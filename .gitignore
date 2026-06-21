@@ -1,0 +1,39 @@
+# Build output (Makefile uses build/ and emits the binary at the repo root)
+build/
+/javascript_engine
+
+# Object files and other compiled intermediates
+*.o
+*.obj
+*.lo
+*.slo
+*.ko
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Libraries
+*.a
+*.la
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug info
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Editors / OS
+.idea/
+.vscode/
+**/.DS_Store
