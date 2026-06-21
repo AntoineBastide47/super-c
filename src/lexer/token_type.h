@@ -1,0 +1,114 @@
+#ifndef TOKEN_TYPE_H
+#define TOKEN_TYPE_H
+
+#include <stdint.h>
+
+// Discriminants are packed into a token's high byte. Keep this enum in sync
+// with TOKEN_TYPE_NAMES in token_type.c.
+typedef enum TokenType {
+  // Names
+  Identifier,
+
+  // Reserved words
+  As,
+  Break,
+  Case,
+  Const,
+  Continue,
+  Defer,
+  Else,
+  Enum,
+  Extern,
+  False,
+  Fn,
+  For,
+  If,
+  Impl,
+  In,
+  Let,
+  Match,
+  Move,
+  Mut,
+  New,
+  Null,
+  Return,
+  SelfLower,
+  SelfUpper,
+  Struct,
+  Trait,
+  True,
+  Type,
+  Unsafe,
+  Where,
+  While,
+
+  // Literals
+  IntegerLiteral,
+  FloatLiteral,
+  CharacterLiteral,
+  ByteCharacterLiteral,
+  StringLiteral,
+  RawStringLiteral,
+
+  // Delimiters and punctuation
+  LeftBrace, // {
+  RightBrace, // }
+  LeftParen, // (
+  RightParen, // )
+  LeftBracket, // [
+  RightBracket, // ]
+  Comma, // ,
+  Semicolon, // ;
+  Colon, // :
+  Dot, // .
+
+  // Operators
+  Plus, // +
+  Minus, // -
+  Star, // *
+  Slash, // /
+  Percent, // %
+  Tilde, // ~
+  Bang, // !
+  Question, // ?
+  QuestionQuestion, // ??
+
+  EqualEqual, // ==
+  BangEqual, // !=
+  LessThan, // <
+  LessThanEqual, // <=
+  GreaterThan, // >
+  GreaterThanEqual, // >=
+
+  Ampersand, // &
+  Pipe, // |
+  Caret, // ^
+  AmpersandAmpersand, // &&
+  PipePipe, // ||
+  LeftShift, // <<
+  RightShift, // >>
+
+  Equal, // =
+  PlusEqual, // +=
+  MinusEqual, // -=
+  StarEqual, // *=
+  SlashEqual, // /=
+  PercentEqual, // %=
+  AmpersandEqual, // &=
+  PipeEqual, // |=
+  CaretEqual, // ^=
+  LeftShiftEqual, // <<=
+  RightShiftEqual, // >>=
+
+  Range, // ..
+  RangeInclusive, // ..=
+  PathSeparator, // ::
+  Arrow, // ->
+  FatArrow, // =>
+
+  Eof,
+} TokenType;
+
+const char *token_type_name(TokenType t);
+
+#endif // TOKEN_TYPE_H
