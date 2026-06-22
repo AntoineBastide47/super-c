@@ -7,6 +7,7 @@
 
 #include "ast/ast.h"
 #include "ast/parser.h"
+#include "codegen/codegen.h"
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 #include "resolver/resolver.h"
@@ -17,7 +18,7 @@
   #define BIN_NAME "super-c"
 #endif
 
-static void run(const char *source, const size_t len) {
+static void run(const char *source, const size_t len, const char *out_path) {
   Lexer *lexer = lexer_new(source, len);
   lexer_scan_tokens(lexer);
   ERRORS_CHECK(lexer);
@@ -42,11 +43,21 @@ static void run(const char *source, const size_t len) {
   ERRORS_CHECK(typechecker);
 
   ast = typechecker_take_ast(typechecker);
-  #ifdef NDEBUG
-  ast_fprint(stdout, ast, source);
-  #endif
-  ast_free(&ast);
   typechecker_free(&typechecker);
+
+  FILE *out = fopen(out_path, "w");
+  if (!out) {
+    perror(out_path);
+    ast_free(&ast);
+    return;
+  }
+  Codegen *codegen = codegen_new(ast, source, len);
+  codegen_emit(codegen, out);
+  fclose(out); // closed before ERRORS_CHECK's early return
+  ERRORS_CHECK(codegen);
+  ast = codegen_take_ast(codegen);
+  ast_free(&ast);
+  codegen_free(&codegen);
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer.
@@ -87,6 +98,21 @@ static char *read_to_string(const char *path, size_t *size) {
   return buf;
 }
 
+// Derive the C output path from the input: replace a trailing extension with ".c", appending it
+// if there is none. The result is heap-allocated and must be freed by the caller.
+static char *derive_out_path(const char *path) {
+  const char *const slash = strrchr(path, '/');
+  const char *const base = slash ? slash + 1 : path;
+  const char *const dot = strrchr(base, '.');
+  const size_t stem = dot ? (size_t)(dot - path) : strlen(path);
+  char *const out = malloc(stem + 3);
+  if (!out)
+    return NULL;
+  memcpy(out, path, stem);
+  memcpy(out + stem, ".c", 3);
+  return out;
+}
+
 static int run_file(const char *path) {
   size_t size = 0;
   char *const source = read_to_string(path, &size);
@@ -94,7 +120,14 @@ static int run_file(const char *path) {
     perror(path);
     return 1;
   }
-  run(source, size);
+  char *const out_path = derive_out_path(path);
+  if (!out_path) {
+    fprintf(stderr, "fatal: out of memory\n");
+    free(source);
+    return 1;
+  }
+  run(source, size, out_path);
+  free(out_path);
   free(source);
   return 0;
 }
@@ -119,7 +152,7 @@ static int run_prompt(void) {
     if (read == 4 && memcmp(line, "exit", 4) == 0)
       break;
 
-    run(line, (size_t)read);
+    run(line, (size_t)read, "out.c");
   }
 
   free(line);

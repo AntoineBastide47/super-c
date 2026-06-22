@@ -113,6 +113,14 @@ static void test_ok(void) {
       "struct pattern field",
       "struct P { x: i32, }\n"
       "fn f(p: P) i32 { return switch p { P { x: v } => v, }; }\n");
+  expect_ok("pointer offset", "fn f(p: *i32) i32 { let q: *i32 = p + 1; return *q; }\n");
+  expect_ok("pointer minus int", "fn f(p: *i32) i32 { let q: *i32 = p - 1; return *q; }\n");
+  expect_ok("int plus pointer", "fn f(p: *i32) i32 { let q: *i32 = 1 + p; return *q; }\n");
+  expect_ok("pointer difference", "fn f(a: *i32, b: *i32) isize { return a - b; }\n");
+  expect_ok(
+      "reference coerces to const pointer",
+      "fn take(p: *const i32) i32 { return *p; }\n"
+      "fn give(x: i32) i32 { return take(&x); }\n");
 }
 
 static void test_errors(void) {
@@ -129,6 +137,16 @@ static void test_errors(void) {
   expect_error("index non-array", "fn main() void { let x: i32 = 1; let y: i32 = x[0]; }\n", "cannot index");
   expect_error(
       "unknown init field", "struct P { x: i32, }\nfn main() void { let p: P = P { y: 1, }; }\n", "no field 'y'");
+  expect_error(
+      "pointer plus pointer", "fn f(a: *i32, b: *i32) void { let c = a + b; }\n", "invalid pointer arithmetic");
+  expect_error(
+      "non-integer pointer offset", "fn f(p: *i32, y: f64) void { let q = p + y; }\n",
+      "pointer arithmetic requires an integer offset");
+  expect_error(
+      "const pointer does not coerce to reference",
+      "fn take(r: &i32) i32 { return *r; }\n"
+      "fn give(p: *const i32) i32 { return take(p); }\n",
+      "mismatched types");
 }
 
 int main(void) {

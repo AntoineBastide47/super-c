@@ -165,6 +165,12 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   const TypeId actual = ast_type(t->ast, node);
   if (expected == TYPE_NONE || actual == TYPE_NONE || expected == actual)
     return true;
+  // `&T` coerces to `*const T` (both lower to `const T *`; a reference is always a valid pointer).
+  // One-way only: a raw pointer carries no validity guarantee, so `*const T` does not become `&T`.
+  const Ty *const ex = ast_type_at(t->ast, expected), *const ac = ast_type_at(t->ast, actual);
+  if (ex->kind == TYPE_POINTER && ex->qualifier == TYPE_QUAL_CONST && ac->kind == TYPE_REFERENCE &&
+      ac->qualifier == TYPE_QUAL_NONE && ex->as.elem == ac->as.elem)
+    return true;
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
     v = ast_at_const(t->ast, v->as.unary.operand);
@@ -403,13 +409,47 @@ static TypeId binary_numeric(
   return l;
 }
 
+// Pointer arithmetic for + / -: `ptr ± int → ptr`, `int + ptr → ptr`, `ptr − ptr → isize`. Sets
+// `*handled` when at least one operand is a pointer (so the caller skips the numeric rules),
+// emitting a diagnostic for ill-formed combinations.
+static TypeId check_ptr_arith(
+    TypeChecker *t, const Node *const n, const NodeId id, const TypeId l, const TypeId r, bool *const handled) {
+  *handled = false;
+  if (l == TYPE_NONE || r == TYPE_NONE)
+    return TYPE_NONE;
+  const bool lp = ast_type_at(t->ast, l)->kind == TYPE_POINTER, rp = ast_type_at(t->ast, r)->kind == TYPE_POINTER;
+  if (!lp && !rp)
+    return TYPE_NONE; // ordinary numeric operands
+  *handled = true;
+  const Span sp = ast_at_const(t->ast, id)->span;
+  const bool minus = n->as.binary.op == Minus;
+  if (lp && rp) {
+    if (minus && l == r)
+      return ast_builtin(BT_ISIZE); // pointer difference
+    typechecker_errorf(t, sp.start, sp.end - sp.start, "invalid pointer arithmetic");
+    return TYPE_NONE;
+  }
+  if (lp && is_int(t, r))
+    return l; // ptr ± int
+  if (rp && !minus && is_int(t, l))
+    return r; // int + ptr
+  typechecker_errorf(t, sp.start, sp.end - sp.start, "pointer arithmetic requires an integer offset");
+  return TYPE_NONE;
+}
+
 static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id) {
   const NodeId ln = n->as.binary.left, rn = n->as.binary.right;
   const TypeId l = check_expr(t, ln), r = check_expr(t, rn);
   const Span sp = ast_at_const(t->ast, id)->span;
   switch (n->as.binary.op) {
     case Plus:
-    case Minus:
+    case Minus: {
+      bool handled;
+      const TypeId pt = check_ptr_arith(t, n, id, l, r, &handled);
+      if (handled)
+        return pt;
+      return binary_numeric(t, id, l, ln, r, rn, false);
+    }
     case Star:
     case Slash:
     case Percent:
