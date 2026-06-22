@@ -5,6 +5,8 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include "ast/ast.h"
+#include "ast/parser.h"
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 
@@ -17,14 +19,16 @@ static void run(const char *source, const size_t len) {
   Lexer *lexer = lexer_new(source, len);
   lexer_scan_tokens(lexer);
   ERRORS_CHECK(lexer);
-
-  Token_Vec tokens = lexer_take_tokens(lexer);
-  for (size_t i = 0; i < tokens.len; i++) {
-    token_fprint(stdout, tokens.data[i]);
-    fputc('\n', stdout);
-  }
-  VEC_DEINIT(tokens);
+  
+  Parser *parser = parser_new( lexer_take_tokens(lexer), source, len);
   lexer_free(&lexer);
+  parser_build_ast(parser);
+  ERRORS_CHECK(parser);
+
+  Ast *ast = parser_take_ast(parser);
+  ast_fprint(stdout, ast, source);
+  ast_free(&ast);
+  parser_free(&parser);
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer.
