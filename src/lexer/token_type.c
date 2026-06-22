@@ -103,7 +103,7 @@ _Static_assert(
     sizeof TOKEN_TYPE_NAMES / sizeof TOKEN_TYPE_NAMES[0] == Eof + 1, "TokenType and TOKEN_TYPE_NAMES are out of sync");
 _Static_assert(Eof < 256, "TokenType must fit in the token's high byte");
 
-const char *token_type_name(TokenType t) {
+const char *token_type_name(const TokenType t) {
   const unsigned index = (unsigned)t;
   if (index >= sizeof TOKEN_TYPE_NAMES / sizeof TOKEN_TYPE_NAMES[0])
     return "InvalidTokenType";

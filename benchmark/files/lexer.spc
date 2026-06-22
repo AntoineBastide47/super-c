@@ -122,7 +122,7 @@ struct TokenWriter {
     end: *mut Token,
 }
 
-fn lexer_new(source: *const char, len: usize) -> *mut Lexer {
+fn lexer_new(source: *const char, len: usize) *mut Lexer {
     let l = new Lexer {
         bytes: source as *const u8,
         len: len,
@@ -142,11 +142,11 @@ fn lexer_free(l: *mut Lexer) {
     free(l);
 }
 
-fn is_eof(l: *const Lexer) -> bool {
+fn is_eof(l: *const Lexer) bool {
     return l->current >= l->len;
 }
 
-fn decode_at_b(l: *const Lexer, b: u8, current: usize, size: *mut usize) -> u32 {
+fn decode_at_b(l: *const Lexer, b: u8, current: usize, size: *mut usize) u32 {
     let mut cp: u32;
     let mut minimum: u32;
     let mut width: usize;
@@ -193,7 +193,7 @@ fn decode_at_b(l: *const Lexer, b: u8, current: usize, size: *mut usize) -> u32 
     return cp;
 }
 
-fn token_writer_grow(l: *mut Lexer, w: *mut TokenWriter) -> bool {
+fn token_writer_grow(l: *mut Lexer, w: *mut TokenWriter) bool {
     let used = token_writer_used(w);
     l->tokens.len = used;
     if (!token_vec_reserve(&l->tokens, used + 1)) {
@@ -222,21 +222,21 @@ fn add_token(l: *mut Lexer, w: *mut TokenWriter, kind: TokenType) {
     token_writer_push(l, w, token);
 }
 
-fn peek_byte(l: *const Lexer) -> u8 {
+fn peek_byte(l: *const Lexer) u8 {
     if (is_eof(l)) {
         return EOF_CH;
     }
     return l->bytes[l->current];
 }
 
-fn peek_byte_n(l: *const Lexer, n: usize) -> u8 {
+fn peek_byte_n(l: *const Lexer, n: usize) u8 {
     if (l->current + n >= l->len) {
         return EOF_CH;
     }
     return l->bytes[l->current + n];
 }
 
-fn match_byte(l: *mut Lexer, expected: u8) -> bool {
+fn match_byte(l: *mut Lexer, expected: u8) bool {
     if (peek_byte(l) != expected) {
         return false;
     }
@@ -252,32 +252,32 @@ fn lexer_error_at(l: *mut Lexer, at: usize, len: usize, message: str) {
     push_error(&l->errors, at, len, message);
 }
 
-fn is_identifier_part(b: u8) -> bool {
+fn is_identifier_part(b: u8) bool {
     return (b >= b'a' && b <= b'z') ||
            (b >= b'A' && b <= b'Z') ||
            (b >= b'0' && b <= b'9') ||
            b == b'_';
 }
 
-fn is_dec(b: u8) -> bool {
+fn is_dec(b: u8) bool {
     return b >= b'0' && b <= b'9';
 }
 
-fn is_hex(b: u8) -> bool {
+fn is_hex(b: u8) bool {
     return is_dec(b) ||
            (b >= b'A' && b <= b'F') ||
            (b >= b'a' && b <= b'f');
 }
 
-fn is_oct(b: u8) -> bool {
+fn is_oct(b: u8) bool {
     return b >= b'0' && b <= b'7';
 }
 
-fn is_bin(b: u8) -> bool {
+fn is_bin(b: u8) bool {
     return b == b'0' || b == b'1';
 }
 
-fn hex_value(b: u8) -> int {
+fn hex_value(b: u8) int {
     if (b <= b'9') {
         return b - b'0';
     }
@@ -287,7 +287,7 @@ fn hex_value(b: u8) -> int {
     return b - b'a' + 10;
 }
 
-fn keywords(lexeme: *const u8, len: usize) -> TokenType {
+fn keywords(lexeme: *const u8, len: usize) TokenType {
     if (len == 2) {
         if (lexeme[0] == b'a' && lexeme[1] == b's') { return TokenType.TokenAs; }
         if (lexeme[0] == b'f' && lexeme[1] == b'n') { return TokenType.TokenFn; }
@@ -350,7 +350,7 @@ fn identifier(l: *mut Lexer, w: *mut TokenWriter) {
     }
 }
 
-fn validate_utf8_at(l: *mut Lexer, i: *mut usize) -> bool {
+fn validate_utf8_at(l: *mut Lexer, i: *mut usize) bool {
     let mut size: usize = 0;
     decode_at_b(l, l->bytes[*i], *i, &size);
     if (size == 0) {
@@ -423,7 +423,7 @@ fn block_comment(l: *mut Lexer) {
     lexer_error_at(l, l->start, 2, "unterminated block comment");
 }
 
-fn escape(l: *mut Lexer, byte_character: bool) -> u32 {
+fn escape(l: *mut Lexer, byte_character: bool) u32 {
     if (is_eof(l)) {
         lexer_error_at(l, l->current, 0, "unterminated escape sequence");
         return INVALID_SCALAR;
@@ -548,7 +548,7 @@ fn character(l: *mut Lexer, w: *mut TokenWriter, byte_character: bool) {
     lexer_error(l, "unterminated character literal");
 }
 
-fn raw_string_ahead(l: *const Lexer, hashes: *mut usize) -> bool {
+fn raw_string_ahead(l: *const Lexer, hashes: *mut usize) bool {
     let mut i = l->current;
     while (i < l->len && l->bytes[i] == b'#') {
         i += 1;
@@ -826,7 +826,7 @@ fn lexer_scan_tokens(l: *mut Lexer) {
     l->tokens.len = token_writer_used(&w);
 }
 
-fn lexer_take_tokens(l: *mut Lexer) -> TokenVec {
+fn lexer_take_tokens(l: *mut Lexer) TokenVec {
     let out = move l->tokens;
     l->tokens = new TokenVec { data: null, len: 0, cap: 0 };
     return out;

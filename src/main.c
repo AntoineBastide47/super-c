@@ -19,8 +19,8 @@ static void run(const char *source, const size_t len) {
   Lexer *lexer = lexer_new(source, len);
   lexer_scan_tokens(lexer);
   ERRORS_CHECK(lexer);
-  
-  Parser *parser = parser_new( lexer_take_tokens(lexer), source, len);
+
+  Parser *parser = parser_new(lexer_take_tokens(lexer), source, len);
   lexer_free(&lexer);
   parser_build_ast(parser);
   ERRORS_CHECK(parser);
@@ -33,7 +33,7 @@ static void run(const char *source, const size_t len) {
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer.
 static char *read_to_string(const char *path, size_t *size) {
-  FILE *f = fopen(path, "rb");
+  FILE *const f = fopen(path, "rb");
   if (!f)
     return NULL;
 
@@ -41,7 +41,7 @@ static char *read_to_string(const char *path, size_t *size) {
     fclose(f);
     return NULL;
   }
-  long s = ftell(f);
+  const long s = ftell(f);
   rewind(f);
   if (s < 0) {
     fclose(f);
@@ -50,13 +50,13 @@ static char *read_to_string(const char *path, size_t *size) {
 
   *size = (size_t)s;
 
-  char *buf = malloc(*size + 1);
+  char *const buf = malloc(*size + 1);
   if (!buf) {
     fclose(f);
     return NULL;
   }
 
-  size_t n = fread(buf, 1, *size, f);
+  const size_t n = fread(buf, 1, *size, f);
   if (n != *size && ferror(f)) {
     free(buf);
     fclose(f);
@@ -71,7 +71,7 @@ static char *read_to_string(const char *path, size_t *size) {
 
 static int run_file(const char *path) {
   size_t size = 0;
-  char *source = read_to_string(path, &size);
+  char *const source = read_to_string(path, &size);
   if (!source) {
     perror(path);
     return 1;
@@ -108,7 +108,7 @@ static int run_prompt(void) {
   return 0;
 }
 
-int main(int argc, char **argv) {
+int main(const int argc, char **argv) {
   if (argc > 2) {
     printf("Usage: %s [<path/to/script>]\n", BIN_NAME);
     return 1;

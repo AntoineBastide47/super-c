@@ -62,35 +62,35 @@ COLD_EXPORT void errors_log(const String_Vec *errors);
   #define ERRORS_TAKE_DECL(Struct, Label, Var)
   #define ERRORS_TAKE_DEFN(Struct, Label, Var)
 #else
-  #define ERRORS_TAKE_DECL(Struct, Label, Var) String_Vec Label##_take_errors(Struct *Var);
+  #define ERRORS_TAKE_DECL(Struct, Label, Var) COLD_EXPORT String_Vec Label##_take_errors(Struct *Var);
   #define ERRORS_TAKE_DEFN(Struct, Label, Var)                                                                         \
-    String_Vec Label##_take_errors(Struct *Var) {                                                                      \
+    COLD_EXPORT String_Vec Label##_take_errors(Struct *Var) {                                                          \
       if ((Var)->errors.len == 0)                                                                                      \
         return String_Vec_init();                                                                                      \
-      String_Vec out = (Var)->errors;                                                                                  \
+      const String_Vec out = (Var)->errors;                                                                            \
       (Var)->errors = String_Vec_init();                                                                               \
       return out;                                                                                                      \
     }
 #endif
 
 #define ERRORS_API(Struct, Label, Var)                                                                                 \
-  bool Label##_has_errors(Struct *Var);                                                                                \
-  void Label##_log_errors(Struct *Var);                                                                                \
+  bool Label##_has_errors(const Struct *Var);                                                                          \
+  COLD_EXPORT void Label##_log_errors(const Struct *Var);                                                              \
   ERRORS_TAKE_DECL(Struct, Label, Var)                                                                                 \
-  void Label##_errorf(Struct *Var, uint32_t at, uint32_t len, const char *fmt, ...);
+  COLD_EXPORT void Label##_errorf(Struct *Var, const uint32_t at, const uint32_t len, const char *fmt, ...);
 
 #define ERRORS_BODY(Struct, Label, Var)                                                                                \
-  bool Label##_has_errors(Struct *Var) {                                                                               \
+  bool Label##_has_errors(const Struct *Var) {                                                                         \
     return (Var)->errors.len != 0;                                                                                     \
   }                                                                                                                    \
                                                                                                                        \
-  void Label##_log_errors(Struct *Var) {                                                                               \
+  COLD_EXPORT void Label##_log_errors(const Struct *Var) {                                                             \
     errors_log(&(Var)->errors);                                                                                        \
   }                                                                                                                    \
                                                                                                                        \
   ERRORS_TAKE_DEFN(Struct, Label, Var)                                                                                 \
                                                                                                                        \
-  void Label##_errorf(Struct *Var, uint32_t at, uint32_t len, const char *fmt, ...) {                                  \
+  COLD_EXPORT void Label##_errorf(Struct *Var, const uint32_t at, const uint32_t len, const char *fmt, ...) {          \
     va_list args;                                                                                                      \
     va_start(args, fmt);                                                                                               \
     errors_vemitf(&(Var)->errors, &(Var)->errors_start, &(Var)->errors_len, at, len, fmt, args);                       \

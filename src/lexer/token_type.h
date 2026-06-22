@@ -109,6 +109,6 @@ typedef enum TokenType {
   Eof,
 } TokenType;
 
-const char *token_type_name(TokenType t);
+const char *token_type_name(const TokenType t);
 
 #endif // TOKEN_TYPE_H

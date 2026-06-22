@@ -11,19 +11,19 @@
 #define TARGET_SECONDS 0.25
 
 typedef struct {
-  const char *name;
-  const char *snippet;
+    const char *name;
+    const char *snippet;
 } Benchmark;
 
 typedef struct {
-  char *data;
-  size_t len;
+    char *data;
+    size_t len;
 } Source;
 
 typedef struct {
-  size_t node_cap;
-  size_t node_len;
-  uint64_t checksum;
+    size_t node_cap;
+    size_t node_len;
+    uint64_t checksum;
 } ParseResult;
 
 static volatile uint64_t benchmark_sink;
@@ -49,36 +49,6 @@ static Source repeat_source(const char *snippet) {
   for (size_t i = 0; i < repetitions; i++)
     memcpy(data + i * snippet_len, snippet, snippet_len);
   return (Source){data, len};
-}
-
-static Source read_source(const char *path) {
-  FILE *file = fopen(path, "rb");
-  if (file == NULL) {
-    perror(path);
-    exit(1);
-  }
-  if (fseek(file, 0, SEEK_END) != 0) {
-    perror(path);
-    exit(1);
-  }
-  const long size = ftell(file);
-  if (size < 0) {
-    perror(path);
-    exit(1);
-  }
-  rewind(file);
-
-  char *data = malloc((size_t)size);
-  if (data == NULL) {
-    fprintf(stderr, "fatal: out of memory\n");
-    exit(1);
-  }
-  if (fread(data, 1, (size_t)size, file) != (size_t)size) {
-    fprintf(stderr, "failed to read %s\n", path);
-    exit(1);
-  }
-  fclose(file);
-  return (Source){data, (size_t)size};
 }
 
 static Token_Vec lex(const Source *source) {
@@ -160,8 +130,8 @@ static void run_source(const char *name, Source source) {
   const double bytes_per_node = (double)source.len / (double)sample.node_len;
 
   printf(
-      "%-20s %12zu %12zu %10.2f %10.2f %10.2f %10.2f\n", name, sample.node_cap, sample.node_len,
-      mb_per_second, ns_per_node, mnodes_per_second, bytes_per_node);
+      "%-20s %12zu %12zu %10.2f %10.2f %10.2f %10.2f\n", name, sample.node_cap, sample.node_len, mb_per_second,
+      ns_per_node, mnodes_per_second, bytes_per_node);
   VEC_DEINIT(tokens);
   free(source.data);
 }
@@ -176,29 +146,29 @@ int main(void) {
           "declarations",
           "struct Pair<T> { left: T, right: T, }\n"
           "enum Result<T, E> { Ok(T), Err { error: E }, }\n"
-          "type Callback = fn(*const u8, []u8) -> int;\n"
+          "type Callback = fn(*const u8, []u8) (int, Error);\n"
           "const LIMIT: usize = 1_024;\n",
       },
       {
           "functions",
-          "fn calculate<T>(left: T, right: T) -> int where T: Add + Copy {\n"
+          "fn calculate<T>(left: T, right: T) int where T: Add + Copy {\n"
           "  let mut value: int = 1 + 2 * 3;\n"
-          "  value += (left as int) << 2;\n"
+          "  value += (left as int) * 4;\n"
           "  if (value > 10 && value != 20) { value -= 1; } else { value = 0; }\n"
           "  return value;\n"
           "}\n",
       },
       {
           "interfaces-extends",
-          "interface Writer<T> { type Output; fn write(self: *mut Self, value: T) -> Self::Output; }\n"
+          "interface Writer<T> { type Output; fn write(self: *mut Self, value: T) Self::Output; }\n"
           "extend<T> Buffer<T> as Writer<T> {\n"
           "  type Output = usize;\n"
-          "  fn write(self: *mut Self, value: T) -> usize { self.len += 1; return self.len; }\n"
+          "  fn write(self: *mut Self, value: T) usize { self.len += 1; return self.len; }\n"
           "}\n",
       },
       {
           "control-flow",
-          "fn process(values: []int) -> int {\n"
+          "fn process(values: []int) int {\n"
           "  let mut total: int = 0;\n"
           "  for value in values { defer release(value); total += value; }\n"
           "  while (total > 100) { total -= 1; }\n"
@@ -207,7 +177,7 @@ int main(void) {
       },
       {
           "switch-patterns",
-          "fn classify(value: Result<int, Error>) -> int {\n"
+          "fn classify(value: Result<int, Error>) int {\n"
           "  return switch value {\n"
           "    Ok(number) if number > 0 => number,\n"
           "    case '0'..='9' => 1,\n"
@@ -219,11 +189,9 @@ int main(void) {
   };
 
   printf(
-      "%-20s %12s %12s %10s %10s %10s %10s\n", "Benchmark", "Nodes Cap", "Nodes Len", "MB/s", "ns/node",
-      "Mnode/s", "byte/node");
+      "%-20s %12s %12s %10s %10s %10s %10s\n", "Benchmark", "Nodes Cap", "Nodes Len", "MB/s", "ns/node", "Mnode/s",
+      "byte/node");
   for (size_t i = 0; i < sizeof benchmarks / sizeof benchmarks[0]; i++)
     run_benchmark(&benchmarks[i]);
-  run_source("lexer-file", read_source("benchmark/files/lexer.spc"));
-
   return benchmark_sink == UINT64_MAX;
 }

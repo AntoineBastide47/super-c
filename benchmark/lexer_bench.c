@@ -144,8 +144,8 @@ static void run_source(const char *name, Source source) {
   const double bytes_per_token = (double)source.len / (double)sample.token_len;
 
   printf(
-      "%-20s %12zu %12zu %10.2f %10.2f %10.2f %10.2f\n", name, sample.token_cap, sample.token_len,
-      mb_per_second, ns_per_token, mtokens_per_second, bytes_per_token);
+      "%-20s %12zu %12zu %10.2f %10.2f %10.2f %10.2f\n", name, sample.token_cap, sample.token_len, mb_per_second,
+      ns_per_token, mtokens_per_second, bytes_per_token);
   free(source.data);
 }
 
@@ -169,7 +169,7 @@ int main(void) {
           "declarations",
           "let mut counter_123: i64 = current_value;\n"
           "const limit_value: usize = 1_000;\n"
-          "fn increment(value: i64) -> i64 { return value + 1; }\n",
+          "fn increment(value: i64) i64 { return value + 1; }\n",
       },
       {
           "operators",
@@ -198,7 +198,7 @@ int main(void) {
       {
           "mixed-source",
           "struct Point { x: f64, y: f64 }\n"
-          "fn distance(a: *const Point, b: *const Point) -> f64 {\n"
+          "fn distance(a: *const Point, b: *const Point) f64 {\n"
           "  let dx = a->x - b->x;\n"
           "  let dy = a->y - b->y;\n"
           "  return sqrt(dx * dx + dy * dy);\n"

@@ -52,12 +52,11 @@ static Ast *parse(const char *name, const char *source) {
 }
 
 static void test_items_and_types(void) {
-  static const char source[] =
-      "struct Pair<T> { left: T, right: T, }\n"
-      "enum Result<T, E> { Ok(T), Err { error: E }, }\n"
-      "type Callback = fn(*const u8, []u8, [u8; 16]) -> int;\n"
-      "const LIMIT: usize = 16;\n"
-      "extern \"C\" { type CFile; fn fclose(file: *mut CFile) -> int; }\n";
+  static const char source[] = "struct Pair<T> { left: T, right: T, }\n"
+                               "enum Result<T, E> { Ok(T), Err { error: E }, }\n"
+                               "type Callback = fn(*const u8, []u8, [u8; 16]) (int, Error);\n"
+                               "const LIMIT: usize = 16;\n"
+                               "extern \"C\" { type CFile; fn fclose(file: *mut CFile) int; }\n";
   Ast *ast = parse("items and types", source);
   if (!ast)
     return;
@@ -68,6 +67,9 @@ static void test_items_and_types(void) {
   CHECK(ast_at_const(ast, items[0])->kind == NODE_STRUCT, "items and types: item 0 should be struct");
   CHECK(ast_at_const(ast, items[1])->kind == NODE_ENUM, "items and types: item 1 should be enum");
   CHECK(ast_at_const(ast, items[2])->kind == NODE_TYPE_ALIAS, "items and types: item 2 should be type alias");
+  const Node *callback = ast_at_const(ast, ast_at_const(ast, items[2])->as.type_alias.type);
+  CHECK(callback->kind == NODE_FUNCTION_TYPE, "items and types: callback should be a function type");
+  CHECK(callback->as.function_type.returns.len == 2, "items and types: callback should have two returns");
   CHECK(ast_at_const(ast, items[3])->kind == NODE_CONST, "items and types: item 3 should be const");
   CHECK(ast_at_const(ast, items[4])->kind == NODE_EXTERN_BLOCK, "items and types: item 4 should be extern");
   ast_free(&ast);
@@ -75,7 +77,7 @@ static void test_items_and_types(void) {
 
 static void test_functions_and_expressions(void) {
   static const char source[] =
-      "fn transform<T: Copy>(input: Result<Vec<T>, Error>, out: *mut T) -> int where T: Copy + Drop {\n"
+      "fn transform<T: Copy>(input: Result<Vec<T>, Error>, out: *mut T) int where T: Copy + Drop {\n"
       "  let mut value: int = 1 + 2 * 3;\n"
       "  let item = input.unwrap()[0] as int;\n"
       "  if (item >= value && value != 0) { value += item; } else { value = 0; }\n"
@@ -91,24 +93,25 @@ static void test_functions_and_expressions(void) {
   CHECK(fn->kind == NODE_FUNCTION, "functions and expressions: expected function");
   CHECK(fn->as.function.generics.len == 1, "functions and expressions: expected one generic");
   CHECK(fn->as.function.params.len == 2, "functions and expressions: expected two parameters");
+  CHECK(fn->as.function.returns.len == 1, "functions and expressions: expected one return");
   CHECK(fn->as.function.where_clause.len == 1, "functions and expressions: expected one where predicate");
   const Node *body = ast_at_const(ast, fn->as.function.body);
   CHECK(body->kind == NODE_BLOCK, "functions and expressions: expected function block");
-  CHECK(body->as.block.statements.len == 6, "functions and expressions: expected 6 statements, got %u",
-        body->as.block.statements.len);
+  CHECK(
+      body->as.block.statements.len == 6, "functions and expressions: expected 6 statements, got %u",
+      body->as.block.statements.len);
   ast_free(&ast);
 }
 
 static void test_traits_impls_match_and_new(void) {
-  static const char source[] =
-      "interface Factory<T> { type Output; fn make(value: T) -> Self::Output; }\n"
-      "extend<T> Box<T> as Factory<T> {\n"
-      "  type Output = Box<T>;\n"
-      "  fn make(value: T) -> Box<T> { return new Box<T> { value: value }; }\n"
-      "}\n"
-      "fn classify(c: u8) -> int {\n"
-      "  return switch c { case '0'..='9' => 1, Value(x) if x > 0 => x, _ => 0, };\n"
-      "}\n";
+  static const char source[] = "interface Factory<T> { type Output; fn make(value: T) Self::Output; }\n"
+                               "extend<T> Box<T> as Factory<T> {\n"
+                               "  type Output = Box<T>;\n"
+                               "  fn make(value: T) Box<T> { return new Box<T> { value: value }; }\n"
+                               "}\n"
+                               "fn classify(c: u8) int {\n"
+                               "  return switch c { case '0'..='9' => 1, Value(x) if x > 0 => x, _ => 0, };\n"
+                               "}\n";
   Ast *ast = parse("interfaces extensions switch and new", source);
   if (!ast)
     return;
@@ -121,10 +124,56 @@ static void test_traits_impls_match_and_new(void) {
   ast_free(&ast);
 }
 
+static void test_grouped_parameters_and_returns(void) {
+  static const char source[] = "fn slice(self: *mut Self, start, end, len: isize) *mut Self {}\n"
+                               "fn divmod(a, b: int) (int, int) { return a / b, a % b; }\n"
+                               "fn open(path: str) (file: File, err: IOError) {}\n"
+                               "fn log(message: str) {}\n"
+                               "fn risky(ptr: *mut int) { unsafe { consume(ptr); } unsafe consume(ptr); }\n";
+  Ast *ast = parse("grouped parameters and returns", source);
+  if (!ast)
+    return;
+
+  const Node *root = ast_at_const(ast, ast->root);
+  CHECK(root->as.program.items.len == 5, "grouped parameters and returns: expected 5 functions");
+  const NodeId *items = ast_list(ast, root->as.program.items);
+
+  const Node *slice = ast_at_const(ast, items[0]);
+  CHECK(slice->as.function.params.len == 4, "grouped parameters and returns: expected 4 slice parameters");
+  CHECK(slice->as.function.returns.len == 1, "grouped parameters and returns: expected one slice return");
+
+  const Node *divmod = ast_at_const(ast, items[1]);
+  CHECK(divmod->as.function.params.len == 2, "grouped parameters and returns: expected 2 divmod parameters");
+  CHECK(divmod->as.function.returns.len == 2, "grouped parameters and returns: expected 2 divmod returns");
+  const Node *divmod_body = ast_at_const(ast, divmod->as.function.body);
+  const Node *return_stmt = ast_at_const(ast, ast_list(ast, divmod_body->as.block.statements)[0]);
+  CHECK(return_stmt->kind == NODE_RETURN, "grouped parameters and returns: expected return statement");
+  CHECK(return_stmt->as.return_stmt.values.len == 2, "grouped parameters and returns: expected 2 return values");
+
+  const Node *open = ast_at_const(ast, items[2]);
+  CHECK(open->as.function.returns.len == 2, "grouped parameters and returns: expected 2 named returns");
+  const NodeId *open_returns = ast_list(ast, open->as.function.returns);
+  CHECK(
+      ast_at_const(ast, open_returns[0])->kind == NODE_PARAMETER,
+      "grouped parameters and returns: expected named return parameter");
+  CHECK(
+      ast_at_const(ast, open_returns[1])->kind == NODE_PARAMETER,
+      "grouped parameters and returns: expected named return parameter");
+
+  const Node *log = ast_at_const(ast, items[3]);
+  CHECK(log->as.function.returns.len == 0, "grouped parameters and returns: expected no log return");
+
+  const Node *risky = ast_at_const(ast, items[4]);
+  const Node *risky_body = ast_at_const(ast, risky->as.function.body);
+  CHECK(risky_body->as.block.statements.len == 2, "grouped parameters and returns: expected 2 unsafe statements");
+  ast_free(&ast);
+}
+
 int main(void) {
   test_items_and_types();
   test_functions_and_expressions();
   test_traits_impls_match_and_new();
+  test_grouped_parameters_and_returns();
   if (failures) {
     fprintf(stderr, "%d parser test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

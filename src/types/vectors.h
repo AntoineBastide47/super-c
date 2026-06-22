@@ -31,11 +31,11 @@
                                                                                                                        \
   bool Name##_reserve(Name *v, const size_t needed);                                                                   \
                                                                                                                        \
-  ALWAYS_INLINE Name Name##_init() {                                                                                   \
+  ALWAYS_INLINE Name Name##_init(void) {                                                                               \
     return (Name)VEC_INIT;                                                                                             \
   }                                                                                                                    \
                                                                                                                        \
-  ALWAYS_INLINE bool Name##_push(Name *v, T value) {                                                                   \
+  ALWAYS_INLINE bool Name##_push(Name *v, T const value) {                                                             \
     if (UNLIKELY(!Name##_reserve(v, v->len + 1)))                                                                      \
       return false;                                                                                                    \
     v->data[v->len++] = value;                                                                                         \
@@ -49,12 +49,12 @@
     return true;                                                                                                       \
   }                                                                                                                    \
                                                                                                                        \
-  ALWAYS_INLINE size_t Name##_partition_point(const Name *v, bool (*pred)(T item, void *ctx), void *ctx) {             \
+  ALWAYS_INLINE size_t Name##_partition_point(const Name *v, bool (*const pred)(T item, void *ctx), void *const ctx) { \
     size_t left = 0;                                                                                                   \
     size_t right = v->len;                                                                                             \
                                                                                                                        \
     while (left < right) {                                                                                             \
-      size_t mid = left + (right - left) / 2;                                                                          \
+      const size_t mid = left + (right - left) / 2;                                                                    \
                                                                                                                        \
       if (pred(v->data[mid], ctx))                                                                                     \
         left = mid + 1;                                                                                                \
@@ -72,14 +72,13 @@
     size_t new_cap = v->cap ? v->cap * 2 : 8;                                                                          \
     while (new_cap < needed)                                                                                           \
       new_cap *= 2;                                                                                                    \
-    T *new_data = realloc(v->data, new_cap * sizeof *v->data);                                                         \
+    T *const new_data = realloc(v->data, new_cap * sizeof *v->data);                                                   \
     if (!new_data)                                                                                                     \
       return false;                                                                                                    \
     v->data = new_data;                                                                                                \
     v->cap = new_cap;                                                                                                  \
     return true;                                                                                                       \
   }
-
 
 VEC_DECLARE(uint32_t, U32_Vec)
 VEC_DECLARE(char *, String_Vec)

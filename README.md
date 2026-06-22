@@ -40,7 +40,7 @@ let mut count: int = 0;
 Example function:
 
 ```superc
-fn add(a: int, b: int) -> int {
+fn add(a: int, b: int) int {
     return a + b;
 }
 ```
@@ -48,7 +48,7 @@ fn add(a: int, b: int) -> int {
 Example resource cleanup with `defer`:
 
 ```superc
-fn main() -> int {
+fn main() int {
     let file = File.open("data.txt");
 
     defer file.close();
@@ -63,7 +63,7 @@ fn main() -> int {
 Example pattern matching:
 
 ```superc
-fn classify(c: u8) -> int {
+fn classify(c: u8) int {
     return match c {
         '0'..='9' => 1,
         'a'..='z' => 2,
@@ -77,7 +77,7 @@ Example trait-style abstraction:
 
 ```superc
 trait Writer {
-    fn write(self: *mut Self, bytes: []u8) -> usize;
+    fn write(self: *mut Self, bytes: []u8) usize;
 }
 
 fn write_all<T: Writer>(writer: *mut T, data: []u8) {
@@ -125,8 +125,8 @@ C APIs can be exposed through raw external declarations:
 extern "C" {
     type CFile;
 
-    fn fopen(path: *const char, mode: *const char) -> *mut CFile;
-    fn fclose(file: *mut CFile) -> int;
+    fn fopen(path: *const char, mode: *const char) *mut CFile;
+    fn fclose(file: *mut CFile) int;
 }
 ```
 

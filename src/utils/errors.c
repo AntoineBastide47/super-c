@@ -10,10 +10,10 @@ COLD_EXPORT void errors_vemitf(
     const char *fmt, va_list args) {
   va_list copy;
   va_copy(copy, args);
-  int msg_len = vsnprintf(NULL, 0, fmt, copy);
+  const int msg_len = vsnprintf(NULL, 0, fmt, copy);
   va_end(copy);
 
-  char *result = malloc(msg_len + 1);
+  char *const result = malloc((size_t)msg_len + 1);
   if (result == NULL) {
     fprintf(stderr, "fatal: out of memory\n");
     abort();
@@ -25,7 +25,7 @@ COLD_EXPORT void errors_vemitf(
   U32_Vec_push(errors_len, len);
 }
 
-static bool at_or_before(uint32_t line_start, void *off) {
+static bool at_or_before(const uint32_t line_start, void *const off) {
   return line_start <= *(const uint32_t *)off;
 }
 
@@ -61,13 +61,13 @@ COLD char *render(
     disp_end = disp_start + MAX_W < lend ? disp_start + MAX_W : lend;
   }
   const int line_len = (int)(disp_end - disp_start);
-  const char *line_ptr = (const char *)source + disp_start;
+  const char *const line_ptr = (const char *)source + disp_start;
   const size_t caret_col = off - disp_start; // caret indent within the shown text
 
   size_t carets = span < 1 ? 1 : span;
   if (off + carets > disp_end)
     carets = disp_end > off ? disp_end - off : 1;
-  char *bar = malloc(carets + 1);
+  char *const bar = malloc(carets + 1);
   if (bar == NULL) {
     fprintf(stderr, "fatal: out of memory\n");
     abort();
@@ -80,7 +80,7 @@ COLD char *render(
 
   // Single generously-sized buffer; snprintf truncates safely if over-estimated.
   const size_t cap = strlen(msg) + (size_t)line_len + real_col + carets + (size_t)gw * 4 + 128;
-  char *out = malloc(cap);
+  char *const out = malloc(cap);
   if (out == NULL) {
     fprintf(stderr, "fatal: out of memory\n");
     abort();
@@ -124,7 +124,7 @@ COLD_EXPORT void errors_finalize(
   }
 
   for (size_t e = 0; e < errors->len; e++) {
-    char *block = render(errors->data[e], source, &line_starts, len, errors_start->data[e], errors_len->data[e]);
+    char *const block = render(errors->data[e], source, &line_starts, len, errors_start->data[e], errors_len->data[e]);
     free(errors->data[e]);
     errors->data[e] = block;
   }
@@ -142,7 +142,7 @@ COLD_EXPORT void errors_finalize(
 // `|` or `^`) on the "N | ..." lines is never miscolored.
 COLD void print_colored(FILE *out, const char *block) {
   for (const char *p = block; *p;) {
-    const char *eol = strchr(p, '\n');
+    const char *const eol = strchr(p, '\n');
     const size_t n = eol ? (size_t)(eol - p) : strlen(p);
 
     if (n >= 5 && memcmp(p, "error", 5) == 0) {
@@ -183,7 +183,7 @@ COLD void print_colored(FILE *out, const char *block) {
         fputs(C_BLUE, out);
         fwrite(p, 1, bar + 1, out); // line number + gutter pipe
         fputs(C_RST, out);
-        const char *rest = p + bar + 1;
+        const char *const rest = p + bar + 1;
         const size_t rn = n - bar - 1;
         if (has_digit) {
           fwrite(rest, 1, rn, out); // source line — leave code untouched

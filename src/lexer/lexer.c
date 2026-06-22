@@ -48,7 +48,7 @@ typedef struct {
 } TokenWriter;
 
 Lexer *lexer_new(const char *source, const size_t len) {
-  Lexer *l = calloc(1, sizeof *l);
+  Lexer *const l = calloc(1, sizeof *l);
   if (!l) {
     fprintf(stderr, "fatal: out of memory\n");
     abort();
@@ -62,7 +62,7 @@ Lexer *lexer_new(const char *source, const size_t len) {
 }
 
 void lexer_free(Lexer **l) {
-  if (*l == NULL)
+  if (!l || !*l)
     return;
 
   VEC_DEINIT((*l)->tokens)
@@ -79,20 +79,14 @@ ALWAYS_INLINE bool is_eof(const Lexer *l) {
 // UTF-8. ASCII is handled by the caller.
 static uint32_t decode_at_b(const Lexer *l, const uint8_t b, const size_t current, size_t *size) {
   uint32_t cp;
-  uint32_t minimum;
-  size_t width;
+  const uint32_t minimum = b <= 0xDF ? 0x80 : b <= 0xEF ? 0x800 : 0x10000;
+  const size_t width = b <= 0xDF ? 2 : b <= 0xEF ? 3 : 4;
 
   if (b >= 0xC2 && b <= 0xDF) {
-    width = 2;
-    minimum = 0x80;
     cp = b & 0x1F;
   } else if (b >= 0xE0 && b <= 0xEF) {
-    width = 3;
-    minimum = 0x800;
     cp = b & 0x0F;
   } else if (b >= 0xF0 && b <= 0xF4) {
-    width = 4;
-    minimum = 0x10000;
     cp = b & 0x07;
   } else {
     *size = 0;
@@ -166,27 +160,27 @@ COLD void lexer_error(Lexer *l, const char *message) {
   lexer_errorf(l, (uint32_t)l->start, (uint32_t)(l->current - l->start), "%s", message);
 }
 
-COLD void lexer_error_at(Lexer *l, size_t at, size_t len, const char *message) {
+COLD void lexer_error_at(Lexer *l, const size_t at, const size_t len, const char *message) {
   lexer_errorf(l, (uint32_t)at, (uint32_t)len, "%s", message);
 }
 
-ALWAYS_INLINE bool is_dec(uint8_t b) {
+ALWAYS_INLINE bool is_dec(const uint8_t b) {
   return b >= '0' && b <= '9';
 }
 
-ALWAYS_INLINE bool is_hex(uint8_t b) {
+ALWAYS_INLINE bool is_hex(const uint8_t b) {
   return is_dec(b) || (b >= 'A' && b <= 'F') || (b >= 'a' && b <= 'f');
 }
 
-ALWAYS_INLINE bool is_oct(uint8_t b) {
+ALWAYS_INLINE bool is_oct(const uint8_t b) {
   return b >= '0' && b <= '7';
 }
 
-ALWAYS_INLINE bool is_bin(uint8_t b) {
+ALWAYS_INLINE bool is_bin(const uint8_t b) {
   return b == '0' || b == '1';
 }
 
-ALWAYS_INLINE int hex_value(uint8_t b) {
+ALWAYS_INLINE int hex_value(const uint8_t b) {
   if (b <= '9')
     return b - '0';
   if (b <= 'F')
@@ -199,7 +193,7 @@ static const uint8_t kw_first[256] = {
     ['m'] = 1, ['n'] = 1, ['r'] = 1, ['s'] = 1, ['t'] = 1, ['u'] = 1, ['w'] = 1, ['S'] = 1,
 };
 
-static TokenType keywords(const uint8_t *lexeme, size_t len) {
+static TokenType keywords(const uint8_t *lexeme, const size_t len) {
   if (!kw_first[lexeme[0]])
     return Identifier;
 
@@ -311,7 +305,7 @@ static TokenType keywords(const uint8_t *lexeme, size_t len) {
 static void identifier(Lexer *l, TokenWriter *w) {
   size_t i = l->current;
   const size_t len = l->len;
-  const uint8_t *bytes = l->bytes;
+  const uint8_t *const bytes = l->bytes;
 
   while (i < len && is_id_part[bytes[i]])
     i++;
@@ -336,7 +330,7 @@ static bool validate_utf8_at(Lexer *l, size_t *i) {
 static void whitespace(Lexer *l) {
   size_t i = l->current;
   const size_t len = l->len;
-  const uint8_t *bytes = l->bytes;
+  const uint8_t *const bytes = l->bytes;
 
   while (i < len) {
     switch (bytes[i]) {
@@ -364,7 +358,7 @@ static void whitespace(Lexer *l) {
 static void line_comment(Lexer *l) {
   size_t i = l->current;
   const size_t len = l->len;
-  const uint8_t *bytes = l->bytes;
+  const uint8_t *const bytes = l->bytes;
 
   while (i < len) {
     const uint8_t b = bytes[i];
@@ -385,7 +379,7 @@ static void line_comment(Lexer *l) {
 static void block_comment(Lexer *l) {
   size_t i = l->current;
   const size_t len = l->len;
-  const uint8_t *bytes = l->bytes;
+  const uint8_t *const bytes = l->bytes;
   size_t depth = 1;
 
   while (i < len) {
@@ -413,7 +407,7 @@ static void block_comment(Lexer *l) {
 }
 
 // Consumes an escape after its backslash. UINT32_MAX means malformed.
-static uint32_t escape(Lexer *l, bool byte_character) {
+static uint32_t escape(Lexer *l, const bool byte_character) {
   if (is_eof(l)) {
     lexer_error_at(l, l->current, 0, "unterminated escape sequence");
     return UINT32_MAX;
@@ -490,7 +484,7 @@ static uint32_t escape(Lexer *l, bool byte_character) {
 static void string(Lexer *l, TokenWriter *w) {
   size_t i = l->current;
   const size_t len = l->len;
-  const uint8_t *bytes = l->bytes;
+  const uint8_t *const bytes = l->bytes;
 
   while (i < len) {
     const uint8_t b = bytes[i++];
@@ -524,7 +518,7 @@ static void string(Lexer *l, TokenWriter *w) {
   lexer_error(l, "unterminated string literal");
 }
 
-static void character(Lexer *l, TokenWriter *w, bool byte_character) {
+static void character(Lexer *l, TokenWriter *w, const bool byte_character) {
   size_t count = 0;
   bool malformed = false;
   bool invalid_byte = false;
@@ -573,7 +567,7 @@ static void character(Lexer *l, TokenWriter *w, bool byte_character) {
   lexer_error(l, "unterminated character literal");
 }
 
-static bool raw_string_ahead(const Lexer *l, size_t *hashes) {
+ALWAYS_INLINE bool raw_string_ahead(const Lexer *l, size_t *hashes) {
   size_t i = l->current;
   while (i < l->len && l->bytes[i] == '#')
     i++;
@@ -583,13 +577,13 @@ static bool raw_string_ahead(const Lexer *l, size_t *hashes) {
   return true;
 }
 
-static void raw_string(Lexer *l, TokenWriter *w, size_t hashes) {
+static void raw_string(Lexer *l, TokenWriter *w, const size_t hashes) {
   if (hashes > 255)
     lexer_error_at(l, l->start, hashes + 1, "raw string delimiter contains more than 255 '#' characters");
 
   size_t i = l->current + hashes + 1;
   const size_t len = l->len;
-  const uint8_t *bytes = l->bytes;
+  const uint8_t *const bytes = l->bytes;
 
   while (i < len) {
     const uint8_t b = bytes[i];
@@ -623,7 +617,7 @@ static void raw_string(Lexer *l, TokenWriter *w, size_t hashes) {
   do {                                                                                                                 \
     size_t i = (l)->current;                                                                                           \
     const size_t len = (l)->len;                                                                                       \
-    const uint8_t *bytes = (l)->bytes;                                                                                 \
+    const uint8_t *const bytes = (l)->bytes;                                                                           \
     while (i < len) {                                                                                                  \
       const uint8_t b = bytes[i];                                                                                      \
       if (is_digit(b)) {                                                                                               \
@@ -765,7 +759,7 @@ static void number(Lexer *l, TokenWriter *w) {
     add_token(l, w, is_float ? FloatLiteral : IntegerLiteral);
 }
 
-static void leading_dot_number(Lexer *l) {
+COLD void leading_dot_number(Lexer *l) {
   while (is_id_part[peek_byte(l)] || peek_byte(l) == '.')
     l->current++;
   lexer_error(l, "floating-point literals require a digit before the decimal point");
@@ -1030,7 +1024,7 @@ void lexer_scan_tokens(Lexer *l) {
 }
 
 Token_Vec lexer_take_tokens(Lexer *l) {
-  Token_Vec out = l->tokens;
+  const Token_Vec out = l->tokens;
   l->tokens = Token_Vec_init();
   return out;
 }
