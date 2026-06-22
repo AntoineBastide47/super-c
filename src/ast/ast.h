@@ -246,11 +246,49 @@ typedef struct {
 
 VEC_DECLARE(Node, Node_Vec)
 
+typedef uint32_t TypeId;
+#define TYPE_NONE ((TypeId)0) // unknown / not-yet-computed / poison (suppresses cascading errors)
+
+// Order matches resolver.c's is_builtin_type[] table so a name lookup maps straight to an index.
+typedef enum {
+  BT_BOOL, BT_CHAR, BT_I8, BT_I16, BT_I32, BT_I64, BT_ISIZE,
+  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_VOID,
+  BT_COUNT,
+} BuiltinType;
+
+typedef enum {
+  TYPE_ERROR = 0,
+  TYPE_BUILTIN,
+  TYPE_POINTER,
+  TYPE_REFERENCE,
+  TYPE_SLICE,
+  TYPE_ARRAY,
+  TYPE_FUNCTION,
+  TYPE_STRUCT,
+  TYPE_ENUM,
+  TYPE_GENERIC,
+} TypeKind;
+
+// Named `Ty`, not `Type`: a `Type` token-keyword enum constant already occupies that identifier.
+typedef struct {
+    TypeKind kind;
+    TypeQualifier qualifier; // POINTER/REFERENCE/SLICE only
+    union {
+        BuiltinType builtin; // BUILTIN
+        TypeId elem;         // POINTER/REFERENCE/SLICE/ARRAY pointee/element
+        NodeId decl;         // STRUCT/ENUM/GENERIC decl node; FUNCTION = NODE_FUNCTION/NODE_FUNCTION_TYPE node
+    } as;
+} Ty;
+
+VEC_DECLARE(Ty, Ty_Vec)
+
 typedef struct {
     Node_Vec nodes;
     U32_Vec children;
     U32_Vec scratch;
     U32_Vec resolutions;
+    Ty_Vec type_pool; // interned types; index 0 is TYPE_ERROR, 1..BT_COUNT are the builtins
+    U32_Vec types;    // side table: index = NodeId, value = TypeId (0 = unknown)
     NodeId root;
 } Ast;
 
@@ -261,6 +299,8 @@ uint32_t ast_mark(const Ast *a);
 void ast_push(Ast *a, const NodeId id);
 NodeList ast_commit(Ast *a, const uint32_t mark);
 void ast_init_resolutions(Ast *a);
+void ast_init_types(Ast *a);
+TypeId ast_intern_type(Ast *a, const Ty t);
 
 #ifdef NDEBUG
 void ast_fprint(FILE *out, const Ast *a, const char *source);
@@ -284,6 +324,22 @@ ALWAYS_INLINE void ast_set_resolution(Ast *a, const NodeId ref, const NodeId dec
 
 ALWAYS_INLINE NodeId ast_resolution(const Ast *a, const NodeId ref) {
   return a->resolutions.data[ref];
+}
+
+ALWAYS_INLINE TypeId ast_builtin(const BuiltinType b) {
+  return (TypeId)b + 1;
+}
+
+ALWAYS_INLINE void ast_set_type(Ast *a, const NodeId n, const TypeId t) {
+  a->types.data[n] = t;
+}
+
+ALWAYS_INLINE TypeId ast_type(const Ast *a, const NodeId n) {
+  return a->types.data[n];
+}
+
+ALWAYS_INLINE const Ty *ast_type_at(const Ast *a, const TypeId t) {
+  return &a->type_pool.data[t];
 }
 
 #endif

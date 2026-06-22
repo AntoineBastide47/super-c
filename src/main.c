@@ -10,6 +10,7 @@
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 #include "resolver/resolver.h"
+#include "typechecker/typechecker.h"
 
 // Set by the Makefile (-DBIN_NAME='"$(BIN)"'); fall back for standalone builds.
 #ifndef BIN_NAME
@@ -34,11 +35,18 @@ static void run(const char *source, const size_t len) {
   ERRORS_CHECK(resolver);
 
   ast = resolver_take_ast(resolver);
+  resolver_free(&resolver);
+
+  TypeChecker *typechecker = typechecker_new(ast, source, len);
+  typechecker_check(typechecker);
+  ERRORS_CHECK(typechecker);
+
+  ast = typechecker_take_ast(typechecker);
   #ifdef NDEBUG
   ast_fprint(stdout, ast, source);
   #endif
   ast_free(&ast);
-  resolver_free(&resolver);
+  typechecker_free(&typechecker);
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer.

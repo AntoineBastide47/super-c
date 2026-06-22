@@ -4,6 +4,9 @@
 #include <string.h>
 
 VEC_DEFINE(Node, Node_Vec)
+VEC_DEFINE(Ty, Ty_Vec)
+
+_Static_assert(sizeof(Ty) == 12, "Ty must be padding-free so ast_intern_type can memcmp it");
 
 Ast *ast_new(const size_t token_count) {
   Ast *const a = calloc(1, sizeof *a);
@@ -15,6 +18,8 @@ Ast *ast_new(const size_t token_count) {
   a->children = U32_Vec_init();
   a->scratch = U32_Vec_init();
   a->resolutions = U32_Vec_init();
+  a->type_pool = Ty_Vec_init();
+  a->types = U32_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
   Node_Vec_push(&a->nodes, (Node){.kind = NODE_NONE_KIND});
@@ -28,6 +33,8 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->children);
   VEC_DEINIT((*a)->scratch);
   VEC_DEINIT((*a)->resolutions);
+  VEC_DEINIT((*a)->type_pool);
+  VEC_DEINIT((*a)->types);
   free(*a);
   *a = NULL;
 }
@@ -58,6 +65,24 @@ void ast_init_resolutions(Ast *a) {
   U32_Vec_reserve(&a->resolutions, a->nodes.len);
   a->resolutions.len = a->nodes.len;
   memset(a->resolutions.data, NODE_NONE, a->nodes.len * sizeof *a->resolutions.data);
+}
+
+void ast_init_types(Ast *a) {
+  U32_Vec_reserve(&a->types, a->nodes.len);
+  a->types.len = a->nodes.len;
+  memset(a->types.data, TYPE_NONE, a->nodes.len * sizeof *a->types.data);
+  a->type_pool.len = 0;
+  Ty_Vec_push(&a->type_pool, (Ty){.kind = TYPE_ERROR}); // index 0 == TYPE_NONE
+  for (BuiltinType b = 0; b < BT_COUNT; b++)             // indices 1..BT_COUNT
+    Ty_Vec_push(&a->type_pool, (Ty){.kind = TYPE_BUILTIN, .as.builtin = b});
+}
+
+TypeId ast_intern_type(Ast *a, const Ty t) {
+  for (size_t i = 0; i < a->type_pool.len; i++)
+    if (memcmp(&a->type_pool.data[i], &t, sizeof t) == 0)
+      return (TypeId)i;
+  Ty_Vec_push(&a->type_pool, t);
+  return (TypeId)(a->type_pool.len - 1);
 }
 
 #ifdef NDEBUG
