@@ -52,6 +52,36 @@ static Source repeat_source(const char *snippet) {
   return (Source){data, len};
 }
 
+static Source read_source(const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (file == NULL) {
+    perror(path);
+    exit(1);
+  }
+  if (fseek(file, 0, SEEK_END) != 0) {
+    perror(path);
+    exit(1);
+  }
+  const long size = ftell(file);
+  if (size < 0) {
+    perror(path);
+    exit(1);
+  }
+  rewind(file);
+
+  char *data = malloc((size_t)size);
+  if (data == NULL) {
+    fprintf(stderr, "fatal: out of memory\n");
+    exit(1);
+  }
+  if (fread(data, 1, (size_t)size, file) != (size_t)size) {
+    fprintf(stderr, "failed to read %s\n", path);
+    exit(1);
+  }
+  fclose(file);
+  return (Source){data, (size_t)size};
+}
+
 static ScanResult scan(const Source *source) {
   Lexer *lexer = lexer_new(source->data, source->len);
   lexer_scan_tokens(lexer);
@@ -95,8 +125,7 @@ static size_t iteration_count(const Source *source) {
   return iterations;
 }
 
-static void run_benchmark(const Benchmark *benchmark) {
-  const Source source = repeat_source(benchmark->snippet);
+static void run_source(const char *name, Source source) {
   const ScanResult sample = scan(&source);
   const size_t iterations = iteration_count(&source);
 
@@ -115,17 +144,21 @@ static void run_benchmark(const Benchmark *benchmark) {
   const double bytes_per_token = (double)source.len / (double)sample.token_len;
 
   printf(
-      "%-20s %12zu %12zu %10.2f %10.2f %10.2f %10.2f\n", benchmark->name, sample.token_cap, sample.token_len,
+      "%-20s %12zu %12zu %10.2f %10.2f %10.2f %10.2f\n", name, sample.token_cap, sample.token_len,
       mb_per_second, ns_per_token, mtokens_per_second, bytes_per_token);
   free(source.data);
+}
+
+static void run_benchmark(const Benchmark *benchmark) {
+  run_source(benchmark->name, repeat_source(benchmark->snippet));
 }
 
 int main(void) {
   static const Benchmark benchmarks[] = {
       {
           "keywords",
-          "as break case const continue defer else enum extern false fn for if impl in let match move mut new "
-          "null return self Self struct trait true type unsafe where while\n",
+          "as break case const continue defer else enum extend extern false fn for if in interface let move mut new "
+          "null return self Self struct switch true type unsafe where while\n",
       },
       {
           "identifiers",
@@ -180,6 +213,7 @@ int main(void) {
       "byte/tok");
   for (size_t i = 0; i < sizeof benchmarks / sizeof benchmarks[0]; i++)
     run_benchmark(&benchmarks[i]);
+  run_source("lexer-file", read_source("benchmark/files/lexer.spc"));
 
   return benchmark_sink == UINT64_MAX;
 }

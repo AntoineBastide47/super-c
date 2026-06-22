@@ -71,14 +71,15 @@ static void expect_error(const char *name, const char *source, const char *messa
 
 static void test_keywords(void) {
   static const TokenType expected[] = {
-      As,     Break, Case, Const, Continue, Defer, Else,  Enum,       Extern,     False,      Fn,        For,
-      If,     Impl,  In,   Let,   Match,    Move,  Mut,   New,        Null,       Return,     SelfLower, SelfUpper,
-      Struct, Trait, True, Type,  Unsafe,   Where, While, Identifier, Identifier, Identifier, Eof,
+      As,        Break, Case, Const, Continue, Defer, Else, Enum, Extern, False, Fn, For, If, In, Let,
+      Move,      Mut,   New,  Null,  Return, SelfLower, SelfUpper, Struct, True, Type, Unsafe, Where, While,
+      Switch,    Interface, Extend, Identifier, Identifier, Identifier, Identifier, Identifier, Identifier, Eof,
   };
   expect_tokens(
       "keywords",
-      "as break case const continue defer else enum extern false fn for if impl in let match move mut "
-      "new null return self Self struct trait true type unsafe where while name _ i32",
+      "as break case const continue defer else enum extern false fn for if in let move mut "
+      "new null return self Self struct true type unsafe where while switch interface extend "
+      "match trait impl name _ i32",
       expected, sizeof expected / sizeof expected[0]);
 }
 

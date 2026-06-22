@@ -242,8 +242,6 @@ static TokenType keywords(const uint8_t *lexeme, size_t len) {
           if (memcmp(lexeme, "enum", 4) == 0)
             return Enum;
           return Identifier;
-        case 'i':
-          return memcmp(lexeme, "impl", 4) == 0 ? Impl : Identifier;
         case 'm':
           return memcmp(lexeme, "move", 4) == 0 ? Move : Identifier;
         case 'n':
@@ -271,10 +269,6 @@ static TokenType keywords(const uint8_t *lexeme, size_t len) {
           return memcmp(lexeme, "defer", 5) == 0 ? Defer : Identifier;
         case 'f':
           return memcmp(lexeme, "false", 5) == 0 ? False : Identifier;
-        case 'm':
-          return memcmp(lexeme, "match", 5) == 0 ? Match : Identifier;
-        case 't':
-          return memcmp(lexeme, "trait", 5) == 0 ? Trait : Identifier;
         case 'w':
           if (memcmp(lexeme, "where", 5) == 0)
             return Where;
@@ -287,11 +281,19 @@ static TokenType keywords(const uint8_t *lexeme, size_t len) {
     case 6:
       switch (lexeme[0]) {
         case 'e':
-          return memcmp(lexeme, "extern", 6) == 0 ? Extern : Identifier;
+          if (memcmp(lexeme, "extend", 6) == 0)
+            return Extend;
+          if (memcmp(lexeme, "extern", 6) == 0)
+            return Extern;
+          return Identifier;
         case 'r':
           return memcmp(lexeme, "return", 6) == 0 ? Return : Identifier;
         case 's':
-          return memcmp(lexeme, "struct", 6) == 0 ? Struct : Identifier;
+          if (memcmp(lexeme, "struct", 6) == 0)
+            return Struct;
+          if (memcmp(lexeme, "switch", 6) == 0)
+            return Switch;
+          return Identifier;
         case 'u':
           return memcmp(lexeme, "unsafe", 6) == 0 ? Unsafe : Identifier;
         default:
@@ -299,6 +301,8 @@ static TokenType keywords(const uint8_t *lexeme, size_t len) {
       }
     case 8:
       return memcmp(lexeme, "continue", 8) == 0 ? Continue : Identifier;
+    case 9:
+      return memcmp(lexeme, "interface", 9) == 0 ? Interface : Identifier;
     default:
       return Identifier;
   }
@@ -314,7 +318,7 @@ static void identifier(Lexer *l, TokenWriter *w) {
 
   l->current = i;
   const size_t identifier_len = i - l->start;
-  add_token(l, w, identifier_len > 8 ? Identifier : keywords(bytes + l->start, identifier_len));
+  add_token(l, w, identifier_len > 9 ? Identifier : keywords(bytes + l->start, identifier_len));
 }
 
 static bool validate_utf8_at(Lexer *l, size_t *i) {

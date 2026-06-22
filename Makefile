@@ -64,10 +64,9 @@ TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 BENCHMARK_SRCS := $(wildcard benchmark/*_bench.c)
 BENCHMARK_BINS := $(BENCHMARK_SRCS:benchmark/%.c=$(BUILD_DIR)/benchmark/%)
 
-.PHONY: all build run release test bench clean
+.PHONY: all run release test bench clean
 
-all: build
-build: $(BIN)
+all: $(BIN)
 
 run: all
 	@./$(BIN)
