@@ -967,6 +967,9 @@ ALWAYS_INLINE int precedence(const TokenType type) {
     case Plus:
     case Minus:
       return 10;
+    case LeftShift:
+    case RightShift:
+      return 9;
     case LessThan:
     case LessThanEqual:
     case GreaterThan:
@@ -975,6 +978,12 @@ ALWAYS_INLINE int precedence(const TokenType type) {
     case EqualEqual:
     case BangEqual:
       return 7;
+    case Ampersand:
+      return 6;
+    case Caret:
+      return 5;
+    case Pipe:
+      return 4;
     case AmpersandAmpersand:
       return 3;
     case PipePipe:

@@ -9,6 +9,7 @@
 #include "ast/parser.h"
 #include "lexer/lexer.h"
 #include "lexer/token.h"
+#include "resolver/resolver.h"
 
 // Set by the Makefile (-DBIN_NAME='"$(BIN)"'); fall back for standalone builds.
 #ifndef BIN_NAME
@@ -26,9 +27,18 @@ static void run(const char *source, const size_t len) {
   ERRORS_CHECK(parser);
 
   Ast *ast = parser_take_ast(parser);
-  ast_fprint(stdout, ast, source);
-  ast_free(&ast);
   parser_free(&parser);
+
+  Resolver *resolver = resolver_new(ast, source, len);
+  resolver_resolve(resolver);
+  ERRORS_CHECK(resolver);
+
+  ast = resolver_take_ast(resolver);
+  #ifdef NDEBUG
+  ast_fprint(stdout, ast, source);
+  #endif
+  ast_free(&ast);
+  resolver_free(&resolver);
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer.

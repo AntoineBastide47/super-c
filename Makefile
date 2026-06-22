@@ -1,7 +1,8 @@
-CC      ?= cc
-CSTD    := -std=c11 -D_POSIX_C_SOURCE=200809L
-WARN    := -Wall -Wextra
-INCLUDE := -Isrc
+CC       ?= cc
+CSTD     := -std=c11 -D_POSIX_C_SOURCE=200809L
+WARN     := -Wall -Wextra
+INCLUDE  := -Isrc
+DEPFLAGS := -MMD -MP
 
 V ?= 0
 BAR_WIDTH := 20
@@ -64,7 +65,7 @@ TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 BENCHMARK_SRCS := $(wildcard benchmark/*_bench.c)
 BENCHMARK_BINS := $(BENCHMARK_SRCS:benchmark/%.c=$(BUILD_DIR)/benchmark/%)
 
-.PHONY: all run release test bench clean
+.PHONY: all build run release test bench clean
 
 all: $(BIN)
 
@@ -84,7 +85,11 @@ endif
 
 ifeq ($(PROFILE),release)
 bench: $(BENCHMARK_BINS)
-	@for benchmark in $(BENCHMARK_BINS); do $$benchmark || exit 1; done
+	@printf '\n========== Benchmarks ==========\n'
+	@for benchmark in $(BENCHMARK_BINS); do \
+	   printf '\n--- %s ---\n' "$$(basename $$benchmark)"; \
+	   $$benchmark || exit 1; \
+	 done
 else
 bench:
 	@$(MAKE) PROFILE=release bench
@@ -93,12 +98,12 @@ endif
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
 	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $< $(LIB_OBJS) -o $@ $(LDOPT)
+	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT)
 
 $(BUILD_DIR)/benchmark/%: benchmark/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
 	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $< $(LIB_OBJS) -o $@ $(LDOPT)
+	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT)
 
 $(BIN): $(LIB_OBJS) $(BUILD_DIR)/main.o
 	@$(call ECHO,LINK,$@)
@@ -108,9 +113,14 @@ $(BIN): $(LIB_OBJS) $(BUILD_DIR)/main.o
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
 	@$(call ECHO,CC,$<)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(CPPFLAGS_EXTRA) -c $< -o $@
+	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $(CPPFLAGS_EXTRA) -c $< -o $@
 
 $(BUILD_DIR)/main.o: CPPFLAGS_EXTRA := -DBIN_NAME='"$(BIN)"'
+
+# Header-dependency tracking: -MMD -MP emits a .d file beside each object/binary listing the
+# headers it includes (plus phony header targets so deleting a header doesn't break the build).
+DEPS := $(LIB_OBJS:.o=.d) $(BUILD_DIR)/main.d $(addsuffix .d,$(TEST_BINS) $(BENCHMARK_BINS))
+-include $(DEPS)
 
 clean:
 	@rm -rf build $(BIN) profile.json.gz

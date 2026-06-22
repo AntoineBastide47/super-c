@@ -1,6 +1,7 @@
 #include "ast.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 VEC_DEFINE(Node, Node_Vec)
 
@@ -13,6 +14,7 @@ Ast *ast_new(const size_t token_count) {
   a->nodes = Node_Vec_init();
   a->children = U32_Vec_init();
   a->scratch = U32_Vec_init();
+  a->resolutions = U32_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
   Node_Vec_push(&a->nodes, (Node){.kind = NODE_NONE_KIND});
@@ -25,6 +27,7 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->nodes);
   VEC_DEINIT((*a)->children);
   VEC_DEINIT((*a)->scratch);
+  VEC_DEINIT((*a)->resolutions);
   free(*a);
   *a = NULL;
 }
@@ -51,6 +54,13 @@ NodeList ast_commit(Ast *a, const uint32_t mark) {
   return list;
 }
 
+void ast_init_resolutions(Ast *a) {
+  U32_Vec_reserve(&a->resolutions, a->nodes.len);
+  a->resolutions.len = a->nodes.len;
+  memset(a->resolutions.data, NODE_NONE, a->nodes.len * sizeof *a->resolutions.data);
+}
+
+#ifdef NDEBUG
 static const char *kind_name(const NodeKind kind) {
   static const char *const names[] = {
       "None",
@@ -321,3 +331,4 @@ void ast_fprint(FILE *out, const Ast *a, const char *source) {
   if (a && a->root)
     print_node(out, a, a->root, source, 0);
 }
+#endif

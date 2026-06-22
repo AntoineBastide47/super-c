@@ -7,13 +7,7 @@
 #include "ast/parser.h"
 #include "lexer/lexer.h"
 
-#define SOURCE_BYTES (1024u * 1024u)
 #define TARGET_SECONDS 0.25
-
-typedef struct {
-    const char *name;
-    const char *snippet;
-} Benchmark;
 
 typedef struct {
     char *data;
@@ -37,18 +31,39 @@ static double now_seconds(void) {
   return (double)time.tv_sec + (double)time.tv_nsec / 1e9;
 }
 
-static Source repeat_source(const char *snippet) {
-  const size_t snippet_len = strlen(snippet);
-  const size_t repetitions = (SOURCE_BYTES + snippet_len - 1) / snippet_len;
-  const size_t len = repetitions * snippet_len;
-  char *data = malloc(len);
+static const char *base_name(const char *path) {
+  const char *slash = strrchr(path, '/');
+  return slash ? slash + 1 : path;
+}
+
+static Source read_source(const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (file == NULL) {
+    perror(path);
+    exit(1);
+  }
+  if (fseek(file, 0, SEEK_END) != 0) {
+    perror(path);
+    exit(1);
+  }
+  const long size = ftell(file);
+  if (size < 0) {
+    perror(path);
+    exit(1);
+  }
+  rewind(file);
+
+  char *data = malloc((size_t)size);
   if (data == NULL) {
     fprintf(stderr, "fatal: out of memory\n");
     exit(1);
   }
-  for (size_t i = 0; i < repetitions; i++)
-    memcpy(data + i * snippet_len, snippet, snippet_len);
-  return (Source){data, len};
+  if (fread(data, 1, (size_t)size, file) != (size_t)size) {
+    fprintf(stderr, "failed to read %s\n", path);
+    exit(1);
+  }
+  fclose(file);
+  return (Source){data, (size_t)size};
 }
 
 static Token_Vec lex(const Source *source) {
@@ -136,62 +151,16 @@ static void run_source(const char *name, Source source) {
   free(source.data);
 }
 
-static void run_benchmark(const Benchmark *benchmark) {
-  run_source(benchmark->name, repeat_source(benchmark->snippet));
-}
-
 int main(void) {
-  static const Benchmark benchmarks[] = {
-      {
-          "declarations",
-          "struct Pair<T> { left: T, right: T, }\n"
-          "enum Result<T, E> { Ok(T), Err { error: E }, }\n"
-          "type Callback = fn(*const u8, []u8) (int, Error);\n"
-          "const LIMIT: usize = 1_024;\n",
-      },
-      {
-          "functions",
-          "fn calculate<T>(left: T, right: T) int where T: Add + Copy {\n"
-          "  let mut value: int = 1 + 2 * 3;\n"
-          "  value += (left as int) * 4;\n"
-          "  if (value > 10 && value != 20) { value -= 1; } else { value = 0; }\n"
-          "  return value;\n"
-          "}\n",
-      },
-      {
-          "interfaces-extends",
-          "interface Writer<T> { type Output; fn write(self: *mut Self, value: T) Self::Output; }\n"
-          "extend<T> Buffer<T> as Writer<T> {\n"
-          "  type Output = usize;\n"
-          "  fn write(self: *mut Self, value: T) usize { self.len += 1; return self.len; }\n"
-          "}\n",
-      },
-      {
-          "control-flow",
-          "fn process(values: []int) int {\n"
-          "  let mut total: int = 0;\n"
-          "  for value in values { defer release(value); total += value; }\n"
-          "  while (total > 100) { total -= 1; }\n"
-          "  return total;\n"
-          "}\n",
-      },
-      {
-          "switch-patterns",
-          "fn classify(value: Result<int, Error>) int {\n"
-          "  return switch value {\n"
-          "    Ok(number) if number > 0 => number,\n"
-          "    case '0'..='9' => 1,\n"
-          "    Err { error: err } => 2,\n"
-          "    _ => 0,\n"
-          "  };\n"
-          "}\n",
-      },
+  static const char *const corpus[] = {
+      "benchmark/files/lexer.spc",
   };
 
   printf(
       "%-20s %12s %12s %10s %10s %10s %10s\n", "Benchmark", "Nodes Cap", "Nodes Len", "MB/s", "ns/node", "Mnode/s",
       "byte/node");
-  for (size_t i = 0; i < sizeof benchmarks / sizeof benchmarks[0]; i++)
-    run_benchmark(&benchmarks[i]);
+  for (size_t i = 0; i < sizeof corpus / sizeof corpus[0]; i++)
+    run_source(base_name(corpus[i]), read_source(corpus[i]));
+
   return benchmark_sink == UINT64_MAX;
 }

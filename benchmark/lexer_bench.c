@@ -7,13 +7,7 @@
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 
-#define SOURCE_BYTES (1024u * 1024u)
 #define TARGET_SECONDS 0.25
-
-typedef struct {
-    const char *name;
-    const char *snippet;
-} Benchmark;
 
 typedef struct {
     char *data;
@@ -37,19 +31,9 @@ static double now_seconds(void) {
   return (double)time.tv_sec + (double)time.tv_nsec / 1e9;
 }
 
-static Source repeat_source(const char *snippet) {
-  const size_t snippet_len = strlen(snippet);
-  const size_t repetitions = (SOURCE_BYTES + snippet_len - 1) / snippet_len;
-  const size_t len = repetitions * snippet_len;
-  char *data = malloc(len);
-  if (data == NULL) {
-    fprintf(stderr, "fatal: out of memory\n");
-    exit(1);
-  }
-
-  for (size_t i = 0; i < repetitions; i++)
-    memcpy(data + i * snippet_len, snippet, snippet_len);
-  return (Source){data, len};
+static const char *base_name(const char *path) {
+  const char *slash = strrchr(path, '/');
+  return slash ? slash + 1 : path;
 }
 
 static Source read_source(const char *path) {
@@ -149,71 +133,16 @@ static void run_source(const char *name, Source source) {
   free(source.data);
 }
 
-static void run_benchmark(const Benchmark *benchmark) {
-  run_source(benchmark->name, repeat_source(benchmark->snippet));
-}
-
 int main(void) {
-  static const Benchmark benchmarks[] = {
-      {
-          "keywords",
-          "as break case const continue defer else enum extend extern false fn for if in interface let move mut new "
-          "null return self Self struct switch true type unsafe where while\n",
-      },
-      {
-          "identifiers",
-          "a value counter_123 current_value write_all File HTTPServer point2d _ temporary_result "
-          "very_long_identifier_name_with_multiple_segments\n",
-      },
-      {
-          "declarations",
-          "let mut counter_123: i64 = current_value;\n"
-          "const limit_value: usize = 1_000;\n"
-          "fn increment(value: i64) i64 { return value + 1; }\n",
-      },
-      {
-          "operators",
-          "a+b-c*d/e%f; a==b; a!=b; a<b; a<=b; a>b; a>=b; "
-          "a&b|c^d; a&&b||c; a<<b; a>>b; "
-          "a+=b; a-=b; a*=b; a/=b; a%=b; a&=b; a|=b; a^=b; a<<=b; a>>=b; "
-          "a..b; a..=b; path::item; ptr->field; arm=>value; value??fallback; value?;\n",
-      },
-      {
-          "numbers",
-          "0 0123 42 1_000_000 0xCAFE_BABE 0b1010_0110 0o755 "
-          "1. 3.14159265 123.456_789 1e9 1e-9 1.25e+10;\n",
-      },
-      {
-          "text-literals",
-          "\"plain UTF-8 λ 😀\" \"escaped\\n\\t\\xFF\\u{1F600}\" "
-          "'a' '\\n' '\\x41' '\\u{03BB}' b'A' b'\\n' b'\\xFF' "
-          "r\"C:\\Users\\name\\file.txt\" r#\"contains \"quotes\"\"# r##\"line one\nline \"# two\"##;\n",
-      },
-      {
-          "comments-skipped",
-          "let value = 42; // line comment λ\n"
-          "/* outer comment /* nested comment */ outer continues */ "
-          "value += 1; /** documentation */ value;\n",
-      },
-      {
-          "mixed-source",
-          "struct Point { x: f64, y: f64 }\n"
-          "fn distance(a: *const Point, b: *const Point) f64 {\n"
-          "  let dx = a->x - b->x;\n"
-          "  let dy = a->y - b->y;\n"
-          "  return sqrt(dx * dx + dy * dy);\n"
-          "}\n"
-          "// construct a point\n"
-          "let origin = Point { x: 0.0, y: 0.0 };\n",
-      },
+  static const char *const corpus[] = {
+      "benchmark/files/lexer.spc",
   };
 
   printf(
       "%-20s %12s %12s %10s %10s %10s %10s\n", "Benchmark", "Tokens Cap", "Tokens Len", "MB/s", "ns/tok", "Mtok/s",
       "byte/tok");
-  for (size_t i = 0; i < sizeof benchmarks / sizeof benchmarks[0]; i++)
-    run_benchmark(&benchmarks[i]);
-  run_source("lexer-file", read_source("benchmark/files/lexer.spc"));
+  for (size_t i = 0; i < sizeof corpus / sizeof corpus[0]; i++)
+    run_source(base_name(corpus[i]), read_source(corpus[i]));
 
   return benchmark_sink == UINT64_MAX;
 }

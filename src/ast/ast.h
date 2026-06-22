@@ -250,6 +250,7 @@ typedef struct {
     Node_Vec nodes;
     U32_Vec children;
     U32_Vec scratch;
+    U32_Vec resolutions;
     NodeId root;
 } Ast;
 
@@ -259,7 +260,11 @@ NodeId ast_add(Ast *a, const Node node);
 uint32_t ast_mark(const Ast *a);
 void ast_push(Ast *a, const NodeId id);
 NodeList ast_commit(Ast *a, const uint32_t mark);
+void ast_init_resolutions(Ast *a);
+
+#ifdef NDEBUG
 void ast_fprint(FILE *out, const Ast *a, const char *source);
+#endif
 
 ALWAYS_INLINE Node *ast_at(Ast *a, const NodeId id) {
   return &a->nodes.data[id];
@@ -271,6 +276,14 @@ ALWAYS_INLINE const Node *ast_at_const(const Ast *a, const NodeId id) {
 
 ALWAYS_INLINE const NodeId *ast_list(const Ast *a, const NodeList list) {
   return a->children.data + list.start;
+}
+
+ALWAYS_INLINE void ast_set_resolution(Ast *a, const NodeId ref, const NodeId decl) {
+  a->resolutions.data[ref] = decl;
+}
+
+ALWAYS_INLINE NodeId ast_resolution(const Ast *a, const NodeId ref) {
+  return a->resolutions.data[ref];
 }
 
 #endif
