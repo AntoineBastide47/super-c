@@ -811,12 +811,18 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
       emit_expr(c, p->as.single.value);
       break;
     case NODE_PATTERN_RANGE: {
-      const Node *const lo = ast_at_const(c->ast, p->as.pattern_range.start);
-      const Node *const hi = ast_at_const(c->ast, p->as.pattern_range.end);
-      emit(c, "%s >= ", scrut);
-      emit_expr(c, lo->kind == NODE_PATTERN_LITERAL ? lo->as.single.value : p->as.pattern_range.start);
-      emit(c, " && %s %s ", scrut, p->as.pattern_range.inclusive ? "<=" : "<");
-      emit_expr(c, hi->kind == NODE_PATTERN_LITERAL ? hi->as.single.value : p->as.pattern_range.end);
+      const NodeId lo = p->as.pattern_range.start; // either bound may be absent (half-open range)
+      const NodeId hi = p->as.pattern_range.end;
+      if (lo != NODE_NONE) {
+        const Node *const lon = ast_at_const(c->ast, lo);
+        emit(c, "%s >= ", scrut);
+        emit_expr(c, lon->kind == NODE_PATTERN_LITERAL ? lon->as.single.value : lo);
+      }
+      if (hi != NODE_NONE) {
+        const Node *const hin = ast_at_const(c->ast, hi);
+        emit(c, "%s%s %s ", lo != NODE_NONE ? " && " : "", scrut, p->as.pattern_range.inclusive ? "<=" : "<");
+        emit_expr(c, hin->kind == NODE_PATTERN_LITERAL ? hin->as.single.value : hi);
+      }
       break;
     }
     case NODE_PATTERN_TUPLE: {
@@ -1084,7 +1090,37 @@ static NodeId array_length_of(Codegen *c, const NodeId iter) {
              : NODE_NONE;
 }
 
+// `for i in lo..hi` -> a counting loop. A missing start counts from 0; a missing end runs
+// unbounded (the body must `break`); `..=` includes the end.
+static void emit_for_range(Codegen *c, const Node *n) {
+  const Node *const r = ast_at_const(c->ast, n->as.for_stmt.iterable);
+  const NodeId lo = r->as.pattern_range.start;
+  const NodeId hi = r->as.pattern_range.end;
+  const Span name = name_span(c, n->as.for_stmt.binding);
+  char nm[128];
+  render_ident(c, name, nm, sizeof nm);
+  emit(c, "for (");
+  emit_binding(c, ast_type(c->ast, lo != NODE_NONE ? lo : hi), name, false);
+  emit(c, " = ");
+  if (lo != NODE_NONE)
+    emit_expr(c, lo);
+  else
+    emit(c, "0");
+  emit(c, "; ");
+  if (hi != NODE_NONE) {
+    emit(c, "%s %s ", nm, r->as.pattern_range.inclusive ? "<=" : "<");
+    emit_expr(c, hi);
+  }
+  emit(c, "; %s++) ", nm);
+  emit_block(c, n->as.for_stmt.body);
+  emit(c, "\n");
+}
+
 static void emit_for(Codegen *c, const Node *n) {
+  if (ast_at_const(c->ast, n->as.for_stmt.iterable)->kind == NODE_RANGE) {
+    emit_for_range(c, n);
+    return;
+  }
   const Ty *const it = ast_type_at(c->ast, ast_type(c->ast, n->as.for_stmt.iterable));
   const NodeId body = n->as.for_stmt.body;
   const NodeList stmts = ast_at_const(c->ast, body)->as.block.statements;

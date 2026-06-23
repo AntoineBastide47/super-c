@@ -82,6 +82,8 @@ typedef enum {
   NODE_PATTERN_FIELD,
   NODE_PATTERN_RANGE,
 
+  NODE_RANGE, // `lo..hi` / `lo..=hi` expression (for-loop iterable only); reuses `pattern_range`
+
   NODE_KIND_COUNT,
 } NodeKind;
 
@@ -239,9 +241,9 @@ typedef struct {
             NodeList children;
         } pattern;
         struct {
-            NodeId start, end;
+            NodeId start, end; // either may be NODE_NONE for a half-open range (NODE_RANGE)
             bool inclusive;
-        } pattern_range;
+        } pattern_range; // shared by NODE_PATTERN_RANGE and NODE_RANGE
     } as;
 } Node;
 

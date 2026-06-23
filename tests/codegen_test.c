@@ -178,6 +178,49 @@ static void test_control(void) {
   expect_contains("switch literal test", CONTROL, " == ");
 }
 
+// Bare `if`/`while` (no parens) plus the four for-range forms lowered to counting loops.
+static const char *const RANGES =
+    "fn f() i32 {\n"
+    "  let mut s: i32 = 0;\n"
+    "  for i in 0..10 { s = s + i; }\n"
+    "  for i in 1..=5 { s = s + i; }\n"
+    "  for i in ..4 { s = s + 1; }\n"
+    "  for i in 100.. { if i >= 103 { break; } s = s + i; }\n"
+    "  while s < 0 { s = s + 1; }\n"
+    "  return s;\n"
+    "}\n";
+
+static void test_ranges(void) {
+  expect_contains("exclusive range", RANGES, "for (int32_t i = 0; i < 10; i++)");
+  expect_contains("inclusive range", RANGES, "for (int32_t i = 1; i <= 5; i++)");
+  expect_contains("open-start range", RANGES, "for (int32_t i = 0; i < 4; i++)");
+  expect_contains("open-end range", RANGES, "for (int32_t i = 100; ; i++)");
+  expect_contains("bare if lowers", RANGES, "if (i >= 103)");
+  expect_contains("bare while lowers", RANGES, "while (s < 0)");
+}
+
+// switch arms reuse the for-loop range grammar; half-open arms lower to a single comparison.
+static const char *const SWITCH_RANGES =
+    "fn classify(n: i32) i32 {\n"
+    "  return switch n {\n"
+    "    10..20 => 1,\n"
+    "    20..=30 => 2,\n"
+    "    ..5 => 3,\n"
+    "    99.. => 4,\n"
+    "    _ => 0,\n"
+    "  };\n"
+    "}\n";
+
+static void test_switch_ranges(void) {
+  expect_contains("exclusive arm lower bound", SWITCH_RANGES, ">= 10 && ");
+  expect_contains("exclusive arm upper bound", SWITCH_RANGES, "< 20");
+  expect_contains("inclusive arm upper bound", SWITCH_RANGES, "<= 30");
+  expect_contains("open-start arm is upper-only", SWITCH_RANGES, "< 5");
+  expect_absent("open-start arm has no lower bound", SWITCH_RANGES, ">= 5");
+  expect_contains("open-end arm is lower-only", SWITCH_RANGES, ">= 99");
+  expect_absent("open-end arm has no upper bound", SWITCH_RANGES, "< 99");
+}
+
 static void test_pointer_arith(void) {
   expect_contains("pointer offset", "fn f(p: *i32) i32 { return *(p + 1); }\n", "(p + 1)");
   expect_contains("pointer difference", "fn f(a: *i32, b: *i32) isize { return a - b; }\n", "(a - b)");
@@ -243,6 +286,8 @@ static void test_literals(void) {
 int main(void) {
   test_broad();
   test_control();
+  test_ranges();
+  test_switch_ranges();
   test_pointer_arith();
   test_references();
   test_extern();

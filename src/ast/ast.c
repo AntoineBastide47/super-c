@@ -164,6 +164,7 @@ static const char *kind_name(const NodeKind kind) {
       "PatternStruct",
       "PatternField",
       "PatternRange",
+      "Range",
   };
   return (unsigned)kind < sizeof names / sizeof names[0] ? names[kind] : "Invalid";
 }
@@ -367,6 +368,7 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
       print_list(out, a, n->as.pattern.children, source, depth + 1);
       break;
     case NODE_PATTERN_RANGE:
+    case NODE_RANGE:
       print_child(out, a, n->as.pattern_range.start, source, depth + 1);
       print_child(out, a, n->as.pattern_range.end, source, depth + 1);
       break;

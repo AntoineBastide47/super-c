@@ -169,11 +169,97 @@ static void test_grouped_parameters_and_returns(void) {
   ast_free(&ast);
 }
 
+// Parse only to learn whether the parser reported an error (used for rejection cases).
+static bool parse_has_error(const char *source) {
+  Lexer *lexer = lexer_new(source, strlen(source));
+  lexer_scan_tokens(lexer);
+  Token_Vec tokens = lexer_take_tokens(lexer);
+  lexer_free(&lexer);
+  Parser *parser = parser_new(tokens, source, strlen(source));
+  parser_build_ast(parser);
+  const bool e = parser_has_errors(parser);
+  parser_free(&parser);
+  return e;
+}
+
+static void test_bare_conditions_and_ranges(void) {
+  static const char source[] = "fn f() void {\n"
+                               "  if x { }\n"
+                               "  while y { }\n"
+                               "  for i in 0..10 { }\n"
+                               "  for i in 1..=5 { }\n"
+                               "  for i in ..4 { }\n"
+                               "  for i in 6.. { }\n"
+                               "}\n";
+  Ast *ast = parse("bare conditions and ranges", source);
+  if (!ast)
+    return;
+  const Node *fn = ast_at_const(ast, ast_list(ast, ast_at_const(ast, ast->root)->as.program.items)[0]);
+  const Node *body = ast_at_const(ast, fn->as.function.body);
+  const NodeId *stmts = ast_list(ast, body->as.block.statements);
+  CHECK(body->as.block.statements.len == 6, "bare conditions: expected 6 statements");
+  CHECK(ast_at_const(ast, stmts[0])->kind == NODE_IF, "bare 'if' parses to NODE_IF");
+  CHECK(ast_at_const(ast, stmts[1])->kind == NODE_WHILE, "bare 'while' parses to NODE_WHILE");
+
+  const Node *r1 = ast_at_const(ast, ast_at_const(ast, stmts[2])->as.for_stmt.iterable);
+  CHECK(r1->kind == NODE_RANGE, "0..10 iterable is NODE_RANGE");
+  CHECK(
+      r1->as.pattern_range.start != NODE_NONE && r1->as.pattern_range.end != NODE_NONE && !r1->as.pattern_range.inclusive,
+      "0..10 is an exclusive range with both bounds");
+  CHECK(ast_at_const(ast, ast_at_const(ast, stmts[3])->as.for_stmt.iterable)->as.pattern_range.inclusive,
+        "1..=5 is inclusive");
+  const Node *r3 = ast_at_const(ast, ast_at_const(ast, stmts[4])->as.for_stmt.iterable);
+  CHECK(r3->as.pattern_range.start == NODE_NONE && r3->as.pattern_range.end != NODE_NONE, "..4 has no start");
+  const Node *r4 = ast_at_const(ast, ast_at_const(ast, stmts[5])->as.for_stmt.iterable);
+  CHECK(r4->as.pattern_range.start != NODE_NONE && r4->as.pattern_range.end == NODE_NONE, "6.. has no end");
+  ast_free(&ast);
+
+  CHECK(parse_has_error("fn f() void { for i in .. { } }\n"), "bare '..' range is rejected");
+  CHECK(parse_has_error("fn f() void { for i in 0..= { } }\n"), "inclusive range without an end is rejected");
+}
+
+// switch patterns share the for-loop range grammar, so the same half-open forms are accepted.
+static void test_switch_pattern_ranges(void) {
+  static const char source[] = "fn f(n: i32) i32 {\n"
+                               "  return switch n {\n"
+                               "    10..20 => 1,\n"
+                               "    20..=30 => 2,\n"
+                               "    ..5 => 3,\n"
+                               "    99.. => 4,\n"
+                               "    _ => 0,\n"
+                               "  };\n"
+                               "}\n";
+  Ast *ast = parse("switch pattern ranges", source);
+  if (!ast)
+    return;
+  const Node *fn = ast_at_const(ast, ast_list(ast, ast_at_const(ast, ast->root)->as.program.items)[0]);
+  const Node *body = ast_at_const(ast, fn->as.function.body);
+  const Node *ret = ast_at_const(ast, ast_list(ast, body->as.block.statements)[0]);
+  const Node *sw = ast_at_const(ast, ast_list(ast, ret->as.return_stmt.values)[0]);
+  CHECK(sw->kind == NODE_MATCH, "switch parses to NODE_MATCH");
+  const NodeId *arms = ast_list(ast, sw->as.match_expr.arms);
+  CHECK(sw->as.match_expr.arms.len == 5, "switch: expected 5 arms");
+#define PAT(i) ast_at_const(ast, ast_at_const(ast, arms[i])->as.match_arm.pattern)
+  CHECK(PAT(0)->kind == NODE_PATTERN_RANGE && !PAT(0)->as.pattern_range.inclusive, "10..20 is an exclusive pattern range");
+  CHECK(PAT(0)->as.pattern_range.start != NODE_NONE && PAT(0)->as.pattern_range.end != NODE_NONE, "10..20 has both bounds");
+  CHECK(PAT(1)->kind == NODE_PATTERN_RANGE && PAT(1)->as.pattern_range.inclusive, "20..=30 is inclusive");
+  CHECK(PAT(2)->as.pattern_range.start == NODE_NONE && PAT(2)->as.pattern_range.end != NODE_NONE, "..5 has no start");
+  CHECK(PAT(3)->as.pattern_range.start != NODE_NONE && PAT(3)->as.pattern_range.end == NODE_NONE, "99.. has no end");
+  CHECK(PAT(4)->kind == NODE_PATTERN_WILDCARD, "_ is a wildcard");
+#undef PAT
+  ast_free(&ast);
+
+  CHECK(parse_has_error("fn f(n: i32) i32 { return switch n { .. => 1, }; }\n"), "bare '..' pattern is rejected");
+  CHECK(parse_has_error("fn f(n: i32) i32 { return switch n { 0..= => 1, }; }\n"), "inclusive pattern without an end is rejected");
+}
+
 int main(void) {
   test_items_and_types();
   test_functions_and_expressions();
   test_traits_impls_match_and_new();
   test_grouped_parameters_and_returns();
+  test_bare_conditions_and_ranges();
+  test_switch_pattern_ranges();
   if (failures) {
     fprintf(stderr, "%d parser test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

@@ -756,6 +756,14 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_IF:
       check_if(t, n);
       break; // an `if` used as a value has no inferred type yet
+    case NODE_RANGE: { // for-loop range; its type is the loop-variable type
+      const TypeId s = check_expr(t, n->as.pattern_range.start);
+      const TypeId e = check_expr(t, n->as.pattern_range.end);
+      if ((s != TYPE_NONE && !is_int(t, s)) || (e != TYPE_NONE && !is_int(t, e)))
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "range bounds must be integers");
+      result = s != TYPE_NONE ? s : e;
+      break;
+    }
     default:
       break;
   }
@@ -852,9 +860,15 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_FOR: {
-      const TypeId it = check_expr(t, n->as.for_stmt.iterable);
-      const Ty *const ity = ast_type_at(a, it);
-      const TypeId elem = ity->kind == TYPE_ARRAY || ity->kind == TYPE_SLICE ? ity->as.elem : TYPE_NONE;
+      const NodeId iter = n->as.for_stmt.iterable;
+      const TypeId it = check_expr(t, iter);
+      TypeId elem;
+      if (ast_at_const(a, iter)->kind == NODE_RANGE) {
+        elem = it; // a range's value type is exactly the loop-variable type
+      } else {
+        const Ty *const ity = ast_type_at(a, it);
+        elem = ity->kind == TYPE_ARRAY || ity->kind == TYPE_SLICE ? ity->as.elem : TYPE_NONE;
+      }
       ast_set_type(a, id, elem); // the loop binding resolves to this for-node (see resolver)
       check_stmt(t, n->as.for_stmt.body);
       break;

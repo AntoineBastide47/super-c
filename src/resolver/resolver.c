@@ -488,6 +488,10 @@ static void resolve_expr(Resolver *r, const NodeId id) {
     case NODE_IF:
       resolve_if(r, n);
       break;
+    case NODE_RANGE: // for-loop range bounds (either may be NODE_NONE)
+      resolve_expr(r, n->as.pattern_range.start);
+      resolve_expr(r, n->as.pattern_range.end);
+      break;
     default: // NODE_LITERAL and other leaves
       break;
   }

@@ -21,6 +21,10 @@ static NodeId parse_type(Parser *p);
 static NodeId parse_pattern(Parser *p);
 static NodeList parse_function_returns(Parser *p);
 
+// One range grammar shared by `for` iterables and `switch` patterns (so they can never drift).
+typedef enum { RANGE_FOR, RANGE_PATTERN } RangeContext;
+static NodeId parse_range(Parser *p, const RangeContext context);
+
 Parser *parser_new(Token_Vec tokens, const char *source, const size_t len) {
   Parser *const p = calloc(1, sizeof *p);
   if (!p) {
@@ -832,17 +836,7 @@ static NodeId parse_pattern_atom(Parser *p) {
 }
 
 static NodeId parse_pattern(Parser *p) {
-  const NodeId start = parse_pattern_atom(p);
-  if (!check(p, Range) && !check(p, RangeInclusive))
-    return start;
-  const TokenType op = token_type(advance(p));
-  const NodeId end = parse_pattern_atom(p);
-  return ast_add(
-      p->ast, (Node){
-                  .kind = NODE_PATTERN_RANGE,
-                  .span = span_new(node_span(p, start).start, node_span(p, end).end),
-                  .as.pattern_range = {.start = start, .end = end, .inclusive = op == RangeInclusive},
-              });
+  return parse_range(p, RANGE_PATTERN);
 }
 
 static NodeId parse_primary(Parser *p) {
@@ -862,7 +856,10 @@ static NodeId parse_primary(Parser *p) {
     return value;
   }
   if (match(p, LeftParen)) {
+    const bool old = p->allow_struct_initializer; // parens are the escape hatch: re-enable struct literals inside
+    p->allow_struct_initializer = true;
     const NodeId value = parse_expression(p);
+    p->allow_struct_initializer = old;
     expect(p, RightParen, "')'");
     return value;
   }
@@ -1031,6 +1028,46 @@ static NodeId parse_expression(Parser *p) {
               });
 }
 
+// A range bound: an expression in a `for`, a pattern atom in a `switch`.
+static NodeId parse_range_bound(Parser *p, const RangeContext context) {
+  return context == RANGE_PATTERN ? parse_pattern_atom(p) : parse_expression(p);
+}
+
+// Whether the current token can begin a bound (FIRST set). Used to spot a missing end: anything
+// that can't start a bound (`{`, `=>`, `)`, `,`, `}`, a guard `if`, ...) closes a half-open range.
+static bool starts_range_bound(Parser *p, const RangeContext context) {
+  const TokenType t = peek_type(p);
+  if (context == RANGE_PATTERN)
+    return is_literal_token(t) || t == Identifier || t == LeftParen;
+  return is_literal_token(t) || t == Identifier || t == LeftParen || t == SelfLower || t == New || t == Switch ||
+         unary_operator(t);
+}
+
+// `(start)?..(=)?(end)?` with at least one bound. Without a `..` it returns the lone start, so a
+// plain `for` iterable / `switch` pattern flows straight through. NODE_RANGE vs NODE_PATTERN_RANGE
+// is the only thing the context changes; both reuse the `pattern_range` payload.
+static NodeId parse_range(Parser *p, const RangeContext context) {
+  const bool open_start = check(p, Range) || check(p, RangeInclusive);
+  const NodeId start = open_start ? NODE_NONE : parse_range_bound(p, context);
+  if (!check(p, Range) && !check(p, RangeInclusive))
+    return start; // not a range
+  const uint32_t op_start = token_start(raw_peek(p));
+  const bool inclusive = token_type(advance(p)) == RangeInclusive;
+  const NodeId end = starts_range_bound(p, context) ? parse_range_bound(p, context) : NODE_NONE;
+  if (start == NODE_NONE && end == NODE_NONE)
+    error_here(p, "a range needs a start and/or an end");
+  else if (inclusive && end == NODE_NONE)
+    error_here(p, "an inclusive range '..=' needs an end");
+  const uint32_t lo = start != NODE_NONE ? node_span(p, start).start : op_start;
+  const uint32_t hi = end != NODE_NONE ? node_span(p, end).end : previous_end(p);
+  return ast_add(
+      p->ast, (Node){
+                  .kind = context == RANGE_PATTERN ? NODE_PATTERN_RANGE : NODE_RANGE,
+                  .span = span_new(lo, hi),
+                  .as.pattern_range = {.start = start, .end = end, .inclusive = inclusive},
+              });
+}
+
 static NodeId parse_let(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   advance(p);
@@ -1059,9 +1096,10 @@ static NodeId parse_let(Parser *p) {
 static NodeId parse_if(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   advance(p);
-  expect(p, LeftParen, "'('");
+  const bool old = p->allow_struct_initializer; // a bare `{` after the condition is the block, never a struct literal
+  p->allow_struct_initializer = false;
   const NodeId condition = parse_expression(p);
-  expect(p, RightParen, "')'");
+  p->allow_struct_initializer = old;
   const NodeId then_branch = parse_block(p);
   const NodeId else_branch = match(p, Else) ? (check(p, If) ? parse_if(p) : parse_block(p)) : NODE_NONE;
   return ast_add(
@@ -1117,9 +1155,10 @@ static NodeId parse_statement(Parser *p) {
       return parse_if(p);
     case While: {
       advance(p);
-      expect(p, LeftParen, "'('");
+      const bool old = p->allow_struct_initializer; // see parse_if: condition cannot end in a struct literal
+      p->allow_struct_initializer = false;
       const NodeId condition = parse_expression(p);
-      expect(p, RightParen, "')'");
+      p->allow_struct_initializer = old;
       const NodeId body = parse_block(p);
       return ast_add(
           p->ast, (Node){
@@ -1134,7 +1173,7 @@ static NodeId parse_statement(Parser *p) {
       expect(p, In, "'in'");
       const bool old = p->allow_struct_initializer;
       p->allow_struct_initializer = false;
-      const NodeId iterable = parse_expression(p);
+      const NodeId iterable = parse_range(p, RANGE_FOR); // a range `(start)?..(=)?(end)?` or a plain collection
       p->allow_struct_initializer = old;
       const NodeId body = parse_block(p);
       return ast_add(
