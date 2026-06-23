@@ -281,14 +281,17 @@ typedef enum {
 
 // Named `Ty`, not `Type`: a `Type` token-keyword enum constant already occupies that identifier.
 typedef struct {
-    TypeKind kind;
-    TypeQualifier qualifier; // POINTER/REFERENCE/SLICE only
+    uint8_t kind;
+    uint8_t qualifier; // POINTER/REFERENCE/SLICE only
+    uint16_t reserved;
     union {
         BuiltinType builtin; // BUILTIN
         TypeId elem;         // POINTER/REFERENCE/SLICE/ARRAY pointee/element
         NodeId decl;         // STRUCT/ENUM/GENERIC decl node; FUNCTION = NODE_FUNCTION/NODE_FUNCTION_TYPE node
     } as;
 } Ty;
+
+_Static_assert(sizeof(Ty) == 8, "Ty must stay cache-compact");
 
 VEC_DECLARE(Ty, Ty_Vec)
 HM_DECLARE(Ty, TypeId, TyMap) // Ty -> TypeId, so ast_intern_type dedups in O(1) not O(pool)

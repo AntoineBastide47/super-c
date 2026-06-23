@@ -13,6 +13,8 @@ typedef struct {
     Token name;    // token_start/token_len give the source span; token_type holds the Namespace
 } Symbol;
 
+_Static_assert(sizeof(Symbol) == 16, "Symbol must stay cache-compact");
+
 VEC_DECLARE(Symbol, Symbol_Vec)
 
 #endif // RESOLVER_SYMBOL_H

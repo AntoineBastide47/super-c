@@ -6,8 +6,6 @@
 VEC_DEFINE(Node, Node_Vec)
 VEC_DEFINE(Ty, Ty_Vec)
 
-_Static_assert(sizeof(Ty) == 12, "Ty must be padding-free so ast_intern_type can memcmp it");
-
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
 static inline size_t ty_hash(const Ty t) {
   const unsigned char *const p = (const unsigned char *)&t;

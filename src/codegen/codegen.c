@@ -126,8 +126,11 @@ static void emit_bytes(Codegen *c, const char *const p, const size_t n) {
 #endif
 
 EMIT_FORMAT static void emit(Codegen *c, const char *fmt, ...) {
-  if (!strchr(fmt, '%')) {
-    emit_bytes(c, fmt, strlen(fmt));
+  const char *p = fmt;
+  while (*p && *p != '%')
+    p++;
+  if (!*p) {
+    emit_bytes(c, fmt, (size_t)(p - fmt));
     return;
   }
 
@@ -180,33 +183,92 @@ static int builtin_of(const uint8_t *const src, const Span s) {
 // C keywords (and a few reserved identifiers) a user name might collide with. A matching name
 // gets a trailing `_` at every declaration and reference so the two still agree.
 static bool is_c_keyword(const uint8_t *src, const Span s) {
-  static const char *const KW[] = {
-      "auto",     "break",    "case",     "char",     "const",    "continue",   "default",
-      "do",       "double",   "else",     "enum",     "extern",   "float",      "for",
-      "goto",     "if",       "inline",   "int",      "long",     "register",   "restrict",
-      "return",   "short",    "signed",   "sizeof",   "static",   "struct",     "switch",
-      "typedef",  "union",    "unsigned", "void",     "volatile", "while",      "bool",
-      "true",     "false",    "_Bool",    "_Complex", "_Atomic",  "_Noreturn",  "_Generic",
-      "_Static_assert",       "_Thread_local",        "NULL",
-  };
   const size_t n = s.end - s.start;
-  for (size_t i = 0; i < sizeof KW / sizeof KW[0]; i++)
-    if (strlen(KW[i]) == n && memcmp(src + s.start, KW[i], n) == 0)
-      return true;
-  return false;
+#define IS(lit) (n == sizeof(lit) - 1 && memcmp(src + s.start, lit, sizeof(lit) - 1) == 0)
+  switch (n ? src[s.start] : 0) {
+    case 'N': return IS("NULL");
+    case '_':
+      return IS("_Bool") || IS("_Complex") || IS("_Atomic") || IS("_Noreturn") || IS("_Generic") ||
+             IS("_Static_assert") || IS("_Thread_local");
+    case 'a': return IS("auto");
+    case 'b': return IS("break") || IS("bool");
+    case 'c': return IS("case") || IS("char") || IS("const") || IS("continue");
+    case 'd': return IS("default") || IS("do") || IS("double");
+    case 'e': return IS("else") || IS("enum") || IS("extern");
+    case 'f': return IS("float") || IS("for") || IS("false");
+    case 'g': return IS("goto");
+    case 'i': return IS("if") || IS("inline") || IS("int");
+    case 'l': return IS("long");
+    case 'r': return IS("register") || IS("restrict") || IS("return");
+    case 's': return IS("short") || IS("signed") || IS("sizeof") || IS("static") || IS("struct") || IS("switch");
+    case 't': return IS("typedef") || IS("true");
+    case 'u': return IS("union") || IS("unsigned");
+    case 'v': return IS("void") || IS("volatile");
+    case 'w': return IS("while");
+    default: return false;
+  }
+#undef IS
 }
 
 static void emit_ident(Codegen *c, const Span s) {
-  emit(c, "%.*s%s", (int)(s.end - s.start), c->source + s.start, is_c_keyword(c->source, s) ? "_" : "");
+  emit_span(c, s);
+  if (is_c_keyword(c->source, s))
+    emit_bytes(c, "_", 1);
 }
 
 // Render an identifier (keyword-mangled) into a buffer, for building declarator/accessor strings.
-static void render_ident(Codegen *c, const Span s, char *buf, const size_t cap) {
-  snprintf(buf, cap, "%.*s%s", (int)(s.end - s.start), c->source + s.start, is_c_keyword(c->source, s) ? "_" : "");
+static size_t render_ident(Codegen *c, const Span s, char *buf, const size_t cap) {
+  const size_t source_len = s.end - s.start;
+  const bool suffix = is_c_keyword(c->source, s);
+  const size_t full_len = source_len + suffix;
+  if (cap) {
+    const size_t copied = source_len < cap - 1 ? source_len : cap - 1;
+    memcpy(buf, c->source + s.start, copied);
+    size_t written = copied;
+    if (suffix && written + 1 < cap)
+      buf[written++] = '_';
+    buf[written] = '\0';
+  }
+  return full_len;
 }
 
 static void fresh(Codegen *c, char *buf, const size_t cap) {
   snprintf(buf, cap, "__sc%u", c->tmp++);
+}
+
+static size_t buf_append(char *out, const size_t cap, size_t at, const char *text) {
+  const size_t n = strlen(text);
+  if (at < cap) {
+    const size_t room = cap - at - 1;
+    const size_t copied = n < room ? n : room;
+    memcpy(out + at, text, copied);
+    out[at + copied] = '\0';
+  }
+  return at + n;
+}
+
+static size_t buf_append_bytes(char *out, const size_t cap, size_t at, const char *text, const size_t n) {
+  if (at < cap) {
+    const size_t room = cap - at - 1;
+    const size_t copied = n < room ? n : room;
+    memcpy(out + at, text, copied);
+    out[at + copied] = '\0';
+  }
+  return at + n;
+}
+
+static void buf_join3(
+    char *out, const size_t cap, const char *first, const char *second, const char *third) {
+  size_t at = 0;
+  if (cap)
+    out[0] = '\0';
+  at = buf_append(out, cap, at, first);
+  at = buf_append(out, cap, at, second);
+  buf_append(out, cap, at, third);
+}
+
+static void emit_cstr(Codegen *c, const char *text) {
+  emit_bytes(c, text, strlen(text));
 }
 
 // Find the enum declaration that owns `variant` (to spell its `Enum_Variant` tag constant).
@@ -273,16 +335,16 @@ static void emit_number(Codegen *c, const Span s, const TokenType tt) {
       return;
     }
     if (k == 'x' || k == 'X') {
-      emit(c, "%s", buf);
+      emit_cstr(c, buf);
       return;
     }
     size_t i = 0; // decimal with leading zeros: strip them so C does not read octal
     while (i + 1 < n && buf[i] == '0')
       i++;
-    emit(c, "%s", buf + i);
+    emit_cstr(c, buf + i);
     return;
   }
-  emit(c, "%s", buf);
+  emit_cstr(c, buf);
 }
 
 static void emit_literal(Codegen *c, const Node *n) {
@@ -325,7 +387,7 @@ static void emit_literal(Codegen *c, const Node *n) {
 // any leading `*` / trailing `[]` already threaded in) into `out`.
 static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char *out, const size_t cap) {
   if (tn == NODE_NONE) {
-    snprintf(out, cap, "void%s%s", SEP(decl), decl);
+    buf_join3(out, cap, "void", SEP(decl), decl);
     return;
   }
   const Node *const n = ast_at_const(c->ast, tn);
@@ -338,12 +400,12 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
         if (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) {
           char nm[128];
           render_ident(c, name_span(c, dn->as.aggregate.name), nm, sizeof nm);
-          snprintf(out, cap, "%s%s%s", nm, SEP(decl), decl);
+          buf_join3(out, cap, nm, SEP(decl), decl);
         } else if (dn->kind == NODE_TYPE_ALIAS) {
           render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent
         } else {
           codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic or opaque type is not yet supported");
-          snprintf(out, cap, "void%s%s", SEP(decl), decl);
+          buf_join3(out, cap, "void", SEP(decl), decl);
         }
         break;
       }
@@ -352,36 +414,41 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
                          : n->as.name.text;
       const int b = builtin_of(c->source, s);
       if (b >= 0)
-        snprintf(out, cap, "%s%s%s", BUILTIN_C[b], SEP(decl), decl);
+        buf_join3(out, cap, BUILTIN_C[b], SEP(decl), decl);
       else {
         codegen_errorf(c, s.start, s.end - s.start, "codegen: unresolved type '%.*s'", (int)(s.end - s.start), c->source + s.start);
-        snprintf(out, cap, "void%s%s", SEP(decl), decl);
+        buf_join3(out, cap, "void", SEP(decl), decl);
       }
       break;
     }
     case NODE_POINTER_TYPE:
     case NODE_REFERENCE_TYPE: {
       char inner[480];
-      snprintf(inner, sizeof inner, "*%s", decl);
+      buf_join3(inner, sizeof inner, "*", "", decl);
       const TypeQualifier q = n->as.indirect_type.qualifier;
       // `&T` -> `const T *`, `&mut T` -> `T *`; a raw pointer is const-pointee only for `*const`.
       const bool const_pointee = n->kind == NODE_REFERENCE_TYPE ? q != TYPE_QUAL_MUT : q == TYPE_QUAL_CONST;
       if (const_pointee) {
         char base[512];
         render_type_node(c, n->as.indirect_type.type, inner, base, sizeof base);
-        snprintf(out, cap, "const %s", base);
+        buf_join3(out, cap, "const ", "", base);
       } else {
         render_type_node(c, n->as.indirect_type.type, inner, out, cap);
       }
       break;
     }
     case NODE_SLICE_TYPE:
-      snprintf(out, cap, "SCslice%s%s", SEP(decl), decl);
+      buf_join3(out, cap, "SCslice", SEP(decl), decl);
       break;
     case NODE_ARRAY_TYPE: {
       const Span ls = ast_at_const(c->ast, n->as.array_type.length)->span;
       char inner[480];
-      snprintf(inner, sizeof inner, "%s[%.*s]", decl, (int)(ls.end - ls.start), c->source + ls.start);
+      size_t at = 0;
+      inner[0] = '\0';
+      at = buf_append(inner, sizeof inner, at, decl);
+      at = buf_append(inner, sizeof inner, at, "[");
+      at = buf_append_bytes(inner, sizeof inner, at, (const char *)c->source + ls.start, ls.end - ls.start);
+      buf_append(inner, sizeof inner, at, "]");
       render_type_node(c, n->as.array_type.element, inner, out, cap);
       break;
     }
@@ -394,28 +461,34 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
       for (uint32_t i = 0; i < ps.len && k < sizeof params; i++) {
         char t[256];
         render_type_node(c, pid[i], "", t, sizeof t);
-        const int w = snprintf(params + k, sizeof params - k, "%s%s", i ? ", " : "", t);
-        if (w > 0)
-          k += (size_t)w;
+        if (i)
+          k = buf_append(params, sizeof params, k, ", ");
+        k = buf_append(params, sizeof params, k, t);
       }
       char inner[600];
-      snprintf(inner, sizeof inner, "(*%s)(%s)", decl, ps.len ? params : "void");
+      size_t at = 0;
+      inner[0] = '\0';
+      at = buf_append(inner, sizeof inner, at, "(*");
+      at = buf_append(inner, sizeof inner, at, decl);
+      at = buf_append(inner, sizeof inner, at, ")(");
+      at = buf_append(inner, sizeof inner, at, ps.len ? params : "void");
+      buf_append(inner, sizeof inner, at, ")");
       const NodeList rs = n->as.function_type.returns;
       if (rs.len == 1) {
         const NodeId r0 = ast_list(c->ast, rs)[0];
         const Node *const rn = ast_at_const(c->ast, r0);
         render_type_node(c, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0, inner, out, cap);
       } else if (rs.len == 0) {
-        snprintf(out, cap, "void %s", inner);
+        buf_join3(out, cap, "void ", "", inner);
       } else {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: multi-return function pointer is not yet supported");
-        snprintf(out, cap, "void %s", inner);
+        buf_join3(out, cap, "void ", "", inner);
       }
       break;
     }
     default:
       codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: unsupported type");
-      snprintf(out, cap, "void%s%s", SEP(decl), decl);
+      buf_join3(out, cap, "void", SEP(decl), decl);
       break;
   }
 }
@@ -427,41 +500,41 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
   const Ty *const ty = ast_type_at(c->ast, t);
   switch (ty->kind) {
     case TYPE_BUILTIN:
-      snprintf(out, cap, "%s%s%s", BUILTIN_C[ty->as.builtin], SEP(decl), decl);
+      buf_join3(out, cap, BUILTIN_C[ty->as.builtin], SEP(decl), decl);
       break;
     case TYPE_STRUCT:
     case TYPE_ENUM: {
       char nm[128];
       render_ident(c, name_span(c, ast_at_const(c->ast, ty->as.decl)->as.aggregate.name), nm, sizeof nm);
-      snprintf(out, cap, "%s%s%s", nm, SEP(decl), decl);
+      buf_join3(out, cap, nm, SEP(decl), decl);
       break;
     }
     case TYPE_POINTER:
     case TYPE_REFERENCE: {
       char inner[480];
-      snprintf(inner, sizeof inner, "*%s", decl);
+      buf_join3(inner, sizeof inner, "*", "", decl);
       // `&T` -> `const T *`, `&mut T` -> `T *`; a raw pointer is const-pointee only for `*const`.
       const bool const_pointee = ty->kind == TYPE_REFERENCE ? ty->qualifier != TYPE_QUAL_MUT : ty->qualifier == TYPE_QUAL_CONST;
       if (const_pointee) {
         char base[512];
         render_type_id(c, ty->as.elem, inner, base, sizeof base);
-        snprintf(out, cap, "const %s", base);
+        buf_join3(out, cap, "const ", "", base);
       } else {
         render_type_id(c, ty->as.elem, inner, out, cap);
       }
       break;
     }
     case TYPE_SLICE:
-      snprintf(out, cap, "SCslice%s%s", SEP(decl), decl);
+      buf_join3(out, cap, "SCslice", SEP(decl), decl);
       break;
     case TYPE_ARRAY: {
       char inner[480];
-      snprintf(inner, sizeof inner, "*%s", decl);
+      buf_join3(inner, sizeof inner, "*", "", decl);
       render_type_id(c, ty->as.elem, inner, out, cap);
       break;
     }
     default:
-      snprintf(out, cap, "void%s%s", SEP(decl), decl);
+      buf_join3(out, cap, "void", SEP(decl), decl);
       break;
   }
 }
@@ -474,12 +547,12 @@ static void render_binding_id(Codegen *c, const TypeId t, const char *name, cons
   const TypeKind k = ast_type_at(c->ast, t)->kind;
   if (is_const && (k == TYPE_POINTER || k == TYPE_REFERENCE)) {
     char nm[200];
-    snprintf(nm, sizeof nm, "const %s", name);
+    buf_join3(nm, sizeof nm, "const ", "", name);
     render_type_id(c, t, nm, out, cap);
   } else if (is_const) {
     char body[256];
     render_type_id(c, t, name, body, sizeof body);
-    snprintf(out, cap, "const %s", body);
+    buf_join3(out, cap, "const ", "", body);
   } else {
     render_type_id(c, t, name, out, cap);
   }
@@ -491,12 +564,12 @@ static void render_binding_node(Codegen *c, const NodeId tn, const char *name, c
   const NodeKind k = tn != NODE_NONE ? ast_at_const(c->ast, tn)->kind : NODE_NONE_KIND;
   if (is_const && (k == NODE_POINTER_TYPE || k == NODE_REFERENCE_TYPE || k == NODE_FUNCTION_TYPE)) {
     char nm[200];
-    snprintf(nm, sizeof nm, "const %s", name);
+    buf_join3(nm, sizeof nm, "const ", "", name);
     render_type_node(c, tn, nm, out, cap);
   } else if (is_const) {
     char body[256];
     render_type_node(c, tn, name, body, sizeof body);
-    snprintf(out, cap, "const %s", body);
+    buf_join3(out, cap, "const ", "", body);
   } else {
     render_type_node(c, tn, name, out, cap);
   }
@@ -516,7 +589,7 @@ static void emit_binding(Codegen *c, const TypeId t, const Span name, const bool
   char nm[128], decl[300];
   render_ident(c, name, nm, sizeof nm);
   render_binding_id(c, t, nm, is_const, decl, sizeof decl);
-  emit(c, "%s", decl);
+  emit_cstr(c, decl);
 }
 
 // --- operators -----------------------------------------------------------------------------
@@ -560,7 +633,7 @@ static const char *c_op(const TokenType t) {
 static void emit_prefixed(Codegen *c, const NodeId obj, const char *prefix) {
   const NodeKind k = ast_at_const(c->ast, obj)->kind;
   const bool primary = k == NODE_IDENTIFIER || k == NODE_MEMBER || k == NODE_INDEX || k == NODE_CALL;
-  emit(c, "%s", prefix);
+  emit_cstr(c, prefix);
   if (primary)
     emit_expr(c, obj);
   else {
@@ -722,14 +795,16 @@ static void emit_match_expr(Codegen *c, const NodeId id) {
   if (rt != TYPE_NONE)
     render_type_id(c, rt, res, decl, sizeof decl);
   else
-    snprintf(decl, sizeof decl, "int %s", res);
+    buf_join3(decl, sizeof decl, "int ", "", res);
   emit(c, "({\n");
   c->depth++;
   emit_indent(c);
-  emit(c, "%s;\n", decl);
+  emit_cstr(c, decl);
+  emit(c, ";\n");
   emit_match_core(c, id, 1, res);
   emit_indent(c);
-  emit(c, "%s;\n", res);
+  emit_cstr(c, res);
+  emit(c, ";\n");
   c->depth--;
   emit_indent(c);
   emit(c, "})");
@@ -1068,7 +1143,8 @@ static void emit_match_core(Codegen *c, const NodeId id, const int mode, const c
   } else {
     char d[300];
     render_binding_id(c, base, scrut, true, d, sizeof d);
-    emit(c, "%s = ", d);
+    emit_cstr(c, d);
+    emit(c, " = ");
   }
   for (unsigned i = 0; i < derefs; i++)
     emit(c, "(*");
@@ -1241,16 +1317,18 @@ static void emit_if_expr(Codegen *c, const NodeId id) {
   if (rt != TYPE_NONE)
     render_type_id(c, rt, res, decl, sizeof decl);
   else
-    snprintf(decl, sizeof decl, "int %s", res);
+    buf_join3(decl, sizeof decl, "int ", "", res);
   emit(c, "({\n");
   c->depth++;
   emit_indent(c);
-  emit(c, "%s;\n", decl);
+  emit_cstr(c, decl);
+  emit(c, ";\n");
   emit_indent(c);
   emit_if_value(c, n, res);
   emit(c, "\n");
   emit_indent(c);
-  emit(c, "%s;\n", res);
+  emit_cstr(c, res);
+  emit(c, ";\n");
   c->depth--;
   emit_indent(c);
   emit(c, "})");
@@ -1479,7 +1557,7 @@ static void emit_stmt(Codegen *c, const NodeId id) {
         char nm[128], decl[300];
         render_ident(c, name_span(c, n->as.let_stmt.name), nm, sizeof nm);
         render_binding_node(c, n->as.let_stmt.type, nm, !n->as.let_stmt.is_mutable, decl, sizeof decl);
-        emit(c, "%s", decl);
+        emit_cstr(c, decl);
       } else {
         emit_binding(c, ast_type(c->ast, id), name_span(c, n->as.let_stmt.name), !n->as.let_stmt.is_mutable);
       }
@@ -1494,7 +1572,8 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       char nm[128], decl[256];
       render_ident(c, name_span(c, n->as.const_def.name), nm, sizeof nm);
       render_type_node(c, n->as.const_def.type, nm, decl, sizeof decl);
-      emit(c, "static const %s", decl);
+      emit(c, "static const ");
+      emit_cstr(c, decl);
       if (n->as.const_def.value != NODE_NONE) {
         emit(c, " = ");
         emit_initializer(c, n->as.const_def.type, n->as.const_def.value);
@@ -1541,7 +1620,7 @@ static void emit_stmt(Codegen *c, const NodeId id) {
 // "void" / "T0 p0, T1 p1" — a function's C parameter list.
 static void render_params(Codegen *c, const NodeList params, char *out, const size_t cap) {
   if (params.len == 0) {
-    snprintf(out, cap, "void");
+    buf_join3(out, cap, "void", "", "");
     return;
   }
   const NodeId *const ids = ast_list(c->ast, params);
@@ -1552,9 +1631,9 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
     char nm[128], d[300];
     render_ident(c, name_span(c, p->as.parameter.name), nm, sizeof nm);
     render_binding_node(c, p->as.parameter.type, nm, true, d, sizeof d); // parameters are never mut
-    const int w = snprintf(out + k, cap - k, "%s%s", i ? ", " : "", d);
-    if (w > 0)
-      k += (size_t)w;
+    if (i)
+      k = buf_append(out, cap, k, ", ");
+    k = buf_append(out, cap, k, d);
   }
 }
 
@@ -1562,8 +1641,9 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
 static void function_name(Codegen *c, const NodeId fn, const NodeId target, char *out, const size_t cap) {
   size_t k = 0;
   if (target != NODE_NONE) {
-    render_ident(c, name_span(c, ast_at_const(c->ast, target)->as.aggregate.name), out, cap);
-    k = strlen(out);
+    k = render_ident(c, name_span(c, ast_at_const(c->ast, target)->as.aggregate.name), out, cap);
+    if (k >= cap)
+      k = cap ? cap - 1 : 0;
     if (k + 2 < cap) {
       out[k++] = '_';
       out[k++] = '_';
@@ -1581,7 +1661,12 @@ static void emit_function(Codegen *c, const NodeId fn_id, const NodeId target, c
   char ps[1024];
   render_params(c, fn->as.function.params, ps, sizeof ps);
   char decl[1320];
-  snprintf(decl, sizeof decl, "%s(%s)", nm, ps);
+  size_t at = 0;
+  decl[0] = '\0';
+  at = buf_append(decl, sizeof decl, at, nm);
+  at = buf_append(decl, sizeof decl, at, "(");
+  at = buf_append(decl, sizeof decl, at, ps);
+  buf_append(decl, sizeof decl, at, ")");
 
   if (extern_q)
     emit(c, "extern ");
@@ -1592,16 +1677,19 @@ static void emit_function(Codegen *c, const NodeId fn_id, const NodeId target, c
   if (target == NODE_NONE && !extern_q && span_is(c->source, name_span(c, fn->as.function.name), "main")) {
     emit(c, "int %s", decl);
   } else if (rets.len > 1) {
-    snprintf(c->current_ret, sizeof c->current_ret, "%s_ret", nm);
-    emit(c, "%s %s", c->current_ret, decl);
+    buf_join3(c->current_ret, sizeof c->current_ret, nm, "", "_ret");
+    emit_cstr(c, c->current_ret);
+    emit(c, " ");
+    emit_cstr(c, decl);
   } else if (rets.len == 1) {
     const NodeId r0 = ast_list(c->ast, rets)[0];
     const Node *const rn = ast_at_const(c->ast, r0);
     char out[1400];
     render_type_node(c, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0, decl, out, sizeof out);
-    emit(c, "%s", out);
+    emit_cstr(c, out);
   } else {
-    emit(c, "void %s", decl);
+    emit(c, "void ");
+    emit_cstr(c, decl);
   }
 
   if (with_body && fn->as.function.body != NODE_NONE) {
@@ -1628,7 +1716,8 @@ static void emit_ret_struct(Codegen *c, const NodeId fn_id, const NodeId target)
     char fld[16], d[256];
     snprintf(fld, sizeof fld, "_%u", i);
     render_type_node(c, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : ids[i], fld, d, sizeof d);
-    emit(c, "%s; ", d);
+    emit_cstr(c, d);
+    emit(c, "; ");
   }
   emit(c, "} %s_ret;\n", nm);
 }
@@ -1719,7 +1808,8 @@ static void phase_types(Codegen *c) {
         render_ident(c, name_span(c, f->as.field.name), nm, sizeof nm);
         render_type_node(c, f->as.field.type, nm, d, sizeof d);
         emit_indent(c);
-        emit(c, "%s;\n", d);
+        emit_cstr(c, d);
+        emit(c, ";\n");
       }
       c->depth--;
       emit(c, "};\n");
@@ -1755,7 +1845,8 @@ static void phase_types(Codegen *c) {
             snprintf(fld, sizeof fld, "_%u", k);
             render_type_node(c, pids[k], fld, d, sizeof d);
           }
-          emit(c, "%s; ", d);
+          emit_cstr(c, d);
+          emit(c, "; ");
         }
         emit(c, "} ");
         emit_span(c, name_span(c, v->as.variant.name));

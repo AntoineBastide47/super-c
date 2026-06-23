@@ -1,16 +1,33 @@
 #include "resolver.h"
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "symbol.h"
+#include "types/hashmap.h"
+
+static inline size_t symbol_key_hash(const uint64_t key) {
+  uint64_t x = key;
+  x ^= x >> 30;
+  x *= UINT64_C(0xbf58476d1ce4e5b9);
+  x ^= x >> 27;
+  x *= UINT64_C(0x94d049bb133111eb);
+  x ^= x >> 31;
+  return (size_t)x;
+}
+#define SYMBOL_KEY_EQ(a, b) ((a) == (b))
+HM_DECLARE(uint64_t, uint32_t, SymbolIndex)
+HM_DEFINE(uint64_t, uint32_t, SymbolIndex, symbol_key_hash, SYMBOL_KEY_EQ)
 
 struct Resolver {
     Ast *ast;
     const uint8_t *source;
     size_t len;
     Symbol_Vec symbols;   // flat stack of live symbols across all open scopes
+    U32_Vec symbol_previous; // chain links parallel to symbols, encoded as index + 1
     U32_Vec scope_starts; // stack of symbols.len at each scope entry
+    SymbolIndex symbol_index; // (namespace, name hash) -> newest matching symbol index + 1
     NodeId current_self;  // type 'Self' refers to inside the current interface/extension (else NODE_NONE)
     ERRORS_VARIABLES;
 };
@@ -32,6 +49,7 @@ Resolver *resolver_new(Ast *ast, const char *source, const size_t len) {
   r->source = (const uint8_t *)source;
   r->len = len;
   r->symbols = Symbol_Vec_init();
+  r->symbol_previous = U32_Vec_init();
   r->scope_starts = U32_Vec_init();
   ERRORS_INIT(r);
   return r;
@@ -42,7 +60,9 @@ void resolver_free(Resolver **r) {
     return;
   ast_free(&(*r)->ast);
   VEC_DEINIT((*r)->symbols);
+  VEC_DEINIT((*r)->symbol_previous);
   VEC_DEINIT((*r)->scope_starts);
+  SymbolIndex_deinit(&(*r)->symbol_index);
   ERRORS_DEINIT(r);
   free(*r);
   *r = NULL;
@@ -94,8 +114,23 @@ ALWAYS_INLINE void scope_enter(Resolver *r) {
   U32_Vec_push(&r->scope_starts, (uint32_t)r->symbols.len);
 }
 
-ALWAYS_INLINE void scope_exit(Resolver *r) {
-  r->symbols.len = r->scope_starts.data[--r->scope_starts.len];
+ALWAYS_INLINE uint64_t symbol_key(const uint32_t hash, const Namespace ns) {
+  return ((uint64_t)(uint32_t)ns << 32) | hash;
+}
+
+static void scope_exit(Resolver *r) {
+  const size_t start = r->scope_starts.data[--r->scope_starts.len];
+  while (r->symbols.len > start) {
+    const size_t index = --r->symbols.len;
+    const Symbol *const s = &r->symbols.data[index];
+    const uint32_t previous = r->symbol_previous.data[index];
+    const uint64_t key = symbol_key(s->hash, (Namespace)token_type(s->name));
+    if (previous)
+      SymbolIndex_insert(&r->symbol_index, key, previous);
+    else
+      SymbolIndex_remove(&r->symbol_index, key);
+  }
+  r->symbol_previous.len = start;
 }
 
 static void declare(Resolver *r, const NodeId name_node, const NodeId decl, const Namespace ns) {
@@ -103,9 +138,16 @@ static void declare(Resolver *r, const NodeId name_node, const NodeId decl, cons
     return;
   const Span name = name_span(r, name_node);
   const uint32_t hash = name_hash(r->source, name);
-  for (size_t i = r->scope_starts.data[r->scope_starts.len - 1]; i < r->symbols.len; i++) {
+  const uint64_t key = symbol_key(hash, ns);
+  uint32_t head = 0;
+  SymbolIndex_get(&r->symbol_index, key, &head);
+  const size_t scope_start = r->scope_starts.data[r->scope_starts.len - 1];
+  for (uint32_t current = head; current; current = r->symbol_previous.data[current - 1]) {
+    const size_t i = current - 1;
+    if (i < scope_start)
+      break;
     const Symbol *const s = &r->symbols.data[i];
-    if (token_type(s->name) == (TokenType)ns && s->hash == hash && span_eq(r->source, token_span(s->name), name)) {
+    if (span_eq(r->source, token_span(s->name), name)) {
       resolver_errorf(
           r, name.start, name.end - name.start, "duplicate definition of '%.*s'", (int)(name.end - name.start),
           r->source + name.start);
@@ -114,15 +156,25 @@ static void declare(Resolver *r, const NodeId name_node, const NodeId decl, cons
   }
   Symbol_Vec_push(
       &r->symbols,
-      (Symbol){.hash = hash, .decl = decl, .name = token_new((TokenType)ns, name.start, name.end - name.start)});
+      (Symbol){
+          .hash = hash,
+          .decl = decl,
+          .name = token_new((TokenType)ns, name.start, name.end - name.start),
+      });
+  U32_Vec_push(&r->symbol_previous, head);
+  SymbolIndex_insert(&r->symbol_index, key, (uint32_t)r->symbols.len);
 }
 
 static NodeId lookup(const Resolver *r, const Span name, const Namespace ns) {
   const uint32_t hash = name_hash(r->source, name);
-  for (size_t i = r->symbols.len; i-- > 0;) {
-    const Symbol *const s = &r->symbols.data[i];
-    if (token_type(s->name) == (TokenType)ns && s->hash == hash && span_eq(r->source, token_span(s->name), name))
+  uint32_t current = 0;
+  if (!SymbolIndex_get(&r->symbol_index, symbol_key(hash, ns), &current))
+    return NODE_NONE;
+  while (current) {
+    const Symbol *const s = &r->symbols.data[current - 1];
+    if (span_eq(r->source, token_span(s->name), name))
       return s->decl;
+    current = r->symbol_previous.data[current - 1];
   }
   return NODE_NONE;
 }
