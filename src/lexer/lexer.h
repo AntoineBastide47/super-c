@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "token.h"
-#include "types/vectors.h"
+#include "types/vector.h"
 #include "utils/errors.h"
 
 typedef struct Lexer Lexer;

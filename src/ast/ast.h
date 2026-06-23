@@ -5,7 +5,8 @@
 #include <stdio.h>
 
 #include "lexer/token.h"
-#include "types/vectors.h"
+#include "types/hashmap.h"
+#include "types/vector.h"
 
 typedef uint32_t NodeId;
 #define NODE_NONE ((NodeId)0)
@@ -281,14 +282,16 @@ typedef struct {
 } Ty;
 
 VEC_DECLARE(Ty, Ty_Vec)
+HM_DECLARE(Ty, TypeId, TyMap) // Ty -> TypeId, so ast_intern_type dedups in O(1) not O(pool)
 
 typedef struct {
     Node_Vec nodes;
     U32_Vec children;
     U32_Vec scratch;
     U32_Vec resolutions;
-    Ty_Vec type_pool; // interned types; index 0 is TYPE_ERROR, 1..BT_COUNT are the builtins
-    U32_Vec types;    // side table: index = NodeId, value = TypeId (0 = unknown)
+    Ty_Vec type_pool;   // interned types; index 0 is TYPE_ERROR, 1..BT_COUNT are the builtins
+    TyMap type_index;   // reverse of type_pool: interned Ty -> its TypeId
+    U32_Vec types;      // side table: index = NodeId, value = TypeId (0 = unknown)
     NodeId root;
 } Ast;
 

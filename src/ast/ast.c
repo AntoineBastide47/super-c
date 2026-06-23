@@ -8,6 +8,21 @@ VEC_DEFINE(Ty, Ty_Vec)
 
 _Static_assert(sizeof(Ty) == 12, "Ty must be padding-free so ast_intern_type can memcmp it");
 
+// FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
+static inline size_t ty_hash(const Ty t) {
+  const unsigned char *const p = (const unsigned char *)&t;
+  size_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < sizeof t; i++) {
+    h ^= p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+static inline bool ty_eq(const Ty a, const Ty b) {
+  return memcmp(&a, &b, sizeof a) == 0;
+}
+HM_DEFINE(Ty, TypeId, TyMap, ty_hash, ty_eq)
+
 Ast *ast_new(const size_t token_count) {
   Ast *const a = calloc(1, sizeof *a);
   if (!a) {
@@ -34,6 +49,7 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->scratch);
   VEC_DEINIT((*a)->resolutions);
   VEC_DEINIT((*a)->type_pool);
+  TyMap_deinit(&(*a)->type_index);
   VEC_DEINIT((*a)->types);
   free(*a);
   *a = NULL;
@@ -72,17 +88,24 @@ void ast_init_types(Ast *a) {
   a->types.len = a->nodes.len;
   memset(a->types.data, TYPE_NONE, a->nodes.len * sizeof *a->types.data);
   a->type_pool.len = 0;
+  TyMap_deinit(&a->type_index); // re-seed the index cleanly if init runs more than once
   Ty_Vec_push(&a->type_pool, (Ty){.kind = TYPE_ERROR}); // index 0 == TYPE_NONE
-  for (BuiltinType b = 0; b < BT_COUNT; b++)             // indices 1..BT_COUNT
-    Ty_Vec_push(&a->type_pool, (Ty){.kind = TYPE_BUILTIN, .as.builtin = b});
+  TyMap_insert(&a->type_index, (Ty){.kind = TYPE_ERROR}, 0);
+  for (BuiltinType b = 0; b < BT_COUNT; b++) { // indices 1..BT_COUNT
+    const Ty t = {.kind = TYPE_BUILTIN, .as.builtin = b};
+    Ty_Vec_push(&a->type_pool, t);
+    TyMap_insert(&a->type_index, t, (TypeId)(b + 1));
+  }
 }
 
 TypeId ast_intern_type(Ast *a, const Ty t) {
-  for (size_t i = 0; i < a->type_pool.len; i++)
-    if (memcmp(&a->type_pool.data[i], &t, sizeof t) == 0)
-      return (TypeId)i;
+  TypeId id;
+  if (TyMap_get(&a->type_index, t, &id))
+    return id;
+  id = (TypeId)a->type_pool.len;
   Ty_Vec_push(&a->type_pool, t);
-  return (TypeId)(a->type_pool.len - 1);
+  TyMap_insert(&a->type_index, t, id);
+  return id;
 }
 
 #ifdef NDEBUG

@@ -5,19 +5,33 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "types/hashmap.h"
+
 // Lowers a resolved, type-checked Ast to a single C translation unit (see plan in
 // src/codegen). Names are already bound (`ast_resolution`) and every expression typed
 // (`ast_type`); codegen never re-derives scope. Type rendering walks either the AST type
 // node (which still carries array lengths / qualifiers) or the interned `Ty` when only a
 // `TypeId` is on hand. Output goes straight to a FILE* with fprintf, exactly like ast_fprint.
+// NodeId(variant) -> NodeId(enum): built once so enclosing_enum is O(1), not a per-reference
+// O(items x variants) scan of the whole program.
+static inline size_t cg_nodeid_hash(const NodeId k) {
+  return (size_t)k * 0x9E3779B1u;
+}
+#define CG_NODEID_EQ(a, b) ((a) == (b))
+HM_DECLARE(NodeId, NodeId, CgEnumMap)
+HM_DEFINE(NodeId, NodeId, CgEnumMap, cg_nodeid_hash, CG_NODEID_EQ)
+
 struct Codegen {
     Ast *ast;
     const uint8_t *source;
     size_t len;
-    FILE *out;
-    unsigned depth;          // current C indentation level
-    unsigned tmp;            // counter feeding fresh() unique `__sc<N>` names
-    char current_ret[128];   // enclosing function's multi-return struct name, or ""
+    char *buf;                 // C output accumulated in memory, flushed in one write at the end
+    size_t buf_len;            // bytes written
+    size_t buf_cap;            // allocated capacity
+    CgEnumMap enum_of_variant; // see build_enum_index
+    unsigned depth;            // current C indentation level
+    unsigned tmp;              // counter feeding fresh() unique `__sc<N>` names
+    char current_ret[128];     // enclosing function's multi-return struct name, or ""
     ERRORS_VARIABLES;
 };
 
@@ -52,6 +66,12 @@ Codegen *codegen_new(Ast *ast, const char *source, const size_t len) {
   c->ast = ast;
   c->source = (const uint8_t *)source;
   c->len = len;
+  c->buf_cap = len * 4 + 4096; // generated C runs a few x the source; reserve up front
+  c->buf = malloc(c->buf_cap);
+  if (!c->buf) {
+    fprintf(stderr, "fatal: out of memory\n");
+    abort();
+  }
   ERRORS_INIT(c);
   return c;
 }
@@ -60,6 +80,8 @@ void codegen_free(Codegen **c) {
   if (!c || !*c)
     return;
   ast_free(&(*c)->ast);
+  CgEnumMap_deinit(&(*c)->enum_of_variant);
+  free((*c)->buf);
   ERRORS_DEINIT(c);
   free(*c);
   *c = NULL;
@@ -73,16 +95,57 @@ Ast *codegen_take_ast(Codegen *c) {
 
 // --- low-level helpers ---------------------------------------------------------------------
 
+static void emit_reserve(Codegen *c, const size_t extra) {
+  if (c->buf_len + extra <= c->buf_cap)
+    return;
+  size_t cap = c->buf_cap ? c->buf_cap : 4096;
+  while (cap < c->buf_len + extra)
+    cap *= 2;
+  char *const buf = realloc(c->buf, cap);
+  if (!buf) {
+    fprintf(stderr, "fatal: out of memory\n");
+    abort();
+  }
+  c->buf = buf;
+  c->buf_cap = cap;
+}
+
+// Raw append, no format parsing — the hot path for spans and fixed strings.
+static void emit_bytes(Codegen *c, const char *const p, const size_t n) {
+  emit_reserve(c, n);
+  memcpy(c->buf + c->buf_len, p, n);
+  c->buf_len += n;
+}
+
 __attribute__((format(printf, 2, 3))) static void emit(Codegen *c, const char *fmt, ...) {
+  if (!strchr(fmt, '%')) { // no conversions (the common case): skip vsnprintf, just copy
+    emit_bytes(c, fmt, strlen(fmt));
+    return;
+  }
   va_list args;
   va_start(args, fmt);
-  vfprintf(c->out, fmt, args);
+  const size_t avail = c->buf_cap - c->buf_len;
+  va_list copy;
+  va_copy(copy, args);
+  const int n = vsnprintf(c->buf + c->buf_len, avail, fmt, copy);
+  va_end(copy);
+  if (n > 0) {
+    if ((size_t)n >= avail) { // didn't fit: grow and reformat
+      emit_reserve(c, (size_t)n + 1);
+      vsnprintf(c->buf + c->buf_len, (size_t)n + 1, fmt, args);
+    }
+    c->buf_len += (size_t)n;
+  }
   va_end(args);
 }
 
 static void emit_indent(Codegen *c) {
-  for (unsigned i = 0; i < c->depth; i++)
-    fputs("  ", c->out);
+  static const char spaces[33] = "                                ";
+  for (unsigned n = c->depth * 2; n; ) {
+    const unsigned k = n < 32 ? n : 32;
+    emit_bytes(c, spaces, k);
+    n -= k;
+  }
 }
 
 ALWAYS_INLINE Span name_span(const Codegen *c, const NodeId name_node) {
@@ -90,7 +153,7 @@ ALWAYS_INLINE Span name_span(const Codegen *c, const NodeId name_node) {
 }
 
 static void emit_span(Codegen *c, const Span s) {
-  emit(c, "%.*s", (int)(s.end - s.start), c->source + s.start);
+  emit_bytes(c, (const char *)c->source + s.start, (size_t)(s.end - s.start));
 }
 
 ALWAYS_INLINE bool span_is(const uint8_t *const src, const Span s, const char *const lit) {
@@ -138,7 +201,8 @@ static void fresh(Codegen *c, char *buf, const size_t cap) {
 }
 
 // Find the enum declaration that owns `variant` (to spell its `Enum_Variant` tag constant).
-static NodeId enclosing_enum(Codegen *c, const NodeId variant) {
+// Index every enum variant to its enclosing enum, once, so enclosing_enum is a hash lookup.
+static void build_enum_index(Codegen *c) {
   const NodeList items = ast_at_const(c->ast, c->ast->root)->as.program.items;
   const NodeId *const ids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
@@ -148,10 +212,13 @@ static NodeId enclosing_enum(Codegen *c, const NodeId variant) {
     const NodeList ms = it->as.aggregate.members;
     const NodeId *const mids = ast_list(c->ast, ms);
     for (uint32_t j = 0; j < ms.len; j++)
-      if (mids[j] == variant)
-        return ids[i];
+      CgEnumMap_insert(&c->enum_of_variant, mids[j], ids[i]);
   }
-  return NODE_NONE;
+}
+
+static NodeId enclosing_enum(Codegen *c, const NodeId variant) {
+  NodeId e;
+  return CgEnumMap_get(&c->enum_of_variant, variant, &e) ? e : NODE_NONE;
 }
 
 // Emit the C enum constant `<Enum>_<Variant>` (raw spans, kept identical at definition and use).
@@ -1518,7 +1585,7 @@ static void phase_bodies(Codegen *c) {
 }
 
 void codegen_emit(Codegen *c, FILE *out) {
-  c->out = out;
+  build_enum_index(c);
   emit(c, "#include <stdint.h>\n#include <stdbool.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
   emit(c, "typedef struct { void *ptr; size_t len; } SCslice;\n\n");
   phase_forward(c);
@@ -1530,6 +1597,8 @@ void codegen_emit(Codegen *c, FILE *out) {
   emit(c, "\n");
   phase_bodies(c);
   errors_finalize(&c->errors, &c->errors_start, &c->errors_len, c->source, c->len);
+  if (c->buf_len)
+    fwrite(c->buf, 1, c->buf_len, out);
 }
 
 ERRORS_BODY(Codegen, codegen, c)

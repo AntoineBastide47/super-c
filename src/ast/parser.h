@@ -2,7 +2,7 @@
 #define PARSER_H
 
 #include "utils/errors.h"
-#include "types/vectors.h"
+#include "types/vector.h"
 #include "lexer/token.h"
 #include "ast.h"
 

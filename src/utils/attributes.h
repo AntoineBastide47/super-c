@@ -29,3 +29,10 @@
 # define LIKELY(x)   (x)
 # define UNLIKELY(x) (x)
 #endif
+
+// For generic-container functions an instantiation may not call (no warning when unused).
+#if defined(__GNUC__) || defined(__clang__)
+# define MAYBE_UNUSED __attribute__((unused))
+#else
+# define MAYBE_UNUSED
+#endif

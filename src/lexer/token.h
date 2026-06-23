@@ -5,7 +5,7 @@
 #include <stdio.h>
 
 #include "token_type.h"
-#include "types/vectors.h"
+#include "types/vector.h"
 #include "utils/attributes.h"
 
 typedef struct Span {

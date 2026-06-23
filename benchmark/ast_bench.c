@@ -154,6 +154,7 @@ static void run_source(const char *name, Source source) {
 int main(void) {
   static const char *const corpus[] = {
       "benchmark/files/lexer.spc",
+      "benchmark/files/methods.spc",
   };
 
   printf(

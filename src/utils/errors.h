@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "types/vectors.h"
+#include "types/vector.h"
 
 // Format one error message and append it, with the source span [at, at+len) it
 // refers to, to the given vectors. The va_list variant is the shared core behind
