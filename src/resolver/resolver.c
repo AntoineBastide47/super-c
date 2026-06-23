@@ -272,6 +272,7 @@ static void resolve_members(Resolver *r, const NodeList members) {
       resolve_type(r, m->as.field.type);
     } else { // NODE_VARIANT
       declare(r, m->as.variant.name, ids[i], NS_VALUE);
+      resolve_expr(r, m->as.variant.value); // explicit discriminant (NODE_NONE when absent)
       const NodeList payload = m->as.variant.payload;
       const NodeId *const payload_ids = ast_list(r->ast, payload);
       for (uint32_t j = 0; j < payload.len; j++) {
@@ -369,11 +370,21 @@ static void resolve_stmt(Resolver *r, const NodeId id) {
     case NODE_BLOCK:
       resolve_block(r, id);
       break;
-    case NODE_LET:
+    case NODE_LET: {
       resolve_type(r, n->as.let_stmt.type);
       resolve_expr(r, n->as.let_stmt.value);
-      declare(r, n->as.let_stmt.name, id, NS_VALUE); // bound only after its initializer
+      const Node *const nm = ast_at_const(r->ast, n->as.let_stmt.name);
+      if (nm->kind == NODE_PATTERN_TUPLE) { // `let (a, b) = ..`: each element declares itself
+        const NodeId *const cids = ast_list(r->ast, nm->as.pattern.children);
+        for (uint32_t i = 0; i < nm->as.pattern.children.len; i++) {
+          declare(r, cids[i], cids[i], NS_VALUE);
+          ast_set_resolution(r->ast, cids[i], id); // back-point to the let so mutability is recoverable
+        }
+      } else {
+        declare(r, n->as.let_stmt.name, id, NS_VALUE); // bound only after its initializer
+      }
       break;
+    }
     case NODE_CONST:
       resolve_type(r, n->as.const_def.type);
       resolve_expr(r, n->as.const_def.value);
@@ -440,7 +451,12 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       resolve_expr(r, n->as.index.index);
       break;
     case NODE_MEMBER:
-      resolve_expr(r, n->as.member.object); // member name needs a type; deferred to the type checker
+      // `Enum::Variant`: the base names a type (resolved here); the variant is bound by the type
+      // checker. A `.`/`->` member access resolves its object as a value instead.
+      if (n->as.member.path && ast_at_const(r->ast, n->as.member.object)->kind == NODE_IDENTIFIER)
+        resolve_ref(r, n->as.member.object, n->as.member.object, NS_TYPE, "type");
+      else
+        resolve_expr(r, n->as.member.object); // member name needs a type; deferred to the type checker
       break;
     case NODE_CAST:
       resolve_expr(r, n->as.cast.expression);
@@ -474,6 +490,13 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       else
         resolve_type(r, n->as.new_expr.type);
       break;
+    case NODE_ARRAY_LITERAL: {
+      const NodeList elements = n->as.array_literal.elements;
+      const NodeId *const ids = ast_list(r->ast, elements);
+      for (uint32_t i = 0; i < elements.len; i++)
+        resolve_expr(r, ids[i]);
+      break;
+    }
     case NODE_STRUCT_INITIALIZER: {
       resolve_type_name(r, n->as.struct_initializer.type);
       const NodeList fields = n->as.struct_initializer.fields;

@@ -1,79 +1,31 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+// Resolver coverage. Beyond the original error-count checks, this asserts actual resolution
+// *targets* (ast_resolution(ref) == the expected decl node): nearest-shadow wins, and the
+// value/type namespaces are independent. Value uses resolve on their NODE_IDENTIFIER; type uses
+// resolve on the NODE_TYPE_PATH -- so the two are unambiguous to locate via an arena scan.
 
-#include "ast/parser.h"
-#include "lexer/lexer.h"
-#include "resolver/resolver.h"
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                                          \
-  do {                                                                                                                 \
-    if (!(condition)) {                                                                                                \
-      fprintf(stderr, "%s:%d: ", __FILE__, __LINE__);                                                                  \
-      fprintf(stderr, __VA_ARGS__);                                                                                    \
-      fputc('\n', stderr);                                                                                             \
-      failures++;                                                                                                      \
-    }                                                                                                                  \
-  } while (0)
-
-static void free_errors(String_Vec *errors) {
-  for (size_t i = 0; i < errors->len; i++)
-    free(errors->data[i]);
-  VEC_DEINIT_REF(errors);
-}
-
-// Lex and parse, returning the AST, or NULL (after a CHECK failure) on a lexer/parser error.
-static Ast *parse(const char *name, const char *source) {
-  Lexer *lexer = lexer_new(source, strlen(source));
-  lexer_scan_tokens(lexer);
-  if (lexer_has_errors(lexer)) {
-    String_Vec errors = lexer_take_errors(lexer);
-    CHECK(false, "%s: lexer error: %s", name, errors.data[0]);
-    free_errors(&errors);
-    lexer_free(&lexer);
-    return NULL;
-  }
-
-  Token_Vec tokens = lexer_take_tokens(lexer);
-  lexer_free(&lexer);
-  Parser *parser = parser_new(tokens, source, strlen(source));
-  parser_build_ast(parser);
-  if (parser_has_errors(parser)) {
-    String_Vec errors = parser_take_errors(parser);
-    CHECK(false, "%s: parser error: %s", name, errors.data[0]);
-    free_errors(&errors);
-    parser_free(&parser);
-    return NULL;
-  }
-
-  Ast *ast = parser_take_ast(parser);
-  parser_free(&parser);
-  return ast;
-}
-
-static size_t resolve(const char *name, const char *source, const char *needle) {
-  Ast *ast = parse(name, source);
-  if (!ast)
-    return 0;
-  Resolver *resolver = resolver_new(ast, source, strlen(source));
-  resolver_resolve(resolver);
-  String_Vec errors = resolver_take_errors(resolver);
-  const size_t count = errors.len;
-  if (needle && count)
-    CHECK(strstr(errors.data[0], needle) != NULL, "%s: first error missing '%s':\n%s", name, needle, errors.data[0]);
-  free_errors(&errors);
-  resolver_free(&resolver);
-  return count;
-}
+#include "test_harness.h"
 
 static void expect_ok(const char *name, const char *source) {
-  CHECK(resolve(name, source, NULL) == 0, "%s: expected no resolution errors", name);
+  Ast *ast = sc_resolve(name, source);
+  if (ast)
+    ast_free(&ast);
 }
 
 static void expect_error(const char *name, const char *source, const char *needle) {
-  CHECK(resolve(name, source, needle) >= 1, "%s: expected a resolution error", name);
+  char first[256];
+  const size_t n = sc_stage_errors(name, source, ST_RESOLVE, first, sizeof first);
+  CHECK(n >= 1, "%s: expected a resolution error", name);
+  if (n)
+    CHECK(strstr(first, needle) != NULL, "%s: first error missing '%s':\n%s", name, needle, first);
+}
+
+// All NODE_IDENTIFIER value-uses named `name` that the resolver bound, in creation order.
+static size_t value_uses(const Ast *a, const char *src, const char *name, NodeId *out, const size_t cap) {
+  size_t n = 0;
+  for (NodeId id = 1; id < (NodeId)a->nodes.len; id++)
+    if (th_ident_is(a, src, id, name) && ast_resolution(a, id) != NODE_NONE && n < cap)
+      out[n++] = id;
+  return n;
 }
 
 static void test_resolves(void) {
@@ -103,8 +55,58 @@ static void test_resolves(void) {
       "fn take(n: i32) void {}\n");
 }
 
+// Two uses of `x` must bind to the two different `let x` declarations: the inner use to the inner
+// let (nearest shadow), the outer use to the outer let.
+static void test_nearest_shadow(void) {
+  static const char src[] = "fn g(n: i32) void {}\n"
+                            "fn f() void {\n"
+                            "  let x: i32 = 1;\n"
+                            "  { let x: i32 = 2; g(x); }\n"
+                            "  g(x);\n"
+                            "}\n";
+  Ast *a = sc_resolve("nearest shadow", src);
+  if (!a)
+    return;
+  const NodeId outer_let = th_nth_kind(a, NODE_LET, 0); // created first
+  const NodeId inner_let = th_nth_kind(a, NODE_LET, 1);
+  NodeId uses[4];
+  const size_t n = value_uses(a, src, "x", uses, 4);
+  CHECK(n == 2, "two bound uses of x, got %zu", n);
+  if (n == 2) {
+    CHECK(ast_resolution(a, uses[0]) == inner_let, "inner g(x) binds to the inner let");
+    CHECK(ast_resolution(a, uses[1]) == outer_let, "outer g(x) binds to the outer let");
+    CHECK(inner_let != outer_let, "the two lets are distinct declarations");
+  }
+  ast_free(&a);
+}
+
+// The same spelling in the value and type namespaces resolves to different decls.
+static void test_namespace_separation(void) {
+  static const char src[] = "struct Foo {}\n"
+                            "const Foo: i32 = 5;\n"
+                            "fn main() i32 { let x: Foo = Foo; }\n";
+  Ast *a = sc_resolve("namespace separation", src);
+  if (!a)
+    return;
+  const NodeId struct_decl = th_nth_kind(a, NODE_STRUCT, 0);
+  const NodeId const_decl = th_nth_kind(a, NODE_CONST, 0);
+
+  NodeId uses[4];
+  const size_t n = value_uses(a, src, "Foo", uses, 4); // value use is the let initializer
+  CHECK(n == 1, "one value use of Foo, got %zu", n);
+  if (n == 1)
+    CHECK(ast_resolution(a, uses[0]) == const_decl, "value Foo binds to the const, not the struct");
+
+  NodeId type_path = NODE_NONE; // type use is the `: Foo` annotation, resolved on the NODE_TYPE_PATH
+  for (NodeId id = 1; id < (NodeId)a->nodes.len; id++)
+    if (ast_at_const(a, id)->kind == NODE_TYPE_PATH && ast_resolution(a, id) != NODE_NONE)
+      type_path = id;
+  CHECK(type_path != NODE_NONE && ast_resolution(a, type_path) == struct_decl, "type Foo binds to the struct");
+  ast_free(&a);
+}
+
 static void test_errors(void) {
-  expect_error("undefined value", "fn main() void { bar(); }\n", "cannot find value 'bar'");
+  expect_error("undefined value", "fn main() i32 { bar(); }\n", "cannot find value 'bar'");
   expect_error("undefined type", "fn f(x: Widget) void {}\n", "cannot find type 'Widget'");
   expect_error("duplicate item", "struct P {}\nstruct P {}\n", "duplicate definition of 'P'");
   expect_error("duplicate parameter", "fn f(a: i32, a: i32) void {}\n", "duplicate definition of 'a'");
@@ -117,6 +119,8 @@ static void test_errors(void) {
 
 int main(void) {
   test_resolves();
+  test_nearest_shadow();
+  test_namespace_separation();
   test_errors();
   if (failures) {
     fprintf(stderr, "%d resolver test failure%s\n", failures, failures == 1 ? "" : "s");

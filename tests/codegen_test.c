@@ -1,149 +1,49 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+// Structural codegen coverage: asserts the *shape* of the emitted C for things not observable at
+// runtime, or not constructible in surface syntax (const placement, name mangling, extern
+// prototypes, literal rewriting, tagged-union/multi-return/slice lowering, "not yet supported"
+// diagnostics). Behavioral correctness of runnable programs lives in codegen_run_test.c.
 
-#include "ast/parser.h"
-#include "codegen/codegen.h"
-#include "lexer/lexer.h"
-#include "resolver/resolver.h"
-#include "typechecker/typechecker.h"
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                                          \
-  do {                                                                                                                 \
-    if (!(condition)) {                                                                                                \
-      fprintf(stderr, "%s:%d: ", __FILE__, __LINE__);                                                                  \
-      fprintf(stderr, __VA_ARGS__);                                                                                    \
-      fputc('\n', stderr);                                                                                             \
-      failures++;                                                                                                      \
-    }                                                                                                                  \
-  } while (0)
-
-static void free_errors(String_Vec *errors) {
-  for (size_t i = 0; i < errors->len; i++)
-    free(errors->data[i]);
-  VEC_DEINIT_REF(errors);
-}
-
-// Lex, parse, resolve and type-check; returns the type-checked AST, or NULL (after a CHECK
-// failure) if any earlier stage erred (those stages own their own test suites).
-static Ast *check_pipeline(const char *name, const char *source) {
-  const size_t len = strlen(source);
-  Lexer *lexer = lexer_new(source, len);
-  lexer_scan_tokens(lexer);
-  if (lexer_has_errors(lexer)) {
-    String_Vec e = lexer_take_errors(lexer);
-    CHECK(false, "%s: lexer error: %s", name, e.data[0]);
-    free_errors(&e);
-    lexer_free(&lexer);
-    return NULL;
-  }
-  Token_Vec tokens = lexer_take_tokens(lexer);
-  lexer_free(&lexer);
-
-  Parser *parser = parser_new(tokens, source, len);
-  parser_build_ast(parser);
-  if (parser_has_errors(parser)) {
-    String_Vec e = parser_take_errors(parser);
-    CHECK(false, "%s: parser error: %s", name, e.data[0]);
-    free_errors(&e);
-    parser_free(&parser);
-    return NULL;
-  }
-  Ast *ast = parser_take_ast(parser);
-  parser_free(&parser);
-
-  Resolver *resolver = resolver_new(ast, source, len);
-  resolver_resolve(resolver);
-  if (resolver_has_errors(resolver)) {
-    String_Vec e = resolver_take_errors(resolver);
-    CHECK(false, "%s: resolver error: %s", name, e.data[0]);
-    free_errors(&e);
-    resolver_free(&resolver);
-    return NULL;
-  }
-  ast = resolver_take_ast(resolver);
-  resolver_free(&resolver);
-
-  TypeChecker *tc = typechecker_new(ast, source, len);
-  typechecker_check(tc);
-  if (typechecker_has_errors(tc)) {
-    String_Vec e = typechecker_take_errors(tc);
-    CHECK(false, "%s: type error: %s", name, e.data[0]);
-    free_errors(&e);
-    typechecker_free(&tc);
-    return NULL;
-  }
-  ast = typechecker_take_ast(tc);
-  typechecker_free(&tc);
-  return ast;
-}
-
-typedef struct {
-    char *code;
-    size_t errors;
-    char first[256];
-} Gen;
-
-// Run the full pipeline through codegen into an in-memory FILE*. `code` is heap-allocated (free
-// it); `first` holds the first codegen diagnostic, if any.
-static Gen gen(const char *name, const char *source) {
-  Gen g = {NULL, 0, {0}};
-  Ast *ast = check_pipeline(name, source);
-  if (!ast)
-    return g;
-
-  char *buf = NULL;
-  size_t size = 0;
-  FILE *f = open_memstream(&buf, &size);
-  Codegen *cg = codegen_new(ast, source, strlen(source));
-  codegen_emit(cg, f);
-  fclose(f);
-
-  String_Vec errs = codegen_take_errors(cg);
-  g.errors = errs.len;
-  if (errs.len)
-    snprintf(g.first, sizeof g.first, "%s", errs.data[0]);
-  free_errors(&errs);
-  codegen_free(&cg);
-  g.code = buf;
-  return g;
-}
+#include "test_harness.h"
 
 static void expect_contains(const char *name, const char *source, const char *needle) {
-  Gen g = gen(name, source);
-  if (!g.code)
+  size_t n_err = 0;
+  char first[256];
+  char *code = sc_codegen(name, source, &n_err, first, sizeof first);
+  if (!code)
     return;
-  CHECK(g.errors == 0, "%s: unexpected codegen error: %s", name, g.first);
-  CHECK(strstr(g.code, needle) != NULL, "%s: emitted C missing '%s':\n%s", name, needle, g.code);
-  free(g.code);
+  CHECK(n_err == 0, "%s: unexpected codegen error: %s", name, first);
+  CHECK(strstr(code, needle) != NULL, "%s: emitted C missing '%s':\n%s", name, needle, code);
+  free(code);
 }
 
 static void expect_absent(const char *name, const char *source, const char *needle) {
-  Gen g = gen(name, source);
-  if (!g.code)
+  size_t n_err = 0;
+  char first[256];
+  char *code = sc_codegen(name, source, &n_err, first, sizeof first);
+  if (!code)
     return;
-  CHECK(g.errors == 0, "%s: unexpected codegen error: %s", name, g.first);
-  CHECK(strstr(g.code, needle) == NULL, "%s: emitted C should not contain '%s':\n%s", name, needle, g.code);
-  free(g.code);
+  CHECK(n_err == 0, "%s: unexpected codegen error: %s", name, first);
+  CHECK(strstr(code, needle) == NULL, "%s: emitted C should not contain '%s':\n%s", name, needle, code);
+  free(code);
 }
 
 static void expect_codegen_error(const char *name, const char *source, const char *needle) {
-  Gen g = gen(name, source);
-  if (!g.code)
+  size_t n_err = 0;
+  char first[256];
+  char *code = sc_codegen(name, source, &n_err, first, sizeof first);
+  if (!code)
     return;
-  CHECK(g.errors >= 1, "%s: expected a codegen diagnostic", name);
-  if (g.errors)
-    CHECK(strstr(g.first, needle) != NULL, "%s: diagnostic missing '%s':\n%s", name, needle, g.first);
-  free(g.code);
+  CHECK(n_err >= 1, "%s: expected a codegen diagnostic", name);
+  if (n_err)
+    CHECK(strstr(first, needle) != NULL, "%s: diagnostic missing '%s':\n%s", name, needle, first);
+  free(code);
 }
 
 static const char *const BROAD =
     "struct Point { x: i32, }\n"
     "extend Point { fn get(self: &Point) i32 { return self.x; } }\n"
     "fn add(a: i32, b: i32) i32 { return a + b; }\n"
-    "fn main() void {\n"
+    "fn main() i32 {\n"
     "  let p: Point = Point { x: 1, };\n"
     "  let y: i32 = p.get();\n"
     "  let z: i32 = add(1, 2);\n"
@@ -248,7 +148,7 @@ static const char *const EXTERN =
     "extern \"C\" {\n"
     "  fn putchar(c: i32) i32;\n"
     "}\n"
-    "fn main() void { let r: i32 = putchar(72); }\n";
+    "fn main() i32 { let r: i32 = putchar(72); }\n";
 
 static void test_extern(void) {
   expect_contains("extern prototype", EXTERN, "extern int32_t putchar(const int32_t c);");
@@ -268,6 +168,84 @@ static void test_constness(void) {
   expect_contains("immutable let is const", CONSTNESS, "const int32_t x = a;");
   expect_absent("mutable let is not const", CONSTNESS, "const int32_t y");
   expect_contains("mutable let stays plain", CONSTNESS, "int32_t y = a;");
+}
+
+// Enum lowering: payload-less -> a plain C enum; a payload-bearing enum -> a tagged union.
+static void test_enums(void) {
+  static const char *const PLAIN = "enum Color { Red, Green, Blue, }\nfn f(c: Color) i32 { return 0; }\n";
+  expect_contains("payload-less enum is a C enum", PLAIN, "Color_Red");
+  expect_contains("payload-less enum typedef", PLAIN, "} Color;");
+
+  static const char *const TAGGED = "enum Shape { Dot, Circle(i32), }\nfn f(s: Shape) i32 { return 0; }\n";
+  expect_contains("tagged enum: tag type", TAGGED, "ShapeTag");
+  expect_contains("tagged enum: tag constant", TAGGED, "Shape_Circle");
+  expect_contains("tagged enum: union member", TAGGED, "union {");
+  expect_contains("tagged enum: discriminant field", TAGGED, "tag;");
+
+  // Enum::Variant construction lowers to a tagged-union compound literal.
+  static const char *const CTOR = "enum E { A, B(i32), }\nfn f() E { return E::B(7); }\n";
+  expect_contains("variant construct: tag", CTOR, ".tag = E_B");
+  expect_contains("variant construct: payload", CTOR, ".payload.B = {");
+  // A payload-less variant value is its plain C enum constant.
+  expect_contains("plain variant value", "enum C { Red, Green, }\nfn f() C { return C::Green; }\n", "C_Green");
+
+  // A bare unit-variant pattern is a tag test, NOT a catch-all binding (the fixed bug).
+  static const char *const MATCH = "enum C { Red, Green, }\nfn f(c: C) i32 { return switch c { Red => 1, Green => 2, }; }\n";
+  expect_contains("plain enum arm tests the tag", MATCH, "== C_Red");
+  expect_absent("plain enum arm is not a binding", MATCH, "C Red =");
+  expect_contains("exhaustive match is closed", MATCH, "__builtin_unreachable");
+
+  // Explicit discriminants are emitted into the C enum.
+  expect_contains(
+      "explicit discriminant", "enum Code { Ok = 0, Bad = 404, }\nfn f(c: Code) i32 { return c as i32; }\n",
+      "Code_Bad = 404");
+}
+
+// An `if` in value position lowers to a GNU statement-expression: a result temp, the if/else
+// chain assigning each arm's tail to it, then the temp as the yielded value.
+static void test_if_expression(void) {
+  static const char *const SRC =
+      "fn f(n: i32) i32 { let x: i32 = if n > 0 { 1; } else { 2; }; return x; }\n";
+  expect_contains("if-expr is a statement-expression", SRC, "({");
+  expect_contains("if-expr arm assigns the result temp", SRC, " = 1;");
+  expect_contains("if-expr lowers the chain", SRC, "else {");
+}
+
+// Array literals: a brace list when initializing a real C array binding, a compound literal when in
+// a general value position (so it can be passed by value).
+static void test_array_literals(void) {
+  expect_contains(
+      "array literal let is a brace list", "fn f() void { let a: [i32; 3] = [1, 2, 3]; }\n", "= { 1, 2, 3 }");
+  expect_absent(
+      "array literal let is not a compound literal", "fn f() void { let a: [i32; 3] = [1, 2, 3]; }\n",
+      "(int32_t[3]){ 1, 2, 3 }");
+  expect_contains(
+      "array literal argument is a compound literal",
+      "fn g(a: [i32; 3]) i32 { return a[0]; }\nfn f() i32 { return g([1, 2, 3]); }\n", "(int32_t[3]){ 1, 2, 3 }");
+}
+
+// Multiple returns lower to a generated `<fn>_ret` struct and a compound-literal return.
+static void test_multi_return(void) {
+  static const char *const MR = "fn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\n";
+  expect_contains("multi-return struct typedef", MR, "dm_ret");
+  expect_contains("multi-return field", MR, "int32_t _0;");
+  expect_contains("multi-return compound literal", MR, "(dm_ret){");
+
+  // `let (x, y) = dm(..)` lowers to a temp plus one `._i` field read per binding.
+  static const char *const DESTR =
+      "fn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\n"
+      "fn f() i32 { let (x, y) = dm(3, 1); return x + y; }\n";
+  expect_contains("destructure temp", DESTR, "const __auto_type");
+  expect_contains("destructure field 0", DESTR, "x = ");
+  expect_contains("destructure reads _0", DESTR, "._0;");
+  expect_contains("destructure reads _1", DESTR, "._1;");
+}
+
+// Slices lower to the SCslice fat pointer; fixed arrays keep their C array parameter form.
+static void test_slices_and_arrays(void) {
+  expect_contains("slice param is SCslice", "fn first(s: []i32) i32 { return s[0]; }\n", "const SCslice s");
+  expect_contains("slice index casts ptr", "fn first(s: []i32) i32 { return s[0]; }\n", "((int32_t*)s.ptr)[0]");
+  expect_contains("array param keeps extent", "fn g(a: [i32; 3]) i32 { return a[0]; }\n", "const int32_t a[3]");
 }
 
 static void test_errors(void) {
@@ -292,6 +270,11 @@ int main(void) {
   test_references();
   test_extern();
   test_constness();
+  test_enums();
+  test_if_expression();
+  test_array_literals();
+  test_multi_return();
+  test_slices_and_arrays();
   test_errors();
   test_literals();
   if (failures) {

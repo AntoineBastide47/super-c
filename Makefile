@@ -62,10 +62,15 @@ LIB_OBJS := $(LIB_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 TEST_SRCS := $(wildcard tests/*_test.c)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
+# Release/NDEBUG test lane: ast_fprint is compiled in only under NDEBUG, so its driver must link
+# release lib objects. These run after the dev tests via `$(MAKE) PROFILE=release rtest`.
+RTEST_SRCS := $(wildcard tests/*_rtest.c)
+RTEST_BINS := $(RTEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
+
 BENCHMARK_SRCS := $(wildcard benchmark/*_bench.c)
 BENCHMARK_BINS := $(BENCHMARK_SRCS:benchmark/%.c=$(BUILD_DIR)/benchmark/%)
 
-.PHONY: all build run release test bench clean
+.PHONY: all build run release test rtest bench clean
 
 all: $(BIN)
 
@@ -76,11 +81,20 @@ release:
 	@$(MAKE) PROFILE=release all
 
 ifeq ($(PROFILE),dev)
-test: $(TEST_BINS)
+test: $(BIN) $(TEST_BINS)
 	@for test in $(TEST_BINS); do $$test || exit 1; done
+	@$(MAKE) PROFILE=release rtest
 else
 test:
 	@$(MAKE) PROFILE=dev test
+endif
+
+ifeq ($(PROFILE),release)
+rtest: $(RTEST_BINS)
+	@for test in $(RTEST_BINS); do $$test || exit 1; done
+else
+rtest:
+	@$(MAKE) PROFILE=release rtest
 endif
 
 ifeq ($(PROFILE),release)
@@ -119,7 +133,7 @@ $(BUILD_DIR)/main.o: CPPFLAGS_EXTRA := -DBIN_NAME='"$(BIN)"'
 
 # Header-dependency tracking: -MMD -MP emits a .d file beside each object/binary listing the
 # headers it includes (plus phony header targets so deleting a header doesn't break the build).
-DEPS := $(LIB_OBJS:.o=.d) $(BUILD_DIR)/main.d $(addsuffix .d,$(TEST_BINS) $(BENCHMARK_BINS))
+DEPS := $(LIB_OBJS:.o=.d) $(BUILD_DIR)/main.d $(addsuffix .d,$(TEST_BINS) $(RTEST_BINS) $(BENCHMARK_BINS))
 -include $(DEPS)
 
 clean:

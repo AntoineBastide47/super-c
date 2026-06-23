@@ -71,6 +71,7 @@ typedef enum {
   NODE_MATCH,
   NODE_MATCH_ARM,
   NODE_NEW,
+  NODE_ARRAY_LITERAL,
   NODE_STRUCT_INITIALIZER,
   NODE_FIELD_INITIALIZER,
 
@@ -124,6 +125,7 @@ typedef struct {
             NodeId name;
             NodeList payload;
             bool struct_payload;
+            NodeId value; // explicit discriminant `= <int>` (payload-less variants only), or NODE_NONE
         } variant;
         struct {
             NodeId name;
@@ -196,6 +198,7 @@ typedef struct {
         struct {
             TokenType op;
             NodeId operand;
+            TypeQualifier qualifier; // `&mut` address-of (TYPE_QUAL_MUT); TYPE_QUAL_NONE otherwise
         } unary;
         struct {
             TokenType op;
@@ -211,6 +214,7 @@ typedef struct {
         struct {
             NodeId object, member;
             bool pointer;
+            bool path; // `Enum::Variant` path (object names a type) vs a `.`/`->` value member
         } member;
         struct {
             NodeId expression, type;
@@ -229,6 +233,9 @@ typedef struct {
         struct {
             NodeId type, initializer;
         } new_expr;
+        struct {
+            NodeList elements;
+        } array_literal;
         struct {
             NodeId type;
             NodeList fields;

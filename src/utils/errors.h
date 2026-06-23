@@ -48,11 +48,12 @@ COLD_EXPORT void errors_log(const String_Vec *errors);
     VEC_DEINIT((*Var)->errors_len);                                                                                    \
   } while (0)
 
+// Bail out of the (int-returning) driver with a failure status when a stage collected errors.
 #define ERRORS_CHECK(Var)                                                                                              \
   if (Var##_has_errors(Var)) {                                                                                         \
     Var##_log_errors(Var);                                                                                             \
     Var##_free(&Var);                                                                                                  \
-    return;                                                                                                            \
+    return 1;                                                                                                          \
   }
 
 // take_errors hands ownership of the collected messages to the caller. Only the

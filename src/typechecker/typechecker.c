@@ -97,6 +97,19 @@ static bool is_numeric(const TypeChecker *t, const TypeId x) {
   return y->kind == TYPE_BUILTIN && (bt_is_int(y->as.builtin) || bt_is_float(y->as.builtin));
 }
 
+// A payload-less enum is a plain C enum: its values are integers, so it casts to/from integers.
+static bool is_plain_enum(const TypeChecker *t, const TypeId x) {
+  const Ty *const y = ast_type_at(t->ast, x);
+  if (y->kind != TYPE_ENUM)
+    return false;
+  const NodeList ms = ast_at_const(t->ast, y->as.decl)->as.aggregate.members;
+  const NodeId *const ids = ast_list(t->ast, ms);
+  for (uint32_t i = 0; i < ms.len; i++)
+    if (ast_at_const(t->ast, ids[i])->as.variant.payload.len > 0)
+      return false;
+  return true;
+}
+
 // Peel pointer/reference layers to reach the underlying aggregate (for member access).
 static TypeId strip(const TypeChecker *t, TypeId x) {
   const Ty *y = ast_type_at(t->ast, x);
@@ -165,11 +178,17 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   const TypeId actual = ast_type(t->ast, node);
   if (expected == TYPE_NONE || actual == TYPE_NONE || expected == actual)
     return true;
-  // `&T` coerces to `*const T` (both lower to `const T *`; a reference is always a valid pointer).
-  // One-way only: a raw pointer carries no validity guarantee, so `*const T` does not become `&T`.
+  // A reference coerces to a raw pointer of the same pointee: `&T`->`*const T`, `&mut T`->`*mut T`
+  // or `*const T` (mut downgrades to const). One-way only, and `&T` never gains `*mut`. A raw
+  // pointer carries no validity guarantee, so it never becomes a reference.
   const Ty *const ex = ast_type_at(t->ast, expected), *const ac = ast_type_at(t->ast, actual);
-  if (ex->kind == TYPE_POINTER && ex->qualifier == TYPE_QUAL_CONST && ac->kind == TYPE_REFERENCE &&
-      ac->qualifier == TYPE_QUAL_NONE && ex->as.elem == ac->as.elem)
+  if (ex->kind == TYPE_POINTER && ac->kind == TYPE_REFERENCE && ex->as.elem == ac->as.elem &&
+      (ac->qualifier == TYPE_QUAL_MUT || ex->qualifier == TYPE_QUAL_CONST))
+    return true;
+  // Raw pointers of the same pointee: a writable source (`*T`/`*mut T`) fits any target; a
+  // `*const T` source fits only a `*const T` target (so `new`'s `*mut T` flows into `*T`/`*const`).
+  if (ex->kind == TYPE_POINTER && ac->kind == TYPE_POINTER && ex->as.elem == ac->as.elem &&
+      (ex->qualifier == TYPE_QUAL_CONST || ac->qualifier != TYPE_QUAL_CONST))
     return true;
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
@@ -378,8 +397,8 @@ static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) 
       typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot dereference a non-pointer");
       return TYPE_NONE;
     }
-    case Ampersand: // address-of
-      return ast_intern_type(t->ast, (Ty){.kind = TYPE_REFERENCE, .as.elem = opnd});
+    case Ampersand: // address-of: `&x` -> `&T`, `&mut x` -> `&mut T`
+      return ast_intern_type(t->ast, (Ty){.kind = TYPE_REFERENCE, .qualifier = n->as.unary.qualifier, .as.elem = opnd});
     default: // Move, Unsafe (and any future prefix) pass the operand's type through
       return opnd;
   }
@@ -479,7 +498,17 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
   switch (n->kind) {
     case NODE_IDENTIFIER: {
       const NodeId d = ast_resolution(t->ast, node);
-      return d != NODE_NONE && ast_at_const(t->ast, d)->kind == NODE_LET && ast_at_const(t->ast, d)->as.let_stmt.is_mutable;
+      if (d == NODE_NONE)
+        return false;
+      const Node *const dn = ast_at_const(t->ast, d);
+      if (dn->kind == NODE_LET)
+        return dn->as.let_stmt.is_mutable;
+      if (dn->kind == NODE_IDENTIFIER) { // a tuple-let element: its resolution back-points to the let
+        const NodeId let = ast_resolution(t->ast, d);
+        return let != NODE_NONE && ast_at_const(t->ast, let)->kind == NODE_LET &&
+               ast_at_const(t->ast, let)->as.let_stmt.is_mutable;
+      }
+      return false;
     }
     case NODE_UNARY: {
       if (n->as.unary.op != Star)
@@ -500,7 +529,61 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
   }
 }
 
+// `Enum::Variant` as an expression: bind the variant against the base enum, yield the enum type.
+static TypeId check_path_member(TypeChecker *t, const Node *const n) {
+  const NodeId obj = n->as.member.object;
+  const NodeId decl = ast_at_const(t->ast, obj)->kind == NODE_IDENTIFIER ? ast_resolution(t->ast, obj) : NODE_NONE;
+  const Span mname = name_span(t, n->as.member.member);
+  if (decl == NODE_NONE || ast_at_const(t->ast, decl)->kind != NODE_ENUM) {
+    typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'::' base must be an enum type");
+    return TYPE_NONE;
+  }
+  const NodeId variant = find_member(t, decl, mname);
+  if (variant == NODE_NONE || ast_at_const(t->ast, variant)->kind != NODE_VARIANT) {
+    typechecker_errorf(
+        t, mname.start, mname.end - mname.start, "no variant '%.*s' on this enum", (int)(mname.end - mname.start),
+        t->source + mname.start);
+    return TYPE_NONE;
+  }
+  ast_set_resolution(t->ast, n->as.member.member, variant);
+  return decl_to_type(t, decl);
+}
+
+// `Enum::Variant(args)` construction: arity- and type-check the payload, yield the enum type.
+static TypeId check_variant_call(
+    TypeChecker *t, const Node *const n, const NodeId id, const NodeId variant, const TypeId enum_ty) {
+  const NodeList args = n->as.call.args;
+  const NodeId *const aids = ast_list(t->ast, args);
+  for (uint32_t i = 0; i < args.len; i++)
+    check_expr(t, aids[i]);
+  const NodeList payload = ast_at_const(t->ast, variant)->as.variant.payload;
+  const NodeId *const pl = ast_list(t->ast, payload);
+  const Span sp = ast_at_const(t->ast, id)->span;
+  if (args.len != payload.len) {
+    typechecker_errorf(
+        t, sp.start, sp.end - sp.start, "variant expects %u argument%s, found %u", payload.len,
+        payload.len == 1 ? "" : "s", args.len);
+  } else {
+    for (uint32_t i = 0; i < args.len; i++) {
+      const Node *const pe = ast_at_const(t->ast, pl[i]);
+      const TypeId pt = resolve_type(t, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
+      if (!compatible(t, pt, aids[i]))
+        err_mismatch(t, aids[i], pt);
+    }
+  }
+  return enum_ty;
+}
+
 static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
+  // `Enum::Variant(args)` is construction, not a function call.
+  const Node *const path_callee = ast_at_const(t->ast, n->as.call.callee);
+  if (path_callee->kind == NODE_MEMBER && path_callee->as.member.path) {
+    const TypeId enum_ty = check_expr(t, n->as.call.callee);
+    const NodeId variant = ast_resolution(t->ast, path_callee->as.member.member);
+    if (variant != NODE_NONE && ast_at_const(t->ast, variant)->kind == NODE_VARIANT)
+      return check_variant_call(t, n, id, variant, enum_ty);
+    return TYPE_NONE; // the path error was already reported by check_expr
+  }
   const TypeId callee = check_expr(t, n->as.call.callee);
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(t->ast, args);
@@ -679,7 +762,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_MEMBER:
-      result = check_member(t, n);
+      result = n->as.member.path ? check_path_member(t, n) : check_member(t, n);
       break;
     case NODE_CAST: {
       const TypeId src = check_expr(t, n->as.cast.expression);
@@ -688,7 +771,9 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         const TypeKind sk = ast_type_at(a, src)->kind, dk = ast_type_at(a, dst)->kind;
         const bool aggregate = sk == TYPE_STRUCT || sk == TYPE_ENUM || sk == TYPE_FUNCTION || dk == TYPE_STRUCT ||
                                dk == TYPE_ENUM || dk == TYPE_FUNCTION;
-        if (aggregate) {
+        // A payload-less enum and an integer are interconvertible (the discriminant value).
+        const bool enum_int = (is_plain_enum(t, src) && is_int(t, dst)) || (is_plain_enum(t, dst) && is_int(t, src));
+        if (aggregate && !enum_int) {
           char s[96], d[96];
           render_type(t, src, s, sizeof s);
           render_type(t, dst, d, sizeof d);
@@ -732,9 +817,42 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_NEW: {
-      const TypeId inner = n->as.new_expr.initializer != NODE_NONE ? check_expr(t, n->as.new_expr.initializer)
-                                                                   : resolve_type(t, n->as.new_expr.type);
-      result = ast_intern_type(a, (Ty){.kind = TYPE_POINTER, .as.elem = inner});
+      const TypeId declared = resolve_type(t, n->as.new_expr.type);
+      TypeId inner = declared;
+      const NodeId init = n->as.new_expr.initializer;
+      if (init != NODE_NONE) {
+        const TypeId it = check_expr(t, init);
+        if (ast_at_const(a, init)->kind == NODE_STRUCT_INITIALIZER)
+          inner = it; // `new T { .. }`: the initializer already carries the new type
+        else if (!compatible(t, declared, init)) // `new T(expr)`: expr must fit T
+          err_mismatch(t, init, declared);
+      }
+      // `new` yields an owning `*mut T`: the freshly allocated pointee is writable.
+      result = ast_intern_type(a, (Ty){.kind = TYPE_POINTER, .qualifier = TYPE_QUAL_MUT, .as.elem = inner});
+      break;
+    }
+    case NODE_ARRAY_LITERAL: {
+      // All elements must share one type T; the literal's type is `[T; N]` (N is recovered from
+      // the element count at codegen, since the interned `Ty` does not carry the length).
+      const NodeList elements = n->as.array_literal.elements;
+      const NodeId *const ids = ast_list(a, elements);
+      if (elements.len == 0) {
+        typechecker_errorf(
+            t, n->span.start, n->span.end - n->span.start, "cannot infer the element type of an empty array literal");
+        break;
+      }
+      TypeId elem = TYPE_NONE;
+      for (uint32_t i = 0; i < elements.len; i++) {
+        const TypeId et = check_expr(t, ids[i]);
+        if (i == 0)
+          elem = et;
+        else if (et != elem && et != TYPE_NONE && elem != TYPE_NONE) {
+          err_mismatch(t, ids[i], elem);
+          elem = TYPE_NONE;
+        }
+      }
+      if (elem != TYPE_NONE)
+        result = ast_intern_type(a, (Ty){.kind = TYPE_ARRAY, .as.elem = elem});
       break;
     }
     case NODE_STRUCT_INITIALIZER:
@@ -753,9 +871,32 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       break;
     }
-    case NODE_IF:
-      check_if(t, n);
-      break; // an `if` used as a value has no inferred type yet
+    case NODE_IF: {
+      // An `if` used as a value: both arms must agree, and an `else` is mandatory (a missing arm
+      // would leave the value undefined). The arms are blocks whose tail expression is the value.
+      const TypeId c = check_expr(t, n->as.if_stmt.condition);
+      if (c != TYPE_NONE && !is_bool(t, c)) {
+        const Span sp = ast_at_const(a, n->as.if_stmt.condition)->span;
+        char ty[96];
+        render_type(t, c, ty, sizeof ty);
+        typechecker_errorf(t, sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'", ty);
+      }
+      const TypeId then_ty = check_expr(t, n->as.if_stmt.then_branch);
+      if (n->as.if_stmt.else_branch == NODE_NONE) {
+        typechecker_errorf(
+            t, n->span.start, n->span.end - n->span.start, "an 'if' used as a value must have an 'else' branch");
+        result = TYPE_NONE;
+      } else {
+        const TypeId else_ty = check_expr(t, n->as.if_stmt.else_branch);
+        if (then_ty != else_ty && then_ty != TYPE_NONE && else_ty != TYPE_NONE) {
+          err_mismatch(t, n->as.if_stmt.else_branch, then_ty);
+          result = TYPE_NONE;
+        } else {
+          result = then_ty;
+        }
+      }
+      break;
+    }
     case NODE_RANGE: { // for-loop range; its type is the loop-variable type
       const TypeId s = check_expr(t, n->as.pattern_range.start);
       const TypeId e = check_expr(t, n->as.pattern_range.end);
@@ -769,6 +910,50 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
   }
   ast_set_type(a, id, result);
   return result;
+}
+
+// `let (a, b, ..) = call`: bind each name to the matching return type of a multi-value function call.
+// The names carry their own types (each element identifier is its own decl); the let node has none.
+static void check_tuple_let(TypeChecker *t, const Node *const n) {
+  Ast *const a = t->ast;
+  const Node *const nm = ast_at_const(a, n->as.let_stmt.name);
+  const NodeList names = nm->as.pattern.children;
+  const NodeId *const nids = ast_list(a, names);
+  const NodeId value = n->as.let_stmt.value;
+  check_expr(t, value); // types the callee even though a multi-return call yields no single value
+
+  NodeList returns = {0, 0};
+  bool ok = false;
+  if (value != NODE_NONE && ast_at_const(a, value)->kind == NODE_CALL) {
+    const TypeId callee = ast_type(a, ast_at_const(a, value)->as.call.callee);
+    if (callee != TYPE_NONE) {
+      const Ty *const ct = ast_type_at(a, callee);
+      if (ct->kind == TYPE_FUNCTION) {
+        const Node *const fn = ast_at_const(a, ct->as.decl);
+        returns = fn->kind == NODE_FUNCTION ? fn->as.function.returns : fn->as.function_type.returns;
+        ok = true;
+      }
+    }
+  }
+  if (!ok) {
+    typechecker_errorf(
+        t, n->span.start, n->span.end - n->span.start, "a tuple binding requires a multi-value function call");
+    return;
+  }
+  if (names.len != returns.len) {
+    typechecker_errorf(
+        t, n->span.start, n->span.end - n->span.start, "expected %u binding%s, the call returns %u value%s",
+        names.len, names.len == 1 ? "" : "s", returns.len, returns.len == 1 ? "" : "s");
+  }
+  const NodeId *const rids = ast_list(a, returns);
+  for (uint32_t i = 0; i < names.len; i++) {
+    TypeId et = TYPE_NONE;
+    if (i < returns.len) {
+      const Node *const rn = ast_at_const(a, rids[i]);
+      et = resolve_type(t, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rids[i]);
+    }
+    ast_set_type(a, nids[i], et); // each element identifier carries its field's type
+  }
 }
 
 static void check_return(TypeChecker *t, const Node *const n, const NodeId id) {
@@ -807,6 +992,10 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_LET: {
+      if (ast_at_const(a, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE) {
+        check_tuple_let(t, n);
+        break;
+      }
       const bool annotated = n->as.let_stmt.type != NODE_NONE;
       const bool valued = n->as.let_stmt.value != NODE_NONE;
       const TypeId declared = annotated ? resolve_type(t, n->as.let_stmt.type) : TYPE_NONE;
@@ -887,10 +1076,24 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
   Ast *const a = t->ast;
   const Node *const n = ast_at_const(a, id);
   switch (n->kind) {
-    case NODE_IDENTIFIER:   // shorthand struct-field binding
-    case NODE_PATTERN_NAME: // plain binding
+    case NODE_IDENTIFIER: // shorthand struct-field binding
       ast_set_type(a, id, expected);
       break;
+    case NODE_PATTERN_NAME: {
+      // A bare name matching a *unit* variant of the scrutinee enum is a tag pattern, not a
+      // binding (so `switch e { A => .., B => .. }` tests the tag instead of always matching).
+      const Ty *const bt = ast_type_at(a, strip(t, expected));
+      if (bt->kind == TYPE_ENUM) {
+        const NodeId v = find_member(t, bt->as.decl, name_span(t, n->as.pattern.name));
+        if (v != NODE_NONE && ast_at_const(a, v)->kind == NODE_VARIANT &&
+            ast_at_const(a, v)->as.variant.payload.len == 0) {
+          ast_set_resolution(a, n->as.pattern.name, v);
+          break;
+        }
+      }
+      ast_set_type(a, id, expected); // plain binding
+      break;
+    }
     case NODE_PATTERN_STRUCT: {
       const TypeId base = strip(t, expected);
       const Ty *const bt = ast_type_at(a, base);
@@ -975,6 +1178,21 @@ static void check_item(TypeChecker *t, const NodeId id) {
       const NodeId *const pids = ast_list(t->ast, params);
       for (uint32_t i = 0; i < params.len; i++)
         decl_type(t, pids[i]); // type each parameter so references resolve
+      // The program entry point must be `fn main() i32` -- it lowers to C's `int main(void)`, so any
+      // other return type or a parameter list would be silently dropped or miscompiled.
+      if (span_is(t->source, name_span(t, n->as.function.name), "main")) {
+        const NodeList rets = n->as.function.returns;
+        TypeId rt = TYPE_NONE;
+        if (rets.len == 1) {
+          const NodeId r0 = ast_list(t->ast, rets)[0];
+          const Node *const rn = ast_at_const(t->ast, r0);
+          rt = resolve_type(t, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+        }
+        if (params.len != 0 || rets.len != 1 || rt != ast_builtin(BT_I32)) {
+          const Span sp = name_span(t, n->as.function.name);
+          typechecker_errorf(t, sp.start, sp.end - sp.start, "'main' must be declared 'fn main() i32'");
+        }
+      }
       const NodeList saved = t->current_returns;
       t->current_returns = n->as.function.returns;
       if (n->as.function.body != NODE_NONE)
@@ -991,6 +1209,13 @@ static void check_item(TypeChecker *t, const NodeId id) {
         if (m->kind == NODE_FIELD) {
           resolve_type(t, m->as.field.type);
         } else { // NODE_VARIANT
+          if (m->as.variant.value != NODE_NONE) { // explicit discriminant must be an integer
+            const TypeId vt = check_expr(t, m->as.variant.value);
+            if (vt != TYPE_NONE && !is_int(t, vt)) {
+              const Span sp = ast_at_const(t->ast, m->as.variant.value)->span;
+              typechecker_errorf(t, sp.start, sp.end - sp.start, "enum discriminant must be an integer");
+            }
+          }
           const NodeList payload = m->as.variant.payload;
           const NodeId *const pl = ast_list(t->ast, payload);
           for (uint32_t j = 0; j < payload.len; j++) {

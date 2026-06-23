@@ -48,7 +48,7 @@ fn add(a: int, b: int) int {
 Example resource cleanup with `defer`:
 
 ```superc
-fn main() int {
+fn main() i32 {
     let file = File.open("data.txt");
 
     defer file.close();

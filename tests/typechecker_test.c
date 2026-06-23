@@ -1,111 +1,42 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+// Type-checker coverage. Beyond the original pass/fail checks, this asserts the *computed* type
+// stored on representative expression nodes (ast_type): comparisons yield bool, arithmetic keeps
+// the operand type, pointer offset stays a pointer, deref yields the pointee, address-of yields a
+// reference, and a bare literal adapts to its annotated type.
 
-#include "ast/parser.h"
-#include "lexer/lexer.h"
-#include "resolver/resolver.h"
-#include "typechecker/typechecker.h"
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                                          \
-  do {                                                                                                                 \
-    if (!(condition)) {                                                                                                \
-      fprintf(stderr, "%s:%d: ", __FILE__, __LINE__);                                                                  \
-      fprintf(stderr, __VA_ARGS__);                                                                                    \
-      fputc('\n', stderr);                                                                                             \
-      failures++;                                                                                                      \
-    }                                                                                                                  \
-  } while (0)
-
-static void free_errors(String_Vec *errors) {
-  for (size_t i = 0; i < errors->len; i++)
-    free(errors->data[i]);
-  VEC_DEINIT_REF(errors);
-}
-
-// Lex, parse and resolve, returning the resolved AST, or NULL (after a CHECK failure) on any
-// earlier-stage error (those stages have their own tests).
-static Ast *resolve(const char *name, const char *source) {
-  Lexer *lexer = lexer_new(source, strlen(source));
-  lexer_scan_tokens(lexer);
-  if (lexer_has_errors(lexer)) {
-    String_Vec errors = lexer_take_errors(lexer);
-    CHECK(false, "%s: lexer error: %s", name, errors.data[0]);
-    free_errors(&errors);
-    lexer_free(&lexer);
-    return NULL;
-  }
-
-  Token_Vec tokens = lexer_take_tokens(lexer);
-  lexer_free(&lexer);
-  Parser *parser = parser_new(tokens, source, strlen(source));
-  parser_build_ast(parser);
-  if (parser_has_errors(parser)) {
-    String_Vec errors = parser_take_errors(parser);
-    CHECK(false, "%s: parser error: %s", name, errors.data[0]);
-    free_errors(&errors);
-    parser_free(&parser);
-    return NULL;
-  }
-  Ast *ast = parser_take_ast(parser);
-  parser_free(&parser);
-
-  Resolver *resolver = resolver_new(ast, source, strlen(source));
-  resolver_resolve(resolver);
-  if (resolver_has_errors(resolver)) {
-    String_Vec errors = resolver_take_errors(resolver);
-    CHECK(false, "%s: resolver error: %s", name, errors.data[0]);
-    free_errors(&errors);
-    resolver_free(&resolver);
-    return NULL;
-  }
-  ast = resolver_take_ast(resolver);
-  resolver_free(&resolver);
-  return ast;
-}
-
-static size_t check(const char *name, const char *source, const char *needle) {
-  Ast *ast = resolve(name, source);
-  if (!ast)
-    return 0;
-  TypeChecker *tc = typechecker_new(ast, source, strlen(source));
-  typechecker_check(tc);
-  String_Vec errors = typechecker_take_errors(tc);
-  const size_t count = errors.len;
-  if (needle && count)
-    CHECK(strstr(errors.data[0], needle) != NULL, "%s: first error missing '%s':\n%s", name, needle, errors.data[0]);
-  free_errors(&errors);
-  typechecker_free(&tc);
-  return count;
-}
+#include "test_harness.h"
 
 static void expect_ok(const char *name, const char *source) {
-  CHECK(check(name, source, NULL) == 0, "%s: expected no type errors", name);
+  Ast *ast = sc_typecheck(name, source);
+  if (ast)
+    ast_free(&ast);
 }
 
 static void expect_error(const char *name, const char *source, const char *needle) {
-  CHECK(check(name, source, needle) >= 1, "%s: expected a type error", name);
+  char first[256];
+  const size_t n = sc_stage_errors(name, source, ST_TYPECHECK, first, sizeof first);
+  CHECK(n >= 1, "%s: expected a type error", name);
+  if (n)
+    CHECK(strstr(first, needle) != NULL, "%s: first error missing '%s':\n%s", name, needle, first);
 }
 
 static void test_ok(void) {
   expect_ok(
       "field access",
       "struct P { x: i32, }\n"
-      "fn main() void { let p: P = P { x: 1, }; let y: i32 = p.x; }\n");
+      "fn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.x; }\n");
   expect_ok(
       "method call binds self",
       "struct P { x: i32, }\n"
       "extend P { fn get(self: P) i32 { return self.x; } }\n"
-      "fn main() void { let p: P = P { x: 1, }; let y: i32 = p.get(); }\n");
-  expect_ok("literal coercion", "fn main() void { let x: u8 = 5; }\n");
-  expect_ok("inferred binding", "fn main() void { let x = 1; let y: i32 = x; }\n");
+      "fn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.get(); }\n");
+  expect_ok("entry point fn main() i32", "fn main() i32 { return 0; }\n");
+  expect_ok("literal coercion", "fn main() i32 { let x: u8 = 5; }\n");
+  expect_ok("inferred binding", "fn main() i32 { let x = 1; let y: i32 = x; }\n");
   expect_ok(
       "call argument types",
       "fn add(a: i32, b: i32) i32 { return a; }\n"
-      "fn main() void { let z: i32 = add(1, 2); }\n");
-  expect_ok("bool condition", "fn main() void { if (true) { } }\n");
+      "fn main() i32 { let z: i32 = add(1, 2); }\n");
+  expect_ok("bool condition", "fn main() i32 { if (true) { } }\n");
   expect_ok(
       "switch name binding",
       "fn classify(c: u8) i32 { return switch c { 0 => 1, n => 2, _ => 0, }; }\n");
@@ -123,20 +54,72 @@ static void test_ok(void) {
       "fn give(x: i32) i32 { return take(&x); }\n");
 }
 
+static void test_computed_scalar_types(void) {
+  // `a < b` is bool; `a + b` keeps i32.
+  static const char src[] = "fn f(a: i32, b: i32) bool { let c: bool = a < b; let d: i32 = a + b; return c; }\n";
+  Ast *a = sc_typecheck("scalar types", src);
+  if (!a)
+    return;
+  const NodeId lt = th_nth_kind(a, NODE_BINARY, 0); // a < b (parsed first)
+  const NodeId add = th_nth_kind(a, NODE_BINARY, 1); // a + b
+  CHECK(ast_type(a, lt) == ast_builtin(BT_BOOL), "comparison is bool");
+  CHECK(ast_type(a, add) == ast_builtin(BT_I32), "i32 + i32 is i32");
+  ast_free(&a);
+}
+
+static void test_computed_pointer_types(void) {
+  static const char src[] = "fn f(p: *i32) i32 { let q: *i32 = p + 1; return *q; }\n";
+  Ast *a = sc_typecheck("pointer types", src);
+  if (!a)
+    return;
+  const NodeId off = th_nth_kind(a, NODE_BINARY, 0); // p + 1
+  const TypeId ot = ast_type(a, off);
+  CHECK(ast_type_at(a, ot)->kind == TYPE_POINTER, "pointer offset stays a pointer");
+  CHECK(ast_type_at(a, ot)->as.elem == ast_builtin(BT_I32), "pointee is i32");
+  const NodeId deref = th_nth_kind(a, NODE_UNARY, 0); // *q
+  CHECK(ast_type(a, deref) == ast_builtin(BT_I32), "deref yields the pointee type");
+  ast_free(&a);
+}
+
+static void test_computed_reference_type(void) {
+  // `*p` is unary[0] (in `take`), `&x` is unary[1] (in `give`, parsed second).
+  static const char src[] = "fn take(p: *const i32) i32 { return *p; }\n"
+                            "fn give(x: i32) i32 { return take(&x); }\n";
+  Ast *a = sc_typecheck("reference type", src);
+  if (!a)
+    return;
+  const NodeId addr = th_nth_kind(a, NODE_UNARY, 1); // &x
+  CHECK(ast_type_at(a, ast_type(a, addr))->kind == TYPE_REFERENCE, "address-of yields a reference");
+  ast_free(&a);
+}
+
+// Each literal carries its intrinsic type; an integer literal stays i32 and merely *adapts* (via
+// compatibility) into a narrower annotated type, rather than being retyped on the node.
+static void test_literal_types(void) {
+  static const char src[] = "fn main() i32 { let i = 5; let c = 'a'; let b = true; }\n";
+  Ast *a = sc_typecheck("literal types", src);
+  if (!a)
+    return;
+  CHECK(ast_type(a, th_nth_kind(a, NODE_LITERAL, 0)) == ast_builtin(BT_I32), "integer literal is i32");
+  CHECK(ast_type(a, th_nth_kind(a, NODE_LITERAL, 1)) == ast_builtin(BT_CHAR), "char literal is char");
+  CHECK(ast_type(a, th_nth_kind(a, NODE_LITERAL, 2)) == ast_builtin(BT_BOOL), "bool literal is bool");
+  ast_free(&a);
+}
+
 static void test_errors(void) {
-  expect_error("let mismatch", "fn main() void { let b: bool = 1; }\n", "mismatched types");
+  expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error(
-      "argument type", "fn g(a: bool) void {}\nfn main() void { g(1); }\n", "mismatched types");
-  expect_error("argument count", "fn g(a: i32) void {}\nfn main() void { g(1, 2); }\n", "expected 1 argument");
+      "argument type", "fn g(a: bool) void {}\nfn main() i32 { g(1); }\n", "mismatched types");
+  expect_error("argument count", "fn g(a: i32) void {}\nfn main() i32 { g(1, 2); }\n", "expected 1 argument");
   expect_error(
-      "unknown field", "struct P { x: i32, }\nfn main() void { let p: P = P { x: 1, }; p.y; }\n",
+      "unknown field", "struct P { x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; p.y; }\n",
       "no field or method 'y'");
-  expect_error("non-bool condition", "fn main() void { if (1) { } }\n", "must be 'bool'");
-  expect_error("assign immutable", "fn main() void { let x: i32 = 1; x = 2; }\n", "cannot assign");
+  expect_error("non-bool condition", "fn main() i32 { if (1) { } }\n", "must be 'bool'");
+  expect_error("assign immutable", "fn main() i32 { let x: i32 = 1; x = 2; }\n", "cannot assign");
   expect_error("return mismatch", "fn f() i32 { return true; }\n", "mismatched types");
-  expect_error("index non-array", "fn main() void { let x: i32 = 1; let y: i32 = x[0]; }\n", "cannot index");
+  expect_error("index non-array", "fn main() i32 { let x: i32 = 1; let y: i32 = x[0]; }\n", "cannot index");
   expect_error(
-      "unknown init field", "struct P { x: i32, }\nfn main() void { let p: P = P { y: 1, }; }\n", "no field 'y'");
+      "unknown init field", "struct P { x: i32, }\nfn main() i32 { let p: P = P { y: 1, }; }\n", "no field 'y'");
   expect_error(
       "pointer plus pointer", "fn f(a: *i32, b: *i32) void { let c = a + b; }\n", "invalid pointer arithmetic");
   expect_error(
@@ -147,10 +130,21 @@ static void test_errors(void) {
       "fn take(r: &i32) i32 { return *r; }\n"
       "fn give(p: *const i32) i32 { return take(p); }\n",
       "mismatched types");
+  // The entry point must be exactly `fn main() i32` (it lowers to C's `int main(void)`).
+  expect_error("main returning void", "fn main() void { }\n", "'main' must be declared 'fn main() i32'");
+  expect_error("main with no return type", "fn main() { return; }\n", "'main' must be declared 'fn main() i32'");
+  expect_error(
+      "main with a wrong return type", "fn main() bool { return true; }\n", "'main' must be declared 'fn main() i32'");
+  expect_error(
+      "main with parameters", "fn main(x: i32) i32 { return 0; }\n", "'main' must be declared 'fn main() i32'");
 }
 
 int main(void) {
   test_ok();
+  test_computed_scalar_types();
+  test_computed_pointer_types();
+  test_computed_reference_type();
+  test_literal_types();
   test_errors();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");

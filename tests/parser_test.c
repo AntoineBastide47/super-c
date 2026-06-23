@@ -1,54 +1,17 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+// Parser coverage. Beyond item/statement counts, this asserts tree *shape*: operator precedence
+// and associativity, the `>>` token split inside nested generics, the struct-initializer
+// ambiguity flag (`Foo {}` as a value vs `if cond {}` as a condition), and multi-error recovery.
 
-#include "ast/parser.h"
-#include "lexer/lexer.h"
+#include "test_harness.h"
 
-static int failures;
-
-#define CHECK(condition, ...)                                                                                          \
-  do {                                                                                                                 \
-    if (!(condition)) {                                                                                                \
-      fprintf(stderr, "%s:%d: ", __FILE__, __LINE__);                                                                  \
-      fprintf(stderr, __VA_ARGS__);                                                                                    \
-      fputc('\n', stderr);                                                                                             \
-      failures++;                                                                                                      \
-    }                                                                                                                  \
-  } while (0)
-
-static void free_errors(String_Vec *errors) {
-  for (size_t i = 0; i < errors->len; i++)
-    free(errors->data[i]);
-  VEC_DEINIT_REF(errors);
+static bool parse_has_error(const char *source) {
+  char first[256];
+  return sc_stage_errors("rejection", source, ST_PARSE, first, sizeof first) >= 1;
 }
 
-static Ast *parse(const char *name, const char *source) {
-  Lexer *lexer = lexer_new(source, strlen(source));
-  lexer_scan_tokens(lexer);
-  if (lexer_has_errors(lexer)) {
-    String_Vec errors = lexer_take_errors(lexer);
-    CHECK(false, "%s: lexer error: %s", name, errors.data[0]);
-    free_errors(&errors);
-    lexer_free(&lexer);
-    return NULL;
-  }
-
-  Token_Vec tokens = lexer_take_tokens(lexer);
-  lexer_free(&lexer);
-  Parser *parser = parser_new(tokens, source, strlen(source));
-  parser_build_ast(parser);
-  if (parser_has_errors(parser)) {
-    String_Vec errors = parser_take_errors(parser);
-    CHECK(false, "%s: parser error: %s", name, errors.data[0]);
-    free_errors(&errors);
-    parser_free(&parser);
-    return NULL;
-  }
-
-  Ast *ast = parser_take_ast(parser);
-  parser_free(&parser);
-  return ast;
+// program item `i`.
+static const Node *item(const Ast *a, const uint32_t i) {
+  return ast_at_const(a, ast_list(a, ast_at_const(a, a->root)->as.program.items)[i]);
 }
 
 static void test_items_and_types(void) {
@@ -57,21 +20,20 @@ static void test_items_and_types(void) {
                                "type Callback = fn(*const u8, []u8, [u8; 16]) (int, Error);\n"
                                "const LIMIT: usize = 16;\n"
                                "extern \"C\" { type CFile; fn fclose(file: *mut CFile) int; }\n";
-  Ast *ast = parse("items and types", source);
+  Ast *ast = sc_parse("items and types", source);
   if (!ast)
     return;
   const Node *root = ast_at_const(ast, ast->root);
   CHECK(root->kind == NODE_PROGRAM, "items and types: expected program root");
   CHECK(root->as.program.items.len == 5, "items and types: expected 5 items, got %u", root->as.program.items.len);
-  const NodeId *items = ast_list(ast, root->as.program.items);
-  CHECK(ast_at_const(ast, items[0])->kind == NODE_STRUCT, "items and types: item 0 should be struct");
-  CHECK(ast_at_const(ast, items[1])->kind == NODE_ENUM, "items and types: item 1 should be enum");
-  CHECK(ast_at_const(ast, items[2])->kind == NODE_TYPE_ALIAS, "items and types: item 2 should be type alias");
-  const Node *callback = ast_at_const(ast, ast_at_const(ast, items[2])->as.type_alias.type);
+  CHECK(item(ast, 0)->kind == NODE_STRUCT, "items and types: item 0 should be struct");
+  CHECK(item(ast, 1)->kind == NODE_ENUM, "items and types: item 1 should be enum");
+  CHECK(item(ast, 2)->kind == NODE_TYPE_ALIAS, "items and types: item 2 should be type alias");
+  const Node *callback = ast_at_const(ast, item(ast, 2)->as.type_alias.type);
   CHECK(callback->kind == NODE_FUNCTION_TYPE, "items and types: callback should be a function type");
   CHECK(callback->as.function_type.returns.len == 2, "items and types: callback should have two returns");
-  CHECK(ast_at_const(ast, items[3])->kind == NODE_CONST, "items and types: item 3 should be const");
-  CHECK(ast_at_const(ast, items[4])->kind == NODE_EXTERN_BLOCK, "items and types: item 4 should be extern");
+  CHECK(item(ast, 3)->kind == NODE_CONST, "items and types: item 3 should be const");
+  CHECK(item(ast, 4)->kind == NODE_EXTERN_BLOCK, "items and types: item 4 should be extern");
   ast_free(&ast);
 }
 
@@ -85,11 +47,10 @@ static void test_functions_and_expressions(void) {
       "  for entry in input { defer consume(move entry); }\n"
       "  return value;\n"
       "}\n";
-  Ast *ast = parse("functions and expressions", source);
+  Ast *ast = sc_parse("functions and expressions", source);
   if (!ast)
     return;
-  const Node *root = ast_at_const(ast, ast->root);
-  const Node *fn = ast_at_const(ast, ast_list(ast, root->as.program.items)[0]);
+  const Node *fn = item(ast, 0);
   CHECK(fn->kind == NODE_FUNCTION, "functions and expressions: expected function");
   CHECK(fn->as.function.generics.len == 1, "functions and expressions: expected one generic");
   CHECK(fn->as.function.params.len == 2, "functions and expressions: expected two parameters");
@@ -112,15 +73,14 @@ static void test_traits_impls_match_and_new(void) {
                                "fn classify(c: u8) int {\n"
                                "  return switch c { case '0'..='9' => 1, Value(x) if x > 0 => x, _ => 0, };\n"
                                "}\n";
-  Ast *ast = parse("interfaces extensions switch and new", source);
+  Ast *ast = sc_parse("interfaces extensions switch and new", source);
   if (!ast)
     return;
   const Node *root = ast_at_const(ast, ast->root);
   CHECK(root->as.program.items.len == 3, "interfaces extensions switch and new: expected 3 items");
-  const NodeId *items = ast_list(ast, root->as.program.items);
-  CHECK(ast_at_const(ast, items[0])->kind == NODE_TRAIT, "expected interface");
-  CHECK(ast_at_const(ast, items[1])->kind == NODE_IMPL, "expected extension");
-  CHECK(ast_at_const(ast, items[2])->kind == NODE_FUNCTION, "expected function");
+  CHECK(item(ast, 0)->kind == NODE_TRAIT, "expected interface");
+  CHECK(item(ast, 1)->kind == NODE_IMPL, "expected extension");
+  CHECK(item(ast, 2)->kind == NODE_FUNCTION, "expected function");
   ast_free(&ast);
 }
 
@@ -130,19 +90,16 @@ static void test_grouped_parameters_and_returns(void) {
                                "fn open(path: str) (file: File, err: IOError) {}\n"
                                "fn log(message: str) {}\n"
                                "fn risky(ptr: *mut int) { unsafe { consume(ptr); } unsafe consume(ptr); }\n";
-  Ast *ast = parse("grouped parameters and returns", source);
+  Ast *ast = sc_parse("grouped parameters and returns", source);
   if (!ast)
     return;
-
   const Node *root = ast_at_const(ast, ast->root);
   CHECK(root->as.program.items.len == 5, "grouped parameters and returns: expected 5 functions");
-  const NodeId *items = ast_list(ast, root->as.program.items);
 
-  const Node *slice = ast_at_const(ast, items[0]);
-  CHECK(slice->as.function.params.len == 4, "grouped parameters and returns: expected 4 slice parameters");
-  CHECK(slice->as.function.returns.len == 1, "grouped parameters and returns: expected one slice return");
+  CHECK(item(ast, 0)->as.function.params.len == 4, "grouped parameters and returns: expected 4 slice parameters");
+  CHECK(item(ast, 0)->as.function.returns.len == 1, "grouped parameters and returns: expected one slice return");
 
-  const Node *divmod = ast_at_const(ast, items[1]);
+  const Node *divmod = item(ast, 1);
   CHECK(divmod->as.function.params.len == 2, "grouped parameters and returns: expected 2 divmod parameters");
   CHECK(divmod->as.function.returns.len == 2, "grouped parameters and returns: expected 2 divmod returns");
   const Node *divmod_body = ast_at_const(ast, divmod->as.function.body);
@@ -150,36 +107,77 @@ static void test_grouped_parameters_and_returns(void) {
   CHECK(return_stmt->kind == NODE_RETURN, "grouped parameters and returns: expected return statement");
   CHECK(return_stmt->as.return_stmt.values.len == 2, "grouped parameters and returns: expected 2 return values");
 
-  const Node *open = ast_at_const(ast, items[2]);
+  const Node *open = item(ast, 2);
   CHECK(open->as.function.returns.len == 2, "grouped parameters and returns: expected 2 named returns");
   const NodeId *open_returns = ast_list(ast, open->as.function.returns);
-  CHECK(
-      ast_at_const(ast, open_returns[0])->kind == NODE_PARAMETER,
-      "grouped parameters and returns: expected named return parameter");
-  CHECK(
-      ast_at_const(ast, open_returns[1])->kind == NODE_PARAMETER,
-      "grouped parameters and returns: expected named return parameter");
+  CHECK(ast_at_const(ast, open_returns[0])->kind == NODE_PARAMETER, "expected named return parameter");
+  CHECK(ast_at_const(ast, open_returns[1])->kind == NODE_PARAMETER, "expected named return parameter");
 
-  const Node *log = ast_at_const(ast, items[3]);
-  CHECK(log->as.function.returns.len == 0, "grouped parameters and returns: expected no log return");
+  CHECK(item(ast, 3)->as.function.returns.len == 0, "grouped parameters and returns: expected no log return");
 
-  const Node *risky = ast_at_const(ast, items[4]);
-  const Node *risky_body = ast_at_const(ast, risky->as.function.body);
+  const Node *risky_body = ast_at_const(ast, item(ast, 4)->as.function.body);
   CHECK(risky_body->as.block.statements.len == 2, "grouped parameters and returns: expected 2 unsafe statements");
   ast_free(&ast);
 }
 
-// Parse only to learn whether the parser reported an error (used for rejection cases).
-static bool parse_has_error(const char *source) {
-  Lexer *lexer = lexer_new(source, strlen(source));
-  lexer_scan_tokens(lexer);
-  Token_Vec tokens = lexer_take_tokens(lexer);
-  lexer_free(&lexer);
-  Parser *parser = parser_new(tokens, source, strlen(source));
-  parser_build_ast(parser);
-  const bool e = parser_has_errors(parser);
-  parser_free(&parser);
-  return e;
+// Precedence: `*` binds tighter than `+`; `-` is left-associative.
+static void test_precedence(void) {
+  Ast *a = sc_parse("precedence", "fn f() i32 { return 1 + 2 * 3; }\n");
+  if (a) {
+    const Node *body = ast_at_const(a, item(a, 0)->as.function.body);
+    const Node *ret = ast_at_const(a, ast_list(a, body->as.block.statements)[0]);
+    const Node *top = ast_at_const(a, ast_list(a, ret->as.return_stmt.values)[0]);
+    CHECK(top->kind == NODE_BINARY && top->as.binary.op == Plus, "top operator is +");
+    CHECK(ast_at_const(a, top->as.binary.right)->as.binary.op == Star, "* is the right child (binds tighter)");
+    CHECK(ast_at_const(a, top->as.binary.left)->kind == NODE_LITERAL, "left operand is the literal 1");
+    ast_free(&a);
+  }
+
+  Ast *b = sc_parse("associativity", "fn f() i32 { return 1 - 2 - 3; }\n");
+  if (b) {
+    const Node *body = ast_at_const(b, item(b, 0)->as.function.body);
+    const Node *ret = ast_at_const(b, ast_list(b, body->as.block.statements)[0]);
+    const Node *top = ast_at_const(b, ast_list(b, ret->as.return_stmt.values)[0]);
+    CHECK(top->kind == NODE_BINARY && top->as.binary.op == Minus, "top operator is -");
+    CHECK(ast_at_const(b, top->as.binary.left)->as.binary.op == Minus, "- is left-associative (left child is -)");
+    ast_free(&b);
+  }
+}
+
+// `Vec<Vec<i32>>` requires splitting the `>>` token into two closing `>`s.
+static void test_generic_shift_split(void) {
+  Ast *a = sc_parse("generic >> split", "type Nested = Vec<Vec<i32>>;\n");
+  if (!a)
+    return;
+  const Node *outer = ast_at_const(a, item(a, 0)->as.type_alias.type);
+  CHECK(outer->kind == NODE_TYPE_PATH && outer->as.type_path.args.len == 1, "outer Vec has one type argument");
+  const Node *inner = ast_at_const(a, ast_list(a, outer->as.type_path.args)[0]);
+  CHECK(inner->kind == NODE_TYPE_PATH && inner->as.type_path.args.len == 1, "inner Vec<i32> parsed (>> was split)");
+  ast_free(&a);
+}
+
+// The struct-initializer flag: `Foo {}` is a value, but in a condition the `{` opens the block.
+static void test_struct_initializer_flag(void) {
+  Ast *a = sc_parse("struct init value", "struct Foo { x: i32, }\nfn f() void { let p: Foo = Foo { x: 1, }; }\n");
+  if (a) {
+    const Node *let = ast_at_const(a, th_nth_kind(a, NODE_LET, 0));
+    CHECK(ast_at_const(a, let->as.let_stmt.value)->kind == NODE_STRUCT_INITIALIZER, "Foo {} is a struct initializer");
+    ast_free(&a);
+  }
+  Ast *b = sc_parse("condition is not struct init", "fn g() void { if cond { } }\n");
+  if (b) {
+    const Node *iff = ast_at_const(b, th_nth_kind(b, NODE_IF, 0));
+    CHECK(ast_at_const(b, iff->as.if_stmt.condition)->kind == NODE_IDENTIFIER, "`if cond {}` keeps cond as the value");
+    CHECK(ast_at_const(b, iff->as.if_stmt.then_branch)->kind == NODE_BLOCK, "the `{}` is the then-branch");
+    ast_free(&b);
+  }
+}
+
+static void test_error_recovery(void) {
+  char first[256];
+  const size_t n =
+      sc_stage_errors("recovery", "fn f() void { let x: i32 = ; let y: i32 = ; }\n", ST_PARSE, first, sizeof first);
+  CHECK(n >= 2, "two malformed lets produce multiple errors (got %zu), proving resync", n);
 }
 
 static void test_bare_conditions_and_ranges(void) {
@@ -191,11 +189,10 @@ static void test_bare_conditions_and_ranges(void) {
                                "  for i in ..4 { }\n"
                                "  for i in 6.. { }\n"
                                "}\n";
-  Ast *ast = parse("bare conditions and ranges", source);
+  Ast *ast = sc_parse("bare conditions and ranges", source);
   if (!ast)
     return;
-  const Node *fn = ast_at_const(ast, ast_list(ast, ast_at_const(ast, ast->root)->as.program.items)[0]);
-  const Node *body = ast_at_const(ast, fn->as.function.body);
+  const Node *body = ast_at_const(ast, item(ast, 0)->as.function.body);
   const NodeId *stmts = ast_list(ast, body->as.block.statements);
   CHECK(body->as.block.statements.len == 6, "bare conditions: expected 6 statements");
   CHECK(ast_at_const(ast, stmts[0])->kind == NODE_IF, "bare 'if' parses to NODE_IF");
@@ -218,7 +215,6 @@ static void test_bare_conditions_and_ranges(void) {
   CHECK(parse_has_error("fn f() void { for i in 0..= { } }\n"), "inclusive range without an end is rejected");
 }
 
-// switch patterns share the for-loop range grammar, so the same half-open forms are accepted.
 static void test_switch_pattern_ranges(void) {
   static const char source[] = "fn f(n: i32) i32 {\n"
                                "  return switch n {\n"
@@ -229,11 +225,10 @@ static void test_switch_pattern_ranges(void) {
                                "    _ => 0,\n"
                                "  };\n"
                                "}\n";
-  Ast *ast = parse("switch pattern ranges", source);
+  Ast *ast = sc_parse("switch pattern ranges", source);
   if (!ast)
     return;
-  const Node *fn = ast_at_const(ast, ast_list(ast, ast_at_const(ast, ast->root)->as.program.items)[0]);
-  const Node *body = ast_at_const(ast, fn->as.function.body);
+  const Node *body = ast_at_const(ast, item(ast, 0)->as.function.body);
   const Node *ret = ast_at_const(ast, ast_list(ast, body->as.block.statements)[0]);
   const Node *sw = ast_at_const(ast, ast_list(ast, ret->as.return_stmt.values)[0]);
   CHECK(sw->kind == NODE_MATCH, "switch parses to NODE_MATCH");
@@ -258,6 +253,10 @@ int main(void) {
   test_functions_and_expressions();
   test_traits_impls_match_and_new();
   test_grouped_parameters_and_returns();
+  test_precedence();
+  test_generic_shift_split();
+  test_struct_initializer_flag();
+  test_error_recovery();
   test_bare_conditions_and_ranges();
   test_switch_pattern_ranges();
   if (failures) {

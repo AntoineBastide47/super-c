@@ -1,27 +1,6 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "test_harness.h"
 
-#include "lexer/lexer.h"
 #include "lexer/token_type.h"
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                                          \
-  do {                                                                                                                 \
-    if (!(condition)) {                                                                                                \
-      fprintf(stderr, "%s:%d: ", __FILE__, __LINE__);                                                                  \
-      fprintf(stderr, __VA_ARGS__);                                                                                    \
-      fputc('\n', stderr);                                                                                             \
-      failures++;                                                                                                      \
-    }                                                                                                                  \
-  } while (0)
-
-static void free_errors(String_Vec *errors) {
-  for (size_t i = 0; i < errors->len; i++)
-    free(errors->data[i]);
-  VEC_DEINIT_REF(errors);
-}
 
 static void expect_tokens(const char *name, const char *source, const TokenType *expected, size_t expected_len) {
   Lexer *lexer = lexer_new(source, strlen(source));
@@ -233,12 +212,48 @@ static void test_raw_delimiter_limit(void) {
   free(source);
 }
 
+// Token spans are byte ranges into the source; assert exact start/end across a small program.
+static void test_spans(void) {
+  static const char src[] = "let x = 10;";
+  Lexer *lexer = lexer_new(src, strlen(src));
+  lexer_scan_tokens(lexer);
+  CHECK(!lexer_has_errors(lexer), "spans: unexpected error");
+  Token_Vec t = lexer_take_tokens(lexer);
+  // Let[0,3) Identifier[4,5) Equal[6,7) IntegerLiteral[8,10) Semicolon[10,11) Eof[11,11)
+  CHECK(t.len == 6, "spans: expected 6 tokens, got %zu", t.len);
+  if (t.len == 6) {
+    CHECK(token_start(t.data[0]) == 0 && token_end(t.data[0]) == 3, "Let span [0,3)");
+    CHECK(token_start(t.data[1]) == 4 && token_end(t.data[1]) == 5, "Identifier span [4,5)");
+    CHECK(token_start(t.data[3]) == 8 && token_end(t.data[3]) == 10, "IntegerLiteral span [8,10)");
+    CHECK(token_start(t.data[4]) == 10 && token_end(t.data[4]) == 11, "Semicolon span [10,11)");
+    CHECK(token_type(t.data[5]) == Eof && token_start(t.data[5]) == 11, "EOF sits at end of input");
+  }
+  VEC_DEINIT(t);
+  lexer_free(&lexer);
+}
+
+// The lexer recovers and keeps scanning, collecting more than one diagnostic.
+static void test_multiple_errors(void) {
+  static const char src[] = "@ @ @"; // three reserved-'@' errors
+  Lexer *lexer = lexer_new(src, strlen(src));
+  lexer_scan_tokens(lexer);
+  CHECK(lexer_has_errors(lexer), "expected errors");
+  String_Vec e = lexer_take_errors(lexer);
+  CHECK(e.len >= 2, "lexer recovers and collects multiple errors (got %zu)", e.len);
+  free_errors(&e);
+  Token_Vec t = lexer_take_tokens(lexer);
+  VEC_DEINIT(t);
+  lexer_free(&lexer);
+}
+
 int main(void) {
   test_keywords();
   test_operators();
   test_literals();
   test_ranges();
   test_comments();
+  test_spans();
+  test_multiple_errors();
   test_errors();
   test_bom();
   test_raw_delimiter_limit();

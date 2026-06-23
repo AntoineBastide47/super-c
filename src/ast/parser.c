@@ -16,6 +16,7 @@ struct Parser {
 static NodeId parse_item(Parser *p);
 static NodeId parse_statement(Parser *p);
 static NodeId parse_block(Parser *p);
+static NodeId parse_if(Parser *p);
 static NodeId parse_expression(Parser *p);
 static NodeId parse_type(Parser *p);
 static NodeId parse_pattern(Parser *p);
@@ -472,6 +473,7 @@ static NodeId parse_variant(Parser *p) {
   const NodeId name = identifier(p);
   NodeList payload = {0};
   bool struct_payload = false;
+  NodeId value = NODE_NONE;
   if (match(p, LeftParen)) {
     payload = parse_comma_types(p, RightParen);
     expect(p, RightParen, "')'");
@@ -479,12 +481,14 @@ static NodeId parse_variant(Parser *p) {
     struct_payload = true;
     payload = parse_fields(p);
     expect(p, RightBrace, "'}'");
+  } else if (match(p, Equal)) { // explicit discriminant `Variant = <int>` (one-token lookahead)
+    value = parse_expression(p);
   }
   return ast_add(
       p->ast, (Node){
                   .kind = NODE_VARIANT,
                   .span = span_new(start, previous_end(p)),
-                  .as.variant = {.name = name, .payload = payload, .struct_payload = struct_payload},
+                  .as.variant = {.name = name, .payload = payload, .struct_payload = struct_payload, .value = value},
               });
 }
 
@@ -865,15 +869,38 @@ static NodeId parse_primary(Parser *p) {
   }
   if (type == Switch)
     return parse_switch(p);
+  if (type == If) // `if cond { a; } else { b; }` as a value (one-token lookahead, LL(1))
+    return parse_if(p);
   if (match(p, New)) {
     const NodeId new_type = parse_type(p);
-    const NodeId initializer =
-        check(p, LeftBrace) ? parse_struct_initializer_after(p, new_type, node_span(p, new_type).start) : NODE_NONE;
+    NodeId initializer = NODE_NONE;
+    if (check(p, LeftBrace)) // `new T { .. }` struct initializer
+      initializer = parse_struct_initializer_after(p, new_type, node_span(p, new_type).start);
+    else if (match(p, LeftParen)) { // `new T(expr)` scalar initializer (one-token lookahead, LL(1))
+      initializer = parse_expression(p);
+      expect(p, RightParen, "')'");
+    }
     return ast_add(
         p->ast, (Node){
                     .kind = NODE_NEW,
                     .span = span_new(start, previous_end(p)),
                     .as.new_expr = {.type = new_type, .initializer = initializer},
+                });
+  }
+  if (match(p, LeftBracket)) { // `[e0, e1, ...]` array literal (postfix `[` indexing lives in parse_postfix)
+    const uint32_t mark = ast_mark(p->ast);
+    while (!check(p, RightBracket) && !at_end(p)) {
+      ast_push(p->ast, parse_expression(p));
+      if (!match(p, Comma))
+        break;
+    }
+    const NodeList elements = ast_commit(p->ast, mark);
+    expect(p, RightBracket, "']'");
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_ARRAY_LITERAL,
+                    .span = span_new(start, previous_end(p)),
+                    .as.array_literal = {.elements = elements},
                 });
   }
   error_here(p, "expected expression");
@@ -916,13 +943,23 @@ static NodeId parse_postfix(Parser *p) {
                       .as.member = {.object = expr, .member = member, .pointer = pointer},
                   });
     } else if (match(p, PathSeparator)) {
-      const NodeList types = parse_type_args(p);
-      expr = ast_add(
-          p->ast, (Node){
-                      .kind = NODE_GENERIC_SPECIALIZATION,
-                      .span = span_new(start, previous_end(p)),
-                      .as.specialization = {.expression = expr, .types = types},
-                  });
+      if (check(p, LessThan)) { // `expr::<T, ...>` turbofish
+        const NodeList types = parse_type_args(p);
+        expr = ast_add(
+            p->ast, (Node){
+                        .kind = NODE_GENERIC_SPECIALIZATION,
+                        .span = span_new(start, previous_end(p)),
+                        .as.specialization = {.expression = expr, .types = types},
+                    });
+      } else { // `Enum::Variant` path access (one-token lookahead keeps this LL(1))
+        const NodeId member = identifier(p);
+        expr = ast_add(
+            p->ast, (Node){
+                        .kind = NODE_MEMBER,
+                        .span = span_new(start, node_span(p, member).end),
+                        .as.member = {.object = expr, .member = member, .path = true},
+                    });
+      }
     } else if (match(p, As)) {
       const NodeId cast_type = parse_type(p);
       expr = ast_add(
@@ -946,12 +983,14 @@ static NodeId parse_unary(Parser *p) {
   if (!unary_operator(peek_type(p)))
     return parse_postfix(p);
   const Token op = advance(p);
+  // `&mut expr` is a mutable address-of (one-token lookahead after `&`, so still LL(1)).
+  const TypeQualifier qualifier = token_type(op) == Ampersand && match(p, Mut) ? TYPE_QUAL_MUT : TYPE_QUAL_NONE;
   const NodeId operand = token_type(op) == Unsafe && check(p, LeftBrace) ? parse_block(p) : parse_unary(p);
   return ast_add(
       p->ast, (Node){
                   .kind = NODE_UNARY,
                   .span = span_new(token_start(op), node_span(p, operand).end),
-                  .as.unary = {.op = token_type(op), .operand = operand},
+                  .as.unary = {.op = token_type(op), .operand = operand, .qualifier = qualifier},
               });
 }
 
@@ -1072,7 +1111,29 @@ static NodeId parse_let(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   advance(p);
   const bool is_mutable = match(p, Mut);
-  const NodeId name = identifier(p);
+  // `let (a, b, ..) = call` destructures a multi-value return; a `(` after `let` is unambiguous
+  // (a single binding is always a bare identifier), keeping this LL(1).
+  NodeId name;
+  if (check(p, LeftParen)) {
+    const uint32_t tstart = token_start(raw_peek(p));
+    advance(p);
+    const uint32_t mark = ast_mark(p->ast);
+    while (!check(p, RightParen) && !at_end(p)) {
+      ast_push(p->ast, identifier(p));
+      if (!match(p, Comma))
+        break;
+    }
+    const NodeList children = ast_commit(p->ast, mark);
+    expect(p, RightParen, "')'");
+    name = ast_add(
+        p->ast, (Node){
+                    .kind = NODE_PATTERN_TUPLE,
+                    .span = span_new(tstart, previous_end(p)),
+                    .as.pattern = {.name = NODE_NONE, .children = children},
+                });
+  } else {
+    name = identifier(p);
+  }
   NodeId type = NODE_NONE;
   NodeId value = NODE_NONE;
   if (match(p, Colon)) {

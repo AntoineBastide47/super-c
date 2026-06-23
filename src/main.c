@@ -18,7 +18,8 @@
   #define BIN_NAME "super-c"
 #endif
 
-static void run(const char *source, const size_t len, const char *out_path) {
+// Returns 0 on success, 1 if any stage reported errors or the output file could not be opened.
+static int run(const char *source, const size_t len, const char *out_path) {
   Lexer *lexer = lexer_new(source, len);
   lexer_scan_tokens(lexer);
   ERRORS_CHECK(lexer);
@@ -28,36 +29,31 @@ static void run(const char *source, const size_t len, const char *out_path) {
   parser_build_ast(parser);
   ERRORS_CHECK(parser);
 
-  Ast *ast = parser_take_ast(parser);
+  Resolver *resolver = resolver_new(parser_take_ast(parser), source, len);
   parser_free(&parser);
-
-  Resolver *resolver = resolver_new(ast, source, len);
   resolver_resolve(resolver);
   ERRORS_CHECK(resolver);
 
-  ast = resolver_take_ast(resolver);
+  TypeChecker *typechecker = typechecker_new(resolver_take_ast(resolver), source, len);
   resolver_free(&resolver);
-
-  TypeChecker *typechecker = typechecker_new(ast, source, len);
   typechecker_check(typechecker);
   ERRORS_CHECK(typechecker);
 
-  ast = typechecker_take_ast(typechecker);
-  typechecker_free(&typechecker);
-
   FILE *out = fopen(out_path, "w");
   if (!out) {
+    typechecker_free(&typechecker);
     perror(out_path);
-    ast_free(&ast);
-    return;
+    return 1;
   }
-  Codegen *codegen = codegen_new(ast, source, len);
+
+  Codegen *codegen = codegen_new(typechecker_take_ast(typechecker), source, len);
+  typechecker_free(&typechecker);
   codegen_emit(codegen, out);
-  fclose(out); // closed before ERRORS_CHECK's early return
+  fclose(out);
   ERRORS_CHECK(codegen);
-  ast = codegen_take_ast(codegen);
-  ast_free(&ast);
+
   codegen_free(&codegen);
+  return 0;
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer.
@@ -126,10 +122,10 @@ static int run_file(const char *path) {
     free(source);
     return 1;
   }
-  run(source, size, out_path);
+  const int rc = run(source, size, out_path);
   free(out_path);
   free(source);
-  return 0;
+  return rc;
 }
 
 static int run_prompt(void) {

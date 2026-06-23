@@ -155,6 +155,7 @@ static const char *kind_name(const NodeKind kind) {
       "Match",
       "MatchArm",
       "New",
+      "ArrayLiteral",
       "StructInitializer",
       "FieldInitializer",
       "PatternWildcard",
@@ -351,6 +352,9 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
     case NODE_NEW:
       print_child(out, a, n->as.new_expr.type, source, depth + 1);
       print_child(out, a, n->as.new_expr.initializer, source, depth + 1);
+      break;
+    case NODE_ARRAY_LITERAL:
+      print_list(out, a, n->as.array_literal.elements, source, depth + 1);
       break;
     case NODE_STRUCT_INITIALIZER:
       print_child(out, a, n->as.struct_initializer.type, source, depth + 1);

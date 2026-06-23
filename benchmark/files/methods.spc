@@ -1322,7 +1322,7 @@ extend S119 {
   fn m6(self: &S119) i32 { return self.m4(2) + self.m5(); }
   fn m7(self: &S119) i32 { return self.m6() + self.m3() + self.m0(); }
 }
-fn main() void {
+fn main() i32 {
   let mut acc: i32 = 0;
   let s0: S0 = S0 { a: 1, b: 2, c: 3, };
   acc = acc + s0.m7();

@@ -49,6 +49,8 @@ static void emit_expr(Codegen *c, NodeId id);
 static void emit_stmt(Codegen *c, NodeId id);
 static void emit_block(Codegen *c, NodeId id);
 static void emit_if(Codegen *c, const Node *n);
+static void emit_if_expr(Codegen *c, NodeId id);
+static void emit_array_braces(Codegen *c, const Node *n);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -117,11 +119,18 @@ static void emit_bytes(Codegen *c, const char *const p, const size_t n) {
   c->buf_len += n;
 }
 
-__attribute__((format(printf, 2, 3))) static void emit(Codegen *c, const char *fmt, ...) {
-  if (!strchr(fmt, '%')) { // no conversions (the common case): skip vsnprintf, just copy
+#if defined(__GNUC__) || defined(__clang__)
+# define EMIT_FORMAT __attribute__((format(printf, 2, 3)))
+#else
+# define EMIT_FORMAT
+#endif
+
+EMIT_FORMAT static void emit(Codegen *c, const char *fmt, ...) {
+  if (!strchr(fmt, '%')) {
     emit_bytes(c, fmt, strlen(fmt));
     return;
   }
+
   va_list args;
   va_start(args, fmt);
   const size_t avail = c->buf_cap - c->buf_len;
@@ -561,13 +570,64 @@ static void emit_prefixed(Codegen *c, const NodeId obj, const char *prefix) {
   }
 }
 
+// Emit an `Enum::Variant` value. A payload-less enum lowers to its plain C tag constant; a unit
+// variant of a tagged (payload-bearing) enum is a struct literal with only its tag set.
+static void emit_variant_value(Codegen *c, const NodeId variant) {
+  const NodeId en = enclosing_enum(c, variant);
+  if (en == NODE_NONE) {
+    emit(c, "0");
+    return;
+  }
+  if (!aggregate_has_payload(c, ast_at_const(c->ast, en))) {
+    emit_tag(c, en, variant);
+    return;
+  }
+  char enm[128];
+  render_ident(c, name_span(c, ast_at_const(c->ast, en)->as.aggregate.name), enm, sizeof enm);
+  emit(c, "(%s){ .tag = ", enm);
+  emit_tag(c, en, variant);
+  emit(c, " }");
+}
+
+// Emit `Enum::Variant(args)` construction as a tagged-union compound literal.
+static void emit_variant_construct(Codegen *c, const NodeId variant, const NodeList args, const NodeId *const aids) {
+  const NodeId en = enclosing_enum(c, variant);
+  if (en == NODE_NONE || !aggregate_has_payload(c, ast_at_const(c->ast, en))) {
+    emit_variant_value(c, variant); // payload-less: ignore (absent) args, emit the tag
+    return;
+  }
+  char enm[128], vn[128];
+  render_ident(c, name_span(c, ast_at_const(c->ast, en)->as.aggregate.name), enm, sizeof enm);
+  render_ident(c, name_span(c, ast_at_const(c->ast, variant)->as.variant.name), vn, sizeof vn);
+  emit(c, "(%s){ .tag = ", enm);
+  emit_tag(c, en, variant);
+  if (args.len) {
+    emit(c, ", .payload.%s = { ", vn);
+    for (uint32_t i = 0; i < args.len; i++) {
+      if (i)
+        emit(c, ", ");
+      emit_expr(c, aids[i]);
+    }
+    emit(c, " }");
+  }
+  emit(c, " }");
+}
+
 static void emit_call(Codegen *c, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(c->ast, args);
 
-  if (callee->kind == NODE_MEMBER) {
+  if (callee->kind == NODE_MEMBER && callee->as.member.path) { // Enum::Variant(args)
+    const NodeId variant = ast_resolution(c->ast, callee->as.member.member);
+    if (variant != NODE_NONE && ast_at_const(c->ast, variant)->kind == NODE_VARIANT) {
+      emit_variant_construct(c, variant, args, aids);
+      return;
+    }
+  }
+
+  if (callee->kind == NODE_MEMBER && !callee->as.member.path) {
     const NodeId method = ast_resolution(c->ast, callee->as.member.member);
     if (method != NODE_NONE && ast_at_const(c->ast, method)->kind == NODE_FUNCTION) {
       const NodeId obj = callee->as.member.object;
@@ -687,6 +747,19 @@ static void emit_ident_ref(Codegen *c, const NodeId id, const Node *n) {
   emit_ident(c, n->as.name.text);
 }
 
+// `{ e0, e1, .., e(n-1) }` — the element list of an array literal, no type prefix.
+static void emit_array_braces(Codegen *c, const Node *n) {
+  const NodeList elements = n->as.array_literal.elements;
+  const NodeId *const ids = ast_list(c->ast, elements);
+  emit(c, "{ ");
+  for (uint32_t i = 0; i < elements.len; i++) {
+    if (i)
+      emit(c, ", ");
+    emit_expr(c, ids[i]);
+  }
+  emit(c, " }");
+}
+
 static void emit_expr(Codegen *c, const NodeId id) {
   if (id == NODE_NONE)
     return;
@@ -743,6 +816,10 @@ static void emit_expr(Codegen *c, const NodeId id) {
       break;
     }
     case NODE_MEMBER: {
+      if (n->as.member.path) { // Enum::Variant used as a value
+        emit_variant_value(c, ast_resolution(c->ast, n->as.member.member));
+        break;
+      }
       const Ty *const ot = ast_type_at(c->ast, ast_type(c->ast, n->as.member.object));
       const bool ptr = ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE;
       emit_expr(c, n->as.member.object);
@@ -767,8 +844,25 @@ static void emit_expr(Codegen *c, const NodeId id) {
     case NODE_NEW:
       emit_new(c, n);
       break;
+    case NODE_ARRAY_LITERAL: {
+      // `[e0, .., e(n-1)]` in a general value position (arg/field) -> a C compound literal
+      // `(T[N]){ .. }`; N is the element count, T the interned element type. A let/const initializer
+      // emits the brace list alone (see emit_stmt), since `const T a[N]` can't take a compound literal.
+      const TypeId at = ast_type(c->ast, id);
+      char et[256];
+      if (at != TYPE_NONE)
+        render_type_id(c, ast_type_at(c->ast, at)->as.elem, "", et, sizeof et);
+      else
+        snprintf(et, sizeof et, "int");
+      emit(c, "(%s[%u])", et, n->as.array_literal.elements.len);
+      emit_array_braces(c, n);
+      break;
+    }
     case NODE_MATCH:
       emit_match_expr(c, id);
+      break;
+    case NODE_IF:
+      emit_if_expr(c, id);
       break;
     case NODE_BLOCK:
       emit(c, "(");
@@ -801,8 +895,24 @@ static bool pat_trivial(const NodeKind k) {
 static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
   const Node *const p = ast_at_const(c->ast, pid);
   switch (p->kind) {
+    case NODE_PATTERN_NAME: {
+      // A name bound to a unit variant (by the type checker) is a tag test; otherwise it is a
+      // catch-all binding that matches anything.
+      const NodeId vd = ast_resolution(c->ast, p->as.pattern.name);
+      if (vd != NODE_NONE && ast_at_const(c->ast, vd)->kind == NODE_VARIANT) {
+        const NodeId en = enclosing_enum(c, vd);
+        const bool payload = en != NODE_NONE && aggregate_has_payload(c, ast_at_const(c->ast, en));
+        emit(c, payload ? "%s.tag == " : "%s == ", scrut);
+        if (en != NODE_NONE)
+          emit_tag(c, en, vd);
+        else
+          emit(c, "0");
+      } else {
+        emit(c, "1");
+      }
+      break;
+    }
     case NODE_PATTERN_WILDCARD:
-    case NODE_PATTERN_NAME:
     case NODE_IDENTIFIER:
       emit(c, "1");
       break;
@@ -887,11 +997,15 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
 static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) {
   const Node *const p = ast_at_const(c->ast, pid);
   switch (p->kind) {
-    case NODE_PATTERN_NAME:
+    case NODE_PATTERN_NAME: {
+      const NodeId vd = ast_resolution(c->ast, p->as.pattern.name);
+      if (vd != NODE_NONE && ast_at_const(c->ast, vd)->kind == NODE_VARIANT)
+        break; // a unit-variant tag pattern binds nothing
       emit_indent(c);
       emit_binding(c, ast_type(c->ast, pid), name_span(c, p->as.pattern.name), true);
       emit(c, " = %s;\n", scrut);
       break;
+    }
     case NODE_IDENTIFIER:
       emit_indent(c);
       emit_binding(c, ast_type(c->ast, pid), p->as.name.text, true);
@@ -1001,6 +1115,13 @@ static void emit_match_core(Codegen *c, const NodeId id, const int mode, const c
     emit_indent(c);
     emit(c, "}\n");
   }
+  // In value/return position the match must yield a value, so an unmatched fallthrough is a bug:
+  // tell C the chain is exhaustive (matches the language's exhaustiveness rule) and silence
+  // -Wreturn-type for the enclosing function. (A trailing `_`/binding arm makes this else dead.)
+  if (mode != 0 && arms.len > 0) {
+    emit_indent(c);
+    emit(c, "else { __builtin_unreachable(); }\n");
+  }
 }
 
 static void emit_match_stmt(Codegen *c, const NodeId id) {
@@ -1070,6 +1191,69 @@ static void emit_if(Codegen *c, const Node *n) {
     else
       emit_block(c, n->as.if_stmt.else_branch);
   }
+}
+
+// Emit a branch block of an `if`-expression: every statement verbatim, but the tail expression
+// statement assigns its value to `result` (the GNU statement-expression's yielded slot).
+static void emit_block_value(Codegen *c, const NodeId id, const char *result) {
+  const Node *const n = ast_at_const(c->ast, id);
+  emit(c, "{\n");
+  c->depth++;
+  const NodeList stmts = n->as.block.statements;
+  const NodeId *const ids = ast_list(c->ast, stmts);
+  for (uint32_t i = 0; i < stmts.len; i++) {
+    const Node *const s = ast_at_const(c->ast, ids[i]);
+    emit_indent(c);
+    if (i + 1 == stmts.len && s->kind == NODE_EXPRESSION_STATEMENT) {
+      emit(c, "%s = ", result);
+      emit_expr(c, s->as.single.value);
+      emit(c, ";\n");
+    } else {
+      emit_stmt(c, ids[i]);
+    }
+  }
+  c->depth--;
+  emit_indent(c);
+  emit(c, "}");
+}
+
+// The if/else chain of an `if`-expression, each arm assigning its tail value to `result`.
+static void emit_if_value(Codegen *c, const Node *n, const char *result) {
+  emit(c, "if ");
+  emit_condition(c, n->as.if_stmt.condition);
+  emit(c, " ");
+  emit_block_value(c, n->as.if_stmt.then_branch, result);
+  const NodeId e = n->as.if_stmt.else_branch; // the type checker requires an else in value position
+  emit(c, " else ");
+  if (ast_at_const(c->ast, e)->kind == NODE_IF)
+    emit_if_value(c, ast_at_const(c->ast, e), result);
+  else
+    emit_block_value(c, e, result);
+}
+
+// An `if` used as a value: wrap the chain in a GNU statement-expression yielding `res`.
+static void emit_if_expr(Codegen *c, const NodeId id) {
+  const Node *const n = ast_at_const(c->ast, id);
+  const TypeId rt = ast_type(c->ast, id);
+  char res[32];
+  fresh(c, res, sizeof res);
+  char decl[256];
+  if (rt != TYPE_NONE)
+    render_type_id(c, rt, res, decl, sizeof decl);
+  else
+    snprintf(decl, sizeof decl, "int %s", res);
+  emit(c, "({\n");
+  c->depth++;
+  emit_indent(c);
+  emit(c, "%s;\n", decl);
+  emit_indent(c);
+  emit_if_value(c, n, res);
+  emit(c, "\n");
+  emit_indent(c);
+  emit(c, "%s;\n", res);
+  c->depth--;
+  emit_indent(c);
+  emit(c, "})");
 }
 
 // Recover an array's element count from the iterable's declared type node (an array parameter
@@ -1245,6 +1429,38 @@ static void emit_expr_stmt(Codegen *c, NodeId v) {
   emit(c, ";\n");
 }
 
+// `let (a, b, ..) = call` -> a hidden temp holding the multi-return struct, then one binding per
+// element reading its `_i` field. `__auto_type` sidesteps naming the synthesized `<fn>_ret` type.
+static void emit_tuple_let(Codegen *c, const Node *n) {
+  char tmp[32];
+  fresh(c, tmp, sizeof tmp);
+  emit(c, "const __auto_type %s = ", tmp);
+  emit_expr(c, n->as.let_stmt.value);
+  emit(c, ";\n");
+  const Node *const nm = ast_at_const(c->ast, n->as.let_stmt.name);
+  const NodeList names = nm->as.pattern.children;
+  const NodeId *const nids = ast_list(c->ast, names);
+  const char *const qual = n->as.let_stmt.is_mutable ? "" : "const ";
+  for (uint32_t i = 0; i < names.len; i++) {
+    emit_indent(c);
+    char bn[128];
+    render_ident(c, name_span(c, nids[i]), bn, sizeof bn);
+    emit(c, "%s__auto_type %s = %s._%u;\n", qual, bn, tmp, i);
+  }
+}
+
+// A binding initializer. An array literal whose declarator is a real C array (`T name[N]`, from an
+// array-type annotation) emits a brace list, since a `const`-qualified array can't take a compound
+// literal; every other value (incl. an array literal bound to a decayed pointer) goes through emit_expr.
+static void emit_initializer(Codegen *c, const NodeId type, const NodeId value) {
+  const Node *const val = ast_at_const(c->ast, value);
+  if (val->kind == NODE_ARRAY_LITERAL && type != NODE_NONE &&
+      ast_at_const(c->ast, type)->kind == NODE_ARRAY_TYPE)
+    emit_array_braces(c, val);
+  else
+    emit_expr(c, value);
+}
+
 static void emit_stmt(Codegen *c, const NodeId id) {
   if (id == NODE_NONE)
     return;
@@ -1255,6 +1471,10 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       emit(c, "\n");
       break;
     case NODE_LET: {
+      if (ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE) {
+        emit_tuple_let(c, n);
+        break;
+      }
       if (n->as.let_stmt.type != NODE_NONE) {
         char nm[128], decl[300];
         render_ident(c, name_span(c, n->as.let_stmt.name), nm, sizeof nm);
@@ -1265,7 +1485,7 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       }
       if (n->as.let_stmt.value != NODE_NONE) {
         emit(c, " = ");
-        emit_expr(c, n->as.let_stmt.value);
+        emit_initializer(c, n->as.let_stmt.type, n->as.let_stmt.value);
       }
       emit(c, ";\n");
       break;
@@ -1277,7 +1497,7 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       emit(c, "static const %s", decl);
       if (n->as.const_def.value != NODE_NONE) {
         emit(c, " = ");
-        emit_expr(c, n->as.const_def.value);
+        emit_initializer(c, n->as.const_def.type, n->as.const_def.value);
       }
       emit(c, ";\n");
       break;
@@ -1368,7 +1588,7 @@ static void emit_function(Codegen *c, const NodeId fn_id, const NodeId target, c
 
   const NodeList rets = fn->as.function.returns;
   c->current_ret[0] = '\0';
-  // C requires `int main(void)`; a Super-C `fn main() void` implicitly returns 0.
+  // C requires `int main(void)`; a Super-C `fn main() i32` maps onto it (implicit 0 on fall-through).
   if (target == NODE_NONE && !extern_q && span_is(c->source, name_span(c, fn->as.function.name), "main")) {
     emit(c, "int %s", decl);
   } else if (rets.len > 1) {
@@ -1456,6 +1676,11 @@ static void phase_forward(Codegen *c) {
         if (j)
           emit(c, ", ");
         emit_tag(c, ids[i], mids[j]);
+        const NodeId disc = ast_at_const(c->ast, mids[j])->as.variant.value;
+        if (disc != NODE_NONE) { // explicit discriminant `= <int>`
+          emit(c, " = ");
+          emit_expr(c, disc);
+        }
       }
       emit(c, " } ");
       emit_ident(c, name_span(c, n->as.aggregate.name));
