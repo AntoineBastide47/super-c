@@ -1043,12 +1043,29 @@ static NodeId parse_postfix(Parser *p) {
     } else if (match(p, PathSeparator)) {
       if (check(p, LessThan)) { // `expr::<T, ...>` turbofish
         const NodeList types = parse_type_args(p);
+        const NodeId inner = expr;
         expr = ast_add(
             p->ast, (Node){
                         .kind = NODE_GENERIC_SPECIALIZATION,
                         .span = span_new(start, previous_end(p)),
-                        .as.specialization = {.expression = expr, .types = types},
+                        .as.specialization = {.expression = inner, .types = types},
                     });
+        if (p->allow_struct_initializer && check(p, LeftBrace)) { // `T::<A..> { .. }` generic construction
+          NodeId tp;
+          if (ast_at(p->ast, inner)->kind == NODE_MEMBER) {
+            tp = path_chain_to_type_path(p, inner, start);
+          } else { // bare type name base
+            const uint32_t mark = ast_mark(p->ast);
+            ast_push(p->ast, inner);
+            tp = ast_add(p->ast, (Node){
+                                     .kind = NODE_TYPE_PATH,
+                                     .span = span_new(start, previous_end(p)),
+                                     .as.type_path = {.parts = ast_commit(p->ast, mark)},
+                                 });
+          }
+          ast_at(p->ast, tp)->as.type_path.args = types;
+          return parse_struct_initializer_after(p, tp, start);
+        }
       } else { // `Enum::Variant` path access (one-token lookahead keeps this LL(1))
         const NodeId member = callable_name(p);
         expr = ast_add(

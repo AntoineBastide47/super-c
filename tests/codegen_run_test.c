@@ -266,6 +266,21 @@ static void test_generics(void) {
           "fn deref<T>(p: &T) T { return *p; }\n"
           "fn main() i32 { let x: i32 = 37; exit(id(5) + deref(&x)); }\n",
       42, ""); // 5 + 37
+  // A generic struct is monomorphized: distinct type args -> distinct C structs; construct + field access.
+  sc_run_program(
+      "generic struct construct + field",
+      PRE "struct Pair<T> { pub a: T, pub b: i32 }\n"
+          "fn main() i32 { let p: Pair<i32> = Pair::<i32> { a: 20, b: 5 };\n"
+          "  let q: Pair<bool> = Pair::<bool> { a: true, b: 17 };\n"
+          "  exit(if q.a { p.a + p.b + q.b; } else { 0; }); }\n",
+      42, ""); // 20 + 5 + 17
+  // A generic function over a generic struct: the type arg flows through Box<T> and is inferred.
+  sc_run_program(
+      "generic fn over generic struct",
+      PRE "struct Box<T> { pub v: T }\n"
+          "fn unwrap<T>(b: Box<T>) T { return b.v; }\n"
+          "fn main() i32 { exit(unwrap(Box::<i32> { v: 42 })); }\n",
+      42, "");
 }
 
 int main(void) {
