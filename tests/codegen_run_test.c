@@ -281,6 +281,37 @@ static void test_generics(void) {
           "fn unwrap<T>(b: Box<T>) T { return b.v; }\n"
           "fn main() i32 { exit(unwrap(Box::<i32> { v: 42 })); }\n",
       42, "");
+  // A generic enum is monomorphized: turbofish construction picks the instance; a payload variant
+  // carries the concrete arg; bare variant patterns match against the instance.
+  sc_run_program(
+      "generic enum construct + match",
+      PRE "enum Opt<T> { Some(T), None }\n"
+          "fn main() i32 { let a: Opt<i32> = Opt::<i32>::Some(40);\n"
+          "  let b: Opt<i32> = Opt::<i32>::None;\n"
+          "  let x: i32 = switch a { Some(v) => v + 2, None => 0, };\n"
+          "  exit(x + switch b { Some(_) => 99, None => 0, }); }\n",
+      42, ""); // 42 + 0
+  // Distinct type args -> distinct enum instances; a two-parameter enum (Result) mangles both args.
+  sc_run_program(
+      "generic enum multi-instance + two params",
+      PRE "enum Opt<T> { Some(T), None }\n"
+          "enum Res<T, E> { Ok(T), Err(E) }\n"
+          "fn main() i32 { let a: Opt<i32> = Opt::<i32>::Some(20);\n"
+          "  let b: Opt<bool> = Opt::<bool>::Some(true);\n"
+          "  let c: Res<i32, bool> = Res::<i32, bool>::Ok(17);\n"
+          "  let bv: i32 = switch b { Some(t) => if t { 5; } else { 0; }, None => 0, };\n"
+          "  exit(switch a { Some(v) => v, None => 0, } + bv + switch c { Ok(n) => n, Err(_) => 0, }); }\n",
+      42, ""); // 20 + 5 + 17
+  // A generic function over a generic enum: the type arg is inferred through Opt<T>, and the variant
+  // pattern binding is specialized in the monomorphized copy.
+  sc_run_program(
+      "generic fn over generic enum",
+      PRE "enum Opt<T> { Some(T), None }\n"
+          "fn unwrap_or<T>(o: Opt<T>, d: T) T { return switch o { Some(v) => v, None => d, }; }\n"
+          "fn main() i32 { let a: Opt<i32> = Opt::<i32>::Some(42);\n"
+          "  let b: Opt<i32> = Opt::<i32>::None;\n"
+          "  exit(unwrap_or(a, 0) - unwrap_or(b, 0)); }\n",
+      42, "");
 }
 
 int main(void) {

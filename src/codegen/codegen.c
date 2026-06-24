@@ -1077,7 +1077,16 @@ static void emit_prefixed(Codegen *c, const NodeId obj, const char *prefix) {
 
 // Emit an `Enum::Variant` value. A payload-less enum lowers to its plain C tag constant; a unit
 // variant of a tagged (payload-bearing) enum is a struct literal with only its tag set.
-static void emit_variant_value(Codegen *c, const DefId v) {
+// Spell the C type name of variant `v`'s enum: a generic instance (`enum_ty` a TYPE_INSTANCE) -> its
+// specialized name (`Opt__i32`); otherwise the plain qualified enum name.
+static void render_enum_cname(Codegen *c, const DefId v, const NodeId en, const TypeId enum_ty, char *buf, const size_t cap) {
+  if (enum_ty != TYPE_NONE && ast_type_at(c->ast, enum_ty)->kind == TYPE_INSTANCE)
+    inst_name(c, ast_instance(c->ast, ast_type_at(c->ast, enum_ty)->as.inst), buf, cap);
+  else
+    render_qualified(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en)->as.aggregate.name, buf, cap);
+}
+
+static void emit_variant_value(Codegen *c, const DefId v, const TypeId enum_ty) {
   const NodeId en = enclosing_enum_in(c, v.module, v.node);
   if (en == NODE_NONE) {
     emit(c, "0");
@@ -1087,22 +1096,23 @@ static void emit_variant_value(Codegen *c, const DefId v) {
     emit_tag_mod(c, v.module, en, v.node);
     return;
   }
-  char enm[160];
-  render_qualified(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en)->as.aggregate.name, enm, sizeof enm);
+  char enm[200];
+  render_enum_cname(c, v, en, enum_ty, enm, sizeof enm);
   emit(c, "(%s){ .tag = ", enm);
   emit_tag_mod(c, v.module, en, v.node);
   emit(c, " }");
 }
 
 // Emit `Enum::Variant(args)` construction as a tagged-union compound literal.
-static void emit_variant_construct(Codegen *c, const DefId v, const NodeList args, const NodeId *const aids) {
+static void emit_variant_construct(Codegen *c, const DefId v, const NodeList args, const NodeId *const aids,
+                                   const TypeId enum_ty) {
   const NodeId en = enclosing_enum_in(c, v.module, v.node);
   if (en == NODE_NONE || !aggregate_has_payload_in(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en))) {
-    emit_variant_value(c, v); // payload-less: ignore (absent) args, emit the tag
+    emit_variant_value(c, v, enum_ty); // payload-less: ignore (absent) args, emit the tag
     return;
   }
-  char enm[160], vn[128];
-  render_qualified(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en)->as.aggregate.name, enm, sizeof enm);
+  char enm[200], vn[128];
+  render_enum_cname(c, v, en, enum_ty, enm, sizeof enm);
   render_variant_name(c, v.module, v.node, vn, sizeof vn);
   emit(c, "(%s){ .tag = ", enm);
   emit_tag_mod(c, v.module, en, v.node);
@@ -1146,7 +1156,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   if (callee->kind == NODE_MEMBER && callee->as.member.path) { // Enum::Variant(args) or Type::method(args)
     const DefId md = ast_resolution_def(c->ast, callee->as.member.member);
     if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_VARIANT) {
-      emit_variant_construct(c, md, args, aids);
+      emit_variant_construct(c, md, args, aids, ast_type(c->ast, id));
       return;
     }
     if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_FUNCTION) {
@@ -1414,7 +1424,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
           render_qualified(c, d.module, dn->as.function.name, nm, sizeof nm);
           emit_cstr(c, nm);
         } else {
-          emit_variant_value(c, d); // Enum::Variant (or unresolved -> 0)
+          emit_variant_value(c, d, ast_type(c->ast, id)); // Enum::Variant (or unresolved -> 0)
         }
         break;
       }
@@ -2351,6 +2361,71 @@ static NodeList program_items(Codegen *c) {
   return ast_at_const(c->ast, c->ast->root)->as.program.items;
 }
 
+// `typedef enum { Name_A, Name_B = 3, .. } NameTag;` -- discriminant enum of a payload-bearing enum.
+static void emit_enum_tag_decl(Codegen *c, const NodeId enum_id, const Node *const dn) {
+  emit(c, "typedef enum { ");
+  const NodeList ms = dn->as.aggregate.members;
+  const NodeId *const mids = ast_list(c->ast, ms);
+  for (uint32_t j = 0; j < ms.len; j++) {
+    if (j)
+      emit(c, ", ");
+    emit_tag(c, enum_id, mids[j]);
+    const NodeId disc = ast_at_const(c->ast, mids[j])->as.variant.value;
+    if (disc != NODE_NONE) { // explicit discriminant `= <int>`
+      emit(c, " = ");
+      emit_expr(c, disc);
+    }
+  }
+  emit(c, " } ");
+  emit_local_type_name(c, dn->as.aggregate.name);
+  emit(c, "Tag;\n");
+}
+
+// The body (between `{` and `}`) of a payload-bearing enum's tagged-union C struct: a `<Name>Tag tag;`
+// discriminant plus a `union` of per-variant payload structs. With the active subst map, payload member
+// types are specialized (so a generic enum instance gets concrete fields). Reads c->ast.
+static void emit_enum_struct_body(Codegen *c, const Node *const dn) {
+  c->depth++;
+  emit_indent(c);
+  emit_local_type_name(c, dn->as.aggregate.name);
+  emit(c, "Tag tag;\n");
+  emit_indent(c);
+  emit(c, "union {\n");
+  c->depth++;
+  const NodeList ms = dn->as.aggregate.members;
+  const NodeId *const mids = ast_list(c->ast, ms);
+  for (uint32_t j = 0; j < ms.len; j++) {
+    const Node *const v = ast_at_const(c->ast, mids[j]);
+    const NodeList payload = v->as.variant.payload;
+    if (payload.len == 0)
+      continue;
+    const NodeId *const pids = ast_list(c->ast, payload);
+    emit_indent(c);
+    emit(c, "struct { ");
+    for (uint32_t k = 0; k < payload.len; k++) {
+      const Node *const pe = ast_at_const(c->ast, pids[k]);
+      char fld[24], d[256];
+      if (v->as.variant.struct_payload) {
+        char m[128];
+        render_ident(c, name_span(c, pe->as.field.name), m, sizeof m);
+        render_type_node(c, pe->as.field.type, m, d, sizeof d);
+      } else {
+        snprintf(fld, sizeof fld, "_%u", k);
+        render_type_node(c, pids[k], fld, d, sizeof d);
+      }
+      emit_cstr(c, d);
+      emit(c, "; ");
+    }
+    emit(c, "} ");
+    emit_span(c, name_span(c, v->as.variant.name));
+    emit(c, ";\n");
+  }
+  c->depth--;
+  emit_indent(c);
+  emit(c, "} payload;\n");
+  c->depth--;
+}
+
 // Emit a generic struct instantiation's C definition (forward typedef when !with_body), with the type
 // params bound to the instance's concrete args. Same-module only (the generic struct is in this ast).
 static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool with_body) {
@@ -2387,8 +2462,76 @@ static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool 
   c->nsubst = 0;
 }
 
-// Emit every same-module generic-aggregate instantiation (struct forward typedefs, then full bodies).
+// Emit a generic enum instantiation. Payload-bearing -> a tagged-union struct named `Opt__i32` whose tag
+// reuses the generic enum's shared `<Name>Tag` (emitted once by emit_generic_enum_shared); union member
+// types are the variant payloads with the instance's args substituted. Payload-less -> a typedef alias to
+// the shared plain C enum. Same-module only.
+static void emit_enum_inst(Codegen *c, const TyInstance *const it, const bool with_body) {
+  const Node *const dn = ast_at_const(c->ast, it->decl);
+  char nm[200];
+  inst_name(c, it, nm, sizeof nm);
+  if (!aggregate_has_payload(c, dn)) { // phantom type param: alias the shared plain enum
+    if (with_body) {
+      emit(c, "typedef ");
+      emit_local_type_name(c, dn->as.aggregate.name);
+      emit(c, " %s;\n", nm);
+    }
+    return;
+  }
+  if (!with_body) {
+    emit(c, "typedef struct %s %s;\n", nm, nm);
+    return;
+  }
+  const NodeList gens = dn->as.aggregate.generics;
+  const NodeId *const gids = ast_list(c->ast, gens);
+  c->nsubst = 0;
+  for (uint32_t i = 0; i < gens.len && i < it->n && c->nsubst < 8; i++) {
+    c->subst[c->nsubst].param = (DefId){it->module, gids[i]};
+    c->subst[c->nsubst].concrete = it->args[i];
+    c->nsubst++;
+  }
+  emit(c, "struct %s {\n", nm);
+  emit_enum_struct_body(c, dn);
+  emit(c, "};\n");
+  c->nsubst = 0;
+}
+
+// Emit, once per generic enum with a concrete instance, its type-arg-independent shared parts (in the
+// forward pass, before any instance struct references them): a payload enum's `<Name>Tag` discriminant,
+// or a payload-less enum's plain C enum (its instances alias it).
+static void emit_generic_enum_shared(Codegen *c) {
+  NodeId seen[64];
+  int ns = 0;
+  for (size_t i = 0; i < c->ast->instances.len; i++) {
+    const TyInstance *const it = &c->ast->instances.data[i];
+    if (it->module != c->ast->module)
+      continue;
+    const Node *const dn = ast_at_const(c->ast, it->decl);
+    if (dn->kind != NODE_ENUM)
+      continue;
+    bool concrete = true;
+    for (uint8_t k = 0; k < it->n; k++)
+      concrete &= type_is_concrete(c, it->args[k]);
+    if (!concrete)
+      continue;
+    bool dup = false;
+    for (int s = 0; s < ns; s++)
+      dup |= seen[s] == it->decl;
+    if (dup)
+      continue;
+    if (ns < 64)
+      seen[ns++] = it->decl;
+    if (aggregate_has_payload(c, dn))
+      emit_enum_tag_decl(c, it->decl, dn);
+    else
+      emit_enum_full(c, dn, it->decl); // shared plain enum (instances alias it)
+  }
+}
+
+// Emit every same-module generic-aggregate instantiation (forward typedefs, then full bodies).
 static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
+  if (!with_body)
+    emit_generic_enum_shared(c); // shared tag/plain enums, before any instance struct names them
   for (size_t i = 0; i < c->ast->instances.len; i++) {
     const TyInstance *const it = &c->ast->instances.data[i];
     if (it->module != c->ast->module) // cross-module generic aggregate definitions not yet specialized
@@ -2398,8 +2541,11 @@ static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
       concrete &= type_is_concrete(c, it->args[k]);
     if (!concrete) // skip an intermediate application like Box<T> (only real instantiations are emitted)
       continue;
-    if (ast_at_const(c->ast, it->decl)->kind == NODE_STRUCT)
+    const NodeKind dk = ast_at_const(c->ast, it->decl)->kind;
+    if (dk == NODE_STRUCT)
       emit_struct_inst(c, it, with_body);
+    else if (dk == NODE_ENUM)
+      emit_enum_inst(c, it, with_body);
   }
 }
 
@@ -2426,22 +2572,7 @@ static void phase_forward(Codegen *c) {
         continue;
       }
       // Payload enum: the discriminant tag enum, then a forward typedef for the tagged-union struct.
-      const NodeList ms = n->as.aggregate.members;
-      const NodeId *const mids = ast_list(c->ast, ms);
-      emit(c, "typedef enum { ");
-      for (uint32_t j = 0; j < ms.len; j++) {
-        if (j)
-          emit(c, ", ");
-        emit_tag(c, ids[i], mids[j]);
-        const NodeId disc = ast_at_const(c->ast, mids[j])->as.variant.value;
-        if (disc != NODE_NONE) { // explicit discriminant `= <int>`
-          emit(c, " = ");
-          emit_expr(c, disc);
-        }
-      }
-      emit(c, " } ");
-      emit_local_type_name(c, n->as.aggregate.name);
-      emit(c, "Tag;\n");
+      emit_enum_tag_decl(c, ids[i], n);
       emit(c, "typedef struct ");
       emit_local_type_name(c, n->as.aggregate.name);
       emit(c, " ");
@@ -2479,48 +2610,10 @@ static void phase_types(Codegen *c) {
       c->depth--;
       emit(c, "};\n");
     } else if (n->kind == NODE_ENUM && !n->as.aggregate.generics.len && aggregate_has_payload(c, n)) {
-      const NodeList ms = n->as.aggregate.members;
-      const NodeId *const mids = ast_list(c->ast, ms);
       emit(c, "struct ");
       emit_local_type_name(c, n->as.aggregate.name);
       emit(c, " {\n");
-      c->depth++;
-      emit_indent(c);
-      emit_local_type_name(c, n->as.aggregate.name);
-      emit(c, "Tag tag;\n");
-      emit_indent(c);
-      emit(c, "union {\n");
-      c->depth++;
-      for (uint32_t j = 0; j < ms.len; j++) {
-        const Node *const v = ast_at_const(c->ast, mids[j]);
-        const NodeList payload = v->as.variant.payload;
-        if (payload.len == 0)
-          continue;
-        const NodeId *const pids = ast_list(c->ast, payload);
-        emit_indent(c);
-        emit(c, "struct { ");
-        for (uint32_t k = 0; k < payload.len; k++) {
-          const Node *const pe = ast_at_const(c->ast, pids[k]);
-          char fld[24], d[256];
-          if (v->as.variant.struct_payload) {
-            char m[128];
-            render_ident(c, name_span(c, pe->as.field.name), m, sizeof m);
-            render_type_node(c, pe->as.field.type, m, d, sizeof d);
-          } else {
-            snprintf(fld, sizeof fld, "_%u", k);
-            render_type_node(c, pids[k], fld, d, sizeof d);
-          }
-          emit_cstr(c, d);
-          emit(c, "; ");
-        }
-        emit(c, "} ");
-        emit_span(c, name_span(c, v->as.variant.name));
-        emit(c, ";\n");
-      }
-      c->depth--;
-      emit_indent(c);
-      emit(c, "} payload;\n");
-      c->depth--;
+      emit_enum_struct_body(c, n);
       emit(c, "};\n");
     }
   }

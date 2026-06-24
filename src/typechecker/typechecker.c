@@ -50,6 +50,7 @@ static void check_pattern(TypeChecker *t, NodeId id, TypeId expected);
 static void render_type(TypeChecker *t, TypeId tid, char *buf, size_t cap);
 static TypeId check_member(TypeChecker *t, const Node *n, bool prefer_method);
 static TypeId subst_type(TypeChecker *t, TypeId ty, const DefId *params, const TypeId *args, int n);
+static bool aggregate_of(TypeChecker *t, TypeId ty, ModuleId *mod, NodeId *decl, DefId *params, TypeId *args, int *n);
 
 TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   TypeChecker *const t = calloc(1, sizeof *t);
@@ -715,15 +716,23 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
   const Node *const on = ast_at_const(t->ast, obj);
   ModuleId bmod;
   NodeId bdecl;
+  TypeId inst_ty = TYPE_NONE; // set when the base is a generic instance (`Opt::<i32>`): variants yield it
   if (on->kind == NODE_IDENTIFIER) {
     const DefId b = ast_resolution_def(t->ast, obj); // carries the module too (a prelude type isn't local)
     bmod = b.module;
     bdecl = b.node;
-  } else { // nested base, e.g. `(mod::Type)::method`
+  } else { // nested base, e.g. `(mod::Type)::method` or `Opt::<i32>::Variant`
     const TypeId bt = check_expr(t, obj);
     const Ty *const ty = ast_type_at(t->ast, bt);
-    bmod = ty->module;
-    bdecl = bt != TYPE_NONE && (ty->kind == TYPE_STRUCT || ty->kind == TYPE_ENUM) ? ty->as.decl : NODE_NONE;
+    if (ty->kind == TYPE_INSTANCE) {
+      const TyInstance *const it = ast_instance(t->ast, ty->as.inst);
+      bmod = it->module;
+      bdecl = it->decl;
+      inst_ty = bt;
+    } else {
+      bmod = ty->module;
+      bdecl = bt != TYPE_NONE && (ty->kind == TYPE_STRUCT || ty->kind == TYPE_ENUM) ? ty->as.decl : NODE_NONE;
+    }
   }
   const Span mname = name_span(t, n->as.member.member);
   const Node *const bd = bdecl == NODE_NONE ? NULL : ast_at_const(mod_ast(t, bmod), bdecl);
@@ -735,7 +744,7 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
     const NodeId variant = find_member(t, bmod, bdecl, mname);
     if (variant != NODE_NONE && ast_at_const(mod_ast(t, bmod), variant)->kind == NODE_VARIANT) {
       ast_set_resolution_def(t->ast, n->as.member.member, (DefId){bmod, variant});
-      return named_type_of(t, bmod, bdecl);
+      return inst_ty != TYPE_NONE ? inst_ty : named_type_of(t, bmod, bdecl);
     }
   }
   const DefId method = find_method(t, bmod, bdecl, mname);
@@ -763,6 +772,13 @@ static TypeId check_variant_call(
   const NodeList payload = ast_at_const(va, variant)->as.variant.payload;
   const NodeId *const pl = ast_list(va, payload);
   const Span sp = ast_at_const(t->ast, id)->span;
+  // A generic enum instance (`Opt<i32>`) substitutes its type args into the (generic) payload types.
+  ModuleId amod;
+  NodeId adecl;
+  DefId gp[4];
+  TypeId ga[4];
+  int gn = 0;
+  const bool inst = aggregate_of(t, enum_ty, &amod, &adecl, gp, ga, &gn);
   if (args.len != payload.len) {
     typechecker_errorf(
         t, sp.start, sp.end - sp.start, "variant expects %u argument%s, found %u", payload.len,
@@ -770,7 +786,8 @@ static TypeId check_variant_call(
   } else {
     for (uint32_t i = 0; i < args.len; i++) {
       const Node *const pe = ast_at_const(va, pl[i]);
-      const TypeId pt = lower_type_in(t, vmod, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
+      const TypeId raw = lower_type_in(t, vmod, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
+      const TypeId pt = inst ? subst_type(t, raw, gp, ga, gn) : raw;
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
     }
@@ -1170,11 +1187,24 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_GENERIC_SPECIALIZATION: {
-      result = check_expr(t, n->as.specialization.expression);
+      const NodeId inner = n->as.specialization.expression;
       const NodeList types = n->as.specialization.types;
       const NodeId *const ids = ast_list(a, types);
       for (uint32_t i = 0; i < types.len; i++)
         resolve_type(t, ids[i]);
+      // `Type::<Args>` over a generic enum/struct -> the interned instance type (so `Opt::<i32>::Variant`
+      // and field access carry the concrete args); `f::<T>` over a function keeps the function type.
+      const DefId d = ast_resolution_def(a, inner);
+      const Node *const dn = d.node != NODE_NONE ? ast_at_const(mod_ast(t, d.module), d.node) : NULL;
+      if (dn && (dn->kind == NODE_ENUM || dn->kind == NODE_STRUCT) && dn->as.aggregate.generics.len > 0 && types.len > 0) {
+        TypeId ta[4];
+        uint8_t tn = 0;
+        for (uint32_t i = 0; i < types.len && tn < 4; i++)
+          ta[tn++] = resolve_type(t, ids[i]);
+        result = ast_intern_instance(t->ast, d.module, d.node, ta, tn);
+      } else {
+        result = check_expr(t, inner);
+      }
       break;
     }
     case NODE_MATCH: {
@@ -1469,10 +1499,14 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
     case NODE_PATTERN_NAME: {
       // A bare name matching a *unit* variant of the scrutinee enum is a tag pattern, not a
       // binding (so `switch e { A => .., B => .. }` tests the tag instead of always matching).
-      const Ty *const bt = ast_type_at(a, strip(t, expected));
-      if (bt->kind == TYPE_ENUM) {
-        const ModuleId bmod = bt->module;
-        const NodeId v = find_member(t, bmod, bt->as.decl, name_span(t, n->as.pattern.name));
+      ModuleId bmod;
+      NodeId decl;
+      DefId gp[4];
+      TypeId ga[4];
+      int gn;
+      if (aggregate_of(t, strip(t, expected), &bmod, &decl, gp, ga, &gn) &&
+          ast_at_const(mod_ast(t, bmod), decl)->kind == NODE_ENUM) {
+        const NodeId v = find_member(t, bmod, decl, name_span(t, n->as.pattern.name));
         if (v != NODE_NONE && ast_at_const(mod_ast(t, bmod), v)->kind == NODE_VARIANT &&
             ast_at_const(mod_ast(t, bmod), v)->as.variant.payload.len == 0) {
           ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, v});
@@ -1484,10 +1518,13 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
     }
     case NODE_PATTERN_STRUCT: {
       const TypeId base = strip(t, expected);
-      const Ty *const bt = ast_type_at(a, base);
-      const NodeId decl = bt->kind == TYPE_STRUCT || bt->kind == TYPE_ENUM ? bt->as.decl : NODE_NONE;
-      if (n->as.pattern.name != NODE_NONE && decl != NODE_NONE)
-        ast_set_resolution_def(a, n->as.pattern.name, (DefId){bt->module, decl});
+      ModuleId bmod;
+      NodeId decl;
+      DefId gp[4];
+      TypeId ga[4];
+      int gn;
+      if (aggregate_of(t, base, &bmod, &decl, gp, ga, &gn) && n->as.pattern.name != NODE_NONE)
+        ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, decl});
       const NodeList children = n->as.pattern.children;
       const NodeId *const ids = ast_list(a, children);
       for (uint32_t i = 0; i < children.len; i++)
@@ -1496,16 +1533,19 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
     }
     case NODE_PATTERN_FIELD: {
       const TypeId base = strip(t, expected);
-      const Ty *const bt = ast_type_at(a, base);
-      const ModuleId bmod = bt->module;
-      const NodeId decl = bt->kind == TYPE_STRUCT || bt->kind == TYPE_ENUM ? bt->as.decl : NODE_NONE;
+      ModuleId bmod;
+      NodeId decl;
+      DefId gp[4];
+      TypeId ga[4];
+      int gn;
+      const bool agg = aggregate_of(t, base, &bmod, &decl, gp, ga, &gn);
       TypeId field_type = TYPE_NONE;
-      if (decl != NODE_NONE && n->as.pattern.name != NODE_NONE) {
+      if (agg && n->as.pattern.name != NODE_NONE) {
         const Span fname = name_span(t, n->as.pattern.name);
         const NodeId field = find_member(t, bmod, decl, fname);
         if (field != NODE_NONE) {
           ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, field});
-          field_type = decl_type_in(t, bmod, field);
+          field_type = subst_type(t, decl_type_in(t, bmod, field), gp, ga, gn);
         } else {
           char ty[96];
           render_type(t, base, ty, sizeof ty);
@@ -1522,9 +1562,14 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
     }
     case NODE_PATTERN_TUPLE: { // enum-variant constructor pattern
       const TypeId base = strip(t, expected);
-      const Ty *const bt = ast_type_at(a, base);
-      const ModuleId bmod = bt->module;
-      const NodeId decl = bt->kind == TYPE_ENUM ? bt->as.decl : NODE_NONE;
+      ModuleId bmod;
+      NodeId decl0;
+      DefId gp[4];
+      TypeId ga[4];
+      int gn;
+      const bool agg = aggregate_of(t, base, &bmod, &decl0, gp, ga, &gn) &&
+                       ast_at_const(mod_ast(t, bmod), decl0)->kind == NODE_ENUM;
+      const NodeId decl = agg ? decl0 : NODE_NONE;
       NodeId variant = NODE_NONE;
       if (decl != NODE_NONE && n->as.pattern.name != NODE_NONE) {
         const Span vname = name_span(t, n->as.pattern.name);
@@ -1548,7 +1593,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
         TypeId pt = TYPE_NONE;
         if (i < payload.len) {
           const Node *const pe = ast_at_const(va, pl[i]);
-          pt = lower_type_in(t, bmod, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
+          pt = subst_type(t, lower_type_in(t, bmod, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]), gp, ga, gn);
         }
         check_pattern(t, ids[i], pt);
       }
