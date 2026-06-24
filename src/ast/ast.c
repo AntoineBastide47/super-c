@@ -6,6 +6,7 @@
 VEC_DEFINE(Node, Node_Vec)
 VEC_DEFINE(Ty, Ty_Vec)
 VEC_DEFINE(DefId, DefId_Vec)
+VEC_DEFINE(MonoUse, MonoUse_Vec)
 
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
 static inline size_t ty_hash(const Ty t) {
@@ -34,6 +35,7 @@ Ast *ast_new(const size_t token_count) {
   a->resolutions = DefId_Vec_init();
   a->type_pool = Ty_Vec_init();
   a->types = U32_Vec_init();
+  a->mono = MonoUse_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
   Node_Vec_push(&a->nodes, (Node){.kind = NODE_NONE_KIND});
@@ -50,8 +52,23 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->type_pool);
   TyMap_deinit(&(*a)->type_index);
   VEC_DEINIT((*a)->types);
+  VEC_DEINIT((*a)->mono);
   free(*a);
   *a = NULL;
+}
+
+void ast_set_type_args(Ast *a, const NodeId node, const TypeId *const args, const uint8_t n) {
+  MonoUse u = {.node = node, .n = n > 4 ? 4 : n};
+  for (uint8_t i = 0; i < u.n; i++)
+    u.args[i] = args[i];
+  MonoUse_Vec_push(&a->mono, u);
+}
+
+const MonoUse *ast_type_args(const Ast *a, const NodeId node) {
+  for (size_t i = a->mono.len; i-- > 0;) // latest record wins
+    if (a->mono.data[i].node == node)
+      return &a->mono.data[i];
+  return NULL;
 }
 
 NodeId ast_add(Ast *a, const Node node) {

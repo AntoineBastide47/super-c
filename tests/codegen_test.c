@@ -345,9 +345,18 @@ static void test_slices_and_arrays(void) {
 }
 
 static void test_errors(void) {
-  expect_codegen_error("generic function", "fn id<T>(x: T) T { return x; }\n", "not yet supported");
   expect_codegen_error(
       "defer", "fn cleanup() void {}\nfn run() void { defer cleanup(); }\n", "not yet supported");
+}
+
+// A generic function emits no template; each turbofish instantiation emits a concrete `<fn>__<args>` copy
+// with the type param substituted, and the call site references it.
+static void test_generics(void) {
+  const char *const ID = "fn id<T>(x: T) T { return x; }\n"
+                         "fn main() i32 { let a: i32 = id::<i32>(5); let b: bool = id::<bool>(true); return a; }\n";
+  expect_contains("generic specialization with substituted return", ID, "int32_t id__i32(");
+  expect_contains("second instantiation", ID, "id__bool(");
+  expect_absent("no generic template emitted", ID, " id(");
 }
 
 static void test_literals(void) {
@@ -378,6 +387,7 @@ int main(void) {
   test_multi_return();
   test_slices_and_arrays();
   test_errors();
+  test_generics();
   test_literals();
   if (failures) {
     fprintf(stderr, "%d codegen test failure%s\n", failures, failures == 1 ? "" : "s");

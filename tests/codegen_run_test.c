@@ -251,7 +251,25 @@ static void test_str(void) {
       "");
 }
 
+static void test_generics(void) {
+  // A generic function is monomorphized: turbofish picks the instantiation, and distinct type args
+  // produce distinct specializations.
+  sc_run_program(
+      "generic turbofish",
+      PRE "fn id<T>(x: T) T { return x; }\n"
+          "fn main() i32 { let a: i32 = id::<i32>(40); let b: bool = id::<bool>(true); if b { exit(a + 2); } exit(0); }\n",
+      42, "");
+  // Type args are inferred from the call arguments (no turbofish), incl. through a reference parameter.
+  sc_run_program(
+      "generic inference",
+      PRE "fn id<T>(x: T) T { return x; }\n"
+          "fn deref<T>(p: &T) T { return *p; }\n"
+          "fn main() i32 { let x: i32 = 37; exit(id(5) + deref(&x)); }\n",
+      42, ""); // 5 + 37
+}
+
 int main(void) {
+  test_generics();
   test_arithmetic();
   test_control_flow();
   test_recursion();
