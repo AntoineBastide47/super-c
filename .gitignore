@@ -40,3 +40,6 @@ build/
 SuperC-Specs.html
 super-c
 examples
+# std/ holds the standard library, auto-imported as a prelude (resolved relative to the
+# super-c binary). Gitignored for now while it stabilises.
+/std/

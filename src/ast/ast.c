@@ -5,6 +5,7 @@
 
 VEC_DEFINE(Node, Node_Vec)
 VEC_DEFINE(Ty, Ty_Vec)
+VEC_DEFINE(DefId, DefId_Vec)
 
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
 static inline size_t ty_hash(const Ty t) {
@@ -30,7 +31,7 @@ Ast *ast_new(const size_t token_count) {
   a->nodes = Node_Vec_init();
   a->children = U32_Vec_init();
   a->scratch = U32_Vec_init();
-  a->resolutions = U32_Vec_init();
+  a->resolutions = DefId_Vec_init();
   a->type_pool = Ty_Vec_init();
   a->types = U32_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
@@ -76,9 +77,9 @@ NodeList ast_commit(Ast *a, const uint32_t mark) {
 }
 
 void ast_init_resolutions(Ast *a) {
-  U32_Vec_reserve(&a->resolutions, a->nodes.len);
+  DefId_Vec_reserve(&a->resolutions, a->nodes.len);
   a->resolutions.len = a->nodes.len;
-  memset(a->resolutions.data, NODE_NONE, a->nodes.len * sizeof *a->resolutions.data);
+  memset(a->resolutions.data, 0, a->nodes.len * sizeof *a->resolutions.data); // all-zero DefId = unresolved
 }
 
 void ast_init_types(Ast *a) {
@@ -124,6 +125,7 @@ static const char *kind_name(const NodeKind kind) {
       "TypeAlias",
       "Const",
       "ExternBlock",
+      "Import",
       "GenericParam",
       "WherePredicate",
       "TypePath",
@@ -255,6 +257,10 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
     case NODE_EXTERN_BLOCK:
       print_child(out, a, n->as.extern_block.abi, source, depth + 1);
       print_list(out, a, n->as.extern_block.items, source, depth + 1);
+      break;
+    case NODE_IMPORT:
+      print_list(out, a, n->as.import_decl.path, source, depth + 1);
+      print_child(out, a, n->as.import_decl.alias, source, depth + 1);
       break;
     case NODE_GENERIC_PARAM:
       print_child(out, a, n->as.generic_param.name, source, depth + 1);

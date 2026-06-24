@@ -112,7 +112,7 @@ endif
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
 	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT)
+	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) -DSUPERC_STD_DIR='"$(CURDIR)/std"' $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT)
 
 $(BUILD_DIR)/benchmark/%: benchmark/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)

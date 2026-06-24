@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "module/loader.h"
 #include "symbol.h"
 #include "types/hashmap.h"
 
@@ -29,6 +30,7 @@ struct Resolver {
     U32_Vec scope_starts; // stack of symbols.len at each scope entry
     SymbolIndex symbol_index; // (namespace, name hash) -> newest matching symbol index + 1
     NodeId current_self;  // type 'Self' refers to inside the current interface/extension (else NODE_NONE)
+    const Package *package; // for resolving `import`ed module-qualified names (NULL = no imports)
     ERRORS_VARIABLES;
 };
 
@@ -38,8 +40,9 @@ static void resolve_block(Resolver *r, NodeId id);
 static void resolve_stmt(Resolver *r, NodeId id);
 static void resolve_expr(Resolver *r, NodeId id);
 static void resolve_pattern(Resolver *r, NodeId id);
+static int import_target(const Resolver *r, NodeList parts);
 
-Resolver *resolver_new(Ast *ast, const char *source, const size_t len) {
+Resolver *resolver_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   Resolver *const r = calloc(1, sizeof *r);
   if (!r) {
     fprintf(stderr, "fatal: out of memory\n");
@@ -48,6 +51,7 @@ Resolver *resolver_new(Ast *ast, const char *source, const size_t len) {
   r->ast = ast;
   r->source = (const uint8_t *)source;
   r->len = len;
+  r->package = package;
   r->symbols = Symbol_Vec_init();
   r->symbol_previous = U32_Vec_init();
   r->scope_starts = U32_Vec_init();
@@ -98,7 +102,7 @@ ALWAYS_INLINE bool span_is(const uint8_t *const src, const Span s, const char *c
 static bool is_builtin_type(const uint8_t *const src, const Span s) {
   static const char *const builtins[] = {
       "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-      "u16",  "u32",  "u64", "usize", "f32", "f64", "void", "str",
+      "u16",  "u32",  "u64", "usize", "f32", "f64", "void",
   };
   for (size_t i = 0; i < sizeof builtins / sizeof builtins[0]; i++)
     if (span_is(src, s, builtins[i]))
@@ -179,6 +183,30 @@ static NodeId lookup(const Resolver *r, const Span name, const Namespace ns) {
   return NODE_NONE;
 }
 
+// Look up `name` among the modules this module glob-imports (`import P as *;`): their public items are in
+// scope unqualified here. Returns the decl and sets *out_mid, or NODE_NONE.
+static NodeId glob_lookup(const Resolver *r, const Span name, const bool want_type, ModuleId *const out_mid) {
+  if (!r->package)
+    return NODE_NONE;
+  const NodeList items = ast_at_const(r->ast, r->ast->root)->as.program.items;
+  const NodeId *const ids = ast_list(r->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(r->ast, ids[i]);
+    if (n->kind != NODE_IMPORT || !n->as.import_decl.glob)
+      continue;
+    const int m = import_target(r, n->as.import_decl.path);
+    if (m < 0)
+      continue;
+    const NodeId d =
+        package_lookup(r->package, (ModuleId)m, (const char *)r->source + name.start, name.end - name.start, want_type);
+    if (d != NODE_NONE) {
+      *out_mid = (ModuleId)m;
+      return d;
+    }
+  }
+  return NODE_NONE;
+}
+
 static void resolve_ref(Resolver *r, const NodeId ref, const NodeId name_node, const Namespace ns, const char *kind) {
   if (name_node == NODE_NONE)
     return;
@@ -190,9 +218,172 @@ static void resolve_ref(Resolver *r, const NodeId ref, const NodeId name_node, c
   }
   if (ns == NS_TYPE && is_builtin_type(r->source, name))
     return;
+  // Unqualified fallback: the std prelude (str, String, SCslice, ... -- in scope everywhere) and this
+  // module's glob imports (`import P as *;`). Record the cross-module decl for the type checker to follow.
+  if (r->package) {
+    ModuleId mid;
+    const char *const nm = (const char *)r->source + name.start;
+    const uint32_t nl = name.end - name.start;
+    NodeId d = package_prelude_lookup(r->package, nm, nl, ns == NS_TYPE, &mid);
+    if (d == NODE_NONE)
+      d = glob_lookup(r, name, ns == NS_TYPE, &mid);
+    if (d != NODE_NONE) {
+      ast_set_resolution_def(r->ast, ref, (DefId){mid, d});
+      return;
+    }
+  }
   resolver_errorf(
       r, name.start, name.end - name.start, "cannot find %s '%.*s'", kind, (int)(name.end - name.start),
       r->source + name.start);
+}
+
+// Join the first `count` identifier parts with "::" into `buf`; returns length, or -1 on overflow.
+static int join_path(const Resolver *r, const NodeId *const parts, const uint32_t count, char *buf, const size_t cap) {
+  size_t at = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    const Span s = name_span(r, parts[i]);
+    const size_t l = s.end - s.start;
+    if (at + (i ? 2 : 0) + l >= cap)
+      return -1;
+    if (i) {
+      buf[at++] = ':';
+      buf[at++] = ':';
+    }
+    memcpy(buf + at, r->source + s.start, l);
+    at += l;
+  }
+  buf[at] = '\0';
+  return (int)at;
+}
+
+// The module id named by an import's path parts (its loaded "::"-joined path), or -1.
+static int import_target(const Resolver *r, const NodeList parts) {
+  char buf[512];
+  const int n = join_path(r, ast_list(r->ast, parts), parts.len, buf, sizeof buf);
+  return n < 0 ? -1 : package_find(r->package, buf, (size_t)n);
+}
+
+// True if `name` names an imported module usable as a single leading segment: its `as` alias, or a
+// single-segment module path. Sets *mid to the target module.
+static bool name_is_module(const Resolver *r, const Span name, ModuleId *const mid) {
+  if (!r->package)
+    return false;
+  const NodeList items = ast_at_const(r->ast, r->ast->root)->as.program.items;
+  const NodeId *const ids = ast_list(r->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(r->ast, ids[i]);
+    if (n->kind != NODE_IMPORT)
+      continue;
+    const NodeId alias = n->as.import_decl.alias;
+    const NodeList parts = n->as.import_decl.path;
+    const bool hit = alias != NODE_NONE
+                         ? span_eq(r->source, name_span(r, alias), name)
+                         : parts.len == 1 && span_eq(r->source, name_span(r, ast_list(r->ast, parts)[0]), name);
+    if (hit) {
+      const int m = import_target(r, parts);
+      if (m >= 0) {
+        *mid = (ModuleId)m;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// If a type path is module-qualified (`std::string::String` by full path, or `alias::Type`), return its
+// module id and set *type_node to the final segment; otherwise -1.
+static int module_qualified_type(const Resolver *r, const NodeList parts, NodeId *const type_node) {
+  if (!r->package || parts.len < 2)
+    return -1;
+  const NodeId *const ids = ast_list(r->ast, parts);
+  char buf[512];
+  const int n = join_path(r, ids, parts.len - 1, buf, sizeof buf); // module = every segment but the last
+  if (n >= 0) {
+    const int m = package_find(r->package, buf, (size_t)n);
+    if (m >= 0) {
+      *type_node = ids[parts.len - 1];
+      return m;
+    }
+  }
+  ModuleId mid; // `alias::Type`
+  if (parts.len == 2 && name_is_module(r, name_span(r, ids[0]), &mid)) {
+    *type_node = ids[1];
+    return (int)mid;
+  }
+  return -1;
+}
+
+// Resolve a public top-level decl `name` in module `mid` and record it (cross-module) on `ref`.
+static void resolve_module_decl(Resolver *r, const NodeId ref, const ModuleId mid, const Span name,
+                                const bool want_type, const char *const kind) {
+  const NodeId decl = package_lookup(r->package, mid, (const char *)r->source + name.start, name.end - name.start, want_type);
+  if (decl != NODE_NONE)
+    ast_set_resolution_def(r->ast, ref, (DefId){mid, decl});
+  else
+    resolver_errorf(
+        r, name.start, name.end - name.start, "no public %s '%.*s' in the imported module", kind,
+        (int)(name.end - name.start), r->source + name.start);
+}
+
+// Resolve a path-member expression `id` (node `n`) as `<module>::<decl>` where the module may be MANY
+// segments (`test::test::func`, `std::net::tcp::Connect`, `foo::Type::method`). Flattens the `::` chain,
+// matches the longest loaded-module prefix, and records the cross-module DefId so the type checker and
+// codegen treat it exactly like any qualified reference. Returns true if a module prefix matched (it has
+// then handled or errored on `n`); false to let the caller try alias / local `Type::` resolution.
+static bool resolve_qualified_member(Resolver *r, const NodeId id) {
+  if (!r->package)
+    return false;
+  NodeId chain[16]; // the `::` member nodes, outermost..innermost; must bottom out at a base identifier
+  uint32_t cc = 0;
+  NodeId base = NODE_NONE;
+  for (NodeId curid = id;;) {
+    const Node *const cn = ast_at_const(r->ast, curid);
+    if (cn->kind != NODE_MEMBER || !cn->as.member.path || cc >= 16)
+      return false;
+    chain[cc++] = curid;
+    const NodeId o = cn->as.member.object;
+    const Node *const on = ast_at_const(r->ast, o);
+    if (on->kind == NODE_IDENTIFIER) {
+      base = o;
+      break;
+    }
+    if (on->kind != NODE_MEMBER || !on->as.member.path)
+      return false;
+    curid = o;
+  }
+  const uint32_t N = cc + 1; // segment count: base + one per chain link
+  NodeId seg[17];            // segment name nodes, base..outer; chain[N-1-i] introduces seg[i] (i>=1)
+  seg[0] = base;
+  for (uint32_t i = 1; i < N; i++)
+    seg[i] = ast_at_const(r->ast, chain[N - 1 - i])->as.member.member;
+  char buf[512];
+  for (uint32_t m = N - 1; m >= 1; m--) { // longest module prefix leaving >=1 trailing segment
+    const int len = join_path(r, seg, m, buf, sizeof buf);
+    if (len < 0)
+      continue;
+    const int found = package_find(r->package, buf, (size_t)len);
+    if (found < 0)
+      continue;
+    const ModuleId mid = (ModuleId)found;
+    if (N - m == 1) { // module::decl -- a function (preferred) or type, recorded on the callee node
+      const Span dn = name_span(r, seg[m]);
+      NodeId decl = package_lookup(r->package, mid, (const char *)r->source + dn.start, dn.end - dn.start, false);
+      if (decl == NODE_NONE)
+        decl = package_lookup(r->package, mid, (const char *)r->source + dn.start, dn.end - dn.start, true);
+      if (decl != NODE_NONE)
+        ast_set_resolution_def(r->ast, id, (DefId){mid, decl});
+      else
+        resolver_errorf(r, dn.start, dn.end - dn.start, "no public item '%.*s' in module '%s'",
+                        (int)(dn.end - dn.start), r->source + dn.start, buf);
+      return true;
+    }
+    if (N - m == 2) { // module::Type::method -- record the Type; the type checker binds the method
+      resolve_module_decl(r, chain[1], mid, name_span(r, seg[m]), true, "type");
+      return true;
+    }
+    return false; // deeper than module::Type::method is not supported here
+  }
+  return false;
 }
 
 static void resolve_bounds(Resolver *r, const NodeList bounds) {
@@ -226,6 +417,16 @@ static void resolve_type(Resolver *r, const NodeId id) {
   switch (n->kind) {
     case NODE_TYPE_PATH: {
       const NodeList parts = n->as.type_path.parts;
+      NodeId type_node;
+      const int mid = module_qualified_type(r, parts, &type_node);
+      if (mid >= 0) {
+        resolve_module_decl(r, id, (ModuleId)mid, name_span(r, type_node), true, "type");
+        const NodeList margs = n->as.type_path.args;
+        const NodeId *const marg_ids = ast_list(r->ast, margs);
+        for (uint32_t i = 0; i < margs.len; i++)
+          resolve_type(r, marg_ids[i]);
+        break;
+      }
       if (parts.len > 0) {
         const NodeId first = ast_list(r->ast, parts)[0];
         const Span name = name_span(r, first);
@@ -502,14 +703,32 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       resolve_expr(r, n->as.index.object);
       resolve_expr(r, n->as.index.index);
       break;
-    case NODE_MEMBER:
-      // `Enum::Variant`: the base names a type (resolved here); the variant is bound by the type
-      // checker. A `.`/`->` member access resolves its object as a value instead.
-      if (n->as.member.path && ast_at_const(r->ast, n->as.member.object)->kind == NODE_IDENTIFIER)
-        resolve_ref(r, n->as.member.object, n->as.member.object, NS_TYPE, "type");
-      else
-        resolve_expr(r, n->as.member.object); // member name needs a type; deferred to the type checker
+    case NODE_MEMBER: {
+      // A full module-PATH qualifier (`mod::f`, `a::b::f`, `a::b::Type::method`) -- possibly many
+      // segments -- is resolved here against the loaded modules. `Enum::Variant` / local `Type::method` /
+      // an `as`-alias fall through to the cases below; a `.`/`->` access resolves its object as a value.
+      if (n->as.member.path && resolve_qualified_member(r, id))
+        break;
+      const NodeId obj = n->as.member.object;
+      ModuleId mid;
+      if (n->as.member.path && ast_at_const(r->ast, obj)->kind == NODE_IDENTIFIER &&
+          name_is_module(r, name_span(r, obj), &mid)) {
+        const Span mn = name_span(r, n->as.member.member);
+        // A value (function) export takes priority; otherwise a type (e.g. `mod::Type::method`).
+        const char *const nm = (const char *)r->source + mn.start;
+        const uint32_t nl = mn.end - mn.start;
+        NodeId decl = package_lookup(r->package, mid, nm, nl, false);
+        if (decl != NODE_NONE)
+          ast_set_resolution_def(r->ast, id, (DefId){mid, decl});
+        else
+          resolve_module_decl(r, id, mid, mn, true, "item");
+      } else if (n->as.member.path && ast_at_const(r->ast, obj)->kind == NODE_IDENTIFIER) {
+        resolve_ref(r, obj, obj, NS_TYPE, "type");
+      } else {
+        resolve_expr(r, obj); // member name needs a type; deferred to the type checker
+      }
       break;
+    }
     case NODE_CAST:
       resolve_expr(r, n->as.cast.expression);
       resolve_type(r, n->as.cast.type);

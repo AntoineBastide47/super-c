@@ -3,13 +3,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#if defined(__APPLE__)
+#  include <mach-o/dyld.h> // _NSGetExecutablePath
+#elif defined(__linux__)
+#  include <unistd.h> // readlink("/proc/self/exe")
+#endif
 
 #include "ast/ast.h"
 #include "ast/parser.h"
 #include "codegen/codegen.h"
 #include "lexer/lexer.h"
 #include "lexer/token.h"
+#include "module/loader.h"
 #include "resolver/resolver.h"
 #include "typechecker/typechecker.h"
 
@@ -18,117 +25,221 @@
   #define BIN_NAME "super-c"
 #endif
 
-// Returns 0 on success, 1 if any stage reported errors or the output file could not be opened.
-static int run(const char *source, const size_t len, const char *out_path) {
+// One pipeline stage over a single module: runs it, logs any diagnostics, and hands the Ast back via
+// *pa (the pipeline stages take and return ownership). Returns false if the stage reported errors.
+static bool resolve_one(const Package *p, Ast **pa, const char *src, const size_t len) {
+  Resolver *r = resolver_new(*pa, src, len, p);
+  resolver_resolve(r);
+  const bool had = resolver_has_errors(r);
+  if (had)
+    resolver_log_errors(r);
+  *pa = resolver_take_ast(r);
+  resolver_free(&r);
+  return !had;
+}
+static bool typecheck_one(const Package *p, Ast **pa, const char *src, const size_t len) {
+  TypeChecker *t = typechecker_new(*pa, src, len, p);
+  typechecker_check(t);
+  const bool had = typechecker_has_errors(t);
+  if (had)
+    typechecker_log_errors(t);
+  *pa = typechecker_take_ast(t);
+  typechecker_free(&t);
+  return !had;
+}
+
+// Compile one in-memory source (a REPL line) against the std prelude under `std_dir`, emitting a single
+// self-contained .c: the prelude modules first, then the user code. 1 on any stage error.
+static int run(const char *source, const size_t len, const char *out_path, const char *std_dir) {
   Lexer *lexer = lexer_new(source, len);
   lexer_scan_tokens(lexer);
   ERRORS_CHECK(lexer);
-
   Parser *parser = parser_new(lexer_take_tokens(lexer), source, len);
   lexer_free(&lexer);
   parser_build_ast(parser);
   ERRORS_CHECK(parser);
-
-  Resolver *resolver = resolver_new(parser_take_ast(parser), source, len);
+  Ast *ast = parser_take_ast(parser);
   parser_free(&parser);
-  resolver_resolve(resolver);
-  ERRORS_CHECK(resolver);
 
-  TypeChecker *typechecker = typechecker_new(resolver_take_ast(resolver), source, len);
-  resolver_free(&resolver);
-  typechecker_check(typechecker);
-  ERRORS_CHECK(typechecker);
+  Package *pp = package_prelude_only(std_dir);
+  if (!pp->ok) {
+    ast_free(&ast);
+    package_free(&pp);
+    return 1;
+  }
+  ast->module = (ModuleId)pp->count; // standalone: its own nodes resolve to `ast`, prelude via the package
+
+  bool ok = true;
+  for (size_t i = 0; i < pp->count; i++)
+    ok = resolve_one(pp, &pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len) && ok;
+  ok = resolve_one(pp, &ast, source, len) && ok;
+  if (ok)
+    for (size_t i = 0; i < pp->count; i++)
+      ok = typecheck_one(pp, &pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len) && ok;
+  ok = ok && typecheck_one(pp, &ast, source, len);
+  if (!ok) {
+    ast_free(&ast);
+    package_free(&pp);
+    return 1;
+  }
 
   FILE *out = fopen(out_path, "w");
   if (!out) {
-    typechecker_free(&typechecker);
     perror(out_path);
+    ast_free(&ast);
+    package_free(&pp);
     return 1;
   }
-
-  Codegen *codegen = codegen_new(typechecker_take_ast(typechecker), source, len);
-  typechecker_free(&typechecker);
-  codegen_emit(codegen, out);
+  // Emit the prelude modules and the user code as one self-contained, phase-interleaved unit.
+  const size_t total = pp->count + 1;
+  Codegen **cs = malloc(total * sizeof *cs);
+  for (size_t i = 0; i < pp->count; i++)
+    cs[i] = codegen_new(pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len, pp);
+  cs[pp->count] = codegen_new(ast, source, len, pp);
+  codegen_emit_unit(cs, total, out);
   fclose(out);
-  ERRORS_CHECK(codegen);
-
-  codegen_free(&codegen);
-  return 0;
+  bool err = false;
+  for (size_t i = 0; i < total; i++) {
+    if (codegen_has_errors(cs[i])) {
+      codegen_log_errors(cs[i]);
+      err = true;
+    }
+    Ast *const taken = codegen_take_ast(cs[i]);
+    if (i < pp->count)
+      pp->modules[i].ast = taken;
+    else
+      ast = taken;
+    codegen_free(&cs[i]);
+  }
+  free(cs);
+  ast_free(&ast);
+  package_free(&pp);
+  return err ? 1 : 0;
 }
 
-// Read a whole file into a NUL-terminated, heap-allocated buffer.
-static char *read_to_string(const char *path, size_t *size) {
-  FILE *const f = fopen(path, "rb");
-  if (!f)
-    return NULL;
-
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  const long s = ftell(f);
-  rewind(f);
-  if (s < 0) {
-    fclose(f);
-    return NULL;
-  }
-
-  *size = (size_t)s;
-
-  char *const buf = malloc(*size + 1);
-  if (!buf) {
-    fclose(f);
-    return NULL;
-  }
-
-  const size_t n = fread(buf, 1, *size, f);
-  if (n != *size && ferror(f)) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-
-  fclose(f);
-  buf[n] = '\0';
-  *size = n;
-  return buf;
+// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
+static void mkdir_p(const char *path) {
+  char buf[4096];
+  const size_t n = strlen(path);
+  if (n == 0 || n >= sizeof buf)
+    return;
+  memcpy(buf, path, n + 1);
+  for (char *q = buf + 1; *q; q++)
+    if (*q == '/') {
+      *q = '\0';
+      mkdir(buf, 0775);
+      *q = '/';
+    }
+  mkdir(buf, 0775);
 }
 
-// Derive the C output path from the input: replace a trailing extension with ".c", appending it
-// if there is none. The result is heap-allocated and must be freed by the caller.
-static char *derive_out_path(const char *path) {
-  const char *const slash = strrchr(path, '/');
-  const char *const base = slash ? slash + 1 : path;
-  const char *const dot = strrchr(base, '.');
-  const size_t stem = dot ? (size_t)(dot - path) : strlen(path);
-  char *const out = malloc(stem + 3);
+// Generated output path: "<root>/build/<module path, '::' -> '/'><ext>", mirroring module paths as
+// subdirectories (`std::string` -> `build/std/string.c`; the prelude is `__std::*` -> `build/__std/*`).
+// Generated `#include`s are relative, so the tree builds with `cc build/**/*.c` and no -I. Heap-allocated.
+static char *build_out_path(const char *root_dir, const char *mod_path, const char *ext) {
+  const size_t n = strlen(root_dir) + sizeof "/build/" + strlen(mod_path) + strlen(ext);
+  char *const out = malloc(n);
   if (!out)
     return NULL;
-  memcpy(out, path, stem);
-  memcpy(out + stem, ".c", 3);
+  size_t at = (size_t)snprintf(out, n, "%s/build/", root_dir);
+  for (const char *s = mod_path; *s; s++) {
+    if (s[0] == ':' && s[1] == ':') {
+      out[at++] = '/';
+      s++;
+    } else {
+      out[at++] = *s;
+    }
+  }
+  memcpy(out + at, ext, strlen(ext) + 1);
   return out;
 }
 
-static int run_file(const char *path) {
-  size_t size = 0;
-  char *const source = read_to_string(path, &size);
-  if (!source) {
-    perror(path);
-    return 1;
+// Open `path` for writing, creating any missing parent directories first.
+static FILE *open_out(char *path) {
+  char *const slash = strrchr(path, '/');
+  if (slash) {
+    *slash = '\0';
+    mkdir_p(path);
+    *slash = '/';
   }
-  char *const out_path = derive_out_path(path);
-  if (!out_path) {
-    fprintf(stderr, "fatal: out of memory\n");
-    free(source);
-    return 1;
+  return fopen(path, "w");
+}
+
+// The runtime header shared by every generated module: the C standard library includes. The string /
+// slice view types are no longer builtins -- they come from the std `string` module (the prelude).
+static void write_super_rt(const char *root_dir) {
+  char *const path = build_out_path(root_dir, "super_rt", ".h");
+  if (!path)
+    return;
+  FILE *const f = open_out(path);
+  if (f) {
+    fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n", f);
+    fputs(SUPER_RT_INCLUDES, f);
+    fputs("#endif\n", f);
+    fclose(f);
   }
-  const int rc = run(source, size, out_path);
-  free(out_path);
-  free(source);
+  free(path);
+}
+
+// Compile a loaded Package as global phases (resolve all -> type-check all -> emit all), so name
+// resolution sees every module's declarations. Output is always a `<root>/build/` tree mirroring the
+// module paths: a `super_rt.h` plus one `.c`/`.h` per module (the std prelude is its own unmangled
+// module the others include). Symbols are mangled only when there is more than one user module.
+static int run_package(Package *p) {
+  for (size_t i = 0; i < p->count; i++)
+    p->ok = resolve_one(p, &p->modules[i].ast, p->modules[i].source, p->modules[i].source_len) && p->ok;
+  if (!p->ok)
+    return 1;
+  for (size_t i = 0; i < p->count; i++)
+    p->ok = typecheck_one(p, &p->modules[i].ast, p->modules[i].source, p->modules[i].source_len) && p->ok;
+  if (!p->ok)
+    return 1;
+
+  write_super_rt(p->root_dir);
+  bool err = false;
+  for (size_t i = 0; i < p->count; i++) {
+    Module *const m = &p->modules[i];
+    Codegen *c = codegen_new(m->ast, m->source, m->source_len, p);
+    codegen_set_multifile(c, true); // always a build/ tree, even for a lone module
+    char *const hpath = build_out_path(p->root_dir, m->path, ".h"); // public header alongside the .c
+    FILE *const hout = hpath ? open_out(hpath) : NULL;
+    if (hout) {
+      codegen_emit_header(c, hout);
+      fclose(hout);
+    }
+    free(hpath);
+    char *const out_path = build_out_path(p->root_dir, m->path, ".c");
+    FILE *const out = out_path ? open_out(out_path) : NULL;
+    if (!out) {
+      if (out_path)
+        perror(out_path);
+      free(out_path);
+      m->ast = codegen_take_ast(c);
+      codegen_free(&c);
+      err = true;
+      continue;
+    }
+    codegen_emit(c, out);
+    fclose(out);
+    if (codegen_has_errors(c)) {
+      codegen_log_errors(c);
+      err = true;
+    }
+    m->ast = codegen_take_ast(c);
+    codegen_free(&c);
+    free(out_path);
+  }
+  return err ? 1 : 0;
+}
+
+static int run_file(const char *path, const char *std_dir) {
+  Package *p = package_load(path, std_dir);
+  const int rc = p->ok ? run_package(p) : 1;
+  package_free(&p);
   return rc;
 }
 
-static int run_prompt(void) {
+static int run_prompt(const char *std_dir) {
   char *line = NULL;
   size_t cap = 0;
 
@@ -148,20 +259,46 @@ static int run_prompt(void) {
     if (read == 4 && memcmp(line, "exit", 4) == 0)
       break;
 
-    run(line, (size_t)read, "out.c");
+    run(line, (size_t)read, "out.c", std_dir);
   }
 
   free(line);
   return 0;
 }
 
+// The std/ directory next to the running binary ("<exe dir>/std"); the prelude is resolved from here so
+// it is found regardless of the working directory. Heap-allocated; caller frees.
+static char *exe_std_dir(const char *argv0) {
+  char buf[4096];
+  const char *path = argv0;
+#if defined(__APPLE__)
+  uint32_t size = sizeof buf;
+  if (_NSGetExecutablePath(buf, &size) == 0)
+    path = buf;
+#elif defined(__linux__)
+  const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+  if (n > 0) {
+    buf[n] = '\0';
+    path = buf;
+  }
+#endif
+  const char *const slash = strrchr(path, '/');
+  const size_t dirlen = slash ? (size_t)(slash - path) : 1;
+  char *const out = malloc(dirlen + sizeof "/std");
+  if (!out)
+    return NULL;
+  memcpy(out, slash ? path : ".", dirlen);
+  memcpy(out + dirlen, "/std", sizeof "/std");
+  return out;
+}
+
 int main(const int argc, char **argv) {
   if (argc > 2) {
     printf("Usage: %s [<path/to/script>]\n", BIN_NAME);
     return 1;
-  } else if (argc == 2) {
-    return run_file(argv[1]);
-  } else {
-    return run_prompt();
   }
+  char *const std_dir = exe_std_dir(argv[0]);
+  const int rc = argc == 2 ? run_file(argv[1], std_dir) : run_prompt(std_dir);
+  free(std_dir);
+  return rc;
 }

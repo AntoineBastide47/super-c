@@ -282,6 +282,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
           if (memcmp(lexeme, "extern", 6) == 0)
             return Extern;
           return Identifier;
+        case 'i':
+          return memcmp(lexeme, "import", 6) == 0 ? Import : Identifier;
         case 'r':
           return memcmp(lexeme, "return", 6) == 0 ? Return : Identifier;
         case 's':

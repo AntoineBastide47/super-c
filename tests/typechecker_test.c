@@ -143,7 +143,9 @@ static void test_str_member_types(void) {
   Ast *a = sc_typecheck("str member types", src);
   if (!a)
     return;
-  CHECK(ast_type(a, th_nth_kind(a, NODE_LITERAL, 0)) == ast_builtin(BT_STR), "string literal is str");
+  // `str` is no longer a builtin -- a string literal is the std prelude's `str` struct (its `.len`/`.ptr`
+  // field types below confirm the shape).
+  CHECK(ast_type_at(a, ast_type(a, th_nth_kind(a, NODE_LITERAL, 0)))->kind == TYPE_STRUCT, "string literal is str");
   const NodeId len_access = th_nth_kind(a, NODE_MEMBER, 0); // g.len
   CHECK(ast_type(a, len_access) == ast_builtin(BT_USIZE), "str.len is usize");
   const NodeId ptr_access = th_nth_kind(a, NODE_MEMBER, 1); // g.ptr

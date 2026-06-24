@@ -4,6 +4,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Identifier",
 
     "As",
+    "Import",
     "Break",
     "Case",
     "Const",

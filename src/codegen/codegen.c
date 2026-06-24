@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "module/loader.h"
 #include "types/hashmap.h"
 
 // Lowers a resolved, type-checked Ast to a single C translation unit (see plan in
@@ -21,6 +22,18 @@ static inline size_t cg_nodeid_hash(const NodeId k) {
 HM_DECLARE(NodeId, NodeId, CgEnumMap)
 HM_DEFINE(NodeId, NodeId, CgEnumMap, cg_nodeid_hash, CG_NODEID_EQ)
 
+// Every C standard library header, each behind __has_include so a toolchain that lacks an optional or
+// C23 header (threads.h / uchar.h / stdbit.h on this macOS, etc.) silently skips it instead of failing.
+#define RT_H(h) "#if __has_include(<" h ">)\n#include <" h ">\n#endif\n"
+const char *const SUPER_RT_INCLUDES =
+    RT_H("assert.h") RT_H("complex.h") RT_H("ctype.h") RT_H("errno.h") RT_H("fenv.h") RT_H("float.h")
+    RT_H("inttypes.h") RT_H("iso646.h") RT_H("limits.h") RT_H("locale.h") RT_H("math.h") RT_H("setjmp.h")
+    RT_H("signal.h") RT_H("stdalign.h") RT_H("stdarg.h") RT_H("stdatomic.h") RT_H("stdbit.h") RT_H("stdbool.h")
+    RT_H("stdckdint.h") RT_H("stddef.h") RT_H("stdint.h") RT_H("stdio.h") RT_H("stdlib.h") RT_H("stdnoreturn.h")
+    RT_H("string.h") RT_H("tgmath.h") RT_H("threads.h") RT_H("time.h") RT_H("uchar.h") RT_H("wchar.h")
+    RT_H("wctype.h");
+#undef RT_H
+
 struct Codegen {
     Ast *ast;
     const uint8_t *source;
@@ -32,17 +45,66 @@ struct Codegen {
     unsigned depth;            // current C indentation level
     unsigned tmp;              // counter feeding fresh() unique `__sc<N>` names
     char current_ret[128];     // enclosing function's multi-return struct name, or ""
+    const Package *package;    // for cross-module references / mangling (NULL = single file)
+    bool mangle;               // true for >1 user module: prefix every symbol by its module
+    bool multifile;            // emit as header + .c with includes (build/ tree), vs one self-contained .c
     ERRORS_VARIABLES;
 };
+
+// The Ast / source backing module `m`: the current module uses the in-flight Ast; any other module in
+// the package is read through it. Independent of mangling, so cross-module refs (e.g. the prelude) also
+// resolve in self-contained output. The standalone REPL/test Ast has module == package->count, so its
+// own nodes take the `c->ast` branch and never index the package.
+ALWAYS_INLINE Ast *cg_mod_ast(const Codegen *c, const ModuleId m) {
+  return c->package && m != c->ast->module ? c->package->modules[m].ast : c->ast;
+}
+ALWAYS_INLINE const uint8_t *cg_mod_src(const Codegen *c, const ModuleId m) {
+  return c->package && m != c->ast->module ? (const uint8_t *)c->package->modules[m].source : c->source;
+}
+
+// Render module `m`'s mangled prefix ("std::string" -> "std__string__") into buf; empty when not
+// mangling. Returns the number of bytes the full prefix needs.
+static size_t render_modpfx(const Codegen *c, const ModuleId m, char *buf, const size_t cap) {
+  if (cap)
+    buf[0] = '\0';
+  if (!c->mangle)
+    return 0;
+  if (c->package->modules[m].prelude) // prelude symbols (str, String, ...) keep stable unmangled names
+    return 0;
+  const char *const path = c->package->modules[m].path;
+  size_t at = 0;
+  for (size_t i = 0; path[i]; i++) {
+    if (path[i] == ':' && path[i + 1] == ':') {
+      i++;
+      if (at + 2 < cap) {
+        buf[at] = '_';
+        buf[at + 1] = '_';
+      }
+      at += 2;
+    } else {
+      if (at + 1 < cap)
+        buf[at] = path[i];
+      at += 1;
+    }
+  }
+  if (at + 2 < cap) {
+    buf[at] = '_';
+    buf[at + 1] = '_';
+  }
+  at += 2;
+  if (at < cap)
+    buf[at] = '\0';
+  return at;
+}
 
 // Super-C builtin names (for matching unresolved type paths) and their C spellings.
 static const char *const BUILTIN_NAMES[BT_COUNT] = {
     "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-    "u16",  "u32",  "u64", "usize", "f32", "f64", "void", "str",
+    "u16",  "u32",  "u64", "usize", "f32", "f64", "void",
 };
 static const char *const BUILTIN_C[BT_COUNT] = {
     "bool",     "char",     "int8_t",   "int16_t", "int32_t", "int64_t", "intptr_t", "uint8_t",
-    "uint16_t", "uint32_t", "uint64_t", "size_t",  "float",   "double",  "void",     "str",
+    "uint16_t", "uint32_t", "uint64_t", "size_t",  "float",   "double",  "void",
 };
 
 static void emit_expr(Codegen *c, NodeId id);
@@ -58,8 +120,9 @@ static void emit_match_core(Codegen *c, NodeId id, int mode, const char *result)
 static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
 static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut);
 static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
+static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
 
-Codegen *codegen_new(Ast *ast, const char *source, const size_t len) {
+Codegen *codegen_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   Codegen *const c = calloc(1, sizeof *c);
   if (!c) {
     fprintf(stderr, "fatal: out of memory\n");
@@ -68,6 +131,15 @@ Codegen *codegen_new(Ast *ast, const char *source, const size_t len) {
   c->ast = ast;
   c->source = (const uint8_t *)source;
   c->len = len;
+  c->package = package;
+  // Mangle only when more than one *user* module is in play; the prelude is always emitted unmangled, and
+  // a lone user module (+ prelude) stays a single self-contained .c with plain names.
+  size_t user_mods = 0;
+  if (package)
+    for (size_t i = 0; i < package->count; i++)
+      user_mods += !package->modules[i].prelude;
+  c->mangle = user_mods > 1;
+  c->multifile = c->mangle; // default; the CLI forces multifile so a lone module still gets a build/ tree
   c->buf_cap = len * 4 + 4096; // generated C runs a few x the source; reserve up front
   c->buf = malloc(c->buf_cap);
   if (!c->buf) {
@@ -93,6 +165,10 @@ Ast *codegen_take_ast(Codegen *c) {
   Ast *const ast = c->ast;
   c->ast = NULL;
   return ast;
+}
+
+void codegen_set_multifile(Codegen *c, const bool on) {
+  c->multifile = on;
 }
 
 // --- low-level helpers ---------------------------------------------------------------------
@@ -163,6 +239,10 @@ static void emit_indent(Codegen *c) {
 ALWAYS_INLINE Span name_span(const Codegen *c, const NodeId name_node) {
   return ast_at_const(c->ast, name_node)->as.name.text;
 }
+// The name span of a node living in module `m` (for references that may cross a module boundary).
+ALWAYS_INLINE Span name_span_in(const Codegen *c, const ModuleId m, const NodeId name_node) {
+  return ast_at_const(cg_mod_ast(c, m), name_node)->as.name.text;
+}
 
 static void emit_span(Codegen *c, const Span s) {
   emit_bytes(c, (const char *)c->source + s.start, (size_t)(s.end - s.start));
@@ -216,20 +296,34 @@ static void emit_ident(Codegen *c, const Span s) {
     emit_bytes(c, "_", 1);
 }
 
-// Render an identifier (keyword-mangled) into a buffer, for building declarator/accessor strings.
-static size_t render_ident(Codegen *c, const Span s, char *buf, const size_t cap) {
+// Render an identifier (keyword-mangled) from an explicit source buffer into `buf`.
+static size_t render_ident_src(const uint8_t *src, const Span s, char *buf, const size_t cap) {
   const size_t source_len = s.end - s.start;
-  const bool suffix = is_c_keyword(c->source, s);
+  const bool suffix = is_c_keyword(src, s);
   const size_t full_len = source_len + suffix;
   if (cap) {
     const size_t copied = source_len < cap - 1 ? source_len : cap - 1;
-    memcpy(buf, c->source + s.start, copied);
+    memcpy(buf, src + s.start, copied);
     size_t written = copied;
     if (suffix && written + 1 < cap)
       buf[written++] = '_';
     buf[written] = '\0';
   }
   return full_len;
+}
+
+// Render an identifier (keyword-mangled) into a buffer, for building declarator/accessor strings.
+static size_t render_ident(Codegen *c, const Span s, char *buf, const size_t cap) {
+  return render_ident_src(c->source, s, buf, cap);
+}
+
+// Render `<module prefix><identifier>` for a symbol named by `name_node` defined in module `owner`
+// (its name span is read from `owner`'s source). The prefix is empty unless mangling is active.
+static size_t render_qualified(Codegen *c, const ModuleId owner, const NodeId name_node, char *buf, const size_t cap) {
+  const size_t at = render_modpfx(c, owner, buf, cap);
+  const size_t off = at < cap ? at : (cap ? cap - 1 : 0);
+  const Span s = ast_at_const(cg_mod_ast(c, owner), name_node)->as.name.text;
+  return at + render_ident_src(cg_mod_src(c, owner), s, buf + off, cap > off ? cap - off : 0);
 }
 
 static void fresh(Codegen *c, char *buf, const size_t cap) {
@@ -271,6 +365,20 @@ static void emit_cstr(Codegen *c, const char *text) {
   emit_bytes(c, text, strlen(text));
 }
 
+// Emit a keyword-mangled identifier named by `name_node` (an identifier node in module `m`).
+static void emit_ident_mod(Codegen *c, const ModuleId m, const NodeId name_node) {
+  char nm[160];
+  render_ident_src(cg_mod_src(c, m), ast_at_const(cg_mod_ast(c, m), name_node)->as.name.text, nm, sizeof nm);
+  emit_cstr(c, nm);
+}
+
+// Emit the mangled C name (`<mod>__Name`) of a struct/enum declared in the current module.
+static void emit_local_type_name(Codegen *c, const NodeId aggregate_name) {
+  char nm[160];
+  render_qualified(c, c->ast->module, aggregate_name, nm, sizeof nm);
+  emit_cstr(c, nm);
+}
+
 // Find the enum declaration that owns `variant` (to spell its `Enum_Variant` tag constant).
 // Index every enum variant to its enclosing enum, once, so enclosing_enum is a hash lookup.
 static void build_enum_index(Codegen *c) {
@@ -292,11 +400,48 @@ static NodeId enclosing_enum(Codegen *c, const NodeId variant) {
   return CgEnumMap_get(&c->enum_of_variant, variant, &e) ? e : NODE_NONE;
 }
 
-// Emit the C enum constant `<Enum>_<Variant>` (raw spans, kept identical at definition and use).
-static void emit_tag(Codegen *c, const NodeId enum_decl, const NodeId variant) {
-  emit_span(c, name_span(c, ast_at_const(c->ast, enum_decl)->as.aggregate.name));
+// Like enclosing_enum but for a variant in any module `m`. The per-module index only covers the current
+// module, so a cross-module variant (e.g. matching/constructing an imported or prelude enum) is found by
+// scanning the owner module's enums -- rare and only on the cross-module path.
+static NodeId enclosing_enum_in(Codegen *c, const ModuleId m, const NodeId variant) {
+  if (m == c->ast->module)
+    return enclosing_enum(c, variant);
+  const Ast *const a = cg_mod_ast(c, m);
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const it = ast_at_const(a, ids[i]);
+    if (it->kind != NODE_ENUM)
+      continue;
+    const NodeList ms = it->as.aggregate.members;
+    const NodeId *const mids = ast_list(a, ms);
+    for (uint32_t j = 0; j < ms.len; j++)
+      if (mids[j] == variant)
+        return ids[i];
+  }
+  return NODE_NONE;
+}
+
+// Emit the C enum constant `<mod>__<Enum>_<Variant>` (kept identical at definition and use) for an enum
+// in module `m`; spans are read from `m`'s ast/source so it is correct across module boundaries.
+static void emit_tag_mod(Codegen *c, const ModuleId m, const NodeId enum_decl, const NodeId variant) {
+  const Ast *const a = cg_mod_ast(c, m);
+  const uint8_t *const src = cg_mod_src(c, m);
+  char pfx[64];
+  render_modpfx(c, m, pfx, sizeof pfx);
+  emit_cstr(c, pfx);
+  const Span es = name_span_in(c, m, ast_at_const(a, enum_decl)->as.aggregate.name);
+  emit_bytes(c, (const char *)src + es.start, es.end - es.start);
   emit(c, "_");
-  emit_span(c, name_span(c, ast_at_const(c->ast, variant)->as.variant.name));
+  const Span vs = name_span_in(c, m, ast_at_const(a, variant)->as.variant.name);
+  emit_bytes(c, (const char *)src + vs.start, vs.end - vs.start);
+}
+static void emit_tag(Codegen *c, const NodeId enum_decl, const NodeId variant) {
+  emit_tag_mod(c, c->ast->module, enum_decl, variant);
+}
+// Render the (keyword-mangled) variant name of a variant in module `m` -- the C payload-union member.
+static void render_variant_name(Codegen *c, const ModuleId m, const NodeId variant, char *buf, const size_t cap) {
+  render_ident_src(cg_mod_src(c, m), name_span_in(c, m, ast_at_const(cg_mod_ast(c, m), variant)->as.variant.name), buf, cap);
 }
 
 // Peel pointer/reference layers to the underlying aggregate (for method-call mangling).
@@ -402,15 +547,17 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
   switch (n->kind) {
     case NODE_TYPE_PATH:
     case NODE_IDENTIFIER: {
-      const NodeId d = ast_resolution(c->ast, tn);
-      if (d != NODE_NONE) {
-        const Node *const dn = ast_at_const(c->ast, d);
+      const DefId d = ast_resolution_def(c->ast, tn);
+      if (d.node != NODE_NONE) {
+        const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
         if (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) {
-          char nm[128];
-          render_ident(c, name_span(c, dn->as.aggregate.name), nm, sizeof nm);
+          char nm[160];
+          render_qualified(c, d.module, dn->as.aggregate.name, nm, sizeof nm);
           buf_join3(out, cap, nm, SEP(decl), decl);
+        } else if (dn->kind == NODE_TYPE_ALIAS && d.module == c->ast->module) {
+          render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent (same module)
         } else if (dn->kind == NODE_TYPE_ALIAS) {
-          render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent
+          render_type_id(c, ast_type(c->ast, tn), decl, out, cap); // imported alias: use the resolved type
         } else {
           codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic or opaque type is not yet supported");
           buf_join3(out, cap, "void", SEP(decl), decl);
@@ -512,8 +659,8 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       break;
     case TYPE_STRUCT:
     case TYPE_ENUM: {
-      char nm[128];
-      render_ident(c, name_span(c, ast_at_const(c->ast, ty->as.decl)->as.aggregate.name), nm, sizeof nm);
+      char nm[160];
+      render_qualified(c, ty->module, ast_at_const(cg_mod_ast(c, ty->module), ty->as.decl)->as.aggregate.name, nm, sizeof nm);
       buf_join3(out, cap, nm, SEP(decl), decl);
       break;
     }
@@ -600,25 +747,28 @@ static void emit_binding(Codegen *c, const TypeId t, const Span name, const bool
   emit_cstr(c, decl);
 }
 
-// Does `t` carry a writable (`*mut`) address -- directly, or through a struct field or array/slice
-// element? Such a value owns mutable state, so a `let` binding of it must NOT be const-qualified in C:
-// `const` would lock the owned pointer and reject the value's `&mut self` methods (e.g. `deinit`).
-// Stops at the first pointer/reference (a `*const`/`*mut` to a struct doesn't recurse into the pointee).
-static bool type_owns_mut(Codegen *c, const TypeId t) {
-  const Ty *const ty = ast_type_at(c->ast, t);
+// Does `t` (a TypeId in module `m`'s pool) carry a writable (`*mut`) address -- directly, or through a
+// struct field or array/slice element? Such a value owns mutable state, so a `let` binding of it must NOT
+// be const-qualified in C: `const` would lock the owned pointer and reject the value's `&mut self` methods
+// (e.g. `deinit`). Stops at the first pointer/reference. A struct field may live in another module (e.g.
+// the prelude's `String`), so its decl/members/field-types are read from THAT module, not the current one.
+static bool type_owns_mut_in(Codegen *c, const ModuleId m, const TypeId t) {
+  const Ty *const ty = ast_type_at(cg_mod_ast(c, m), t);
   switch (ty->kind) {
     case TYPE_POINTER:
     case TYPE_REFERENCE:
       return ty->qualifier == TYPE_QUAL_MUT;
     case TYPE_ARRAY:
     case TYPE_SLICE:
-      return type_owns_mut(c, ty->as.elem);
+      return type_owns_mut_in(c, m, ty->as.elem);
     case TYPE_STRUCT: {
-      const NodeList members = ast_at_const(c->ast, ty->as.decl)->as.aggregate.members;
-      const NodeId *const ids = ast_list(c->ast, members);
+      const ModuleId sm = ty->module; // the struct's owning module
+      Ast *const sa = cg_mod_ast(c, sm);
+      const NodeList members = ast_at_const(sa, ty->as.decl)->as.aggregate.members;
+      const NodeId *const ids = ast_list(sa, members);
       for (uint32_t i = 0; i < members.len; i++) {
-        const Node *const m = ast_at_const(c->ast, ids[i]);
-        if (m->kind == NODE_FIELD && type_owns_mut(c, ast_type(c->ast, m->as.field.type)))
+        const Node *const mn = ast_at_const(sa, ids[i]);
+        if (mn->kind == NODE_FIELD && type_owns_mut_in(c, sm, ast_type(sa, mn->as.field.type)))
           return true;
       }
       return false;
@@ -626,6 +776,10 @@ static bool type_owns_mut(Codegen *c, const TypeId t) {
     default:
       return false;
   }
+}
+
+static bool type_owns_mut(Codegen *c, const TypeId t) {
+  return type_owns_mut_in(c, c->ast->module, t);
 }
 
 // --- operators -----------------------------------------------------------------------------
@@ -681,35 +835,35 @@ static void emit_prefixed(Codegen *c, const NodeId obj, const char *prefix) {
 
 // Emit an `Enum::Variant` value. A payload-less enum lowers to its plain C tag constant; a unit
 // variant of a tagged (payload-bearing) enum is a struct literal with only its tag set.
-static void emit_variant_value(Codegen *c, const NodeId variant) {
-  const NodeId en = enclosing_enum(c, variant);
+static void emit_variant_value(Codegen *c, const DefId v) {
+  const NodeId en = enclosing_enum_in(c, v.module, v.node);
   if (en == NODE_NONE) {
     emit(c, "0");
     return;
   }
-  if (!aggregate_has_payload(c, ast_at_const(c->ast, en))) {
-    emit_tag(c, en, variant);
+  if (!aggregate_has_payload_in(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en))) {
+    emit_tag_mod(c, v.module, en, v.node);
     return;
   }
-  char enm[128];
-  render_ident(c, name_span(c, ast_at_const(c->ast, en)->as.aggregate.name), enm, sizeof enm);
+  char enm[160];
+  render_qualified(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en)->as.aggregate.name, enm, sizeof enm);
   emit(c, "(%s){ .tag = ", enm);
-  emit_tag(c, en, variant);
+  emit_tag_mod(c, v.module, en, v.node);
   emit(c, " }");
 }
 
 // Emit `Enum::Variant(args)` construction as a tagged-union compound literal.
-static void emit_variant_construct(Codegen *c, const NodeId variant, const NodeList args, const NodeId *const aids) {
-  const NodeId en = enclosing_enum(c, variant);
-  if (en == NODE_NONE || !aggregate_has_payload(c, ast_at_const(c->ast, en))) {
-    emit_variant_value(c, variant); // payload-less: ignore (absent) args, emit the tag
+static void emit_variant_construct(Codegen *c, const DefId v, const NodeList args, const NodeId *const aids) {
+  const NodeId en = enclosing_enum_in(c, v.module, v.node);
+  if (en == NODE_NONE || !aggregate_has_payload_in(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en))) {
+    emit_variant_value(c, v); // payload-less: ignore (absent) args, emit the tag
     return;
   }
-  char enm[128], vn[128];
-  render_ident(c, name_span(c, ast_at_const(c->ast, en)->as.aggregate.name), enm, sizeof enm);
-  render_ident(c, name_span(c, ast_at_const(c->ast, variant)->as.variant.name), vn, sizeof vn);
+  char enm[160], vn[128];
+  render_qualified(c, v.module, ast_at_const(cg_mod_ast(c, v.module), en)->as.aggregate.name, enm, sizeof enm);
+  render_variant_name(c, v.module, v.node, vn, sizeof vn);
   emit(c, "(%s){ .tag = ", enm);
-  emit_tag(c, en, variant);
+  emit_tag_mod(c, v.module, en, v.node);
   if (args.len) {
     emit(c, ", .payload.%s = { ", vn);
     for (uint32_t i = 0; i < args.len; i++) {
@@ -728,21 +882,22 @@ static void emit_call(Codegen *c, const Node *n) {
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(c->ast, args);
 
-  if (callee->kind == NODE_MEMBER && callee->as.member.path) { // Enum::Variant(args)
-    const NodeId member = ast_resolution(c->ast, callee->as.member.member);
-    if (member != NODE_NONE && ast_at_const(c->ast, member)->kind == NODE_VARIANT) {
-      emit_variant_construct(c, member, args, aids);
+  if (callee->kind == NODE_MEMBER && callee->as.member.path) { // Enum::Variant(args) or Type::method(args)
+    const DefId md = ast_resolution_def(c->ast, callee->as.member.member);
+    if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_VARIANT) {
+      emit_variant_construct(c, md, args, aids);
       return;
     }
-    if (member != NODE_NONE && ast_at_const(c->ast, member)->kind == NODE_FUNCTION) {
-      const NodeId target = ast_resolution(c->ast, callee->as.member.object);
-      if (target == NODE_NONE) {
-        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: associated method target is unresolved");
-      } else {
-        emit_ident(c, name_span(c, ast_at_const(c->ast, target)->as.aggregate.name));
+    if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_FUNCTION) {
+      const DefId td = ast_resolution_def(c->ast, callee->as.member.object); // the Target type (none = module fn)
+      char pfx[64];
+      render_modpfx(c, md.module, pfx, sizeof pfx);
+      emit_cstr(c, pfx);
+      if (td.node != NODE_NONE) { // `Type::method` -> `Target__method`; a `module::func` has no target type
+        emit_ident_mod(c, td.module, ast_at_const(cg_mod_ast(c, td.module), td.node)->as.aggregate.name);
         emit(c, "__");
       }
-      emit_ident(c, name_span(c, callee->as.member.member));
+      emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
       emit(c, "(");
       for (uint32_t i = 0; i < args.len; i++) {
         if (i)
@@ -755,26 +910,33 @@ static void emit_call(Codegen *c, const Node *n) {
   }
 
   if (callee->kind == NODE_MEMBER && !callee->as.member.path) {
-    const NodeId method = ast_resolution(c->ast, callee->as.member.member);
-    if (method != NODE_NONE && ast_at_const(c->ast, method)->kind == NODE_FUNCTION) {
+    const DefId md = ast_resolution_def(c->ast, callee->as.member.member);
+    Ast *const ma = cg_mod_ast(c, md.module);
+    if (md.node != NODE_NONE && ast_at_const(ma, md.node)->kind == NODE_FUNCTION) {
       const NodeId obj = callee->as.member.object;
       const TypeId obj_t = ast_type(c->ast, obj);
       const Ty *const base = ast_type_at(c->ast, strip_ptr(c, obj_t));
       if (base->kind == TYPE_STRUCT || base->kind == TYPE_ENUM) {
-        emit_ident(c, name_span(c, ast_at_const(c->ast, base->as.decl)->as.aggregate.name));
+        char pfx[64];
+        render_modpfx(c, md.module, pfx, sizeof pfx); // method's module: a local extension is mangled by it
+        emit_cstr(c, pfx);
+        emit_ident_mod(c, base->module, ast_at_const(cg_mod_ast(c, base->module), base->as.decl)->as.aggregate.name);
         emit(c, "__");
       } else {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: method receiver is not a struct or enum");
       }
-      emit_ident(c, name_span(c, callee->as.member.member));
+      emit_ident_mod(c, md.module, ast_at_const(ma, md.node)->as.function.name);
       emit(c, "(");
 
-      const NodeList params = ast_at_const(c->ast, method)->as.function.params;
+      const NodeList params = ast_at_const(ma, md.node)->as.function.params;
       bool wrote = false;
       if (params.len > 0) { // bind the receiver to the implicit self parameter
-        const Ty *const self = ast_type_at(c->ast, ast_type(c->ast, ast_list(c->ast, params)[0]));
+        // self-by-pointer is decided from the self parameter's own type node (in the method's module),
+        // so it needs no interned type for a foreign decl.
+        const NodeId self_type = ast_at_const(ma, ast_list(ma, params)[0])->as.parameter.type;
+        const NodeKind sk = self_type != NODE_NONE ? ast_at_const(ma, self_type)->kind : NODE_NONE_KIND;
+        const bool self_ptr = sk == NODE_POINTER_TYPE || sk == NODE_REFERENCE_TYPE;
         const Ty *const ot = ast_type_at(c->ast, obj_t);
-        const bool self_ptr = self->kind == TYPE_POINTER || self->kind == TYPE_REFERENCE;
         const bool obj_ptr = ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE;
         if (self_ptr && !obj_ptr)
           emit_prefixed(c, obj, "&");
@@ -864,12 +1026,44 @@ static void emit_match_expr(Codegen *c, const NodeId id) {
   emit(c, "})");
 }
 
+// Whether `node` is a top-level item of module `m` (vs a block-scoped local). Top-level consts are
+// module-mangled like functions; locals keep their bare name. Only consulted when mangling is active.
+static bool decl_is_toplevel(Codegen *c, const ModuleId m, const NodeId node) {
+  const Ast *const a = cg_mod_ast(c, m);
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++)
+    if (ids[i] == node)
+      return true;
+  return false;
+}
+
 static void emit_ident_ref(Codegen *c, const NodeId id, const Node *n) {
-  const NodeId d = ast_resolution(c->ast, id);
-  if (d != NODE_NONE && ast_at_const(c->ast, d)->kind == NODE_VARIANT) {
-    const NodeId en = enclosing_enum(c, d);
-    if (en != NODE_NONE) {
-      emit_tag(c, en, d);
+  const DefId d = ast_resolution_def(c->ast, id);
+  if (d.node != NODE_NONE) {
+    Ast *const da = cg_mod_ast(c, d.module);
+    const Node *const dn = ast_at_const(da, d.node);
+    if (dn->kind == NODE_VARIANT) { // a bare (glob/prelude) payload-less variant -> its tag constant
+      const NodeId en = enclosing_enum_in(c, d.module, d.node);
+      if (en != NODE_NONE) {
+        emit_tag_mod(c, d.module, en, d.node);
+        return;
+      }
+    }
+    // A bare reference to a module-level function (not extern -- those have no body -- and not `main`)
+    // emits the OWNING module's mangled name, so glob / prelude / alias imports (which are pure source
+    // sugar) still resolve to the real symbol exactly as a fully-qualified reference would.
+    if (dn->kind == NODE_FUNCTION && dn->as.function.body != NODE_NONE &&
+        !span_is(cg_mod_src(c, d.module), ast_at_const(da, dn->as.function.name)->as.name.text, "main")) {
+      char nm[160];
+      render_qualified(c, d.module, dn->as.function.name, nm, sizeof nm);
+      emit_cstr(c, nm);
+      return;
+    }
+    if (dn->kind == NODE_CONST && (!c->mangle || decl_is_toplevel(c, d.module, d.node))) {
+      char nm[160]; // top-level const -> its mangled name (matches the mangled definition); locals stay bare
+      render_qualified(c, d.module, dn->as.const_def.name, nm, sizeof nm);
+      emit_cstr(c, nm);
       return;
     }
   }
@@ -945,8 +1139,22 @@ static void emit_expr(Codegen *c, const NodeId id) {
       break;
     }
     case NODE_MEMBER: {
-      if (n->as.member.path) { // Enum::Variant used as a value
-        emit_variant_value(c, ast_resolution(c->ast, n->as.member.member));
+      if (n->as.member.path) { // a `::` path value: Enum::Variant, or a qualified const / function ref
+        DefId d = ast_resolution_def(c->ast, id); // multi-segment module paths record on the outer node
+        if (d.node == NODE_NONE)
+          d = ast_resolution_def(c->ast, n->as.member.member); // local Type::Variant records on the member
+        const Node *const dn = d.node != NODE_NONE ? ast_at_const(cg_mod_ast(c, d.module), d.node) : NULL;
+        if (dn && dn->kind == NODE_CONST) {
+          char nm[160];
+          render_qualified(c, d.module, dn->as.const_def.name, nm, sizeof nm);
+          emit_cstr(c, nm);
+        } else if (dn && dn->kind == NODE_FUNCTION) {
+          char nm[160];
+          render_qualified(c, d.module, dn->as.function.name, nm, sizeof nm);
+          emit_cstr(c, nm);
+        } else {
+          emit_variant_value(c, d); // Enum::Variant (or unresolved -> 0)
+        }
         break;
       }
       const Ty *const ot = ast_type_at(c->ast, ast_type(c->ast, n->as.member.object));
@@ -1026,14 +1234,14 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
   switch (p->kind) {
     case NODE_PATTERN_NAME: {
       // A name bound to a unit variant (by the type checker) is a tag test; otherwise it is a
-      // catch-all binding that matches anything.
-      const NodeId vd = ast_resolution(c->ast, p->as.pattern.name);
-      if (vd != NODE_NONE && ast_at_const(c->ast, vd)->kind == NODE_VARIANT) {
-        const NodeId en = enclosing_enum(c, vd);
-        const bool payload = en != NODE_NONE && aggregate_has_payload(c, ast_at_const(c->ast, en));
+      // catch-all binding that matches anything. The variant may live in another module.
+      const DefId vd = ast_resolution_def(c->ast, p->as.pattern.name);
+      if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT) {
+        const NodeId en = enclosing_enum_in(c, vd.module, vd.node);
+        const bool payload = en != NODE_NONE && aggregate_has_payload_in(c, vd.module, ast_at_const(cg_mod_ast(c, vd.module), en));
         emit(c, payload ? "%s.tag == " : "%s == ", scrut);
         if (en != NODE_NONE)
-          emit_tag(c, en, vd);
+          emit_tag_mod(c, vd.module, en, vd.node);
         else
           emit(c, "0");
       } else {
@@ -1065,21 +1273,22 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
       break;
     }
     case NODE_PATTERN_TUPLE: {
-      const NodeId vd = p->as.pattern.name != NODE_NONE ? ast_resolution(c->ast, p->as.pattern.name) : NODE_NONE;
+      const DefId vd = p->as.pattern.name != NODE_NONE ? ast_resolution_def(c->ast, p->as.pattern.name)
+                                                       : (DefId){0, NODE_NONE};
       const NodeList ch = p->as.pattern.children;
       const NodeId *const ids = ast_list(c->ast, ch);
-      if (vd != NODE_NONE && ast_at_const(c->ast, vd)->kind == NODE_VARIANT) {
-        const NodeId en = enclosing_enum(c, vd);
+      if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT) {
+        const NodeId en = enclosing_enum_in(c, vd.module, vd.node);
         // A payload-bearing enum is a tagged union (test `.tag`); a payload-less one is a plain
         // C enum whose value is the tag itself.
-        const bool payload = en != NODE_NONE && aggregate_has_payload(c, ast_at_const(c->ast, en));
+        const bool payload = en != NODE_NONE && aggregate_has_payload_in(c, vd.module, ast_at_const(cg_mod_ast(c, vd.module), en));
         emit(c, payload ? "%s.tag == " : "%s == ", scrut);
         if (en != NODE_NONE)
-          emit_tag(c, en, vd);
+          emit_tag_mod(c, vd.module, en, vd.node);
         else
           emit(c, "0");
         char vn[128];
-        render_ident(c, name_span(c, ast_at_const(c->ast, vd)->as.variant.name), vn, sizeof vn);
+        render_variant_name(c, vd.module, vd.node, vn, sizeof vn);
         for (uint32_t i = 0; i < ch.len; i++) {
           if (pat_trivial(ast_at_const(c->ast, ids[i])->kind))
             continue;
@@ -1127,8 +1336,8 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
   const Node *const p = ast_at_const(c->ast, pid);
   switch (p->kind) {
     case NODE_PATTERN_NAME: {
-      const NodeId vd = ast_resolution(c->ast, p->as.pattern.name);
-      if (vd != NODE_NONE && ast_at_const(c->ast, vd)->kind == NODE_VARIANT)
+      const DefId vd = ast_resolution_def(c->ast, p->as.pattern.name);
+      if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT)
         break; // a unit-variant tag pattern binds nothing
       emit_indent(c);
       emit_binding(c, ast_type(c->ast, pid), name_span(c, p->as.pattern.name), true);
@@ -1141,12 +1350,13 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
       emit(c, " = %s;\n", scrut);
       break;
     case NODE_PATTERN_TUPLE: {
-      const NodeId vd = p->as.pattern.name != NODE_NONE ? ast_resolution(c->ast, p->as.pattern.name) : NODE_NONE;
+      const DefId vd = p->as.pattern.name != NODE_NONE ? ast_resolution_def(c->ast, p->as.pattern.name)
+                                                       : (DefId){0, NODE_NONE};
       const NodeList ch = p->as.pattern.children;
       const NodeId *const ids = ast_list(c->ast, ch);
       char vn[128] = "";
-      if (vd != NODE_NONE && ast_at_const(c->ast, vd)->kind == NODE_VARIANT)
-        render_ident(c, name_span(c, ast_at_const(c->ast, vd)->as.variant.name), vn, sizeof vn);
+      if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT)
+        render_variant_name(c, vd.module, vd.node, vn, sizeof vn);
       for (uint32_t i = 0; i < ch.len; i++) {
         char sub[256];
         if (vn[0])
@@ -1694,27 +1904,39 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
   }
 }
 
-// Build a function's C name: `name`, or `Target__name` for an impl method.
-static void function_name(Codegen *c, const NodeId fn, const NodeId target, char *out, const size_t cap) {
-  size_t k = 0;
-  if (target != NODE_NONE) {
-    k = render_ident(c, name_span(c, ast_at_const(c->ast, target)->as.aggregate.name), out, cap);
-    if (k >= cap)
-      k = cap ? cap - 1 : 0;
+// Build a function's C name: `<mod>__name`, or `<mod>__Target__name` for an impl method. `prefixed`
+// is false for extern (FFI) functions; the program entry `main` is never prefixed either.
+// `target` is the receiver type (a DefId; .node == NODE_NONE for a free function). The module prefix is
+// always this (the emitting) module, so a local `extend foreign::T` method is mangled by the module that
+// declares it (`extender__T__m`); the type-name segment is read from the target type's own module.
+static void function_name(Codegen *c, const NodeId fn, const DefId target, char *out, const size_t cap, const bool prefixed) {
+  const Span fname = name_span(c, ast_at_const(c->ast, fn)->as.function.name);
+  const bool is_main = target.node == NODE_NONE && span_is(c->source, fname, "main");
+  size_t k = prefixed && !is_main ? render_modpfx(c, c->ast->module, out, cap) : 0;
+  if (k >= cap)
+    k = cap ? cap - 1 : 0;
+  if (target.node != NODE_NONE) {
+    const Span ts = name_span_in(c, target.module, ast_at_const(cg_mod_ast(c, target.module), target.node)->as.aggregate.name);
+    k += render_ident_src(cg_mod_src(c, target.module), ts, out + k, cap - k);
     if (k + 2 < cap) {
       out[k++] = '_';
       out[k++] = '_';
     }
   }
-  render_ident(c, name_span(c, ast_at_const(c->ast, fn)->as.function.name), out + k, cap - k);
+  render_ident(c, fname, out + k, cap - k);
 }
 
 // Emit a function signature; with_body emits the block, otherwise a prototype `;`. `extern_q`
 // prefixes `extern`. Sets current_ret for multi-return so NODE_RETURN can build the struct.
-static void emit_function(Codegen *c, const NodeId fn_id, const NodeId target, const bool extern_q, const bool with_body) {
+static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, const bool extern_q, const bool with_body) {
   const Node *const fn = ast_at_const(c->ast, fn_id);
   char nm[256];
-  function_name(c, fn_id, target, nm, sizeof nm);
+  function_name(c, fn_id, target, nm, sizeof nm, !extern_q);
+  // In a multi-module package a non-`pub` function is module-private: emit it `static` so it never
+  // gets external linkage (its prototype is kept in the .c, not the public header). `main` and FFI
+  // declarations are never static.
+  const bool is_main = target.node == NODE_NONE && span_is(c->source, name_span(c, fn->as.function.name), "main");
+  const bool is_static = c->multifile && !extern_q && !is_main && !fn->as.function.is_public;
   char ps[1024];
   render_params(c, fn->as.function.params, ps, sizeof ps);
   char decl[1320];
@@ -1734,11 +1956,13 @@ static void emit_function(Codegen *c, const NodeId fn_id, const NodeId target, c
 
   if (extern_q)
     emit(c, "extern ");
+  if (is_static)
+    emit(c, "static ");
 
   const NodeList rets = fn->as.function.returns;
   c->current_ret[0] = '\0';
   // C requires `int main(void)`; a Super-C `fn main() i32` maps onto it (implicit 0 on fall-through).
-  if (target == NODE_NONE && !extern_q && span_is(c->source, name_span(c, fn->as.function.name), "main")) {
+  if (target.node == NODE_NONE && !extern_q && span_is(c->source, name_span(c, fn->as.function.name), "main")) {
     emit(c, "int %s", decl);
   } else if (rets.len > 1) {
     buf_join3(c->current_ret, sizeof c->current_ret, nm, "", "_ret");
@@ -1765,14 +1989,15 @@ static void emit_function(Codegen *c, const NodeId fn_id, const NodeId target, c
   }
 }
 
+
 // Emit the `<fn>_ret` struct backing a multi-return function (fields `_0`, `_1`, …).
-static void emit_ret_struct(Codegen *c, const NodeId fn_id, const NodeId target) {
+static void emit_ret_struct(Codegen *c, const NodeId fn_id, const DefId target) {
   const Node *const fn = ast_at_const(c->ast, fn_id);
   const NodeList rets = fn->as.function.returns;
   if (rets.len <= 1)
     return;
   char nm[256];
-  function_name(c, fn_id, target, nm, sizeof nm);
+  function_name(c, fn_id, target, nm, sizeof nm, true);
   const NodeId *const ids = ast_list(c->ast, rets);
   emit(c, "typedef struct { ");
   for (uint32_t i = 0; i < rets.len; i++) {
@@ -1786,13 +2011,45 @@ static void emit_ret_struct(Codegen *c, const NodeId fn_id, const NodeId target)
   emit(c, "} %s_ret;\n", nm);
 }
 
-static bool aggregate_has_payload(Codegen *c, const Node *enum_node) {
+static bool aggregate_has_payload_in(Codegen *c, const ModuleId m, const Node *enum_node) {
+  const Ast *const a = cg_mod_ast(c, m);
   const NodeList members = enum_node->as.aggregate.members;
-  const NodeId *const ids = ast_list(c->ast, members);
+  const NodeId *const ids = ast_list(a, members);
   for (uint32_t i = 0; i < members.len; i++)
-    if (ast_at_const(c->ast, ids[i])->as.variant.payload.len > 0)
+    if (ast_at_const(a, ids[i])->as.variant.payload.len > 0)
       return true;
   return false;
+}
+static bool aggregate_has_payload(Codegen *c, const Node *enum_node) {
+  return aggregate_has_payload_in(c, c->ast->module, enum_node);
+}
+
+// Full definition of a payload-less enum, wrapped in a per-enum include guard keyed on its mangled name.
+// C11 cannot forward-declare an `enum`, so when a header must name a cross-module payload-less enum but
+// cannot include its owner's header (that would re-enter a mutual cycle), it emits this guarded copy.
+// The guard makes the same enum emittable from several headers (owner's + referrers') without a
+// duplicate-definition error; every copy is byte-identical, so the constants agree across translation
+// units. Reads c->ast, so cross-module callers swap c->ast/source to the owner first.
+static void emit_enum_full(Codegen *c, const Node *n, const NodeId enum_id) {
+  char nm[160];
+  render_qualified(c, c->ast->module, n->as.aggregate.name, nm, sizeof nm);
+  emit(c, "#ifndef SUPER_ENUM_%s\n#define SUPER_ENUM_%s\n", nm, nm);
+  emit(c, "typedef enum { ");
+  const NodeList ms = n->as.aggregate.members;
+  const NodeId *const mids = ast_list(c->ast, ms);
+  for (uint32_t j = 0; j < ms.len; j++) {
+    if (j)
+      emit(c, ", ");
+    emit_tag(c, enum_id, mids[j]);
+    const NodeId disc = ast_at_const(c->ast, mids[j])->as.variant.value;
+    if (disc != NODE_NONE) { // explicit discriminant `= <int>`
+      emit(c, " = ");
+      emit_expr(c, disc);
+    }
+  }
+  emit(c, " } ");
+  emit_local_type_name(c, n->as.aggregate.name);
+  emit(c, ";\n#endif\n");
 }
 
 static NodeList program_items(Codegen *c) {
@@ -1812,18 +2069,22 @@ static void phase_forward(Codegen *c) {
         continue;
       }
       emit(c, "typedef struct ");
-      emit_ident(c, name_span(c, n->as.aggregate.name));
+      emit_local_type_name(c, n->as.aggregate.name);
       emit(c, " ");
-      emit_ident(c, name_span(c, n->as.aggregate.name));
+      emit_local_type_name(c, n->as.aggregate.name);
       emit(c, ";\n");
     } else if (n->kind == NODE_ENUM) {
       if (n->as.aggregate.generics.len) {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic enum is not yet supported");
         continue;
       }
+      if (!aggregate_has_payload(c, n)) {
+        emit_enum_full(c, n, ids[i]); // self-contained, guarded (so referrers can re-emit it)
+        continue;
+      }
+      // Payload enum: the discriminant tag enum, then a forward typedef for the tagged-union struct.
       const NodeList ms = n->as.aggregate.members;
       const NodeId *const mids = ast_list(c->ast, ms);
-      const bool payload = aggregate_has_payload(c, n);
       emit(c, "typedef enum { ");
       for (uint32_t j = 0; j < ms.len; j++) {
         if (j)
@@ -1836,17 +2097,13 @@ static void phase_forward(Codegen *c) {
         }
       }
       emit(c, " } ");
-      emit_ident(c, name_span(c, n->as.aggregate.name));
-      if (payload)
-        emit(c, "Tag");
+      emit_local_type_name(c, n->as.aggregate.name);
+      emit(c, "Tag;\n");
+      emit(c, "typedef struct ");
+      emit_local_type_name(c, n->as.aggregate.name);
+      emit(c, " ");
+      emit_local_type_name(c, n->as.aggregate.name);
       emit(c, ";\n");
-      if (payload) {
-        emit(c, "typedef struct ");
-        emit_ident(c, name_span(c, n->as.aggregate.name));
-        emit(c, " ");
-        emit_ident(c, name_span(c, n->as.aggregate.name));
-        emit(c, ";\n");
-      }
     }
   }
 }
@@ -1861,7 +2118,7 @@ static void phase_types(Codegen *c) {
       if (n->as.aggregate.generics.len)
         continue;
       emit(c, "struct ");
-      emit_ident(c, name_span(c, n->as.aggregate.name));
+      emit_local_type_name(c, n->as.aggregate.name);
       emit(c, " {\n");
       c->depth++;
       const NodeList fs = n->as.aggregate.members;
@@ -1881,11 +2138,11 @@ static void phase_types(Codegen *c) {
       const NodeList ms = n->as.aggregate.members;
       const NodeId *const mids = ast_list(c->ast, ms);
       emit(c, "struct ");
-      emit_ident(c, name_span(c, n->as.aggregate.name));
+      emit_local_type_name(c, n->as.aggregate.name);
       emit(c, " {\n");
       c->depth++;
       emit_indent(c);
-      emit_ident(c, name_span(c, n->as.aggregate.name));
+      emit_local_type_name(c, n->as.aggregate.name);
       emit(c, "Tag tag;\n");
       emit_indent(c);
       emit(c, "union {\n");
@@ -1932,9 +2189,9 @@ static void phase_ret_structs(Codegen *c) {
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len) {
-      emit_ret_struct(c, ids[i], NODE_NONE);
+      emit_ret_struct(c, ids[i], (DefId){0, NODE_NONE});
     } else if (n->kind == NODE_IMPL && !n->as.impl_def.generics.len) {
-      const NodeId target = ast_resolution(c->ast, n->as.impl_def.target_type);
+      const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
       const NodeList ms = n->as.impl_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
@@ -1944,8 +2201,16 @@ static void phase_ret_structs(Codegen *c) {
   }
 }
 
-// Phase 3: prototypes for every top-level function, impl method and extern function.
-static void phase_prototypes(Codegen *c) {
+// Which prototypes a pass emits: everything (single file), only public + extern (a module's header),
+// or only private (a module's own .c, where they are `static`).
+enum { PROTO_ALL, PROTO_PUBLIC, PROTO_PRIVATE };
+
+static bool want_fn(const int which, const bool is_public) {
+  return which == PROTO_ALL || (which == PROTO_PUBLIC) == is_public;
+}
+
+// Phase 3: prototypes for top-level functions, impl methods and extern functions (filtered by `which`).
+static void phase_prototypes(Codegen *c, const int which) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
@@ -1955,25 +2220,54 @@ static void phase_prototypes(Codegen *c) {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic function is not yet supported");
         continue;
       }
-      emit_function(c, ids[i], NODE_NONE, false, false);
+      if (want_fn(which, n->as.function.is_public))
+        emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false);
     } else if (n->kind == NODE_IMPL) {
       if (n->as.impl_def.generics.len) {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic impl is not yet supported");
         continue;
       }
-      const NodeId target = ast_resolution(c->ast, n->as.impl_def.target_type);
+      const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
       const NodeList ms = n->as.impl_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
-        if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION)
+        if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && want_fn(which, ast_at_const(c->ast, mids[j])->as.function.is_public))
           emit_function(c, mids[j], target, false, false);
-    } else if (n->kind == NODE_EXTERN_BLOCK) {
+    } else if (n->kind == NODE_EXTERN_BLOCK && which != PROTO_PRIVATE) {
       const NodeList ms = n->as.extern_block.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && !ast_at_const(c->ast, mids[j])->as.function.generics.len)
-          emit_function(c, mids[j], NODE_NONE, true, false);
+          emit_function(c, mids[j], (DefId){0, NODE_NONE}, true, false);
     }
+  }
+}
+
+// A top-level const, module-mangled (so refs across modules agree and names never collide). `static const`
+// is per-TU internal linkage, so a public one lives in the header (each includer gets its own copy, no ODR
+// issue) and a private one stays in the .c. Distinct from a block-local const (emit_stmt, kept bare).
+static void emit_toplevel_const(Codegen *c, const NodeId id) {
+  const Node *const n = ast_at_const(c->ast, id);
+  char nm[160], decl[256];
+  render_qualified(c, c->ast->module, n->as.const_def.name, nm, sizeof nm);
+  render_type_node(c, n->as.const_def.type, nm, decl, sizeof decl);
+  emit(c, "static const ");
+  emit_cstr(c, decl);
+  if (n->as.const_def.value != NODE_NONE) {
+    emit(c, " = ");
+    emit_initializer(c, n->as.const_def.type, n->as.const_def.value);
+  }
+  emit(c, ";\n");
+}
+
+// The module's public consts -- emitted into the header (multi-file build) so other modules can name them.
+static void emit_public_consts(Codegen *c) {
+  const NodeList items = program_items(c);
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    if (n->kind == NODE_CONST && n->as.const_def.is_public)
+      emit_toplevel_const(c, ids[i]);
   }
 }
 
@@ -1981,16 +2275,20 @@ static void phase_prototypes(Codegen *c) {
 static void phase_bodies(Codegen *c) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
-  for (uint32_t i = 0; i < items.len; i++)
-    if (ast_at_const(c->ast, ids[i])->kind == NODE_CONST)
-      emit_stmt(c, ids[i]);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    // Public consts go in the header when emitting a multi-file build; otherwise (and for private ones)
+    // they go here in the .c (or the single self-contained unit).
+    if (n->kind == NODE_CONST && !(c->multifile && n->as.const_def.is_public))
+      emit_toplevel_const(c, ids[i]);
+  }
 
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE) {
-      emit_function(c, ids[i], NODE_NONE, false, true);
+      emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true);
     } else if (n->kind == NODE_IMPL && !n->as.impl_def.generics.len) {
-      const NodeId target = ast_resolution(c->ast, n->as.impl_def.target_type);
+      const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
       const NodeList ms = n->as.impl_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
@@ -2000,22 +2298,216 @@ static void phase_bodies(Codegen *c) {
   }
 }
 
-void codegen_emit(Codegen *c, FILE *out) {
+// Subdir depth of the current module under build/ (number of `::` in its path).
+static size_t module_depth(const Codegen *c) {
+  const char *const p = c->package->modules[c->ast->module].path;
+  size_t d = 0;
+  for (size_t i = 0; p[i]; i++)
+    if (p[i] == ':' && p[i + 1] == ':') {
+      d++;
+      i++;
+    }
+  return d;
+}
+
+// "../" repeated to climb from the current module's subdir back to the build root.
+static void emit_rel_prefix(Codegen *c) {
+  for (size_t i = 0, d = module_depth(c); i < d; i++)
+    emit(c, "../");
+}
+
+// Emit `#include "<rel><path>.h"`: a path RELATIVE to the current file's dir (so the build/ tree compiles
+// with `cc build/**/*.c` and no -I), where `path` is the "::"-joined module path rewritten with '/'.
+static void emit_modpath_include(Codegen *c, const char *path) {
+  emit(c, "#include \"");
+  emit_rel_prefix(c);
+  for (size_t i = 0; path[i]; i++) {
+    if (path[i] == ':' && path[i + 1] == ':') {
+      emit(c, "/");
+      i++;
+    } else {
+      emit_bytes(c, path + i, 1);
+    }
+  }
+  emit(c, ".h\"\n");
+}
+
+// Forward-declare every referenced cross-module STRUCT, so this header's prototypes can name them even
+// under a mutual include cycle (e.g. str <-> string via str.to_string() / String.from_str()). A prototype
+// needs only the name; the full type still arrives via the includes below (needed for by-value fields) and
+// in the .c. Duplicate `typedef struct X X;` is legal C, so this is safe even when an include re-declares it.
+static void emit_referenced_fwd(Codegen *c) {
+  const ModuleId cur = c->ast->module;
+  for (size_t i = 0; i < c->ast->type_pool.len; i++) {
+    const Ty t = c->ast->type_pool.data[i];
+    if (t.module == cur || t.module >= c->package->count)
+      continue;
+    const Node *const dn = ast_at_const(cg_mod_ast(c, t.module), t.as.decl);
+    // A struct, or a payload enum (struct-shaped in C), forward-declares as `typedef struct X X;` --
+    // enough for a prototype that names it. A payload-less enum lowers to a C `enum`, which C11 cannot
+    // forward-declare, so emit its guarded full definition (self-contained: only integer discriminants).
+    if (t.kind == TYPE_STRUCT || (t.kind == TYPE_ENUM && aggregate_has_payload_in(c, t.module, dn))) {
+      char nm[160];
+      render_qualified(c, t.module, dn->as.aggregate.name, nm, sizeof nm);
+      emit(c, "typedef struct %s %s;\n", nm, nm);
+    } else if (t.kind == TYPE_ENUM) {
+      Ast *const sa = c->ast;
+      const uint8_t *const ss = c->source;
+      const size_t sl = c->len;
+      Ast *const oa = cg_mod_ast(c, t.module); // capture owner ast/source BEFORE swapping c->ast,
+      const uint8_t *const os = cg_mod_src(c, t.module); // else cg_mod_src would see the new module
+      c->ast = oa;
+      c->source = os;
+      c->len = c->package->modules[t.module].source_len;
+      emit_enum_full(c, ast_at_const(c->ast, t.as.decl), t.as.decl);
+      c->ast = sa;
+      c->source = ss;
+      c->len = sl;
+    }
+  }
+}
+
+// Include the header of every OTHER module this one actually references -- via a recorded cross-module
+// resolution (types, functions, idents) or an interned named type. Dependency-precise: it pulls exactly
+// what this module's types/prototypes/bodies name, so auto-imported prelude modules don't cross-include
+// in a cycle (str.h never pulls string.h) yet `String`'s header still gets str.h. Covers explicit
+// imports and glob/prelude refs uniformly (an unused import contributes no include).
+static void emit_referenced_includes(Codegen *c) {
+  const size_t nmod = c->package->count;
+  const ModuleId cur = c->ast->module;
+  bool *const want = calloc(nmod, sizeof *want);
+  if (!want)
+    return;
+  for (size_t i = 0; i < c->ast->resolutions.len; i++) {
+    const DefId d = c->ast->resolutions.data[i];
+    if (d.node != NODE_NONE && d.module != cur && d.module < nmod)
+      want[d.module] = true;
+  }
+  for (size_t i = 0; i < c->ast->type_pool.len; i++) {
+    const Ty t = c->ast->type_pool.data[i]; // named types reach modules a literal/inference uses w/o a ref
+    if ((t.kind == TYPE_STRUCT || t.kind == TYPE_ENUM || t.kind == TYPE_FUNCTION || t.kind == TYPE_GENERIC) &&
+        t.module != cur && t.module < nmod)
+      want[t.module] = true;
+  }
+  for (size_t m = 0; m < nmod; m++)
+    if (want[m])
+      emit_modpath_include(c, c->package->modules[m].path);
+  free(want);
+}
+
+// A multi-file .c includes its own header (which transitively brings in the runtime + every type and
+// public prototype) plus the header of every module it references.
+static void emit_includes(Codegen *c) {
+  emit_modpath_include(c, c->package->modules[c->ast->module].path);
+  emit_referenced_includes(c);
+  emit(c, "\n");
+}
+
+// A module's public header: include guard, the shared runtime, imported headers (public signatures may
+// name imported types), every type definition, multi-return structs, and public/extern prototypes only.
+void codegen_emit_header(Codegen *c, FILE *out) {
   build_enum_index(c);
-  emit(c, "#include <stdint.h>\n#include <stdbool.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
-  emit(c, "typedef struct { void *ptr; size_t len; } SCslice;\n");
-  emit(c, "typedef struct { const uint8_t *ptr; size_t len; } str;\n\n");
+  // Guard from the module PATH (not the mangled prefix, which is empty for an unmangled single module --
+  // that would collide across modules). "std::string" -> SUPER_STD__STRING_H.
+  char guard[160];
+  size_t at = buf_append(guard, sizeof guard, 0, "SUPER_");
+  const char *const mp = c->package->modules[c->ast->module].path;
+  for (size_t i = 0; mp[i] && at + 2 < sizeof guard; i++) {
+    if (mp[i] == ':' && mp[i + 1] == ':') {
+      guard[at++] = '_';
+      guard[at++] = '_';
+      i++;
+    } else {
+      guard[at++] = mp[i];
+    }
+  }
+  guard[at] = '\0';
+  buf_append(guard, sizeof guard, at, "_H");
+  for (size_t i = 0; guard[i]; i++)
+    if (guard[i] >= 'a' && guard[i] <= 'z')
+      guard[i] = (char)(guard[i] - 32);
+  emit(c, "#ifndef %s\n#define %s\n\n", guard, guard);
+  emit(c, "#include \"");
+  emit_rel_prefix(c); // super_rt.h lives at the build root
+  emit(c, "super_rt.h\"\n");
+  emit_referenced_fwd(c);      // forward-decl referenced cross-module structs (breaks mutual include cycles)
+  emit_referenced_includes(c); // headers of the modules this one's public signatures / types name
+  emit(c, "\n");
   phase_forward(c);
   emit(c, "\n");
   phase_types(c);
   phase_ret_structs(c);
   emit(c, "\n");
-  phase_prototypes(c);
+  phase_prototypes(c, PROTO_PUBLIC);
   emit(c, "\n");
-  phase_bodies(c);
+  emit_public_consts(c); // public consts: in the header so other modules can name them
+  emit(c, "\n#endif\n");
+  if (c->buf_len)
+    fwrite(c->buf, 1, c->buf_len, out);
+  c->buf_len = 0; // reuse the buffer for the .c
+}
+
+void codegen_emit(Codegen *c, FILE *out) {
+  build_enum_index(c);
+  if (c->multifile) {
+    // Multi-file .c: types/public prototypes live in the included headers; here go the private
+    // (static) prototypes and every body (private functions are emitted `static`).
+    emit_includes(c);
+    phase_prototypes(c, PROTO_PRIVATE);
+    emit(c, "\n");
+    phase_bodies(c);
+  } else {
+    emit_cstr(c, SUPER_RT_INCLUDES);
+    emit(c, "\n");
+    phase_forward(c);
+    emit(c, "\n");
+    phase_types(c);
+    phase_ret_structs(c);
+    emit(c, "\n");
+    phase_prototypes(c, PROTO_ALL);
+    emit(c, "\n");
+    phase_bodies(c);
+  }
   errors_finalize(&c->errors, &c->errors_start, &c->errors_len, c->source, c->len);
   if (c->buf_len)
     fwrite(c->buf, 1, c->buf_len, out);
+}
+
+static void cg_flush(Codegen *c, FILE *out) {
+  if (c->buf_len)
+    fwrite(c->buf, 1, c->buf_len, out);
+  c->buf_len = 0;
+}
+
+// Emit several modules as ONE self-contained translation unit, interleaved BY PHASE so cross-module
+// (even mutually dependent) types resolve: all forward typedefs first, then all type definitions +
+// prototypes, then all bodies. Used for the REPL/test inline build where the prelude + user code share a
+// single .c (str <-> String interconversion works because every struct is forward-declared, then every
+// struct is defined, before any function body). Each Codegen keeps its own AST for the caller to reclaim.
+void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
+  if (!n)
+    return;
+  emit_cstr(cs[0], SUPER_RT_INCLUDES);
+  emit(cs[0], "\n");
+  cg_flush(cs[0], out);
+  for (size_t i = 0; i < n; i++)
+    build_enum_index(cs[i]);
+  for (size_t i = 0; i < n; i++) { // every struct/enum forward typedef
+    phase_forward(cs[i]);
+    cg_flush(cs[i], out);
+  }
+  for (size_t i = 0; i < n; i++) { // every full type + multi-return struct + prototype
+    phase_types(cs[i]);
+    phase_ret_structs(cs[i]);
+    phase_prototypes(cs[i], PROTO_ALL);
+    cg_flush(cs[i], out);
+  }
+  for (size_t i = 0; i < n; i++) { // every body (all types are complete by now)
+    phase_bodies(cs[i]);
+    cg_flush(cs[i], out);
+  }
+  for (size_t i = 0; i < n; i++)
+    errors_finalize(&cs[i]->errors, &cs[i]->errors_start, &cs[i]->errors_len, cs[i]->source, cs[i]->len);
 }
 
 ERRORS_BODY(Codegen, codegen, c)
