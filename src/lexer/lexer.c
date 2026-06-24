@@ -190,7 +190,7 @@ ALWAYS_INLINE int hex_value(const uint8_t b) {
 
 static const uint8_t kw_first[256] = {
     ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1, ['i'] = 1, ['l'] = 1,
-    ['m'] = 1, ['n'] = 1, ['r'] = 1, ['s'] = 1, ['t'] = 1, ['u'] = 1, ['w'] = 1, ['S'] = 1,
+    ['m'] = 1, ['n'] = 1, ['p'] = 1, ['r'] = 1, ['s'] = 1, ['t'] = 1, ['u'] = 1, ['w'] = 1, ['S'] = 1,
 };
 
 static TokenType keywords(const uint8_t *lexeme, const size_t len) {
@@ -223,6 +223,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
           return memcmp(lexeme, "mut", 3) == 0 ? Mut : Identifier;
         case 'n':
           return memcmp(lexeme, "new", 3) == 0 ? New : Identifier;
+        case 'p':
+          return memcmp(lexeme, "pub", 3) == 0 ? Pub : Identifier;
         default:
           return Identifier;
       }

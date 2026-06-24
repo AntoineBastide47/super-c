@@ -37,6 +37,20 @@ static void test_items_and_types(void) {
   ast_free(&ast);
 }
 
+static void test_associated_new_name(void) {
+  Ast *ast = sc_parse("associated new name", "struct String {}\nextend String { fn new() String { return String {}; } }\n");
+  if (!ast)
+    return;
+  const Node *ext = item(ast, 1);
+  CHECK(ext->kind == NODE_IMPL, "associated new name: item 1 should be an extension");
+  const NodeId method_id = ast_list(ast, ext->as.impl_def.items)[0];
+  const Node *method = ast_at_const(ast, method_id);
+  CHECK(method->kind == NODE_FUNCTION, "associated new name: extension item should be a function");
+  CHECK(th_ident_is(ast, "struct String {}\nextend String { fn new() String { return String {}; } }\n", method->as.function.name, "new"),
+        "associated new name: method should be named new");
+  ast_free(&ast);
+}
+
 static void test_functions_and_expressions(void) {
   static const char source[] =
       "fn transform<T: Copy>(input: Result<Vec<T>, Error>, out: *mut T) int where T: Copy + Drop {\n"
@@ -248,8 +262,33 @@ static void test_switch_pattern_ranges(void) {
   CHECK(parse_has_error("fn f(n: i32) i32 { return switch n { 0..= => 1, }; }\n"), "inclusive pattern without an end is rejected");
 }
 
+// `pub` sets is_public on structs, functions, methods, and fields; its absence leaves them private.
+static void test_pub_modifiers(void) {
+  Ast *a = sc_parse(
+      "pub modifiers",
+      "pub struct S { pub x: i32, y: i32, }\n"
+      "extend S { pub fn shown() {} fn hidden() {} }\n"
+      "pub fn f() {}\nfn g() {}\n");
+  if (!a)
+    return;
+  const Node *s = item(a, 0);
+  CHECK(s->kind == NODE_STRUCT && s->as.aggregate.is_public, "pub struct is public");
+  const NodeId *fields = ast_list(a, s->as.aggregate.members);
+  CHECK(ast_at_const(a, fields[0])->as.field.is_public, "pub field x is public");
+  CHECK(!ast_at_const(a, fields[1])->as.field.is_public, "non-pub field y is private");
+  const NodeId *methods = ast_list(a, item(a, 1)->as.impl_def.items);
+  CHECK(ast_at_const(a, methods[0])->as.function.is_public, "pub method is public");
+  CHECK(!ast_at_const(a, methods[1])->as.function.is_public, "non-pub method is private");
+  CHECK(item(a, 2)->as.function.is_public, "pub fn is public");
+  CHECK(!item(a, 3)->as.function.is_public, "non-pub fn is private");
+  ast_free(&a);
+  CHECK(parse_has_error("pub let x: i32 = 1;\n"), "pub before a non-item is rejected");
+}
+
 int main(void) {
   test_items_and_types();
+  test_pub_modifiers();
+  test_associated_new_name();
   test_functions_and_expressions();
   test_traits_impls_match_and_new();
   test_grouped_parameters_and_returns();

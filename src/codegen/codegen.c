@@ -38,11 +38,11 @@ struct Codegen {
 // Super-C builtin names (for matching unresolved type paths) and their C spellings.
 static const char *const BUILTIN_NAMES[BT_COUNT] = {
     "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-    "u16",  "u32",  "u64", "usize", "f32", "f64", "void",
+    "u16",  "u32",  "u64", "usize", "f32", "f64", "void", "str",
 };
 static const char *const BUILTIN_C[BT_COUNT] = {
     "bool",     "char",     "int8_t",   "int16_t", "int32_t", "int64_t", "intptr_t", "uint8_t",
-    "uint16_t", "uint32_t", "uint64_t", "size_t",  "float",   "double",  "void",
+    "uint16_t", "uint32_t", "uint64_t", "size_t",  "float",   "double",  "void",     "str",
 };
 
 static void emit_expr(Codegen *c, NodeId id);
@@ -360,8 +360,16 @@ static void emit_literal(Codegen *c, const Node *n) {
       emit(c, "NULL");
       break;
     case CharacterLiteral:
-    case StringLiteral:
       emit_span(c, s);
+      break;
+    case StringLiteral:
+      // A string literal is a `str` view: `(str){ (const uint8_t *)"...", sizeof("...") - 1 }`.
+      // `sizeof - 1` is the byte length (escapes already decoded by the C compiler) minus the NUL.
+      emit(c, "(str){ (const uint8_t *)");
+      emit_span(c, s);
+      emit(c, ", sizeof(");
+      emit_span(c, s);
+      emit(c, ") - 1 }");
       break;
     case ByteCharacterLiteral: // b'a' -> 'a'
       if (s.end > s.start && c->source[s.start] == 'b')
@@ -592,6 +600,34 @@ static void emit_binding(Codegen *c, const TypeId t, const Span name, const bool
   emit_cstr(c, decl);
 }
 
+// Does `t` carry a writable (`*mut`) address -- directly, or through a struct field or array/slice
+// element? Such a value owns mutable state, so a `let` binding of it must NOT be const-qualified in C:
+// `const` would lock the owned pointer and reject the value's `&mut self` methods (e.g. `deinit`).
+// Stops at the first pointer/reference (a `*const`/`*mut` to a struct doesn't recurse into the pointee).
+static bool type_owns_mut(Codegen *c, const TypeId t) {
+  const Ty *const ty = ast_type_at(c->ast, t);
+  switch (ty->kind) {
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+      return ty->qualifier == TYPE_QUAL_MUT;
+    case TYPE_ARRAY:
+    case TYPE_SLICE:
+      return type_owns_mut(c, ty->as.elem);
+    case TYPE_STRUCT: {
+      const NodeList members = ast_at_const(c->ast, ty->as.decl)->as.aggregate.members;
+      const NodeId *const ids = ast_list(c->ast, members);
+      for (uint32_t i = 0; i < members.len; i++) {
+        const Node *const m = ast_at_const(c->ast, ids[i]);
+        if (m->kind == NODE_FIELD && type_owns_mut(c, ast_type(c->ast, m->as.field.type)))
+          return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 // --- operators -----------------------------------------------------------------------------
 
 static const char *c_op(const TokenType t) {
@@ -693,9 +729,27 @@ static void emit_call(Codegen *c, const Node *n) {
   const NodeId *const aids = ast_list(c->ast, args);
 
   if (callee->kind == NODE_MEMBER && callee->as.member.path) { // Enum::Variant(args)
-    const NodeId variant = ast_resolution(c->ast, callee->as.member.member);
-    if (variant != NODE_NONE && ast_at_const(c->ast, variant)->kind == NODE_VARIANT) {
-      emit_variant_construct(c, variant, args, aids);
+    const NodeId member = ast_resolution(c->ast, callee->as.member.member);
+    if (member != NODE_NONE && ast_at_const(c->ast, member)->kind == NODE_VARIANT) {
+      emit_variant_construct(c, member, args, aids);
+      return;
+    }
+    if (member != NODE_NONE && ast_at_const(c->ast, member)->kind == NODE_FUNCTION) {
+      const NodeId target = ast_resolution(c->ast, callee->as.member.object);
+      if (target == NODE_NONE) {
+        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: associated method target is unresolved");
+      } else {
+        emit_ident(c, name_span(c, ast_at_const(c->ast, target)->as.aggregate.name));
+        emit(c, "__");
+      }
+      emit_ident(c, name_span(c, callee->as.member.member));
+      emit(c, "(");
+      for (uint32_t i = 0; i < args.len; i++) {
+        if (i)
+          emit(c, ", ");
+        emit_expr(c, aids[i]);
+      }
+      emit(c, ")");
       return;
     }
   }
@@ -1362,7 +1416,7 @@ static void emit_for_range(Codegen *c, const Node *n) {
   char nm[128];
   render_ident(c, name, nm, sizeof nm);
   emit(c, "for (");
-  emit_binding(c, ast_type(c->ast, lo != NODE_NONE ? lo : hi), name, false);
+  emit_binding(c, ast_type(c->ast, n->as.for_stmt.iterable), name, false);
   emit(c, " = ");
   if (lo != NODE_NONE)
     emit_expr(c, lo);
@@ -1518,12 +1572,13 @@ static void emit_tuple_let(Codegen *c, const Node *n) {
   const Node *const nm = ast_at_const(c->ast, n->as.let_stmt.name);
   const NodeList names = nm->as.pattern.children;
   const NodeId *const nids = ast_list(c->ast, names);
-  const char *const qual = n->as.let_stmt.is_mutable ? "" : "const ";
   for (uint32_t i = 0; i < names.len; i++) {
     emit_indent(c);
     char bn[128];
     render_ident(c, name_span(c, nids[i]), bn, sizeof bn);
-    emit(c, "%s__auto_type %s = %s._%u;\n", qual, bn, tmp, i);
+    // const unless mutable or the element owns a `*mut` (see type_owns_mut).
+    const bool element_const = !n->as.let_stmt.is_mutable && !type_owns_mut(c, ast_type(c->ast, nids[i]));
+    emit(c, "%s__auto_type %s = %s._%u;\n", element_const ? "const " : "", bn, tmp, i);
   }
 }
 
@@ -1553,13 +1608,15 @@ static void emit_stmt(Codegen *c, const NodeId id) {
         emit_tuple_let(c, n);
         break;
       }
+      // A `let` of a type that owns a `*mut` stays non-const, so its `&mut self` methods stay callable.
+      const bool is_const = !n->as.let_stmt.is_mutable && !type_owns_mut(c, ast_type(c->ast, id));
       if (n->as.let_stmt.type != NODE_NONE) {
         char nm[128], decl[300];
         render_ident(c, name_span(c, n->as.let_stmt.name), nm, sizeof nm);
-        render_binding_node(c, n->as.let_stmt.type, nm, !n->as.let_stmt.is_mutable, decl, sizeof decl);
+        render_binding_node(c, n->as.let_stmt.type, nm, is_const, decl, sizeof decl);
         emit_cstr(c, decl);
       } else {
-        emit_binding(c, ast_type(c->ast, id), name_span(c, n->as.let_stmt.name), !n->as.let_stmt.is_mutable);
+        emit_binding(c, ast_type(c->ast, id), name_span(c, n->as.let_stmt.name), is_const);
       }
       if (n->as.let_stmt.value != NODE_NONE) {
         emit(c, " = ");
@@ -1663,7 +1720,14 @@ static void emit_function(Codegen *c, const NodeId fn_id, const NodeId target, c
   char decl[1320];
   size_t at = 0;
   decl[0] = '\0';
+  // Parenthesize the name in FFI prototypes -- `void *(memcpy)(...)`. A function-like libc macro
+  // (macOS fortifies memcpy/memset/strcpy/... in <string.h>) only expands when its name is directly
+  // followed by `(`, so `(memcpy)` declares the real function instead of expanding mid-declaration.
+  if (extern_q)
+    at = buf_append(decl, sizeof decl, at, "(");
   at = buf_append(decl, sizeof decl, at, nm);
+  if (extern_q)
+    at = buf_append(decl, sizeof decl, at, ")");
   at = buf_append(decl, sizeof decl, at, "(");
   at = buf_append(decl, sizeof decl, at, ps);
   buf_append(decl, sizeof decl, at, ")");
@@ -1939,7 +2003,8 @@ static void phase_bodies(Codegen *c) {
 void codegen_emit(Codegen *c, FILE *out) {
   build_enum_index(c);
   emit(c, "#include <stdint.h>\n#include <stdbool.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
-  emit(c, "typedef struct { void *ptr; size_t len; } SCslice;\n\n");
+  emit(c, "typedef struct { void *ptr; size_t len; } SCslice;\n");
+  emit(c, "typedef struct { const uint8_t *ptr; size_t len; } str;\n\n");
   phase_forward(c);
   emit(c, "\n");
   phase_types(c);

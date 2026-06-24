@@ -40,7 +40,7 @@ static void expect_codegen_error(const char *name, const char *source, const cha
 }
 
 static const char *const BROAD =
-    "struct Point { x: i32, }\n"
+    "struct Point { pub x: i32, }\n"
     "extend Point { fn get(self: &Point) i32 { return self.x; } }\n"
     "fn add(a: i32, b: i32) i32 { return a + b; }\n"
     "fn main() i32 {\n"
@@ -58,6 +58,9 @@ static void test_broad(void) {
   expect_contains("struct field", BROAD, "int32_t x;");
   expect_contains("method proto", BROAD, "Point__get(");
   expect_contains("method call self", BROAD, "Point__get(&p)");
+  expect_contains(
+      "associated new call", "struct String {}\nextend String { fn new() String { return String {}; } }\nfn f() String { return String::new(); }\n",
+      "String__new()");
   expect_contains("struct initializer", BROAD, "(Point){ .x = 1");
   expect_contains("if statement", BROAD, "if (");
   expect_contains("while statement", BROAD, "while (");
@@ -95,6 +98,7 @@ static void test_ranges(void) {
   expect_contains("inclusive range", RANGES, "for (int32_t i = 1; i <= 5; i++)");
   expect_contains("open-start range", RANGES, "for (int32_t i = 0; i < 4; i++)");
   expect_contains("open-end range", RANGES, "for (int32_t i = 100; ; i++)");
+  expect_contains("usize end range", "fn f(n: usize) void { for i in 0..n { } }\n", "for (size_t i = 0; i < n; i++)");
   expect_contains("bare if lowers", RANGES, "if (i >= 103)");
   expect_contains("bare while lowers", RANGES, "while (s < 0)");
 }
@@ -129,7 +133,7 @@ static void test_pointer_arith(void) {
 // Reference/pointer C lowering: `&T`->`const T *`, `&mut T`->`T *`; raw `*const T`->`const T *`,
 // `*mut T`->`T *`. Distinct parameter names let the assertions pin const-pointee vs mutable.
 static const char *const REFS =
-    "struct P { x: i32, }\n"
+    "struct P { pub x: i32, }\n"
     "fn reads(r: &P) i32 { return r.x; }\n"
     "fn writes(w: &mut P) void { w.x = 1; }\n"
     "fn raw_c(pc: *const i32) i32 { return *pc; }\n"
@@ -151,8 +155,20 @@ static const char *const EXTERN =
     "fn main() i32 { let r: i32 = putchar(72); }\n";
 
 static void test_extern(void) {
-  expect_contains("extern prototype", EXTERN, "extern int32_t putchar(const int32_t c);");
+  // The name is parenthesized so a fortified libc macro (macOS memcpy/etc.) cannot expand at the
+  // declaration; the call site keeps the bare name so it still expands to the fortified builtin.
+  expect_contains("extern prototype", EXTERN, "extern int32_t (putchar)(const int32_t c);");
   expect_contains("extern call site", EXTERN, "putchar(72)");
+}
+
+static const char *const STR = "fn f(s: str) usize { return s.len; }\nfn main() i32 { let g: str = \"hi\"; return 0; }\n";
+
+static void test_str(void) {
+  expect_contains("str typedef", STR, "typedef struct { const uint8_t *ptr; size_t len; } str;");
+  expect_contains("str param", STR, "size_t f(const str s)");
+  expect_contains("str member access", STR, "s.len");
+  // a string literal lowers to a `str` compound literal carrying the byte pointer and `sizeof - 1` length
+  expect_contains("str literal", STR, "(str){ (const uint8_t *)\"hi\", sizeof(\"hi\") - 1 }");
 }
 
 static const char *const CONSTNESS =
@@ -162,6 +178,83 @@ static const char *const CONSTNESS =
     "  y = y + 1;\n"
     "  return x + y;\n"
     "}\n";
+
+// A `let` of a value that owns a `*mut` (here `Buf.ptr`) drops `const`; a scalar `let` keeps it.
+static const char *const OWNS_MUT =
+    "struct Buf { pub ptr: *mut u8, }\n"
+    "fn main() i32 { let b: Buf = Buf { ptr: null, }; let x: i32 = 5; return x; }\n";
+
+static void test_owning_mut_constness(void) {
+  expect_contains("owning-mut let is non-const", OWNS_MUT, "Buf b =");
+  expect_absent("owning-mut let is not const", OWNS_MUT, "const Buf b");
+  expect_contains("scalar let still const", OWNS_MUT, "const int32_t x = 5");
+}
+
+// One corpus of struct shapes; each `let aN: T;` (annotated, no initializer) lets us assert the
+// const-ness of T's binding purely from its type. A `*mut` reachable through value fields / array
+// elements makes the binding non-const; a `*const`/`*mut`-to-an-owner stops at the pointer.
+static const char *const OWNS_MUT_ZOO =
+    "struct Scalars { a: i32, b: i64, }\n"
+    "struct HasMut { p: *mut u8, }\n"
+    "struct HasConstPtr { p: *const u8, }\n"
+    "struct HasMutRef { r: &mut u8, }\n"
+    "struct HasRef { r: &u8, }\n"
+    "struct Empty {}\n"
+    "struct WrapMut { inner: HasMut, tag: i32, }\n"
+    "struct WrapScalar { inner: Scalars, }\n"
+    "struct HoldsConstToMut { q: *const HasMut, }\n"
+    "struct HoldsMutToMut { q: *mut HasMut, }\n"
+    "struct ArrMut { buf: [*mut u8; 3], }\n"
+    "struct ArrOwner { items: [HasMut; 4], }\n"
+    "struct ArrScalar { xs: [i32; 8], }\n"
+    "struct ListMut { next: *mut ListMut, v: i32, }\n"
+    "struct ListConst { next: *const ListConst, v: i32, }\n"
+    "struct D10 { p: *mut u8, }\nstruct D9 { x: D10, }\nstruct D8 { x: D9, }\nstruct D7 { x: D8, }\n"
+    "struct D6 { x: D7, }\nstruct D5 { x: D6, }\nstruct D4 { x: D5, }\nstruct D3 { x: D4, }\n"
+    "struct D2 { x: D3, }\nstruct D1 { x: D2, }\n"
+    "struct S10 { p: i32, }\nstruct S9 { x: S10, }\nstruct S8 { x: S9, }\nstruct S7 { x: S8, }\n"
+    "struct S6 { x: S7, }\nstruct S5 { x: S6, }\nstruct S4 { x: S5, }\nstruct S3 { x: S4, }\n"
+    "struct S2 { x: S3, }\nstruct S1 { x: S2, }\n"
+    "fn main() i32 {\n"
+    "  let a1: Scalars; let a2: HasMut; let a3: HasConstPtr; let a4: HasMutRef; let a5: HasRef;\n"
+    "  let a6: Empty; let a7: WrapMut; let a8: WrapScalar; let a9: HoldsConstToMut; let a10: HoldsMutToMut;\n"
+    "  let a11: ArrMut; let a12: ArrOwner; let a13: ArrScalar; let a14: ListMut; let a15: ListConst;\n"
+    "  let a16: D1; let a17: S1;\n"
+    "  return 0;\n"
+    "}\n";
+
+// Non-const is proven by the absence of `const <Type> <name>`; const by its presence.
+static void test_owns_mut_simple(void) {
+  expect_contains("scalar struct -> const", OWNS_MUT_ZOO, "const Scalars a1;");
+  expect_absent("direct *mut field -> non-const", OWNS_MUT_ZOO, "const HasMut a2");
+  expect_contains("*const field -> const", OWNS_MUT_ZOO, "const HasConstPtr a3;");
+}
+
+static void test_owns_mut_complex(void) {
+  expect_absent("&mut field -> non-const", OWNS_MUT_ZOO, "const HasMutRef a4");
+  expect_contains("&T (shared) field -> const", OWNS_MUT_ZOO, "const HasRef a5;");
+  expect_absent("nested struct owning *mut -> non-const", OWNS_MUT_ZOO, "const WrapMut a7");
+  expect_contains("nested scalar struct -> const", OWNS_MUT_ZOO, "const WrapScalar a8;");
+  expect_absent("array of *mut -> non-const", OWNS_MUT_ZOO, "const ArrMut a11");
+  expect_absent("array of mut-owners -> non-const", OWNS_MUT_ZOO, "const ArrOwner a12");
+  expect_contains("array of scalars -> const", OWNS_MUT_ZOO, "const ArrScalar a13;");
+}
+
+static void test_owns_mut_nested_deep(void) {
+  expect_absent("10-level value nest ending in *mut -> non-const", OWNS_MUT_ZOO, "const D1 a16");
+  expect_contains("10-level value nest ending in scalar -> const", OWNS_MUT_ZOO, "const S1 a17;");
+}
+
+static void test_owns_mut_edge_cases(void) {
+  expect_contains("empty struct -> const", OWNS_MUT_ZOO, "const Empty a6;");
+  // a `*const` pointer to a mut-owner does NOT propagate (recursion stops at the pointer)...
+  expect_contains("*const to a mut-owner -> const", OWNS_MUT_ZOO, "const HoldsConstToMut a9;");
+  // ...but a `*mut` pointer is itself a writable address.
+  expect_absent("*mut to a mut-owner -> non-const", OWNS_MUT_ZOO, "const HoldsMutToMut a10");
+  // self-referential structs must not loop forever: the recursion halts at the pointer field.
+  expect_absent("self-ref via *mut -> non-const", OWNS_MUT_ZOO, "const ListMut a14");
+  expect_contains("self-ref via *const -> const", OWNS_MUT_ZOO, "const ListConst a15;");
+}
 
 static void test_constness(void) {
   expect_contains("immutable param is const", CONSTNESS, "const int32_t a");
@@ -269,7 +362,13 @@ int main(void) {
   test_pointer_arith();
   test_references();
   test_extern();
+  test_str();
   test_constness();
+  test_owning_mut_constness();
+  test_owns_mut_simple();
+  test_owns_mut_complex();
+  test_owns_mut_nested_deep();
+  test_owns_mut_edge_cases();
   test_enums();
   test_if_expression();
   test_array_literals();

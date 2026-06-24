@@ -63,7 +63,7 @@ static void test_switch(void) {
 static void test_structs_and_methods(void) {
   sc_run_program(
       "method dispatch (&self / &mut self)",
-      PRE "struct Point { x: i32, y: i32, }\n"
+      PRE "struct Point { pub x: i32, pub y: i32, }\n"
           "extend Point {\n"
           "  fn sum(self: &Point) i32 { return self.x + self.y; }\n"
           "  fn shift(self: &mut Point, d: i32) void { self.x = self.x + d; self.y = self.y + d; }\n"
@@ -72,13 +72,13 @@ static void test_structs_and_methods(void) {
       27, "");
   sc_run_program(
       "nested struct field access",
-      PRE "struct Inner { v: i32, }\n"
-          "struct Outer { inner: Inner, }\n"
+      PRE "struct Inner { pub v: i32, }\n"
+          "struct Outer { pub inner: Inner, }\n"
           "fn main() i32 { let o: Outer = Outer { inner: Inner { v: 7, }, }; exit(o.inner.v); }\n",
       7, "");
   sc_run_program(
       "heap struct via new",
-      PRE "struct Box { v: i32, }\n"
+      PRE "struct Box { pub v: i32, }\n"
           "fn main() i32 { let b: *Box = new Box { v: 9, }; exit(b.v); }\n",
       9, "");
 }
@@ -205,6 +205,52 @@ static void test_misc(void) {
       "AB\n");
 }
 
+static void test_let_owning_mut(void) {
+  // A `let` (immutable) binding of a struct that owns a `*mut` is emitted non-const, so its &mut self
+  // methods stay callable -- a const binding would make `&b` a `const Box *` and fail to compile.
+  sc_run_program(
+      "let owning-mut binding calls &mut self",
+      PRE "extern \"C\" { fn malloc(n: usize) *mut void; fn free(p: *mut void) void; }\n"
+          "struct Box { pub p: *mut u8, }\n"
+          "extend Box {\n"
+          "  fn make() Box { return Box { p: malloc(1) as *mut u8, }; }\n"
+          "  fn set(self: &mut Box, v: u8) { self.p[0] = v; }\n"
+          "  fn get(self: &Box) u8 { return self.p[0]; }\n"
+          "  fn deinit(self: &mut Box) { free(self.p as *mut void); self.p = null; }\n"
+          "}\n"
+          "fn main() i32 { let b: Box = Box::make(); b.set(42); let r: u8 = b.get(); b.deinit(); exit(r as i32); }\n",
+      42, "");
+}
+
+static void test_field_vs_method(void) {
+  // `s.len` (field read) and `s.len()` (method call) are distinct even when they share a name:
+  // a bare member access resolves field-first, a call callee resolves method-first.
+  sc_run_program(
+      "field vs same-named method",
+      PRE "struct S { pub len: i32, }\n"
+          "extend S { pub fn new(n: i32) S { return S { len: n, }; } pub fn len(self: &S) i32 { return self.len * 10; } }\n"
+          "fn main() i32 { let s: S = S::new(5); exit(s.len + s.len()); }\n",
+      55, ""); // field 5 + method (5*10)
+}
+
+static void test_str(void) {
+  // A string literal is a `str` view: `.len` is the byte count, `.ptr` indexes the UTF-8 bytes.
+  sc_run_program(
+      "str len + byte indexing",
+      PRE "fn first(s: str) i32 { return s.ptr[0] as i32; }\n"
+          "fn main() i32 { let g: str = \"ABC\"; exit(first(g) + g.len as i32); }\n",
+      68, ""); // 'A'=65 + len 3
+  // Multi-byte UTF-8: `.len` counts bytes, and the raw bytes round-trip to stdout unchanged.
+  sc_run_program(
+      "str utf8 bytes to stdout",
+      PRE "fn main() i32 { let s: str = \"é!\"; for i in 0..s.len { putchar(s.ptr[i] as i32); } exit(s.len as i32); }\n",
+      3, "\xc3\xa9!"); // é is 2 UTF-8 bytes, '!' is 1 -> 3 bytes
+  // An empty literal has length 0 (the for-loop body never runs).
+  sc_run_program(
+      "empty str", PRE "fn main() i32 { let s: str = \"\"; for i in 0..s.len { putchar(63); } exit(s.len as i32); }\n", 0,
+      "");
+}
+
 int main(void) {
   test_arithmetic();
   test_control_flow();
@@ -215,7 +261,10 @@ int main(void) {
   test_tuple_destructure();
   test_enums();
   test_structs_and_methods();
+  test_let_owning_mut();
+  test_field_vs_method();
   test_pointers();
+  test_str();
   test_misc();
   if (failures) {
     fprintf(stderr, "%d codegen-run test failure%s\n", failures, failures == 1 ? "" : "s");

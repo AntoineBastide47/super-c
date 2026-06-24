@@ -98,7 +98,7 @@ ALWAYS_INLINE bool span_is(const uint8_t *const src, const Span s, const char *c
 static bool is_builtin_type(const uint8_t *const src, const Span s) {
   static const char *const builtins[] = {
       "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-      "u16",  "u32",  "u64", "usize", "f32", "f64", "void",
+      "u16",  "u32",  "u64", "usize", "f32", "f64", "void", "str",
   };
   for (size_t i = 0; i < sizeof builtins / sizeof builtins[0]; i++)
     if (span_is(src, s, builtins[i]))
