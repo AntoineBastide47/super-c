@@ -268,7 +268,10 @@ static void test_pub_modifiers(void) {
       "pub modifiers",
       "pub struct S { pub x: i32, y: i32, }\n"
       "extend S { pub fn shown() {} fn hidden() {} }\n"
-      "pub fn f() {}\nfn g() {}\n");
+      "pub fn f() {}\nfn g() {}\n"
+      "pub enum E { A, B }\nenum F { C }\n"
+      "pub const K: i32 = 1;\nconst L: i32 = 2;\n"
+      "pub type Ta = i32;\ntype Tb = i32;\n");
   if (!a)
     return;
   const Node *s = item(a, 0);
@@ -281,6 +284,12 @@ static void test_pub_modifiers(void) {
   CHECK(!ast_at_const(a, methods[1])->as.function.is_public, "non-pub method is private");
   CHECK(item(a, 2)->as.function.is_public, "pub fn is public");
   CHECK(!item(a, 3)->as.function.is_public, "non-pub fn is private");
+  CHECK(item(a, 4)->kind == NODE_ENUM && item(a, 4)->as.aggregate.is_public, "pub enum is public");
+  CHECK(item(a, 5)->kind == NODE_ENUM && !item(a, 5)->as.aggregate.is_public, "non-pub enum is private");
+  CHECK(item(a, 6)->kind == NODE_CONST && item(a, 6)->as.const_def.is_public, "pub const is public");
+  CHECK(item(a, 7)->kind == NODE_CONST && !item(a, 7)->as.const_def.is_public, "non-pub const is private");
+  CHECK(item(a, 8)->kind == NODE_TYPE_ALIAS && item(a, 8)->as.type_alias.is_public, "pub type is public");
+  CHECK(item(a, 9)->kind == NODE_TYPE_ALIAS && !item(a, 9)->as.type_alias.is_public, "non-pub type is private");
   ast_free(&a);
   CHECK(parse_has_error("pub let x: i32 = 1;\n"), "pub before a non-item is rejected");
 }

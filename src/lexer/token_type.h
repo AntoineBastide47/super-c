@@ -11,6 +11,7 @@ typedef enum TokenType {
 
   // Reserved words
   As,
+  Import,
   Break,
   Case,
   Const,

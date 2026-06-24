@@ -5,8 +5,11 @@
 #include "utils/errors.h"
 
 typedef struct TypeChecker TypeChecker;
+typedef struct Package Package; // module/loader.h; NULL for the single-file / REPL path
 
-TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len);
+// `package` lets the checker follow imported decls into their origin module's Ast; pass NULL when
+// compiling a lone source with no imports (the REPL and unit tests).
+TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, const Package *package);
 void typechecker_free(TypeChecker **t);
 
 void typechecker_check(TypeChecker *t);

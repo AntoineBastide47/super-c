@@ -164,7 +164,10 @@ static void test_extern(void) {
 static const char *const STR = "fn f(s: str) usize { return s.len; }\nfn main() i32 { let g: str = \"hi\"; return 0; }\n";
 
 static void test_str(void) {
-  expect_contains("str typedef", STR, "typedef struct { const uint8_t *ptr; size_t len; } str;");
+  // `str` is now the std prelude's struct, emitted as a forward typedef + a body (so types can name it
+  // in any order), not the old inline anonymous typedef.
+  expect_contains("str forward typedef", STR, "typedef struct str str;");
+  expect_contains("str struct body", STR, "struct str {\n  const uint8_t *ptr;\n  size_t len;\n};");
   expect_contains("str param", STR, "size_t f(const str s)");
   expect_contains("str member access", STR, "s.len");
   // a string literal lowers to a `str` compound literal carrying the byte pointer and `sizeof - 1` length

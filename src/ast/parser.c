@@ -665,11 +665,40 @@ static NodeId parse_extern(Parser *p) {
               });
 }
 
+// `import <ident> (:: <ident>)* [as <ident>] ;` -- top-level, LL(1) (the `import` keyword is the
+// one-token decision; the optional `as` is decided by a single lookahead).
+static NodeId parse_import(Parser *p) {
+  const uint32_t start = token_start(raw_peek(p));
+  advance(p);
+  const uint32_t mark = ast_mark(p->ast);
+  ast_push(p->ast, identifier(p));
+  while (match(p, PathSeparator))
+    ast_push(p->ast, identifier(p));
+  const NodeList path = ast_commit(p->ast, mark);
+  // `as <name>` aliases the module; `as *` is a glob (its public items become unqualified). LL(1): one
+  // token of lookahead after `as` distinguishes `*` from an identifier.
+  NodeId alias = NODE_NONE;
+  bool glob = false;
+  if (match(p, As)) {
+    if (match(p, Star))
+      glob = true;
+    else
+      alias = identifier(p);
+  }
+  expect(p, Semicolon, "';'");
+  return ast_add(
+      p->ast, (Node){
+                  .kind = NODE_IMPORT,
+                  .span = span_new(start, previous_end(p)),
+                  .as.import_decl = {.path = path, .alias = alias, .glob = glob},
+              });
+}
+
 static NodeId parse_item(Parser *p) {
-  // `pub` (LL(1): one-token lookahead) may prefix a struct or function only.
+  // `pub` (LL(1): one-token lookahead) may prefix a struct, enum, function, const, or type alias.
   const bool is_public = match(p, Pub);
-  if (is_public && !check(p, Fn) && !check(p, Struct))
-    error_here(p, "'pub' may only be applied to a struct or function");
+  if (is_public && !check(p, Fn) && !check(p, Struct) && !check(p, Enum) && !check(p, Const) && !check(p, Type))
+    error_here(p, "'pub' may only be applied to a struct, enum, function, const, or type");
   switch (peek_type(p)) {
     case Fn: {
       const NodeId f = parse_function(p, true);
@@ -681,18 +710,29 @@ static NodeId parse_item(Parser *p) {
       ast_at(p->ast, s)->as.aggregate.is_public = is_public;
       return s;
     }
-    case Enum:
-      return parse_enum(p);
+    case Enum: {
+      const NodeId e = parse_enum(p);
+      ast_at(p->ast, e)->as.aggregate.is_public = is_public;
+      return e;
+    }
     case Interface:
       return parse_interface(p);
     case Extend:
       return parse_extend(p);
-    case Type:
-      return parse_type_alias(p, false);
-    case Const:
-      return parse_const(p);
+    case Type: {
+      const NodeId ta = parse_type_alias(p, false);
+      ast_at(p->ast, ta)->as.type_alias.is_public = is_public;
+      return ta;
+    }
+    case Const: {
+      const NodeId cn = parse_const(p);
+      ast_at(p->ast, cn)->as.const_def.is_public = is_public;
+      return cn;
+    }
     case Extern:
       return parse_extern(p);
+    case Import:
+      return parse_import(p);
     default:
       error_here(p, "expected top-level item");
       while (!at_end(p) && !check(p, Semicolon))
@@ -939,6 +979,34 @@ static NodeId parse_primary(Parser *p) {
   return NODE_NONE;
 }
 
+// Rebuild a just-parsed `a::b::C` value path (a NODE_MEMBER chain) as a NODE_TYPE_PATH, so a qualified
+// struct construction `a::b::C { .. }` reuses the same type-path resolution as `a::b::C` in type position.
+static NodeId path_chain_to_type_path(Parser *p, const NodeId chain, const uint32_t start) {
+  NodeId segs[16];
+  uint32_t n = 0;
+  for (NodeId cur = chain;;) { // collect segment name nodes outermost..base
+    const Node *const cn = ast_at(p->ast, cur);
+    if (n < 16)
+      segs[n++] = cn->as.member.member;
+    const NodeId o = cn->as.member.object;
+    if (ast_at(p->ast, o)->kind != NODE_MEMBER) {
+      if (n < 16)
+        segs[n++] = o; // the base identifier
+      break;
+    }
+    cur = o;
+  }
+  const uint32_t mark = ast_mark(p->ast);
+  for (uint32_t i = n; i-- > 0;) // push base..outermost so parts read left-to-right
+    ast_push(p->ast, segs[i]);
+  const NodeList parts = ast_commit(p->ast, mark);
+  return ast_add(p->ast, (Node){
+                             .kind = NODE_TYPE_PATH,
+                             .span = span_new(start, previous_end(p)),
+                             .as.type_path = {.parts = parts, .args = {0}},
+                         });
+}
+
 static NodeId parse_postfix(Parser *p) {
   NodeId expr = parse_primary(p);
   for (;;) {
@@ -989,6 +1057,8 @@ static NodeId parse_postfix(Parser *p) {
                         .span = span_new(start, node_span(p, member).end),
                         .as.member = {.object = expr, .member = member, .path = true},
                     });
+        if (p->allow_struct_initializer && check(p, LeftBrace)) // `a::b::C { .. }` qualified construction
+          return parse_struct_initializer_after(p, path_chain_to_type_path(p, expr, start), start);
       }
     } else if (match(p, As)) {
       const NodeId cast_type = parse_type(p);

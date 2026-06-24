@@ -31,8 +31,15 @@
 #include "ast/parser.h"
 #include "codegen/codegen.h"
 #include "lexer/lexer.h"
+#include "module/loader.h"
 #include "resolver/resolver.h"
 #include "typechecker/typechecker.h"
+
+// The std prelude (str / String / SCslice) is auto-imported into every compiled snippet, exactly as the
+// REPL/CLI do. The Makefile bakes in the absolute path; fall back to a repo-root-relative "std".
+#ifndef SUPERC_STD_DIR
+#  define SUPERC_STD_DIR "std"
+#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #  define TH_UNUSED __attribute__((unused))
@@ -138,7 +145,18 @@ TH_UNUSED static ScResult sc_compile(const char *name, const char *source, const
   if (stop == ST_PARSE)
     return r;
 
-  Resolver *resolver = resolver_new(r.ast, source, len);
+  // Auto-import the std prelude: a fresh package per call (cheap, no shared state). The user Ast stays
+  // standalone with module == pp->count, so its own nodes resolve to it and prelude refs go through pp.
+  Package *pp = package_prelude_only(SUPERC_STD_DIR);
+  for (size_t i = 0; i < pp->count; i++) {
+    Resolver *pr = resolver_new(pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len, pp);
+    resolver_resolve(pr);
+    pp->modules[i].ast = resolver_take_ast(pr);
+    resolver_free(&pr);
+  }
+  r.ast->module = (ModuleId)pp->count;
+
+  Resolver *resolver = resolver_new(r.ast, source, len, pp);
   resolver_resolve(resolver);
   if (resolver_has_errors(resolver)) {
     String_Vec e = resolver_take_errors(resolver);
@@ -149,10 +167,18 @@ TH_UNUSED static ScResult sc_compile(const char *name, const char *source, const
   }
   r.ast = resolver_take_ast(resolver);
   resolver_free(&resolver);
-  if (r.errors || stop == ST_RESOLVE)
+  if (r.errors || stop == ST_RESOLVE) {
+    package_free(&pp);
     return r;
+  }
 
-  TypeChecker *tc = typechecker_new(r.ast, source, len);
+  for (size_t i = 0; i < pp->count; i++) {
+    TypeChecker *pt = typechecker_new(pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len, pp);
+    typechecker_check(pt);
+    pp->modules[i].ast = typechecker_take_ast(pt);
+    typechecker_free(&pt);
+  }
+  TypeChecker *tc = typechecker_new(r.ast, source, len, pp);
   typechecker_check(tc);
   if (typechecker_has_errors(tc)) {
     String_Vec e = typechecker_take_errors(tc);
@@ -163,25 +189,39 @@ TH_UNUSED static ScResult sc_compile(const char *name, const char *source, const
   }
   r.ast = typechecker_take_ast(tc);
   typechecker_free(&tc);
-  if (r.errors || stop == ST_TYPECHECK)
+  if (r.errors || stop == ST_TYPECHECK) {
+    package_free(&pp);
     return r;
+  }
 
   char *buf = NULL;
   size_t size = 0;
   FILE *f = open_memstream(&buf, &size);
-  Codegen *cg = codegen_new(r.ast, source, len);
-  codegen_emit(cg, f);
+  // Emit the prelude modules + the user snippet as one phase-interleaved unit (mutually dependent types
+  // like str <-> String resolve: all forwards, then all types, then all bodies).
+  const size_t total = pp->count + 1;
+  Codegen **cs = (Codegen **)malloc(total * sizeof *cs);
+  for (size_t i = 0; i < pp->count; i++)
+    cs[i] = codegen_new(pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len, pp);
+  cs[pp->count] = codegen_new(r.ast, source, len, pp);
+  codegen_emit_unit(cs, total, f);
   fclose(f);
-  String_Vec e = codegen_take_errors(cg);
+  String_Vec e = codegen_take_errors(cs[pp->count]); // user-module diagnostics
   if (e.len) {
     r.errors = e.len;
     r.err_stage = ST_CODEGEN;
     snprintf(r.first, sizeof r.first, "%s", e.data[0]);
   }
   free_errors(&e);
-  r.ast = codegen_take_ast(cg);
-  codegen_free(&cg);
+  for (size_t i = 0; i < pp->count; i++) {
+    pp->modules[i].ast = codegen_take_ast(cs[i]);
+    codegen_free(&cs[i]);
+  }
+  r.ast = codegen_take_ast(cs[pp->count]);
+  codegen_free(&cs[pp->count]);
+  free(cs);
   r.code = buf;
+  package_free(&pp);
   return r;
 }
 

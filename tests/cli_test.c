@@ -30,34 +30,178 @@ static void write_file(const char *path, const char *contents) {
 }
 
 static void test_compiles_file(void) {
-  char spc[4160], out[4160], cmd[8320], buf[256];
+  char spc[4160], out[4170], cmd[8320], buf[256];
   snprintf(spc, sizeof spc, "%s/prog.spc", DIR);
-  snprintf(out, sizeof out, "%s/prog.c", DIR);
+  snprintf(out, sizeof out, "%s/build/prog.c", DIR); // output goes to a flat build/ tree
   write_file(spc, "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { exit(7); }\n");
 
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   const int rc = run_cmd(cmd, buf, sizeof buf);
   CHECK(rc == 0, "compiling a valid file exits 0 (got %d): %s", rc, buf);
-  CHECK(access(out, F_OK) == 0, "derive_out_path replaced .spc with .c -> %s", out);
+  CHECK(access(out, F_OK) == 0, "module .c is emitted under build/ -> %s", out);
 
-  // the emitted C is real: it compiles and runs with the program's exit code
+  // the emitted C is real: the whole build/ tree compiles and runs with the program's exit code
   char ccmd[8320], crun[8320];
   char bin[4200];
   snprintf(bin, sizeof bin, "%s/prog.bin", DIR);
-  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror '%s' -o '%s' 2>&1", out, bin);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror %s/build/*.c -o '%s' 2>&1", DIR, bin);
   CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "CLI output compiles: %s", buf);
   snprintf(crun, sizeof crun, "'%s'", bin);
   CHECK(run_cmd(crun, NULL, 0) == 7, "CLI output runs with the right exit code");
 }
 
+// A second module's enums used across the boundary: a value return, a payload-less match (bare variant
+// arms resolved via the scrutinee's enum), a payload-bearing construction, and a payload match. Drives
+// the full multi-file build/ tree (subdirs) through cc + run, locking in the cross-module variant codegen.
+static void test_cross_module_enum(void) {
+  char root[4112], dir[4128], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/xm", DIR); // own project root so its build/ holds only these modules
+  snprintf(dir, sizeof dir, "%s/lib", root);
+  if (system((snprintf(cmd, sizeof cmd, "mkdir -p '%s'", dir), cmd))) { /* best-effort */
+  }
+  snprintf(spc, sizeof spc, "%s/lib.spc", dir);
+  write_file(spc,
+             "pub enum Color { Red, Green = 5, Blue }\n"
+             "pub enum Box { Empty, Filled(i32) }\n"
+             "pub fn red() Color { return Color::Red; }\n");
+  snprintf(spc, sizeof spc, "%s/xm.spc", root);
+  write_file(spc,
+             "import lib::lib;\n"
+             "extern \"C\" { fn exit(code: i32) void; }\n"
+             "fn color_code(c: lib::lib::Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\n"
+             "fn box_amt(b: lib::lib::Box) i32 { return switch b { Filled(n) => n, Empty => -1, }; }\n"
+             "fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);\n"
+             "  exit(color_code(c) + box_amt(b)); }\n");
+
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  const int rc = run_cmd(cmd, buf, sizeof buf);
+  CHECK(rc == 0, "cross-module enum project compiles (got %d): %s", rc, buf);
+
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/xm.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "cross-module enum C compiles: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 21, "cross-module enum value/match/construct run correctly (1 + 20)");
+}
+
+// Write `root/rel` (creating parent dirs); `rel` may contain a subdirectory.
+static void mkfile(const char *root, const char *rel, const char *content) {
+  char path[4200], cmd[8400];
+  snprintf(path, sizeof path, "%s/%s", root, rel);
+  char dir[4200];
+  snprintf(dir, sizeof dir, "%s", path);
+  char *const slash = strrchr(dir, '/');
+  if (slash) {
+    *slash = '\0';
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s'", dir);
+    if (system(cmd)) { /* best-effort */
+    }
+  }
+  write_file(path, content);
+}
+
+// Compile `DIR/name/main.spc`, asserting a nonzero exit and a diagnostic containing `want`.
+static void expect_fail(const char *name, const char *want) {
+  char spc[4200], cmd[8400], buf[1024];
+  snprintf(spc, sizeof spc, "%s/%s/main.spc", DIR, name);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  const int rc = run_cmd(cmd, buf, sizeof buf);
+  CHECK(rc != 0, "%s: nonzero exit on bad program (got %d)", name, rc);
+  CHECK_STR_CONTAINS(buf, want);
+}
+
+// Cross-module language features (Tier 1): a public const, a public type alias used as a type, qualified
+// struct construction `mod::T { .. }`, and a local extension method on an imported type -- built and run.
+static void test_module_features(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/feat", DIR);
+  mkfile(root, "lib/lib.spc",
+         "pub struct Vec2 { pub x: i32, pub y: i32 }\n"
+         "pub type V = Vec2;\n"
+         "pub const BASE: i32 = 100;\n"
+         "pub fn mk(a: i32, b: i32) Vec2 { return Vec2 { x: a, y: b }; }\n");
+  mkfile(root, "feat.spc",
+         "import lib::lib;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "extend lib::lib::Vec2 { fn sum(self: &lib::lib::Vec2) i32 { return self.x + self.y; } }\n"
+         "fn main() i32 {\n"
+         "  let v: lib::lib::V = lib::lib::Vec2 { x: 5, y: 7 };\n"
+         "  let w = lib::lib::mk(1, 2);\n"
+         "  exit(v.sum() + w.sum() + lib::lib::BASE); }\n");
+  snprintf(spc, sizeof spc, "%s/feat.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module features compile: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/feat.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "cross-module features C compiles: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 115, "const + alias + qualified construct + extension method run (12+3+100)");
+}
+
+// Import forms + mangling: an alias import (`s::tag`), a glob import (bare `tag`), two modules with a
+// same-named public function (module mangling must keep them distinct), and a module named like a C
+// stdlib header (`string`) -- the relative-include build must not shadow <string.h>. Built with -Werror.
+static void test_module_imports(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/imp", DIR);
+  mkfile(root, "string.spc", "pub fn tag() i32 { return 10; }\n"); // collides with <string.h> by name
+  mkfile(root, "math.spc", "pub fn tag() i32 { return 20; }\n");   // same fn name -> mangling disambiguates
+  mkfile(root, "main.spc",
+         "import string as s;\n"
+         "import math as *;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn main() i32 { exit(s::tag() + tag()); }\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "alias+glob+stdlib-named modules compile: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/imp.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "import-forms C compiles (no <string.h> shadow): %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 30, "alias s::tag (10) + glob tag (20), mangled distinctly");
+}
+
+// Module-layer negative paths: cycles, missing modules, and using a non-public type/const/field across
+// modules must each be a clear, nonzero-exit error.
+static void test_module_errors(void) {
+  char root[4150];
+  snprintf(root, sizeof root, "%s/cyc", DIR);
+  mkfile(root, "main.spc", "import a::a;\nfn main() i32 { return 0; }\n");
+  mkfile(root, "a/a.spc", "import b::b;\npub fn f() i32 { return b::b::g(); }\n");
+  mkfile(root, "b/b.spc", "import a::a;\npub fn g() i32 { return a::a::f(); }\n");
+  expect_fail("cyc", "import cycle");
+
+  snprintf(root, sizeof root, "%s/miss", DIR);
+  mkfile(root, "main.spc", "import nope::nope;\nfn main() i32 { return 0; }\n");
+  expect_fail("miss", "cannot open module");
+
+  snprintf(root, sizeof root, "%s/privty", DIR);
+  mkfile(root, "main.spc", "import lib::lib;\nfn use_it(p: lib::lib::Secret) i32 { return 0; }\nfn main() i32 { return 0; }\n");
+  mkfile(root, "lib/lib.spc", "enum Secret { A, B }\npub fn ok() i32 { return 1; }\n");
+  expect_fail("privty", "no public type");
+
+  snprintf(root, sizeof root, "%s/privc", DIR);
+  mkfile(root, "main.spc", "import lib::lib;\nfn main() i32 { return lib::lib::K; }\n");
+  mkfile(root, "lib/lib.spc", "const K: i32 = 9;\n");
+  expect_fail("privc", "no public");
+
+  snprintf(root, sizeof root, "%s/privf", DIR);
+  mkfile(root, "main.spc", "import lib::lib;\nfn main() i32 { let p = lib::lib::mk(); return p.x; }\n");
+  mkfile(root, "lib/lib.spc", "pub struct P { x: i32 }\npub fn mk() P { return P { x: 5 }; }\n");
+  expect_fail("privf", "is private");
+}
+
 static void test_extensionless_appends(void) {
-  char in[4160], out[4160], cmd[8320];
+  char in[4160], out[4170], cmd[8320];
   snprintf(in, sizeof in, "%s/noext", DIR);
-  snprintf(out, sizeof out, "%s/noext.c", DIR);
+  snprintf(out, sizeof out, "%s/build/noext.c", DIR);
   write_file(in, "fn main() i32 { }\n");
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, in);
   run_cmd(cmd, NULL, 0);
-  CHECK(access(out, F_OK) == 0, "derive_out_path appended .c to an extensionless input -> %s", out);
+  CHECK(access(out, F_OK) == 0, "an extensionless input still produces build/<stem>.c -> %s", out);
 }
 
 static void test_missing_file(void) {
@@ -86,9 +230,9 @@ static void test_repl(void) {
 }
 
 static void test_error_exit_code(void) {
-  char spc[4160], out[4160], cmd[8320], buf[256];
+  char spc[4160], out[4170], cmd[8320], buf[256];
   snprintf(spc, sizeof spc, "%s/bad.spc", DIR);
-  snprintf(out, sizeof out, "%s/bad.c", DIR);
+  snprintf(out, sizeof out, "%s/build/bad.c", DIR);
   write_file(spc, "fn main() i32 { let x: bool = 1; }\n"); // a type error
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   const int rc = run_cmd(cmd, buf, sizeof buf);
@@ -113,6 +257,10 @@ int main(void) {
   }
 
   test_compiles_file();
+  test_cross_module_enum();
+  test_module_features();
+  test_module_imports();
+  test_module_errors();
   test_extensionless_appends();
   test_missing_file();
   test_usage();

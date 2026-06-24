@@ -4,29 +4,53 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "module/loader.h"
+
 struct TypeChecker {
     Ast *ast;
     const uint8_t *source;
     size_t len;
     NodeList current_returns; // the enclosing function's `returns` list, for NODE_RETURN checking
     NodeId current_self;      // the struct decl whose `extend` we are inside (NODE_NONE at top level)
+    const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     ERRORS_VARIABLES;
 };
 
+// The Ast / source backing module `m`: the current module uses the in-flight Ast directly; an imported
+// module is reached through the Package. With no package, everything is the current module.
+ALWAYS_INLINE Ast *mod_ast(const TypeChecker *t, const ModuleId m) {
+  return t->package && m != t->ast->module ? t->package->modules[m].ast : t->ast;
+}
+ALWAYS_INLINE const uint8_t *mod_src(const TypeChecker *t, const ModuleId m) {
+  return t->package && m != t->ast->module ? (const uint8_t *)t->package->modules[m].source : t->source;
+}
+
 static const char *const BUILTIN_NAMES[BT_COUNT] = {
     "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-    "u16",  "u32",  "u64", "usize", "f32", "f64", "void", "str",
+    "u16",  "u32",  "u64", "usize", "f32", "f64", "void",
 };
 
 static TypeId check_expr(TypeChecker *t, NodeId id);
 static void check_stmt(TypeChecker *t, NodeId id);
 static TypeId resolve_type(TypeChecker *t, NodeId id);
 static TypeId decl_type(TypeChecker *t, NodeId decl);
+static TypeId decl_type_in(TypeChecker *t, ModuleId m, NodeId decl);
+static TypeId named_type_of(TypeChecker *t, ModuleId m, NodeId decl);
+
+// `str` is no longer a builtin -- a string literal's type is the std prelude's `str` struct.
+static TypeId prelude_str_type(TypeChecker *t) {
+  if (!t->package)
+    return TYPE_ERROR;
+  ModuleId mid;
+  const NodeId d = package_prelude_lookup(t->package, "str", 3, true, &mid);
+  return d != NODE_NONE ? named_type_of(t, mid, d) : TYPE_ERROR;
+}
+static TypeId lower_type_in(TypeChecker *t, ModuleId m, NodeId id);
 static void check_pattern(TypeChecker *t, NodeId id, TypeId expected);
 static void render_type(TypeChecker *t, TypeId tid, char *buf, size_t cap);
 static TypeId check_member(TypeChecker *t, const Node *n, bool prefer_method);
 
-TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len) {
+TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   TypeChecker *const t = calloc(1, sizeof *t);
   if (!t) {
     fprintf(stderr, "fatal: out of memory\n");
@@ -35,6 +59,7 @@ TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len) {
   t->ast = ast;
   t->source = (const uint8_t *)source;
   t->len = len;
+  t->package = package;
   ERRORS_INIT(t);
   return t;
 }
@@ -58,14 +83,15 @@ ALWAYS_INLINE Span name_span(const TypeChecker *t, const NodeId name_node) {
   return ast_at_const(t->ast, name_node)->as.name.text;
 }
 
-ALWAYS_INLINE bool span_eq(const uint8_t *const src, const Span a, const Span b) {
-  const uint32_t la = a.end - a.start;
-  return la == b.end - b.start && memcmp(src + a.start, src + b.start, la) == 0;
-}
-
 ALWAYS_INLINE bool span_is(const uint8_t *const src, const Span s, const char *const lit) {
   const size_t n = strlen(lit);
   return (size_t)(s.end - s.start) == n && memcmp(src + s.start, lit, n) == 0;
+}
+
+// Compare two spans that may index different source buffers (a cross-module name vs a local one).
+ALWAYS_INLINE bool spans_eq2(const uint8_t *const sa, const Span a, const uint8_t *const sb, const Span b) {
+  const uint32_t la = a.end - a.start;
+  return la == b.end - b.start && memcmp(sa + a.start, sb + b.start, la) == 0;
 }
 
 // Returns the BuiltinType index for a builtin type name, or -1. Order matches BUILTIN_NAMES / the enum.
@@ -118,10 +144,11 @@ static bool is_plain_enum(const TypeChecker *t, const TypeId x) {
   const Ty *const y = ast_type_at(t->ast, x);
   if (y->kind != TYPE_ENUM)
     return false;
-  const NodeList ms = ast_at_const(t->ast, y->as.decl)->as.aggregate.members;
-  const NodeId *const ids = ast_list(t->ast, ms);
+  Ast *const a = mod_ast(t, y->module);
+  const NodeList ms = ast_at_const(a, y->as.decl)->as.aggregate.members;
+  const NodeId *const ids = ast_list(a, ms);
   for (uint32_t i = 0; i < ms.len; i++)
-    if (ast_at_const(t->ast, ids[i])->as.variant.payload.len > 0)
+    if (ast_at_const(a, ids[i])->as.variant.payload.len > 0)
       return false;
   return true;
 }
@@ -164,10 +191,11 @@ static void render_type(TypeChecker *t, const TypeId tid, char *buf, const size_
     case TYPE_STRUCT:
     case TYPE_ENUM:
     case TYPE_GENERIC: {
-      const Node *const d = ast_at_const(t->ast, ty->as.decl);
+      Ast *const a = mod_ast(t, ty->module);
+      const Node *const d = ast_at_const(a, ty->as.decl);
       const NodeId nm = d->kind == NODE_GENERIC_PARAM ? d->as.generic_param.name : d->as.aggregate.name;
-      const Span s = name_span(t, nm);
-      snprintf(buf, cap, "%.*s", (int)(s.end - s.start), (const char *)t->source + s.start);
+      const Span s = ast_at_const(a, nm)->as.name.text;
+      snprintf(buf, cap, "%.*s", (int)(s.end - s.start), (const char *)mod_src(t, ty->module) + s.start);
       break;
     }
     case TYPE_FUNCTION:
@@ -257,56 +285,123 @@ static TypeId range_type(TypeChecker *t, const Node *const n, const TypeId start
   return TYPE_NONE;
 }
 
-// Find a NODE_FIELD / NODE_VARIANT member of a struct/enum decl by name.
-static NodeId find_member(TypeChecker *t, const NodeId decl, const Span name) {
-  const Node *const d = ast_at_const(t->ast, decl);
+// Find a NODE_FIELD / NODE_VARIANT member of struct/enum `decl` (which lives in module `m`) by name.
+static NodeId find_member(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name) {
+  Ast *const a = mod_ast(t, m);
+  const uint8_t *const src = mod_src(t, m);
+  const Node *const d = ast_at_const(a, decl);
   if (d->kind != NODE_STRUCT && d->kind != NODE_ENUM)
     return NODE_NONE;
   const NodeList members = d->as.aggregate.members;
-  const NodeId *const ids = ast_list(t->ast, members);
+  const NodeId *const ids = ast_list(a, members);
   for (uint32_t i = 0; i < members.len; i++) {
-    const Node *const m = ast_at_const(t->ast, ids[i]);
-    const NodeId mname = m->kind == NODE_FIELD ? m->as.field.name : m->as.variant.name;
-    if (span_eq(t->source, name_span(t, mname), name))
+    const Node *const mem = ast_at_const(a, ids[i]);
+    const NodeId mname = mem->kind == NODE_FIELD ? mem->as.field.name : mem->as.variant.name;
+    if (spans_eq2(t->source, name, src, ast_at_const(a, mname)->as.name.text))
       return ids[i];
   }
   return NODE_NONE;
 }
 
-// Find a method named `name` in any top-level impl whose target type resolves to `decl`.
-static NodeId find_method(TypeChecker *t, const NodeId decl, const Span name) {
-  const NodeList items = ast_at_const(t->ast, t->ast->root)->as.program.items;
-  const NodeId *const ids = ast_list(t->ast, items);
+// Find a method named `name` in any top-level impl of module `m` whose target type resolves to `decl`.
+// `name` is a span into the *caller's* source; member names are compared against module `m`'s source.
+// Find a method named `name` for type `decl` (declared in module `m`). Searches the type's home module,
+// then the CURRENT module for a local extension of an imported type (`extend foreign::T`, visible only
+// here and mangled by this module). Returns the method's real DefId, or {_, NODE_NONE} if not found.
+static DefId find_method(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name) {
+  Ast *const a = mod_ast(t, m);
+  const uint8_t *const src = mod_src(t, m);
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
   for (uint32_t i = 0; i < items.len; i++) {
-    const Node *const it = ast_at_const(t->ast, ids[i]);
+    const Node *const it = ast_at_const(a, ids[i]);
     if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
       continue;
-    if (ast_resolution(t->ast, it->as.impl_def.target_type) != decl)
+    if (ast_resolution(a, it->as.impl_def.target_type) != decl)
       continue;
     const NodeList methods = it->as.impl_def.items;
-    const NodeId *const mids = ast_list(t->ast, methods);
+    const NodeId *const mids = ast_list(a, methods);
     for (uint32_t j = 0; j < methods.len; j++) {
-      const Node *const m = ast_at_const(t->ast, mids[j]);
-      if (m->kind == NODE_FUNCTION && span_eq(t->source, name_span(t, m->as.function.name), name))
-        return mids[j];
+      const Node *const mn = ast_at_const(a, mids[j]);
+      if (mn->kind == NODE_FUNCTION &&
+          spans_eq2(t->source, name, src, ast_at_const(a, mn->as.function.name)->as.name.text))
+        return (DefId){m, mids[j]};
     }
   }
-  return NODE_NONE;
+  if (m != t->ast->module) { // a local `extend foreign::T` in the current module
+    Ast *const ca = t->ast;
+    const NodeList citems = ast_at_const(ca, ca->root)->as.program.items;
+    const NodeId *const cids = ast_list(ca, citems);
+    for (uint32_t i = 0; i < citems.len; i++) {
+      const Node *const it = ast_at_const(ca, cids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId td = ast_resolution_def(ca, it->as.impl_def.target_type);
+      if (td.module != m || td.node != decl)
+        continue;
+      const NodeList methods = it->as.impl_def.items;
+      const NodeId *const mids = ast_list(ca, methods);
+      for (uint32_t j = 0; j < methods.len; j++) {
+        const Node *const mn = ast_at_const(ca, mids[j]);
+        if (mn->kind == NODE_FUNCTION &&
+            spans_eq2(t->source, name, t->source, ast_at_const(ca, mn->as.function.name)->as.name.text))
+          return (DefId){t->ast->module, mids[j]};
+      }
+    }
+  }
+  return (DefId){0, NODE_NONE};
 }
 
-// Map a resolved declaration node to its TypeId (the struct/enum/alias/generic it names).
-static TypeId decl_to_type(TypeChecker *t, const NodeId decl) {
-  const Node *const d = ast_at_const(t->ast, decl);
+// The interned type a struct/enum/alias/generic decl names, where the decl lives in module `m`. The
+// module is carried into the Ty so the same named type unifies across modules.
+static TypeId named_type_of(TypeChecker *t, const ModuleId m, const NodeId decl) {
+  const Node *const d = ast_at_const(mod_ast(t, m), decl);
   switch (d->kind) {
     case NODE_STRUCT:
-      return ast_intern_type(t->ast, (Ty){.kind = TYPE_STRUCT, .as.decl = decl});
+      return ast_intern_type(t->ast, (Ty){.kind = TYPE_STRUCT, .module = m, .as.decl = decl});
     case NODE_ENUM:
-      return ast_intern_type(t->ast, (Ty){.kind = TYPE_ENUM, .as.decl = decl});
+      return ast_intern_type(t->ast, (Ty){.kind = TYPE_ENUM, .module = m, .as.decl = decl});
     case NODE_TYPE_ALIAS:
-      return resolve_type(t, d->as.type_alias.type); // aliases are transparent
+      return lower_type_in(t, m, d->as.type_alias.type); // aliases are transparent
     case NODE_GENERIC_PARAM:
-      return ast_intern_type(t->ast, (Ty){.kind = TYPE_GENERIC, .as.decl = decl});
+      return ast_intern_type(t->ast, (Ty){.kind = TYPE_GENERIC, .module = m, .as.decl = decl});
     default: // NODE_TRAIT used as a type, Self->impl, etc. — opaque for now
+      return TYPE_ERROR;
+  }
+}
+
+// Lower a type node living in module `m` to a TypeId interned in the current pool. For the current
+// module this is exactly resolve_type (memoised, with array-length checks and Enum::Variant binding);
+// for an imported module it reads that module's own nodes and resolutions.
+static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
+  if (!t->package || m == t->ast->module)
+    return resolve_type(t, id);
+  if (id == NODE_NONE)
+    return TYPE_NONE;
+  Ast *const a = mod_ast(t, m);
+  const Node *const n = ast_at_const(a, id);
+  switch (n->kind) {
+    case NODE_TYPE_PATH: {
+      const DefId d = ast_resolution_def(a, id);
+      if (d.node != NODE_NONE)
+        return named_type_of(t, d.module, d.node);
+      const NodeList parts = n->as.type_path.parts;
+      const int b = parts.len ? builtin_of(mod_src(t, m), ast_at_const(a, ast_list(a, parts)[0])->as.name.text) : -1;
+      return b >= 0 ? ast_builtin((BuiltinType)b) : TYPE_ERROR;
+    }
+    case NODE_POINTER_TYPE:
+    case NODE_REFERENCE_TYPE:
+    case NODE_SLICE_TYPE: {
+      const TypeKind k =
+          n->kind == NODE_POINTER_TYPE ? TYPE_POINTER : n->kind == NODE_REFERENCE_TYPE ? TYPE_REFERENCE : TYPE_SLICE;
+      return ast_intern_type(
+          t->ast, (Ty){.kind = k, .qualifier = n->as.indirect_type.qualifier, .as.elem = lower_type_in(t, m, n->as.indirect_type.type)});
+    }
+    case NODE_ARRAY_TYPE:
+      return ast_intern_type(t->ast, (Ty){.kind = TYPE_ARRAY, .as.elem = lower_type_in(t, m, n->as.array_type.element)});
+    case NODE_FUNCTION_TYPE:
+      return ast_intern_type(t->ast, (Ty){.kind = TYPE_FUNCTION, .module = m, .as.decl = id});
+    default:
       return TYPE_ERROR;
   }
 }
@@ -324,15 +419,18 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
   switch (n->kind) {
     case NODE_TYPE_PATH: {
       const NodeList parts = n->as.type_path.parts;
-      const NodeId decl = ast_resolution(a, id);
-      if (decl != NODE_NONE) {
-        result = decl_to_type(t, decl);
-        // Resolve trailing path segments (e.g. Enum::Variant) against the base's members.
-        const NodeId *const pids = ast_list(a, parts);
-        for (uint32_t i = 1; i < parts.len; i++) {
-          const NodeId member = find_member(t, decl, name_span(t, pids[i]));
-          if (member != NODE_NONE)
-            ast_set_resolution(a, pids[i], member);
+      const DefId d = ast_resolution_def(a, id);
+      if (d.node != NODE_NONE) {
+        result = named_type_of(t, d.module, d.node);
+        // Resolve trailing path segments (e.g. local Enum::Variant) against the base's members. A
+        // module-qualified path's final segment is already the type, so it has no trailing members.
+        if (d.module == a->module) {
+          const NodeId *const pids = ast_list(a, parts);
+          for (uint32_t i = 1; i < parts.len; i++) {
+            const NodeId member = find_member(t, d.module, d.node, name_span(t, pids[i]));
+            if (member != NODE_NONE)
+              ast_set_resolution(a, pids[i], member);
+          }
         }
       } else if (parts.len > 0) {
         const int b = builtin_of(t->source, name_span(t, ast_list(a, parts)[0]));
@@ -359,7 +457,7 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
       result = ast_intern_type(a, (Ty){.kind = TYPE_ARRAY, .as.elem = resolve_type(t, n->as.array_type.element)});
       break;
     case NODE_FUNCTION_TYPE:
-      result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .as.decl = id});
+      result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .module = a->module, .as.decl = id});
       break;
     default:
       break;
@@ -375,49 +473,58 @@ static TypeId type_of_type_node(TypeChecker *t, const NodeId id) {
   const Node *const n = ast_at_const(t->ast, id);
   if (n->kind != NODE_IDENTIFIER)
     return resolve_type(t, id);
-  const NodeId decl = ast_resolution(t->ast, id);
-  if (decl != NODE_NONE)
-    return decl_to_type(t, decl);
+  const DefId d = ast_resolution_def(t->ast, id);
+  if (d.node != NODE_NONE)
+    return named_type_of(t, d.module, d.node);
   const int b = builtin_of(t->source, name_span(t, id));
   return b >= 0 ? ast_builtin((BuiltinType)b) : TYPE_ERROR;
 }
 
-// Type of a resolved declaration, memoized. Locals (let/for/pattern) already have their type
-// stored by the time they are referenced, so the cached read returns it.
-static TypeId decl_type(TypeChecker *t, const NodeId decl) {
+// Type of a resolved declaration `decl` living in module `m`, memoized for the current module. Locals
+// (let/for/pattern) already have their type stored by the time they are referenced, so the cached read
+// returns it. Imported decls (m != current) are computed fresh against their own module's Ast.
+static TypeId decl_type_in(TypeChecker *t, const ModuleId m, const NodeId decl) {
   if (decl == NODE_NONE)
     return TYPE_NONE;
-  const TypeId cached = ast_type(t->ast, decl);
-  if (cached != TYPE_NONE)
-    return cached;
-  const Node *const d = ast_at_const(t->ast, decl);
+  const bool local = !t->package || m == t->ast->module;
+  if (local) {
+    const TypeId cached = ast_type(t->ast, decl);
+    if (cached != TYPE_NONE)
+      return cached;
+  }
+  const Node *const d = ast_at_const(mod_ast(t, m), decl);
   TypeId result = TYPE_NONE;
   switch (d->kind) {
     case NODE_PARAMETER:
-      result = resolve_type(t, d->as.parameter.type);
+      result = lower_type_in(t, m, d->as.parameter.type);
       break;
     case NODE_FIELD:
-      result = resolve_type(t, d->as.field.type);
+      result = lower_type_in(t, m, d->as.field.type);
       break;
     case NODE_CONST:
-      result = resolve_type(t, d->as.const_def.type);
+      result = lower_type_in(t, m, d->as.const_def.type);
       break;
     case NODE_LET:
-      result = resolve_type(t, d->as.let_stmt.type);
+      result = lower_type_in(t, m, d->as.let_stmt.type);
       break;
     case NODE_FUNCTION:
-      result = ast_intern_type(t->ast, (Ty){.kind = TYPE_FUNCTION, .as.decl = decl});
+      result = ast_intern_type(t->ast, (Ty){.kind = TYPE_FUNCTION, .module = m, .as.decl = decl});
       break;
     case NODE_STRUCT:
     case NODE_ENUM:
     case NODE_GENERIC_PARAM:
-      result = decl_to_type(t, decl);
+      result = named_type_of(t, m, decl);
       break;
     default:
       break;
   }
-  ast_set_type(t->ast, decl, result);
+  if (local)
+    ast_set_type(t->ast, decl, result);
   return result;
+}
+
+static TypeId decl_type(TypeChecker *t, const NodeId decl) {
+  return decl_type_in(t, t->ast->module, decl);
 }
 
 // Result type of a unary operator applied to an operand of type `opnd`.
@@ -578,49 +685,71 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
   }
 }
 
-// `Enum::Variant` as an expression yields the enum type; `Type::method` yields the associated
-// function type and is normally consumed by check_call.
-static TypeId check_path_member(TypeChecker *t, const Node *const n) {
+// `Enum::Variant` as an expression yields the enum type; `Type::method` yields the associated function
+// type (normally consumed by check_call). Handles imports: a direct `mod::Name` (recorded on this node
+// by the resolver) and a nested `(mod::Type)::method`.
+static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeId id) {
+  // Direct module-qualified reference recorded by the resolver: `mod::Name` -> a type or a free function.
+  const DefId direct = ast_resolution_def(t->ast, id);
+  if (direct.node != NODE_NONE) {
+    if (ast_at_const(mod_ast(t, direct.module), direct.node)->kind == NODE_FUNCTION) {
+      ast_set_resolution_def(t->ast, n->as.member.member, direct);
+      return decl_type_in(t, direct.module, direct.node);
+    }
+    return named_type_of(t, direct.module, direct.node); // a type, used as the base of a further `::`
+  }
+
   const NodeId obj = n->as.member.object;
-  const NodeId decl = ast_at_const(t->ast, obj)->kind == NODE_IDENTIFIER ? ast_resolution(t->ast, obj) : NODE_NONE;
+  const Node *const on = ast_at_const(t->ast, obj);
+  ModuleId bmod;
+  NodeId bdecl;
+  if (on->kind == NODE_IDENTIFIER) {
+    const DefId b = ast_resolution_def(t->ast, obj); // carries the module too (a prelude type isn't local)
+    bmod = b.module;
+    bdecl = b.node;
+  } else { // nested base, e.g. `(mod::Type)::method`
+    const TypeId bt = check_expr(t, obj);
+    const Ty *const ty = ast_type_at(t->ast, bt);
+    bmod = ty->module;
+    bdecl = bt != TYPE_NONE && (ty->kind == TYPE_STRUCT || ty->kind == TYPE_ENUM) ? ty->as.decl : NODE_NONE;
+  }
   const Span mname = name_span(t, n->as.member.member);
-  if (decl == NODE_NONE || (ast_at_const(t->ast, decl)->kind != NODE_STRUCT && ast_at_const(t->ast, decl)->kind != NODE_ENUM)) {
+  const Node *const bd = bdecl == NODE_NONE ? NULL : ast_at_const(mod_ast(t, bmod), bdecl);
+  if (!bd || (bd->kind != NODE_STRUCT && bd->kind != NODE_ENUM)) {
     typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'::' base must be a struct or enum type");
     return TYPE_NONE;
   }
-  if (ast_at_const(t->ast, decl)->kind == NODE_ENUM) {
-    const NodeId variant = find_member(t, decl, mname);
-    if (variant != NODE_NONE && ast_at_const(t->ast, variant)->kind == NODE_VARIANT) {
-      ast_set_resolution(t->ast, n->as.member.member, variant);
-      return decl_to_type(t, decl);
+  if (bd->kind == NODE_ENUM) {
+    const NodeId variant = find_member(t, bmod, bdecl, mname);
+    if (variant != NODE_NONE && ast_at_const(mod_ast(t, bmod), variant)->kind == NODE_VARIANT) {
+      ast_set_resolution_def(t->ast, n->as.member.member, (DefId){bmod, variant});
+      return named_type_of(t, bmod, bdecl);
     }
   }
-  const NodeId method = find_method(t, decl, mname);
-  if (method != NODE_NONE) {
-    ast_set_resolution(t->ast, n->as.member.member, method);
-    return decl_type(t, method);
+  const DefId method = find_method(t, bmod, bdecl, mname);
+  if (method.node != NODE_NONE) {
+    ast_set_resolution_def(t->ast, n->as.member.member, method);
+    return decl_type_in(t, method.module, method.node);
   }
-  if (ast_at_const(t->ast, decl)->kind == NODE_ENUM) {
-    typechecker_errorf(
-        t, mname.start, mname.end - mname.start, "no variant or method '%.*s' on this enum", (int)(mname.end - mname.start),
-        t->source + mname.start);
-  } else {
-    typechecker_errorf(
-        t, mname.start, mname.end - mname.start, "no associated method '%.*s' on this struct",
-        (int)(mname.end - mname.start), t->source + mname.start);
-  }
+  typechecker_errorf(
+      t, mname.start, mname.end - mname.start, "no %s '%.*s' on this %s",
+      bd->kind == NODE_ENUM ? "variant or method" : "associated method", (int)(mname.end - mname.start),
+      t->source + mname.start, bd->kind == NODE_ENUM ? "enum" : "struct");
   return TYPE_NONE;
 }
 
-// `Enum::Variant(args)` construction: arity- and type-check the payload, yield the enum type.
+// `Enum::Variant(args)` construction: arity- and type-check the payload, yield the enum type. The
+// variant (and its payload type nodes) live in module `vmod`; the argument expressions are local.
 static TypeId check_variant_call(
-    TypeChecker *t, const Node *const n, const NodeId id, const NodeId variant, const TypeId enum_ty) {
+    TypeChecker *t, const Node *const n, const NodeId id, const ModuleId vmod, const NodeId variant,
+    const TypeId enum_ty) {
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(t->ast, args);
   for (uint32_t i = 0; i < args.len; i++)
     check_expr(t, aids[i]);
-  const NodeList payload = ast_at_const(t->ast, variant)->as.variant.payload;
-  const NodeId *const pl = ast_list(t->ast, payload);
+  Ast *const va = mod_ast(t, vmod);
+  const NodeList payload = ast_at_const(va, variant)->as.variant.payload;
+  const NodeId *const pl = ast_list(va, payload);
   const Span sp = ast_at_const(t->ast, id)->span;
   if (args.len != payload.len) {
     typechecker_errorf(
@@ -628,8 +757,8 @@ static TypeId check_variant_call(
         payload.len == 1 ? "" : "s", args.len);
   } else {
     for (uint32_t i = 0; i < args.len; i++) {
-      const Node *const pe = ast_at_const(t->ast, pl[i]);
-      const TypeId pt = resolve_type(t, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
+      const Node *const pe = ast_at_const(va, pl[i]);
+      const TypeId pt = lower_type_in(t, vmod, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
     }
@@ -643,9 +772,9 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
   TypeId callee = TYPE_NONE;
   if (path_callee->kind == NODE_MEMBER && path_callee->as.member.path) {
     callee = check_expr(t, n->as.call.callee);
-    const NodeId variant = ast_resolution(t->ast, path_callee->as.member.member);
-    if (variant != NODE_NONE && ast_at_const(t->ast, variant)->kind == NODE_VARIANT)
-      return check_variant_call(t, n, id, variant, callee);
+    const DefId vd = ast_resolution_def(t->ast, path_callee->as.member.member);
+    if (vd.node != NODE_NONE && ast_at_const(mod_ast(t, vd.module), vd.node)->kind == NODE_VARIANT)
+      return check_variant_call(t, n, id, vd.module, vd.node, callee);
   } else if (path_callee->kind == NODE_MEMBER) {
     callee = check_member(t, path_callee, true); // `obj.name(args)`: resolve `name` as a method, not a field
   } else {
@@ -665,7 +794,9 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
     return TYPE_NONE;
   }
 
-  const Node *const fn = ast_at_const(t->ast, ct->as.decl);
+  const ModuleId fmod = ct->module;        // the called function lives in this module
+  Ast *const fa = mod_ast(t, fmod);
+  const Node *const fn = ast_at_const(fa, ct->as.decl);
   const bool named = fn->kind == NODE_FUNCTION;
   const NodeList params = named ? fn->as.function.params : fn->as.function_type.params;
   const NodeList returns = named ? fn->as.function.returns : fn->as.function_type.returns;
@@ -674,8 +805,8 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
   uint32_t skip = 0;
   const Node *const callee_node = ast_at_const(t->ast, n->as.call.callee);
   if (named && callee_node->kind == NODE_MEMBER && !callee_node->as.member.path && params.len > 0) {
-    const NodeId m = ast_resolution(t->ast, callee_node->as.member.member);
-    if (m != NODE_NONE && ast_at_const(t->ast, m)->kind == NODE_FUNCTION)
+    const DefId md = ast_resolution_def(t->ast, callee_node->as.member.member);
+    if (md.node != NODE_NONE && ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION)
       skip = 1;
   }
 
@@ -685,25 +816,27 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
         t, sp.start, sp.end - sp.start, "expected %u argument%s, found %u", expected, expected == 1 ? "" : "s",
         args.len);
   } else {
-    const NodeId *const pids = ast_list(t->ast, params);
+    const NodeId *const pids = ast_list(fa, params);
     for (uint32_t i = 0; i < args.len; i++) {
-      const TypeId pt = named ? decl_type(t, pids[i + skip]) : resolve_type(t, pids[i + skip]);
+      const TypeId pt = named ? decl_type_in(t, fmod, pids[i + skip]) : lower_type_in(t, fmod, pids[i + skip]);
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
     }
   }
   if (returns.len != 1)
     return TYPE_NONE; // 0 or multiple returns: no single value type yet
-  const NodeId r0 = ast_list(t->ast, returns)[0];
-  const Node *const rn = ast_at_const(t->ast, r0);
-  return resolve_type(t, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  const NodeId r0 = ast_list(fa, returns)[0];
+  const Node *const rn = ast_at_const(fa, r0);
+  return lower_type_in(t, fmod, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
 }
 
-// A non-`pub` struct field of `owner` may only be named from inside `owner`'s own `extend` blocks
-// (where current_self == owner). `at` is the access span (the field name); enum variants are exempt.
-static void check_field_visibility(TypeChecker *t, const NodeId field, const NodeId owner, const Span at) {
-  const Node *const f = ast_at_const(t->ast, field);
-  if (f->kind == NODE_FIELD && !f->as.field.is_public && owner != t->current_self)
+// A non-`pub` struct field of `owner` (in module `m`) may only be named from inside `owner`'s own
+// `extend` blocks (same module, current_self == owner). A private field of an imported struct is always
+// inaccessible. `at` is the access span (the field name); enum variants are exempt.
+static void check_field_visibility(TypeChecker *t, const ModuleId m, const NodeId field, const NodeId owner, const Span at) {
+  const Node *const f = ast_at_const(mod_ast(t, m), field);
+  const bool inside_owner = (!t->package || m == t->ast->module) && owner == t->current_self;
+  if (f->kind == NODE_FIELD && !f->as.field.is_public && !inside_owner)
     typechecker_errorf(
         t, at.start, at.end - at.start, "field '%.*s' is private", (int)(at.end - at.start), t->source + at.start);
 }
@@ -718,24 +851,30 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
   const Span name = name_span(t, mname);
   const TypeId base = strip(t, obj);
   const Ty *const bt = ast_type_at(t->ast, base);
-  if (bt->kind == TYPE_BUILTIN && bt->as.builtin == BT_STR) {
-    // `str` exposes two read-only fields: `ptr: *const u8` and `len: usize`.
-    if (span_is(t->source, name, "ptr"))
-      return ast_intern_type(
-          t->ast, (Ty){.kind = TYPE_POINTER, .qualifier = TYPE_QUAL_CONST, .as.elem = ast_builtin(BT_U8)});
-    if (span_is(t->source, name, "len"))
-      return ast_builtin(BT_USIZE);
-  }
   if (bt->kind == TYPE_STRUCT || bt->kind == TYPE_ENUM) {
+    const ModuleId bmod = bt->module;
     // Look up the preferred namespace first (method for a call, field for a bare access), then the other.
-    NodeId hit = prefer_method ? find_method(t, bt->as.decl, name) : find_member(t, bt->as.decl, name);
-    if (hit == NODE_NONE)
-      hit = prefer_method ? find_member(t, bt->as.decl, name) : find_method(t, bt->as.decl, name);
-    if (hit != NODE_NONE) {
-      ast_set_resolution(t->ast, mname, hit);
-      if (ast_at_const(t->ast, hit)->kind == NODE_FIELD)
-        check_field_visibility(t, hit, bt->as.decl, name);
-      return decl_type(t, hit);
+    // A method may live in another module (a local extension of an imported type); a field is always in bmod.
+    DefId mhit = {0, NODE_NONE};
+    NodeId fhit = NODE_NONE;
+    if (prefer_method) {
+      mhit = find_method(t, bmod, bt->as.decl, name);
+      if (mhit.node == NODE_NONE)
+        fhit = find_member(t, bmod, bt->as.decl, name);
+    } else {
+      fhit = find_member(t, bmod, bt->as.decl, name);
+      if (fhit == NODE_NONE)
+        mhit = find_method(t, bmod, bt->as.decl, name);
+    }
+    if (mhit.node != NODE_NONE) {
+      ast_set_resolution_def(t->ast, mname, mhit);
+      return decl_type_in(t, mhit.module, mhit.node);
+    }
+    if (fhit != NODE_NONE) {
+      ast_set_resolution_def(t->ast, mname, (DefId){bmod, fhit});
+      if (ast_at_const(mod_ast(t, bmod), fhit)->kind == NODE_FIELD)
+        check_field_visibility(t, bmod, fhit, bt->as.decl, name);
+      return decl_type_in(t, bmod, fhit);
     }
   }
   char ty[96];
@@ -749,6 +888,7 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
 static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
   const TypeId sty = type_of_type_node(t, n->as.struct_initializer.type);
   const Ty *const st = ast_type_at(t->ast, sty);
+  const ModuleId smod = st->module;
   const NodeId decl = st->kind == TYPE_STRUCT ? st->as.decl : NODE_NONE;
   const NodeList fields = n->as.struct_initializer.fields;
   const NodeId *const ids = ast_list(t->ast, fields);
@@ -758,7 +898,7 @@ static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
     if (decl == NODE_NONE)
       continue;
     const Span fname = name_span(t, fi->as.field_initializer.name);
-    const NodeId field = find_member(t, decl, fname);
+    const NodeId field = find_member(t, smod, decl, fname);
     if (field == NODE_NONE) {
       char ty[96];
       render_type(t, sty, ty, sizeof ty);
@@ -767,10 +907,10 @@ static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
           t->source + fname.start, ty);
       continue;
     }
-    ast_set_resolution(t->ast, fi->as.field_initializer.name, field);
-    check_field_visibility(t, field, decl, fname); // can't initialize a private field from outside the struct
-    if (!compatible(t, decl_type(t, field), fi->as.field_initializer.value))
-      err_mismatch(t, fi->as.field_initializer.value, decl_type(t, field));
+    ast_set_resolution_def(t->ast, fi->as.field_initializer.name, (DefId){smod, field});
+    check_field_visibility(t, smod, field, decl, fname); // can't initialize a private field from outside the struct
+    if (!compatible(t, decl_type_in(t, smod, field), fi->as.field_initializer.value))
+      err_mismatch(t, fi->as.field_initializer.value, decl_type_in(t, smod, field));
   }
   return sty;
 }
@@ -802,13 +942,17 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         case ByteCharacterLiteral: result = ast_builtin(BT_U8); break;
         case True:
         case False: result = ast_builtin(BT_BOOL); break;
-        case StringLiteral: result = ast_builtin(BT_STR); break; // a `str` view over the literal bytes
+        case StringLiteral: result = prelude_str_type(t); break; // a `str` view over the literal bytes
         default: result = TYPE_NONE; break; // Null, RawString (deferred)
       }
       break;
-    case NODE_IDENTIFIER:
-      result = decl_type(t, ast_resolution(a, id));
+    case NODE_IDENTIFIER: {
+      // The decl may live in another module (a prelude / glob-imported function), so read its type from
+      // the owning module via the full DefId -- `decl_type` alone would read the current module's pool.
+      const DefId d = ast_resolution_def(a, id);
+      result = decl_type_in(t, d.module, d.node);
       break;
+    }
     case NODE_UNARY:
       result = check_unary(t, n, id);
       break;
@@ -849,7 +993,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_MEMBER:
-      result = n->as.member.path ? check_path_member(t, n) : check_member(t, n, false);
+      result = n->as.member.path ? check_path_member(t, n, id) : check_member(t, n, false);
       break;
     case NODE_CAST: {
       const TypeId src = check_expr(t, n->as.cast.expression);
@@ -1173,10 +1317,11 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       // binding (so `switch e { A => .., B => .. }` tests the tag instead of always matching).
       const Ty *const bt = ast_type_at(a, strip(t, expected));
       if (bt->kind == TYPE_ENUM) {
-        const NodeId v = find_member(t, bt->as.decl, name_span(t, n->as.pattern.name));
-        if (v != NODE_NONE && ast_at_const(a, v)->kind == NODE_VARIANT &&
-            ast_at_const(a, v)->as.variant.payload.len == 0) {
-          ast_set_resolution(a, n->as.pattern.name, v);
+        const ModuleId bmod = bt->module;
+        const NodeId v = find_member(t, bmod, bt->as.decl, name_span(t, n->as.pattern.name));
+        if (v != NODE_NONE && ast_at_const(mod_ast(t, bmod), v)->kind == NODE_VARIANT &&
+            ast_at_const(mod_ast(t, bmod), v)->as.variant.payload.len == 0) {
+          ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, v});
           break;
         }
       }
@@ -1188,7 +1333,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       const Ty *const bt = ast_type_at(a, base);
       const NodeId decl = bt->kind == TYPE_STRUCT || bt->kind == TYPE_ENUM ? bt->as.decl : NODE_NONE;
       if (n->as.pattern.name != NODE_NONE && decl != NODE_NONE)
-        ast_set_resolution(a, n->as.pattern.name, decl);
+        ast_set_resolution_def(a, n->as.pattern.name, (DefId){bt->module, decl});
       const NodeList children = n->as.pattern.children;
       const NodeId *const ids = ast_list(a, children);
       for (uint32_t i = 0; i < children.len; i++)
@@ -1198,14 +1343,15 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
     case NODE_PATTERN_FIELD: {
       const TypeId base = strip(t, expected);
       const Ty *const bt = ast_type_at(a, base);
+      const ModuleId bmod = bt->module;
       const NodeId decl = bt->kind == TYPE_STRUCT || bt->kind == TYPE_ENUM ? bt->as.decl : NODE_NONE;
       TypeId field_type = TYPE_NONE;
       if (decl != NODE_NONE && n->as.pattern.name != NODE_NONE) {
         const Span fname = name_span(t, n->as.pattern.name);
-        const NodeId field = find_member(t, decl, fname);
+        const NodeId field = find_member(t, bmod, decl, fname);
         if (field != NODE_NONE) {
-          ast_set_resolution(a, n->as.pattern.name, field);
-          field_type = decl_type(t, field);
+          ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, field});
+          field_type = decl_type_in(t, bmod, field);
         } else {
           char ty[96];
           render_type(t, base, ty, sizeof ty);
@@ -1223,13 +1369,14 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
     case NODE_PATTERN_TUPLE: { // enum-variant constructor pattern
       const TypeId base = strip(t, expected);
       const Ty *const bt = ast_type_at(a, base);
+      const ModuleId bmod = bt->module;
       const NodeId decl = bt->kind == TYPE_ENUM ? bt->as.decl : NODE_NONE;
       NodeId variant = NODE_NONE;
       if (decl != NODE_NONE && n->as.pattern.name != NODE_NONE) {
         const Span vname = name_span(t, n->as.pattern.name);
-        variant = find_member(t, decl, vname);
+        variant = find_member(t, bmod, decl, vname);
         if (variant != NODE_NONE)
-          ast_set_resolution(a, n->as.pattern.name, variant);
+          ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, variant});
         else {
           char ty[96];
           render_type(t, base, ty, sizeof ty);
@@ -1240,13 +1387,14 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       }
       const NodeList children = n->as.pattern.children;
       const NodeId *const ids = ast_list(a, children);
-      const NodeList payload = variant != NODE_NONE ? ast_at_const(a, variant)->as.variant.payload : (NodeList){0, 0};
-      const NodeId *const pl = ast_list(a, payload);
+      Ast *const va = mod_ast(t, bmod);
+      const NodeList payload = variant != NODE_NONE ? ast_at_const(va, variant)->as.variant.payload : (NodeList){0, 0};
+      const NodeId *const pl = ast_list(va, payload);
       for (uint32_t i = 0; i < children.len; i++) {
         TypeId pt = TYPE_NONE;
         if (i < payload.len) {
-          const Node *const pe = ast_at_const(a, pl[i]);
-          pt = resolve_type(t, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
+          const Node *const pe = ast_at_const(va, pl[i]);
+          pt = lower_type_in(t, bmod, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]);
         }
         check_pattern(t, ids[i], pt);
       }

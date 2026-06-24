@@ -16,6 +16,19 @@ typedef struct {
     uint32_t len;
 } NodeList;
 
+// A module index within a Package; 0 is the single-file / REPL path. Kept to uint16_t so it packs
+// into both DefId and Ty.module without growing them (<= 65535 modules).
+typedef uint16_t ModuleId;
+
+// A program-wide declaration handle: NodeId is local to one module's Ast, DefId is global. Same-module
+// refs are {own module, node}; imported refs are {origin module, node}. The all-zero value is "unresolved".
+typedef struct {
+    ModuleId module;
+    NodeId node;
+} DefId;
+
+VEC_DECLARE(DefId, DefId_Vec)
+
 typedef enum {
   TYPE_QUAL_NONE,
   TYPE_QUAL_CONST,
@@ -39,6 +52,7 @@ typedef enum {
   NODE_TYPE_ALIAS,
   NODE_CONST,
   NODE_EXTERN_BLOCK,
+  NODE_IMPORT,
   NODE_GENERIC_PARAM,
   NODE_WHERE_PREDICATE,
 
@@ -143,14 +157,21 @@ typedef struct {
             NodeId name;
             NodeList generics;
             NodeId type;
+            bool is_public; // `pub type`
         } type_alias;
         struct {
             NodeId name, type, value;
+            bool is_public; // `pub const`
         } const_def;
         struct {
             NodeId abi;
             NodeList items;
         } extern_block;
+        struct {
+            NodeList path;  // `::`-separated identifier segments, e.g. `std::string`
+            NodeId alias;   // `as <name>` module alias, or NODE_NONE
+            bool glob;      // `as *`: bring the module's public items into scope unqualified
+        } import_decl;
         struct {
             NodeId name;
             NodeList bounds;
@@ -263,12 +284,11 @@ typedef uint32_t TypeId;
 #define TYPE_NONE ((TypeId)0) // unknown / not-yet-computed / poison (suppresses cascading errors)
 
 // Order matches resolver.c's is_builtin_type[] table so a name lookup maps straight to an index.
-// All entries are scalars/void except BT_STR, a fat-pointer string view `{ *const u8 ptr; usize len }`
-// (the type of string literals); it lowers to a C struct, so the is_int/is_numeric/... predicates that
-// gate on the scalar ranges deliberately exclude it.
+// Every entry is a scalar or void. The string view `str` and the slice fat pointer `SCslice` are no
+// longer builtins -- they are ordinary structs in the std `string` module (auto-imported as a prelude).
 typedef enum {
   BT_BOOL, BT_CHAR, BT_I8, BT_I16, BT_I32, BT_I64, BT_ISIZE,
-  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_VOID, BT_STR,
+  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_VOID,
   BT_COUNT,
 } BuiltinType;
 
@@ -289,7 +309,8 @@ typedef enum {
 typedef struct {
     uint8_t kind;
     uint8_t qualifier; // POINTER/REFERENCE/SLICE only
-    uint16_t reserved;
+    ModuleId module;   // STRUCT/ENUM/FUNCTION/GENERIC: module owning `as.decl`, so (module, decl) is a
+                       // global DefId and named types unify across modules. 0 for builtins/single-file.
     union {
         BuiltinType builtin; // BUILTIN
         TypeId elem;         // POINTER/REFERENCE/SLICE/ARRAY pointee/element
@@ -306,11 +327,12 @@ typedef struct {
     Node_Vec nodes;
     U32_Vec children;
     U32_Vec scratch;
-    U32_Vec resolutions;
+    DefId_Vec resolutions; // side table: index = NodeId, value = DefId (all-zero = unresolved)
     Ty_Vec type_pool;   // interned types; index 0 is TYPE_ERROR, 1..BT_COUNT are the builtins
     TyMap type_index;   // reverse of type_pool: interned Ty -> its TypeId
     U32_Vec types;      // side table: index = NodeId, value = TypeId (0 = unknown)
     NodeId root;
+    ModuleId module;    // this Ast's module index within its Package (0 for single-file / REPL)
 } Ast;
 
 Ast *ast_new(const size_t token_count);
@@ -339,12 +361,25 @@ ALWAYS_INLINE const NodeId *ast_list(const Ast *a, const NodeList list) {
   return a->children.data + list.start;
 }
 
+// Same-module resolution: the common path. `decl` is a node in this Ast, tagged with this module.
 ALWAYS_INLINE void ast_set_resolution(Ast *a, const NodeId ref, const NodeId decl) {
-  a->resolutions.data[ref] = decl;
+  a->resolutions.data[ref] = (DefId){a->module, decl};
 }
 
+// The resolved node id. Valid as a local NodeId only when the ref resolves within this module; use
+// ast_resolution_def when a reference may cross a module boundary (imports).
 ALWAYS_INLINE NodeId ast_resolution(const Ast *a, const NodeId ref) {
+  return a->resolutions.data[ref].node;
+}
+
+// The full global handle, including the owning module -- for cross-module-aware code.
+ALWAYS_INLINE DefId ast_resolution_def(const Ast *a, const NodeId ref) {
   return a->resolutions.data[ref];
+}
+
+// Record a resolution that may point into another module (an imported decl).
+ALWAYS_INLINE void ast_set_resolution_def(Ast *a, const NodeId ref, const DefId decl) {
+  a->resolutions.data[ref] = decl;
 }
 
 ALWAYS_INLINE TypeId ast_builtin(const BuiltinType b) {
