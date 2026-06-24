@@ -134,6 +134,10 @@ static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
 static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut);
 static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
 static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
+static void inst_name(Codegen *c, const TyInstance *it, char *out, size_t cap);
+static TypeId subst_lookup(Codegen *c, ModuleId m, NodeId decl);
+static TypeId subst_resolve(Codegen *c, TypeId t);
+static bool type_is_concrete(Codegen *c, TypeId t);
 static size_t buf_append(char *out, size_t cap, size_t at, const char *text);
 
 Codegen *codegen_new(Ast *ast, const char *source, const size_t len, const Package *package) {
@@ -371,6 +375,9 @@ static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap)
       snprintf(out, cap, "arr_%s", e);
       break;
     }
+    case TYPE_INSTANCE:
+      inst_name(c, ast_instance(c->ast, ty->as.inst), out, cap);
+      break;
     default:
       buf_append(out, cap, 0, "v");
       break;
@@ -385,6 +392,81 @@ static void spec_name(Codegen *c, const DefId fn, const TypeId *const args, cons
     char e[176];
     mangle_type(c, args[i], e, sizeof e);
     at = buf_append(out, cap, at, e);
+  }
+}
+
+// The mangled C name of a generic struct/enum instantiation: `<Type>__<arg1>[__<arg2>...]` (e.g. Box__i32).
+// Args are resolved through the active specialization substitution, so a reference to Box<T> inside a
+// specialization of T=i32 mangles to Box__i32 (matching the emitted struct).
+static void inst_name(Codegen *c, const TyInstance *const it, char *out, const size_t cap) {
+  size_t at = render_qualified(c, it->module, ast_at_const(cg_mod_ast(c, it->module), it->decl)->as.aggregate.name, out, cap);
+  for (uint8_t i = 0; i < it->n; i++) {
+    at = buf_append(out, cap, at, "__");
+    char e[176];
+    mangle_type(c, subst_resolve(c, it->args[i]), e, sizeof e);
+    at = buf_append(out, cap, at, e);
+  }
+}
+
+// Resolve a type through the active specialization substitution (TYPE_GENERIC param -> concrete),
+// recursing through pointer/ref/slice/array layers and generic-instance args. Identity when not
+// specializing (nsubst == 0). Re-interns rewritten compound types into the current pool.
+static TypeId subst_resolve(Codegen *c, const TypeId t) {
+  if (c->nsubst == 0)
+    return t;
+  const Ty *const y = ast_type_at(c->ast, t);
+  switch (y->kind) {
+    case TYPE_GENERIC: {
+      const TypeId s = subst_lookup(c, y->module, y->as.decl);
+      return s != TYPE_NONE ? s : t;
+    }
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY: {
+      const TypeId e = subst_resolve(c, y->as.elem);
+      if (e == y->as.elem)
+        return t;
+      Ty nt = *y;
+      nt.as.elem = e;
+      return ast_intern_type(c->ast, nt);
+    }
+    case TYPE_INSTANCE: {
+      const TyInstance src = *ast_instance(c->ast, y->as.inst);
+      TypeId na[4];
+      bool changed = false;
+      for (uint8_t i = 0; i < src.n; i++) {
+        na[i] = subst_resolve(c, src.args[i]);
+        changed |= na[i] != src.args[i];
+      }
+      return changed ? ast_intern_instance(c->ast, src.module, src.decl, na, src.n) : t;
+    }
+    default:
+      return t;
+  }
+}
+
+// Whether a type mentions no unresolved type parameter -- i.e. it is a real instantiation worth emitting
+// (a specialization template like Box<T> or id::<T> is intermediate and must be skipped).
+static bool type_is_concrete(Codegen *c, const TypeId t) {
+  const Ty *const y = ast_type_at(c->ast, t);
+  switch (y->kind) {
+    case TYPE_GENERIC:
+      return false;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY:
+      return type_is_concrete(c, y->as.elem);
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(c->ast, y->as.inst);
+      for (uint8_t i = 0; i < it->n; i++)
+        if (!type_is_concrete(c, it->args[i]))
+          return false;
+      return true;
+    }
+    default:
+      return true;
   }
 }
 
@@ -684,6 +766,11 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
     case NODE_IDENTIFIER: {
       const DefId d = ast_resolution_def(c->ast, tn);
       if (d.node != NODE_NONE) {
+        const TypeId nt = ast_type(c->ast, tn); // a generic application (Vec<i32>) -> its specialized name
+        if (nt != TYPE_NONE && ast_type_at(c->ast, nt)->kind == TYPE_INSTANCE) {
+          render_type_id(c, nt, decl, out, cap);
+          break;
+        }
         const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
         if (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) {
           char nm[160];
@@ -835,6 +922,12 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
         render_type_id(c, s, decl, out, cap);
       else
         buf_join3(out, cap, "void", SEP(decl), decl);
+      break;
+    }
+    case TYPE_INSTANCE: { // a generic struct/enum applied -> its specialized C type name (e.g. Box__i32)
+      char nm[200];
+      inst_name(c, ast_instance(c->ast, ty->as.inst), nm, sizeof nm);
+      buf_join3(out, cap, nm, SEP(decl), decl);
       break;
     }
     default:
@@ -2169,6 +2262,11 @@ static void emit_specializations(Codegen *c, const bool with_body) {
     const DefId fn = c->insts[i].fn;
     if (fn.module != c->ast->module)
       continue; // cross-module generic definitions not yet specialized (per-Ast TypeId pools differ)
+    bool concrete = true;
+    for (uint8_t k = 0; k < c->insts[i].n; k++)
+      concrete &= type_is_concrete(c, c->insts[i].args[k]);
+    if (!concrete) // skip an intermediate instantiation (e.g. id::<T> called inside another generic)
+      continue;
     const Node *const fnnode = ast_at_const(c->ast, fn.node);
     if (fnnode->as.function.returns.len > 1)
       continue; // multi-return generic not yet supported
@@ -2253,6 +2351,58 @@ static NodeList program_items(Codegen *c) {
   return ast_at_const(c->ast, c->ast->root)->as.program.items;
 }
 
+// Emit a generic struct instantiation's C definition (forward typedef when !with_body), with the type
+// params bound to the instance's concrete args. Same-module only (the generic struct is in this ast).
+static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool with_body) {
+  const Node *const dn = ast_at_const(c->ast, it->decl);
+  char nm[200];
+  inst_name(c, it, nm, sizeof nm);
+  if (!with_body) {
+    emit(c, "typedef struct %s %s;\n", nm, nm);
+    return;
+  }
+  const NodeList gens = dn->as.aggregate.generics;
+  const NodeId *const gids = ast_list(c->ast, gens);
+  c->nsubst = 0;
+  for (uint32_t i = 0; i < gens.len && i < it->n && c->nsubst < 8; i++) {
+    c->subst[c->nsubst].param = (DefId){it->module, gids[i]};
+    c->subst[c->nsubst].concrete = it->args[i];
+    c->nsubst++;
+  }
+  emit(c, "struct %s {\n", nm);
+  c->depth++;
+  const NodeList fs = dn->as.aggregate.members;
+  const NodeId *const fids = ast_list(c->ast, fs);
+  for (uint32_t j = 0; j < fs.len; j++) {
+    const Node *const f = ast_at_const(c->ast, fids[j]);
+    char fnm[128], d[256];
+    render_ident(c, name_span(c, f->as.field.name), fnm, sizeof fnm);
+    render_type_node(c, f->as.field.type, fnm, d, sizeof d);
+    emit_indent(c);
+    emit_cstr(c, d);
+    emit(c, ";\n");
+  }
+  c->depth--;
+  emit(c, "};\n");
+  c->nsubst = 0;
+}
+
+// Emit every same-module generic-aggregate instantiation (struct forward typedefs, then full bodies).
+static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
+  for (size_t i = 0; i < c->ast->instances.len; i++) {
+    const TyInstance *const it = &c->ast->instances.data[i];
+    if (it->module != c->ast->module) // cross-module generic aggregate definitions not yet specialized
+      continue;
+    bool concrete = true;
+    for (uint8_t k = 0; k < it->n; k++)
+      concrete &= type_is_concrete(c, it->args[k]);
+    if (!concrete) // skip an intermediate application like Box<T> (only real instantiations are emitted)
+      continue;
+    if (ast_at_const(c->ast, it->decl)->kind == NODE_STRUCT)
+      emit_struct_inst(c, it, with_body);
+  }
+}
+
 // Phase 1: forward typedefs so any type can name any struct/payload-enum regardless of order.
 // Payload-less enums are self-contained, so they are emitted in full here.
 static void phase_forward(Codegen *c) {
@@ -2261,20 +2411,16 @@ static void phase_forward(Codegen *c) {
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_STRUCT) {
-      if (n->as.aggregate.generics.len) {
-        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic struct is not yet supported");
-        continue;
-      }
+      if (n->as.aggregate.generics.len)
+        continue; // a generic template emits nothing; its instantiations are emitted separately
       emit(c, "typedef struct ");
       emit_local_type_name(c, n->as.aggregate.name);
       emit(c, " ");
       emit_local_type_name(c, n->as.aggregate.name);
       emit(c, ";\n");
     } else if (n->kind == NODE_ENUM) {
-      if (n->as.aggregate.generics.len) {
-        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic enum is not yet supported");
-        continue;
-      }
+      if (n->as.aggregate.generics.len)
+        continue; // generic enum template emits nothing (instantiation of generic enums is not yet emitted)
       if (!aggregate_has_payload(c, n)) {
         emit_enum_full(c, n, ids[i]); // self-contained, guarded (so referrers can re-emit it)
         continue;
@@ -2303,6 +2449,7 @@ static void phase_forward(Codegen *c) {
       emit(c, ";\n");
     }
   }
+  emit_aggregate_specializations(c, false); // forward typedefs for generic struct instantiations
 }
 
 // Phase 2: full struct / payload-enum definitions (source order; pointer cycles use phase 1).
@@ -2377,6 +2524,7 @@ static void phase_types(Codegen *c) {
       emit(c, "};\n");
     }
   }
+  emit_aggregate_specializations(c, true); // full bodies for generic struct instantiations
 }
 
 // Multi-return structs, after all type definitions (they reference parameter/return types).

@@ -303,6 +303,8 @@ typedef enum {
   TYPE_STRUCT,
   TYPE_ENUM,
   TYPE_GENERIC,
+  TYPE_INSTANCE, // a generic struct/enum applied to concrete type args (e.g. Vec<i32>); `as.inst` indexes
+                 // the Ast's interned instance table, so Vec<i32> and Vec<bool> are distinct interned types
 } TypeKind;
 
 // Named `Ty`, not `Type`: a `Type` token-keyword enum constant already occupies that identifier.
@@ -315,6 +317,7 @@ typedef struct {
         BuiltinType builtin; // BUILTIN
         TypeId elem;         // POINTER/REFERENCE/SLICE/ARRAY pointee/element
         NodeId decl;         // STRUCT/ENUM/GENERIC decl node; FUNCTION = NODE_FUNCTION/NODE_FUNCTION_TYPE node
+        uint32_t inst;       // INSTANCE: index into the Ast's instance table
     } as;
 } Ty;
 
@@ -322,6 +325,17 @@ _Static_assert(sizeof(Ty) == 8, "Ty must stay cache-compact");
 
 VEC_DECLARE(Ty, Ty_Vec)
 HM_DECLARE(Ty, TypeId, TyMap) // Ty -> TypeId, so ast_intern_type dedups in O(1) not O(pool)
+
+// A generic struct/enum applied to concrete type args. `module`/`decl` name the generic aggregate; `args`
+// are its type arguments (interned TypeIds in the SAME Ast). Interned (deduped) so equal applications
+// share one index -> equal TYPE_INSTANCE Tys. Up to 4 type params.
+typedef struct {
+    ModuleId module;
+    NodeId decl;
+    uint8_t n;
+    TypeId args[4];
+} TyInstance;
+VEC_DECLARE(TyInstance, TyInstance_Vec)
 
 // Per-call generic type arguments (monomorphization): the concrete types a generic call instantiates
 // (turbofish-explicit or inferred), recorded by the type checker and read by codegen. Up to 4 params.
@@ -341,6 +355,7 @@ typedef struct {
     TyMap type_index;   // reverse of type_pool: interned Ty -> its TypeId
     U32_Vec types;      // side table: index = NodeId, value = TypeId (0 = unknown)
     MonoUse_Vec mono;   // per-call generic type arguments (small; linear scan)
+    TyInstance_Vec instances; // interned generic instantiations referenced by TYPE_INSTANCE Tys
     NodeId root;
     ModuleId module;    // this Ast's module index within its Package (0 for single-file / REPL)
 } Ast;
@@ -354,6 +369,11 @@ NodeList ast_commit(Ast *a, const uint32_t mark);
 void ast_init_resolutions(Ast *a);
 void ast_init_types(Ast *a);
 TypeId ast_intern_type(Ast *a, const Ty t);
+
+// Intern a generic instantiation `decl<args...>` (deduped), returning a TYPE_INSTANCE TypeId. `ast_instance`
+// recovers the (decl, args) record from an interned TYPE_INSTANCE's `as.inst` index.
+TypeId ast_intern_instance(Ast *a, ModuleId module, NodeId decl, const TypeId *args, uint8_t n);
+const TyInstance *ast_instance(const Ast *a, uint32_t index);
 
 #ifdef NDEBUG
 void ast_fprint(FILE *out, const Ast *a, const char *source);

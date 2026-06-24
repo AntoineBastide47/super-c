@@ -6,6 +6,7 @@
 VEC_DEFINE(Node, Node_Vec)
 VEC_DEFINE(Ty, Ty_Vec)
 VEC_DEFINE(DefId, DefId_Vec)
+VEC_DEFINE(TyInstance, TyInstance_Vec)
 VEC_DEFINE(MonoUse, MonoUse_Vec)
 
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
@@ -36,6 +37,7 @@ Ast *ast_new(const size_t token_count) {
   a->type_pool = Ty_Vec_init();
   a->types = U32_Vec_init();
   a->mono = MonoUse_Vec_init();
+  a->instances = TyInstance_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
   Node_Vec_push(&a->nodes, (Node){.kind = NODE_NONE_KIND});
@@ -53,8 +55,41 @@ void ast_free(Ast **a) {
   TyMap_deinit(&(*a)->type_index);
   VEC_DEINIT((*a)->types);
   VEC_DEINIT((*a)->mono);
+  VEC_DEINIT((*a)->instances);
   free(*a);
   *a = NULL;
+}
+
+TypeId ast_intern_instance(Ast *a, const ModuleId module, const NodeId decl, const TypeId *const args,
+                           const uint8_t n) {
+  const uint8_t m = n > 4 ? 4 : n;
+  uint32_t idx = (uint32_t)a->instances.len;
+  for (size_t i = 0; i < a->instances.len; i++) { // dedup so equal applications share an index
+    const TyInstance *const it = &a->instances.data[i];
+    if (it->module != module || it->decl != decl || it->n != m)
+      continue;
+    bool same = true;
+    for (uint8_t j = 0; j < m; j++)
+      if (it->args[j] != args[j]) {
+        same = false;
+        break;
+      }
+    if (same) {
+      idx = (uint32_t)i;
+      break;
+    }
+  }
+  if (idx == a->instances.len) {
+    TyInstance it = {.module = module, .decl = decl, .n = m};
+    for (uint8_t j = 0; j < m; j++)
+      it.args[j] = args[j];
+    TyInstance_Vec_push(&a->instances, it);
+  }
+  return ast_intern_type(a, (Ty){.kind = TYPE_INSTANCE, .module = module, .as.inst = idx});
+}
+
+const TyInstance *ast_instance(const Ast *a, const uint32_t index) {
+  return &a->instances.data[index];
 }
 
 void ast_set_type_args(Ast *a, const NodeId node, const TypeId *const args, const uint8_t n) {
