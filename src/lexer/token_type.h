@@ -31,6 +31,7 @@ typedef enum TokenType {
   Mut,
   New,
   Null,
+  Pub,
   Return,
   SelfLower,
   SelfUpper,

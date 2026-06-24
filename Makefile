@@ -137,4 +137,4 @@ DEPS := $(LIB_OBJS:.o=.d) $(BUILD_DIR)/main.d $(addsuffix .d,$(TEST_BINS) $(RTES
 -include $(DEPS)
 
 clean:
-	@rm -rf build $(BIN) profile.json.gz
+	@rm -rf build $(BIN) profile.json.gz *.out

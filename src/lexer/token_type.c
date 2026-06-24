@@ -24,6 +24,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Mut",
     "New",
     "Null",
+    "Pub",
     "Return",
     "SelfLower",
     "SelfUpper",

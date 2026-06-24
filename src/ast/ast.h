@@ -110,6 +110,7 @@ typedef struct {
             NodeList returns;
             NodeList where_clause;
             NodeId body;
+            bool is_public; // `pub fn` -- stored for visibility (field privacy is what's enforced today)
         } function;
         struct {
             NodeId name, type;
@@ -117,9 +118,11 @@ typedef struct {
         struct {
             NodeId name;
             NodeList generics, members;
+            bool is_public; // `pub struct`
         } aggregate;
         struct {
             NodeId name, type, value;
+            bool is_public; // `pub` field; private fields are reachable only inside the struct's own extend
         } field;
         struct {
             NodeId name;
@@ -260,9 +263,12 @@ typedef uint32_t TypeId;
 #define TYPE_NONE ((TypeId)0) // unknown / not-yet-computed / poison (suppresses cascading errors)
 
 // Order matches resolver.c's is_builtin_type[] table so a name lookup maps straight to an index.
+// All entries are scalars/void except BT_STR, a fat-pointer string view `{ *const u8 ptr; usize len }`
+// (the type of string literals); it lowers to a C struct, so the is_int/is_numeric/... predicates that
+// gate on the scalar ranges deliberately exclude it.
 typedef enum {
   BT_BOOL, BT_CHAR, BT_I8, BT_I16, BT_I32, BT_I64, BT_ISIZE,
-  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_VOID,
+  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_VOID, BT_STR,
   BT_COUNT,
 } BuiltinType;
 

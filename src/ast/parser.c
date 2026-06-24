@@ -151,6 +151,22 @@ static NodeId identifier(Parser *p) {
               });
 }
 
+static NodeId callable_name(Parser *p) {
+  if (!check(p, Identifier) && !check(p, SelfUpper) && !check(p, New)) {
+    error_here(p, "expected identifier");
+    if (!at_end(p))
+      advance(p);
+    return NODE_NONE;
+  }
+  const Token token = advance(p);
+  return ast_add(
+      p->ast, (Node){
+                  .kind = NODE_IDENTIFIER,
+                  .span = token_span(token),
+                  .as.name = {.text = token_span(token)},
+              });
+}
+
 static NodeId literal(Parser *p) {
   const Token token = advance(p);
   return ast_add(
@@ -403,7 +419,7 @@ static NodeList parse_function_returns(Parser *p) {
 static NodeId parse_function(Parser *p, const bool require_body) {
   const uint32_t start = token_start(raw_peek(p));
   expect(p, Fn, "'fn'");
-  const NodeId name = identifier(p);
+  const NodeId name = callable_name(p);
   const NodeList generics = parse_generics(p);
   const NodeList params = parse_parameters(p);
   const NodeList returns = parse_function_returns(p);
@@ -431,6 +447,7 @@ static NodeId parse_function(Parser *p, const bool require_body) {
 
 static NodeId parse_field(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
+  const bool is_public = match(p, Pub); // `pub name: T` makes the field readable outside the struct
   const NodeId name = identifier(p);
   expect(p, Colon, "':'");
   const NodeId type = parse_type(p);
@@ -438,7 +455,7 @@ static NodeId parse_field(Parser *p) {
       p->ast, (Node){
                   .kind = NODE_FIELD,
                   .span = span_new(start, node_span(p, type).end),
-                  .as.field = {.name = name, .type = type},
+                  .as.field = {.name = name, .type = type, .is_public = is_public},
               });
 }
 
@@ -591,12 +608,15 @@ static NodeId parse_extend(Parser *p) {
   expect(p, LeftBrace, "'{'");
   const uint32_t mark = ast_mark(p->ast);
   while (!check(p, RightBrace) && !at_end(p)) {
-    if (check(p, Fn))
-      ast_push(p->ast, parse_function(p, true));
-    else if (check(p, Type))
+    const bool is_public = match(p, Pub); // `pub fn` on a method
+    if (check(p, Fn)) {
+      const NodeId fn = parse_function(p, true);
+      ast_at(p->ast, fn)->as.function.is_public = is_public;
+      ast_push(p->ast, fn);
+    } else if (check(p, Type) && !is_public) {
       ast_push(p->ast, parse_type_alias(p, false));
-    else {
-      error_here(p, "expected extension item");
+    } else {
+      error_here(p, is_public ? "'pub' may only be applied to a function here" : "expected extension item");
       advance(p);
     }
   }
@@ -646,11 +666,21 @@ static NodeId parse_extern(Parser *p) {
 }
 
 static NodeId parse_item(Parser *p) {
+  // `pub` (LL(1): one-token lookahead) may prefix a struct or function only.
+  const bool is_public = match(p, Pub);
+  if (is_public && !check(p, Fn) && !check(p, Struct))
+    error_here(p, "'pub' may only be applied to a struct or function");
   switch (peek_type(p)) {
-    case Fn:
-      return parse_function(p, true);
-    case Struct:
-      return parse_struct(p);
+    case Fn: {
+      const NodeId f = parse_function(p, true);
+      ast_at(p->ast, f)->as.function.is_public = is_public;
+      return f;
+    }
+    case Struct: {
+      const NodeId s = parse_struct(p);
+      ast_at(p->ast, s)->as.aggregate.is_public = is_public;
+      return s;
+    }
     case Enum:
       return parse_enum(p);
     case Interface:
@@ -935,7 +965,7 @@ static NodeId parse_postfix(Parser *p) {
       const bool pointer = match(p, Arrow);
       if (!pointer)
         advance(p);
-      const NodeId member = identifier(p);
+      const NodeId member = callable_name(p);
       expr = ast_add(
           p->ast, (Node){
                       .kind = NODE_MEMBER,
@@ -952,7 +982,7 @@ static NodeId parse_postfix(Parser *p) {
                         .as.specialization = {.expression = expr, .types = types},
                     });
       } else { // `Enum::Variant` path access (one-token lookahead keeps this LL(1))
-        const NodeId member = identifier(p);
+        const NodeId member = callable_name(p);
         expr = ast_add(
             p->ast, (Node){
                         .kind = NODE_MEMBER,
