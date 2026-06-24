@@ -766,6 +766,59 @@ static TypeId check_variant_call(
   return enum_ty;
 }
 
+// Rewrite `ty`, replacing each generic type param (matched by DefId against `params[i]`) with the
+// concrete `args[i]`, recursing through pointer/reference/slice/array layers. Used to monomorphize a
+// generic call's parameter and return types from its (turbofish or inferred) type arguments.
+static TypeId subst_type(TypeChecker *t, const TypeId ty, const DefId *const params, const TypeId *const args,
+                         const int n) {
+  if (ty == TYPE_NONE || n == 0)
+    return ty;
+  const Ty *const y = ast_type_at(t->ast, ty);
+  switch (y->kind) {
+    case TYPE_GENERIC:
+      for (int i = 0; i < n; i++)
+        if (params[i].module == y->module && params[i].node == y->as.decl)
+          return args[i];
+      return ty;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY: {
+      const TypeId e = subst_type(t, y->as.elem, params, args, n);
+      if (e == y->as.elem)
+        return ty;
+      Ty nt = *y;
+      nt.as.elem = e;
+      return ast_intern_type(t->ast, nt);
+    }
+    default:
+      return ty;
+  }
+}
+
+// Infer generic type args by matching a declared (possibly generic) parameter type against an actual
+// argument type: a bare `T` binds to the argument; pointer/ref/slice/array layers recurse. Fills
+// `bound[i]` (by param index) the first time each param is seen.
+static void unify_infer(TypeChecker *t, const TypeId param_ty, const TypeId arg_ty, const DefId *const params,
+                        TypeId *const bound, const int n) {
+  if (param_ty == TYPE_NONE || arg_ty == TYPE_NONE)
+    return;
+  const Ty *const p = ast_type_at(t->ast, param_ty);
+  if (p->kind == TYPE_GENERIC) {
+    for (int i = 0; i < n; i++)
+      if (params[i].module == p->module && params[i].node == p->as.decl) {
+        if (bound[i] == TYPE_NONE)
+          bound[i] = arg_ty;
+        return;
+      }
+    return;
+  }
+  const Ty *const aT = ast_type_at(t->ast, arg_ty);
+  if (aT->kind == p->kind &&
+      (p->kind == TYPE_POINTER || p->kind == TYPE_REFERENCE || p->kind == TYPE_SLICE || p->kind == TYPE_ARRAY))
+    unify_infer(t, p->as.elem, aT->as.elem, params, bound, n);
+}
+
 static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
   // `Enum::Variant(args)` is construction, not a function call.
   const Node *const path_callee = ast_at_const(t->ast, n->as.call.callee);
@@ -810,6 +863,40 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
       skip = 1;
   }
 
+  // Generic call: bind the function's type params from explicit turbofish args or by inferring them from
+  // the argument types, then substitute into the parameter/return types so `fn id<T>(x: T) T` checks and
+  // yields a concrete type. The bound args are recorded on the call so codegen emits the matching
+  // specialization (`id__i32`).
+  DefId gparams[8];
+  TypeId gargs[8];
+  int gn = 0;
+  const Node *const callee_n = ast_at_const(t->ast, n->as.call.callee);
+  if (named && fn->as.function.generics.len) {
+    const NodeList gens = fn->as.function.generics;
+    const NodeId *const gids = ast_list(fa, gens);
+    const int g = gens.len < 8 ? (int)gens.len : 8;
+    for (int i = 0; i < g; i++)
+      gparams[i] = (DefId){fmod, gids[i]};
+    if (callee_n->kind == NODE_GENERIC_SPECIALIZATION) { // explicit turbofish
+      const NodeList tas = callee_n->as.specialization.types;
+      const NodeId *const taids = ast_list(t->ast, tas);
+      for (uint32_t i = 0; i < tas.len && gn < g; i++)
+        gargs[gn++] = ast_type(t->ast, taids[i]);
+    } else if (args.len == params.len - skip) { // infer from argument types
+      TypeId bound[8];
+      for (int i = 0; i < g; i++)
+        bound[i] = TYPE_NONE;
+      const NodeId *const pids = ast_list(fa, params);
+      for (uint32_t i = 0; i < args.len; i++)
+        unify_infer(t, decl_type_in(t, fmod, pids[i + skip]), ast_type(t->ast, aids[i]), gparams, bound, g);
+      for (int i = 0; i < g; i++)
+        gargs[i] = bound[i]; // may stay TYPE_NONE if a param couldn't be inferred
+      gn = g;
+    }
+    if (gn == g) // fully determined: record for codegen's specialization
+      ast_set_type_args(t->ast, id, gargs, (uint8_t)gn);
+  }
+
   const uint32_t expected = params.len - skip;
   if (args.len != expected) {
     typechecker_errorf(
@@ -818,7 +905,8 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
   } else {
     const NodeId *const pids = ast_list(fa, params);
     for (uint32_t i = 0; i < args.len; i++) {
-      const TypeId pt = named ? decl_type_in(t, fmod, pids[i + skip]) : lower_type_in(t, fmod, pids[i + skip]);
+      const TypeId raw = named ? decl_type_in(t, fmod, pids[i + skip]) : lower_type_in(t, fmod, pids[i + skip]);
+      const TypeId pt = subst_type(t, raw, gparams, gargs, gn);
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
     }
@@ -827,7 +915,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
     return TYPE_NONE; // 0 or multiple returns: no single value type yet
   const NodeId r0 = ast_list(fa, returns)[0];
   const Node *const rn = ast_at_const(fa, r0);
-  return lower_type_in(t, fmod, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  return subst_type(t, lower_type_in(t, fmod, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0), gparams, gargs, gn);
 }
 
 // A non-`pub` struct field of `owner` (in module `m`) may only be named from inside `owner`'s own

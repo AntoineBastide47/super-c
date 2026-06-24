@@ -48,6 +48,19 @@ struct Codegen {
     const Package *package;    // for cross-module references / mangling (NULL = single file)
     bool mangle;               // true for >1 user module: prefix every symbol by its module
     bool multifile;            // emit as header + .c with includes (build/ tree), vs one self-contained .c
+    // Monomorphization: while emitting a specialization, `subst` maps each generic param (DefId) to its
+    // concrete type; `insts` is the dedup'd set of generic instantiations used by this module.
+    struct {
+        DefId param;
+        TypeId concrete;
+    } subst[8];
+    int nsubst;
+    struct {
+        DefId fn;
+        uint8_t n;
+        TypeId args[4];
+    } insts[256];
+    int ninsts;
     ERRORS_VARIABLES;
 };
 
@@ -121,6 +134,7 @@ static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
 static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut);
 static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
 static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
+static size_t buf_append(char *out, size_t cap, size_t at, const char *text);
 
 Codegen *codegen_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   Codegen *const c = calloc(1, sizeof *c);
@@ -324,6 +338,118 @@ static size_t render_qualified(Codegen *c, const ModuleId owner, const NodeId na
   const size_t off = at < cap ? at : (cap ? cap - 1 : 0);
   const Span s = ast_at_const(cg_mod_ast(c, owner), name_node)->as.name.text;
   return at + render_ident_src(cg_mod_src(c, owner), s, buf + off, cap > off ? cap - off : 0);
+}
+
+// A C-identifier-safe spelling of a type, for monomorphization name mangling: i32, lib__Foo, ptr_i32,
+// slice_u8, arr_f64. Nested types recurse so distinct instantiations get distinct symbol names.
+static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap) {
+  const Ty *const ty = ast_type_at(c->ast, t);
+  switch (ty->kind) {
+    case TYPE_BUILTIN:
+      buf_append(out, cap, 0, BUILTIN_NAMES[ty->as.builtin]);
+      break;
+    case TYPE_STRUCT:
+    case TYPE_ENUM:
+      render_qualified(c, ty->module, ast_at_const(cg_mod_ast(c, ty->module), ty->as.decl)->as.aggregate.name, out, cap);
+      break;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE: {
+      char e[176];
+      mangle_type(c, ty->as.elem, e, sizeof e);
+      snprintf(out, cap, "ptr_%s", e);
+      break;
+    }
+    case TYPE_SLICE: {
+      char e[176];
+      mangle_type(c, ty->as.elem, e, sizeof e);
+      snprintf(out, cap, "slice_%s", e);
+      break;
+    }
+    case TYPE_ARRAY: {
+      char e[176];
+      mangle_type(c, ty->as.elem, e, sizeof e);
+      snprintf(out, cap, "arr_%s", e);
+      break;
+    }
+    default:
+      buf_append(out, cap, 0, "v");
+      break;
+  }
+}
+
+// The mangled C name of a generic function specialization: `<fn>__<arg1>[__<arg2>...]` (e.g. `id__i32`).
+static void spec_name(Codegen *c, const DefId fn, const TypeId *const args, const int n, char *out, const size_t cap) {
+  size_t at = render_qualified(c, fn.module, ast_at_const(cg_mod_ast(c, fn.module), fn.node)->as.function.name, out, cap);
+  for (int i = 0; i < n; i++) {
+    at = buf_append(out, cap, at, "__");
+    char e[176];
+    mangle_type(c, args[i], e, sizeof e);
+    at = buf_append(out, cap, at, e);
+  }
+}
+
+// If node `callId` is a call to a generic function (turbofish `f::<T..>(..)` or a bare `f(..)` whose type
+// args were inferred), return the generic fn's DefId and fill `args`/`*n` with the concrete type-arg
+// TypeIds (recorded by the type checker); otherwise return {_, NODE_NONE}.
+static DefId generic_call_target(Codegen *c, const NodeId callId, TypeId *const args, int *const n) {
+  *n = 0;
+  const Node *const call = ast_at_const(c->ast, callId);
+  if (call->kind != NODE_CALL)
+    return (DefId){0, NODE_NONE};
+  const Node *const callee = ast_at_const(c->ast, call->as.call.callee);
+  const DefId fn = callee->kind == NODE_GENERIC_SPECIALIZATION
+                       ? ast_resolution_def(c->ast, callee->as.specialization.expression)
+                       : ast_resolution_def(c->ast, call->as.call.callee);
+  if (fn.node == NODE_NONE)
+    return (DefId){0, NODE_NONE};
+  const Node *const fnnode = ast_at_const(cg_mod_ast(c, fn.module), fn.node);
+  if (fnnode->kind != NODE_FUNCTION || !fnnode->as.function.generics.len)
+    return (DefId){0, NODE_NONE};
+  const MonoUse *const mu = ast_type_args(c->ast, callId);
+  if (!mu)
+    return (DefId){0, NODE_NONE};
+  for (uint8_t i = 0; i < mu->n && *n < 4; i++)
+    args[(*n)++] = mu->args[i];
+  return fn;
+}
+
+// Record a generic instantiation for this module, deduplicated (same fn + same type args -> emitted once).
+static void record_inst(Codegen *c, const DefId fn, const TypeId *const args, const int n) {
+  for (int i = 0; i < c->ninsts; i++) {
+    if (c->insts[i].fn.module != fn.module || c->insts[i].fn.node != fn.node || c->insts[i].n != n)
+      continue;
+    bool same = true;
+    for (int j = 0; j < n; j++)
+      if (c->insts[i].args[j] != args[j]) {
+        same = false;
+        break;
+      }
+    if (same)
+      return;
+  }
+  if (c->ninsts >= (int)(sizeof c->insts / sizeof c->insts[0]))
+    return;
+  c->insts[c->ninsts].fn = fn;
+  c->insts[c->ninsts].n = (uint8_t)n;
+  for (int j = 0; j < n; j++)
+    c->insts[c->ninsts].args[j] = args[j];
+  c->ninsts++;
+}
+
+// Scan every node for turbofish generic calls and record the (deduplicated) instantiations this module
+// needs. A linear scan over the node arena finds calls anywhere in any body.
+static void collect_insts(Codegen *c) {
+  c->ninsts = 0;
+  for (uint32_t i = 0; i < c->ast->nodes.len; i++) {
+    const Node *const node = ast_at_const(c->ast, i);
+    if (node->kind != NODE_CALL)
+      continue;
+    TypeId args[4];
+    int n;
+    const DefId fn = generic_call_target(c, i, args, &n);
+    if (fn.node != NODE_NONE)
+      record_inst(c, fn, args, n);
+  }
 }
 
 static void fresh(Codegen *c, char *buf, const size_t cap) {
@@ -537,6 +663,15 @@ static void emit_literal(Codegen *c, const Node *n) {
 #define SEP(decl) ((decl)[0] ? " " : "")
 
 // Render a C declaration of AST type node `tn` with declarator `decl` (the variable name, with
+// While emitting a generic specialization, the concrete type bound to a type param (a NODE_GENERIC_PARAM
+// at DefId{m,decl}), or TYPE_NONE if not currently substituted.
+static TypeId subst_lookup(Codegen *c, const ModuleId m, const NodeId decl) {
+  for (int i = 0; i < c->nsubst; i++)
+    if (c->subst[i].param.module == m && c->subst[i].param.node == decl)
+      return c->subst[i].concrete;
+  return TYPE_NONE;
+}
+
 // any leading `*` / trailing `[]` already threaded in) into `out`.
 static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char *out, const size_t cap) {
   if (tn == NODE_NONE) {
@@ -558,8 +693,14 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
           render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent (same module)
         } else if (dn->kind == NODE_TYPE_ALIAS) {
           render_type_id(c, ast_type(c->ast, tn), decl, out, cap); // imported alias: use the resolved type
+        } else if (dn->kind == NODE_GENERIC_PARAM) {
+          const TypeId s = subst_lookup(c, d.module, d.node); // a type param, concrete inside a specialization
+          if (s != TYPE_NONE)
+            render_type_id(c, s, decl, out, cap);
+          else
+            buf_join3(out, cap, "void", SEP(decl), decl);
         } else {
-          codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic or opaque type is not yet supported");
+          codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: opaque type is not yet supported");
           buf_join3(out, cap, "void", SEP(decl), decl);
         }
         break;
@@ -686,6 +827,14 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       char inner[480];
       buf_join3(inner, sizeof inner, "*", "", decl);
       render_type_id(c, ty->as.elem, inner, out, cap);
+      break;
+    }
+    case TYPE_GENERIC: {
+      const TypeId s = subst_lookup(c, ty->module, ty->as.decl); // concrete inside a specialization
+      if (s != TYPE_NONE)
+        render_type_id(c, s, decl, out, cap);
+      else
+        buf_join3(out, cap, "void", SEP(decl), decl);
       break;
     }
     default:
@@ -876,11 +1025,30 @@ static void emit_variant_construct(Codegen *c, const DefId v, const NodeList arg
   emit(c, " }");
 }
 
-static void emit_call(Codegen *c, const Node *n) {
+static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(c->ast, args);
+
+  { // a call to a generic function (turbofish or inferred) -> the monomorphized specialization
+    TypeId ga[4];
+    int gn;
+    const DefId g = generic_call_target(c, id, ga, &gn);
+    if (g.node != NODE_NONE) {
+      char nm[256];
+      spec_name(c, g, ga, gn, nm, sizeof nm);
+      emit_cstr(c, nm);
+      emit(c, "(");
+      for (uint32_t i = 0; i < args.len; i++) {
+        if (i)
+          emit(c, ", ");
+        emit_expr(c, aids[i]);
+      }
+      emit(c, ")");
+      return;
+    }
+  }
 
   if (callee->kind == NODE_MEMBER && callee->as.member.path) { // Enum::Variant(args) or Type::method(args)
     const DefId md = ast_resolution_def(c->ast, callee->as.member.member);
@@ -1118,7 +1286,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
       emit_expr(c, n->as.binary.right);
       break;
     case NODE_CALL:
-      emit_call(c, n);
+      emit_call(c, id, n);
       break;
     case NODE_INDEX: {
       const Ty *const ot = ast_type_at(c->ast, ast_type(c->ast, n->as.index.object));
@@ -1928,15 +2096,19 @@ static void function_name(Codegen *c, const NodeId fn, const DefId target, char 
 
 // Emit a function signature; with_body emits the block, otherwise a prototype `;`. `extern_q`
 // prefixes `extern`. Sets current_ret for multi-return so NODE_RETURN can build the struct.
-static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, const bool extern_q, const bool with_body) {
+static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, const bool extern_q,
+                          const bool with_body, const char *const name_override) {
   const Node *const fn = ast_at_const(c->ast, fn_id);
   char nm[256];
-  function_name(c, fn_id, target, nm, sizeof nm, !extern_q);
+  if (name_override)
+    buf_append(nm, sizeof nm, 0, name_override); // a monomorphized specialization's mangled name
+  else
+    function_name(c, fn_id, target, nm, sizeof nm, !extern_q);
   // In a multi-module package a non-`pub` function is module-private: emit it `static` so it never
   // gets external linkage (its prototype is kept in the .c, not the public header). `main` and FFI
-  // declarations are never static.
-  const bool is_main = target.node == NODE_NONE && span_is(c->source, name_span(c, fn->as.function.name), "main");
-  const bool is_static = c->multifile && !extern_q && !is_main && !fn->as.function.is_public;
+  // declarations are never static. A specialization is always file-local (each module emits its own).
+  const bool is_main = target.node == NODE_NONE && !name_override && span_is(c->source, name_span(c, fn->as.function.name), "main");
+  const bool is_static = name_override ? c->multifile : (c->multifile && !extern_q && !is_main && !fn->as.function.is_public);
   char ps[1024];
   render_params(c, fn->as.function.params, ps, sizeof ps);
   char decl[1320];
@@ -1989,6 +2161,31 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
   }
 }
 
+// Emit each collected generic instantiation as a concrete `static` function (a copy of the generic body
+// with its type params bound to the instantiation's concrete types). `with_body` false emits prototypes.
+// Same-module only for now: the generic function lives in this module's ast.
+static void emit_specializations(Codegen *c, const bool with_body) {
+  for (int i = 0; i < c->ninsts; i++) {
+    const DefId fn = c->insts[i].fn;
+    if (fn.module != c->ast->module)
+      continue; // cross-module generic definitions not yet specialized (per-Ast TypeId pools differ)
+    const Node *const fnnode = ast_at_const(c->ast, fn.node);
+    if (fnnode->as.function.returns.len > 1)
+      continue; // multi-return generic not yet supported
+    const NodeList gens = fnnode->as.function.generics;
+    const NodeId *const gids = ast_list(c->ast, gens);
+    c->nsubst = 0;
+    for (uint32_t g = 0; g < gens.len && g < c->insts[i].n && c->nsubst < 8; g++) {
+      c->subst[c->nsubst].param = (DefId){fn.module, gids[g]};
+      c->subst[c->nsubst].concrete = c->insts[i].args[g];
+      c->nsubst++;
+    }
+    char nm[256];
+    spec_name(c, fn, c->insts[i].args, c->insts[i].n, nm, sizeof nm);
+    emit_function(c, fn.node, (DefId){0, NODE_NONE}, false, with_body, nm);
+    c->nsubst = 0;
+  }
+}
 
 // Emit the `<fn>_ret` struct backing a multi-return function (fields `_0`, `_1`, …).
 static void emit_ret_struct(Codegen *c, const NodeId fn_id, const DefId target) {
@@ -2216,12 +2413,10 @@ static void phase_prototypes(Codegen *c, const int which) {
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION) {
-      if (n->as.function.generics.len) {
-        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic function is not yet supported");
-        continue;
-      }
+      if (n->as.function.generics.len)
+        continue; // a generic template emits nothing; its specializations are emitted separately
       if (want_fn(which, n->as.function.is_public))
-        emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false);
+        emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false, NULL);
     } else if (n->kind == NODE_IMPL) {
       if (n->as.impl_def.generics.len) {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: generic impl is not yet supported");
@@ -2232,15 +2427,17 @@ static void phase_prototypes(Codegen *c, const int which) {
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && want_fn(which, ast_at_const(c->ast, mids[j])->as.function.is_public))
-          emit_function(c, mids[j], target, false, false);
+          emit_function(c, mids[j], target, false, false, NULL);
     } else if (n->kind == NODE_EXTERN_BLOCK && which != PROTO_PRIVATE) {
       const NodeList ms = n->as.extern_block.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && !ast_at_const(c->ast, mids[j])->as.function.generics.len)
-          emit_function(c, mids[j], (DefId){0, NODE_NONE}, true, false);
+          emit_function(c, mids[j], (DefId){0, NODE_NONE}, true, false, NULL);
     }
   }
+  if (which != PROTO_PUBLIC) // specializations are static -> their prototypes live in the .c, not the header
+    emit_specializations(c, false);
 }
 
 // A top-level const, module-mangled (so refs across modules agree and names never collide). `static const`
@@ -2283,17 +2480,19 @@ static void phase_bodies(Codegen *c) {
       emit_toplevel_const(c, ids[i]);
   }
 
+  emit_specializations(c, true); // concrete generic instantiations, before the bodies that call them
+
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE) {
-      emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true);
+      emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true, NULL);
     } else if (n->kind == NODE_IMPL && !n->as.impl_def.generics.len) {
       const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
       const NodeList ms = n->as.impl_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && ast_at_const(c->ast, mids[j])->as.function.body != NODE_NONE)
-          emit_function(c, mids[j], target, false, true);
+          emit_function(c, mids[j], target, false, true, NULL);
     }
   }
 }
@@ -2449,6 +2648,7 @@ void codegen_emit_header(Codegen *c, FILE *out) {
 
 void codegen_emit(Codegen *c, FILE *out) {
   build_enum_index(c);
+  collect_insts(c); // generic instantiations needed by this module (emitted as static specializations)
   if (c->multifile) {
     // Multi-file .c: types/public prototypes live in the included headers; here go the private
     // (static) prototypes and every body (private functions are emitted `static`).
@@ -2490,8 +2690,10 @@ void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
   emit_cstr(cs[0], SUPER_RT_INCLUDES);
   emit(cs[0], "\n");
   cg_flush(cs[0], out);
-  for (size_t i = 0; i < n; i++)
+  for (size_t i = 0; i < n; i++) {
     build_enum_index(cs[i]);
+    collect_insts(cs[i]);
+  }
   for (size_t i = 0; i < n; i++) { // every struct/enum forward typedef
     phase_forward(cs[i]);
     cg_flush(cs[i], out);

@@ -323,6 +323,15 @@ _Static_assert(sizeof(Ty) == 8, "Ty must stay cache-compact");
 VEC_DECLARE(Ty, Ty_Vec)
 HM_DECLARE(Ty, TypeId, TyMap) // Ty -> TypeId, so ast_intern_type dedups in O(1) not O(pool)
 
+// Per-call generic type arguments (monomorphization): the concrete types a generic call instantiates
+// (turbofish-explicit or inferred), recorded by the type checker and read by codegen. Up to 4 params.
+typedef struct {
+    NodeId node;
+    uint8_t n;
+    TypeId args[4];
+} MonoUse;
+VEC_DECLARE(MonoUse, MonoUse_Vec)
+
 typedef struct {
     Node_Vec nodes;
     U32_Vec children;
@@ -331,6 +340,7 @@ typedef struct {
     Ty_Vec type_pool;   // interned types; index 0 is TYPE_ERROR, 1..BT_COUNT are the builtins
     TyMap type_index;   // reverse of type_pool: interned Ty -> its TypeId
     U32_Vec types;      // side table: index = NodeId, value = TypeId (0 = unknown)
+    MonoUse_Vec mono;   // per-call generic type arguments (small; linear scan)
     NodeId root;
     ModuleId module;    // this Ast's module index within its Package (0 for single-file / REPL)
 } Ast;
@@ -381,6 +391,11 @@ ALWAYS_INLINE DefId ast_resolution_def(const Ast *a, const NodeId ref) {
 ALWAYS_INLINE void ast_set_resolution_def(Ast *a, const NodeId ref, const DefId decl) {
   a->resolutions.data[ref] = decl;
 }
+
+// Record / fetch a generic call's concrete type arguments (monomorphization). `ast_type_args` returns
+// NULL when the call has none recorded (not a generic call, or no instantiation determined).
+void ast_set_type_args(Ast *a, NodeId node, const TypeId *args, uint8_t n);
+const MonoUse *ast_type_args(const Ast *a, NodeId node);
 
 ALWAYS_INLINE TypeId ast_builtin(const BuiltinType b) {
   return (TypeId)b + 1;
