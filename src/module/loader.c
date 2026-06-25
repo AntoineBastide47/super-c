@@ -317,6 +317,7 @@ void package_free(Package **p) {
   free((*p)->modules);
   free((*p)->root_dir);
   free((*p)->std_root);
+  free((*p)->macro_generics);
   free(*p);
   *p = NULL;
 }
@@ -377,29 +378,108 @@ NodeId package_prelude_lookup(const Package *p, const char *name, const size_t n
   return NODE_NONE;
 }
 
-// Re-intern `src`'s concrete cross-module generic instantiations into their owning modules' tables.
-// Returns true if any owner table grew (drives the fixpoint in package_propagate_instances).
-static bool reintern_cross_module(Package *p, Ast *const src) {
+#define MODULE_NONE ((ModuleId)0xFFFF)
+
+// Is `m` a user (non-prelude) module? The standalone REPL/test Ast lives at module == p->count (outside
+// p->modules) and is always user code.
+static bool module_is_user(const Package *p, const ModuleId m) {
+  return m >= p->count || !p->modules[m].prelude;
+}
+
+static ModuleId type_user_home(const Package *p, const Ast *a, TypeId t);
+
+// The module a concrete instance must be emitted in: the module of the first type argument that is a
+// user (non-prelude) aggregate held by value -- there its full layout is visible, so an `Option<Bar>`-style
+// by-value field is complete. All-builtin/all-prelude args -> the generic's own module (it->module), the
+// classic owner-emits path. A pointer/ref/slice arg needs only a forward declaration, so it never re-homes.
+static ModuleId instance_home(const Package *p, const Ast *a, const TyInstance *const it) {
+  for (uint8_t i = 0; i < it->n; i++) {
+    const ModuleId h = type_user_home(p, a, it->args[i]);
+    if (h != MODULE_NONE)
+      return h;
+  }
+  return it->module;
+}
+
+static ModuleId type_user_home(const Package *p, const Ast *a, const TypeId t) {
+  const Ty *const y = ast_type_at(a, t);
+  switch (y->kind) {
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+      return MODULE_NONE; // complete via a forward declaration / fat pointer
+    case TYPE_ARRAY:
+      return type_user_home(p, a, y->as.elem); // an array embeds its element by value
+    case TYPE_STRUCT:
+    case TYPE_ENUM:
+      return module_is_user(p, y->module) ? y->module : MODULE_NONE;
+    case TYPE_INSTANCE:
+      // A nested instance held by value re-homes the outer one to where the nested instance ITSELF is
+      // emitted (its home) -- the only module where its layout is complete. That may be a prelude sibling
+      // (Option<Vector<i32>> -> the vector module, where Vector__i32 is complete and which includes the
+      // Option header), not the outer generic's owner; routing there is what makes the by-value field valid.
+      return instance_home(p, a, ast_instance(a, y->as.inst));
+    default:
+      return MODULE_NONE;
+  }
+}
+
+ModuleId package_instance_home(const Package *p, const Ast *a, const TyInstance *const it) {
+  return instance_home(p, a, it);
+}
+
+bool package_generic_needs_macro(const Package *p, const ModuleId module, const NodeId decl) {
+  for (size_t i = 0; i < p->n_macro_generics; i++)
+    if (p->macro_generics[i].module == module && p->macro_generics[i].node == decl)
+      return true;
+  return false;
+}
+
+// Mark generic `(module, decl)` as having a re-homed instance (deduplicated).
+static void record_macro_generic(Package *p, const ModuleId module, const NodeId decl) {
+  if (package_generic_needs_macro(p, module, decl))
+    return;
+  if (p->n_macro_generics == p->cap_macro_generics) {
+    const size_t cap = p->cap_macro_generics ? p->cap_macro_generics * 2 : 8;
+    DefId *const g = realloc(p->macro_generics, cap * sizeof *g);
+    if (!g)
+      return;
+    p->macro_generics = g;
+    p->cap_macro_generics = cap;
+  }
+  p->macro_generics[p->n_macro_generics++] = (DefId){module, decl};
+}
+
+// Re-intern `src`'s concrete cross-module generic instantiations into their HOME module's table (see
+// instance_home): an all-builtin instance lands in the generic's owner (owner-emits), while one over a
+// user type by value lands in that type's module, which emits it via the generic's DECLARE/DEFINE macros.
+// Returns true if any table grew (drives the fixpoint in package_propagate_instances).
+static bool reintern_cross_module(Package *p, Ast *const src, Ast *const standalone) {
   bool changed = false;
   const size_t n = src->instances.len; // snapshot: entries added this pass are caught next round
   for (size_t i = 0; i < n; i++) {
-    const TyInstance it = src->instances.data[i]; // copy: the owner table may realloc below
-    if (it.module == src->module || it.module >= p->count || !p->modules[it.module].ast)
-      continue;
+    const TyInstance it = src->instances.data[i]; // copy: the dest table may realloc below
     bool concrete = true;
     for (uint8_t k = 0; k < it.n; k++)
       concrete &= ast_type_concrete(src, it.args[k]);
     if (!concrete)
       continue;
-    Ast *const owner = p->modules[it.module].ast;
-    if (owner == src)
-      continue;
-    const size_t before = owner->instances.len;
+    const ModuleId home = instance_home(p, src, &it);
+    if (home != it.module)
+      record_macro_generic(p, it.module, it.decl); // re-homed over a user type -> needs the generic's macros,
+                                                   // even when the using module already IS the home
+    Ast *const dest = home < p->count                            ? p->modules[home].ast
+                      : standalone && standalone->module == home ? standalone
+                                                                 : NULL;
+    if (!dest || dest == src)
+      continue; // already in its home module
+    const size_t before = dest->instances.len;
+    const uint8_t n = it.n < 4 ? it.n : 4; // a TyInstance holds at most 4 args (ast_intern_instance clamps)
     TypeId na[4];
-    for (uint8_t k = 0; k < it.n; k++)
-      na[k] = ast_reintern(owner, src, it.args[k]);
-    ast_intern_instance(owner, it.module, it.decl, na, it.n);
-    changed |= owner->instances.len != before;
+    for (uint8_t k = 0; k < n; k++)
+      na[k] = ast_reintern(dest, src, it.args[k]);
+    ast_intern_instance(dest, it.module, it.decl, na, n);
+    changed |= dest->instances.len != before;
   }
   return changed;
 }
@@ -407,7 +487,7 @@ static bool reintern_cross_module(Package *p, Ast *const src) {
 // Record `src`'s generic-method calls (a method with its own generic params, e.g. `map<U>`) into the
 // method's OWNING module, so that owner emits the matching `Inst__method__targs` specialization. The
 // receiver instance and the method's own type args are reinterned across pools. Returns true on growth.
-static bool reintern_method_insts(Package *p, Ast *const src) {
+static bool reintern_method_insts(Package *p, Ast *const src, Ast *const standalone) {
   bool changed = false;
   const size_t n = src->nodes.len;
   for (NodeId i = 0; i < n; i++) {
@@ -437,16 +517,27 @@ static bool reintern_method_insts(Package *p, Ast *const src) {
       rty = y->as.elem;
     if (ast_type_at(src, rty)->kind != TYPE_INSTANCE || !ast_type_concrete(src, rty))
       continue;
+    const uint8_t mtn = mu->n < 4 ? mu->n : 4; // MonoUse carries at most 4 method type args
     bool concrete = true;
-    for (uint8_t k = 0; k < mu->n; k++)
+    for (uint8_t k = 0; k < mtn; k++)
       concrete &= ast_type_concrete(src, mu->args[k]);
     if (!concrete)
       continue;
-    const TypeId rinst = owner == src ? rty : ast_reintern(owner, src, rty);
+    // Emit the specialization where the receiver instance lives: its home (a user module for an instance
+    // over a user type by value, else the owner). This keeps map<U> over Option<Bar> with the re-homed
+    // Option<Bar> instead of re-adding it to the owner (which can only forward-declare Bar).
+    const TyInstance recv = *ast_instance(src, ast_type_at(src, rty)->as.inst);
+    const ModuleId home = instance_home(p, src, &recv);
+    Ast *const dest = home < p->count                            ? p->modules[home].ast
+                      : standalone && standalone->module == home ? standalone
+                                                                 : owner;
+    if (!dest)
+      continue;
+    const TypeId rinst = dest == src ? rty : ast_reintern(dest, src, rty);
     TypeId targs[4];
-    for (uint8_t k = 0; k < mu->n && k < 4; k++)
-      targs[k] = owner == src ? mu->args[k] : ast_reintern(owner, src, mu->args[k]);
-    changed |= ast_add_method_inst(owner, rinst, md.node, targs, mu->n);
+    for (uint8_t k = 0; k < mtn; k++)
+      targs[k] = dest == src ? mu->args[k] : ast_reintern(dest, src, mu->args[k]);
+    changed |= ast_add_method_inst(dest, rinst, md.node, targs, mtn);
   }
   return changed;
 }
@@ -457,12 +548,12 @@ void package_propagate_instances(Package *p, Ast *const standalone) {
     changed = false;
     for (size_t u = 0; u < p->count; u++)
       if (p->modules[u].ast) {
-        changed |= reintern_cross_module(p, p->modules[u].ast);
-        changed |= reintern_method_insts(p, p->modules[u].ast);
+        changed |= reintern_cross_module(p, p->modules[u].ast, standalone);
+        changed |= reintern_method_insts(p, p->modules[u].ast, standalone);
       }
     if (standalone) {
-      changed |= reintern_cross_module(p, standalone);
-      changed |= reintern_method_insts(p, standalone);
+      changed |= reintern_cross_module(p, standalone, standalone);
+      changed |= reintern_method_insts(p, standalone, standalone);
     }
   }
 }

@@ -77,6 +77,12 @@ struct Codegen {
     NodeId cb_param;         // while emitting a callback specialization: the elided param (else NODE_NONE)
     DefId cb_callee;         // ... its bound callee
     bool cb_callee_closure;  // ... callee is a closure node
+    // Macro templating: while emitting a generic's `<G>_DECLARE`/`<G>_DEFINE` macro body, the generic
+    // param renders as its name (the macro's type param), the self instance as `NAME`, and identifier
+    // pastes mark a `\x01` sentinel (macro_finish -> `##`); see emit_generic_macro.
+    bool macro;
+    NodeId macro_self;       // the generic decl being templated (its instances render as `NAME`)
+    ModuleId macro_self_mod; // that decl's module
     ERRORS_VARIABLES;
 };
 
@@ -145,6 +151,7 @@ static void emit_array_braces(Codegen *c, const Node *n);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
+static size_t render_qualified(Codegen *c, ModuleId owner, NodeId name_node, char *buf, size_t cap);
 static NodeId fn_array_return(Codegen *c, NodeId fn_id);
 static void emit_match_core(Codegen *c, NodeId id, int mode, const char *result);
 static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
@@ -273,6 +280,57 @@ static void emit_indent(Codegen *c) {
     const unsigned k = n < 32 ? n : 32;
     emit_bytes(c, spaces, k);
     n -= k;
+  }
+}
+
+// Token-paste marker emitted between a macro parameter and adjacent identifier text inside a macro body;
+// macro_finish rewrites it to `##`. A no-op outside macro mode (names are concrete there).
+#define CG_PASTE '\x01'
+static void emit_paste(Codegen *c) {
+  if (c->macro)
+    emit_bytes(c, (const char[]){CG_PASTE}, 1);
+}
+
+// Finalize a generic macro body emitted into buf since `start`: turn each interior newline into a
+// `\`-continued line and each CG_PASTE sentinel into `##`, so the whole multi-line template becomes one
+// C `#define`. The single trailing newline is left as the macro's terminator.
+static void macro_finish(Codegen *c, const size_t start) {
+  if (c->buf_len <= start)
+    return;
+  size_t end = c->buf_len;
+  while (end > start && c->buf[end - 1] == '\n')
+    end--; // keep one plain newline after the body; drop trailing blanks
+  const size_t n = end - start;
+  char *const tmp = malloc(n);
+  if (!tmp) {
+    fprintf(stderr, "fatal: out of memory\n");
+    abort();
+  }
+  memcpy(tmp, c->buf + start, n);
+  c->buf_len = start;
+  for (size_t i = 0; i < n; i++) {
+    if (tmp[i] == '\n')
+      emit_bytes(c, " \\\n", 3);
+    else if (tmp[i] == CG_PASTE)
+      emit_bytes(c, "##", 2);
+    else
+      emit_bytes(c, tmp + i, 1);
+  }
+  emit_bytes(c, "\n", 1);
+  free(tmp);
+}
+
+// `OPTION` / `LIB__FOO`: the macro-name stem of a generic decl -- its module-qualified C name uppercased
+// (non-alphanumerics -> '_'), shared by the macro definition and every invocation.
+static void macro_stem(Codegen *c, const ModuleId m, const NodeId aggregate_name, char *out, const size_t cap) {
+  const size_t n = render_qualified(c, m, aggregate_name, out, cap);
+  for (size_t i = 0; i < n && i < cap; i++) {
+    char ch = out[i];
+    if (ch >= 'a' && ch <= 'z')
+      ch = (char)(ch - 32);
+    else if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')))
+      ch = '_';
+    out[i] = ch;
   }
 }
 
@@ -420,9 +478,63 @@ static void spec_name(Codegen *c, const DefId fn, const TypeId *const args, cons
 // The mangled C name of a generic struct/enum instantiation: `<Type>__<arg1>[__<arg2>...]` (e.g. Box__i32).
 // Args are resolved through the active specialization substitution, so a reference to Box<T> inside a
 // specialization of T=i32 mangles to Box__i32 (matching the emitted struct).
-static void inst_name(Codegen *c, const TyInstance *const it, char *out, const size_t cap) {
-  size_t at = render_qualified(c, it->module, ast_at_const(cg_mod_ast(c, it->module), it->decl)->as.aggregate.name, out, cap);
+// A generic param's source name (the macro's C-spelling type parameter, e.g. `T`).
+static size_t render_macro_param(Codegen *c, const ModuleId m, const NodeId decl, char *buf, const size_t cap) {
+  const Node *const gp = ast_at_const(cg_mod_ast(c, m), decl);
+  return render_ident_src(cg_mod_src(c, m), name_span_in(c, m, gp->as.generic_param.name), buf, cap);
+}
+
+// Inside a macro body, the C-identifier token naming a type argument for instance-name pasting: a generic
+// param renders as its mangle macro-parameter `_SCM_<name>` (so the invocation substitutes the arg's
+// mangle), any concrete type as its plain mangle.
+static void macro_arg_token(Codegen *c, const TypeId arg, char *out, const size_t cap) {
+  const Ty *const y = ast_type_at(c->ast, arg);
+  if (y->kind == TYPE_GENERIC) {
+    const size_t at = buf_append(out, cap, 0, "_SCM_");
+    render_macro_param(c, y->module, y->as.decl, out + at, cap - at);
+    return;
+  }
+  mangle_type(c, arg, out, cap);
+}
+
+// In a macro body, is `it` the template's OWN self instance (`Option<T>` while templating Option) -- as
+// opposed to the same generic over a different arg (`Option<U>` inside map<U>, a sibling)? Only the former
+// renders as the macro's NAME parameter; the latter pastes its arg token like any other instance.
+static bool is_self_instance(Codegen *c, const TyInstance *const it) {
+  if (!c->macro || it->decl != c->macro_self || it->module != c->macro_self_mod)
+    return false;
+  const Ast *const sa = cg_mod_ast(c, c->macro_self_mod);
+  const NodeList gens = ast_at_const(sa, c->macro_self)->as.aggregate.generics;
+  if (gens.len != it->n)
+    return false;
+  const NodeId *const gids = ast_list(sa, gens);
   for (uint8_t i = 0; i < it->n; i++) {
+    const Ty *const y = ast_type_at(c->ast, it->args[i]);
+    if (y->kind != TYPE_GENERIC || y->as.decl != gids[i] || y->module != c->macro_self_mod)
+      return false;
+  }
+  return true;
+}
+
+static void inst_name(Codegen *c, const TyInstance *const it, char *out, const size_t cap) {
+  if (is_self_instance(c, it)) {
+    buf_append(out, cap, 0, "NAME"); // the self instance -> the macro's NAME parameter
+    return;
+  }
+  size_t at = render_qualified(c, it->module, ast_at_const(cg_mod_ast(c, it->module), it->decl)->as.aggregate.name, out, cap);
+  const char sent[2] = {CG_PASTE, 0};
+  for (uint8_t i = 0; i < it->n; i++) {
+    if (c->macro) {
+      // sibling instance inside a macro: `Base__ ## tok0 ## __ ## tok1` so mangle-param tokens glue.
+      at = buf_append(out, cap, at, i ? sent : "__");
+      at = buf_append(out, cap, at, i ? "__" : sent);
+      if (i)
+        at = buf_append(out, cap, at, sent);
+      char e[176];
+      macro_arg_token(c, it->args[i], e, sizeof e);
+      at = buf_append(out, cap, at, e);
+      continue;
+    }
     at = buf_append(out, cap, at, "__");
     char e[176];
     mangle_type(c, subst_resolve(c, it->args[i]), e, sizeof e);
@@ -913,10 +1025,15 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
           render_type_id(c, ast_type(c->ast, tn), decl, out, cap); // imported alias: use the resolved type
         } else if (dn->kind == NODE_GENERIC_PARAM) {
           const TypeId s = subst_lookup(c, d.module, d.node); // a type param, concrete inside a specialization
-          if (s != TYPE_NONE)
+          if (s != TYPE_NONE) {
             render_type_id(c, s, decl, out, cap);
-          else
+          } else if (c->macro) {
+            char p[64]; // a macro template: the param renders as the macro's C-spelling type parameter
+            render_macro_param(c, d.module, d.node, p, sizeof p);
+            buf_join3(out, cap, p, SEP(decl), decl);
+          } else {
             buf_join3(out, cap, "void", SEP(decl), decl);
+          }
         } else {
           codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: opaque type is not yet supported");
           buf_join3(out, cap, "void", SEP(decl), decl);
@@ -1049,10 +1166,15 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
     }
     case TYPE_GENERIC: {
       const TypeId s = subst_lookup(c, ty->module, ty->as.decl); // concrete inside a specialization
-      if (s != TYPE_NONE)
+      if (s != TYPE_NONE) {
         render_type_id(c, s, decl, out, cap);
-      else
+      } else if (c->macro) {
+        char p[64];
+        render_macro_param(c, ty->module, ty->as.decl, p, sizeof p);
+        buf_join3(out, cap, p, SEP(decl), decl);
+      } else {
         buf_join3(out, cap, "void", SEP(decl), decl);
+      }
       break;
     }
     case TYPE_INSTANCE: { // a generic struct/enum applied -> its specialized C type name (e.g. Box__i32)
@@ -1392,6 +1514,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         char inm[200]; // a generic instance assoc fn -> `Inst__method` (inst_name is already module-qualified)
         inst_name(c, ast_instance(c->ast, ast_type_at(c->ast, base_t)->as.inst), inm, sizeof inm);
         emit_cstr(c, inm);
+        emit_paste(c); // in a macro body `NAME ## __method`
         emit(c, "__");
       } else {
         const DefId td = ast_resolution_def(c->ast, callee->as.member.object); // the Target type (none = module fn)
@@ -1443,6 +1566,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         char inm[200];
         inst_name(c, ast_instance(c->ast, base->as.inst), inm, sizeof inm); // already module-qualified
         emit_cstr(c, inm);
+        emit_paste(c); // in a macro body `NAME ## __method`
         emit(c, "__");
       } else if (base->kind == TYPE_STRUCT || base->kind == TYPE_ENUM) {
         char pfx[64];
@@ -3377,6 +3501,317 @@ static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
   }
 }
 
+// --- generic macros: a cross-module instance over a user type by value (Option<Bar>) cannot be emitted by
+// the generic's own module (it can only forward-declare Bar -> an incomplete by-value field). Instead the
+// generic's module exports `<G>_DECLARE`/`<G>_DEFINE` C macros (parameterized by each type arg's C spelling
+// + mangle token, then the instance NAME), and the type's module invokes them so the instance materializes
+// where its args are complete. The macros also let a plain-C project reuse the type without Super-C. ----
+
+// Non-generic methods of every generic impl on `declId` (in this module), as macro prototypes
+// (define=false) or bodies (define=true), each named `NAME ## __<method>`. Generic methods (map<U>) and
+// multi-return methods cannot be a fixed macro and are skipped (emitted concretely for builtin instances).
+static void emit_generic_macro_methods(Codegen *c, const NodeId declId, const bool define) {
+  const NodeList items = program_items(c);
+  const NodeId *const iids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, iids[i]);
+    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
+      continue;
+    if (ast_resolution(c->ast, n->as.impl_def.target_type) != declId)
+      continue;
+    const NodeList ms = n->as.impl_def.items;
+    const NodeId *const mids = ast_list(c->ast, ms);
+    for (uint32_t j = 0; j < ms.len; j++) {
+      const Node *const mn = ast_at_const(c->ast, mids[j]);
+      if (mn->kind != NODE_FUNCTION || mn->as.function.generics.len || mn->as.function.returns.len > 1)
+        continue;
+      if (define && mn->as.function.body == NODE_NONE)
+        continue;
+      char nm[320];
+      size_t at = buf_append(nm, sizeof nm, 0, "NAME");
+      nm[at++] = CG_PASTE; // NAME ## __<method>
+      at = buf_append(nm, sizeof nm, at, "__");
+      render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
+      emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, define, nm, false);
+    }
+  }
+}
+
+// Emit `#define <STEM>_DECLARE(T, _SCM_T, .., NAME) <typedef+struct+protos>` (define=false) or the matching
+// `_DEFINE` (method bodies). The body is emitted in macro mode (params render as names, the self instance as
+// NAME, instance-name pastes as `##`) then folded onto continued lines by macro_finish.
+static void emit_generic_macro(Codegen *c, const NodeId declId, const bool define) {
+  const Node *const dn = ast_at_const(c->ast, declId);
+  char stem[160];
+  macro_stem(c, c->ast->module, dn->as.aggregate.name, stem, sizeof stem);
+  const NodeList gens = dn->as.aggregate.generics;
+  const NodeId *const gids = ast_list(c->ast, gens);
+  emit(c, "#define %s_%s(", stem, define ? "DEFINE" : "DECLARE");
+  for (uint32_t i = 0; i < gens.len; i++) {
+    char p[64];
+    render_macro_param(c, c->ast->module, gids[i], p, sizeof p);
+    emit(c, "%s, _SCM_%s, ", p, p);
+  }
+  emit(c, "NAME) ");
+  c->macro = true;
+  c->macro_self = declId;
+  c->macro_self_mod = c->ast->module;
+  c->nsubst = 0;
+  const size_t start = c->buf_len;
+  if (!define) {
+    if (dn->kind == NODE_STRUCT) {
+      emit(c, "typedef struct NAME NAME;\n");
+      emit(c, "struct NAME {\n");
+      c->depth++;
+      const NodeList fs = dn->as.aggregate.members;
+      const NodeId *const fids = ast_list(c->ast, fs);
+      for (uint32_t j = 0; j < fs.len; j++) {
+        const Node *const f = ast_at_const(c->ast, fids[j]);
+        char fnm[128], d[256];
+        render_ident(c, name_span(c, f->as.field.name), fnm, sizeof fnm);
+        render_type_node(c, f->as.field.type, fnm, d, sizeof d);
+        emit_indent(c);
+        emit_cstr(c, d);
+        emit(c, ";\n");
+      }
+      c->depth--;
+      emit(c, "};\n");
+    } else if (aggregate_has_payload(c, dn)) {
+      emit(c, "typedef struct NAME NAME;\n");
+      emit(c, "struct NAME {\n");
+      emit_enum_struct_body(c, dn); // uses the shared `<Enum>Tag` (emitted once by emit_generic_macros)
+      emit(c, "};\n");
+    } else {
+      emit(c, "typedef "); // payload-less generic enum: every instance aliases the shared plain C enum
+      emit_local_type_name(c, dn->as.aggregate.name);
+      emit(c, " NAME;\n");
+    }
+  }
+  emit_generic_macro_methods(c, declId, define);
+  c->macro = false;
+  c->macro_self = NODE_NONE;
+  macro_finish(c, start);
+  emit(c, "\n");
+}
+
+// A generic method's macro-mode C name: `NAME ## __<method>__ ## _SCM_<targ0>[ ## __ ## _SCM_<targ1>]`,
+// i.e. the concrete `Inst__method__targ0[__targ1]` with NAME and the targ-mangle params left to paste.
+static void macro_method_name(Codegen *c, const NodeId methodId, char *out, const size_t cap) {
+  const Node *const mn = ast_at_const(c->ast, methodId);
+  size_t at = buf_append(out, cap, 0, "NAME");
+  if (at < cap)
+    out[at++] = CG_PASTE;
+  at = buf_append(out, cap, at, "__");
+  at += render_ident(c, name_span(c, mn->as.function.name), out + at, cap - at);
+  at = buf_append(out, cap, at, "__");
+  const NodeList mg = mn->as.function.generics;
+  const NodeId *const mgids = ast_list(c->ast, mg);
+  for (uint32_t k = 0; k < mg.len; k++) {
+    if (k) {
+      if (at < cap)
+        out[at++] = CG_PASTE;
+      at = buf_append(out, cap, at, "__");
+    }
+    if (at < cap)
+      out[at++] = CG_PASTE;
+    at = buf_append(out, cap, at, "_SCM_");
+    at += render_macro_param(c, c->ast->module, mgids[k], out + at, cap - at);
+  }
+}
+
+// A generic method (`map<U>`): `#define <STEM>_<method>_DECLARE(T,_SCM_T,..,NAME,U,_SCM_U,..) <proto>` and the
+// matching `_DEFINE` (body). The method's own type params become extra macro params after NAME; the home
+// invokes one per recorded (instance, targs) use, so each concrete `Inst__method__targs` materializes there.
+static void emit_generic_method_macro(Codegen *c, const NodeId declId, const NodeId methodId, const bool define) {
+  const Node *const dn = ast_at_const(c->ast, declId);
+  const Node *const mn = ast_at_const(c->ast, methodId);
+  char stem[160], mnm[64];
+  macro_stem(c, c->ast->module, dn->as.aggregate.name, stem, sizeof stem);
+  render_ident(c, name_span(c, mn->as.function.name), mnm, sizeof mnm);
+  emit(c, "#define %s_%s_%s(", stem, mnm, define ? "DEFINE" : "DECLARE");
+  const NodeList gens = dn->as.aggregate.generics;
+  const NodeId *const gids = ast_list(c->ast, gens);
+  for (uint32_t i = 0; i < gens.len; i++) {
+    char p[64];
+    render_macro_param(c, c->ast->module, gids[i], p, sizeof p);
+    emit(c, "%s, _SCM_%s, ", p, p);
+  }
+  emit(c, "NAME");
+  const NodeList mg = mn->as.function.generics;
+  const NodeId *const mgids = ast_list(c->ast, mg);
+  for (uint32_t k = 0; k < mg.len; k++) {
+    char p[64];
+    render_macro_param(c, c->ast->module, mgids[k], p, sizeof p);
+    emit(c, ", %s, _SCM_%s", p, p);
+  }
+  emit(c, ") ");
+  c->macro = true;
+  c->macro_self = declId;
+  c->macro_self_mod = c->ast->module;
+  c->nsubst = 0;
+  const size_t start = c->buf_len;
+  char ov[400];
+  macro_method_name(c, methodId, ov, sizeof ov);
+  emit_function(c, methodId, (DefId){0, NODE_NONE}, false, define, ov, false);
+  c->macro = false;
+  c->macro_self = NODE_NONE;
+  macro_finish(c, start);
+  emit(c, "\n");
+}
+
+// Every generic method of the generic impls on `declId`, as DECLARE + DEFINE macros.
+static void emit_generic_method_macros(Codegen *c, const NodeId declId) {
+  const NodeList items = program_items(c);
+  const NodeId *const iids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, iids[i]);
+    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
+      continue;
+    if (ast_resolution(c->ast, n->as.impl_def.target_type) != declId)
+      continue;
+    const NodeList ms = n->as.impl_def.items;
+    const NodeId *const mids = ast_list(c->ast, ms);
+    for (uint32_t j = 0; j < ms.len; j++) {
+      const Node *const mn = ast_at_const(c->ast, mids[j]);
+      if (mn->kind != NODE_FUNCTION || !mn->as.function.generics.len || mn->as.function.returns.len > 1)
+        continue;
+      emit_generic_method_macro(c, declId, mids[j], false);
+      emit_generic_method_macro(c, declId, mids[j], true);
+    }
+  }
+}
+
+// In this module's header: for each pub generic struct/enum, the shared (instance-independent) enum tag and
+// the DECLARE + DEFINE macros. Both are `#define`s (DEFINE expands only where invoked, in the home .c), so
+// a module that includes this header can invoke either.
+static void emit_generic_macros(Codegen *c) {
+  if (!c->package)
+    return;
+  const NodeList items = program_items(c);
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    if ((n->kind != NODE_STRUCT && n->kind != NODE_ENUM) || !n->as.aggregate.generics.len ||
+        !n->as.aggregate.is_public)
+      continue;
+    // A self-contained translation unit (REPL / inline tests) only needs the macros for generics actually
+    // re-homed over a user type; the multi-file build emits every pub generic's macros for plain-C reuse.
+    if (!c->multifile && !package_generic_needs_macro(c->package, c->ast->module, ids[i]))
+      continue;
+    if (n->kind == NODE_ENUM) { // the tag is shared across instances; macro structs name it
+      if (aggregate_has_payload(c, n))
+        emit_enum_tag_decl(c, ids[i], n);
+      else
+        emit_enum_full(c, n, ids[i]);
+    }
+    emit_generic_macro(c, ids[i], false);
+    emit_generic_macro(c, ids[i], true);
+    emit_generic_method_macros(c, ids[i]); // map<U> etc.: one DECLARE/DEFINE per generic method
+  }
+}
+
+// True if instance `it` (from c->ast->instances) is a concrete instantiation whose home is THIS module but
+// whose generic is declared elsewhere -- i.e. one to emit here via the generic's macros.
+static bool inst_rehomed_here(Codegen *c, const TyInstance *const it) {
+  if (!c->package || it->module == c->ast->module)
+    return false;
+  for (uint8_t k = 0; k < it->n; k++)
+    if (!type_is_concrete(c, it->args[k]))
+      return false;
+  return package_instance_home(c->package, c->ast, it) == c->ast->module;
+}
+
+// Forward typedef for every instance re-homed here, so the DECLARE invocations' prototypes can name them
+// in any order (a by-value field still needs the full definition, emitted by DECLARE below).
+static void emit_rehomed_forwards(Codegen *c) {
+  if (!c->package)
+    return;
+  for (size_t i = 0; i < c->ast->instances.len; i++) {
+    const TyInstance it = c->ast->instances.data[i];
+    if (!inst_rehomed_here(c, &it))
+      continue;
+    const Node *const dn = ast_at_const(cg_mod_ast(c, it.module), it.decl);
+    char inm[200];
+    inst_name(c, &it, inm, sizeof inm);
+    if (dn->kind == NODE_STRUCT || aggregate_has_payload_in(c, it.module, dn)) {
+      emit(c, "typedef struct %s %s;\n", inm, inm);
+    } else { // payload-less enum instance: alias the shared plain enum (from the generic's header)
+      char en[160];
+      render_qualified(c, it.module, dn->as.aggregate.name, en, sizeof en);
+      emit(c, "typedef %s %s;\n", en, inm);
+    }
+  }
+}
+
+// Invoke `<G>_DECLARE(...)` (define=false) / `<G>_DEFINE(...)` for every instance re-homed here, passing each
+// arg's C spelling + mangle token and the instance's mangled name.
+static void emit_instance_macro_invocations(Codegen *c, const bool define) {
+  if (!c->package)
+    return;
+  for (size_t i = 0; i < c->ast->instances.len; i++) {
+    const TyInstance it = c->ast->instances.data[i];
+    if (!inst_rehomed_here(c, &it))
+      continue;
+    const Node *const dn = ast_at_const(cg_mod_ast(c, it.module), it.decl);
+    char stem[160];
+    macro_stem(c, it.module, dn->as.aggregate.name, stem, sizeof stem);
+    emit(c, "%s_%s(", stem, define ? "DEFINE" : "DECLARE");
+    for (uint8_t k = 0; k < it.n; k++) {
+      char csp[256], mng[176];
+      render_type_id(c, it.args[k], "", csp, sizeof csp);
+      mangle_type(c, it.args[k], mng, sizeof mng);
+      emit(c, "%s, %s, ", csp, mng);
+    }
+    char inm[200];
+    inst_name(c, &it, inm, sizeof inm);
+    emit(c, "%s)\n", inm);
+  }
+}
+
+// Invoke `<STEM>_<method>_DECLARE/DEFINE(...)` for every recorded generic-method use (map<U> etc.) whose
+// receiver instance is re-homed here -- one per (instance, method, targs) tuple. The method decl lives in
+// the generic's owner module (reached via the instance's module), so its name/params read from there.
+static void emit_method_macro_invocations(Codegen *c, const bool define) {
+  if (!c->package)
+    return;
+  for (size_t i = 0; i < c->ast->method_insts.len; i++) {
+    const MethodInst mi = c->ast->method_insts.data[i];
+    const Ty *const ity = ast_type_at(c->ast, mi.instance);
+    if (ity->kind != TYPE_INSTANCE)
+      continue;
+    const TyInstance recv = *ast_instance(c->ast, ity->as.inst);
+    if (!inst_rehomed_here(c, &recv))
+      continue;
+    bool ok = true;
+    for (uint8_t k = 0; k < mi.n; k++)
+      ok &= type_is_concrete(c, mi.targs[k]);
+    if (!ok)
+      continue;
+    const Ast *const oa = cg_mod_ast(c, recv.module);
+    const Node *const mn = ast_at_const(oa, mi.method);
+    char stem[160], mnm[64];
+    macro_stem(c, recv.module, ast_at_const(oa, recv.decl)->as.aggregate.name, stem, sizeof stem);
+    render_ident_src(cg_mod_src(c, recv.module), name_span_in(c, recv.module, mn->as.function.name), mnm, sizeof mnm);
+    emit(c, "%s_%s_%s(", stem, mnm, define ? "DEFINE" : "DECLARE");
+    for (uint8_t k = 0; k < recv.n; k++) {
+      char csp[256], mng[176];
+      render_type_id(c, recv.args[k], "", csp, sizeof csp);
+      mangle_type(c, recv.args[k], mng, sizeof mng);
+      emit(c, "%s, %s, ", csp, mng);
+    }
+    char inm[200];
+    inst_name(c, &recv, inm, sizeof inm);
+    emit(c, "%s", inm);
+    for (uint8_t k = 0; k < mi.n; k++) {
+      char csp[256], mng[176];
+      render_type_id(c, mi.targs[k], "", csp, sizeof csp);
+      mangle_type(c, mi.targs[k], mng, sizeof mng);
+      emit(c, ", %s, %s", csp, mng);
+    }
+    emit(c, ")\n");
+  }
+}
+
 // Phase 1: forward typedefs so any type can name any struct/payload-enum regardless of order.
 // Payload-less enums are self-contained, so they are emitted in full here.
 static void phase_forward(Codegen *c) {
@@ -3409,6 +3844,7 @@ static void phase_forward(Codegen *c) {
     }
   }
   emit_aggregate_specializations(c, false); // forward typedefs for generic struct instantiations
+  emit_rehomed_forwards(c);                  // forward typedefs for cross-module instances emitted here via macros
 }
 
 // Phase 2: full struct / payload-enum definitions (source order; pointer cycles use phase 1).
@@ -3511,6 +3947,9 @@ static void phase_types(Codegen *c) {
   }
   free(state);
   emit_aggregate_specializations(c, true); // full bodies for generic struct instantiations
+  emit_generic_macros(c);                  // this module's generics as <G>_DECLARE/<G>_DEFINE macros
+  emit_instance_macro_invocations(c, false); // DECLARE cross-module instances homed here (after their args)
+  emit_method_macro_invocations(c, false);   // DECLARE their generic-method (map<U>) specializations
 }
 
 // Multi-return structs, after all type definitions (they reference parameter/return types).
@@ -3618,6 +4057,8 @@ static void phase_bodies(Codegen *c) {
       emit_toplevel_const(c, ids[i]);
   }
 
+  emit_instance_macro_invocations(c, true); // DEFINE bodies of cross-module instances homed here
+  emit_method_macro_invocations(c, true);   // DEFINE their generic-method (map<U>) specializations
   emit_specializations(c, true);            // concrete generic free-function instantiations
   emit_method_specializations(c, PROTO_ALL, true); // concrete generic method instantiations
   emit_closures(c, true);                    // hoisted closure / anonymous-fn bodies
@@ -3729,6 +4170,23 @@ static void emit_referenced_includes(Codegen *c) {
     if ((t.kind == TYPE_STRUCT || t.kind == TYPE_ENUM || t.kind == TYPE_FUNCTION || t.kind == TYPE_GENERIC) &&
         t.module != cur && t.module < nmod)
       want[t.module] = true;
+  }
+  // A generic instance re-homed over a user type lives in that type's module and is built by the generic's
+  // macros: pull the generic's header (the macros + shared tag) and the home's header (the instance itself).
+  for (size_t i = 0; i < c->ast->instances.len; i++) {
+    const TyInstance *const it = &c->ast->instances.data[i];
+    bool concrete = it->module < nmod || it->module == cur;
+    for (uint8_t k = 0; k < it->n && concrete; k++)
+      concrete = type_is_concrete(c, it->args[k]);
+    if (!concrete)
+      continue;
+    const ModuleId home = package_instance_home(c->package, c->ast, it);
+    if (home == it->module)
+      continue; // builtin/prelude args -> owner-emitted, already covered by ordinary refs
+    if (it->module != cur && it->module < nmod)
+      want[it->module] = true; // the generic's macros + shared tag
+    if (home != cur && home < nmod)
+      want[home] = true; // where the instance is materialized
   }
   for (size_t m = 0; m < nmod; m++)
     if (want[m])

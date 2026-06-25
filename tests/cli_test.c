@@ -140,6 +140,50 @@ static void test_module_features(void) {
   CHECK(run_cmd(crun, NULL, 0) == 115, "const + alias + qualified construct + extension method run (12+3+100)");
 }
 
+// A7: a generic defined in one module, instantiated over a user struct held BY VALUE in another. The
+// generic's module cannot see the user type's layout, so the owner-emits model would produce an
+// incomplete-type field; instead the instance is re-homed to the user module via the generic's
+// DECLARE/DEFINE macros. Exercises the re-homed struct, a non-generic method (unwrap_or), and a
+// cross-pool generic method (map<U>). The -Werror compile is itself the placement proof -- an instance
+// emitted in the owner with an incomplete `Bar` would fail to compile.
+static void test_cross_module_generic_by_value(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/genbv", DIR);
+  mkfile(root, "opt/opt.spc",
+         "pub enum Opt<T> { Some(T), None }\n"
+         "extend<T> Opt<T> {\n"
+         "  pub fn unwrap_or(self: &Opt<T>, d: T) T { return switch self { Some(v) => v, None => d, }; }\n"
+         "  pub fn map<U>(self: &Opt<T>, f: fn(T) U) Opt<U> {\n"
+         "    return switch self { Some(v) => Opt::<U>::Some(f(v)), None => Opt::<U>::None, }; }\n"
+         "}\n");
+  mkfile(root, "genbv.spc",
+         "import opt::opt;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "struct Bar { pub x: i32 }\n"
+         "fn bx(b: Bar) i32 { return b.x; }\n"
+         "fn main() i32 {\n"
+         "  let o = opt::opt::Opt::<Bar>::Some(Bar { x: 30 });\n"
+         "  let a = o.unwrap_or(Bar { x: 0 }).x;\n" // 30 -- re-homed struct + non-generic method
+         "  let m = o.map(bx).unwrap_or(0);\n"      // 30 -- cross-pool generic method map<i32>
+         "  exit(a + m); }\n");                     // 60
+  snprintf(spc, sizeof spc, "%s/genbv.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module generic over a user type compiles: %s", buf);
+
+  // The instance is materialized in the USER module (its DECLARE macro is invoked in genbv's header),
+  // not in the generic's owner module -- that is the whole point of the placement fix.
+  char gcmd[8400];
+  snprintf(gcmd, sizeof gcmd, "grep -q '_DECLARE(' '%s/build/genbv.h'", root);
+  CHECK(run_cmd(gcmd, NULL, 0) == 0, "the generic instance is emitted in the user module's header");
+
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/genbv.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "cross-module generic-by-value C compiles -Werror (no incomplete type): %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 60, "re-homed instance method + cross-pool map<U> run (30 + 30)");
+}
+
 // Import forms + mangling: an alias import (`s::tag`), a glob import (bare `tag`), two modules with a
 // same-named public function (module mangling must keep them distinct), and a module named like a C
 // stdlib header (`string`) -- the relative-include build must not shadow <string.h>. Built with -Werror.
@@ -259,6 +303,7 @@ int main(void) {
   test_compiles_file();
   test_cross_module_enum();
   test_module_features();
+  test_cross_module_generic_by_value();
   test_module_imports();
   test_module_errors();
   test_extensionless_appends();
