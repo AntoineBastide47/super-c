@@ -106,7 +106,7 @@ static Ast *build_ast(const Source *source, const Token_Vec *tokens) {
 // One resolution pass over the (reused) AST. Unresolved-name diagnostics from a not-yet
 // self-contained corpus are expected and ignored: this measures throughput, not validity.
 static ResolveResult resolve_pass(Ast *ast, const Source *source) {
-  Resolver *resolver = resolver_new(ast, source->data, source->len);
+  Resolver *resolver = resolver_new(ast, source->data, source->len, NULL);
   resolver_resolve(resolver);
   Ast *out = resolver_take_ast(resolver); // reclaim ownership so the AST survives the pass
   resolver_free(&resolver);

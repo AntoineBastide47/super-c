@@ -102,7 +102,7 @@ static Ast *build_resolved_ast(const Source *source, const Token_Vec *tokens) {
   Ast *ast = parser_take_ast(parser);
   parser_free(&parser);
 
-  Resolver *resolver = resolver_new(ast, source->data, source->len);
+  Resolver *resolver = resolver_new(ast, source->data, source->len, NULL);
   resolver_resolve(resolver); // corpus diagnostics are expected; the type checker degrades gracefully
   ast = resolver_take_ast(resolver);
   resolver_free(&resolver);
@@ -112,7 +112,7 @@ static Ast *build_resolved_ast(const Source *source, const Token_Vec *tokens) {
 // One type-checking pass over the (reused) resolved AST. Corpus diagnostics are expected and
 // ignored: this measures throughput, not validity.
 static CheckResult check_pass(Ast *ast, const Source *source) {
-  TypeChecker *tc = typechecker_new(ast, source->data, source->len);
+  TypeChecker *tc = typechecker_new(ast, source->data, source->len, NULL);
   typechecker_check(tc);
   Ast *out = typechecker_take_ast(tc); // reclaim ownership so the AST survives the pass
   typechecker_free(&tc);

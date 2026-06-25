@@ -357,6 +357,13 @@ static void test_generics(void) {
   expect_contains("generic specialization with substituted return", ID, "int32_t id__i32(");
   expect_contains("second instantiation", ID, "id__bool(");
   expect_absent("no generic template emitted", ID, " id(");
+  // A payload-bearing generic enum's shared discriminant is emitted once AND wrapped in an include guard,
+  // so even past the dedup table's bound a second emission can never be a C redefinition.
+  const char *const ENUM = "enum Opt<T> { Some(T), None }\n"
+                           "fn main() i32 { let a: Opt<i32> = Opt::<i32>::Some(1); let b: Opt<bool> = Opt::<bool>::None;\n"
+                           "  return switch a { Some(v) => v, None => 0, } + switch b { Some(_) => 1, None => 0, }; }\n";
+  expect_contains("generic enum tag is include-guarded", ENUM, "SUPER_ENUMTAG_Opt");
+  expect_contains("generic enum tag emitted once", ENUM, "} OptTag;");
 }
 
 static void test_literals(void) {

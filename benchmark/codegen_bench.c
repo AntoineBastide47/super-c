@@ -104,12 +104,12 @@ static Ast *build_checked_ast(const Source *source, const Token_Vec *tokens) {
   Ast *ast = parser_take_ast(parser);
   parser_free(&parser);
 
-  Resolver *resolver = resolver_new(ast, source->data, source->len);
+  Resolver *resolver = resolver_new(ast, source->data, source->len, NULL);
   resolver_resolve(resolver);
   ast = resolver_take_ast(resolver);
   resolver_free(&resolver);
 
-  TypeChecker *tc = typechecker_new(ast, source->data, source->len);
+  TypeChecker *tc = typechecker_new(ast, source->data, source->len, NULL);
   typechecker_check(tc);
   ast = typechecker_take_ast(tc);
   typechecker_free(&tc);
@@ -119,7 +119,7 @@ static Ast *build_checked_ast(const Source *source, const Token_Vec *tokens) {
 // One codegen pass over the (reused) checked AST, emitting to a sink. Ownership is reclaimed so
 // the AST survives the pass.
 static CodegenResult codegen_pass(Ast *ast, const Source *source, FILE *sink) {
-  Codegen *codegen = codegen_new(ast, source->data, source->len);
+  Codegen *codegen = codegen_new(ast, source->data, source->len, NULL);
   codegen_emit(codegen, sink);
   Ast *out = codegen_take_ast(codegen);
   codegen_free(&codegen);

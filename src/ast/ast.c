@@ -38,6 +38,7 @@ Ast *ast_new(const size_t token_count) {
   a->type_pool = Ty_Vec_init();
   a->types = U32_Vec_init();
   a->mono = MonoUse_Vec_init();
+  a->mono_at = U32_Vec_init();
   a->instances = TyInstance_Vec_init();
   a->method_insts = MethodInst_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
@@ -57,6 +58,7 @@ void ast_free(Ast **a) {
   TyMap_deinit(&(*a)->type_index);
   VEC_DEINIT((*a)->types);
   VEC_DEINIT((*a)->mono);
+  VEC_DEINIT((*a)->mono_at);
   VEC_DEINIT((*a)->instances);
   VEC_DEINIT((*a)->method_insts);
   free(*a);
@@ -170,13 +172,20 @@ void ast_set_type_args(Ast *a, const NodeId node, const TypeId *const args, cons
   for (uint8_t i = 0; i < u.n; i++)
     u.args[i] = args[i];
   MonoUse_Vec_push(&a->mono, u);
+  if (a->mono_at.len <= node) { // grow the node->mono index to cover this (and the final) node count, zeroed
+    const size_t old = a->mono_at.len, want = a->nodes.len > (size_t)node + 1 ? a->nodes.len : (size_t)node + 1;
+    U32_Vec_reserve(&a->mono_at, want);
+    memset(a->mono_at.data + old, 0, (want - old) * sizeof *a->mono_at.data);
+    a->mono_at.len = want;
+  }
+  a->mono_at.data[node] = (uint32_t)a->mono.len; // 1-based; a later record for `node` overwrites -> latest wins
 }
 
 const MonoUse *ast_type_args(const Ast *a, const NodeId node) {
-  for (size_t i = a->mono.len; i-- > 0;) // latest record wins
-    if (a->mono.data[i].node == node)
-      return &a->mono.data[i];
-  return NULL;
+  if (node >= a->mono_at.len)
+    return NULL;
+  const uint32_t idx = a->mono_at.data[node];
+  return idx ? &a->mono.data[idx - 1] : NULL;
 }
 
 NodeId ast_add(Ast *a, const Node node) {
