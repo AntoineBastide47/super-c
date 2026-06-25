@@ -1,240 +1,301 @@
 # Super-C
 
-Super-C is an experimental C-like systems programming language that compiles to C.
+Super-C is a small, statically-typed systems language that **compiles to readable C**. It pairs a
+modern, frontend containing features I liked from multiple different programming languages I have encountered (generics, enums with payloads, pattern matching, closures, modules, )
+with C's portability and performance model — the compiler lowers everything to ordinary C99/C11 that Clang, GCC, or MSVC then turns into a native binary.
 
-The project aims to provide a modern frontend for low-level programming while keeping the portability and performance model of C. Super-C is not a C dialect and does not attempt to preserve ISO C syntax exactly. It is a new language that uses C as its compilation target.
+Super-C is not a C dialect. It is its own language that uses C as a compilation target.
 
-Super-C source code will be parsed by a custom compiler, checked by the frontend, lowered into portable C code, and then compiled by an existing C compiler such as Clang, GCC, or MSVC.
-
-## Purpose
-
-Super-C exists to explore a safer and more expressive C-like language design without abandoning the C ecosystem.
-
-The compiler will eventually translate Super-C source files into readable C code. The generated C code can then be compiled by standard C toolchains to produce native binaries.
-
-The intended compilation pipeline is:
+## Pipeline
 
 ```text
-Super-C source
-    -> lexer
-    -> parser
-    -> semantic analysis
-    -> intermediate lowering
-    -> C code generation
-    -> Clang, GCC, or MSVC
+Super-C source (.spc)
+    -> lexer        (UTF-8, packed tokens)
+    -> parser       (LL(1)-friendly, flat AST arena)
+    -> resolver     (name binding, scopes, modules)
+    -> typechecker  (type inference, generics, monomorphization)
+    -> codegen      (readable C: build/ tree of .h/.c)
+    -> cc / clang / gcc
     -> native binary
 ```
 
-## Example Syntax
+## Quick start
 
-The syntax is still experimental, but Super-C is intended to look familiar to C programmers while avoiding some of C's parsing and safety problems.
-
-Example variable declarations:
-
-```superc
-let x: int = 10;
-let y = 20;
-let mut count: int = 0;
+```sh
+make                      # build the compiler -> ./super-c
+./super-c path/to/app.spc # emit C into  path/to/build/
+cc path/to/build/**/*.c -o app   # compile the generated C (no -I needed; includes are relative)
+./app
 ```
 
-Example function:
+Run with no arguments for a REPL that compiles one line at a time:
+
+```sh
+./super-c
+> fn main() i32 { return 21 + 21; }
+```
+
+The `std/` prelude (`String`, `str`, `Box`, `Option`, `Result`, `Vector`, slices) is auto-imported, so
+those types are in scope without any `import`.
+
+## Language tour
+
+### Bindings and functions
 
 ```superc
-fn add(a: int, b: int) int {
+fn add(a: i32, b: i32) i32 {
     return a + b;
 }
-```
 
-Example resource cleanup with `defer`:
-
-```superc
 fn main() i32 {
-    let file = File.open("data.txt");
-
-    defer file.close();
-
-    // Do stuff with the file
-    ...
-
-    return 0;
+    let x: i32 = 10;     // explicit type
+    let y = add(x, 20);  // inferred
+    let mut sum = 0;     // mutable binding
+    for i in 0..=y { sum = sum + i; }
+    return sum % 256;
 }
 ```
 
-Example pattern matching:
+Builtin scalar types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 usize`, `f32`, `f64`,
+`void`. (`main` must be `fn main() i32`.)
+
+### Multiple return values
 
 ```superc
-fn classify(c: u8) int {
-    return match c {
-        '0'..='9' => 1,
-        'a'..='z' => 2,
-        'A'..='Z' => 3,
-        _ => 0,
+fn divmod(a: i32, b: i32) (i32, i32) {
+    return a / b, a % b;
+}
+
+fn main() i32 {
+    let (q, r) = divmod(17, 5);   // tuple destructuring
+    return q * 10 + r;            // 32
+}
+```
+
+### Structs, methods, and visibility
+
+```superc
+struct Counter { pub n: i32 }    // fields are private by default; `pub` exposes them
+
+extend Counter {
+    fn get(self: &Counter) i32 { return self.n; }
+    fn bump(self: &mut Counter) { self.n = self.n + 1; }
+}
+
+fn main() i32 {
+    let mut c = Counter { n: 0 };
+    c.bump();
+    c.bump();
+    return c.get();   // 2
+}
+```
+
+### Enums and pattern matching
+
+```superc
+enum Shape {
+    Circle(i32),
+    Rect { w: i32, h: i32 },
+    Unit,
+}
+
+fn area(s: Shape) i32 {
+    return switch s {
+        Circle(r)     => r * r * 3,
+        Rect { w, h } => w * h,
+        Unit          => 0,
+    };
+}
+
+fn classify(n: i32) i32 {
+    return switch n {
+        0          => 0,
+        1..=9      => 1,
+        n if n < 0 => -1,   // guards can use the bound value
+        _          => 2,
     };
 }
 ```
 
-Example trait-style abstraction:
+`switch` is exhaustive and usable as an expression. Payload-less enums lower to plain C `enum`s;
+payload-bearing ones lower to tagged unions.
+
+### Generics (monomorphized)
 
 ```superc
-trait Writer {
-    fn write(self: *mut Self, bytes: []u8) usize;
-}
+fn id<T>(x: T) T { return x; }
 
-fn write_all<T: Writer>(writer: *mut T, data: []u8) {
-    writer.write(data);
-}
-```
+struct Pair<A, B> { pub a: A, pub b: B }
 
-Example generated C shape:
-
-```c
-int add(int a, int b) {
-    return a + b;
+fn main() i32 {
+    let p = Pair::<i32, bool> { a: id(41), b: true };
+    return p.a + 1;   // 42
 }
 ```
 
-Super-C code is intended to lower into ordinary C constructs such as functions, structs, enums, unions, explicit cleanup calls, and direct function calls.
+Generic functions, structs, enums, and methods (including methods with their own type parameters, e.g.
+`map<U>`) are specialized per instantiation, across module boundaries.
 
-## Design Direction
-
-Super-C is designed around a grammar that is easier to parse than C.
-
-Declarations use explicit keywords such as `let`, `fn`, `struct`, `enum`, `trait`, and `impl`. This avoids C-style ambiguity where the parser needs semantic knowledge to know whether a statement is a declaration or an expression.
-
-For example, Super-C prefers:
+### Closures and function pointers
 
 ```superc
-let value: int = 42;
+fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }
+
+fn main() i32 {
+    let g = |x: i32| x * 2;                       // compact closure
+    let h = fn(x: i32) i32 { return x + 1; };     // anonymous function
+    return apply(g, 20) + apply(h, 0);            // 41
+}
 ```
 
-instead of:
+Closures are non-capturing (Stage 1): they lower to hoisted static C functions and plain function
+pointers — no hidden environment or allocation.
 
-```c
-int value = 42;
+### Memory: pointers, references, `new`
+
+```superc
+fn main() i32 {
+    let p = new i32(41);     // heap-allocated *mut i32
+    *p = *p + 1;
+    let r: &i32 = p;         // reference (&T -> const T*, &mut T -> T*)
+    return *r;               // 42
+}
 ```
 
-The goal is to keep the language simple to parse, simple to lower, and compatible with efficient C output.
+`*const T` / `*mut T` are raw pointers; `&T` / `&mut T` are references. `new T(expr)` and `new T { .. }`
+allocate; `sizeof(T)` gives the byte size.
 
-## C Interoperability
+### Slices and arrays
 
-Super-C is intended to interoperate with existing C libraries through FFI bindings.
+```superc
+fn sum(xs: []i32) i32 {              // []T is a (ptr, len) fat-pointer view
+    let mut t = 0;
+    for x in xs { t = t + x; }
+    return t;
+}
 
-C APIs can be exposed through raw external declarations:
+fn main() i32 {
+    let a: [i32; 4] = [10, 20, 30, 40];
+    return a[0] + a[3];
+}
+```
+
+### The standard prelude
+
+```superc
+fn main() i32 {
+    let mut v = Vector::<i32>::new();
+    v.push(1); v.push(2); v.push(3);
+
+    let mut s = String::from_str("hi");
+    s.push_str("!");
+    s.println();
+    s.drop();
+
+    let o = Option::<i32>::some(v.len() as i32);
+    return o.unwrap_or(0);   // 3
+}
+```
+
+`Box<T>`, `Option<T>`, `Result<T, E>`, `Vector<T>`, `String`, and `str` ship in `std/` and are
+auto-imported.
+
+### Modules
+
+A project is a tree of `.spc` files. `import` pulls another module in; `pub` controls what crosses the
+boundary.
+
+```superc
+// geom.spc
+pub struct Point { pub x: i32, pub y: i32 }
+pub fn manhattan(p: Point) i32 { return p.x + p.y; }
+```
+
+```superc
+// app.spc
+import geom;
+
+fn main() i32 {
+    let p = geom::Point { x: 3, y: 4 };
+    return geom::manhattan(p);   // 7
+}
+```
+
+`import P as Q;` aliases a module and `import P as *;` brings its public items into scope unqualified.
+
+### C interop (FFI)
 
 ```superc
 extern "C" {
     type CFile;
-
     fn fopen(path: *const char, mode: *const char) *mut CFile;
-    fn fclose(file: *mut CFile) int;
+    fn fclose(file: *mut CFile) i32;
 }
 ```
 
-Raw bindings are expected to remain low-level and unsafe. Higher-level Super-C libraries can wrap them with safer abstractions.
+`extern "C"` declarations bind directly to C symbols with no wrapper or mangling, so existing C
+libraries can be used as-is.
 
-Super-C should not require rewriting entire C libraries. Existing C APIs can remain in C, while Super-C provides safer wrappers where useful.
+## Generated output
 
-## Performance Model
+`./super-c app.spc` writes a `build/` tree next to the source that mirrors the module paths:
 
-Super-C is intended to compile to efficient C.
+```text
+build/
+  super_rt.h        # shared runtime (C standard-library includes)
+  app.h  app.c      # one .h/.c per module
+  __std/            # the prelude modules
+    string.h string.c  option.h option.c  ...
+```
 
-The language design avoids any extra garbage collection, heap allocation, dynamic dispatch, and runtime reflection. Most high-level features are intended to lower into explicit C code.
+Includes are relative, so the whole tree builds with `cc build/**/*.c` and no `-I` flags. Symbols are
+module-mangled only when more than one user module is present, so single-file programs emit plain C
+names. The output is meant to be read.
 
-The generated C should be simple enough for Clang, GCC, or MSVC to optimize effectively.
+## Project layout
 
-## Future Features
+```text
+src/
+  lexer/        token scanning
+  ast/          parser + flat AST arena
+  resolver/     name resolution and scopes
+  typechecker/  type inference, generics, monomorphization
+  codegen/      C emission
+  module/       package loader / imports / prelude
+  types/        generic vector + hashmap containers
+  utils/        diagnostics (rustc-style), attributes
+std/            the auto-imported prelude
+tests/          unit + compile-and-run tests
+benchmark/      per-stage microbenchmarks
+examples/       sample programs
+```
 
-Super-C has not been implemented yet. The following features are planned or under consideration.
+## Building and testing
 
-### Core Language
+```sh
+make             # dev build (ASan/UBSan) -> ./super-c
+make release     # optimized build (-O3 -flto)
+make test        # run the full test suite
+make bench       # run the benchmarks
+```
 
-* C-like syntax
-* LL(1)-friendly grammar
-* explicit declaration keywords
-* local variable declarations with optional type annotations
-* type inference for local variables
-* mutable and immutable bindings
-* structs
-* enums
-* tagged enum variants with payloads
-* functions
-* blocks and lexical scopes
-* pointers and references
-* slices
-* explicit casts
-* module-level items
+## Status and roadmap
 
-### Resource Management
+Implemented and working: the full lexer→parser→resolver→typechecker→codegen pipeline, type inference,
+structs/methods/visibility, enums with payloads and pattern matching, monomorphized generics
+(functions, structs, enums, methods — same- and cross-module), non-capturing closures and function
+pointers, references/pointers/`new`, slices and arrays, multi-return + tuple destructuring, the module
+system with an auto-imported `std` prelude, `extern "C"` FFI, and `sizeof`.
 
-* RAII-style cleanup
-* destructors through a `Drop` trait
-* deterministic cleanup at scope exit
-* `defer` statements
-* move semantics
-* drop analysis
-* prevention of double-drops after moves
+Planned / not yet implemented:
 
-### Error Handling
-
-* `Result<T, E>` style value-based errors
-* `Option<T>` style optional values
-* pattern matching over result and option types
-* possible `?` operator for early error returns
-
-### Traits and Generics
-
-* Rust-like traits
-* trait implementations
-* bounded generics
-* static dispatch by default
-* monomorphized generic functions
-* explicit dynamic dispatch as a later feature
-
-### Pattern Matching
-
-* `match` expressions
-* exhaustive matching
-* wildcard patterns
-* enum variant patterns
-* scalar literal patterns
-* scalar range patterns such as `'0'..='9'`
-* guarded match arms
-
-### Operators
-
-* overloading of existing operators
-* trait-based operator resolution
-* fixed precedence table
-* possible custom two-character operators as a later feature
-* no arbitrary redefinition of core syntax such as assignment, member access, or short-circuit logic
-
-### C Backend
-
-* C code generation
-* readable generated C
-* `#line` directives for diagnostics
-* integration with Clang, GCC, and MSVC
-* generated headers
-* generated raw C bindings
-* optional safe wrappers around C APIs
-
-### Compiler Internals
-
-* lexer
-* LL(1)-style parser
-* AST
-* name resolution
-* type checking
-* ownership and move analysis
-* trait resolution
-* generic monomorphization
-* intermediate representation
-* language-level optimization before C emission
-* C AST or C IR
-* C code emitter
-
-## Project Status
-
-Super-C is currently a language design and compiler planning project.
-
-The first milestone is to define the syntax, semantics, compiler architecture, and C lowering model. Implementation will begin after the core language specification is stable enough to support a minimal compiler frontend.
+* interfaces — `interface` definitions, generic bounds (`<T: Writer>`), and method dispatch. The
+  `interface` / `extend T as Trait` syntax parses today, but the bound is not checked and `as Trait`
+  is currently decorative (the methods just become inherent methods on the type).
+* `defer` and RAII-style deterministic cleanup (a `Drop` trait)
+* move/borrow analysis and double-drop prevention
+* capturing closures
+* the `?` early-return operator
+* operator overloading via traits
+* dynamic dispatch / trait objects — **TBD / undecided**: heterogeneous collections + open extension
+  across modules. The case for and against is written up in [todos/dyn_tbd.md](todos/dyn_tbd.md).

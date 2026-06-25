@@ -113,6 +113,7 @@ typedef struct {
         } program;
         struct {
             Span text;
+            bool is_mutable; // transient: set on a parameter name preceded by `mut`, read when building NODE_PARAMETER
         } name;
         struct {
             Span raw;
@@ -130,6 +131,7 @@ typedef struct {
         } function;
         struct {
             NodeId name, type;
+            bool is_mutable; // `fn f(mut p: T)` -- a by-value parameter assignable in the body (emitted non-const)
         } parameter;
         struct {
             NodeId name;

@@ -13,8 +13,11 @@ struct TypeChecker {
     NodeList current_returns; // the enclosing function's `returns` list, for NODE_RETURN checking
     NodeId current_self;      // the struct decl whose `extend` we are inside (NODE_NONE at top level)
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
+    unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
     ERRORS_VARIABLES;
 };
+
+#define TYPE_ALIAS_MAX_DEPTH 64
 
 // The Ast / source backing module `m`: the current module uses the in-flight Ast directly; an imported
 // module is reached through the Package. With no package, everything is the current module.
@@ -292,6 +295,14 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   // A named function (or another fn pointer) fits a `fn(..) ..` slot when signatures match structurally.
   if (ex->kind == TYPE_FUNCTION && ac->kind == TYPE_FUNCTION)
     return fn_compatible(t, ex, ac);
+  // Arrays compare by element: equal elements, or fn-typed elements that match structurally (a function
+  // type is keyed on its decl, so `[fn(i32)i32]` from an annotation and from `[a, b]` are distinct TypeIds).
+  if (ex->kind == TYPE_ARRAY && ac->kind == TYPE_ARRAY) {
+    if (ex->as.elem == ac->as.elem)
+      return true;
+    const Ty *const ee = ast_type_at(t->ast, ex->as.elem), *const ae = ast_type_at(t->ast, ac->as.elem);
+    return ee->kind == TYPE_FUNCTION && ae->kind == TYPE_FUNCTION && fn_compatible(t, ee, ae);
+  }
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
     v = ast_at_const(t->ast, v->as.unary.operand);
@@ -440,8 +451,16 @@ static TypeId named_type_of(TypeChecker *t, const ModuleId m, const NodeId decl)
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_STRUCT, .module = m, .as.decl = decl});
     case NODE_ENUM:
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_ENUM, .module = m, .as.decl = decl});
-    case NODE_TYPE_ALIAS:
-      return lower_type_in(t, m, d->as.type_alias.type); // aliases are transparent
+    case NODE_TYPE_ALIAS: { // aliases are transparent; bound expansion so `type T = T;` (or A=B;B=A) diagnoses
+      if (t->alias_depth >= TYPE_ALIAS_MAX_DEPTH) {
+        typechecker_errorf(t, d->span.start, d->span.end - d->span.start, "type alias is cyclic");
+        return TYPE_ERROR;
+      }
+      t->alias_depth++;
+      const TypeId aliased = lower_type_in(t, m, d->as.type_alias.type);
+      t->alias_depth--;
+      return aliased;
+    }
     case NODE_GENERIC_PARAM:
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_GENERIC, .module = m, .as.decl = decl});
     default: // NODE_TRAIT used as a type, Self->impl, etc. — opaque for now
@@ -760,6 +779,8 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
       const Node *const dn = ast_at_const(t->ast, d);
       if (dn->kind == NODE_LET)
         return dn->as.let_stmt.is_mutable;
+      if (dn->kind == NODE_PARAMETER) // `fn f(mut p: T)` makes the by-value parameter assignable
+        return dn->as.parameter.is_mutable;
       if (dn->kind == NODE_IDENTIFIER) { // a tuple-let element: its resolution back-points to the let
         const NodeId let = ast_resolution(t->ast, d);
         return let != NODE_NONE && ast_at_const(t->ast, let)->kind == NODE_LET &&
@@ -1219,14 +1240,56 @@ static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
   int gn = 0;
   if (!aggregate_of(t, sty, &smod, &decl, gp, ga, &gn))
     decl = NODE_NONE;
+  // `Enum::Variant { f: .. }` constructs a struct-payload variant: its fields live in the variant's
+  // payload (set as the type path's last segment's resolution), and the value's type is the enum.
+  NodeId variant = NODE_NONE;
+  ModuleId vmod = smod;
+  const NodeId stn = n->as.struct_initializer.type;
+  if (ast_at_const(t->ast, stn)->kind == NODE_TYPE_PATH) {
+    const NodeList parts = ast_at_const(t->ast, stn)->as.type_path.parts;
+    if (parts.len >= 2) {
+      const DefId vd = ast_resolution_def(t->ast, ast_list(t->ast, parts)[parts.len - 1]);
+      if (vd.node != NODE_NONE && ast_at_const(mod_ast(t, vd.module), vd.node)->kind == NODE_VARIANT) {
+        variant = vd.node;
+        vmod = vd.module;
+      }
+    }
+  }
   const NodeList fields = n->as.struct_initializer.fields;
   const NodeId *const ids = ast_list(t->ast, fields);
   for (uint32_t i = 0; i < fields.len; i++) {
     const Node *const fi = ast_at_const(t->ast, ids[i]);
     check_expr(t, fi->as.field_initializer.value);
+    const Span fname = name_span(t, fi->as.field_initializer.name);
+    if (variant != NODE_NONE) { // resolve the field against the variant's struct payload
+      Ast *const va = mod_ast(t, vmod);
+      const NodeList vpl = ast_at_const(va, variant)->as.variant.payload;
+      const NodeId *const vplids = ast_list(va, vpl);
+      NodeId field = NODE_NONE;
+      for (uint32_t j = 0; j < vpl.len; j++) {
+        const Node *const pf = ast_at_const(va, vplids[j]);
+        if (pf->kind == NODE_FIELD &&
+            spans_eq2(t->source, fname, mod_src(t, vmod), ast_at_const(va, pf->as.field.name)->as.name.text)) {
+          field = vplids[j];
+          break;
+        }
+      }
+      if (field == NODE_NONE) {
+        char ty[96];
+        render_type(t, sty, ty, sizeof ty);
+        typechecker_errorf(
+            t, fname.start, fname.end - fname.start, "no field '%.*s' on '%s'", (int)(fname.end - fname.start),
+            t->source + fname.start, ty);
+        continue;
+      }
+      ast_set_resolution_def(t->ast, fi->as.field_initializer.name, (DefId){vmod, field});
+      const TypeId ft = subst_type(t, lower_type_in(t, vmod, ast_at_const(va, field)->as.field.type), gp, ga, gn);
+      if (!compatible(t, ft, fi->as.field_initializer.value))
+        err_mismatch(t, fi->as.field_initializer.value, ft);
+      continue;
+    }
     if (decl == NODE_NONE)
       continue;
-    const Span fname = name_span(t, fi->as.field_initializer.name);
     const NodeId field = find_member(t, smod, decl, fname);
     if (field == NODE_NONE) {
       char ty[96];
@@ -1442,8 +1505,13 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         if (i == 0)
           elem = et;
         else if (et != elem && et != TYPE_NONE && elem != TYPE_NONE) {
-          err_mismatch(t, ids[i], elem);
-          elem = TYPE_NONE;
+          // distinct fn decls intern to distinct TYPE_FUNCTION TypeIds; a homogeneous `[a, b]` of
+          // matching-signature functions is still one element type, so unify those structurally.
+          const Ty *const e0 = ast_type_at(a, elem), *const ei = ast_type_at(a, et);
+          if (!(e0->kind == TYPE_FUNCTION && ei->kind == TYPE_FUNCTION && fn_compatible(t, e0, ei))) {
+            err_mismatch(t, ids[i], elem);
+            elem = TYPE_NONE;
+          }
         }
       }
       if (elem != TYPE_NONE)
@@ -1518,13 +1586,23 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
   NodeList returns = {0, 0};
   bool ok = false;
   if (value != NODE_NONE && ast_at_const(a, value)->kind == NODE_CALL) {
-    const TypeId callee = ast_type(a, ast_at_const(a, value)->as.call.callee);
+    const NodeId calleeId = ast_at_const(a, value)->as.call.callee;
+    const TypeId callee = ast_type(a, calleeId);
     if (callee != TYPE_NONE) {
       const Ty *const ct = ast_type_at(a, callee);
       if (ct->kind == TYPE_FUNCTION) {
         const Node *const fn = ast_at_const(a, ct->as.decl);
         returns = fn->kind == NODE_FUNCTION ? fn->as.function.returns : fn->as.function_type.returns;
         ok = true;
+      }
+    } else { // a method-call callee (NODE_MEMBER) caches no type; recover the method's returns via its resolution
+      const Node *const cn = ast_at_const(a, calleeId);
+      if (cn->kind == NODE_MEMBER) {
+        const DefId md = ast_resolution_def(a, cn->as.member.member);
+        if (md.node != NODE_NONE && md.module == a->module && ast_at_const(a, md.node)->kind == NODE_FUNCTION) {
+          returns = ast_at_const(a, md.node)->as.function.returns;
+          ok = true;
+        }
       }
     }
   }
@@ -1703,12 +1781,56 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       DefId gp[4];
       TypeId ga[4];
       int gn;
-      if (aggregate_of(t, base, &bmod, &decl, gp, ga, &gn) && n->as.pattern.name != NODE_NONE)
-        ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, decl});
+      const bool agg = aggregate_of(t, base, &bmod, &decl, gp, ga, &gn);
+      // `Variant { f, .. }` matching a struct-payload enum variant: bind fields from the variant's payload.
+      NodeId variant = NODE_NONE;
+      if (agg && n->as.pattern.name != NODE_NONE && ast_at_const(mod_ast(t, bmod), decl)->kind == NODE_ENUM) {
+        const NodeId v = find_member(t, bmod, decl, name_span(t, n->as.pattern.name));
+        if (v != NODE_NONE && ast_at_const(mod_ast(t, bmod), v)->kind == NODE_VARIANT) {
+          variant = v;
+          ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, variant});
+        }
+      }
       const NodeList children = n->as.pattern.children;
       const NodeId *const ids = ast_list(a, children);
-      for (uint32_t i = 0; i < children.len; i++)
-        check_pattern(t, ids[i], base); // children are NODE_PATTERN_FIELD; pass the aggregate type
+      if (variant != NODE_NONE) {
+        Ast *const va = mod_ast(t, bmod);
+        const NodeList vpl = ast_at_const(va, variant)->as.variant.payload;
+        const NodeId *const vplids = ast_list(va, vpl);
+        for (uint32_t i = 0; i < children.len; i++) {
+          const Node *const fld = ast_at_const(a, ids[i]); // NODE_PATTERN_FIELD
+          const Span fn = name_span(t, fld->as.pattern.name);
+          TypeId ft = TYPE_NONE;
+          NodeId match = NODE_NONE;
+          for (uint32_t j = 0; j < vpl.len; j++) {
+            const Node *const pf = ast_at_const(va, vplids[j]);
+            if (pf->kind == NODE_FIELD &&
+                spans_eq2(t->source, fn, mod_src(t, bmod), ast_at_const(va, pf->as.field.name)->as.name.text)) {
+              match = vplids[j];
+              ft = subst_type(t, lower_type_in(t, bmod, pf->as.field.type), gp, ga, gn);
+              break;
+            }
+          }
+          if (match != NODE_NONE)
+            ast_set_resolution_def(a, fld->as.pattern.name, (DefId){bmod, match});
+          else {
+            char ty[96];
+            render_type(t, base, ty, sizeof ty);
+            typechecker_errorf(
+                t, fn.start, fn.end - fn.start, "no field '%.*s' on '%s'", (int)(fn.end - fn.start), t->source + fn.start,
+                ty);
+          }
+          const NodeList fc = fld->as.pattern.children;
+          const NodeId *const fcids = ast_list(a, fc);
+          for (uint32_t k = 0; k < fc.len; k++)
+            check_pattern(t, fcids[k], ft);
+        }
+      } else {
+        if (agg && n->as.pattern.name != NODE_NONE)
+          ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, decl});
+        for (uint32_t i = 0; i < children.len; i++)
+          check_pattern(t, ids[i], base); // children are NODE_PATTERN_FIELD; pass the aggregate type
+      }
       break;
     }
     case NODE_PATTERN_FIELD: {
@@ -1740,9 +1862,9 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
         check_pattern(t, ids[i], field_type);
       break;
     }
-    case NODE_PATTERN_TUPLE: { // enum-variant constructor pattern
+    case NODE_PATTERN_TUPLE: { // enum-variant constructor pattern (named), or a parenthesized pattern (unnamed)
       const TypeId base = strip(t, expected);
-      ModuleId bmod;
+      ModuleId bmod = a->module; // safe default; aggregate_of only writes it on success (else the read below is garbage)
       NodeId decl0;
       DefId gp[4];
       TypeId ga[4];
@@ -1751,12 +1873,17 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
                        ast_at_const(mod_ast(t, bmod), decl0)->kind == NODE_ENUM;
       const NodeId decl = agg ? decl0 : NODE_NONE;
       NodeId variant = NODE_NONE;
-      if (decl != NODE_NONE && n->as.pattern.name != NODE_NONE) {
+      if (n->as.pattern.name != NODE_NONE) {
         const Span vname = name_span(t, n->as.pattern.name);
-        variant = find_member(t, bmod, decl, vname);
-        if (variant != NODE_NONE)
+        if (decl == NODE_NONE) { // a variant constructor pattern against a non-enum value (was a BUS crash)
+          char ty[96];
+          render_type(t, base, ty, sizeof ty);
+          typechecker_errorf(
+              t, vname.start, vname.end - vname.start, "pattern '%.*s(..)' expects an enum, but the value has type '%s'",
+              (int)(vname.end - vname.start), t->source + vname.start, ty);
+        } else if ((variant = find_member(t, bmod, decl, vname)) != NODE_NONE) {
           ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, variant});
-        else {
+        } else {
           char ty[96];
           render_type(t, base, ty, sizeof ty);
           typechecker_errorf(
@@ -1766,9 +1893,14 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       }
       const NodeList children = n->as.pattern.children;
       const NodeId *const ids = ast_list(a, children);
-      Ast *const va = mod_ast(t, bmod);
-      const NodeList payload = variant != NODE_NONE ? ast_at_const(va, variant)->as.variant.payload : (NodeList){0, 0};
-      const NodeId *const pl = ast_list(va, payload);
+      NodeList payload = (NodeList){0, 0};
+      Ast *va = a;
+      const NodeId *pl = NULL;
+      if (variant != NODE_NONE) { // only read the variant's payload when we actually resolved one
+        va = mod_ast(t, bmod);
+        payload = ast_at_const(va, variant)->as.variant.payload;
+        pl = ast_list(va, payload);
+      }
       for (uint32_t i = 0; i < children.len; i++) {
         TypeId pt = TYPE_NONE;
         if (i < payload.len) {

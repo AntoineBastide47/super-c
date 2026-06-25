@@ -145,6 +145,7 @@ static void emit_array_braces(Codegen *c, const Node *n);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
+static NodeId fn_array_return(Codegen *c, NodeId fn_id);
 static void emit_match_core(Codegen *c, NodeId id, int mode, const char *result);
 static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
 static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut);
@@ -729,6 +730,106 @@ static void emit_number(Codegen *c, const Span s, const TokenType tt) {
   emit_cstr(c, buf);
 }
 
+static int hex_val(const uint8_t ch) {
+  if (ch >= '0' && ch <= '9')
+    return ch - '0';
+  if (ch >= 'a' && ch <= 'f')
+    return ch - 'a' + 10;
+  if (ch >= 'A' && ch <= 'F')
+    return ch - 'A' + 10;
+  return 0;
+}
+
+// Encode a Unicode scalar as UTF-8 into `out` (1-4 bytes), returning the byte count.
+static int utf8_encode(const uint32_t cp, uint8_t out[4]) {
+  if (cp < 0x80) {
+    out[0] = (uint8_t)cp;
+    return 1;
+  }
+  if (cp < 0x800) {
+    out[0] = (uint8_t)(0xC0 | (cp >> 6));
+    out[1] = (uint8_t)(0x80 | (cp & 0x3F));
+    return 2;
+  }
+  if (cp < 0x10000) {
+    out[0] = (uint8_t)(0xE0 | (cp >> 12));
+    out[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = (uint8_t)(0x80 | (cp & 0x3F));
+    return 3;
+  }
+  out[0] = (uint8_t)(0xF0 | (cp >> 18));
+  out[1] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+  out[2] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+  out[3] = (uint8_t)(0x80 | (cp & 0x3F));
+  return 4;
+}
+
+// Re-emit a string/char literal with escapes translated into C's own syntax. Super-C's `\xNN` is
+// exactly two hex digits and `\u{..}` is a Unicode scalar -- C reads both differently -- so each becomes
+// a fixed-width octal `\NNN` (a string's `\u{}` is UTF-8 encoded first; `\0` is padded so a following
+// digit can't be absorbed). Ordinary escapes (\n \t \r \\ \" \') pass through unchanged.
+static void emit_reescaped(Codegen *c, const Span s, const bool is_char) {
+  const uint8_t *const src = c->source;
+  const char q = is_char ? '\'' : '"';
+  emit(c, "%c", q);
+  size_t i = s.start + 1;       // skip opening quote
+  const size_t end = s.end - 1; // closing quote
+  while (i < end) {
+    if (src[i] != '\\') {
+      emit(c, "%c", src[i]);
+      i++;
+      continue;
+    }
+    i++; // past backslash
+    if (i >= end)
+      break;
+    const uint8_t e = src[i++];
+    switch (e) {
+      case 'n':
+      case 'r':
+      case 't':
+      case '\\':
+      case '"':
+      case '\'':
+        emit(c, "\\%c", e);
+        break;
+      case '0':
+        emit(c, "\\000"); // single NUL, padded so a trailing octal digit isn't absorbed
+        break;
+      case 'x': { // exactly two hex digits -> the byte, as fixed-width octal
+        const uint32_t v = (uint32_t)((hex_val(src[i]) << 4) | hex_val(src[i + 1]));
+        i += 2;
+        emit(c, "\\%03o", v & 0xFFu);
+        break;
+      }
+      case 'u': { // \u{HEX}: a Unicode scalar value
+        if (i < end && src[i] == '{')
+          i++;
+        uint32_t cp = 0;
+        while (i < end && src[i] != '}') {
+          cp = (cp << 4) | (uint32_t)hex_val(src[i]);
+          i++;
+        }
+        if (i < end && src[i] == '}')
+          i++;
+        if (is_char) {
+          emit(c, "\\%03o", cp & 0xFFu); // a char is one byte
+        } else {
+          uint8_t b[4];
+          const int n = utf8_encode(cp, b);
+          for (int k = 0; k < n; k++)
+            emit(c, "\\%03o", b[k]);
+        }
+        break;
+      }
+      default:
+        emit(c, "\\%c", e); // lexer-validated; copy through
+        break;
+    }
+  }
+  emit(c, "%c", q);
+}
+
 static void emit_literal(Codegen *c, const Node *n) {
   const Span s = n->as.literal.raw;
   switch (n->as.literal.token_type) {
@@ -742,15 +843,16 @@ static void emit_literal(Codegen *c, const Node *n) {
       emit(c, "NULL");
       break;
     case CharacterLiteral:
-      emit_span(c, s);
+      emit_reescaped(c, s, true);
       break;
     case StringLiteral:
       // A string literal is a `str` view: `(str){ (const uint8_t *)"...", sizeof("...") - 1 }`.
-      // `sizeof - 1` is the byte length (escapes already decoded by the C compiler) minus the NUL.
+      // `sizeof - 1` is the byte length (C-decoded escapes) minus the NUL; escapes are re-emitted in C
+      // syntax so `\u{..}`/`\xNN` mean the same bytes Super-C's lexer decoded.
       emit(c, "(str){ (const uint8_t *)");
-      emit_span(c, s);
+      emit_reescaped(c, s, false);
       emit(c, ", sizeof(");
-      emit_span(c, s);
+      emit_reescaped(c, s, false);
       emit(c, ") - 1 }");
       break;
     case ByteCharacterLiteral: // b'a' -> 'a'
@@ -988,7 +1090,12 @@ static void render_binding_id(Codegen *c, const TypeId t, const char *name, cons
 // reference and function-pointer outer types take east-const; everything else west.
 static void render_binding_node(Codegen *c, const NodeId tn, const char *name, const bool is_const, char *out, const size_t cap) {
   const NodeKind k = tn != NODE_NONE ? ast_at_const(c->ast, tn)->kind : NODE_NONE_KIND;
-  if (is_const && (k == NODE_POINTER_TYPE || k == NODE_REFERENCE_TYPE || k == NODE_FUNCTION_TYPE)) {
+  // An array of function pointers also needs east-const: west-const would const the fn's return type
+  // (`const int32_t (*a[2])(int32_t)`), which then rejects the assigned functions.
+  const bool east_array_fn =
+      k == NODE_ARRAY_TYPE &&
+      ast_at_const(c->ast, ast_at_const(c->ast, tn)->as.array_type.element)->kind == NODE_FUNCTION_TYPE;
+  if (is_const && (k == NODE_POINTER_TYPE || k == NODE_REFERENCE_TYPE || k == NODE_FUNCTION_TYPE || east_array_fn)) {
     char nm[200];
     buf_join3(nm, sizeof nm, "const ", "", name);
     render_type_node(c, tn, nm, out, cap);
@@ -1081,6 +1188,11 @@ static const char *c_op(const TokenType t) {
     case StarEqual: return "*=";
     case SlashEqual: return "/=";
     case PercentEqual: return "%=";
+    case AmpersandEqual: return "&=";
+    case PipeEqual: return "|=";
+    case CaretEqual: return "^=";
+    case LeftShiftEqual: return "<<=";
+    case RightShiftEqual: return ">>=";
     case Bang: return "!";
     case Tilde: return "~";
     default: return "?";
@@ -1381,9 +1493,41 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
 
 static void emit_struct_init(Codegen *c, const Node *n) {
   char t[256];
-  render_type_node(c, n->as.struct_initializer.type, "", t, sizeof t);
+  render_type_node(c, n->as.struct_initializer.type, "", t, sizeof t); // for `Enum::Variant` this is the enum's C name
   const NodeList fields = n->as.struct_initializer.fields;
   const NodeId *const ids = ast_list(c->ast, fields);
+  // `Enum::Variant { f: .. }` -> (Enum){ .tag = Enum_Variant, .payload.Variant = { .f = .. } }
+  const NodeId stn = n->as.struct_initializer.type;
+  if (ast_at_const(c->ast, stn)->kind == NODE_TYPE_PATH) {
+    const NodeList parts = ast_at_const(c->ast, stn)->as.type_path.parts;
+    if (parts.len >= 2) {
+      const DefId vd = ast_resolution_def(c->ast, ast_list(c->ast, parts)[parts.len - 1]);
+      if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT) {
+        const NodeId en = enclosing_enum_in(c, vd.module, vd.node);
+        char vn[128];
+        render_variant_name(c, vd.module, vd.node, vn, sizeof vn);
+        emit(c, "(%s){ .tag = ", t);
+        if (en != NODE_NONE)
+          emit_tag_mod(c, vd.module, en, vd.node);
+        else
+          emit(c, "0");
+        emit(c, ", .payload.%s = {", vn);
+        for (uint32_t i = 0; i < fields.len; i++) {
+          const Node *const fi = ast_at_const(c->ast, ids[i]);
+          emit(c, i ? ", ." : " .");
+          emit_ident(c, name_span(c, fi->as.field_initializer.name));
+          emit(c, " = ");
+          const NodeId fv = fi->as.field_initializer.value;
+          if (ast_at_const(c->ast, fv)->kind == NODE_ARRAY_LITERAL)
+            emit_array_braces(c, ast_at_const(c->ast, fv));
+          else
+            emit_expr(c, fv);
+        }
+        emit(c, fields.len ? " } }" : "0 } }");
+        return;
+      }
+    }
+  }
   if (fields.len == 0) {
     emit(c, "(%s){0}", t);
     return;
@@ -1396,7 +1540,11 @@ static void emit_struct_init(Codegen *c, const Node *n) {
     emit(c, ".");
     emit_ident(c, name_span(c, fi->as.field_initializer.name));
     emit(c, " = ");
-    emit_expr(c, fi->as.field_initializer.value);
+    const NodeId fv = fi->as.field_initializer.value;
+    if (ast_at_const(c->ast, fv)->kind == NODE_ARRAY_LITERAL) // a C array member takes a brace list, not an expr
+      emit_array_braces(c, ast_at_const(c->ast, fv));
+    else
+      emit_expr(c, fv);
   }
   emit(c, " }");
 }
@@ -1491,7 +1639,11 @@ static void emit_array_braces(Codegen *c, const Node *n) {
   for (uint32_t i = 0; i < elements.len; i++) {
     if (i)
       emit(c, ", ");
-    emit_expr(c, ids[i]);
+    const Node *const el = ast_at_const(c->ast, ids[i]);
+    if (el->kind == NODE_ARRAY_LITERAL) // a nested array member needs a brace list, not a `(T[N]){..}` expr
+      emit_array_braces(c, el);
+    else
+      emit_expr(c, ids[i]);
   }
   emit(c, " }");
 }
@@ -1518,21 +1670,59 @@ static void emit_expr(Codegen *c, const NodeId id) {
       }
       break;
     }
-    case NODE_BINARY:
+    case NODE_BINARY: {
+      // C's `%` is integer-only; on floats lower to fmodf/fmod (the type checker allows float `%`).
+      if (n->as.binary.op == Percent) {
+        const Ty *const lt = ast_type_at(c->ast, ast_type(c->ast, n->as.binary.left));
+        if (lt->kind == TYPE_BUILTIN && (lt->as.builtin == BT_F32 || lt->as.builtin == BT_F64)) {
+          emit(c, "%s(", lt->as.builtin == BT_F32 ? "fmodf" : "fmod");
+          emit_expr(c, n->as.binary.left);
+          emit(c, ", ");
+          emit_expr(c, n->as.binary.right);
+          emit(c, ")");
+          break;
+        }
+      }
       emit(c, "(");
       emit_expr(c, n->as.binary.left);
       emit(c, " %s ", c_op(n->as.binary.op));
       emit_expr(c, n->as.binary.right);
       emit(c, ")");
       break;
-    case NODE_ASSIGNMENT:
-      emit_expr(c, n->as.binary.left);
+    }
+    case NODE_ASSIGNMENT: {
+      // C arrays aren't assignable, so `arr = [..]` / `arr = other` lowers to memcpy (value semantics).
+      // The RHS array literal emits as a `(T[N]){..}` compound literal that decays to a pointer here.
+      const TypeId lt = ast_type(c->ast, n->as.binary.left);
+      if (n->as.binary.op == Equal && lt != TYPE_NONE && ast_type_at(c->ast, lt)->kind == TYPE_ARRAY) {
+        emit(c, "memcpy(");
+        emit_expr(c, n->as.binary.left);
+        emit(c, ", ");
+        emit_expr(c, n->as.binary.right);
+        emit(c, ", sizeof(");
+        emit_expr(c, n->as.binary.left);
+        emit(c, "))");
+        break;
+      }
+      emit(c, "("); // parenthesized like NODE_BINARY: C's `=`/`+=` bind looser, so a sub-expression
+      emit_expr(c, n->as.binary.left); // assignment (`(a = 5) + 1`, `if (a = 3) == 3`) must keep its grouping
       emit(c, " %s ", c_op(n->as.binary.op));
       emit_expr(c, n->as.binary.right);
+      emit(c, ")");
       break;
-    case NODE_CALL:
+    }
+    case NODE_CALL: {
+      // A call returning an array by value yields its wrapper struct; `._` recovers the array (so it
+      // can be indexed, passed (decaying to a pointer), or memcpy-copied into a binding).
+      const TypeId ct = ast_type(c->ast, id);
+      const bool arr_ret = ct != TYPE_NONE && ast_type_at(c->ast, ct)->kind == TYPE_ARRAY;
+      if (arr_ret)
+        emit(c, "(");
       emit_call(c, id, n);
+      if (arr_ret)
+        emit(c, ")._");
       break;
+    }
     case NODE_CLOSURE: { // a closure value is just the address of its hoisted static function
       char nm[200];
       closure_name(c, id, nm, sizeof nm);
@@ -1730,9 +1920,31 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
       break;
     }
     case NODE_PATTERN_STRUCT: {
+      // A struct-payload variant pattern (`Rect { w, h }`) first tests the tag, then reads fields via
+      // `.payload.Variant.field`; a plain struct pattern reads `.field` directly.
+      const DefId vd =
+          p->as.pattern.name != NODE_NONE ? ast_resolution_def(c->ast, p->as.pattern.name) : (DefId){0, NODE_NONE};
+      const bool is_variant = vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT;
       const NodeList ch = p->as.pattern.children;
       const NodeId *const ids = ast_list(c->ast, ch);
+      char prefix[300];
       bool wrote = false;
+      if (is_variant) {
+        const NodeId en = enclosing_enum_in(c, vd.module, vd.node);
+        const bool payload =
+            en != NODE_NONE && aggregate_has_payload_in(c, vd.module, ast_at_const(cg_mod_ast(c, vd.module), en));
+        emit(c, payload ? "%s.tag == " : "%s == ", scrut);
+        if (en != NODE_NONE)
+          emit_tag_mod(c, vd.module, en, vd.node);
+        else
+          emit(c, "0");
+        wrote = true;
+        char vn[128];
+        render_variant_name(c, vd.module, vd.node, vn, sizeof vn);
+        snprintf(prefix, sizeof prefix, "%s.payload.%s", scrut, vn);
+      } else {
+        snprintf(prefix, sizeof prefix, "%s", scrut);
+      }
       for (uint32_t i = 0; i < ch.len; i++) {
         const Node *const f = ast_at_const(c->ast, ids[i]);
         const NodeList sub = f->as.pattern.children;
@@ -1741,8 +1953,8 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
           continue;
         char m[128];
         render_ident(c, name_span(c, f->as.pattern.name), m, sizeof m);
-        char acc[256];
-        snprintf(acc, sizeof acc, "%s.%s", scrut, m);
+        char acc[440];
+        snprintf(acc, sizeof acc, "%s.%s", prefix, m);
         emit(c, wrote ? " && " : "");
         emit_pattern_test(c, subpat, acc);
         wrote = true;
@@ -1793,14 +2005,24 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
       break;
     }
     case NODE_PATTERN_STRUCT: {
+      const DefId vd =
+          p->as.pattern.name != NODE_NONE ? ast_resolution_def(c->ast, p->as.pattern.name) : (DefId){0, NODE_NONE};
+      char prefix[300];
+      if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT) {
+        char vn[128];
+        render_variant_name(c, vd.module, vd.node, vn, sizeof vn);
+        snprintf(prefix, sizeof prefix, "%s.payload.%s", scrut, vn); // struct-payload variant field access
+      } else {
+        snprintf(prefix, sizeof prefix, "%s", scrut);
+      }
       const NodeList ch = p->as.pattern.children;
       const NodeId *const ids = ast_list(c->ast, ch);
       for (uint32_t i = 0; i < ch.len; i++) {
         const Node *const f = ast_at_const(c->ast, ids[i]);
         char m[128];
         render_ident(c, name_span(c, f->as.pattern.name), m, sizeof m);
-        char acc[256];
-        snprintf(acc, sizeof acc, "%s.%s", scrut, m);
+        char acc[440];
+        snprintf(acc, sizeof acc, "%s.%s", prefix, m);
         const NodeList sub = f->as.pattern.children;
         if (sub.len)
           emit_pattern_binds(c, ast_list(c->ast, sub)[0], acc);
@@ -1809,6 +2031,29 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
     }
     default:
       break; // wildcard / literal / range bind nothing
+  }
+}
+
+// Emit one arm's body per mode: 0 statement, 1 assign to `result`, 2 `return`.
+static void emit_arm_body(Codegen *c, const NodeId body, const int mode, const char *result) {
+  if (mode == 2) {
+    emit_indent(c);
+    emit(c, "return ");
+    emit_expr(c, body);
+    emit(c, ";\n");
+  } else if (mode == 1) {
+    emit_indent(c);
+    emit(c, "%s = ", result);
+    emit_expr(c, body);
+    emit(c, ";\n");
+  } else if (ast_at_const(c->ast, body)->kind == NODE_BLOCK) {
+    emit_indent(c);
+    emit_block(c, body);
+    emit(c, "\n");
+  } else {
+    emit_indent(c);
+    emit_expr(c, body);
+    emit(c, ";\n");
   }
 }
 
@@ -1844,49 +2089,79 @@ static void emit_match_core(Codegen *c, const NodeId id, const int mode, const c
 
   const NodeList arms = n->as.match_expr.arms;
   const NodeId *const ids = ast_list(c->ast, arms);
+  bool has_guard = false;
+  for (uint32_t i = 0; i < arms.len; i++)
+    if (ast_at_const(c->ast, ids[i])->as.match_arm.guard != NODE_NONE)
+      has_guard = true;
+
+  if (!has_guard) { // a flat else-if chain; each arm's bindings live inside its own block
+    for (uint32_t i = 0; i < arms.len; i++) {
+      const Node *const arm = ast_at_const(c->ast, ids[i]);
+      emit_indent(c);
+      emit(c, i ? "else if (" : "if (");
+      emit_pattern_test(c, arm->as.match_arm.pattern, scrut);
+      emit(c, ") {\n");
+      c->depth++;
+      emit_pattern_binds(c, arm->as.match_arm.pattern, scrut);
+      emit_arm_body(c, arm->as.match_arm.body, mode, result);
+      c->depth--;
+      emit_indent(c);
+      emit(c, "}\n");
+    }
+    // In value/return position the match must yield a value, so an unmatched fallthrough is a bug:
+    // tell C the chain is exhaustive (matches the language's exhaustiveness rule) and silence
+    // -Wreturn-type for the enclosing function. (A trailing `_`/binding arm makes this else dead.)
+    if (mode != 0 && arms.len > 0) {
+      emit_indent(c);
+      emit(c, "else { __builtin_unreachable(); }\n");
+    }
+    return;
+  }
+
+  // A guard references the pattern's bindings, which are only in scope *after* emit_pattern_binds, so a
+  // flat else-if (guard in the condition) can't see them. Lower to a fallthrough chain inside a
+  // do/while(0): `if (test) { binds; if (guard) { body; break; } }`. A failing guard simply falls
+  // through to the next arm -- exactly match semantics -- and `break` stops once an arm is taken.
+  emit_indent(c);
+  emit(c, "do {\n");
+  c->depth++;
   for (uint32_t i = 0; i < arms.len; i++) {
     const Node *const arm = ast_at_const(c->ast, ids[i]);
+    const NodeId guard = arm->as.match_arm.guard;
     emit_indent(c);
-    emit(c, i ? "else if (" : "if (");
+    emit(c, "if (");
     emit_pattern_test(c, arm->as.match_arm.pattern, scrut);
-    if (arm->as.match_arm.guard != NODE_NONE) {
-      emit(c, " && ");
-      emit_condition(c, arm->as.match_arm.guard);
-    }
     emit(c, ") {\n");
     c->depth++;
     emit_pattern_binds(c, arm->as.match_arm.pattern, scrut);
-    const NodeId body = arm->as.match_arm.body;
-    if (mode == 2) {
+    if (guard != NODE_NONE) {
       emit_indent(c);
-      emit(c, "return ");
-      emit_expr(c, body);
-      emit(c, ";\n");
-    } else if (mode == 1) {
+      emit(c, "if (");
+      emit_condition(c, guard);
+      emit(c, ") {\n");
+      c->depth++;
+    }
+    emit_arm_body(c, arm->as.match_arm.body, mode, result);
+    if (mode != 2) { // a `return` body already exited; otherwise stop scanning further arms
       emit_indent(c);
-      emit(c, "%s = ", result);
-      emit_expr(c, body);
-      emit(c, ";\n");
-    } else if (ast_at_const(c->ast, body)->kind == NODE_BLOCK) {
+      emit(c, "break;\n");
+    }
+    if (guard != NODE_NONE) {
+      c->depth--;
       emit_indent(c);
-      emit_block(c, body);
-      emit(c, "\n");
-    } else {
-      emit_indent(c);
-      emit_expr(c, body);
-      emit(c, ";\n");
+      emit(c, "}\n");
     }
     c->depth--;
     emit_indent(c);
     emit(c, "}\n");
   }
-  // In value/return position the match must yield a value, so an unmatched fallthrough is a bug:
-  // tell C the chain is exhaustive (matches the language's exhaustiveness rule) and silence
-  // -Wreturn-type for the enclosing function. (A trailing `_`/binding arm makes this else dead.)
-  if (mode != 0 && arms.len > 0) {
+  if (mode != 0) { // value/return position: a guard-only fallthrough would be a bug (typechecker requires a catch-all)
     emit_indent(c);
-    emit(c, "else { __builtin_unreachable(); }\n");
+    emit(c, "__builtin_unreachable();\n");
   }
+  c->depth--;
+  emit_indent(c);
+  emit(c, "} while (0);\n");
 }
 
 static void emit_match_stmt(Codegen *c, const NodeId id) {
@@ -2156,6 +2431,15 @@ static void emit_return(Codegen *c, const Node *n) {
       emit(c, "}\n");
       return;
     }
+    if (c->current_ret[0]) { // array-by-value return: pack the value into the wrapper struct
+      emit(c, "return (%s){ ", c->current_ret);
+      if (ast_at_const(c->ast, vids[0])->kind == NODE_ARRAY_LITERAL)
+        emit_array_braces(c, ast_at_const(c->ast, vids[0]));
+      else
+        emit_expr(c, vids[0]);
+      emit(c, " };\n");
+      return;
+    }
     emit(c, "return ");
     emit_expr(c, vids[0]);
     emit(c, ";\n");
@@ -2245,6 +2529,30 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       }
       // A `let` of a type that owns a `*mut` stays non-const, so its `&mut self` methods stay callable.
       const bool is_const = !n->as.let_stmt.is_mutable && !type_owns_mut(c, ast_type(c->ast, id));
+      // Value-semantics array copy: an array bound from a non-literal source (another array, or an
+      // array-returning call) can't use C array initialization -> declare, then memcpy. The length comes
+      // from the annotation, or from the source call's return type (the binding's TypeId has lost it).
+      const TypeId lbt = ast_type(c->ast, id);
+      const NodeId lval = n->as.let_stmt.value;
+      if (lval != NODE_NONE && lbt != TYPE_NONE && ast_type_at(c->ast, lbt)->kind == TYPE_ARRAY &&
+          ast_at_const(c->ast, lval)->kind != NODE_ARRAY_LITERAL) {
+        NodeId arrtn = n->as.let_stmt.type;
+        if (arrtn == NODE_NONE && ast_at_const(c->ast, lval)->kind == NODE_CALL) {
+          const DefId fd = ast_resolution_def(c->ast, ast_at_const(c->ast, lval)->as.call.callee);
+          if (fd.node != NODE_NONE && fd.module == c->ast->module && ast_at_const(c->ast, fd.node)->kind == NODE_FUNCTION)
+            arrtn = fn_array_return(c, fd.node);
+        }
+        if (arrtn != NODE_NONE) {
+          char nm[128], decl[300];
+          render_ident(c, name_span(c, n->as.let_stmt.name), nm, sizeof nm);
+          render_binding_node(c, arrtn, nm, false, decl, sizeof decl); // non-const: memcpy writes it next
+          emit_cstr(c, decl);
+          emit(c, "; memcpy(%s, ", nm);
+          emit_expr(c, lval);
+          emit(c, ", sizeof(%s));\n", nm);
+          break;
+        }
+      }
       if (n->as.let_stmt.type != NODE_NONE) {
         char nm[128], decl[300];
         render_ident(c, name_span(c, n->as.let_stmt.name), nm, sizeof nm);
@@ -2321,7 +2629,7 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
     const Node *const p = ast_at_const(c->ast, ids[i]);
     char nm[128], d[300];
     render_ident(c, name_span(c, p->as.parameter.name), nm, sizeof nm);
-    render_binding_node(c, p->as.parameter.type, nm, true, d, sizeof d); // parameters are never mut
+    render_binding_node(c, p->as.parameter.type, nm, !p->as.parameter.is_mutable, d, sizeof d); // `mut p` -> non-const
     if (any)
       k = buf_append(out, cap, k, ", ");
     k = buf_append(out, cap, k, d);
@@ -2397,6 +2705,12 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
   if (target.node == NODE_NONE && !extern_q && span_is(c->source, name_span(c, fn->as.function.name), "main")) {
     emit(c, "int %s", decl);
   } else if (rets.len > 1) {
+    buf_join3(c->current_ret, sizeof c->current_ret, nm, "", "_ret");
+    emit_cstr(c, c->current_ret);
+    emit(c, " ");
+    emit_cstr(c, decl);
+  } else if (fn_array_return(c, fn_id) != NODE_NONE) {
+    // array-by-value return: emit the wrapper struct as the return type; current_ret makes RETURN wrap it.
     buf_join3(c->current_ret, sizeof c->current_ret, nm, "", "_ret");
     emit_cstr(c, c->current_ret);
     emit(c, " ");
@@ -2787,12 +3101,32 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
 }
 
 // Emit the `<fn>_ret` struct backing a multi-return function (fields `_0`, `_1`, …).
+// The array-type node a function returns by value (`fn f() [T; N]`), else NODE_NONE. C cannot return
+// an array, so such a return is wrapped in a `<fn>_ret { T _[N]; }` struct (like a multi-return tuple).
+static NodeId fn_array_return(Codegen *c, const NodeId fn_id) {
+  const NodeList rets = ast_at_const(c->ast, fn_id)->as.function.returns;
+  if (rets.len != 1)
+    return NODE_NONE;
+  const NodeId r0 = ast_list(c->ast, rets)[0];
+  const Node *const rn = ast_at_const(c->ast, r0);
+  const NodeId tn = rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0;
+  return ast_at_const(c->ast, tn)->kind == NODE_ARRAY_TYPE ? tn : NODE_NONE;
+}
+
 static void emit_ret_struct(Codegen *c, const NodeId fn_id, const DefId target) {
   const Node *const fn = ast_at_const(c->ast, fn_id);
   const NodeList rets = fn->as.function.returns;
+  char nm[256];
+  const NodeId arr = fn_array_return(c, fn_id);
+  if (arr != NODE_NONE) { // single array-by-value return -> `struct { T _[N]; } <fn>_ret;`
+    function_name(c, fn_id, target, nm, sizeof nm, true);
+    char d[256];
+    render_type_node(c, arr, "_", d, sizeof d); // the array member, e.g. `int32_t _[3]`
+    emit(c, "typedef struct { %s; } %s_ret;\n", d, nm);
+    return;
+  }
   if (rets.len <= 1)
     return;
-  char nm[256];
   function_name(c, fn_id, target, nm, sizeof nm, true);
   const NodeId *const ids = ast_list(c->ast, rets);
   emit(c, "typedef struct { ");
@@ -3078,39 +3412,104 @@ static void phase_forward(Codegen *c) {
 }
 
 // Phase 2: full struct / payload-enum definitions (source order; pointer cycles use phase 1).
+// Does phase_types emit a full C body for this decl? (non-generic struct, or non-generic payload enum.)
+static bool type_emittable(Codegen *c, const Node *const n) {
+  return (n->kind == NODE_STRUCT && !n->as.aggregate.generics.len) ||
+         (n->kind == NODE_ENUM && !n->as.aggregate.generics.len && aggregate_has_payload(c, n));
+}
+
+// The local struct/enum a field embeds BY VALUE (so its full definition must precede this one), or
+// NODE_NONE. Pointers/references only need a forward typedef; an array embeds its element by value.
+static NodeId struct_dep(Codegen *c, const NodeId tn) {
+  if (tn == NODE_NONE)
+    return NODE_NONE;
+  const Node *const t = ast_at_const(c->ast, tn);
+  if (t->kind == NODE_ARRAY_TYPE)
+    return struct_dep(c, t->as.array_type.element);
+  if (t->kind == NODE_POINTER_TYPE || t->kind == NODE_REFERENCE_TYPE)
+    return NODE_NONE;
+  if (t->kind == NODE_TYPE_PATH || t->kind == NODE_IDENTIFIER) {
+    const DefId d = ast_resolution_def(c->ast, tn);
+    if (d.node != NODE_NONE && d.module == c->ast->module) {
+      const Node *const dn = ast_at_const(c->ast, d.node);
+      if (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM)
+        return d.node;
+    }
+  }
+  return NODE_NONE;
+}
+
+static void emit_type_decl(Codegen *c, const NodeId declId) {
+  const Node *const n = ast_at_const(c->ast, declId);
+  emit(c, "struct ");
+  emit_local_type_name(c, n->as.aggregate.name);
+  emit(c, " {\n");
+  if (n->kind == NODE_ENUM) {
+    emit_enum_struct_body(c, n);
+  } else {
+    c->depth++;
+    const NodeList fs = n->as.aggregate.members;
+    const NodeId *const fids = ast_list(c->ast, fs);
+    for (uint32_t j = 0; j < fs.len; j++) {
+      const Node *const f = ast_at_const(c->ast, fids[j]);
+      char nm[128], d[256];
+      render_ident(c, name_span(c, f->as.field.name), nm, sizeof nm);
+      render_type_node(c, f->as.field.type, nm, d, sizeof d);
+      emit_indent(c);
+      emit_cstr(c, d);
+      emit(c, ";\n");
+    }
+    c->depth--;
+  }
+  emit(c, "};\n");
+}
+
+// Emit a type's by-value dependencies before itself (post-order DFS). `state`: 0 unvisited, 1 on the
+// current path (a cycle -- the type checker rejects by-value cycles, so just stop), 2 emitted.
+static void emit_type_dfs(Codegen *c, const NodeId declId, uint8_t *const state) {
+  if (state[declId])
+    return;
+  state[declId] = 1;
+  const Node *const n = ast_at_const(c->ast, declId);
+  const NodeList members = n->as.aggregate.members;
+  const NodeId *const mids = ast_list(c->ast, members);
+  for (uint32_t i = 0; i < members.len; i++) {
+    const Node *const m = ast_at_const(c->ast, mids[i]);
+    if (n->kind == NODE_STRUCT && m->kind == NODE_FIELD) {
+      const NodeId dep = struct_dep(c, m->as.field.type);
+      if (dep != NODE_NONE && type_emittable(c, ast_at_const(c->ast, dep)))
+        emit_type_dfs(c, dep, state);
+    } else if (n->kind == NODE_ENUM && m->kind == NODE_VARIANT) {
+      const NodeList pl = m->as.variant.payload;
+      const NodeId *const plids = ast_list(c->ast, pl);
+      for (uint32_t k = 0; k < pl.len; k++) {
+        const Node *const pf = ast_at_const(c->ast, plids[k]);
+        const NodeId dep = struct_dep(c, pf->kind == NODE_FIELD ? pf->as.field.type : plids[k]);
+        if (dep != NODE_NONE && type_emittable(c, ast_at_const(c->ast, dep)))
+          emit_type_dfs(c, dep, state);
+      }
+    }
+  }
+  emit_type_decl(c, declId);
+  state[declId] = 2;
+}
+
 static void phase_types(Codegen *c) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
+  // Emit struct/enum bodies in value-containment dependency order: a by-value field of a struct defined
+  // later in source must still be complete at the point of use. Forward typedefs already exist.
+  uint8_t *const state = calloc(c->ast->nodes.len, 1);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
-    if (n->kind == NODE_STRUCT) {
-      if (n->as.aggregate.generics.len)
-        continue;
-      emit(c, "struct ");
-      emit_local_type_name(c, n->as.aggregate.name);
-      emit(c, " {\n");
-      c->depth++;
-      const NodeList fs = n->as.aggregate.members;
-      const NodeId *const fids = ast_list(c->ast, fs);
-      for (uint32_t j = 0; j < fs.len; j++) {
-        const Node *const f = ast_at_const(c->ast, fids[j]);
-        char nm[128], d[256];
-        render_ident(c, name_span(c, f->as.field.name), nm, sizeof nm);
-        render_type_node(c, f->as.field.type, nm, d, sizeof d);
-        emit_indent(c);
-        emit_cstr(c, d);
-        emit(c, ";\n");
-      }
-      c->depth--;
-      emit(c, "};\n");
-    } else if (n->kind == NODE_ENUM && !n->as.aggregate.generics.len && aggregate_has_payload(c, n)) {
-      emit(c, "struct ");
-      emit_local_type_name(c, n->as.aggregate.name);
-      emit(c, " {\n");
-      emit_enum_struct_body(c, n);
-      emit(c, "};\n");
+    if (type_emittable(c, n)) {
+      if (state)
+        emit_type_dfs(c, ids[i], state);
+      else
+        emit_type_decl(c, ids[i]); // out of memory: fall back to source order
     }
   }
+  free(state);
   emit_aggregate_specializations(c, true); // full bodies for generic struct instantiations
 }
 
