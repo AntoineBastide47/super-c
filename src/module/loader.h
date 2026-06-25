@@ -23,6 +23,11 @@ typedef struct Package {
     char *root_dir;   // source root: the directory of the root file; imports resolve relative to it
     char *std_root;   // second import search root (parent of std/): `import std::x;` -> <std_root>/std/x.spc
     bool ok;          // false if any read/parse/cycle error was reported during loading
+    // Generics with a concrete instance re-homed into a user module (Option<Bar>): the owner emits their
+    // DECLARE/DEFINE macros so the home can materialize the instance. Filled by propagation; a DefId per
+    // generic decl. Used to gate macro emission in single-TU output (the multi-file tree emits all pub ones).
+    DefId *macro_generics;
+    size_t n_macro_generics, cap_macro_generics;
 } Package;
 
 // Load `root_file` and, transitively, every module it imports, then append the std prelude found under
@@ -51,5 +56,14 @@ NodeId package_prelude_lookup(const Package *p, const char *name, size_t name_le
 // the REPL/test user Ast that lives outside `modules` (NULL for the build-tree path). Iterates to a
 // fixpoint so nested instances (Vec<Box<i32>>) reach every owner.
 void package_propagate_instances(Package *p, Ast *standalone);
+
+// The module a concrete generic instance must be emitted in: the module of its first user (non-prelude)
+// type argument held by value, else the generic's own module (it->module). `a` owns `it`'s arg TypeIds.
+// Codegen emits an instance whose home is the current module (re-homed ones via the generic's macros).
+ModuleId package_instance_home(const Package *p, const Ast *a, const TyInstance *it);
+
+// True if generic `decl` (owned by module `module`) has an instance re-homed into a user module, so its
+// DECLARE/DEFINE macros must be emitted even in single-TU output. (Recorded by package_propagate_instances.)
+bool package_generic_needs_macro(const Package *p, ModuleId module, NodeId decl);
 
 #endif // MODULE_LOADER_H

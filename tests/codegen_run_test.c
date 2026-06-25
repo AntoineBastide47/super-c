@@ -251,6 +251,38 @@ static void test_str(void) {
       "");
 }
 
+// A7: a prelude generic instantiated over a USER struct held by value -- the instance is re-homed to the
+// user code and built from the generic's macros (an owner-emitted concrete struct would carry an
+// incomplete-type field). Covers the re-homed struct + non-generic method (Option::unwrap_or), a
+// sibling-referencing monomorphic method (Vector::pop -> Option<P>), and a cross-pool generic method
+// (Option::map<U>). These all compile -Werror clean and run.
+static void test_generics_over_user_types(void) {
+  sc_run_program(
+      "Option over a user struct by value",
+      PRE "struct P { pub a: i32 }\n"
+          "fn main() i32 { let o: Option<P> = Option::<P>::some(P { a: 40 });\n"
+          "  let n: Option<P> = Option::<P>::none();\n"
+          "  exit(o.unwrap_or(P { a: 0 }).a + n.unwrap_or(P { a: 2 }).a); }\n", // 40 + 2
+      42, "");
+  sc_run_program(
+      "Vector over a user struct: pop -> Option<P>",
+      PRE "struct P { pub a: i32 }\n"
+          "fn main() i32 { let mut v: Vector<P> = Vector::<P>::new();\n"
+          "  v.push(P { a: 5 }); v.push(P { a: 40 });\n"
+          "  let r: i32 = v.pop().unwrap_or(P { a: 0 }).a + v.pop().unwrap_or(P { a: 0 }).a - 3;\n" // 40 + 5 - 3
+          "  v.drop(); exit(r); }\n",
+      42, "");
+  sc_run_program(
+      "Option::map<U> over a user struct (cross-pool)",
+      PRE "struct P { pub a: i32 }\n"
+          "fn geta(p: P) i32 { return p.a; }\n"
+          "fn dup(p: P) P { return P { a: p.a + 1 }; }\n"
+          "fn main() i32 { let s: Option<P> = Option::<P>::some(P { a: 41 });\n"
+          "  let chained: i32 = s.map(dup).map(geta).unwrap_or(0);\n" // (41+1) -> 42
+          "  exit(chained); }\n",
+      42, "");
+}
+
 static void test_generics(void) {
   // A generic function is monomorphized: turbofish picks the instantiation, and distinct type args
   // produce distinct specializations.
@@ -456,6 +488,7 @@ static void test_closures(void) {
 int main(void) {
   test_closures();
   test_std_types();
+  test_generics_over_user_types();
   test_generics();
   test_arithmetic();
   test_control_flow();
