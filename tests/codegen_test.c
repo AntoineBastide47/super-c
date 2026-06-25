@@ -366,7 +366,25 @@ static void test_literals(void) {
       "keyword identifier", "fn f() i32 { let register: i32 = 1; return register; }\n", "register_");
 }
 
+// Win 1: a free fn called with a statically-known callback is specialized (direct call, param elided);
+// a runtime callback keeps the pointer original.
+static void test_callback_specialization(void) {
+  static const char KNOWN[] = "fn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\n"
+                              "fn inc(x: i32) i32 { return x + 1; }\n"
+                              "fn use() i32 { return apply(10, inc); }\n";
+  expect_contains("callback specialization emitted", KNOWN, "apply__cb_inc(");
+  expect_contains("callback call site drops the callback arg", KNOWN, "apply__cb_inc(10)");
+  expect_absent("private specialized-away original dropped", KNOWN, "(*const f)");
+
+  static const char RUNTIME[] = "fn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\n"
+                                "fn inc(x: i32) i32 { return x + 1; }\n"
+                                "fn use() i32 { let k: fn(i32) i32 = inc; return apply(10, k); }\n";
+  expect_contains("runtime callback keeps the pointer original", RUNTIME, "(*const f)");
+  expect_absent("runtime callback is not specialized", RUNTIME, "__cb_");
+}
+
 int main(void) {
+  test_callback_specialization();
   test_broad();
   test_control();
   test_ranges();
