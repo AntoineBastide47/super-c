@@ -45,4 +45,11 @@ NodeId package_lookup(const Package *p, ModuleId mid, const char *name, size_t n
 // Like package_lookup but across every prelude module; sets *out_mid to the owning module on a hit.
 NodeId package_prelude_lookup(const Package *p, const char *name, size_t name_len, bool want_type, ModuleId *out_mid);
 
+// Move every concrete cross-module generic instantiation into its template module's instance table, so
+// the owning module emits the specialization (struct + methods) in its header/.c and users just include
+// it -- mirroring non-generic cross-module types. Run after typechecking, before codegen. `standalone` is
+// the REPL/test user Ast that lives outside `modules` (NULL for the build-tree path). Iterates to a
+// fixpoint so nested instances (Vec<Box<i32>>) reach every owner.
+void package_propagate_instances(Package *p, Ast *standalone);
+
 #endif // MODULE_LOADER_H

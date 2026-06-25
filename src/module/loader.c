@@ -376,3 +376,42 @@ NodeId package_prelude_lookup(const Package *p, const char *name, const size_t n
   }
   return NODE_NONE;
 }
+
+// Re-intern `src`'s concrete cross-module generic instantiations into their owning modules' tables.
+// Returns true if any owner table grew (drives the fixpoint in package_propagate_instances).
+static bool reintern_cross_module(Package *p, Ast *const src) {
+  bool changed = false;
+  const size_t n = src->instances.len; // snapshot: entries added this pass are caught next round
+  for (size_t i = 0; i < n; i++) {
+    const TyInstance it = src->instances.data[i]; // copy: the owner table may realloc below
+    if (it.module == src->module || it.module >= p->count || !p->modules[it.module].ast)
+      continue;
+    bool concrete = true;
+    for (uint8_t k = 0; k < it.n; k++)
+      concrete &= ast_type_concrete(src, it.args[k]);
+    if (!concrete)
+      continue;
+    Ast *const owner = p->modules[it.module].ast;
+    if (owner == src)
+      continue;
+    const size_t before = owner->instances.len;
+    TypeId na[4];
+    for (uint8_t k = 0; k < it.n; k++)
+      na[k] = ast_reintern(owner, src, it.args[k]);
+    ast_intern_instance(owner, it.module, it.decl, na, it.n);
+    changed |= owner->instances.len != before;
+  }
+  return changed;
+}
+
+void package_propagate_instances(Package *p, Ast *const standalone) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t u = 0; u < p->count; u++)
+      if (p->modules[u].ast)
+        changed |= reintern_cross_module(p, p->modules[u].ast);
+    if (standalone)
+      changed |= reintern_cross_module(p, standalone);
+  }
+}
