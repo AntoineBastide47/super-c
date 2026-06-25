@@ -291,6 +291,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
             return Struct;
           if (memcmp(lexeme, "switch", 6) == 0)
             return Switch;
+          if (memcmp(lexeme, "sizeof", 6) == 0)
+            return Sizeof;
           return Identifier;
         case 'u':
           return memcmp(lexeme, "unsafe", 6) == 0 ? Unsafe : Identifier;

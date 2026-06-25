@@ -33,6 +33,7 @@ typedef enum TokenType {
   New,
   Null,
   Pub,
+  Sizeof,
   Return,
   SelfLower,
   SelfUpper,
