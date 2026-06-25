@@ -61,6 +61,21 @@ struct Codegen {
         TypeId args[4];
     } insts[256];
     int ninsts;
+    // Win 1 — callback specialization: a same-module free fn called with a statically-known non-capturing
+    // callback is specialized per callee, the callback param elided and the inner call made direct.
+    struct {
+        DefId fn;            // the specialized free function (this module)
+        NodeId param;        // its elided callback parameter
+        uint32_t cbidx;      // that parameter's position (so the matching argument is dropped)
+        DefId callee;        // the statically-known callee bound to it (named fn / closure node)
+        bool callee_closure; // callee.node is a NODE_CLOSURE
+    } cb_insts[128];
+    int n_cb_insts;
+    NodeId cb_keep_fns[128]; // qualifying free fns that still need the pointer original (a runtime caller)
+    int n_cb_keep;
+    NodeId cb_param;         // while emitting a callback specialization: the elided param (else NODE_NONE)
+    DefId cb_callee;         // ... its bound callee
+    bool cb_callee_closure;  // ... callee is a closure node
     ERRORS_VARIABLES;
 };
 
@@ -136,6 +151,8 @@ static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
 static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
 static void inst_name(Codegen *c, const TyInstance *it, char *out, size_t cap);
 static void closure_name(Codegen *c, NodeId id, char *out, size_t cap);
+static bool cb_known_callee(Codegen *c, NodeId arg, DefId *out, bool *is_closure);
+static void cb_spec_name(Codegen *c, DefId fn, DefId callee, bool is_closure, char *out, size_t cap);
 static TypeId subst_lookup(Codegen *c, ModuleId m, NodeId decl);
 static TypeId subst_resolve(Codegen *c, TypeId t);
 static bool type_is_concrete(Codegen *c, TypeId t);
@@ -1167,6 +1184,61 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const Node *const callee = ast_at_const(c->ast, callee_id);
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(c->ast, args);
+
+  // Win 1, inside a callback specialization: a call to the elided callback parameter becomes a direct
+  // call to the bound callee (no indirection).
+  if (c->cb_param != NODE_NONE && callee->kind == NODE_IDENTIFIER) {
+    const DefId d = ast_resolution_def(c->ast, callee_id);
+    if (d.module == c->ast->module && d.node == c->cb_param) {
+      char sym[200];
+      if (c->cb_callee_closure)
+        closure_name(c, c->cb_callee.node, sym, sizeof sym);
+      else
+        render_qualified(
+            c, c->cb_callee.module,
+            ast_at_const(cg_mod_ast(c, c->cb_callee.module), c->cb_callee.node)->as.function.name, sym, sizeof sym);
+      emit_cstr(c, sym);
+      emit(c, "(");
+      for (uint32_t i = 0; i < args.len; i++) {
+        if (i)
+          emit(c, ", ");
+        emit_expr(c, aids[i]);
+      }
+      emit(c, ")");
+      return;
+    }
+  }
+
+  // Win 1, at a call site: a free fn called with a statically-known non-capturing callback -> its
+  // specialization (`fn__cb_<callee>`), with the callback argument dropped.
+  if (callee->kind == NODE_IDENTIFIER) {
+    const DefId fn = ast_resolution_def(c->ast, callee_id);
+    for (int k = 0; k < c->n_cb_insts; k++) {
+      if (c->cb_insts[k].fn.node != fn.node || c->cb_insts[k].fn.module != fn.module)
+        continue;
+      const uint32_t cbidx = c->cb_insts[k].cbidx;
+      DefId ac;
+      bool acclo;
+      if (cbidx >= args.len || !cb_known_callee(c, aids[cbidx], &ac, &acclo) ||
+          ac.node != c->cb_insts[k].callee.node || ac.module != c->cb_insts[k].callee.module)
+        continue;
+      char nm[260];
+      cb_spec_name(c, fn, ac, acclo, nm, sizeof nm);
+      emit_cstr(c, nm);
+      emit(c, "(");
+      bool wrote = false;
+      for (uint32_t i = 0; i < args.len; i++) {
+        if (i == cbidx)
+          continue; // the callback argument is baked into the specialization
+        if (wrote)
+          emit(c, ", ");
+        emit_expr(c, aids[i]);
+        wrote = true;
+      }
+      emit(c, ")");
+      return;
+    }
+  }
 
   { // a call to a generic function (turbofish or inferred) -> the monomorphized specialization
     TypeId ga[4];
@@ -2230,22 +2302,24 @@ static void emit_stmt(Codegen *c, const NodeId id) {
 
 // "void" / "T0 p0, T1 p1" — a function's C parameter list.
 static void render_params(Codegen *c, const NodeList params, char *out, const size_t cap) {
-  if (params.len == 0) {
-    buf_join3(out, cap, "void", "", "");
-    return;
-  }
   const NodeId *const ids = ast_list(c->ast, params);
   size_t k = 0;
   out[0] = '\0';
+  bool any = false;
   for (uint32_t i = 0; i < params.len && k < cap; i++) {
+    if (ids[i] == c->cb_param) // an elided callback parameter (inside a Win-1 specialization)
+      continue;
     const Node *const p = ast_at_const(c->ast, ids[i]);
     char nm[128], d[300];
     render_ident(c, name_span(c, p->as.parameter.name), nm, sizeof nm);
     render_binding_node(c, p->as.parameter.type, nm, true, d, sizeof d); // parameters are never mut
-    if (i)
+    if (any)
       k = buf_append(out, cap, k, ", ");
     k = buf_append(out, cap, k, d);
+    any = true;
   }
+  if (!any)
+    buf_join3(out, cap, "void", "", "");
 }
 
 // Build a function's C name: `<mod>__name`, or `<mod>__Target__name` for an impl method. `prefixed`
@@ -2410,6 +2484,182 @@ static void emit_closures(Codegen *c, const bool with_body) {
   for (size_t i = 0; i < c->ast->nodes.len; i++)
     if (c->ast->nodes.data[i].kind == NODE_CLOSURE)
       emit_closure_fn(c, (NodeId)i, with_body);
+}
+
+// --- Win 1: callback specialization ---------------------------------------------------------------
+// A same-module free function called with a statically-known non-capturing callback is specialized per
+// callee: the callback parameter is elided and the inner indirect call becomes a direct call. The
+// pointer original is kept only when still needed (the fn is `pub`, or some call passes a runtime value).
+
+// Is `arg` a statically-known non-capturing callee (a defined named fn, or a closure literal)? Fills its
+// DefId and whether it is a closure node. Extern/prototype-only fns and runtime values are not "known".
+static bool cb_known_callee(Codegen *c, const NodeId arg, DefId *const out, bool *const is_closure) {
+  const Node *const a = ast_at_const(c->ast, arg);
+  if (a->kind == NODE_CLOSURE) {
+    *out = (DefId){c->ast->module, arg};
+    *is_closure = true;
+    return true;
+  }
+  if (a->kind == NODE_IDENTIFIER) {
+    const DefId d = ast_resolution_def(c->ast, arg);
+    if (d.node != NODE_NONE) {
+      const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
+      if (dn->kind == NODE_FUNCTION && dn->as.function.body != NODE_NONE) {
+        *out = d;
+        *is_closure = false;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// `<fn>__cb_<callee>`: a specialization's C name, stable across its prototype, body and every call site.
+static void cb_spec_name(Codegen *c, const DefId fn, const DefId callee, const bool is_closure, char *out, const size_t cap) {
+  function_name(c, fn.node, (DefId){0, NODE_NONE}, out, cap, true);
+  size_t at = buf_append(out, cap, strlen(out), "__cb_");
+  char sym[200];
+  if (is_closure)
+    closure_name(c, callee.node, sym, sizeof sym);
+  else
+    render_qualified(c, callee.module, ast_at_const(cg_mod_ast(c, callee.module), callee.node)->as.function.name, sym, sizeof sym);
+  buf_append(out, cap, at, sym);
+}
+
+// A function qualifies for callback specialization when it has exactly one `fn(..) ..`-typed parameter;
+// `*cbidx`/`*param` name it. (Zero or multiple callback params keep the pointer form.)
+static bool cb_single_callback_param(Codegen *c, const Node *const fnnode, uint32_t *const cbidx, NodeId *const param) {
+  const NodeList ps = fnnode->as.function.params;
+  const NodeId *const pids = ast_list(c->ast, ps);
+  int found = -1;
+  for (uint32_t i = 0; i < ps.len; i++) {
+    const NodeId tn = ast_at_const(c->ast, pids[i])->as.parameter.type;
+    if (tn != NODE_NONE && ast_at_const(c->ast, tn)->kind == NODE_FUNCTION_TYPE) {
+      if (found >= 0)
+        return false;
+      found = (int)i;
+    }
+  }
+  if (found < 0)
+    return false;
+  *cbidx = (uint32_t)found;
+  *param = pids[found];
+  return true;
+}
+
+// Is the callback parameter referenced ONLY as the callee of a call? (If it is stored, returned or passed
+// on, eliding it would be unsound, so such a function keeps the pointer form.) The param decl is unique
+// and only referenced inside its own function, so a whole-module count is exact.
+static bool param_only_callee(Codegen *c, const NodeId param) {
+  uint32_t uses = 0, callees = 0;
+  for (uint32_t i = 0; i < c->ast->nodes.len; i++) {
+    const Node *const n = ast_at_const(c->ast, i);
+    if (n->kind == NODE_IDENTIFIER) {
+      const DefId d = ast_resolution_def(c->ast, i);
+      if (d.module == c->ast->module && d.node == param)
+        uses++;
+    } else if (n->kind == NODE_CALL) {
+      const NodeId ce = n->as.call.callee;
+      if (ast_at_const(c->ast, ce)->kind == NODE_IDENTIFIER) {
+        const DefId d = ast_resolution_def(c->ast, ce);
+        if (d.module == c->ast->module && d.node == param)
+          callees++;
+      }
+    }
+  }
+  return uses == callees;
+}
+
+static void cb_record(Codegen *c, const DefId fn, const NodeId param, const uint32_t cbidx, const DefId callee, const bool is_closure) {
+  for (int i = 0; i < c->n_cb_insts; i++)
+    if (c->cb_insts[i].fn.node == fn.node && c->cb_insts[i].fn.module == fn.module &&
+        c->cb_insts[i].callee.node == callee.node && c->cb_insts[i].callee.module == callee.module &&
+        c->cb_insts[i].callee_closure == is_closure)
+      return;
+  if (c->n_cb_insts >= (int)(sizeof c->cb_insts / sizeof c->cb_insts[0]))
+    return;
+  c->cb_insts[c->n_cb_insts].fn = fn;
+  c->cb_insts[c->n_cb_insts].param = param;
+  c->cb_insts[c->n_cb_insts].cbidx = cbidx;
+  c->cb_insts[c->n_cb_insts].callee = callee;
+  c->cb_insts[c->n_cb_insts].callee_closure = is_closure;
+  c->n_cb_insts++;
+}
+
+static void cb_keep(Codegen *c, const NodeId fn) {
+  for (int i = 0; i < c->n_cb_keep; i++)
+    if (c->cb_keep_fns[i] == fn)
+      return;
+  if (c->n_cb_keep < (int)(sizeof c->cb_keep_fns / sizeof c->cb_keep_fns[0]))
+    c->cb_keep_fns[c->n_cb_keep++] = fn;
+}
+
+// Scan this module's call sites for specializable callback calls (deduplicated). A call whose callback is
+// a runtime value marks the function as still needing its pointer original.
+static void collect_callbacks(Codegen *c) {
+  c->n_cb_insts = 0;
+  c->n_cb_keep = 0;
+  for (uint32_t i = 0; i < c->ast->nodes.len; i++) {
+    const Node *const call = ast_at_const(c->ast, i);
+    if (call->kind != NODE_CALL)
+      continue;
+    const NodeId callee_id = call->as.call.callee;
+    if (ast_at_const(c->ast, callee_id)->kind != NODE_IDENTIFIER)
+      continue;
+    const DefId fn = ast_resolution_def(c->ast, callee_id);
+    if (fn.module != c->ast->module || fn.node == NODE_NONE)
+      continue;
+    const Node *const fnnode = ast_at_const(c->ast, fn.node);
+    if (fnnode->kind != NODE_FUNCTION || fnnode->as.function.generics.len || fnnode->as.function.body == NODE_NONE)
+      continue;
+    if (!decl_is_toplevel(c, fn.module, fn.node)) // free functions only; methods keep the pointer form
+      continue;
+    uint32_t cbidx;
+    NodeId param;
+    if (!cb_single_callback_param(c, fnnode, &cbidx, &param) || !param_only_callee(c, param))
+      continue;
+    const NodeList args = call->as.call.args;
+    const NodeId *const aids = ast_list(c->ast, args);
+    DefId callee;
+    bool isclo;
+    if (cbidx < args.len && cb_known_callee(c, aids[cbidx], &callee, &isclo))
+      cb_record(c, fn, param, cbidx, callee, isclo);
+    else
+      cb_keep(c, fn.node); // a runtime / unknown callback -> the pointer original is still needed
+  }
+}
+
+// A private free function whose every same-module call was specialized away: its pointer original would be
+// unused, so it is not emitted. (`pub` fns keep external linkage; any runtime caller keeps the original.)
+static bool cb_specialized_away(Codegen *c, const NodeId fnId) {
+  const Node *const fn = ast_at_const(c->ast, fnId);
+  if (fn->kind != NODE_FUNCTION || fn->as.function.is_public)
+    return false;
+  bool any = false;
+  for (int i = 0; i < c->n_cb_insts && !any; i++)
+    any = c->cb_insts[i].fn.node == fnId && c->cb_insts[i].fn.module == c->ast->module;
+  if (!any)
+    return false;
+  for (int i = 0; i < c->n_cb_keep; i++)
+    if (c->cb_keep_fns[i] == fnId)
+      return false;
+  return true;
+}
+
+// Emit each callback specialization as a file-local `static` function: the callback parameter elided
+// (render_params skips `c->cb_param`) and its calls made direct (emit_call redirects through `c->cb_*`).
+static void emit_callback_specializations(Codegen *c, const bool with_body) {
+  for (int i = 0; i < c->n_cb_insts; i++) {
+    if (c->cb_insts[i].fn.module != c->ast->module)
+      continue;
+    c->cb_param = c->cb_insts[i].param;
+    c->cb_callee = c->cb_insts[i].callee;
+    c->cb_callee_closure = c->cb_insts[i].callee_closure;
+    char nm[260];
+    cb_spec_name(c, c->cb_insts[i].fn, c->cb_callee, c->cb_callee_closure, nm, sizeof nm);
+    emit_function(c, c->cb_insts[i].fn.node, (DefId){0, NODE_NONE}, false, with_body, nm, true);
+    c->cb_param = NODE_NONE;
+  }
 }
 
 // Emit each collected generic instantiation as a concrete `static` function (a copy of the generic body
@@ -2888,6 +3138,8 @@ static void phase_prototypes(Codegen *c, const int which) {
     if (n->kind == NODE_FUNCTION) {
       if (n->as.function.generics.len)
         continue; // a generic template emits nothing; its specializations are emitted separately
+      if (cb_specialized_away(c, ids[i]))
+        continue; // its pointer original is unused (every caller took the specialized path)
       if (want_fn(which, n->as.function.is_public))
         emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false, NULL, false);
     } else if (n->kind == NODE_IMPL) {
@@ -2907,9 +3159,10 @@ static void phase_prototypes(Codegen *c, const int which) {
           emit_function(c, mids[j], (DefId){0, NODE_NONE}, true, false, NULL, false);
     }
   }
-  if (which != PROTO_PUBLIC) { // free-function specs and closures are static -> their prototypes live in the .c
+  if (which != PROTO_PUBLIC) { // free-function specs, closures and callback specs are static -> .c only
     emit_specializations(c, false);
     emit_closures(c, false);
+    emit_callback_specializations(c, false);
   }
   emit_method_specializations(c, which, false); // method specs: pub -> header (PUBLIC), private -> .c (PRIVATE)
 }
@@ -2957,10 +3210,12 @@ static void phase_bodies(Codegen *c) {
   emit_specializations(c, true);            // concrete generic free-function instantiations
   emit_method_specializations(c, PROTO_ALL, true); // concrete generic method instantiations
   emit_closures(c, true);                    // hoisted closure / anonymous-fn bodies
+  emit_callback_specializations(c, true);    // callback-specialized free functions (Win 1)
 
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
-    if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE) {
+    if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE &&
+        !cb_specialized_away(c, ids[i])) {
       emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true, NULL, false);
     } else if (n->kind == NODE_IMPL && !n->as.impl_def.generics.len) {
       const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
@@ -3125,6 +3380,7 @@ void codegen_emit_header(Codegen *c, FILE *out) {
 void codegen_emit(Codegen *c, FILE *out) {
   build_enum_index(c);
   collect_insts(c); // generic instantiations needed by this module (emitted as static specializations)
+  collect_callbacks(c); // Win 1: free fns called with statically-known callbacks (callback specializations)
   if (c->multifile) {
     // Multi-file .c: types/public prototypes live in the included headers; here go the private
     // (static) prototypes and every body (private functions are emitted `static`).
@@ -3169,6 +3425,7 @@ void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
   for (size_t i = 0; i < n; i++) {
     build_enum_index(cs[i]);
     collect_insts(cs[i]);
+    collect_callbacks(cs[i]);
   }
   for (size_t i = 0; i < n; i++) { // every struct/enum forward typedef
     phase_forward(cs[i]);
