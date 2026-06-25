@@ -324,8 +324,31 @@ static void test_pub_modifiers(void) {
   CHECK(parse_has_error("pub let x: i32 = 1;\n"), "pub before a non-item is rejected");
 }
 
+// An untagged `union` parses like a struct (NODE_STRUCT with fields) but is flagged is_union; `pub` and
+// per-field `pub` apply as for a struct.
+static void test_union(void) {
+  Ast *a = sc_parse("union decl", "pub union Bits { pub i: u32, bytes: [u8; 4], }\n");
+  if (!a)
+    return;
+  const Node *u = item(a, 0);
+  CHECK(u->kind == NODE_STRUCT, "union parses as a NODE_STRUCT");
+  CHECK(u->as.aggregate.is_union, "union is flagged is_union");
+  CHECK(u->as.aggregate.is_public, "pub union is public");
+  const NodeId *fields = ast_list(a, u->as.aggregate.members);
+  CHECK(ast_at_const(a, fields[0])->as.field.is_public, "pub union field is public");
+  CHECK(!ast_at_const(a, fields[1])->as.field.is_public, "non-pub union field is private");
+  ast_free(&a);
+  // A plain struct is not flagged is_union.
+  Ast *b = sc_parse("struct not union", "struct S { x: i32, }\n");
+  if (b) {
+    CHECK(!item(b, 0)->as.aggregate.is_union, "a struct is not is_union");
+    ast_free(&b);
+  }
+}
+
 int main(void) {
   test_items_and_types();
+  test_union();
   test_pub_modifiers();
   test_associated_new_name();
   test_functions_and_expressions();

@@ -265,6 +265,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
           return memcmp(lexeme, "defer", 5) == 0 ? Defer : Identifier;
         case 'f':
           return memcmp(lexeme, "false", 5) == 0 ? False : Identifier;
+        case 'u':
+          return memcmp(lexeme, "union", 5) == 0 ? Union : Identifier;
         case 'w':
           if (memcmp(lexeme, "where", 5) == 0)
             return Where;

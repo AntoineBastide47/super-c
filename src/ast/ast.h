@@ -137,6 +137,7 @@ typedef struct {
             NodeId name;
             NodeList generics, members;
             bool is_public; // `pub struct`
+            bool is_union;  // `union` (untagged): a NODE_STRUCT whose fields overlap; emitted as a C `union`
         } aggregate;
         struct {
             NodeId name, type, value;
