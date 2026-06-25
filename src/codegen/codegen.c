@@ -61,6 +61,7 @@ struct Codegen {
         TypeId args[4];
     } insts[256];
     int ninsts;
+    bool insts_overflow; // set once if a module exceeds `insts` -> a loud diagnostic, never a silent drop
     // Win 1 — callback specialization: a same-module free fn called with a statically-known non-capturing
     // callback is specialized per callee, the callback param elided and the inner call made direct.
     struct {
@@ -516,7 +517,7 @@ static DefId generic_call_target(Codegen *c, const NodeId callId, TypeId *const 
 }
 
 // Record a generic instantiation for this module, deduplicated (same fn + same type args -> emitted once).
-static void record_inst(Codegen *c, const DefId fn, const TypeId *const args, const int n) {
+static void record_inst(Codegen *c, const DefId fn, const TypeId *const args, const int n, const NodeId site) {
   for (int i = 0; i < c->ninsts; i++) {
     if (c->insts[i].fn.module != fn.module || c->insts[i].fn.node != fn.node || c->insts[i].n != n)
       continue;
@@ -529,8 +530,16 @@ static void record_inst(Codegen *c, const DefId fn, const TypeId *const args, co
     if (same)
       return;
   }
-  if (c->ninsts >= (int)(sizeof c->insts / sizeof c->insts[0]))
+  if (c->ninsts >= (int)(sizeof c->insts / sizeof c->insts[0])) {
+    if (!c->insts_overflow) { // never drop silently: one diagnostic instead of a missing symbol at link time
+      c->insts_overflow = true;
+      const Span sp = ast_at_const(c->ast, site)->span;
+      codegen_errorf(
+          c, sp.start, sp.end - sp.start, "codegen: too many distinct generic instantiations in one module (max %d)",
+          (int)(sizeof c->insts / sizeof c->insts[0]));
+    }
     return;
+  }
   c->insts[c->ninsts].fn = fn;
   c->insts[c->ninsts].n = (uint8_t)n;
   for (int j = 0; j < n; j++)
@@ -550,7 +559,7 @@ static void collect_insts(Codegen *c) {
     int n;
     const DefId fn = generic_call_target(c, i, args, &n);
     if (fn.node != NODE_NONE)
-      record_inst(c, fn, args, n);
+      record_inst(c, fn, args, n, i);
   }
 }
 
@@ -2845,6 +2854,9 @@ static NodeList program_items(Codegen *c) {
 
 // `typedef enum { Name_A, Name_B = 3, .. } NameTag;` -- discriminant enum of a payload-bearing enum.
 static void emit_enum_tag_decl(Codegen *c, const NodeId enum_id, const Node *const dn) {
+  char nm[160]; // guard like emit_enum_full: idempotent, so a duplicate emission can never be a C redefinition
+  render_qualified(c, c->ast->module, dn->as.aggregate.name, nm, sizeof nm);
+  emit(c, "#ifndef SUPER_ENUMTAG_%s\n#define SUPER_ENUMTAG_%s\n", nm, nm);
   emit(c, "typedef enum { ");
   const NodeList ms = dn->as.aggregate.members;
   const NodeId *const mids = ast_list(c->ast, ms);
@@ -2860,7 +2872,7 @@ static void emit_enum_tag_decl(Codegen *c, const NodeId enum_id, const Node *con
   }
   emit(c, " } ");
   emit_local_type_name(c, dn->as.aggregate.name);
-  emit(c, "Tag;\n");
+  emit(c, "Tag;\n#endif\n");
 }
 
 // The body (between `{` and `}`) of a payload-bearing enum's tagged-union C struct: a `<Name>Tag tag;`

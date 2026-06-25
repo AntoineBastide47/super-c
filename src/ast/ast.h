@@ -373,7 +373,8 @@ typedef struct {
     Ty_Vec type_pool;   // interned types; index 0 is TYPE_ERROR, 1..BT_COUNT are the builtins
     TyMap type_index;   // reverse of type_pool: interned Ty -> its TypeId
     U32_Vec types;      // side table: index = NodeId, value = TypeId (0 = unknown)
-    MonoUse_Vec mono;   // per-call generic type arguments (small; linear scan)
+    MonoUse_Vec mono;   // per-call generic type arguments, append-only (latest record for a node wins)
+    U32_Vec mono_at;    // side table: index = NodeId, value = 1-based index into `mono` (0 = none) -> O(1) lookup
     TyInstance_Vec instances; // interned generic instantiations referenced by TYPE_INSTANCE Tys
     MethodInst_Vec method_insts; // generic-method instantiations to emit here (owner); linear scan
     NodeId root;
