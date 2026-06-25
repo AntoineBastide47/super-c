@@ -82,6 +82,7 @@ static int run(const char *source, const size_t len, const char *out_path, const
     package_free(&pp);
     return 1;
   }
+  package_propagate_instances(pp, ast); // owners emit cross-module generic instances (prelude + user code)
 
   FILE *out = fopen(out_path, "w");
   if (!out) {
@@ -194,6 +195,7 @@ static int run_package(Package *p) {
     p->ok = typecheck_one(p, &p->modules[i].ast, p->modules[i].source, p->modules[i].source_len) && p->ok;
   if (!p->ok)
     return 1;
+  package_propagate_instances(p, NULL); // owners emit the generic instances used across module boundaries
 
   write_super_rt(p->root_dir);
   bool err = false;

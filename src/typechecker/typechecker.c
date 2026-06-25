@@ -354,6 +354,25 @@ static DefId find_method(TypeChecker *t, const ModuleId m, const NodeId decl, co
   return (DefId){0, NODE_NONE};
 }
 
+// The top-level impl in module `m` whose items contain `method`, or NODE_NONE -- used to recover the
+// impl's own generic params so a method on a generic instance receiver substitutes them by its args.
+static NodeId enclosing_impl(TypeChecker *t, const ModuleId m, const NodeId method) {
+  Ast *const a = mod_ast(t, m);
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const it = ast_at_const(a, ids[i]);
+    if (it->kind != NODE_IMPL)
+      continue;
+    const NodeList ms = it->as.impl_def.items;
+    const NodeId *const mids = ast_list(a, ms);
+    for (uint32_t j = 0; j < ms.len; j++)
+      if (mids[j] == method)
+        return ids[i];
+  }
+  return NODE_NONE;
+}
+
 // The interned type a struct/enum/alias/generic decl names, where the decl lives in module `m`. The
 // module is carried into the Ty so the same named type unifies across modules.
 static TypeId named_type_of(TypeChecker *t, const ModuleId m, const NodeId decl) {
@@ -385,8 +404,19 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
   switch (n->kind) {
     case NODE_TYPE_PATH: {
       const DefId d = ast_resolution_def(a, id);
-      if (d.node != NODE_NONE)
+      if (d.node != NODE_NONE) {
+        const Node *const dn = ast_at_const(mod_ast(t, d.module), d.node);
+        const NodeList args = n->as.type_path.args;
+        if ((dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) && dn->as.aggregate.generics.len > 0 && args.len > 0) {
+          const NodeId *const aids = ast_list(a, args); // a foreign generic application (Box<T>) -> an instance
+          TypeId ta[4];
+          uint8_t tn = 0;
+          for (uint32_t i = 0; i < args.len && tn < 4; i++)
+            ta[tn++] = lower_type_in(t, m, aids[i]);
+          return ast_intern_instance(t->ast, d.module, d.node, ta, tn);
+        }
         return named_type_of(t, d.module, d.node);
+      }
       const NodeList parts = n->as.type_path.parts;
       const int b = parts.len ? builtin_of(mod_src(t, m), ast_at_const(a, ast_list(a, parts)[0])->as.name.text) : -1;
       return b >= 0 ? ast_builtin((BuiltinType)b) : TYPE_ERROR;
@@ -909,6 +939,36 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
       skip = 1;
   }
 
+  // A method or associated fn reached through a generic instance (`b.get()`, `Box::<i32>::make()`)
+  // substitutes the instance's type args into the signature via the impl's own generics. The instance is
+  // the member's object type (the receiver, or the `Type::<Args>` base); the impl declares its generics
+  // bound positionally to the instance args by its target type (`extend<T> Box<T>`).
+  DefId rsubp[4];
+  TypeId rsuba[4];
+  int nrsub = 0;
+  if (callee_node->kind == NODE_MEMBER) {
+    const DefId md = ast_resolution_def(t->ast, callee_node->as.member.member);
+    ModuleId rmod;
+    NodeId rdecl;
+    DefId sp[4];
+    TypeId sa[4];
+    int sn = 0;
+    if (md.node != NODE_NONE && ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION &&
+        aggregate_of(t, strip(t, ast_type(t->ast, callee_node->as.member.object)), &rmod, &rdecl, sp, sa, &sn) && sn > 0) {
+      const NodeId impl = enclosing_impl(t, md.module, md.node);
+      if (impl != NODE_NONE) {
+        const NodeList ig = ast_at_const(mod_ast(t, md.module), impl)->as.impl_def.generics;
+        const NodeId *const gids = ast_list(mod_ast(t, md.module), ig);
+        const int g = (int)ig.len < sn ? (int)ig.len : sn;
+        for (int i = 0; i < g && nrsub < 4; i++) {
+          rsubp[nrsub] = (DefId){md.module, gids[i]};
+          rsuba[nrsub] = sa[i];
+          nrsub++;
+        }
+      }
+    }
+  }
+
   // Generic call: bind the function's type params from explicit turbofish args or by inferring them from
   // the argument types, then substitute into the parameter/return types so `fn id<T>(x: T) T` checks and
   // yields a concrete type. The bound args are recorded on the call so codegen emits the matching
@@ -952,7 +1012,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
     const NodeId *const pids = ast_list(fa, params);
     for (uint32_t i = 0; i < args.len; i++) {
       const TypeId raw = named ? decl_type_in(t, fmod, pids[i + skip]) : lower_type_in(t, fmod, pids[i + skip]);
-      const TypeId pt = subst_type(t, raw, gparams, gargs, gn);
+      const TypeId pt = subst_type(t, subst_type(t, raw, gparams, gargs, gn), rsubp, rsuba, nrsub);
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
     }
@@ -961,7 +1021,8 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
     return TYPE_NONE; // 0 or multiple returns: no single value type yet
   const NodeId r0 = ast_list(fa, returns)[0];
   const Node *const rn = ast_at_const(fa, r0);
-  return subst_type(t, lower_type_in(t, fmod, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0), gparams, gargs, gn);
+  const TypeId ret = lower_type_in(t, fmod, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  return subst_type(t, subst_type(t, ret, gparams, gargs, gn), rsubp, rsuba, nrsub);
 }
 
 // A non-`pub` struct field of `owner` (in module `m`) may only be named from inside `owner`'s own

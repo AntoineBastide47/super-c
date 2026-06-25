@@ -92,6 +92,53 @@ const TyInstance *ast_instance(const Ast *a, const uint32_t index) {
   return &a->instances.data[index];
 }
 
+TypeId ast_reintern(Ast *dst, const Ast *src, const TypeId t) {
+  if (t == TYPE_NONE || dst == src)
+    return t;
+  const Ty ty = *ast_type_at(src, t);
+  switch (ty.kind) {
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY: {
+      Ty nt = ty;
+      nt.as.elem = ast_reintern(dst, src, ty.as.elem);
+      return ast_intern_type(dst, nt);
+    }
+    case TYPE_INSTANCE: {
+      const TyInstance inst = *ast_instance(src, ty.as.inst);
+      TypeId na[4];
+      for (uint8_t i = 0; i < inst.n; i++)
+        na[i] = ast_reintern(dst, src, inst.args[i]);
+      return ast_intern_instance(dst, inst.module, inst.decl, na, inst.n);
+    }
+    default: // BUILTIN/STRUCT/ENUM/FUNCTION/GENERIC: identity (module+decl) is carried in the Ty itself
+      return ast_intern_type(dst, ty);
+  }
+}
+
+bool ast_type_concrete(const Ast *a, const TypeId t) {
+  const Ty *const ty = ast_type_at(a, t);
+  switch (ty->kind) {
+    case TYPE_GENERIC:
+      return false;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY:
+      return ast_type_concrete(a, ty->as.elem);
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(a, ty->as.inst);
+      for (uint8_t i = 0; i < it->n; i++)
+        if (!ast_type_concrete(a, it->args[i]))
+          return false;
+      return true;
+    }
+    default:
+      return true;
+  }
+}
+
 void ast_set_type_args(Ast *a, const NodeId node, const TypeId *const args, const uint8_t n) {
   MonoUse u = {.node = node, .n = n > 4 ? 4 : n};
   for (uint8_t i = 0; i < u.n; i++)

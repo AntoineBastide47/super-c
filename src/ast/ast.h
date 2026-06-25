@@ -375,6 +375,12 @@ TypeId ast_intern_type(Ast *a, const Ty t);
 TypeId ast_intern_instance(Ast *a, ModuleId module, NodeId decl, const TypeId *args, uint8_t n);
 const TyInstance *ast_instance(const Ast *a, uint32_t index);
 
+// Deep-copy an interned type from `src`'s pool into `dst`'s, returning the equivalent TypeId in `dst`.
+// Used to move a generic instantiation referenced in one module into its template module's pool.
+TypeId ast_reintern(Ast *dst, const Ast *src, TypeId t);
+// True if `t` mentions no unresolved type parameter (a real instantiation, not a template like Box<T>).
+bool ast_type_concrete(const Ast *a, TypeId t);
+
 #ifdef NDEBUG
 void ast_fprint(FILE *out, const Ast *a, const char *source);
 #endif
