@@ -218,6 +218,45 @@ static void err_mismatch(TypeChecker *t, const NodeId node, const TypeId expecte
   typechecker_errorf(t, sp.start, sp.end - sp.start, "mismatched types: expected '%s', found '%s'", e, f);
 }
 
+// Reads a TYPE_FUNCTION's signature into interned TypeIds, normalizing a named `NODE_FUNCTION` (params
+// are NODE_PARAMETER) and an anonymous `fn(..) ..` NODE_FUNCTION_TYPE (params are bare type nodes) to
+// the same shape. Returns the parameter count; `*ret` is the single return type, or TYPE_NONE for none.
+static int fn_sig(TypeChecker *t, const Ty *const fty, TypeId *const params, const int cap, TypeId *const ret) {
+  const ModuleId m = fty->module;
+  Ast *const fa = mod_ast(t, m);
+  const Node *const fn = ast_at_const(fa, fty->as.decl);
+  const bool named = fn->kind == NODE_FUNCTION;
+  const NodeList ps = named ? fn->as.function.params : fn->as.function_type.params;
+  const NodeList rs = named ? fn->as.function.returns : fn->as.function_type.returns;
+  const NodeId *const pid = ast_list(fa, ps);
+  for (uint32_t i = 0; i < ps.len && (int)i < cap; i++) {
+    const Node *const p = ast_at_const(fa, pid[i]);
+    params[i] = lower_type_in(t, m, p->kind == NODE_PARAMETER ? p->as.parameter.type : pid[i]);
+  }
+  if (rs.len == 1) {
+    const NodeId r0 = ast_list(fa, rs)[0];
+    const Node *const rn = ast_at_const(fa, r0);
+    *ret = lower_type_in(t, m, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  } else {
+    *ret = TYPE_NONE;
+  }
+  return (int)ps.len;
+}
+
+// Two function types are compatible when their signatures match structurally (so a named function
+// passes where a `fn(..) ..` pointer is expected, even though they intern to distinct Tys keyed on
+// their decl node). C function-pointer types must match exactly, so params/return compare by identity.
+static bool fn_compatible(TypeChecker *t, const Ty *const ex, const Ty *const ac) {
+  TypeId ep[4], ap[4], er, ar;
+  const int en = fn_sig(t, ex, ep, 4, &er), an = fn_sig(t, ac, ap, 4, &ar);
+  if (en != an || en > 4 || er != ar)
+    return false;
+  for (int i = 0; i < en; i++)
+    if (ep[i] != ap[i])
+      return false;
+  return true;
+}
+
 // Is the value at `node` assignable to a slot of type `expected`? Equal types, poison (suppress
 // cascades), a numeric literal matching the expected numeric class, or `null` into a pointer/reference.
 static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node) {
@@ -236,6 +275,9 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   if (ex->kind == TYPE_POINTER && ac->kind == TYPE_POINTER && ex->as.elem == ac->as.elem &&
       (ex->qualifier == TYPE_QUAL_CONST || ac->qualifier != TYPE_QUAL_CONST))
     return true;
+  // A named function (or another fn pointer) fits a `fn(..) ..` slot when signatures match structurally.
+  if (ex->kind == TYPE_FUNCTION && ac->kind == TYPE_FUNCTION)
+    return fn_compatible(t, ex, ac);
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
     v = ast_at_const(t->ast, v->as.unary.operand);
@@ -892,7 +934,33 @@ static void unify_infer(TypeChecker *t, const TypeId param_ty, const TypeId arg_
     if (pi->decl == ai->decl && pi->module == ai->module && pi->n == ai->n)
       for (uint8_t i = 0; i < pi->n; i++)
         unify_infer(t, pi->args[i], ai->args[i], params, bound, n);
+  } else if (p->kind == TYPE_FUNCTION && aT->kind == TYPE_FUNCTION) { // fn(T) U against fn(i32) i32 -> U = i32
+    TypeId pp[4], ap[4], pr, ar;
+    const int pn = fn_sig(t, p, pp, 4, &pr), an = fn_sig(t, aT, ap, 4, &ar);
+    if (pn == an && pn <= 4) {
+      for (int i = 0; i < pn; i++)
+        unify_infer(t, pp[i], ap[i], params, bound, n);
+      unify_infer(t, pr, ar, params, bound, n);
+    }
   }
+}
+
+// Structural fn-type compatibility for a `fn(..) ..` parameter at a generic call: the expected (param)
+// side's positions are first substituted through the call's generic + receiver-instance maps (so a
+// param `fn(T) U` becomes `fn(i32) i32` before matching the concrete argument function).
+static bool fn_compatible_subst(TypeChecker *t, const Ty *const ex, const Ty *const ac, const DefId *const gp,
+                                const TypeId *const ga, const int gn, const DefId *const rp, const TypeId *const ra,
+                                const int rn) {
+  TypeId ep[4], ap[4], er, ar;
+  const int en = fn_sig(t, ex, ep, 4, &er), an = fn_sig(t, ac, ap, 4, &ar);
+  if (en != an || en > 4)
+    return false;
+  if (subst_type(t, subst_type(t, er, gp, ga, gn), rp, ra, rn) != ar)
+    return false;
+  for (int i = 0; i < en; i++)
+    if (subst_type(t, subst_type(t, ep[i], gp, ga, gn), rp, ra, rn) != ap[i])
+      return false;
+  return true;
 }
 
 static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
@@ -1013,6 +1081,17 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
     for (uint32_t i = 0; i < args.len; i++) {
       const TypeId raw = named ? decl_type_in(t, fmod, pids[i + skip]) : lower_type_in(t, fmod, pids[i + skip]);
       const TypeId pt = subst_type(t, subst_type(t, raw, gparams, gargs, gn), rsubp, rsuba, nrsub);
+      // A `fn(..) ..` parameter carries generics inside the function type that plain subst_type can't
+      // rewrite; compare it structurally with the call's substitutions applied per signature position.
+      const Ty *const ptt = ast_type_at(t->ast, pt);
+      if (ptt->kind == TYPE_FUNCTION) {
+        const TypeId at = ast_type(t->ast, aids[i]);
+        const Ty *const att = at == TYPE_NONE ? NULL : ast_type_at(t->ast, at);
+        if (!att || att->kind != TYPE_FUNCTION ||
+            !fn_compatible_subst(t, ptt, att, gparams, gargs, gn, rsubp, rsuba, nrsub))
+          err_mismatch(t, aids[i], pt);
+        continue;
+      }
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
     }
@@ -1764,12 +1843,65 @@ static void check_associated(TypeChecker *t, const NodeList items) {
     check_item(t, ids[i]);
 }
 
+// Transitive instance closure. The owner always emits every NON-generic method of a concrete instance,
+// and those methods' signatures may name OTHER generic instances (`Vector<i32>::pop -> Option<i32>`,
+// `Result<i32,E>::get_ok -> Option<i32>`). Intern those concrete instances here so propagation emits
+// them even when the program never names them directly. Generic methods are emitted on demand, so they
+// are skipped. The growing loop is the fixpoint -- a freshly interned instance is itself closed in turn.
+static void close_instances(TypeChecker *t) {
+  for (size_t ii = 0; ii < t->ast->instances.len; ii++) {
+    const TyInstance it = t->ast->instances.data[ii]; // copy: subst below may grow the table
+    bool concrete = true;
+    for (uint8_t k = 0; k < it.n; k++)
+      concrete &= ast_type_concrete(t->ast, it.args[k]);
+    if (!concrete)
+      continue;
+    Ast *const ma = mod_ast(t, it.module);
+    const NodeList items = ast_at_const(ma, ma->root)->as.program.items;
+    const NodeId *const iids = ast_list(ma, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const n = ast_at_const(ma, iids[i]);
+      if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len ||
+          ast_resolution(ma, n->as.impl_def.target_type) != it.decl)
+        continue;
+      const NodeList gens = n->as.impl_def.generics;
+      const NodeId *const gids = ast_list(ma, gens);
+      DefId ip[4];
+      TypeId ia[4];
+      int ipn = 0;
+      for (uint32_t g = 0; g < gens.len && g < it.n && ipn < 4; g++) {
+        ip[ipn] = (DefId){it.module, gids[g]};
+        ia[ipn] = it.args[g];
+        ipn++;
+      }
+      const NodeList ms = n->as.impl_def.items;
+      const NodeId *const mids = ast_list(ma, ms);
+      for (uint32_t j = 0; j < ms.len; j++) {
+        const Node *const mn = ast_at_const(ma, mids[j]);
+        if (mn->kind != NODE_FUNCTION || mn->as.function.generics.len) // generic methods emit on demand
+          continue;
+        const NodeList ps = mn->as.function.params;
+        const NodeId *const pids = ast_list(ma, ps);
+        for (uint32_t p = 0; p < ps.len; p++) // intern (side effect) any concrete instance in a param type
+          subst_type(t, lower_type_in(t, it.module, ast_at_const(ma, pids[p])->as.parameter.type), ip, ia, ipn);
+        const NodeList rs = mn->as.function.returns;
+        if (rs.len == 1) {
+          const NodeId r0 = ast_list(ma, rs)[0];
+          const Node *const rn = ast_at_const(ma, r0);
+          subst_type(t, lower_type_in(t, it.module, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0), ip, ia, ipn);
+        }
+      }
+    }
+  }
+}
+
 void typechecker_check(TypeChecker *t) {
   ast_init_types(t->ast);
   const NodeList items = ast_at_const(t->ast, t->ast->root)->as.program.items;
   const NodeId *const ids = ast_list(t->ast, items);
   for (uint32_t i = 0; i < items.len; i++)
     check_item(t, ids[i]);
+  close_instances(t);
   errors_finalize(&t->errors, &t->errors_start, &t->errors_len, t->source, t->len);
 }
 

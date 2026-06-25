@@ -347,6 +347,17 @@ typedef struct {
 } MonoUse;
 VEC_DECLARE(MonoUse, MonoUse_Vec)
 
+// A monomorphized use of a generic method that has its OWN extra generic params (e.g. `map<U>`): the
+// concrete instance it's called on plus the method's own type args. Propagated into the method's owning
+// module (where the instance is emitted) so the owner emits the matching `Inst__method__targs` spec.
+typedef struct {
+    TypeId instance; // TYPE_INSTANCE the method is invoked on, interned in THIS Ast's pool
+    NodeId method;   // the method decl node, local to this (owning) Ast
+    uint8_t n;
+    TypeId targs[4]; // the method's own generic args, interned in THIS Ast's pool
+} MethodInst;
+VEC_DECLARE(MethodInst, MethodInst_Vec)
+
 typedef struct {
     Node_Vec nodes;
     U32_Vec children;
@@ -357,6 +368,7 @@ typedef struct {
     U32_Vec types;      // side table: index = NodeId, value = TypeId (0 = unknown)
     MonoUse_Vec mono;   // per-call generic type arguments (small; linear scan)
     TyInstance_Vec instances; // interned generic instantiations referenced by TYPE_INSTANCE Tys
+    MethodInst_Vec method_insts; // generic-method instantiations to emit here (owner); linear scan
     NodeId root;
     ModuleId module;    // this Ast's module index within its Package (0 for single-file / REPL)
 } Ast;
@@ -375,6 +387,9 @@ TypeId ast_intern_type(Ast *a, const Ty t);
 // recovers the (decl, args) record from an interned TYPE_INSTANCE's `as.inst` index.
 TypeId ast_intern_instance(Ast *a, ModuleId module, NodeId decl, const TypeId *args, uint8_t n);
 const TyInstance *ast_instance(const Ast *a, uint32_t index);
+// Record a generic-method instantiation to be emitted by this (owning) Ast, deduplicated. Returns true
+// if it was newly added (drives the propagation fixpoint).
+bool ast_add_method_inst(Ast *a, TypeId instance, NodeId method, const TypeId *targs, uint8_t n);
 
 // Deep-copy an interned type from `src`'s pool into `dst`'s, returning the equivalent TypeId in `dst`.
 // Used to move a generic instantiation referenced in one module into its template module's pool.

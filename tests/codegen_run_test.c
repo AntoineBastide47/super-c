@@ -352,6 +352,62 @@ static void test_std_types(void) {
           "  let r: i32 = v.first().unwrap_or(0) + v.at(1) + v.last().unwrap_or(0);\n" // 12 + 18 + 12
           "  v.drop(); exit(r); }\n",
       42, "");
+  // Function pointers as first-class values: pass a named fn where a `fn(..) ..` param is expected.
+  sc_run_program(
+      "fn pointers",
+      PRE "fn dbl(x: i32) i32 { return x * 2; }\n"
+          "fn apply(f: fn(i32) i32, v: i32) i32 { return f(v); }\n"
+          "fn main() i32 { exit(apply(dbl, 21)); }\n",
+      42, "");
+  // Higher-order Option methods (method-own generic `U`, type-changing) -- inferred, owner-emitted.
+  sc_run_program(
+      "std Option map/and_then/filter",
+      PRE "fn dbl(x: i32) i32 { return x * 2; }\n"
+          "fn even(x: i32) bool { return x % 2 == 0; }\n"
+          "fn half(x: i32) Option<i32> { return Option::<i32>::Some(x / 2); }\n"
+          "fn main() i32 { let a: Option<i32> = Option::<i32>::Some(10);\n"
+          "  let m: i32 = a.map(dbl).unwrap_or(0);\n"            // 20
+          "  let t: i32 = a.and_then(half).unwrap_or(0);\n"      // 5
+          "  let f: i32 = a.filter(even).unwrap_or(0);\n"        // 10
+          "  let mo: i32 = a.map_or(0, dbl);\n"                  // 20
+          "  exit(m + t + f - mo + 27); }\n",                    // 20+5+10-20+27
+      42, "");
+  // Higher-order Result methods + Result<->Option conversion.
+  sc_run_program(
+      "std Result map/and_then/get_ok",
+      PRE "fn inc(x: i32) i32 { return x + 1; }\n"
+          "fn chk(x: i32) Result<i32, bool> { return Result::<i32, bool>::Ok(x + 8); }\n"
+          "fn main() i32 { let r: Result<i32, bool> = Result::<i32, bool>::Ok(7);\n"
+          "  let m: i32 = r.map(inc).unwrap_or(0);\n"            // 8
+          "  let a: i32 = r.and_then(chk).unwrap_or(0);\n"       // 15
+          "  let g: i32 = r.get_ok().unwrap_or(0);\n"            // 7
+          "  exit(m + a + g + 12); }\n",                         // 8+15+7+12
+      42, "");
+  // Vector insert/remove/swap_remove/reverse/find/retain/map.
+  sc_run_program(
+      "std Vector mutators + map/find",
+      PRE "fn dbl(x: i32) i32 { return x * 2; }\n"
+          "fn even(x: i32) bool { return x % 2 == 0; }\n"
+          "fn main() i32 { let mut v: Vector<i32> = Vector::<i32>::new();\n"
+          "  v.push(1); v.push(2); v.push(3); v.push(4);\n"     // [1,2,3,4]
+          "  v.insert(0, 9);\n"                                  // [9,1,2,3,4]
+          "  let r0: i32 = v.remove(1).unwrap_or(0);\n"          // removes 1 -> [9,2,3,4]; r0=1
+          "  let sr: i32 = v.swap_remove(0).unwrap_or(0);\n"     // removes 9 -> [4,2,3]; sr=9
+          "  v.reverse();\n"                                     // [3,2,4]
+          "  let fd: i32 = v.find(even).unwrap_or(0);\n"         // 2
+          "  v.retain(even);\n"                                  // [2,4]
+          "  let mut m: Vector<i32> = v.map(dbl);\n"             // [4,8]
+          "  let r: i32 = r0 + sr + fd + m.at(0) + m.at(1) + (v.len() as i32);\n" // 1+9+2+4+8+2 = 26
+          "  v.drop(); m.drop(); exit(r + 16); }\n",             // 26 + 16
+      42, "");
+  // Box higher-order map (allocates a fresh box of the mapped type).
+  sc_run_program(
+      "std Box map",
+      PRE "fn dbl(x: i32) i32 { return x * 2; }\n"
+          "fn main() i32 { let b: Box<i32> = Box::<i32>::new(21);\n"
+          "  let mut c: Box<i32> = b.map(dbl);\n"
+          "  let r: i32 = c.get(); c.drop(); exit(r); }\n",
+      42, "");
 }
 
 int main(void) {
