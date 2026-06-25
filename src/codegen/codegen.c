@@ -1130,6 +1130,23 @@ static void emit_variant_construct(Codegen *c, const DefId v, const NodeList arg
   emit(c, " }");
 }
 
+// Whether `id` denotes a C lvalue whose address can be taken directly. A by-ref method on a non-lvalue
+// receiver (a call result, struct literal, ...) needs the receiver materialized into a temp first.
+static bool is_lvalue(Codegen *c, const NodeId id) {
+  const Node *const n = ast_at_const(c->ast, id);
+  switch (n->kind) {
+    case NODE_IDENTIFIER:
+    case NODE_INDEX:
+      return true;
+    case NODE_MEMBER:
+      return !n->as.member.path; // a field/element access is an lvalue; an `Enum::Variant` value is not
+    case NODE_UNARY:
+      return n->as.unary.op == Star; // `*p` deref
+    default:
+      return false;
+  }
+}
+
 static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
@@ -1197,6 +1214,22 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       const NodeId obj = callee->as.member.object;
       const TypeId obj_t = ast_type(c->ast, obj);
       const Ty *const base = ast_type_at(c->ast, strip_ptr(c, obj_t));
+      // self-by-pointer is decided from the self parameter's own type node (in the method's module).
+      const NodeList params = ast_at_const(ma, md.node)->as.function.params;
+      const NodeId self_type = params.len ? ast_at_const(ma, ast_list(ma, params)[0])->as.parameter.type : NODE_NONE;
+      const NodeKind sk = self_type != NODE_NONE ? ast_at_const(ma, self_type)->kind : NODE_NONE_KIND;
+      const bool self_ptr = sk == NODE_POINTER_TYPE || sk == NODE_REFERENCE_TYPE;
+      const bool obj_ptr = ast_type_at(c->ast, obj_t)->kind == TYPE_POINTER || ast_type_at(c->ast, obj_t)->kind == TYPE_REFERENCE;
+      // `&self` on a temporary (call result, literal, ...): C cannot take its address, so materialize the
+      // receiver into a statement-expression temp and pass `&temp`. Mutations to a temporary are moot.
+      const bool materialize = self_ptr && !obj_ptr && !is_lvalue(c, obj);
+      char tmp[32];
+      if (materialize) {
+        fresh(c, tmp, sizeof tmp);
+        emit(c, "({ __auto_type %s = ", tmp);
+        emit_expr(c, obj);
+        emit(c, "; ");
+      }
       if (base->kind == TYPE_INSTANCE) { // a generic instance receiver -> the monomorphized `Inst__method`
         char inm[200];
         inst_name(c, ast_instance(c->ast, base->as.inst), inm, sizeof inm); // already module-qualified
@@ -1214,17 +1247,11 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       emit_ident_mod(c, md.module, ast_at_const(ma, md.node)->as.function.name);
       emit(c, "(");
 
-      const NodeList params = ast_at_const(ma, md.node)->as.function.params;
       bool wrote = false;
       if (params.len > 0) { // bind the receiver to the implicit self parameter
-        // self-by-pointer is decided from the self parameter's own type node (in the method's module),
-        // so it needs no interned type for a foreign decl.
-        const NodeId self_type = ast_at_const(ma, ast_list(ma, params)[0])->as.parameter.type;
-        const NodeKind sk = self_type != NODE_NONE ? ast_at_const(ma, self_type)->kind : NODE_NONE_KIND;
-        const bool self_ptr = sk == NODE_POINTER_TYPE || sk == NODE_REFERENCE_TYPE;
-        const Ty *const ot = ast_type_at(c->ast, obj_t);
-        const bool obj_ptr = ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE;
-        if (self_ptr && !obj_ptr)
+        if (materialize)
+          emit(c, "&%s", tmp);
+        else if (self_ptr && !obj_ptr)
           emit_prefixed(c, obj, "&");
         else if (!self_ptr && obj_ptr)
           emit_prefixed(c, obj, "*");
@@ -1238,6 +1265,8 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         emit_expr(c, aids[i]);
       }
       emit(c, ")");
+      if (materialize)
+        emit(c, "; })");
       return;
     }
   }
@@ -1461,6 +1490,12 @@ static void emit_expr(Codegen *c, const NodeId id) {
     case NODE_GENERIC_SPECIALIZATION:
       emit_expr(c, n->as.specialization.expression); // type args erased
       break;
+    case NODE_SIZEOF: {
+      char ty[256];
+      render_type_node(c, n->as.single.value, "", ty, sizeof ty); // substitutes T inside a specialization
+      emit(c, "sizeof(%s)", ty);
+      break;
+    }
     case NODE_STRUCT_INITIALIZER:
       emit_struct_init(c, n);
       break;

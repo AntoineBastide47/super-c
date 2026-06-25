@@ -314,7 +314,48 @@ static void test_generics(void) {
       42, "");
 }
 
+// The std/ generic container types (Option, Result, Box, Vector) exercised end-to-end: they are prelude
+// modules, so this proves cross-module generic instances + methods + sizeof + rvalue-receiver chaining.
+static void test_std_types(void) {
+  // sizeof(T) lowers to C's sizeof and is usize-typed (the byte sizes back the heap containers).
+  sc_run_program("sizeof", PRE "fn main() i32 { exit(((sizeof(i32) + sizeof(u8)) as i32) * 8 + 2); }\n", 42, ""); // (4+1)*8+2
+  sc_run_program(
+      "std Option",
+      PRE "fn main() i32 { let a: Option<i32> = Option::<i32>::some(40);\n"
+          "  let b: Option<i32> = Option::<i32>::none();\n"
+          "  exit(a.unwrap_or(0) + b.unwrap_or(2)); }\n",
+      42, ""); // 40 + 2
+  sc_run_program(
+      "std Result",
+      PRE "fn main() i32 { let r: Result<i32, bool> = Result::<i32, bool>::ok(40);\n"
+          "  let e: Result<i32, bool> = Result::<i32, bool>::err(true);\n"
+          "  exit(r.unwrap_or(0) + e.unwrap_or(2)); }\n",
+      42, ""); // 40 + 2
+  sc_run_program(
+      "std Box",
+      PRE "fn main() i32 { let mut b: Box<i32> = Box::<i32>::new(40);\n"
+          "  let old: i32 = b.replace(2);\n"
+          "  let r: i32 = b.get() + old; b.drop(); exit(r); }\n",
+      42, ""); // 2 + 40
+  sc_run_program(
+      "std Vector push/pop/get",
+      PRE "fn main() i32 { let mut v: Vector<i32> = Vector::<i32>::new();\n"
+          "  for i in 0..10 { v.push(i * 3); }\n"                              // [0,3,..,27], len 10
+          "  let r: i32 = v.at(2) + v.pop().unwrap_or(0) + v.get(50).unwrap_or(9);\n" // 6 + 27 + 9
+          "  v.drop(); exit(r); }\n",
+      42, "");
+  sc_run_program(
+      "std Vector capacity/set/first/last",
+      PRE "fn main() i32 { let mut v: Vector<i32> = Vector::<i32>::with_capacity(4);\n"
+          "  v.push(1); v.push(2); v.push(3);\n"
+          "  v.set(0, 12); v.set(1, 18); v.set(2, 12);\n"
+          "  let r: i32 = v.first().unwrap_or(0) + v.at(1) + v.last().unwrap_or(0);\n" // 12 + 18 + 12
+          "  v.drop(); exit(r); }\n",
+      42, "");
+}
+
 int main(void) {
+  test_std_types();
   test_generics();
   test_arithmetic();
   test_control_flow();

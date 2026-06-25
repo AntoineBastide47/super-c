@@ -193,6 +193,7 @@ TH_UNUSED static ScResult sc_compile(const char *name, const char *source, const
     package_free(&pp);
     return r;
   }
+  package_propagate_instances(pp, r.ast); // owners emit cross-module generic instances (matches the CLI)
 
   char *buf = NULL;
   size_t size = 0;

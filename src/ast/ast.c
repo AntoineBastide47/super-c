@@ -254,6 +254,7 @@ static const char *kind_name(const NodeKind kind) {
       "Match",
       "MatchArm",
       "New",
+      "Sizeof",
       "ArrayLiteral",
       "StructInitializer",
       "FieldInitializer",

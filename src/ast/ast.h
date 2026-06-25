@@ -85,6 +85,7 @@ typedef enum {
   NODE_MATCH,
   NODE_MATCH_ARM,
   NODE_NEW,
+  NODE_SIZEOF, // `sizeof(T)` -> usize; the type node is `as.single.value`
   NODE_ARRAY_LITERAL,
   NODE_STRUCT_INITIALIZER,
   NODE_FIELD_INITIALIZER,

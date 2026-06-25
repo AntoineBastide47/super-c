@@ -733,12 +733,15 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       resolve_expr(r, n->as.cast.expression);
       resolve_type(r, n->as.cast.type);
       break;
+    case NODE_SIZEOF:
+      resolve_type(r, n->as.single.value);
+      break;
     case NODE_GENERIC_SPECIALIZATION: {
       // A turbofish base is a generic FUNCTION (value, `f::<T>()`) or a generic TYPE
-      // (`Opt::<i32>::Some(..)`). Resolve in the namespace that actually has the name; default to value.
+      // (`Opt::<i32>::Some(..)`, possibly a prelude type). Only a generic function is a local value, so
+      // anything else (local type, builtin, or prelude/glob type) resolves in the type namespace.
       const NodeId inner = n->as.specialization.expression;
-      if (ast_at_const(r->ast, inner)->kind == NODE_IDENTIFIER && lookup(r, name_span(r, inner), NS_VALUE) == NODE_NONE &&
-          lookup(r, name_span(r, inner), NS_TYPE) != NODE_NONE)
+      if (ast_at_const(r->ast, inner)->kind == NODE_IDENTIFIER && lookup(r, name_span(r, inner), NS_VALUE) == NODE_NONE)
         resolve_ref(r, inner, inner, NS_TYPE, "type");
       else
         resolve_expr(r, inner);
