@@ -210,6 +210,75 @@ static void test_errors(void) {
       "main with parameters", "fn main(x: i32) i32 { return 0; }\n", "'main' must be declared 'fn main() i32'");
 }
 
+// Interface bounds are enforced by the semantic phase: a type argument must implement (via `extend T as
+// Iface`) every interface its parameter is bound to -- inline (`<T: I>`), via a `where` clause, or through
+// a conditional extension. An `extend T as I` must also provide every method the interface requires, and a
+// bounded value may call its interface's methods.
+static void test_interface_bounds(void) {
+  // Satisfied bounds typecheck.
+  expect_ok(
+      "bound satisfied + method dispatch",
+      "interface Writer { fn write(self: *mut Self, n: i32) i32; }\n"
+      "struct File { pub count: i32 }\n"
+      "extend File as Writer { fn write(self: *mut Self, n: i32) i32 { return n; } }\n"
+      "fn use_w<T: Writer>(w: &mut T, n: i32) i32 { return w.write(n); }\n"
+      "fn main() i32 { let mut f = File { count: 0 }; return use_w(&mut f, 1); }\n");
+  expect_ok(
+      "where clause + multi-bound satisfied",
+      "interface A { fn a(self: *mut Self) i32; }\ninterface B { fn b(self: *mut Self) i32; }\n"
+      "struct S { pub v: i32 }\n"
+      "extend S as A { fn a(self: *mut Self) i32 { return self.v; } }\n"
+      "extend S as B { fn b(self: *mut Self) i32 { return self.v; } }\n"
+      "fn both<T>(x: &mut T) i32 where T: A + B { return x.a() + x.b(); }\n"
+      "fn main() i32 { let mut s = S { v: 1 }; return both(&mut s); }\n");
+  expect_ok(
+      "conditional extension satisfied",
+      "interface Drop { fn drop(self: *mut Self) i32; }\n"
+      "struct Res { pub id: i32 }\nextend Res as Drop { fn drop(self: *mut Self) i32 { return self.id; } }\n"
+      "struct Box<T> { pub inner: T }\n"
+      "extend<T: Drop> Box<T> as Drop { fn drop(self: &mut Box<T>) i32 { return self.inner.drop(); } }\n"
+      "fn dispose<U: Drop>(x: &mut U) i32 { return x.drop(); }\n"
+      "fn main() i32 { let mut b = Box::<Res> { inner: Res { id: 1 } }; return dispose(&mut b); }\n");
+
+  // Violations are rejected.
+  expect_error(
+      "bound not satisfied (turbofish)",
+      "interface Writer { fn write(self: *mut Self, n: i32) i32; }\n"
+      "struct Plain { pub x: i32 }\n"
+      "fn use_w<T: Writer>(w: &mut T, n: i32) i32 { return w.write(n); }\n"
+      "fn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n",
+      "does not satisfy bound 'Writer'");
+  expect_error(
+      "impl missing a required method",
+      "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\n"
+      "struct File { pub count: i32 }\n"
+      "extend File as Writer { fn write(self: *mut Self) i32 { return self.count; } }\n"
+      "fn main() i32 { return 0; }\n",
+      "missing method 'flush'");
+  expect_error(
+      "where clause not satisfied",
+      "interface Writer { fn write(self: *mut Self, n: i32) i32; }\n"
+      "struct Plain { pub x: i32 }\n"
+      "fn use_w<T>(w: &mut T, n: i32) i32 where T: Writer { return w.write(n); }\n"
+      "fn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n",
+      "does not satisfy bound 'Writer'");
+  expect_error(
+      "conditional extension: inner type lacks the bound",
+      "interface Drop { fn drop(self: *mut Self) i32; }\nstruct Plain { pub n: i32 }\n"
+      "struct Box<T> { pub inner: T }\n"
+      "extend<T: Drop> Box<T> as Drop { fn drop(self: &mut Box<T>) i32 { return self.inner.drop(); } }\n"
+      "fn dispose<U: Drop>(x: &mut U) i32 { return x.drop(); }\n"
+      "fn main() i32 { let mut b = Box::<Plain> { inner: Plain { n: 1 } }; return dispose(&mut b); }\n",
+      "does not satisfy bound 'Drop'");
+  expect_error(
+      "method not declared by any bound",
+      "interface Writer { fn write(self: *mut Self) i32; }\nstruct File { pub count: i32 }\n"
+      "extend File as Writer { fn write(self: *mut Self) i32 { return self.count; } }\n"
+      "fn f<T: Writer>(w: &mut T) i32 { return w.nope(); }\n"
+      "fn main() i32 { let mut x = File { count: 0 }; return f(&mut x); }\n",
+      "no field or method 'nope'");
+}
+
 int main(void) {
   test_ok();
   test_computed_scalar_types();
@@ -219,6 +288,7 @@ int main(void) {
   test_inferred_let_types();
   test_str_member_types();
   test_errors();
+  test_interface_bounds();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

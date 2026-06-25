@@ -184,6 +184,31 @@ static void test_cross_module_generic_by_value(void) {
   CHECK(run_cmd(crun, NULL, 0) == 60, "re-homed instance method + cross-pool map<U> run (30 + 30)");
 }
 
+// A `pub interface` declared in one module, then implemented over a local type via `extend T as
+// mod::Iface` and consumed by a bounded generic in another module: the bound resolves across the import,
+// the impl satisfies it, and the bounded call dispatches to the concrete method. Built -Werror and run.
+static void test_cross_module_interface(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/iface", DIR);
+  mkfile(root, "shapes.spc", "pub interface Area { fn area(self: *mut Self) i32; }\n");
+  mkfile(root, "main.spc",
+         "import shapes;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "struct Sq { pub s: i32 }\n"
+         "extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return self.s * self.s; } }\n"
+         "fn total<T: shapes::Area>(x: &mut T) i32 { return x.area(); }\n"
+         "fn main() i32 { let mut q = Sq { s: 6 }; exit(total(&mut q)); }\n"); // 36
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module interface compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/iface.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "cross-module interface C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 36, "imported-interface bound dispatches to Sq::area (6*6)");
+}
+
 // Import forms + mangling: an alias import (`s::tag`), a glob import (bare `tag`), two modules with a
 // same-named public function (module mangling must keep them distinct), and a module named like a C
 // stdlib header (`string`) -- the relative-include build must not shadow <string.h>. Built with -Werror.
@@ -304,6 +329,7 @@ int main(void) {
   test_cross_module_enum();
   test_module_features();
   test_cross_module_generic_by_value();
+  test_cross_module_interface();
   test_module_imports();
   test_module_errors();
   test_extensionless_appends();

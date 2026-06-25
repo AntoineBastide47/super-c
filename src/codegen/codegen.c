@@ -1422,6 +1422,41 @@ static void emit_method_targs(Codegen *c, const NodeId callId, const DefId md) {
   }
 }
 
+static bool cg_span_eq(const uint8_t *const sa, const Span a, const uint8_t *const sb, const Span b) {
+  const size_t la = a.end - a.start;
+  return la == (size_t)(b.end - b.start) && memcmp(sa + a.start, sb + b.start, la) == 0;
+}
+
+// The concrete `extend <tdecl> { fn <name> }` method for a type (its module or the current module), used
+// to dispatch a bound method on a now-monomorphized generic receiver to the real impl. {_,NODE_NONE} if none.
+static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl, const uint8_t *const nsrc, const Span name) {
+  const ModuleId scopes[2] = {tmod, c->ast->module};
+  const int ns = tmod == c->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = cg_mod_ast(c, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tg.module != tmod || tg.node != tdecl)
+        continue;
+      const NodeList ms = it->as.impl_def.items;
+      const NodeId *const mids = ast_list(a, ms);
+      for (uint32_t j = 0; j < ms.len; j++) {
+        const Node *const mn = ast_at_const(a, mids[j]);
+        if (mn->kind == NODE_FUNCTION &&
+            cg_span_eq(nsrc, name, cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text))
+          return (DefId){m, mids[j]};
+      }
+    }
+  }
+  return (DefId){0, NODE_NONE};
+}
+
 static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
@@ -1540,12 +1575,24 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   }
 
   if (callee->kind == NODE_MEMBER && !callee->as.member.path) {
-    const DefId md = ast_resolution_def(c->ast, callee->as.member.member);
-    Ast *const ma = cg_mod_ast(c, md.module);
-    if (md.node != NODE_NONE && ast_at_const(ma, md.node)->kind == NODE_FUNCTION) {
+    DefId md = ast_resolution_def(c->ast, callee->as.member.member);
+    if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_FUNCTION) {
       const NodeId obj = callee->as.member.object;
       const TypeId obj_t = ast_type(c->ast, obj);
-      const Ty *const base = ast_type_at(c->ast, strip_ptr(c, obj_t));
+      const TypeId pointee = strip_ptr(c, obj_t);
+      // A method on a generic-parameter receiver (`w: T`, `T: Writer`) resolved to the interface method;
+      // once the param is monomorphized, dispatch to the concrete type's `as`-impl method (`File__write`).
+      if (ast_type_at(c->ast, pointee)->kind == TYPE_GENERIC) {
+        const Ty *const rb = ast_type_at(c->ast, subst_resolve(c, pointee));
+        if (rb->kind == TYPE_STRUCT || rb->kind == TYPE_ENUM) {
+          const DefId cm = cg_find_method(
+              c, rb->module, rb->as.decl, cg_mod_src(c, c->ast->module), name_span(c, callee->as.member.member));
+          if (cm.node != NODE_NONE)
+            md = cm;
+        }
+      }
+      Ast *const ma = cg_mod_ast(c, md.module);
+      const Ty *const base = ast_type_at(c->ast, subst_resolve(c, pointee));
       // self-by-pointer is decided from the self parameter's own type node (in the method's module).
       const NodeList params = ast_at_const(ma, md.node)->as.function.params;
       const NodeId self_type = params.len ? ast_at_const(ma, ast_list(ma, params)[0])->as.parameter.type : NODE_NONE;

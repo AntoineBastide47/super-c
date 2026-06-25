@@ -152,6 +152,7 @@ typedef struct {
         struct {
             NodeId name;
             NodeList generics, bounds, items;
+            bool is_public; // `pub interface` -- exported for cross-module bounds/impls
         } trait_def;
         struct {
             NodeList generics;

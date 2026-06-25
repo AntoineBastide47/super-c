@@ -532,7 +532,48 @@ static void test_string_sso(void) {
       42, "");
 }
 
+// Interfaces end-to-end: a bounded generic dispatches `w.write()` to the concrete `extend T as Iface`
+// method once monomorphized (inferred and turbofish), through `where` clauses, multiple bounds, conditional
+// extensions, and `Self`-returning methods -- each compiled warning-clean and run.
+static void test_interfaces(void) {
+  sc_run_program(
+      "interface bound: dispatch, inference + turbofish",
+      PRE "interface Writer { fn write(self: *mut Self, n: i32) i32; }\n"
+          "struct File { pub count: i32 }\n"
+          "extend File as Writer { fn write(self: *mut Self, n: i32) i32 { self.count = self.count + n; return self.count; } }\n"
+          "fn use_w<T: Writer>(w: &mut T, n: i32) i32 { return w.write(n); }\n"
+          "fn main() i32 { let mut f = File { count: 0 };\n"
+          "  let a = use_w(&mut f, 42); exit(a + use_w::<File>(&mut f, 8)); }\n", // 42 + 50
+      92, "");
+  sc_run_program(
+      "interface: where clause + multiple bounds",
+      PRE "interface A { fn a(self: *mut Self) i32; }\ninterface B { fn b(self: *mut Self) i32; }\n"
+          "struct S { pub v: i32 }\n"
+          "extend S as A { fn a(self: *mut Self) i32 { return self.v; } }\n"
+          "extend S as B { fn b(self: *mut Self) i32 { return self.v + 1; } }\n"
+          "fn both<T>(x: &mut T) i32 where T: A + B { return x.a() + x.b(); }\n"
+          "fn main() i32 { let mut s = S { v: 10 }; exit(both(&mut s)); }\n", // 10 + 11
+      21, "");
+  sc_run_program(
+      "interface: conditional extension dispatches through inner type",
+      PRE "interface Drop { fn drop(self: *mut Self) i32; }\n"
+          "struct Res { pub id: i32 }\nextend Res as Drop { fn drop(self: *mut Self) i32 { return self.id; } }\n"
+          "struct Box<T> { pub inner: T }\n"
+          "extend<T: Drop> Box<T> as Drop { fn drop(self: &mut Box<T>) i32 { return self.inner.drop(); } }\n"
+          "fn dispose<U: Drop>(x: &mut U) i32 { return x.drop(); }\n"
+          "fn main() i32 { let mut b = Box::<Res> { inner: Res { id: 99 } }; exit(dispose(&mut b)); }\n",
+      99, "");
+  sc_run_program(
+      "interface: Self-returning method",
+      PRE "interface Clone { fn dup(self: *mut Self) Self; }\n"
+          "struct P { pub x: i32 }\nextend P as Clone { fn dup(self: *mut Self) Self { return P { x: self.x }; } }\n"
+          "fn copy_of<T: Clone>(w: &mut T) T { return w.dup(); }\n"
+          "fn main() i32 { let mut p = P { x: 7 }; let q = copy_of(&mut p); exit(q.x); }\n",
+      7, "");
+}
+
 int main(void) {
+  test_interfaces();
   test_string_sso();
   test_unions();
   test_closures();

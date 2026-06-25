@@ -711,8 +711,8 @@ static NodeId parse_item(Parser *p) {
   // `pub` (LL(1): one-token lookahead) may prefix a struct, enum, function, const, or type alias.
   const bool is_public = match(p, Pub);
   if (is_public && !check(p, Fn) && !check(p, Struct) && !check(p, Union) && !check(p, Enum) && !check(p, Const) &&
-      !check(p, Type))
-    error_here(p, "'pub' may only be applied to a struct, union, enum, function, const, or type");
+      !check(p, Type) && !check(p, Interface))
+    error_here(p, "'pub' may only be applied to a struct, union, enum, function, const, interface, or type");
   switch (peek_type(p)) {
     case Fn: {
       const NodeId f = parse_function(p, true);
@@ -735,8 +735,11 @@ static NodeId parse_item(Parser *p) {
       ast_at(p->ast, e)->as.aggregate.is_public = is_public;
       return e;
     }
-    case Interface:
-      return parse_interface(p);
+    case Interface: {
+      const NodeId it = parse_interface(p);
+      ast_at(p->ast, it)->as.trait_def.is_public = is_public;
+      return it;
+    }
     case Extend:
       return parse_extend(p);
     case Type: {
