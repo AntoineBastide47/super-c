@@ -41,6 +41,7 @@ typedef enum TokenType {
   Interface,
   True,
   Type,
+  Union,
   Unsafe,
   Where,
   While,

@@ -34,6 +34,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Interface",
     "True",
     "Type",
+    "Union",
     "Unsafe",
     "Where",
     "While",

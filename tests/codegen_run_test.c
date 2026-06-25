@@ -485,7 +485,56 @@ static void test_closures(void) {
       42, "");
 }
 
+// Untagged unions: fields overlap in memory (a C `union`), so writing one field and reading another is
+// type punning. Also a value type -- methods, &mut self, and an independent by-value copy.
+static void test_unions(void) {
+  // Little-endian: the low byte of 0x44434241 is 0x41 ('A'=65), the high byte 0x44 ('D'=68).
+  sc_run_program(
+      "union type punning",
+      PRE "union Bits { pub i: u32, pub bytes: [u8; 4] }\n"
+          "fn main() i32 { let u: Bits = Bits { i: 0x44434241 };\n"
+          "  exit(u.bytes[0] as i32 + u.bytes[3] as i32 - 100); }\n", // 65 + 68 - 100
+      33, "");
+  sc_run_program(
+      "union methods + independent value copy",
+      PRE "union Tag { raw: u16, parts: [u8; 2] }\n"
+          "extend Tag { fn make(v: u16) Tag { return Tag { raw: v }; }\n"
+          "  fn lo(self: &Tag) u8 { return self.parts[0]; }\n"
+          "  fn set(self: &mut Tag, v: u16) { self.raw = v; } }\n"
+          "fn main() i32 { let mut t: Tag = Tag::make(0x0121);\n" // lo byte 0x21 = 33
+          "  let copy: Tag = t; t.set(0xFFFF);\n"                  // mutate original; copy is unaffected
+          "  exit(copy.lo() as i32); }\n",
+      33, "");
+}
+
+// The std String's small-string optimization: short strings live inline (capacity 23, no allocation),
+// crossing 23 bytes transitions to the heap with content intact, and shrink_to_fit moves a short heap
+// string back inline. Exercised end-to-end through the prelude String.
+static void test_string_sso(void) {
+  sc_run_program(
+      "string SSO: short stays inline",
+      PRE "fn main() i32 { let mut s: String = String::from_str(\"hi\");\n"
+          "  s.push_str(\", world\");\n"                         // 9 bytes, still inline
+          "  if !s.eq_str(\"hi, world\") { exit(1); }\n"
+          "  let c: i32 = s.capacity() as i32;\n"                // 23: inline budget, never allocated
+          "  s.drop(); exit(c); }\n",
+      23, "");
+  sc_run_program(
+      "string SSO: heap transition + shrink back",
+      PRE "fn main() i32 { let mut s: String = String::new();\n"
+          "  let mut k: usize = 0; while k < 40 { s.push_byte(65); k = k + 1; }\n" // 'A'x40 -> heap
+          "  if s.len() != 40 { exit(1); }\n"
+          "  if s.capacity() < 40 { exit(2); }\n"                                  // grew onto the heap
+          "  let mut j: usize = 0; while j < 40 { if s.byte(j) != 65 { exit(3); } j = j + 1; }\n" // bytes survived
+          "  s.truncate(5); s.shrink_to_fit();\n"
+          "  if s.capacity() != 23 { exit(4); }\n"                                 // moved back inline
+          "  let r: i32 = s.len() as i32 + 37; s.drop(); exit(r); }\n",            // 5 + 37
+      42, "");
+}
+
 int main(void) {
+  test_string_sso();
+  test_unions();
   test_closures();
   test_std_types();
   test_generics_over_user_types();

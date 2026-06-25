@@ -3812,6 +3812,11 @@ static void emit_method_macro_invocations(Codegen *c, const bool define) {
   }
 }
 
+// The C aggregate keyword for a struct decl: `union` for an untagged union, else `struct`.
+static const char *agg_kw(const Node *const n) {
+  return n->kind == NODE_STRUCT && n->as.aggregate.is_union ? "union" : "struct";
+}
+
 // Phase 1: forward typedefs so any type can name any struct/payload-enum regardless of order.
 // Payload-less enums are self-contained, so they are emitted in full here.
 static void phase_forward(Codegen *c) {
@@ -3822,7 +3827,7 @@ static void phase_forward(Codegen *c) {
     if (n->kind == NODE_STRUCT) {
       if (n->as.aggregate.generics.len)
         continue; // a generic template emits nothing; its instantiations are emitted separately
-      emit(c, "typedef struct ");
+      emit(c, "typedef %s ", agg_kw(n));
       emit_local_type_name(c, n->as.aggregate.name);
       emit(c, " ");
       emit_local_type_name(c, n->as.aggregate.name);
@@ -3877,7 +3882,7 @@ static NodeId struct_dep(Codegen *c, const NodeId tn) {
 
 static void emit_type_decl(Codegen *c, const NodeId declId) {
   const Node *const n = ast_at_const(c->ast, declId);
-  emit(c, "struct ");
+  emit(c, "%s ", agg_kw(n));
   emit_local_type_name(c, n->as.aggregate.name);
   emit(c, " {\n");
   if (n->kind == NODE_ENUM) {
@@ -4131,7 +4136,7 @@ static void emit_referenced_fwd(Codegen *c) {
     if (t.kind == TYPE_STRUCT || (t.kind == TYPE_ENUM && aggregate_has_payload_in(c, t.module, dn))) {
       char nm[160];
       render_qualified(c, t.module, dn->as.aggregate.name, nm, sizeof nm);
-      emit(c, "typedef struct %s %s;\n", nm, nm);
+      emit(c, "typedef %s %s %s;\n", agg_kw(dn), nm, nm); // `union` for a cross-module untagged union
     } else if (t.kind == TYPE_ENUM) {
       Ast *const sa = c->ast;
       const uint8_t *const ss = c->source;
