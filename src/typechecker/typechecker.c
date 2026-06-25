@@ -301,6 +301,8 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   switch (v->as.literal.token_type) {
     case IntegerLiteral: // an integer literal fits any int *or* float slot (`let f: f64 = 0;`)
       return et->kind == TYPE_BUILTIN && (bt_is_int(et->as.builtin) || bt_is_float(et->as.builtin));
+    case CharacterLiteral: // an ASCII char literal fits any int slot too (`contains_byte('l')`), like `b'l'`
+      return et->kind == TYPE_BUILTIN && bt_is_int(et->as.builtin);
     case FloatLiteral: // a float literal stays float-only (no implicit float->int truncation)
       return et->kind == TYPE_BUILTIN && bt_is_float(et->as.builtin);
     case Null:

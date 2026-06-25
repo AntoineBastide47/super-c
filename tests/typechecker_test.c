@@ -47,6 +47,10 @@ static void test_ok(void) {
   expect_ok("inferred binding", "fn main() i32 { let x = 1; let y: i32 = x; }\n");
   expect_ok("int literal initializes a float", "fn main() i32 { let f: f64 = 0; let g: f32 = 5; let h: f64 = -3; }\n");
   expect_ok(
+      "char literal coerces to any int slot",
+      "fn take(b: u8) u8 { return b; }\n"
+      "fn main() i32 { let x: u8 = 'l'; let y: u32 = 'A'; let z: u8 = take('z'); }\n");
+  expect_ok(
       "call argument types",
       "fn add(a: i32, b: i32) i32 { return a; }\n"
       "fn main() i32 { let z: i32 = add(1, 2); }\n");
@@ -158,6 +162,8 @@ static void test_str_member_types(void) {
 static void test_errors(void) {
   expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
+  expect_error( // only char *literals* coerce; a char value needs an explicit conversion
+      "non-literal char not assignable to u8", "fn f(c: char) u8 { return c; }\n", "mismatched types");
   expect_error(
       "argument type", "fn g(a: bool) void {}\nfn main() i32 { g(1); }\n", "mismatched types");
   expect_error("argument count", "fn g(a: i32) void {}\nfn main() i32 { g(1, 2); }\n", "expected 1 argument");
