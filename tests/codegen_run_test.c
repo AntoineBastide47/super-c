@@ -410,7 +410,51 @@ static void test_std_types(void) {
       42, "");
 }
 
+// Closures / anonymous functions (non-capturing): compact `|x: T| expr`, anonymous `fn(..) .. { .. }`,
+// as fn-pointer arguments, let-bound + directly called, and driving the generic std higher-order methods.
+static void test_closures(void) {
+  // Both forms passed where a `fn(i32) i32` pointer is expected.
+  sc_run_program(
+      "closure as fn-pointer arg",
+      PRE "fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }\n"
+          "fn main() i32 {\n"
+          "  let a: i32 = apply(|x: i32| x + 1, 20);\n"               // 21
+          "  let b: i32 = apply(fn(x: i32) i32 { return x * 2; }, 10);\n" // 20
+          "  let c: i32 = apply(|x: i32| x - 1, 2);\n"               // 1
+          "  exit(a + b + c); }\n",                                  // 42
+      42, "");
+  // Let-bound closures, then invoked directly through the binding.
+  sc_run_program(
+      "closure let + direct call",
+      PRE "fn main() i32 {\n"
+          "  let g = |x: i32| x * 3;\n"
+          "  let h = fn(n: i32) i32 { return n + 5; };\n"
+          "  exit(g(9) + h(10)); }\n",                               // 27 + 15 = 42
+      42, "");
+  // A void anonymous fn used for a side effect; exact stdout asserted.
+  sc_run_program(
+      "closure void side-effect",
+      PRE "fn run(f: fn(i32) void, n: i32) void { f(n); }\n"
+          "fn main() i32 { run(fn(c: i32) { putchar(c); }, 65); exit(0); }\n",
+      0, "A");
+  // Closures driving the monomorphized generic higher-order std methods (return type inferred per closure).
+  sc_run_program(
+      "closures into std HOFs",
+      PRE "fn main() i32 {\n"
+          "  let o: Option<i32> = Option::<i32>::Some(20);\n"
+          "  let v1: i32 = o.map(|x: i32| x + 1).unwrap_or(0);\n"    // 21
+          "  let mut vec: Vector<i32> = Vector::<i32>::new();\n"
+          "  vec.push(1); vec.push(2); vec.push(3); vec.push(4);\n"
+          "  let fd: i32 = vec.find(|x: i32| x > 2).unwrap_or(0);\n" // 3
+          "  let mut d: Vector<i32> = vec.map(|x: i32| x * 2);\n"    // [2,4,6,8]
+          "  let s: i32 = d.at(0) + d.at(2) + d.at(3);\n"           // 2+6+8 = 16
+          "  vec.drop(); d.drop();\n"
+          "  exit(v1 + fd + s + 2); }\n",                            // 21+3+16+2 = 42
+      42, "");
+}
+
 int main(void) {
+  test_closures();
   test_std_types();
   test_generics();
   test_arithmetic();

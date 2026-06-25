@@ -135,6 +135,7 @@ static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut);
 static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
 static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
 static void inst_name(Codegen *c, const TyInstance *it, char *out, size_t cap);
+static void closure_name(Codegen *c, NodeId id, char *out, size_t cap);
 static TypeId subst_lookup(Codegen *c, ModuleId m, NodeId decl);
 static TypeId subst_resolve(Codegen *c, TypeId t);
 static bool type_is_concrete(Codegen *c, TypeId t);
@@ -1451,6 +1452,12 @@ static void emit_expr(Codegen *c, const NodeId id) {
     case NODE_CALL:
       emit_call(c, id, n);
       break;
+    case NODE_CLOSURE: { // a closure value is just the address of its hoisted static function
+      char nm[200];
+      closure_name(c, id, nm, sizeof nm);
+      emit_cstr(c, nm);
+      break;
+    }
     case NODE_INDEX: {
       const Ty *const ot = ast_type_at(c->ast, ast_type(c->ast, n->as.index.object));
       if (ot->kind == TYPE_SLICE) {
@@ -2331,6 +2338,80 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
   }
 }
 
+// `<mod>__closure_<nodeid>`: a hoisted closure's C symbol. The NodeId is unique within the module, so the
+// name is stable across the prototype, the definition and every value reference to the closure.
+static void closure_name(Codegen *c, const NodeId id, char *out, const size_t cap) {
+  size_t k = render_modpfx(c, c->ast->module, out, cap);
+  k = buf_append(out, cap, k, "closure_");
+  char idb[16];
+  snprintf(idb, sizeof idb, "%u", (unsigned)id);
+  buf_append(out, cap, k, idb);
+}
+
+// Emit a hoisted closure as a file-local `static` function: a prototype when !with_body, else the body. A
+// compact closure (`expr_body`) returns its body expression; an anonymous `fn` emits its block verbatim.
+static void emit_closure_fn(Codegen *c, const NodeId id, const bool with_body) {
+  const Node *const n = ast_at_const(c->ast, id);
+  char nm[200];
+  closure_name(c, id, nm, sizeof nm);
+  char ps[1024];
+  render_params(c, n->as.closure.params, ps, sizeof ps);
+  char decl[1300];
+  size_t at = buf_append(decl, sizeof decl, 0, nm);
+  at = buf_append(decl, sizeof decl, at, "(");
+  at = buf_append(decl, sizeof decl, at, ps);
+  buf_append(decl, sizeof decl, at, ")");
+
+  const NodeId body = n->as.closure.body;
+  const bool expr_body = n->as.closure.expr_body;
+  const TypeId rt = expr_body ? ast_type(c->ast, body) : TYPE_NONE;
+  emit(c, "static ");
+  char out[1400];
+  if (expr_body) {
+    render_type_id(c, rt, decl, out, sizeof out);
+  } else {
+    const NodeList rets = n->as.closure.returns;
+    if (rets.len == 1) {
+      const NodeId r0 = ast_list(c->ast, rets)[0];
+      const Node *const rn = ast_at_const(c->ast, r0);
+      render_type_node(c, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0, decl, out, sizeof out);
+    } else {
+      buf_join3(out, sizeof out, "void ", "", decl);
+    }
+  }
+  emit_cstr(c, out);
+  if (!with_body) {
+    emit(c, ";\n");
+    return;
+  }
+  c->current_ret[0] = '\0';
+  if (expr_body) {
+    const Ty *const rty = rt != TYPE_NONE ? ast_type_at(c->ast, rt) : NULL;
+    const bool is_void = rty && rty->kind == TYPE_BUILTIN && rty->as.builtin == BT_VOID;
+    emit(c, " {\n");
+    c->depth++;
+    emit_indent(c);
+    if (!is_void)
+      emit(c, "return ");
+    emit_expr(c, body);
+    emit(c, ";\n");
+    c->depth--;
+    emit(c, "}\n\n");
+  } else {
+    emit(c, " ");
+    emit_block(c, body);
+    emit(c, "\n\n");
+  }
+}
+
+// Hoist every closure in this module to a top-level static function (prototypes, then definitions). The
+// flat node scan finds closures at any nesting depth; they are emitted in the module that defines them.
+static void emit_closures(Codegen *c, const bool with_body) {
+  for (size_t i = 0; i < c->ast->nodes.len; i++)
+    if (c->ast->nodes.data[i].kind == NODE_CLOSURE)
+      emit_closure_fn(c, (NodeId)i, with_body);
+}
+
 // Emit each collected generic instantiation as a concrete `static` function (a copy of the generic body
 // with its type params bound to the instantiation's concrete types). `with_body` false emits prototypes.
 // Same-module only for now: the generic function lives in this module's ast.
@@ -2826,8 +2907,10 @@ static void phase_prototypes(Codegen *c, const int which) {
           emit_function(c, mids[j], (DefId){0, NODE_NONE}, true, false, NULL, false);
     }
   }
-  if (which != PROTO_PUBLIC) // free-function specs are static -> their prototypes live in the .c, not the header
+  if (which != PROTO_PUBLIC) { // free-function specs and closures are static -> their prototypes live in the .c
     emit_specializations(c, false);
+    emit_closures(c, false);
+  }
   emit_method_specializations(c, which, false); // method specs: pub -> header (PUBLIC), private -> .c (PRIVATE)
 }
 
@@ -2873,6 +2956,7 @@ static void phase_bodies(Codegen *c) {
 
   emit_specializations(c, true);            // concrete generic free-function instantiations
   emit_method_specializations(c, PROTO_ALL, true); // concrete generic method instantiations
+  emit_closures(c, true);                    // hoisted closure / anonymous-fn bodies
 
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);

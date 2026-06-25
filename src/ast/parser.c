@@ -984,6 +984,62 @@ static NodeId parse_primary(Parser *p) {
                     .as.array_literal = {.elements = elements},
                 });
   }
+  if (match(p, Fn)) { // anonymous function `fn(params) RetOpt { block }`
+    const NodeList params = parse_parameters(p);
+    const NodeList returns = parse_function_returns(p);
+    const NodeId body = parse_block(p);
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_CLOSURE,
+                    .span = span_new(start, previous_end(p)),
+                    .as.closure = {.params = params, .returns = returns, .body = body, .expr_body = false},
+                });
+  }
+  if (check(p, Pipe) || check(p, PipePipe)) { // compact closure `|params| expr` (`||` = no params)
+    const bool empty = match(p, PipePipe);
+    if (!empty)
+      advance(p); // opening `|`
+    const uint32_t mark = ast_mark(p->ast);
+    if (!empty) {
+      while (!check(p, Pipe) && !at_end(p)) {
+        const uint32_t pstart = token_start(raw_peek(p));
+        const NodeId name = identifier(p);
+        NodeId type = NODE_NONE;
+        if (match(p, Colon))
+          type = parse_type(p);
+        else
+          error_here(p, "closure parameter requires a type annotation (e.g. `|x: i32|`)");
+        ast_push(
+            p->ast, ast_add(
+                        p->ast, (Node){
+                                    .kind = NODE_PARAMETER,
+                                    .span = span_new(pstart, previous_end(p)),
+                                    .as.parameter = {.name = name, .type = type},
+                                }));
+        if (!match(p, Comma))
+          break;
+      }
+      expect(p, Pipe, "'|'");
+    }
+    const NodeList params = ast_commit(p->ast, mark);
+    if (check(p, LeftBrace)) { // block-bodied compact closures aren't supported yet; recover by eating the block
+      error_here(p, "compact closures with a block body are unsupported; use `fn(params) Ret { ... }`");
+      const NodeId block = parse_block(p);
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_CLOSURE,
+                      .span = span_new(start, previous_end(p)),
+                      .as.closure = {.params = params, .returns = {0}, .body = block, .expr_body = false},
+                  });
+    }
+    const NodeId body = parse_expression(p);
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_CLOSURE,
+                    .span = span_new(start, previous_end(p)),
+                    .as.closure = {.params = params, .returns = {0}, .body = body, .expr_body = true},
+                });
+  }
   error_here(p, "expected expression");
   if (!at_end(p))
     advance(p);

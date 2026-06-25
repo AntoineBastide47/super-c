@@ -225,15 +225,20 @@ static int fn_sig(TypeChecker *t, const Ty *const fty, TypeId *const params, con
   const ModuleId m = fty->module;
   Ast *const fa = mod_ast(t, m);
   const Node *const fn = ast_at_const(fa, fty->as.decl);
-  const bool named = fn->kind == NODE_FUNCTION;
-  const NodeList ps = named ? fn->as.function.params : fn->as.function_type.params;
-  const NodeList rs = named ? fn->as.function.returns : fn->as.function_type.returns;
+  NodeList ps, rs;
+  switch (fn->kind) {
+    case NODE_FUNCTION: ps = fn->as.function.params; rs = fn->as.function.returns; break;
+    case NODE_CLOSURE: ps = fn->as.closure.params; rs = fn->as.closure.returns; break;
+    default: ps = fn->as.function_type.params; rs = fn->as.function_type.returns; break; // NODE_FUNCTION_TYPE
+  }
   const NodeId *const pid = ast_list(fa, ps);
   for (uint32_t i = 0; i < ps.len && (int)i < cap; i++) {
     const Node *const p = ast_at_const(fa, pid[i]);
     params[i] = lower_type_in(t, m, p->kind == NODE_PARAMETER ? p->as.parameter.type : pid[i]);
   }
-  if (rs.len == 1) {
+  if (fn->kind == NODE_CLOSURE && fn->as.closure.expr_body) {
+    *ret = ast_type(fa, fn->as.closure.body); // compact closure: return type inferred from the body
+  } else if (rs.len == 1) {
     const NodeId r0 = ast_list(fa, rs)[0];
     const Node *const rn = ast_at_const(fa, r0);
     *ret = lower_type_in(t, m, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
@@ -243,13 +248,22 @@ static int fn_sig(TypeChecker *t, const Ty *const fty, TypeId *const params, con
   return (int)ps.len;
 }
 
+// A function's return is void in two spellings: an explicit `void` (BT_VOID) and an omitted return type
+// (TYPE_NONE, used by a no-annotation closure/fn body). Treat them as the same when matching signatures.
+static bool ret_eq(const TypeId a, const TypeId b) {
+  if (a == b)
+    return true;
+  const TypeId v = ast_builtin(BT_VOID);
+  return (a == TYPE_NONE || a == v) && (b == TYPE_NONE || b == v);
+}
+
 // Two function types are compatible when their signatures match structurally (so a named function
 // passes where a `fn(..) ..` pointer is expected, even though they intern to distinct Tys keyed on
 // their decl node). C function-pointer types must match exactly, so params/return compare by identity.
 static bool fn_compatible(TypeChecker *t, const Ty *const ex, const Ty *const ac) {
   TypeId ep[4], ap[4], er, ar;
   const int en = fn_sig(t, ex, ep, 4, &er), an = fn_sig(t, ac, ap, 4, &ar);
-  if (en != an || en > 4 || er != ar)
+  if (en != an || en > 4 || !ret_eq(er, ar))
     return false;
   for (int i = 0; i < en; i++)
     if (ep[i] != ap[i])
@@ -955,7 +969,7 @@ static bool fn_compatible_subst(TypeChecker *t, const Ty *const ex, const Ty *co
   const int en = fn_sig(t, ex, ep, 4, &er), an = fn_sig(t, ac, ap, 4, &ar);
   if (en != an || en > 4)
     return false;
-  if (subst_type(t, subst_type(t, er, gp, ga, gn), rp, ra, rn) != ar)
+  if (!ret_eq(subst_type(t, subst_type(t, er, gp, ga, gn), rp, ra, rn), ar))
     return false;
   for (int i = 0; i < en; i++)
     if (subst_type(t, subst_type(t, ep[i], gp, ga, gn), rp, ra, rn) != ap[i])
@@ -995,8 +1009,9 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
   Ast *const fa = mod_ast(t, fmod);
   const Node *const fn = ast_at_const(fa, ct->as.decl);
   const bool named = fn->kind == NODE_FUNCTION;
-  const NodeList params = named ? fn->as.function.params : fn->as.function_type.params;
-  const NodeList returns = named ? fn->as.function.returns : fn->as.function_type.returns;
+  const bool clos = fn->kind == NODE_CLOSURE;
+  const NodeList params = named ? fn->as.function.params : clos ? fn->as.closure.params : fn->as.function_type.params;
+  const NodeList returns = named ? fn->as.function.returns : clos ? fn->as.closure.returns : fn->as.function_type.returns;
 
   // A method call `obj.m(args)` binds the receiver to the first (self) parameter implicitly.
   uint32_t skip = 0;
@@ -1096,6 +1111,8 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
         err_mismatch(t, aids[i], pt);
     }
   }
+  if (clos && fn->as.closure.expr_body)
+    return ast_type(fa, fn->as.closure.body); // compact closure callee: return type inferred from its body
   if (returns.len != 1)
     return TYPE_NONE; // 0 or multiple returns: no single value type yet
   const NodeId r0 = ast_list(fa, returns)[0];
@@ -1285,6 +1302,23 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_CALL:
       result = check_call(t, n, id);
       break;
+    case NODE_CLOSURE: {
+      const NodeList params = n->as.closure.params;
+      const NodeId *const pids = ast_list(a, params);
+      for (uint32_t i = 0; i < params.len; i++)
+        decl_type(t, pids[i]); // type each parameter so its body references resolve
+      if (n->as.closure.expr_body) {
+        check_expr(t, n->as.closure.body); // its type IS the closure's return type
+      } else {
+        const NodeList saved = t->current_returns; // a `return` inside an anon `fn` targets the closure
+        t->current_returns = n->as.closure.returns;
+        check_stmt(t, n->as.closure.body);
+        t->current_returns = saved;
+      }
+      // The closure is a function value keyed on its own node, like a `fn(..) ..` pointer type.
+      result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .module = a->module, .as.decl = id});
+      break;
+    }
     case NODE_INDEX: {
       const TypeId obj = check_expr(t, n->as.index.object);
       const TypeId idx = check_expr(t, n->as.index.index);

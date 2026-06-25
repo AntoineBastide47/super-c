@@ -273,6 +273,7 @@ static const char *kind_name(const NodeKind kind) {
       "Binary",
       "Assignment",
       "Call",
+      "Closure",
       "Index",
       "Member",
       "Cast",
@@ -453,6 +454,11 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
     case NODE_CALL:
       print_child(out, a, n->as.call.callee, source, depth + 1);
       print_list(out, a, n->as.call.args, source, depth + 1);
+      break;
+    case NODE_CLOSURE:
+      print_list(out, a, n->as.closure.params, source, depth + 1);
+      print_list(out, a, n->as.closure.returns, source, depth + 1);
+      print_child(out, a, n->as.closure.body, source, depth + 1);
       break;
     case NODE_INDEX:
       print_child(out, a, n->as.index.object, source, depth + 1);
