@@ -8,10 +8,13 @@ struct Parser {
     Token_Vec tokens;
     size_t current;
     unsigned pending_gt;
+    unsigned depth; // recursive-descent nesting depth, bounded by PARSE_MAX_DEPTH so pathological input diagnoses, not crashes
     bool allow_struct_initializer;
     Ast *ast;
     ERRORS_VARIABLES;
 };
+
+#define PARSE_MAX_DEPTH 256
 
 static NodeId parse_item(Parser *p);
 static NodeId parse_statement(Parser *p);
@@ -63,6 +66,10 @@ ALWAYS_INLINE Token raw_peek(const Parser *p) {
 
 ALWAYS_INLINE TokenType peek_type(const Parser *p) {
   return p->pending_gt ? GreaterThan : token_type(raw_peek(p));
+}
+
+ALWAYS_INLINE TokenType peek_next_type(const Parser *p) {
+  return p->pending_gt ? token_type(raw_peek(p)) : token_type(p->tokens.data[p->current + 1]);
 }
 
 ALWAYS_INLINE bool at_end(const Parser *p) {
@@ -345,7 +352,11 @@ static NodeId parse_parameter_name(Parser *p) {
     return ast_add(
         p->ast, (Node){.kind = NODE_IDENTIFIER, .span = token_span(token), .as.name = {.text = token_span(token)}});
   }
-  return identifier(p);
+  const bool is_mut = match(p, Mut); // `fn f(mut p: T)` -- carried on the name node, read when building the parameter
+  const NodeId id = identifier(p);
+  if (is_mut && id != NODE_NONE)
+    ast_at(p->ast, id)->as.name.is_mutable = true;
+  return id;
 }
 
 static NodeList parse_parameters(Parser *p) {
@@ -371,7 +382,9 @@ static NodeList parse_parameters(Parser *p) {
                       p->ast, (Node){
                                   .kind = NODE_PARAMETER,
                                   .span = span_new(node_span(p, name).start, node_span(p, type).end),
-                                  .as.parameter = {.name = name, .type = type},
+                                  .as.parameter = {.name = name,
+                                                   .type = type,
+                                                   .is_mutable = ast_at_const(p->ast, name)->as.name.is_mutable},
                               }));
     }
     if (!match(p, Comma))
@@ -824,6 +837,22 @@ ALWAYS_INLINE bool is_literal_token(const TokenType type) {
 
 static NodeId parse_pattern_atom(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
+  // `-<literal>` is a negative literal pattern: parse it as a unary-minus over the literal so the
+  // type checker and codegen reuse their existing `-literal` handling (a literal for coercion/emit).
+  if (check(p, Minus) && is_literal_token(peek_next_type(p))) {
+    advance(p);
+    const NodeId value = literal(p);
+    const NodeId neg = ast_add(
+        p->ast, (Node){
+                    .kind = NODE_UNARY,
+                    .span = span_new(start, node_span(p, value).end),
+                    .as.unary = {.op = Minus, .operand = value, .qualifier = TYPE_QUAL_NONE},
+                });
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_PATTERN_LITERAL, .span = span_new(start, node_span(p, value).end),
+                    .as.single = {.value = neg}});
+  }
   if (is_literal_token(peek_type(p))) {
     const NodeId value = literal(p);
     return ast_add(
@@ -1160,22 +1189,35 @@ static NodeId parse_postfix(Parser *p) {
 }
 
 ALWAYS_INLINE bool unary_operator(const TokenType type) {
-  return type == Bang || type == Minus || type == Star || type == Ampersand || type == Move || type == Unsafe;
+  return type == Bang || type == Tilde || type == Minus || type == Star || type == Ampersand || type == Move ||
+         type == Unsafe;
 }
 
 static NodeId parse_unary(Parser *p) {
-  if (!unary_operator(peek_type(p)))
-    return parse_postfix(p);
-  const Token op = advance(p);
-  // `&mut expr` is a mutable address-of (one-token lookahead after `&`, so still LL(1)).
-  const TypeQualifier qualifier = token_type(op) == Ampersand && match(p, Mut) ? TYPE_QUAL_MUT : TYPE_QUAL_NONE;
-  const NodeId operand = token_type(op) == Unsafe && check(p, LeftBrace) ? parse_block(p) : parse_unary(p);
-  return ast_add(
-      p->ast, (Node){
-                  .kind = NODE_UNARY,
-                  .span = span_new(token_start(op), node_span(p, operand).end),
-                  .as.unary = {.op = token_type(op), .operand = operand, .qualifier = qualifier},
-              });
+  // Bounded recursion: parse_unary is entered once per nesting level (every prefix op AND every
+  // parenthesized sub-expression flows through here), so one guard here caps total descent depth.
+  if (p->depth >= PARSE_MAX_DEPTH) {
+    error_here(p, "expression nested too deeply");
+    return NODE_NONE;
+  }
+  p->depth++;
+  NodeId result;
+  if (!unary_operator(peek_type(p))) {
+    result = parse_postfix(p);
+  } else {
+    const Token op = advance(p);
+    // `&mut expr` is a mutable address-of (one-token lookahead after `&`, so still LL(1)).
+    const TypeQualifier qualifier = token_type(op) == Ampersand && match(p, Mut) ? TYPE_QUAL_MUT : TYPE_QUAL_NONE;
+    const NodeId operand = token_type(op) == Unsafe && check(p, LeftBrace) ? parse_block(p) : parse_unary(p);
+    result = ast_add(
+        p->ast, (Node){
+                    .kind = NODE_UNARY,
+                    .span = span_new(token_start(op), node_span(p, operand).end),
+                    .as.unary = {.op = token_type(op), .operand = operand, .qualifier = qualifier},
+                });
+  }
+  p->depth--;
+  return result;
 }
 
 ALWAYS_INLINE int precedence(const TokenType type) {
@@ -1234,7 +1276,8 @@ static NodeId parse_binary(Parser *p, const int minimum) {
 
 ALWAYS_INLINE bool assignment_operator(const TokenType type) {
   return type == Equal || type == PlusEqual || type == MinusEqual || type == StarEqual || type == SlashEqual ||
-         type == PercentEqual;
+         type == PercentEqual || type == AmpersandEqual || type == PipeEqual || type == CaretEqual ||
+         type == LeftShiftEqual || type == RightShiftEqual;
 }
 
 static NodeId parse_expression(Parser *p) {
@@ -1261,7 +1304,7 @@ static NodeId parse_range_bound(Parser *p, const RangeContext context) {
 static bool starts_range_bound(Parser *p, const RangeContext context) {
   const TokenType t = peek_type(p);
   if (context == RANGE_PATTERN)
-    return is_literal_token(t) || t == Identifier || t == LeftParen;
+    return is_literal_token(t) || t == Identifier || t == LeftParen || t == Minus; // `..=-1` negative end bound
   return is_literal_token(t) || t == Identifier || t == LeftParen || t == SelfLower || t == New || t == Switch ||
          t == Sizeof || unary_operator(t);
 }
