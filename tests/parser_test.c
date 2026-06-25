@@ -187,6 +187,36 @@ static void test_struct_initializer_flag(void) {
   }
 }
 
+static void test_closures(void) {
+  // Compact `|x: i32| expr` -> a NODE_CLOSURE with an expression body; the `|` is not parsed as bitwise-or.
+  Ast *a = sc_parse("compact closure", "fn f() i32 { let g = |x: i32| x + 1; return g(0); }\n");
+  if (a) {
+    const Node *let = ast_at_const(a, th_nth_kind(a, NODE_LET, 0));
+    const Node *clo = ast_at_const(a, let->as.let_stmt.value);
+    CHECK(clo->kind == NODE_CLOSURE, "`|x| e` parses to a closure");
+    CHECK(clo->as.closure.expr_body, "compact closure has an expression body");
+    CHECK(clo->as.closure.params.len == 1, "the closure has one parameter");
+    ast_free(&a);
+  }
+  // Anonymous `fn(..) Ret { .. }` -> a NODE_CLOSURE with a block body and an explicit return type.
+  Ast *b = sc_parse("anonymous fn", "fn f() i32 { let h = fn(x: i32) i32 { return x * 2; }; return h(0); }\n");
+  if (b) {
+    const Node *let = ast_at_const(b, th_nth_kind(b, NODE_LET, 0));
+    const Node *clo = ast_at_const(b, let->as.let_stmt.value);
+    CHECK(clo->kind == NODE_CLOSURE, "`fn(..) .. {}` parses to a closure");
+    CHECK(!clo->as.closure.expr_body, "anonymous fn has a block body");
+    CHECK(clo->as.closure.returns.len == 1, "anonymous fn keeps its explicit return type");
+    ast_free(&b);
+  }
+  // Infix `|` is still bitwise-or, not a closure.
+  Ast *c = sc_parse("bitwise or stays binary", "fn f() i32 { return 1 | 2; }\n");
+  if (c) {
+    CHECK(th_nth_kind(c, NODE_CLOSURE, 0) == NODE_NONE, "`a | b` is not a closure");
+    CHECK(th_nth_kind(c, NODE_BINARY, 0) != NODE_NONE, "`a | b` is a binary expression");
+    ast_free(&c);
+  }
+}
+
 static void test_error_recovery(void) {
   char first[256];
   const size_t n =
@@ -304,6 +334,7 @@ int main(void) {
   test_precedence();
   test_generic_shift_split();
   test_struct_initializer_flag();
+  test_closures();
   test_error_recovery();
   test_bare_conditions_and_ranges();
   test_switch_pattern_ranges();

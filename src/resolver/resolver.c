@@ -30,6 +30,9 @@ struct Resolver {
     U32_Vec scope_starts; // stack of symbols.len at each scope entry
     SymbolIndex symbol_index; // (namespace, name hash) -> newest matching symbol index + 1
     NodeId current_self;  // type 'Self' refers to inside the current interface/extension (else NODE_NONE)
+    bool in_closure;      // resolving inside a closure body: outer-local value refs are captures (rejected)
+    bool in_generic;      // resolving inside a generic fn/impl: closures here can't be monomorphized yet
+    uint32_t closure_floor; // symbols.len at the innermost closure entry; refs below it are captures
     const Package *package; // for resolving `import`ed module-qualified names (NULL = no imports)
     ERRORS_VARIABLES;
 };
@@ -169,15 +172,20 @@ static void declare(Resolver *r, const NodeId name_node, const NodeId decl, cons
   SymbolIndex_insert(&r->symbol_index, key, (uint32_t)r->symbols.len);
 }
 
-static NodeId lookup(const Resolver *r, const Span name, const Namespace ns) {
+// `out_idx` (nullable) receives the matched symbol's 1-based stack position -- used to tell whether a
+// reference inside a closure binds to a variable declared OUTSIDE it (a capture).
+static NodeId lookup(const Resolver *r, const Span name, const Namespace ns, uint32_t *const out_idx) {
   const uint32_t hash = name_hash(r->source, name);
   uint32_t current = 0;
   if (!SymbolIndex_get(&r->symbol_index, symbol_key(hash, ns), &current))
     return NODE_NONE;
   while (current) {
     const Symbol *const s = &r->symbols.data[current - 1];
-    if (span_eq(r->source, token_span(s->name), name))
+    if (span_eq(r->source, token_span(s->name), name)) {
+      if (out_idx)
+        *out_idx = current;
       return s->decl;
+    }
     current = r->symbol_previous.data[current - 1];
   }
   return NODE_NONE;
@@ -211,8 +219,20 @@ static void resolve_ref(Resolver *r, const NodeId ref, const NodeId name_node, c
   if (name_node == NODE_NONE)
     return;
   const Span name = name_span(r, name_node);
-  const NodeId decl = lookup(r, name, ns);
+  uint32_t idx = 0;
+  const NodeId decl = lookup(r, name, ns, &idx);
   if (decl != NODE_NONE) {
+    // A value binding declared outside the enclosing closure would have to be captured; Stage-1 closures
+    // are non-capturing, so reject it with a precise diagnostic. Module-level items (functions/consts) are
+    // never captures, so only flag the local binding kinds.
+    if (ns == NS_VALUE && r->in_closure && idx && idx - 1 < r->closure_floor) {
+      const NodeKind dk = ast_at_const(r->ast, decl)->kind;
+      if (dk == NODE_LET || dk == NODE_PARAMETER || dk == NODE_FOR || dk == NODE_IDENTIFIER)
+        resolver_errorf(
+            r, name.start, name.end - name.start,
+            "closures cannot capture local variable '%.*s' (capturing closures are not yet supported)",
+            (int)(name.end - name.start), r->source + name.start);
+    }
     ast_set_resolution(r->ast, ref, decl);
     return;
   }
@@ -489,6 +509,8 @@ static void resolve_function(Resolver *r, const NodeId id) {
   const NodeList where_clause = n->as.function.where_clause;
   const NodeId body = n->as.function.body;
 
+  const bool saved_generic = r->in_generic;
+  r->in_generic = saved_generic || generics.len > 0;
   scope_enter(r);
   declare_generics(r, generics);
   const NodeId *const pids = ast_list(r->ast, params);
@@ -506,6 +528,7 @@ static void resolve_function(Resolver *r, const NodeId id) {
   if (body != NODE_NONE)
     resolve_block(r, body);
   scope_exit(r);
+  r->in_generic = saved_generic;
 }
 
 static void resolve_type_alias(Resolver *r, const NodeId id) {
@@ -580,7 +603,10 @@ static void resolve_item(Resolver *r, const NodeId id) {
       const NodeId old_self = r->current_self;
       const NodeId resolved = target == NODE_NONE ? NODE_NONE : ast_resolution(r->ast, target);
       r->current_self = resolved != NODE_NONE ? resolved : id;
+      const bool saved_generic = r->in_generic;
+      r->in_generic = saved_generic || n->as.impl_def.generics.len > 0; // methods inherit the impl's generics
       resolve_associated_items(r, n->as.impl_def.items);
+      r->in_generic = saved_generic;
       r->current_self = old_self;
       scope_exit(r);
       break;
@@ -741,7 +767,7 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       // (`Opt::<i32>::Some(..)`, possibly a prelude type). Only a generic function is a local value, so
       // anything else (local type, builtin, or prelude/glob type) resolves in the type namespace.
       const NodeId inner = n->as.specialization.expression;
-      if (ast_at_const(r->ast, inner)->kind == NODE_IDENTIFIER && lookup(r, name_span(r, inner), NS_VALUE) == NODE_NONE)
+      if (ast_at_const(r->ast, inner)->kind == NODE_IDENTIFIER && lookup(r, name_span(r, inner), NS_VALUE, NULL) == NODE_NONE)
         resolve_ref(r, inner, inner, NS_TYPE, "type");
       else
         resolve_expr(r, inner);
@@ -789,6 +815,32 @@ static void resolve_expr(Resolver *r, const NodeId id) {
     case NODE_BLOCK:
       resolve_block(r, id);
       break;
+    case NODE_CLOSURE: {
+      if (r->in_generic)
+        resolver_errorf(
+            r, n->span.start, n->span.end - n->span.start,
+            "closures inside generic functions are not yet supported");
+      const bool saved_in = r->in_closure;
+      const uint32_t saved_floor = r->closure_floor;
+      scope_enter(r);
+      r->in_closure = true;
+      r->closure_floor = (uint32_t)r->symbols.len; // params declared next are local to the closure
+      const NodeList params = n->as.closure.params;
+      const NodeId *const pids = ast_list(r->ast, params);
+      for (uint32_t i = 0; i < params.len; i++) {
+        const Node *const param = ast_at_const(r->ast, pids[i]);
+        declare(r, param->as.parameter.name, pids[i], NS_VALUE);
+        resolve_type(r, param->as.parameter.type);
+      }
+      if (n->as.closure.expr_body)
+        resolve_expr(r, n->as.closure.body);
+      else
+        resolve_block(r, n->as.closure.body);
+      r->in_closure = saved_in;
+      r->closure_floor = saved_floor;
+      scope_exit(r);
+      break;
+    }
     case NODE_IF:
       resolve_if(r, n);
       break;

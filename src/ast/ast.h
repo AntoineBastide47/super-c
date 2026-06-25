@@ -78,6 +78,7 @@ typedef enum {
   NODE_BINARY,
   NODE_ASSIGNMENT,
   NODE_CALL,
+  NODE_CLOSURE, // an anonymous `fn(..) .. { .. }` or compact `|..| expr` function value
   NODE_INDEX,
   NODE_MEMBER,
   NODE_CAST,
@@ -233,6 +234,12 @@ typedef struct {
             NodeId callee;
             NodeList args;
         } call;
+        struct {
+            NodeList params;  // NODE_PARAMETER nodes (always type-annotated)
+            NodeList returns; // explicit return type(s); empty for a compact closure (return inferred from body)
+            NodeId body;      // a NODE_BLOCK (anonymous `fn`), or the body expression (compact `|..|`)
+            bool expr_body;   // true: `body` is an expression to be returned; false: `body` is a block
+        } closure;
         struct {
             NodeId object, index;
         } index;

@@ -117,11 +117,28 @@ static void test_errors(void) {
   expect_error("Self outside impl", "fn f(x: Self) void {}\n", "'Self' is only valid");
 }
 
+static void test_closures(void) {
+  // A closure may use its own params, module-level functions and consts -- none of those is a capture.
+  expect_ok(
+      "closure uses params and module items",
+      "const K: i32 = 3;\n"
+      "fn helper(n: i32) i32 { return n; }\n"
+      "fn main() i32 { let f = |x: i32| helper(x) + K; return f(1); }\n");
+  // Referencing an outer local from inside a closure is a capture -- rejected in Stage 1.
+  expect_error(
+      "closure captures outer let", "fn main() i32 { let base = 10; let f = |x: i32| x + base; return f(1); }\n",
+      "cannot capture local variable 'base'");
+  expect_error(
+      "closure captures outer param", "fn add(b: i32) i32 { let f = |x: i32| x + b; return f(1); }\n",
+      "cannot capture local variable 'b'");
+}
+
 int main(void) {
   test_resolves();
   test_nearest_shadow();
   test_namespace_separation();
   test_errors();
+  test_closures();
   if (failures) {
     fprintf(stderr, "%d resolver test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;
