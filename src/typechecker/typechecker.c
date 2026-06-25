@@ -12,6 +12,7 @@ struct TypeChecker {
     size_t len;
     NodeList current_returns; // the enclosing function's `returns` list, for NODE_RETURN checking
     NodeId current_self;      // the struct decl whose `extend` we are inside (NODE_NONE at top level)
+    NodeId current_fn;        // the function decl being checked, for `where`-clause bound lookup (NODE_NONE if none)
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
     ERRORS_VARIABLES;
@@ -442,6 +443,187 @@ static NodeId enclosing_impl(TypeChecker *t, const ModuleId m, const NodeId meth
   return NODE_NONE;
 }
 
+// The interface (NODE_TRAIT) an interface method belongs to, or NODE_NONE -- recovers the trait so a
+// method reached through a generic bound substitutes its `Self` by the receiver type.
+static NodeId enclosing_trait(TypeChecker *t, const ModuleId m, const NodeId method) {
+  Ast *const a = mod_ast(t, m);
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const it = ast_at_const(a, ids[i]);
+    if (it->kind != NODE_TRAIT)
+      continue;
+    const NodeList ms = it->as.trait_def.items;
+    const NodeId *const mids = ast_list(a, ms);
+    for (uint32_t j = 0; j < ms.len; j++)
+      if (mids[j] == method)
+        return ids[i];
+  }
+  return NODE_NONE;
+}
+
+// Append the interface DefIds named by `bounds` (type-paths resolved in ast `a`) to out[0..*n).
+static void add_bound_ifaces(Ast *const a, const NodeList bounds, DefId *const out, int *const n, const int cap) {
+  const NodeId *const ids = ast_list(a, bounds);
+  for (uint32_t i = 0; i < bounds.len && *n < cap; i++) {
+    const DefId d = ast_resolution_def(a, ids[i]);
+    if (d.node != NODE_NONE)
+      out[(*n)++] = d;
+  }
+}
+
+// The interface bounds in effect for generic param (pmod, pdecl): its own inline bounds plus, when it is
+// the enclosing function's own param, any matching `where` predicates.
+static int collect_param_bounds(TypeChecker *t, const ModuleId pmod, const NodeId pdecl, DefId *const out, const int cap) {
+  int n = 0;
+  Ast *const pa = mod_ast(t, pmod);
+  add_bound_ifaces(pa, ast_at_const(pa, pdecl)->as.generic_param.bounds, out, &n, cap);
+  if (pmod == t->ast->module && t->current_fn != NODE_NONE) {
+    const NodeList wc = ast_at_const(t->ast, t->current_fn)->as.function.where_clause;
+    const NodeId *const wids = ast_list(t->ast, wc);
+    for (uint32_t w = 0; w < wc.len; w++) {
+      const Node *const wp = ast_at_const(t->ast, wids[w]);
+      if (ast_resolution(t->ast, wp->as.where_predicate.type) == pdecl)
+        add_bound_ifaces(t->ast, wp->as.where_predicate.bounds, out, &n, cap);
+    }
+  }
+  return n;
+}
+
+// A method named `name` declared by an interface bound in effect for generic param `pdecl` (`<T: Writer>`,
+// a `where` clause, or a conditional extension): the interface method's DefId, with the satisfying
+// interface returned via *iface; {_,NODE_NONE} if none.
+static DefId find_bound_method(TypeChecker *t, const ModuleId pmod, const NodeId pdecl, const Span name,
+                               DefId *const iface) {
+  DefId ifaces[8];
+  const int ni = collect_param_bounds(t, pmod, pdecl, ifaces, 8);
+  for (int b = 0; b < ni; b++) {
+    const DefId id = ifaces[b];
+    Ast *const ia = mod_ast(t, id.module);
+    const Node *const idn = ast_at_const(ia, id.node);
+    if (idn->kind != NODE_TRAIT)
+      continue;
+    const NodeList items = idn->as.trait_def.items;
+    const NodeId *const mids = ast_list(ia, items);
+    for (uint32_t j = 0; j < items.len; j++) {
+      const Node *const mn = ast_at_const(ia, mids[j]);
+      if (mn->kind == NODE_FUNCTION &&
+          spans_eq2(t->source, name, mod_src(t, id.module), ast_at_const(ia, mn->as.function.name)->as.name.text)) {
+        if (iface)
+          *iface = id;
+        return (DefId){id.module, mids[j]};
+      }
+    }
+  }
+  return (DefId){0, NODE_NONE};
+}
+
+// An `extend [<G>] <tdecl> as <iface>` impl in `tdecl`'s module or the current module (a local extension);
+// NODE_NONE if absent. *imod receives the impl's module.
+static NodeId find_impl_as(TypeChecker *t, const ModuleId tmod, const NodeId tdecl, const DefId iface,
+                           ModuleId *const imod) {
+  const ModuleId scopes[2] = {tmod, t->ast->module};
+  const int ns = tmod == t->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = mod_ast(t, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tr.module == iface.module && tr.node == iface.node && tg.module == tmod && tg.node == tdecl) {
+        *imod = m;
+        return ids[i];
+      }
+    }
+  }
+  return NODE_NONE;
+}
+
+// Whether concrete type `ty` satisfies interface bound `iface`: there is an `extend ty as iface` (directly,
+// or a conditional `extend<G> Ty<G> as iface` whose own bounds hold for ty's type arguments). A still-
+// abstract type parameter is taken to satisfy -- it is re-checked when finally instantiated.
+#define BOUND_MAX_DEPTH 8
+static bool type_satisfies(TypeChecker *t, const TypeId ty, const DefId iface, const int depth) {
+  if (ty == TYPE_NONE || ty == TYPE_ERROR || depth > BOUND_MAX_DEPTH)
+    return true; // unknown / too deep: do not manufacture a false error
+  const Ty *const y = ast_type_at(t->ast, ty);
+  if (y->kind == TYPE_GENERIC)
+    return true; // abstract param: verified at concrete instantiation
+  ModuleId tmod;
+  NodeId tdecl;
+  TypeId iargs[4];
+  int in = 0;
+  if (y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM) {
+    tmod = y->module;
+    tdecl = y->as.decl;
+  } else if (y->kind == TYPE_INSTANCE) {
+    const TyInstance *const inst = ast_instance(t->ast, y->as.inst);
+    tmod = inst->module;
+    tdecl = inst->decl;
+    for (uint8_t k = 0; k < inst->n && in < 4; k++)
+      iargs[in++] = inst->args[k];
+  } else {
+    return false; // a builtin/pointer/etc. with no `as iface` impl
+  }
+  ModuleId imod;
+  const NodeId impl = find_impl_as(t, tmod, tdecl, iface, &imod);
+  if (impl == NODE_NONE)
+    return false;
+  // Conditional extension: each impl generic param's bounds must hold for the matching instance arg.
+  Ast *const ia = mod_ast(t, imod);
+  const NodeList gens = ast_at_const(ia, impl)->as.impl_def.generics;
+  const NodeId *const gids = ast_list(ia, gens);
+  for (uint32_t g = 0; g < gens.len && (int)g < in; g++) {
+    const NodeList gb = ast_at_const(ia, gids[g])->as.generic_param.bounds;
+    const NodeId *const gbids = ast_list(ia, gb);
+    for (uint32_t b = 0; b < gb.len; b++) {
+      const DefId gbi = ast_resolution_def(ia, gbids[b]);
+      if (gbi.node != NODE_NONE && !type_satisfies(t, iargs[g], gbi, depth + 1))
+        return false;
+    }
+  }
+  return true;
+}
+
+// `extend T as Iface { ... }` must provide every method the interface requires (a body-less declaration);
+// interface methods that carry a default body are optional. Reports each missing method.
+static void check_impl_conformance(TypeChecker *t, const Node *const n) {
+  const DefId iface = ast_resolution_def(t->ast, n->as.impl_def.trait_type);
+  if (iface.node == NODE_NONE)
+    return;
+  Ast *const ia = mod_ast(t, iface.module);
+  const Node *const idn = ast_at_const(ia, iface.node);
+  if (idn->kind != NODE_TRAIT)
+    return;
+  const NodeList req = idn->as.trait_def.items;
+  const NodeId *const rids = ast_list(ia, req);
+  const NodeList have = n->as.impl_def.items;
+  const NodeId *const hids = ast_list(t->ast, have);
+  for (uint32_t i = 0; i < req.len; i++) {
+    const Node *const rm = ast_at_const(ia, rids[i]);
+    if (rm->kind != NODE_FUNCTION || rm->as.function.body != NODE_NONE)
+      continue; // only required (body-less) methods must be provided
+    const Span rn = ast_at_const(ia, rm->as.function.name)->as.name.text;
+    bool found = false;
+    for (uint32_t j = 0; j < have.len && !found; j++) {
+      const Node *const hm = ast_at_const(t->ast, hids[j]);
+      found = hm->kind == NODE_FUNCTION &&
+              spans_eq2(mod_src(t, iface.module), rn, t->source, ast_at_const(t->ast, hm->as.function.name)->as.name.text);
+    }
+    if (!found) {
+      const Span at = ast_at_const(t->ast, n->as.impl_def.trait_type)->span;
+      typechecker_errorf(
+          t, at.start, at.end - at.start, "missing method '%.*s' required by this interface",
+          (int)(rn.end - rn.start), (const char *)mod_src(t, iface.module) + rn.start);
+    }
+  }
+}
+
 // The interned type a struct/enum/alias/generic decl names, where the decl lives in module `m`. The
 // module is carried into the Ty so the same named type unifies across modules.
 static TypeId named_type_of(TypeChecker *t, const ModuleId m, const NodeId decl) {
@@ -463,7 +645,9 @@ static TypeId named_type_of(TypeChecker *t, const ModuleId m, const NodeId decl)
     }
     case NODE_GENERIC_PARAM:
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_GENERIC, .module = m, .as.decl = decl});
-    default: // NODE_TRAIT used as a type, Self->impl, etc. — opaque for now
+    case NODE_TRAIT: // `Self` inside an interface: an abstract type, substituted to the receiver at use
+      return ast_intern_type(t->ast, (Ty){.kind = TYPE_GENERIC, .module = m, .as.decl = decl});
+    default:
       return TYPE_ERROR;
   }
 }
@@ -1075,6 +1259,18 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
     }
   }
 
+  // A method reached through a generic bound (`w.write()`, `w: T`, `T: Writer`) is the interface's method;
+  // substitute its `Self` (a TYPE_GENERIC of the trait) by the receiver type so the signature resolves.
+  if (callee_node->kind == NODE_MEMBER && !callee_node->as.member.path && nrsub < 4) {
+    const DefId md = ast_resolution_def(t->ast, callee_node->as.member.member);
+    const NodeId tr = md.node != NODE_NONE ? enclosing_trait(t, md.module, md.node) : NODE_NONE;
+    if (tr != NODE_NONE) {
+      rsubp[nrsub] = (DefId){md.module, tr};
+      rsuba[nrsub] = strip(t, ast_type(t->ast, callee_node->as.member.object));
+      nrsub++;
+    }
+  }
+
   // Generic call: bind the function's type params from explicit turbofish args or by inferring them from
   // the argument types, then substitute into the parameter/return types so `fn id<T>(x: T) T` checks and
   // yields a concrete type. The bound args are recorded on the call so codegen emits the matching
@@ -1105,8 +1301,44 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
         gargs[i] = bound[i]; // may stay TYPE_NONE if a param couldn't be inferred
       gn = g;
     }
-    if (gn == g) // fully determined: record for codegen's specialization
+    if (gn == g) { // fully determined: record for codegen's specialization, then enforce interface bounds
       ast_set_type_args(t->ast, id, gargs, (uint8_t)gn);
+      for (int i = 0; i < g; i++) {
+        const NodeList pb = ast_at_const(fa, gids[i])->as.generic_param.bounds;
+        const NodeId *const pbids = ast_list(fa, pb);
+        for (uint32_t b = 0; b < pb.len; b++) {
+          const DefId bi = ast_resolution_def(fa, pbids[b]);
+          if (bi.node != NODE_NONE && !type_satisfies(t, gargs[i], bi, 0)) {
+            char tn[96];
+            render_type(t, gargs[i], tn, sizeof tn);
+            const Span bsp = ast_at_const(fa, pbids[b])->span;
+            typechecker_errorf(
+                t, sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'", tn,
+                (int)(bsp.end - bsp.start), (const char *)mod_src(t, fmod) + bsp.start);
+          }
+        }
+      }
+      // `where T: Bound` predicates: lower each predicate type with the type args applied, then check it.
+      const NodeList wc = fn->as.function.where_clause;
+      const NodeId *const wids = ast_list(fa, wc);
+      for (uint32_t w = 0; w < wc.len; w++) {
+        const Node *const wp = ast_at_const(fa, wids[w]);
+        const TypeId wt = subst_type(t, lower_type_in(t, fmod, wp->as.where_predicate.type), gparams, gargs, gn);
+        const NodeList wb = wp->as.where_predicate.bounds;
+        const NodeId *const wbids = ast_list(fa, wb);
+        for (uint32_t b = 0; b < wb.len; b++) {
+          const DefId bi = ast_resolution_def(fa, wbids[b]);
+          if (bi.node != NODE_NONE && !type_satisfies(t, wt, bi, 0)) {
+            char tn[96];
+            render_type(t, wt, tn, sizeof tn);
+            const Span bsp = ast_at_const(fa, wbids[b])->span;
+            typechecker_errorf(
+                t, sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'", tn,
+                (int)(bsp.end - bsp.start), (const char *)mod_src(t, fmod) + bsp.start);
+          }
+        }
+      }
+    }
   }
 
   const uint32_t expected = params.len - skip;
@@ -1221,6 +1453,18 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
       if (ast_at_const(mod_ast(t, bmod), fhit)->kind == NODE_FIELD)
         check_field_visibility(t, bmod, fhit, bdecl, name);
       return subst_type(t, decl_type_in(t, bmod, fhit), gp, ga, gn);
+    }
+  }
+  // A method on a value of generic-parameter type (`w: T` with `T: Writer`): resolve it through the
+  // param's interface bounds. `Self` stays abstract (TYPE_GENERIC of the trait); check_call substitutes
+  // it by the receiver, and codegen dispatches to the concrete impl once the param is monomorphized.
+  const Ty *const bt = ast_type_at(t->ast, base);
+  if (bt->kind == TYPE_GENERIC) {
+    DefId iface;
+    const DefId m = find_bound_method(t, bt->module, bt->as.decl, name, &iface);
+    if (m.node != NODE_NONE) {
+      ast_set_resolution_def(t->ast, mname, m);
+      return decl_type_in(t, m.module, m.node);
     }
   }
   char ty[96];
@@ -1942,10 +2186,13 @@ static void check_item(TypeChecker *t, const NodeId id) {
         }
       }
       const NodeList saved = t->current_returns;
+      const NodeId savedfn = t->current_fn;
       t->current_returns = n->as.function.returns;
+      t->current_fn = id;
       if (n->as.function.body != NODE_NONE)
         check_stmt(t, n->as.function.body);
       t->current_returns = saved;
+      t->current_fn = savedfn;
       break;
     }
     case NODE_STRUCT:
@@ -1981,6 +2228,8 @@ static void check_item(TypeChecker *t, const NodeId id) {
       // Inside `extend S { ... }`, S's private fields are reachable (current_self == S).
       const NodeId saved = t->current_self;
       t->current_self = ast_resolution(t->ast, n->as.impl_def.target_type);
+      if (n->as.impl_def.trait_type != NODE_NONE)
+        check_impl_conformance(t, n);
       check_associated(t, n->as.impl_def.items);
       t->current_self = saved;
       break;

@@ -342,6 +342,10 @@ NodeId package_lookup(const Package *p, const ModuleId mid, const char *name, co
       name_node = n->as.type_alias.name;
       is_pub = n->as.type_alias.is_public;
       is_type = true;
+    } else if (n->kind == NODE_TRAIT) {
+      name_node = n->as.trait_def.name;
+      is_pub = n->as.trait_def.is_public;
+      is_type = true;
     } else if (n->kind == NODE_FUNCTION) {
       name_node = n->as.function.name;
       is_pub = n->as.function.is_public;
