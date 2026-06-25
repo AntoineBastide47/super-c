@@ -404,14 +404,65 @@ static bool reintern_cross_module(Package *p, Ast *const src) {
   return changed;
 }
 
+// Record `src`'s generic-method calls (a method with its own generic params, e.g. `map<U>`) into the
+// method's OWNING module, so that owner emits the matching `Inst__method__targs` specialization. The
+// receiver instance and the method's own type args are reinterned across pools. Returns true on growth.
+static bool reintern_method_insts(Package *p, Ast *const src) {
+  bool changed = false;
+  const size_t n = src->nodes.len;
+  for (NodeId i = 0; i < n; i++) {
+    const Node *const call = ast_at_const(src, i);
+    if (call->kind != NODE_CALL)
+      continue;
+    const Node *const callee = ast_at_const(src, call->as.call.callee);
+    if (callee->kind != NODE_MEMBER)
+      continue;
+    const DefId md = ast_resolution_def(src, callee->as.member.member);
+    if (md.node == NODE_NONE)
+      continue;
+    Ast *const owner = md.module < p->count && p->modules[md.module].ast ? p->modules[md.module].ast
+                       : md.module == src->module                        ? src
+                                                                         : NULL;
+    if (!owner)
+      continue;
+    const Node *const mn = ast_at_const(owner, md.node);
+    if (mn->kind != NODE_FUNCTION || mn->as.function.generics.len == 0)
+      continue;
+    const MonoUse *const mu = ast_type_args(src, i);
+    if (!mu || mu->n == 0)
+      continue;
+    TypeId rty = ast_type(src, callee->as.member.object); // receiver / `Type::<Args>` base type
+    for (const Ty *y = ast_type_at(src, rty); y->kind == TYPE_POINTER || y->kind == TYPE_REFERENCE;
+         y = ast_type_at(src, rty))
+      rty = y->as.elem;
+    if (ast_type_at(src, rty)->kind != TYPE_INSTANCE || !ast_type_concrete(src, rty))
+      continue;
+    bool concrete = true;
+    for (uint8_t k = 0; k < mu->n; k++)
+      concrete &= ast_type_concrete(src, mu->args[k]);
+    if (!concrete)
+      continue;
+    const TypeId rinst = owner == src ? rty : ast_reintern(owner, src, rty);
+    TypeId targs[4];
+    for (uint8_t k = 0; k < mu->n && k < 4; k++)
+      targs[k] = owner == src ? mu->args[k] : ast_reintern(owner, src, mu->args[k]);
+    changed |= ast_add_method_inst(owner, rinst, md.node, targs, mu->n);
+  }
+  return changed;
+}
+
 void package_propagate_instances(Package *p, Ast *const standalone) {
   bool changed = true;
   while (changed) {
     changed = false;
     for (size_t u = 0; u < p->count; u++)
-      if (p->modules[u].ast)
+      if (p->modules[u].ast) {
         changed |= reintern_cross_module(p, p->modules[u].ast);
-    if (standalone)
+        changed |= reintern_method_insts(p, p->modules[u].ast);
+      }
+    if (standalone) {
       changed |= reintern_cross_module(p, standalone);
+      changed |= reintern_method_insts(p, standalone);
+    }
   }
 }

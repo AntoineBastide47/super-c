@@ -1147,6 +1147,20 @@ static bool is_lvalue(Codegen *c, const NodeId id) {
   }
 }
 
+// Append `__<arg1>[__<arg2>]` for a method call whose method declares its own generic params (map<U>),
+// reading the recorded instantiation off the call node so the call matches the emitted spec name.
+static void emit_method_targs(Codegen *c, const NodeId callId, const DefId md) {
+  const Node *const mn = ast_at_const(cg_mod_ast(c, md.module), md.node);
+  if (mn->kind != NODE_FUNCTION || !mn->as.function.generics.len)
+    return;
+  const MonoUse *const mu = ast_type_args(c->ast, callId);
+  for (uint8_t i = 0; mu && i < mu->n; i++) {
+    char e[176];
+    mangle_type(c, subst_resolve(c, mu->args[i]), e, sizeof e);
+    emit(c, "__%s", e);
+  }
+}
+
 static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
@@ -1196,6 +1210,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         }
       }
       emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
+      emit_method_targs(c, id, md);
       emit(c, "(");
       for (uint32_t i = 0; i < args.len; i++) {
         if (i)
@@ -1245,6 +1260,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: method receiver is not a struct or enum");
       }
       emit_ident_mod(c, md.module, ast_at_const(ma, md.node)->as.function.name);
+      emit_method_targs(c, id, md);
       emit(c, "(");
 
       bool wrote = false;
@@ -2381,17 +2397,49 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
           continue;
         if (with_body ? mn->as.function.body == NODE_NONE : !want_fn(which, mn->as.function.is_public))
           continue;
+        // Bind the impl's generics (e.g. T) from the instance's args -- shared by every spec below.
         c->nsubst = 0;
         for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
           c->subst[c->nsubst].param = (DefId){c->ast->module, gids[g]};
           c->subst[c->nsubst].concrete = it.args[g];
           c->nsubst++;
         }
-        char nm[256];
+        char nm[320];
         size_t at = buf_append(nm, sizeof nm, 0, inm);
         at = buf_append(nm, sizeof nm, at, "__");
         render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
-        emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, nm, c->multifile && !mn->as.function.is_public);
+        const bool stat = c->multifile && !mn->as.function.is_public;
+        if (mn->as.function.generics.len == 0) { // ordinary method: one spec per instance
+          emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, nm, stat);
+          c->nsubst = 0;
+          continue;
+        }
+        // Generic method (map<U>): one spec per recorded (instance, method, targs) tuple, layering the
+        // method's own generics atop the impl subst and suffixing the name with the mangled type args.
+        const TypeId itTy = ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n);
+        const int nimpl = c->nsubst;
+        const NodeList mg = mn->as.function.generics;
+        const NodeId *const mgids = ast_list(c->ast, mg);
+        for (size_t mi = 0; mi < c->ast->method_insts.len; mi++) {
+          const MethodInst inst = c->ast->method_insts.data[mi]; // copy: emit may grow pools
+          if (inst.method != mids[j] || inst.instance != itTy)
+            continue;
+          c->nsubst = nimpl;
+          for (uint32_t g = 0; g < mg.len && g < inst.n && c->nsubst < 8; g++) {
+            c->subst[c->nsubst].param = (DefId){c->ast->module, mgids[g]};
+            c->subst[c->nsubst].concrete = inst.targs[g];
+            c->nsubst++;
+          }
+          char snm[400];
+          size_t a2 = buf_append(snm, sizeof snm, 0, nm);
+          for (uint8_t g = 0; g < inst.n; g++) {
+            a2 = buf_append(snm, sizeof snm, a2, "__");
+            char e[176];
+            mangle_type(c, inst.targs[g], e, sizeof e);
+            a2 = buf_append(snm, sizeof snm, a2, e);
+          }
+          emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, snm, stat);
+        }
         c->nsubst = 0;
       }
     }

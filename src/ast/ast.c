@@ -8,6 +8,7 @@ VEC_DEFINE(Ty, Ty_Vec)
 VEC_DEFINE(DefId, DefId_Vec)
 VEC_DEFINE(TyInstance, TyInstance_Vec)
 VEC_DEFINE(MonoUse, MonoUse_Vec)
+VEC_DEFINE(MethodInst, MethodInst_Vec)
 
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
 static inline size_t ty_hash(const Ty t) {
@@ -38,6 +39,7 @@ Ast *ast_new(const size_t token_count) {
   a->types = U32_Vec_init();
   a->mono = MonoUse_Vec_init();
   a->instances = TyInstance_Vec_init();
+  a->method_insts = MethodInst_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
   Node_Vec_push(&a->nodes, (Node){.kind = NODE_NONE_KIND});
@@ -56,6 +58,7 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->types);
   VEC_DEINIT((*a)->mono);
   VEC_DEINIT((*a)->instances);
+  VEC_DEINIT((*a)->method_insts);
   free(*a);
   *a = NULL;
 }
@@ -90,6 +93,29 @@ TypeId ast_intern_instance(Ast *a, const ModuleId module, const NodeId decl, con
 
 const TyInstance *ast_instance(const Ast *a, const uint32_t index) {
   return &a->instances.data[index];
+}
+
+bool ast_add_method_inst(Ast *a, const TypeId instance, const NodeId method, const TypeId *const targs,
+                         const uint8_t n) {
+  const uint8_t m = n > 4 ? 4 : n;
+  for (size_t i = 0; i < a->method_insts.len; i++) { // dedup: same instance + method + targs -> once
+    const MethodInst *const mi = &a->method_insts.data[i];
+    if (mi->instance != instance || mi->method != method || mi->n != m)
+      continue;
+    bool same = true;
+    for (uint8_t j = 0; j < m; j++)
+      if (mi->targs[j] != targs[j]) {
+        same = false;
+        break;
+      }
+    if (same)
+      return false;
+  }
+  MethodInst mi = {.instance = instance, .method = method, .n = m};
+  for (uint8_t j = 0; j < m; j++)
+    mi.targs[j] = targs[j];
+  MethodInst_Vec_push(&a->method_insts, mi);
+  return true;
 }
 
 TypeId ast_reintern(Ast *dst, const Ast *src, const TypeId t) {
