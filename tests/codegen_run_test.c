@@ -457,6 +457,20 @@ static void test_container_conformances(void) {
       42, "");
 }
 
+// Multiple `From` impls on one type: each `from`/`into` is disambiguated by source type, so the C symbols
+// (Celsius__from__i32, Celsius__from__u8) do not collide and each call routes to the right one.
+static void test_multi_from(void) {
+  sc_run_program(
+      "two From impls: Type::from(x) and x.into() route by source type",
+      PRE "struct Celsius { pub v: i32 }\n"
+          "extend Celsius as From<u8> { fn from(value: u8) Celsius { return Celsius { v: value as i32 }; } }\n"
+          "extend Celsius as From<i32> { fn from(value: i32) Celsius { return Celsius { v: value }; } }\n"
+          "fn main() i32 { let a: Celsius = Celsius::from(40);\n" // i32 overload
+          "  let b: u8 = 1; let c: Celsius = b.into();\n"         // u8 overload via .into()
+          "  exit(a.v + c.v); }\n",                               // 41
+      41, "");
+}
+
 static void test_generics(void) {
   // A generic function is monomorphized: turbofish picks the instantiation, and distinct type args
   // produce distinct specializations.
@@ -938,6 +952,7 @@ int main(void) {
   test_std_types();
   test_generics_over_user_types();
   test_container_conformances();
+  test_multi_from();
   test_generics();
   test_arithmetic();
   test_control_flow();
