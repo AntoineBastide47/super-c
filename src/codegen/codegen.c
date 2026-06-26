@@ -5434,6 +5434,29 @@ static void emit_referenced_fwd(Codegen *c) {
 // what this module's types/prototypes/bodies name, so auto-imported prelude modules don't cross-include
 // in a cycle (str.h never pulls string.h) yet `String`'s header still gets str.h. Covers explicit
 // imports and glob/prelude refs uniformly (an unused import contributes no include).
+// True if (m, node) is an interface itself, or a method declared inside one -- neither has a C
+// representation, so a reference to it never needs the defining module's header.
+static bool cg_decl_is_interface_member(Codegen *c, const ModuleId m, const NodeId node) {
+  Ast *const a = cg_mod_ast(c, m);
+  if (ast_at_const(a, node)->kind == NODE_TRAIT)
+    return true;
+  if (ast_at_const(a, node)->kind != NODE_FUNCTION)
+    return false;
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const it = ast_at_const(a, ids[i]);
+    if (it->kind != NODE_TRAIT)
+      continue;
+    const NodeList ms = it->as.trait_def.items;
+    const NodeId *const mids = ast_list(a, ms);
+    for (uint32_t j = 0; j < ms.len; j++)
+      if (mids[j] == node)
+        return true;
+  }
+  return false;
+}
+
 static void emit_referenced_includes(Codegen *c) {
   const size_t nmod = c->package->count;
   const ModuleId cur = c->ast->module;
@@ -5442,14 +5465,24 @@ static void emit_referenced_includes(Codegen *c) {
     return;
   for (size_t i = 0; i < c->ast->resolutions.len; i++) {
     const DefId d = c->ast->resolutions.data[i];
-    if (d.node != NODE_NONE && d.module != cur && d.module < nmod)
-      want[d.module] = true;
+    if (d.node == NODE_NONE || d.module == cur || d.module >= nmod)
+      continue;
+    // An interface, or an interface METHOD, has NO C representation: a trait bound, a conformance's
+    // `as Iface`, and a bound-method call (`v.fmt()` resolved to `Format::fmt`) all reference the trait
+    // module but generate no use of its header (codegen dispatches to the concrete impl in the value's own
+    // module). Pulling the trait header here would re-form a cycle (a value type that conforms to a prelude
+    // interface would include the interface module, which references that very type by value).
+    if (cg_decl_is_interface_member(c, d.module, d.node))
+      continue;
+    want[d.module] = true;
   }
   for (size_t i = 0; i < c->ast->type_pool.len; i++) {
     const Ty t = c->ast->type_pool.data[i]; // named types reach modules a literal/inference uses w/o a ref
-    if ((t.kind == TYPE_STRUCT || t.kind == TYPE_ENUM || t.kind == TYPE_FUNCTION || t.kind == TYPE_GENERIC) &&
-        t.module != cur && t.module < nmod)
-      want[t.module] = true;
+    if ((t.kind != TYPE_STRUCT && t.kind != TYPE_ENUM && t.kind != TYPE_FUNCTION) || t.module == cur || t.module >= nmod)
+      continue; // (TYPE_GENERIC is a param / Self -- never an emittable type, so never an include)
+    if (t.kind == TYPE_FUNCTION && cg_decl_is_interface_member(c, t.module, t.as.decl))
+      continue; // an interface method's function type (e.g. `Format::fmt`) -- no C symbol, no header needed
+    want[t.module] = true;
   }
   // A generic instance re-homed over a user type lives in that type's module and is built by the generic's
   // macros: pull the generic's header (the macros + shared tag) and the home's header (the instance itself).
