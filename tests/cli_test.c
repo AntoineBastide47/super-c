@@ -296,6 +296,35 @@ static void test_module_imports(void) {
   CHECK(run_cmd(crun, NULL, 0) == 30, "alias s::tag (10) + glob tag (20), mangled distinctly");
 }
 
+// Format conformances across the prelude, built as a multi-file tree: String/Vector/Option/Result render
+// to a String. This exercises the prelude header-include graph -- a value type conforming to a prelude
+// interface must NOT pull the interface module's header (that re-formed a cycle: interfaces -> result ->
+// String-by-value). Built -Werror (the no-cycle proof) and run.
+static void test_format_conformances(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/fmt", DIR);
+  mkfile(root, "fmt.spc",
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn main() i32 {\n"
+         "  let mut v = Vector::<String>::new();\n"
+         "  v.push(String::from_str(\"a\")); v.push(String::from_str(\"b\"));\n"
+         "  let mut vs = v.fmt();\n"                                  // "[a, b]" (6)
+         "  let o = Option::<String>::Some(String::from_str(\"x\"));\n"
+         "  let mut os = o.fmt();\n"                                  // "Some(x)" (7)
+         "  let r = Result::<String, String>::Ok(String::from_str(\"y\"));\n"
+         "  let mut rs = r.fmt();\n"                                  // "Ok(y)" (5)
+         "  exit(vs.len() as i32 + os.len() as i32 + rs.len() as i32); }\n"); // 18
+  snprintf(spc, sizeof spc, "%s/fmt.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "Format conformances compile (no prelude header cycle): %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/fmt.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "Format-conformance C compiles -Werror (no include cycle): %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 18, "Vector/Option/Result fmt render through the element's Format (6+7+5)");
+}
+
 // Module-layer negative paths: cycles, missing modules, and using a non-public type/const/field across
 // modules must each be a clear, nonzero-exit error.
 static void test_module_errors(void) {
@@ -396,6 +425,7 @@ int main(void) {
   test_cross_module_interface();
   test_ffi_bindings();
   test_module_imports();
+  test_format_conformances();
   test_module_errors();
   test_extensionless_appends();
   test_missing_file();
