@@ -129,7 +129,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@$(call ECHO,CC,$<)
 	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $(CPPFLAGS_EXTRA) -c $< -o $@
 
-$(BUILD_DIR)/main.o: CPPFLAGS_EXTRA := -DBIN_NAME='"$(BIN)"'
+$(BUILD_DIR)/main.o $(BUILD_DIR)/repl.o: CPPFLAGS_EXTRA := -DBIN_NAME='"$(BIN)"'
 
 # Header-dependency tracking: -MMD -MP emits a .d file beside each object/binary listing the
 # headers it includes (plus phony header targets so deleting a header doesn't break the build).
