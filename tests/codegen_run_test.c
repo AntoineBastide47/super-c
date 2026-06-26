@@ -457,6 +457,23 @@ static void test_container_conformances(void) {
       42, "");
 }
 
+// `str` conforms to Eq/Ord/Hash/Default with the `&Self` convention: `==`/`!=` dispatch to its `eq` (this
+// also covers the former `str == str` miscompile, where `eq` took `other` by value), `T: Ord` reaches `cmp`.
+static void test_str_conformances(void) {
+  sc_run_program(
+      "str Eq/Ord/Hash/Default behind operators and bounds",
+      PRE "fn lt<T: Ord>(a: &T, b: &T) bool { return a.cmp(b) < 0; }\n"
+          "fn main() i32 { let a = \"apple\"; let b = \"apple\"; let c = \"banana\";\n"
+          "  let mut acc = 0;\n"
+          "  if a == b { acc = acc + 1; }\n"            // eq via ==
+          "  if a != c { acc = acc + 2; }\n"            // 3
+          "  if lt(&a, &c) { acc = acc + 4; }\n"        // 7: str behind T: Ord
+          "  if a.hash() == b.hash() { acc = acc + 8; }\n" // 15
+          "  let d: str = Default::default(); if d.is_empty() { acc = acc + 16; }\n" // 31
+          "  exit(acc); }\n",
+      31, "");
+}
+
 // Multiple `From` impls on one type: each `from`/`into` is disambiguated by source type, so the C symbols
 // (Celsius__from__i32, Celsius__from__u8) do not collide and each call routes to the right one.
 static void test_multi_from(void) {
@@ -952,6 +969,7 @@ int main(void) {
   test_std_types();
   test_generics_over_user_types();
   test_container_conformances();
+  test_str_conformances();
   test_multi_from();
   test_generics();
   test_arithmetic();
