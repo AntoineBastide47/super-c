@@ -457,6 +457,26 @@ static void test_container_conformances(void) {
       42, "");
 }
 
+// Map<K, V> (open-addressing hash map): insert/overwrite/get/contains/remove over String keys, across
+// several reallocations. Exercises the K: Hash + Eq bound dispatch (String__hash / String__eq).
+static void test_map(void) {
+  sc_run_program(
+      "Map<String,i32> insert/get/remove/grow",
+      PRE "fn main() i32 {\n"
+          "  let mut m = Map::<String, i32>::new();\n"
+          "  let mut i = 0; while i < 40 { m.insert(String::from_str(\"k\"), i); i = i + 1; }\n" // overwrite + grows
+          "  m.insert(String::from_str(\"a\"), 10); m.insert(String::from_str(\"b\"), 20);\n"
+          "  let ka = String::from_str(\"a\"); let kb = String::from_str(\"b\"); let kk = String::from_str(\"k\");\n"
+          "  let mut acc = 0;\n"
+          "  acc = acc + m.get(&ka).unwrap_or(0);\n"             // 10
+          "  acc = acc + m.get(&kk).unwrap_or(0);\n"             // 39 -> 49
+          "  if m.contains_key(&kb) { acc = acc + 100; }\n"      // 149
+          "  m.remove(&kb);\n"
+          "  if m.get(&kb).is_none() { acc = acc + 1000; }\n"    // 1149
+          "  let total = acc; m.drop(); exit(total - 1100); }\n", // 49
+      49, "");
+}
+
 // format/print/println builtins: a string literal with `{}` placeholders filled by the trailing args,
 // appended by type (int/float/bool/char/str/String). `{{`/`}}` are literal braces; a Format value is passed
 // as its `.fmt()` String. `format` returns the String; `println` adds a newline.
@@ -986,6 +1006,7 @@ int main(void) {
   test_container_conformances();
   test_str_conformances();
   test_format_printing();
+  test_map();
   test_multi_from();
   test_generics();
   test_arithmetic();
