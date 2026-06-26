@@ -31,7 +31,7 @@ ALWAYS_INLINE const uint8_t *mod_src(const TypeChecker *t, const ModuleId m) {
 
 static const char *const BUILTIN_NAMES[BT_COUNT] = {
     "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-    "u16",  "u32",  "u64", "usize", "f32", "f64", "void",
+    "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "void",
 };
 
 static TypeId check_expr(TypeChecker *t, NodeId id);
@@ -120,6 +120,10 @@ ALWAYS_INLINE bool bt_is_float(const BuiltinType b) {
   return b == BT_F32 || b == BT_F64;
 }
 
+ALWAYS_INLINE bool bt_is_complex(const BuiltinType b) {
+  return b == BT_C32 || b == BT_C64;
+}
+
 static bool is_bool(const TypeChecker *t, const TypeId x) {
   const Ty *const y = ast_type_at(t->ast, x);
   return y->kind == TYPE_BUILTIN && y->as.builtin == BT_BOOL;
@@ -132,7 +136,8 @@ static bool is_int(const TypeChecker *t, const TypeId x) {
 
 static bool is_numeric(const TypeChecker *t, const TypeId x) {
   const Ty *const y = ast_type_at(t->ast, x);
-  return y->kind == TYPE_BUILTIN && (bt_is_int(y->as.builtin) || bt_is_float(y->as.builtin));
+  return y->kind == TYPE_BUILTIN &&
+         (bt_is_int(y->as.builtin) || bt_is_float(y->as.builtin) || bt_is_complex(y->as.builtin));
 }
 
 static bool is_void_type(const TypeChecker *t, const TypeId x) {
@@ -351,12 +356,23 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
     return false;
   const Ty *const et = ast_type_at(t->ast, expected);
   switch (v->as.literal.token_type) {
-    case IntegerLiteral: // an integer literal fits any int *or* float slot (`let f: f64 = 0;`)
-      return et->kind == TYPE_BUILTIN && (bt_is_int(et->as.builtin) || bt_is_float(et->as.builtin));
+    case IntegerLiteral: // an integer literal fits any int *or* float/complex slot (`let f: f64 = 0;`)
+      return et->kind == TYPE_BUILTIN &&
+             (bt_is_int(et->as.builtin) || bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin));
     case CharacterLiteral: // an ASCII char literal fits any int slot too (`contains_byte('l')`), like `b'l'`
       return et->kind == TYPE_BUILTIN && bt_is_int(et->as.builtin);
-    case FloatLiteral: // a float literal stays float-only (no implicit float->int truncation)
-      return et->kind == TYPE_BUILTIN && bt_is_float(et->as.builtin);
+    case FloatLiteral: // a float literal fits a float or complex slot (no implicit float->int truncation)
+      return et->kind == TYPE_BUILTIN && (bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin));
+    case StringLiteral: { // a string literal is a NUL-terminated C string: it coerces to a `*const char` /
+      // `*const u8` FFI slot (e.g. printf's `fmt`), emitting the bare C literal instead of a `str` view.
+      if (et->kind != TYPE_POINTER || et->qualifier != TYPE_QUAL_CONST)
+        return false;
+      const Ty *const pe = ast_type_at(t->ast, et->as.elem);
+      if (pe->kind != TYPE_BUILTIN || (pe->as.builtin != BT_CHAR && pe->as.builtin != BT_U8))
+        return false;
+      ast_set_type(t->ast, node, expected); // record the coercion so codegen emits the raw pointer
+      return true;
+    }
     case Null:
       return et->kind == TYPE_POINTER || et->kind == TYPE_REFERENCE;
     default:
@@ -1461,14 +1477,18 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
     }
   }
 
-  const uint32_t expected = params.len - skip;
-  if (args.len != expected) {
+  // A C-variadic binding (`fn printf(fmt: *u8, ...)`) takes AT LEAST its fixed params; the extra trailing
+  // args are already checked as plain expressions above and passed through verbatim (C default promotions).
+  const bool variadic = named && fn->as.function.is_variadic;
+  const uint32_t expected = params.len - skip; // `...` adds no param node, so params.len is the fixed count
+  if (variadic ? args.len < expected : args.len != expected) {
     typechecker_errorf(
-        t, sp.start, sp.end - sp.start, "expected %u argument%s, found %u", expected, expected == 1 ? "" : "s",
-        args.len);
+        t, sp.start, sp.end - sp.start, variadic ? "expected at least %u argument%s, found %u"
+                                                  : "expected %u argument%s, found %u",
+        expected, expected == 1 ? "" : "s", args.len);
   } else {
     const NodeId *const pids = ast_list(fa, params);
-    for (uint32_t i = 0; i < args.len; i++) {
+    for (uint32_t i = 0; i < expected; i++) {
       const TypeId raw = named ? decl_type_in(t, fmod, pids[i + skip]) : lower_type_in(t, fmod, pids[i + skip]);
       const TypeId pt = subst_type(t, subst_type(t, raw, gparams, gargs, gn), rsubp, rsuba, nrsub);
       // A `fn(..) ..` parameter carries generics inside the function type that plain subst_type can't
@@ -1484,6 +1504,17 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
       }
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
+    }
+  }
+  // A string literal in a C-vararg slot has no `str` meaning to C: default it to `*const char` so codegen
+  // emits the bare NUL-terminated literal (what `%s` expects), mirroring the fixed-param coercion.
+  if (variadic && args.len >= expected) {
+    const TypeId cstr =
+        ast_intern_type(t->ast, (Ty){.kind = TYPE_POINTER, .qualifier = TYPE_QUAL_CONST, .as.elem = ast_builtin(BT_CHAR)});
+    for (uint32_t i = expected; i < args.len; i++) {
+      const Node *const a = ast_at_const(t->ast, aids[i]);
+      if (a->kind == NODE_LITERAL && a->as.literal.token_type == StringLiteral)
+        ast_set_type(t->ast, aids[i], cstr);
     }
   }
   // A `&mut self` / `*mut self` method needs a mutable receiver: an immutable binding/place cannot be
@@ -1795,7 +1826,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
                                dk == TYPE_ENUM || dk == TYPE_FUNCTION;
         // A payload-less enum and an integer are interconvertible (the discriminant value).
         const bool enum_int = (is_plain_enum(t, src) && is_int(t, dst)) || (is_plain_enum(t, dst) && is_int(t, src));
-        if (aggregate && !enum_int) {
+        // A complex has no C conversion to a real/int (use creal/cimag); real -> complex and c32<->c64 are fine.
+        const bool complex_lossy =
+            sk == TYPE_BUILTIN && bt_is_complex(ast_type_at(a, src)->as.builtin) && dk == TYPE_BUILTIN &&
+            !bt_is_complex(ast_type_at(a, dst)->as.builtin);
+        if ((aggregate && !enum_int) || complex_lossy) {
           char s[96], d[96];
           render_type(t, src, s, sizeof s);
           render_type(t, dst, d, sizeof d);
@@ -2308,6 +2343,12 @@ static void check_item(TypeChecker *t, const NodeId id) {
       const NodeId *const pids = ast_list(t->ast, params);
       for (uint32_t i = 0; i < params.len; i++)
         decl_type(t, pids[i]); // type each parameter so references resolve
+      // `...` only makes sense for a C binding: a Super-C-defined body has no way to read variadic args.
+      if (n->as.function.is_variadic && !n->as.function.is_extern) {
+        const Span sp = name_span(t, n->as.function.name);
+        typechecker_errorf(
+            t, sp.start, sp.end - sp.start, "variadic '...' parameters are only allowed in 'extern' declarations");
+      }
       // The program entry point must be `fn main() i32` -- it lowers to C's `int main(void)`, so any
       // other return type or a parameter list would be silently dropped or miscompiled.
       if (span_is(t->source, name_span(t, n->as.function.name), "main")) {

@@ -160,6 +160,50 @@ static void test_extern(void) {
   // cannot reproduce exactly (e.g. `FILE *fopen`). The call site emits the bare unmangled C name.
   expect_absent("extern prototype suppressed", EXTERN, "(putchar)(");
   expect_contains("extern call site", EXTERN, "putchar(72)");
+
+  // `extern "C" "<header>"` emits an #include so bindings reach non-standard headers: a bare name -> a
+  // system include `<...>`; a path starting with '.' or '/' -> a quote include "...".
+  expect_contains(
+      "extern system header include",
+      "extern \"C\" \"pthread.h\" { type pthread_t; fn pthread_self() pthread_t; }\n"
+      "fn main() i32 { let t: pthread_t = pthread_self(); return 0; }\n",
+      "#include <pthread.h>");
+  expect_contains(
+      "extern local header include",
+      "extern \"C\" \"./lib.h\" { fn answer() i32; }\nfn main() i32 { return answer(); }\n",
+      "#include \"./lib.h\"");
+
+  // A variadic call emits every argument verbatim (fixed + trailing); the binding keeps its C name.
+  expect_contains(
+      "variadic call passes all args",
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
+      "fn main() i32 { let f: char = '%'; printf(&f, 1, 2, 3); return 0; }\n",
+      "1, 2, 3)");
+
+  // A string literal in a `*const char` slot (fixed fmt + `%s` vararg) emits the bare C string, not a
+  // `str` view; a `*const u8` slot adds the cast; elsewhere it stays a `str`.
+  expect_contains(
+      "string literal -> bare C string in fmt + vararg",
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
+      "fn main() i32 { printf(\"%s\\n\", \"hi\"); return 0; }\n",
+      "printf(\"%s\\n\", \"hi\")");
+  expect_contains(
+      "string literal -> *const u8 adds cast",
+      "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return f(\"hi\"); }\n",
+      "(const uint8_t *)\"hi\"");
+  expect_contains( // an uncoerced literal of "zq9" keeps the full str fat-pointer view
+      "string literal stays str view by default", "fn main() i32 { let s: str = \"zq9\"; return 0; }\n",
+      "(str){ (const uint8_t *)\"zq9\"");
+
+  // `c64`/`c32` render to real C `_Complex` scalar types.
+  expect_contains(
+      "complex builtin renders to _Complex", "fn main() i32 { let z: c64 = 3.0; let w: c32 = 1.0; return 0; }\n",
+      "double _Complex");
+  expect_contains(
+      "c32 renders to float _Complex", "fn main() i32 { let w: c32 = 1.0; return 0; }\n", "float _Complex");
+
+  // The atomics runtime shim ships in the emitted output, ready for an `extern` binding to call.
+  expect_contains("atomics runtime shim emitted", EXTERN, "__sc_atomic_fence");
 }
 
 static const char *const STR = "fn f(s: str) usize { return s.len; }\nfn main() i32 { let g: str = \"hi\"; return 0; }\n";

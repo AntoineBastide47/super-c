@@ -141,6 +141,9 @@ static void test_ranges(void) {
       IntegerLiteral, Range, IntegerLiteral, IntegerLiteral, RangeInclusive, IntegerLiteral, Eof,
   };
   expect_tokens("ranges", "0..9 0..=9", expected, sizeof expected / sizeof expected[0]);
+  // `...` (variadic marker) is greedily distinct from `..`/`..=`; a 4th dot trails as a lone `.`.
+  static const TokenType dots[] = {Ellipsis, Range, RangeInclusive, Ellipsis, Dot, Eof};
+  expect_tokens("ellipsis vs range", "... .. ..= ....", dots, sizeof dots / sizeof dots[0]);
 }
 
 static void test_comments(void) {

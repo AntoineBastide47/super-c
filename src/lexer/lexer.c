@@ -865,7 +865,7 @@ static void scan_token(Lexer *l, TokenWriter *w) {
       if (is_dec(peek_byte(l))) {
         leading_dot_number(l);
       } else if (match_byte(l, '.')) {
-        EMIT(match_byte(l, '=') ? RangeInclusive : Range);
+        EMIT(match_byte(l, '.') ? Ellipsis : match_byte(l, '=') ? RangeInclusive : Range);
       } else {
         EMIT(Dot);
       }

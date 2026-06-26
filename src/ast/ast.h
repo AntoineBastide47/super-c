@@ -127,8 +127,9 @@ typedef struct {
             NodeList returns;
             NodeList where_clause;
             NodeId body;
-            bool is_public; // `pub fn` -- stored for visibility (field privacy is what's enforced today)
-            bool is_extern; // declared in an `extern "C"` block: keep the real C symbol name (never mangled)
+            bool is_public;   // `pub fn` -- stored for visibility (field privacy is what's enforced today)
+            bool is_extern;   // declared in an `extern "C"` block: keep the real C symbol name (never mangled)
+            bool is_variadic; // trailing `...` C variadic (extern only): a call may pass extra trailing args
         } function;
         struct {
             NodeId name, type;
@@ -172,6 +173,7 @@ typedef struct {
         } const_def;
         struct {
             NodeId abi;
+            NodeId header; // optional `extern "C" "pthread.h" { .. }`: the backing C header to #include, or NODE_NONE
             NodeList items;
         } extern_block;
         struct {
@@ -297,11 +299,12 @@ typedef uint32_t TypeId;
 #define TYPE_NONE ((TypeId)0) // unknown / not-yet-computed / poison (suppresses cascading errors)
 
 // Order matches resolver.c's is_builtin_type[] table so a name lookup maps straight to an index.
-// Every entry is a scalar or void. The string view `str` and the slice views `Slice<T>`/`SliceMut<T>`
+// Every entry is a scalar, complex (`c32`/`c64` -> C `_Complex`), or void. The string view `str` and the
+// slice views `Slice<T>`/`SliceMut<T>`
 // (what `[]T`/`[]mut T` lower to) are not builtins -- they are ordinary prelude structs (auto-imported).
 typedef enum {
   BT_BOOL, BT_CHAR, BT_I8, BT_I16, BT_I32, BT_I64, BT_ISIZE,
-  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_VOID,
+  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_C32, BT_C64, BT_VOID,
   BT_COUNT,
 } BuiltinType;
 

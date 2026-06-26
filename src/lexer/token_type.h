@@ -106,6 +106,7 @@ typedef enum TokenType {
 
   Range, // ..
   RangeInclusive, // ..=
+  Ellipsis, // ... (C variadic marker in an extern parameter list)
   PathSeparator, // ::
   Arrow, // ->
   FatArrow, // =>

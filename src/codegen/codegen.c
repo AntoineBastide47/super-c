@@ -25,14 +25,44 @@ HM_DEFINE(NodeId, NodeId, CgEnumMap, cg_nodeid_hash, CG_NODEID_EQ)
 // Every C standard library header, each behind __has_include so a toolchain that lacks an optional or
 // C23 header (threads.h / uchar.h / stdbit.h on this macOS, etc.) silently skips it instead of failing.
 #define RT_H(h) "#if __has_include(<" h ">)\n#include <" h ">\n#endif\n"
+// Sequentially-consistent atomics over `__atomic_*` compiler builtins -- usable without <stdatomic.h>
+// (whose API is macros/_Generic, not bindable symbols). Real, per-scalar-type `static inline` symbols an
+// `extern "C"` binding can declare and call (`__sc_atomic_<op>_<suffix>`); unused ones cost nothing.
+#define SC_ATOMIC_SHIM                                                                                              \
+  "#if defined(__GNUC__) || defined(__clang__)\n"                                                                  \
+  "#pragma GCC diagnostic push\n"                                                                                  \
+  "#pragma GCC diagnostic ignored \"-Wunused-function\"\n"                                                         \
+  "#define SC_AT(T,S) \\\n"                                                                                         \
+  "static inline T __sc_atomic_load_##S(const T*p){return __atomic_load_n(p,__ATOMIC_SEQ_CST);} \\\n"              \
+  "static inline void __sc_atomic_store_##S(T*p,T v){__atomic_store_n(p,v,__ATOMIC_SEQ_CST);} \\\n"                \
+  "static inline T __sc_atomic_swap_##S(T*p,T v){return __atomic_exchange_n(p,v,__ATOMIC_SEQ_CST);} \\\n"          \
+  "static inline T __sc_atomic_add_##S(T*p,T v){return __atomic_fetch_add(p,v,__ATOMIC_SEQ_CST);} \\\n"            \
+  "static inline T __sc_atomic_sub_##S(T*p,T v){return __atomic_fetch_sub(p,v,__ATOMIC_SEQ_CST);} \\\n"            \
+  "static inline T __sc_atomic_and_##S(T*p,T v){return __atomic_fetch_and(p,v,__ATOMIC_SEQ_CST);} \\\n"            \
+  "static inline T __sc_atomic_or_##S(T*p,T v){return __atomic_fetch_or(p,v,__ATOMIC_SEQ_CST);} \\\n"              \
+  "static inline T __sc_atomic_xor_##S(T*p,T v){return __atomic_fetch_xor(p,v,__ATOMIC_SEQ_CST);} \\\n"            \
+  "static inline bool __sc_atomic_cas_##S(T*p,T e,T d){return "                                                    \
+  "__atomic_compare_exchange_n(p,&e,d,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST);}\n"                                    \
+  "SC_AT(int8_t,i8) SC_AT(int16_t,i16) SC_AT(int32_t,i32) SC_AT(int64_t,i64) SC_AT(intptr_t,isize)\n"             \
+  "SC_AT(uint8_t,u8) SC_AT(uint16_t,u16) SC_AT(uint32_t,u32) SC_AT(uint64_t,u64) SC_AT(size_t,usize)\n"           \
+  "#undef SC_AT\n"                                                                                                 \
+  "static inline bool __sc_atomic_load_bool(const bool*p){return __atomic_load_n(p,__ATOMIC_SEQ_CST);}\n"          \
+  "static inline void __sc_atomic_store_bool(bool*p,bool v){__atomic_store_n(p,v,__ATOMIC_SEQ_CST);}\n"            \
+  "static inline bool __sc_atomic_swap_bool(bool*p,bool v){return __atomic_exchange_n(p,v,__ATOMIC_SEQ_CST);}\n"   \
+  "static inline bool __sc_atomic_cas_bool(bool*p,bool e,bool d){return "                                          \
+  "__atomic_compare_exchange_n(p,&e,d,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST);}\n"                                    \
+  "static inline void __sc_atomic_fence(void){__atomic_thread_fence(__ATOMIC_SEQ_CST);}\n"                         \
+  "#pragma GCC diagnostic pop\n"                                                                                   \
+  "#endif\n"
 const char *const SUPER_RT_INCLUDES =
     RT_H("assert.h") RT_H("complex.h") RT_H("ctype.h") RT_H("errno.h") RT_H("fenv.h") RT_H("float.h")
     RT_H("inttypes.h") RT_H("iso646.h") RT_H("limits.h") RT_H("locale.h") RT_H("math.h") RT_H("setjmp.h")
     RT_H("signal.h") RT_H("stdalign.h") RT_H("stdarg.h") RT_H("stdatomic.h") RT_H("stdbit.h") RT_H("stdbool.h")
     RT_H("stdckdint.h") RT_H("stddef.h") RT_H("stdint.h") RT_H("stdio.h") RT_H("stdlib.h") RT_H("stdnoreturn.h")
     RT_H("string.h") RT_H("tgmath.h") RT_H("threads.h") RT_H("time.h") RT_H("uchar.h") RT_H("wchar.h")
-    RT_H("wctype.h");
+    RT_H("wctype.h") SC_ATOMIC_SHIM;
 #undef RT_H
+#undef SC_ATOMIC_SHIM
 
 struct Codegen {
     Ast *ast;
@@ -137,11 +167,12 @@ static size_t render_modpfx(const Codegen *c, const ModuleId m, char *buf, const
 // Super-C builtin names (for matching unresolved type paths) and their C spellings.
 static const char *const BUILTIN_NAMES[BT_COUNT] = {
     "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-    "u16",  "u32",  "u64", "usize", "f32", "f64", "void",
+    "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "void",
 };
 static const char *const BUILTIN_C[BT_COUNT] = {
-    "bool",     "char",     "int8_t",   "int16_t", "int32_t", "int64_t", "intptr_t", "uint8_t",
-    "uint16_t", "uint32_t", "uint64_t", "size_t",  "float",   "double",  "void",
+    "bool",     "char",     "int8_t",   "int16_t", "int32_t", "int64_t",        "intptr_t",        "uint8_t",
+    "uint16_t", "uint32_t", "uint64_t", "size_t",  "float",   "double",         "float _Complex",  "double _Complex",
+    "void",
 };
 
 static void emit_expr(Codegen *c, NodeId id);
@@ -945,7 +976,7 @@ static void emit_reescaped(Codegen *c, const Span s, const bool is_char) {
   emit(c, "%c", q);
 }
 
-static void emit_literal(Codegen *c, const Node *n) {
+static void emit_literal(Codegen *c, const NodeId id, const Node *n) {
   const Span s = n->as.literal.raw;
   switch (n->as.literal.token_type) {
     case True:
@@ -960,7 +991,19 @@ static void emit_literal(Codegen *c, const Node *n) {
     case CharacterLiteral:
       emit_reescaped(c, s, true);
       break;
-    case StringLiteral:
+    case StringLiteral: {
+      // When the typechecker coerced the literal to a `*const char` / `*const u8` (an FFI C-string slot,
+      // e.g. printf's `fmt`), emit the bare C string literal -- it is already a NUL-terminated `const char*`
+      // (cast for `u8` to dodge -Wpointer-sign). Otherwise it is a `str` view: `(str){ ptr, len }`.
+      const TypeId tid = ast_type(c->ast, id);
+      const Ty *const ty = tid == TYPE_NONE ? NULL : ast_type_at(c->ast, tid);
+      if (ty && ty->kind == TYPE_POINTER) {
+        const Ty *const pe = ast_type_at(c->ast, ty->as.elem);
+        if (pe->kind == TYPE_BUILTIN && pe->as.builtin == BT_U8)
+          emit(c, "(const uint8_t *)");
+        emit_reescaped(c, s, false);
+        break;
+      }
       // A string literal is a `str` view: `(str){ (const uint8_t *)"...", sizeof("...") - 1 }`.
       // `sizeof - 1` is the byte length (C-decoded escapes) minus the NUL; escapes are re-emitted in C
       // syntax so `\u{..}`/`\xNN` mean the same bytes Super-C's lexer decoded.
@@ -970,6 +1013,7 @@ static void emit_literal(Codegen *c, const Node *n) {
       emit_reescaped(c, s, false);
       emit(c, ") - 1 }");
       break;
+    }
     case ByteCharacterLiteral: // b'a' -> 'a'
       if (s.end > s.start && c->source[s.start] == 'b')
         emit(c, "%.*s", (int)(s.end - s.start - 1), c->source + s.start + 1);
@@ -1871,7 +1915,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
   const Node *const n = ast_at_const(c->ast, id);
   switch (n->kind) {
     case NODE_LITERAL:
-      emit_literal(c, n);
+      emit_literal(c, id, n);
       break;
     case NODE_IDENTIFIER:
       emit_ident_ref(c, id, n);
@@ -4290,6 +4334,39 @@ static void emit_referenced_includes(Codegen *c) {
   free(want);
 }
 
+// Emit `#include` for each `extern "C" "<header>" { .. }` backing header in this module, so bindings to
+// non-standard / third-party / local C headers resolve (standard headers are auto-included via super_rt).
+// A leading '.' or '/' (relative or absolute path) -> a quote include; anything else -> a system include.
+// Dedup'd by content so repeated headers across blocks emit once; idempotent across .h/.c (header guards).
+static void emit_extern_includes(Codegen *c) {
+  const NodeList items = program_items(c);
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    if (n->kind != NODE_EXTERN_BLOCK || n->as.extern_block.header == NODE_NONE)
+      continue;
+    const Span hs = ast_at_const(c->ast, n->as.extern_block.header)->span;
+    const uint32_t s = hs.start + 1, e = hs.end - 1; // strip the string-literal quotes
+    if (e <= s)
+      continue;
+    bool dup = false; // skip if an earlier block named the same header
+    for (uint32_t j = 0; j < i && !dup; j++) {
+      const Node *const m = ast_at_const(c->ast, ids[j]);
+      if (m->kind != NODE_EXTERN_BLOCK || m->as.extern_block.header == NODE_NONE)
+        continue;
+      const Span ms = ast_at_const(c->ast, m->as.extern_block.header)->span;
+      dup = ms.end - ms.start == hs.end - hs.start &&
+            memcmp(c->source + ms.start, c->source + hs.start, hs.end - hs.start) == 0;
+    }
+    if (dup)
+      continue;
+    const bool local = c->source[s] == '.' || c->source[s] == '/';
+    emit(c, local ? "#include \"" : "#include <");
+    emit_bytes(c, (const char *)c->source + s, e - s);
+    emit(c, local ? "\"\n" : ">\n");
+  }
+}
+
 // A multi-file .c includes its own header (which transitively brings in the runtime + every type and
 // public prototype) plus the header of every module it references.
 static void emit_includes(Codegen *c) {
@@ -4325,6 +4402,7 @@ void codegen_emit_header(Codegen *c, FILE *out) {
   emit(c, "#include \"");
   emit_rel_prefix(c); // super_rt.h lives at the build root
   emit(c, "super_rt.h\"\n");
+  emit_extern_includes(c);     // backing C headers named by this module's `extern "C" "..."` blocks
   emit_referenced_fwd(c);      // forward-decl referenced cross-module structs (breaks mutual include cycles)
   emit_referenced_includes(c); // headers of the modules this one's public signatures / types name
   emit(c, "\n");
@@ -4355,6 +4433,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     phase_bodies(c);
   } else {
     emit_cstr(c, SUPER_RT_INCLUDES);
+    emit_extern_includes(c);
     emit(c, "\n");
     phase_forward(c);
     emit(c, "\n");
@@ -4386,6 +4465,8 @@ void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
     return;
   emit_cstr(cs[0], SUPER_RT_INCLUDES);
   emit(cs[0], "\n");
+  for (size_t i = 0; i < n; i++)
+    emit_extern_includes(cs[i]); // backing C headers from any module's `extern "C" "..."` blocks
   cg_flush(cs[0], out);
   for (size_t i = 0; i < n; i++) {
     build_enum_index(cs[i]);

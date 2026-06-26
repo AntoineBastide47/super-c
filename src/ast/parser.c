@@ -360,10 +360,14 @@ static NodeId parse_parameter_name(Parser *p) {
   return id;
 }
 
-static NodeList parse_parameters(Parser *p) {
+static NodeList parse_parameters(Parser *p, bool *out_variadic) {
   expect(p, LeftParen, "'('");
   const uint32_t params_mark = ast_mark(p->ast);
   while (!check(p, RightParen) && !at_end(p)) {
+    if (match(p, Ellipsis)) { // trailing C variadic `...`: the final parameter (extern-only; checked in sema)
+      *out_variadic = true;
+      break;
+    }
     const uint32_t names_mark = ast_mark(p->ast);
     ast_push(p->ast, parse_parameter_name(p));
     while (!check(p, Colon) && !at_end(p)) {
@@ -435,7 +439,8 @@ static NodeId parse_function(Parser *p, const bool require_body) {
   expect(p, Fn, "'fn'");
   const NodeId name = callable_name(p);
   const NodeList generics = parse_generics(p);
-  const NodeList params = parse_parameters(p);
+  bool is_variadic = false;
+  const NodeList params = parse_parameters(p, &is_variadic);
   const NodeList returns = parse_function_returns(p);
   const NodeList where_clause = parse_where_clause(p);
   NodeId body = NODE_NONE;
@@ -455,6 +460,7 @@ static NodeId parse_function(Parser *p, const bool require_body) {
                           .returns = returns,
                           .where_clause = where_clause,
                           .body = body,
+                          .is_variadic = is_variadic,
                       },
               });
 }
@@ -651,6 +657,9 @@ static NodeId parse_extern(Parser *p) {
   const NodeId abi = check(p, StringLiteral) ? literal(p) : NODE_NONE;
   if (!abi)
     error_here(p, "expected ABI string");
+  // optional backing header: `extern "C" "pthread.h" { .. }` -- emitted as an `#include` so bindings to
+  // non-standard / third-party / local headers resolve (standard headers are already auto-included).
+  const NodeId header = check(p, StringLiteral) ? literal(p) : NODE_NONE;
   expect(p, LeftBrace, "'{'");
   const uint32_t mark = ast_mark(p->ast);
   while (!check(p, RightBrace) && !at_end(p)) {
@@ -680,7 +689,7 @@ static NodeId parse_extern(Parser *p) {
       p->ast, (Node){
                   .kind = NODE_EXTERN_BLOCK,
                   .span = span_new(start, previous_end(p)),
-                  .as.extern_block = {.abi = abi, .items = items},
+                  .as.extern_block = {.abi = abi, .header = header, .items = items},
               });
 }
 
@@ -1037,7 +1046,10 @@ static NodeId parse_primary(Parser *p) {
                 });
   }
   if (match(p, Fn)) { // anonymous function `fn(params) RetOpt { block }`
-    const NodeList params = parse_parameters(p);
+    bool variadic = false;
+    const NodeList params = parse_parameters(p, &variadic);
+    if (variadic)
+      error_here(p, "anonymous functions cannot be variadic");
     const NodeList returns = parse_function_returns(p);
     const NodeId body = parse_block(p);
     return ast_add(
