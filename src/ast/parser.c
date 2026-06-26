@@ -257,12 +257,13 @@ static NodeId parse_type(Parser *p) {
   }
   if (match(p, LeftBracket)) {
     if (match(p, RightBracket)) {
+      const TypeQualifier qualifier = match(p, Mut) ? TYPE_QUAL_MUT : TYPE_QUAL_NONE; // `[]mut T` -> SliceMut<T>
       const NodeId element = parse_type(p);
       return ast_add(
           p->ast, (Node){
                       .kind = NODE_SLICE_TYPE,
                       .span = span_new(start, node_span(p, element).end),
-                      .as.indirect_type = {.type = element},
+                      .as.indirect_type = {.type = element, .qualifier = qualifier},
                   });
     }
     const NodeId element = parse_type(p);
@@ -653,18 +654,23 @@ static NodeId parse_extern(Parser *p) {
   expect(p, LeftBrace, "'{'");
   const uint32_t mark = ast_mark(p->ast);
   while (!check(p, RightBrace) && !at_end(p)) {
+    const bool is_public = match(p, Pub); // `pub` exports a raw binding / opaque handle to importers
     if (check(p, Fn)) {
       const NodeId fn = parse_function(p, false);
       if (ast_at_const(p->ast, fn)->as.function.body != NODE_NONE)
         parser_errorf(
             p, node_span(p, fn).start, node_span(p, fn).end - node_span(p, fn).start,
             "extern function declarations cannot have a body");
+      ast_at(p->ast, fn)->as.function.is_public = is_public;
+      ast_at(p->ast, fn)->as.function.is_extern = true;
       expect(p, Semicolon, "';'");
       ast_push(p->ast, fn);
     } else if (check(p, Type)) {
-      ast_push(p->ast, parse_type_alias(p, true));
+      const NodeId ta = parse_type_alias(p, true);
+      ast_at(p->ast, ta)->as.type_alias.is_public = is_public;
+      ast_push(p->ast, ta);
     } else {
-      error_here(p, "expected extern item");
+      error_here(p, is_public ? "'pub' may only be applied to an extern function or type" : "expected extern item");
       advance(p);
     }
   }
@@ -884,8 +890,15 @@ static NodeId parse_pattern_atom(Parser *p) {
                     .as.pattern = {.children = ast_commit(p->ast, mark)},
                 });
   }
-  if (check(p, Identifier)) {
+  // `mut <name>` binds a *mutable* payload binding (`Some(mut f) => f.write(..)`); the flag rides the
+  // name node, exactly like a `mut` parameter. Only meaningful on a plain-name binding (below).
+  if (check(p, Mut) || check(p, Identifier)) {
+    const bool is_mut = match(p, Mut);
     const NodeId name = identifier(p);
+    if (name == NODE_NONE)
+      return NODE_NONE;
+    if (is_mut)
+      ast_at(p->ast, name)->as.name.is_mutable = true;
     const Node *const name_node = ast_at_const(p->ast, name);
     const Span text = name_node->as.name.text;
     if (text.end - text.start == 1 && p->source[text.start] == '_')

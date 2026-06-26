@@ -155,9 +155,10 @@ static const char *const EXTERN =
     "fn main() i32 { let r: i32 = putchar(72); }\n";
 
 static void test_extern(void) {
-  // The name is parenthesized so a fortified libc macro (macOS memcpy/etc.) cannot expand at the
-  // declaration; the call site keeps the bare name so it still expands to the fortified builtin.
-  expect_contains("extern prototype", EXTERN, "extern int32_t (putchar)(const int32_t c);");
+  // `extern "C"` functions get NO emitted prototype -- every C standard-library header is already
+  // included, so the real declaration is in scope and re-declaring it would clash on signatures we
+  // cannot reproduce exactly (e.g. `FILE *fopen`). The call site emits the bare unmangled C name.
+  expect_absent("extern prototype suppressed", EXTERN, "(putchar)(");
   expect_contains("extern call site", EXTERN, "putchar(72)");
 }
 
@@ -182,81 +183,19 @@ static const char *const CONSTNESS =
     "  return x + y;\n"
     "}\n";
 
-// A `let` of a value that owns a `*mut` (here `Buf.ptr`) drops `const`; a scalar `let` keeps it.
-static const char *const OWNS_MUT =
+// Binding const-ness follows the binding's mutability ONLY (`let` vs `let mut`). A type owning a `*mut`
+// internally (`Buf.ptr`) is an encapsulated detail and does NOT make an immutable binding non-const --
+// mutating an immutable binding is rejected by the typechecker, not papered over in codegen.
+static const char *const BIND_CONST =
     "struct Buf { pub ptr: *mut u8, }\n"
-    "fn main() i32 { let b: Buf = Buf { ptr: null, }; let x: i32 = 5; return x; }\n";
+    "fn main() i32 { let b: Buf = Buf { ptr: null, }; let mut m: Buf = Buf { ptr: null, };\n"
+    "  let x: i32 = 5; let mut y: i32 = 6; return x; }\n";
 
-static void test_owning_mut_constness(void) {
-  expect_contains("owning-mut let is non-const", OWNS_MUT, "Buf b =");
-  expect_absent("owning-mut let is not const", OWNS_MUT, "const Buf b");
-  expect_contains("scalar let still const", OWNS_MUT, "const int32_t x = 5");
-}
-
-// One corpus of struct shapes; each `let aN: T;` (annotated, no initializer) lets us assert the
-// const-ness of T's binding purely from its type. A `*mut` reachable through value fields / array
-// elements makes the binding non-const; a `*const`/`*mut`-to-an-owner stops at the pointer.
-static const char *const OWNS_MUT_ZOO =
-    "struct Scalars { a: i32, b: i64, }\n"
-    "struct HasMut { p: *mut u8, }\n"
-    "struct HasConstPtr { p: *const u8, }\n"
-    "struct HasMutRef { r: &mut u8, }\n"
-    "struct HasRef { r: &u8, }\n"
-    "struct Empty {}\n"
-    "struct WrapMut { inner: HasMut, tag: i32, }\n"
-    "struct WrapScalar { inner: Scalars, }\n"
-    "struct HoldsConstToMut { q: *const HasMut, }\n"
-    "struct HoldsMutToMut { q: *mut HasMut, }\n"
-    "struct ArrMut { buf: [*mut u8; 3], }\n"
-    "struct ArrOwner { items: [HasMut; 4], }\n"
-    "struct ArrScalar { xs: [i32; 8], }\n"
-    "struct ListMut { next: *mut ListMut, v: i32, }\n"
-    "struct ListConst { next: *const ListConst, v: i32, }\n"
-    "struct D10 { p: *mut u8, }\nstruct D9 { x: D10, }\nstruct D8 { x: D9, }\nstruct D7 { x: D8, }\n"
-    "struct D6 { x: D7, }\nstruct D5 { x: D6, }\nstruct D4 { x: D5, }\nstruct D3 { x: D4, }\n"
-    "struct D2 { x: D3, }\nstruct D1 { x: D2, }\n"
-    "struct S10 { p: i32, }\nstruct S9 { x: S10, }\nstruct S8 { x: S9, }\nstruct S7 { x: S8, }\n"
-    "struct S6 { x: S7, }\nstruct S5 { x: S6, }\nstruct S4 { x: S5, }\nstruct S3 { x: S4, }\n"
-    "struct S2 { x: S3, }\nstruct S1 { x: S2, }\n"
-    "fn main() i32 {\n"
-    "  let a1: Scalars; let a2: HasMut; let a3: HasConstPtr; let a4: HasMutRef; let a5: HasRef;\n"
-    "  let a6: Empty; let a7: WrapMut; let a8: WrapScalar; let a9: HoldsConstToMut; let a10: HoldsMutToMut;\n"
-    "  let a11: ArrMut; let a12: ArrOwner; let a13: ArrScalar; let a14: ListMut; let a15: ListConst;\n"
-    "  let a16: D1; let a17: S1;\n"
-    "  return 0;\n"
-    "}\n";
-
-// Non-const is proven by the absence of `const <Type> <name>`; const by its presence.
-static void test_owns_mut_simple(void) {
-  expect_contains("scalar struct -> const", OWNS_MUT_ZOO, "const Scalars a1;");
-  expect_absent("direct *mut field -> non-const", OWNS_MUT_ZOO, "const HasMut a2");
-  expect_contains("*const field -> const", OWNS_MUT_ZOO, "const HasConstPtr a3;");
-}
-
-static void test_owns_mut_complex(void) {
-  expect_absent("&mut field -> non-const", OWNS_MUT_ZOO, "const HasMutRef a4");
-  expect_contains("&T (shared) field -> const", OWNS_MUT_ZOO, "const HasRef a5;");
-  expect_absent("nested struct owning *mut -> non-const", OWNS_MUT_ZOO, "const WrapMut a7");
-  expect_contains("nested scalar struct -> const", OWNS_MUT_ZOO, "const WrapScalar a8;");
-  expect_absent("array of *mut -> non-const", OWNS_MUT_ZOO, "const ArrMut a11");
-  expect_absent("array of mut-owners -> non-const", OWNS_MUT_ZOO, "const ArrOwner a12");
-  expect_contains("array of scalars -> const", OWNS_MUT_ZOO, "const ArrScalar a13;");
-}
-
-static void test_owns_mut_nested_deep(void) {
-  expect_absent("10-level value nest ending in *mut -> non-const", OWNS_MUT_ZOO, "const D1 a16");
-  expect_contains("10-level value nest ending in scalar -> const", OWNS_MUT_ZOO, "const S1 a17;");
-}
-
-static void test_owns_mut_edge_cases(void) {
-  expect_contains("empty struct -> const", OWNS_MUT_ZOO, "const Empty a6;");
-  // a `*const` pointer to a mut-owner does NOT propagate (recursion stops at the pointer)...
-  expect_contains("*const to a mut-owner -> const", OWNS_MUT_ZOO, "const HoldsConstToMut a9;");
-  // ...but a `*mut` pointer is itself a writable address.
-  expect_absent("*mut to a mut-owner -> non-const", OWNS_MUT_ZOO, "const HoldsMutToMut a10");
-  // self-referential structs must not loop forever: the recursion halts at the pointer field.
-  expect_absent("self-ref via *mut -> non-const", OWNS_MUT_ZOO, "const ListMut a14");
-  expect_contains("self-ref via *const -> const", OWNS_MUT_ZOO, "const ListConst a15;");
+static void test_binding_constness(void) {
+  expect_contains("immutable let of owning type is const", BIND_CONST, "const Buf b =");
+  expect_absent("mut let of owning type is non-const", BIND_CONST, "const Buf m");
+  expect_contains("scalar immutable let is const", BIND_CONST, "const int32_t x = 5");
+  expect_absent("scalar mut let is non-const", BIND_CONST, "const int32_t y");
 }
 
 static void test_constness(void) {
@@ -337,11 +276,16 @@ static void test_multi_return(void) {
   expect_contains("destructure reads _1", DESTR, "._1;");
 }
 
-// Slices lower to the SCslice fat pointer; fixed arrays keep their C array parameter form.
+// `[]T` lowers to the prelude's monomorphized Slice<T> / SliceMut<T> fat-pointer struct (typed `.ptr`);
+// fixed arrays keep their C array parameter form, and an array argument coerces to a slice view.
 static void test_slices_and_arrays(void) {
-  expect_contains("slice param is SCslice", "fn first(s: []i32) i32 { return s[0]; }\n", "const SCslice s");
-  expect_contains("slice index casts ptr", "fn first(s: []i32) i32 { return s[0]; }\n", "((int32_t*)s.ptr)[0]");
+  expect_contains("slice param is Slice__T", "fn first(s: []i32) i32 { return s[0]; }\n", "const Slice__i32 s");
+  expect_contains("mut slice param is SliceMut__T", "fn set0(s: []mut i32) { s[0] = 1; }\n", "const SliceMut__i32 s");
+  expect_contains("slice index uses typed ptr", "fn first(s: []i32) i32 { return s[0]; }\n", "s.ptr[0]");
   expect_contains("array param keeps extent", "fn g(a: [i32; 3]) i32 { return a[0]; }\n", "const int32_t a[3]");
+  expect_contains(
+      "array arg coerces to slice view", "fn take(s: []i32) i32 { return s[0]; }\nfn m() i32 { let a: [i32; 2] = [4, 5]; return take(a); }\n",
+      "(Slice__i32){ .ptr = a, .len = 2 }");
 }
 
 static void test_errors(void) {
@@ -401,11 +345,7 @@ int main(void) {
   test_extern();
   test_str();
   test_constness();
-  test_owning_mut_constness();
-  test_owns_mut_simple();
-  test_owns_mut_complex();
-  test_owns_mut_nested_deep();
-  test_owns_mut_edge_cases();
+  test_binding_constness();
   test_enums();
   test_if_expression();
   test_array_literals();

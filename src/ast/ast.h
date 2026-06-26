@@ -128,6 +128,7 @@ typedef struct {
             NodeList where_clause;
             NodeId body;
             bool is_public; // `pub fn` -- stored for visibility (field privacy is what's enforced today)
+            bool is_extern; // declared in an `extern "C"` block: keep the real C symbol name (never mangled)
         } function;
         struct {
             NodeId name, type;
@@ -296,8 +297,8 @@ typedef uint32_t TypeId;
 #define TYPE_NONE ((TypeId)0) // unknown / not-yet-computed / poison (suppresses cascading errors)
 
 // Order matches resolver.c's is_builtin_type[] table so a name lookup maps straight to an index.
-// Every entry is a scalar or void. The string view `str` and the slice fat pointer `SCslice` are no
-// longer builtins -- they are ordinary structs in the std `string` module (auto-imported as a prelude).
+// Every entry is a scalar or void. The string view `str` and the slice views `Slice<T>`/`SliceMut<T>`
+// (what `[]T`/`[]mut T` lower to) are not builtins -- they are ordinary prelude structs (auto-imported).
 typedef enum {
   BT_BOOL, BT_CHAR, BT_I8, BT_I16, BT_I32, BT_I64, BT_ISIZE,
   BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_VOID,
@@ -317,6 +318,8 @@ typedef enum {
   TYPE_GENERIC,
   TYPE_INSTANCE, // a generic struct/enum applied to concrete type args (e.g. Vec<i32>); `as.inst` indexes
                  // the Ast's interned instance table, so Vec<i32> and Vec<bool> are distinct interned types
+  TYPE_OPAQUE,   // an `extern "C" { type X; }` handle: a real, sized C type named by the header. `as.decl`
+                 // is the NODE_TYPE_ALIAS (in `module`); renders to its own unmangled C name, never `void`
 } TypeKind;
 
 // Named `Ty`, not `Type`: a `Type` token-keyword enum constant already occupies that identifier.

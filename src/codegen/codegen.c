@@ -83,6 +83,8 @@ struct Codegen {
     bool macro;
     NodeId macro_self;       // the generic decl being templated (its instances render as `NAME`)
     ModuleId macro_self_mod; // that decl's module
+    NodeId slice_raw;        // the array node currently emitted as the inner `.ptr` of an array->slice
+                             // coercion wrap; suppresses re-entrant coercion so it emits as a bare array
     ERRORS_VARIABLES;
 };
 
@@ -143,6 +145,7 @@ static const char *const BUILTIN_C[BT_COUNT] = {
 };
 
 static void emit_expr(Codegen *c, NodeId id);
+static NodeId array_length_of(Codegen *c, NodeId iter);
 static void emit_stmt(Codegen *c, NodeId id);
 static void emit_block(Codegen *c, NodeId id);
 static void emit_if(Codegen *c, const Node *n);
@@ -1019,6 +1022,10 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
           char nm[160];
           render_qualified(c, d.module, dn->as.aggregate.name, nm, sizeof nm);
           buf_join3(out, cap, nm, SEP(decl), decl);
+        } else if (dn->kind == NODE_TYPE_ALIAS && dn->as.type_alias.type == NODE_NONE) {
+          char nm[160]; // opaque extern "C" handle: its real (unmangled) C name from the header, never `void`
+          render_ident_src(cg_mod_src(c, d.module), ast_at_const(cg_mod_ast(c, d.module), dn->as.type_alias.name)->as.name.text, nm, sizeof nm);
+          buf_join3(out, cap, nm, SEP(decl), decl);
         } else if (dn->kind == NODE_TYPE_ALIAS && d.module == c->ast->module) {
           render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent (same module)
         } else if (dn->kind == NODE_TYPE_ALIAS) {
@@ -1068,8 +1075,8 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
       }
       break;
     }
-    case NODE_SLICE_TYPE:
-      buf_join3(out, cap, "SCslice", SEP(decl), decl);
+    case NODE_SLICE_TYPE: // `[]T` -> the prelude Slice<T> / SliceMut<T> instance C name
+      render_type_id(c, ast_type(c->ast, tn), decl, out, cap);
       break;
     case NODE_ARRAY_TYPE: {
       const Span ls = ast_at_const(c->ast, n->as.array_type.length)->span;
@@ -1183,10 +1190,35 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       buf_join3(out, cap, nm, SEP(decl), decl);
       break;
     }
+    case TYPE_OPAQUE: { // an extern "C" handle: its real (unmangled) C name, supplied by the header
+      char nm[160];
+      const Node *const dn = ast_at_const(cg_mod_ast(c, ty->module), ty->as.decl);
+      render_ident_src(cg_mod_src(c, ty->module), ast_at_const(cg_mod_ast(c, ty->module), dn->as.type_alias.name)->as.name.text, nm, sizeof nm);
+      buf_join3(out, cap, nm, SEP(decl), decl);
+      break;
+    }
     default:
       buf_join3(out, cap, "void", SEP(decl), decl);
       break;
   }
+}
+
+// True (and yields `*elem`) when `tid` is a prelude `Slice<E>` / `SliceMut<E>` instance -- the lowered
+// form of `[]E` / `[]mut E`. Slice intrinsics (indexing, for-iteration) read the element type via this.
+static bool cg_slice_elem(Codegen *c, const TypeId tid, TypeId *const elem) {
+  if (!c->package)
+    return false;
+  const Ty *const ty = ast_type_at(c->ast, tid);
+  if (ty->kind != TYPE_INSTANCE)
+    return false;
+  const TyInstance *const it = ast_instance(c->ast, ty->as.inst);
+  ModuleId smid, mmid;
+  const NodeId sd = package_prelude_lookup(c->package, "Slice", 5, true, &smid);
+  const NodeId md = package_prelude_lookup(c->package, "SliceMut", 8, true, &mmid);
+  const bool is_slice = (it->module == smid && it->decl == sd) || (it->module == mmid && it->decl == md);
+  if (is_slice && it->n == 1 && elem)
+    *elem = it->args[0];
+  return is_slice && it->n == 1;
 }
 
 // Render the declaration of `name` (already keyword-mangled) with interned type `t`, const per
@@ -1248,40 +1280,6 @@ static void emit_binding(Codegen *c, const TypeId t, const Span name, const bool
 }
 
 // Does `t` (a TypeId in module `m`'s pool) carry a writable (`*mut`) address -- directly, or through a
-// struct field or array/slice element? Such a value owns mutable state, so a `let` binding of it must NOT
-// be const-qualified in C: `const` would lock the owned pointer and reject the value's `&mut self` methods
-// (e.g. `deinit`). Stops at the first pointer/reference. A struct field may live in another module (e.g.
-// the prelude's `String`), so its decl/members/field-types are read from THAT module, not the current one.
-static bool type_owns_mut_in(Codegen *c, const ModuleId m, const TypeId t) {
-  const Ty *const ty = ast_type_at(cg_mod_ast(c, m), t);
-  switch (ty->kind) {
-    case TYPE_POINTER:
-    case TYPE_REFERENCE:
-      return ty->qualifier == TYPE_QUAL_MUT;
-    case TYPE_ARRAY:
-    case TYPE_SLICE:
-      return type_owns_mut_in(c, m, ty->as.elem);
-    case TYPE_STRUCT: {
-      const ModuleId sm = ty->module; // the struct's owning module
-      Ast *const sa = cg_mod_ast(c, sm);
-      const NodeList members = ast_at_const(sa, ty->as.decl)->as.aggregate.members;
-      const NodeId *const ids = ast_list(sa, members);
-      for (uint32_t i = 0; i < members.len; i++) {
-        const Node *const mn = ast_at_const(sa, ids[i]);
-        if (mn->kind == NODE_FIELD && type_owns_mut_in(c, sm, ast_type(sa, mn->as.field.type)))
-          return true;
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
-}
-
-static bool type_owns_mut(Codegen *c, const TypeId t) {
-  return type_owns_mut_in(c, c->ast->module, t);
-}
-
 // --- operators -----------------------------------------------------------------------------
 
 static const char *c_op(const TokenType t) {
@@ -1544,6 +1542,18 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       return;
     }
     if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_FUNCTION) {
+      // A raw binding reached as `mod::f(..)` keeps its real C symbol name -- never module-mangled.
+      if (ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.is_extern) {
+        emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
+        emit(c, "(");
+        for (uint32_t i = 0; i < args.len; i++) {
+          if (i)
+            emit(c, ", ");
+          emit_expr(c, aids[i]);
+        }
+        emit(c, ")");
+        return;
+      }
       const TypeId base_t = ast_type(c->ast, callee->as.member.object); // `Type::<Args>` base -> instance
       if (base_t != TYPE_NONE && ast_type_at(c->ast, base_t)->kind == TYPE_INSTANCE) {
         char inm[200]; // a generic instance assoc fn -> `Inst__method` (inst_name is already module-qualified)
@@ -1819,8 +1829,44 @@ static void emit_array_braces(Codegen *c, const Node *n) {
   emit(c, " }");
 }
 
+// If `id`'s (coerced) type is a prelude slice but its value is an array -- a `[T; N]` literal or an
+// array-typed binding -- materialize the `(Slice__T){ .ptr = <array>, .len = N }` fat-pointer view and
+// return true. Length is the literal's element count or the binding's declared `[T; N]`. A genuine slice
+// value (struct literal, call, slice binding) has no recoverable array length here, so it falls through.
+static bool emit_slice_coercion(Codegen *c, const NodeId id) {
+  TypeId selem;
+  const TypeId st = ast_type(c->ast, id);
+  if (!cg_slice_elem(c, st, &selem))
+    return false;
+  const Node *const n = ast_at_const(c->ast, id);
+  const bool is_lit = n->kind == NODE_ARRAY_LITERAL;
+  const NodeId lenN = is_lit ? NODE_NONE : array_length_of(c, id);
+  if (!is_lit && lenN == NODE_NONE)
+    return false; // a real slice value, not an array source
+  char styp[200];
+  render_type_id(c, st, "", styp, sizeof styp);
+  emit(c, "(%s){ .ptr = ", styp);
+  if (is_lit) { // a typed compound literal `(T[N]){..}`; T is the slice element (the node's type is the slice)
+    char et[256];
+    render_type_id(c, selem, "", et, sizeof et);
+    emit(c, "(%s[%u])", et, n->as.array_literal.elements.len);
+    emit_array_braces(c, n);
+    emit(c, ", .len = %u }", n->as.array_literal.elements.len);
+    return true;
+  }
+  c->slice_raw = id; // re-entry guard: emit the array binding bare (it decays to its element pointer)
+  emit_expr(c, id);
+  c->slice_raw = NODE_NONE;
+  emit(c, ", .len = ");
+  emit_expr(c, lenN);
+  emit(c, " }");
+  return true;
+}
+
 static void emit_expr(Codegen *c, const NodeId id) {
   if (id == NODE_NONE)
+    return;
+  if (id != c->slice_raw && emit_slice_coercion(c, id)) // array -> slice fat-pointer view
     return;
   const Node *const n = ast_at_const(c->ast, id);
   switch (n->kind) {
@@ -1901,21 +1947,15 @@ static void emit_expr(Codegen *c, const NodeId id) {
       break;
     }
     case NODE_INDEX: {
-      const Ty *const ot = ast_type_at(c->ast, ast_type(c->ast, n->as.index.object));
-      if (ot->kind == TYPE_SLICE) {
-        char et[256];
-        render_type_id(c, ot->as.elem, "", et, sizeof et);
-        emit(c, "((%s*)", et);
+      if (cg_slice_elem(c, ast_type(c->ast, n->as.index.object), NULL)) { // `s[i]` on `[]T`: its typed `.ptr`
         emit_expr(c, n->as.index.object);
-        emit(c, ".ptr)[");
-        emit_expr(c, n->as.index.index);
-        emit(c, "]");
+        emit(c, ".ptr[");
       } else {
         emit_expr(c, n->as.index.object);
         emit(c, "[");
-        emit_expr(c, n->as.index.index);
-        emit(c, "]");
       }
+      emit_expr(c, n->as.index.index);
+      emit(c, "]");
       break;
     }
     case NODE_MEMBER: {
@@ -2148,13 +2188,16 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
       if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT)
         break; // a unit-variant tag pattern binds nothing
       emit_indent(c);
-      emit_binding(c, ast_type(c->ast, pid), name_span(c, p->as.pattern.name), true);
+      // const iff immutable: `Some(mut x)` binds non-const (reassignment / `&mut self` methods); a plain
+      // `Some(x)` is immutable, and the typechecker rejects mutating it.
+      const bool is_mut = ast_at_const(c->ast, p->as.pattern.name)->as.name.is_mutable;
+      emit_binding(c, ast_type(c->ast, pid), name_span(c, p->as.pattern.name), !is_mut);
       emit(c, " = %s;\n", scrut);
       break;
     }
     case NODE_IDENTIFIER:
       emit_indent(c);
-      emit_binding(c, ast_type(c->ast, pid), p->as.name.text, true);
+      emit_binding(c, ast_type(c->ast, pid), p->as.name.text, !p->as.name.is_mutable);
       emit(c, " = %s;\n", scrut);
       break;
     case NODE_PATTERN_TUPLE: {
@@ -2553,23 +2596,24 @@ static void emit_for(Codegen *c, const Node *n) {
     emit(c, "}\n");
     return;
   }
-  if (it->kind == TYPE_SLICE) {
-    char et[256];
-    render_type_id(c, it->as.elem, "", et, sizeof et);
-    char s[32];
+  TypeId selem;
+  if (cg_slice_elem(c, ast_type(c->ast, n->as.for_stmt.iterable), &selem)) {
+    char s[32], styp[200];
     fresh(c, s, sizeof s);
+    render_type_id(c, ast_type(c->ast, n->as.for_stmt.iterable), s, styp, sizeof styp);
     emit(c, "{\n");
     c->depth++;
     emit_indent(c);
-    emit(c, "SCslice %s = ", s);
+    emit_cstr(c, styp); // `Slice__T __scN = <iterable>;`
+    emit(c, " = ");
     emit_expr(c, n->as.for_stmt.iterable);
     emit(c, ";\n");
     emit_indent(c);
     emit(c, "for (size_t %s = 0; %s < %s.len; %s++) {\n", idx, idx, s, idx);
     c->depth++;
     emit_indent(c);
-    emit_binding(c, it->as.elem, name_span(c, n->as.for_stmt.binding), true);
-    emit(c, " = ((%s*)%s.ptr)[%s];\n", et, s, idx);
+    emit_binding(c, selem, name_span(c, n->as.for_stmt.binding), true);
+    emit(c, " = %s.ptr[%s];\n", s, idx); // the `.ptr` field is already typed `*const T`
     for (uint32_t i = 0; i < stmts.len; i++) {
       emit_indent(c);
       emit_stmt(c, sids[i]);
@@ -2666,8 +2710,8 @@ static void emit_tuple_let(Codegen *c, const Node *n) {
     emit_indent(c);
     char bn[128];
     render_ident(c, name_span(c, nids[i]), bn, sizeof bn);
-    // const unless mutable or the element owns a `*mut` (see type_owns_mut).
-    const bool element_const = !n->as.let_stmt.is_mutable && !type_owns_mut(c, ast_type(c->ast, nids[i]));
+    // const iff the binding is immutable (`let` without `mut`); mutability is a binding property only.
+    const bool element_const = !n->as.let_stmt.is_mutable;
     emit(c, "%s__auto_type %s = %s._%u;\n", element_const ? "const " : "", bn, tmp, i);
   }
 }
@@ -2698,8 +2742,9 @@ static void emit_stmt(Codegen *c, const NodeId id) {
         emit_tuple_let(c, n);
         break;
       }
-      // A `let` of a type that owns a `*mut` stays non-const, so its `&mut self` methods stay callable.
-      const bool is_const = !n->as.let_stmt.is_mutable && !type_owns_mut(c, ast_type(c->ast, id));
+      // const iff the binding is immutable (`let` without `mut`). Calling a `&mut self` method on an
+      // immutable binding is rejected by the typechecker (receiver_mutable), so const never blocks a valid one.
+      const bool is_const = !n->as.let_stmt.is_mutable;
       // Value-semantics array copy: an array bound from a non-literal source (another array, or an
       // array-returning call) can't use C array initialization -> declare, then memcpy. The length comes
       // from the annotation, or from the source call's return type (the binding's TypeId has lost it).
@@ -4053,13 +4098,12 @@ static void phase_prototypes(Codegen *c, const int which) {
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && want_fn(which, ast_at_const(c->ast, mids[j])->as.function.is_public))
           emit_function(c, mids[j], target, false, false, NULL, false);
-    } else if (n->kind == NODE_EXTERN_BLOCK && which != PROTO_PRIVATE) {
-      const NodeList ms = n->as.extern_block.items;
-      const NodeId *const mids = ast_list(c->ast, ms);
-      for (uint32_t j = 0; j < ms.len; j++)
-        if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && !ast_at_const(c->ast, mids[j])->as.function.generics.len)
-          emit_function(c, mids[j], (DefId){0, NODE_NONE}, true, false, NULL, false);
     }
+    // `extern "C"` block functions get NO emitted prototype: every C standard-library header is already
+    // included (super_rt.h), so the real declaration is in scope -- and re-declaring it would clash on any
+    // signature we cannot reproduce exactly (e.g. `FILE *fopen`, where our opaque `type` lowers to `void`).
+    // Calls emit the unmangled C name and bind through the included header; `void`-typed pointers (opaque
+    // extern types) convert freely, so `*mut CFile = fopen(...)` and `fclose(h)` type-check in C.
   }
   if (which != PROTO_PUBLIC) { // free-function specs, closures and callback specs are static -> .c only
     emit_specializations(c, false);

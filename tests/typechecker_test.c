@@ -183,10 +183,37 @@ static void test_errors(void) {
       "struct A { v: i32, }\nstruct B {}\nextend B { fn peek(a: A) i32 { return a.v; } }\n", "field 'v' is private");
   expect_error("non-bool condition", "fn main() i32 { if (1) { } }\n", "must be 'bool'");
   expect_error("assign immutable", "fn main() i32 { let x: i32 = 1; x = 2; }\n", "cannot assign");
-  // A `let` of a `*mut`-owning struct is non-const in C, but still an immutable *binding*: no rebinding.
+  expect_error( // a non-`mut` match payload binding is immutable
+      "assign immutable match binding",
+      "enum Opt { None, Some(i32), }\n"
+      "fn main() i32 { let o = Opt::Some(1); return switch o { Some(x) => { x = 2; x; }, None => { 0; }, }; }\n",
+      "cannot assign");
+  expect_ok( // `Some(mut x)` makes the payload binding assignable
+      "mut match binding is assignable",
+      "enum Opt { None, Some(i32), }\n"
+      "fn main() i32 { let o = Opt::Some(1); return switch o { Some(mut x) => { x = 2; x; }, None => { 0; }, }; }\n");
+  // A `let` of a `*mut`-owning struct is an immutable *binding*: no rebinding, and no `&mut self` calls.
+  // Binding mutability is `let mut`, NOT a property of the type owning a writable pointer internally.
   expect_error(
-      "owning-mut let still not reassignable",
+      "owning-type let still not reassignable",
       "struct Buf { pub p: *mut u8, }\nfn f(b: Buf, c: Buf) { let x: Buf = b; x = c; }\n", "cannot assign");
+  expect_error(
+      "&mut self on immutable let rejected",
+      "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\n"
+      "fn f(b: Buf) { let x: Buf = b; x.clear(); }\n",
+      "cannot call a '&mut self' method on an immutable binding");
+  expect_ok(
+      "&mut self on let mut allowed",
+      "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\n"
+      "fn f(b: Buf) { let mut x: Buf = b; x.clear(); }\n");
+  expect_ok( // &mut self through a &mut parameter is fine (mutable indirection), no `mut` binding needed
+      "&mut self through &mut param",
+      "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\n"
+      "fn f(b: &mut Buf) { b.clear(); }\n");
+  expect_error( // taking `&mut` of an immutable binding would hand out write access to it
+      "&mut of immutable binding rejected",
+      "fn use_p(p: &mut i32) {}\nfn f() { let x: i32 = 1; use_p(&mut x); }\n", "cannot take '&mut'");
+  expect_ok("&mut of let mut allowed", "fn use_p(p: &mut i32) {}\nfn f() { let mut x: i32 = 1; use_p(&mut x); }\n");
   expect_error("return mismatch", "fn f() i32 { return true; }\n", "mismatched types");
   expect_error("index non-array", "fn main() i32 { let x: i32 = 1; let y: i32 = x[0]; }\n", "cannot index");
   expect_error(
@@ -279,8 +306,29 @@ static void test_interface_bounds(void) {
       "no field or method 'nope'");
 }
 
+static void test_slices(void) {
+  // `[]T` is the prelude Slice<T>: `.len` field, element indexing, and methods all resolve.
+  expect_ok("slice len + index read", "fn f(s: []i32) i32 { let n: usize = s.len; return s[0]; }\n");
+  expect_ok("slice method resolves", "fn f(s: []i32) usize { return s.len(); }\n");
+  // An array coerces to a read-only slice; a mutable array coerces to a writable `[]mut T`.
+  expect_ok(
+      "array coerces to []T", "fn take(s: []i32) i32 { return s[0]; }\n"
+      "fn main() i32 { let a: [i32; 2] = [1, 2]; return take(a); }\n");
+  expect_ok(
+      "mutable array coerces to []mut T", "fn fill(s: []mut i32) { s[0] = 9; }\n"
+      "fn main() i32 { let mut a: [i32; 2] = [0, 0]; fill(a); return a[0]; }\n");
+  expect_ok("[]mut element is assignable", "fn fill(s: []mut i32) { s[0] = 9; }\n");
+  // A read-only `[]T` element cannot be assigned; an immutable array cannot become `[]mut T`.
+  expect_error("write to read-only slice", "fn f(s: []i32) { s[0] = 1; }\n", "cannot assign");
+  expect_error(
+      "immutable array not []mut", "fn take(s: []mut i32) {}\n"
+      "fn main() i32 { let a: [i32; 2] = [1, 2]; take(a); return 0; }\n",
+      "mismatched types");
+}
+
 int main(void) {
   test_ok();
+  test_slices();
   test_computed_scalar_types();
   test_computed_pointer_types();
   test_computed_reference_type();

@@ -110,8 +110,10 @@ static char *module_file_path(const char *root_dir, const Ast *ast, const char *
 }
 
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
-// finds <std_root>/std/x.spc). Returns the first path that exists, else the project-relative path (so a
-// not-found error names the project location). Heap-allocated; caller owns it.
+// finds <std_root>/std/x.spc), then the bundled `ffi/` bindings (so a bare `import stdio;` finds
+// <std_root>/ffi/stdio.spc -- one module per C header, imported by the header's bare name). Returns the
+// first path that exists, else the project-relative path (so a not-found error names the project
+// location). Heap-allocated; caller owns it.
 static char *resolve_import_file(const Package *p, const Ast *ast, const char *src, const NodeList parts) {
   char *const root_rel = module_file_path(p->root_dir, ast, src, parts);
   if (access(root_rel, F_OK) == 0 || !p->std_root)
@@ -122,6 +124,14 @@ static char *resolve_import_file(const Package *p, const Ast *ast, const char *s
     return std_rel;
   }
   free(std_rel);
+  char ffi_base[PATH_MAX];
+  snprintf(ffi_base, sizeof ffi_base, "%s/ffi", p->std_root);
+  char *const ffi_rel = module_file_path(ffi_base, ast, src, parts);
+  if (access(ffi_rel, F_OK) == 0) {
+    free(root_rel);
+    return ffi_rel;
+  }
+  free(ffi_rel);
   return root_rel;
 }
 
@@ -354,6 +364,33 @@ NodeId package_lookup(const Package *p, const ModuleId mid, const char *name, co
       name_node = n->as.const_def.name;
       is_pub = n->as.const_def.is_public;
       is_type = false;
+    } else if (n->kind == NODE_EXTERN_BLOCK) {
+      // `pub` raw bindings / opaque handles live one level down, inside the extern block.
+      const NodeList inner = n->as.extern_block.items;
+      const NodeId *const iids = ast_list(ast, inner);
+      for (uint32_t j = 0; j < inner.len; j++) {
+        const Node *const it = ast_at_const(ast, iids[j]);
+        NodeId nn;
+        bool ip, it_type;
+        if (it->kind == NODE_FUNCTION) {
+          nn = it->as.function.name;
+          ip = it->as.function.is_public;
+          it_type = false;
+        } else if (it->kind == NODE_TYPE_ALIAS) {
+          nn = it->as.type_alias.name;
+          ip = it->as.type_alias.is_public;
+          it_type = true;
+        } else {
+          continue;
+        }
+        if (!ip || it_type != want_type)
+          continue;
+        size_t l = 0;
+        const char *const t = ident_text(ast, src, nn, &l);
+        if (l == name_len && memcmp(t, name, name_len) == 0)
+          return iids[j];
+      }
+      continue;
     } else {
       continue;
     }
