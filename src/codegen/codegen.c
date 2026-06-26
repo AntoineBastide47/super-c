@@ -216,6 +216,8 @@ static const char *const BUILTIN_C[BT_COUNT] = {
 static void emit_expr(Codegen *c, NodeId id);
 static NodeId array_length_of(Codegen *c, NodeId iter);
 static void emit_stmt(Codegen *c, NodeId id);
+static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId srcTy, char *out, size_t cap);
+static const char *cg_conv_lit(Codegen *c, ModuleId m, Span name);
 static void emit_block(Codegen *c, NodeId id);
 static void emit_if(Codegen *c, const Node *n);
 static void emit_if_expr(Codegen *c, NodeId id);
@@ -1798,6 +1800,11 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         }
       }
       emit_ident_mod(c, emd.module, ast_at_const(cg_mod_ast(c, emd.module), emd.node)->as.function.name);
+      if (td.node != NODE_NONE && args.len) { // overloaded `Type::from(x)` -> `Type__from__<argType>`
+        char sfx[200];
+        cg_conv_suffix(c, td, cg_conv_lit(c, c->ast->module, name_span(c, callee->as.member.member)), ast_type(c->ast, aids[0]), sfx, sizeof sfx);
+        emit_cstr(c, sfx);
+      }
       emit_method_targs(c, id, emd);
       emit(c, "(");
       for (uint32_t i = 0; i < args.len; i++) {
@@ -1841,6 +1848,14 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
           emit(c, "__");
         }
         emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
+        { // overloaded `from`/`try_from`: disambiguate by the source value's type (`x.into()` -> `T__from__<src>`)
+          const DefId ct = tb->kind == TYPE_INSTANCE
+                               ? (DefId){ast_instance(c->ast, tb->as.inst)->module, ast_instance(c->ast, tb->as.inst)->decl}
+                               : (DefId){tb->module, tb->as.decl};
+          char sfx[200];
+          cg_conv_suffix(c, ct, cg_conv_lit(c, md.module, mdn), ast_type(c->ast, obj), sfx, sizeof sfx);
+          emit_cstr(c, sfx);
+        }
         emit(c, "(");
         emit_expr(c, obj);
         emit(c, ")");
@@ -3648,6 +3663,61 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
 // `target` is the receiver type (a DefId; .node == NODE_NONE for a free function). The module prefix is
 // always this (the emitting) module, so a local `extend foreign::T` method is mangled by the module that
 // declares it (`extender__T__m`); the type-name segment is read from the target type's own module.
+// The number of `from` (or `try_from`) methods across all impls targeting (tmod,tdecl). A type with more
+// than one `From`/`TryFrom` impl needs each symbol disambiguated by its source type (Celsius__from__u8).
+static int cg_conv_count(Codegen *c, const ModuleId tmod, const NodeId tdecl, const char *const lit) {
+  int n = 0;
+  const ModuleId scopes[2] = {tmod, c->ast->module};
+  const int ns = tmod == c->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = cg_mod_ast(c, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tg.module != tmod || tg.node != tdecl)
+        continue;
+      const NodeList ms = it->as.impl_def.items;
+      const NodeId *const mids = ast_list(a, ms);
+      for (uint32_t j = 0; j < ms.len; j++) {
+        const Node *const mn = ast_at_const(a, mids[j]);
+        if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text, lit))
+          n++;
+      }
+    }
+  }
+  return n;
+}
+
+// If `lit` ("from"/"try_from") names an overloaded conversion of `target` (several such impls), append
+// `__<srcMangle>` so the overloads get distinct C symbols. `srcTy` is the source type to mangle (the method's
+// value-param type at a definition; the call's source/arg type at a call site) -- equal for an exact-source
+// match, which is how the def and the call agree on the symbol. A no-op otherwise.
+static void cg_conv_suffix(Codegen *c, const DefId target, const char *const lit, const TypeId srcTy, char *out,
+                           const size_t cap) {
+  if (cap)
+    out[0] = '\0';
+  if (target.node == NODE_NONE || srcTy == TYPE_NONE || !lit || cg_conv_count(c, target.module, target.node, lit) < 2)
+    return;
+  size_t at = buf_append(out, cap, 0, "__");
+  char e[176];
+  mangle_type(c, subst_resolve(c, srcTy), e, sizeof e);
+  buf_append(out, cap, at, e);
+}
+
+// "from"/"try_from"/NULL for a method-name span, in its own module's source.
+static const char *cg_conv_lit(Codegen *c, const ModuleId m, const Span name) {
+  if (span_is(cg_mod_src(c, m), name, "from"))
+    return "from";
+  if (span_is(cg_mod_src(c, m), name, "try_from"))
+    return "try_from";
+  return NULL;
+}
+
 static void function_name(Codegen *c, const NodeId fn, const DefId target, char *out, const size_t cap, const bool prefixed) {
   if (cg_symbol_override(c, c->ast->module, fn, out, cap)) // `@c.export`/`@c.import`: the exact C symbol
     return;
@@ -3664,7 +3734,14 @@ static void function_name(Codegen *c, const NodeId fn, const DefId target, char 
       out[k++] = '_';
     }
   }
-  render_ident(c, fname, out + k, cap - k);
+  k += render_ident(c, fname, out + k, cap - k);
+  // Overloaded `from`/`try_from`: disambiguate by the value-param's type so the impls get distinct symbols.
+  const NodeList params = ast_at_const(c->ast, fn)->as.function.params;
+  const char *const lit = cg_conv_lit(c, c->ast->module, fname);
+  if (lit && target.node != NODE_NONE && params.len) {
+    const NodeId p0 = ast_list(c->ast, params)[0];
+    cg_conv_suffix(c, target, lit, ast_type(c->ast, ast_at_const(c->ast, p0)->as.parameter.type), out + k, cap - k);
+  }
 }
 
 // Emit a function signature; with_body emits the block, otherwise a prototype `;`. `extern_q`
