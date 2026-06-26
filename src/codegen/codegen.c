@@ -119,8 +119,14 @@ struct Codegen {
     // in reverse, at its exit (fall-through, return, break, continue). `loop_defer_base` is the stack depth
     // at the innermost loop body's entry, so break/continue run only the defers registered inside the loop.
     NodeId defer_stack[256];
+    uint8_t defer_kind[256]; // 0 = a `defer` statement expr; 1 = an automatic Drop of a local binding (RAII)
     uint32_t defer_top;
     uint32_t loop_defer_base;
+    // RAII: locals of a `Drop`-implementing type are dropped at scope exit, UNLESS moved out (passed by
+    // value, bound to another name, or returned) -- a moved value is owned (and dropped) elsewhere. `moved`
+    // holds the decl nodes moved anywhere in the current function (a sound, if conservative, double-free guard).
+    NodeId moved[512];
+    uint32_t nmoved;
     ERRORS_VARIABLES;
 };
 
@@ -214,6 +220,7 @@ static void emit_block(Codegen *c, NodeId id);
 static void emit_if(Codegen *c, const Node *n);
 static void emit_if_expr(Codegen *c, NodeId id);
 static void emit_array_braces(Codegen *c, const Node *n);
+static void emit_auto_drop(Codegen *c, NodeId letId);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -2701,11 +2708,12 @@ static void emit_match_stmt(Codegen *c, const NodeId id) {
 
 // --- statements ----------------------------------------------------------------------------
 
-static void emit_block(Codegen *c, const NodeId id) {
+// Emit a block whose fall-through cleanup runs the defers/drops registered down to `dbase`. The function
+// body passes dbase=0 so its owned parameters (registered before the block) are torn down at its close.
+static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
   const Node *const n = ast_at_const(c->ast, id);
   emit(c, "{\n");
   c->depth++;
-  const uint32_t dbase = c->defer_top; // defers registered in this block run, reversed, at its close
   const NodeList stmts = n->as.block.statements;
   const NodeId *const ids = ast_list(c->ast, stmts);
   for (uint32_t i = 0; i < stmts.len; i++) {
@@ -2717,6 +2725,10 @@ static void emit_block(Codegen *c, const NodeId id) {
   c->depth--;
   emit_indent(c);
   emit(c, "}");
+}
+
+static void emit_block(Codegen *c, const NodeId id) {
+  emit_block_from(c, id, c->defer_top); // defers/drops registered in this block run, reversed, at its close
 }
 
 // True when emit_expr already surrounds the expression with parentheses, so a condition context
@@ -3158,7 +3170,10 @@ static void emit_expr_stmt(Codegen *c, NodeId v) {
 static void emit_defers_to(Codegen *c, const uint32_t base) {
   for (uint32_t i = c->defer_top; i-- > base;) {
     emit_indent(c);
-    emit_expr_stmt(c, c->defer_stack[i]);
+    if (c->defer_kind[i] == 1) // an automatic RAII drop of a local binding
+      emit_auto_drop(c, c->defer_stack[i]);
+    else
+      emit_expr_stmt(c, c->defer_stack[i]);
   }
 }
 
@@ -3208,6 +3223,245 @@ static void emit_static_assert(Codegen *c, const Node *const n) {
   emit(c, ");\n");
 }
 
+// The `drop` method of a type that implements the Drop interface (`extend T as Drop`), or {_,NODE_NONE}.
+// Only an explicit `as Drop` impl opts a type into RAII auto-drop. Searches the type's home + current module.
+static DefId cg_drop_method(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
+  const ModuleId scopes[2] = {tmod, c->ast->module};
+  const int ns = tmod == c->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = cg_mod_ast(c, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tg.module != tmod || tg.node != tdecl)
+        continue;
+      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
+      if (tr.node == NODE_NONE)
+        continue;
+      const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
+      if (trn->kind != NODE_TRAIT ||
+          !span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text, "Drop"))
+        continue;
+      const NodeList ms = it->as.impl_def.items;
+      const NodeId *const mids = ast_list(a, ms);
+      for (uint32_t j = 0; j < ms.len; j++) {
+        const Node *const mn = ast_at_const(a, mids[j]);
+        if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text, "drop"))
+          return (DefId){m, mids[j]};
+      }
+    }
+  }
+  return (DefId){0, NODE_NONE};
+}
+
+// Does the (subst-resolved) type implement the Drop interface? Such a value owns resources -> it gets an
+// RAII destructor at scope exit, and a binding/param of it is emitted non-`const` (drop takes `&mut self`).
+static bool cg_type_is_drop(Codegen *c, const TypeId ty) {
+  const Ty *const y = ast_type_at(c->ast, subst_resolve(c, ty));
+  ModuleId om;
+  NodeId od;
+  if (y->kind == TYPE_STRUCT) {
+    om = y->module;
+    od = y->as.decl;
+  } else if (y->kind == TYPE_INSTANCE) {
+    const TyInstance *const ii = ast_instance(c->ast, y->as.inst);
+    om = ii->module;
+    od = ii->decl;
+  } else {
+    return false;
+  }
+  return cg_drop_method(c, om, od).node != NODE_NONE;
+}
+
+// Was the local `decl` moved out somewhere in the current function (so it must not be auto-dropped)?
+static bool cg_is_moved(const Codegen *c, const NodeId decl) {
+  for (uint32_t i = 0; i < c->nmoved; i++)
+    if (c->moved[i] == decl)
+      return true;
+  return false;
+}
+
+// Record `expr` as a move if it is a bare reference to a current-module owned binding (a `let` or a
+// by-value parameter) -- ownership transfers to another owner (`let`, `return`, assignment, struct field,
+// or a by-value call argument), so the source must not be auto-dropped here.
+static void cg_mark_move(Codegen *c, const NodeId expr) {
+  if (expr == NODE_NONE || ast_at_const(c->ast, expr)->kind != NODE_IDENTIFIER)
+    return;
+  const DefId d = ast_resolution_def(c->ast, expr);
+  if (d.module != c->ast->module || d.node == NODE_NONE)
+    return;
+  const NodeKind dk = ast_at_const(c->ast, d.node)->kind;
+  if (dk != NODE_LET && dk != NODE_PARAMETER)
+    return;
+  if (c->nmoved < (uint32_t)(sizeof c->moved / sizeof c->moved[0]))
+    c->moved[c->nmoved++] = d.node;
+}
+
+// Pre-pass over a function body collecting moved local bindings (so RAII skips dropping them). A move is a
+// bare binding used as a `let` initializer, an assignment RHS, a returned value, or a struct field value.
+static void cg_scan_moves(Codegen *c, const NodeId id) {
+  if (id == NODE_NONE)
+    return;
+  const Node *const n = ast_at_const(c->ast, id);
+  switch (n->kind) {
+    case NODE_BLOCK: {
+      const NodeList ss = n->as.block.statements;
+      const NodeId *const ids = ast_list(c->ast, ss);
+      for (uint32_t i = 0; i < ss.len; i++)
+        cg_scan_moves(c, ids[i]);
+      break;
+    }
+    case NODE_LET:
+      cg_mark_move(c, n->as.let_stmt.value);
+      cg_scan_moves(c, n->as.let_stmt.value);
+      break;
+    case NODE_RETURN: {
+      const NodeList vs = n->as.return_stmt.values;
+      const NodeId *const ids = ast_list(c->ast, vs);
+      for (uint32_t i = 0; i < vs.len; i++) {
+        cg_mark_move(c, ids[i]);
+        cg_scan_moves(c, ids[i]);
+      }
+      break;
+    }
+    case NODE_ASSIGNMENT:
+      cg_mark_move(c, n->as.binary.right);
+      cg_scan_moves(c, n->as.binary.left);
+      cg_scan_moves(c, n->as.binary.right);
+      break;
+    case NODE_STRUCT_INITIALIZER: {
+      const NodeList fs = n->as.struct_initializer.fields;
+      const NodeId *const ids = ast_list(c->ast, fs);
+      for (uint32_t i = 0; i < fs.len; i++) {
+        const NodeId v = ast_at_const(c->ast, ids[i])->as.field_initializer.value;
+        cg_mark_move(c, v);
+        cg_scan_moves(c, v);
+      }
+      break;
+    }
+    case NODE_IF:
+      cg_scan_moves(c, n->as.if_stmt.condition);
+      cg_scan_moves(c, n->as.if_stmt.then_branch);
+      cg_scan_moves(c, n->as.if_stmt.else_branch);
+      break;
+    case NODE_WHILE:
+      cg_scan_moves(c, n->as.while_stmt.condition);
+      cg_scan_moves(c, n->as.while_stmt.body);
+      break;
+    case NODE_FOR:
+      cg_scan_moves(c, n->as.for_stmt.iterable);
+      cg_scan_moves(c, n->as.for_stmt.body);
+      break;
+    case NODE_MATCH: {
+      cg_scan_moves(c, n->as.match_expr.value);
+      const NodeList arms = n->as.match_expr.arms;
+      const NodeId *const ids = ast_list(c->ast, arms);
+      for (uint32_t i = 0; i < arms.len; i++)
+        cg_scan_moves(c, ast_at_const(c->ast, ids[i])->as.match_arm.body);
+      break;
+    }
+    case NODE_EXPRESSION_STATEMENT:
+    case NODE_DEFER:
+      cg_scan_moves(c, n->as.single.value);
+      break;
+    case NODE_CALL: {
+      cg_scan_moves(c, n->as.call.callee);
+      const NodeList args = n->as.call.args;
+      const NodeId *const ids = ast_list(c->ast, args);
+      for (uint32_t i = 0; i < args.len; i++) {
+        cg_mark_move(c, ids[i]); // a by-value argument moves the binding to the callee (which owns/drops it)
+        cg_scan_moves(c, ids[i]);
+      }
+      break;
+    }
+    case NODE_BINARY:
+      cg_scan_moves(c, n->as.binary.left);
+      cg_scan_moves(c, n->as.binary.right);
+      break;
+    case NODE_UNARY:
+      cg_scan_moves(c, n->as.unary.operand);
+      break;
+    case NODE_MEMBER:
+      cg_scan_moves(c, n->as.member.object);
+      break;
+    case NODE_INDEX:
+      cg_scan_moves(c, n->as.index.object);
+      cg_scan_moves(c, n->as.index.index);
+      break;
+    case NODE_CAST:
+      cg_scan_moves(c, n->as.cast.expression);
+      break;
+    default:
+      break;
+  }
+}
+
+// Whether the binding at `id` (a `let` or a by-value parameter) holds a Drop-implementing, not-moved value
+// -- i.e. it gets a scope-exit RAII drop. Such a let is emitted non-`const` (its destructor takes `&mut self`).
+static bool cg_will_auto_drop(Codegen *c, const NodeId id) {
+  const Node *const n = ast_at_const(c->ast, id);
+  if (n->kind == NODE_LET && ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE)
+    return false;
+  if (cg_is_moved(c, id))
+    return false;
+  return cg_type_is_drop(c, ast_type(c->ast, id));
+}
+
+// Register an automatic drop on the scope-exit cleanup stack (RAII), in the same reverse-order sequence
+// as `defer`. Caller has already confirmed cg_will_auto_drop.
+static void cg_register_auto_drop(Codegen *c, const NodeId id) {
+  if (c->defer_top >= (uint32_t)(sizeof c->defer_stack / sizeof c->defer_stack[0]))
+    return;
+  c->defer_stack[c->defer_top] = id; // the let node; emit_defers_to reads its binding name + type
+  c->defer_kind[c->defer_top] = 1;
+  c->defer_top++;
+}
+
+// Emit the RAII destructor call for the binding (`let` or by-value param) at `bid`: `Type__drop(&name)`.
+static void emit_auto_drop(Codegen *c, const NodeId bid) {
+  const Node *const ln = ast_at_const(c->ast, bid);
+  const TypeId bt = subst_resolve(c, ast_type(c->ast, bid));
+  const Ty *const y = ast_type_at(c->ast, bt);
+  ModuleId om;
+  NodeId od;
+  if (y->kind == TYPE_INSTANCE) {
+    const TyInstance *const ii = ast_instance(c->ast, y->as.inst);
+    om = ii->module;
+    od = ii->decl;
+  } else if (y->kind == TYPE_STRUCT) {
+    om = y->module;
+    od = y->as.decl;
+  } else {
+    return;
+  }
+  const DefId dm = cg_drop_method(c, om, od);
+  if (dm.node == NODE_NONE)
+    return;
+  if (y->kind == TYPE_INSTANCE) {
+    char inm[200];
+    inst_name(c, ast_instance(c->ast, y->as.inst), inm, sizeof inm);
+    emit_cstr(c, inm);
+    emit_paste(c);
+    emit(c, "__");
+  } else {
+    char pfx[64];
+    render_modpfx(c, dm.module, pfx, sizeof pfx);
+    emit_cstr(c, pfx);
+    emit_ident_mod(c, om, ast_at_const(cg_mod_ast(c, om), od)->as.aggregate.name);
+    emit(c, "__");
+  }
+  emit_ident_mod(c, dm.module, ast_at_const(cg_mod_ast(c, dm.module), dm.node)->as.function.name);
+  char nm[128];
+  const NodeId nameNode = ln->kind == NODE_PARAMETER ? ln->as.parameter.name : ln->as.let_stmt.name;
+  render_ident(c, name_span(c, nameNode), nm, sizeof nm);
+  emit(c, "(&%s);\n", nm);
+}
+
 static void emit_stmt(Codegen *c, const NodeId id) {
   if (id == NODE_NONE)
     return;
@@ -3227,7 +3481,9 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       }
       // const iff the binding is immutable (`let` without `mut`). Calling a `&mut self` method on an
       // immutable binding is rejected by the typechecker (receiver_mutable), so const never blocks a valid one.
-      const bool is_const = !n->as.let_stmt.is_mutable;
+      // A Drop-managed binding is emitted non-const, since its scope-exit destructor takes `&mut self`.
+      const bool autodrop = cg_will_auto_drop(c, id);
+      const bool is_const = !n->as.let_stmt.is_mutable && !autodrop;
       // Value-semantics array copy: an array bound from a non-literal source (another array, or an
       // array-returning call) can't use C array initialization -> declare, then memcpy. The length comes
       // from the annotation, or from the source call's return type (the binding's TypeId has lost it).
@@ -3265,6 +3521,8 @@ static void emit_stmt(Codegen *c, const NodeId id) {
         emit_initializer(c, n->as.let_stmt.type, n->as.let_stmt.value);
       }
       emit(c, ";\n");
+      if (autodrop)
+        cg_register_auto_drop(c, id); // RAII: schedule a scope-exit drop
       break;
     }
     case NODE_CONST: {
@@ -3335,8 +3593,10 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       // Registered, not emitted here: the enclosing scope runs it (reversed) at every exit path.
       if (c->defer_top >= (uint32_t)(sizeof c->defer_stack / sizeof c->defer_stack[0]))
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: too many nested 'defer' statements");
-      else
+      else {
+        c->defer_kind[c->defer_top] = 0;
         c->defer_stack[c->defer_top++] = n->as.single.value;
+      }
       break;
     case NODE_EXPRESSION_STATEMENT:
       emit_expr_stmt(c, n->as.single.value);
@@ -3360,7 +3620,9 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
     const Node *const p = ast_at_const(c->ast, ids[i]);
     char nm[128], d[300];
     render_ident(c, name_span(c, p->as.parameter.name), nm, sizeof nm);
-    render_binding_node(c, p->as.parameter.type, nm, !p->as.parameter.is_mutable, d, sizeof d); // `mut p` -> non-const
+    // `mut p` -> non-const; a by-value Drop param is also non-const (it is owned and its destructor mutates it).
+    const bool pconst = !p->as.parameter.is_mutable && !cg_type_is_drop(c, ast_type(c->ast, ids[i]));
+    render_binding_node(c, p->as.parameter.type, nm, pconst, d, sizeof d);
     if (any)
       k = buf_append(out, cap, k, ", ");
     k = buf_append(out, cap, k, d);
@@ -3508,7 +3770,16 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
     emit(c, " ");
     c->defer_top = 0; // each function body is a fresh defer scope
     c->loop_defer_base = 0;
-    emit_block(c, fn->as.function.body);
+    c->nmoved = 0; // RAII: collect bindings moved out of this body, so their auto-drop is elided
+    cg_scan_moves(c, fn->as.function.body);
+    // A by-value Drop parameter is owned by this function -> drop it at scope exit (unless moved). Pushed
+    // first so params are torn down LAST (after locals), preserving reverse-construction order.
+    const NodeList ps = fn->as.function.params;
+    const NodeId *const pids = ast_list(c->ast, ps);
+    for (uint32_t i = 0; i < ps.len; i++)
+      if (cg_will_auto_drop(c, pids[i]))
+        cg_register_auto_drop(c, pids[i]);
+    emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also drops owned parameters
     emit(c, "\n\n");
   } else {
     emit(c, ";\n");

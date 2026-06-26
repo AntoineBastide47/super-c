@@ -160,6 +160,13 @@ static void test_str_member_types(void) {
 }
 
 static void test_errors(void) {
+  // move analysis: using a Drop value after it has been moved is rejected (a plain non-Drop value still copies).
+  expect_error(
+      "use after move",
+      "interface Drop { fn drop(self: &mut Self); }\n"
+      "struct R { pub t: i32 }\nextend R as Drop { fn drop(self: &mut Self) {} }\n"
+      "fn main() i32 { let a = R { t: 1 }; let b = a; return a.t; }\n",
+      "use of moved value");
   expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
   expect_error( // only char *literals* coerce; a char value needs an explicit conversion
