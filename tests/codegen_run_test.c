@@ -493,6 +493,13 @@ static void test_generics(void) {
 static void test_std_types(void) {
   // sizeof(T) lowers to C's sizeof and is usize-typed (the byte sizes back the heap containers).
   sc_run_program("sizeof", PRE "fn main() i32 { exit(((sizeof(i32) + sizeof(u8)) as i32) * 8 + 2); }\n", 42, ""); // (4+1)*8+2
+  // String numeric formatting: from_i64 / from_u64 / push_i64 / push_f64.
+  sc_run_program(
+      "std String int/float to-string",
+      PRE "fn main() i32 { let mut a = String::from_i64(-12345); a.print(); putchar(32);\n"
+          "  let mut s = String::from_str(\"x=\"); s.push_i64(42); s.push_byte(32); s.push_f64(3.5); s.println();\n"
+          "  let n = a.len(); a.drop(); s.drop(); exit(n as i32); }\n",
+      6, "-12345 x=42 3.5\n");
   sc_run_program(
       "std Option",
       PRE "fn main() i32 { let a: Option<i32> = Option::<i32>::some(40);\n"
@@ -712,6 +719,51 @@ static void test_interfaces(void) {
           "fn copy_of<T: Clone>(w: &mut T) T { return w.dup(); }\n"
           "fn main() i32 { let mut p = P { x: 7 }; let q = copy_of(&mut p); exit(q.x); }\n",
       7, "");
+  // static (no-self) interface method on a type parameter: `T::default()` dispatches to the concrete impl.
+  sc_run_program(
+      "interface: static method on a type param",
+      PRE "interface Default { fn default() Self; }\n"
+          "struct Q { pub x: i32 }\nextend Q as Default { fn default() Q { return Q { x: 7 }; } }\n"
+          "fn make<T: Default>() T { return T::default(); }\n"
+          "fn main() i32 { let q = make::<Q>(); exit(q.x); }\n",
+      7, "");
+  // `Trait::assoc()` resolved by the expected (annotation) type: `Default::default()` -> `R__default`.
+  sc_run_program(
+      "interface: Trait::assoc() resolved by expected type",
+      PRE "interface Default { fn default() Self; }\n"
+          "struct R { pub x: i32, pub y: i32 }\nextend R as Default { fn default() R { return R { x: 5, y: 9 }; } }\n"
+          "fn main() i32 { let r: R = Default::default(); exit(r.x + r.y); }\n",
+      14, "");
+  // `.into()` desugars to the target type's `From` impl, picked via the expected (annotation) type.
+  sc_run_program(
+      "interface: .into() via From",
+      PRE "interface From<T> { fn from(value: T) Self; }\n"
+          "struct C { pub d: i32 }\nstruct F { pub d: i32 }\n"
+          "extend F as From<C> { fn from(value: C) F { return F { d: value.d * 9 / 5 + 32 }; } }\n"
+          "fn main() i32 { let c = C { d: 100 }; let f: F = c.into(); exit(f.d); }\n",
+      212, "");
+  // `.try_into()` desugars to the target type's `TryFrom` impl (result is a `Result<U, E>`).
+  sc_run_program(
+      "interface: .try_into() via TryFrom",
+      PRE "interface TryFrom<T> { fn try_from(value: T) Result<Self, i32>; }\n"
+          "struct Sm { pub v: i32 }\n"
+          "extend Sm as TryFrom<i32> { fn try_from(value: i32) Result<Sm, i32> {\n"
+          "  if value > 255 { return Result::<Sm, i32>::err(1); } return Result::<Sm, i32>::ok(Sm { v: value }); } }\n"
+          "fn main() i32 { let r: Result<Sm, i32> = (200).try_into(); let s = r.unwrap_or(Sm { v: 0 }); exit(s.v); }\n",
+      200, "");
+  // interface DEFAULT methods: impl provides `eq`/`cmp`; `ne` (from Eq) and `lt`/`ge` (from Ord) are inherited.
+  sc_run_program(
+      "interface: inherited default methods",
+      PRE "interface Eq { fn eq(self: &Self, other: &Self) bool; fn ne(self: &Self, other: &Self) bool { return !self.eq(other); } }\n"
+          "interface Ord: Eq { fn cmp(self: &Self, other: &Self) i32;\n"
+          "  fn lt(self: &Self, other: &Self) bool { return self.cmp(other) < 0; }\n"
+          "  fn ge(self: &Self, other: &Self) bool { return self.cmp(other) >= 0; } }\n"
+          "struct V { pub n: i32 }\n"
+          "extend V as Eq { fn eq(self: &Self, other: &Self) bool { return self.n == other.n; } }\n"
+          "extend V as Ord { fn cmp(self: &Self, other: &Self) i32 { return self.n - other.n; } }\n"
+          "fn main() i32 { let a = V { n: 3 }; let b = V { n: 7 }; let mut acc = 0;\n"
+          "  if a.lt(&b) { acc = acc + 1; } if a.ge(&b) { acc = acc + 10; } if a.ne(&b) { acc = acc + 100; } exit(acc); }\n",
+      101, "");
 }
 
 static void test_defer(void) {
