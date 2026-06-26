@@ -1108,11 +1108,13 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
           render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent (same module)
         } else if (dn->kind == NODE_TYPE_ALIAS) {
           render_type_id(c, ast_type(c->ast, tn), decl, out, cap); // imported alias: use the resolved type
-        } else if (dn->kind == NODE_GENERIC_PARAM) {
-          const TypeId s = subst_lookup(c, d.module, d.node); // a type param, concrete inside a specialization
+        } else if (dn->kind == NODE_GENERIC_PARAM || dn->kind == NODE_TRAIT) {
+          // A type param (concrete inside a specialization) or `Self` inside a synthesized interface
+          // default method (substituted to the implementing type via the same subst stack).
+          const TypeId s = subst_lookup(c, d.module, d.node);
           if (s != TYPE_NONE) {
             render_type_id(c, s, decl, out, cap);
-          } else if (c->macro) {
+          } else if (c->macro && dn->kind == NODE_GENERIC_PARAM) {
             char p[64]; // a macro template: the param renders as the macro's C-spelling type parameter
             render_macro_param(c, d.module, d.node, p, sizeof p);
             buf_join3(out, cap, p, SEP(decl), decl);
@@ -1639,14 +1641,55 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         return;
       }
       const TypeId base_t = ast_type(c->ast, callee->as.member.object); // `Type::<Args>` base -> instance
+      const DefId td = ast_resolution_def(c->ast, callee->as.member.object); // the Target type (none = module fn)
+      DefId emd = md;
+      // `T::assoc()` on a type parameter: resolve T to the concrete type (we are emitting a specialization)
+      // and dispatch to that type's `as`-impl method instead of the abstract interface method.
+      TypeId param_tgt = TYPE_NONE;
+      if (td.node != NODE_NONE && ast_at_const(cg_mod_ast(c, td.module), td.node)->kind == NODE_GENERIC_PARAM) {
+        const TypeId r = subst_resolve(c, ast_intern_type(c->ast, (Ty){.kind = TYPE_GENERIC, .module = td.module, .as.decl = td.node}));
+        if (type_is_concrete(c, r))
+          param_tgt = r;
+      } else if (td.node != NODE_NONE && ast_at_const(cg_mod_ast(c, td.module), td.node)->kind == NODE_TRAIT) {
+        const TypeId r = subst_resolve(c, ast_type(c->ast, id)); // `Trait::assoc()`: the call's result type is the concrete target
+        if (type_is_concrete(c, r))
+          param_tgt = r;
+      }
       if (base_t != TYPE_NONE && ast_type_at(c->ast, base_t)->kind == TYPE_INSTANCE) {
         char inm[200]; // a generic instance assoc fn -> `Inst__method` (inst_name is already module-qualified)
         inst_name(c, ast_instance(c->ast, ast_type_at(c->ast, base_t)->as.inst), inm, sizeof inm);
         emit_cstr(c, inm);
         emit_paste(c); // in a macro body `NAME ## __method`
         emit(c, "__");
+      } else if (param_tgt != TYPE_NONE) {
+        const Ty *const rb = ast_type_at(c->ast, param_tgt);
+        ModuleId omod;
+        NodeId odecl;
+        if (rb->kind == TYPE_INSTANCE) {
+          const TyInstance *const it = ast_instance(c->ast, rb->as.inst);
+          omod = it->module;
+          odecl = it->decl;
+        } else {
+          omod = rb->module;
+          odecl = rb->as.decl;
+        }
+        const DefId cm = cg_find_method(c, omod, odecl, cg_mod_src(c, md.module), name_span(c, callee->as.member.member));
+        if (cm.node != NODE_NONE)
+          emd = cm;
+        if (rb->kind == TYPE_INSTANCE) {
+          char inm[200];
+          inst_name(c, ast_instance(c->ast, rb->as.inst), inm, sizeof inm);
+          emit_cstr(c, inm);
+          emit_paste(c);
+          emit(c, "__");
+        } else if (rb->kind == TYPE_STRUCT || rb->kind == TYPE_ENUM) {
+          char pfx[64];
+          render_modpfx(c, emd.module, pfx, sizeof pfx);
+          emit_cstr(c, pfx);
+          emit_ident_mod(c, omod, ast_at_const(cg_mod_ast(c, omod), odecl)->as.aggregate.name);
+          emit(c, "__");
+        }
       } else {
-        const DefId td = ast_resolution_def(c->ast, callee->as.member.object); // the Target type (none = module fn)
         char pfx[64];
         render_modpfx(c, md.module, pfx, sizeof pfx);
         emit_cstr(c, pfx);
@@ -1655,8 +1698,8 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
           emit(c, "__");
         }
       }
-      emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
-      emit_method_targs(c, id, md);
+      emit_ident_mod(c, emd.module, ast_at_const(cg_mod_ast(c, emd.module), emd.node)->as.function.name);
+      emit_method_targs(c, id, emd);
       emit(c, "(");
       for (uint32_t i = 0; i < args.len; i++) {
         if (i)
@@ -1672,6 +1715,38 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     DefId md = ast_resolution_def(c->ast, callee->as.member.member);
     if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_FUNCTION) {
       const NodeId obj = callee->as.member.object;
+      // Built-in conversion: `x.into()`/`x.try_into()` resolved (by the typechecker) to `Target::from` /
+      // `U::try_from`. The member name (`into`/`try_into`) differs from the dispatched method (`from`/
+      // `try_from`), which is the signal; emit `Target__from(x)` with the receiver passed as the value arg.
+      const Span memn = name_span(c, callee->as.member.member);
+      const Span mdn = ast_at_const(cg_mod_ast(c, md.module), ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name)->as.name.text;
+      const bool conv = (span_is(cg_mod_src(c, c->ast->module), memn, "into") && span_is(cg_mod_src(c, md.module), mdn, "from")) ||
+                        (span_is(cg_mod_src(c, c->ast->module), memn, "try_into") && span_is(cg_mod_src(c, md.module), mdn, "try_from"));
+      if (conv) {
+        TypeId tgt = subst_resolve(c, ast_type(c->ast, id)); // into: result = Target; try_into: Result<U,E>
+        const Ty *rt = ast_type_at(c->ast, tgt);
+        if (span_is(cg_mod_src(c, md.module), mdn, "try_from") && rt->kind == TYPE_INSTANCE)
+          tgt = subst_resolve(c, ast_instance(c->ast, rt->as.inst)->args[0]); // unwrap to U
+        const Ty *const tb = ast_type_at(c->ast, tgt);
+        if (tb->kind == TYPE_INSTANCE) {
+          char inm[200];
+          inst_name(c, ast_instance(c->ast, tb->as.inst), inm, sizeof inm);
+          emit_cstr(c, inm);
+          emit_paste(c);
+          emit(c, "__");
+        } else {
+          char pfx[64];
+          render_modpfx(c, md.module, pfx, sizeof pfx);
+          emit_cstr(c, pfx);
+          emit_ident_mod(c, tb->module, ast_at_const(cg_mod_ast(c, tb->module), tb->as.decl)->as.aggregate.name);
+          emit(c, "__");
+        }
+        emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
+        emit(c, "(");
+        emit_expr(c, obj);
+        emit(c, ")");
+        return;
+      }
       const TypeId obj_t = ast_type(c->ast, obj);
       const TypeId pointee = strip_ptr(c, obj_t);
       // A method on a generic-parameter receiver (`w: T`, `T: Writer`) resolved to the interface method;
@@ -3615,6 +3690,56 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
   }
 }
 
+// Emit interface DEFAULT method bodies inherited by `extend T as Iface` impls in this module that do not
+// override them: synthesize `T__<name>` with the interface's abstract `Self` substituted to T, so a call
+// resolved to the default (`x.lt(y)`) links. Same-module interfaces only (emit_function reads the current
+// Ast); generic impls and generic / multi-return defaults are skipped. `which`/`with_body` mirror the
+// prototype vs body split of phase_prototypes / phase_bodies.
+static void emit_default_methods(Codegen *c, const int which, const bool with_body) {
+  const NodeList items = program_items(c);
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    if (n->kind != NODE_IMPL || n->as.impl_def.trait_type == NODE_NONE || n->as.impl_def.target_type == NODE_NONE ||
+        n->as.impl_def.generics.len)
+      continue;
+    const DefId iface = ast_resolution_def(c->ast, n->as.impl_def.trait_type);
+    const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
+    if (iface.node == NODE_NONE || iface.module != c->ast->module || target.node == NODE_NONE)
+      continue; // only same-module interface defaults are emittable here
+    const Node *const tn = ast_at_const(c->ast, target.node);
+    const TypeId tty = ast_intern_type(
+        c->ast, (Ty){.kind = tn->kind == NODE_ENUM ? TYPE_ENUM : TYPE_STRUCT, .module = target.module, .as.decl = target.node});
+    const NodeList req = ast_at_const(c->ast, iface.node)->as.trait_def.items;
+    const NodeId *const rids = ast_list(c->ast, req);
+    const NodeList have = n->as.impl_def.items;
+    const NodeId *const hids = ast_list(c->ast, have);
+    for (uint32_t r = 0; r < req.len; r++) {
+      const Node *const rm = ast_at_const(c->ast, rids[r]);
+      if (rm->kind != NODE_FUNCTION || rm->as.function.body == NODE_NONE) // only DEFAULT (bodied) methods
+        continue;
+      if (rm->as.function.generics.len || rm->as.function.returns.len > 1)
+        continue;
+      if (!with_body && !want_fn(which, rm->as.function.is_public))
+        continue;
+      const Span rmn = ast_at_const(c->ast, rm->as.function.name)->as.name.text;
+      bool overridden = false;
+      for (uint32_t h = 0; h < have.len && !overridden; h++) {
+        const Node *const hm = ast_at_const(c->ast, hids[h]);
+        overridden = hm->kind == NODE_FUNCTION &&
+                     cg_span_eq(c->source, ast_at_const(c->ast, hm->as.function.name)->as.name.text, c->source, rmn);
+      }
+      if (overridden)
+        continue;
+      c->nsubst = 1;
+      c->subst[0].param = iface; // the interface's `Self` is a TYPE_GENERIC keyed by (iface.module, trait node)
+      c->subst[0].concrete = tty;
+      emit_function(c, rids[r], target, false, with_body, NULL, c->multifile && !rm->as.function.is_public);
+      c->nsubst = 0;
+    }
+  }
+}
+
 // Emit the `<fn>_ret` struct backing a multi-return function (fields `_0`, `_1`, …).
 // The array-type node a function returns by value (`fn f() [T; N]`), else NODE_NONE. C cannot return
 // an array, so such a return is wrapped in a `<fn>_ret { T _[N]; }` struct (like a multi-return tuple).
@@ -4428,6 +4553,7 @@ static void phase_prototypes(Codegen *c, const int which) {
     emit_callback_specializations(c, false);
   }
   emit_method_specializations(c, which, false); // method specs: pub -> header (PUBLIC), private -> .c (PRIVATE)
+  emit_default_methods(c, which, false);         // inherited interface default-method prototypes
 }
 
 // A top-level const, module-mangled (so refs across modules agree and names never collide). `static const`
@@ -4474,6 +4600,7 @@ static void phase_bodies(Codegen *c) {
 
   emit_instance_macro_invocations(c, true); // DEFINE bodies of cross-module instances homed here
   emit_method_macro_invocations(c, true);   // DEFINE their generic-method (map<U>) specializations
+  emit_default_methods(c, PROTO_ALL, true);  // inherited interface default-method bodies
   emit_specializations(c, true);            // concrete generic free-function instantiations
   emit_method_specializations(c, PROTO_ALL, true); // concrete generic method instantiations
   emit_closures(c, true);                    // hoisted closure / anonymous-fn bodies
