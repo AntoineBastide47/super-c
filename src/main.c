@@ -17,6 +17,7 @@
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 #include "module/loader.h"
+#include "repl.h"
 #include "resolver/resolver.h"
 #include "typechecker/typechecker.h"
 
@@ -46,76 +47,6 @@ static bool typecheck_one(const Package *p, Ast **pa, const char *src, const siz
   *pa = typechecker_take_ast(t);
   typechecker_free(&t);
   return !had;
-}
-
-// Compile one in-memory source (a REPL line) against the std prelude under `std_dir`, emitting a single
-// self-contained .c: the prelude modules first, then the user code. 1 on any stage error.
-static int run(const char *source, const size_t len, const char *out_path, const char *std_dir) {
-  Lexer *lexer = lexer_new(source, len);
-  lexer_scan_tokens(lexer);
-  ERRORS_CHECK(lexer);
-  Parser *parser = parser_new(lexer_take_tokens(lexer), source, len);
-  lexer_free(&lexer);
-  parser_build_ast(parser);
-  ERRORS_CHECK(parser);
-  Ast *ast = parser_take_ast(parser);
-  parser_free(&parser);
-
-  Package *pp = package_prelude_only(std_dir);
-  if (!pp->ok) {
-    ast_free(&ast);
-    package_free(&pp);
-    return 1;
-  }
-  ast->module = (ModuleId)pp->count; // standalone: its own nodes resolve to `ast`, prelude via the package
-
-  bool ok = true;
-  for (size_t i = 0; i < pp->count; i++)
-    ok = resolve_one(pp, &pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len) && ok;
-  ok = resolve_one(pp, &ast, source, len) && ok;
-  if (ok)
-    for (size_t i = 0; i < pp->count; i++)
-      ok = typecheck_one(pp, &pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len) && ok;
-  ok = ok && typecheck_one(pp, &ast, source, len);
-  if (!ok) {
-    ast_free(&ast);
-    package_free(&pp);
-    return 1;
-  }
-  package_propagate_instances(pp, ast); // owners emit cross-module generic instances (prelude + user code)
-
-  FILE *out = fopen(out_path, "w");
-  if (!out) {
-    perror(out_path);
-    ast_free(&ast);
-    package_free(&pp);
-    return 1;
-  }
-  // Emit the prelude modules and the user code as one self-contained, phase-interleaved unit.
-  const size_t total = pp->count + 1;
-  Codegen **cs = malloc(total * sizeof *cs);
-  for (size_t i = 0; i < pp->count; i++)
-    cs[i] = codegen_new(pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len, pp);
-  cs[pp->count] = codegen_new(ast, source, len, pp);
-  codegen_emit_unit(cs, total, out);
-  fclose(out);
-  bool err = false;
-  for (size_t i = 0; i < total; i++) {
-    if (codegen_has_errors(cs[i])) {
-      codegen_log_errors(cs[i]);
-      err = true;
-    }
-    Ast *const taken = codegen_take_ast(cs[i]);
-    if (i < pp->count)
-      pp->modules[i].ast = taken;
-    else
-      ast = taken;
-    codegen_free(&cs[i]);
-  }
-  free(cs);
-  ast_free(&ast);
-  package_free(&pp);
-  return err ? 1 : 0;
 }
 
 // Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
@@ -241,33 +172,6 @@ static int run_file(const char *path, const char *std_dir) {
   return rc;
 }
 
-static int run_prompt(const char *std_dir) {
-  char *line = NULL;
-  size_t cap = 0;
-
-  for (;;) {
-    printf("> ");
-    fflush(stdout); // needed because printf does not auto-flush
-
-    ssize_t read = getline(&line, &cap, stdin);
-    if (read <= 0)
-      break;
-
-    // trim trailing \r and \n
-    while (read > 0 && (line[read - 1] == '\n' || line[read - 1] == '\r')) {
-      line[--read] = '\0';
-    }
-
-    if (read == 4 && memcmp(line, "exit", 4) == 0)
-      break;
-
-    run(line, (size_t)read, "out.c", std_dir);
-  }
-
-  free(line);
-  return 0;
-}
-
 // The std/ directory next to the running binary ("<exe dir>/std"); the prelude is resolved from here so
 // it is found regardless of the working directory. Heap-allocated; caller frees.
 static char *exe_std_dir(const char *argv0) {
@@ -300,7 +204,7 @@ int main(const int argc, char **argv) {
     return 1;
   }
   char *const std_dir = exe_std_dir(argv[0]);
-  const int rc = argc == 2 ? run_file(argv[1], std_dir) : run_prompt(std_dir);
+  const int rc = argc == 2 ? run_file(argv[1], std_dir) : repl_run(std_dir);
   free(std_dir);
   return rc;
 }
