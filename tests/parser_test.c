@@ -346,8 +346,28 @@ static void test_union(void) {
   }
 }
 
+// `@c.*` attributes parse into the Ast's attribute table; malformed ones are rejected with a diagnostic.
+static void test_attributes(void) {
+  Ast *a = sc_parse(
+      "attributes",
+      "@c.packed\nstruct H { x: u32, }\n"
+      "@c.noreturn\n@c.export(\"sym\")\nfn die() void {}\n");
+  if (a) {
+    CHECK(a->attrs.len == 3, "three attributes recorded");
+    CHECK(item(a, 0)->kind == NODE_STRUCT, "attributed struct parses");
+    CHECK(item(a, 1)->kind == NODE_FUNCTION, "attributed fn parses");
+    ast_free(&a);
+  }
+  CHECK(parse_has_error("@c.frobnicate\nfn m() {}\n"), "unknown attribute rejected");
+  CHECK(parse_has_error("@rust.inline\nfn m() {}\n"), "unknown namespace rejected");
+  CHECK(parse_has_error("@c.align\nstruct S { x: i32 }\n"), "align without an argument rejected");
+  CHECK(parse_has_error("@c.gnu.attribute(\"hot\")\nfn m() {}\n"), "target-specific namespace rejected");
+  CHECK(parse_has_error("@c.inline(3)\nfn m() {}\n"), "no-arg attribute given an argument rejected");
+}
+
 int main(void) {
   test_items_and_types();
+  test_attributes();
   test_union();
   test_pub_modifiers();
   test_associated_new_name();

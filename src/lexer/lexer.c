@@ -202,6 +202,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
       switch (lexeme[0]) {
         case 'a':
           return lexeme[1] == 's' ? As : Identifier;
+        case 'd':
+          return lexeme[1] == 'o' ? Do : Identifier;
         case 'f':
           return lexeme[1] == 'n' ? Fn : Identifier;
         case 'i':
@@ -973,8 +975,7 @@ static void scan_token(Lexer *l, TokenWriter *w) {
       lexer_error_at(l, l->start, 1, "'#' is not valid in Super-C source; Super-C has no preprocessor");
       return;
     case '@':
-      lexer_error_at(l, l->start, 1, "'@' is reserved for future attribute syntax");
-      return;
+      EMIT(At);
     case '$':
       lexer_error_at(l, l->start, 1, "'$' is reserved");
       return;

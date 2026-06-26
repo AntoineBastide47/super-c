@@ -50,13 +50,13 @@ static void expect_error(const char *name, const char *source, const char *messa
 
 static void test_keywords(void) {
   static const TokenType expected[] = {
-      As,        Break, Case, Const, Continue, Defer, Else, Enum, Extern, False, Fn, For, If, In, Let,
+      As,        Break, Case, Const, Continue, Defer, Do, Else, Enum, Extern, False, Fn, For, If, In, Let,
       Move,      Mut,   New,  Null,  Return, SelfLower, SelfUpper, Struct, True, Type, Unsafe, Where, While,
       Switch,    Interface, Extend, Identifier, Identifier, Identifier, Identifier, Identifier, Identifier, Eof,
   };
   expect_tokens(
       "keywords",
-      "as break case const continue defer else enum extern false fn for if in let move mut "
+      "as break case const continue defer do else enum extern false fn for if in let move mut "
       "new null return self Self struct true type unsafe where while switch interface extend "
       "match trait impl name _ i32",
       expected, sizeof expected / sizeof expected[0]);
@@ -112,12 +112,13 @@ static void test_operators(void) {
       PathSeparator,
       Arrow,
       FatArrow,
+      At,
       Eof,
   };
   expect_tokens(
       "operators",
       "{}()[],;:. + - * / % ~ ! ? ?? == != < <= > >= & | ^ && || << >> = += -= *= /= %= &= |= ^= "
-      "<<= >>= .. ..= :: -> =>",
+      "<<= >>= .. ..= :: -> => @",
       expected, sizeof expected / sizeof expected[0]);
 }
 
@@ -174,7 +175,7 @@ static void test_errors(void) {
   expect_error("unterminated comment", "/* outer /* inner */", "unterminated block comment");
   expect_error("unicode identifier", "λ", "identifiers may contain only ASCII");
   expect_error("reserved hash", "#define", "no preprocessor");
-  expect_error("reserved at", "@inline", "reserved for future attribute");
+  expect_error("reserved dollar", "$x", "reserved");
   expect_error("byte string", "b\"abc\"", "byte string literals are not supported");
 
   const char nul_source[] = {'a', 0, 'b'};
@@ -237,7 +238,7 @@ static void test_spans(void) {
 
 // The lexer recovers and keeps scanning, collecting more than one diagnostic.
 static void test_multiple_errors(void) {
-  static const char src[] = "@ @ @"; // three reserved-'@' errors
+  static const char src[] = "$ $ $"; // three reserved-'$' errors
   Lexer *lexer = lexer_new(src, strlen(src));
   lexer_scan_tokens(lexer);
   CHECK(lexer_has_errors(lexer), "expected errors");

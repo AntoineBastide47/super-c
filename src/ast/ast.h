@@ -29,6 +29,21 @@ typedef struct {
 
 VEC_DECLARE(DefId, DefId_Vec)
 
+// A structured `@c.*` attribute on an item, classified at parse time. `arg` carries `@c.align(N)`'s N;
+// `str` is the content span (no quotes, into the owning module's source) of an export/import/section name.
+typedef enum {
+  ATTR_INLINE, ATTR_ALWAYS_INLINE, ATTR_NOINLINE, ATTR_NORETURN,
+  ATTR_ALIGN, ATTR_PACKED, ATTR_EXPORT, ATTR_IMPORT, ATTR_SECTION, ATTR_USED, ATTR_UNUSED,
+} AttrKind;
+
+typedef struct {
+    NodeId owner;  // the item this attribute decorates
+    uint8_t kind;  // AttrKind
+    uint32_t arg;  // ATTR_ALIGN: the alignment N
+    Span str;      // ATTR_EXPORT / ATTR_IMPORT / ATTR_SECTION: the name's content span (else empty)
+} Attr;
+VEC_DECLARE(Attr, Attr_Vec)
+
 typedef enum {
   TYPE_QUAL_NONE,
   TYPE_QUAL_CONST,
@@ -51,6 +66,7 @@ typedef enum {
   NODE_IMPL,
   NODE_TYPE_ALIAS,
   NODE_CONST,
+  NODE_STATIC_ASSERT, // `static_assert(cond, "msg")`: compile-time check, lowered to C `_Static_assert`
   NODE_EXTERN_BLOCK,
   NODE_IMPORT,
   NODE_GENERIC_PARAM,
@@ -87,6 +103,7 @@ typedef enum {
   NODE_MATCH_ARM,
   NODE_NEW,
   NODE_SIZEOF, // `sizeof(T)` -> usize; the type node is `as.single.value`
+  NODE_VA_EXPR, // `va_start(ap, last)` / `va_arg(ap, T)` / `va_end(ap)`; see `as.va_op`
   NODE_ARRAY_LITERAL,
   NODE_STRUCT_INITIALIZER,
   NODE_FIELD_INITIALIZER,
@@ -98,11 +115,15 @@ typedef enum {
   NODE_PATTERN_STRUCT,
   NODE_PATTERN_FIELD,
   NODE_PATTERN_RANGE,
+  NODE_PATTERN_OR, // `A | B | C` in a switch arm: matches if any alternative matches (`as.pattern.children`)
 
   NODE_RANGE, // `lo..hi` / `lo..=hi` expression (for-loop iterable only); reuses `pattern_range`
 
   NODE_KIND_COUNT,
 } NodeKind;
+
+// `va_op.op` discriminants for NODE_VA_EXPR.
+enum { VA_START, VA_ARG, VA_END };
 
 typedef struct {
     NodeKind kind;
@@ -216,6 +237,11 @@ typedef struct {
             NodeId value;
         } single;
         struct {
+            uint8_t op;   // VA_START / VA_ARG / VA_END
+            NodeId ap;    // the `va_list` operand
+            NodeId extra; // VA_START: last named param (expr); VA_ARG: the type node; VA_END: NODE_NONE
+        } va_op;
+        struct {
             NodeList values;
         } return_stmt;
         struct {
@@ -223,6 +249,7 @@ typedef struct {
         } if_stmt;
         struct {
             NodeId condition, body;
+            bool is_do; // `do { } while (cond)`: body runs before the condition is first tested
         } while_stmt;
         struct {
             NodeId binding, iterable, body;
@@ -304,7 +331,7 @@ typedef uint32_t TypeId;
 // (what `[]T`/`[]mut T` lower to) are not builtins -- they are ordinary prelude structs (auto-imported).
 typedef enum {
   BT_BOOL, BT_CHAR, BT_I8, BT_I16, BT_I32, BT_I64, BT_ISIZE,
-  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_C32, BT_C64, BT_VOID,
+  BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_C32, BT_C64, BT_VALIST, BT_VOID,
   BT_COUNT,
 } BuiltinType;
 
@@ -387,6 +414,7 @@ typedef struct {
     U32_Vec mono_at;    // side table: index = NodeId, value = 1-based index into `mono` (0 = none) -> O(1) lookup
     TyInstance_Vec instances; // interned generic instantiations referenced by TYPE_INSTANCE Tys
     MethodInst_Vec method_insts; // generic-method instantiations to emit here (owner); linear scan
+    Attr_Vec attrs;     // `@c.*` attributes on items, each tagged with its owner NodeId (linear scan; few)
     NodeId root;
     ModuleId module;    // this Ast's module index within its Package (0 for single-file / REPL)
 } Ast;
@@ -399,6 +427,7 @@ void ast_push(Ast *a, const NodeId id);
 NodeList ast_commit(Ast *a, const uint32_t mark);
 void ast_init_resolutions(Ast *a);
 void ast_init_types(Ast *a);
+void ast_add_attr(Ast *a, const Attr attr); // record a classified `@c.*` attribute (attr.owner is set)
 TypeId ast_intern_type(Ast *a, const Ty t);
 
 // Intern a generic instantiation `decl<args...>` (deduped), returning a TYPE_INSTANCE TypeId. `ast_instance`

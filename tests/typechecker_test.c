@@ -342,9 +342,15 @@ static void test_ffi(void) {
       "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
       "fn main() i32 { printf(); return 0; }\n",
       "at least 1 argument");
+  // A Super-C-defined variadic function is allowed (it reads args via va_start/va_arg), but needs at
+  // least one fixed parameter for va_start to anchor on.
+  expect_ok(
+      "defined variadic ok",
+      "fn s(n: i32, ...) i32 { let mut ap: va_list; va_start(ap, n); let v: i32 = va_arg(ap, i32); va_end(ap); return v; }\n");
   expect_error(
-      "variadic only in extern", "fn f(a: i32, ...) i32 { return a; }\n",
-      "only allowed in 'extern'");
+      "variadic needs a fixed param", "fn f(...) i32 { return 0; }\n", "at least one fixed parameter");
+  expect_error(
+      "va_arg needs a va_list", "fn f(n: i32) i32 { return va_arg(n, i32); }\n", "expected a 'va_list'");
 
   // `c32`/`c64` complex builtins: real literals coerce in, native arithmetic, casts up to complex --
   // but a complex has no conversion back to a real/int scalar (use creal/cimag).
@@ -372,9 +378,20 @@ static void test_ffi(void) {
       "extern \"C\" { fn f(s: *mut char) i32; }\nfn main() i32 { return f(\"hi\"); }\n", "mismatched types");
 }
 
+static void test_static_assert(void) {
+  expect_ok("static_assert item", "static_assert(1 == 1, \"ok\");\nfn main() i32 { return 0; }\n");
+  expect_ok("static_assert no message", "fn main() i32 { static_assert(2 > 1); return 0; }\n");
+  expect_ok("static_assert over sizeof", "struct S { a: i64, }\nstatic_assert(sizeof(S) == 8);\nfn main() i32 { return 0; }\n");
+  expect_error("static_assert needs bool", "static_assert(5, \"nope\");\nfn main() i32 { return 0; }\n", "must be 'bool'");
+  expect_error(
+      "static_assert message must be a literal",
+      "fn main() i32 { let m: i32 = 0; static_assert(true, m); return 0; }\n", "string literal");
+}
+
 int main(void) {
   test_ok();
   test_ffi();
+  test_static_assert();
   test_slices();
   test_computed_scalar_types();
   test_computed_pointer_types();

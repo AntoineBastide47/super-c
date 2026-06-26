@@ -57,7 +57,8 @@ fn main() i32 {
 ```
 
 Builtin scalar types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 usize`, `f32`, `f64`,
-`void`. (`main` must be `fn main() i32`.)
+`c32`, `c64` (C `_Complex`), `void`. (`main` must be `fn main() i32`.) `while`, `for`, and `do { .. }
+while (cond);` loops are all available.
 
 ### Multiple return values
 
@@ -110,15 +111,17 @@ fn area(s: Shape) i32 {
 fn classify(n: i32) i32 {
     return switch n {
         0          => 0,
-        1..=9      => 1,
+        1 | 2 | 3  => 1,    // or-pattern: any alternative matches
+        4..=9      => 1,
         n if n < 0 => -1,   // guards can use the bound value
         _          => 2,
     };
 }
 ```
 
-`switch` is exhaustive and usable as an expression. Payload-less enums lower to plain C `enum`s;
-payload-bearing ones lower to tagged unions.
+`switch` is exhaustive and usable as an expression. Arms may combine alternatives with `|` (literals,
+ranges, or variants). Payload-less enums lower to plain C `enum`s; payload-bearing ones lower to tagged
+unions.
 
 ### Generics (monomorphized)
 
@@ -165,6 +168,22 @@ fn main() i32 {
 `*const T` / `*mut T` are raw pointers; `&T` / `&mut T` are references. `new T(expr)` and `new T { .. }`
 allocate; `sizeof(T)` gives the byte size.
 
+### Deferred cleanup
+
+```superc
+extern "C" { fn free(p: *mut void) void; }
+
+fn main() i32 {
+    let p = new i32(42);
+    defer free(p as *mut void);   // runs at scope exit, even on an early return
+    return *p;                    // the value is read before the defer runs
+}
+```
+
+`defer` runs its statement when the enclosing block exits — on fall-through, `return`, `break`, or
+`continue` — in last-in-first-out order. On a `return`, the return value is evaluated first, then the
+deferred statements run.
+
 ### Slices and arrays
 
 ```superc
@@ -176,7 +195,8 @@ fn sum(xs: []i32) i32 {              // []T is a (ptr, len) fat-pointer view
 
 fn main() i32 {
     let a: [i32; 4] = [10, 20, 30, 40];
-    return a[0] + a[3];
+    let t: [i32; 128] = [['a'] = 1, ['z'] = 2];   // designated (sparse) initializers
+    return a[0] + a[3] + t['a'];
 }
 ```
 
@@ -234,7 +254,61 @@ extern "C" {
 ```
 
 `extern "C"` declarations bind directly to C symbols with no wrapper or mangling, so existing C
-libraries can be used as-is.
+libraries can be used as-is. `extern "C" "header.h" { .. }` emits the matching `#include`.
+
+Variadics work in both directions. A binding can take `...`:
+
+```superc
+extern "C" { fn printf(fmt: *const char, ...) i32; }
+```
+
+and a Super-C function can *define* one, reading its arguments with the `va_list` type and the
+`va_start` / `va_arg(ap, T)` / `va_end` intrinsics:
+
+```superc
+extern "C" { fn vsnprintf(buf: *mut char, n: usize, fmt: *const char, ap: va_list) i32; }
+
+fn format(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
+    let mut ap: va_list;
+    va_start(ap, fmt);
+    let written = vsnprintf(buf, n, fmt, ap);
+    va_end(ap);
+    return written;
+}
+```
+
+### Attributes
+
+`@c.*` attributes annotate an item (before any `pub`) and lower to portable C keywords or GNU
+`__attribute__`s:
+
+```superc
+@c.noreturn
+fn panic() void { /* ... */ }
+
+@c.packed
+struct Header { pub magic: u32, pub version: u16 }
+
+@c.align(64)
+struct CacheLine { pub data: [u8; 64] }
+
+@c.export("superc_init")     // pin the exact C symbol (no module mangling)
+pub fn init() i32 { return 0; }
+```
+
+Supported: `inline`, `always_inline`, `noinline`, `noreturn`, `align(N)`, `packed`, `export("sym")`,
+`import("sym")`, `section("s")`, `used`, `unused`. `export`/`import` set a function's exact C symbol at
+both its definition and every call site.
+
+### Compile-time assertions
+
+```superc
+struct Header { magic: u32, version: u16 }
+static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
+```
+
+`static_assert(cond, "msg")` is valid at item or statement scope and lowers to C `_Static_assert`, so
+the C compiler evaluates it.
 
 ## Generated output
 
@@ -282,17 +356,17 @@ make bench       # run the benchmarks
 ## Status and roadmap
 
 Implemented and working: the full lexer→parser→resolver→typechecker→codegen pipeline, type inference,
-structs/methods/visibility, enums with payloads and pattern matching, monomorphized generics
-(functions, structs, enums, methods — same- and cross-module), non-capturing closures and function
-pointers, references/pointers/`new`, slices and arrays, multi-return + tuple destructuring, the module
-system with an auto-imported `std` prelude, `extern "C"` FFI, and `sizeof`.
+structs/methods/visibility, enums with payloads and pattern matching (including or-patterns and
+guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
+cross-module), interfaces with enforced generic bounds and method dispatch, non-capturing closures and
+function pointers, references/pointers/`new`, slices and arrays (including designated initializers),
+multi-return + tuple destructuring, `while` / `for` / `do`-`while`, `defer`, `static_assert`, `@c.*`
+attributes, the module system with an auto-imported `std` prelude, `extern "C"` FFI (custom header
+includes, variadics in both directions via `va_list`, `_Complex`), and `sizeof`.
 
 Planned / not yet implemented:
 
-* interfaces — `interface` definitions, generic bounds (`<T: Writer>`), and method dispatch. The
-  `interface` / `extend T as Trait` syntax parses today, but the bound is not checked and `as Trait`
-  is currently decorative (the methods just become inherent methods on the type).
-* `defer` and RAII-style deterministic cleanup (a `Drop` trait)
+* RAII-style automatic cleanup (a `Drop` trait invoked at scope exit; `defer` is the manual form today)
 * move/borrow analysis and double-drop prevention
 * capturing closures
 * the `?` early-return operator
