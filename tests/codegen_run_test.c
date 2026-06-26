@@ -3,9 +3,9 @@
 // where relevant) is asserted. This proves the emitted C is correct, not merely plausible -- the
 // gap the substring-only codegen_test.c cannot close.
 //
-// Scope note: the language currently has no surface syntax to *construct* enum, array, slice or
-// tuple values (see the suite's findings), so those are covered structurally in codegen_test.c
-// rather than behaviorally here.
+// Scope note: enum/tuple values still lack full construction syntax (covered structurally in
+// codegen_test.c), but arrays and slices are now behaviorally exercised here -- `[]T`/`[]mut T` lower
+// to the prelude Slice<T>/SliceMut<T> views, constructible by array->slice coercion (see test_slices).
 
 #include "test_harness.h"
 
@@ -83,6 +83,21 @@ static void test_structs_and_methods(void) {
       9, "");
 }
 
+// A `mut` payload binding (`Some(mut x) =>`) is emitted non-const, so `&mut self` methods and
+// reassignment work on it -- the gap that blocked the stdio::File switch pattern.
+static void test_mut_match_binding(void) {
+  sc_run_program(
+      "mut binding: &mut self method + reassign",
+      PRE "struct C { pub n: i32 }\n"
+          "extend C { fn bump(self: &mut C) { self.n = self.n + 1; } fn get(self: &C) i32 { return self.n; } }\n"
+          "enum Opt { None, Some(C), }\n"
+          "fn main() i32 {\n"
+          "  let o = Opt::Some(C { n: 5 });\n"
+          "  exit(switch o { Some(mut c) => { c.bump(); c.bump(); c = C { n: c.get() + 1 }; c.get(); }, None => { 0; }, });\n"
+          "}\n", // 5 -> bump,bump = 7 -> reassign to 8
+      8, NULL);
+}
+
 static void test_enums(void) {
   // payload-less enum: matching a bare variant name now tests the tag (it used to always take
   // the first arm and miscompile to `if (1)` + an unused binding).
@@ -143,6 +158,40 @@ static void test_tuple_destructure(void) {
       PRE "fn divmod(a: i32, b: i32) (i32, i32) { return a / b, a % b; }\n"
           "fn main() i32 { let mut (a, b) = divmod(100, 7); a = a + 1; exit(a + b); }\n",
       17, ""); // (14+1) + 2
+}
+
+// `[]T`/`[]mut T` lower to the prelude Slice<T>/SliceMut<T> fat pointers: methods, indexing, iteration,
+// and array->slice coercion (identifier, literal, mutable) all execute against real backing storage.
+static void test_slices(void) {
+  // array identifier coerces to `[]i32`; summed via for-loop iteration.
+  sc_run_program(
+      "slice for-loop + array coercion",
+      PRE "fn sum(s: []i32) i32 { let mut t = 0; for x in s { t = t + x; } return t; }\n"
+          "fn main() i32 { let a: [i32; 4] = [1, 2, 3, 4]; exit(sum(a)); }\n",
+      10, NULL);
+  // array literal coerces to `[]i32`; `.len()`, `.get()`, `.first()`, `.last()` methods.
+  sc_run_program(
+      "slice methods + literal coercion",
+      PRE "fn f(s: []i32) i32 { return (s.len() as i32) + s.get(1) + s.first() + s.last(); }\n"
+          "fn main() i32 { exit(f([10, 20, 30])); }\n", // 3 + 20 + 10 + 30
+      63, NULL);
+  // `[]mut i32` writes through the view; the mutation is visible in the backing array.
+  sc_run_program(
+      "mut slice writes back to array",
+      PRE "fn dbl(s: []mut i32) { let mut i: usize = 0; while i < s.len { s[i] = s[i] * 2; i = i + 1; } }\n"
+          "fn main() i32 { let mut a: [i32; 3] = [3, 4, 5]; dbl(a); exit(a[0] + a[1] + a[2]); }\n", // (6+8+10)
+      24, NULL);
+}
+
+// Opaque `extern "C"` handles are real, sized C types (named by the auto-included header), usable by value
+// -- as a local, a by-value parameter, and a by-value return -- not just behind a pointer.
+static void test_opaque_extern(void) {
+  sc_run_program(
+      "opaque handle by value",
+      "extern \"C\" { type clock_t; fn clock() clock_t; }\n"
+      "fn pass(c: clock_t) clock_t { return c; }\n"
+      "fn main() i32 { let t: clock_t = clock(); pass(t); return 7; }\n",
+      7, NULL);
 }
 
 static void test_array_literals(void) {
@@ -206,10 +255,10 @@ static void test_misc(void) {
 }
 
 static void test_let_owning_mut(void) {
-  // A `let` (immutable) binding of a struct that owns a `*mut` is emitted non-const, so its &mut self
-  // methods stay callable -- a const binding would make `&b` a `const Box *` and fail to compile.
+  // A `let mut` binding is emitted non-const, so `&mut self` methods are callable on it. (`let` without
+  // `mut` is immutable: the typechecker rejects `&mut self` on it -- binding mutability is explicit.)
   sc_run_program(
-      "let owning-mut binding calls &mut self",
+      "let mut binding calls &mut self",
       PRE "extern \"C\" { fn malloc(n: usize) *mut void; fn free(p: *mut void) void; }\n"
           "struct Box { pub p: *mut u8, }\n"
           "extend Box {\n"
@@ -218,7 +267,7 @@ static void test_let_owning_mut(void) {
           "  fn get(self: &Box) u8 { return self.p[0]; }\n"
           "  fn deinit(self: &mut Box) { free(self.p as *mut void); self.p = null; }\n"
           "}\n"
-          "fn main() i32 { let b: Box = Box::make(); b.set(42); let r: u8 = b.get(); b.deinit(); exit(r as i32); }\n",
+          "fn main() i32 { let mut b: Box = Box::make(); b.set(42); let r: u8 = b.get(); b.deinit(); exit(r as i32); }\n",
       42, "");
 }
 
@@ -586,8 +635,11 @@ int main(void) {
   test_switch();
   test_if_expression();
   test_array_literals();
+  test_slices();
+  test_opaque_extern();
   test_tuple_destructure();
   test_enums();
+  test_mut_match_binding();
   test_structs_and_methods();
   test_let_owning_mut();
   test_field_vs_method();

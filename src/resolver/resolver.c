@@ -238,7 +238,7 @@ static void resolve_ref(Resolver *r, const NodeId ref, const NodeId name_node, c
   }
   if (ns == NS_TYPE && is_builtin_type(r->source, name))
     return;
-  // Unqualified fallback: the std prelude (str, String, SCslice, ... -- in scope everywhere) and this
+  // Unqualified fallback: the std prelude (str, String, Slice, ... -- in scope everywhere) and this
   // module's glob imports (`import P as *;`). Record the cross-module decl for the type checker to follow.
   if (r->package) {
     ModuleId mid;

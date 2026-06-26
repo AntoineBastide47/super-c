@@ -209,6 +209,35 @@ static void test_cross_module_interface(void) {
   CHECK(run_cmd(crun, NULL, 0) == 36, "imported-interface bound dispatches to Sq::area (6*6)");
 }
 
+// The bundled `ffi/` bindings, imported by a C header's bare name (`import math;` -> ffi/math.spc, no
+// `ffi::` prefix). Exercises the FFI path end-to-end: the ffi search root, a `pub` raw `extern "C"`
+// binding emitted with its real unmangled C symbol (and no clashing prototype, since the std headers are
+// already included), and a thin wrapper -- all compiled -Werror and run.
+static void test_ffi_bindings(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/ffiuse", DIR);
+  mkfile(root, "main.spc",
+         "import math;\n"
+         "import ctype;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn main() i32 {\n"
+         "  let s = math::sqrt(144.0) as i32;\n" // 12, raw binding via mod::f
+         "  let mut acc = 0;\n"
+         "  if ctype::is_digit(53) { acc = acc + 1; }\n"  // '5' -> +1, thin wrapper
+         "  if ctype::is_alpha(53) { acc = acc + 10; }\n" // not alpha -> +0
+         "  exit(s + acc);\n"                              // 13
+         "}\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "ffi bindings compile (bare `import math; import ctype;`): %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/ffiuse.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' -lm 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "ffi C compiles + links -Werror (no proto clash): %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 13, "math::sqrt (12) + ctype::is_digit (1) run");
+}
+
 // Import forms + mangling: an alias import (`s::tag`), a glob import (bare `tag`), two modules with a
 // same-named public function (module mangling must keep them distinct), and a module named like a C
 // stdlib header (`string`) -- the relative-include build must not shadow <string.h>. Built with -Werror.
@@ -330,6 +359,7 @@ int main(void) {
   test_module_features();
   test_cross_module_generic_by_value();
   test_cross_module_interface();
+  test_ffi_bindings();
   test_module_imports();
   test_module_errors();
   test_extensionless_appends();

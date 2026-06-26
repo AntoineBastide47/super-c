@@ -50,6 +50,10 @@ static TypeId prelude_str_type(TypeChecker *t) {
   return d != NODE_NONE ? named_type_of(t, mid, d) : TYPE_ERROR;
 }
 static TypeId lower_type_in(TypeChecker *t, ModuleId m, NodeId id);
+static TypeId prelude_slice_type(TypeChecker *t, TypeId elem, bool mut);
+static int slice_kind(TypeChecker *t, TypeId tid, TypeId *elem);
+static bool is_assignable(TypeChecker *t, NodeId node);
+static bool is_place(TypeChecker *t, NodeId node);
 static void check_pattern(TypeChecker *t, NodeId id, TypeId expected);
 static void render_type(TypeChecker *t, TypeId tid, char *buf, size_t cap);
 static TypeId check_member(TypeChecker *t, const Node *n, bool prefer_method);
@@ -204,6 +208,26 @@ static void render_type(TypeChecker *t, const TypeId tid, char *buf, const size_
       snprintf(buf, cap, "%.*s", (int)(s.end - s.start), (const char *)mod_src(t, ty->module) + s.start);
       break;
     }
+    case TYPE_OPAQUE: {
+      Ast *const a = mod_ast(t, ty->module);
+      const Span s = ast_at_const(a, ast_at_const(a, ty->as.decl)->as.type_alias.name)->as.name.text;
+      snprintf(buf, cap, "%.*s", (int)(s.end - s.start), (const char *)mod_src(t, ty->module) + s.start);
+      break;
+    }
+    case TYPE_INSTANCE: { // a generic application, e.g. `Slice<i32>` (what `[]i32` lowers to) or `Box<bool>`
+      const TyInstance *const it = ast_instance(t->ast, ty->as.inst);
+      Ast *const a = mod_ast(t, it->module);
+      const Span s = ast_at_const(a, ast_at_const(a, it->decl)->as.aggregate.name)->as.name.text;
+      size_t at = snprintf(buf, cap, "%.*s<", (int)(s.end - s.start), (const char *)mod_src(t, it->module) + s.start);
+      for (uint8_t i = 0; i < it->n && at < cap; i++) {
+        char arg[64];
+        render_type(t, it->args[i], arg, sizeof arg);
+        at += snprintf(buf + at, cap > at ? cap - at : 0, "%s%s", i ? ", " : "", arg);
+      }
+      if (at < cap)
+        snprintf(buf + at, cap - at, ">");
+      break;
+    }
     case TYPE_FUNCTION:
       snprintf(buf, cap, "fn");
       break;
@@ -225,7 +249,11 @@ static void err_mismatch(TypeChecker *t, const NodeId node, const TypeId expecte
 // Reads a TYPE_FUNCTION's signature into interned TypeIds, normalizing a named `NODE_FUNCTION` (params
 // are NODE_PARAMETER) and an anonymous `fn(..) ..` NODE_FUNCTION_TYPE (params are bare type nodes) to
 // the same shape. Returns the parameter count; `*ret` is the single return type, or TYPE_NONE for none.
-static int fn_sig(TypeChecker *t, const Ty *const fty, TypeId *const params, const int cap, TypeId *const ret) {
+// Takes a TypeId (not a `const Ty *`): lowering the signature interns types, which may realloc the type
+// pool and dangle any `Ty *` the caller still holds. Re-fetching `fty` here from the id keeps fn_sig and
+// its callers safe across that realloc.
+static int fn_sig(TypeChecker *t, const TypeId fid, TypeId *const params, const int cap, TypeId *const ret) {
+  const Ty *const fty = ast_type_at(t->ast, fid);
   const ModuleId m = fty->module;
   Ast *const fa = mod_ast(t, m);
   const Node *const fn = ast_at_const(fa, fty->as.decl);
@@ -264,9 +292,9 @@ static bool ret_eq(const TypeId a, const TypeId b) {
 // Two function types are compatible when their signatures match structurally (so a named function
 // passes where a `fn(..) ..` pointer is expected, even though they intern to distinct Tys keyed on
 // their decl node). C function-pointer types must match exactly, so params/return compare by identity.
-static bool fn_compatible(TypeChecker *t, const Ty *const ex, const Ty *const ac) {
+static bool fn_compatible(TypeChecker *t, const TypeId exid, const TypeId acid) {
   TypeId ep[4], ap[4], er, ar;
-  const int en = fn_sig(t, ex, ep, 4, &er), an = fn_sig(t, ac, ap, 4, &ar);
+  const int en = fn_sig(t, exid, ep, 4, &er), an = fn_sig(t, acid, ap, 4, &ar);
   if (en != an || en > 4 || !ret_eq(er, ar))
     return false;
   for (int i = 0; i < en; i++)
@@ -295,14 +323,26 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
     return true;
   // A named function (or another fn pointer) fits a `fn(..) ..` slot when signatures match structurally.
   if (ex->kind == TYPE_FUNCTION && ac->kind == TYPE_FUNCTION)
-    return fn_compatible(t, ex, ac);
+    return fn_compatible(t, expected, actual);
   // Arrays compare by element: equal elements, or fn-typed elements that match structurally (a function
   // type is keyed on its decl, so `[fn(i32)i32]` from an annotation and from `[a, b]` are distinct TypeIds).
   if (ex->kind == TYPE_ARRAY && ac->kind == TYPE_ARRAY) {
     if (ex->as.elem == ac->as.elem)
       return true;
-    const Ty *const ee = ast_type_at(t->ast, ex->as.elem), *const ae = ast_type_at(t->ast, ac->as.elem);
-    return ee->kind == TYPE_FUNCTION && ae->kind == TYPE_FUNCTION && fn_compatible(t, ee, ae);
+    const TypeId eel = ex->as.elem, ael = ac->as.elem;
+    const Ty *const ee = ast_type_at(t->ast, eel), *const ae = ast_type_at(t->ast, ael);
+    return ee->kind == TYPE_FUNCTION && ae->kind == TYPE_FUNCTION && fn_compatible(t, eel, ael);
+  }
+  // An array coerces to a slice over the same element: `[T; N]` -> `[]T` (Slice<T>), or `[]mut T`
+  // (SliceMut<T>) when the source is a mutable place. Recording the node's coerced type makes codegen
+  // materialize the {ptr, len} fat-pointer view (length recovered from the array's declaration).
+  if (ac->kind == TYPE_ARRAY) {
+    TypeId selem;
+    const int sk = slice_kind(t, expected, &selem);
+    if (sk && selem == ac->as.elem && (sk == 1 || is_assignable(t, node))) {
+      ast_set_type(t->ast, node, expected);
+      return true;
+    }
   }
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
@@ -634,6 +674,8 @@ static TypeId named_type_of(TypeChecker *t, const ModuleId m, const NodeId decl)
     case NODE_ENUM:
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_ENUM, .module = m, .as.decl = decl});
     case NODE_TYPE_ALIAS: { // aliases are transparent; bound expansion so `type T = T;` (or A=B;B=A) diagnoses
+      if (d->as.type_alias.type == NODE_NONE) // opaque `extern "C" { type X; }`: a sized, named C handle
+        return ast_intern_type(t->ast, (Ty){.kind = TYPE_OPAQUE, .module = m, .as.decl = decl});
       if (t->alias_depth >= TYPE_ALIAS_MAX_DEPTH) {
         typechecker_errorf(t, d->span.start, d->span.end - d->span.start, "type alias is cyclic");
         return TYPE_ERROR;
@@ -682,11 +724,12 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
       const int b = parts.len ? builtin_of(mod_src(t, m), ast_at_const(a, ast_list(a, parts)[0])->as.name.text) : -1;
       return b >= 0 ? ast_builtin((BuiltinType)b) : TYPE_ERROR;
     }
+    case NODE_SLICE_TYPE:
+      return prelude_slice_type(
+          t, lower_type_in(t, m, n->as.indirect_type.type), n->as.indirect_type.qualifier == TYPE_QUAL_MUT);
     case NODE_POINTER_TYPE:
-    case NODE_REFERENCE_TYPE:
-    case NODE_SLICE_TYPE: {
-      const TypeKind k =
-          n->kind == NODE_POINTER_TYPE ? TYPE_POINTER : n->kind == NODE_REFERENCE_TYPE ? TYPE_REFERENCE : TYPE_SLICE;
+    case NODE_REFERENCE_TYPE: {
+      const TypeKind k = n->kind == NODE_POINTER_TYPE ? TYPE_POINTER : TYPE_REFERENCE;
       return ast_intern_type(
           t->ast, (Ty){.kind = k, .qualifier = n->as.indirect_type.qualifier, .as.elem = lower_type_in(t, m, n->as.indirect_type.type)});
     }
@@ -697,6 +740,37 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
     default:
       return TYPE_ERROR;
   }
+}
+
+// `[]T` / `[]mut T` are sugar for the prelude's `Slice<T>` / `SliceMut<T>` fat-pointer structs, so a
+// slice rides the whole generic-struct path (fields `.ptr`/`.len`, methods, monomorphization) for free.
+static TypeId prelude_slice_type(TypeChecker *t, const TypeId elem, const bool mut) {
+  if (!t->package)
+    return TYPE_ERROR;
+  ModuleId mid;
+  const NodeId d = mut ? package_prelude_lookup(t->package, "SliceMut", 8, true, &mid)
+                       : package_prelude_lookup(t->package, "Slice", 5, true, &mid);
+  return d != NODE_NONE ? ast_intern_instance(t->ast, mid, d, &elem, 1) : TYPE_ERROR;
+}
+
+// Identify a prelude slice instance -- the lowered form of `[]E` / `[]mut E`. Returns 0 (not a slice),
+// 1 (`Slice<E>`, read-only) or 2 (`SliceMut<E>`, writable); sets `*elem` to E for either slice kind.
+static int slice_kind(TypeChecker *t, const TypeId tid, TypeId *const elem) {
+  if (!t->package)
+    return 0;
+  const Ty *const ty = ast_type_at(t->ast, tid);
+  if (ty->kind != TYPE_INSTANCE)
+    return 0;
+  const TyInstance *const it = ast_instance(t->ast, ty->as.inst);
+  if (it->n != 1)
+    return 0;
+  ModuleId smid, mmid;
+  const NodeId sd = package_prelude_lookup(t->package, "Slice", 5, true, &smid);
+  const NodeId md = package_prelude_lookup(t->package, "SliceMut", 8, true, &mmid);
+  const int kind = (it->module == smid && it->decl == sd) ? 1 : (it->module == mmid && it->decl == md) ? 2 : 0;
+  if (kind && elem)
+    *elem = it->args[0];
+  return kind;
 }
 
 // Lower an AST type node to an interned TypeId (memoized in the `types` side table).
@@ -746,11 +820,13 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
       }
       break;
     }
+    case NODE_SLICE_TYPE: // `[]T` / `[]mut T` -> the prelude's Slice<T> / SliceMut<T> instance
+      result = prelude_slice_type(
+          t, resolve_type(t, n->as.indirect_type.type), n->as.indirect_type.qualifier == TYPE_QUAL_MUT);
+      break;
     case NODE_POINTER_TYPE:
-    case NODE_REFERENCE_TYPE:
-    case NODE_SLICE_TYPE: {
-      const TypeKind k =
-          n->kind == NODE_POINTER_TYPE ? TYPE_POINTER : n->kind == NODE_REFERENCE_TYPE ? TYPE_REFERENCE : TYPE_SLICE;
+    case NODE_REFERENCE_TYPE: {
+      const TypeKind k = n->kind == NODE_POINTER_TYPE ? TYPE_POINTER : TYPE_REFERENCE;
       result = ast_intern_type(
           a, (Ty){.kind = k, .qualifier = n->as.indirect_type.qualifier,
                     .as.elem = resolve_type(t, n->as.indirect_type.type)});
@@ -858,6 +934,14 @@ static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) 
       return TYPE_NONE;
     }
     case Ampersand: // address-of: `&x` -> `&T`, `&mut x` -> `&mut T`
+      // A `&mut` borrow of a place needs that place to be mutable -- otherwise it would hand out write
+      // access to an immutable binding. (An rvalue operand is a fresh temp, so it is left to codegen.)
+      if (n->as.unary.qualifier == TYPE_QUAL_MUT && is_place(t, n->as.unary.operand) &&
+          !is_assignable(t, n->as.unary.operand)) {
+        const Span osp = ast_at_const(t->ast, n->as.unary.operand)->span;
+        typechecker_errorf(t, osp.start, osp.end - osp.start,
+                           "cannot take '&mut' of an immutable binding (bind it with 'mut')");
+      }
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_REFERENCE, .qualifier = n->as.unary.qualifier, .as.elem = opnd});
     default: // Move, Unsafe (and any future prefix) pass the operand's type through
       return opnd;
@@ -965,6 +1049,8 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
         return dn->as.let_stmt.is_mutable;
       if (dn->kind == NODE_PARAMETER) // `fn f(mut p: T)` makes the by-value parameter assignable
         return dn->as.parameter.is_mutable;
+      if (dn->kind == NODE_PATTERN_NAME) // `Some(mut f) =>` makes the payload binding assignable
+        return ast_at_const(t->ast, dn->as.pattern.name)->as.name.is_mutable;
       if (dn->kind == NODE_IDENTIFIER) { // a tuple-let element: its resolution back-points to the let
         const NodeId let = ast_resolution(t->ast, d);
         return let != NODE_NONE && ast_at_const(t->ast, let)->kind == NODE_LET &&
@@ -983,12 +1069,46 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
       const NodeId obj = n->kind == NODE_INDEX ? n->as.index.object : n->as.member.object;
       if (is_assignable(t, obj))
         return true;
+      // Indexing a writable slice (`[]mut T` -> SliceMut<T>) yields an assignable element, however the
+      // slice was bound -- its mutability lives in the type, not the binding.
+      if (n->kind == NODE_INDEX && slice_kind(t, ast_type(t->ast, obj), NULL) == 2)
+        return true;
       const Ty *const ot = ast_type_at(t->ast, ast_type(t->ast, obj)); // auto-deref through a mutable pointer
       return (ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE) && ot->qualifier == TYPE_QUAL_MUT;
     }
     default:
       return false;
   }
+}
+
+// A "place" (lvalue): an expression denoting a storage location, not a fresh value. Mirrors codegen's
+// is_lvalue so the mutability check and the temp-materialization agree on what is a place vs an rvalue.
+static bool is_place(TypeChecker *t, const NodeId id) {
+  const Node *const n = ast_at_const(t->ast, id);
+  switch (n->kind) {
+    case NODE_IDENTIFIER:
+    case NODE_INDEX:
+      return true;
+    case NODE_MEMBER:
+      return !n->as.member.path; // a field/element access is a place; `Enum::Variant` is not
+    case NODE_UNARY:
+      return n->as.unary.op == Star; // `*p` deref
+    default:
+      return false;
+  }
+}
+
+// Can `recv` be the receiver of a `&mut self` (or `*mut self`) method -- i.e. can a mutable borrow of it
+// be taken? A `&mut`/`*mut` receiver auto-derefs and is mutable; a `&`/`*const` one is not. A value
+// receiver must be a *mutable place* (so the mutation is observable); an rvalue is a fresh owned temp.
+static bool receiver_mutable(TypeChecker *t, const NodeId recv) {
+  const TypeId rt = ast_type(t->ast, recv);
+  if (rt != TYPE_NONE) {
+    const Ty *const rty = ast_type_at(t->ast, rt);
+    if (rty->kind == TYPE_POINTER || rty->kind == TYPE_REFERENCE)
+      return rty->qualifier == TYPE_QUAL_MUT;
+  }
+  return is_place(t, recv) ? is_assignable(t, recv) : true;
 }
 
 // `Enum::Variant` as an expression yields the enum type; `Type::method` yields the associated function
@@ -1157,7 +1277,7 @@ static void unify_infer(TypeChecker *t, const TypeId param_ty, const TypeId arg_
         unify_infer(t, pi->args[i], ai->args[i], params, bound, n);
   } else if (p->kind == TYPE_FUNCTION && aT->kind == TYPE_FUNCTION) { // fn(T) U against fn(i32) i32 -> U = i32
     TypeId pp[4], ap[4], pr, ar;
-    const int pn = fn_sig(t, p, pp, 4, &pr), an = fn_sig(t, aT, ap, 4, &ar);
+    const int pn = fn_sig(t, param_ty, pp, 4, &pr), an = fn_sig(t, arg_ty, ap, 4, &ar);
     if (pn == an && pn <= 4) {
       for (int i = 0; i < pn; i++)
         unify_infer(t, pp[i], ap[i], params, bound, n);
@@ -1169,11 +1289,11 @@ static void unify_infer(TypeChecker *t, const TypeId param_ty, const TypeId arg_
 // Structural fn-type compatibility for a `fn(..) ..` parameter at a generic call: the expected (param)
 // side's positions are first substituted through the call's generic + receiver-instance maps (so a
 // param `fn(T) U` becomes `fn(i32) i32` before matching the concrete argument function).
-static bool fn_compatible_subst(TypeChecker *t, const Ty *const ex, const Ty *const ac, const DefId *const gp,
+static bool fn_compatible_subst(TypeChecker *t, const TypeId exid, const TypeId acid, const DefId *const gp,
                                 const TypeId *const ga, const int gn, const DefId *const rp, const TypeId *const ra,
                                 const int rn) {
   TypeId ep[4], ap[4], er, ar;
-  const int en = fn_sig(t, ex, ep, 4, &er), an = fn_sig(t, ac, ap, 4, &ar);
+  const int en = fn_sig(t, exid, ep, 4, &er), an = fn_sig(t, acid, ap, 4, &ar);
   if (en != an || en > 4)
     return false;
   if (!ret_eq(subst_type(t, subst_type(t, er, gp, ga, gn), rp, ra, rn), ar))
@@ -1358,12 +1478,26 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id) {
         const TypeId at = ast_type(t->ast, aids[i]);
         const Ty *const att = at == TYPE_NONE ? NULL : ast_type_at(t->ast, at);
         if (!att || att->kind != TYPE_FUNCTION ||
-            !fn_compatible_subst(t, ptt, att, gparams, gargs, gn, rsubp, rsuba, nrsub))
+            !fn_compatible_subst(t, pt, at, gparams, gargs, gn, rsubp, rsuba, nrsub))
           err_mismatch(t, aids[i], pt);
         continue;
       }
       if (!compatible(t, pt, aids[i]))
         err_mismatch(t, aids[i], pt);
+    }
+  }
+  // A `&mut self` / `*mut self` method needs a mutable receiver: an immutable binding/place cannot be
+  // mutated through it (binding mutability is `let mut` / `mut`, NOT a property of the type's internals).
+  if (skip == 1 && callee_node->kind == NODE_MEMBER && params.len > 0) {
+    const Ty *const selfp = ast_type_at(t->ast, decl_type_in(t, fmod, ast_list(fa, params)[0]));
+    if ((selfp->kind == TYPE_REFERENCE || selfp->kind == TYPE_POINTER) && selfp->qualifier == TYPE_QUAL_MUT) {
+      const NodeId recv = callee_node->as.member.object;
+      if (!receiver_mutable(t, recv)) {
+        const Span rsp = ast_at_const(t->ast, recv)->span;
+        typechecker_errorf(
+            t, rsp.start, rsp.end - rsp.start,
+            "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')");
+      }
     }
   }
   if (clos && fn->as.closure.expr_body)
@@ -1633,8 +1767,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const TypeId idx = check_expr(t, n->as.index.index);
       const Ty *const ot = ast_type_at(a, obj);
       if (obj != TYPE_NONE) {
-        if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_SLICE || ot->kind == TYPE_POINTER)
+        TypeId selem;
+        if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER)
           result = ot->as.elem;
+        else if (slice_kind(t, obj, &selem)) // `s[i]` on a `[]T` -> the element type
+          result = selem;
         else {
           const Span sp = ast_at_const(a, n->as.index.object)->span;
           typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot index this expression");
@@ -1752,7 +1889,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           // distinct fn decls intern to distinct TYPE_FUNCTION TypeIds; a homogeneous `[a, b]` of
           // matching-signature functions is still one element type, so unify those structurally.
           const Ty *const e0 = ast_type_at(a, elem), *const ei = ast_type_at(a, et);
-          if (!(e0->kind == TYPE_FUNCTION && ei->kind == TYPE_FUNCTION && fn_compatible(t, e0, ei))) {
+          if (!(e0->kind == TYPE_FUNCTION && ei->kind == TYPE_FUNCTION && fn_compatible(t, elem, et))) {
             err_mismatch(t, ids[i], elem);
             elem = TYPE_NONE;
           }
@@ -1975,7 +2112,8 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         elem = it; // a range's value type is exactly the loop-variable type
       } else {
         const Ty *const ity = ast_type_at(a, it);
-        elem = ity->kind == TYPE_ARRAY || ity->kind == TYPE_SLICE ? ity->as.elem : TYPE_NONE;
+        TypeId selem;
+        elem = ity->kind == TYPE_ARRAY ? ity->as.elem : slice_kind(t, it, &selem) ? selem : TYPE_NONE;
       }
       ast_set_type(a, id, elem); // the loop binding resolves to this for-node (see resolver)
       check_stmt(t, n->as.for_stmt.body);
