@@ -4080,6 +4080,74 @@ static void emit_specializations(Codegen *c, const bool with_body) {
   }
 }
 
+// Codegen mirror of the typechecker's type_satisfies, for gating conditional-conformance emission: does the
+// concrete type `ty` have an `extend ty as iface` impl -- directly, or a conditional `extend<G> Ty<G> as iface`
+// whose own generic bounds hold for ty's args? A generic param is taken to satisfy (re-checked at instantiation).
+static bool cg_type_satisfies(Codegen *c, const TypeId ty, const DefId iface, const int depth) {
+  if (ty == TYPE_NONE || depth > 8)
+    return true; // unknown / too deep: do not manufacture a false miss
+  const Ty *const y = ast_type_at(c->ast, ty);
+  if (y->kind == TYPE_GENERIC)
+    return true;
+  ModuleId tmod;
+  NodeId tdecl;
+  TypeId iargs[4];
+  int in = 0;
+  if (y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM) {
+    tmod = y->module;
+    tdecl = y->as.decl;
+  } else if (y->kind == TYPE_INSTANCE) {
+    const TyInstance *const it = ast_instance(c->ast, y->as.inst);
+    tmod = it->module;
+    tdecl = it->decl;
+    for (uint8_t k = 0; k < it->n && in < 4; k++)
+      iargs[in++] = it->args[k];
+  } else {
+    return false; // a builtin / pointer / etc.: no `as iface` impl
+  }
+  const ModuleId scopes[2] = {tmod, c->ast->module};
+  const int ns = tmod == c->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = cg_mod_ast(c, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tr.module != iface.module || tr.node != iface.node || tg.module != tmod || tg.node != tdecl)
+        continue;
+      const NodeList gens = it->as.impl_def.generics; // conditional extension: each param bound must hold for the arg
+      const NodeId *const gids = ast_list(a, gens);
+      bool ok = true;
+      for (uint32_t g = 0; g < gens.len && (int)g < in && ok; g++) {
+        const NodeList gb = ast_at_const(a, gids[g])->as.generic_param.bounds;
+        const NodeId *const gbids = ast_list(a, gb);
+        for (uint32_t b = 0; b < gb.len && ok; b++) {
+          const DefId gbi = ast_resolution_def(a, gbids[b]);
+          if (gbi.node != NODE_NONE && !cg_type_satisfies(c, iargs[g], gbi, depth + 1))
+            ok = false;
+        }
+      }
+      if (ok)
+        return true;
+    }
+  }
+  return false;
+}
+
+// An impl's trait as a DefId, or {_,NODE_NONE} for an inherent (non-conformance) impl. A conditional
+// conformance (`extend<T: Clone> Vector<T> as Clone`) is emitted for an instance ONLY when the instance
+// satisfies it (cg_type_satisfies), so e.g. `Vector<i32>` -- whose i32 is not Clone -- gets no clone method.
+static DefId impl_trait(Ast *const a, const Node *const impl) {
+  if (impl->as.impl_def.trait_type == NODE_NONE)
+    return (DefId){0, NODE_NONE};
+  return ast_resolution_def(a, impl->as.impl_def.trait_type);
+}
+
 // Emit specialized methods for every concrete generic instance OWNED by this module (moved here by
 // package_propagate_instances): for each impl targeting the instance's generic decl, emit each method as
 // `<Inst>__<method>` with the impl's type params bound to the instance args. Unlike free-function specs
@@ -4104,6 +4172,10 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
       if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
         continue;
       if (ast_resolution(c->ast, n->as.impl_def.target_type) != it.decl)
+        continue;
+      const DefId itrait = impl_trait(c->ast, n); // a conditional conformance emits only for satisfying instances
+      if (itrait.node != NODE_NONE &&
+          !cg_type_satisfies(c, ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n), itrait, 0))
         continue;
       const NodeList gens = n->as.impl_def.generics;
       const NodeId *const gids = ast_list(c->ast, gens);
@@ -4509,6 +4581,8 @@ static void emit_generic_macro_methods(Codegen *c, const NodeId declId, const bo
       continue;
     if (ast_resolution(c->ast, n->as.impl_def.target_type) != declId)
       continue;
+    if (n->as.impl_def.trait_type != NODE_NONE)
+      continue; // a conditional conformance: emitted via its own gated per-conformance macro, not the core one
     const NodeList ms = n->as.impl_def.items;
     const NodeId *const mids = ast_list(c->ast, ms);
     for (uint32_t j = 0; j < ms.len; j++) {
@@ -4524,6 +4598,78 @@ static void emit_generic_macro_methods(Codegen *c, const NodeId declId, const bo
       render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
       emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, define, nm, false);
     }
+  }
+}
+
+// The macro-name fragment for a conditional conformance impl: the interface's source name (`Clone`), so a
+// type's conformance macros are `<STEM>_as_Clone_DECLARE/DEFINE`. Distinct interfaces -> distinct macros.
+static size_t conformance_tag(Codegen *c, const Node *const impl, char *out, const size_t cap) {
+  const DefId tr = ast_resolution_def(c->ast, impl->as.impl_def.trait_type);
+  size_t at = buf_append(out, cap, 0, "as_");
+  if (tr.node == NODE_NONE)
+    return at;
+  const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
+  return at + render_ident_src(cg_mod_src(c, tr.module),
+                               ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text,
+                               out + at, cap > at ? cap - at : 0);
+}
+
+// One conditional conformance impl as `#define <STEM>_as_<Iface>_DECLARE(T,_SCM_T,..,NAME) <protos>` /
+// `_DEFINE` (bodies), in macro mode. The home invokes it (after the core DECLARE/DEFINE) ONLY for instances
+// that satisfy the conformance, so different element types get different subsets (Clone-but-not-Hash, etc.).
+static void emit_generic_conformance_macro(Codegen *c, const NodeId declId, const NodeId implId, const bool define) {
+  const Node *const dn = ast_at_const(c->ast, declId);
+  const Node *const impl = ast_at_const(c->ast, implId);
+  char stem[160], tag[80];
+  macro_stem(c, c->ast->module, dn->as.aggregate.name, stem, sizeof stem);
+  conformance_tag(c, impl, tag, sizeof tag);
+  const NodeList gens = dn->as.aggregate.generics;
+  const NodeId *const gids = ast_list(c->ast, gens);
+  emit(c, "#define %s_%s_%s(", stem, tag, define ? "DEFINE" : "DECLARE");
+  for (uint32_t i = 0; i < gens.len; i++) {
+    char p[64];
+    render_macro_param(c, c->ast->module, gids[i], p, sizeof p);
+    emit(c, "%s, _SCM_%s, ", p, p);
+  }
+  emit(c, "NAME) ");
+  c->macro = true;
+  c->macro_self = declId;
+  c->macro_self_mod = c->ast->module;
+  c->nsubst = 0;
+  const size_t start = c->buf_len;
+  const NodeList ms = impl->as.impl_def.items;
+  const NodeId *const mids = ast_list(c->ast, ms);
+  for (uint32_t j = 0; j < ms.len; j++) {
+    const Node *const mn = ast_at_const(c->ast, mids[j]);
+    if (mn->kind != NODE_FUNCTION || mn->as.function.generics.len || mn->as.function.returns.len > 1)
+      continue;
+    if (define && mn->as.function.body == NODE_NONE)
+      continue;
+    char nm[320];
+    size_t at = buf_append(nm, sizeof nm, 0, "NAME");
+    nm[at++] = CG_PASTE;
+    at = buf_append(nm, sizeof nm, at, "__");
+    render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
+    emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, define, nm, false);
+  }
+  c->macro = false;
+  c->macro_self = NODE_NONE;
+  macro_finish(c, start);
+  emit(c, "\n");
+}
+
+// Every conditional conformance impl on `declId`, as DECLARE + DEFINE macros (gated per-instance at the home).
+static void emit_generic_conformance_macros(Codegen *c, const NodeId declId) {
+  const NodeList items = program_items(c);
+  const NodeId *const iids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, iids[i]);
+    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len || n->as.impl_def.trait_type == NODE_NONE)
+      continue;
+    if (ast_resolution(c->ast, n->as.impl_def.target_type) != declId)
+      continue;
+    emit_generic_conformance_macro(c, declId, iids[i], false);
+    emit_generic_conformance_macro(c, declId, iids[i], true);
   }
 }
 
@@ -4696,7 +4842,8 @@ static void emit_generic_macros(Codegen *c) {
     }
     emit_generic_macro(c, ids[i], false);
     emit_generic_macro(c, ids[i], true);
-    emit_generic_method_macros(c, ids[i]); // map<U> etc.: one DECLARE/DEFINE per generic method
+    emit_generic_method_macros(c, ids[i]);      // map<U> etc.: one DECLARE/DEFINE per generic method
+    emit_generic_conformance_macros(c, ids[i]); // each `as Iface` conformance: a gated DECLARE/DEFINE
   }
 }
 
@@ -4733,8 +4880,47 @@ static void emit_rehomed_forwards(Codegen *c) {
   }
 }
 
+// After the core DECLARE/DEFINE, invoke each SATISFIED conditional conformance's macro for a re-homed
+// instance: `<STEM>_as_<Iface>_DECLARE/DEFINE(args.., NAME)`. Gated by cg_type_satisfies, so an element type
+// implementing only some of Clone/Eq/Hash gets only those (and e.g. `Vector<i32>` gets none of them).
+static void emit_conformance_invocations(Codegen *c, const TyInstance *const it, const bool define) {
+  Ast *const oa = cg_mod_ast(c, it->module);
+  const Node *const dn = ast_at_const(oa, it->decl);
+  const NodeList items = ast_at_const(oa, oa->root)->as.program.items;
+  const NodeId *const iids = ast_list(oa, items);
+  const TypeId instTy = ast_intern_instance(c->ast, it->module, it->decl, it->args, it->n);
+  char stem[160];
+  macro_stem(c, it->module, dn->as.aggregate.name, stem, sizeof stem);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(oa, iids[i]);
+    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len || n->as.impl_def.trait_type == NODE_NONE)
+      continue;
+    if (ast_resolution(oa, n->as.impl_def.target_type) != it->decl)
+      continue;
+    const DefId tr = ast_resolution_def(oa, n->as.impl_def.trait_type);
+    if (tr.node == NODE_NONE || !cg_type_satisfies(c, instTy, tr, 0))
+      continue;
+    char tag[80];
+    size_t at = buf_append(tag, sizeof tag, 0, "as_");
+    const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
+    render_ident_src(cg_mod_src(c, tr.module),
+                     ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text, tag + at,
+                     sizeof tag > at ? sizeof tag - at : 0);
+    emit(c, "%s_%s_%s(", stem, tag, define ? "DEFINE" : "DECLARE");
+    for (uint8_t k = 0; k < it->n; k++) {
+      char csp[256], mng[176];
+      render_type_id(c, it->args[k], "", csp, sizeof csp);
+      mangle_type(c, it->args[k], mng, sizeof mng);
+      emit(c, "%s, %s, ", csp, mng);
+    }
+    char inm[200];
+    inst_name(c, it, inm, sizeof inm);
+    emit(c, "%s)\n", inm);
+  }
+}
+
 // Invoke `<G>_DECLARE(...)` (define=false) / `<G>_DEFINE(...)` for every instance re-homed here, passing each
-// arg's C spelling + mangle token and the instance's mangled name.
+// arg's C spelling + mangle token and the instance's mangled name; then each satisfied conformance's macro.
 static void emit_instance_macro_invocations(Codegen *c, const bool define) {
   if (!c->package)
     return;
@@ -4755,6 +4941,7 @@ static void emit_instance_macro_invocations(Codegen *c, const bool define) {
     char inm[200];
     inst_name(c, &it, inm, sizeof inm);
     emit(c, "%s)\n", inm);
+    emit_conformance_invocations(c, &it, define);
   }
 }
 

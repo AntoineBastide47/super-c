@@ -425,6 +425,38 @@ static void test_generics_over_user_types(void) {
       42, "");
 }
 
+// Conditional container conformances: Vector/Option/Box/Result are Clone/Eq/Hash when their element is.
+// Each dispatches to the element's bound method through the cross-module placement macros (Phase 1).
+static void test_container_conformances(void) {
+  sc_run_program(
+      "Vector<P> Clone + Eq + Hash (element-wise via the bound)",
+      PRE "struct P { pub a: i32 }\n"
+          "extend P as Clone { fn clone(self: &Self) P { return P { a: self.a }; } }\n"
+          "extend P as Eq { fn eq(self: &Self, other: &Self) bool { return self.a == other.a; } }\n"
+          "extend P as Hash { fn hash(self: &Self) u64 { return self.a as u64; } }\n"
+          "fn main() i32 { let mut v = Vector::<P>::new(); v.push(P{a:3}); v.push(P{a:4});\n"
+          "  let mut w = v.clone();\n"
+          "  let mut acc = 0;\n"
+          "  if v.eq(&w) { acc = acc + 6; }\n"               // 6
+          "  if v.hash() == w.hash() { acc = acc + 36; }\n"  // 42
+          "  v.drop(); w.drop(); exit(acc); }\n",
+      42, "");
+  sc_run_program(
+      "Option<P> and Box<P> Clone + Eq",
+      PRE "struct P { pub a: i32 }\n"
+          "extend P as Clone { fn clone(self: &Self) P { return P { a: self.a }; } }\n"
+          "extend P as Eq { fn eq(self: &Self, other: &Self) bool { return self.a == other.a; } }\n"
+          "fn main() i32 { let o = Option::<P>::Some(P{a:20});\n"
+          "  let o2 = o.clone();\n"
+          "  let mut b = Box::<P>::new(P{a:22});\n"
+          "  let mut b2 = b.clone();\n"
+          "  let mut acc = 0;\n"
+          "  if o.eq(&o2) { acc = acc + 20; }\n"
+          "  if b.eq(&b2) { acc = acc + 22; }\n" // 42
+          "  b.drop(); b2.drop(); exit(acc); }\n",
+      42, "");
+}
+
 static void test_generics(void) {
   // A generic function is monomorphized: turbofish picks the instantiation, and distinct type args
   // produce distinct specializations.
@@ -905,6 +937,7 @@ int main(void) {
   test_closures();
   test_std_types();
   test_generics_over_user_types();
+  test_container_conformances();
   test_generics();
   test_arithmetic();
   test_control_flow();
