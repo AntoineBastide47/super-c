@@ -457,6 +457,21 @@ static void test_container_conformances(void) {
       42, "");
 }
 
+// format/print/println builtins: a string literal with `{}` placeholders filled by the trailing args,
+// appended by type (int/float/bool/char/str/String). `{{`/`}}` are literal braces; a Format value is passed
+// as its `.fmt()` String. `format` returns the String; `println` adds a newline.
+static void test_format_printing(void) {
+  sc_run_program(
+      "println with mixed argument types and brace escapes",
+      PRE "fn main() i32 {\n"
+          "  let name = \"world\"; let n: i32 = 42;\n"
+          "  println(\"hi {} n={} pi={} ok={} brace={{}}\", name, n, 2.5, true);\n"
+          "  let mut s = format(\"<{}>\", n);\n"
+          "  s.print(); s.drop();\n"
+          "  exit(0); }\n",
+      0, "hi world n=42 pi=2.5 ok=true brace={}\n<42>");
+}
+
 // `str` conforms to Eq/Ord/Hash/Default with the `&Self` convention: `==`/`!=` dispatch to its `eq` (this
 // also covers the former `str == str` miscompile, where `eq` took `other` by value), `T: Ord` reaches `cmp`.
 static void test_str_conformances(void) {
@@ -970,6 +985,7 @@ int main(void) {
   test_generics_over_user_types();
   test_container_conformances();
   test_str_conformances();
+  test_format_printing();
   test_multi_from();
   test_generics();
   test_arithmetic();

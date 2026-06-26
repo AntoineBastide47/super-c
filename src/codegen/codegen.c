@@ -1636,11 +1636,212 @@ static bool emit_cmp_overload(Codegen *c, const Node *const n) {
   return true;
 }
 
+// True if type `y` is the prelude struct named `lit` (used to spot `str` / `String` arguments to format).
+static bool cg_struct_name_is(Codegen *c, const Ty *const y, const char *const lit) {
+  if (y->kind != TYPE_STRUCT)
+    return false;
+  const Node *const dn = ast_at_const(cg_mod_ast(c, y->module), y->as.decl);
+  return span_is(cg_mod_src(c, y->module), ast_at_const(cg_mod_ast(c, y->module), dn->as.aggregate.name)->as.name.text, lit);
+}
+
+// Emit (into the format builder named `f`) a C string-literal for the raw format bytes [a, b): re-escapes
+// exactly like a normal string literal, and collapses `{{`/`}}` to one brace. Emitted twice per segment --
+// once for `.ptr`, once inside `sizeof` -- so the runtime length counts escapes correctly.
+static void emit_fmt_cstr(Codegen *c, const size_t a, const size_t b) {
+  const uint8_t *const src = c->source;
+  emit(c, "\"");
+  size_t i = a;
+  while (i < b) {
+    if ((src[i] == '{' || src[i] == '}') && i + 1 < b && src[i + 1] == src[i]) {
+      emit(c, "%c", src[i]); // `{{` / `}}` -> one literal brace
+      i += 2;
+      continue;
+    }
+    if (src[i] == '\\' && i + 1 < b) {
+      const uint8_t e = src[i + 1];
+      if (e == 'x' && i + 3 < b) { // \xNN -> fixed-width octal (so a following digit isn't absorbed)
+        emit(c, "\\%03o", (unsigned)((hex_val(src[i + 2]) << 4) | hex_val(src[i + 3])) & 0xFFu);
+        i += 4;
+      } else if (e == '0') {
+        emit(c, "\\000");
+        i += 2;
+      } else { // n / r / t / \\ / " / ' (and others) copy through verbatim -- already valid C
+        emit(c, "\\%c", e);
+        i += 2;
+      }
+      continue;
+    }
+    emit(c, "%c", src[i]);
+    i++;
+  }
+  emit(c, "\"");
+}
+
+// Append one format argument to the builder `f`, by its static type: any integer/float, bool, char, str, or
+// String. Anything else (e.g. a Vector) is rejected -- call its `.fmt()` and pass the resulting String.
+static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg) {
+  const TypeId t = subst_resolve(c, ast_type(c->ast, arg));
+  const Ty *const y = ast_type_at(c->ast, t);
+  if (y->kind == TYPE_BUILTIN) {
+    switch (y->as.builtin) {
+      case BT_BOOL:
+        emit(c, "if (");
+        emit_expr(c, arg);
+        emit(c, ") String__push_str(&%s, (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });", f);
+        emit(c, " else String__push_str(&%s, (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n", f);
+        return true;
+      case BT_CHAR:
+        emit(c, "String__push_byte(&%s, (uint8_t)(", f);
+        emit_expr(c, arg);
+        emit(c, "));\n");
+        return true;
+      case BT_I8: case BT_I16: case BT_I32: case BT_I64: case BT_ISIZE:
+        emit(c, "String__push_i64(&%s, (int64_t)(", f);
+        emit_expr(c, arg);
+        emit(c, "));\n");
+        return true;
+      case BT_U8: case BT_U16: case BT_U32: case BT_U64: case BT_USIZE:
+        emit(c, "String__push_u64(&%s, (uint64_t)(", f);
+        emit_expr(c, arg);
+        emit(c, "));\n");
+        return true;
+      case BT_F32: case BT_F64:
+        emit(c, "String__push_f64(&%s, (double)(", f);
+        emit_expr(c, arg);
+        emit(c, "));\n");
+        return true;
+      default:
+        return false;
+    }
+  }
+  if (cg_struct_name_is(c, y, "str")) {
+    emit(c, "String__push_str(&%s, ", f);
+    emit_expr(c, arg);
+    emit(c, ");\n");
+    return true;
+  }
+  if (cg_struct_name_is(c, y, "String")) {
+    if (is_lvalue(c, arg)) { // borrow a named String (the caller still owns it)
+      emit(c, "String__push_string(&%s, &(", f);
+      emit_expr(c, arg);
+      emit(c, "));\n");
+    } else { // a temporary (e.g. `v.fmt()`): materialize, append, then drop it (no leak)
+      char tmp[32];
+      fresh(c, tmp, sizeof tmp);
+      emit(c, "{ String %s = ", tmp);
+      emit_expr(c, arg);
+      emit(c, "; String__push_string(&%s, &%s); String__drop(&%s); }\n", f, tmp, tmp);
+    }
+    return true;
+  }
+  return false;
+}
+
+// True if (m, node) is the prelude `format`/`print`/`println` builtin. Their calls are always desugared
+// (emit_format_builtin), so the declarations themselves emit no C (the stub bodies are never used).
+static bool cg_is_format_builtin(Codegen *c, const ModuleId m, const NodeId node) {
+  if (!c->package || m >= c->package->count || !c->package->modules[m].prelude)
+    return false;
+  const Ast *const a = cg_mod_ast(c, m);
+  if (ast_at_const(a, node)->kind != NODE_FUNCTION)
+    return false;
+  const Span fn = ast_at_const(a, ast_at_const(a, node)->as.function.name)->as.name.text;
+  return span_is(cg_mod_src(c, m), fn, "format") || span_is(cg_mod_src(c, m), fn, "print") ||
+         span_is(cg_mod_src(c, m), fn, "println");
+}
+
+// `format`/`print`/`println`: a string-literal first arg with `{}` placeholders + matching trailing args.
+// Build a String with per-argument appends, then yield it (format) / write it to stdout (print/println).
+// Returns false (fall through to a normal call) if this is not one of the builtins.
+static bool emit_format_builtin(Codegen *c, const Node *const n) {
+  if (!c->package)
+    return false;
+  const Node *const callee = ast_at_const(c->ast, n->as.call.callee);
+  if (callee->kind != NODE_IDENTIFIER)
+    return false;
+  const DefId d = ast_resolution_def(c->ast, n->as.call.callee);
+  if (d.node == NODE_NONE || d.module >= c->package->count || !c->package->modules[d.module].prelude)
+    return false;
+  const Ast *const da = cg_mod_ast(c, d.module);
+  if (ast_at_const(da, d.node)->kind != NODE_FUNCTION)
+    return false;
+  const Span fn = ast_at_const(da, ast_at_const(da, d.node)->as.function.name)->as.name.text;
+  const int kind = span_is(cg_mod_src(c, d.module), fn, "format") ? 1 : span_is(cg_mod_src(c, d.module), fn, "print") ? 2
+                   : span_is(cg_mod_src(c, d.module), fn, "println") ? 3 : 0;
+  if (!kind)
+    return false;
+  const NodeList args = n->as.call.args;
+  const NodeId *const aids = ast_list(c->ast, args);
+  const Node *const fmtn = args.len ? ast_at_const(c->ast, aids[0]) : NULL;
+  if (!fmtn || fmtn->kind != NODE_LITERAL || fmtn->as.literal.token_type != StringLiteral) {
+    codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: format string must be a string literal");
+    return true;
+  }
+  char f[32];
+  fresh(c, f, sizeof f);
+  emit(c, "({ String %s = String__new();\n", f);
+  const Span raw = fmtn->as.literal.raw;
+  const uint8_t *const src = c->source;
+  size_t i = raw.start + 1;
+  const size_t end = raw.end - 1;
+  size_t seg = i;
+  uint32_t ai = 1;
+  while (i < end) {
+    if ((src[i] == '{' || src[i] == '}') && i + 1 < end && src[i + 1] == src[i]) {
+      i += 2;
+      continue;
+    }
+    if (src[i] == '{' && i + 1 < end && src[i + 1] == '}') {
+      if (i > seg) {
+        emit(c, "String__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
+        emit_fmt_cstr(c, seg, i);
+        emit(c, ", .len = sizeof(");
+        emit_fmt_cstr(c, seg, i);
+        emit(c, ") - 1 });\n");
+      }
+      if (ai >= args.len) {
+        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more `{}` placeholders than arguments");
+        emit(c, "%s; })", f);
+        return true;
+      }
+      if (!emit_format_arg(c, f, aids[ai])) {
+        const Span as = ast_at_const(c->ast, aids[ai])->span;
+        codegen_errorf(c, as.start, as.end - as.start, "codegen: argument is not directly formattable (call its .fmt())");
+      }
+      ai++;
+      i += 2;
+      seg = i;
+      continue;
+    }
+    i++;
+  }
+  if (end > seg) {
+    emit(c, "String__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
+    emit_fmt_cstr(c, seg, end);
+    emit(c, ", .len = sizeof(");
+    emit_fmt_cstr(c, seg, end);
+    emit(c, ") - 1 });\n");
+  }
+  if (ai < args.len)
+    codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more arguments than `{}` placeholders");
+  if (kind == 3)
+    emit(c, "String__push_byte(&%s, 10);\n", f);
+  if (kind == 1) {
+    emit(c, "%s; })", f); // format: yield the built String
+  } else {
+    emit(c, "String__print(&%s); String__drop(&%s); })", f, f); // print/println: write to stdout, then free
+  }
+  return true;
+}
+
 static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(c->ast, args);
+
+  if (emit_format_builtin(c, n)) // format/print/println: split the literal + per-arg appends
+    return;
 
   // Win 1, inside a callback specialization: a call to the elided callback parameter becomes a direct
   // call to the bound callee (no indirection).
@@ -5265,8 +5466,8 @@ static void phase_prototypes(Codegen *c, const int which) {
     if (n->kind == NODE_FUNCTION) {
       if (n->as.function.generics.len)
         continue; // a generic template emits nothing; its specializations are emitted separately
-      if (cb_specialized_away(c, ids[i]))
-        continue; // its pointer original is unused (every caller took the specialized path)
+      if (cb_specialized_away(c, ids[i]) || cg_is_format_builtin(c, c->ast->module, ids[i]))
+        continue; // its pointer original is unused (every caller took the specialized path) / a format builtin
       if (want_fn(which, n->as.function.is_public))
         emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false, NULL, false);
     } else if (n->kind == NODE_IMPL) {
@@ -5347,7 +5548,7 @@ static void phase_bodies(Codegen *c) {
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE &&
-        !cb_specialized_away(c, ids[i])) {
+        !cb_specialized_away(c, ids[i]) && !cg_is_format_builtin(c, c->ast->module, ids[i])) {
       emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true, NULL, false);
     } else if (n->kind == NODE_IMPL && !n->as.impl_def.generics.len) {
       const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
