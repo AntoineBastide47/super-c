@@ -1300,11 +1300,11 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
     DefId egp[4];
     TypeId ega[4];
     int egn;
-    if (aggregate_of(t, strip(t, expected), &emod, &edecl, egp, ega, &egn) && egn == 0) {
+    if (aggregate_of(t, strip(t, expected), &emod, &edecl, egp, ega, &egn)) {
       const DefId m = find_method(t, emod, edecl, mname);
       if (m.node != NODE_NONE) {
         ast_set_resolution_def(t->ast, n->as.member.member, m);
-        return decl_type_in(t, m.module, m.node);
+        return decl_type_in(t, m.module, m.node); // result-type subst (for a generic target) happens in check_call
       }
     }
   }
@@ -1562,6 +1562,29 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       rsubp[nrsub] = (DefId){md.module, tr};
       rsuba[nrsub] = named_type_of(t, ob.module, ob.node);
       nrsub++;
+    }
+    // `Trait::assoc()` on a generic instance target (`let v: Vector<String> = Default::default();`): the
+    // resolved method's signature uses the IMPL's type params -- bind them to the target instance's args.
+    if (ob.node != NODE_NONE && md.node != NODE_NONE &&
+        ast_at_const(mod_ast(t, ob.module), ob.node)->kind == NODE_TRAIT) {
+      ModuleId em;
+      NodeId ed;
+      DefId egp[4];
+      TypeId ega[4];
+      int egn;
+      if (want != TYPE_NONE && aggregate_of(t, strip(t, want), &em, &ed, egp, ega, &egn) && egn > 0) {
+        const NodeId impl = enclosing_impl(t, md.module, md.node);
+        if (impl != NODE_NONE) {
+          Ast *const ma = mod_ast(t, md.module);
+          const NodeList ig = ast_at_const(ma, impl)->as.impl_def.generics;
+          const NodeId *const gids = ast_list(ma, ig);
+          for (uint32_t i = 0; i < ig.len && (int)i < egn && nrsub < 4; i++) {
+            rsubp[nrsub] = (DefId){md.module, gids[i]};
+            rsuba[nrsub] = ega[i];
+            nrsub++;
+          }
+        }
+      }
     }
   }
 

@@ -493,6 +493,20 @@ static void test_generics(void) {
 static void test_std_types(void) {
   // sizeof(T) lowers to C's sizeof and is usize-typed (the byte sizes back the heap containers).
   sc_run_program("sizeof", PRE "fn main() i32 { exit(((sizeof(i32) + sizeof(u8)) as i32) * 8 + 2); }\n", 42, ""); // (4+1)*8+2
+  // Standard-interface conformances on prelude types: String Eq/Ord/Clone/Default/From, Vector/Option
+  // Default, dispatched through a generic `T: Ord` bound and the expected-type `Default::default()`.
+  // (Vector<i32> here, not Vector<String>: a by-value Option<prelude-type> field is only orderable in the
+  // multi-file build, not this single-TU harness path.)
+  sc_run_program(
+      "std interface conformances",
+      PRE "fn pick<T: Ord>(a: T, b: T) T { if a.cmp(&b) >= 0 { return a; } return b; }\n"
+          "fn main() i32 { let mut x: String = String::from(\"apple\"); let mut y: String = String::from(\"banana\");\n"
+          "  let mut acc = 0; if x.cmp(&y) < 0 { acc = acc + 1; } if x.eq(&y) { acc = acc + 1000; }\n"
+          "  let mut big = pick::<String>(x.clone(), y.clone()); big.print();\n"
+          "  let mut d: String = Default::default(); if d.len() == 0 { acc = acc + 10; }\n"
+          "  let mut v: Vector<i32> = Default::default(); v.push(7); acc = acc + (v.len() as i32) * 100;\n"
+          "  let o: Option<i32> = Default::default(); acc = acc + o.unwrap_or(0); v.drop(); x.drop(); y.drop(); big.drop(); d.drop(); exit(acc); }\n",
+      111, "banana"); // 1 + 10 + 100
   // String numeric formatting: from_i64 / from_u64 / push_i64 / push_f64.
   sc_run_program(
       "std String int/float to-string",
