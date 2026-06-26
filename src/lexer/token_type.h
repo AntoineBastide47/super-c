@@ -17,6 +17,7 @@ typedef enum TokenType {
   Const,
   Continue,
   Defer,
+  Do,
   Else,
   Enum,
   Extern,
@@ -65,6 +66,7 @@ typedef enum TokenType {
   Semicolon, // ;
   Colon, // :
   Dot, // .
+  At, // @ (introduces an attribute)
 
   // Operators
   Plus, // +

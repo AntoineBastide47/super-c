@@ -27,18 +27,6 @@ static void expect_absent(const char *name, const char *source, const char *need
   free(code);
 }
 
-static void expect_codegen_error(const char *name, const char *source, const char *needle) {
-  size_t n_err = 0;
-  char first[256];
-  char *code = sc_codegen(name, source, &n_err, first, sizeof first);
-  if (!code)
-    return;
-  CHECK(n_err >= 1, "%s: expected a codegen diagnostic", name);
-  if (n_err)
-    CHECK(strstr(first, needle) != NULL, "%s: diagnostic missing '%s':\n%s", name, needle, first);
-  free(code);
-}
-
 static const char *const BROAD =
     "struct Point { pub x: i32, }\n"
     "extend Point { fn get(self: &Point) i32 { return self.x; } }\n"
@@ -333,8 +321,48 @@ static void test_slices_and_arrays(void) {
 }
 
 static void test_errors(void) {
-  expect_codegen_error(
-      "defer", "fn cleanup() void {}\nfn run() void { defer cleanup(); }\n", "not yet supported");
+  // `defer` now lowers: the deferred call is emitted at the block's exit, not at the defer site.
+  expect_contains(
+      "defer lowers to scope-exit call", "fn cleanup() void {}\nfn run() void { defer cleanup(); }\n", "cleanup()");
+  // designated array initializer keeps the C `[index] = value` form.
+  expect_contains(
+      "designated array init", "fn m() i32 { let t: [i32; 4] = [[2] = 9]; return t[2]; }\n", "[2] = 9");
+  // a block-local `const` table becomes a `static const`.
+  expect_contains(
+      "local const is static const", "fn m() i32 { const T: [i32; 2] = [1, 2]; return T[0]; }\n", "static const");
+  // static_assert lowers to C `_Static_assert`.
+  expect_contains("static_assert lowers", "static_assert(1 == 1);\nfn m() i32 { return 0; }\n", "_Static_assert(");
+  // do/while keeps the post-tested loop form.
+  expect_contains(
+      "do/while form", "fn m() i32 { let mut i: i32 = 0; do { i = i + 1; } while i < 3; return i; }\n", "do {");
+}
+
+// `@c.*` attributes lower to portable C keywords + a combined GNU `__attribute__`; export/import pin the
+// exact C symbol (no module mangling) at both the definition and call sites; packed/align ride the struct.
+static void test_attributes(void) {
+  expect_contains("noreturn", "@c.noreturn\nfn die() void {}\nfn main() i32 { return 0; }\n", "_Noreturn void");
+  expect_contains(
+      "always_inline", "@c.always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { return a(0); }\n",
+      "inline __attribute__((always_inline))");
+  expect_contains(
+      "section + used", "@c.section(\"hot\")\n@c.used\nfn a() i32 { return 0; }\nfn main() i32 { return a(); }\n",
+      "__attribute__((used, section(\"hot\")))");
+  expect_contains(
+      "packed struct", "@c.packed\nstruct H { pub x: u32 }\nfn main() i32 { let h = H { x: 1 }; return h.x as i32; }\n",
+      "struct __attribute__((packed)) H");
+  expect_contains(
+      "aligned struct", "@c.align(64)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32; }\n",
+      "__attribute__((aligned(64)))");
+  // export renames the symbol AND every call site to it; no `static`.
+  const char *const EX = "@c.export(\"sc_init\")\nfn init() i32 { return 0; }\nfn main() i32 { return init(); }\n";
+  expect_contains("export defines the exact symbol", EX, "int32_t sc_init(void)");
+  expect_contains("export rewrites the call site", EX, "return sc_init()");
+  expect_absent("export drops the Super-C name", EX, " init(");
+  // import renames an extern binding's symbol at the call site.
+  expect_contains(
+      "import binds to the C symbol",
+      "extern \"C\" { @c.import(\"puts\") fn line(s: *const char) i32; }\nfn main() i32 { line(\"x\"); return 0; }\n",
+      "puts(");
 }
 
 // A generic function emits no template; each turbofish instantiation emits a concrete `<fn>__<args>` copy
@@ -396,6 +424,7 @@ int main(void) {
   test_multi_return();
   test_slices_and_arrays();
   test_errors();
+  test_attributes();
   test_generics();
   test_literals();
   if (failures) {

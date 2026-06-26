@@ -56,7 +56,7 @@ HM_DEFINE(NodeId, NodeId, CgEnumMap, cg_nodeid_hash, CG_NODEID_EQ)
   "#endif\n"
 const char *const SUPER_RT_INCLUDES =
     RT_H("assert.h") RT_H("complex.h") RT_H("ctype.h") RT_H("errno.h") RT_H("fenv.h") RT_H("float.h")
-    RT_H("inttypes.h") RT_H("iso646.h") RT_H("limits.h") RT_H("locale.h") RT_H("math.h") RT_H("setjmp.h")
+    RT_H("inttypes.h") RT_H("iso646.h") RT_H("limits.h") RT_H("locale.h") RT_H("math.h")
     RT_H("signal.h") RT_H("stdalign.h") RT_H("stdarg.h") RT_H("stdatomic.h") RT_H("stdbit.h") RT_H("stdbool.h")
     RT_H("stdckdint.h") RT_H("stddef.h") RT_H("stdint.h") RT_H("stdio.h") RT_H("stdlib.h") RT_H("stdnoreturn.h")
     RT_H("string.h") RT_H("tgmath.h") RT_H("threads.h") RT_H("time.h") RT_H("uchar.h") RT_H("wchar.h")
@@ -115,6 +115,12 @@ struct Codegen {
     ModuleId macro_self_mod; // that decl's module
     NodeId slice_raw;        // the array node currently emitted as the inner `.ptr` of an array->slice
                              // coercion wrap; suppresses re-entrant coercion so it emits as a bare array
+    // `defer`: a stack of pending deferred statements. Each block scope runs the defers pushed within it,
+    // in reverse, at its exit (fall-through, return, break, continue). `loop_defer_base` is the stack depth
+    // at the innermost loop body's entry, so break/continue run only the defers registered inside the loop.
+    NodeId defer_stack[256];
+    uint32_t defer_top;
+    uint32_t loop_defer_base;
     ERRORS_VARIABLES;
 };
 
@@ -127,6 +133,32 @@ ALWAYS_INLINE Ast *cg_mod_ast(const Codegen *c, const ModuleId m) {
 }
 ALWAYS_INLINE const uint8_t *cg_mod_src(const Codegen *c, const ModuleId m) {
   return c->package && m != c->ast->module ? (const uint8_t *)c->package->modules[m].source : c->source;
+}
+
+// Find a `@c.*` attribute of `kind` on item `owner` in module `mod`, or NULL. Attributes are few, so a
+// linear scan of the owning module's table is cheap.
+static const Attr *cg_attr(const Codegen *c, const ModuleId mod, const NodeId owner, const AttrKind kind) {
+  const Ast *const a = cg_mod_ast(c, mod);
+  for (size_t i = 0; i < a->attrs.len; i++)
+    if (a->attrs.data[i].owner == owner && a->attrs.data[i].kind == kind)
+      return &a->attrs.data[i];
+  return NULL;
+}
+
+// If function `fn` (module `mod`) carries `@c.export`/`@c.import`, copy its literal C symbol (the bytes
+// of the attribute's string, from that module's source) into `out` and return true.
+static bool cg_symbol_override(const Codegen *c, const ModuleId mod, const NodeId fn, char *const out, const size_t cap) {
+  const Attr *a = cg_attr(c, mod, fn, ATTR_EXPORT);
+  if (!a)
+    a = cg_attr(c, mod, fn, ATTR_IMPORT);
+  if (!a || cap == 0)
+    return false;
+  size_t n = a->str.end - a->str.start;
+  if (n >= cap)
+    n = cap - 1;
+  memcpy(out, cg_mod_src(c, mod) + a->str.start, n);
+  out[n] = '\0';
+  return true;
 }
 
 // Render module `m`'s mangled prefix ("std::string" -> "std__string__") into buf; empty when not
@@ -167,12 +199,12 @@ static size_t render_modpfx(const Codegen *c, const ModuleId m, char *buf, const
 // Super-C builtin names (for matching unresolved type paths) and their C spellings.
 static const char *const BUILTIN_NAMES[BT_COUNT] = {
     "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-    "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "void",
+    "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "va_list", "void",
 };
 static const char *const BUILTIN_C[BT_COUNT] = {
     "bool",     "char",     "int8_t",   "int16_t", "int32_t", "int64_t",        "intptr_t",        "uint8_t",
     "uint16_t", "uint32_t", "uint64_t", "size_t",  "float",   "double",         "float _Complex",  "double _Complex",
-    "void",
+    "va_list",  "void",
 };
 
 static void emit_expr(Codegen *c, NodeId id);
@@ -189,6 +221,8 @@ static size_t render_qualified(Codegen *c, ModuleId owner, NodeId name_node, cha
 static NodeId fn_array_return(Codegen *c, NodeId fn_id);
 static void emit_match_core(Codegen *c, NodeId id, int mode, const char *result);
 static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
+static void emit_expr_stmt(Codegen *c, NodeId v);
+static void emit_defers_to(Codegen *c, uint32_t base);
 static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut);
 static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
 static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
@@ -1586,9 +1620,15 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       return;
     }
     if (md.node != NODE_NONE && ast_at_const(cg_mod_ast(c, md.module), md.node)->kind == NODE_FUNCTION) {
+      // `@c.export`/`@c.import` pin the exact C symbol regardless of module mangling.
+      char ov[160];
+      const bool override = cg_symbol_override(c, md.module, md.node, ov, sizeof ov);
       // A raw binding reached as `mod::f(..)` keeps its real C symbol name -- never module-mangled.
-      if (ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.is_extern) {
-        emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
+      if (override || ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.is_extern) {
+        if (override)
+          emit_cstr(c, ov);
+        else
+          emit_ident_mod(c, md.module, ast_at_const(cg_mod_ast(c, md.module), md.node)->as.function.name);
         emit(c, "(");
         for (uint32_t i = 0; i < args.len; i++) {
           if (i)
@@ -1836,6 +1876,15 @@ static void emit_ident_ref(Codegen *c, const NodeId id, const Node *n) {
         return;
       }
     }
+    // `@c.export`/`@c.import` pin the exact C symbol (covers a bare `f()` to an exported fn or an
+    // imported binding reached by its Super-C name).
+    if (dn->kind == NODE_FUNCTION) {
+      char ov[160];
+      if (cg_symbol_override(c, d.module, d.node, ov, sizeof ov)) {
+        emit_cstr(c, ov);
+        return;
+      }
+    }
     // A bare reference to a module-level function (not extern -- those have no body -- and not `main`)
     // emits the OWNING module's mangled name, so glob / prelude / alias imports (which are pure source
     // sugar) still resolve to the real symbol exactly as a fully-qualified reference would.
@@ -1865,10 +1914,20 @@ static void emit_array_braces(Codegen *c, const Node *n) {
     if (i)
       emit(c, ", ");
     const Node *const el = ast_at_const(c->ast, ids[i]);
-    if (el->kind == NODE_ARRAY_LITERAL) // a nested array member needs a brace list, not a `(T[N]){..}` expr
+    if (el->kind == NODE_FIELD_INITIALIZER) { // designated element `[index] = value`
+      emit(c, "[");
+      emit_expr(c, el->as.field_initializer.name);
+      emit(c, "] = ");
+      const Node *const v = ast_at_const(c->ast, el->as.field_initializer.value);
+      if (v->kind == NODE_ARRAY_LITERAL)
+        emit_array_braces(c, v);
+      else
+        emit_expr(c, el->as.field_initializer.value);
+    } else if (el->kind == NODE_ARRAY_LITERAL) { // a nested array member needs a brace list, not a `(T[N]){..}` expr
       emit_array_braces(c, el);
-    else
+    } else {
       emit_expr(c, ids[i]);
+    }
   }
   emit(c, " }");
 }
@@ -2045,6 +2104,25 @@ static void emit_expr(Codegen *c, const NodeId id) {
       emit(c, "sizeof(%s)", ty);
       break;
     }
+    case NODE_VA_EXPR:
+      if (n->as.va_op.op == VA_ARG) {
+        char ty[256];
+        render_type_node(c, n->as.va_op.extra, "", ty, sizeof ty);
+        emit(c, "va_arg(");
+        emit_expr(c, n->as.va_op.ap);
+        emit(c, ", %s)", ty);
+      } else if (n->as.va_op.op == VA_START) {
+        emit(c, "va_start(");
+        emit_expr(c, n->as.va_op.ap);
+        emit(c, ", ");
+        emit_expr(c, n->as.va_op.extra);
+        emit(c, ")");
+      } else { // VA_END
+        emit(c, "va_end(");
+        emit_expr(c, n->as.va_op.ap);
+        emit(c, ")");
+      }
+      break;
     case NODE_STRUCT_INITIALIZER:
       emit_struct_init(c, n);
       break;
@@ -2218,6 +2296,20 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
         emit(c, "1");
       break;
     }
+    case NODE_PATTERN_OR: { // matches if any alternative matches: `(t0) || (t1) || ...`
+      const NodeList alts = p->as.pattern.children;
+      const NodeId *const ids = ast_list(c->ast, alts);
+      if (alts.len == 0) {
+        emit(c, "1");
+        break;
+      }
+      for (uint32_t i = 0; i < alts.len; i++) {
+        emit(c, i ? " || (" : "(");
+        emit_pattern_test(c, ids[i], scrut);
+        emit(c, ")");
+      }
+      break;
+    }
     default:
       emit(c, "1");
       break;
@@ -2285,6 +2377,12 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
         if (sub.len)
           emit_pattern_binds(c, ast_list(c->ast, sub)[0], acc);
       }
+      break;
+    }
+    case NODE_PATTERN_OR: { // alternatives must bind the same names; emit the first alternative's binds
+      const NodeList alts = p->as.pattern.children;
+      if (alts.len)
+        emit_pattern_binds(c, ast_list(c->ast, alts)[0], scrut);
       break;
     }
     default:
@@ -2437,12 +2535,15 @@ static void emit_block(Codegen *c, const NodeId id) {
   const Node *const n = ast_at_const(c->ast, id);
   emit(c, "{\n");
   c->depth++;
+  const uint32_t dbase = c->defer_top; // defers registered in this block run, reversed, at its close
   const NodeList stmts = n->as.block.statements;
   const NodeId *const ids = ast_list(c->ast, stmts);
   for (uint32_t i = 0; i < stmts.len; i++) {
     emit_indent(c);
     emit_stmt(c, ids[i]);
   }
+  emit_defers_to(c, dbase); // fall-through cleanup
+  c->defer_top = dbase;
   c->depth--;
   emit_indent(c);
   emit(c, "}");
@@ -2497,6 +2598,7 @@ static void emit_block_value(Codegen *c, const NodeId id, const char *result) {
   const Node *const n = ast_at_const(c->ast, id);
   emit(c, "{\n");
   c->depth++;
+  const uint32_t dbase = c->defer_top; // defers run after the branch's value is computed
   const NodeList stmts = n->as.block.statements;
   const NodeId *const ids = ast_list(c->ast, stmts);
   for (uint32_t i = 0; i < stmts.len; i++) {
@@ -2510,6 +2612,8 @@ static void emit_block_value(Codegen *c, const NodeId id, const char *result) {
       emit_stmt(c, ids[i]);
     }
   }
+  emit_defers_to(c, dbase);
+  c->defer_top = dbase;
   c->depth--;
   emit_indent(c);
   emit(c, "}");
@@ -2631,10 +2735,13 @@ static void emit_for(Codegen *c, const Node *n) {
     emit(c, " = (");
     emit_expr(c, n->as.for_stmt.iterable);
     emit(c, ")[%s];\n", idx);
+    const uint32_t dbase = c->defer_top;
     for (uint32_t i = 0; i < stmts.len; i++) {
       emit_indent(c);
       emit_stmt(c, sids[i]);
     }
+    emit_defers_to(c, dbase);
+    c->defer_top = dbase;
     c->depth--;
     emit_indent(c);
     emit(c, "}\n");
@@ -2658,10 +2765,13 @@ static void emit_for(Codegen *c, const Node *n) {
     emit_indent(c);
     emit_binding(c, selem, name_span(c, n->as.for_stmt.binding), true);
     emit(c, " = %s.ptr[%s];\n", s, idx); // the `.ptr` field is already typed `*const T`
+    const uint32_t dbase = c->defer_top;
     for (uint32_t i = 0; i < stmts.len; i++) {
       emit_indent(c);
       emit_stmt(c, sids[i]);
     }
+    emit_defers_to(c, dbase);
+    c->defer_top = dbase;
     c->depth--;
     emit_indent(c);
     emit(c, "}\n");
@@ -2676,6 +2786,45 @@ static void emit_for(Codegen *c, const Node *n) {
 static void emit_return(Codegen *c, const Node *n) {
   const NodeList vals = n->as.return_stmt.values;
   const NodeId *const vids = ast_list(c->ast, vals);
+  // With pending defers, evaluate the return value first, run every live defer (innermost-out), then
+  // return -- so a `defer x.close()` runs after `return x.read()` is computed (Go-style ordering).
+  if (c->defer_top > 0) {
+    emit(c, "{\n");
+    c->depth++;
+    if (vals.len == 0) {
+      emit_defers_to(c, 0);
+      emit_indent(c);
+      emit(c, "return;\n");
+    } else {
+      char rv[32];
+      fresh(c, rv, sizeof rv);
+      emit_indent(c);
+      if (c->current_ret[0]) { // multi-return struct, or array-by-value wrapper
+        emit(c, "%s %s = (%s){ ", c->current_ret, rv, c->current_ret);
+        if (vals.len == 1 && ast_at_const(c->ast, vids[0])->kind == NODE_ARRAY_LITERAL) {
+          emit_array_braces(c, ast_at_const(c->ast, vids[0]));
+        } else {
+          for (uint32_t i = 0; i < vals.len; i++) {
+            if (i)
+              emit(c, ", ");
+            emit_expr(c, vids[i]);
+          }
+        }
+        emit(c, " };\n");
+      } else { // single value (a `return switch` lowers to a stmt-expression via emit_expr)
+        emit(c, "__auto_type %s = ", rv);
+        emit_expr(c, vids[0]);
+        emit(c, ";\n");
+      }
+      emit_defers_to(c, 0);
+      emit_indent(c);
+      emit(c, "return %s;\n", rv);
+    }
+    c->depth--;
+    emit_indent(c);
+    emit(c, "}\n");
+    return;
+  }
   if (vals.len == 0) {
     emit(c, "return;\n");
     return;
@@ -2739,6 +2888,13 @@ static void emit_expr_stmt(Codegen *c, NodeId v) {
   emit(c, ";\n");
 }
 
+static void emit_defers_to(Codegen *c, const uint32_t base) {
+  for (uint32_t i = c->defer_top; i-- > base;) {
+    emit_indent(c);
+    emit_expr_stmt(c, c->defer_stack[i]);
+  }
+}
+
 // `let (a, b, ..) = call` -> a hidden temp holding the multi-return struct, then one binding per
 // element reading its `_i` field. `__auto_type` sidesteps naming the synthesized `<fn>_ret` type.
 static void emit_tuple_let(Codegen *c, const Node *n) {
@@ -2772,11 +2928,27 @@ static void emit_initializer(Codegen *c, const NodeId type, const NodeId value) 
     emit_expr(c, value);
 }
 
+// `static_assert(cond, "msg")` -> C `_Static_assert(cond, "msg")`. The C compiler evaluates the
+// constant condition; the message is a bare C string literal (C11 requires one, so synthesize a default).
+static void emit_static_assert(Codegen *c, const Node *const n) {
+  emit(c, "_Static_assert(");
+  emit_expr(c, n->as.binary.left);
+  emit(c, ", ");
+  if (n->as.binary.right != NODE_NONE)
+    emit_reescaped(c, ast_at_const(c->ast, n->as.binary.right)->as.literal.raw, false);
+  else
+    emit(c, "\"static assertion failed\"");
+  emit(c, ");\n");
+}
+
 static void emit_stmt(Codegen *c, const NodeId id) {
   if (id == NODE_NONE)
     return;
   const Node *const n = ast_at_const(c->ast, id);
   switch (n->kind) {
+    case NODE_STATIC_ASSERT:
+      emit_static_assert(c, n);
+      break;
     case NODE_BLOCK:
       emit_block(c, id);
       emit(c, "\n");
@@ -2848,24 +3020,56 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       emit_if(c, n);
       emit(c, "\n");
       break;
-    case NODE_WHILE:
-      emit(c, "while ");
-      emit_condition(c, n->as.while_stmt.condition);
-      emit(c, " ");
-      emit_block(c, n->as.while_stmt.body);
-      emit(c, "\n");
+    case NODE_WHILE: {
+      const uint32_t saved_ldb = c->loop_defer_base; // break/continue run defers down to here
+      c->loop_defer_base = c->defer_top;
+      if (n->as.while_stmt.is_do) {
+        emit(c, "do ");
+        emit_block(c, n->as.while_stmt.body);
+        emit(c, " while ");
+        emit_condition(c, n->as.while_stmt.condition);
+        emit(c, ";\n");
+      } else {
+        emit(c, "while ");
+        emit_condition(c, n->as.while_stmt.condition);
+        emit(c, " ");
+        emit_block(c, n->as.while_stmt.body);
+        emit(c, "\n");
+      }
+      c->loop_defer_base = saved_ldb;
       break;
-    case NODE_FOR:
+    }
+    case NODE_FOR: {
+      const uint32_t saved_ldb = c->loop_defer_base;
+      c->loop_defer_base = c->defer_top;
       emit_for(c, n);
+      c->loop_defer_base = saved_ldb;
       break;
+    }
     case NODE_BREAK:
-      emit(c, "break;\n");
+    case NODE_CONTINUE: {
+      const char *const kw = n->kind == NODE_BREAK ? "break" : "continue";
+      // run only the defers registered inside the innermost loop, then jump
+      if (c->defer_top > c->loop_defer_base) {
+        emit(c, "{\n");
+        c->depth++;
+        emit_defers_to(c, c->loop_defer_base);
+        emit_indent(c);
+        emit(c, "%s;\n", kw);
+        c->depth--;
+        emit_indent(c);
+        emit(c, "}\n");
+      } else {
+        emit(c, "%s;\n", kw);
+      }
       break;
-    case NODE_CONTINUE:
-      emit(c, "continue;\n");
-      break;
+    }
     case NODE_DEFER:
-      codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: defer is not yet supported");
+      // Registered, not emitted here: the enclosing scope runs it (reversed) at every exit path.
+      if (c->defer_top >= (uint32_t)(sizeof c->defer_stack / sizeof c->defer_stack[0]))
+        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: too many nested 'defer' statements");
+      else
+        c->defer_stack[c->defer_top++] = n->as.single.value;
       break;
     case NODE_EXPRESSION_STATEMENT:
       emit_expr_stmt(c, n->as.single.value);
@@ -2905,6 +3109,8 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
 // always this (the emitting) module, so a local `extend foreign::T` method is mangled by the module that
 // declares it (`extender__T__m`); the type-name segment is read from the target type's own module.
 static void function_name(Codegen *c, const NodeId fn, const DefId target, char *out, const size_t cap, const bool prefixed) {
+  if (cg_symbol_override(c, c->ast->module, fn, out, cap)) // `@c.export`/`@c.import`: the exact C symbol
+    return;
   const Span fname = name_span(c, ast_at_const(c->ast, fn)->as.function.name);
   const bool is_main = target.node == NODE_NONE && span_is(c->source, fname, "main");
   size_t k = prefixed && !is_main ? render_modpfx(c, c->ast->module, out, cap) : 0;
@@ -2936,9 +3142,13 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
   // declarations are never static. A specialization's linkage is decided by the caller (`spec_static`):
   // a free-function spec is file-local (per-module-static), a public method spec is a real owned symbol.
   const bool is_main = target.node == NODE_NONE && !name_override && span_is(c->source, name_span(c, fn->as.function.name), "main");
-  const bool is_static = name_override ? spec_static : (c->multifile && !extern_q && !is_main && !fn->as.function.is_public);
+  const bool exported = cg_attr(c, c->ast->module, fn_id, ATTR_EXPORT) != NULL; // external linkage, never static
+  const bool is_static = name_override ? spec_static
+                                       : (c->multifile && !extern_q && !is_main && !exported && !fn->as.function.is_public);
   char ps[1024];
   render_params(c, fn->as.function.params, ps, sizeof ps);
+  if (fn->as.function.is_variadic && strcmp(ps, "void") != 0) // a defined variadic fn keeps its C `...`
+    buf_append(ps, sizeof ps, strlen(ps), ", ...");
   char decl[1320];
   size_t at = 0;
   decl[0] = '\0';
@@ -2958,6 +3168,47 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
     emit(c, "extern ");
   if (is_static)
     emit(c, "static ");
+
+  // `@c.*` qualifiers: portable C keywords (`_Noreturn` / `inline`) plus a combined GNU `__attribute__`.
+  const ModuleId fmod = c->ast->module;
+  if (cg_attr(c, fmod, fn_id, ATTR_NORETURN))
+    emit(c, "_Noreturn ");
+  if (cg_attr(c, fmod, fn_id, ATTR_INLINE) || cg_attr(c, fmod, fn_id, ATTR_ALWAYS_INLINE))
+    emit(c, "inline ");
+  {
+    char g[256];
+    g[0] = '\0';
+    size_t gn = 0;
+#define ADDG(s)                                                                                                        \
+  do {                                                                                                                 \
+    if (gn)                                                                                                            \
+      gn = buf_append(g, sizeof g, gn, ", ");                                                                          \
+    gn = buf_append(g, sizeof g, gn, (s));                                                                             \
+  } while (0)
+    if (cg_attr(c, fmod, fn_id, ATTR_ALWAYS_INLINE))
+      ADDG("always_inline");
+    if (cg_attr(c, fmod, fn_id, ATTR_NOINLINE))
+      ADDG("noinline");
+    if (cg_attr(c, fmod, fn_id, ATTR_USED))
+      ADDG("used");
+    if (cg_attr(c, fmod, fn_id, ATTR_UNUSED))
+      ADDG("unused");
+    const Attr *const sec = cg_attr(c, fmod, fn_id, ATTR_SECTION);
+    if (sec) {
+      char sb[160];
+      char nm2[128];
+      size_t nl = sec->str.end - sec->str.start;
+      if (nl >= sizeof nm2)
+        nl = sizeof nm2 - 1;
+      memcpy(nm2, cg_mod_src(c, fmod) + sec->str.start, nl);
+      nm2[nl] = '\0';
+      snprintf(sb, sizeof sb, "section(\"%s\")", nm2);
+      ADDG(sb);
+    }
+#undef ADDG
+    if (gn)
+      emit(c, "__attribute__((%s)) ", g);
+  }
 
   const NodeList rets = fn->as.function.returns;
   c->current_ret[0] = '\0';
@@ -2988,6 +3239,8 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
 
   if (with_body && fn->as.function.body != NODE_NONE) {
     emit(c, " ");
+    c->defer_top = 0; // each function body is a fresh defer scope
+    c->loop_defer_base = 0;
     emit_block(c, fn->as.function.body);
     emit(c, "\n\n");
   } else {
@@ -3056,6 +3309,8 @@ static void emit_closure_fn(Codegen *c, const NodeId id, const bool with_body) {
     emit(c, "}\n\n");
   } else {
     emit(c, " ");
+    c->defer_top = 0; // a closure body is its own defer scope
+    c->loop_defer_base = 0;
     emit_block(c, body);
     emit(c, "\n\n");
   }
@@ -4019,6 +4274,24 @@ static NodeId struct_dep(Codegen *c, const NodeId tn) {
 static void emit_type_decl(Codegen *c, const NodeId declId) {
   const Node *const n = ast_at_const(c->ast, declId);
   emit(c, "%s ", agg_kw(n));
+  // `@c.packed` / `@c.align(N)` apply to the aggregate's layout: `struct __attribute__((packed)) Name {..}`.
+  const Attr *const pk = cg_attr(c, c->ast->module, declId, ATTR_PACKED);
+  const Attr *const al = cg_attr(c, c->ast->module, declId, ATTR_ALIGN);
+  if (pk || al) {
+    char g[64];
+    size_t gn = 0;
+    g[0] = '\0';
+    if (pk)
+      gn = buf_append(g, sizeof g, gn, "packed");
+    if (al) {
+      if (gn)
+        gn = buf_append(g, sizeof g, gn, ", ");
+      char a[32];
+      snprintf(a, sizeof a, "aligned(%u)", al->arg);
+      buf_append(g, sizeof g, gn, a);
+    }
+    emit(c, "__attribute__((%s)) ", g);
+  }
   emit_local_type_name(c, n->as.aggregate.name);
   emit(c, " {\n");
   if (n->kind == NODE_ENUM) {
@@ -4195,6 +4468,8 @@ static void phase_bodies(Codegen *c) {
     // they go here in the .c (or the single self-contained unit).
     if (n->kind == NODE_CONST && !(c->multifile && n->as.const_def.is_public))
       emit_toplevel_const(c, ids[i]);
+    else if (n->kind == NODE_STATIC_ASSERT) // file-scope check, after phase_types so sizeof(struct) is defined
+      emit_static_assert(c, n);
   }
 
   emit_instance_macro_invocations(c, true); // DEFINE bodies of cross-module instances homed here

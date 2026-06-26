@@ -1,6 +1,7 @@
 #include "parser.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 struct Parser {
     const uint8_t *source;
@@ -28,6 +29,7 @@ static NodeList parse_function_returns(Parser *p);
 // One range grammar shared by `for` iterables and `switch` patterns (so they can never drift).
 typedef enum { RANGE_FOR, RANGE_PATTERN } RangeContext;
 static NodeId parse_range(Parser *p, const RangeContext context);
+static int parse_attributes(Parser *p, Attr *buf, int cap);
 
 Parser *parser_new(Token_Vec tokens, const char *source, const size_t len) {
   Parser *const p = calloc(1, sizeof *p);
@@ -94,6 +96,37 @@ ALWAYS_INLINE bool check(const Parser *p, const TokenType type) {
 
 ALWAYS_INLINE bool check_next(const Parser *p, const TokenType type) {
   return !p->pending_gt && token_type(p->tokens.data[p->current + 1]) == type;
+}
+
+// Is the current token an identifier whose text equals `kw`? Used for contextual keywords (e.g.
+// `static_assert`) that are too long to live in the lexer's fixed keyword table.
+static bool peek_ident_is(const Parser *p, const char *const kw) {
+  const Token t = raw_peek(p);
+  if (token_type(t) != Identifier)
+    return false;
+  const uint32_t len = token_len(t);
+  const size_t klen = strlen(kw);
+  return len == klen && memcmp(p->source + token_start(t), kw, klen) == 0;
+}
+
+// With the cursor on a `[`, is this a designated array element `[index] = value` rather than a nested
+// array literal `[a, b]`? Scans to the matching `]` and checks for a following `=`. Read-only.
+static bool designator_ahead(const Parser *p) {
+  size_t i = p->current + 1;
+  int depth = 1;
+  const Token_Vec *const tk = &p->tokens;
+  while (i < tk->len) {
+    const TokenType t = token_type(tk->data[i]);
+    if (t == LeftBracket)
+      depth++;
+    else if (t == RightBracket && --depth == 0) {
+      i++;
+      break;
+    } else if (t == Eof)
+      return false;
+    i++;
+  }
+  return i < tk->len && token_type(tk->data[i]) == Equal;
 }
 
 ALWAYS_INLINE bool match(Parser *p, const TokenType type) {
@@ -628,10 +661,16 @@ static NodeId parse_extend(Parser *p) {
   expect(p, LeftBrace, "'{'");
   const uint32_t mark = ast_mark(p->ast);
   while (!check(p, RightBrace) && !at_end(p)) {
+    Attr ma[16];
+    const int mn = parse_attributes(p, ma, 16);
     const bool is_public = match(p, Pub); // `pub fn` on a method
     if (check(p, Fn)) {
       const NodeId fn = parse_function(p, true);
       ast_at(p->ast, fn)->as.function.is_public = is_public;
+      for (int i = 0; i < mn; i++) {
+        ma[i].owner = fn;
+        ast_add_attr(p->ast, ma[i]);
+      }
       ast_push(p->ast, fn);
     } else if (check(p, Type) && !is_public) {
       ast_push(p->ast, parse_type_alias(p, false));
@@ -663,6 +702,8 @@ static NodeId parse_extern(Parser *p) {
   expect(p, LeftBrace, "'{'");
   const uint32_t mark = ast_mark(p->ast);
   while (!check(p, RightBrace) && !at_end(p)) {
+    Attr ea[16];
+    const int en = parse_attributes(p, ea, 16); // e.g. `@c.import("c_symbol")` on a binding
     const bool is_public = match(p, Pub); // `pub` exports a raw binding / opaque handle to importers
     if (check(p, Fn)) {
       const NodeId fn = parse_function(p, false);
@@ -672,6 +713,10 @@ static NodeId parse_extern(Parser *p) {
             "extern function declarations cannot have a body");
       ast_at(p->ast, fn)->as.function.is_public = is_public;
       ast_at(p->ast, fn)->as.function.is_extern = true;
+      for (int i = 0; i < en; i++) {
+        ea[i].owner = fn;
+        ast_add_attr(p->ast, ea[i]);
+      }
       expect(p, Semicolon, "';'");
       ast_push(p->ast, fn);
     } else if (check(p, Type)) {
@@ -722,55 +767,185 @@ static NodeId parse_import(Parser *p) {
               });
 }
 
+// `static_assert(<const-expr> [, "message"]) ;` -- a compile-time check, valid at item or statement
+// scope. The condition is emitted to a C `_Static_assert`, so the C compiler evaluates it.
+static NodeId parse_static_assert(Parser *p) {
+  const uint32_t start = token_start(raw_peek(p));
+  advance(p); // `static_assert`
+  expect(p, LeftParen, "'('");
+  const NodeId cond = parse_expression(p);
+  NodeId msg = NODE_NONE;
+  if (match(p, Comma)) {
+    if (check(p, StringLiteral))
+      msg = literal(p);
+    else
+      error_here(p, "static_assert message must be a string literal");
+  }
+  expect(p, RightParen, "')'");
+  expect(p, Semicolon, "';'");
+  return ast_add(
+      p->ast, (Node){
+                  .kind = NODE_STATIC_ASSERT,
+                  .span = span_new(start, previous_end(p)),
+                  .as.binary = {.left = cond, .right = msg},
+              });
+}
+
+// Whether token `t`'s source text equals `s` (type-agnostic: an attribute name like `import` lexes as a
+// keyword, not an identifier, yet is still a valid attribute name).
+static bool tok_text_is(const Parser *p, const Token t, const char *const s) {
+  const size_t sl = strlen(s);
+  return token_len(t) == sl && memcmp(p->source + token_start(t), s, sl) == 0;
+}
+
+// `c.<name>` -> the AttrKind, with whether it takes a string / an integer argument. Returns -1 if unknown.
+static int attr_kind_of(const Parser *p, const Token name, bool *wants_str, bool *wants_int) {
+  *wants_str = false;
+  *wants_int = false;
+  if (tok_text_is(p, name, "inline")) return ATTR_INLINE;
+  if (tok_text_is(p, name, "always_inline")) return ATTR_ALWAYS_INLINE;
+  if (tok_text_is(p, name, "noinline")) return ATTR_NOINLINE;
+  if (tok_text_is(p, name, "noreturn")) return ATTR_NORETURN;
+  if (tok_text_is(p, name, "packed")) return ATTR_PACKED;
+  if (tok_text_is(p, name, "used")) return ATTR_USED;
+  if (tok_text_is(p, name, "unused")) return ATTR_UNUSED;
+  if (tok_text_is(p, name, "align")) { *wants_int = true; return ATTR_ALIGN; }
+  if (tok_text_is(p, name, "export")) { *wants_str = true; return ATTR_EXPORT; }
+  if (tok_text_is(p, name, "import")) { *wants_str = true; return ATTR_IMPORT; }
+  if (tok_text_is(p, name, "section")) { *wants_str = true; return ATTR_SECTION; }
+  return -1;
+}
+
+// Parse one `@c.name[(arg)]` attribute, classifying it into `*out` (owner unset). Returns false on a
+// malformed attribute (a diagnostic is emitted).
+static bool parse_attribute(Parser *p, Attr *const out) {
+  advance(p); // `@`
+  if (!check(p, Identifier)) {
+    error_here(p, "expected an attribute path after '@'");
+    return false;
+  }
+  const Token ns = advance(p);
+  if (!tok_text_is(p, ns, "c"))
+    parser_errorf(p, token_start(ns), token_len(ns), "unknown attribute namespace; only '@c.*' is supported");
+  expect(p, Dot, "'.'");
+  // the name may lex as a keyword (e.g. `import`), so accept any non-delimiter token here
+  if (at_end(p) || check(p, LeftParen) || check(p, RightParen) || check(p, Semicolon) || check(p, Dot)) {
+    error_here(p, "expected an attribute name after '@c.'");
+    return false;
+  }
+  const Token name = advance(p);
+  if (check(p, Dot)) // `@c.gnu.*` / `@c.msvc.*` target-specific escapes are not supported yet
+    error_here(p, "target-specific attribute namespaces (e.g. '@c.gnu.*') are not supported");
+  bool wants_str, wants_int;
+  const int kind = attr_kind_of(p, name, &wants_str, &wants_int);
+  if (kind < 0) {
+    parser_errorf(p, token_start(name), token_len(name), "unknown attribute '@c.%.*s'", (int)token_len(name),
+                  p->source + token_start(name));
+    return false;
+  }
+  *out = (Attr){.kind = (uint8_t)kind};
+  const bool has_args = match(p, LeftParen);
+  if (wants_str || wants_int) {
+    if (!has_args) {
+      parser_errorf(p, token_start(name), token_len(name), "attribute '@c.%.*s' requires an argument",
+                    (int)token_len(name), p->source + token_start(name));
+      return true;
+    }
+    if (wants_int) {
+      if (!check(p, IntegerLiteral)) {
+        error_here(p, "expected an integer argument");
+      } else {
+        const Token lit = raw_peek(p);
+        char buf[24];
+        size_t k = 0;
+        for (uint32_t i = token_start(lit); i < token_end(lit) && k + 1 < sizeof buf; i++)
+          if (p->source[i] != '_')
+            buf[k++] = (char)p->source[i];
+        buf[k] = '\0';
+        out->arg = (uint32_t)strtoul(buf, NULL, 0);
+      }
+      advance(p);
+    } else { // wants_str
+      if (!check(p, StringLiteral)) {
+        error_here(p, "expected a string argument");
+      } else {
+        const Token lit = raw_peek(p);
+        out->str = (Span){token_start(lit) + 1, token_end(lit) - 1}; // content, without the quotes
+      }
+      advance(p);
+    }
+    expect(p, RightParen, "')'");
+  } else if (has_args) {
+    parser_errorf(p, token_start(name), token_len(name), "attribute '@c.%.*s' takes no arguments",
+                  (int)token_len(name), p->source + token_start(name));
+    while (!check(p, RightParen) && !at_end(p))
+      advance(p);
+    match(p, RightParen);
+  }
+  return true;
+}
+
+// Collect the leading `@c.*` attribute list (LL(1): `@` uniquely starts an attribute) into `buf`.
+static int parse_attributes(Parser *p, Attr *const buf, const int cap) {
+  int n = 0;
+  while (check(p, At)) {
+    Attr a;
+    if (parse_attribute(p, &a) && n < cap)
+      buf[n++] = a;
+  }
+  return n;
+}
+
 static NodeId parse_item(Parser *p) {
+  Attr attrs[16];
+  const int nattr = parse_attributes(p, attrs, 16);
+  if (peek_ident_is(p, "static_assert"))
+    return parse_static_assert(p);
   // `pub` (LL(1): one-token lookahead) may prefix a struct, enum, function, const, or type alias.
   const bool is_public = match(p, Pub);
   if (is_public && !check(p, Fn) && !check(p, Struct) && !check(p, Union) && !check(p, Enum) && !check(p, Const) &&
       !check(p, Type) && !check(p, Interface))
     error_here(p, "'pub' may only be applied to a struct, union, enum, function, const, interface, or type");
+  NodeId id = NODE_NONE;
   switch (peek_type(p)) {
-    case Fn: {
-      const NodeId f = parse_function(p, true);
-      ast_at(p->ast, f)->as.function.is_public = is_public;
-      return f;
-    }
-    case Struct: {
-      const NodeId s = parse_struct(p);
-      ast_at(p->ast, s)->as.aggregate.is_public = is_public;
-      return s;
-    }
-    case Union: { // an untagged union: parsed exactly like a struct, flagged for C `union` emission
-      const NodeId u = parse_struct(p);
-      ast_at(p->ast, u)->as.aggregate.is_public = is_public;
-      ast_at(p->ast, u)->as.aggregate.is_union = true;
-      return u;
-    }
-    case Enum: {
-      const NodeId e = parse_enum(p);
-      ast_at(p->ast, e)->as.aggregate.is_public = is_public;
-      return e;
-    }
-    case Interface: {
-      const NodeId it = parse_interface(p);
-      ast_at(p->ast, it)->as.trait_def.is_public = is_public;
-      return it;
-    }
+    case Fn:
+      id = parse_function(p, true);
+      ast_at(p->ast, id)->as.function.is_public = is_public;
+      break;
+    case Struct:
+      id = parse_struct(p);
+      ast_at(p->ast, id)->as.aggregate.is_public = is_public;
+      break;
+    case Union: // an untagged union: parsed exactly like a struct, flagged for C `union` emission
+      id = parse_struct(p);
+      ast_at(p->ast, id)->as.aggregate.is_public = is_public;
+      ast_at(p->ast, id)->as.aggregate.is_union = true;
+      break;
+    case Enum:
+      id = parse_enum(p);
+      ast_at(p->ast, id)->as.aggregate.is_public = is_public;
+      break;
+    case Interface:
+      id = parse_interface(p);
+      ast_at(p->ast, id)->as.trait_def.is_public = is_public;
+      break;
     case Extend:
-      return parse_extend(p);
-    case Type: {
-      const NodeId ta = parse_type_alias(p, false);
-      ast_at(p->ast, ta)->as.type_alias.is_public = is_public;
-      return ta;
-    }
-    case Const: {
-      const NodeId cn = parse_const(p);
-      ast_at(p->ast, cn)->as.const_def.is_public = is_public;
-      return cn;
-    }
+      id = parse_extend(p);
+      break;
+    case Type:
+      id = parse_type_alias(p, false);
+      ast_at(p->ast, id)->as.type_alias.is_public = is_public;
+      break;
+    case Const:
+      id = parse_const(p);
+      ast_at(p->ast, id)->as.const_def.is_public = is_public;
+      break;
     case Extern:
-      return parse_extern(p);
+      id = parse_extern(p);
+      break;
     case Import:
-      return parse_import(p);
+      id = parse_import(p);
+      break;
     default:
       error_here(p, "expected top-level item");
       while (!at_end(p) && !check(p, Semicolon))
@@ -778,6 +953,11 @@ static NodeId parse_item(Parser *p) {
       match(p, Semicolon);
       return NODE_NONE;
   }
+  for (int i = 0; i < nattr; i++) { // attach the leading attributes to the item they decorate
+    attrs[i].owner = id;
+    ast_add_attr(p->ast, attrs[i]);
+  }
+  return id;
 }
 
 static NodeList parse_arguments(Parser *p) {
@@ -831,7 +1011,20 @@ static NodeId parse_switch(Parser *p) {
   while (!check(p, RightBrace) && !at_end(p)) {
     const uint32_t arm_start = token_start(raw_peek(p));
     match(p, Case);
-    const NodeId pattern = parse_pattern(p);
+    NodeId pattern = parse_pattern(p);
+    if (check(p, Pipe)) { // `A | B | C =>` or-pattern: matches if any alternative matches
+      const uint32_t alt_mark = ast_mark(p->ast);
+      ast_push(p->ast, pattern);
+      while (match(p, Pipe))
+        ast_push(p->ast, parse_pattern(p));
+      const NodeList alts = ast_commit(p->ast, alt_mark);
+      pattern = ast_add(
+          p->ast, (Node){
+                      .kind = NODE_PATTERN_OR,
+                      .span = span_new(arm_start, previous_end(p)),
+                      .as.pattern = {.name = NODE_NONE, .children = alts},
+                  });
+    }
     const NodeId guard = match(p, If) ? parse_expression(p) : NODE_NONE;
     expect(p, FatArrow, "'=>'");
     const NodeId body = check(p, LeftBrace) ? parse_block(p) : parse_expression(p);
@@ -985,6 +1178,30 @@ static NodeId parse_primary(Parser *p) {
         p->ast, (Node){.kind = NODE_IDENTIFIER, .span = token_span(token), .as.name = {.text = token_span(token)}});
   }
   if (type == Identifier) {
+    // `va_start(ap, last)` / `va_arg(ap, T)` / `va_end(ap)` -- variadic-argument intrinsics over <stdarg.h>.
+    // Contextual (followed by `(`), so `va_arg` etc. remain valid identifiers elsewhere.
+    if (check_next(p, LeftParen) &&
+        (peek_ident_is(p, "va_start") || peek_ident_is(p, "va_arg") || peek_ident_is(p, "va_end"))) {
+      const uint8_t op = peek_ident_is(p, "va_start") ? VA_START : peek_ident_is(p, "va_arg") ? VA_ARG : VA_END;
+      advance(p); // the intrinsic name
+      expect(p, LeftParen, "'('");
+      const NodeId ap = parse_expression(p);
+      NodeId extra = NODE_NONE;
+      if (op == VA_ARG) {
+        expect(p, Comma, "','");
+        extra = parse_type(p); // the type to read
+      } else if (op == VA_START) {
+        expect(p, Comma, "','");
+        extra = parse_expression(p); // the last named parameter
+      }
+      expect(p, RightParen, "')'");
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_VA_EXPR,
+                      .span = span_new(start, previous_end(p)),
+                      .as.va_op = {.op = op, .ap = ap, .extra = extra},
+                  });
+    }
     const NodeId value = identifier(p);
     if (p->allow_struct_initializer && check(p, LeftBrace))
       return parse_struct_initializer_after(p, value, start);
@@ -1032,7 +1249,23 @@ static NodeId parse_primary(Parser *p) {
   if (match(p, LeftBracket)) { // `[e0, e1, ...]` array literal (postfix `[` indexing lives in parse_postfix)
     const uint32_t mark = ast_mark(p->ast);
     while (!check(p, RightBracket) && !at_end(p)) {
-      ast_push(p->ast, parse_expression(p));
+      if (check(p, LeftBracket) && designator_ahead(p)) { // designated element `[index] = value`
+        const uint32_t es = token_start(raw_peek(p));
+        advance(p); // `[`
+        const NodeId index = parse_expression(p);
+        expect(p, RightBracket, "']'");
+        expect(p, Equal, "'='");
+        const NodeId value = parse_expression(p);
+        ast_push(
+            p->ast, ast_add(
+                        p->ast, (Node){
+                                    .kind = NODE_FIELD_INITIALIZER, // reused: `.name` holds the index expr
+                                    .span = span_new(es, node_span(p, value).end),
+                                    .as.field_initializer = {.name = index, .value = value},
+                                }));
+      } else {
+        ast_push(p->ast, parse_expression(p));
+      }
       if (!match(p, Comma))
         break;
     }
@@ -1435,6 +1668,8 @@ static NodeId parse_if(Parser *p) {
 
 static NodeId parse_statement(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
+  if (peek_ident_is(p, "static_assert"))
+    return parse_static_assert(p);
   switch (peek_type(p)) {
     case LeftBrace:
       return parse_block(p);
@@ -1488,6 +1723,22 @@ static NodeId parse_statement(Parser *p) {
                       .kind = NODE_WHILE,
                       .span = span_new(start, node_span(p, body).end),
                       .as.while_stmt = {.condition = condition, .body = body},
+                  });
+    }
+    case Do: { // `do { .. } while (cond);` -- body runs once before the condition is tested
+      advance(p);
+      const NodeId body = parse_block(p);
+      expect(p, While, "'while'");
+      const bool old = p->allow_struct_initializer;
+      p->allow_struct_initializer = false;
+      const NodeId condition = parse_expression(p);
+      p->allow_struct_initializer = old;
+      expect(p, Semicolon, "';'");
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_WHILE,
+                      .span = span_new(start, previous_end(p)),
+                      .as.while_stmt = {.condition = condition, .body = body, .is_do = true},
                   });
     }
     case For: {

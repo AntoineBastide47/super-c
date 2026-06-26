@@ -9,6 +9,7 @@ VEC_DEFINE(DefId, DefId_Vec)
 VEC_DEFINE(TyInstance, TyInstance_Vec)
 VEC_DEFINE(MonoUse, MonoUse_Vec)
 VEC_DEFINE(MethodInst, MethodInst_Vec)
+VEC_DEFINE(Attr, Attr_Vec)
 
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
 static inline size_t ty_hash(const Ty t) {
@@ -41,6 +42,7 @@ Ast *ast_new(const size_t token_count) {
   a->mono_at = U32_Vec_init();
   a->instances = TyInstance_Vec_init();
   a->method_insts = MethodInst_Vec_init();
+  a->attrs = Attr_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
   Node_Vec_push(&a->nodes, (Node){.kind = NODE_NONE_KIND});
@@ -61,6 +63,7 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->mono_at);
   VEC_DEINIT((*a)->instances);
   VEC_DEINIT((*a)->method_insts);
+  VEC_DEINIT((*a)->attrs);
   free(*a);
   *a = NULL;
 }
@@ -118,6 +121,10 @@ bool ast_add_method_inst(Ast *a, const TypeId instance, const NodeId method, con
     mi.targs[j] = targs[j];
   MethodInst_Vec_push(&a->method_insts, mi);
   return true;
+}
+
+void ast_add_attr(Ast *a, const Attr attr) {
+  Attr_Vec_push(&a->attrs, attr);
 }
 
 TypeId ast_reintern(Ast *dst, const Ast *src, const TypeId t) {
@@ -258,6 +265,7 @@ static const char *kind_name(const NodeKind kind) {
       "Impl",
       "TypeAlias",
       "Const",
+      "StaticAssert",
       "ExternBlock",
       "Import",
       "GenericParam",
@@ -291,6 +299,7 @@ static const char *kind_name(const NodeKind kind) {
       "MatchArm",
       "New",
       "Sizeof",
+      "VaExpr",
       "ArrayLiteral",
       "StructInitializer",
       "FieldInitializer",
@@ -301,8 +310,10 @@ static const char *kind_name(const NodeKind kind) {
       "PatternStruct",
       "PatternField",
       "PatternRange",
+      "PatternOr",
       "Range",
   };
+  _Static_assert(sizeof names / sizeof names[0] == NODE_KIND_COUNT, "kind_name names[] out of sync with NodeKind");
   return (unsigned)kind < sizeof names / sizeof names[0] ? names[kind] : "Invalid";
 }
 
@@ -457,6 +468,7 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
       break;
     case NODE_BINARY:
     case NODE_ASSIGNMENT:
+    case NODE_STATIC_ASSERT:
       print_child(out, a, n->as.binary.left, source, depth + 1);
       print_child(out, a, n->as.binary.right, source, depth + 1);
       break;
@@ -498,6 +510,10 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
       print_child(out, a, n->as.new_expr.type, source, depth + 1);
       print_child(out, a, n->as.new_expr.initializer, source, depth + 1);
       break;
+    case NODE_VA_EXPR:
+      print_child(out, a, n->as.va_op.ap, source, depth + 1);
+      print_child(out, a, n->as.va_op.extra, source, depth + 1);
+      break;
     case NODE_ARRAY_LITERAL:
       print_list(out, a, n->as.array_literal.elements, source, depth + 1);
       break;
@@ -513,6 +529,7 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
     case NODE_PATTERN_TUPLE:
     case NODE_PATTERN_STRUCT:
     case NODE_PATTERN_FIELD:
+    case NODE_PATTERN_OR:
       print_child(out, a, n->as.pattern.name, source, depth + 1);
       print_list(out, a, n->as.pattern.children, source, depth + 1);
       break;

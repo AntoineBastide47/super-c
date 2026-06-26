@@ -10,6 +10,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Const",
     "Continue",
     "Defer",
+    "Do",
     "Else",
     "Enum",
     "Extern",
@@ -56,6 +57,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Semicolon",
     "Colon",
     "Dot",
+    "At",
 
     "Plus",
     "Minus",

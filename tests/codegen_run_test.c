@@ -32,6 +32,13 @@ static void test_control_flow(void) {
   sc_run_program(
       "nested for",
       PRE "fn main() i32 { let mut t: i32 = 0; for i in 0..3 { for j in 0..3 { t = t + 1; } } exit(t); }\n", 9, "");
+  sc_run_program( // body runs once before the test: sum 0+1+2+3+4 = 10
+      "do while",
+      PRE "fn main() i32 { let mut i: i32 = 0; let mut s: i32 = 0; do { s = s + i; i = i + 1; } while i < 5; exit(s); }\n",
+      10, "");
+  sc_run_program( // do-while body always runs at least once even when the condition is false up front
+      "do while runs once",
+      PRE "fn main() i32 { let mut n: i32 = 0; do { n = n + 7; } while false; exit(n); }\n", 7, "");
 }
 
 static void test_recursion(void) {
@@ -58,6 +65,11 @@ static void test_switch(void) {
       PRE "fn d(c: char) i32 { return switch c { '0'..='9' => 1, _ => 0, }; }\n"
           "fn main() i32 { exit(d('7')); }\n",
       1, "");
+  sc_run_program( // or-pattern: literals + a range alternative all map to one arm
+      "switch or-pattern",
+      PRE "fn k(c: i32) i32 { return switch c { 1 | 2 | 3 => 10, 4..=9 | 20 => 20, _ => 0, }; }\n"
+          "fn main() i32 { exit(k(2) + k(20) + k(99)); }\n",
+      30, ""); // 10 + 20 + 0
 }
 
 static void test_structs_and_methods(void) {
@@ -203,6 +215,31 @@ static void test_variadics(void) {
       "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
       "fn main() i32 { printf(\"%s=%d\\n\", \"x\", 42); return 0; }\n",
       0, "x=42\n");
+  // A Super-C-defined variadic function reading its args with va_start/va_arg/va_end.
+  sc_run_program(
+      "defined variadic with va_arg",
+      "fn sum(count: i32, ...) i32 {\n"
+      "  let mut ap: va_list; va_start(ap, count);\n"
+      "  let mut total: i32 = 0; let mut i: i32 = 0;\n"
+      "  while i < count { total = total + va_arg(ap, i32); i = i + 1; }\n"
+      "  va_end(ap); return total;\n"
+      "}\n"
+      "fn main() i32 { return sum(4, 10, 20, 30, 40) - 100; }\n",
+      0, "");
+  // forwarding a va_list to a C function (vsnprintf) -- the self-host diagnostics path.
+  sc_run_program(
+      "va_list forwarded to vsnprintf",
+      "extern \"C\" {\n"
+      "  fn vsnprintf(buf: *mut char, n: usize, fmt: *const char, ap: va_list) i32;\n"
+      "  fn puts(s: *const char) i32;\n"
+      "}\n"
+      "fn say(fmt: *const char, ...) void {\n"
+      "  let mut buf: [char; 64]; let mut ap: va_list;\n"
+      "  va_start(ap, fmt); vsnprintf(&mut buf[0], 64, fmt, ap); va_end(ap);\n"
+      "  puts(&buf[0]);\n"
+      "}\n"
+      "fn main() i32 { say(\"n=%d\", 7); return 0; }\n",
+      0, "n=7\n");
 }
 
 // The `c32`/`c64` builtins are real C `_Complex`: held by value, arithmetic via native operators, real
@@ -251,6 +288,22 @@ static void test_array_literals(void) {
       PRE "fn third(a: [i32; 3]) i32 { return a[2]; }\n"
           "fn main() i32 { exit(third([7, 8, 9])); }\n",
       9, "");
+  // designated (sparse) initializers, including a char index and a mixed positional+designated list.
+  sc_run_program(
+      "designated array init",
+      PRE "fn main() i32 {\n"
+          "  let t: [i32; 8] = [[1] = 10, [3] = 30, [7] = 70];\n"
+          "  let k: [i32; 128] = [['a'] = 5];\n"
+          "  let m: [i32; 4] = [1, [3] = 9];\n"
+          "  exit(t[1] + t[3] + t[7] + k['a'] + m[0] + m[3]);\n" // 10+30+70+5+1+9 = 125
+          "}\n",
+      125, "");
+  // a block-local `const` table lowers to `static const` -- the Super-C stand-in for a C function-local static.
+  sc_run_program(
+      "function-local const table",
+      PRE "fn lut(i: i32) i32 { const T: [i32; 5] = [2, 3, 5, 7, 11]; return T[i]; }\n"
+          "fn main() i32 { exit(lut(0) + lut(4)); }\n", // 2 + 11
+      13, "");
 }
 
 static void test_pointers(void) {
@@ -661,7 +714,62 @@ static void test_interfaces(void) {
       7, "");
 }
 
+static void test_defer(void) {
+  // LIFO execution at scope exit: prints 1 2, then the defers reversed (b a).
+  sc_run_program(
+      "defer LIFO",
+      PRE "fn run() void { putchar('1'); defer putchar('a'); defer putchar('b'); putchar('2'); }\n"
+          "fn main() i32 { run(); exit(0); }\n",
+      0, "12ba");
+  // an early return runs the innermost-out defers first; the value is captured before they run.
+  sc_run_program(
+      "defer on return captures value first",
+      PRE "fn f() i32 { let mut x: i32 = 5; defer x = 99; return x; }\nfn main() i32 { exit(f()); }\n", 5, "");
+  // nested-scope defer + return: inner Y runs before outer X.
+  sc_run_program(
+      "defer nested scope on return",
+      PRE "fn g() void { defer putchar('X'); if true { defer putchar('Y'); return; } }\n"
+          "fn main() i32 { g(); exit(0); }\n",
+      0, "YX");
+  // a loop body's defer runs at the end of each iteration, including on `continue`.
+  sc_run_program(
+      "defer in loop with continue",
+      PRE "fn main() i32 { for i in 0..3 { defer putchar('.'); if i == 1 { continue; } putchar(('0' as i32) + i); } exit(0); }\n",
+      0, "0..2.");
+}
+
+static void test_attributes(void) {
+  // @c.always_inline + @c.export compile clean (-Werror) and run; the exported symbol is callable internally.
+  sc_run_program(
+      "attributes inline + export",
+      PRE "@c.always_inline\nfn dbl(x: i32) i32 { return x + x; }\n"
+          "@c.export(\"sc_main_value\")\nfn val() i32 { return 21; }\n"
+          "fn main() i32 { exit(dbl(val()) - 42); }\n", // 42 - 42
+      0, "");
+  // @c.import binds a friendly Super-C name to a real libc symbol.
+  sc_run_program(
+      "attribute import",
+      "extern \"C\" { @c.import(\"putchar\") fn emit(c: i32) i32; }\n"
+      "fn main() i32 { emit(('A' as i32)); emit(10); return 0; }\n",
+      0, "A\n");
+}
+
+static void test_static_assert(void) {
+  // Passing assertions at item scope (struct layout, arithmetic) and statement scope; the program
+  // only compiles (-Werror) if every _Static_assert holds.
+  sc_run_program(
+      "static_assert",
+      PRE "struct Pair { a: i32, b: i32, }\n"
+          "static_assert(sizeof(Pair) == 8, \"two i32s\");\n"
+          "static_assert(2 * 3 == 6);\n"
+          "fn main() i32 { static_assert(sizeof(i64) == 8, \"i64\"); exit(0); }\n",
+      0, "");
+}
+
 int main(void) {
+  test_attributes();
+  test_defer();
+  test_static_assert();
   test_interfaces();
   test_string_sso();
   test_unions();

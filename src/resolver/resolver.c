@@ -105,7 +105,7 @@ ALWAYS_INLINE bool span_is(const uint8_t *const src, const Span s, const char *c
 static bool is_builtin_type(const uint8_t *const src, const Span s) {
   static const char *const builtins[] = {
       "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-      "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "void",
+      "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "va_list", "void",
   };
   for (size_t i = 0; i < sizeof builtins / sizeof builtins[0]; i++)
     if (span_is(src, s, builtins[i]))
@@ -621,6 +621,9 @@ static void resolve_item(Resolver *r, const NodeId id) {
     case NODE_EXTERN_BLOCK:
       resolve_associated_items(r, n->as.extern_block.items);
       break;
+    case NODE_STATIC_ASSERT:
+      resolve_expr(r, n->as.binary.left); // the message (right) is a string literal: nothing to resolve
+      break;
     default:
       break;
   }
@@ -696,6 +699,9 @@ static void resolve_stmt(Resolver *r, const NodeId id) {
     case NODE_EXPRESSION_STATEMENT:
       resolve_expr(r, n->as.single.value);
       break;
+    case NODE_STATIC_ASSERT:
+      resolve_expr(r, n->as.binary.left);
+      break;
     default: // NODE_BREAK, NODE_CONTINUE
       break;
   }
@@ -761,6 +767,13 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       break;
     case NODE_SIZEOF:
       resolve_type(r, n->as.single.value);
+      break;
+    case NODE_VA_EXPR:
+      resolve_expr(r, n->as.va_op.ap);
+      if (n->as.va_op.op == VA_ARG)
+        resolve_type(r, n->as.va_op.extra); // the read-out type
+      else if (n->as.va_op.op == VA_START)
+        resolve_expr(r, n->as.va_op.extra); // the last named parameter
       break;
     case NODE_GENERIC_SPECIALIZATION: {
       // A turbofish base is a generic FUNCTION (value, `f::<T>()`) or a generic TYPE

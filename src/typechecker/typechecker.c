@@ -31,7 +31,7 @@ ALWAYS_INLINE const uint8_t *mod_src(const TypeChecker *t, const ModuleId m) {
 
 static const char *const BUILTIN_NAMES[BT_COUNT] = {
     "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
-    "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "void",
+    "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "va_list", "void",
 };
 
 static TypeId check_expr(TypeChecker *t, NodeId id);
@@ -1845,6 +1845,26 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       resolve_type(t, n->as.single.value); // validate the type; its byte size is a usize
       result = ast_builtin(BT_USIZE);
       break;
+    case NODE_VA_EXPR: {
+      // `va_start(ap, last)` / `va_arg(ap, T)` / `va_end(ap)`: `ap` must be a `va_list`. va_arg yields T;
+      // va_start / va_end are void. The last named parameter (va_start) is checked for resolution only.
+      const TypeId apt = check_expr(t, n->as.va_op.ap);
+      const Ty *const ay = apt != TYPE_NONE ? ast_type_at(a, apt) : NULL;
+      if (ay && !(ay->kind == TYPE_BUILTIN && ay->as.builtin == BT_VALIST)) {
+        const Span sp = ast_at_const(a, n->as.va_op.ap)->span;
+        char ty[96];
+        render_type(t, apt, ty, sizeof ty);
+        typechecker_errorf(t, sp.start, sp.end - sp.start, "expected a 'va_list', found '%s'", ty);
+      }
+      if (n->as.va_op.op == VA_ARG) {
+        result = resolve_type(t, n->as.va_op.extra);
+      } else {
+        if (n->as.va_op.op == VA_START)
+          check_expr(t, n->as.va_op.extra);
+        result = ast_builtin(BT_VOID);
+      }
+      break;
+    }
     case NODE_GENERIC_SPECIALIZATION: {
       const NodeId inner = n->as.specialization.expression;
       const NodeList types = n->as.specialization.types;
@@ -1917,7 +1937,19 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       TypeId elem = TYPE_NONE;
       for (uint32_t i = 0; i < elements.len; i++) {
-        const TypeId et = check_expr(t, ids[i]);
+        const Node *const el = ast_at_const(a, ids[i]);
+        TypeId et;
+        if (el->kind == NODE_FIELD_INITIALIZER) { // designated `[index] = value`: index must be integral
+          const TypeId it = check_expr(t, el->as.field_initializer.name);
+          const Ty *const iy = it != TYPE_NONE ? ast_type_at(a, it) : NULL;
+          if (iy && !(iy->kind == TYPE_BUILTIN && (bt_is_int(iy->as.builtin) || iy->as.builtin == BT_CHAR))) {
+            const Span sp = ast_at_const(a, el->as.field_initializer.name)->span;
+            typechecker_errorf(t, sp.start, sp.end - sp.start, "array designator index must be an integer");
+          }
+          et = check_expr(t, el->as.field_initializer.value);
+        } else {
+          et = check_expr(t, ids[i]);
+        }
         if (i == 0)
           elem = et;
         else if (et != elem && et != TYPE_NONE && elem != TYPE_NONE) {
@@ -2069,12 +2101,27 @@ static void check_return(TypeChecker *t, const Node *const n, const NodeId id) {
   }
 }
 
+// `static_assert(cond, ..)`: the condition must be a boolean expression. Its compile-time truth is
+// enforced by the backend C `_Static_assert`, so const-folding is delegated to the C compiler.
+static void check_static_assert(TypeChecker *t, const Node *const n) {
+  const TypeId c = check_expr(t, n->as.binary.left);
+  if (c != TYPE_NONE && !is_bool(t, c)) {
+    const Span sp = ast_at_const(t->ast, n->as.binary.left)->span;
+    char ty[96];
+    render_type(t, c, ty, sizeof ty);
+    typechecker_errorf(t, sp.start, sp.end - sp.start, "static_assert condition must be 'bool', found '%s'", ty);
+  }
+}
+
 static void check_stmt(TypeChecker *t, const NodeId id) {
   if (id == NODE_NONE)
     return;
   Ast *const a = t->ast;
   const Node *const n = ast_at_const(a, id);
   switch (n->kind) {
+    case NODE_STATIC_ASSERT:
+      check_static_assert(t, n);
+      break;
     case NODE_BLOCK: {
       const NodeList stmts = n->as.block.statements;
       const NodeId *const ids = ast_list(a, stmts);
@@ -2328,6 +2375,13 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       }
       break;
     }
+    case NODE_PATTERN_OR: { // each alternative is matched against the same scrutinee type
+      const NodeList children = n->as.pattern.children;
+      const NodeId *const ids = ast_list(a, children);
+      for (uint32_t i = 0; i < children.len; i++)
+        check_pattern(t, ids[i], expected);
+      break;
+    }
     default: // NODE_PATTERN_WILDCARD, NODE_PATTERN_LITERAL, NODE_PATTERN_RANGE
       break;
   }
@@ -2338,16 +2392,20 @@ static void check_associated(TypeChecker *t, const NodeList items);
 static void check_item(TypeChecker *t, const NodeId id) {
   const Node *const n = ast_at_const(t->ast, id);
   switch (n->kind) {
+    case NODE_STATIC_ASSERT:
+      check_static_assert(t, n);
+      break;
     case NODE_FUNCTION: {
       const NodeList params = n->as.function.params;
       const NodeId *const pids = ast_list(t->ast, params);
       for (uint32_t i = 0; i < params.len; i++)
         decl_type(t, pids[i]); // type each parameter so references resolve
-      // `...` only makes sense for a C binding: a Super-C-defined body has no way to read variadic args.
-      if (n->as.function.is_variadic && !n->as.function.is_extern) {
+      // A Super-C-defined variadic function reads its args with `va_start`/`va_arg`, which need a last
+      // named parameter to anchor on -- so `...` requires at least one fixed parameter here.
+      if (n->as.function.is_variadic && !n->as.function.is_extern && params.len == 0) {
         const Span sp = name_span(t, n->as.function.name);
         typechecker_errorf(
-            t, sp.start, sp.end - sp.start, "variadic '...' parameters are only allowed in 'extern' declarations");
+            t, sp.start, sp.end - sp.start, "a variadic function needs at least one fixed parameter before '...'");
       }
       // The program entry point must be `fn main() i32` -- it lowers to C's `int main(void)`, so any
       // other return type or a parameter list would be silently dropped or miscompiled.
