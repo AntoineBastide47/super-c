@@ -1877,7 +1877,18 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         emit_expr(c, obj);
         emit(c, "; ");
       }
-      if (base->kind == TYPE_INSTANCE) { // a generic instance receiver -> the monomorphized `Inst__method`
+      if (c->macro && base->kind == TYPE_GENERIC) {
+        // A bound-method call on a generic param inside a generic macro template (`elem.clone()` where
+        // `T: Clone`): the concrete arg is unknown here, so paste the param's mangle token with the method
+        // to form the impl symbol at invocation time (`_SCM_T ## __clone` -> `Bar__clone`). The method must
+        // live in the arg type's own module (coherent impl), so its symbol prefix matches the arg's mangle.
+        char pp[64];
+        emit(c, "_SCM_");
+        render_macro_param(c, base->module, base->as.decl, pp, sizeof pp);
+        emit_cstr(c, pp);
+        emit_paste(c);
+        emit(c, "__");
+      } else if (base->kind == TYPE_INSTANCE) { // a generic instance receiver -> monomorphized `Inst__method`
         char inm[200];
         inst_name(c, ast_instance(c->ast, base->as.inst), inm, sizeof inm); // already module-qualified
         emit_cstr(c, inm);

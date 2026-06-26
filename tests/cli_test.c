@@ -184,6 +184,40 @@ static void test_cross_module_generic_by_value(void) {
   CHECK(run_cmd(crun, NULL, 0) == 60, "re-homed instance method + cross-pool map<U> run (30 + 30)");
 }
 
+// A cross-module generic instance over a user type whose bounded impl calls a BOUND METHOD on the
+// element (`extend<T: Clone> Bx<T> { fn dup() { ..self.v.clone().. } }` instantiated as `Bx<Bar>`). The
+// instance is re-homed to the user module and emitted via the generic's placement macros; the bound call
+// lowers to `_SCM_T ## __clone`, which the invocation resolves to the concrete `Bar__clone`. Built -Werror
+// and run -- this is what unblocks the container `Clone`/`Eq`/`Hash` conformances.
+static void test_cross_module_generic_bound_dispatch(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/genbd", DIR);
+  mkfile(root, "bx/bx.spc",
+         "pub interface Clone { fn clone(self: &Self) Self; }\n"
+         "pub struct Bx<T> { pub v: T }\n"
+         "extend<T: Clone> Bx<T> {\n"
+         "  pub fn dup(self: &Bx<T>) Bx<T> { return Bx::<T> { v: self.v.clone() }; }\n"
+         "}\n");
+  mkfile(root, "genbd.spc",
+         "import bx::bx;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "struct Bar { pub x: i32 }\n"
+         "extend Bar as bx::bx::Clone { fn clone(self: &Self) Bar { return Bar { x: self.x }; } }\n"
+         "fn main() i32 {\n"
+         "  let b = bx::bx::Bx::<Bar> { v: Bar { x: 21 } };\n"
+         "  let d = b.dup();\n" // deep-clones Bar via the bound dispatch
+         "  exit(d.v.x + b.v.x); }\n"); // 42
+  snprintf(spc, sizeof spc, "%s/genbd.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module generic with bound-method dispatch compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/genbd.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "bound-dispatch generic C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 42, "re-homed Bx<Bar>::dup dispatches self.v.clone() to Bar__clone (21+21)");
+}
+
 // A `pub interface` declared in one module, then implemented over a local type via `extend T as
 // mod::Iface` and consumed by a bounded generic in another module: the bound resolves across the import,
 // the impl satisfies it, and the bounded call dispatches to the concrete method. Built -Werror and run.
@@ -358,6 +392,7 @@ int main(void) {
   test_cross_module_enum();
   test_module_features();
   test_cross_module_generic_by_value();
+  test_cross_module_generic_bound_dispatch();
   test_cross_module_interface();
   test_ffi_bindings();
   test_module_imports();
