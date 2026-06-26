@@ -96,6 +96,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
 
     "Range",
     "RangeInclusive",
+    "Ellipsis",
     "PathSeparator",
     "Arrow",
     "FatArrow",

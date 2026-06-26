@@ -43,7 +43,7 @@ those types are in scope without any `import`.
 ### Bindings and functions
 
 ```superc
-fn add(a: i32, b: i32) i32 {
+fn add(a, b: i32) i32 {
     return a + b;
 }
 
@@ -62,7 +62,7 @@ Builtin scalar types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 us
 ### Multiple return values
 
 ```superc
-fn divmod(a: i32, b: i32) (i32, i32) {
+fn divmod(a, b: i32) (i32, i32) {
     return a / b, a % b;
 }
 
@@ -298,4 +298,4 @@ Planned / not yet implemented:
 * the `?` early-return operator
 * operator overloading via traits
 * dynamic dispatch / trait objects — **TBD / undecided**: heterogeneous collections + open extension
-  across modules. The case for and against is written up in [todos/dyn_tbd.md](todos/dyn_tbd.md).
+  across modules.

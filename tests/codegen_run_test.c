@@ -194,6 +194,46 @@ static void test_opaque_extern(void) {
       7, NULL);
 }
 
+// A C-variadic binding (`fn printf(fmt, ...)`) takes its fixed params plus any number of trailing args;
+// the call passes them all through verbatim. String literals coerce to bare C strings in the fixed
+// `*const char` fmt AND in `%s` vararg slots, so `printf("%s=%d\n", "x", 42)` -> "x=42\n" links + runs.
+static void test_variadics(void) {
+  sc_run_program(
+      "variadic printf with string-literal fmt + %s arg",
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
+      "fn main() i32 { printf(\"%s=%d\\n\", \"x\", 42); return 0; }\n",
+      0, "x=42\n");
+}
+
+// The `c32`/`c64` builtins are real C `_Complex`: held by value, arithmetic via native operators, real
+// literals coerce in, and complex.h functions bind via FFI. csqrt(-1) = i; |3 + 4i| = 5.
+static void test_complex(void) {
+  sc_run_program(
+      "complex arithmetic + complex.h FFI",
+      PRE "extern \"C\" { fn csqrt(z: c64) c64; fn creal(z: c64) f64; fn cimag(z: c64) f64; fn cabs(z: c64) f64; }\n"
+          "fn main() i32 { let i: c64 = csqrt(-1.0); let z: c64 = 3.0 + 4.0 * i;\n"
+          "  exit((creal(z) as i32) + (cimag(z) as i32) + (cabs(z) as i32)); }\n", // 3 + 4 + 5
+      12, NULL);
+}
+
+// Sequentially-consistent atomics from the compiler runtime (`__sc_atomic_*`, lowered to `__atomic_*`),
+// bound as ordinary extern fns: store/add(returns prior)/cas/load/fence over a plain `i32` cell.
+static void test_atomics(void) {
+  sc_run_program(
+      "atomic store/add/cas/load/fence",
+      PRE "extern \"C\" {\n"
+          "  fn __sc_atomic_store_i32(p: *mut i32, v: i32);\n"
+          "  fn __sc_atomic_load_i32(p: *const i32) i32;\n"
+          "  fn __sc_atomic_add_i32(p: *mut i32, v: i32) i32;\n"
+          "  fn __sc_atomic_cas_i32(p: *mut i32, e: i32, d: i32) bool;\n"
+          "  fn __sc_atomic_fence();\n}\n"
+          "fn main() i32 { let mut x: i32 = 0; __sc_atomic_store_i32(&mut x, 40);\n"
+          "  let p: i32 = __sc_atomic_add_i32(&mut x, 2); __sc_atomic_fence();\n"
+          "  let ok: bool = __sc_atomic_cas_i32(&mut x, 42, 6);\n"
+          "  exit(p + __sc_atomic_load_i32(&x) + (ok as i32)); }\n", // 40 + 6 + 1
+      47, NULL);
+}
+
 static void test_array_literals(void) {
   // array literal as a let initializer (brace list) and iterated with a for-loop.
   sc_run_program(
@@ -637,6 +677,9 @@ int main(void) {
   test_array_literals();
   test_slices();
   test_opaque_extern();
+  test_variadics();
+  test_complex();
+  test_atomics();
   test_tuple_destructure();
   test_enums();
   test_mut_match_binding();

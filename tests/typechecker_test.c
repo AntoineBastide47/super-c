@@ -326,8 +326,55 @@ static void test_slices(void) {
       "mismatched types");
 }
 
+static void test_ffi(void) {
+  // A C-variadic binding accepts its fixed params plus any number (incl. zero) of trailing args.
+  expect_ok(
+      "variadic call with extra args",
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
+      "fn main() i32 { let f: char = '%'; printf(&f, 1, 2, 3); return 0; }\n");
+  expect_ok(
+      "variadic call with no extra args",
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
+      "fn main() i32 { let f: char = '%'; printf(&f); return 0; }\n");
+  // ... but never fewer than the fixed params, and `...` is meaningless without an extern C body.
+  expect_error(
+      "variadic call below fixed arity",
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
+      "fn main() i32 { printf(); return 0; }\n",
+      "at least 1 argument");
+  expect_error(
+      "variadic only in extern", "fn f(a: i32, ...) i32 { return a; }\n",
+      "only allowed in 'extern'");
+
+  // `c32`/`c64` complex builtins: real literals coerce in, native arithmetic, casts up to complex --
+  // but a complex has no conversion back to a real/int scalar (use creal/cimag).
+  expect_ok("real literal initializes complex", "fn main() i32 { let z: c64 = 3.0; let w: c32 = 1; return 0; }\n");
+  expect_ok(
+      "complex arithmetic + real cast in",
+      "fn main() i32 { let a: c64 = 2.0; let b: c64 = a + 1.0; let c: c64 = (3.0 as c64) * b; return 0; }\n");
+  expect_ok("c64 <-> c32 casts", "fn main() i32 { let a: c64 = 1.0; let b: c32 = a as c32; let c: c64 = b as c64; return 0; }\n");
+  expect_error("complex to int cast rejected", "fn main() i32 { let z: c64 = 1.0; return z as i32; }\n", "invalid cast");
+
+  // A string literal coerces to a `*const char` / `*const u8` C-string slot (fixed param and variadic
+  // arg), but still defaults to the `str` view elsewhere -- it does NOT become a mutable/non-const pointer.
+  expect_ok(
+      "string literal -> *const char param",
+      "extern \"C\" { fn puts(s: *const char) i32; }\nfn main() i32 { puts(\"hi\"); return 0; }\n");
+  expect_ok(
+      "string literal -> *const u8 param",
+      "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return f(\"hi\"); }\n");
+  expect_ok(
+      "string literal as %s vararg",
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { printf(\"%s\", \"hi\"); return 0; }\n");
+  expect_ok("string literal stays str by default", "fn main() i32 { let s: str = \"hi\"; return s.len() as i32; }\n");
+  expect_error(
+      "string literal not a mutable pointer",
+      "extern \"C\" { fn f(s: *mut char) i32; }\nfn main() i32 { return f(\"hi\"); }\n", "mismatched types");
+}
+
 int main(void) {
   test_ok();
+  test_ffi();
   test_slices();
   test_computed_scalar_types();
   test_computed_pointer_types();
