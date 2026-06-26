@@ -1158,10 +1158,35 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
       if ((l != TYPE_NONE && !is_bool(t, l)) || (r != TYPE_NONE && !is_bool(t, r)))
         typechecker_errorf(t, sp.start, sp.end - sp.start, "logical operator requires 'bool' operands");
       return ast_builtin(BT_BOOL);
-    default: // comparisons (==, !=, <, <=, >, >=)
+    default: { // comparisons (==, !=, <, <=, >, >=)
+      // Operator overloading: on a struct or generic-instance operand, `==`/`!=` dispatch to its `eq`
+      // (Eq) and `<`/`<=`/`>`/`>=` to its `cmp` (Ord); codegen emits the call. A struct compared with C
+      // `==` would otherwise miscompile silently, so the method is required.
+      const TypeId ls = l == TYPE_NONE ? TYPE_NONE : strip(t, l);
+      const Ty *const lt = ls == TYPE_NONE ? NULL : ast_type_at(t->ast, ls);
+      if (lt && (lt->kind == TYPE_STRUCT || lt->kind == TYPE_INSTANCE)) {
+        const bool ord = n->as.binary.op == LessThan || n->as.binary.op == LessThanEqual ||
+                         n->as.binary.op == GreaterThan || n->as.binary.op == GreaterThanEqual;
+        ModuleId om;
+        NodeId od;
+        DefId gp[4];
+        TypeId ga[4];
+        int gn;
+        if (aggregate_of(t, ls, &om, &od, gp, ga, &gn) &&
+            find_method_cstr(t, om, od, ord ? "cmp" : "eq").node == NODE_NONE) {
+          char ty[96];
+          render_type(t, ls, ty, sizeof ty);
+          typechecker_errorf(t, sp.start, sp.end - sp.start, "'%s' has no '%s' method for this operator (implement %s)",
+                             ty, ord ? "cmp" : "eq", ord ? "Ord" : "Eq");
+        }
+        return ast_builtin(BT_BOOL);
+      }
+      if (lt && lt->kind == TYPE_GENERIC) // a bound `T: Eq`/`T: Ord`; verified at instantiation, codegen dispatches
+        return ast_builtin(BT_BOOL);
       if (l != TYPE_NONE && r != TYPE_NONE && l != r && !compatible(t, l, rn) && !compatible(t, r, ln))
         err_mismatch(t, rn, l);
       return ast_builtin(BT_BOOL);
+    }
   }
 }
 
@@ -1461,6 +1486,50 @@ static bool fn_compatible_subst(TypeChecker *t, const TypeId exid, const TypeId 
     if (subst_type(t, subst_type(t, ep[i], gp, ga, gn), rp, ra, rn) != ap[i])
       return false;
   return true;
+}
+
+// The element type of an iterable that follows the Iterator protocol: a `next(&mut self) -> Option<T>`
+// method. Returns T (so `for x in it` binds x to it), or TYPE_NONE if `it` is not such an iterator.
+static TypeId iter_elem_type(TypeChecker *t, const TypeId it) {
+  ModuleId im;
+  NodeId idl;
+  DefId gp[4];
+  TypeId ga[4];
+  int gn;
+  if (!aggregate_of(t, it, &im, &idl, gp, ga, &gn))
+    return TYPE_NONE;
+  const DefId nx = find_method_cstr(t, im, idl, "next");
+  if (nx.node == NODE_NONE)
+    return TYPE_NONE;
+  Ast *const na = mod_ast(t, nx.module);
+  const NodeList rets = ast_at_const(na, nx.node)->as.function.returns;
+  if (rets.len != 1)
+    return TYPE_NONE;
+  const NodeId r0 = ast_list(na, rets)[0];
+  const Node *const rn = ast_at_const(na, r0);
+  TypeId ret = lower_type_in(t, nx.module, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  // Substitute the iterator impl's own generics by the receiver instance's type args (Option<T> -> Option<i32>).
+  const NodeId impl = enclosing_impl(t, nx.module, nx.node);
+  if (impl != NODE_NONE && gn > 0) {
+    const NodeList ig = ast_at_const(na, impl)->as.impl_def.generics;
+    const NodeId *const gids = ast_list(na, ig);
+    DefId ip[4];
+    TypeId ia[4];
+    int in2 = 0;
+    for (uint32_t i = 0; i < ig.len && (int)i < gn && in2 < 4; i++) {
+      ip[in2] = (DefId){nx.module, gids[i]};
+      ia[in2] = ga[i];
+      in2++;
+    }
+    ret = subst_type(t, ret, ip, ia, in2);
+  }
+  const Ty *const rt = ast_type_at(t->ast, ret); // expect Option<Elem>
+  if (rt->kind == TYPE_INSTANCE) {
+    const TyInstance *const oi = ast_instance(t->ast, rt->as.inst);
+    if (oi->n >= 1)
+      return oi->args[0];
+  }
+  return TYPE_NONE;
 }
 
 static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, const TypeId want) {
@@ -2418,6 +2487,13 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         const Ty *const ity = ast_type_at(a, it);
         TypeId selem;
         elem = ity->kind == TYPE_ARRAY ? ity->as.elem : slice_kind(t, it, &selem) ? selem : TYPE_NONE;
+        if (elem == TYPE_NONE && it != TYPE_NONE) // Iterator protocol: `it.next() -> Option<T>` binds x to T
+          elem = iter_elem_type(t, it);
+      }
+      if (elem == TYPE_NONE && it != TYPE_NONE) {
+        const Span sp = ast_at_const(a, iter)->span;
+        typechecker_errorf(t, sp.start, sp.end - sp.start,
+                           "cannot iterate over this value (need an array, slice, range, or an Iterator)");
       }
       ast_set_type(a, id, elem); // the loop binding resolves to this for-node (see resolver)
       check_stmt(t, n->as.for_stmt.body);

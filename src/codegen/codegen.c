@@ -1535,6 +1535,98 @@ static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl,
   return (DefId){0, NODE_NONE};
 }
 
+// Like cg_find_method but matches a C-string method name (for operator overloading -> `eq`/`cmp`).
+static DefId cg_find_method_cstr(Codegen *c, const ModuleId tmod, const NodeId tdecl, const char *const lit) {
+  const ModuleId scopes[2] = {tmod, c->ast->module};
+  const int ns = tmod == c->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = cg_mod_ast(c, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tg.module != tmod || tg.node != tdecl)
+        continue;
+      const NodeList ms = it->as.impl_def.items;
+      const NodeId *const mids = ast_list(a, ms);
+      for (uint32_t j = 0; j < ms.len; j++) {
+        const Node *const mn = ast_at_const(a, mids[j]);
+        if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text, lit))
+          return (DefId){m, mids[j]};
+      }
+    }
+  }
+  return (DefId){0, NODE_NONE};
+}
+
+// Emit an overloaded comparison (`a == b`, `a < b`, ...) on a struct / generic-instance operand as a call
+// to its `eq` / `cmp` method. Operands are spilled to temps so taking `&` is always valid (even for a
+// temporary). Returns false (operands not a struct/instance, or no method) to fall back to a plain C op.
+static bool emit_cmp_overload(Codegen *c, const Node *const n) {
+  const TokenType op = n->as.binary.op;
+  if (op != EqualEqual && op != BangEqual && op != LessThan && op != LessThanEqual && op != GreaterThan &&
+      op != GreaterThanEqual)
+    return false;
+  TypeId lt = ast_type(c->ast, n->as.binary.left);
+  if (lt == TYPE_NONE)
+    return false;
+  lt = subst_resolve(c, strip_ptr(c, lt));
+  const Ty *const bt = ast_type_at(c->ast, lt);
+  if (bt->kind != TYPE_STRUCT && bt->kind != TYPE_INSTANCE)
+    return false;
+  ModuleId om;
+  NodeId od;
+  if (bt->kind == TYPE_INSTANCE) {
+    const TyInstance *const it = ast_instance(c->ast, bt->as.inst);
+    om = it->module;
+    od = it->decl;
+  } else {
+    om = bt->module;
+    od = bt->as.decl;
+  }
+  const bool ord = op != EqualEqual && op != BangEqual;
+  const DefId m = cg_find_method_cstr(c, om, od, ord ? "cmp" : "eq");
+  if (m.node == NODE_NONE)
+    return false;
+  char l[32], r[32];
+  fresh(c, l, sizeof l);
+  fresh(c, r, sizeof r);
+  // Outer parens so the whole thing is a grouped expression: a bare statement-expr as an `if` condition
+  // (`if ({...})`) reads the `{` as a block, but `if (({...}))` is fine.
+  emit(c, "(({ __auto_type %s = ", l);
+  emit_expr(c, n->as.binary.left);
+  emit(c, "; __auto_type %s = ", r);
+  emit_expr(c, n->as.binary.right);
+  emit(c, "; ");
+  if (op == BangEqual)
+    emit(c, "!");
+  if (ord)
+    emit(c, "(");
+  if (bt->kind == TYPE_INSTANCE) {
+    char inm[200];
+    inst_name(c, ast_instance(c->ast, bt->as.inst), inm, sizeof inm);
+    emit_cstr(c, inm);
+    emit_paste(c);
+    emit(c, "__");
+  } else {
+    char pfx[64];
+    render_modpfx(c, m.module, pfx, sizeof pfx);
+    emit_cstr(c, pfx);
+    emit_ident_mod(c, om, ast_at_const(cg_mod_ast(c, om), od)->as.aggregate.name);
+    emit(c, "__");
+  }
+  emit_ident_mod(c, m.module, ast_at_const(cg_mod_ast(c, m.module), m.node)->as.function.name);
+  emit(c, "(&%s, &%s)", l, r);
+  if (ord)
+    emit(c, " %s 0)", c_op(op));
+  emit(c, "; }))");
+  return true;
+}
+
 static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
@@ -2066,6 +2158,9 @@ static void emit_expr(Codegen *c, const NodeId id) {
       break;
     }
     case NODE_BINARY: {
+      // Operator overloading: a comparison on a struct / generic-instance operand -> its eq/cmp method.
+      if (emit_cmp_overload(c, n))
+        break;
       // C's `%` is integer-only; on floats lower to fmodf/fmod (the type checker allows float `%`).
       if (n->as.binary.op == Percent) {
         const Ty *const lt = ast_type_at(c->ast, ast_type(c->ast, n->as.binary.left));
@@ -2779,7 +2874,7 @@ static void emit_for_range(Codegen *c, const Node *n) {
   emit(c, "\n");
 }
 
-static void emit_for(Codegen *c, const Node *n) {
+static void emit_for(Codegen *c, const NodeId id, const Node *n) {
   if (ast_at_const(c->ast, n->as.for_stmt.iterable)->kind == NODE_RANGE) {
     emit_for_range(c, n);
     return;
@@ -2854,6 +2949,103 @@ static void emit_for(Codegen *c, const Node *n) {
     emit_indent(c);
     emit(c, "}\n");
     return;
+  }
+  // Iterator protocol: `for x in it` where `it.next() -> Option<T>`. Lower to a loop calling next() and
+  // breaking on the None tag, binding x to the Some payload.
+  {
+    const Ty *const bt = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, n->as.for_stmt.iterable)));
+    ModuleId om = 0;
+    NodeId od = NODE_NONE;
+    if (bt->kind == TYPE_STRUCT) {
+      om = bt->module;
+      od = bt->as.decl;
+    } else if (bt->kind == TYPE_INSTANCE) {
+      const TyInstance *const ii = ast_instance(c->ast, bt->as.inst);
+      om = ii->module;
+      od = ii->decl;
+    }
+    const DefId nx = od == NODE_NONE ? (DefId){0, NODE_NONE} : cg_find_method_cstr(c, om, od, "next");
+    if (nx.node != NODE_NONE) {
+      Ast *const na = cg_mod_ast(c, nx.module);
+      const NodeList rets = ast_at_const(na, nx.node)->as.function.returns;
+      const NodeId r0 = ast_list(na, rets)[0];
+      const Node *const rn = ast_at_const(na, r0);
+      const DefId opt = ast_resolution_def(na, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0); // Option enum
+      const TypeId elem = subst_resolve(c, ast_type(c->ast, id));
+      if (opt.node != NODE_NONE && elem != TYPE_NONE) {
+        // Find Some (payload) and None (unit) variants of Option.
+        Ast *const oa = cg_mod_ast(c, opt.module);
+        const NodeList mem = ast_at_const(oa, opt.node)->as.aggregate.members;
+        const NodeId *const mids = ast_list(oa, mem);
+        NodeId some = NODE_NONE, none = NODE_NONE;
+        for (uint32_t i = 0; i < mem.len; i++) {
+          const Node *const v = ast_at_const(oa, mids[i]);
+          if (v->kind != NODE_VARIANT)
+            continue;
+          const Span vs = ast_at_const(oa, v->as.variant.name)->as.name.text;
+          if (span_is(cg_mod_src(c, opt.module), vs, "Some"))
+            some = mids[i];
+          else if (span_is(cg_mod_src(c, opt.module), vs, "None"))
+            none = mids[i];
+        }
+        if (some != NODE_NONE && none != NODE_NONE) {
+          const TypeId optTy = ast_intern_instance(c->ast, opt.module, opt.node, (TypeId[]){elem}, 1);
+          char it[32], ov[32], odecl[256], vn[128];
+          fresh(c, it, sizeof it);
+          fresh(c, ov, sizeof ov);
+          render_variant_name(c, opt.module, some, vn, sizeof vn);
+          emit(c, "{\n");
+          c->depth++;
+          emit_indent(c);
+          emit(c, "__auto_type %s = ", it); // the iterator (mutable; next is &mut self)
+          emit_expr(c, n->as.for_stmt.iterable);
+          emit(c, ";\n");
+          emit_indent(c);
+          emit(c, "for (;;) {\n");
+          c->depth++;
+          emit_indent(c);
+          render_type_id(c, optTy, ov, odecl, sizeof odecl);
+          emit_cstr(c, odecl); // `Option__T __o = `
+          emit(c, " = ");
+          if (bt->kind == TYPE_INSTANCE) {
+            char inm[200];
+            inst_name(c, ast_instance(c->ast, bt->as.inst), inm, sizeof inm);
+            emit_cstr(c, inm);
+            emit_paste(c);
+            emit(c, "__");
+          } else {
+            char pfx[64];
+            render_modpfx(c, nx.module, pfx, sizeof pfx);
+            emit_cstr(c, pfx);
+            emit_ident_mod(c, om, ast_at_const(cg_mod_ast(c, om), od)->as.aggregate.name);
+            emit(c, "__");
+          }
+          emit_ident_mod(c, nx.module, ast_at_const(na, nx.node)->as.function.name);
+          emit(c, "(&%s);\n", it);
+          emit_indent(c);
+          emit(c, "if (%s.tag == ", ov);
+          emit_tag_mod(c, opt.module, opt.node, none);
+          emit(c, ") break;\n");
+          emit_indent(c);
+          emit_binding(c, elem, name_span(c, n->as.for_stmt.binding), true);
+          emit(c, " = %s.payload.%s._0;\n", ov, vn);
+          const uint32_t dbase = c->defer_top;
+          for (uint32_t i = 0; i < stmts.len; i++) {
+            emit_indent(c);
+            emit_stmt(c, sids[i]);
+          }
+          emit_defers_to(c, dbase);
+          c->defer_top = dbase;
+          c->depth--;
+          emit_indent(c);
+          emit(c, "}\n");
+          c->depth--;
+          emit_indent(c);
+          emit(c, "}\n");
+          return;
+        }
+      }
+    }
   }
   codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: cannot iterate over a non-array/slice value");
 }
@@ -3117,7 +3309,7 @@ static void emit_stmt(Codegen *c, const NodeId id) {
     case NODE_FOR: {
       const uint32_t saved_ldb = c->loop_defer_base;
       c->loop_defer_base = c->defer_top;
-      emit_for(c, n);
+      emit_for(c, id, n);
       c->loop_defer_base = saved_ldb;
       break;
     }

@@ -507,6 +507,12 @@ static void test_std_types(void) {
           "  let mut v: Vector<i32> = Default::default(); v.push(7); acc = acc + (v.len() as i32) * 100;\n"
           "  let o: Option<i32> = Default::default(); acc = acc + o.unwrap_or(0); v.drop(); x.drop(); y.drop(); big.drop(); d.drop(); exit(acc); }\n",
       111, "banana"); // 1 + 10 + 100
+  // Vector is iterable via `.iter()` (VecIter implements Iterator), driving the for-loop desugar.
+  sc_run_program(
+      "std Vector for-loop via .iter()",
+      PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(10); v.push(20); v.push(12);\n"
+          "  let mut sum = 0; for x in v.iter() { sum = sum + x; } v.drop(); exit(sum); }\n",
+      42, "");
   // String numeric formatting: from_i64 / from_u64 / push_i64 / push_f64.
   sc_run_program(
       "std String int/float to-string",
@@ -765,6 +771,29 @@ static void test_interfaces(void) {
           "  if value > 255 { return Result::<Sm, i32>::err(1); } return Result::<Sm, i32>::ok(Sm { v: value }); } }\n"
           "fn main() i32 { let r: Result<Sm, i32> = (200).try_into(); let s = r.unwrap_or(Sm { v: 0 }); exit(s.v); }\n",
       200, "");
+  // operator overloading: `==`/`!=` dispatch to `eq`, `<`/`<=`/`>`/`>=` to `cmp` (on a struct + a generic bound).
+  sc_run_program(
+      "interface: comparison operator overloading",
+      PRE "interface Eq { fn eq(self: &Self, other: &Self) bool; }\n"
+          "interface Ord: Eq { fn cmp(self: &Self, other: &Self) i32; }\n"
+          "struct P { pub n: i32 }\n"
+          "extend P as Eq { fn eq(self: &Self, o: &Self) bool { return self.n == o.n; } }\n"
+          "extend P as Ord { fn cmp(self: &Self, o: &Self) i32 { return self.n - o.n; } }\n"
+          "fn least<T: Ord>(a: T, b: T) T { if a < b { return a; } return b; }\n"
+          "fn main() i32 { let a = P { n: 3 }; let b = P { n: 7 }; let mut acc = 0;\n"
+          "  if a != b { acc = acc + 1; } if a < b { acc = acc + 10; } if b >= a { acc = acc + 100; }\n"
+          "  if a == b { acc = acc + 1000; } exit(acc + least::<P>(a, b).n); }\n",
+      114, ""); // 1 + 10 + 100 + 3
+  // Iterator protocol: `for x in it` lowers to a loop over `it.next()` until None.
+  sc_run_program(
+      "interface: for-loop over an Iterator",
+      PRE "interface Iterator<T> { fn next(self: &mut Self) Option<T>; }\n"
+          "struct Counter { pub cur: i32, pub end: i32 }\n"
+          "extend Counter as Iterator<i32> { fn next(self: &mut Self) Option<i32> {\n"
+          "  if self.cur >= self.end { return Option::<i32>::none(); }\n"
+          "  let v = self.cur; self.cur = self.cur + 1; return Option::<i32>::some(v); } }\n"
+          "fn main() i32 { let mut sum = 0; let c = Counter { cur: 1, end: 6 }; for x in c { sum = sum + x; } exit(sum); }\n",
+      15, ""); // 1+2+3+4+5
   // interface DEFAULT methods: impl provides `eq`/`cmp`; `ne` (from Eq) and `lt`/`ge` (from Ord) are inherited.
   sc_run_program(
       "interface: inherited default methods",
