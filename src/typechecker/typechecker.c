@@ -16,6 +16,8 @@ struct TypeChecker {
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
     TypeId expected;          // target type of the expression being checked (let annotation / return / assignment RHS), or TYPE_NONE; consumed once by check_expr
+    NodeId moved[256];        // Drop-typed bindings moved out of the current function; using one again is an error
+    uint32_t nmoved;          // (reset per function; best-effort linear move/use-after-move analysis)
     ERRORS_VARIABLES;
 };
 
@@ -592,6 +594,61 @@ static DefId find_default_method(TypeChecker *t, const ModuleId tmod, const Node
     }
   }
   return (DefId){0, NODE_NONE};
+}
+
+// Does `ty` implement the Drop interface (`extend T as Drop`)? Such values are move-tracked: once moved,
+// a re-use is an error (and the value is not double-dropped). Plain non-Drop value types are not tracked,
+// so ordinary value-semantics copies (`let p2 = p1` for a POD struct) stay legal.
+static bool tc_type_is_drop(TypeChecker *t, const TypeId ty) {
+  ModuleId om;
+  NodeId od;
+  DefId gp[4];
+  TypeId ga[4];
+  int gn;
+  if (ty == TYPE_NONE || !aggregate_of(t, strip(t, ty), &om, &od, gp, ga, &gn))
+    return false;
+  const ModuleId scopes[2] = {om, t->ast->module};
+  const int ns = om == t->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = mod_ast(t, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tg.module != om || tg.node != od)
+        continue;
+      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
+      if (tr.node == NODE_NONE)
+        continue;
+      const Node *const trn = ast_at_const(mod_ast(t, tr.module), tr.node);
+      if (trn->kind == NODE_TRAIT &&
+          span_is(mod_src(t, tr.module), ast_at_const(mod_ast(t, tr.module), trn->as.trait_def.name)->as.name.text, "Drop"))
+        return true;
+    }
+  }
+  return false;
+}
+
+// Record `expr` as a move if it is a bare reference to a current-module Drop-typed binding (a `let` or a
+// by-value parameter): ownership transfers away, so a later use is flagged.
+static void tc_mark_move(TypeChecker *t, const NodeId expr) {
+  if (expr == NODE_NONE || ast_at_const(t->ast, expr)->kind != NODE_IDENTIFIER)
+    return;
+  const DefId d = ast_resolution_def(t->ast, expr);
+  if (d.module != t->ast->module || d.node == NODE_NONE)
+    return;
+  const NodeKind dk = ast_at_const(t->ast, d.node)->kind;
+  if ((dk != NODE_LET && dk != NODE_PARAMETER) || !tc_type_is_drop(t, ast_type(t->ast, expr)))
+    return;
+  for (uint32_t i = 0; i < t->nmoved; i++)
+    if (t->moved[i] == d.node)
+      return; // already moved
+  if (t->nmoved < (uint32_t)(sizeof t->moved / sizeof t->moved[0]))
+    t->moved[t->nmoved++] = d.node;
 }
 
 // The top-level impl in module `m` whose items contain `method`, or NODE_NONE -- used to recover the
@@ -1552,6 +1609,8 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   const NodeId *const aids = ast_list(t->ast, args);
   for (uint32_t i = 0; i < args.len; i++)
     check_expr(t, aids[i]);
+  for (uint32_t i = 0; i < args.len; i++)
+    tc_mark_move(t, aids[i]); // a by-value Drop argument is moved to the callee (which owns/drops it)
 
   if (callee == TYPE_NONE)
     return TYPE_NONE;
@@ -1950,6 +2009,7 @@ static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
   for (uint32_t i = 0; i < fields.len; i++) {
     const Node *const fi = ast_at_const(t->ast, ids[i]);
     check_expr(t, fi->as.field_initializer.value);
+    tc_mark_move(t, fi->as.field_initializer.value); // a Drop value placed in a field is moved into the struct
     const Span fname = name_span(t, fi->as.field_initializer.name);
     if (variant != NODE_NONE) { // resolve the field against the variant's struct payload
       Ast *const va = mod_ast(t, vmod);
@@ -2036,6 +2096,12 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       // the owning module via the full DefId -- `decl_type` alone would read the current module's pool.
       const DefId d = ast_resolution_def(a, id);
       result = decl_type_in(t, d.module, d.node);
+      if (d.module == t->ast->module && d.node != NODE_NONE) // use-after-move: a moved Drop binding is dead
+        for (uint32_t i = 0; i < t->nmoved; i++)
+          if (t->moved[i] == d.node) {
+            typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "use of moved value");
+            break;
+          }
       break;
     }
     case NODE_UNARY:
@@ -2048,6 +2114,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const TypeId l = check_expr(t, n->as.binary.left);
       t->expected = l; // hand the lvalue's type to the RHS for expected-type resolution
       check_expr(t, n->as.binary.right);
+      tc_mark_move(t, n->as.binary.right); // `z = x` moves a Drop x
       if (!is_assignable(t, n->as.binary.left)) {
         const Span sp = ast_at_const(a, n->as.binary.left)->span;
         typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot assign to this expression");
@@ -2429,6 +2496,7 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
       if (valued) {
         t->expected = declared; // hand the annotation to the initializer for expected-type resolution
         check_expr(t, n->as.let_stmt.value);
+        tc_mark_move(t, n->as.let_stmt.value); // `let y = x` moves a Drop x into y
       }
       TypeId binding;
       if (annotated) {
@@ -2724,8 +2792,10 @@ static void check_item(TypeChecker *t, const NodeId id) {
       const NodeId savedfn = t->current_fn;
       t->current_returns = n->as.function.returns;
       t->current_fn = id;
+      t->nmoved = 0; // fresh move-tracking scope per function body
       if (n->as.function.body != NODE_NONE)
         check_stmt(t, n->as.function.body);
+      t->nmoved = 0;
       t->current_returns = saved;
       t->current_fn = savedfn;
       break;

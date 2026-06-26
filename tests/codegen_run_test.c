@@ -809,6 +809,39 @@ static void test_interfaces(void) {
       101, "");
 }
 
+static void test_drop_raii(void) {
+#define DROP_PRE                                                                                                        \
+  PRE "interface Drop { fn drop(self: &mut Self); }\n"                                                                  \
+      "struct R { pub tag: i32 }\n"                                                                                     \
+      "extend R as Drop { fn drop(self: &mut Self) { putchar(self.tag); } }\n"
+  // RAII: locals are dropped at scope exit in reverse construction order.
+  sc_run_program(
+      "drop: reverse-order scope-exit cleanup",
+      DROP_PRE "fn run() void { let a = R { tag: 65 }; let b = R { tag: 66 }; putchar(88); }\n"
+               "fn main() i32 { run(); exit(0); }\n",
+      0, "XBA"); // X, then drop b (B) then a (A)
+  // a moved binding is not dropped at the source scope (no double-free); the new owner drops it.
+  sc_run_program(
+      "drop: moved value is not auto-dropped",
+      DROP_PRE "fn run() void { let a = R { tag: 65 }; let b = a; putchar(88); }\n"
+               "fn main() i32 { run(); exit(0); }\n",
+      0, "XA"); // only b (holding tag 65 = A) drops; a was moved
+  // a by-value Drop parameter is owned by the callee, which drops it; the caller does not re-drop.
+  sc_run_program(
+      "drop: by-value parameter ownership transfer",
+      DROP_PRE "fn consume(r: R) void { putchar(67); }\n"
+               "fn run() void { let a = R { tag: 65 }; consume(a); putchar(88); }\n"
+               "fn main() i32 { run(); exit(0); }\n",
+      0, "CAX"); // consume prints C then drops its param (A); then X; a was moved, run drops nothing
+  // RAII and defer share one reverse-order cleanup sequence.
+  sc_run_program(
+      "drop: interleaves with defer",
+      DROP_PRE "fn run() void { let a = R { tag: 65 }; defer putchar(68); let b = R { tag: 66 }; putchar(88); }\n"
+               "fn main() i32 { run(); exit(0); }\n",
+      0, "XBDA"); // X, then reverse of [drop a, defer D, drop b]: b(B), D, a(A)
+#undef DROP_PRE
+}
+
 static void test_defer(void) {
   // LIFO execution at scope exit: prints 1 2, then the defers reversed (b a).
   sc_run_program(
@@ -863,6 +896,7 @@ static void test_static_assert(void) {
 
 int main(void) {
   test_attributes();
+  test_drop_raii();
   test_defer();
   test_static_assert();
   test_interfaces();
