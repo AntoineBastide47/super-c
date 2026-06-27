@@ -1682,6 +1682,77 @@ static bool emit_cmp_overload(Codegen *c, const Node *const n) {
   return true;
 }
 
+// Emit the C symbol of method `mth` (`Type__<method>`) for a struct / generic-instance type `bt` (owner
+// om/od). Shared by the arithmetic and index operator-overload emitters.
+static void emit_op_method(Codegen *c, const Ty *const bt, const ModuleId om, const NodeId od, const DefId mth) {
+  if (bt->kind == TYPE_INSTANCE) {
+    char inm[200];
+    inst_name(c, ast_instance(c->ast, bt->as.inst), inm, sizeof inm);
+    emit_cstr(c, inm);
+    emit_paste(c);
+    emit(c, "__");
+  } else {
+    char pfx[64];
+    render_modpfx(c, mth.module, pfx, sizeof pfx);
+    emit_cstr(c, pfx);
+    emit_ident_mod(c, om, ast_at_const(cg_mod_ast(c, om), od)->as.aggregate.name);
+    emit(c, "__");
+  }
+  emit_ident_mod(c, mth.module, ast_at_const(cg_mod_ast(c, mth.module), mth.node)->as.function.name);
+}
+
+// The method name for an arithmetic operator dispatched on a user-type operand, or NULL.
+static const char *cg_arith_op_method(const TokenType op) {
+  switch (op) {
+    case Plus: return "add";
+    case Minus: return "sub";
+    case Star: return "mul";
+    case Slash: return "div";
+    case Percent: return "rem";
+    default: return NULL;
+  }
+}
+
+// Emit an overloaded arithmetic op (`a + b`, ...) on a struct / generic-instance operand as a call to its
+// add/sub/mul/div/rem method. Operands are spilled to temps so taking `&` is valid even for a temporary.
+// Returns false (not a struct/instance operand, or no such method) to fall back to a plain C operator.
+static bool emit_arith_overload(Codegen *c, const Node *const n) {
+  const char *const m = cg_arith_op_method(n->as.binary.op);
+  if (!m)
+    return false;
+  TypeId lt = ast_type(c->ast, n->as.binary.left);
+  if (lt == TYPE_NONE)
+    return false;
+  lt = subst_resolve(c, strip_ptr(c, lt));
+  const Ty *const bt = ast_type_at(c->ast, lt);
+  if (bt->kind != TYPE_STRUCT && bt->kind != TYPE_INSTANCE)
+    return false;
+  ModuleId om;
+  NodeId od;
+  if (bt->kind == TYPE_INSTANCE) {
+    const TyInstance *const it = ast_instance(c->ast, bt->as.inst);
+    om = it->module;
+    od = it->decl;
+  } else {
+    om = bt->module;
+    od = bt->as.decl;
+  }
+  const DefId mth = cg_find_method_cstr(c, om, od, m);
+  if (mth.node == NODE_NONE)
+    return false;
+  char l[32], r[32];
+  fresh(c, l, sizeof l);
+  fresh(c, r, sizeof r);
+  emit(c, "({ __auto_type %s = ", l);
+  emit_expr(c, n->as.binary.left);
+  emit(c, "; __auto_type %s = ", r);
+  emit_expr(c, n->as.binary.right);
+  emit(c, "; ");
+  emit_op_method(c, bt, om, od, mth);
+  emit(c, "(&%s, &%s); })", l, r);
+  return true;
+}
+
 // True if type `y` is the prelude struct named `lit` (used to spot `str` / `String` arguments to format).
 static bool cg_struct_name_is(Codegen *c, const Ty *const y, const char *const lit) {
   if (y->kind != TYPE_STRUCT)
@@ -2446,8 +2517,11 @@ static void emit_expr(Codegen *c, const NodeId id) {
       break;
     }
     case NODE_BINARY: {
-      // Operator overloading: a comparison on a struct / generic-instance operand -> its eq/cmp method.
+      // Operator overloading: a comparison on a struct / generic-instance operand -> its eq/cmp method,
+      // an arithmetic op -> its add/sub/mul/div/rem method.
       if (emit_cmp_overload(c, n))
+        break;
+      if (emit_arith_overload(c, n))
         break;
       // C's `%` is integer-only; on floats lower to fmodf/fmod (the type checker allows float `%`).
       if (n->as.binary.op == Percent) {
@@ -2562,6 +2636,35 @@ static void emit_expr(Codegen *c, const NodeId id) {
         }
         emit(c, " }; })");
         break;
+      }
+      { // operator overloading: `obj[i]` on a struct / generic-instance -> its `index` method
+        const TypeId ot = ast_type(c->ast, n->as.index.object);
+        const Ty *const bt = ot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, strip_ptr(c, ot)));
+        if (bt && (bt->kind == TYPE_STRUCT || bt->kind == TYPE_INSTANCE)) {
+          ModuleId om;
+          NodeId od;
+          if (bt->kind == TYPE_INSTANCE) {
+            const TyInstance *const it = ast_instance(c->ast, bt->as.inst);
+            om = it->module;
+            od = it->decl;
+          } else {
+            om = bt->module;
+            od = bt->as.decl;
+          }
+          const DefId mth = cg_find_method_cstr(c, om, od, "index");
+          if (mth.node != NODE_NONE) {
+            char o[32];
+            fresh(c, o, sizeof o);
+            emit(c, "({ __auto_type %s = ", o); // spill so `&` is valid even for a temporary
+            emit_expr(c, n->as.index.object);
+            emit(c, "; ");
+            emit_op_method(c, bt, om, od, mth);
+            emit(c, "(&%s, ", o);
+            emit_expr(c, n->as.index.index);
+            emit(c, "); })");
+            break;
+          }
+        }
       }
       if (cg_slice_elem(c, ast_type(c->ast, n->as.index.object), NULL)) { // `s[i]` on `[]T`: its typed `.ptr`
         emit_expr(c, n->as.index.object);
