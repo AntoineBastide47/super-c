@@ -256,6 +256,7 @@ static void emit_if_expr(Codegen *c, NodeId id);
 static void emit_array_braces(Codegen *c, const Node *n);
 static void emit_auto_drop(Codegen *c, NodeId letId);
 static void emit_try(Codegen *c, const Node *n);
+static DefId cg_drop_method(Codegen *c, ModuleId tmod, NodeId tdecl);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -1963,6 +1964,42 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
 
   if (emit_format_builtin(c, n)) // format/print/println: split the literal + per-arg appends
     return;
+
+  // `x.free()` destructor INTRINSIC: only when the type checker left it unresolved (an unbounded generic
+  // receiver, monomorphized here) -- emit x's Free impl when the concrete type is Free, else a no-op. This
+  // is what lets one generic container conformance free its elements (`Vector<String>` frees its Strings,
+  // `Vector<i32>` skips them). A resolved `.free()` (concrete type or `T: Free` bound) falls through to the
+  // normal call path, which handles its real return type and receiver auto-ref.
+  if (callee->kind == NODE_MEMBER && !callee->as.member.path && args.len == 0 &&
+      ast_resolution_def(c->ast, callee->as.member.member).node == NODE_NONE &&
+      span_is(cg_mod_src(c, c->ast->module), ast_at_const(c->ast, callee->as.member.member)->as.name.text, "free")) {
+    const NodeId recv = callee->as.member.object;
+    const Ty *const raw = ast_type_at(c->ast, ast_type(c->ast, recv));
+    const bool isref = raw->kind == TYPE_POINTER || raw->kind == TYPE_REFERENCE; // receiver already a pointer
+    const Ty *const rt = ast_type_at(c->ast, subst_resolve(c, strip_ptr(c, ast_type(c->ast, recv))));
+    ModuleId om = 0;
+    NodeId od = NODE_NONE;
+    if (rt->kind == TYPE_INSTANCE) {
+      const TyInstance *const it = ast_instance(c->ast, rt->as.inst);
+      om = it->module;
+      od = it->decl;
+    } else if (rt->kind == TYPE_STRUCT) {
+      om = rt->module;
+      od = rt->as.decl;
+    }
+    const DefId fm = od != NODE_NONE ? cg_drop_method(c, om, od) : (DefId){0, NODE_NONE};
+    if (fm.node != NODE_NONE) {
+      emit_op_method(c, rt, om, od, fm);
+      emit(c, isref ? "(" : "(&");
+      emit_expr(c, recv);
+      emit(c, ")");
+    } else { // not a Free type (or a generic param resolved to one): evaluate the receiver, free nothing
+      emit(c, "(void)(");
+      emit_expr(c, recv);
+      emit(c, ")");
+    }
+    return;
+  }
 
   // Win 1, inside a callback specialization: a call to the elided callback parameter becomes a direct
   // call to the bound callee (no indirection).

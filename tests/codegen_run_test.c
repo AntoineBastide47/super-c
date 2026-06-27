@@ -1134,6 +1134,21 @@ static void test_container_drop_raii(void) {
 #undef BOX_PRE
 }
 
+// `.free()` is the destructor intrinsic: callable on ANY type, it runs the type's Free impl or is a no-op
+// when the type isn't Free -- resolved per monomorphization. This is what lets generic code (and a generic
+// container's element teardown) free uniformly without a `T: Free` bound.
+static void test_free_intrinsic(void) {
+#define FI_PRE                                                                                                         \
+  PRE "interface Free { fn free(self: &mut Self); }\n"                                                                \
+      "struct Leaf { pub id: i32 }\n"                                                                                  \
+      "extend Leaf as Free { fn free(self: &mut Self) { putchar(self.id); } }\n"
+  sc_run_program("free intrinsic: Free type frees, non-Free is a no-op (via a generic)",
+                 FI_PRE "fn dispose<T>(mut x: T) void { x.free(); }\n"
+                        "fn main() i32 { dispose::<Leaf>(Leaf { id: 65 }); dispose::<i32>(7); putchar(10); exit(0); }\n",
+                 0, "A\n"); // Leaf freed once (A, explicit free consumes -> no double auto-free); i32 free is a no-op
+#undef FI_PRE
+}
+
 static void test_defer(void) {
   // LIFO execution at scope exit: prints 1 2, then the defers reversed (b a).
   sc_run_program(
@@ -1191,6 +1206,7 @@ int main(void) {
   test_drop_raii();
   test_conditional_move_drop();
   test_container_drop_raii();
+  test_free_intrinsic();
   test_defer();
   test_static_assert();
   test_interfaces();

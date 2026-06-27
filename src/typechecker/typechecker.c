@@ -1851,6 +1851,35 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   // `Enum::Variant(args)` is construction, not a function call.
   const Node *const path_callee = ast_at_const(t->ast, n->as.call.callee);
   TypeId callee = TYPE_NONE;
+  // `x.free()` as the destructor intrinsic: when `x.free()` does NOT resolve to a real method -- an
+  // UNBOUNDED generic param (`self.ptr[i]` in `extend<T> Vector<T>`), a builtin, or a struct with no `free`
+  // -- it is a void NO-OP (so generic container code can free each element uniformly; codegen resolves it
+  // per monomorphization). A type that DOES have a `free` (concrete or via a `T: Free` bound) falls through
+  // to normal resolution, which governs the real return type, auto-ref, and the consume below.
+  if (path_callee->kind == NODE_MEMBER && !path_callee->as.member.path && n->as.call.args.len == 0 &&
+      span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, path_callee->as.member.member)->as.name.text, "free")) {
+    const TypeId rt = check_expr(t, path_callee->as.member.object);
+    const Span fname = name_span(t, path_callee->as.member.member);
+    bool resolvable = false;
+    if (rt != TYPE_NONE) {
+      const Ty *const rty = ast_type_at(t->ast, strip(t, rt));
+      if (rty->kind == TYPE_STRUCT || rty->kind == TYPE_INSTANCE) {
+        ModuleId om;
+        NodeId od;
+        DefId gp[4];
+        TypeId ga[4];
+        int gn;
+        if (aggregate_of(t, strip(t, rt), &om, &od, gp, ga, &gn))
+          resolvable = find_method_cstr(t, om, od, "free").node != NODE_NONE;
+      } else if (rty->kind == TYPE_GENERIC) {
+        DefId iface;
+        resolvable = find_bound_method(t, rty->module, rty->as.decl, fname, &iface).node != NODE_NONE;
+      }
+    }
+    if (!resolvable)
+      return ast_builtin(BT_VOID); // no real `free` -> destructor no-op
+    // else fall through: a real `free` method governs (return type, receiver auto-ref, the consume below)
+  }
   if (path_callee->kind == NODE_MEMBER && path_callee->as.member.path) {
     t->expected = want; // a `Trait::assoc()` callee resolves through the call's target type
     callee = check_expr(t, n->as.call.callee);
@@ -1896,16 +1925,16 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       skip = 1;
   }
 
-  // Calling the destructor `x.free()` on an owned Free value consumes it: a later use is a use-after-free,
-  // and its scope-exit auto-drop must be elided (no double free). A `&mut`/`*` receiver only borrows a value
-  // owned elsewhere, so it is left alone. This is what lets explicit `.free()` coexist with Free-RAII.
+  // A resolved `x.free()` destructor on an owned (non-reference) Free value consumes it: a later use is a
+  // use-after-free, and its scope-exit auto-free is elided (no double free). A `&mut`/`*` receiver only
+  // borrows a value owned elsewhere, so it is left alone.
   if (skip && callee_node->as.member.object != NODE_NONE &&
       span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, callee_node->as.member.member)->as.name.text, "free")) {
     const NodeId recv = callee_node->as.member.object;
-    const Ty *const rt = ast_type_at(t->ast, ast_type(t->ast, recv));
-    if (rt->kind != TYPE_POINTER && rt->kind != TYPE_REFERENCE) {
+    const Ty *const rty = ast_type_at(t->ast, ast_type(t->ast, recv));
+    if (rty->kind != TYPE_POINTER && rty->kind != TYPE_REFERENCE && tc_type_is_drop(t, ast_type(t->ast, recv))) {
       tc_mark_move(t, recv);
-      if (ast_at_const(t->ast, recv)->kind == NODE_IDENTIFIER) { // record it as freed, for the diagnostic
+      if (ast_at_const(t->ast, recv)->kind == NODE_IDENTIFIER) { // record it as freed, for the use-after-free diagnostic
         const DefId rd = ast_resolution_def(t->ast, recv);
         if (rd.module == t->ast->module && rd.node != NODE_NONE && t->nfreed < (uint32_t)(sizeof t->freed / sizeof t->freed[0]))
           t->freed[t->nfreed++] = rd.node;
