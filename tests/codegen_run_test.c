@@ -979,6 +979,34 @@ static void test_drop_raii(void) {
 #undef DROP_PRE
 }
 
+// D#10: a binding moved on only SOME control-flow paths gets a runtime drop flag, so it is dropped EXACTLY
+// once -- skipped on the path that moved it out, run on the path that did not (no leak, no double-free).
+static void test_conditional_move_drop(void) {
+#define CM_PRE                                                                                                          \
+  PRE "interface Drop { fn drop(self: &mut Self); }\n"                                                                  \
+      "struct R { pub tag: i32 }\n"                                                                                     \
+      "extend R as Drop { fn drop(self: &mut Self) { putchar(self.tag); } }\n"                                          \
+      "fn consume(r: R) void { }\n"
+  // moved in the then-branch only: when taken, consume drops it; when not, the scope-exit drop runs.
+  sc_run_program(
+      "drop: conditional move, branch taken",
+      CM_PRE "fn run(c: bool) void { let a = R { tag: 65 }; if c { consume(a); } }\n"
+             "fn main() i32 { run(true); run(false); exit(0); }\n",
+      0, "AA"); // taken: consume drops A; not taken: auto-drop A -> one A per call, never zero or two
+  // moved on BOTH arms: the flag is set on either path, so the scope-exit drop is always skipped (consume owns it).
+  sc_run_program(
+      "drop: moved on both branches",
+      CM_PRE "fn run(c: bool) void { let a = R { tag: 65 }; if c { consume(a); } else { consume(a); } }\n"
+             "fn main() i32 { run(true); run(false); exit(0); }\n",
+      0, "AA"); // each call: exactly one drop (inside consume), none leaked, none double
+  // a fresh flag per loop iteration: moved only when i==1, dropped otherwise -> three drops total.
+  sc_run_program(
+      "drop: conditional move inside a loop",
+      CM_PRE "fn main() i32 { let mut i = 0; while i < 3 { let a = R { tag: 65 }; if i == 1 { consume(a); } i = i + 1; } exit(0); }\n",
+      0, "AAA");
+#undef CM_PRE
+}
+
 static void test_defer(void) {
   // LIFO execution at scope exit: prints 1 2, then the defers reversed (b a).
   sc_run_program(
@@ -1034,6 +1062,7 @@ static void test_static_assert(void) {
 int main(void) {
   test_attributes();
   test_drop_raii();
+  test_conditional_move_drop();
   test_defer();
   test_static_assert();
   test_interfaces();

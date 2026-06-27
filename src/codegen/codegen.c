@@ -124,9 +124,21 @@ struct Codegen {
     uint32_t loop_defer_base;
     // RAII: locals of a `Drop`-implementing type are dropped at scope exit, UNLESS moved out (passed by
     // value, bound to another name, or returned) -- a moved value is owned (and dropped) elsewhere. `moved`
-    // holds the decl nodes moved anywhere in the current function (a sound, if conservative, double-free guard).
+    // holds bindings moved UNCONDITIONALLY (on every path), whose auto-drop is elided outright.
     NodeId moved[512];
     uint32_t nmoved;
+    // A binding moved on only SOME paths (inside an if/match/loop branch) can't be elided outright (the
+    // no-move path would leak): it gets a runtime `bool __mv<decl>` set true at each move site, and its
+    // scope-exit drop is guarded `if (!__mv<decl>)`. `cond_moved` are those bindings; `cond_sites` are the
+    // identifier expressions that move them (where the flag is set).
+    NodeId cond_moved[256];
+    uint32_t ncond_moved;
+    NodeId cond_sites[256];
+    uint32_t ncond_sites;
+    // Conditionally-moved by-value Drop parameters: their drop flags are declared at the function body's
+    // top (a parameter has no `let` site to attach them to). Consumed once by emit_block_from.
+    NodeId param_flags[32];
+    uint32_t nparam_flags;
     ERRORS_VARIABLES;
 };
 
@@ -216,6 +228,18 @@ static const char *const BUILTIN_C[BT_COUNT] = {
 static void emit_expr(Codegen *c, NodeId id);
 static NodeId array_length_of(Codegen *c, NodeId iter);
 static long array_literal_count(Codegen *c, NodeId obj);
+
+// The runtime drop-flag name for a conditionally-moved Drop binding (decl node `decl`): `__mv<decl>`.
+static inline void cg_move_flag(char *out, const size_t cap, const NodeId decl) {
+  snprintf(out, cap, "__mv%u", decl);
+}
+// Is the identifier expression `expr` a conditional-move site (set its binding's drop flag when emitting it)?
+static inline bool cg_is_cond_site(const Codegen *c, const NodeId expr) {
+  for (uint32_t i = 0; i < c->ncond_sites; i++)
+    if (c->cond_sites[i] == expr)
+      return true;
+  return false;
+}
 static void emit_stmt(Codegen *c, NodeId id);
 static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId srcTy, char *out, size_t cap);
 static const char *cg_conv_lit(Codegen *c, ModuleId m, Span name);
@@ -2395,7 +2419,15 @@ static void emit_expr(Codegen *c, const NodeId id) {
       emit_literal(c, id, n);
       break;
     case NODE_IDENTIFIER:
-      emit_ident_ref(c, id, n);
+      if (cg_is_cond_site(c, id)) { // a conditional move: set the drop flag, then yield the value
+        char fl[32];
+        cg_move_flag(fl, sizeof fl, ast_resolution_def(c->ast, id).node);
+        emit(c, "(%s = true, ", fl);
+        emit_ident_ref(c, id, n);
+        emit(c, ")");
+      } else {
+        emit_ident_ref(c, id, n);
+      }
       break;
     case NODE_UNARY: {
       const TokenType op = n->as.unary.op;
@@ -3013,6 +3045,13 @@ static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
   const Node *const n = ast_at_const(c->ast, id);
   emit(c, "{\n");
   c->depth++;
+  for (uint32_t i = 0; i < c->nparam_flags; i++) { // cond-moved Drop params: drop flags at function-body top
+    char fl[32];
+    cg_move_flag(fl, sizeof fl, c->param_flags[i]);
+    emit_indent(c);
+    emit(c, "bool %s = false;\n", fl);
+  }
+  c->nparam_flags = 0; // consumed -- nested blocks must not re-emit them
   const NodeList stmts = n->as.block.statements;
   const NodeId *const ids = ast_list(c->ast, stmts);
   for (uint32_t i = 0; i < stmts.len; i++) {
@@ -3637,10 +3676,19 @@ static bool cg_is_moved(const Codegen *c, const NodeId decl) {
   return false;
 }
 
-// Record `expr` as a move if it is a bare reference to a current-module owned binding (a `let` or a
-// by-value parameter) -- ownership transfers to another owner (`let`, `return`, assignment, struct field,
-// or a by-value call argument), so the source must not be auto-dropped here.
-static void cg_mark_move(Codegen *c, const NodeId expr) {
+static bool cg_is_cond_moved(const Codegen *c, const NodeId decl) {
+  for (uint32_t i = 0; i < c->ncond_moved; i++)
+    if (c->cond_moved[i] == decl)
+      return true;
+  return false;
+}
+
+// Identifier `expr` is a move site (a `let`/`return`/assignment RHS, struct field, or by-value call arg
+// reference to a current-module owned Drop binding). `pass`/`cond` drive the two-pass classification:
+//  pass 0 records UNCONDITIONAL moves (cond==false) into `moved` -- those skip auto-drop outright;
+//  pass 1 records the move SITES of bindings moved only conditionally (cond==true and not unconditional),
+//          into `cond_moved` + `cond_sites`, so each gets a runtime drop flag instead.
+static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const int pass) {
   if (expr == NODE_NONE || ast_at_const(c->ast, expr)->kind != NODE_IDENTIFIER)
     return;
   const DefId d = ast_resolution_def(c->ast, expr);
@@ -3649,13 +3697,25 @@ static void cg_mark_move(Codegen *c, const NodeId expr) {
   const NodeKind dk = ast_at_const(c->ast, d.node)->kind;
   if (dk != NODE_LET && dk != NODE_PARAMETER)
     return;
-  if (c->nmoved < (uint32_t)(sizeof c->moved / sizeof c->moved[0]))
-    c->moved[c->nmoved++] = d.node;
+  if (!cg_type_is_drop(c, ast_type(c->ast, expr))) // only Drop bindings are tracked (others need no drop)
+    return;
+  if (pass == 0) {
+    if (!cond && c->nmoved < (uint32_t)(sizeof c->moved / sizeof c->moved[0]))
+      c->moved[c->nmoved++] = d.node; // moved on a guaranteed path -> elide its drop entirely
+    return;
+  }
+  if (!cond || cg_is_moved(c, d.node)) // pass 1: only conditional moves of not-already-elided bindings
+    return;
+  if (!cg_is_cond_moved(c, d.node) && c->ncond_moved < (uint32_t)(sizeof c->cond_moved / sizeof c->cond_moved[0]))
+    c->cond_moved[c->ncond_moved++] = d.node;
+  if (c->ncond_sites < (uint32_t)(sizeof c->cond_sites / sizeof c->cond_sites[0]))
+    c->cond_sites[c->ncond_sites++] = expr;
 }
 
-// Pre-pass over a function body collecting moved local bindings (so RAII skips dropping them). A move is a
-// bare binding used as a `let` initializer, an assignment RHS, a returned value, or a struct field value.
-static void cg_scan_moves(Codegen *c, const NodeId id) {
+// Pre-pass over a function body classifying moved Drop bindings (so RAII elides or guards their drop). A
+// move is a bare binding used as a `let` initializer, assignment RHS, returned value, struct field value,
+// or by-value call argument. `cond` is true once inside an if/match/loop branch (a not-always-taken path).
+static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const int pass) {
   if (id == NODE_NONE)
     return;
   const Node *const n = ast_at_const(c->ast, id);
@@ -3664,88 +3724,89 @@ static void cg_scan_moves(Codegen *c, const NodeId id) {
       const NodeList ss = n->as.block.statements;
       const NodeId *const ids = ast_list(c->ast, ss);
       for (uint32_t i = 0; i < ss.len; i++)
-        cg_scan_moves(c, ids[i]);
+        cg_scan_moves(c, ids[i], cond, pass);
       break;
     }
     case NODE_LET:
-      cg_mark_move(c, n->as.let_stmt.value);
-      cg_scan_moves(c, n->as.let_stmt.value);
+      cg_mark_move(c, n->as.let_stmt.value, cond, pass);
+      cg_scan_moves(c, n->as.let_stmt.value, cond, pass);
       break;
     case NODE_RETURN: {
       const NodeList vs = n->as.return_stmt.values;
       const NodeId *const ids = ast_list(c->ast, vs);
       for (uint32_t i = 0; i < vs.len; i++) {
-        cg_mark_move(c, ids[i]);
-        cg_scan_moves(c, ids[i]);
+        cg_mark_move(c, ids[i], cond, pass);
+        cg_scan_moves(c, ids[i], cond, pass);
       }
       break;
     }
     case NODE_ASSIGNMENT:
-      cg_mark_move(c, n->as.binary.right);
-      cg_scan_moves(c, n->as.binary.left);
-      cg_scan_moves(c, n->as.binary.right);
+      cg_mark_move(c, n->as.binary.right, cond, pass);
+      cg_scan_moves(c, n->as.binary.left, cond, pass);
+      cg_scan_moves(c, n->as.binary.right, cond, pass);
       break;
     case NODE_STRUCT_INITIALIZER: {
       const NodeList fs = n->as.struct_initializer.fields;
       const NodeId *const ids = ast_list(c->ast, fs);
       for (uint32_t i = 0; i < fs.len; i++) {
         const NodeId v = ast_at_const(c->ast, ids[i])->as.field_initializer.value;
-        cg_mark_move(c, v);
-        cg_scan_moves(c, v);
+        cg_mark_move(c, v, cond, pass);
+        cg_scan_moves(c, v, cond, pass);
       }
       break;
     }
-    case NODE_IF:
-      cg_scan_moves(c, n->as.if_stmt.condition);
-      cg_scan_moves(c, n->as.if_stmt.then_branch);
-      cg_scan_moves(c, n->as.if_stmt.else_branch);
+    case NODE_IF: // the branches are conditional paths; the condition always runs
+      cg_scan_moves(c, n->as.if_stmt.condition, cond, pass);
+      cg_scan_moves(c, n->as.if_stmt.then_branch, true, pass);
+      cg_scan_moves(c, n->as.if_stmt.else_branch, true, pass);
       break;
-    case NODE_WHILE:
-      cg_scan_moves(c, n->as.while_stmt.condition);
-      cg_scan_moves(c, n->as.while_stmt.body);
+    case NODE_WHILE: // the body may run zero or many times -> conditional
+      cg_scan_moves(c, n->as.while_stmt.condition, cond, pass);
+      cg_scan_moves(c, n->as.while_stmt.body, true, pass);
       break;
     case NODE_FOR:
-      cg_scan_moves(c, n->as.for_stmt.iterable);
-      cg_scan_moves(c, n->as.for_stmt.body);
+      cg_scan_moves(c, n->as.for_stmt.iterable, cond, pass);
+      cg_scan_moves(c, n->as.for_stmt.body, true, pass);
       break;
-    case NODE_MATCH: {
-      cg_scan_moves(c, n->as.match_expr.value);
+    case NODE_MATCH: { // each arm body is one of several alternative paths
+      cg_scan_moves(c, n->as.match_expr.value, cond, pass);
       const NodeList arms = n->as.match_expr.arms;
       const NodeId *const ids = ast_list(c->ast, arms);
       for (uint32_t i = 0; i < arms.len; i++)
-        cg_scan_moves(c, ast_at_const(c->ast, ids[i])->as.match_arm.body);
+        cg_scan_moves(c, ast_at_const(c->ast, ids[i])->as.match_arm.body, true, pass);
       break;
     }
     case NODE_EXPRESSION_STATEMENT:
     case NODE_DEFER:
-      cg_scan_moves(c, n->as.single.value);
+      cg_scan_moves(c, n->as.single.value, cond, pass);
       break;
     case NODE_CALL: {
-      cg_scan_moves(c, n->as.call.callee);
+      cg_scan_moves(c, n->as.call.callee, cond, pass);
       const NodeList args = n->as.call.args;
       const NodeId *const ids = ast_list(c->ast, args);
       for (uint32_t i = 0; i < args.len; i++) {
-        cg_mark_move(c, ids[i]); // a by-value argument moves the binding to the callee (which owns/drops it)
-        cg_scan_moves(c, ids[i]);
+        cg_mark_move(c, ids[i], cond, pass); // a by-value argument moves the binding to the callee
+        cg_scan_moves(c, ids[i], cond, pass);
       }
       break;
     }
-    case NODE_BINARY:
-      cg_scan_moves(c, n->as.binary.left);
-      cg_scan_moves(c, n->as.binary.right);
+    case NODE_BINARY: // `&&`/`||` short-circuit: the right operand is a conditional path
+      cg_scan_moves(c, n->as.binary.left, cond, pass);
+      cg_scan_moves(c, n->as.binary.right,
+                    cond || n->as.binary.op == AmpersandAmpersand || n->as.binary.op == PipePipe, pass);
       break;
     case NODE_UNARY:
-      cg_scan_moves(c, n->as.unary.operand);
+      cg_scan_moves(c, n->as.unary.operand, cond, pass);
       break;
     case NODE_MEMBER:
-      cg_scan_moves(c, n->as.member.object);
+      cg_scan_moves(c, n->as.member.object, cond, pass);
       break;
     case NODE_INDEX:
-      cg_scan_moves(c, n->as.index.object);
-      cg_scan_moves(c, n->as.index.index);
+      cg_scan_moves(c, n->as.index.object, cond, pass);
+      cg_scan_moves(c, n->as.index.index, cond, pass);
       break;
     case NODE_CAST:
-      cg_scan_moves(c, n->as.cast.expression);
+      cg_scan_moves(c, n->as.cast.expression, cond, pass);
       break;
     default:
       break;
@@ -3793,6 +3854,11 @@ static void emit_auto_drop(Codegen *c, const NodeId bid) {
   const DefId dm = cg_drop_method(c, om, od);
   if (dm.node == NODE_NONE)
     return;
+  if (cg_is_cond_moved(c, bid)) { // conditionally moved: drop only on the path that did NOT move it out
+    char fl[32];
+    cg_move_flag(fl, sizeof fl, bid);
+    emit(c, "if (!%s) ", fl);
+  }
   if (y->kind == TYPE_INSTANCE) {
     char inm[200];
     inst_name(c, ast_instance(c->ast, y->as.inst), inm, sizeof inm);
@@ -3872,6 +3938,12 @@ static void emit_stmt(Codegen *c, const NodeId id) {
         emit_initializer(c, n->as.let_stmt.type, n->as.let_stmt.value);
       }
       emit(c, ";\n");
+      if (autodrop && cg_is_cond_moved(c, id)) { // a fresh drop flag per execution (resets each loop pass)
+        char fl[32];
+        cg_move_flag(fl, sizeof fl, id);
+        emit_indent(c);
+        emit(c, "bool %s = false;\n", fl);
+      }
       if (autodrop)
         cg_register_auto_drop(c, id); // RAII: schedule a scope-exit drop
       break;
@@ -4183,15 +4255,20 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
     emit(c, " ");
     c->defer_top = 0; // each function body is a fresh defer scope
     c->loop_defer_base = 0;
-    c->nmoved = 0; // RAII: collect bindings moved out of this body, so their auto-drop is elided
-    cg_scan_moves(c, fn->as.function.body);
+    c->nmoved = c->ncond_moved = c->ncond_sites = 0; // RAII move analysis, fresh per function body
+    cg_scan_moves(c, fn->as.function.body, false, 0);  // pass 0: bindings moved on every path (drop elided)
+    cg_scan_moves(c, fn->as.function.body, false, 1);  // pass 1: conditional move sites (drop flag-guarded)
     // A by-value Drop parameter is owned by this function -> drop it at scope exit (unless moved). Pushed
     // first so params are torn down LAST (after locals), preserving reverse-construction order.
     const NodeList ps = fn->as.function.params;
     const NodeId *const pids = ast_list(c->ast, ps);
+    c->nparam_flags = 0;
     for (uint32_t i = 0; i < ps.len; i++)
-      if (cg_will_auto_drop(c, pids[i]))
+      if (cg_will_auto_drop(c, pids[i])) {
         cg_register_auto_drop(c, pids[i]);
+        if (cg_is_cond_moved(c, pids[i]) && c->nparam_flags < (uint32_t)(sizeof c->param_flags / sizeof c->param_flags[0]))
+          c->param_flags[c->nparam_flags++] = pids[i]; // declared at body top by emit_block_from
+      }
     emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also drops owned parameters
     emit(c, "\n\n");
   } else {
