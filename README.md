@@ -210,7 +210,7 @@ fn main() i32 {
     let mut s = String::from_str("hi");
     s.push_str("!");
     s.println();
-    s.drop();
+    s.free();
 
     let o = Option::<i32>::some(v.len() as i32);
     return o.unwrap_or(0);   // 3
@@ -366,8 +366,8 @@ includes, variadics in both directions via `va_list`, `_Complex`), and `sizeof`.
 
 Planned / not yet implemented:
 
-* RAII-style automatic cleanup (a `Drop` trait invoked at scope exit; `defer` is the manual form today)
-* move/borrow analysis and double-drop prevention
+* RAII-style automatic cleanup (a `Free` trait invoked at scope exit; `defer` is the manual form today)
+* move/borrow analysis and double-free prevention
 * capturing closures
 * the `?` early-return operator
 * operator overloading via traits

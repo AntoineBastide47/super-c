@@ -51,6 +51,44 @@ static TypeId resolve_type(TypeChecker *t, NodeId id);
 static TypeId decl_type(TypeChecker *t, NodeId decl);
 static TypeId decl_type_in(TypeChecker *t, ModuleId m, NodeId decl);
 static TypeId named_type_of(TypeChecker *t, ModuleId m, NodeId decl);
+static TypeId lower_type_in(TypeChecker *t, ModuleId m, NodeId id);
+static TypeId subst_type(TypeChecker *t, TypeId ty, const DefId *params, const TypeId *args, int n);
+
+// Fill trailing generic args from their declared `= <default>` (e.g. the `A=Global` of `Box<T, A=Global>`).
+// `dmod`/`dn` is the generic aggregate; `ta`/`*tn` already holds the explicitly-supplied args. Each missing
+// param's default is lowered in the owner module and substituted for any earlier params it names (`<T, U=T>`).
+static void apply_default_args(TypeChecker *t, const ModuleId dmod, const Node *const dn, TypeId *const ta,
+                               uint8_t *const tn) {
+  const NodeList gens = dn->as.aggregate.generics;
+  if (*tn >= gens.len)
+    return;
+  Ast *const da = mod_ast(t, dmod);
+  const NodeId *const gids = ast_list(da, gens);
+  for (uint32_t i = *tn; i < gens.len && *tn < 4; i++) {
+    const NodeId dft = ast_at_const(da, gids[i])->as.generic_param.default_type;
+    if (dft == NODE_NONE)
+      break; // defaults must be trailing; a gap means the application is under-applied (caught by arity check)
+    TypeId d = lower_type_in(t, dmod, dft);
+    if (*tn > 0) {
+      DefId params[4];
+      for (uint8_t j = 0; j < *tn; j++)
+        params[j] = (DefId){.module = dmod, .node = gids[j]};
+      d = subst_type(t, d, params, ta, *tn);
+    }
+    ta[(*tn)++] = d;
+  }
+}
+
+// Whether aggregate `dn` (in module `dmod`) can complete an application that supplied `from` explicit args
+// from defaults -- i.e. the param at index `from` declares a `= <default>`. Lets a bare all-defaulted name
+// (`String` where `String<A = Global>`) resolve to its defaulted instance (`String<Global>`).
+static bool agg_has_default_at(TypeChecker *t, const ModuleId dmod, const Node *const dn, const uint32_t from) {
+  const NodeList gens = dn->as.aggregate.generics;
+  if (from >= gens.len)
+    return false;
+  const NodeId gid = ast_list(mod_ast(t, dmod), gens)[from];
+  return ast_at_const(mod_ast(t, dmod), gid)->as.generic_param.default_type != NODE_NONE;
+}
 
 // `str` is no longer a builtin -- a string literal's type is the std prelude's `str` struct.
 static TypeId prelude_str_type(TypeChecker *t) {
@@ -65,7 +103,8 @@ static TypeId prelude_slice_type(TypeChecker *t, TypeId elem, bool mut);
 static int slice_kind(TypeChecker *t, TypeId tid, TypeId *elem);
 static bool is_assignable(TypeChecker *t, NodeId node);
 static bool is_place(TypeChecker *t, NodeId node);
-static void check_pattern(TypeChecker *t, NodeId id, TypeId expected);
+// bind_ref: 0 = value (owned/move) bindings; 1 = `&T` bindings (matching `&Self`); 2 = `&mut T` bindings.
+static void check_pattern(TypeChecker *t, NodeId id, TypeId expected, int bind_ref);
 static void render_type(TypeChecker *t, TypeId tid, char *buf, size_t cap);
 static TypeId check_member(TypeChecker *t, const Node *n, bool prefer_method);
 static TypeId subst_type(TypeChecker *t, TypeId ty, const DefId *params, const TypeId *args, int n);
@@ -187,6 +226,13 @@ static TypeId strip(const TypeChecker *t, TypeId x) {
     y = ast_type_at(t->ast, x);
   }
   return x;
+}
+
+// A reference type `&elem` / `&mut elem` (for switch ref-binding-mode payloads). A non-mut reference uses
+// TYPE_QUAL_NONE, matching how `&x` / a `&T` annotation are interned (so the two unify).
+static TypeId tc_ref(TypeChecker *t, const TypeId elem, const bool mut) {
+  return ast_intern_type(
+      t->ast, (Ty){.kind = TYPE_REFERENCE, .qualifier = mut ? TYPE_QUAL_MUT : TYPE_QUAL_NONE, .as.elem = elem});
 }
 
 static void render_type(TypeChecker *t, const TypeId tid, char *buf, const size_t cap) {
@@ -604,10 +650,29 @@ static DefId find_default_method(TypeChecker *t, const ModuleId tmod, const Node
   return (DefId){0, NODE_NONE};
 }
 
+// Is generic param `gp` (in module `m`) bound by the `Free` interface (`<T: Free>`)?
+static bool tc_param_has_free_bound(TypeChecker *t, const ModuleId m, const NodeId gp) {
+  Ast *const a = mod_ast(t, m);
+  const NodeList bs = ast_at_const(a, gp)->as.generic_param.bounds;
+  const NodeId *const bids = ast_list(a, bs);
+  for (uint32_t i = 0; i < bs.len; i++) {
+    const DefId bd = ast_resolution_def(a, bids[i]);
+    if (bd.node == NODE_NONE)
+      continue;
+    const Node *const bn = ast_at_const(mod_ast(t, bd.module), bd.node);
+    if (bn->kind == NODE_TRAIT &&
+        span_is(mod_src(t, bd.module), ast_at_const(mod_ast(t, bd.module), bn->as.trait_def.name)->as.name.text, "Free"))
+      return true;
+  }
+  return false;
+}
+
 // Does `ty` implement the Free interface (`extend T as Free`)? Such values are move-tracked: once moved,
 // a re-use is an error (and the value is not double-freed). Plain non-Free value types are not tracked,
-// so ordinary value-semantics copies (`let p2 = p1` for a POD struct) stay legal.
-static bool tc_type_is_drop(TypeChecker *t, const TypeId ty) {
+// so ordinary value-semantics copies (`let p2 = p1` for a POD struct) stay legal. For a conditional impl
+// (`extend<T: Free> Option<T> as Free`) the instance must satisfy the `Free` bounds (Option<i32> is NOT
+// Free; Option<String> is) -- positional with the aggregate's type args.
+static bool tc_type_is_free(TypeChecker *t, const TypeId ty) {
   ModuleId om;
   NodeId od;
   DefId gp[4];
@@ -633,9 +698,17 @@ static bool tc_type_is_drop(TypeChecker *t, const TypeId ty) {
       if (tr.node == NODE_NONE)
         continue;
       const Node *const trn = ast_at_const(mod_ast(t, tr.module), tr.node);
-      if (trn->kind == NODE_TRAIT &&
-          span_is(mod_src(t, tr.module), ast_at_const(mod_ast(t, tr.module), trn->as.trait_def.name)->as.name.text, "Free"))
-        return true;
+      if (trn->kind != NODE_TRAIT ||
+          !span_is(mod_src(t, tr.module), ast_at_const(mod_ast(t, tr.module), trn->as.trait_def.name)->as.name.text,
+                   "Free"))
+        continue;
+      // Every `Free`-bounded type parameter of the impl must map to a `Free` argument.
+      const NodeList gens = it->as.impl_def.generics;
+      const NodeId *const gids = ast_list(a, gens);
+      for (uint32_t k = 0; k < gens.len && (int)k < gn; k++)
+        if (tc_param_has_free_bound(t, m, gids[k]) && !tc_type_is_free(t, ga[k]))
+          return false;
+      return true;
     }
   }
   return false;
@@ -650,7 +723,7 @@ static void tc_mark_move(TypeChecker *t, const NodeId expr) {
   if (d.module != t->ast->module || d.node == NODE_NONE)
     return;
   const NodeKind dk = ast_at_const(t->ast, d.node)->kind;
-  if ((dk != NODE_LET && dk != NODE_PARAMETER) || !tc_type_is_drop(t, ast_type(t->ast, expr)))
+  if ((dk != NODE_LET && dk != NODE_PARAMETER) || !tc_type_is_free(t, ast_type(t->ast, expr)))
     return;
   for (uint32_t i = 0; i < t->nmoved; i++)
     if (t->moved[i] == d.node)
@@ -689,6 +762,8 @@ typedef struct {
   uint32_t nmoved;
   NodeId uninit[64];
   uint32_t nuninit;
+  NodeId freed[64];
+  uint32_t nfreed;
 } FlowState;
 
 static FlowState tc_flow_save(const TypeChecker *t) {
@@ -699,6 +774,9 @@ static FlowState tc_flow_save(const TypeChecker *t) {
   s.nuninit = t->nuninit;
   for (uint32_t i = 0; i < t->nuninit; i++)
     s.uninit[i] = t->uninit[i];
+  s.nfreed = t->nfreed;
+  for (uint32_t i = 0; i < t->nfreed; i++)
+    s.freed[i] = t->freed[i];
   return s;
 }
 
@@ -709,6 +787,9 @@ static void tc_flow_set(TypeChecker *t, const FlowState *s) {
   t->nuninit = s->nuninit;
   for (uint32_t i = 0; i < s->nuninit; i++)
     t->uninit[i] = s->uninit[i];
+  t->nfreed = s->nfreed;
+  for (uint32_t i = 0; i < s->nfreed; i++)
+    t->freed[i] = s->freed[i];
 }
 
 static void tc_flow_collect(FlowState *acc, const TypeChecker *t) { // union the live state into `acc`
@@ -725,6 +806,13 @@ static void tc_flow_collect(FlowState *acc, const TypeChecker *t) { // union the
       seen |= acc->uninit[j] == t->uninit[i];
     if (!seen && acc->nuninit < (uint32_t)(sizeof acc->uninit / sizeof acc->uninit[0]))
       acc->uninit[acc->nuninit++] = t->uninit[i];
+  }
+  for (uint32_t i = 0; i < t->nfreed; i++) {
+    bool seen = false;
+    for (uint32_t j = 0; j < acc->nfreed; j++)
+      seen |= acc->freed[j] == t->freed[i];
+    if (!seen && acc->nfreed < (uint32_t)(sizeof acc->freed / sizeof acc->freed[0]))
+      acc->freed[acc->nfreed++] = t->freed[i];
   }
 }
 
@@ -974,12 +1062,14 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
       if (d.node != NODE_NONE) {
         const Node *const dn = ast_at_const(mod_ast(t, d.module), d.node);
         const NodeList args = n->as.type_path.args;
-        if ((dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) && dn->as.aggregate.generics.len > 0 && args.len > 0) {
+        if ((dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) && dn->as.aggregate.generics.len > 0 &&
+            (args.len > 0 || agg_has_default_at(t, d.module, dn, args.len))) {
           const NodeId *const aids = ast_list(a, args); // a foreign generic application (Box<T>) -> an instance
           TypeId ta[4];
           uint8_t tn = 0;
           for (uint32_t i = 0; i < args.len && tn < 4; i++)
             ta[tn++] = lower_type_in(t, m, aids[i]);
+          apply_default_args(t, d.module, dn, ta, &tn);
           return ast_intern_instance(t->ast, d.module, d.node, ta, tn);
         }
         return named_type_of(t, d.module, d.node);
@@ -1111,11 +1201,13 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
             result = resolve_type(t, target);
           else
             result = named_type_of(t, d.module, d.node);
-        } else if (generic_agg && args.len > 0) { // `Vec<i32>` -> an interned generic instance
+        } else if (generic_agg && (args.len > 0 || agg_has_default_at(t, d.module, dn, args.len))) {
+          // `Vec<i32>` -> an interned instance; a bare all-defaulted name (`String`) -> `String<Global>`.
           TypeId ta[4];
           uint8_t tn = 0;
           for (uint32_t i = 0; i < args.len && tn < 4; i++)
             ta[tn++] = resolve_type(t, arg_ids[i]);
+          apply_default_args(t, d.module, dn, ta, &tn);
           result = ast_intern_instance(t->ast, d.module, d.node, ta, tn);
         } else {
           result = named_type_of(t, d.module, d.node);
@@ -1604,6 +1696,22 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
     const DefId b = ast_resolution_def(t->ast, obj); // carries the module too (a prelude type isn't local)
     bmod = b.module;
     bdecl = b.node;
+    // A bare all-defaulted generic name as a `::` base (`String::from_str`) denotes its defaulted instance
+    // (`String<Global>`): record that instance as the base's type so the assoc call substitutes the impl's
+    // generics and codegen mangles it as `String__Global__from_str`.
+    if (bdecl != NODE_NONE) {
+      const Node *const bdn = ast_at_const(mod_ast(t, bmod), bdecl);
+      if ((bdn->kind == NODE_STRUCT || bdn->kind == NODE_ENUM) && bdn->as.aggregate.generics.len > 0 &&
+          agg_has_default_at(t, bmod, bdn, 0)) {
+        TypeId ta[4];
+        uint8_t tn = 0;
+        apply_default_args(t, bmod, bdn, ta, &tn);
+        if (tn == bdn->as.aggregate.generics.len) {
+          inst_ty = ast_intern_instance(t->ast, bmod, bdecl, ta, tn);
+          ast_set_type(t->ast, obj, inst_ty);
+        }
+      }
+    }
   } else { // nested base, e.g. `(mod::Type)::method` or `Opt::<i32>::Variant`
     const TypeId bt = check_expr(t, obj);
     const Ty *const ty = ast_type_at(t->ast, bt);
@@ -1897,7 +2005,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   for (uint32_t i = 0; i < args.len; i++)
     check_expr(t, aids[i]);
   for (uint32_t i = 0; i < args.len; i++)
-    tc_mark_move(t, aids[i]); // a by-value Free argument is moved to the callee (which owns/drops it)
+    tc_mark_move(t, aids[i]); // a by-value Free argument is moved to the callee (which owns/frees it)
 
   if (callee == TYPE_NONE)
     return TYPE_NONE;
@@ -1932,7 +2040,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, callee_node->as.member.member)->as.name.text, "free")) {
     const NodeId recv = callee_node->as.member.object;
     const Ty *const rty = ast_type_at(t->ast, ast_type(t->ast, recv));
-    if (rty->kind != TYPE_POINTER && rty->kind != TYPE_REFERENCE && tc_type_is_drop(t, ast_type(t->ast, recv))) {
+    if (rty->kind != TYPE_POINTER && rty->kind != TYPE_REFERENCE && tc_type_is_free(t, ast_type(t->ast, recv))) {
       tc_mark_move(t, recv);
       if (ast_at_const(t->ast, recv)->kind == NODE_IDENTIFIER) { // record it as freed, for the use-after-free diagnostic
         const DefId rd = ast_resolution_def(t->ast, recv);
@@ -1940,6 +2048,14 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
           t->freed[t->nfreed++] = rd.node;
       }
     }
+  } else if (skip && callee_node->as.member.object != NODE_NONE) {
+    // A method whose `self` is taken BY VALUE (`fn unwrap_or(self: Option<T>, ..)`) consumes its receiver:
+    // the receiver moves into the call, so a later use is a use-after-move (and it is not double-freed).
+    const NodeId p0 = ast_list(fa, params)[0];
+    const NodeId pt = ast_at_const(fa, p0)->as.parameter.type;
+    const NodeKind ptk = pt != NODE_NONE ? ast_at_const(fa, pt)->kind : NODE_NONE_KIND;
+    if (ptk != NODE_POINTER_TYPE && ptk != NODE_REFERENCE_TYPE)
+      tc_mark_move(t, callee_node->as.member.object);
   }
 
   // A method or associated fn reached through a generic instance (`b.get()`, `Box::<i32>::make()`)
@@ -2612,6 +2728,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         uint8_t tn = 0;
         for (uint32_t i = 0; i < types.len && tn < 4; i++)
           ta[tn++] = resolve_type(t, ids[i]);
+        apply_default_args(t, d.module, dn, ta, &tn);
         result = ast_intern_instance(t->ast, d.module, d.node, ta, tn);
       } else {
         result = check_expr(t, inner);
@@ -2620,6 +2737,12 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     }
     case NODE_MATCH: {
       const TypeId scrut = check_expr(t, n->as.match_expr.value);
+      // Binding mode (Rust match ergonomics): matching a reference binds each payload by reference
+      // (`&T` / `&mut T`); matching an owned value moves it out and consumes the scrutinee.
+      const Ty *const sy = ast_type_at(a, scrut);
+      const int bind_ref = (sy->kind == TYPE_REFERENCE || sy->kind == TYPE_POINTER)
+                               ? (sy->qualifier == TYPE_QUAL_MUT ? 2 : 1)
+                               : 0;
       const NodeList arms = n->as.match_expr.arms;
       const NodeId *const ids = ast_list(a, arms);
       bool first = true;
@@ -2628,7 +2751,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       for (uint32_t i = 0; i < arms.len; i++) {
         const Node *const arm = ast_at_const(a, ids[i]);
         tc_flow_set(t, &mpre); // this arm does not see another arm's moves/inits
-        check_pattern(t, arm->as.match_arm.pattern, scrut);
+        check_pattern(t, arm->as.match_arm.pattern, scrut, bind_ref);
         const TypeId g = check_expr(t, arm->as.match_arm.guard);
         if (arm->as.match_arm.guard != NODE_NONE && g != TYPE_NONE && !is_bool(t, g)) {
           const Span sp = ast_at_const(a, arm->as.match_arm.guard)->span;
@@ -2646,6 +2769,8 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       if (arms.len)
         tc_flow_set(t, &acc); // post-match = union of every arm
+      if (bind_ref == 0)
+        tc_mark_move(t, n->as.match_expr.value); // destructuring an owned value consumes it (Free types tracked)
       break;
     }
     case NODE_NEW: {
@@ -2714,7 +2839,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         check_stmt(t, ids[i]);
       if (stmts.len > 0) {
         const Node *const last = ast_at_const(a, ids[stmts.len - 1]);
-        result = last->kind == NODE_EXPRESSION_STATEMENT ? ast_type(a, last->as.single.value) : ast_builtin(BT_VOID);
+        // A block's value is its final expression statement (`{ ..; e; }` yields `e`). An assignment is a
+        // statement, not a value, so a block ending in one is `void` (`{ x = y; }` is not an `i32`).
+        const NodeId lv = last->kind == NODE_EXPRESSION_STATEMENT ? last->as.single.value : NODE_NONE;
+        result = (lv != NODE_NONE && ast_at_const(a, lv)->kind != NODE_ASSIGNMENT) ? ast_type(a, lv)
+                                                                                   : ast_builtin(BT_VOID);
       } else {
         result = ast_builtin(BT_VOID);
       }
@@ -2825,6 +2954,35 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
   }
 }
 
+// Escape analysis (v1): the address provenance of a syntactically-obvious address expression.
+// 1 = address of a local binding, 2 = address of a parameter slot, 0 = anything else (global/heap, an
+// address through a pointer, or not an address). Looks through casts (`&x as *T`, `&x as usize`) and the
+// transparent Move/Unsafe wrappers; only a BARE identifier operand of `&`/`&mut` is classified, so
+// `&x.field` / `&arr[i]` / `&*p` stay unflagged (those may point through a pointer, not into a local slot).
+static int addr_escape(TypeChecker *t, NodeId e) {
+  const Node *n = ast_at_const(t->ast, e);
+  while (n->kind == NODE_CAST || (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe))) {
+    e = n->kind == NODE_CAST ? n->as.cast.expression : n->as.unary.operand;
+    n = ast_at_const(t->ast, e);
+  }
+  if (n->kind != NODE_UNARY || n->as.unary.op != Ampersand)
+    return 0;
+  if (ast_at_const(t->ast, n->as.unary.operand)->kind != NODE_IDENTIFIER)
+    return 0; // &x.field / &arr[i] / &*p -- a place expression, not a bare local slot
+  const DefId d = ast_resolution_def(t->ast, n->as.unary.operand);
+  if (d.node == NODE_NONE || d.module != t->ast->module)
+    return 0;
+  switch (ast_at_const(t->ast, d.node)->kind) {
+    case NODE_PARAMETER:
+      return 2;
+    case NODE_LET:
+    case NODE_PATTERN_NAME:
+      return 1;
+    default:
+      return 0; // a module-level const/static outlives the function -- safe to return its address
+  }
+}
+
 static void check_return(TypeChecker *t, const Node *const n, const NodeId id) {
   const NodeList values = n->as.return_stmt.values;
   const NodeId *const vids = ast_list(t->ast, values);
@@ -2837,6 +2995,15 @@ static void check_return(TypeChecker *t, const Node *const n, const NodeId id) {
   }
   for (uint32_t i = 0; i < values.len; i++)
     check_expr(t, vids[i]);
+  for (uint32_t i = 0; i < values.len; i++) { // escape analysis: a returned address of a local/param dangles
+    const int esc = addr_escape(t, vids[i]);
+    if (esc) {
+      const Span sp = ast_at_const(t->ast, vids[i])->span;
+      typechecker_errorf(
+          t, sp.start, sp.end - sp.start, "returning a pointer/reference to a %s, which does not outlive the call",
+          esc == 2 ? "function parameter" : "local variable");
+    }
+  }
   const uint32_t expected = returns_void ? 0 : rets.len;
   if (values.len != expected) {
     const Span sp = ast_at_const(t->ast, id)->span;
@@ -2913,7 +3080,7 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
       }
       ast_set_type(a, id, binding); // referenced via decl_type's cached read
       if (annotated && !valued) { // deferred initialization: usable only once definitely assigned
-        if (tc_type_is_drop(t, binding)) {
+        if (tc_type_is_free(t, binding)) {
           const Span sp = name_span(t, n->as.let_stmt.name);
           typechecker_errorf(t, sp.start, sp.end - sp.start,
                              "a Free-typed binding must be initialized when declared (it is freed at scope exit)");
@@ -2989,14 +3156,14 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
   }
 }
 
-static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected) {
+static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected, const int bind_ref) {
   if (id == NODE_NONE)
     return;
   Ast *const a = t->ast;
   const Node *const n = ast_at_const(a, id);
   switch (n->kind) {
     case NODE_IDENTIFIER: // shorthand struct-field binding
-      ast_set_type(a, id, expected);
+      ast_set_type(a, id, bind_ref ? tc_ref(t, expected, bind_ref == 2) : expected);
       break;
     case NODE_PATTERN_NAME: {
       // A bare name matching a *unit* variant of the scrutinee enum is a tag pattern, not a
@@ -3015,7 +3182,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
           break;
         }
       }
-      ast_set_type(a, id, expected); // plain binding
+      ast_set_type(a, id, bind_ref ? tc_ref(t, expected, bind_ref == 2) : expected); // plain binding
       break;
     }
     case NODE_PATTERN_STRUCT: {
@@ -3067,13 +3234,13 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
           const NodeList fc = fld->as.pattern.children;
           const NodeId *const fcids = ast_list(a, fc);
           for (uint32_t k = 0; k < fc.len; k++)
-            check_pattern(t, fcids[k], ft);
+            check_pattern(t, fcids[k], ft, bind_ref);
         }
       } else {
         if (agg && n->as.pattern.name != NODE_NONE)
           ast_set_resolution_def(a, n->as.pattern.name, (DefId){bmod, decl});
         for (uint32_t i = 0; i < children.len; i++)
-          check_pattern(t, ids[i], base); // children are NODE_PATTERN_FIELD; pass the aggregate type
+          check_pattern(t, ids[i], base, bind_ref); // children are NODE_PATTERN_FIELD; pass the aggregate type
       }
       break;
     }
@@ -3103,7 +3270,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       const NodeList children = n->as.pattern.children;
       const NodeId *const ids = ast_list(a, children);
       for (uint32_t i = 0; i < children.len; i++)
-        check_pattern(t, ids[i], field_type);
+        check_pattern(t, ids[i], field_type, bind_ref);
       break;
     }
     case NODE_PATTERN_TUPLE: { // enum-variant constructor pattern (named), or a parenthesized pattern (unnamed)
@@ -3151,7 +3318,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
           const Node *const pe = ast_at_const(va, pl[i]);
           pt = subst_type(t, lower_type_in(t, bmod, pe->kind == NODE_FIELD ? pe->as.field.type : pl[i]), gp, ga, gn);
         }
-        check_pattern(t, ids[i], pt);
+        check_pattern(t, ids[i], pt, bind_ref);
       }
       break;
     }
@@ -3159,7 +3326,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       const NodeList children = n->as.pattern.children;
       const NodeId *const ids = ast_list(a, children);
       for (uint32_t i = 0; i < children.len; i++)
-        check_pattern(t, ids[i], expected);
+        check_pattern(t, ids[i], expected, bind_ref);
       break;
     }
     default: // NODE_PATTERN_WILDCARD, NODE_PATTERN_LITERAL, NODE_PATTERN_RANGE
@@ -3188,7 +3355,7 @@ static void check_item(TypeChecker *t, const NodeId id) {
             t, sp.start, sp.end - sp.start, "a variadic function needs at least one fixed parameter before '...'");
       }
       // The program entry point must be `fn main() i32` -- it lowers to C's `int main(void)`, so any
-      // other return type or a parameter list would be silently dropped or miscompiled.
+      // other return type or a parameter list would be silently freeped or miscompiled.
       if (span_is(t->source, name_span(t, n->as.function.name), "main")) {
         const NodeList rets = n->as.function.returns;
         TypeId rt = TYPE_NONE;
@@ -3341,7 +3508,9 @@ void typechecker_check(TypeChecker *t) {
   for (uint32_t i = 0; i < items.len; i++)
     check_item(t, ids[i]);
   close_instances(t);
-  errors_finalize(&t->errors, &t->errors_start, &t->errors_len, t->source, t->len);
+  errors_finalize(
+      &t->errors, &t->errors_start, &t->errors_len, t->source, t->len,
+      t->package && t->ast->module < t->package->count ? t->package->modules[t->ast->module].file : NULL);
 }
 
 ERRORS_BODY(TypeChecker, typechecker, t)

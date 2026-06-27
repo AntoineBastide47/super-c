@@ -412,6 +412,7 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
     case NODE_GENERIC_PARAM:
       print_child(out, a, n->as.generic_param.name, source, depth + 1);
       print_list(out, a, n->as.generic_param.bounds, source, depth + 1);
+      print_child(out, a, n->as.generic_param.default_type, source, depth + 1);
       break;
     case NODE_WHERE_PREDICATE:
       print_child(out, a, n->as.where_predicate.type, source, depth + 1);

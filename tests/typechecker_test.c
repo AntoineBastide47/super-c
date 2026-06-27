@@ -185,6 +185,17 @@ static void test_errors(void) {
   // explicitly `free()`-ing a value consumes it: a later use is a use-after-free (distinct from a move).
   expect_error("use after explicit free",
                MOVE_PRE "fn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n", "use after free");
+  // a method whose `self` is taken BY VALUE consumes its receiver (Rust's `Option::unwrap_or(self, ..)`).
+  expect_error(
+      "use after by-value-self method call",
+      MOVE_PRE "extend R { fn consume(self: R) i32 { return self.t; } }\n"
+               "fn main() i32 { let a = R { t: 1 }; let x = a.consume(); return a.t; }\n",
+      "use of moved value");
+  // ...but a `&self` method only borrows -- the receiver stays usable afterward.
+  expect_ok(
+      "by-ref-self method call does not consume the receiver",
+      MOVE_PRE "extend R { fn peek(self: &R) i32 { return self.t; } }\n"
+               "fn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n");
 #undef MOVE_PRE
   // D#11 definite initialization: a deferred binding read before assignment, or initialized on only some paths.
   expect_error("read of uninitialized binding", "fn main() i32 { let mut x: i32; return x; }\n",
@@ -194,7 +205,7 @@ static void test_errors(void) {
                "use of possibly uninitialized value");
   expect_error("value read of uninitialized array element",
                "fn main() i32 { let mut a: [i32; 4]; return a[0]; }\n", "use of possibly uninitialized value");
-  expect_error( // a Free binding is dropped at scope exit, so it cannot be left to deferred initialization
+  expect_error( // a Free binding is freed at scope exit, so it cannot be left to deferred initialization
       "deferred-init Free binding",
       "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\n"
       "extend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n",
@@ -273,6 +284,18 @@ static void test_errors(void) {
       "&mut of immutable binding rejected",
       "fn use_p(p: &mut i32) {}\nfn f() { let x: i32 = 1; use_p(&mut x); }\n", "cannot take '&mut'");
   expect_ok("&mut of let mut allowed", "fn use_p(p: &mut i32) {}\nfn f() { let mut x: i32 = 1; use_p(&mut x); }\n");
+  // Escape analysis (v1): a returned address of a local/parameter dangles past the call.
+  expect_error("return &local", "fn bad() *const i32 { let x: i32 = 10; return &x; }\n", "does not outlive the call");
+  expect_error("return &mut local", "fn bad() *mut i32 { let mut x: i32 = 10; return &mut x; }\n",
+               "does not outlive the call");
+  expect_error("return &param", "fn bad(x: i32) *const i32 { return &x; }\n", "function parameter");
+  expect_error("return (&local) as usize", "fn bad() usize { let x: i32 = 10; return ((&x) as usize); }\n",
+               "does not outlive the call");
+  expect_ok("return &global const is fine", "const G: i32 = 7;\nfn ok() &i32 { return &G; }\n");
+  expect_ok("return a deref'd pointer param is fine", "fn ok(p: &i32) i32 { return *p; }\n");
+  expect_ok( // &x.field / &arr[i] are place expressions, not bare local slots -- not flagged (may be through a ptr)
+      "address of a field through a reference param is fine",
+      "struct P { pub x: i32 }\nfn ok(p: &P) &i32 { return &p.x; }\n");
   expect_error("return mismatch", "fn f() i32 { return true; }\n", "mismatched types");
   expect_error("index non-array", "fn main() i32 { let x: i32 = 1; let y: i32 = x[0]; }\n", "cannot index");
   expect_error(

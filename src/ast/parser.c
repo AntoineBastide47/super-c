@@ -12,6 +12,7 @@ struct Parser {
     unsigned depth; // recursive-descent nesting depth, bounded by PARSE_MAX_DEPTH so pathological input diagnoses, not crashes
     bool allow_struct_initializer;
     Ast *ast;
+    const char *file; // source path for diagnostics (NULL = none); set by the loader
     ERRORS_VARIABLES;
 };
 
@@ -46,6 +47,10 @@ Parser *parser_new(Token_Vec tokens, const char *source, const size_t len) {
   p->allow_struct_initializer = true;
   ERRORS_INIT(p);
   return p;
+}
+
+void parser_set_file(Parser *const p, const char *const file) {
+  p->file = file;
 }
 
 void parser_free(Parser **p) {
@@ -348,12 +353,13 @@ static NodeList parse_generics(Parser *p) {
     const uint32_t start = token_start(raw_peek(p));
     const NodeId name = identifier(p);
     const NodeList bounds = match(p, Colon) ? parse_bounds(p) : (NodeList){0};
+    const NodeId default_type = match(p, Equal) ? parse_type(p) : NODE_NONE;
     ast_push(
         p->ast, ast_add(
                     p->ast, (Node){
                                 .kind = NODE_GENERIC_PARAM,
                                 .span = span_new(start, previous_end(p)),
-                                .as.generic_param = {.name = name, .bounds = bounds},
+                                .as.generic_param = {.name = name, .bounds = bounds, .default_type = default_type},
                             }));
     if (!match(p, Comma))
       break;
@@ -1850,7 +1856,7 @@ void parser_build_ast(Parser *p) {
                   .span = span_new(0, (uint32_t)p->len),
                   .as.program = {.items = items},
               });
-  errors_finalize(&p->errors, &p->errors_start, &p->errors_len, p->source, p->len);
+  errors_finalize(&p->errors, &p->errors_start, &p->errors_len, p->source, p->len, p->file);
 }
 
 ERRORS_BODY(Parser, parser, p)

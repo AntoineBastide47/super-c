@@ -152,9 +152,9 @@ static void test_cross_module_generic_by_value(void) {
   mkfile(root, "opt/opt.spc",
          "pub enum Opt<T> { Some(T), None }\n"
          "extend<T> Opt<T> {\n"
-         "  pub fn unwrap_or(self: &Opt<T>, d: T) T { return switch self { Some(v) => v, None => d, }; }\n"
+         "  pub fn unwrap_or(self: &Opt<T>, d: T) T { return switch self { Some(v) => *v, None => d, }; }\n"
          "  pub fn map<U>(self: &Opt<T>, f: fn(T) U) Opt<U> {\n"
-         "    return switch self { Some(v) => Opt::<U>::Some(f(v)), None => Opt::<U>::None, }; }\n"
+         "    return switch self { Some(v) => Opt::<U>::Some(f(*v)), None => Opt::<U>::None, }; }\n"
          "}\n");
   mkfile(root, "genbv.spc",
          "import opt::opt;\n"

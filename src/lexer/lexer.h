@@ -12,6 +12,7 @@
 typedef struct Lexer Lexer;
 
 Lexer *lexer_new(const char *source, const size_t len);
+void lexer_set_file(Lexer *l, const char *file); // path shown in diagnostics (NULL = none)
 void lexer_free(Lexer **l);
 
 void lexer_scan_tokens(Lexer *l);

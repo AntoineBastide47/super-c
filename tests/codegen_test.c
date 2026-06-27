@@ -313,7 +313,8 @@ static void test_multi_return(void) {
 static void test_slices_and_arrays(void) {
   expect_contains("slice param is Slice__T", "fn first(s: []i32) i32 { return s[0]; }\n", "const Slice__i32 s");
   expect_contains("mut slice param is SliceMut__T", "fn set0(s: []mut i32) { s[0] = 1; }\n", "const SliceMut__i32 s");
-  expect_contains("slice index uses typed ptr", "fn first(s: []i32) i32 { return s[0]; }\n", "s.ptr[0]");
+  expect_contains("slice index uses typed ptr, bounds-checked", "fn first(s: []i32) i32 { return s[0]; }\n",
+                  "s.ptr[__sc_bounds(0, s.len)]");
   expect_contains("array param keeps extent", "fn g(a: [i32; 3]) i32 { return a[0]; }\n", "const int32_t a[3]");
   expect_contains(
       "array arg coerces to slice view", "fn take(s: []i32) i32 { return s[0]; }\nfn m() i32 { let a: [i32; 2] = [4, 5]; return take(a); }\n",
@@ -357,7 +358,7 @@ static void test_attributes(void) {
   const char *const EX = "@c.export(\"sc_init\")\nfn init() i32 { return 0; }\nfn main() i32 { return init(); }\n";
   expect_contains("export defines the exact symbol", EX, "int32_t sc_init(void)");
   expect_contains("export rewrites the call site", EX, "return sc_init()");
-  expect_absent("export drops the Super-C name", EX, " init(");
+  expect_absent("export elides the Super-C name", EX, " init(");
   // import renames an extern binding's symbol at the call site.
   expect_contains(
       "import binds to the C symbol",
@@ -396,13 +397,15 @@ static void test_callback_specialization(void) {
                               "fn inc(x: i32) i32 { return x + 1; }\n"
                               "fn use() i32 { return apply(10, inc); }\n";
   expect_contains("callback specialization emitted", KNOWN, "apply__cb_inc(");
-  expect_contains("callback call site drops the callback arg", KNOWN, "apply__cb_inc(10)");
-  expect_absent("private specialized-away original dropped", KNOWN, "(*const f)");
+  expect_contains("callback call site elides the callback arg", KNOWN, "apply__cb_inc(10)");
+  expect_absent("private specialized-away original elided", KNOWN,
+                "int32_t apply(const int32_t x, int32_t (*const f)(int32_t))");
 
   static const char RUNTIME[] = "fn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\n"
                                 "fn inc(x: i32) i32 { return x + 1; }\n"
                                 "fn use() i32 { let k: fn(i32) i32 = inc; return apply(10, k); }\n";
-  expect_contains("runtime callback keeps the pointer original", RUNTIME, "(*const f)");
+  expect_contains("runtime callback keeps the pointer original", RUNTIME,
+                  "int32_t apply(const int32_t x, int32_t (*const f)(int32_t))");
   expect_absent("runtime callback is not specialized", RUNTIME, "__cb_");
 }
 

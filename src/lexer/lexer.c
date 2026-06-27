@@ -36,6 +36,7 @@ struct Lexer {
     size_t len;
     size_t start;
     size_t current;
+    const char *file; // source path for diagnostics (NULL = none); set by the loader
 
     Token_Vec tokens;
     ERRORS_VARIABLES;
@@ -59,6 +60,10 @@ Lexer *lexer_new(const char *source, const size_t len) {
   l->tokens = Token_Vec_init();
   ERRORS_INIT(l);
   return l;
+}
+
+void lexer_set_file(Lexer *const l, const char *const file) {
+  l->file = file;
 }
 
 void lexer_free(Lexer **l) {
@@ -1029,7 +1034,7 @@ void lexer_scan_tokens(Lexer *l) {
 
   token_writer_push(l, &w, token_new(Eof, (uint32_t)len, 0));
   l->tokens.len = w.begin == NULL ? 0 : (size_t)(w.out - w.begin);
-  errors_finalize(&l->errors, &l->errors_start, &l->errors_len, l->bytes, len);
+  errors_finalize(&l->errors, &l->errors_start, &l->errors_len, l->bytes, len, l->file);
 }
 
 Token_Vec lexer_take_tokens(Lexer *l) {

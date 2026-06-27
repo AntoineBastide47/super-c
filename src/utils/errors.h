@@ -19,9 +19,11 @@ COLD_EXPORT void errors_vemitf(
 // Replace each collected message in place with a rendered, plain-text block
 // (header, source line, caret underline). Call once after all errors are
 // gathered, before logging. `errors` is rewritten in place, so it is not const.
+// `file` is the source's path, shown in the `--> file:line:col` location line
+// (NULL/"" falls back to `--> line:col`).
 COLD_EXPORT void errors_finalize(
     String_Vec *errors, const U32_Vec *errors_start, const U32_Vec *errors_len, const uint8_t *source,
-    const size_t len);
+    const size_t len, const char *file);
 
 // Write the rendered blocks to stderr, adding rustc-style ANSI colors only when
 // stderr is a terminal (so piped/redirected output and take_errors stay plain).
