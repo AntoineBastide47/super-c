@@ -414,6 +414,21 @@ static void test_field_vs_method(void) {
       55, ""); // field 5 + method (5*10)
 }
 
+// Inside a generic `extend<T> Wrap<T>`, `self: &Self` is the full target type `Wrap<T>` (not the argless
+// struct), so a method returning a `T` field unifies with its `T` return type -- no need to spell out
+// `self: &Wrap<T>`.
+static void test_generic_self_receiver(void) {
+  sc_run_program(
+      "generic method: &Self returns a T field",
+      PRE "struct Wrap<T> { pub a: T, pub b: T }\n"
+          "extend<T> Wrap<T> {\n"
+          "  fn first(self: &Self) T { return self.a; }\n"
+          "  fn swap(self: &Self) Wrap<T> { return Wrap::<T> { a: self.b, b: self.a }; }\n"
+          "}\n"
+          "fn main() i32 { let w = Wrap::<i32> { a: 30, b: 12 }; let s = w.swap(); exit(w.first() + s.first()); }\n",
+      42, ""); // 30 + 12
+}
+
 static void test_str(void) {
   // A string literal is a `str` view: `.len` is the byte count, `.ptr` indexes the UTF-8 bytes.
   sc_run_program(
@@ -992,7 +1007,7 @@ static void test_operator_overloading(void) {
   sc_run_program(
       "operator overload: index on a generic instance",
       PRE "struct Wrap<T> { pub a: T, pub b: T }\n"
-          "extend<T> Wrap<T> { fn index(self: &Wrap<T>, i: usize) T { if i == 0 { return self.a; } return self.b; } }\n"
+          "extend<T> Wrap<T> { fn index(self: &Self, i: usize) T { if i == 0 { return self.a; } return self.b; } }\n"
           "fn main() i32 { let w = Wrap::<i32> { a: 30, b: 12 }; exit(w[0] + w[1]); }\n", // 42
       42, "");
   // builtin numeric arithmetic and array indexing are unaffected by the overload path.
@@ -1206,6 +1221,7 @@ int main(void) {
   test_structs_and_methods();
   test_let_owning_mut();
   test_field_vs_method();
+  test_generic_self_receiver();
   test_pointers();
   test_str();
   test_misc();
