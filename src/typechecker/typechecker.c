@@ -651,6 +651,17 @@ static void tc_mark_move(TypeChecker *t, const NodeId expr) {
     t->moved[t->nmoved++] = d.node;
 }
 
+// Add `decl` to the moved set if absent. Used to UNION the moves of alternative branches (if/else, match
+// arms): a value moved on any path is "maybe moved" afterward, so a later use is still rejected -- but the
+// branches are checked independently (each from the pre-branch state) so one arm's move never taints another.
+static void tc_add_moved(TypeChecker *t, const NodeId decl) {
+  for (uint32_t i = 0; i < t->nmoved; i++)
+    if (t->moved[i] == decl)
+      return;
+  if (t->nmoved < (uint32_t)(sizeof t->moved / sizeof t->moved[0]))
+    t->moved[t->nmoved++] = decl;
+}
+
 // The top-level impl in module `m` whose items contain `method`, or NODE_NONE -- used to recover the
 // impl's own generic params so a method on a generic instance receiver substitutes them by its args.
 static NodeId enclosing_impl(TypeChecker *t, const ModuleId m, const NodeId method) {
@@ -2089,8 +2100,19 @@ static void check_if(TypeChecker *t, const Node *const n) {
     render_type(t, c, ty, sizeof ty);
     typechecker_errorf(t, sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'", ty);
   }
+  // The two branches are alternative paths: check each from the same pre-`if` move state, then union
+  // their moves (so an else-branch use of a value the then-branch moved is not a false use-after-move).
+  const uint32_t base = t->nmoved;
   check_stmt(t, n->as.if_stmt.then_branch);
+  NodeId stash[256];
+  uint32_t ns = 0;
+  for (uint32_t i = base; i < t->nmoved; i++)
+    if (ns < (uint32_t)(sizeof stash / sizeof stash[0]))
+      stash[ns++] = t->moved[i];
+  t->nmoved = base; // hide then-branch moves while checking the else branch
   check_stmt(t, n->as.if_stmt.else_branch);
+  for (uint32_t i = 0; i < ns; i++)
+    tc_add_moved(t, stash[i]); // post-if = pre-if ∪ then-moves ∪ else-moves
 }
 
 static TypeId check_expr(TypeChecker *t, const NodeId id) {
@@ -2289,8 +2311,12 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const NodeList arms = n->as.match_expr.arms;
       const NodeId *const ids = ast_list(a, arms);
       bool first = true;
+      const uint32_t mbase = t->nmoved; // each arm is an alternative path; union their moves afterward
+      NodeId uni[256];
+      uint32_t nu = 0;
       for (uint32_t i = 0; i < arms.len; i++) {
         const Node *const arm = ast_at_const(a, ids[i]);
+        t->nmoved = mbase; // this arm does not see another arm's moves
         check_pattern(t, arm->as.match_arm.pattern, scrut);
         const TypeId g = check_expr(t, arm->as.match_arm.guard);
         if (arm->as.match_arm.guard != NODE_NONE && g != TYPE_NONE && !is_bool(t, g)) {
@@ -2298,6 +2324,13 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           typechecker_errorf(t, sp.start, sp.end - sp.start, "match guard must be 'bool'");
         }
         const TypeId body = check_expr(t, arm->as.match_arm.body);
+        for (uint32_t k = mbase; k < t->nmoved; k++) { // collect this arm's moves into the union
+          bool seen = false;
+          for (uint32_t j = 0; j < nu; j++)
+            seen |= uni[j] == t->moved[k];
+          if (!seen && nu < (uint32_t)(sizeof uni / sizeof uni[0]))
+            uni[nu++] = t->moved[k];
+        }
         if (first) {
           result = body;
           first = false;
@@ -2306,6 +2339,9 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           result = TYPE_NONE;
         }
       }
+      t->nmoved = mbase;
+      for (uint32_t i = 0; i < nu; i++)
+        tc_add_moved(t, uni[i]); // post-match = pre-match ∪ (moves of every arm)
       break;
     }
     case NODE_NEW: {
@@ -2390,13 +2426,22 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         render_type(t, c, ty, sizeof ty);
         typechecker_errorf(t, sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'", ty);
       }
+      const uint32_t ifbase = t->nmoved; // branches are alternative paths -> check independent, union after
       const TypeId then_ty = check_expr(t, n->as.if_stmt.then_branch);
       if (n->as.if_stmt.else_branch == NODE_NONE) {
         typechecker_errorf(
             t, n->span.start, n->span.end - n->span.start, "an 'if' used as a value must have an 'else' branch");
         result = TYPE_NONE;
       } else {
+        NodeId stash[256];
+        uint32_t ns = 0;
+        for (uint32_t i = ifbase; i < t->nmoved; i++)
+          if (ns < (uint32_t)(sizeof stash / sizeof stash[0]))
+            stash[ns++] = t->moved[i];
+        t->nmoved = ifbase;
         const TypeId else_ty = check_expr(t, n->as.if_stmt.else_branch);
+        for (uint32_t i = 0; i < ns; i++)
+          tc_add_moved(t, stash[i]);
         if (then_ty != else_ty && then_ty != TYPE_NONE && else_ty != TYPE_NONE) {
           err_mismatch(t, n->as.if_stmt.else_branch, then_ty);
           result = TYPE_NONE;

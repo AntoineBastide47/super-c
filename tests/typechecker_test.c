@@ -167,6 +167,22 @@ static void test_errors(void) {
       "struct R { pub t: i32 }\nextend R as Drop { fn drop(self: &mut Self) {} }\n"
       "fn main() i32 { let a = R { t: 1 }; let b = a; return a.t; }\n",
       "use of moved value");
+  // D#10 flow-sensitive moves: a value moved in only ONE arm is "maybe moved" afterward -> a later use errors.
+#define MOVE_PRE                                                                                                        \
+  "interface Drop { fn drop(self: &mut Self); }\n"                                                                      \
+  "struct R { pub t: i32 }\nextend R as Drop { fn drop(self: &mut Self) {} }\nfn take(r: R) void {}\n"
+  expect_error(
+      "use after conditional move",
+      MOVE_PRE "fn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n", "use of moved value");
+  expect_error(
+      "use after move on both branches",
+      MOVE_PRE "fn main() i32 { let a = R { t: 1 }; if true { take(a); } else { take(a); } return a.t; }\n",
+      "use of moved value");
+  // ...but an alternative arm may use a value a sibling arm moved: the else here doesn't see the then's move.
+  expect_ok(
+      "sibling-branch move does not taint the other arm",
+      MOVE_PRE "fn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n");
+#undef MOVE_PRE
   expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
   expect_error( // only char *literals* coerce; a char value needs an explicit conversion
