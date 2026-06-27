@@ -53,7 +53,7 @@ static void test_associated_new_name(void) {
 
 static void test_functions_and_expressions(void) {
   static const char source[] =
-      "fn transform<T: Copy>(input: Result<Vec<T>, Error>, out: *mut T) int where T: Copy + Drop {\n"
+      "fn transform<T: Copy>(input: Result<Vec<T>, Error>, out: *mut T) int where T: Copy + Free {\n"
       "  let mut value: int = 1 + 2 * 3;\n"
       "  let item = input.unwrap()[0] as int;\n"
       "  if (item >= value && value != 0) { value += item; } else { value = 0; }\n"

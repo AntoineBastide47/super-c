@@ -160,17 +160,17 @@ static void test_str_member_types(void) {
 }
 
 static void test_errors(void) {
-  // move analysis: using a Drop value after it has been moved is rejected (a plain non-Drop value still copies).
+  // move analysis: using a Free value after it has been moved is rejected (a plain non-Free value still copies).
   expect_error(
       "use after move",
-      "interface Drop { fn drop(self: &mut Self); }\n"
-      "struct R { pub t: i32 }\nextend R as Drop { fn drop(self: &mut Self) {} }\n"
+      "interface Free { fn free(self: &mut Self); }\n"
+      "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\n"
       "fn main() i32 { let a = R { t: 1 }; let b = a; return a.t; }\n",
       "use of moved value");
   // D#10 flow-sensitive moves: a value moved in only ONE arm is "maybe moved" afterward -> a later use errors.
 #define MOVE_PRE                                                                                                        \
-  "interface Drop { fn drop(self: &mut Self); }\n"                                                                      \
-  "struct R { pub t: i32 }\nextend R as Drop { fn drop(self: &mut Self) {} }\nfn take(r: R) void {}\n"
+  "interface Free { fn free(self: &mut Self); }\n"                                                                      \
+  "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\n"
   expect_error(
       "use after conditional move",
       MOVE_PRE "fn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n", "use of moved value");
@@ -182,6 +182,9 @@ static void test_errors(void) {
   expect_ok(
       "sibling-branch move does not taint the other arm",
       MOVE_PRE "fn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n");
+  // explicitly `free()`-ing a value consumes it: a later use is a use-after-free (distinct from a move).
+  expect_error("use after explicit free",
+               MOVE_PRE "fn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n", "use after free");
 #undef MOVE_PRE
   // D#11 definite initialization: a deferred binding read before assignment, or initialized on only some paths.
   expect_error("read of uninitialized binding", "fn main() i32 { let mut x: i32; return x; }\n",
@@ -191,10 +194,10 @@ static void test_errors(void) {
                "use of possibly uninitialized value");
   expect_error("value read of uninitialized array element",
                "fn main() i32 { let mut a: [i32; 4]; return a[0]; }\n", "use of possibly uninitialized value");
-  expect_error( // a Drop binding is dropped at scope exit, so it cannot be left to deferred initialization
-      "deferred-init Drop binding",
-      "interface Drop { fn drop(self: &mut Self); }\nstruct R { pub t: i32 }\n"
-      "extend R as Drop { fn drop(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n",
+  expect_error( // a Free binding is dropped at scope exit, so it cannot be left to deferred initialization
+      "deferred-init Free binding",
+      "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\n"
+      "extend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n",
       "must be initialized when declared");
   expect_ok("definitely initialized before read", "fn main() i32 { let mut x: i32; x = 7; return x; }\n");
   expect_ok("initialized on every branch before read",
@@ -303,11 +306,11 @@ static void test_interface_bounds(void) {
       "fn main() i32 { let mut s = S { v: 1 }; return both(&mut s); }\n");
   expect_ok(
       "conditional extension satisfied",
-      "interface Drop { fn drop(self: *mut Self) i32; }\n"
-      "struct Res { pub id: i32 }\nextend Res as Drop { fn drop(self: *mut Self) i32 { return self.id; } }\n"
+      "interface Free { fn free(self: *mut Self) i32; }\n"
+      "struct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return self.id; } }\n"
       "struct Box<T> { pub inner: T }\n"
-      "extend<T: Drop> Box<T> as Drop { fn drop(self: &mut Box<T>) i32 { return self.inner.drop(); } }\n"
-      "fn dispose<U: Drop>(x: &mut U) i32 { return x.drop(); }\n"
+      "extend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\n"
+      "fn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\n"
       "fn main() i32 { let mut b = Box::<Res> { inner: Res { id: 1 } }; return dispose(&mut b); }\n");
 
   // Violations are rejected.
@@ -334,12 +337,12 @@ static void test_interface_bounds(void) {
       "does not satisfy bound 'Writer'");
   expect_error(
       "conditional extension: inner type lacks the bound",
-      "interface Drop { fn drop(self: *mut Self) i32; }\nstruct Plain { pub n: i32 }\n"
+      "interface Free { fn free(self: *mut Self) i32; }\nstruct Plain { pub n: i32 }\n"
       "struct Box<T> { pub inner: T }\n"
-      "extend<T: Drop> Box<T> as Drop { fn drop(self: &mut Box<T>) i32 { return self.inner.drop(); } }\n"
-      "fn dispose<U: Drop>(x: &mut U) i32 { return x.drop(); }\n"
+      "extend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\n"
+      "fn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\n"
       "fn main() i32 { let mut b = Box::<Plain> { inner: Plain { n: 1 } }; return dispose(&mut b); }\n",
-      "does not satisfy bound 'Drop'");
+      "does not satisfy bound 'Free'");
   expect_error(
       "method not declared by any bound",
       "interface Writer { fn write(self: *mut Self) i32; }\nstruct File { pub count: i32 }\n"
