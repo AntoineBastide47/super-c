@@ -139,6 +139,10 @@ struct Codegen {
     // top (a parameter has no `let` site to attach them to). Consumed once by emit_block_from.
     NodeId param_flags[32];
     uint32_t nparam_flags;
+    // Per-aggregate DFS emission state (0 unvisited / 1 on-path / 2 emitted), keyed by decl NodeId. Persists
+    // across phase_types so the single-TU path can pre-emit a concrete struct (an instance's by-value arg
+    // living in a later module) before any instance, and the owning module's phase_types then skips it.
+    uint8_t *type_state;
     ERRORS_VARIABLES;
 };
 
@@ -304,6 +308,7 @@ void codegen_free(Codegen **c) {
     return;
   ast_free(&(*c)->ast);
   CgEnumMap_deinit(&(*c)->enum_of_variant);
+  free((*c)->type_state);
   free((*c)->buf);
   ERRORS_DEINIT(c);
   free(*c);
@@ -5609,12 +5614,20 @@ static void emit_type_dfs(Codegen *c, const NodeId declId, uint8_t *const state)
   state[declId] = 2;
 }
 
+// The persistent per-Codegen DFS state (lazily allocated, sized to the node count); NULL on OOM.
+static uint8_t *cg_type_state(Codegen *c) {
+  if (!c->type_state)
+    c->type_state = calloc(c->ast->nodes.len, 1);
+  return c->type_state;
+}
+
 static void phase_types(Codegen *c) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
   // Emit struct/enum bodies in value-containment dependency order: a by-value field of a struct defined
-  // later in source must still be complete at the point of use. Forward typedefs already exist.
-  uint8_t *const state = calloc(c->ast->nodes.len, 1);
+  // later in source must still be complete at the point of use. Forward typedefs already exist. The DFS
+  // state persists (cg_type_state), so a concrete struct the single-TU pre-pass already emitted is skipped.
+  uint8_t *const state = cg_type_state(c);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (type_emittable(c, n)) {
@@ -5624,7 +5637,6 @@ static void phase_types(Codegen *c) {
         emit_type_decl(c, ids[i]); // out of memory: fall back to source order
     }
   }
-  free(state);
   emit_aggregate_specializations(c, true); // full bodies for generic struct instantiations
   emit_generic_macros(c);                  // this module's generics as <G>_DECLARE/<G>_DEFINE macros
   emit_instance_macro_invocations(c, false); // DECLARE cross-module instances homed here (after their args)
@@ -6036,6 +6048,34 @@ static void cg_flush(Codegen *c, FILE *out) {
 // prototypes, then all bodies. Used for the REPL/test inline build where the prelude + user code share a
 // single .c (str <-> String interconversion works because every struct is forward-declared, then every
 // struct is defined, before any function body). Each Codegen keeps its own AST for the caller to reclaim.
+// Find the Codegen for module `m` among cs[0..n), or NULL.
+static Codegen *cg_by_module(Codegen **cs, const size_t n, const ModuleId m) {
+  for (size_t i = 0; i < n; i++)
+    if (cs[i]->ast->module == m)
+      return cs[i];
+  return NULL;
+}
+
+// Single-TU: emit the concrete struct/enum definitions reachable by-value through `t` (a generic instance's
+// type arg) before the instance that holds them. A concrete dep is emitted via its OWN module's Codegen and
+// DFS state, so the owning module's later phase_types skips it; nested instance args recurse. This is what
+// the multi-file build gets for free from per-module header includes.
+static void pre_emit_concrete_deps(Codegen **cs, const size_t n, FILE *out, Codegen *from, const TypeId t) {
+  const Ty *const y = ast_type_at(from->ast, t);
+  if (y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM) {
+    Codegen *const owner = cg_by_module(cs, n, y->module);
+    uint8_t *const st = owner ? cg_type_state(owner) : NULL;
+    if (st && st[y->as.decl] == 0 && type_emittable(owner, ast_at_const(owner->ast, y->as.decl))) {
+      emit_type_dfs(owner, y->as.decl, st);
+      cg_flush(owner, out);
+    }
+  } else if (y->kind == TYPE_INSTANCE) {
+    const TyInstance *const it = ast_instance(from->ast, y->as.inst);
+    for (uint8_t k = 0; k < it->n; k++)
+      pre_emit_concrete_deps(cs, n, out, from, it->args[k]);
+  }
+}
+
 void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
   if (!n)
     return;
@@ -6053,6 +6093,15 @@ void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
     phase_forward(cs[i]);
     cg_flush(cs[i], out);
   }
+  // Concrete structs an instance holds by value must precede that instance. Across modules the instance
+  // (e.g. Option<String>, homed in the option module) can be emitted before its arg's struct (String, in
+  // the string module), so pre-emit those concrete deps now -- phase_types then skips them (shared state).
+  for (size_t i = 0; i < n; i++)
+    for (size_t j = 0; j < cs[i]->ast->instances.len; j++) {
+      const TyInstance *const it = &cs[i]->ast->instances.data[j];
+      for (uint8_t k = 0; k < it->n; k++)
+        pre_emit_concrete_deps(cs, n, out, cs[i], it->args[k]);
+    }
   for (size_t i = 0; i < n; i++) { // every full type + multi-return struct + prototype
     phase_types(cs[i]);
     phase_ret_structs(cs[i]);
