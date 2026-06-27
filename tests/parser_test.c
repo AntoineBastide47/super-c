@@ -259,6 +259,28 @@ static void test_bare_conditions_and_ranges(void) {
   CHECK(parse_has_error("fn f() void { for i in 0..= { } }\n"), "inclusive range without an end is rejected");
 }
 
+// A `lo..hi` in expression position (a `let` initializer here) parses to a NODE_RANGE value -- the same
+// node the for/index forms use -- with both bounds and the inclusive flag preserved. One token of
+// lookahead (`..`/`..=` after the start) decides it, so the grammar stays LL(1).
+static void test_range_value_expression(void) {
+  static const char source[] = "fn f() void {\n"
+                               "  let a = 1..5;\n"
+                               "  let b = 0..=9;\n"
+                               "}\n";
+  Ast *ast = sc_parse("range value expression", source);
+  if (!ast)
+    return;
+  const Node *body = ast_at_const(ast, item(ast, 0)->as.function.body);
+  const NodeId *stmts = ast_list(ast, body->as.block.statements);
+  const Node *a = ast_at_const(ast, ast_at_const(ast, stmts[0])->as.let_stmt.value);
+  CHECK(a->kind == NODE_RANGE, "let a = 1..5 -> NODE_RANGE value");
+  CHECK(a->as.pattern_range.start != NODE_NONE && a->as.pattern_range.end != NODE_NONE && !a->as.pattern_range.inclusive,
+        "1..5 has both bounds, exclusive");
+  const Node *b = ast_at_const(ast, ast_at_const(ast, stmts[1])->as.let_stmt.value);
+  CHECK(b->kind == NODE_RANGE && b->as.pattern_range.inclusive, "0..=9 is an inclusive NODE_RANGE value");
+  ast_free(&ast);
+}
+
 static void test_switch_pattern_ranges(void) {
   static const char source[] = "fn f(n: i32) i32 {\n"
                                "  return switch n {\n"
@@ -380,6 +402,7 @@ int main(void) {
   test_closures();
   test_error_recovery();
   test_bare_conditions_and_ranges();
+  test_range_value_expression();
   test_switch_pattern_ranges();
   if (failures) {
     fprintf(stderr, "%d parser test failure%s\n", failures, failures == 1 ? "" : "s");
