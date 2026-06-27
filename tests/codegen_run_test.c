@@ -451,7 +451,7 @@ static void test_generics_over_user_types(void) {
           "fn main() i32 { let mut v: Vector<P> = Vector::<P>::new();\n"
           "  v.push(P { a: 5 }); v.push(P { a: 40 });\n"
           "  let r: i32 = v.pop().unwrap_or(P { a: 0 }).a + v.pop().unwrap_or(P { a: 0 }).a - 3;\n" // 40 + 5 - 3
-          "  v.drop(); exit(r); }\n",
+          "  v.free(); exit(r); }\n",
       42, "");
   sc_run_program(
       "Option::map<U> over a user struct (cross-pool)",
@@ -478,7 +478,7 @@ static void test_container_conformances(void) {
           "  let mut acc = 0;\n"
           "  if v.eq(&w) { acc = acc + 6; }\n"               // 6
           "  if v.hash() == w.hash() { acc = acc + 36; }\n"  // 42
-          "  v.drop(); w.drop(); exit(acc); }\n",
+          "  v.free(); w.free(); exit(acc); }\n",
       42, "");
   sc_run_program(
       "Option<P> and Box<P> Clone + Eq",
@@ -492,7 +492,7 @@ static void test_container_conformances(void) {
           "  let mut acc = 0;\n"
           "  if o.eq(&o2) { acc = acc + 20; }\n"
           "  if b.eq(&b2) { acc = acc + 22; }\n" // 42
-          "  b.drop(); b2.drop(); exit(acc); }\n",
+          "  b.free(); b2.free(); exit(acc); }\n",
       42, "");
 }
 
@@ -512,7 +512,7 @@ static void test_map(void) {
           "  if m.contains_key(&kb) { acc = acc + 100; }\n"      // 149
           "  m.remove(&kb);\n"
           "  if m.get(&kb).is_none() { acc = acc + 1000; }\n"    // 1149
-          "  let total = acc; m.drop(); exit(total - 1100); }\n", // 49
+          "  let total = acc; m.free(); exit(total - 1100); }\n", // 49
       49, "");
 }
 
@@ -526,7 +526,7 @@ static void test_format_printing(void) {
           "  let name = \"world\"; let n: i32 = 42;\n"
           "  println(\"hi {} n={} pi={} ok={} brace={{}}\", name, n, 2.5, true);\n"
           "  let mut s = format(\"<{}>\", n);\n"
-          "  s.print(); s.drop();\n"
+          "  s.print(); s.free();\n"
           "  exit(0); }\n",
       0, "hi world n=42 pi=2.5 ok=true brace={}\n<42>");
 }
@@ -635,7 +635,7 @@ static void test_nested_generic_by_value(void) {
       PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(40); v.push(2);\n"
           "  let o: Option<Vector<i32>> = Option::<Vector<i32>>::some(v);\n"
           "  let mut w = o.unwrap_or(Vector::<i32>::new());\n"
-          "  let mut acc = 0; for x in w.iter() { acc = acc + x; } w.drop(); exit(acc); }\n",
+          "  let mut acc = 0; for x in w.iter() { acc = acc + x; } w.free(); exit(acc); }\n",
       42, "");
   // Option<String> holds a String by value: the String struct must precede Option__String in the output.
   sc_run_program(
@@ -643,7 +643,7 @@ static void test_nested_generic_by_value(void) {
       PRE "fn main() i32 { let s = String::from(\"hi\");\n"
           "  let o: Option<String> = Option::<String>::some(s);\n"
           "  let mut w = o.unwrap_or(String::from(\"\"));\n"
-          "  let n = w.len() as i32; w.drop(); exit(n); }\n",
+          "  let n = w.len() as i32; w.free(); exit(n); }\n",
       2, "");
   // case (c): a user concrete struct holding a generic instance BY VALUE.
   sc_run_program(
@@ -668,20 +668,20 @@ static void test_std_types(void) {
           "  let mut big = pick::<String>(x.clone(), y.clone()); big.print();\n"
           "  let mut d: String = Default::default(); if d.len() == 0 { acc = acc + 10; }\n"
           "  let mut v: Vector<i32> = Default::default(); v.push(7); acc = acc + (v.len() as i32) * 100;\n"
-          "  let o: Option<i32> = Default::default(); acc = acc + o.unwrap_or(0); v.drop(); x.drop(); y.drop(); big.drop(); d.drop(); exit(acc); }\n",
+          "  let o: Option<i32> = Default::default(); acc = acc + o.unwrap_or(0); v.free(); x.free(); y.free(); big.free(); d.free(); exit(acc); }\n",
       111, "banana"); // 1 + 10 + 100
   // Vector is iterable via `.iter()` (VecIter implements Iterator), driving the for-loop desugar.
   sc_run_program(
       "std Vector for-loop via .iter()",
       PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(10); v.push(20); v.push(12);\n"
-          "  let mut sum = 0; for x in v.iter() { sum = sum + x; } v.drop(); exit(sum); }\n",
+          "  let mut sum = 0; for x in v.iter() { sum = sum + x; } v.free(); exit(sum); }\n",
       42, "");
   // String numeric formatting: from_i64 / from_u64 / push_i64 / push_f64.
   sc_run_program(
       "std String int/float to-string",
       PRE "fn main() i32 { let mut a = String::from_i64(-12345); a.print(); putchar(32);\n"
           "  let mut s = String::from_str(\"x=\"); s.push_i64(42); s.push_byte(32); s.push_f64(3.5); s.println();\n"
-          "  let n = a.len(); a.drop(); s.drop(); exit(n as i32); }\n",
+          "  let n = a.len(); a.free(); s.free(); exit(n as i32); }\n",
       6, "-12345 x=42 3.5\n");
   sc_run_program(
       "std Option",
@@ -699,14 +699,14 @@ static void test_std_types(void) {
       "std Box",
       PRE "fn main() i32 { let mut b: Box<i32> = Box::<i32>::new(40);\n"
           "  let old: i32 = b.replace(2);\n"
-          "  let r: i32 = b.get() + old; b.drop(); exit(r); }\n",
+          "  let r: i32 = b.get() + old; b.free(); exit(r); }\n",
       42, ""); // 2 + 40
   sc_run_program(
       "std Vector push/pop/get",
       PRE "fn main() i32 { let mut v: Vector<i32> = Vector::<i32>::new();\n"
           "  for i in 0..10 { v.push(i * 3); }\n"                              // [0,3,..,27], len 10
           "  let r: i32 = v.at(2) + v.pop().unwrap_or(0) + v.get(50).unwrap_or(9);\n" // 6 + 27 + 9
-          "  v.drop(); exit(r); }\n",
+          "  v.free(); exit(r); }\n",
       42, "");
   sc_run_program(
       "std Vector capacity/set/first/last",
@@ -714,7 +714,7 @@ static void test_std_types(void) {
           "  v.push(1); v.push(2); v.push(3);\n"
           "  v.set(0, 12); v.set(1, 18); v.set(2, 12);\n"
           "  let r: i32 = v.first().unwrap_or(0) + v.at(1) + v.last().unwrap_or(0);\n" // 12 + 18 + 12
-          "  v.drop(); exit(r); }\n",
+          "  v.free(); exit(r); }\n",
       42, "");
   // Function pointers as first-class values: pass a named fn where a `fn(..) ..` param is expected.
   sc_run_program(
@@ -762,7 +762,7 @@ static void test_std_types(void) {
           "  v.retain(even);\n"                                  // [2,4]
           "  let mut m: Vector<i32> = v.map(dbl);\n"             // [4,8]
           "  let r: i32 = r0 + sr + fd + m.at(0) + m.at(1) + (v.len() as i32);\n" // 1+9+2+4+8+2 = 26
-          "  v.drop(); m.drop(); exit(r + 16); }\n",             // 26 + 16
+          "  v.free(); m.free(); exit(r + 16); }\n",             // 26 + 16
       42, "");
   // Box higher-order map (allocates a fresh box of the mapped type).
   sc_run_program(
@@ -770,7 +770,7 @@ static void test_std_types(void) {
       PRE "fn dbl(x: i32) i32 { return x * 2; }\n"
           "fn main() i32 { let b: Box<i32> = Box::<i32>::new(21);\n"
           "  let mut c: Box<i32> = b.map(dbl);\n"
-          "  let r: i32 = c.get(); c.drop(); exit(r); }\n",
+          "  let r: i32 = c.get(); c.free(); exit(r); }\n",
       42, "");
 }
 
@@ -812,7 +812,7 @@ static void test_closures(void) {
           "  let fd: i32 = vec.find(|x: i32| x > 2).unwrap_or(0);\n" // 3
           "  let mut d: Vector<i32> = vec.map(|x: i32| x * 2);\n"    // [2,4,6,8]
           "  let s: i32 = d.at(0) + d.at(2) + d.at(3);\n"           // 2+6+8 = 16
-          "  vec.drop(); d.drop();\n"
+          "  vec.free(); d.free();\n"
           "  exit(v1 + fd + s + 2); }\n",                            // 21+3+16+2 = 42
       42, "");
 }
@@ -849,7 +849,7 @@ static void test_string_sso(void) {
           "  s.push_str(\", world\");\n"                         // 9 bytes, still inline
           "  if !s.eq_str(\"hi, world\") { exit(1); }\n"
           "  let c: i32 = s.capacity() as i32;\n"                // 23: inline budget, never allocated
-          "  s.drop(); exit(c); }\n",
+          "  s.free(); exit(c); }\n",
       23, "");
   sc_run_program(
       "string SSO: heap transition + shrink back",
@@ -860,7 +860,7 @@ static void test_string_sso(void) {
           "  let mut j: usize = 0; while j < 40 { if s.byte(j) != 65 { exit(3); } j = j + 1; }\n" // bytes survived
           "  s.truncate(5); s.shrink_to_fit();\n"
           "  if s.capacity() != 23 { exit(4); }\n"                                 // moved back inline
-          "  let r: i32 = s.len() as i32 + 37; s.drop(); exit(r); }\n",            // 5 + 37
+          "  let r: i32 = s.len() as i32 + 37; s.free(); exit(r); }\n",            // 5 + 37
       42, "");
 }
 
@@ -888,11 +888,11 @@ static void test_interfaces(void) {
       21, "");
   sc_run_program(
       "interface: conditional extension dispatches through inner type",
-      PRE "interface Drop { fn drop(self: *mut Self) i32; }\n"
-          "struct Res { pub id: i32 }\nextend Res as Drop { fn drop(self: *mut Self) i32 { return self.id; } }\n"
+      PRE "interface Free { fn free(self: *mut Self) i32; }\n"
+          "struct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return self.id; } }\n"
           "struct Box<T> { pub inner: T }\n"
-          "extend<T: Drop> Box<T> as Drop { fn drop(self: &mut Box<T>) i32 { return self.inner.drop(); } }\n"
-          "fn dispose<U: Drop>(x: &mut U) i32 { return x.drop(); }\n"
+          "extend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\n"
+          "fn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\n"
           "fn main() i32 { let mut b = Box::<Res> { inner: Res { id: 99 } }; exit(dispose(&mut b)); }\n",
       99, "");
   sc_run_program(
@@ -974,9 +974,9 @@ static void test_interfaces(void) {
 
 static void test_drop_raii(void) {
 #define DROP_PRE                                                                                                        \
-  PRE "interface Drop { fn drop(self: &mut Self); }\n"                                                                  \
+  PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
       "struct R { pub tag: i32 }\n"                                                                                     \
-      "extend R as Drop { fn drop(self: &mut Self) { putchar(self.tag); } }\n"
+      "extend R as Free { fn free(self: &mut Self) { putchar(self.tag); } }\n"
   // RAII: locals are dropped at scope exit in reverse construction order.
   sc_run_program(
       "drop: reverse-order scope-exit cleanup",
@@ -989,7 +989,7 @@ static void test_drop_raii(void) {
       DROP_PRE "fn run() void { let a = R { tag: 65 }; let b = a; putchar(88); }\n"
                "fn main() i32 { run(); exit(0); }\n",
       0, "XA"); // only b (holding tag 65 = A) drops; a was moved
-  // a by-value Drop parameter is owned by the callee, which drops it; the caller does not re-drop.
+  // a by-value Free parameter is owned by the callee, which drops it; the caller does not re-drop.
   sc_run_program(
       "drop: by-value parameter ownership transfer",
       DROP_PRE "fn consume(r: R) void { putchar(67); }\n"
@@ -1009,9 +1009,9 @@ static void test_drop_raii(void) {
 // once -- skipped on the path that moved it out, run on the path that did not (no leak, no double-free).
 static void test_conditional_move_drop(void) {
 #define CM_PRE                                                                                                          \
-  PRE "interface Drop { fn drop(self: &mut Self); }\n"                                                                  \
+  PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
       "struct R { pub tag: i32 }\n"                                                                                     \
-      "extend R as Drop { fn drop(self: &mut Self) { putchar(self.tag); } }\n"                                          \
+      "extend R as Free { fn free(self: &mut Self) { putchar(self.tag); } }\n"                                          \
       "fn consume(r: R) void { }\n"
   // moved in the then-branch only: when taken, consume drops it; when not, the scope-exit drop runs.
   sc_run_program(
@@ -1031,6 +1031,33 @@ static void test_conditional_move_drop(void) {
       CM_PRE "fn main() i32 { let mut i = 0; while i < 3 { let a = R { tag: 65 }; if i == 1 { consume(a); } i = i + 1; } exit(0); }\n",
       0, "AAA");
 #undef CM_PRE
+}
+
+// A#1: Free-RAII on a GENERIC container. A `Box<T>` conditionally conforming to Free (`extend<T: Free>
+// Box<T> as Free`) auto-drops at scope exit, recursively dropping its element; moving it into a consumer
+// suppresses the source's drop; a conditional move is flag-guarded so it drops exactly once on each path.
+// This is the compiler machinery a full prelude container migration to auto-Free rests on.
+static void test_container_drop_raii(void) {
+#define BOX_PRE                                                                                                         \
+  PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
+      "struct Leaf { pub id: i32 }\n"                                                                                   \
+      "extend Leaf as Free { fn free(self: &mut Self) { putchar(self.id); } }\n"                                        \
+      "struct Box<T> { pub inner: T }\n"                                                                                \
+      "extend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) { self.inner.free(); } }\n"                          \
+      "fn take(b: Box<Leaf>) void { }\n"
+  sc_run_program("container RAII: scope-exit recursive auto-drop",
+                 BOX_PRE "fn run() void { let a = Box::<Leaf> { inner: Leaf { id: 65 } }; putchar(88); }\n"
+                         "fn main() i32 { run(); exit(0); }\n",
+                 0, "XA"); // X, then drop a -> its inner Leaf (A)
+  sc_run_program("container RAII: move into consumer suppresses source drop",
+                 BOX_PRE "fn run() void { let a = Box::<Leaf> { inner: Leaf { id: 65 } }; take(a); putchar(88); }\n"
+                         "fn main() i32 { run(); exit(0); }\n",
+                 0, "AX"); // take drops a (A), then X; the source is not re-dropped
+  sc_run_program("container RAII: conditional move drops once per path",
+                 BOX_PRE "fn run(c: bool) void { let a = Box::<Leaf> { inner: Leaf { id: 65 } }; if c { take(a); } }\n"
+                         "fn main() i32 { run(true); run(false); exit(0); }\n",
+                 0, "AA"); // taken: consumer drops; not taken: scope-exit drops -- one A each call
+#undef BOX_PRE
 }
 
 static void test_defer(void) {
@@ -1089,6 +1116,7 @@ int main(void) {
   test_attributes();
   test_drop_raii();
   test_conditional_move_drop();
+  test_container_drop_raii();
   test_defer();
   test_static_assert();
   test_interfaces();

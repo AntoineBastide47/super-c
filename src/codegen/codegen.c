@@ -119,10 +119,10 @@ struct Codegen {
     // in reverse, at its exit (fall-through, return, break, continue). `loop_defer_base` is the stack depth
     // at the innermost loop body's entry, so break/continue run only the defers registered inside the loop.
     NodeId defer_stack[256];
-    uint8_t defer_kind[256]; // 0 = a `defer` statement expr; 1 = an automatic Drop of a local binding (RAII)
+    uint8_t defer_kind[256]; // 0 = a `defer` statement expr; 1 = an automatic Free of a local binding (RAII)
     uint32_t defer_top;
     uint32_t loop_defer_base;
-    // RAII: locals of a `Drop`-implementing type are dropped at scope exit, UNLESS moved out (passed by
+    // RAII: locals of a `Free`-implementing type are dropped at scope exit, UNLESS moved out (passed by
     // value, bound to another name, or returned) -- a moved value is owned (and dropped) elsewhere. `moved`
     // holds bindings moved UNCONDITIONALLY (on every path), whose auto-drop is elided outright.
     NodeId moved[512];
@@ -135,7 +135,7 @@ struct Codegen {
     uint32_t ncond_moved;
     NodeId cond_sites[256];
     uint32_t ncond_sites;
-    // Conditionally-moved by-value Drop parameters: their drop flags are declared at the function body's
+    // Conditionally-moved by-value Free parameters: their drop flags are declared at the function body's
     // top (a parameter has no `let` site to attach them to). Consumed once by emit_block_from.
     NodeId param_flags[32];
     uint32_t nparam_flags;
@@ -233,7 +233,7 @@ static void emit_expr(Codegen *c, NodeId id);
 static NodeId array_length_of(Codegen *c, NodeId iter);
 static long array_literal_count(Codegen *c, NodeId obj);
 
-// The runtime drop-flag name for a conditionally-moved Drop binding (decl node `decl`): `__mv<decl>`.
+// The runtime drop-flag name for a conditionally-moved Free binding (decl node `decl`): `__mv<decl>`.
 static inline void cg_move_flag(char *out, const size_t cap, const NodeId decl) {
   snprintf(out, cap, "__mv%u", decl);
 }
@@ -1776,7 +1776,7 @@ static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg) {
       fresh(c, tmp, sizeof tmp);
       emit(c, "{ String %s = ", tmp);
       emit_expr(c, arg);
-      emit(c, "; String__push_string(&%s, &%s); String__drop(&%s); }\n", f, tmp, tmp);
+      emit(c, "; String__push_string(&%s, &%s); String__free(&%s); }\n", f, tmp, tmp);
     }
     return true;
   }
@@ -1875,7 +1875,7 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
   if (kind == 1) {
     emit(c, "%s; })", f); // format: yield the built String
   } else {
-    emit(c, "String__print(&%s); String__drop(&%s); })", f, f); // print/println: write to stdout, then free
+    emit(c, "String__print(&%s); String__free(&%s); })", f, f); // print/println: write to stdout, then free
   }
   return true;
 }
@@ -3050,7 +3050,7 @@ static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
   const Node *const n = ast_at_const(c->ast, id);
   emit(c, "{\n");
   c->depth++;
-  for (uint32_t i = 0; i < c->nparam_flags; i++) { // cond-moved Drop params: drop flags at function-body top
+  for (uint32_t i = 0; i < c->nparam_flags; i++) { // cond-moved Free params: drop flags at function-body top
     char fl[32];
     cg_move_flag(fl, sizeof fl, c->param_flags[i]);
     emit_indent(c);
@@ -3618,8 +3618,8 @@ static void emit_static_assert(Codegen *c, const Node *const n) {
   emit(c, ");\n");
 }
 
-// The `drop` method of a type that implements the Drop interface (`extend T as Drop`), or {_,NODE_NONE}.
-// Only an explicit `as Drop` impl opts a type into RAII auto-drop. Searches the type's home + current module.
+// The `drop` method of a type that implements the Free interface (`extend T as Free`), or {_,NODE_NONE}.
+// Only an explicit `as Free` impl opts a type into RAII auto-drop. Searches the type's home + current module.
 static DefId cg_drop_method(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
@@ -3640,13 +3640,13 @@ static DefId cg_drop_method(Codegen *c, const ModuleId tmod, const NodeId tdecl)
         continue;
       const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
       if (trn->kind != NODE_TRAIT ||
-          !span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text, "Drop"))
+          !span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text, "Free"))
         continue;
       const NodeList ms = it->as.impl_def.items;
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
-        if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text, "drop"))
+        if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text, "free"))
           return (DefId){m, mids[j]};
       }
     }
@@ -3654,7 +3654,7 @@ static DefId cg_drop_method(Codegen *c, const ModuleId tmod, const NodeId tdecl)
   return (DefId){0, NODE_NONE};
 }
 
-// Does the (subst-resolved) type implement the Drop interface? Such a value owns resources -> it gets an
+// Does the (subst-resolved) type implement the Free interface? Such a value owns resources -> it gets an
 // RAII destructor at scope exit, and a binding/param of it is emitted non-`const` (drop takes `&mut self`).
 static bool cg_type_is_drop(Codegen *c, const TypeId ty) {
   const Ty *const y = ast_type_at(c->ast, subst_resolve(c, ty));
@@ -3689,7 +3689,7 @@ static bool cg_is_cond_moved(const Codegen *c, const NodeId decl) {
 }
 
 // Identifier `expr` is a move site (a `let`/`return`/assignment RHS, struct field, or by-value call arg
-// reference to a current-module owned Drop binding). `pass`/`cond` drive the two-pass classification:
+// reference to a current-module owned Free binding). `pass`/`cond` drive the two-pass classification:
 //  pass 0 records UNCONDITIONAL moves (cond==false) into `moved` -- those skip auto-drop outright;
 //  pass 1 records the move SITES of bindings moved only conditionally (cond==true and not unconditional),
 //          into `cond_moved` + `cond_sites`, so each gets a runtime drop flag instead.
@@ -3702,7 +3702,7 @@ static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const i
   const NodeKind dk = ast_at_const(c->ast, d.node)->kind;
   if (dk != NODE_LET && dk != NODE_PARAMETER)
     return;
-  if (!cg_type_is_drop(c, ast_type(c->ast, expr))) // only Drop bindings are tracked (others need no drop)
+  if (!cg_type_is_drop(c, ast_type(c->ast, expr))) // only Free bindings are tracked (others need no drop)
     return;
   if (pass == 0) {
     if (!cond && c->nmoved < (uint32_t)(sizeof c->moved / sizeof c->moved[0]))
@@ -3717,7 +3717,7 @@ static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const i
     c->cond_sites[c->ncond_sites++] = expr;
 }
 
-// Pre-pass over a function body classifying moved Drop bindings (so RAII elides or guards their drop). A
+// Pre-pass over a function body classifying moved Free bindings (so RAII elides or guards their drop). A
 // move is a bare binding used as a `let` initializer, assignment RHS, returned value, struct field value,
 // or by-value call argument. `cond` is true once inside an if/match/loop branch (a not-always-taken path).
 static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const int pass) {
@@ -3787,6 +3787,13 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
       break;
     case NODE_CALL: {
       cg_scan_moves(c, n->as.call.callee, cond, pass);
+      const Node *const callee = ast_at_const(c->ast, n->as.call.callee);
+      if (callee->kind == NODE_MEMBER && !callee->as.member.path && // `x.free()` consumes the owned receiver
+          span_is(cg_mod_src(c, c->ast->module), ast_at_const(c->ast, callee->as.member.member)->as.name.text, "free")) {
+        const TypeKind rk = ast_type_at(c->ast, ast_type(c->ast, callee->as.member.object))->kind;
+        if (rk != TYPE_POINTER && rk != TYPE_REFERENCE)
+          cg_mark_move(c, callee->as.member.object, cond, pass); // elide its scope-exit auto-drop
+      }
       const NodeList args = n->as.call.args;
       const NodeId *const ids = ast_list(c->ast, args);
       for (uint32_t i = 0; i < args.len; i++) {
@@ -3818,7 +3825,7 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
   }
 }
 
-// Whether the binding at `id` (a `let` or a by-value parameter) holds a Drop-implementing, not-moved value
+// Whether the binding at `id` (a `let` or a by-value parameter) holds a Free-implementing, not-moved value
 // -- i.e. it gets a scope-exit RAII drop. Such a let is emitted non-`const` (its destructor takes `&mut self`).
 static bool cg_will_auto_drop(Codegen *c, const NodeId id) {
   const Node *const n = ast_at_const(c->ast, id);
@@ -3903,7 +3910,7 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       }
       // const iff the binding is immutable (`let` without `mut`). Calling a `&mut self` method on an
       // immutable binding is rejected by the typechecker (receiver_mutable), so const never blocks a valid one.
-      // A Drop-managed binding is emitted non-const, since its scope-exit destructor takes `&mut self`.
+      // A Free-managed binding is emitted non-const, since its scope-exit destructor takes `&mut self`.
       const bool autodrop = cg_will_auto_drop(c, id);
       const bool is_const = !n->as.let_stmt.is_mutable && !autodrop;
       // Value-semantics array copy: an array bound from a non-literal source (another array, or an
@@ -4048,7 +4055,7 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
     const Node *const p = ast_at_const(c->ast, ids[i]);
     char nm[128], d[300];
     render_ident(c, name_span(c, p->as.parameter.name), nm, sizeof nm);
-    // `mut p` -> non-const; a by-value Drop param is also non-const (it is owned and its destructor mutates it).
+    // `mut p` -> non-const; a by-value Free param is also non-const (it is owned and its destructor mutates it).
     const bool pconst = !p->as.parameter.is_mutable && !cg_type_is_drop(c, ast_type(c->ast, ids[i]));
     render_binding_node(c, p->as.parameter.type, nm, pconst, d, sizeof d);
     if (any)
@@ -4263,7 +4270,7 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
     c->nmoved = c->ncond_moved = c->ncond_sites = 0; // RAII move analysis, fresh per function body
     cg_scan_moves(c, fn->as.function.body, false, 0);  // pass 0: bindings moved on every path (drop elided)
     cg_scan_moves(c, fn->as.function.body, false, 1);  // pass 1: conditional move sites (drop flag-guarded)
-    // A by-value Drop parameter is owned by this function -> drop it at scope exit (unless moved). Pushed
+    // A by-value Free parameter is owned by this function -> drop it at scope exit (unless moved). Pushed
     // first so params are torn down LAST (after locals), preserving reverse-construction order.
     const NodeList ps = fn->as.function.params;
     const NodeId *const pids = ast_list(c->ast, ps);

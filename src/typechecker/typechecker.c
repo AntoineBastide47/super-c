@@ -16,10 +16,12 @@ struct TypeChecker {
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
     TypeId expected;          // target type of the expression being checked (let annotation / return / assignment RHS), or TYPE_NONE; consumed once by check_expr
-    NodeId moved[256];        // Drop-typed bindings moved out of the current function; using one again is an error
+    NodeId moved[256];        // Free-typed bindings moved out of the current function; using one again is an error
     uint32_t nmoved;          // (reset per function; best-effort linear move/use-after-move analysis)
     NodeId uninit[64];        // deferred-init bindings (`let mut x: T;`) not yet assigned on the current path
     uint32_t nuninit;         // (definite-initialization: reading one is an error; assigning it clears it)
+    NodeId freed[64];         // bindings consumed by an explicit `.free()` -- using one is a use-after-free
+    uint32_t nfreed;          // (vs an ordinary move; flavors the diagnostic, the `moved` set gates it)
     bool addr_ctx;            // the expression being checked is a place under address-of (&/&mut): its base is
                               // borrowed, not value-read, so the definite-init read check is suppressed for it
     ERRORS_VARIABLES;
@@ -600,8 +602,8 @@ static DefId find_default_method(TypeChecker *t, const ModuleId tmod, const Node
   return (DefId){0, NODE_NONE};
 }
 
-// Does `ty` implement the Drop interface (`extend T as Drop`)? Such values are move-tracked: once moved,
-// a re-use is an error (and the value is not double-dropped). Plain non-Drop value types are not tracked,
+// Does `ty` implement the Free interface (`extend T as Free`)? Such values are move-tracked: once moved,
+// a re-use is an error (and the value is not double-freed). Plain non-Free value types are not tracked,
 // so ordinary value-semantics copies (`let p2 = p1` for a POD struct) stay legal.
 static bool tc_type_is_drop(TypeChecker *t, const TypeId ty) {
   ModuleId om;
@@ -630,14 +632,14 @@ static bool tc_type_is_drop(TypeChecker *t, const TypeId ty) {
         continue;
       const Node *const trn = ast_at_const(mod_ast(t, tr.module), tr.node);
       if (trn->kind == NODE_TRAIT &&
-          span_is(mod_src(t, tr.module), ast_at_const(mod_ast(t, tr.module), trn->as.trait_def.name)->as.name.text, "Drop"))
+          span_is(mod_src(t, tr.module), ast_at_const(mod_ast(t, tr.module), trn->as.trait_def.name)->as.name.text, "Free"))
         return true;
     }
   }
   return false;
 }
 
-// Record `expr` as a move if it is a bare reference to a current-module Drop-typed binding (a `let` or a
+// Record `expr` as a move if it is a bare reference to a current-module Free-typed binding (a `let` or a
 // by-value parameter): ownership transfers away, so a later use is flagged.
 static void tc_mark_move(TypeChecker *t, const NodeId expr) {
   if (expr == NODE_NONE || ast_at_const(t->ast, expr)->kind != NODE_IDENTIFIER)
@@ -1708,7 +1710,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   for (uint32_t i = 0; i < args.len; i++)
     check_expr(t, aids[i]);
   for (uint32_t i = 0; i < args.len; i++)
-    tc_mark_move(t, aids[i]); // a by-value Drop argument is moved to the callee (which owns/drops it)
+    tc_mark_move(t, aids[i]); // a by-value Free argument is moved to the callee (which owns/drops it)
 
   if (callee == TYPE_NONE)
     return TYPE_NONE;
@@ -1734,6 +1736,23 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     const DefId md = ast_resolution_def(t->ast, callee_node->as.member.member);
     if (md.node != NODE_NONE && ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION)
       skip = 1;
+  }
+
+  // Calling the destructor `x.free()` on an owned Free value consumes it: a later use is a use-after-free,
+  // and its scope-exit auto-drop must be elided (no double free). A `&mut`/`*` receiver only borrows a value
+  // owned elsewhere, so it is left alone. This is what lets explicit `.free()` coexist with Free-RAII.
+  if (skip && callee_node->as.member.object != NODE_NONE &&
+      span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, callee_node->as.member.member)->as.name.text, "free")) {
+    const NodeId recv = callee_node->as.member.object;
+    const Ty *const rt = ast_type_at(t->ast, ast_type(t->ast, recv));
+    if (rt->kind != TYPE_POINTER && rt->kind != TYPE_REFERENCE) {
+      tc_mark_move(t, recv);
+      if (ast_at_const(t->ast, recv)->kind == NODE_IDENTIFIER) { // record it as freed, for the diagnostic
+        const DefId rd = ast_resolution_def(t->ast, recv);
+        if (rd.module == t->ast->module && rd.node != NODE_NONE && t->nfreed < (uint32_t)(sizeof t->freed / sizeof t->freed[0]))
+          t->freed[t->nfreed++] = rd.node;
+      }
+    }
   }
 
   // A method or associated fn reached through a generic instance (`b.get()`, `Box::<i32>::make()`)
@@ -2107,7 +2126,7 @@ static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
   for (uint32_t i = 0; i < fields.len; i++) {
     const Node *const fi = ast_at_const(t->ast, ids[i]);
     check_expr(t, fi->as.field_initializer.value);
-    tc_mark_move(t, fi->as.field_initializer.value); // a Drop value placed in a field is moved into the struct
+    tc_mark_move(t, fi->as.field_initializer.value); // a Free value placed in a field is moved into the struct
     const Span fname = name_span(t, fi->as.field_initializer.name);
     if (variant != NODE_NONE) { // resolve the field against the variant's struct payload
       Ast *const va = mod_ast(t, vmod);
@@ -2206,9 +2225,13 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const DefId d = ast_resolution_def(a, id);
       result = decl_type_in(t, d.module, d.node);
       if (d.module == t->ast->module && d.node != NODE_NONE) {
-        for (uint32_t i = 0; i < t->nmoved; i++) // use-after-move: a moved Drop binding is dead
+        for (uint32_t i = 0; i < t->nmoved; i++) // a moved/freed Free binding is dead
           if (t->moved[i] == d.node) {
-            typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "use of moved value");
+            bool freed = false; // distinguish a value freed by `.free()` from one moved elsewhere
+            for (uint32_t k = 0; k < t->nfreed; k++)
+              freed |= t->freed[k] == d.node;
+            typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                               freed ? "use after free" : "use of moved value");
             break;
           }
         if (!addr_ctx && tc_is_uninit(t, d.node)) // definite-init: a deferred binding read before assignment
@@ -2233,7 +2256,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const TypeId l = check_expr(t, n->as.binary.left);
       t->expected = l; // hand the lvalue's type to the RHS for expected-type resolution
       check_expr(t, n->as.binary.right);
-      tc_mark_move(t, n->as.binary.right); // `z = x` moves a Drop x
+      tc_mark_move(t, n->as.binary.right); // `z = x` moves a Free x
       if (!is_assignable(t, n->as.binary.left)) {
         const Span sp = ast_at_const(a, n->as.binary.left)->span;
         typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot assign to this expression");
@@ -2664,7 +2687,7 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
       if (valued) {
         t->expected = declared; // hand the annotation to the initializer for expected-type resolution
         check_expr(t, n->as.let_stmt.value);
-        tc_mark_move(t, n->as.let_stmt.value); // `let y = x` moves a Drop x into y
+        tc_mark_move(t, n->as.let_stmt.value); // `let y = x` moves a Free x into y
       }
       TypeId binding;
       if (annotated) {
@@ -2685,7 +2708,7 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         if (tc_type_is_drop(t, binding)) {
           const Span sp = name_span(t, n->as.let_stmt.name);
           typechecker_errorf(t, sp.start, sp.end - sp.start,
-                             "a Drop-typed binding must be initialized when declared (it is dropped at scope exit)");
+                             "a Free-typed binding must be initialized when declared (it is freed at scope exit)");
         } else {
           tc_add_uninit(t, id); // identifier uses resolve to this NODE_LET node
         }
@@ -2975,10 +2998,10 @@ static void check_item(TypeChecker *t, const NodeId id) {
       const NodeId savedfn = t->current_fn;
       t->current_returns = n->as.function.returns;
       t->current_fn = id;
-      t->nmoved = t->nuninit = 0; // fresh move + definite-init tracking scope per function body
+      t->nmoved = t->nuninit = t->nfreed = 0; // fresh move + definite-init + use-after-free scope per body
       if (n->as.function.body != NODE_NONE)
         check_stmt(t, n->as.function.body);
-      t->nmoved = t->nuninit = 0;
+      t->nmoved = t->nuninit = t->nfreed = 0;
       t->current_returns = saved;
       t->current_fn = savedfn;
       break;
