@@ -256,7 +256,6 @@ static void emit_if_expr(Codegen *c, NodeId id);
 static void emit_array_braces(Codegen *c, const Node *n);
 static void emit_auto_drop(Codegen *c, NodeId letId);
 static void emit_try(Codegen *c, const Node *n);
-static DefId cg_drop_method(Codegen *c, ModuleId tmod, NodeId tdecl);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -1987,13 +1986,13 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       om = rt->module;
       od = rt->as.decl;
     }
-    const DefId fm = od != NODE_NONE ? cg_drop_method(c, om, od) : (DefId){0, NODE_NONE};
+    const DefId fm = od != NODE_NONE ? cg_find_method_cstr(c, om, od, "free") : (DefId){0, NODE_NONE};
     if (fm.node != NODE_NONE) {
       emit_op_method(c, rt, om, od, fm);
       emit(c, isref ? "(" : "(&");
       emit_expr(c, recv);
       emit(c, ")");
-    } else { // not a Free type (or a generic param resolved to one): evaluate the receiver, free nothing
+    } else { // no `free` method (e.g. a builtin, or a generic param resolved to a POD type): free nothing
       emit(c, "(void)(");
       emit_expr(c, recv);
       emit(c, ")");
