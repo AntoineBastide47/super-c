@@ -1451,6 +1451,13 @@ static NodeId parse_postfix(Parser *p) {
                       .span = span_new(start, node_span(p, cast_type).end),
                       .as.cast = {.expression = expr, .type = cast_type},
                   });
+    } else if (match(p, Question)) { // `expr?` early-return operator -> a postfix unary
+      expr = ast_add(
+          p->ast, (Node){
+                      .kind = NODE_UNARY,
+                      .span = span_new(start, previous_end(p)),
+                      .as.unary = {.op = Question, .operand = expr},
+                  });
     } else {
       break;
     }

@@ -1038,6 +1038,25 @@ static TypeId range_instance_elem(TypeChecker *t, const TypeId tid) {
   return it->n == 1 && it->module == rmid && it->decl == rd ? it->args[0] : TYPE_NONE;
 }
 
+// If `tid` is the prelude enum `name` (e.g. "Option"/"Result"), copy its type args into `out` (up to
+// `maxn`) and return the arg count; else -1. Used by the `?` operator to read Option<T> / Result<T,E>.
+static int prelude_instance_args(TypeChecker *t, const TypeId tid, const char *const name, const size_t nl,
+                                 TypeId *const out, const int maxn) {
+  if (!t->package || tid == TYPE_NONE)
+    return -1;
+  const Ty *const ty = ast_type_at(t->ast, tid);
+  if (ty->kind != TYPE_INSTANCE)
+    return -1;
+  const TyInstance *const it = ast_instance(t->ast, ty->as.inst);
+  ModuleId mid;
+  const NodeId d = package_prelude_lookup(t->package, name, nl, true, &mid);
+  if (d == NODE_NONE || it->module != mid || it->decl != d)
+    return -1;
+  for (int i = 0; i < it->n && i < maxn; i++)
+    out[i] = it->args[i];
+  return it->n;
+}
+
 // Identify a prelude slice instance -- the lowered form of `[]E` / `[]mut E`. Returns 0 (not a slice),
 // 1 (`Slice<E>`, read-only) or 2 (`SliceMut<E>`, writable); sets `*elem` to E for either slice kind.
 static int slice_kind(TypeChecker *t, const TypeId tid, TypeId *const elem) {
@@ -1230,6 +1249,40 @@ static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) 
                            "cannot take '&mut' of an immutable binding (bind it with 'mut')");
       }
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_REFERENCE, .qualifier = n->as.unary.qualifier, .as.elem = opnd});
+    case Question: { // `expr?`: unwrap Option<T>/Result<T,E>, else early-return None/Err from the function
+      if (opnd == TYPE_NONE)
+        return TYPE_NONE;
+      const TypeId os = strip(t, opnd);
+      TypeId oa[2], fa[2];
+      const int nopt = prelude_instance_args(t, os, "Option", 6, oa, 2);
+      const int nres = nopt >= 0 ? -1 : prelude_instance_args(t, os, "Result", 6, oa, 2);
+      if (nopt < 0 && nres < 0) {
+        typechecker_errorf(t, sp.start, sp.end - sp.start, "'?' requires an Option or Result operand");
+        return TYPE_NONE;
+      }
+      TypeId fnret = TYPE_NONE; // the enclosing function's single declared return type
+      if (t->current_returns.len == 1) {
+        const NodeId r0 = ast_list(t->ast, t->current_returns)[0];
+        const Node *const rnn = ast_at_const(t->ast, r0);
+        fnret = resolve_type(t, rnn->kind == NODE_PARAMETER ? rnn->as.parameter.type : r0);
+      }
+      const TypeId frs = fnret == TYPE_NONE ? TYPE_NONE : strip(t, fnret);
+      if (nopt >= 0) {
+        if (prelude_instance_args(t, frs, "Option", 6, fa, 2) < 0)
+          typechecker_errorf(t, sp.start, sp.end - sp.start, "'?' on an Option requires the function to return an Option");
+        return oa[0]; // the Some payload type
+      }
+      if (prelude_instance_args(t, frs, "Result", 6, fa, 2) < 0)
+        typechecker_errorf(t, sp.start, sp.end - sp.start, "'?' on a Result requires the function to return a Result");
+      else if (oa[1] != fa[1]) { // the error types must match (convert explicitly with `.into()` before `?`)
+        char a1[96], a2[96];
+        render_type(t, oa[1], a1, sizeof a1);
+        render_type(t, fa[1], a2, sizeof a2);
+        typechecker_errorf(t, sp.start, sp.end - sp.start,
+                           "'?' error type '%s' does not match the function's error type '%s'", a1, a2);
+      }
+      return oa[0]; // the Ok payload type
+    }
     default: // Move, Unsafe (and any future prefix) pass the operand's type through
       return opnd;
   }

@@ -1001,6 +1001,30 @@ static void test_operator_overloading(void) {
       PRE "fn main() i32 { let arr = [40, 2]; exit(arr[0] + arr[1] + (10 * 0)); }\n", 42, "");
 }
 
+// E#14 `?` early-return operator: `expr?` unwraps Some/Ok, or returns None/Err (carrying the error) from
+// the enclosing function -- running its pending defers first, like a `return`.
+static void test_question_operator(void) {
+  sc_run_program(
+      "? unwraps Some and propagates None",
+      PRE "fn checked(n: i32) Option<i32> { let o = Option::<i32>::some(n); let v = o?; return Option::<i32>::some(v + 1); }\n"
+          "fn first(o: Option<i32>) Option<i32> { let v = o?; return Option::<i32>::some(v); }\n"
+          "fn main() i32 { let a = switch checked(41) { Some(v) => v, None => 0, };\n" // 42
+          "  let b = switch first(Option::<i32>::none()) { Some(_) => 1, None => 100, }; exit(a + b - 100); }\n", // 42
+      42, "");
+  sc_run_program(
+      "? unwraps Ok and propagates Err",
+      PRE "fn rdiv(a: i32, b: i32) Result<i32, i32> { if b == 0 { return Result::<i32, i32>::err(9); }\n"
+          "  return Result::<i32, i32>::ok(a / b); }\n"
+          "fn calc() Result<i32, i32> { let x = rdiv(84, 2)?; let y = rdiv(x, 0)?; return Result::<i32, i32>::ok(y); }\n"
+          "fn main() i32 { exit(switch calc() { Ok(v) => v, Err(e) => 33 + e, }); }\n", // rdiv(x,0) -> Err(9) -> 42
+      42, "");
+  sc_run_program(
+      "? runs pending defers on the early return",
+      PRE "fn g() Option<i32> { defer putchar('D'); let v = Option::<i32>::none()?; putchar('Z'); return Option::<i32>::some(v); }\n"
+          "fn main() i32 { let r = switch g() { Some(_) => 1, None => 2, }; putchar(10); exit(r - 2); }\n",
+      0, "D\n"); // 'D' from the defer, never 'Z'; g() returns None -> r == 2 -> exit 0
+}
+
 static void test_drop_raii(void) {
 #define DROP_PRE                                                                                                        \
   PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
@@ -1150,6 +1174,7 @@ int main(void) {
   test_static_assert();
   test_interfaces();
   test_operator_overloading();
+  test_question_operator();
   test_string_sso();
   test_unions();
   test_closures();

@@ -75,6 +75,8 @@ struct Codegen {
     unsigned depth;            // current C indentation level
     unsigned tmp;              // counter feeding fresh() unique `__sc<N>` names
     char current_ret[128];     // enclosing function's multi-return struct name, or ""
+    NodeId current_fn_ret_node; // the enclosing function's single return TYPE node, for the `?` operator's
+                                // early-return construction; NODE_NONE for void / multi-return
     const Package *package;    // for cross-module references / mangling (NULL = single file)
     bool mangle;               // true for >1 user module: prefix every symbol by its module
     bool multifile;            // emit as header + .c with includes (build/ tree), vs one self-contained .c
@@ -252,6 +254,7 @@ static void emit_if(Codegen *c, const Node *n);
 static void emit_if_expr(Codegen *c, NodeId id);
 static void emit_array_braces(Codegen *c, const Node *n);
 static void emit_auto_drop(Codegen *c, NodeId letId);
+static void emit_try(Codegen *c, const Node *n);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -2507,7 +2510,9 @@ static void emit_expr(Codegen *c, const NodeId id) {
       break;
     case NODE_UNARY: {
       const TokenType op = n->as.unary.op;
-      if (op == Move || op == Unsafe) {
+      if (op == Question) {
+        emit_try(c, n); // `expr?`: unwrap or early-return None/Err
+      } else if (op == Move || op == Unsafe) {
         emit_expr(c, n->as.unary.operand); // ownership/unsafe markers vanish
       } else {
         emit(c, "(%s", c_op(op));
@@ -3639,6 +3644,67 @@ static void emit_return(Codegen *c, const Node *n) {
   emit(c, " };\n");
 }
 
+// The variant of enum `enumDecl` (in module `m`) named `lit`, or NODE_NONE (so `?` can tell Option from
+// Result by probing for a "None" variant).
+static NodeId cg_enum_variant(Codegen *c, const ModuleId m, const NodeId enumDecl, const char *const lit) {
+  const Ast *const a = cg_mod_ast(c, m);
+  const Node *const e = ast_at_const(a, enumDecl);
+  if (e->kind != NODE_ENUM)
+    return NODE_NONE;
+  const NodeList ms = e->as.aggregate.members;
+  const NodeId *const ids = ast_list(a, ms);
+  for (uint32_t i = 0; i < ms.len; i++) {
+    const Node *const v = ast_at_const(a, ids[i]);
+    if (v->kind == NODE_VARIANT && span_is(cg_mod_src(c, m), ast_at_const(a, v->as.variant.name)->as.name.text, lit))
+      return ids[i];
+  }
+  return NODE_NONE;
+}
+
+// `expr?`: unwrap an Option<T> / Result<T,E>, or run the pending defers and early-return None / Err from the
+// enclosing function (which the type checker has verified returns the matching family). A GNU statement-expr
+// yields the Some/Ok payload on the fall-through path.
+static void emit_try(Codegen *c, const Node *const n) {
+  const NodeId operand = n->as.unary.operand;
+  const Ty *const bt = ast_type_at(c->ast, subst_resolve(c, strip_ptr(c, ast_type(c->ast, operand))));
+  if (bt->kind != TYPE_INSTANCE) { // defensive: the type checker should have rejected this
+    emit_expr(c, operand);
+    return;
+  }
+  const TyInstance *const it = ast_instance(c->ast, bt->as.inst);
+  const ModuleId om = it->module;
+  const NodeId od = it->decl;
+  const NodeId noneV = cg_enum_variant(c, om, od, "None");
+  const bool is_option = noneV != NODE_NONE;
+  const NodeId failV = is_option ? noneV : cg_enum_variant(c, om, od, "Err");
+  const NodeId okV = cg_enum_variant(c, om, od, is_option ? "Some" : "Ok");
+  char okName[128], failName[128];
+  render_variant_name(c, om, okV, okName, sizeof okName);
+  render_variant_name(c, om, failV, failName, sizeof failName);
+  char rtn[200];
+  rtn[0] = '\0';
+  if (c->current_fn_ret_node != NODE_NONE)
+    render_type_node(c, c->current_fn_ret_node, "", rtn, sizeof rtn);
+  char tmp[32];
+  fresh(c, tmp, sizeof tmp);
+  emit(c, "({ __auto_type %s = ", tmp);
+  emit_expr(c, operand);
+  emit(c, "; if (%s.tag == ", tmp);
+  emit_tag_mod(c, om, od, failV);
+  emit(c, ") {\n");
+  c->depth++;
+  emit_defers_to(c, 0); // like a return: run every live defer / scope-exit drop first (defer_top is untouched)
+  emit_indent(c);
+  emit(c, "return (%s){ .tag = ", rtn);
+  emit_tag_mod(c, om, od, failV);
+  if (!is_option) // carry the error payload through (same error type; cross-type conversion is rejected upstream)
+    emit(c, ", .payload.%s._0 = %s.payload.%s._0", failName, tmp, failName);
+  emit(c, " };\n");
+  c->depth--;
+  emit_indent(c);
+  emit(c, "} %s.payload.%s._0; })", tmp, okName);
+}
+
 // An expression-statement: peel transparent unsafe/move wrappers, then render block/if/match as
 // real statements (no stray stmt-expr or semicolon), everything else as `<expr>;`.
 static void emit_expr_stmt(Codegen *c, NodeId v) {
@@ -4341,6 +4407,7 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
 
   const NodeList rets = fn->as.function.returns;
   c->current_ret[0] = '\0';
+  c->current_fn_ret_node = NODE_NONE;
   // C requires `int main(void)`; a Super-C `fn main() i32` maps onto it (implicit 0 on fall-through).
   if (target.node == NODE_NONE && !extern_q && span_is(c->source, name_span(c, fn->as.function.name), "main")) {
     emit(c, "int %s", decl);
@@ -4358,8 +4425,9 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
   } else if (rets.len == 1) {
     const NodeId r0 = ast_list(c->ast, rets)[0];
     const Node *const rn = ast_at_const(c->ast, r0);
+    c->current_fn_ret_node = rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0; // for `?`
     char out[1400];
-    render_type_node(c, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0, decl, out, sizeof out);
+    render_type_node(c, c->current_fn_ret_node, decl, out, sizeof out);
     emit_cstr(c, out);
   } else {
     emit(c, "void ");
