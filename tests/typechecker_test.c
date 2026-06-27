@@ -219,6 +219,13 @@ static void test_errors(void) {
                "has no 'add' method");
   expect_error("index operator without method",
                "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; return a[0]; }\n", "has no 'index' method");
+  // the `?` operator requires an Option/Result operand and a matching function return type.
+  expect_error("? in a non-Option/Result function",
+               "fn f() i32 { let o = Option::<i32>::some(1); let v = o?; return v; }\n",
+               "requires the function to return an Option");
+  expect_error("? on a non-Option/Result operand",
+               "fn f() Option<i32> { let x = 5; let v = x?; return Option::<i32>::some(v); }\n",
+               "requires an Option or Result operand");
   expect_error(
       "unknown field", "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; p.y; }\n",
       "no field or method 'y'");

@@ -259,6 +259,20 @@ static void test_bare_conditions_and_ranges(void) {
   CHECK(parse_has_error("fn f() void { for i in 0..= { } }\n"), "inclusive range without an end is rejected");
 }
 
+// The postfix `?` early-return operator parses to a NODE_UNARY whose op is the `?` token, applied to the
+// preceding postfix expression (so `f()?` is `(f())?`).
+static void test_question_operator_parse(void) {
+  Ast *ast = sc_parse("question operator", "fn f() void { let x = g()?; }\n");
+  if (!ast)
+    return;
+  const Node *body = ast_at_const(ast, item(ast, 0)->as.function.body);
+  const Node *let = ast_at_const(ast, ast_list(ast, body->as.block.statements)[0]);
+  const Node *val = ast_at_const(ast, let->as.let_stmt.value);
+  CHECK(val->kind == NODE_UNARY && val->as.unary.op == Question, "g()? parses to a NODE_UNARY with op '?'");
+  CHECK(ast_at_const(ast, val->as.unary.operand)->kind == NODE_CALL, "the `?` operand is the call g()");
+  ast_free(&ast);
+}
+
 // A `lo..hi` in expression position (a `let` initializer here) parses to a NODE_RANGE value -- the same
 // node the for/index forms use -- with both bounds and the inclusive flag preserved. One token of
 // lookahead (`..`/`..=` after the start) decides it, so the grammar stays LL(1).
@@ -403,6 +417,7 @@ int main(void) {
   test_error_recovery();
   test_bare_conditions_and_ranges();
   test_range_value_expression();
+  test_question_operator_parse();
   test_switch_pattern_ranges();
   if (failures) {
     fprintf(stderr, "%d parser test failure%s\n", failures, failures == 1 ? "" : "s");
