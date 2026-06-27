@@ -625,6 +625,34 @@ static void test_generics(void) {
       42, "");
 }
 
+// D#12: a generic instance held BY VALUE inside another (`Option<Vector<i32>>` -- Option's payload is a
+// Vector<i32>, not a pointer to one) needs the inner specialization defined before the outer in the
+// single-TU output. The emitter topologically orders specializations so this compiles in the REPL/test path
+// too (it always worked in the multi-file build via per-module headers).
+static void test_nested_generic_by_value(void) {
+  sc_run_program(
+      "nested generic instance by value (single-TU ordering)",
+      PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(40); v.push(2);\n"
+          "  let o: Option<Vector<i32>> = Option::<Vector<i32>>::some(v);\n"
+          "  let mut w = o.unwrap_or(Vector::<i32>::new());\n"
+          "  let mut acc = 0; for x in w.iter() { acc = acc + x; } w.drop(); exit(acc); }\n",
+      42, "");
+  // Option<String> holds a String by value: the String struct must precede Option__String in the output.
+  sc_run_program(
+      "Option<prelude struct> by value (single-TU ordering)",
+      PRE "fn main() i32 { let s = String::from(\"hi\");\n"
+          "  let o: Option<String> = Option::<String>::some(s);\n"
+          "  let mut w = o.unwrap_or(String::from(\"\"));\n"
+          "  let n = w.len() as i32; w.drop(); exit(n); }\n",
+      2, "");
+  // case (c): a user concrete struct holding a generic instance BY VALUE.
+  sc_run_program(
+      "concrete struct holds generic instance by value (single-TU ordering)",
+      PRE "struct Holder { pub o: Option<i32> }\n"
+          "fn main() i32 { let h = Holder { o: Option::<i32>::some(42) }; exit(h.o.unwrap_or(0)); }\n",
+      42, "");
+}
+
 // The std/ generic container types (Option, Result, Box, Vector) exercised end-to-end: they are prelude
 // modules, so this proves cross-module generic instances + methods + sizeof + rvalue-receiver chaining.
 static void test_std_types(void) {
@@ -632,8 +660,6 @@ static void test_std_types(void) {
   sc_run_program("sizeof", PRE "fn main() i32 { exit(((sizeof(i32) + sizeof(u8)) as i32) * 8 + 2); }\n", 42, ""); // (4+1)*8+2
   // Standard-interface conformances on prelude types: String Eq/Ord/Clone/Default/From, Vector/Option
   // Default, dispatched through a generic `T: Ord` bound and the expected-type `Default::default()`.
-  // (Vector<i32> here, not Vector<String>: a by-value Option<prelude-type> field is only orderable in the
-  // multi-file build, not this single-TU harness path.)
   sc_run_program(
       "std interface conformances",
       PRE "fn pick<T: Ord>(a: T, b: T) T { if a.cmp(&b) >= 0 { return a; } return b; }\n"
@@ -1070,6 +1096,7 @@ int main(void) {
   test_unions();
   test_closures();
   test_std_types();
+  test_nested_generic_by_value();
   test_generics_over_user_types();
   test_container_conformances();
   test_str_conformances();
