@@ -54,15 +54,29 @@ HM_DEFINE(NodeId, NodeId, CgEnumMap, cg_nodeid_hash, CG_NODEID_EQ)
   "static inline void __sc_atomic_fence(void){__atomic_thread_fence(__ATOMIC_SEQ_CST);}\n"                         \
   "#pragma GCC diagnostic pop\n"                                                                                   \
   "#endif\n"
+#define SC_LIBC_SHIM                                                                                                \
+  "static inline __attribute__((unused)) FILE* __sc_stdin(void){return stdin;}\n"                                   \
+  "static inline __attribute__((unused)) FILE* __sc_stdout(void){return stdout;}\n"                                 \
+  "static inline __attribute__((unused)) FILE* __sc_stderr(void){return stderr;}\n"                                 \
+  "static inline __attribute__((unused)) int* __sc_errno_location(void){return &errno;}\n"
 const char *const SUPER_RT_INCLUDES =
     RT_H("assert.h") RT_H("complex.h") RT_H("ctype.h") RT_H("errno.h") RT_H("fenv.h") RT_H("float.h")
-    RT_H("inttypes.h") RT_H("iso646.h") RT_H("limits.h") RT_H("locale.h") RT_H("math.h")
+    RT_H("inttypes.h") RT_H("iso646.h") RT_H("limits.h") RT_H("locale.h") RT_H("math.h") RT_H("dlfcn.h")
     RT_H("signal.h") RT_H("stdalign.h") RT_H("stdarg.h") RT_H("stdatomic.h") RT_H("stdbit.h") RT_H("stdbool.h")
     RT_H("stdckdint.h") RT_H("stddef.h") RT_H("stdint.h") RT_H("stdio.h") RT_H("stdlib.h") RT_H("stdnoreturn.h")
     RT_H("string.h") RT_H("tgmath.h") RT_H("threads.h") RT_H("time.h") RT_H("uchar.h") RT_H("wchar.h")
-    RT_H("wctype.h") SC_ATOMIC_SHIM;
+    RT_H("wctype.h") SC_ATOMIC_SHIM SC_LIBC_SHIM
+    // Runtime safety traps: abort on a violation (the language has no panic/unwind).
+    "static __attribute__((unused)) void __sc_panic(const char *__m) {\n"
+    "  fprintf(stderr, \"super-c: %s\\n\", __m); abort();\n"
+    "}\n"
+    "static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n) {\n"
+    "  if (__i >= __n) __sc_panic(\"index out of bounds\");\n"
+    "  return __i;\n"
+    "}\n";
 #undef RT_H
 #undef SC_ATOMIC_SHIM
+#undef SC_LIBC_SHIM
 
 struct Codegen {
     Ast *ast;
@@ -80,6 +94,8 @@ struct Codegen {
     const Package *package;    // for cross-module references / mangling (NULL = single file)
     bool mangle;               // true for >1 user module: prefix every symbol by its module
     bool multifile;            // emit as header + .c with includes (build/ tree), vs one self-contained .c
+    bool const_ctx;            // emitting a C constant expression (const init / enum discriminant / static_assert):
+                               // checked arithmetic must stay a constant expression (no runtime trap wrapper)
     // Monomorphization: while emitting a specialization, `subst` maps each generic param (DefId) to its
     // concrete type; `insts` is the dedup'd set of generic instantiations used by this module.
     struct {
@@ -93,13 +109,13 @@ struct Codegen {
         TypeId args[4];
     } insts[256];
     int ninsts;
-    bool insts_overflow; // set once if a module exceeds `insts` -> a loud diagnostic, never a silent drop
+    bool insts_overflow; // set once if a module exceeds `insts` -> a loud diagnostic, never a silent omission
     // Win 1 — callback specialization: a same-module free fn called with a statically-known non-capturing
     // callback is specialized per callee, the callback param elided and the inner call made direct.
     struct {
         DefId fn;            // the specialized free function (this module)
         NodeId param;        // its elided callback parameter
-        uint32_t cbidx;      // that parameter's position (so the matching argument is dropped)
+        uint32_t cbidx;      // that parameter's position (so the matching argument is elided)
         DefId callee;        // the statically-known callee bound to it (named fn / closure node)
         bool callee_closure; // callee.node is a NODE_CLOSURE
     } cb_insts[128];
@@ -124,20 +140,20 @@ struct Codegen {
     uint8_t defer_kind[256]; // 0 = a `defer` statement expr; 1 = an automatic Free of a local binding (RAII)
     uint32_t defer_top;
     uint32_t loop_defer_base;
-    // RAII: locals of a `Free`-implementing type are dropped at scope exit, UNLESS moved out (passed by
-    // value, bound to another name, or returned) -- a moved value is owned (and dropped) elsewhere. `moved`
-    // holds bindings moved UNCONDITIONALLY (on every path), whose auto-drop is elided outright.
+    // RAII: locals of a `Free`-implementing type are freed at scope exit, UNLESS moved out (passed by
+    // value, bound to another name, or returned) -- a moved value is owned (and freed) elsewhere. `moved`
+    // holds bindings moved UNCONDITIONALLY (on every path), whose auto-free is elided outright.
     NodeId moved[512];
     uint32_t nmoved;
     // A binding moved on only SOME paths (inside an if/match/loop branch) can't be elided outright (the
     // no-move path would leak): it gets a runtime `bool __mv<decl>` set true at each move site, and its
-    // scope-exit drop is guarded `if (!__mv<decl>)`. `cond_moved` are those bindings; `cond_sites` are the
+    // scope-exit free is guarded `if (!__mv<decl>)`. `cond_moved` are those bindings; `cond_sites` are the
     // identifier expressions that move them (where the flag is set).
     NodeId cond_moved[256];
     uint32_t ncond_moved;
     NodeId cond_sites[256];
     uint32_t ncond_sites;
-    // Conditionally-moved by-value Free parameters: their drop flags are declared at the function body's
+    // Conditionally-moved by-value Free parameters: their free flags are declared at the function body's
     // top (a parameter has no `let` site to attach them to). Consumed once by emit_block_from.
     NodeId param_flags[32];
     uint32_t nparam_flags;
@@ -234,13 +250,15 @@ static const char *const BUILTIN_C[BT_COUNT] = {
 static void emit_expr(Codegen *c, NodeId id);
 static NodeId array_length_of(Codegen *c, NodeId iter);
 static long array_literal_count(Codegen *c, NodeId obj);
+static bool cg_int_lit(Codegen *c, NodeId e, long *out);
+static bool cg_emit_checked_arith(Codegen *c, const Node *n, NodeId id);
 
-// The runtime drop-flag name for a conditionally-moved Free binding (decl node `decl`): `__mv<decl>`.
+// The runtime free-flag name for a conditionally-moved Free binding (decl node `decl`): `__mv<decl>`.
 static inline void cg_move_flag(char *out, const size_t cap, const NodeId decl) {
   snprintf(out, cap, "__mv%u", decl);
 }
 static bool cg_is_cond_moved(const Codegen *c, NodeId decl);
-// Is the identifier expression `expr` a conditional-move site (set its binding's drop flag when emitting it)?
+// Is the identifier expression `expr` a conditional-move site (set its binding's free flag when emitting it)?
 static inline bool cg_is_cond_site(const Codegen *c, const NodeId expr) {
   for (uint32_t i = 0; i < c->ncond_sites; i++)
     if (c->cond_sites[i] == expr)
@@ -254,7 +272,10 @@ static void emit_block(Codegen *c, NodeId id);
 static void emit_if(Codegen *c, const Node *n);
 static void emit_if_expr(Codegen *c, NodeId id);
 static void emit_array_braces(Codegen *c, const Node *n);
-static void emit_auto_drop(Codegen *c, NodeId letId);
+static void emit_auto_free(Codegen *c, NodeId letId);
+static bool cg_type_is_free(Codegen *c, TypeId ty);
+static bool cg_is_moved(const Codegen *c, NodeId decl);
+static bool emit_free_target(Codegen *c, TypeId bt);
 static void emit_try(Codegen *c, const Node *n);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
@@ -265,7 +286,7 @@ static void emit_match_core(Codegen *c, NodeId id, int mode, const char *result)
 static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
 static void emit_expr_stmt(Codegen *c, NodeId v);
 static void emit_defers_to(Codegen *c, uint32_t base);
-static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut);
+static void emit_pattern_binds(Codegen *c, NodeId pid, const char *scrut, bool by_ref);
 static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
 static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
 static void inst_name(Codegen *c, const TyInstance *it, char *out, size_t cap);
@@ -410,7 +431,7 @@ static void macro_finish(Codegen *c, const size_t start) {
     return;
   size_t end = c->buf_len;
   while (end > start && c->buf[end - 1] == '\n')
-    end--; // keep one plain newline after the body; drop trailing blanks
+    end--; // keep one plain newline after the body; trim trailing blanks
   const size_t n = end - start;
   char *const tmp = malloc(n);
   if (!tmp) {
@@ -605,6 +626,18 @@ static void macro_arg_token(Codegen *c, const TypeId arg, char *out, const size_
     render_macro_param(c, y->module, y->as.decl, out + at, cap - at);
     return;
   }
+  // A pointer/reference/slice/array over a (possibly generic) element: emit the prefix then a paste
+  // sentinel, so a generic inner element stays a substitutable `_SCM_<T>` token (`ptr_ ## _SCM_T`).
+  if (y->kind == TYPE_POINTER || y->kind == TYPE_REFERENCE || y->kind == TYPE_SLICE || y->kind == TYPE_ARRAY) {
+    const char *const pfx = y->kind == TYPE_SLICE ? "slice_" : y->kind == TYPE_ARRAY ? "arr_" : "ptr_";
+    size_t at = buf_append(out, cap, 0, pfx);
+    if (at < cap)
+      out[at++] = CG_PASTE;
+    if (at < cap)
+      out[at] = '\0';
+    macro_arg_token(c, y->as.elem, out + at, cap > at ? cap - at : 0);
+    return;
+  }
   mangle_type(c, arg, out, cap);
 }
 
@@ -755,7 +788,7 @@ static void record_inst(Codegen *c, const DefId fn, const TypeId *const args, co
       return;
   }
   if (c->ninsts >= (int)(sizeof c->insts / sizeof c->insts[0])) {
-    if (!c->insts_overflow) { // never drop silently: one diagnostic instead of a missing symbol at link time
+    if (!c->insts_overflow) { // never omit silently: one diagnostic instead of a missing symbol at link time
       c->insts_overflow = true;
       const Span sp = ast_at_const(c->ast, site)->span;
       codegen_errorf(
@@ -917,7 +950,7 @@ static TypeId strip_ptr(Codegen *c, TypeId t) {
 
 // --- numeric/literal emission --------------------------------------------------------------
 
-// Emit an integer/float literal, dropping `_` separators and rewriting radix forms C can't read:
+// Emit an integer/float literal, removing `_` separators and rewriting radix forms C can't read:
 // `0b…` → decimal, `0o…` → C octal `0…`, leading-zero decimals → stripped (else C reads octal).
 static void emit_number(Codegen *c, const Span s, const TokenType tt) {
   char buf[256];
@@ -1192,7 +1225,8 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
       if (const_pointee) {
         char base[512];
         render_type_node(c, n->as.indirect_type.type, inner, base, sizeof base);
-        buf_join3(out, cap, "const ", "", base);
+        // A reference-to-reference (`&&T`) already renders its pointee `const` -- don't double the keyword.
+        buf_join3(out, cap, strncmp(base, "const ", 6) == 0 ? "" : "const ", "", base);
       } else {
         render_type_node(c, n->as.indirect_type.type, inner, out, cap);
       }
@@ -1279,7 +1313,8 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       if (const_pointee) {
         char base[512];
         render_type_id(c, ty->as.elem, inner, base, sizeof base);
-        buf_join3(out, cap, "const ", "", base);
+        // A reference-to-reference (`&&T`) already renders its pointee `const` -- don't double the keyword.
+        buf_join3(out, cap, strncmp(base, "const ", 6) == 0 ? "" : "const ", "", base);
       } else {
         render_type_id(c, ty->as.elem, inner, out, cap);
       }
@@ -1379,6 +1414,30 @@ static void render_binding_id(Codegen *c, const TypeId t, const char *name, cons
   }
 }
 
+// A type node that, after generic substitution, is a pointer/reference (e.g. a param `value: T` in a
+// specialization where `T = &U`). Such a node renders pointee-const already (`const U *`), so it must
+// take east-const too — west-const would emit a duplicate leading `const`.
+static bool cg_binding_subst_indirect(Codegen *c, const NodeId tn) {
+  if (tn == NODE_NONE)
+    return false;
+  const Node *const n = ast_at_const(c->ast, tn);
+  if (n->kind != NODE_TYPE_PATH && n->kind != NODE_IDENTIFIER)
+    return false;
+  const DefId d = ast_resolution_def(c->ast, tn);
+  if (d.node == NODE_NONE)
+    return false;
+  const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
+  if (dn->kind != NODE_GENERIC_PARAM && dn->kind != NODE_TRAIT)
+    return false;
+  const TypeId s = subst_lookup(c, d.module, d.node);
+  if (s == TYPE_NONE)
+    // Inside a macro template the concrete arg is unknown -- it may be a reference (`const P *`), so a
+    // west-const param `const T` would double the const. East-const (`T const`) is safe for any C type.
+    return c->macro && dn->kind == NODE_GENERIC_PARAM;
+  const TypeKind sk = ast_type_at(c->ast, s)->kind;
+  return sk == TYPE_POINTER || sk == TYPE_REFERENCE;
+}
+
 // Same west/east const placement, but from an AST type node (preserves array lengths). Pointer,
 // reference and function-pointer outer types take east-const; everything else west.
 static void render_binding_node(Codegen *c, const NodeId tn, const char *name, const bool is_const, char *out, const size_t cap) {
@@ -1388,7 +1447,7 @@ static void render_binding_node(Codegen *c, const NodeId tn, const char *name, c
   const bool east_array_fn =
       k == NODE_ARRAY_TYPE &&
       ast_at_const(c->ast, ast_at_const(c->ast, tn)->as.array_type.element)->kind == NODE_FUNCTION_TYPE;
-  if (is_const && (k == NODE_POINTER_TYPE || k == NODE_REFERENCE_TYPE || k == NODE_FUNCTION_TYPE || east_array_fn)) {
+  if (is_const && (k == NODE_POINTER_TYPE || k == NODE_REFERENCE_TYPE || k == NODE_FUNCTION_TYPE || east_array_fn || cg_binding_subst_indirect(c, tn))) {
     char nm[200];
     buf_join3(nm, sizeof nm, "const ", "", name);
     render_type_node(c, tn, nm, out, cap);
@@ -1759,10 +1818,20 @@ static bool emit_arith_overload(Codegen *c, const Node *const n) {
 
 // True if type `y` is the prelude struct named `lit` (used to spot `str` / `String` arguments to format).
 static bool cg_struct_name_is(Codegen *c, const Ty *const y, const char *const lit) {
-  if (y->kind != TYPE_STRUCT)
+  ModuleId m;
+  NodeId decl;
+  if (y->kind == TYPE_STRUCT) {
+    m = y->module;
+    decl = y->as.decl;
+  } else if (y->kind == TYPE_INSTANCE) { // a generic instance (`String<Global>`) matches its decl's name ("String")
+    const TyInstance *const it = ast_instance(c->ast, y->as.inst);
+    m = it->module;
+    decl = it->decl;
+  } else {
     return false;
-  const Node *const dn = ast_at_const(cg_mod_ast(c, y->module), y->as.decl);
-  return span_is(cg_mod_src(c, y->module), ast_at_const(cg_mod_ast(c, y->module), dn->as.aggregate.name)->as.name.text, lit);
+  }
+  const Node *const dn = ast_at_const(cg_mod_ast(c, m), decl);
+  return span_is(cg_mod_src(c, m), ast_at_const(cg_mod_ast(c, m), dn->as.aggregate.name)->as.name.text, lit);
 }
 
 // Emit (into the format builder named `f`) a C string-literal for the raw format bytes [a, b): re-escapes
@@ -1800,34 +1869,54 @@ static void emit_fmt_cstr(Codegen *c, const size_t a, const size_t b) {
 
 // Append one format argument to the builder `f`, by its static type: any integer/float, bool, char, str, or
 // String. Anything else (e.g. a Vector) is rejected -- call its `.fmt()` and pass the resulting String.
-static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg) {
+// spec: 0 = default; 'x'/'X' = lowercase/uppercase hex (integer args only).
+static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg, const char spec) {
   const TypeId t = subst_resolve(c, ast_type(c->ast, arg));
   const Ty *const y = ast_type_at(c->ast, t);
+  if (spec == 'x' || spec == 'X') { // hex: integers only
+    const bool up = spec == 'X';
+    if (y->kind != TYPE_BUILTIN)
+      return false;
+    switch (y->as.builtin) {
+      case BT_I8: case BT_I16: case BT_I32: case BT_I64: case BT_ISIZE:
+        emit(c, "String__Global__push_hex_i64(&%s, (int64_t)(", f);
+        emit_expr(c, arg);
+        emit(c, "), %s);\n", up ? "true" : "false");
+        return true;
+      case BT_U8: case BT_U16: case BT_U32: case BT_U64: case BT_USIZE: case BT_CHAR:
+        emit(c, "String__Global__push_hex(&%s, (uint64_t)(", f);
+        emit_expr(c, arg);
+        emit(c, "), %s);\n", up ? "true" : "false");
+        return true;
+      default:
+        return false;
+    }
+  }
   if (y->kind == TYPE_BUILTIN) {
     switch (y->as.builtin) {
       case BT_BOOL:
         emit(c, "if (");
         emit_expr(c, arg);
-        emit(c, ") String__push_str(&%s, (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });", f);
-        emit(c, " else String__push_str(&%s, (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n", f);
+        emit(c, ") String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });", f);
+        emit(c, " else String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n", f);
         return true;
       case BT_CHAR:
-        emit(c, "String__push_byte(&%s, (uint8_t)(", f);
+        emit(c, "String__Global__push_byte(&%s, (uint8_t)(", f);
         emit_expr(c, arg);
         emit(c, "));\n");
         return true;
       case BT_I8: case BT_I16: case BT_I32: case BT_I64: case BT_ISIZE:
-        emit(c, "String__push_i64(&%s, (int64_t)(", f);
+        emit(c, "String__Global__push_i64(&%s, (int64_t)(", f);
         emit_expr(c, arg);
         emit(c, "));\n");
         return true;
       case BT_U8: case BT_U16: case BT_U32: case BT_U64: case BT_USIZE:
-        emit(c, "String__push_u64(&%s, (uint64_t)(", f);
+        emit(c, "String__Global__push_u64(&%s, (uint64_t)(", f);
         emit_expr(c, arg);
         emit(c, "));\n");
         return true;
       case BT_F32: case BT_F64:
-        emit(c, "String__push_f64(&%s, (double)(", f);
+        emit(c, "String__Global__push_f64(&%s, (double)(", f);
         emit_expr(c, arg);
         emit(c, "));\n");
         return true;
@@ -1836,22 +1925,22 @@ static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg) {
     }
   }
   if (cg_struct_name_is(c, y, "str")) {
-    emit(c, "String__push_str(&%s, ", f);
+    emit(c, "String__Global__push_str(&%s, ", f);
     emit_expr(c, arg);
     emit(c, ");\n");
     return true;
   }
   if (cg_struct_name_is(c, y, "String")) {
     if (is_lvalue(c, arg)) { // borrow a named String (the caller still owns it)
-      emit(c, "String__push_string(&%s, &(", f);
+      emit(c, "String__Global__push_string(&%s, &(", f);
       emit_expr(c, arg);
       emit(c, "));\n");
-    } else { // a temporary (e.g. `v.fmt()`): materialize, append, then drop it (no leak)
+    } else { // a temporary (e.g. `v.fmt()`): materialize, append, then free it (no leak)
       char tmp[32];
       fresh(c, tmp, sizeof tmp);
-      emit(c, "{ String %s = ", tmp);
+      emit(c, "{ String__Global %s = ", tmp);
       emit_expr(c, arg);
-      emit(c, "; String__push_string(&%s, &%s); String__free(&%s); }\n", f, tmp, tmp);
+      emit(c, "; String__Global__push_string(&%s, &%s); String__Global__free(&%s); }\n", f, tmp, tmp);
     }
     return true;
   }
@@ -1900,7 +1989,7 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
   }
   char f[32];
   fresh(c, f, sizeof f);
-  emit(c, "({ String %s = String__new();\n", f);
+  emit(c, "({ String__Global %s = String__Global__new();\n", f);
   const Span raw = fmtn->as.literal.raw;
   const uint8_t *const src = c->source;
   size_t i = raw.start + 1;
@@ -1912,32 +2001,42 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
       i += 2;
       continue;
     }
-    if (src[i] == '{' && i + 1 < end && src[i + 1] == '}') {
-      if (i > seg) {
-        emit(c, "String__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
-        emit_fmt_cstr(c, seg, i);
-        emit(c, ", .len = sizeof(");
-        emit_fmt_cstr(c, seg, i);
-        emit(c, ") - 1 });\n");
+    if (src[i] == '{') { // a placeholder `{}` or `{:x}` / `{:X}` (hex). Scan to the closing `}`.
+      char spec = 0;
+      size_t j = i + 1;
+      if (j < end && src[j] == ':' && j + 1 < end) {
+        spec = (char)src[j + 1];
+        j += 2;
       }
-      if (ai >= args.len) {
-        codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more `{}` placeholders than arguments");
-        emit(c, "%s; })", f);
-        return true;
+      if (j < end && src[j] == '}' && (spec == 0 || spec == 'x' || spec == 'X')) {
+        if (i > seg) {
+          emit(c, "String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
+          emit_fmt_cstr(c, seg, i);
+          emit(c, ", .len = sizeof(");
+          emit_fmt_cstr(c, seg, i);
+          emit(c, ") - 1 });\n");
+        }
+        if (ai >= args.len) {
+          codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more `{}` placeholders than arguments");
+          emit(c, "%s; })", f);
+          return true;
+        }
+        if (!emit_format_arg(c, f, aids[ai], spec)) {
+          const Span as = ast_at_const(c->ast, aids[ai])->span;
+          codegen_errorf(c, as.start, as.end - as.start,
+                         spec ? "codegen: `{:x}`/`{:X}` hex format requires an integer argument"
+                              : "codegen: argument is not directly formattable (call its .fmt())");
+        }
+        ai++;
+        i = j + 1;
+        seg = i;
+        continue;
       }
-      if (!emit_format_arg(c, f, aids[ai])) {
-        const Span as = ast_at_const(c->ast, aids[ai])->span;
-        codegen_errorf(c, as.start, as.end - as.start, "codegen: argument is not directly formattable (call its .fmt())");
-      }
-      ai++;
-      i += 2;
-      seg = i;
-      continue;
     }
     i++;
   }
   if (end > seg) {
-    emit(c, "String__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
+    emit(c, "String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
     emit_fmt_cstr(c, seg, end);
     emit(c, ", .len = sizeof(");
     emit_fmt_cstr(c, seg, end);
@@ -1946,11 +2045,11 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
   if (ai < args.len)
     codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more arguments than `{}` placeholders");
   if (kind == 3)
-    emit(c, "String__push_byte(&%s, 10);\n", f);
+    emit(c, "String__Global__push_byte(&%s, 10);\n", f);
   if (kind == 1) {
     emit(c, "%s; })", f); // format: yield the built String
   } else {
-    emit(c, "String__print(&%s); String__free(&%s); })", f, f); // print/println: write to stdout, then free
+    emit(c, "String__Global__print(&%s); String__Global__free(&%s); })", f, f); // print/println: write to stdout, then free
   }
   return true;
 }
@@ -1964,7 +2063,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   if (emit_format_builtin(c, n)) // format/print/println: split the literal + per-arg appends
     return;
 
-  // `x.free()` destructor INTRINSIC: only when the type checker left it unresolved (an unbounded generic
+  // `x.free()` Free intrinsic: only when the type checker left it unresolved (an unbounded generic
   // receiver, monomorphized here) -- emit x's Free impl when the concrete type is Free, else a no-op. This
   // is what lets one generic container conformance free its elements (`Vector<String>` frees its Strings,
   // `Vector<i32>` skips them). A resolved `.free()` (concrete type or `T: Free` bound) falls through to the
@@ -1989,6 +2088,19 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     const DefId fm = od != NODE_NONE ? cg_find_method_cstr(c, om, od, "free") : (DefId){0, NODE_NONE};
     if (fm.node != NODE_NONE) {
       emit_op_method(c, rt, om, od, fm);
+      emit(c, isref ? "(" : "(&");
+      emit_expr(c, recv);
+      emit(c, ")");
+    } else if (c->macro && rt->kind == TYPE_GENERIC) {
+      // Inside a macro template the receiver's concrete type is unknown: paste `_SCM_<T> ## __free` so the
+      // invocation supplies the arg type's `free` (a real one for a Free arg, or a guarded no-op stub for a
+      // non-Free arg -- emitted by cg_emit_free_stub). This makes deep-free reach user Free element types.
+      char pp[64];
+      emit(c, "_SCM_");
+      render_macro_param(c, rt->module, rt->as.decl, pp, sizeof pp);
+      emit_cstr(c, pp);
+      emit_paste(c);
+      emit(c, "__free");
       emit(c, isref ? "(" : "(&");
       emit_expr(c, recv);
       emit(c, ")");
@@ -2025,7 +2137,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   }
 
   // Win 1, at a call site: a free fn called with a statically-known non-capturing callback -> its
-  // specialization (`fn__cb_<callee>`), with the callback argument dropped.
+  // specialization (`fn__cb_<callee>`), with the callback argument elided.
   if (callee->kind == NODE_IDENTIFIER) {
     const DefId fn = ast_resolution_def(c->ast, callee_id);
     for (int k = 0; k < c->n_cb_insts; k++) {
@@ -2132,7 +2244,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
           omod = rb->module;
           odecl = rb->as.decl;
         }
-        const DefId cm = cg_find_method(c, omod, odecl, cg_mod_src(c, md.module), name_span(c, callee->as.member.member));
+        const DefId cm = cg_find_method(c, omod, odecl, c->source, name_span(c, callee->as.member.member));
         if (cm.node != NODE_NONE)
           emd = cm;
         if (rb->kind == TYPE_INSTANCE) {
@@ -2148,6 +2260,18 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
           emit_ident_mod(c, omod, ast_at_const(cg_mod_ast(c, omod), odecl)->as.aggregate.name);
           emit(c, "__");
         }
+      } else if (c->macro && td.node != NODE_NONE &&
+                 ast_at_const(cg_mod_ast(c, td.module), td.node)->kind == NODE_GENERIC_PARAM) {
+        // `T::assoc()` on a generic param inside a macro template (e.g. `T::default()` in `Box<T> as Default`):
+        // the concrete arg is unknown here, so paste the param's mangle token to form the impl symbol at
+        // invocation time (`_SCM_T ## __default_` -> `Option__Tr__default_`). Covers every interface's
+        // associated functions uniformly, mirroring the bound-method receiver path above.
+        char pp[64];
+        emit(c, "_SCM_");
+        render_macro_param(c, td.module, td.node, pp, sizeof pp);
+        emit_cstr(c, pp);
+        emit_paste(c);
+        emit(c, "__");
       } else {
         char pfx[64];
         render_modpfx(c, md.module, pfx, sizeof pfx);
@@ -2243,12 +2367,24 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       // `&self` on a temporary (call result, literal, ...): C cannot take its address, so materialize the
       // receiver into a statement-expression temp and pass `&temp`. Mutations to a temporary are moot.
       const bool materialize = self_ptr && !obj_ptr && !is_lvalue(c, obj);
-      char tmp[32];
+      // A materialized Free temporary (e.g. `make_string().len()`) must be freed after the call or it
+      // leaks -- unless the result borrows INTO it (a reference/pointer return), in which case freeing it
+      // would dangle the result, so it is left alone.
+      const TypeId crt = ast_type(c->ast, id);
+      const Ty *const crty = crt != TYPE_NONE ? ast_type_at(c->ast, crt) : NULL;
+      const bool void_ret = !crty || (crty->kind == TYPE_BUILTIN && crty->as.builtin == BT_VOID);
+      const bool ref_ret = crty && (crty->kind == TYPE_POINTER || crty->kind == TYPE_REFERENCE);
+      const bool free_tmp = materialize && !ref_ret && cg_type_is_free(c, obj_t);
+      char tmp[32], tres[32];
       if (materialize) {
         fresh(c, tmp, sizeof tmp);
         emit(c, "({ __auto_type %s = ", tmp);
         emit_expr(c, obj);
         emit(c, "; ");
+        if (free_tmp && !void_ret) {
+          fresh(c, tres, sizeof tres);
+          emit(c, "__auto_type %s = ", tres); // capture the result, then free the temp, then yield it
+        }
       }
       if (c->macro && base->kind == TYPE_GENERIC) {
         // A bound-method call on a generic param inside a generic macro template (`elem.clone()` where
@@ -2298,8 +2434,18 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         emit_expr(c, aids[i]);
       }
       emit(c, ")");
-      if (materialize)
-        emit(c, "; })");
+      if (materialize) {
+        if (free_tmp) {
+          emit(c, "; ");
+          emit_free_target(c, obj_t);
+          emit(c, "(&%s);", tmp);
+          if (!void_ret)
+            emit(c, " %s;", tres);
+          emit(c, " })");
+        } else {
+          emit(c, "; })");
+        }
+      }
       return;
     }
   }
@@ -2535,7 +2681,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
       emit_literal(c, id, n);
       break;
     case NODE_IDENTIFIER:
-      if (cg_is_cond_site(c, id)) { // a conditional move: set the drop flag, then yield the value
+      if (cg_is_cond_site(c, id)) { // a conditional move: set the free flag, then yield the value
         char fl[32];
         cg_move_flag(fl, sizeof fl, ast_resolution_def(c->ast, id).node);
         emit(c, "(%s = true, ", fl);
@@ -2551,6 +2697,15 @@ static void emit_expr(Codegen *c, const NodeId id) {
         emit_try(c, n); // `expr?`: unwrap or early-return None/Err
       } else if (op == Move || op == Unsafe) {
         emit_expr(c, n->as.unary.operand); // ownership/unsafe markers vanish
+      } else if (op == Ampersand && !is_lvalue(c, n->as.unary.operand) &&
+                 ast_type_at(c->ast, ast_type(c->ast, n->as.unary.operand))->kind == TYPE_BUILTIN) {
+        // `&<scalar rvalue>` (e.g. a default `opt.unwrap_or(&9)`): C can't take a literal's address, so
+        // materialize a compound literal -- it has block lifetime, so the borrow is valid for the statement.
+        char ty[128];
+        render_type_id(c, ast_type(c->ast, n->as.unary.operand), "", ty, sizeof ty);
+        emit(c, "(&(%s){", ty);
+        emit_expr(c, n->as.unary.operand);
+        emit(c, "})");
       } else {
         emit(c, "(%s", c_op(op));
         emit_expr(c, n->as.unary.operand);
@@ -2577,6 +2732,8 @@ static void emit_expr(Codegen *c, const NodeId id) {
           break;
         }
       }
+      if (cg_emit_checked_arith(c, n, id)) // signed +,-,* overflow / integer /,% by zero
+        break;
       emit(c, "(");
       emit_expr(c, n->as.binary.left);
       emit(c, " %s ", c_op(n->as.binary.op));
@@ -2598,6 +2755,26 @@ static void emit_expr(Codegen *c, const NodeId id) {
         emit(c, "))");
         break;
       }
+      // Reassigning a Free BINDING (`x = new`) frees the old value first -- a Free binding is always
+      // initialized (the type checker forbids deferred init), and not freeing the old buffer would leak.
+      // (Field/index places like `m.vals[i] = v` are managed manually -- they may be uninitialized.)
+      const Node *const lhs = ast_at_const(c->ast, n->as.binary.left);
+      const DefId ld = lhs->kind == NODE_IDENTIFIER ? ast_resolution_def(c->ast, n->as.binary.left) : (DefId){0, NODE_NONE};
+      if (n->as.binary.op == Equal && lhs->kind == NODE_IDENTIFIER && cg_type_is_free(c, lt) && ld.node != NODE_NONE &&
+          !cg_is_moved(c, ld.node)) {
+        char r[32];
+        fresh(c, r, sizeof r);
+        emit(c, "({ __auto_type %s = ", r); // evaluate the new value, free the old binding, then move in
+        emit_expr(c, n->as.binary.right);
+        emit(c, "; ");
+        emit_free_target(c, lt);
+        emit(c, "(&");
+        emit_expr(c, n->as.binary.left);
+        emit(c, "); (");
+        emit_expr(c, n->as.binary.left);
+        emit(c, " = %s); })", r);
+        break;
+      }
       emit(c, "("); // parenthesized like NODE_BINARY: C's `=`/`+=` bind looser, so a sub-expression
       emit_expr(c, n->as.binary.left); // assignment (`(a = 5) + 1`, `if (a = 3) == 3`) must keep its grouping
       emit(c, " %s ", c_op(n->as.binary.op));
@@ -2610,7 +2787,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
       // can be indexed, passed (decaying to a pointer), or memcpy-copied into a binding).
       const TypeId ct = ast_type(c->ast, id);
       const bool arr_ret = ct != TYPE_NONE && ast_type_at(c->ast, ct)->kind == TYPE_ARRAY;
-      // A conditional `x.free()` sets x's drop flag AROUND the call (the receiver is taken by address, so
+      // A conditional `x.free()` sets x's free flag AROUND the call (the receiver is taken by address, so
       // it can't be wrapped as a comma-expr); the scope-exit auto-free is then `if (!flag)`.
       const Node *const cn = ast_at_const(c->ast, n->as.call.callee);
       char freeflag[32];
@@ -2724,16 +2901,55 @@ static void emit_expr(Codegen *c, const NodeId id) {
           }
         }
       }
-      if (cg_slice_elem(c, ast_type(c->ast, n->as.index.object), NULL)) { // `s[i]` on `[]T`: its typed `.ptr`
-        emit_expr(c, n->as.index.object);
-        emit(c, ".ptr[");
-      } else {
-        emit_expr(c, n->as.index.object);
+      {
+        const NodeId obj = n->as.index.object, idx = n->as.index.index;
+        // Bounds checks: the index is wrapped in `__sc_bounds(i, len)` (preserving lvalue-ness of `a[i]`),
+        // which aborts on out-of-range. Slices carry a runtime `.len`; fixed arrays use their compile-time
+        // length (and a constant index is checked at COMPILE time). Raw pointers stay unchecked (unsafe).
+        if (cg_slice_elem(c, ast_type(c->ast, obj), NULL)) { // `s[i]` on `[]T`
+          emit_expr(c, obj);
+          emit(c, ".ptr[__sc_bounds(");
+          emit_expr(c, idx);
+          emit(c, ", ");
+          emit_expr(c, obj);
+          emit(c, ".len)]");
+          break;
+        }
+        const Ty *const oty = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, obj)));
+        const NodeId lenN = oty->kind == TYPE_ARRAY ? array_length_of(c, obj) : NODE_NONE;
+        const long licnt = oty->kind == TYPE_ARRAY && lenN == NODE_NONE ? array_literal_count(c, obj) : -1;
+        if (lenN != NODE_NONE || licnt >= 0) { // a fixed array with a known length
+          long iv = 0, nv = licnt;
+          const bool nconst = lenN != NODE_NONE ? cg_int_lit(c, lenN, &nv) : licnt >= 0;
+          if (cg_int_lit(c, idx, &iv) && nconst) { // both constant -> compile-time bounds check
+            if (iv < 0 || iv >= nv) {
+              const Span sp = ast_at_const(c->ast, idx)->span;
+              codegen_errorf(c, sp.start, sp.end - sp.start, "index %ld is out of bounds for an array of length %ld",
+                             iv, nv);
+            }
+            emit_expr(c, obj);
+            emit(c, "[");
+            emit_expr(c, idx);
+            emit(c, "]");
+            break;
+          }
+          emit_expr(c, obj); // runtime check against the array's length
+          emit(c, "[__sc_bounds(");
+          emit_expr(c, idx);
+          emit(c, ", ");
+          if (lenN != NODE_NONE)
+            emit_expr(c, lenN);
+          else
+            emit(c, "%ld", licnt);
+          emit(c, ")]");
+          break;
+        }
+        emit_expr(c, obj); // raw pointer / unknown-length: no check
         emit(c, "[");
+        emit_expr(c, idx);
+        emit(c, "]");
+        break;
       }
-      emit_expr(c, n->as.index.index);
-      emit(c, "]");
-      break;
     }
     case NODE_MEMBER: {
       if (n->as.member.path) { // a `::` path value: Enum::Variant, or a qualified const / function ref
@@ -2990,25 +3206,40 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
   }
 }
 
-static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) {
+// Emit one leaf pattern binding. Value mode: `<T> name = <scrut>;`. Ref mode: `<const?>__auto_type name =
+// &(<scrut>);` -- `__auto_type` lets C infer the exact qualified pointer type of `&payload` (which may be a
+// reference-to-reference, e.g. `Option<&T>`), sidestepping nested-const placement in the renderer.
+static void emit_bind(Codegen *c, const NodeId pid, const Span name, const bool is_mut, const char *scrut,
+                      const bool by_ref) {
+  emit_indent(c);
+  if (by_ref) {
+    char nm[128];
+    render_ident(c, name, nm, sizeof nm);
+    emit(c, "%s__auto_type %s = &(%s);\n", is_mut ? "" : "const ", nm, scrut);
+  } else {
+    // A Free payload may be freed (or `.free()`d) at arm exit, which takes `&mut`, so it is non-const.
+    emit_binding(c, ast_type(c->ast, pid), name, !is_mut && !cg_type_is_free(c, ast_type(c->ast, pid)));
+    emit(c, " = %s;\n", scrut);
+  }
+}
+
+// by_ref: bind each payload by reference (`&payload`) rather than by copy -- set when matching through a
+// `&`/`&mut` scrutinee (the binding's type is then `&T`/`&mut T`, set by the type checker).
+static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut, const bool by_ref) {
   const Node *const p = ast_at_const(c->ast, pid);
   switch (p->kind) {
     case NODE_PATTERN_NAME: {
       const DefId vd = ast_resolution_def(c->ast, p->as.pattern.name);
       if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT)
         break; // a unit-variant tag pattern binds nothing
-      emit_indent(c);
       // const iff immutable: `Some(mut x)` binds non-const (reassignment / `&mut self` methods); a plain
       // `Some(x)` is immutable, and the typechecker rejects mutating it.
       const bool is_mut = ast_at_const(c->ast, p->as.pattern.name)->as.name.is_mutable;
-      emit_binding(c, ast_type(c->ast, pid), name_span(c, p->as.pattern.name), !is_mut);
-      emit(c, " = %s;\n", scrut);
+      emit_bind(c, pid, name_span(c, p->as.pattern.name), is_mut, scrut, by_ref);
       break;
     }
     case NODE_IDENTIFIER:
-      emit_indent(c);
-      emit_binding(c, ast_type(c->ast, pid), p->as.name.text, !p->as.name.is_mutable);
-      emit(c, " = %s;\n", scrut);
+      emit_bind(c, pid, p->as.name.text, p->as.name.is_mutable, scrut, by_ref);
       break;
     case NODE_PATTERN_TUPLE: {
       const DefId vd = p->as.pattern.name != NODE_NONE ? ast_resolution_def(c->ast, p->as.pattern.name)
@@ -3024,7 +3255,7 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
           snprintf(sub, sizeof sub, "%s.payload.%s._%u", scrut, vn, i);
         else
           snprintf(sub, sizeof sub, "%s", scrut);
-        emit_pattern_binds(c, ids[i], sub);
+        emit_pattern_binds(c, ids[i], sub, by_ref);
       }
       break;
     }
@@ -3049,14 +3280,14 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
         snprintf(acc, sizeof acc, "%s.%s", prefix, m);
         const NodeList sub = f->as.pattern.children;
         if (sub.len)
-          emit_pattern_binds(c, ast_list(c->ast, sub)[0], acc);
+          emit_pattern_binds(c, ast_list(c->ast, sub)[0], acc, by_ref);
       }
       break;
     }
     case NODE_PATTERN_OR: { // alternatives must bind the same names; emit the first alternative's binds
       const NodeList alts = p->as.pattern.children;
       if (alts.len)
-        emit_pattern_binds(c, ast_list(c->ast, alts)[0], scrut);
+        emit_pattern_binds(c, ast_list(c->ast, alts)[0], scrut, by_ref);
       break;
     }
     default:
@@ -3064,14 +3295,96 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut) 
   }
 }
 
-// Emit one arm's body per mode: 0 statement, 1 assign to `result`, 2 `return`.
-static void emit_arm_body(Codegen *c, const NodeId body, const int mode, const char *result) {
+// Free elaboration: a move-mode `switch` arm OWNS the matched payload. Any payload binding NOT moved out of
+// the arm (bound but only borrowed, or `_`-ignored as part of a deeper bind) must be freed at arm exit, or
+// it leaks. Walk the pattern's leaf bindings and, for each Free one that was not moved out, free it. A
+// binding that WAS moved (unconditionally or on some path) is skipped -- its new owner frees it. `do_emit`
+// false just counts (so the caller knows whether the arm needs the free). Returns the leaf-free count.
+static int cg_arm_frees(Codegen *c, const NodeId pid, const bool do_emit) {
+  const Node *const p = ast_at_const(c->ast, pid);
+  switch (p->kind) {
+    case NODE_PATTERN_NAME:
+    case NODE_IDENTIFIER: {
+      const Span nm = p->kind == NODE_PATTERN_NAME ? name_span(c, p->as.pattern.name) : p->as.name.text;
+      if (p->kind == NODE_PATTERN_NAME) {
+        const DefId vd = ast_resolution_def(c->ast, p->as.pattern.name);
+        if (vd.node != NODE_NONE && ast_at_const(cg_mod_ast(c, vd.module), vd.node)->kind == NODE_VARIANT)
+          return 0; // a unit-variant tag pattern binds nothing
+      }
+      const TypeId t = ast_type(c->ast, pid);
+      if (!cg_type_is_free(c, t) || cg_is_moved(c, pid) || cg_is_cond_moved(c, pid))
+        return 0; // not Free, or moved out (its new owner frees it)
+      if (do_emit) {
+        emit_indent(c);
+        emit_free_target(c, t);
+        char b[128];
+        render_ident(c, nm, b, sizeof b);
+        emit(c, "(&%s);\n", b);
+      }
+      return 1;
+    }
+    case NODE_PATTERN_TUPLE: {
+      const NodeList ch = p->as.pattern.children;
+      const NodeId *const ids = ast_list(c->ast, ch);
+      int n = 0;
+      for (uint32_t i = 0; i < ch.len; i++)
+        n += cg_arm_frees(c, ids[i], do_emit);
+      return n;
+    }
+    case NODE_PATTERN_STRUCT: {
+      const NodeList ch = p->as.pattern.children;
+      const NodeId *const ids = ast_list(c->ast, ch);
+      int n = 0;
+      for (uint32_t i = 0; i < ch.len; i++) {
+        const NodeList sub = ast_at_const(c->ast, ids[i])->as.pattern.children;
+        if (sub.len)
+          n += cg_arm_frees(c, ast_list(c->ast, sub)[0], do_emit);
+      }
+      return n;
+    }
+    case NODE_PATTERN_OR: {
+      const NodeList alts = p->as.pattern.children;
+      return alts.len ? cg_arm_frees(c, ast_list(c->ast, alts)[0], do_emit) : 0;
+    }
+    default:
+      return 0;
+  }
+}
+
+// Emit one arm's body per mode: 0 statement, 1 assign to `result`, 2 `return`. In move mode (by_ref false)
+// the arm's not-moved-out Free payloads are freed after the body value is taken (for `return`, captured
+// into a temp so the free runs before the function returns).
+static void emit_arm_body(Codegen *c, const NodeId body, const int mode, const char *result, const NodeId pattern,
+                          const bool by_ref) {
+  const int frees = by_ref ? 0 : cg_arm_frees(c, pattern, false);
   if (mode == 2) {
     emit_indent(c);
-    emit(c, "return ");
-    emit_expr(c, body);
-    emit(c, ";\n");
-  } else if (mode == 1) {
+    if (!frees) {
+      emit(c, "return ");
+      emit_expr(c, body);
+      emit(c, ";\n");
+      return;
+    }
+    const TypeId rt = ast_type(c->ast, body);
+    const Ty *const rty = rt != TYPE_NONE ? ast_type_at(c->ast, rt) : NULL;
+    const bool voidret = !rty || (rty->kind == TYPE_BUILTIN && rty->as.builtin == BT_VOID);
+    char r[32];
+    if (voidret) {
+      emit(c, "{ ");
+      emit_expr(c, body);
+      emit(c, ";\n");
+    } else {
+      fresh(c, r, sizeof r);
+      emit(c, "{ __auto_type %s = ", r);
+      emit_expr(c, body);
+      emit(c, ";\n");
+    }
+    cg_arm_frees(c, pattern, true);
+    emit_indent(c);
+    emit(c, voidret ? "return; }\n" : "return %s; }\n", r);
+    return;
+  }
+  if (mode == 1) {
     emit_indent(c);
     emit(c, "%s = ", result);
     emit_expr(c, body);
@@ -3085,6 +3398,8 @@ static void emit_arm_body(Codegen *c, const NodeId body, const int mode, const c
     emit_expr(c, body);
     emit(c, ";\n");
   }
+  if (frees)
+    cg_arm_frees(c, pattern, true);
 }
 
 // Emit `__auto_type scrut = <value>;` then an if/else-if chain over the arms. mode: 0 statement,
@@ -3093,28 +3408,42 @@ static void emit_match_core(Codegen *c, const NodeId id, const int mode, const c
   const Node *const n = ast_at_const(c->ast, id);
   char scrut[32];
   fresh(c, scrut, sizeof scrut);
-  // Bind the scrutinee to a value temp, dereferencing through any pointer/reference layers so
-  // patterns can use `.tag` / `.field` (the type checker matched against the stripped type).
+  // Binding mode: through a `&`/`&mut`/pointer scrutinee, bind `scrut` to a POINTER to the aggregate (no
+  // whole-value copy) so payloads can be borrowed in place (`&scrut->payload...`); for an owned value,
+  // copy it into a temp and bind payloads by value. The type checker set each binding's type to match.
+  const TypeId outer = ast_type(c->ast, n->as.match_expr.value);
   unsigned derefs = 0;
-  TypeId base = ast_type(c->ast, n->as.match_expr.value);
+  TypeId base = outer;
   for (const Ty *y = ast_type_at(c->ast, base); y->kind == TYPE_POINTER || y->kind == TYPE_REFERENCE;
        y = ast_type_at(c->ast, base))
     base = y->as.elem, derefs++;
-  emit_indent(c);
+  const bool by_ref = derefs > 0;
+  const bool mut_ref = by_ref && ast_type_at(c->ast, outer)->qualifier == TYPE_QUAL_MUT;
   const TypeKind bk = ast_type_at(c->ast, base)->kind;
-  if (bk == TYPE_ERROR || bk == TYPE_FUNCTION || bk == TYPE_GENERIC) {
+  char access[40];
+  emit_indent(c);
+  if (by_ref) {
+    char aggr[256];
+    render_type_id(c, base, "", aggr, sizeof aggr);
+    emit(c, "%s%s *const %s = ", mut_ref ? "" : "const ", aggr, scrut); // pointer to the matched aggregate
+    for (unsigned i = 0; i + 1 < derefs; i++) // leave one indirection: `&*v == v`, so derefs-1 derefs
+      emit(c, "(*");
+    emit_expr(c, n->as.match_expr.value);
+    for (unsigned i = 0; i + 1 < derefs; i++)
+      emit(c, ")");
+    snprintf(access, sizeof access, "(*%s)", scrut); // patterns read/borrow through the pointer
+  } else if (bk == TYPE_ERROR || bk == TYPE_FUNCTION || bk == TYPE_GENERIC) {
     emit(c, "const __auto_type %s = ", scrut); // scrutinee temp is only read
+    emit_expr(c, n->as.match_expr.value);
+    snprintf(access, sizeof access, "%s", scrut);
   } else {
     char d[300];
     render_binding_id(c, base, scrut, true, d, sizeof d);
     emit_cstr(c, d);
     emit(c, " = ");
+    emit_expr(c, n->as.match_expr.value);
+    snprintf(access, sizeof access, "%s", scrut);
   }
-  for (unsigned i = 0; i < derefs; i++)
-    emit(c, "(*");
-  emit_expr(c, n->as.match_expr.value);
-  for (unsigned i = 0; i < derefs; i++)
-    emit(c, ")");
   emit(c, ";\n");
 
   const NodeList arms = n->as.match_expr.arms;
@@ -3129,11 +3458,11 @@ static void emit_match_core(Codegen *c, const NodeId id, const int mode, const c
       const Node *const arm = ast_at_const(c->ast, ids[i]);
       emit_indent(c);
       emit(c, i ? "else if (" : "if (");
-      emit_pattern_test(c, arm->as.match_arm.pattern, scrut);
+      emit_pattern_test(c, arm->as.match_arm.pattern, access);
       emit(c, ") {\n");
       c->depth++;
-      emit_pattern_binds(c, arm->as.match_arm.pattern, scrut);
-      emit_arm_body(c, arm->as.match_arm.body, mode, result);
+      emit_pattern_binds(c, arm->as.match_arm.pattern, access, by_ref);
+      emit_arm_body(c, arm->as.match_arm.body, mode, result, arm->as.match_arm.pattern, by_ref);
       c->depth--;
       emit_indent(c);
       emit(c, "}\n");
@@ -3160,10 +3489,10 @@ static void emit_match_core(Codegen *c, const NodeId id, const int mode, const c
     const NodeId guard = arm->as.match_arm.guard;
     emit_indent(c);
     emit(c, "if (");
-    emit_pattern_test(c, arm->as.match_arm.pattern, scrut);
+    emit_pattern_test(c, arm->as.match_arm.pattern, access);
     emit(c, ") {\n");
     c->depth++;
-    emit_pattern_binds(c, arm->as.match_arm.pattern, scrut);
+    emit_pattern_binds(c, arm->as.match_arm.pattern, access, by_ref);
     if (guard != NODE_NONE) {
       emit_indent(c);
       emit(c, "if (");
@@ -3171,7 +3500,7 @@ static void emit_match_core(Codegen *c, const NodeId id, const int mode, const c
       emit(c, ") {\n");
       c->depth++;
     }
-    emit_arm_body(c, arm->as.match_arm.body, mode, result);
+    emit_arm_body(c, arm->as.match_arm.body, mode, result, arm->as.match_arm.pattern, by_ref);
     if (mode != 2) { // a `return` body already exited; otherwise stop scanning further arms
       emit_indent(c);
       emit(c, "break;\n");
@@ -3205,13 +3534,35 @@ static void emit_match_stmt(Codegen *c, const NodeId id) {
 
 // --- statements ----------------------------------------------------------------------------
 
-// Emit a block whose fall-through cleanup runs the defers/drops registered down to `dbase`. The function
+// Emit a block whose fall-through cleanup runs the defers/frees registered down to `dbase`. The function
 // body passes dbase=0 so its owned parameters (registered before the block) are torn down at its close.
+// True when control cannot fall through past this statement (it always returns/breaks/continues), so an
+// enclosing block's fall-through cleanup after it would be unreachable, duplicate code -- the diverting
+// path (emit_return / break / continue) has already run every pending free.
+static bool cg_stmt_diverges(Codegen *c, const NodeId id) {
+  const Node *const n = ast_at_const(c->ast, id);
+  switch (n->kind) {
+    case NODE_RETURN:
+    case NODE_BREAK:
+    case NODE_CONTINUE:
+      return true;
+    case NODE_BLOCK: {
+      const NodeList s = n->as.block.statements;
+      return s.len > 0 && cg_stmt_diverges(c, ast_list(c->ast, s)[s.len - 1]);
+    }
+    case NODE_IF: // an if diverges only when it has an else and BOTH branches diverge
+      return n->as.if_stmt.else_branch != NODE_NONE && cg_stmt_diverges(c, n->as.if_stmt.then_branch) &&
+             cg_stmt_diverges(c, n->as.if_stmt.else_branch);
+    default:
+      return false;
+  }
+}
+
 static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
   const Node *const n = ast_at_const(c->ast, id);
   emit(c, "{\n");
   c->depth++;
-  for (uint32_t i = 0; i < c->nparam_flags; i++) { // cond-moved Free params: drop flags at function-body top
+  for (uint32_t i = 0; i < c->nparam_flags; i++) { // cond-moved Free params: free flags at function-body top
     char fl[32];
     cg_move_flag(fl, sizeof fl, c->param_flags[i]);
     emit_indent(c);
@@ -3224,7 +3575,10 @@ static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
     emit_indent(c);
     emit_stmt(c, ids[i]);
   }
-  emit_defers_to(c, dbase); // fall-through cleanup
+  // Fall-through cleanup -- skipped when the block always diverges (its last statement returns/breaks/
+  // continues), since that path already ran every pending free and the code here is unreachable.
+  if (!(stmts.len > 0 && cg_stmt_diverges(c, ids[stmts.len - 1])))
+    emit_defers_to(c, dbase);
   c->defer_top = dbase;
   c->depth--;
   emit_indent(c);
@@ -3232,7 +3586,7 @@ static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
 }
 
 static void emit_block(Codegen *c, const NodeId id) {
-  emit_block_from(c, id, c->defer_top); // defers/drops registered in this block run, reversed, at its close
+  emit_block_from(c, id, c->defer_top); // defers/frees registered in this block run, reversed, at its close
 }
 
 // True when emit_expr already surrounds the expression with parentheses, so a condition context
@@ -3381,6 +3735,124 @@ static long array_literal_count(Codegen *c, NodeId obj) {
   return v != NODE_NONE && ast_at_const(c->ast, v)->kind == NODE_ARRAY_LITERAL
              ? (long)ast_at_const(c->ast, v)->as.array_literal.elements.len
              : -1;
+}
+
+// Parse a non-negative integer literal node's value (decimal / 0x / 0b / 0o, `_` separators and any type
+// suffix tolerated). Returns true with *out set; false if `e` is not a plain integer literal.
+static bool cg_int_lit(Codegen *c, const NodeId e, long *out) {
+  const Node *const n = ast_at_const(c->ast, e);
+  if (n->kind != NODE_LITERAL || n->as.literal.token_type != IntegerLiteral)
+    return false;
+  char buf[32];
+  size_t k = 0;
+  for (uint32_t i = n->as.literal.raw.start; i < n->as.literal.raw.end && k + 1 < sizeof buf; i++) {
+    const uint8_t ch = c->source[i];
+    if (ch == '_')
+      continue;
+    if (k == 0 && (ch == '0') && i + 1 < n->as.literal.raw.end) { // keep base prefix
+      buf[k++] = (char)ch;
+      continue;
+    }
+    const bool hexish = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') ||
+                        ch == 'x' || ch == 'X' || ch == 'b' || ch == 'B' || ch == 'o' || ch == 'O';
+    if (!hexish)
+      break; // a type suffix (e.g. `5usize`) -- stop
+    buf[k++] = (char)ch;
+  }
+  buf[k] = '\0';
+  if (k == 0)
+    return false;
+  char *end = NULL;
+  const long v = strtol(buf, &end, 0);
+  if (end == buf)
+    return false;
+  *out = v;
+  return true;
+}
+
+// The inclusive range of a signed integer builtin, as long long.
+static void cg_int_range(const BuiltinType b, long long *mn, long long *mx) {
+  switch (b) {
+    case BT_I8: *mn = -128; *mx = 127; break;
+    case BT_I16: *mn = -32768; *mx = 32767; break;
+    case BT_I32: *mn = INT32_MIN; *mx = INT32_MAX; break;
+    default: *mn = INT64_MIN; *mx = INT64_MAX; break; // i64 / isize
+  }
+}
+
+// Checked integer arithmetic for `+ - * / %`. Returns true if it emitted a (possibly checked) form; false
+// to let the caller emit the plain operator. Signed `+ - *` trap on overflow; integer `/ %` trap on
+// divide-by-zero; UNSIGNED WRAPS (no check -- the prelude's hashing/probing rely on it). In a constant
+// context the plain operator is emitted (kept a constant expression) and a literal-operand overflow /
+// divide-by-zero is a COMPILE-TIME error.
+static bool cg_emit_checked_arith(Codegen *c, const Node *const n, const NodeId id) {
+  const TokenType op = n->as.binary.op;
+  const bool add = op == Plus, sub = op == Minus, mul = op == Star, dv = op == Slash, rm = op == Percent;
+  if (!(add || sub || mul || dv || rm))
+    return false;
+  const TypeId rt = subst_resolve(c, ast_type(c->ast, id));
+  const Ty *const ry = rt == TYPE_NONE ? NULL : ast_type_at(c->ast, rt);
+  if (!ry || ry->kind != TYPE_BUILTIN)
+    return false;
+  const BuiltinType b = ry->as.builtin;
+  const bool sgn = b == BT_I8 || b == BT_I16 || b == BT_I32 || b == BT_I64 || b == BT_ISIZE;
+  const bool uns = b == BT_U8 || b == BT_U16 || b == BT_U32 || b == BT_U64 || b == BT_USIZE;
+  if (!sgn && !uns)
+    return false; // floats etc.: caller emits plain
+
+  const NodeId L = n->as.binary.left, R = n->as.binary.right;
+  // Both operands must be integers too: pointer difference `p - q` also yields a signed integer but is not
+  // integer arithmetic, and pointer arithmetic `p + i` must not be overflow-trapped as integers.
+  const Ty *const lt = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, L)));
+  const Ty *const rtt = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, R)));
+  if (lt->kind != TYPE_BUILTIN || rtt->kind != TYPE_BUILTIN)
+    return false;
+  long lv, rv;
+  if (cg_int_lit(c, L, &lv) && cg_int_lit(c, R, &rv)) { // both literal -> evaluate at compile time
+    const char *bad = NULL;
+    if ((dv || rm) && rv == 0) {
+      bad = "constant division by zero";
+    } else if (sgn) {
+      long long res = 0;
+      bool ov = add   ? __builtin_saddll_overflow(lv, rv, &res)
+                : sub ? __builtin_ssubll_overflow(lv, rv, &res)
+                : mul ? __builtin_smulll_overflow(lv, rv, &res)
+                : (res = dv ? lv / rv : lv % rv, false);
+      long long mn, mx;
+      cg_int_range(b, &mn, &mx);
+      if (ov || res < mn || res > mx)
+        bad = "constant arithmetic overflow";
+    }
+    if (bad) {
+      const Span sp = ast_at_const(c->ast, id)->span;
+      codegen_errorf(c, sp.start, sp.end - sp.start, "%s", bad);
+    }
+  }
+  if (c->const_ctx) // must remain a constant expression: no runtime-trap wrapper here
+    return false;
+
+  char rts[64];
+  render_type_id(c, rt, "", rts, sizeof rts);
+  if (sgn && (add || sub || mul)) {
+    emit(c, "({ %s __sc_r; if (__builtin_%s_overflow(", rts, add ? "add" : sub ? "sub" : "mul");
+    emit_expr(c, L);
+    emit(c, ", ");
+    emit_expr(c, R);
+    emit(c, ", &__sc_r)) { __sc_panic(\"arithmetic overflow\"); } __sc_r; })");
+    return true;
+  }
+  if (dv || rm) { // divide-by-zero trap for both signed and unsigned
+    char a[32], d[32];
+    fresh(c, a, sizeof a);
+    fresh(c, d, sizeof d);
+    emit(c, "({ %s %s = ", rts, a);
+    emit_expr(c, L);
+    emit(c, "; %s %s = ", rts, d);
+    emit_expr(c, R);
+    emit(c, "; if (%s == 0) { __sc_panic(\"divide by zero\"); } (%s %s %s); })", d, a, dv ? "/" : "%", d);
+    return true;
+  }
+  return false; // unsigned + - * : plain (wraps)
 }
 
 // `for i in lo..hi` -> a counting loop. A missing start counts from 0; a missing end runs
@@ -3746,7 +4218,7 @@ static void emit_try(Codegen *c, const Node *const n) {
   emit_tag_mod(c, om, od, failV);
   emit(c, ") {\n");
   c->depth++;
-  emit_defers_to(c, 0); // like a return: run every live defer / scope-exit drop first (defer_top is untouched)
+  emit_defers_to(c, 0); // like a return: run every live defer / scope-exit free first (defer_top is untouched)
   emit_indent(c);
   emit(c, "return (%s){ .tag = ", rtn);
   emit_tag_mod(c, om, od, failV);
@@ -3787,8 +4259,8 @@ static void emit_expr_stmt(Codegen *c, NodeId v) {
 static void emit_defers_to(Codegen *c, const uint32_t base) {
   for (uint32_t i = c->defer_top; i-- > base;) {
     emit_indent(c);
-    if (c->defer_kind[i] == 1) // an automatic RAII drop of a local binding
-      emit_auto_drop(c, c->defer_stack[i]);
+    if (c->defer_kind[i] == 1) // an automatic RAII free of a local binding
+      emit_auto_free(c, c->defer_stack[i]);
     else
       emit_expr_stmt(c, c->defer_stack[i]);
   }
@@ -3831,7 +4303,10 @@ static void emit_initializer(Codegen *c, const NodeId type, const NodeId value) 
 // constant condition; the message is a bare C string literal (C11 requires one, so synthesize a default).
 static void emit_static_assert(Codegen *c, const Node *const n) {
   emit(c, "_Static_assert(");
+  const bool sc = c->const_ctx;
+  c->const_ctx = true; // the condition must stay a constant expression (no runtime-trap wrapper)
   emit_expr(c, n->as.binary.left);
+  c->const_ctx = sc;
   emit(c, ", ");
   if (n->as.binary.right != NODE_NONE)
     emit_reescaped(c, ast_at_const(c->ast, n->as.binary.right)->as.literal.raw, false);
@@ -3840,9 +4315,9 @@ static void emit_static_assert(Codegen *c, const Node *const n) {
   emit(c, ");\n");
 }
 
-// The `drop` method of a type that implements the Free interface (`extend T as Free`), or {_,NODE_NONE}.
-// Only an explicit `as Free` impl opts a type into RAII auto-drop. Searches the type's home + current module.
-static DefId cg_drop_method(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
+// The `free` method of a type that implements the Free interface (`extend T as Free`), or {_,NODE_NONE}.
+// Only an explicit `as Free` impl opts a type into RAII auto-free. Searches the type's home + current module.
+static DefId cg_free_method(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
   for (int s = 0; s < ns; s++) {
@@ -3876,26 +4351,78 @@ static DefId cg_drop_method(Codegen *c, const ModuleId tmod, const NodeId tdecl)
   return (DefId){0, NODE_NONE};
 }
 
-// Does the (subst-resolved) type implement the Free interface? Such a value owns resources -> it gets an
-// RAII destructor at scope exit, and a binding/param of it is emitted non-`const` (drop takes `&mut self`).
-static bool cg_type_is_drop(Codegen *c, const TypeId ty) {
-  const Ty *const y = ast_type_at(c->ast, subst_resolve(c, ty));
-  ModuleId om;
-  NodeId od;
-  if (y->kind == TYPE_STRUCT) {
-    om = y->module;
-    od = y->as.decl;
-  } else if (y->kind == TYPE_INSTANCE) {
-    const TyInstance *const ii = ast_instance(c->ast, y->as.inst);
-    om = ii->module;
-    od = ii->decl;
-  } else {
-    return false;
+// The `as Free` impl on `(tmod, tdecl)`, or {_,NODE_NONE} -- like cg_free_method but returns the impl.
+static DefId cg_free_impl(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
+  const ModuleId scopes[2] = {tmod, c->ast->module};
+  const int ns = tmod == c->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId m = scopes[s];
+    Ast *const a = cg_mod_ast(c, m);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      if (tg.module != tmod || tg.node != tdecl)
+        continue;
+      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
+      if (tr.node == NODE_NONE)
+        continue;
+      const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
+      if (trn->kind == NODE_TRAIT &&
+          span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text,
+                  "Free"))
+        return (DefId){m, ids[i]};
+    }
   }
-  return cg_drop_method(c, om, od).node != NODE_NONE;
+  return (DefId){0, NODE_NONE};
 }
 
-// Was the local `decl` moved out somewhere in the current function (so it must not be auto-dropped)?
+// Is generic param `gp` (in module `m`) bound by the `Free` interface (`<T: Free>`)?
+static bool cg_param_has_free_bound(Codegen *c, const ModuleId m, const NodeId gp) {
+  Ast *const a = cg_mod_ast(c, m);
+  const NodeList bs = ast_at_const(a, gp)->as.generic_param.bounds;
+  const NodeId *const bids = ast_list(a, bs);
+  for (uint32_t i = 0; i < bs.len; i++) {
+    const DefId bd = ast_resolution_def(a, bids[i]);
+    if (bd.node == NODE_NONE)
+      continue;
+    const Node *const bn = ast_at_const(cg_mod_ast(c, bd.module), bd.node);
+    if (bn->kind == NODE_TRAIT &&
+        span_is(cg_mod_src(c, bd.module), ast_at_const(cg_mod_ast(c, bd.module), bn->as.trait_def.name)->as.name.text,
+                "Free"))
+      return true;
+  }
+  return false;
+}
+
+// Does the (subst-resolved) type implement the Free interface? Such a value owns resources -> it gets an
+// RAII Free call at scope exit, and a binding/param of it is emitted non-`const` (free takes `&mut self`).
+// For a conditional impl (`extend<T: Free> Option<T> as Free`) the instance must satisfy the `Free` bounds
+// (Option<i32> is NOT Free -- its `free` is never monomorphized -- but Option<String> is).
+static bool cg_type_is_free(Codegen *c, const TypeId ty) {
+  const Ty *const y = ast_type_at(c->ast, subst_resolve(c, ty));
+  if (y->kind == TYPE_STRUCT)
+    return cg_free_method(c, y->module, y->as.decl).node != NODE_NONE;
+  if (y->kind != TYPE_INSTANCE)
+    return false;
+  const TyInstance *const ii = ast_instance(c->ast, y->as.inst);
+  const DefId impl = cg_free_impl(c, ii->module, ii->decl);
+  if (impl.node == NODE_NONE)
+    return false;
+  // Every `Free`-bounded type parameter must map to a `Free` argument (positional with the target's args).
+  Ast *const ia = cg_mod_ast(c, impl.module);
+  const NodeList gens = ast_at_const(ia, impl.node)->as.impl_def.generics;
+  const NodeId *const gids = ast_list(ia, gens);
+  for (uint32_t i = 0; i < gens.len && i < ii->n; i++)
+    if (cg_param_has_free_bound(c, impl.module, gids[i]) && !cg_type_is_free(c, ii->args[i]))
+      return false;
+  return true;
+}
+
+// Was the local `decl` moved out somewhere in the current function (so it must not be auto-freed)?
 static bool cg_is_moved(const Codegen *c, const NodeId decl) {
   for (uint32_t i = 0; i < c->nmoved; i++)
     if (c->moved[i] == decl)
@@ -3912,9 +4439,9 @@ static bool cg_is_cond_moved(const Codegen *c, const NodeId decl) {
 
 // Identifier `expr` is a move site (a `let`/`return`/assignment RHS, struct field, or by-value call arg
 // reference to a current-module owned Free binding). `pass`/`cond` drive the two-pass classification:
-//  pass 0 records UNCONDITIONAL moves (cond==false) into `moved` -- those skip auto-drop outright;
+//  pass 0 records UNCONDITIONAL moves (cond==false) into `moved` -- those skip auto-free outright;
 //  pass 1 records the move SITES of bindings moved only conditionally (cond==true and not unconditional),
-//          into `cond_moved` + `cond_sites`, so each gets a runtime drop flag instead.
+//          into `cond_moved` + `cond_sites`, so each gets a runtime free flag instead.
 // `site`: record `expr` as a flag-set site (`(flag=true, expr)` wraps the value at emit). False for an
 // `x.free()` receiver -- there the value is taken by ADDRESS (`&x`), which a comma-expr can't be, so the
 // flag is set around the whole call instead (emit_call); the binding still joins cond_moved for its flag.
@@ -3925,15 +4452,21 @@ static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const i
   if (d.module != c->ast->module || d.node == NODE_NONE)
     return;
   const NodeKind dk = ast_at_const(c->ast, d.node)->kind;
-  if (dk != NODE_LET && dk != NODE_PARAMETER)
+  // `let`/param bindings and `switch` payload bindings (so move-out of a matched payload is recorded, and
+  // a payload NOT moved out can be freed at arm exit -- see cg_arm_frees).
+  if (dk != NODE_LET && dk != NODE_PARAMETER && dk != NODE_PATTERN_NAME)
     return;
-  if (!cg_type_is_drop(c, ast_type(c->ast, expr))) // only Free bindings are tracked (others need no drop)
+  if (!cg_type_is_free(c, ast_type(c->ast, expr))) // only Free bindings are tracked (others need no free)
     return;
   if (pass == 0) {
-    if (!cond && c->nmoved < (uint32_t)(sizeof c->moved / sizeof c->moved[0]))
-      c->moved[c->nmoved++] = d.node; // moved on a guaranteed path -> elide its drop entirely
+    // A `switch` payload binding lives only within its arm, so a move of it is effectively unconditional
+    // (no runtime free flag needed) -- record it directly. Other bindings need a guaranteed (cond==false) path.
+    if ((!cond || dk == NODE_PATTERN_NAME) && c->nmoved < (uint32_t)(sizeof c->moved / sizeof c->moved[0]))
+      c->moved[c->nmoved++] = d.node; // moved -> elide its free / arm-free entirely
     return;
   }
+  if (dk == NODE_PATTERN_NAME) // payload bindings are handled in pass 0; they never use the flag machinery
+    return;
   if (!cond || cg_is_moved(c, d.node)) // pass 1: only conditional moves of not-already-elided bindings
     return;
   if (!cg_is_cond_moved(c, d.node) && c->ncond_moved < (uint32_t)(sizeof c->cond_moved / sizeof c->cond_moved[0]))
@@ -3942,7 +4475,41 @@ static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const i
     c->cond_sites[c->ncond_sites++] = expr;
 }
 
-// Pre-pass over a function body classifying moved Free bindings (so RAII elides or guards their drop). A
+// A value in move position (`return e`, `let x = e`, a call arg, ...) may itself be a match/if/block whose
+// VALUE flows out through its arm/branch/tail expressions -- those tail bindings are the ones really moved.
+// Propagate the move to them so a tail binding/param is not also auto-freed (a double-free).
+static void cg_mark_move_tail(Codegen *c, const NodeId e, const bool cond, const int pass) {
+  if (e == NODE_NONE)
+    return;
+  const Node *const n = ast_at_const(c->ast, e);
+  switch (n->kind) {
+    case NODE_MATCH: {
+      const NodeList arms = n->as.match_expr.arms;
+      const NodeId *const ids = ast_list(c->ast, arms);
+      for (uint32_t i = 0; i < arms.len; i++)
+        cg_mark_move_tail(c, ast_at_const(c->ast, ids[i])->as.match_arm.body, true, pass); // arms are alternatives
+      break;
+    }
+    case NODE_IF:
+      cg_mark_move_tail(c, n->as.if_stmt.then_branch, true, pass);
+      cg_mark_move_tail(c, n->as.if_stmt.else_branch, true, pass);
+      break;
+    case NODE_BLOCK: {
+      const NodeList ss = n->as.block.statements; // a block's value is its final non-assignment expr statement
+      if (ss.len) {
+        const Node *const last = ast_at_const(c->ast, ast_list(c->ast, ss)[ss.len - 1]);
+        if (last->kind == NODE_EXPRESSION_STATEMENT &&
+            ast_at_const(c->ast, last->as.single.value)->kind != NODE_ASSIGNMENT)
+          cg_mark_move_tail(c, last->as.single.value, cond, pass);
+      }
+      break;
+    }
+    default:
+      cg_mark_move(c, e, cond, pass, true); // a bare binding (else a no-op)
+  }
+}
+
+// Pre-pass over a function body classifying moved Free bindings (so RAII elides or guards their free). A
 // move is a bare binding used as a `let` initializer, assignment RHS, returned value, struct field value,
 // or by-value call argument. `cond` is true once inside an if/match/loop branch (a not-always-taken path).
 static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const int pass) {
@@ -3958,20 +4525,20 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
       break;
     }
     case NODE_LET:
-      cg_mark_move(c, n->as.let_stmt.value, cond, pass, true);
+      cg_mark_move_tail(c, n->as.let_stmt.value, cond, pass);
       cg_scan_moves(c, n->as.let_stmt.value, cond, pass);
       break;
     case NODE_RETURN: {
       const NodeList vs = n->as.return_stmt.values;
       const NodeId *const ids = ast_list(c->ast, vs);
       for (uint32_t i = 0; i < vs.len; i++) {
-        cg_mark_move(c, ids[i], cond, pass, true);
+        cg_mark_move_tail(c, ids[i], cond, pass);
         cg_scan_moves(c, ids[i], cond, pass);
       }
       break;
     }
     case NODE_ASSIGNMENT:
-      cg_mark_move(c, n->as.binary.right, cond, pass, true);
+      cg_mark_move_tail(c, n->as.binary.right, cond, pass);
       cg_scan_moves(c, n->as.binary.left, cond, pass);
       cg_scan_moves(c, n->as.binary.right, cond, pass);
       break;
@@ -3980,7 +4547,7 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
       const NodeId *const ids = ast_list(c->ast, fs);
       for (uint32_t i = 0; i < fs.len; i++) {
         const NodeId v = ast_at_const(c->ast, ids[i])->as.field_initializer.value;
-        cg_mark_move(c, v, cond, pass, true);
+        cg_mark_move_tail(c, v, cond, pass);
         cg_scan_moves(c, v, cond, pass);
       }
       break;
@@ -3999,6 +4566,7 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
       cg_scan_moves(c, n->as.for_stmt.body, true, pass);
       break;
     case NODE_MATCH: { // each arm body is one of several alternative paths
+      cg_mark_move(c, n->as.match_expr.value, cond, pass, true); // destructuring an owned Free value consumes it
       cg_scan_moves(c, n->as.match_expr.value, cond, pass);
       const NodeList arms = n->as.match_expr.arms;
       const NodeId *const ids = ast_list(c->ast, arms);
@@ -4018,6 +4586,21 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
         const TypeKind rk = ast_type_at(c->ast, ast_type(c->ast, callee->as.member.object))->kind;
         if (rk != TYPE_POINTER && rk != TYPE_REFERENCE)
           cg_mark_move(c, callee->as.member.object, cond, pass, false); // flag set around the call, not the receiver
+      } else if (callee->kind == NODE_MEMBER && !callee->as.member.path) {
+        // A method whose `self` is taken BY VALUE (`fn unwrap_or(self: Option<T>, ..)`) consumes its
+        // receiver -- the receiver moves into the call, so it must not also be auto-freed at scope exit.
+        const DefId md = ast_resolution_def(c->ast, callee->as.member.member);
+        if (md.node != NODE_NONE) {
+          Ast *const ma = cg_mod_ast(c, md.module);
+          const Node *const mn = ast_at_const(ma, md.node);
+          if (mn->kind == NODE_FUNCTION && mn->as.function.params.len > 0) {
+            const NodeId p0 = ast_list(ma, mn->as.function.params)[0];
+            const NodeId pt = ast_at_const(ma, p0)->as.parameter.type;
+            const NodeKind ptk = pt != NODE_NONE ? ast_at_const(ma, pt)->kind : NODE_NONE_KIND;
+            if (ptk != NODE_POINTER_TYPE && ptk != NODE_REFERENCE_TYPE)
+              cg_mark_move(c, callee->as.member.object, cond, pass, true); // by-value self -> receiver moves
+          }
+        }
       }
       const NodeList args = n->as.call.args;
       const NodeId *const ids = ast_list(c->ast, args);
@@ -4051,19 +4634,19 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
 }
 
 // Whether the binding at `id` (a `let` or a by-value parameter) holds a Free-implementing, not-moved value
-// -- i.e. it gets a scope-exit RAII drop. Such a let is emitted non-`const` (its destructor takes `&mut self`).
-static bool cg_will_auto_drop(Codegen *c, const NodeId id) {
+// -- i.e. it gets a scope-exit RAII free. Such a let is emitted non-`const` (its Free call takes `&mut self`).
+static bool cg_will_auto_free(Codegen *c, const NodeId id) {
   const Node *const n = ast_at_const(c->ast, id);
   if (n->kind == NODE_LET && ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE)
     return false;
   if (cg_is_moved(c, id))
     return false;
-  return cg_type_is_drop(c, ast_type(c->ast, id));
+  return cg_type_is_free(c, ast_type(c->ast, id));
 }
 
-// Register an automatic drop on the scope-exit cleanup stack (RAII), in the same reverse-order sequence
-// as `defer`. Caller has already confirmed cg_will_auto_drop.
-static void cg_register_auto_drop(Codegen *c, const NodeId id) {
+// Register an automatic free on the scope-exit cleanup stack (RAII), in the same reverse-order sequence
+// as `defer`. Caller has already confirmed cg_will_auto_free.
+static void cg_register_auto_free(Codegen *c, const NodeId id) {
   if (c->defer_top >= (uint32_t)(sizeof c->defer_stack / sizeof c->defer_stack[0]))
     return;
   c->defer_stack[c->defer_top] = id; // the let node; emit_defers_to reads its binding name + type
@@ -4071,11 +4654,11 @@ static void cg_register_auto_drop(Codegen *c, const NodeId id) {
   c->defer_top++;
 }
 
-// Emit the RAII destructor call for the binding (`let` or by-value param) at `bid`: `Type__drop(&name)`.
-static void emit_auto_drop(Codegen *c, const NodeId bid) {
-  const Node *const ln = ast_at_const(c->ast, bid);
-  const TypeId bt = subst_resolve(c, ast_type(c->ast, bid));
-  const Ty *const y = ast_type_at(c->ast, bt);
+// Emit the RAII Free call for the binding (`let` or by-value param) at `bid`: `Type__free(&name)`.
+// Emit the C symbol of `bt`'s Free method (without the `(&recv)` args), or return false if `bt` is not a
+// Free type. Works in macro mode (`Inst ## __free`) and normal mode (paste is a no-op there).
+static bool emit_free_target(Codegen *c, const TypeId bt) {
+  const Ty *const y = ast_type_at(c->ast, subst_resolve(c, bt));
   ModuleId om;
   NodeId od;
   if (y->kind == TYPE_INSTANCE) {
@@ -4086,16 +4669,11 @@ static void emit_auto_drop(Codegen *c, const NodeId bid) {
     om = y->module;
     od = y->as.decl;
   } else {
-    return;
+    return false;
   }
-  const DefId dm = cg_drop_method(c, om, od);
+  const DefId dm = cg_free_method(c, om, od);
   if (dm.node == NODE_NONE)
-    return;
-  if (cg_is_cond_moved(c, bid)) { // conditionally moved: drop only on the path that did NOT move it out
-    char fl[32];
-    cg_move_flag(fl, sizeof fl, bid);
-    emit(c, "if (!%s) ", fl);
-  }
+    return false;
   if (y->kind == TYPE_INSTANCE) {
     char inm[200];
     inst_name(c, ast_instance(c->ast, y->as.inst), inm, sizeof inm);
@@ -4110,6 +4688,20 @@ static void emit_auto_drop(Codegen *c, const NodeId bid) {
     emit(c, "__");
   }
   emit_ident_mod(c, dm.module, ast_at_const(cg_mod_ast(c, dm.module), dm.node)->as.function.name);
+  return true;
+}
+
+static void emit_auto_free(Codegen *c, const NodeId bid) {
+  const TypeId bt = ast_type(c->ast, bid);
+  if (!cg_type_is_free(c, bt))
+    return;
+  if (cg_is_cond_moved(c, bid)) { // conditionally moved: free only on the path that did NOT move it out
+    char fl[32];
+    cg_move_flag(fl, sizeof fl, bid);
+    emit(c, "if (!%s) ", fl);
+  }
+  emit_free_target(c, bt);
+  const Node *const ln = ast_at_const(c->ast, bid);
   char nm[128];
   const NodeId nameNode = ln->kind == NODE_PARAMETER ? ln->as.parameter.name : ln->as.let_stmt.name;
   render_ident(c, name_span(c, nameNode), nm, sizeof nm);
@@ -4135,9 +4727,9 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       }
       // const iff the binding is immutable (`let` without `mut`). Calling a `&mut self` method on an
       // immutable binding is rejected by the typechecker (receiver_mutable), so const never blocks a valid one.
-      // A Free-managed binding is emitted non-const, since its scope-exit destructor takes `&mut self`.
-      const bool autodrop = cg_will_auto_drop(c, id);
-      const bool is_const = !n->as.let_stmt.is_mutable && !autodrop;
+      // A Free-managed binding is emitted non-const, since its scope-exit Free call takes `&mut self`.
+      const bool autofree = cg_will_auto_free(c, id);
+      const bool is_const = !n->as.let_stmt.is_mutable && !autofree;
       // Value-semantics array copy: an array bound from a non-literal source (another array, or an
       // array-returning call) can't use C array initialization -> declare, then memcpy. The length comes
       // from the annotation, or from the source call's return type (the binding's TypeId has lost it).
@@ -4175,14 +4767,14 @@ static void emit_stmt(Codegen *c, const NodeId id) {
         emit_initializer(c, n->as.let_stmt.type, n->as.let_stmt.value);
       }
       emit(c, ";\n");
-      if (autodrop && cg_is_cond_moved(c, id)) { // a fresh drop flag per execution (resets each loop pass)
+      if (autofree && cg_is_cond_moved(c, id)) { // a fresh free flag per execution (resets each loop pass)
         char fl[32];
         cg_move_flag(fl, sizeof fl, id);
         emit_indent(c);
         emit(c, "bool %s = false;\n", fl);
       }
-      if (autodrop)
-        cg_register_auto_drop(c, id); // RAII: schedule a scope-exit drop
+      if (autofree)
+        cg_register_auto_free(c, id); // RAII: schedule a scope-exit free
       break;
     }
     case NODE_CONST: {
@@ -4193,7 +4785,10 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       emit_cstr(c, decl);
       if (n->as.const_def.value != NODE_NONE) {
         emit(c, " = ");
+        const bool sc = c->const_ctx;
+        c->const_ctx = true; // a `static const` initializer must be a constant expression
         emit_initializer(c, n->as.const_def.type, n->as.const_def.value);
+        c->const_ctx = sc;
       }
       emit(c, ";\n");
       break;
@@ -4280,8 +4875,8 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
     const Node *const p = ast_at_const(c->ast, ids[i]);
     char nm[128], d[300];
     render_ident(c, name_span(c, p->as.parameter.name), nm, sizeof nm);
-    // `mut p` -> non-const; a by-value Free param is also non-const (it is owned and its destructor mutates it).
-    const bool pconst = !p->as.parameter.is_mutable && !cg_type_is_drop(c, ast_type(c->ast, ids[i]));
+    // `mut p` -> non-const; a by-value Free param is also non-const (it is owned and `free` mutates it).
+    const bool pconst = !p->as.parameter.is_mutable && !cg_type_is_free(c, ast_type(c->ast, ids[i]));
     render_binding_node(c, p->as.parameter.type, nm, pconst, d, sizeof d);
     if (any)
       k = buf_append(out, cap, k, ", ");
@@ -4495,20 +5090,20 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
     c->defer_top = 0; // each function body is a fresh defer scope
     c->loop_defer_base = 0;
     c->nmoved = c->ncond_moved = c->ncond_sites = 0; // RAII move analysis, fresh per function body
-    cg_scan_moves(c, fn->as.function.body, false, 0);  // pass 0: bindings moved on every path (drop elided)
-    cg_scan_moves(c, fn->as.function.body, false, 1);  // pass 1: conditional move sites (drop flag-guarded)
-    // A by-value Free parameter is owned by this function -> drop it at scope exit (unless moved). Pushed
+    cg_scan_moves(c, fn->as.function.body, false, 0);  // pass 0: bindings moved on every path (free elided)
+    cg_scan_moves(c, fn->as.function.body, false, 1);  // pass 1: conditional move sites (free flag-guarded)
+    // A by-value Free parameter is owned by this function -> free it at scope exit (unless moved). Pushed
     // first so params are torn down LAST (after locals), preserving reverse-construction order.
     const NodeList ps = fn->as.function.params;
     const NodeId *const pids = ast_list(c->ast, ps);
     c->nparam_flags = 0;
     for (uint32_t i = 0; i < ps.len; i++)
-      if (cg_will_auto_drop(c, pids[i])) {
-        cg_register_auto_drop(c, pids[i]);
+      if (cg_will_auto_free(c, pids[i])) {
+        cg_register_auto_free(c, pids[i]);
         if (cg_is_cond_moved(c, pids[i]) && c->nparam_flags < (uint32_t)(sizeof c->param_flags / sizeof c->param_flags[0]))
           c->param_flags[c->nparam_flags++] = pids[i]; // declared at body top by emit_block_from
       }
-    emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also drops owned parameters
+    emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also frees owned parameters
     emit(c, "\n\n");
   } else {
     emit(c, ";\n");
@@ -5078,7 +5673,10 @@ static void emit_enum_full(Codegen *c, const Node *n, const NodeId enum_id) {
     const NodeId disc = ast_at_const(c->ast, mids[j])->as.variant.value;
     if (disc != NODE_NONE) { // explicit discriminant `= <int>`
       emit(c, " = ");
+      const bool sc = c->const_ctx;
+      c->const_ctx = true; // a C enum discriminant must be a constant expression
       emit_expr(c, disc);
+      c->const_ctx = sc;
     }
   }
   emit(c, " } ");
@@ -5105,7 +5703,10 @@ static void emit_enum_tag_decl(Codegen *c, const NodeId enum_id, const Node *con
     const NodeId disc = ast_at_const(c->ast, mids[j])->as.variant.value;
     if (disc != NODE_NONE) { // explicit discriminant `= <int>`
       emit(c, " = ");
+      const bool sc = c->const_ctx;
+      c->const_ctx = true; // a C enum discriminant must be a constant expression
       emit_expr(c, disc);
+      c->const_ctx = sc;
     }
   }
   emit(c, " } ");
@@ -5158,6 +5759,8 @@ static void emit_enum_struct_body(Codegen *c, const Node *const dn) {
   c->depth--;
 }
 
+static const char *agg_kw(const Node *const n);
+
 // Emit a generic struct instantiation's C definition (forward typedef when !with_body), with the type
 // params bound to the instance's concrete args. Same-module only (the generic struct is in this ast).
 static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool with_body) {
@@ -5165,7 +5768,7 @@ static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool 
   char nm[200];
   inst_name(c, it, nm, sizeof nm);
   if (!with_body) {
-    emit(c, "typedef struct %s %s;\n", nm, nm);
+    emit(c, "typedef %s %s %s;\n", agg_kw(dn), nm, nm); // `union` for an instance of an untagged union (SSO String)
     return;
   }
   const NodeList gens = dn->as.aggregate.generics;
@@ -5176,7 +5779,7 @@ static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool 
     c->subst[c->nsubst].concrete = it->args[i];
     c->nsubst++;
   }
-  emit(c, "struct %s {\n", nm);
+  emit(c, "%s %s {\n", agg_kw(dn), nm);
   c->depth++;
   const NodeList fs = dn->as.aggregate.members;
   const NodeId *const fids = ast_list(c->ast, fs);
@@ -5261,24 +5864,109 @@ static void emit_generic_enum_shared(Codegen *c) {
 }
 
 // Emit every same-module generic-aggregate instantiation (forward typedefs, then full bodies).
+// Record `typeNode`'s by-value instance dependency (if any) under the current subst: a field/payload whose
+// substituted type is itself a concrete generic instance (e.g. Option<String<Global>>'s `Some` payload is
+// String__Global). Pointers/references resolve to a non-instance Ty, so they contribute no by-value dep --
+// a forward typedef suffices for them. Arrays embed their element by value, so unwrap to it.
+static void collect_inst_dep(Codegen *c, const NodeId typeNode, uint32_t *const deps, int *const ndeps) {
+  if (typeNode == NODE_NONE || *ndeps >= 16)
+    return;
+  const TypeId ft = ast_type(c->ast, typeNode);
+  if (ft == TYPE_NONE)
+    return;
+  TypeId cft = subst_resolve(c, ft);
+  const Ty *y = ast_type_at(c->ast, cft);
+  while (y->kind == TYPE_ARRAY) {
+    cft = y->as.elem;
+    y = ast_type_at(c->ast, cft);
+  }
+  if (y->kind != TYPE_INSTANCE)
+    return;
+  const uint32_t di = y->as.inst;
+  for (int i = 0; i < *ndeps; i++)
+    if (deps[i] == di)
+      return;
+  deps[(*ndeps)++] = di;
+}
+
+// Emit generic instance `idx` after the instances it embeds BY VALUE (post-order DFS over the instance
+// table), so a by-value field/payload of a later-interned instance is still a complete type at its point of
+// use (Option<String<Global>> embeds String__Global). `state`: 0 unvisited / 1 on-path / 2 emitted.
+static void emit_inst_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, const size_t nstate, const bool with_body) {
+  if (idx >= nstate || state[idx])
+    return;
+  state[idx] = 1;
+  const TyInstance it = c->ast->instances.data[idx]; // copy: emitting below may grow the table
+  bool concrete = true;
+  for (uint8_t k = 0; k < it.n; k++)
+    concrete &= type_is_concrete(c, it.args[k]);
+  if (it.module != c->ast->module || !concrete) { // cross-module / intermediate (Box<T>) -> not emitted here
+    state[idx] = 2;
+    return;
+  }
+  const Node *const dn = ast_at_const(c->ast, it.decl);
+  uint32_t deps[16];
+  int ndeps = 0;
+  { // collect by-value instance deps under this instance's arg substitution, BEFORE recursing (which resets subst)
+    const NodeList gens = dn->as.aggregate.generics;
+    const NodeId *const gids = ast_list(c->ast, gens);
+    const int saved = c->nsubst;
+    c->nsubst = 0;
+    for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
+      c->subst[c->nsubst].param = (DefId){it.module, gids[g]};
+      c->subst[c->nsubst].concrete = it.args[g];
+      c->nsubst++;
+    }
+    const NodeList ms = dn->as.aggregate.members;
+    const NodeId *const mids = ast_list(c->ast, ms);
+    for (uint32_t m = 0; m < ms.len; m++) {
+      const Node *const mn = ast_at_const(c->ast, mids[m]);
+      if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
+        collect_inst_dep(c, mn->as.field.type, deps, &ndeps);
+      } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
+        const NodeList pl = mn->as.variant.payload;
+        const NodeId *const plids = ast_list(c->ast, pl);
+        for (uint32_t k = 0; k < pl.len; k++) {
+          const Node *const pf = ast_at_const(c->ast, plids[k]);
+          collect_inst_dep(c, pf->kind == NODE_FIELD ? pf->as.field.type : plids[k], deps, &ndeps);
+        }
+      }
+    }
+    c->nsubst = saved;
+  }
+  for (int d = 0; d < ndeps; d++)
+    emit_inst_dfs(c, deps[d], state, nstate, with_body);
+  if (dn->kind == NODE_STRUCT)
+    emit_struct_inst(c, &it, with_body);
+  else if (dn->kind == NODE_ENUM)
+    emit_enum_inst(c, &it, with_body);
+  state[idx] = 2;
+}
+
 static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
   if (!with_body)
     emit_generic_enum_shared(c); // shared tag/plain enums, before any instance struct names them
-  for (size_t i = 0; i < c->ast->instances.len; i++) {
-    const TyInstance *const it = &c->ast->instances.data[i];
-    if (it->module != c->ast->module) // cross-module generic aggregate definitions not yet specialized
-      continue;
-    bool concrete = true;
-    for (uint8_t k = 0; k < it->n; k++)
-      concrete &= type_is_concrete(c, it->args[k]);
-    if (!concrete) // skip an intermediate application like Box<T> (only real instantiations are emitted)
-      continue;
-    const NodeKind dk = ast_at_const(c->ast, it->decl)->kind;
-    if (dk == NODE_STRUCT)
-      emit_struct_inst(c, it, with_body);
-    else if (dk == NODE_ENUM)
-      emit_enum_inst(c, it, with_body);
+  const size_t n = c->ast->instances.len;
+  uint8_t *const state = calloc(n ? n : 1, 1);
+  if (!state) { // OOM: fall back to insertion order (correct unless an instance embeds a later one by value)
+    for (size_t i = 0; i < c->ast->instances.len; i++) {
+      const TyInstance *const it = &c->ast->instances.data[i];
+      bool concrete = true;
+      for (uint8_t k = 0; k < it->n; k++)
+        concrete &= type_is_concrete(c, it->args[k]);
+      if (it->module != c->ast->module || !concrete)
+        continue;
+      const NodeKind dk = ast_at_const(c->ast, it->decl)->kind;
+      if (dk == NODE_STRUCT)
+        emit_struct_inst(c, it, with_body);
+      else if (dk == NODE_ENUM)
+        emit_enum_inst(c, it, with_body);
+    }
+    return;
   }
+  for (size_t i = 0; i < n; i++)
+    emit_inst_dfs(c, (uint32_t)i, state, n, with_body);
+  free(state);
 }
 
 // --- generic macros: a cross-module instance over a user type by value (Option<Bar>) cannot be emitted by
@@ -5414,8 +6102,9 @@ static void emit_generic_macro(Codegen *c, const NodeId declId, const bool defin
   const size_t start = c->buf_len;
   if (!define) {
     if (dn->kind == NODE_STRUCT) {
-      emit(c, "typedef struct NAME NAME;\n");
-      emit(c, "struct NAME {\n");
+      const char *const kw = agg_kw(dn); // `union` for an untagged-union aggregate (SSO String)
+      emit(c, "typedef %s NAME NAME;\n", kw);
+      emit(c, "%s NAME {\n", kw);
       c->depth++;
       const NodeList fs = dn->as.aggregate.members;
       const NodeId *const fids = ast_list(c->ast, fs);
@@ -5589,7 +6278,7 @@ static void emit_rehomed_forwards(Codegen *c) {
     char inm[200];
     inst_name(c, &it, inm, sizeof inm);
     if (dn->kind == NODE_STRUCT || aggregate_has_payload_in(c, it.module, dn)) {
-      emit(c, "typedef struct %s %s;\n", inm, inm);
+      emit(c, "typedef %s %s %s;\n", agg_kw(dn), inm, inm); // `union` for an SSO-union instance
     } else { // payload-less enum instance: alias the shared plain enum (from the generic's header)
       char en[160];
       render_qualified(c, it.module, dn->as.aggregate.name, en, sizeof en);
@@ -5599,6 +6288,20 @@ static void emit_rehomed_forwards(Codegen *c) {
 }
 
 // After the core DECLARE/DEFINE, invoke each SATISFIED conditional conformance's macro for a re-homed
+// A non-Free macro argument has no real `<mangle>__free`, but a macro body's deep-free pastes
+// `_SCM_<T> ## __free`. Emit a guarded no-op stub so that paste resolves. The `#ifndef` guard dedups within
+// a translation unit (single-TU = one file; multi-file = per file) and `static` keeps each file's copy
+// internal -- so a Free arg uses its real `__free`, a non-Free arg this no-op (deep-free of a POD element).
+static void cg_emit_free_stub(Codegen *c, const TypeId argTy) {
+  if (cg_type_is_free(c, argTy))
+    return; // a Free arg already has a real `<mangle>__free`
+  char csp[256], mng[176];
+  render_type_id(c, argTy, "", csp, sizeof csp);
+  mangle_type(c, argTy, mng, sizeof mng);
+  emit(c, "#ifndef SC_NOFREE_%s\n#define SC_NOFREE_%s\n", mng, mng);
+  emit(c, "static __attribute__((unused)) void %s__free(%s *p) { (void)p; }\n#endif\n", mng, csp);
+}
+
 // instance: `<STEM>_as_<Iface>_DECLARE/DEFINE(args.., NAME)`. Gated by cg_type_satisfies, so an element type
 // implementing only some of Clone/Eq/Hash gets only those (and e.g. `Vector<i32>` gets none of them).
 static void emit_conformance_invocations(Codegen *c, const TyInstance *const it, const bool define) {
@@ -5618,6 +6321,9 @@ static void emit_conformance_invocations(Codegen *c, const TyInstance *const it,
     const DefId tr = ast_resolution_def(oa, n->as.impl_def.trait_type);
     if (tr.node == NODE_NONE || !cg_type_satisfies(c, instTy, tr, 0))
       continue;
+    if (define)
+      for (uint8_t k = 0; k < it->n; k++)
+        cg_emit_free_stub(c, it->args[k]); // a deep-freeing conformance body may paste `_SCM_<arg> ## __free`
     char tag[80];
     size_t at = buf_append(tag, sizeof tag, 0, "as_");
     const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
@@ -5649,6 +6355,9 @@ static void emit_instance_macro_invocations(Codegen *c, const bool define) {
     const Node *const dn = ast_at_const(cg_mod_ast(c, it.module), it.decl);
     char stem[160];
     macro_stem(c, it.module, dn->as.aggregate.name, stem, sizeof stem);
+    if (define)
+      for (uint8_t k = 0; k < it.n; k++)
+        cg_emit_free_stub(c, it.args[k]); // a deep-freeing method body may paste `_SCM_<arg> ## __free`
     emit(c, "%s_%s(", stem, define ? "DEFINE" : "DECLARE");
     for (uint8_t k = 0; k < it.n; k++) {
       char csp[256], mng[176];
@@ -5687,6 +6396,12 @@ static void emit_method_macro_invocations(Codegen *c, const bool define) {
     char stem[160], mnm[64];
     macro_stem(c, recv.module, ast_at_const(oa, recv.decl)->as.aggregate.name, stem, sizeof stem);
     render_ident_src(cg_mod_src(c, recv.module), name_span_in(c, recv.module, mn->as.function.name), mnm, sizeof mnm);
+    if (define) {
+      for (uint8_t k = 0; k < recv.n; k++)
+        cg_emit_free_stub(c, recv.args[k]); // a deep-freeing method body may paste `_SCM_<arg> ## __free`
+      for (uint8_t k = 0; k < mi.n; k++)
+        cg_emit_free_stub(c, mi.targs[k]);
+    }
     emit(c, "%s_%s_%s(", stem, mnm, define ? "DEFINE" : "DECLARE");
     for (uint8_t k = 0; k < recv.n; k++) {
       char csp[256], mng[176];
@@ -6050,6 +6765,18 @@ static void emit_referenced_fwd(Codegen *c) {
   const ModuleId cur = c->ast->module;
   for (size_t i = 0; i < c->ast->type_pool.len; i++) {
     const Ty t = c->ast->type_pool.data[i];
+    if (t.kind == TYPE_INSTANCE) { // a cross-module generic instance used by value (`str.to_string() -> String<Global>`)
+      const TyInstance *const it = ast_instance(c->ast, t.as.inst);
+      if (it->module == cur || it->module >= c->package->count)
+        continue;
+      const Node *const idn = ast_at_const(cg_mod_ast(c, it->module), it->decl);
+      if (idn->kind == NODE_STRUCT || aggregate_has_payload_in(c, it->module, idn)) {
+        char inm[200];
+        inst_name(c, it, inm, sizeof inm);
+        emit(c, "typedef %s %s %s;\n", agg_kw(idn), inm, inm); // `union` for an SSO-union instance
+      }
+      continue;
+    }
     if (t.module == cur || t.module >= c->package->count)
       continue;
     const Node *const dn = ast_at_const(cg_mod_ast(c, t.module), t.as.decl);
@@ -6266,7 +6993,9 @@ void codegen_emit(Codegen *c, FILE *out) {
     emit(c, "\n");
     phase_bodies(c);
   }
-  errors_finalize(&c->errors, &c->errors_start, &c->errors_len, c->source, c->len);
+  errors_finalize(
+      &c->errors, &c->errors_start, &c->errors_len, c->source, c->len,
+      c->package && c->ast->module < c->package->count ? c->package->modules[c->ast->module].file : NULL);
   if (c->buf_len)
     fwrite(c->buf, 1, c->buf_len, out);
 }
@@ -6310,6 +7039,94 @@ static void pre_emit_concrete_deps(Codegen **cs, const size_t n, FILE *out, Code
   }
 }
 
+// The module owning `t`'s top-level by-value type (an instance's owner, or a struct/enum's module), looking
+// through arrays (embedded by value) but NOT through pointers/references (those need only a forward typedef)
+// or instance ARGS (a field of type Vector<String> embeds Vector by value, not String). MODULE_NONE if none.
+static ModuleId cg_byval_owner(const Ast *const a, const TypeId t) {
+  const Ty *y = ast_type_at(a, t);
+  while (y->kind == TYPE_ARRAY)
+    y = ast_type_at(a, y->as.elem);
+  if (y->kind == TYPE_INSTANCE)
+    return ast_instance(a, y->as.inst)->module;
+  if (y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM)
+    return y->module;
+  return (ModuleId)0xFFFF;
+}
+
+// Does instance `it` (emitted by this module) embed, by value, a type owned by module `m`? Scans the decl's
+// fields / variant payloads under `it`'s arg substitution -- the only dependency that constrains the order in
+// which type definitions may be emitted across modules (Option<String<Global>> embeds String__Global).
+static bool cg_inst_byval_refs(Codegen *c, const TyInstance *const it, const ModuleId m) {
+  const Node *const dn = ast_at_const(c->ast, it->decl);
+  const int saved = c->nsubst;
+  const NodeList gens = dn->as.aggregate.generics;
+  const NodeId *const gids = ast_list(c->ast, gens);
+  c->nsubst = 0;
+  for (uint32_t g = 0; g < gens.len && g < it->n && c->nsubst < 8; g++) {
+    c->subst[c->nsubst].param = (DefId){it->module, gids[g]};
+    c->subst[c->nsubst].concrete = it->args[g];
+    c->nsubst++;
+  }
+  bool found = false;
+  const NodeList ms = dn->as.aggregate.members;
+  const NodeId *const mids = ast_list(c->ast, ms);
+  for (uint32_t mi = 0; mi < ms.len && !found; mi++) {
+    const Node *const mn = ast_at_const(c->ast, mids[mi]);
+    NodeId fts[8];
+    int nf = 0;
+    if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
+      fts[nf++] = mn->as.field.type;
+    } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
+      const NodeList pl = mn->as.variant.payload;
+      const NodeId *const plids = ast_list(c->ast, pl);
+      for (uint32_t k = 0; k < pl.len && nf < 8; k++) {
+        const Node *const pf = ast_at_const(c->ast, plids[k]);
+        fts[nf++] = pf->kind == NODE_FIELD ? pf->as.field.type : plids[k];
+      }
+    }
+    for (int f = 0; f < nf && !found; f++) {
+      const TypeId ft = fts[f] == NODE_NONE ? TYPE_NONE : ast_type(c->ast, fts[f]);
+      if (ft != TYPE_NONE && cg_byval_owner(c->ast, subst_resolve(c, ft)) == m)
+        found = true;
+    }
+  }
+  c->nsubst = saved;
+  return found;
+}
+
+// Does module `c` embed, by value, a type owned by module `m` (a type-definition ordering edge)? Only
+// by-value containment counts -- pointer/signature references do NOT, since those are satisfied by the
+// forward typedefs emitted earlier. Restricting to by-value edges keeps the dependency graph acyclic (the
+// type checker rejects by-value cycles), so the topological order is well-defined.
+static bool cg_module_refs(Codegen *c, const ModuleId m) {
+  for (size_t i = 0; i < c->ast->instances.len; i++) {
+    const TyInstance *const it = &c->ast->instances.data[i];
+    if (it->module != c->ast->module) // only instances this module actually emits create an ordering edge
+      continue;
+    bool concrete = true;
+    for (uint8_t k = 0; k < it->n; k++)
+      concrete &= type_is_concrete(c, it->args[k]);
+    if (concrete && cg_inst_byval_refs(c, it, m))
+      return true;
+  }
+  return false;
+}
+
+// Post-order DFS over the modules: emit each module's referenced modules before itself. Reference cycles
+// (str <-> string via signatures) are broken arbitrarily -- safe, because a genuine by-value STRUCT cycle
+// is rejected by the type checker, so cycle members never embed each other's types by value.
+static void cg_topo_visit(Codegen **cs, const size_t n, const size_t i, uint8_t *const state, size_t *const order,
+                          size_t *const pos) {
+  if (state[i])
+    return;
+  state[i] = 1;
+  for (size_t j = 0; j < n; j++)
+    if (j != i && cg_module_refs(cs[i], cs[j]->ast->module))
+      cg_topo_visit(cs, n, j, state, order, pos);
+  order[(*pos)++] = i;
+  state[i] = 2;
+}
+
 void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
   if (!n)
     return;
@@ -6336,18 +7153,33 @@ void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
       for (uint8_t k = 0; k < it->n; k++)
         pre_emit_concrete_deps(cs, n, out, cs[i], it->args[k]);
     }
-  for (size_t i = 0; i < n; i++) { // every full type + multi-return struct + prototype
+  // Emit type definitions in dependency order: a module whose types embed another module's by value must
+  // come after it (forward typedefs above already cover pointer-only refs). Falls back to load order on OOM.
+  size_t *const order = malloc(n * sizeof *order);
+  uint8_t *const tstate = order ? calloc(n, 1) : NULL;
+  size_t pos = 0;
+  if (order && tstate) {
+    for (size_t i = 0; i < n; i++)
+      cg_topo_visit(cs, n, i, tstate, order, &pos);
+  }
+  for (size_t oi = 0; oi < n; oi++) { // every full type + multi-return struct + prototype
+    const size_t i = (order && tstate) ? order[oi] : oi;
     phase_types(cs[i]);
     phase_ret_structs(cs[i]);
     phase_prototypes(cs[i], PROTO_ALL);
     cg_flush(cs[i], out);
   }
+  free(order);
+  free(tstate);
   for (size_t i = 0; i < n; i++) { // every body (all types are complete by now)
     phase_bodies(cs[i]);
     cg_flush(cs[i], out);
   }
   for (size_t i = 0; i < n; i++)
-    errors_finalize(&cs[i]->errors, &cs[i]->errors_start, &cs[i]->errors_len, cs[i]->source, cs[i]->len);
+    errors_finalize(
+        &cs[i]->errors, &cs[i]->errors_start, &cs[i]->errors_len, cs[i]->source, cs[i]->len,
+        cs[i]->package && cs[i]->ast->module < cs[i]->package->count ? cs[i]->package->modules[cs[i]->ast->module].file
+                                                                     : NULL);
 }
 
 ERRORS_BODY(Codegen, codegen, c)

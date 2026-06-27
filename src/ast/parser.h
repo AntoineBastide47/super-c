@@ -9,6 +9,7 @@
 typedef struct Parser Parser;
 
 Parser *parser_new(Token_Vec tokens, const char *source, const size_t len);
+void parser_set_file(Parser *p, const char *file); // path shown in diagnostics (NULL = none)
 void parser_free(Parser **p);
 
 void parser_build_ast(Parser *p);

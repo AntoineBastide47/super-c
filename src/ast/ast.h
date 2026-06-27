@@ -205,6 +205,7 @@ typedef struct {
         struct {
             NodeId name;
             NodeList bounds;
+            NodeId default_type;  // `= <type>` default, or NODE_NONE
         } generic_param;
         struct {
             NodeId type;

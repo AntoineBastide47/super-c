@@ -25,7 +25,7 @@ static String_Vec make_blocks(const char *src, const char *msg, const uint32_t o
   String_Vec e = String_Vec_init();
   U32_Vec s = U32_Vec_init(), l = U32_Vec_init();
   emitf(&e, &s, &l, off, span, "%s", msg);
-  errors_finalize(&e, &s, &l, (const uint8_t *)src, strlen(src));
+  errors_finalize(&e, &s, &l, (const uint8_t *)src, strlen(src), NULL);
   VEC_DEINIT(s);
   VEC_DEINIT(l);
   return e;
@@ -67,6 +67,20 @@ static void test_line_col_and_carets(void) {
   CHECK_STR_CONTAINS(b, "^^^"); // span == 3 carets
   CHECK_STR_ABSENT(b, "^^^^"); // ...and no more than 3
   free(b);
+}
+
+// The location line gains a `file:` prefix when a path is supplied; a relative path is shown verbatim.
+static void test_file_in_location(void) {
+  static const char src[] = "ab\ncd\n  foo bar\n";
+  const uint32_t off = offset_of(src, "bar");
+  String_Vec e = String_Vec_init();
+  U32_Vec s = U32_Vec_init(), l = U32_Vec_init();
+  emitf(&e, &s, &l, off, 3, "%s", "boom");
+  errors_finalize(&e, &s, &l, (const uint8_t *)src, strlen(src), "src/foo.spc");
+  CHECK_STR_CONTAINS(e.data[0], "--> src/foo.spc:3:7"); // file:line:col
+  free_errors(&e);
+  VEC_DEINIT(s);
+  VEC_DEINIT(l);
 }
 
 static void test_caret_clamping(void) {
@@ -190,6 +204,7 @@ static void test_log_color(void) {
 int main(void) {
   test_emit_collects();
   test_line_col_and_carets();
+  test_file_in_location();
   test_caret_clamping();
   test_line_starts_crlf();
   test_long_line_windowing();

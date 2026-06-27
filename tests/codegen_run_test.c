@@ -522,8 +522,8 @@ static void test_map(void) {
           "  m.insert(String::from_str(\"a\"), 10); m.insert(String::from_str(\"b\"), 20);\n"
           "  let ka = String::from_str(\"a\"); let kb = String::from_str(\"b\"); let kk = String::from_str(\"k\");\n"
           "  let mut acc = 0;\n"
-          "  acc = acc + m.get(&ka).unwrap_or(0);\n"             // 10
-          "  acc = acc + m.get(&kk).unwrap_or(0);\n"             // 39 -> 49
+          "  acc = acc + *m.get(&ka).unwrap_or(&0);\n"           // 10  (get borrows -> &i32)
+          "  acc = acc + *m.get(&kk).unwrap_or(&0);\n"           // 39 -> 49
           "  if m.contains_key(&kb) { acc = acc + 100; }\n"      // 149
           "  m.remove(&kb);\n"
           "  if m.get(&kb).is_none() { acc = acc + 1000; }\n"    // 1149
@@ -544,6 +544,137 @@ static void test_format_printing(void) {
           "  s.print(); s.free();\n"
           "  exit(0); }\n",
       0, "hi world n=42 pi=2.5 ok=true brace={}\n<42>");
+  // Hex format specs: `{:x}` lowercase, `{:X}` uppercase, signed (leading '-'), unsigned, and a wide value.
+  sc_run_program(
+      "hex format specs {:x}/{:X} signed + unsigned + String::from_hex",
+      PRE "fn main() i32 {\n"
+          "  println(\"dec={} x={:x} X={:X} u={:x} neg={:x}\", 255, 255, 255, 4096 as u32, -255);\n"
+          "  let s = String::from_hex(3735928559, false); s.print();\n" // 0xdeadbeef
+          "  putchar(10); exit(0); }\n",
+      0, "dec=255 x=ff X=FF u=1000 neg=-ff\ndeadbeef\n");
+}
+
+// Bounds checks: an in-bounds array/slice index reads correctly through `__sc_bounds`; a constant
+// out-of-range index on a fixed array is a COMPILE-TIME error. (Runtime out-of-range aborts -- verified
+// manually; a signal exit can't be asserted through the clean-exit harness.)
+static void test_bounds_checks(void) {
+  sc_run_program( // in-bounds array index with a dynamic index still reads the right element
+      "bounds-checked array index (in bounds)",
+      PRE "fn main() i32 { let a: [i32; 3] = [10, 20, 30]; let i: usize = 2; exit(a[i]); }\n", 30, "");
+  sc_run_program( // array element is still an lvalue after bounds-checking the index
+      "bounds-checked array index is assignable",
+      PRE "fn main() i32 { let mut a: [i32; 3] = [1, 2, 3]; let i: usize = 1; a[i] = 41; exit(a[i] + 1); }\n", 42, "");
+  sc_run_program( // a slice carries a runtime length; in-bounds index reads correctly
+      "bounds-checked slice index (in bounds)",
+      PRE "fn main() i32 { let a: [i32; 3] = [7, 8, 9]; let s: []i32 = a[0..3]; let i: usize = 1; exit(s[i] + 34); }\n",
+      42, "");
+  char first[256];
+  const size_t n = sc_stage_errors("const out-of-bounds array index is a compile error",
+                                   PRE "fn main() i32 { let a: [i32; 3] = [1, 2, 3]; exit(a[5]); }\n", ST_CODEGEN,
+                                   first, sizeof first);
+  CHECK(n >= 1, "const OOB index: expected a codegen error");
+  if (n)
+    CHECK(strstr(first, "out of bounds") != NULL, "const OOB index: message missing 'out of bounds':\n%s", first);
+}
+
+// Checked arithmetic: signed +/-/* trap on overflow and integer /,% trap on divide-by-zero at runtime;
+// UNSIGNED WRAPS; a constant overflow / divide-by-zero is a COMPILE-TIME error. (Runtime traps abort --
+// verified manually; a signal exit isn't assertable through the clean-exit harness.)
+static void test_checked_arith(void) {
+  sc_run_program( // ordinary in-range signed arithmetic is unchanged
+      "checked arithmetic computes normally in range",
+      PRE "fn main() i32 { let a: i32 = 40; let b: i32 = 2; exit(a + b); }\n", 42, "");
+  sc_run_program( // unsigned overflow wraps (two's complement) -- the prelude's hashing relies on this
+      "unsigned arithmetic wraps (no trap)",
+      PRE "fn main() i32 { let a: u32 = 4294967295; let b: u32 = 3; let c: u32 = a + b; exit(c as i32); }\n", 2, "");
+  char first[256];
+  size_t n = sc_stage_errors("constant signed overflow is a compile error",
+                             "const X: i32 = 2147483647 + 1;\nfn main() i32 { return 0; }\n", ST_CODEGEN, first,
+                             sizeof first);
+  CHECK(n >= 1, "const overflow: expected a codegen error");
+  if (n)
+    CHECK(strstr(first, "overflow") != NULL, "const overflow: message missing 'overflow':\n%s", first);
+  n = sc_stage_errors("constant divide-by-zero is a compile error",
+                      "const X: i32 = 5 / 0;\nfn main() i32 { return 0; }\n", ST_CODEGEN, first, sizeof first);
+  CHECK(n >= 1, "const div-by-zero: expected a codegen error");
+  if (n)
+    CHECK(strstr(first, "division by zero") != NULL, "const div0: message missing 'division by zero':\n%s", first);
+}
+
+// Default generic arguments: an under-applied generic (`Pair<bool>`) fills its trailing params from their
+// declared `= <type>` defaults, so `Pair<bool>` == `Pair<bool, i32>` everywhere -- type annotations
+// (resolve_type), turbofish + method monomorphization (NODE_GENERIC_SPECIALIZATION), and defaults that
+// reference an earlier param (`B = A`, substituted) all build the same complete instance.
+static void test_default_generic_args(void) {
+  sc_run_program( // type-annotation path fills B=i32
+      "default generic arg via type annotation",
+      PRE "struct Pair<A, B = i32> { pub a: A, pub b: B }\n"
+          "fn main() i32 { let p: Pair<bool> = Pair::<bool> { a: true, b: 42 }; exit(p.b); }\n",
+      42, "");
+  sc_run_program( // turbofish + a method monomorphized over the default-filled instance
+      "default generic arg through a monomorphized method",
+      PRE "struct Pair<A, B = i32> { pub a: A, pub b: B }\n"
+          "extend<A, B> Pair<A, B> { fn second(self: &Self) B { return self.b; } }\n"
+          "fn main() i32 { let p = Pair::<bool> { a: false, b: 42 }; exit(p.second()); }\n",
+      42, "");
+  sc_run_program( // a default that names an earlier param: `B = A` binds to the supplied A
+      "default generic arg referencing an earlier param",
+      PRE "struct Dup<A, B = A> { pub a: A, pub b: B }\n"
+          "fn main() i32 { let d = Dup::<i32> { a: 19, b: 23 }; exit(d.a + d.b); }\n",
+      42, "");
+}
+
+// Allocator-typed ownership: a user allocator chosen via turbofish (`Box::<T, A>` / `Vector::<T, A>`) threads
+// through allocation, growth (realloc) and auto-Free, distinct from the default `Global` path -- the allocator
+// is part of the type. Both allocate real memory, so this also proves ASan-clean release through the right
+// `dealloc`. (`A` is a zero-sized tag: no per-container storage.)
+static void test_custom_allocator(void) {
+  sc_run_program(
+      "custom allocator threads through Box + Vector; Global default alongside",
+      PRE "extern \"C\" { fn malloc(size: usize) *mut void; fn realloc(p: *mut void, size: usize) *mut void; fn free(p: *mut void) void; }\n"
+          "struct Mallocator {}\n"
+          "extend Mallocator as Allocator {\n"
+          "  fn alloc(size: usize) *mut void { return malloc(size); }\n"
+          "  fn realloc(p: *mut void, size: usize) *mut void { return realloc(p, size); }\n"
+          "  fn dealloc(p: *mut void) void { free(p); }\n"
+          "}\n"
+          "fn main() i32 {\n"
+          "  let mut b = Box::<i32, Mallocator>::new(40); b.set(2);\n"     // custom-allocated box
+          "  let g = Box::<i32>::new(0);\n"                                 // Global-allocated box (the default)
+          "  let mut v = Vector::<i32, Mallocator>::new();\n"
+          "  let mut i: i32 = 0; while i < 20 { v.push(i); i = i + 1; }\n"  // forces growth through Mallocator::realloc
+          "  let last = v.pop().unwrap_or(0);\n"                            // 19
+          "  exit(*b.get() + *g.get() + last + 21); }\n",                   // 2 + 0 + 19 + 21 = 42
+      42, "");
+  // String is allocator-typed too (SSO: short strings stay inline; long ones allocate through `A`). A custom
+  // allocator selected by turbofish drives the heap variant; the SSO union is preserved across the migration.
+  sc_run_program(
+      "custom allocator on a heap (non-SSO) String, with auto-Free",
+      PRE "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\n"
+          "struct Mallocator {}\n"
+          "extend Mallocator as Allocator {\n"
+          "  fn alloc(n: usize) *mut void { return malloc(n); }\n"
+          "  fn realloc(p: *mut void, n: usize) *mut void { return realloc(p, n); }\n"
+          "  fn dealloc(p: *mut void) void { free(p); }\n"
+          "}\n"
+          "fn run() i32 {\n"
+          "  let mut s = String::<Mallocator>::from_str(\"a long heap string beyond the 23-byte SSO inline buffer\");\n"
+          "  s.push_str(\" + more\");\n"           // grows the heap buffer through Mallocator::realloc
+          "  let n = s.len() as i32;\n"            // 55 + 7 = 62
+          "  s.free();\n"                          // released through Mallocator::dealloc
+          "  return n - 20; }\n"                   // 42
+          "fn main() i32 { exit(run()); }\n",
+      42, "");
+  // A default-allocator (`Global`) String alongside an SSO-short String: short stays inline (no alloc), long
+  // allocates; both auto-Free. Confirms the SSO discriminant survives the union becoming a generic instance.
+  sc_run_program(
+      "Global String SSO short vs heap, both auto-Free",
+      PRE "fn run() i32 {\n"
+          "  let short = String::from_str(\"hi\");\n"                                  // inline, no allocation
+          "  let long = String::from_str(\"a heap-backed string that exceeds the small buffer length\");\n"
+          "  return (short.len() + long.len()) as i32 - 17; }\n"                       // 2 + 57 - 17 = 42
+          "fn main() i32 { exit(run()); }\n",
+      42, "");
 }
 
 // `str` conforms to Eq/Ord/Hash/Default with the `&Self` convention: `==`/`!=` dispatch to its `eq` (this
@@ -650,7 +781,7 @@ static void test_nested_generic_by_value(void) {
       PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(40); v.push(2);\n"
           "  let o: Option<Vector<i32>> = Option::<Vector<i32>>::some(v);\n"
           "  let mut w = o.unwrap_or(Vector::<i32>::new());\n"
-          "  let mut acc = 0; for x in w.iter() { acc = acc + x; } w.free(); exit(acc); }\n",
+          "  let mut acc = 0; for x in w.iter() { acc = acc + *x; } w.free(); exit(acc); }\n", // iter borrows -> &i32
       42, "");
   // Option<String> holds a String by value: the String struct must precede Option__String in the output.
   sc_run_program(
@@ -689,7 +820,7 @@ static void test_std_types(void) {
   sc_run_program(
       "std Vector for-loop via .iter()",
       PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(10); v.push(20); v.push(12);\n"
-          "  let mut sum = 0; for x in v.iter() { sum = sum + x; } v.free(); exit(sum); }\n",
+          "  let mut sum = 0; for x in v.iter() { sum = sum + *x; } v.free(); exit(sum); }\n", // iter borrows -> &i32
       42, "");
   // String numeric formatting: from_i64 / from_u64 / push_i64 / push_f64.
   sc_run_program(
@@ -714,13 +845,13 @@ static void test_std_types(void) {
       "std Box",
       PRE "fn main() i32 { let mut b: Box<i32> = Box::<i32>::new(40);\n"
           "  let old: i32 = b.replace(2);\n"
-          "  let r: i32 = b.get() + old; b.free(); exit(r); }\n",
+          "  let r: i32 = *b.get() + old; b.free(); exit(r); }\n", // get borrows -> &i32
       42, ""); // 2 + 40
   sc_run_program(
       "std Vector push/pop/get",
       PRE "fn main() i32 { let mut v: Vector<i32> = Vector::<i32>::new();\n"
           "  for i in 0..10 { v.push(i * 3); }\n"                              // [0,3,..,27], len 10
-          "  let r: i32 = v.at(2) + v.pop().unwrap_or(0) + v.get(50).unwrap_or(9);\n" // 6 + 27 + 9
+          "  let r: i32 = *v.at(2) + v.pop().unwrap_or(0) + *v.get(50).unwrap_or(&9);\n" // 6 + 27 + 9 (peeks borrow)
           "  v.free(); exit(r); }\n",
       42, "");
   sc_run_program(
@@ -728,7 +859,7 @@ static void test_std_types(void) {
       PRE "fn main() i32 { let mut v: Vector<i32> = Vector::<i32>::with_capacity(4);\n"
           "  v.push(1); v.push(2); v.push(3);\n"
           "  v.set(0, 12); v.set(1, 18); v.set(2, 12);\n"
-          "  let r: i32 = v.first().unwrap_or(0) + v.at(1) + v.last().unwrap_or(0);\n" // 12 + 18 + 12
+          "  let r: i32 = *v.first().unwrap_or(&0) + *v.at(1) + *v.last().unwrap_or(&0);\n" // 12 + 18 + 12 (peeks borrow)
           "  v.free(); exit(r); }\n",
       42, "");
   // Function pointers as first-class values: pass a named fn where a `fn(..) ..` param is expected.
@@ -773,10 +904,10 @@ static void test_std_types(void) {
           "  let r0: i32 = v.remove(1).unwrap_or(0);\n"          // removes 1 -> [9,2,3,4]; r0=1
           "  let sr: i32 = v.swap_remove(0).unwrap_or(0);\n"     // removes 9 -> [4,2,3]; sr=9
           "  v.reverse();\n"                                     // [3,2,4]
-          "  let fd: i32 = v.find(even).unwrap_or(0);\n"         // 2
+          "  let fd: i32 = *v.find(even).unwrap_or(&0);\n"       // 2 (find borrows -> &i32)
           "  v.retain(even);\n"                                  // [2,4]
           "  let mut m: Vector<i32> = v.map(dbl);\n"             // [4,8]
-          "  let r: i32 = r0 + sr + fd + m.at(0) + m.at(1) + (v.len() as i32);\n" // 1+9+2+4+8+2 = 26
+          "  let r: i32 = r0 + sr + fd + *m.at(0) + *m.at(1) + (v.len() as i32);\n" // 1+9+2+4+8+2 = 26 (at borrows)
           "  v.free(); m.free(); exit(r + 16); }\n",             // 26 + 16
       42, "");
   // Box higher-order map (allocates a fresh box of the mapped type).
@@ -785,7 +916,7 @@ static void test_std_types(void) {
       PRE "fn dbl(x: i32) i32 { return x * 2; }\n"
           "fn main() i32 { let b: Box<i32> = Box::<i32>::new(21);\n"
           "  let mut c: Box<i32> = b.map(dbl);\n"
-          "  let r: i32 = c.get(); c.free(); exit(r); }\n",
+          "  let r: i32 = *c.get(); c.free(); exit(r); }\n", // get borrows -> &i32
       42, "");
 }
 
@@ -824,9 +955,9 @@ static void test_closures(void) {
           "  let v1: i32 = o.map(|x: i32| x + 1).unwrap_or(0);\n"    // 21
           "  let mut vec: Vector<i32> = Vector::<i32>::new();\n"
           "  vec.push(1); vec.push(2); vec.push(3); vec.push(4);\n"
-          "  let fd: i32 = vec.find(|x: i32| x > 2).unwrap_or(0);\n" // 3
+          "  let fd: i32 = *vec.find(|x: i32| x > 2).unwrap_or(&0);\n" // 3 (find borrows -> &i32)
           "  let mut d: Vector<i32> = vec.map(|x: i32| x * 2);\n"    // [2,4,6,8]
-          "  let s: i32 = d.at(0) + d.at(2) + d.at(3);\n"           // 2+6+8 = 16
+          "  let s: i32 = *d.at(0) + *d.at(2) + *d.at(3);\n"        // 2+6+8 = 16 (at borrows)
           "  vec.free(); d.free();\n"
           "  exit(v1 + fd + s + 2); }\n",                            // 21+3+16+2 = 42
       42, "");
@@ -1040,72 +1171,72 @@ static void test_question_operator(void) {
       0, "D\n"); // 'D' from the defer, never 'Z'; g() returns None -> r == 2 -> exit 0
 }
 
-static void test_drop_raii(void) {
-#define DROP_PRE                                                                                                        \
+static void test_free_raii(void) {
+#define FREE_PRE                                                                                                        \
   PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
       "struct R { pub tag: i32 }\n"                                                                                     \
       "extend R as Free { fn free(self: &mut Self) { putchar(self.tag); } }\n"
-  // RAII: locals are dropped at scope exit in reverse construction order.
+  // RAII: locals are freed at scope exit in reverse construction order.
   sc_run_program(
-      "drop: reverse-order scope-exit cleanup",
-      DROP_PRE "fn run() void { let a = R { tag: 65 }; let b = R { tag: 66 }; putchar(88); }\n"
+      "free: reverse-order scope-exit cleanup",
+      FREE_PRE "fn run() void { let a = R { tag: 65 }; let b = R { tag: 66 }; putchar(88); }\n"
                "fn main() i32 { run(); exit(0); }\n",
-      0, "XBA"); // X, then drop b (B) then a (A)
-  // a moved binding is not dropped at the source scope (no double-free); the new owner drops it.
+      0, "XBA"); // X, then free b (B) then a (A)
+  // a moved binding is not freed at the source scope (no double-free); the new owner frees it.
   sc_run_program(
-      "drop: moved value is not auto-dropped",
-      DROP_PRE "fn run() void { let a = R { tag: 65 }; let b = a; putchar(88); }\n"
+      "free: moved value is not auto-freed",
+      FREE_PRE "fn run() void { let a = R { tag: 65 }; let b = a; putchar(88); }\n"
                "fn main() i32 { run(); exit(0); }\n",
-      0, "XA"); // only b (holding tag 65 = A) drops; a was moved
-  // a by-value Free parameter is owned by the callee, which drops it; the caller does not re-drop.
+      0, "XA"); // only b (holding tag 65 = A) frees; a was moved
+  // a by-value Free parameter is owned by the callee, which frees it; the caller does not re-free.
   sc_run_program(
-      "drop: by-value parameter ownership transfer",
-      DROP_PRE "fn consume(r: R) void { putchar(67); }\n"
+      "free: by-value parameter ownership transfer",
+      FREE_PRE "fn consume(r: R) void { putchar(67); }\n"
                "fn run() void { let a = R { tag: 65 }; consume(a); putchar(88); }\n"
                "fn main() i32 { run(); exit(0); }\n",
-      0, "CAX"); // consume prints C then drops its param (A); then X; a was moved, run drops nothing
+      0, "CAX"); // consume prints C then frees its param (A); then X; a was moved, run frees nothing
   // RAII and defer share one reverse-order cleanup sequence.
   sc_run_program(
-      "drop: interleaves with defer",
-      DROP_PRE "fn run() void { let a = R { tag: 65 }; defer putchar(68); let b = R { tag: 66 }; putchar(88); }\n"
+      "free: interleaves with defer",
+      FREE_PRE "fn run() void { let a = R { tag: 65 }; defer putchar(68); let b = R { tag: 66 }; putchar(88); }\n"
                "fn main() i32 { run(); exit(0); }\n",
-      0, "XBDA"); // X, then reverse of [drop a, defer D, drop b]: b(B), D, a(A)
-#undef DROP_PRE
+      0, "XBDA"); // X, then reverse of [free a, defer D, free b]: b(B), D, a(A)
+#undef FREE_PRE
 }
 
-// D#10: a binding moved on only SOME control-flow paths gets a runtime drop flag, so it is dropped EXACTLY
+// D#10: a binding moved on only SOME control-flow paths gets a runtime free flag, so it is freed EXACTLY
 // once -- skipped on the path that moved it out, run on the path that did not (no leak, no double-free).
-static void test_conditional_move_drop(void) {
+static void test_conditional_move_free(void) {
 #define CM_PRE                                                                                                          \
   PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
       "struct R { pub tag: i32 }\n"                                                                                     \
       "extend R as Free { fn free(self: &mut Self) { putchar(self.tag); } }\n"                                          \
       "fn consume(r: R) void { }\n"
-  // moved in the then-branch only: when taken, consume drops it; when not, the scope-exit drop runs.
+  // moved in the then-branch only: when taken, consume frees it; when not, the scope-exit free runs.
   sc_run_program(
-      "drop: conditional move, branch taken",
+      "free: conditional move, branch taken",
       CM_PRE "fn run(c: bool) void { let a = R { tag: 65 }; if c { consume(a); } }\n"
              "fn main() i32 { run(true); run(false); exit(0); }\n",
-      0, "AA"); // taken: consume drops A; not taken: auto-drop A -> one A per call, never zero or two
-  // moved on BOTH arms: the flag is set on either path, so the scope-exit drop is always skipped (consume owns it).
+      0, "AA"); // taken: consume frees A; not taken: auto-free A -> one A per call, never zero or two
+  // moved on BOTH arms: the flag is set on either path, so the scope-exit free is always skipped (consume owns it).
   sc_run_program(
-      "drop: moved on both branches",
+      "free: moved on both branches",
       CM_PRE "fn run(c: bool) void { let a = R { tag: 65 }; if c { consume(a); } else { consume(a); } }\n"
              "fn main() i32 { run(true); run(false); exit(0); }\n",
-      0, "AA"); // each call: exactly one drop (inside consume), none leaked, none double
-  // a fresh flag per loop iteration: moved only when i==1, dropped otherwise -> three drops total.
+      0, "AA"); // each call: exactly one free (inside consume), none leaked, none double
+  // a fresh flag per loop iteration: moved only when i==1, freed otherwise -> three frees total.
   sc_run_program(
-      "drop: conditional move inside a loop",
+      "free: conditional move inside a loop",
       CM_PRE "fn main() i32 { let mut i = 0; while i < 3 { let a = R { tag: 65 }; if i == 1 { consume(a); } i = i + 1; } exit(0); }\n",
       0, "AAA");
 #undef CM_PRE
 }
 
 // A#1: Free-RAII on a GENERIC container. A `Box<T>` conditionally conforming to Free (`extend<T: Free>
-// Box<T> as Free`) auto-drops at scope exit, recursively dropping its element; moving it into a consumer
-// suppresses the source's drop; a conditional move is flag-guarded so it drops exactly once on each path.
+// Box<T> as Free`) auto-frees at scope exit, recursively freeing its element; moving it into a consumer
+// suppresses the source's free; a conditional move is flag-guarded so it frees exactly once on each path.
 // This is the compiler machinery a full prelude container migration to auto-Free rests on.
-static void test_container_drop_raii(void) {
+static void test_container_free_raii(void) {
 #define BOX_PRE                                                                                                         \
   PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
       "struct Leaf { pub id: i32 }\n"                                                                                   \
@@ -1113,18 +1244,18 @@ static void test_container_drop_raii(void) {
       "struct Box<T> { pub inner: T }\n"                                                                                \
       "extend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) { self.inner.free(); } }\n"                          \
       "fn take(b: Box<Leaf>) void { }\n"
-  sc_run_program("container RAII: scope-exit recursive auto-drop",
+  sc_run_program("container RAII: scope-exit recursive auto-free",
                  BOX_PRE "fn run() void { let a = Box::<Leaf> { inner: Leaf { id: 65 } }; putchar(88); }\n"
                          "fn main() i32 { run(); exit(0); }\n",
-                 0, "XA"); // X, then drop a -> its inner Leaf (A)
-  sc_run_program("container RAII: move into consumer suppresses source drop",
+                 0, "XA"); // X, then free a -> its inner Leaf (A)
+  sc_run_program("container RAII: move into consumer suppresses source free",
                  BOX_PRE "fn run() void { let a = Box::<Leaf> { inner: Leaf { id: 65 } }; take(a); putchar(88); }\n"
                          "fn main() i32 { run(); exit(0); }\n",
-                 0, "AX"); // take drops a (A), then X; the source is not re-dropped
-  sc_run_program("container RAII: conditional move drops once per path",
+                 0, "AX"); // take frees a (A), then X; the source is not re-freed
+  sc_run_program("container RAII: conditional move frees once per path",
                  BOX_PRE "fn run(c: bool) void { let a = Box::<Leaf> { inner: Leaf { id: 65 } }; if c { take(a); } }\n"
                          "fn main() i32 { run(true); run(false); exit(0); }\n",
-                 0, "AA"); // taken: consumer drops; not taken: scope-exit drops -- one A each call
+                 0, "AA"); // taken: consumer frees; not taken: scope-exit frees -- one A each call
   // a CONDITIONAL explicit `a.free()` consumes the receiver: the flag is set around the call (the receiver
   // is taken by address, so it cannot be wrapped as a comma-expr), and the scope-exit auto-free is guarded.
   sc_run_program("container RAII: conditional explicit free is not double-freed",
@@ -1134,7 +1265,7 @@ static void test_container_drop_raii(void) {
 #undef BOX_PRE
 }
 
-// `.free()` is the destructor intrinsic: callable on ANY type, it runs the type's Free impl or is a no-op
+// `.free()` is the Free intrinsic: callable on ANY type, it runs the type's Free impl or is a no-op
 // when the type isn't Free -- resolved per monomorphization. This is what lets generic code (and a generic
 // container's element teardown) free uniformly without a `T: Free` bound.
 static void test_free_intrinsic(void) {
@@ -1147,6 +1278,183 @@ static void test_free_intrinsic(void) {
                         "fn main() i32 { dispose::<Leaf>(Leaf { id: 65 }); dispose::<i32>(7); putchar(10); exit(0); }\n",
                  0, "A\n"); // Leaf freed once (A, explicit free consumes -> no double auto-free); i32 free is a no-op
 #undef FI_PRE
+}
+
+// The std prelude containers (Vector/Box/Map) are auto-`Free` and deep-free their heap-owning elements,
+// while the peek accessors borrow (`&T` / `Option<&T>`) -- so an element peeked while the container is
+// still alive is freed exactly once at scope exit: no double-free, no use-after-free (the harness builds
+// with -fsanitize=address). RAII fires only on scope exit, so the work RETURNS (calling exit() would skip
+// cleanup and defeat the check). Strings are >23 bytes to force a heap buffer ASan can track.
+static void test_std_container_auto_free(void) {
+  // Vector<String>: borrow-peek via at / iter / get, then the vector deep-auto-frees every String + buffer.
+  sc_run_program(
+      "auto-Free Vector<String> with borrow peeks (no manual free)",
+      PRE "fn run() i32 {\n"
+          "  let mut v = Vector::<String>::new();\n"
+          "  v.push(String::from_str(\"this string is long enough to live on the heap\"));\n"
+          "  v.push(String::from_str(\"and so is this second heap-allocated string too!\"));\n"
+          "  let mut acc = 0;\n"
+          "  if v.at(0).len() > 23 { acc = acc + 10; }\n"               // borrow &String, still v-owned
+          "  for s in v.iter() { if s.len() > 23 { acc = acc + 1; } }\n" // s: &String -> 12
+          "  if v.get(1).is_some() { acc = acc + 30; }\n"               // 42
+          "  return acc;\n"                                             // v auto-frees (deep) -- ASan-checked
+          "}\n"
+          "fn main() i32 { exit(run()); }\n",
+      42, "");
+  // Box<String> auto-frees the boxed heap String; Map<String,i32> deep-frees its String keys. `get` borrows.
+  sc_run_program(
+      "auto-Free Box<String> + Map<String,i32> (deep, no manual free)",
+      PRE "fn run() i32 {\n"
+          "  let b = Box::<String>::new(String::from_str(\"a boxed heap string beyond the small buffer\"));\n"
+          "  let mut acc = 0;\n"
+          "  if b.get().len() > 23 { acc = acc + 6; }\n"                // borrow &String
+          "  let mut m = Map::<String, i32>::new();\n"
+          "  m.insert(String::from_str(\"a sufficiently long heap key for the map\"), 36);\n"
+          "  let key = String::from_str(\"a sufficiently long heap key for the map\");\n"
+          "  acc = acc + *m.get(&key).unwrap_or(&0);\n"                 // 36 -> 42 (get borrows -> &i32)
+          "  return acc;\n"                                            // key, b, m all auto-free (deep)
+          "}\n"
+          "fn main() i32 { exit(run()); }\n",
+      42, "");
+  // USER-defined Free element types deep-free through the cross-module macro path too (output proves each is
+  // freed EXACTLY once: a missing char = leak, a doubled char = double-free). Covers Vector/Box deep-free
+  // and a combinator free (Option::and) over a user Free type -- the `.free()` intrinsic pastes the arg's
+  // `__free` in the macro template (a guarded no-op stub backs non-Free args).
+  sc_run_program(
+      "user Free element deep-frees via macro path, exactly once",
+      PRE "struct Tr { pub id: i32 }\n"
+          "extend Tr as Free { fn free(self: &mut Tr) { putchar(self.id); } }\n"
+          "fn run() void {\n"
+          "  let mut v = Vector::<Tr>::new(); v.push(Tr { id: 66 }); v.push(Tr { id: 67 });\n" // B C at scope exit
+          "  let bx = Box::<Tr>::new(Tr { id: 68 });\n"                                         // D at scope exit
+          "  let freed = Option::<Tr>::Some(Tr { id: 65 }).and(Option::<i32>::Some(0));\n"    // A now (and)
+          "  if freed.is_none() { putchar(63); }\n"            // not reached
+          "}\n"
+          "fn main() i32 { run(); putchar(10); exit(0); }\n",
+      0, "ADBC\n"); // A (and, eager), then scope exit LIFO: D (bx), then B C (vector elements)
+  // The remover path: pop MOVES the String out of the vector (so the vector no longer frees it); the
+  // moved-out value is the sole owner. The remaining element still deep-auto-frees -- each heap buffer once.
+  sc_run_program(
+      "auto-Free Vector<String> pop moves ownership out",
+      PRE "fn run() i32 {\n"
+          "  let mut v = Vector::<String>::new();\n"
+          "  v.push(String::from_str(\"first long heap string for the move-out test\"));\n"
+          "  v.push(String::from_str(\"second long heap string for the move-out test\"));\n"
+          "  let mut popped = v.pop().unwrap_or(String::new());\n"      // 2nd String moves out of v
+          "  let n = popped.len() as i32;\n"
+          "  popped.free();\n"                                         // free the moved-out String explicitly
+          "  if n > 23 { return 42; }\n"
+          "  return 0;\n"                                              // v auto-frees its remaining String
+          "}\n"
+          "fn main() i32 { exit(run()); }\n",
+      42, "");
+}
+
+// `switch` binding modes (Rust match ergonomics): matching a `&`/`&mut` scrutinee binds each payload BY
+// REFERENCE (peek / mutate the payload in place); matching an owned value MOVES the payload out and
+// consumes the scrutinee. This is what lets Option/Result be auto-`Free` -- their payload is reached only
+// through `switch`, so move-mode extraction + ref-mode deep-free are both expressible and sound.
+static void test_switch_binding_modes(void) {
+  // &mut scrutinee -> `&mut` payload binding: mutate the enum's payload in place through the borrow.
+  sc_run_program(
+      "switch &mut binds payload by &mut (mutate in place)",
+      PRE "fn main() i32 { let mut o = Option::<i32>::Some(41);\n"
+          "  let r = switch &mut o { Some(v) => *v = *v + 1, None => 0 };\n" // mutate o's payload in place
+          "  exit(o.unwrap_or(0) + r - 84); }\n",                            // o is now Some(42); r == 42
+      0, "");
+  // & scrutinee -> `&` payload binding: borrow a heap payload and call a method on it without consuming.
+  sc_run_program(
+      "switch & binds payload by & (peek without consuming)",
+      PRE "fn peek_len(o: &Option<String>) i32 { return switch o { Some(s) => s.len() as i32, None => -1 }; }\n"
+          "fn run() i32 { let o = Option::<String>::Some(String::from_str(\"a heap string long enough to allocate\"));\n"
+          "  let a = peek_len(&o); let b = peek_len(&o);\n"   // peeked twice -- o still owns its String
+          "  if a != b { return 1; }\n"
+          "  return 0; }\n"                                    // o auto-frees its String once at scope exit
+          "fn main() i32 { exit(run()); }\n",
+      0, "");
+  // Owned scrutinee -> move mode: `unwrap_or` consumes the Option and moves the String out; the Option is
+  // not double-freed. Option<String> freed WITHOUT extraction deep-auto-frees its payload.
+  sc_run_program(
+      "Option<String> auto-Free: deep-free on free + move-out via unwrap_or",
+      PRE "fn run() i32 {\n"
+          "  let held = Option::<String>::Some(String::from_str(\"freed without extraction -- deep auto-freed\"));\n"
+          "  if held.is_none() { return 1; }\n"               // held auto-frees its String at scope exit
+          "  let o = Option::<String>::Some(String::from_str(\"extracted heap string moved out by unwrap_or\"));\n"
+          "  let mut s = o.unwrap_or(String::from_str(\"a heap-backed default long enough to allocate now\"));\n"
+          "  return (s.len() > 23) as i32 - 1; }\n"           // s auto-frees; o consumed (no double free)
+          "fn main() i32 { exit(run()); }\n",
+      0, "");
+  // Result<String, i32> is auto-`Free` whenever the Ok type is (the Err arm frees through the intrinsic).
+  sc_run_program(
+      "Result<String,i32> auto-Free on free (Ok payload deep-freed)",
+      PRE "fn run() i32 {\n"
+          "  let r = Result::<String, i32>::Ok(String::from_str(\"a result-carried heap string of real length\"));\n"
+          "  if r.is_err() { return 1; }\n"                   // r auto-frees its Ok String at scope exit
+          "  return 0; }\n"
+          "fn main() i32 { exit(run()); }\n",
+      0, "");
+  // A combinator that FREES a payload frees it (no leak) without double-freeing (ASan): `Option::and` on
+  // the Some path discards `self`'s heap String and returns `other`; `Result::get_err` discards the Ok
+  // String. The prelude frees the discarded payload explicitly per arm (sound under flow-sensitive `freed`).
+  sc_run_program(
+      "owned-switch frees the discarded payload (and / get_err), no double-free",
+      PRE "fn run() i32 {\n"
+          "  let a = Option::<String>::Some(String::from_str(\"self payload discarded by and, freed here ok\"));\n"
+          "  let b = a.and(Option::<i32>::Some(7));\n"        // a's String freed; b is Some(7)
+          "  if b.unwrap_or(0) != 7 { return 1; }\n"
+          "  let r = Result::<String, i32>::Ok(String::from_str(\"ok payload discarded by get_err here now\"));\n"
+          "  let e = r.get_err();\n"                          // r's Ok String freed; e is None
+          "  if e.is_some() { return 2; }\n"
+          "  return 0; }\n"
+          "fn main() i32 { exit(run()); }\n",
+      0, "");
+  // Void block arms (a `;`-terminated assignment block is `void`, like `{}`): mutate in place via &mut.
+  sc_run_program(
+      "void block switch arms (assignment block is void)",
+      PRE "fn main() i32 { let mut o = Option::<i32>::Some(20);\n"
+          "  switch &mut o { Some(v) => { *v = *v + 22; }, None => {}, };\n" // both arms void
+          "  exit(o.unwrap_or(0)); }\n",
+      42, "");
+}
+
+// RAII move/free edge cases (output proves each value is freed EXACTLY once -- a missing char is a leak, a
+// doubled char a double-free; the harness also builds with -fsanitize=address).
+static void test_raii_move_edges(void) {
+#define TR_PRE                                                                                                          \
+  PRE "struct Tr { pub id: i32 }\n"                                                                                    \
+      "extend Tr as Free { fn free(self: &mut Tr) { putchar(self.id); } }\n"
+  // Free elaboration: a move-mode `switch` payload bound but only READ (not moved out) is freed at arm exit.
+  sc_run_program(
+      "switch free-elaboration: borrowed-not-moved payload freed once",
+      TR_PRE "fn run() i32 { let o = Option::<Tr>::Some(Tr { id: 65 });\n"
+             "  let r = switch o { Some(v) => v.id, None => 0, };\n" // v read, not moved -> freed: 'A'
+             "  return r - 65; }\n"
+             "fn main() i32 { let r = run(); putchar(10); exit(r); }\n",
+      0, "A\n");
+  // 3 deeply nested move-mode switches: the deepest payload is read (not moved) -> freed at the deep arm.
+  sc_run_program(
+      "deeply nested switch free-elaboration (3 levels)",
+      TR_PRE "fn run() i32 {\n"
+             "  let d = Option::<Option<Result<Tr, i32>>>::Some(Option::<Result<Tr, i32>>::Some(Result::<Tr, i32>::Ok(Tr { id: 90 })));\n"
+             "  let r = switch d { Some(a) => switch a { Some(b) => switch b { Ok(v) => v.id, Err(_) => 0, }, None => 0, }, None => 0, };\n"
+             "  return r - 90; }\n" // v read at depth 3, not moved -> freed: 'Z'
+             "fn main() i32 { let r = run(); putchar(10); exit(r); }\n",
+      0, "Z\n");
+  // Reassigning a Free binding frees the OLD value first; the new value frees at scope exit.
+  sc_run_program(
+      "reassigning a Free binding frees the old value once",
+      TR_PRE "fn run() void { let mut t = Tr { id: 65 }; t = Tr { id: 66 }; }\n" // old 'A' on reassign, new 'B' at exit
+             "fn main() i32 { run(); putchar(10); exit(0); }\n",
+      0, "AB\n");
+  // A discarded Free temporary (a method result used inline) is freed after the statement.
+  sc_run_program(
+      "discarded Free temporary is freed",
+      TR_PRE "fn mk(id: i32) Tr { return Tr { id: id }; }\n"
+             "extend Tr { fn tag(self: &Tr) i32 { return self.id; } }\n"
+             "fn run() i32 { let r = mk(65).tag(); return r - 65; }\n" // the mk(65) temp is freed after the call: 'A'
+             "fn main() i32 { let r = run(); putchar(10); exit(r); }\n",
+      0, "A\n");
+#undef TR_PRE
 }
 
 static void test_defer(void) {
@@ -1203,10 +1511,13 @@ static void test_static_assert(void) {
 
 int main(void) {
   test_attributes();
-  test_drop_raii();
-  test_conditional_move_drop();
-  test_container_drop_raii();
+  test_free_raii();
+  test_conditional_move_free();
+  test_container_free_raii();
   test_free_intrinsic();
+  test_std_container_auto_free();
+  test_switch_binding_modes();
+  test_raii_move_edges();
   test_defer();
   test_static_assert();
   test_interfaces();
@@ -1221,6 +1532,10 @@ int main(void) {
   test_container_conformances();
   test_str_conformances();
   test_format_printing();
+  test_bounds_checks();
+  test_checked_arith();
+  test_default_generic_args();
+  test_custom_allocator();
   test_map();
   test_multi_from();
   test_generics();

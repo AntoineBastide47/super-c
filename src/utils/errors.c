@@ -40,7 +40,7 @@ static bool at_or_before(const uint32_t line_start, void *const off) {
 // malloc'd block; the caller frees the original message.
 COLD char *render(
     const char *msg, const uint8_t *source, const U32_Vec *line_starts, const size_t src_len, uint32_t off,
-    const uint32_t span) {
+    const uint32_t span, const char *file) {
   if (off > src_len)
     off = (uint32_t)src_len;
   const size_t li = U32_Vec_partition_point(line_starts, at_or_before, &off) - 1;
@@ -78,8 +78,12 @@ COLD char *render(
   char numbuf[24];
   const int gw = snprintf(numbuf, sizeof numbuf, "%zu", line_no); // gutter width
 
+  // The location line shows `--> file:L:C` when a path is known, else `--> L:C`.
+  const char *const fpfx = (file && file[0]) ? file : "";
+  const char *const fsep = (file && file[0]) ? ":" : "";
+
   // Single generously-sized buffer; snprintf truncates safely if over-estimated.
-  const size_t cap = strlen(msg) + (size_t)line_len + real_col + carets + (size_t)gw * 4 + 128;
+  const size_t cap = strlen(msg) + (size_t)line_len + real_col + carets + (size_t)gw * 4 + strlen(fpfx) + 128;
   char *const out = malloc(cap);
   if (out == NULL) {
     fprintf(stderr, "fatal: out of memory\n");
@@ -89,11 +93,12 @@ COLD char *render(
   snprintf(
       out, cap,
       "error: %s\n" // error: <message>
-      "%*s--> %zu:%zu\n" //  --> L:C
+      "%*s--> %s%s%zu:%zu\n" //  --> file:L:C
       "%*s |\n" //    |
       "%*zu | %.*s\n" //  N | <source line>
       "%*s | %*s%s", //    |    ^^^
-      msg, gw, "", line_no, real_col + 1, gw, "", gw, line_no, line_len, line_ptr, gw, "", (int)caret_col, "", bar);
+      msg, gw, "", fpfx, fsep, line_no, real_col + 1, gw, "", gw, line_no, line_len, line_ptr, gw, "", (int)caret_col, "",
+      bar);
 
   free(bar);
   return out;
@@ -101,9 +106,18 @@ COLD char *render(
 
 COLD_EXPORT void errors_finalize(
     String_Vec *errors, const U32_Vec *errors_start, const U32_Vec *errors_len, const uint8_t *source,
-    const size_t len) {
+    const size_t len, const char *file) {
   if (errors->len == 0)
     return;
+
+  // Show the path relative to the working directory when it sits underneath it (e.g.
+  // `/abs/proj/examples/main.spc` -> `examples/main.spc`); otherwise leave it as given.
+  char cwd[4096];
+  if (file && file[0] == '/' && getcwd(cwd, sizeof cwd)) {
+    const size_t cl = strlen(cwd);
+    if (strncmp(file, cwd, cl) == 0 && file[cl] == '/')
+      file += cl + 1;
+  }
 
   // Build the line-start table once (only ever reached on the error path).
   U32_Vec line_starts = U32_Vec_init();
@@ -124,7 +138,8 @@ COLD_EXPORT void errors_finalize(
   }
 
   for (size_t e = 0; e < errors->len; e++) {
-    char *const block = render(errors->data[e], source, &line_starts, len, errors_start->data[e], errors_len->data[e]);
+    char *const block =
+        render(errors->data[e], source, &line_starts, len, errors_start->data[e], errors_len->data[e], file);
     free(errors->data[e]);
     errors->data[e] = block;
   }

@@ -136,8 +136,10 @@ static char *resolve_import_file(const Package *p, const Ast *ast, const char *s
 }
 
 // Lex + parse one module's source into an Ast, printing diagnostics; NULL on a lex/parse error.
-static Ast *parse_source(const char *source, const size_t len) {
+// `file` is the source path, shown in diagnostics' `--> file:line:col` location.
+static Ast *parse_source(const char *source, const size_t len, const char *file) {
   Lexer *lexer = lexer_new(source, len);
+  lexer_set_file(lexer, file);
   lexer_scan_tokens(lexer);
   if (lexer_has_errors(lexer)) {
     lexer_log_errors(lexer);
@@ -145,6 +147,7 @@ static Ast *parse_source(const char *source, const size_t len) {
     return NULL;
   }
   Parser *parser = parser_new(lexer_take_tokens(lexer), source, len);
+  parser_set_file(parser, file);
   lexer_free(&lexer);
   parser_build_ast(parser);
   if (parser_has_errors(parser)) {
@@ -199,7 +202,7 @@ static int load_module(Package *p, char *mod_path, char *file_path) {
     return -1;
   }
 
-  Ast *const ast = parse_source(source, len);
+  Ast *const ast = parse_source(source, len, file_path);
   const int id = add_module(p, mod_path, file_path, source, len, ast);
   if (!ast) {
     p->ok = false;
@@ -433,10 +436,27 @@ static ModuleId type_user_home(const Package *p, const Ast *a, TypeId t);
 // user (non-prelude) aggregate held by value -- there its full layout is visible, so an `Option<Bar>`-style
 // by-value field is complete. All-builtin/all-prelude args -> the generic's own module (it->module), the
 // classic owner-emits path. A pointer/ref/slice arg needs only a forward declaration, so it never re-homes.
+// Does module `from`'s code reference anything in module `to` (a cross-module use edge)? Used to tell
+// whether `from` already includes `to`'s header. A prelude instance arg (String<Global>, home = the base
+// `string` module) must NOT pull the outer container down to its home if the container's owner can simply
+// include it (owner -> string, no cycle); only re-home to a prelude arg-home that itself depends on the
+// owner (vector -> option), where owner-emitting would form an include cycle.
+static bool module_imports(const Package *p, const ModuleId from, const ModuleId to) {
+  if (from >= p->count || !p->modules[from].ast)
+    return false;
+  const DefId_Vec *const r = &p->modules[from].ast->resolutions;
+  for (size_t i = 0; i < r->len; i++)
+    if (r->data[i].node != NODE_NONE && r->data[i].module == to)
+      return true;
+  return false;
+}
+
 static ModuleId instance_home(const Package *p, const Ast *a, const TyInstance *const it) {
   for (uint8_t i = 0; i < it->n; i++) {
     const ModuleId h = type_user_home(p, a, it->args[i]);
-    if (h != MODULE_NONE)
+    // Re-home over a user type always; over a prelude arg-home only when that home depends on the owner
+    // (so owner-emitting would cycle). Otherwise the owner can include the arg-home -> keep it owner-emitted.
+    if (h != MODULE_NONE && (module_is_user(p, h) || module_imports(p, h, it->module)))
       return h;
   }
   return it->module;
@@ -447,8 +467,13 @@ static ModuleId type_user_home(const Package *p, const Ast *a, const TypeId t) {
   switch (y->kind) {
     case TYPE_POINTER:
     case TYPE_REFERENCE:
+      // A pointer/reference arg only needs its pointee forward-declared for layout, but the instance's
+      // mangled NAME and the pointee-typed field must be rendered where the pointee is known. So re-home
+      // to the pointee's user module (Option<&P> emits alongside P, exactly like Option<P>) -- otherwise
+      // the generic's owner module would try to render a user type it cannot see.
+      return type_user_home(p, a, y->as.elem);
     case TYPE_SLICE:
-      return MODULE_NONE; // complete via a forward declaration / fat pointer
+      return MODULE_NONE; // a fat pointer: self-contained, completes anywhere
     case TYPE_ARRAY:
       return type_user_home(p, a, y->as.elem); // an array embeds its element by value
     case TYPE_STRUCT:

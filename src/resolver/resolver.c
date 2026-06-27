@@ -416,9 +416,13 @@ static void declare_generics(Resolver *r, const NodeList generics) {
   const NodeId *const ids = ast_list(r->ast, generics);
   for (uint32_t i = 0; i < generics.len; i++)
     declare(r, ast_at_const(r->ast, ids[i])->as.generic_param.name, ids[i], NS_TYPE);
-  // Bounds are resolved after every parameter is in scope so they may refer to each other.
-  for (uint32_t i = 0; i < generics.len; i++)
+  // Bounds and defaults are resolved after every parameter is in scope so they may refer to each other.
+  for (uint32_t i = 0; i < generics.len; i++) {
     resolve_bounds(r, ast_at_const(r->ast, ids[i])->as.generic_param.bounds);
+    const NodeId dft = ast_at_const(r->ast, ids[i])->as.generic_param.default_type;
+    if (dft != NODE_NONE)
+      resolve_type(r, dft);
+  }
 }
 
 static void resolve_where(Resolver *r, const NodeList where_clause) {
@@ -943,7 +947,9 @@ void resolver_resolve(Resolver *r) {
     resolve_item(r, ids[i]);
   scope_exit(r);
 
-  errors_finalize(&r->errors, &r->errors_start, &r->errors_len, r->source, r->len);
+  errors_finalize(
+      &r->errors, &r->errors_start, &r->errors_len, r->source, r->len,
+      r->package && r->ast->module < r->package->count ? r->package->modules[r->ast->module].file : NULL);
 }
 
 VEC_DEFINE(Symbol, Symbol_Vec)
