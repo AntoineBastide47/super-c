@@ -1125,6 +1125,12 @@ static void test_container_drop_raii(void) {
                  BOX_PRE "fn run(c: bool) void { let a = Box::<Leaf> { inner: Leaf { id: 65 } }; if c { take(a); } }\n"
                          "fn main() i32 { run(true); run(false); exit(0); }\n",
                  0, "AA"); // taken: consumer drops; not taken: scope-exit drops -- one A each call
+  // a CONDITIONAL explicit `a.free()` consumes the receiver: the flag is set around the call (the receiver
+  // is taken by address, so it cannot be wrapped as a comma-expr), and the scope-exit auto-free is guarded.
+  sc_run_program("container RAII: conditional explicit free is not double-freed",
+                 BOX_PRE "fn run(c: bool) void { let mut a = Box::<Leaf> { inner: Leaf { id: 65 } }; if c { a.free(); } }\n"
+                         "fn main() i32 { run(true); run(false); exit(0); }\n",
+                 0, "AA"); // taken: explicit free (A), auto-free suppressed; not taken: auto-free (A)
 #undef BOX_PRE
 }
 

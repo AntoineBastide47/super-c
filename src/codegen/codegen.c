@@ -239,6 +239,7 @@ static long array_literal_count(Codegen *c, NodeId obj);
 static inline void cg_move_flag(char *out, const size_t cap, const NodeId decl) {
   snprintf(out, cap, "__mv%u", decl);
 }
+static bool cg_is_cond_moved(const Codegen *c, NodeId decl);
 // Is the identifier expression `expr` a conditional-move site (set its binding's drop flag when emitting it)?
 static inline bool cg_is_cond_site(const Codegen *c, const NodeId expr) {
   for (uint32_t i = 0; i < c->ncond_sites; i++)
@@ -2573,11 +2574,27 @@ static void emit_expr(Codegen *c, const NodeId id) {
       // can be indexed, passed (decaying to a pointer), or memcpy-copied into a binding).
       const TypeId ct = ast_type(c->ast, id);
       const bool arr_ret = ct != TYPE_NONE && ast_type_at(c->ast, ct)->kind == TYPE_ARRAY;
+      // A conditional `x.free()` sets x's drop flag AROUND the call (the receiver is taken by address, so
+      // it can't be wrapped as a comma-expr); the scope-exit auto-free is then `if (!flag)`.
+      const Node *const cn = ast_at_const(c->ast, n->as.call.callee);
+      char freeflag[32];
+      freeflag[0] = '\0';
+      if (cn->kind == NODE_MEMBER && !cn->as.member.path && cn->as.member.object != NODE_NONE &&
+          ast_at_const(c->ast, cn->as.member.object)->kind == NODE_IDENTIFIER &&
+          span_is(cg_mod_src(c, c->ast->module), ast_at_const(c->ast, cn->as.member.member)->as.name.text, "free")) {
+        const DefId rd = ast_resolution_def(c->ast, cn->as.member.object);
+        if (rd.module == c->ast->module && cg_is_cond_moved(c, rd.node)) {
+          cg_move_flag(freeflag, sizeof freeflag, rd.node);
+          emit(c, "(%s = true, ", freeflag);
+        }
+      }
       if (arr_ret)
         emit(c, "(");
       emit_call(c, id, n);
       if (arr_ret)
         emit(c, ")._");
+      if (freeflag[0])
+        emit(c, ")");
       break;
     }
     case NODE_CLOSURE: { // a closure value is just the address of its hoisted static function
@@ -3862,7 +3879,10 @@ static bool cg_is_cond_moved(const Codegen *c, const NodeId decl) {
 //  pass 0 records UNCONDITIONAL moves (cond==false) into `moved` -- those skip auto-drop outright;
 //  pass 1 records the move SITES of bindings moved only conditionally (cond==true and not unconditional),
 //          into `cond_moved` + `cond_sites`, so each gets a runtime drop flag instead.
-static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const int pass) {
+// `site`: record `expr` as a flag-set site (`(flag=true, expr)` wraps the value at emit). False for an
+// `x.free()` receiver -- there the value is taken by ADDRESS (`&x`), which a comma-expr can't be, so the
+// flag is set around the whole call instead (emit_call); the binding still joins cond_moved for its flag.
+static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const int pass, const bool site) {
   if (expr == NODE_NONE || ast_at_const(c->ast, expr)->kind != NODE_IDENTIFIER)
     return;
   const DefId d = ast_resolution_def(c->ast, expr);
@@ -3882,7 +3902,7 @@ static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const i
     return;
   if (!cg_is_cond_moved(c, d.node) && c->ncond_moved < (uint32_t)(sizeof c->cond_moved / sizeof c->cond_moved[0]))
     c->cond_moved[c->ncond_moved++] = d.node;
-  if (c->ncond_sites < (uint32_t)(sizeof c->cond_sites / sizeof c->cond_sites[0]))
+  if (site && c->ncond_sites < (uint32_t)(sizeof c->cond_sites / sizeof c->cond_sites[0]))
     c->cond_sites[c->ncond_sites++] = expr;
 }
 
@@ -3902,20 +3922,20 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
       break;
     }
     case NODE_LET:
-      cg_mark_move(c, n->as.let_stmt.value, cond, pass);
+      cg_mark_move(c, n->as.let_stmt.value, cond, pass, true);
       cg_scan_moves(c, n->as.let_stmt.value, cond, pass);
       break;
     case NODE_RETURN: {
       const NodeList vs = n->as.return_stmt.values;
       const NodeId *const ids = ast_list(c->ast, vs);
       for (uint32_t i = 0; i < vs.len; i++) {
-        cg_mark_move(c, ids[i], cond, pass);
+        cg_mark_move(c, ids[i], cond, pass, true);
         cg_scan_moves(c, ids[i], cond, pass);
       }
       break;
     }
     case NODE_ASSIGNMENT:
-      cg_mark_move(c, n->as.binary.right, cond, pass);
+      cg_mark_move(c, n->as.binary.right, cond, pass, true);
       cg_scan_moves(c, n->as.binary.left, cond, pass);
       cg_scan_moves(c, n->as.binary.right, cond, pass);
       break;
@@ -3924,7 +3944,7 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
       const NodeId *const ids = ast_list(c->ast, fs);
       for (uint32_t i = 0; i < fs.len; i++) {
         const NodeId v = ast_at_const(c->ast, ids[i])->as.field_initializer.value;
-        cg_mark_move(c, v, cond, pass);
+        cg_mark_move(c, v, cond, pass, true);
         cg_scan_moves(c, v, cond, pass);
       }
       break;
@@ -3961,12 +3981,12 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
           span_is(cg_mod_src(c, c->ast->module), ast_at_const(c->ast, callee->as.member.member)->as.name.text, "free")) {
         const TypeKind rk = ast_type_at(c->ast, ast_type(c->ast, callee->as.member.object))->kind;
         if (rk != TYPE_POINTER && rk != TYPE_REFERENCE)
-          cg_mark_move(c, callee->as.member.object, cond, pass); // elide its scope-exit auto-drop
+          cg_mark_move(c, callee->as.member.object, cond, pass, false); // flag set around the call, not the receiver
       }
       const NodeList args = n->as.call.args;
       const NodeId *const ids = ast_list(c->ast, args);
       for (uint32_t i = 0; i < args.len; i++) {
-        cg_mark_move(c, ids[i], cond, pass); // a by-value argument moves the binding to the callee
+        cg_mark_move(c, ids[i], cond, pass, true); // a by-value argument moves the binding to the callee
         cg_scan_moves(c, ids[i], cond, pass);
       }
       break;
