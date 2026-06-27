@@ -940,6 +940,29 @@ static TypeId prelude_slice_type(TypeChecker *t, const TypeId elem, const bool m
   return d != NODE_NONE ? ast_intern_instance(t->ast, mid, d, &elem, 1) : TYPE_ERROR;
 }
 
+// `Range<E>`: the prelude type a `lo..hi` range value lowers to (the for/switch/index uses of `..` are
+// handled structurally and never reach this).
+static TypeId prelude_range_type(TypeChecker *t, const TypeId elem) {
+  if (!t->package)
+    return TYPE_ERROR;
+  ModuleId mid;
+  const NodeId d = package_prelude_lookup(t->package, "Range", 5, true, &mid);
+  return d != NODE_NONE ? ast_intern_instance(t->ast, mid, d, &elem, 1) : TYPE_ERROR;
+}
+
+// E if `tid` is a prelude `Range<E>` instance, else TYPE_NONE (lets `for x in r` bind x to E).
+static TypeId range_instance_elem(TypeChecker *t, const TypeId tid) {
+  if (!t->package)
+    return TYPE_NONE;
+  const Ty *const ty = ast_type_at(t->ast, tid);
+  if (ty->kind != TYPE_INSTANCE)
+    return TYPE_NONE;
+  const TyInstance *const it = ast_instance(t->ast, ty->as.inst);
+  ModuleId rmid;
+  const NodeId rd = package_prelude_lookup(t->package, "Range", 5, true, &rmid);
+  return it->n == 1 && it->module == rmid && it->decl == rd ? it->args[0] : TYPE_NONE;
+}
+
 // Identify a prelude slice instance -- the lowered form of `[]E` / `[]mut E`. Returns 0 (not a slice),
 // 1 (`Slice<E>`, read-only) or 2 (`SliceMut<E>`, writable); sets `*elem` to E for either slice kind.
 static int slice_kind(TypeChecker *t, const TypeId tid, TypeId *const elem) {
@@ -2146,8 +2169,32 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     }
     case NODE_INDEX: {
       const TypeId obj = check_expr(t, n->as.index.object);
-      const TypeId idx = check_expr(t, n->as.index.index);
       const Ty *const ot = ast_type_at(a, obj);
+      const Node *const idxn = ast_at_const(a, n->as.index.index);
+      if (idxn->kind == NODE_RANGE) { // `a[lo..hi]` -> a `[]T` view of the element type
+        TypeId elem = TYPE_NONE, selem;
+        if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER)
+          elem = ot->as.elem;
+        else if (slice_kind(t, obj, &selem))
+          elem = selem;
+        else if (obj != TYPE_NONE) {
+          const Span sp = ast_at_const(a, n->as.index.object)->span;
+          typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot slice this expression");
+        }
+        const NodeId bounds[2] = {idxn->as.pattern_range.start, idxn->as.pattern_range.end};
+        for (int b = 0; b < 2; b++) {
+          if (bounds[b] == NODE_NONE)
+            continue;
+          const TypeId bt = check_expr(t, bounds[b]);
+          if (bt != TYPE_NONE && !is_int(t, bt) && ast_at_const(a, bounds[b])->kind != NODE_LITERAL) {
+            const Span sp = ast_at_const(a, bounds[b])->span;
+            typechecker_errorf(t, sp.start, sp.end - sp.start, "range bound must be an integer");
+          }
+        }
+        result = elem != TYPE_NONE ? prelude_slice_type(t, elem, false) : TYPE_NONE;
+        break;
+      }
+      const TypeId idx = check_expr(t, n->as.index.index);
       if (obj != TYPE_NONE) {
         TypeId selem;
         if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER)
@@ -2359,10 +2406,16 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       break;
     }
-    case NODE_RANGE: { // for-loop range; its type is the loop-variable type
+    case NODE_RANGE: { // a range used as a value lowers to `Range<T>` (for/index uses never reach here)
       const TypeId s = check_expr(t, n->as.pattern_range.start);
       const TypeId e = check_expr(t, n->as.pattern_range.end);
-      result = range_type(t, n, s, e);
+      const TypeId elem = range_type(t, n, s, e);
+      if (n->as.pattern_range.start == NODE_NONE || n->as.pattern_range.end == NODE_NONE) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "a range value needs both a start and an end");
+        result = TYPE_NONE;
+      } else
+        result = elem != TYPE_NONE ? prelude_range_type(t, elem) : TYPE_NONE;
       break;
     }
     default:
@@ -2547,21 +2600,27 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
     }
     case NODE_FOR: {
       const NodeId iter = n->as.for_stmt.iterable;
-      const TypeId it = check_expr(t, iter);
+      const Node *const itn = ast_at_const(a, iter);
       TypeId elem;
-      if (ast_at_const(a, iter)->kind == NODE_RANGE) {
-        elem = it; // a range's value type is exactly the loop-variable type
+      if (itn->kind == NODE_RANGE) { // a literal range -> counting loop; bounds checked, no Range<T> value built
+        const TypeId s = check_expr(t, itn->as.pattern_range.start);
+        const TypeId e = check_expr(t, itn->as.pattern_range.end);
+        elem = range_type(t, itn, s, e);  // the loop variable's type
+        ast_set_type(a, iter, elem);      // codegen reads the range node's type for the loop binding
       } else {
+        const TypeId it = check_expr(t, iter);
         const Ty *const ity = ast_type_at(a, it);
         TypeId selem;
-        elem = ity->kind == TYPE_ARRAY ? ity->as.elem : slice_kind(t, it, &selem) ? selem : TYPE_NONE;
+        elem = ity->kind == TYPE_ARRAY  ? ity->as.elem
+               : slice_kind(t, it, &selem) ? selem
+                                           : range_instance_elem(t, it); // iterate a bound `Range<T>` value
         if (elem == TYPE_NONE && it != TYPE_NONE) // Iterator protocol: `it.next() -> Option<T>` binds x to T
           elem = iter_elem_type(t, it);
-      }
-      if (elem == TYPE_NONE && it != TYPE_NONE) {
-        const Span sp = ast_at_const(a, iter)->span;
-        typechecker_errorf(t, sp.start, sp.end - sp.start,
-                           "cannot iterate over this value (need an array, slice, range, or an Iterator)");
+        if (elem == TYPE_NONE && it != TYPE_NONE) {
+          const Span sp = ast_at_const(a, iter)->span;
+          typechecker_errorf(t, sp.start, sp.end - sp.start,
+                             "cannot iterate over this value (need an array, slice, range, or an Iterator)");
+        }
       }
       ast_set_type(a, id, elem); // the loop binding resolves to this for-node (see resolver)
       check_stmt(t, n->as.for_stmt.body);

@@ -215,6 +215,7 @@ static const char *const BUILTIN_C[BT_COUNT] = {
 
 static void emit_expr(Codegen *c, NodeId id);
 static NodeId array_length_of(Codegen *c, NodeId iter);
+static long array_literal_count(Codegen *c, NodeId obj);
 static void emit_stmt(Codegen *c, NodeId id);
 static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId srcTy, char *out, size_t cap);
 static const char *cg_conv_lit(Codegen *c, ModuleId m, Span name);
@@ -1308,6 +1309,22 @@ static bool cg_slice_elem(Codegen *c, const TypeId tid, TypeId *const elem) {
   if (is_slice && it->n == 1 && elem)
     *elem = it->args[0];
   return is_slice && it->n == 1;
+}
+
+// True if `tid` is a prelude `Range<E>` instance (the lowered form of a `lo..hi` value); sets `*elem` to E.
+static bool cg_range_elem(Codegen *c, const TypeId tid, TypeId *const elem) {
+  if (!c->package)
+    return false;
+  const Ty *const ty = ast_type_at(c->ast, tid);
+  if (ty->kind != TYPE_INSTANCE)
+    return false;
+  const TyInstance *const it = ast_instance(c->ast, ty->as.inst);
+  ModuleId rmid;
+  const NodeId rd = package_prelude_lookup(c->package, "Range", 5, true, &rmid);
+  const bool is_range = it->n == 1 && it->module == rmid && it->decl == rd;
+  if (is_range && elem)
+    *elem = it->args[0];
+  return is_range;
 }
 
 // Render the declaration of `name` (already keyword-mangled) with interned type `t`, const per
@@ -2453,7 +2470,62 @@ static void emit_expr(Codegen *c, const NodeId id) {
       emit_cstr(c, nm);
       break;
     }
+    case NODE_RANGE: { // a range value -> a `Range<T>` struct literal (for/index uses are lowered elsewhere)
+      char styp[200];
+      render_type_id(c, ast_type(c->ast, id), "", styp, sizeof styp);
+      emit(c, "(%s){ .start = ", styp);
+      emit_expr(c, n->as.pattern_range.start);
+      emit(c, ", .end = ");
+      emit_expr(c, n->as.pattern_range.end);
+      emit(c, ", .inclusive = %s }", n->as.pattern_range.inclusive ? "true" : "false");
+      break;
+    }
     case NODE_INDEX: {
+      const Node *const idxn = ast_at_const(c->ast, n->as.index.index);
+      if (idxn->kind == NODE_RANGE) { // `a[lo..hi]` -> a `[]T` view: { .ptr = base + lo, .len = hi - lo }
+        const NodeId obj = n->as.index.object;
+        const NodeId lo = idxn->as.pattern_range.start, hi = idxn->as.pattern_range.end;
+        const bool incl = idxn->as.pattern_range.inclusive;
+        char styp[200];
+        render_type_id(c, ast_type(c->ast, id), "", styp, sizeof styp); // the Slice<elem> result type
+        const bool isslice = cg_slice_elem(c, ast_type(c->ast, obj), NULL);
+        const NodeId arrlen = isslice ? NODE_NONE : array_length_of(c, obj); // open-ended hi -> the array length
+        char b[32];
+        fresh(c, b, sizeof b);
+        emit(c, "({ __auto_type %s = ", b); // materialize the base once (array decays to a pointer)
+        emit_expr(c, obj);
+        emit(c, "; (%s){ .ptr = %s%s + ", styp, b, isslice ? ".ptr" : "");
+        if (lo != NODE_NONE) {
+          emit(c, "(");
+          emit_expr(c, lo);
+          emit(c, ")");
+        } else {
+          emit(c, "0");
+        }
+        emit(c, ", .len = ");
+        if (hi != NODE_NONE) {
+          emit(c, "(");
+          emit_expr(c, hi);
+          emit(c, incl ? ") + 1" : ")");
+        } else if (isslice) {
+          emit(c, "%s.len", b);
+        } else if (arrlen != NODE_NONE) {
+          emit_expr(c, arrlen);
+        } else {
+          const long cnt = array_literal_count(c, obj); // inferred-length array: count from the initializer
+          emit(c, "%ld", cnt >= 0 ? cnt : 0);
+        }
+        emit(c, " - ");
+        if (lo != NODE_NONE) {
+          emit(c, "(");
+          emit_expr(c, lo);
+          emit(c, ")");
+        } else {
+          emit(c, "0");
+        }
+        emit(c, " }; })");
+        break;
+      }
       if (cg_slice_elem(c, ast_type(c->ast, n->as.index.object), NULL)) { // `s[i]` on `[]T`: its typed `.ptr`
         emit_expr(c, n->as.index.object);
         emit(c, ".ptr[");
@@ -3087,6 +3159,25 @@ static NodeId array_length_of(Codegen *c, const NodeId iter) {
              : NODE_NONE;
 }
 
+// Static element count of an array binding inferred from its array-literal initializer
+// (an unannotated `let a = [..]` decays to a pointer, so the length lives only in the AST).
+// -1 when not statically determinable.
+static long array_literal_count(Codegen *c, NodeId obj) {
+  const Node *o = ast_at_const(c->ast, obj);
+  if (o->kind == NODE_ARRAY_LITERAL)
+    return (long)o->as.array_literal.elements.len;
+  if (o->kind != NODE_IDENTIFIER)
+    return -1;
+  const NodeId d = ast_resolution(c->ast, obj);
+  if (d == NODE_NONE)
+    return -1;
+  const Node *const dn = ast_at_const(c->ast, d);
+  const NodeId v = dn->kind == NODE_LET ? dn->as.let_stmt.value : NODE_NONE;
+  return v != NODE_NONE && ast_at_const(c->ast, v)->kind == NODE_ARRAY_LITERAL
+             ? (long)ast_at_const(c->ast, v)->as.array_literal.elements.len
+             : -1;
+}
+
 // `for i in lo..hi` -> a counting loop. A missing start counts from 0; a missing end runs
 // unbounded (the body must `break`); `..=` includes the end.
 static void emit_for_range(Codegen *c, const Node *n) {
@@ -3174,6 +3265,39 @@ static void emit_for(Codegen *c, const NodeId id, const Node *n) {
     emit_indent(c);
     emit_binding(c, selem, name_span(c, n->as.for_stmt.binding), true);
     emit(c, " = %s.ptr[%s];\n", s, idx); // the `.ptr` field is already typed `*const T`
+    const uint32_t dbase = c->defer_top;
+    for (uint32_t i = 0; i < stmts.len; i++) {
+      emit_indent(c);
+      emit_stmt(c, sids[i]);
+    }
+    emit_defers_to(c, dbase);
+    c->defer_top = dbase;
+    c->depth--;
+    emit_indent(c);
+    emit(c, "}\n");
+    c->depth--;
+    emit_indent(c);
+    emit(c, "}\n");
+    return;
+  }
+  TypeId relem;
+  if (cg_range_elem(c, ast_type(c->ast, n->as.for_stmt.iterable), &relem)) { // `for x in r` over a Range value
+    char r[32], styp[200], nm[128];
+    fresh(c, r, sizeof r);
+    render_type_id(c, ast_type(c->ast, n->as.for_stmt.iterable), r, styp, sizeof styp);
+    render_ident(c, name_span(c, n->as.for_stmt.binding), nm, sizeof nm);
+    emit(c, "{\n");
+    c->depth++;
+    emit_indent(c);
+    emit_cstr(c, styp); // `Range__T __scN = <iterable>;`
+    emit(c, " = ");
+    emit_expr(c, n->as.for_stmt.iterable);
+    emit(c, ";\n");
+    emit_indent(c);
+    emit(c, "for (");
+    emit_binding(c, relem, name_span(c, n->as.for_stmt.binding), false); // mutable: `x++` advances it
+    emit(c, " = %s.start; %s.inclusive ? %s <= %s.end : %s < %s.end; %s++) {\n", r, r, nm, r, nm, r, nm);
+    c->depth++;
     const uint32_t dbase = c->defer_top;
     for (uint32_t i = 0; i < stmts.len; i++) {
       emit_indent(c);
@@ -5685,8 +5809,11 @@ static void emit_referenced_includes(Codegen *c) {
       continue; // an interface method's function type (e.g. `Format::fmt`) -- no C symbol, no header needed
     want[t.module] = true;
   }
-  // A generic instance re-homed over a user type lives in that type's module and is built by the generic's
-  // macros: pull the generic's header (the macros + shared tag) and the home's header (the instance itself).
+  // A generic instance materialized in another module needs that module's header. An instance over a user
+  // type is re-homed to the type's module (the generic's macros build it there); an instance over only
+  // builtin/prelude args is owner-emitted in the generic's own module. Either way, if it lives elsewhere we
+  // must include its header -- an instance used only as a field/param/return type (e.g. a `[]i32` slice, or
+  // a `Vector<i32>`) has no ordinary resolution / named-type entry to pull it in otherwise.
   for (size_t i = 0; i < c->ast->instances.len; i++) {
     const TyInstance *const it = &c->ast->instances.data[i];
     bool concrete = it->module < nmod || it->module == cur;
@@ -5695,12 +5822,10 @@ static void emit_referenced_includes(Codegen *c) {
     if (!concrete)
       continue;
     const ModuleId home = package_instance_home(c->package, c->ast, it);
-    if (home == it->module)
-      continue; // builtin/prelude args -> owner-emitted, already covered by ordinary refs
     if (it->module != cur && it->module < nmod)
-      want[it->module] = true; // the generic's macros + shared tag
+      want[it->module] = true; // the generic's owner (its struct/enum body, or its macros + shared tag)
     if (home != cur && home < nmod)
-      want[home] = true; // where the instance is materialized
+      want[home] = true; // where the instance is materialized (== owner for builtin/prelude args)
   }
   for (size_t m = 0; m < nmod; m++)
     if (want[m])

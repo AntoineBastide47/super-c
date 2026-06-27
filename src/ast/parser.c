@@ -27,8 +27,10 @@ static NodeId parse_pattern(Parser *p);
 static NodeList parse_function_returns(Parser *p);
 
 // One range grammar shared by `for` iterables and `switch` patterns (so they can never drift).
-typedef enum { RANGE_FOR, RANGE_PATTERN } RangeContext;
+typedef enum { RANGE_FOR, RANGE_PATTERN, RANGE_EXPR } RangeContext;
 static NodeId parse_range(Parser *p, const RangeContext context);
+static NodeId parse_range_value(Parser *p, NodeId start);
+static bool starts_range_bound(Parser *p, RangeContext context);
 static int parse_attributes(Parser *p, Attr *buf, int cap);
 
 Parser *parser_new(Token_Vec tokens, const char *source, const size_t len) {
@@ -1385,7 +1387,7 @@ static NodeId parse_postfix(Parser *p) {
                       .as.call = {.callee = expr, .args = args},
                   });
     } else if (match(p, LeftBracket)) {
-      const NodeId index = parse_expression(p);
+      const NodeId index = parse_range(p, RANGE_EXPR); // `a[i]` (plain) or `a[lo..hi]` (a slicing range)
       expect(p, RightBracket, "']'");
       expr = ast_add(
           p->ast, (Node){
@@ -1549,7 +1551,11 @@ ALWAYS_INLINE bool assignment_operator(const TokenType type) {
 }
 
 static NodeId parse_expression(Parser *p) {
+  if (check(p, Range) || check(p, RangeInclusive)) // open-start range value: `..hi` / `..=hi`
+    return parse_range_value(p, NODE_NONE);
   const NodeId left = parse_binary(p, 1);
+  if (check(p, Range) || check(p, RangeInclusive)) // `lo..hi` / `lo..` / `lo..=hi` as a first-class value
+    return parse_range_value(p, left);
   if (!assignment_operator(peek_type(p)))
     return left;
   const TokenType op = token_type(advance(p));
@@ -1600,6 +1606,26 @@ static NodeId parse_range(Parser *p, const RangeContext context) {
                   .span = span_new(lo, hi),
                   .as.pattern_range = {.start = start, .end = end, .inclusive = inclusive},
               });
+}
+
+// A range used as a value (not a `for`/`switch`/index subscript): `start` is already parsed (or NONE
+// for an open start). Consumes the `..`/`..=` and an optional end (a `parse_binary`, so `a..b..c` is
+// rejected rather than nesting). Produces a NODE_RANGE that lowers to a prelude `Range<T>` literal.
+static NodeId parse_range_value(Parser *p, const NodeId start) {
+  const uint32_t op_start = token_start(raw_peek(p));
+  const bool inclusive = token_type(advance(p)) == RangeInclusive;
+  const NodeId end = starts_range_bound(p, RANGE_EXPR) ? parse_binary(p, 1) : NODE_NONE;
+  if (start == NODE_NONE && end == NODE_NONE)
+    error_here(p, "a range needs a start and/or an end");
+  else if (inclusive && end == NODE_NONE)
+    error_here(p, "an inclusive range '..=' needs an end");
+  const uint32_t lo = start != NODE_NONE ? node_span(p, start).start : op_start;
+  const uint32_t hi = end != NODE_NONE ? node_span(p, end).end : previous_end(p);
+  return ast_add(p->ast, (Node){
+                             .kind = NODE_RANGE,
+                             .span = span_new(lo, hi),
+                             .as.pattern_range = {.start = start, .end = end, .inclusive = inclusive},
+                         });
 }
 
 static NodeId parse_let(Parser *p) {

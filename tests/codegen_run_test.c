@@ -195,6 +195,45 @@ static void test_slices(void) {
       24, NULL);
 }
 
+// `a[lo..hi]` slices an array (or another slice) into a `[]T` view: half-open `lo..hi`, open ends
+// `..hi`/`lo..`, and inclusive `lo..=hi`. Open-ended upper bound uses the array's length (from the
+// annotation, or counted from an inferred-length literal). Slicing a slice indexes through its `.ptr`.
+#define RSUM "fn sum(s: []i32) i32 { let mut t = 0; for x in s { t = t + x; } return t; }\n"
+static void test_range_slicing(void) {
+  sc_run_program("range half-open a[1..4]",
+                 PRE RSUM "fn main() i32 { let a = [10,20,30,40,50]; exit(sum(a[1..4])); }\n", 90, NULL);
+  sc_run_program("range open-start a[..2]",
+                 PRE RSUM "fn main() i32 { let a = [10,20,30,40,50]; exit(sum(a[..2])); }\n", 30, NULL);
+  sc_run_program("range open-end (inferred len) a[3..]",
+                 PRE RSUM "fn main() i32 { let a = [10,20,30,40,50]; exit(sum(a[3..])); }\n", 90, NULL);
+  sc_run_program("range open-end (annotated len) a[2..]",
+                 PRE RSUM "fn main() i32 { let a: [i32; 5] = [10,20,30,40,50]; exit(sum(a[2..])); }\n", 120, NULL);
+  sc_run_program("range inclusive a[0..=2]",
+                 PRE RSUM "fn main() i32 { let a = [10,20,30,40,50]; exit(sum(a[0..=2])); }\n", 60, NULL);
+  sc_run_program("slice of a slice mid[1..3]",
+                 PRE RSUM "fn main() i32 { let a = [10,20,30,40,50]; let mid = a[1..4]; exit(sum(mid[1..3])); }\n",
+                 70, NULL);
+}
+
+// `lo..hi` in value position is a first-class `Range<T>` (a `for` iterable / `switch` pattern / `a[..]`
+// subscript stays structural and never builds one): bind it, read `.start`/`.end`, pass it to a fn, and
+// `for x in r` counts start..end (half-open) or start..=end (inclusive).
+static void test_range_value(void) {
+  sc_run_program("range value: fields", PRE "fn main() i32 { let r = 1..5; exit(r.start + r.end); }\n", 6, NULL);
+  sc_run_program("range value: iterate half-open",
+                 PRE "fn main() i32 { let r = 1..5; let mut s = 0; for x in r { s = s + x; } exit(s); }\n", 10,
+                 NULL); // 1+2+3+4
+  sc_run_program("range value: iterate inclusive",
+                 PRE "fn main() i32 { let r = 0..=4; let mut s = 0; for x in r { s = s + x; } exit(s); }\n", 10,
+                 NULL); // 0+1+2+3+4
+  sc_run_program("range value: passed to a fn",
+                 PRE "fn span(r: Range<i32>) i32 { return r.end - r.start; }\n"
+                     "fn main() i32 { let r = 3..10; exit(span(r)); }\n",
+                 7, NULL);
+  sc_run_program("literal range for-loop still counts (no Range value built)",
+                 PRE "fn main() i32 { let mut s = 0; for i in 0..=5 { s = s + i; } exit(s); }\n", 15, NULL);
+}
+
 // Opaque `extern "C"` handles are real, sized C types (named by the auto-included header), usable by value
 // -- as a local, a by-value parameter, and a by-value return -- not just behind a pointer.
 static void test_opaque_extern(void) {
@@ -1016,6 +1055,8 @@ int main(void) {
   test_if_expression();
   test_array_literals();
   test_slices();
+  test_range_slicing();
+  test_range_value();
   test_opaque_extern();
   test_variadics();
   test_complex();
