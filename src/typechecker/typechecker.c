@@ -12,6 +12,8 @@ struct TypeChecker {
     size_t len;
     NodeList current_returns; // the enclosing function's `returns` list, for NODE_RETURN checking
     NodeId current_self;      // the struct decl whose `extend` we are inside (NODE_NONE at top level)
+    NodeId current_impl;      // the enclosing NODE_IMPL, so a bare `Self` lowers to its full target type
+                              // (`Wrap<T>`), not the bare struct -- otherwise generic field access loses the args
     NodeId current_fn;        // the function decl being checked, for `where`-clause bound lookup (NODE_NONE if none)
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
@@ -1099,7 +1101,17 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
         const Node *const dn = ast_at_const(mod_ast(t, d.module), d.node);
         const bool generic_agg =
             (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) && dn->as.aggregate.generics.len > 0;
-        if (generic_agg && args.len > 0) { // `Vec<i32>` -> an interned generic instance
+        // A bare `Self` (or the bare target name) inside `extend .. Target<T> { }` means the FULL target
+        // type `Target<T>`, not the argless struct -- so member access carries the impl's generics and
+        // a `T` field unifies with a `T` return. Lower it to the impl's target_type (an instance).
+        if (generic_agg && args.len == 0 && t->current_impl != NODE_NONE && d.module == a->module &&
+            d.node == t->current_self) {
+          const NodeId target = ast_at_const(a, t->current_impl)->as.impl_def.target_type;
+          if (target != id) // guard against self-reference (target is `Target<T>`, a different node)
+            result = resolve_type(t, target);
+          else
+            result = named_type_of(t, d.module, d.node);
+        } else if (generic_agg && args.len > 0) { // `Vec<i32>` -> an interned generic instance
           TypeId ta[4];
           uint8_t tn = 0;
           for (uint32_t i = 0; i < args.len && tn < 4; i++)
@@ -3205,11 +3217,14 @@ static void check_item(TypeChecker *t, const NodeId id) {
     case NODE_IMPL: {
       // Inside `extend S { ... }`, S's private fields are reachable (current_self == S).
       const NodeId saved = t->current_self;
+      const NodeId saved_impl = t->current_impl;
       t->current_self = ast_resolution(t->ast, n->as.impl_def.target_type);
+      t->current_impl = id; // a bare `Self` here lowers to this impl's target type (with its generics)
       if (n->as.impl_def.trait_type != NODE_NONE)
         check_impl_conformance(t, n);
       check_associated(t, n->as.impl_def.items);
       t->current_self = saved;
+      t->current_impl = saved_impl;
       break;
     }
     case NODE_CONST: {
