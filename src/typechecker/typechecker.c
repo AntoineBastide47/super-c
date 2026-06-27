@@ -1287,6 +1287,92 @@ static TypeId check_ptr_arith(
   return TYPE_NONE;
 }
 
+// The single return type of method `md` called on a receiver of type `recv`, with the receiver instance's
+// args substituted through the method's enclosing impl generics (so `fn index(self,..) T` -> the element).
+static TypeId tc_method_ret(TypeChecker *t, const TypeId recv, const DefId md) {
+  Ast *const fa = mod_ast(t, md.module);
+  const Node *const fn = ast_at_const(fa, md.node);
+  if (fn->kind != NODE_FUNCTION || fn->as.function.returns.len != 1)
+    return TYPE_NONE;
+  DefId rsubp[4];
+  TypeId rsuba[4];
+  int nrsub = 0;
+  ModuleId rmod;
+  NodeId rdecl;
+  DefId sp[4];
+  TypeId sa[4];
+  int sn = 0;
+  if (aggregate_of(t, strip(t, recv), &rmod, &rdecl, sp, sa, &sn) && sn > 0) {
+    const NodeId impl = enclosing_impl(t, md.module, md.node);
+    if (impl != NODE_NONE) {
+      const NodeList ig = ast_at_const(mod_ast(t, md.module), impl)->as.impl_def.generics;
+      const NodeId *const gids = ast_list(mod_ast(t, md.module), ig);
+      const int g = (int)ig.len < sn ? (int)ig.len : sn;
+      for (int i = 0; i < g && nrsub < 4; i++) {
+        rsubp[nrsub] = (DefId){md.module, gids[i]};
+        rsuba[nrsub] = sa[i];
+        nrsub++;
+      }
+    }
+  }
+  const NodeId r0 = ast_list(fa, fn->as.function.returns)[0];
+  const Node *const rn = ast_at_const(fa, r0);
+  const TypeId ret = lower_type_in(t, md.module, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  return subst_type(t, ret, rsubp, rsuba, nrsub);
+}
+
+// The method name an arithmetic operator dispatches to when an operand is a user type, or NULL.
+static const char *arith_method_name(const TokenType op) {
+  switch (op) {
+    case Plus: return "add";
+    case Minus: return "sub";
+    case Star: return "mul";
+    case Slash: return "div";
+    case Percent: return "rem";
+    default: return NULL;
+  }
+}
+
+// Operator overloading for `+ - * / %`: if the left operand is a struct/instance (or a generic param bound
+// to the trait), dispatch to its add/sub/mul/div/rem method; the result is that method's return type.
+// Sets `*out` and returns true when handled (so the caller skips the builtin numeric path).
+static bool check_arith_overload(TypeChecker *t, const Node *const n, const NodeId id, const TypeId l, TypeId *const out) {
+  const char *const m = arith_method_name(n->as.binary.op);
+  if (!m)
+    return false;
+  const TypeId ls = l == TYPE_NONE ? TYPE_NONE : strip(t, l);
+  const Ty *const lt = ls == TYPE_NONE ? NULL : ast_type_at(t->ast, ls);
+  if (!lt)
+    return false;
+  if (lt->kind == TYPE_GENERIC) { // a bound `T: Add`; verified at instantiation, codegen dispatches
+    *out = ls;
+    return true;
+  }
+  if (lt->kind != TYPE_STRUCT && lt->kind != TYPE_INSTANCE)
+    return false; // builtin numeric operands fall through to binary_numeric
+  ModuleId om;
+  NodeId od;
+  DefId gp[4];
+  TypeId ga[4];
+  int gn;
+  *out = ls;
+  if (aggregate_of(t, ls, &om, &od, gp, ga, &gn)) {
+    const DefId md = find_method_cstr(t, om, od, m);
+    if (md.node == NODE_NONE) {
+      const Span sp = ast_at_const(t->ast, id)->span;
+      char ty[96];
+      render_type(t, ls, ty, sizeof ty);
+      typechecker_errorf(t, sp.start, sp.end - sp.start, "'%s' has no '%s' method for this operator", ty, m);
+      *out = TYPE_NONE;
+    } else {
+      const TypeId ret = tc_method_ret(t, ls, md);
+      if (ret != TYPE_NONE)
+        *out = ret;
+    }
+  }
+  return true;
+}
+
 static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id) {
   const NodeId ln = n->as.binary.left, rn = n->as.binary.right;
   const TypeId l = check_expr(t, ln), r = check_expr(t, rn);
@@ -1294,6 +1380,9 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
   switch (n->as.binary.op) {
     case Plus:
     case Minus: {
+      TypeId ov;
+      if (check_arith_overload(t, n, id, l, &ov))
+        return ov;
       bool handled;
       const TypeId pt = check_ptr_arith(t, n, id, l, r, &handled);
       if (handled)
@@ -1302,8 +1391,12 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
     }
     case Star:
     case Slash:
-    case Percent:
+    case Percent: {
+      TypeId ov;
+      if (check_arith_overload(t, n, id, l, &ov))
+        return ov;
       return binary_numeric(t, id, l, ln, r, rn, false);
+    }
     case Ampersand:
     case Pipe:
     case Caret:
@@ -2315,18 +2408,39 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         break;
       }
       const TypeId idx = check_expr(t, n->as.index.index);
+      bool overloaded = false;
       if (obj != TYPE_NONE) {
         TypeId selem;
         if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER)
           result = ot->as.elem;
         else if (slice_kind(t, obj, &selem)) // `s[i]` on a `[]T` -> the element type
           result = selem;
-        else {
+        else if (ot->kind == TYPE_STRUCT || ot->kind == TYPE_INSTANCE) { // `obj[i]` -> its `index` method
+          overloaded = true;
+          ModuleId om;
+          NodeId od;
+          DefId gp[4];
+          TypeId ga[4];
+          int gn;
+          const Span sp = ast_at_const(a, n->as.index.object)->span;
+          if (aggregate_of(t, strip(t, obj), &om, &od, gp, ga, &gn)) {
+            const DefId md = find_method_cstr(t, om, od, "index");
+            if (md.node == NODE_NONE) {
+              char ty[96];
+              render_type(t, strip(t, obj), ty, sizeof ty);
+              typechecker_errorf(t, sp.start, sp.end - sp.start, "'%s' has no 'index' method for '[]'", ty);
+            } else {
+              result = tc_method_ret(t, strip(t, obj), md);
+            }
+          }
+        } else {
           const Span sp = ast_at_const(a, n->as.index.object)->span;
           typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot index this expression");
         }
       }
-      if (idx != TYPE_NONE && !is_int(t, idx) && ast_at_const(a, n->as.index.index)->kind != NODE_LITERAL) {
+      // The index key type is governed by an overloaded `index` method's own signature; only a builtin
+      // array/slice/pointer index must be an integer.
+      if (!overloaded && idx != TYPE_NONE && !is_int(t, idx) && ast_at_const(a, n->as.index.index)->kind != NODE_LITERAL) {
         const Span sp = ast_at_const(a, n->as.index.index)->span;
         typechecker_errorf(t, sp.start, sp.end - sp.start, "index must be an integer");
       }

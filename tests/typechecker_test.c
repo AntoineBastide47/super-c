@@ -213,6 +213,12 @@ static void test_errors(void) {
   expect_error(
       "argument type", "fn g(a: bool) void {}\nfn main() i32 { g(1); }\n", "mismatched types");
   expect_error("argument count", "fn g(a: i32) void {}\nfn main() i32 { g(1, 2); }\n", "expected 1 argument");
+  // operator overloading: `+` / `[]` on a struct without the required method is rejected.
+  expect_error("arithmetic operator without method",
+               "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let b = P { x: 2 }; let c = a + b; return 0; }\n",
+               "has no 'add' method");
+  expect_error("index operator without method",
+               "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; return a[0]; }\n", "has no 'index' method");
   expect_error(
       "unknown field", "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; p.y; }\n",
       "no field or method 'y'");

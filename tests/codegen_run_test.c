@@ -972,6 +972,35 @@ static void test_interfaces(void) {
       101, "");
 }
 
+// E#15 operator overloading: `+ - * / %` on a struct/instance operand dispatch to its add/sub/mul/div/rem
+// method (result = the method's return), and `obj[i]` to its `index` method. A bare method of the right
+// name is enough (no interface conformance required); builtin numeric/array indexing is untouched.
+static void test_operator_overloading(void) {
+  sc_run_program(
+      "operator overload: arithmetic + index on a struct",
+      PRE "struct Point { pub x: i32, pub y: i32 }\n"
+          "extend Point {\n"
+          "  fn add(self: &Self, o: &Self) Point { return Point { x: self.x + o.x, y: self.y + o.y }; }\n"
+          "  fn sub(self: &Self, o: &Self) Point { return Point { x: self.x - o.x, y: self.y - o.y }; }\n"
+          "  fn index(self: &Self, i: usize) i32 { if i == 0 { return self.x; } return self.y; }\n"
+          "}\n"
+          "fn main() i32 { let a = Point { x: 10, y: 20 }; let b = Point { x: 3, y: 4 };\n"
+          "  let c = (a + b) - Point { x: 1, y: 2 };\n" // {12, 22}
+          "  exit(c[0] + c[1]); }\n",                    // 34
+      34, "");
+  // a generic-instance operand dispatches the same way (the impl's generics substitute into the result).
+  sc_run_program(
+      "operator overload: index on a generic instance",
+      PRE "struct Wrap<T> { pub a: T, pub b: T }\n"
+          "extend<T> Wrap<T> { fn index(self: &Wrap<T>, i: usize) T { if i == 0 { return self.a; } return self.b; } }\n"
+          "fn main() i32 { let w = Wrap::<i32> { a: 30, b: 12 }; exit(w[0] + w[1]); }\n", // 42
+      42, "");
+  // builtin numeric arithmetic and array indexing are unaffected by the overload path.
+  sc_run_program(
+      "operator overload: builtins untouched",
+      PRE "fn main() i32 { let arr = [40, 2]; exit(arr[0] + arr[1] + (10 * 0)); }\n", 42, "");
+}
+
 static void test_drop_raii(void) {
 #define DROP_PRE                                                                                                        \
   PRE "interface Free { fn free(self: &mut Self); }\n"                                                                  \
@@ -1120,6 +1149,7 @@ int main(void) {
   test_defer();
   test_static_assert();
   test_interfaces();
+  test_operator_overloading();
   test_string_sso();
   test_unions();
   test_closures();
