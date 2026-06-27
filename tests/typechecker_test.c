@@ -183,6 +183,26 @@ static void test_errors(void) {
       "sibling-branch move does not taint the other arm",
       MOVE_PRE "fn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n");
 #undef MOVE_PRE
+  // D#11 definite initialization: a deferred binding read before assignment, or initialized on only some paths.
+  expect_error("read of uninitialized binding", "fn main() i32 { let mut x: i32; return x; }\n",
+               "use of possibly uninitialized value");
+  expect_error("read of conditionally-initialized binding",
+               "fn main() i32 { let mut x: i32; if true { x = 5; } return x; }\n",
+               "use of possibly uninitialized value");
+  expect_error("value read of uninitialized array element",
+               "fn main() i32 { let mut a: [i32; 4]; return a[0]; }\n", "use of possibly uninitialized value");
+  expect_error( // a Drop binding is dropped at scope exit, so it cannot be left to deferred initialization
+      "deferred-init Drop binding",
+      "interface Drop { fn drop(self: &mut Self); }\nstruct R { pub t: i32 }\n"
+      "extend R as Drop { fn drop(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n",
+      "must be initialized when declared");
+  expect_ok("definitely initialized before read", "fn main() i32 { let mut x: i32; x = 7; return x; }\n");
+  expect_ok("initialized on every branch before read",
+            "fn main() i32 { let mut x: i32; if true { x = 5; } else { x = 6; } return x; }\n");
+  expect_ok( // taking the address of an uninitialized buffer is an out-parameter, not a read
+      "address of uninitialized buffer is not a read",
+      "extern \"C\" { fn memset(p: *mut char, c: i32, n: usize) i32; }\n"
+      "fn main() i32 { let mut buf: [char; 8]; memset(&mut buf[0], 0, 8); return 0; }\n");
   expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
   expect_error( // only char *literals* coerce; a char value needs an explicit conversion

@@ -18,6 +18,10 @@ struct TypeChecker {
     TypeId expected;          // target type of the expression being checked (let annotation / return / assignment RHS), or TYPE_NONE; consumed once by check_expr
     NodeId moved[256];        // Drop-typed bindings moved out of the current function; using one again is an error
     uint32_t nmoved;          // (reset per function; best-effort linear move/use-after-move analysis)
+    NodeId uninit[64];        // deferred-init bindings (`let mut x: T;`) not yet assigned on the current path
+    uint32_t nuninit;         // (definite-initialization: reading one is an error; assigning it clears it)
+    bool addr_ctx;            // the expression being checked is a place under address-of (&/&mut): its base is
+                              // borrowed, not value-read, so the definite-init read check is suppressed for it
     ERRORS_VARIABLES;
 };
 
@@ -651,15 +655,73 @@ static void tc_mark_move(TypeChecker *t, const NodeId expr) {
     t->moved[t->nmoved++] = d.node;
 }
 
-// Add `decl` to the moved set if absent. Used to UNION the moves of alternative branches (if/else, match
-// arms): a value moved on any path is "maybe moved" afterward, so a later use is still rejected -- but the
-// branches are checked independently (each from the pre-branch state) so one arm's move never taints another.
-static void tc_add_moved(TypeChecker *t, const NodeId decl) {
-  for (uint32_t i = 0; i < t->nmoved; i++)
-    if (t->moved[i] == decl)
+// Definite-init set ops. A deferred binding starts uninitialized; an assignment to it (`x = ..`) is its
+// initialization and clears it; reading it while still present is an error. Alternative branches union
+// (uninit afterward iff uninit on any path), so a value initialized in only one arm stays uninit.
+static bool tc_is_uninit(const TypeChecker *t, const NodeId decl) {
+  for (uint32_t i = 0; i < t->nuninit; i++)
+    if (t->uninit[i] == decl)
+      return true;
+  return false;
+}
+static void tc_add_uninit(TypeChecker *t, const NodeId decl) {
+  if (!tc_is_uninit(t, decl) && t->nuninit < (uint32_t)(sizeof t->uninit / sizeof t->uninit[0]))
+    t->uninit[t->nuninit++] = decl;
+}
+static void tc_init(TypeChecker *t, const NodeId decl) { // mark `decl` initialized on this path
+  for (uint32_t i = 0; i < t->nuninit; i++)
+    if (t->uninit[i] == decl) {
+      t->uninit[i] = t->uninit[--t->nuninit]; // order is irrelevant: membership-only set
       return;
-  if (t->nmoved < (uint32_t)(sizeof t->moved / sizeof t->moved[0]))
-    t->moved[t->nmoved++] = decl;
+    }
+}
+
+// A captured snapshot of the flow-sensitive analysis state (moved + uninit), so alternative branches can
+// each be checked from the same starting point and their results unioned. A binding moved OR left
+// uninitialized on ANY path is so afterward (a later use is rejected); a sibling path's effect never
+// leaks into another. `tc_flow_collect` accumulates the live state into an (initially empty) union.
+typedef struct {
+  NodeId moved[256];
+  uint32_t nmoved;
+  NodeId uninit[64];
+  uint32_t nuninit;
+} FlowState;
+
+static FlowState tc_flow_save(const TypeChecker *t) {
+  FlowState s;
+  s.nmoved = t->nmoved;
+  for (uint32_t i = 0; i < t->nmoved; i++)
+    s.moved[i] = t->moved[i];
+  s.nuninit = t->nuninit;
+  for (uint32_t i = 0; i < t->nuninit; i++)
+    s.uninit[i] = t->uninit[i];
+  return s;
+}
+
+static void tc_flow_set(TypeChecker *t, const FlowState *s) {
+  t->nmoved = s->nmoved;
+  for (uint32_t i = 0; i < s->nmoved; i++)
+    t->moved[i] = s->moved[i];
+  t->nuninit = s->nuninit;
+  for (uint32_t i = 0; i < s->nuninit; i++)
+    t->uninit[i] = s->uninit[i];
+}
+
+static void tc_flow_collect(FlowState *acc, const TypeChecker *t) { // union the live state into `acc`
+  for (uint32_t i = 0; i < t->nmoved; i++) {
+    bool seen = false;
+    for (uint32_t j = 0; j < acc->nmoved; j++)
+      seen |= acc->moved[j] == t->moved[i];
+    if (!seen && acc->nmoved < (uint32_t)(sizeof acc->moved / sizeof acc->moved[0]))
+      acc->moved[acc->nmoved++] = t->moved[i];
+  }
+  for (uint32_t i = 0; i < t->nuninit; i++) {
+    bool seen = false;
+    for (uint32_t j = 0; j < acc->nuninit; j++)
+      seen |= acc->uninit[j] == t->uninit[i];
+    if (!seen && acc->nuninit < (uint32_t)(sizeof acc->uninit / sizeof acc->uninit[0]))
+      acc->uninit[acc->nuninit++] = t->uninit[i];
+  }
 }
 
 // The top-level impl in module `m` whose items contain `method`, or NODE_NONE -- used to recover the
@@ -1130,6 +1192,8 @@ static TypeId decl_type(TypeChecker *t, const NodeId decl) {
 
 // Result type of a unary operator applied to an operand of type `opnd`.
 static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) {
+  if (n->as.unary.op == Ampersand) // `&x`/`&mut x` borrows x; its base is not value-read (definite-init)
+    t->addr_ctx = true;
   const TypeId opnd = check_expr(t, n->as.unary.operand);
   const Span sp = ast_at_const(t->ast, id)->span;
   switch (n->as.unary.op) {
@@ -2100,19 +2164,17 @@ static void check_if(TypeChecker *t, const Node *const n) {
     render_type(t, c, ty, sizeof ty);
     typechecker_errorf(t, sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'", ty);
   }
-  // The two branches are alternative paths: check each from the same pre-`if` move state, then union
-  // their moves (so an else-branch use of a value the then-branch moved is not a false use-after-move).
-  const uint32_t base = t->nmoved;
+  // The two branches are alternative paths: check each from the same pre-`if` state, then union their
+  // effects -- so an else use of a value the then-branch moved (or vice versa) is not a false error, while
+  // a value left moved/uninitialized on either path is so afterward.
+  const FlowState pre = tc_flow_save(t);
   check_stmt(t, n->as.if_stmt.then_branch);
-  NodeId stash[256];
-  uint32_t ns = 0;
-  for (uint32_t i = base; i < t->nmoved; i++)
-    if (ns < (uint32_t)(sizeof stash / sizeof stash[0]))
-      stash[ns++] = t->moved[i];
-  t->nmoved = base; // hide then-branch moves while checking the else branch
+  FlowState acc = {.nmoved = 0, .nuninit = 0};
+  tc_flow_collect(&acc, t);          // then-branch effects
+  tc_flow_set(t, &pre);              // else branch starts fresh from the pre-if state
   check_stmt(t, n->as.if_stmt.else_branch);
-  for (uint32_t i = 0; i < ns; i++)
-    tc_add_moved(t, stash[i]); // post-if = pre-if ∪ then-moves ∪ else-moves
+  tc_flow_collect(&acc, t);          // ∪ else-branch effects
+  tc_flow_set(t, &acc);              // post-if = union of both
 }
 
 static TypeId check_expr(TypeChecker *t, const NodeId id) {
@@ -2122,6 +2184,8 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
   const Node *const n = ast_at_const(a, id);
   const TypeId expected = t->expected; // target type from the enclosing context (let / return / assignment)
   t->expected = TYPE_NONE;             // consumed here; do not leak into nested subexpressions
+  const bool addr_ctx = t->addr_ctx;   // whether this expr is the place being borrowed (&/&mut); one-shot
+  t->addr_ctx = false;
   TypeId result = TYPE_NONE;
   switch (n->kind) {
     case NODE_LITERAL:
@@ -2141,12 +2205,15 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       // the owning module via the full DefId -- `decl_type` alone would read the current module's pool.
       const DefId d = ast_resolution_def(a, id);
       result = decl_type_in(t, d.module, d.node);
-      if (d.module == t->ast->module && d.node != NODE_NONE) // use-after-move: a moved Drop binding is dead
-        for (uint32_t i = 0; i < t->nmoved; i++)
+      if (d.module == t->ast->module && d.node != NODE_NONE) {
+        for (uint32_t i = 0; i < t->nmoved; i++) // use-after-move: a moved Drop binding is dead
           if (t->moved[i] == d.node) {
             typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "use of moved value");
             break;
           }
+        if (!addr_ctx && tc_is_uninit(t, d.node)) // definite-init: a deferred binding read before assignment
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "use of possibly uninitialized value");
+      }
       break;
     }
     case NODE_UNARY:
@@ -2156,6 +2223,13 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       result = check_binary(t, n, id);
       break;
     case NODE_ASSIGNMENT: {
+      // A plain `x = ..` to a deferred binding is its initialization, not a read: clear it before the LHS is
+      // checked so the read-of-uninitialized check below does not fire. (Compound `x += ..` does read x.)
+      if (n->as.binary.op == Equal && ast_at_const(a, n->as.binary.left)->kind == NODE_IDENTIFIER) {
+        const DefId ld = ast_resolution_def(a, n->as.binary.left);
+        if (ld.module == t->ast->module && ld.node != NODE_NONE)
+          tc_init(t, ld.node);
+      }
       const TypeId l = check_expr(t, n->as.binary.left);
       t->expected = l; // hand the lvalue's type to the RHS for expected-type resolution
       check_expr(t, n->as.binary.right);
@@ -2190,6 +2264,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_INDEX: {
+      t->addr_ctx = addr_ctx; // `&buf[i]` borrows buf -- propagate the address context to the base
       const TypeId obj = check_expr(t, n->as.index.object);
       const Ty *const ot = ast_type_at(a, obj);
       const Node *const idxn = ast_at_const(a, n->as.index.index);
@@ -2235,6 +2310,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_MEMBER:
+      t->addr_ctx = addr_ctx; // `&x.f` borrows x -- propagate the address context to the receiver
       result = n->as.member.path ? check_path_member(t, n, id, expected) : check_member(t, n, false);
       break;
     case NODE_CAST: {
@@ -2268,6 +2344,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_VA_EXPR: {
       // `va_start(ap, last)` / `va_arg(ap, T)` / `va_end(ap)`: `ap` must be a `va_list`. va_arg yields T;
       // va_start / va_end are void. The last named parameter (va_start) is checked for resolution only.
+      if (n->as.va_op.op == VA_START && ast_at_const(a, n->as.va_op.ap)->kind == NODE_IDENTIFIER) {
+        const DefId d = ast_resolution_def(a, n->as.va_op.ap); // va_start initializes a deferred `va_list`
+        if (d.module == t->ast->module && d.node != NODE_NONE)
+          tc_init(t, d.node);
+      }
       const TypeId apt = check_expr(t, n->as.va_op.ap);
       const Ty *const ay = apt != TYPE_NONE ? ast_type_at(a, apt) : NULL;
       if (ay && !(ay->kind == TYPE_BUILTIN && ay->as.builtin == BT_VALIST)) {
@@ -2311,12 +2392,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const NodeList arms = n->as.match_expr.arms;
       const NodeId *const ids = ast_list(a, arms);
       bool first = true;
-      const uint32_t mbase = t->nmoved; // each arm is an alternative path; union their moves afterward
-      NodeId uni[256];
-      uint32_t nu = 0;
+      const FlowState mpre = tc_flow_save(t); // each arm is an alternative path; union their effects after
+      FlowState acc = {.nmoved = 0, .nuninit = 0};
       for (uint32_t i = 0; i < arms.len; i++) {
         const Node *const arm = ast_at_const(a, ids[i]);
-        t->nmoved = mbase; // this arm does not see another arm's moves
+        tc_flow_set(t, &mpre); // this arm does not see another arm's moves/inits
         check_pattern(t, arm->as.match_arm.pattern, scrut);
         const TypeId g = check_expr(t, arm->as.match_arm.guard);
         if (arm->as.match_arm.guard != NODE_NONE && g != TYPE_NONE && !is_bool(t, g)) {
@@ -2324,13 +2404,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           typechecker_errorf(t, sp.start, sp.end - sp.start, "match guard must be 'bool'");
         }
         const TypeId body = check_expr(t, arm->as.match_arm.body);
-        for (uint32_t k = mbase; k < t->nmoved; k++) { // collect this arm's moves into the union
-          bool seen = false;
-          for (uint32_t j = 0; j < nu; j++)
-            seen |= uni[j] == t->moved[k];
-          if (!seen && nu < (uint32_t)(sizeof uni / sizeof uni[0]))
-            uni[nu++] = t->moved[k];
-        }
+        tc_flow_collect(&acc, t); // ∪ this arm's effects
         if (first) {
           result = body;
           first = false;
@@ -2339,9 +2413,8 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           result = TYPE_NONE;
         }
       }
-      t->nmoved = mbase;
-      for (uint32_t i = 0; i < nu; i++)
-        tc_add_moved(t, uni[i]); // post-match = pre-match ∪ (moves of every arm)
+      if (arms.len)
+        tc_flow_set(t, &acc); // post-match = union of every arm
       break;
     }
     case NODE_NEW: {
@@ -2426,22 +2499,19 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         render_type(t, c, ty, sizeof ty);
         typechecker_errorf(t, sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'", ty);
       }
-      const uint32_t ifbase = t->nmoved; // branches are alternative paths -> check independent, union after
+      const FlowState ifpre = tc_flow_save(t); // branches are alternative paths -> check independent, union after
       const TypeId then_ty = check_expr(t, n->as.if_stmt.then_branch);
       if (n->as.if_stmt.else_branch == NODE_NONE) {
         typechecker_errorf(
             t, n->span.start, n->span.end - n->span.start, "an 'if' used as a value must have an 'else' branch");
         result = TYPE_NONE;
       } else {
-        NodeId stash[256];
-        uint32_t ns = 0;
-        for (uint32_t i = ifbase; i < t->nmoved; i++)
-          if (ns < (uint32_t)(sizeof stash / sizeof stash[0]))
-            stash[ns++] = t->moved[i];
-        t->nmoved = ifbase;
+        FlowState acc = {.nmoved = 0, .nuninit = 0};
+        tc_flow_collect(&acc, t);
+        tc_flow_set(t, &ifpre);
         const TypeId else_ty = check_expr(t, n->as.if_stmt.else_branch);
-        for (uint32_t i = 0; i < ns; i++)
-          tc_add_moved(t, stash[i]);
+        tc_flow_collect(&acc, t);
+        tc_flow_set(t, &acc);
         if (then_ty != else_ty && then_ty != TYPE_NONE && else_ty != TYPE_NONE) {
           err_mismatch(t, n->as.if_stmt.else_branch, then_ty);
           result = TYPE_NONE;
@@ -2611,6 +2681,15 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         binding = TYPE_NONE;
       }
       ast_set_type(a, id, binding); // referenced via decl_type's cached read
+      if (annotated && !valued) { // deferred initialization: usable only once definitely assigned
+        if (tc_type_is_drop(t, binding)) {
+          const Span sp = name_span(t, n->as.let_stmt.name);
+          typechecker_errorf(t, sp.start, sp.end - sp.start,
+                             "a Drop-typed binding must be initialized when declared (it is dropped at scope exit)");
+        } else {
+          tc_add_uninit(t, id); // identifier uses resolve to this NODE_LET node
+        }
+      }
       break;
     }
     case NODE_CONST: {
@@ -2896,10 +2975,10 @@ static void check_item(TypeChecker *t, const NodeId id) {
       const NodeId savedfn = t->current_fn;
       t->current_returns = n->as.function.returns;
       t->current_fn = id;
-      t->nmoved = 0; // fresh move-tracking scope per function body
+      t->nmoved = t->nuninit = 0; // fresh move + definite-init tracking scope per function body
       if (n->as.function.body != NODE_NONE)
         check_stmt(t, n->as.function.body);
-      t->nmoved = 0;
+      t->nmoved = t->nuninit = 0;
       t->current_returns = saved;
       t->current_fn = savedfn;
       break;
