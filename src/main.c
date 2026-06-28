@@ -112,6 +112,134 @@ static void write_super_rt(const char *root_dir) {
   free(path);
 }
 
+static bool mark_live(bool *const live, const size_t n, const ModuleId m) {
+  if (m >= n || live[m])
+    return false;
+  live[m] = true;
+  return true;
+}
+
+static bool ast_type_mentions_builtin(const Ast *const a, const TypeId t) {
+  if (t == TYPE_NONE)
+    return false;
+  const Ty *const y = ast_type_at(a, t);
+  switch (y->kind) {
+    case TYPE_BUILTIN:
+      return true;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY:
+      return ast_type_mentions_builtin(a, y->as.elem);
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(a, y->as.inst);
+      for (uint8_t i = 0; i < it->n; i++)
+        if (ast_type_mentions_builtin(a, it->args[i]))
+          return true;
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+static bool mark_type_modules(const Package *const p, const Ast *const a, const TypeId t, bool *const live) {
+  if (t == TYPE_NONE)
+    return false;
+  const Ty *const y = ast_type_at(a, t);
+  bool changed = false;
+  switch (y->kind) {
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY:
+      changed |= mark_type_modules(p, a, y->as.elem, live);
+      break;
+    case TYPE_STRUCT:
+    case TYPE_ENUM:
+    case TYPE_FUNCTION:
+      if (package_builtin_of_decl(p, y->module, y->as.decl) < 0)
+        changed |= mark_live(live, p->count, y->module);
+      break;
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(a, y->as.inst);
+      if (it->module < p->count)
+        changed |= mark_live(live, p->count, it->module);
+      const ModuleId home = package_instance_home(p, a, it);
+      if (home < p->count)
+        changed |= mark_live(live, p->count, home);
+      for (uint8_t i = 0; i < it->n; i++) {
+        changed |= mark_type_modules(p, a, it->args[i], live);
+        if (p->core_seeded && ast_type_mentions_builtin(a, it->args[i]))
+          changed |= mark_live(live, p->count, p->core_module);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  return changed;
+}
+
+static bool *compute_emit_live(const Package *const p) {
+  bool *const live = calloc(p->count ? p->count : 1, sizeof *live);
+  if (!live)
+    return NULL;
+  for (size_t i = 0; i < p->count; i++)
+    if (!p->modules[i].prelude)
+      live[i] = true;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t m = 0; m < p->count; m++) {
+      if (!live[m] || !p->modules[m].ast)
+        continue;
+      const Ast *const a = p->modules[m].ast;
+      for (size_t i = 0; i < a->resolutions.len; i++) {
+        const DefId d = a->resolutions.data[i];
+        if (d.node == NODE_NONE || d.module >= p->count || d.module == m)
+          continue;
+        if (package_builtin_of_decl(p, d.module, d.node) >= 0)
+          continue;
+        changed |= mark_live(live, p->count, d.module);
+      }
+      for (size_t i = 0; i < a->type_pool.len; i++)
+        changed |= mark_type_modules(p, a, (TypeId)i, live);
+      for (size_t i = 0; i < a->instances.len; i++) {
+        const TyInstance *const it = &a->instances.data[i];
+        if (it->module < p->count)
+          changed |= mark_live(live, p->count, it->module);
+        const ModuleId home = package_instance_home(p, a, it);
+        if (home < p->count)
+          changed |= mark_live(live, p->count, home);
+        for (uint8_t k = 0; k < it->n; k++) {
+          changed |= mark_type_modules(p, a, it->args[k], live);
+          if (p->core_seeded && ast_type_mentions_builtin(a, it->args[k]))
+            changed |= mark_live(live, p->count, p->core_module);
+        }
+      }
+      for (size_t i = 0; i < a->mono.len; i++) {
+        const MonoUse *const mu = &a->mono.data[i];
+        for (uint8_t k = 0; k < mu->n; k++) {
+          changed |= mark_type_modules(p, a, mu->args[k], live);
+          if (p->core_seeded && ast_type_mentions_builtin(a, mu->args[k]))
+            changed |= mark_live(live, p->count, p->core_module);
+        }
+      }
+      for (size_t i = 0; i < a->method_insts.len; i++) {
+        const MethodInst *const mi = &a->method_insts.data[i];
+        changed |= mark_type_modules(p, a, mi->instance, live);
+        for (uint8_t k = 0; k < mi->n; k++) {
+          changed |= mark_type_modules(p, a, mi->targs[k], live);
+          if (p->core_seeded && ast_type_mentions_builtin(a, mi->targs[k]))
+            changed |= mark_live(live, p->count, p->core_module);
+        }
+      }
+    }
+  }
+  return live;
+}
+
 // Compile a loaded Package as global phases (resolve all -> type-check all -> emit all), so name
 // resolution sees every module's declarations. Output is always a `<root>/build/` tree mirroring the
 // module paths: a `super_rt.h` plus one `.c`/`.h` per module (the std prelude is its own unmangled
@@ -129,10 +257,13 @@ static int run_package(Package *p) {
 
   write_super_rt(p->root_dir);
   bool err = false;
+  bool *const live = compute_emit_live(p);
   ModuleId *const order = malloc((p->count ? p->count : 1) * sizeof *order);
   package_emit_order(p, order); // dependency-first: a generic's owner is emitted before any user module
   for (size_t oi = 0; oi < p->count; oi++) {        // that re-homes its instances (see package_emit_order)
     const ModuleId i = order[oi];
+    if (live && !live[i])
+      continue;
     Module *const m = &p->modules[i];
     Codegen *c = codegen_new(m->ast, m->source, m->source_len, p);
     codegen_set_multifile(c, true); // always a build/ tree, even for a lone module
@@ -165,6 +296,7 @@ static int run_package(Package *p) {
     free(out_path);
   }
   free(order);
+  free(live);
   return err ? 1 : 0;
 }
 

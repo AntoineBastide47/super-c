@@ -654,9 +654,9 @@ static NodeId parse_interface(Parser *p) {
   expect(p, RightBrace, "'}'");
   return ast_add(
       p->ast, (Node){
-                  .kind = NODE_TRAIT,
+                  .kind = NODE_INTERFACE,
                   .span = span_new(start, previous_end(p)),
-                  .as.trait_def = {.name = name, .generics = generics, .bounds = bounds, .items = items},
+                  .as.interface_def = {.name = name, .generics = generics, .bounds = bounds, .items = items},
               });
 }
 
@@ -665,7 +665,7 @@ static NodeId parse_extend(Parser *p) {
   advance(p);
   const NodeList generics = parse_generics(p);
   const NodeId target = parse_type(p);
-  const NodeId trait_type = match(p, As) ? parse_type(p) : NODE_NONE;
+  const NodeId interface_type = match(p, As) ? parse_type(p) : NODE_NONE;
   expect(p, LeftBrace, "'{'");
   const uint32_t mark = ast_mark(p->ast);
   while (!check(p, RightBrace) && !at_end(p)) {
@@ -692,9 +692,9 @@ static NodeId parse_extend(Parser *p) {
   return ast_add(
       p->ast,
       (Node){
-          .kind = NODE_IMPL,
+          .kind = NODE_EXTEND,
           .span = span_new(start, previous_end(p)),
-          .as.impl_def = {.generics = generics, .trait_type = trait_type, .target_type = target, .items = items},
+          .as.extend_def = {.generics = generics, .interface_type = interface_type, .target_type = target, .items = items},
       });
 }
 
@@ -843,8 +843,10 @@ static bool parse_attribute(Parser *p, Attr *const out) {
     }
     return true;
   }
-  if (!tok_text_is(p, ns, "c"))
+  if (!tok_text_is(p, ns, "c")) {
     parser_errorf(p, token_start(ns), token_len(ns), "unknown attribute namespace; only '@c.*' and '@emit_macro' are supported");
+    parser_notef(p, "use '@c.<name>' for C attributes or bare '@emit_macro' for generic C macro emission");
+  }
   expect(p, Dot, "'.'");
   // the name may lex as a keyword (e.g. `import`), so accept any non-delimiter token here
   if (at_end(p) || check(p, LeftParen) || check(p, RightParen) || check(p, Semicolon) || check(p, Dot)) {
@@ -859,6 +861,7 @@ static bool parse_attribute(Parser *p, Attr *const out) {
   if (kind < 0) {
     parser_errorf(p, token_start(name), token_len(name), "unknown attribute '@c.%.*s'", (int)token_len(name),
                   p->source + token_start(name));
+    parser_notef(p, "supported '@c' attributes include export, import, noreturn, always_inline, used, unused, section, packed, and align");
     return false;
   }
   *out = (Attr){.kind = (uint8_t)kind};
@@ -945,7 +948,7 @@ static NodeId parse_item(Parser *p) {
       break;
     case Interface:
       id = parse_interface(p);
-      ast_at(p->ast, id)->as.trait_def.is_public = is_public;
+      ast_at(p->ast, id)->as.interface_def.is_public = is_public;
       break;
     case Extend:
       id = parse_extend(p);
@@ -977,6 +980,7 @@ static NodeId parse_item(Parser *p) {
       if (!d || (d->kind != NODE_STRUCT && d->kind != NODE_ENUM) || !d->as.aggregate.generics.len) {
         const Span sp = d ? d->span : (Span){0, 0};
         parser_errorf(p, sp.start, sp.end - sp.start, "'@emit_macro' may only be applied to a generic struct or enum");
+        parser_notef(p, "write it before a declaration like 'struct Box<T> { ... }' or 'enum Option<T> { ... }'");
       }
     }
     attrs[i].owner = id;
@@ -1875,7 +1879,7 @@ void parser_build_ast(Parser *p) {
                   .span = span_new(0, (uint32_t)p->len),
                   .as.program = {.items = items},
               });
-  errors_finalize(&p->errors, &p->errors_start, &p->errors_len, p->source, p->len, p->file);
+  errors_finalize(&p->errors, &p->errors_notes, &p->errors_start, &p->errors_len, p->source, p->len, p->file);
 }
 
 ERRORS_BODY(Parser, parser, p)

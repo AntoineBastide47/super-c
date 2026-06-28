@@ -31,7 +31,7 @@ struct Resolver {
     SymbolIndex symbol_index; // (namespace, name hash) -> newest matching symbol index + 1
     NodeId current_self;  // type 'Self' refers to inside the current interface/extension (else NODE_NONE)
     bool in_closure;      // resolving inside a closure body: outer-local value refs are captures (rejected)
-    bool in_generic;      // resolving inside a generic fn/impl: closures here can't be monomorphized yet
+    bool in_generic;      // resolving inside a generic fn/extend: closures here can't be monomorphized yet
     uint32_t closure_floor; // symbols.len at the innermost closure entry; refs below it are captures
     const Package *package; // for resolving `import`ed module-qualified names (NULL = no imports)
     ERRORS_VARIABLES;
@@ -261,6 +261,7 @@ static void resolve_ref(Resolver *r, const NodeId ref, const NodeId name_node, c
   resolver_errorf(
       r, name.start, name.end - name.start, "cannot find %s '%.*s'", kind, (int)(name.end - name.start),
       r->source + name.start);
+  resolver_notef(r, "check spelling, imports, and whether the item is declared before this use");
 }
 
 // Join the first `count` identifier parts with "::" into `buf`; returns length, or -1 on overflow.
@@ -349,6 +350,8 @@ static void resolve_module_decl(Resolver *r, const NodeId ref, const ModuleId mi
     resolver_errorf(
         r, name.start, name.end - name.start, "no public %s '%.*s' in the imported module", kind,
         (int)(name.end - name.start), r->source + name.start);
+  if (decl == NODE_NONE)
+    resolver_notef(r, "only 'pub' top-level items are visible across module boundaries");
 }
 
 // Resolve a path-member expression `id` (node `n`) as `<module>::<decl>` where the module may be MANY
@@ -401,6 +404,8 @@ static bool resolve_qualified_member(Resolver *r, const NodeId id) {
       else
         resolver_errorf(r, dn.start, dn.end - dn.start, "no public item '%.*s' in module '%s'",
                         (int)(dn.end - dn.start), r->source + dn.start, buf);
+      if (decl == NODE_NONE)
+        resolver_notef(r, "the module was found, but this item is missing or not public");
       return true;
     }
     if (N - m == 2) { // module::Type::method -- record the Type; the type checker binds the method
@@ -593,25 +598,25 @@ static void resolve_item(Resolver *r, const NodeId id) {
       resolve_members(r, n->as.aggregate.members);
       scope_exit(r);
       break;
-    case NODE_TRAIT: {
+    case NODE_INTERFACE: {
       scope_enter(r);
-      declare_generics(r, n->as.trait_def.generics);
-      resolve_bounds(r, n->as.trait_def.bounds);
+      declare_generics(r, n->as.interface_def.generics);
+      resolve_bounds(r, n->as.interface_def.bounds);
       const NodeId old_self = r->current_self;
       r->current_self = id;
-      resolve_associated_items(r, n->as.trait_def.items);
+      resolve_associated_items(r, n->as.interface_def.items);
       r->current_self = old_self;
       scope_exit(r);
       break;
     }
-    case NODE_IMPL: {
-      const NodeId target = n->as.impl_def.target_type;
+    case NODE_EXTEND: {
+      const NodeId target = n->as.extend_def.target_type;
       scope_enter(r);
-      declare_generics(r, n->as.impl_def.generics);
+      declare_generics(r, n->as.extend_def.generics);
       resolve_type(r, target);
-      resolve_type(r, n->as.impl_def.trait_type);
+      resolve_type(r, n->as.extend_def.interface_type);
       // `extend i32 { .. }`: a builtin target is not a name binding, so resolve_type left it unresolved. Point
-      // it at the builtin's synthetic core decl so this impl is matched on `i32` receivers like any extension.
+      // it at the builtin's synthetic core decl so this extend is matched on `i32` receivers like any extension.
       if (target != NODE_NONE && r->package && ast_resolution(r->ast, target) == NODE_NONE) {
         const Node *const tn = ast_at_const(r->ast, target);
         if (tn->kind == NODE_TYPE_PATH && tn->as.type_path.parts.len == 1) {
@@ -625,8 +630,8 @@ static void resolve_item(Resolver *r, const NodeId id) {
       const NodeId resolved = target == NODE_NONE ? NODE_NONE : ast_resolution(r->ast, target);
       r->current_self = resolved != NODE_NONE ? resolved : id;
       const bool saved_generic = r->in_generic;
-      r->in_generic = saved_generic || n->as.impl_def.generics.len > 0; // methods inherit the impl's generics
-      resolve_associated_items(r, n->as.impl_def.items);
+      r->in_generic = saved_generic || n->as.extend_def.generics.len > 0; // methods inherit the extend's generics
+      resolve_associated_items(r, n->as.extend_def.items);
       r->in_generic = saved_generic;
       r->current_self = old_self;
       scope_exit(r);
@@ -930,8 +935,8 @@ static void collect_items(Resolver *r, const NodeList items) {
       case NODE_ENUM:
         declare(r, n->as.aggregate.name, id, NS_TYPE);
         break;
-      case NODE_TRAIT:
-        declare(r, n->as.trait_def.name, id, NS_TYPE);
+      case NODE_INTERFACE:
+        declare(r, n->as.interface_def.name, id, NS_TYPE);
         break;
       case NODE_TYPE_ALIAS:
         declare(r, n->as.type_alias.name, id, NS_TYPE);
@@ -948,7 +953,7 @@ static void collect_items(Resolver *r, const NodeList items) {
         }
         break;
       }
-      default: // NODE_IMPL has no module-scope name
+      default: // NODE_EXTEND has no module-scope name
         break;
     }
   }
@@ -966,7 +971,7 @@ void resolver_resolve(Resolver *r) {
   scope_exit(r);
 
   errors_finalize(
-      &r->errors, &r->errors_start, &r->errors_len, r->source, r->len,
+      &r->errors, &r->errors_notes, &r->errors_start, &r->errors_len, r->source, r->len,
       r->package && r->ast->module < r->package->count ? r->package->modules[r->ast->module].file : NULL);
 }
 

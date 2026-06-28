@@ -58,7 +58,7 @@ static void test_keywords(void) {
       "keywords",
       "as break case const continue defer do else enum extern false fn for if in let move mut "
       "new null return self Self struct true type unsafe where while switch interface extend "
-      "match trait impl name _ i32",
+      "match protocol augment name _ i32",
       expected, sizeof expected / sizeof expected[0]);
 }
 

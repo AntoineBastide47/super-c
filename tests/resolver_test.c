@@ -114,7 +114,7 @@ static void test_errors(void) {
   expect_error(
       "local escapes its block", "fn f() void { { let x: i32 = 1; } use_x(x); }\nfn use_x(n: i32) void {}\n",
       "cannot find value 'x'");
-  expect_error("Self outside impl", "fn f(x: Self) void {}\n", "'Self' is only valid");
+  expect_error("Self outside extend", "fn f(x: Self) void {}\n", "'Self' is only valid");
 }
 
 static void test_closures(void) {

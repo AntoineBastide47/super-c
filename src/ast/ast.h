@@ -63,8 +63,8 @@ typedef enum {
   NODE_FIELD,
   NODE_ENUM,
   NODE_VARIANT,
-  NODE_TRAIT,
-  NODE_IMPL,
+  NODE_INTERFACE,
+  NODE_EXTEND,
   NODE_TYPE_ALIAS,
   NODE_CONST,
   NODE_STATIC_ASSERT, // `static_assert(cond, "msg")`: compile-time check, lowered to C `_Static_assert`
@@ -177,13 +177,13 @@ typedef struct {
         struct {
             NodeId name;
             NodeList generics, bounds, items;
-            bool is_public; // `pub interface` -- exported for cross-module bounds/impls
-        } trait_def;
+            bool is_public; // `pub interface` -- exported for cross-module bounds/extends
+        } interface_def;
         struct {
             NodeList generics;
-            NodeId trait_type, target_type;
+            NodeId interface_type, target_type;
             NodeList items;
-        } impl_def;
+        } extend_def;
         struct {
             NodeId name;
             NodeList generics;

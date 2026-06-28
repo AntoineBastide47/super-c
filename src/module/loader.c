@@ -389,9 +389,9 @@ NodeId package_lookup(const Package *p, const ModuleId mid, const char *name, co
       name_node = n->as.type_alias.name;
       is_pub = n->as.type_alias.is_public;
       is_type = true;
-    } else if (n->kind == NODE_TRAIT) {
-      name_node = n->as.trait_def.name;
-      is_pub = n->as.trait_def.is_public;
+    } else if (n->kind == NODE_INTERFACE) {
+      name_node = n->as.interface_def.name;
+      is_pub = n->as.interface_def.is_public;
       is_type = true;
     } else if (n->kind == NODE_FUNCTION) {
       name_node = n->as.function.name;
@@ -577,6 +577,135 @@ void package_emit_order(const Package *p, ModuleId *const order) {
   free(done);
 }
 
+static TypeId subst_reintern_type(Ast *const dest, const Ast *const owner, const TypeId t, const ModuleId gmod,
+                                  const NodeId *const gids, const TypeId *const args, const uint8_t nargs) {
+  if (t == TYPE_NONE)
+    return TYPE_NONE;
+  const Ty ty = *ast_type_at(owner, t);
+  switch (ty.kind) {
+    case TYPE_GENERIC:
+      for (uint8_t i = 0; i < nargs; i++)
+        if (ty.module == gmod && ty.as.decl == gids[i])
+          return args[i];
+      return ast_reintern(dest, owner, t);
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY: {
+      Ty nt = ty;
+      nt.as.elem = subst_reintern_type(dest, owner, ty.as.elem, gmod, gids, args, nargs);
+      return ast_intern_type(dest, nt);
+    }
+    case TYPE_INSTANCE: {
+      const TyInstance inst = *ast_instance(owner, ty.as.inst);
+      TypeId na[4];
+      const uint8_t n = inst.n < 4 ? inst.n : 4;
+      for (uint8_t i = 0; i < n; i++)
+        na[i] = subst_reintern_type(dest, owner, inst.args[i], gmod, gids, args, nargs);
+      return ast_intern_instance(dest, inst.module, inst.decl, na, n);
+    }
+    default:
+      return ast_reintern(dest, owner, t);
+  }
+}
+
+static void reintern_nested_type(Package *p, Ast *const dest, const Ast *const owner, const TypeId t,
+                                 const ModuleId gmod, const NodeId *const gids, const TypeId *const args,
+                                 const uint8_t nargs, bool *const changed) {
+  if (t == TYPE_NONE)
+    return;
+  const size_t before = dest->instances.len;
+  TypeId st = subst_reintern_type(dest, owner, t, gmod, gids, args, nargs);
+  const Ty *y = ast_type_at(dest, st);
+  while (y->kind == TYPE_ARRAY) {
+    st = y->as.elem;
+    y = ast_type_at(dest, st);
+  }
+  if (y->kind != TYPE_INSTANCE)
+    return;
+  const TyInstance it = *ast_instance(dest, y->as.inst);
+  bool concrete = true;
+  for (uint8_t i = 0; i < it.n; i++)
+    concrete &= ast_type_concrete(dest, it.args[i]);
+  if (!concrete)
+    return;
+  const ModuleId home = instance_home(p, dest, &it);
+  Ast *const hdst = home < p->count ? p->modules[home].ast : dest->module == home ? dest : NULL;
+  if (hdst && hdst != dest) {
+    TypeId na[4];
+    const uint8_t n = it.n < 4 ? it.n : 4;
+    const size_t hbefore = hdst->instances.len;
+    for (uint8_t i = 0; i < n; i++)
+      na[i] = ast_reintern(hdst, dest, it.args[i]);
+    ast_intern_instance(hdst, it.module, it.decl, na, n);
+    *changed |= hdst->instances.len != hbefore;
+  }
+  *changed |= dest->instances.len != before;
+}
+
+static void reintern_nested_instance_deps(Package *p, Ast *const dest, const TyInstance *const it,
+                                          const TypeId *const args, const uint8_t nargs, bool *const changed) {
+  if (it->module >= p->count || !p->modules[it->module].ast)
+    return;
+  Ast *const owner = p->modules[it->module].ast;
+  const Node *const dn = ast_at_const(owner, it->decl);
+  if ((dn->kind != NODE_STRUCT && dn->kind != NODE_ENUM) || dn->as.aggregate.generics.len == 0)
+    return;
+  const NodeId *const gids = ast_list(owner, dn->as.aggregate.generics);
+  const NodeId *const mids = ast_list(owner, dn->as.aggregate.members);
+  for (uint32_t m = 0; m < dn->as.aggregate.members.len; m++) {
+    const Node *const mn = ast_at_const(owner, mids[m]);
+    if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
+      reintern_nested_type(p, dest, owner, ast_type(owner, mn->as.field.type), it->module, gids, args, nargs, changed);
+    } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
+      const NodeId *const pids = ast_list(owner, mn->as.variant.payload);
+      for (uint32_t k = 0; k < mn->as.variant.payload.len; k++) {
+        const Node *const pf = ast_at_const(owner, pids[k]);
+        const NodeId tn = pf->kind == NODE_FIELD ? pf->as.field.type : pids[k];
+        reintern_nested_type(p, dest, owner, ast_type(owner, tn), it->module, gids, args, nargs, changed);
+      }
+    }
+  }
+}
+
+static void reintern_method_signature_deps(Package *p, Ast *const dest, const TyInstance *const it,
+                                           const TypeId *const args, const uint8_t nargs, bool *const changed) {
+  if (it->module >= p->count || !p->modules[it->module].ast)
+    return;
+  Ast *const owner = p->modules[it->module].ast;
+  const NodeList items = ast_at_const(owner, owner->root)->as.program.items;
+  const NodeId *const ids = ast_list(owner, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const extend = ast_at_const(owner, ids[i]);
+    if (extend->kind != NODE_EXTEND || !extend->as.extend_def.generics.len)
+      continue;
+    if (ast_resolution(owner, extend->as.extend_def.target_type) != it->decl)
+      continue;
+    const NodeId *const gids = ast_list(owner, extend->as.extend_def.generics);
+    const NodeList ms = extend->as.extend_def.items;
+    const NodeId *const mids = ast_list(owner, ms);
+    for (uint32_t m = 0; m < ms.len; m++) {
+      const Node *const fn = ast_at_const(owner, mids[m]);
+      if (fn->kind != NODE_FUNCTION || fn->as.function.generics.len || fn->as.function.returns.len > 1)
+        continue;
+      const NodeList ps = fn->as.function.params;
+      const NodeId *const pids = ast_list(owner, ps);
+      for (uint32_t k = 0; k < ps.len; k++) {
+        const Node *const pn = ast_at_const(owner, pids[k]);
+        reintern_nested_type(p, dest, owner, ast_type(owner, pn->as.parameter.type), owner->module, gids, args, nargs,
+                             changed);
+      }
+      const NodeList rs = fn->as.function.returns;
+      const NodeId *const rids = ast_list(owner, rs);
+      for (uint32_t k = 0; k < rs.len; k++) {
+        const Node *const rn = ast_at_const(owner, rids[k]);
+        const NodeId tn = rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rids[k];
+        reintern_nested_type(p, dest, owner, ast_type(owner, tn), owner->module, gids, args, nargs, changed);
+      }
+    }
+  }
+}
+
 // Re-intern `src`'s concrete cross-module generic instantiations into their HOME module's table (see
 // instance_home): an all-builtin instance lands in the generic's owner (owner-emits), while one over a
 // user type by value lands in that type's module, which emits it via the generic's DECLARE/DEFINE macros.
@@ -595,15 +724,19 @@ static bool reintern_cross_module(Package *p, Ast *const src, Ast *const standal
     Ast *const dest = home < p->count                            ? p->modules[home].ast
                       : standalone && standalone->module == home ? standalone
                                                                  : NULL;
-    if (!dest || dest == src)
-      continue; // already in its home module
-    const size_t before = dest->instances.len;
+    if (!dest)
+      continue;
     const uint8_t n = it.n < 4 ? it.n : 4; // a TyInstance holds at most 4 args (ast_intern_instance clamps)
     TypeId na[4];
     for (uint8_t k = 0; k < n; k++)
-      na[k] = ast_reintern(dest, src, it.args[k]);
-    ast_intern_instance(dest, it.module, it.decl, na, n);
-    changed |= dest->instances.len != before;
+      na[k] = dest == src ? it.args[k] : ast_reintern(dest, src, it.args[k]);
+    if (dest != src) {
+      const size_t before = dest->instances.len;
+      ast_intern_instance(dest, it.module, it.decl, na, n);
+      changed |= dest->instances.len != before;
+    }
+    reintern_nested_instance_deps(p, dest, &it, na, n, &changed);
+    reintern_method_signature_deps(p, dest, &it, na, n, &changed);
   }
   return changed;
 }
