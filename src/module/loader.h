@@ -28,6 +28,12 @@ typedef struct Package {
     // generic decl. Used to gate macro emission in single-TU output (the multi-file tree emits all pub ones).
     DefId *macro_generics;
     size_t n_macro_generics, cap_macro_generics;
+    // Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
+    // `extend i32 { .. }` / `extend i32 as Hash { .. }` resolve and dispatch like any other type. `core_seeded`
+    // gates it (false when no core module is present, e.g. parser-only / no-prelude builds).
+    ModuleId core_module;
+    bool core_seeded;
+    NodeId builtin_decls[BT_COUNT];
 } Package;
 
 // Load `root_file` and, transitively, every module it imports, then append the std prelude found under
@@ -65,5 +71,10 @@ ModuleId package_instance_home(const Package *p, const Ast *a, const TyInstance 
 // True if generic `decl` (owned by module `module`) has an instance re-homed into a user module, so its
 // DECLARE/DEFINE macros must be emitted even in single-TU output. (Recorded by package_propagate_instances.)
 bool package_generic_needs_macro(const Package *p, ModuleId module, NodeId decl);
+
+// The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins were not seeded.
+NodeId package_builtin_decl(const Package *p, BuiltinType b);
+// If (module, node) names a builtin's synthetic core decl, its BuiltinType; else -1.
+int package_builtin_of_decl(const Package *p, ModuleId module, NodeId node);
 
 #endif // MODULE_LOADER_H

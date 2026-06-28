@@ -1,7 +1,6 @@
 // Coverage of src/main.c, whose helpers are all static -> exercised by driving the built ./super-c
-// binary as a subprocess: argument handling, derive_out_path (extension replace vs append), the
-// file-not-found error path, and the REPL. The dev `test` target depends on $(BIN), so the binary
-// exists when this runs.
+// binary as a subprocess: argument handling, derive_out_path (extension replace vs append), and the
+// file-not-found error path. The dev `test` target depends on $(BIN), so the binary exists when this runs.
 
 #include "test_harness.h"
 
@@ -381,15 +380,6 @@ static void test_usage(void) {
   CHECK_STR_CONTAINS(buf, "Usage");
 }
 
-static void test_repl(void) {
-  char cmd[8320], buf[512];
-  // a line then `exit`: the REPL must process input, print its prompts, and terminate
-  snprintf(cmd, sizeof cmd, "cd '%s' && printf 'fn main() i32 {}\\nexit\\n' | '%s' 2>/dev/null", DIR, SC);
-  const int rc = run_cmd(cmd, buf, sizeof buf);
-  CHECK(rc == 0, "REPL exits 0 on `exit` (got %d)", rc);
-  CHECK_STR_CONTAINS(buf, "> "); // the prompt is printed
-}
-
 static void test_error_exit_code(void) {
   char spc[4160], out[4170], cmd[8320], buf[256];
   snprintf(spc, sizeof spc, "%s/bad.spc", DIR);
@@ -430,7 +420,6 @@ int main(void) {
   test_extensionless_appends();
   test_missing_file();
   test_usage();
-  test_repl();
   test_error_exit_code();
 
   char rm[4128];

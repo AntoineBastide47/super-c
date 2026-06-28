@@ -2093,8 +2093,8 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       emit(c, ")");
     } else if (c->macro && rt->kind == TYPE_GENERIC) {
       // Inside a macro template the receiver's concrete type is unknown: paste `_SCM_<T> ## __free` so the
-      // invocation supplies the arg type's `free` (a real one for a Free arg, or a guarded no-op stub for a
-      // non-Free arg -- emitted by cg_emit_free_stub). This makes deep-free reach user Free element types.
+      // invocation supplies the arg type's `free`. Every type has one -- a real destructor for a Free type,
+      // an empty `<builtin>__free` for a scalar (std/core.spc) -- so deep-free reaches user Free elements.
       char pp[64];
       emit(c, "_SCM_");
       render_macro_param(c, rt->module, rt->as.decl, pp, sizeof pp);
@@ -2232,6 +2232,20 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         emit_cstr(c, inm);
         emit_paste(c); // in a macro body `NAME ## __method`
         emit(c, "__");
+      } else if (param_tgt != TYPE_NONE && ast_type_at(c->ast, param_tgt)->kind == TYPE_BUILTIN && c->package) {
+        // `T::default()` with T monomorphized to a builtin -> `i32__default_` (the core conformance).
+        const BuiltinType bt = ast_type_at(c->ast, param_tgt)->as.builtin;
+        const NodeId bd = package_builtin_decl(c->package, bt);
+        if (bd != NODE_NONE) {
+          const DefId cm = cg_find_method(c, c->package->core_module, bd, c->source, name_span(c, callee->as.member.member));
+          if (cm.node != NODE_NONE)
+            emd = cm;
+        }
+        char pfx[64];
+        render_modpfx(c, emd.module, pfx, sizeof pfx);
+        emit_cstr(c, pfx);
+        emit_cstr(c, BUILTIN_NAMES[bt]);
+        emit(c, "__");
       } else if (param_tgt != TYPE_NONE) {
         const Ty *const rb = ast_type_at(c->ast, param_tgt);
         ModuleId omod;
@@ -2354,6 +2368,14 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
               c, rb->module, rb->as.decl, cg_mod_src(c, c->ast->module), name_span(c, callee->as.member.member));
           if (cm.node != NODE_NONE)
             md = cm;
+        } else if (rb->kind == TYPE_BUILTIN && c->package) { // K: Hash monomorphized to a builtin -> i32__hash
+          const NodeId bd = package_builtin_decl(c->package, rb->as.builtin);
+          if (bd != NODE_NONE) {
+            const DefId cm = cg_find_method(
+                c, c->package->core_module, bd, cg_mod_src(c, c->ast->module), name_span(c, callee->as.member.member));
+            if (cm.node != NODE_NONE)
+              md = cm;
+          }
         }
       }
       Ast *const ma = cg_mod_ast(c, md.module);
@@ -2408,6 +2430,12 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         render_modpfx(c, md.module, pfx, sizeof pfx); // method's module: a local extension is mangled by it
         emit_cstr(c, pfx);
         emit_ident_mod(c, base->module, ast_at_const(cg_mod_ast(c, base->module), base->as.decl)->as.aggregate.name);
+        emit(c, "__");
+      } else if (base->kind == TYPE_BUILTIN) { // `extend i32 { .. }` method -> i32__<method>
+        char pfx[64];
+        render_modpfx(c, md.module, pfx, sizeof pfx);
+        emit_cstr(c, pfx);
+        emit_cstr(c, BUILTIN_NAMES[base->as.builtin]);
         emit(c, "__");
       } else {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: method receiver is not a struct or enum");
@@ -4956,8 +4984,13 @@ static void function_name(Codegen *c, const NodeId fn, const DefId target, char 
   if (k >= cap)
     k = cap ? cap - 1 : 0;
   if (target.node != NODE_NONE) {
-    const Span ts = name_span_in(c, target.module, ast_at_const(cg_mod_ast(c, target.module), target.node)->as.aggregate.name);
-    k += render_ident_src(cg_mod_src(c, target.module), ts, out + k, cap - k);
+    const int bb = c->package ? package_builtin_of_decl(c->package, target.module, target.node) : -1;
+    if (bb >= 0) { // `extend i32 { .. }`: the target is a builtin, mangled by its own name (i32__<method>)
+      k = buf_append(out, cap, k, BUILTIN_NAMES[bb]);
+    } else {
+      const Span ts = name_span_in(c, target.module, ast_at_const(cg_mod_ast(c, target.module), target.node)->as.aggregate.name);
+      k += render_ident_src(cg_mod_src(c, target.module), ts, out + k, cap - k);
+    }
     if (k + 2 < cap) {
       out[k++] = '_';
       out[k++] = '_';
@@ -5097,14 +5130,30 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
     const NodeList ps = fn->as.function.params;
     const NodeId *const pids = ast_list(c->ast, ps);
     c->nparam_flags = 0;
+    bool any_owned_param = false;
     for (uint32_t i = 0; i < ps.len; i++)
       if (cg_will_auto_free(c, pids[i])) {
+        any_owned_param = true;
         cg_register_auto_free(c, pids[i]);
         if (cg_is_cond_moved(c, pids[i]) && c->nparam_flags < (uint32_t)(sizeof c->param_flags / sizeof c->param_flags[0]))
           c->param_flags[c->nparam_flags++] = pids[i]; // declared at body top by emit_block_from
       }
-    emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also frees owned parameters
-    emit(c, "\n\n");
+    const Node *const bodyn = ast_at_const(c->ast, fn->as.function.body);
+    if (bodyn->kind == NODE_BLOCK && bodyn->as.block.statements.len == 0 && ps.len > 0 && !any_owned_param) {
+      // An empty body that takes parameters none of which it owns (e.g. a builtin's no-op
+      // `free(self: &mut Self) {}`) would leave them unused -> `-Werror,-Wunused-parameter`; cast each to
+      // void so it stays warning-clean. (A by-value Free param IS owned -> emit_block_from frees it instead.)
+      emit(c, "{");
+      for (uint32_t i = 0; i < ps.len; i++) {
+        char pn[128];
+        render_ident(c, name_span(c, ast_at_const(c->ast, pids[i])->as.parameter.name), pn, sizeof pn);
+        emit(c, " (void)%s;", pn);
+      }
+      emit(c, " }\n\n");
+    } else {
+      emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also frees owned parameters
+      emit(c, "\n\n");
+    }
   } else {
     emit(c, ";\n");
   }
@@ -5415,8 +5464,14 @@ static bool cg_type_satisfies(Codegen *c, const TypeId ty, const DefId iface, co
     tdecl = it->decl;
     for (uint8_t k = 0; k < it->n && in < 4; k++)
       iargs[in++] = it->args[k];
+  } else if (y->kind == TYPE_BUILTIN && c->package) {
+    const NodeId bd = package_builtin_decl(c->package, y->as.builtin); // builtins conform via `extend i32 as iface`
+    if (bd == NODE_NONE)
+      return false;
+    tmod = c->package->core_module;
+    tdecl = bd;
   } else {
-    return false; // a builtin / pointer / etc.: no `as iface` impl
+    return false; // a pointer / etc.: no `as iface` impl
   }
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
@@ -6292,14 +6347,17 @@ static void emit_rehomed_forwards(Codegen *c) {
 // `_SCM_<T> ## __free`. Emit a guarded no-op stub so that paste resolves. The `#ifndef` guard dedups within
 // a translation unit (single-TU = one file; multi-file = per file) and `static` keeps each file's copy
 // internal -- so a Free arg uses its real `__free`, a non-Free arg this no-op (deep-free of a POD element).
-static void cg_emit_free_stub(Codegen *c, const TypeId argTy) {
-  if (cg_type_is_free(c, argTy))
-    return; // a Free arg already has a real `<mangle>__free`
-  char csp[256], mng[176];
-  render_type_id(c, argTy, "", csp, sizeof csp);
+// A re-homed macro instance's DEFINE body deep-frees each element via the paste `<arg-mangle>__free(&e)`.
+// A Free element has a real destructor and a builtin has its empty `<builtin>__free` (std/core.spc); a
+// plain non-Free type has neither, so define `<arg>__free` as a no-op function-like MACRO -- the call then
+// expands to nothing. No stub function is synthesized (unlike the old per-type `__free` definitions).
+static void cg_emit_free_noop_macro(Codegen *c, const TypeId argTy) {
+  const Ty *const y = ast_type_at(c->ast, subst_resolve(c, argTy));
+  if (y->kind == TYPE_BUILTIN || cg_type_is_free(c, argTy))
+    return; // already has a real `<mangle>__free`
+  char mng[176];
   mangle_type(c, argTy, mng, sizeof mng);
-  emit(c, "#ifndef SC_NOFREE_%s\n#define SC_NOFREE_%s\n", mng, mng);
-  emit(c, "static __attribute__((unused)) void %s__free(%s *p) { (void)p; }\n#endif\n", mng, csp);
+  emit(c, "#ifndef SC_NF_%s\n#define SC_NF_%s\n#define %s__free(p) ((void)(p))\n#endif\n", mng, mng, mng);
 }
 
 // instance: `<STEM>_as_<Iface>_DECLARE/DEFINE(args.., NAME)`. Gated by cg_type_satisfies, so an element type
@@ -6323,7 +6381,7 @@ static void emit_conformance_invocations(Codegen *c, const TyInstance *const it,
       continue;
     if (define)
       for (uint8_t k = 0; k < it->n; k++)
-        cg_emit_free_stub(c, it->args[k]); // a deep-freeing conformance body may paste `_SCM_<arg> ## __free`
+        cg_emit_free_noop_macro(c, it->args[k]); // a deep-freeing conformance body may paste `<arg>__free`
     char tag[80];
     size_t at = buf_append(tag, sizeof tag, 0, "as_");
     const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
@@ -6357,7 +6415,7 @@ static void emit_instance_macro_invocations(Codegen *c, const bool define) {
     macro_stem(c, it.module, dn->as.aggregate.name, stem, sizeof stem);
     if (define)
       for (uint8_t k = 0; k < it.n; k++)
-        cg_emit_free_stub(c, it.args[k]); // a deep-freeing method body may paste `_SCM_<arg> ## __free`
+        cg_emit_free_noop_macro(c, it.args[k]); // a deep-freeing method body may paste `<arg>__free`
     emit(c, "%s_%s(", stem, define ? "DEFINE" : "DECLARE");
     for (uint8_t k = 0; k < it.n; k++) {
       char csp[256], mng[176];
@@ -6398,9 +6456,9 @@ static void emit_method_macro_invocations(Codegen *c, const bool define) {
     render_ident_src(cg_mod_src(c, recv.module), name_span_in(c, recv.module, mn->as.function.name), mnm, sizeof mnm);
     if (define) {
       for (uint8_t k = 0; k < recv.n; k++)
-        cg_emit_free_stub(c, recv.args[k]); // a deep-freeing method body may paste `_SCM_<arg> ## __free`
+        cg_emit_free_noop_macro(c, recv.args[k]); // a deep-freeing method body may paste `<arg>__free`
       for (uint8_t k = 0; k < mi.n; k++)
-        cg_emit_free_stub(c, mi.targs[k]);
+        cg_emit_free_noop_macro(c, mi.targs[k]);
     }
     emit(c, "%s_%s_%s(", stem, mnm, define ? "DEFINE" : "DECLARE");
     for (uint8_t k = 0; k < recv.n; k++) {
@@ -6877,6 +6935,11 @@ static void emit_referenced_includes(Codegen *c) {
     if (home != cur && home < nmod)
       want[home] = true; // where the instance is materialized (== owner for builtin/prelude args)
   }
+  // Builtin conformances (i32__hash, i32__eq, ...) live in core; a generic instance over a builtin arg
+  // (Map<i32,_>) calls them from its method bodies. core.h pulls in only super_rt, so always including it
+  // is cheap and cycle-free.
+  if (c->package->core_seeded && c->package->core_module != cur && c->package->core_module < nmod)
+    want[c->package->core_module] = true;
   for (size_t m = 0; m < nmod; m++)
     if (want[m])
       emit_modpath_include(c, c->package->modules[m].path);
@@ -6998,188 +7061,6 @@ void codegen_emit(Codegen *c, FILE *out) {
       c->package && c->ast->module < c->package->count ? c->package->modules[c->ast->module].file : NULL);
   if (c->buf_len)
     fwrite(c->buf, 1, c->buf_len, out);
-}
-
-static void cg_flush(Codegen *c, FILE *out) {
-  if (c->buf_len)
-    fwrite(c->buf, 1, c->buf_len, out);
-  c->buf_len = 0;
-}
-
-// Emit several modules as ONE self-contained translation unit, interleaved BY PHASE so cross-module
-// (even mutually dependent) types resolve: all forward typedefs first, then all type definitions +
-// prototypes, then all bodies. Used for the REPL/test inline build where the prelude + user code share a
-// single .c (str <-> String interconversion works because every struct is forward-declared, then every
-// struct is defined, before any function body). Each Codegen keeps its own AST for the caller to reclaim.
-// Find the Codegen for module `m` among cs[0..n), or NULL.
-static Codegen *cg_by_module(Codegen **cs, const size_t n, const ModuleId m) {
-  for (size_t i = 0; i < n; i++)
-    if (cs[i]->ast->module == m)
-      return cs[i];
-  return NULL;
-}
-
-// Single-TU: emit the concrete struct/enum definitions reachable by-value through `t` (a generic instance's
-// type arg) before the instance that holds them. A concrete dep is emitted via its OWN module's Codegen and
-// DFS state, so the owning module's later phase_types skips it; nested instance args recurse. This is what
-// the multi-file build gets for free from per-module header includes.
-static void pre_emit_concrete_deps(Codegen **cs, const size_t n, FILE *out, Codegen *from, const TypeId t) {
-  const Ty *const y = ast_type_at(from->ast, t);
-  if (y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM) {
-    Codegen *const owner = cg_by_module(cs, n, y->module);
-    uint8_t *const st = owner ? cg_type_state(owner) : NULL;
-    if (st && st[y->as.decl] == 0 && type_emittable(owner, ast_at_const(owner->ast, y->as.decl))) {
-      emit_type_dfs(owner, y->as.decl, st);
-      cg_flush(owner, out);
-    }
-  } else if (y->kind == TYPE_INSTANCE) {
-    const TyInstance *const it = ast_instance(from->ast, y->as.inst);
-    for (uint8_t k = 0; k < it->n; k++)
-      pre_emit_concrete_deps(cs, n, out, from, it->args[k]);
-  }
-}
-
-// The module owning `t`'s top-level by-value type (an instance's owner, or a struct/enum's module), looking
-// through arrays (embedded by value) but NOT through pointers/references (those need only a forward typedef)
-// or instance ARGS (a field of type Vector<String> embeds Vector by value, not String). MODULE_NONE if none.
-static ModuleId cg_byval_owner(const Ast *const a, const TypeId t) {
-  const Ty *y = ast_type_at(a, t);
-  while (y->kind == TYPE_ARRAY)
-    y = ast_type_at(a, y->as.elem);
-  if (y->kind == TYPE_INSTANCE)
-    return ast_instance(a, y->as.inst)->module;
-  if (y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM)
-    return y->module;
-  return (ModuleId)0xFFFF;
-}
-
-// Does instance `it` (emitted by this module) embed, by value, a type owned by module `m`? Scans the decl's
-// fields / variant payloads under `it`'s arg substitution -- the only dependency that constrains the order in
-// which type definitions may be emitted across modules (Option<String<Global>> embeds String__Global).
-static bool cg_inst_byval_refs(Codegen *c, const TyInstance *const it, const ModuleId m) {
-  const Node *const dn = ast_at_const(c->ast, it->decl);
-  const int saved = c->nsubst;
-  const NodeList gens = dn->as.aggregate.generics;
-  const NodeId *const gids = ast_list(c->ast, gens);
-  c->nsubst = 0;
-  for (uint32_t g = 0; g < gens.len && g < it->n && c->nsubst < 8; g++) {
-    c->subst[c->nsubst].param = (DefId){it->module, gids[g]};
-    c->subst[c->nsubst].concrete = it->args[g];
-    c->nsubst++;
-  }
-  bool found = false;
-  const NodeList ms = dn->as.aggregate.members;
-  const NodeId *const mids = ast_list(c->ast, ms);
-  for (uint32_t mi = 0; mi < ms.len && !found; mi++) {
-    const Node *const mn = ast_at_const(c->ast, mids[mi]);
-    NodeId fts[8];
-    int nf = 0;
-    if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
-      fts[nf++] = mn->as.field.type;
-    } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
-      const NodeList pl = mn->as.variant.payload;
-      const NodeId *const plids = ast_list(c->ast, pl);
-      for (uint32_t k = 0; k < pl.len && nf < 8; k++) {
-        const Node *const pf = ast_at_const(c->ast, plids[k]);
-        fts[nf++] = pf->kind == NODE_FIELD ? pf->as.field.type : plids[k];
-      }
-    }
-    for (int f = 0; f < nf && !found; f++) {
-      const TypeId ft = fts[f] == NODE_NONE ? TYPE_NONE : ast_type(c->ast, fts[f]);
-      if (ft != TYPE_NONE && cg_byval_owner(c->ast, subst_resolve(c, ft)) == m)
-        found = true;
-    }
-  }
-  c->nsubst = saved;
-  return found;
-}
-
-// Does module `c` embed, by value, a type owned by module `m` (a type-definition ordering edge)? Only
-// by-value containment counts -- pointer/signature references do NOT, since those are satisfied by the
-// forward typedefs emitted earlier. Restricting to by-value edges keeps the dependency graph acyclic (the
-// type checker rejects by-value cycles), so the topological order is well-defined.
-static bool cg_module_refs(Codegen *c, const ModuleId m) {
-  for (size_t i = 0; i < c->ast->instances.len; i++) {
-    const TyInstance *const it = &c->ast->instances.data[i];
-    if (it->module != c->ast->module) // only instances this module actually emits create an ordering edge
-      continue;
-    bool concrete = true;
-    for (uint8_t k = 0; k < it->n; k++)
-      concrete &= type_is_concrete(c, it->args[k]);
-    if (concrete && cg_inst_byval_refs(c, it, m))
-      return true;
-  }
-  return false;
-}
-
-// Post-order DFS over the modules: emit each module's referenced modules before itself. Reference cycles
-// (str <-> string via signatures) are broken arbitrarily -- safe, because a genuine by-value STRUCT cycle
-// is rejected by the type checker, so cycle members never embed each other's types by value.
-static void cg_topo_visit(Codegen **cs, const size_t n, const size_t i, uint8_t *const state, size_t *const order,
-                          size_t *const pos) {
-  if (state[i])
-    return;
-  state[i] = 1;
-  for (size_t j = 0; j < n; j++)
-    if (j != i && cg_module_refs(cs[i], cs[j]->ast->module))
-      cg_topo_visit(cs, n, j, state, order, pos);
-  order[(*pos)++] = i;
-  state[i] = 2;
-}
-
-void codegen_emit_unit(Codegen **cs, const size_t n, FILE *out) {
-  if (!n)
-    return;
-  emit_cstr(cs[0], SUPER_RT_INCLUDES);
-  emit(cs[0], "\n");
-  for (size_t i = 0; i < n; i++)
-    emit_extern_includes(cs[i]); // backing C headers from any module's `extern "C" "..."` blocks
-  cg_flush(cs[0], out);
-  for (size_t i = 0; i < n; i++) {
-    build_enum_index(cs[i]);
-    collect_insts(cs[i]);
-    collect_callbacks(cs[i]);
-  }
-  for (size_t i = 0; i < n; i++) { // every struct/enum forward typedef
-    phase_forward(cs[i]);
-    cg_flush(cs[i], out);
-  }
-  // Concrete structs an instance holds by value must precede that instance. Across modules the instance
-  // (e.g. Option<String>, homed in the option module) can be emitted before its arg's struct (String, in
-  // the string module), so pre-emit those concrete deps now -- phase_types then skips them (shared state).
-  for (size_t i = 0; i < n; i++)
-    for (size_t j = 0; j < cs[i]->ast->instances.len; j++) {
-      const TyInstance *const it = &cs[i]->ast->instances.data[j];
-      for (uint8_t k = 0; k < it->n; k++)
-        pre_emit_concrete_deps(cs, n, out, cs[i], it->args[k]);
-    }
-  // Emit type definitions in dependency order: a module whose types embed another module's by value must
-  // come after it (forward typedefs above already cover pointer-only refs). Falls back to load order on OOM.
-  size_t *const order = malloc(n * sizeof *order);
-  uint8_t *const tstate = order ? calloc(n, 1) : NULL;
-  size_t pos = 0;
-  if (order && tstate) {
-    for (size_t i = 0; i < n; i++)
-      cg_topo_visit(cs, n, i, tstate, order, &pos);
-  }
-  for (size_t oi = 0; oi < n; oi++) { // every full type + multi-return struct + prototype
-    const size_t i = (order && tstate) ? order[oi] : oi;
-    phase_types(cs[i]);
-    phase_ret_structs(cs[i]);
-    phase_prototypes(cs[i], PROTO_ALL);
-    cg_flush(cs[i], out);
-  }
-  free(order);
-  free(tstate);
-  for (size_t i = 0; i < n; i++) { // every body (all types are complete by now)
-    phase_bodies(cs[i]);
-    cg_flush(cs[i], out);
-  }
-  for (size_t i = 0; i < n; i++)
-    errors_finalize(
-        &cs[i]->errors, &cs[i]->errors_start, &cs[i]->errors_len, cs[i]->source, cs[i]->len,
-        cs[i]->package && cs[i]->ast->module < cs[i]->package->count ? cs[i]->package->modules[cs[i]->ast->module].file
-                                                                     : NULL);
 }
 
 ERRORS_BODY(Codegen, codegen, c)

@@ -101,12 +101,43 @@ TH_UNUSED static const char *sc_stage_name(const Stage s) {
 }
 
 typedef struct {
-    Ast *ast;        // owned by the caller (ast_free); NULL if lex/parse failed
-    char *code;      // codegen output (caller frees); NULL unless ST_CODEGEN reached without earlier error
-    size_t errors;   // error count from the FIRST stage that erred (0 = clean through `stop`)
-    Stage err_stage; // which stage produced `errors`
-    char first[256]; // that stage's first message
+    Ast *ast;          // owned by the caller (ast_free); NULL if lex/parse failed
+    char *code;        // concatenated codegen output (caller frees); NULL unless ST_CODEGEN reached cleanly
+    char build_dir[64]; // temp dir holding the emitted multi-file build/ tree (caller rm -rf's it); "" if none
+    size_t errors;     // error count from the FIRST stage that erred (0 = clean through `stop`)
+    Stage err_stage;   // which stage produced `errors`
+    char first[256];   // that stage's first message
 } ScResult;
+
+// Build path "<root>/build/<modpath, '::' -> '/'><ext>" (heap-allocated), mirroring the CLI's tree layout.
+TH_UNUSED static char *th_modfile(const char *root, const char *modpath, const char *ext) {
+  const size_t n = strlen(root) + sizeof "/build/" + strlen(modpath) + strlen(ext);
+  char *const out = (char *)malloc(n);
+  size_t at = (size_t)snprintf(out, n, "%s/build/", root);
+  for (const char *s = modpath; *s; s++) {
+    if (s[0] == ':' && s[1] == ':') { out[at++] = '/'; s++; }
+    else out[at++] = *s;
+  }
+  memcpy(out + at, ext, strlen(ext) + 1);
+  return out;
+}
+
+// Write `n` bytes to `path`, then append the same bytes to the open `concat` stream (for strstr inspection).
+TH_UNUSED static void th_emit_file(const char *path, const char *buf, const size_t n, FILE *concat) {
+  FILE *const f = fopen(path, "w");
+  if (f) { fwrite(buf, 1, n, f); fclose(f); }
+  if (concat) fwrite(buf, 1, n, concat);
+}
+
+// Recursively remove a temp build dir (no-op for an empty path).
+TH_UNUSED static void th_rmtree(const char *dir) {
+  if (!dir || !dir[0])
+    return;
+  char cmd[128];
+  snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+  if (system(cmd)) { /* best-effort cleanup */
+  }
+}
 
 // Run the pipeline lex..`stop`, halting at the first stage that errors. The AST (when one
 // exists) is always handed back for the caller to free, even on error.
@@ -195,33 +226,81 @@ TH_UNUSED static ScResult sc_compile(const char *name, const char *source, const
   }
   package_propagate_instances(pp, r.ast); // owners emit cross-module generic instances (matches the CLI)
 
-  char *buf = NULL;
-  size_t size = 0;
-  FILE *f = open_memstream(&buf, &size);
-  // Emit the prelude modules + the user snippet as one phase-interleaved unit (mutually dependent types
-  // like str <-> String resolve: all forwards, then all types, then all bodies).
-  const size_t total = pp->count + 1;
-  Codegen **cs = (Codegen **)malloc(total * sizeof *cs);
-  for (size_t i = 0; i < pp->count; i++)
-    cs[i] = codegen_new(pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len, pp);
-  cs[pp->count] = codegen_new(r.ast, source, len, pp);
-  codegen_emit_unit(cs, total, f);
-  fclose(f);
-  String_Vec e = codegen_take_errors(cs[pp->count]); // user-module diagnostics
-  if (e.len) {
-    r.errors = e.len;
-    r.err_stage = ST_CODEGEN;
-    snprintf(r.first, sizeof r.first, "%s", e.data[0]);
+  // Append the user snippet as a real (non-prelude) `main` module, then emit the whole package as one
+  // build/ tree -- the single, uniform compilation path (identical to the CLI; no separate single-TU
+  // emitter). The user nodes were resolved with module == pp->count, exactly the index they land at here.
+  const ModuleId uidx = (ModuleId)pp->count;
+  if (pp->count == pp->cap) {
+    pp->cap = pp->cap ? pp->cap * 2 : 8;
+    pp->modules = (Module *)realloc(pp->modules, pp->cap * sizeof *pp->modules);
   }
-  free_errors(&e);
+  pp->modules[uidx] = (Module){0};
+  pp->modules[uidx].path = strdup("main");
+  pp->modules[uidx].source = strdup(source);
+  pp->modules[uidx].source_len = len;
+  pp->modules[uidx].ast = r.ast;
+  pp->count++;
+
+  char tmpl[] = "/tmp/scgenXXXXXX";
+  char *const dir = mkdtemp(tmpl);
+  char *catbuf = NULL;
+  size_t catsz = 0;
+  FILE *const cat = open_memstream(&catbuf, &catsz); // all .h + .c concatenated, for strstr inspection
+  if (dir) {
+    char mk[160];
+    snprintf(mk, sizeof mk, "mkdir -p %s/build/__std", dir); // prelude is __std::*; user `main` at build/ root
+    if (system(mk)) { /* ignore: a write failure surfaces as a later compile error */
+    }
+    char *const rt = th_modfile(dir, "super_rt", ".h");
+    const char *const g0 = "#ifndef SUPER_RT_H\n#define SUPER_RT_H\n";
+    const char *const g1 = "#endif\n";
+    FILE *rf = fopen(rt, "w");
+    if (rf) { fputs(g0, rf); fputs(SUPER_RT_INCLUDES, rf); fputs(g1, rf); fclose(rf); }
+    fputs(g0, cat); // the runtime header (atomics shim, ...) is part of the inspectable `code` too
+    fputs(SUPER_RT_INCLUDES, cat);
+    fputs(g1, cat);
+    free(rt);
+  }
   for (size_t i = 0; i < pp->count; i++) {
-    pp->modules[i].ast = codegen_take_ast(cs[i]);
-    codegen_free(&cs[i]);
+    Codegen *c = codegen_new(pp->modules[i].ast, pp->modules[i].source, pp->modules[i].source_len, pp);
+    codegen_set_multifile(c, true);
+    char *hb = NULL, *cb = NULL;
+    size_t hn = 0, cn = 0;
+    FILE *hf = open_memstream(&hb, &hn);
+    codegen_emit_header(c, hf);
+    fclose(hf);
+    FILE *cf = open_memstream(&cb, &cn);
+    codegen_emit(c, cf);
+    fclose(cf);
+    if (dir) {
+      char *hp = th_modfile(dir, pp->modules[i].path, ".h");
+      char *cp = th_modfile(dir, pp->modules[i].path, ".c");
+      th_emit_file(hp, hb, hn, cat);
+      th_emit_file(cp, cb, cn, cat);
+      free(hp);
+      free(cp);
+    }
+    free(hb);
+    free(cb);
+    if (i == uidx) { // user-module codegen diagnostics
+      String_Vec e = codegen_take_errors(c);
+      if (e.len) {
+        r.errors = e.len;
+        r.err_stage = ST_CODEGEN;
+        snprintf(r.first, sizeof r.first, "%s", e.data[0]);
+      }
+      free_errors(&e);
+    }
+    pp->modules[i].ast = codegen_take_ast(c);
+    codegen_free(&c);
   }
-  r.ast = codegen_take_ast(cs[pp->count]);
-  codegen_free(&cs[pp->count]);
-  free(cs);
-  r.code = buf;
+  fclose(cat);
+  r.code = catbuf;
+  if (dir)
+    snprintf(r.build_dir, sizeof r.build_dir, "%s", dir);
+  // Hand the user AST back to the caller; detach it from the package so package_free won't double-free it.
+  r.ast = pp->modules[uidx].ast;
+  pp->modules[uidx].ast = NULL;
   package_free(&pp);
   return r;
 }
@@ -267,6 +346,7 @@ TH_UNUSED static size_t sc_stage_errors(const char *name, const char *source, co
     snprintf(first, cap, "%s", r.first);
   ast_free(&r.ast);
   free(r.code);
+  th_rmtree(r.build_dir);
   return r.errors;
 }
 
@@ -287,89 +367,127 @@ TH_UNUSED static char *sc_codegen(const char *name, const char *source, size_t *
   if (first && cap)
     snprintf(first, cap, "%s", r.first);
   ast_free(&r.ast);
+  th_rmtree(r.build_dir); // the strstr callers only need the concatenated `code`
   return r.code;
 }
 
-// Behavioral soundness driver: write `c_src` to a temp dir, compile it warning-clean under the
-// sanitizers, run it. Returns 0 with stdout in `out` and the process exit code in *exit_code;
-// returns -1 (compile failed) with the compiler's stderr copied into `out`.
-TH_UNUSED static int sc_compile_and_run(const char *c_src, char *out, const size_t out_cap, int *exit_code) {
-  char dir[] = "/tmp/scrunXXXXXX";
-  if (!mkdtemp(dir))
+// Behavioral soundness driver: compile every .c in the already-emitted `build_dir` tree warning-clean
+// under the sanitizers, link, and run it. Returns 0 with stdout in `out` and the process exit code in
+// *exit_code; returns -1 (compile/link failed) with the compiler's stderr copied into `out`.
+//
+// Each .c is compiled to a content-addressed object in a shared cache: the prelude C is byte-identical
+// across most snippets (only the user's `main.c` and any module emitting snippet-specific monomorphized
+// instances vary), so those objects are compiled once and reused -- otherwise the unified multi-file path
+// would re-parse the heavy runtime header in ~17 units per test. The generated #includes are relative, so
+// each .c compiles standalone (no -I) and the cache key is just the .c's own bytes.
+TH_UNUSED static int sc_run_built(const char *build_dir, char *out, const size_t out_cap, int *exit_code) {
+  if (!build_dir || !build_dir[0])
     return -1;
-  char cpath[64], bpath[64], epath[64], cmd[512];
-  snprintf(cpath, sizeof cpath, "%s/p.c", dir);
-  snprintf(bpath, sizeof bpath, "%s/p", dir);
-  snprintf(epath, sizeof epath, "%s/e", dir);
-
-  FILE *cf = fopen(cpath, "w");
-  if (!cf) {
-    rmdir(dir);
-    return -1;
+  static bool cache_ready = false;
+  if (!cache_ready) {
+    if (system("mkdir -p /tmp/sc_ocache")) { /* a failure surfaces as a compile error below */
+    }
+    cache_ready = true;
   }
-  fputs(c_src, cf);
-  fclose(cf);
-
-  snprintf(
-      cmd, sizeof cmd, "cc -std=c11 -Wall -Wextra -Werror -fsanitize=undefined,address %s -o %s 2>%s", cpath, bpath,
-      epath);
-  const int crc = system(cmd);
-
+  char bpath[96], epath[96], findcmd[192];
+  snprintf(bpath, sizeof bpath, "%s/p", build_dir);
+  snprintf(epath, sizeof epath, "%s/e", build_dir);
+  snprintf(findcmd, sizeof findcmd, "find %s/build -name '*.c'", build_dir);
+  FILE *lp = popen(findcmd, "r");
+  if (!lp)
+    return -1;
+  char link[16384];
+  size_t lat = 0;
+  link[0] = '\0';
+  char line[512];
   int rc = 0;
-  if (crc != 0) {
+  while (fgets(line, sizeof line, lp)) {
+    line[strcspn(line, "\n")] = '\0';
+    if (!line[0])
+      continue;
+    uint64_t h = 1469598103934665603ULL; // FNV-1a over the .c bytes
+    FILE *cf = fopen(line, "rb");
+    if (cf) {
+      int ch;
+      while ((ch = fgetc(cf)) != EOF) {
+        h ^= (uint64_t)(unsigned char)ch;
+        h *= 1099511628211ULL;
+      }
+      fclose(cf);
+    }
+    char opath[96];
+    snprintf(opath, sizeof opath, "/tmp/sc_ocache/%016llx.o", (unsigned long long)h);
+    if (access(opath, F_OK) != 0) {
+      char cc[1024];
+      // -Wno-unused-function: a snippet may define a private helper it never calls (in multi-file output
+      // such a fn is `static`, so it would warn -- the old single-TU emitted user fns non-static). All
+      // other warnings stay hard errors, alongside the UBSan/ASan instrumentation.
+      snprintf(cc, sizeof cc,
+               "cc -std=c11 -Wall -Wextra -Werror -Wno-unused-function -fsanitize=undefined,address -c '%s' -o '%s' "
+               "2>>'%s'",
+               line, opath, epath);
+      if (system(cc) != 0) {
+        rc = -1;
+        break;
+      }
+    }
+    lat += (size_t)snprintf(link + lat, lat < sizeof link ? sizeof link - lat : 0, " '%s'", opath);
+  }
+  pclose(lp);
+  if (rc == 0) {
+    char lcmd[16800];
+    snprintf(lcmd, sizeof lcmd, "cc -fsanitize=undefined,address%s -o '%s' 2>>'%s'", link, bpath, epath);
+    if (system(lcmd) != 0)
+      rc = -1;
+  }
+  if (rc != 0) {
     FILE *ef = fopen(epath, "r");
     size_t n = (ef && out && out_cap) ? fread(out, 1, out_cap - 1, ef) : 0;
     if (out && out_cap)
       out[n] = '\0';
     if (ef)
       fclose(ef);
-    rc = -1;
-  } else {
-    FILE *p = popen(bpath, "r");
-    if (!p) {
-      rc = -1;
-    } else {
-      size_t n = (out && out_cap) ? fread(out, 1, out_cap - 1, p) : 0;
-      if (out && out_cap)
-        out[n] = '\0';
-      const int st = pclose(p);
-      if (exit_code)
-        *exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
-    }
+    return -1;
   }
-
-  unlink(cpath);
-  unlink(bpath);
-  unlink(epath);
-  rmdir(dir);
-  return rc;
+  FILE *p = popen(bpath, "r");
+  if (!p)
+    return -1;
+  size_t n = (out && out_cap) ? fread(out, 1, out_cap - 1, p) : 0;
+  if (out && out_cap)
+    out[n] = '\0';
+  const int st = pclose(p);
+  if (exit_code)
+    *exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+  return 0;
 }
 
 // End-to-end: transpile `sc_src`, compile+run the C, assert the exit code and (when non-NULL)
 // the exact stdout. The single strongest soundness assertion in the suite.
 TH_UNUSED static void sc_run_program(const char *name, const char *sc_src, const int expected_exit,
                                      const char *expected_stdout) {
-  size_t n_err = 0;
-  char first[256];
-  char *code = sc_codegen(name, sc_src, &n_err, first, sizeof first);
-  if (!code)
-    return; // earlier-stage failure already reported
-  CHECK(n_err == 0, "%s: unexpected codegen error: %s", name, first);
-  if (n_err) {
-    free(code);
+  ScResult r = sc_compile(name, sc_src, ST_CODEGEN);
+  if (r.errors && r.err_stage != ST_CODEGEN) // an earlier-stage failure
+    CHECK(false, "%s: unexpected %s error: %s", name, sc_stage_name(r.err_stage), r.first);
+  else
+    CHECK(r.errors == 0, "%s: unexpected codegen error: %s", name, r.first);
+  if (r.errors || !r.code) {
+    ast_free(&r.ast);
+    free(r.code);
+    th_rmtree(r.build_dir);
     return;
   }
   char out[8192];
   int ec = -1;
-  if (sc_compile_and_run(code, out, sizeof out, &ec) != 0) {
-    CHECK(false, "%s: generated C failed to compile:\n%s\n----- generated C -----\n%s", name, out, code);
-    free(code);
-    return;
+  if (sc_run_built(r.build_dir, out, sizeof out, &ec) != 0)
+    CHECK(false, "%s: generated C failed to compile:\n%s\n----- generated C -----\n%s", name, out, r.code);
+  else {
+    CHECK(ec == expected_exit, "%s: expected exit %d, got %d\n----- generated C -----\n%s", name, expected_exit, ec, r.code);
+    if (expected_stdout)
+      CHECK(strcmp(out, expected_stdout) == 0, "%s: expected stdout [%s], got [%s]", name, expected_stdout, out);
   }
-  CHECK(ec == expected_exit, "%s: expected exit %d, got %d\n----- generated C -----\n%s", name, expected_exit, ec, code);
-  if (expected_stdout)
-    CHECK(strcmp(out, expected_stdout) == 0, "%s: expected stdout [%s], got [%s]", name, expected_stdout, out);
-  free(code);
+  ast_free(&r.ast);
+  free(r.code);
+  th_rmtree(r.build_dir);
 }
 
 // Arena scan helpers: the whole AST lives in one node vector in creation order, so locating

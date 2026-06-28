@@ -605,6 +605,52 @@ static void test_checked_arith(void) {
 // declared `= <type>` defaults, so `Pair<bool>` == `Pair<bool, i32>` everywhere -- type annotations
 // (resolve_type), turbofish + method monomorphization (NODE_GENERIC_SPECIALIZATION), and defaults that
 // reference an earlier param (`B = A`, substituted) all build the same complete instance.
+// Builtins are nominal types: the core prelude conforms every scalar to Hash/Eq/Ord/Clone/Default via
+// `extend`, and user code may `extend i32 { .. }` with its own methods. Covers direct dispatch (i32__eq),
+// dispatch through a generic bound (key.hash() in Map, a.cmp() under T: Ord), and the associated function
+// path (T::default() -> i32__default_).
+static void test_builtin_conformances(void) {
+  sc_run_program( // a user extension method on a builtin -> i32__doubled
+      "extend i32 with a method",
+      PRE "extend i32 { fn doubled(self: i32) i32 { return self * 2; } }\n"
+          "fn main() i32 { let x: i32 = 21; exit(x.doubled()); }\n",
+      42, "");
+  sc_run_program( // Map<i32, V>: builtin keys satisfy Hash + Eq
+      "Map over builtin keys (Hash + Eq)",
+      PRE "fn main() i32 {\n"
+          "  let mut m = Map::<i32, i32>::new();\n"
+          "  m.insert(7, 40);\n"
+          "  m.insert(8, 2);\n"
+          "  let mut r: i32 = 0;\n"
+          "  if m.contains_key(&7) { r = r + 40; }\n"
+          "  if m.contains_key(&8) { r = r + 2; }\n"
+          "  if m.contains_key(&9) { r = r + 100; }\n"
+          "  exit(r);\n"
+          "}\n",
+      42, "");
+  sc_run_program( // direct conformance methods on a builtin value
+      "builtin eq/hash/clone dispatch",
+      PRE "fn main() i32 {\n"
+          "  let a: i32 = 21;\n"
+          "  let b = a.clone();\n"
+          "  let mut r: i32 = 0;\n"
+          "  if a.eq(&b) { r = r + 21; }\n"
+          "  r = r + (b.hash() as i32);\n" // hash(21) == 21
+          "  exit(r);\n"
+          "}\n",
+      42, "");
+  sc_run_program( // Ord on a builtin reached through a generic bound -> i32__cmp
+      "builtin Ord through a generic bound",
+      PRE "fn max_of<T: Ord>(a: T, b: T) T { if a.cmp(&b) < 0 { return b; } return a; }\n"
+          "fn main() i32 { exit(max_of::<i32>(13, 42)); }\n",
+      42, "");
+  sc_run_program( // associated function on a builtin reached through a bound -> i32__default_
+      "builtin Default through T::default()",
+      PRE "fn zero<T: Default>() T { return T::default(); }\n"
+          "fn main() i32 { exit(zero::<i32>() + 42); }\n",
+      42, "");
+}
+
 static void test_default_generic_args(void) {
   sc_run_program( // type-annotation path fills B=i32
       "default generic arg via type annotation",
@@ -1534,6 +1580,7 @@ int main(void) {
   test_format_printing();
   test_bounds_checks();
   test_checked_arith();
+  test_builtin_conformances();
   test_default_generic_args();
   test_custom_allocator();
   test_map();

@@ -298,6 +298,39 @@ static void load_prelude(Package *p, const char *std_dir) {
   free(names);
 }
 
+// Inject one synthetic decl per builtin into the core prelude module (`__std::core`), so builtins are nominal
+// types that `extend i32 { .. }` can target and `find_method`/`type_satisfies` can match. The decls live in
+// the node pool only (not program.items): they are never declared as names, only referenced as the resolution
+// of an `extend`'s builtin target. Run after loading, before resolve (which sizes the resolution table).
+static void package_seed_core(Package *p) {
+  p->core_seeded = false;
+  for (size_t i = 0; i < p->count; i++) {
+    if (!p->modules[i].ast || strcmp(p->modules[i].path, "__std::core") != 0)
+      continue;
+    Ast *const a = p->modules[i].ast;
+    for (BuiltinType b = 0; b < BT_COUNT; b++) {
+      const Node decl = {.kind = NODE_STRUCT, .as.aggregate = {.name = NODE_NONE, .is_public = true}};
+      p->builtin_decls[b] = ast_add(a, decl);
+    }
+    p->core_module = (ModuleId)i;
+    p->core_seeded = true;
+    return;
+  }
+}
+
+NodeId package_builtin_decl(const Package *p, const BuiltinType b) {
+  return p->core_seeded && b < BT_COUNT ? p->builtin_decls[b] : NODE_NONE;
+}
+
+int package_builtin_of_decl(const Package *p, const ModuleId module, const NodeId node) {
+  if (!p->core_seeded || module != p->core_module || node == NODE_NONE)
+    return -1;
+  for (int b = 0; b < BT_COUNT; b++)
+    if (p->builtin_decls[b] == node)
+      return b;
+  return -1;
+}
+
 Package *package_load(const char *root_file, const char *std_dir) {
   Package *const p = calloc(1, sizeof *p);
   p->ok = true;
@@ -305,6 +338,7 @@ Package *package_load(const char *root_file, const char *std_dir) {
   p->std_root = std_dir ? dir_of(std_dir) : NULL; // `import std::x;` -> <std_root>/std/x.spc
   load_module(p, stem_of(root_file), strdup(root_file));
   load_prelude(p, std_dir);
+  package_seed_core(p);
   return p;
 }
 
@@ -314,6 +348,7 @@ Package *package_prelude_only(const char *std_dir) {
   p->root_dir = strdup(std_dir ? std_dir : ".");
   p->std_root = std_dir ? dir_of(std_dir) : NULL;
   load_prelude(p, std_dir);
+  package_seed_core(p);
   return p;
 }
 

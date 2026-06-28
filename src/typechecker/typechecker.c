@@ -959,8 +959,14 @@ static bool type_satisfies(TypeChecker *t, const TypeId ty, const DefId iface, c
     tdecl = inst->decl;
     for (uint8_t k = 0; k < inst->n && in < 4; k++)
       iargs[in++] = inst->args[k];
+  } else if (y->kind == TYPE_BUILTIN && t->package) {
+    const NodeId bd = package_builtin_decl(t->package, y->as.builtin); // a builtin conforms via `extend i32 as iface`
+    if (bd == NODE_NONE)
+      return false;
+    tmod = t->package->core_module;
+    tdecl = bd;
   } else {
-    return false; // a builtin/pointer/etc. with no `as iface` impl
+    return false; // a pointer/etc. with no `as iface` impl
   }
   ModuleId imod;
   const NodeId impl = find_impl_as(t, tmod, tdecl, iface, &imod);
@@ -1060,6 +1066,9 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
     case NODE_TYPE_PATH: {
       const DefId d = ast_resolution_def(a, id);
       if (d.node != NODE_NONE) {
+        const int bb = package_builtin_of_decl(t->package, d.module, d.node);
+        if (bb >= 0)
+          return ast_builtin((BuiltinType)bb);
         const Node *const dn = ast_at_const(mod_ast(t, d.module), d.node);
         const NodeList args = n->as.type_path.args;
         if ((dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) && dn->as.aggregate.generics.len > 0 &&
@@ -1188,6 +1197,13 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
         resolve_type(t, arg_ids[i]); // resolve type args first so their TypeIds exist
       const DefId d = ast_resolution_def(a, id);
       if (d.node != NODE_NONE) {
+        // A builtin's synthetic core decl (the target of `extend i32`, or a bare `Self` inside it) is still
+        // the builtin value type, never a struct -- lower it back to the builtin.
+        const int bb = t->package ? package_builtin_of_decl(t->package, d.module, d.node) : -1;
+        if (bb >= 0) {
+          result = ast_builtin((BuiltinType)bb);
+          break;
+        }
         const Node *const dn = ast_at_const(mod_ast(t, d.module), d.node);
         const bool generic_agg =
             (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) && dn->as.aggregate.generics.len > 0;
@@ -2356,6 +2372,23 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
       if (dm.node != NODE_NONE) {
         ast_set_resolution_def(t->ast, mname, dm);
         return subst_type(t, decl_type_in(t, dm.module, dm.node), gp, ga, gn);
+      }
+    }
+  }
+  // A method on a builtin value (`x.abs()`, `key.hash()`): builtins are nominal types anchored in core, so
+  // look the method up on the builtin's synthetic decl (including inherited interface default bodies).
+  {
+    const Ty *const bty = ast_type_at(t->ast, base);
+    if (bty->kind == TYPE_BUILTIN && t->package) {
+      const NodeId bd = package_builtin_decl(t->package, bty->as.builtin);
+      if (bd != NODE_NONE) {
+        DefId mhit = find_method(t, t->package->core_module, bd, name);
+        if (mhit.node == NODE_NONE)
+          mhit = find_default_method(t, t->package->core_module, bd, name);
+        if (mhit.node != NODE_NONE) {
+          ast_set_resolution_def(t->ast, mname, mhit);
+          return decl_type_in(t, mhit.module, mhit.node);
+        }
       }
     }
   }

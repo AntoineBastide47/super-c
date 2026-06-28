@@ -17,7 +17,6 @@
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 #include "module/loader.h"
-#include "repl.h"
 #include "resolver/resolver.h"
 #include "typechecker/typechecker.h"
 
@@ -199,12 +198,12 @@ static char *exe_std_dir(const char *argv0) {
 }
 
 int main(const int argc, char **argv) {
-  if (argc > 2) {
-    printf("Usage: %s [<path/to/script>]\n", BIN_NAME);
+  if (argc != 2) {
+    fprintf(stderr, "Usage: %s <path/to/script>\n", BIN_NAME);
     return 1;
   }
   char *const std_dir = exe_std_dir(argv[0]);
-  const int rc = argc == 2 ? run_file(argv[1], std_dir) : repl_run(std_dir);
+  const int rc = run_file(argv[1], std_dir);
   free(std_dir);
   return rc;
 }
