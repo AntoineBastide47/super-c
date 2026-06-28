@@ -1227,13 +1227,15 @@ static NodeId parse_primary(Parser *p) {
     return parse_switch(p);
   if (type == If) // `if cond { a; } else { b; }` as a value (one-token lookahead, LL(1))
     return parse_if(p);
-  if (match(p, Sizeof)) { // `sizeof(T)` -> usize byte size of a type
+  if (check(p, Sizeof) || check(p, Alignof)) { // `sizeof(T)` / `alignof(T)` -> usize
+    const bool is_align = check(p, Alignof);
+    advance(p);
     expect(p, LeftParen, "'('");
     const NodeId ty = parse_type(p);
     expect(p, RightParen, "')'");
     return ast_add(
         p->ast, (Node){
-                    .kind = NODE_SIZEOF,
+                    .kind = is_align ? NODE_ALIGNOF : NODE_SIZEOF,
                     .span = span_new(start, previous_end(p)),
                     .as.single = {.value = ty},
                 });
@@ -1593,7 +1595,7 @@ static bool starts_range_bound(Parser *p, const RangeContext context) {
   if (context == RANGE_PATTERN)
     return is_literal_token(t) || t == Identifier || t == LeftParen || t == Minus; // `..=-1` negative end bound
   return is_literal_token(t) || t == Identifier || t == LeftParen || t == SelfLower || t == New || t == Switch ||
-         t == Sizeof || unary_operator(t);
+         t == Sizeof || t == Alignof || unary_operator(t);
 }
 
 // `(start)?..(=)?(end)?` with at least one bound. Without a `..` it returns the lone start, so a

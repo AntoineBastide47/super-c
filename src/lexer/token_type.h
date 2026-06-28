@@ -35,6 +35,7 @@ typedef enum TokenType {
   Null,
   Pub,
   Sizeof,
+  Alignof,
   Return,
   SelfLower,
   SelfUpper,

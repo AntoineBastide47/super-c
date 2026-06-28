@@ -392,6 +392,33 @@ TH_UNUSED static int sc_run_built(const char *build_dir, char *out, const size_t
   char bpath[96], epath[96], findcmd[192];
   snprintf(bpath, sizeof bpath, "%s/p", build_dir);
   snprintf(epath, sizeof epath, "%s/e", build_dir);
+  // A digest of every header in the tree, mixed into each object's cache key: a `.c` may be byte-identical
+  // across runs yet include a changed prelude header (a new struct layout), so keying on the `.c` alone would
+  // reuse a stale `.o` compiled against the old ABI. XOR of per-file FNV-1a is order-independent (find order
+  // is not stable) and changes whenever any header changes.
+  uint64_t hdr_digest = 0;
+  snprintf(findcmd, sizeof findcmd, "find %s/build -name '*.h'", build_dir);
+  FILE *hp = popen(findcmd, "r");
+  if (hp) {
+    char hline[512];
+    while (fgets(hline, sizeof hline, hp)) {
+      hline[strcspn(hline, "\n")] = '\0';
+      if (!hline[0])
+        continue;
+      uint64_t fh = 1469598103934665603ULL;
+      FILE *hf = fopen(hline, "rb");
+      if (hf) {
+        int ch;
+        while ((ch = fgetc(hf)) != EOF) {
+          fh ^= (uint64_t)(unsigned char)ch;
+          fh *= 1099511628211ULL;
+        }
+        fclose(hf);
+      }
+      hdr_digest ^= fh;
+    }
+    pclose(hp);
+  }
   snprintf(findcmd, sizeof findcmd, "find %s/build -name '*.c'", build_dir);
   FILE *lp = popen(findcmd, "r");
   if (!lp)
@@ -405,7 +432,7 @@ TH_UNUSED static int sc_run_built(const char *build_dir, char *out, const size_t
     line[strcspn(line, "\n")] = '\0';
     if (!line[0])
       continue;
-    uint64_t h = 1469598103934665603ULL; // FNV-1a over the .c bytes
+    uint64_t h = 1469598103934665603ULL ^ hdr_digest; // FNV-1a over the .c bytes, seeded by the header digest
     FILE *cf = fopen(line, "rb");
     if (cf) {
       int ch;

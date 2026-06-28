@@ -157,6 +157,11 @@ struct Codegen {
     // top (a parameter has no `let` site to attach them to). Consumed once by emit_block_from.
     NodeId param_flags[32];
     uint32_t nparam_flags;
+    // Parameters the function body never references: cast to void at the body top so an intentionally
+    // ignored parameter (e.g. an allocator's unused `self`/`align`) stays `-Werror,-Wunused-parameter`
+    // clean. Set by emit_function, consumed once at the function body's open by emit_block_from.
+    NodeId unused_params[32];
+    uint32_t nunused_params;
     // Per-aggregate DFS emission state (0 unvisited / 1 on-path / 2 emitted), keyed by decl NodeId. Persists
     // across phase_types so the single-TU path can pre-emit a concrete struct (an instance's by-value arg
     // living in a later module) before any instance, and the owning module's phase_types then skips it.
@@ -1931,16 +1936,21 @@ static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg, c
     return true;
   }
   if (cg_struct_name_is(c, y, "String")) {
+    // The format builder is a `String<Global>`, but the argument may be a `String` over a different
+    // allocator (`String<MyAlloc>`); push its bytes through the allocator-agnostic `str` view (`as_str`),
+    // mangled for the argument's own instance, so a custom-allocator String interpolates correctly.
+    char sm[200];
+    render_type_id(c, t, "", sm, sizeof sm); // the arg's concrete instance: String__Global / String__MyAlloc
     if (is_lvalue(c, arg)) { // borrow a named String (the caller still owns it)
-      emit(c, "String__Global__push_string(&%s, &(", f);
+      emit(c, "String__Global__push_str(&%s, %s__as_str(&(", f, sm);
       emit_expr(c, arg);
-      emit(c, "));\n");
+      emit(c, ")));\n");
     } else { // a temporary (e.g. `v.fmt()`): materialize, append, then free it (no leak)
       char tmp[32];
       fresh(c, tmp, sizeof tmp);
-      emit(c, "{ String__Global %s = ", tmp);
+      emit(c, "{ %s %s = ", sm, tmp);
       emit_expr(c, arg);
-      emit(c, "; String__Global__push_string(&%s, &%s); String__Global__free(&%s); }\n", f, tmp, tmp);
+      emit(c, "; String__Global__push_str(&%s, %s__as_str(&%s)); %s__free(&%s); }\n", f, sm, tmp, sm, tmp);
     }
     return true;
   }
@@ -2526,7 +2536,15 @@ static void emit_struct_init(Codegen *c, const Node *n) {
     }
   }
   if (fields.len == 0) {
-    emit(c, "(%s){0}", t);
+    // `T {}` zero-initializes; a struct WITH fields wants `(T){0}`, but a genuinely empty struct
+    // (a ZST allocator tag) has no members, so `(T){0}` would be an excess initializer -> emit `(T){}`.
+    bool zero_fields = false;
+    const DefId d = ast_resolution_def(c->ast, stn); // a NODE_TYPE_PATH carries its resolution on the whole node
+    if (d.node != NODE_NONE) {
+      const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
+      zero_fields = dn->kind == NODE_STRUCT && dn->as.aggregate.members.len == 0;
+    }
+    emit(c, zero_fields ? "(%s){}" : "(%s){0}", t);
     return;
   }
   emit(c, "(%s){ ", t);
@@ -3016,10 +3034,11 @@ static void emit_expr(Codegen *c, const NodeId id) {
     case NODE_GENERIC_SPECIALIZATION:
       emit_expr(c, n->as.specialization.expression); // type args erased
       break;
-    case NODE_SIZEOF: {
+    case NODE_SIZEOF:
+    case NODE_ALIGNOF: {
       char ty[256];
       render_type_node(c, n->as.single.value, "", ty, sizeof ty); // substitutes T inside a specialization
-      emit(c, "sizeof(%s)", ty);
+      emit(c, n->kind == NODE_ALIGNOF ? "_Alignof(%s)" : "sizeof(%s)", ty);
       break;
     }
     case NODE_VA_EXPR:
@@ -3597,6 +3616,13 @@ static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
     emit(c, "bool %s = false;\n", fl);
   }
   c->nparam_flags = 0; // consumed -- nested blocks must not re-emit them
+  for (uint32_t i = 0; i < c->nunused_params; i++) { // unused parameters: cast to void at function-body top
+    char pn[128];
+    render_ident(c, name_span(c, ast_at_const(c->ast, c->unused_params[i])->as.parameter.name), pn, sizeof pn);
+    emit_indent(c);
+    emit(c, "(void)%s;\n", pn);
+  }
+  c->nunused_params = 0; // consumed -- nested blocks must not re-emit them
   const NodeList stmts = n->as.block.statements;
   const NodeId *const ids = ast_list(c->ast, stmts);
   for (uint32_t i = 0; i < stmts.len; i++) {
@@ -5008,6 +5034,104 @@ static void function_name(Codegen *c, const NodeId fn, const DefId target, char 
 
 // Emit a function signature; with_body emits the block, otherwise a prototype `;`. `extern_q`
 // prefixes `extern`. Sets current_ret for multi-return so NODE_RETURN can build the struct.
+// Does the subtree rooted at `id` reference parameter `param` (a NODE_PARAMETER of the current module)?
+// Drives the `(void)param;` cast for genuinely-unused parameters. Over-reporting "unused" is harmless (a
+// redundant cast before a real use still compiles), so any unhandled node kind just stops that branch.
+static bool cg_subtree_uses(Codegen *c, const NodeId id, const NodeId param) {
+  if (id == NODE_NONE)
+    return false;
+  const Node *const n = ast_at_const(c->ast, id);
+  switch (n->kind) {
+    case NODE_IDENTIFIER: {
+      const DefId d = ast_resolution_def(c->ast, id);
+      return d.module == c->ast->module && d.node == param;
+    }
+    case NODE_BLOCK: {
+      const NodeId *const ids = ast_list(c->ast, n->as.block.statements);
+      for (uint32_t i = 0; i < n->as.block.statements.len; i++)
+        if (cg_subtree_uses(c, ids[i], param))
+          return true;
+      return false;
+    }
+    case NODE_LET:
+      return cg_subtree_uses(c, n->as.let_stmt.value, param);
+    case NODE_RETURN: {
+      const NodeId *const ids = ast_list(c->ast, n->as.return_stmt.values);
+      for (uint32_t i = 0; i < n->as.return_stmt.values.len; i++)
+        if (cg_subtree_uses(c, ids[i], param))
+          return true;
+      return false;
+    }
+    case NODE_DEFER:
+    case NODE_EXPRESSION_STATEMENT:
+      return cg_subtree_uses(c, n->as.single.value, param);
+    case NODE_IF:
+      return cg_subtree_uses(c, n->as.if_stmt.condition, param) || cg_subtree_uses(c, n->as.if_stmt.then_branch, param) ||
+             cg_subtree_uses(c, n->as.if_stmt.else_branch, param);
+    case NODE_WHILE:
+      return cg_subtree_uses(c, n->as.while_stmt.condition, param) || cg_subtree_uses(c, n->as.while_stmt.body, param);
+    case NODE_FOR:
+      return cg_subtree_uses(c, n->as.for_stmt.iterable, param) || cg_subtree_uses(c, n->as.for_stmt.body, param);
+    case NODE_MATCH: {
+      if (cg_subtree_uses(c, n->as.match_expr.value, param))
+        return true;
+      const NodeId *const ids = ast_list(c->ast, n->as.match_expr.arms);
+      for (uint32_t i = 0; i < n->as.match_expr.arms.len; i++) {
+        const Node *const arm = ast_at_const(c->ast, ids[i]);
+        if (cg_subtree_uses(c, arm->as.match_arm.guard, param) || cg_subtree_uses(c, arm->as.match_arm.body, param))
+          return true;
+      }
+      return false;
+    }
+    case NODE_ASSIGNMENT:
+    case NODE_BINARY:
+      return cg_subtree_uses(c, n->as.binary.left, param) || cg_subtree_uses(c, n->as.binary.right, param);
+    case NODE_UNARY:
+      return cg_subtree_uses(c, n->as.unary.operand, param);
+    case NODE_CALL: {
+      if (cg_subtree_uses(c, n->as.call.callee, param))
+        return true;
+      const NodeId *const ids = ast_list(c->ast, n->as.call.args);
+      for (uint32_t i = 0; i < n->as.call.args.len; i++)
+        if (cg_subtree_uses(c, ids[i], param))
+          return true;
+      return false;
+    }
+    case NODE_INDEX:
+      return cg_subtree_uses(c, n->as.index.object, param) || cg_subtree_uses(c, n->as.index.index, param);
+    case NODE_MEMBER:
+      return cg_subtree_uses(c, n->as.member.object, param);
+    case NODE_CAST:
+      return cg_subtree_uses(c, n->as.cast.expression, param);
+    case NODE_GENERIC_SPECIALIZATION:
+      return cg_subtree_uses(c, n->as.specialization.expression, param);
+    case NODE_NEW:
+      return cg_subtree_uses(c, n->as.new_expr.initializer, param);
+    case NODE_VA_EXPR:
+      return cg_subtree_uses(c, n->as.va_op.ap, param) || cg_subtree_uses(c, n->as.va_op.extra, param);
+    case NODE_ARRAY_LITERAL: {
+      const NodeId *const ids = ast_list(c->ast, n->as.array_literal.elements);
+      for (uint32_t i = 0; i < n->as.array_literal.elements.len; i++)
+        if (cg_subtree_uses(c, ids[i], param))
+          return true;
+      return false;
+    }
+    case NODE_STRUCT_INITIALIZER: {
+      const NodeId *const ids = ast_list(c->ast, n->as.struct_initializer.fields);
+      for (uint32_t i = 0; i < n->as.struct_initializer.fields.len; i++)
+        if (cg_subtree_uses(c, ast_at_const(c->ast, ids[i])->as.field_initializer.value, param))
+          return true;
+      return false;
+    }
+    case NODE_CLOSURE:
+      return cg_subtree_uses(c, n->as.closure.body, param);
+    case NODE_RANGE:
+      return cg_subtree_uses(c, n->as.pattern_range.start, param) || cg_subtree_uses(c, n->as.pattern_range.end, param);
+    default:
+      return false;
+  }
+}
+
 static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, const bool extern_q,
                           const bool with_body, const char *const name_override, const bool spec_static) {
   const Node *const fn = ast_at_const(c->ast, fn_id);
@@ -5130,30 +5254,22 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
     const NodeList ps = fn->as.function.params;
     const NodeId *const pids = ast_list(c->ast, ps);
     c->nparam_flags = 0;
-    bool any_owned_param = false;
-    for (uint32_t i = 0; i < ps.len; i++)
+    c->nunused_params = 0;
+    for (uint32_t i = 0; i < ps.len; i++) {
       if (cg_will_auto_free(c, pids[i])) {
-        any_owned_param = true;
         cg_register_auto_free(c, pids[i]);
         if (cg_is_cond_moved(c, pids[i]) && c->nparam_flags < (uint32_t)(sizeof c->param_flags / sizeof c->param_flags[0]))
           c->param_flags[c->nparam_flags++] = pids[i]; // declared at body top by emit_block_from
+      } else if (!cg_subtree_uses(c, fn->as.function.body, pids[i]) &&
+                 c->nunused_params < (uint32_t)(sizeof c->unused_params / sizeof c->unused_params[0])) {
+        // A parameter the body never reads (e.g. an allocator's ignored `self`/`align`, or a builtin's
+        // no-op `free(self: &mut Self) {}`) is cast to void at the body top by emit_block_from -- keeps
+        // generated C `-Werror,-Wunused-parameter` clean. (An owned Free param IS used -- freed at close.)
+        c->unused_params[c->nunused_params++] = pids[i];
       }
-    const Node *const bodyn = ast_at_const(c->ast, fn->as.function.body);
-    if (bodyn->kind == NODE_BLOCK && bodyn->as.block.statements.len == 0 && ps.len > 0 && !any_owned_param) {
-      // An empty body that takes parameters none of which it owns (e.g. a builtin's no-op
-      // `free(self: &mut Self) {}`) would leave them unused -> `-Werror,-Wunused-parameter`; cast each to
-      // void so it stays warning-clean. (A by-value Free param IS owned -> emit_block_from frees it instead.)
-      emit(c, "{");
-      for (uint32_t i = 0; i < ps.len; i++) {
-        char pn[128];
-        render_ident(c, name_span(c, ast_at_const(c->ast, pids[i])->as.parameter.name), pn, sizeof pn);
-        emit(c, " (void)%s;", pn);
-      }
-      emit(c, " }\n\n");
-    } else {
-      emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also frees owned parameters
-      emit(c, "\n\n");
     }
+    emit_block_from(c, fn->as.function.body, 0); // base 0: the body's close also frees owned parameters
+    emit(c, "\n\n");
   } else {
     emit(c, ";\n");
   }

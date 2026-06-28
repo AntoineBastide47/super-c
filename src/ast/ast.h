@@ -103,6 +103,7 @@ typedef enum {
   NODE_MATCH_ARM,
   NODE_NEW,
   NODE_SIZEOF, // `sizeof(T)` -> usize; the type node is `as.single.value`
+  NODE_ALIGNOF, // `alignof(T)` -> usize byte alignment; the type node is `as.single.value`
   NODE_VA_EXPR, // `va_start(ap, last)` / `va_arg(ap, T)` / `va_end(ap)`; see `as.va_op`
   NODE_ARRAY_LITERAL,
   NODE_STRUCT_INITIALIZER,
