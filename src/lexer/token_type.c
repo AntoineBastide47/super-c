@@ -28,6 +28,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Null",
     "Pub",
     "Sizeof",
+    "Alignof",
     "Return",
     "SelfLower",
     "SelfUpper",

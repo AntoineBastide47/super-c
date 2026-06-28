@@ -308,6 +308,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
         default:
           return Identifier;
       }
+    case 7:
+      return memcmp(lexeme, "alignof", 7) == 0 ? Alignof : Identifier;
     case 8:
       return memcmp(lexeme, "continue", 8) == 0 ? Continue : Identifier;
     case 9:

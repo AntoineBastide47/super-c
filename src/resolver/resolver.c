@@ -787,6 +787,7 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       resolve_type(r, n->as.cast.type);
       break;
     case NODE_SIZEOF:
+    case NODE_ALIGNOF:
       resolve_type(r, n->as.single.value);
       break;
     case NODE_VA_EXPR:

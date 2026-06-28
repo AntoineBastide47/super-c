@@ -299,6 +299,7 @@ static const char *kind_name(const NodeKind kind) {
       "MatchArm",
       "New",
       "Sizeof",
+      "Alignof",
       "VaExpr",
       "ArrayLiteral",
       "StructInitializer",

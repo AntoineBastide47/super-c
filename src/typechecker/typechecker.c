@@ -2718,7 +2718,8 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_SIZEOF:
-      resolve_type(t, n->as.single.value); // validate the type; its byte size is a usize
+    case NODE_ALIGNOF:
+      resolve_type(t, n->as.single.value); // validate the type; its byte size/alignment is a usize
       result = ast_builtin(BT_USIZE);
       break;
     case NODE_VA_EXPR: {

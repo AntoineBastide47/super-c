@@ -552,6 +552,24 @@ static void test_format_printing(void) {
           "  let s = String::from_hex(3735928559, false); s.print();\n" // 0xdeadbeef
           "  putchar(10); exit(0); }\n",
       0, "dec=255 x=ff X=FF u=1000 neg=-ff\ndeadbeef\n");
+  // A `String` argument over a CUSTOM allocator interpolates correctly: the builder is a `String<Global>`, but
+  // the argument's bytes are pushed through its own allocator-agnostic `str` view (`as_str`), so a heap
+  // `String<MyAlloc>` is rendered, not skipped. (Earlier the interpolation assumed `String<Global>`.)
+  sc_run_program(
+      "format interpolates a custom-allocator String argument",
+      PRE "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\n"
+          "struct Mallocator {}\n"
+          "extend Mallocator as Allocator {\n"
+          "  fn alloc(self: &mut Mallocator, n: usize, align: usize) *mut void { return malloc(n); }\n"
+          "  fn realloc(self: &mut Mallocator, p: *mut void, o: usize, n: usize, align: usize) *mut void { return realloc(p, n); }\n"
+          "  fn dealloc(self: &mut Mallocator, p: *mut void, n: usize, align: usize) void { free(p); }\n"
+          "}\n"
+          "extend Mallocator as Default { fn default() Mallocator { return Mallocator {}; } }\n"
+          "fn label() String<Mallocator> { return String::<Mallocator>::from_str(\"a custom-allocated heap label beyond SSO\"); }\n"
+          "fn main() i32 {\n"
+          "  let mut out = format(\"[{}] #{}\", label(), 7);\n"  // label() is a temporary String<Mallocator>
+          "  out.println(); out.free(); exit(0); }\n",
+      0, "[a custom-allocated heap label beyond SSO] #7\n");
 }
 
 // Bounds checks: an in-bounds array/slice index reads correctly through `__sc_bounds`; a constant
@@ -672,18 +690,19 @@ static void test_default_generic_args(void) {
 
 // Allocator-typed ownership: a user allocator chosen via turbofish (`Box::<T, A>` / `Vector::<T, A>`) threads
 // through allocation, growth (realloc) and auto-Free, distinct from the default `Global` path -- the allocator
-// is part of the type. Both allocate real memory, so this also proves ASan-clean release through the right
-// `dealloc`. (`A` is a zero-sized tag: no per-container storage.)
+// is part of the type, stored in the container and called with self + size/align. Both allocate real memory,
+// so this also proves ASan-clean release through the right `dealloc`. (`A` is zero-sized here: no space cost.)
 static void test_custom_allocator(void) {
   sc_run_program(
       "custom allocator threads through Box + Vector; Global default alongside",
       PRE "extern \"C\" { fn malloc(size: usize) *mut void; fn realloc(p: *mut void, size: usize) *mut void; fn free(p: *mut void) void; }\n"
           "struct Mallocator {}\n"
           "extend Mallocator as Allocator {\n"
-          "  fn alloc(size: usize) *mut void { return malloc(size); }\n"
-          "  fn realloc(p: *mut void, size: usize) *mut void { return realloc(p, size); }\n"
-          "  fn dealloc(p: *mut void) void { free(p); }\n"
+          "  fn alloc(self: &mut Mallocator, size: usize, align: usize) *mut void { return malloc(size); }\n"
+          "  fn realloc(self: &mut Mallocator, p: *mut void, old_size: usize, new_size: usize, align: usize) *mut void { return realloc(p, new_size); }\n"
+          "  fn dealloc(self: &mut Mallocator, p: *mut void, size: usize, align: usize) void { free(p); }\n"
           "}\n"
+          "extend Mallocator as Default { fn default() Mallocator { return Mallocator {}; } }\n"
           "fn main() i32 {\n"
           "  let mut b = Box::<i32, Mallocator>::new(40); b.set(2);\n"     // custom-allocated box
           "  let g = Box::<i32>::new(0);\n"                                 // Global-allocated box (the default)
@@ -693,16 +712,17 @@ static void test_custom_allocator(void) {
           "  exit(*b.get() + *g.get() + last + 21); }\n",                   // 2 + 0 + 19 + 21 = 42
       42, "");
   // String is allocator-typed too (SSO: short strings stay inline; long ones allocate through `A`). A custom
-  // allocator selected by turbofish drives the heap variant; the SSO union is preserved across the migration.
+  // allocator selected by turbofish drives the heap variant; the allocator is stored beside the SSO union.
   sc_run_program(
       "custom allocator on a heap (non-SSO) String, with auto-Free",
       PRE "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\n"
           "struct Mallocator {}\n"
           "extend Mallocator as Allocator {\n"
-          "  fn alloc(n: usize) *mut void { return malloc(n); }\n"
-          "  fn realloc(p: *mut void, n: usize) *mut void { return realloc(p, n); }\n"
-          "  fn dealloc(p: *mut void) void { free(p); }\n"
+          "  fn alloc(self: &mut Mallocator, n: usize, align: usize) *mut void { return malloc(n); }\n"
+          "  fn realloc(self: &mut Mallocator, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return realloc(p, n); }\n"
+          "  fn dealloc(self: &mut Mallocator, p: *mut void, n: usize, align: usize) void { free(p); }\n"
           "}\n"
+          "extend Mallocator as Default { fn default() Mallocator { return Mallocator {}; } }\n"
           "fn run() i32 {\n"
           "  let mut s = String::<Mallocator>::from_str(\"a long heap string beyond the 23-byte SSO inline buffer\");\n"
           "  s.push_str(\" + more\");\n"           // grows the heap buffer through Mallocator::realloc
@@ -720,6 +740,94 @@ static void test_custom_allocator(void) {
           "  let long = String::from_str(\"a heap-backed string that exceeds the small buffer length\");\n"
           "  return (short.len() + long.len()) as i32 - 17; }\n"                       // 2 + 57 - 17 = 42
           "fn main() i32 { exit(run()); }\n",
+      42, "");
+}
+
+// A STATEFUL allocator: a bump arena owns one buffer; a small Copy handle (`ArenaRef`, just a pointer) is
+// stored in each container and bumps the shared arena's offset -- so the allocator carries per-instance state
+// (distinct from the zero-sized `Global`). It uses `align` (rounds the bump pointer) and `old_size` (the
+// realloc copy), and its `dealloc` is a no-op because the arena reclaims everything at once. Exercised across
+// Vector (forces realloc growth), Box, Map, Set and a heap String through `new_in`/`from_str_in` -- the String
+// stores the handle outside its SSO union and grows through it -- then released en masse. ASan-clean.
+// (The handle also implements `Default` -- a never-called null sentinel -- because the re-homed macro path
+// emits the default-constructible `new()`/`with_capacity()` unconditionally.)
+static void test_stateful_allocator(void) {
+  sc_run_program(
+      "stateful bump-arena allocator stored in Vector/Box/Map/Set (sized + aligned)",
+      PRE "extern \"C\" { fn malloc(n: usize) *mut void; fn free(p: *mut void) void; fn memcpy(d: *mut void, s: *const void, n: usize) *mut void; }\n"
+          "struct Arena { pub buf: *mut u8, pub off: usize, pub cap: usize, }\n"
+          "extend Arena {\n"
+          "  fn make(cap: usize) Arena { return Arena { buf: malloc(cap) as *mut u8, off: 0, cap: cap, }; }\n"
+          "  fn handle(self: &mut Arena) ArenaRef { return ArenaRef { a: self, }; }\n"
+          "  fn used(self: &Arena) usize { return self.off; }\n"
+          "  fn free(self: &mut Arena) { free(self.buf as *mut void); self.buf = null; self.off = 0; self.cap = 0; }\n"
+          "}\n"
+          "struct ArenaRef { pub a: *mut Arena, }\n"
+          "extend ArenaRef as Allocator {\n"
+          "  fn alloc(self: &mut ArenaRef, size: usize, align: usize) *mut void {\n"
+          "    let mut off = self.a[0].off; let rem = off % align;\n"
+          "    if rem != 0 { off = off + (align - rem); }\n"                          // align the bump pointer
+          "    let p = ((self.a[0].buf as usize) + off) as *mut void;\n"
+          "    self.a[0].off = off + size; return p;\n"
+          "  }\n"
+          "  fn realloc(self: &mut ArenaRef, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {\n"
+          "    let np = self.alloc(new_size, align);\n"
+          "    if ptr != null { if old_size > 0 { memcpy(np, ptr as *const void, old_size); } }\n" // copy old_size bytes
+          "    return np;\n"
+          "  }\n"
+          "  fn dealloc(self: &mut ArenaRef, ptr: *mut void, size: usize, align: usize) void { }\n" // reclaimed en masse
+          "}\n"
+          "extend ArenaRef as Default { fn default() ArenaRef { return ArenaRef { a: null, }; } }\n"
+          "fn main() i32 {\n"
+          "  let mut arena = Arena::make(8192);\n"
+          "  let h = arena.handle();\n"
+          "  let mut v = Vector::<i32, ArenaRef>::new_in(h);\n"
+          "  let mut i = 0; while i < 50 { v.push(i); i = i + 1; }\n"                  // realloc growth via the arena
+          "  let mut b = Box::<i64, ArenaRef>::new_in(h, 1000);\n"
+          "  let mut m = Map::<i32, i32, ArenaRef>::new_in(h); m.insert(7, 70); m.insert(8, 80);\n"
+          "  let mut s = Set::<i32, ArenaRef>::new_in(h); s.insert(9); s.insert(9); s.insert(10);\n"
+          "  let mut str1 = String::<ArenaRef>::from_str_in(h, \"an arena-backed heap string beyond the inline budget\");\n"
+          "  str1.push_str(\" grown through the stored handle\");\n"                    // realloc via the stored arena handle
+          "  let str_ok = str1.eq_str(\"an arena-backed heap string beyond the inline budget grown through the stored handle\");\n"
+          "  let mut sum: i64 = *b.get();\n"
+          "  let mut k: usize = 0; while k < 50 { sum = sum + ((*v.at(k)) as i64); k = k + 1; }\n" // 0..49 -> 1225
+          "  sum = sum + ((*m.get(&7).unwrap_or(&0)) as i64) + (s.len() as i64);\n"    // +70 +2
+          "  v.free(); b.free(); m.free(); s.free(); str1.free();\n"                  // dealloc is a no-op
+          "  let touched = arena.used() > 0; arena.free();\n"                          // whole arena freed at once
+          "  if touched && str_ok { exit((sum - 2255) as i32); }\n"                   // 1000+1225+70+2 = 2297 -> 42
+          "  exit(1); }\n",
+      42, "");
+}
+
+// Set<T, A = Global>: a hash set. Insert dedups (per Eq), `contains` borrows a lookup key, `remove` reports
+// presence, `len`/`is_empty` track size. Over a Free element (String) the duplicate is freed on insert, the
+// stored key is freed on remove, and scope-exit auto-Free deep-frees the rest -- all exactly-once, ASan-clean.
+static void test_set(void) {
+  sc_run_program(
+      "Set<i32>: insert dedup, contains, remove, len",
+      PRE "fn main() i32 {\n"
+          "  let mut s = Set::<i32>::new();\n"
+          "  s.insert(1); s.insert(2); s.insert(2); s.insert(3);\n"  // dedup -> {1,2,3}
+          "  let mut acc = s.len() as i32;\n"                         // 3
+          "  if s.contains(&2) { acc = acc + 10; }\n"                 // 13
+          "  if s.remove(&2) { acc = acc + 100; }\n"                  // 113
+          "  if !s.contains(&2) { acc = acc + 1000; }\n"             // 1113
+          "  acc = acc + (s.len() as i32);\n"                         // +2 = 1115
+          "  s.free();\n"
+          "  exit(acc - 1073); }\n",                                  // 1115 - 1073 = 42
+      42, "");
+  sc_run_program(
+      "Set<String>: dedup frees the duplicate, deep auto-Free",
+      PRE "fn main() i32 {\n"
+          "  let mut s = Set::<String>::new();\n"
+          "  s.insert(String::from_str(\"alpha heap key beyond the inline buffer length\"));\n"
+          "  s.insert(String::from_str(\"beta heap key beyond the inline buffer length too\"));\n"
+          "  s.insert(String::from_str(\"alpha heap key beyond the inline buffer length\"));\n" // dup -> freed
+          "  let mut acc = s.len() as i32;\n"                         // 2 (alpha, beta)
+          "  let mut k = String::from_str(\"beta heap key beyond the inline buffer length too\");\n"
+          "  if s.contains(&k) { acc = acc + 40; }\n"                 // 42
+          "  k.free(); s.free();\n"                                   // s.free() deep-frees the remaining keys
+          "  exit(acc); }\n",
       42, "");
 }
 
@@ -1583,6 +1691,8 @@ int main(void) {
   test_builtin_conformances();
   test_default_generic_args();
   test_custom_allocator();
+  test_stateful_allocator();
+  test_set();
   test_map();
   test_multi_from();
   test_generics();
