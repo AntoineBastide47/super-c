@@ -5636,6 +5636,25 @@ static DefId impl_trait(Ast *const a, const Node *const impl) {
   return ast_resolution_def(a, impl->as.impl_def.trait_type);
 }
 
+// True if every interface bound on impl `impl`'s generic params is satisfied by the instance's args, so the
+// block's methods may be specialized for it. A method on `extend<A: Allocator + Default> Box<T, A>` must NOT
+// be emitted for an instance whose A lacks `Default` -- its body would call `A::default()`, an undefined
+// symbol. (Conformance impls are additionally gated by impl_trait/cg_type_satisfies above.)
+static bool cg_impl_bounds_hold(Codegen *c, const Node *const impl, const TypeId *const args, const uint8_t n) {
+  const NodeList gens = impl->as.impl_def.generics;
+  const NodeId *const gids = ast_list(c->ast, gens);
+  for (uint32_t g = 0; g < gens.len && g < n; g++) {
+    const NodeList gb = ast_at_const(c->ast, gids[g])->as.generic_param.bounds;
+    const NodeId *const gbids = ast_list(c->ast, gb);
+    for (uint32_t b = 0; b < gb.len; b++) {
+      const DefId gbi = ast_resolution_def(c->ast, gbids[b]);
+      if (gbi.node != NODE_NONE && !cg_type_satisfies(c, args[g], gbi, 0))
+        return false;
+    }
+  }
+  return true;
+}
+
 // Emit specialized methods for every concrete generic instance OWNED by this module (moved here by
 // package_propagate_instances): for each impl targeting the instance's generic decl, emit each method as
 // `<Inst>__<method>` with the impl's type params bound to the instance args. Unlike free-function specs
@@ -5662,6 +5681,8 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
     if (itrait.node != NODE_NONE &&
         !cg_type_satisfies(c, ast_intern_instance(c->ast, it->module, it->decl, it->args, it->n), itrait, 0))
       continue;
+    if (!cg_impl_bounds_hold(c, n, it->args, it->n)) // a block whose param bounds the args don't meet (e.g.
+      continue;                                      // `A: Default` for a non-Default allocator) emits nothing
     const NodeList gens = n->as.impl_def.generics;
     const NodeId *const gids = ast_list(c->ast, gens);
     const NodeList ms = n->as.impl_def.items;

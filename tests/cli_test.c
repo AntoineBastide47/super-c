@@ -271,6 +271,32 @@ static void test_emit_macro_export(void) {
   CHECK(strstr(buf, "generic struct or enum") != NULL, "the rejection names the constraint: %s", buf);
 }
 
+// Per-impl bound filtering: a generic with a bounded extension block (`extend<T: Marker> Wrap<T>`) plus an
+// unbounded one, instantiated over a type that does NOT satisfy the bound. The bounded block's methods must
+// not be specialized for it (their bodies would call an unprovided method -> an undefined symbol); only the
+// unbounded block emits. This is what lets a stateful (non-Default) allocator skip a `Default`-bounded ctor.
+static void test_per_impl_bound_filtering(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/pibf", DIR);
+  mkfile(root, "pibf.spc",
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "pub interface Marker { fn mark(self: &Self) i32; }\n"
+         "pub struct Wrap<T> { pub v: T }\n"
+         "extend<T> Wrap<T> { pub fn raw(self: &Wrap<T>) i32 { return 7; } }\n"
+         "extend<T: Marker> Wrap<T> { pub fn marked(self: &Wrap<T>) i32 { return self.v.mark(); } }\n"
+         "struct Plain { pub n: i32 }\n" // deliberately does NOT implement Marker
+         "fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; exit(w.raw()); }\n");
+  snprintf(spc, sizeof spc, "%s/pibf.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "generic with an unsatisfied bounded block compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/pibf.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "the unsatisfied bounded block emits nothing (no undefined ref): %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 7, "the unbounded method still runs");
+}
+
 // A `pub interface` declared in one module, then implemented over a local type via `extend T as
 // mod::Iface` and consumed by a bounded generic in another module: the bound resolves across the import,
 // the impl satisfies it, and the bounded call dispatches to the concrete method. Built -Werror and run.
@@ -467,6 +493,7 @@ int main(void) {
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();
   test_emit_macro_export();
+  test_per_impl_bound_filtering();
   test_cross_module_interface();
   test_ffi_bindings();
   test_module_imports();
