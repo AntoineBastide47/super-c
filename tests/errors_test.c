@@ -13,19 +13,29 @@
 #  include <pty.h>
 #endif
 
-static void emitf(String_Vec *e, U32_Vec *s, U32_Vec *l, const uint32_t at, const uint32_t len, const char *fmt, ...) {
+static void emitf(String_Vec *e, String_Vec *n, U32_Vec *s, U32_Vec *l, const uint32_t at, const uint32_t len,
+                  const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  errors_vemitf(e, s, l, at, len, fmt, ap);
+  errors_vemitf(e, n, s, l, at, len, fmt, ap);
+  va_end(ap);
+}
+
+static void notef(String_Vec *e, String_Vec *n, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  errors_vnotef(e, n, fmt, ap);
   va_end(ap);
 }
 
 // Build, finalize and return the rendered diagnostics vector (caller: free_errors).
 static String_Vec make_blocks(const char *src, const char *msg, const uint32_t off, const uint32_t span) {
   String_Vec e = String_Vec_init();
+  String_Vec n = String_Vec_init();
   U32_Vec s = U32_Vec_init(), l = U32_Vec_init();
-  emitf(&e, &s, &l, off, span, "%s", msg);
-  errors_finalize(&e, &s, &l, (const uint8_t *)src, strlen(src), NULL);
+  emitf(&e, &n, &s, &l, off, span, "%s", msg);
+  errors_finalize(&e, &n, &s, &l, (const uint8_t *)src, strlen(src), NULL);
+  free_errors(&n);
   VEC_DEINIT(s);
   VEC_DEINIT(l);
   return e;
@@ -46,12 +56,14 @@ static uint32_t offset_of(const char *src, const char *needle) {
 
 static void test_emit_collects(void) {
   String_Vec e = String_Vec_init();
+  String_Vec n = String_Vec_init();
   U32_Vec s = U32_Vec_init(), l = U32_Vec_init();
-  emitf(&e, &s, &l, 12, 3, "count is %d for %s", 7, "x");
+  emitf(&e, &n, &s, &l, 12, 3, "count is %d for %s", 7, "x");
   CHECK(e.len == 1 && s.len == 1 && l.len == 1, "one message + span recorded");
   CHECK_STR_EQ(e.data[0], "count is 7 for x"); // varargs formatting
   CHECK(s.data[0] == 12 && l.data[0] == 3, "span recorded verbatim");
   free_errors(&e);
+  free_errors(&n);
   VEC_DEINIT(s);
   VEC_DEINIT(l);
 }
@@ -74,11 +86,29 @@ static void test_file_in_location(void) {
   static const char src[] = "ab\ncd\n  foo bar\n";
   const uint32_t off = offset_of(src, "bar");
   String_Vec e = String_Vec_init();
+  String_Vec n = String_Vec_init();
   U32_Vec s = U32_Vec_init(), l = U32_Vec_init();
-  emitf(&e, &s, &l, off, 3, "%s", "boom");
-  errors_finalize(&e, &s, &l, (const uint8_t *)src, strlen(src), "src/foo.spc");
+  emitf(&e, &n, &s, &l, off, 3, "%s", "boom");
+  errors_finalize(&e, &n, &s, &l, (const uint8_t *)src, strlen(src), "src/foo.spc");
   CHECK_STR_CONTAINS(e.data[0], "--> src/foo.spc:3:7"); // file:line:col
   free_errors(&e);
+  free_errors(&n);
+  VEC_DEINIT(s);
+  VEC_DEINIT(l);
+}
+
+static void test_notes(void) {
+  static const char src[] = "let x = y;\n";
+  String_Vec e = String_Vec_init();
+  String_Vec n = String_Vec_init();
+  U32_Vec s = U32_Vec_init(), l = U32_Vec_init();
+  emitf(&e, &n, &s, &l, offset_of(src, "y"), 1, "%s", "unknown name");
+  notef(&e, &n, "did you mean '%s'?", "x");
+  errors_finalize(&e, &n, &s, &l, (const uint8_t *)src, strlen(src), NULL);
+  CHECK_STR_CONTAINS(e.data[0], "error: unknown name");
+  CHECK_STR_CONTAINS(e.data[0], "= note: did you mean 'x'?");
+  free_errors(&e);
+  free_errors(&n);
   VEC_DEINIT(s);
   VEC_DEINIT(l);
 }
@@ -205,6 +235,7 @@ int main(void) {
   test_emit_collects();
   test_line_col_and_carets();
   test_file_in_location();
+  test_notes();
   test_caret_clamping();
   test_line_starts_crlf();
   test_long_line_windowing();

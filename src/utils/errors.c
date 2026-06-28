@@ -6,8 +6,8 @@
 #include <unistd.h>
 
 COLD_EXPORT void errors_vemitf(
-    String_Vec *errors, U32_Vec *errors_start, U32_Vec *errors_len, const uint32_t at, const uint32_t len,
-    const char *fmt, va_list args) {
+    String_Vec *errors, String_Vec *errors_notes, U32_Vec *errors_start, U32_Vec *errors_len, const uint32_t at,
+    const uint32_t len, const char *fmt, va_list args) {
   va_list copy;
   va_copy(copy, args);
   const int msg_len = vsnprintf(NULL, 0, fmt, copy);
@@ -21,8 +21,48 @@ COLD_EXPORT void errors_vemitf(
   vsnprintf(result, msg_len + 1, fmt, args);
 
   String_Vec_push(errors, result);
+  if (errors_notes) {
+    char *const empty = malloc(1);
+    if (empty == NULL) {
+      fprintf(stderr, "fatal: out of memory\n");
+      abort();
+    }
+    empty[0] = '\0';
+    String_Vec_push(errors_notes, empty);
+  }
   U32_Vec_push(errors_start, at);
   U32_Vec_push(errors_len, len);
+}
+
+COLD_EXPORT void errors_vnotef(String_Vec *errors, String_Vec *errors_notes, const char *fmt, va_list args) {
+  if (!errors || !errors_notes || errors->len == 0 || errors_notes->len < errors->len)
+    return;
+  va_list copy;
+  va_copy(copy, args);
+  const int msg_len = vsnprintf(NULL, 0, fmt, copy);
+  va_end(copy);
+
+  char *const msg = malloc((size_t)msg_len + 1);
+  if (msg == NULL) {
+    fprintf(stderr, "fatal: out of memory\n");
+    abort();
+  }
+  vsnprintf(msg, msg_len + 1, fmt, args);
+
+  char *old = errors_notes->data[errors->len - 1];
+  const size_t old_len = old ? strlen(old) : 0;
+  const size_t add = strlen(msg) + sizeof "\n  = note: ";
+  char *const next = malloc(old_len + add + 1);
+  if (next == NULL) {
+    fprintf(stderr, "fatal: out of memory\n");
+    abort();
+  }
+  if (old_len)
+    memcpy(next, old, old_len);
+  snprintf(next + old_len, add + 1, "\n  = note: %s", msg);
+  free(old);
+  free(msg);
+  errors_notes->data[errors->len - 1] = next;
 }
 
 static bool at_or_before(const uint32_t line_start, void *const off) {
@@ -40,7 +80,7 @@ static bool at_or_before(const uint32_t line_start, void *const off) {
 // malloc'd block; the caller frees the original message.
 COLD char *render(
     const char *msg, const uint8_t *source, const U32_Vec *line_starts, const size_t src_len, uint32_t off,
-    const uint32_t span, const char *file) {
+    const uint32_t span, const char *file, const char *notes) {
   if (off > src_len)
     off = (uint32_t)src_len;
   const size_t li = U32_Vec_partition_point(line_starts, at_or_before, &off) - 1;
@@ -83,7 +123,8 @@ COLD char *render(
   const char *const fsep = (file && file[0]) ? ":" : "";
 
   // Single generously-sized buffer; snprintf truncates safely if over-estimated.
-  const size_t cap = strlen(msg) + (size_t)line_len + real_col + carets + (size_t)gw * 4 + strlen(fpfx) + 128;
+  const size_t cap =
+      strlen(msg) + strlen(notes ? notes : "") + (size_t)line_len + real_col + carets + (size_t)gw * 4 + strlen(fpfx) + 128;
   char *const out = malloc(cap);
   if (out == NULL) {
     fprintf(stderr, "fatal: out of memory\n");
@@ -96,17 +137,17 @@ COLD char *render(
       "%*s--> %s%s%zu:%zu\n" //  --> file:L:C
       "%*s |\n" //    |
       "%*zu | %.*s\n" //  N | <source line>
-      "%*s | %*s%s", //    |    ^^^
+      "%*s | %*s%s%s", //    |    ^^^
       msg, gw, "", fpfx, fsep, line_no, real_col + 1, gw, "", gw, line_no, line_len, line_ptr, gw, "", (int)caret_col, "",
-      bar);
+      bar, notes ? notes : "");
 
   free(bar);
   return out;
 }
 
 COLD_EXPORT void errors_finalize(
-    String_Vec *errors, const U32_Vec *errors_start, const U32_Vec *errors_len, const uint8_t *source,
-    const size_t len, const char *file) {
+    String_Vec *errors, const String_Vec *errors_notes, const U32_Vec *errors_start, const U32_Vec *errors_len,
+    const uint8_t *source, const size_t len, const char *file) {
   if (errors->len == 0)
     return;
 
@@ -138,8 +179,9 @@ COLD_EXPORT void errors_finalize(
   }
 
   for (size_t e = 0; e < errors->len; e++) {
+    const char *const notes = errors_notes && e < errors_notes->len ? errors_notes->data[e] : "";
     char *const block =
-        render(errors->data[e], source, &line_starts, len, errors_start->data[e], errors_len->data[e], file);
+        render(errors->data[e], source, &line_starts, len, errors_start->data[e], errors_len->data[e], file, notes);
     free(errors->data[e]);
     errors->data[e] = block;
   }

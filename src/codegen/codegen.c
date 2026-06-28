@@ -1141,6 +1141,7 @@ static void emit_literal(Codegen *c, const NodeId id, const Node *n) {
       break;
     case RawStringLiteral:
       codegen_errorf(c, s.start, s.end - s.start, "codegen: raw string literals are not yet supported");
+      codegen_notef(c, "use a normal escaped string literal for now");
       emit_span(c, s);
       break;
     default:
@@ -1193,7 +1194,7 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
           render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent (same module)
         } else if (dn->kind == NODE_TYPE_ALIAS) {
           render_type_id(c, ast_type(c->ast, tn), decl, out, cap); // imported alias: use the resolved type
-        } else if (dn->kind == NODE_GENERIC_PARAM || dn->kind == NODE_TRAIT) {
+        } else if (dn->kind == NODE_GENERIC_PARAM || dn->kind == NODE_INTERFACE) {
           // A type param (concrete inside a specialization) or `Self` inside a synthesized interface
           // default method (substituted to the implementing type via the same subst stack).
           const TypeId s = subst_lookup(c, d.module, d.node);
@@ -1208,6 +1209,7 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
           }
         } else {
           codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: opaque type is not yet supported");
+          codegen_notef(c, "opaque extern types are supported through 'extern \"C\" { type Name; }' aliases");
           buf_join3(out, cap, "void", SEP(decl), decl);
         }
         break;
@@ -1286,6 +1288,7 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
         buf_join3(out, cap, "void ", "", inner);
       } else {
         codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: multi-return function pointer is not yet supported");
+        codegen_notef(c, "wrap multiple return values in a struct when using a function pointer type");
         buf_join3(out, cap, "void ", "", inner);
       }
       break;
@@ -1436,7 +1439,7 @@ static bool cg_binding_subst_indirect(Codegen *c, const NodeId tn) {
   if (d.node == NODE_NONE)
     return false;
   const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
-  if (dn->kind != NODE_GENERIC_PARAM && dn->kind != NODE_TRAIT)
+  if (dn->kind != NODE_GENERIC_PARAM && dn->kind != NODE_INTERFACE)
     return false;
   const TypeId s = subst_lookup(c, d.module, d.node);
   if (s == TYPE_NONE)
@@ -1633,7 +1636,7 @@ static bool cg_span_eq(const uint8_t *const sa, const Span a, const uint8_t *con
 }
 
 // The concrete `extend <tdecl> { fn <name> }` method for a type (its module or the current module), used
-// to dispatch a bound method on a now-monomorphized generic receiver to the real impl. {_,NODE_NONE} if none.
+// to dispatch a bound method on a now-monomorphized generic receiver to the real extend. {_,NODE_NONE} if none.
 static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl, const uint8_t *const nsrc, const Span name) {
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
@@ -1644,12 +1647,12 @@ static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl,
     const NodeId *const ids = ast_list(a, items);
     for (uint32_t i = 0; i < items.len; i++) {
       const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
+      if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
       if (tg.module != tmod || tg.node != tdecl)
         continue;
-      const NodeList ms = it->as.impl_def.items;
+      const NodeList ms = it->as.extend_def.items;
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
@@ -1673,12 +1676,12 @@ static DefId cg_find_method_cstr(Codegen *c, const ModuleId tmod, const NodeId t
     const NodeId *const ids = ast_list(a, items);
     for (uint32_t i = 0; i < items.len; i++) {
       const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
+      if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
       if (tg.module != tmod || tg.node != tdecl)
         continue;
-      const NodeList ms = it->as.impl_def.items;
+      const NodeList ms = it->as.extend_def.items;
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
@@ -1999,6 +2002,7 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
   const Node *const fmtn = args.len ? ast_at_const(c->ast, aids[0]) : NULL;
   if (!fmtn || fmtn->kind != NODE_LITERAL || fmtn->as.literal.token_type != StringLiteral) {
     codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: format string must be a string literal");
+    codegen_notef(c, "format strings are parsed at compile time so placeholders can be checked");
     return true;
   }
   char f[32];
@@ -2032,6 +2036,7 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
         }
         if (ai >= args.len) {
           codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more `{}` placeholders than arguments");
+          codegen_notef(c, "add an argument for each placeholder or escape literal braces as '{{' and '}}'");
           emit(c, "%s; })", f);
           return true;
         }
@@ -2040,6 +2045,10 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
           codegen_errorf(c, as.start, as.end - as.start,
                          spec ? "codegen: `{:x}`/`{:X}` hex format requires an integer argument"
                               : "codegen: argument is not directly formattable (call its .fmt())");
+          if (spec)
+            codegen_notef(c, "hex formatting is currently implemented only for integer types");
+          else
+            codegen_notef(c, "implement Format for this type or pass a value that already formats directly");
         }
         ai++;
         i = j + 1;
@@ -2056,8 +2065,10 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
     emit_fmt_cstr(c, seg, end);
     emit(c, ") - 1 });\n");
   }
-  if (ai < args.len)
+  if (ai < args.len) {
     codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more arguments than `{}` placeholders");
+    codegen_notef(c, "remove the extra argument or add a matching '{}' placeholder");
+  }
   if (kind == 3)
     emit(c, "String__Global__push_byte(&%s, 10);\n", f);
   if (kind == 1) {
@@ -2078,7 +2089,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     return;
 
   // `x.free()` Free intrinsic: only when the type checker left it unresolved (an unbounded generic
-  // receiver, monomorphized here) -- emit x's Free impl when the concrete type is Free, else a no-op. This
+  // receiver, monomorphized here) -- emit x's Free extend when the concrete type is Free, else a no-op. This
   // is what lets one generic container conformance free its elements (`Vector<String>` frees its Strings,
   // `Vector<i32>` skips them). A resolved `.free()` (concrete type or `T: Free` bound) falls through to the
   // normal call path, which handles its real return type and receiver auto-ref.
@@ -2229,14 +2240,14 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       const DefId td = ast_resolution_def(c->ast, callee->as.member.object); // the Target type (none = module fn)
       DefId emd = md;
       // `T::assoc()` on a type parameter: resolve T to the concrete type (we are emitting a specialization)
-      // and dispatch to that type's `as`-impl method instead of the abstract interface method.
+      // and dispatch to that type's `as`-extend method instead of the abstract interface method.
       TypeId param_tgt = TYPE_NONE;
       if (td.node != NODE_NONE && ast_at_const(cg_mod_ast(c, td.module), td.node)->kind == NODE_GENERIC_PARAM) {
         const TypeId r = subst_resolve(c, ast_intern_type(c->ast, (Ty){.kind = TYPE_GENERIC, .module = td.module, .as.decl = td.node}));
         if (type_is_concrete(c, r))
           param_tgt = r;
-      } else if (td.node != NODE_NONE && ast_at_const(cg_mod_ast(c, td.module), td.node)->kind == NODE_TRAIT) {
-        const TypeId r = subst_resolve(c, ast_type(c->ast, id)); // `Trait::assoc()`: the call's result type is the concrete target
+      } else if (td.node != NODE_NONE && ast_at_const(cg_mod_ast(c, td.module), td.node)->kind == NODE_INTERFACE) {
+        const TypeId r = subst_resolve(c, ast_type(c->ast, id)); // `Interface::assoc()`: the call's result type is the concrete target
         if (type_is_concrete(c, r))
           param_tgt = r;
       }
@@ -2291,7 +2302,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       } else if (c->macro && td.node != NODE_NONE &&
                  ast_at_const(cg_mod_ast(c, td.module), td.node)->kind == NODE_GENERIC_PARAM) {
         // `T::assoc()` on a generic param inside a macro template (e.g. `T::default()` in `Box<T> as Default`):
-        // the concrete arg is unknown here, so paste the param's mangle token to form the impl symbol at
+        // the concrete arg is unknown here, so paste the param's mangle token to form the extend symbol at
         // invocation time (`_SCM_T ## __default_` -> `Option__Tr__default_`). Covers every interface's
         // associated functions uniformly, mirroring the bound-method receiver path above.
         char pp[64];
@@ -2374,7 +2385,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       const TypeId obj_t = ast_type(c->ast, obj);
       const TypeId pointee = strip_ptr(c, obj_t);
       // A method on a generic-parameter receiver (`w: T`, `T: Writer`) resolved to the interface method;
-      // once the param is monomorphized, dispatch to the concrete type's `as`-impl method (`File__write`).
+      // once the param is monomorphized, dispatch to the concrete type's `as`-extend method (`File__write`).
       if (ast_type_at(c->ast, pointee)->kind == TYPE_GENERIC) {
         const Ty *const rb = ast_type_at(c->ast, subst_resolve(c, pointee));
         if (rb->kind == TYPE_STRUCT || rb->kind == TYPE_ENUM) {
@@ -2425,8 +2436,8 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       if (c->macro && base->kind == TYPE_GENERIC) {
         // A bound-method call on a generic param inside a generic macro template (`elem.clone()` where
         // `T: Clone`): the concrete arg is unknown here, so paste the param's mangle token with the method
-        // to form the impl symbol at invocation time (`_SCM_T ## __clone` -> `Bar__clone`). The method must
-        // live in the arg type's own module (coherent impl), so its symbol prefix matches the arg's mangle.
+        // to form the extend symbol at invocation time (`_SCM_T ## __clone` -> `Bar__clone`). The method must
+        // live in the arg type's own module (coherent extend), so its symbol prefix matches the arg's mangle.
         char pp[64];
         emit(c, "_SCM_");
         render_macro_param(c, base->module, base->as.decl, pp, sizeof pp);
@@ -4374,7 +4385,7 @@ static void emit_static_assert(Codegen *c, const Node *const n) {
 }
 
 // The `free` method of a type that implements the Free interface (`extend T as Free`), or {_,NODE_NONE}.
-// Only an explicit `as Free` impl opts a type into RAII auto-free. Searches the type's home + current module.
+// Only an explicit `as Free` extend opts a type into RAII auto-free. Searches the type's home + current module.
 static DefId cg_free_method(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
@@ -4385,19 +4396,19 @@ static DefId cg_free_method(Codegen *c, const ModuleId tmod, const NodeId tdecl)
     const NodeId *const ids = ast_list(a, items);
     for (uint32_t i = 0; i < items.len; i++) {
       const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+      if (it->kind != NODE_EXTEND || it->as.extend_def.interface_type == NODE_NONE || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
       if (tg.module != tmod || tg.node != tdecl)
         continue;
-      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
+      const DefId tr = ast_resolution_def(a, it->as.extend_def.interface_type);
       if (tr.node == NODE_NONE)
         continue;
       const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
-      if (trn->kind != NODE_TRAIT ||
-          !span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text, "Free"))
+      if (trn->kind != NODE_INTERFACE ||
+          !span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.interface_def.name)->as.name.text, "Free"))
         continue;
-      const NodeList ms = it->as.impl_def.items;
+      const NodeList ms = it->as.extend_def.items;
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
@@ -4409,8 +4420,8 @@ static DefId cg_free_method(Codegen *c, const ModuleId tmod, const NodeId tdecl)
   return (DefId){0, NODE_NONE};
 }
 
-// The `as Free` impl on `(tmod, tdecl)`, or {_,NODE_NONE} -- like cg_free_method but returns the impl.
-static DefId cg_free_impl(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
+// The `as Free` extend on `(tmod, tdecl)`, or {_,NODE_NONE} -- like cg_free_method but returns the extend.
+static DefId cg_free_extend(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
   for (int s = 0; s < ns; s++) {
@@ -4420,17 +4431,17 @@ static DefId cg_free_impl(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
     const NodeId *const ids = ast_list(a, items);
     for (uint32_t i = 0; i < items.len; i++) {
       const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+      if (it->kind != NODE_EXTEND || it->as.extend_def.interface_type == NODE_NONE || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
       if (tg.module != tmod || tg.node != tdecl)
         continue;
-      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
+      const DefId tr = ast_resolution_def(a, it->as.extend_def.interface_type);
       if (tr.node == NODE_NONE)
         continue;
       const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
-      if (trn->kind == NODE_TRAIT &&
-          span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text,
+      if (trn->kind == NODE_INTERFACE &&
+          span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.interface_def.name)->as.name.text,
                   "Free"))
         return (DefId){m, ids[i]};
     }
@@ -4448,8 +4459,8 @@ static bool cg_param_has_free_bound(Codegen *c, const ModuleId m, const NodeId g
     if (bd.node == NODE_NONE)
       continue;
     const Node *const bn = ast_at_const(cg_mod_ast(c, bd.module), bd.node);
-    if (bn->kind == NODE_TRAIT &&
-        span_is(cg_mod_src(c, bd.module), ast_at_const(cg_mod_ast(c, bd.module), bn->as.trait_def.name)->as.name.text,
+    if (bn->kind == NODE_INTERFACE &&
+        span_is(cg_mod_src(c, bd.module), ast_at_const(cg_mod_ast(c, bd.module), bn->as.interface_def.name)->as.name.text,
                 "Free"))
       return true;
   }
@@ -4458,7 +4469,7 @@ static bool cg_param_has_free_bound(Codegen *c, const ModuleId m, const NodeId g
 
 // Does the (subst-resolved) type implement the Free interface? Such a value owns resources -> it gets an
 // RAII Free call at scope exit, and a binding/param of it is emitted non-`const` (free takes `&mut self`).
-// For a conditional impl (`extend<T: Free> Option<T> as Free`) the instance must satisfy the `Free` bounds
+// For a conditional extend (`extend<T: Free> Option<T> as Free`) the instance must satisfy the `Free` bounds
 // (Option<i32> is NOT Free -- its `free` is never monomorphized -- but Option<String> is).
 static bool cg_type_is_free(Codegen *c, const TypeId ty) {
   const Ty *const y = ast_type_at(c->ast, subst_resolve(c, ty));
@@ -4467,15 +4478,15 @@ static bool cg_type_is_free(Codegen *c, const TypeId ty) {
   if (y->kind != TYPE_INSTANCE)
     return false;
   const TyInstance *const ii = ast_instance(c->ast, y->as.inst);
-  const DefId impl = cg_free_impl(c, ii->module, ii->decl);
-  if (impl.node == NODE_NONE)
+  const DefId extend = cg_free_extend(c, ii->module, ii->decl);
+  if (extend.node == NODE_NONE)
     return false;
   // Every `Free`-bounded type parameter must map to a `Free` argument (positional with the target's args).
-  Ast *const ia = cg_mod_ast(c, impl.module);
-  const NodeList gens = ast_at_const(ia, impl.node)->as.impl_def.generics;
+  Ast *const ia = cg_mod_ast(c, extend.module);
+  const NodeList gens = ast_at_const(ia, extend.node)->as.extend_def.generics;
   const NodeId *const gids = ast_list(ia, gens);
   for (uint32_t i = 0; i < gens.len && i < ii->n; i++)
-    if (cg_param_has_free_bound(c, impl.module, gids[i]) && !cg_type_is_free(c, ii->args[i]))
+    if (cg_param_has_free_bound(c, extend.module, gids[i]) && !cg_type_is_free(c, ii->args[i]))
       return false;
   return true;
 }
@@ -4945,13 +4956,13 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
     buf_join3(out, cap, "void", "", "");
 }
 
-// Build a function's C name: `<mod>__name`, or `<mod>__Target__name` for an impl method. `prefixed`
+// Build a function's C name: `<mod>__name`, or `<mod>__Target__name` for an extend method. `prefixed`
 // is false for extern (FFI) functions; the program entry `main` is never prefixed either.
 // `target` is the receiver type (a DefId; .node == NODE_NONE for a free function). The module prefix is
 // always this (the emitting) module, so a local `extend foreign::T` method is mangled by the module that
 // declares it (`extender__T__m`); the type-name segment is read from the target type's own module.
-// The number of `from` (or `try_from`) methods across all impls targeting (tmod,tdecl). A type with more
-// than one `From`/`TryFrom` impl needs each symbol disambiguated by its source type (Celsius__from__u8).
+// The number of `from` (or `try_from`) methods across all extends targeting (tmod,tdecl). A type with more
+// than one `From`/`TryFrom` extend needs each symbol disambiguated by its source type (Celsius__from__u8).
 static int cg_conv_count(Codegen *c, const ModuleId tmod, const NodeId tdecl, const char *const lit) {
   int n = 0;
   const ModuleId scopes[2] = {tmod, c->ast->module};
@@ -4963,12 +4974,12 @@ static int cg_conv_count(Codegen *c, const ModuleId tmod, const NodeId tdecl, co
     const NodeId *const ids = ast_list(a, items);
     for (uint32_t i = 0; i < items.len; i++) {
       const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_IMPL || it->as.impl_def.target_type == NODE_NONE)
+      if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
       if (tg.module != tmod || tg.node != tdecl)
         continue;
-      const NodeList ms = it->as.impl_def.items;
+      const NodeList ms = it->as.extend_def.items;
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
@@ -4980,7 +4991,7 @@ static int cg_conv_count(Codegen *c, const ModuleId tmod, const NodeId tdecl, co
   return n;
 }
 
-// If `lit` ("from"/"try_from") names an overloaded conversion of `target` (several such impls), append
+// If `lit` ("from"/"try_from") names an overloaded conversion of `target` (several such extends), append
 // `__<srcMangle>` so the overloads get distinct C symbols. `srcTy` is the source type to mangle (the method's
 // value-param type at a definition; the call's source/arg type at a call site) -- equal for an exact-source
 // match, which is how the def and the call agree on the symbol. A no-op otherwise.
@@ -5027,7 +5038,7 @@ static void function_name(Codegen *c, const NodeId fn, const DefId target, char 
     }
   }
   k += render_ident(c, fname, out + k, cap - k);
-  // Overloaded `from`/`try_from`: disambiguate by the value-param's type so the impls get distinct symbols.
+  // Overloaded `from`/`try_from`: disambiguate by the value-param's type so the extends get distinct symbols.
   const NodeList params = ast_at_const(c->ast, fn)->as.function.params;
   const char *const lit = cg_conv_lit(c, c->ast->module, fname);
   if (lit && target.node != NODE_NONE && params.len) {
@@ -5200,6 +5211,8 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
       ADDG("used");
     if (cg_attr(c, fmod, fn_id, ATTR_UNUSED))
       ADDG("unused");
+    if (is_static && !cg_attr(c, fmod, fn_id, ATTR_USED))
+      ADDG("unused");
     const Attr *const sec = cg_attr(c, fmod, fn_id, ATTR_SECTION);
     if (sec) {
       char sb[160];
@@ -5306,7 +5319,7 @@ static void emit_closure_fn(Codegen *c, const NodeId id, const bool with_body) {
   const NodeId body = n->as.closure.body;
   const bool expr_body = n->as.closure.expr_body;
   const TypeId rt = expr_body ? ast_type(c->ast, body) : TYPE_NONE;
-  emit(c, "static ");
+  emit(c, "static __attribute__((unused)) ");
   char out[1400];
   if (expr_body) {
     render_type_id(c, rt, decl, out, sizeof out);
@@ -5563,7 +5576,7 @@ static void emit_specializations(Codegen *c, const bool with_body) {
 }
 
 // Codegen mirror of the typechecker's type_satisfies, for gating conditional-conformance emission: does the
-// concrete type `ty` have an `extend ty as iface` impl -- directly, or a conditional `extend<G> Ty<G> as iface`
+// concrete type `ty` have an `extend ty as iface` extend -- directly, or a conditional `extend<G> Ty<G> as iface`
 // whose own generic bounds hold for ty's args? A generic param is taken to satisfy (re-checked at instantiation).
 static bool cg_type_satisfies(Codegen *c, const TypeId ty, const DefId iface, const int depth) {
   if (ty == TYPE_NONE || depth > 8)
@@ -5591,7 +5604,7 @@ static bool cg_type_satisfies(Codegen *c, const TypeId ty, const DefId iface, co
     tmod = c->package->core_module;
     tdecl = bd;
   } else {
-    return false; // a pointer / etc.: no `as iface` impl
+    return false; // a pointer / etc.: no `as iface` extend
   }
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
@@ -5602,13 +5615,13 @@ static bool cg_type_satisfies(Codegen *c, const TypeId ty, const DefId iface, co
     const NodeId *const ids = ast_list(a, items);
     for (uint32_t i = 0; i < items.len; i++) {
       const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_IMPL || it->as.impl_def.trait_type == NODE_NONE || it->as.impl_def.target_type == NODE_NONE)
+      if (it->kind != NODE_EXTEND || it->as.extend_def.interface_type == NODE_NONE || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tr = ast_resolution_def(a, it->as.impl_def.trait_type);
-      const DefId tg = ast_resolution_def(a, it->as.impl_def.target_type);
+      const DefId tr = ast_resolution_def(a, it->as.extend_def.interface_type);
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
       if (tr.module != iface.module || tr.node != iface.node || tg.module != tmod || tg.node != tdecl)
         continue;
-      const NodeList gens = it->as.impl_def.generics; // conditional extension: each param bound must hold for the arg
+      const NodeList gens = it->as.extend_def.generics; // conditional extension: each param bound must hold for the arg
       const NodeId *const gids = ast_list(a, gens);
       bool ok = true;
       for (uint32_t g = 0; g < gens.len && (int)g < in && ok; g++) {
@@ -5627,21 +5640,21 @@ static bool cg_type_satisfies(Codegen *c, const TypeId ty, const DefId iface, co
   return false;
 }
 
-// An impl's trait as a DefId, or {_,NODE_NONE} for an inherent (non-conformance) impl. A conditional
+// An extend's interface as a DefId, or {_,NODE_NONE} for an inherent (non-conformance) extend. A conditional
 // conformance (`extend<T: Clone> Vector<T> as Clone`) is emitted for an instance ONLY when the instance
 // satisfies it (cg_type_satisfies), so e.g. `Vector<i32>` -- whose i32 is not Clone -- gets no clone method.
-static DefId impl_trait(Ast *const a, const Node *const impl) {
-  if (impl->as.impl_def.trait_type == NODE_NONE)
+static DefId extend_interface(Ast *const a, const Node *const extend) {
+  if (extend->as.extend_def.interface_type == NODE_NONE)
     return (DefId){0, NODE_NONE};
-  return ast_resolution_def(a, impl->as.impl_def.trait_type);
+  return ast_resolution_def(a, extend->as.extend_def.interface_type);
 }
 
-// True if every interface bound on impl `impl`'s generic params is satisfied by the instance's args, so the
+// True if every interface bound on extend `extend`'s generic params is satisfied by the instance's args, so the
 // block's methods may be specialized for it. A method on `extend<A: Allocator + Default> Box<T, A>` must NOT
 // be emitted for an instance whose A lacks `Default` -- its body would call `A::default()`, an undefined
-// symbol. (Conformance impls are additionally gated by impl_trait/cg_type_satisfies above.)
-static bool cg_impl_bounds_hold(Codegen *c, const Node *const impl, const TypeId *const args, const uint8_t n) {
-  const NodeList gens = impl->as.impl_def.generics;
+// symbol. (Conformance extends are additionally gated by extend_interface/cg_type_satisfies above.)
+static bool cg_extend_bounds_hold(Codegen *c, const Node *const extend, const TypeId *const args, const uint8_t n) {
+  const NodeList gens = extend->as.extend_def.generics;
   const NodeId *const gids = ast_list(c->ast, gens);
   for (uint32_t g = 0; g < gens.len && g < n; g++) {
     const NodeList gb = ast_at_const(c->ast, gids[g])->as.generic_param.bounds;
@@ -5655,13 +5668,123 @@ static bool cg_impl_bounds_hold(Codegen *c, const Node *const impl, const TypeId
   return true;
 }
 
+static bool seed_type_instances_from_type(Codegen *c, TypeId ty) {
+  if (ty == TYPE_NONE)
+    return false;
+  ty = subst_resolve(c, ty);
+  const Ty *const y = ast_type_at(c->ast, ty);
+  bool changed = false;
+  switch (y->kind) {
+    case TYPE_INSTANCE: {
+      const TyInstance it = *ast_instance(c->ast, y->as.inst);
+      bool concrete = true;
+      for (uint8_t i = 0; i < it.n; i++)
+        concrete &= type_is_concrete(c, it.args[i]);
+      if (!concrete)
+        break;
+      const size_t before = c->ast->instances.len;
+      ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n);
+      changed |= c->ast->instances.len != before;
+      for (uint8_t i = 0; i < it.n; i++)
+        changed |= seed_type_instances_from_type(c, it.args[i]);
+      break;
+    }
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_ARRAY:
+      changed |= seed_type_instances_from_type(c, y->as.elem);
+      break;
+    default:
+      break;
+  }
+  return changed;
+}
+
+static bool seed_type_instances_from_type_node(Codegen *c, const NodeId type_node) {
+  if (type_node == NODE_NONE)
+    return false;
+  const TypeId ty = ast_type(c->ast, type_node);
+  return ty != TYPE_NONE && seed_type_instances_from_type(c, ty);
+}
+
+static bool seed_type_instances_from_fn_signature(Codegen *c, const NodeId fn_id) {
+  const Node *const fn = ast_at_const(c->ast, fn_id);
+  bool changed = false;
+  const NodeList ps = fn->as.function.params;
+  const NodeId *const pids = ast_list(c->ast, ps);
+  for (uint32_t i = 0; i < ps.len; i++)
+    changed |= seed_type_instances_from_type_node(c, ast_at_const(c->ast, pids[i])->as.parameter.type);
+  const NodeList rs = fn->as.function.returns;
+  const NodeId *const rids = ast_list(c->ast, rs);
+  for (uint32_t i = 0; i < rs.len; i++) {
+    const Node *const rn = ast_at_const(c->ast, rids[i]);
+    changed |= seed_type_instances_from_type_node(c, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rids[i]);
+  }
+  return changed;
+}
+
+static bool seed_emitted_generic_method_signature_instances(Codegen *c) {
+  bool changed = false;
+  for (size_t ii = 0; ii < c->ast->instances.len; ii++) {
+    const TyInstance it = c->ast->instances.data[ii];
+    if (it.module != c->ast->module)
+      continue;
+    bool concrete = true;
+    for (uint8_t k = 0; k < it.n; k++)
+      concrete &= type_is_concrete(c, it.args[k]);
+    if (!concrete)
+      continue;
+    const NodeList items = program_items(c);
+    const NodeId *const iids = ast_list(c->ast, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const n = ast_at_const(c->ast, iids[i]);
+      if (n->kind != NODE_EXTEND || !n->as.extend_def.generics.len)
+        continue;
+      if (ast_resolution(c->ast, n->as.extend_def.target_type) != it.decl)
+        continue;
+      const DefId itrait = extend_interface(c->ast, n);
+      if (itrait.node != NODE_NONE &&
+          !cg_type_satisfies(c, ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n), itrait, 0))
+        continue;
+      if (!cg_extend_bounds_hold(c, n, it.args, it.n))
+        continue;
+      const NodeList gens = n->as.extend_def.generics;
+      const NodeId *const gids = ast_list(c->ast, gens);
+      const int saved = c->nsubst;
+      c->nsubst = 0;
+      for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
+        c->subst[c->nsubst].param = (DefId){c->ast->module, gids[g]};
+        c->subst[c->nsubst].concrete = it.args[g];
+        c->nsubst++;
+      }
+      const NodeList ms = n->as.extend_def.items;
+      const NodeId *const mids = ast_list(c->ast, ms);
+      for (uint32_t j = 0; j < ms.len; j++) {
+        const Node *const mn = ast_at_const(c->ast, mids[j]);
+        if (mn->kind != NODE_FUNCTION || mn->as.function.generics.len || mn->as.function.returns.len > 1)
+          continue;
+        changed |= seed_type_instances_from_fn_signature(c, mids[j]);
+      }
+      c->nsubst = saved;
+    }
+  }
+  return changed;
+}
+
+static void seed_emitted_type_instances(Codegen *c) {
+  for (int pass = 0; pass < 32; pass++) {
+    if (!seed_emitted_generic_method_signature_instances(c))
+      return;
+  }
+}
+
 // Emit specialized methods for every concrete generic instance OWNED by this module (moved here by
-// package_propagate_instances): for each impl targeting the instance's generic decl, emit each method as
-// `<Inst>__<method>` with the impl's type params bound to the instance args. Unlike free-function specs
+// package_propagate_instances): for each extend targeting the instance's generic decl, emit each method as
+// `<Inst>__<method>` with the extend's type params bound to the instance args. Unlike free-function specs
 // (per-module-static), methods are emitted once by the owner, so a `pub` method becomes a real
 // cross-module symbol (prototype in the header). `which`/`with_body` mirror phase_prototypes/phase_bodies.
 // Emit one concrete instance's methods (ordinary + generic map<U>). `it`'s args live in the CURRENT
-// c->ast pool, and impls are scanned from c->ast (the generic's owner -- equal to c->ast for a same-module
+// c->ast pool, and extends are scanned from c->ast (the generic's owner -- equal to c->ast for a same-module
 // instance, the temporarily swapped-in owner for a re-homed one). Generic-method instantiations are read
 // from `mi_src->method_insts` keyed by `mi_inst` (the receiver instance's TypeId in mi_src's pool), so a
 // re-homed instance still finds the uses recorded in its home module while its template reads from owner.
@@ -5673,19 +5796,19 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
   inst_name(c, it, inm, sizeof inm);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, iids[i]);
-    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
+    if (n->kind != NODE_EXTEND || !n->as.extend_def.generics.len)
       continue;
-    if (ast_resolution(c->ast, n->as.impl_def.target_type) != it->decl)
+    if (ast_resolution(c->ast, n->as.extend_def.target_type) != it->decl)
       continue;
-    const DefId itrait = impl_trait(c->ast, n); // a conditional conformance emits only for satisfying instances
+    const DefId itrait = extend_interface(c->ast, n); // a conditional conformance emits only for satisfying instances
     if (itrait.node != NODE_NONE &&
         !cg_type_satisfies(c, ast_intern_instance(c->ast, it->module, it->decl, it->args, it->n), itrait, 0))
       continue;
-    if (!cg_impl_bounds_hold(c, n, it->args, it->n)) // a block whose param bounds the args don't meet (e.g.
+    if (!cg_extend_bounds_hold(c, n, it->args, it->n)) // a block whose param bounds the args don't meet (e.g.
       continue;                                      // `A: Default` for a non-Default allocator) emits nothing
-    const NodeList gens = n->as.impl_def.generics;
+    const NodeList gens = n->as.extend_def.generics;
     const NodeId *const gids = ast_list(c->ast, gens);
-    const NodeList ms = n->as.impl_def.items;
+    const NodeList ms = n->as.extend_def.items;
     const NodeId *const mids = ast_list(c->ast, ms);
     for (uint32_t j = 0; j < ms.len; j++) {
       const Node *const mn = ast_at_const(c->ast, mids[j]);
@@ -5693,7 +5816,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
         continue;
       if (with_body ? mn->as.function.body == NODE_NONE : !want_fn(which, mn->as.function.is_public))
         continue;
-      // Bind the impl's generics (e.g. T) from the instance's args -- shared by every spec below.
+      // Bind the extend's generics (e.g. T) from the instance's args -- shared by every spec below.
       c->nsubst = 0;
       for (uint32_t g = 0; g < gens.len && g < it->n && c->nsubst < 8; g++) {
         c->subst[c->nsubst].param = (DefId){c->ast->module, gids[g]};
@@ -5711,7 +5834,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
         continue;
       }
       // Generic method (map<U>): one spec per recorded (instance, method, targs) tuple, layering the
-      // method's own generics atop the impl subst and suffixing the name with the mangled type args.
+      // method's own generics atop the extend subst and suffixing the name with the mangled type args.
       const int nimpl = c->nsubst;
       const NodeList mg = mn->as.function.generics;
       const NodeId *const mgids = ast_list(c->ast, mg);
@@ -5756,29 +5879,29 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
   }
 }
 
-// Emit interface DEFAULT method bodies inherited by `extend T as Iface` impls in this module that do not
+// Emit interface DEFAULT method bodies inherited by `extend T as Iface` extends in this module that do not
 // override them: synthesize `T__<name>` with the interface's abstract `Self` substituted to T, so a call
 // resolved to the default (`x.lt(y)`) links. Same-module interfaces only (emit_function reads the current
-// Ast); generic impls and generic / multi-return defaults are skipped. `which`/`with_body` mirror the
+// Ast); generic extends and generic / multi-return defaults are skipped. `which`/`with_body` mirror the
 // prototype vs body split of phase_prototypes / phase_bodies.
 static void emit_default_methods(Codegen *c, const int which, const bool with_body) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
-    if (n->kind != NODE_IMPL || n->as.impl_def.trait_type == NODE_NONE || n->as.impl_def.target_type == NODE_NONE ||
-        n->as.impl_def.generics.len)
+    if (n->kind != NODE_EXTEND || n->as.extend_def.interface_type == NODE_NONE || n->as.extend_def.target_type == NODE_NONE ||
+        n->as.extend_def.generics.len)
       continue;
-    const DefId iface = ast_resolution_def(c->ast, n->as.impl_def.trait_type);
-    const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
+    const DefId iface = ast_resolution_def(c->ast, n->as.extend_def.interface_type);
+    const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
     if (iface.node == NODE_NONE || iface.module != c->ast->module || target.node == NODE_NONE)
       continue; // only same-module interface defaults are emittable here
     const Node *const tn = ast_at_const(c->ast, target.node);
     const TypeId tty = ast_intern_type(
         c->ast, (Ty){.kind = tn->kind == NODE_ENUM ? TYPE_ENUM : TYPE_STRUCT, .module = target.module, .as.decl = target.node});
-    const NodeList req = ast_at_const(c->ast, iface.node)->as.trait_def.items;
+    const NodeList req = ast_at_const(c->ast, iface.node)->as.interface_def.items;
     const NodeId *const rids = ast_list(c->ast, req);
-    const NodeList have = n->as.impl_def.items;
+    const NodeList have = n->as.extend_def.items;
     const NodeId *const hids = ast_list(c->ast, have);
     for (uint32_t r = 0; r < req.len; r++) {
       const Node *const rm = ast_at_const(c->ast, rids[r]);
@@ -5798,7 +5921,7 @@ static void emit_default_methods(Codegen *c, const int which, const bool with_bo
       if (overridden)
         continue;
       c->nsubst = 1;
-      c->subst[0].param = iface; // the interface's `Self` is a TYPE_GENERIC keyed by (iface.module, trait node)
+      c->subst[0].param = iface; // the interface's `Self` is a TYPE_GENERIC keyed by (iface.module, interface node)
       c->subst[0].concrete = tty;
       emit_function(c, rids[r], target, false, with_body, NULL, c->multifile && !rm->as.function.is_public);
       c->nsubst = 0;
@@ -6204,7 +6327,7 @@ static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
 // + mangle token, then the instance NAME), and the type's module invokes them so the instance materializes
 // where its args are complete. The macros also let a plain-C project reuse the type without Super-C. ----
 
-// Non-generic methods of every generic impl on `declId` (in this module), as macro prototypes
+// Non-generic methods of every generic extend on `declId` (in this module), as macro prototypes
 // (define=false) or bodies (define=true), each named `NAME ## __<method>`. Generic methods (map<U>) and
 // multi-return methods cannot be a fixed macro and are skipped (emitted concretely for builtin instances).
 static void emit_generic_macro_methods(Codegen *c, const NodeId declId, const bool define) {
@@ -6212,13 +6335,13 @@ static void emit_generic_macro_methods(Codegen *c, const NodeId declId, const bo
   const NodeId *const iids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, iids[i]);
-    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
+    if (n->kind != NODE_EXTEND || !n->as.extend_def.generics.len)
       continue;
-    if (ast_resolution(c->ast, n->as.impl_def.target_type) != declId)
+    if (ast_resolution(c->ast, n->as.extend_def.target_type) != declId)
       continue;
-    if (n->as.impl_def.trait_type != NODE_NONE)
+    if (n->as.extend_def.interface_type != NODE_NONE)
       continue; // a conditional conformance: emitted via its own gated per-conformance macro, not the core one
-    const NodeList ms = n->as.impl_def.items;
+    const NodeList ms = n->as.extend_def.items;
     const NodeId *const mids = ast_list(c->ast, ms);
     for (uint32_t j = 0; j < ms.len; j++) {
       const Node *const mn = ast_at_const(c->ast, mids[j]);
@@ -6236,28 +6359,28 @@ static void emit_generic_macro_methods(Codegen *c, const NodeId declId, const bo
   }
 }
 
-// The macro-name fragment for a conditional conformance impl: the interface's source name (`Clone`), so a
+// The macro-name fragment for a conditional conformance extend: the interface's source name (`Clone`), so a
 // type's conformance macros are `<STEM>_as_Clone_DECLARE/DEFINE`. Distinct interfaces -> distinct macros.
-static size_t conformance_tag(Codegen *c, const Node *const impl, char *out, const size_t cap) {
-  const DefId tr = ast_resolution_def(c->ast, impl->as.impl_def.trait_type);
+static size_t conformance_tag(Codegen *c, const Node *const extend, char *out, const size_t cap) {
+  const DefId tr = ast_resolution_def(c->ast, extend->as.extend_def.interface_type);
   size_t at = buf_append(out, cap, 0, "as_");
   if (tr.node == NODE_NONE)
     return at;
   const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
   return at + render_ident_src(cg_mod_src(c, tr.module),
-                               ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text,
+                               ast_at_const(cg_mod_ast(c, tr.module), trn->as.interface_def.name)->as.name.text,
                                out + at, cap > at ? cap - at : 0);
 }
 
-// One conditional conformance impl as `#define <STEM>_as_<Iface>_DECLARE(T,_SCM_T,..,NAME) <protos>` /
+// One conditional conformance extend as `#define <STEM>_as_<Iface>_DECLARE(T,_SCM_T,..,NAME) <protos>` /
 // `_DEFINE` (bodies), in macro mode. The home invokes it (after the core DECLARE/DEFINE) ONLY for instances
 // that satisfy the conformance, so different element types get different subsets (Clone-but-not-Hash, etc.).
 static void emit_generic_conformance_macro(Codegen *c, const NodeId declId, const NodeId implId, const bool define) {
   const Node *const dn = ast_at_const(c->ast, declId);
-  const Node *const impl = ast_at_const(c->ast, implId);
+  const Node *const extend = ast_at_const(c->ast, implId);
   char stem[160], tag[80];
   macro_stem(c, c->ast->module, dn->as.aggregate.name, stem, sizeof stem);
-  conformance_tag(c, impl, tag, sizeof tag);
+  conformance_tag(c, extend, tag, sizeof tag);
   const NodeList gens = dn->as.aggregate.generics;
   const NodeId *const gids = ast_list(c->ast, gens);
   emit(c, "#define %s_%s_%s(", stem, tag, define ? "DEFINE" : "DECLARE");
@@ -6272,7 +6395,7 @@ static void emit_generic_conformance_macro(Codegen *c, const NodeId declId, cons
   c->macro_self_mod = c->ast->module;
   c->nsubst = 0;
   const size_t start = c->buf_len;
-  const NodeList ms = impl->as.impl_def.items;
+  const NodeList ms = extend->as.extend_def.items;
   const NodeId *const mids = ast_list(c->ast, ms);
   for (uint32_t j = 0; j < ms.len; j++) {
     const Node *const mn = ast_at_const(c->ast, mids[j]);
@@ -6293,15 +6416,15 @@ static void emit_generic_conformance_macro(Codegen *c, const NodeId declId, cons
   emit(c, "\n");
 }
 
-// Every conditional conformance impl on `declId`, as DECLARE + DEFINE macros (gated per-instance at the home).
+// Every conditional conformance extend on `declId`, as DECLARE + DEFINE macros (gated per-instance at the home).
 static void emit_generic_conformance_macros(Codegen *c, const NodeId declId) {
   const NodeList items = program_items(c);
   const NodeId *const iids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, iids[i]);
-    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len || n->as.impl_def.trait_type == NODE_NONE)
+    if (n->kind != NODE_EXTEND || !n->as.extend_def.generics.len || n->as.extend_def.interface_type == NODE_NONE)
       continue;
-    if (ast_resolution(c->ast, n->as.impl_def.target_type) != declId)
+    if (ast_resolution(c->ast, n->as.extend_def.target_type) != declId)
       continue;
     emit_generic_conformance_macro(c, declId, iids[i], false);
     emit_generic_conformance_macro(c, declId, iids[i], true);
@@ -6431,17 +6554,17 @@ static void emit_generic_method_macro(Codegen *c, const NodeId declId, const Nod
   emit(c, "\n");
 }
 
-// Every generic method of the generic impls on `declId`, as DECLARE + DEFINE macros.
+// Every generic method of the generic extends on `declId`, as DECLARE + DEFINE macros.
 static void emit_generic_method_macros(Codegen *c, const NodeId declId) {
   const NodeList items = program_items(c);
   const NodeId *const iids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, iids[i]);
-    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
+    if (n->kind != NODE_EXTEND || !n->as.extend_def.generics.len)
       continue;
-    if (ast_resolution(c->ast, n->as.impl_def.target_type) != declId)
+    if (ast_resolution(c->ast, n->as.extend_def.target_type) != declId)
       continue;
-    const NodeList ms = n->as.impl_def.items;
+    const NodeList ms = n->as.extend_def.items;
     const NodeId *const mids = ast_list(c->ast, ms);
     for (uint32_t j = 0; j < ms.len; j++) {
       const Node *const mn = ast_at_const(c->ast, mids[j]);
@@ -6518,7 +6641,7 @@ static void emit_rehomed_forwards(Codegen *c) {
 
 // Full-monomorphize a cross-module generic instance re-homed to this module (its args are user types defined
 // here, which the generic's own module could only forward-declare -> an incomplete by-value field). Source
-// the generic's template (decl, fields/impls/method bodies) from its owner module via a temporary c->ast
+// the generic's template (decl, fields/extends/method bodies) from its owner module via a temporary c->ast
 // swap, reinterning the instance's args into the owner pool so the substitution stays self-consistent.
 // Output (c->buf) and the home instance table are unaffected -- c->buf is independent of c->ast, and the
 // owner's codegen pass has already run (deps emit first), so interning into the owner pool here is inert.
@@ -6549,17 +6672,115 @@ static void emit_rehomed_struct(Codegen *c, const TyInstance *const it, const bo
   c->nsubst = 0;
 }
 
-static void emit_rehomed_structs(Codegen *c, const bool with_body) {
-  if (!c->package)
-    return;
-  for (size_t ii = 0; ii < c->ast->instances.len; ii++) {
-    const TyInstance it = c->ast->instances.data[ii];
-    if (inst_rehomed_here(c, &it))
-      emit_rehomed_struct(c, &it, with_body);
+static TypeId rehome_subst_type(Codegen *c, Ast *const owner, Ast *const home, const TyInstance *const it,
+                                const TypeId t) {
+  if (t == TYPE_NONE)
+    return TYPE_NONE;
+  const Ty ty = *ast_type_at(owner, t);
+  switch (ty.kind) {
+    case TYPE_GENERIC: {
+      const Node *const dn = ast_at_const(owner, it->decl);
+      const NodeId *const gids = ast_list(owner, dn->as.aggregate.generics);
+      for (uint32_t i = 0; i < dn->as.aggregate.generics.len && i < it->n; i++)
+        if (ty.module == it->module && ty.as.decl == gids[i])
+          return it->args[i];
+      return ast_reintern(home, owner, t);
+    }
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY: {
+      Ty nt = ty;
+      nt.as.elem = rehome_subst_type(c, owner, home, it, ty.as.elem);
+      return ast_intern_type(home, nt);
+    }
+    case TYPE_INSTANCE: {
+      const TyInstance inst = *ast_instance(owner, ty.as.inst);
+      TypeId na[4];
+      const uint8_t n = inst.n < 4 ? inst.n : 4;
+      for (uint8_t i = 0; i < n; i++)
+        na[i] = rehome_subst_type(c, owner, home, it, inst.args[i]);
+      return ast_intern_instance(home, inst.module, inst.decl, na, n);
+    }
+    default:
+      return ast_reintern(home, owner, t);
   }
 }
 
-// Methods of every cross-module instance re-homed here: template (impls + method bodies) sourced from the
+static void collect_rehomed_dep(Codegen *c, const TyInstance *const it, const NodeId typeNode, uint32_t *const deps,
+                                int *const ndeps, const size_t nstate) {
+  if (typeNode == NODE_NONE || *ndeps >= 16 || it->module >= c->package->count)
+    return;
+  Ast *const owner = cg_mod_ast(c, it->module);
+  TypeId st = rehome_subst_type(c, owner, c->ast, it, ast_type(owner, typeNode));
+  const Ty *y = ast_type_at(c->ast, st);
+  while (y->kind == TYPE_ARRAY) {
+    st = y->as.elem;
+    y = ast_type_at(c->ast, st);
+  }
+  if (y->kind != TYPE_INSTANCE || y->as.inst >= nstate)
+    return;
+  const TyInstance dep = c->ast->instances.data[y->as.inst];
+  if (!inst_rehomed_here(c, &dep))
+    return;
+  for (int i = 0; i < *ndeps; i++)
+    if (deps[i] == y->as.inst)
+      return;
+  deps[(*ndeps)++] = y->as.inst;
+}
+
+static void emit_rehomed_struct_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, const size_t nstate,
+                                    const bool with_body) {
+  if (idx >= nstate || state[idx])
+    return;
+  const TyInstance it = c->ast->instances.data[idx];
+  if (!inst_rehomed_here(c, &it)) {
+    state[idx] = 2;
+    return;
+  }
+  state[idx] = 1;
+  Ast *const owner = cg_mod_ast(c, it.module);
+  const Node *const dn = ast_at_const(owner, it.decl);
+  uint32_t deps[16];
+  int ndeps = 0;
+  const NodeId *const mids = ast_list(owner, dn->as.aggregate.members);
+  for (uint32_t m = 0; m < dn->as.aggregate.members.len; m++) {
+    const Node *const mn = ast_at_const(owner, mids[m]);
+    if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
+      collect_rehomed_dep(c, &it, mn->as.field.type, deps, &ndeps, nstate);
+    } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
+      const NodeId *const pids = ast_list(owner, mn->as.variant.payload);
+      for (uint32_t k = 0; k < mn->as.variant.payload.len; k++) {
+        const Node *const pf = ast_at_const(owner, pids[k]);
+        collect_rehomed_dep(c, &it, pf->kind == NODE_FIELD ? pf->as.field.type : pids[k], deps, &ndeps, nstate);
+      }
+    }
+  }
+  for (int d = 0; d < ndeps; d++)
+    emit_rehomed_struct_dfs(c, deps[d], state, nstate, with_body);
+  emit_rehomed_struct(c, &it, with_body);
+  state[idx] = 2;
+}
+
+static void emit_rehomed_structs(Codegen *c, const bool with_body) {
+  if (!c->package)
+    return;
+  const size_t n = c->ast->instances.len;
+  uint8_t *const state = calloc(n ? n : 1, 1);
+  if (!state) {
+    for (size_t ii = 0; ii < n; ii++) {
+      const TyInstance it = c->ast->instances.data[ii];
+      if (inst_rehomed_here(c, &it))
+        emit_rehomed_struct(c, &it, with_body);
+    }
+    return;
+  }
+  for (size_t ii = 0; ii < n; ii++)
+    emit_rehomed_struct_dfs(c, (uint32_t)ii, state, n, with_body);
+  free(state);
+}
+
+// Methods of every cross-module instance re-homed here: template (extends + method bodies) sourced from the
 // owner via the c->ast swap, while generic-method uses (map<U>) are still read from this (home) module's
 // method_insts (keyed by the receiver's home-pool TypeId), since that is where the uses were recorded.
 static void emit_rehomed_methods(Codegen *c, const int which, const bool with_body) {
@@ -6742,6 +6963,7 @@ static uint8_t *cg_type_state(Codegen *c) {
 }
 
 static void phase_types(Codegen *c) {
+  seed_emitted_type_instances(c);
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
   // Emit struct/enum bodies in value-containment dependency order: a by-value field of a struct defined
@@ -6770,9 +6992,9 @@ static void phase_ret_structs(Codegen *c) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len) {
       emit_ret_struct(c, ids[i], (DefId){0, NODE_NONE});
-    } else if (n->kind == NODE_IMPL && !n->as.impl_def.generics.len) {
-      const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
-      const NodeList ms = n->as.impl_def.items;
+    } else if (n->kind == NODE_EXTEND && !n->as.extend_def.generics.len) {
+      const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
+      const NodeList ms = n->as.extend_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION)
@@ -6789,7 +7011,7 @@ static bool want_fn(const int which, const bool is_public) {
   return which == PROTO_ALL || (which == PROTO_PUBLIC) == is_public;
 }
 
-// Phase 3: prototypes for top-level functions, impl methods and extern functions (filtered by `which`).
+// Phase 3: prototypes for top-level functions, extend methods and extern functions (filtered by `which`).
 static void phase_prototypes(Codegen *c, const int which) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
@@ -6802,11 +7024,11 @@ static void phase_prototypes(Codegen *c, const int which) {
         continue; // its pointer original is unused (every caller took the specialized path) / a format builtin
       if (want_fn(which, n->as.function.is_public))
         emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false, NULL, false);
-    } else if (n->kind == NODE_IMPL) {
-      if (n->as.impl_def.generics.len)
-        continue; // a generic impl emits no template; its methods are specialized per instance below
-      const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
-      const NodeList ms = n->as.impl_def.items;
+    } else if (n->kind == NODE_EXTEND) {
+      if (n->as.extend_def.generics.len)
+        continue; // a generic extend emits no template; its methods are specialized per instance below
+      const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
+      const NodeList ms = n->as.extend_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && want_fn(which, ast_at_const(c->ast, mids[j])->as.function.is_public))
@@ -6882,9 +7104,9 @@ static void phase_bodies(Codegen *c) {
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE &&
         !cb_specialized_away(c, ids[i]) && !cg_is_format_builtin(c, c->ast->module, ids[i])) {
       emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true, NULL, false);
-    } else if (n->kind == NODE_IMPL && !n->as.impl_def.generics.len) {
-      const DefId target = ast_resolution_def(c->ast, n->as.impl_def.target_type);
-      const NodeList ms = n->as.impl_def.items;
+    } else if (n->kind == NODE_EXTEND && !n->as.extend_def.generics.len) {
+      const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
+      const NodeList ms = n->as.extend_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
         if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && ast_at_const(c->ast, mids[j])->as.function.body != NODE_NONE)
@@ -6949,6 +7171,8 @@ static void emit_referenced_fwd(Codegen *c) {
     }
     if (t.module == cur || t.module >= c->package->count)
       continue;
+    if (package_builtin_of_decl(c->package, t.module, t.as.decl) >= 0)
+      continue;
     const Node *const dn = ast_at_const(cg_mod_ast(c, t.module), t.as.decl);
     // A struct, or a payload enum (struct-shaped in C), forward-declares as `typedef struct X X;` --
     // enough for a prototype that names it. A payload-less enum lowers to a C `enum`, which C11 cannot
@@ -6983,7 +7207,7 @@ static void emit_referenced_fwd(Codegen *c) {
 // representation, so a reference to it never needs the defining module's header.
 static bool cg_decl_is_interface_member(Codegen *c, const ModuleId m, const NodeId node) {
   Ast *const a = cg_mod_ast(c, m);
-  if (ast_at_const(a, node)->kind == NODE_TRAIT)
+  if (ast_at_const(a, node)->kind == NODE_INTERFACE)
     return true;
   if (ast_at_const(a, node)->kind != NODE_FUNCTION)
     return false;
@@ -6991,15 +7215,39 @@ static bool cg_decl_is_interface_member(Codegen *c, const ModuleId m, const Node
   const NodeId *const ids = ast_list(a, items);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const it = ast_at_const(a, ids[i]);
-    if (it->kind != NODE_TRAIT)
+    if (it->kind != NODE_INTERFACE)
       continue;
-    const NodeList ms = it->as.trait_def.items;
+    const NodeList ms = it->as.interface_def.items;
     const NodeId *const mids = ast_list(a, ms);
     for (uint32_t j = 0; j < ms.len; j++)
       if (mids[j] == node)
         return true;
   }
   return false;
+}
+
+static bool type_mentions_builtin(Codegen *c, const TypeId t) {
+  if (t == TYPE_NONE)
+    return false;
+  const Ty *const y = ast_type_at(c->ast, t);
+  switch (y->kind) {
+    case TYPE_BUILTIN:
+      return true;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY:
+      return type_mentions_builtin(c, y->as.elem);
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(c->ast, y->as.inst);
+      for (uint8_t i = 0; i < it->n; i++)
+        if (type_mentions_builtin(c, it->args[i]))
+          return true;
+      return false;
+    }
+    default:
+      return false;
+  }
 }
 
 static void emit_referenced_includes(Codegen *c) {
@@ -7012,10 +7260,10 @@ static void emit_referenced_includes(Codegen *c) {
     const DefId d = c->ast->resolutions.data[i];
     if (d.node == NODE_NONE || d.module == cur || d.module >= nmod)
       continue;
-    // An interface, or an interface METHOD, has NO C representation: a trait bound, a conformance's
-    // `as Iface`, and a bound-method call (`v.fmt()` resolved to `Format::fmt`) all reference the trait
-    // module but generate no use of its header (codegen dispatches to the concrete impl in the value's own
-    // module). Pulling the trait header here would re-form a cycle (a value type that conforms to a prelude
+    // An interface, or an interface METHOD, has NO C representation: a interface bound, a conformance's
+    // `as Iface`, and a bound-method call (`v.fmt()` resolved to `Format::fmt`) all reference the interface
+    // module but generate no use of its header (codegen dispatches to the concrete extend in the value's own
+    // module). Pulling the interface header here would re-form a cycle (a value type that conforms to a prelude
     // interface would include the interface module, which references that very type by value).
     if (cg_decl_is_interface_member(c, d.module, d.node))
       continue;
@@ -7025,6 +7273,8 @@ static void emit_referenced_includes(Codegen *c) {
     const Ty t = c->ast->type_pool.data[i]; // named types reach modules a literal/inference uses w/o a ref
     if ((t.kind != TYPE_STRUCT && t.kind != TYPE_ENUM && t.kind != TYPE_FUNCTION) || t.module == cur || t.module >= nmod)
       continue; // (TYPE_GENERIC is a param / Self -- never an emittable type, so never an include)
+    if (package_builtin_of_decl(c->package, t.module, t.as.decl) >= 0)
+      continue; // synthetic builtin nominal decls live in core's pool, but C spells them as scalars
     if (t.kind == TYPE_FUNCTION && cg_decl_is_interface_member(c, t.module, t.as.decl))
       continue; // an interface method's function type (e.g. `Format::fmt`) -- no C symbol, no header needed
     want[t.module] = true;
@@ -7048,10 +7298,23 @@ static void emit_referenced_includes(Codegen *c) {
       want[home] = true; // where the instance is materialized (== owner for builtin/prelude args)
   }
   // Builtin conformances (i32__hash, i32__eq, ...) live in core; a generic instance over a builtin arg
-  // (Map<i32,_>) calls them from its method bodies. core.h pulls in only super_rt, so always including it
-  // is cheap and cycle-free.
-  if (c->package->core_seeded && c->package->core_module != cur && c->package->core_module < nmod)
-    want[c->package->core_module] = true;
+  // (Map<i32,_>) can call them from its method bodies. Plain scalar use does not need core.h.
+  if (c->package->core_seeded && c->package->core_module != cur && c->package->core_module < nmod) {
+    bool need_core = false;
+    for (size_t i = 0; i < c->ast->instances.len && !need_core; i++) {
+      const TyInstance *const it = &c->ast->instances.data[i];
+      bool concrete = it->module < nmod || it->module == cur;
+      for (uint8_t k = 0; k < it->n && concrete; k++)
+        concrete = type_is_concrete(c, it->args[k]);
+      for (uint8_t k = 0; k < it->n && concrete && !need_core; k++)
+        need_core = type_mentions_builtin(c, it->args[k]);
+    }
+    for (int i = 0; i < c->ninsts && !need_core; i++)
+      for (uint8_t k = 0; k < c->insts[i].n && !need_core; k++)
+        need_core = type_mentions_builtin(c, c->insts[i].args[k]);
+    if (need_core)
+      want[c->package->core_module] = true;
+  }
   for (size_t m = 0; m < nmod; m++)
     if (want[m])
       emit_modpath_include(c, c->package->modules[m].path);
@@ -7169,7 +7432,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     phase_bodies(c);
   }
   errors_finalize(
-      &c->errors, &c->errors_start, &c->errors_len, c->source, c->len,
+      &c->errors, &c->errors_notes, &c->errors_start, &c->errors_len, c->source, c->len,
       c->package && c->ast->module < c->package->count ? c->package->modules[c->ast->module].file : NULL);
   if (c->buf_len)
     fwrite(c->buf, 1, c->buf_len, out);

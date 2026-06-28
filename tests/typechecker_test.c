@@ -374,7 +374,7 @@ static void test_interface_bounds(void) {
       "fn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n",
       "does not satisfy bound 'Writer'");
   expect_error(
-      "impl missing a required method",
+      "extend missing a required method",
       "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\n"
       "struct File { pub count: i32 }\n"
       "extend File as Writer { fn write(self: *mut Self) i32 { return self.count; } }\n"

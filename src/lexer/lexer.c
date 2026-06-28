@@ -1036,7 +1036,7 @@ void lexer_scan_tokens(Lexer *l) {
 
   token_writer_push(l, &w, token_new(Eof, (uint32_t)len, 0));
   l->tokens.len = w.begin == NULL ? 0 : (size_t)(w.out - w.begin);
-  errors_finalize(&l->errors, &l->errors_start, &l->errors_len, l->bytes, len, l->file);
+  errors_finalize(&l->errors, &l->errors_notes, &l->errors_start, &l->errors_len, l->bytes, len, l->file);
 }
 
 Token_Vec lexer_take_tokens(Lexer *l) {

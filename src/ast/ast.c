@@ -261,8 +261,8 @@ static const char *kind_name(const NodeKind kind) {
       "Field",
       "Enum",
       "Variant",
-      "Trait",
-      "Impl",
+      "Interface",
+      "Extend",
       "TypeAlias",
       "Const",
       "StaticAssert",
@@ -380,17 +380,17 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
       print_child(out, a, n->as.variant.name, source, depth + 1);
       print_list(out, a, n->as.variant.payload, source, depth + 1);
       break;
-    case NODE_TRAIT:
-      print_child(out, a, n->as.trait_def.name, source, depth + 1);
-      print_list(out, a, n->as.trait_def.generics, source, depth + 1);
-      print_list(out, a, n->as.trait_def.bounds, source, depth + 1);
-      print_list(out, a, n->as.trait_def.items, source, depth + 1);
+    case NODE_INTERFACE:
+      print_child(out, a, n->as.interface_def.name, source, depth + 1);
+      print_list(out, a, n->as.interface_def.generics, source, depth + 1);
+      print_list(out, a, n->as.interface_def.bounds, source, depth + 1);
+      print_list(out, a, n->as.interface_def.items, source, depth + 1);
       break;
-    case NODE_IMPL:
-      print_list(out, a, n->as.impl_def.generics, source, depth + 1);
-      print_child(out, a, n->as.impl_def.trait_type, source, depth + 1);
-      print_child(out, a, n->as.impl_def.target_type, source, depth + 1);
-      print_list(out, a, n->as.impl_def.items, source, depth + 1);
+    case NODE_EXTEND:
+      print_list(out, a, n->as.extend_def.generics, source, depth + 1);
+      print_child(out, a, n->as.extend_def.interface_type, source, depth + 1);
+      print_child(out, a, n->as.extend_def.target_type, source, depth + 1);
+      print_list(out, a, n->as.extend_def.items, source, depth + 1);
       break;
     case NODE_TYPE_ALIAS:
       print_child(out, a, n->as.type_alias.name, source, depth + 1);

@@ -871,11 +871,11 @@ static void test_str_conformances(void) {
       31, "");
 }
 
-// Multiple `From` impls on one type: each `from`/`into` is disambiguated by source type, so the C symbols
+// Multiple `From` extends on one type: each `from`/`into` is disambiguated by source type, so the C symbols
 // (Celsius__from__i32, Celsius__from__u8) do not collide and each call routes to the right one.
 static void test_multi_from(void) {
   sc_run_program(
-      "two From impls: Type::from(x) and x.into() route by source type",
+      "two From extends: Type::from(x) and x.into() route by source type",
       PRE "struct Celsius { pub v: i32 }\n"
           "extend Celsius as From<u8> { fn from(value: u8) Celsius { return Celsius { v: value as i32 }; } }\n"
           "extend Celsius as From<i32> { fn from(value: i32) Celsius { return Celsius { v: value }; } }\n"
@@ -1225,7 +1225,7 @@ static void test_interfaces(void) {
           "fn copy_of<T: Clone>(w: &mut T) T { return w.dup(); }\n"
           "fn main() i32 { let mut p = P { x: 7 }; let q = copy_of(&mut p); exit(q.x); }\n",
       7, "");
-  // static (no-self) interface method on a type parameter: `T::default()` dispatches to the concrete impl.
+  // static (no-self) interface method on a type parameter: `T::default()` dispatches to the concrete extend.
   sc_run_program(
       "interface: static method on a type param",
       PRE "interface Default { fn default() Self; }\n"
@@ -1233,14 +1233,14 @@ static void test_interfaces(void) {
           "fn make<T: Default>() T { return T::default(); }\n"
           "fn main() i32 { let q = make::<Q>(); exit(q.x); }\n",
       7, "");
-  // `Trait::assoc()` resolved by the expected (annotation) type: `Default::default()` -> `R__default`.
+  // `Interface::assoc()` resolved by the expected (annotation) type: `Default::default()` -> `R__default`.
   sc_run_program(
-      "interface: Trait::assoc() resolved by expected type",
+      "interface: Interface::assoc() resolved by expected type",
       PRE "interface Default { fn default() Self; }\n"
           "struct R { pub x: i32, pub y: i32 }\nextend R as Default { fn default() R { return R { x: 5, y: 9 }; } }\n"
           "fn main() i32 { let r: R = Default::default(); exit(r.x + r.y); }\n",
       14, "");
-  // `.into()` desugars to the target type's `From` impl, picked via the expected (annotation) type.
+  // `.into()` desugars to the target type's `From` extend, picked via the expected (annotation) type.
   sc_run_program(
       "interface: .into() via From",
       PRE "interface From<T> { fn from(value: T) Self; }\n"
@@ -1248,7 +1248,7 @@ static void test_interfaces(void) {
           "extend F as From<C> { fn from(value: C) F { return F { d: value.d * 9 / 5 + 32 }; } }\n"
           "fn main() i32 { let c = C { d: 100 }; let f: F = c.into(); exit(f.d); }\n",
       212, "");
-  // `.try_into()` desugars to the target type's `TryFrom` impl (result is a `Result<U, E>`).
+  // `.try_into()` desugars to the target type's `TryFrom` extend (result is a `Result<U, E>`).
   sc_run_program(
       "interface: .try_into() via TryFrom",
       PRE "interface TryFrom<T> { fn try_from(value: T) Result<Self, i32>; }\n"
@@ -1280,7 +1280,7 @@ static void test_interfaces(void) {
           "  let v = self.cur; self.cur = self.cur + 1; return Option::<i32>::some(v); } }\n"
           "fn main() i32 { let mut sum = 0; let c = Counter { cur: 1, end: 6 }; for x in c { sum = sum + x; } exit(sum); }\n",
       15, ""); // 1+2+3+4+5
-  // interface DEFAULT methods: impl provides `eq`/`cmp`; `ne` (from Eq) and `lt`/`ge` (from Ord) are inherited.
+  // interface DEFAULT methods: extend provides `eq`/`cmp`; `ne` (from Eq) and `lt`/`ge` (from Ord) are inherited.
   sc_run_program(
       "interface: inherited default methods",
       PRE "interface Eq { fn eq(self: &Self, other: &Self) bool; fn ne(self: &Self, other: &Self) bool { return !self.eq(other); } }\n"
@@ -1311,7 +1311,7 @@ static void test_operator_overloading(void) {
           "  let c = (a + b) - Point { x: 1, y: 2 };\n" // {12, 22}
           "  exit(c[0] + c[1]); }\n",                    // 34
       34, "");
-  // a generic-instance operand dispatches the same way (the impl's generics substitute into the result).
+  // a generic-instance operand dispatches the same way (the extend's generics substitute into the result).
   sc_run_program(
       "operator overload: index on a generic instance",
       PRE "struct Wrap<T> { pub a: T, pub b: T }\n"
@@ -1442,7 +1442,7 @@ static void test_container_free_raii(void) {
 #undef BOX_PRE
 }
 
-// `.free()` is the Free intrinsic: callable on ANY type, it runs the type's Free impl or is a no-op
+// `.free()` is the Free intrinsic: callable on ANY type, it runs the type's Free extend or is a no-op
 // when the type isn't Free -- resolved per monomorphization. This is what lets generic code (and a generic
 // container's element teardown) free uniformly without a `T: Free` bound.
 static void test_free_intrinsic(void) {

@@ -341,10 +341,10 @@ static void test_errors(void) {
 // `@c.*` attributes lower to portable C keywords + a combined GNU `__attribute__`; export/import pin the
 // exact C symbol (no module mangling) at both the definition and call sites; packed/align ride the struct.
 static void test_attributes(void) {
-  expect_contains("noreturn", "@c.noreturn\nfn die() void {}\nfn main() i32 { return 0; }\n", "_Noreturn void");
+  expect_contains("noreturn", "@c.noreturn\nfn die() void {}\nfn main() i32 { return 0; }\n", "_Noreturn");
   expect_contains(
       "always_inline", "@c.always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { return a(0); }\n",
-      "inline __attribute__((always_inline))");
+      "inline __attribute__((always_inline, unused))");
   expect_contains(
       "section + used", "@c.section(\"hot\")\n@c.used\nfn a() i32 { return 0; }\nfn main() i32 { return a(); }\n",
       "__attribute__((used, section(\"hot\")))");

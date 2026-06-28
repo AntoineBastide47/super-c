@@ -42,8 +42,8 @@ static void test_associated_new_name(void) {
   if (!ast)
     return;
   const Node *ext = item(ast, 1);
-  CHECK(ext->kind == NODE_IMPL, "associated new name: item 1 should be an extension");
-  const NodeId method_id = ast_list(ast, ext->as.impl_def.items)[0];
+  CHECK(ext->kind == NODE_EXTEND, "associated new name: item 1 should be an extension");
+  const NodeId method_id = ast_list(ast, ext->as.extend_def.items)[0];
   const Node *method = ast_at_const(ast, method_id);
   CHECK(method->kind == NODE_FUNCTION, "associated new name: extension item should be a function");
   CHECK(th_ident_is(ast, "struct String {}\nextend String { fn new() String { return String {}; } }\n", method->as.function.name, "new"),
@@ -92,8 +92,8 @@ static void test_traits_impls_match_and_new(void) {
     return;
   const Node *root = ast_at_const(ast, ast->root);
   CHECK(root->as.program.items.len == 3, "interfaces extensions switch and new: expected 3 items");
-  CHECK(item(ast, 0)->kind == NODE_TRAIT, "expected interface");
-  CHECK(item(ast, 1)->kind == NODE_IMPL, "expected extension");
+  CHECK(item(ast, 0)->kind == NODE_INTERFACE, "expected interface");
+  CHECK(item(ast, 1)->kind == NODE_EXTEND, "expected extension");
   CHECK(item(ast, 2)->kind == NODE_FUNCTION, "expected function");
   ast_free(&ast);
 }
@@ -345,7 +345,7 @@ static void test_pub_modifiers(void) {
   const NodeId *fields = ast_list(a, s->as.aggregate.members);
   CHECK(ast_at_const(a, fields[0])->as.field.is_public, "pub field x is public");
   CHECK(!ast_at_const(a, fields[1])->as.field.is_public, "non-pub field y is private");
-  const NodeId *methods = ast_list(a, item(a, 1)->as.impl_def.items);
+  const NodeId *methods = ast_list(a, item(a, 1)->as.extend_def.items);
   CHECK(ast_at_const(a, methods[0])->as.function.is_public, "pub method is public");
   CHECK(!ast_at_const(a, methods[1])->as.function.is_public, "non-pub method is private");
   CHECK(item(a, 2)->as.function.is_public, "pub fn is public");

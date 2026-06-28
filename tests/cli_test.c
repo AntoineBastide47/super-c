@@ -183,7 +183,7 @@ static void test_cross_module_generic_by_value(void) {
   CHECK(run_cmd(crun, NULL, 0) == 60, "re-homed instance method + cross-pool map<U> run (30 + 30)");
 }
 
-// A cross-module generic instance over a user type whose bounded impl calls a BOUND METHOD on the
+// A cross-module generic instance over a user type whose bounded extend calls a BOUND METHOD on the
 // element (`extend<T: Clone> Bx<T> { fn dup() { ..self.v.clone().. } }` instantiated as `Bx<Bar>`). The
 // instance is re-homed to the user module and full-monomorphized there; the bound call `self.v.clone()`
 // dispatches through the subst (T -> Bar) to the concrete `Bar__clone`. Built -Werror and run -- this is
@@ -271,7 +271,7 @@ static void test_emit_macro_export(void) {
   CHECK(strstr(buf, "generic struct or enum") != NULL, "the rejection names the constraint: %s", buf);
 }
 
-// Per-impl bound filtering: a generic with a bounded extension block (`extend<T: Marker> Wrap<T>`) plus an
+// Per-extend bound filtering: a generic with a bounded extension block (`extend<T: Marker> Wrap<T>`) plus an
 // unbounded one, instantiated over a type that does NOT satisfy the bound. The bounded block's methods must
 // not be specialized for it (their bodies would call an unprovided method -> an undefined symbol); only the
 // unbounded block emits. This is what lets a stateful (non-Default) allocator skip a `Default`-bounded ctor.
@@ -299,7 +299,7 @@ static void test_per_impl_bound_filtering(void) {
 
 // A `pub interface` declared in one module, then implemented over a local type via `extend T as
 // mod::Iface` and consumed by a bounded generic in another module: the bound resolves across the import,
-// the impl satisfies it, and the bounded call dispatches to the concrete method. Built -Werror and run.
+// the extend satisfies it, and the bounded call dispatches to the concrete method. Built -Werror and run.
 static void test_cross_module_interface(void) {
   char root[4112], spc[4170], cmd[8320], buf[256];
   snprintf(root, sizeof root, "%s/iface", DIR);
