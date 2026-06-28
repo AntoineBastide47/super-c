@@ -141,10 +141,10 @@ static void test_module_features(void) {
 
 // A7: a generic defined in one module, instantiated over a user struct held BY VALUE in another. The
 // generic's module cannot see the user type's layout, so the owner-emits model would produce an
-// incomplete-type field; instead the instance is re-homed to the user module via the generic's
-// DECLARE/DEFINE macros. Exercises the re-homed struct, a non-generic method (unwrap_or), and a
-// cross-pool generic method (map<U>). The -Werror compile is itself the placement proof -- an instance
-// emitted in the owner with an incomplete `Bar` would fail to compile.
+// incomplete-type field; instead the instance is re-homed to the user module and full-monomorphized
+// there (the generic's template is sourced from its owner module). Exercises the re-homed struct, a
+// non-generic method (unwrap_or), and a cross-pool generic method (map<U>). The -Werror compile is
+// itself the placement proof -- an instance emitted in the owner with an incomplete `Bar` would fail.
 static void test_cross_module_generic_by_value(void) {
   char root[4112], spc[4170], cmd[8320], buf[256];
   snprintf(root, sizeof root, "%s/genbv", DIR);
@@ -169,11 +169,11 @@ static void test_cross_module_generic_by_value(void) {
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module generic over a user type compiles: %s", buf);
 
-  // The instance is materialized in the USER module (its DECLARE macro is invoked in genbv's header),
+  // The instance's concrete struct is materialized in the USER module's header (full-monomorphized there),
   // not in the generic's owner module -- that is the whole point of the placement fix.
   char gcmd[8400];
-  snprintf(gcmd, sizeof gcmd, "grep -q '_DECLARE(' '%s/build/genbv.h'", root);
-  CHECK(run_cmd(gcmd, NULL, 0) == 0, "the generic instance is emitted in the user module's header");
+  snprintf(gcmd, sizeof gcmd, "grep -q 'struct opt__opt__Opt__genbv__Bar {' '%s/build/genbv.h'", root);
+  CHECK(run_cmd(gcmd, NULL, 0) == 0, "the generic instance is full-monomorphized in the user module's header");
 
   char bin[4200], ccmd[8320], crun[8320];
   snprintf(bin, sizeof bin, "%s/genbv.bin", DIR);
@@ -185,9 +185,9 @@ static void test_cross_module_generic_by_value(void) {
 
 // A cross-module generic instance over a user type whose bounded impl calls a BOUND METHOD on the
 // element (`extend<T: Clone> Bx<T> { fn dup() { ..self.v.clone().. } }` instantiated as `Bx<Bar>`). The
-// instance is re-homed to the user module and emitted via the generic's placement macros; the bound call
-// lowers to `_SCM_T ## __clone`, which the invocation resolves to the concrete `Bar__clone`. Built -Werror
-// and run -- this is what unblocks the container `Clone`/`Eq`/`Hash` conformances.
+// instance is re-homed to the user module and full-monomorphized there; the bound call `self.v.clone()`
+// dispatches through the subst (T -> Bar) to the concrete `Bar__clone`. Built -Werror and run -- this is
+// what unblocks the container `Clone`/`Eq`/`Hash` conformances.
 static void test_cross_module_generic_bound_dispatch(void) {
   char root[4112], spc[4170], cmd[8320], buf[256];
   snprintf(root, sizeof root, "%s/genbd", DIR);
@@ -215,6 +215,60 @@ static void test_cross_module_generic_bound_dispatch(void) {
   CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "bound-dispatch generic C compiles -Werror: %s", buf);
   snprintf(crun, sizeof crun, "'%s'", bin);
   CHECK(run_cmd(crun, NULL, 0) == 42, "re-homed Bx<Bar>::dup dispatches self.v.clone() to Bar__clone (21+21)");
+}
+
+// `@emit_macro` on a generic type emits reusable C `DECLARE`/`DEFINE` templates into its own header (opt-in),
+// so a plain-C consumer can instantiate the Super-C generic over its own C type. Super-C's own instances are
+// still full-monomorphized; the templates are purely additive. Also checks the attribute is rejected on a
+// non-generic type. (Macro reuse is lower-fidelity: the instance NAME must be the canonical `<Base>__<token>`.)
+static void test_emit_macro_export(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/emac", DIR);
+  mkfile(root, "emac.spc",
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "@emit_macro\n"
+         "pub struct Pair<T> { pub a: T, pub b: T }\n"
+         "extend<T> Pair<T> { pub fn pick(self: &Pair<T>, second: bool) T { if second { return self.b; } return self.a; } }\n"
+         "fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; exit(p.pick(true) + p.a); }\n"); // 4 + 3
+  snprintf(spc, sizeof spc, "%s/emac.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "@emit_macro generic compiles: %s", buf);
+
+  char gcmd[8400]; // the opt-in templates land in the type's own header
+  snprintf(gcmd, sizeof gcmd, "grep -q 'PAIR_DECLARE(' '%s/build/emac.h' && grep -q 'PAIR_DEFINE(' '%s/build/emac.h'",
+           root, root);
+  CHECK(run_cmd(gcmd, NULL, 0) == 0, "@emit_macro emits DECLARE/DEFINE templates in the header");
+
+  char bin[4200], ccmd[8320], crun[8320]; // Super-C's own use full-monomorphizes and runs
+  snprintf(bin, sizeof bin, "%s/emac.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "@emit_macro module C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 7, "@emit_macro module runs (full-mono Pair<i32>)");
+
+  // A plain-C consumer instantiates the template over its own C type (no Super-C compiler involved).
+  mkfile(root, "cuser.c",
+         "#include \"emac.h\"\n"
+         "typedef struct { int n; } CT;\n"
+         "PAIR_DECLARE(CT, CT, Pair__CT)\n"
+         "PAIR_DEFINE(CT, CT, Pair__CT)\n"
+         "int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };\n"
+         "  return Pair__CT__pick(&p, 1).n == 9 ? 0 : 1; }\n");
+  char cbin[4200], cc2[8460];
+  snprintf(cbin, sizeof cbin, "%s/cuser.bin", DIR);
+  snprintf(cc2, sizeof cc2, "cc -std=c11 -Wall -Wextra -Werror -I'%s/build' '%s/cuser.c' -o '%s' 2>&1", root, root, cbin);
+  CHECK(run_cmd(cc2, buf, sizeof buf) == 0, "plain-C instantiates the @emit_macro template -Werror: %s", buf);
+  char cr[4220];
+  snprintf(cr, sizeof cr, "'%s'", cbin);
+  CHECK(run_cmd(cr, NULL, 0) == 0, "plain-C reuse of the Super-C generic runs");
+
+  // The attribute is rejected on a non-generic type.
+  char bad[4170], bcmd[8320];
+  mkfile(root, "bad.spc", "@emit_macro\npub struct Plain { pub a: i32 }\nfn main() i32 { return 0; }\n");
+  snprintf(bad, sizeof bad, "%s/bad.spc", root);
+  snprintf(bcmd, sizeof bcmd, "%s '%s' 2>&1", SC, bad);
+  CHECK(run_cmd(bcmd, buf, sizeof buf) != 0, "@emit_macro on a non-generic is rejected");
+  CHECK(strstr(buf, "generic struct or enum") != NULL, "the rejection names the constraint: %s", buf);
 }
 
 // A `pub interface` declared in one module, then implemented over a local type via `extend T as
@@ -412,6 +466,7 @@ int main(void) {
   test_module_features();
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();
+  test_emit_macro_export();
   test_cross_module_interface();
   test_ffi_bindings();
   test_module_imports();

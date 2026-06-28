@@ -34,6 +34,7 @@ VEC_DECLARE(DefId, DefId_Vec)
 typedef enum {
   ATTR_INLINE, ATTR_ALWAYS_INLINE, ATTR_NOINLINE, ATTR_NORETURN,
   ATTR_ALIGN, ATTR_PACKED, ATTR_EXPORT, ATTR_IMPORT, ATTR_SECTION, ATTR_USED, ATTR_UNUSED,
+  ATTR_EMIT_MACRO, // `@emit_macro` (bare, no `c.`): emit this generic type as reusable C DECLARE/DEFINE macros
 } AttrKind;
 
 typedef struct {

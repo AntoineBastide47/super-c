@@ -131,6 +131,9 @@ struct Codegen {
     bool macro;
     NodeId macro_self;       // the generic decl being templated (its instances render as `NAME`)
     ModuleId macro_self_mod; // that decl's module
+    bool borrowed;           // true while emitting a re-homed instance with c->ast swapped to the owner
+                             // module: the per-module enum index belongs to the home module, so enum-tag
+                             // lookups must scan the owner's enums instead of trusting the stale index
     NodeId slice_raw;        // the array node currently emitted as the inner `.ptr` of an array->slice
                              // coercion wrap; suppresses re-entrant coercion so it emits as a bare array
     // `defer`: a stack of pending deferred statements. Each block scope runs the defers pushed within it,
@@ -707,10 +710,11 @@ static TypeId subst_resolve(Codegen *c, const TypeId t) {
     case TYPE_REFERENCE:
     case TYPE_SLICE:
     case TYPE_ARRAY: {
-      const TypeId e = subst_resolve(c, y->as.elem);
-      if (e == y->as.elem)
+      const Ty saved = *y; // copy before recursing: subst_resolve may intern -> realloc the pool, freeing y
+      const TypeId e = subst_resolve(c, saved.as.elem);
+      if (e == saved.as.elem)
         return t;
-      Ty nt = *y;
+      Ty nt = saved;
       nt.as.elem = e;
       return ast_intern_type(c->ast, nt);
     }
@@ -903,7 +907,7 @@ static NodeId enclosing_enum(Codegen *c, const NodeId variant) {
 // module, so a cross-module variant (e.g. matching/constructing an imported or prelude enum) is found by
 // scanning the owner module's enums -- rare and only on the cross-module path.
 static NodeId enclosing_enum_in(Codegen *c, const ModuleId m, const NodeId variant) {
-  if (m == c->ast->module)
+  if (m == c->ast->module && !c->borrowed) // borrowed: c->ast is a swapped-in owner; its index is the home's
     return enclosing_enum(c, variant);
   const Ast *const a = cg_mod_ast(c, m);
   const NodeList items = ast_at_const(a, a->root)->as.program.items;
@@ -5637,9 +5641,85 @@ static DefId impl_trait(Ast *const a, const Node *const impl) {
 // `<Inst>__<method>` with the impl's type params bound to the instance args. Unlike free-function specs
 // (per-module-static), methods are emitted once by the owner, so a `pub` method becomes a real
 // cross-module symbol (prototype in the header). `which`/`with_body` mirror phase_prototypes/phase_bodies.
-static void emit_method_specializations(Codegen *c, const int which, const bool with_body) {
+// Emit one concrete instance's methods (ordinary + generic map<U>). `it`'s args live in the CURRENT
+// c->ast pool, and impls are scanned from c->ast (the generic's owner -- equal to c->ast for a same-module
+// instance, the temporarily swapped-in owner for a re-homed one). Generic-method instantiations are read
+// from `mi_src->method_insts` keyed by `mi_inst` (the receiver instance's TypeId in mi_src's pool), so a
+// re-homed instance still finds the uses recorded in its home module while its template reads from owner.
+static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const mi_src, const TypeId mi_inst,
+                              const int which, const bool with_body) {
   const NodeList items = program_items(c);
   const NodeId *const iids = ast_list(c->ast, items);
+  char inm[200];
+  inst_name(c, it, inm, sizeof inm);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, iids[i]);
+    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
+      continue;
+    if (ast_resolution(c->ast, n->as.impl_def.target_type) != it->decl)
+      continue;
+    const DefId itrait = impl_trait(c->ast, n); // a conditional conformance emits only for satisfying instances
+    if (itrait.node != NODE_NONE &&
+        !cg_type_satisfies(c, ast_intern_instance(c->ast, it->module, it->decl, it->args, it->n), itrait, 0))
+      continue;
+    const NodeList gens = n->as.impl_def.generics;
+    const NodeId *const gids = ast_list(c->ast, gens);
+    const NodeList ms = n->as.impl_def.items;
+    const NodeId *const mids = ast_list(c->ast, ms);
+    for (uint32_t j = 0; j < ms.len; j++) {
+      const Node *const mn = ast_at_const(c->ast, mids[j]);
+      if (mn->kind != NODE_FUNCTION || mn->as.function.returns.len > 1) // multi-return method: unsupported
+        continue;
+      if (with_body ? mn->as.function.body == NODE_NONE : !want_fn(which, mn->as.function.is_public))
+        continue;
+      // Bind the impl's generics (e.g. T) from the instance's args -- shared by every spec below.
+      c->nsubst = 0;
+      for (uint32_t g = 0; g < gens.len && g < it->n && c->nsubst < 8; g++) {
+        c->subst[c->nsubst].param = (DefId){c->ast->module, gids[g]};
+        c->subst[c->nsubst].concrete = it->args[g];
+        c->nsubst++;
+      }
+      char nm[320];
+      size_t at = buf_append(nm, sizeof nm, 0, inm);
+      at = buf_append(nm, sizeof nm, at, "__");
+      render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
+      const bool stat = c->multifile && !mn->as.function.is_public;
+      if (mn->as.function.generics.len == 0) { // ordinary method: one spec per instance
+        emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, nm, stat);
+        c->nsubst = 0;
+        continue;
+      }
+      // Generic method (map<U>): one spec per recorded (instance, method, targs) tuple, layering the
+      // method's own generics atop the impl subst and suffixing the name with the mangled type args.
+      const int nimpl = c->nsubst;
+      const NodeList mg = mn->as.function.generics;
+      const NodeId *const mgids = ast_list(c->ast, mg);
+      for (size_t mk = 0; mk < mi_src->method_insts.len; mk++) {
+        const MethodInst inst = mi_src->method_insts.data[mk]; // copy: emit may grow pools
+        if (inst.method != mids[j] || inst.instance != mi_inst)
+          continue;
+        c->nsubst = nimpl;
+        for (uint32_t g = 0; g < mg.len && g < inst.n && c->nsubst < 8; g++) {
+          c->subst[c->nsubst].param = (DefId){c->ast->module, mgids[g]};
+          c->subst[c->nsubst].concrete = mi_src == c->ast ? inst.targs[g] : ast_reintern(c->ast, mi_src, inst.targs[g]);
+          c->nsubst++;
+        }
+        char snm[400];
+        size_t a2 = buf_append(snm, sizeof snm, 0, nm);
+        for (uint8_t g = 0; g < inst.n; g++) {
+          a2 = buf_append(snm, sizeof snm, a2, "__");
+          char e[176];
+          mangle_type(c, mi_src == c->ast ? inst.targs[g] : ast_reintern(c->ast, mi_src, inst.targs[g]), e, sizeof e);
+          a2 = buf_append(snm, sizeof snm, a2, e);
+        }
+        emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, snm, stat);
+      }
+      c->nsubst = 0;
+    }
+  }
+}
+
+static void emit_method_specializations(Codegen *c, const int which, const bool with_body) {
   for (size_t ii = 0; ii < c->ast->instances.len; ii++) {
     const TyInstance it = c->ast->instances.data[ii]; // copy: emit_function below may grow the pool
     if (it.module != c->ast->module)
@@ -5649,74 +5729,9 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
       concrete &= type_is_concrete(c, it.args[k]);
     if (!concrete)
       continue;
-    char inm[200];
-    inst_name(c, &it, inm, sizeof inm);
-    for (uint32_t i = 0; i < items.len; i++) {
-      const Node *const n = ast_at_const(c->ast, iids[i]);
-      if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len)
-        continue;
-      if (ast_resolution(c->ast, n->as.impl_def.target_type) != it.decl)
-        continue;
-      const DefId itrait = impl_trait(c->ast, n); // a conditional conformance emits only for satisfying instances
-      if (itrait.node != NODE_NONE &&
-          !cg_type_satisfies(c, ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n), itrait, 0))
-        continue;
-      const NodeList gens = n->as.impl_def.generics;
-      const NodeId *const gids = ast_list(c->ast, gens);
-      const NodeList ms = n->as.impl_def.items;
-      const NodeId *const mids = ast_list(c->ast, ms);
-      for (uint32_t j = 0; j < ms.len; j++) {
-        const Node *const mn = ast_at_const(c->ast, mids[j]);
-        if (mn->kind != NODE_FUNCTION || mn->as.function.returns.len > 1) // multi-return method: unsupported
-          continue;
-        if (with_body ? mn->as.function.body == NODE_NONE : !want_fn(which, mn->as.function.is_public))
-          continue;
-        // Bind the impl's generics (e.g. T) from the instance's args -- shared by every spec below.
-        c->nsubst = 0;
-        for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
-          c->subst[c->nsubst].param = (DefId){c->ast->module, gids[g]};
-          c->subst[c->nsubst].concrete = it.args[g];
-          c->nsubst++;
-        }
-        char nm[320];
-        size_t at = buf_append(nm, sizeof nm, 0, inm);
-        at = buf_append(nm, sizeof nm, at, "__");
-        render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
-        const bool stat = c->multifile && !mn->as.function.is_public;
-        if (mn->as.function.generics.len == 0) { // ordinary method: one spec per instance
-          emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, nm, stat);
-          c->nsubst = 0;
-          continue;
-        }
-        // Generic method (map<U>): one spec per recorded (instance, method, targs) tuple, layering the
-        // method's own generics atop the impl subst and suffixing the name with the mangled type args.
-        const TypeId itTy = ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n);
-        const int nimpl = c->nsubst;
-        const NodeList mg = mn->as.function.generics;
-        const NodeId *const mgids = ast_list(c->ast, mg);
-        for (size_t mi = 0; mi < c->ast->method_insts.len; mi++) {
-          const MethodInst inst = c->ast->method_insts.data[mi]; // copy: emit may grow pools
-          if (inst.method != mids[j] || inst.instance != itTy)
-            continue;
-          c->nsubst = nimpl;
-          for (uint32_t g = 0; g < mg.len && g < inst.n && c->nsubst < 8; g++) {
-            c->subst[c->nsubst].param = (DefId){c->ast->module, mgids[g]};
-            c->subst[c->nsubst].concrete = inst.targs[g];
-            c->nsubst++;
-          }
-          char snm[400];
-          size_t a2 = buf_append(snm, sizeof snm, 0, nm);
-          for (uint8_t g = 0; g < inst.n; g++) {
-            a2 = buf_append(snm, sizeof snm, a2, "__");
-            char e[176];
-            mangle_type(c, inst.targs[g], e, sizeof e);
-            a2 = buf_append(snm, sizeof snm, a2, e);
-          }
-          emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, snm, stat);
-        }
-        c->nsubst = 0;
-      }
-    }
+    const TypeId itTy = ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n);
+    emit_inst_methods(c, &it, c->ast, itTy, which, with_body);
+    c->nsubst = 0;
   }
 }
 
@@ -6031,6 +6046,28 @@ static void emit_generic_enum_shared(Codegen *c) {
       emit_enum_tag_decl(c, it->decl, dn);
     else
       emit_enum_full(c, dn, it->decl); // shared plain enum (instances alias it)
+  }
+  // A public generic enum whose only instances are re-homed into other modules has no same-module instance
+  // above, yet those re-homed bodies (full-monomorphized in user modules that include this header) name the
+  // shared tag. Emit it here in the owner's header for every public generic enum, deduped against the set.
+  const NodeList items = program_items(c);
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const NodeId did = ids[i];
+    const Node *const dn = ast_at_const(c->ast, did);
+    if (dn->kind != NODE_ENUM || !dn->as.aggregate.generics.len || !dn->as.aggregate.is_public)
+      continue;
+    bool dup = false;
+    for (int s = 0; s < ns; s++)
+      dup |= seen[s] == did;
+    if (dup)
+      continue;
+    if (ns < 64)
+      seen[ns++] = did;
+    if (aggregate_has_payload(c, dn))
+      emit_enum_tag_decl(c, did, dn);
+    else
+      emit_enum_full(c, dn, did);
   }
 }
 
@@ -6398,6 +6435,9 @@ static void emit_generic_method_macros(Codegen *c, const NodeId declId) {
 // In this module's header: for each pub generic struct/enum, the shared (instance-independent) enum tag and
 // the DECLARE + DEFINE macros. Both are `#define`s (DEFINE expands only where invoked, in the home .c), so
 // a module that includes this header can invoke either.
+// Emit the opt-in C-reuse macro templates (<G>_DECLARE/<G>_DEFINE) for every generic struct/enum carrying
+// the `@emit_macro` attribute, so a plain-C project can instantiate the type over its own C types. Purely
+// additive: Super-C's own instances are full-monomorphized (these templates are never invoked internally).
 static void emit_generic_macros(Codegen *c) {
   if (!c->package)
     return;
@@ -6405,12 +6445,9 @@ static void emit_generic_macros(Codegen *c) {
   const NodeId *const ids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
-    if ((n->kind != NODE_STRUCT && n->kind != NODE_ENUM) || !n->as.aggregate.generics.len ||
-        !n->as.aggregate.is_public)
+    if ((n->kind != NODE_STRUCT && n->kind != NODE_ENUM) || !n->as.aggregate.generics.len)
       continue;
-    // A self-contained translation unit (REPL / inline tests) only needs the macros for generics actually
-    // re-homed over a user type; the multi-file build emits every pub generic's macros for plain-C reuse.
-    if (!c->multifile && !package_generic_needs_macro(c->package, c->ast->module, ids[i]))
+    if (!cg_attr(c, c->ast->module, ids[i], ATTR_EMIT_MACRO)) // opt-in, per generic type
       continue;
     if (n->kind == NODE_ENUM) { // the tag is shared across instances; macro structs name it
       if (aggregate_has_payload(c, n))
@@ -6458,141 +6495,80 @@ static void emit_rehomed_forwards(Codegen *c) {
   }
 }
 
-// After the core DECLARE/DEFINE, invoke each SATISFIED conditional conformance's macro for a re-homed
-// A non-Free macro argument has no real `<mangle>__free`, but a macro body's deep-free pastes
-// `_SCM_<T> ## __free`. Emit a guarded no-op stub so that paste resolves. The `#ifndef` guard dedups within
-// a translation unit (single-TU = one file; multi-file = per file) and `static` keeps each file's copy
-// internal -- so a Free arg uses its real `__free`, a non-Free arg this no-op (deep-free of a POD element).
-// A re-homed macro instance's DEFINE body deep-frees each element via the paste `<arg-mangle>__free(&e)`.
-// A Free element has a real destructor and a builtin has its empty `<builtin>__free` (std/core.spc); a
-// plain non-Free type has neither, so define `<arg>__free` as a no-op function-like MACRO -- the call then
-// expands to nothing. No stub function is synthesized (unlike the old per-type `__free` definitions).
-static void cg_emit_free_noop_macro(Codegen *c, const TypeId argTy) {
-  const Ty *const y = ast_type_at(c->ast, subst_resolve(c, argTy));
-  if (y->kind == TYPE_BUILTIN || cg_type_is_free(c, argTy))
-    return; // already has a real `<mangle>__free`
-  char mng[176];
-  mangle_type(c, argTy, mng, sizeof mng);
-  emit(c, "#ifndef SC_NF_%s\n#define SC_NF_%s\n#define %s__free(p) ((void)(p))\n#endif\n", mng, mng, mng);
+// Full-monomorphize a cross-module generic instance re-homed to this module (its args are user types defined
+// here, which the generic's own module could only forward-declare -> an incomplete by-value field). Source
+// the generic's template (decl, fields/impls/method bodies) from its owner module via a temporary c->ast
+// swap, reinterning the instance's args into the owner pool so the substitution stays self-consistent.
+// Output (c->buf) and the home instance table are unaffected -- c->buf is independent of c->ast, and the
+// owner's codegen pass has already run (deps emit first), so interning into the owner pool here is inert.
+static void emit_rehomed_struct(Codegen *c, const TyInstance *const it, const bool with_body) {
+  Ast *const home = c->ast;
+  const uint8_t *const hsrc = c->source;
+  const size_t hlen = c->len;
+  Ast *const owner = cg_mod_ast(c, it->module);          // capture owner ast/source BEFORE swapping c->ast,
+  const uint8_t *const osrc = cg_mod_src(c, it->module); // else cg_mod_src would resolve against the new module
+  const size_t oninst = owner->instances.len;            // instances interned into the owner during this emit
+  TyInstance oit = *it;                                  // (arg reinterns, satisfies-checks) are transient
+  for (uint8_t k = 0; k < it->n; k++)
+    oit.args[k] = ast_reintern(owner, home, it->args[k]);
+  c->ast = owner;
+  c->source = osrc;
+  c->len = c->package->modules[it->module].source_len;
+  c->borrowed = true;
+  const NodeKind dk = ast_at_const(owner, oit.decl)->kind;
+  if (dk == NODE_STRUCT)
+    emit_struct_inst(c, &oit, with_body);
+  else if (dk == NODE_ENUM)
+    emit_enum_inst(c, &oit, with_body);
+  owner->instances.len = oninst; // drop transient instances so the owner's own pass never re-emits them
+  c->borrowed = false;
+  c->ast = home;
+  c->source = hsrc;
+  c->len = hlen;
+  c->nsubst = 0;
 }
 
-// instance: `<STEM>_as_<Iface>_DECLARE/DEFINE(args.., NAME)`. Gated by cg_type_satisfies, so an element type
-// implementing only some of Clone/Eq/Hash gets only those (and e.g. `Vector<i32>` gets none of them).
-static void emit_conformance_invocations(Codegen *c, const TyInstance *const it, const bool define) {
-  Ast *const oa = cg_mod_ast(c, it->module);
-  const Node *const dn = ast_at_const(oa, it->decl);
-  const NodeList items = ast_at_const(oa, oa->root)->as.program.items;
-  const NodeId *const iids = ast_list(oa, items);
-  const TypeId instTy = ast_intern_instance(c->ast, it->module, it->decl, it->args, it->n);
-  char stem[160];
-  macro_stem(c, it->module, dn->as.aggregate.name, stem, sizeof stem);
-  for (uint32_t i = 0; i < items.len; i++) {
-    const Node *const n = ast_at_const(oa, iids[i]);
-    if (n->kind != NODE_IMPL || !n->as.impl_def.generics.len || n->as.impl_def.trait_type == NODE_NONE)
-      continue;
-    if (ast_resolution(oa, n->as.impl_def.target_type) != it->decl)
-      continue;
-    const DefId tr = ast_resolution_def(oa, n->as.impl_def.trait_type);
-    if (tr.node == NODE_NONE || !cg_type_satisfies(c, instTy, tr, 0))
-      continue;
-    if (define)
-      for (uint8_t k = 0; k < it->n; k++)
-        cg_emit_free_noop_macro(c, it->args[k]); // a deep-freeing conformance body may paste `<arg>__free`
-    char tag[80];
-    size_t at = buf_append(tag, sizeof tag, 0, "as_");
-    const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
-    render_ident_src(cg_mod_src(c, tr.module),
-                     ast_at_const(cg_mod_ast(c, tr.module), trn->as.trait_def.name)->as.name.text, tag + at,
-                     sizeof tag > at ? sizeof tag - at : 0);
-    emit(c, "%s_%s_%s(", stem, tag, define ? "DEFINE" : "DECLARE");
-    for (uint8_t k = 0; k < it->n; k++) {
-      char csp[256], mng[176];
-      render_type_id(c, it->args[k], "", csp, sizeof csp);
-      mangle_type(c, it->args[k], mng, sizeof mng);
-      emit(c, "%s, %s, ", csp, mng);
-    }
-    char inm[200];
-    inst_name(c, it, inm, sizeof inm);
-    emit(c, "%s)\n", inm);
+static void emit_rehomed_structs(Codegen *c, const bool with_body) {
+  if (!c->package)
+    return;
+  for (size_t ii = 0; ii < c->ast->instances.len; ii++) {
+    const TyInstance it = c->ast->instances.data[ii];
+    if (inst_rehomed_here(c, &it))
+      emit_rehomed_struct(c, &it, with_body);
   }
 }
 
-// Invoke `<G>_DECLARE(...)` (define=false) / `<G>_DEFINE(...)` for every instance re-homed here, passing each
-// arg's C spelling + mangle token and the instance's mangled name; then each satisfied conformance's macro.
-static void emit_instance_macro_invocations(Codegen *c, const bool define) {
+// Methods of every cross-module instance re-homed here: template (impls + method bodies) sourced from the
+// owner via the c->ast swap, while generic-method uses (map<U>) are still read from this (home) module's
+// method_insts (keyed by the receiver's home-pool TypeId), since that is where the uses were recorded.
+static void emit_rehomed_methods(Codegen *c, const int which, const bool with_body) {
   if (!c->package)
     return;
-  for (size_t i = 0; i < c->ast->instances.len; i++) {
-    const TyInstance it = c->ast->instances.data[i];
+  Ast *const home = c->ast;
+  const uint8_t *const hsrc = c->source;
+  const size_t hlen = c->len;
+  for (size_t ii = 0; ii < home->instances.len; ii++) {
+    const TyInstance it = home->instances.data[ii];
     if (!inst_rehomed_here(c, &it))
       continue;
-    const Node *const dn = ast_at_const(cg_mod_ast(c, it.module), it.decl);
-    char stem[160];
-    macro_stem(c, it.module, dn->as.aggregate.name, stem, sizeof stem);
-    if (define)
-      for (uint8_t k = 0; k < it.n; k++)
-        cg_emit_free_noop_macro(c, it.args[k]); // a deep-freeing method body may paste `<arg>__free`
-    emit(c, "%s_%s(", stem, define ? "DEFINE" : "DECLARE");
-    for (uint8_t k = 0; k < it.n; k++) {
-      char csp[256], mng[176];
-      render_type_id(c, it.args[k], "", csp, sizeof csp);
-      mangle_type(c, it.args[k], mng, sizeof mng);
-      emit(c, "%s, %s, ", csp, mng);
-    }
-    char inm[200];
-    inst_name(c, &it, inm, sizeof inm);
-    emit(c, "%s)\n", inm);
-    emit_conformance_invocations(c, &it, define);
-  }
-}
-
-// Invoke `<STEM>_<method>_DECLARE/DEFINE(...)` for every recorded generic-method use (map<U> etc.) whose
-// receiver instance is re-homed here -- one per (instance, method, targs) tuple. The method decl lives in
-// the generic's owner module (reached via the instance's module), so its name/params read from there.
-static void emit_method_macro_invocations(Codegen *c, const bool define) {
-  if (!c->package)
-    return;
-  for (size_t i = 0; i < c->ast->method_insts.len; i++) {
-    const MethodInst mi = c->ast->method_insts.data[i];
-    const Ty *const ity = ast_type_at(c->ast, mi.instance);
-    if (ity->kind != TYPE_INSTANCE)
-      continue;
-    const TyInstance recv = *ast_instance(c->ast, ity->as.inst);
-    if (!inst_rehomed_here(c, &recv))
-      continue;
-    bool ok = true;
-    for (uint8_t k = 0; k < mi.n; k++)
-      ok &= type_is_concrete(c, mi.targs[k]);
-    if (!ok)
-      continue;
-    const Ast *const oa = cg_mod_ast(c, recv.module);
-    const Node *const mn = ast_at_const(oa, mi.method);
-    char stem[160], mnm[64];
-    macro_stem(c, recv.module, ast_at_const(oa, recv.decl)->as.aggregate.name, stem, sizeof stem);
-    render_ident_src(cg_mod_src(c, recv.module), name_span_in(c, recv.module, mn->as.function.name), mnm, sizeof mnm);
-    if (define) {
-      for (uint8_t k = 0; k < recv.n; k++)
-        cg_emit_free_noop_macro(c, recv.args[k]); // a deep-freeing method body may paste `<arg>__free`
-      for (uint8_t k = 0; k < mi.n; k++)
-        cg_emit_free_noop_macro(c, mi.targs[k]);
-    }
-    emit(c, "%s_%s_%s(", stem, mnm, define ? "DEFINE" : "DECLARE");
-    for (uint8_t k = 0; k < recv.n; k++) {
-      char csp[256], mng[176];
-      render_type_id(c, recv.args[k], "", csp, sizeof csp);
-      mangle_type(c, recv.args[k], mng, sizeof mng);
-      emit(c, "%s, %s, ", csp, mng);
-    }
-    char inm[200];
-    inst_name(c, &recv, inm, sizeof inm);
-    emit(c, "%s", inm);
-    for (uint8_t k = 0; k < mi.n; k++) {
-      char csp[256], mng[176];
-      render_type_id(c, mi.targs[k], "", csp, sizeof csp);
-      mangle_type(c, mi.targs[k], mng, sizeof mng);
-      emit(c, ", %s, %s", csp, mng);
-    }
-    emit(c, ")\n");
+    const TypeId itTy = ast_intern_instance(home, it.module, it.decl, it.args, it.n); // home-pool key for map<U>
+    Ast *const owner = cg_mod_ast(c, it.module);          // capture owner ast/source BEFORE swapping c->ast
+    const uint8_t *const osrc = cg_mod_src(c, it.module);
+    const size_t oninst = owner->instances.len;
+    TyInstance oit = it;
+    for (uint8_t k = 0; k < it.n; k++)
+      oit.args[k] = ast_reintern(owner, home, it.args[k]);
+    c->ast = owner;
+    c->source = osrc;
+    c->len = c->package->modules[it.module].source_len;
+    c->borrowed = true;
+    emit_inst_methods(c, &oit, home, itTy, which, with_body);
+    owner->instances.len = oninst; // drop transient instances so the owner's own pass never re-emits them
+    c->borrowed = false;
+    c->ast = home;
+    c->source = hsrc;
+    c->len = hlen;
+    c->nsubst = 0;
   }
 }
 
@@ -6761,9 +6737,8 @@ static void phase_types(Codegen *c) {
     }
   }
   emit_aggregate_specializations(c, true); // full bodies for generic struct instantiations
-  emit_generic_macros(c);                  // this module's generics as <G>_DECLARE/<G>_DEFINE macros
-  emit_instance_macro_invocations(c, false); // DECLARE cross-module instances homed here (after their args)
-  emit_method_macro_invocations(c, false);   // DECLARE their generic-method (map<U>) specializations
+  emit_rehomed_structs(c, true);           // full bodies for cross-module instances homed here (after their args)
+  emit_generic_macros(c);                  // @emit_macro generics as <G>_DECLARE/<G>_DEFINE C-reuse templates
 }
 
 // Multi-return structs, after all type definitions (they reference parameter/return types).
@@ -6828,6 +6803,7 @@ static void phase_prototypes(Codegen *c, const int which) {
     emit_callback_specializations(c, false);
   }
   emit_method_specializations(c, which, false); // method specs: pub -> header (PUBLIC), private -> .c (PRIVATE)
+  emit_rehomed_methods(c, which, false);         // method protos for cross-module instances homed here
   emit_default_methods(c, which, false);         // inherited interface default-method prototypes
 }
 
@@ -6873,11 +6849,10 @@ static void phase_bodies(Codegen *c) {
       emit_static_assert(c, n);
   }
 
-  emit_instance_macro_invocations(c, true); // DEFINE bodies of cross-module instances homed here
-  emit_method_macro_invocations(c, true);   // DEFINE their generic-method (map<U>) specializations
   emit_default_methods(c, PROTO_ALL, true);  // inherited interface default-method bodies
   emit_specializations(c, true);            // concrete generic free-function instantiations
   emit_method_specializations(c, PROTO_ALL, true); // concrete generic method instantiations
+  emit_rehomed_methods(c, PROTO_ALL, true);  // method bodies for cross-module instances homed here
   emit_closures(c, true);                    // hoisted closure / anonymous-fn bodies
   emit_callback_specializations(c, true);    // callback-specialized free functions (Win 1)
 

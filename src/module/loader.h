@@ -23,11 +23,6 @@ typedef struct Package {
     char *root_dir;   // source root: the directory of the root file; imports resolve relative to it
     char *std_root;   // second import search root (parent of std/): `import std::x;` -> <std_root>/std/x.spc
     bool ok;          // false if any read/parse/cycle error was reported during loading
-    // Generics with a concrete instance re-homed into a user module (Option<Bar>): the owner emits their
-    // DECLARE/DEFINE macros so the home can materialize the instance. Filled by propagation; a DefId per
-    // generic decl. Used to gate macro emission in single-TU output (the multi-file tree emits all pub ones).
-    DefId *macro_generics;
-    size_t n_macro_generics, cap_macro_generics;
     // Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     // `extend i32 { .. }` / `extend i32 as Hash { .. }` resolve and dispatch like any other type. `core_seeded`
     // gates it (false when no core module is present, e.g. parser-only / no-prelude builds).
@@ -68,9 +63,12 @@ void package_propagate_instances(Package *p, Ast *standalone);
 // Codegen emits an instance whose home is the current module (re-homed ones via the generic's macros).
 ModuleId package_instance_home(const Package *p, const Ast *a, const TyInstance *it);
 
-// True if generic `decl` (owned by module `module`) has an instance re-homed into a user module, so its
-// DECLARE/DEFINE macros must be emitted even in single-TU output. (Recorded by package_propagate_instances.)
-bool package_generic_needs_macro(const Package *p, ModuleId module, NodeId decl);
+// Fill `order` (length p->count) with module ids in dependency-first order: every module a module
+// references is emitted before it. Codegen materializes a re-homed generic instance in the user module
+// that owns its type by sourcing the generic's template from the owner module; emitting the owner first
+// keeps that transient cross-pool work from being observed by the owner's own pass. Imports form a DAG
+// (cycles are rejected at load); any residual cycle falls back to id order for the remainder.
+void package_emit_order(const Package *p, ModuleId *order);
 
 // The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins were not seeded.
 NodeId package_builtin_decl(const Package *p, BuiltinType b);

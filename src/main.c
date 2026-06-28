@@ -129,7 +129,10 @@ static int run_package(Package *p) {
 
   write_super_rt(p->root_dir);
   bool err = false;
-  for (size_t i = 0; i < p->count; i++) {
+  ModuleId *const order = malloc((p->count ? p->count : 1) * sizeof *order);
+  package_emit_order(p, order); // dependency-first: a generic's owner is emitted before any user module
+  for (size_t oi = 0; oi < p->count; oi++) {        // that re-homes its instances (see package_emit_order)
+    const ModuleId i = order[oi];
     Module *const m = &p->modules[i];
     Codegen *c = codegen_new(m->ast, m->source, m->source_len, p);
     codegen_set_multifile(c, true); // always a build/ tree, even for a lone module
@@ -161,6 +164,7 @@ static int run_package(Package *p) {
     codegen_free(&c);
     free(out_path);
   }
+  free(order);
   return err ? 1 : 0;
 }
 
