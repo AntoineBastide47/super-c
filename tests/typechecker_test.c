@@ -46,6 +46,15 @@ static void test_ok(void) {
   expect_ok("literal coercion", "fn main() i32 { let x: u8 = 5; }\n");
   expect_ok("inferred binding", "fn main() i32 { let x = 1; let y: i32 = x; }\n");
   expect_ok("int literal initializes a float", "fn main() i32 { let f: f64 = 0; let g: f32 = 5; let h: f64 = -3; }\n");
+  expect_ok("builtin Copy bound", "fn id<T: Copy>(x: T) T { return x; }\nfn main() i32 { return id::<i32>(0); }\n");
+  expect_ok("complex Clone Default Copy bounds",
+            "fn id<T: Copy>(x: T) T { return x; }\nfn clone_of<T: Clone>(x: &T) T { return x.clone(); }\n"
+            "fn zero<T: Default>() T { return T::default(); }\n"
+            "fn main() i32 { let z: c64 = 1.0; let a = id::<c64>(z); let b = clone_of::<c64>(&a); let c = zero::<c64>(); return 0; }\n");
+  expect_ok("builtin inherent scalar methods",
+            "fn main() i32 { let x: i32 = -5; let y: u32 = 8; let z: i32 = 9; let a = x.abs() + x.signum() + z.clamp(0, 7);\n"
+            "let f: f64 = 9.0; let g: f64 = -2.5; let h: f32 = 4.0; let r: f32 = h.sqrt();\n"
+            "if !y.is_power_of_two() { return 1; } if !(f.sqrt() + g.abs()).is_finite() { return 2; } return a + r as i32; }\n");
   expect_ok(
       "char literal coerces to any int slot",
       "fn take(b: u8) u8 { return b; }\n"
@@ -219,6 +228,13 @@ static void test_errors(void) {
       "fn main() i32 { let mut buf: [char; 8]; memset(&mut buf[0], 0, 8); return 0; }\n");
   expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
+  expect_error("f32 is not Eq", "fn needs<T: Eq>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) { return 1; } return 0; }\n",
+               "does not satisfy bound 'Eq'");
+  expect_error("f32 is not Ord", "fn needs<T: Ord>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) { return 1; } return 0; }\n",
+               "does not satisfy bound 'Ord'");
+  expect_error("f32 is not Hash",
+               "fn needs<T: Hash>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) { return 1; } return 0; }\n",
+               "does not satisfy bound 'Hash'");
   expect_error( // only char *literals* coerce; a char value needs an explicit conversion
       "non-literal char not assignable to u8", "fn f(c: char) u8 { return c; }\n", "mismatched types");
   expect_error(

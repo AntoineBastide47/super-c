@@ -667,6 +667,29 @@ static void test_builtin_conformances(void) {
       PRE "fn zero<T: Default>() T { return T::default(); }\n"
           "fn main() i32 { exit(zero::<i32>() + 42); }\n",
       42, "");
+  sc_run_program( // Copy is a marker interface, but generic bound checking still needs builtin conformance
+      "builtin Copy through a generic bound",
+      PRE "fn id<T: Copy>(x: T) T { return x; }\n"
+          "fn main() i32 { exit(id::<i32>(42)); }\n",
+      42, "");
+  sc_run_program( // direct complex value methods avoid total Eq/Ord/Hash while still proving value semantics
+      "complex Clone Default Copy direct methods",
+      PRE "extern \"C\" { fn csqrt(z: c64) c64; fn cabs(z: c64) f64; }\n"
+          "fn main() i32 { let i: c64 = csqrt(-1.0); let z: c64 = 3.0 + 4.0 * i; let b = z.clone();\n"
+          "  let c: c64 = 0.0; exit((cabs(b) + cabs(c)) as i32 + 37); }\n",
+      42, "");
+  sc_run_program(
+      "builtin inherent scalar methods",
+      PRE "fn main() i32 {\n"
+          "  let x: i32 = -5; let hi: i32 = 9; let a = x.abs() + x.signum() + hi.clamp(0, 7);\n"
+          "  let y: u32 = 8; if !y.is_power_of_two() { exit(1); }\n"
+          "  let f: f64 = 9.0; let g: f64 = -2.5; let h: f64 = 8.0;\n"
+          "  let p: f32 = 0.0; let q: f32 = 4.0; let s: f32 = p.sin(); let r: f32 = q.sqrt();\n"
+          "  let n: f64 = (0.0 as f64) / (0.0 as f64); if !n.is_nan() { exit(2); }\n"
+          "  let c: f64 = f.sqrt() + g.abs() + h.log2(); let d: f32 = s + r;\n"
+          "  exit(a + c as i32 + d as i32);\n"
+          "}\n",
+      21, "");
 }
 
 static void test_default_generic_args(void) {
