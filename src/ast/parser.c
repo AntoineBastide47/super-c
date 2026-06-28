@@ -833,8 +833,18 @@ static bool parse_attribute(Parser *p, Attr *const out) {
     return false;
   }
   const Token ns = advance(p);
+  if (tok_text_is(p, ns, "emit_macro") && !check(p, Dot)) { // a bare (namespace-less) attribute, no arguments
+    *out = (Attr){.kind = ATTR_EMIT_MACRO};
+    if (match(p, LeftParen)) {
+      parser_errorf(p, token_start(ns), token_len(ns), "attribute '@emit_macro' takes no arguments");
+      while (!check(p, RightParen) && !at_end(p))
+        advance(p);
+      match(p, RightParen);
+    }
+    return true;
+  }
   if (!tok_text_is(p, ns, "c"))
-    parser_errorf(p, token_start(ns), token_len(ns), "unknown attribute namespace; only '@c.*' is supported");
+    parser_errorf(p, token_start(ns), token_len(ns), "unknown attribute namespace; only '@c.*' and '@emit_macro' are supported");
   expect(p, Dot, "'.'");
   // the name may lex as a keyword (e.g. `import`), so accept any non-delimiter token here
   if (at_end(p) || check(p, LeftParen) || check(p, RightParen) || check(p, Semicolon) || check(p, Dot)) {
@@ -962,6 +972,13 @@ static NodeId parse_item(Parser *p) {
       return NODE_NONE;
   }
   for (int i = 0; i < nattr; i++) { // attach the leading attributes to the item they decorate
+    if (attrs[i].kind == ATTR_EMIT_MACRO) { // C macro export: only meaningful for a generic struct/enum
+      const Node *const d = id != NODE_NONE ? ast_at(p->ast, id) : NULL;
+      if (!d || (d->kind != NODE_STRUCT && d->kind != NODE_ENUM) || !d->as.aggregate.generics.len) {
+        const Span sp = d ? d->span : (Span){0, 0};
+        parser_errorf(p, sp.start, sp.end - sp.start, "'@emit_macro' may only be applied to a generic struct or enum");
+      }
+    }
     attrs[i].owner = id;
     ast_add_attr(p->ast, attrs[i]);
   }

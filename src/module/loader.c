@@ -365,7 +365,6 @@ void package_free(Package **p) {
   free((*p)->modules);
   free((*p)->root_dir);
   free((*p)->std_root);
-  free((*p)->macro_generics);
   free(*p);
   *p = NULL;
 }
@@ -529,26 +528,53 @@ ModuleId package_instance_home(const Package *p, const Ast *a, const TyInstance 
   return instance_home(p, a, it);
 }
 
-bool package_generic_needs_macro(const Package *p, const ModuleId module, const NodeId decl) {
-  for (size_t i = 0; i < p->n_macro_generics; i++)
-    if (p->macro_generics[i].module == module && p->macro_generics[i].node == decl)
+// True if emitting module `a` would full-monomorphize a generic instance owned by module `b`: codegen
+// sources `b`'s template while transiently interning into `b`'s pools, so `b` must be emitted first (its
+// own pass then never observes that transient state). This is exactly the re-homing relation -- a concrete
+// instance in `a`'s table whose owner is `b` and whose home (where it materializes) is `a` itself.
+static bool emits_into(const Package *p, const ModuleId a, const ModuleId b) {
+  if (a >= p->count || !p->modules[a].ast)
+    return false;
+  const Ast *const aa = p->modules[a].ast;
+  for (size_t i = 0; i < aa->instances.len; i++) {
+    const TyInstance *const it = &aa->instances.data[i];
+    if (it->module != b)
+      continue;
+    bool concrete = true;
+    for (uint8_t k = 0; k < it->n; k++)
+      concrete &= ast_type_concrete(aa, it->args[k]);
+    if (concrete && instance_home(p, aa, it) == a)
       return true;
+  }
   return false;
 }
 
-// Mark generic `(module, decl)` as having a re-homed instance (deduplicated).
-static void record_macro_generic(Package *p, const ModuleId module, const NodeId decl) {
-  if (package_generic_needs_macro(p, module, decl))
+void package_emit_order(const Package *p, ModuleId *const order) {
+  bool *const done = calloc(p->count ? p->count : 1, 1);
+  if (!done) { // OOM: id order (correct output; only the re-homed-pollution-timing optimization is lost)
+    for (size_t i = 0; i < p->count; i++)
+      order[i] = (ModuleId)i;
     return;
-  if (p->n_macro_generics == p->cap_macro_generics) {
-    const size_t cap = p->cap_macro_generics ? p->cap_macro_generics * 2 : 8;
-    DefId *const g = realloc(p->macro_generics, cap * sizeof *g);
-    if (!g)
-      return;
-    p->macro_generics = g;
-    p->cap_macro_generics = cap;
   }
-  p->macro_generics[p->n_macro_generics++] = (DefId){module, decl};
+  for (size_t k = 0; k < p->count; k++) {
+    size_t pick = p->count;
+    for (size_t i = 0; i < p->count && pick == p->count; i++) {
+      if (done[i])
+        continue;
+      bool ready = true; // i is ready once every owner module it re-homes an instance into is emitted
+      for (size_t j = 0; j < p->count && ready; j++)
+        if (!done[j] && j != i && emits_into(p, (ModuleId)i, (ModuleId)j))
+          ready = false;
+      if (ready)
+        pick = i;
+    }
+    if (pick == p->count) // residual cycle (mutually re-homing modules): take the next in id order
+      for (size_t i = 0; i < p->count; i++)
+        if (!done[i]) { pick = i; break; }
+    order[k] = (ModuleId)pick;
+    done[pick] = true;
+  }
+  free(done);
 }
 
 // Re-intern `src`'s concrete cross-module generic instantiations into their HOME module's table (see
@@ -566,9 +592,6 @@ static bool reintern_cross_module(Package *p, Ast *const src, Ast *const standal
     if (!concrete)
       continue;
     const ModuleId home = instance_home(p, src, &it);
-    if (home != it.module)
-      record_macro_generic(p, it.module, it.decl); // re-homed over a user type -> needs the generic's macros,
-                                                   // even when the using module already IS the home
     Ast *const dest = home < p->count                            ? p->modules[home].ast
                       : standalone && standalone->module == home ? standalone
                                                                  : NULL;
