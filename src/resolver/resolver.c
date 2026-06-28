@@ -102,15 +102,21 @@ ALWAYS_INLINE bool span_is(const uint8_t *const src, const Span s, const char *c
 
 // The only predefined type names; see SuperC-Specs.html section 6.2. Pointer/reference
 // forms (*void, &u8, ...) need no entry: they wrap one of these, which resolves on its own.
-static bool is_builtin_type(const uint8_t *const src, const Span s) {
+// The BuiltinType index of name `s` (matching ast.h's enum order), or -1. Pointer/reference forms (*void,
+// &u8, ...) need no entry: they wrap one of these, which resolves on its own.
+static int builtin_index(const uint8_t *const src, const Span s) {
   static const char *const builtins[] = {
       "bool", "char", "i8",  "i16",   "i32", "i64", "isize", "u8",
       "u16",  "u32",  "u64", "usize", "f32", "f64", "c32", "c64", "va_list", "void",
   };
   for (size_t i = 0; i < sizeof builtins / sizeof builtins[0]; i++)
     if (span_is(src, s, builtins[i]))
-      return true;
-  return false;
+      return (int)i;
+  return -1;
+}
+
+static bool is_builtin_type(const uint8_t *const src, const Span s) {
+  return builtin_index(src, s) >= 0;
 }
 
 ALWAYS_INLINE Span name_span(const Resolver *r, const NodeId name_node) {
@@ -604,6 +610,17 @@ static void resolve_item(Resolver *r, const NodeId id) {
       declare_generics(r, n->as.impl_def.generics);
       resolve_type(r, target);
       resolve_type(r, n->as.impl_def.trait_type);
+      // `extend i32 { .. }`: a builtin target is not a name binding, so resolve_type left it unresolved. Point
+      // it at the builtin's synthetic core decl so this impl is matched on `i32` receivers like any extension.
+      if (target != NODE_NONE && r->package && ast_resolution(r->ast, target) == NODE_NONE) {
+        const Node *const tn = ast_at_const(r->ast, target);
+        if (tn->kind == NODE_TYPE_PATH && tn->as.type_path.parts.len == 1) {
+          const int b = builtin_index(r->source, name_span(r, ast_list(r->ast, tn->as.type_path.parts)[0]));
+          const NodeId bd = b >= 0 ? package_builtin_decl(r->package, (BuiltinType)b) : NODE_NONE;
+          if (bd != NODE_NONE)
+            ast_set_resolution_def(r->ast, target, (DefId){r->package->core_module, bd});
+        }
+      }
       const NodeId old_self = r->current_self;
       const NodeId resolved = target == NODE_NONE ? NODE_NONE : ast_resolution(r->ast, target);
       r->current_self = resolved != NODE_NONE ? resolved : id;

@@ -195,32 +195,32 @@ static int chcmp(const void *a, const void *b) {
 // Codegen + compile + run one batch program; assert exit 0 (ASan-clean) and that the freed-byte multiset
 // equals the constructed-id multiset (order-independent: sort both, compare).
 static void gen_run(const char *name, const char *src, const char *exp_ids) {
-  size_t n_err = 0;
-  char first[256];
-  char *code = sc_codegen(name, src, &n_err, first, sizeof first);
-  if (!code)
-    return;
-  CHECK(n_err == 0, "%s: codegen error: %s", name, first);
-  if (n_err) {
-    free(code);
+  ScResult r = sc_compile(name, src, ST_CODEGEN);
+  CHECK(r.errors == 0, "%s: codegen error: %s", name, r.first);
+  if (r.errors || !r.code) {
+    ast_free(&r.ast);
+    free(r.code);
+    th_rmtree(r.build_dir);
     return;
   }
   char out[8192];
   int ec = -1;
-  if (sc_compile_and_run(code, out, sizeof out, &ec) != 0) {
-    CHECK(false, "%s: generated C failed to compile/run:\n%s\n----- C -----\n%s", name, out, code);
-    free(code);
-    return;
+  if (sc_run_built(r.build_dir, out, sizeof out, &ec) != 0)
+    CHECK(false, "%s: generated C failed to compile/run:\n%s\n----- C -----\n%s", name, out, r.code);
+  else {
+    CHECK(ec == 0, "%s: expected exit 0, got %d (double-free / use-after-free?)\n----- C -----\n%s", name, ec, r.code);
+    char a[8192], b[256];
+    snprintf(a, sizeof a, "%s", out);
+    snprintf(b, sizeof b, "%s", exp_ids);
+    qsort(a, strlen(a), 1, chcmp);
+    qsort(b, strlen(b), 1, chcmp);
+    CHECK(strcmp(a, b) == 0,
+          "%s: free multiset mismatch\n  expected(sorted): %s\n  got(sorted):      %s\n----- C -----\n%s", name, b, a,
+          r.code);
   }
-  CHECK(ec == 0, "%s: expected exit 0, got %d (double-free / use-after-free?)\n----- C -----\n%s", name, ec, code);
-  char a[8192], b[256];
-  snprintf(a, sizeof a, "%s", out);
-  snprintf(b, sizeof b, "%s", exp_ids);
-  qsort(a, strlen(a), 1, chcmp);
-  qsort(b, strlen(b), 1, chcmp);
-  CHECK(strcmp(a, b) == 0, "%s: free multiset mismatch\n  expected(sorted): %s\n  got(sorted):      %s\n----- C -----\n%s",
-        name, b, a, code);
-  free(code);
+  ast_free(&r.ast);
+  free(r.code);
+  th_rmtree(r.build_dir);
 }
 
 #define TR_PRE                                                                                                          \
