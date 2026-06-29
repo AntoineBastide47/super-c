@@ -50,10 +50,8 @@ typedef struct {
 
 Lexer *lexer_new(const char *source, const size_t len) {
   Lexer *const l = calloc(1, sizeof *l);
-  if (!l) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!l)
+    oom();
 
   l->bytes = (const uint8_t *)source;
   l->len = len;
@@ -135,10 +133,8 @@ static bool token_writer_grow(Lexer *l, TokenWriter *w) {
 }
 
 ALWAYS_INLINE void token_writer_push(Lexer *l, TokenWriter *w, const Token token) {
-  if (UNLIKELY(w->out == w->end) && !token_writer_grow(l, w)) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (UNLIKELY(w->out == w->end) && !token_writer_grow(l, w))
+    oom();
   *w->out++ = token;
 }
 

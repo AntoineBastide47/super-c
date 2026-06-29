@@ -15,6 +15,19 @@
 #include "test_harness.h"
 #include <stdarg.h>
 
+// The batches are independent (each is its own self-contained program), and the dominant cost is the
+// external cc compile/link/run of every batch's generated C -- so they fan out across cores. The
+// in-process transpile is thread-safe (the compiler keeps no global mutable state; each sc_compile
+// allocates its own handles). When OpenMP is unavailable the macros vanish and the suite runs serially.
+#ifdef _OPENMP
+#  include <omp.h>
+#  define SC_PARALLEL_FOR _Pragma("omp parallel for schedule(dynamic)")
+#  define SC_CRITICAL _Pragma("omp critical")
+#else
+#  define SC_PARALLEL_FOR
+#  define SC_CRITICAL
+#endif
+
 // ---- bounded string builders (return the new end offset; always NUL-terminate) ----
 static int ap(char *b, int at, int cap, const char *s) {
   int n = (int)strlen(s);
@@ -195,28 +208,33 @@ static int chcmp(const void *a, const void *b) {
 // Codegen + compile + run one batch program; assert exit 0 (ASan-clean) and that the freed-byte multiset
 // equals the constructed-id multiset (order-independent: sort both, compare).
 static void gen_run(const char *name, const char *src, const char *exp_ids) {
-  ScResult r = sc_compile(name, src, ST_CODEGEN);
-  CHECK(r.errors == 0, "%s: codegen error: %s", name, r.first);
-  if (r.errors || !r.code) {
-    ast_free(&r.ast);
-    free(r.code);
-    th_rmtree(r.build_dir);
-    return;
+  ScResult r = sc_compile(name, src, ST_CODEGEN); // in-process transpile (thread-safe: no global state)
+  char out[8192] = {0}, a[8192] = {0}, b[256] = {0};
+  int ec = -1, built = -1;
+  if (r.errors == 0 && r.code) {
+    built = sc_run_built(r.build_dir, out, sizeof out, &ec); // external cc compile/link/run -- the slow part
+    if (built == 0) {
+      snprintf(a, sizeof a, "%s", out);
+      snprintf(b, sizeof b, "%s", exp_ids);
+      qsort(a, strlen(a), 1, chcmp);
+      qsort(b, strlen(b), 1, chcmp);
+    }
   }
-  char out[8192];
-  int ec = -1;
-  if (sc_run_built(r.build_dir, out, sizeof out, &ec) != 0)
-    CHECK(false, "%s: generated C failed to compile/run:\n%s\n----- C -----\n%s", name, out, r.code);
-  else {
-    CHECK(ec == 0, "%s: expected exit 0, got %d (double-free / use-after-free?)\n----- C -----\n%s", name, ec, r.code);
-    char a[8192], b[256];
-    snprintf(a, sizeof a, "%s", out);
-    snprintf(b, sizeof b, "%s", exp_ids);
-    qsort(a, strlen(a), 1, chcmp);
-    qsort(b, strlen(b), 1, chcmp);
-    CHECK(strcmp(a, b) == 0,
-          "%s: free multiset mismatch\n  expected(sorted): %s\n  got(sorted):      %s\n----- C -----\n%s", name, b, a,
-          r.code);
+  // Only the assertion bookkeeping is serialized: `failures` and stderr are shared. The comparisons are
+  // cheap and run only on the (normally empty) failure path, so this contends for nothing in a clean run.
+  SC_CRITICAL {
+    CHECK(r.errors == 0, "%s: codegen error: %s", name, r.first);
+    if (r.errors == 0 && r.code) {
+      if (built != 0)
+        CHECK(false, "%s: generated C failed to compile/run:\n%s\n----- C -----\n%s", name, out, r.code);
+      else {
+        CHECK(ec == 0, "%s: expected exit 0, got %d (double-free / use-after-free?)\n----- C -----\n%s", name, ec,
+              r.code);
+        CHECK(strcmp(a, b) == 0,
+              "%s: free multiset mismatch\n  expected(sorted): %s\n  got(sorted):      %s\n----- C -----\n%s", name, b,
+              a, r.code);
+      }
+    }
   }
   ast_free(&r.ast);
   free(r.code);
@@ -230,23 +248,42 @@ static void gen_run(const char *name, const char *src, const char *exp_ids) {
 
 #define ID_CAP 70 // ids map to bytes 48.. ; keep them printable (<127)
 
-// Assemble accumulated scenarios into one program (respecting the per-program id budget) and run it.
-static void flush(const Work *works, int *wi, int nworks, int batch) {
-  static char prog[1 << 19];
+// Assemble works[start..end) into one program (a self-contained batch) and run it. The 512 KiB program
+// buffer is heap-allocated per call so concurrent batches don't share it (it was a function-local static).
+#define PROG_CAP (1 << 19)
+static void run_batch(const Work *works, int start, int end, int batch) {
+  char *prog = malloc(PROG_CAP);
   char calls[16384], exp[256];
-  int at = ap(prog, 0, sizeof prog, TR_PRE);
+  int at = ap(prog, 0, PROG_CAP, TR_PRE);
   int cat = 0, eat = 0, idc = 0, sc = 0;
   calls[0] = exp[0] = '\0';
-  while (*wi < nworks && idc + id_need(works[*wi].op) <= ID_CAP) {
-    emit_scenario(prog, &at, sizeof prog, calls, &cat, sizeof calls, exp, &eat, sizeof exp, &idc, sc, &works[*wi]);
+  for (int wi = start; wi < end; wi++) {
+    emit_scenario(prog, &at, PROG_CAP, calls, &cat, sizeof calls, exp, &eat, sizeof exp, &idc, sc, &works[wi]);
     sc++;
-    (*wi)++;
   }
-  at = apf(prog, at, sizeof prog,
+  at = apf(prog, at, PROG_CAP,
            "fn main() i32 { let mut acc = 0;\n%s  if acc == 2147483647 { putchar(33); }\n  exit(0); }\n", calls);
+  (void)at;
   char name[64];
   snprintf(name, sizeof name, "raii-gen batch %d (%d scenarios)", batch, sc);
   gen_run(name, prog, exp);
+  free(prog);
+}
+
+// Split the work list into batches up front (respecting the per-program id budget), so the batches can run
+// independently in parallel. `out_starts` must hold n+1 ints; returns the batch count (out_starts[count]==n).
+static int plan_batches(const Work *works, int n, int *out_starts) {
+  int nbatch = 0, wi = 0;
+  while (wi < n) {
+    out_starts[nbatch++] = wi;
+    int idc = 0;
+    while (wi < n && idc + id_need(works[wi].op) <= ID_CAP) {
+      idc += id_need(works[wi].op);
+      wi++;
+    }
+  }
+  out_starts[nbatch] = n;
+  return nbatch;
 }
 
 static void add(Work *w, int *n, const char *sh, int op) {
@@ -296,9 +333,15 @@ static void test_raii_generated(void) {
   add_all_shapes(works, &n, MAX_SWITCH_DEPTH, "OR", swops, (int)(sizeof swops / sizeof *swops));
   add_all_shapes(works, &n, MAX_GENERAL_DEPTH, "ORB", genops, (int)(sizeof genops / sizeof *genops));
 
-  int wi = 0, batch = 0;
-  while (wi < n)
-    flush(works, &wi, n, batch++);
+  // The batches are fully independent and the dominant per-batch cost is the external cc compile/link/run,
+  // so they fan out across cores. (There is no cross-batch object sharing to warm up first: every batch bakes
+  // its own monomorphized instances into every module, so each batch's objects are unique to it.)
+  int *starts = malloc(sizeof(int) * ((size_t)n + 1));
+  const int nbatch = plan_batches(works, n, starts);
+  SC_PARALLEL_FOR
+  for (int b = 0; b < nbatch; b++)
+    run_batch(works, starts[b], starts[b + 1], b);
+  free(starts);
 }
 
 int main(void) {

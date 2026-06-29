@@ -5,28 +5,36 @@
 #include <string.h>
 #include <unistd.h>
 
+COLD_EXPORT void oom(void) {
+  fputs("fatal: out of memory\n", stderr);
+  abort();
+}
+
+// Upper bound on collected diagnostics. Real programs never approach this; the cap stops pathological input
+// (e.g. tens of thousands of unbalanced/stray tokens) from flooding the list -- which would also make
+// errors_finalize, with its per-error source scan, quadratic and effectively hang.
+#define ERRORS_MAX 256
+
 COLD_EXPORT void errors_vemitf(
     String_Vec *errors, String_Vec *errors_notes, U32_Vec *errors_start, U32_Vec *errors_len, const uint32_t at,
     const uint32_t len, const char *fmt, va_list args) {
+  if (errors->len >= ERRORS_MAX)
+    return;
   va_list copy;
   va_copy(copy, args);
   const int msg_len = vsnprintf(NULL, 0, fmt, copy);
   va_end(copy);
 
   char *const result = malloc((size_t)msg_len + 1);
-  if (result == NULL) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (result == NULL)
+    oom();
   vsnprintf(result, msg_len + 1, fmt, args);
 
   String_Vec_push(errors, result);
   if (errors_notes) {
     char *const empty = malloc(1);
-    if (empty == NULL) {
-      fprintf(stderr, "fatal: out of memory\n");
-      abort();
-    }
+    if (empty == NULL)
+      oom();
     empty[0] = '\0';
     String_Vec_push(errors_notes, empty);
   }
@@ -43,20 +51,16 @@ COLD_EXPORT void errors_vnotef(String_Vec *errors, String_Vec *errors_notes, con
   va_end(copy);
 
   char *const msg = malloc((size_t)msg_len + 1);
-  if (msg == NULL) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (msg == NULL)
+    oom();
   vsnprintf(msg, msg_len + 1, fmt, args);
 
   char *old = errors_notes->data[errors->len - 1];
   const size_t old_len = old ? strlen(old) : 0;
   const size_t add = strlen(msg) + sizeof "\n  = note: ";
   char *const next = malloc(old_len + add + 1);
-  if (next == NULL) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (next == NULL)
+    oom();
   if (old_len)
     memcpy(next, old, old_len);
   snprintf(next + old_len, add + 1, "\n  = note: %s", msg);
@@ -108,10 +112,8 @@ COLD char *render(
   if (off + carets > disp_end)
     carets = disp_end > off ? disp_end - off : 1;
   char *const bar = malloc(carets + 1);
-  if (bar == NULL) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (bar == NULL)
+    oom();
   memset(bar, '^', carets);
   bar[carets] = '\0';
 
@@ -126,10 +128,8 @@ COLD char *render(
   const size_t cap =
       strlen(msg) + strlen(notes ? notes : "") + (size_t)line_len + real_col + carets + (size_t)gw * 4 + strlen(fpfx) + 128;
   char *const out = malloc(cap);
-  if (out == NULL) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (out == NULL)
+    oom();
 
   snprintf(
       out, cap,

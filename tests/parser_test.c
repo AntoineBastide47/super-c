@@ -401,7 +401,30 @@ static void test_attributes(void) {
   CHECK(parse_has_error("@c.inline(3)\nfn m() {}\n"), "no-arg attribute given an argument rejected");
 }
 
+// Regressions for parser bugs from the cross-stage hunt.
+static void test_bug_regressions(void) {
+  // P1: a comparison after a cast must parse as `(a as i32) < b`, not be eaten as generic type args.
+  CHECK(!parse_has_error("fn f(a: i32, b: i32) bool { return a as i32 < b; }\n"), "`a as i32 < b` should parse");
+  // P2: deeply nested blocks must hit the depth guard and diagnose, not overflow the stack. > PARSE_MAX_DEPTH.
+  {
+    static char src[2048];
+    size_t at = 0;
+    for (const char *p = "fn main() i32 {"; *p; p++)
+      src[at++] = *p;
+    for (int i = 0; i < 700; i++)
+      src[at++] = '{';
+    for (const char *p = " return 0; "; *p; p++)
+      src[at++] = *p;
+    for (int i = 0; i < 700; i++)
+      src[at++] = '}';
+    src[at++] = '}';
+    src[at] = '\0';
+    CHECK(parse_has_error(src), "deeply nested blocks should diagnose, not crash");
+  }
+}
+
 int main(void) {
+  test_bug_regressions();
   test_items_and_types();
   test_attributes();
   test_union();

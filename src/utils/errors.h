@@ -34,6 +34,10 @@ COLD_EXPORT void errors_finalize(
 // stderr is a terminal (so piped/redirected output and take_errors stay plain).
 COLD_EXPORT void errors_log(const String_Vec *errors);
 
+// Report an allocation failure and abort. The shared body behind every
+// out-of-memory check in the compiler.
+COLD_EXPORT void oom(void);
+
 #define ERRORS_VARIABLES                                                                                               \
   String_Vec errors;                                                                                                   \
   String_Vec errors_notes;                                                                                             \

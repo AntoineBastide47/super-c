@@ -9,6 +9,17 @@
 
 #include "test_harness.h"
 
+// Each test_* below is an independent end-to-end program (its own transpile + external cc compile/link/run,
+// the dominant cost), so they fan out across cores -- same structure as raii_gen_test. This is sound because
+// the compiler keeps no global mutable state, the harness routes cc through popen and publishes cache objects
+// atomically, and CHECK bumps `failures` atomically under OpenMP. Without OpenMP the macro vanishes (serial).
+#ifdef _OPENMP
+#  include <omp.h>
+#  define SC_PARALLEL_FOR _Pragma("omp parallel for schedule(dynamic)")
+#else
+#  define SC_PARALLEL_FOR
+#endif
+
 #define PRE "extern \"C\" { fn exit(code: i32) void; fn putchar(c: i32) i32; }\n"
 
 static void test_arithmetic(void) {
@@ -1683,62 +1694,95 @@ static void test_static_assert(void) {
       0, "");
 }
 
+// Regressions for codegen/runtime bugs from the cross-stage hunt. Generated C is compiled under
+// -Werror -fsanitize=address,undefined, so a double-free / use-after-free / bad-C regression fails here.
+static void test_bug_regressions(void) {
+  // C1: a partial move of a Free field must not double-free the owner at scope exit.
+  sc_run_program("partial field move, no double-free",
+      PRE "struct H { pub name: String, pub n: i32 }\n"
+          "extend H as Free { fn free(self: &mut H) { self.name.free(); } }\n"
+          "fn main() i32 {\n"
+          "  let h = H { name: String::from_str(\"a heap name long enough to allocate now\"), n: 7 };\n"
+          "  let nm = h.name;\n"
+          "  if nm.len() < 10 { return 1; }\n"
+          "  return 0; }\n",
+      0, "");
+  // C3: a struct array field initialized from a non-literal lowers via memcpy, not an illegal C array init.
+  sc_run_program("struct array field from variable",
+      PRE "struct Q { pub v: [i32; 3] }\n"
+          "fn main() i32 { let local: [i32; 3] = [1, 2, 3]; let q = Q { v: local }; return q.v[2] - 3; }\n",
+      0, "");
+  // C4 regression: a value-block tail that builds a Free value (get_ok -> Option<String>) is RETURNED, not
+  // freed as a discarded temporary. This is the exact std `result.c` void-return that slipped before.
+  sc_run_program("free value-block tail is returned",
+      PRE "fn main() i32 {\n"
+          "  let r = Result::<String, i32>::Ok(String::from_str(\"ok payload long enough to heap-allocate\"));\n"
+          "  let o = r.get_ok();\n"
+          "  if o.unwrap_or(String::new()).len() < 10 { return 1; }\n"
+          "  return 0; }\n",
+      0, "");
+  // C4: a genuinely discarded owning temporary is freed -- its Free prints 'A', proving the cleanup ran.
+  sc_run_program("discarded owning temporary freed",
+      PRE "struct T { pub tag: i32 }\n"
+          "extend T as Free { fn free(self: &mut T) { putchar(self.tag); } }\n"
+          "fn make(t: i32) T { return T { tag: t }; }\n"
+          "fn main() i32 { make(65); return 0; }\n",
+      0, "A");
+  // C5: tuple-destructured owning bindings are freed once; a moved-out element is not double-freed.
+  // 'A' is freed inside consume (a moved in), 'B' at main's scope exit -- each exactly once, no double-free.
+  sc_run_program("tuple-let elements freed once",
+      PRE "struct T { pub tag: i32 }\n"
+          "extend T as Free { fn free(self: &mut T) { putchar(self.tag); } }\n"
+          "fn pair() (T, T) { return T { tag: 65 }, T { tag: 66 }; }\n"
+          "fn consume(t: T) i32 { return t.tag; }\n"
+          "fn main() i32 { let (a, b) = pair(); if consume(a) != 65 { return 1; } if b.tag != 66 { return 2; } return 0; }\n",
+      0, "AB");
+  // L2: a byte literal is u8 -- `b'\xFF' as i32` is 255, not the signed C char's -1.
+  sc_run_program("byte literal high bit", PRE "fn main() i32 { if b'\\xFF' as i32 != 255 { return 1; } return 0; }\n", 0, "");
+  // L1a: a non-ASCII char that fits in one byte compiles and carries its codepoint.
+  sc_run_program("non-ascii char in one byte", PRE "fn main() i32 { if '\\u{E9}' as u8 != 233 { return 1; } return 0; }\n", 0, "");
+  // T5 (runtime): `&mut x` flows into a `&i32` parameter.
+  sc_run_program("mut ref as shared ref runs",
+      PRE "fn read(r: &i32) i32 { return *r; }\n"
+          "fn main() i32 { let mut x = 5; if read(&mut x) != 5 { return 1; } return 0; }\n",
+      0, "");
+  // P1: `a as i32 < b` parses as `(a as i32) < b`.
+  sc_run_program("comparison after cast",
+      PRE "fn main() i32 { let a: i32 = 5; let b: i32 = 3; if a as i32 < b { return 1; } return 0; }\n", 0, "");
+  // R2: or-pattern payload bindings are usable in the arm body.
+  sc_run_program("or-pattern binding usable",
+      PRE "fn pick(r: Result<i32, i32>) i32 { return switch r { Ok(v) | Err(v) => v, }; }\n"
+          "fn main() i32 { if pick(Result::<i32, i32>::Ok(42)) != 42 { return 1; } return 0; }\n",
+      0, "");
+}
+
 int main(void) {
-  test_attributes();
-  test_free_raii();
-  test_conditional_move_free();
-  test_container_free_raii();
-  test_free_intrinsic();
-  test_std_container_auto_free();
-  test_switch_binding_modes();
-  test_raii_move_edges();
-  test_defer();
-  test_static_assert();
-  test_interfaces();
-  test_operator_overloading();
-  test_question_operator();
-  test_string_sso();
-  test_unions();
-  test_closures();
-  test_std_types();
-  test_nested_generic_by_value();
-  test_generics_over_user_types();
-  test_container_conformances();
-  test_str_conformances();
-  test_format_printing();
-  test_bounds_checks();
-  test_checked_arith();
-  test_builtin_conformances();
-  test_default_generic_args();
-  test_custom_allocator();
-  test_stateful_allocator();
-  test_set();
-  test_map();
-  test_multi_from();
-  test_generics();
-  test_arithmetic();
-  test_control_flow();
-  test_recursion();
-  test_switch();
-  test_if_expression();
-  test_array_literals();
-  test_slices();
-  test_range_slicing();
-  test_range_value();
-  test_opaque_extern();
-  test_variadics();
-  test_complex();
-  test_atomics();
-  test_tuple_destructure();
-  test_enums();
-  test_mut_match_binding();
-  test_structs_and_methods();
-  test_let_owning_mut();
-  test_field_vs_method();
-  test_generic_self_receiver();
-  test_pointers();
-  test_str();
-  test_misc();
+  // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
+  static void (*const tests[])(void) = {
+      test_bug_regressions,    test_attributes,           test_free_raii,
+      test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
+      test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,
+      test_defer,              test_static_assert,        test_interfaces,
+      test_operator_overloading, test_question_operator,  test_string_sso,
+      test_unions,             test_closures,             test_std_types,
+      test_nested_generic_by_value, test_generics_over_user_types, test_container_conformances,
+      test_str_conformances,   test_format_printing,      test_bounds_checks,
+      test_checked_arith,      test_builtin_conformances, test_default_generic_args,
+      test_custom_allocator,   test_stateful_allocator,   test_set,
+      test_map,                test_multi_from,           test_generics,
+      test_arithmetic,         test_control_flow,         test_recursion,
+      test_switch,             test_if_expression,        test_array_literals,
+      test_slices,             test_range_slicing,        test_range_value,
+      test_opaque_extern,      test_variadics,            test_complex,
+      test_atomics,            test_tuple_destructure,    test_enums,
+      test_mut_match_binding,  test_structs_and_methods,  test_let_owning_mut,
+      test_field_vs_method,    test_generic_self_receiver, test_pointers,
+      test_str,                test_misc,
+  };
+  const int nt = (int)(sizeof tests / sizeof *tests);
+  SC_PARALLEL_FOR
+  for (int i = 0; i < nt; i++)
+    tests[i]();
   if (failures) {
     fprintf(stderr, "%d codegen-run test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;
