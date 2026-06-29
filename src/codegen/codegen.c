@@ -7239,23 +7239,51 @@ static void emit_modpath_include(Codegen *c, const char *path) {
   emit(c, ".h\"\n");
 }
 
+// A grow-on-demand set of forward-declared C names. Many distinct type-pool entries can mangle to the same
+// C name (every concrete String<T> -> String__Global, but also each abstract String<T> -> String__v), so the
+// pass declares each name once instead of flooding the header with identical (if legal) typedefs.
+typedef struct {
+  char (*names)[256];
+  size_t len, cap;
+} FwdSeen;
+static bool fwd_seen_add(FwdSeen *const s, const char *const name) {
+  for (size_t i = 0; i < s->len; i++)
+    if (!strcmp(s->names[i], name))
+      return true;
+  if (s->len == s->cap) {
+    s->cap = s->cap ? s->cap * 2 : 16;
+    s->names = realloc(s->names, s->cap * sizeof *s->names);
+    if (!s->names)
+      oom();
+  }
+  memcpy(s->names[s->len++], name, strlen(name) + 1);
+  return false;
+}
+
 // Forward-declare every referenced cross-module STRUCT, so this header's prototypes can name them even
 // under a mutual include cycle (e.g. str <-> string via str.to_string() / String.from_str()). A prototype
 // needs only the name; the full type still arrives via the includes below (needed for by-value fields) and
 // in the .c. Duplicate `typedef struct X X;` is legal C, so this is safe even when an include re-declares it.
 static void emit_referenced_fwd(Codegen *c) {
   const ModuleId cur = c->ast->module;
+  FwdSeen seen = {0};
   for (size_t i = 0; i < c->ast->type_pool.len; i++) {
     const Ty t = c->ast->type_pool.data[i];
     if (t.kind == TYPE_INSTANCE) { // a cross-module generic instance used by value (`str.to_string() -> String<Global>`)
       const TyInstance *const it = ast_instance(c->ast, t.as.inst);
       if (it->module == cur || it->module >= c->package->count)
         continue;
+      bool concrete = true; // an abstract template (String<T>) is never named by an emitted prototype, and
+      for (uint8_t k = 0; k < it->n; k++) // every arg mangles to the same `__v` -- skip it, else the pool
+        concrete &= type_is_concrete(c, it->args[k]); // floods the header with bogus String__v typedefs.
+      if (!concrete)
+        continue;
       const Node *const idn = ast_at_const(cg_mod_ast(c, it->module), it->decl);
       if (idn->kind == NODE_STRUCT || aggregate_has_payload_in(c, it->module, idn)) {
         char inm[200];
         inst_name(c, it, inm, sizeof inm);
-        emit(c, "typedef %s %s %s;\n", agg_kw(idn), inm, inm); // `union` for an SSO-union instance
+        if (!fwd_seen_add(&seen, inm))
+          emit(c, "typedef %s %s %s;\n", agg_kw(idn), inm, inm); // `union` for an SSO-union instance
       }
       continue;
     }
@@ -7270,7 +7298,8 @@ static void emit_referenced_fwd(Codegen *c) {
     if (t.kind == TYPE_STRUCT || (t.kind == TYPE_ENUM && aggregate_has_payload_in(c, t.module, dn))) {
       char nm[160];
       render_qualified(c, t.module, dn->as.aggregate.name, nm, sizeof nm);
-      emit(c, "typedef %s %s %s;\n", agg_kw(dn), nm, nm); // `union` for a cross-module untagged union
+      if (!fwd_seen_add(&seen, nm))
+        emit(c, "typedef %s %s %s;\n", agg_kw(dn), nm, nm); // `union` for a cross-module untagged union
     } else if (t.kind == TYPE_ENUM) {
       Ast *const sa = c->ast;
       const uint8_t *const ss = c->source;
@@ -7286,6 +7315,7 @@ static void emit_referenced_fwd(Codegen *c) {
       c->len = sl;
     }
   }
+  free(seen.names);
 }
 
 // Include the header of every OTHER module this one actually references -- via a recorded cross-module

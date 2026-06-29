@@ -1,10 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <dirent.h> // opendir/readdir, to prune stale outputs
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h> // unlink/rmdir, to prune stale outputs
 #if defined(__APPLE__)
 #  include <mach-o/dyld.h> // _NSGetExecutablePath
 #elif defined(__linux__)
@@ -240,6 +242,60 @@ static bool *compute_emit_live(const Package *const p) {
   return live;
 }
 
+// Record a build-output path this run emitted (ownership transferred), growing the keep-list. Returns false
+// on allocation failure: the caller then skips pruning, so a transient OOM can never delete a live output.
+static bool keep_push(char ***list, size_t *n, size_t *cap, char *path) {
+  if (!path)
+    return true; // a failed build_out_path: nothing to track (and nothing was written)
+  if (*n == *cap) {
+    const size_t nc = *cap ? *cap * 2 : 16;
+    char **const g = realloc(*list, nc * sizeof **list);
+    if (!g) {
+      free(path);
+      return false;
+    }
+    *list = g;
+    *cap = nc;
+  }
+  (*list)[(*n)++] = path;
+  return true;
+}
+
+// Recursively delete every .c/.h under `dir` that is NOT in `keep` (the files this run wrote), then drop any
+// directory left empty. The compiler overwrites build/ in place but never removed outputs that the program no
+// longer produces, so a stale per-module .c lingered and broke `cc build/**/*.c` -- it could reference a
+// generic instance the regenerated shared headers no longer emit (incomplete type). Pruning keeps the tree
+// matching the current program. Comparison is exact: walk paths are built like build_out_path's (`dir/name`).
+static void prune_orphans(const char *dir, char *const *keep, const size_t nkeep) {
+  DIR *const d = opendir(dir);
+  if (!d)
+    return;
+  for (const struct dirent *e; (e = readdir(d));) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+      continue;
+    char path[4096];
+    if ((size_t)snprintf(path, sizeof path, "%s/%s", dir, e->d_name) >= sizeof path)
+      continue;
+    struct stat st;
+    if (stat(path, &st) != 0)
+      continue;
+    if (S_ISDIR(st.st_mode)) {
+      prune_orphans(path, keep, nkeep);
+      rmdir(path); // no-op unless the recursion just emptied it
+      continue;
+    }
+    const size_t L = strlen(e->d_name); // only generated translation units are ours to prune
+    if (!(L >= 2 && e->d_name[L - 2] == '.' && (e->d_name[L - 1] == 'c' || e->d_name[L - 1] == 'h')))
+      continue;
+    bool kept = false;
+    for (size_t i = 0; i < nkeep && !kept; i++)
+      kept = !strcmp(keep[i], path);
+    if (!kept)
+      unlink(path);
+  }
+  closedir(d);
+}
+
 // Compile a loaded Package as global phases (resolve all -> type-check all -> emit all), so name
 // resolution sees every module's declarations. Output is always a `<root>/build/` tree mirroring the
 // module paths: a `super_rt.h` plus one `.c`/`.h` per module (the std prelude is its own unmangled
@@ -257,6 +313,9 @@ static int run_package(Package *p) {
 
   write_super_rt(p->root_dir);
   bool err = false;
+  char **kept = NULL; // every output written this run; stale .c/.h not in here are pruned below
+  size_t nkept = 0, kcap = 0;
+  bool keep_ok = keep_push(&kept, &nkept, &kcap, build_out_path(p->root_dir, "super_rt", ".h"));
   bool *const live = compute_emit_live(p);
   ModuleId *const order = malloc((p->count ? p->count : 1) * sizeof *order);
   if (!order) { // OOM: package_emit_order writes through `order` -- bail with an error instead of segfaulting
@@ -277,13 +336,13 @@ static int run_package(Package *p) {
       codegen_emit_header(c, hout);
       fclose(hout);
     }
-    free(hpath);
+    keep_ok &= keep_push(&kept, &nkept, &kcap, hpath);
     char *const out_path = build_out_path(p->root_dir, m->path, ".c");
     FILE *const out = out_path ? open_out(out_path) : NULL;
     if (!out) {
       if (out_path)
         perror(out_path);
-      free(out_path);
+      keep_ok &= keep_push(&kept, &nkept, &kcap, out_path);
       m->ast = codegen_take_ast(c);
       codegen_free(&c);
       err = true;
@@ -297,10 +356,18 @@ static int run_package(Package *p) {
     }
     m->ast = codegen_take_ast(c);
     codegen_free(&c);
-    free(out_path);
+    keep_ok &= keep_push(&kept, &nkept, &kcap, out_path);
   }
   free(order);
   free(live);
+  // Drop outputs from a previous build that this program no longer emits (a removed module/instance), so the
+  // tree always matches the current sources. Skip on a keep-list OOM -- never risk deleting a live output.
+  char broot[4096];
+  if (keep_ok && (size_t)snprintf(broot, sizeof broot, "%s/build", p->root_dir) < sizeof broot)
+    prune_orphans(broot, kept, nkept);
+  for (size_t i = 0; i < nkept; i++)
+    free(kept[i]);
+  free(kept);
   return err ? 1 : 0;
 }
 
