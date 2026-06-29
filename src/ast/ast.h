@@ -193,6 +193,7 @@ typedef struct {
         struct {
             NodeId name, type, value;
             bool is_public; // `pub const`
+            bool is_extern; // `extern "C"` const (no initializer): value resolved from the backing C header
         } const_def;
         struct {
             NodeId abi;

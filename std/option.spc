@@ -91,6 +91,9 @@ extend<T> Option<T> {
 
     // Keep the value only when `pred` holds, else `None`. Consumes `self`; the `&self` match lets `pred`
     // peek the payload before `self` is moved. On rejection `self` is freed by scope-exit auto-`Free`.
+    // NOTE: `pred` takes `T` by value, so for a Free element type this copies (and the copy is freed),
+    // double-freeing the payload `self` still owns. A `fn(&T)` predicate is the right fix but currently
+    // hits two compiler gaps (over-const borrow of an embedded pointer payload; no `&mut`->`&` coercion).
     pub fn filter(self: Option<T>, pred: fn(T) bool) Option<T> {
         let keep = switch &self {
             Some(v) => pred(*v),

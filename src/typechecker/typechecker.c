@@ -519,8 +519,10 @@ static DefId find_method(TypeChecker *t, const ModuleId m, const NodeId decl, co
     for (uint32_t j = 0; j < methods.len; j++) {
       const Node *const mn = ast_at_const(a, mids[j]);
       if (mn->kind == NODE_FUNCTION &&
-          spans_eq2(t->source, name, src, ast_at_const(a, mn->as.function.name)->as.name.text))
+          spans_eq2(t->source, name, src, ast_at_const(a, mn->as.function.name)->as.name.text)) {
+        package_mark_method_used((Package *)t->package, (DefId){m, mids[j]}); // reached -> emit (demand-driven)
         return (DefId){m, mids[j]};
+      }
     }
   }
   if (m != t->ast->module) { // a local `extend foreign::T` in the current module
@@ -539,8 +541,10 @@ static DefId find_method(TypeChecker *t, const ModuleId m, const NodeId decl, co
       for (uint32_t j = 0; j < methods.len; j++) {
         const Node *const mn = ast_at_const(ca, mids[j]);
         if (mn->kind == NODE_FUNCTION &&
-            spans_eq2(t->source, name, t->source, ast_at_const(ca, mn->as.function.name)->as.name.text))
+            spans_eq2(t->source, name, t->source, ast_at_const(ca, mn->as.function.name)->as.name.text)) {
+          package_mark_method_used((Package *)t->package, (DefId){t->ast->module, mids[j]});
           return (DefId){t->ast->module, mids[j]};
+        }
       }
     }
   }
@@ -568,12 +572,35 @@ static DefId find_method_cstr(TypeChecker *t, const ModuleId m, const NodeId dec
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
-        if (mn->kind == NODE_FUNCTION && span_is(mod_src(t, mm), ast_at_const(a, mn->as.function.name)->as.name.text, lit))
+        if (mn->kind == NODE_FUNCTION && span_is(mod_src(t, mm), ast_at_const(a, mn->as.function.name)->as.name.text, lit)) {
+          package_mark_method_used((Package *)t->package, (DefId){mm, mids[j]});
           return (DefId){mm, mids[j]};
+        }
       }
     }
   }
   return (DefId){0, NODE_NONE};
+}
+
+// The `format`/`print`/`println` builtins are lowered in codegen to direct `String<Global>` appends
+// (push_i64 / push_hex / push_str / ...) and an interpolated argument's `as_str`, with no source-level
+// method call -- so demand-driven emission would prune those helpers. Resolve them here (via the marking
+// find_method_cstr) whenever a format builtin is type-checked, so they are always emitted when used.
+static void mark_format_helpers(TypeChecker *t) {
+  if (!t->package)
+    return;
+  ModuleId sm;
+  const NodeId sd = package_prelude_lookup(t->package, "String", 6, true, &sm);
+  if (sd == NODE_NONE)
+    return;
+  // Keep in sync with the String<Global> methods that emit_format_arg / emit_format_builtin synthesize
+  // (src/codegen/codegen.c): the per-arg appenders, the `new` builder constructor, the `print` writer, and
+  // an interpolated String argument's `as_str`. A missing entry only surfaces as a link error in a format
+  // test, so the codegen-run format cases guard this list.
+  static const char *const helpers[] = {"new",      "print",    "push_i64", "push_u64",   "push_f64",
+                                        "push_hex_i64", "push_hex", "push_byte", "push_str", "as_str"};
+  for (size_t i = 0; i < sizeof helpers / sizeof helpers[0]; i++)
+    find_method_cstr(t, sm, sd, helpers[i]); // a successful lookup marks the method used (see find_method_cstr)
 }
 
 // `x.into()` / `x.try_into()`: built-in conversions backed by the target type's `From` / `TryFrom` extend.
@@ -2291,6 +2318,15 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   const bool clos = fn->kind == NODE_CLOSURE;
   const NodeList params = named ? fn->as.function.params : clos ? fn->as.closure.params : fn->as.function_type.params;
   const NodeList returns = named ? fn->as.function.returns : clos ? fn->as.closure.returns : fn->as.function_type.returns;
+
+  // A `format`/`print`/`println` builtin call: its codegen-synthesized String<Global> helpers must survive
+  // demand-driven pruning, so mark them used now (harmless if it is the String `.print()`/`.println()` method).
+  if (named && t->package && fmod < t->package->count && t->package->modules[fmod].prelude) {
+    const Span fnm = ast_at_const(fa, fn->as.function.name)->as.name.text;
+    if (span_is(mod_src(t, fmod), fnm, "format") || span_is(mod_src(t, fmod), fnm, "print") ||
+        span_is(mod_src(t, fmod), fnm, "println"))
+      mark_format_helpers(t);
+  }
 
   // A method call `obj.m(args)` binds the receiver to the first (self) parameter implicitly.
   uint32_t skip = 0;

@@ -582,6 +582,10 @@ static void resolve_associated_items(Resolver *r, const NodeList items) {
       resolve_function(r, ids[i]);
     else if (kind == NODE_TYPE_ALIAS)
       resolve_type_alias(r, ids[i]);
+    else if (kind == NODE_CONST) { // extern const (`extern "C" { pub const X: T; }`): resolve its type so
+      resolve_type(r, ast_at_const(r->ast, ids[i])->as.const_def.type); // an unknown/aliased type is diagnosed
+      resolve_expr(r, ast_at_const(r->ast, ids[i])->as.const_def.value); // value is NODE_NONE -> no-op
+    }
   }
 }
 
@@ -950,6 +954,8 @@ static void collect_items(Resolver *r, const NodeList items) {
             declare(r, it->as.function.name, iids[j], NS_VALUE);
           else if (it->kind == NODE_TYPE_ALIAS)
             declare(r, it->as.type_alias.name, iids[j], NS_TYPE);
+          else if (it->kind == NODE_CONST)
+            declare(r, it->as.const_def.name, iids[j], NS_VALUE);
         }
         break;
       }

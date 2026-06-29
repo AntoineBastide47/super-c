@@ -352,6 +352,48 @@ Package *package_prelude_only(const char *std_dir) {
   return p;
 }
 
+void package_mark_method_used(Package *p, const DefId d) {
+  if (!p || d.node == NODE_NONE)
+    return;
+  if ((size_t)d.module >= p->method_used_mods) { // grow the per-module outer arrays
+    const size_t nm = (size_t)d.module + 1 > p->count ? (size_t)d.module + 1 : p->count;
+    bool **const na = realloc(p->method_used, nm * sizeof *na);
+    if (!na)
+      return; // OOM: a missed mark only over-prunes a never-otherwise-referenced method
+    p->method_used = na;
+    size_t *const nc = realloc(p->method_used_cap, nm * sizeof *nc);
+    if (!nc)
+      return;
+    p->method_used_cap = nc;
+    for (size_t i = p->method_used_mods; i < nm; i++) {
+      na[i] = NULL;
+      nc[i] = 0;
+    }
+    p->method_used_mods = nm;
+  }
+  if ((size_t)d.node >= p->method_used_cap[d.module]) { // grow this module's bit array to cover the node
+    size_t ncap = p->method_used_cap[d.module] ? p->method_used_cap[d.module] : 256;
+    while (ncap <= (size_t)d.node)
+      ncap *= 2;
+    bool *const nb = realloc(p->method_used[d.module], ncap * sizeof *nb);
+    if (!nb)
+      return;
+    for (size_t i = p->method_used_cap[d.module]; i < ncap; i++)
+      nb[i] = false;
+    p->method_used[d.module] = nb;
+    p->method_used_cap[d.module] = ncap;
+  }
+  p->method_used[d.module][d.node] = true;
+}
+
+bool package_method_used(const Package *p, const DefId d) {
+  if (!p)
+    return true; // no package (single-file / REPL): emit every method
+  if (d.node == NODE_NONE || (size_t)d.module >= p->method_used_mods || (size_t)d.node >= p->method_used_cap[d.module])
+    return false;
+  return p->method_used[d.module][d.node];
+}
+
 void package_free(Package **p) {
   if (!p || !*p)
     return;
@@ -365,6 +407,10 @@ void package_free(Package **p) {
   free((*p)->modules);
   free((*p)->root_dir);
   free((*p)->std_root);
+  for (size_t i = 0; i < (*p)->method_used_mods; i++)
+    free((*p)->method_used[i]);
+  free((*p)->method_used);
+  free((*p)->method_used_cap);
   free(*p);
   *p = NULL;
 }
@@ -417,6 +463,10 @@ NodeId package_lookup(const Package *p, const ModuleId mid, const char *name, co
           nn = it->as.type_alias.name;
           ip = it->as.type_alias.is_public;
           it_type = true;
+        } else if (it->kind == NODE_CONST) {
+          nn = it->as.const_def.name;
+          ip = it->as.const_def.is_public;
+          it_type = false;
         } else {
           continue;
         }
@@ -528,53 +578,69 @@ ModuleId package_instance_home(const Package *p, const Ast *a, const TyInstance 
   return instance_home(p, a, it);
 }
 
-// True if emitting module `a` would full-monomorphize a generic instance owned by module `b`: codegen
-// sources `b`'s template while transiently interning into `b`'s pools, so `b` must be emitted first (its
-// own pass then never observes that transient state). This is exactly the re-homing relation -- a concrete
-// instance in `a`'s table whose owner is `b` and whose home (where it materializes) is `a` itself.
-static bool emits_into(const Package *p, const ModuleId a, const ModuleId b) {
-  if (a >= p->count || !p->modules[a].ast)
-    return false;
-  const Ast *const aa = p->modules[a].ast;
-  for (size_t i = 0; i < aa->instances.len; i++) {
-    const TyInstance *const it = &aa->instances.data[i];
-    if (it->module != b)
-      continue;
-    bool concrete = true;
-    for (uint8_t k = 0; k < it->n; k++)
-      concrete &= ast_type_concrete(aa, it->args[k]);
-    if (concrete && instance_home(p, aa, it) == a)
-      return true;
-  }
-  return false;
-}
-
+// The emit-order dependency relation (built inline in package_emit_order below): emitting module `a`
+// full-monomorphizes a generic instance owned by module `b` -- codegen sources `b`'s template while
+// transiently interning into `b`'s pools, so `b` must be emitted first (its own pass then never observes
+// that transient state). That is the re-homing relation: a concrete instance in `a`'s table whose owner is
+// `b` and whose home (where it materializes) is `a` itself.
 void package_emit_order(const Package *p, ModuleId *const order) {
-  bool *const done = calloc(p->count ? p->count : 1, 1);
-  if (!done) { // OOM: id order (correct output; only the re-homed-pollution-timing optimization is lost)
-    for (size_t i = 0; i < p->count; i++)
+  const size_t n = p->count;
+  if (n == 0)
+    return;
+  // Build the dependency edges ONCE -- `dep[a*n + b]` means module a re-homes a concrete instance owned by
+  // b, so b must be emitted before a -- then Kahn topo-sort with a lowest-id tiebreak (matching the old
+  // selection). O(instances + n^2) instead of the old O(n^3 * instances) emits_into rescans.
+  bool *const done = calloc(n, 1);
+  bool *const dep = calloc(n * n, 1);
+  size_t *const indeg = calloc(n, sizeof *indeg);
+  if (!done || !dep || !indeg) { // OOM: id order (correct output; loses the re-homed-pollution-timing opt)
+    for (size_t i = 0; i < n; i++)
       order[i] = (ModuleId)i;
+    free(done);
+    free(dep);
+    free(indeg);
     return;
   }
-  for (size_t k = 0; k < p->count; k++) {
-    size_t pick = p->count;
-    for (size_t i = 0; i < p->count && pick == p->count; i++) {
-      if (done[i])
+  for (size_t a = 0; a < n; a++) {
+    const Ast *const aa = p->modules[a].ast;
+    if (!aa)
+      continue;
+    for (size_t i = 0; i < aa->instances.len; i++) {
+      const TyInstance *const it = &aa->instances.data[i];
+      const ModuleId b = it->module;
+      if ((size_t)b >= n || (size_t)b == a || dep[a * n + (size_t)b])
         continue;
-      bool ready = true; // i is ready once every owner module it re-homes an instance into is emitted
-      for (size_t j = 0; j < p->count && ready; j++)
-        if (!done[j] && j != i && emits_into(p, (ModuleId)i, (ModuleId)j))
-          ready = false;
-      if (ready)
-        pick = i;
+      bool concrete = true;
+      for (uint8_t k = 0; k < it->n; k++)
+        concrete &= ast_type_concrete(aa, it->args[k]);
+      if (concrete && instance_home(p, aa, it) == (ModuleId)a) {
+        dep[a * n + (size_t)b] = true;
+        indeg[a]++;
+      }
     }
-    if (pick == p->count) // residual cycle (mutually re-homing modules): take the next in id order
-      for (size_t i = 0; i < p->count; i++)
-        if (!done[i]) { pick = i; break; }
+  }
+  for (size_t k = 0; k < n; k++) {
+    size_t pick = n;
+    for (size_t i = 0; i < n; i++) // lowest-id module whose every owner dependency is already emitted
+      if (!done[i] && indeg[i] == 0) {
+        pick = i;
+        break;
+      }
+    if (pick == n) // residual cycle (mutually re-homing modules): take the next in id order
+      for (size_t i = 0; i < n; i++)
+        if (!done[i]) {
+          pick = i;
+          break;
+        }
     order[k] = (ModuleId)pick;
     done[pick] = true;
+    for (size_t x = 0; x < n; x++) // pick is emitted: drop it from every remaining dependent's indegree
+      if (!done[x] && dep[x * n + pick] && indeg[x] > 0)
+        indeg[x]--;
   }
   free(done);
+  free(dep);
+  free(indeg);
 }
 
 static TypeId subst_reintern_type(Ast *const dest, const Ast *const owner, const TypeId t, const ModuleId gmod,

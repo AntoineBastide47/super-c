@@ -35,6 +35,11 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
         let removed = self.m.remove(value);
         return removed.is_some();
     }
+
+    // A borrowing cursor over the elements (`&T`); `for x in s.iter() { .. }`. Arbitrary order.
+    pub fn iter(self: &Set<T, A>) MapKeys<T> {
+        return self.m.keys();
+    }
 }
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).

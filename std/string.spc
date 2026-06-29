@@ -191,11 +191,12 @@ extend<A: Allocator> String<A> {
         }
         let n = self.repr.large.len;
         let p = self.repr.large.ptr;
-        if n <= 23 { // move back inline, then free the heap buffer (discriminant still set -> capacity() valid)
+        let cap = self.capacity(); // read BEFORE any memcpy: the inline move overwrites the union's cap field
+        if n <= 23 { // move back inline, then free the heap buffer
             if n > 0 {
                 memcpy((&self.repr.small.data[0]) as *mut void, p as *const void, n);
             }
-            self.alloc.dealloc(p as *mut void, self.capacity(), 1);
+            self.alloc.dealloc(p as *mut void, cap, 1);
             self.repr.small.len = n as u8; // clears the discriminant (n <= 23)
             return;
         }
@@ -424,6 +425,24 @@ extend<A: Allocator> String<A> {
 
     pub fn as_str(self: &String<A>) str {
         return str { ptr: self.as_ptr(), len: self.len() };
+    }
+
+    // Borrowed iterators over the bytes -- delegate to the `str` view: valid until the next mutation, and
+    // only while `self` is alive (bind the String to a `let`; do not iterate a temporary's iterator).
+    pub fn bytes(self: &String<A>) Bytes {
+        return self.as_str().bytes();
+    }
+
+    pub fn chars(self: &String<A>) Chars {
+        return self.as_str().chars();
+    }
+
+    pub fn split(self: &String<A>, sep: str) Split {
+        return self.as_str().split(sep);
+    }
+
+    pub fn lines(self: &String<A>) Lines {
+        return self.as_str().lines();
     }
 
     // A NUL-terminated `*const char` view of the bytes, for passing to C APIs (the FFI `.cstr()` bridge).

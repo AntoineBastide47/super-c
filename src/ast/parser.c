@@ -731,8 +731,31 @@ static NodeId parse_extern(Parser *p) {
       const NodeId ta = parse_type_alias(p, true);
       ast_at(p->ast, ta)->as.type_alias.is_public = is_public;
       ast_push(p->ast, ta);
+    } else if (check(p, Const)) {
+      // `pub const NAME: T;` -- no initializer: a binding to a real C macro/constant from the backing
+      // header. Use sites emit the bare C identifier; nothing is defined.
+      const uint32_t cstart = token_start(raw_peek(p));
+      advance(p);
+      const NodeId cname = identifier(p);
+      expect(p, Colon, "':'");
+      const NodeId ctype = parse_type(p);
+      if (check(p, Equal))
+        error_here(p, "extern const declarations cannot have an initializer");
+      expect(p, Semicolon, "';'");
+      const NodeId cnode = ast_add(
+          p->ast,
+          (Node){
+              .kind = NODE_CONST,
+              .span = span_new(cstart, previous_end(p)),
+              .as.const_def = {.name = cname, .type = ctype, .value = NODE_NONE, .is_public = is_public, .is_extern = true},
+          });
+      for (int i = 0; i < en; i++) {
+        ea[i].owner = cnode;
+        ast_add_attr(p->ast, ea[i]);
+      }
+      ast_push(p->ast, cnode);
     } else {
-      error_here(p, is_public ? "'pub' may only be applied to an extern function or type" : "expected extern item");
+      error_here(p, is_public ? "'pub' may only be applied to an extern function, type, or const" : "expected extern item");
       advance(p);
     }
   }

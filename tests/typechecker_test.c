@@ -402,6 +402,95 @@ static void test_interface_bounds(void) {
       "fn f<T: Writer>(w: &mut T) i32 { return w.nope(); }\n"
       "fn main() i32 { let mut x = File { count: 0 }; return f(&mut x); }\n",
       "no field or method 'nope'");
+
+  // Conditional extend/interface bounds must be checked at every method-selection surface.
+  expect_error(
+      "conditional prelude associated default rejects unsatisfied key/value",
+      "struct B { pub x: i32 }\n"
+      "fn main() i32 { let xxx: Map<B, B> = Map::<B, B>::default(); return 0; }\n",
+      "unsatisfied interface bounds");
+  expect_error(
+      "conditional prelude interface associated default rejects expected type",
+      "struct B { pub x: i32 }\n"
+      "fn main() i32 { let xxx: Map<B, B> = Default::default(); return 0; }\n",
+      "unsatisfied interface bounds");
+  expect_error(
+      "conditional inherent method rejects unsatisfied receiver",
+      "interface Marker { fn mark(self: &Self) i32; }\n"
+      "struct Wrap<T> { pub v: T }\n"
+      "extend<T: Marker> Wrap<T> { fn marked(self: &Self) i32 { return self.v.mark(); } }\n"
+      "struct Plain { pub n: i32 }\n"
+      "fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; return w.marked(); }\n",
+      "unsatisfied interface bounds");
+  expect_error(
+      "conditional associated method rejects unsatisfied target",
+      "interface Marker { fn mark(self: &Self) i32; }\n"
+      "struct Wrap<T> { pub v: T }\n"
+      "extend<T: Marker> Wrap<T> { fn make(v: T) Wrap<T> { return Wrap::<T> { v: v }; } }\n"
+      "struct Plain { pub n: i32 }\n"
+      "fn main() i32 { let w = Wrap::<Plain>::make(Plain { n: 1 }); return 0; }\n",
+      "unsatisfied interface bounds");
+  expect_error(
+      "conditional operator method rejects unsatisfied operands",
+      "interface Marker { fn mark(self: &Self) i32; }\n"
+      "struct Wrap<T> { pub v: T }\n"
+      "extend<T: Marker> Wrap<T> { fn add(self: &Self, other: &Self) Wrap<T> { return Wrap::<T> { v: self.v }; } }\n"
+      "struct Plain { pub n: i32 }\n"
+      "fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; let z = w + w; return 0; }\n",
+      "unsatisfied interface bounds");
+  expect_error(
+      "conditional index method rejects unsatisfied receiver",
+      "interface Marker { fn mark(self: &Self) i32; }\n"
+      "struct Wrap<T> { pub v: T }\n"
+      "extend<T: Marker> Wrap<T> { fn index(self: &Self, i: usize) i32 { return self.v.mark(); } }\n"
+      "struct Plain { pub n: i32 }\n"
+      "fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; return w[0]; }\n",
+      "unsatisfied interface bounds");
+
+  // Interface conformance must compare full signatures, not just method names.
+  expect_error(
+      "interface method return signature mismatch",
+      "interface I { fn f(self: &Self) i32; }\n"
+      "struct S { pub x: i32 }\n"
+      "extend S as I { fn f(self: &Self) bool { return true; } }\n"
+      "fn main() i32 { return 0; }\n",
+      "does not match interface signature");
+  expect_error(
+      "interface method arity signature mismatch",
+      "interface I { fn f(self: &Self, x: i32) i32; }\n"
+      "struct S { pub x: i32 }\n"
+      "extend S as I { fn f(self: &Self) i32 { return 0; } }\n"
+      "fn main() i32 { return 0; }\n",
+      "does not match interface signature");
+
+  // Subinterfaces require their superinterfaces, and expose inherited methods through bounds.
+  expect_error(
+      "subinterface extend requires explicit superinterface satisfaction",
+      "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\n"
+      "interface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\n"
+      "struct S { pub x: i32 }\n"
+      "extend S as OrdLike {\n"
+      "  fn eq(self: &Self, other: &Self) bool { return self.x == other.x; }\n"
+      "  fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; }\n"
+      "}\n"
+      "fn main() i32 { return 0; }\n",
+      "required superinterface");
+  expect_ok(
+      "superinterface method visible through subinterface bound",
+      "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\n"
+      "interface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\n"
+      "fn same<T: OrdLike>(x: &T) bool { return x.eq(x); }\n"
+      "struct S { pub x: i32 }\n"
+      "extend S as EqLike { fn eq(self: &Self, other: &Self) bool { return self.x == other.x; } }\n"
+      "extend S as OrdLike { fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; } }\n"
+      "fn main() i32 { let s = S { x: 1 }; if same(&s) { return 0; } return 1; }\n");
+  expect_ok(
+      "generic interface argument substituted in bound method return",
+      "interface Getter<U> { fn get(self: &Self) U; }\n"
+      "struct S { pub x: i32 }\n"
+      "extend S as Getter<i32> { fn get(self: &Self) i32 { return self.x; } }\n"
+      "fn need<T: Getter<i32>>(x: &T) i32 { return x.get(); }\n"
+      "fn main() i32 { let s = S { x: 7 }; return need(&s); }\n");
 }
 
 static void test_slices(void) {

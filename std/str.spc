@@ -6,7 +6,8 @@
 // live on `String`. The two fields are public -- a `str` is a plain fat pointer -- so `s.ptr` / `s.len`
 // are usable directly; the `len()` / `is_empty()` / `ptr()` methods exist for API parity with `String`.
 //
-// Out of scope until the language grows cycle-free prelude iterators: `split`, `lines`, and `chars`.
+// Borrowed iterators (`bytes`, `chars`, `split`, `lines`) live at the bottom of this module as small
+// cursor structs implementing `Iterator`, so `for b in s.bytes() { .. }` works.
 // `is_valid_utf8` is structural only: it does not reject overlong encodings or surrogate-range scalars.
 
 extern "C" {
@@ -244,5 +245,140 @@ extend str as Default {
     // The empty view (a null, zero-length `str`).
     pub fn default() str {
         return str { ptr: null, len: 0, };
+    }
+}
+
+// --- iterators -----------------------------------------------------------------------------------
+// Borrowing cursors over a `str`. Each holds a copy of the (ptr, len) view, so the borrowed bytes must
+// outlive the iterator (the same borrowing contract as `Vector::iter`). Bind the source first: iterating a
+// TEMPORARY (`for c in make_string().chars() { .. }`) reads freed memory once the temporary is dropped at
+// the end of the construction expression -- bind it to a `let` whose scope covers the loop. They live in
+// this module (alongside `str`), so no prelude header cycle arises.
+
+pub struct Bytes { pub s: str, pub i: usize }
+pub struct Chars { pub s: str, pub i: usize }
+pub struct Split { pub s: str, pub i: usize, pub sep: str }
+pub struct Lines { pub s: str, pub i: usize }
+
+extend str {
+    // Iterate the raw bytes (`u8`).
+    pub fn bytes(self: &str) Bytes {
+        return Bytes { s: self.slice(0, self.len), i: 0 };
+    }
+
+    // Iterate Unicode scalar values (`u32` code points), decoding UTF-8. Assumes valid UTF-8; a
+    // malformed leading byte yields U+FFFD and advances one byte.
+    pub fn chars(self: &str) Chars {
+        return Chars { s: self.slice(0, self.len), i: 0 };
+    }
+
+    // Iterate the sub-views separated by `sep`. An empty `sep` yields the whole view once; adjacent or
+    // edge separators produce empty views.
+    pub fn split(self: &str, sep: str) Split {
+        return Split { s: self.slice(0, self.len), i: 0, sep: sep };
+    }
+
+    // Iterate lines split on '\n', dropping a trailing '\r' (so "\r\n" works). A final newline does not
+    // yield a trailing empty line.
+    pub fn lines(self: &str) Lines {
+        return Lines { s: self.slice(0, self.len), i: 0 };
+    }
+}
+
+extend Bytes as Iterator<u8> {
+    pub fn next(self: &mut Bytes) Option<u8> {
+        if self.i >= self.s.len() {
+            return Option::<u8>::None;
+        }
+        let b = self.s.byte_at(self.i);
+        self.i = self.i + 1;
+        return Option::<u8>::Some(b);
+    }
+}
+
+extend Chars as Iterator<u32> {
+    pub fn next(self: &mut Chars) Option<u32> {
+        if self.i >= self.s.len() {
+            return Option::<u32>::None;
+        }
+        let b0 = self.s.byte_at(self.i);
+        let mut cp: u32 = 0;
+        let mut n: usize = 1;
+        if b0 < 0x80 {
+            cp = b0 as u32;
+            n = 1;
+        } else if (b0 & 0xE0) == 0xC0 {
+            cp = (b0 & 0x1F) as u32;
+            n = 2;
+        } else if (b0 & 0xF0) == 0xE0 {
+            cp = (b0 & 0x0F) as u32;
+            n = 3;
+        } else if (b0 & 0xF8) == 0xF0 {
+            cp = (b0 & 0x07) as u32;
+            n = 4;
+        } else {
+            self.i = self.i + 1;
+            return Option::<u32>::Some(0xFFFD); // a continuation byte or 5+ byte leader: not a valid start
+        }
+        if self.i + n > self.s.len() {
+            self.i = self.i + 1; // truncated sequence at the end of the view
+            return Option::<u32>::Some(0xFFFD);
+        }
+        let mut k: usize = 1;
+        while k < n {
+            let cb = self.s.byte_at(self.i + k);
+            if (cb & 0xC0) != 0x80 { // a non-continuation byte where one is required -> malformed
+                self.i = self.i + 1;
+                return Option::<u32>::Some(0xFFFD);
+            }
+            cp = (cp << 6) | ((cb & 0x3F) as u32);
+            k = k + 1;
+        }
+        self.i = self.i + n;
+        return Option::<u32>::Some(cp);
+    }
+}
+
+extend Split as Iterator<str> {
+    pub fn next(self: &mut Split) Option<str> {
+        if self.i > self.s.len() {
+            return Option::<str>::None;
+        }
+        if self.sep.len() == 0 {
+            let whole = self.s.slice(self.i, self.s.len());
+            self.i = self.s.len() + 1;
+            return Option::<str>::Some(whole);
+        }
+        let rest = self.s.slice(self.i, self.s.len());
+        let pos = rest.find(self.sep);
+        if pos < 0 {
+            let tail = self.s.slice(self.i, self.s.len());
+            self.i = self.s.len() + 1;
+            return Option::<str>::Some(tail);
+        }
+        let j = self.i + (pos as usize);
+        let piece = self.s.slice(self.i, j);
+        self.i = j + self.sep.len();
+        return Option::<str>::Some(piece);
+    }
+}
+
+extend Lines as Iterator<str> {
+    pub fn next(self: &mut Lines) Option<str> {
+        if self.i >= self.s.len() {
+            return Option::<str>::None;
+        }
+        let start = self.i;
+        let mut j = self.i;
+        while j < self.s.len() && self.s.byte_at(j) != 10 {
+            j = j + 1;
+        }
+        let mut end = j;
+        if end > start && self.s.byte_at(end - 1) == 13 {
+            end = end - 1;
+        }
+        let piece = self.s.slice(start, end);
+        self.i = j + 1;
+        return Option::<str>::Some(piece);
     }
 }

@@ -29,6 +29,13 @@ typedef struct Package {
     ModuleId core_module;
     bool core_seeded;
     NodeId builtin_decls[BT_COUNT];
+    // Demand-driven method emission: a per-module bit (indexed by the method's node id) set for every
+    // method referenced anywhere during type-checking, for O(1) mark/query. An INHERENT method of a
+    // non-`@emit_macro` generic type whose bit is unset is dead and is not emitted; conformance methods
+    // (operators / RAII / bound dispatch) and `@emit_macro` types emit fully.
+    bool **method_used;       // method_used[module][node] -- ragged, grown on demand
+    size_t *method_used_cap;  // allocated length of each module's bit array
+    size_t method_used_mods;  // number of module slots in the two arrays above
 } Package;
 
 // Load `root_file` and, transitively, every module it imports, then append the std prelude found under
@@ -47,6 +54,12 @@ int package_find(const Package *p, const char *path, size_t path_len);
 // Find a *public* top-level declaration named `name` in module `mid`: a struct/enum when `want_type`,
 // otherwise a function. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE.
 NodeId package_lookup(const Package *p, ModuleId mid, const char *name, size_t name_len, bool want_type);
+
+// Record / test a method DefId as referenced, for demand-driven instance-method emission. The type-checker
+// marks every method it resolves; codegen omits inherent methods of non-`@emit_macro` types never marked.
+// `package_method_used` returns true when `p` is NULL (the single-file path emits every method).
+void package_mark_method_used(Package *p, DefId d);
+bool package_method_used(const Package *p, DefId d);
 
 // Like package_lookup but across every prelude module; sets *out_mid to the owning module on a hit.
 NodeId package_prelude_lookup(const Package *p, const char *name, size_t name_len, bool want_type, ModuleId *out_mid);

@@ -29,6 +29,14 @@ extend<T> Slice<T> {
         return &self.ptr[i];
     }
 
+    // Bounds-checked borrow: `Some(&elem)` when `i < len`, else `None`.
+    pub fn get_checked(self: &Slice<T>, i: usize) Option<&T> {
+        if i >= self.len {
+            return Option::<&T>::None;
+        }
+        return Option::<&T>::Some(&self.ptr[i]);
+    }
+
     pub fn first(self: &Slice<T>) T {
         return self.ptr[0];
     }
@@ -65,6 +73,14 @@ extend<T> SliceMut<T> {
 
     pub fn at(self: &SliceMut<T>, i: usize) &T {
         return &self.ptr[i];
+    }
+
+    // Bounds-checked shared borrow: `Some(&elem)` when `i < len`, else `None`.
+    pub fn get_checked(self: &SliceMut<T>, i: usize) Option<&T> {
+        if i >= self.len {
+            return Option::<&T>::None;
+        }
+        return Option::<&T>::Some(&self.ptr[i]);
     }
 
     // Overwrite the element at `i` (no bounds check -- the caller guarantees `i < len`).
