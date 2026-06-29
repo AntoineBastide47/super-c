@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "utils/errors.h"
+
 VEC_DEFINE(Node, Node_Vec)
 VEC_DEFINE(Ty, Ty_Vec)
 VEC_DEFINE(DefId, DefId_Vec)
@@ -28,10 +30,8 @@ HM_DEFINE(Ty, TypeId, TyMap, ty_hash, ty_eq)
 
 Ast *ast_new(const size_t token_count) {
   Ast *const a = calloc(1, sizeof *a);
-  if (!a) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!a)
+    oom();
   a->nodes = Node_Vec_init();
   a->children = U32_Vec_init();
   a->scratch = U32_Vec_init();

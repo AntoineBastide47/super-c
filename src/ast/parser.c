@@ -36,10 +36,8 @@ static int parse_attributes(Parser *p, Attr *buf, int cap);
 
 Parser *parser_new(Token_Vec tokens, const char *source, const size_t len) {
   Parser *const p = calloc(1, sizeof *p);
-  if (!p) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!p)
+    oom();
   p->source = (const uint8_t *)source;
   p->len = len;
   p->tokens = tokens;
@@ -263,6 +261,26 @@ static NodeId parse_type_path(Parser *p) {
               });
 }
 
+// The target type of an `as` cast. A bare type path here must NOT consume a trailing `<...>` as generic
+// args: that is ambiguous with a relational `x as T < y`, and casting to a generic aggregate is invalid
+// anyway (the type checker rejects aggregate casts). Indirect forms (`*T`, `&T`, `[]T`, `[T;N]`, `fn(..)`)
+// and their nested generics still parse via the full type grammar.
+static NodeId parse_cast_type(Parser *p) {
+  if (!check(p, Identifier) && !check(p, SelfUpper))
+    return parse_type(p);
+  const uint32_t start = token_start(raw_peek(p));
+  const uint32_t mark = ast_mark(p->ast);
+  ast_push(p->ast, identifier(p));
+  while (match(p, PathSeparator))
+    ast_push(p->ast, identifier(p));
+  return ast_add(
+      p->ast, (Node){
+                  .kind = NODE_TYPE_PATH,
+                  .span = span_new(start, previous_end(p)),
+                  .as.type_path = {.parts = ast_commit(p->ast, mark), .args = (NodeList){0}},
+              });
+}
+
 ALWAYS_INLINE TypeQualifier parse_qualifier(Parser *p) {
   if (match(p, Const))
     return TYPE_QUAL_CONST;
@@ -271,7 +289,22 @@ ALWAYS_INLINE TypeQualifier parse_qualifier(Parser *p) {
   return TYPE_QUAL_NONE;
 }
 
+static NodeId parse_type_inner(Parser *p);
+// Depth-guarded entry: caps recursive type nesting (`****..T`, deeply nested generics) so pathological input
+// diagnoses instead of overflowing the native stack. Shares `p->depth` with parse_unary / parse_statement.
 static NodeId parse_type(Parser *p) {
+  if (p->depth >= PARSE_MAX_DEPTH) {
+    error_here(p, "type nested too deeply");
+    if (!at_end(p))
+      advance(p);
+    return NODE_NONE;
+  }
+  p->depth++;
+  const NodeId t = parse_type_inner(p);
+  p->depth--;
+  return t;
+}
+static NodeId parse_type_inner(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   if (match(p, Star) || match(p, Ampersand)) {
     const TokenType opener = token_type(p->tokens.data[p->current - 1]);
@@ -1496,7 +1529,7 @@ static NodeId parse_postfix(Parser *p) {
           return parse_struct_initializer_after(p, path_chain_to_type_path(p, expr, start), start);
       }
     } else if (match(p, As)) {
-      const NodeId cast_type = parse_type(p);
+      const NodeId cast_type = parse_cast_type(p);
       expr = ast_add(
           p->ast, (Node){
                       .kind = NODE_CAST,
@@ -1751,7 +1784,23 @@ static NodeId parse_if(Parser *p) {
               });
 }
 
+static NodeId parse_statement_inner(Parser *p);
+// Depth-guarded entry: caps block/statement nesting (each `{ .. }` recurses parse_block -> parse_statement)
+// so deeply nested blocks diagnose instead of overflowing the stack. The `advance` keeps the enclosing block
+// loop making progress so it terminates rather than spinning on the unconsumed token.
 static NodeId parse_statement(Parser *p) {
+  if (p->depth >= PARSE_MAX_DEPTH) {
+    error_here(p, "statement nested too deeply");
+    if (!at_end(p))
+      advance(p);
+    return NODE_NONE;
+  }
+  p->depth++;
+  const NodeId s = parse_statement_inner(p);
+  p->depth--;
+  return s;
+}
+static NodeId parse_statement_inner(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   if (peek_ident_is(p, "static_assert"))
     return parse_static_assert(p);

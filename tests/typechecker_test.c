@@ -575,8 +575,51 @@ static void test_static_assert(void) {
       "fn main() i32 { let m: i32 = 0; static_assert(true, m); return 0; }\n", "string literal");
 }
 
+// Regressions for bugs found by the cross-stage hunt: each asserts the fix and would fail if it regressed.
+static void test_bug_regressions(void) {
+  // T1: an operator overload must type-check its right operand against the method's parameter.
+  expect_error("op rhs type-checked",
+               "struct A { pub x: i32 }\n"
+               "extend A { fn add(self: &A, o: &A) A { return A { x: self.x + o.x }; } }\n"
+               "fn main() i32 { let a = A { x: 1 }; let p = a + 5; return p.x; }\n",
+               "mismatched types");
+  // T2: using an operator on an unbounded generic param requires the matching bound (`T: Add`).
+  expect_error("unbounded generic operator",
+               "fn add2<T>(a: T, b: T) T { return a + b; }\n"
+               "fn main() i32 { let n: i32 = add2::<i32>(1, 2); return n; }\n",
+               "no 'add' method for this operator");
+  // T3: a write through a shared `&T` is rejected even when the binding is `let mut`.
+  expect_error("write through shared ref",
+               "struct S { pub x: i32 }\n"
+               "fn main() i32 { let s = S { x: 1 }; let mut r: &S = &s; r.x = 99; return s.x; }\n",
+               "cannot assign");
+  // T4: returning the address of a local array element dangles (escape analysis covers &local[i]).
+  expect_error("escape of &local index",
+               "fn dangle() &i32 { let a: [i32; 3] = [1, 2, 3]; return &a[1]; }\n"
+               "fn main() i32 { return *dangle(); }\n",
+               "does not outlive");
+  // T5: `&mut T` is accepted where `&T` is expected (a reborrow; the stronger borrow covers the weaker).
+  expect_ok("mut ref coerces to shared ref",
+            "fn read(r: &i32) i32 { return *r; }\n"
+            "fn main() i32 { let mut x = 5; return read(&mut x); }\n");
+  // L1: a `char` literal whose scalar exceeds one byte is rejected (not silently truncated).
+  expect_error("char over one byte",
+               "fn main() i32 { let c = '\\u{1F600}'; return c as i32; }\n",
+               "does not fit in 'char'");
+  // L3: an integer literal larger than 64 bits is rejected with a clean diagnostic.
+  expect_error("oversized integer literal",
+               "fn main() i32 { let x = 0x1FFFFFFFFFFFFFFFF; return 0; }\n",
+               "too large to fit in a 64-bit integer");
+  // C2: a fixed-size array cannot be a generic type argument (the interned Ty carries no length).
+  expect_error("array as generic argument",
+               "struct Wrap<T> { pub v: T }\n"
+               "fn main() i32 { let w = Wrap::<[i32; 3]> { v: [1, 2, 3] }; return w.v[0]; }\n",
+               "cannot be a generic type argument");
+}
+
 int main(void) {
   test_ok();
+  test_bug_regressions();
   test_ffi();
   test_static_assert();
   test_slices();

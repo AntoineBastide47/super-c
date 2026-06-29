@@ -4,6 +4,18 @@ WARN     := -Wall -Wextra
 INCLUDE  := -Isrc
 DEPFLAGS := -MMD -MP
 
+# OpenMP runtime for the parallelized raii_gen test (the rest of the suite ignores it). Apple clang needs
+# Homebrew's libomp; on GCC run `make OMP_FLAGS=-fopenmp`. Without it raii_gen still builds and runs serially.
+# $(wildcard) probes the known Homebrew prefixes with no subprocess, so plain `make` pays nothing.
+OMP_FLAGS ?=
+ifeq ($(strip $(OMP_FLAGS)),)
+  LIBOMP := $(firstword $(wildcard /opt/homebrew/opt/libomp /usr/local/opt/libomp))
+  ifneq ($(LIBOMP),)
+    OMP_FLAGS := -Xpreprocessor -fopenmp -I$(LIBOMP)/include -L$(LIBOMP)/lib -lomp
+  endif
+endif
+OMP :=
+
 V ?= 0
 BAR_WIDTH := 20
 
@@ -109,10 +121,13 @@ bench:
 	@$(MAKE) PROFILE=release bench
 endif
 
+# raii_gen and codegen_run are OpenMP-parallelized; every other test links without it ($(OMP) stays empty).
+$(BUILD_DIR)/tests/raii_gen_test $(BUILD_DIR)/tests/codegen_run_test: OMP := $(OMP_FLAGS)
+
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
 	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) -DSUPERC_STD_DIR='"$(CURDIR)/std"' $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT)
+	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) -DSUPERC_STD_DIR='"$(CURDIR)/std"' $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT) $(OMP)
 
 $(BUILD_DIR)/benchmark/%: benchmark/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)

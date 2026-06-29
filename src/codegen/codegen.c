@@ -165,6 +165,10 @@ struct Codegen {
     // clean. Set by emit_function, consumed once at the function body's open by emit_block_from.
     NodeId unused_params[32];
     uint32_t nunused_params;
+    // True while emitting the value-yielding tail statement of a value-block (`({ ..; VALUE })`): there the
+    // expression's value IS the block's result, so the discarded-temporary free must NOT fire (it would
+    // consume the value the statement-expression must yield).
+    bool no_temp_free;
     // Per-aggregate DFS emission state (0 unvisited / 1 on-path / 2 emitted), keyed by decl NodeId. Persists
     // across phase_types so the single-TU path can pre-emit a concrete struct (an instance's by-value arg
     // living in a later module) before any instance, and the owning module's phase_types then skips it.
@@ -310,10 +314,8 @@ static bool want_fn(int which, bool is_public);
 
 Codegen *codegen_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   Codegen *const c = calloc(1, sizeof *c);
-  if (!c) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!c)
+    oom();
   c->ast = ast;
   c->source = (const uint8_t *)source;
   c->len = len;
@@ -328,10 +330,8 @@ Codegen *codegen_new(Ast *ast, const char *source, const size_t len, const Packa
   c->multifile = c->mangle; // default; the CLI forces multifile so a lone module still gets a build/ tree
   c->buf_cap = len * 4 + 4096; // generated C runs a few x the source; reserve up front
   c->buf = malloc(c->buf_cap);
-  if (!c->buf) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!c->buf)
+    oom();
   ERRORS_INIT(c);
   return c;
 }
@@ -367,10 +367,8 @@ static void emit_reserve(Codegen *c, const size_t extra) {
   while (cap < c->buf_len + extra)
     cap *= 2;
   char *const buf = realloc(c->buf, cap);
-  if (!buf) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!buf)
+    oom();
   c->buf = buf;
   c->buf_cap = cap;
 }
@@ -833,8 +831,7 @@ static void fresh(Codegen *c, char *buf, const size_t cap) {
   snprintf(buf, cap, "__sc%u", c->tmp++);
 }
 
-static size_t buf_append(char *out, const size_t cap, size_t at, const char *text) {
-  const size_t n = strlen(text);
+static size_t buf_append_bytes(char *out, const size_t cap, size_t at, const char *text, const size_t n) {
   if (at < cap) {
     const size_t room = cap - at - 1;
     const size_t copied = n < room ? n : room;
@@ -844,14 +841,8 @@ static size_t buf_append(char *out, const size_t cap, size_t at, const char *tex
   return at + n;
 }
 
-static size_t buf_append_bytes(char *out, const size_t cap, size_t at, const char *text, const size_t n) {
-  if (at < cap) {
-    const size_t room = cap - at - 1;
-    const size_t copied = n < room ? n : room;
-    memcpy(out + at, text, copied);
-    out[at + copied] = '\0';
-  }
-  return at + n;
+static size_t buf_append(char *out, const size_t cap, size_t at, const char *text) {
+  return buf_append_bytes(out, cap, at, text, strlen(text));
 }
 
 static void buf_join3(
@@ -1041,6 +1032,12 @@ static void emit_reescaped(Codegen *c, const Span s, const bool is_char) {
   const size_t end = s.end - 1; // closing quote
   while (i < end) {
     if (src[i] != '\\') {
+      if (is_char && src[i] >= 0x80) { // a non-ASCII char (lexer-checked to fit one byte): emit its codepoint
+        const uint32_t cp = ((uint32_t)(src[i] & 0x1F) << 6) | (uint32_t)(src[i + 1] & 0x3F); // 2-byte UTF-8
+        emit(c, "\\%03o", cp & 0xFFu); // value, not the raw multi-byte sequence (which is invalid C in 'x')
+        i += 2;
+        continue;
+      }
       emit(c, "%c", src[i]);
       i++;
       continue;
@@ -1133,7 +1130,8 @@ static void emit_literal(Codegen *c, const NodeId id, const Node *n) {
       emit(c, ") - 1 }");
       break;
     }
-    case ByteCharacterLiteral: // b'a' -> 'a'
+    case ByteCharacterLiteral: // b'a' -> (uint8_t)'a': a byte literal is `u8`, so the cast yields 255 for
+      emit(c, "(uint8_t)");   // b'\xFF' rather than the signed C char constant's -1
       if (s.end > s.start && c->source[s.start] == 'b')
         emit(c, "%.*s", (int)(s.end - s.start - 1), c->source + s.start + 1);
       else
@@ -1636,8 +1634,10 @@ static bool cg_span_eq(const uint8_t *const sa, const Span a, const uint8_t *con
 }
 
 // The concrete `extend <tdecl> { fn <name> }` method for a type (its module or the current module), used
-// to dispatch a bound method on a now-monomorphized generic receiver to the real extend. {_,NODE_NONE} if none.
-static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl, const uint8_t *const nsrc, const Span name) {
+// to dispatch a bound method on a now-monomorphized generic receiver to the real extend. Matches the method
+// name by span (`name` in `nsrc`) when `lit` is NULL, else against the C-string `lit`. {_,NODE_NONE} if none.
+static DefId cg_find_method_impl(
+    Codegen *c, const ModuleId tmod, const NodeId tdecl, const uint8_t *const nsrc, const Span name, const char *const lit) {
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
   for (int s = 0; s < ns; s++) {
@@ -1656,8 +1656,10 @@ static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl,
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
-        if (mn->kind == NODE_FUNCTION &&
-            cg_span_eq(nsrc, name, cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text))
+        if (mn->kind != NODE_FUNCTION)
+          continue;
+        const Span mname = ast_at_const(a, mn->as.function.name)->as.name.text;
+        if (lit ? span_is(cg_mod_src(c, m), mname, lit) : cg_span_eq(nsrc, name, cg_mod_src(c, m), mname))
           return (DefId){m, mids[j]};
       }
     }
@@ -1665,32 +1667,13 @@ static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl,
   return (DefId){0, NODE_NONE};
 }
 
+static DefId cg_find_method(Codegen *c, const ModuleId tmod, const NodeId tdecl, const uint8_t *const nsrc, const Span name) {
+  return cg_find_method_impl(c, tmod, tdecl, nsrc, name, NULL);
+}
+
 // Like cg_find_method but matches a C-string method name (for operator overloading -> `eq`/`cmp`).
 static DefId cg_find_method_cstr(Codegen *c, const ModuleId tmod, const NodeId tdecl, const char *const lit) {
-  const ModuleId scopes[2] = {tmod, c->ast->module};
-  const int ns = tmod == c->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId m = scopes[s];
-    Ast *const a = cg_mod_ast(c, m);
-    const NodeList items = ast_at_const(a, a->root)->as.program.items;
-    const NodeId *const ids = ast_list(a, items);
-    for (uint32_t i = 0; i < items.len; i++) {
-      const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
-        continue;
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
-      if (tg.module != tmod || tg.node != tdecl)
-        continue;
-      const NodeList ms = it->as.extend_def.items;
-      const NodeId *const mids = ast_list(a, ms);
-      for (uint32_t j = 0; j < ms.len; j++) {
-        const Node *const mn = ast_at_const(a, mids[j]);
-        if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text, lit))
-          return (DefId){m, mids[j]};
-      }
-    }
-  }
-  return (DefId){0, NODE_NONE};
+  return cg_find_method_impl(c, tmod, tdecl, NULL, (Span){0}, lit);
 }
 
 // Emit an overloaded comparison (`a == b`, `a < b`, ...) on a struct / generic-instance operand as a call
@@ -2562,6 +2545,22 @@ static void emit_struct_init(Codegen *c, const Node *n) {
     emit(c, zero_fields ? "(%s){}" : "(%s){0}", t);
     return;
   }
+  // A C array member can't be initialized from an array lvalue in a compound literal (and re-subscripting
+  // would evaluate the value N times). If any field is array-typed and not a brace list, build the struct in
+  // a statement-expression and memcpy those fields, each value evaluated once via its address.
+  bool arr_copy = false;
+  for (uint32_t i = 0; i < fields.len; i++) {
+    const NodeId fv = ast_at_const(c->ast, ids[i])->as.field_initializer.value;
+    const TypeId fvt = ast_type(c->ast, fv);
+    if (ast_at_const(c->ast, fv)->kind != NODE_ARRAY_LITERAL && fvt != TYPE_NONE &&
+        ast_type_at(c->ast, fvt)->kind == TYPE_ARRAY)
+      arr_copy = true;
+  }
+  char st[32];
+  if (arr_copy) {
+    fresh(c, st, sizeof st);
+    emit(c, "({ %s %s = ", t, st);
+  }
   emit(c, "(%s){ ", t);
   for (uint32_t i = 0; i < fields.len; i++) {
     const Node *const fi = ast_at_const(c->ast, ids[i]);
@@ -2571,12 +2570,36 @@ static void emit_struct_init(Codegen *c, const Node *n) {
     emit_ident(c, name_span(c, fi->as.field_initializer.name));
     emit(c, " = ");
     const NodeId fv = fi->as.field_initializer.value;
+    const TypeId fvt = ast_type(c->ast, fv);
+    const bool arr_field = ast_at_const(c->ast, fv)->kind != NODE_ARRAY_LITERAL && fvt != TYPE_NONE &&
+                           ast_type_at(c->ast, fvt)->kind == TYPE_ARRAY;
     if (ast_at_const(c->ast, fv)->kind == NODE_ARRAY_LITERAL) // a C array member takes a brace list, not an expr
       emit_array_braces(c, ast_at_const(c->ast, fv));
+    else if (arr_field)
+      emit(c, "{0}"); // filled by the memcpy below
     else
       emit_expr(c, fv);
   }
   emit(c, " }");
+  if (!arr_copy)
+    return;
+  emit(c, ";");
+  for (uint32_t i = 0; i < fields.len; i++) {
+    const Node *const fi = ast_at_const(c->ast, ids[i]);
+    const NodeId fv = fi->as.field_initializer.value;
+    const TypeId fvt = ast_type(c->ast, fv);
+    if (ast_at_const(c->ast, fv)->kind == NODE_ARRAY_LITERAL || fvt == TYPE_NONE ||
+        ast_type_at(c->ast, fvt)->kind != TYPE_ARRAY)
+      continue;
+    emit(c, " memcpy(&%s.", st);
+    emit_ident(c, name_span(c, fi->as.field_initializer.name));
+    emit(c, ", &(");
+    emit_expr(c, fv);
+    emit(c, "), sizeof %s.", st);
+    emit_ident(c, name_span(c, fi->as.field_initializer.name));
+    emit(c, ");");
+  }
+  emit(c, " %s; })", st);
 }
 
 static void emit_new(Codegen *c, const Node *n) {
@@ -3122,10 +3145,13 @@ static void emit_expr(Codegen *c, const NodeId id) {
       {
         const NodeList stmts = n->as.block.statements;
         const NodeId *const ids = ast_list(c->ast, stmts);
+        const bool saved = c->no_temp_free;
         for (uint32_t i = 0; i < stmts.len; i++) {
+          c->no_temp_free = i + 1 == stmts.len; // the last statement yields the block's value -- don't free it
           emit_indent(c);
           emit_stmt(c, ids[i]);
         }
+        c->no_temp_free = saved;
       }
       c->depth--;
       emit_indent(c);
@@ -4335,6 +4361,20 @@ static void emit_expr_stmt(Codegen *c, NodeId v) {
     emit_match_stmt(c, v);
     return;
   }
+  // A discarded owning temporary (`make_string();`, `v.pop();`) is never bound, so it would leak. If the
+  // value is a Free-typed rvalue (not a place -- a place is still owned by its binding, and an assignment
+  // stores into one), materialize and free it. Places/assignments fall through to their own cleanup.
+  const TypeId vt = ast_type(c->ast, v);
+  if (vt != TYPE_NONE && !c->no_temp_free && n->kind != NODE_ASSIGNMENT && !is_lvalue(c, v) && cg_type_is_free(c, vt)) {
+    char tmp[32];
+    fresh(c, tmp, sizeof tmp);
+    emit(c, "{ __auto_type %s = ", tmp);
+    emit_expr(c, v);
+    emit(c, "; ");
+    emit_free_target(c, vt);
+    emit(c, "(&%s); }\n", tmp);
+    return;
+  }
   emit_expr(c, v);
   emit(c, ";\n");
 }
@@ -4364,8 +4404,9 @@ static void emit_tuple_let(Codegen *c, const Node *n) {
     emit_indent(c);
     char bn[128];
     render_ident(c, name_span(c, nids[i]), bn, sizeof bn);
-    // const iff the binding is immutable (`let` without `mut`); mutability is a binding property only.
-    const bool element_const = !n->as.let_stmt.is_mutable;
+    // const iff the binding is immutable AND not Free -- a Free element's scope-exit free takes `&mut self`,
+    // so it must be non-const (mutability is otherwise a binding property only).
+    const bool element_const = !n->as.let_stmt.is_mutable && !cg_type_is_free(c, ast_type(c->ast, nids[i]));
     emit(c, "%s__auto_type %s = %s._%u;\n", element_const ? "const " : "", bn, tmp, i);
   }
 }
@@ -4400,41 +4441,8 @@ static void emit_static_assert(Codegen *c, const Node *const n) {
 
 // The `free` method of a type that implements the Free interface (`extend T as Free`), or {_,NODE_NONE}.
 // Only an explicit `as Free` extend opts a type into RAII auto-free. Searches the type's home + current module.
-static DefId cg_free_method(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
-  const ModuleId scopes[2] = {tmod, c->ast->module};
-  const int ns = tmod == c->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId m = scopes[s];
-    Ast *const a = cg_mod_ast(c, m);
-    const NodeList items = ast_at_const(a, a->root)->as.program.items;
-    const NodeId *const ids = ast_list(a, items);
-    for (uint32_t i = 0; i < items.len; i++) {
-      const Node *const it = ast_at_const(a, ids[i]);
-      if (it->kind != NODE_EXTEND || it->as.extend_def.interface_type == NODE_NONE || it->as.extend_def.target_type == NODE_NONE)
-        continue;
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
-      if (tg.module != tmod || tg.node != tdecl)
-        continue;
-      const DefId tr = ast_resolution_def(a, it->as.extend_def.interface_type);
-      if (tr.node == NODE_NONE)
-        continue;
-      const Node *const trn = ast_at_const(cg_mod_ast(c, tr.module), tr.node);
-      if (trn->kind != NODE_INTERFACE ||
-          !span_is(cg_mod_src(c, tr.module), ast_at_const(cg_mod_ast(c, tr.module), trn->as.interface_def.name)->as.name.text, "Free"))
-        continue;
-      const NodeList ms = it->as.extend_def.items;
-      const NodeId *const mids = ast_list(a, ms);
-      for (uint32_t j = 0; j < ms.len; j++) {
-        const Node *const mn = ast_at_const(a, mids[j]);
-        if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, m), ast_at_const(a, mn->as.function.name)->as.name.text, "free"))
-          return (DefId){m, mids[j]};
-      }
-    }
-  }
-  return (DefId){0, NODE_NONE};
-}
-
-// The `as Free` extend on `(tmod, tdecl)`, or {_,NODE_NONE} -- like cg_free_method but returns the extend.
+// The `as Free` extend on `(tmod, tdecl)` (its module or the current module), or {_,NODE_NONE}. Returns
+// (module, extend-node-id) of the first matching `extend T as Free` block.
 static DefId cg_free_extend(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
   const ModuleId scopes[2] = {tmod, c->ast->module};
   const int ns = tmod == c->ast->module ? 1 : 2;
@@ -4459,6 +4467,22 @@ static DefId cg_free_extend(Codegen *c, const ModuleId tmod, const NodeId tdecl)
                   "Free"))
         return (DefId){m, ids[i]};
     }
+  }
+  return (DefId){0, NODE_NONE};
+}
+
+// The `free` method inside `(tmod, tdecl)`'s `as Free` extend, or {_,NODE_NONE} when there is no such extend.
+static DefId cg_free_method(Codegen *c, const ModuleId tmod, const NodeId tdecl) {
+  const DefId ext = cg_free_extend(c, tmod, tdecl);
+  if (ext.node == NODE_NONE)
+    return (DefId){0, NODE_NONE};
+  Ast *const a = cg_mod_ast(c, ext.module);
+  const NodeList ms = ast_at_const(a, ext.node)->as.extend_def.items;
+  const NodeId *const mids = ast_list(a, ms);
+  for (uint32_t j = 0; j < ms.len; j++) {
+    const Node *const mn = ast_at_const(a, mids[j]);
+    if (mn->kind == NODE_FUNCTION && span_is(cg_mod_src(c, ext.module), ast_at_const(a, mn->as.function.name)->as.name.text, "free"))
+      return (DefId){ext.module, mids[j]};
   }
   return (DefId){0, NODE_NONE};
 }
@@ -4529,15 +4553,33 @@ static bool cg_is_cond_moved(const Codegen *c, const NodeId decl) {
 // `x.free()` receiver -- there the value is taken by ADDRESS (`&x`), which a comma-expr can't be, so the
 // flag is set around the whole call instead (emit_call); the binding still joins cond_moved for its flag.
 static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const int pass, const bool site) {
-  if (expr == NODE_NONE || ast_at_const(c->ast, expr)->kind != NODE_IDENTIFIER)
+  if (expr == NODE_NONE)
+    return;
+  // A partial move of a Free field (`let x = s.field`) hands the resource to `x`, but the owning binding `s`
+  // would still free that field at scope exit -- a double free. Record it as a move of `s` itself so its
+  // auto-free is elided (the moved-out value now owns the resource). Walks to the root binding.
+  const Node *const me = ast_at_const(c->ast, expr);
+  if (me->kind == NODE_MEMBER && !me->as.member.path && cg_type_is_free(c, ast_type(c->ast, expr))) {
+    cg_mark_move(c, me->as.member.object, cond, pass, false);
+    return;
+  }
+  if (ast_at_const(c->ast, expr)->kind != NODE_IDENTIFIER)
     return;
   const DefId d = ast_resolution_def(c->ast, expr);
   if (d.module != c->ast->module || d.node == NODE_NONE)
     return;
   const NodeKind dk = ast_at_const(c->ast, d.node)->kind;
+  // A tuple-let element binds under an identifier node that back-points to its `let`; accept it so a move
+  // of `a` in `let (a, b) = ..` is recorded (otherwise it would be both moved out and auto-freed -> double free).
+  bool tuple_elem = false;
+  if (dk == NODE_IDENTIFIER) {
+    const NodeId let = ast_resolution(c->ast, d.node);
+    tuple_elem = let != NODE_NONE && ast_at_const(c->ast, let)->kind == NODE_LET &&
+                 ast_at_const(c->ast, ast_at_const(c->ast, let)->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE;
+  }
   // `let`/param bindings and `switch` payload bindings (so move-out of a matched payload is recorded, and
-  // a payload NOT moved out can be freed at arm exit -- see cg_arm_frees).
-  if (dk != NODE_LET && dk != NODE_PARAMETER && dk != NODE_PATTERN_NAME)
+  // a payload NOT moved out can be freed at arm exit -- see cg_arm_frees), plus tuple-let elements.
+  if (dk != NODE_LET && dk != NODE_PARAMETER && dk != NODE_PATTERN_NAME && !tuple_elem)
     return;
   if (!cg_type_is_free(c, ast_type(c->ast, expr))) // only Free bindings are tracked (others need no free)
     return;
@@ -4786,7 +4828,9 @@ static void emit_auto_free(Codegen *c, const NodeId bid) {
   emit_free_target(c, bt);
   const Node *const ln = ast_at_const(c->ast, bid);
   char nm[128];
-  const NodeId nameNode = ln->kind == NODE_PARAMETER ? ln->as.parameter.name : ln->as.let_stmt.name;
+  const NodeId nameNode = ln->kind == NODE_PARAMETER     ? ln->as.parameter.name
+                          : ln->kind == NODE_IDENTIFIER  ? bid // a tuple-let element binds under its own name
+                                                         : ln->as.let_stmt.name;
   render_ident(c, name_span(c, nameNode), nm, sizeof nm);
   emit(c, "(&%s);\n", nm);
 }
@@ -4806,6 +4850,21 @@ static void emit_stmt(Codegen *c, const NodeId id) {
     case NODE_LET: {
       if (ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE) {
         emit_tuple_let(c, n);
+        // RAII for the destructured elements: each owning element that is not moved out is freed at scope
+        // exit (a conditionally-moved one gets a runtime flag, like a regular Free `let`).
+        const Node *const pat = ast_at_const(c->ast, n->as.let_stmt.name);
+        const NodeId *const eids = ast_list(c->ast, pat->as.pattern.children);
+        for (uint32_t i = 0; i < pat->as.pattern.children.len; i++) {
+          if (!cg_type_is_free(c, ast_type(c->ast, eids[i])) || cg_is_moved(c, eids[i]))
+            continue;
+          if (cg_is_cond_moved(c, eids[i])) {
+            char fl[32];
+            cg_move_flag(fl, sizeof fl, eids[i]);
+            emit_indent(c);
+            emit(c, "bool %s = false;\n", fl);
+          }
+          cg_register_auto_free(c, eids[i]);
+        }
         break;
       }
       // const iff the binding is immutable (`let` without `mut`). Calling a `&mut self` method on an

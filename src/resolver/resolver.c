@@ -47,10 +47,8 @@ static int import_target(const Resolver *r, NodeList parts);
 
 Resolver *resolver_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   Resolver *const r = calloc(1, sizeof *r);
-  if (!r) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!r)
+    oom();
   r->ast = ast;
   r->source = (const uint8_t *)source;
   r->len = len;
@@ -915,6 +913,12 @@ static void resolve_pattern(Resolver *r, const NodeId id) {
       const NodeId *const ids = ast_list(r->ast, children);
       for (uint32_t i = 0; i < children.len; i++)
         resolve_pattern(r, ids[i]);
+      break;
+    }
+    case NODE_PATTERN_OR: { // alternatives bind the same names; declare the first's binds -- codegen
+      const NodeList children = n->as.pattern.children; // (emit_pattern_binds) and the type checker key off alt 0
+      if (children.len)
+        resolve_pattern(r, ast_list(r->ast, children)[0]);
       break;
     }
     default: // NODE_PATTERN_WILDCARD, NODE_PATTERN_LITERAL, NODE_PATTERN_RANGE

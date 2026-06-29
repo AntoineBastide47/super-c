@@ -112,10 +112,8 @@ static bool aggregate_of(TypeChecker *t, TypeId ty, ModuleId *mod, NodeId *decl,
 
 TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   TypeChecker *const t = calloc(1, sizeof *t);
-  if (!t) {
-    fprintf(stderr, "fatal: out of memory\n");
-    abort();
-  }
+  if (!t)
+    oom();
   t->ast = ast;
   t->source = (const uint8_t *)source;
   t->len = len;
@@ -202,6 +200,40 @@ static bool is_integer_literal_node(const Ast *a, NodeId id) {
   if (n->kind == NODE_UNARY && n->as.unary.op == Minus)
     n = ast_at_const(a, n->as.unary.operand);
   return n->kind == NODE_LITERAL && n->as.literal.token_type == IntegerLiteral;
+}
+
+static unsigned hex_digit(const uint8_t c) { return c <= '9' ? (unsigned)(c - '0') : (unsigned)((c | 0x20) - 'a' + 10); }
+
+// The Unicode scalar of a character-literal source span (between the quotes): a raw byte/UTF-8 scalar, or a
+// `\xNN` / `\u{..}` escape. `char` is one C byte, so the type checker rejects a scalar above 0xFF here.
+static uint32_t char_literal_cp(const uint8_t *const src, const Span s) {
+  size_t i = s.start + 1; // past the opening quote
+  if (i >= s.end)
+    return 0;
+  if (src[i] != '\\') {
+    const uint8_t b = src[i];
+    if (b < 0x80)
+      return b;
+    if (b <= 0xDF)
+      return ((uint32_t)(b & 0x1F) << 6) | (src[i + 1] & 0x3F);
+    if (b <= 0xEF)
+      return ((uint32_t)(b & 0x0F) << 12) | ((uint32_t)(src[i + 1] & 0x3F) << 6) | (src[i + 2] & 0x3F);
+    return ((uint32_t)(b & 0x07) << 18) | ((uint32_t)(src[i + 1] & 0x3F) << 12) | ((uint32_t)(src[i + 2] & 0x3F) << 6) |
+           (src[i + 3] & 0x3F);
+  }
+  i++; // past backslash
+  const uint8_t e = src[i++];
+  if (e == 'x')
+    return ((uint32_t)hex_digit(src[i]) << 4) | hex_digit(src[i + 1]);
+  if (e == 'u') {
+    if (i < s.end && src[i] == '{')
+      i++;
+    uint32_t cp = 0;
+    while (i < s.end && src[i] != '}')
+      cp = (cp << 4) | hex_digit(src[i++]);
+    return cp;
+  }
+  return 0; // simple escapes (\n, \t, \\, ...) are all < 0x80
 }
 
 // A payload-less enum is a plain C enum: its values are integers, so it casts to/from integers.
@@ -388,6 +420,11 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   if (ex->kind == TYPE_POINTER && ac->kind == TYPE_REFERENCE && ex->as.elem == ac->as.elem &&
       (ac->qualifier == TYPE_QUAL_MUT || ex->qualifier == TYPE_QUAL_CONST))
     return true;
+  // A mutable reference satisfies a shared-reference slot: `&mut T` -> `&T` (a reborrow; the stronger borrow
+  // covers the weaker requirement). One-way only -- a shared `&T` never becomes `&mut T`.
+  if (ex->kind == TYPE_REFERENCE && ac->kind == TYPE_REFERENCE && ex->as.elem == ac->as.elem &&
+      ex->qualifier != TYPE_QUAL_MUT && ac->qualifier == TYPE_QUAL_MUT)
+    return true;
   // Raw pointers of the same pointee: a writable source (`*T`/`*mut T`) fits any target; a
   // `*const T` source fits only a `*const T` target (so `new`'s `*mut T` flows into `*T`/`*const`).
   if (ex->kind == TYPE_POINTER && ac->kind == TYPE_POINTER && ex->as.elem == ac->as.elem &&
@@ -499,61 +536,12 @@ static NodeId find_member(TypeChecker *t, const ModuleId m, const NodeId decl, c
 }
 
 // Find a method named `name` in any top-level extend of module `m` whose target type resolves to `decl`.
-// `name` is a span into the *caller's* source; member names are compared against module `m`'s source.
-// Find a method named `name` for type `decl` (declared in module `m`). Searches the type's home module,
-// then the CURRENT module for a local extension of an imported type (`extend foreign::T`, visible only
-// here and mangled by this module). Returns the method's real DefId, or {_, NODE_NONE} if not found.
-static DefId find_method(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name) {
-  Ast *const a = mod_ast(t, m);
-  const uint8_t *const src = mod_src(t, m);
-  const NodeList items = ast_at_const(a, a->root)->as.program.items;
-  const NodeId *const ids = ast_list(a, items);
-  for (uint32_t i = 0; i < items.len; i++) {
-    const Node *const it = ast_at_const(a, ids[i]);
-    if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
-      continue;
-    if (ast_resolution(a, it->as.extend_def.target_type) != decl)
-      continue;
-    const NodeList methods = it->as.extend_def.items;
-    const NodeId *const mids = ast_list(a, methods);
-    for (uint32_t j = 0; j < methods.len; j++) {
-      const Node *const mn = ast_at_const(a, mids[j]);
-      if (mn->kind == NODE_FUNCTION &&
-          spans_eq2(t->source, name, src, ast_at_const(a, mn->as.function.name)->as.name.text)) {
-        package_mark_method_used((Package *)t->package, (DefId){m, mids[j]}); // reached -> emit (demand-driven)
-        return (DefId){m, mids[j]};
-      }
-    }
-  }
-  if (m != t->ast->module) { // a local `extend foreign::T` in the current module
-    Ast *const ca = t->ast;
-    const NodeList citems = ast_at_const(ca, ca->root)->as.program.items;
-    const NodeId *const cids = ast_list(ca, citems);
-    for (uint32_t i = 0; i < citems.len; i++) {
-      const Node *const it = ast_at_const(ca, cids[i]);
-      if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
-        continue;
-      const DefId td = ast_resolution_def(ca, it->as.extend_def.target_type);
-      if (td.module != m || td.node != decl)
-        continue;
-      const NodeList methods = it->as.extend_def.items;
-      const NodeId *const mids = ast_list(ca, methods);
-      for (uint32_t j = 0; j < methods.len; j++) {
-        const Node *const mn = ast_at_const(ca, mids[j]);
-        if (mn->kind == NODE_FUNCTION &&
-            spans_eq2(t->source, name, t->source, ast_at_const(ca, mn->as.function.name)->as.name.text)) {
-          package_mark_method_used((Package *)t->package, (DefId){t->ast->module, mids[j]});
-          return (DefId){t->ast->module, mids[j]};
-        }
-      }
-    }
-  }
-  return (DefId){0, NODE_NONE};
-}
-
-// Like find_method, but matches a C-string method name (used by the built-in `.into()`/`.try_into()`
-// conversions to reach a type's `from` / `try_from`). Searches the type's home module and the current one.
-static DefId find_method_cstr(TypeChecker *t, const ModuleId m, const NodeId decl, const char *const lit) {
+// `name` is a span into the *caller's* source; member names are compared against each searched module's
+// source. Find a method for type `decl` (declared in module `m`): searches the type's home module, then the
+// CURRENT module for a local extension of an imported type (`extend foreign::T`, visible only here and
+// mangled by this module). Matches the method name by span (`name`) when `lit` is NULL, else against the
+// C-string `lit`. Marks the resolved method used (demand-driven emission). {_, NODE_NONE} if not found.
+static DefId find_method_impl(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name, const char *const lit) {
   const ModuleId scopes[2] = {m, t->ast->module};
   const int ns = m == t->ast->module ? 1 : 2;
   for (int s = 0; s < ns; s++) {
@@ -572,14 +560,27 @@ static DefId find_method_cstr(TypeChecker *t, const ModuleId m, const NodeId dec
       const NodeId *const mids = ast_list(a, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(a, mids[j]);
-        if (mn->kind == NODE_FUNCTION && span_is(mod_src(t, mm), ast_at_const(a, mn->as.function.name)->as.name.text, lit)) {
-          package_mark_method_used((Package *)t->package, (DefId){mm, mids[j]});
+        if (mn->kind != NODE_FUNCTION)
+          continue;
+        const Span mname = ast_at_const(a, mn->as.function.name)->as.name.text;
+        if (lit ? span_is(mod_src(t, mm), mname, lit) : spans_eq2(t->source, name, mod_src(t, mm), mname)) {
+          package_mark_method_used((Package *)t->package, (DefId){mm, mids[j]}); // reached -> emit (demand-driven)
           return (DefId){mm, mids[j]};
         }
       }
     }
   }
   return (DefId){0, NODE_NONE};
+}
+
+static DefId find_method(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name) {
+  return find_method_impl(t, m, decl, name, NULL);
+}
+
+// Like find_method, but matches a C-string method name (used by the built-in `.into()`/`.try_into()`
+// conversions to reach a type's `from` / `try_from`).
+static DefId find_method_cstr(TypeChecker *t, const ModuleId m, const NodeId decl, const char *const lit) {
+  return find_method_impl(t, m, decl, (Span){0}, lit);
 }
 
 // The `format`/`print`/`println` builtins are lowered in codegen to direct `String<Global>` appends
@@ -991,6 +992,38 @@ static DefId find_bound_method(TypeChecker *t, const ModuleId pmod, const NodeId
   return (DefId){0, NODE_NONE};
 }
 
+// Does interface `iface` (or one of its superinterfaces) declare a method named `m`?
+static bool interface_declares_cstr(TypeChecker *t, const DefId iface, const char *const m, const int depth) {
+  if (depth > 8 || iface.node == NODE_NONE)
+    return false;
+  Ast *const a = mod_ast(t, iface.module);
+  const Node *const idn = ast_at_const(a, iface.node);
+  if (idn->kind != NODE_INTERFACE)
+    return false;
+  const NodeId *const mids = ast_list(a, idn->as.interface_def.items);
+  for (uint32_t i = 0; i < idn->as.interface_def.items.len; i++) {
+    const Node *const mn = ast_at_const(a, mids[i]);
+    if (mn->kind == NODE_FUNCTION && span_is(mod_src(t, iface.module), ast_at_const(a, mn->as.function.name)->as.name.text, m))
+      return true;
+  }
+  const NodeId *const bids = ast_list(a, idn->as.interface_def.bounds);
+  for (uint32_t i = 0; i < idn->as.interface_def.bounds.len; i++)
+    if (interface_declares_cstr(t, ast_resolution_def(a, bids[i]), m, depth + 1))
+      return true;
+  return false;
+}
+
+// Does generic param (pmod, pdecl) carry a bound whose interface provides a method named `m`? This gates
+// operator use on a type parameter: `a + b` / `a < b` on a bare `<T>` is only sound when T: Add / T: Ord.
+static bool tc_param_bound_provides(TypeChecker *t, const ModuleId pmod, const NodeId pdecl, const char *const m) {
+  BoundIface ifaces[8];
+  const int ni = collect_param_bounds_full(t, pmod, pdecl, ifaces, 8);
+  for (int b = 0; b < ni; b++)
+    if (interface_declares_cstr(t, ifaces[b].iface, m, 0))
+      return true;
+  return false;
+}
+
 // An `extend [<G>] <tdecl> as <iface>` extend in `tdecl`'s module or the current module (a local extension);
 // NODE_NONE if absent. *imod receives the extend's module.
 static NodeId find_extend_as(TypeChecker *t, const ModuleId tmod, const NodeId tdecl, const DefId iface,
@@ -1339,8 +1372,18 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
           const NodeId *const aids = ast_list(a, args); // a foreign generic application (Box<T>) -> an instance
           TypeId ta[4];
           uint8_t tn = 0;
-          for (uint32_t i = 0; i < args.len && tn < 4; i++)
-            ta[tn++] = lower_type_in(t, m, aids[i]);
+          for (uint32_t i = 0; i < args.len && tn < 4; i++) {
+            ta[tn] = lower_type_in(t, m, aids[i]);
+            // A fixed-size array carries no length in the interned `Ty` (8 bytes, no room), so it cannot be a
+            // generic type argument -- it would mangle without its length and lower to a decayed pointer field.
+            if (ta[tn] != TYPE_NONE && ast_type_at(t->ast, ta[tn])->kind == TYPE_ARRAY) {
+              const Span asp = ast_at_const(a, aids[i])->span;
+              typechecker_errorf(t, asp.start, asp.end - asp.start,
+                                 "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct");
+              ta[tn] = TYPE_NONE;
+            }
+            tn++;
+          }
           apply_default_args(t, d.module, dn, ta, &tn);
           return ast_intern_instance(t->ast, d.module, d.node, ta, tn);
         }
@@ -1484,8 +1527,18 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
           // `Vec<i32>` -> an interned instance; a bare all-defaulted name (`String`) -> `String<Global>`.
           TypeId ta[4];
           uint8_t tn = 0;
-          for (uint32_t i = 0; i < args.len && tn < 4; i++)
-            ta[tn++] = resolve_type(t, arg_ids[i]);
+          for (uint32_t i = 0; i < args.len && tn < 4; i++) {
+            ta[tn] = resolve_type(t, arg_ids[i]);
+            // A fixed-size array carries no length in the interned `Ty`, so it cannot be a generic type
+            // argument -- it would mangle without its length and lower to a decayed pointer field.
+            if (ta[tn] != TYPE_NONE && ast_type_at(t->ast, ta[tn])->kind == TYPE_ARRAY) {
+              const Span asp = ast_at_const(a, arg_ids[i])->span;
+              typechecker_errorf(t, asp.start, asp.end - asp.start,
+                                 "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct");
+              ta[tn] = TYPE_NONE;
+            }
+            tn++;
+          }
           apply_default_args(t, d.module, dn, ta, &tn);
           result = ast_intern_instance(t->ast, d.module, d.node, ta, tn);
         } else {
@@ -1728,15 +1781,9 @@ static TypeId check_ptr_arith(
   return TYPE_NONE;
 }
 
-// The single return type of method `md` called on a receiver of type `recv`, with the receiver instance's
-// args substituted through the method's enclosing extend generics (so `fn index(self,..) T` -> the element).
-static TypeId tc_method_ret(TypeChecker *t, const TypeId recv, const DefId md) {
-  Ast *const fa = mod_ast(t, md.module);
-  const Node *const fn = ast_at_const(fa, md.node);
-  if (fn->kind != NODE_FUNCTION || fn->as.function.returns.len != 1)
-    return TYPE_NONE;
-  DefId rsubp[4];
-  TypeId rsuba[4];
+// Build the substitution mapping method `md`'s enclosing extend generics onto receiver `recv`'s type args
+// (so `fn f(self,..) T` reads T as the instance's element). Returns the substitution length (<= 4).
+static int method_recv_subst(TypeChecker *t, const TypeId recv, const DefId md, DefId *const rsubp, TypeId *const rsuba) {
   int nrsub = 0;
   ModuleId rmod;
   NodeId rdecl;
@@ -1756,10 +1803,47 @@ static TypeId tc_method_ret(TypeChecker *t, const TypeId recv, const DefId md) {
       }
     }
   }
+  return nrsub;
+}
+
+// The single return type of method `md` called on a receiver of type `recv`, with the receiver instance's
+// args substituted through the method's enclosing extend generics (so `fn index(self,..) T` -> the element).
+static TypeId tc_method_ret(TypeChecker *t, const TypeId recv, const DefId md) {
+  Ast *const fa = mod_ast(t, md.module);
+  const Node *const fn = ast_at_const(fa, md.node);
+  if (fn->kind != NODE_FUNCTION || fn->as.function.returns.len != 1)
+    return TYPE_NONE;
+  DefId rsubp[4];
+  TypeId rsuba[4];
+  const int nrsub = method_recv_subst(t, recv, md, rsubp, rsuba);
   const NodeId r0 = ast_list(fa, fn->as.function.returns)[0];
   const Node *const rn = ast_at_const(fa, r0);
   const TypeId ret = lower_type_in(t, md.module, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
   return subst_type(t, ret, rsubp, rsuba, nrsub);
+}
+
+// The substituted type of method `md`'s parameter at position `idx` (0 = self), or TYPE_NONE if absent.
+static TypeId tc_method_param(TypeChecker *t, const TypeId recv, const DefId md, const int idx) {
+  Ast *const fa = mod_ast(t, md.module);
+  const Node *const fn = ast_at_const(fa, md.node);
+  if (fn->kind != NODE_FUNCTION || (int)fn->as.function.params.len <= idx)
+    return TYPE_NONE;
+  DefId rsubp[4];
+  TypeId rsuba[4];
+  const int nrsub = method_recv_subst(t, recv, md, rsubp, rsuba);
+  const NodeId p = ast_list(fa, fn->as.function.params)[idx];
+  const Node *const pn = ast_at_const(fa, p);
+  const TypeId pt = lower_type_in(t, md.module, pn->kind == NODE_PARAMETER ? pn->as.parameter.type : p);
+  return subst_type(t, pt, rsubp, rsuba, nrsub);
+}
+
+// Does the value at `operand` fit operator method parameter type `pt`? An operator auto-borrows its operand,
+// so a value fits a `&T`/`&mut T` parameter when it fits the pointee. A TYPE_NONE param is unconstrained.
+static bool operand_fits_param(TypeChecker *t, const TypeId pt, const NodeId operand) {
+  if (pt == TYPE_NONE || compatible(t, pt, operand))
+    return true;
+  const Ty *const p = ast_type_at(t->ast, pt);
+  return p->kind == TYPE_REFERENCE && compatible(t, p->as.elem, operand);
 }
 
 // The method name an arithmetic operator dispatches to when an operand is a user type, or NULL.
@@ -1786,7 +1870,14 @@ static bool check_arith_overload(TypeChecker *t, const Node *const n, const Node
   if (!lt)
     return false;
   if (lt->kind == TYPE_GENERIC) { // a bound `T: Add`; verified at instantiation, codegen dispatches
-    *out = ls;
+    if (!tc_param_bound_provides(t, lt->module, lt->as.decl, m)) {
+      const Span sp = ast_at_const(t->ast, id)->span;
+      char ty[96];
+      render_type(t, ls, ty, sizeof ty);
+      typechecker_errorf(t, sp.start, sp.end - sp.start,
+                         "type parameter '%s' has no '%s' method for this operator (add a bound that provides it)", ty, m);
+      *out = TYPE_NONE;
+    }
     return true;
   }
   if (lt->kind != TYPE_STRUCT && lt->kind != TYPE_INSTANCE)
@@ -1812,6 +1903,9 @@ static bool check_arith_overload(TypeChecker *t, const Node *const n, const Node
         *out = TYPE_NONE;
         return true;
       }
+      const TypeId p1 = tc_method_param(t, ls, md, 1); // the operator's right operand must match `add`'s 2nd param
+      if (!operand_fits_param(t, p1, n->as.binary.right))
+        err_mismatch(t, n->as.binary.right, p1);
       const TypeId ret = tc_method_ret(t, ls, md);
       if (ret != TYPE_NONE)
         *out = ret;
@@ -1859,11 +1953,11 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
       // Operator overloading: on a struct or generic-instance operand, `==`/`!=` dispatch to its `eq`
       // (Eq) and `<`/`<=`/`>`/`>=` to its `cmp` (Ord); codegen emits the call. A struct compared with C
       // `==` would otherwise miscompile silently, so the method is required.
+      const bool ord = n->as.binary.op == LessThan || n->as.binary.op == LessThanEqual ||
+                       n->as.binary.op == GreaterThan || n->as.binary.op == GreaterThanEqual;
       const TypeId ls = l == TYPE_NONE ? TYPE_NONE : strip(t, l);
       const Ty *const lt = ls == TYPE_NONE ? NULL : ast_type_at(t->ast, ls);
       if (lt && (lt->kind == TYPE_STRUCT || lt->kind == TYPE_INSTANCE)) {
-        const bool ord = n->as.binary.op == LessThan || n->as.binary.op == LessThanEqual ||
-                         n->as.binary.op == GreaterThan || n->as.binary.op == GreaterThanEqual;
         ModuleId om;
         NodeId od;
         DefId gp[4];
@@ -1879,12 +1973,21 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
             typechecker_notef(t, "operator overloads are resolved through interface-style methods");
           } else if (!method_extend_bounds_hold(t, ls, md)) {
             err_method_extend_bounds(t, sp, ls, md);
+          } else {
+            const TypeId p1 = tc_method_param(t, ls, md, 1); // the RHS must match eq/cmp's `other` parameter
+            if (!operand_fits_param(t, p1, rn))
+              err_mismatch(t, rn, p1);
           }
         }
         return ast_builtin(BT_BOOL);
       }
-      if (lt && lt->kind == TYPE_GENERIC) // a bound `T: Eq`/`T: Ord`; verified at instantiation, codegen dispatches
+      if (lt && lt->kind == TYPE_GENERIC) { // requires a `T: Eq`/`T: Ord` bound; codegen dispatches at instantiation
+        if (!tc_param_bound_provides(t, lt->module, lt->as.decl, ord ? "cmp" : "eq"))
+          typechecker_errorf(t, sp.start, sp.end - sp.start,
+                             "type parameter has no '%s' method for this operator (add a `%s` bound)", ord ? "cmp" : "eq",
+                             ord ? "Ord" : "Eq");
         return ast_builtin(BT_BOOL);
+      }
       if (l != TYPE_NONE && r != TYPE_NONE && l != r && !compatible(t, l, rn) && !compatible(t, r, ln))
         err_mismatch(t, rn, l);
       return ast_builtin(BT_BOOL);
@@ -1924,14 +2027,16 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
     case NODE_INDEX:
     case NODE_MEMBER: {
       const NodeId obj = n->kind == NODE_INDEX ? n->as.index.object : n->as.member.object;
-      if (is_assignable(t, obj))
-        return true;
       // Indexing a writable slice (`[]mut T` -> SliceMut<T>) yields an assignable element, however the
       // slice was bound -- its mutability lives in the type, not the binding.
       if (n->kind == NODE_INDEX && slice_kind(t, ast_type(t->ast, obj), NULL) == 2)
         return true;
-      const Ty *const ot = ast_type_at(t->ast, ast_type(t->ast, obj)); // auto-deref through a mutable pointer
-      return (ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE) && ot->qualifier == TYPE_QUAL_MUT;
+      const Ty *const ot = ast_type_at(t->ast, ast_type(t->ast, obj));
+      // Auto-deref: when the base is a reference/pointer, write-through is governed by the POINTEE
+      // qualifier, not the binding -- a `let mut r: &T` may be rebound but `*r` / `r.f` stays read-only.
+      if (ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE)
+        return ot->qualifier == TYPE_QUAL_MUT;
+      return is_assignable(t, obj); // a value-typed place: writability flows from the base place
     }
     default:
       return false;
@@ -2867,9 +2972,45 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
   switch (n->kind) {
     case NODE_LITERAL:
       switch (n->as.literal.token_type) {
-        case IntegerLiteral: result = ast_builtin(BT_I32); break;
+        case IntegerLiteral: {
+          result = ast_builtin(BT_I32);
+          // Reject a literal that exceeds 64 bits: it has no representable type and would otherwise leak a
+          // confusing C-level "integer literal too large" error with no Super-C diagnostic.
+          const Span lr = n->as.literal.raw;
+          const uint8_t *p = t->source + lr.start;
+          size_t len = lr.end - lr.start;
+          unsigned base = 10;
+          if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'x') {
+            base = 16, p += 2, len -= 2;
+          } else if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'b') {
+            base = 2, p += 2, len -= 2;
+          } else if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'o') {
+            base = 8, p += 2, len -= 2;
+          }
+          uint64_t acc = 0;
+          bool overflow = false;
+          for (size_t i = 0; i < len && !overflow; i++) {
+            const uint8_t ch = p[i];
+            if (ch == '_')
+              continue;
+            const unsigned d = ch <= '9' ? (unsigned)(ch - '0') : (unsigned)((ch | 0x20) - 'a' + 10);
+            if (acc > (UINT64_MAX - d) / base)
+              overflow = true;
+            else
+              acc = acc * base + d;
+          }
+          if (overflow)
+            typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                               "integer literal is too large to fit in a 64-bit integer");
+          break;
+        }
         case FloatLiteral: result = ast_builtin(BT_F32); break; // default float; `compatible` still adapts it to f64
-        case CharacterLiteral: result = ast_builtin(BT_CHAR); break;
+        case CharacterLiteral:
+          result = ast_builtin(BT_CHAR);
+          if (char_literal_cp(t->source, n->as.literal.raw) > 0xFF) // `char` is one byte
+            typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                               "character literal does not fit in 'char' (one byte); use a string or an integer");
+          break;
         case ByteCharacterLiteral: result = ast_builtin(BT_U8); break;
         case True:
         case False: result = ast_builtin(BT_BOOL); break;
@@ -2999,6 +3140,9 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
               err_method_extend_bounds(t, sp, strip(t, obj), md);
               result = TYPE_NONE;
             } else {
+              const TypeId p1 = tc_method_param(t, strip(t, obj), md, 1); // the key must match `index`'s 2nd param
+              if (!operand_fits_param(t, p1, n->as.index.index))
+                err_mismatch(t, n->as.index.index, p1);
               result = tc_method_ret(t, strip(t, obj), md);
             }
           }
@@ -3327,9 +3471,32 @@ static int addr_escape(TypeChecker *t, NodeId e) {
   }
   if (n->kind != NODE_UNARY || n->as.unary.op != Ampersand)
     return 0;
-  if (ast_at_const(t->ast, n->as.unary.operand)->kind != NODE_IDENTIFIER)
-    return 0; // &x.field / &arr[i] / &*p -- a place expression, not a bare local slot
-  const DefId d = ast_resolution_def(t->ast, n->as.unary.operand);
+  // Walk to the place's base: a field of a value struct or an element of a value array shares storage with
+  // its base, so it dangles too; but a member/index reached THROUGH a pointer/reference/slice (or `&*p`)
+  // names storage that outlives the call, so it is safe.
+  NodeId place = n->as.unary.operand;
+  for (;;) {
+    const Node *const pn = ast_at_const(t->ast, place);
+    NodeId base;
+    if (pn->kind == NODE_MEMBER && !pn->as.member.path)
+      base = pn->as.member.object;
+    else if (pn->kind == NODE_INDEX)
+      base = pn->as.index.object;
+    else
+      break;
+    const TypeId bt = ast_type(t->ast, base);
+    const Ty *const btk = bt == TYPE_NONE ? NULL : ast_type_at(t->ast, bt);
+    if (!btk)
+      return 0;
+    if (btk->kind == TYPE_POINTER || btk->kind == TYPE_REFERENCE)
+      return 0; // behind an indirection -- outlives the call
+    if (pn->kind == NODE_INDEX && btk->kind != TYPE_ARRAY)
+      return 0; // indexing a slice/other -- the element outlives the call
+    place = base;
+  }
+  if (ast_at_const(t->ast, place)->kind != NODE_IDENTIFIER)
+    return 0; // &*p and other non-place roots
+  const DefId d = ast_resolution_def(t->ast, place);
   if (d.node == NODE_NONE || d.module != t->ast->module)
     return 0;
   switch (ast_at_const(t->ast, d.node)->kind) {

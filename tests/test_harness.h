@@ -49,6 +49,14 @@
 
 static int failures TH_UNUSED;
 
+// `failures` is shared across threads in the OpenMP-parallelized tests (raii_gen, codegen_run), so bump it
+// atomically there. Every non-OpenMP test compiles with _OPENMP undefined and gets a plain increment.
+#ifdef _OPENMP
+#  define TH_FAILURES_INC _Pragma("omp atomic") failures++
+#else
+#  define TH_FAILURES_INC failures++
+#endif
+
 // file:line + message, bumps `failures`. The whole suite's hard-assert primitive.
 #define CHECK(condition, ...)                                                                                          \
   do {                                                                                                                 \
@@ -56,7 +64,7 @@ static int failures TH_UNUSED;
       fprintf(stderr, "%s:%d: ", __FILE__, __LINE__);                                                                  \
       fprintf(stderr, __VA_ARGS__);                                                                                    \
       fputc('\n', stderr);                                                                                             \
-      failures++;                                                                                                      \
+      TH_FAILURES_INC;                                                                                                 \
     }                                                                                                                  \
   } while (0)
 
@@ -371,6 +379,20 @@ TH_UNUSED static char *sc_codegen(const char *name, const char *source, size_t *
   return r.code;
 }
 
+// Run a shell command, drain its stdout, and return its exit status (-1 if it didn't exit normally).
+// Used for the cc compile/link steps instead of system(): on macOS system() serializes across threads
+// (a process-wide lock), which would defeat OpenMP-parallelized tests -- popen() runs concurrently.
+TH_UNUSED static int th_run_cmd(const char *cmd) {
+  FILE *p = popen(cmd, "r");
+  if (!p)
+    return -1;
+  char buf[4096];
+  while (fread(buf, 1, sizeof buf, p) > 0) { /* discard stdout; the commands redirect stderr to a file */
+  }
+  const int st = pclose(p);
+  return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
 // Behavioral soundness driver: compile every .c in the already-emitted `build_dir` tree warning-clean
 // under the sanitizers, link, and run it. Returns 0 with stdout in `out` and the process exit code in
 // *exit_code; returns -1 (compile/link failed) with the compiler's stderr copied into `out`.
@@ -445,17 +467,23 @@ TH_UNUSED static int sc_run_built(const char *build_dir, char *out, const size_t
     char opath[96];
     snprintf(opath, sizeof opath, "/tmp/sc_ocache/%016llx.o", (unsigned long long)h);
     if (access(opath, F_OK) != 0) {
-      char cc[1024];
+      // Compile to a per-build temp, then atomically rename into the shared cache. When several threads
+      // (OpenMP-parallelized tests) or processes (`make -j`) build the byte-identical object at once,
+      // last-writer-wins on identical content -- a half-written .o can never be read by a parallel linker.
+      char tmpo[160], cc[1024];
+      snprintf(tmpo, sizeof tmpo, "%s/cache.tmp.o", build_dir);
       // -Wno-unused-function: a snippet may define a private helper it never calls (in multi-file output
       // such a fn is `static`, so it would warn -- the old single-TU emitted user fns non-static). All
       // other warnings stay hard errors, alongside the UBSan/ASan instrumentation.
       snprintf(cc, sizeof cc,
                "cc -std=c11 -Wall -Wextra -Werror -Wno-unused-function -fsanitize=undefined,address -c '%s' -o '%s' "
                "2>>'%s'",
-               line, opath, epath);
-      if (system(cc) != 0) {
+               line, tmpo, epath);
+      if (th_run_cmd(cc) != 0) {
         rc = -1;
         break;
+      }
+      if (rename(tmpo, opath) != 0) { /* a lost publish surfaces as a later link error */
       }
     }
     lat += (size_t)snprintf(link + lat, lat < sizeof link ? sizeof link - lat : 0, " '%s'", opath);
@@ -464,7 +492,7 @@ TH_UNUSED static int sc_run_built(const char *build_dir, char *out, const size_t
   if (rc == 0) {
     char lcmd[16800];
     snprintf(lcmd, sizeof lcmd, "cc -fsanitize=undefined,address%s -o '%s' 2>>'%s'", link, bpath, epath);
-    if (system(lcmd) != 0)
+    if (th_run_cmd(lcmd) != 0)
       rc = -1;
   }
   if (rc != 0) {
