@@ -28,13 +28,6 @@ cc path/to/build/**/*.c -o app   # compile the generated C (no -I needed; includ
 ./app
 ```
 
-Run with no arguments for a REPL that compiles one line at a time:
-
-```sh
-./super-c
-> fn main() i32 { return 21 + 21; }
-```
-
 The `std/` prelude (`String`, `str`, `Box`, `Option`, `Result`, `Vector`, slices) is auto-imported, so
 those types are in scope without any `import`.
 
@@ -358,18 +351,17 @@ make bench       # run the benchmarks
 Implemented and working: the full lexer→parser→resolver→typechecker→codegen pipeline, type inference,
 structs/methods/visibility, enums with payloads and pattern matching (including or-patterns and
 guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
-cross-module), interfaces with enforced generic bounds and method dispatch, non-capturing closures and
-function pointers, references/pointers/`new`, slices and arrays (including designated initializers),
-multi-return + tuple destructuring, `while` / `for` / `do`-`while`, `defer`, `static_assert`, `@c.*`
-attributes, the module system with an auto-imported `std` prelude, `extern "C"` FFI (custom header
-includes, variadics in both directions via `va_list`, `_Complex`), and `sizeof`.
+cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
+(`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), the `?` early-return operator, RAII-style
+automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
+use-after-free, and double-free prevention), non-capturing closures and function pointers,
+references/pointers/`new`, slices and arrays (including designated initializers), multi-return +
+tuple destructuring, `while` / `for` / `do`-`while`, `defer`, `static_assert`, `@c.*` attributes, the
+module system with an auto-imported `std` prelude, `extern "C"` FFI (custom header includes, variadics
+in both directions via `va_list`, `_Complex`), and `sizeof`.
 
 Planned / not yet implemented:
 
-* RAII-style automatic cleanup (a `Free` trait invoked at scope exit; `defer` is the manual form today)
-* move/borrow analysis and double-free prevention
-* capturing closures
-* the `?` early-return operator
-* operator overloading via traits
+* capturing closures (closures are non-capturing today)
 * dynamic dispatch / trait objects — **TBD / undecided**: heterogeneous collections + open extension
   across modules.
