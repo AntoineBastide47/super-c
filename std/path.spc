@@ -56,11 +56,18 @@ extend Path {
 
     pub fn file_name(self: &Path) str {
         let s = self.inner[0].as_str();
-        let i = self.inner[0].rfind("/");
-        if i == self.inner[0].len() {
-            return s;
+        let mut end = s.len; // drop trailing '/' so "src/" yields "src", not ""
+        while end > 0 && s.byte_at(end - 1) == 47 {
+            end = end - 1;
         }
-        return s.slice(i + 1, s.len);
+        let mut i = end;
+        while i > 0 {
+            i = i - 1;
+            if s.byte_at(i) == 47 {
+                return s.slice(i + 1, end);
+            }
+        }
+        return s.slice(0, end);
     }
 
     pub fn parent(self: &Path) Path {
@@ -73,11 +80,17 @@ extend Path {
 
     pub fn extension(self: &Path) str {
         let name = self.file_name();
-        let dot = name.find_byte(46);
-        if dot < 0 {
-            return str::default();
+        let mut i = name.len; // the LAST '.', so "archive.tar.gz" -> "gz"
+        while i > 0 {
+            i = i - 1;
+            if name.byte_at(i) == 46 {
+                if i == 0 {
+                    return str::default(); // a leading-dot dotfile (".gitignore") has no extension
+                }
+                return name.slice(i + 1, name.len);
+            }
         }
-        return name.slice((dot as usize) + 1, name.len);
+        return str::default();
     }
 }
 

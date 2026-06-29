@@ -186,3 +186,57 @@ extend<K: Hash + Eq + Default, V: Default, A: Allocator + Default> Map<K, V, A> 
         return Map::<K, V, A>::new();
     }
 }
+
+// Borrowing cursors over a Map. `for k in m.keys()` / `for v in m.values()` visit each occupied entry
+// (in arbitrary slot order). Each borrows the Map, which must outlive the iteration.
+pub struct MapKeys<K> {
+    pub keys: *const K,
+    pub used: *const u8,
+    pub idx: usize,
+    pub cap: usize,
+}
+
+pub struct MapValues<V> {
+    pub vals: *const V,
+    pub used: *const u8,
+    pub idx: usize,
+    pub cap: usize,
+}
+
+extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
+    // A cursor over the keys (`&K`).
+    pub fn keys(self: &Map<K, V, A>) MapKeys<K> {
+        return MapKeys::<K> { keys: self.keys as *const K, used: self.used as *const u8, idx: 0, cap: self.cap };
+    }
+
+    // A cursor over the values (`&V`).
+    pub fn values(self: &Map<K, V, A>) MapValues<V> {
+        return MapValues::<V> { vals: self.vals as *const V, used: self.used as *const u8, idx: 0, cap: self.cap };
+    }
+}
+
+extend<K> MapKeys<K> as Iterator<&K> {
+    pub fn next(self: &mut MapKeys<K>) Option<&K> {
+        while self.idx < self.cap {
+            let i = self.idx;
+            self.idx = self.idx + 1;
+            if self.used[i] != 0 {
+                return Option::<&K>::Some(&self.keys[i]);
+            }
+        }
+        return Option::<&K>::None;
+    }
+}
+
+extend<V> MapValues<V> as Iterator<&V> {
+    pub fn next(self: &mut MapValues<V>) Option<&V> {
+        while self.idx < self.cap {
+            let i = self.idx;
+            self.idx = self.idx + 1;
+            if self.used[i] != 0 {
+                return Option::<&V>::Some(&self.vals[i]);
+            }
+        }
+        return Option::<&V>::None;
+    }
+}

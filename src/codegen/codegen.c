@@ -2660,6 +2660,14 @@ static void emit_ident_ref(Codegen *c, const NodeId id, const Node *n) {
       emit_cstr(c, nm);
       return;
     }
+    if (dn->kind == NODE_CONST && dn->as.const_def.is_extern) {
+      char ov[160]; // extern const: emit the real C macro name (e.g. O_RDONLY) from the backing header
+      if (cg_symbol_override(c, d.module, d.node, ov, sizeof ov))
+        emit_cstr(c, ov);
+      else
+        emit_ident_mod(c, d.module, dn->as.const_def.name);
+      return;
+    }
     if (dn->kind == NODE_CONST && (!c->mangle || decl_is_toplevel(c, d.module, d.node))) {
       char nm[160]; // top-level const -> its mangled name (matches the mangled definition); locals stay bare
       render_qualified(c, d.module, dn->as.const_def.name, nm, sizeof nm);
@@ -3018,7 +3026,13 @@ static void emit_expr(Codegen *c, const NodeId id) {
         if (d.node == NODE_NONE)
           d = ast_resolution_def(c->ast, n->as.member.member); // local Type::Variant records on the member
         const Node *const dn = d.node != NODE_NONE ? ast_at_const(cg_mod_ast(c, d.module), d.node) : NULL;
-        if (dn && dn->kind == NODE_CONST) {
+        if (dn && dn->kind == NODE_CONST && dn->as.const_def.is_extern) {
+          char ov[160]; // extern const: the real C macro name from the backing header, not a mangled symbol
+          if (cg_symbol_override(c, d.module, d.node, ov, sizeof ov))
+            emit_cstr(c, ov);
+          else
+            emit_ident_mod(c, d.module, dn->as.const_def.name);
+        } else if (dn && dn->kind == NODE_CONST) {
           char nm[160];
           render_qualified(c, d.module, dn->as.const_def.name, nm, sizeof nm);
           emit_cstr(c, nm);
@@ -5829,6 +5843,15 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
       render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
       const bool stat = c->multifile && !mn->as.function.is_public;
       if (mn->as.function.generics.len == 0) { // ordinary method: one spec per instance
+        // Demand-driven emission: an INHERENT method (itrait unset) of a non-`@emit_macro` type that the
+        // type-checker never resolved is dead -- skip it (no call site can reference it, so this is sound).
+        // Conformance methods (reached via operators / RAII / a generic bound) and `@emit_macro` types
+        // (full C-reuse export) always emit. Single-file builds (no package) emit everything.
+        if (c->multifile && itrait.node == NODE_NONE && !cg_attr(c, c->ast->module, it->decl, ATTR_EMIT_MACRO) &&
+            !package_method_used(c->package, (DefId){c->ast->module, mids[j]})) {
+          c->nsubst = 0;
+          continue;
+        }
         emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, nm, stat);
         c->nsubst = 0;
         continue;
@@ -7321,6 +7344,141 @@ static void emit_referenced_includes(Codegen *c) {
   free(want);
 }
 
+// Mark the module whose COMPLETE type a by-value field/array/payload of resolved type `ft` needs. A
+// pointer/reference (and the box/slice indirections that lower to one) needs only a forward declaration,
+// so it marks nothing. This drives a HEADER's #includes purely from layout: a header pulls another
+// module's full `.h` only when it lays a type out by value, never for a prototype's by-value return/param
+// (legal C with an incomplete type). That is what stops two Super-C modules that name each other --
+// `option` lays out `Option<str>` (needs `str`), `str` only returns `Option<..>` from prototypes -- from
+// forming a generated C header cycle: `option.h` includes `str.h`, but `str.h` forward-declares `Option`.
+static void mark_layout_module(Codegen *c, const TypeId ft, bool *const want, const size_t nmod) {
+  if (ft == TYPE_NONE)
+    return;
+  TypeId cft = subst_resolve(c, ft);
+  const Ty *y = ast_type_at(c->ast, cft);
+  while (y->kind == TYPE_ARRAY) { // an array embeds its element by value
+    cft = y->as.elem;
+    y = ast_type_at(c->ast, cft);
+  }
+  const ModuleId cur = c->ast->module;
+  if (y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM) {
+    if (y->module != cur && y->module < nmod && package_builtin_of_decl(c->package, y->module, y->as.decl) < 0)
+      want[y->module] = true;
+  } else if (y->kind == TYPE_INSTANCE) {
+    const TyInstance *const it = ast_instance(c->ast, y->as.inst);
+    const ModuleId home = package_instance_home(c->package, c->ast, it); // the instance body lives in its home
+    if (home != cur && home < nmod)
+      want[home] = true;
+  }
+}
+
+// Walk the by-value fields/payloads of one (possibly generic, under `subst`) aggregate decl, marking the
+// modules their layout needs. Shared by a module's own non-generic types and its materialized instances.
+static void mark_aggregate_layout(Codegen *c, const Node *const dn, bool *const want, const size_t nmod) {
+  const NodeList ms = dn->as.aggregate.members;
+  const NodeId *const mids = ast_list(c->ast, ms);
+  for (uint32_t m = 0; m < ms.len; m++) {
+    const Node *const mn = ast_at_const(c->ast, mids[m]);
+    if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
+      mark_layout_module(c, ast_type(c->ast, mn->as.field.type), want, nmod);
+    } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
+      const NodeList pl = mn->as.variant.payload;
+      const NodeId *const plids = ast_list(c->ast, pl);
+      for (uint32_t k = 0; k < pl.len; k++) {
+        const Node *const pf = ast_at_const(c->ast, plids[k]);
+        mark_layout_module(c, ast_type(c->ast, pf->kind == NODE_FIELD ? pf->as.field.type : plids[k]), want, nmod);
+      }
+    }
+  }
+}
+
+// A module's public HEADER #includes: only the modules whose complete types this header lays out by value
+// (its own non-generic aggregates, the generic instances materialized here, multi-return bundles, and
+// by-value consts). Everything else a header names -- prototype params/returns, pointer/reference fields --
+// is satisfied by the forward declarations emitted just above (emit_referenced_fwd) and by the full
+// includes in the .c. Restricting header includes to layout needs is what keeps mutually-importing modules
+// (option <-> str) from forming a C include cycle while still completing every by-value field.
+static void emit_header_includes(Codegen *c) {
+  const size_t nmod = c->package->count;
+  const ModuleId cur = c->ast->module;
+  bool *const want = calloc(nmod ? nmod : 1, sizeof *want);
+  if (!want)
+    return;
+  const int saved = c->nsubst;
+  c->nsubst = 0;
+  bool pub_const_expr = false; // a public const whose initializer (emitted verbatim in the header) is more
+  const NodeList items = program_items(c); // than a bare literal -- it may name a cross-module type/value
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    if ((n->kind == NODE_STRUCT || n->kind == NODE_ENUM) && n->as.aggregate.generics.len == 0) {
+      mark_aggregate_layout(c, n, want, nmod); // this module's own concrete struct/enum bodies
+    } else if (n->kind == NODE_FUNCTION && n->as.function.returns.len > 1) {
+      const NodeId *const rids = ast_list(c->ast, n->as.function.returns); // multi-return bundle struct
+      for (uint32_t r = 0; r < n->as.function.returns.len; r++) {
+        const Node *const rn = ast_at_const(c->ast, rids[r]);
+        mark_layout_module(c, ast_type(c->ast, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rids[r]), want, nmod);
+      }
+    } else if (n->kind == NODE_CONST && !n->as.const_def.is_extern) {
+      mark_layout_module(c, ast_type(c->ast, n->as.const_def.type), want, nmod);
+      if (n->as.const_def.is_public && n->as.const_def.value != NODE_NONE &&
+          ast_at_const(c->ast, n->as.const_def.value)->kind != NODE_LITERAL)
+        pub_const_expr = true; // e.g. `pub const N: usize = sizeof(other::T);` -- needs other complete here
+    }
+  }
+  for (size_t i = 0; i < c->ast->instances.len; i++) { // generic instances materialized in THIS header
+    const TyInstance it = c->ast->instances.data[i];
+    bool concrete = it.module < nmod || it.module == cur;
+    for (uint8_t k = 0; k < it.n && concrete; k++)
+      concrete = type_is_concrete(c, it.args[k]);
+    if (!concrete || package_instance_home(c->package, c->ast, &c->ast->instances.data[i]) != cur)
+      continue; // not materialized here -> only forward-declared, so no layout include
+    if (it.module == cur) { // same-module generic: walk its decl fields under this instance's args
+      const Node *const dn = ast_at_const(c->ast, it.decl);
+      const NodeList gens = dn->as.aggregate.generics;
+      const NodeId *const gids = ast_list(c->ast, gens);
+      c->nsubst = 0;
+      for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
+        c->subst[c->nsubst].param = (DefId){it.module, gids[g]};
+        c->subst[c->nsubst].concrete = it.args[g];
+        c->nsubst++;
+      }
+      mark_aggregate_layout(c, dn, want, nmod);
+      c->nsubst = 0;
+    } else { // re-homed instance owned elsewhere (only ever a std generic over a user type, so no prelude
+      // cycle): needs the owner's full header for the instance's internal by-value types -- the shared tag
+      // enum of a payload enum, a String's `StringRepr` union -- plus the modules of its concrete args.
+      if (it.module != cur && it.module < nmod)
+        want[it.module] = true;
+      for (uint8_t k = 0; k < it.n; k++)
+        mark_layout_module(c, it.args[k], want, nmod);
+    }
+  }
+  c->nsubst = saved;
+  // A public const initializer beyond a literal is emitted verbatim into the header and may reference a
+  // cross-module type (`sizeof(other::T)` -> needs the complete type) or value (`other::X` -> needs its
+  // declaration). These are not by-value layout fields, so pull in every module this one references (the
+  // same set the .c uses). Gated on such a const existing, so the common layout-only path is unaffected.
+  if (pub_const_expr) {
+    for (size_t i = 0; i < c->ast->resolutions.len; i++) {
+      const DefId d = c->ast->resolutions.data[i];
+      if (d.node == NODE_NONE || d.module == cur || d.module >= nmod || cg_decl_is_interface_member(c, d.module, d.node))
+        continue;
+      want[d.module] = true;
+    }
+    for (size_t i = 0; i < c->ast->type_pool.len; i++) {
+      const Ty t = c->ast->type_pool.data[i];
+      if ((t.kind == TYPE_STRUCT || t.kind == TYPE_ENUM) && t.module != cur && t.module < nmod &&
+          package_builtin_of_decl(c->package, t.module, t.as.decl) < 0)
+        want[t.module] = true;
+    }
+  }
+  for (size_t m = 0; m < nmod; m++)
+    if (m != cur && want[m])
+      emit_modpath_include(c, c->package->modules[m].path);
+  free(want);
+}
+
 // Emit `#include` for each `extern "C" "<header>" { .. }` backing header in this module, so bindings to
 // non-standard / third-party / local C headers resolve (standard headers are auto-included via super_rt).
 // A leading '.' or '/' (relative or absolute path) -> a quote include; anything else -> a system include.
@@ -7391,7 +7549,7 @@ void codegen_emit_header(Codegen *c, FILE *out) {
   emit(c, "super_rt.h\"\n");
   emit_extern_includes(c);     // backing C headers named by this module's `extern "C" "..."` blocks
   emit_referenced_fwd(c);      // forward-decl referenced cross-module structs (breaks mutual include cycles)
-  emit_referenced_includes(c); // headers of the modules this one's public signatures / types name
+  emit_header_includes(c);     // full headers ONLY for types this header lays out by value (no cycles)
   emit(c, "\n");
   phase_forward(c);
   emit(c, "\n");

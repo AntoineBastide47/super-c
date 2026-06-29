@@ -86,6 +86,7 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     pub fn set(self: &mut Vector<T, A>, index: usize, value: T) {
+        self.ptr[index].free(); // free the replaced element (no-op if T isn't Free), like Map::insert
         self.ptr[index] = value;
     }
 
@@ -185,22 +186,24 @@ extend<T, A: Allocator> Vector<T, A> {
         }
     }
 
-    // A new vector (same allocator) with `f` applied to every element.
-    pub fn map<U>(self: &Vector<T, A>, f: fn(T) U) Vector<U, A> {
+    // A new vector (same allocator) with `f` applied to every element. `f` BORROWS each element (`&T`): this
+    // map reads `self` and leaves it owning its elements, so it must not consume them (passing a Free element
+    // by value would free the Vector's still-owned copy).
+    pub fn map<U>(self: &Vector<T, A>, f: fn(&T) U) Vector<U, A> {
         let mut out = Vector::<U, A>::with_capacity_in(self.alloc, self.len);
         let mut i: usize = 0;
         while i < self.len {
-            out.push(f(self.ptr[i]));
+            out.push(f(self.at(i)));
             i = i + 1;
         }
         return out;
     }
 
-    // A borrow of the first element matching `pred`, or `None`.
-    pub fn find(self: &Vector<T, A>, pred: fn(T) bool) Option<&T> {
+    // A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
+    pub fn find(self: &Vector<T, A>, pred: fn(&T) bool) Option<&T> {
         let mut i: usize = 0;
         while i < self.len {
-            if pred(self.ptr[i]) {
+            if pred(self.at(i)) {
                 return Option::<&T>::Some(&self.ptr[i]);
             }
             i = i + 1;
@@ -208,14 +211,19 @@ extend<T, A: Allocator> Vector<T, A> {
         return Option::<&T>::None;
     }
 
-    // Keep only the elements matching `pred` (in place, preserving order).
-    pub fn retain(self: &mut Vector<T, A>, pred: fn(T) bool) {
+    // Keep only the elements matching `pred` (in place, preserving order). `pred` borrows (`&T`); rejected
+    // elements are freed (no-op when T isn't Free) so nothing leaks.
+    pub fn retain(self: &mut Vector<T, A>, pred: fn(&T) bool) {
         let mut w: usize = 0;
         let mut i: usize = 0;
         while i < self.len {
-            if pred(self.ptr[i]) {
-                self.ptr[w] = self.ptr[i];
+            if pred(&self.ptr[i]) {
+                if w != i {
+                    self.ptr[w] = self.ptr[i];
+                }
                 w = w + 1;
+            } else {
+                self.ptr[i].free();
             }
             i = i + 1;
         }
@@ -251,6 +259,105 @@ extend<T, A: Allocator> Vector<T, A> as Free {
 // Standard-interface conformances.
 extend<T, A: Allocator + Default> Vector<T, A> as Default {
     pub fn default() Vector<T, A> { return Vector::<T, A>::new(); }
+}
+
+// Equality-based algorithms (available when the element type is `Eq`).
+extend<T: Eq, A: Allocator> Vector<T, A> {
+    // True if any element equals `x` (per `Eq`); O(n) linear scan.
+    pub fn contains(self: &Vector<T, A>, x: &T) bool {
+        let mut i: usize = 0;
+        while i < self.len {
+            if self.ptr[i].eq(x) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    // Index of the first element equal to `x`, or `None`.
+    pub fn position(self: &Vector<T, A>, x: &T) Option<usize> {
+        let mut i: usize = 0;
+        while i < self.len {
+            if self.ptr[i].eq(x) { return Option::<usize>::Some(i); }
+            i = i + 1;
+        }
+        return Option::<usize>::None;
+    }
+
+    // Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
+    // are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
+    pub fn dedup(self: &mut Vector<T, A>) {
+        if self.len < 2 { return; }
+        let mut w: usize = 1;
+        let mut r: usize = 1;
+        while r < self.len {
+            if self.ptr[r].eq(&self.ptr[w - 1]) {
+                self.ptr[r].free();
+            } else {
+                self.ptr[w] = self.ptr[r];
+                w = w + 1;
+            }
+            r = r + 1;
+        }
+        self.len = w;
+    }
+}
+
+// Order-based algorithms (available when the element type is `Ord`).
+extend<T: Ord, A: Allocator> Vector<T, A> {
+    // True if the elements are in non-decreasing order (per `Ord`).
+    pub fn is_sorted(self: &Vector<T, A>) bool {
+        if self.len < 2 { return true; }
+        let mut i: usize = 0;
+        while i + 1 < self.len {
+            if self.ptr[i].cmp(&self.ptr[i + 1]) > 0 { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    // Binary search of a sorted vector: `Ok(i)` where an equal element lives, or `Err(i)` the index a
+    // missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
+    pub fn binary_search(self: &Vector<T, A>, x: &T) Result<usize, usize> {
+        let mut lo: usize = 0;
+        let mut hi: usize = self.len;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let c = self.ptr[mid].cmp(x);
+            if c == 0 { return Result::<usize, usize>::Ok(mid); }
+            if c < 0 { lo = mid + 1; } else { hi = mid; }
+        }
+        return Result::<usize, usize>::Err(lo);
+    }
+
+    // Restore the max-heap property at `root` over the prefix `[0, end)` by sifting it down.
+    fn sift_down(self: &mut Vector<T, A>, root: usize, end: usize) {
+        let mut r = root;
+        let mut child = 2 * r + 1;
+        while child < end {
+            if child + 1 < end && self.ptr[child].cmp(&self.ptr[child + 1]) < 0 { child = child + 1; }
+            if self.ptr[r].cmp(&self.ptr[child]) >= 0 { return; }
+            self.swap(r, child);
+            r = child;
+            child = 2 * r + 1;
+        }
+    }
+
+    // Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
+    pub fn sort(self: &mut Vector<T, A>) {
+        let n = self.len;
+        if n < 2 { return; }
+        let mut start = n / 2;
+        while start > 0 {
+            start = start - 1;
+            self.sift_down(start, n);
+        }
+        let mut end = n;
+        while end > 1 {
+            end = end - 1;
+            self.swap(0, end);
+            self.sift_down(0, end);
+        }
+    }
 }
 
 // A borrowing cursor over a Vector's elements. `for x in v.iter()` yields a borrow `&T` of each element.

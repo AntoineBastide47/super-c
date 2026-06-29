@@ -275,7 +275,7 @@ static void test_emit_macro_export(void) {
 // unbounded one, instantiated over a type that does NOT satisfy the bound. The bounded block's methods must
 // not be specialized for it (their bodies would call an unprovided method -> an undefined symbol); only the
 // unbounded block emits. This is what lets a stateful (non-Default) allocator skip a `Default`-bounded ctor.
-static void test_per_impl_bound_filtering(void) {
+static void test_per_extend_bound_filtering(void) {
   char root[4112], spc[4170], cmd[8320], buf[256];
   snprintf(root, sizeof root, "%s/pibf", DIR);
   mkfile(root, "pibf.spc",
@@ -295,6 +295,122 @@ static void test_per_impl_bound_filtering(void) {
   CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "the unsatisfied bounded block emits nothing (no undefined ref): %s", buf);
   snprintf(crun, sizeof crun, "'%s'", bin);
   CHECK(run_cmd(crun, NULL, 0) == 7, "the unbounded method still runs");
+}
+
+// A non-Default allocator must still get all String<A> methods/conformances that only need an explicit or
+// stored allocator. This is a CLI multi-file regression: the generated C must declare/emit the specialized
+// String__RawAlloc methods and compile warning-clean without a sentinel `RawAlloc: Default` extension.
+static void test_string_non_default_allocator(void) {
+  char root[4112], spc[4170], cmd[8320], buf[1024];
+  snprintf(root, sizeof root, "%s/strnd", DIR);
+  mkfile(root, "main.spc",
+         "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }\n"
+         "struct RawAlloc {}\n"
+         "extend RawAlloc as Allocator {\n"
+         "  fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return malloc(n); }\n"
+         "  fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return realloc(p, n); }\n"
+         "  fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) void { free(p); }\n"
+         "}\n"
+         "fn main() i32 {\n"
+         "  let a = RawAlloc {};\n"
+         "  let mut s = String::<RawAlloc>::from_str_in(a, \"abcdefghijklmnopqrstuvwxyz\");\n"
+         "  s.push_str(\"0123456789\");\n"
+         "  let mut c = s.clone();\n"
+         "  let mut f = s.fmt();\n"
+         "  let ok = s.eq_str(\"abcdefghijklmnopqrstuvwxyz0123456789\") && s.cmp(&c) == 0 && s.hash() == c.hash() && f.len() == s.len();\n"
+         "  f.free(); c.free(); s.free();\n"
+         "  if ok { exit(42); } exit(1);\n"
+         "}\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "String<RawAlloc> without Default compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/strnd.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "String<RawAlloc> generated C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 42, "String<RawAlloc> construct/grow/clone/compare/hash/format/free works");
+}
+
+// Eager emission is allowed, but generated C must remain warning-clean under -Wunused-function: generic
+// methods, inherited default methods and private functions may be omitted or explicitly marked unused.
+static void test_warning_clean_unused_emission(void) {
+  char root[4112], spc[4170], cmd[8320], buf[1024];
+  snprintf(root, sizeof root, "%s/unused", DIR);
+  mkfile(root, "main.spc",
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn unused_private() i32 { return 99; }\n"
+         "interface I { fn value(self: &Self) i32; fn unused_default(self: &Self) i32 { return 123; } }\n"
+         "struct S { pub x: i32 }\n"
+         "extend S as I { fn value(self: &Self) i32 { return self.x; } }\n"
+         "struct Wrap<T> { pub v: T }\n"
+         "extend<T> Wrap<T> {\n"
+         "  fn get(self: &Self) T { return self.v; }\n"
+         "  fn unused_method(self: &Self) T { return self.v; }\n"
+         "}\n"
+         "fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; exit(s.value() + w.get()); }\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "unused-emission regression source compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/unused.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "unused generated functions are warning-clean: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 42, "unused-emission regression program runs");
+}
+
+// A trivial app should not dump the whole std prelude tree. It may emit runtime support it actually uses,
+// but unrelated heavy prelude modules such as Vector/Map/String should not be written.
+static void test_prelude_output_is_demand_driven(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/simpleout", DIR);
+  mkfile(root, "main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { exit(42); }\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "trivial CLI source compiles: %s", buf);
+  char path[4200];
+  snprintf(path, sizeof path, "%s/build/__std/vector.c", root);
+  CHECK(access(path, F_OK) != 0, "trivial output should not emit unused std vector.c");
+  snprintf(path, sizeof path, "%s/build/__std/map.c", root);
+  CHECK(access(path, F_OK) != 0, "trivial output should not emit unused std map.c");
+  snprintf(path, sizeof path, "%s/build/__std/string.c", root);
+  CHECK(access(path, F_OK) != 0, "trivial output should not emit unused std string.c");
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/simpleout.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "trivial demand-driven output C compiles: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 42, "trivial demand-driven output runs");
+}
+
+// Cross-module re-homed generic instances must discover by-value nested generic fields before emission.
+// `Outer<Bar>` lives in the user module and contains `Inner<Bar>` by value; both specializations must be
+// re-homed and emitted in dependency order, otherwise C sees an incomplete by-value field.
+static void test_cross_module_nested_rehomed_instance(void) {
+  char root[4112], spc[4170], cmd[8320], buf[1024];
+  snprintf(root, sizeof root, "%s/nested", DIR);
+  mkfile(root, "lib/lib.spc",
+         "pub struct Inner<T> { pub value: T }\n"
+         "pub struct Outer<T> { pub inner: Inner<T> }\n"
+         "extend<T> Outer<T> { pub fn get(self: &Self) T { return self.inner.value; } }\n");
+  mkfile(root, "main.spc",
+         "import lib::lib;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "struct Bar { pub x: i32 }\n"
+         "fn main() i32 {\n"
+         "  let o = lib::lib::Outer::<Bar> { inner: lib::lib::Inner::<Bar> { value: Bar { x: 42 } } };\n"
+         "  exit(o.get().x);\n"
+         "}\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module nested generic source compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/nested.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "cross-module nested generic generated C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 42, "cross-module nested re-homed generic instance runs");
 }
 
 // A `pub interface` declared in one module, then implemented over a local type via `extend T as
@@ -493,7 +609,11 @@ int main(void) {
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();
   test_emit_macro_export();
-  test_per_impl_bound_filtering();
+  test_per_extend_bound_filtering();
+  test_string_non_default_allocator();
+  test_warning_clean_unused_emission();
+  test_prelude_output_is_demand_driven();
+  test_cross_module_nested_rehomed_instance();
   test_cross_module_interface();
   test_ffi_bindings();
   test_module_imports();

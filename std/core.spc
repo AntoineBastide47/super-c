@@ -413,7 +413,7 @@ extend c64 as Free {
 extend c64 as Copy {}
 
 extend i8 {
-    pub fn abs(self: i8) i8 { if self < 0 { return 0 - self; } return self; }
+    pub fn abs(self: i8) i8 { if self < 0 { return (0 - (self as u8)) as i8; } return self; } // unsigned negate: no MIN overflow
     pub fn signum(self: i8) i8 { if self < 0 { return -1; } if self > 0 { return 1; } return 0; }
     pub fn is_positive(self: i8) bool { return self > 0; }
     pub fn is_negative(self: i8) bool { return self < 0; }
@@ -423,7 +423,7 @@ extend i8 {
 }
 
 extend i16 {
-    pub fn abs(self: i16) i16 { if self < 0 { return 0 - self; } return self; }
+    pub fn abs(self: i16) i16 { if self < 0 { return (0 - (self as u16)) as i16; } return self; } // unsigned negate: no MIN overflow
     pub fn signum(self: i16) i16 { if self < 0 { return -1; } if self > 0 { return 1; } return 0; }
     pub fn is_positive(self: i16) bool { return self > 0; }
     pub fn is_negative(self: i16) bool { return self < 0; }
@@ -433,7 +433,7 @@ extend i16 {
 }
 
 extend i32 {
-    pub fn abs(self: i32) i32 { if self < 0 { return 0 - self; } return self; }
+    pub fn abs(self: i32) i32 { if self < 0 { return (0 - (self as u32)) as i32; } return self; } // unsigned negate: no MIN overflow
     pub fn signum(self: i32) i32 { if self < 0 { return -1; } if self > 0 { return 1; } return 0; }
     pub fn is_positive(self: i32) bool { return self > 0; }
     pub fn is_negative(self: i32) bool { return self < 0; }
@@ -443,7 +443,7 @@ extend i32 {
 }
 
 extend i64 {
-    pub fn abs(self: i64) i64 { if self < 0 { return 0 - self; } return self; }
+    pub fn abs(self: i64) i64 { if self < 0 { return (0 - (self as u64)) as i64; } return self; } // unsigned negate: no MIN overflow
     pub fn signum(self: i64) i64 { if self < 0 { return -1; } if self > 0 { return 1; } return 0; }
     pub fn is_positive(self: i64) bool { return self > 0; }
     pub fn is_negative(self: i64) bool { return self < 0; }
@@ -453,7 +453,7 @@ extend i64 {
 }
 
 extend isize {
-    pub fn abs(self: isize) isize { if self < 0 { return 0 - self; } return self; }
+    pub fn abs(self: isize) isize { if self < 0 { return (0 - (self as usize)) as isize; } return self; } // unsigned negate: no MIN overflow
     pub fn signum(self: isize) isize { if self < 0 { return -1; } if self > 0 { return 1; } return 0; }
     pub fn is_positive(self: isize) bool { return self > 0; }
     pub fn is_negative(self: isize) bool { return self < 0; }

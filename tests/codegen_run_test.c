@@ -772,8 +772,6 @@ static void test_custom_allocator(void) {
 // realloc copy), and its `dealloc` is a no-op because the arena reclaims everything at once. Exercised across
 // Vector (forces realloc growth), Box, Map, Set and a heap String through `new_in`/`from_str_in` -- the String
 // stores the handle outside its SSO union and grows through it -- then released en masse. ASan-clean.
-// (The handle also implements `Default` -- a never-called null sentinel -- because the re-homed macro path
-// emits the default-constructible `new()`/`with_capacity()` unconditionally.)
 static void test_stateful_allocator(void) {
   sc_run_program(
       "stateful bump-arena allocator stored in Vector/Box/Map/Set (sized + aligned)",
@@ -800,7 +798,6 @@ static void test_stateful_allocator(void) {
           "  }\n"
           "  fn dealloc(self: &mut ArenaRef, ptr: *mut void, size: usize, align: usize) void { }\n" // reclaimed en masse
           "}\n"
-          "extend ArenaRef as Default { fn default() ArenaRef { return ArenaRef { a: null, }; } }\n"
           "fn main() i32 {\n"
           "  let mut arena = Arena::make(8192);\n"
           "  let h = arena.handle();\n"
@@ -1073,8 +1070,8 @@ static void test_std_types(void) {
   // Vector insert/remove/swap_remove/reverse/find/retain/map.
   sc_run_program(
       "std Vector mutators + map/find",
-      PRE "fn dbl(x: i32) i32 { return x * 2; }\n"
-          "fn even(x: i32) bool { return x % 2 == 0; }\n"
+      PRE "fn dbl(x: &i32) i32 { return *x * 2; }\n"
+          "fn even(x: &i32) bool { return *x % 2 == 0; }\n"
           "fn main() i32 { let mut v: Vector<i32> = Vector::<i32>::new();\n"
           "  v.push(1); v.push(2); v.push(3); v.push(4);\n"     // [1,2,3,4]
           "  v.insert(0, 9);\n"                                  // [9,1,2,3,4]
@@ -1132,8 +1129,8 @@ static void test_closures(void) {
           "  let v1: i32 = o.map(|x: i32| x + 1).unwrap_or(0);\n"    // 21
           "  let mut vec: Vector<i32> = Vector::<i32>::new();\n"
           "  vec.push(1); vec.push(2); vec.push(3); vec.push(4);\n"
-          "  let fd: i32 = *vec.find(|x: i32| x > 2).unwrap_or(&0);\n" // 3 (find borrows -> &i32)
-          "  let mut d: Vector<i32> = vec.map(|x: i32| x * 2);\n"    // [2,4,6,8]
+          "  let fd: i32 = *vec.find(|x: &i32| *x > 2).unwrap_or(&0);\n" // 3 (find borrows -> &i32)
+          "  let mut d: Vector<i32> = vec.map(|x: &i32| *x * 2);\n"    // [2,4,6,8]
           "  let s: i32 = *d.at(0) + *d.at(2) + *d.at(3);\n"        // 2+6+8 = 16 (at borrows)
           "  vec.free(); d.free();\n"
           "  exit(v1 + fd + s + 2); }\n",                            // 21+3+16+2 = 42

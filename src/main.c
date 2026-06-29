@@ -259,6 +259,10 @@ static int run_package(Package *p) {
   bool err = false;
   bool *const live = compute_emit_live(p);
   ModuleId *const order = malloc((p->count ? p->count : 1) * sizeof *order);
+  if (!order) { // OOM: package_emit_order writes through `order` -- bail with an error instead of segfaulting
+    free(live);
+    return 1;
+  }
   package_emit_order(p, order); // dependency-first: a generic's owner is emitted before any user module
   for (size_t oi = 0; oi < p->count; oi++) {        // that re-homes its instances (see package_emit_order)
     const ModuleId i = order[oi];
