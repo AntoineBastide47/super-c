@@ -1754,6 +1754,25 @@ static void test_bug_regressions(void) {
       PRE "fn pick(r: Result<i32, i32>) i32 { return switch r { Ok(v) | Err(v) => v, }; }\n"
           "fn main() i32 { if pick(Result::<i32, i32>::Ok(42)) != 42 { return 1; } return 0; }\n",
       0, "");
+  // Type-emission ordering: a struct embedding a generic instance over a user type BY VALUE needs that
+  // instance's full body emitted first. `Bag` embeds `Vector<Item>` (re-homed here, generic owner is std) and
+  // `Maybe` embeds `Option<Pt>` which itself embeds `Pt` by value -- so both the struct->instance and the
+  // instance->user-type layout edges must be ordered, or the generated C is an incomplete-type error (caught
+  // by the harness's -Werror compile). Pre-fix: `Bag`/`Maybe` were emitted before the instances they contain.
+  sc_run_program("by-value instance field ordered before its struct",
+      PRE "struct Item { pub v: i32 }\n"
+          "struct Bag { pub items: Vector<Item> }\n"
+          "extend Bag as Free { fn free(self: &mut Bag) { self.items.free(); } }\n"
+          "struct Pt { pub x: i32 }\n"
+          "struct Maybe { pub slot: Option<Pt> }\n"
+          "fn main() i32 {\n"
+          "  let mut b = Bag { items: Vector::<Item>::new() };\n"
+          "  b.items.push(Item { v: 42 });\n"
+          "  if b.items.len() != 1 { return 1; }\n"
+          "  let m = Maybe { slot: Option::<Pt>::Some(Pt { x: 42 }) };\n"
+          "  if !m.slot.is_some() { return 2; }\n"
+          "  return 0; }\n",
+      0, "");
 }
 
 int main(void) {
