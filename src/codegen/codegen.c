@@ -173,6 +173,12 @@ struct Codegen {
     // across phase_types so the single-TU path can pre-emit a concrete struct (an instance's by-value arg
     // living in a later module) before any instance, and the owning module's phase_types then skips it.
     uint8_t *type_state;
+    // Body-pass generic-instance emission state (0/1/2 like type_state, indexed by instance table position),
+    // valid only during phase_types' body emission (NULL otherwise). Shared between emit_type_dfs and
+    // emit_aggregate_specializations so a user struct and the instances it embeds by value (and the user types
+    // those embed) are emitted in ONE unified topological order, each exactly once.
+    uint8_t *inst_emit_state;
+    size_t inst_emit_n;
     ERRORS_VARIABLES;
 };
 
@@ -342,6 +348,7 @@ void codegen_free(Codegen **c) {
   ast_free(&(*c)->ast);
   CgEnumMap_deinit(&(*c)->enum_of_variant);
   free((*c)->type_state);
+  free((*c)->inst_emit_state);
   free((*c)->buf);
   ERRORS_DEINIT(c);
   free(*c);
@@ -6298,50 +6305,71 @@ static void emit_generic_enum_shared(Codegen *c) {
 }
 
 // Emit every same-module generic-aggregate instantiation (forward typedefs, then full bodies).
-// Record `typeNode`'s by-value instance dependency (if any) under the current subst: a field/payload whose
-// substituted type is itself a concrete generic instance (e.g. Option<String<Global>>'s `Some` payload is
-// String__Global). Pointers/references resolve to a non-instance Ty, so they contribute no by-value dep --
-// a forward typedef suffices for them. Arrays embed their element by value, so unwrap to it.
-static void collect_inst_dep(Codegen *c, const NodeId typeNode, uint32_t *const deps, int *const ndeps) {
-  if (typeNode == NODE_NONE || *ndeps >= 16)
+static void emit_type_dfs(Codegen *c, const NodeId declId, uint8_t *const state);
+static bool type_emittable(Codegen *c, const Node *const n);
+static void emit_inst_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, const size_t nstate, const bool with_body);
+static void emit_rehomed_struct_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, const size_t nstate,
+                                    const bool with_body);
+
+// Record an already-resolved (home-pool) type `st` as a by-value layout dependency: unwrap arrays (which embed
+// their element by value), keep only aggregates -- struct/enum/instance, since pointers/references/builtins
+// need only a forward typedef -- and dedup. `deps` caps at 32 distinct entries (no real aggregate approaches it).
+static void push_home_dep(Codegen *c, TypeId st, TypeId *const deps, int *const nh) {
+  if (*nh >= 32 || st == TYPE_NONE)
     return;
-  const TypeId ft = ast_type(c->ast, typeNode);
-  if (ft == TYPE_NONE)
-    return;
-  TypeId cft = subst_resolve(c, ft);
-  const Ty *y = ast_type_at(c->ast, cft);
+  const Ty *y = ast_type_at(c->ast, st);
   while (y->kind == TYPE_ARRAY) {
-    cft = y->as.elem;
-    y = ast_type_at(c->ast, cft);
+    st = y->as.elem;
+    y = ast_type_at(c->ast, st);
   }
-  if (y->kind != TYPE_INSTANCE)
+  if (y->kind != TYPE_STRUCT && y->kind != TYPE_ENUM && y->kind != TYPE_INSTANCE)
     return;
-  const uint32_t di = y->as.inst;
-  for (int i = 0; i < *ndeps; i++)
-    if (deps[i] == di)
+  for (int i = 0; i < *nh; i++)
+    if (deps[i] == st)
       return;
-  deps[(*ndeps)++] = di;
+  deps[(*nh)++] = st;
 }
 
-// Emit generic instance `idx` after the instances it embeds BY VALUE (post-order DFS over the instance
-// table), so a by-value field/payload of a later-interned instance is still a complete type at its point of
-// use (Option<String<Global>> embeds String__Global). `state`: 0 unvisited / 1 on-path / 2 emitted.
+// Emit the full body of whatever type-unit a home-pool type `st` denotes BEFORE the unit that embeds it by
+// value, so the C struct laying it out sees a complete type. `st` may be a same-module user struct/enum
+// (emit_type_dfs), or a generic instance -- same-module (emit_inst_dfs) or re-homed here
+// (emit_rehomed_struct_dfs). The two instance DFSs share c->inst_emit_state, so each instance emits exactly
+// once and the wrong-kind call is an immediate no-op; emit_inst_dfs is tried first so a same-module instance
+// is never consumed (marked done) by the re-homed pass. A cross-module user type is completed by a full
+// #include (emit_header_includes), not emitted here. Each branch is gated on its state buffer, so outside the
+// body pass (forward typedefs, whose order is irrelevant) this is inert.
+static void emit_home_dep(Codegen *c, const TypeId st) {
+  if (st == TYPE_NONE)
+    return;
+  const Ty *y = ast_type_at(c->ast, st);
+  if ((y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM) && y->module == c->ast->module && c->type_state) {
+    const Node *const dn = ast_at_const(c->ast, y->as.decl);
+    if (type_emittable(c, dn))
+      emit_type_dfs(c, y->as.decl, c->type_state);
+  } else if (y->kind == TYPE_INSTANCE && c->inst_emit_state) {
+    emit_inst_dfs(c, y->as.inst, c->inst_emit_state, c->inst_emit_n, true);
+    emit_rehomed_struct_dfs(c, y->as.inst, c->inst_emit_state, c->inst_emit_n, true);
+  }
+}
+
+// Emit generic instance `idx` after the type-units it embeds BY VALUE (post-order DFS), so a by-value
+// field/payload is a complete type at its point of use: Option<String<Global>> embeds String__Global (another
+// instance), Option<Account> embeds Account (a user struct). `state`: 0 unvisited / 1 on-path / 2 emitted;
+// shared with the re-homed DFS, so a cross-module / non-concrete instance is LEFT for that pass (not marked).
 static void emit_inst_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, const size_t nstate, const bool with_body) {
   if (idx >= nstate || state[idx])
     return;
-  state[idx] = 1;
   const TyInstance it = c->ast->instances.data[idx]; // copy: emitting below may grow the table
   bool concrete = true;
   for (uint8_t k = 0; k < it.n; k++)
     concrete &= type_is_concrete(c, it.args[k]);
-  if (it.module != c->ast->module || !concrete) { // cross-module / intermediate (Box<T>) -> not emitted here
-    state[idx] = 2;
+  if (it.module != c->ast->module || !concrete) // cross-module / intermediate (Box<T>): the re-homed pass owns it
     return;
-  }
+  state[idx] = 1;
   const Node *const dn = ast_at_const(c->ast, it.decl);
-  uint32_t deps[16];
-  int ndeps = 0;
-  { // collect by-value instance deps under this instance's arg substitution, BEFORE recursing (which resets subst)
+  TypeId deps[32];
+  int nh = 0;
+  { // resolve by-value field/payload types under this instance's arg subst, BEFORE recursing (which resets subst)
     const NodeList gens = dn->as.aggregate.generics;
     const NodeId *const gids = ast_list(c->ast, gens);
     const int saved = c->nsubst;
@@ -6351,25 +6379,23 @@ static void emit_inst_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, 
       c->subst[c->nsubst].concrete = it.args[g];
       c->nsubst++;
     }
-    const NodeList ms = dn->as.aggregate.members;
-    const NodeId *const mids = ast_list(c->ast, ms);
-    for (uint32_t m = 0; m < ms.len; m++) {
+    const NodeId *const mids = ast_list(c->ast, dn->as.aggregate.members);
+    for (uint32_t m = 0; m < dn->as.aggregate.members.len; m++) {
       const Node *const mn = ast_at_const(c->ast, mids[m]);
       if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
-        collect_inst_dep(c, mn->as.field.type, deps, &ndeps);
+        push_home_dep(c, subst_resolve(c, ast_type(c->ast, mn->as.field.type)), deps, &nh);
       } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
-        const NodeList pl = mn->as.variant.payload;
-        const NodeId *const plids = ast_list(c->ast, pl);
-        for (uint32_t k = 0; k < pl.len; k++) {
-          const Node *const pf = ast_at_const(c->ast, plids[k]);
-          collect_inst_dep(c, pf->kind == NODE_FIELD ? pf->as.field.type : plids[k], deps, &ndeps);
+        const NodeId *const pids = ast_list(c->ast, mn->as.variant.payload);
+        for (uint32_t k = 0; k < mn->as.variant.payload.len; k++) {
+          const Node *const pf = ast_at_const(c->ast, pids[k]);
+          push_home_dep(c, subst_resolve(c, ast_type(c->ast, pf->kind == NODE_FIELD ? pf->as.field.type : pids[k])), deps, &nh);
         }
       }
     }
     c->nsubst = saved;
   }
-  for (int d = 0; d < ndeps; d++)
-    emit_inst_dfs(c, deps[d], state, nstate, with_body);
+  for (int d = 0; d < nh; d++)
+    emit_home_dep(c, deps[d]);
   if (dn->kind == NODE_STRUCT)
     emit_struct_inst(c, &it, with_body);
   else if (dn->kind == NODE_ENUM)
@@ -6381,7 +6407,11 @@ static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
   if (!with_body)
     emit_generic_enum_shared(c); // shared tag/plain enums, before any instance struct names them
   const size_t n = c->ast->instances.len;
-  uint8_t *const state = calloc(n ? n : 1, 1);
+  // Body pass: reuse the shared state phase_types also drives via emit_type_dfs, so instances pulled in early
+  // (embedded by value in a user struct) are not re-emitted here. Forward pass / OOM: a private state.
+  uint8_t *const shared = with_body ? c->inst_emit_state : NULL;
+  uint8_t *const state = shared ? shared : calloc(n ? n : 1, 1);
+  const size_t nstate = shared ? c->inst_emit_n : n;
   if (!state) { // OOM: fall back to insertion order (correct unless an instance embeds a later one by value)
     for (size_t i = 0; i < c->ast->instances.len; i++) {
       const TyInstance *const it = &c->ast->instances.data[i];
@@ -6398,9 +6428,10 @@ static void emit_aggregate_specializations(Codegen *c, const bool with_body) {
     }
     return;
   }
-  for (size_t i = 0; i < n; i++)
-    emit_inst_dfs(c, (uint32_t)i, state, n, with_body);
-  free(state);
+  for (size_t i = 0; i < n && i < nstate; i++)
+    emit_inst_dfs(c, (uint32_t)i, state, nstate, with_body);
+  if (state != shared)
+    free(state);
 }
 
 // --- generic macros: a cross-module instance over a user type by value (Option<Bar>) cannot be emitted by
@@ -6789,57 +6820,41 @@ static TypeId rehome_subst_type(Codegen *c, Ast *const owner, Ast *const home, c
   }
 }
 
-static void collect_rehomed_dep(Codegen *c, const TyInstance *const it, const NodeId typeNode, uint32_t *const deps,
-                                int *const ndeps, const size_t nstate) {
-  if (typeNode == NODE_NONE || *ndeps >= 16 || it->module >= c->package->count)
-    return;
-  Ast *const owner = cg_mod_ast(c, it->module);
-  TypeId st = rehome_subst_type(c, owner, c->ast, it, ast_type(owner, typeNode));
-  const Ty *y = ast_type_at(c->ast, st);
-  while (y->kind == TYPE_ARRAY) {
-    st = y->as.elem;
-    y = ast_type_at(c->ast, st);
-  }
-  if (y->kind != TYPE_INSTANCE || y->as.inst >= nstate)
-    return;
-  const TyInstance dep = c->ast->instances.data[y->as.inst];
-  if (!inst_rehomed_here(c, &dep))
-    return;
-  for (int i = 0; i < *ndeps; i++)
-    if (deps[i] == y->as.inst)
-      return;
-  deps[(*ndeps)++] = y->as.inst;
-}
-
+// Emit a re-homed instance `idx` after the type-units it embeds BY VALUE, like emit_inst_dfs but for an
+// instance whose template lives in another module: members are read from the owner ast and each field type
+// is mapped into the home pool via rehome_subst_type, then dispatched through emit_home_dep -- which may pull
+// another re-homed instance, a same-module instance, or a user struct (Option<Account> embeds Account). The
+// shared state means a non-re-homed instance is simply consumed here once the instance pass has emitted it.
 static void emit_rehomed_struct_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, const size_t nstate,
                                     const bool with_body) {
   if (idx >= nstate || state[idx])
     return;
   const TyInstance it = c->ast->instances.data[idx];
-  if (!inst_rehomed_here(c, &it)) {
+  if (!inst_rehomed_here(c, &it)) { // same-module (already emitted by the instance pass) or another module's: consume
     state[idx] = 2;
     return;
   }
   state[idx] = 1;
   Ast *const owner = cg_mod_ast(c, it.module);
   const Node *const dn = ast_at_const(owner, it.decl);
-  uint32_t deps[16];
-  int ndeps = 0;
+  TypeId deps[32];
+  int nh = 0;
   const NodeId *const mids = ast_list(owner, dn->as.aggregate.members);
   for (uint32_t m = 0; m < dn->as.aggregate.members.len; m++) {
     const Node *const mn = ast_at_const(owner, mids[m]);
     if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
-      collect_rehomed_dep(c, &it, mn->as.field.type, deps, &ndeps, nstate);
+      push_home_dep(c, rehome_subst_type(c, owner, c->ast, &it, ast_type(owner, mn->as.field.type)), deps, &nh);
     } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
       const NodeId *const pids = ast_list(owner, mn->as.variant.payload);
       for (uint32_t k = 0; k < mn->as.variant.payload.len; k++) {
         const Node *const pf = ast_at_const(owner, pids[k]);
-        collect_rehomed_dep(c, &it, pf->kind == NODE_FIELD ? pf->as.field.type : pids[k], deps, &ndeps, nstate);
+        const NodeId tn = pf->kind == NODE_FIELD ? pf->as.field.type : pids[k];
+        push_home_dep(c, rehome_subst_type(c, owner, c->ast, &it, ast_type(owner, tn)), deps, &nh);
       }
     }
   }
-  for (int d = 0; d < ndeps; d++)
-    emit_rehomed_struct_dfs(c, deps[d], state, nstate, with_body);
+  for (int d = 0; d < nh; d++)
+    emit_home_dep(c, deps[d]);
   emit_rehomed_struct(c, &it, with_body);
   state[idx] = 2;
 }
@@ -6848,7 +6863,11 @@ static void emit_rehomed_structs(Codegen *c, const bool with_body) {
   if (!c->package)
     return;
   const size_t n = c->ast->instances.len;
-  uint8_t *const state = calloc(n ? n : 1, 1);
+  // Body pass: share phase_types' instance state, so an instance already emitted (by the instance pass, or
+  // pulled in early by a user struct that embeds it) is skipped here. Forward pass / OOM: a private state.
+  uint8_t *const shared = with_body ? c->inst_emit_state : NULL;
+  uint8_t *const state = shared ? shared : calloc(n ? n : 1, 1);
+  const size_t nstate = shared ? c->inst_emit_n : n;
   if (!state) {
     for (size_t ii = 0; ii < n; ii++) {
       const TyInstance it = c->ast->instances.data[ii];
@@ -6857,9 +6876,10 @@ static void emit_rehomed_structs(Codegen *c, const bool with_body) {
     }
     return;
   }
-  for (size_t ii = 0; ii < n; ii++)
-    emit_rehomed_struct_dfs(c, (uint32_t)ii, state, n, with_body);
-  free(state);
+  for (size_t ii = 0; ii < n && ii < nstate; ii++)
+    emit_rehomed_struct_dfs(c, (uint32_t)ii, state, nstate, with_body);
+  if (state != shared)
+    free(state);
 }
 
 // Methods of every cross-module instance re-homed here: template (extends + method bodies) sourced from the
@@ -6943,27 +6963,6 @@ static bool type_emittable(Codegen *c, const Node *const n) {
          (n->kind == NODE_ENUM && !n->as.aggregate.generics.len && aggregate_has_payload(c, n));
 }
 
-// The local struct/enum a field embeds BY VALUE (so its full definition must precede this one), or
-// NODE_NONE. Pointers/references only need a forward typedef; an array embeds its element by value.
-static NodeId struct_dep(Codegen *c, const NodeId tn) {
-  if (tn == NODE_NONE)
-    return NODE_NONE;
-  const Node *const t = ast_at_const(c->ast, tn);
-  if (t->kind == NODE_ARRAY_TYPE)
-    return struct_dep(c, t->as.array_type.element);
-  if (t->kind == NODE_POINTER_TYPE || t->kind == NODE_REFERENCE_TYPE)
-    return NODE_NONE;
-  if (t->kind == NODE_TYPE_PATH || t->kind == NODE_IDENTIFIER) {
-    const DefId d = ast_resolution_def(c->ast, tn);
-    if (d.node != NODE_NONE && d.module == c->ast->module) {
-      const Node *const dn = ast_at_const(c->ast, d.node);
-      if (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM)
-        return d.node;
-    }
-  }
-  return NODE_NONE;
-}
-
 static void emit_type_decl(Codegen *c, const NodeId declId) {
   const Node *const n = ast_at_const(c->ast, declId);
   emit(c, "%s ", agg_kw(n));
@@ -7007,32 +7006,32 @@ static void emit_type_decl(Codegen *c, const NodeId declId) {
   emit(c, "};\n");
 }
 
-// Emit a type's by-value dependencies before itself (post-order DFS). `state`: 0 unvisited, 1 on the
-// current path (a cycle -- the type checker rejects by-value cycles, so just stop), 2 emitted.
+// Emit a user struct/enum after the type-units it embeds BY VALUE (post-order DFS): another user type, a
+// same-module generic instance (Vector<Account> in a field), or one re-homed here -- all dispatched through
+// emit_home_dep so layout always sees a complete type. `state`: 0 unvisited, 1 on the current path (a cycle --
+// the type checker rejects by-value cycles, so just stop), 2 emitted.
 static void emit_type_dfs(Codegen *c, const NodeId declId, uint8_t *const state) {
   if (state[declId])
     return;
   state[declId] = 1;
   const Node *const n = ast_at_const(c->ast, declId);
-  const NodeList members = n->as.aggregate.members;
-  const NodeId *const mids = ast_list(c->ast, members);
-  for (uint32_t i = 0; i < members.len; i++) {
+  const NodeId *const mids = ast_list(c->ast, n->as.aggregate.members);
+  TypeId deps[32];
+  int nh = 0;
+  for (uint32_t i = 0; i < n->as.aggregate.members.len; i++) { // (no subst active: a user type's fields are concrete)
     const Node *const m = ast_at_const(c->ast, mids[i]);
     if (n->kind == NODE_STRUCT && m->kind == NODE_FIELD) {
-      const NodeId dep = struct_dep(c, m->as.field.type);
-      if (dep != NODE_NONE && type_emittable(c, ast_at_const(c->ast, dep)))
-        emit_type_dfs(c, dep, state);
+      push_home_dep(c, ast_type(c->ast, m->as.field.type), deps, &nh);
     } else if (n->kind == NODE_ENUM && m->kind == NODE_VARIANT) {
-      const NodeList pl = m->as.variant.payload;
-      const NodeId *const plids = ast_list(c->ast, pl);
-      for (uint32_t k = 0; k < pl.len; k++) {
+      const NodeId *const plids = ast_list(c->ast, m->as.variant.payload);
+      for (uint32_t k = 0; k < m->as.variant.payload.len; k++) {
         const Node *const pf = ast_at_const(c->ast, plids[k]);
-        const NodeId dep = struct_dep(c, pf->kind == NODE_FIELD ? pf->as.field.type : plids[k]);
-        if (dep != NODE_NONE && type_emittable(c, ast_at_const(c->ast, dep)))
-          emit_type_dfs(c, dep, state);
+        push_home_dep(c, ast_type(c->ast, pf->kind == NODE_FIELD ? pf->as.field.type : plids[k]), deps, &nh);
       }
     }
   }
+  for (int d = 0; d < nh; d++)
+    emit_home_dep(c, deps[d]);
   emit_type_decl(c, declId);
   state[declId] = 2;
 }
@@ -7052,6 +7051,12 @@ static void phase_types(Codegen *c) {
   // later in source must still be complete at the point of use. Forward typedefs already exist. The DFS
   // state persists (cg_type_state), so a concrete struct the single-TU pre-pass already emitted is skipped.
   uint8_t *const state = cg_type_state(c);
+  // Shared instance state so emit_type_dfs (a user struct pulling in a by-value instance) and
+  // emit_aggregate_specializations agree on what's already emitted. NULL on OOM -> insertion order (the prior
+  // behavior). Sized now: nothing between here and emit_aggregate_specializations grows the instance table.
+  const size_t ni = c->ast->instances.len;
+  c->inst_emit_state = calloc(ni ? ni : 1, 1);
+  c->inst_emit_n = c->inst_emit_state ? ni : 0;
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (type_emittable(c, n)) {
@@ -7064,6 +7069,9 @@ static void phase_types(Codegen *c) {
   emit_aggregate_specializations(c, true); // full bodies for generic struct instantiations
   emit_rehomed_structs(c, true);           // full bodies for cross-module instances homed here (after their args)
   emit_generic_macros(c);                  // @emit_macro generics as <G>_DECLARE/<G>_DEFINE C-reuse templates
+  free(c->inst_emit_state);
+  c->inst_emit_state = NULL;
+  c->inst_emit_n = 0;
 }
 
 // Multi-return structs, after all type definitions (they reference parameter/return types).
