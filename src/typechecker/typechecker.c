@@ -3749,6 +3749,169 @@ static void check_if(TypeChecker *t, const Node *const n) {
     tc_flow_overflow(t, n->as.if_stmt.condition);
 }
 
+// --- switch exhaustiveness ------------------------------------------------------------------
+// Is this pattern irrefutable (matches every value of its type)? Wildcards and plain bindings are;
+// a tuple/struct destructure is iff it tests no enum variant tag and every sub-pattern is. Runs
+// AFTER check_pattern, which resolved each tag-testing pattern name to its NODE_VARIANT.
+static bool pattern_irrefutable(TypeChecker *t, const NodeId id) {
+  if (id == NODE_NONE)
+    return true; // an absent sub-pattern constrains nothing
+  const Node *const p = ast_at_const(t->ast, id);
+  switch (p->kind) {
+    case NODE_PATTERN_WILDCARD:
+    case NODE_IDENTIFIER: // shorthand struct-field binding
+      return true;
+    case NODE_PATTERN_NAME:
+    case NODE_PATTERN_TUPLE:
+    case NODE_PATTERN_STRUCT: {
+      const NodeId nameId = p->as.pattern.name;
+      if (nameId != NODE_NONE) {
+        const DefId d = ast_resolution_def(t->ast, nameId);
+        if (d.node != NODE_NONE && ast_at_const(mod_ast(t, d.module), d.node)->kind == NODE_VARIANT)
+          return false; // tests a tag
+      }
+      if (p->kind == NODE_PATTERN_NAME)
+        return true; // a plain binding
+      const NodeId *const ids = ast_list(t->ast, p->as.pattern.children);
+      for (uint32_t i = 0; i < p->as.pattern.children.len; i++)
+        if (!pattern_irrefutable(t, ids[i]))
+          return false;
+      return true;
+    }
+    case NODE_PATTERN_FIELD: {
+      const NodeId *const ids = ast_list(t->ast, p->as.pattern.children);
+      for (uint32_t i = 0; i < p->as.pattern.children.len; i++)
+        if (!pattern_irrefutable(t, ids[i]))
+          return false;
+      return true;
+    }
+    case NODE_PATTERN_OR: {
+      const NodeId *const ids = ast_list(t->ast, p->as.pattern.children);
+      for (uint32_t i = 0; i < p->as.pattern.children.len; i++)
+        if (pattern_irrefutable(t, ids[i]))
+          return true; // one always-matching alternative makes the whole `|` irrefutable
+      return false;
+    }
+    default:
+      return false; // literal / range: matches specific values only
+  }
+}
+
+// The enum variant this pattern FULLY covers (its tag with irrefutable payload sub-patterns), or
+// NODE_NONE. `Some(x)` covers Some; `Some(5)` does not (5 can fail).
+static NodeId pattern_covered_variant(TypeChecker *t, const Node *const p) {
+  if (p->kind != NODE_PATTERN_NAME && p->kind != NODE_PATTERN_TUPLE && p->kind != NODE_PATTERN_STRUCT)
+    return NODE_NONE;
+  const NodeId nameId = p->as.pattern.name;
+  if (nameId == NODE_NONE)
+    return NODE_NONE;
+  const DefId d = ast_resolution_def(t->ast, nameId);
+  if (d.node == NODE_NONE || ast_at_const(mod_ast(t, d.module), d.node)->kind != NODE_VARIANT)
+    return NODE_NONE;
+  const NodeId *const ids = ast_list(t->ast, p->as.pattern.children);
+  for (uint32_t i = 0; i < p->as.pattern.children.len; i++)
+    if (!pattern_irrefutable(t, ids[i]))
+      return NODE_NONE;
+  return d.node;
+}
+
+#define MATCH_MAX_VARIANTS 256
+// One no-guard arm pattern's contribution: a catch-all, a fully-covered enum variant bit, or a
+// `true`/`false` literal. Or-pattern alternatives each contribute on their own.
+static void match_arm_coverage(TypeChecker *t, const NodeId pid, const Ast *const ea, const NodeList variants,
+                               uint64_t *const covered, bool *const catchall, bool *const tcov, bool *const fcov) {
+  if (pid == NODE_NONE)
+    return;
+  const Node *const p = ast_at_const(t->ast, pid);
+  if (p->kind == NODE_PATTERN_OR) {
+    const NodeId *const ids = ast_list(t->ast, p->as.pattern.children);
+    for (uint32_t i = 0; i < p->as.pattern.children.len; i++)
+      match_arm_coverage(t, ids[i], ea, variants, covered, catchall, tcov, fcov);
+    return;
+  }
+  if (pattern_irrefutable(t, pid)) {
+    *catchall = true;
+    return;
+  }
+  if (p->kind == NODE_PATTERN_LITERAL) { // `true` / `false` literals enumerate bool completely
+    const Node *const v = ast_at_const(t->ast, p->as.single.value);
+    if (v->kind == NODE_LITERAL && v->as.literal.token_type == True)
+      *tcov = true;
+    else if (v->kind == NODE_LITERAL && v->as.literal.token_type == False)
+      *fcov = true;
+    return;
+  }
+  const NodeId var = pattern_covered_variant(t, p);
+  if (var == NODE_NONE || ea == NULL)
+    return;
+  const NodeId *const vids = ast_list(ea, variants);
+  for (uint32_t i = 0; i < variants.len && i < MATCH_MAX_VARIANTS; i++)
+    if (vids[i] == var) {
+      covered[i >> 6] |= (uint64_t)1 << (i & 63);
+      return;
+    }
+}
+
+// The language rule README/codegen already rely on (`__builtin_unreachable` fall-through): every
+// switch must cover its scrutinee. Enums must match every variant (or `_`); `true`+`false` cover
+// bool; anything else needs an irrefutable arm. Guarded arms cover nothing (a guard can fail).
+static void check_match_exhaustive(TypeChecker *t, const Node *const n, const TypeId scrut) {
+  if (scrut == TYPE_NONE)
+    return; // the scrutinee already failed to type; don't cascade
+  Ast *const a = t->ast;
+  const TypeId base = strip(t, scrut);
+  ModuleId emod = 0;
+  NodeId edecl = NODE_NONE;
+  DefId gp[4];
+  TypeId ga[4];
+  int gn;
+  const bool is_enum = aggregate_of(t, base, &emod, &edecl, gp, ga, &gn) &&
+                       ast_at_const(mod_ast(t, emod), edecl)->kind == NODE_ENUM;
+  const Ast *const ea = is_enum ? mod_ast(t, emod) : NULL;
+  const NodeList variants = is_enum ? ast_at_const(ea, edecl)->as.aggregate.members : (NodeList){0, 0};
+  uint64_t covered[MATCH_MAX_VARIANTS / 64] = {0};
+  bool catchall = false, tcov = false, fcov = false;
+  const NodeId *const ids = ast_list(a, n->as.match_expr.arms);
+  for (uint32_t i = 0; i < n->as.match_expr.arms.len; i++) {
+    const Node *const arm = ast_at_const(a, ids[i]);
+    if (arm->as.match_arm.guard != NODE_NONE)
+      continue;
+    match_arm_coverage(t, arm->as.match_arm.pattern, ea, variants, covered, &catchall, &tcov, &fcov);
+  }
+  if (catchall)
+    return;
+  const Span sp = ast_at_const(a, n->as.match_expr.value)->span;
+  if (is_enum && variants.len <= MATCH_MAX_VARIANTS) {
+    char miss[128];
+    size_t at = 0;
+    uint32_t nmiss = 0;
+    const NodeId *const vids = ast_list(ea, variants);
+    for (uint32_t i = 0; i < variants.len; i++) {
+      if (covered[i >> 6] & ((uint64_t)1 << (i & 63)))
+        continue;
+      nmiss++;
+      if (nmiss <= 3 && at < sizeof miss) { // name the first few; count the rest
+        const Span vn = ast_at_const(ea, ast_at_const(ea, vids[i])->as.variant.name)->as.name.text;
+        const int w = snprintf(miss + at, sizeof miss - at, "%s'%.*s'", nmiss > 1 ? ", " : "",
+                               (int)(vn.end - vn.start), (const char *)mod_src(t, emod) + vn.start);
+        at = w > 0 && at + (size_t)w < sizeof miss ? at + (size_t)w : sizeof miss;
+      }
+    }
+    if (!nmiss)
+      return; // every variant matched
+    if (nmiss > 3 && at < sizeof miss)
+      snprintf(miss + at, sizeof miss - at, " and %u more", nmiss - 3);
+    typechecker_errorf(
+        t, sp.start, sp.end - sp.start, "switch is not exhaustive: missing variant%s %s", nmiss == 1 ? "" : "s", miss);
+    typechecker_notef(t, "match every variant or add a '_' arm");
+    return;
+  }
+  if (base == ast_builtin(BT_BOOL) && tcov && fcov)
+    return;
+  typechecker_errorf(t, sp.start, sp.end - sp.start, "switch is not exhaustive");
+  typechecker_notef(t, "add a '_' arm to cover the remaining values");
+}
+
 static TypeId check_expr(TypeChecker *t, const NodeId id) {
   if (id == NODE_NONE)
     return TYPE_NONE;
@@ -4179,6 +4342,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       if (ovf)
         tc_flow_overflow(t, id);
       borrow_release_to(t, bm); // arm-body temporaries end with the match expression
+      check_match_exhaustive(t, n, scrut); // after the arms: check_pattern has resolved every tag pattern
       break;
     }
     case NODE_NEW: {

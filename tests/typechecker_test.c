@@ -617,6 +617,33 @@ static void test_bug_regressions(void) {
                "cannot be a generic type argument");
 }
 
+// Every switch must cover its scrutinee: enums by variant (or `_`), bool by true+false, anything
+// else by an irrefutable arm. Guarded arms cover nothing; or-patterns cover per alternative.
+static void test_switch_exhaustiveness(void) {
+#define ENUM3 "enum E { A, B, C }\n"
+  expect_error("switch missing a variant", ENUM3 "fn f(e: E) i32 { return switch e { A => 1, B => 2 }; }\n",
+               "missing variant 'C'");
+  expect_error(
+      "literal payload does not cover its variant",
+      "fn f(o: Option<i32>) i32 { return switch o { Some(5) => 1, None => 0 }; }\n", "missing variant 'Some'");
+  expect_error(
+      "guarded arm covers nothing",
+      "fn f(o: Option<i32>) i32 { return switch o { Some(x) if x > 0 => x, None => 0 }; }\n",
+      "missing variant 'Some'");
+  expect_error("int switch needs a catch-all", "fn f(n: i32) i32 { return switch n { 1 => 1, 2 => 2 }; }\n",
+               "not exhaustive");
+  expect_error("bool switch needs both literals", "fn f(b: bool) i32 { return switch b { true => 1 }; }\n",
+               "not exhaustive");
+  expect_ok("all variants cover the enum", ENUM3 "fn f(e: E) i32 { return switch e { A => 1, B => 2, C => 3 }; }\n");
+  expect_ok("or-pattern covers per alternative", ENUM3 "fn f(e: E) i32 { return switch e { A | B => 1, C => 3 }; }\n");
+  expect_ok(
+      "payload binding covers its variant",
+      "fn f(o: Option<i32>) i32 { return switch o { Some(x) => x, None => 0 }; }\n");
+  expect_ok("true and false cover bool", "fn f(b: bool) i32 { return switch b { true => 1, false => 0 }; }\n");
+  expect_ok("binding arm is a catch-all", "fn f(n: i32) i32 { return switch n { 0..10 => 1, x => x }; }\n");
+#undef ENUM3
+}
+
 int main(void) {
   test_ok();
   test_bug_regressions();
@@ -630,6 +657,7 @@ int main(void) {
   test_inferred_let_types();
   test_str_member_types();
   test_errors();
+  test_switch_exhaustiveness();
   test_interface_bounds();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
