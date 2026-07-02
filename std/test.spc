@@ -7,18 +7,18 @@ extern "C" {
 
 pub fn assert_true(condition: bool) {
     if !condition {
-        abort();
+        unsafe abort();
     }
 }
 
 pub fn assert_eq<T: Eq>(left: &T, right: &T) {
     if !left.eq(right) {
-        abort();
+        unsafe abort();
     }
 }
 
 pub fn assert_ne<T: Eq>(left: &T, right: &T) {
     if left.eq(right) {
-        abort();
+        unsafe abort();
     }
 }

@@ -114,8 +114,8 @@ static void test_switch_ranges(void) {
 }
 
 static void test_pointer_arith(void) {
-  expect_contains("pointer offset", "fn f(p: *i32) i32 { return *(p + 1); }\n", "(p + 1)");
-  expect_contains("pointer difference", "fn f(a: *i32, b: *i32) isize { return a - b; }\n", "(a - b)");
+  expect_contains("pointer offset", "fn f(p: *i32) i32 { return unsafe *(p + 1); }\n", "(p + 1)");
+  expect_contains("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n", "(a - b)");
 }
 
 // Reference/pointer C lowering: `&T`->`const T *`, `&mut T`->`T *`; raw `*const T`->`const T *`,
@@ -124,8 +124,8 @@ static const char *const REFS =
     "struct P { pub x: i32, }\n"
     "fn reads(r: &P) i32 { return r.x; }\n"
     "fn writes(w: &mut P) void { w.x = 1; }\n"
-    "fn raw_c(pc: *const i32) i32 { return *pc; }\n"
-    "fn raw_m(pm: *mut i32) void { *pm = 1; }\n";
+    "fn raw_c(pc: *const i32) i32 { return unsafe *pc; }\n"
+    "fn raw_m(pm: *mut i32) void { unsafe *pm = 1; }\n";
 
 static void test_references(void) {
   expect_contains("&T is const pointee", REFS, "const P *const r");
@@ -140,7 +140,7 @@ static const char *const EXTERN =
     "extern \"C\" {\n"
     "  fn putchar(c: i32) i32;\n"
     "}\n"
-    "fn main() i32 { let r: i32 = putchar(72); }\n";
+    "fn main() i32 { let r: i32 = unsafe putchar(72); }\n";
 
 static void test_extern(void) {
   // `extern "C"` functions get NO emitted prototype -- every C standard-library header is already
@@ -154,18 +154,18 @@ static void test_extern(void) {
   expect_contains(
       "extern system header include",
       "extern \"C\" \"pthread.h\" { type pthread_t; fn pthread_self() pthread_t; }\n"
-      "fn main() i32 { let t: pthread_t = pthread_self(); return 0; }\n",
+      "fn main() i32 { let t: pthread_t = unsafe pthread_self(); return 0; }\n",
       "#include <pthread.h>");
   expect_contains(
       "extern local header include",
-      "extern \"C\" \"./lib.h\" { fn answer() i32; }\nfn main() i32 { return answer(); }\n",
+      "extern \"C\" \"./lib.h\" { fn answer() i32; }\nfn main() i32 { return unsafe answer(); }\n",
       "#include \"./lib.h\"");
 
   // A variadic call emits every argument verbatim (fixed + trailing); the binding keeps its C name.
   expect_contains(
       "variadic call passes all args",
       "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
-      "fn main() i32 { let f: char = '%'; printf(&f, 1, 2, 3); return 0; }\n",
+      "fn main() i32 { let f: char = '%'; unsafe printf(&f, 1, 2, 3); return 0; }\n",
       "1, 2, 3)");
 
   // A string literal in a `*const char` slot (fixed fmt + `%s` vararg) emits the bare C string, not a
@@ -173,11 +173,11 @@ static void test_extern(void) {
   expect_contains(
       "string literal -> bare C string in fmt + vararg",
       "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
-      "fn main() i32 { printf(\"%s\\n\", \"hi\"); return 0; }\n",
+      "fn main() i32 { unsafe printf(\"%s\\n\", \"hi\"); return 0; }\n",
       "printf(\"%s\\n\", \"hi\")");
   expect_contains(
       "string literal -> *const u8 adds cast",
-      "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return f(\"hi\"); }\n",
+      "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return unsafe f(\"hi\"); }\n",
       "(const uint8_t *)\"hi\"");
   expect_contains( // an uncoerced literal of "zq9" keeps the full str fat-pointer view
       "string literal stays str view by default", "fn main() i32 { let s: str = \"zq9\"; return 0; }\n",
@@ -362,7 +362,7 @@ static void test_attributes(void) {
   // import renames an extern binding's symbol at the call site.
   expect_contains(
       "import binds to the C symbol",
-      "extern \"C\" { @c.import(\"puts\") fn line(s: *const char) i32; }\nfn main() i32 { line(\"x\"); return 0; }\n",
+      "extern \"C\" { @c.import(\"puts\") fn line(s: *const char) i32; }\nfn main() i32 { unsafe line(\"x\"); return 0; }\n",
       "puts(");
 }
 

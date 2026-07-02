@@ -94,17 +94,17 @@ pub struct Global {}
 
 extend Global as Allocator {
     pub fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
-        let p = malloc(size);
-        if p == null { abort(); }
+        let p = unsafe malloc(size);
+        if p == null { unsafe abort(); }
         return p;
     }
     pub fn realloc(self: &mut Global, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
-        let p = realloc(ptr, new_size);
-        if p == null { abort(); }
+        let p = unsafe realloc(ptr, new_size);
+        if p == null { unsafe abort(); }
         return p;
     }
     pub fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) void {
-        free(ptr);
+        unsafe free(ptr);
     }
 }
 

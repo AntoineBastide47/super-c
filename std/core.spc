@@ -501,48 +501,48 @@ extend f32 {
     pub fn is_nan(self: f32) bool { return self != self; }
     pub fn is_infinite(self: f32) bool { return !self.is_nan() && self == 1.0 / 0.0 || self == -1.0 / 0.0; }
     pub fn is_finite(self: f32) bool { return !self.is_nan() && !self.is_infinite(); }
-    pub fn is_sign_positive(self: f32) bool { return copysignf(1.0, self) > 0.0; }
-    pub fn is_sign_negative(self: f32) bool { return copysignf(1.0, self) < 0.0; }
-    pub fn abs(self: f32) f32 { return fabsf(self); }
-    pub fn signum(self: f32) f32 { if self.is_nan() { return self; } return copysignf(1.0, self); }
-    pub fn copysign(self: f32, sign: f32) f32 { return copysignf(self, sign); }
-    pub fn min(self: f32, other: f32) f32 { return fminf(self, other); }
-    pub fn max(self: f32, other: f32) f32 { return fmaxf(self, other); }
+    pub fn is_sign_positive(self: f32) bool { return unsafe copysignf(1.0, self) > 0.0; }
+    pub fn is_sign_negative(self: f32) bool { return unsafe copysignf(1.0, self) < 0.0; }
+    pub fn abs(self: f32) f32 { return unsafe fabsf(self); }
+    pub fn signum(self: f32) f32 { if self.is_nan() { return self; } return unsafe copysignf(1.0, self); }
+    pub fn copysign(self: f32, sign: f32) f32 { return unsafe copysignf(self, sign); }
+    pub fn min(self: f32, other: f32) f32 { return unsafe fminf(self, other); }
+    pub fn max(self: f32, other: f32) f32 { return unsafe fmaxf(self, other); }
     pub fn clamp(self: f32, min: f32, max: f32) f32 { if self < min { return min; } if self > max { return max; } return self; }
-    pub fn floor(self: f32) f32 { return floorf(self); }
-    pub fn ceil(self: f32) f32 { return ceilf(self); }
-    pub fn round(self: f32) f32 { return roundf(self); }
-    pub fn trunc(self: f32) f32 { return truncf(self); }
-    pub fn fract(self: f32) f32 { return self - truncf(self); }
+    pub fn floor(self: f32) f32 { return unsafe floorf(self); }
+    pub fn ceil(self: f32) f32 { return unsafe ceilf(self); }
+    pub fn round(self: f32) f32 { return unsafe roundf(self); }
+    pub fn trunc(self: f32) f32 { return unsafe truncf(self); }
+    pub fn fract(self: f32) f32 { return self - unsafe truncf(self); }
     pub fn recip(self: f32) f32 { return 1.0 / self; }
-    pub fn sqrt(self: f32) f32 { return sqrtf(self); }
-    pub fn cbrt(self: f32) f32 { return cbrtf(self); }
-    pub fn powf(self: f32, n: f32) f32 { return powf(self, n); }
-    pub fn powi(self: f32, n: i32) f32 { return powf(self, n as f32); }
-    pub fn exp(self: f32) f32 { return expf(self); }
-    pub fn exp2(self: f32) f32 { return exp2f(self); }
-    pub fn exp_m1(self: f32) f32 { return expm1f(self); }
-    pub fn ln(self: f32) f32 { return logf(self); }
-    pub fn log(self: f32, base: f32) f32 { return logf(self) / logf(base); }
-    pub fn log2(self: f32) f32 { return log2f(self); }
-    pub fn log10(self: f32) f32 { return log10f(self); }
-    pub fn ln_1p(self: f32) f32 { return log1pf(self); }
-    pub fn hypot(self: f32, other: f32) f32 { return hypotf(self, other); }
-    pub fn sin(self: f32) f32 { return sinf(self); }
-    pub fn cos(self: f32) f32 { return cosf(self); }
-    pub fn tan(self: f32) f32 { return tanf(self); }
-    pub fn asin(self: f32) f32 { return asinf(self); }
-    pub fn acos(self: f32) f32 { return acosf(self); }
-    pub fn atan(self: f32) f32 { return atanf(self); }
-    pub fn atan2(self: f32, other: f32) f32 { return atan2f(self, other); }
-    pub fn sin_cos(self: f32) (f32, f32) { return sinf(self), cosf(self); }
-    pub fn sinh(self: f32) f32 { return sinhf(self); }
-    pub fn cosh(self: f32) f32 { return coshf(self); }
-    pub fn tanh(self: f32) f32 { return tanhf(self); }
-    pub fn asinh(self: f32) f32 { return asinhf(self); }
-    pub fn acosh(self: f32) f32 { return acoshf(self); }
-    pub fn atanh(self: f32) f32 { return atanhf(self); }
-    pub fn mul_add(self: f32, a: f32, b: f32) f32 { return fmaf(self, a, b); }
+    pub fn sqrt(self: f32) f32 { return unsafe sqrtf(self); }
+    pub fn cbrt(self: f32) f32 { return unsafe cbrtf(self); }
+    pub fn powf(self: f32, n: f32) f32 { return unsafe powf(self, n); }
+    pub fn powi(self: f32, n: i32) f32 { return unsafe powf(self, n as f32); }
+    pub fn exp(self: f32) f32 { return unsafe expf(self); }
+    pub fn exp2(self: f32) f32 { return unsafe exp2f(self); }
+    pub fn exp_m1(self: f32) f32 { return unsafe expm1f(self); }
+    pub fn ln(self: f32) f32 { return unsafe logf(self); }
+    pub fn log(self: f32, base: f32) f32 { return unsafe logf(self) / unsafe logf(base); }
+    pub fn log2(self: f32) f32 { return unsafe log2f(self); }
+    pub fn log10(self: f32) f32 { return unsafe log10f(self); }
+    pub fn ln_1p(self: f32) f32 { return unsafe log1pf(self); }
+    pub fn hypot(self: f32, other: f32) f32 { return unsafe hypotf(self, other); }
+    pub fn sin(self: f32) f32 { return unsafe sinf(self); }
+    pub fn cos(self: f32) f32 { return unsafe cosf(self); }
+    pub fn tan(self: f32) f32 { return unsafe tanf(self); }
+    pub fn asin(self: f32) f32 { return unsafe asinf(self); }
+    pub fn acos(self: f32) f32 { return unsafe acosf(self); }
+    pub fn atan(self: f32) f32 { return unsafe atanf(self); }
+    pub fn atan2(self: f32, other: f32) f32 { return unsafe atan2f(self, other); }
+    pub fn sin_cos(self: f32) (f32, f32) { return unsafe sinf(self), unsafe cosf(self); }
+    pub fn sinh(self: f32) f32 { return unsafe sinhf(self); }
+    pub fn cosh(self: f32) f32 { return unsafe coshf(self); }
+    pub fn tanh(self: f32) f32 { return unsafe tanhf(self); }
+    pub fn asinh(self: f32) f32 { return unsafe asinhf(self); }
+    pub fn acosh(self: f32) f32 { return unsafe acoshf(self); }
+    pub fn atanh(self: f32) f32 { return unsafe atanhf(self); }
+    pub fn mul_add(self: f32, a: f32, b: f32) f32 { return unsafe fmaf(self, a, b); }
     pub fn to_degrees(self: f32) f32 { return self * 57.29577951308232; }
     pub fn to_radians(self: f32) f32 { return self * 0.017453292519943295; }
 }
@@ -553,48 +553,48 @@ extend f64 {
         return !self.is_nan() && self == (1.0 as f64) / (0.0 as f64) || self == (-1.0 as f64) / (0.0 as f64);
     }
     pub fn is_finite(self: f64) bool { return !self.is_nan() && !self.is_infinite(); }
-    pub fn is_sign_positive(self: f64) bool { return copysign(1.0, self) > 0.0; }
-    pub fn is_sign_negative(self: f64) bool { return copysign(1.0, self) < 0.0; }
-    pub fn abs(self: f64) f64 { return fabs(self); }
-    pub fn signum(self: f64) f64 { if self.is_nan() { return self; } return copysign(1.0, self); }
-    pub fn copysign(self: f64, sign: f64) f64 { return copysign(self, sign); }
-    pub fn min(self: f64, other: f64) f64 { return fmin(self, other); }
-    pub fn max(self: f64, other: f64) f64 { return fmax(self, other); }
+    pub fn is_sign_positive(self: f64) bool { return unsafe copysign(1.0, self) > 0.0; }
+    pub fn is_sign_negative(self: f64) bool { return unsafe copysign(1.0, self) < 0.0; }
+    pub fn abs(self: f64) f64 { return unsafe fabs(self); }
+    pub fn signum(self: f64) f64 { if self.is_nan() { return self; } return unsafe copysign(1.0, self); }
+    pub fn copysign(self: f64, sign: f64) f64 { return unsafe copysign(self, sign); }
+    pub fn min(self: f64, other: f64) f64 { return unsafe fmin(self, other); }
+    pub fn max(self: f64, other: f64) f64 { return unsafe fmax(self, other); }
     pub fn clamp(self: f64, min: f64, max: f64) f64 { if self < min { return min; } if self > max { return max; } return self; }
-    pub fn floor(self: f64) f64 { return floor(self); }
-    pub fn ceil(self: f64) f64 { return ceil(self); }
-    pub fn round(self: f64) f64 { return round(self); }
-    pub fn trunc(self: f64) f64 { return trunc(self); }
-    pub fn fract(self: f64) f64 { return self - trunc(self); }
+    pub fn floor(self: f64) f64 { return unsafe floor(self); }
+    pub fn ceil(self: f64) f64 { return unsafe ceil(self); }
+    pub fn round(self: f64) f64 { return unsafe round(self); }
+    pub fn trunc(self: f64) f64 { return unsafe trunc(self); }
+    pub fn fract(self: f64) f64 { return self - unsafe trunc(self); }
     pub fn recip(self: f64) f64 { return 1.0 / self; }
-    pub fn sqrt(self: f64) f64 { return sqrt(self); }
-    pub fn cbrt(self: f64) f64 { return cbrt(self); }
-    pub fn powf(self: f64, n: f64) f64 { return pow(self, n); }
-    pub fn powi(self: f64, n: i32) f64 { return pow(self, n as f64); }
-    pub fn exp(self: f64) f64 { return exp(self); }
-    pub fn exp2(self: f64) f64 { return exp2(self); }
-    pub fn exp_m1(self: f64) f64 { return expm1(self); }
-    pub fn ln(self: f64) f64 { return log(self); }
-    pub fn log(self: f64, base: f64) f64 { return log(self) / log(base); }
-    pub fn log2(self: f64) f64 { return log2(self); }
-    pub fn log10(self: f64) f64 { return log10(self); }
-    pub fn ln_1p(self: f64) f64 { return log1p(self); }
-    pub fn hypot(self: f64, other: f64) f64 { return hypot(self, other); }
-    pub fn sin(self: f64) f64 { return sin(self); }
-    pub fn cos(self: f64) f64 { return cos(self); }
-    pub fn tan(self: f64) f64 { return tan(self); }
-    pub fn asin(self: f64) f64 { return asin(self); }
-    pub fn acos(self: f64) f64 { return acos(self); }
-    pub fn atan(self: f64) f64 { return atan(self); }
-    pub fn atan2(self: f64, other: f64) f64 { return atan2(self, other); }
-    pub fn sin_cos(self: f64) (f64, f64) { return sin(self), cos(self); }
-    pub fn sinh(self: f64) f64 { return sinh(self); }
-    pub fn cosh(self: f64) f64 { return cosh(self); }
-    pub fn tanh(self: f64) f64 { return tanh(self); }
-    pub fn asinh(self: f64) f64 { return asinh(self); }
-    pub fn acosh(self: f64) f64 { return acosh(self); }
-    pub fn atanh(self: f64) f64 { return atanh(self); }
-    pub fn mul_add(self: f64, a: f64, b: f64) f64 { return fma(self, a, b); }
+    pub fn sqrt(self: f64) f64 { return unsafe sqrt(self); }
+    pub fn cbrt(self: f64) f64 { return unsafe cbrt(self); }
+    pub fn powf(self: f64, n: f64) f64 { return unsafe pow(self, n); }
+    pub fn powi(self: f64, n: i32) f64 { return unsafe pow(self, n as f64); }
+    pub fn exp(self: f64) f64 { return unsafe exp(self); }
+    pub fn exp2(self: f64) f64 { return unsafe exp2(self); }
+    pub fn exp_m1(self: f64) f64 { return unsafe expm1(self); }
+    pub fn ln(self: f64) f64 { return unsafe log(self); }
+    pub fn log(self: f64, base: f64) f64 { return unsafe log(self) / unsafe log(base); }
+    pub fn log2(self: f64) f64 { return unsafe log2(self); }
+    pub fn log10(self: f64) f64 { return unsafe log10(self); }
+    pub fn ln_1p(self: f64) f64 { return unsafe log1p(self); }
+    pub fn hypot(self: f64, other: f64) f64 { return unsafe hypot(self, other); }
+    pub fn sin(self: f64) f64 { return unsafe sin(self); }
+    pub fn cos(self: f64) f64 { return unsafe cos(self); }
+    pub fn tan(self: f64) f64 { return unsafe tan(self); }
+    pub fn asin(self: f64) f64 { return unsafe asin(self); }
+    pub fn acos(self: f64) f64 { return unsafe acos(self); }
+    pub fn atan(self: f64) f64 { return unsafe atan(self); }
+    pub fn atan2(self: f64, other: f64) f64 { return unsafe atan2(self, other); }
+    pub fn sin_cos(self: f64) (f64, f64) { return unsafe sin(self), unsafe cos(self); }
+    pub fn sinh(self: f64) f64 { return unsafe sinh(self); }
+    pub fn cosh(self: f64) f64 { return unsafe cosh(self); }
+    pub fn tanh(self: f64) f64 { return unsafe tanh(self); }
+    pub fn asinh(self: f64) f64 { return unsafe asinh(self); }
+    pub fn acosh(self: f64) f64 { return unsafe acosh(self); }
+    pub fn atanh(self: f64) f64 { return unsafe atanh(self); }
+    pub fn mul_add(self: f64, a: f64, b: f64) f64 { return unsafe fma(self, a, b); }
     pub fn to_degrees(self: f64) f64 { return self * 57.29577951308232; }
     pub fn to_radians(self: f64) f64 { return self * 0.017453292519943295; }
 }

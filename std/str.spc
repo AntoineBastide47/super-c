@@ -40,13 +40,13 @@ extend str {
 
     // The byte at `index` (0 <= index < len). No bounds check -- the caller owns the index.
     pub fn byte_at(self: &str, index: usize) u8 {
-        return self.ptr[index];
+        return unsafe self.ptr[index];
     }
 
     // The sub-view of bytes [start, end) -- allocation-free, it borrows `self`'s bytes. The caller
     // keeps `start`/`end` on UTF-8 boundaries (and within bounds).
     pub fn slice(self: &str, start: usize, end: usize) str {
-        return str { ptr: self.ptr + start, len: end - start, };
+        return str { ptr: unsafe (self.ptr + start), len: end - start, };
     }
 
     // --- search --------------------------------------------------------------------------------
@@ -58,7 +58,7 @@ extend str {
         if prefix.len == 0 {
             return true;
         }
-        return memcmp(self.ptr as *const void, prefix.ptr as *const void, prefix.len) == 0;
+        return unsafe memcmp(self.ptr as *const void, prefix.ptr as *const void, prefix.len) == 0;
     }
 
     pub fn ends_with(self: &str, suffix: str) bool {
@@ -68,13 +68,13 @@ extend str {
         if suffix.len == 0 {
             return true;
         }
-        return memcmp((self.ptr + (self.len - suffix.len)) as *const void, suffix.ptr as *const void, suffix.len) == 0;
+        return unsafe memcmp((unsafe (self.ptr + (self.len - suffix.len))) as *const void, suffix.ptr as *const void, suffix.len) == 0;
     }
 
     // First index of byte `byte`, or -1 if absent.
     pub fn find_byte(self: &str, byte: u8) isize {
         for i in 0..self.len {
-            if self.ptr[i] == byte {
+            if unsafe self.ptr[i] == byte {
                 return i as isize;
             }
         }
@@ -91,7 +91,7 @@ extend str {
         }
         let last = self.len - needle.len;
         for i in 0..=last {
-            if memcmp((self.ptr + i) as *const void, needle.ptr as *const void, needle.len) == 0 {
+            if unsafe memcmp((unsafe (self.ptr + i)) as *const void, needle.ptr as *const void, needle.len) == 0 {
                 return i as isize;
             }
         }
@@ -108,20 +108,20 @@ extend str {
     pub fn trim_start(self: &str) str {
         let mut start: usize = 0;
         while start < self.len {
-            let b = self.ptr[start];
+            let b = unsafe self.ptr[start];
             if b != 32 && b != 9 && b != 10 && b != 13 {
                 break;
             }
             start = start + 1;
         }
-        return str { ptr: self.ptr + start, len: self.len - start, };
+        return str { ptr: unsafe (self.ptr + start), len: self.len - start, };
     }
 
     // The view with trailing ASCII whitespace removed.
     pub fn trim_end(self: &str) str {
         let mut end = self.len;
         while end > 0 {
-            let b = self.ptr[end - 1];
+            let b = unsafe self.ptr[end - 1];
             if b != 32 && b != 9 && b != 10 && b != 13 {
                 break;
             }
@@ -143,7 +143,7 @@ extend str {
     pub fn char_count(self: &str) usize {
         let mut count: usize = 0;
         for i in 0..self.len {
-            if (self.ptr[i] & 0xC0) != 0x80 {
+            if (unsafe self.ptr[i] & 0xC0) != 0x80 {
                 count = count + 1;
             }
         }
@@ -156,7 +156,7 @@ extend str {
     pub fn is_valid_utf8(self: &str) bool {
         let mut i: usize = 0;
         while i < self.len {
-            let b = self.ptr[i];
+            let b = unsafe self.ptr[i];
             let mut n: usize = 0;
             if b < 0x80 {
                 n = 1;
@@ -173,7 +173,7 @@ extend str {
                 return false;
             }
             for k in 1..n {
-                if (self.ptr[i + k] & 0xC0) != 0x80 {
+                if (unsafe self.ptr[i + k] & 0xC0) != 0x80 {
                     return false;
                 }
             }
@@ -200,7 +200,7 @@ extend str as Eq {
         if self.len == 0 {
             return true;
         }
-        return memcmp(self.ptr as *const void, other.ptr as *const void, self.len) == 0;
+        return unsafe memcmp(self.ptr as *const void, other.ptr as *const void, self.len) == 0;
     }
 }
 
@@ -213,7 +213,7 @@ extend str as Ord {
             n = other.len;
         }
         if n > 0 {
-            let c = memcmp(self.ptr as *const void, other.ptr as *const void, n);
+            let c = unsafe memcmp(self.ptr as *const void, other.ptr as *const void, n);
             if c != 0 {
                 return c;
             }
@@ -234,7 +234,7 @@ extend str as Hash {
         let mut h: u64 = 0xcbf29ce484222325;
         let mut i: usize = 0;
         while i < self.len {
-            h = (h ^ (self.ptr[i] as u64)) * 0x100000001b3;
+            h = (h ^ (unsafe self.ptr[i] as u64)) * 0x100000001b3;
             i = i + 1;
         }
         return h;
@@ -254,7 +254,7 @@ extend str as Default {
 // No IndexMut: a `str` is a read-only view.
 extend str as Index<u8, str> {
     pub fn index(self: &str, i: usize) &u8 {
-        return &self.ptr[i];
+        return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &str, r: Range<usize>) str {
         let hi = if r.inclusive { r.end + 1; } else { r.end; };

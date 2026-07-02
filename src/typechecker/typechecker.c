@@ -71,6 +71,8 @@ struct TypeChecker {
     TypeId mret_types[8];     // check_tuple_let), already substituted with the call's generic/instance args;
     uint8_t mret_n;           // stashed element count (capped at 8; the rest fall back to the raw decl types)
     uint32_t mret_total;      // the callee's true return count, for the binding-arity check
+    uint32_t unsafe_depth;    // > 0 inside `unsafe { .. }` / `unsafe expr`: raw-pointer operations and
+                              // extern "C" calls are only legal there (the compiler cannot vouch for them)
     ERRORS_VARIABLES;
 };
 
@@ -384,6 +386,37 @@ static void err_mismatch(TypeChecker *t, const NodeId node, const TypeId expecte
   render_type(t, ast_type(t->ast, node), f, sizeof f);
   const Span sp = ast_at_const(t->ast, node)->span;
   typechecker_errorf(t, sp.start, sp.end - sp.start, "mismatched types: expected '%s', found '%s'", e, f);
+}
+
+// An operation the compiler cannot vouch for (raw-pointer memory access / extern "C" call) outside
+// an `unsafe` context. The borrow checker's guarantees stop at these; the block is the audit marker.
+static void err_unsafe(TypeChecker *t, const Span sp, const char *const what) {
+  typechecker_errorf(t, sp.start, sp.end - sp.start, "%s requires an 'unsafe' block", what);
+  typechecker_notef(t, "wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'");
+}
+
+// `move` / `unsafe` prefixes are transparent wrappers around their operand: every place-shaped
+// analysis (assignability, place tests, borrow decomposition) sees through them.
+static NodeId peel_wrappers(const TypeChecker *t, NodeId id) {
+  const Node *n = ast_at_const(t->ast, id);
+  while (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe)) {
+    id = n->as.unary.operand;
+    n = ast_at_const(t->ast, id);
+  }
+  return id;
+}
+
+// Does this type reach memory through a RAW-POINTER layer (`*T`, possibly under references)?
+// Reference layers alone are borrow-checked and safe; any `*` layer is not.
+static bool through_raw_pointer(TypeChecker *t, TypeId ty) {
+  const Ty *y = ast_type_at(t->ast, ty);
+  while (y->kind == TYPE_REFERENCE || y->kind == TYPE_POINTER) {
+    if (y->kind == TYPE_POINTER)
+      return true;
+    ty = y->as.elem;
+    y = ast_type_at(t->ast, ty);
+  }
+  return false;
 }
 
 // Reads a TYPE_FUNCTION's signature into interned TypeIds, normalizing a named `NODE_FUNCTION` (params
@@ -1110,6 +1143,10 @@ static NodeId place_decompose(TypeChecker *t, NodeId place, PStep *const steps, 
   *nsteps = 0;
   for (;;) {
     const Node *const pn = ast_at_const(t->ast, place);
+    if (pn->kind == NODE_UNARY && (pn->as.unary.op == Move || pn->as.unary.op == Unsafe)) {
+      place = pn->as.unary.operand; // transparent wrappers add no place step
+      continue;
+    }
     if (pn->kind == NODE_UNARY && pn->as.unary.op == Star) { // `*r`: an explicit deref
       const NodeId op = pn->as.unary.operand;
       const TypeId ot = ast_type(t->ast, op);
@@ -2289,8 +2326,12 @@ static TypeId decl_type(TypeChecker *t, const NodeId decl) {
 static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) {
   if (n->as.unary.op == Ampersand) // `&x`/`&mut x` borrows x; its base is not value-read (definite-init)
     t->addr_ctx = true;
+  if (n->as.unary.op == Unsafe) // `unsafe expr` / `unsafe { .. }`: raw ops are legal inside the operand
+    t->unsafe_depth++;
   const uint32_t bm = borrow_mark(t); // temporaries the operand creates (a ref-returning method's receiver)
   const TypeId opnd = check_expr(t, n->as.unary.operand);
+  if (n->as.unary.op == Unsafe)
+    t->unsafe_depth--;
   const Span sp = ast_at_const(t->ast, id)->span;
   switch (n->as.unary.op) {
     case Minus:
@@ -2310,6 +2351,8 @@ static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) 
         return TYPE_NONE;
       const Ty *const ot = ast_type_at(t->ast, opnd);
       if (ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE) {
+        if (ot->kind == TYPE_POINTER && !t->unsafe_depth)
+          err_unsafe(t, sp, "dereferencing a raw pointer");
         // Dereferencing an RVALUE reference copies the value out and ENDS the reference: the shared
         // temporaries its computation registered (e.g. `v.at(2)`'s receiver borrow) expire here, so
         // `*v.at(2) + v.pop()` does not conflict (NLL). Mutable ones persist to the statement's end --
@@ -2444,6 +2487,8 @@ static TypeId check_ptr_arith(
     return TYPE_NONE; // ordinary numeric operands
   *handled = true;
   const Span sp = ast_at_const(t->ast, id)->span;
+  if (!t->unsafe_depth) // offsetting/differencing raw pointers escapes the borrow checker's view
+    err_unsafe(t, sp, "raw pointer arithmetic");
   const bool minus = n->as.binary.op == Minus;
   if (lp && rp) {
     if (minus && l == r)
@@ -2690,7 +2735,8 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
 
 // Can the lvalue at `node` be assigned to? A mutable `let`, a deref/index/member reached through
 // something mutable. Parameters and consts are immutable.
-static bool is_assignable(TypeChecker *t, const NodeId node) {
+static bool is_assignable(TypeChecker *t, const NodeId node_in) {
+  const NodeId node = peel_wrappers(t, node_in); // `unsafe p[0] = v` assigns through the wrapper
   const Node *const n = ast_at_const(t->ast, node);
   switch (n->kind) {
     case NODE_IDENTIFIER: {
@@ -2765,7 +2811,7 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
 // A "place" (lvalue): an expression denoting a storage location, not a fresh value. Mirrors codegen's
 // is_lvalue so the mutability check and the temp-materialization agree on what is a place vs an rvalue.
 static bool is_place(TypeChecker *t, const NodeId id) {
-  const Node *const n = ast_at_const(t->ast, id);
+  const Node *const n = ast_at_const(t->ast, peel_wrappers(t, id));
   switch (n->kind) {
     case NODE_IDENTIFIER:
     case NODE_INDEX:
@@ -3141,6 +3187,10 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   Ast *const fa = mod_ast(t, fmod);
   const Node *const fn = ast_at_const(fa, ct->as.decl);
   const bool named = fn->kind == NODE_FUNCTION;
+  // An extern "C" function body is invisible to the compiler: no borrow/move/bounds guarantees
+  // survive the call, so the call site must carry the `unsafe` audit marker.
+  if (named && fn->as.function.is_extern && !t->unsafe_depth)
+    err_unsafe(t, sp, "calling an extern \"C\" function");
   const bool clos = fn->kind == NODE_CLOSURE;
   const NodeList params = named ? fn->as.function.params : clos ? fn->as.closure.params : fn->as.function_type.params;
   const NodeList returns = named ? fn->as.function.returns : clos ? fn->as.closure.returns : fn->as.function_type.returns;
@@ -3574,8 +3624,13 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
     }
     if (fhit != NODE_NONE) {
       ast_set_resolution_def(t->ast, mname, (DefId){bmod, fhit});
-      if (ast_at_const(mod_ast(t, bmod), fhit)->kind == NODE_FIELD)
+      if (ast_at_const(mod_ast(t, bmod), fhit)->kind == NODE_FIELD) {
         check_field_visibility(t, bmod, fhit, bdecl, name);
+        // A field READ/WRITE through a raw pointer (`p.f` / `p->f`) dereferences it; a method call
+        // through one stays safe here -- the method body's own raw accesses are checked in its scope.
+        if (!t->unsafe_depth && through_raw_pointer(t, obj))
+          err_unsafe(t, n->span, "accessing a field through a raw pointer"); // whole `p.f`, not just `.f`
+      }
       return subst_type(t, decl_type_in(t, bmod, fhit), gp, ga, gn);
     }
     // No own method/field: inherit an interface DEFAULT method (`extend T as Ord` gets Ord's `lt` body).
@@ -4101,8 +4156,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       if (idxn->kind == NODE_RANGE) { // `a[lo..hi]` -> a `[]T` view of the element type
         TypeId elem = TYPE_NONE, selem;
         TypeId user_result = TYPE_NONE; // set when a struct/instance dispatches to its `index_range` method
-        if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER)
+        if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER) {
+          if (ot->kind == TYPE_POINTER && !t->unsafe_depth)
+            err_unsafe(t, ast_at_const(a, n->as.index.object)->span, "slicing a raw pointer");
           elem = ot->as.elem;
+        }
         else if (slice_kind(t, obj, &selem))
           elem = selem;
         else if (ot->kind == TYPE_STRUCT || ot->kind == TYPE_INSTANCE) {
@@ -4159,9 +4217,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       bool overloaded = false;
       if (obj != TYPE_NONE) {
         TypeId selem;
-        if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER)
+        if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER) {
+          if (ot->kind == TYPE_POINTER && !t->unsafe_depth) // unchecked memory access (no length to bound it)
+            err_unsafe(t, ast_at_const(a, n->as.index.object)->span, "indexing a raw pointer");
           result = ot->as.elem;
-        else if (slice_kind(t, obj, &selem)) // `s[i]` on a `[]T` -> the element type
+        } else if (slice_kind(t, obj, &selem)) // `s[i]` on a `[]T` -> the element type
           result = selem;
         else if (ot->kind == TYPE_STRUCT || ot->kind == TYPE_INSTANCE) { // `obj[i]` -> its `index` method
           overloaded = true;

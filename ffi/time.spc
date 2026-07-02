@@ -23,10 +23,10 @@ pub const CLOCKS_PER_SEC: i64 = 1000000;
 
 // Current wall-clock time as seconds since the Unix epoch.
 pub fn now() i64 {
-    return time(null);
+    return unsafe time(null);
 }
 
 // Processor time consumed by the program so far, in seconds.
 pub fn cpu_seconds() f64 {
-    return (clock() as f64) / (CLOCKS_PER_SEC as f64);
+    return (unsafe clock() as f64) / (CLOCKS_PER_SEC as f64);
 }

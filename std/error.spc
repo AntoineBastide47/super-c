@@ -13,11 +13,11 @@ extern "C" {
 
 extend Error {
     fn own_message(message: String) *mut String {
-        let p = malloc(sizeof(String)) as *mut String;
+        let p = unsafe malloc(sizeof(String)) as *mut String;
         if (p as *mut void) == null {
-            abort();
+            unsafe abort();
         }
-        p[0] = message;
+        unsafe p[0] = message;
         return p;
     }
 
@@ -30,15 +30,15 @@ extend Error {
     }
 
     pub fn message(self: &Error) &String {
-        return &self.message[0];
+        return unsafe &self.message[0];
     }
 }
 
 extend Error as Free {
     pub fn free(self: &mut Error) {
         if (self.message as *mut void) != null {
-            self.message[0].free();
-            free(self.message as *mut void);
+            unsafe self.message[0].free();
+            unsafe free(self.message as *mut void);
             self.message = null;
         }
     }
@@ -46,7 +46,7 @@ extend Error as Free {
 
 extend Error as Clone {
     pub fn clone(self: &Error) Error {
-        return Error { code: self.code, message: Error::own_message(self.message[0].clone()) };
+        return Error { code: self.code, message: Error::own_message(unsafe self.message[0].clone()) };
     }
 }
 
@@ -55,7 +55,7 @@ extend Error as Format {
         let mut out = String::from_str("Error(");
         out.push_i64(self.code as i64);
         out.push_str(": ");
-        out.push_string(&self.message[0]);
+        out.push_string(unsafe &self.message[0]);
         out.push_str(")");
         return out;
     }

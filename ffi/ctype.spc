@@ -20,12 +20,12 @@ extern "C" {
 }
 
 // Ergonomic byte-oriented wrappers.
-pub fn is_alpha(b: u8) bool { return isalpha(b as i32) != 0; }
-pub fn is_digit(b: u8) bool { return isdigit(b as i32) != 0; }
-pub fn is_alnum(b: u8) bool { return isalnum(b as i32) != 0; }
-pub fn is_space(b: u8) bool { return isspace(b as i32) != 0; }
-pub fn is_upper(b: u8) bool { return isupper(b as i32) != 0; }
-pub fn is_lower(b: u8) bool { return islower(b as i32) != 0; }
-pub fn is_xdigit(b: u8) bool { return isxdigit(b as i32) != 0; }
-pub fn to_upper(b: u8) u8 { return toupper(b as i32) as u8; }
-pub fn to_lower(b: u8) u8 { return tolower(b as i32) as u8; }
+pub fn is_alpha(b: u8) bool { return unsafe isalpha(b as i32) != 0; }
+pub fn is_digit(b: u8) bool { return unsafe isdigit(b as i32) != 0; }
+pub fn is_alnum(b: u8) bool { return unsafe isalnum(b as i32) != 0; }
+pub fn is_space(b: u8) bool { return unsafe isspace(b as i32) != 0; }
+pub fn is_upper(b: u8) bool { return unsafe isupper(b as i32) != 0; }
+pub fn is_lower(b: u8) bool { return unsafe islower(b as i32) != 0; }
+pub fn is_xdigit(b: u8) bool { return unsafe isxdigit(b as i32) != 0; }
+pub fn to_upper(b: u8) u8 { return unsafe toupper(b as i32) as u8; }
+pub fn to_lower(b: u8) u8 { return unsafe tolower(b as i32) as u8; }
