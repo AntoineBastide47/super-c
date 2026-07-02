@@ -23,6 +23,10 @@ static NodeId parse_statement(Parser *p);
 static NodeId parse_block(Parser *p);
 static NodeId parse_if(Parser *p);
 static NodeId parse_expression(Parser *p);
+static NodeId parse_expression_after(Parser *p, NodeId left);
+static NodeId parse_binary(Parser *p, int minimum);
+static NodeId parse_binary_after(Parser *p, NodeId left, int minimum);
+static NodeId parse_postfix_after(Parser *p, NodeId expr);
 static NodeId parse_type(Parser *p);
 static NodeId parse_pattern(Parser *p);
 static NodeList parse_function_returns(Parser *p);
@@ -75,10 +79,6 @@ ALWAYS_INLINE TokenType peek_type(const Parser *p) {
   return p->pending_gt ? GreaterThan : token_type(raw_peek(p));
 }
 
-ALWAYS_INLINE TokenType peek_next_type(const Parser *p) {
-  return p->pending_gt ? token_type(raw_peek(p)) : token_type(p->tokens.data[p->current + 1]);
-}
-
 ALWAYS_INLINE bool at_end(const Parser *p) {
   return peek_type(p) == Eof;
 }
@@ -99,10 +99,6 @@ ALWAYS_INLINE bool check(const Parser *p, const TokenType type) {
   return peek_type(p) == type;
 }
 
-ALWAYS_INLINE bool check_next(const Parser *p, const TokenType type) {
-  return !p->pending_gt && token_type(p->tokens.data[p->current + 1]) == type;
-}
-
 // Is the current token an identifier whose text equals `kw`? Used for contextual keywords (e.g.
 // `static_assert`) that are too long to live in the lexer's fixed keyword table.
 static bool peek_ident_is(const Parser *p, const char *const kw) {
@@ -112,26 +108,6 @@ static bool peek_ident_is(const Parser *p, const char *const kw) {
   const uint32_t len = token_len(t);
   const size_t klen = strlen(kw);
   return len == klen && memcmp(p->source + token_start(t), kw, klen) == 0;
-}
-
-// With the cursor on a `[`, is this a designated array element `[index] = value` rather than a nested
-// array literal `[a, b]`? Scans to the matching `]` and checks for a following `=`. Read-only.
-static bool designator_ahead(const Parser *p) {
-  size_t i = p->current + 1;
-  int depth = 1;
-  const Token_Vec *const tk = &p->tokens;
-  while (i < tk->len) {
-    const TokenType t = token_type(tk->data[i]);
-    if (t == LeftBracket)
-      depth++;
-    else if (t == RightBracket && --depth == 0) {
-      i++;
-      break;
-    } else if (t == Eof)
-      return false;
-    i++;
-  }
-  return i < tk->len && token_type(tk->data[i]) == Equal;
 }
 
 ALWAYS_INLINE bool match(Parser *p, const TokenType type) {
@@ -245,10 +221,11 @@ static NodeList parse_type_args(Parser *p) {
   return args;
 }
 
-static NodeId parse_type_path(Parser *p) {
-  const uint32_t start = token_start(raw_peek(p));
+// Continues a type path whose first segment `head` was already consumed — the left-factoring hook
+// for callers that must read an identifier before knowing it heads a type (e.g. return lists).
+static NodeId parse_type_path_after(Parser *p, const NodeId head, const uint32_t start) {
   const uint32_t mark = ast_mark(p->ast);
-  ast_push(p->ast, identifier(p));
+  ast_push(p->ast, head);
   while (match(p, PathSeparator))
     ast_push(p->ast, identifier(p));
   const NodeList parts = ast_commit(p->ast, mark);
@@ -259,6 +236,11 @@ static NodeId parse_type_path(Parser *p) {
                   .span = span_new(start, previous_end(p)),
                   .as.type_path = {.parts = parts, .args = args},
               });
+}
+
+static NodeId parse_type_path(Parser *p) {
+  const uint32_t start = token_start(raw_peek(p));
+  return parse_type_path_after(p, identifier(p), start);
 }
 
 // The target type of an `as` cast. A bare type path here must NOT consume a trailing `<...>` as generic
@@ -484,17 +466,23 @@ static NodeList parse_function_returns(Parser *p) {
   }
 
   while (!check(p, RightParen) && !at_end(p)) {
-    if (check(p, Identifier) && check_next(p, Colon)) {
-      const NodeId name = identifier(p);
-      expect(p, Colon, "':'");
-      const NodeId type = parse_type(p);
-      ast_push(
-          p->ast, ast_add(
-                      p->ast, (Node){
-                                  .kind = NODE_PARAMETER,
-                                  .span = span_new(node_span(p, name).start, node_span(p, type).end),
-                                  .as.parameter = {.name = name, .type = type},
-                              }));
+    if (check(p, Identifier)) {
+      // Left-factored (LL(1)): consume the identifier, then one token decides — `:` makes it a
+      // return NAME, anything else makes it the head of a type path.
+      const uint32_t start = token_start(raw_peek(p));
+      const NodeId head = identifier(p);
+      if (match(p, Colon)) {
+        const NodeId type = parse_type(p);
+        ast_push(
+            p->ast, ast_add(
+                        p->ast, (Node){
+                                    .kind = NODE_PARAMETER,
+                                    .span = span_new(start, node_span(p, type).end),
+                                    .as.parameter = {.name = head, .type = type},
+                                }));
+      } else {
+        ast_push(p->ast, parse_type_path_after(p, head, start));
+      }
     } else {
       ast_push(p->ast, parse_type(p));
     }
@@ -1140,10 +1128,16 @@ ALWAYS_INLINE bool is_literal_token(const TokenType type) {
 
 static NodeId parse_pattern_atom(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
-  // `-<literal>` is a negative literal pattern: parse it as a unary-minus over the literal so the
-  // type checker and codegen reuse their existing `-literal` handling (a literal for coercion/emit).
-  if (check(p, Minus) && is_literal_token(peek_next_type(p))) {
-    advance(p);
+  // `-<literal>` is a negative literal pattern: `-` begins no other pattern, so commit on it alone
+  // (LL(1)) and require a literal. Parsed as a unary-minus over the literal so the type checker and
+  // codegen reuse their existing `-literal` handling (a literal for coercion/emit).
+  if (match(p, Minus)) {
+    if (!is_literal_token(peek_type(p))) {
+      error_here(p, "expected literal");
+      if (!at_end(p))
+        advance(p);
+      return NODE_NONE;
+    }
     const NodeId value = literal(p);
     const NodeId neg = ast_add(
         p->ast, (Node){
@@ -1252,6 +1246,54 @@ static NodeId parse_pattern(Parser *p) {
   return parse_range(p, RANGE_PATTERN);
 }
 
+static NodeId parse_array_literal(Parser *p);
+
+// One element of an array literal. Left-factored (LL(1)): an element starting with `[` parses the
+// bracket group as a (nested) array literal first; the single token after its `]` then decides --
+// `=` reinterprets the group's lone expression as a designated element `[index] = value`, anything
+// else keeps the group as a value that continues through the ordinary expression grammar.
+static NodeId parse_array_element(Parser *p) {
+  if (!check(p, LeftBracket))
+    return parse_expression(p);
+  const uint32_t start = token_start(raw_peek(p));
+  const NodeId group = parse_array_literal(p);
+  if (match(p, Equal)) {
+    const NodeList elements = ast_at_const(p->ast, group)->as.array_literal.elements;
+    NodeId index = elements.len == 1 ? ast_list(p->ast, elements)[0] : NODE_NONE;
+    if (index != NODE_NONE && ast_at_const(p->ast, index)->kind == NODE_FIELD_INITIALIZER)
+      index = NODE_NONE;
+    if (index == NODE_NONE)
+      parser_errorf(p, start, previous_end(p) - start, "a designated element needs a single index expression");
+    const NodeId value = parse_expression(p);
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_FIELD_INITIALIZER, // reused: `.name` holds the index expr
+                    .span = span_new(start, node_span(p, value).end),
+                    .as.field_initializer = {.name = index, .value = value},
+                });
+  }
+  return parse_expression_after(p, parse_binary_after(p, parse_postfix_after(p, group), 1));
+}
+
+static NodeId parse_array_literal(Parser *p) {
+  const uint32_t start = token_start(raw_peek(p));
+  advance(p); // `[`
+  const uint32_t mark = ast_mark(p->ast);
+  while (!check(p, RightBracket) && !at_end(p)) {
+    ast_push(p->ast, parse_array_element(p));
+    if (!match(p, Comma))
+      break;
+  }
+  const NodeList elements = ast_commit(p->ast, mark);
+  expect(p, RightBracket, "']'");
+  return ast_add(
+      p->ast, (Node){
+                  .kind = NODE_ARRAY_LITERAL,
+                  .span = span_new(start, previous_end(p)),
+                  .as.array_literal = {.elements = elements},
+              });
+}
+
 static NodeId parse_primary(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   const TokenType type = peek_type(p);
@@ -1264,18 +1306,21 @@ static NodeId parse_primary(Parser *p) {
   }
   if (type == Identifier) {
     // `va_start(ap, last)` / `va_arg(ap, T)` / `va_end(ap)` -- variadic-argument intrinsics over <stdarg.h>.
-    // Contextual (followed by `(`), so `va_arg` etc. remain valid identifiers elsewhere.
-    if (check_next(p, LeftParen) &&
-        (peek_ident_is(p, "va_start") || peek_ident_is(p, "va_arg") || peek_ident_is(p, "va_end"))) {
-      const uint8_t op = peek_ident_is(p, "va_start") ? VA_START : peek_ident_is(p, "va_arg") ? VA_ARG : VA_END;
-      advance(p); // the intrinsic name
-      expect(p, LeftParen, "'('");
+    // Contextual and left-factored (LL(1)): classify the name, consume it as an ordinary identifier,
+    // then the current token decides -- `(` enters the intrinsic grammar, anything else keeps the
+    // identifier, so `va_arg` etc. remain valid names elsewhere.
+    const int va = peek_ident_is(p, "va_start") ? VA_START
+                   : peek_ident_is(p, "va_arg") ? VA_ARG
+                   : peek_ident_is(p, "va_end") ? VA_END
+                                                : -1;
+    const NodeId value = identifier(p);
+    if (va >= 0 && match(p, LeftParen)) {
       const NodeId ap = parse_expression(p);
       NodeId extra = NODE_NONE;
-      if (op == VA_ARG) {
+      if (va == VA_ARG) {
         expect(p, Comma, "','");
         extra = parse_type(p); // the type to read
-      } else if (op == VA_START) {
+      } else if (va == VA_START) {
         expect(p, Comma, "','");
         extra = parse_expression(p); // the last named parameter
       }
@@ -1284,10 +1329,9 @@ static NodeId parse_primary(Parser *p) {
           p->ast, (Node){
                       .kind = NODE_VA_EXPR,
                       .span = span_new(start, previous_end(p)),
-                      .as.va_op = {.op = op, .ap = ap, .extra = extra},
+                      .as.va_op = {.op = (uint8_t)va, .ap = ap, .extra = extra},
                   });
     }
-    const NodeId value = identifier(p);
     if (p->allow_struct_initializer && check(p, LeftBrace))
       return parse_struct_initializer_after(p, value, start);
     return value;
@@ -1333,38 +1377,8 @@ static NodeId parse_primary(Parser *p) {
                     .as.new_expr = {.type = new_type, .initializer = initializer},
                 });
   }
-  if (match(p, LeftBracket)) { // `[e0, e1, ...]` array literal (postfix `[` indexing lives in parse_postfix)
-    const uint32_t mark = ast_mark(p->ast);
-    while (!check(p, RightBracket) && !at_end(p)) {
-      if (check(p, LeftBracket) && designator_ahead(p)) { // designated element `[index] = value`
-        const uint32_t es = token_start(raw_peek(p));
-        advance(p); // `[`
-        const NodeId index = parse_expression(p);
-        expect(p, RightBracket, "']'");
-        expect(p, Equal, "'='");
-        const NodeId value = parse_expression(p);
-        ast_push(
-            p->ast, ast_add(
-                        p->ast, (Node){
-                                    .kind = NODE_FIELD_INITIALIZER, // reused: `.name` holds the index expr
-                                    .span = span_new(es, node_span(p, value).end),
-                                    .as.field_initializer = {.name = index, .value = value},
-                                }));
-      } else {
-        ast_push(p->ast, parse_expression(p));
-      }
-      if (!match(p, Comma))
-        break;
-    }
-    const NodeList elements = ast_commit(p->ast, mark);
-    expect(p, RightBracket, "']'");
-    return ast_add(
-        p->ast, (Node){
-                    .kind = NODE_ARRAY_LITERAL,
-                    .span = span_new(start, previous_end(p)),
-                    .as.array_literal = {.elements = elements},
-                });
-  }
+  if (check(p, LeftBracket)) // `[e0, e1, ...]` array literal (postfix `[` indexing lives in parse_postfix)
+    return parse_array_literal(p);
   if (match(p, Fn)) { // anonymous function `fn(params) RetOpt { block }`
     bool variadic = false;
     const NodeList params = parse_parameters(p, &variadic);
@@ -1458,8 +1472,7 @@ static NodeId path_chain_to_type_path(Parser *p, const NodeId chain, const uint3
                          });
 }
 
-static NodeId parse_postfix(Parser *p) {
-  NodeId expr = parse_primary(p);
+static NodeId parse_postfix_after(Parser *p, NodeId expr) {
   for (;;) {
     const uint32_t start = node_span(p, expr).start;
     if (match(p, LeftParen)) {
@@ -1550,6 +1563,10 @@ static NodeId parse_postfix(Parser *p) {
   return expr;
 }
 
+static NodeId parse_postfix(Parser *p) {
+  return parse_postfix_after(p, parse_primary(p));
+}
+
 ALWAYS_INLINE bool unary_operator(const TokenType type) {
   return type == Bang || type == Tilde || type == Minus || type == Star || type == Ampersand || type == Move ||
          type == Unsafe;
@@ -1617,8 +1634,7 @@ ALWAYS_INLINE int precedence(const TokenType type) {
   }
 }
 
-static NodeId parse_binary(Parser *p, const int minimum) {
-  NodeId left = parse_unary(p);
+static NodeId parse_binary_after(Parser *p, NodeId left, const int minimum) {
   for (;;) {
     const TokenType op = peek_type(p);
     const int prec = precedence(op);
@@ -1636,16 +1652,17 @@ static NodeId parse_binary(Parser *p, const int minimum) {
   return left;
 }
 
+static NodeId parse_binary(Parser *p, const int minimum) {
+  return parse_binary_after(p, parse_unary(p), minimum);
+}
+
 ALWAYS_INLINE bool assignment_operator(const TokenType type) {
   return type == Equal || type == PlusEqual || type == MinusEqual || type == StarEqual || type == SlashEqual ||
          type == PercentEqual || type == AmpersandEqual || type == PipeEqual || type == CaretEqual ||
          type == LeftShiftEqual || type == RightShiftEqual;
 }
 
-static NodeId parse_expression(Parser *p) {
-  if (check(p, Range) || check(p, RangeInclusive)) // open-start range value: `..hi` / `..=hi`
-    return parse_range_value(p, NODE_NONE);
-  const NodeId left = parse_binary(p, 1);
+static NodeId parse_expression_after(Parser *p, const NodeId left) {
   if (check(p, Range) || check(p, RangeInclusive)) // `lo..hi` / `lo..` / `lo..=hi` as a first-class value
     return parse_range_value(p, left);
   if (!assignment_operator(peek_type(p)))
@@ -1658,6 +1675,12 @@ static NodeId parse_expression(Parser *p) {
                   .span = span_new(node_span(p, left).start, node_span(p, right).end),
                   .as.binary = {.op = op, .left = left, .right = right},
               });
+}
+
+static NodeId parse_expression(Parser *p) {
+  if (check(p, Range) || check(p, RangeInclusive)) // open-start range value: `..hi` / `..=hi`
+    return parse_range_value(p, NODE_NONE);
+  return parse_expression_after(p, parse_binary(p, 1));
 }
 
 // A range bound: an expression in a `for`, a pattern atom in a `switch`.
