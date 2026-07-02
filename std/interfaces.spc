@@ -20,8 +20,8 @@ pub interface Mul { fn mul(self: &Self, other: &Self) Self; }
 pub interface Div { fn div(self: &Self, other: &Self) Self; }
 pub interface Rem { fn rem(self: &Self, other: &Self) Self; }
 
-// Index operator overloading: `obj[i]` dispatches to `obj.index(i)`, yielding a `T`.
-pub interface Index<T> { fn index(self: &Self, i: usize) T; }
+// Index operator overloading (`obj[i]` / `obj[lo..hi]`) lives in the sibling `traits` module as
+// `Index` / `IndexMut`: its range form mentions `Range` and the slice views, which this module must not.
 
 // A canonical "zero" / empty value, constructible without arguments.
 pub interface Default {

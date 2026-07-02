@@ -109,3 +109,37 @@ extend<T> SliceMut<T> {
     }
 
 }
+
+// Index conformances. The `[]` operator on slice VALUES keeps its inline lowering (the compiler builds
+// the `{ptr,len}` view directly), so these exist for interface bounds (`fn f<C: Index<i32, []i32>>`) and
+// direct calls. Unchecked like the rest of the surface: the caller keeps `i`/the range within `len`.
+// `index_range` honors the written bounds: `..=` includes `r.end`; an open end arrives as `len()`.
+extend<T> Slice<T> as Index<T, []T> {
+    pub fn index(self: &Slice<T>, i: usize) &T {
+        return &self.ptr[i];
+    }
+    pub fn index_range(self: &Slice<T>, r: Range<usize>) []T {
+        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        return Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+    }
+}
+
+extend<T> SliceMut<T> as Index<T, []T> {
+    pub fn index(self: &SliceMut<T>, i: usize) &T {
+        return &self.ptr[i];
+    }
+    pub fn index_range(self: &SliceMut<T>, r: Range<usize>) []T {
+        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        return Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+    }
+}
+
+extend<T> SliceMut<T> as IndexMut<T, []mut T> {
+    pub fn index_mut(self: &mut SliceMut<T>, i: usize) &mut T {
+        return &mut self.ptr[i];
+    }
+    pub fn index_range_mut(self: &mut SliceMut<T>, r: Range<usize>) []mut T {
+        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        return SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+    }
+}

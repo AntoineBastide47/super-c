@@ -910,6 +910,20 @@ extend<A: Allocator> String<A> as Writer {
     }
 }
 
+// Index conformance: `s[i]` borrows the byte at `i`, and `s[lo..hi]` -- any range form, `..=` including
+// the end byte, an open end meaning `len()` -- is a borrowed `str` sub-view (valid until the next
+// mutation, like `as_str`). Byte-addressed and unchecked: the caller keeps the bounds within `len` and
+// on UTF-8 boundaries. No IndexMut: bytes are mutated through the growing/UTF-8-aware String API.
+extend<A: Allocator> String<A> as Index<u8, str> {
+    pub fn index(self: &String<A>, i: usize) &u8 {
+        return &self.as_str().ptr[i];
+    }
+    pub fn index_range(self: &String<A>, r: Range<usize>) str {
+        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        return self.as_str().slice(r.start, hi);
+    }
+}
+
 // Formatted output, compiler builtins. The first argument is a string literal with `{}` placeholders; the
 // trailing arguments fill them in order and are appended by their type (any integer/float, bool, char, str,
 // String, or any `Format` type). `{{`/`}}` are literal braces. `format` returns the built String; `print`

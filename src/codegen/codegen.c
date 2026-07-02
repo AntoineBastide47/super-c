@@ -955,6 +955,18 @@ static TypeId strip_ptr(Codegen *c, TypeId t) {
   return t;
 }
 
+// Peel REFERENCE layers only, stopping at a raw pointer: `*const S + i` / `p == q` are plain C pointer
+// arithmetic/comparison, never operator dispatch on the pointee (mirrors the typechecker's routing).
+// Returns TYPE_NONE for a pointer so overload emitters bail.
+static TypeId strip_ref_only(Codegen *c, TypeId t) {
+  const Ty *y = ast_type_at(c->ast, t);
+  while (y->kind == TYPE_REFERENCE) {
+    t = y->as.elem;
+    y = ast_type_at(c->ast, t);
+  }
+  return y->kind == TYPE_POINTER ? TYPE_NONE : t;
+}
+
 // --- numeric/literal emission --------------------------------------------------------------
 
 // Emit an integer/float literal, removing `_` separators and rewriting radix forms C can't read:
@@ -1761,7 +1773,9 @@ static bool emit_cmp_overload(Codegen *c, const Node *const n) {
   TypeId lt = ast_type(c->ast, n->as.binary.left);
   if (lt == TYPE_NONE)
     return false;
-  lt = subst_resolve(c, strip_ptr(c, lt));
+  lt = strip_ref_only(c, subst_resolve(c, lt));
+  if (lt == TYPE_NONE)
+    return false; // a raw-pointer operand: plain C pointer arithmetic/comparison
   const Ty *const bt = ast_type_at(c->ast, lt);
   if (bt->kind != TYPE_STRUCT && bt->kind != TYPE_INSTANCE)
     return false;
@@ -1855,7 +1869,9 @@ static bool emit_arith_overload(Codegen *c, const Node *const n) {
   TypeId lt = ast_type(c->ast, n->as.binary.left);
   if (lt == TYPE_NONE)
     return false;
-  lt = subst_resolve(c, strip_ptr(c, lt));
+  lt = strip_ref_only(c, subst_resolve(c, lt));
+  if (lt == TYPE_NONE)
+    return false; // a raw-pointer operand: plain C pointer arithmetic/comparison
   const Ty *const bt = ast_type_at(c->ast, lt);
   if (bt->kind != TYPE_STRUCT && bt->kind != TYPE_INSTANCE)
     return false;
@@ -2941,6 +2957,57 @@ static void emit_expr(Codegen *c, const NodeId id) {
         emit(c, " = %s); })", r);
         break;
       }
+      // Overloaded index-assignment (the IndexMut interface): `obj[i] = v` stores through the element
+      // pointer `index_mut` returns; a compound op reads and writes through it. A plain `=` over a Free
+      // element frees the replaced value first (mirroring a Free binding reassignment), with the RHS
+      // evaluated BEFORE the free so `v[i] = f(v[i])` reads the old element safely.
+      if (lhs->kind == NODE_INDEX && ast_at_const(c->ast, lhs->as.index.index)->kind != NODE_RANGE &&
+          !cg_slice_elem(c, ast_type(c->ast, lhs->as.index.object), NULL)) {
+        const TypeId iot = ast_type(c->ast, lhs->as.index.object); // NOT pointer-peeled (see the read path)
+        const Ty *const ibt = iot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, iot));
+        if (ibt && (ibt->kind == TYPE_STRUCT || ibt->kind == TYPE_INSTANCE)) {
+          ModuleId om;
+          NodeId od;
+          if (ibt->kind == TYPE_INSTANCE) {
+            const TyInstance *const it = ast_instance(c->ast, ibt->as.inst);
+            om = it->module;
+            od = it->decl;
+          } else {
+            om = ibt->module;
+            od = ibt->as.decl;
+          }
+          const DefId mth = cg_find_method_cstr(c, om, od, "index_mut");
+          if (mth.node != NODE_NONE) {
+            if (n->as.binary.op == Equal && lt != TYPE_NONE && cg_type_is_free(c, lt)) {
+              char r[32], p[32];
+              fresh(c, r, sizeof r);
+              fresh(c, p, sizeof p);
+              emit(c, "({ __auto_type %s = ", r);
+              emit_expr(c, n->as.binary.right);
+              emit(c, "; __auto_type %s = ", p);
+              emit_op_method(c, ibt, om, od, mth);
+              emit(c, "(");
+              emit_prefixed(c, lhs->as.index.object, "&");
+              emit(c, ", ");
+              emit_expr(c, lhs->as.index.index);
+              emit(c, "); ");
+              emit_free_target(c, lt);
+              emit(c, "(%s); (*%s = %s); })", p, p, r);
+            } else {
+              emit(c, "(*");
+              emit_op_method(c, ibt, om, od, mth);
+              emit(c, "(");
+              emit_prefixed(c, lhs->as.index.object, "&");
+              emit(c, ", ");
+              emit_expr(c, lhs->as.index.index);
+              emit(c, ") %s ", c_op(n->as.binary.op));
+              emit_expr(c, n->as.binary.right);
+              emit(c, ")");
+            }
+            break;
+          }
+        }
+      }
       emit(c, "("); // parenthesized like NODE_BINARY: C's `=`/`+=` bind looser, so a sub-expression
       emit_expr(c, n->as.binary.left); // assignment (`(a = 5) + 1`, `if (a = 3) == 3`) must keep its grouping
       emit(c, " %s ", c_op(n->as.binary.op));
@@ -2998,6 +3065,68 @@ static void emit_expr(Codegen *c, const NodeId id) {
         const NodeId obj = n->as.index.object;
         const NodeId lo = idxn->as.pattern_range.start, hi = idxn->as.pattern_range.end;
         const bool incl = idxn->as.pattern_range.inclusive;
+        // Range-index operator overloading (the Index interface): `obj[lo..hi]` on a struct / generic
+        // instance -> its `index_range` method, the written bounds packed into a `Range<usize>`. A
+        // missing start is 0; a missing end is the receiver's `len()` (the typechecker required it).
+        // Built-in slices keep their inline `{ptr,len}` lowering below (mirrors the typechecker's order).
+        if (c->package && !cg_slice_elem(c, ast_type(c->ast, obj), NULL)) {
+          const TypeId ot = ast_type(c->ast, obj); // NOT pointer-peeled: `p[a..b]` on a raw pointer is a C view
+          const Ty *const bt = ot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, ot));
+          if (bt && (bt->kind == TYPE_STRUCT || bt->kind == TYPE_INSTANCE)) {
+            ModuleId om;
+            NodeId od;
+            if (bt->kind == TYPE_INSTANCE) {
+              const TyInstance *const it = ast_instance(c->ast, bt->as.inst);
+              om = it->module;
+              od = it->decl;
+            } else {
+              om = bt->module;
+              od = bt->as.decl;
+            }
+            const DefId mth = cg_find_method_cstr(c, om, od, "index_range");
+            if (mth.node != NODE_NONE) {
+              ModuleId rm;
+              const NodeId rd = package_prelude_lookup(c->package, "Range", 5, true, &rm);
+              char rn[200]; // the Range<usize> C name the bounds are packed into
+              render_type_id(c, ast_intern_instance(c->ast, rm, rd, (TypeId[]){ast_builtin(BT_USIZE)}, 1), "", rn,
+                             sizeof rn);
+              // An LVALUE receiver is passed by ADDRESS (the returned view aliases its storage, which must
+              // outlive the statement-expression); a temporary receiver is spilled by value first.
+              char o[32], v[32];
+              fresh(c, o, sizeof o);
+              if (is_lvalue(c, obj)) {
+                emit(c, "({ __auto_type %s = ", o);
+                emit_prefixed(c, obj, "&");
+              } else {
+                fresh(c, v, sizeof v);
+                emit(c, "({ __auto_type %s = ", v);
+                emit_expr(c, obj);
+                emit(c, "; __auto_type %s = &%s", o, v);
+              }
+              emit(c, "; ");
+              emit_op_method(c, bt, om, od, mth);
+              emit(c, "(%s, (%s){ .start = ", o, rn);
+              if (lo != NODE_NONE)
+                emit_expr(c, lo);
+              else
+                emit(c, "0");
+              emit(c, ", .end = ");
+              if (hi != NODE_NONE) {
+                emit_expr(c, hi);
+              } else { // open end: the receiver's length
+                const DefId lm = cg_find_method_cstr(c, om, od, "len");
+                if (lm.node != NODE_NONE) {
+                  emit_op_method(c, bt, om, od, lm);
+                  emit(c, "(%s)", o);
+                } else {
+                  emit(c, "0"); // unreachable: the typechecker required a `len` method
+                }
+              }
+              emit(c, ", .inclusive = %s }); })", incl ? "true" : "false");
+              break;
+            }
+          }
+        }
         char styp[200];
         render_type_id(c, ast_type(c->ast, id), "", styp, sizeof styp); // the Slice<elem> result type
         const bool isslice = cg_slice_elem(c, ast_type(c->ast, obj), NULL);
@@ -3038,10 +3167,13 @@ static void emit_expr(Codegen *c, const NodeId id) {
         emit(c, " }; })");
         break;
       }
-      { // operator overloading: `obj[i]` on a struct / generic-instance -> its `index` method
+      { // operator overloading: `obj[i]` on a struct / generic-instance -> its `index` method.
+        // The object type is NOT pointer-peeled (mirrors the typechecker): `self.ptr[i]` on a raw
+        // `*mut T` is C indexing, never a dispatch to the pointee's own `index`. Prelude slices keep
+        // their inline `.ptr[__sc_bounds(..)]` lowering below (also mirroring the typechecker's order).
         const TypeId ot = ast_type(c->ast, n->as.index.object);
-        const Ty *const bt = ot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, strip_ptr(c, ot)));
-        if (bt && (bt->kind == TYPE_STRUCT || bt->kind == TYPE_INSTANCE)) {
+        const Ty *const bt = ot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, ot));
+        if (bt && (bt->kind == TYPE_STRUCT || bt->kind == TYPE_INSTANCE) && !cg_slice_elem(c, ot, NULL)) {
           ModuleId om;
           NodeId od;
           if (bt->kind == TYPE_INSTANCE) {
@@ -3054,15 +3186,38 @@ static void emit_expr(Codegen *c, const NodeId id) {
           }
           const DefId mth = cg_find_method_cstr(c, om, od, "index");
           if (mth.node != NODE_NONE) {
-            char o[32];
+            // A reference-returning `index` makes `obj[i]` the ELEMENT place: deref the returned pointer
+            // (the typechecker typed the expression as the element). A value-returning `index` stays a value.
+            Ast *const mam = cg_mod_ast(c, mth.module);
+            const NodeList mrets = ast_at_const(mam, mth.node)->as.function.returns;
+            bool retref = false;
+            if (mrets.len == 1) {
+              const NodeId mr0 = ast_list(mam, mrets)[0];
+              const Node *const mrn = ast_at_const(mam, mr0);
+              const NodeId mtn = mrn->kind == NODE_PARAMETER ? mrn->as.parameter.type : mr0;
+              retref = mtn != NODE_NONE && ast_at_const(mam, mtn)->kind == NODE_REFERENCE_TYPE;
+            }
+            // An LVALUE receiver is passed by ADDRESS (never copied into the statement-expression: a
+            // reference-returning index would then point into storage that dies at the `})`); only a
+            // temporary receiver is spilled by value first.
+            char o[32], v[32];
             fresh(c, o, sizeof o);
-            emit(c, "({ __auto_type %s = ", o); // spill so `&` is valid even for a temporary
-            emit_expr(c, n->as.index.object);
+            if (retref)
+              emit(c, "(*");
+            if (is_lvalue(c, n->as.index.object)) {
+              emit(c, "({ __auto_type %s = ", o);
+              emit_prefixed(c, n->as.index.object, "&");
+            } else {
+              fresh(c, v, sizeof v);
+              emit(c, "({ __auto_type %s = ", v);
+              emit_expr(c, n->as.index.object);
+              emit(c, "; __auto_type %s = &%s", o, v);
+            }
             emit(c, "; ");
             emit_op_method(c, bt, om, od, mth);
-            emit(c, "(&%s, ", o);
+            emit(c, "(%s, ", o);
             emit_expr(c, n->as.index.index);
-            emit(c, "); })");
+            emit(c, retref ? "); }))" : "); })");
             break;
           }
         }

@@ -2539,7 +2539,13 @@ static bool check_arith_overload(TypeChecker *t, const Node *const n, const Node
   const char *const m = arith_method_name(n->as.binary.op);
   if (!m)
     return false;
-  const TypeId ls = l == TYPE_NONE ? TYPE_NONE : strip(t, l);
+  // Peel REFERENCE layers only (auto-deref receivers). A RAW-POINTER operand is pointer arithmetic
+  // (`self.ptr + i` -- including a generic pointee `*const T`), never operator dispatch.
+  TypeId ls = l;
+  while (ls != TYPE_NONE && ast_type_at(t->ast, ls)->kind == TYPE_REFERENCE)
+    ls = ast_type_at(t->ast, ls)->as.elem;
+  if (ls != TYPE_NONE && ast_type_at(t->ast, ls)->kind == TYPE_POINTER)
+    return false;
   const Ty *const lt = ls == TYPE_NONE ? NULL : ast_type_at(t->ast, ls);
   if (!lt)
     return false;
@@ -2629,7 +2635,16 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
       // `==` would otherwise miscompile silently, so the method is required.
       const bool ord = n->as.binary.op == LessThan || n->as.binary.op == LessThanEqual ||
                        n->as.binary.op == GreaterThan || n->as.binary.op == GreaterThanEqual;
-      const TypeId ls = l == TYPE_NONE ? TYPE_NONE : strip(t, l);
+      // Peel REFERENCE layers only: raw-pointer comparisons (`self.ptr == null`, `p < q` -- including a
+      // generic pointee `*const T`) are plain C pointer comparisons, never eq/cmp dispatch.
+      TypeId ls = l;
+      while (ls != TYPE_NONE && ast_type_at(t->ast, ls)->kind == TYPE_REFERENCE)
+        ls = ast_type_at(t->ast, ls)->as.elem;
+      if (ls != TYPE_NONE && ast_type_at(t->ast, ls)->kind == TYPE_POINTER) {
+        if (l != TYPE_NONE && r != TYPE_NONE && l != r && !compatible(t, l, rn) && !compatible(t, r, ln))
+          err_mismatch(t, rn, l);
+        return ast_builtin(BT_BOOL);
+      }
       const Ty *const lt = ls == TYPE_NONE ? NULL : ast_type_at(t->ast, ls);
       if (lt && (lt->kind == TYPE_STRUCT || lt->kind == TYPE_INSTANCE)) {
         ModuleId om;
@@ -2703,9 +2718,35 @@ static bool is_assignable(TypeChecker *t, const NodeId node) {
       const NodeId obj = n->kind == NODE_INDEX ? n->as.index.object : n->as.member.object;
       // Indexing a writable slice (`[]mut T` -> SliceMut<T>) yields an assignable element, however the
       // slice was bound -- its mutability lives in the type, not the binding.
-      if (n->kind == NODE_INDEX && slice_kind(t, ast_type(t->ast, obj), NULL) == 2)
-        return true;
+      const int sk = n->kind == NODE_INDEX ? slice_kind(t, ast_type(t->ast, obj), NULL) : 0;
+      if (sk)
+        return sk == 2; // a read-only `[]T` element is never assignable
       const Ty *const ot = ast_type_at(t->ast, ast_type(t->ast, obj));
+      // Overloaded index-assignment (the IndexMut interface): `obj[i] = v` stores through the type's
+      // `index_mut` method, so the type must provide one AND the receiver must be mutable.
+      if (n->kind == NODE_INDEX && (ot->kind == TYPE_STRUCT || ot->kind == TYPE_INSTANCE)) {
+        ModuleId om;
+        NodeId od;
+        DefId gp[4];
+        TypeId ga[4];
+        int gn;
+        if (!aggregate_of(t, ast_type(t->ast, obj), &om, &od, gp, ga, &gn))
+          return false;
+        const DefId im = find_method_cstr(t, om, od, "index_mut");
+        if (im.node == NODE_NONE)
+          return false;
+        // The store goes THROUGH index_mut's returned reference, so it must return exactly one `&mut T`.
+        Ast *const ia = mod_ast(t, im.module);
+        const NodeList irs = ast_at_const(ia, im.node)->as.function.returns;
+        if (irs.len != 1)
+          return false;
+        const NodeId ir0 = ast_list(ia, irs)[0];
+        const Node *const irn = ast_at_const(ia, ir0);
+        const NodeId itn = irn->kind == NODE_PARAMETER ? irn->as.parameter.type : ir0;
+        if (itn == NODE_NONE || ast_at_const(ia, itn)->kind != NODE_REFERENCE_TYPE)
+          return false;
+        return is_assignable(t, obj); // index_mut takes `&mut self`: the receiver place must be mutable
+      }
       // Auto-deref: when the base is a reference/pointer, write-through is governed by the POINTEE
       // qualifier, not the binding -- a `let mut r: &T` may be rebound but `*r` / `r.f` stays read-only.
       if (ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE)
@@ -3880,11 +3921,43 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const Node *const idxn = ast_at_const(a, n->as.index.index);
       if (idxn->kind == NODE_RANGE) { // `a[lo..hi]` -> a `[]T` view of the element type
         TypeId elem = TYPE_NONE, selem;
+        TypeId user_result = TYPE_NONE; // set when a struct/instance dispatches to its `index_range` method
         if (ot->kind == TYPE_ARRAY || ot->kind == TYPE_POINTER)
           elem = ot->as.elem;
         else if (slice_kind(t, obj, &selem))
           elem = selem;
-        else if (obj != TYPE_NONE) {
+        else if (ot->kind == TYPE_STRUCT || ot->kind == TYPE_INSTANCE) {
+          // Range-index operator overloading (the Index interface): `obj[lo..hi]` -- any of `lo..hi`,
+          // `lo..=hi`, `lo..`, `..hi`, `..=hi` -- dispatches to `obj.index_range(r)` with the written
+          // bounds packed into a `Range<usize>`. A missing start is 0; a missing end is the value's
+          // `len()`, so an open-ended range additionally requires a `len` method.
+          ModuleId om;
+          NodeId od;
+          DefId gp[4];
+          TypeId ga[4];
+          int gn;
+          const Span sp = ast_at_const(a, n->as.index.object)->span;
+          if (aggregate_of(t, strip(t, obj), &om, &od, gp, ga, &gn)) {
+            const DefId md = find_method_cstr(t, om, od, "index_range");
+            if (md.node == NODE_NONE) {
+              char ty[96];
+              render_type(t, strip(t, obj), ty, sizeof ty);
+              typechecker_errorf(t, sp.start, sp.end - sp.start, "'%s' has no 'index_range' method for '[..]'", ty);
+              typechecker_notef(t, "implement the Index interface (an 'index_range' method) or slice a built-in array/slice");
+            } else if (!method_extend_bounds_hold(t, strip(t, obj), md)) {
+              err_method_extend_bounds(t, sp, strip(t, obj), md);
+            } else {
+              if (idxn->as.pattern_range.end == NODE_NONE && find_method_cstr(t, om, od, "len").node == NODE_NONE) {
+                char ty[96];
+                render_type(t, strip(t, obj), ty, sizeof ty);
+                typechecker_errorf(t, sp.start, sp.end - sp.start,
+                                   "an open-ended range index needs a 'len' method on '%s' to supply the end", ty);
+              }
+              prelude_range_type(t, ast_builtin(BT_USIZE)); // intern Range<usize>: the argument codegen builds
+              user_result = tc_method_ret(t, strip(t, obj), md);
+            }
+          }
+        } else if (obj != TYPE_NONE) {
           const Span sp = ast_at_const(a, n->as.index.object)->span;
           typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot slice this expression");
         }
@@ -3898,7 +3971,9 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
             typechecker_errorf(t, sp.start, sp.end - sp.start, "range bound must be an integer");
           }
         }
-        result = elem != TYPE_NONE ? prelude_slice_type(t, elem, false) : TYPE_NONE;
+        result = user_result != TYPE_NONE ? user_result
+                 : elem != TYPE_NONE      ? prelude_slice_type(t, elem, false)
+                                          : TYPE_NONE;
         break;
       }
       const TypeId idx = check_expr(t, n->as.index.index);
@@ -3932,6 +4007,11 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
               if (!operand_fits_param(t, p1, n->as.index.index))
                 err_mismatch(t, n->as.index.index, p1);
               result = tc_method_ret(t, strip(t, obj), md);
+              // A reference-returning `index` makes `obj[i]` the ELEMENT PLACE (the compiler inserts the
+              // deref, mirrored in codegen), so containers hand out borrowed elements, never copies. A
+              // value-returning `index` keeps its rvalue behavior.
+              if (result != TYPE_NONE && ast_type_at(a, result)->kind == TYPE_REFERENCE)
+                result = ast_type_at(a, result)->as.elem;
             }
           }
         } else {
