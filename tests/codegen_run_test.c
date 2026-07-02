@@ -1332,6 +1332,76 @@ static void test_operator_overloading(void) {
       PRE "fn main() i32 { let arr = [40, 2]; exit(arr[0] + arr[1] + (10 * 0)); }\n", 42, "");
 }
 
+// The Index / IndexMut interfaces: `obj[i]` through a reference-returning `index` is the element PLACE
+// (read via auto-deref, written -- plain and compound -- through `index_mut`), and `obj[lo..hi]` in every
+// range form (closed, inclusive `..=`, open start, open end via `len()`) dispatches to `index_range` with
+// the bounds packed into a `Range<usize>`. Covers a user conformance and the std ones (Vector, str, String).
+static void test_index_interface(void) {
+  sc_run_program(
+      "Index/IndexMut: user type, places + every range form",
+      PRE "struct Buf { pub data: [i32; 8], pub n: usize }\n"
+          "extend Buf { pub fn len(self: &Buf) usize { return self.n; } }\n"
+          "extend Buf as Index<i32, []i32> {\n"
+          "  pub fn index(self: &Buf, i: usize) &i32 { return &self.data[i]; }\n"
+          "  pub fn index_range(self: &Buf, r: Range<usize>) []i32 {\n"
+          "    let hi = if r.inclusive { r.end + 1; } else { r.end; };\n"
+          "    return self.data[r.start..hi];\n"
+          "  }\n"
+          "}\n"
+          "extend Buf as IndexMut<i32, []mut i32> {\n"
+          "  pub fn index_mut(self: &mut Buf, i: usize) &mut i32 { return &mut self.data[i]; }\n"
+          "  pub fn index_range_mut(self: &mut Buf, r: Range<usize>) []mut i32 {\n"
+          "    let hi = if r.inclusive { r.end + 1; } else { r.end; };\n"
+          "    return SliceMut::<i32> { ptr: ((&mut self.data[0]) as *mut i32) + r.start, len: hi - r.start, };\n"
+          "  }\n"
+          "}\n"
+          "fn main() i32 {\n"
+          "  let mut b = Buf { data: [10, 20, 30, 40, 50, 60, 70, 80], n: 8 };\n"
+          "  b[2] = 5; b[3] += 2;\n"                                          // write + compound -> 5, 42
+          "  let s1 = b[1..4]; let s2 = b[..2]; let s3 = b[6..]; let s4 = b[5..=6];\n"
+          "  let mut w = b.index_range_mut(Range::<usize> { start: 0, end: 1, inclusive: false });\n"
+          "  w.set(0, 3);\n"                                                  // mut view writes back
+          "  exit(b[0] + s1.get(1) + s2.len() as i32 + s3.get(1) + s4.get(0)); }\n", // 3+5+2+80+60 = 150
+      150, "");
+  sc_run_program(
+      "Index/IndexMut: Vector places and range views",
+      PRE "fn main() i32 {\n"
+          "  let mut v = Vector::<i32>::new();\n"
+          "  let mut i = 0; while i < 8 { v.push(i * 10); i = i + 1; }\n"
+          "  v[0] = 7; v[1] += 3;\n"                                          // 7, 13
+          "  let a = v[2..5]; let b = v[..3]; let c = v[6..]; let d = v[4..=6];\n"
+          "  exit(v[0] + v[1] + a.get(0) + b.len() as i32 + c.get(1) + d.get(2)); }\n", // 7+13+20+3+70+60 = 173
+      173, "");
+  sc_run_program(
+      "Index: str and String byte places + str sub-views",
+      PRE "fn main() i32 {\n"
+          "  let s = \"hello world\";\n"
+          "  let hello = s[..5]; let world = s[6..]; let ell = s[1..=3];\n"
+          "  let owned = \"abcdef\".to_string();\n"
+          "  let mid = owned[1..4];\n"
+          "  let mut acc = 0;\n"
+          "  if hello.eq(&\"hello\") { acc = acc + 1; }\n"
+          "  if world.eq(&\"world\") { acc = acc + 10; }\n"
+          "  if ell.eq(&\"ell\") { acc = acc + 100; }\n"
+          "  if mid.eq(&\"bcd\") { acc = acc + 1000; }\n"
+          "  if s[4] == 111 { acc = acc + 10000; }\n"      // 'o'
+          "  if owned[2] == 99 { acc = acc + 100000; }\n"  // 'c'
+          "  exit(acc / 1361); }\n",                       // 111111 / 1361 = 81 (all six hit)
+      81, "");
+  // A plain `=` over a Free element frees the replaced value before the store (like Vector::set).
+  // Only the replacement's free prints: `exit()` terminates before main's scope-exit RAII runs.
+  sc_run_program(
+      "IndexMut: plain = frees the replaced Free element",
+      PRE "struct R { pub id: i32 }\n"
+          "extend R as Free { fn free(self: &mut R) { putchar(48 + self.id); } }\n"
+          "fn main() i32 {\n"
+          "  let mut v = Vector::<R>::new();\n"
+          "  v.push(R { id: 1 });\n"
+          "  v[0] = R { id: 2 };\n" // frees id 1 here, before the store
+          "  exit(0); }\n",
+      0, "1");
+}
+
 // E#14 `?` early-return operator: `expr?` unwraps Some/Ok, or returns None/Err (carrying the error) from
 // the enclosing function -- running its pending defers first, like a `return`.
 static void test_question_operator(void) {
@@ -1782,7 +1852,7 @@ int main(void) {
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,
       test_defer,              test_static_assert,        test_interfaces,
-      test_operator_overloading, test_question_operator,  test_string_sso,
+      test_operator_overloading, test_index_interface, test_question_operator,  test_string_sso,
       test_unions,             test_closures,             test_std_types,
       test_nested_generic_by_value, test_generics_over_user_types, test_container_conformances,
       test_str_conformances,   test_format_printing,      test_bounds_checks,

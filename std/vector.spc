@@ -382,6 +382,33 @@ extend<T> VecIter<T> as Iterator<&T> {
     }
 }
 
+// Index conformances: `v[i]` borrows the element in place (unchecked, like `at` -- the caller keeps
+// `i < len`), and `v[lo..hi]` -- any range form, `..=` including the end, an open end meaning the
+// vector's `len()` -- is a borrowed `[]T` view of the elements. Views alias the buffer, so they are
+// invalidated by any reallocating mutation (push/reserve).
+extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
+    pub fn index(self: &Vector<T, A>, i: usize) &T {
+        return &self.ptr[i];
+    }
+    pub fn index_range(self: &Vector<T, A>, r: Range<usize>) []T {
+        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        return Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+    }
+}
+
+// The writable counterpart: `v[i] = x` stores through the returned element pointer (a plain `=` over a
+// Free element frees the replaced value first, compiler-inserted -- same semantics as `set`);
+// `index_range_mut` is an in-place writable view.
+extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
+    pub fn index_mut(self: &mut Vector<T, A>, i: usize) &mut T {
+        return &mut self.ptr[i];
+    }
+    pub fn index_range_mut(self: &mut Vector<T, A>, r: Range<usize>) []mut T {
+        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        return SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+    }
+}
+
 // Conditional conformances: a Vector is Clone/Eq/Hash exactly when its element is. Each dispatches to the
 // element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash()`), monomorphized per element type.
 extend<T: Clone, A: Allocator> Vector<T, A> as Clone {

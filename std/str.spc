@@ -248,6 +248,20 @@ extend str as Default {
     }
 }
 
+// Index conformance: `s[i]` borrows the byte at `i`; `s[lo..hi]` -- any range form, `..=` including the
+// end byte, an open end meaning `len()` -- is the sub-view `slice(lo, hi)`. Byte-addressed and unchecked:
+// the caller keeps the bounds within `len` and on UTF-8 boundaries, exactly like `byte_at`/`slice`.
+// No IndexMut: a `str` is a read-only view.
+extend str as Index<u8, str> {
+    pub fn index(self: &str, i: usize) &u8 {
+        return &self.ptr[i];
+    }
+    pub fn index_range(self: &str, r: Range<usize>) str {
+        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        return self.slice(r.start, hi);
+    }
+}
+
 // --- iterators -----------------------------------------------------------------------------------
 // Borrowing cursors over a `str`. Each holds a copy of the (ptr, len) view, so the borrowed bytes must
 // outlive the iterator (the same borrowing contract as `Vector::iter`). Bind the source first: iterating a
