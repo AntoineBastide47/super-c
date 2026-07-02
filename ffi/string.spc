@@ -27,7 +27,7 @@ pub fn copy(dst: []mut u8, src: []u8) usize {
         n = src.len();
     }
     if n > 0 {
-        memcpy(dst.as_mut_ptr() as *mut void, src.as_ptr() as *const void, n);
+        unsafe memcpy(dst.as_mut_ptr() as *mut void, src.as_ptr() as *const void, n);
     }
     return n;
 }
@@ -38,14 +38,14 @@ pub fn move_bytes(dst: []mut u8, src: []u8) usize {
         n = src.len();
     }
     if n > 0 {
-        memmove(dst.as_mut_ptr() as *mut void, src.as_ptr() as *const void, n);
+        unsafe memmove(dst.as_mut_ptr() as *mut void, src.as_ptr() as *const void, n);
     }
     return n;
 }
 
 pub fn fill(dst: []mut u8, value: u8) {
     if dst.len() > 0 {
-        memset(dst.as_mut_ptr() as *mut void, value as i32, dst.len());
+        unsafe memset(dst.as_mut_ptr() as *mut void, value as i32, dst.len());
     }
 }
 
@@ -56,5 +56,5 @@ pub fn equal(a: []u8, b: []u8) bool {
     if a.len() == 0 {
         return true;
     }
-    return memcmp(a.as_ptr() as *const void, b.as_ptr() as *const void, a.len()) == 0;
+    return unsafe memcmp(a.as_ptr() as *const void, b.as_ptr() as *const void, a.len()) == 0;
 }

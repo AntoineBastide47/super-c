@@ -22,11 +22,11 @@ extend<T> Slice<T> {
 
     // The element at `i` (no bounds check -- the caller guarantees `i < len`).
     pub fn get(self: &Slice<T>, i: usize) T {
-        return self.ptr[i];
+        return unsafe self.ptr[i];
     }
 
     pub fn at(self: &Slice<T>, i: usize) &T {
-        return &self.ptr[i];
+        return &unsafe self.ptr[i];
     }
 
     // Bounds-checked borrow: `Some(&elem)` when `i < len`, else `None`.
@@ -34,15 +34,15 @@ extend<T> Slice<T> {
         if i >= self.len {
             return Option::<&T>::None;
         }
-        return Option::<&T>::Some(&self.ptr[i]);
+        return Option::<&T>::Some(&unsafe self.ptr[i]);
     }
 
     pub fn first(self: &Slice<T>) T {
-        return self.ptr[0];
+        return unsafe self.ptr[0];
     }
 
     pub fn last(self: &Slice<T>) T {
-        return self.ptr[self.len - 1];
+        return unsafe self.ptr[self.len - 1];
     }
 
     // A read-only pointer to the first element (the view's backing storage).
@@ -68,11 +68,11 @@ extend<T> SliceMut<T> {
     }
 
     pub fn get(self: &SliceMut<T>, i: usize) T {
-        return self.ptr[i];
+        return unsafe self.ptr[i];
     }
 
     pub fn at(self: &SliceMut<T>, i: usize) &T {
-        return &self.ptr[i];
+        return &unsafe self.ptr[i];
     }
 
     // Bounds-checked shared borrow: `Some(&elem)` when `i < len`, else `None`.
@@ -80,22 +80,22 @@ extend<T> SliceMut<T> {
         if i >= self.len {
             return Option::<&T>::None;
         }
-        return Option::<&T>::Some(&self.ptr[i]);
+        return Option::<&T>::Some(&unsafe self.ptr[i]);
     }
 
     // Overwrite the element at `i` (no bounds check -- the caller guarantees `i < len`). Takes `&self`: a
     // `[]mut T` view grants element mutation through its internal `*mut T` regardless of the binding's
     // mutability, exactly like the `s[i] = v` index-assignment it mirrors.
     pub fn set(self: &SliceMut<T>, i: usize, value: T) {
-        self.ptr[i] = value;
+        unsafe self.ptr[i] = value;
     }
 
     pub fn first(self: &SliceMut<T>) T {
-        return self.ptr[0];
+        return unsafe self.ptr[0];
     }
 
     pub fn last(self: &SliceMut<T>) T {
-        return self.ptr[self.len - 1];
+        return unsafe self.ptr[self.len - 1];
     }
 
     pub fn as_ptr(self: &SliceMut<T>) *const T {
@@ -116,30 +116,30 @@ extend<T> SliceMut<T> {
 // `index_range` honors the written bounds: `..=` includes `r.end`; an open end arrives as `len()`.
 extend<T> Slice<T> as Index<T, []T> {
     pub fn index(self: &Slice<T>, i: usize) &T {
-        return &self.ptr[i];
+        return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &Slice<T>, r: Range<usize>) []T {
         let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
     }
 }
 
 extend<T> SliceMut<T> as Index<T, []T> {
     pub fn index(self: &SliceMut<T>, i: usize) &T {
-        return &self.ptr[i];
+        return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &SliceMut<T>, r: Range<usize>) []T {
         let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
     }
 }
 
 extend<T> SliceMut<T> as IndexMut<T, []mut T> {
     pub fn index_mut(self: &mut SliceMut<T>, i: usize) &mut T {
-        return &mut self.ptr[i];
+        return &mut unsafe self.ptr[i];
     }
     pub fn index_range_mut(self: &mut SliceMut<T>, r: Range<usize>) []mut T {
         let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start, };
+        return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
     }
 }

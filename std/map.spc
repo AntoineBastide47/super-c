@@ -36,8 +36,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     // The slot a key occupies, or the first empty slot on its probe sequence. Requires cap > 0.
     fn slot(self: &Map<K, V, A>, key: &K) usize {
         let mut i = (key.hash() as usize) % self.cap;
-        while self.used[i] != 0 {
-            if self.keys[i].eq(key) {
+        while unsafe self.used[i] != 0 {
+            if unsafe self.keys[i].eq(key) {
                 return i;
             }
             i = i + 1;
@@ -61,16 +61,16 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         self.keys = self.alloc.alloc(newcap * sizeof(K), alignof(K)) as *mut K;
         self.vals = self.alloc.alloc(newcap * sizeof(V), alignof(V)) as *mut V;
         self.used = self.alloc.alloc(newcap, alignof(u8)) as *mut u8;
-        memset(self.used as *mut void, 0, newcap); // mark every slot empty
+        unsafe memset(self.used as *mut void, 0, newcap); // mark every slot empty
         self.cap = newcap;
         self.len = 0;
         let mut i: usize = 0;
         while i < oldcap {
-            if oldused[i] == 1 {
-                let j = self.slot(&oldkeys[i]);
-                self.keys[j] = oldkeys[i];
-                self.vals[j] = oldvals[i];
-                self.used[j] = 1;
+            if unsafe oldused[i] == 1 {
+                let j = self.slot(&unsafe oldkeys[i]);
+                unsafe self.keys[j] = unsafe oldkeys[i];
+                unsafe self.vals[j] = unsafe oldvals[i];
+                unsafe self.used[j] = 1;
                 self.len = self.len + 1;
             }
             i = i + 1;
@@ -89,16 +89,16 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             self.grow();
         }
         let i = self.slot(&key);
-        if self.used[i] != 0 { // overwrite: keep the stored key, free the duplicate + the old value
+        if unsafe self.used[i] != 0 { // overwrite: keep the stored key, free the duplicate + the old value
             let mut dup = key;
             dup.free();
-            self.vals[i].free();
-            self.vals[i] = value;
+            unsafe self.vals[i].free();
+            unsafe self.vals[i] = value;
             return;
         }
-        self.keys[i] = key;
-        self.vals[i] = value;
-        self.used[i] = 1;
+        unsafe self.keys[i] = key;
+        unsafe self.vals[i] = value;
+        unsafe self.used[i] = 1;
         self.len = self.len + 1;
     }
 
@@ -108,10 +108,10 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             return Option::<&V>::None;
         }
         let i = self.slot(key);
-        if self.used[i] == 0 {
+        if unsafe self.used[i] == 0 {
             return Option::<&V>::None;
         }
-        return Option::<&V>::Some(&self.vals[i]);
+        return Option::<&V>::Some(&unsafe self.vals[i]);
     }
 
     pub fn contains_key(self: &Map<K, V, A>, key: &K) bool {
@@ -125,21 +125,21 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             return Option::<V>::None;
         }
         let i = self.slot(key);
-        if self.used[i] == 0 {
+        if unsafe self.used[i] == 0 {
             return Option::<V>::None;
         }
-        let removed = self.vals[i];
-        self.keys[i].free(); // the key for this entry is no longer referenced -- free it (no-op if not Free)
-        self.used[i] = 0;
+        let removed = unsafe self.vals[i];
+        unsafe self.keys[i].free(); // the key for this entry is no longer referenced -- free it (no-op if not Free)
+        unsafe self.used[i] = 0;
         self.len = self.len - 1;
         let mut j = i + 1;
         if j >= self.cap {
             j = 0;
         }
-        while self.used[j] == 1 {
-            let k = self.keys[j];
-            let v = self.vals[j];
-            self.used[j] = 0;
+        while unsafe self.used[j] == 1 {
+            let k = unsafe self.keys[j];
+            let v = unsafe self.vals[j];
+            unsafe self.used[j] = 0;
             self.len = self.len - 1;
             self.insert(k, v);
             j = j + 1;
@@ -164,9 +164,9 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
     pub fn free(self: &mut Map<K, V, A>) {
         let mut i: usize = 0;
         while i < self.cap {
-            if self.used[i] != 0 {
-                self.keys[i].free(); // no-op if K isn't Free
-                self.vals[i].free(); // no-op if V isn't Free
+            if unsafe self.used[i] != 0 {
+                unsafe self.keys[i].free(); // no-op if K isn't Free
+                unsafe self.vals[i].free(); // no-op if V isn't Free
             }
             i = i + 1;
         }
@@ -220,8 +220,8 @@ extend<K> MapKeys<K> as Iterator<&K> {
         while self.idx < self.cap {
             let i = self.idx;
             self.idx = self.idx + 1;
-            if self.used[i] != 0 {
-                return Option::<&K>::Some(&self.keys[i]);
+            if unsafe self.used[i] != 0 {
+                return Option::<&K>::Some(&unsafe self.keys[i]);
             }
         }
         return Option::<&K>::None;
@@ -233,8 +233,8 @@ extend<V> MapValues<V> as Iterator<&V> {
         while self.idx < self.cap {
             let i = self.idx;
             self.idx = self.idx + 1;
-            if self.used[i] != 0 {
-                return Option::<&V>::Some(&self.vals[i]);
+            if unsafe self.used[i] != 0 {
+                return Option::<&V>::Some(&unsafe self.vals[i]);
             }
         }
         return Option::<&V>::None;

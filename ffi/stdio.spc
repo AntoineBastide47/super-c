@@ -67,7 +67,7 @@ pub struct File {
 extend File {
     // Open `path` with a C `fopen` mode ("r", "w", "a", "rb", ...). `None` if the file cannot be opened.
     pub fn open(path: &mut String, mode: &mut String) Option<File> {
-        let h = fopen(path.cstr(), mode.cstr());
+        let h = unsafe fopen(path.cstr(), mode.cstr());
         if h == null {
             return Option::<File>::None;
         }
@@ -76,29 +76,29 @@ extend File {
 
     // Append `text`'s bytes to the file; returns the number of bytes written.
     pub fn write_str(self: &mut File, text: &String) usize {
-        return fwrite(text.as_ptr() as *const void, 1, text.len(), self.handle);
+        return unsafe fwrite(text.as_ptr() as *const void, 1, text.len(), self.handle);
     }
 
     // Read the entire remaining contents into a new owned string.
     pub fn read_all(self: &mut File) String {
         let mut out = String::new();
-        let mut c = fgetc(self.handle);
+        let mut c = unsafe fgetc(self.handle);
         while c >= 0 {
             out.push_byte(c as u8);
-            c = fgetc(self.handle);
+            c = unsafe fgetc(self.handle);
         }
         return out;
     }
 
     // Flush buffered writes to the OS. Returns 0 on success.
     pub fn flush(self: &mut File) i32 {
-        return fflush(self.handle);
+        return unsafe fflush(self.handle);
     }
 
     // Close now, idempotently. Also runs automatically via `Free`.
     pub fn close(self: &mut File) {
         if self.handle != null {
-            fclose(self.handle);
+            unsafe fclose(self.handle);
             self.handle = null;
         }
     }
@@ -112,10 +112,10 @@ extend File as Free {
 
 extend File as Writer {
     fn write(self: &mut File, bytes: []u8) usize {
-        return fwrite(bytes.as_ptr() as *const void, 1, bytes.len(), self.handle);
+        return unsafe fwrite(bytes.as_ptr() as *const void, 1, bytes.len(), self.handle);
     }
 }
 
-pub fn stdin() *mut FILE { return __sc_stdin(); }
-pub fn stdout() *mut FILE { return __sc_stdout(); }
-pub fn stderr() *mut FILE { return __sc_stderr(); }
+pub fn stdin() *mut FILE { return unsafe __sc_stdin(); }
+pub fn stdout() *mut FILE { return unsafe __sc_stdout(); }
+pub fn stderr() *mut FILE { return unsafe __sc_stderr(); }

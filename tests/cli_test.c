@@ -32,7 +32,7 @@ static void test_compiles_file(void) {
   char spc[4160], out[4170], cmd[8320], buf[256];
   snprintf(spc, sizeof spc, "%s/prog.spc", DIR);
   snprintf(out, sizeof out, "%s/build/prog.c", DIR); // output goes to a flat build/ tree
-  write_file(spc, "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { exit(7); }\n");
+  write_file(spc, "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(7); }\n");
 
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   const int rc = run_cmd(cmd, buf, sizeof buf);
@@ -70,7 +70,7 @@ static void test_cross_module_enum(void) {
              "fn color_code(c: lib::lib::Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\n"
              "fn box_amt(b: lib::lib::Box) i32 { return switch b { Filled(n) => n, Empty => -1, }; }\n"
              "fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);\n"
-             "  exit(color_code(c) + box_amt(b)); }\n");
+             "  unsafe exit(color_code(c) + box_amt(b)); }\n");
 
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   const int rc = run_cmd(cmd, buf, sizeof buf);
@@ -127,7 +127,7 @@ static void test_module_features(void) {
          "fn main() i32 {\n"
          "  let v: lib::lib::V = lib::lib::Vec2 { x: 5, y: 7 };\n"
          "  let w = lib::lib::mk(1, 2);\n"
-         "  exit(v.sum() + w.sum() + lib::lib::BASE); }\n");
+         "  unsafe exit(v.sum() + w.sum() + lib::lib::BASE); }\n");
   snprintf(spc, sizeof spc, "%s/feat.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module features compile: %s", buf);
@@ -164,7 +164,7 @@ static void test_cross_module_generic_by_value(void) {
          "  let o = opt::opt::Opt::<Bar>::Some(Bar { x: 30 });\n"
          "  let a = o.unwrap_or(Bar { x: 0 }).x;\n" // 30 -- re-homed struct + non-generic method
          "  let m = o.map(bx).unwrap_or(0);\n"      // 30 -- cross-pool generic method map<i32>
-         "  exit(a + m); }\n");                     // 60
+         "  unsafe exit(a + m); }\n");                     // 60
   snprintf(spc, sizeof spc, "%s/genbv.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module generic over a user type compiles: %s", buf);
@@ -205,7 +205,7 @@ static void test_cross_module_generic_bound_dispatch(void) {
          "fn main() i32 {\n"
          "  let b = bx::bx::Bx::<Bar> { v: Bar { x: 21 } };\n"
          "  let d = b.dup();\n" // deep-clones Bar via the bound dispatch
-         "  exit(d.v.x + b.v.x); }\n"); // 42
+         "  unsafe exit(d.v.x + b.v.x); }\n"); // 42
   snprintf(spc, sizeof spc, "%s/genbd.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module generic with bound-method dispatch compiles: %s", buf);
@@ -229,7 +229,7 @@ static void test_emit_macro_export(void) {
          "@emit_macro\n"
          "pub struct Pair<T> { pub a: T, pub b: T }\n"
          "extend<T> Pair<T> { pub fn pick(self: &Pair<T>, second: bool) T { if second { return self.b; } return self.a; } }\n"
-         "fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; exit(p.pick(true) + p.a); }\n"); // 4 + 3
+         "fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p.a); }\n"); // 4 + 3
   snprintf(spc, sizeof spc, "%s/emac.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "@emit_macro generic compiles: %s", buf);
@@ -285,7 +285,7 @@ static void test_per_extend_bound_filtering(void) {
          "extend<T> Wrap<T> { pub fn raw(self: &Wrap<T>) i32 { return 7; } }\n"
          "extend<T: Marker> Wrap<T> { pub fn marked(self: &Wrap<T>) i32 { return self.v.mark(); } }\n"
          "struct Plain { pub n: i32 }\n" // deliberately does NOT implement Marker
-         "fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; exit(w.raw()); }\n");
+         "fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()); }\n");
   snprintf(spc, sizeof spc, "%s/pibf.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "generic with an unsatisfied bounded block compiles: %s", buf);
@@ -307,9 +307,9 @@ static void test_string_non_default_allocator(void) {
          "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }\n"
          "struct RawAlloc {}\n"
          "extend RawAlloc as Allocator {\n"
-         "  fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return malloc(n); }\n"
-         "  fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return realloc(p, n); }\n"
-         "  fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) void { free(p); }\n"
+         "  fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe malloc(n); }\n"
+         "  fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe realloc(p, n); }\n"
+         "  fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) void { unsafe free(p); }\n"
          "}\n"
          "fn main() i32 {\n"
          "  let a = RawAlloc {};\n"
@@ -319,7 +319,7 @@ static void test_string_non_default_allocator(void) {
          "  let mut f = s.fmt();\n"
          "  let ok = s.eq_str(\"abcdefghijklmnopqrstuvwxyz0123456789\") && s.cmp(&c) == 0 && s.hash() == c.hash() && f.len() == s.len();\n"
          "  f.free(); c.free(); s.free();\n"
-         "  if ok { exit(42); } exit(1);\n"
+         "  if ok { unsafe exit(42); } unsafe exit(1);\n"
          "}\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
@@ -348,7 +348,7 @@ static void test_warning_clean_unused_emission(void) {
          "  fn get(self: &Self) T { return self.v; }\n"
          "  fn unused_method(self: &Self) T { return self.v; }\n"
          "}\n"
-         "fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; exit(s.value() + w.get()); }\n");
+         "fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(s.value() + w.get()); }\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "unused-emission regression source compiles: %s", buf);
@@ -365,7 +365,7 @@ static void test_warning_clean_unused_emission(void) {
 static void test_prelude_output_is_demand_driven(void) {
   char root[4112], spc[4170], cmd[8320], buf[256];
   snprintf(root, sizeof root, "%s/simpleout", DIR);
-  mkfile(root, "main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { exit(42); }\n");
+  mkfile(root, "main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(42); }\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "trivial CLI source compiles: %s", buf);
@@ -400,7 +400,7 @@ static void test_cross_module_nested_rehomed_instance(void) {
          "struct Bar { pub x: i32 }\n"
          "fn main() i32 {\n"
          "  let o = lib::lib::Outer::<Bar> { inner: lib::lib::Inner::<Bar> { value: Bar { x: 42 } } };\n"
-         "  exit(o.get().x);\n"
+         "  unsafe exit(o.get().x);\n"
          "}\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
@@ -424,9 +424,9 @@ static void test_cross_module_interface(void) {
          "import shapes;\n"
          "extern \"C\" { fn exit(code: i32) void; }\n"
          "struct Sq { pub s: i32 }\n"
-         "extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return self.s * self.s; } }\n"
+         "extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return unsafe (self.s * self.s); } }\n"
          "fn total<T: shapes::Area>(x: &mut T) i32 { return x.area(); }\n"
-         "fn main() i32 { let mut q = Sq { s: 6 }; exit(total(&mut q)); }\n"); // 36
+         "fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); }\n"); // 36
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module interface compiles: %s", buf);
@@ -450,11 +450,11 @@ static void test_ffi_bindings(void) {
          "import ctype;\n"
          "extern \"C\" { fn exit(code: i32) void; }\n"
          "fn main() i32 {\n"
-         "  let s = math::sqrt(144.0) as i32;\n" // 12, raw binding via mod::f
+         "  let s = unsafe math::sqrt(144.0) as i32;\n" // 12, raw binding via mod::f
          "  let mut acc = 0;\n"
          "  if ctype::is_digit(53) { acc = acc + 1; }\n"  // '5' -> +1, thin wrapper
          "  if ctype::is_alpha(53) { acc = acc + 10; }\n" // not alpha -> +0
-         "  exit(s + acc);\n"                              // 13
+         "  unsafe exit(s + acc);\n"                              // 13
          "}\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
@@ -479,7 +479,7 @@ static void test_module_imports(void) {
          "import string as s;\n"
          "import math as *;\n"
          "extern \"C\" { fn exit(code: i32) void; }\n"
-         "fn main() i32 { exit(s::tag() + tag()); }\n");
+         "fn main() i32 { unsafe exit(s::tag() + tag()); }\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "alias+glob+stdlib-named modules compile: %s", buf);
@@ -508,7 +508,7 @@ static void test_format_conformances(void) {
          "  let mut os = o.fmt();\n"                                  // "Some(x)" (7)
          "  let r = Result::<String, String>::Ok(String::from_str(\"y\"));\n"
          "  let mut rs = r.fmt();\n"                                  // "Ok(y)" (5)
-         "  exit(vs.len() as i32 + os.len() as i32 + rs.len() as i32); }\n"); // 18
+         "  unsafe exit(vs.len() as i32 + os.len() as i32 + rs.len() as i32); }\n"); // 18
   snprintf(spc, sizeof spc, "%s/fmt.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "Format conformances compile (no prelude header cycle): %s", buf);

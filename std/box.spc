@@ -16,22 +16,22 @@ extend<T, A: Allocator> Box<T, A> {
     pub fn new_in(alloc: A, value: T) Box<T, A> {
         let mut b = Box::<T, A> { ptr: null, alloc: alloc, };
         b.ptr = b.alloc.alloc(sizeof(T), alignof(T)) as *mut T;
-        b.ptr[0] = value;
+        unsafe b.ptr[0] = value;
         return b;
     }
 
     pub fn get(self: &Box<T, A>) &T {
-        return &self.ptr[0];
+        return unsafe &self.ptr[0];
     }
 
     pub fn set(self: &mut Box<T, A>, value: T) {
-        self.ptr[0] = value;
+        unsafe self.ptr[0] = value;
     }
 
     // Overwrite the contents, returning the previous value.
     pub fn replace(self: &mut Box<T, A>, value: T) T {
-        let old = self.ptr[0];
-        self.ptr[0] = value;
+        let old = unsafe self.ptr[0];
+        unsafe self.ptr[0] = value;
         return old;
     }
 
@@ -41,7 +41,7 @@ extend<T, A: Allocator> Box<T, A> {
 
     // Allocate a new box (through a copy of the same allocator) holding `f` applied to this box's value.
     pub fn map<U>(self: &Box<T, A>, f: fn(T) U) Box<U, A> {
-        return Box::<U, A>::new_in(self.alloc, f(self.ptr[0]));
+        return Box::<U, A>::new_in(self.alloc, f(unsafe self.ptr[0]));
     }
 
 }
@@ -58,7 +58,7 @@ extend<T, A: Allocator + Default> Box<T, A> {
 // value. The inner `.free()` is a no-op when `T` isn't a Free type.
 extend<T, A: Allocator> Box<T, A> as Free {
     pub fn free(self: &mut Box<T, A>) {
-        self.ptr[0].free(); // free the boxed value (no-op if T isn't Free)
+        unsafe self.ptr[0].free(); // free the boxed value (no-op if T isn't Free)
         self.alloc.dealloc(self.ptr as *mut void, sizeof(T), alignof(T));
         self.ptr = null;
     }

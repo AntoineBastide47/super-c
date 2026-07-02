@@ -1696,6 +1696,8 @@ static bool is_lvalue(Codegen *c, const NodeId id) {
     case NODE_MEMBER:
       return !n->as.member.path; // a field/element access is an lvalue; an `Enum::Variant` value is not
     case NODE_UNARY:
+      if (n->as.unary.op == Move || n->as.unary.op == Unsafe)
+        return is_lvalue(c, n->as.unary.operand); // transparent wrappers: `&unsafe p[i]` addresses the place
       return n->as.unary.op == Star; // `*p` deref
     default:
       return false;
@@ -2942,8 +2944,13 @@ static void emit_expr(Codegen *c, const NodeId id) {
       // Reassigning a Free BINDING (`x = new`) frees the old value first -- a Free binding is always
       // initialized (the type checker forbids deferred init), and not freeing the old buffer would leak.
       // (Field/index places like `m.vals[i] = v` are managed manually -- they may be uninitialized.)
-      const Node *const lhs = ast_at_const(c->ast, n->as.binary.left);
-      const DefId ld = lhs->kind == NODE_IDENTIFIER ? ast_resolution_def(c->ast, n->as.binary.left) : (DefId){0, NODE_NONE};
+      NodeId lhsId = n->as.binary.left;
+      const Node *lhs = ast_at_const(c->ast, lhsId);
+      while (lhs->kind == NODE_UNARY && (lhs->as.unary.op == Move || lhs->as.unary.op == Unsafe)) {
+        lhsId = lhs->as.unary.operand; // transparent wrappers: store-form detection needs the real place
+        lhs = ast_at_const(c->ast, lhsId);
+      }
+      const DefId ld = lhs->kind == NODE_IDENTIFIER ? ast_resolution_def(c->ast, lhsId) : (DefId){0, NODE_NONE};
       if (n->as.binary.op == Equal && lhs->kind == NODE_IDENTIFIER && cg_type_is_free(c, lt) && ld.node != NODE_NONE &&
           !cg_is_moved(c, ld.node)) {
         char r[32];

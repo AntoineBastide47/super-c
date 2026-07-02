@@ -42,7 +42,7 @@ extern "C" {
 // The value of environment variable `name`, or `None` if unset (a fresh owned copy -- the C buffer is not
 // retained).
 pub fn get_env(name: &mut String) Option<String> {
-    let p = getenv(name.cstr());
+    let p = unsafe getenv(name.cstr());
     if p == null {
         return Option::<String>::None;
     }
@@ -51,10 +51,10 @@ pub fn get_env(name: &mut String) Option<String> {
 
 // Parse a base-10 integer, ignoring leading whitespace and trailing junk (0 on a non-numeric string).
 pub fn parse_int(s: &mut String) i64 {
-    return atol(s.cstr());
+    return unsafe atol(s.cstr());
 }
 
 // Parse a floating-point value (0.0 on a non-numeric string).
 pub fn parse_float(s: &mut String) f64 {
-    return atof(s.cstr());
+    return unsafe atof(s.cstr());
 }

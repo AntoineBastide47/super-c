@@ -10,14 +10,14 @@ extern "C" {
 }
 
 pub fn errno() i32 {
-    return __sc_errno_location()[0];
+    return unsafe __sc_errno_location()[0];
 }
 
 pub fn set_errno(code: i32) {
-    __sc_errno_location()[0] = code;
+    unsafe __sc_errno_location()[0] = code;
 }
 
 // The error message for `code` (e.g. a negative return value's magnitude) as an owned string.
 pub fn error_string(code: i32) String {
-    return String::from_cstr(strerror(code));
+    return String::from_cstr(unsafe strerror(code));
 }

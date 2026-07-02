@@ -151,15 +151,20 @@ pointers — no hidden environment or allocation.
 
 ```superc
 fn main() i32 {
-    let p = new i32(41);     // heap-allocated *mut i32
-    *p = *p + 1;
-    let r: &i32 = p;         // reference (&T -> const T*, &mut T -> T*)
-    return *r;               // 42
+    let p = new i32(41);        // heap-allocated *mut i32
+    unsafe { *p = *p + 1; }     // raw-pointer access must carry the `unsafe` marker
+    let r: &i32 = unsafe &*p;   // reborrow the raw pointer as a reference (&T -> const T*)
+    return *r;                  // 42 (reference operations need no unsafe)
 }
 ```
 
 `*const T` / `*mut T` are raw pointers; `&T` / `&mut T` are references. `new T(expr)` and `new T { .. }`
 allocate; `sizeof(T)` and `alignof(T)` give the byte size and alignment.
+
+Raw-pointer manipulation — dereference, indexing, arithmetic, field access through a pointer — and
+every call to an `extern "C"` function must sit inside an `unsafe { ... }` block or be prefixed with
+`unsafe`: the compiler cannot vouch for those operations, so the marker delimits exactly where its
+guarantees stop. Pointer comparison and reference operations stay safe.
 
 References are borrow-checked statically: a place admits many `&` or one `&mut` (overlap is
 field-precise — `p.a` and `p.b` don't conflict), a place can't be read or moved while an overlapping
@@ -173,8 +178,8 @@ extern "C" { fn free(p: *mut void) void; }
 
 fn main() i32 {
     let p = new i32(42);
-    defer free(p as *mut void);   // runs at scope exit, even on an early return
-    return *p;                    // the value is read before the defer runs
+    defer unsafe free(p as *mut void);   // runs at scope exit, even on an early return
+    return unsafe *p;                    // the value is read before the defer runs
 }
 ```
 
@@ -254,7 +259,8 @@ extern "C" {
 ```
 
 `extern "C"` declarations bind directly to C symbols with no wrapper or mangling, so existing C
-libraries can be used as-is. `extern "C" "header.h" { .. }` emits the matching `#include`.
+libraries can be used as-is. `extern "C" "header.h" { .. }` emits the matching `#include`. Calling
+any extern binding requires an `unsafe` block or prefix at the call site.
 
 Variadics work in both directions. A binding can take `...`:
 
@@ -271,7 +277,7 @@ extern "C" { fn vsnprintf(buf: *mut char, n: usize, fmt: *const char, ap: va_lis
 fn format(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
     let mut ap: va_list;
     va_start(ap, fmt);
-    let written = vsnprintf(buf, n, fmt, ap);
+    let written = unsafe vsnprintf(buf, n, fmt, ap);
     va_end(ap);
     return written;
 }

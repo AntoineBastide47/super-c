@@ -31,7 +31,7 @@ static void test_ok(void) {
       "fn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.get(); }\n");
   expect_ok("entry point fn main() i32", "fn main() i32 { return 0; }\n");
   expect_ok("string literal is str", "fn main() i32 { let s: str = \"hi\"; let n: usize = s.len; }\n");
-  expect_ok("str ptr field indexes to u8", "fn first(s: str) u8 { return s.ptr[0]; }\n");
+  expect_ok("str ptr field indexes to u8", "fn first(s: str) u8 { return unsafe s.ptr[0]; }\n");
   expect_ok(
       "private field reachable via self",
       "struct S { v: i32, }\nextend S { fn get(self: &S) i32 { return self.v; } }\n");
@@ -71,16 +71,16 @@ static void test_ok(void) {
       "struct pattern field",
       "struct P { pub x: i32, }\n"
       "fn f(p: P) i32 { return switch p { P { x: v } => v, }; }\n");
-  expect_ok("pointer offset", "fn f(p: *i32) i32 { let q: *i32 = p + 1; return *q; }\n");
-  expect_ok("pointer minus int", "fn f(p: *i32) i32 { let q: *i32 = p - 1; return *q; }\n");
-  expect_ok("int plus pointer", "fn f(p: *i32) i32 { let q: *i32 = 1 + p; return *q; }\n");
-  expect_ok("pointer difference", "fn f(a: *i32, b: *i32) isize { return a - b; }\n");
+  expect_ok("pointer offset", "fn f(p: *i32) i32 { let q: *i32 = unsafe (p + 1); return unsafe *q; }\n");
+  expect_ok("pointer minus int", "fn f(p: *i32) i32 { let q: *i32 = unsafe (p - 1); return unsafe *q; }\n");
+  expect_ok("int plus pointer", "fn f(p: *i32) i32 { let q: *i32 = unsafe (1 + p); return unsafe *q; }\n");
+  expect_ok("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n");
   expect_ok("explicit void bare return", "fn f() void { return; }\n");
   expect_ok("range adopts usize bound", "fn f(n: usize) void { for i in 0..n { let x: usize = i; } }\n");
   expect_ok("associated new call", "struct String {}\nextend String { fn new() String { return String {}; } }\nfn f() String { return String::new(); }\n");
   expect_ok(
       "reference coerces to const pointer",
-      "fn take(p: *const i32) i32 { return *p; }\n"
+      "fn take(p: *const i32) i32 { return unsafe *p; }\n"
       "fn give(x: i32) i32 { return take(&x); }\n");
 }
 
@@ -98,7 +98,7 @@ static void test_computed_scalar_types(void) {
 }
 
 static void test_computed_pointer_types(void) {
-  static const char src[] = "fn f(p: *i32) i32 { let q: *i32 = p + 1; return *q; }\n";
+  static const char src[] = "fn f(p: *i32) i32 { let q: *i32 = unsafe (p + 1); return unsafe *q; }\n";
   Ast *a = sc_typecheck("pointer types", src);
   if (!a)
     return;
@@ -106,19 +106,19 @@ static void test_computed_pointer_types(void) {
   const TypeId ot = ast_type(a, off);
   CHECK(ast_type_at(a, ot)->kind == TYPE_POINTER, "pointer offset stays a pointer");
   CHECK(ast_type_at(a, ot)->as.elem == ast_builtin(BT_I32), "pointee is i32");
-  const NodeId deref = th_nth_kind(a, NODE_UNARY, 0); // *q
+  const NodeId deref = th_nth_kind(a, NODE_UNARY, 1); // *q (unary 0 is the first `unsafe` wrapper)
   CHECK(ast_type(a, deref) == ast_builtin(BT_I32), "deref yields the pointee type");
   ast_free(&a);
 }
 
 static void test_computed_reference_type(void) {
   // `*p` is unary[0] (in `take`), `&x` is unary[1] (in `give`, parsed second).
-  static const char src[] = "fn take(p: *const i32) i32 { return *p; }\n"
+  static const char src[] = "fn take(p: *const i32) i32 { return unsafe *p; }\n"
                             "fn give(x: i32) i32 { return take(&x); }\n";
   Ast *a = sc_typecheck("reference type", src);
   if (!a)
     return;
-  const NodeId addr = th_nth_kind(a, NODE_UNARY, 1); // &x
+  const NodeId addr = th_nth_kind(a, NODE_UNARY, 2); // &x (unary 0/1 are `*p` and its `unsafe` wrapper)
   CHECK(ast_type_at(a, ast_type(a, addr))->kind == TYPE_REFERENCE, "address-of yields a reference");
   ast_free(&a);
 }
@@ -152,7 +152,7 @@ static void test_inferred_let_types(void) {
 static void test_str_member_types(void) {
   // The string literal is created first, so it is NODE_LITERAL[0]; the member accesses follow in
   // source order: g.len is NODE_MEMBER[0], g.ptr is NODE_MEMBER[1].
-  static const char src[] = "fn main() i32 { let g: str = \"hi\"; let n: usize = g.len; let b: u8 = g.ptr[0]; return 0; }\n";
+  static const char src[] = "fn main() i32 { let g: str = \"hi\"; let n: usize = g.len; let b: u8 = unsafe g.ptr[0]; return 0; }\n";
   Ast *a = sc_typecheck("str member types", src);
   if (!a)
     return;
@@ -225,7 +225,7 @@ static void test_errors(void) {
   expect_ok( // taking the address of an uninitialized buffer is an out-parameter, not a read
       "address of uninitialized buffer is not a read",
       "extern \"C\" { fn memset(p: *mut char, c: i32, n: usize) i32; }\n"
-      "fn main() i32 { let mut buf: [char; 8]; memset(&mut buf[0], 0, 8); return 0; }\n");
+      "fn main() i32 { let mut buf: [char; 8]; unsafe memset(&mut buf[0], 0, 8); return 0; }\n");
   expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
   expect_error("f32 is not Eq", "fn needs<T: Eq>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) { return 1; } return 0; }\n",
@@ -317,9 +317,9 @@ static void test_errors(void) {
   expect_error(
       "unknown init field", "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { y: 1, }; }\n", "no field 'y'");
   expect_error(
-      "pointer plus pointer", "fn f(a: *i32, b: *i32) void { let c = a + b; }\n", "invalid pointer arithmetic");
+      "pointer plus pointer", "fn f(a: *i32, b: *i32) void { let c = unsafe (a + b); }\n", "invalid pointer arithmetic");
   expect_error(
-      "non-integer pointer offset", "fn f(p: *i32, y: f64) void { let q = p + y; }\n",
+      "non-integer pointer offset", "fn f(p: *i32, y: f64) void { let q = unsafe (p + y); }\n",
       "pointer arithmetic requires an integer offset");
   expect_error(
       "const pointer does not coerce to reference",
@@ -352,14 +352,14 @@ static void test_interface_bounds(void) {
       "where clause + multi-bound satisfied",
       "interface A { fn a(self: *mut Self) i32; }\ninterface B { fn b(self: *mut Self) i32; }\n"
       "struct S { pub v: i32 }\n"
-      "extend S as A { fn a(self: *mut Self) i32 { return self.v; } }\n"
-      "extend S as B { fn b(self: *mut Self) i32 { return self.v; } }\n"
+      "extend S as A { fn a(self: *mut Self) i32 { return unsafe self.v; } }\n"
+      "extend S as B { fn b(self: *mut Self) i32 { return unsafe self.v; } }\n"
       "fn both<T>(x: &mut T) i32 where T: A + B { return x.a() + x.b(); }\n"
       "fn main() i32 { let mut s = S { v: 1 }; return both(&mut s); }\n");
   expect_ok(
       "conditional extension satisfied",
       "interface Free { fn free(self: *mut Self) i32; }\n"
-      "struct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return self.id; } }\n"
+      "struct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return unsafe self.id; } }\n"
       "struct Box<T> { pub inner: T }\n"
       "extend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\n"
       "fn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\n"
@@ -377,7 +377,7 @@ static void test_interface_bounds(void) {
       "extend missing a required method",
       "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\n"
       "struct File { pub count: i32 }\n"
-      "extend File as Writer { fn write(self: *mut Self) i32 { return self.count; } }\n"
+      "extend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\n"
       "fn main() i32 { return 0; }\n",
       "missing method 'flush'");
   expect_error(
@@ -398,7 +398,7 @@ static void test_interface_bounds(void) {
   expect_error(
       "method not declared by any bound",
       "interface Writer { fn write(self: *mut Self) i32; }\nstruct File { pub count: i32 }\n"
-      "extend File as Writer { fn write(self: *mut Self) i32 { return self.count; } }\n"
+      "extend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\n"
       "fn f<T: Writer>(w: &mut T) i32 { return w.nope(); }\n"
       "fn main() i32 { let mut x = File { count: 0 }; return f(&mut x); }\n",
       "no field or method 'nope'");
@@ -518,16 +518,16 @@ static void test_ffi(void) {
   expect_ok(
       "variadic call with extra args",
       "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
-      "fn main() i32 { let f: char = '%'; printf(&f, 1, 2, 3); return 0; }\n");
+      "fn main() i32 { let f: char = '%'; unsafe printf(&f, 1, 2, 3); return 0; }\n");
   expect_ok(
       "variadic call with no extra args",
       "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
-      "fn main() i32 { let f: char = '%'; printf(&f); return 0; }\n");
+      "fn main() i32 { let f: char = '%'; unsafe printf(&f); return 0; }\n");
   // ... but never fewer than the fixed params, and `...` is meaningless without an extern C body.
   expect_error(
       "variadic call below fixed arity",
       "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
-      "fn main() i32 { printf(); return 0; }\n",
+      "fn main() i32 { unsafe printf(); return 0; }\n",
       "at least 1 argument");
   // A Super-C-defined variadic function is allowed (it reads args via va_start/va_arg), but needs at
   // least one fixed parameter for va_start to anchor on.
@@ -552,17 +552,17 @@ static void test_ffi(void) {
   // arg), but still defaults to the `str` view elsewhere -- it does NOT become a mutable/non-const pointer.
   expect_ok(
       "string literal -> *const char param",
-      "extern \"C\" { fn puts(s: *const char) i32; }\nfn main() i32 { puts(\"hi\"); return 0; }\n");
+      "extern \"C\" { fn puts(s: *const char) i32; }\nfn main() i32 { unsafe puts(\"hi\"); return 0; }\n");
   expect_ok(
       "string literal -> *const u8 param",
-      "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return f(\"hi\"); }\n");
+      "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return unsafe f(\"hi\"); }\n");
   expect_ok(
       "string literal as %s vararg",
-      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { printf(\"%s\", \"hi\"); return 0; }\n");
+      "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { unsafe printf(\"%s\", \"hi\"); return 0; }\n");
   expect_ok("string literal stays str by default", "fn main() i32 { let s: str = \"hi\"; return s.len() as i32; }\n");
   expect_error(
       "string literal not a mutable pointer",
-      "extern \"C\" { fn f(s: *mut char) i32; }\nfn main() i32 { return f(\"hi\"); }\n", "mismatched types");
+      "extern \"C\" { fn f(s: *mut char) i32; }\nfn main() i32 { return unsafe f(\"hi\"); }\n", "mismatched types");
 }
 
 static void test_static_assert(void) {
@@ -644,6 +644,34 @@ static void test_switch_exhaustiveness(void) {
 #undef ENUM3
 }
 
+// Raw-pointer operations and extern "C" calls are only legal inside `unsafe { .. }` / `unsafe expr`:
+// the compiler cannot vouch for them, so the marker is mandatory. References stay safe.
+static void test_unsafe_enforcement(void) {
+#define EXTC "extern \"C\" { fn exit(code: i32) void; }\n"
+  expect_error("extern call needs unsafe", EXTC "fn main() i32 { exit(0); return 0; }\n",
+               "calling an extern \"C\" function requires an 'unsafe' block");
+  expect_error("raw deref needs unsafe", "fn f(p: *i32) i32 { return *p; }\n",
+               "dereferencing a raw pointer requires an 'unsafe' block");
+  expect_error("raw index needs unsafe", "fn f(p: *i32) i32 { return p[1]; }\n",
+               "indexing a raw pointer requires an 'unsafe' block");
+  expect_error("pointer arithmetic needs unsafe", "fn f(p: *i32) *i32 { return p + 1; }\n",
+               "raw pointer arithmetic requires an 'unsafe' block");
+  expect_error(
+      "field through raw pointer needs unsafe",
+      "struct S { pub v: i32 }\nfn f(p: *mut S) i32 { return p.v; }\n",
+      "accessing a field through a raw pointer requires an 'unsafe' block");
+  expect_ok("unsafe block covers the operation", EXTC "fn main() i32 { unsafe { exit(0); } return 0; }\n");
+  expect_ok("unsafe prefix covers the expression", EXTC "fn main() i32 { unsafe exit(0); return 0; }\n");
+  expect_ok("unsafe deref index arith",
+            "fn f(p: *mut i32) i32 { unsafe *p = 1; let x = unsafe p[0]; let q = unsafe (p + 1); return x + unsafe *q; }\n");
+  expect_ok("unsafe assignment through wrapper is a place",
+            "struct S { pub v: i32 }\nfn f(p: *mut S) { unsafe p.v = 3; }\n");
+  expect_ok("reference operations stay safe",
+            "fn f(r: &mut i32) i32 { *r = 2; return *r; }\n");
+  expect_ok("pointer comparison stays safe", "fn f(a: *i32, b: *i32) bool { return a == b; }\n");
+#undef EXTC
+}
+
 int main(void) {
   test_ok();
   test_bug_regressions();
@@ -658,6 +686,7 @@ int main(void) {
   test_str_member_types();
   test_errors();
   test_switch_exhaustiveness();
+  test_unsafe_enforcement();
   test_interface_bounds();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");

@@ -244,7 +244,7 @@ static void gen_run(const char *name, const char *src, const char *exp_ids) {
 #define TR_PRE                                                                                                          \
   "extern \"C\" { fn exit(code: i32) void; fn putchar(c: i32) i32; }\n"                                                 \
   "struct Tr { pub id: i32 }\n"                                                                                         \
-  "extend Tr as Free { fn free(self: &mut Tr) { putchar(self.id); } }\n"
+  "extend Tr as Free { fn free(self: &mut Tr) { unsafe putchar(self.id); } }\n"
 
 #define ID_CAP 70 // ids map to bytes 48.. ; keep them printable (<127)
 
@@ -262,7 +262,7 @@ static void run_batch(const Work *works, int start, int end, int batch) {
     sc++;
   }
   at = apf(prog, at, PROG_CAP,
-           "fn main() i32 { let mut acc = 0;\n%s  if acc == 2147483647 { putchar(33); }\n  exit(0); }\n", calls);
+           "fn main() i32 { let mut acc = 0;\n%s  if acc == 2147483647 { unsafe putchar(33); }\n  unsafe exit(0); }\n", calls);
   (void)at;
   char name[64];
   snprintf(name, sizeof name, "raii-gen batch %d (%d scenarios)", batch, sc);
