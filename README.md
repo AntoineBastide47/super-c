@@ -1,8 +1,8 @@
 # Super-C
 
 Super-C is a small, statically-typed systems language that **compiles to readable C**. It pairs a
-modern, frontend containing features I liked from multiple different programming languages I have encountered (generics, enums with payloads, pattern matching, closures, modules, )
-with C's portability and performance model — the compiler lowers everything to ordinary C99/C11 that Clang, GCC, or MSVC then turns into a native binary.
+modern frontend — features I liked from other languages (generics, enums with payloads, pattern matching, closures, modules)
+— with C's portability and performance model — the compiler lowers everything to ordinary C99/C11 that Clang, GCC, or MSVC then turns into a native binary.
 
 Super-C is not a C dialect. It is its own language that uses C as a compilation target.
 
@@ -11,9 +11,9 @@ Super-C is not a C dialect. It is its own language that uses C as a compilation 
 ```text
 Super-C source (.spc)
     -> lexer        (UTF-8, packed tokens)
-    -> parser       (LL(1)-friendly, flat AST arena)
+    -> parser       (predicated LL(1): one-token lookahead, no backtracking; flat AST arena)
     -> resolver     (name binding, scopes, modules)
-    -> typechecker  (type inference, generics, monomorphization)
+    -> typechecker  (type inference, generics, monomorphization, borrow checking)
     -> codegen      (readable C: build/ tree of .h/.c)
     -> cc / clang / gcc
     -> native binary
@@ -28,8 +28,8 @@ cc path/to/build/**/*.c -o app   # compile the generated C (no -I needed; includ
 ./app
 ```
 
-The `std/` prelude (`String`, `str`, `Box`, `Option`, `Result`, `Vector`, slices) is auto-imported, so
-those types are in scope without any `import`.
+The `std/` prelude (`String`, `str`, `Box`, `Option`, `Result`, `Vector`, `Map`, `Set`, slices) is
+auto-imported, so those types are in scope without any `import`.
 
 ## Language tour
 
@@ -159,7 +159,12 @@ fn main() i32 {
 ```
 
 `*const T` / `*mut T` are raw pointers; `&T` / `&mut T` are references. `new T(expr)` and `new T { .. }`
-allocate; `sizeof(T)` gives the byte size.
+allocate; `sizeof(T)` and `alignof(T)` give the byte size and alignment.
+
+References are borrow-checked statically: a place admits many `&` or one `&mut` (overlap is
+field-precise — `p.a` and `p.b` don't conflict), a place can't be read or moved while an overlapping
+`&mut` is live, a stored borrow ends at its last use (non-lexical), and returning a reference that
+traces to a local is rejected.
 
 ### Deferred cleanup
 
@@ -210,8 +215,10 @@ fn main() i32 {
 }
 ```
 
-`Box<T>`, `Option<T>`, `Result<T, E>`, `Vector<T>`, `String`, and `str` ship in `std/` and are
-auto-imported.
+`Box<T>`, `Option<T>`, `Result<T, E>`, `Vector<T>`, `Map<K, V>`, `Set<T>`, `String`, and `str` ship in
+`std/` and are auto-imported, along with iterators and the algorithms built on them. The containers and
+`String` are allocator-parameterized: implement the `Allocator` interface and pass it via the `*_in`
+constructors (`new_in`, `with_capacity_in`, `from_str_in`).
 
 ### Modules
 
@@ -291,7 +298,8 @@ pub fn init() i32 { return 0; }
 
 Supported: `inline`, `always_inline`, `noinline`, `noreturn`, `align(N)`, `packed`, `export("sym")`,
 `import("sym")`, `section("s")`, `used`, `unused`. `export`/`import` set a function's exact C symbol at
-both its definition and every call site.
+both its definition and every call site. Bare `@emit_macro` on a generic struct or enum additionally
+exports it as a reusable C macro for consumption from plain C.
 
 ### Compile-time assertions
 
@@ -354,11 +362,14 @@ guards), untagged `union`s, monomorphized generics (functions, structs, enums, m
 cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
 (`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), the `?` early-return operator, RAII-style
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
-use-after-free, and double-free prevention), non-capturing closures and function pointers,
-references/pointers/`new`, slices and arrays (including designated initializers), multi-return +
-tuple destructuring, `while` / `for` / `do`-`while`, `defer`, `static_assert`, `@c.*` attributes, the
-module system with an auto-imported `std` prelude, `extern "C"` FFI (custom header includes, variadics
-in both directions via `va_list`, `_Complex`), and `sizeof`.
+use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with
+field-precise overlap, use-while-borrowed, non-lexical borrow lifetimes, dangling-reference returns),
+non-capturing closures and function pointers, references/pointers/`new`, slices and arrays (including
+designated initializers), first-class ranges and slicing (`a[lo..hi]`), `for` over user iterators (an
+`Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while`, `defer`,
+`static_assert`, `@c.*` attributes, the module system with an auto-imported `std` prelude (containers,
+iterators/algorithms, pluggable allocators), `extern "C"` FFI (custom header includes, variadics in
+both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
 
 Planned / not yet implemented:
 
