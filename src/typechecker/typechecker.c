@@ -5,6 +5,35 @@
 #include <string.h>
 
 #include "module/loader.h"
+#include "types/hashmap.h"
+
+// A live borrow of a place, for the borrow checker (single-threaded aliasing rules). `root` is the borrowed
+// place's root binding decl (a `let`/parameter/pattern-name); `place` is the borrowed place expression
+// itself (field-precise overlap checks decompose it). `origin` is the expression to blame in diagnostics
+// (the `&`/`&mut` node, or a method receiver whose call returns a reference) -- borrow checking is
+// intraprocedural, so both always resolve in the current module's AST. `binding` is the reference binding
+// this borrow is stored in (`r` in `let r = &x`) or NODE_NONE for a temporary; it drives NLL -- the borrow
+// ends at its binding's last use, not at scope exit. `region` is the BINDING's block-scope depth (creation
+// depth for a temporary), the lexical fallback drop point. Kind: shared (`&`) vs mutable (`&mut`).
+enum { BORROW_SHARED = 0, BORROW_MUT = 1 };
+typedef struct {
+  NodeId root;
+  NodeId place;
+  NodeId origin;
+  NodeId binding;
+  uint16_t region;
+  uint8_t kind;
+} Borrow;
+
+// Binding decl NodeId -> lexical scope depth at declaration. Drives a stored borrow's region (it must die
+// with its BINDING's scope, not the scope the `&` happened in) and the does-not-live-long-enough check at
+// scope exit (a root dying in a scope its borrower outlives).
+static inline size_t tc_nodeid_hash(const NodeId k) {
+  return (size_t)k * 0x9E3779B1u;
+}
+#define TC_NODEID_EQ(a, b) ((a) == (b))
+HM_DECLARE(NodeId, uint32_t, TcDepthMap)
+HM_DEFINE(NodeId, uint32_t, TcDepthMap, tc_nodeid_hash, TC_NODEID_EQ)
 
 struct TypeChecker {
     Ast *ast;
@@ -24,6 +53,18 @@ struct TypeChecker {
     uint32_t nuninit;         // (definite-initialization: reading one is an error; assigning it clears it)
     NodeId freed[64];         // bindings consumed by an explicit `.free()` -- using one is a use-after-free
     uint32_t nfreed;          // (vs an ordinary move; flavors the diagnostic, the `moved` set gates it)
+    Borrow borrows[64];       // live `&`/`&mut` borrows on the current path; the aliasing rule is checked
+    uint32_t nborrows;        // against these (borrow checker); reset per function, part of the flow state
+    uint32_t scope_depth;     // lexical block nesting; a borrow is dropped when its binding's scope exits
+    uint32_t loop_depth;      // inside a loop condition/body: node-id order no longer implies execution
+                              // order (back edges), so last-use borrow expiry is disabled there
+    TcDepthMap binding_depth; // binding decl -> its declaring scope depth (params are depth 0)
+    NodeId defer_stack[256];  // pending `defer` expressions, replayed (LIFO) at their block's close so
+    uint32_t defer_depth[256];// their moves/frees apply where they EXECUTE, not where they are written
+    uint32_t ndefers;
+    bool in_loop_recheck;     // re-checking a loop body for back-edge use-after-move; bounds nested re-checks
+    bool place_use;           // the expression is the base of an enclosing place whose read-borrow check has
+                              // already run (`x` in a read of `x.f`); suppresses its own whole-value read check
     bool addr_ctx;            // the expression being checked is a place under address-of (&/&mut): its base is
                               // borrowed, not value-read, so the definite-init read check is suppressed for it
     ERRORS_VARIABLES;
@@ -126,6 +167,7 @@ void typechecker_free(TypeChecker **t) {
   if (!t || !*t)
     return;
   ast_free(&(*t)->ast);
+  TcDepthMap_deinit(&(*t)->binding_depth);
   ERRORS_DEINIT(t);
   free(*t);
   *t = NULL;
@@ -752,10 +794,36 @@ static bool tc_type_is_free(TypeChecker *t, const TypeId ty) {
   return false;
 }
 
+static bool borrow_dead_after(TypeChecker *t, const Borrow *b, NodeId after);
+static void borrow_tombstone(Borrow *b);
+static NodeId place_through_binding(const TypeChecker *t, NodeId place);
+
+// The lexical scope depth a binding was declared at (recorded when its declaration is checked;
+// parameters live at function scope, depth 0). A miss falls back to 0 -- the borrow then just lives
+// longer (conservative for aliasing, and never manufactures a does-not-live-long-enough error).
+static uint32_t tc_binding_depth(TypeChecker *t, const NodeId decl) {
+  if (decl == NODE_NONE || ast_at_const(t->ast, decl)->kind == NODE_PARAMETER)
+    return 0;
+  uint32_t d;
+  return TcDepthMap_get(&t->binding_depth, decl, &d) ? d : 0;
+}
+static void tc_record_binding_depth(TypeChecker *t, const NodeId decl) {
+  if (decl != NODE_NONE)
+    TcDepthMap_insert(&t->binding_depth, decl, t->scope_depth);
+}
+
 // Record `expr` as a move if it is a bare reference to a current-module Free-typed binding (a `let` or a
-// by-value parameter): ownership transfers away, so a later use is flagged.
-static void tc_mark_move(TypeChecker *t, const NodeId expr) {
-  if (expr == NODE_NONE || ast_at_const(t->ast, expr)->kind != NODE_IDENTIFIER)
+// by-value parameter): ownership transfers away, so a later use is flagged. `move`/`unsafe` wrappers are
+// transparent -- the move is of the wrapped binding.
+static void tc_mark_move(TypeChecker *t, NodeId expr) {
+  if (expr == NODE_NONE)
+    return;
+  const Node *n = ast_at_const(t->ast, expr);
+  while (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe)) {
+    expr = n->as.unary.operand;
+    n = ast_at_const(t->ast, expr);
+  }
+  if (n->kind != NODE_IDENTIFIER)
     return;
   const DefId d = ast_resolution_def(t->ast, expr);
   if (d.module != t->ast->module || d.node == NODE_NONE)
@@ -763,11 +831,32 @@ static void tc_mark_move(TypeChecker *t, const NodeId expr) {
   const NodeKind dk = ast_at_const(t->ast, d.node)->kind;
   if ((dk != NODE_LET && dk != NODE_PARAMETER) || !tc_type_is_free(t, ast_type(t->ast, expr)))
     return;
+  // Borrow checker: moving the whole binding out from under a live shared borrow of it (or any sub-place) is
+  // illegal. (A `&mut` borrow already blocks the read of `expr` that precedes the move, diagnosed there; here
+  // we catch the shared case -- the move reads all of `expr`, so any shared borrow of its root overlaps.)
+  // A stored borrow whose binding has no use after this point has already expired (NLL) -- drop, not conflict.
+  for (uint32_t i = 0; i < t->nborrows; i++) {
+    Borrow *const b = &t->borrows[i];
+    if (b->root != d.node || b->kind != BORROW_SHARED)
+      continue;
+    if (borrow_dead_after(t, b, expr)) {
+      borrow_tombstone(b);
+      continue;
+    }
+    const Span sp = ast_at_const(t->ast, expr)->span;
+    typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot move this value while it is borrowed");
+    break;
+  }
   for (uint32_t i = 0; i < t->nmoved; i++)
     if (t->moved[i] == d.node)
       return; // already moved
-  if (t->nmoved < (uint32_t)(sizeof t->moved / sizeof t->moved[0]))
+  if (t->nmoved < (uint32_t)(sizeof t->moved / sizeof t->moved[0])) {
     t->moved[t->nmoved++] = d.node;
+  } else { // never drop a fact silently: a lost move would hide use-after-move AND double frees downstream
+    const Span sp = ast_at_const(t->ast, expr)->span;
+    typechecker_errorf(t, sp.start, sp.end - sp.start,
+                       "too many moved values in one function (move-analysis limit)");
+  }
 }
 
 // Definite-init set ops. A deferred binding starts uninitialized; an assignment to it (`x = ..`) is its
@@ -780,14 +869,35 @@ static bool tc_is_uninit(const TypeChecker *t, const NodeId decl) {
   return false;
 }
 static void tc_add_uninit(TypeChecker *t, const NodeId decl) {
-  if (!tc_is_uninit(t, decl) && t->nuninit < (uint32_t)(sizeof t->uninit / sizeof t->uninit[0]))
+  if (tc_is_uninit(t, decl))
+    return;
+  if (t->nuninit < (uint32_t)(sizeof t->uninit / sizeof t->uninit[0])) {
     t->uninit[t->nuninit++] = decl;
+  } else { // never drop a fact silently: an untracked deferred binding would skip the definite-init check
+    const Span sp = ast_at_const(t->ast, decl)->span;
+    typechecker_errorf(t, sp.start, sp.end - sp.start,
+                       "too many uninitialized bindings in one function (definite-init analysis limit)");
+  }
 }
 static void tc_init(TypeChecker *t, const NodeId decl) { // mark `decl` initialized on this path
   for (uint32_t i = 0; i < t->nuninit; i++)
     if (t->uninit[i] == decl) {
       t->uninit[i] = t->uninit[--t->nuninit]; // order is irrelevant: membership-only set
       return;
+    }
+}
+// Reassigning a binding (`x = ..`) gives it a fresh owned value, so it is no longer moved-out or freed: a
+// later use is valid again. (The old value's cleanup is codegen's concern -- a reassign frees it.)
+static void tc_unmark_move(TypeChecker *t, const NodeId decl) {
+  for (uint32_t i = 0; i < t->nmoved; i++)
+    if (t->moved[i] == decl) {
+      t->moved[i] = t->moved[--t->nmoved];
+      break;
+    }
+  for (uint32_t i = 0; i < t->nfreed; i++)
+    if (t->freed[i] == decl) {
+      t->freed[i] = t->freed[--t->nfreed];
+      break;
     }
 }
 
@@ -802,6 +912,8 @@ typedef struct {
   uint32_t nuninit;
   NodeId freed[64];
   uint32_t nfreed;
+  Borrow borrows[64]; // a borrow live on ANY path is live afterward (conservative), like moved/uninit
+  uint32_t nborrows;
 } FlowState;
 
 static FlowState tc_flow_save(const TypeChecker *t) {
@@ -815,6 +927,9 @@ static FlowState tc_flow_save(const TypeChecker *t) {
   s.nfreed = t->nfreed;
   for (uint32_t i = 0; i < t->nfreed; i++)
     s.freed[i] = t->freed[i];
+  s.nborrows = t->nborrows;
+  for (uint32_t i = 0; i < t->nborrows; i++)
+    s.borrows[i] = t->borrows[i];
   return s;
 }
 
@@ -828,30 +943,549 @@ static void tc_flow_set(TypeChecker *t, const FlowState *s) {
   t->nfreed = s->nfreed;
   for (uint32_t i = 0; i < s->nfreed; i++)
     t->freed[i] = s->freed[i];
+  t->nborrows = s->nborrows;
+  for (uint32_t i = 0; i < s->nborrows; i++)
+    t->borrows[i] = s->borrows[i];
 }
 
-static void tc_flow_collect(FlowState *acc, const TypeChecker *t) { // union the live state into `acc`
+// Two borrow records name the same borrow event (for merge dedup) when their root, kind, region and origin
+// node all match -- a borrow present before an `if` appears identically in both arms.
+static bool borrow_same(const Borrow *a, const Borrow *b) {
+  return a->root == b->root && a->kind == b->kind && a->region == b->region && a->origin == b->origin;
+}
+
+// Union the live state into `acc`. Returns true if any fact was dropped for capacity (the caller
+// diagnoses -- a silently lost fact would disable a later use-after-move / definite-init check).
+static bool tc_flow_collect(FlowState *acc, const TypeChecker *t) {
+  bool overflow = false;
   for (uint32_t i = 0; i < t->nmoved; i++) {
     bool seen = false;
     for (uint32_t j = 0; j < acc->nmoved; j++)
       seen |= acc->moved[j] == t->moved[i];
-    if (!seen && acc->nmoved < (uint32_t)(sizeof acc->moved / sizeof acc->moved[0]))
+    if (seen)
+      continue;
+    if (acc->nmoved < (uint32_t)(sizeof acc->moved / sizeof acc->moved[0]))
       acc->moved[acc->nmoved++] = t->moved[i];
+    else
+      overflow = true;
   }
   for (uint32_t i = 0; i < t->nuninit; i++) {
     bool seen = false;
     for (uint32_t j = 0; j < acc->nuninit; j++)
       seen |= acc->uninit[j] == t->uninit[i];
-    if (!seen && acc->nuninit < (uint32_t)(sizeof acc->uninit / sizeof acc->uninit[0]))
+    if (seen)
+      continue;
+    if (acc->nuninit < (uint32_t)(sizeof acc->uninit / sizeof acc->uninit[0]))
       acc->uninit[acc->nuninit++] = t->uninit[i];
+    else
+      overflow = true;
   }
   for (uint32_t i = 0; i < t->nfreed; i++) {
     bool seen = false;
     for (uint32_t j = 0; j < acc->nfreed; j++)
       seen |= acc->freed[j] == t->freed[i];
-    if (!seen && acc->nfreed < (uint32_t)(sizeof acc->freed / sizeof acc->freed[0]))
+    if (seen)
+      continue;
+    if (acc->nfreed < (uint32_t)(sizeof acc->freed / sizeof acc->freed[0]))
       acc->freed[acc->nfreed++] = t->freed[i];
+    else
+      overflow = true;
   }
+  for (uint32_t i = 0; i < t->nborrows; i++) {
+    bool seen = false;
+    for (uint32_t j = 0; j < acc->nborrows; j++)
+      seen |= borrow_same(&acc->borrows[j], &t->borrows[i]);
+    if (seen)
+      continue;
+    if (acc->nborrows < (uint32_t)(sizeof acc->borrows / sizeof acc->borrows[0]))
+      acc->borrows[acc->nborrows++] = t->borrows[i];
+    else
+      overflow = true;
+  }
+  return overflow;
+}
+
+// Diagnose a lossy branch-state union once per construct (`at` anchors the span).
+static void tc_flow_overflow(TypeChecker *t, const NodeId at) {
+  const Span sp = ast_at_const(t->ast, at)->span;
+  typechecker_errorf(t, sp.start, sp.end - sp.start,
+                     "too many flow facts to merge across branches in one function (analysis limit)");
+}
+
+// Enter/leave a lexical block scope. On exit, drop every borrow whose BINDING's scope is the departing
+// one (or a nested one, defensively): the reference dies with its binding. A borrow whose binding
+// OUTLIVES the scope but whose borrowed root dies here is a dangling reference -- there are no lifetime
+// annotations to say otherwise, so it is always an error (`let mut r = &x; { let y = 2; r = &y; }`).
+static void tc_scope_enter(TypeChecker *t) {
+  t->scope_depth++;
+}
+static void tc_scope_exit(TypeChecker *t) {
+  const uint32_t d = t->scope_depth;
+  uint32_t w = 0;
+  for (uint32_t i = 0; i < t->nborrows; i++) {
+    const Borrow *const b = &t->borrows[i];
+    if (b->region >= d)
+      continue; // the binding (or temporary) dies with this scope: the borrow ends silently
+    if (b->binding != NODE_NONE && b->root != NODE_NONE && tc_binding_depth(t, b->root) >= d) {
+      const Span sp = ast_at_const(t->ast, b->origin)->span;
+      typechecker_errorf(t, sp.start, sp.end - sp.start,
+                         "borrowed value does not live long enough: it is destroyed at the end of this "
+                         "block while a reference to it is still stored");
+      continue; // diagnosed; drop it so the stale record cannot cascade
+    }
+    t->borrows[w++] = t->borrows[i];
+  }
+  t->nborrows = w;
+  if (t->scope_depth)
+    t->scope_depth--;
+}
+
+// The access steps of a place, leaf-first, for field-precise borrow tracking. A field step records the field
+// name span (compared by text); an index step records a constant literal value when it has one (distinct
+// constant slots `a[0]`/`a[1]` are disjoint; a variable index matches any, since i == j cannot be disproved);
+// a deref step marks an access THROUGH a reference (`*r`, `r.f`), which roots the place at the reference.
+enum { PS_FIELD = 0, PS_INDEX, PS_DEREF };
+typedef struct {
+  uint8_t kind;
+  bool index_const;  // (PS_INDEX) the index is a compile-time constant literal
+  int64_t index_val; // (PS_INDEX) its value, valid iff index_const
+  Span name;         // (PS_FIELD) the field-name text span
+} PStep;
+#define PLACE_MAX_STEPS 16
+
+// A non-negative integer-literal index's value, for disambiguating distinct constant array slots (`a[0]` vs
+// `a[1]`). Returns false for anything not a plain integer literal (a variable/computed index stays conservative).
+static bool place_index_const(const TypeChecker *t, const NodeId idx, int64_t *const out) {
+  const Node *const n = ast_at_const(t->ast, idx);
+  if (n->kind != NODE_LITERAL || n->as.literal.token_type != IntegerLiteral)
+    return false;
+  const Span lr = n->as.literal.raw;
+  const uint8_t *p = t->source + lr.start;
+  size_t len = lr.end - lr.start;
+  unsigned base = 10;
+  if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'x') { base = 16, p += 2, len -= 2; }
+  else if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'b') { base = 2, p += 2, len -= 2; }
+  else if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'o') { base = 8, p += 2, len -= 2; }
+  uint64_t acc = 0;
+  for (size_t i = 0; i < len; i++) {
+    const uint8_t ch = p[i];
+    if (ch == '_')
+      continue;
+    const unsigned d = ch <= '9' ? (unsigned)(ch - '0') : (unsigned)((ch | 0x20) - 'a' + 10);
+    if (d >= base || acc > (uint64_t)(INT64_MAX - (int64_t)d) / base)
+      return false; // a suffix, a non-digit, or an out-of-range value -> not a usable constant
+    acc = acc * base + d;
+  }
+  *out = (int64_t)acc;
+  return true;
+}
+
+// Is `ty` an untagged union (a `union` decl, or an instance of a generic one)? Its members alias.
+static bool tc_type_is_union(TypeChecker *t, const TypeId ty) {
+  ModuleId m;
+  NodeId d;
+  DefId gp[4];
+  TypeId ga[4];
+  int gn;
+  if (ty == TYPE_NONE || !aggregate_of(t, ty, &m, &d, gp, ga, &gn))
+    return false;
+  const Node *const dn = ast_at_const(mod_ast(t, m), d);
+  return dn->kind == NODE_STRUCT && dn->as.aggregate.is_union;
+}
+
+// Decompose a place `&x.f[i]…` into its root binding + access steps (leaf-first, up to `cap`). Returns the
+// root decl if it is a local binding (let / parameter / payload pattern / tuple-let element / loop
+// binding) in THIS module, else NODE_NONE for anything the borrow model does not track -- a raw-pointer/
+// global root, a slice element, or a non-place. A place reached THROUGH a reference (`*r`, `r.f`, r a
+// reference binding OR parameter) roots at the reference itself with a DEREF step, so uses of `r` and
+// reborrows of the same sub-place conflict, while r's own borrow (which roots at what r points at) stays
+// distinct. Raw-pointer derefs stay untracked (unsafe). A UNION member access collapses everything
+// leafward of the union (its fields overlap, so field-name disjointness would be wrong there). Steps past
+// `cap` are dropped (root still returned), so an absurdly deep path compares on its recorded prefix.
+static NodeId place_decompose(TypeChecker *t, NodeId place, PStep *const steps, int *const nsteps, const int cap) {
+  *nsteps = 0;
+  for (;;) {
+    const Node *const pn = ast_at_const(t->ast, place);
+    if (pn->kind == NODE_UNARY && pn->as.unary.op == Star) { // `*r`: an explicit deref
+      const NodeId op = pn->as.unary.operand;
+      const TypeId ot = ast_type(t->ast, op);
+      const Ty *const otk = ot == TYPE_NONE ? NULL : ast_type_at(t->ast, ot);
+      if (!otk || otk->kind != TYPE_REFERENCE)
+        return NODE_NONE; // a raw-pointer / unknown deref -- untracked
+      if (*nsteps < cap)
+        steps[(*nsteps)++] = (PStep){.kind = PS_DEREF};
+      place = op;
+      continue;
+    }
+    NodeId base;
+    PStep step = {0};
+    if (pn->kind == NODE_MEMBER && !pn->as.member.path) {
+      base = pn->as.member.object;
+      step.kind = PS_FIELD;
+      step.name = name_span(t, pn->as.member.member); // the field-name text span (compared by bytes below)
+    } else if (pn->kind == NODE_INDEX) {
+      base = pn->as.index.object;
+      step.kind = PS_INDEX;
+      int64_t v;
+      if (place_index_const(t, pn->as.index.index, &v)) {
+        step.index_const = true;
+        step.index_val = v;
+      }
+    } else {
+      break;
+    }
+    const TypeId bt = ast_type(t->ast, base);
+    const Ty *const btk = bt == TYPE_NONE ? NULL : ast_type_at(t->ast, bt);
+    if (!btk)
+      return NODE_NONE;
+    // A union's members overlap: drop the leafward refinements and skip the field step itself, so any
+    // two places inside the same union compare as overlapping (`&u.a` conflicts with `&mut u.b`).
+    const bool base_union = pn->kind == NODE_MEMBER &&
+                            tc_type_is_union(t, btk->kind == TYPE_REFERENCE ? btk->as.elem : bt);
+    if (base_union)
+      *nsteps = 0;
+    if (btk->kind == TYPE_REFERENCE) {
+      // `r.f` / `r[i]` on a reference binding: the field/index access is applied through an implicit deref, so
+      // record the step, then a deref, and continue decomposing `r` itself -- the place roots at `r`.
+      if (pn->kind == NODE_INDEX)
+        return NODE_NONE; // indexing through a reference is untracked (out of scope)
+      if (!base_union && *nsteps < cap)
+        steps[(*nsteps)++] = step;
+      if (*nsteps < cap)
+        steps[(*nsteps)++] = (PStep){.kind = PS_DEREF};
+      place = base;
+      continue;
+    }
+    if (btk->kind == TYPE_POINTER)
+      return NODE_NONE; // behind a raw pointer -- names storage that is not the local binding (untracked)
+    if (pn->kind == NODE_INDEX && btk->kind != TYPE_ARRAY)
+      return NODE_NONE; // a slice/other element, not an array slot within the local
+    if (!base_union && *nsteps < cap)
+      steps[(*nsteps)++] = step;
+    place = base;
+  }
+  if (ast_at_const(t->ast, place)->kind != NODE_IDENTIFIER)
+    return NODE_NONE;
+  const DefId d = ast_resolution_def(t->ast, place);
+  if (d.node == NODE_NONE || d.module != t->ast->module)
+    return NODE_NONE;
+  switch (ast_at_const(t->ast, d.node)->kind) {
+    case NODE_PARAMETER: // deref'd places (`*p`, `self.f`) root at the param like a local reference binding
+    case NODE_LET:
+    case NODE_PATTERN_NAME:
+    case NODE_IDENTIFIER: // a tuple-let element / struct-pattern shorthand binding (declared as itself)
+    case NODE_FOR:        // a loop binding (uses resolve to the for node)
+      return d.node;
+    default:
+      return NODE_NONE;
+  }
+}
+
+// The root binding a place borrows from, or NODE_NONE if untracked. Shared by borrow creation, the use
+// checks, and `addr_escape` (a returned address of such a root dangles).
+static NodeId borrow_place_root(TypeChecker *t, const NodeId place) {
+  PStep steps[PLACE_MAX_STEPS];
+  int n;
+  return place_decompose(t, place, steps, &n, PLACE_MAX_STEPS);
+}
+
+// Do two value-places name overlapping storage? They must reduce to the same root binding; then one access
+// path must be a prefix of the other. Field steps overlap iff they name the same field; an index step
+// overlaps any index. So `&mut x.a` and `&x.b` are disjoint, but `&mut x` and `&x.a` overlap.
+static bool places_overlap(TypeChecker *t, const NodeId a, const NodeId b) {
+  PStep sa[PLACE_MAX_STEPS], sb[PLACE_MAX_STEPS];
+  int na, nb;
+  const NodeId ra = place_decompose(t, a, sa, &na, PLACE_MAX_STEPS);
+  const NodeId rb = place_decompose(t, b, sb, &nb, PLACE_MAX_STEPS);
+  if (ra == NODE_NONE || rb == NODE_NONE || ra != rb)
+    return false;
+  const int common = na < nb ? na : nb;
+  for (int i = 0; i < common; i++) { // steps are leaf-first: compare from the shared root outward
+    const PStep *const pa = &sa[na - 1 - i];
+    const PStep *const pb = &sb[nb - 1 - i];
+    if (pa->kind != pb->kind)
+      return true; // access-kind mismatch at a shared level (should not happen) -- err toward overlap
+    if (pa->kind == PS_FIELD) {
+      const uint32_t la = pa->name.end - pa->name.start, lb = pb->name.end - pb->name.start;
+      if (la != lb || memcmp(t->source + pa->name.start, t->source + pb->name.start, la) != 0)
+        return false; // different fields at this level -> disjoint
+    } else if (pa->kind == PS_INDEX && pa->index_const && pb->index_const && pa->index_val != pb->index_val) {
+      return false; // distinct constant array slots -> disjoint (a variable index still matches any)
+    }
+  }
+  return true; // one path is a prefix of the other -> overlap
+}
+
+// The live-borrow count on entry to an expression context; `borrow_release_to` drops the TEMPORARIES created
+// since. A temporary borrow (an `&`/`&mut` not bound to a name) lives only for the context it appears in --
+// an expression statement, an initializer, a condition, or a return -- so sequential statements do not
+// falsely conflict. A borrow bound to a name (a stored reference, e.g. from a reference reassignment `r = &y`
+// nested in an expression statement) is scope/NLL-lived, so it is KEPT (compacted down) across the release.
+static uint32_t borrow_mark(const TypeChecker *t) {
+  return t->nborrows;
+}
+static void borrow_release_to(TypeChecker *t, const uint32_t mark) {
+  if (t->nborrows <= mark)
+    return; // everything above the mark is already gone (a rebind tombstoned + released below it)
+  uint32_t w = mark;
+  for (uint32_t i = mark; i < t->nborrows; i++)
+    if (t->borrows[i].binding != NODE_NONE)
+      t->borrows[w++] = t->borrows[i];
+  t->nborrows = w;
+}
+
+// Neutralize a borrow record IN PLACE (never compact mid-expression: outstanding borrow_mark snapshots
+// index into the array, and shifting entries below a mark corrupts the next release). A tombstone's
+// root never matches a conflict query, and binding == NONE lets release/scope-exit reap it normally.
+static void borrow_tombstone(Borrow *const b) {
+  b->root = NODE_NONE;
+  b->binding = NODE_NONE;
+}
+
+// Sub-statement NLL: a STORED borrow whose binding has no use at any node past `after` has already
+// expired, so it never conflicts (`f(*r, &mut x)` is fine when `*r` is r's last use). Identifier uses are
+// created in source order, so a scan of the resolution side table past `after` is exact for straight-line
+// and branching code; a loop body re-executes earlier nodes, so this is disabled inside loops
+// (conservative: the borrow stays live there). A live reborrow THROUGH the binding keeps it live too.
+static bool borrow_dead_after(TypeChecker *t, const Borrow *const b, const NodeId after) {
+  if (b->binding == NODE_NONE || t->loop_depth)
+    return false;
+  // A borrow bound to a TUPLE-let is lexical, not NLL: its destructured elements resolve to their own
+  // identifiers, not to the let node, so the use scan below cannot see them (same carve-out as
+  // borrow_nll_drop). It lives until tc_scope_exit.
+  const Node *const bn = ast_at_const(t->ast, b->binding);
+  if (bn->kind == NODE_LET && ast_at_const(t->ast, bn->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE)
+    return false;
+  for (uint32_t i = 0; i < t->nborrows; i++)
+    if (&t->borrows[i] != b && place_through_binding(t, t->borrows[i].place) == b->binding)
+      return false; // `let q = &mut *r`: q aliases through r, so r's borrow must outlive q
+  const size_t n = t->ast->nodes.len;
+  for (NodeId nid = after + 1; nid < n; nid++) {
+    const DefId rd = ast_resolution_def(t->ast, nid);
+    if (rd.node == b->binding && rd.module == t->ast->module)
+      return false;
+  }
+  return true;
+}
+
+// Report (once) an aliasing conflict for borrowing `place` with `kind` against live borrows that OVERLAP it:
+// a `&mut` is exclusive (conflicts with any overlapping borrow) and a `&` conflicts only with an overlapping
+// `&mut`; `&` + `&` is allowed, and disjoint fields (`&mut x.a` vs `&x.b`) do not conflict. `origin` gives
+// the error span. Returns true iff a conflict was reported (so the caller skips registering the borrow). Used
+// both to register a real borrow (`borrow_create`) and to check a transient implicit method-receiver borrow.
+static bool borrow_report_conflict(TypeChecker *t, const NodeId place, const uint8_t kind, const NodeId origin) {
+  const NodeId root = borrow_place_root(t, place);
+  if (root == NODE_NONE)
+    return false;
+  for (uint32_t i = 0; i < t->nborrows; i++) {
+    Borrow *const b = &t->borrows[i];
+    if (b->root != root || (kind == BORROW_SHARED && b->kind == BORROW_SHARED) ||
+        !places_overlap(t, place, b->place))
+      continue; // different binding, the compatible shared+shared pair, or disjoint sub-places
+    if (borrow_dead_after(t, b, origin)) {
+      borrow_tombstone(b); // its binding's last use has passed: the borrow expired (NLL)
+      continue;
+    }
+    const Span sp = ast_at_const(t->ast, origin)->span;
+    typechecker_errorf(t, sp.start, sp.end - sp.start,
+                       "cannot borrow this value as %s while it is already borrowed as %s",
+                       kind == BORROW_MUT ? "mutable" : "immutable", b->kind == BORROW_MUT ? "mutable" : "immutable");
+    typechecker_notef(t, "a value may have many '&' borrows or a single '&mut', not both; the earlier borrow must end first");
+    return true;
+  }
+  return false;
+}
+
+// Append a borrow of `place` (rooted at `root`) to the live set, or fail safe if the fixed set is full
+// (rather than silently untracking it, which would miss real conflicts against it).
+static void borrow_push(TypeChecker *t, const NodeId root, const uint8_t kind, const NodeId place, const NodeId origin) {
+  if (t->nborrows < (uint32_t)(sizeof t->borrows / sizeof t->borrows[0]))
+    t->borrows[t->nborrows++] = (Borrow){
+        .root = root, .place = place, .kind = kind, .region = (uint16_t)t->scope_depth, .origin = origin,
+        .binding = NODE_NONE};
+  else
+    typechecker_errorf(t, ast_at_const(t->ast, origin)->span.start, 1,
+                       "too many simultaneous borrows in one function (borrow-checker limit)");
+}
+
+// Register a borrow of `place` (kind shared/mut) made by expression `origin`, enforcing the aliasing rule. A
+// reborrow `&[mut] *r` roots at `r` (via place_decompose), so it does not collide with r's own borrow (which
+// roots at what r points at) yet does conflict with another reborrow of the same sub-place through r.
+static void borrow_create(TypeChecker *t, const NodeId place, const uint8_t kind, const NodeId origin) {
+  const NodeId root = borrow_place_root(t, place);
+  if (root == NODE_NONE)
+    return; // a raw-pointer/global/unresolved place or a non-place -- untracked by the borrow model
+  if (!borrow_report_conflict(t, place, kind, origin))
+    borrow_push(t, root, kind, place, origin);
+}
+
+// A live `&mut` borrow whose place overlaps the value-place `place`, or NULL. Reading `place` while it is
+// exclusively borrowed is illegal; a disjoint field (reading x.b while only x.a is `&mut`-borrowed) is fine.
+// A stored borrow whose binding has no later use has expired (NLL): dropped here, never a conflict.
+static const Borrow *borrow_conflicting_read(TypeChecker *t, const NodeId place) {
+  const NodeId root = borrow_place_root(t, place);
+  if (root == NODE_NONE)
+    return NULL;
+  for (uint32_t i = 0; i < t->nborrows; i++) {
+    Borrow *const b = &t->borrows[i];
+    if (b->root != root || b->kind != BORROW_MUT || !places_overlap(t, place, b->place))
+      continue;
+    if (borrow_dead_after(t, b, place)) {
+      borrow_tombstone(b);
+      continue;
+    }
+    return b;
+  }
+  return NULL;
+}
+
+// A live STORED shared borrow overlapping the assignment target `place`, or NULL. Assigning through the owner
+// while such a borrow is live is illegal. A `&mut` stored borrow is already caught by the LHS read check; a
+// same-statement TEMPORARY (the `&x` in `x = f(&x)`, which has no binding) is excluded, matching NLL -- that
+// borrow ends before the store -- so only borrows bound to a name (`binding != NONE`) trigger this. `after`
+// is the last-use anchor: the whole ASSIGNMENT node, since the RHS (`x = *r + 1` -- r's last use) evaluates
+// before the store yet parses after the LHS place.
+static const Borrow *borrow_conflicting_write(TypeChecker *t, const NodeId place, const NodeId after) {
+  const NodeId root = borrow_place_root(t, place);
+  if (root == NODE_NONE)
+    return NULL;
+  for (uint32_t i = 0; i < t->nborrows; i++) {
+    Borrow *const b = &t->borrows[i];
+    if (b->root != root || b->kind != BORROW_SHARED || b->binding == NODE_NONE ||
+        !places_overlap(t, place, b->place))
+      continue;
+    if (borrow_dead_after(t, b, after)) {
+      borrow_tombstone(b);
+      continue;
+    }
+    return b;
+  }
+  return NULL;
+}
+
+// `let r2 = r1` / `r2 = r1` where the initializer is a bare read of a reference binding r1: a `&mut` is
+// non-Copy so this MOVES it (rebind r1's borrow(s) to r2, then invalidate r1 -- a later use is use-after-move);
+// a `&` is Copy so this DUPLICATES it (r1 stays live too). Does nothing unless `init` resolves to a local
+// reference binding with live borrows -- an `&`/`&mut`/call initializer creates its own borrow, handled elsewhere.
+static void borrow_transfer_ref(TypeChecker *t, const NodeId init, const NodeId binding) {
+  NodeId e = init;
+  const Node *n = ast_at_const(t->ast, e);
+  while (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe)) {
+    e = n->as.unary.operand;
+    n = ast_at_const(t->ast, e);
+  }
+  if (n->kind != NODE_IDENTIFIER)
+    return;
+  const DefId rd = ast_resolution_def(t->ast, e);
+  if (rd.node == NODE_NONE || rd.module != t->ast->module)
+    return;
+  const uint32_t n0 = t->nborrows;
+  const uint16_t region = (uint16_t)tc_binding_depth(t, binding); // the borrow now dies with ITS binding's scope
+  bool moved = false;
+  for (uint32_t i = 0; i < n0; i++) {
+    if (t->borrows[i].binding != rd.node)
+      continue;
+    if (t->borrows[i].kind == BORROW_MUT) {
+      t->borrows[i].binding = binding; // the exclusive borrow moves to r2
+      t->borrows[i].region = region;
+      moved = true;
+    } else if (t->nborrows < (uint32_t)(sizeof t->borrows / sizeof t->borrows[0])) {
+      t->borrows[t->nborrows] = t->borrows[i]; // the shared borrow duplicates: both r1 and r2 alias it
+      t->borrows[t->nborrows].region = region;
+      t->borrows[t->nborrows++].binding = binding;
+    }
+  }
+  if (moved) { // a `&mut` is consumed by the copy; reading r1 afterward is a use-after-move
+    bool seen = false;
+    for (uint32_t i = 0; i < t->nmoved; i++)
+      seen |= t->moved[i] == rd.node;
+    if (!seen && t->nmoved < (uint32_t)(sizeof t->moved / sizeof t->moved[0]))
+      t->moved[t->nmoved++] = rd.node;
+  }
+}
+
+// The reference binding a place is reached THROUGH (`r` in `*r`, `r.f`, `r.f.g`), or NODE_NONE if it is not
+// through a local reference. A reborrow's origin operand names such a place; used to extend r's borrow.
+static NodeId place_through_binding(const TypeChecker *t, NodeId place) {
+  for (;;) {
+    const Node *const pn = ast_at_const(t->ast, place);
+    NodeId base;
+    if (pn->kind == NODE_UNARY && pn->as.unary.op == Star)
+      base = pn->as.unary.operand;
+    else if (pn->kind == NODE_MEMBER && !pn->as.member.path)
+      base = pn->as.member.object;
+    else if (pn->kind == NODE_INDEX)
+      base = pn->as.index.object;
+    else
+      return NODE_NONE;
+    const TypeId bt = ast_type(t->ast, base);
+    const Ty *const btk = bt == TYPE_NONE ? NULL : ast_type_at(t->ast, bt);
+    if ((pn->kind == NODE_UNARY || (btk && btk->kind == TYPE_REFERENCE)) &&
+        ast_at_const(t->ast, base)->kind == NODE_IDENTIFIER) {
+      const DefId d = ast_resolution_def(t->ast, base); // reached `r` -- the reference we deref through
+      return d.node != NODE_NONE && d.module == t->ast->module ? d.node : NODE_NONE;
+    }
+    place = base; // an access on a value aggregate -- keep walking toward the reference (or the local root)
+  }
+}
+
+// NLL: after finishing statement `ids[si]` of the block node `block_id`, drop any stored borrow made in THIS
+// block whose reference binding is not used in a LATER statement -- its region ends at its last use, not at
+// scope exit. A reference binding is in scope only within this block, so every use of it has a node id in
+// (ids[si], block_id) (later statements are parsed after, hence have higher ids); scanning that range over
+// the resolution side table finds all later uses with no generic AST walk. Over-counting (a late-numbered
+// node inside statement si) only keeps the borrow longer, so this is always sound.
+static void borrow_nll_drop(TypeChecker *t, const NodeId block_id, const NodeId *const ids, const uint32_t si) {
+  bool keep[sizeof t->borrows / sizeof t->borrows[0]];
+  for (uint32_t k = 0; k < t->nborrows; k++) {
+    const Borrow *const b = &t->borrows[k];
+    keep[k] = true;
+    if (b->binding != NODE_NONE && b->region == (uint16_t)t->scope_depth) {
+      // A borrow bound to a TUPLE-let is lexical, not NLL: its destructured elements resolve to their own
+      // identifiers, not to the let node, so the id-range scan cannot see their uses. tc_scope_exit ends it.
+      const Node *const bn = ast_at_const(t->ast, b->binding);
+      const bool tuple =
+          bn->kind == NODE_LET && ast_at_const(t->ast, bn->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE;
+      if (!tuple) {
+        keep[k] = false;
+        for (NodeId nid = ids[si] + 1; nid < block_id && !keep[k]; nid++) {
+          const DefId rd = ast_resolution_def(t->ast, nid);
+          keep[k] = rd.node == b->binding && rd.module == t->ast->module;
+        }
+      }
+    }
+  }
+  // A reborrow `let r2 = &mut *r` borrows r for r2's life, so r's own borrow must outlive r2 even if r has no
+  // later textual use. Reborrows go THROUGH earlier references, so a reverse pass propagates the extension in
+  // one sweep: a kept borrow reborrowing through r keeps every borrow bound to r (which may itself chain on).
+  for (int k = (int)t->nborrows - 1; k >= 0; k--) {
+    if (!keep[k])
+      continue;
+    const NodeId thru = place_through_binding(t, t->borrows[k].place);
+    if (thru == NODE_NONE)
+      continue;
+    for (uint32_t j = 0; j < t->nborrows; j++)
+      if (t->borrows[j].binding == thru)
+        keep[j] = true;
+  }
+  uint32_t w = 0;
+  for (uint32_t k = 0; k < t->nborrows; k++)
+    if (keep[k])
+      t->borrows[w++] = t->borrows[k];
+  t->nborrows = w;
+}
+
+// True if any element of a tuple-let pattern `name` binds a reference type -- the destructured references may
+// then alias the initializer's reference arguments, so their borrows must outlive the statement.
+static bool tuple_binds_reference(TypeChecker *t, const NodeId name) {
+  const NodeList names = ast_at_const(t->ast, name)->as.pattern.children;
+  const NodeId *const nids = ast_list(t->ast, names);
+  for (uint32_t i = 0; i < names.len; i++) {
+    const TypeId et = ast_type(t->ast, nids[i]);
+    if (et != TYPE_NONE && ast_type_at(t->ast, et)->kind == TYPE_REFERENCE)
+      return true;
+  }
+  return false;
 }
 
 // The top-level extend in module `m` whose items contain `method`, or NODE_NONE -- used to recover the
@@ -1651,6 +2285,7 @@ static TypeId decl_type(TypeChecker *t, const NodeId decl) {
 static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) {
   if (n->as.unary.op == Ampersand) // `&x`/`&mut x` borrows x; its base is not value-read (definite-init)
     t->addr_ctx = true;
+  const uint32_t bm = borrow_mark(t); // temporaries the operand creates (a ref-returning method's receiver)
   const TypeId opnd = check_expr(t, n->as.unary.operand);
   const Span sp = ast_at_const(t->ast, id)->span;
   switch (n->as.unary.op) {
@@ -1670,21 +2305,60 @@ static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) 
       if (opnd == TYPE_NONE)
         return TYPE_NONE;
       const Ty *const ot = ast_type_at(t->ast, opnd);
-      if (ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE)
+      if (ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE) {
+        // Dereferencing an RVALUE reference copies the value out and ENDS the reference: the shared
+        // temporaries its computation registered (e.g. `v.at(2)`'s receiver borrow) expire here, so
+        // `*v.at(2) + v.pop()` does not conflict (NLL). Mutable ones persist to the statement's end --
+        // `*v.at_mut(2) = v.pop()` still stores through v while mutating it, and must conflict.
+        if (!is_place(t, n->as.unary.operand))
+          for (uint32_t i = bm; i < t->nborrows; i++)
+            if (t->borrows[i].binding == NODE_NONE && t->borrows[i].kind == BORROW_SHARED)
+              borrow_tombstone(&t->borrows[i]);
         return ot->as.elem;
+      }
       typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot dereference a non-pointer");
       return TYPE_NONE;
     }
-    case Ampersand: // address-of: `&x` -> `&T`, `&mut x` -> `&mut T`
+    case Ampersand: { // address-of: `&x` -> `&T`, `&mut x` -> `&mut T`
+      const bool mut = n->as.unary.qualifier == TYPE_QUAL_MUT;
       // A `&mut` borrow of a place needs that place to be mutable -- otherwise it would hand out write
       // access to an immutable binding. (An rvalue operand is a fresh temp, so it is left to codegen.)
-      if (n->as.unary.qualifier == TYPE_QUAL_MUT && is_place(t, n->as.unary.operand) &&
-          !is_assignable(t, n->as.unary.operand)) {
+      if (mut && is_place(t, n->as.unary.operand) && !is_assignable(t, n->as.unary.operand)) {
         const Span osp = ast_at_const(t->ast, n->as.unary.operand)->span;
         typechecker_errorf(t, osp.start, osp.end - osp.start,
                            "cannot take '&mut' of an immutable binding (bind it with 'mut')");
       }
+      {
+        // Peel the transparent move/unsafe wrappers so the checks below see the real operand.
+        NodeId op = n->as.unary.operand;
+        const Node *on = ast_at_const(t->ast, op);
+        while (on->kind == NODE_UNARY && (on->as.unary.op == Move || on->as.unary.op == Unsafe)) {
+          op = on->as.unary.operand;
+          on = ast_at_const(t->ast, op);
+        }
+        // `&mut x` on a deferred (`let mut x: T;`) binding hands it out as an out-parameter: the callee
+        // is assumed to write it, so it counts as initialized (the borrow itself never reads it).
+        if (mut && on->kind == NODE_IDENTIFIER) {
+          const DefId od = ast_resolution_def(t->ast, op);
+          if (od.module == t->ast->module && od.node != NODE_NONE)
+            tc_init(t, od.node);
+        }
+        // The address of a value that codegen cannot materialize (a call/if/switch/block result, or an
+        // operator result of aggregate type) has no C spelling -- `&(f())` is invalid C. Scalar rvalues
+        // and compound-literal forms (struct/array/string literals, ranges) materialize fine.
+        if (!is_place(t, op) && opnd != TYPE_NONE && ast_type_at(t->ast, opnd)->kind != TYPE_BUILTIN &&
+            (on->kind == NODE_CALL || on->kind == NODE_IF || on->kind == NODE_MATCH || on->kind == NODE_BLOCK ||
+             on->kind == NODE_BINARY || on->kind == NODE_ASSIGNMENT || on->kind == NODE_CAST)) {
+          const Span osp = ast_at_const(t->ast, op)->span;
+          typechecker_errorf(t, osp.start, osp.end - osp.start,
+                             "cannot take the address of a temporary value; bind it to a 'let' first");
+        }
+      }
+      // Borrow checker: register the borrow of the operand place and enforce the aliasing rule against
+      // overlapping borrows already live in this expression context (shared XOR mutable). `id` is the origin.
+      borrow_create(t, n->as.unary.operand, mut ? BORROW_MUT : BORROW_SHARED, id);
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_REFERENCE, .qualifier = n->as.unary.qualifier, .as.elem = opnd});
+    }
     case Question: { // `expr?`: unwrap Option<T>/Result<T,E>, else early-return None/Err from the function
       if (opnd == TYPE_NONE)
         return TYPE_NONE;
@@ -2402,10 +3076,12 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   }
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(t->ast, args);
-  for (uint32_t i = 0; i < args.len; i++)
+  for (uint32_t i = 0; i < args.len; i++) {
     check_expr(t, aids[i]);
-  for (uint32_t i = 0; i < args.len; i++)
-    tc_mark_move(t, aids[i]); // a by-value Free argument is moved to the callee (which owns/frees it)
+    // A by-value Free argument is moved to the callee (which owns/frees it) -- marked IMMEDIATELY so a
+    // later argument reusing the same value (`f(s, s)`, `f(s, &mut s)`) is flagged by its own check.
+    tc_mark_move(t, aids[i]);
+  }
 
   if (callee == TYPE_NONE)
     return TYPE_NONE;
@@ -2444,27 +3120,80 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
 
   // A resolved `x.free()` destructor on an owned (non-reference) Free value consumes it: a later use is a
   // use-after-free, and its scope-exit auto-free is elided (no double free). A `&mut`/`*` receiver only
-  // borrows a value owned elsewhere, so it is left alone.
+  // borrows a value owned elsewhere -- but if that ELSEWHERE is a live borrow rooted at a binding of THIS
+  // function (`let r = &mut s; r.free();`), the owner's scope-exit free still runs: a double free, rejected.
+  // Through a parameter the referent is caller-owned (the normal destructor pattern) and stays allowed.
   if (skip && callee_node->as.member.object != NODE_NONE &&
       span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, callee_node->as.member.member)->as.name.text, "free")) {
     const NodeId recv = callee_node->as.member.object;
     const Ty *const rty = ast_type_at(t->ast, ast_type(t->ast, recv));
-    if (rty->kind != TYPE_POINTER && rty->kind != TYPE_REFERENCE && tc_type_is_free(t, ast_type(t->ast, recv))) {
+    NodeId thru = NODE_NONE; // the local reference binding the free reaches through, if any
+    if (rty->kind == TYPE_REFERENCE && ast_at_const(t->ast, recv)->kind == NODE_IDENTIFIER) {
+      const DefId rd = ast_resolution_def(t->ast, recv);
+      if (rd.module == t->ast->module)
+        thru = rd.node; // `r.free()`
+    } else if (rty->kind != TYPE_POINTER) {
+      thru = place_through_binding(t, recv); // `(*r).free()` / `r.field.free()`
+    }
+    bool through_owner = false;
+    for (uint32_t i = 0; thru != NODE_NONE && i < t->nborrows && !through_owner; i++) {
+      const Borrow *const b = &t->borrows[i];
+      if (b->binding != thru || b->root == NODE_NONE)
+        continue;
+      const NodeKind rk = ast_at_const(t->ast, b->root)->kind;
+      if (rk == NODE_LET || rk == NODE_PATTERN_NAME || rk == NODE_IDENTIFIER || rk == NODE_FOR) {
+        const Span rsp = ast_at_const(t->ast, recv)->span;
+        typechecker_errorf(t, rsp.start, rsp.end - rsp.start,
+                           "cannot free a borrowed value: its owning binding frees it again at scope exit");
+        typechecker_notef(t, "call 'free' on the owning binding itself, or let it be freed automatically");
+        through_owner = true;
+      }
+    }
+    if (!through_owner && rty->kind != TYPE_POINTER && rty->kind != TYPE_REFERENCE &&
+        tc_type_is_free(t, ast_type(t->ast, recv))) {
       tc_mark_move(t, recv);
       if (ast_at_const(t->ast, recv)->kind == NODE_IDENTIFIER) { // record it as freed, for the use-after-free diagnostic
         const DefId rd = ast_resolution_def(t->ast, recv);
-        if (rd.module == t->ast->module && rd.node != NODE_NONE && t->nfreed < (uint32_t)(sizeof t->freed / sizeof t->freed[0]))
-          t->freed[t->nfreed++] = rd.node;
+        if (rd.module == t->ast->module && rd.node != NODE_NONE) {
+          if (t->nfreed < (uint32_t)(sizeof t->freed / sizeof t->freed[0])) {
+            t->freed[t->nfreed++] = rd.node;
+          } else { // never drop a fact silently: an untracked free would hide a use-after-free
+            const Span rsp = ast_at_const(t->ast, recv)->span;
+            typechecker_errorf(t, rsp.start, rsp.end - rsp.start,
+                               "too many freed values in one function (free-analysis limit)");
+          }
+        }
       }
     }
   } else if (skip && callee_node->as.member.object != NODE_NONE) {
-    // A method whose `self` is taken BY VALUE (`fn unwrap_or(self: Option<T>, ..)`) consumes its receiver:
-    // the receiver moves into the call, so a later use is a use-after-move (and it is not double-freed).
     const NodeId p0 = ast_list(fa, params)[0];
     const NodeId pt = ast_at_const(fa, p0)->as.parameter.type;
     const NodeKind ptk = pt != NODE_NONE ? ast_at_const(fa, pt)->kind : NODE_NONE_KIND;
-    if (ptk != NODE_POINTER_TYPE && ptk != NODE_REFERENCE_TYPE)
+    if (ptk != NODE_POINTER_TYPE && ptk != NODE_REFERENCE_TYPE) {
+      // `self` taken BY VALUE (`fn unwrap_or(self: Option<T>, ..)`) consumes its receiver: the receiver moves
+      // into the call, so a later use is a use-after-move (and it is not double-freed).
       tc_mark_move(t, callee_node->as.member.object);
+    } else {
+      // A `&self` / `&mut self` (or `*const`/`*mut self`) method implicitly borrows its receiver for the
+      // call's duration. This is a two-phase borrow: the args (evaluated above, so `v.len()` inside
+      // `v.push(v.len())` already ran) precede the receiver borrow, so it only conflicts with borrows that
+      // OUTLIVE those reads. When the method RETURNS a reference, the result conservatively borrows the
+      // receiver for as long as it is held, so the borrow is REGISTERED (`let r = h.get(); h.set(..);`
+      // conflicts); otherwise it is transient (the method returned) -- checked, never registered.
+      const uint8_t bk =
+          ast_at_const(fa, pt)->as.indirect_type.qualifier == TYPE_QUAL_MUT ? BORROW_MUT : BORROW_SHARED;
+      bool ret_ref = false;
+      if (returns.len == 1) {
+        const NodeId rr0 = ast_list(fa, returns)[0];
+        const Node *const rrn = ast_at_const(fa, rr0);
+        const NodeId rtn = rrn->kind == NODE_PARAMETER ? rrn->as.parameter.type : rr0;
+        ret_ref = rtn != NODE_NONE && ast_at_const(fa, rtn)->kind == NODE_REFERENCE_TYPE;
+      }
+      if (ret_ref)
+        borrow_create(t, callee_node->as.member.object, bk, callee_node->as.member.object);
+      else
+        borrow_report_conflict(t, callee_node->as.member.object, bk, callee_node->as.member.object);
+    }
   }
 
   // A method or associated fn reached through a generic instance (`b.get()`, `Box::<i32>::make()`)
@@ -2939,6 +3668,7 @@ static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
 }
 
 static void check_if(TypeChecker *t, const Node *const n) {
+  const uint32_t bm = borrow_mark(t);
   const TypeId c = check_expr(t, n->as.if_stmt.condition);
   if (c != TYPE_NONE && !is_bool(t, c)) {
     const Span sp = ast_at_const(t->ast, n->as.if_stmt.condition)->span;
@@ -2946,17 +3676,20 @@ static void check_if(TypeChecker *t, const Node *const n) {
     render_type(t, c, ty, sizeof ty);
     typechecker_errorf(t, sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'", ty);
   }
+  borrow_release_to(t, bm); // the condition's temporary borrows end before the branches run
   // The two branches are alternative paths: check each from the same pre-`if` state, then union their
   // effects -- so an else use of a value the then-branch moved (or vice versa) is not a false error, while
   // a value left moved/uninitialized on either path is so afterward.
   const FlowState pre = tc_flow_save(t);
   check_stmt(t, n->as.if_stmt.then_branch);
   FlowState acc = {.nmoved = 0, .nuninit = 0};
-  tc_flow_collect(&acc, t);          // then-branch effects
-  tc_flow_set(t, &pre);              // else branch starts fresh from the pre-if state
+  bool ovf = tc_flow_collect(&acc, t); // then-branch effects
+  tc_flow_set(t, &pre);                // else branch starts fresh from the pre-if state
   check_stmt(t, n->as.if_stmt.else_branch);
-  tc_flow_collect(&acc, t);          // ∪ else-branch effects
-  tc_flow_set(t, &acc);              // post-if = union of both
+  ovf |= tc_flow_collect(&acc, t);     // ∪ else-branch effects
+  tc_flow_set(t, &acc);                // post-if = union of both
+  if (ovf)
+    tc_flow_overflow(t, n->as.if_stmt.condition);
 }
 
 static TypeId check_expr(TypeChecker *t, const NodeId id) {
@@ -2968,6 +3701,8 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
   t->expected = TYPE_NONE;             // consumed here; do not leak into nested subexpressions
   const bool addr_ctx = t->addr_ctx;   // whether this expr is the place being borrowed (&/&mut); one-shot
   t->addr_ctx = false;
+  const bool place_use = t->place_use; // whether this expr is a place base whose read check already ran; one-shot
+  t->place_use = false;
   TypeId result = TYPE_NONE;
   switch (n->kind) {
     case NODE_LITERAL:
@@ -3035,11 +3770,23 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           }
         if (!addr_ctx && tc_is_uninit(t, d.node)) // definite-init: a deferred binding read before assignment
           typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "use of possibly uninitialized value");
+        // Borrow checker: reading a value while it is mutably borrowed is illegal (the `&mut` is exclusive).
+        // Suppressed under `addr_ctx` (the base of a further `&`/`&mut` is reborrowed, not read) and under
+        // `place_use` (this is a place base like `x` in `x.f`, whose read was already checked precisely).
+        if (!addr_ctx && !place_use && borrow_conflicting_read(t, id))
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                             "cannot use this value while it is mutably borrowed");
       }
       break;
     }
     case NODE_UNARY:
       result = check_unary(t, n, id);
+      // A bare deref `*r` reads/writes the storage r points at. If a live reborrow holds it exclusively (a
+      // borrow rooted at r), the access conflicts. Suppressed as a borrow target (`&*r`, addr_ctx) or as a
+      // checked place base (`(*r).f`, place_use) -- those run their own precise check at the outer place.
+      if (n->as.unary.op == Star && !addr_ctx && !place_use && borrow_conflicting_read(t, id))
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "cannot use this value while it is mutably borrowed");
       break;
     case NODE_BINARY:
       result = check_binary(t, n, id);
@@ -3047,18 +3794,53 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_ASSIGNMENT: {
       // A plain `x = ..` to a deferred binding is its initialization, not a read: clear it before the LHS is
       // checked so the read-of-uninitialized check below does not fire. (Compound `x += ..` does read x.)
-      if (n->as.binary.op == Equal && ast_at_const(a, n->as.binary.left)->kind == NODE_IDENTIFIER) {
-        const DefId ld = ast_resolution_def(a, n->as.binary.left);
-        if (ld.module == t->ast->module && ld.node != NODE_NONE)
-          tc_init(t, ld.node);
+      const bool plain = n->as.binary.op == Equal;
+      DefId ld = {.node = NODE_NONE};
+      if (plain && ast_at_const(a, n->as.binary.left)->kind == NODE_IDENTIFIER)
+        ld = ast_resolution_def(a, n->as.binary.left);
+      const bool lhs_local = ld.node != NODE_NONE && ld.module == t->ast->module;
+      if (lhs_local) {
+        tc_init(t, ld.node);        // a plain `x = ..` initializes x ...
+        tc_unmark_move(t, ld.node); // ... and gives it a fresh owned value (no longer moved / freed)
       }
+      // Reassigning a reference binding (`r = &mut y` / `r = r1`) rebinds the borrow it stores. Drop r's
+      // previous borrow BEFORE the RHS is checked (so `r = &mut x` while r already borrows x does not
+      // self-conflict against the stale record), then bind the RHS's new borrow to r afterward.
+      const TypeId lt = lhs_local ? decl_type_in(t, ld.module, ld.node) : TYPE_NONE;
+      const bool ref_rebind = lt != TYPE_NONE && ast_type_at(a, lt)->kind == TYPE_REFERENCE;
+      if (ref_rebind) {
+        // Tombstone in place, never compact: an enclosing context's borrow_mark indexes into the array,
+        // and shifting/shrinking below it would make the next release resurrect or misclassify records.
+        for (uint32_t i = 0; i < t->nborrows; i++)
+          if (t->borrows[i].binding == ld.node)
+            borrow_tombstone(&t->borrows[i]);
+      }
+      const uint32_t bm = borrow_mark(t);
       const TypeId l = check_expr(t, n->as.binary.left);
       t->expected = l; // hand the lvalue's type to the RHS for expected-type resolution
       check_expr(t, n->as.binary.right);
       tc_mark_move(t, n->as.binary.right); // `z = x` moves a Free x
+      if (ref_rebind) {
+        if (t->nborrows > bm) {
+          // The RHS produced a borrow (`&y`, or `f(&y)`) -- store it in r. The borrow lives for r's
+          // scope, NOT the (possibly deeper) scope this assignment sits in: `{ r = &x; }` must keep the
+          // borrow alive after the block when r is an outer binding (and tc_scope_exit flags the
+          // dangling case where the borrowed root itself dies with the block).
+          const uint16_t region = (uint16_t)tc_binding_depth(t, ld.node);
+          for (uint32_t k = bm; k < t->nborrows; k++) {
+            t->borrows[k].binding = ld.node;
+            t->borrows[k].region = region;
+          }
+        } else { // `r = r1`: copy (`&`) or move (`&mut`) r1's stored borrow
+          borrow_transfer_ref(t, n->as.binary.right, ld.node);
+        }
+      }
       if (!is_assignable(t, n->as.binary.left)) {
         const Span sp = ast_at_const(a, n->as.binary.left)->span;
         typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot assign to this expression");
+      } else if (borrow_conflicting_write(t, n->as.binary.left, id)) { // assigning through the owner while borrowed
+        const Span sp = ast_at_const(a, n->as.binary.left)->span;
+        typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot assign to this value while it is borrowed");
       } else if (!compatible(t, l, n->as.binary.right)) {
         err_mismatch(t, n->as.binary.right, l);
       }
@@ -3087,7 +3869,13 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     }
     case NODE_INDEX: {
       t->addr_ctx = addr_ctx; // `&buf[i]` borrows buf -- propagate the address context to the base
+      t->place_use = !addr_ctx; // value index read: suppress the base's whole read (checked precisely below)
       const TypeId obj = check_expr(t, n->as.index.object);
+      // The base is type-resolved now, so the place decomposes; field-precise read check like NODE_MEMBER.
+      // (The index expression, checked further below, is a separate value -- place_use was reset by the base.)
+      if (!addr_ctx && !place_use && borrow_conflicting_read(t, id))
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "cannot use this value while it is mutably borrowed");
       const Ty *const ot = ast_type_at(a, obj);
       const Node *const idxn = ast_at_const(a, n->as.index.index);
       if (idxn->kind == NODE_RANGE) { // `a[lo..hi]` -> a `[]T` view of the element type
@@ -3159,10 +3947,18 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       break;
     }
-    case NODE_MEMBER:
-      t->addr_ctx = addr_ctx; // `&x.f` borrows x -- propagate the address context to the receiver
+    case NODE_MEMBER: {
+      const bool value_read = !n->as.member.path && !addr_ctx;
+      t->addr_ctx = addr_ctx;  // `&x.f` borrows x -- propagate the address context to the receiver
+      t->place_use = value_read; // value member read: suppress the base's whole read (checked precisely below)
       result = n->as.member.path ? check_path_member(t, n, id, expected) : check_member(t, n, false);
+      // The object is type-resolved now, so the place decomposes. Field-precise read check at the outermost
+      // place: reading `x.f` conflicts with a `&mut` overlapping x.f, not with a disjoint `&mut x.g`.
+      if (value_read && !place_use && borrow_conflicting_read(t, id))
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "cannot use this value while it is mutably borrowed");
       break;
+    }
     case NODE_CAST: {
       const TypeId src = check_expr(t, n->as.cast.expression);
       const TypeId dst = resolve_type(t, n->as.cast.type);
@@ -3240,6 +4036,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_MATCH: {
+      const uint32_t bm = borrow_mark(t);
       const TypeId scrut = check_expr(t, n->as.match_expr.value);
       // Binding mode (Rust match ergonomics): matching a reference binds each payload by reference
       // (`&T` / `&mut T`); matching an owned value moves it out and consumes the scrutinee.
@@ -3247,9 +4044,19 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const int bind_ref = (sy->kind == TYPE_REFERENCE || sy->kind == TYPE_POINTER)
                                ? (sy->qualifier == TYPE_QUAL_MUT ? 2 : 1)
                                : 0;
+      // For a BY-REFERENCE match (`switch &mut x`/`switch &x`) the payload bindings alias the scrutinee, so
+      // its borrow must stay live THROUGH the arms -- mutating (or, under `&mut`, even reading) the scrutinee
+      // in an arm then conflicts. A by-value match's scrutinee borrows nothing, so its temporaries end here
+      // -- and destructuring it CONSUMES it, marked BEFORE the arms so an arm body reusing the consumed
+      // value (`switch s { A => use(s) }`) is flagged as a use-after-move.
+      if (bind_ref == 0) {
+        borrow_release_to(t, bm);
+        tc_mark_move(t, n->as.match_expr.value);
+      }
       const NodeList arms = n->as.match_expr.arms;
       const NodeId *const ids = ast_list(a, arms);
       bool first = true;
+      bool ovf = false;
       const FlowState mpre = tc_flow_save(t); // each arm is an alternative path; union their effects after
       FlowState acc = {.nmoved = 0, .nuninit = 0};
       for (uint32_t i = 0; i < arms.len; i++) {
@@ -3262,7 +4069,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           typechecker_errorf(t, sp.start, sp.end - sp.start, "match guard must be 'bool'");
         }
         const TypeId body = check_expr(t, arm->as.match_arm.body);
-        tc_flow_collect(&acc, t); // ∪ this arm's effects
+        ovf |= tc_flow_collect(&acc, t); // ∪ this arm's effects
         if (first) {
           result = body;
           first = false;
@@ -3273,8 +4080,9 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       if (arms.len)
         tc_flow_set(t, &acc); // post-match = union of every arm
-      if (bind_ref == 0)
-        tc_mark_move(t, n->as.match_expr.value); // destructuring an owned value consumes it (Free types tracked)
+      if (ovf)
+        tc_flow_overflow(t, id);
+      borrow_release_to(t, bm); // arm-body temporaries end with the match expression
       break;
     }
     case NODE_NEW: {
@@ -3339,8 +4147,18 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_BLOCK: {
       const NodeList stmts = n->as.block.statements;
       const NodeId *const ids = ast_list(a, stmts);
-      for (uint32_t i = 0; i < stmts.len; i++)
+      tc_scope_enter(t);
+      for (uint32_t i = 0; i < stmts.len; i++) {
         check_stmt(t, ids[i]);
+        borrow_nll_drop(t, id, ids, i); // NLL: a stored borrow ends after its binding's last use
+      }
+      while (t->ndefers && t->defer_depth[t->ndefers - 1] == t->scope_depth) { // replay defers (see check_stmt)
+        const NodeId dv = t->defer_stack[--t->ndefers];
+        const uint32_t dbm = borrow_mark(t);
+        check_expr(t, dv);
+        borrow_release_to(t, dbm);
+      }
+      tc_scope_exit(t); // borrows made in this value-block end here (its value type is read below)
       if (stmts.len > 0) {
         const Node *const last = ast_at_const(a, ids[stmts.len - 1]);
         // A block's value is its final expression statement (`{ ..; e; }` yields `e`). An assignment is a
@@ -3356,6 +4174,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_IF: {
       // An `if` used as a value: both arms must agree, and an `else` is mandatory (a missing arm
       // would leave the value undefined). The arms are blocks whose tail expression is the value.
+      const uint32_t bm = borrow_mark(t);
       const TypeId c = check_expr(t, n->as.if_stmt.condition);
       if (c != TYPE_NONE && !is_bool(t, c)) {
         const Span sp = ast_at_const(a, n->as.if_stmt.condition)->span;
@@ -3363,6 +4182,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         render_type(t, c, ty, sizeof ty);
         typechecker_errorf(t, sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'", ty);
       }
+      borrow_release_to(t, bm); // condition temporaries end before the branches
       const FlowState ifpre = tc_flow_save(t); // branches are alternative paths -> check independent, union after
       const TypeId then_ty = check_expr(t, n->as.if_stmt.then_branch);
       if (n->as.if_stmt.else_branch == NODE_NONE) {
@@ -3371,11 +4191,13 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         result = TYPE_NONE;
       } else {
         FlowState acc = {.nmoved = 0, .nuninit = 0};
-        tc_flow_collect(&acc, t);
+        bool ovf = tc_flow_collect(&acc, t);
         tc_flow_set(t, &ifpre);
         const TypeId else_ty = check_expr(t, n->as.if_stmt.else_branch);
-        tc_flow_collect(&acc, t);
+        ovf |= tc_flow_collect(&acc, t);
         tc_flow_set(t, &acc);
+        if (ovf)
+          tc_flow_overflow(t, id);
         if (then_ty != else_ty && then_ty != TYPE_NONE && else_ty != TYPE_NONE) {
           err_mismatch(t, n->as.if_stmt.else_branch, then_ty);
           result = TYPE_NONE;
@@ -3458,56 +4280,75 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
   }
 }
 
-// Escape analysis (v1): the address provenance of a syntactically-obvious address expression.
-// 1 = address of a local binding, 2 = address of a parameter slot, 0 = anything else (global/heap, an
-// address through a pointer, or not an address). Looks through casts (`&x as *T`, `&x as usize`) and the
-// transparent Move/Unsafe wrappers; only a BARE identifier operand of `&`/`&mut` is classified, so
-// `&x.field` / `&arr[i]` / `&*p` stay unflagged (those may point through a pointer, not into a local slot).
-static int addr_escape(TypeChecker *t, NodeId e) {
+// The escape rank of one borrowed place: 1 = frame-local storage (a `let`/pattern/loop binding),
+// 2 = a by-value parameter slot, 0 = storage that outlives the call. A place with a DEREF step lives
+// behind another reference: safe through a reference PARAMETER (caller-owned), else it follows THAT
+// binding's own live borrows (a reborrow chain), bounded by `depth`.
+static int borrow_escape_of_binding(TypeChecker *t, NodeId binding, unsigned depth);
+static int place_escape(TypeChecker *t, const NodeId place, const unsigned depth) {
+  PStep steps[PLACE_MAX_STEPS];
+  int ns;
+  const NodeId root = place_decompose(t, place, steps, &ns, PLACE_MAX_STEPS);
+  if (root == NODE_NONE)
+    return 0; // raw pointer / heap / untracked -- assumed to outlive the call
+  bool thru = false;
+  for (int i = 0; i < ns; i++)
+    thru |= steps[i].kind == PS_DEREF;
+  if (thru)
+    return ast_at_const(t->ast, root)->kind == NODE_PARAMETER ? 0 : borrow_escape_of_binding(t, root, depth + 1);
+  return ast_at_const(t->ast, root)->kind == NODE_PARAMETER ? 2 : 1;
+}
+static int borrow_escape_of_binding(TypeChecker *t, const NodeId binding, const unsigned depth) {
+  if (depth > 8)
+    return 0;
+  int esc = 0;
+  for (uint32_t i = 0; i < t->nborrows; i++) {
+    if (t->borrows[i].binding != binding)
+      continue;
+    const int e = place_escape(t, t->borrows[i].place, depth);
+    if (e == 1)
+      return 1; // a frame-local referent is the worst case; report it
+    if (e)
+      esc = e;
+  }
+  return esc;
+}
+
+// Escape analysis: the address provenance of a returned reference/pointer expression.
+// 1 = derives from a local binding, 2 = from a by-value parameter slot, 0 = anything that outlives the call
+// (global/heap, an address through a pointer, or a reference parameter -- the caller owns its referent).
+// Looks through casts (`&x as *T`, `&x as usize`) and the transparent Move/Unsafe wrappers. A returned
+// REFERENCE binding is judged by its LIVE BORROWS (assignments rebind those, so `let mut r = &x; r = p;
+// return r;` is safe while `let mut r = p; r = &x; return r;` dangles); a pointer-typed local still
+// follows its `let` initializer (raw pointers carry no borrows).
+#define BORROW_ESCAPE_MAX_DEPTH 64
+static int addr_escape_at(TypeChecker *t, NodeId e, const unsigned depth) {
   const Node *n = ast_at_const(t->ast, e);
   while (n->kind == NODE_CAST || (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe))) {
     e = n->kind == NODE_CAST ? n->as.cast.expression : n->as.unary.operand;
     n = ast_at_const(t->ast, e);
   }
-  if (n->kind != NODE_UNARY || n->as.unary.op != Ampersand)
-    return 0;
-  // Walk to the place's base: a field of a value struct or an element of a value array shares storage with
-  // its base, so it dangles too; but a member/index reached THROUGH a pointer/reference/slice (or `&*p`)
-  // names storage that outlives the call, so it is safe.
-  NodeId place = n->as.unary.operand;
-  for (;;) {
-    const Node *const pn = ast_at_const(t->ast, place);
-    NodeId base;
-    if (pn->kind == NODE_MEMBER && !pn->as.member.path)
-      base = pn->as.member.object;
-    else if (pn->kind == NODE_INDEX)
-      base = pn->as.index.object;
-    else
-      break;
-    const TypeId bt = ast_type(t->ast, base);
-    const Ty *const btk = bt == TYPE_NONE ? NULL : ast_type_at(t->ast, bt);
-    if (!btk)
-      return 0;
-    if (btk->kind == TYPE_POINTER || btk->kind == TYPE_REFERENCE)
-      return 0; // behind an indirection -- outlives the call
-    if (pn->kind == NODE_INDEX && btk->kind != TYPE_ARRAY)
-      return 0; // indexing a slice/other -- the element outlives the call
-    place = base;
+  if (n->kind == NODE_UNARY && n->as.unary.op == Ampersand) {
+    // A field of a value struct / element of a value array shares storage with its base, so it dangles too; a
+    // place reached THROUGH a reference/pointer (`&*r`, `&r.f`, `&*p`) names the referent's storage, which
+    // outlives the call (or follows the reference's own borrows). place_decompose records the DEREF steps.
+    return place_escape(t, n->as.unary.operand, depth);
   }
-  if (ast_at_const(t->ast, place)->kind != NODE_IDENTIFIER)
-    return 0; // &*p and other non-place roots
-  const DefId d = ast_resolution_def(t->ast, place);
-  if (d.node == NODE_NONE || d.module != t->ast->module)
-    return 0;
-  switch (ast_at_const(t->ast, d.node)->kind) {
-    case NODE_PARAMETER:
-      return 2;
-    case NODE_LET:
-    case NODE_PATTERN_NAME:
-      return 1;
-    default:
-      return 0; // a module-level const/static outlives the function -- safe to return its address
+  if (n->kind == NODE_IDENTIFIER && depth < BORROW_ESCAPE_MAX_DEPTH) {
+    const DefId d = ast_resolution_def(t->ast, e);
+    if (d.module == t->ast->module && d.node != NODE_NONE) {
+      const Node *const dn = ast_at_const(t->ast, d.node);
+      const TypeId dt = ast_type(t->ast, d.node);
+      if (dt != TYPE_NONE && ast_type_at(t->ast, dt)->kind == TYPE_REFERENCE)
+        return borrow_escape_of_binding(t, d.node, depth); // flow-accurate: live borrows, not the initializer
+      if (dn->kind == NODE_LET && dn->as.let_stmt.value != NODE_NONE)
+        return addr_escape_at(t, dn->as.let_stmt.value, depth + 1); // pointer chains keep the old behavior
+    }
   }
+  return 0;
+}
+static int addr_escape(TypeChecker *t, const NodeId e) {
+  return addr_escape_at(t, e, 0);
 }
 
 static void check_return(TypeChecker *t, const Node *const n, const NodeId id) {
@@ -3562,6 +4403,24 @@ static void check_static_assert(TypeChecker *t, const Node *const n) {
   }
 }
 
+// Check a loop body, then -- if it moved a binding out (so a SECOND iteration would re-use it), or left a
+// borrow live past its own end (one stored in an OUTER binding, so a second iteration's earlier statements
+// run against it), and we are not already inside such a re-check -- check it AGAIN from the post-iteration
+// state, catching back-edge use-after-move and back-edge aliasing (`while c { x += 1; r = &x; }`). The
+// `in_loop_recheck` guard bounds this to one extra pass per outermost loop (no exponential blowup on
+// nesting). A body that reassigns what it moved (tc_unmark_move) leaves nmoved unchanged, and body-local
+// borrows die with the body's scope, so the common loop re-checks nothing.
+static void check_loop_body(TypeChecker *t, const NodeId body) {
+  const uint32_t nm0 = t->nmoved;
+  const uint32_t nb0 = t->nborrows;
+  check_stmt(t, body);
+  if ((t->nmoved > nm0 || t->nborrows > nb0) && !t->in_loop_recheck) {
+    t->in_loop_recheck = true;
+    check_stmt(t, body);
+    t->in_loop_recheck = false;
+  }
+}
+
 static void check_stmt(TypeChecker *t, const NodeId id) {
   if (id == NODE_NONE)
     return;
@@ -3574,15 +4433,52 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
     case NODE_BLOCK: {
       const NodeList stmts = n->as.block.statements;
       const NodeId *const ids = ast_list(a, stmts);
-      for (uint32_t i = 0; i < stmts.len; i++)
+      tc_scope_enter(t);
+      for (uint32_t i = 0; i < stmts.len; i++) {
         check_stmt(t, ids[i]);
+        borrow_nll_drop(t, id, ids, i); // a stored borrow ends after its binding's last use, not at scope exit
+      }
+      // Replay this block's defers (LIFO) so their moves/frees land where they EXECUTE -- at scope exit,
+      // after every statement above. Their first (registration-time) check was rolled back, so a use
+      // between the `defer` and here is not a use-after-free; two defers freeing the same value still
+      // collide here. Re-emitted identical diagnostics are dropped by errors_finalize.
+      while (t->ndefers && t->defer_depth[t->ndefers - 1] == t->scope_depth) {
+        const NodeId dv = t->defer_stack[--t->ndefers];
+        const uint32_t dbm = borrow_mark(t);
+        check_expr(t, dv);
+        borrow_release_to(t, dbm);
+      }
+      tc_scope_exit(t); // borrows still live at block end (their last use was the final statement) end here
       break;
     }
     case NODE_LET: {
+      // A stored reference (`let r = &x`) keeps its borrow alive for r's scope: the borrow is bound to
+      // this binding (region = this block's depth), so the block's tc_scope_exit drops it exactly when r
+      // goes out of scope. Any other initializer's borrows are temporaries, released at the end of the let.
+      const uint32_t bm = borrow_mark(t);
       if (ast_at_const(a, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE) {
         check_tuple_let(t, n);
+        { // each element is a binding at this depth (borrow roots + regions + outlives checks key off it)
+          const Node *const pat = ast_at_const(a, n->as.let_stmt.name);
+          const NodeId *const eids = ast_list(a, pat->as.pattern.children);
+          for (uint32_t k = 0; k < pat->as.pattern.children.len; k++)
+            tc_record_binding_depth(t, eids[k]);
+          tc_record_binding_depth(t, id);
+        }
+        // If any destructured element is a reference, the tuple's references may (conservatively) borrow the
+        // initializer's reference arguments; keep those borrows alive for the tuple-let's scope. They are
+        // lexical (bound to the tuple-let, which borrow_nll_drop leaves to tc_scope_exit) since element uses
+        // do not resolve to the let node. Otherwise the initializer's borrows are temporaries.
+        if (tuple_binds_reference(t, n->as.let_stmt.name) && t->nborrows > bm)
+          for (uint32_t k = bm; k < t->nborrows; k++) {
+            t->borrows[k].binding = id;
+            t->borrows[k].region = (uint16_t)t->scope_depth;
+          }
+        else
+          borrow_release_to(t, bm);
         break;
       }
+      tc_record_binding_depth(t, id); // the binding's scope depth: borrow regions + outlives checks key off it
       const bool annotated = n->as.let_stmt.type != NODE_NONE;
       const bool valued = n->as.let_stmt.value != NODE_NONE;
       const TypeId declared = annotated ? resolve_type(t, n->as.let_stmt.type) : TYPE_NONE;
@@ -3590,6 +4486,9 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         t->expected = declared; // hand the annotation to the initializer for expected-type resolution
         check_expr(t, n->as.let_stmt.value);
         tc_mark_move(t, n->as.let_stmt.value); // `let y = x` moves a Free x into y
+        tc_unmark_move(t, id); // this binding gets a fresh value -- clear any stale moved/freed state a prior
+                               // loop iteration left on the same decl (so a re-declared loop-local is not
+                               // seen as used-after-free/move on the back-edge re-check)
       }
       TypeId binding;
       if (annotated) {
@@ -3615,9 +4514,26 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
           tc_add_uninit(t, id); // identifier uses resolve to this NODE_LET node
         }
       }
+      // A reference-typed binding stores the borrow(s) its initializer created: `let r = &x` (r borrows x),
+      // or -- conservatively -- `let r = f(&x)` where f returns a reference (r is taken to borrow f's
+      // reference arguments, since we have no lifetime annotations to say otherwise). Keep them alive bound to
+      // `id`; NLL ends them at this binding's last use. Any other initializer's borrows are temporaries.
+      const bool binding_is_ref = binding != TYPE_NONE && ast_type_at(a, binding)->kind == TYPE_REFERENCE;
+      const bool stores_borrow = binding_is_ref && t->nborrows > bm;
+      if (stores_borrow)
+        for (uint32_t k = bm; k < t->nborrows; k++) {
+          t->borrows[k].binding = id;
+          t->borrows[k].region = (uint16_t)t->scope_depth; // the borrow dies with ITS binding's scope
+        }
+      else {
+        borrow_release_to(t, bm); // temporaries end with the statement
+        if (binding_is_ref && valued) // `let r2 = r1`: copy (`&`) or move (`&mut`) r1's stored borrow
+          borrow_transfer_ref(t, n->as.let_stmt.value, id);
+      }
       break;
     }
     case NODE_CONST: {
+      const uint32_t bm = borrow_mark(t);
       const TypeId declared = resolve_type(t, n->as.const_def.type);
       if (n->as.const_def.value != NODE_NONE) {
         check_expr(t, n->as.const_def.value);
@@ -3625,18 +4541,39 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
           err_mismatch(t, n->as.const_def.value, declared);
       }
       ast_set_type(a, id, declared);
+      borrow_release_to(t, bm);
       break;
     }
-    case NODE_RETURN:
+    case NODE_RETURN: {
+      const uint32_t bm = borrow_mark(t);
       check_return(t, n, id);
+      borrow_release_to(t, bm); // borrows of the returned values end with the statement
       break;
-    case NODE_DEFER:
+    }
+    case NODE_DEFER: {
+      // The deferred expression runs at scope EXIT, not here: check it now (type/name/borrow errors),
+      // then roll its flow effects back -- a use between the `defer` and the block's end is NOT
+      // after-free -- and register it for replay at the block's close (see NODE_BLOCK).
+      const FlowState pre = tc_flow_save(t);
+      const uint32_t bm = borrow_mark(t);
       check_expr(t, n->as.single.value);
+      borrow_release_to(t, bm);
+      tc_flow_set(t, &pre);
+      if (t->ndefers < (uint32_t)(sizeof t->defer_stack / sizeof t->defer_stack[0])) {
+        t->defer_stack[t->ndefers] = n->as.single.value;
+        t->defer_depth[t->ndefers++] = t->scope_depth;
+      } else {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "too many pending 'defer' statements in one function (analysis limit)");
+      }
       break;
+    }
     case NODE_IF:
       check_if(t, n);
       break;
     case NODE_WHILE: {
+      t->loop_depth++; // node-id order stops implying execution order (the back edge re-runs earlier nodes)
+      const uint32_t bm = borrow_mark(t);
       const TypeId c = check_expr(t, n->as.while_stmt.condition);
       if (c != TYPE_NONE && !is_bool(t, c)) {
         const Span sp = ast_at_const(a, n->as.while_stmt.condition)->span;
@@ -3644,10 +4581,28 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         render_type(t, c, ty, sizeof ty);
         typechecker_errorf(t, sp.start, sp.end - sp.start, "while condition must be 'bool', found '%s'", ty);
       }
-      check_stmt(t, n->as.while_stmt.body);
+      borrow_release_to(t, bm); // condition temporaries end before the body (re-evaluated each iteration)
+      if (n->as.while_stmt.is_do) {
+        check_loop_body(t, n->as.while_stmt.body); // a do-while body runs at least once
+      } else {
+        // The body runs zero or more times: union the post-body state with the pre-body one, so an
+        // initialization/move inside the loop does not count as definite on the zero-iteration path.
+        const FlowState pre = tc_flow_save(t);
+        check_loop_body(t, n->as.while_stmt.body);
+        FlowState acc = {.nmoved = 0, .nuninit = 0};
+        bool ovf = tc_flow_collect(&acc, t);
+        tc_flow_set(t, &pre);
+        ovf |= tc_flow_collect(&acc, t);
+        tc_flow_set(t, &acc);
+        if (ovf)
+          tc_flow_overflow(t, n->as.while_stmt.condition);
+      }
+      t->loop_depth--;
       break;
     }
     case NODE_FOR: {
+      t->loop_depth++; // see NODE_WHILE
+      const uint32_t bm = borrow_mark(t);
       const NodeId iter = n->as.for_stmt.iterable;
       const Node *const itn = ast_at_const(a, iter);
       TypeId elem;
@@ -3672,12 +4627,31 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         }
       }
       ast_set_type(a, id, elem); // the loop binding resolves to this for-node (see resolver)
-      check_stmt(t, n->as.for_stmt.body);
+      // The loop binding lives per-iteration, INSIDE the body's scope: a reference to it stored in an
+      // outer binding must be flagged as outliving it (tc_scope_exit), so record it at body depth.
+      if (id != NODE_NONE)
+        TcDepthMap_insert(&t->binding_depth, id, t->scope_depth + 1);
+      borrow_release_to(t, bm); // iterable temporaries end before the body
+      {
+        const FlowState pre = tc_flow_save(t); // zero-or-more iterations: union with the skip path
+        check_loop_body(t, n->as.for_stmt.body);
+        FlowState acc = {.nmoved = 0, .nuninit = 0};
+        bool ovf = tc_flow_collect(&acc, t);
+        tc_flow_set(t, &pre);
+        ovf |= tc_flow_collect(&acc, t);
+        tc_flow_set(t, &acc);
+        if (ovf)
+          tc_flow_overflow(t, iter);
+      }
+      t->loop_depth--;
       break;
     }
-    case NODE_EXPRESSION_STATEMENT:
+    case NODE_EXPRESSION_STATEMENT: {
+      const uint32_t bm = borrow_mark(t);
       check_expr(t, n->as.single.value);
+      borrow_release_to(t, bm); // temporaries (`f(&x)`, an assignment's `&y`) end with the statement
       break;
+    }
     default: // NODE_BREAK, NODE_CONTINUE
       break;
   }
@@ -3691,6 +4665,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
   switch (n->kind) {
     case NODE_IDENTIFIER: // shorthand struct-field binding
       ast_set_type(a, id, bind_ref ? tc_ref(t, expected, bind_ref == 2) : expected);
+      tc_record_binding_depth(t, id);
       break;
     case NODE_PATTERN_NAME: {
       // A bare name matching a *unit* variant of the scrutinee enum is a tag pattern, not a
@@ -3710,6 +4685,7 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
         }
       }
       ast_set_type(a, id, bind_ref ? tc_ref(t, expected, bind_ref == 2) : expected); // plain binding
+      tc_record_binding_depth(t, id);
       break;
     }
     case NODE_PATTERN_STRUCT: {
@@ -3901,9 +4877,15 @@ static void check_item(TypeChecker *t, const NodeId id) {
       t->current_returns = n->as.function.returns;
       t->current_fn = id;
       t->nmoved = t->nuninit = t->nfreed = 0; // fresh move + definite-init + use-after-free scope per body
+      t->nborrows = t->scope_depth = 0;       // fresh borrow-check state per body
+      t->loop_depth = 0;
+      t->ndefers = 0;
       if (n->as.function.body != NODE_NONE)
         check_stmt(t, n->as.function.body);
       t->nmoved = t->nuninit = t->nfreed = 0;
+      t->nborrows = t->scope_depth = 0;
+      t->loop_depth = 0;
+      t->ndefers = 0;
       t->current_returns = saved;
       t->current_fn = savedfn;
       break;

@@ -83,8 +83,10 @@ extend<T> SliceMut<T> {
         return Option::<&T>::Some(&self.ptr[i]);
     }
 
-    // Overwrite the element at `i` (no bounds check -- the caller guarantees `i < len`).
-    pub fn set(self: &mut SliceMut<T>, i: usize, value: T) {
+    // Overwrite the element at `i` (no bounds check -- the caller guarantees `i < len`). Takes `&self`: a
+    // `[]mut T` view grants element mutation through its internal `*mut T` regardless of the binding's
+    // mutability, exactly like the `s[i] = v` index-assignment it mirrors.
+    pub fn set(self: &SliceMut<T>, i: usize, value: T) {
         self.ptr[i] = value;
     }
 
@@ -100,7 +102,9 @@ extend<T> SliceMut<T> {
         return self.ptr;
     }
 
-    pub fn as_mut_ptr(self: &mut SliceMut<T>) *mut T {
+    // Takes `&self` for the same reason as `set`: the mutable view exposes its `*mut T` without needing a
+    // mutable binding, so `[]mut T` value parameters can hand the pointer to FFI without a redundant `mut`.
+    pub fn as_mut_ptr(self: &SliceMut<T>) *mut T {
         return self.ptr;
     }
 
