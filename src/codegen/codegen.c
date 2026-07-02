@@ -1477,12 +1477,79 @@ static void render_binding_node(Codegen *c, const NodeId tn, const char *name, c
   }
 }
 
+// Render a function-pointer declarator `<ret> (*<decl>)(<params>)` for a function VALUE whose interned type
+// (TYPE_FUNCTION) is backed by a NODE_FUNCTION / NODE_CLOSURE / NODE_FUNCTION_TYPE in THIS module -- so a
+// `let f = some_fn;` or `let f = |x| ..;` binding gets a concrete C type instead of `__auto_type`. Mirrors
+// render_type_node's NODE_FUNCTION_TYPE spelling but reads params/returns from whichever node backs the
+// type; a compact closure's inferred return comes from its body's checked type.
+static void render_fn_value(Codegen *c, const NodeId fn, const char *decl, char *out, const size_t cap) {
+  const Node *const n = ast_at_const(c->ast, fn);
+  if (n->kind == NODE_FUNCTION_TYPE) { // a fn-typed param used as a value: node already spells the pointer
+    render_type_node(c, fn, decl, out, cap);
+    return;
+  }
+  NodeList ps, rs;
+  NodeId body = NODE_NONE; // compact closure `|x| e`: return type is inferred from `e`, not in `rs`
+  if (n->kind == NODE_FUNCTION) {
+    ps = n->as.function.params;
+    rs = n->as.function.returns;
+  } else if (n->kind == NODE_CLOSURE) {
+    ps = n->as.closure.params;
+    rs = n->as.closure.returns;
+    if (n->as.closure.expr_body)
+      body = n->as.closure.body;
+  } else {
+    buf_join3(out, cap, "void", SEP(decl), decl);
+    return;
+  }
+  char params[480];
+  size_t k = 0;
+  params[0] = '\0';
+  const NodeId *const pid = ast_list(c->ast, ps);
+  for (uint32_t i = 0; i < ps.len && k < sizeof params; i++) {
+    const Node *const pn = ast_at_const(c->ast, pid[i]);
+    char tt[256];
+    render_type_node(c, pn->kind == NODE_PARAMETER ? pn->as.parameter.type : pid[i], "", tt, sizeof tt);
+    if (i)
+      k = buf_append(params, sizeof params, k, ", ");
+    k = buf_append(params, sizeof params, k, tt);
+  }
+  char inner[600];
+  size_t at = 0;
+  inner[0] = '\0';
+  at = buf_append(inner, sizeof inner, at, "(*");
+  at = buf_append(inner, sizeof inner, at, decl);
+  at = buf_append(inner, sizeof inner, at, ")(");
+  at = buf_append(inner, sizeof inner, at, ps.len ? params : "void");
+  buf_append(inner, sizeof inner, at, ")");
+  if (rs.len == 1) {
+    const NodeId r0 = ast_list(c->ast, rs)[0];
+    const Node *const rn = ast_at_const(c->ast, r0);
+    render_type_node(c, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0, inner, out, cap);
+  } else if (rs.len == 0 && body != NODE_NONE) {
+    render_type_id(c, ast_type(c->ast, body), inner, out, cap);
+  } else {
+    buf_join3(out, cap, "void ", "", inner); // no return, or (unsupported) multi-return -> void
+  }
+}
+
 // Emit the declaration head for an inferred binding of name `name` and checker-computed type `t`,
-// const-qualified unless mutable. Functions (decay to a pointer), generics and poison
-// (multi-return calls, deferred `str`) have no faithful C declarator from the TypeId alone, so
-// those defer to `__auto_type`; every other type is written concretely.
+// const-qualified unless mutable. A function value defined in THIS module renders as a concrete function
+// pointer (east-const: `T (*const name)(..)`); cross-module function values, generics and poison
+// (multi-return calls, deferred `str`) have no faithful C declarator from the TypeId here, so those defer
+// to `__auto_type`; every other type is written concretely.
 static void emit_binding(Codegen *c, const TypeId t, const Span name, const bool is_const) {
-  const TypeKind k = ast_type_at(c->ast, t)->kind;
+  const Ty *const ty = ast_type_at(c->ast, t);
+  const TypeKind k = ty->kind;
+  if (k == TYPE_FUNCTION && ty->module == c->ast->module) {
+    char nm[128], cnm[160], decl[400];
+    render_ident(c, name, nm, sizeof nm);
+    if (is_const)
+      buf_join3(cnm, sizeof cnm, "const ", "", nm); // the pointer is const, not the pointee
+    render_fn_value(c, ty->as.decl, is_const ? cnm : nm, decl, sizeof decl);
+    emit_cstr(c, decl);
+    return;
+  }
   if (k == TYPE_ERROR || k == TYPE_FUNCTION || k == TYPE_GENERIC) {
     emit(c, is_const ? "const __auto_type " : "__auto_type ");
     emit_ident(c, name);
@@ -4559,18 +4626,24 @@ static bool cg_is_cond_moved(const Codegen *c, const NodeId decl) {
 // `site`: record `expr` as a flag-set site (`(flag=true, expr)` wraps the value at emit). False for an
 // `x.free()` receiver -- there the value is taken by ADDRESS (`&x`), which a comma-expr can't be, so the
 // flag is set around the whole call instead (emit_call); the binding still joins cond_moved for its flag.
-static void cg_mark_move(Codegen *c, const NodeId expr, const bool cond, const int pass, const bool site) {
+static void cg_mark_move(Codegen *c, NodeId expr, const bool cond, const int pass, const bool site) {
   if (expr == NODE_NONE)
     return;
+  // `move x` / `unsafe x` are transparent wrappers: the move is of the wrapped binding. Without
+  // peeling, `let t = move s;` would leave s untracked -- both s and t auto-freed, a double free.
+  const Node *me = ast_at_const(c->ast, expr);
+  while (me->kind == NODE_UNARY && (me->as.unary.op == Move || me->as.unary.op == Unsafe)) {
+    expr = me->as.unary.operand;
+    me = ast_at_const(c->ast, expr);
+  }
   // A partial move of a Free field (`let x = s.field`) hands the resource to `x`, but the owning binding `s`
   // would still free that field at scope exit -- a double free. Record it as a move of `s` itself so its
   // auto-free is elided (the moved-out value now owns the resource). Walks to the root binding.
-  const Node *const me = ast_at_const(c->ast, expr);
   if (me->kind == NODE_MEMBER && !me->as.member.path && cg_type_is_free(c, ast_type(c->ast, expr))) {
     cg_mark_move(c, me->as.member.object, cond, pass, false);
     return;
   }
-  if (ast_at_const(c->ast, expr)->kind != NODE_IDENTIFIER)
+  if (me->kind != NODE_IDENTIFIER)
     return;
   const DefId d = ast_resolution_def(c->ast, expr);
   if (d.module != c->ast->module || d.node == NODE_NONE)

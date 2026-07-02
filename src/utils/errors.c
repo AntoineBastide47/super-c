@@ -186,6 +186,21 @@ COLD_EXPORT void errors_finalize(
     errors->data[e] = block;
   }
 
+  // Drop exact duplicates (same rendered block, which embeds span + message + notes): the type
+  // checker re-runs whole subtrees (the loop-body back-edge re-check, the defer replay at scope
+  // exit), re-emitting identical diagnostics. Rendered-block equality is the precise dedup key.
+  size_t w = 0;
+  for (size_t e = 0; e < errors->len; e++) {
+    bool dup = false;
+    for (size_t k = 0; k < w && !dup; k++)
+      dup = strcmp(errors->data[k], errors->data[e]) == 0;
+    if (dup)
+      free(errors->data[e]);
+    else
+      errors->data[w++] = errors->data[e];
+  }
+  errors->len = w;
+
   VEC_DEINIT(line_starts);
 }
 
