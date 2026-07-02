@@ -175,6 +175,28 @@ static void test_tuple_destructure(void) {
       PRE "fn divmod(a: i32, b: i32) (i32, i32) { return a / b, a % b; }\n"
           "fn main() i32 { let (q, r) = divmod(17, 5); exit(q * 10 + r); }\n",
       32, ""); // 3*10 + 2
+  // multi-return x generics: a generic free fn, an instance method, a generic method with its own
+  // type param, and an inherited interface default -- each emits a substituted `<spec>_ret` struct.
+  sc_run_program(
+      "multi-return generic specializations",
+      PRE "fn pair<T>(x: T) (T, T) { return x, x; }\n"
+          "struct Two<T> { pub v: T }\n"
+          "extend<T> Two<T> {\n"
+          "  pub fn both(self: &Two<T>) (T, T) { return self.v, self.v; }\n"
+          "  pub fn with<U>(self: &Two<T>, u: U) (T, U) { return self.v, u; }\n"
+          "}\n"
+          "interface Splittable { fn halves(self: &Self) (i32, i32) { return 1, 2; } }\n"
+          "struct S { pub n: i32 }\nextend S as Splittable {}\n"
+          "fn main() i32 {\n"
+          "  let (a, b) = pair(5);\n"
+          "  let t = Two::<i32>{ v: 10 };\n"
+          "  let (c, d) = t.both();\n"
+          "  let (e, f) = t.with(true);\n"
+          "  let s = S{ n: 0 };\n"
+          "  let (g, h) = s.halves();\n"
+          "  exit(a + b + c + d + e + (f as i32) + g + h);\n"
+          "}\n",
+      44, ""); // 5+5 + 10+10 + 10+1 + 1+2
   // a mutable tuple binding can be reassigned.
   sc_run_program(
       "mutable tuple destructure",

@@ -67,6 +67,10 @@ struct TypeChecker {
                               // already run (`x` in a read of `x.f`); suppresses its own whole-value read check
     bool addr_ctx;            // the expression being checked is a place under address-of (&/&mut): its base is
                               // borrowed, not value-read, so the definite-init read check is suppressed for it
+    NodeId mret_call;         // the multi-return CALL whose element types are stashed below (check_call ->
+    TypeId mret_types[8];     // check_tuple_let), already substituted with the call's generic/instance args;
+    uint8_t mret_n;           // stashed element count (capped at 8; the rest fall back to the raw decl types)
+    uint32_t mret_total;      // the callee's true return count, for the binding-arity check
     ERRORS_VARIABLES;
 };
 
@@ -3474,8 +3478,20 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   }
   if (clos && fn->as.closure.expr_body)
     return ast_type(fa, fn->as.closure.body); // compact closure callee: return type inferred from its body
-  if (returns.len != 1)
+  if (returns.len != 1) {
+    if (returns.len > 1) { // multi-return: stash the SUBSTITUTED element types for check_tuple_let
+      const NodeId *const mrids = ast_list(fa, returns);
+      t->mret_n = returns.len < 8 ? (uint8_t)returns.len : 8;
+      t->mret_total = returns.len;
+      for (uint8_t i = 0; i < t->mret_n; i++) {
+        const Node *const mrn = ast_at_const(fa, mrids[i]);
+        const TypeId mrt = lower_type_in(t, fmod, mrn->kind == NODE_PARAMETER ? mrn->as.parameter.type : mrids[i]);
+        t->mret_types[i] = subst_type(t, subst_type(t, mrt, gparams, gargs, gn), rsubp, rsuba, nrsub);
+      }
+      t->mret_call = id;
+    }
     return TYPE_NONE; // 0 or multiple returns: no single value type yet
+  }
   const NodeId r0 = ast_list(fa, returns)[0];
   const Node *const rn = ast_at_const(fa, r0);
   const TypeId ret = lower_type_in(t, fmod, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
@@ -4314,7 +4330,10 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
   const NodeList names = nm->as.pattern.children;
   const NodeId *const nids = ast_list(a, names);
   const NodeId value = n->as.let_stmt.value;
+  t->mret_call = NODE_NONE;
   check_expr(t, value); // types the callee even though a multi-return call yields no single value
+  // check_call stashed the substituted element types (generic / instance-method calls included).
+  const bool stashed = value != NODE_NONE && t->mret_call == value;
 
   NodeList returns = {0, 0};
   bool ok = false;
@@ -4339,20 +4358,23 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
       }
     }
   }
-  if (!ok) {
+  if (!ok && !stashed) {
     typechecker_errorf(
         t, n->span.start, n->span.end - n->span.start, "a tuple binding requires a multi-value function call");
     return;
   }
-  if (names.len != returns.len) {
+  const uint32_t nret = stashed ? t->mret_total : returns.len;
+  if (names.len != nret) {
     typechecker_errorf(
         t, n->span.start, n->span.end - n->span.start, "expected %u binding%s, the call returns %u value%s",
-        names.len, names.len == 1 ? "" : "s", returns.len, returns.len == 1 ? "" : "s");
+        names.len, names.len == 1 ? "" : "s", nret, nret == 1 ? "" : "s");
   }
   const NodeId *const rids = ast_list(a, returns);
   for (uint32_t i = 0; i < names.len; i++) {
     TypeId et = TYPE_NONE;
-    if (i < returns.len) {
+    if (stashed && i < t->mret_n) { // substituted by check_call (generic args / receiver instance / Self)
+      et = t->mret_types[i];
+    } else if (i < returns.len) {
       const Node *const rn = ast_at_const(a, rids[i]);
       et = resolve_type(t, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rids[i]);
     }

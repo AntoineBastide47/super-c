@@ -300,6 +300,8 @@ static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out,
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
 static size_t render_qualified(Codegen *c, ModuleId owner, NodeId name_node, char *buf, size_t cap);
 static NodeId fn_array_return(Codegen *c, NodeId fn_id);
+static void emit_ret_struct_named(Codegen *c, NodeId fn_id, const char *nm);
+static void emit_ret_struct(Codegen *c, NodeId fn_id, DefId target);
 static void emit_match_core(Codegen *c, NodeId id, int mode, const char *result);
 static void emit_pattern_test(Codegen *c, NodeId pid, const char *scrut);
 static void emit_expr_stmt(Codegen *c, NodeId v);
@@ -5866,8 +5868,6 @@ static void emit_specializations(Codegen *c, const bool with_body) {
     if (!concrete) // skip an intermediate instantiation (e.g. id::<T> called inside another generic)
       continue;
     const Node *const fnnode = ast_at_const(c->ast, fn.node);
-    if (fnnode->as.function.returns.len > 1)
-      continue; // multi-return generic not yet supported
     const NodeList gens = fnnode->as.function.generics;
     const NodeId *const gids = ast_list(c->ast, gens);
     c->nsubst = 0;
@@ -5878,6 +5878,8 @@ static void emit_specializations(Codegen *c, const bool with_body) {
     }
     char nm[256];
     spec_name(c, fn, c->insts[i].args, c->insts[i].n, nm, sizeof nm);
+    if (!with_body) // the spec's `<name>_ret` typedef (multi-return / array-by-value), under the same subst
+      emit_ret_struct_named(c, fn.node, nm);
     emit_function(c, fn.node, (DefId){0, NODE_NONE}, false, with_body, nm, true);
     c->nsubst = 0;
   }
@@ -6069,7 +6071,7 @@ static bool seed_emitted_generic_method_signature_instances(Codegen *c) {
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++) {
         const Node *const mn = ast_at_const(c->ast, mids[j]);
-        if (mn->kind != NODE_FUNCTION || mn->as.function.generics.len || mn->as.function.returns.len > 1)
+        if (mn->kind != NODE_FUNCTION || mn->as.function.generics.len)
           continue;
         changed |= seed_type_instances_from_fn_signature(c, mids[j]);
       }
@@ -6120,7 +6122,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
     const NodeId *const mids = ast_list(c->ast, ms);
     for (uint32_t j = 0; j < ms.len; j++) {
       const Node *const mn = ast_at_const(c->ast, mids[j]);
-      if (mn->kind != NODE_FUNCTION || mn->as.function.returns.len > 1) // multi-return method: unsupported
+      if (mn->kind != NODE_FUNCTION)
         continue;
       if (with_body ? mn->as.function.body == NODE_NONE : !want_fn(which, mn->as.function.is_public))
         continue;
@@ -6146,6 +6148,8 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
           c->nsubst = 0;
           continue;
         }
+        if (!with_body) // the method spec's `<name>_ret` typedef, under the extend's subst
+          emit_ret_struct_named(c, mids[j], nm);
         emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, nm, stat);
         c->nsubst = 0;
         continue;
@@ -6173,6 +6177,8 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
           mangle_type(c, mi_src == c->ast ? inst.targs[g] : ast_reintern(c->ast, mi_src, inst.targs[g]), e, sizeof e);
           a2 = buf_append(snm, sizeof snm, a2, e);
         }
+        if (!with_body)
+          emit_ret_struct_named(c, mids[j], snm);
         emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, snm, stat);
       }
       c->nsubst = 0;
@@ -6199,7 +6205,7 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
 // Emit interface DEFAULT method bodies inherited by `extend T as Iface` extends in this module that do not
 // override them: synthesize `T__<name>` with the interface's abstract `Self` substituted to T, so a call
 // resolved to the default (`x.lt(y)`) links. Same-module interfaces only (emit_function reads the current
-// Ast); generic extends and generic / multi-return defaults are skipped. `which`/`with_body` mirror the
+// Ast); generic extends and generic defaults are skipped. `which`/`with_body` mirror the
 // prototype vs body split of phase_prototypes / phase_bodies.
 static void emit_default_methods(Codegen *c, const int which, const bool with_body) {
   const NodeList items = program_items(c);
@@ -6224,7 +6230,7 @@ static void emit_default_methods(Codegen *c, const int which, const bool with_bo
       const Node *const rm = ast_at_const(c->ast, rids[r]);
       if (rm->kind != NODE_FUNCTION || rm->as.function.body == NODE_NONE) // only DEFAULT (bodied) methods
         continue;
-      if (rm->as.function.generics.len || rm->as.function.returns.len > 1)
+      if (rm->as.function.generics.len)
         continue;
       if (!with_body && !want_fn(which, rm->as.function.is_public))
         continue;
@@ -6240,6 +6246,8 @@ static void emit_default_methods(Codegen *c, const int which, const bool with_bo
       c->nsubst = 1;
       c->subst[0].param = iface; // the interface's `Self` is a TYPE_GENERIC keyed by (iface.module, interface node)
       c->subst[0].concrete = tty;
+      if (!with_body) // the default's `<T__name>_ret` typedef (multi-return), under the Self subst
+        emit_ret_struct(c, rids[r], target);
       emit_function(c, rids[r], target, false, with_body, NULL, c->multifile && !rm->as.function.is_public);
       c->nsubst = 0;
     }
@@ -6259,13 +6267,13 @@ static NodeId fn_array_return(Codegen *c, const NodeId fn_id) {
   return ast_at_const(c->ast, tn)->kind == NODE_ARRAY_TYPE ? tn : NODE_NONE;
 }
 
-static void emit_ret_struct(Codegen *c, const NodeId fn_id, const DefId target) {
+// Core with an explicit struct-name stem: specializations pass their mangled spec name so the typedef
+// matches the `<override>_ret` return type emit_function produces; runs under the caller's c->subst.
+static void emit_ret_struct_named(Codegen *c, const NodeId fn_id, const char *const nm) {
   const Node *const fn = ast_at_const(c->ast, fn_id);
   const NodeList rets = fn->as.function.returns;
-  char nm[256];
   const NodeId arr = fn_array_return(c, fn_id);
   if (arr != NODE_NONE) { // single array-by-value return -> `struct { T _[N]; } <fn>_ret;`
-    function_name(c, fn_id, target, nm, sizeof nm, true);
     char d[256];
     render_type_node(c, arr, "_", d, sizeof d); // the array member, e.g. `int32_t _[3]`
     emit(c, "typedef struct { %s; } %s_ret;\n", d, nm);
@@ -6273,7 +6281,6 @@ static void emit_ret_struct(Codegen *c, const NodeId fn_id, const DefId target) 
   }
   if (rets.len <= 1)
     return;
-  function_name(c, fn_id, target, nm, sizeof nm, true);
   const NodeId *const ids = ast_list(c->ast, rets);
   emit(c, "typedef struct { ");
   for (uint32_t i = 0; i < rets.len; i++) {
@@ -6285,6 +6292,15 @@ static void emit_ret_struct(Codegen *c, const NodeId fn_id, const DefId target) 
     emit(c, "; ");
   }
   emit(c, "} %s_ret;\n", nm);
+}
+
+static void emit_ret_struct(Codegen *c, const NodeId fn_id, const DefId target) {
+  const Node *const fn = ast_at_const(c->ast, fn_id);
+  if (fn->as.function.returns.len <= 1 && fn_array_return(c, fn_id) == NODE_NONE)
+    return;
+  char nm[256];
+  function_name(c, fn_id, target, nm, sizeof nm, true);
+  emit_ret_struct_named(c, fn_id, nm);
 }
 
 static bool aggregate_has_payload_in(Codegen *c, const ModuleId m, const Node *enum_node) {
