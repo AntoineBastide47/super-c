@@ -841,6 +841,73 @@ static void test_explicit_free_mutability(void) {
       "cannot call a '&mut self' method on an immutable binding");
 }
 
+// `&dyn I` / `&mut dyn I` trait objects: erasure coercion, vtable dispatch, dyn-compatibility rules.
+#define DYN_PRELUDE \
+  "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\n" \
+  "struct Circle { pub r: f64 }\n" \
+  "extend Circle as Shape {\n" \
+  "  pub fn area(self: &Circle) f64 { return self.r; }\n" \
+  "  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n" \
+  "}\n"
+
+static void test_dyn(void) {
+  expect_ok(
+      "dyn coercion + vtable dispatch",
+      DYN_PRELUDE
+      "fn total(a: &dyn Shape) f64 { return a.area(); }\n"
+      "fn main() i32 { let c = Circle { r: 1.0 }; let d: &dyn Shape = &c; let t = total(&c) + d.area() + d.tag() as f64; return 0; }\n");
+  expect_ok(
+      "&mut dyn allows &mut self methods",
+      DYN_PRELUDE
+      "fn main() i32 { let mut c = Circle { r: 1.0 }; let m: &mut dyn Shape = &mut c; m.scale(2.0); return 0; }\n");
+  expect_ok(
+      "&mut dyn weakens to &dyn",
+      DYN_PRELUDE
+      "fn view(a: &dyn Shape) f64 { return a.area(); }\n"
+      "fn main() i32 { let mut c = Circle { r: 1.0 }; let m: &mut dyn Shape = &mut c; return view(m) as i32; }\n");
+  expect_error(
+      "&mut self method through &dyn",
+      DYN_PRELUDE "fn main() i32 { let c = Circle { r: 1.0 }; let d: &dyn Shape = &c; d.scale(2.0); return 0; }\n",
+      "cannot call a '&mut self' method through '&dyn'");
+  expect_error(
+      "bare interface is not a type",
+      DYN_PRELUDE "fn main() i32 { let c = Circle { r: 1.0 }; let w: Shape = c; return 0; }\n",
+      "an interface is not a type");
+  expect_error(
+      "erasing a non-conforming type",
+      DYN_PRELUDE "struct Plain { pub x: i32 }\n"
+                  "fn main() i32 { let p = Plain { x: 1 }; let d: &dyn Shape = &p; return 0; }\n",
+      "mismatched types");
+  expect_error(
+      "&mut dyn needs a &mut source",
+      DYN_PRELUDE "fn main() i32 { let c = Circle { r: 1.0 }; let m: &mut dyn Shape = &c; return 0; }\n",
+      "mismatched types");
+  expect_error(
+      "Self outside the receiver is not dyn-compatible",
+      "interface Cloney { fn duplicate(self: &Self) Self; }\n"
+      "struct S { pub v: i32 }\nextend S as Cloney { pub fn duplicate(self: &S) S { return S { v: self.v }; } }\n"
+      "fn main() i32 { let s = S { v: 1 }; let d: &dyn Cloney = &s; return 0; }\n",
+      "not dyn-compatible");
+  expect_error(
+      "by-value self is not dyn-compatible",
+      "interface Sink { fn consume(self: Self) i32; }\n"
+      "struct S { pub v: i32 }\nextend S as Sink { pub fn consume(self: S) i32 { return self.v; } }\n"
+      "fn main() i32 { let s = S { v: 1 }; let d: &dyn Sink = &s; return 0; }\n",
+      "not dyn-compatible");
+  expect_error(
+      "a generic interface is not dyn-compatible",
+      "interface Producer<T> { fn make(self: &Self) i32; }\n"
+      "struct S { pub v: i32 }\n"
+      "fn f(d: &dyn Producer) i32 { return 0; }\n"
+      "fn main() i32 { return 0; }\n",
+      "not dyn-compatible");
+  expect_error(
+      "erasing a generic type parameter",
+      DYN_PRELUDE "fn f<T: Shape>(x: &T) f64 { let d: &dyn Shape = x; return d.area(); }\n"
+                  "fn main() i32 { let c = Circle { r: 1.0 }; return f(&c) as i32; }\n",
+      "cannot erase a generic type parameter");
+}
+
 int main(void) {
   test_ok();
   test_bug_regressions();
@@ -861,6 +928,7 @@ int main(void) {
   test_interface_bounds();
   test_closures();
   test_explicit_free_mutability();
+  test_dyn();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

@@ -18,6 +18,7 @@ typedef enum TokenType {
   Continue,
   Defer,
   Do,
+  Dyn,
   Else,
   Enum,
   Extern,

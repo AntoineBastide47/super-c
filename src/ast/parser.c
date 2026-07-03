@@ -302,6 +302,17 @@ static NodeId parse_type_inner(Parser *p) {
         advance(p);
       }
     }
+    if (opener == Ampersand && match(p, Dyn)) { // `&dyn I` / `&mut dyn I`: one fat value, never a reference
+      const NodeId inner = parse_type(p);
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_DYN_TYPE,
+                      .span = span_new(start, node_span(p, inner).end),
+                      .as.indirect_type = {
+                          .type = inner,
+                          .qualifier = qualifier == TYPE_QUAL_MUT ? TYPE_QUAL_MUT : TYPE_QUAL_CONST},
+                  });
+    }
     const NodeId type = parse_type(p);
     return ast_add(
         p->ast, (Node){
@@ -354,6 +365,15 @@ static NodeId parse_type_inner(Parser *p) {
                     .kind = NODE_TUPLE_TYPE,
                     .span = span_new(start, previous_end(p)),
                     .as.array_literal = {.elements = elems},
+                });
+  }
+  if (match(p, Dyn)) { // bare `dyn I`: only legal as `Box<dyn I>`'s argument (the type checker validates)
+    const NodeId inner = parse_type(p);
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_DYN_TYPE,
+                    .span = span_new(start, node_span(p, inner).end),
+                    .as.indirect_type = {.type = inner, .qualifier = TYPE_QUAL_NONE},
                 });
   }
   if (check(p, Identifier) || check(p, SelfUpper))

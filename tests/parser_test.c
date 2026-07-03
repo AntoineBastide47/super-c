@@ -246,6 +246,21 @@ static void test_closures(void) {
           "`fn move(..) ..` parses with the move flag");
     ast_free(&g);
   }
+  // `&dyn I` / `&mut dyn I` fold into ONE NODE_DYN_TYPE (never a reference wrapping it); the
+  // qualifier carries the flavor. A `dyn` inside generic args parses with qualifier NONE (owned).
+  Ast *h = sc_parse("dyn types", "fn f(a: &dyn Shape, b: &mut dyn Shape, c: Box<dyn Shape>) void {}\n");
+  if (h) {
+    const NodeId d0 = th_nth_kind(h, NODE_DYN_TYPE, 0), d1 = th_nth_kind(h, NODE_DYN_TYPE, 1),
+                 d2 = th_nth_kind(h, NODE_DYN_TYPE, 2);
+    CHECK(d0 != NODE_NONE && ast_at_const(h, d0)->as.indirect_type.qualifier == TYPE_QUAL_CONST,
+          "`&dyn I` is one DYN_TYPE node (const flavor)");
+    CHECK(d1 != NODE_NONE && ast_at_const(h, d1)->as.indirect_type.qualifier == TYPE_QUAL_MUT,
+          "`&mut dyn I` carries the mut flavor");
+    CHECK(d2 != NODE_NONE && ast_at_const(h, d2)->as.indirect_type.qualifier == TYPE_QUAL_NONE,
+          "`Box<dyn I>`'s argument parses with the owned flavor");
+    CHECK(th_nth_kind(h, NODE_REFERENCE_TYPE, 0) == NODE_NONE, "no reference node wraps a dyn type");
+    ast_free(&h);
+  }
 }
 
 static void test_error_recovery(void) {

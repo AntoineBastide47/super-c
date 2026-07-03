@@ -11,6 +11,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Continue",
     "Defer",
     "Do",
+    "Dyn",
     "Else",
     "Enum",
     "Extern",

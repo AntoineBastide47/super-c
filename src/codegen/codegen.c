@@ -140,6 +140,7 @@ struct Codegen {
                              // lookups must scan the owner's enums instead of trusting the stale index
     NodeId slice_raw;        // the array node currently emitted as the inner `.ptr` of an array->slice
                              // coercion wrap; suppresses re-entrant coercion so it emits as a bare array
+    NodeId dyn_raw;          // same re-entry guard for a `&T` -> `&dyn I` fat-pair coercion wrap
     NodeId env_clos;         // the capturing closure whose body is being emitted: identifiers resolving
                              // to its captured decls rewrite to `__env-><name>` (NODE_NONE otherwise)
     bool minst_only;         // emit_inst_methods: emit ONLY the recorded generic-method specs (skip
@@ -594,6 +595,12 @@ static size_t render_qualified(Codegen *c, const ModuleId owner, const NodeId na
   return at + render_ident_src(cg_mod_src(c, owner), s, buf + off, cap > off ? cap - off : 0);
 }
 
+// The C name stem of interface `iface`'s trait-object support types: `<modpfx><Iface>` -- callers
+// suffix `__dyn` (the fat {data, vt} pair) or `__vt` (the vtable struct).
+static size_t render_iface_stem(Codegen *c, const ModuleId m, const NodeId iface, char *out, const size_t cap) {
+  return render_qualified(c, m, ast_at_const(cg_mod_ast(c, m), iface)->as.interface_def.name, out, cap);
+}
+
 // A C-identifier-safe spelling of a type, for monomorphization name mangling: i32, lib__Foo, ptr_i32,
 // slice_u8, arr_f64. Nested types recurse so distinct instantiations get distinct symbol names.
 static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap) {
@@ -644,10 +651,26 @@ static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap)
         snprintf(out, cap, "fnt%u_%u", (unsigned)ty->module, (unsigned)ty->as.decl);
       break;
     }
+    case TYPE_DYN: { // flavors mangle apart: borrowed dyn is POD, owned (`Box<dyn I>`) is Free
+      char e[176];
+      render_iface_stem(c, ty->module, ty->as.decl, e, sizeof e);
+      snprintf(out, cap, "%s_%s",
+               ty->qualifier == TYPE_QUAL_MUT ? "dynm" : ty->qualifier == TYPE_QUAL_CONST ? "dyn" : "dynb", e);
+      break;
+    }
     default:
       buf_append(out, cap, 0, "v");
       break;
   }
+}
+
+// `<srcmangle>__<Iface>` -- the per-(concrete type, interface) symbol stem shared by the vtable
+// (`<stem>__vtbl`) and its glue thunks (`<stem>__<method>`).
+static void dyn_pair_stem(Codegen *c, const TypeId src, const ModuleId im, const NodeId iface, char *out, const size_t cap) {
+  char sm[176], stem[176];
+  mangle_type(c, src, sm, sizeof sm);
+  render_iface_stem(c, im, iface, stem, sizeof stem);
+  snprintf(out, cap, "%s__%s", sm, stem);
 }
 
 // The mangled C name of a generic function specialization: `<fn>__<arg1>[__<arg2>...]` (e.g. `id__i32`).
@@ -1409,6 +1432,7 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
     }
     case NODE_SLICE_TYPE:  // `[]T` -> the prelude Slice<T> / SliceMut<T> instance C name
     case NODE_TUPLE_TYPE:  // `(T1, T2)` -> the prelude Tuple<n> instance C name
+    case NODE_DYN_TYPE:    // `&[mut] dyn I` -> the interface's fat-pair struct name
       render_type_id(c, ast_type(c->ast, tn), decl, out, cap);
       break;
     case NODE_ARRAY_TYPE: {
@@ -1571,6 +1595,13 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       } else {
         render_fn_ptr_id(c, *ty, decl, out, cap);
       }
+      break;
+    }
+    case TYPE_DYN: { // every flavor shares the one C fat-pair struct; constness is a typechecker fact
+      char nm[200];
+      const size_t k = render_iface_stem(c, ty->module, ty->as.decl, nm, sizeof nm);
+      buf_append(nm, sizeof nm, k, "__dyn");
+      buf_join3(out, cap, nm, SEP(decl), decl);
       break;
     }
     default:
@@ -2799,6 +2830,44 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
           }
         }
       }
+      { // a `dyn` receiver: dispatch through the fat pair's vtable. A non-identifier receiver is
+        // materialized once into a temp (the pair is 2 words) so its expression never evaluates twice.
+        const TypeId dt = subst_resolve(c, pointee);
+        const Ty *const dty = ast_type_at(c->ast, dt);
+        if (dty->kind == TYPE_DYN) {
+          Ast *const ia = cg_mod_ast(c, md.module);
+          char mn[128];
+          render_ident_src(cg_mod_src(c, md.module),
+                           ast_at_const(ia, ast_at_const(ia, md.node)->as.function.name)->as.name.text, mn, sizeof mn);
+          const TypeKind ok = ast_type_at(c->ast, obj_t)->kind;
+          const bool obj_ind = ok == TYPE_POINTER || ok == TYPE_REFERENCE;
+          const bool simple = !obj_ind && ast_at_const(c->ast, obj)->kind == NODE_IDENTIFIER;
+          char tmp[32];
+          if (simple) {
+            emit_expr(c, obj);
+            emit(c, ".vt->%s(", mn);
+            emit_expr(c, obj);
+            emit(c, ".data");
+          } else {
+            char dtn[240];
+            render_type_id(c, dt, "", dtn, sizeof dtn);
+            fresh(c, tmp, sizeof tmp);
+            emit(c, "({ const %s %s = ", dtn, tmp);
+            if (obj_ind)
+              emit(c, "*");
+            emit_expr(c, obj);
+            emit(c, "; %s.vt->%s(%s.data", tmp, mn, tmp);
+          }
+          for (uint32_t i = 0; i < args.len; i++) {
+            emit(c, ", ");
+            emit_expr(c, aids[i]);
+          }
+          emit(c, ")");
+          if (!simple)
+            emit(c, "; })");
+          return;
+        }
+      }
       Ast *const ma = cg_mod_ast(c, md.module);
       const Ty *const base = ast_type_at(c->ast, subst_resolve(c, pointee));
       // self-by-pointer is decided from the self parameter's own type node (in the method's module).
@@ -3241,10 +3310,31 @@ static bool emit_slice_coercion(Codegen *c, const NodeId id) {
   return true;
 }
 
+// A recorded `&T` -> `&dyn I` erasure site: wrap the reference value into the interface's fat pair,
+// pointing `.vt` at the (T, I) vtable this TU emits. The explicit `(void *)` cast also sheds the
+// pointee const of a `&T` source (the type system already gates `&mut self` dispatch).
+static bool emit_dyn_coercion(Codegen *c, const NodeId id) {
+  const DynUse *const du = ast_dyn_use_at(c->ast, id);
+  if (!du)
+    return false;
+  const Ty *const dy = ast_type_at(c->ast, du->dyn);
+  char dt[240], pair[368];
+  render_type_id(c, du->dyn, "", dt, sizeof dt);
+  dyn_pair_stem(c, du->src, dy->module, dy->as.decl, pair, sizeof pair);
+  emit(c, "((%s){ .data = (void *)(", dt);
+  c->dyn_raw = id;
+  emit_expr(c, id);
+  c->dyn_raw = NODE_NONE;
+  emit(c, "), .vt = &%s__vtbl })", pair);
+  return true;
+}
+
 static void emit_expr(Codegen *c, const NodeId id) {
   if (id == NODE_NONE)
     return;
   if (id != c->slice_raw && emit_slice_coercion(c, id)) // array -> slice fat-pointer view
+    return;
+  if (id != c->dyn_raw && emit_dyn_coercion(c, id)) // reference -> trait-object fat pair
     return;
   const Node *const n = ast_at_const(c->ast, id);
   // const-eval: a folded PURE COMPUTATION emits as its value, so constant chains collapse in the
@@ -8090,7 +8180,179 @@ static uint8_t *cg_type_state(Codegen *c) {
   return c->type_state;
 }
 
+// ---- dyn trait objects --------------------------------------------------------------------------
+// Is interface item `m` (in module `im`) a vtable entry: a method taking `self`? Self-less (static)
+// methods are not dispatchable through a value, so they stay out of the vtable.
+static bool cg_dyn_method(Codegen *c, const ModuleId im, const Node *const m) {
+  if (m->kind != NODE_FUNCTION || !m->as.function.params.len)
+    return false;
+  Ast *const ia = cg_mod_ast(c, im);
+  const Node *const p0 = ast_at_const(ia, ast_list(ia, m->as.function.params)[0]);
+  return span_is(cg_mod_src(c, im), ast_at_const(ia, p0->as.parameter.name)->as.name.text, "self");
+}
+
+// Interface method `m`'s single return type, reinterned into the current pool (TYPE_NONE = void).
+static TypeId cg_dyn_ret(Codegen *c, const ModuleId im, const Node *const m) {
+  if (m->as.function.returns.len != 1)
+    return TYPE_NONE;
+  Ast *const ia = cg_mod_ast(c, im);
+  const NodeId r0 = ast_list(ia, m->as.function.returns)[0];
+  const Node *const rn = ast_at_const(ia, r0);
+  const TypeId rt = ast_type(ia, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  if (rt == TYPE_NONE || (ast_type_at(ia, rt)->kind == TYPE_BUILTIN && ast_type_at(ia, rt)->as.builtin == BT_VOID))
+    return TYPE_NONE;
+  return ast_reintern(c->ast, ia, rt);
+}
+
+// The concrete receiver behind an erased `src` type, for method lookup (owner module + decl).
+static bool cg_dyn_target(Codegen *c, const Ty *const sy, ModuleId *const tm, NodeId *const td) {
+  if (sy->kind == TYPE_INSTANCE) {
+    *tm = ast_instance(c->ast, sy->as.inst)->module;
+    *td = ast_instance(c->ast, sy->as.inst)->decl;
+  } else if (sy->kind == TYPE_STRUCT || sy->kind == TYPE_ENUM) {
+    *tm = sy->module;
+    *td = sy->as.decl;
+  } else if (sy->kind == TYPE_BUILTIN && c->package && package_builtin_decl(c->package, sy->as.builtin) != NODE_NONE) {
+    *tm = c->package->core_module;
+    *td = package_builtin_decl(c->package, sy->as.builtin);
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// The `dyn` support typedefs for every interface erased in this TU: the vtable struct (a `__free`
+// drop-glue slot + one fn pointer per self-method, interface decl order) and the fat {data, vt} pair.
+// Self-contained (only `void *` and fn pointers), so they emit before all aggregate bodies.
+static void emit_dyn_typedefs(Codegen *c) {
+  const DynUse *const du = c->ast->dyn_uses.data;
+  for (size_t i = 0; i < c->ast->dyn_uses.len; i++) {
+    const Ty dy = *ast_type_at(c->ast, du[i].dyn);
+    bool seen = false;
+    for (size_t j = 0; j < i && !seen; j++) {
+      const Ty pj = *ast_type_at(c->ast, du[j].dyn);
+      seen = pj.module == dy.module && pj.as.decl == dy.as.decl;
+    }
+    if (seen)
+      continue;
+    char stem[176];
+    render_iface_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
+    Ast *const ia = cg_mod_ast(c, dy.module);
+    const Node *const idn = ast_at_const(ia, dy.as.decl);
+    const NodeId *const mids = ast_list(ia, idn->as.interface_def.items);
+    emit(c, "typedef struct %s__vt {\n    void (*__free)(void *self);\n", stem);
+    for (uint32_t k = 0; k < idn->as.interface_def.items.len; k++) {
+      const Node *const m = ast_at_const(ia, mids[k]);
+      if (!cg_dyn_method(c, dy.module, m))
+        continue;
+      char mn[128];
+      render_ident_src(cg_mod_src(c, dy.module), ast_at_const(ia, m->as.function.name)->as.name.text, mn, sizeof mn);
+      char inner[512];
+      size_t at = 0;
+      inner[0] = '\0';
+      at = buf_append(inner, sizeof inner, at, "(*");
+      at = buf_append(inner, sizeof inner, at, mn);
+      at = buf_append(inner, sizeof inner, at, ")(void *self");
+      const NodeId *const pids = ast_list(ia, m->as.function.params);
+      for (uint32_t p = 1; p < m->as.function.params.len; p++) {
+        char pt[200];
+        render_type_id(c, ast_reintern(c->ast, ia, ast_type(ia, ast_at_const(ia, pids[p])->as.parameter.type)), "",
+                       pt, sizeof pt);
+        at = buf_append(inner, sizeof inner, at, ", ");
+        at = buf_append(inner, sizeof inner, at, pt);
+      }
+      buf_append(inner, sizeof inner, at, ")");
+      const TypeId rt = cg_dyn_ret(c, dy.module, m);
+      char memb[600];
+      if (rt != TYPE_NONE)
+        render_type_id(c, rt, inner, memb, sizeof memb);
+      else
+        buf_join3(memb, sizeof memb, "void ", "", inner);
+      emit(c, "    %s;\n", memb);
+    }
+    emit(c, "} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n", stem, stem, stem, stem);
+  }
+}
+
+// One static vtable + glue-thunk set per distinct (concrete type, interface) erased in this TU. Glue
+// casts the vtable's `void *self` back to the concrete receiver and forwards -- a real thunk, not a
+// function-pointer cast (calling through an incompatibly-typed fn pointer is UB); the C compiler
+// inlines the target. Emitted after all prototypes (glue references concrete method symbols).
+static void emit_dyn_tables(Codegen *c) {
+  const DynUse *const du = c->ast->dyn_uses.data;
+  for (size_t i = 0; i < c->ast->dyn_uses.len; i++) {
+    const Ty dy = *ast_type_at(c->ast, du[i].dyn);
+    bool seen = false;
+    for (size_t j = 0; j < i && !seen; j++) {
+      const Ty pj = *ast_type_at(c->ast, du[j].dyn);
+      seen = du[j].src == du[i].src && pj.module == dy.module && pj.as.decl == dy.as.decl;
+    }
+    if (seen)
+      continue;
+    const TypeId src = du[i].src;
+    const Ty sy = *ast_type_at(c->ast, src);
+    ModuleId tm;
+    NodeId td;
+    if (!cg_dyn_target(c, &sy, &tm, &td))
+      continue; // the type checker rejected anything else at the coercion
+    char pair[368], recv[256];
+    dyn_pair_stem(c, src, dy.module, dy.as.decl, pair, sizeof pair);
+    render_type_id(c, src, "", recv, sizeof recv);
+    Ast *const ia = cg_mod_ast(c, dy.module);
+    const Node *const idn = ast_at_const(ia, dy.as.decl);
+    const NodeId *const mids = ast_list(ia, idn->as.interface_def.items);
+    for (uint32_t k = 0; k < idn->as.interface_def.items.len; k++) {
+      const Node *const m = ast_at_const(ia, mids[k]);
+      if (!cg_dyn_method(c, dy.module, m))
+        continue;
+      const Span mspan = ast_at_const(ia, m->as.function.name)->as.name.text;
+      char mn[128];
+      render_ident_src(cg_mod_src(c, dy.module), mspan, mn, sizeof mn);
+      const TypeId rt = cg_dyn_ret(c, dy.module, m);
+      char rts[256];
+      if (rt != TYPE_NONE)
+        render_type_id(c, rt, "", rts, sizeof rts);
+      else
+        buf_append(rts, sizeof rts, 0, "void");
+      emit(c, "static __attribute__((unused)) %s %s__%s(void *__self", rts, pair, mn);
+      const NodeId *const pids = ast_list(ia, m->as.function.params);
+      for (uint32_t p = 1; p < m->as.function.params.len; p++) {
+        char an[16], pd[240];
+        snprintf(an, sizeof an, "_a%u", p);
+        render_type_id(c, ast_reintern(c->ast, ia, ast_type(ia, ast_at_const(ia, pids[p])->as.parameter.type)), an,
+                       pd, sizeof pd);
+        emit(c, ", %s", pd);
+      }
+      emit(c, ") { %s", rt != TYPE_NONE ? "return " : "");
+      // The concrete symbol: the type's own extend method, or the same-module synthesized default.
+      DefId cm = cg_find_method(c, tm, td, cg_mod_src(c, dy.module), mspan);
+      if (cm.node == NODE_NONE)
+        cm = (DefId){dy.module, mids[k]};
+      emit_op_method(c, &sy, tm, td, cm);
+      emit(c, "((%s *)__self", recv);
+      for (uint32_t p = 1; p < m->as.function.params.len; p++)
+        emit(c, ", _a%u", p);
+      emit(c, "); }\n");
+    }
+    char stem[176];
+    render_iface_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
+    emit(c, "static const %s__vt %s__vtbl __attribute__((unused)) = { 0", stem, pair);
+    for (uint32_t k = 0; k < idn->as.interface_def.items.len; k++) {
+      const Node *const m = ast_at_const(ia, mids[k]);
+      if (!cg_dyn_method(c, dy.module, m))
+        continue;
+      char mn[128];
+      render_ident_src(cg_mod_src(c, dy.module), ast_at_const(ia, m->as.function.name)->as.name.text, mn, sizeof mn);
+      emit(c, ", %s__%s", pair, mn);
+    }
+    emit(c, " };\n");
+  }
+  if (c->ast->dyn_uses.len)
+    emit(c, "\n");
+}
+
 static void phase_types(Codegen *c) {
+  emit_dyn_typedefs(c); // only `void *` + fn pointers inside: safe before every aggregate body
   seed_emitted_type_instances(c);
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
@@ -8720,6 +8982,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     emit_layout_asserts(c); // type definitions came in via the headers just included
     phase_prototypes(c, PROTO_PRIVATE);
     emit(c, "\n");
+    emit_dyn_tables(c); // vtables + glue: after every method prototype, before the bodies that use them
     phase_bodies(c);
   } else {
     emit_cstr(c, SUPER_RT_INCLUDES);
@@ -8733,6 +8996,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     emit_layout_asserts(c);
     phase_prototypes(c, PROTO_ALL);
     emit(c, "\n");
+    emit_dyn_tables(c);
     phase_bodies(c);
   }
   errors_finalize(

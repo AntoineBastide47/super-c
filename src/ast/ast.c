@@ -11,6 +11,7 @@ VEC_DEFINE(DefId, DefId_Vec)
 VEC_DEFINE(TyInstance, TyInstance_Vec)
 VEC_DEFINE(MonoUse, MonoUse_Vec)
 VEC_DEFINE(MethodInst, MethodInst_Vec)
+VEC_DEFINE(DynUse, DynUse_Vec)
 VEC_DEFINE(Attr, Attr_Vec)
 
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
@@ -42,6 +43,8 @@ Ast *ast_new(const size_t token_count) {
   a->mono_at = U32_Vec_init();
   a->instances = TyInstance_Vec_init();
   a->method_insts = MethodInst_Vec_init();
+  a->dyn_uses = DynUse_Vec_init();
+  a->dyn_at = U32_Vec_init();
   a->attrs = Attr_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
@@ -63,6 +66,8 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->mono_at);
   VEC_DEINIT((*a)->instances);
   VEC_DEINIT((*a)->method_insts);
+  VEC_DEINIT((*a)->dyn_uses);
+  VEC_DEINIT((*a)->dyn_at);
   VEC_DEINIT((*a)->attrs);
   free(*a);
   *a = NULL;
@@ -195,6 +200,24 @@ const MonoUse *ast_type_args(const Ast *a, const NodeId node) {
   return idx ? &a->mono.data[idx - 1] : NULL;
 }
 
+void ast_add_dyn_use(Ast *a, const NodeId node, const TypeId src, const TypeId dyn) {
+  DynUse_Vec_push(&a->dyn_uses, (DynUse){.node = node, .src = src, .dyn = dyn});
+  if (a->dyn_at.len <= node) {
+    const size_t old = a->dyn_at.len, want = a->nodes.len > (size_t)node + 1 ? a->nodes.len : (size_t)node + 1;
+    U32_Vec_reserve(&a->dyn_at, want);
+    memset(a->dyn_at.data + old, 0, (want - old) * sizeof *a->dyn_at.data);
+    a->dyn_at.len = want;
+  }
+  a->dyn_at.data[node] = (uint32_t)a->dyn_uses.len; // 1-based; latest record wins
+}
+
+const DynUse *ast_dyn_use_at(const Ast *a, const NodeId node) {
+  if (node >= a->dyn_at.len)
+    return NULL;
+  const uint32_t idx = a->dyn_at.data[node];
+  return idx ? &a->dyn_uses.data[idx - 1] : NULL;
+}
+
 NodeId ast_add(Ast *a, const Node node) {
   const NodeId id = (NodeId)a->nodes.len;
   Node_Vec_push(&a->nodes, node);
@@ -276,6 +299,7 @@ static const char *kind_name(const NodeKind kind) {
       "SliceType",
       "ArrayType",
       "FunctionType",
+      "DynType",
       "Block",
       "Let",
       "Return",
@@ -428,6 +452,7 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
     case NODE_POINTER_TYPE:
     case NODE_REFERENCE_TYPE:
     case NODE_SLICE_TYPE:
+    case NODE_DYN_TYPE:
       print_child(out, a, n->as.indirect_type.type, source, depth + 1);
       break;
     case NODE_ARRAY_TYPE:
