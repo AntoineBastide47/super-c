@@ -292,6 +292,89 @@ static void test_ctfe_memory(void) {
   CHECK(strstr(buf, "use after free") != NULL, "and names it: %s", buf);
 }
 
+// The last CTFE surface: `?` early return (both paths), array->slice coercion, range indexing
+// into a Vector (an untyped NODE_RANGE builds a prelude Range value), struct-payload variants
+// constructed and destructured by struct patterns, &CONST, interface DEFAULT method bodies
+// (Self bound to the concrete receiver), and Map/Set (hashing, memset-zeroed bitmaps, deep
+// generic substitution for `Option<&V>` receivers).
+static void test_ctfe_gaps(void) {
+  char root[4112], spc[4170], out[4180], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/ctfeg", DIR);
+  if (system((snprintf(cmd, sizeof cmd, "mkdir -p '%s'", root), cmd))) { /* best-effort */
+  }
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  write_file(spc,
+             "const K: i32 = 40;\n"
+             "fn check(k: i32) Result<i32, i32> {\n"
+             "  if k < 0 { return Result::<i32, i32>::Err(-1); }\n"
+             "  return Result::<i32, i32>::Ok(k + 1);\n"
+             "}\n"
+             "fn step1(k: i32) Result<i32, i32> {\n"
+             "  let v = check(k)?;\n"
+             "  return Result::<i32, i32>::Ok(v * 2);\n"
+             "}\n"
+             "fn g1(k: i32) i32 { return switch step1(k) { Ok(v) => v, Err(e) => e, }; }\n"
+             "static_assert(g1(20) == 42 && g1(-5) == -1, \"try both paths\");\n"
+             "fn g2() i32 {\n"
+             "  let a: [i32; 5] = [1, 2, 3, 4, 5];\n"
+             "  let s: []i32 = a;\n"
+             "  let mut x = Vector::<i32>::with_capacity(4);\n"
+             "  x.push(10); x.push(20); x.push(30);\n"
+             "  let w = x[1..3];\n"
+             "  let r = (s.len() as i32) + s.get(4) + w.get(0) + w.get(1) + (w.len() as i32);\n"
+             "  x.free();\n"
+             "  return r;\n"
+             "}\n"
+             "static_assert(g2() == 62, \"slices + range indexing\");\n"
+             "enum Shape { Dot, Rect { w: i32, h: i32 }, }\n"
+             "fn g3(w: i32, h: i32) i32 {\n"
+             "  let s = Shape::Rect { w: w, h: h };\n"
+             "  let p = &K;\n"
+             "  return switch s { Dot => 0, Rect { w, h } => w * h + *p, };\n"
+             "}\n"
+             "static_assert(g3(6, 7) == 82, \"struct patterns + &const\");\n"
+             "interface Doubler {\n"
+             "  fn base(self: &Self) i32;\n"
+             "  fn twice(self: &Self) i32 { return self.base() * 2; }\n"
+             "}\n"
+             "struct G { pub v: i32 }\n"
+             "extend G as Doubler { pub fn base(self: &G) i32 { return self.v; } }\n"
+             "fn g4() i32 { let g = G { v: 21 }; return g.twice(); }\n"
+             "static_assert(g4() == 42, \"interface default body\");\n"
+             "fn g5() i32 {\n"
+             "  let mut m = Map::<i32, i32>::new();\n"
+             "  m.insert(1, 40);\n"
+             "  m.insert(2, 60);\n"
+             "  let v = switch m.get(&1) { Some(x) => *x, None => -1, };\n"
+             "  let mut s = Set::<i32>::new();\n"
+             "  s.insert(7);\n"
+             "  s.insert(7);\n"
+             "  let r = v + (m.len() as i32) + (s.len() as i32);\n"
+             "  m.free();\n"
+             "  s.free();\n"
+             "  return r;\n"
+             "}\n"
+             "static_assert(g5() == 43, \"Map and Set fold\");\n"
+             "fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5() - 43; }\n");
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "gap program compiles (got): %s", buf);
+  snprintf(out, sizeof out, "%s/build/main.c", root);
+  char gc[32768];
+  CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
+  CHECK(strstr(gc, "_Static_assert(true, \"try both paths\")") != NULL, "? folds both ways");
+  CHECK(strstr(gc, "_Static_assert(true, \"slices + range indexing\")") != NULL, "slices fold");
+  CHECK(strstr(gc, "_Static_assert(true, \"struct patterns + &const\")") != NULL, "struct patterns fold");
+  CHECK(strstr(gc, "_Static_assert(true, \"interface default body\")") != NULL, "interface defaults fold");
+  CHECK(strstr(gc, "_Static_assert(true, \"Map and Set fold\")") != NULL, "Map/Set fold");
+  char bin[4200];
+  snprintf(bin, sizeof bin, "%s/ctfeg.bin", DIR);
+  snprintf(cmd, sizeof cmd, "cc -std=c11 -Wall -Wextra -Werror %s/build/*.c %s/build/__std/*.c -o '%s' 2>&1", root,
+           root, bin);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "gap program compiles -Werror: %s", buf);
+  snprintf(cmd, sizeof cmd, "'%s'", bin);
+  CHECK(run_cmd(cmd, NULL, 0) == 0, "gap program runs (everything folded to 0)");
+}
+
 // A second module's enums used across the boundary: a value return, a payload-less match (bare variant
 // arms resolved via the scrutinee's enum), a payload-bearing construction, and a payload match. Drives
 // the full multi-file build/ tree (subdirs) through cc + run, locking in the cross-module variant codegen.
@@ -851,6 +934,7 @@ int main(void) {
   test_const_eval_flag();
   test_ctfe();
   test_ctfe_memory();
+  test_ctfe_gaps();
   test_module_features();
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();

@@ -598,7 +598,7 @@ typedef struct {
     TypeId at[4];
 } CeRecv;
 
-typedef struct {
+struct CeFrame {
     uint32_t env; // object holding this frame's locals (one slot each)
     struct {
         NodeId decl;
@@ -608,6 +608,7 @@ typedef struct {
     CeVal rets[8];
     uint8_t nrets;
     uint8_t returned;
+    uint8_t early; // a `?` early-return in flight: nil results unwind as X_RETURN, not X_BAIL
     // concrete type substitution: params_g[i] (a generic param decl owned by pmod) -> (am[i], at[i])
     ModuleId pmod;
     NodeId params_g[8];
@@ -616,9 +617,17 @@ typedef struct {
     uint8_t ng;
     NodeId defers[CE_MAX_DEFERS];
     uint8_t ndefers;
-} CeFrame;
+};
 
 enum { X_OK, X_RETURN, X_BREAK, X_CONTINUE, X_BAIL }; // statement outcomes
+
+typedef struct CeFrame CeFrame;
+
+// A nil value normally poisons the whole fold -- unless a `?` set the frame's early-return, in
+// which case the failure IS a return and must unwind as one.
+static int xfail(const CeFrame *f) {
+  return f && f->early ? X_RETURN : X_BAIL;
+}
 
 static void ce_trap(ConstEval *ce, const char *msg) {
   if (!ce->trap)
@@ -806,6 +815,60 @@ static bool ce_strip_refptr(const ConstEval *ce, const CeFrame *f, ModuleId m, T
   return false;
 }
 
+// The Asts are mutable in reality (the loader owns them; ConstEval only holds a const view).
+// Deep substitution must INTERN rebuilt types, exactly like the typechecker and codegen do.
+static Ast *ce_mut_ast(const ConstEval *ce, const ModuleId m) {
+  return (Ast *)ce_ast(ce, m);
+}
+
+// Substitute every generic mentioned in (m, t) through the frame, re-interning the result into
+// m's pool so the outcome is a single-pool, fully concrete TypeId. TYPE_NONE = an unbound generic
+// remains. (One-hop ce_rtype cannot reach generics EMBEDDED in instance args like `Option<&V>`.)
+static TypeId ce_subst_deep(const ConstEval *ce, const CeFrame *f, const ModuleId m, const TypeId t, const int depth) {
+  if (t == TYPE_NONE || depth > CE_MAX_DEPTH)
+    return TYPE_NONE;
+  Ast *const a = ce_mut_ast(ce, m);
+  const Ty y = *ast_type_at(a, t); // by value: interning below may realloc the pool
+  switch (y.kind) {
+    case TYPE_GENERIC: {
+      if (!f)
+        return TYPE_NONE;
+      for (uint8_t i = 0; i < f->ng; i++)
+        if (f->pmod == y.module && f->params_g[i] == y.as.decl)
+          return f->am[i] == m ? f->at[i] : ast_reintern(a, ce_ast(ce, f->am[i]), f->at[i]);
+      return TYPE_NONE;
+    }
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_ARRAY: {
+      const TypeId e = ce_subst_deep(ce, f, m, y.as.elem, depth + 1);
+      if (e == TYPE_NONE)
+        return TYPE_NONE;
+      if (e == y.as.elem)
+        return t;
+      Ty ny = y;
+      ny.as.elem = e; // ARRAY: `arr.len` aliases past `elem`, preserved by the struct copy
+      if (y.kind == TYPE_ARRAY)
+        ny.as.arr.len = y.as.arr.len;
+      return ast_intern_type(a, ny);
+    }
+    case TYPE_INSTANCE: {
+      const TyInstance it = *ast_instance(a, y.as.inst);
+      TypeId na[4];
+      bool changed = false;
+      for (uint8_t i = 0; i < it.n; i++) {
+        na[i] = ce_subst_deep(ce, f, m, it.args[i], depth + 1);
+        if (na[i] == TYPE_NONE)
+          return TYPE_NONE;
+        changed |= na[i] != it.args[i];
+      }
+      return changed ? ast_intern_instance(a, it.module, it.decl, na, it.n) : t;
+    }
+    default:
+      return t; // builtins / nominal types carry no generics of their own
+  }
+}
+
 // The receiver identity of (m, t): aggregate decl + concrete args, or a builtin.
 static bool ce_recv_of(const ConstEval *ce, const CeFrame *f, ModuleId m, TypeId t, CeRecv *out) {
   memset(out, 0, sizeof *out);
@@ -824,14 +887,14 @@ static bool ce_recv_of(const ConstEval *ce, const CeFrame *f, ModuleId m, TypeId
       out->dn = y->as.decl;
       return true;
     case TYPE_INSTANCE: {
-      const TyInstance *const it = ast_instance(ce_ast(ce, m), y->as.inst);
-      out->dm = it->module;
-      out->dn = it->decl;
-      out->n = it->n;
-      for (uint8_t i = 0; i < it->n; i++) {
-        if (!ce_rtype(ce, f, m, it->args[i], &out->am[i], &out->at[i]))
-          return false;
-        if (!ast_type_concrete(ce_ast(ce, out->am[i]), out->at[i]))
+      const TyInstance it = *ast_instance(ce_ast(ce, m), y->as.inst); // by value: deep-subst interns
+      out->dm = it.module;
+      out->dn = it.decl;
+      out->n = it.n;
+      for (uint8_t i = 0; i < it.n; i++) {
+        out->am[i] = m;
+        out->at[i] = ce_subst_deep(ce, f, m, it.args[i], 0);
+        if (out->at[i] == TYPE_NONE || !ast_type_concrete(ce_ast(ce, m), out->at[i]))
           return false;
       }
       return true;
@@ -904,6 +967,31 @@ static int ce_variant_pos(const ConstEval *ce, const ModuleId vm, const NodeId v
       }
   }
   return -1;
+}
+
+// Index of the variant named `lit` within enum (dm, dn); -1 when absent.
+static int ce_variant_named(const ConstEval *ce, const ModuleId dm, const NodeId dn, const char *lit) {
+  const Ast *const a = ce_ast(ce, dm);
+  const Node *const d = ast_at_const(a, dn);
+  const NodeId *const mids = ast_list(a, d->as.aggregate.members);
+  for (uint32_t i = 0; i < d->as.aggregate.members.len; i++) {
+    const Node *const v = ast_at_const(a, mids[i]);
+    if (ce_span_is(ce, dm, ast_at_const(a, v->as.variant.name)->as.name.text, lit))
+      return (int)i;
+  }
+  return -1;
+}
+
+// The TypeId of plain nominal decl (dm, dn) in ITS OWN pool (interned when the module checked);
+// TYPE_NONE if the pool holds none. Used to bind an interface default body's `Self`.
+static TypeId ce_pool_find_type(const ConstEval *ce, const ModuleId dm, const NodeId dn) {
+  const Ast *const a = ce_ast(ce, dm);
+  for (TypeId t = 1; t < a->type_pool.len; t++) {
+    const Ty *const y = ast_type_at(a, t);
+    if ((y->kind == TYPE_STRUCT || y->kind == TYPE_ENUM) && y->module == dm && y->as.decl == dn)
+      return t;
+  }
+  return TYPE_NONE;
 }
 
 // The item (extend or interface) containing method (fm, fn): 0 = free fn, 1 = extend, 2 = interface.
@@ -1153,7 +1241,8 @@ static int exec_match(ConstEval *ce, CeFrame *f, ModuleId m, const Node *n, CeVa
 static bool ce_call(ConstEval *ce, CeFrame *f, ModuleId m, NodeId id, CeVal rets[8], uint8_t *nrets);
 static bool ce_invoke(ConstEval *ce, ModuleId fm, NodeId fnode, NodeId extend_node, const CeRecv *recv,
                       const ModuleId *monom, const TypeId *monot, uint8_t nmono, const CeVal *args, uint32_t nargs,
-                      CeVal rets[8], uint8_t *nrets);
+                      ModuleId self_pm, NodeId self_decl, ModuleId self_am, TypeId self_at, CeVal rets[8],
+                      uint8_t *nrets);
 
 // Dispatch a named method on a receiver identity with pre-evaluated args (operators, iterators,
 // index). Returns false when the method is missing or the invocation bails.
@@ -1165,7 +1254,8 @@ static bool ce_dispatch(ConstEval *ce, const CeRecv *r, const ModuleId scope, co
     return false;
   CeVal rets[8];
   uint8_t nrets = 0;
-  if (!ce_invoke(ce, md.module, md.node, extend, r, 0, NULL, 0, args, nargs, rets, &nrets))
+  if (!ce_invoke(ce, md.module, md.node, extend, r, NULL, NULL, 0, args, nargs, 0, NODE_NONE, 0, TYPE_NONE, rets,
+                 &nrets))
     return false;
   *out = nrets ? rets[0] : CV_NIL;
   return true;
@@ -1405,6 +1495,66 @@ static CeVal eval_str_literal(ConstEval *ce, const CeFrame *f, const ModuleId m,
 
 // --- expression evaluation ----------------------------------------------------------------------
 
+// The prelude's `Range` struct decl (one module declares it).
+static bool ce_range_decl(const ConstEval *ce, ModuleId *dm, NodeId *dn) {
+  for (ModuleId mm = 0; mm < (ModuleId)ce->nmods; mm++) {
+    const Ast *const a = ce_ast(ce, mm);
+    if (!a || !a->nodes.len)
+      continue;
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const iids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, iids[i]);
+      if (it->kind == NODE_STRUCT && !it->as.aggregate.is_union &&
+          ce_span_is(ce, mm, ast_at_const(a, it->as.aggregate.name)->as.name.text, "Range")) {
+        *dm = mm;
+        *dn = iids[i];
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Build a `Range { start, end, inclusive }` value from a NODE_RANGE. The node is untyped in index
+// position, so bounds evaluate in-frame first and fall back to the context-free path (literals).
+static CeVal ce_range_obj(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
+  const Node *const n = ast_at_const(ce_ast(ce, m), id);
+  if (n->as.pattern_range.start == NODE_NONE || n->as.pattern_range.end == NODE_NONE)
+    return CV_NIL; // open ranges get their bounds at the consuming site
+  ModuleId dm;
+  NodeId dn;
+  if (!ce_range_decl(ce, &dm, &dn))
+    return CV_NIL;
+  CeVal sv = ev_in(ce, f, m, n->as.pattern_range.start);
+  if (sv.kind == CV_NIL_K)
+    sv = ev_in(ce, NULL, m, n->as.pattern_range.start);
+  CeVal e = ev_in(ce, f, m, n->as.pattern_range.end);
+  if (e.kind == CV_NIL_K)
+    e = ev_in(ce, NULL, m, n->as.pattern_range.end);
+  if (sv.kind == CV_PTR && ce_loadp(ce, sv, &sv) == false)
+    return CV_NIL;
+  if (e.kind == CV_PTR && ce_loadp(ce, e, &e) == false)
+    return CV_NIL;
+  if (sv.kind != CV_INT || e.kind != CV_INT)
+    return CV_NIL;
+  const uint32_t o = ce_obj_new(ce, ce_field_count(ce, dm, dn));
+  if (!o)
+    return CV_NIL;
+  CeObj *const ro = ce_obj(ce, o);
+  ro->dm = dm;
+  ro->dn = dn;
+  ro->nargs = 1;
+  ro->am[0] = 0;
+  ro->at[0] = ast_builtin(BT_USIZE);
+  if (ro->len < 3)
+    return CV_NIL;
+  ro->slots[0] = sv; // Range { start, end, inclusive } in declaration order
+  ro->slots[1] = e;
+  ro->slots[2] = (CeVal){.kind = CV_BOOL, .tm = 0, .type = ast_builtin(BT_BOOL), .as.i = n->as.pattern_range.inclusive};
+  return (CeVal){.kind = CV_AGG, .tm = m, .type = ce_type(ce_ast(ce, m), id), .as.p = {o, 0}};
+}
+
 static CeVal ev_in(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
   if (id == NODE_NONE || !ce_tick(ce) || ce->depth > CE_MAX_DEPTH)
     return CV_NIL;
@@ -1450,6 +1600,26 @@ static CeVal ce_coerce(ConstEval *ce, const CeVal v, const ModuleId wm, const Ty
     if (!ce_loadp(ce, v, &out))
       return CV_NIL;
     return ce_coerce(ce, out, wm, wt);
+  }
+  if (y->kind == TYPE_INSTANCE && v.kind == CV_AGG && v.type != TYPE_NONE &&
+      ast_type_at(ce_ast(ce, v.tm), v.type)->kind == TYPE_ARRAY) {
+    // array -> slice coercion at a binding boundary: build the `Slice<T>`/`SliceMut<T>` fat pointer
+    const TyInstance *const it = ast_instance(ce_ast(ce, wm), y->as.inst);
+    const Ast *const da = ce_ast(ce, it->module);
+    const Span dn = ast_at_const(da, ast_at_const(da, it->decl)->as.aggregate.name)->as.name.text;
+    if (!ce_span_is(ce, it->module, dn, "Slice") && !ce_span_is(ce, it->module, dn, "SliceMut"))
+      return CV_NIL;
+    if (!ce_obj(ce, v.as.p.obj))
+      return CV_NIL;
+    const uint32_t so = ce_obj_new(ce, 2);
+    if (!so)
+      return CV_NIL;
+    CeObj *const sl = ce_obj(ce, so);
+    sl->dm = it->module;
+    sl->dn = it->decl;
+    sl->slots[0] = (CeVal){.kind = CV_PTR, .tm = 0, .type = TYPE_NONE, .as.p = {v.as.p.obj, 0}}; // ptr
+    sl->slots[1] = (CeVal){.kind = CV_INT, .tm = 0, .type = ast_builtin(BT_USIZE), .as.i = ce_obj(ce, v.as.p.obj)->len}; // len
+    return (CeVal){.kind = CV_AGG, .tm = wm, .type = wt, .as.p = {so, 0}};
   }
   if (y->kind == TYPE_ARRAY && v.kind == CV_AGG && y->as.arr.len) {
     CeObj *const o = ce_obj(ce, v.as.p.obj);
@@ -1585,7 +1755,7 @@ static bool ev_place(ConstEval *ce, CeFrame *f, const ModuleId m, NodeId id, CeV
     }
     case NODE_UNARY:
       if (n->as.unary.op == Star) { // *p = ...
-        const CeVal p = ev_rval(ce, f, m, n->as.unary.operand);
+        const CeVal p = ev_in(ce, f, m, n->as.unary.operand);
         if (p.kind != CV_PTR)
           return false;
         *out = p;
@@ -1605,9 +1775,8 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
   // and an un-checked body (a call folded before the checker reached the callee) must stay runtime.
   const Node *const n = ast_at_const(a, id);
   if (f && ce_type(a, id) == TYPE_NONE &&
-      !(n->kind == NODE_LITERAL && n->as.literal.token_type == Null)) { // `null` adapts: never typed
+      !(n->kind == NODE_LITERAL && n->as.literal.token_type == Null)) // `null` adapts: never typed
     return CV_NIL;
-  }
   const uint8_t *const src = ce_src(ce, m);
   switch (n->kind) {
     case NODE_LITERAL:
@@ -1749,12 +1918,39 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
         out.type = ce_type(a, id);
         return out;
       }
-      if (op == Star) { // *p
-        const CeVal p = ev_rval(ce, f, m, n->as.unary.operand);
+      if (op == Star) { // *p: evaluate WITHOUT the reference auto-load (that load IS this deref)
+        const CeVal p = ev_in(ce, f, m, n->as.unary.operand);
         CeVal out;
         if (p.kind != CV_PTR || !ce_loadp(ce, p, &out))
           return CV_NIL;
         return out;
+      }
+      if (op == Question) { // `expr?`: unwrap Some/Ok, or early-return the None/Err through defers
+        if (!f)
+          return CV_NIL;
+        const CeVal v = ev_rval(ce, f, m, n->as.unary.operand);
+        if (v.kind != CV_AGG)
+          return CV_NIL;
+        const CeObj *const o = ce_obj(ce, v.as.p.obj);
+        if (!o || !o->is_enum)
+          return CV_NIL;
+        int okv = ce_variant_named(ce, o->dm, o->dn, "Some");
+        if (okv < 0)
+          okv = ce_variant_named(ce, o->dm, o->dn, "Ok");
+        if (okv < 0)
+          return CV_NIL;
+        if (o->slots[0].as.i == okv) {
+          if (o->len < 2 || o->slots[1].kind == CV_NIL_K)
+            return CV_NIL;
+          return o->slots[1];
+        }
+        // the fail value carries through unchanged (same enum decl, same tag, same error payload);
+        // block-scope defers replay as the X_RETURN unwinds, exactly like the emitted C
+        f->rets[0] = v;
+        f->nrets = 1;
+        f->returned = 1;
+        f->early = 1;
+        return CV_NIL;
       }
       const CeVal o = ev_rval(ce, f, m, n->as.unary.operand);
       if (o.kind == CV_NIL_K)
@@ -1784,7 +1980,7 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
             return CV_NIL;
           return (CeVal){.kind = CV_BOOL, .tm = m, .type = ce_type(a, id), .as.i = !o.as.i};
         default:
-          return CV_NIL; // `?` early-return and friends stay runtime
+          return CV_NIL;
       }
     }
     case NODE_CAST: {
@@ -2042,7 +2238,20 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
           if (rv.kind == CV_NIL_K || !ce_temp_place(ce, rv, &recv))
             return CV_NIL;
         }
-        const CeVal iv = ev_rval(ce, f, m, n->as.index.index);
+        CeVal iv;
+        if (ast_at_const(a, n->as.index.index)->kind == NODE_RANGE) {
+          // `x[a..b]` slicing: the checker leaves the range node untyped here, so build the
+          // prelude Range value directly and dispatch index_range
+          iv = ce_range_obj(ce, f, m, n->as.index.index);
+          if (iv.kind != CV_AGG)
+            return CV_NIL;
+          const CeVal args[2] = {recv, iv};
+          CeVal res;
+          if (!ce_dispatch(ce, &r, m, "index_range", args, 2, &res) || res.kind != CV_AGG)
+            return CV_NIL;
+          return res;
+        }
+        iv = ev_rval(ce, f, m, n->as.index.index);
         if (iv.kind != CV_INT)
           return CV_NIL;
         const CeVal args[2] = {recv, iv};
@@ -2057,6 +2266,74 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
       return out;
     }
     case NODE_STRUCT_INITIALIZER: {
+      { // `Variant { field: v, .. }`: a struct-payload enum variant builds an enum object
+        const NodeId tn = n->as.struct_initializer.type;
+        DefId vd = ast_resolution_def(a, tn);
+        if (vd.node == NODE_NONE)
+          vd = (DefId){m, ast_resolution(a, tn)};
+        if (vd.node != NODE_NONE && vd.module < ce->nmods &&
+            ast_at_const(ce_ast(ce, vd.module), vd.node)->kind == NODE_ENUM &&
+            ast_at_const(a, tn)->kind == NODE_TYPE_PATH && ast_at_const(a, tn)->as.type_path.parts.len >= 2) {
+          // `Shape::Rect { .. }` resolves to the ENUM; the last path part names the variant
+          const NodeId *const parts = ast_list(a, ast_at_const(a, tn)->as.type_path.parts);
+          const Span vn = ast_at_const(a, parts[ast_at_const(a, tn)->as.type_path.parts.len - 1])->as.name.text;
+          const Ast *const ea = ce_ast(ce, vd.module);
+          const Node *const ed = ast_at_const(ea, vd.node);
+          const NodeId *const mids = ast_list(ea, ed->as.aggregate.members);
+          NodeId hit = NODE_NONE;
+          for (uint32_t k = 0; k < ed->as.aggregate.members.len; k++)
+            if (ce_spans_eq(ce, vd.module, ast_at_const(ea, ast_at_const(ea, mids[k])->as.variant.name)->as.name.text,
+                            m, vn)) {
+              hit = mids[k];
+              break;
+            }
+          if (hit != NODE_NONE)
+            vd.node = hit;
+        }
+        if (vd.node != NODE_NONE && vd.module < ce->nmods &&
+            ast_at_const(ce_ast(ce, vd.module), vd.node)->kind == NODE_VARIANT) {
+          NodeId edecl = NODE_NONE;
+          const int pos = ce_variant_pos(ce, vd.module, vd.node, &edecl);
+          const Node *const var = ast_at_const(ce_ast(ce, vd.module), vd.node);
+          if (pos < 0 || !var->as.variant.struct_payload)
+            return CV_NIL;
+          const NodeId *const pfids = ast_list(ce_ast(ce, vd.module), var->as.variant.payload);
+          const uint32_t o = ce_obj_new(ce, 1 + var->as.variant.payload.len);
+          if (!o)
+            return CV_NIL;
+          {
+            CeObj *const eo = ce_obj(ce, o);
+            eo->is_enum = 1;
+            eo->dm = vd.module;
+            eo->dn = edecl;
+            eo->slots[0] = (CeVal){.kind = CV_INT, .tm = 0, .type = TYPE_NONE, .as.i = pos};
+          }
+          const NodeId *const fids = ast_list(a, n->as.struct_initializer.fields);
+          for (uint32_t i = 0; i < n->as.struct_initializer.fields.len; i++) {
+            const Node *const fi = ast_at_const(a, fids[i]);
+            if (fi->kind != NODE_FIELD_INITIALIZER || fi->as.field_initializer.name == NODE_NONE)
+              return CV_NIL;
+            int slot = -1;
+            for (uint32_t j = 0; j < var->as.variant.payload.len; j++) {
+              const Node *const fd = ast_at_const(ce_ast(ce, vd.module), pfids[j]);
+              if (fd->kind == NODE_FIELD &&
+                  ce_spans_eq(ce, vd.module, ast_at_const(ce_ast(ce, vd.module), fd->as.field.name)->as.name.text, m,
+                              ast_at_const(a, fi->as.field_initializer.name)->as.name.text)) {
+                slot = (int)j;
+                break;
+              }
+            }
+            const CeVal v = ev_rval(ce, f, m, fi->as.field_initializer.value);
+            if (slot < 0 || v.kind == CV_NIL_K)
+              return CV_NIL;
+            CeObj *const eo = ce_obj(ce, o);
+            eo->slots[1 + slot] = ce_clone(ce, v, 0);
+            if (eo->slots[1 + slot].kind == CV_NIL_K)
+              return CV_NIL;
+          }
+          return (CeVal){.kind = CV_AGG, .tm = m, .type = ce_type(a, id), .as.p = {o, 0}};
+        }
+      }
       CeRecv r;
       if (!ce_recv_of(ce, f, m, ce_type(a, id), &r) || r.dn == NODE_NONE)
         return CV_NIL;
@@ -2210,8 +2487,10 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
     }
     case NODE_CLOSURE:
       return (CeVal){.kind = CV_FN, .tm = m, .type = ce_type(a, id), .as.fnv = {m, id}};
+    case NODE_RANGE: // a first-class range value: the prelude `Range<T>` struct
+      return ce_range_obj(ce, f, m, id);
     default:
-      return CV_NIL; // ranges-as-values, slices, va_*, ...: not modeled
+      return CV_NIL; // slices are built at coercion sites; unions/va_* are not modeled
   }
 }
 
@@ -2317,8 +2596,62 @@ static int pat_match(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId p
       }
       return 1;
     }
+    case NODE_PATTERN_STRUCT: { // Variant { field: pat, shorthand } over a tagged enum
+      if (v->kind != CV_AGG || p->as.pattern.name == NODE_NONE)
+        return -1;
+      const DefId d = ast_resolution_def(a, p->as.pattern.name);
+      if (d.node == NODE_NONE || ast_at_const(ce_ast(ce, d.module), d.node)->kind != NODE_VARIANT)
+        return -1;
+      const CeObj *const o = ce_obj(ce, v->as.p.obj);
+      const int pos = ce_variant_pos(ce, d.module, d.node, NULL);
+      if (!o || !o->is_enum || pos < 0)
+        return -1;
+      if (o->slots[0].as.i != pos)
+        return 0;
+      const Node *const vd = ast_at_const(ce_ast(ce, d.module), d.node);
+      if (!vd->as.variant.struct_payload)
+        return -1;
+      const NodeId *const pfids = ast_list(ce_ast(ce, d.module), vd->as.variant.payload);
+      const NodeId *const ids = ast_list(a, p->as.pattern.children);
+      for (uint32_t k = 0; k < p->as.pattern.children.len; k++) {
+        const Node *const pf = ast_at_const(a, ids[k]);
+        if (pf->kind != NODE_PATTERN_FIELD || pf->as.pattern.name == NODE_NONE)
+          return -1;
+        int slot = -1; // the named field's position within the variant's payload
+        for (uint32_t j = 0; j < vd->as.variant.payload.len; j++) {
+          const Node *const fd = ast_at_const(ce_ast(ce, d.module), pfids[j]);
+          if (fd->kind == NODE_FIELD &&
+              ce_spans_eq(ce, d.module, ast_at_const(ce_ast(ce, d.module), fd->as.field.name)->as.name.text, m,
+                          ast_at_const(a, pf->as.pattern.name)->as.name.text)) {
+            slot = (int)j;
+            break;
+          }
+        }
+        if (slot < 0 || 1 + (uint32_t)slot >= o->len)
+          return -1;
+        const NodeId child = ast_list(a, pf->as.pattern.children)[0];
+        if (refobj && ast_at_const(a, child)->kind == NODE_IDENTIFIER) { // shorthand bind, by reference
+          const CeVal pv = {.kind = CV_PTR, .tm = 0, .type = TYPE_NONE, .as.p = {refobj, 1 + (uint32_t)slot}};
+          if (!f || !ce_bind(ce, f, child, pv))
+            return -1;
+          continue;
+        }
+        const CeVal sv = o->slots[1 + slot];
+        if (sv.kind == CV_NIL_K)
+          return -1;
+        if (ast_at_const(a, child)->kind == NODE_IDENTIFIER) { // shorthand bind, by value
+          if (!f || !ce_bind(ce, f, child, sv))
+            return -1;
+          continue;
+        }
+        const int r = pat_match(ce, f, m, child, &sv, uns, 0);
+        if (r != 1)
+          return r;
+      }
+      return 1;
+    }
     default:
-      return -1; // struct patterns and friends: not yet modeled
+      return -1; // slice/rest patterns: not modeled
   }
 }
 
@@ -2337,7 +2670,7 @@ static int exec_match(ConstEval *ce, CeFrame *f, const ModuleId m, const Node *n
     }
   }
   if (v.kind == CV_NIL_K)
-    return X_BAIL;
+    return xfail(f);
   const BuiltinType sb = ce_builtin_of(ce, f, m, ce_type(a, n->as.match_expr.value));
   const bool uns = sb != BT_COUNT && bt_unsigned(sb);
   const NodeId *const ids = ast_list(a, n->as.match_expr.arms);
@@ -2351,14 +2684,14 @@ static int exec_match(ConstEval *ce, CeFrame *f, const ModuleId m, const Node *n
     if (arm->as.match_arm.guard != NODE_NONE) {
       const CeVal g = ev_rval(ce, f, m, arm->as.match_arm.guard);
       if (g.kind != CV_BOOL)
-        return X_BAIL;
+        return xfail(f);
       if (!g.as.i)
         continue;
     }
     const NodeId body = arm->as.match_arm.body;
     if (out) {
       *out = ev_in(ce, f, m, body);
-      return out->kind != CV_NIL_K ? X_OK : X_BAIL;
+      return out->kind != CV_NIL_K ? X_OK : xfail(f);
     }
     return ast_at_const(a, body)->kind == NODE_BLOCK ? exec_stmt(ce, f, m, body) : exec_expr_stmt(ce, f, m, body);
   }
@@ -2387,10 +2720,10 @@ static int exec_assign(ConstEval *ce, CeFrame *f, const ModuleId m, const Node *
   const Ast *const a = ce_ast(ce, m);
   CeVal place;
   if (!ev_place(ce, f, m, n->as.binary.left, &place))
-    return X_BAIL;
+    return xfail(f);
   CeVal r = ev_rval(ce, f, m, n->as.binary.right);
   if (r.kind == CV_NIL_K)
-    return X_BAIL;
+    return xfail(f);
   if (n->as.binary.op != Equal) {
     CeVal cur;
     if (!ce_loadp(ce, place, &cur))
@@ -2427,9 +2760,9 @@ static int exec_expr_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, NodeId id
   if (n->kind == NODE_CALL) {
     CeVal rets[8];
     uint8_t nrets = 0;
-    return ce_call(ce, f, m, id, rets, &nrets) ? X_OK : X_BAIL; // result (if any) is discarded
+    return ce_call(ce, f, m, id, rets, &nrets) ? X_OK : xfail(f); // result (if any) is discarded
   }
-  return ev_in(ce, f, m, id).kind != CV_NIL_K ? X_OK : X_BAIL;
+  return ev_in(ce, f, m, id).kind != CV_NIL_K ? X_OK : xfail(f);
 }
 
 static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
@@ -2466,13 +2799,13 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
         if (vn->kind == NODE_CALL) {
           uint8_t nr = 0;
           if (!ce_call(ce, f, m, n->as.let_stmt.value, vals, &nr))
-            return X_BAIL;
+            return xfail(f);
           nvals = nr;
         }
         if (nvals <= 1) { // a tuple VALUE destructures by field
           const CeVal tv = nvals == 1 ? vals[0] : ev_rval(ce, f, m, n->as.let_stmt.value);
           if (tv.kind != CV_AGG)
-            return X_BAIL;
+            return xfail(f);
           const CeObj *const o = ce_obj(ce, tv.as.p.obj);
           if (!o || o->len < nbind)
             return X_BAIL;
@@ -2484,7 +2817,7 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
           return X_BAIL;
         for (uint32_t i = 0; i < nbind; i++)
           if (vals[i].kind == CV_NIL_K || !ce_bind(ce, f, eids[i], vals[i]))
-            return X_BAIL;
+            return xfail(f);
         return X_OK;
       }
       if (nm->kind != NODE_IDENTIFIER)
@@ -2502,14 +2835,14 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
           v = ev_in(ce, f, m, n->as.let_stmt.value);
         }
         if (v.kind == CV_NIL_K)
-          return X_BAIL;
+          return xfail(f);
       }
       return ce_bind(ce, f, id, v) ? X_OK : X_BAIL; // refs resolve to the LET node itself
     }
     case NODE_IF: {
       const CeVal c = ev_rval(ce, f, m, n->as.if_stmt.condition);
       if (c.kind != CV_BOOL)
-        return X_BAIL;
+        return xfail(f);
       if (c.as.i)
         return exec_stmt(ce, f, m, n->as.if_stmt.then_branch);
       return n->as.if_stmt.else_branch == NODE_NONE ? X_OK : exec_stmt(ce, f, m, n->as.if_stmt.else_branch);
@@ -2520,7 +2853,7 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
         if (!first) {
           const CeVal c = ev_rval(ce, f, m, n->as.while_stmt.condition);
           if (c.kind != CV_BOOL)
-            return X_BAIL;
+            return xfail(f);
           if (!c.as.i)
             return X_OK;
         }
@@ -2541,7 +2874,7 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
           return X_BAIL;
         const CeVal s = ev_rval(ce, f, m, it->as.pattern_range.start);
         if (s.kind != CV_INT)
-          return X_BAIL;
+          return xfail(f);
         const BuiltinType eb = ce_builtin_of(ce, f, m, ce_type(a, n->as.for_stmt.iterable));
         const bool uns = eb != BT_COUNT && bt_unsigned(eb);
         const bool inc = it->as.pattern_range.inclusive;
@@ -2552,7 +2885,7 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
         for (int64_t v = s.as.i;; v++) {
           const CeVal e = ev_rval(ce, f, m, it->as.pattern_range.end);
           if (e.kind != CV_INT)
-            return X_BAIL;
+            return xfail(f);
           const bool last = v == e.as.i;
           if (uns ? (uint64_t)v > (uint64_t)e.as.i || (!inc && last) : v > e.as.i || (!inc && last))
             return X_OK;
@@ -2596,7 +2929,7 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
       { // the Iterator protocol: the iterable IS the iterator; loop on next() until None
         const CeVal iv = ev_in(ce, f, m, n->as.for_stmt.iterable);
         if (iv.kind == CV_NIL_K)
-          return X_BAIL;
+          return xfail(f);
         CeVal itp;
         if (!ce_temp_place(ce, iv, &itp))
           return X_BAIL;
@@ -2636,7 +2969,7 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
       for (uint32_t i = 0; i < n->as.return_stmt.values.len; i++) {
         const CeVal v = ev_in(ce, f, m, vids[i]);
         if (v.kind == CV_NIL_K)
-          return X_BAIL;
+          return xfail(f); // a `?` inside the return value already staged the early result
         f->rets[f->nrets++] = v;
       }
       f->returned = 1;
@@ -2781,6 +3114,48 @@ static bool ce_intercept(ConstEval *ce, const ModuleId fm, const Node *fn, const
     b->dead = 1;
     return true;
   }
+  if (ce_span_is(ce, fm, nm, "memset")) { // element-wise fill; Map zeroes its slot bitmap this way
+    if (nargs != 3 || args[0].kind != CV_PTR || args[1].kind != CV_INT || args[2].kind != CV_INT || args[2].as.i < 0)
+      return false;
+    const uint64_t n = (uint64_t)args[2].as.i;
+    if (args[0].as.p.obj == 0)
+      return n == 0; // memset(NULL, _, 0) is technically UB but harmless; nonzero traps below
+    CeObj *const b = ce_obj(ce, args[0].as.p.obj);
+    if (!b || !b->heap)
+      return false;
+    if (b->dead) {
+      ce_trap(ce, "use after free");
+      return false;
+    }
+    if (b->et == TYPE_NONE && args[0].as.p.off == 0) { // an untyped block: memset gives it a byte view
+      if (!ce_obj_resize(ce, b, (uint32_t)b->bytes))
+        return false;
+      b->em = 0;
+      b->et = ast_builtin(BT_U8);
+      b->esz = 1;
+    }
+    if (b->esz == 0 || n % b->esz)
+      return false;
+    const uint64_t count = n / b->esz;
+    if (args[0].as.p.off + count > b->len) {
+      ce_trap(ce, "out-of-bounds access");
+      return false;
+    }
+    CeVal fill;
+    if (b->esz == 1) {
+      fill = (CeVal){.kind = CV_INT, .tm = 0, .type = ast_builtin(BT_U8), .as.i = args[1].as.i & 0xff};
+    } else {
+      if (args[1].as.i != 0)
+        return false; // a non-zero pattern over multi-byte elements is byte-level reinterpretation
+      fill = ce_zero(ce, b->em, b->et, 0);
+      if (fill.kind == CV_NIL_K)
+        return false;
+    }
+    for (uint64_t i = 0; i < count; i++)
+      b->slots[args[0].as.p.off + i] = ce_clone(ce, fill, 0);
+    rets[(*nrets)++] = args[0]; // memset returns dst
+    return true;
+  }
   if (ce_span_is(ce, fm, nm, "abort")) {
     ce_trap(ce, "abort reached at compile time");
     return false;
@@ -2850,7 +3225,8 @@ static bool ce_intercept(ConstEval *ce, const ModuleId fm, const Node *fn, const
 // Run a resolved concrete function/closure body in a fresh frame.
 static bool ce_invoke(ConstEval *ce, const ModuleId fm, const NodeId fnode, const NodeId extend_node,
                       const CeRecv *recv, const ModuleId *monom, const TypeId *monot, const uint8_t nmono,
-                      const CeVal *args, const uint32_t nargs, CeVal rets[8], uint8_t *nrets) {
+                      const CeVal *args, const uint32_t nargs, const ModuleId self_pm, const NodeId self_decl,
+                      const ModuleId self_am, const TypeId self_at, CeVal rets[8], uint8_t *nrets) {
   const Ast *const fa = ce_ast(ce, fm);
   const Node *const fn = ast_at_const(fa, fnode);
   const bool closure = fn->kind == NODE_CLOSURE;
@@ -2868,6 +3244,8 @@ static bool ce_invoke(ConstEval *ce, const ModuleId fm, const NodeId fnode, cons
   }
   CeFrame g;
   memset(&g, 0, sizeof g);
+  if (self_decl != NODE_NONE && !ce_subst_add(ce, &g, self_pm, self_decl, self_am, self_at))
+    return false; // an interface default body: Self -> the receiver's concrete type
   if (extend_node != NODE_NONE) {
     const NodeList xg = ast_at_const(fa, extend_node)->as.extend_def.generics;
     bool bound = xg.len == 0;
@@ -3059,7 +3437,8 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
           else if (rv.kind == CV_NIL_K || !ce_temp_place(ce, rv, &recv))
             return false;
         }
-        return ce_invoke(ce, md.module, md.node, extend, &r, 0, NULL, 0, &recv, 1, rets, nrets);
+        return ce_invoke(ce, md.module, md.node, extend, &r, NULL, NULL, 0, &recv, 1, 0, NODE_NONE, 0, TYPE_NONE,
+                         rets, nrets);
       }
     }
   } else {
@@ -3129,19 +3508,36 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
   }
   NodeId container = NODE_NONE;
   int ckind = fn->kind == NODE_CLOSURE ? 0 : ce_container_of(ce, fd.module, fd.node, &container);
+  ModuleId self_pm = 0; // an interface DEFAULT body runs with `Self` bound to the receiver
+  NodeId self_decl = NODE_NONE;
+  ModuleId self_am = 0;
+  TypeId self_at = TYPE_NONE;
   if (ckind == 2) { // re-dispatch through the concrete type
     if (!have_recv_id)
       return false;
     const Span mname = ast_at_const(fa, fn->as.function.name)->as.name.text;
     NodeId extend = NODE_NONE;
     const DefId md = ce_find_method(ce, &recv_id, m, fd.module, mname, NULL, &extend);
-    if (md.node == NODE_NONE)
-      return false; // interface default bodies: not modeled
-    fd = md;
-    fa = ce_ast(ce, fd.module);
-    fn = ast_at_const(fa, fd.node);
-    container = extend;
-    ckind = 1;
+    if (md.node != NODE_NONE) {
+      fd = md;
+      fa = ce_ast(ce, fd.module);
+      fn = ast_at_const(fa, fd.node);
+      container = extend;
+      ckind = 1;
+    } else if (fn->as.function.body != NODE_NONE) {
+      // no impl: the interface's default body, with Self = the receiver (single-pool types only)
+      self_at = recv_id.dn == NODE_NONE ? ast_builtin(recv_id.b)
+                : recv_id.n == 0        ? ce_pool_find_type(ce, recv_id.dm, recv_id.dn)
+                                        : TYPE_NONE; // a generic instance has no one-pool TypeId
+      if (self_at == TYPE_NONE)
+        return false;
+      self_am = recv_id.dn == NODE_NONE ? 0 : recv_id.dm;
+      self_pm = fd.module;
+      self_decl = container; // `Self` lowers to TYPE_GENERIC{module, decl = the interface node}
+      ckind = 0;
+    } else {
+      return false;
+    }
   }
 
   // extern: intercept the modeled runtime, refuse everything else
@@ -3204,15 +3600,13 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
   const MonoUse *const mu = ast_type_args(a, id);
   if (mu)
     for (uint8_t i = 0; i < mu->n && i < 4; i++) {
-      if (!ce_rtype(ce, f, m, mu->args[i], &monom[nmono], &monot[nmono])) {
-        monom[nmono] = 0;
-        monot[nmono] = TYPE_NONE;
-      }
+      monom[nmono] = m;
+      monot[nmono] = ce_subst_deep(ce, f, m, mu->args[i], 0);
       nmono++;
     }
 
   return ce_invoke(ce, fd.module, fd.node, ckind == 1 ? container : NODE_NONE, have_recv_id ? &recv_id : NULL,
-                   monom, monot, nmono, argv, na, rets, nrets);
+                   monom, monot, nmono, argv, na, self_pm, self_decl, self_am, self_at, rets, nrets);
 }
 
 // --- the public boundary ------------------------------------------------------------------------
