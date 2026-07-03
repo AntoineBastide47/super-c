@@ -850,8 +850,15 @@ static void resolve_expr(Resolver *r, const NodeId id) {
     case NODE_TUPLE: {
       const NodeList elements = n->as.array_literal.elements;
       const NodeId *const ids = ast_list(r->ast, elements);
-      for (uint32_t i = 0; i < elements.len; i++)
-        resolve_expr(r, ids[i]);
+      for (uint32_t i = 0; i < elements.len; i++) {
+        const Node *const el = ast_at_const(r->ast, ids[i]);
+        if (el->kind == NODE_FIELD_INITIALIZER) { // designated `[index] = value`: both are expressions
+          resolve_expr(r, el->as.field_initializer.name);
+          resolve_expr(r, el->as.field_initializer.value);
+        } else {
+          resolve_expr(r, ids[i]);
+        }
+      }
       break;
     }
     case NODE_STRUCT_INITIALIZER: {

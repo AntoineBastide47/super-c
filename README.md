@@ -338,6 +338,27 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 `static_assert(cond, "msg")` is valid at item or statement scope and lowers to C `_Static_assert`, so
 the C compiler evaluates it.
 
+### Compile-time evaluation (`--const-eval`)
+
+```sh
+./super-c --const-eval app.spc
+```
+
+Opting in enables a compile-time constant evaluator and a layout engine (64-bit C data model):
+
+* `static_assert` conditions that fold are decided by Super-C itself, with source spans —
+  including `sizeof`/`alignof` over structs, enums, tuples, and generic instances. Unfoldable
+  conditions (e.g. involving opaque `extern "C"` types or `va_list`) still lower to C
+  `_Static_assert` as before.
+* Array designator indices may be any constant expression (`[K] = v`, `[K + 1] = v`); non-constant
+  indices become a Super-C error instead of invalid C.
+* Array lengths become part of the type — `[i32; 4]` and `[i32; 8]` are distinct — which makes
+  fixed-size arrays legal as generic type arguments (`Wrap<[i32; 4]>` embeds the array by value).
+  Passing bare arrays through the std containers is not supported; wrap them in a struct.
+* Every layout the compiler computes is verified in the generated C by an emitted
+  `_Static_assert(sizeof(T) == N, ...)`, so the downstream C compiler proves the layout model on
+  the actual target — a mismatch is a named compile error, never silent.
+
 ## Generated output
 
 `./super-c app.spc` writes a `build/` tree next to the source that mirrors the module paths:
@@ -388,7 +409,7 @@ structs/methods/visibility, enums with payloads and pattern matching (including 
 guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
 cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
 (`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), first-class tuples, the `?` early-return
-operator, `panic` /
+operator, opt-in compile-time constant evaluation and layout folding (`--const-eval`), `panic` /
 `unwrap` / `expect` with a `never` type for diverging calls, RAII-style
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with

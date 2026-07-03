@@ -1,4 +1,5 @@
 #include "codegen.h"
+#include "consteval/consteval.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -194,6 +195,11 @@ ALWAYS_INLINE Ast *cg_mod_ast(const Codegen *c, const ModuleId m) {
 }
 ALWAYS_INLINE const uint8_t *cg_mod_src(const Codegen *c, const ModuleId m) {
   return c->package && m != c->ast->module ? (const uint8_t *)c->package->modules[m].source : c->source;
+}
+
+// The package's opt-in const evaluator (--const-eval), or NULL (all consumers degrade gracefully).
+static ConstEval *cg_ceval(const Codegen *c) {
+  return c->package ? c->package->ceval : NULL;
 }
 
 // Find a `@c.*` attribute of `kind` on item `owner` in module `mod`, or NULL. Attributes are few, so a
@@ -602,7 +608,10 @@ static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap)
     case TYPE_ARRAY: {
       char e[176];
       mangle_type(c, ty->as.elem, e, sizeof e);
-      snprintf(out, cap, "arr_%s", e);
+      if (ty->as.arr.len)
+        snprintf(out, cap, "arr%u_%s", ty->as.arr.len, e);
+      else
+        snprintf(out, cap, "arr_%s", e);
       break;
     }
     case TYPE_INSTANCE:
@@ -1251,6 +1260,21 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
     case NODE_POINTER_TYPE:
     case NODE_REFERENCE_TYPE: {
       char inner[480];
+      // A pointee that resolves to a known-length array (`&T` with T = [i32; N] in a spec, or a
+      // written `&[T; N]`) needs the C pointer-to-array declarator: `T (*decl)[N]`.
+      const TypeId pt = ast_type(c->ast, n->as.indirect_type.type);
+      const TypeId ptr = pt == TYPE_NONE ? TYPE_NONE : subst_resolve(c, pt);
+      if (ptr != TYPE_NONE && ast_type_at(c->ast, ptr)->kind == TYPE_ARRAY && ast_type_at(c->ast, ptr)->as.arr.len) {
+        const Ty *const ay = ast_type_at(c->ast, ptr);
+        char spiral[480];
+        snprintf(spiral, sizeof spiral, "(*%s)[%u]", decl, ay->as.arr.len);
+        const bool cp = n->kind == NODE_REFERENCE_TYPE ? n->as.indirect_type.qualifier != TYPE_QUAL_MUT
+                                                       : n->as.indirect_type.qualifier == TYPE_QUAL_CONST;
+        char base[512];
+        render_type_id(c, ay->as.elem, spiral, base, sizeof base);
+        buf_join3(out, cap, cp && strncmp(base, "const ", 6) != 0 ? "const " : "", "", base);
+        break;
+      }
       buf_join3(inner, sizeof inner, "*", "", decl);
       const TypeQualifier q = n->as.indirect_type.qualifier;
       // `&T` -> `const T *`, `&mut T` -> `T *`; a raw pointer is const-pointee only for `*const`.
@@ -1270,14 +1294,23 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
       render_type_id(c, ast_type(c->ast, tn), decl, out, cap);
       break;
     case NODE_ARRAY_TYPE: {
-      const Span ls = ast_at_const(c->ast, n->as.array_type.length)->span;
       char inner[480];
-      size_t at = 0;
-      inner[0] = '\0';
-      at = buf_append(inner, sizeof inner, at, decl);
-      at = buf_append(inner, sizeof inner, at, "[");
-      at = buf_append_bytes(inner, sizeof inner, at, (const char *)c->source + ls.start, ls.end - ls.start);
-      buf_append(inner, sizeof inner, at, "]");
+      const TypeId att = ast_type(c->ast, tn);
+      const uint32_t flen = // --const-eval: a folded length renders as a number (a `static const`
+          att != TYPE_NONE && ast_type_at(c->ast, att)->kind == TYPE_ARRAY // C name would be a VLA)
+              ? ast_type_at(c->ast, att)->as.arr.len
+              : 0;
+      if (flen) {
+        snprintf(inner, sizeof inner, "%s[%u]", decl, flen);
+      } else {
+        const Span ls = ast_at_const(c->ast, n->as.array_type.length)->span;
+        size_t at = 0;
+        inner[0] = '\0';
+        at = buf_append(inner, sizeof inner, at, decl);
+        at = buf_append(inner, sizeof inner, at, "[");
+        at = buf_append_bytes(inner, sizeof inner, at, (const char *)c->source + ls.start, ls.end - ls.start);
+        buf_append(inner, sizeof inner, at, "]");
+      }
       render_type_node(c, n->as.array_type.element, inner, out, cap);
       break;
     }
@@ -1344,6 +1377,16 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
     }
     case TYPE_POINTER:
     case TYPE_REFERENCE: {
+      const Ty *const el = ast_type_at(c->ast, ty->as.elem);
+      if (el->kind == TYPE_ARRAY && el->as.arr.len) { // `&[T; N]` -> `const T (*decl)[N]`
+        char inner[480];
+        snprintf(inner, sizeof inner, "(*%s)[%u]", decl, el->as.arr.len);
+        const bool cp = ty->kind == TYPE_REFERENCE ? ty->qualifier != TYPE_QUAL_MUT : ty->qualifier == TYPE_QUAL_CONST;
+        char base[512];
+        render_type_id(c, el->as.elem, inner, base, sizeof base);
+        buf_join3(out, cap, cp && strncmp(base, "const ", 6) != 0 ? "const " : "", "", base);
+        break;
+      }
       char inner[480];
       buf_join3(inner, sizeof inner, "*", "", decl);
       // `&T` -> `const T *`, `&mut T` -> `T *`; a raw pointer is const-pointee only for `*const`.
@@ -1363,7 +1406,13 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       break;
     case TYPE_ARRAY: {
       char inner[480];
-      buf_join3(inner, sizeof inner, "*", "", decl);
+      if (ty->as.arr.len) { // --const-eval: the length lives in the type -> a real C array declarator
+        char lenb[16];
+        snprintf(lenb, sizeof lenb, "[%u]", ty->as.arr.len);
+        buf_join3(inner, sizeof inner, decl, "", lenb);
+      } else {
+        buf_join3(inner, sizeof inner, "*", "", decl); // unknown length: decays to a pointer as before
+      }
       render_type_id(c, ty->as.elem, inner, out, cap);
       break;
     }
@@ -2813,7 +2862,11 @@ static void emit_array_braces(Codegen *c, const Node *n) {
     const Node *const el = ast_at_const(c->ast, ids[i]);
     if (el->kind == NODE_FIELD_INITIALIZER) { // designated element `[index] = value`
       emit(c, "[");
-      emit_expr(c, el->as.field_initializer.name);
+      const ConstValue iv = consteval_eval(cg_ceval(c), c->ast->module, el->as.field_initializer.name);
+      if (iv.kind == CONST_INT) // folded: C requires an integer constant expression here
+        emit(c, "%lld", (long long)iv.i);
+      else
+        emit_expr(c, el->as.field_initializer.name);
       emit(c, "] = ");
       const Node *const v = ast_at_const(c->ast, el->as.field_initializer.value);
       if (v->kind == NODE_ARRAY_LITERAL)
@@ -2869,6 +2922,36 @@ static void emit_expr(Codegen *c, const NodeId id) {
   if (id != c->slice_raw && emit_slice_coercion(c, id)) // array -> slice fat-pointer view
     return;
   const Node *const n = ast_at_const(c->ast, id);
+  // --const-eval: a folded PURE COMPUTATION emits as its value, so constant chains collapse in the
+  // generated C. Only computation kinds fold here -- identifiers/members/places keep their names
+  // (`&K` must stay addressable, and named constants read better than magic numbers).
+  if (cg_ceval(c))
+    switch (n->kind) {
+      case NODE_BINARY:
+      case NODE_UNARY:
+      case NODE_CAST:
+      case NODE_SIZEOF:
+      case NODE_ALIGNOF: {
+        const ConstValue v = consteval_eval(cg_ceval(c), c->ast->module, id);
+        if (v.kind == CONST_BOOL) {
+          emit(c, v.i ? "true" : "false");
+          return;
+        }
+        if (v.kind == CONST_INT) {
+          const Ty *const vt = v.type != TYPE_NONE ? ast_type_at(c->ast, v.type) : NULL;
+          const BuiltinType vb = vt && vt->kind == TYPE_BUILTIN ? vt->as.builtin : BT_COUNT;
+          const bool uns = vb == BT_U8 || vb == BT_U16 || vb == BT_U32 || vb == BT_U64 || vb == BT_USIZE;
+          if (uns)
+            emit(c, (uint64_t)v.i > 0x7fffffffull ? "%lluull" : "%llu", (unsigned long long)v.i);
+          else
+            emit(c, v.i > 0x7fffffffll || v.i < -0x80000000ll ? "%lldll" : "%lld", (long long)v.i);
+          return;
+        }
+        break;
+      }
+      default:
+        break;
+    }
   switch (n->kind) {
     case NODE_LITERAL:
       emit_literal(c, id, n);
@@ -2938,7 +3021,8 @@ static void emit_expr(Codegen *c, const NodeId id) {
       // C arrays aren't assignable, so `arr = [..]` / `arr = other` lowers to memcpy (value semantics).
       // The RHS array literal emits as a `(T[N]){..}` compound literal that decays to a pointer here.
       const TypeId lt = ast_type(c->ast, n->as.binary.left);
-      if (n->as.binary.op == Equal && lt != TYPE_NONE && ast_type_at(c->ast, lt)->kind == TYPE_ARRAY) {
+      const TypeId ltr = lt == TYPE_NONE ? TYPE_NONE : subst_resolve(c, lt); // T = [i32; N] in a spec body
+      if (n->as.binary.op == Equal && ltr != TYPE_NONE && ast_type_at(c->ast, ltr)->kind == TYPE_ARRAY) {
         emit(c, "memcpy(");
         emit_expr(c, n->as.binary.left);
         emit(c, ", ");
@@ -7257,6 +7341,56 @@ static void phase_forward(Codegen *c) {
 
 // Phase 2: full struct / payload-enum definitions (source order; pointer cycles use phase 1).
 // Does phase_types emit a full C body for this decl? (non-generic struct, or non-generic payload enum.)
+// --const-eval layout verification: for every type whose size/align the const evaluator computed,
+// emit a C _Static_assert next to the module's code so the DOWNSTREAM compiler proves the 64-bit
+// layout model on the actual target (a mismatch is a named compile error, never a silent one).
+static void emit_layout_asserts(Codegen *c) {
+  ConstEval *const ce = cg_ceval(c);
+  if (!ce)
+    return;
+  bool any = false;
+  const NodeList items = program_items(c);
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    if ((n->kind != NODE_STRUCT && n->kind != NODE_ENUM) || n->as.aggregate.generics.len)
+      continue;
+    if (n->kind == NODE_ENUM && !aggregate_has_payload(c, n))
+      continue; // payload-less enums may only exist as guarded copies; their `int` size is universal
+    const TypeId t = ast_intern_type(
+        c->ast, (Ty){.kind = n->kind == NODE_ENUM ? TYPE_ENUM : TYPE_STRUCT, .module = c->ast->module, .as.decl = ids[i]});
+    uint64_t size, align;
+    if (!consteval_layout(ce, c->ast->module, t, &size, &align))
+      continue;
+    char nm[256];
+    render_type_id(c, t, "", nm, sizeof nm);
+    emit(c, "_Static_assert(sizeof(%s) == %llu && _Alignof(%s) == %llu, \"super-c layout model mismatch: %s\");\n",
+         nm, (unsigned long long)size, nm, (unsigned long long)align, nm);
+    any = true;
+  }
+  for (size_t ii = 0; ii < c->ast->instances.len; ii++) {
+    const TyInstance it = c->ast->instances.data[ii];
+    if (it.module != c->ast->module)
+      continue; // owned instances only: exactly the set this module's header defines
+    bool concrete = true;
+    for (uint8_t k = 0; k < it.n; k++)
+      concrete &= type_is_concrete(c, it.args[k]);
+    if (!concrete)
+      continue;
+    const TypeId t = ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n);
+    uint64_t size, align;
+    if (!consteval_layout(ce, c->ast->module, t, &size, &align))
+      continue;
+    char nm[256];
+    render_type_id(c, t, "", nm, sizeof nm);
+    emit(c, "_Static_assert(sizeof(%s) == %llu && _Alignof(%s) == %llu, \"super-c layout model mismatch: %s\");\n",
+         nm, (unsigned long long)size, nm, (unsigned long long)align, nm);
+    any = true;
+  }
+  if (any)
+    emit(c, "\n");
+}
+
 static bool type_emittable(Codegen *c, const Node *const n) {
   return (n->kind == NODE_STRUCT && !n->as.aggregate.generics.len) ||
          (n->kind == NODE_ENUM && !n->as.aggregate.generics.len && aggregate_has_payload(c, n));
@@ -7447,6 +7581,8 @@ static void emit_toplevel_const(Codegen *c, const NodeId id) {
   char nm[160], decl[256];
   render_qualified(c, c->ast->module, n->as.const_def.name, nm, sizeof nm);
   render_type_node(c, n->as.const_def.type, nm, decl, sizeof decl);
+  if (cg_ceval(c)) // folding may replace every use of a const with its value -- keep -Werror clean
+    emit(c, "__attribute__((unused)) ");
   emit(c, "static const ");
   emit_cstr(c, decl);
   if (n->as.const_def.value != NODE_NONE) {
@@ -7969,6 +8105,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     // Multi-file .c: types/public prototypes live in the included headers; here go the private
     // (static) prototypes and every body (private functions are emitted `static`).
     emit_includes(c);
+    emit_layout_asserts(c); // type definitions came in via the headers just included
     phase_prototypes(c, PROTO_PRIVATE);
     emit(c, "\n");
     phase_bodies(c);
@@ -7981,6 +8118,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     phase_types(c);
     phase_ret_structs(c);
     emit(c, "\n");
+    emit_layout_asserts(c);
     phase_prototypes(c, PROTO_ALL);
     emit(c, "\n");
     phase_bodies(c);

@@ -28,6 +28,16 @@ static void write_file(const char *path, const char *contents) {
   }
 }
 
+static bool read_file(const char *path, char *out, const size_t cap) {
+  FILE *const fp = fopen(path, "rb");
+  if (!fp)
+    return false;
+  const size_t n = fread(out, 1, cap - 1, fp);
+  out[n] = '\0';
+  fclose(fp);
+  return true;
+}
+
 static void test_compiles_file(void) {
   char spc[4160], out[4170], cmd[8320], buf[256];
   snprintf(spc, sizeof spc, "%s/prog.spc", DIR);
@@ -47,6 +57,55 @@ static void test_compiles_file(void) {
   CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "CLI output compiles: %s", buf);
   snprintf(crun, sizeof crun, "'%s'", bin);
   CHECK(run_cmd(crun, NULL, 0) == 7, "CLI output runs with the right exit code");
+}
+
+// --const-eval end-to-end: folded static_assert (true passes, false errors AT SUPER-C level with our
+// span), folded designated indices (a `const` item index would otherwise emit invalid C), folded
+// sizeof over the computed layout, [T; N] as a generic type argument, and the layout-verification
+// _Static_asserts landing in the generated C and PASSING under -Werror on this target.
+static void test_const_eval_flag(void) {
+  char root[4112], spc[4170], out[4180], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/ce", DIR);
+  if (system((snprintf(cmd, sizeof cmd, "mkdir -p '%s'", root), cmd))) { /* best-effort */
+  }
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  write_file(
+      spc,
+      "extern \"C\" { fn exit(code: i32) void; }\n"
+      "const K: i32 = 2;\n"
+      "struct Pt { pub x: i32, pub y: u8 }\n"
+      "struct Wrap<T> { pub v: T }\n"
+      "static_assert(sizeof(Pt) == 8, \"padded to 8\");\n"
+      "static_assert(K * 2 == 4, \"folds\");\n"
+      "static_assert(sizeof(Wrap<[i32; 4]>) == 16, \"array arg layout\");\n"
+      "fn main() i32 {\n"
+      "  let a: [i32; 2 + 2] = [[K] = 30, [K + 1] = 10, [1 - 1] = 2];\n"
+      "  let w = Wrap::<[i32; 4]> { v: [1, 2, 3, 4] };\n"
+      "  unsafe exit(a[2] + a[3] + a[0] + w.v[3] + (sizeof((i32, bool)) as i32));\n"
+      "}\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "--const-eval compiles (got): %s", buf);
+  snprintf(out, sizeof out, "%s/build/main.c", root);
+  char gc[8192];
+  CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
+  CHECK(strstr(gc, "[2] = 30") != NULL, "const designator index folded into the C output");
+  CHECK(strstr(gc, "_Static_assert(sizeof(Pt) == 8") != NULL, "layout verification assert emitted");
+  char bin[4200];
+  snprintf(bin, sizeof bin, "%s/ce.bin", DIR);
+  snprintf(cmd, sizeof cmd, "cc -std=c11 -Wall -Wextra -Werror %s/build/*.c %s/build/__std/*.c -o '%s' 2>&1", root,
+           root, bin);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "--const-eval output compiles -Werror (layout asserts hold): %s", buf);
+  snprintf(cmd, sizeof cmd, "'%s'", bin);
+  CHECK(run_cmd(cmd, NULL, 0) == 54, "const-eval program runs (30+10+2+4+8)");
+
+  // a folded-FALSE static_assert is a SUPER-C error (with our span), not a downstream C error
+  write_file(spc, "static_assert(1 + 1 == 3, \"nope\");\nfn main() i32 { return 0; }\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "folded-false static_assert fails the build");
+  CHECK(strstr(buf, "static assertion failed") != NULL, "and names the failure: %s", buf);
+  // without the flag the same file defers to C (compiles at the Super-C level)
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "flag off: static_assert defers to C as before");
 }
 
 // A second module's enums used across the boundary: a value return, a payload-less match (bare variant
@@ -605,6 +664,7 @@ int main(void) {
 
   test_compiles_file();
   test_cross_module_enum();
+  test_const_eval_flag();
   test_module_features();
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();
