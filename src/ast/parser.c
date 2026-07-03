@@ -366,8 +366,24 @@ static NodeId parse_type_inner(Parser *p) {
 
 // A bound is an interface path, or a callable signature `fn(T..) R` (one-token decision: `fn` never
 // starts a type path), making `F: fn(i32) i32` a generic param any function value satisfies.
+// `fn move(T..) R` additionally accepts closures that OWN captured values (the generic body then
+// move-tracks the param); `move` is only meaningful (and only parsed) in bound position.
 static NodeId parse_bound(Parser *p) {
-  return check(p, Fn) ? parse_type(p) : parse_type_path(p);
+  if (!check(p, Fn))
+    return parse_type_path(p);
+  const uint32_t start = token_start(raw_peek(p));
+  advance(p); // `fn`
+  const bool is_move = match(p, Move);
+  expect(p, LeftParen, "'('");
+  const NodeList params = parse_comma_types(p, RightParen);
+  expect(p, RightParen, "')'");
+  const NodeList returns = parse_function_returns(p);
+  return ast_add(
+      p->ast, (Node){
+                  .kind = NODE_FUNCTION_TYPE,
+                  .span = span_new(start, previous_end(p)),
+                  .as.function_type = {.params = params, .returns = returns, .is_move = is_move},
+              });
 }
 
 static NodeList parse_bounds(Parser *p) {
