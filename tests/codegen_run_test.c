@@ -209,6 +209,25 @@ static void test_tuple_destructure(void) {
           "  unsafe exit(a + b + c + d + e);\n"
           "}\n",
       51, "");
+  // first-class tuples: literals, destructuring, nesting, `.N` places, tuples in generics/fields.
+  sc_run_program(
+      "first-class tuples",
+      PRE "struct Holder { pub at: (i32, i32) }\n"
+          "fn swap(p: (i32, bool)) (bool, i32) { return p.1, p.0; }\n"
+          "fn main() i32 {\n"
+          "  let t = (40, true);\n"
+          "  let (b, n) = swap(t);\n"
+          "  let (a, b2) = (3, 4);\n"
+          "  let nested = ((1, 2), 30);\n"
+          "  let x = (nested.0).0 + (nested.0).1 + nested.1;\n"
+          "  let h = Holder { at: (5, 6) };\n"
+          "  let mut v = Vector::<(i32, i32)>::new();\n"
+          "  v.push((7, 8));\n"
+          "  let p = v.pop().unwrap();\n"
+          "  let u: (u8, u8) = (1, 2);\n"
+          "  unsafe exit(n + (b as i32) + a + b2 + x + h.at.0 + h.at.1 + p.0 + p.1 + (u.0 as i32) + (u.1 as i32));\n"
+          "}\n",
+      110, ""); // 40+1 + 3+4 + 33 + 11 + 15 + 3
   sc_run_program(
       "unwrap on None panics (aborts)",
       PRE "fn main() i32 { let v = Option::<i32>::none().unwrap(); unsafe exit(v); }\n",

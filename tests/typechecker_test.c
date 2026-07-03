@@ -679,6 +679,22 @@ static void test_never_type(void) {
       "mismatched types");
 }
 
+// `(A, B)` lowers to the prelude Tuple<n> struct: literals, `.N` element places, destructuring
+// lets, and literal elements adapting to an annotated tuple type.
+static void test_tuples(void) {
+  expect_ok("tuple literal and access", "fn f() i32 { let t = (1, true); return t.0 + (t.1 as i32); }\n");
+  expect_ok("tuple destructure", "fn f() i32 { let (a, b) = (1, 2); return a + b; }\n");
+  expect_ok("tuple type annotation adapts literals", "fn f() u8 { let t: (u8, u8) = (1, 2); return t.0 + t.1; }\n");
+  expect_ok("tuple param and generic arg", "fn g(p: (i32, bool)) i32 { return p.0; }\n"
+            "fn f() i32 { let mut v = Vector::<(i32, bool)>::new(); v.free(); return g((5, false)); }\n");
+  expect_error("tuple arity capped at 4", "fn f() i32 { let t = (1, 2, 3, 4, 5); return 0; }\n",
+               "tuple arity is limited to 4");
+  expect_error("tuple index out of range", "fn f() i32 { let t = (1, 2); return t.9; }\n", "no field or method '9'");
+  expect_error(
+      "tuple binding needs a tuple or multi-return",
+      "fn f() i32 { let (a, b) = 5; return a + b; }\n", "tuple binding requires");
+}
+
 // Raw-pointer operations and extern "C" calls are only legal inside `unsafe { .. }` / `unsafe expr`:
 // the compiler cannot vouch for them, so the marker is mandatory. References stay safe.
 static void test_unsafe_enforcement(void) {
@@ -723,6 +739,7 @@ int main(void) {
   test_switch_exhaustiveness();
   test_unsafe_enforcement();
   test_never_type();
+  test_tuples();
   test_interface_bounds();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");

@@ -1265,7 +1265,8 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
       }
       break;
     }
-    case NODE_SLICE_TYPE: // `[]T` -> the prelude Slice<T> / SliceMut<T> instance C name
+    case NODE_SLICE_TYPE:  // `[]T` -> the prelude Slice<T> / SliceMut<T> instance C name
+    case NODE_TUPLE_TYPE:  // `(T1, T2)` -> the prelude Tuple<n> instance C name
       render_type_id(c, ast_type(c->ast, tn), decl, out, cap);
       break;
     case NODE_ARRAY_TYPE: {
@@ -3064,6 +3065,18 @@ static void emit_expr(Codegen *c, const NodeId id) {
       emit_cstr(c, nm);
       break;
     }
+    case NODE_TUPLE: { // `(a, b, ..)` -> a Tuple<n> struct literal (fields `_0`..)
+      char styp[200];
+      render_type_id(c, ast_type(c->ast, id), "", styp, sizeof styp);
+      emit(c, "(%s){ ", styp);
+      const NodeId *const eids = ast_list(c->ast, n->as.array_literal.elements);
+      for (uint32_t i = 0; i < n->as.array_literal.elements.len; i++) {
+        emit(c, i ? ", ._%u = " : "._%u = ", i);
+        emit_expr(c, eids[i]);
+      }
+      emit(c, " }");
+      break;
+    }
     case NODE_RANGE: { // a range value -> a `Range<T>` struct literal (for/index uses are lowered elsewhere)
       char styp[200];
       render_type_id(c, ast_type(c->ast, id), "", styp, sizeof styp);
@@ -3316,7 +3329,10 @@ static void emit_expr(Codegen *c, const NodeId id) {
       const bool ptr = ot->kind == TYPE_POINTER || ot->kind == TYPE_REFERENCE;
       emit_expr(c, n->as.member.object);
       emit(c, ptr ? "->" : ".");
-      emit_ident(c, name_span(c, n->as.member.member));
+      const Span msp = name_span(c, n->as.member.member);
+      if (c->source[msp.start] >= '0' && c->source[msp.start] <= '9')
+        emit(c, "_"); // tuple element `t.0` reads the Tuple<n> field `_0`
+      emit_ident(c, msp);
       break;
     }
     case NODE_CAST: {

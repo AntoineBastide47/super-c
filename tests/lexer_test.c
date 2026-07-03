@@ -62,6 +62,13 @@ static void test_keywords(void) {
       expected, sizeof expected / sizeof expected[0]);
 }
 
+// `.` before a digit is a plain Dot (tuple element access `t.0`); `0.1` after an expression dot
+// still lexes as a float (the parser diagnoses nested access with a parenthesize hint).
+static void test_dot_digit(void) {
+  static const TokenType expected[] = {Identifier, Dot, IntegerLiteral, Identifier, Dot, FloatLiteral, Eof};
+  expect_tokens("dot digit is tuple access", "t.0 t.0.5", expected, sizeof expected / sizeof expected[0]);
+}
+
 static void test_operators(void) {
   static const TokenType expected[] = {
       LeftBrace,
@@ -155,7 +162,6 @@ static void test_comments(void) {
 }
 
 static void test_errors(void) {
-  expect_error("leading dot float", ".5", "require a digit before");
   expect_error("binary digit", "0b102", "invalid digit in binary");
   expect_error("hex digit", "0xFG", "invalid digit in hexadecimal");
   expect_error("octal digit", "0o789", "invalid digit in octal");
@@ -252,6 +258,7 @@ static void test_multiple_errors(void) {
 
 int main(void) {
   test_keywords();
+  test_dot_digit();
   test_operators();
   test_literals();
   test_ranges();

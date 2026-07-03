@@ -147,6 +147,7 @@ static TypeId prelude_str_type(TypeChecker *t) {
 }
 static TypeId lower_type_in(TypeChecker *t, ModuleId m, NodeId id);
 static TypeId prelude_slice_type(TypeChecker *t, TypeId elem, bool mut);
+static TypeId prelude_tuple_type(TypeChecker *t, const TypeId *args, uint32_t n);
 static int slice_kind(TypeChecker *t, TypeId tid, TypeId *elem);
 static bool is_assignable(TypeChecker *t, NodeId node);
 static bool is_place(TypeChecker *t, NodeId node);
@@ -629,6 +630,26 @@ static NodeId find_member(TypeChecker *t, const ModuleId m, const NodeId decl, c
     const Node *const mem = ast_at_const(a, ids[i]);
     const NodeId mname = mem->kind == NODE_FIELD ? mem->as.field.name : mem->as.variant.name;
     if (spans_eq2(t->source, name, src, ast_at_const(a, mname)->as.name.text))
+      return ids[i];
+  }
+  return NODE_NONE;
+}
+
+// find_member with a C-string name the caller synthesized (tuple `.0` -> field `_0`).
+static NodeId find_member_cstr(TypeChecker *t, const ModuleId m, const NodeId decl, const char *const name) {
+  Ast *const a = mod_ast(t, m);
+  const uint8_t *const src = mod_src(t, m);
+  const Node *const d = ast_at_const(a, decl);
+  if (d->kind != NODE_STRUCT && d->kind != NODE_ENUM)
+    return NODE_NONE;
+  const NodeList members = d->as.aggregate.members;
+  const NodeId *const ids = ast_list(a, members);
+  const size_t nl = strlen(name);
+  for (uint32_t i = 0; i < members.len; i++) {
+    const Node *const mem = ast_at_const(a, ids[i]);
+    const NodeId mname = mem->kind == NODE_FIELD ? mem->as.field.name : mem->as.variant.name;
+    const Span sp = ast_at_const(a, mname)->as.name.text;
+    if (sp.end - sp.start == nl && memcmp(src + sp.start, name, nl) == 0)
       return ids[i];
   }
   return NODE_NONE;
@@ -2091,6 +2112,16 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
     case NODE_SLICE_TYPE:
       return prelude_slice_type(
           t, lower_type_in(t, m, n->as.indirect_type.type), n->as.indirect_type.qualifier == TYPE_QUAL_MUT);
+    case NODE_TUPLE_TYPE: { // `(T1, T2, ..)` -> Tuple<n>, lowered in the signature's own module
+      const NodeList elems = n->as.array_literal.elements;
+      const NodeId *const eids = ast_list(a, elems);
+      if (elems.len > 4)
+        return TYPE_ERROR; // diagnosed where the type is written (resolve_type)
+      TypeId targs[4];
+      for (uint32_t i = 0; i < elems.len; i++)
+        targs[i] = lower_type_in(t, m, eids[i]);
+      return prelude_tuple_type(t, targs, elems.len);
+    }
     case NODE_POINTER_TYPE:
     case NODE_REFERENCE_TYPE: {
       const TypeKind k = n->kind == NODE_POINTER_TYPE ? TYPE_POINTER : TYPE_REFERENCE;
@@ -2125,6 +2156,30 @@ static TypeId prelude_range_type(TypeChecker *t, const TypeId elem) {
   ModuleId mid;
   const NodeId d = package_prelude_lookup(t->package, "Range", 5, true, &mid);
   return d != NODE_NONE ? ast_intern_instance(t->ast, mid, d, &elem, 1) : TYPE_ERROR;
+}
+
+static int prelude_instance_args(TypeChecker *t, TypeId tid, const char *name, size_t nl, TypeId *out, int maxn);
+
+// `(T1, .., Tn)` -> the prelude's `Tuple<n>` instance (mirrors slices/ranges: a tuple is an ordinary
+// prelude struct with fields `_0`.. so all downstream machinery is the plain generic-instance path).
+static TypeId prelude_tuple_type(TypeChecker *t, const TypeId *const args, const uint32_t n) {
+  if (!t->package || n < 2 || n > 4)
+    return TYPE_ERROR;
+  const char *const names[3] = {"Tuple2", "Tuple3", "Tuple4"};
+  ModuleId mid;
+  const NodeId d = package_prelude_lookup(t->package, names[n - 2], 6, true, &mid);
+  return d != NODE_NONE ? ast_intern_instance(t->ast, mid, d, args, (uint8_t)n) : TYPE_ERROR;
+}
+
+// The element types of a tuple-instance type, or -1 (mirrors slice_kind for `Tuple2`/`Tuple3`/`Tuple4`).
+static int tuple_args_of(TypeChecker *t, const TypeId tid, TypeId *const out, const int maxn) {
+  static const char *const names[3] = {"Tuple2", "Tuple3", "Tuple4"};
+  for (int k = 0; k < 3; k++) {
+    const int n = prelude_instance_args(t, tid, names[k], 6, out, maxn);
+    if (n >= 0)
+      return n;
+  }
+  return -1;
 }
 
 // E if `tid` is a prelude `Range<E>` instance, else TYPE_NONE (lets `for x in r` bind x to E).
@@ -2259,6 +2314,19 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
       result = prelude_slice_type(
           t, resolve_type(t, n->as.indirect_type.type), n->as.indirect_type.qualifier == TYPE_QUAL_MUT);
       break;
+    case NODE_TUPLE_TYPE: { // `(T1, T2, ..)` -> the prelude's Tuple<n> instance
+      const NodeList elems = n->as.array_literal.elements;
+      const NodeId *const eids = ast_list(a, elems);
+      if (elems.len > 4) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "tuple arity is limited to 4 elements");
+        break;
+      }
+      TypeId targs[4];
+      for (uint32_t i = 0; i < elems.len; i++)
+        targs[i] = resolve_type(t, eids[i]);
+      result = prelude_tuple_type(t, targs, elems.len);
+      break;
+    }
     case NODE_POINTER_TYPE:
     case NODE_REFERENCE_TYPE: {
       const TypeKind k = n->kind == NODE_POINTER_TYPE ? TYPE_POINTER : TYPE_REFERENCE;
@@ -3634,11 +3702,20 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
     // For a generic instance, member types are substituted by the instance's type args.
     DefId mhit = {0, NODE_NONE};
     NodeId fhit = NODE_NONE;
-    if (prefer_method) {
+    // Tuple element access `t.0`: an all-digit member maps to the prelude Tuple<n> field `_0`/`_1`/..
+    bool digits = name.end > name.start && name.end - name.start <= 2;
+    for (uint32_t i = name.start; i < name.end && digits; i++)
+      digits = t->source[i] >= '0' && t->source[i] <= '9';
+    if (digits) {
+      char fld[8];
+      snprintf(fld, sizeof fld, "_%.*s", (int)(name.end - name.start), (const char *)t->source + name.start);
+      fhit = find_member_cstr(t, bmod, bdecl, fld);
+    }
+    if (fhit == NODE_NONE && prefer_method) {
       mhit = find_method(t, bmod, bdecl, name);
       if (mhit.node == NODE_NONE)
         fhit = find_member(t, bmod, bdecl, name);
-    } else {
+    } else if (fhit == NODE_NONE) {
       fhit = find_member(t, bmod, bdecl, name);
       if (fhit == NODE_NONE)
         mhit = find_method(t, bmod, bdecl, name);
@@ -4562,6 +4639,28 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       break;
     }
+    case NODE_TUPLE: { // `(a, b, ..)` -> the prelude's Tuple<n> instance (fields `_0`..)
+      const NodeList elems = n->as.array_literal.elements;
+      const NodeId *const eids = ast_list(a, elems);
+      if (elems.len > 4) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "tuple arity is limited to 4 elements");
+        break;
+      }
+      TypeId wargs[4]; // the expected tuple's element types, so literal elements adapt to their slot
+      const int wn = expected != TYPE_NONE ? tuple_args_of(t, strip(t, expected), wargs, 4) : -1;
+      TypeId targs[4];
+      for (uint32_t i = 0; i < elems.len; i++) {
+        const TypeId et = check_expr(t, eids[i]);
+        targs[i] = et;
+        if ((int)i < wn && et != wargs[i] && compatible(t, wargs[i], eids[i])) {
+          targs[i] = wargs[i]; // `let t: (u8, bool) = (1, true)`: the literal takes the slot's type
+          ast_set_type(a, eids[i], wargs[i]);
+        }
+        tc_mark_move(t, eids[i]); // a Free element is moved into the tuple (like a struct-init field)
+      }
+      result = prelude_tuple_type(t, targs, elems.len);
+      break;
+    }
     case NODE_RANGE: { // a range used as a value lowers to `Range<T>` (for/index uses never reach here)
       const TypeId s = check_expr(t, n->as.pattern_range.start);
       const TypeId e = check_expr(t, n->as.pattern_range.end);
@@ -4593,6 +4692,14 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
   check_expr(t, value); // types the callee even though a multi-return call yields no single value
   // check_call stashed the substituted element types (generic / instance-method calls included).
   const bool stashed = value != NODE_NONE && t->mret_call == value;
+  // A tuple-typed value (`let (a, b) = pair;`) destructures by element; the source is consumed.
+  TypeId targs[4];
+  int tn = -1;
+  if (!stashed && value != NODE_NONE) {
+    tn = tuple_args_of(t, strip(t, ast_type(a, value)), targs, 4);
+    if (tn >= 0)
+      tc_mark_move(t, value);
+  }
 
   NodeList returns = {0, 0};
   bool ok = false;
@@ -4617,12 +4724,13 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
       }
     }
   }
-  if (!ok && !stashed) {
+  if (!ok && !stashed && tn < 0) {
     typechecker_errorf(
-        t, n->span.start, n->span.end - n->span.start, "a tuple binding requires a multi-value function call");
+        t, n->span.start, n->span.end - n->span.start,
+        "a tuple binding requires a multi-value function call or a tuple value");
     return;
   }
-  const uint32_t nret = stashed ? t->mret_total : returns.len;
+  const uint32_t nret = stashed ? t->mret_total : tn >= 0 ? (uint32_t)tn : returns.len;
   if (names.len != nret) {
     typechecker_errorf(
         t, n->span.start, n->span.end - n->span.start, "expected %u binding%s, the call returns %u value%s",
@@ -4633,6 +4741,8 @@ static void check_tuple_let(TypeChecker *t, const Node *const n) {
     TypeId et = TYPE_NONE;
     if (stashed && i < t->mret_n) { // substituted by check_call (generic args / receiver instance / Self)
       et = t->mret_types[i];
+    } else if (tn >= 0) {
+      et = i < (uint32_t)tn ? targs[i] : TYPE_NONE; // tuple elements
     } else if (i < returns.len) {
       const Node *const rn = ast_at_const(a, rids[i]);
       et = resolve_type(t, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rids[i]);
