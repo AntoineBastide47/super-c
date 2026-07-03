@@ -326,9 +326,10 @@ static void inst_name(Codegen *c, const TyInstance *it, char *out, size_t cap);
 static void closure_name(Codegen *c, NodeId id, char *out, size_t cap);
 static void closure_sym_in(Codegen *c, ModuleId m, NodeId id, char *out, size_t cap);
 static bool cg_fn_is_capturing(Codegen *c, const Ty *fy);
+static bool cg_fn_owns(Codegen *c, const Ty *fy);
 static void render_fn_ptr_id(Codegen *c, const Ty fy, const char *decl, char *out, size_t cap);
 static Span cg_decl_name_span(Codegen *c, NodeId decl);
-static void emit_capture_init(Codegen *c, NodeId decl);
+static void emit_capture_init(Codegen *c, NodeId clos, uint32_t idx);
 static bool cb_known_callee(Codegen *c, NodeId arg, DefId *out, bool *is_closure);
 static void cb_spec_name(Codegen *c, DefId fn, DefId callee, bool is_closure, char *out, size_t cap);
 static TypeId subst_lookup(Codegen *c, ModuleId m, NodeId decl);
@@ -1637,6 +1638,22 @@ static bool cg_fn_is_capturing(Codegen *c, const Ty *const fy) {
     return false;
   const Node *const fn = ast_at_const(cg_mod_ast(c, fy->module), fy->as.decl);
   return fn->kind == NODE_CLOSURE && fn->as.closure.captures.len != 0;
+}
+
+// True when the closure behind `fy` OWNS a captured Free value (a non-mutated Free capture moved into
+// its env at creation): its value carries a destructor (`<sym>_env_free`) and is move-tracked.
+static bool cg_fn_owns(Codegen *c, const Ty *const fy) {
+  if (fy->kind != TYPE_FUNCTION)
+    return false;
+  Ast *const fa = cg_mod_ast(c, fy->module);
+  const Node *const fn = ast_at_const(fa, fy->as.decl);
+  if (fn->kind != NODE_CLOSURE)
+    return false;
+  const NodeId *const cids = ast_list(fa, fn->as.closure.captures);
+  for (uint32_t i = 0; i < fn->as.closure.captures.len; i++) // capture types live in the CLOSURE's pool
+    if (!(fn->as.closure.mut_caps >> i & 1) && cg_type_is_free(c, ast_reintern(c->ast, fa, ast_type(fa, cids[i]))))
+      return true;
+  return false;
 }
 
 // True (and yields `*elem`) when `tid` is a prelude `Slice<E>` / `SliceMut<E>` instance -- the lowered
@@ -3061,37 +3078,56 @@ static Span cg_decl_name_span(Codegen *c, const NodeId decl) {
   }
 }
 
-// One `.name = <value>` env-literal field for captured decl `decl`. The value is the capture's current
-// C lvalue at the creation site -- which, inside an enclosing closure's body, may itself be one of THAT
-// closure's captures (`__env->name`).
-static void emit_capture_init(Codegen *c, const NodeId decl) {
+// The capture index of `decl` in the ACTIVE closure emission context (c->env_clos), or -1. `*is_mut`
+// receives whether that capture is a `&mut` capture (env holds a pointer).
+static int cg_env_capture(Codegen *c, const NodeId decl, bool *const is_mut) {
+  if (c->env_clos == NODE_NONE || decl == NODE_NONE)
+    return -1;
+  const Node *const cn = ast_at_const(c->ast, c->env_clos);
+  const NodeId *const cids = ast_list(c->ast, cn->as.closure.captures);
+  for (uint32_t i = 0; i < cn->as.closure.captures.len; i++)
+    if (cids[i] == decl) {
+      *is_mut = (cn->as.closure.mut_caps >> i & 1) != 0;
+      return (int)i;
+    }
+  return -1;
+}
+
+// One `.name = <value>` env-literal field for capture `idx` of closure `clos`. A `&mut` capture stores
+// the variable's ADDRESS; a copy capture its value. Inside an enclosing closure's body the variable may
+// itself be one of THAT closure's captures: a pointer field forwards as-is, a copy field forwards its
+// value (dereferenced when the enclosing capture is a pointer).
+static void emit_capture_init(Codegen *c, const NodeId clos, const uint32_t idx) {
+  const Node *const cn = ast_at_const(c->ast, clos);
+  const NodeId decl = ast_list(c->ast, cn->as.closure.captures)[idx];
+  const bool want_ptr = (cn->as.closure.mut_caps >> idx & 1) != 0;
   char nm[128];
   render_ident(c, cg_decl_name_span(c, decl), nm, sizeof nm);
   emit(c, ".%s = ", nm);
-  if (c->env_clos != NODE_NONE) {
-    const NodeList caps = ast_at_const(c->ast, c->env_clos)->as.closure.captures;
-    const NodeId *const cids = ast_list(c->ast, caps);
-    for (uint32_t i = 0; i < caps.len; i++)
-      if (cids[i] == decl) {
-        emit(c, "__env->");
-        break;
-      }
-  }
+  bool outer_mut = false;
+  const int oi = cg_env_capture(c, decl, &outer_mut);
+  if (want_ptr)
+    emit(c, oi >= 0 && outer_mut ? "" : "&"); // an enclosing pointer field IS the address already
+  else if (oi >= 0 && outer_mut)
+    emit(c, "*"); // copy the value out of the enclosing pointer field
+  if (oi >= 0)
+    emit(c, "__env->");
   emit_cstr(c, nm);
 }
 
 static void emit_ident_ref(Codegen *c, const NodeId id, const Node *n) {
   const DefId d = ast_resolution_def(c->ast, id);
-  // Inside a capturing closure's hoisted body, a reference to a captured local reads the env copy.
-  if (c->env_clos != NODE_NONE && d.node != NODE_NONE && d.module == c->ast->module) {
-    const NodeList caps = ast_at_const(c->ast, c->env_clos)->as.closure.captures;
-    const NodeId *const cids = ast_list(c->ast, caps);
-    for (uint32_t i = 0; i < caps.len; i++)
-      if (cids[i] == d.node) {
-        emit(c, "__env->");
-        emit_ident(c, n->as.name.text);
-        return;
-      }
+  // Inside a capturing closure's hoisted body, a reference to a captured local reads the env copy --
+  // or, for a `&mut` capture, the OUTER variable through the env's pointer.
+  if (d.node != NODE_NONE && d.module == c->ast->module) {
+    bool is_mut = false;
+    if (cg_env_capture(c, d.node, &is_mut) >= 0) {
+      emit(c, is_mut ? "(*__env->" : "__env->");
+      emit_ident(c, n->as.name.text);
+      if (is_mut)
+        emit(c, ")");
+      return;
+    }
   }
   if (d.node != NODE_NONE) {
     Ast *const da = cg_mod_ast(c, d.module);
@@ -3451,16 +3487,31 @@ static void emit_expr(Codegen *c, const NodeId id) {
       char nm[200];
       closure_name(c, id, nm, sizeof nm);
       if (n->as.closure.captures.len) {
-        // A capturing closure's value is its env struct, built HERE: captures copy at creation. (Calls
-        // pass its address to the hoisted fn; the compound literal is an lvalue, so `&` applies.)
+        // A capturing closure's value is its env struct, built HERE: captures copy (or take the
+        // variable's address, for `&mut` captures) at creation. (Calls pass its address to the hoisted
+        // fn; the compound literal is an lvalue, so `&` applies.) A conditionally-created OWNING
+        // closure sets its captures' free flags as part of the value (this node is the move site).
+        bool wrapped = false;
+        if (cg_is_cond_site(c, id)) {
+          const NodeId *const cids = ast_list(c->ast, n->as.closure.captures);
+          for (uint32_t i = 0; i < n->as.closure.captures.len; i++) {
+            if (n->as.closure.mut_caps >> i & 1 || !cg_is_cond_moved(c, cids[i]))
+              continue;
+            char fl[32];
+            cg_move_flag(fl, sizeof fl, cids[i]);
+            emit(c, wrapped ? "%s = true, " : "(%s = true, ", fl);
+            wrapped = true;
+          }
+        }
         emit(c, "((%s_env){ ", nm);
-        const NodeId *const cids = ast_list(c->ast, n->as.closure.captures);
         for (uint32_t i = 0; i < n->as.closure.captures.len; i++) {
           if (i)
             emit(c, ", ");
-          emit_capture_init(c, cids[i]);
+          emit_capture_init(c, id, i);
         }
         emit(c, " })");
+        if (wrapped)
+          emit(c, ")");
         break;
       }
       emit_cstr(c, nm); // non-capturing: the address of its hoisted static function
@@ -5229,6 +5280,8 @@ static bool cg_param_has_free_bound(Codegen *c, const ModuleId m, const NodeId g
 // (Option<i32> is NOT Free -- its `free` is never monomorphized -- but Option<String> is).
 static bool cg_type_is_free(Codegen *c, const TypeId ty) {
   const Ty *const y = ast_type_at(c->ast, subst_resolve(c, ty));
+  if (y->kind == TYPE_FUNCTION) // an owning closure value frees its env's captures at scope exit
+    return cg_fn_owns(c, y);
   if (y->kind == TYPE_STRUCT)
     return cg_free_method(c, y->module, y->as.decl).node != NODE_NONE;
   if (y->kind != TYPE_INSTANCE)
@@ -5459,6 +5512,31 @@ static void cg_scan_moves(Codegen *c, const NodeId id, const bool cond, const in
       }
       break;
     }
+    case NODE_CLOSURE: { // creation MOVES each owned (non-`&mut`) Free capture into the env; the body's
+      // own moves belong to the hoisted function, not to this one -- do not descend.
+      const NodeId *const cids = ast_list(c->ast, n->as.closure.captures);
+      bool site_pushed = false;
+      for (uint32_t i = 0; i < n->as.closure.captures.len; i++) {
+        const NodeId decl = cids[i];
+        if (n->as.closure.mut_caps >> i & 1 || !cg_type_is_free(c, ast_type(c->ast, decl)))
+          continue;
+        const bool patb = ast_at_const(c->ast, decl)->kind == NODE_PATTERN_NAME; // arm-local: unconditional
+        if (pass == 0) {
+          if ((!cond || patb) && c->nmoved < (uint32_t)(sizeof c->moved / sizeof c->moved[0]))
+            c->moved[c->nmoved++] = decl;
+          continue;
+        }
+        if (patb || !cond || cg_is_moved(c, decl))
+          continue;
+        if (!cg_is_cond_moved(c, decl) && c->ncond_moved < (uint32_t)(sizeof c->cond_moved / sizeof c->cond_moved[0]))
+          c->cond_moved[c->ncond_moved++] = decl;
+        if (!site_pushed && c->ncond_sites < (uint32_t)(sizeof c->cond_sites / sizeof c->cond_sites[0])) {
+          c->cond_sites[c->ncond_sites++] = id; // the env literal sets the flags (emit_expr NODE_CLOSURE)
+          site_pushed = true;
+        }
+      }
+      break;
+    }
     case NODE_BINARY: // `&&`/`||` short-circuit: the right operand is a conditional path
       cg_scan_moves(c, n->as.binary.left, cond, pass);
       cg_scan_moves(c, n->as.binary.right,
@@ -5510,6 +5588,14 @@ static bool emit_free_target(Codegen *c, const TypeId bt) {
   const Ty *const y = ast_type_at(c->ast, subst_resolve(c, bt));
   ModuleId om;
   NodeId od;
+  if (y->kind == TYPE_FUNCTION) { // an owning closure value: its synthesized env destructor
+    if (!cg_fn_owns(c, y))
+      return false;
+    char sym[220];
+    closure_sym_in(c, y->module, y->as.decl, sym, sizeof sym);
+    emit(c, "%s_env_free", sym);
+    return true;
+  }
   if (y->kind == TYPE_INSTANCE) {
     const TyInstance *const ii = ast_instance(c->ast, y->as.inst);
     om = ii->module;
@@ -6114,16 +6200,35 @@ static void emit_closure_fn(Codegen *c, const NodeId id, const bool with_body) {
   const bool caps = n->as.closure.captures.len != 0;
   char nm[200];
   closure_name(c, id, nm, sizeof nm);
-  if (caps && !with_body) { // the env struct: one copied field per captured local
+  if (caps && !with_body) { // the env struct: a copied field per capture; a POINTER for a mutated one
     emit(c, "typedef struct { ");
     const NodeId *const cids = ast_list(c->ast, n->as.closure.captures);
     for (uint32_t i = 0; i < n->as.closure.captures.len; i++) {
       char fnm[128], d[300];
       render_ident(c, cg_decl_name_span(c, cids[i]), fnm, sizeof fnm);
-      render_type_id(c, ast_type(c->ast, cids[i]), fnm, d, sizeof d);
+      TypeId ft = ast_type(c->ast, cids[i]);
+      if (n->as.closure.mut_caps >> i & 1) // `&mut` capture: writes land on the OUTER variable
+        ft = ast_intern_type(c->ast, (Ty){.kind = TYPE_POINTER, .qualifier = TYPE_QUAL_MUT, .as.elem = ft});
+      render_type_id(c, ft, fnm, d, sizeof d);
       emit(c, "%s; ", d);
     }
     emit(c, "} %s_env;\n", nm);
+    // An OWNING closure (a Free value moved into the env): synthesize its destructor, run when the
+    // closure value dies unconsumed (scope exit / a spec's by-value param) -- mut (borrowed) fields
+    // and POD copies are left alone.
+    const Ty fnty = {.kind = TYPE_FUNCTION, .module = c->ast->module, .as.decl = id};
+    if (cg_fn_owns(c, &fnty)) {
+      emit(c, "static __attribute__((unused)) void %s_env_free(%s_env *const __e) { ", nm, nm);
+      for (uint32_t i = 0; i < n->as.closure.captures.len; i++) {
+        if (n->as.closure.mut_caps >> i & 1 || !cg_type_is_free(c, ast_type(c->ast, cids[i])))
+          continue;
+        char fnm[128];
+        render_ident(c, cg_decl_name_span(c, cids[i]), fnm, sizeof fnm);
+        if (emit_free_target(c, ast_type(c->ast, cids[i])))
+          emit(c, "(&__e->%s); ", fnm);
+      }
+      emit(c, "}\n");
+    }
   }
   char ps[1024];
   render_params(c, n->as.closure.params, ps, sizeof ps);

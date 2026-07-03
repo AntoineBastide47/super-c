@@ -748,37 +748,81 @@ static void test_closures(void) {
       "capturing closure into a bare fn let",
       "fn main() i32 { let b = 1; let f: fn(i32) i32 = |x: i32| x + b; return f(1); }\n",
       "mismatch");
+  // Mutating a capture is legal when the OUTER binding is `mut` (the capture becomes an implicit
+  // `&mut`, so the write is outer-visible); an immutable outer binding keeps its normal errors.
+  expect_ok(
+      "mutating a mut capture",
+      "fn main() i32 { let mut n = 1; let f = fn(x: i32) i32 { n += x; return n; }; return f(1); }\n");
   expect_error(
-      "assignment to a capture",
-      "fn main() i32 { let mut n = 1; let f = fn(x: i32) i32 { n = x; return n; }; return f(1); }\n",
+      "assignment to an immutable capture",
+      "fn main() i32 { let n = 1; let f = fn(x: i32) i32 { n = x; return n; }; return f(1); }\n",
       "cannot assign");
   expect_error(
-      "&mut of a capture",
+      "&mut of an immutable capture",
       "fn bump(r: &mut i32) { *r += 1; }\n"
-      "fn main() i32 { let mut n = 1; let f = fn(x: i32) i32 { bump(&mut n); return x; }; return f(1); }\n",
+      "fn main() i32 { let n = 1; let f = fn(x: i32) i32 { bump(&mut n); return x; }; return f(1); }\n",
       "cannot take '&mut' of an immutable binding");
   expect_error(
-      "&mut self method on a capture",
+      "&mut self method on an immutable capture",
       "struct Counter { pub n: i32 }\n"
       "extend Counter { fn bump(self: &mut Counter) { self.n += 1; } }\n"
       "fn main() i32 {\n"
-      "  let mut c: Counter = Counter { n: 0 };\n"
+      "  let c: Counter = Counter { n: 0 };\n"
       "  let f = fn(x: i32) i32 { c.bump(); return x; };\n"
       "  return f(1);\n"
       "}\n",
       "cannot call a '&mut self' method on an immutable binding");
-  expect_error(
-      "capturing a Free value",
+  // Capturing a Free value by copy MOVES it into the env (the closure value owns and frees it):
+  // the outer binding is spent, and the env's value cannot be moved back out.
+  expect_ok(
+      "owning capture reads its value",
       "fn main() i32 {\n"
       "  let s: String = String::from_str(\"hi\");\n"
       "  let f = |x: i32| x + s.len() as i32;\n"
+      "  return f(1) + f(2);\n" // calls only borrow the env: twice is fine
+      "}\n");
+  expect_error(
+      "outer use after an owning capture",
+      "fn main() i32 {\n"
+      "  let s: String = String::from_str(\"hi\");\n"
+      "  let f = |x: i32| x + s.len() as i32;\n"
+      "  return f(1) + s.len() as i32;\n"
+      "}\n",
+      "use of moved value");
+  expect_error(
+      "moving a capture out of the closure",
+      "fn eat(s: String) i32 { return s.len() as i32; }\n"
+      "fn main() i32 {\n"
+      "  let s: String = String::from_str(\"hi\");\n"
+      "  let f = |x: i32| x + eat(s);\n"
       "  return f(1);\n"
       "}\n",
-      "closure cannot capture this variable");
+      "cannot move a captured value out of a closure");
+  expect_error(
+      "owning closure needs a fn move bound",
+      "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\n"
+      "fn main() i32 {\n"
+      "  let s: String = String::from_str(\"hi\");\n"
+      "  return apply(1, |x: i32| x + s.len() as i32);\n"
+      "}\n",
+      "does not satisfy bound");
+  expect_ok(
+      "owning closure through a fn move bound",
+      "fn apply<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x) + f(x); }\n"
+      "fn main() i32 {\n"
+      "  let s: String = String::from_str(\"hi\");\n"
+      "  return apply(1, |x: i32| x + s.len() as i32);\n"
+      "}\n");
+  expect_error(
+      "fn move param cannot be passed twice",
+      "fn use_once<F: fn move(i32) i32>(f: F) i32 { return f(1); }\n"
+      "fn both<F: fn move(i32) i32>(f: F) i32 { return use_once(f) + use_once(f); }\n"
+      "fn main() i32 { return both(|x: i32| x + 1); }\n",
+      "use of moved value");
   expect_error(
       "capturing a fixed-size array",
       "fn main() i32 { let a: [i32; 2] = [1, 2]; let f = |x: i32| x + a[0]; return f(1); }\n",
-      "closure cannot capture this variable");
+      "closure cannot capture a fixed-size array");
 }
 
 int main(void) {

@@ -233,7 +233,18 @@ static void test_closures(void) {
     const NodeId *bids = ast_list(e, wp->as.where_predicate.bounds);
     CHECK(wp->as.where_predicate.bounds.len == 1 && ast_at_const(e, bids[0])->kind == NODE_FUNCTION_TYPE,
           "`where F: fn(..) ..` parses");
+    CHECK(!ast_at_const(e, bids[0])->as.function_type.is_move, "a plain fn bound is not `move`");
     ast_free(&e);
+  }
+  // `fn move(..) ..`: the ownership-marked bound (accepts closures that own captured Free values).
+  Ast *g = sc_parse("fn move bound", "fn run<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x); }\n");
+  if (g) {
+    const Node *gp = ast_at_const(g, th_nth_kind(g, NODE_GENERIC_PARAM, 0));
+    const NodeId *bids = ast_list(g, gp->as.generic_param.bounds);
+    CHECK(gp->as.generic_param.bounds.len == 1 && ast_at_const(g, bids[0])->kind == NODE_FUNCTION_TYPE &&
+              ast_at_const(g, bids[0])->as.function_type.is_move,
+          "`fn move(..) ..` parses with the move flag");
+    ast_free(&g);
   }
 }
 

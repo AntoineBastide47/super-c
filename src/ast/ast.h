@@ -231,6 +231,8 @@ typedef struct {
         struct {
             NodeList params;
             NodeList returns;
+            bool is_move; // `fn move(..) ..` BOUND form: the callable may OWN captured values, so the
+                          // generic body must move-track it (only such bounds accept owning closures)
         } function_type;
 
         struct {
@@ -281,6 +283,9 @@ typedef struct {
             NodeId body;      // a NODE_BLOCK (anonymous `fn`), or the body expression (compact `|..|`)
             bool expr_body;   // true: `body` is an expression to be returned; false: `body` is a block
             NodeList captures; // outer-local decls captured by copy (resolver-filled); empty = a bare fn pointer
+            uint64_t mut_caps; // typechecker-filled bitmask over `captures`: bit i set = the body MUTATES
+                               // capture i, so it is captured by `&mut` (env holds a pointer, writes are
+                               // outer-visible); clear = by copy (a Free copy-capture MOVES in: env owns it)
         } closure;
         struct {
             NodeId object, index;

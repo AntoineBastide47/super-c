@@ -45,8 +45,8 @@ struct TypeChecker {
     NodeId current_extend;      // the enclosing NODE_EXTEND, so a bare `Self` lowers to its full target type
                               // (`Wrap<T>`), not the bare struct -- otherwise generic field access loses the args
     NodeId current_fn;        // the function decl being checked, for `where`-clause bound lookup (NODE_NONE if none)
-    NodeId cur_closure;       // the innermost NODE_CLOSURE whose body is being checked: its captures are
-                              // copies, so assigning / `&mut`-borrowing them through it is rejected
+    NodeId clos_stack[8];     // the NODE_CLOSUREs whose bodies are being checked, innermost last: a
+    uint32_t nclos;           // mutated capture is recorded (as `&mut`) on EVERY enclosing closure
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
     TypeId expected;          // target type of the expression being checked (let annotation / return / assignment RHS), or TYPE_NONE; consumed once by check_expr
@@ -536,6 +536,68 @@ static bool fn_is_capturing(TypeChecker *t, const TypeId fid) {
   return fn->kind == NODE_CLOSURE && fn->as.closure.captures.len != 0;
 }
 
+static bool tc_type_is_free(TypeChecker *t, TypeId ty);
+
+// The position of `decl` in closure `clos`'s capture list, or -1. Captures are same-module locals,
+// so a plain NodeId comparison suffices.
+static int tc_capture_index(TypeChecker *t, const NodeId clos, const NodeId decl) {
+  const NodeList caps = ast_at_const(t->ast, clos)->as.closure.captures;
+  const NodeId *const cids = ast_list(t->ast, caps);
+  for (uint32_t i = 0; i < caps.len; i++)
+    if (cids[i] == decl)
+      return (int)i;
+  return -1;
+}
+
+// True when `fid` is a closure that OWNS a captured value: a Free-typed capture taken by copy MOVES
+// into the env at creation, making the closure value itself Free (freed at scope exit, move-tracked).
+// A MUTATED Free capture is a `&mut` borrow instead (bit set in mut_caps) -- the outer binding keeps
+// ownership. Owning closures satisfy only `fn move(..) ..` bounds, so generic code move-tracks them.
+static bool fn_owns(TypeChecker *t, const TypeId fid) {
+  const Ty *const fy = ast_type_at(t->ast, fid);
+  if (fy->kind != TYPE_FUNCTION)
+    return false;
+  Ast *const fa = mod_ast(t, fy->module);
+  const Node *const fn = ast_at_const(fa, fy->as.decl);
+  if (fn->kind != NODE_CLOSURE)
+    return false;
+  const NodeId *const cids = ast_list(fa, fn->as.closure.captures);
+  for (uint32_t i = 0; i < fn->as.closure.captures.len; i++) // capture types live in the CLOSURE's pool
+    if (!(fn->as.closure.mut_caps >> i & 1) && tc_type_is_free(t, ast_reintern(t->ast, fa, ast_type(fa, cids[i]))))
+      return true;
+  return false;
+}
+
+// Record that the body of every enclosing closure capturing the root binding of place `expr` MUTATES
+// it: that capture switches to `&mut` (env holds a pointer; the write lands on the OUTER variable).
+// A deref (`*p = ..`) stops the walk -- the mutation goes through the pointee, the binding is only read.
+static void tc_mark_capture_mut(TypeChecker *t, NodeId expr) {
+  if (!t->nclos)
+    return;
+  const Node *n = ast_at_const(t->ast, expr);
+  for (;;) {
+    if (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe))
+      expr = n->as.unary.operand;
+    else if (n->kind == NODE_MEMBER && !n->as.member.path)
+      expr = n->as.member.object;
+    else if (n->kind == NODE_INDEX)
+      expr = n->as.index.object;
+    else
+      break;
+    n = ast_at_const(t->ast, expr);
+  }
+  if (n->kind != NODE_IDENTIFIER)
+    return;
+  const DefId d = ast_resolution_def(t->ast, expr);
+  if (d.module != t->ast->module || d.node == NODE_NONE)
+    return;
+  for (uint32_t f = 0; f < t->nclos; f++) {
+    const int idx = tc_capture_index(t, t->clos_stack[f], d.node);
+    if (idx >= 0)
+      ast_at(t->ast, t->clos_stack[f])->as.closure.mut_caps |= (uint64_t)1 << idx;
+  }
+}
+
 // Two function types are compatible when their signatures match structurally (so a named function
 // passes where a `fn(..) ..` pointer is expected, even though they intern to distinct Tys keyed on
 // their decl node). C function-pointer types must match exactly, so params/return compare by identity.
@@ -890,7 +952,19 @@ static bool tc_type_is_free(TypeChecker *t, const TypeId ty) {
   DefId gp[4];
   TypeId ga[4];
   int gn;
-  if (ty == TYPE_NONE || !aggregate_of(t, strip(t, ty), &om, &od, gp, ga, &gn))
+  if (ty == TYPE_NONE)
+    return false;
+  const Ty *const y0 = ast_type_at(t->ast, ty);
+  if (y0->kind == TYPE_FUNCTION) // an owning closure value frees its env's captures at scope exit
+    return fn_owns(t, ty);
+  if (y0->kind == TYPE_GENERIC) {
+    // An `F: fn move(..) ..` param MAY be an owning closure: the generic body move-tracks it (the
+    // concrete spec then frees it, or skips the free entirely for a plain fn / borrowing closure).
+    const NodeId fb = generic_fn_bound(t, y0->module, y0->as.decl);
+    if (fb != NODE_NONE)
+      return ast_at_const(mod_ast(t, y0->module), fb)->as.function_type.is_move;
+  }
+  if (!aggregate_of(t, strip(t, ty), &om, &od, gp, ga, &gn))
     return false;
   const ModuleId scopes[2] = {om, t->ast->module};
   const int ns = om == t->ast->module ? 1 : 2;
@@ -944,6 +1018,30 @@ static void tc_record_binding_depth(TypeChecker *t, const NodeId decl) {
     TcDepthMap_insert(&t->binding_depth, decl, t->scope_depth);
 }
 
+// Inside a closure body, a captured Free value in MOVE position (a by-value arg, a `let` init, a
+// returned value -- including a compact closure's body expression) would leave the env's copy dangling
+// when the env is freed: reject it. Returns true when it errored (the caller skips its move marking).
+static bool tc_capture_move_guard(TypeChecker *t, NodeId expr) {
+  if (!t->nclos)
+    return false;
+  const Node *n = ast_at_const(t->ast, expr);
+  while (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe)) {
+    expr = n->as.unary.operand;
+    n = ast_at_const(t->ast, expr);
+  }
+  if (n->kind != NODE_IDENTIFIER)
+    return false;
+  const DefId d = ast_resolution_def(t->ast, expr);
+  if (d.module != t->ast->module || d.node == NODE_NONE ||
+      tc_capture_index(t, t->clos_stack[t->nclos - 1], d.node) < 0 ||
+      !tc_type_is_free(t, ast_type(t->ast, expr)))
+    return false;
+  const Span sp = ast_at_const(t->ast, expr)->span;
+  typechecker_errorf(t, sp.start, sp.end - sp.start,
+                     "cannot move a captured value out of a closure (the closure's env owns it)");
+  return true;
+}
+
 // Record `expr` as a move if it is a bare reference to a current-module Free-typed binding (a `let` or a
 // by-value parameter): ownership transfers away, so a later use is flagged. `move`/`unsafe` wrappers are
 // transparent -- the move is of the wrapped binding.
@@ -962,6 +1060,10 @@ static void tc_mark_move(TypeChecker *t, NodeId expr) {
     return;
   const NodeKind dk = ast_at_const(t->ast, d.node)->kind;
   if ((dk != NODE_LET && dk != NODE_PARAMETER) || !tc_type_is_free(t, ast_type(t->ast, expr)))
+    return;
+  // Inside a closure body, a captured Free value belongs to (or is borrowed into) the closure's env:
+  // the body may use it, but moving it OUT would leave the env's copy dangling when the env is freed.
+  if (tc_capture_move_guard(t, expr))
     return;
   // Borrow checker: moving the whole binding out from under a live shared borrow of it (or any sub-place) is
   // illegal. (A `&mut` borrow already blocks the read of `expr` that precedes the move, diagnosed there; here
@@ -1078,6 +1180,34 @@ static void tc_flow_set(TypeChecker *t, const FlowState *s) {
   t->nborrows = s->nborrows;
   for (uint32_t i = 0; i < s->nborrows; i++)
     t->borrows[i] = s->borrows[i];
+}
+
+// Does this statement RETURN from the function on every path through it (a trailing `return`, possibly
+// inside nested blocks / an if with both branches returning, or a diverging `never`-typed call)? Such a
+// branch's flow effects never reach the join after its enclosing `if` -- merging them would manufacture
+// false use-after-move errors on the other path. `break`/`continue` do NOT count: they re-join inside
+// the function (at the loop boundary), carrying their effects with them.
+static bool tc_stmt_returns(TypeChecker *t, const NodeId id) {
+  if (id == NODE_NONE)
+    return false;
+  const Node *const n = ast_at_const(t->ast, id);
+  switch (n->kind) {
+    case NODE_RETURN:
+      return true;
+    case NODE_BLOCK: {
+      const NodeList ss = n->as.block.statements;
+      return ss.len && tc_stmt_returns(t, ast_list(t->ast, ss)[ss.len - 1]);
+    }
+    case NODE_IF:
+      return n->as.if_stmt.else_branch != NODE_NONE && tc_stmt_returns(t, n->as.if_stmt.then_branch) &&
+             tc_stmt_returns(t, n->as.if_stmt.else_branch);
+    case NODE_EXPRESSION_STATEMENT: { // a `@c.noreturn` call (panic) diverges too
+      const TypeId ty = ast_type(t->ast, n->as.single.value);
+      return ty != TYPE_NONE && ast_type_at(t->ast, ty)->kind == TYPE_NEVER;
+    }
+    default:
+      return false;
+  }
 }
 
 // Two borrow records name the same borrow event (for merge dedup) when their root, kind, region and origin
@@ -2533,6 +2663,8 @@ static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) 
         typechecker_errorf(t, osp.start, osp.end - osp.start,
                            "cannot take '&mut' of an immutable binding (bind it with 'mut')");
       }
+      if (mut)
+        tc_mark_capture_mut(t, n->as.unary.operand); // `&mut` of a capture -> a `&mut` capture
       {
         // Peel the transparent move/unsafe wrappers so the checks below see the real operand.
         NodeId op = n->as.unary.operand;
@@ -2901,15 +3033,6 @@ static bool is_assignable(TypeChecker *t, const NodeId node_in) {
       const NodeId d = ast_resolution(t->ast, node);
       if (d == NODE_NONE)
         return false;
-      // A capture is a COPY in the closure's env: writing (or `&mut`-borrowing, or calling a `&mut self`
-      // method) through it would silently mutate the copy, so a captured binding is never assignable.
-      if (t->cur_closure != NODE_NONE) {
-        const NodeList caps = ast_at_const(t->ast, t->cur_closure)->as.closure.captures;
-        const NodeId *const cids = ast_list(t->ast, caps);
-        for (uint32_t i = 0; i < caps.len; i++)
-          if (cids[i] == d)
-            return false;
-      }
       const Node *const dn = ast_at_const(t->ast, d);
       if (dn->kind == NODE_LET)
         return dn->as.let_stmt.is_mutable;
@@ -3246,6 +3369,15 @@ static void unify_infer(TypeChecker *t, const TypeId param_ty, const TypeId arg_
 static bool fn_compatible_subst(TypeChecker *t, const TypeId exid, const TypeId acid, const DefId *const gp,
                                 const TypeId *const ga, const int gn, const DefId *const rp, const TypeId *const ra,
                                 const int rn) {
+  // An OWNING closure (a Free value moved into its env) requires a `fn move(..) ..` bound: only under
+  // that marker does the generic body move-track the param (and free it), so a plain bound taking one
+  // would double-free the env's captures on the second use.
+  if (exid != acid && fn_owns(t, acid)) {
+    const Ty *const exy = ast_type_at(t->ast, exid);
+    const Node *const exn = ast_at_const(mod_ast(t, exy->module), exy->as.decl);
+    if (exn->kind != NODE_FUNCTION_TYPE || !exn->as.function_type.is_move)
+      return false;
+  }
   TypeId ep[4], ap[4], er, ar;
   const int en = fn_sig(t, exid, ep, 4, &er), an = fn_sig(t, acid, ap, 4, &ar);
   if (en != an || en > 4)
@@ -3649,7 +3781,11 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
               typechecker_errorf(
                   t, sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'", tn,
                   (int)(bsp.end - bsp.start), (const char *)mod_src(t, fmod) + bsp.start);
-              typechecker_notef(t, "the argument must be a function or closure with this exact signature");
+              if (gy->kind == TYPE_FUNCTION && fn_owns(t, gargs[i]) &&
+                  !ast_at_const(fa, pbids[b])->as.function_type.is_move)
+                typechecker_notef(t, "this closure owns a captured value; the bound must be 'fn move(..) ..'");
+              else
+                typechecker_notef(t, "the argument must be a function or closure with this exact signature");
             }
             continue;
           }
@@ -3764,6 +3900,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     const Ty *const selfp = ast_type_at(t->ast, decl_type_in(t, fmod, ast_list(fa, params)[0]));
     if ((selfp->kind == TYPE_REFERENCE || selfp->kind == TYPE_POINTER) && selfp->qualifier == TYPE_QUAL_MUT) {
       const NodeId recv = callee_node->as.member.object;
+      tc_mark_capture_mut(t, recv); // a `&mut self` method mutates through the capture
       if (!receiver_mutable(t, recv)) {
         const Span rsp = ast_at_const(t->ast, recv)->span;
         typechecker_errorf(
@@ -4050,15 +4187,20 @@ static void check_if(TypeChecker *t, const Node *const n) {
   borrow_release_to(t, bm); // the condition's temporary borrows end before the branches run
   // The two branches are alternative paths: check each from the same pre-`if` state, then union their
   // effects -- so an else use of a value the then-branch moved (or vice versa) is not a false error, while
-  // a value left moved/uninitialized on either path is so afterward.
+  // a value left moved/uninitialized on either path is so afterward. A branch that RETURNS on every path
+  // through it contributes nothing to the join (control never flows from it to the code after the `if`),
+  // so `if c { let f = |x| ..owns s..; return f(1); } return s.id;` is not a false use-after-move.
   const FlowState pre = tc_flow_save(t);
   check_stmt(t, n->as.if_stmt.then_branch);
   FlowState acc = {.nmoved = 0, .nuninit = 0};
-  bool ovf = tc_flow_collect(&acc, t); // then-branch effects
-  tc_flow_set(t, &pre);                // else branch starts fresh from the pre-if state
+  bool ovf = false;
+  if (!tc_stmt_returns(t, n->as.if_stmt.then_branch))
+    ovf |= tc_flow_collect(&acc, t); // then-branch effects
+  tc_flow_set(t, &pre);              // else branch starts fresh from the pre-if state
   check_stmt(t, n->as.if_stmt.else_branch);
-  ovf |= tc_flow_collect(&acc, t);     // ∪ else-branch effects
-  tc_flow_set(t, &acc);                // post-if = union of both
+  if (!tc_stmt_returns(t, n->as.if_stmt.else_branch))
+    ovf |= tc_flow_collect(&acc, t); // ∪ else-branch effects
+  tc_flow_set(t, &acc);              // post-if = union of the fall-through paths
   if (ovf)
     tc_flow_overflow(t, n->as.if_stmt.condition);
 }
@@ -4351,6 +4493,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       }
       const uint32_t bm = borrow_mark(t);
       const TypeId l = check_expr(t, n->as.binary.left);
+      tc_mark_capture_mut(t, n->as.binary.left); // writing through a capture -> it becomes a `&mut` capture
       t->expected = l; // hand the lvalue's type to the RHS for expected-type resolution
       check_expr(t, n->as.binary.right);
       tc_mark_move(t, n->as.binary.right); // `z = x` moves a Free x
@@ -4389,35 +4532,74 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const NodeId *const pids = ast_list(a, params);
       for (uint32_t i = 0; i < params.len; i++)
         decl_type(t, pids[i]); // type each parameter so its body references resolve
-      // Captures are copied into the closure's env struct when the closure VALUE is built: a type whose
-      // copy would be unsound (a destructor -> double free) or unrepresentable (a C array member can't
-      // be initialized from an array value) is rejected up front, with the variable named.
-      const NodeList caps = n->as.closure.captures;
-      const NodeId *const cids = ast_list(a, caps);
-      for (uint32_t i = 0; i < caps.len; i++) {
-        const TypeId cty = decl_type(t, cids[i]);
-        const char *why = NULL;
-        if (cty != TYPE_NONE && tc_type_is_free(t, cty))
-          why = "its type has a destructor, and captures copy (the copy would double-free)";
-        else if (cty != TYPE_NONE && ast_type_at(a, cty)->kind == TYPE_ARRAY)
-          why = "fixed-size arrays cannot be captured by copy; capture a reference or a slice instead";
-        if (why) {
-          typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
-                             "closure cannot capture this variable: %s", why);
-          break;
-        }
+      if (t->nclos >= sizeof t->clos_stack / sizeof t->clos_stack[0]) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "closures nested too deeply (max 8)");
+        result = TYPE_NONE;
+        break;
       }
-      const NodeId saved_clos = t->cur_closure;
-      t->cur_closure = id;
+      t->clos_stack[t->nclos++] = id; // body mutations of captures record onto this node's mut_caps
       if (n->as.closure.expr_body) {
         check_expr(t, n->as.closure.body); // its type IS the closure's return type
+        tc_capture_move_guard(t, n->as.closure.body); // the body expr is returned: no capture move-out
       } else {
         const NodeList saved = t->current_returns; // a `return` inside an anon `fn` targets the closure
         t->current_returns = n->as.closure.returns;
         check_stmt(t, n->as.closure.body);
         t->current_returns = saved;
       }
-      t->cur_closure = saved_clos;
+      t->nclos--;
+      // Capture validation, AFTER the body so mut_caps is settled. A MUTATED capture is a `&mut` borrow
+      // (env holds a pointer; outer keeps ownership -- so it also requires a mutable outer binding). A
+      // COPY capture of a Free value MOVES ownership into the env (the closure value becomes Free and
+      // frees it); the outer binding is moved, like any by-value transfer. Arrays cannot be captured by
+      // copy at all (a C struct member cannot be initialized from an array value).
+      const NodeList caps = n->as.closure.captures;
+      const NodeId *const cids = ast_list(a, caps);
+      const uint64_t mut_caps = ast_at_const(a, id)->as.closure.mut_caps;
+      for (uint32_t i = 0; i < caps.len; i++) {
+        const TypeId cty = decl_type(t, cids[i]);
+        const bool is_mut = (mut_caps >> i & 1) != 0;
+        if (cty != TYPE_NONE && !is_mut && ast_type_at(a, cty)->kind == TYPE_ARRAY) {
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                             "closure cannot capture a fixed-size array by copy; capture a slice instead");
+          continue;
+        }
+        if (cty == TYPE_NONE || is_mut || !tc_type_is_free(t, cty))
+          continue;
+        // An OWNED Free capture: creation moves the value in, exactly like passing it by value.
+        for (uint32_t m = 0; m < t->nmoved; m++)
+          if (t->moved[m] == cids[i]) {
+            typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                               "closure captures a moved value (use of moved value)");
+            break;
+          }
+        // An enclosing closure capturing the same value (by copy or `&mut`) would be left holding a
+        // stale view of something this closure now owns.
+        for (uint32_t f = 0; f < t->nclos; f++)
+          if (tc_capture_index(t, t->clos_stack[f], cids[i]) >= 0) {
+            typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                               "cannot take ownership of a value also captured by an enclosing closure");
+            break;
+          }
+        for (uint32_t b = 0; b < t->nborrows; b++) { // moving out from under a live borrow dangles it
+          Borrow *const br = &t->borrows[b];
+          if (br->root != cids[i])
+            continue;
+          if (borrow_dead_after(t, br, id)) {
+            borrow_tombstone(br);
+            continue;
+          }
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                             "cannot capture this value while it is borrowed");
+          break;
+        }
+        if (t->nmoved < (uint32_t)(sizeof t->moved / sizeof t->moved[0])) {
+          t->moved[t->nmoved++] = cids[i];
+        } else {
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                             "too many moved values in one function (move-analysis limit)");
+        }
+      }
       // The closure is a function value keyed on its own node, like a `fn(..) ..` pointer type.
       result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .module = a->module, .as.decl = id});
       break;
@@ -5027,8 +5209,10 @@ static void check_return(TypeChecker *t, const Node *const n, const NodeId id) {
     const Node *const rn = ast_at_const(t->ast, ast_list(t->ast, rets)[0]);
     t->expected = resolve_type(t, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : ast_list(t->ast, rets)[0]);
   }
-  for (uint32_t i = 0; i < values.len; i++)
+  for (uint32_t i = 0; i < values.len; i++) {
     check_expr(t, vids[i]);
+    tc_capture_move_guard(t, vids[i]); // `return s` inside a closure must not move a capture out
+  }
   for (uint32_t i = 0; i < values.len; i++) { // escape analysis: a returned address of a local/param dangles
     const int esc = addr_escape(t, vids[i]);
     if (esc) {

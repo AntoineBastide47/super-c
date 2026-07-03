@@ -1228,6 +1228,47 @@ static void test_closures(void) {
           "  n = 100;\n"
           "  unsafe exit(f(2)); }\n", // 42, not 102
       42, "");
+  // FnMut: a mutated capture is an implicit `&mut` capture -- the write lands on the OUTER variable,
+  // both through a generic HOF and through direct calls on the binding.
+  sc_run_program(
+      "mutable captures are outer-visible",
+      PRE "fn each<F: fn(i32) void>(n: i32, f: F) { for i in 0..n { f(i); } }\n"
+          "fn main() i32 {\n"
+          "  let mut sum = 0;\n"
+          "  each(5, fn(x: i32) { sum += x; });\n" // 0+1+2+3+4 = 10
+          "  let mut calls = 0;\n"
+          "  let bump = fn(x: i32) { calls += x; };\n"
+          "  bump(30); bump(2);\n"                 // 32
+          "  unsafe exit(sum + calls); }\n",              // 42
+      42, "");
+  // Owning closures: a Free capture MOVES into the env; it is freed exactly once -- by the consuming
+  // `fn move` spec for a passed closure, at scope exit for a let-bound one (called or never called).
+  sc_run_program(
+      "owning closures free their env once",
+      PRE "struct Res { pub id: i32 }\n"
+          "extend Res as Free { fn free(self: &mut Res) { unsafe putchar(self.id); } }\n"
+          "fn run<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x) + f(x); }\n"
+          "fn main() i32 {\n"
+          "  let a = Res { id: 65 };\n"
+          "  let r1 = run(1, |x: i32| x + a.id);\n" // 132; 'A' freed inside run (its param dies there)
+          "  unsafe putchar(66);\n"                 // 'B'
+          "  { let c = Res { id: 67 }; let f = |x: i32| x * c.id; let v = f(1); unsafe putchar(v + 1); }\n" // 'D' then 'C'
+          "  { let d = Res { id: 69 }; let g = |x: i32| x + d.id; }\n" // never called: 'E' at scope exit
+          "  unsafe exit(r1 - 132); }\n",
+      0, "ABDCE");
+  // A conditionally-created owning closure guards the captured value's free with a runtime flag:
+  // exactly one of (the closure's env, the outer scope exit) frees it on each path.
+  sc_run_program(
+      "conditional owning capture",
+      PRE "struct Res { pub id: i32 }\n"
+          "extend Res as Free { fn free(self: &mut Res) { unsafe putchar(self.id); } }\n"
+          "fn pick(c: bool) i32 {\n"
+          "  let r = Res { id: 70 };\n"
+          "  if c { let f = |x: i32| x + r.id; return f(1); }\n" // env owns r; freed at block exit
+          "  return r.id;\n"                                      // r still owned here: freed at fn exit
+          "}\n"
+          "fn main() i32 { unsafe exit(pick(true) + pick(false) - 141); }\n", // 71 + 70 - 141 = 0
+      0, "FF");
   // A nested closure captures through the enclosing one (the inner env copies from the outer's), and a
   // loop binding captures per iteration (each env literal snapshots the current `i`).
   sc_run_program(

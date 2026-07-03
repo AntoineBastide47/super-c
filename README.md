@@ -173,9 +173,23 @@ pointer, but it satisfies an `F: fn(..) ..` generic bound (also spellable as `wh
 which monomorphizes the function per closure and calls it directly. The std higher-order methods
 (`Vector::map`/`find`/`retain`, `Option::map`/`and_then`/`filter`, `Result::map`/`map_err`/`and_then`,
 `Box::map`) all take `F: fn(..) ..`, so they accept named functions, function pointers, and capturing
-closures alike. Captures are copies: assigning to a captured name, `&mut`-borrowing it, or calling a
-`&mut self` method on it inside the closure is rejected, as is capturing a destructor-owning (`Free`)
-value or a fixed-size array.
+closures alike.
+
+Captures come in three flavors, decided per variable by how the body uses it:
+
+* **read** — captured by copy at creation (a later write to the original is invisible to the closure);
+* **mutated** (`FnMut`-style) — a capture the body assigns to, `&mut`-borrows, or calls a `&mut self`
+  method on becomes an implicit `&mut` capture: the env holds a pointer and writes land on the OUTER
+  variable (`let mut n = 0; each(5, fn(x: i32) { n += x; });` leaves `n == 10`). The outer binding
+  must be `mut`;
+* **owned** (`FnOnce`-style) — capturing a destructor-owning (`Free`) value MOVES it into the env:
+  the outer binding is spent, the closure value itself becomes `Free` (move-tracked; its env frees the
+  value exactly once — at scope exit, or inside the generic that consumed it), and the body may use
+  but not move the value out. An owning closure satisfies only the ownership-marked bound
+  `F: fn move(..) ..` — under it the generic body move-tracks `f`, so passing it on twice is a
+  use-after-move error, while *calling* it any number of times is fine (calls only borrow the env).
+
+Capturing a fixed-size array by copy is rejected (capture a slice instead).
 
 ### Memory: pointers, references, `new`
 
@@ -436,8 +450,8 @@ operator, compile-time evaluation (constant folding, layout, and full CTFE with 
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with
 field-precise overlap, use-while-borrowed, non-lexical borrow lifetimes, dangling-reference returns),
-closures (capturing by copy, monomorphized through `F: fn(..) ..` bounds) and function pointers,
-references/pointers/`new`, slices and arrays (including
+closures (copy / `&mut` / owning captures, monomorphized through `F: fn(..) ..` and `fn move` bounds)
+and function pointers, references/pointers/`new`, slices and arrays (including
 designated initializers), first-class ranges and slicing (`a[lo..hi]`), `for` over user iterators (an
 `Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while`, `defer`,
 `static_assert`, `@c.*` attributes, the module system with an auto-imported `std` prelude (containers,
@@ -446,7 +460,7 @@ both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
 
 Planned / not yet implemented:
 
-* `FnMut` / `FnOnce`-style closures (captures are immutable copies today) and closure storage in
-  structs / heterogeneous collections (needs the fat-pointer form below)
+* closure storage in structs / heterogeneous collections (`dyn Fn` — needs the fat-pointer form below)
+  and closures inside generic functions
 * dynamic dispatch / trait objects — **TBD / undecided**: heterogeneous collections + open extension
   across modules.
