@@ -108,6 +108,66 @@ static void test_const_eval_flag(void) {
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "flag off: static_assert defers to C as before");
 }
 
+// Implicit CTFE under --const-eval: a call with folded arguments RUNS at compile time (recursion,
+// loops, switch values, compound assignment), so static_asserts prove it and call sites emit the
+// literal; a pure call in statement position disappears. Unfoldable callees (floats here) and
+// budget blowups degrade to runtime calls -- and the compile stays fast (a hang fails this lane).
+static void test_ctfe(void) {
+  char root[4112], spc[4170], out[4180], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/ctfe", DIR);
+  if (system((snprintf(cmd, sizeof cmd, "mkdir -p '%s'", root), cmd))) { /* best-effort */
+  }
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  write_file(spc,
+             "fn fib(n: i32) i32 {\n"
+             "  if n < 2 { return n; }\n"
+             "  return fib(n - 1) + fib(n - 2);\n"
+             "}\n"
+             "fn collatz(mut n: u64) i32 {\n"
+             "  let mut c = 0;\n"
+             "  while n != 1 { n = switch n % 2 { 0 => n / 2, _ => 3 * n + 1 }; c += 1; }\n"
+             "  return c;\n"
+             "}\n"
+             "fn late() f64 { return 1.5; }\n"
+             "static_assert(fib(20) == 6_765, \"ctfe\");\n"
+             "static_assert(collatz(27) == 111, \"loops fold\");\n"
+             "fn main() i32 {\n"
+             "  fib(9);\n"
+             "  let x = fib(10) - 47;\n"
+             "  if late() < 1.0 { return 1; }\n"
+             "  return x;\n"
+             "}\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "CTFE program compiles (got): %s", buf);
+  snprintf(out, sizeof out, "%s/build/main.c", root);
+  char gc[16384];
+  CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
+  CHECK(strstr(gc, "_Static_assert(true, \"ctfe\")") != NULL, "fib(20) ran at compile time");
+  CHECK(strstr(gc, "_Static_assert(true, \"loops fold\")") != NULL, "collatz(27) ran at compile time");
+  CHECK(strstr(gc, "x = 8;") != NULL, "the call site folded to its value");
+  CHECK(strstr(gc, "fib(10") == NULL && strstr(gc, "fib(9") == NULL, "no interpreted call survives in main");
+  CHECK(strstr(gc, "late()") != NULL, "an unfoldable (float) callee stays a runtime call");
+  char bin[4200];
+  snprintf(bin, sizeof bin, "%s/ctfe.bin", DIR);
+  snprintf(cmd, sizeof cmd, "cc -std=c11 -Wall -Wextra -Werror %s/build/*.c -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "CTFE output compiles -Werror: %s", buf);
+  snprintf(cmd, sizeof cmd, "'%s'", bin);
+  CHECK(run_cmd(cmd, NULL, 0) == 8, "CTFE program runs (55 - 47)");
+
+  // a callee that blows the step budget bails to a runtime call instead of hanging the compiler
+  write_file(spc,
+             "fn spin() i32 {\n"
+             "  let mut i = 0;\n"
+             "  while true { i += 1; if i > 100_000_000 { return i; } }\n"
+             "  return 0;\n"
+             "}\n"
+             "fn main() i32 { if spin() > 0 { return 3; } return 4; }\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "budget blowup still compiles: %s", buf);
+  CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
+  CHECK(strstr(gc, "spin()") != NULL, "over-budget callee stays a runtime call");
+}
+
 // A second module's enums used across the boundary: a value return, a payload-less match (bare variant
 // arms resolved via the scrutinee's enum), a payload-bearing construction, and a payload match. Drives
 // the full multi-file build/ tree (subdirs) through cc + run, locking in the cross-module variant codegen.
@@ -665,6 +725,7 @@ int main(void) {
   test_compiles_file();
   test_cross_module_enum();
   test_const_eval_flag();
+  test_ctfe();
   test_module_features();
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();

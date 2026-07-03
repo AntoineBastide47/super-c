@@ -2924,12 +2924,14 @@ static void emit_expr(Codegen *c, const NodeId id) {
   const Node *const n = ast_at_const(c->ast, id);
   // --const-eval: a folded PURE COMPUTATION emits as its value, so constant chains collapse in the
   // generated C. Only computation kinds fold here -- identifiers/members/places keep their names
-  // (`&K` must stay addressable, and named constants read better than magic numbers).
+  // (`&K` must stay addressable, and named constants read better than magic numbers). A CALL folds
+  // when the interpreter ran the callee to completion (implicit CTFE).
   if (cg_ceval(c))
     switch (n->kind) {
       case NODE_BINARY:
       case NODE_UNARY:
       case NODE_CAST:
+      case NODE_CALL:
       case NODE_SIZEOF:
       case NODE_ALIGNOF: {
         const ConstValue v = consteval_eval(cg_ceval(c), c->ast->module, id);
@@ -4716,6 +4718,12 @@ static void emit_expr_stmt(Codegen *c, NodeId v) {
   while (n->kind == NODE_UNARY && (n->as.unary.op == Move || n->as.unary.op == Unsafe)) {
     v = n->as.unary.operand;
     n = ast_at_const(c->ast, v);
+  }
+  // --const-eval: a call the interpreter folded is pure computation with a discarded result; the
+  // statement disappears (emitting the literal would trip -Wunused-value).
+  if (cg_ceval(c) && n->kind == NODE_CALL && consteval_eval(cg_ceval(c), c->ast->module, v).kind != CONST_NONE) {
+    emit(c, ";\n");
+    return;
   }
   if (n->kind == NODE_BLOCK) {
     emit_block(c, v);
