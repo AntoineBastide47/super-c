@@ -1387,6 +1387,22 @@ static void test_operator_overloading(void) {
   sc_run_program(
       "operator overload: builtins untouched",
       PRE "fn main() i32 { let arr = [40, 2]; unsafe exit(arr[0] + arr[1] + (10 * 0)); }\n", 42, "");
+  // Overloaded comparison/arithmetic through REFERENCE operands: an operand that is already a pointer is
+  // passed through (regression: spilling a `&P` then taking `&` passed a pointer-to-pointer, so `==` on
+  // two `&String`s compared stack garbage).
+  sc_run_program(
+      "operator overload: comparison + arithmetic through references",
+      PRE "struct P { pub n: i32 }\n"
+          "extend P {\n"
+          "  fn add(self: &Self, o: &Self) P { return P { n: self.n + o.n }; }\n"
+          "  fn eq(self: &Self, o: &Self) bool { return self.n == o.n; }\n"
+          "  fn cmp(self: &Self, o: &Self) i32 { return self.n - o.n; }\n"
+          "}\n"
+          "fn judge(a: &P, b: &P) i32 { let mut acc = 0; if a == b { acc = acc + 1; } if a < b { acc = acc + 10; } return acc; }\n"
+          "fn plus(a: &P, b: &P) P { return a + b; }\n"
+          "fn main() i32 { let x = P { n: 3 }; let y = P { n: 7 }; let z = P { n: 3 };\n"
+          "  unsafe exit(judge(&x, &y) + judge(&x, &z) + plus(&x, &y).n); }\n", // 10 + 1 + 10
+      21, "");
 }
 
 // The Index / IndexMut interfaces: `obj[i]` through a reference-returning `index` is the element PLACE
@@ -1457,6 +1473,25 @@ static void test_index_interface(void) {
           "  v[0] = R { id: 2 };\n" // frees id 1 here, before the store
           "  unsafe exit(0); }\n",
       0, "1");
+  // Reference bases auto-deref for `[]` (like member access): reads and every range form on a `&String`,
+  // plain + compound writes through a `&mut Vector`, and the inline slice lowering through a `&[]T`.
+  sc_run_program(
+      "Index through reference bases (&String, &mut Vector, &[]T)",
+      PRE "fn nth(s: &String, i: usize) u8 { return s[i]; }\n"
+          "fn head(s: &String) str { return s[..5]; }\n"
+          "fn tail(s: &String) str { return s[6..]; }\n" // open end: `len()` dispatches through the ref too
+          "fn bump(v: &mut Vector<i32>) { v[0] += 1; v[1] = 9; }\n"
+          "fn sum(xs: &[]i32) i32 { let mut t = 0; for i in 0..xs.len() { t = t + xs[i]; } return t; }\n"
+          "fn win(xs: &[]i32) []i32 { return xs[1..3]; }\n"
+          "fn main() i32 {\n"
+          "  let s = String::from(\"Hello World!\");\n"
+          "  let mut v = Vector::<i32>::new(); v.push(1); v.push(2);\n"
+          "  bump(&mut v);\n"
+          "  let arr: [i32; 4] = [10, 20, 30, 40];\n"
+          "  let xs: []i32 = arr;\n"
+          "  let m = win(&xs);\n"
+          "  unsafe exit(nth(&s, 4) as i32 + head(&s).len as i32 + tail(&s).len as i32 + v[0] + v[1] + sum(&m)); }\n",
+      183, ""); // 'o'(111) + 5 + 6 + 2 + 9 + 50
 }
 
 // E#14 `?` early-return operator: `expr?` unwraps Some/Ok, or returns None/Err (carrying the error) from

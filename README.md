@@ -338,13 +338,16 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 `static_assert(cond, "msg")` is valid at item or statement scope and lowers to C `_Static_assert`, so
 the C compiler evaluates it.
 
-### Compile-time evaluation (`--const-eval`)
+### Compile-time evaluation
+
+Always on. A constant evaluator, a layout engine (64-bit C data model), and a CTFE interpreter run
+as part of every compile; two flags bound how much work a single compile-time evaluation may do
+(exhausting a budget is never an error -- the expression simply stays a runtime one):
 
 ```sh
-./super-c --const-eval app.spc
+./super-c app.spc                                          # defaults: ~2M steps, ~96 MiB
+./super-c --const-eval-steps=100000 --const-eval-memory=16M app.spc
 ```
-
-Opting in enables a compile-time constant evaluator and a layout engine (64-bit C data model):
 
 * `static_assert` conditions that fold are decided by Super-C itself, with source spans —
   including `sizeof`/`alignof` over structs, enums, tuples, and generic instances. Unfoldable
@@ -358,6 +361,13 @@ Opting in enables a compile-time constant evaluator and a layout engine (64-bit 
 * Every layout the compiler computes is verified in the generated C by an emitted
   `_Static_assert(sizeof(T) == N, ...)`, so the downstream C compiler proves the layout model on
   the actual target — a mismatch is a named compile error, never silent.
+* Implicit CTFE (Zig-style, no marker): a call whose arguments are compile-time constants is RUN
+  by an interpreter — loops, recursion, structs, arrays, payload enums, generic methods, floats
+  (including the libm externs), and even heap code (`malloc`/`realloc`/`free` are intercepted into
+  an abstract compile-time heap, so a `Vector`-building function folds to its result). Anything
+  unmodeled, or over budget, stays a runtime call. A `static_assert` may call functions defined
+  anywhere (undecidable asserts are re-checked once the whole package has type-checked), and one
+  that would trap reports the reason (`division by zero`, `use after free`, ...).
 
 ## Generated output
 
@@ -409,7 +419,7 @@ structs/methods/visibility, enums with payloads and pattern matching (including 
 guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
 cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
 (`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), first-class tuples, the `?` early-return
-operator, opt-in compile-time constant evaluation and layout folding (`--const-eval`), `panic` /
+operator, compile-time evaluation (constant folding, layout, and full CTFE with an abstract heap), `panic` /
 `unwrap` / `expect` with a `never` type for diverging calls, RAII-style
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with

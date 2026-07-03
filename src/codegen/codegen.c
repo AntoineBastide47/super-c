@@ -981,6 +981,23 @@ static TypeId strip_ref_only(Codegen *c, TypeId t) {
   return y->kind == TYPE_POINTER ? TYPE_NONE : t;
 }
 
+// How many reference layers wrap `t` -- each one is a C pointer level on the emitted value. The overload
+// emitters use this to pass an already-pointer operand/receiver through instead of re-taking `&`.
+static int cg_ref_depth(Codegen *c, TypeId t) {
+  int d = 0;
+  for (const Ty *y = ast_type_at(c->ast, t); y->kind == TYPE_REFERENCE; y = ast_type_at(c->ast, y->as.elem))
+    d++;
+  return d;
+}
+
+// The `d - 1` C derefs that turn a ref-depth-`d` expression into a single pointer to the pointee
+// (depth 1 -- the only realistic case -- is the empty string: a `&T` already IS that pointer).
+static const char *ref_derefs(int d) {
+  static const char s[] = "*******";
+  d = d < 1 ? 1 : d > 7 ? 7 : d;
+  return s + sizeof s - d;
+}
+
 // --- numeric/literal emission --------------------------------------------------------------
 
 // Emit an integer/float literal, removing `_` separators and rewriting radix forms C can't read:
@@ -1688,6 +1705,18 @@ static void emit_prefixed(Codegen *c, const NodeId obj, const char *prefix) {
   }
 }
 
+// Emit a slice-valued base expression for the inline `[]T` lowerings, derefing a reference base
+// (`rd` layers) down to the underlying `{ptr,len}` view so `.ptr`/`.len` apply.
+static void emit_slice_base(Codegen *c, const NodeId obj, const int rd) {
+  if (rd == 0) {
+    emit_expr(c, obj);
+    return;
+  }
+  emit(c, "(");
+  emit_prefixed(c, obj, ref_derefs(rd + 1)); // rd full derefs: down to the view VALUE, not a pointer to it
+  emit(c, ")");
+}
+
 // Emit an `Enum::Variant` value. A payload-less enum lowers to its plain C tag constant; a unit
 // variant of a tagged (payload-bearing) enum is a struct literal with only its tag set.
 // Spell the C type name of variant `v`'s enum: a generic instance (`enum_ty` a TYPE_INSTANCE) -> its
@@ -1853,6 +1882,11 @@ static bool emit_cmp_overload(Codegen *c, const Node *const n) {
   const DefId m = cg_find_method_cstr(c, om, od, ord ? "cmp" : "eq");
   if (m.node == NODE_NONE)
     return false;
+  // A reference operand is spilled as the pointer it already is -- pass it through, don't re-take `&`
+  // (each operand independently: `a == b` may mix a `&String` with a `String`).
+  const TypeId rt0 = ast_type(c->ast, n->as.binary.right);
+  const int dl = cg_ref_depth(c, subst_resolve(c, ast_type(c->ast, n->as.binary.left)));
+  const int dr = rt0 == TYPE_NONE ? 0 : cg_ref_depth(c, subst_resolve(c, rt0));
   char l[32], r[32];
   fresh(c, l, sizeof l);
   fresh(c, r, sizeof r);
@@ -1881,7 +1915,7 @@ static bool emit_cmp_overload(Codegen *c, const Node *const n) {
     emit(c, "__");
   }
   emit_ident_mod(c, m.module, ast_at_const(cg_mod_ast(c, m.module), m.node)->as.function.name);
-  emit(c, "(&%s, &%s)", l, r);
+  emit(c, "(%s%s, %s%s)", dl ? ref_derefs(dl) : "&", l, dr ? ref_derefs(dr) : "&", r);
   if (ord)
     emit(c, " %s 0)", c_op(op));
   emit(c, "; }))");
@@ -1948,6 +1982,10 @@ static bool emit_arith_overload(Codegen *c, const Node *const n) {
   const DefId mth = cg_find_method_cstr(c, om, od, m);
   if (mth.node == NODE_NONE)
     return false;
+  // A reference operand is already the pointer the method wants -- pass it through, don't re-take `&`.
+  const TypeId rt0 = ast_type(c->ast, n->as.binary.right);
+  const int dl = cg_ref_depth(c, subst_resolve(c, ast_type(c->ast, n->as.binary.left)));
+  const int dr = rt0 == TYPE_NONE ? 0 : cg_ref_depth(c, subst_resolve(c, rt0));
   char l[32], r[32];
   fresh(c, l, sizeof l);
   fresh(c, r, sizeof r);
@@ -1957,7 +1995,7 @@ static bool emit_arith_overload(Codegen *c, const Node *const n) {
   emit_expr(c, n->as.binary.right);
   emit(c, "; ");
   emit_op_method(c, bt, om, od, mth);
-  emit(c, "(&%s, &%s); })", l, r);
+  emit(c, "(%s%s, %s%s); })", dl ? ref_derefs(dl) : "&", l, dr ? ref_derefs(dr) : "&", r);
   return true;
 }
 
@@ -2922,7 +2960,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
   if (id != c->slice_raw && emit_slice_coercion(c, id)) // array -> slice fat-pointer view
     return;
   const Node *const n = ast_at_const(c->ast, id);
-  // --const-eval: a folded PURE COMPUTATION emits as its value, so constant chains collapse in the
+  // const-eval: a folded PURE COMPUTATION emits as its value, so constant chains collapse in the
   // generated C. Only computation kinds fold here -- identifiers/members/places keep their names
   // (`&K` must stay addressable, and named constants read better than magic numbers). A CALL folds
   // when the interpreter ran the callee to completion (implicit CTFE).
@@ -3073,11 +3111,14 @@ static void emit_expr(Codegen *c, const NodeId id) {
       // pointer `index_mut` returns; a compound op reads and writes through it. A plain `=` over a Free
       // element frees the replaced value first (mirroring a Free binding reassignment), with the RHS
       // evaluated BEFORE the free so `v[i] = f(v[i])` reads the old element safely.
-      if (lhs->kind == NODE_INDEX && ast_at_const(c->ast, lhs->as.index.index)->kind != NODE_RANGE &&
-          !cg_slice_elem(c, ast_type(c->ast, lhs->as.index.object), NULL)) {
-        const TypeId iot = ast_type(c->ast, lhs->as.index.object); // NOT pointer-peeled (see the read path)
-        const Ty *const ibt = iot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, iot));
-        if (ibt && (ibt->kind == TYPE_STRUCT || ibt->kind == TYPE_INSTANCE)) {
+      if (lhs->kind == NODE_INDEX && ast_at_const(c->ast, lhs->as.index.index)->kind != NODE_RANGE) {
+        // Reference bases auto-deref; raw pointers are NOT peeled (see the read path). A slice base --
+        // referenced or not -- falls through to the plain-C store into its inline element lvalue.
+        const TypeId iot = ast_type(c->ast, lhs->as.index.object);
+        const TypeId riot = iot == TYPE_NONE ? TYPE_NONE : strip_ref_only(c, subst_resolve(c, iot));
+        const int ird = iot == TYPE_NONE ? 0 : cg_ref_depth(c, subst_resolve(c, iot));
+        const Ty *const ibt = riot == TYPE_NONE ? NULL : ast_type_at(c->ast, riot);
+        if (ibt && (ibt->kind == TYPE_STRUCT || ibt->kind == TYPE_INSTANCE) && !cg_slice_elem(c, riot, NULL)) {
           ModuleId om;
           NodeId od;
           if (ibt->kind == TYPE_INSTANCE) {
@@ -3099,7 +3140,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
               emit(c, "; __auto_type %s = ", p);
               emit_op_method(c, ibt, om, od, mth);
               emit(c, "(");
-              emit_prefixed(c, lhs->as.index.object, "&");
+              emit_prefixed(c, lhs->as.index.object, ird ? ref_derefs(ird) : "&");
               emit(c, ", ");
               emit_expr(c, lhs->as.index.index);
               emit(c, "); ");
@@ -3109,7 +3150,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
               emit(c, "(*");
               emit_op_method(c, ibt, om, od, mth);
               emit(c, "(");
-              emit_prefixed(c, lhs->as.index.object, "&");
+              emit_prefixed(c, lhs->as.index.object, ird ? ref_derefs(ird) : "&");
               emit(c, ", ");
               emit_expr(c, lhs->as.index.index);
               emit(c, ") %s ", c_op(n->as.binary.op));
@@ -3189,13 +3230,18 @@ static void emit_expr(Codegen *c, const NodeId id) {
         const NodeId obj = n->as.index.object;
         const NodeId lo = idxn->as.pattern_range.start, hi = idxn->as.pattern_range.end;
         const bool incl = idxn->as.pattern_range.inclusive;
+        // Reference bases auto-deref (mirrors the typechecker); raw pointers are NOT peeled: `p[a..b]`
+        // on a raw pointer is a C view, so strip_ref_only's TYPE_NONE keeps them out of dispatch.
+        const TypeId oty0 = ast_type(c->ast, obj);
+        const TypeId roty = oty0 == TYPE_NONE ? TYPE_NONE : strip_ref_only(c, subst_resolve(c, oty0));
+        // `refd`, not `rd`: the overload block below reuses `rd` for the Range prelude decl's NodeId.
+        const int refd = oty0 == TYPE_NONE ? 0 : cg_ref_depth(c, subst_resolve(c, oty0));
         // Range-index operator overloading (the Index interface): `obj[lo..hi]` on a struct / generic
         // instance -> its `index_range` method, the written bounds packed into a `Range<usize>`. A
         // missing start is 0; a missing end is the receiver's `len()` (the typechecker required it).
         // Built-in slices keep their inline `{ptr,len}` lowering below (mirrors the typechecker's order).
-        if (c->package && !cg_slice_elem(c, ast_type(c->ast, obj), NULL)) {
-          const TypeId ot = ast_type(c->ast, obj); // NOT pointer-peeled: `p[a..b]` on a raw pointer is a C view
-          const Ty *const bt = ot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, ot));
+        if (c->package && !cg_slice_elem(c, roty, NULL)) {
+          const Ty *const bt = roty == TYPE_NONE ? NULL : ast_type_at(c->ast, roty);
           if (bt && (bt->kind == TYPE_STRUCT || bt->kind == TYPE_INSTANCE)) {
             ModuleId om;
             NodeId od;
@@ -3215,10 +3261,14 @@ static void emit_expr(Codegen *c, const NodeId id) {
               render_type_id(c, ast_intern_instance(c->ast, rm, rd, (TypeId[]){ast_builtin(BT_USIZE)}, 1), "", rn,
                              sizeof rn);
               // An LVALUE receiver is passed by ADDRESS (the returned view aliases its storage, which must
-              // outlive the statement-expression); a temporary receiver is spilled by value first.
+              // outlive the statement-expression); a temporary receiver is spilled by value first. A
+              // reference base already IS the receiver pointer (and its pointee outlives the expression).
               char o[32], v[32];
               fresh(c, o, sizeof o);
-              if (is_lvalue(c, obj)) {
+              if (refd > 0) {
+                emit(c, "({ __auto_type %s = ", o);
+                emit_prefixed(c, obj, ref_derefs(refd));
+              } else if (is_lvalue(c, obj)) {
                 emit(c, "({ __auto_type %s = ", o);
                 emit_prefixed(c, obj, "&");
               } else {
@@ -3253,12 +3303,15 @@ static void emit_expr(Codegen *c, const NodeId id) {
         }
         char styp[200];
         render_type_id(c, ast_type(c->ast, id), "", styp, sizeof styp); // the Slice<elem> result type
-        const bool isslice = cg_slice_elem(c, ast_type(c->ast, obj), NULL);
+        const bool isslice = cg_slice_elem(c, roty, NULL);
         const NodeId arrlen = isslice ? NODE_NONE : array_length_of(c, obj); // open-ended hi -> the array length
         char b[32];
         fresh(c, b, sizeof b);
         emit(c, "({ __auto_type %s = ", b); // materialize the base once (array decays to a pointer)
-        emit_expr(c, obj);
+        if (refd > 0)
+          emit_prefixed(c, obj, ref_derefs(refd + 1)); // copy the {ptr,len} view out of the reference base
+        else
+          emit_expr(c, obj);
         emit(c, "; (%s){ .ptr = %s%s + ", styp, b, isslice ? ".ptr" : "");
         if (lo != NODE_NONE) {
           emit(c, "(");
@@ -3292,12 +3345,15 @@ static void emit_expr(Codegen *c, const NodeId id) {
         break;
       }
       { // operator overloading: `obj[i]` on a struct / generic-instance -> its `index` method.
-        // The object type is NOT pointer-peeled (mirrors the typechecker): `self.ptr[i]` on a raw
-        // `*mut T` is C indexing, never a dispatch to the pointee's own `index`. Prelude slices keep
-        // their inline `.ptr[__sc_bounds(..)]` lowering below (also mirroring the typechecker's order).
+        // Reference bases auto-deref (mirrors the typechecker); raw pointers are NOT peeled: `self.ptr[i]`
+        // on a raw `*mut T` is C indexing, never a dispatch to the pointee's own `index` (strip_ref_only
+        // returns TYPE_NONE for them). Prelude slices keep their inline `.ptr[__sc_bounds(..)]` lowering
+        // below (also mirroring the typechecker's order).
         const TypeId ot = ast_type(c->ast, n->as.index.object);
-        const Ty *const bt = ot == TYPE_NONE ? NULL : ast_type_at(c->ast, subst_resolve(c, ot));
-        if (bt && (bt->kind == TYPE_STRUCT || bt->kind == TYPE_INSTANCE) && !cg_slice_elem(c, ot, NULL)) {
+        const TypeId rot = ot == TYPE_NONE ? TYPE_NONE : strip_ref_only(c, subst_resolve(c, ot));
+        const int rd = ot == TYPE_NONE ? 0 : cg_ref_depth(c, subst_resolve(c, ot));
+        const Ty *const bt = rot == TYPE_NONE ? NULL : ast_type_at(c->ast, rot);
+        if (bt && (bt->kind == TYPE_STRUCT || bt->kind == TYPE_INSTANCE) && !cg_slice_elem(c, rot, NULL)) {
           ModuleId om;
           NodeId od;
           if (bt->kind == TYPE_INSTANCE) {
@@ -3323,12 +3379,16 @@ static void emit_expr(Codegen *c, const NodeId id) {
             }
             // An LVALUE receiver is passed by ADDRESS (never copied into the statement-expression: a
             // reference-returning index would then point into storage that dies at the `})`); only a
-            // temporary receiver is spilled by value first.
+            // temporary receiver is spilled by value first. A reference base already IS the receiver
+            // pointer (and its pointee outlives the expression).
             char o[32], v[32];
             fresh(c, o, sizeof o);
             if (retref)
               emit(c, "(*");
-            if (is_lvalue(c, n->as.index.object)) {
+            if (rd > 0) {
+              emit(c, "({ __auto_type %s = ", o);
+              emit_prefixed(c, n->as.index.object, ref_derefs(rd));
+            } else if (is_lvalue(c, n->as.index.object)) {
               emit(c, "({ __auto_type %s = ", o);
               emit_prefixed(c, n->as.index.object, "&");
             } else {
@@ -3351,12 +3411,15 @@ static void emit_expr(Codegen *c, const NodeId id) {
         // Bounds checks: the index is wrapped in `__sc_bounds(i, len)` (preserving lvalue-ness of `a[i]`),
         // which aborts on out-of-range. Slices carry a runtime `.len`; fixed arrays use their compile-time
         // length (and a constant index is checked at COMPILE time). Raw pointers stay unchecked (unsafe).
-        if (cg_slice_elem(c, ast_type(c->ast, obj), NULL)) { // `s[i]` on `[]T`
-          emit_expr(c, obj);
+        const TypeId bty = ast_type(c->ast, obj);
+        const TypeId rbty = bty == TYPE_NONE ? TYPE_NONE : strip_ref_only(c, subst_resolve(c, bty));
+        const int rd = bty == TYPE_NONE ? 0 : cg_ref_depth(c, subst_resolve(c, bty));
+        if (cg_slice_elem(c, rbty, NULL)) { // `s[i]` on `[]T` (a reference base derefs to the view)
+          emit_slice_base(c, obj, rd);
           emit(c, ".ptr[__sc_bounds(");
           emit_expr(c, idx);
           emit(c, ", ");
-          emit_expr(c, obj);
+          emit_slice_base(c, obj, rd);
           emit(c, ".len)]");
           break;
         }
@@ -4067,7 +4130,7 @@ static void emit_block(Codegen *c, const NodeId id) {
 // needn't add its own — avoiding `if ((a == b))`, which clang flags under -Wparentheses-equality.
 static bool emits_own_parens(Codegen *c, const NodeId id) {
   const Node *const n = ast_at_const(c->ast, id);
-  // --const-eval: a folded expression emits as a bare literal, whatever its kind
+  // const-eval: a folded expression emits as a bare literal, whatever its kind
   if (cg_ceval(c) && consteval_eval(cg_ceval(c), c->ast->module, id).kind != CONST_NONE)
     return false;
   switch (n->kind) {
@@ -4732,7 +4795,7 @@ static void emit_expr_stmt(Codegen *c, NodeId v) {
     v = n->as.unary.operand;
     n = ast_at_const(c->ast, v);
   }
-  // --const-eval: a call the interpreter folded is pure computation with a discarded result; the
+  // const-eval: a call the interpreter folded is pure computation with a discarded result; the
   // statement disappears (emitting the literal would trip -Wunused-value).
   if (cg_ceval(c) && n->kind == NODE_CALL && consteval_eval(cg_ceval(c), c->ast->module, v).kind != CONST_NONE) {
     emit(c, ";\n");

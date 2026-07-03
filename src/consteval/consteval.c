@@ -12,12 +12,12 @@
 // aggregates and heap blocks (element-wise, never byte-wise), place handles for references, and
 // interception of the C heap primitives. Anything unmodeled (un-intercepted externs, unions,
 // byte-level reinterpretation, budget blowups) bails to CONST_NONE and stays a runtime call.
-#define CE_MAX_STEPS (1u << 21) // interpreted statements + expressions per top-level evaluation
-#define CE_MAX_FRAMES 48        // call depth; also breaks const<->fn reference cycles
-#define CE_MAX_LOCALS 96        // bindings per frame (params, lets, loop/pattern bindings)
-#define CE_MAX_DEFERS 24        // pending `defer`s per frame
-#define CE_MAX_OBJS (1u << 16)  // objects per top-level evaluation
-#define CE_MAX_SLOTS (1u << 22) // total object slots per top-level evaluation (memory budget)
+#define CE_DEFAULT_STEPS (1u << 21) // interpreted statements + expressions per top-level evaluation
+#define CE_DEFAULT_SLOTS (1u << 22) // object slots per top-level evaluation (~96 MiB of values)
+#define CE_MAX_FRAMES 48            // call depth; also breaks const<->fn reference cycles
+#define CE_MAX_LOCALS 96            // bindings per frame (params, lets, loop/pattern bindings)
+#define CE_MAX_DEFERS 24            // pending `defer`s per frame
+#define CE_MAX_OBJS (1u << 16)      // objects per top-level evaluation
 
 typedef struct CeObj CeObj;
 typedef struct {
@@ -33,6 +33,8 @@ struct ConstEval {
     unsigned depth;   // shared recursion depth across expression eval and const-item chasing
     unsigned nframes; // live interpreter call frames
     uint32_t steps;   // interpreter work counter, reset per top-level evaluation
+    uint32_t max_steps; // per-evaluation budgets (--const-eval-steps / --const-eval-memory)
+    uint64_t max_slots;
     CeObj *objs;      // the object store (frames' environments, aggregates, heap blocks)
     uint32_t nobjs, cobjs;
     uint64_t live_slots;
@@ -43,12 +45,16 @@ struct ConstEval {
 
 static const ConstValue CE_NONE = {0};
 
-ConstEval *consteval_new(const Package *pkg) {
+static uint64_t ce_mem_to_slots(uint64_t bytes); // defined with CeVal (slots are CeVal-sized)
+
+ConstEval *consteval_new(const Package *pkg, const uint32_t max_steps, const uint64_t max_mem_bytes) {
   ConstEval *const ce = calloc(1, sizeof *ce);
   if (!ce)
     oom();
   ce->pkg = pkg;
   ce->nmods = pkg->count;
+  ce->max_steps = max_steps ? max_steps : CE_DEFAULT_STEPS;
+  ce->max_slots = max_mem_bytes ? ce_mem_to_slots(max_mem_bytes) : CE_DEFAULT_SLOTS;
   ce->vals = calloc(pkg->count ? pkg->count : 1, sizeof *ce->vals);
   ce->caps = calloc(pkg->count ? pkg->count : 1, sizeof *ce->caps);
   if (!ce->vals || !ce->caps)
@@ -501,6 +507,11 @@ typedef struct {
 
 static const CeVal CV_NIL = {0};
 
+static uint64_t ce_mem_to_slots(const uint64_t bytes) {
+  const uint64_t slots = bytes / sizeof(CeVal);
+  return slots ? slots : 1;
+}
+
 // One store object. `dm`/`dn` name the aggregate decl (field lookup, method dispatch); heap blocks
 // carry their byte size and element type (assigned by the first typed pointer cast).
 struct CeObj {
@@ -558,7 +569,7 @@ static void ce_trap(ConstEval *ce, const char *msg) {
 }
 
 static bool ce_tick(ConstEval *ce) {
-  if (++ce->steps > CE_MAX_STEPS) {
+  if (++ce->steps > ce->max_steps) {
     ce_trap(ce, "const-eval step budget exceeded");
     return false;
   }
@@ -580,7 +591,7 @@ static CeObj *ce_obj(ConstEval *ce, const uint32_t id) {
 
 // New object with `len` zeroed (CV_NIL = uninitialized) slots; 0 on budget exhaustion.
 static uint32_t ce_obj_new(ConstEval *ce, const uint32_t len) {
-  if (ce->nobjs >= CE_MAX_OBJS || ce->live_slots + len > CE_MAX_SLOTS) {
+  if (ce->nobjs >= CE_MAX_OBJS || ce->live_slots + len > ce->max_slots) {
     ce_trap(ce, "const-eval memory budget exceeded");
     return 0;
   }
@@ -604,7 +615,7 @@ static uint32_t ce_obj_new(ConstEval *ce, const uint32_t len) {
 
 // Resize an object's slot array (heap realloc, frame environments); keeps existing values.
 static bool ce_obj_resize(ConstEval *ce, CeObj *o, const uint32_t len) {
-  if (len > o->len && ce->live_slots + (len - o->len) > CE_MAX_SLOTS) {
+  if (len > o->len && ce->live_slots + (len - o->len) > ce->max_slots) {
     ce_trap(ce, "const-eval memory budget exceeded");
     return false;
   }
