@@ -364,11 +364,17 @@ static NodeId parse_type_inner(Parser *p) {
   return NODE_NONE;
 }
 
+// A bound is an interface path, or a callable signature `fn(T..) R` (one-token decision: `fn` never
+// starts a type path), making `F: fn(i32) i32` a generic param any function value satisfies.
+static NodeId parse_bound(Parser *p) {
+  return check(p, Fn) ? parse_type(p) : parse_type_path(p);
+}
+
 static NodeList parse_bounds(Parser *p) {
   const uint32_t mark = ast_mark(p->ast);
-  ast_push(p->ast, parse_type_path(p));
+  ast_push(p->ast, parse_bound(p));
   while (match(p, Plus))
-    ast_push(p->ast, parse_type_path(p));
+    ast_push(p->ast, parse_bound(p));
   return ast_commit(p->ast, mark);
 }
 

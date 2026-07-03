@@ -153,17 +153,29 @@ Generic functions, structs, enums, and methods (including methods with their own
 ### Closures and function pointers
 
 ```superc
-fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }
+fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }            // a plain function pointer
+
+fn scale<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x) * 2; }  // any function value, incl. captures
 
 fn main() i32 {
     let g = |x: i32| x * 2;                       // compact closure
     let h = fn(x: i32) i32 { return x + 1; };     // anonymous function
-    return apply(g, 20) + apply(h, 0);            // 41
+    let k = 10;
+    let add_k = |x: i32| x + k;                   // captures k BY COPY at this point
+    return apply(g, 20) + apply(h, 0) + scale(5, add_k) + add_k(1) - 40; // 42
 }
 ```
 
-Closures are non-capturing (Stage 1): they lower to hoisted static C functions and plain function
-pointers — no hidden environment or allocation.
+A non-capturing closure lowers to a hoisted static C function and a plain function pointer — no hidden
+environment or allocation. A **capturing** closure copies the locals it uses into a per-closure
+environment struct (its value IS that struct — still no allocation); it cannot be a bare `fn(..) ..`
+pointer, but it satisfies an `F: fn(..) ..` generic bound (also spellable as `where F: fn(..) ..`),
+which monomorphizes the function per closure and calls it directly. The std higher-order methods
+(`Vector::map`/`find`/`retain`, `Option::map`/`and_then`/`filter`, `Result::map`/`map_err`/`and_then`,
+`Box::map`) all take `F: fn(..) ..`, so they accept named functions, function pointers, and capturing
+closures alike. Captures are copies: assigning to a captured name, `&mut`-borrowing it, or calling a
+`&mut self` method on it inside the closure is rejected, as is capturing a destructor-owning (`Free`)
+value or a fixed-size array.
 
 ### Memory: pointers, references, `new`
 
@@ -361,7 +373,7 @@ as part of every compile; two flags bound how much work a single compile-time ev
 * Every layout the compiler computes is verified in the generated C by an emitted
   `_Static_assert(sizeof(T) == N, ...)`, so the downstream C compiler proves the layout model on
   the actual target — a mismatch is a named compile error, never silent.
-* Implicit CTFE (Zig-style, no marker): a call whose arguments are compile-time constants is RUN
+* Implicit CTFE: a call whose arguments are compile-time constants is RUN
   by an interpreter — loops, recursion, structs, arrays, payload enums, generic methods, floats
   (including the libm externs), and even heap code (`malloc`/`realloc`/`free` are intercepted into
   an abstract compile-time heap, so a `Vector`-building function folds to its result). Anything
@@ -424,7 +436,8 @@ operator, compile-time evaluation (constant folding, layout, and full CTFE with 
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with
 field-precise overlap, use-while-borrowed, non-lexical borrow lifetimes, dangling-reference returns),
-non-capturing closures and function pointers, references/pointers/`new`, slices and arrays (including
+closures (capturing by copy, monomorphized through `F: fn(..) ..` bounds) and function pointers,
+references/pointers/`new`, slices and arrays (including
 designated initializers), first-class ranges and slicing (`a[lo..hi]`), `for` over user iterators (an
 `Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while`, `defer`,
 `static_assert`, `@c.*` attributes, the module system with an auto-imported `std` prelude (containers,
@@ -433,6 +446,7 @@ both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
 
 Planned / not yet implemented:
 
-* capturing closures (closures are non-capturing today)
+* `FnMut` / `FnOnce`-style closures (captures are immutable copies today) and closure storage in
+  structs / heterogeneous collections (needs the fat-pointer form below)
 * dynamic dispatch / trait objects — **TBD / undecided**: heterogeneous collections + open extension
   across modules.

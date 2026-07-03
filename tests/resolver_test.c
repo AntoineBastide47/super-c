@@ -117,20 +117,51 @@ static void test_errors(void) {
   expect_error("Self outside extend", "fn f(x: Self) void {}\n", "'Self' is only valid");
 }
 
+// The capture count of each closure of `source`, in node order (an inner closure completes first, so
+// it precedes its enclosing one). Returns the closure count.
+static size_t closure_captures(const char *name, const char *source, uint32_t *out, const size_t cap) {
+  Ast *a = sc_resolve(name, source);
+  if (!a)
+    return 0;
+  size_t n = 0;
+  for (NodeId id = 1; id < (NodeId)a->nodes.len; id++)
+    if (ast_at_const(a, id)->kind == NODE_CLOSURE && n < cap)
+      out[n++] = ast_at_const(a, id)->as.closure.captures.len;
+  ast_free(&a);
+  return n;
+}
+
 static void test_closures(void) {
   // A closure may use its own params, module-level functions and consts -- none of those is a capture.
-  expect_ok(
+  uint32_t caps[4];
+  size_t n = closure_captures(
       "closure uses params and module items",
       "const K: i32 = 3;\n"
       "fn helper(n: i32) i32 { return n; }\n"
-      "fn main() i32 { let f = |x: i32| helper(x) + K; return f(1); }\n");
-  // Referencing an outer local from inside a closure is a capture -- rejected in Stage 1.
-  expect_error(
-      "closure captures outer let", "fn main() i32 { let base = 10; let f = |x: i32| x + base; return f(1); }\n",
-      "cannot capture local variable 'base'");
-  expect_error(
-      "closure captures outer param", "fn add(b: i32) i32 { let f = |x: i32| x + b; return f(1); }\n",
-      "cannot capture local variable 'b'");
+      "fn main() i32 { let f = |x: i32| helper(x) + K; return f(1); }\n",
+      caps, 4);
+  CHECK(n == 1 && caps[0] == 0, "params/module items are not captures (got %u)", n ? caps[0] : 999);
+  // Referencing an outer local from inside a closure is a CAPTURE, collected on the closure node
+  // (deduped: `base` twice is one capture).
+  n = closure_captures(
+      "closure captures outer let",
+      "fn main() i32 { let base = 10; let f = |x: i32| x + base + base; return f(1); }\n", caps, 4);
+  CHECK(n == 1 && caps[0] == 1, "one deduped capture expected (got %u)", n ? caps[0] : 999);
+  n = closure_captures(
+      "closure captures outer param",
+      "fn add(b: i32, c: i32) i32 { let f = |x: i32| x + b + c; return f(1); }\n", caps, 4);
+  CHECK(n == 1 && caps[0] == 2, "two captures expected (got %u)", n ? caps[0] : 999);
+  // A nested closure captures through the outer one: the ref in the inner body is below BOTH floors,
+  // so both closures collect it (the outer env forwards the copy the inner env is built from).
+  n = closure_captures(
+      "nested closures propagate captures",
+      "fn main() i32 {\n"
+      "  let base = 10;\n"
+      "  let outer = fn(x: i32) i32 { let inner = |y: i32| y + base; return inner(x); };\n"
+      "  return outer(1);\n"
+      "}\n",
+      caps, 4);
+  CHECK(n == 2 && caps[0] == 1 && caps[1] == 1, "both closures capture 'base' (got %zu closures)", n);
 }
 
 int main(void) {

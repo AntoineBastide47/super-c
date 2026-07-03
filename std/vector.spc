@@ -189,7 +189,7 @@ extend<T, A: Allocator> Vector<T, A> {
     // A new vector (same allocator) with `f` applied to every element. `f` BORROWS each element (`&T`): this
     // map reads `self` and leaves it owning its elements, so it must not consume them (passing a Free element
     // by value would free the Vector's still-owned copy).
-    pub fn map<U>(self: &Vector<T, A>, f: fn(&T) U) Vector<U, A> {
+    pub fn map<U, F: fn(&T) U>(self: &Vector<T, A>, f: F) Vector<U, A> {
         let mut out = Vector::<U, A>::with_capacity_in(self.alloc, self.len);
         let mut i: usize = 0;
         while i < self.len {
@@ -200,7 +200,7 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     // A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
-    pub fn find(self: &Vector<T, A>, pred: fn(&T) bool) Option<&T> {
+    pub fn find<F: fn(&T) bool>(self: &Vector<T, A>, pred: F) Option<&T> {
         let mut i: usize = 0;
         while i < self.len {
             if pred(self.at(i)) {
@@ -213,7 +213,7 @@ extend<T, A: Allocator> Vector<T, A> {
 
     // Keep only the elements matching `pred` (in place, preserving order). `pred` borrows (`&T`); rejected
     // elements are freed (no-op when T isn't Free) so nothing leaks.
-    pub fn retain(self: &mut Vector<T, A>, pred: fn(&T) bool) {
+    pub fn retain<F: fn(&T) bool>(self: &mut Vector<T, A>, pred: F) {
         let mut w: usize = 0;
         let mut i: usize = 0;
         while i < self.len {

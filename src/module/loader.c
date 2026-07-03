@@ -563,6 +563,10 @@ static ModuleId type_user_home(const Package *p, const Ast *a, const TypeId t) {
     case TYPE_STRUCT:
     case TYPE_ENUM:
       return module_is_user(p, y->module) ? y->module : MODULE_NONE;
+    case TYPE_FUNCTION:
+      // A function VALUE arg (an `F: fn(..)` instantiation): a closure's static fn / env struct exists
+      // only in its defining TU, so anything specialized over it must materialize there.
+      return module_is_user(p, y->module) ? y->module : MODULE_NONE;
     case TYPE_INSTANCE:
       // A nested instance held by value re-homes the outer one to where the nested instance ITSELF is
       // emitted (its home) -- the only module where its layout is complete. That may be a prelude sibling
@@ -617,6 +621,36 @@ void package_emit_order(const Package *p, ModuleId *const order) {
         dep[a * n + (size_t)b] = true;
         indeg[a]++;
       }
+    }
+    // A generic-method use recorded here over a foreign instance (fn-value type args are kept in the
+    // calling module) sources the owner's template the same way: the owner must emit first.
+    for (size_t i = 0; i < aa->method_insts.len; i++) {
+      const Ty *const y = ast_type_at(aa, aa->method_insts.data[i].instance);
+      if (y->kind != TYPE_INSTANCE)
+        continue;
+      const ModuleId b = ast_instance(aa, y->as.inst)->module;
+      if ((size_t)b >= n || (size_t)b == a || dep[a * n + (size_t)b])
+        continue;
+      dep[a * n + (size_t)b] = true;
+      indeg[a]++;
+    }
+    // A call to a FOREIGN generic free function: the caller emits a static copy of the spec by sourcing
+    // the owner's template (transiently interning into its pools) -- the owner must emit first too.
+    for (size_t i = 0; i < aa->mono.len; i++) {
+      const Node *const call = ast_at_const(aa, aa->mono.data[i].node);
+      if (call->kind != NODE_CALL)
+        continue;
+      const Node *const callee = ast_at_const(aa, call->as.call.callee);
+      const DefId fd = callee->kind == NODE_GENERIC_SPECIALIZATION
+                           ? ast_resolution_def(aa, callee->as.specialization.expression)
+                           : ast_resolution_def(aa, call->as.call.callee);
+      const ModuleId b = fd.module;
+      if (fd.node == NODE_NONE || (size_t)b >= n || (size_t)b == a || dep[a * n + (size_t)b])
+        continue;
+      if (!p->modules[b].ast || ast_at_const(p->modules[b].ast, fd.node)->kind != NODE_FUNCTION)
+        continue;
+      dep[a * n + (size_t)b] = true;
+      indeg[a]++;
     }
   }
   for (size_t k = 0; k < n; k++) {
@@ -772,6 +806,30 @@ static void reintern_method_signature_deps(Package *p, Ast *const dest, const Ty
   }
 }
 
+// True when `t` mentions a function VALUE type anywhere (a TYPE_FUNCTION, possibly nested): such a type
+// names a specific fn/closure, whose C symbol (and env struct) is local to the module defining it.
+static bool type_mentions_fnval(const Ast *a, const TypeId t) {
+  const Ty *const y = ast_type_at(a, t);
+  switch (y->kind) {
+    case TYPE_FUNCTION:
+      return true;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY:
+      return type_mentions_fnval(a, y->as.elem);
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(a, y->as.inst);
+      for (uint8_t i = 0; i < it->n; i++)
+        if (type_mentions_fnval(a, it->args[i]))
+          return true;
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 // Re-intern `src`'s concrete cross-module generic instantiations into their HOME module's table (see
 // instance_home): an all-builtin instance lands in the generic's owner (owner-emits), while one over a
 // user type by value lands in that type's module, which emits it via the generic's DECLARE/DEFINE macros.
@@ -851,11 +909,19 @@ static bool reintern_method_insts(Package *p, Ast *const src, Ast *const standal
     // Option<Bar> instead of re-adding it to the owner (which can only forward-declare Bar).
     const TyInstance recv = *ast_instance(src, ast_type_at(src, rty)->as.inst);
     const ModuleId home = instance_home(p, src, &recv);
-    Ast *const dest = home < p->count                            ? p->modules[home].ast
-                      : standalone && standalone->module == home ? standalone
-                                                                 : owner;
+    Ast *dest = home < p->count                            ? p->modules[home].ast
+                : standalone && standalone->module == home ? standalone
+                                                           : owner;
     if (!dest)
       continue;
+    // A method type arg naming a function VALUE (a closure bound to an `F: fn(..)` param) exists only in
+    // the calling module's TU: keep the use HERE, where codegen emits the spec static
+    // (emit_local_method_insts) instead of asking the owner to reference a foreign static symbol.
+    for (uint8_t k = 0; k < mtn; k++)
+      if (type_mentions_fnval(src, mu->args[k])) {
+        dest = src;
+        break;
+      }
     const TypeId rinst = dest == src ? rty : ast_reintern(dest, src, rty);
     TypeId targs[4];
     for (uint8_t k = 0; k < mtn; k++)

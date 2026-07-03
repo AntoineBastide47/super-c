@@ -45,6 +45,8 @@ struct TypeChecker {
     NodeId current_extend;      // the enclosing NODE_EXTEND, so a bare `Self` lowers to its full target type
                               // (`Wrap<T>`), not the bare struct -- otherwise generic field access loses the args
     NodeId current_fn;        // the function decl being checked, for `where`-clause bound lookup (NODE_NONE if none)
+    NodeId cur_closure;       // the innermost NODE_CLOSURE whose body is being checked: its captures are
+                              // copies, so assigning / `&mut`-borrowing them through it is rejected
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
     TypeId expected;          // target type of the expression being checked (let annotation / return / assignment RHS), or TYPE_NONE; consumed once by check_expr
@@ -493,10 +495,53 @@ static bool receiver_type_eq(TypeChecker *t, const TypeId a, const TypeId b) {
   return ap && bp && at->qualifier == bt->qualifier && at->as.elem == bt->as.elem;
 }
 
+// The `fn(..) ..` bound on a generic param decl (module `m`), or NODE_NONE. Such a bound makes the
+// param CALLABLE with the bound's signature, and is satisfied by any matching function value --
+// a named fn, a `fn(..) ..` pointer, or a (capturing) closure.
+static NodeId generic_fn_bound(TypeChecker *t, const ModuleId m, const NodeId decl) {
+  Ast *const a = mod_ast(t, m);
+  const Node *const gp = ast_at_const(a, decl);
+  if (gp->kind != NODE_GENERIC_PARAM)
+    return NODE_NONE;
+  const NodeId *const bids = ast_list(a, gp->as.generic_param.bounds);
+  for (uint32_t i = 0; i < gp->as.generic_param.bounds.len; i++)
+    if (ast_at_const(a, bids[i])->kind == NODE_FUNCTION_TYPE)
+      return bids[i];
+  // `where F: fn(..) ..` on the enclosing function binds the param too (same module only: a where
+  // clause names its own function's params).
+  if (t->current_fn != NODE_NONE && (!t->package || m == t->ast->module)) {
+    const NodeList wc = ast_at_const(t->ast, t->current_fn)->as.function.where_clause;
+    const NodeId *const wids = ast_list(t->ast, wc);
+    for (uint32_t w = 0; w < wc.len; w++) {
+      const Node *const wp = ast_at_const(t->ast, wids[w]);
+      if (ast_resolution(t->ast, wp->as.where_predicate.type) != decl)
+        continue;
+      const NodeId *const wb = ast_list(t->ast, wp->as.where_predicate.bounds);
+      for (uint32_t b = 0; b < wp->as.where_predicate.bounds.len; b++)
+        if (ast_at_const(t->ast, wb[b])->kind == NODE_FUNCTION_TYPE)
+          return wb[b];
+    }
+  }
+  return NODE_NONE;
+}
+
+// True when `fid` (a TYPE_FUNCTION) is backed by a closure that captures locals: its runtime value is
+// its environment struct, NOT a function pointer, so it never coerces into a bare `fn(..) ..` slot --
+// it only satisfies an `F: fn(..) ..` generic bound (monomorphized per closure).
+static bool fn_is_capturing(TypeChecker *t, const TypeId fid) {
+  const Ty *const fy = ast_type_at(t->ast, fid);
+  if (fy->kind != TYPE_FUNCTION)
+    return false;
+  const Node *const fn = ast_at_const(mod_ast(t, fy->module), fy->as.decl);
+  return fn->kind == NODE_CLOSURE && fn->as.closure.captures.len != 0;
+}
+
 // Two function types are compatible when their signatures match structurally (so a named function
 // passes where a `fn(..) ..` pointer is expected, even though they intern to distinct Tys keyed on
 // their decl node). C function-pointer types must match exactly, so params/return compare by identity.
 static bool fn_compatible(TypeChecker *t, const TypeId exid, const TypeId acid) {
+  if (exid != acid && fn_is_capturing(t, acid))
+    return false; // a capturing closure's value is an env struct -- never a bare fn pointer
   TypeId ep[4], ap[4], er, ar;
   const int en = fn_sig(t, exid, ep, 4, &er), an = fn_sig(t, acid, ap, 4, &ar);
   if (en != an || en > 4 || !ret_eq(er, ar))
@@ -2856,6 +2901,15 @@ static bool is_assignable(TypeChecker *t, const NodeId node_in) {
       const NodeId d = ast_resolution(t->ast, node);
       if (d == NODE_NONE)
         return false;
+      // A capture is a COPY in the closure's env: writing (or `&mut`-borrowing, or calling a `&mut self`
+      // method) through it would silently mutate the copy, so a captured binding is never assignable.
+      if (t->cur_closure != NODE_NONE) {
+        const NodeList caps = ast_at_const(t->ast, t->cur_closure)->as.closure.captures;
+        const NodeId *const cids = ast_list(t->ast, caps);
+        for (uint32_t i = 0; i < caps.len; i++)
+          if (cids[i] == d)
+            return false;
+      }
       const Node *const dn = ast_at_const(t->ast, d);
       if (dn->kind == NODE_LET)
         return dn->as.let_stmt.is_mutable;
@@ -3304,8 +3358,17 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
 
   if (callee == TYPE_NONE)
     return TYPE_NONE;
-  const Ty *const ct = ast_type_at(t->ast, callee);
+  const Ty *ct = ast_type_at(t->ast, callee);
   const Span sp = ast_at_const(t->ast, id)->span;
+  if (ct->kind == TYPE_GENERIC) {
+    // An `F: fn(..) ..`-bounded param is callable: read the signature from the bound (its only power),
+    // so `f(x)` type-checks inside the generic body and yields the bound's return type.
+    const NodeId fb = generic_fn_bound(t, ct->module, ct->as.decl);
+    if (fb != NODE_NONE) {
+      callee = lower_type_in(t, ct->module, fb);
+      ct = ast_type_at(t->ast, callee);
+    }
+  }
   if (ct->kind != TYPE_FUNCTION) {
     typechecker_errorf(t, sp.start, sp.end - sp.start, "called value is not a function");
     return TYPE_NONE;
@@ -3537,28 +3600,59 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     const int g = gens.len < 8 ? (int)gens.len : 8;
     for (int i = 0; i < g; i++)
       gparams[i] = (DefId){fmod, gids[i]};
-    if (callee_n->kind == NODE_GENERIC_SPECIALIZATION) { // explicit turbofish
+    TypeId bound[8];
+    int nexplicit = 0;
+    for (int i = 0; i < g; i++)
+      bound[i] = TYPE_NONE;
+    if (callee_n->kind == NODE_GENERIC_SPECIALIZATION) { // explicit turbofish (possibly partial)
       const NodeList tas = callee_n->as.specialization.types;
       const NodeId *const taids = ast_list(t->ast, tas);
-      for (uint32_t i = 0; i < tas.len && gn < g; i++)
-        gargs[gn++] = ast_type(t->ast, taids[i]);
-    } else if (args.len == params.len - skip) { // infer from argument types
-      TypeId bound[8];
-      for (int i = 0; i < g; i++)
-        bound[i] = TYPE_NONE;
+      for (uint32_t i = 0; i < tas.len && nexplicit < g; i++)
+        bound[nexplicit++] = ast_type(t->ast, taids[i]);
+    }
+    if (nexplicit < g && args.len == params.len - skip) { // infer the remaining params from the args
       const NodeId *const pids = ast_list(fa, params);
       for (uint32_t i = 0; i < args.len; i++)
         unify_infer(t, decl_type_in(t, fmod, pids[i + skip]), ast_type(t->ast, aids[i]), gparams, bound, g);
-      for (int i = 0; i < g; i++)
-        gargs[i] = bound[i]; // may stay TYPE_NONE if a param couldn't be inferred
-      gn = g;
+      // A param bound to F (`fn(..) ..`-bounded generic) fixes F but not the generics inside the bound's
+      // signature (`map<U, F: fn(T) U>` gets U only from F): unify the bound against the inferred F.
+      for (int i = 0; i < g; i++) {
+        if (bound[i] == TYPE_NONE || ast_type_at(t->ast, bound[i])->kind != TYPE_FUNCTION)
+          continue;
+        const NodeId fb = generic_fn_bound(t, fmod, gids[i]);
+        if (fb != NODE_NONE)
+          unify_infer(t, lower_type_in(t, fmod, fb), bound[i], gparams, bound, g);
+      }
+      nexplicit = g;
     }
+    for (int i = 0; i < nexplicit; i++)
+      gargs[i] = bound[i]; // may stay TYPE_NONE if a param couldn't be inferred
+    gn = nexplicit;
     if (gn == g) { // fully determined: record for codegen's specialization, then enforce interface bounds
       ast_set_type_args(t->ast, id, gargs, (uint8_t)gn);
       for (int i = 0; i < g; i++) {
         const NodeList pb = ast_at_const(fa, gids[i])->as.generic_param.bounds;
         const NodeId *const pbids = ast_list(fa, pb);
         for (uint32_t b = 0; b < pb.len; b++) {
+          // An `fn(..) ..` bound: the arg must be a function value whose signature matches the bound
+          // with the call's generic + receiver substitutions applied. A still-abstract param passes
+          // (re-checked at its own instantiation), like interface bounds below.
+          if (ast_at_const(fa, pbids[b])->kind == NODE_FUNCTION_TYPE) {
+            const TypeId bt = lower_type_in(t, fmod, pbids[b]);
+            const Ty *const gy = gargs[i] == TYPE_NONE ? NULL : ast_type_at(t->ast, gargs[i]);
+            if (gy && gy->kind != TYPE_GENERIC &&
+                (gy->kind != TYPE_FUNCTION ||
+                 !fn_compatible_subst(t, bt, gargs[i], gparams, gargs, gn, rsubp, rsuba, nrsub))) {
+              char tn[96];
+              render_type(t, gargs[i], tn, sizeof tn);
+              const Span bsp = ast_at_const(fa, pbids[b])->span;
+              typechecker_errorf(
+                  t, sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'", tn,
+                  (int)(bsp.end - bsp.start), (const char *)mod_src(t, fmod) + bsp.start);
+              typechecker_notef(t, "the argument must be a function or closure with this exact signature");
+            }
+            continue;
+          }
           const DefId bi = ast_resolution_def(fa, pbids[b]);
           if (bi.node != NODE_NONE && !type_satisfies(t, gargs[i], bi, 0)) {
             char tn[96];
@@ -3582,6 +3676,22 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
         const NodeList wb = wp->as.where_predicate.bounds;
         const NodeId *const wbids = ast_list(fa, wb);
         for (uint32_t b = 0; b < wb.len; b++) {
+          if (ast_at_const(fa, wbids[b])->kind == NODE_FUNCTION_TYPE) { // `where F: fn(..) ..`
+            const TypeId bt = lower_type_in(t, fmod, wbids[b]);
+            const Ty *const wy = wt == TYPE_NONE ? NULL : ast_type_at(t->ast, wt);
+            if (wy && wy->kind != TYPE_GENERIC &&
+                (wy->kind != TYPE_FUNCTION ||
+                 !fn_compatible_subst(t, bt, wt, gparams, gargs, gn, rsubp, rsuba, nrsub))) {
+              char tn[96];
+              render_type(t, wt, tn, sizeof tn);
+              const Span bsp = ast_at_const(fa, wbids[b])->span;
+              typechecker_errorf(
+                  t, sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'", tn,
+                  (int)(bsp.end - bsp.start), (const char *)mod_src(t, fmod) + bsp.start);
+              typechecker_notef(t, "required by this function's where-clause");
+            }
+            continue;
+          }
           const DefId bi = ast_resolution_def(fa, wbids[b]);
           if (bi.node != NODE_NONE && !type_satisfies(t, wt, bi, 0)) {
             char tn[96];
@@ -3621,9 +3731,16 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       if (ptt->kind == TYPE_FUNCTION) {
         const TypeId at = ast_type(t->ast, aids[i]);
         const Ty *const att = at == TYPE_NONE ? NULL : ast_type_at(t->ast, at);
-        if (!att || att->kind != TYPE_FUNCTION ||
-            !fn_compatible_subst(t, pt, at, gparams, gargs, gn, rsubp, rsuba, nrsub))
+        if (pt != at && att && fn_is_capturing(t, at)) {
+          // Its value is an env struct, not a pointer -- only an `F: fn(..) ..` generic can take it.
+          const Span asp = ast_at_const(t->ast, aids[i])->span;
+          typechecker_errorf(t, asp.start, asp.end - asp.start,
+                             "a capturing closure cannot be passed as a bare 'fn' pointer");
+          typechecker_notef(t, "make the parameter generic instead: fn f<F: fn(..) ..>(callback: F)");
+        } else if (!att || att->kind != TYPE_FUNCTION ||
+                   !fn_compatible_subst(t, pt, at, gparams, gargs, gn, rsubp, rsuba, nrsub)) {
           err_mismatch(t, aids[i], pt);
+        }
         continue;
       }
       if (!compatible(t, pt, aids[i]))
@@ -4272,6 +4389,26 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       const NodeId *const pids = ast_list(a, params);
       for (uint32_t i = 0; i < params.len; i++)
         decl_type(t, pids[i]); // type each parameter so its body references resolve
+      // Captures are copied into the closure's env struct when the closure VALUE is built: a type whose
+      // copy would be unsound (a destructor -> double free) or unrepresentable (a C array member can't
+      // be initialized from an array value) is rejected up front, with the variable named.
+      const NodeList caps = n->as.closure.captures;
+      const NodeId *const cids = ast_list(a, caps);
+      for (uint32_t i = 0; i < caps.len; i++) {
+        const TypeId cty = decl_type(t, cids[i]);
+        const char *why = NULL;
+        if (cty != TYPE_NONE && tc_type_is_free(t, cty))
+          why = "its type has a destructor, and captures copy (the copy would double-free)";
+        else if (cty != TYPE_NONE && ast_type_at(a, cty)->kind == TYPE_ARRAY)
+          why = "fixed-size arrays cannot be captured by copy; capture a reference or a slice instead";
+        if (why) {
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                             "closure cannot capture this variable: %s", why);
+          break;
+        }
+      }
+      const NodeId saved_clos = t->cur_closure;
+      t->cur_closure = id;
       if (n->as.closure.expr_body) {
         check_expr(t, n->as.closure.body); // its type IS the closure's return type
       } else {
@@ -4280,6 +4417,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         check_stmt(t, n->as.closure.body);
         t->current_returns = saved;
       }
+      t->cur_closure = saved_clos;
       // The closure is a function value keyed on its own node, like a `fn(..) ..` pointer type.
       result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .module = a->module, .as.decl = id});
       break;

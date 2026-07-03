@@ -280,6 +280,7 @@ typedef struct {
             NodeList returns; // explicit return type(s); empty for a compact closure (return inferred from body)
             NodeId body;      // a NODE_BLOCK (anonymous `fn`), or the body expression (compact `|..|`)
             bool expr_body;   // true: `body` is an expression to be returned; false: `body` is a block
+            NodeList captures; // outer-local decls captured by copy (resolver-filled); empty = a bare fn pointer
         } closure;
         struct {
             NodeId object, index;
