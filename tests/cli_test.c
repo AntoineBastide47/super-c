@@ -83,7 +83,7 @@ static void test_const_eval_flag(void) {
       "  let w = Wrap::<[i32; 4]> { v: [1, 2, 3, 4] };\n"
       "  unsafe exit(a[2] + a[3] + a[0] + w.v[3] + (sizeof((i32, bool)) as i32));\n"
       "}\n");
-  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "--const-eval compiles (got): %s", buf);
   snprintf(out, sizeof out, "%s/build/main.c", root);
   char gc[8192];
@@ -100,12 +100,16 @@ static void test_const_eval_flag(void) {
 
   // a folded-FALSE static_assert is a SUPER-C error (with our span), not a downstream C error
   write_file(spc, "static_assert(1 + 1 == 3, \"nope\");\nfn main() i32 { return 0; }\n");
-  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "folded-false static_assert fails the build");
   CHECK(strstr(buf, "static assertion failed") != NULL, "and names the failure: %s", buf);
-  // without the flag the same file defers to C (compiles at the Super-C level)
-  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
-  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "flag off: static_assert defers to C as before");
+  // the budget flags parse (with size suffixes) and tiny budgets keep plain folding working
+  snprintf(cmd, sizeof cmd, "%s --const-eval-steps=4096 --const-eval-memory=1M '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "tiny budgets still fold scalar asserts");
+  CHECK(strstr(buf, "static assertion failed") != NULL, "same failure under tiny budgets: %s", buf);
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "the retired --const-eval flag is rejected with usage");
+  CHECK(strstr(buf, "Usage:") != NULL, "and prints usage: %s", buf);
 }
 
 // Implicit CTFE under --const-eval: a call with folded arguments RUNS at compile time (recursion,
@@ -140,7 +144,7 @@ static void test_ctfe(void) {
              "  if late() < 0 { return 1; }\n"
              "  return x;\n"
              "}\n");
-  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "CTFE program compiles (got): %s", buf);
   snprintf(out, sizeof out, "%s/build/main.c", root);
   char gc[16384];
@@ -166,10 +170,19 @@ static void test_ctfe(void) {
              "  return 0;\n"
              "}\n"
              "fn main() i32 { if spin() > 0 { return 3; } return 4; }\n");
-  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "budget blowup still compiles: %s", buf);
   CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
   CHECK(strstr(gc, "spin()") != NULL, "over-budget callee stays a runtime call");
+
+  // --const-eval-steps starves CTFE: an assert that needs execution now reports the budget
+  write_file(spc,
+             "fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }\n"
+             "static_assert(fib(20) == 6_765, \"needs execution\");\n"
+             "fn main() i32 { return 0; }\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval-steps=4096 '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "a starved assert fails the build");
+  CHECK(strstr(buf, "step budget exceeded") != NULL, "and blames the budget: %s", buf);
 }
 
 // CTFE over aggregates and the abstract heap: structs + methods + operator/extend dispatch, local
@@ -224,7 +237,7 @@ static void test_ctfe_memory(void) {
              "  return s;\n"
              "}\n"
              "fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }\n");
-  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "heap CTFE program compiles (got): %s", buf);
   snprintf(out, sizeof out, "%s/build/main.c", root);
   char gc[32768];
@@ -247,7 +260,7 @@ static void test_ctfe_memory(void) {
              "fn div0(n: i32) i32 { return 10 / n; }\n"
              "static_assert(div0(0) == 1, \"traps\");\n"
              "fn main() i32 { return 0; }\n");
-  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "a trapping assert fails the build");
   CHECK(strstr(buf, "division by zero") != NULL, "and names the trap: %s", buf);
 
@@ -262,7 +275,7 @@ static void test_ctfe_memory(void) {
              "}\n"
              "static_assert(uaf() == 1, \"uaf\");\n"
              "fn main() i32 { return 0; }\n");
-  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "use-after-free fails the build");
   CHECK(strstr(buf, "use after free") != NULL, "and names it: %s", buf);
 }

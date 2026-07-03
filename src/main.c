@@ -59,7 +59,7 @@ static void flush_emitf(String_Vec *errors, String_Vec *notes, U32_Vec *starts, 
   va_end(args);
 }
 
-// A deferred static_assert (--const-eval) that failed once the whole package was typed: render it
+// A deferred static_assert that failed once the whole package was typed: render it
 // with the compiler's usual source excerpt against the owning module.
 static void flush_assert_err(void *ctx, const ModuleId m, const NodeId cond, const char *msg) {
   Package *const p = ctx;
@@ -346,8 +346,8 @@ static int run_package(Package *p) {
     p->ok = typecheck_one(p, &p->modules[i].ast, p->modules[i].source, p->modules[i].source_len) && p->ok;
   if (!p->ok)
     return 1;
-  // --const-eval: static_asserts that were undecidable in module order (calling functions the
-  // checker had not reached yet) re-evaluate now that every module is fully typed.
+  // static_asserts that were undecidable in module order (calling functions the checker had
+  // not reached yet) re-evaluate now that every module is fully typed.
   consteval_flush_asserts(p->ceval, flush_assert_err, p);
   if (!p->ok)
     return 1;
@@ -413,14 +413,30 @@ static int run_package(Package *p) {
   return err ? 1 : 0;
 }
 
-static int run_file(const char *path, const char *std_dir, const bool const_eval) {
+static int run_file(const char *path, const char *std_dir, const uint32_t ce_steps, const uint64_t ce_mem) {
   Package *p = package_load(path, std_dir);
-  if (p->ok && const_eval)
-    p->ceval = consteval_new(p); // opt-in folding: typechecker/codegen consult p->ceval when set
+  if (p->ok)
+    p->ceval = consteval_new(p, ce_steps, ce_mem); // always on; the flags only bound its budgets
   const int rc = p->ok ? run_package(p) : 1;
   consteval_free(&p->ceval);
   package_free(&p);
   return rc;
+}
+
+// "1024", "64K", "16M", "1G" -> bytes; 0 on malformed input.
+static uint64_t parse_size(const char *s) {
+  char *end = NULL;
+  const unsigned long long v = strtoull(s, &end, 10);
+  if (end == s || v == 0)
+    return 0;
+  uint64_t mul = 1;
+  if (*end == 'K' || *end == 'k')
+    mul = 1024, end++;
+  else if (*end == 'M' || *end == 'm')
+    mul = 1024 * 1024, end++;
+  else if (*end == 'G' || *end == 'g')
+    mul = 1024ull * 1024 * 1024, end++;
+  return *end == '\0' ? v * mul : 0;
 }
 
 // The std/ directory next to the running binary ("<exe dir>/std"); the prelude is resolved from here so
@@ -450,22 +466,34 @@ static char *exe_std_dir(const char *argv0) {
 }
 
 int main(const int argc, char **argv) {
-  bool const_eval = false;
+  uint32_t ce_steps = 0; // 0 = the evaluator's defaults
+  uint64_t ce_mem = 0;
   const char *file = NULL;
+  bool bad = false;
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--const-eval") == 0)
-      const_eval = true;
-    else if (!file)
+    if (strncmp(argv[i], "--const-eval-steps=", 19) == 0) {
+      const uint64_t v = parse_size(argv[i] + 19);
+      if (!v || v > UINT32_MAX)
+        bad = true;
+      else
+        ce_steps = (uint32_t)v;
+    } else if (strncmp(argv[i], "--const-eval-memory=", 20) == 0) {
+      ce_mem = parse_size(argv[i] + 20);
+      bad |= ce_mem == 0;
+    } else if (argv[i][0] == '-' && argv[i][1] == '-') {
+      bad = true; // unknown flag
+    } else if (!file) {
       file = argv[i];
-    else
+    } else {
       file = ""; // more than one input: fall through to usage
+    }
   }
-  if (!file || !*file) {
-    fprintf(stderr, "Usage: %s [--const-eval] <path/to/script>\n", BIN_NAME);
+  if (bad || !file || !*file) {
+    fprintf(stderr, "Usage: %s [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] <path/to/script>\n", BIN_NAME);
     return 1;
   }
   char *const std_dir = exe_std_dir(argv[0]);
-  const int rc = run_file(file, std_dir, const_eval);
+  const int rc = run_file(file, std_dir, ce_steps, ce_mem);
   free(std_dir);
   return rc;
 }

@@ -1,7 +1,7 @@
 #ifndef CONSTEVAL_H
 #define CONSTEVAL_H
 
-// Opt-in (--const-eval) compile-time constant evaluation, in two layers:
+// Compile-time constant evaluation (always on; --const-eval-steps/--const-eval-memory bound it), in two layers:
 //   1. A memoized, demand-driven scalar folder over TYPED expression nodes (bottom-up: children
 //      evaluate first; results land in a per-module NodeId -> ConstValue side table). The AST is
 //      never mutated -- the typechecker and codegen consult the table where a constant is required
@@ -34,7 +34,10 @@ typedef struct {
 
 typedef struct ConstEval ConstEval;
 
-ConstEval *consteval_new(const Package *pkg);
+// `max_steps` bounds interpreted statements/expressions and `max_mem_bytes` the object storage,
+// both PER top-level evaluation (so folding stays order-independent); 0 picks the default. An
+// exhausted budget is not an error -- the expression simply stays a runtime one.
+ConstEval *consteval_new(const Package *pkg, uint32_t max_steps, uint64_t max_mem_bytes);
 void consteval_free(ConstEval **ce);
 
 // The reason the LAST consteval_eval could not fold, when that reason was a would-be runtime trap

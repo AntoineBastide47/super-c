@@ -17,7 +17,7 @@ typedef struct Module {
 
 // The whole compilation: the root module plus every module reachable through `import`. Modules are
 // kept as separate Asts; cross-module references are DefId{module, node} into this array.
-struct ConstEval; // src/consteval: opt-in (--const-eval) folding; NULL when the flag is off
+struct ConstEval; // src/consteval: compile-time evaluation; NULL only in library/test use
 
 typedef struct Package {
     struct ConstEval *ceval; // owned by main (created after load, freed before package_free)

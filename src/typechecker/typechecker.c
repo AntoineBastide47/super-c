@@ -2354,7 +2354,7 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
     }
     case NODE_ARRAY_TYPE: {
       check_expr(t, n->as.array_type.length);
-      // Under --const-eval a folded length becomes part of the TYPE ([i32;4] != [i32;8]); an
+      // A folded length becomes part of the TYPE ([i32;4] != [i32;8]); an
       // unfoldable length keeps len 0 (identity and rendering exactly as before).
       uint32_t alen = 0;
       const ConstValue lv = consteval_eval(tc_ceval(t), t->ast->module, n->as.array_type.length);
@@ -2879,12 +2879,25 @@ static bool is_assignable(TypeChecker *t, const NodeId node_in) {
     case NODE_INDEX:
     case NODE_MEMBER: {
       const NodeId obj = n->kind == NODE_INDEX ? n->as.index.object : n->as.member.object;
+      TypeId oty = ast_type(t->ast, obj);
+      // Auto-deref (INDEX only, mirroring the read path): a store through a reference base is governed by
+      // the innermost reference's qualifier -- `(&mut v)[i] = x` is fine, through a `&v` it is not.
+      bool via_ref = false, ref_mut = false;
+      if (n->kind == NODE_INDEX) {
+        const Ty *y = ast_type_at(t->ast, oty);
+        while (y->kind == TYPE_REFERENCE) {
+          via_ref = true;
+          ref_mut = y->qualifier == TYPE_QUAL_MUT;
+          oty = y->as.elem;
+          y = ast_type_at(t->ast, oty);
+        }
+      }
       // Indexing a writable slice (`[]mut T` -> SliceMut<T>) yields an assignable element, however the
       // slice was bound -- its mutability lives in the type, not the binding.
-      const int sk = n->kind == NODE_INDEX ? slice_kind(t, ast_type(t->ast, obj), NULL) : 0;
+      const int sk = n->kind == NODE_INDEX ? slice_kind(t, oty, NULL) : 0;
       if (sk)
         return sk == 2; // a read-only `[]T` element is never assignable
-      const Ty *const ot = ast_type_at(t->ast, ast_type(t->ast, obj));
+      const Ty *const ot = ast_type_at(t->ast, oty);
       // Overloaded index-assignment (the IndexMut interface): `obj[i] = v` stores through the type's
       // `index_mut` method, so the type must provide one AND the receiver must be mutable.
       if (n->kind == NODE_INDEX && (ot->kind == TYPE_STRUCT || ot->kind == TYPE_INSTANCE)) {
@@ -2893,7 +2906,7 @@ static bool is_assignable(TypeChecker *t, const NodeId node_in) {
         DefId gp[4];
         TypeId ga[4];
         int gn;
-        if (!aggregate_of(t, ast_type(t->ast, obj), &om, &od, gp, ga, &gn))
+        if (!aggregate_of(t, oty, &om, &od, gp, ga, &gn))
           return false;
         const DefId im = find_method_cstr(t, om, od, "index_mut");
         if (im.node == NODE_NONE)
@@ -2908,7 +2921,9 @@ static bool is_assignable(TypeChecker *t, const NodeId node_in) {
         const NodeId itn = irn->kind == NODE_PARAMETER ? irn->as.parameter.type : ir0;
         if (itn == NODE_NONE || ast_at_const(ia, itn)->kind != NODE_REFERENCE_TYPE)
           return false;
-        return is_assignable(t, obj); // index_mut takes `&mut self`: the receiver place must be mutable
+        // index_mut takes `&mut self`: through a reference base the reference's own qualifier is the
+        // receiver mutability; a value base needs a mutable place.
+        return via_ref ? ref_mut : is_assignable(t, obj);
       }
       // Auto-deref: when the base is a reference/pointer, write-through is governed by the POINTEE
       // qualifier, not the binding -- a `let mut r: &T` may be rebound but `*r` / `r.f` stays read-only.
@@ -4272,12 +4287,25 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_INDEX: {
       t->addr_ctx = addr_ctx; // `&buf[i]` borrows buf -- propagate the address context to the base
       t->place_use = !addr_ctx; // value index read: suppress the base's whole read (checked precisely below)
-      const TypeId obj = check_expr(t, n->as.index.object);
+      TypeId obj = check_expr(t, n->as.index.object);
       // The base is type-resolved now, so the place decomposes; field-precise read check like NODE_MEMBER.
       // (The index expression, checked further below, is a separate value -- place_use was reset by the base.)
       if (!addr_ctx && !place_use && borrow_conflicting_read(t, id))
         typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
                            "cannot use this value while it is mutably borrowed");
+      // Auto-deref: `r[i]` / `r[lo..hi]` on a `&T` base indexes the referent, like member access. Raw
+      // pointers keep C index semantics (unsafe, no dispatch), and a reference to an ARRAY stays an error:
+      // its length lives outside the type, so neither bounds checks nor slicing could be lowered.
+      if (ast_type_at(a, obj)->kind == TYPE_REFERENCE) {
+        TypeId p = obj;
+        const Ty *y = ast_type_at(a, p);
+        while (y->kind == TYPE_REFERENCE) {
+          p = y->as.elem;
+          y = ast_type_at(a, p);
+        }
+        if (y->kind != TYPE_ARRAY)
+          obj = p;
+      }
       const Ty *const ot = ast_type_at(a, obj);
       const Node *const idxn = ast_at_const(a, n->as.index.index);
       if (idxn->kind == NODE_RANGE) { // `a[lo..hi]` -> a `[]T` view of the element type
@@ -4902,7 +4930,7 @@ static void check_static_assert(TypeChecker *t, const Node *const n) {
     typechecker_errorf(t, sp.start, sp.end - sp.start, "static_assert condition must be 'bool', found '%s'", ty);
     return;
   }
-  // Under --const-eval a foldable condition is decided HERE (with this span). An unfoldable one
+  // A foldable condition is decided HERE (with this span). An unfoldable one
   // either TRAPPED (it would panic/overflow at runtime: a hard error, with the reason), or is not
   // yet decidable (e.g. it calls a function the checker has not reached) and is DEFERRED: the
   // driver re-evaluates it after the whole package checks. Still-undecidable conditions (an opaque
