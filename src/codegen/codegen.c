@@ -2949,6 +2949,16 @@ static void emit_expr(Codegen *c, const NodeId id) {
             emit(c, v.i > 0x7fffffffll || v.i < -0x80000000ll ? "%lldll" : "%lld", (long long)v.i);
           return;
         }
+        if (v.kind == CONST_FLOAT) { // always finite here (cv_pub refuses inf/nan)
+          const Ty *const vt = v.type != TYPE_NONE ? ast_type_at(c->ast, v.type) : NULL;
+          const bool f32 = vt && vt->kind == TYPE_BUILTIN && vt->as.builtin == BT_F32;
+          char fb[48];
+          snprintf(fb, sizeof fb, "%.17g", v.f);
+          if (!strpbrk(fb, ".eE")) // 42 -> 42.0, so the literal stays a double
+            strcat(fb, ".0");
+          emit(c, f32 ? "%sf" : "%s", fb);
+          return;
+        }
         break;
       }
       default:
@@ -4057,6 +4067,9 @@ static void emit_block(Codegen *c, const NodeId id) {
 // needn't add its own — avoiding `if ((a == b))`, which clang flags under -Wparentheses-equality.
 static bool emits_own_parens(Codegen *c, const NodeId id) {
   const Node *const n = ast_at_const(c->ast, id);
+  // --const-eval: a folded expression emits as a bare literal, whatever its kind
+  if (cg_ceval(c) && consteval_eval(cg_ceval(c), c->ast->module, id).kind != CONST_NONE)
+    return false;
   switch (n->kind) {
     case NODE_BINARY:
     case NODE_CAST:

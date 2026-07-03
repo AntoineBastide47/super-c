@@ -4902,12 +4902,21 @@ static void check_static_assert(TypeChecker *t, const Node *const n) {
     typechecker_errorf(t, sp.start, sp.end - sp.start, "static_assert condition must be 'bool', found '%s'", ty);
     return;
   }
-  // Under --const-eval a foldable condition is decided HERE (with this span); an unfoldable one
-  // (e.g. involving an opaque type's sizeof) still lowers to C _Static_assert as before.
+  // Under --const-eval a foldable condition is decided HERE (with this span). An unfoldable one
+  // either TRAPPED (it would panic/overflow at runtime: a hard error, with the reason), or is not
+  // yet decidable (e.g. it calls a function the checker has not reached) and is DEFERRED: the
+  // driver re-evaluates it after the whole package checks. Still-undecidable conditions (an opaque
+  // type's sizeof) lower to C _Static_assert as before.
   const ConstValue v = consteval_eval(tc_ceval(t), t->ast->module, n->as.binary.left);
+  const Span sp = ast_at_const(t->ast, n->as.binary.left)->span;
   if (v.kind == CONST_BOOL && !v.i) {
-    const Span sp = ast_at_const(t->ast, n->as.binary.left)->span;
     typechecker_errorf(t, sp.start, sp.end - sp.start, "static assertion failed");
+  } else if (v.kind == CONST_NONE && tc_ceval(t)) {
+    const char *const trap = consteval_trap(tc_ceval(t));
+    if (trap)
+      typechecker_errorf(t, sp.start, sp.end - sp.start, "static assertion cannot be evaluated: %s", trap);
+    else
+      consteval_defer_assert(tc_ceval(t), t->ast->module, n->as.binary.left);
   }
 }
 

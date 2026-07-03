@@ -51,6 +51,42 @@ static bool typecheck_one(const Package *p, Ast **pa, const char *src, const siz
   return !had;
 }
 
+static void flush_emitf(String_Vec *errors, String_Vec *notes, U32_Vec *starts, U32_Vec *lens, const uint32_t at,
+                        const uint32_t len, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  errors_vemitf(errors, notes, starts, lens, at, len, fmt, args);
+  va_end(args);
+}
+
+// A deferred static_assert (--const-eval) that failed once the whole package was typed: render it
+// with the compiler's usual source excerpt against the owning module.
+static void flush_assert_err(void *ctx, const ModuleId m, const NodeId cond, const char *msg) {
+  Package *const p = ctx;
+  const Module *const mod = &p->modules[m];
+  const Span sp = ast_at_const(mod->ast, cond)->span;
+  String_Vec errors = VEC_INIT;
+  String_Vec notes = VEC_INIT;
+  U32_Vec starts = VEC_INIT;
+  U32_Vec lens = VEC_INIT;
+  if (msg)
+    flush_emitf(&errors, &notes, &starts, &lens, sp.start, sp.end - sp.start,
+                "static assertion cannot be evaluated: %s", msg);
+  else
+    flush_emitf(&errors, &notes, &starts, &lens, sp.start, sp.end - sp.start, "static assertion failed");
+  errors_finalize(&errors, &notes, &starts, &lens, (const uint8_t *)mod->source, mod->source_len, mod->file);
+  errors_log(&errors);
+  for (size_t i = 0; i < errors.len; i++)
+    free(errors.data[i]);
+  for (size_t i = 0; i < notes.len; i++)
+    free(notes.data[i]);
+  VEC_DEINIT(errors)
+  VEC_DEINIT(notes)
+  VEC_DEINIT(starts)
+  VEC_DEINIT(lens)
+  p->ok = false;
+}
+
 // Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
 static void mkdir_p(const char *path) {
   char buf[4096];
@@ -308,6 +344,11 @@ static int run_package(Package *p) {
     return 1;
   for (size_t i = 0; i < p->count; i++)
     p->ok = typecheck_one(p, &p->modules[i].ast, p->modules[i].source, p->modules[i].source_len) && p->ok;
+  if (!p->ok)
+    return 1;
+  // --const-eval: static_asserts that were undecidable in module order (calling functions the
+  // checker had not reached yet) re-evaluate now that every module is fully typed.
+  consteval_flush_asserts(p->ceval, flush_assert_err, p);
   if (!p->ok)
     return 1;
   package_propagate_instances(p, NULL); // owners emit the generic instances used across module boundaries

@@ -20,18 +20,35 @@ typedef enum {
   CONST_NONE = 0, // not const-evaluable (the universal fallback -- never an error by itself)
   CONST_INT,      // an integer/char value; signedness/width come from `type`
   CONST_BOOL,
+  CONST_FLOAT, // an f32/f64 value in `f` (always finite when reported through this interface)
 } ConstKind;
 
 typedef struct {
     uint8_t kind; // ConstKind
     TypeId type;  // the node's checked type, in the EVALUATING module's pool (informational)
-    int64_t i;    // value bits (unsigned values are the same 64 bits reinterpreted)
+    union {
+        int64_t i; // value bits (unsigned values are the same 64 bits reinterpreted)
+        double f;  // CONST_FLOAT (an f32 value is stored pre-rounded to float precision)
+    };
 } ConstValue;
 
 typedef struct ConstEval ConstEval;
 
 ConstEval *consteval_new(const Package *pkg);
 void consteval_free(ConstEval **ce);
+
+// The reason the LAST consteval_eval could not fold, when that reason was a would-be runtime trap
+// (panic/abort, division by zero, out-of-bounds, use-after-free) or a blown budget; NULL otherwise.
+// Cleared at each top-level evaluation.
+const char *consteval_trap(const ConstEval *ce);
+
+// Deferred static_asserts: a condition not yet decidable when its module checks (e.g. calling a
+// function defined later, or in a later module) is recorded and re-evaluated by
+// consteval_flush_asserts AFTER the whole package has type-checked. The callback receives each
+// assert that folded FALSE (msg = NULL) or hit a compile-time trap (msg = the trap).
+void consteval_defer_assert(ConstEval *ce, ModuleId m, NodeId cond);
+typedef void (*CeAssertErr)(void *ctx, ModuleId m, NodeId cond, const char *msg);
+void consteval_flush_asserts(ConstEval *ce, CeAssertErr err, void *ctx);
 
 // Evaluate expression `id` of module `m`. Requires the subtree to be TYPED (ast_type set by the
 // typechecker); returns kind CONST_NONE when the expression is not a compile-time constant.
