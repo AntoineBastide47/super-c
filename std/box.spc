@@ -40,7 +40,7 @@ extend<T, A: Allocator> Box<T, A> {
     }
 
     // Allocate a new box (through a copy of the same allocator) holding `f` applied to this box's value.
-    pub fn map<U>(self: &Box<T, A>, f: fn(T) U) Box<U, A> {
+    pub fn map<U, F: fn(T) U>(self: &Box<T, A>, f: F) Box<U, A> {
         return Box::<U, A>::new_in(self.alloc, f(unsafe self.ptr[0]));
     }
 

@@ -1203,6 +1203,61 @@ static void test_closures(void) {
           "  vec.free(); d.free();\n"
           "  unsafe exit(v1 + fd + s + 2); }\n",                            // 21+3+16+2 = 42
       42, "");
+  // Capturing closures (copy capture), monomorphized through `F: fn(..) ..` bounds: as an argument, as a
+  // named fn bound to the same F, let-bound + called directly, and F forwarded through another generic.
+  sc_run_program(
+      "capturing closures through F generics",
+      PRE "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\n"
+          "fn twice<F: fn(i32) i32>(x: i32, f: F) i32 { return apply(apply(x, f), f); }\n"
+          "fn inc(x: i32) i32 { return x + 1; }\n"
+          "fn main() i32 {\n"
+          "  let base = 10;\n"
+          "  let a = apply(5, |x: i32| x + base);\n" // 15
+          "  let b = apply(5, inc);\n"               // 6 (a named fn satisfies F too)
+          "  let f = |x: i32| x * base;\n"
+          "  let c = f(2);\n"                        // 20 (direct call on the binding)
+          "  let d = twice(1, |x: i32| x + base);\n" // 21 (F passed through a generic unchanged)
+          "  unsafe exit(a + b + c + d - 20); }\n",        // 15+6+20+21-20 = 42
+      42, "");
+  // Capture is BY COPY when the closure value is built: a later write to the original is invisible.
+  sc_run_program(
+      "captures copy at creation",
+      PRE "fn main() i32 {\n"
+          "  let mut n = 40;\n"
+          "  let f = |x: i32| x + n;\n"
+          "  n = 100;\n"
+          "  unsafe exit(f(2)); }\n", // 42, not 102
+      42, "");
+  // A nested closure captures through the enclosing one (the inner env copies from the outer's), and a
+  // loop binding captures per iteration (each env literal snapshots the current `i`).
+  sc_run_program(
+      "nested closures and loop captures",
+      PRE "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\n"
+          "fn main() i32 {\n"
+          "  let a = 5;\n"
+          "  let outer = fn(x: i32) i32 { let inner = |y: i32| y + a; return inner(x) + a; };\n"
+          "  let mut acc = outer(1);\n"                            // 1 + 5 + 5 = 11
+          "  for i in 1..4 { acc += apply(i, |x: i32| x * i); }\n" // 1 + 4 + 9 -> 25
+          "  unsafe exit(acc + 17); }\n",                                // 42
+      42, "");
+  // Capturing closures driving the std generic HOFs: the env-typed specs are emitted (static) in THIS
+  // module, sourcing the owner's template -- map/retain/find/Option::map/Result::map_err all capture.
+  sc_run_program(
+      "capturing closures into std HOFs",
+      PRE "fn main() i32 {\n"
+          "  let k = 3;\n"
+          "  let mut v: Vector<i32> = Vector::<i32>::new();\n"
+          "  v.push(1); v.push(2); v.push(3); v.push(4);\n"
+          "  let mut m: Vector<i32> = v.map(|x: &i32| *x * k);\n"          // [3,6,9,12]
+          "  m.retain(|x: &i32| *x % 2 == k % 2);\n"                       // odd survive: [3,9]
+          "  let found: i32 = *m.find(|x: &i32| *x > k).unwrap_or(&0);\n"  // 9
+          "  let len: i32 = m.len() as i32;\n"                             // 2
+          "  let o: i32 = Option::<i32>::Some(5).map(|x: i32| x * k).unwrap_or(0);\n" // 15
+          "  let r: Result<i32, i32> = Result::<i32, i32>::Err(2);\n"
+          "  let e: i32 = switch r.map_err(|x: i32| x * k) { Ok(w) => w, Err(w) => w };\n" // 6
+          "  v.free(); m.free();\n"
+          "  unsafe exit(found + len * 6 + o + e); }\n",                          // 9+12+15+6 = 42
+      42, "");
 }
 
 // Untagged unions: fields overlap in memory (a C `union`), so writing one field and reading another is

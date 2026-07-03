@@ -140,6 +140,10 @@ struct Codegen {
                              // lookups must scan the owner's enums instead of trusting the stale index
     NodeId slice_raw;        // the array node currently emitted as the inner `.ptr` of an array->slice
                              // coercion wrap; suppresses re-entrant coercion so it emits as a bare array
+    NodeId env_clos;         // the capturing closure whose body is being emitted: identifiers resolving
+                             // to its captured decls rewrite to `__env-><name>` (NODE_NONE otherwise)
+    bool minst_only;         // emit_inst_methods: emit ONLY the recorded generic-method specs (skip
+                             // ordinary methods) -- the locally-homed fn-value specs of a foreign instance
     // `defer`: a stack of pending deferred statements. Each block scope runs the defers pushed within it,
     // in reverse, at its exit (fall-through, return, break, continue). `loop_defer_base` is the stack depth
     // at the innermost loop body's entry, so break/continue run only the defers registered inside the loop.
@@ -320,13 +324,22 @@ static bool aggregate_has_payload(Codegen *c, const Node *enum_node);
 static bool aggregate_has_payload_in(Codegen *c, ModuleId m, const Node *enum_node);
 static void inst_name(Codegen *c, const TyInstance *it, char *out, size_t cap);
 static void closure_name(Codegen *c, NodeId id, char *out, size_t cap);
+static void closure_sym_in(Codegen *c, ModuleId m, NodeId id, char *out, size_t cap);
+static bool cg_fn_is_capturing(Codegen *c, const Ty *fy);
+static void render_fn_ptr_id(Codegen *c, const Ty fy, const char *decl, char *out, size_t cap);
+static Span cg_decl_name_span(Codegen *c, NodeId decl);
+static void emit_capture_init(Codegen *c, NodeId decl);
 static bool cb_known_callee(Codegen *c, NodeId arg, DefId *out, bool *is_closure);
 static void cb_spec_name(Codegen *c, DefId fn, DefId callee, bool is_closure, char *out, size_t cap);
 static TypeId subst_lookup(Codegen *c, ModuleId m, NodeId decl);
 static TypeId subst_resolve(Codegen *c, TypeId t);
 static bool type_is_concrete(Codegen *c, TypeId t);
+static bool cg_type_mentions_fnval(Codegen *c, TypeId t);
 static size_t buf_append(char *out, size_t cap, size_t at, const char *text);
 static NodeList program_items(Codegen *c);
+// Which prototypes a pass emits: everything (single file), only public + extern (a module's header),
+// or only private (a module's own .c, where they are `static`).
+enum { PROTO_ALL, PROTO_PUBLIC, PROTO_PRIVATE };
 static bool want_fn(int which, bool is_public);
 
 Codegen *codegen_new(Ast *ast, const char *source, const size_t len, const Package *package) {
@@ -617,6 +630,19 @@ static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap)
     case TYPE_INSTANCE:
       inst_name(c, ast_instance(c->ast, ty->as.inst), out, cap);
       break;
+    case TYPE_FUNCTION: {
+      // A function VALUE bound to an `F: fn(..) ..` param: each distinct callee is its own type, so the
+      // spec name embeds the callee's (module-qualified, hence unique) symbol -- or, for a plain
+      // `fn(..) ..` annotation, its (module, node) identity.
+      const Node *const fd = ast_at_const(cg_mod_ast(c, ty->module), ty->as.decl);
+      if (fd->kind == NODE_FUNCTION)
+        render_qualified(c, ty->module, fd->as.function.name, out, cap);
+      else if (fd->kind == NODE_CLOSURE)
+        closure_sym_in(c, ty->module, ty->as.decl, out, cap);
+      else
+        snprintf(out, cap, "fnt%u_%u", (unsigned)ty->module, (unsigned)ty->as.decl);
+      break;
+    }
     default:
       buf_append(out, cap, 0, "v");
       break;
@@ -834,6 +860,79 @@ static void record_inst(Codegen *c, const DefId fn, const TypeId *const args, co
 
 // Scan every node for turbofish generic calls and record the (deduplicated) instantiations this module
 // needs. A linear scan over the node arena finds calls anywhere in any body.
+// A spec's body may itself call a generic with the OUTER's params as its args (`twice<F>` calling
+// `apply(x, f)` records only the abstract apply<F>): expand transitively -- for each recorded inst,
+// resolve every generic call textually inside its function's body through that inst's substitution and
+// record the now-concrete instantiation. The loop bound grows as records append (fixpoint; record_inst
+// dedups and diagnoses overflow), so chains of nested generic calls all materialize.
+static void expand_nested_insts(Codegen *c) {
+  for (int i = 0; i < c->ninsts; i++) {
+    const DefId fn = c->insts[i].fn; // copy: record_inst below appends to c->insts
+    const uint8_t fn_n = c->insts[i].n;
+    TypeId fargs[4];
+    for (uint8_t k = 0; k < fn_n; k++)
+      fargs[k] = c->insts[i].args[k];
+    const bool foreign = fn.module != c->ast->module;
+    if (foreign && (!c->package || fn.module >= c->package->count))
+      continue;
+    // A foreign template expands under the owner-AST swap (its body's calls and their mono records live
+    // there); discovered instantiations are re-interned back into THIS pool, which c->insts speaks.
+    Ast *const home = c->ast;
+    const uint8_t *const hsrc = c->source;
+    const size_t hlen = c->len;
+    size_t oninst = 0; // transient owner interns (arg reinterns, subst_resolve) roll back below
+    if (foreign) {
+      Ast *const owner = cg_mod_ast(c, fn.module);
+      c->source = cg_mod_src(c, fn.module);
+      c->len = c->package->modules[fn.module].source_len;
+      c->ast = owner;
+      c->borrowed = true;
+      oninst = owner->instances.len;
+      for (uint8_t k = 0; k < fn_n; k++)
+        fargs[k] = ast_reintern(owner, home, fargs[k]);
+    }
+    const Node *const fnn = ast_at_const(c->ast, fn.node);
+    const Span fsp = fnn->span;
+    const NodeList gens = fnn->as.function.generics;
+    const NodeId *const gids = ast_list(c->ast, gens);
+    c->nsubst = 0;
+    for (uint32_t g = 0; g < gens.len && g < fn_n && c->nsubst < 8; g++) {
+      c->subst[c->nsubst].param = (DefId){fn.module, gids[g]};
+      c->subst[c->nsubst].concrete = fargs[g];
+      c->nsubst++;
+    }
+    for (uint32_t nid = 1; nid < c->ast->nodes.len; nid++) {
+      const Node *const nn = ast_at_const(c->ast, nid);
+      // Textual containment identifies the body's calls (closures inside generic fns are rejected, so
+      // every call inside the span belongs to this function's monomorphization).
+      if (nn->kind != NODE_CALL || nn->span.start < fsp.start || nn->span.end > fsp.end)
+        continue;
+      TypeId args[4];
+      int n = 0;
+      const DefId g2 = generic_call_target(c, nid, args, &n);
+      if (g2.node == NODE_NONE)
+        continue;
+      bool concrete = true;
+      for (int k = 0; k < n; k++) {
+        args[k] = subst_resolve(c, args[k]);
+        concrete &= type_is_concrete(c, args[k]); // checked in the pool the id belongs to (owner if foreign)
+        if (foreign)
+          args[k] = ast_reintern(home, c->ast, args[k]); // c->insts speaks the home pool
+      }
+      if (concrete)
+        record_inst(c, g2, args, n, nid);
+    }
+    c->nsubst = 0;
+    if (foreign) {
+      c->ast->instances.len = oninst;
+      c->borrowed = false;
+      c->ast = home;
+      c->source = hsrc;
+      c->len = hlen;
+    }
+  }
+}
+
 static void collect_insts(Codegen *c) {
   c->ninsts = 0;
   for (uint32_t i = 0; i < c->ast->nodes.len; i++) {
@@ -846,6 +945,7 @@ static void collect_insts(Codegen *c) {
     if (fn.node != NODE_NONE)
       record_inst(c, fn, args, n, i);
   }
+  expand_nested_insts(c);
 }
 
 static void fresh(Codegen *c, char *buf, const size_t cap) {
@@ -1459,10 +1559,84 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       buf_join3(out, cap, nm, SEP(decl), decl);
       break;
     }
+    case TYPE_FUNCTION: {
+      // A concrete function value (an `F: fn(..) ..` substitution): a capturing closure's C value is its
+      // env struct; anything else (named fn / non-capturing closure / fn-pointer annotation) is a pointer.
+      if (cg_fn_is_capturing(c, ty)) {
+        char envn[240];
+        closure_sym_in(c, ty->module, ty->as.decl, envn, sizeof envn);
+        buf_append(envn, sizeof envn, strlen(envn), "_env");
+        buf_join3(out, cap, envn, SEP(decl), decl);
+      } else {
+        render_fn_ptr_id(c, *ty, decl, out, cap);
+      }
+      break;
+    }
     default:
       buf_join3(out, cap, "void", SEP(decl), decl);
       break;
   }
+}
+
+// Render the C function-pointer declarator `<ret> (*<decl>)(<params>)` for a TYPE_FUNCTION whose backing
+// node (NODE_FUNCTION / NODE_CLOSURE / NODE_FUNCTION_TYPE) may live in ANOTHER module: the signature's
+// checked types are read from that module's side tables and re-interned into the current pool to render.
+static void render_fn_ptr_id(Codegen *c, const Ty fy, const char *decl, char *out, const size_t cap) {
+  Ast *const fa = cg_mod_ast(c, fy.module);
+  const Node *const fn = ast_at_const(fa, fy.as.decl);
+  NodeList ps, rs;
+  NodeId body = NODE_NONE; // compact closure: the return type is its body expression's
+  switch (fn->kind) {
+    case NODE_FUNCTION: ps = fn->as.function.params; rs = fn->as.function.returns; break;
+    case NODE_CLOSURE:
+      ps = fn->as.closure.params;
+      rs = fn->as.closure.returns;
+      if (fn->as.closure.expr_body)
+        body = fn->as.closure.body;
+      break;
+    default: ps = fn->as.function_type.params; rs = fn->as.function_type.returns; break;
+  }
+  char params[480];
+  size_t k = 0;
+  params[0] = '\0';
+  const NodeId *const pid = ast_list(fa, ps);
+  for (uint32_t i = 0; i < ps.len && k < sizeof params; i++) {
+    const Node *const pn = ast_at_const(fa, pid[i]);
+    const NodeId tn = pn->kind == NODE_PARAMETER ? pn->as.parameter.type : pid[i];
+    char tt[256];
+    render_type_id(c, ast_reintern(c->ast, fa, ast_type(fa, tn)), "", tt, sizeof tt);
+    if (i)
+      k = buf_append(params, sizeof params, k, ", ");
+    k = buf_append(params, sizeof params, k, tt);
+  }
+  char inner[600];
+  size_t at = 0;
+  inner[0] = '\0';
+  at = buf_append(inner, sizeof inner, at, "(*");
+  at = buf_append(inner, sizeof inner, at, decl);
+  at = buf_append(inner, sizeof inner, at, ")(");
+  at = buf_append(inner, sizeof inner, at, ps.len ? params : "void");
+  buf_append(inner, sizeof inner, at, ")");
+  TypeId rt = TYPE_NONE;
+  if (rs.len == 1) {
+    const NodeId r0 = ast_list(fa, rs)[0];
+    const Node *const rn = ast_at_const(fa, r0);
+    rt = ast_reintern(c->ast, fa, ast_type(fa, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0));
+  } else if (body != NODE_NONE) {
+    rt = ast_reintern(c->ast, fa, ast_type(fa, body));
+  }
+  if (rt != TYPE_NONE)
+    render_type_id(c, rt, inner, out, cap);
+  else
+    buf_join3(out, cap, "void ", "", inner);
+}
+
+// True when `fy` (a TYPE_FUNCTION) is backed by a closure with captures: its C value is its env struct.
+static bool cg_fn_is_capturing(Codegen *c, const Ty *const fy) {
+  if (fy->kind != TYPE_FUNCTION)
+    return false;
+  const Node *const fn = ast_at_const(cg_mod_ast(c, fy->module), fy->as.decl);
+  return fn->kind == NODE_CLOSURE && fn->as.closure.captures.len != 0;
 }
 
 // True (and yields `*elem`) when `tid` is a prelude `Slice<E>` / `SliceMut<E>` instance -- the lowered
@@ -1538,8 +1712,10 @@ static bool cg_binding_subst_indirect(Codegen *c, const NodeId tn) {
     // Inside a macro template the concrete arg is unknown -- it may be a reference (`const P *`), so a
     // west-const param `const T` would double the const. East-const (`T const`) is safe for any C type.
     return c->macro && dn->kind == NODE_GENERIC_PARAM;
-  const TypeKind sk = ast_type_at(c->ast, s)->kind;
-  return sk == TYPE_POINTER || sk == TYPE_REFERENCE;
+  const Ty *const sy = ast_type_at(c->ast, s);
+  if (sy->kind == TYPE_FUNCTION) // an `F: fn(..)` param: a fn POINTER takes east-const like a written
+    return !cg_fn_is_capturing(c, sy); // `fn(..) ..` type; a capturing closure is a struct value (west)
+  return sy->kind == TYPE_POINTER || sy->kind == TYPE_REFERENCE;
 }
 
 // Same west/east const placement, but from an AST type node (preserves array lengths). Pointer,
@@ -1628,6 +1804,13 @@ static void render_fn_value(Codegen *c, const NodeId fn, const char *decl, char 
 static void emit_binding(Codegen *c, const TypeId t, const Span name, const bool is_const) {
   const Ty *const ty = ast_type_at(c->ast, t);
   const TypeKind k = ty->kind;
+  if (k == TYPE_FUNCTION && cg_fn_is_capturing(c, ty)) { // a capturing closure's value IS its env struct
+    char nm[128], decl[400];
+    render_ident(c, name, nm, sizeof nm);
+    render_binding_id(c, t, nm, is_const, decl, sizeof decl);
+    emit_cstr(c, decl);
+    return;
+  }
   if (k == TYPE_FUNCTION && ty->module == c->ast->module) {
     char nm[128], cnm[160], decl[400];
     render_ident(c, name, nm, sizeof nm);
@@ -2363,12 +2546,37 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     }
   }
 
-  { // a call to a generic function (turbofish or inferred) -> the monomorphized specialization
+  { // a call THROUGH a capturing-closure value (a literal, a let-binding, or an `F: fn(..)` param
+    // monomorphized to one): dispatch to its hoisted fn, passing the env value's address first.
+    const TypeId ct0 = ast_type(c->ast, callee_id);
+    if (ct0 != TYPE_NONE) {
+      const Ty cty = *ast_type_at(c->ast, subst_resolve(c, ct0));
+      if (cty.kind == TYPE_FUNCTION && cg_fn_is_capturing(c, &cty)) {
+        char sym[200];
+        closure_sym_in(c, cty.module, cty.as.decl, sym, sizeof sym);
+        emit(c, "%s(&(", sym);
+        emit_expr(c, callee_id);
+        emit(c, ")");
+        for (uint32_t i = 0; i < args.len; i++) {
+          emit(c, ", ");
+          emit_expr(c, aids[i]);
+        }
+        emit(c, ")");
+        return;
+      }
+    }
+  }
+
+  { // a call to a generic function (turbofish or inferred) -> the monomorphized specialization.
+    // Inside another specialization the recorded args may BE the outer generics (`twice<F>` calling
+    // `apply(x, f)` records apply<F>): resolve through the active substitution so the name is concrete.
     TypeId ga[4];
     int gn;
     const DefId g = generic_call_target(c, id, ga, &gn);
     if (g.node != NODE_NONE) {
       char nm[256];
+      for (int k = 0; k < gn; k++)
+        ga[k] = subst_resolve(c, ga[k]);
       spec_name(c, g, ga, gn, nm, sizeof nm);
       emit_cstr(c, nm);
       emit(c, "(");
@@ -2840,8 +3048,51 @@ static bool decl_is_toplevel(Codegen *c, const ModuleId m, const NodeId node) {
   return false;
 }
 
+// The source name span of a local binding decl (a closure capture): a LET/PARAMETER's name, a FOR
+// binding, a tuple-let element (the identifier itself), or a pattern binding's name.
+static Span cg_decl_name_span(Codegen *c, const NodeId decl) {
+  const Node *const d = ast_at_const(c->ast, decl);
+  switch (d->kind) {
+    case NODE_LET: return ast_at_const(c->ast, d->as.let_stmt.name)->as.name.text;
+    case NODE_PARAMETER: return ast_at_const(c->ast, d->as.parameter.name)->as.name.text;
+    case NODE_FOR: return ast_at_const(c->ast, d->as.for_stmt.binding)->as.name.text;
+    case NODE_PATTERN_NAME: return ast_at_const(c->ast, d->as.pattern.name)->as.name.text;
+    default: return d->as.name.text; // NODE_IDENTIFIER: a tuple-let element declares itself
+  }
+}
+
+// One `.name = <value>` env-literal field for captured decl `decl`. The value is the capture's current
+// C lvalue at the creation site -- which, inside an enclosing closure's body, may itself be one of THAT
+// closure's captures (`__env->name`).
+static void emit_capture_init(Codegen *c, const NodeId decl) {
+  char nm[128];
+  render_ident(c, cg_decl_name_span(c, decl), nm, sizeof nm);
+  emit(c, ".%s = ", nm);
+  if (c->env_clos != NODE_NONE) {
+    const NodeList caps = ast_at_const(c->ast, c->env_clos)->as.closure.captures;
+    const NodeId *const cids = ast_list(c->ast, caps);
+    for (uint32_t i = 0; i < caps.len; i++)
+      if (cids[i] == decl) {
+        emit(c, "__env->");
+        break;
+      }
+  }
+  emit_cstr(c, nm);
+}
+
 static void emit_ident_ref(Codegen *c, const NodeId id, const Node *n) {
   const DefId d = ast_resolution_def(c->ast, id);
+  // Inside a capturing closure's hoisted body, a reference to a captured local reads the env copy.
+  if (c->env_clos != NODE_NONE && d.node != NODE_NONE && d.module == c->ast->module) {
+    const NodeList caps = ast_at_const(c->ast, c->env_clos)->as.closure.captures;
+    const NodeId *const cids = ast_list(c->ast, caps);
+    for (uint32_t i = 0; i < caps.len; i++)
+      if (cids[i] == d.node) {
+        emit(c, "__env->");
+        emit_ident(c, n->as.name.text);
+        return;
+      }
+  }
   if (d.node != NODE_NONE) {
     Ast *const da = cg_mod_ast(c, d.module);
     const Node *const dn = ast_at_const(da, d.node);
@@ -3196,10 +3447,23 @@ static void emit_expr(Codegen *c, const NodeId id) {
         emit(c, ")");
       break;
     }
-    case NODE_CLOSURE: { // a closure value is just the address of its hoisted static function
+    case NODE_CLOSURE: {
       char nm[200];
       closure_name(c, id, nm, sizeof nm);
-      emit_cstr(c, nm);
+      if (n->as.closure.captures.len) {
+        // A capturing closure's value is its env struct, built HERE: captures copy at creation. (Calls
+        // pass its address to the hoisted fn; the compound literal is an lvalue, so `&` applies.)
+        emit(c, "((%s_env){ ", nm);
+        const NodeId *const cids = ast_list(c->ast, n->as.closure.captures);
+        for (uint32_t i = 0; i < n->as.closure.captures.len; i++) {
+          if (i)
+            emit(c, ", ");
+          emit_capture_init(c, cids[i]);
+        }
+        emit(c, " })");
+        break;
+      }
+      emit_cstr(c, nm); // non-capturing: the address of its hoisted static function
       break;
     }
     case NODE_TUPLE: { // `(a, b, ..)` -> a Tuple<n> struct literal (fields `_0`..)
@@ -5825,28 +6089,58 @@ static void emit_function(Codegen *c, const NodeId fn_id, const DefId target, co
   }
 }
 
-// `<mod>__closure_<nodeid>`: a hoisted closure's C symbol. The NodeId is unique within the module, so the
-// name is stable across the prototype, the definition and every value reference to the closure.
-static void closure_name(Codegen *c, const NodeId id, char *out, const size_t cap) {
-  size_t k = render_modpfx(c, c->ast->module, out, cap);
+// `<mod>__closure_<nodeid>`: a hoisted closure's C symbol -- rendered for an EXPLICIT module, so a
+// specialization emitted under the owner-AST swap still names a foreign closure correctly. The NodeId is
+// unique within its module, so the name is stable across the prototype, the definition and every value
+// reference; a capturing closure's env struct is `<symbol>_env`.
+static void closure_sym_in(Codegen *c, const ModuleId m, const NodeId id, char *out, const size_t cap) {
+  size_t k = render_modpfx(c, m, out, cap);
   k = buf_append(out, cap, k, "closure_");
   char idb[16];
   snprintf(idb, sizeof idb, "%u", (unsigned)id);
   buf_append(out, cap, k, idb);
 }
 
+static void closure_name(Codegen *c, const NodeId id, char *out, const size_t cap) {
+  closure_sym_in(c, c->ast->module, id, out, cap);
+}
+
 // Emit a hoisted closure as a file-local `static` function: a prototype when !with_body, else the body. A
 // compact closure (`expr_body`) returns its body expression; an anonymous `fn` emits its block verbatim.
+// A CAPTURING closure takes its env struct (emitted with the prototype) as a leading `__env` pointer;
+// body references to captured locals read through it (emit_ident_ref).
 static void emit_closure_fn(Codegen *c, const NodeId id, const bool with_body) {
   const Node *const n = ast_at_const(c->ast, id);
+  const bool caps = n->as.closure.captures.len != 0;
   char nm[200];
   closure_name(c, id, nm, sizeof nm);
+  if (caps && !with_body) { // the env struct: one copied field per captured local
+    emit(c, "typedef struct { ");
+    const NodeId *const cids = ast_list(c->ast, n->as.closure.captures);
+    for (uint32_t i = 0; i < n->as.closure.captures.len; i++) {
+      char fnm[128], d[300];
+      render_ident(c, cg_decl_name_span(c, cids[i]), fnm, sizeof fnm);
+      render_type_id(c, ast_type(c->ast, cids[i]), fnm, d, sizeof d);
+      emit(c, "%s; ", d);
+    }
+    emit(c, "} %s_env;\n", nm);
+  }
   char ps[1024];
   render_params(c, n->as.closure.params, ps, sizeof ps);
   char decl[1300];
   size_t at = buf_append(decl, sizeof decl, 0, nm);
   at = buf_append(decl, sizeof decl, at, "(");
-  at = buf_append(decl, sizeof decl, at, ps);
+  if (caps) {
+    at = buf_append(decl, sizeof decl, at, "const ");
+    at = buf_append(decl, sizeof decl, at, nm);
+    at = buf_append(decl, sizeof decl, at, "_env *const __env");
+    if (strcmp(ps, "void") != 0) {
+      at = buf_append(decl, sizeof decl, at, ", ");
+      at = buf_append(decl, sizeof decl, at, ps);
+    }
+  } else {
+    at = buf_append(decl, sizeof decl, at, ps);
+  }
   buf_append(decl, sizeof decl, at, ")");
 
   const NodeId body = n->as.closure.body;
@@ -5872,6 +6166,8 @@ static void emit_closure_fn(Codegen *c, const NodeId id, const bool with_body) {
     return;
   }
   c->current_ret[0] = '\0';
+  const NodeId saved_env = c->env_clos; // captured-ident rewrite context for THIS body
+  c->env_clos = caps ? id : NODE_NONE;
   if (expr_body) {
     const Ty *const rty = rt != TYPE_NONE ? ast_type_at(c->ast, rt) : NULL;
     const bool is_void = rty && rty->kind == TYPE_BUILTIN && rty->as.builtin == BT_VOID;
@@ -5891,6 +6187,7 @@ static void emit_closure_fn(Codegen *c, const NodeId id, const bool with_body) {
     emit_block(c, body);
     emit(c, "\n\n");
   }
+  c->env_clos = saved_env;
 }
 
 // Hoist every closure in this module to a top-level static function (prototypes, then definitions). The
@@ -6083,28 +6380,69 @@ static void emit_callback_specializations(Codegen *c, const bool with_body) {
 static void emit_specializations(Codegen *c, const bool with_body) {
   for (int i = 0; i < c->ninsts; i++) {
     const DefId fn = c->insts[i].fn;
-    if (fn.module != c->ast->module)
-      continue; // cross-module generic definitions not yet specialized (per-Ast TypeId pools differ)
     bool concrete = true;
     for (uint8_t k = 0; k < c->insts[i].n; k++)
       concrete &= type_is_concrete(c, c->insts[i].args[k]);
     if (!concrete) // skip an intermediate instantiation (e.g. id::<T> called inside another generic)
       continue;
-    const Node *const fnnode = ast_at_const(c->ast, fn.node);
+    if (fn.module == c->ast->module) {
+      const Node *const fnnode = ast_at_const(c->ast, fn.node);
+      const NodeList gens = fnnode->as.function.generics;
+      const NodeId *const gids = ast_list(c->ast, gens);
+      c->nsubst = 0;
+      for (uint32_t g = 0; g < gens.len && g < c->insts[i].n && c->nsubst < 8; g++) {
+        c->subst[c->nsubst].param = (DefId){fn.module, gids[g]};
+        c->subst[c->nsubst].concrete = c->insts[i].args[g];
+        c->nsubst++;
+      }
+      char nm[256];
+      spec_name(c, fn, c->insts[i].args, c->insts[i].n, nm, sizeof nm);
+      if (!with_body) // the spec's `<name>_ret` typedef (multi-return / array-by-value), under the same subst
+        emit_ret_struct_named(c, fn.node, nm);
+      emit_function(c, fn.node, (DefId){0, NODE_NONE}, false, with_body, nm, true);
+      c->nsubst = 0;
+      continue;
+    }
+    // A FOREIGN generic free function: emit a file-local (static) copy HERE, sourcing the template from
+    // its owner via the c->ast swap (like re-homed instances). Free-fn specs were always per-module
+    // static, so each calling module owning its own copy is the same linkage story as before -- and it
+    // is what lets an `F: fn(..)` arg name a local closure. (The body's own callees must be visible
+    // here: a pub generic fn calling a module-private helper stays a C-level error.)
+    if (!c->package || fn.module >= c->package->count)
+      continue;
+    Ast *const home = c->ast;
+    const uint8_t *const hsrc = c->source;
+    const size_t hlen = c->len;
+    Ast *const owner = cg_mod_ast(c, fn.module);
+    const uint8_t *const osrc = cg_mod_src(c, fn.module);
+    const size_t oninst = owner->instances.len; // transient interns (arg reinterns) roll back below
+    TypeId oargs[4];
+    for (uint8_t k = 0; k < c->insts[i].n; k++)
+      oargs[k] = ast_reintern(owner, home, c->insts[i].args[k]);
+    c->ast = owner;
+    c->source = osrc;
+    c->len = c->package->modules[fn.module].source_len;
+    c->borrowed = true;
+    const Node *const fnnode = ast_at_const(owner, fn.node);
     const NodeList gens = fnnode->as.function.generics;
-    const NodeId *const gids = ast_list(c->ast, gens);
+    const NodeId *const gids = ast_list(owner, gens);
     c->nsubst = 0;
     for (uint32_t g = 0; g < gens.len && g < c->insts[i].n && c->nsubst < 8; g++) {
       c->subst[c->nsubst].param = (DefId){fn.module, gids[g]};
-      c->subst[c->nsubst].concrete = c->insts[i].args[g];
+      c->subst[c->nsubst].concrete = oargs[g];
       c->nsubst++;
     }
     char nm[256];
-    spec_name(c, fn, c->insts[i].args, c->insts[i].n, nm, sizeof nm);
-    if (!with_body) // the spec's `<name>_ret` typedef (multi-return / array-by-value), under the same subst
+    spec_name(c, fn, oargs, c->insts[i].n, nm, sizeof nm);
+    if (!with_body)
       emit_ret_struct_named(c, fn.node, nm);
     emit_function(c, fn.node, (DefId){0, NODE_NONE}, false, with_body, nm, true);
     c->nsubst = 0;
+    owner->instances.len = oninst;
+    c->borrowed = false;
+    c->ast = home;
+    c->source = hsrc;
+    c->len = hlen;
   }
 }
 
@@ -6347,7 +6685,10 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
       const Node *const mn = ast_at_const(c->ast, mids[j]);
       if (mn->kind != NODE_FUNCTION)
         continue;
-      if (with_body ? mn->as.function.body == NODE_NONE : !want_fn(which, mn->as.function.is_public))
+      // Ordinary methods gate on `which` here; a GENERIC method decides per recorded instantiation
+      // below (a spec over a function value is always static -> the .c pass, whatever the visibility).
+      if (with_body ? mn->as.function.body == NODE_NONE
+                    : (mn->as.function.generics.len == 0 && !want_fn(which, mn->as.function.is_public)))
         continue;
       // Bind the extend's generics (e.g. T) from the instance's args -- shared by every spec below.
       c->nsubst = 0;
@@ -6361,6 +6702,10 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
       at = buf_append(nm, sizeof nm, at, "__");
       render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
       const bool stat = c->multifile && !mn->as.function.is_public;
+      if (c->minst_only && mn->as.function.generics.len == 0) { // foreign-instance pass: only the
+        c->nsubst = 0;                                          // recorded generic-method specs are ours
+        continue;
+      }
       if (mn->as.function.generics.len == 0) { // ordinary method: one spec per instance
         // Demand-driven emission: an INHERENT method (itrait unset) of a non-`@emit_macro` type that the
         // type-checker never resolved is dead -- skip it (no call site can reference it, so this is sound).
@@ -6387,11 +6732,18 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
         if (inst.method != mids[j] || inst.instance != mi_inst)
           continue;
         c->nsubst = nimpl;
+        bool fnval = false; // a type arg naming a function value (closure env / fn symbol) is TU-local
         for (uint32_t g = 0; g < mg.len && g < inst.n && c->nsubst < 8; g++) {
           c->subst[c->nsubst].param = (DefId){c->ast->module, mgids[g]};
           c->subst[c->nsubst].concrete = mi_src == c->ast ? inst.targs[g] : ast_reintern(c->ast, mi_src, inst.targs[g]);
+          fnval |= cg_type_mentions_fnval(c, c->subst[c->nsubst].concrete);
           c->nsubst++;
         }
+        // A function-value spec never crosses the TU: its prototype stays out of the header and the
+        // symbol is static, so two modules instantiating the same (pub) method with the same named fn
+        // each get their own file-local copy instead of a duplicate external symbol.
+        if (!with_body && !(fnval ? which != PROTO_PUBLIC : want_fn(which, mn->as.function.is_public)))
+          continue;
         char snm[400];
         size_t a2 = buf_append(snm, sizeof snm, 0, nm);
         for (uint8_t g = 0; g < inst.n; g++) {
@@ -6402,7 +6754,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
         }
         if (!with_body)
           emit_ret_struct_named(c, mids[j], snm);
-        emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, snm, stat);
+        emit_function(c, mids[j], (DefId){0, NODE_NONE}, false, with_body, snm, stat || fnval);
       }
       c->nsubst = 0;
     }
@@ -7383,6 +7735,79 @@ static void emit_rehomed_methods(Codegen *c, const int which, const bool with_bo
   }
 }
 
+// True when `t` names a function VALUE anywhere (a TYPE_FUNCTION, possibly nested): specs over one are
+// TU-local (a closure's env/static fn, or a per-module static copy for a named fn), never header symbols.
+static bool cg_type_mentions_fnval(Codegen *c, const TypeId t) {
+  if (t == TYPE_NONE)
+    return false;
+  const Ty *const y = ast_type_at(c->ast, t);
+  switch (y->kind) {
+    case TYPE_FUNCTION:
+      return true;
+    case TYPE_POINTER:
+    case TYPE_REFERENCE:
+    case TYPE_SLICE:
+    case TYPE_ARRAY:
+      return cg_type_mentions_fnval(c, y->as.elem);
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(c->ast, y->as.inst);
+      for (uint8_t i = 0; i < it->n; i++)
+        if (cg_type_mentions_fnval(c, it->args[i]))
+          return true;
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+// Generic-method specs recorded HERE over a foreign instance that is NOT re-homed here: a method type
+// arg names a local function value (the loader routes those uses to the calling module), so THIS module
+// emits the spec -- static, sourcing the template from the owner via the c->ast swap, exactly like
+// emit_rehomed_methods but restricted to the recorded generic-method instantiations.
+static void emit_local_method_insts(Codegen *c, const int which, const bool with_body) {
+  if (!c->package || (!with_body && which == PROTO_PUBLIC))
+    return; // everything this pass emits is static -> .c only
+  Ast *const home = c->ast;
+  const uint8_t *const hsrc = c->source;
+  const size_t hlen = c->len;
+  for (size_t ii = 0; ii < home->instances.len; ii++) {
+    const TyInstance it = home->instances.data[ii];
+    if (it.module == home->module || it.module >= c->package->count || inst_rehomed_here(c, &it))
+      continue; // owned or re-homed instances already emit their recorded specs
+    bool concrete = true;
+    for (uint8_t k = 0; k < it.n; k++)
+      concrete &= type_is_concrete(c, it.args[k]);
+    if (!concrete)
+      continue;
+    const TypeId itTy = ast_intern_instance(home, it.module, it.decl, it.args, it.n);
+    bool any = false; // a recorded use keyed to this instance in THIS module's table?
+    for (size_t mk = 0; mk < home->method_insts.len && !any; mk++)
+      any = home->method_insts.data[mk].instance == itTy;
+    if (!any)
+      continue;
+    Ast *const owner = cg_mod_ast(c, it.module);          // capture owner ast/source BEFORE swapping c->ast
+    const uint8_t *const osrc = cg_mod_src(c, it.module);
+    const size_t oninst = owner->instances.len;
+    TyInstance oit = it;
+    for (uint8_t k = 0; k < it.n; k++)
+      oit.args[k] = ast_reintern(owner, home, it.args[k]);
+    c->ast = owner;
+    c->source = osrc;
+    c->len = c->package->modules[it.module].source_len;
+    c->borrowed = true;
+    c->minst_only = true;
+    emit_inst_methods(c, &oit, home, itTy, which, with_body);
+    c->minst_only = false;
+    owner->instances.len = oninst; // drop transient instances so the owner's own pass never re-emits them
+    c->borrowed = false;
+    c->ast = home;
+    c->source = hsrc;
+    c->len = hlen;
+    c->nsubst = 0;
+  }
+}
+
 // The C aggregate keyword for a struct decl: `union` for an untagged union, else `struct`.
 static const char *agg_kw(const Node *const n) {
   return n->kind == NODE_STRUCT && n->as.aggregate.is_union ? "union" : "struct";
@@ -7610,10 +8035,6 @@ static void phase_ret_structs(Codegen *c) {
   }
 }
 
-// Which prototypes a pass emits: everything (single file), only public + extern (a module's header),
-// or only private (a module's own .c, where they are `static`).
-enum { PROTO_ALL, PROTO_PUBLIC, PROTO_PRIVATE };
-
 static bool want_fn(const int which, const bool is_public) {
   return which == PROTO_ALL || (which == PROTO_PUBLIC) == is_public;
 }
@@ -7648,12 +8069,13 @@ static void phase_prototypes(Codegen *c, const int which) {
     // extern types) convert freely, so `*mut CFile = fopen(...)` and `fclose(h)` type-check in C.
   }
   if (which != PROTO_PUBLIC) { // free-function specs, closures and callback specs are static -> .c only
+    emit_closures(c, false); // first: env struct typedefs, which spec prototypes may take as params
     emit_specializations(c, false);
-    emit_closures(c, false);
     emit_callback_specializations(c, false);
   }
   emit_method_specializations(c, which, false); // method specs: pub -> header (PUBLIC), private -> .c (PRIVATE)
   emit_rehomed_methods(c, which, false);         // method protos for cross-module instances homed here
+  emit_local_method_insts(c, which, false);      // fn-value generic-method specs recorded here (static)
   emit_default_methods(c, which, false);         // inherited interface default-method prototypes
 }
 
@@ -7705,6 +8127,7 @@ static void phase_bodies(Codegen *c) {
   emit_specializations(c, true);            // concrete generic free-function instantiations
   emit_method_specializations(c, PROTO_ALL, true); // concrete generic method instantiations
   emit_rehomed_methods(c, PROTO_ALL, true);  // method bodies for cross-module instances homed here
+  emit_local_method_insts(c, PROTO_ALL, true); // fn-value generic-method spec bodies recorded here
   emit_closures(c, true);                    // hoisted closure / anonymous-fn bodies
   emit_callback_specializations(c, true);    // callback-specialized free functions (Win 1)
 

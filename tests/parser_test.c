@@ -215,6 +215,26 @@ static void test_closures(void) {
     CHECK(th_nth_kind(c, NODE_BINARY, 0) != NODE_NONE, "`a | b` is a binary expression");
     ast_free(&c);
   }
+  // `F: fn(i32) i32` -- a callable bound is a NODE_FUNCTION_TYPE in the generic param's bound list
+  // (one-token LL(1) decision on `fn`); the same form parses in a where clause.
+  Ast *d = sc_parse("fn-type bound", "fn apply<F: fn(i32) i32 + Eq>(x: i32, f: F) i32 { return f(x); }\n");
+  if (d) {
+    const Node *gp = ast_at_const(d, th_nth_kind(d, NODE_GENERIC_PARAM, 0));
+    CHECK(gp->as.generic_param.bounds.len == 2, "both bounds collected");
+    const NodeId *bids = ast_list(d, gp->as.generic_param.bounds);
+    CHECK(ast_at_const(d, bids[0])->kind == NODE_FUNCTION_TYPE, "`fn(..) ..` parses as a bound");
+    CHECK(ast_at_const(d, bids[0])->as.function_type.params.len == 1, "the bound keeps its signature");
+    CHECK(ast_at_const(d, bids[1])->kind == NODE_TYPE_PATH, "an interface bound still follows `+`");
+    ast_free(&d);
+  }
+  Ast *e = sc_parse("fn-type bound in where", "fn apply<F>(x: i32, f: F) i32 where F: fn(i32) i32 { return f(x); }\n");
+  if (e) {
+    const Node *wp = ast_at_const(e, th_nth_kind(e, NODE_WHERE_PREDICATE, 0));
+    const NodeId *bids = ast_list(e, wp->as.where_predicate.bounds);
+    CHECK(wp->as.where_predicate.bounds.len == 1 && ast_at_const(e, bids[0])->kind == NODE_FUNCTION_TYPE,
+          "`where F: fn(..) ..` parses");
+    ast_free(&e);
+  }
 }
 
 static void test_error_recovery(void) {

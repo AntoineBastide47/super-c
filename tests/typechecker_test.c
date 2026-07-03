@@ -723,6 +723,64 @@ static void test_unsafe_enforcement(void) {
 #undef EXTC
 }
 
+// Capturing closures + `F: fn(..) ..` bounds: what must check, and every capture restriction.
+static void test_closures(void) {
+  expect_ok(
+      "fn bound callable and satisfied",
+      "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\n"
+      "fn inc(x: i32) i32 { return x + 1; }\n"
+      "fn main() i32 { let b = 1; return apply(1, inc) + apply(1, |x: i32| x + b); }\n");
+  expect_ok(
+      "where-clause fn bound callable",
+      "fn apply<F>(x: i32, f: F) i32 where F: fn(i32) i32 { return f(x); }\n"
+      "fn main() i32 { return apply(1, |x: i32| x + 1); }\n");
+  expect_error(
+      "fn bound signature mismatch",
+      "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\n"
+      "fn main() i32 { return apply(1, |x: bool| x); }\n",
+      "does not satisfy bound");
+  expect_error(
+      "capturing closure into a bare fn param",
+      "fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }\n"
+      "fn main() i32 { let b = 1; return apply(|x: i32| x + b, 1); }\n",
+      "a capturing closure cannot be passed as a bare 'fn' pointer");
+  expect_error(
+      "capturing closure into a bare fn let",
+      "fn main() i32 { let b = 1; let f: fn(i32) i32 = |x: i32| x + b; return f(1); }\n",
+      "mismatch");
+  expect_error(
+      "assignment to a capture",
+      "fn main() i32 { let mut n = 1; let f = fn(x: i32) i32 { n = x; return n; }; return f(1); }\n",
+      "cannot assign");
+  expect_error(
+      "&mut of a capture",
+      "fn bump(r: &mut i32) { *r += 1; }\n"
+      "fn main() i32 { let mut n = 1; let f = fn(x: i32) i32 { bump(&mut n); return x; }; return f(1); }\n",
+      "cannot take '&mut' of an immutable binding");
+  expect_error(
+      "&mut self method on a capture",
+      "struct Counter { pub n: i32 }\n"
+      "extend Counter { fn bump(self: &mut Counter) { self.n += 1; } }\n"
+      "fn main() i32 {\n"
+      "  let mut c: Counter = Counter { n: 0 };\n"
+      "  let f = fn(x: i32) i32 { c.bump(); return x; };\n"
+      "  return f(1);\n"
+      "}\n",
+      "cannot call a '&mut self' method on an immutable binding");
+  expect_error(
+      "capturing a Free value",
+      "fn main() i32 {\n"
+      "  let s: String = String::from_str(\"hi\");\n"
+      "  let f = |x: i32| x + s.len() as i32;\n"
+      "  return f(1);\n"
+      "}\n",
+      "closure cannot capture this variable");
+  expect_error(
+      "capturing a fixed-size array",
+      "fn main() i32 { let a: [i32; 2] = [1, 2]; let f = |x: i32| x + a[0]; return f(1); }\n",
+      "closure cannot capture this variable");
+}
+
 int main(void) {
   test_ok();
   test_bug_regressions();
@@ -741,6 +799,7 @@ int main(void) {
   test_never_type();
   test_tuples();
   test_interface_bounds();
+  test_closures();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

@@ -84,7 +84,7 @@ extend<T, E> Result<T, E> {
     }
 
     // Map the success value through `f`, leaving an error untouched. Consumes `self`.
-    pub fn map<U>(self: Result<T, E>, f: fn(T) U) Result<U, E> {
+    pub fn map<U, F: fn(T) U>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
             Ok(v) => Result::<U, E>::Ok(f(v)),
             Err(e) => Result::<U, E>::Err(e),
@@ -92,7 +92,7 @@ extend<T, E> Result<T, E> {
     }
 
     // Map the error value through `f`, leaving a success untouched. Consumes `self`.
-    pub fn map_err<F>(self: Result<T, E>, f: fn(E) F) Result<T, F> {
+    pub fn map_err<F, M: fn(E) F>(self: Result<T, E>, f: M) Result<T, F> {
         return switch self {
             Ok(v) => Result::<T, F>::Ok(v),
             Err(e) => Result::<T, F>::Err(f(e)),
@@ -100,7 +100,7 @@ extend<T, E> Result<T, E> {
     }
 
     // Chain a fallible step on the success value; `f` returns its own `Result` (flat-map). Consumes `self`.
-    pub fn and_then<U>(self: Result<T, E>, f: fn(T) Result<U, E>) Result<U, E> {
+    pub fn and_then<U, F: fn(T) Result<U, E>>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
             Ok(v) => f(v),
             Err(e) => Result::<U, E>::Err(e),

@@ -81,7 +81,7 @@ extend<T> Option<T> {
     }
 
     // Map the contained value through `f`, producing `Option<U>` (`None` stays `None`). Consumes `self`.
-    pub fn map<U>(self: Option<T>, f: fn(T) U) Option<U> {
+    pub fn map<U, F: fn(T) U>(self: Option<T>, f: F) Option<U> {
         return switch self {
             Some(v) => Option::<U>::Some(f(v)),
             None => Option::<U>::None,
@@ -90,7 +90,7 @@ extend<T> Option<T> {
 
     // Map the contained value, or return `default` when empty. Consumes `self`; frees the unused `default`
     // on the `Some` path (a no-op for non-`Free` types).
-    pub fn map_or<U>(self: Option<T>, default: U, f: fn(T) U) U {
+    pub fn map_or<U, F: fn(T) U>(self: Option<T>, default: U, f: F) U {
         return switch self {
             Some(v) => f(v),
             None => default,
@@ -98,7 +98,7 @@ extend<T> Option<T> {
     }
 
     // Chain a fallible step: `f` itself returns an `Option<U>` (flat-map / "bind"). Consumes `self`.
-    pub fn and_then<U>(self: Option<T>, f: fn(T) Option<U>) Option<U> {
+    pub fn and_then<U, F: fn(T) Option<U>>(self: Option<T>, f: F) Option<U> {
         return switch self {
             Some(v) => f(v),
             None => Option::<U>::None,
@@ -110,7 +110,7 @@ extend<T> Option<T> {
     // NOTE: `pred` takes `T` by value, so for a Free element type this copies (and the copy is freed),
     // double-freeing the payload `self` still owns. A `fn(&T)` predicate is the right fix but currently
     // hits two compiler gaps (over-const borrow of an embedded pointer payload; no `&mut`->`&` coercion).
-    pub fn filter(self: Option<T>, pred: fn(T) bool) Option<T> {
+    pub fn filter<F: fn(T) bool>(self: Option<T>, pred: F) Option<T> {
         let keep = switch &self {
             Some(v) => pred(*v),
             None => false,

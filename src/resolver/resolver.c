@@ -30,9 +30,17 @@ struct Resolver {
     U32_Vec scope_starts; // stack of symbols.len at each scope entry
     SymbolIndex symbol_index; // (namespace, name hash) -> newest matching symbol index + 1
     NodeId current_self;  // type 'Self' refers to inside the current interface/extension (else NODE_NONE)
-    bool in_closure;      // resolving inside a closure body: outer-local value refs are captures (rejected)
     bool in_generic;      // resolving inside a generic fn/extend: closures here can't be monomorphized yet
-    uint32_t closure_floor; // symbols.len at the innermost closure entry; refs below it are captures
+    // Open closures, innermost last. A value ref binding below a closure's floor is a CAPTURE (copied
+    // into its env by codegen): collected per closure (deduped, discovery order), committed to the node's
+    // `captures` list at closure exit. One ref can capture into several nested closures at once.
+    struct {
+        NodeId node;      // the NODE_CLOSURE being resolved
+        uint32_t floor;   // symbols.len at its entry; refs below it are captures
+        NodeId caps[64];  // captured decl nodes (LET/PARAMETER/FOR/tuple-elem/pattern binds)
+        uint32_t ncaps;
+    } closures[8];
+    uint32_t nclosures;
     const Package *package; // for resolving `import`ed module-qualified names (NULL = no imports)
     ERRORS_VARIABLES;
 };
@@ -226,16 +234,27 @@ static void resolve_ref(Resolver *r, const NodeId ref, const NodeId name_node, c
   uint32_t idx = 0;
   const NodeId decl = lookup(r, name, ns, &idx);
   if (decl != NODE_NONE) {
-    // A value binding declared outside the enclosing closure would have to be captured; Stage-1 closures
-    // are non-capturing, so reject it with a precise diagnostic. Module-level items (functions/consts) are
-    // never captures, so only flag the local binding kinds.
-    if (ns == NS_VALUE && r->in_closure && idx && idx - 1 < r->closure_floor) {
+    // A value binding declared outside an enclosing closure is a CAPTURE (copied into the closure's env
+    // struct by codegen): record it on every nested closure whose floor it sits below. Module-level items
+    // (functions/consts) are never captures, so only the local binding kinds collect.
+    if (ns == NS_VALUE && r->nclosures && idx && idx - 1 < r->closures[r->nclosures - 1].floor) {
       const NodeKind dk = ast_at_const(r->ast, decl)->kind;
-      if (dk == NODE_LET || dk == NODE_PARAMETER || dk == NODE_FOR || dk == NODE_IDENTIFIER)
-        resolver_errorf(
-            r, name.start, name.end - name.start,
-            "closures cannot capture local variable '%.*s' (capturing closures are not yet supported)",
-            (int)(name.end - name.start), r->source + name.start);
+      if (dk == NODE_LET || dk == NODE_PARAMETER || dk == NODE_FOR || dk == NODE_IDENTIFIER ||
+          dk == NODE_PATTERN_NAME) {
+        for (uint32_t f = r->nclosures; f-- > 0 && idx - 1 < r->closures[f].floor;) {
+          bool seen = false;
+          for (uint32_t k = 0; k < r->closures[f].ncaps && !seen; k++)
+            seen = r->closures[f].caps[k] == decl;
+          if (seen)
+            continue;
+          if (r->closures[f].ncaps >= sizeof r->closures[f].caps / sizeof r->closures[f].caps[0]) {
+            resolver_errorf(r, name.start, name.end - name.start,
+                            "too many captured variables in one closure (max 64)");
+            continue;
+          }
+          r->closures[f].caps[r->closures[f].ncaps++] = decl;
+        }
+      }
     }
     ast_set_resolution(r->ast, ref, decl);
     return;
@@ -877,11 +896,15 @@ static void resolve_expr(Resolver *r, const NodeId id) {
         resolver_errorf(
             r, n->span.start, n->span.end - n->span.start,
             "closures inside generic functions are not yet supported");
-      const bool saved_in = r->in_closure;
-      const uint32_t saved_floor = r->closure_floor;
+      if (r->nclosures >= sizeof r->closures / sizeof r->closures[0]) {
+        resolver_errorf(r, n->span.start, n->span.end - n->span.start, "closures nested too deeply (max 8)");
+        break;
+      }
       scope_enter(r);
-      r->in_closure = true;
-      r->closure_floor = (uint32_t)r->symbols.len; // params declared next are local to the closure
+      r->closures[r->nclosures].node = id;
+      r->closures[r->nclosures].floor = (uint32_t)r->symbols.len; // params declared next are local to it
+      r->closures[r->nclosures].ncaps = 0;
+      r->nclosures++;
       const NodeList params = n->as.closure.params;
       const NodeId *const pids = ast_list(r->ast, params);
       for (uint32_t i = 0; i < params.len; i++) {
@@ -893,8 +916,13 @@ static void resolve_expr(Resolver *r, const NodeId id) {
         resolve_expr(r, n->as.closure.body);
       else
         resolve_block(r, n->as.closure.body);
-      r->in_closure = saved_in;
-      r->closure_floor = saved_floor;
+      r->nclosures--;
+      { // commit the collected captures onto the closure node (discovery order, deduped)
+        const uint32_t mark = ast_mark(r->ast);
+        for (uint32_t k = 0; k < r->closures[r->nclosures].ncaps; k++)
+          ast_push(r->ast, r->closures[r->nclosures].caps[k]);
+        ast_at(r->ast, id)->as.closure.captures = ast_commit(r->ast, mark);
+      }
       scope_exit(r);
       break;
     }
