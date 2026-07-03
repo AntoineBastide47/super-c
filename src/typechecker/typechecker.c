@@ -160,6 +160,7 @@ static void render_type(TypeChecker *t, TypeId tid, char *buf, size_t cap);
 static TypeId check_member(TypeChecker *t, const Node *n, bool prefer_method);
 static TypeId subst_type(TypeChecker *t, TypeId ty, const DefId *params, const TypeId *args, int n);
 static bool aggregate_of(TypeChecker *t, TypeId ty, ModuleId *mod, NodeId *decl, DefId *params, TypeId *args, int *n);
+static bool dyn_coerce(TypeChecker *t, NodeId node, TypeId src, TypeId dyn_ty);
 
 TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   TypeChecker *const t = calloc(1, sizeof *t);
@@ -380,6 +381,16 @@ static void render_type(TypeChecker *t, const TypeId tid, char *buf, const size_
     case TYPE_FUNCTION:
       snprintf(buf, cap, "fn");
       break;
+    case TYPE_DYN: {
+      Ast *const a = mod_ast(t, ty->module);
+      const Span s = ast_at_const(a, ast_at_const(a, ty->as.decl)->as.interface_def.name)->as.name.text;
+      const char *const pfx = ty->qualifier == TYPE_QUAL_MUT    ? "&mut dyn "
+                              : ty->qualifier == TYPE_QUAL_CONST ? "&dyn "
+                                                                  : "Box<dyn ";
+      snprintf(buf, cap, "%s%.*s%s", pfx, (int)(s.end - s.start), (const char *)mod_src(t, ty->module) + s.start,
+               ty->qualifier == TYPE_QUAL_NONE ? ">" : "");
+      break;
+    }
     default:
       snprintf(buf, cap, "?");
       break;
@@ -669,6 +680,15 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
       return true;
     }
   }
+  // A reference erases to a trait object: `&T`/`&mut T` -> `&dyn I` (`&mut dyn I` needs a `&mut T`
+  // source), when T implements I. The site is recorded so codegen materializes the {data, vt} pair.
+  if (ex->kind == TYPE_DYN && ex->qualifier != TYPE_QUAL_NONE && ac->kind == TYPE_REFERENCE &&
+      (ex->qualifier == TYPE_QUAL_CONST || ac->qualifier == TYPE_QUAL_MUT))
+    return dyn_coerce(t, node, ac->as.elem, expected);
+  // Trait-object reborrow weakening: `&mut dyn I` satisfies a `&dyn I` slot (same layout, no work).
+  if (ex->kind == TYPE_DYN && ac->kind == TYPE_DYN && ex->module == ac->module && ex->as.decl == ac->as.decl &&
+      ex->qualifier == TYPE_QUAL_CONST && ac->qualifier == TYPE_QUAL_MUT)
+    return true;
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
     v = ast_at_const(t->ast, v->as.unary.operand);
@@ -957,6 +977,8 @@ static bool tc_type_is_free(TypeChecker *t, const TypeId ty) {
   const Ty *const y0 = ast_type_at(t->ast, ty);
   if (y0->kind == TYPE_FUNCTION) // an owning closure value frees its env's captures at scope exit
     return fn_owns(t, ty);
+  if (y0->kind == TYPE_DYN) // only the owned form (`Box<dyn I>`) frees, through its vtable's drop glue
+    return y0->qualifier == TYPE_QUAL_NONE;
   if (y0->kind == TYPE_GENERIC) {
     // An `F: fn move(..) ..` param MAY be an owning closure: the generic body move-tracks it (the
     // concrete spec then frees it, or skips the free entirely for a plain fn / borrowing closure).
@@ -1960,6 +1982,8 @@ static bool type_satisfies(TypeChecker *t, const TypeId ty, const DefId iface, c
   const Ty *const y = ast_type_at(t->ast, ty);
   if (y->kind == TYPE_GENERIC)
     return true; // abstract param: verified at concrete instantiation
+  if (y->kind == TYPE_DYN) // a trait object satisfies exactly its own interface bound
+    return y->module == iface.module && y->as.decl == iface.node;
   ModuleId tmod;
   NodeId tdecl;
   TypeId iargs[4];
@@ -1999,6 +2023,164 @@ static bool type_satisfies(TypeChecker *t, const TypeId ty, const DefId iface, c
         return false;
     }
   }
+  return true;
+}
+
+// Is interface item `m` a vtable entry: a method taking `self`? Self-less (static) methods are not
+// dispatchable through a value, so they stay out of the vtable without blocking dyn-compatibility.
+static bool dyn_method(const Ast *ia, const uint8_t *const isrc, const Node *const m) {
+  if (m->kind != NODE_FUNCTION || !m->as.function.params.len)
+    return false;
+  const Node *const p0 = ast_at_const(ia, ast_list(ia, m->as.function.params)[0]);
+  return span_is(isrc, ast_at_const(ia, p0->as.parameter.name)->as.name.text, "self");
+}
+
+// Does type node `tn` (in interface module `ia`) mention the interface's own `Self` (a path resolving
+// to `iface`)? A vtable-dispatched signature cannot name the erased type outside the receiver.
+static bool tc_mentions_self(const Ast *ia, const NodeId tn, const DefId iface) {
+  if (tn == NODE_NONE)
+    return false;
+  const Node *const n = ast_at_const(ia, tn);
+  switch (n->kind) {
+    case NODE_TYPE_PATH: {
+      const DefId d = ast_resolution_def(ia, tn);
+      if (d.module == iface.module && d.node == iface.node)
+        return true;
+      const NodeId *const aid = ast_list(ia, n->as.type_path.args);
+      for (uint32_t i = 0; i < n->as.type_path.args.len; i++)
+        if (tc_mentions_self(ia, aid[i], iface))
+          return true;
+      return false;
+    }
+    case NODE_POINTER_TYPE:
+    case NODE_REFERENCE_TYPE:
+    case NODE_SLICE_TYPE:
+    case NODE_DYN_TYPE:
+      return tc_mentions_self(ia, n->as.indirect_type.type, iface);
+    case NODE_ARRAY_TYPE:
+      return tc_mentions_self(ia, n->as.array_type.element, iface);
+    case NODE_TUPLE_TYPE: {
+      const NodeId *const eid = ast_list(ia, n->as.array_literal.elements);
+      for (uint32_t i = 0; i < n->as.array_literal.elements.len; i++)
+        if (tc_mentions_self(ia, eid[i], iface))
+          return true;
+      return false;
+    }
+    case NODE_FUNCTION_TYPE: {
+      const NodeId *const pid = ast_list(ia, n->as.function_type.params);
+      for (uint32_t i = 0; i < n->as.function_type.params.len; i++)
+        if (tc_mentions_self(ia, pid[i], iface))
+          return true;
+      const NodeId *const rid = ast_list(ia, n->as.function_type.returns);
+      for (uint32_t i = 0; i < n->as.function_type.returns.len; i++)
+        if (tc_mentions_self(ia, rid[i], iface))
+          return true;
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+// A dyn-compatible interface can be dispatched through a vtable: no interface generics or
+// superinterfaces (v1), and every self-taking method takes `Self` by reference, mentions `Self`
+// nowhere else, has no own generics, and returns at most one value. Reports the reason at `at`.
+static bool dyn_compatible(TypeChecker *t, const DefId iface, const Span at) {
+  Ast *const ia = mod_ast(t, iface.module);
+  const uint8_t *const isrc = mod_src(t, iface.module);
+  const Node *const idn = ast_at_const(ia, iface.node);
+  const char *why = NULL;
+  Span mn = {0, 0};
+  if (idn->as.interface_def.generics.len)
+    why = "the interface has generic parameters";
+  else if (idn->as.interface_def.bounds.len)
+    why = "the interface has superinterfaces";
+  const NodeId *const mids = ast_list(ia, idn->as.interface_def.items);
+  for (uint32_t i = 0; !why && i < idn->as.interface_def.items.len; i++) {
+    const Node *const m = ast_at_const(ia, mids[i]);
+    if (!dyn_method(ia, isrc, m))
+      continue;
+    mn = ast_at_const(ia, m->as.function.name)->as.name.text;
+    const NodeId st = ast_at_const(ia, ast_list(ia, m->as.function.params)[0])->as.parameter.type;
+    const NodeKind sk = st != NODE_NONE ? ast_at_const(ia, st)->kind : NODE_NONE_KIND;
+    if (m->as.function.generics.len)
+      why = "a method has its own generic parameters";
+    else if (sk != NODE_REFERENCE_TYPE && sk != NODE_POINTER_TYPE)
+      why = "a method takes 'Self' by value";
+    else if (m->as.function.returns.len > 1)
+      why = "a method has multiple return values";
+    const NodeId *const pids = ast_list(ia, m->as.function.params);
+    for (uint32_t p = 1; !why && p < m->as.function.params.len; p++)
+      if (tc_mentions_self(ia, ast_at_const(ia, pids[p])->as.parameter.type, iface))
+        why = "a method mentions 'Self' outside the receiver";
+    const NodeId *const rids = ast_list(ia, m->as.function.returns);
+    for (uint32_t r = 0; !why && r < m->as.function.returns.len; r++) {
+      const Node *const rn = ast_at_const(ia, rids[r]);
+      if (tc_mentions_self(ia, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rids[r], iface))
+        why = "a method mentions 'Self' outside the receiver";
+    }
+  }
+  if (!why)
+    return true;
+  const Span in = ast_at_const(ia, idn->as.interface_def.name)->as.name.text;
+  typechecker_errorf(t, at.start, at.end - at.start, "interface '%.*s' is not dyn-compatible: %s",
+                     (int)(in.end - in.start), (const char *)isrc + in.start, why);
+  if (mn.end > mn.start)
+    typechecker_notef(t, "offending method: '%.*s'", (int)(mn.end - mn.start), (const char *)isrc + mn.start);
+  return false;
+}
+
+// `&T` -> `&dyn I` erasure at `node`: T must implement I and every vtable method must resolve to an
+// emittable concrete symbol. Records the site for codegen (fat-pair materialization + vtable emission).
+static bool dyn_coerce(TypeChecker *t, const NodeId node, const TypeId src, const TypeId dyn_ty) {
+  const Ty *const dy = ast_type_at(t->ast, dyn_ty);
+  const DefId iface = {dy->module, dy->as.decl};
+  const Ty *const sy = ast_type_at(t->ast, src);
+  const Span sp = ast_at_const(t->ast, node)->span;
+  if (sy->kind == TYPE_GENERIC) {
+    typechecker_errorf(t, sp.start, sp.end - sp.start, "cannot erase a generic type parameter to 'dyn'");
+    return true; // reported; suppress the cascading mismatch
+  }
+  if (!type_satisfies(t, src, iface, 0))
+    return false; // plain mismatch: T does not implement I
+  ModuleId tmod;
+  NodeId tdecl;
+  DefId gp[4];
+  TypeId ga[4];
+  int gn;
+  if (!aggregate_of(t, src, &tmod, &tdecl, gp, ga, &gn)) {
+    if (sy->kind == TYPE_BUILTIN && t->package && package_builtin_decl(t->package, sy->as.builtin) != NODE_NONE) {
+      tmod = t->package->core_module;
+      tdecl = package_builtin_decl(t->package, sy->as.builtin);
+    } else {
+      return false;
+    }
+  }
+  // Every vtable method needs a concrete symbol: the type's own extend method or a same-module default.
+  Ast *const ia = mod_ast(t, iface.module);
+  const uint8_t *const isrc = mod_src(t, iface.module);
+  const Node *const idn = ast_at_const(ia, iface.node);
+  const NodeId *const mids = ast_list(ia, idn->as.interface_def.items);
+  for (uint32_t i = 0; i < idn->as.interface_def.items.len; i++) {
+    const Node *const m = ast_at_const(ia, mids[i]);
+    if (!dyn_method(ia, isrc, m))
+      continue;
+    const Span mn = ast_at_const(ia, m->as.function.name)->as.name.text;
+    char nm[96];
+    snprintf(nm, sizeof nm, "%.*s", (int)(mn.end - mn.start), (const char *)isrc + mn.start);
+    if (find_method_cstr(t, tmod, tdecl, nm).node != NODE_NONE)
+      continue;
+    // No override: only a SAME-module default body is emittable (codegen synthesizes those).
+    if (m->as.function.body != NODE_NONE && iface.module == t->ast->module)
+      continue;
+    char tn[96];
+    render_type(t, src, tn, sizeof tn);
+    typechecker_errorf(t, sp.start, sp.end - sp.start,
+                       "cannot erase '%s' to 'dyn': method '%s' has no emittable implementation", tn, nm);
+    typechecker_notef(t, "a default method body of a cross-module interface cannot back a vtable; override it");
+    return true; // reported
+  }
+  ast_add_dyn_use(t->ast, node, src, dyn_ty);
   return true;
 }
 
@@ -2485,6 +2667,16 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
           result = ast_intern_instance(t->ast, d.module, d.node, ta, tn);
         } else {
           result = named_type_of(t, d.module, d.node);
+          // A bare interface is not a value type (it used to silently render as C `void`); only the
+          // `Self` spelling inside an interface/extend legitimately lowers to the abstract type.
+          if (dn->kind == NODE_INTERFACE && parts.len &&
+              !span_is(t->source, name_span(t, ast_list(a, parts)[0]), "Self")) {
+            const Span isp = name_span(t, ast_list(a, parts)[0]);
+            typechecker_errorf(
+                t, isp.start, isp.end - isp.start,
+                "an interface is not a type; use '&dyn %.*s', 'Box<dyn %.*s>', or a generic bound",
+                (int)(isp.end - isp.start), t->source + isp.start, (int)(isp.end - isp.start), t->source + isp.start);
+          }
           // Resolve trailing path segments (e.g. local Enum::Variant) against the base's members. A
           // module-qualified path's final segment is already the type, so it has no trailing members.
           if (d.module == a->module) {
@@ -2542,6 +2734,26 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
     case NODE_FUNCTION_TYPE:
       result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .module = a->module, .as.decl = id});
       break;
+    case NODE_DYN_TYPE: {
+      const NodeId inner = n->as.indirect_type.type;
+      const DefId d = ast_at_const(a, inner)->kind == NODE_TYPE_PATH ? ast_resolution_def(a, inner)
+                                                                     : (DefId){0, NODE_NONE};
+      if (d.node == NODE_NONE || ast_at_const(mod_ast(t, d.module), d.node)->kind != NODE_INTERFACE) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'dyn' requires an interface");
+        break;
+      }
+      if (!dyn_compatible(t, d, n->span))
+        break;
+      if (n->as.indirect_type.qualifier == TYPE_QUAL_NONE) {
+        // Owned trait objects (`Box<dyn I>`) are not built yet; a bare `dyn I` has no size of its own.
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "a 'dyn' type must be behind a reference: '&dyn I' or '&mut dyn I'");
+        break;
+      }
+      result = ast_intern_type(
+          a, (Ty){.kind = TYPE_DYN, .qualifier = n->as.indirect_type.qualifier, .module = d.module, .as.decl = d.node});
+      break;
+    }
     default:
       break;
   }
@@ -3904,18 +4116,28 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       // compiler emits at scope exit, which never needed `mut`. The binding's life ends here (freed /
       // moved above), so its mutability is irrelevant; `free` through a `&`/`*const` receiver still
       // requires the mutable receiver its signature demands.
-      const TypeKind rvk = ast_type_at(t->ast, ast_type(t->ast, recv))->kind;
-      const bool consuming_free =
-          rvk != TYPE_REFERENCE && rvk != TYPE_POINTER &&
-          span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, callee_node->as.member.member)->as.name.text,
-                  "free");
-      if (!consuming_free) {
-        tc_mark_capture_mut(t, recv); // a `&mut self` method mutates through the capture
-        if (!receiver_mutable(t, recv)) {
+      const Ty *const rvt = ast_type_at(t->ast, ast_type(t->ast, recv));
+      const TypeKind rvk = rvt->kind;
+      if (rvk == TYPE_DYN) {
+        // The data pointer's mutability is the TYPE's (`&dyn` vs `&mut dyn`), not the binding's.
+        if (rvt->qualifier == TYPE_QUAL_CONST) {
           const Span rsp = ast_at_const(t->ast, recv)->span;
-          typechecker_errorf(
-              t, rsp.start, rsp.end - rsp.start,
-              "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')");
+          typechecker_errorf(t, rsp.start, rsp.end - rsp.start,
+                             "cannot call a '&mut self' method through '&dyn' (use '&mut dyn')");
+        }
+      } else {
+        const bool consuming_free =
+            rvk != TYPE_REFERENCE && rvk != TYPE_POINTER &&
+            span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, callee_node->as.member.member)->as.name.text,
+                    "free");
+        if (!consuming_free) {
+          tc_mark_capture_mut(t, recv); // a `&mut self` method mutates through the capture
+          if (!receiver_mutable(t, recv)) {
+            const Span rsp = ast_at_const(t->ast, recv)->span;
+            typechecker_errorf(
+                t, rsp.start, rsp.end - rsp.start,
+                "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')");
+          }
         }
       }
     }
@@ -4070,10 +4292,11 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
   // param's interface bounds. `Self` stays abstract (TYPE_GENERIC of the interface); check_call substitutes
   // it by the receiver, and codegen dispatches to the concrete extend once the param is monomorphized.
   const Ty *const bt = ast_type_at(t->ast, base);
-  if (bt->kind == TYPE_GENERIC) {
+  if (bt->kind == TYPE_GENERIC || bt->kind == TYPE_DYN) {
     // `self` inside an interface default body has the abstract `Self` type (a TYPE_GENERIC keyed by the
     // interface): resolve `self.m()` against the interface's own methods + superinterfaces. A plain generic param
-    // (`w: T`, `T: Writer`) instead resolves through its interface bounds.
+    // (`w: T`, `T: Writer`) instead resolves through its interface bounds. A `dyn I` receiver is the same
+    // shape as the first: its decl IS the interface, and codegen dispatches through the vtable.
     const Node *const gd = ast_at_const(mod_ast(t, bt->module), bt->as.decl);
     if (gd->kind == NODE_INTERFACE) {
       const DefId m = find_interface_method(t, bt->module, bt->as.decl, name, 0);

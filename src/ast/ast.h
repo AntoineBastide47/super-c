@@ -79,6 +79,8 @@ typedef enum {
   NODE_SLICE_TYPE,
   NODE_ARRAY_TYPE,
   NODE_FUNCTION_TYPE,
+  NODE_DYN_TYPE, // `dyn Iface` (only behind `&`/`&mut` or as `Box<dyn I>`); reuses `indirect_type` --
+                 // `type` is the interface path, `qualifier` the flavor (CONST=&dyn, MUT=&mut dyn, NONE=owned)
 
   NODE_BLOCK,
   NODE_LET,
@@ -363,6 +365,9 @@ typedef enum {
                  // the Ast's interned instance table, so Vec<i32> and Vec<bool> are distinct interned types
   TYPE_OPAQUE,   // an `extern "C" { type X; }` handle: a real, sized C type named by the header. `as.decl`
                  // is the NODE_TYPE_ALIAS (in `module`); renders to its own unmangled C name, never `void`
+  TYPE_DYN,      // trait object: a sized 2-word fat value {data, vtable}. (module, as.decl) = the interface
+                 // DefId; `qualifier` is the flavor: CONST = `&dyn I`, MUT = `&mut dyn I`, NONE = `Box<dyn I>`
+                 // (owned -- Free, drop-glue vtable slot). Never wrapped in TYPE_REFERENCE.
   TYPE_NEVER,    // the type of a diverging call (`@c.noreturn`, e.g. panic): unifies with every type,
                  // since control never returns to observe a value. Not nameable in source.
 } TypeKind;
@@ -410,6 +415,15 @@ typedef struct {
 } MonoUse;
 VEC_DECLARE(MonoUse, MonoUse_Vec)
 
+// A `&T` -> `&dyn I` erasure site: `node` is the coerced expression, `src` the concrete pointee type,
+// `dyn` the trait-object type (both in this Ast's pool). Codegen materializes the {data, vtable} fat
+// pair at `node` and emits one static vtable + glue set per distinct (src, interface) in the TU.
+typedef struct {
+    NodeId node;
+    TypeId src, dyn;
+} DynUse;
+VEC_DECLARE(DynUse, DynUse_Vec)
+
 // A monomorphized use of a generic method that has its OWN extra generic params (e.g. `map<U>`): the
 // concrete instance it's called on plus the method's own type args. Propagated into the method's owning
 // module (where the instance is emitted) so the owner emits the matching `Inst__method__targs` spec.
@@ -433,6 +447,8 @@ typedef struct {
     U32_Vec mono_at;    // side table: index = NodeId, value = 1-based index into `mono` (0 = none) -> O(1) lookup
     TyInstance_Vec instances; // interned generic instantiations referenced by TYPE_INSTANCE Tys
     MethodInst_Vec method_insts; // generic-method instantiations to emit here (owner); linear scan
+    DynUse_Vec dyn_uses; // dyn-erasure sites recorded by the type checker (drives vtable emission)
+    U32_Vec dyn_at;      // side table: index = NodeId, value = 1-based index into `dyn_uses` (0 = none)
     Attr_Vec attrs;     // `@c.*` attributes on items, each tagged with its owner NodeId (linear scan; few)
     NodeId root;
     ModuleId module;    // this Ast's module index within its Package (0 for single-file / REPL)
@@ -504,6 +520,10 @@ ALWAYS_INLINE void ast_set_resolution_def(Ast *a, const NodeId ref, const DefId 
 // NULL when the call has none recorded (not a generic call, or no instantiation determined).
 void ast_set_type_args(Ast *a, NodeId node, const TypeId *args, uint8_t n);
 const MonoUse *ast_type_args(const Ast *a, NodeId node);
+
+// Record / fetch a dyn-erasure site (`&T` value coerced to `&dyn I` at `node`).
+void ast_add_dyn_use(Ast *a, NodeId node, TypeId src, TypeId dyn);
+const DynUse *ast_dyn_use_at(const Ast *a, NodeId node);
 
 ALWAYS_INLINE TypeId ast_builtin(const BuiltinType b) {
   return (TypeId)b + 1;

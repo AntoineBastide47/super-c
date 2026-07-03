@@ -218,6 +218,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
       }
     case 3:
       switch (lexeme[0]) {
+        case 'd':
+          return memcmp(lexeme, "dyn", 3) == 0 ? Dyn : Identifier;
         case 'f':
           return memcmp(lexeme, "for", 3) == 0 ? For : Identifier;
         case 'l':

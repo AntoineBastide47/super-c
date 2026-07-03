@@ -501,6 +501,7 @@ static void resolve_type(Resolver *r, const NodeId id) {
     case NODE_POINTER_TYPE:
     case NODE_REFERENCE_TYPE:
     case NODE_SLICE_TYPE:
+    case NODE_DYN_TYPE:
       resolve_type(r, n->as.indirect_type.type);
       break;
     case NODE_TUPLE_TYPE: {

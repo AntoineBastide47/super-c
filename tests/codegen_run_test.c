@@ -2033,9 +2033,52 @@ static void test_bug_regressions(void) {
       0, "");
 }
 
+// `&dyn I` / `&mut dyn I` trait objects: one vtable per (type, interface), fat-pair dispatch.
+static void test_dyn(void) {
+  // Two concrete types through one dyn param; &mut dyn mutation is outer-visible; a same-module
+  // default method dispatches through the vtable; reborrow weakening (&mut dyn -> &dyn) at a call.
+  sc_run_program(
+      "dyn dispatch across types",
+      PRE "interface Shape { fn area(self: &Self) i32; fn scale(self: &mut Self, k: i32); fn tag(self: &Self) i32 { return 7; } }\n"
+          "struct Circle { pub r: i32 }\n"
+          "struct Sq { pub s: i32 }\n"
+          "extend Circle as Shape {\n"
+          "  pub fn area(self: &Circle) i32 { return 3 * self.r * self.r; }\n"
+          "  pub fn scale(self: &mut Circle, k: i32) { self.r = self.r * k; }\n"
+          "}\n"
+          "extend Sq as Shape {\n"
+          "  pub fn area(self: &Sq) i32 { return self.s * self.s; }\n"
+          "  pub fn scale(self: &mut Sq, k: i32) { self.s = self.s * k; }\n"
+          "  pub fn tag(self: &Sq) i32 { return 4; }\n"
+          "}\n"
+          "fn total(a: &dyn Shape, b: &dyn Shape) i32 { return a.area() + b.area(); }\n"
+          "fn view(a: &dyn Shape) i32 { return a.tag(); }\n"
+          "fn main() i32 {\n"
+          "  let c = Circle { r: 1 };\n"
+          "  let mut s = Sq { s: 2 };\n"
+          "  let d: &dyn Shape = &c;\n"
+          "  let t = total(&c, &s);\n"          // 3 + 4 = 7
+          "  let m: &mut dyn Shape = &mut s;\n"
+          "  m.scale(2);\n"                     // s.s = 4
+          "  let w = view(m) + d.tag();\n"      // 4 + 7 = 11
+          "  unsafe exit(t + s.s + w + total(&s, &s));\n" // 7 + 4 + 11 + 32 = 54
+          "}\n",
+      54, "");
+  // A dyn value handed to a monomorphized generic: `T = &dyn Shape` mangles and dispatches.
+  sc_run_program(
+      "dyn value through a generic",
+      PRE "interface Shape { fn area(self: &Self) i32; }\n"
+          "struct Circle { pub r: i32 }\n"
+          "extend Circle as Shape { pub fn area(self: &Circle) i32 { return self.r + 40; } }\n"
+          "fn id<T>(x: T) T { return x; }\n"
+          "fn main() i32 { let c = Circle { r: 2 }; let d: &dyn Shape = &c; unsafe exit(id(d).area()); }\n",
+      42, "");
+}
+
 int main(void) {
   // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
   static void (*const tests[])(void) = {
+      test_dyn,
       test_bug_regressions,    test_attributes,           test_free_raii,
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,
