@@ -3900,12 +3900,23 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     const Ty *const selfp = ast_type_at(t->ast, decl_type_in(t, fmod, ast_list(fa, params)[0]));
     if ((selfp->kind == TYPE_REFERENCE || selfp->kind == TYPE_POINTER) && selfp->qualifier == TYPE_QUAL_MUT) {
       const NodeId recv = callee_node->as.member.object;
-      tc_mark_capture_mut(t, recv); // a `&mut self` method mutates through the capture
-      if (!receiver_mutable(t, recv)) {
-        const Span rsp = ast_at_const(t->ast, recv)->span;
-        typechecker_errorf(
-            t, rsp.start, rsp.end - rsp.start,
-            "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')");
+      // An explicit `.free()` on an OWNED value is a consuming destructor call -- the same call the
+      // compiler emits at scope exit, which never needed `mut`. The binding's life ends here (freed /
+      // moved above), so its mutability is irrelevant; `free` through a `&`/`*const` receiver still
+      // requires the mutable receiver its signature demands.
+      const TypeKind rvk = ast_type_at(t->ast, ast_type(t->ast, recv))->kind;
+      const bool consuming_free =
+          rvk != TYPE_REFERENCE && rvk != TYPE_POINTER &&
+          span_is(mod_src(t, t->ast->module), ast_at_const(t->ast, callee_node->as.member.member)->as.name.text,
+                  "free");
+      if (!consuming_free) {
+        tc_mark_capture_mut(t, recv); // a `&mut self` method mutates through the capture
+        if (!receiver_mutable(t, recv)) {
+          const Span rsp = ast_at_const(t->ast, recv)->span;
+          typechecker_errorf(
+              t, rsp.start, rsp.end - rsp.start,
+              "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')");
+        }
       }
     }
   }

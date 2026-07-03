@@ -825,6 +825,22 @@ static void test_closures(void) {
       "closure cannot capture a fixed-size array");
 }
 
+// Explicit `.free()` is a CONSUMING destructor call: it works on an immutable owned binding (exactly
+// like the scope-exit auto-free), while ordinary `&mut self` methods still require `mut`.
+static void test_explicit_free_mutability(void) {
+  expect_ok(
+      "free on an immutable owned binding",
+      "fn main() i32 { let v: Vector<i32> = Vector::<i32>::with_capacity(8); v.free(); return 0; }\n");
+  expect_error(
+      "use after an explicit free still flagged",
+      "fn main() i32 { let v: Vector<i32> = Vector::<i32>::new(); v.free(); return v.len() as i32; }\n",
+      "use after free");
+  expect_error(
+      "other &mut self methods still need mut",
+      "fn main() i32 { let v: Vector<i32> = Vector::<i32>::new(); v.push(1); return 0; }\n",
+      "cannot call a '&mut self' method on an immutable binding");
+}
+
 int main(void) {
   test_ok();
   test_bug_regressions();
@@ -844,6 +860,7 @@ int main(void) {
   test_tuples();
   test_interface_bounds();
   test_closures();
+  test_explicit_free_mutability();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;
