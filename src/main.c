@@ -18,6 +18,7 @@
 #include "codegen/codegen.h"
 #include "lexer/lexer.h"
 #include "lexer/token.h"
+#include "consteval/consteval.h"
 #include "module/loader.h"
 #include "resolver/resolver.h"
 #include "typechecker/typechecker.h"
@@ -371,9 +372,12 @@ static int run_package(Package *p) {
   return err ? 1 : 0;
 }
 
-static int run_file(const char *path, const char *std_dir) {
+static int run_file(const char *path, const char *std_dir, const bool const_eval) {
   Package *p = package_load(path, std_dir);
+  if (p->ok && const_eval)
+    p->ceval = consteval_new(p); // opt-in folding: typechecker/codegen consult p->ceval when set
   const int rc = p->ok ? run_package(p) : 1;
+  consteval_free(&p->ceval);
   package_free(&p);
   return rc;
 }
@@ -405,12 +409,22 @@ static char *exe_std_dir(const char *argv0) {
 }
 
 int main(const int argc, char **argv) {
-  if (argc != 2) {
-    fprintf(stderr, "Usage: %s <path/to/script>\n", BIN_NAME);
+  bool const_eval = false;
+  const char *file = NULL;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--const-eval") == 0)
+      const_eval = true;
+    else if (!file)
+      file = argv[i];
+    else
+      file = ""; // more than one input: fall through to usage
+  }
+  if (!file || !*file) {
+    fprintf(stderr, "Usage: %s [--const-eval] <path/to/script>\n", BIN_NAME);
     return 1;
   }
   char *const std_dir = exe_std_dir(argv[0]);
-  const int rc = run_file(argv[1], std_dir);
+  const int rc = run_file(file, std_dir, const_eval);
   free(std_dir);
   return rc;
 }

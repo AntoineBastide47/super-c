@@ -372,10 +372,14 @@ typedef struct {
         TypeId elem;         // POINTER/REFERENCE/SLICE/ARRAY pointee/element
         NodeId decl;         // STRUCT/ENUM/GENERIC decl node; FUNCTION = NODE_FUNCTION/NODE_FUNCTION_TYPE node
         uint32_t inst;       // INSTANCE: index into the Ast's instance table
+        struct {
+            TypeId elem;     // aliases `as.elem` (same offset), so every existing ARRAY read still works
+            uint32_t len;    // element count under --const-eval (0 = unknown/unfolded: identity as before)
+        } arr;               // ARRAY only; folded lengths make [i32;4] and [i32;8] DISTINCT interned types
     } as;
 } Ty;
 
-_Static_assert(sizeof(Ty) == 8, "Ty must stay cache-compact");
+_Static_assert(sizeof(Ty) == 12, "Ty must stay cache-compact"); // 8 -> 12 when ARRAY grew a length
 
 VEC_DECLARE(Ty, Ty_Vec)
 HM_DECLARE(Ty, TypeId, TyMap) // Ty -> TypeId, so ast_intern_type dedups in O(1) not O(pool)

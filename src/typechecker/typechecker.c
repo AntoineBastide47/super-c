@@ -1,3 +1,4 @@
+#include "consteval/consteval.h"
 #include "typechecker.h"
 
 #include <stdio.h>
@@ -399,6 +400,12 @@ static void err_unsafe(TypeChecker *t, const Span sp, const char *const what) {
   typechecker_notef(t, "wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'");
 }
 
+// The package's opt-in const evaluator (--const-eval), or NULL: every consumer below degrades to
+// today's delegate-to-C behavior when it is absent.
+static ConstEval *tc_ceval(const TypeChecker *t) {
+  return t->package ? t->package->ceval : NULL;
+}
+
 // Find a `@c.*` attribute of `kind` on item `owner` in module `mod`, or NULL (mirrors codegen's
 // cg_attr; attributes are few, so a linear scan of the owning module's table is cheap).
 static const Attr *tc_attr(TypeChecker *t, const ModuleId mod, const NodeId owner, const AttrKind kind) {
@@ -536,6 +543,8 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   // Arrays compare by element: equal elements, or fn-typed elements that match structurally (a function
   // type is keyed on its decl, so `[fn(i32)i32]` from an annotation and from `[a, b]` are distinct TypeIds).
   if (ex->kind == TYPE_ARRAY && ac->kind == TYPE_ARRAY) {
+    if (ex->as.arr.len && ac->as.arr.len && ex->as.arr.len != ac->as.arr.len)
+      return false; // both lengths known and different (--const-eval); unknown (0) matches anything
     if (ex->as.elem == ac->as.elem)
       return true;
     const TypeId eel = ex->as.elem, ael = ac->as.elem;
@@ -2092,7 +2101,8 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
             ta[tn] = lower_type_in(t, m, aids[i]);
             // A fixed-size array carries no length in the interned `Ty` (8 bytes, no room), so it cannot be a
             // generic type argument -- it would mangle without its length and lower to a decayed pointer field.
-            if (ta[tn] != TYPE_NONE && ast_type_at(t->ast, ta[tn])->kind == TYPE_ARRAY) {
+            if (ta[tn] != TYPE_NONE && ast_type_at(t->ast, ta[tn])->kind == TYPE_ARRAY &&
+                ast_type_at(t->ast, ta[tn])->as.arr.len == 0) { // --const-eval folded lengths are allowed
               const Span asp = ast_at_const(a, aids[i])->span;
               typechecker_errorf(t, asp.start, asp.end - asp.start,
                                  "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct");
@@ -2128,8 +2138,14 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
       return ast_intern_type(
           t->ast, (Ty){.kind = k, .qualifier = n->as.indirect_type.qualifier, .as.elem = lower_type_in(t, m, n->as.indirect_type.type)});
     }
-    case NODE_ARRAY_TYPE:
-      return ast_intern_type(t->ast, (Ty){.kind = TYPE_ARRAY, .as.elem = lower_type_in(t, m, n->as.array_type.element)});
+    case NODE_ARRAY_TYPE: {
+      uint32_t alen = 0;
+      const ConstValue lv = consteval_eval(tc_ceval(t), m, n->as.array_type.length);
+      if (lv.kind == CONST_INT && lv.i > 0 && lv.i <= UINT32_MAX)
+        alen = (uint32_t)lv.i;
+      return ast_intern_type(
+          t->ast, (Ty){.kind = TYPE_ARRAY, .as.arr = {.elem = lower_type_in(t, m, n->as.array_type.element), .len = alen}});
+    }
     case NODE_FUNCTION_TYPE:
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_FUNCTION, .module = m, .as.decl = id});
     default:
@@ -2281,7 +2297,8 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
             ta[tn] = resolve_type(t, arg_ids[i]);
             // A fixed-size array carries no length in the interned `Ty`, so it cannot be a generic type
             // argument -- it would mangle without its length and lower to a decayed pointer field.
-            if (ta[tn] != TYPE_NONE && ast_type_at(t->ast, ta[tn])->kind == TYPE_ARRAY) {
+            if (ta[tn] != TYPE_NONE && ast_type_at(t->ast, ta[tn])->kind == TYPE_ARRAY &&
+                ast_type_at(t->ast, ta[tn])->as.arr.len == 0) { // --const-eval folded lengths are allowed
               const Span asp = ast_at_const(a, arg_ids[i])->span;
               typechecker_errorf(t, asp.start, asp.end - asp.start,
                                  "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct");
@@ -2335,10 +2352,18 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
                     .as.elem = resolve_type(t, n->as.indirect_type.type)});
       break;
     }
-    case NODE_ARRAY_TYPE:
-      check_expr(t, n->as.array_type.length); // length is checked but its value is not used yet
-      result = ast_intern_type(a, (Ty){.kind = TYPE_ARRAY, .as.elem = resolve_type(t, n->as.array_type.element)});
+    case NODE_ARRAY_TYPE: {
+      check_expr(t, n->as.array_type.length);
+      // Under --const-eval a folded length becomes part of the TYPE ([i32;4] != [i32;8]); an
+      // unfoldable length keeps len 0 (identity and rendering exactly as before).
+      uint32_t alen = 0;
+      const ConstValue lv = consteval_eval(tc_ceval(t), t->ast->module, n->as.array_type.length);
+      if (lv.kind == CONST_INT && lv.i > 0 && lv.i <= UINT32_MAX)
+        alen = (uint32_t)lv.i;
+      result = ast_intern_type(
+          a, (Ty){.kind = TYPE_ARRAY, .as.arr = {.elem = resolve_type(t, n->as.array_type.element), .len = alen}});
       break;
+    }
     case NODE_FUNCTION_TYPE:
       result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .module = a->module, .as.decl = id});
       break;
@@ -4547,6 +4572,10 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
           if (iy && !(iy->kind == TYPE_BUILTIN && (bt_is_int(iy->as.builtin) || iy->as.builtin == BT_CHAR))) {
             const Span sp = ast_at_const(a, el->as.field_initializer.name)->span;
             typechecker_errorf(t, sp.start, sp.end - sp.start, "array designator index must be an integer");
+          } else if (tc_ceval(t) && consteval_eval(tc_ceval(t), t->ast->module, el->as.field_initializer.name).kind == CONST_NONE) {
+            // C requires an integer constant expression here; without the fold this emits invalid C.
+            const Span sp = ast_at_const(a, el->as.field_initializer.name)->span;
+            typechecker_errorf(t, sp.start, sp.end - sp.start, "array designator index must be a constant expression");
           }
           et = check_expr(t, el->as.field_initializer.value);
         } else {
@@ -4871,6 +4900,14 @@ static void check_static_assert(TypeChecker *t, const Node *const n) {
     char ty[96];
     render_type(t, c, ty, sizeof ty);
     typechecker_errorf(t, sp.start, sp.end - sp.start, "static_assert condition must be 'bool', found '%s'", ty);
+    return;
+  }
+  // Under --const-eval a foldable condition is decided HERE (with this span); an unfoldable one
+  // (e.g. involving an opaque type's sizeof) still lowers to C _Static_assert as before.
+  const ConstValue v = consteval_eval(tc_ceval(t), t->ast->module, n->as.binary.left);
+  if (v.kind == CONST_BOOL && !v.i) {
+    const Span sp = ast_at_const(t->ast, n->as.binary.left)->span;
+    typechecker_errorf(t, sp.start, sp.end - sp.start, "static assertion failed");
   }
 }
 
