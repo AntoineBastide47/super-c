@@ -3,11 +3,12 @@
 #include <string.h>
 
 #include "consteval.h"
+#include "types/hashmap.h"
 #include "utils/errors.h"
 
 #define CE_MAX_DEPTH 32 // expression + layout recursion cap (house style: fixed limit, loud failure)
 
-// Compile-time function execution (implicit, Zig-style: no `const fn` marker). A call whose
+// Compile-time function execution. A call whose
 // arguments fold is RUN by the interpreter below: frames of locals, an object store for
 // aggregates and heap blocks (element-wise, never byte-wise), place handles for references, and
 // interception of the C heap primitives. Anything unmodeled (un-intercepted externs, unions,
@@ -20,6 +21,7 @@
 #define CE_MAX_OBJS (1u << 16)      // objects per top-level evaluation
 
 typedef struct CeObj CeObj;
+typedef struct CeCalls CeCalls; // the (fn, args) -> results memo (defined with CeVal below)
 typedef struct {
     ModuleId m;
     NodeId cond;
@@ -41,6 +43,7 @@ struct ConstEval {
     const char *trap;   // why the last top-level evaluation trapped (would panic at runtime / budget)
     CePending *pending; // static_asserts deferred until the whole package has type-checked
     size_t npending, cpending;
+    CeCalls *calls; // Zig-style CTFE call memoization; lives for the whole compile
 };
 
 static const ConstValue CE_NONE = {0};
@@ -63,6 +66,7 @@ ConstEval *consteval_new(const Package *pkg, const uint32_t max_steps, const uin
 }
 
 static void ce_objs_reset(ConstEval *ce);
+static void ce_calls_free(CeCalls **calls);
 
 void consteval_free(ConstEval **pce) {
   if (!pce || !*pce)
@@ -71,6 +75,7 @@ void consteval_free(ConstEval **pce) {
   for (size_t i = 0; i < ce->nmods; i++)
     free(ce->vals[i]);
   ce_objs_reset(ce);
+  ce_calls_free(&ce->calls);
   free(ce->objs);
   free(ce->pending);
   free(ce->vals);
@@ -510,6 +515,58 @@ static const CeVal CV_NIL = {0};
 static uint64_t ce_mem_to_slots(const uint64_t bytes) {
   const uint64_t slots = bytes / sizeof(CeVal);
   return slots ? slots : 1;
+}
+
+// Zig-style CTFE call memoization: a call with NO type substitutions whose arguments are all
+// scalars is provably pure (no pointer in = no reachable caller state, no receiver), and when its
+// results are all scalars too they reference no interpreter objects -- so (callee, arg bits) ->
+// results holds for the WHOLE compile. This is what makes naive recursion (fib) linear in its
+// distinct arguments instead of exponential. Failures/traps are never cached (a fresh evaluation
+// gets a fresh budget and a later one may see newly-typed bodies).
+#define CE_CALLS_MAX (1u << 16) // entries; past this, hits keep working but nothing new is added
+
+typedef struct {
+    ModuleId m;
+    NodeId fn;
+    uint8_t nargs;
+    uint8_t kinds[8]; // CvKind per argument
+    int64_t bits[8];  // the value bits (floats alias through the union)
+} CeCallKey;
+
+typedef struct {
+    uint8_t nrets;
+    CeVal rets[8]; // scalars only
+} CeCallHit;
+
+static inline uint64_t ce_callkey_hash(const CeCallKey k) {
+  const uint8_t *const p = (const uint8_t *)&k;
+  uint64_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < sizeof k; i++) {
+    h ^= p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+static inline bool ce_callkey_eq(const CeCallKey a, const CeCallKey b) {
+  return memcmp(&a, &b, sizeof a) == 0;
+}
+HM_DECLARE(CeCallKey, CeCallHit, CeCallMap)
+HM_DEFINE(CeCallKey, CeCallHit, CeCallMap, ce_callkey_hash, ce_callkey_eq)
+
+struct CeCalls {
+    CeCallMap map;
+};
+
+static void ce_calls_free(CeCalls **calls) {
+  if (!*calls)
+    return;
+  CeCallMap_deinit(&(*calls)->map);
+  free(*calls);
+  *calls = NULL;
+}
+
+static bool cv_is_scalar(const CeVal v) {
+  return v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT;
 }
 
 // One store object. `dm`/`dn` name the aggregate decl (field lookup, method dispatch); heap blocks
@@ -2811,9 +2868,6 @@ static bool ce_invoke(ConstEval *ce, const ModuleId fm, const NodeId fnode, cons
   }
   CeFrame g;
   memset(&g, 0, sizeof g);
-  g.env = ce_obj_new(ce, 0);
-  if (!g.env)
-    return false;
   if (extend_node != NODE_NONE) {
     const NodeList xg = ast_at_const(fa, extend_node)->as.extend_def.generics;
     bool bound = xg.len == 0;
@@ -2846,6 +2900,31 @@ static bool ce_invoke(ConstEval *ce, const ModuleId fm, const NodeId fnode, cons
       }
     }
   }
+  // memoization: a substitution-free call over scalar arguments may already have a cached result
+  bool cacheable = !closure && g.ng == 0 && nargs <= 8;
+  for (uint32_t i = 0; cacheable && i < nargs; i++)
+    cacheable = cv_is_scalar(args[i]);
+  CeCallKey ck;
+  if (cacheable) {
+    memset(&ck, 0, sizeof ck);
+    ck.m = fm;
+    ck.fn = fnode;
+    ck.nargs = (uint8_t)nargs;
+    for (uint32_t i = 0; i < nargs; i++) {
+      ck.kinds[i] = args[i].kind;
+      ck.bits[i] = args[i].as.i; // float bits alias through the union
+    }
+    CeCallHit hit;
+    if (ce->calls && CeCallMap_get(&ce->calls->map, ck, &hit)) {
+      *nrets = hit.nrets;
+      for (uint8_t i = 0; i < hit.nrets; i++)
+        rets[i] = hit.rets[i];
+      return true;
+    }
+  }
+  g.env = ce_obj_new(ce, 0);
+  if (!g.env)
+    return false;
   const NodeId *const pids = ast_list(fa, params);
   for (uint32_t i = 0; i < nargs; i++) {
     ModuleId wm = fm;
@@ -2882,12 +2961,26 @@ static bool ce_invoke(ConstEval *ce, const ModuleId fm, const NodeId fnode, cons
   if (!g.returned) {
     if (wantret > 0 && st != X_RETURN)
       return false; // fell off the end of a value-returning body
-    *nrets = 0;
-    return true; // void
+    g.nrets = 0;
   }
   *nrets = g.nrets;
   for (uint8_t i = 0; i < g.nrets; i++)
     rets[i] = g.rets[i];
+  if (cacheable && g.nrets <= 8) { // scalar results hold for the whole compile
+    bool pure = true;
+    for (uint8_t i = 0; pure && i < g.nrets; i++)
+      pure = cv_is_scalar(g.rets[i]);
+    if (pure) {
+      if (!ce->calls)
+        ce->calls = calloc(1, sizeof *ce->calls);
+      if (ce->calls && ce->calls->map.len < CE_CALLS_MAX) {
+        CeCallHit hit = {.nrets = g.nrets};
+        for (uint8_t i = 0; i < g.nrets; i++)
+          hit.rets[i] = g.rets[i];
+        CeCallMap_insert(&ce->calls->map, ck, hit);
+      }
+    }
+  }
   return true;
 }
 
