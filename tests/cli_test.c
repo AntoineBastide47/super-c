@@ -176,13 +176,25 @@ static void test_ctfe(void) {
   CHECK(strstr(gc, "spin()") != NULL, "over-budget callee stays a runtime call");
 
   // --const-eval-steps starves CTFE: an assert that needs execution now reports the budget
+  // (a LOOP burns real steps; recursive fib would be rescued by the call memo below)
   write_file(spc,
-             "fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }\n"
-             "static_assert(fib(20) == 6_765, \"needs execution\");\n"
+             "fn burn() i32 { let mut i = 0; while i < 1_000_000 { i += 1; } return i; }\n"
+             "static_assert(burn() == 1_000_000, \"needs execution\");\n"
              "fn main() i32 { return 0; }\n");
   snprintf(cmd, sizeof cmd, "%s --const-eval-steps=4096 '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "a starved assert fails the build");
   CHECK(strstr(buf, "step budget exceeded") != NULL, "and blames the budget: %s", buf);
+
+  // the (fn, args) call memo (Zig-style): naive fib(40) is ~2.7 BILLION invocations un-cached,
+  // 41 distinct (fn, n) pairs cached -- it must fold comfortably inside a 100k-step budget
+  write_file(spc,
+             "fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }\n"
+             "static_assert(fib(40) == 102_334_155, \"memoized\");\n"
+             "fn main() i32 { return 0; }\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval-steps=100000 '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "memoized fib(40) folds under a small budget: %s", buf);
+  CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
+  CHECK(strstr(gc, "_Static_assert(true, \"memoized\")") != NULL, "the call cache collapsed the recursion");
 }
 
 // CTFE over aggregates and the abstract heap: structs + methods + operator/extend dispatch, local
