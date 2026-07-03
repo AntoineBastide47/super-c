@@ -82,6 +82,18 @@ static void test_ok(void) {
       "reference coerces to const pointer",
       "fn take(p: *const i32) i32 { return unsafe *p; }\n"
       "fn give(x: i32) i32 { return take(&x); }\n");
+  // Pointer ERASURE is implicit (`*mut T` -> `*mut void`, const-respecting); INVENTION
+  // (`*mut void` -> `*mut T`) still needs an explicit `as` cast.
+  expect_ok(
+      "pointer erases to void pointer",
+      "fn take(p: *mut void) void {}\nfn cview(p: *const void) void {}\n"
+      "fn f(x: *mut i32, c: *const i32) { take(x); cview(x); cview(c); }\n");
+  expect_error(
+      "const pointer does not erase to mut void",
+      "fn take(p: *mut void) void {}\nfn f(c: *const i32) { take(c); }\n", "mismatched types");
+  expect_error(
+      "void pointer does not invent a type implicitly",
+      "fn f(p: *mut void) *mut i32 { return p; }\n", "mismatched types");
 }
 
 static void test_computed_scalar_types(void) {

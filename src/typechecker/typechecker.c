@@ -504,9 +504,12 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   if (ex->kind == TYPE_REFERENCE && ac->kind == TYPE_REFERENCE && ex->as.elem == ac->as.elem &&
       ex->qualifier != TYPE_QUAL_MUT && ac->qualifier == TYPE_QUAL_MUT)
     return true;
-  // Raw pointers of the same pointee: a writable source (`*T`/`*mut T`) fits any target; a
-  // `*const T` source fits only a `*const T` target (so `new`'s `*mut T` flows into `*T`/`*const`).
-  if (ex->kind == TYPE_POINTER && ac->kind == TYPE_POINTER && ex->as.elem == ac->as.elem &&
+  // Raw pointers of the same pointee, or ERASED into a void-pointer slot (`*mut T` -> `*mut void`:
+  // a `*void` cannot be dereferenced, so erasing is harmless; the inventing direction
+  // `*mut void` -> `*mut T` stays an explicit `as` cast). Qualifiers: a writable source
+  // (`*T`/`*mut T`) fits any target; a `*const T` source fits only a `*const` target.
+  if (ex->kind == TYPE_POINTER && ac->kind == TYPE_POINTER &&
+      (ex->as.elem == ac->as.elem || ex->as.elem == ast_builtin(BT_VOID)) &&
       (ex->qualifier == TYPE_QUAL_CONST || ac->qualifier != TYPE_QUAL_CONST))
     return true;
   // A named function (or another fn pointer) fits a `fn(..) ..` slot when signatures match structurally.
