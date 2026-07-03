@@ -66,9 +66,12 @@ const char *const SUPER_RT_INCLUDES =
     RT_H("stdckdint.h") RT_H("stddef.h") RT_H("stdint.h") RT_H("stdio.h") RT_H("stdlib.h") RT_H("stdnoreturn.h")
     RT_H("string.h") RT_H("tgmath.h") RT_H("threads.h") RT_H("time.h") RT_H("uchar.h") RT_H("wchar.h")
     RT_H("wctype.h") SC_ATOMIC_SHIM SC_LIBC_SHIM
-    // Runtime safety traps: abort on a violation (the language has no panic/unwind).
-    "static __attribute__((unused)) void __sc_panic(const char *__m) {\n"
+    // Runtime safety traps and the user-facing panic: abort with a message (no unwinding).
+    "static _Noreturn __attribute__((unused)) void __sc_panic(const char *__m) {\n"
     "  fprintf(stderr, \"super-c: %s\\n\", __m); abort();\n"
+    "}\n"
+    "static _Noreturn __attribute__((unused)) void __sc_panic_str(const uint8_t *__p, size_t __n) {\n"
+    "  fprintf(stderr, \"panic: %.*s\\n\", (int)__n, (const char *)__p); abort();\n"
     "}\n"
     "static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n) {\n"
     "  if (__i >= __n) __sc_panic(\"index out of bounds\");\n"
@@ -1327,6 +1330,9 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
   switch (ty->kind) {
     case TYPE_BUILTIN:
       buf_join3(out, cap, BUILTIN_C[ty->as.builtin], SEP(decl), decl);
+      break;
+    case TYPE_NEVER: // a diverging call's type: C has no spelling for it, and no value ever exists
+      buf_join3(out, cap, "void", SEP(decl), decl);
       break;
     case TYPE_STRUCT:
     case TYPE_ENUM: {
@@ -3696,6 +3702,15 @@ static int cg_arm_frees(Codegen *c, const NodeId pid, const bool do_emit) {
 // into a temp so the free runs before the function returns).
 static void emit_arm_body(Codegen *c, const NodeId body, const int mode, const char *result, const NodeId pattern,
                           const bool by_ref) {
+  // A diverging arm (`None => panic(..)`): the _Noreturn call IS the whole body -- no value to
+  // assign or return, no frees to run (control never continues past it).
+  const TypeId bt0 = ast_type(c->ast, body);
+  if (bt0 != TYPE_NONE && ast_type_at(c->ast, bt0)->kind == TYPE_NEVER) {
+    emit_indent(c);
+    emit_expr(c, body);
+    emit(c, ";\n");
+    return;
+  }
   const int frees = by_ref ? 0 : cg_arm_frees(c, pattern, false);
   if (mode == 2) {
     emit_indent(c);
@@ -3992,7 +4007,9 @@ static void emit_block_value(Codegen *c, const NodeId id, const char *result) {
     const Node *const s = ast_at_const(c->ast, ids[i]);
     emit_indent(c);
     if (i + 1 == stmts.len && s->kind == NODE_EXPRESSION_STATEMENT) {
-      emit(c, "%s = ", result);
+      const TypeId vt = ast_type(c->ast, s->as.single.value);
+      if (vt == TYPE_NONE || ast_type_at(c->ast, vt)->kind != TYPE_NEVER)
+        emit(c, "%s = ", result); // a diverging tail (`else { panic(..) }`) emits the call alone
       emit_expr(c, s->as.single.value);
       emit(c, ";\n");
     } else {
@@ -4466,6 +4483,15 @@ static void emit_return(Codegen *c, const Node *n) {
         }
         emit(c, " };\n");
       } else { // single value (a `return switch` lowers to a stmt-expression via emit_expr)
+        const TypeId rvt0 = ast_type(c->ast, vids[0]);
+        if (rvt0 != TYPE_NONE && ast_type_at(c->ast, rvt0)->kind == TYPE_NEVER) {
+          emit_expr(c, vids[0]); // diverging: the call alone; pending defers never run (abort)
+          emit(c, ";\n");
+          c->depth--;
+          emit_indent(c);
+          emit(c, "}\n");
+          return;
+        }
         emit(c, "__auto_type %s = ", rv);
         emit_expr(c, vids[0]);
         emit(c, ";\n");
@@ -4500,6 +4526,12 @@ static void emit_return(Codegen *c, const Node *n) {
       else
         emit_expr(c, vids[0]);
       emit(c, " };\n");
+      return;
+    }
+    const TypeId rvt = ast_type(c->ast, vids[0]);
+    if (rvt != TYPE_NONE && ast_type_at(c->ast, rvt)->kind == TYPE_NEVER) {
+      emit_expr(c, vids[0]); // `return panic(..);`: the _Noreturn call alone (C rejects returning void)
+      emit(c, ";\n");
       return;
     }
     emit(c, "return ");

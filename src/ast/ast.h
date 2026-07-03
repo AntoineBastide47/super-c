@@ -354,6 +354,8 @@ typedef enum {
                  // the Ast's interned instance table, so Vec<i32> and Vec<bool> are distinct interned types
   TYPE_OPAQUE,   // an `extern "C" { type X; }` handle: a real, sized C type named by the header. `as.decl`
                  // is the NODE_TYPE_ALIAS (in `module`); renders to its own unmangled C name, never `void`
+  TYPE_NEVER,    // the type of a diverging call (`@c.noreturn`, e.g. panic): unifies with every type,
+                 // since control never returns to observe a value. Not nameable in source.
 } TypeKind;
 
 // Named `Ty`, not `Type`: a `Type` token-keyword enum constant already occupies that identifier.
