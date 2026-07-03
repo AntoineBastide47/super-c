@@ -484,6 +484,13 @@ static void resolve_type(Resolver *r, const NodeId id) {
     case NODE_SLICE_TYPE:
       resolve_type(r, n->as.indirect_type.type);
       break;
+    case NODE_TUPLE_TYPE: {
+      const NodeList elems = n->as.array_literal.elements;
+      const NodeId *const eids = ast_list(r->ast, elems);
+      for (uint32_t i = 0; i < elems.len; i++)
+        resolve_type(r, eids[i]);
+      break;
+    }
     case NODE_ARRAY_TYPE:
       resolve_type(r, n->as.array_type.element);
       resolve_expr(r, n->as.array_type.length);
@@ -839,7 +846,8 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       else
         resolve_type(r, n->as.new_expr.type);
       break;
-    case NODE_ARRAY_LITERAL: {
+    case NODE_ARRAY_LITERAL:
+    case NODE_TUPLE: {
       const NodeList elements = n->as.array_literal.elements;
       const NodeId *const ids = ast_list(r->ast, elements);
       for (uint32_t i = 0; i < elements.len; i++)

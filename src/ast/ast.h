@@ -121,6 +121,9 @@ typedef enum {
 
   NODE_RANGE, // `lo..hi` / `lo..=hi` expression (for-loop iterable only); reuses `pattern_range`
 
+  NODE_TUPLE,      // `(a, b, ..)` tuple literal (2-4 elements); lowers to the prelude Tuple<n> struct
+  NODE_TUPLE_TYPE, // `(T1, T2, ..)` tuple type; lowers to a Tuple<n> instance. Both reuse `array_literal`.
+
   NODE_KIND_COUNT,
 } NodeKind;
 

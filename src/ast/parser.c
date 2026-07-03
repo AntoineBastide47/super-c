@@ -344,6 +344,18 @@ static NodeId parse_type_inner(Parser *p) {
                     .as.function_type = {.params = params, .returns = returns},
                 });
   }
+  if (match(p, LeftParen)) { // `(T1, T2, ..)` tuple type: parens never group a type, so 2+ elements
+    const NodeList elems = parse_comma_types(p, RightParen);
+    expect(p, RightParen, "')'");
+    if (elems.len < 2)
+      parser_errorf(p, start, previous_end(p) - start, "a tuple type needs at least 2 elements");
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_TUPLE_TYPE,
+                    .span = span_new(start, previous_end(p)),
+                    .as.array_literal = {.elements = elems},
+                });
+  }
   if (check(p, Identifier) || check(p, SelfUpper))
     return parse_type_path(p);
   error_here(p, "expected type");
@@ -1340,6 +1352,21 @@ static NodeId parse_primary(Parser *p) {
     const bool old = p->allow_struct_initializer; // parens are the escape hatch: re-enable struct literals inside
     p->allow_struct_initializer = true;
     const NodeId value = parse_expression(p);
+    if (check(p, Comma)) { // `(a, b, ..)` tuple literal: a grouping never has a comma (LL(1))
+      const uint32_t mark = ast_mark(p->ast);
+      ast_push(p->ast, value);
+      while (match(p, Comma) && !check(p, RightParen) && !at_end(p))
+        ast_push(p->ast, parse_expression(p));
+      const NodeList elems = ast_commit(p->ast, mark);
+      p->allow_struct_initializer = old;
+      expect(p, RightParen, "')'");
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_TUPLE,
+                      .span = span_new(start, previous_end(p)),
+                      .as.array_literal = {.elements = elems},
+                  });
+    }
     p->allow_struct_initializer = old;
     expect(p, RightParen, "')'");
     return value;
@@ -1497,7 +1524,18 @@ static NodeId parse_postfix_after(Parser *p, NodeId expr) {
       const bool pointer = match(p, Arrow);
       if (!pointer)
         advance(p);
-      const NodeId member = callable_name(p);
+      NodeId member;
+      if (check(p, IntegerLiteral)) { // tuple element access `t.0` (the typechecker maps it to field `_0`)
+        const Token tok = advance(p);
+        member = ast_add(
+            p->ast, (Node){.kind = NODE_IDENTIFIER, .span = token_span(tok), .as.name = {.text = token_span(tok)}});
+      } else if (check(p, FloatLiteral)) { // `t.0.1` lexes `0.1` as one float: nested access needs parens
+        error_here(p, "nested tuple access needs parentheses: write '(t.0).1'");
+        advance(p);
+        member = NODE_NONE;
+      } else {
+        member = callable_name(p);
+      }
       expr = ast_add(
           p->ast, (Node){
                       .kind = NODE_MEMBER,

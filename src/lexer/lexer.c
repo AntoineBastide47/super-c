@@ -772,12 +772,6 @@ static void number(Lexer *l, TokenWriter *w) {
     add_token(l, w, is_float ? FloatLiteral : IntegerLiteral);
 }
 
-COLD void leading_dot_number(Lexer *l) {
-  while (is_id_part[peek_byte(l)] || peek_byte(l) == '.')
-    l->current++;
-  lexer_error(l, "floating-point literals require a digit before the decimal point");
-}
-
 static void scan_token(Lexer *l, TokenWriter *w) {
   const uint8_t c = l->bytes[l->current];
   if (LIKELY(c < 0x80))
@@ -867,9 +861,9 @@ static void scan_token(Lexer *l, TokenWriter *w) {
       return;
 
     case '.':
-      if (is_dec(peek_byte(l))) {
-        leading_dot_number(l);
-      } else if (match_byte(l, '.')) {
+      // `.` before a digit is a plain Dot: tuple element access `t.0` needs `Dot IntegerLiteral`,
+      // and leading-dot floats (`.5`) are not a literal form (the number lexes on its own next).
+      if (match_byte(l, '.')) {
         EMIT(match_byte(l, '.') ? Ellipsis : match_byte(l, '=') ? RangeInclusive : Range);
       } else {
         EMIT(Dot);

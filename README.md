@@ -66,6 +66,24 @@ fn main() i32 {
 }
 ```
 
+### Tuples
+
+```superc
+fn swap(p: (i32, bool)) (bool, i32) {
+    return p.1, p.0;
+}
+
+fn main() i32 {
+    let t = (1, true);         // (i32, bool) — sugar for the prelude's Tuple2<i32, bool>
+    let (b, n) = swap(t);      // destructure (works on tuple values and multi-return calls)
+    let pair: (u8, u8) = (2, 3);
+    return n + (b as i32) + (pair.0 as i32) + (pair.1 as i32) - 7;  // t.0 / t.1 read elements
+}
+```
+
+Tuples are first-class values (2-4 elements): store them in fields, pass them to functions, put
+them in containers (`Vector<(i32, bool)>`). Nested element access needs parens: `(t.0).1`.
+
 ### Structs, methods, and visibility
 
 ```superc
@@ -369,7 +387,8 @@ Implemented and working: the full lexer→parser→resolver→typechecker→code
 structs/methods/visibility, enums with payloads and pattern matching (including or-patterns and
 guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
 cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
-(`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), the `?` early-return operator, `panic` /
+(`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), first-class tuples, the `?` early-return
+operator, `panic` /
 `unwrap` / `expect` with a `never` type for diverging calls, RAII-style
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with

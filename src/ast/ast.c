@@ -313,6 +313,8 @@ static const char *kind_name(const NodeKind kind) {
       "PatternRange",
       "PatternOr",
       "Range",
+      "Tuple",
+      "TupleType",
   };
   _Static_assert(sizeof names / sizeof names[0] == NODE_KIND_COUNT, "kind_name names[] out of sync with NodeKind");
   return (unsigned)kind < sizeof names / sizeof names[0] ? names[kind] : "Invalid";
@@ -517,6 +519,8 @@ static void print_node(FILE *out, const Ast *a, const NodeId id, const char *sou
       print_child(out, a, n->as.va_op.extra, source, depth + 1);
       break;
     case NODE_ARRAY_LITERAL:
+    case NODE_TUPLE:
+    case NODE_TUPLE_TYPE:
       print_list(out, a, n->as.array_literal.elements, source, depth + 1);
       break;
     case NODE_STRUCT_INITIALIZER:
