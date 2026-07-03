@@ -119,6 +119,7 @@ static void test_ctfe(void) {
   }
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   write_file(spc,
+             "extern \"C\" { fn rand() i32; }\n"
              "fn fib(n: i32) i32 {\n"
              "  if n < 2 { return n; }\n"
              "  return fib(n - 1) + fib(n - 2);\n"
@@ -128,13 +129,15 @@ static void test_ctfe(void) {
              "  while n != 1 { n = switch n % 2 { 0 => n / 2, _ => 3 * n + 1 }; c += 1; }\n"
              "  return c;\n"
              "}\n"
-             "fn late() f64 { return 1.5; }\n"
+             "fn half(x: f64) f64 { return x / 2.0; }\n"
+             "fn late() i32 { return unsafe rand(); }\n"
              "static_assert(fib(20) == 6_765, \"ctfe\");\n"
              "static_assert(collatz(27) == 111, \"loops fold\");\n"
+             "static_assert(half(3.0) == 1.5, \"floats fold\");\n"
              "fn main() i32 {\n"
              "  fib(9);\n"
              "  let x = fib(10) - 47;\n"
-             "  if late() < 1.0 { return 1; }\n"
+             "  if late() < 0 { return 1; }\n"
              "  return x;\n"
              "}\n");
   snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
@@ -144,9 +147,10 @@ static void test_ctfe(void) {
   CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
   CHECK(strstr(gc, "_Static_assert(true, \"ctfe\")") != NULL, "fib(20) ran at compile time");
   CHECK(strstr(gc, "_Static_assert(true, \"loops fold\")") != NULL, "collatz(27) ran at compile time");
+  CHECK(strstr(gc, "_Static_assert(true, \"floats fold\")") != NULL, "float CTFE ran at compile time");
   CHECK(strstr(gc, "x = 8;") != NULL, "the call site folded to its value");
   CHECK(strstr(gc, "fib(10") == NULL && strstr(gc, "fib(9") == NULL, "no interpreted call survives in main");
-  CHECK(strstr(gc, "late()") != NULL, "an unfoldable (float) callee stays a runtime call");
+  CHECK(strstr(gc, "late()") != NULL, "an un-intercepted extern callee stays a runtime call");
   char bin[4200];
   snprintf(bin, sizeof bin, "%s/ctfe.bin", DIR);
   snprintf(cmd, sizeof cmd, "cc -std=c11 -Wall -Wextra -Werror %s/build/*.c -o '%s' 2>&1", root, bin);
@@ -166,6 +170,101 @@ static void test_ctfe(void) {
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "budget blowup still compiles: %s", buf);
   CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
   CHECK(strstr(gc, "spin()") != NULL, "over-budget callee stays a runtime call");
+}
+
+// CTFE over aggregates and the abstract heap: structs + methods + operator/extend dispatch, local
+// arrays, generic types, intercepted malloc/free with typed pointer views, payload enums through
+// switch, and a full std Vector round trip (with_capacity/push/Index/len/free) -- all executed by
+// the interpreter. Also locks the two diagnostics upgrades: a static_assert may precede its callee
+// (deferred to a package-level re-check) and a would-be runtime trap reports its reason.
+static void test_ctfe_memory(void) {
+  char root[4112], spc[4170], out[4180], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/ctfeh", DIR);
+  if (system((snprintf(cmd, sizeof cmd, "mkdir -p '%s'", root), cmd))) { /* best-effort */
+  }
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  write_file(spc,
+             "static_assert(vec_sum() == 44, \"deferred: asserts may precede their callee\");\n"
+             "struct Pt { x: i32, y: i32 }\n"
+             "extend Pt {\n"
+             "  pub fn mag2(self: &Pt) i32 { return self.x * self.x + self.y * self.y; }\n"
+             "  pub fn shift(self: &mut Pt, dx: i32) { self.x += dx; }\n"
+             "  pub fn make(x: i32, y: i32) Pt { return Pt { x: x, y: y }; }\n"
+             "}\n"
+             "extern \"C\" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }\n"
+             "fn structs() i32 {\n"
+             "  let mut p = Pt::make(3, 4);\n"
+             "  p.shift(1);\n"
+             "  let a: [i32; 4] = [[1] = p.mag2(), 1];\n"
+             "  let mut s = 0;\n"
+             "  for v in a { s += v; }\n"
+             "  return s;\n"
+             "}\n"
+             "static_assert(structs() == 33, \"aggregates fold\");\n"
+             "fn heap() i32 {\n"
+             "  let p = unsafe malloc(2 * sizeof(i64)) as *mut i64;\n"
+             "  unsafe p[0] = 40;\n"
+             "  unsafe p[1] = unsafe p[0] + 2;\n"
+             "  let r = unsafe p[1];\n"
+             "  unsafe free(p as *mut void);\n"
+             "  return (r as i32);\n"
+             "}\n"
+             "static_assert(heap() == 42, \"the abstract heap folds\");\n"
+             "fn opt(k: i32) i32 {\n"
+             "  let o = if k > 0 { Option::<i32>::Some(k); } else { Option::<i32>::None; };\n"
+             "  return switch o { Some(v) => v + 1, None => -1, };\n"
+             "}\n"
+             "static_assert(opt(4) == 5 && opt(-4) == -1, \"payload enums fold\");\n"
+             "fn vec_sum() i32 {\n"
+             "  let mut x = Vector::<i32>::with_capacity(2);\n"
+             "  x.push(7);\n"
+             "  x.push(35);\n"
+             "  let s = x[0] + x[1] + (x.len() as i32);\n"
+             "  x.free();\n"
+             "  return s;\n"
+             "}\n"
+             "fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "heap CTFE program compiles (got): %s", buf);
+  snprintf(out, sizeof out, "%s/build/main.c", root);
+  char gc[32768];
+  CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
+  CHECK(strstr(gc, "_Static_assert(true, \"deferred: asserts may precede their callee\")") != NULL,
+        "an assert ABOVE its callee folds via the package-level re-check");
+  CHECK(strstr(gc, "_Static_assert(true, \"aggregates fold\")") != NULL, "structs/arrays/methods fold");
+  CHECK(strstr(gc, "_Static_assert(true, \"the abstract heap folds\")") != NULL, "malloc/free fold");
+  CHECK(strstr(gc, "_Static_assert(true, \"payload enums fold\")") != NULL, "Option + switch folds");
+  char bin[4200];
+  snprintf(bin, sizeof bin, "%s/ctfeh.bin", DIR);
+  snprintf(cmd, sizeof cmd, "cc -std=c11 -Wall -Wextra -Werror %s/build/*.c %s/build/__std/*.c -o '%s' 2>&1", root,
+           root, bin);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "heap CTFE output compiles -Werror: %s", buf);
+  snprintf(cmd, sizeof cmd, "'%s'", bin);
+  CHECK(run_cmd(cmd, NULL, 0) == 0, "heap CTFE program runs (everything folded to 0)");
+
+  // a would-be runtime trap inside a required-const context reports its REASON at Super-C level
+  write_file(spc,
+             "fn div0(n: i32) i32 { return 10 / n; }\n"
+             "static_assert(div0(0) == 1, \"traps\");\n"
+             "fn main() i32 { return 0; }\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "a trapping assert fails the build");
+  CHECK(strstr(buf, "division by zero") != NULL, "and names the trap: %s", buf);
+
+  // use-after-free is caught by the abstract heap, with the same reporting
+  write_file(spc,
+             "extern \"C\" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }\n"
+             "fn uaf() i32 {\n"
+             "  let p = unsafe malloc(sizeof(i32)) as *mut i32;\n"
+             "  unsafe p[0] = 1;\n"
+             "  unsafe free(p as *mut void);\n"
+             "  return unsafe p[0];\n"
+             "}\n"
+             "static_assert(uaf() == 1, \"uaf\");\n"
+             "fn main() i32 { return 0; }\n");
+  snprintf(cmd, sizeof cmd, "%s --const-eval '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) != 0, "use-after-free fails the build");
+  CHECK(strstr(buf, "use after free") != NULL, "and names it: %s", buf);
 }
 
 // A second module's enums used across the boundary: a value return, a payload-less match (bare variant
@@ -726,6 +825,7 @@ int main(void) {
   test_cross_module_enum();
   test_const_eval_flag();
   test_ctfe();
+  test_ctfe_memory();
   test_module_features();
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();
