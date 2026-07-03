@@ -78,6 +78,16 @@ extern "C" {
     fn fminf(x: f32, y: f32) f32;
     fn fmaxf(x: f32, y: f32) f32;
     fn fmaf(x: f32, y: f32, z: f32) f32;
+
+    fn __sc_panic_str(msg: *const u8, len: usize) void; // the runtime trap: prints `panic: <msg>`, aborts
+}
+
+// Abort the program with a message on stderr. There is no unwinding: no cleanup runs, the process
+// dies via abort(). A `@c.noreturn` call types as `never`, so a panicking switch/if arm unifies
+// with value-producing siblings (`None => panic("empty")`).
+@c.noreturn
+pub fn panic(msg: str) void {
+    unsafe __sc_panic_str(msg.ptr, msg.len);
 }
 
 extend i8 as Eq {

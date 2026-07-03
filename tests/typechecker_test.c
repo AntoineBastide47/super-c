@@ -656,6 +656,29 @@ static void test_switch_exhaustiveness(void) {
 #undef ENUM3
 }
 
+// `panic(..)` (any `@c.noreturn` call) types as `never`, which unifies with every type: a
+// diverging switch/if arm coexists with value-producing siblings, and `return panic(..)` fits
+// any declared return type.
+static void test_never_type(void) {
+  expect_ok(
+      "panicking switch arm unifies",
+      "fn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => panic(\"none\") }; }\n");
+  expect_ok(
+      "panicking else branch unifies",
+      "fn f(n: i32) i32 { let d = if n > 0 { n; } else { panic(\"neg\"); }; return d; }\n");
+  expect_ok("return panic fits any return type", "fn f() i32 { return panic(\"boom\"); }\n");
+  expect_ok(
+      "user noreturn fn also diverges",
+      "extern \"C\" { fn abort() void; }\n"
+      "@c.noreturn\nfn die() void { unsafe abort(); }\n"
+      "fn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => die() }; }\n");
+  expect_error(
+      "non-noreturn void arm still mismatches",
+      "fn nop() void {}\n"
+      "fn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => nop() }; }\n",
+      "mismatched types");
+}
+
 // Raw-pointer operations and extern "C" calls are only legal inside `unsafe { .. }` / `unsafe expr`:
 // the compiler cannot vouch for them, so the marker is mandatory. References stay safe.
 static void test_unsafe_enforcement(void) {
@@ -699,6 +722,7 @@ int main(void) {
   test_errors();
   test_switch_exhaustiveness();
   test_unsafe_enforcement();
+  test_never_type();
   test_interface_bounds();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");

@@ -221,7 +221,10 @@ fn main() i32 {
 ```
 
 `Box<T>`, `Option<T>`, `Result<T, E>`, `Vector<T>`, `Map<K, V>`, `Set<T>`, `String`, and `str` ship in
-`std/` and are auto-imported, along with iterators and the algorithms built on them. The containers and
+`std/` and are auto-imported, along with iterators and the algorithms built on them. `panic("msg")`
+aborts with a message (no unwinding); `Option`/`Result` provide the panicking accessors `unwrap()` /
+`expect(msg)` (+ `unwrap_err()`), and a `@c.noreturn` call types as `never`, so a panicking arm
+unifies with value-producing siblings in a `switch` or `if`. The containers and
 `String` are allocator-parameterized: implement the `Allocator` interface and pass it via the `*_in`
 constructors (`new_in`, `with_capacity_in`, `from_str_in`).
 
@@ -366,7 +369,8 @@ Implemented and working: the full lexer→parser→resolver→typechecker→code
 structs/methods/visibility, enums with payloads and pattern matching (including or-patterns and
 guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
 cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
-(`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), the `?` early-return operator, RAII-style
+(`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), the `?` early-return operator, `panic` /
+`unwrap` / `expect` with a `never` type for diverging calls, RAII-style
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with
 field-precise overlap, use-while-borrowed, non-lexical borrow lifetimes, dangling-reference returns),

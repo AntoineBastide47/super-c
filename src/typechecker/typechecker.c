@@ -321,6 +321,9 @@ static void render_type(TypeChecker *t, const TypeId tid, char *buf, const size_
     case TYPE_BUILTIN:
       snprintf(buf, cap, "%s", BUILTIN_NAMES[ty->as.builtin]);
       break;
+    case TYPE_NEVER:
+      snprintf(buf, cap, "never");
+      break;
     case TYPE_POINTER:
     case TYPE_REFERENCE: {
       char in[96];
@@ -393,6 +396,16 @@ static void err_mismatch(TypeChecker *t, const NodeId node, const TypeId expecte
 static void err_unsafe(TypeChecker *t, const Span sp, const char *const what) {
   typechecker_errorf(t, sp.start, sp.end - sp.start, "%s requires an 'unsafe' block", what);
   typechecker_notef(t, "wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'");
+}
+
+// Find a `@c.*` attribute of `kind` on item `owner` in module `mod`, or NULL (mirrors codegen's
+// cg_attr; attributes are few, so a linear scan of the owning module's table is cheap).
+static const Attr *tc_attr(TypeChecker *t, const ModuleId mod, const NodeId owner, const AttrKind kind) {
+  const Ast *const a = mod_ast(t, mod);
+  for (size_t i = 0; i < a->attrs.len; i++)
+    if (a->attrs.data[i].owner == owner && a->attrs.data[i].kind == kind)
+      return &a->attrs.data[i];
+  return NULL;
 }
 
 // `move` / `unsafe` prefixes are transparent wrappers around their operand: every place-shaped
@@ -496,6 +509,10 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   // or `*const T` (mut downgrades to const). One-way only, and `&T` never gains `*mut`. A raw
   // pointer carries no validity guarantee, so it never becomes a reference.
   const Ty *const ex = ast_type_at(t->ast, expected), *const ac = ast_type_at(t->ast, actual);
+  // A diverging expression (`panic(..)`, any `@c.noreturn` call) fits every slot: control never
+  // returns to observe the value, so `switch o { Some(v) => v, None => panic("..") }` type-checks.
+  if (ac->kind == TYPE_NEVER)
+    return true;
   if (ex->kind == TYPE_POINTER && ac->kind == TYPE_REFERENCE && ex->as.elem == ac->as.elem &&
       (ac->qualifier == TYPE_QUAL_MUT || ex->qualifier == TYPE_QUAL_CONST))
     return true;
@@ -3187,8 +3204,9 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   }
 
   const ModuleId fmod = ct->module;        // the called function lives in this module
+  const NodeId fdecl = ct->as.decl;        // copied out: `ct` dangles once interning grows the type pool
   Ast *const fa = mod_ast(t, fmod);
-  const Node *const fn = ast_at_const(fa, ct->as.decl);
+  const Node *const fn = ast_at_const(fa, fdecl);
   const bool named = fn->kind == NODE_FUNCTION;
   // An extern "C" function body is invisible to the compiler: no borrow/move/bounds guarantees
   // survive the call, so the call site must carry the `unsafe` audit marker.
@@ -3531,6 +3549,10 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   }
   if (clos && fn->as.closure.expr_body)
     return ast_type(fa, fn->as.closure.body); // compact closure callee: return type inferred from its body
+  // A `@c.noreturn` function never returns: the call's type is `never`, which unifies with any
+  // expected type (so a panicking switch/if arm coexists with value-producing siblings).
+  if (named && tc_attr(t, fmod, fdecl, ATTR_NORETURN))
+    return ast_intern_type(t->ast, (Ty){.kind = TYPE_NEVER});
   if (returns.len != 1) {
     if (returns.len > 1) { // multi-return: stash the SUBSTITUTED element types for check_tuple_let
       const NodeId *const mrids = ast_list(fa, returns);
@@ -4392,10 +4414,15 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         }
         const TypeId body = check_expr(t, arm->as.match_arm.body);
         ovf |= tc_flow_collect(&acc, t); // ∪ this arm's effects
+        // A diverging arm (`None => panic(..)`) constrains nothing: skip it in the unification,
+        // and let a later value-producing arm replace a diverging `result`.
+        const bool body_never = body != TYPE_NONE && ast_type_at(a, body)->kind == TYPE_NEVER;
         if (first) {
           result = body;
           first = false;
-        } else if (result != body && body != TYPE_NONE && result != TYPE_NONE) {
+        } else if (result != TYPE_NONE && ast_type_at(a, result)->kind == TYPE_NEVER) {
+          result = body;
+        } else if (!body_never && result != body && body != TYPE_NONE && result != TYPE_NONE) {
           err_mismatch(t, arm->as.match_arm.body, result);
           result = TYPE_NONE;
         }
@@ -4521,7 +4548,12 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         tc_flow_set(t, &acc);
         if (ovf)
           tc_flow_overflow(t, id);
-        if (then_ty != else_ty && then_ty != TYPE_NONE && else_ty != TYPE_NONE) {
+        // A diverging branch (`else { panic(..) }`) constrains nothing: the value is the other side's.
+        const bool then_never = then_ty != TYPE_NONE && ast_type_at(a, then_ty)->kind == TYPE_NEVER;
+        const bool else_never = else_ty != TYPE_NONE && ast_type_at(a, else_ty)->kind == TYPE_NEVER;
+        if (then_never || else_never) {
+          result = then_never ? else_ty : then_ty;
+        } else if (then_ty != else_ty && then_ty != TYPE_NONE && else_ty != TYPE_NONE) {
           err_mismatch(t, n->as.if_stmt.else_branch, then_ty);
           result = TYPE_NONE;
         } else {

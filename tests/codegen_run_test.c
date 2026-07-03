@@ -197,6 +197,22 @@ static void test_tuple_destructure(void) {
           "  unsafe exit(a + b + c + d + e + (f as i32) + g + h);\n"
           "}\n",
       44, ""); // 5+5 + 10+10 + 10+1 + 1+2
+  // panic/unwrap/expect: the happy paths return values; the panicking path aborts (128+SIGABRT via sh).
+  sc_run_program(
+      "unwrap/expect/unwrap_err happy paths",
+      PRE "fn main() i32 {\n"
+          "  let a = Option::<i32>::some(30).unwrap();\n"
+          "  let b = Option::<i32>::some(5).expect(\"gone\");\n"
+          "  let c = Result::<i32, str>::ok(7).unwrap();\n"
+          "  let e = Result::<i32, i32>::err(9).unwrap_err();\n"
+          "  let d = if c > 0 { 0; } else { panic(\"neg\"); };\n"
+          "  unsafe exit(a + b + c + d + e);\n"
+          "}\n",
+      51, "");
+  sc_run_program(
+      "unwrap on None panics (aborts)",
+      PRE "fn main() i32 { let v = Option::<i32>::none().unwrap(); unsafe exit(v); }\n",
+      134, "");
   // a mutable tuple binding can be reassigned.
   sc_run_program(
       "mutable tuple destructure",

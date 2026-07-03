@@ -33,6 +33,31 @@ extend<T, E> Result<T, E> {
         };
     }
 
+    // The success value; panics on `Err`. Consumes `self`. A panic aborts the process with no
+    // unwinding, so the discarded payload is never cleaned up.
+    pub fn unwrap(self: Result<T, E>) T {
+        return switch self {
+            Ok(v) => v,
+            Err(_) => panic("Result::unwrap on Err"),
+        };
+    }
+
+    // The success value; panics with `msg` on `Err`. Consumes `self`.
+    pub fn expect(self: Result<T, E>, msg: str) T {
+        return switch self {
+            Ok(v) => v,
+            Err(_) => panic(msg),
+        };
+    }
+
+    // The error value; panics on `Ok`. Consumes `self`.
+    pub fn unwrap_err(self: Result<T, E>) E {
+        return switch self {
+            Ok(_) => panic("Result::unwrap_err on Ok"),
+            Err(e) => e,
+        };
+    }
+
     // The success value, or `default` on `Err`. Consumes `self`; the discarded `Err` payload is freed and
     // the unused `default` (on the `Ok` path) is freed by auto-`Free`.
     pub fn unwrap_or(self: Result<T, E>, default: T) T {

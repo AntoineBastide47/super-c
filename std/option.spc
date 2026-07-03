@@ -33,6 +33,22 @@ extend<T> Option<T> {
         };
     }
 
+    // The contained value; panics on `None`. Consumes `self`.
+    pub fn unwrap(self: Option<T>) T {
+        return switch self {
+            Some(v) => v,
+            None => panic("Option::unwrap on None"),
+        };
+    }
+
+    // The contained value; panics with `msg` on `None`. Consumes `self`.
+    pub fn expect(self: Option<T>, msg: str) T {
+        return switch self {
+            Some(v) => v,
+            None => panic(msg),
+        };
+    }
+
     // The contained value, or `default` when empty. Consumes `self` (matching the owned value moves the
     // payload out); the unused alternative is freed by scope-exit auto-`Free`.
     pub fn unwrap_or(self: Option<T>, default: T) T {

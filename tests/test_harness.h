@@ -511,8 +511,8 @@ TH_UNUSED static int sc_run_built(const char *build_dir, char *out, const size_t
   if (out && out_cap)
     out[n] = '\0';
   const int st = pclose(p);
-  if (exit_code)
-    *exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+  if (exit_code) // a signal-killed program reports the shell convention 128+sig (SIGABRT -> 134)
+    *exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 128 + WTERMSIG(st) : -1;
   return 0;
 }
 
