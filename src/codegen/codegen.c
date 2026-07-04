@@ -308,7 +308,8 @@ static void emit_auto_free(Codegen *c, NodeId letId);
 static bool cg_type_is_free(Codegen *c, TypeId ty);
 static bool cg_is_moved(const Codegen *c, NodeId decl);
 static bool emit_free_target(Codegen *c, TypeId bt);
-static void emit_try(Codegen *c, const Node *n);
+static void emit_try(Codegen *c, NodeId id, const Node *n);
+static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId srcTy, char *out, size_t cap);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -3549,7 +3550,7 @@ static void emit_expr(Codegen *c, const NodeId id) {
     case NODE_UNARY: {
       const TokenType op = n->as.unary.op;
       if (op == Question) {
-        emit_try(c, n); // `expr?`: unwrap or early-return None/Err
+        emit_try(c, id, n); // `expr?`: unwrap or early-return None/Err
       } else if (op == Move || op == Unsafe) {
         emit_expr(c, n->as.unary.operand); // ownership/unsafe markers vanish
       } else if (op == Ampersand && !is_lvalue(c, n->as.unary.operand) &&
@@ -5300,10 +5301,29 @@ static NodeId cg_enum_variant(Codegen *c, const ModuleId m, const NodeId enumDec
   return NODE_NONE;
 }
 
+// The extend target of method `md` (scanning its module's top-level extends), or {0, NODE_NONE}.
+static DefId cg_method_extend_target(Codegen *c, const DefId md) {
+  Ast *const a = cg_mod_ast(c, md.module);
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const it = ast_at_const(a, ids[i]);
+    if (it->kind != NODE_EXTEND)
+      continue;
+    const NodeList ms = it->as.extend_def.items;
+    const NodeId *const mids = ast_list(a, ms);
+    for (uint32_t j = 0; j < ms.len; j++)
+      if (mids[j] == md.node)
+        return ast_resolution_def(a, it->as.extend_def.target_type);
+  }
+  return (DefId){0, NODE_NONE};
+}
+
 // `expr?`: unwrap an Option<T> / Result<T,E>, or run the pending defers and early-return None / Err from the
 // enclosing function (which the type checker has verified returns the matching family). A GNU statement-expr
-// yields the Some/Ok payload on the fall-through path.
-static void emit_try(Codegen *c, const Node *const n) {
+// yields the Some/Ok payload on the fall-through path. When the error types differ, the typechecker recorded
+// the caller error's `from` method on the `?` node; the Err payload is wrapped in that conversion here.
+static void emit_try(Codegen *c, const NodeId id, const Node *const n) {
   const NodeId operand = n->as.unary.operand;
   const Ty *const bt = ast_type_at(c->ast, subst_resolve(c, strip_ptr(c, ast_type(c->ast, operand))));
   if (bt->kind != TYPE_INSTANCE) { // defensive: the type checker should have rejected this
@@ -5336,8 +5356,25 @@ static void emit_try(Codegen *c, const Node *const n) {
   emit_indent(c);
   emit(c, "return (%s){ .tag = ", rtn);
   emit_tag_mod(c, om, od, failV);
-  if (!is_option) // carry the error payload through (same error type; cross-type conversion is rejected upstream)
-    emit(c, ", .payload.%s._0 = %s.payload.%s._0", failName, tmp, failName);
+  if (!is_option) { // carry the error payload through, converting via the recorded From when types differ
+    const DefId conv = ast_resolution_def(c->ast, id);
+    const DefId tg = conv.node != NODE_NONE ? cg_method_extend_target(c, conv) : (DefId){0, NODE_NONE};
+    emit(c, ", .payload.%s._0 = ", failName);
+    if (tg.node != NODE_NONE) {
+      char pfx[64];
+      render_modpfx(c, conv.module, pfx, sizeof pfx);
+      emit_cstr(c, pfx);
+      emit_ident_mod(c, tg.module, ast_at_const(cg_mod_ast(c, tg.module), tg.node)->as.aggregate.name);
+      emit(c, "__");
+      emit_ident_mod(c, conv.module, ast_at_const(cg_mod_ast(c, conv.module), conv.node)->as.function.name);
+      char sfx[200]; // overloaded `from`: same source-type suffix rule the definition used
+      cg_conv_suffix(c, tg, "from", subst_resolve(c, it->args[1]), sfx, sizeof sfx);
+      emit_cstr(c, sfx);
+      emit(c, "(%s.payload.%s._0)", tmp, failName);
+    } else {
+      emit(c, "%s.payload.%s._0", tmp, failName);
+    }
+  }
   emit(c, " };\n");
   c->depth--;
   emit_indent(c);

@@ -1030,6 +1030,47 @@ static DefId resolve_conversion(TypeChecker *t, const Span name, const TypeId wa
   return find_method_cstr(t, m, decl, is_try ? "try_from" : "from");
 }
 
+// A `from` method on `target`'s aggregate whose single parameter takes exactly `src` -- the From
+// conformance backing `?`'s implicit error conversion (callee error -> caller error). Only plain
+// struct/enum targets participate (a generic-instance error type keeps the exact-match rule).
+static DefId tc_find_from_for(TypeChecker *t, const TypeId target, const TypeId src) {
+  const Ty *const ty = ast_type_at(t->ast, strip(t, target));
+  if (ty->kind != TYPE_STRUCT && ty->kind != TYPE_ENUM)
+    return (DefId){0, NODE_NONE};
+  const ModuleId m = ty->module;
+  const NodeId decl = ty->as.decl;
+  const ModuleId scopes[2] = {m, t->ast->module};
+  const int ns = m == t->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId mm = scopes[s];
+    Ast *const a = mod_ast(t, mm);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE || it->as.extend_def.generics.len)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      if (tg.module != m || tg.node != decl)
+        continue;
+      const NodeList ms = it->as.extend_def.items;
+      const NodeId *const mids = ast_list(a, ms);
+      for (uint32_t j = 0; j < ms.len; j++) {
+        const Node *const mn = ast_at_const(a, mids[j]);
+        if (mn->kind != NODE_FUNCTION ||
+            !span_is(mod_src(t, mm), ast_at_const(a, mn->as.function.name)->as.name.text, "from"))
+          continue;
+        const NodeList ps = mn->as.function.params;
+        if (ps.len != 1 || decl_type_in(t, mm, ast_list(a, ps)[0]) != src)
+          continue;
+        package_mark_method_used((Package *)t->package, (DefId){mm, mids[j]}); // demand-driven emission
+        return (DefId){mm, mids[j]};
+      }
+    }
+  }
+  return (DefId){0, NODE_NONE};
+}
+
 // A method named `name` declared by interface `interface` (module `m`) itself, or by one of its superinterfaces
 // (`interface Ord: Eq`). Used to resolve `self.<m>()` inside an interface DEFAULT method body, where the
 // receiver is the abstract `Self` and `<m>` is one of the interface family's own methods.
@@ -3194,12 +3235,18 @@ static TypeId check_unary(TypeChecker *t, const Node *const n, const NodeId id) 
         typechecker_errorf(t, sp.start, sp.end - sp.start, "'?' on a Result requires the function to return a Result");
         typechecker_notef(t, "the function must return Result<_, E> with the same error type");
       }
-      else if (oa[1] != fa[1]) { // the error types must match (convert explicitly with `.into()` before `?`)
-        char a1[96], a2[96];
-        render_type(t, oa[1], a1, sizeof a1);
-        render_type(t, fa[1], a2, sizeof a2);
-        typechecker_errorf(t, sp.start, sp.end - sp.start,
-                           "'?' error type '%s' does not match the function's error type '%s'", a1, a2);
+      else if (oa[1] != fa[1]) { // differing error types: allowed when the caller's error has From<callee's>
+        const DefId conv = tc_find_from_for(t, fa[1], oa[1]);
+        if (conv.node != NODE_NONE) {
+          ast_set_resolution_def(t->ast, id, conv); // codegen wraps the Err payload in Target__from(..)
+        } else {
+          char a1[96], a2[96];
+          render_type(t, oa[1], a1, sizeof a1);
+          render_type(t, fa[1], a2, sizeof a2);
+          typechecker_errorf(t, sp.start, sp.end - sp.start,
+                             "'?' error type '%s' does not match the function's error type '%s'", a1, a2);
+          typechecker_notef(t, "convert with '.into()' before '?', or provide 'extend %s as From<%s>'", a2, a1);
+        }
       }
       return oa[0]; // the Ok payload type
     }
