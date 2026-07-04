@@ -152,6 +152,18 @@ struct Codegen {
     uint8_t defer_kind[256]; // 0 = a `defer` statement expr; 1 = an automatic Free of a local binding (RAII)
     uint32_t defer_top;
     uint32_t loop_defer_base;
+    // Enclosing loops, innermost last: labeled break/continue and `loop`-expression value breaks route
+    // through these (C labels `__brk<seq>` after the loop / `__cnt<seq>` at body end, value var `__lv<seq>`).
+    struct {
+        NodeId node;         // the loop AST node (break/continue resolutions point here)
+        uint32_t defer_base; // break/continue targeting this loop run defers down to here
+        uint32_t seq;        // fresh id for the loop's C labels / value var
+        bool used_brk, used_cnt; // a goto targeted the after-loop / body-end label -> emit it
+        bool is_expr;        // a value-yielding `loop` expression (break stores __lv, then exits)
+    } loop_stack[32];
+    uint32_t nloops;
+    uint32_t label_seq;  // allocator for loop_stack[].seq
+    uint32_t pending_cnt; // loop-stack index + 1 whose body block emit_block_from is about to emit (0 = none)
     // RAII: locals of a `Free`-implementing type are freed at scope exit, UNLESS moved out (passed by
     // value, bound to another name, or returned) -- a moved value is owned (and freed) elsewhere. `moved`
     // holds bindings moved UNCONDITIONALLY (on every path), whose auto-free is elided outright.
@@ -310,6 +322,8 @@ static bool cg_is_moved(const Codegen *c, NodeId decl);
 static bool emit_free_target(Codegen *c, TypeId bt);
 static void emit_try(Codegen *c, NodeId id, const Node *n);
 static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId srcTy, char *out, size_t cap);
+static int cg_loop_push(Codegen *c, NodeId node, bool is_expr);
+static void cg_loop_pop(Codegen *c, int le);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -4115,6 +4129,34 @@ static void emit_expr(Codegen *c, const NodeId id) {
     case NODE_IF:
       emit_if_expr(c, id);
       break;
+    case NODE_WHILE: { // a `loop { .. }` expression: `break <v>` stores __lv and exits; __lv is the value
+      const uint32_t saved_ldb = c->loop_defer_base;
+      c->loop_defer_base = c->defer_top;
+      const int le = cg_loop_push(c, id, true);
+      const TypeId ty = subst_resolve(c, ast_type(c->ast, id));
+      const Ty *const yt = ty == TYPE_NONE ? NULL : ast_type_at(c->ast, ty);
+      const bool has_val =
+          yt && yt->kind != TYPE_NEVER && !(yt->kind == TYPE_BUILTIN && yt->as.builtin == BT_VOID);
+      emit(c, "({ ");
+      if (has_val && le >= 0) {
+        char vn[32], decl[256];
+        snprintf(vn, sizeof vn, "__lv%u", c->loop_stack[le].seq);
+        render_type_id(c, ty, vn, decl, sizeof decl);
+        emit(c, "%s; ", decl);
+      }
+      emit(c, "for (;;) ");
+      c->pending_cnt = (uint32_t)(le + 1);
+      emit_block(c, n->as.while_stmt.body);
+      if (le >= 0 && c->loop_stack[le].used_brk)
+        emit(c, " __brk%u:;", c->loop_stack[le].seq);
+      if (has_val && le >= 0)
+        emit(c, " __lv%u; })", c->loop_stack[le].seq);
+      else
+        emit(c, " })");
+      cg_loop_pop(c, le);
+      c->loop_defer_base = saved_ldb;
+      break;
+    }
     case NODE_BLOCK:
       emit(c, "(");
       emit(c, "{\n");
@@ -4646,8 +4688,44 @@ static bool cg_stmt_diverges(Codegen *c, const NodeId id) {
   }
 }
 
+// Push/find/pop the enclosing-loop stack (labeled break/continue + `loop`-expression value routing).
+static int cg_loop_push(Codegen *c, const NodeId node, const bool is_expr) {
+  if (c->nloops >= sizeof c->loop_stack / sizeof c->loop_stack[0])
+    return -1;
+  c->loop_stack[c->nloops].node = node;
+  c->loop_stack[c->nloops].defer_base = c->defer_top;
+  c->loop_stack[c->nloops].seq = c->label_seq++;
+  c->loop_stack[c->nloops].used_brk = false;
+  c->loop_stack[c->nloops].used_cnt = false;
+  c->loop_stack[c->nloops].is_expr = is_expr;
+  return (int)c->nloops++;
+}
+
+static void cg_loop_pop(Codegen *c, const int le) {
+  if (le >= 0)
+    c->nloops = (uint32_t)le;
+}
+
+// The stack entry whose loop node is `node` (the typechecker's break/continue resolution), or -1.
+static int cg_loop_find(const Codegen *c, const NodeId node) {
+  for (uint32_t i = c->nloops; i > 0; i--)
+    if (c->loop_stack[i - 1].node == node)
+      return (int)(i - 1);
+  return -1;
+}
+
+// After a loop: the C label a (labeled / value-carrying) `break` jumped to, if any did.
+static void cg_loop_brk_label(Codegen *c, const int le) {
+  if (le >= 0 && c->loop_stack[le].used_brk) {
+    emit_indent(c);
+    emit(c, "__brk%u:;\n", c->loop_stack[le].seq);
+  }
+}
+
 static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
   const Node *const n = ast_at_const(c->ast, id);
+  const uint32_t cnt_hook = c->pending_cnt; // this block is a loop body: labeled continues land at its end
+  c->pending_cnt = 0;
   emit(c, "{\n");
   c->depth++;
   for (uint32_t i = 0; i < c->nparam_flags; i++) { // cond-moved Free params: free flags at function-body top
@@ -4675,6 +4753,12 @@ static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
   if (!(stmts.len > 0 && cg_stmt_diverges(c, ids[stmts.len - 1])))
     emit_defers_to(c, dbase);
   c->defer_top = dbase;
+  // A labeled `continue` targeting this loop lands here, after the cleanup (its site already ran the
+  // defers itself) and right before the back edge.
+  if (cnt_hook && c->loop_stack[cnt_hook - 1].used_cnt) {
+    emit_indent(c);
+    emit(c, "__cnt%u:;\n", c->loop_stack[cnt_hook - 1].seq);
+  }
   c->depth--;
   emit_indent(c);
   emit(c, "}");
@@ -4957,7 +5041,18 @@ static bool cg_emit_checked_arith(Codegen *c, const Node *const n, const NodeId 
 
 // `for i in lo..hi` -> a counting loop. A missing start counts from 0; a missing end runs
 // unbounded (the body must `break`); `..=` includes the end.
-static void emit_for_range(Codegen *c, const Node *n) {
+// A hand-rolled loop body's trailing cleanup, plus the loop's continue label when a labeled
+// `continue` targeted it (the emit_block_from hook, for the emit_for variants that inline the body).
+static void cg_loop_body_tail(Codegen *c, const uint32_t dbase, const int le) {
+  emit_defers_to(c, dbase);
+  c->defer_top = dbase;
+  if (le >= 0 && c->loop_stack[le].used_cnt) {
+    emit_indent(c);
+    emit(c, "__cnt%u:;\n", c->loop_stack[le].seq);
+  }
+}
+
+static void emit_for_range(Codegen *c, const NodeId id, const Node *n) {
   const Node *const r = ast_at_const(c->ast, n->as.for_stmt.iterable);
   const NodeId lo = r->as.pattern_range.start;
   const NodeId hi = r->as.pattern_range.end;
@@ -4977,13 +5072,15 @@ static void emit_for_range(Codegen *c, const Node *n) {
     emit_expr(c, hi);
   }
   emit(c, "; %s++) ", nm);
+  c->pending_cnt = (uint32_t)(cg_loop_find(c, id) + 1); // 0 when not on the loop stack
   emit_block(c, n->as.for_stmt.body);
   emit(c, "\n");
 }
 
 static void emit_for(Codegen *c, const NodeId id, const Node *n) {
+  const int le = cg_loop_find(c, id); // this loop's stack entry (labels/value routing), pushed by emit_stmt
   if (ast_at_const(c->ast, n->as.for_stmt.iterable)->kind == NODE_RANGE) {
-    emit_for_range(c, n);
+    emit_for_range(c, id, n);
     return;
   }
   const Ty *const it = ast_type_at(c->ast, ast_type(c->ast, n->as.for_stmt.iterable));
@@ -5017,8 +5114,7 @@ static void emit_for(Codegen *c, const NodeId id, const Node *n) {
       emit_indent(c);
       emit_stmt(c, sids[i]);
     }
-    emit_defers_to(c, dbase);
-    c->defer_top = dbase;
+    cg_loop_body_tail(c, dbase, le);
     c->depth--;
     emit_indent(c);
     emit(c, "}\n");
@@ -5047,8 +5143,7 @@ static void emit_for(Codegen *c, const NodeId id, const Node *n) {
       emit_indent(c);
       emit_stmt(c, sids[i]);
     }
-    emit_defers_to(c, dbase);
-    c->defer_top = dbase;
+    cg_loop_body_tail(c, dbase, le);
     c->depth--;
     emit_indent(c);
     emit(c, "}\n");
@@ -5080,8 +5175,7 @@ static void emit_for(Codegen *c, const NodeId id, const Node *n) {
       emit_indent(c);
       emit_stmt(c, sids[i]);
     }
-    emit_defers_to(c, dbase);
-    c->defer_top = dbase;
+    cg_loop_body_tail(c, dbase, le);
     c->depth--;
     emit_indent(c);
     emit(c, "}\n");
@@ -5174,8 +5268,7 @@ static void emit_for(Codegen *c, const NodeId id, const Node *n) {
             emit_indent(c);
             emit_stmt(c, sids[i]);
           }
-          emit_defers_to(c, dbase);
-          c->defer_top = dbase;
+          cg_loop_body_tail(c, dbase, le);
           c->depth--;
           emit_indent(c);
           emit(c, "}\n");
@@ -6044,45 +6137,86 @@ static void emit_stmt(Codegen *c, const NodeId id) {
     case NODE_WHILE: {
       const uint32_t saved_ldb = c->loop_defer_base; // break/continue run defers down to here
       c->loop_defer_base = c->defer_top;
+      const int le = cg_loop_push(c, id, false);
       if (n->as.while_stmt.is_do) {
         emit(c, "do ");
+        c->pending_cnt = (uint32_t)(le + 1);
         emit_block(c, n->as.while_stmt.body);
         emit(c, " while ");
         emit_condition(c, n->as.while_stmt.condition);
         emit(c, ";\n");
       } else {
-        emit(c, "while ");
-        emit_condition(c, n->as.while_stmt.condition);
-        emit(c, " ");
+        if (n->as.while_stmt.condition == NODE_NONE) { // `loop { .. }`: an infinite loop
+          emit(c, "for (;;) ");
+        } else {
+          emit(c, "while ");
+          emit_condition(c, n->as.while_stmt.condition);
+          emit(c, " ");
+        }
+        c->pending_cnt = (uint32_t)(le + 1);
         emit_block(c, n->as.while_stmt.body);
         emit(c, "\n");
       }
+      cg_loop_brk_label(c, le);
+      cg_loop_pop(c, le);
       c->loop_defer_base = saved_ldb;
       break;
     }
     case NODE_FOR: {
       const uint32_t saved_ldb = c->loop_defer_base;
       c->loop_defer_base = c->defer_top;
+      const int le = cg_loop_push(c, id, false);
       emit_for(c, id, n);
+      cg_loop_brk_label(c, le);
+      cg_loop_pop(c, le);
       c->loop_defer_base = saved_ldb;
       break;
     }
     case NODE_BREAK:
     case NODE_CONTINUE: {
-      const char *const kw = n->kind == NODE_BREAK ? "break" : "continue";
-      // run only the defers registered inside the innermost loop, then jump
-      if (c->defer_top > c->loop_defer_base) {
-        emit(c, "{\n");
-        c->depth++;
-        emit_defers_to(c, c->loop_defer_base);
-        emit_indent(c);
-        emit(c, "%s;\n", kw);
-        c->depth--;
-        emit_indent(c);
-        emit(c, "}\n");
-      } else {
-        emit(c, "%s;\n", kw);
+      const bool is_brk = n->kind == NODE_BREAK;
+      const int le = cg_loop_find(c, ast_resolution(c->ast, id)); // typechecker-recorded target loop
+      const bool top = le < 0 || (uint32_t)le == c->nloops - 1;   // innermost -> plain C break/continue
+      const uint32_t dbase = le >= 0 ? c->loop_stack[le].defer_base : c->loop_defer_base;
+      const NodeId value = is_brk ? n->as.flow.value : NODE_NONE;
+      const char *const kw = is_brk ? "break" : "continue";
+      if (top && value == NODE_NONE) { // run only the defers registered inside the loop, then jump
+        if (c->defer_top > dbase) {
+          emit(c, "{\n");
+          c->depth++;
+          emit_defers_to(c, dbase);
+          emit_indent(c);
+          emit(c, "%s;\n", kw);
+          c->depth--;
+          emit_indent(c);
+          emit(c, "}\n");
+        } else {
+          emit(c, "%s;\n", kw);
+        }
+        break;
       }
+      emit(c, "{\n");
+      c->depth++;
+      if (value != NODE_NONE && le >= 0 && c->loop_stack[le].is_expr) {
+        emit_indent(c); // the value computes BEFORE the defers run (it may read what they free)
+        emit(c, "__lv%u = ", c->loop_stack[le].seq);
+        emit_expr(c, value);
+        emit(c, ";\n");
+      }
+      emit_defers_to(c, dbase);
+      emit_indent(c);
+      if (top) {
+        emit(c, "%s;\n", kw);
+      } else if (is_brk) {
+        c->loop_stack[le].used_brk = true;
+        emit(c, "goto __brk%u;\n", c->loop_stack[le].seq);
+      } else {
+        c->loop_stack[le].used_cnt = true;
+        emit(c, "goto __cnt%u;\n", c->loop_stack[le].seq);
+      }
+      c->depth--;
+      emit_indent(c);
+      emit(c, "}\n");
       break;
     }
     case NODE_DEFER:

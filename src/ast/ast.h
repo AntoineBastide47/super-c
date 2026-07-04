@@ -260,12 +260,18 @@ typedef struct {
             NodeId condition, then_branch, else_branch;
         } if_stmt;
         struct {
-            NodeId condition, body;
-            bool is_do; // `do { } while (cond)`: body runs before the condition is first tested
+            NodeId condition, body; // condition == NODE_NONE: an infinite `loop { .. }`
+            bool is_do;    // `do { } while (cond)`: body runs before the condition is first tested
+            Span label;    // `'name:` prefix ({0,0} = unlabeled); text includes the leading quote
         } while_stmt;
         struct {
             NodeId binding, iterable, body;
+            Span label; // `'name:` prefix ({0,0} = unlabeled)
         } for_stmt;
+        struct {
+            NodeId value; // `break <expr>` (NODE_NONE for a bare break; always NODE_NONE on continue)
+            Span label;   // `break 'name` / `continue 'name` target ({0,0} = innermost loop)
+        } flow;
 
         struct {
             TokenType op;

@@ -76,6 +76,16 @@ struct TypeChecker {
     uint32_t mret_total;      // the callee's true return count, for the binding-arity check
     uint32_t unsafe_depth;    // > 0 inside `unsafe { .. }` / `unsafe expr`: raw-pointer operations and
                               // extern "C" calls are only legal there (the compiler cannot vouch for them)
+    struct {
+        Span label;      // the loop's `'name:` label ({0,0} = unlabeled); text includes the quote
+        NodeId node;     // the loop node (break/continue record it as their resolution for codegen)
+        TypeId break_ty; // unified `break <expr>` type (TYPE_NONE until the first value break)
+        bool value_loop; // a condition-less `loop`: the only loop `break <expr>` may target
+        bool saw_value;  // >= 1 `break <expr>` targeted this loop
+        bool saw_bare;   // >= 1 bare `break` targeted this loop (mixing with value breaks is an error)
+    } loop_stack[32];    // enclosing loops, innermost last (per function; closures reset the floor)
+    uint32_t nloops;
+    uint32_t loop_floor;      // break/continue may only target entries >= this (a closure body starts fresh)
     ERRORS_VARIABLES;
 };
 
@@ -154,6 +164,7 @@ static TypeId prelude_tuple_type(TypeChecker *t, const TypeId *args, uint32_t n)
 static int slice_kind(TypeChecker *t, TypeId tid, TypeId *elem);
 static bool is_assignable(TypeChecker *t, NodeId node);
 static bool is_place(TypeChecker *t, NodeId node);
+static void check_loop_body(TypeChecker *t, NodeId body);
 // bind_ref: 0 = value (owned/move) bindings; 1 = `&T` bindings (matching `&Self`); 2 = `&mut T` bindings.
 static void check_pattern(TypeChecker *t, NodeId id, TypeId expected, int bind_ref);
 static void render_type(TypeChecker *t, TypeId tid, char *buf, size_t cap);
@@ -281,6 +292,46 @@ static bool is_numeric(const TypeChecker *t, const TypeId x) {
   const Ty *const y = ast_type_at(t->ast, x);
   return y->kind == TYPE_BUILTIN &&
          (bt_is_int(y->as.builtin) || bt_is_float(y->as.builtin) || bt_is_complex(y->as.builtin));
+}
+
+// Push an enclosing loop for break/continue targeting; returns its stack index (fixed while nested
+// loops push above it), or -1 when the nesting limit is hit (further break checks degrade gracefully).
+static int tc_loop_push(TypeChecker *t, const Span label, const NodeId node, const bool value_loop) {
+  if (t->nloops >= sizeof t->loop_stack / sizeof t->loop_stack[0])
+    return -1;
+  t->loop_stack[t->nloops].label = label;
+  t->loop_stack[t->nloops].node = node;
+  t->loop_stack[t->nloops].break_ty = TYPE_NONE;
+  t->loop_stack[t->nloops].value_loop = value_loop;
+  t->loop_stack[t->nloops].saw_value = false;
+  t->loop_stack[t->nloops].saw_bare = false;
+  return (int)t->nloops++;
+}
+
+// Pop entry `le`, diagnosing a value-yielding loop that also has a bare `break` (its type would be
+// undefined on that path).
+static void tc_loop_pop(TypeChecker *t, const int le, const Span sp) {
+  if (le < 0)
+    return;
+  if (t->loop_stack[le].saw_value && t->loop_stack[le].saw_bare)
+    typechecker_errorf(t, sp.start, sp.end - sp.start,
+                       "every 'break' in a value-yielding 'loop' must carry a value");
+  t->nloops = (uint32_t)le;
+}
+
+// The loop a break/continue targets: `'name` -> the innermost matching entry, bare -> the innermost.
+// Entries below loop_floor belong to an outer function/closure and are unreachable. -1 = no target.
+static int tc_find_loop(TypeChecker *t, const Span label) {
+  for (uint32_t i = t->nloops; i > t->loop_floor; i--) {
+    const uint32_t k = i - 1;
+    if (label.end == label.start)
+      return (int)k;
+    const Span ls = t->loop_stack[k].label;
+    if (ls.end - ls.start == label.end - label.start &&
+        memcmp(t->source + ls.start, t->source + label.start, ls.end - ls.start) == 0)
+      return (int)k;
+  }
+  return -1;
 }
 
 static BuiltinType bt_of(const TypeChecker *t, const TypeId x) {
@@ -5134,6 +5185,8 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         break;
       }
       t->clos_stack[t->nclos++] = id; // body mutations of captures record onto this node's mut_caps
+      const uint32_t saved_lf = t->loop_floor; // a break/continue inside the body cannot target outer loops
+      t->loop_floor = t->nloops;
       if (n->as.closure.expr_body) {
         check_expr(t, n->as.closure.body); // its type IS the closure's return type
         tc_capture_move_guard(t, n->as.closure.body); // the body expr is returned: no capture move-out
@@ -5143,6 +5196,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         check_stmt(t, n->as.closure.body);
         t->current_returns = saved;
       }
+      t->loop_floor = saved_lf;
       t->nclos--;
       // Capture validation, AFTER the body so mut_caps is settled. A MUTATED capture is a `&mut` borrow
       // (env holds a pointer; outer keeps ownership -- so it also requires a mutable outer binding). A
@@ -5569,6 +5623,19 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       } else {
         result = ast_builtin(BT_VOID);
       }
+      break;
+    }
+    case NODE_WHILE: { // a `loop { .. }` expression: yields the type its `break <expr>`s agree on
+      t->loop_depth++;
+      const int le = tc_loop_push(t, (Span){0, 0}, id, true);
+      check_loop_body(t, n->as.while_stmt.body);
+      if (le >= 0) {
+        result = t->loop_stack[le].break_ty;
+        tc_loop_pop(t, le, n->span);
+      }
+      if (result == TYPE_NONE) // no `break <expr>` ever runs: the expression never yields
+        result = ast_intern_type(t->ast, (Ty){.kind = TYPE_NEVER});
+      t->loop_depth--;
       break;
     }
     case NODE_IF: {
@@ -6036,6 +6103,9 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
       break;
     case NODE_WHILE: {
       t->loop_depth++; // node-id order stops implying execution order (the back edge re-runs earlier nodes)
+      // Statement position: even a condition-less `loop` yields nothing here, so `break <expr>` is
+      // rejected (value_loop = false); `loop` as an expression is checked in check_expr instead.
+      const int le = tc_loop_push(t, n->as.while_stmt.label, id, false);
       const uint32_t bm = borrow_mark(t);
       const TypeId c = check_expr(t, n->as.while_stmt.condition);
       if (c != TYPE_NONE && !is_bool(t, c)) {
@@ -6045,8 +6115,8 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         typechecker_errorf(t, sp.start, sp.end - sp.start, "while condition must be 'bool', found '%s'", ty);
       }
       borrow_release_to(t, bm); // condition temporaries end before the body (re-evaluated each iteration)
-      if (n->as.while_stmt.is_do) {
-        check_loop_body(t, n->as.while_stmt.body); // a do-while body runs at least once
+      if (n->as.while_stmt.is_do || n->as.while_stmt.condition == NODE_NONE) {
+        check_loop_body(t, n->as.while_stmt.body); // a do-while / infinite-loop body runs at least once
       } else {
         // The body runs zero or more times: union the post-body state with the pre-body one, so an
         // initialization/move inside the loop does not count as definite on the zero-iteration path.
@@ -6060,11 +6130,13 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         if (ovf)
           tc_flow_overflow(t, n->as.while_stmt.condition);
       }
+      tc_loop_pop(t, le, n->span);
       t->loop_depth--;
       break;
     }
     case NODE_FOR: {
       t->loop_depth++; // see NODE_WHILE
+      const int le = tc_loop_push(t, n->as.for_stmt.label, id, false);
       const uint32_t bm = borrow_mark(t);
       const NodeId iter = n->as.for_stmt.iterable;
       const Node *const itn = ast_at_const(a, iter);
@@ -6106,6 +6178,7 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
         if (ovf)
           tc_flow_overflow(t, iter);
       }
+      tc_loop_pop(t, le, n->span);
       t->loop_depth--;
       break;
     }
@@ -6115,7 +6188,44 @@ static void check_stmt(TypeChecker *t, const NodeId id) {
       borrow_release_to(t, bm); // temporaries (`f(&x)`, an assignment's `&y`) end with the statement
       break;
     }
-    default: // NODE_BREAK, NODE_CONTINUE
+    case NODE_BREAK:
+    case NODE_CONTINUE: {
+      const Span lb = n->as.flow.label;
+      const int le = tc_find_loop(t, lb);
+      if (le < 0) {
+        if (lb.end > lb.start) // the label span already includes its leading quote
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "no enclosing loop is labeled %.*s",
+                             (int)(lb.end - lb.start), t->source + lb.start);
+        else
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'%s' outside of a loop",
+                             n->kind == NODE_BREAK ? "break" : "continue");
+        if (n->as.flow.value != NODE_NONE)
+          check_expr(t, n->as.flow.value); // still check it (avoid cascades)
+        break;
+      }
+      ast_set_resolution(a, id, t->loop_stack[le].node); // codegen routes labels/defers through this
+      if (n->kind != NODE_BREAK)
+        break;
+      if (n->as.flow.value == NODE_NONE) {
+        t->loop_stack[le].saw_bare = true;
+        break;
+      }
+      const NodeId v = n->as.flow.value;
+      t->expected = t->loop_stack[le].break_ty; // later breaks adapt their literals to the first's type
+      const TypeId vt = check_expr(t, v);
+      if (!t->loop_stack[le].value_loop) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "'break' can only carry a value inside a 'loop' expression");
+      } else if (t->loop_stack[le].break_ty == TYPE_NONE) {
+        t->loop_stack[le].break_ty = vt;
+      } else if (!compatible(t, t->loop_stack[le].break_ty, v)) {
+        err_mismatch(t, v, t->loop_stack[le].break_ty);
+      }
+      t->loop_stack[le].saw_value = true;
+      tc_mark_move(t, v); // the value leaves the loop, like a return
+      break;
+    }
+    default:
       break;
   }
 }
