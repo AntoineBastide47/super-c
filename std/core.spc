@@ -4,9 +4,10 @@
 // synthetic decl per builtin in this module; these `extend` blocks attach to them and lower to
 // `i32__eq`, etc. `free` is empty (a scalar owns nothing) -- the C compiler optimizes the call away.
 //
-// `void` and `va_list` are omitted: they are not ordinary scalar values. Floats and complex numbers do not
-// implement `Eq`/`Ord`/`Hash`: NaN breaks reflexive equality and total ordering, and complex numbers admit
-// no total order.
+// `void` and `va_list` are omitted: they are not ordinary scalar values. Floats implement `Eq`/`Ord`/
+// `Hash` through the IEEE-754 TOTAL order (`total_cmp`): -NaN < -inf < .. < -0.0 < +0.0 < .. < +inf < NaN,
+// every value equal to itself (including NaN), so sorting and Map/Set keys work -- note `-0.0 != 0.0`
+// under this order, unlike `==`. Complex numbers stay out: they admit no total order.
 
 extern "C" {
     fn sqrt(x: f64) f64;
@@ -378,6 +379,39 @@ extend bool as Free {
 }
 extend bool as Copy {}
 
+// IEEE-754 totalOrder bit trick: flipping ALL bits of a negative float and only the sign bit of a
+// non-negative one yields unsigned integers that order exactly like totalOrder -- the basis for the
+// float `Eq`/`Ord`/`Hash` conformances and the `total_cmp` methods below.
+union F32Bits { pub u: u32, pub f: f32 }
+union F64Bits { pub u: u64, pub f: f64 }
+
+fn f32_total_key(x: f32) u32 {
+    let b = F32Bits { f: x };
+    if b.u >> 31 == 1 { return b.u ^ 0xFFFF_FFFFu32; }
+    return b.u ^ 0x8000_0000u32;
+}
+
+fn f64_total_key(x: f64) u64 {
+    let b = F64Bits { f: x };
+    if b.u >> 63 == 1 { return b.u ^ 0xFFFF_FFFF_FFFF_FFFFu64; }
+    return b.u ^ 0x8000_0000_0000_0000u64;
+}
+
+extend f32 as Eq {
+    pub fn eq(self: &f32, other: &f32) bool { return f32_total_key(*self) == f32_total_key(*other); }
+}
+extend f32 as Ord {
+    pub fn cmp(self: &f32, other: &f32) i32 {
+        let a = f32_total_key(*self);
+        let b = f32_total_key(*other);
+        if a < b { return -1; }
+        if a > b { return 1; }
+        return 0;
+    }
+}
+extend f32 as Hash {
+    pub fn hash(self: &f32) u64 { return f32_total_key(*self) as u64; }
+}
 extend f32 as Clone {
     pub fn clone(self: &f32) f32 { return *self; }
 }
@@ -389,6 +423,21 @@ extend f32 as Free {
 }
 extend f32 as Copy {}
 
+extend f64 as Eq {
+    pub fn eq(self: &f64, other: &f64) bool { return f64_total_key(*self) == f64_total_key(*other); }
+}
+extend f64 as Ord {
+    pub fn cmp(self: &f64, other: &f64) i32 {
+        let a = f64_total_key(*self);
+        let b = f64_total_key(*other);
+        if a < b { return -1; }
+        if a > b { return 1; }
+        return 0;
+    }
+}
+extend f64 as Hash {
+    pub fn hash(self: &f64) u64 { return f64_total_key(*self); }
+}
 extend f64 as Clone {
     pub fn clone(self: &f64) f64 { return *self; }
 }
@@ -553,6 +602,8 @@ extend f32 {
     pub fn acosh(self: f32) f32 { return unsafe acoshf(self); }
     pub fn atanh(self: f32) f32 { return unsafe atanhf(self); }
     pub fn mul_add(self: f32, a: f32, b: f32) f32 { return unsafe fmaf(self, a, b); }
+    // IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
+    pub fn total_cmp(self: f32, other: f32) i32 { return self.cmp(&other); }
     pub fn to_degrees(self: f32) f32 { return self * 57.29577951308232; }
     pub fn to_radians(self: f32) f32 { return self * 0.017453292519943295; }
 }
@@ -598,6 +649,8 @@ extend f64 {
     pub fn atan(self: f64) f64 { return unsafe atan(self); }
     pub fn atan2(self: f64, other: f64) f64 { return unsafe atan2(self, other); }
     pub fn sin_cos(self: f64) (f64, f64) { return unsafe sin(self), unsafe cos(self); }
+    // IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
+    pub fn total_cmp(self: f64, other: f64) i32 { return self.cmp(&other); }
     pub fn sinh(self: f64) f64 { return unsafe sinh(self); }
     pub fn cosh(self: f64) f64 { return unsafe cosh(self); }
     pub fn tanh(self: f64) f64 { return unsafe tanh(self); }

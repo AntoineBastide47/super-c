@@ -1064,6 +1064,35 @@ static void test_std_types(void) {
       PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(10); v.push(20); v.push(12);\n"
           "  let mut sum = 0; for x in v.iter() { sum = sum + *x; } v.free(); unsafe exit(sum); }\n", // iter borrows -> &i32
       42, "");
+  // `sizeof(x)` / `alignof(x)` on a VALUE size its checked type (the type spelling still works).
+  sc_run_program(
+      "sizeof on values",
+      PRE "struct P { pub a: i64, pub b: i64 }\n"
+          "fn main() i32 { let x: i32 = 7; let p = P { a: 1, b: 2 }; let arr: [u8; 10] = [1u8];\n"
+          "  static_assert(sizeof(i32) == 4, \"type form\");\n"
+          "  unsafe exit((sizeof(x) + sizeof(p) + sizeof(arr) + alignof(p)) as i32 + (x - 7) + (p.a as i32 - 1) + (arr[0] as i32 - 1)); }\n",
+      38, ""); // 4 + 16 + 10 + 8
+  // Vector::sort_by (comparator) and sort_by_key (derived Ord key).
+  sc_run_program(
+      "sort_by and sort_by_key",
+      PRE "struct P { pub tag: i32, pub age: i32 }\n"
+          "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(3); v.push(1); v.push(2);\n"
+          "  v.sort_by(|a: &i32, b: &i32| *b - *a);\n"                        // descending: 3 2 1
+          "  let mut ps = Vector::<P>::new();\n"
+          "  ps.push(P { tag: 1, age: 36 }); ps.push(P { tag: 2, age: 28 }); ps.push(P { tag: 3, age: 41 });\n"
+          "  ps.sort_by_key(|p: &P| p.age);\n"                                // 2, 1, 3
+          "  unsafe exit(v[0] * 100 + ps[0].tag * 10 + ps[2].tag); }\n",      // 300 + 20 + 3
+      67, ""); // 323 mod 256 = 67
+  // Floats order TOTALLY (IEEE totalOrder): sortable, usable as Map keys, NaN equal to itself.
+  sc_run_program(
+      "float total ordering",
+      PRE "fn main() i32 { let mut v = Vector::<f64>::new(); let nan = (0.0 as f64) / (0.0 as f64);\n"
+          "  v.push(2.5); v.push(nan); v.push(-1.0); v.push(0.0); v.sort();\n"
+          "  let mut m = Map::<f64, i32>::new(); let k: f64 = 2.5; m.insert(k, 25);\n"
+          "  let ordered = v[0] == -1.0 && v[1] == 0.0 && v[2] == 2.5 && v[3].is_nan();\n"
+          "  let r = (ordered as i32) + *m.get(&k).unwrap_or(&0) + nan.cmp(&nan) + (1.5 as f64).total_cmp(2.5);\n"
+          "  m.free(); v.free(); unsafe exit(r + 1); }\n", // 1 + 25 + 0 + (-1) + 1
+      26, "");
   // A CTFE-foldable multi-return call must NOT collapse to its first value: the tuple destructure
   // reads both (the fold is suppressed; single-value calls still fold).
   sc_run_program(
