@@ -6413,9 +6413,11 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       }
       // const iff the binding is immutable (`let` without `mut`). Calling a `&mut self` method on an
       // immutable binding is rejected by the typechecker (receiver_mutable), so const never blocks a valid one.
-      // A Free-managed binding is emitted non-const, since its scope-exit Free call takes `&mut self`.
+      // A Free-TYPED binding is emitted non-const like a Free parameter: its Free call takes `&mut self`,
+      // whether that is the scope-exit RAII free or an explicit `.free()` (which elides the auto-free and
+      // would otherwise leave the binding const).
       const bool autofree = cg_will_auto_free(c, id);
-      const bool is_const = !n->as.let_stmt.is_mutable && !autofree;
+      const bool is_const = !n->as.let_stmt.is_mutable && !cg_type_is_free(c, ast_type(c->ast, id));
       // Value-semantics array copy: an array bound from a non-literal source (another array, or an
       // array-returning call) can't use C array initialization -> declare, then memcpy. The length comes
       // from the annotation, or from the source call's return type (the binding's TypeId has lost it).

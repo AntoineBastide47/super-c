@@ -2173,7 +2173,9 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
     case NODE_CALL: {
       CeVal rets[8];
       uint8_t nrets = 0;
-      if (!ce_call(ce, f, m, id, rets, &nrets) || nrets == 0)
+      // Exactly ONE return value can be an expression value: collapsing a multi-return call to its
+      // first value here would silently drop the rest (tuple-lets consume all of them in exec_stmt).
+      if (!ce_call(ce, f, m, id, rets, &nrets) || nrets != 1)
         return CV_NIL;
       return rets[0];
     }
