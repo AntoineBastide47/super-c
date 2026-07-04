@@ -650,6 +650,18 @@ static void raw_string(Lexer *l, TokenWriter *w, const size_t hashes) {
     (l)->current = i;                                                                                                  \
   } while (0)
 
+// A numeric-literal type suffix (`1u8` / `1.0f32`): 1 for a float suffix (f32/f64), 0 for an integer
+// suffix, -1 when the identifier run is not a suffix.
+static int num_suffix_kind(const uint8_t *p, const size_t n) {
+  static const char *const INT_SFX[] = {"i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"};
+  if (n == 3 && (memcmp(p, "f32", 3) == 0 || memcmp(p, "f64", 3) == 0))
+    return 1;
+  for (size_t k = 0; k < sizeof INT_SFX / sizeof *INT_SFX; k++)
+    if (n == strlen(INT_SFX[k]) && memcmp(p, INT_SFX[k], n) == 0)
+      return 0;
+  return -1;
+}
+
 static void number(Lexer *l, TokenWriter *w) {
   size_t error_at = SIZE_MAX;
   const char *error = NULL;
@@ -694,11 +706,20 @@ static void number(Lexer *l, TokenWriter *w) {
             error_at = i;
             error = "invalid numeric separator";
           }
-        } else if (error_at == SIZE_MAX) {
-          error_at = i;
-          error = radix == 2   ? "invalid digit in binary literal"
-                  : radix == 8 ? "invalid digit in octal literal"
-                               : "invalid digit in hexadecimal literal";
+        } else {
+          size_t j = i; // not a digit: the rest of the identifier run is either a type suffix or an error
+          while (j < l->len && is_id_part[l->bytes[j]])
+            j++;
+          if (saw_digit && num_suffix_kind(l->bytes + i, j - i) == 0) {
+            i = j; // an integer type suffix: `0xFFu8` / `0b1010i32`
+            break;
+          }
+          if (error_at == SIZE_MAX) {
+            error_at = i;
+            error = radix == 2   ? "invalid digit in binary literal"
+                    : radix == 8 ? "invalid digit in octal literal"
+                                 : "invalid digit in hexadecimal literal";
+          }
         }
         i++;
       }
@@ -760,12 +781,23 @@ static void number(Lexer *l, TokenWriter *w) {
   }
 
   if (is_id_part[peek_byte(l)]) {
-    if (error_at == SIZE_MAX) {
-      error_at = l->current;
-      error = "invalid suffix or trailing identifier characters after numeric literal";
-    }
+    const size_t sfx_start = l->current;
     while (is_id_part[peek_byte(l)])
       l->current++;
+    const int k = num_suffix_kind(l->bytes + sfx_start, l->current - sfx_start);
+    if (k < 0) {
+      if (error_at == SIZE_MAX) {
+        error_at = sfx_start;
+        error = "invalid suffix or trailing identifier characters after numeric literal";
+      }
+    } else if (is_float && k == 0) {
+      if (error_at == SIZE_MAX) {
+        error_at = sfx_start;
+        error = "a float literal cannot take an integer suffix";
+      }
+    } else {
+      is_float |= k == 1; // `1f32` is a float literal
+    }
   }
 
   if (error_at != SIZE_MAX)

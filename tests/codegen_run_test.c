@@ -2157,10 +2157,30 @@ static void test_raw_strings(void) {
                  0, "x=42");
 }
 
+// Numeric literal suffixes (typed constants, C-side U/LL/ULL/f re-emission, radix forms) and implicit
+// lossless widening (value slots, call args, mixed arithmetic) compute the right values at runtime.
+static void test_numeric_suffixes_widening(void) {
+  sc_run_program("suffixed literals compute exactly",
+                 PRE "fn main() i32 {\n"
+                     "  let a = 200u8; let b = 0xFFu64; let c = 0b1010i64; let d = 1f32;\n"
+                     "  let ok = a == 200 && b == 255 && c == 10 && d < 1.5;\n"
+                     "  unsafe exit(switch ok { true => 21, false => 1 });\n"
+                     "}\n",
+                 21, "");
+  sc_run_program("widening through slots, args, and arithmetic",
+                 PRE "fn take(x: i64) i64 { return x; }\n"
+                     "fn main() i32 {\n"
+                     "  let s: i16 = 3; let w: i32 = s; let u: u8 = 7; let y: i64 = u;\n"
+                     "  let m = w + y + take(w);\n" // 3 + 7 + 3 = 13 as i64
+                     "  unsafe exit(m as i32);\n"
+                     "}\n",
+                 13, "");
+}
+
 int main(void) {
   // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
   static void (*const tests[])(void) = {
-      test_dyn,            test_raw_strings,
+      test_dyn,            test_raw_strings,       test_numeric_suffixes_widening,
       test_bug_regressions,    test_attributes,           test_free_raii,
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,

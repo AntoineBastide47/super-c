@@ -234,6 +234,35 @@ ALWAYS_INLINE bool bt_is_float(const BuiltinType b) {
   return b == BT_F32 || b == BT_F64;
 }
 
+// The largest magnitude a suffixed literal of type `b` may spell (signed max: `-min` needs a cast), or
+// 0 for the two full-range 64-bit types (no check needed; the u64 overflow scan already ran).
+static uint64_t bt_int_max(const BuiltinType b) {
+  switch (b) {
+    case BT_I8: return INT8_MAX;
+    case BT_I16: return INT16_MAX;
+    case BT_I32: return INT32_MAX;
+    case BT_I64: case BT_ISIZE: return INT64_MAX;
+    case BT_U8: return UINT8_MAX;
+    case BT_U16: return UINT16_MAX;
+    case BT_U32: return UINT32_MAX;
+    default: return 0; // u64/usize (and non-int suffixes never reach here)
+  }
+}
+
+// Implicit LOSSLESS numeric widening: same-signedness to a strictly wider integer, unsigned to a
+// strictly wider signed integer, and f32 -> f64. usize/isize stay explicit (platform-width), as do
+// narrowing, same-width sign changes, and int<->float (`as`).
+ALWAYS_INLINE bool bt_widens(const BuiltinType from, const BuiltinType to) {
+  if (from == BT_F32 && to == BT_F64)
+    return true;
+  const bool fs = from >= BT_I8 && from <= BT_I64, fu = from >= BT_U8 && from <= BT_U64;
+  const bool ts = to >= BT_I8 && to <= BT_I64, tu = to >= BT_U8 && to <= BT_U64;
+  if (!(fs || fu) || !(ts || tu))
+    return false;
+  const int fw = fs ? from - BT_I8 : from - BT_U8, tw = ts ? to - BT_I8 : to - BT_U8; // 0..3 = 8..64 bits
+  return fu ? tw > fw : (ts && tw > fw); // u<N> fits any strictly wider slot; i<N> only a wider signed one
+}
+
 ALWAYS_INLINE bool bt_is_complex(const BuiltinType b) {
   return b == BT_C32 || b == BT_C64;
 }
@@ -252,6 +281,18 @@ static bool is_numeric(const TypeChecker *t, const TypeId x) {
   const Ty *const y = ast_type_at(t->ast, x);
   return y->kind == TYPE_BUILTIN &&
          (bt_is_int(y->as.builtin) || bt_is_float(y->as.builtin) || bt_is_complex(y->as.builtin));
+}
+
+static BuiltinType bt_of(const TypeChecker *t, const TypeId x) {
+  const Ty *const y = ast_type_at(t->ast, x);
+  return y->kind == TYPE_BUILTIN ? y->as.builtin : BT_COUNT;
+}
+
+// A numeric literal whose type suffix pins it: it never adapts to a context type (only widens).
+static bool tc_literal_pinned(const TypeChecker *t, const Node *n) {
+  return n->kind == NODE_LITERAL &&
+         (n->as.literal.token_type == IntegerLiteral || n->as.literal.token_type == FloatLiteral) &&
+         ast_numeric_suffix(t->source, n->as.literal.raw.start, n->as.literal.raw.end, NULL) != BT_COUNT;
 }
 
 static bool is_void_type(const TypeChecker *t, const TypeId x) {
@@ -787,6 +828,9 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
     }
     return false;
   }
+  // Implicit lossless widening: `i32 -> i64`, `u8 -> u32`, `u16 -> i32`, `f32 -> f64`, ...
+  if (ex->kind == TYPE_BUILTIN && ac->kind == TYPE_BUILTIN && bt_widens(ac->as.builtin, ex->as.builtin))
+    return true;
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
     v = ast_at_const(t->ast, v->as.unary.operand);
@@ -795,11 +839,15 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   const Ty *const et = ast_type_at(t->ast, expected);
   switch (v->as.literal.token_type) {
     case IntegerLiteral: // an integer literal fits any int *or* float/complex slot (`let f: f64 = 0;`)
+      if (tc_literal_pinned(t, v))
+        return false; // a suffixed literal is its named type: only exact match or widening (above)
       return et->kind == TYPE_BUILTIN &&
              (bt_is_int(et->as.builtin) || bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin));
     case CharacterLiteral: // an ASCII char literal fits any int slot too (`contains_byte('l')`), like `b'l'`
       return et->kind == TYPE_BUILTIN && bt_is_int(et->as.builtin);
     case FloatLiteral: // a float literal fits a float or complex slot (no implicit float->int truncation)
+      if (tc_literal_pinned(t, v))
+        return false; // pinned: `1.5f64` never narrows into an f32 slot
       return et->kind == TYPE_BUILTIN && (bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin));
     case StringLiteral:
     case RawStringLiteral: { // a string literal is a NUL-terminated C string: it coerces to a `*const char` /
@@ -3176,9 +3224,13 @@ static TypeId binary_numeric(
   }
   if (l == r)
     return l;
-  if (ast_at_const(t->ast, ln)->kind == NODE_LITERAL) // l adapts to r
-    return r;
-  if (ast_at_const(t->ast, rn)->kind == NODE_LITERAL) // r adapts to l
+  if (ast_at_const(t->ast, ln)->kind == NODE_LITERAL && !tc_literal_pinned(t, ast_at_const(t->ast, ln)))
+    return r; // l adapts to r (a suffixed literal is pinned and never adapts)
+  if (ast_at_const(t->ast, rn)->kind == NODE_LITERAL && !tc_literal_pinned(t, ast_at_const(t->ast, rn)))
+    return l; // r adapts to l
+  if (bt_widens(bt_of(t, l), bt_of(t, r)))
+    return r; // lossless widening also applies between operands: `x_u8 + y_i32` computes as i32
+  if (bt_widens(bt_of(t, r), bt_of(t, l)))
     return l;
   err_mismatch(t, rn, l);
   return l;
@@ -4845,12 +4897,16 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
     case NODE_LITERAL:
       switch (n->as.literal.token_type) {
         case IntegerLiteral: {
-          result = ast_builtin(BT_I32);
+          // A type suffix (`1u8`, `0xFFu64`) pins the literal's type; otherwise the i32 default adapts
+          // through `compatible`. Digit parsing below excludes the suffix.
+          const Span lr = n->as.literal.raw;
+          uint32_t sfx = lr.end;
+          const BuiltinType sb = ast_numeric_suffix(t->source, lr.start, lr.end, &sfx);
+          result = ast_builtin(sb == BT_COUNT ? BT_I32 : sb);
           // Reject a literal that exceeds 64 bits: it has no representable type and would otherwise leak a
           // confusing C-level "integer literal too large" error with no Super-C diagnostic.
-          const Span lr = n->as.literal.raw;
           const uint8_t *p = t->source + lr.start;
-          size_t len = lr.end - lr.start;
+          size_t len = sfx - lr.start;
           unsigned base = 10;
           if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'x') {
             base = 16, p += 2, len -= 2;
@@ -4871,12 +4927,21 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
             else
               acc = acc * base + d;
           }
-          if (overflow)
+          if (overflow) {
             typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
                                "integer literal is too large to fit in a 64-bit integer");
+          } else if (sb != BT_COUNT && bt_int_max(sb) && acc > bt_int_max(sb)) {
+            typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                               "integer literal does not fit in its suffixed type");
+          }
           break;
         }
-        case FloatLiteral: result = ast_builtin(BT_F32); break; // default float; `compatible` still adapts it to f64
+        case FloatLiteral: { // default f32 (`compatible` still adapts an unsuffixed one to f64)
+          const Span lr = n->as.literal.raw;
+          const BuiltinType sb = ast_numeric_suffix(t->source, lr.start, lr.end, NULL);
+          result = ast_builtin(sb == BT_F64 ? BT_F64 : BT_F32);
+          break;
+        }
         case CharacterLiteral:
           result = ast_builtin(BT_CHAR);
           if (char_literal_cp(t->source, n->as.literal.raw) > 0xFF) // `char` is one byte

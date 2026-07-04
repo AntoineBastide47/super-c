@@ -271,6 +271,29 @@ TypeId ast_intern_type(Ast *a, const Ty t) {
   return id;
 }
 
+BuiltinType ast_numeric_suffix(const uint8_t *src, const uint32_t start, const uint32_t end, uint32_t *sfx_start) {
+  static const struct {
+      char s[6];
+      uint8_t len, bt;
+  } SFX[] = {
+      {"isize", 5, BT_ISIZE}, {"usize", 5, BT_USIZE}, {"i16", 3, BT_I16}, {"i32", 3, BT_I32},
+      {"i64", 3, BT_I64},     {"u16", 3, BT_U16},     {"u32", 3, BT_U32}, {"u64", 3, BT_U64},
+      {"f32", 3, BT_F32},     {"f64", 3, BT_F64},     {"i8", 2, BT_I8},   {"u8", 2, BT_U8},
+  };
+  const bool hex = end - start > 2 && src[start] == '0' && (src[start + 1] | 0x20) == 'x';
+  for (size_t k = 0; k < sizeof SFX / sizeof *SFX; k++) {
+    const uint32_t n = SFX[k].len;
+    if (end - start <= n || memcmp(src + end - n, SFX[k].s, n) != 0)
+      continue;
+    if (hex && SFX[k].s[0] == 'f')
+      continue; // 0x..f32: that 'f' is a hex digit, not a suffix
+    if (sfx_start)
+      *sfx_start = end - n;
+    return (BuiltinType)SFX[k].bt;
+  }
+  return BT_COUNT;
+}
+
 #ifdef NDEBUG
 static const char *kind_name(const NodeKind kind) {
   static const char *const names[] = {

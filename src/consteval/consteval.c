@@ -191,6 +191,8 @@ static BuiltinType type_builtin(const Ast *a, const TypeId t) {
 
 static ConstValue eval_int_literal(const Ast *a, const uint8_t *src, const Node *n, const NodeId id) {
   const Span sp = n->as.literal.raw;
+  uint32_t end = sp.end; // a type suffix (`1u8`) is not digits; the checker already typed the node from it
+  ast_numeric_suffix(src, sp.start, sp.end, &end);
   uint64_t v = 0;
   size_t i = sp.start;
   unsigned base = 10;
@@ -200,7 +202,7 @@ static ConstValue eval_int_literal(const Ast *a, const uint8_t *src, const Node 
     else if (r == 'b' || r == 'B') { base = 2; i += 2; }
     else if (r == 'o' || r == 'O') { base = 8; i += 2; }
   }
-  for (; i < sp.end; i++) {
+  for (; i < end; i++) {
     const uint8_t ch = src[i];
     if (ch == '_')
       continue;

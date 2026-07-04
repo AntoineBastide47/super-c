@@ -1157,10 +1157,13 @@ static const char *ref_derefs(int d) {
 
 // Emit an integer/float literal, removing `_` separators and rewriting radix forms C can't read:
 // `0b…` → decimal, `0o…` → C octal `0…`, leading-zero decimals → stripped (else C reads octal).
+// A Super-C type suffix (`1u8`, `1.0f32`) is stripped and re-emitted as the C equivalent.
 static void emit_number(Codegen *c, const Span s, const TokenType tt) {
+  uint32_t sfx = s.end;
+  const BuiltinType sb = ast_numeric_suffix(c->source, s.start, s.end, &sfx);
   char buf[256];
   size_t n = 0;
-  for (uint32_t i = s.start; i < s.end && n < sizeof buf - 1; i++)
+  for (uint32_t i = s.start; i < sfx && n < sizeof buf - 1; i++)
     if (c->source[i] != '_')
       buf[n++] = (char)c->source[i];
   buf[n] = '\0';
@@ -1172,23 +1175,28 @@ static void emit_number(Codegen *c, const Span s, const TokenType tt) {
       for (size_t i = 2; i < n; i++)
         v = (v << 1) | (unsigned long long)(buf[i] - '0');
       emit(c, "%llu", v);
-      return;
-    }
-    if (k == 'o' || k == 'O') {
+    } else if (k == 'o' || k == 'O') {
       emit(c, "0%s", buf + 2);
-      return;
-    }
-    if (k == 'x' || k == 'X') {
+    } else if (k == 'x' || k == 'X') {
       emit_cstr(c, buf);
-      return;
+    } else {
+      size_t i = 0; // decimal with leading zeros: strip them so C does not read octal
+      while (i + 1 < n && buf[i] == '0')
+        i++;
+      emit_cstr(c, buf + i);
     }
-    size_t i = 0; // decimal with leading zeros: strip them so C does not read octal
-    while (i + 1 < n && buf[i] == '0')
-      i++;
-    emit_cstr(c, buf + i);
-    return;
+  } else {
+    emit_cstr(c, buf);
+    if ((sb == BT_F32 || sb == BT_F64) && !memchr(buf, '.', n) && !memchr(buf, 'e', n) && !memchr(buf, 'E', n))
+      emit(c, ".0"); // `1f32` must still read as a C floating constant
   }
-  emit_cstr(c, buf);
+  switch (sb) { // C-side suffix so the constant carries its type without conversion warnings
+    case BT_I64: case BT_ISIZE: emit(c, "LL"); break;
+    case BT_U8: case BT_U16: case BT_U32: emit(c, "U"); break;
+    case BT_U64: case BT_USIZE: emit(c, "ULL"); break;
+    case BT_F32: emit(c, "f"); break;
+    default: break;
+  }
 }
 
 static int hex_val(const uint8_t ch) {
