@@ -927,6 +927,36 @@ static void test_dyn(void) {
       "bare dyn as a non-Box generic argument",
       DYN_PRELUDE "fn main() i32 { let v: Vector<dyn Shape> = Vector::<dyn Shape>::new(); return 0; }\n",
       "can only be the generic argument of 'Box'");
+  // `dyn fn` closures.
+  expect_ok(
+      "dyn fn: named fn, borrowed closure, owned box; structural instance unification",
+      "fn double_it(x: i32) i32 { return x * 2; }\n"
+      "fn run(f: &dyn fn(i32) i32, x: i32) i32 { return f(x); }\n"
+      "fn main() i32 {\n"
+      "  let d: &dyn fn(i32) i32 = double_it;\n"
+      "  let k = 3; let f = |x: i32| x + k;\n"
+      "  let b: Box<dyn fn(i32) i32> = |x: i32| x + k;\n"
+      // the annotation and the turbofish are DIFFERENT nodes: they must intern to one identity
+      "  let mut v: Vector<Box<dyn fn(i32) i32>> = Vector::<Box<dyn fn(i32) i32>>::new();\n"
+      "  v.push(double_it);\n"
+      "  return d(1) + run(&f, 2) + b(3); }\n");
+  expect_error(
+      "a capturing closure by value needs a borrow for &dyn fn",
+      "fn take(f: &dyn fn(i32) i32) i32 { return f(1); }\n"
+      "fn main() i32 { let k = 5; let f = |x: i32| x + k; return take(f); }\n",
+      "must be borrowed");
+  expect_error(
+      "a runtime fn pointer cannot erase",
+      "fn main() i32 { let p: fn(i32) i32 = |x: i32| x; let d: &dyn fn(i32) i32 = p; return 0; }\n",
+      "wrap it in a closure");
+  expect_error(
+      "no &mut dyn fn flavor",
+      "fn main() i32 { let k = 1; let f = |x: i32| x + k; let m: &mut dyn fn(i32) i32 = &f; return 0; }\n",
+      "shared view");
+  expect_error(
+      "dyn fn signature mismatch",
+      "fn main() i32 { let k = 1; let f = |x: i32| x + k; let w: &dyn fn(i32) bool = &f; return 0; }\n",
+      "mismatched types");
 }
 
 int main(void) {

@@ -261,6 +261,15 @@ static void test_closures(void) {
     CHECK(th_nth_kind(h, NODE_REFERENCE_TYPE, 0) == NODE_NONE, "no reference node wraps a dyn type");
     ast_free(&h);
   }
+  // `&dyn fn(i32) i32`: a `dyn` over a function type (the anonymous one-method interface).
+  Ast *k = sc_parse("dyn fn type", "fn f(cb: &dyn fn(i32) i32) i32 { return cb(1); }\n");
+  if (k) {
+    const NodeId d0 = th_nth_kind(k, NODE_DYN_TYPE, 0);
+    CHECK(d0 != NODE_NONE &&
+              ast_at_const(k, ast_at_const(k, d0)->as.indirect_type.type)->kind == NODE_FUNCTION_TYPE,
+          "`&dyn fn(..) ..` parses as DYN_TYPE over FUNCTION_TYPE");
+    ast_free(&k);
+  }
 }
 
 static void test_error_recovery(void) {

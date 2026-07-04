@@ -2112,6 +2112,33 @@ static void test_dyn(void) {
           "  return total;\n"                    // scope exit: v's Res element -> the third 'F'
           "}\n",
       34, "FFF");
+  // `dyn fn`: a named fn (NULL data), a borrowed capturing closure (`&f`), a heterogeneous vector of
+  // OWNED closures (envs heap-copied; different closures, one structural type), and an OWNING closure
+  // whose Free capture is deep-freed by the vtable drop glue ('F') at scope exit.
+  sc_run_program(
+      "dyn fn handlers",
+      PRE "struct Res { pub id: i32 }\n"
+          "extend Res as Free { pub fn free(self: &mut Res) { unsafe putchar(70); } }\n"
+          "fn double_it(x: i32) i32 { return x * 2; }\n"
+          "fn run(f: &dyn fn(i32) i32, x: i32) i32 { return f(x); }\n"
+          "fn make_adder(k: i32) Box<dyn fn(i32) i32> { return |x: i32| x + k; }\n"
+          "fn main() i32 {\n"
+          "  let d: &dyn fn(i32) i32 = double_it;\n"
+          "  let base = 1;\n"
+          "  let f = |x: i32| x + base;\n"
+          "  let g: &dyn fn(i32) i32 = &f;\n"
+          "  let mut v: Vector<Box<dyn fn(i32) i32>> = Vector::<Box<dyn fn(i32) i32>>::new();\n"
+          "  v.push(make_adder(3));\n"
+          "  v.push(make_adder(4));\n"
+          "  v.push(double_it);\n"
+          "  let mut total = d(21) + g(1) + run(&f, 2);\n" // 42 + 2 + 3 = 47
+          "  for i in 0..v.len() { total = total + (*v.at(i))(5); }\n" // + 8 + 9 + 10 -> 74
+          "  let r = Res { id: 7 };\n"
+          "  let own: Box<dyn fn(i32) i32> = |x: i32| x + r.id;\n" // r moves into the heap env
+          "  total = total + own(1);\n"                            // + 8 -> 82
+          "  return total;\n"                                      // own's drop glue: env_free -> 'F'
+          "}\n",
+      82, "F");
 }
 
 int main(void) {

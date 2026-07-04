@@ -601,6 +601,8 @@ static size_t render_iface_stem(Codegen *c, const ModuleId m, const NodeId iface
   return render_qualified(c, m, ast_at_const(cg_mod_ast(c, m), iface)->as.interface_def.name, out, cap);
 }
 
+static void dyn_stem(Codegen *c, ModuleId m, NodeId decl, char *out, size_t cap);
+
 // A C-identifier-safe spelling of a type, for monomorphization name mangling: i32, lib__Foo, ptr_i32,
 // slice_u8, arr_f64. Nested types recurse so distinct instantiations get distinct symbol names.
 static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap) {
@@ -653,7 +655,7 @@ static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap)
     }
     case TYPE_DYN: { // flavors mangle apart: borrowed dyn is POD, owned (`Box<dyn I>`) is Free
       char e[176];
-      render_iface_stem(c, ty->module, ty->as.decl, e, sizeof e);
+      dyn_stem(c, ty->module, ty->as.decl, e, sizeof e);
       snprintf(out, cap, "%s_%s",
                ty->qualifier == TYPE_QUAL_MUT ? "dynm" : ty->qualifier == TYPE_QUAL_CONST ? "dyn" : "dynb", e);
       break;
@@ -664,12 +666,41 @@ static void mangle_type(Codegen *c, const TypeId t, char *out, const size_t cap)
   }
 }
 
-// `<srcmangle>__<Iface>` -- the per-(concrete type, interface) symbol stem shared by the vtable
-// (`<stem>__vtbl`) and its glue thunks (`<stem>__<method>`).
+// The C name stem of a trait object's support types: `<modpfx><Iface>` for an interface, or the
+// STRUCTURAL `dynfn[__<param>..][__r_<ret>]` for a `dyn fn` -- fn types intern per annotation node,
+// but every TU (and every annotation) of one signature must agree on the guarded typedef's name.
+static void dyn_stem(Codegen *c, const ModuleId m, const NodeId decl, char *out, const size_t cap) {
+  Ast *const da = cg_mod_ast(c, m);
+  const Node *const fn = ast_at_const(da, decl);
+  if (fn->kind != NODE_FUNCTION_TYPE) {
+    render_iface_stem(c, m, decl, out, cap);
+    return;
+  }
+  size_t at = buf_append(out, cap, 0, "dynfn");
+  const NodeId *const pid = ast_list(da, fn->as.function_type.params);
+  for (uint32_t i = 0; i < fn->as.function_type.params.len; i++) {
+    char e[176];
+    mangle_type(c, ast_reintern(c->ast, da, ast_type(da, pid[i])), e, sizeof e);
+    at = buf_append(out, cap, at, "__");
+    at = buf_append(out, cap, at, e);
+  }
+  if (fn->as.function_type.returns.len == 1) {
+    const NodeId r0 = ast_list(da, fn->as.function_type.returns)[0];
+    const Node *const rn = ast_at_const(da, r0);
+    char e[176];
+    mangle_type(c, ast_reintern(c->ast, da, ast_type(da, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0)),
+                e, sizeof e);
+    at = buf_append(out, cap, at, "__r_");
+    buf_append(out, cap, at, e);
+  }
+}
+
+// `<srcmangle>__<dynstem>` -- the per-(concrete type, interface/signature) symbol stem shared by the
+// vtable (`<stem>__vtbl`) and its glue thunks (`<stem>__<method>`).
 static void dyn_pair_stem(Codegen *c, const TypeId src, const ModuleId im, const NodeId iface, char *out, const size_t cap) {
   char sm[176], stem[176];
   mangle_type(c, src, sm, sizeof sm);
-  render_iface_stem(c, im, iface, stem, sizeof stem);
+  dyn_stem(c, im, iface, stem, sizeof stem);
   snprintf(out, cap, "%s__%s", sm, stem);
 }
 
@@ -1600,8 +1631,8 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
     }
     case TYPE_DYN: { // every flavor shares the one C fat-pair struct; constness is a typechecker fact
       char nm[200];
-      const size_t k = render_iface_stem(c, ty->module, ty->as.decl, nm, sizeof nm);
-      buf_append(nm, sizeof nm, k, "__dyn");
+      dyn_stem(c, ty->module, ty->as.decl, nm, sizeof nm);
+      buf_append(nm, sizeof nm, strlen(nm), "__dyn");
       buf_join3(out, cap, nm, SEP(decl), decl);
       break;
     }
@@ -2506,7 +2537,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     if (rt->kind == TYPE_DYN && rt->qualifier == TYPE_QUAL_NONE) {
       // An owned trait object: run the vtable's drop glue (a borrowed dyn falls to the no-op below).
       char stem[176];
-      render_iface_stem(c, rt->module, rt->as.decl, stem, sizeof stem);
+      dyn_stem(c, rt->module, rt->as.decl, stem, sizeof stem);
       emit(c, "%s__dyn_free", stem);
       emit(c, isref ? "(" : "(&");
       emit_expr(c, recv);
@@ -2610,6 +2641,31 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     const TypeId ct0 = ast_type(c->ast, callee_id);
     if (ct0 != TYPE_NONE) {
       const Ty cty = *ast_type_at(c->ast, subst_resolve(c, ct0));
+      if (cty.kind == TYPE_DYN) { // a `dyn fn` value: indirect through its vtable's `call` slot
+        const bool simple = ast_at_const(c->ast, callee_id)->kind == NODE_IDENTIFIER;
+        char tmp[32];
+        if (simple) {
+          emit_expr(c, callee_id);
+          emit(c, ".vt->call(");
+          emit_expr(c, callee_id);
+          emit(c, ".data");
+        } else { // materialize the 2-word pair once so the callee expression never evaluates twice
+          char dtn[240];
+          render_type_id(c, subst_resolve(c, ct0), "", dtn, sizeof dtn);
+          fresh(c, tmp, sizeof tmp);
+          emit(c, "({ const %s %s = ", dtn, tmp);
+          emit_expr(c, callee_id);
+          emit(c, "; %s.vt->call(%s.data", tmp, tmp);
+        }
+        for (uint32_t i = 0; i < args.len; i++) {
+          emit(c, ", ");
+          emit_expr(c, aids[i]);
+        }
+        emit(c, ")");
+        if (!simple)
+          emit(c, "; })");
+        return;
+      }
       if (cty.kind == TYPE_FUNCTION && cg_fn_is_capturing(c, &cty)) {
         char sym[200];
         closure_sym_in(c, cty.module, cty.as.decl, sym, sizeof sym);
@@ -3340,9 +3396,34 @@ static bool emit_dyn_coercion(Codegen *c, const NodeId id) {
   char dt[240], pair[368];
   render_type_id(c, du->dyn, "", dt, sizeof dt);
   dyn_pair_stem(c, du->src, dy->module, dy->as.decl, pair, sizeof pair);
+  const Ty *const nat = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, id)));
+  if (nat->kind == TYPE_FUNCTION) { // a fn value erasing to `dyn fn`
+    if (!cg_fn_is_capturing(c, nat)) {
+      // The callee is baked into the glue; the source is a bare name -- nothing to evaluate.
+      emit(c, "((%s){ .data = 0, .vt = &%s__vtbl })", dt, pair);
+      return true;
+    }
+    // Owned `Box<dyn fn ..>`: the env moves to the heap (borrowed capturing sources arrive as `&f`).
+    char envn[256], gt[160], vtmp[32], gtmp[32], ptmp[32];
+    render_type_id(c, du->src, "", envn, sizeof envn);
+    ModuleId gm;
+    const NodeId gd = package_prelude_lookup(c->package, "Global", 6, true, &gm);
+    render_qualified(c, gm, ast_at_const(cg_mod_ast(c, gm), gd)->as.aggregate.name, gt, sizeof gt);
+    fresh(c, vtmp, sizeof vtmp);
+    fresh(c, gtmp, sizeof gtmp);
+    fresh(c, ptmp, sizeof ptmp);
+    emit(c, "({ %s %s = ", envn, vtmp);
+    c->dyn_raw = id;
+    emit_expr(c, id);
+    c->dyn_raw = NODE_NONE;
+    emit(c, "; %s %s = %s__default_(); ", gt, gtmp, gt);
+    emit(c, "%s *%s = (%s *)%s__alloc(&%s, sizeof(%s), _Alignof(%s)); *%s = %s; ", envn, ptmp, envn, gt, gtmp, envn,
+         envn, ptmp, vtmp);
+    emit(c, "((%s){ .data = %s, .vt = &%s__vtbl }); })", dt, ptmp, pair);
+    return true;
+  }
   // The data pointer: a reference source is already the pointer; a `Box<T>` source (the OWNED
   // erasure, a move) surrenders its heap pointer.
-  const Ty *const nat = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, id)));
   const bool box_src = nat->kind == TYPE_INSTANCE;
   emit(c, "((%s){ .data = (void *)(", dt);
   c->dyn_raw = id;
@@ -5715,7 +5796,7 @@ static bool emit_free_target(Codegen *c, const TypeId bt) {
     if (y->qualifier != TYPE_QUAL_NONE)
       return false;
     char stem[176];
-    render_iface_stem(c, y->module, y->as.decl, stem, sizeof stem);
+    dyn_stem(c, y->module, y->as.decl, stem, sizeof stem);
     emit(c, "%s__dyn_free", stem);
     return true;
   }
@@ -8261,6 +8342,20 @@ static bool cg_dyn_target(Codegen *c, const Ty *const sy, ModuleId *const tm, No
   return true;
 }
 
+// A `dyn fn` signature's single return type, reinterned into the current pool (TYPE_NONE = void).
+static TypeId cg_dynfn_ret(Codegen *c, const ModuleId m, const NodeId sig) {
+  Ast *const da = cg_mod_ast(c, m);
+  const Node *const fn = ast_at_const(da, sig);
+  if (fn->as.function_type.returns.len != 1)
+    return TYPE_NONE;
+  const NodeId r0 = ast_list(da, fn->as.function_type.returns)[0];
+  const Node *const rn = ast_at_const(da, r0);
+  const TypeId rt = ast_type(da, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+  if (rt == TYPE_NONE || (ast_type_at(da, rt)->kind == TYPE_BUILTIN && ast_type_at(da, rt)->as.builtin == BT_VOID))
+    return TYPE_NONE;
+  return ast_reintern(c->ast, da, rt);
+}
+
 // The `dyn` support typedefs for every interface erased in this TU: the vtable struct (a `__free`
 // drop-glue slot + one fn pointer per self-method, interface decl order) and the fat {data, vt} pair.
 // Self-contained (only `void *` and fn pointers), so they emit before all aggregate bodies.
@@ -8281,14 +8376,38 @@ static void emit_dyn_typedefs(Codegen *c) {
     if (seen)
       continue;
     char stem[176];
-    render_iface_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
+    dyn_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
     Ast *const ia = cg_mod_ast(c, dy.module);
     const Node *const idn = ast_at_const(ia, dy.as.decl);
-    const NodeId *const mids = ast_list(ia, idn->as.interface_def.items);
     // Guarded: every module erasing this interface emits the identical block into its header, and a
-    // TU including several of those headers must define the structs exactly once.
+    // TU including several of those headers must define the structs exactly once. (The guard also
+    // dedups two same-signature `dyn fn` annotation NODES, whose stems collide structurally.)
     emit(c, "#ifndef SC_DYN_%s\n#define SC_DYN_%s\n", stem, stem);
     emit(c, "typedef struct %s__vt {\n    void (*__free)(void *self);\n", stem);
+    if (idn->kind == NODE_FUNCTION_TYPE) { // `dyn fn(..) ..`: one anonymous `call` entry
+      char inner[512];
+      size_t at = buf_append(inner, sizeof inner, 0, "(*call)(void *self");
+      const NodeId *const pid = ast_list(ia, idn->as.function_type.params);
+      for (uint32_t p = 0; p < idn->as.function_type.params.len; p++) {
+        char pt[200];
+        render_type_id(c, ast_reintern(c->ast, ia, ast_type(ia, pid[p])), "", pt, sizeof pt);
+        at = buf_append(inner, sizeof inner, at, ", ");
+        at = buf_append(inner, sizeof inner, at, pt);
+      }
+      buf_append(inner, sizeof inner, at, ")");
+      const TypeId rt = cg_dynfn_ret(c, dy.module, dy.as.decl);
+      char memb[600];
+      if (rt != TYPE_NONE)
+        render_type_id(c, rt, inner, memb, sizeof memb);
+      else
+        buf_join3(memb, sizeof memb, "void ", "", inner);
+      emit(c, "    %s;\n", memb);
+      emit(c, "} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n", stem, stem, stem,
+           stem);
+      emit(c, "static inline void %s__dyn_free(%s__dyn *const d) { d->vt->__free(d->data); }\n#endif\n", stem, stem);
+      continue;
+    }
+    const NodeId *const mids = ast_list(ia, idn->as.interface_def.items);
     for (uint32_t k = 0; k < idn->as.interface_def.items.len; k++) {
       const Node *const m = ast_at_const(ia, mids[k]);
       if (!cg_dyn_method(c, dy.module, m))
@@ -8326,6 +8445,94 @@ static void emit_dyn_typedefs(Codegen *c) {
   }
 }
 
+// The vtable + glue for a (function value, `dyn fn` signature) pair. The call glue forwards to the
+// statically-known callee: a capturing closure gets its env back (`(const Env *)self`); a named fn /
+// non-capturing closure ignores the NULL data. Drop glue exists only for owned (heap-env) uses.
+static void emit_dynfn_table(Codegen *c, const TypeId src, const Ty dy) {
+  const Ty sy = *ast_type_at(c->ast, src);
+  Ast *const fa = cg_mod_ast(c, sy.module);
+  const Node *const fd = ast_at_const(fa, sy.as.decl);
+  const bool capt = cg_fn_is_capturing(c, &sy);
+  char pair[368];
+  dyn_pair_stem(c, src, dy.module, dy.as.decl, pair, sizeof pair);
+  Ast *const da = cg_mod_ast(c, dy.module);
+  const Node *const sig = ast_at_const(da, dy.as.decl);
+  const TypeId rt = cg_dynfn_ret(c, dy.module, dy.as.decl);
+  char rts[256];
+  if (rt != TYPE_NONE)
+    render_type_id(c, rt, "", rts, sizeof rts);
+  else
+    buf_append(rts, sizeof rts, 0, "void");
+  emit(c, "static __attribute__((unused)) %s %s__call(void *__self", rts, pair);
+  const NodeId *const pid = ast_list(da, sig->as.function_type.params);
+  for (uint32_t p = 0; p < sig->as.function_type.params.len; p++) {
+    char an[16], pd[240];
+    snprintf(an, sizeof an, "_a%u", p);
+    render_type_id(c, ast_reintern(c->ast, da, ast_type(da, pid[p])), an, pd, sizeof pd);
+    emit(c, ", %s", pd);
+  }
+  emit(c, ") { ");
+  if (!capt)
+    emit(c, "(void)__self; ");
+  if (rt != TYPE_NONE)
+    emit(c, "return ");
+  char sym[240];
+  if (fd->kind == NODE_CLOSURE)
+    closure_sym_in(c, sy.module, sy.as.decl, sym, sizeof sym);
+  else
+    render_qualified(c, sy.module, fd->as.function.name, sym, sizeof sym);
+  emit_cstr(c, sym);
+  emit(c, "(");
+  bool wrote = false;
+  char envn[256];
+  if (capt) {
+    render_type_id(c, src, "", envn, sizeof envn); // the closure's env struct name
+    emit(c, "(const %s *)__self", envn);
+    wrote = true;
+  }
+  for (uint32_t p = 0; p < sig->as.function_type.params.len; p++) {
+    emit(c, "%s_a%u", wrote || p ? ", " : "", p);
+    wrote = true;
+  }
+  emit(c, "); }\n");
+  // Drop glue only when this TU builds an owned `Box<dyn fn ..>` of this source (env on the heap).
+  bool owned = false;
+  for (size_t j = 0; j < c->ast->dyn_uses.len && !owned; j++) {
+    const DynUse oj = c->ast->dyn_uses.data[j];
+    if (oj.src != src)
+      continue;
+    const Ty oy = *ast_type_at(c->ast, oj.dyn);
+    owned = oy.qualifier == TYPE_QUAL_NONE;
+  }
+  if (owned && c->package) {
+    ModuleId gm;
+    const NodeId gd = package_prelude_lookup(c->package, "Global", 6, true, &gm);
+    char gt[160];
+    render_qualified(c, gm, ast_at_const(cg_mod_ast(c, gm), gd)->as.aggregate.name, gt, sizeof gt);
+    emit(c, "static void %s____free(void *__self) {\n", pair);
+    if (capt) {
+      if (cg_fn_owns(c, &sy)) { // the env owns Free captures: run its synthesized destructor first
+        char csym[240];
+        closure_sym_in(c, sy.module, sy.as.decl, csym, sizeof csym);
+        emit(c, "    %s_env_free((%s *)__self);\n", csym, envn);
+      }
+      emit(c, "    %s __g = %s__default_();\n    %s__dealloc(&__g, __self, sizeof(%s), _Alignof(%s));\n", gt, gt, gt,
+           envn, envn);
+    } else {
+      emit(c, "    (void)__self;\n"); // a named fn / non-capturing closure: nothing was allocated
+    }
+    emit(c, "}\n");
+  }
+  char stem[176];
+  dyn_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
+  emit(c, "static const %s__vt %s__vtbl __attribute__((unused)) = { ", stem, pair);
+  if (owned)
+    emit(c, "%s____free", pair);
+  else
+    emit(c, "0");
+  emit(c, ", %s__call };\n", pair);
+}
+
 // One static vtable + glue-thunk set per distinct (concrete type, interface) erased in this TU. Glue
 // casts the vtable's `void *self` back to the concrete receiver and forwards -- a real thunk, not a
 // function-pointer cast (calling through an incompatibly-typed fn pointer is UB); the C compiler
@@ -8333,16 +8540,33 @@ static void emit_dyn_typedefs(Codegen *c) {
 static void emit_dyn_tables(Codegen *c) {
   const DynUse *const du = c->ast->dyn_uses.data;
   for (size_t i = 0; i < c->ast->dyn_uses.len; i++) {
+    if (du[i].src == TYPE_NONE)
+      continue; // a reborrow record: no pair of its own
     const Ty dy = *ast_type_at(c->ast, du[i].dyn);
+    char istem[176];
+    dyn_stem(c, dy.module, dy.as.decl, istem, sizeof istem);
     bool seen = false;
     for (size_t j = 0; j < i && !seen; j++) {
+      if (du[j].src != du[i].src)
+        continue;
       const Ty pj = *ast_type_at(c->ast, du[j].dyn);
-      seen = du[j].src == du[i].src && pj.module == dy.module && pj.as.decl == dy.as.decl;
+      if (pj.module == dy.module && pj.as.decl == dy.as.decl) {
+        seen = true;
+        break;
+      }
+      // Two same-signature `dyn fn` annotation nodes share one structural stem -> one vtable.
+      char jstem[176];
+      dyn_stem(c, pj.module, pj.as.decl, jstem, sizeof jstem);
+      seen = strcmp(istem, jstem) == 0;
     }
     if (seen)
       continue;
     const TypeId src = du[i].src;
     const Ty sy = *ast_type_at(c->ast, src);
+    if (ast_at_const(cg_mod_ast(c, dy.module), dy.as.decl)->kind == NODE_FUNCTION_TYPE) {
+      emit_dynfn_table(c, src, dy);
+      continue;
+    }
     ModuleId tm;
     NodeId td;
     if (!cg_dyn_target(c, &sy, &tm, &td))
@@ -8410,7 +8634,7 @@ static void emit_dyn_tables(Codegen *c) {
            gt, recv, recv);
     }
     char stem[176];
-    render_iface_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
+    dyn_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
     emit(c, "static const %s__vt %s__vtbl __attribute__((unused)) = { ", stem, pair);
     if (owned)
       emit(c, "%s____free", pair);
