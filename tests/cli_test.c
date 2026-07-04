@@ -996,7 +996,7 @@ static void test_external_c_sources(void) {
   mkfile(root, "main.spc",
          "@c.source(\"helper.c\")\n"
          "@c.link(\"m\")\n"
-         "extern \"C\" \"../helper.h\" {\n" // relative to the generated build/main.c
+         "extern \"C\" \"helper.h\" {\n" // relative to THIS .spc; the compiler rewrites it for build/
          "  fn helper_add(a: i32, b: i32) i32;\n"
          "}\n"
          "extern \"C\" { fn exit(code: i32) void; }\n"

@@ -415,8 +415,11 @@ extern "C" {
 ```
 
 `extern "C"` declarations bind directly to C symbols with no wrapper or mangling, so existing C
-libraries can be used as-is. `extern "C" "header.h" { .. }` emits the matching `#include`. Calling
-any extern binding requires an `unsafe` block or prefix at the call site.
+libraries can be used as-is. `extern "C" "header.h" { .. }` emits the matching `#include`: a header
+that exists relative to the declaring `.spc` file is rewritten to the right path from inside the
+generated `build/` tree (you never reason about the build layout), anything else is included as
+written (`<...>` for bare names). Calling any extern binding requires an `unsafe` block or prefix at
+the call site.
 
 Whole C sources and libraries can be pulled into the build, beyond declarations:
 

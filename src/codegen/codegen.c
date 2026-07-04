@@ -9884,7 +9884,11 @@ static void emit_header_includes(Codegen *c) {
 
 // Emit `#include` for each `extern "C" "<header>" { .. }` backing header in this module, so bindings to
 // non-standard / third-party / local C headers resolve (standard headers are auto-included via super_rt).
-// A leading '.' or '/' (relative or absolute path) -> a quote include; anything else -> a system include.
+// A header that EXISTS relative to the module's SOURCE file is the natural spelling ("native.h" next to
+// the .spc): the compiler rewrites it to a path valid from the emitted file's own directory under build/
+// (or an absolute path when the header lives outside the project root), so the user never reasons about
+// the build tree's layout. Anything unresolved keeps the spelling-based rule: a leading '.' or '/' -> a
+// verbatim quote include, else a system include.
 // Dedup'd by content so repeated headers across blocks emit once; idempotent across .h/.c (header guards).
 static void emit_extern_includes(Codegen *c) {
   const NodeList items = program_items(c);
@@ -9908,6 +9912,26 @@ static void emit_extern_includes(Codegen *c) {
     }
     if (dup)
       continue;
+    if (c->package && c->ast->module < c->package->count && c->package->modules[c->ast->module].file) {
+      char rel[4096], abs[4096], rootabs[4096];
+      const char *const file = c->package->modules[c->ast->module].file;
+      const char *const slash = strrchr(file, '/');
+      snprintf(rel, sizeof rel, "%.*s/%.*s", slash ? (int)(slash - file) : 1, slash ? file : ".", (int)(e - s),
+               (const char *)c->source + s);
+      if (realpath(rel, abs) && realpath(c->package->root_dir, rootabs)) {
+        const size_t rl = strlen(rootabs);
+        emit(c, "#include \"");
+        if (strncmp(abs, rootabs, rl) == 0 && abs[rl] == '/') {
+          emit_rel_prefix(c); // climb to the build root...
+          emit(c, "../");     // ...and one step more, to the project root the header sits under
+          emit_cstr(c, abs + rl + 1);
+        } else {
+          emit_cstr(c, abs); // outside the project root: only its absolute location is stable
+        }
+        emit(c, "\"\n");
+        continue;
+      }
+    }
     const bool local = c->source[s] == '.' || c->source[s] == '/';
     emit(c, local ? "#include \"" : "#include <");
     emit_bytes(c, (const char *)c->source + s, e - s);
