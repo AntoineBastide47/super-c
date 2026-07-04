@@ -162,6 +162,18 @@ static TypeId subst_type(TypeChecker *t, TypeId ty, const DefId *params, const T
 static bool aggregate_of(TypeChecker *t, TypeId ty, ModuleId *mod, NodeId *decl, DefId *params, TypeId *args, int *n);
 static bool dyn_coerce(TypeChecker *t, NodeId node, TypeId src, TypeId dyn_ty);
 static bool tc_box_of(TypeChecker *t, const Ty *y, TypeId *inner, bool *global_alloc);
+static bool fn_compatible_subst(TypeChecker *t, TypeId exid, TypeId acid, const DefId *gp, const TypeId *ga, int gn,
+                                const DefId *rp, const TypeId *ra, int rn);
+static TypeId tc_intern_dynfn(TypeChecker *t, ModuleId m, NodeId sig, TypeQualifier qual);
+
+// The TYPE_FUNCTION signature behind a `dyn fn(..) ..` (TYPE_NONE when the dyn wraps an interface).
+static TypeId tc_dyn_fn_sig(TypeChecker *t, const Ty *const y) {
+  if (y->kind != TYPE_DYN)
+    return TYPE_NONE;
+  if (ast_at_const(mod_ast(t, y->module), y->as.decl)->kind != NODE_FUNCTION_TYPE)
+    return TYPE_NONE;
+  return lower_type_in(t, y->module, y->as.decl);
+}
 
 TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   TypeChecker *const t = calloc(1, sizeof *t);
@@ -384,12 +396,16 @@ static void render_type(TypeChecker *t, const TypeId tid, char *buf, const size_
       break;
     case TYPE_DYN: {
       Ast *const a = mod_ast(t, ty->module);
-      const Span s = ast_at_const(a, ast_at_const(a, ty->as.decl)->as.interface_def.name)->as.name.text;
       const char *const pfx = ty->qualifier == TYPE_QUAL_MUT    ? "&mut dyn "
                               : ty->qualifier == TYPE_QUAL_CONST ? "&dyn "
                                                                   : "Box<dyn ";
-      snprintf(buf, cap, "%s%.*s%s", pfx, (int)(s.end - s.start), (const char *)mod_src(t, ty->module) + s.start,
-               ty->qualifier == TYPE_QUAL_NONE ? ">" : "");
+      const char *const sfx = ty->qualifier == TYPE_QUAL_NONE ? ">" : "";
+      if (ast_at_const(a, ty->as.decl)->kind == NODE_FUNCTION_TYPE) {
+        snprintf(buf, cap, "%sfn(..) ..%s", pfx, sfx);
+        break;
+      }
+      const Span s = ast_at_const(a, ast_at_const(a, ty->as.decl)->as.interface_def.name)->as.name.text;
+      snprintf(buf, cap, "%s%.*s%s", pfx, (int)(s.end - s.start), (const char *)mod_src(t, ty->module) + s.start, sfx);
       break;
     }
     default:
@@ -626,6 +642,31 @@ static bool fn_compatible(TypeChecker *t, const TypeId exid, const TypeId acid) 
   return true;
 }
 
+// A dyn-fn erasure's signature check: fn_compatible WITHOUT the capturing/`fn move` gates -- a
+// capturing closure's env rides the trait object itself (borrowed via `&f`, or heap-copied into a
+// `Box<dyn fn>` that owns it), so the bound-tier ownership rules don't apply here.
+static bool dynfn_sig_ok(TypeChecker *t, const TypeId exid, const TypeId acid) {
+  TypeId ep[4], ap[4], er, ar;
+  const int en = fn_sig(t, exid, ep, 4, &er), an = fn_sig(t, acid, ap, 4, &ar);
+  if (en != an || en > 4 || !ret_eq(er, ar))
+    return false;
+  for (int i = 0; i < en; i++)
+    if (ep[i] != ap[i])
+      return false;
+  return true;
+}
+
+// Are two trait-object types the SAME dyn? The `dyn fn` flavor compares SIGNATURES (fn types intern
+// per node, so two annotations of one signature must still unify); interfaces compare by DefId.
+static bool tc_dyn_same(TypeChecker *t, const Ty *const a, const Ty *const b) {
+  const TypeId as = tc_dyn_fn_sig(t, a), bs = tc_dyn_fn_sig(t, b);
+  if ((as != TYPE_NONE) != (bs != TYPE_NONE))
+    return false;
+  if (as != TYPE_NONE)
+    return as == bs || fn_compatible(t, as, bs);
+  return a->module == b->module && a->as.decl == b->as.decl;
+}
+
 // Is the value at `node` assignable to a slot of type `expected`? Equal types, poison (suppress
 // cascades), a numeric literal matching the expected numeric class, or `null` into a pointer/reference.
 static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node) {
@@ -681,41 +722,71 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
       return true;
     }
   }
-  // A reference erases to a trait object: `&T`/`&mut T` -> `&dyn I` (`&mut dyn I` needs a `&mut T`
-  // source), when T implements I. The site is recorded so codegen materializes the {data, vt} pair.
-  // An explicit `&`/`&mut` over an OWNED trait object instead reborrows it: `&Box<dyn I>` -> `&dyn I`
-  // (layout-identical; codegen derefs the reference back to the pair -- the TYPE_NONE-src record).
-  if (ex->kind == TYPE_DYN && ex->qualifier != TYPE_QUAL_NONE && ac->kind == TYPE_REFERENCE &&
-      (ex->qualifier == TYPE_QUAL_CONST || ac->qualifier == TYPE_QUAL_MUT)) {
-    const Ty *const rel = ast_type_at(t->ast, ac->as.elem);
-    if (rel->kind == TYPE_DYN) {
-      if (rel->qualifier != TYPE_QUAL_NONE || rel->module != ex->module || rel->as.decl != ex->as.decl)
+  // ---- trait objects ----
+  if (ex->kind == TYPE_DYN) {
+    const TypeId exsig = tc_dyn_fn_sig(t, ex); // TYPE_NONE = interface flavor, else the `dyn fn` signature
+    const Span sp = ast_at_const(t->ast, node)->span;
+    // dyn == dyn: structural for `dyn fn`, DefId for interfaces; `&mut dyn I` weakens to `&dyn I`.
+    if (ac->kind == TYPE_DYN)
+      return tc_dyn_same(t, ex, ac) &&
+             (ex->qualifier == ac->qualifier ||
+              (ex->qualifier == TYPE_QUAL_CONST && ac->qualifier == TYPE_QUAL_MUT));
+    // Borrowed flavors from an explicit `&`/`&mut`: an erasing reference, a reborrowed owned dyn, or
+    // a borrowed closure (`&f` -> `&dyn fn(..) ..` -- the env stays on the creator's frame).
+    if (ex->qualifier != TYPE_QUAL_NONE && ac->kind == TYPE_REFERENCE) {
+      const Ty *const rel = ast_type_at(t->ast, ac->as.elem);
+      if (rel->kind == TYPE_DYN) { // `&b` over `Box<dyn ..>`: layout-identical, codegen derefs
+        if (rel->qualifier != TYPE_QUAL_NONE || !tc_dyn_same(t, ex, rel))
+          return false;
+        ast_add_dyn_use(t->ast, node, TYPE_NONE, expected);
+        return true;
+      }
+      if (exsig != TYPE_NONE) {
+        if (rel->kind != TYPE_FUNCTION || !dynfn_sig_ok(t, exsig, ac->as.elem))
+          return false;
+        ast_add_dyn_use(t->ast, node, ac->as.elem, expected);
+        return true;
+      }
+      if (ex->qualifier == TYPE_QUAL_MUT && ac->qualifier != TYPE_QUAL_MUT)
         return false;
-      ast_add_dyn_use(t->ast, node, TYPE_NONE, expected);
-      return true;
+      return dyn_coerce(t, node, ac->as.elem, expected);
     }
-    return dyn_coerce(t, node, ac->as.elem, expected);
-  }
-  // `Box<T>` erases to the OWNED trait object `Box<dyn I>`: a MOVE of the box (the by-value move
-  // machinery already fires -- the source is a Free value in a move position). Only the default
-  // allocator: a stateful allocator cannot live in the per-type const vtable whose drop glue frees.
-  if (ex->kind == TYPE_DYN && ex->qualifier == TYPE_QUAL_NONE && ac->kind == TYPE_INSTANCE) {
-    TypeId inner;
-    bool galloc;
-    if (tc_box_of(t, ac, &inner, &galloc)) {
-      if (!galloc) {
-        const Span sp = ast_at_const(t->ast, node)->span;
+    // A function VALUE erases to `dyn fn`: a named fn / non-capturing closure for any flavor (data
+    // stays NULL); `Box<dyn fn ..>` additionally heap-copies a capturing closure's env (an OWNING
+    // closure is Free, so the by-value move machinery already consumes it).
+    if (exsig != TYPE_NONE && ac->kind == TYPE_FUNCTION) {
+      if (ast_at_const(mod_ast(t, ac->module), ac->as.decl)->kind == NODE_FUNCTION_TYPE) {
         typechecker_errorf(t, sp.start, sp.end - sp.start,
-                           "only a default-allocated 'Box<T>' can be erased to 'Box<dyn I>'");
+                           "a runtime 'fn(..)' pointer cannot erase to 'dyn fn'; wrap it in a closure");
         return true; // reported
       }
-      return dyn_coerce(t, node, inner, expected);
+      if (!dynfn_sig_ok(t, exsig, actual))
+        return false;
+      if (ex->qualifier != TYPE_QUAL_NONE && fn_is_capturing(t, actual)) {
+        typechecker_errorf(t, sp.start, sp.end - sp.start,
+                           "a capturing closure must be borrowed to view it as '&dyn fn': write '&f'");
+        return true; // reported
+      }
+      ast_add_dyn_use(t->ast, node, actual, expected);
+      return true;
     }
+    // `Box<T>` erases to the OWNED trait object `Box<dyn I>`: a MOVE of the box (the by-value move
+    // machinery already fires -- the source is a Free value in a move position). Only the default
+    // allocator: a stateful allocator cannot live in the per-type const vtable whose drop glue frees.
+    if (ex->qualifier == TYPE_QUAL_NONE && ac->kind == TYPE_INSTANCE && exsig == TYPE_NONE) {
+      TypeId inner;
+      bool galloc;
+      if (tc_box_of(t, ac, &inner, &galloc)) {
+        if (!galloc) {
+          typechecker_errorf(t, sp.start, sp.end - sp.start,
+                             "only a default-allocated 'Box<T>' can be erased to 'Box<dyn I>'");
+          return true; // reported
+        }
+        return dyn_coerce(t, node, inner, expected);
+      }
+    }
+    return false;
   }
-  // Trait-object reborrow weakening: `&mut dyn I` satisfies a `&dyn I` slot (same layout, no work).
-  if (ex->kind == TYPE_DYN && ac->kind == TYPE_DYN && ex->module == ac->module && ex->as.decl == ac->as.decl &&
-      ex->qualifier == TYPE_QUAL_CONST && ac->qualifier == TYPE_QUAL_MUT)
-    return true;
   const Node *v = ast_at_const(t->ast, node);
   if (v->kind == NODE_UNARY && v->as.unary.op == Minus) // -literal still counts as a literal
     v = ast_at_const(t->ast, v->as.unary.operand);
@@ -2545,8 +2616,10 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
     }
     case NODE_FUNCTION_TYPE:
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_FUNCTION, .module = m, .as.decl = id});
-    case NODE_DYN_TYPE: { // a foreign signature's `&[mut] dyn I` (its own module already validated it)
+    case NODE_DYN_TYPE: { // a foreign signature's `&[mut] dyn ..` (its own module already validated it)
       const NodeId inner = n->as.indirect_type.type;
+      if (ast_at_const(a, inner)->kind == NODE_FUNCTION_TYPE)
+        return tc_intern_dynfn(t, m, inner, n->as.indirect_type.qualifier);
       const DefId d = ast_at_const(a, inner)->kind == NODE_TYPE_PATH ? ast_resolution_def(a, inner)
                                                                      : (DefId){0, NODE_NONE};
       if (d.node == NODE_NONE || ast_at_const(mod_ast(t, d.module), d.node)->kind != NODE_INTERFACE)
@@ -2656,15 +2729,57 @@ static int slice_kind(TypeChecker *t, const TypeId tid, TypeId *const elem) {
   return kind;
 }
 
+// Canonicalize a `dyn fn` identity within this pool: fn types intern per annotation NODE, but every
+// same-signature `dyn fn` must yield ONE TypeId or generic instances over it (Vector<Box<dyn fn..>>)
+// would never unify. The first-seen signature's (module, node) becomes the pool's canonical identity.
+static TypeId tc_intern_dynfn(TypeChecker *t, const ModuleId m, const NodeId sig, const TypeQualifier qual) {
+  Ast *const a = t->ast;
+  const TypeId mysig = lower_type_in(t, m, sig);
+  for (TypeId i = 1; i < (TypeId)a->type_pool.len; i++) {
+    const Ty e = a->type_pool.data[i]; // by value: the lowering below may grow (realloc) the pool
+    if (e.kind != TYPE_DYN || ast_at_const(mod_ast(t, e.module), e.as.decl)->kind != NODE_FUNCTION_TYPE)
+      continue;
+    const TypeId esig = lower_type_in(t, e.module, e.as.decl);
+    if (esig == mysig || fn_compatible(t, esig, mysig))
+      return ast_intern_type(a, (Ty){.kind = TYPE_DYN, .qualifier = qual, .module = e.module, .as.decl = e.as.decl});
+  }
+  return ast_intern_type(a, (Ty){.kind = TYPE_DYN, .qualifier = qual, .module = m, .as.decl = sig});
+}
+
 // The TYPE_DYN behind a `dyn I` node, with `qual` as the flavor: the node's own for `&[mut] dyn I`,
 // forced TYPE_QUAL_NONE by the intercepted owned `Box<dyn I>` spelling. Memoizes onto the node.
 static TypeId resolve_dyn_node(TypeChecker *t, const NodeId id, const TypeQualifier qual) {
   Ast *const a = t->ast;
   const Node *const n = ast_at_const(a, id);
   const NodeId inner = n->as.indirect_type.type;
+  TypeId result = TYPE_ERROR;
+  // `dyn fn(..) ..`: a one-method anonymous interface over the signature (structural identity).
+  // Calls only ever read the env, so there is no `&mut` flavor to spell.
+  if (ast_at_const(a, inner)->kind == NODE_FUNCTION_TYPE) {
+    const Node *const fn = ast_at_const(a, inner);
+    bool concrete = qual != TYPE_QUAL_MUT;
+    if (!concrete)
+      typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                         "a 'dyn fn' is always called through a shared view; write '&dyn fn(..) ..'");
+    const NodeId *const pid = ast_list(a, fn->as.function_type.params);
+    for (uint32_t i = 0; concrete && i < fn->as.function_type.params.len; i++)
+      concrete = ast_type_at(a, resolve_type(t, pid[i]))->kind != TYPE_GENERIC;
+    const NodeId *const rid = ast_list(a, fn->as.function_type.returns);
+    for (uint32_t i = 0; concrete && i < fn->as.function_type.returns.len; i++) {
+      const Node *const rn = ast_at_const(a, rid[i]);
+      concrete = ast_type_at(a, resolve_type(t, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : rid[i]))->kind !=
+                 TYPE_GENERIC;
+    }
+    if (concrete)
+      result = tc_intern_dynfn(t, a->module, inner, qual);
+    else if (qual != TYPE_QUAL_MUT)
+      typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                         "a 'dyn fn' signature cannot name a generic parameter");
+    ast_set_type(a, id, result);
+    return result;
+  }
   const DefId d = ast_at_const(a, inner)->kind == NODE_TYPE_PATH ? ast_resolution_def(a, inner)
                                                                  : (DefId){0, NODE_NONE};
-  TypeId result = TYPE_ERROR;
   if (d.node == NODE_NONE || ast_at_const(mod_ast(t, d.module), d.node)->kind != NODE_INTERFACE)
     typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'dyn' requires an interface");
   else if (dyn_compatible(t, d, n->span))
@@ -3807,6 +3922,14 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     const NodeId fb = generic_fn_bound(t, ct->module, ct->as.decl);
     if (fb != NODE_NONE) {
       callee = lower_type_in(t, ct->module, fb);
+      ct = ast_type_at(t->ast, callee);
+    }
+  }
+  if (ct->kind == TYPE_DYN) {
+    // A `dyn fn(..) ..` value is callable with its signature (codegen dispatches through the vtable).
+    const TypeId ds = tc_dyn_fn_sig(t, ct);
+    if (ds != TYPE_NONE) {
+      callee = ds;
       ct = ast_type_at(t->ast, callee);
     }
   }
