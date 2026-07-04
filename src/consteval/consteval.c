@@ -1827,8 +1827,8 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
       const Node *const dn = ast_at_const(ce_ast(ce, d.module), d.node);
       if (dn->kind == NODE_FUNCTION)
         return (CeVal){.kind = CV_FN, .tm = m, .type = ce_type(a, id), .as.fnv = {d.module, d.node}};
-      if (dn->kind != NODE_CONST || dn->as.const_def.value == NODE_NONE)
-        return CV_NIL;
+      if (dn->kind != NODE_CONST || dn->as.const_def.value == NODE_NONE || dn->as.const_def.is_static_mut)
+        return CV_NIL; // a `static mut` global changes at runtime: reading it never folds
       CeVal v = ev_in(ce, NULL, d.module, dn->as.const_def.value);
       if (v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT) {
         v.tm = m;
@@ -1844,7 +1844,7 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
         if (d.node == NODE_NONE || d.module >= ce->nmods)
           return CV_NIL;
         const Node *const dn = ast_at_const(ce_ast(ce, d.module), d.node);
-        if (dn->kind == NODE_CONST && dn->as.const_def.value != NODE_NONE) {
+        if (dn->kind == NODE_CONST && dn->as.const_def.value != NODE_NONE && !dn->as.const_def.is_static_mut) {
           CeVal v = ev_in(ce, NULL, d.module, dn->as.const_def.value);
           if (v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT) {
             v.tm = m;

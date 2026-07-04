@@ -8805,6 +8805,18 @@ static void emit_toplevel_const(Codegen *c, const NodeId id) {
   char nm[160], decl[256];
   render_qualified(c, c->ast->module, n->as.const_def.name, nm, sizeof nm);
   render_type_node(c, n->as.const_def.type, nm, decl, sizeof decl);
+  // A `static mut` global is real mutable storage: exactly ONE definition. A public one is defined
+  // extern-linkage in the .c (the header carries the `extern` declaration via emit_public_consts);
+  // a private one is C-`static`. Only a plain const may live header-side as a per-TU `static const`.
+  if (n->as.const_def.is_static_mut) {
+    if (!n->as.const_def.is_public)
+      emit(c, "static ");
+    emit_cstr(c, decl);
+    emit(c, " = ");
+    emit_initializer(c, n->as.const_def.type, n->as.const_def.value);
+    emit(c, ";\n");
+    return;
+  }
   if (cg_ceval(c)) // folding may replace every use of a const with its value -- keep -Werror clean
     emit(c, "__attribute__((unused)) ");
   emit(c, "static const ");
@@ -8817,13 +8829,24 @@ static void emit_toplevel_const(Codegen *c, const NodeId id) {
 }
 
 // The module's public consts -- emitted into the header (multi-file build) so other modules can name them.
+// A public `static mut` gets an `extern` DECLARATION here; its single definition stays in the .c.
 static void emit_public_consts(Codegen *c) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
-    if (n->kind == NODE_CONST && n->as.const_def.is_public)
+    if (n->kind != NODE_CONST || !n->as.const_def.is_public)
+      continue;
+    if (n->as.const_def.is_static_mut) {
+      char nm[160], decl[256];
+      render_qualified(c, c->ast->module, n->as.const_def.name, nm, sizeof nm);
+      render_type_node(c, n->as.const_def.type, nm, decl, sizeof decl);
+      emit(c, "extern ");
+      emit_cstr(c, decl);
+      emit(c, ";\n");
+    } else {
       emit_toplevel_const(c, ids[i]);
+    }
   }
 }
 
@@ -8834,8 +8857,10 @@ static void phase_bodies(Codegen *c) {
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     // Public consts go in the header when emitting a multi-file build; otherwise (and for private ones)
-    // they go here in the .c (or the single self-contained unit).
-    if (n->kind == NODE_CONST && !(c->multifile && n->as.const_def.is_public))
+    // they go here in the .c (or the single self-contained unit). A `static mut` global's DEFINITION
+    // always lives in the .c -- the header only ever declares it `extern`.
+    if (n->kind == NODE_CONST &&
+        (n->as.const_def.is_static_mut || !(c->multifile && n->as.const_def.is_public)))
       emit_toplevel_const(c, ids[i]);
     else if (n->kind == NODE_STATIC_ASSERT) // file-scope check, after phase_types so sizeof(struct) is defined
       emit_static_assert(c, n);

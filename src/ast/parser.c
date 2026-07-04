@@ -704,6 +704,28 @@ static NodeId parse_const(Parser *p) {
               });
 }
 
+// `static mut name: type = expr;` -- a module-level mutable global (rides NODE_CONST with
+// is_static_mut). `static` is a contextual keyword (an identifier at item level, like static_assert).
+// Immutable module-level data stays `const`, so the `mut` is required.
+static NodeId parse_static(Parser *p) {
+  const uint32_t start = token_start(raw_peek(p));
+  advance(p); // 'static'
+  if (!match(p, Mut))
+    error_here(p, "expected 'mut' after 'static' (immutable module-level data is a 'const')");
+  const NodeId name = identifier(p);
+  expect(p, Colon, "':'");
+  const NodeId type = parse_type(p);
+  expect(p, Equal, "'='");
+  const NodeId value = parse_expression(p);
+  expect(p, Semicolon, "';'");
+  return ast_add(
+      p->ast, (Node){
+                  .kind = NODE_CONST,
+                  .span = span_new(start, previous_end(p)),
+                  .as.const_def = {.name = name, .type = type, .value = value, .is_static_mut = true},
+              });
+}
+
 static NodeId parse_interface(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   advance(p);
@@ -1020,11 +1042,17 @@ static NodeId parse_item(Parser *p) {
   const int nattr = parse_attributes(p, attrs, 16);
   if (peek_ident_is(p, "static_assert"))
     return parse_static_assert(p);
-  // `pub` (LL(1): one-token lookahead) may prefix a struct, enum, function, const, or type alias.
+  // `pub` (LL(1): one-token lookahead) may prefix a struct, enum, function, const, static, or type alias.
   const bool is_public = match(p, Pub);
+  if (peek_ident_is(p, "static")) { // contextual keyword: a module-level `static mut` global
+    const NodeId sid = parse_static(p);
+    if (sid != NODE_NONE)
+      ast_at(p->ast, sid)->as.const_def.is_public = is_public;
+    return sid;
+  }
   if (is_public && !check(p, Fn) && !check(p, Struct) && !check(p, Union) && !check(p, Enum) && !check(p, Const) &&
       !check(p, Type) && !check(p, Interface))
-    error_here(p, "'pub' may only be applied to a struct, union, enum, function, const, interface, or type");
+    error_here(p, "'pub' may only be applied to a struct, union, enum, function, const, static, interface, or type");
   NodeId id = NODE_NONE;
   switch (peek_type(p)) {
     case Fn:
