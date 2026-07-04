@@ -38,6 +38,8 @@ typedef enum {
   ATTR_TEST,       // `@test` / `@test(should_panic)` (arg = 1): a test function (compiled/run under --test)
   ATTR_TEST_INIT,  // `@test_init` (per-module fixture producer) / `@test_init(global)` (arg = 1: suite setup)
   ATTR_TEST_FREE,  // `@test_free` / `@test_free(global)`: optional out-of-band teardown (memory is RAII's job)
+  ATTR_C_SOURCE,   // `@c.source("path.c")` on an extern block: compile that C file into the build
+  ATTR_C_LINK,     // `@c.link("m")` / `@c.link("-framework X")`: a library / raw flag for the link line
 } AttrKind;
 
 typedef struct {

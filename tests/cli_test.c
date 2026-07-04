@@ -984,6 +984,49 @@ static void test_module_imports(void) {
   CHECK(run_cmd(crun, NULL, 0) == 140, "alias (10) + glob (20) + facade-glob dtag (100) + deep::dtag/10 (10)");
 }
 
+// External C code imports: `@c.source("f.c")` on an extern block emits a wrapper TU into build/
+// (an absolute #include, so the file's own relative includes still resolve) and `@c.link("m")`
+// lands in build/__ldflags -- so `cc build/**/*.c $(cat build/__ldflags)` builds the whole program.
+// A missing source is a hard error; removing the attributes prunes the wrapper and the flags file.
+static void test_external_c_sources(void) {
+  char root[4112], spc[4170], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/extc", DIR);
+  mkfile(root, "helper.h", "int helper_add(int a, int b);\n");
+  mkfile(root, "helper.c", "#include \"helper.h\"\nint helper_add(int a, int b) { return a + b; }\n");
+  mkfile(root, "main.spc",
+         "@c.source(\"helper.c\")\n"
+         "@c.link(\"m\")\n"
+         "extern \"C\" \"../helper.h\" {\n" // relative to the generated build/main.c
+         "  fn helper_add(a: i32, b: i32) i32;\n"
+         "}\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn main() i32 { unsafe exit(helper_add(20, 22)); }\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "@c.source/@c.link compile: %s", buf);
+  snprintf(cmd, sizeof cmd, "cat '%s/build/__ldflags' 2>&1", root);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0 && strstr(buf, "-lm"), "@c.link lands in build/__ldflags: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/extc.bin", DIR);
+  snprintf(ccmd, sizeof ccmd,
+           "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') $(cat '%s/build/__ldflags') -o '%s' 2>&1",
+           root, root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "external C source compiles via the build tree: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 42, "helper_add(20, 22) through @c.source");
+  mkfile(root, "main.spc", // drop the attributes: the wrapper TU and __ldflags must disappear
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn main() i32 { unsafe exit(0); }\n");
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "attribute-free recompile: %s", buf);
+  snprintf(cmd, sizeof cmd, "test ! -e '%s/build/__ext0_helper.c' && test ! -e '%s/build/__ldflags'", root, root);
+  CHECK(run_cmd(cmd, NULL, 0) == 0, "stale wrapper TU and __ldflags are pruned");
+  mkfile(root, "main.spc", // a missing source file is a hard error
+         "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) != 0 && strstr(buf, "cannot find C source"), "missing @c.source errors: %s", buf);
+}
+
 // Cross-module interface DEFAULT methods: the interface (with bodied defaults) lives in its own module,
 // conformances elsewhere. Covers the extend in the type's home (extern synth, called from a third module
 // and through a dyn vtable), a LOCAL extension of an imported type (file-local synth), and a builtin
@@ -1166,6 +1209,7 @@ int main(void) {
   test_cross_module_dyn();
   test_ffi_bindings();
   test_module_imports();
+  test_external_c_sources();
   test_cross_module_defaults();
   test_format_conformances();
   test_module_errors();
