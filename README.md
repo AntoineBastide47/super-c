@@ -191,6 +191,58 @@ Captures come in three flavors, decided per variable by how the body uses it:
 
 Capturing a fixed-size array by copy is rejected (capture a slice instead).
 
+### Trait objects (`dyn`)
+
+When the concrete type is a *runtime* choice — heterogeneous collections, plugin-style open
+extension, closures stored in fields — a dyn-compatible interface can be dispatched dynamically:
+
+```superc
+interface Shape {
+    fn area(self: &Self) i32;
+    fn tag(self: &Self) i32 { return 0; }        // default bodies back vtable slots too
+}
+struct Circle { pub r: i32 }
+struct Sq { pub s: i32 }
+extend Circle as Shape { pub fn area(self: &Circle) i32 { return 3 * self.r * self.r; } }
+extend Sq as Shape { pub fn area(self: &Sq) i32 { return self.s * self.s; } }
+
+fn total(a: &dyn Shape, b: &dyn Shape) i32 { return a.area() + b.area(); }  // one fn, any Shapes
+
+fn main() i32 {
+    let mut v: Vector<Box<dyn Shape>> = Vector::<Box<dyn Shape>>::new();    // OWNED, mixed types
+    v.push(Box::<Circle>::new(Circle { r: 1 }));
+    v.push(Box::<Sq>::new(Sq { s: 2 }));
+    let mut sum = 0;
+    for i in 0..v.len() { sum = sum + v.at(i).area(); }                     // 3 + 4
+    return sum;                                                             // elements auto-free
+}
+```
+
+A `dyn` value is a 2-word fat pair `{data, vtable}` passed by value (the slice model — never a hidden
+allocation). Three spellings: `&dyn I` (borrowed view), `&mut dyn I` (mutable view — required for
+`&mut self` methods), and `Box<dyn I>` (owned: `Box<T>` moves in; the vtable's drop glue deep-frees
+the pointee and releases the block, riding the same RAII/move analysis as everything else). `&T`
+erases implicitly wherever `&dyn I` is expected when `T` implements `I`; one `static const` vtable
+per (type, interface) is emitted in each using TU. Dyn-compatibility is checked with a reason: every
+method takes `Self` by reference and mentions it nowhere else, no interface/method generics.
+
+Closures get the same treatment — `dyn fn(..) ..` is a one-method trait object with **structural**
+identity, unlocking heterogeneous handler lists and closure storage:
+
+```superc
+fn make_adder(k: i32) Box<dyn fn(i32) i32> { return |x: i32| x + k; }  // env moves to the heap
+
+let mut on_event: Vector<Box<dyn fn(i32) i32>> = Vector::<Box<dyn fn(i32) i32>>::new();
+on_event.push(make_adder(10));
+on_event.push(double_it);              // a named fn erases too (no allocation)
+let r = (*on_event.at(0))(5);          // 15 — dispatched through the vtable
+```
+
+A capturing closure is borrowed into a view (`&f` → `&dyn fn(..) ..`) or moved into a `Box<dyn fn>`
+(its env is heap-copied; owning captures are deep-freed by the drop glue). Static dispatch through
+`F: fn(..) ..` bounds stays the zero-cost default — `dyn` is the opt-in for the places
+monomorphization cannot reach.
+
 ### Memory: pointers, references, `new`
 
 ```superc
@@ -451,7 +503,9 @@ automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-aft
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with
 field-precise overlap, use-while-borrowed, non-lexical borrow lifetimes, dangling-reference returns),
 closures (copy / `&mut` / owning captures, monomorphized through `F: fn(..) ..` and `fn move` bounds)
-and function pointers, references/pointers/`new`, slices and arrays (including
+and function pointers, trait objects (`&dyn I` / `&mut dyn I` / `Box<dyn I>` with per-TU static
+vtables and drop glue, plus structural `dyn fn(..) ..` for stored closures and heterogeneous handler
+lists), references/pointers/`new`, slices and arrays (including
 designated initializers), first-class ranges and slicing (`a[lo..hi]`), `for` over user iterators (an
 `Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while`, `defer`,
 `static_assert`, `@c.*` attributes, the module system with an auto-imported `std` prelude (containers,
@@ -460,7 +514,6 @@ both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
 
 Planned / not yet implemented:
 
-* closure storage in structs / heterogeneous collections (`dyn Fn` — needs the fat-pointer form below)
-  and closures inside generic functions
-* dynamic dispatch / trait objects — **TBD / undecided**: heterogeneous collections + open extension
-  across modules.
+* closures inside generic functions
+* `dyn` extensions: generic interfaces (`dyn Iterator<i32>`), superinterface dispatch, downcasting,
+  custom-allocator `Box<dyn I>`.
