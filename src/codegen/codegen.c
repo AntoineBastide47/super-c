@@ -1217,7 +1217,8 @@ static void emit_number(Codegen *c, const Span s, const TokenType tt) {
     }
   } else {
     emit_cstr(c, buf);
-    if ((sb == BT_F32 || sb == BT_F64) && !memchr(buf, '.', n) && !memchr(buf, 'e', n) && !memchr(buf, 'E', n))
+    const bool hexf = n > 2 && buf[0] == '0' && (buf[1] | 0x20) == 'x'; // a hex float's 'p' already floats it
+    if (!hexf && (sb == BT_F32 || sb == BT_F64) && !memchr(buf, '.', n) && !memchr(buf, 'e', n) && !memchr(buf, 'E', n))
       emit(c, ".0"); // `1f32` must still read as a C floating constant
   }
   switch (sb) { // C-side suffix so the constant carries its type without conversion warnings
@@ -1397,6 +1398,17 @@ static void emit_literal(Codegen *c, const NodeId id, const Node *n) {
       emit_reescaped(c, s, false);
       emit(c, ", sizeof(");
       emit_reescaped(c, s, false);
+      emit(c, ") - 1 }");
+      break;
+    }
+    case ByteStringLiteral: { // b"..." -> a `[]u8` view: (Slice__u8){ .ptr = "...", .len = sizeof - 1 }
+      char sn[200];
+      render_type_id(c, subst_resolve(c, ast_type(c->ast, id)), "", sn, sizeof sn);
+      const Span bc = {s.start + 1, s.end}; // strip the leading 'b'; the quotes re-emit as C syntax
+      emit(c, "(%s){ .ptr = (const uint8_t *)", sn);
+      emit_reescaped(c, bc, false);
+      emit(c, ", .len = sizeof(");
+      emit_reescaped(c, bc, false);
       emit(c, ") - 1 }");
       break;
     }
@@ -1746,7 +1758,8 @@ static void render_fn_ptr_id(Codegen *c, const Ty fy, const char *decl, char *ou
     const Node *const pn = ast_at_const(fa, pid[i]);
     const NodeId tn = pn->kind == NODE_PARAMETER ? pn->as.parameter.type : pid[i];
     char tt[256];
-    render_type_id(c, ast_reintern(c->ast, fa, ast_type(fa, tn)), "", tt, sizeof tt);
+    // an inferred closure param has no type NODE: its checked type is recorded on the param itself
+    render_type_id(c, ast_reintern(c->ast, fa, ast_type(fa, tn != NODE_NONE ? tn : pid[i])), "", tt, sizeof tt);
     if (i)
       k = buf_append(params, sizeof params, k, ", ");
     k = buf_append(params, sizeof params, k, tt);
@@ -1885,7 +1898,11 @@ static void render_binding_node(Codegen *c, const NodeId tn, const char *name, c
   const bool east_array_fn =
       k == NODE_ARRAY_TYPE &&
       ast_at_const(c->ast, ast_at_const(c->ast, tn)->as.array_type.element)->kind == NODE_FUNCTION_TYPE;
-  if (is_const && (k == NODE_POINTER_TYPE || k == NODE_REFERENCE_TYPE || k == NODE_FUNCTION_TYPE || east_array_fn || cg_binding_subst_indirect(c, tn))) {
+  // A type ALIAS can hide a fn type (`type Binop = fn(..) ..; let g: Binop = ..`): west-const would
+  // qualify the return type instead of the pointer, so consult the node's RECORDED type as well.
+  const TypeId rti = tn != NODE_NONE ? subst_resolve(c, ast_type(c->ast, tn)) : TYPE_NONE;
+  const bool aliased_fn = rti != TYPE_NONE && ast_type_at(c->ast, rti)->kind == TYPE_FUNCTION;
+  if (is_const && (k == NODE_POINTER_TYPE || k == NODE_REFERENCE_TYPE || k == NODE_FUNCTION_TYPE || east_array_fn || aliased_fn || cg_binding_subst_indirect(c, tn))) {
     char nm[200];
     buf_join3(nm, sizeof nm, "const ", "", name);
     render_type_node(c, tn, nm, out, cap);
@@ -5111,6 +5128,8 @@ static void emit_block_from(Codegen *c, const NodeId id, const uint32_t dbase) {
   for (uint32_t i = 0; i < c->nunused_params; i++) { // unused parameters: cast to void at function-body top
     char pn[128];
     render_ident(c, name_span(c, ast_at_const(c->ast, c->unused_params[i])->as.parameter.name), pn, sizeof pn);
+    if (pn[0] == '_' && pn[1] == '\0') // a `_` discard param was renamed C-uniquely by render_params
+      snprintf(pn, sizeof pn, "__sc_u%u", c->unused_params[i]);
     emit_indent(c);
     emit(c, "(void)%s;\n", pn);
   }
@@ -5908,16 +5927,33 @@ static void emit_defers_to(Codegen *c, const uint32_t base) {
 static void emit_tuple_let(Codegen *c, const Node *n) {
   char tmp[32];
   fresh(c, tmp, sizeof tmp);
-  emit(c, "const __auto_type %s = ", tmp);
+  const Node *const pnm = ast_at_const(c->ast, n->as.let_stmt.name);
+  const NodeId *const pnids = ast_list(c->ast, pnm->as.pattern.children);
+  bool freed_discard = false; // a discarded Free element is freed through &tmp -- the temp can't be const
+  for (uint32_t i = 0; i < pnm->as.pattern.children.len; i++)
+    freed_discard |= span_is(cg_mod_src(c, c->ast->module), name_span(c, pnids[i]), "_") &&
+                     cg_type_is_free(c, ast_type(c->ast, pnids[i]));
+  emit(c, "%s__auto_type %s = ", freed_discard ? "" : "const ", tmp);
   emit_expr(c, n->as.let_stmt.value);
   emit(c, ";\n");
   const Node *const nm = ast_at_const(c->ast, n->as.let_stmt.name);
   const NodeList names = nm->as.pattern.children;
   const NodeId *const nids = ast_list(c->ast, names);
   for (uint32_t i = 0; i < names.len; i++) {
-    emit_indent(c);
     char bn[128];
     render_ident(c, name_span(c, nids[i]), bn, sizeof bn);
+    if (bn[0] == '_' && bn[1] == '\0') { // a `_` element is DISCARDED: free a Free value now, bind nothing
+      if (cg_type_is_free(c, ast_type(c->ast, nids[i]))) {
+        emit_indent(c);
+        if (emit_free_target(c, ast_type(c->ast, nids[i])))
+          emit(c, "(&%s._%u)", tmp, i);
+        else
+          emit(c, "(void)%s._%u", tmp, i);
+        emit(c, ";\n");
+      }
+      continue;
+    }
+    emit_indent(c);
     // const iff the binding is immutable AND not Free -- a Free element's scope-exit free takes `&mut self`,
     // so it must be non-const (mutability is otherwise a binding property only).
     const bool element_const = !n->as.let_stmt.is_mutable && !cg_type_is_free(c, ast_type(c->ast, nids[i]));
@@ -6413,6 +6449,14 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       emit(c, "\n");
       break;
     case NODE_LET: {
+      // `let _ = expr;` is a DISCARD: emit the initializer as a bare statement -- the expression-statement
+      // machinery already frees a Free result immediately (statement end, not scope exit), and no C
+      // variable exists to collide with the next `_`.
+      if (ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_IDENTIFIER &&
+          span_is(cg_mod_src(c, c->ast->module), ast_at_const(c->ast, n->as.let_stmt.name)->as.name.text, "_")) {
+        emit_expr_stmt(c, n->as.let_stmt.value);
+        break;
+      }
       if (ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE) {
         emit_tuple_let(c, n);
         // RAII for the destructured elements: each owning element that is not moved out is freed at scope
@@ -6420,7 +6464,8 @@ static void emit_stmt(Codegen *c, const NodeId id) {
         const Node *const pat = ast_at_const(c->ast, n->as.let_stmt.name);
         const NodeId *const eids = ast_list(c->ast, pat->as.pattern.children);
         for (uint32_t i = 0; i < pat->as.pattern.children.len; i++) {
-          if (!cg_type_is_free(c, ast_type(c->ast, eids[i])) || cg_is_moved(c, eids[i]))
+          if (!cg_type_is_free(c, ast_type(c->ast, eids[i])) || cg_is_moved(c, eids[i]) ||
+              span_is(cg_mod_src(c, c->ast->module), name_span(c, eids[i]), "_")) // a discard freed at the let
             continue;
           if (cg_is_cond_moved(c, eids[i])) {
             char fl[32];
@@ -6625,9 +6670,14 @@ static void render_params(Codegen *c, const NodeList params, char *out, const si
     const Node *const p = ast_at_const(c->ast, ids[i]);
     char nm[128], d[300];
     render_ident(c, name_span(c, p->as.parameter.name), nm, sizeof nm);
+    if (nm[0] == '_' && nm[1] == '\0') // `_` discards are never referable; make each one C-unique
+      snprintf(nm, sizeof nm, "__sc_u%u", ids[i]);
     // `mut p` -> non-const; a by-value Free param is also non-const (it is owned and `free` mutates it).
     const bool pconst = !p->as.parameter.is_mutable && !cg_type_is_free(c, ast_type(c->ast, ids[i]));
-    render_binding_node(c, p->as.parameter.type, nm, pconst, d, sizeof d);
+    if (p->as.parameter.type == NODE_NONE) // an inferred closure param: only the recorded TypeId exists
+      render_type_id(c, subst_resolve(c, ast_type(c->ast, ids[i])), nm, d, sizeof d);
+    else
+      render_binding_node(c, p->as.parameter.type, nm, pconst, d, sizeof d);
     if (any)
       k = buf_append(out, cap, k, ", ");
     k = buf_append(out, cap, k, d);

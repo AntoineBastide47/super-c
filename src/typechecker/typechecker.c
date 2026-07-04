@@ -609,7 +609,10 @@ static int fn_sig(TypeChecker *t, const TypeId fid, TypeId *const params, const 
   const NodeId *const pid = ast_list(fa, ps);
   for (uint32_t i = 0; i < ps.len && (int)i < cap; i++) {
     const Node *const p = ast_at_const(fa, pid[i]);
-    params[i] = lower_type_in(t, m, p->kind == NODE_PARAMETER ? p->as.parameter.type : pid[i]);
+    if (p->kind == NODE_PARAMETER && p->as.parameter.type == NODE_NONE)
+      params[i] = ast_type(fa, pid[i]); // an inferred closure param: only the recorded type exists
+    else
+      params[i] = lower_type_in(t, m, p->kind == NODE_PARAMETER ? p->as.parameter.type : pid[i]);
   }
   if (fn->kind == NODE_CLOSURE && fn->as.closure.expr_body) {
     *ret = ast_type(fa, fn->as.closure.body); // compact closure: return type inferred from the body
@@ -4223,6 +4226,14 @@ static TypeId tc_param_expected(TypeChecker *t, const TypeId callee, const Node 
   if (argi + skip >= fn->as.function.params.len)
     return TYPE_NONE;
   TypeId pt = decl_type_in(t, ct->module, ast_list(fa, fn->as.function.params)[argi + skip]);
+  if (pt != TYPE_NONE && ast_type_at(t->ast, pt)->kind == TYPE_GENERIC) {
+    // An `F: fn(..) ..`-bounded param: the bound's signature is the expected type when it is concrete
+    // (`apply<F: fn(i32) i32>(f: F)` -- a bound mentioning other generics supplies nothing).
+    const Ty *const g = ast_type_at(t->ast, pt);
+    const NodeId fb = generic_fn_bound(t, g->module, g->as.decl);
+    if (fb != NODE_NONE)
+      pt = lower_type_in(t, ct->module, fb);
+  }
   // A generic-instance receiver (`v.push(..)` on a Vector<Pair<i32>>): bind the extend's generics to the
   // instance's args positionally (as check_call does later) so an abstract `v: T` param turns concrete.
   if (pt != TYPE_NONE && !ast_type_concrete(t->ast, pt) && skip) {
@@ -4337,8 +4348,9 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   const NodeId *const aids = ast_list(t->ast, args);
   for (uint32_t i = 0; i < args.len; i++) {
     // An `Interface::assoc()` argument (`take(Default::default())`) resolves through the declared
-    // parameter type, exactly like a let annotation (t->expected is consumed by check_member).
-    if (tc_is_iface_assoc_call(t, aids[i]))
+    // parameter type, exactly like a let annotation (t->expected is consumed by check_member); a
+    // CLOSURE literal gets the same hand-off so `call(|x| x + 1, ..)` infers its parameter types.
+    if (tc_is_iface_assoc_call(t, aids[i]) || ast_at_const(t->ast, aids[i])->kind == NODE_CLOSURE)
       t->expected = tc_param_expected(t, callee, path_callee, i);
     check_expr(t, aids[i]);
     // A by-value Free argument is moved to the callee (which owns/frees it) -- marked IMMEDIATELY so a
@@ -5350,6 +5362,7 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         case False: result = ast_builtin(BT_BOOL); break;
         case StringLiteral:
         case RawStringLiteral: result = prelude_str_type(t); break; // a `str` view over the literal bytes
+        case ByteStringLiteral: result = prelude_slice_type(t, ast_builtin(BT_U8), false); break; // b".." -> []u8
         default: result = TYPE_NONE; break; // Null
       }
       break;
@@ -5455,8 +5468,30 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       result = check_call(t, n, id, expected);
       break;
     case NODE_CLOSURE: {
+      const TypeId cwant = expected; // an expected `fn(..) ..` type may supply omitted param types
       const NodeList params = n->as.closure.params;
       const NodeId *const pids = ast_list(a, params);
+      {
+        TypeId sigp[8];
+        TypeId sigr = TYPE_NONE;
+        int sn = -1; // the expected signature, read lazily on the first untyped param
+        for (uint32_t i = 0; i < params.len; i++) {
+          if (ast_at_const(a, pids[i])->as.parameter.type != NODE_NONE)
+            continue;
+          if (sn < 0)
+            sn = cwant != TYPE_NONE && ast_type_at(a, cwant)->kind == TYPE_FUNCTION
+                     ? fn_sig(t, cwant, sigp, 8, &sigr)
+                     : 0;
+          if ((int)i < sn && sigp[i] != TYPE_NONE) {
+            ast_set_type(a, pids[i], sigp[i]);
+          } else {
+            const Span psp = ast_at_const(a, pids[i])->span;
+            typechecker_errorf(t, psp.start, psp.end - psp.start,
+                               "closure parameter needs a type annotation (no expected function type supplies one)");
+            typechecker_notef(t, "annotate it (`|x: i32| ..`) or bind the closure where a 'fn' type is expected");
+          }
+        }
+      }
       for (uint32_t i = 0; i < params.len; i++)
         decl_type(t, pids[i]); // type each parameter so its body references resolve
       if (t->nclos >= sizeof t->clos_stack / sizeof t->clos_stack[0]) {

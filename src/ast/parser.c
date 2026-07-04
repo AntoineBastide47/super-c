@@ -1255,7 +1255,8 @@ static NodeId parse_switch(Parser *p) {
 
 ALWAYS_INLINE bool is_literal_token(const TokenType type) {
   return type == IntegerLiteral || type == FloatLiteral || type == CharacterLiteral || type == ByteCharacterLiteral ||
-         type == StringLiteral || type == RawStringLiteral || type == True || type == False || type == Null;
+         type == StringLiteral || type == RawStringLiteral || type == ByteStringLiteral || type == True ||
+         type == False || type == Null;
 }
 
 static NodeId parse_pattern_atom(Parser *p) {
@@ -1559,11 +1560,9 @@ static NodeId parse_primary(Parser *p) {
       while (!check(p, Pipe) && !at_end(p)) {
         const uint32_t pstart = token_start(raw_peek(p));
         const NodeId name = identifier(p);
-        NodeId type = NODE_NONE;
+        NodeId type = NODE_NONE; // omitted: inferred from an expected `fn(..) ..` type at the use site
         if (match(p, Colon))
           type = parse_type(p);
-        else
-          error_here(p, "closure parameter requires a type annotation (e.g. `|x: i32|`)");
         ast_push(
             p->ast, ast_add(
                         p->ast, (Node){
@@ -1577,8 +1576,7 @@ static NodeId parse_primary(Parser *p) {
       expect(p, Pipe, "'|'");
     }
     const NodeList params = ast_commit(p->ast, mark);
-    if (check(p, LeftBrace)) { // block-bodied compact closures aren't supported yet; recover by eating the block
-      error_here(p, "compact closures with a block body are unsupported; use `fn(params) Ret { ... }`");
+    if (check(p, LeftBrace)) { // `|x| { .. }`: a statement body -- void-returning (write `fn(..) T {..}` for values)
       const NodeId block = parse_block(p);
       return ast_add(
           p->ast, (Node){

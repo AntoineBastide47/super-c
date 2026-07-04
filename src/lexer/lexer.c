@@ -498,7 +498,7 @@ static uint32_t escape(Lexer *l, const bool byte_character) {
   return UINT32_MAX;
 }
 
-static void string(Lexer *l, TokenWriter *w) {
+static void string(Lexer *l, TokenWriter *w, const TokenType kind) {
   size_t i = l->current;
   const size_t len = l->len;
   const uint8_t *const bytes = l->bytes;
@@ -507,7 +507,7 @@ static void string(Lexer *l, TokenWriter *w) {
     const uint8_t b = bytes[i++];
     if (b == '"') {
       l->current = i;
-      add_token(l, w, StringLiteral);
+      add_token(l, w, kind);
       return;
     }
     if (b == '\\') {
@@ -721,6 +721,8 @@ static void number(Lexer *l, TokenWriter *w) {
             error = "invalid numeric separator";
           }
         } else {
+          if (radix == 16 && saw_digit && (b == 'p' || b == 'P'))
+            break; // a hexadecimal float's binary exponent: handled below, after the digit run
           size_t j = i; // not a digit: the rest of the identifier run is either a type suffix or an error
           while (j < l->len && is_id_part[l->bytes[j]])
             j++;
@@ -743,10 +745,45 @@ static void number(Lexer *l, TokenWriter *w) {
         error_at = component_start;
         error = "radix prefix must be followed by at least one digit";
       }
-      if (peek_byte(l) == '.') {
+      // Hexadecimal floats, C syntax: `0x1.8p3` / `0x1p-2` -- a binary exponent (`p`) is REQUIRED,
+      // the fraction is optional, and only an f32/f64 suffix may follow. C reads the form natively,
+      // so the literal text passes through to the emitted code unchanged.
+      bool hex_float = false;
+      if (radix == 16 && error_at == SIZE_MAX && peek_byte(l) == '.' && is_hex(peek_byte_n(l, 1))) {
+        hex_float = true;
+        l->current++;
+        while (is_hex(peek_byte(l)))
+          l->current++;
+      }
+      if (radix == 16 && error_at == SIZE_MAX && (peek_byte(l) == 'p' || peek_byte(l) == 'P')) {
+        hex_float = true;
+        l->current++;
+        if (peek_byte(l) == '+' || peek_byte(l) == '-')
+          l->current++;
+        const size_t exp_start = l->current;
+        while (is_dec(peek_byte(l)))
+          l->current++;
+        if (l->current == exp_start) {
+          error_at = exp_start;
+          error = "hexadecimal float exponent requires at least one decimal digit";
+        } else if (is_id_part[peek_byte(l)]) { // optional f32/f64 suffix after the exponent
+          const size_t sfx = l->current;
+          while (is_id_part[peek_byte(l)])
+            l->current++;
+          if (num_suffix_kind(l->bytes + sfx, l->current - sfx) != 1) {
+            error_at = sfx;
+            error = "a hexadecimal float takes only an 'f32' or 'f64' suffix";
+          }
+        }
+      } else if (hex_float && error_at == SIZE_MAX) {
+        error_at = l->current;
+        error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3";
+      }
+      if (!hex_float && peek_byte(l) == '.') {
         if (error_at == SIZE_MAX) {
           error_at = l->current;
-          error = "hexadecimal, octal, and binary floating-point literals are not supported";
+          error = radix == 16 ? "a hexadecimal float needs a fraction digit and a binary exponent: 0x1.8p3"
+                              : "octal and binary floating-point literals are not supported";
         }
         l->current++;
         while (!is_eof(l)) {
@@ -760,7 +797,7 @@ static void number(Lexer *l, TokenWriter *w) {
       if (error_at != SIZE_MAX)
         lexer_error_at(l, error_at, 1, error);
       else
-        add_token(l, w, IntegerLiteral);
+        add_token(l, w, hex_float ? FloatLiteral : IntegerLiteral);
       return;
     }
   }
@@ -919,7 +956,7 @@ static void scan_token(Lexer *l, TokenWriter *w) {
       return;
 
     case '"':
-      string(l, w);
+      string(l, w, StringLiteral);
       return;
     case '\'':
       // A loop label `'name` vs a character literal `'a'`: an identifier run after the quote that is
@@ -960,10 +997,7 @@ static void scan_token(Lexer *l, TokenWriter *w) {
         character(l, w, true);
       } else if (peek_byte(l) == '"') {
         l->current++;
-        while (!is_eof(l) && peek_byte(l) != '"' && peek_byte(l) != '\n' && peek_byte(l) != '\r')
-          l->current++;
-        match_byte(l, '"');
-        lexer_error(l, "byte string literals are not supported");
+        string(l, w, ByteStringLiteral); // b"...": same escapes, typed as a []u8 view
       } else {
         identifier(l, w);
       }

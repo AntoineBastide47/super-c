@@ -156,6 +156,8 @@ static void declare(Resolver *r, const NodeId name_node, const NodeId decl, cons
   if (name_node == NODE_NONE)
     return;
   const Span name = name_span(r, name_node);
+  if (ns == NS_VALUE && span_is(r->source, name, "_"))
+    return; // `_` is a DISCARD: never declared, never referable, any number of them coexist
   const uint32_t hash = name_hash(r->source, name);
   const uint64_t key = symbol_key(hash, ns);
   uint32_t head = 0;

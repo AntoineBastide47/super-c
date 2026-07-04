@@ -50,6 +50,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "ByteCharacterLiteral",
     "StringLiteral",
     "RawStringLiteral",
+    "ByteStringLiteral",
 
     "LeftBrace",
     "RightBrace",
