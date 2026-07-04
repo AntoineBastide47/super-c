@@ -2293,11 +2293,41 @@ static void test_if_let_while_let(void) {
       5, "");
 }
 
+// Format specifiers `{:[fill][<^>][0][width][.prec][x|X|b]}` + the eprint/eprintln stderr builtins.
+static void test_format_specifiers(void) {
+  sc_run_program("width/alignment/zero-pad/precision/binary/hex",
+                 PRE "fn main() i32 {\n"
+                     "  print(\"[{:5}]\", 42);\n"        // [   42]
+                     "  print(\"[{:<5}]\", 42);\n"       // [42   ]
+                     "  print(\"[{:^6}]\", 42);\n"       // [  42  ]
+                     "  print(\"[{:05}]\", -42);\n"      // [-0042]
+                     "  print(\"[{:08.2}]\", 3.14159);\n"// [00003.14]
+                     "  print(\"[{:.3}]\", 2.5);\n"      // [2.500]
+                     "  print(\"[{:>4}]\", \"hi\");\n"   // [  hi]
+                     "  print(\"[{:*^6}]\", \"hi\");\n"  // [**hi**]
+                     "  print(\"[{:b}]\", 10u8);\n"      // [1010]
+                     "  print(\"[{:b}]\", -1i8);\n"      // [11111111]
+                     "  print(\"[{:#>4x}]\", 255);\n"    // [##ff]
+                     "  print(\"[{:X}]\", 255);\n"       // [FF]
+                     "  return 0;\n"
+                     "}\n",
+                 0, "[   42][42   ][  42  ][-0042][00003.14][2.500][  hi][**hi**][1010][11111111][##ff][FF]");
+  // eprint/eprintln write to stderr (stdout must stay empty); raw format strings keep bytes verbatim
+  // while `{{`/`}}` still collapse.
+  sc_run_program("eprintln goes to stderr; raw format string",
+                 PRE "fn main() i32 {\n"
+                     "  eprintln(\"err {}\", 7);\n"
+                     "  print(r\"raw \\n {} braces {{}}\", 5);\n"
+                     "  return 0;\n"
+                     "}\n",
+                 0, "raw \\n 5 braces {}");
+}
+
 int main(void) {
   // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
   static void (*const tests[])(void) = {
       test_dyn,            test_raw_strings,       test_numeric_suffixes_widening,
-      test_str_parse,      test_labeled_loops,     test_if_let_while_let,
+      test_str_parse,      test_labeled_loops,     test_if_let_while_let,  test_format_specifiers,
       test_bug_regressions,    test_attributes,           test_free_raii,
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,
