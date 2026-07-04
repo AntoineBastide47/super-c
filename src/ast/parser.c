@@ -1342,6 +1342,11 @@ static NodeId parse_pattern_atom(Parser *p) {
     if (match(p, LeftParen)) {
       const uint32_t mark = ast_mark(p->ast);
       while (!check(p, RightParen) && !at_end(p)) {
+        if (check(p, Range)) { // rest pattern `V(a, ..)`: remaining positions are unchecked
+          const Token rt = advance(p);
+          ast_push(p->ast, ast_add(p->ast, (Node){.kind = NODE_PATTERN_WILDCARD, .span = token_span(rt)}));
+          break;
+        }
         ast_push(p->ast, parse_pattern(p));
         if (!match(p, Comma))
           break;
@@ -1358,6 +1363,8 @@ static NodeId parse_pattern_atom(Parser *p) {
     if (match(p, LeftBrace)) {
       const uint32_t mark = ast_mark(p->ast);
       while (!check(p, RightBrace) && !at_end(p)) {
+        if (match(p, Range)) // rest pattern `S { a, .. }`: the remaining fields are ignored
+          break;
         const uint32_t field_start = token_start(raw_peek(p));
         const NodeId field_name = identifier(p);
         NodeId child = field_name;
@@ -1382,6 +1389,17 @@ static NodeId parse_pattern_atom(Parser *p) {
                       .kind = NODE_PATTERN_STRUCT,
                       .span = span_new(start, previous_end(p)),
                       .as.pattern = {.name = name, .children = children},
+                  });
+    }
+    if (match(p, At)) { // `x @ pat`: bind the whole value AND match the sub-pattern (ranges included)
+      const NodeId sub = parse_pattern(p);
+      const uint32_t submark = ast_mark(p->ast);
+      ast_push(p->ast, sub);
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_PATTERN_NAME,
+                      .span = span_new(start, previous_end(p)),
+                      .as.pattern = {.name = name, .children = ast_commit(p->ast, submark)},
                   });
     }
     return ast_add(

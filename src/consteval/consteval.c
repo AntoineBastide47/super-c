@@ -2525,7 +2525,13 @@ static int pat_match(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId p
         }
         return -1;
       }
-      return f && ce_bind(ce, f, pid, *v) ? 1 : -1; // a binding: always matches
+      if (!(f && ce_bind(ce, f, pid, *v)))
+        return -1;
+      if (p->as.pattern.children.len) { // `x @ pat`: the sub-pattern decides the match
+        const NodeId *const subs = ast_list(a, p->as.pattern.children);
+        return pat_match(ce, f, m, subs[0], v, uns, refobj);
+      }
+      return 1; // a plain binding: always matches
     }
     case NODE_PATTERN_LITERAL: {
       const CeVal lv = ev_in(ce, NULL, m, p->as.single.value); // untyped atom: context-free

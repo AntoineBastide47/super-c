@@ -6661,6 +6661,11 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
       }
       ast_set_type(a, id, bind_ref ? tc_ref(t, expected, bind_ref == 2) : expected); // plain binding
       tc_record_binding_depth(t, id);
+      { // `x @ pat`: the sub-pattern matches the same value
+        const NodeId *const subs = ast_list(a, n->as.pattern.children);
+        for (uint32_t i = 0; i < n->as.pattern.children.len; i++)
+          check_pattern(t, subs[i], expected, bind_ref);
+      }
       break;
     }
     case NODE_PATTERN_STRUCT: {
