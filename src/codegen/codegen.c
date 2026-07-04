@@ -326,7 +326,7 @@ static void emit_try(Codegen *c, NodeId id, const Node *n);
 static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId srcTy, char *out, size_t cap);
 static int cg_loop_push(Codegen *c, NodeId node, bool is_expr);
 static void cg_loop_pop(Codegen *c, int le);
-static bool cg_test_skip(Codegen *c, NodeId fn);
+static bool cg_test_skip(Codegen *c, NodeId fn, bool method);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -9277,7 +9277,7 @@ static void phase_prototypes(Codegen *c, const int which) {
       if (n->as.function.generics.len)
         continue; // a generic template emits nothing; its specializations are emitted separately
       if (cb_specialized_away(c, ids[i]) || cg_is_format_builtin(c, c->ast->module, ids[i]) ||
-          cg_test_skip(c, ids[i]))
+          cg_test_skip(c, ids[i], false))
         continue; // its pointer original is unused (every caller took the specialized path) / a format builtin
       if (want_fn(which, n->as.function.is_public))
         emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false, NULL, false);
@@ -9288,7 +9288,8 @@ static void phase_prototypes(Codegen *c, const int which) {
       const NodeList ms = n->as.extend_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
-        if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && want_fn(which, ast_at_const(c->ast, mids[j])->as.function.is_public))
+        if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION &&
+            want_fn(which, ast_at_const(c->ast, mids[j])->as.function.is_public) && !cg_test_skip(c, mids[j], true))
           emit_function(c, mids[j], target, false, false, NULL, false);
     }
     // `extern "C"` block functions get NO emitted prototype: every C standard-library header is already
@@ -9389,14 +9390,15 @@ static void phase_bodies(Codegen *c) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE &&
         !cb_specialized_away(c, ids[i]) && !cg_is_format_builtin(c, c->ast->module, ids[i]) &&
-        !cg_test_skip(c, ids[i])) {
+        !cg_test_skip(c, ids[i], false)) {
       emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true, NULL, false);
     } else if (n->kind == NODE_EXTEND && !n->as.extend_def.generics.len) {
       const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
       const NodeList ms = n->as.extend_def.items;
       const NodeId *const mids = ast_list(c->ast, ms);
       for (uint32_t j = 0; j < ms.len; j++)
-        if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION && ast_at_const(c->ast, mids[j])->as.function.body != NODE_NONE)
+        if (ast_at_const(c->ast, mids[j])->kind == NODE_FUNCTION &&
+            ast_at_const(c->ast, mids[j])->as.function.body != NODE_NONE && !cg_test_skip(c, mids[j], true))
           emit_function(c, mids[j], target, false, true, NULL, false);
     }
   }
@@ -9859,12 +9861,12 @@ void codegen_emit_header(Codegen *c, FILE *out) {
   c->buf_len = 0; // reuse the buffer for the .c
 }
 
-// A @test/@test_init/@test_free function emits only under --test; under --test the program's own
-// `main` is skipped instead (the synthesized runner provides the entry point).
-static bool cg_test_skip(Codegen *c, const NodeId fn) {
+// A @test/@test_init/@test_free function/method emits only under --test; under --test the program's
+// own top-level `main` is skipped instead (the synthesized runner provides the entry point).
+static bool cg_test_skip(Codegen *c, const NodeId fn, const bool method) {
   if (c->test.enabled) {
     const Node *const f = ast_at_const(c->ast, fn);
-    return f->kind == NODE_FUNCTION &&
+    return !method && f->kind == NODE_FUNCTION &&
            span_is(c->source, ast_at_const(c->ast, f->as.function.name)->as.name.text, "main");
   }
   return cg_attr(c, c->ast->module, fn, ATTR_TEST) || cg_attr(c, c->ast->module, fn, ATTR_TEST_INIT) ||
@@ -9883,39 +9885,46 @@ static TypeId cg_test_type(Codegen *c, const DefId d, const bool is_enum) {
 // static) test functions, so private tests need no linkage change; only the wrappers are extern.
 // The module declaring `@test_init(global)` also gets the `__sc_test_genv_init/_free` pair.
 static void emit_test_wrappers(Codegen *c) {
-  if (!c->test.enabled || (!c->test.ntests && c->test.genv_init == NODE_NONE))
+  if (!c->test.enabled || (!c->test.ncases && c->test.genv_init == NODE_NONE))
     return;
   emit_cstr(c, "\n/* --test wrappers */\n");
-  for (uint32_t i = 0; i < c->test.ntests; i++) {
-    const NodeId fn = c->test.tests[i];
-    const uint8_t w = c->test.wants[i];
-    char fname[200];
-    render_qualified(c, c->ast->module, ast_at_const(c->ast, fn)->as.function.name, fname, sizeof fname);
-    emit(c, "void __sc_test_w_%u_%u(void *__genv) {\n  (void)__genv;\n", (unsigned)c->ast->module, (unsigned)fn);
-    if (w & 1) {
-      const TypeId fxt = cg_test_type(c, c->test.fx_type, c->test.fx_is_enum);
-      char decl[256], init[200];
+  for (uint32_t i = 0; i < c->test.ncases; i++) {
+    const CgTestCase *const tc = &c->test.cases[i];
+    // A method test's fixture is its extend target (`self` is the fixture); a free-fn test's is the
+    // module fixture. Symbols render through function_name so method mangling/targets are exact.
+    const bool suite = tc->suite.node != NODE_NONE;
+    const DefId fx_type = suite ? tc->suite : c->test.fx_type;
+    const bool fx_is_enum = suite ? tc->suite_is_enum : c->test.fx_is_enum;
+    const NodeId fx_init = suite ? tc->suite_init : c->test.fx_init;
+    const NodeId fx_free = suite ? tc->suite_free : c->test.fx_free;
+    const DefId target = suite ? tc->suite : (DefId){0, NODE_NONE};
+    char fname[240];
+    function_name(c, tc->fn, target, fname, sizeof fname, true);
+    emit(c, "void __sc_test_w_%u_%u(void *__genv) {\n  (void)__genv;\n", (unsigned)c->ast->module, (unsigned)tc->fn);
+    if (tc->wants & 1) {
+      const TypeId fxt = cg_test_type(c, fx_type, fx_is_enum);
+      char decl[256], init[240];
       render_type_id(c, fxt, "__fx", decl, sizeof decl);
-      render_qualified(c, c->ast->module, ast_at_const(c->ast, c->test.fx_init)->as.function.name, init, sizeof init);
+      function_name(c, fx_init, target, init, sizeof init, true);
       emit(c, "  %s = %s();\n", decl, init);
     }
     emit(c, "  %s(", fname);
-    if (w & 1)
+    if (tc->wants & 1)
       emit_cstr(c, "&__fx");
-    if (w & 2) {
+    if (tc->wants & 2) {
       const TypeId gt = cg_test_type(c, c->test.genv_type, c->test.genv_is_enum);
       char gty[200];
       render_type_id(c, gt, "", gty, sizeof gty);
-      emit(c, "%s(const %s *)__genv", (w & 1) ? ", " : "", gty);
+      emit(c, "%s(const %s *)__genv", (tc->wants & 1) ? ", " : "", gty);
     }
     emit_cstr(c, ");\n");
-    if ((w & 1) && c->test.fx_free != NODE_NONE) {
-      char fre[200];
-      render_qualified(c, c->ast->module, ast_at_const(c->ast, c->test.fx_free)->as.function.name, fre, sizeof fre);
+    if ((tc->wants & 1) && fx_free != NODE_NONE) {
+      char fre[240];
+      function_name(c, fx_free, target, fre, sizeof fre, true);
       emit(c, "  %s(&__fx);\n", fre);
     }
-    if (w & 1) {
-      const TypeId fxt = cg_test_type(c, c->test.fx_type, c->test.fx_is_enum);
+    if (tc->wants & 1) {
+      const TypeId fxt = cg_test_type(c, fx_type, fx_is_enum);
       if (cg_type_is_free(c, fxt)) {
         emit_cstr(c, "  ");
         emit_free_target(c, fxt);

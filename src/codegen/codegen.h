@@ -24,12 +24,18 @@ Ast *codegen_take_ast(Codegen *c);
 // the fixture), plus the global-env `__sc_test_genv_init/_free` pair in the module that declares it.
 // Wrappers live in the same TU as the (possibly static) test fns, so private tests need no linkage change.
 typedef struct {
+    NodeId fn;     // the @test function/method
+    uint8_t wants; // bit0 = takes the fixture (module fixture, or the extend target as `self`), bit1 = global env
+    DefId suite;   // a METHOD test's extend-target fixture type ({0, NODE_NONE} = a free-fn test)
+    bool suite_is_enum;
+    NodeId suite_init, suite_free; // the type's @test_init/@test_free methods (same module; NODE_NONE = none)
+} CgTestCase;
+typedef struct {
     bool enabled;              // also gates the @test-fn emission itself (skipped entirely when false)
-    const NodeId *tests;       // this module's @test fns
-    const uint8_t *wants;      // per test: bit0 = takes the module fixture, bit1 = takes the global env
-    uint32_t ntests;
-    NodeId fx_init, fx_free;   // this module's @test_init/@test_free (NODE_NONE if absent)
-    DefId fx_type;             // the fixture's struct/enum decl ({0, NODE_NONE} if absent)
+    const CgTestCase *cases;   // this module's @test fns/methods
+    uint32_t ncases;
+    NodeId fx_init, fx_free;   // this module's free-fn fixture pair (NODE_NONE if absent)
+    DefId fx_type;             // the module fixture's struct/enum decl ({0, NODE_NONE} if absent)
     bool fx_is_enum;
     NodeId genv_init, genv_free; // set ONLY in the module declaring @test_init(global)
     DefId genv_type;             // the global env's struct/enum decl (every module that has genv tests)

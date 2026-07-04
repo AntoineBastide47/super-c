@@ -504,20 +504,34 @@ static void test_test_pipeline(void) {
          "fn fails() { assert_eq(2 * 3, 7); }\n"
          "@test(should_panic)\n"
          "fn boom() { panic(\"boom\"); }\n"
+         "struct Counter { pub n: i32 }\n" // a method suite: the receiver IS the fixture
+         "extend Counter {\n"
+         "  @test_init\n"
+         "  fn setup() Counter { return Counter { n: 0 }; }\n"
+         "  @test_free\n"
+         "  fn teardown(self: &mut Counter) { assert(self.n >= 0, \"non-negative\"); }\n"
+         "  pub fn bump(self: &mut Counter) { self.n += 1; }\n"
+         "  @test\n"
+         "  fn bumps(self: &mut Counter, e: &env::Env) {\n"
+         "    self.bump();\n"
+         "    assert_eq(self.n * e.tag.len() as i32, 5);\n"
+         "  }\n"
+         "}\n"
          "fn main() i32 { return 0; }\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s --test '%s' 2>&1", SC, spc);
   const int rc = run_cmd(cmd, buf, sizeof buf);
   CHECK(rc == 1, "one failing test -> exit 1 (got %d): %s", rc, buf);
-  CHECK_STR_CONTAINS(buf, "running 3 tests");
+  CHECK_STR_CONTAINS(buf, "running 4 tests");
   CHECK_STR_CONTAINS(buf, "test main::drains ... ok");
+  CHECK_STR_CONTAINS(buf, "test main::Counter::bumps ... ok"); // suite method: fixture-as-self + global env
   CHECK_STR_CONTAINS(buf, "test main::boom ... ok (panicked as expected)");
   CHECK_STR_CONTAINS(buf, "test main::fails ... FAILED");
   CHECK_STR_CONTAINS(buf, "assertion failed: `2 * 3 == 7`");
   CHECK_STR_CONTAINS(buf, "left:  6");
   CHECK_STR_CONTAINS(buf, "right: 7");
   CHECK_STR_CONTAINS(buf, "teardown suite");
-  CHECK_STR_CONTAINS(buf, "2 passed, 1 failed");
+  CHECK_STR_CONTAINS(buf, "3 passed, 1 failed");
   // --test-filter narrows selection; a fully passing selection exits 0.
   snprintf(cmd, sizeof cmd, "%s --test --test-filter=drains --test-jobs=2 '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "filtered run passes: %s", buf);
