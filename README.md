@@ -485,6 +485,27 @@ source text, the left/right values, and its `file:line`, and the arguments are o
 on an owned `String` leaves it usable). In a normal (non-`--test`) build, test functions are not
 emitted at all.
 
+Tests can also be grouped as **method suites** on a type — the receiver *is* the fixture, produced
+by a `@test_init` method in the same (non-generic, inherent) `extend`:
+
+```superc
+extend Counter {
+    @test_init
+    fn setup() Counter { return Counter { n: 0 }; }
+
+    @test
+    fn starts_at_zero(self: &Counter) { assert_eq(self.n, 0); }
+
+    @test
+    fn bump_increments(self: &mut Counter) { self.bump(); assert_eq(self.n, 1); }
+}
+```
+
+Suite tests report as `module::Counter::starts_at_zero`, may take the global env as a second
+parameter, and follow the same lifecycle (setup → test → `@test_free` method → RAII). A module may
+host several suites (one per type), and a local extension of an imported type can define its own —
+each module's suite uses its own `@test_init`.
+
 ### Compile-time assertions
 
 ```superc

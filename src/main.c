@@ -101,8 +101,20 @@ typedef struct {
     ModuleId mod;
     NodeId fn;
     bool should_panic;
-    uint8_t wants; // bit0 = module fixture param, bit1 = global env param
+    uint8_t wants;  // bit0 = fixture param/receiver, bit1 = global env param
+    DefId suite;    // a METHOD test's extend target ({0, NODE_NONE} = a free-fn test)
+    bool suite_is_enum;
+    NodeId suite_init, suite_free; // the type's @test_init/@test_free methods in the SAME module
 } TestCase;
+
+// A method-suite fixture: the @test_init/@test_free METHODS a module declared on a type. Keyed by
+// (module, type) -- a test method may only use a suite init from its own module (mangling homes there).
+typedef struct {
+    ModuleId mod;
+    DefId type;
+    bool is_enum;
+    NodeId init, fre;
+} TestSuite;
 
 typedef struct {
     TestCase *cases;
@@ -110,6 +122,8 @@ typedef struct {
     NodeId *fx_init, *fx_free; // per module ([package count]; NODE_NONE = absent)
     DefId *fx_type;
     bool *fx_is_enum;
+    TestSuite *suites;
+    size_t nsuites, scap;
     ModuleId genv_mod;
     NodeId genv_init, genv_free;
     DefId genv_type;
@@ -210,9 +224,52 @@ static void test_plan_free(TestPlan *plan) {
   free(plan->fx_free);
   free(plan->fx_type);
   free(plan->fx_is_enum);
+  free(plan->suites);
+}
+
+// The inherent, non-generic extend whose items contain `fn`, or NODE_NONE (fn is a top-level item).
+// `*bad_extend` is set when fn IS a method but of a conformance/generic extend (not suite-able).
+static NodeId test_owner_extend(const Ast *a, const NodeId fn, bool *bad_extend) {
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const it = ast_at_const(a, ids[i]);
+    if (it->kind != NODE_EXTEND)
+      continue;
+    const NodeId *const mids = ast_list(a, it->as.extend_def.items);
+    for (uint32_t j = 0; j < it->as.extend_def.items.len; j++)
+      if (mids[j] == fn) {
+        *bad_extend = it->as.extend_def.interface_type != NODE_NONE || it->as.extend_def.generics.len != 0;
+        return ids[i];
+      }
+  }
+  return NODE_NONE;
+}
+
+// The (module, type) suite entry, creating it when `create`; NULL when absent / on OOM.
+static TestSuite *test_suite_of(TestPlan *plan, const ModuleId m, const DefId type, const bool is_enum,
+                                const bool create) {
+  for (size_t i = 0; i < plan->nsuites; i++)
+    if (plan->suites[i].mod == m && plan->suites[i].type.module == type.module && plan->suites[i].type.node == type.node)
+      return &plan->suites[i];
+  if (!create)
+    return NULL;
+  if (plan->nsuites == plan->scap) {
+    const size_t nc = plan->scap ? plan->scap * 2 : 8;
+    TestSuite *const g = realloc(plan->suites, nc * sizeof *g);
+    if (!g)
+      return NULL;
+    plan->suites = g;
+    plan->scap = nc;
+  }
+  plan->suites[plan->nsuites] =
+      (TestSuite){.mod = m, .type = type, .is_enum = is_enum, .init = NODE_NONE, .fre = NODE_NONE};
+  return &plan->suites[plan->nsuites++];
 }
 
 // Collect and validate every @test/@test_init/@test_free in the package into a runnable plan.
+// Attributes may sit on top-level functions (module fixtures) or on methods of a non-generic
+// inherent extend (suite fixtures: the receiver IS the fixture, produced by a @test_init method).
 static void test_plan_build(Package *p, TestPlan *plan) {
   memset(plan, 0, sizeof *plan);
   plan->ok = true;
@@ -230,7 +287,7 @@ static void test_plan_build(Package *p, TestPlan *plan) {
     plan->fx_init[i] = plan->fx_free[i] = NODE_NONE;
     plan->fx_type[i] = (DefId){0, NODE_NONE};
   }
-  // Pass 1: fixture producers/teardowns (module + global), so pass 2 can classify test params.
+  // Pass 1: fixture producers/teardowns (module, suite, and global), so pass 2 can classify params.
   for (size_t m = 0; m < p->count; m++) {
     const Ast *const a = p->modules[m].ast;
     if (!a || p->modules[m].prelude)
@@ -241,6 +298,25 @@ static void test_plan_build(Package *p, TestPlan *plan) {
         continue;
       const Node *const fn = ast_at_const(a, at->owner);
       const Span sp = fn->span;
+      bool bad_ext = false;
+      const NodeId ext = test_owner_extend(a, at->owner, &bad_ext);
+      if (ext != NODE_NONE && bad_ext) {
+        test_err(p, m, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'");
+        continue;
+      }
+      DefId target = {0, NODE_NONE};
+      bool target_is_enum = false;
+      if (ext != NODE_NONE) {
+        if (at->arg) {
+          test_err(p, m, sp, "'(global)' is not allowed on a method; declare the global pair at top level");
+          continue;
+        }
+        target = test_type_decl(p, a, ast_at_const(a, ext)->as.extend_def.target_type, &target_is_enum);
+        if (target.node == NODE_NONE) {
+          test_err(p, m, sp, "a test suite's extend target must be a plain (non-generic) struct or enum");
+          continue;
+        }
+      }
       if (at->kind == ATTR_TEST_INIT) {
         if (fn->as.function.params.len != 0) {
           test_err(p, m, sp, "'@test_init' takes no parameters");
@@ -252,7 +328,22 @@ static void test_plan_build(Package *p, TestPlan *plan) {
           test_err(p, m, sp, "'@test_init' must return a plain (non-generic) struct or enum fixture");
           continue;
         }
-        if (at->arg) { // global
+        if (ext != NODE_NONE) { // a suite init: a static method returning its own type
+          if (d.module != target.module || d.node != target.node) {
+            test_err(p, m, sp, "a suite '@test_init' method must return the extended type itself");
+            continue;
+          }
+          TestSuite *const su = test_suite_of(plan, (ModuleId)m, target, target_is_enum, true);
+          if (!su) {
+            plan->ok = false;
+            return;
+          }
+          if (su->init != NODE_NONE) {
+            test_err(p, m, sp, "duplicate suite '@test_init' (one per type per module)");
+            continue;
+          }
+          su->init = at->owner;
+        } else if (at->arg) { // global
           if (plan->genv_init != NODE_NONE) {
             test_err(p, m, sp, "duplicate '@test_init(global)' (one per test tree)");
             continue;
@@ -270,10 +361,38 @@ static void test_plan_build(Package *p, TestPlan *plan) {
           plan->fx_type[m] = d;
           plan->fx_is_enum[m] = is_enum;
         }
+      } else { // ATTR_TEST_FREE on a METHOD (top-level @test_free handled in the pass below)
+        if (ext == NODE_NONE)
+          continue;
+        bool ok = fn->as.function.params.len == 1 && test_fn_returns_nothing(a, p->modules[m].source, fn);
+        if (ok) {
+          const Node *const pn = ast_at_const(a, ast_list(a, fn->as.function.params)[0]);
+          const Node *const tn = pn->as.parameter.type != NODE_NONE ? ast_at_const(a, pn->as.parameter.type) : NULL;
+          bool is_enum = false;
+          const DefId d = tn && tn->kind == NODE_REFERENCE_TYPE
+                              ? test_type_decl(p, a, tn->as.indirect_type.type, &is_enum)
+                              : (DefId){0, NODE_NONE};
+          ok = tn && tn->kind == NODE_REFERENCE_TYPE && tn->as.indirect_type.qualifier == TYPE_QUAL_MUT &&
+               d.module == target.module && d.node == target.node;
+        }
+        if (!ok) {
+          test_err(p, m, sp, "a suite '@test_free' must be 'fn(self: &mut <the extended type>)' returning nothing");
+          continue;
+        }
+        TestSuite *const su = test_suite_of(plan, (ModuleId)m, target, target_is_enum, true);
+        if (!su) {
+          plan->ok = false;
+          return;
+        }
+        if (su->fre != NODE_NONE) {
+          test_err(p, m, sp, "duplicate suite '@test_free'");
+          continue;
+        }
+        su->fre = at->owner;
       }
     }
   }
-  for (size_t m = 0; m < p->count; m++) { // @test_free after every init is known
+  for (size_t m = 0; m < p->count; m++) { // top-level @test_free, after every init is known
     const Ast *const a = p->modules[m].ast;
     if (!a || p->modules[m].prelude)
       continue;
@@ -281,6 +400,9 @@ static void test_plan_build(Package *p, TestPlan *plan) {
       const Attr *const at = &a->attrs.data[i];
       if (at->kind != ATTR_TEST_FREE)
         continue;
+      bool bad_ext = false;
+      if (test_owner_extend(a, at->owner, &bad_ext) != NODE_NONE)
+        continue; // suite teardown: handled in pass 1
       const Node *const fn = ast_at_const(a, at->owner);
       const Span sp = fn->span;
       const bool global = at->arg != 0;
@@ -319,6 +441,12 @@ static void test_plan_build(Package *p, TestPlan *plan) {
       }
     }
   }
+  for (size_t i = 0; i < plan->nsuites; i++) // a suite teardown without a producer is an error
+    if (plan->suites[i].init == NODE_NONE && plan->suites[i].fre != NODE_NONE) {
+      const Ast *const a = p->modules[plan->suites[i].mod].ast;
+      test_err(p, plan->suites[i].mod, ast_at_const(a, plan->suites[i].fre)->span,
+               "a suite '@test_free' has no matching '@test_init' method on this type in this module");
+    }
   // Pass 2: the tests themselves.
   for (size_t m = 0; m < p->count; m++) {
     const Ast *const a = p->modules[m].ast;
@@ -330,20 +458,42 @@ static void test_plan_build(Package *p, TestPlan *plan) {
         continue;
       const Node *const fn = ast_at_const(a, at->owner);
       const Span sp = fn->span;
+      bool bad_ext = false;
+      const NodeId ext = test_owner_extend(a, at->owner, &bad_ext);
+      if (ext != NODE_NONE && bad_ext) {
+        test_err(p, m, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'");
+        continue;
+      }
+      DefId suite = {0, NODE_NONE};
+      bool suite_is_enum = false;
+      if (ext != NODE_NONE) {
+        suite = test_type_decl(p, a, ast_at_const(a, ext)->as.extend_def.target_type, &suite_is_enum);
+        if (suite.node == NODE_NONE) {
+          test_err(p, m, sp, "a test suite's extend target must be a plain (non-generic) struct or enum");
+          continue;
+        }
+      }
       if (!test_fn_returns_nothing(a, p->modules[m].source, fn)) {
         test_err(p, m, sp, "a '@test' function returns nothing");
         continue;
       }
-      const NodeList params = fn->as.function.params;
-      if (params.len > 2) {
-        test_err(p, m, sp, "a '@test' function takes at most the module fixture and the global env");
+      const Span nmsp = ast_at_const(a, fn->as.function.name)->as.name.text;
+      if (ext == NODE_NONE && nmsp.end - nmsp.start == 4 && memcmp(p->modules[m].source + nmsp.start, "main", 4) == 0) {
+        test_err(p, m, sp, "'main' cannot be a '@test' (it is replaced by the test runner)");
         continue;
       }
+      const NodeList params = fn->as.function.params;
+      if (params.len > 2) {
+        test_err(p, m, sp, "a '@test' function takes at most the fixture (or 'self') and the global env");
+        continue;
+      }
+      // A method test's fixture type is its extend target; a free fn's is the module fixture.
+      const DefId fx = ext != NODE_NONE ? suite : plan->fx_type[m];
       uint8_t wants = 0;
       bool bad = false;
       const NodeId *const pids = ast_list(a, params);
       for (uint32_t k = 0; k < params.len && !bad; k++) {
-        const uint8_t bit = test_param_bit(p, (ModuleId)m, pids[k], plan->fx_type[m],
+        const uint8_t bit = test_param_bit(p, (ModuleId)m, pids[k], fx,
                                            plan->genv_init != NODE_NONE ? plan->genv_type : (DefId){0, NODE_NONE});
         if (!bit) {
           bad = true;
@@ -351,13 +501,23 @@ static void test_plan_build(Package *p, TestPlan *plan) {
           test_err(p, m, sp, "duplicate '@test' parameter kind");
           bad = true;
         } else if (bit == 1 && (wants & 2)) {
-          test_err(p, m, sp, "the module fixture parameter must come before the global env");
+          test_err(p, m, sp, "the fixture ('self') parameter must come before the global env");
           bad = true;
         }
         wants |= bit;
       }
       if (bad)
         continue;
+      NodeId suite_init = NODE_NONE, suite_free = NODE_NONE;
+      if (ext != NODE_NONE && (wants & 1)) {
+        const TestSuite *const su = test_suite_of(plan, (ModuleId)m, suite, suite_is_enum, false);
+        if (!su || su->init == NODE_NONE) {
+          test_err(p, m, sp, "no '@test_init' method on this type in this module produces the receiver");
+          continue;
+        }
+        suite_init = su->init;
+        suite_free = su->fre;
+      }
       if (plan->ncases == plan->ccap) {
         const size_t nc = plan->ccap ? plan->ccap * 2 : 32;
         TestCase *const g = realloc(plan->cases, nc * sizeof *g);
@@ -368,8 +528,14 @@ static void test_plan_build(Package *p, TestPlan *plan) {
         plan->cases = g;
         plan->ccap = nc;
       }
-      plan->cases[plan->ncases++] =
-          (TestCase){.mod = (ModuleId)m, .fn = at->owner, .should_panic = at->arg != 0, .wants = wants};
+      plan->cases[plan->ncases++] = (TestCase){.mod = (ModuleId)m,
+                                               .fn = at->owner,
+                                               .should_panic = at->arg != 0,
+                                               .wants = wants,
+                                               .suite = ext != NODE_NONE && (wants & 1) ? suite : (DefId){0, NODE_NONE},
+                                               .suite_is_enum = suite_is_enum,
+                                               .suite_init = suite_init,
+                                               .suite_free = suite_free};
     }
   }
   plan->ok &= p->ok;
@@ -721,8 +887,14 @@ static char *write_test_main(Package *p, const TestPlan *plan) {
     const TestCase *const tc = &plan->cases[i];
     const Ast *const a = p->modules[tc->mod].ast;
     const Span nm = ast_at_const(a, ast_at_const(a, tc->fn)->as.function.name)->as.name.text;
-    fprintf(f, "  { \"%s::%.*s\", __sc_test_w_%u_%u, %d },\n", p->modules[tc->mod].path, (int)(nm.end - nm.start),
-            p->modules[tc->mod].source + nm.start, (unsigned)tc->mod, (unsigned)tc->fn, tc->should_panic ? 1 : 0);
+    fprintf(f, "  { \"%s::", p->modules[tc->mod].path);
+    if (tc->suite.node != NODE_NONE) { // a suite method displays as module::Type::method
+      const Ast *const sa = p->modules[tc->suite.module].ast;
+      const Span ts = ast_at_const(sa, ast_at_const(sa, tc->suite.node)->as.aggregate.name)->as.name.text;
+      fprintf(f, "%.*s::", (int)(ts.end - ts.start), p->modules[tc->suite.module].source + ts.start);
+    }
+    fprintf(f, "%.*s\", __sc_test_w_%u_%u, %d },\n", (int)(nm.end - nm.start), p->modules[tc->mod].source + nm.start,
+            (unsigned)tc->mod, (unsigned)tc->fn, tc->should_panic ? 1 : 0);
   }
   fprintf(f, "};\nenum { SC_NTESTS = %zu };\n\n", plan->ncases);
   if (plan->genv_init != NODE_NONE) {
@@ -840,20 +1012,21 @@ static int run_package(Package *p, const TestOpts *topts) {
     Module *const m = &p->modules[i];
     Codegen *c = codegen_new(m->ast, m->source, m->source_len, p);
     codegen_set_multifile(c, true); // always a build/ tree, even for a lone module
-    NodeId tids[512];   // this module's test-plan slice; must outlive codegen_emit below
-    uint8_t wants[512]; // (CgTestInfo keeps pointers into these)
-    if (testing) {
+    CgTestCase tcases[512]; // this module's test-plan slice; must outlive codegen_emit below
+    if (testing) {          // (CgTestInfo keeps a pointer into it)
       uint32_t nt = 0;
       for (size_t k = 0; k < plan.ncases && nt < 512; k++)
-        if (plan.cases[k].mod == i) {
-          tids[nt] = plan.cases[k].fn;
-          wants[nt++] = plan.cases[k].wants;
-        }
+        if (plan.cases[k].mod == i)
+          tcases[nt++] = (CgTestCase){.fn = plan.cases[k].fn,
+                                      .wants = plan.cases[k].wants,
+                                      .suite = plan.cases[k].suite,
+                                      .suite_is_enum = plan.cases[k].suite_is_enum,
+                                      .suite_init = plan.cases[k].suite_init,
+                                      .suite_free = plan.cases[k].suite_free};
       const CgTestInfo ti = {
           .enabled = true,
-          .tests = tids,
-          .wants = wants,
-          .ntests = nt,
+          .cases = tcases,
+          .ncases = nt,
           .fx_init = plan.fx_init[i],
           .fx_free = plan.fx_free[i],
           .fx_type = plan.fx_type[i],
