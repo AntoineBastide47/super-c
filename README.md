@@ -400,7 +400,9 @@ fn main() i32 {
 `import P as Q;` aliases a module and `import P as *;` brings its public items into scope unqualified.
 Imports are public, C-style: a glob import of a facade module also exposes everything the facade
 itself imports, and any transitively loaded module stays reachable by its qualified path (`b::foo()`)
-without a direct import.
+without a direct import. Import cycles are legal — mutually-recursive modules (pointer-linked types,
+mutually-recursive functions) resolve order-independently; only a mutual *by-value* embedding is
+rejected (the type would have infinite size).
 
 ### C interop (FFI)
 

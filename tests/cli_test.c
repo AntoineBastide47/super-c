@@ -1105,15 +1105,50 @@ static void test_format_conformances(void) {
   CHECK(run_cmd(crun, NULL, 0) == 18, "Vector/Option/Result fmt render through the element's Format (6+7+5)");
 }
 
-// Module-layer negative paths: cycles, missing modules, and using a non-public type/const/field across
+// Mutually-recursive modules: import cycles are legal (parse-all -> resolve-all -> typecheck-all reads
+// declarations order-independently). Mutual fn calls and mutual POINTER-linked types work; a mutual
+// BY-VALUE embedding is the one impossible shape (infinite size) and gets its own diagnostic.
+static void test_module_cycles(void) {
+  char root[4150], spc[4170], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/mcyc", DIR);
+  mkfile(root, "a.spc",
+         "import b;\n"
+         "pub struct AN { pub v: i32, pub link: *mut b::BN }\n"
+         "pub fn even(n: i32) i32 { if n == 0 { return 1; } return b::odd(n - 1); }\n");
+  mkfile(root, "b.spc",
+         "import a;\n"
+         "pub struct BN { pub v: i32, pub link: *mut a::AN }\n"
+         "pub fn odd(n: i32) i32 { if n == 0 { return 0; } return a::even(n - 1); }\n");
+  mkfile(root, "main.spc",
+         "import a;\nimport b;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn main() i32 {\n"
+         "  let mut an = a::AN { v: 30, link: null };\n"
+         "  let mut bn = b::BN { v: 2, link: (&mut an) as *mut a::AN };\n"
+         "  let linked = unsafe (*bn.link).v + bn.v;\n"      // 32
+         "  unsafe exit(linked + a::even(10) * 10);\n"       // + 10
+         "}\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "mutual imports compile: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/mcyc.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "mutual-import C compiles -Werror (no header cycle): %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 42, "mutual pointer link (32) + mutual recursion even(10) (10)");
+
+  snprintf(root, sizeof root, "%s/mcycbad", DIR);
+  mkfile(root, "main.spc", "import a;\nfn main() i32 { return 0; }\n");
+  mkfile(root, "a.spc", "import b;\npub struct A { pub x: b::B }\n");
+  mkfile(root, "b.spc", "import a;\npub struct B { pub y: a::A }\n");
+  expect_fail("mcycbad", "infinite size");
+}
+
+// Module-layer negative paths: missing modules and using a non-public type/const/field across
 // modules must each be a clear, nonzero-exit error.
 static void test_module_errors(void) {
   char root[4150];
-  snprintf(root, sizeof root, "%s/cyc", DIR);
-  mkfile(root, "main.spc", "import a::a;\nfn main() i32 { return 0; }\n");
-  mkfile(root, "a/a.spc", "import b::b;\npub fn f() i32 { return b::b::g(); }\n");
-  mkfile(root, "b/b.spc", "import a::a;\npub fn g() i32 { return a::a::f(); }\n");
-  expect_fail("cyc", "import cycle");
 
   snprintf(root, sizeof root, "%s/miss", DIR);
   mkfile(root, "main.spc", "import nope::nope;\nfn main() i32 { return 0; }\n");
@@ -1212,6 +1247,7 @@ int main(void) {
   test_external_c_sources();
   test_cross_module_defaults();
   test_format_conformances();
+  test_module_cycles();
   test_module_errors();
   test_extensionless_appends();
   test_missing_file();

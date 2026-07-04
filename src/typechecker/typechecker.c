@@ -6692,6 +6692,47 @@ static void check_pattern(TypeChecker *t, const NodeId id, const TypeId expected
 
 static void check_associated(TypeChecker *t, const NodeList items);
 
+// Does non-generic aggregate (m, d) transitively embed aggregate (tm, td) BY VALUE? Pointers,
+// references and slices break the chain (a forward declaration suffices for them); arrays embed
+// their element. Depth-capped: a cycle not reaching (tm, td) is caught when ITS type is checked.
+static bool tc_embeds_by_value(TypeChecker *t, const ModuleId m, const NodeId d, const ModuleId tm,
+                               const NodeId td, const int depth) {
+  if (depth > 16)
+    return false;
+  Ast *const a = mod_ast(t, m);
+  const Node *const dn = ast_at_const(a, d);
+  if ((dn->kind != NODE_STRUCT && dn->kind != NODE_ENUM) || dn->as.aggregate.generics.len)
+    return false;
+  const NodeId *const mids = ast_list(a, dn->as.aggregate.members);
+  for (uint32_t i = 0; i < dn->as.aggregate.members.len; i++) {
+    const Node *const mn = ast_at_const(a, mids[i]);
+    NodeId tns[16];
+    uint32_t ntn = 0;
+    if (mn->kind == NODE_FIELD) {
+      tns[ntn++] = mn->as.field.type;
+    } else if (mn->kind == NODE_VARIANT) {
+      const NodeId *const pl = ast_list(a, mn->as.variant.payload);
+      for (uint32_t j = 0; j < mn->as.variant.payload.len && ntn < 16; j++) {
+        const Node *const pe = ast_at_const(a, pl[j]);
+        tns[ntn++] = pe->kind == NODE_FIELD ? pe->as.field.type : pl[j];
+      }
+    }
+    for (uint32_t j = 0; j < ntn; j++) {
+      TypeId ft = lower_type_in(t, m, tns[j]);
+      const Ty *y = ast_type_at(t->ast, ft);
+      while (y->kind == TYPE_ARRAY) { // an array embeds its element by value
+        ft = y->as.elem;
+        y = ast_type_at(t->ast, ft);
+      }
+      if (y->kind != TYPE_STRUCT && y->kind != TYPE_ENUM)
+        continue;
+      if ((y->module == tm && y->as.decl == td) || tc_embeds_by_value(t, y->module, y->as.decl, tm, td, depth + 1))
+        return true;
+    }
+  }
+  return false;
+}
+
 static void check_item(TypeChecker *t, const NodeId id) {
   const Node *const n = ast_at_const(t->ast, id);
   switch (n->kind) {
@@ -6766,6 +6807,13 @@ static void check_item(TypeChecker *t, const NodeId id) {
             resolve_type(t, pe->kind == NODE_FIELD ? pe->as.field.type : pl[j]);
           }
         }
+      }
+      // A type embedding itself by value (directly, mutually, or across modules -- imports may cycle)
+      // has no finite layout; reject it here instead of leaking an incomplete-type C error.
+      if (!n->as.aggregate.generics.len && tc_embeds_by_value(t, t->ast->module, id, t->ast->module, id, 0)) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "this type embeds itself by value, so it would have infinite size");
+        typechecker_notef(t, "break the cycle with a pointer ('*mut T'), a reference, or 'Box<T>'");
       }
       break;
     }
