@@ -3004,6 +3004,27 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     return;
   }
 
+  // `Pair(1, 2)`: tuple-struct construction -> a compound literal with positional `_N` fields.
+  if (callee->kind == NODE_IDENTIFIER) {
+    const DefId d = ast_resolution_def(c->ast, callee_id);
+    if (d.node != NODE_NONE) {
+      const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
+      if (dn->kind == NODE_STRUCT && dn->as.aggregate.is_tuple) {
+        char tn[200];
+        render_type_id(c, subst_resolve(c, ast_type(c->ast, id)), "", tn, sizeof tn);
+        emit(c, "(%s){ ", tn);
+        for (uint32_t i = 0; i < args.len; i++) {
+          if (i)
+            emit(c, ", ");
+          emit(c, "._%u = ", i);
+          emit_expr(c, aids[i]);
+        }
+        emit(c, "%s }", args.len ? "" : "0");
+        return;
+      }
+    }
+  }
+
   // Win 1, inside a callback specialization: a call to the elided callback parameter becomes a direct
   // call to the bound callee (no indirection).
   if (c->cb_param != NODE_NONE && callee->kind == NODE_IDENTIFIER) {
@@ -6454,7 +6475,14 @@ static void emit_stmt(Codegen *c, const NodeId id) {
       // variable exists to collide with the next `_`.
       if (ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_IDENTIFIER &&
           span_is(cg_mod_src(c, c->ast->module), ast_at_const(c->ast, n->as.let_stmt.name)->as.name.text, "_")) {
-        emit_expr_stmt(c, n->as.let_stmt.value);
+        const TypeId dvt = ast_type(c->ast, n->as.let_stmt.value);
+        if (dvt != TYPE_NONE && cg_type_is_free(c, dvt)) {
+          emit_expr_stmt(c, n->as.let_stmt.value); // materialize + free the owning temporary now
+        } else {
+          emit(c, "(void)("); // a pure discarded value would trip -Wunused-value as a bare statement
+          emit_expr(c, n->as.let_stmt.value);
+          emit(c, ");\n");
+        }
         break;
       }
       if (ast_at_const(c->ast, n->as.let_stmt.name)->kind == NODE_PATTERN_TUPLE) {
@@ -8979,6 +9007,18 @@ static void emit_type_decl(Codegen *c, const NodeId declId) {
   emit(c, " {\n");
   if (n->kind == NODE_ENUM) {
     emit_enum_struct_body(c, n);
+  } else if (n->as.aggregate.is_tuple) { // tuple struct: positional `_0..` fields from the type list
+    c->depth++;
+    const NodeId *const fids = ast_list(c->ast, n->as.aggregate.members);
+    for (uint32_t j = 0; j < n->as.aggregate.members.len; j++) {
+      char nm[16], d[256];
+      snprintf(nm, sizeof nm, "_%u", j);
+      render_type_node(c, fids[j], nm, d, sizeof d);
+      emit_indent(c);
+      emit_cstr(c, d);
+      emit(c, ";\n");
+    }
+    c->depth--;
   } else {
     c->depth++;
     const NodeList fs = n->as.aggregate.members;
@@ -9011,7 +9051,9 @@ static void emit_type_dfs(Codegen *c, const NodeId declId, uint8_t *const state)
   int nh = 0;
   for (uint32_t i = 0; i < n->as.aggregate.members.len; i++) { // (no subst active: a user type's fields are concrete)
     const Node *const m = ast_at_const(c->ast, mids[i]);
-    if (n->kind == NODE_STRUCT && m->kind == NODE_FIELD) {
+    if (n->kind == NODE_STRUCT && n->as.aggregate.is_tuple) {
+      push_home_dep(c, ast_type(c->ast, mids[i]), deps, &nh); // a tuple struct's member IS its type node
+    } else if (n->kind == NODE_STRUCT && m->kind == NODE_FIELD) {
       push_home_dep(c, ast_type(c->ast, m->as.field.type), deps, &nh);
     } else if (n->kind == NODE_ENUM && m->kind == NODE_VARIANT) {
       const NodeId *const plids = ast_list(c->ast, m->as.variant.payload);
@@ -9853,7 +9895,9 @@ static void mark_aggregate_layout(Codegen *c, const Node *const dn, bool *const 
   const NodeId *const mids = ast_list(c->ast, ms);
   for (uint32_t m = 0; m < ms.len; m++) {
     const Node *const mn = ast_at_const(c->ast, mids[m]);
-    if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
+    if (dn->kind == NODE_STRUCT && dn->as.aggregate.is_tuple) {
+      mark_layout_module(c, ast_type(c->ast, mids[m]), want, nmod); // a tuple struct's member IS its type node
+    } else if (dn->kind == NODE_STRUCT && mn->kind == NODE_FIELD) {
       mark_layout_module(c, ast_type(c->ast, mn->as.field.type), want, nmod);
     } else if (dn->kind == NODE_ENUM && mn->kind == NODE_VARIANT) {
       const NodeList pl = mn->as.variant.payload;

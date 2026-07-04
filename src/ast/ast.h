@@ -173,6 +173,7 @@ typedef struct {
             NodeList generics, members;
             bool is_public; // `pub struct`
             bool is_union;  // `union` (untagged): a NODE_STRUCT whose fields overlap; emitted as a C `union`
+            bool is_tuple;  // `struct Pair(A, B);`: members are TYPE nodes, fields are positional (`p.0` -> `_0`)
         } aggregate;
         struct {
             NodeId name, type, value;

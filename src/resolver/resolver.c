@@ -625,7 +625,13 @@ static void resolve_item(Resolver *r, const NodeId id) {
     case NODE_ENUM:
       scope_enter(r);
       declare_generics(r, n->as.aggregate.generics);
-      resolve_members(r, n->as.aggregate.members);
+      if (n->as.aggregate.is_tuple) { // tuple struct: members ARE type nodes
+        const NodeId *const mids = ast_list(r->ast, n->as.aggregate.members);
+        for (uint32_t i = 0; i < n->as.aggregate.members.len; i++)
+          resolve_type(r, mids[i]);
+      } else {
+        resolve_members(r, n->as.aggregate.members);
+      }
       scope_exit(r);
       break;
     case NODE_INTERFACE: {
@@ -783,7 +789,14 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       resolve_expr(r, n->as.binary.right);
       break;
     case NODE_CALL: {
-      resolve_expr(r, n->as.call.callee);
+      // `Pair(1, 2)`: a callee identifier that is not a value may name a TYPE (tuple-struct construction).
+      const NodeId callee = n->as.call.callee;
+      if (ast_at_const(r->ast, callee)->kind == NODE_IDENTIFIER &&
+          lookup(r, name_span(r, callee), NS_VALUE, NULL) == NODE_NONE &&
+          (lookup(r, name_span(r, callee), NS_TYPE, NULL) != NODE_NONE))
+        resolve_ref(r, callee, callee, NS_TYPE, "type");
+      else
+        resolve_expr(r, callee);
       const NodeList args = n->as.call.args;
       const NodeId *const ids = ast_list(r->ast, args);
       for (uint32_t i = 0; i < args.len; i++)
