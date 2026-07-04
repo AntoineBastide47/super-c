@@ -4129,6 +4129,65 @@ static TypeId tc_check_assert(TypeChecker *t, const Node *const n, const int kin
   return ast_builtin(BT_VOID);
 }
 
+// Infer generic params that appear only inside another param's INTERFACE bound
+// (`count<I: Iterator<T>, T>(it: I)`): once `I` is bound to a concrete type, that type's
+// `extend .. as Iterator<..>` conformance NAMES the bound's args -- unify the bound's declared args
+// (which mention T) against the extend's interface args with the extend's generics substituted from the
+// concrete instance. Two passes, so a param pinned in the first can drive another's bound in the second.
+static void infer_from_bounds(TypeChecker *t, const ModuleId fmod, const NodeId fdecl, const NodeId *const gids,
+                              DefId *const gparams, TypeId *const bound, const int g) {
+  Ast *const fa = mod_ast(t, fmod);
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 0; i < g; i++) {
+      if (bound[i] == TYPE_NONE)
+        continue;
+      BoundIface bs[8];
+      int nb = 0;
+      add_bound_ifaces_full(t, fmod, ast_at_const(fa, gids[i])->as.generic_param.bounds, bs, &nb, 8);
+      const NodeList wc = ast_at_const(fa, fdecl)->as.function.where_clause; // the callee's own where clause
+      const NodeId *const wids = ast_list(fa, wc);
+      for (uint32_t w = 0; w < wc.len; w++) {
+        const Node *const wp = ast_at_const(fa, wids[w]);
+        if (ast_resolution(fa, wp->as.where_predicate.type) == gids[i])
+          add_bound_ifaces_full(t, fmod, wp->as.where_predicate.bounds, bs, &nb, 8);
+      }
+      for (int b = 0; b < nb; b++) {
+        if (!bs[b].n)
+          continue; // only parameterized bounds (Iterator<T>) can pin anything
+        ModuleId tm;
+        NodeId td;
+        DefId sp[4];
+        TypeId sa[4];
+        int sn = 0;
+        if (!aggregate_of(t, strip(t, bound[i]), &tm, &td, sp, sa, &sn))
+          continue;
+        ModuleId imod;
+        const NodeId ext = find_extend_as(t, tm, td, bs[b].iface, &imod);
+        if (ext == NODE_NONE)
+          continue;
+        Ast *const ia = mod_ast(t, imod);
+        const Node *const en = ast_at_const(ia, ext);
+        DefId egp[4]; // the extend's generics bind positionally to the concrete instance's args
+        TypeId ega[4];
+        int egn = 0;
+        const NodeId *const xgids = ast_list(ia, en->as.extend_def.generics);
+        for (uint32_t k = 0; k < en->as.extend_def.generics.len && (int)k < sn && egn < 4; k++) {
+          egp[egn] = (DefId){imod, xgids[k]};
+          ega[egn] = sa[k];
+          egn++;
+        }
+        const Node *const itf = ast_at_const(ia, en->as.extend_def.interface_type);
+        if (itf->kind != NODE_TYPE_PATH)
+          continue;
+        const NodeId *const iargs = ast_list(ia, itf->as.type_path.args);
+        for (uint32_t k = 0; k < itf->as.type_path.args.len && k < bs[b].n; k++)
+          unify_infer(t, bs[b].args[k], subst_type(t, lower_type_in(t, imod, iargs[k]), egp, ega, egn), gparams,
+                      bound, g);
+      }
+    }
+  }
+}
+
 // Is `e` an `Interface::assoc(..)` call (`Default::default()`)? Such an argument resolves through an
 // expected type, so the caller hands it the declared parameter type (resolutions predate type-checking).
 static bool tc_is_iface_assoc_call(TypeChecker *t, const NodeId e) {
@@ -4240,6 +4299,14 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   } else if (path_callee->kind == NODE_MEMBER) {
     t->expected = want;                          // `.into()`/`.try_into()` resolve through the call's target type
     callee = check_member(t, path_callee, true); // `obj.name(args)`: resolve `name` as a method, not a field
+    // A FIELD callee (`self.f(x)` where `f` holds a function value): record its type on the callee node,
+    // so codegen's capturing-closure dispatch can see the (substituted) fn type behind the call.
+    {
+      const DefId fd = ast_resolution_def(t->ast, path_callee->as.member.member);
+      if (fd.node != NODE_NONE && (fd.module == t->ast->module || (t->package && fd.module < t->package->count)) &&
+          ast_at_const(mod_ast(t, fd.module), fd.node)->kind == NODE_FIELD)
+        ast_set_type(t->ast, n->as.call.callee, callee);
+    }
   } else {
     callee = check_expr(t, n->as.call.callee);
   }
@@ -4558,6 +4625,9 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
         if (fb != NODE_NONE)
           unify_infer(t, lower_type_in(t, fmod, fb), bound[i], gparams, bound, g);
       }
+      // A param that appears only inside another param's interface bound (`count<I: Iterator<T>, T>`):
+      // read it off the bound param's conformance extend.
+      infer_from_bounds(t, fmod, fdecl, gids, gparams, bound, g);
       nexplicit = g;
     }
     for (int i = 0; i < nexplicit; i++)

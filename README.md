@@ -363,6 +363,19 @@ unifies with value-producing siblings in a `switch` or `if`. The containers and
 `String` are allocator-parameterized: implement the `Allocator` interface and pass it via the `*_in`
 constructors (`new_in`, `with_capacity_in`, `from_str_in`).
 
+Anything implementing `Iterator<T>` composes into lazy adapter pipelines — `map` / `filter` /
+`enumerate` / `zip` build one, and `for x in ..`, `fold`, `for_each`, `count`, or `collect` drain it.
+The closure's signature (or the source's conformance) pins the element types, so no turbofish is
+needed; adapters are plain monomorphized structs holding the closure by value (no allocation,
+direct calls):
+
+```superc
+let doubled_sum = fold(map(v.iter(), |x: &i32| *x * 2), 0, |a: i32, x: i32| a + x);
+let odd = count(filter(v.iter(), |x: &i32| *x % 2 == 1));
+for p in enumerate(v.iter()) { .. }   // p.0 = index, p.1 = &element
+let picked: Vector<i32> = collect(map(v.iter(), |x: &i32| *x + 1));
+```
+
 ### Modules
 
 A project is a tree of `.spc` files. `import` pulls another module in; `pub` controls what crosses the
