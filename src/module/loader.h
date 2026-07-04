@@ -11,7 +11,6 @@ typedef struct Module {
     char *source;     // NUL-terminated file contents (owned)
     size_t source_len;
     Ast *ast;         // parsed AST (NULL if the file failed to lex/parse)
-    bool loading;     // on the DFS stack -- used to detect import cycles
     bool prelude;     // part of the auto-imported std prelude (its public decls resolve unqualified)
 } Module;
 

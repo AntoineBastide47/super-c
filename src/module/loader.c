@@ -175,18 +175,19 @@ static int add_module(Package *p, char *path, char *file, char *source, size_t s
   }
   const int id = (int)p->count++;
   p->modules[id] = (Module){
-      .path = path, .file = file, .source = source, .source_len = source_len, .ast = ast, .loading = true};
+      .path = path, .file = file, .source = source, .source_len = source_len, .ast = ast};
   return id;
 }
 
 // DFS load: takes ownership of `mod_path` and `file_path`. Returns the module's id (or -1 if unreadable).
+// A module already on the DFS stack (an import cycle) simply resolves to its id: modules are parsed
+// whole before any resolution, and the global resolve-all -> typecheck-all -> emit-all phases read
+// declarations across modules order-independently, so mutual imports need no special handling here.
+// (A mutual BY-VALUE embedding is still impossible -- the type would be infinite -- and is rejected by
+// the layout engine like any other infinitely-sized type.)
 static int load_module(Package *p, char *mod_path, char *file_path) {
   const int existing = package_find(p, mod_path, strlen(mod_path));
   if (existing >= 0) {
-    if (p->modules[existing].loading) {
-      fprintf(stderr, "error: import cycle through module '%s'\n", mod_path);
-      p->ok = false;
-    }
     free(mod_path);
     free(file_path);
     return existing;
@@ -206,7 +207,6 @@ static int load_module(Package *p, char *mod_path, char *file_path) {
   const int id = add_module(p, mod_path, file_path, source, len, ast);
   if (!ast) {
     p->ok = false;
-    p->modules[id].loading = false;
     return id;
   }
   ast->module = (ModuleId)id;
@@ -222,7 +222,6 @@ static int load_module(Package *p, char *mod_path, char *file_path) {
     char *const child_file = resolve_import_file(p, ast, source, n->as.import_decl.path);
     load_module(p, child_path, child_file);
   }
-  p->modules[id].loading = false;
   return id;
 }
 
