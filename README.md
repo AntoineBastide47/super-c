@@ -655,7 +655,9 @@ lossless widening (`i32 → i64`, `u8 → i32`, `f32 → f64`), module-level mut
 `?` error conversion through `From` conformances, `_` discard bindings, `sizeof`/`alignof` on values, unit and tuple structs (`struct S;`,
 `struct Pair(i32, str);` with `p.0` access and `Pair(1, "a")` construction), associated constants
 (`extend T { const N: i32 = ..; }` → `T::N`), `x @ pat` bindings and rest patterns (`V(a, ..)`,
-`S { f, .. }`), float `Eq`/`Ord`/`Hash` via the IEEE-754 total order (`total_cmp`; floats sort and
+`S { f, .. }`), `Deref`/`DerefMut` auto-deref for method calls (`box_of_string.len()`; up to 8 hops,
+cycle-checked, wrapper methods shadow the pointee's, `&mut self` targets need `deref_mut` and a `mut`
+binding), float `Eq`/`Ord`/`Hash` via the IEEE-754 total order (`total_cmp`; floats sort and
 key Maps), `Vector::sort_by`/`sort_by_key`, string→number parsing (`"ff".parse_u64_radix(16)`,
 `"3.5".parse_f64()`), formatted printing with width / alignment / fill / zero-pad / precision / hex /
 binary specifiers (`{:>8}`, `{:08.2}`, `{:b}`) plus `eprint` / `eprintln` to stderr, a test pipeline

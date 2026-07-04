@@ -932,6 +932,9 @@ static bool reintern_method_insts(Package *p, Ast *const src, Ast *const standal
     if (!mu || mu->n == 0)
       continue;
     TypeId rty = ast_type(src, callee->as.member.object); // receiver / `Type::<Args>` base type
+    const DerefUse *const du = ast_deref_use_at(src, callee->as.member.member);
+    if (du)
+      rty = du->target; // an auto-deref'd call dispatches on the chain's final type, not the wrapper
     for (const Ty *y = ast_type_at(src, rty); y->kind == TYPE_POINTER || y->kind == TYPE_REFERENCE;
          y = ast_type_at(src, rty))
       rty = y->as.elem;

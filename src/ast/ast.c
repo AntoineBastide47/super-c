@@ -12,6 +12,7 @@ VEC_DEFINE(TyInstance, TyInstance_Vec)
 VEC_DEFINE(MonoUse, MonoUse_Vec)
 VEC_DEFINE(MethodInst, MethodInst_Vec)
 VEC_DEFINE(DynUse, DynUse_Vec)
+VEC_DEFINE(DerefUse, DerefUse_Vec)
 VEC_DEFINE(Attr, Attr_Vec)
 
 // FNV-1a over the padding-free bytes of Ty; equality is the same memcmp the pool already relied on.
@@ -45,6 +46,8 @@ Ast *ast_new(const size_t token_count) {
   a->method_insts = MethodInst_Vec_init();
   a->dyn_uses = DynUse_Vec_init();
   a->dyn_at = U32_Vec_init();
+  a->deref_uses = DerefUse_Vec_init();
+  a->deref_at = U32_Vec_init();
   a->attrs = Attr_Vec_init();
   Node_Vec_reserve(&a->nodes, token_count);
   U32_Vec_reserve(&a->children, token_count / 2);
@@ -68,6 +71,8 @@ void ast_free(Ast **a) {
   VEC_DEINIT((*a)->method_insts);
   VEC_DEINIT((*a)->dyn_uses);
   VEC_DEINIT((*a)->dyn_at);
+  VEC_DEINIT((*a)->deref_uses);
+  VEC_DEINIT((*a)->deref_at);
   VEC_DEINIT((*a)->attrs);
   free(*a);
   *a = NULL;
@@ -216,6 +221,24 @@ const DynUse *ast_dyn_use_at(const Ast *a, const NodeId node) {
     return NULL;
   const uint32_t idx = a->dyn_at.data[node];
   return idx ? &a->dyn_uses.data[idx - 1] : NULL;
+}
+
+void ast_add_deref_use(Ast *a, const DerefUse *const du) {
+  DerefUse_Vec_push(&a->deref_uses, *du);
+  if (a->deref_at.len <= du->node) {
+    const size_t old = a->deref_at.len, want = a->nodes.len > (size_t)du->node + 1 ? a->nodes.len : (size_t)du->node + 1;
+    U32_Vec_reserve(&a->deref_at, want);
+    memset(a->deref_at.data + old, 0, (want - old) * sizeof *a->deref_at.data);
+    a->deref_at.len = want;
+  }
+  a->deref_at.data[du->node] = (uint32_t)a->deref_uses.len; // 1-based; latest record wins
+}
+
+const DerefUse *ast_deref_use_at(const Ast *a, const NodeId node) {
+  if (node >= a->deref_at.len)
+    return NULL;
+  const uint32_t idx = a->deref_at.data[node];
+  return idx ? &a->deref_uses.data[idx - 1] : NULL;
 }
 
 NodeId ast_add(Ast *a, const Node node) {

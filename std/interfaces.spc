@@ -39,6 +39,18 @@ pub interface Clone {
 // assigned. It carries no methods -- implementing it is purely a promise about the type's representation.
 pub interface Copy {}
 
+// Smart-pointer dereference: a wrapper that transparently exposes its pointee. A method not found on the
+// wrapper itself is looked up through `deref` (up to 8 hops, cycle-checked; the wrapper's own methods
+// always win); calling a `&mut self` method through the chain instead goes through `deref_mut` at every
+// hop, which also requires the original binding to be `mut`. Field access never derefs -- go through the
+// wrapper's accessors explicitly.
+pub interface Deref<Target> {
+    fn deref(self: &Self) &Target;
+}
+pub interface DerefMut<Target> {
+    fn deref_mut(self: &mut Self) &mut Target;
+}
+
 // Infallible value conversion. `From` is the one a type implements; `Into` is its compiler-provided mirror
 // (`x.into()` -> `Target::from(x)`), so implementing `From` gives `.into()` for free. (The fallible pair
 // `TryFrom`/`TryInto` lives in `traits` -- it mentions `Result`.)

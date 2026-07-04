@@ -3395,6 +3395,7 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
   // resolve the callee
   DefId fd = {0, NODE_NONE};
   NodeId recv_expr = NODE_NONE; // a method receiver
+  const DerefUse *du = NULL;    // the typechecker's recorded auto-deref chain (consumed verbatim)
   bool have_recv_type = false;
   DefId recv_syn = {0, NODE_NONE}; // a path receiver that is a bare TYPE name (no cached TypeId)
   ModuleId rtm = 0;
@@ -3429,6 +3430,7 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
       have_recv_type = true;
       rtm = m;
       rtt = ce_type(a, recv_expr);
+      du = ast_deref_use_at(a, cn->as.member.member);
       if (fd.node == NODE_NONE) { // the `.free()` intrinsic: no-op unless the concrete type is Free
         const Span mname = ast_at_const(a, cn->as.member.member)->as.name.text;
         if (!ce_span_is(ce, m, mname, "free") || nargs != 0)
@@ -3503,7 +3505,8 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
   if (have_recv_type) {
     ModuleId sm;
     TypeId st;
-    if (ce_strip_refptr(ce, f, rtm, rtt, &sm, &st))
+    // An auto-deref'd call's dispatch identity (extend-generic binding) is the chain's FINAL type.
+    if (ce_strip_refptr(ce, f, rtm, du ? du->target : rtt, &sm, &st))
       have_recv_id = ce_recv_of(ce, f, sm, st, &recv_id);
   } else if (recv_syn.node != NODE_NONE && recv_syn.module < ce->nmods) {
     const Node *const od = ast_at_const(ce_ast(ce, recv_syn.module), recv_syn.node);
@@ -3576,7 +3579,7 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
     const NodeId p0 = ast_list(fa, params)[0];
     const TypeId p0t = ce_type(fa, ast_at_const(fa, p0)->as.parameter.type);
     const bool want_ref = p0t != TYPE_NONE && ast_type_at(fa, p0t)->kind == TYPE_REFERENCE;
-    if (want_ref) {
+    if (want_ref || du) { // an auto-deref chain always starts from the wrapper's address
       ModuleId sm;
       TypeId st;
       const bool recv_is_ptr = ce_rtype(ce, f, m, rtt, &sm, &st) &&
@@ -3594,6 +3597,25 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
     } else {
       argv[na] = ev_rval(ce, f, m, recv_expr);
       if (argv[na].kind == CV_NIL_K)
+        return false;
+    }
+    if (du) { // walk the recorded auto-deref chain: each hop's deref call yields the next receiver pointer
+      for (uint8_t i = 0; i < du->n; i++) {
+        CeRecv hr;
+        NodeId hext = NODE_NONE;
+        if (!ce_recv_of(ce, f, m, du->recv[i], &hr) ||
+            ce_container_of(ce, du->method[i].module, du->method[i].node, &hext) != 1)
+          return false;
+        CeVal hret[8];
+        uint8_t hn = 0;
+        if (!ce_invoke(ce, du->method[i].module, du->method[i].node, hext, &hr, NULL, NULL, 0, &argv[na], 1, 0,
+                       NODE_NONE, 0, TYPE_NONE, hret, &hn) ||
+            hn != 1 || hret[0].kind != CV_PTR)
+          return false;
+        argv[na] = hret[0];
+      }
+      // a by-value final self (a scalar pointee, `boxed_int.abs()`): copy out of the last pointer
+      if (!want_ref && !ce_loadp(ce, argv[na], &argv[na]))
         return false;
     }
     na++;

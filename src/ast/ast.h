@@ -437,6 +437,19 @@ typedef struct {
 } DynUse;
 VEC_DECLARE(DynUse, DynUse_Vec)
 
+// An auto-deref call site: `b.len()` on `b: Box<String>` resolved through `deref`/`deref_mut` hops.
+// `node` is the member NAME node; `recv[i]` is the receiver type BEFORE hop i and `method[i]` the
+// deref method that hop calls; `target` is the final receiver type the resolved method dispatches on.
+// Recorded once by the typechecker; codegen and CTFE consume the chain verbatim (no re-discovery).
+typedef struct {
+    NodeId node;
+    TypeId target;
+    uint8_t n;
+    TypeId recv[8];
+    DefId method[8];
+} DerefUse;
+VEC_DECLARE(DerefUse, DerefUse_Vec)
+
 // A monomorphized use of a generic method that has its OWN extra generic params (e.g. `map<U>`): the
 // concrete instance it's called on plus the method's own type args. Propagated into the method's owning
 // module (where the instance is emitted) so the owner emits the matching `Inst__method__targs` spec.
@@ -462,6 +475,8 @@ typedef struct {
     MethodInst_Vec method_insts; // generic-method instantiations to emit here (owner); linear scan
     DynUse_Vec dyn_uses; // dyn-erasure sites recorded by the type checker (drives vtable emission)
     U32_Vec dyn_at;      // side table: index = NodeId, value = 1-based index into `dyn_uses` (0 = none)
+    DerefUse_Vec deref_uses; // auto-deref method chains recorded by the type checker
+    U32_Vec deref_at;    // side table: index = NodeId, value = 1-based index into `deref_uses` (0 = none)
     Attr_Vec attrs;     // `@c.*` attributes on items, each tagged with its owner NodeId (linear scan; few)
     NodeId root;
     ModuleId module;    // this Ast's module index within its Package (0 for single-file / REPL)
@@ -537,6 +552,8 @@ const MonoUse *ast_type_args(const Ast *a, NodeId node);
 // Record / fetch a dyn-erasure site (`&T` value coerced to `&dyn I` at `node`).
 void ast_add_dyn_use(Ast *a, NodeId node, TypeId src, TypeId dyn);
 const DynUse *ast_dyn_use_at(const Ast *a, NodeId node);
+void ast_add_deref_use(Ast *a, const DerefUse *du); // du->node keys the record (latest wins)
+const DerefUse *ast_deref_use_at(const Ast *a, NodeId node);
 
 ALWAYS_INLINE TypeId ast_builtin(const BuiltinType b) {
   return (TypeId)b + 1;

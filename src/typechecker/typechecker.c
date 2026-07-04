@@ -3483,6 +3483,20 @@ static TypeId tc_method_param(TypeChecker *t, const TypeId recv, const DefId md,
   return subst_type(t, pt, rsubp, rsuba, nrsub);
 }
 
+// The self parameter's receiver kind of method `md`: 0 = by value (or none), 1 = `&self`/`*const self`,
+// 2 = `&mut self`/`*mut self`. Drives the deref-vs-deref_mut choice for an auto-deref chain.
+static int method_self_kind(TypeChecker *t, const DefId md) {
+  Ast *const fa = mod_ast(t, md.module);
+  const Node *const fn = ast_at_const(fa, md.node);
+  if (fn->kind != NODE_FUNCTION || !fn->as.function.params.len)
+    return 0;
+  const TypeId pt = decl_type_in(t, md.module, ast_list(fa, fn->as.function.params)[0]);
+  const Ty *const y = ast_type_at(t->ast, pt);
+  if (y->kind != TYPE_REFERENCE && y->kind != TYPE_POINTER)
+    return 0;
+  return y->qualifier == TYPE_QUAL_MUT ? 2 : 1;
+}
+
 // Does the value at `operand` fit operator method parameter type `pt`? An operator auto-borrows its operand,
 // so a value fits a `&T`/`&mut T` parameter when it fits the pointee. A TYPE_NONE param is unconstrained.
 static bool operand_fits_param(TypeChecker *t, const TypeId pt, const NodeId operand) {
@@ -4529,8 +4543,12 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     const NodeKind ptk = pt != NODE_NONE ? ast_at_const(fa, pt)->kind : NODE_NONE_KIND;
     if (ptk != NODE_POINTER_TYPE && ptk != NODE_REFERENCE_TYPE) {
       // `self` taken BY VALUE (`fn unwrap_or(self: Option<T>, ..)`) consumes its receiver: the receiver moves
-      // into the call, so a later use is a use-after-move (and it is not double-freed).
-      tc_mark_move(t, callee_node->as.member.object);
+      // into the call, so a later use is a use-after-move (and it is not double-freed). NOT through an
+      // auto-deref chain: there only the scalar POINTEE is copied out; the wrapper is transiently borrowed.
+      if (ast_deref_use_at(t->ast, callee_node->as.member.member))
+        borrow_report_conflict(t, callee_node->as.member.object, BORROW_SHARED, callee_node->as.member.object);
+      else
+        tc_mark_move(t, callee_node->as.member.object);
     } else {
       // A `&self` / `&mut self` (or `*const`/`*mut self`) method implicitly borrows its receiver for the
       // call's duration. This is a two-phase borrow: the args (evaluated above, so `v.len()` inside
@@ -4558,6 +4576,11 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   // substitutes the instance's type args into the signature via the extend's own generics. The instance is
   // the member's object type (the receiver, or the `Type::<Args>` base); the extend declares its generics
   // bound positionally to the instance args by its target type (`extend<T> Box<T>`).
+  // An auto-deref'd call dispatches on its chain's FINAL type, not the wrapper the source names: every
+  // receiver-driven substitution below reads the recorded target instead of the object's type.
+  const DerefUse *const cdu = callee_node->kind == NODE_MEMBER && !callee_node->as.member.path
+                                  ? ast_deref_use_at(t->ast, callee_node->as.member.member)
+                                  : NULL;
   DefId rsubp[4];
   TypeId rsuba[4];
   int nrsub = 0;
@@ -4569,7 +4592,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     TypeId sa[4];
     int sn = 0;
     if (md.node != NODE_NONE && ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION &&
-        aggregate_of(t, strip(t, ast_type(t->ast, callee_node->as.member.object)), &rmod, &rdecl, sp, sa, &sn) && sn > 0) {
+        aggregate_of(t, cdu ? cdu->target : strip(t, ast_type(t->ast, callee_node->as.member.object)), &rmod, &rdecl, sp, sa, &sn) && sn > 0) {
       const NodeId extend = enclosing_extend(t, md.module, md.node);
       if (extend != NODE_NONE) {
         const NodeList ig = ast_at_const(mod_ast(t, md.module), extend)->as.extend_def.generics;
@@ -4591,9 +4614,9 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     const NodeId tr = md.node != NODE_NONE ? enclosing_trait(t, md.module, md.node) : NODE_NONE;
     if (tr != NODE_NONE) {
       rsubp[nrsub] = (DefId){md.module, tr};
-      rsuba[nrsub] = strip(t, ast_type(t->ast, callee_node->as.member.object));
+      rsuba[nrsub] = cdu ? cdu->target : strip(t, ast_type(t->ast, callee_node->as.member.object));
       nrsub++;
-      const Ty *const ro = ast_type_at(t->ast, strip(t, ast_type(t->ast, callee_node->as.member.object)));
+      const Ty *const ro = ast_type_at(t->ast, cdu ? cdu->target : strip(t, ast_type(t->ast, callee_node->as.member.object)));
       if (ro->kind == TYPE_GENERIC && nrsub < 4)
         nrsub += bound_method_subst(t, ro->module, ro->as.decl, md, rsubp + nrsub, rsuba + nrsub, 4 - nrsub);
     }
@@ -4642,7 +4665,7 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     TypeId mt = TYPE_NONE;
     if (md.node != NODE_NONE && ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION) {
       if (!callee_node->as.member.path) {
-        mt = strip(t, ast_type(t->ast, callee_node->as.member.object));
+        mt = cdu ? cdu->target : strip(t, ast_type(t->ast, callee_node->as.member.object));
       } else {
         const DefId ob = ast_resolution_def(t->ast, callee_node->as.member.object);
         if (ob.node != NODE_NONE && ast_at_const(mod_ast(t, ob.module), ob.node)->kind == NODE_INTERFACE && want != TYPE_NONE)
@@ -5072,12 +5095,113 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
       return decl_type_in(t, conv.module, conv.node);
     }
   }
+  // Auto-deref: nothing on the receiver itself, so follow its `deref` chain -- the shallowest match wins
+  // (a wrapper's own methods always shadow the pointee's), at most 8 hops, cycle-checked. Method calls
+  // only. The resolved chain is RECORDED on the member name for codegen and CTFE to consume verbatim; a
+  // `&mut self` target re-walks it through `deref_mut`, and the usual receiver-mutability check in
+  // check_call then enforces `mut` on the original binding.
+  bool deref_capped = false;
+  if (prefer_method) {
+    TypeId seen[9];
+    seen[0] = base;
+    int nseen = 1;
+    DerefUse du = {.node = mname};
+    TypeId cur = base;
+    while (du.n < 8) {
+      ModuleId cm;
+      NodeId cd;
+      DefId cgp[4];
+      TypeId cga[4];
+      int cgn;
+      if (!aggregate_of(t, cur, &cm, &cd, cgp, cga, &cgn))
+        break;
+      const DefId dm = find_method_cstr(t, cm, cd, "deref");
+      if (dm.node == NODE_NONE)
+        break;
+      const TypeId dret = tc_method_ret(t, cur, dm);
+      const Ty *const dry = dret == TYPE_NONE ? NULL : ast_type_at(t->ast, dret);
+      if (!dry || (dry->kind != TYPE_REFERENCE && dry->kind != TYPE_POINTER))
+        break;
+      const TypeId target = dry->as.elem;
+      for (int i = 0; i < nseen; i++) {
+        if (seen[i] == target) {
+          typechecker_errorf(t, name.start, name.end - name.start, "cyclic deref chain while resolving '%.*s'",
+                             (int)(name.end - name.start), t->source + name.start);
+          return TYPE_NONE;
+        }
+      }
+      du.recv[du.n] = cur;
+      du.method[du.n] = dm;
+      du.n++;
+      seen[nseen++] = target;
+      // Per-level lookup order on the pointee: own + local-extension methods, then inherited interface
+      // default bodies; fields stay wrapper-explicit (`b.get().field`).
+      ModuleId tm;
+      NodeId td;
+      DefId tgp[4];
+      TypeId tga[4];
+      int tgn = 0;
+      DefId mhit = {0, NODE_NONE};
+      const Ty *const tty = ast_type_at(t->ast, target);
+      if (aggregate_of(t, target, &tm, &td, tgp, tga, &tgn)) {
+        mhit = find_method(t, tm, td, name);
+        if (mhit.node == NODE_NONE)
+          mhit = find_default_method(t, tm, td, name);
+      } else if (tty->kind == TYPE_BUILTIN && t->package) {
+        const NodeId bd = package_builtin_decl(t->package, tty->as.builtin);
+        if (bd != NODE_NONE) {
+          mhit = find_method(t, t->package->core_module, bd, name);
+          if (mhit.node == NODE_NONE)
+            mhit = find_default_method(t, t->package->core_module, bd, name);
+        }
+      }
+      if (mhit.node != NODE_NONE) {
+        const int sk = method_self_kind(t, mhit);
+        if (sk == 0 && tty->kind != TYPE_BUILTIN) {
+          // A by-value `self` would move/copy the pointee out of its owner; only a scalar pointee (a
+          // builtin, always a plain copy -- `boxed_int.abs()`) is safe to pass through the chain.
+          typechecker_errorf(t, name.start, name.end - name.start,
+                             "cannot call a by-value 'self' method through auto-deref");
+          typechecker_notef(t, "call it on the pointee explicitly (e.g. through '.deref()')");
+          return TYPE_NONE;
+        }
+        if (sk == 2) { // a `&mut self` target: EVERY hop must offer `deref_mut`
+          for (uint8_t i = 0; i < du.n; i++) {
+            ModuleId hm;
+            NodeId hd;
+            DefId hgp[4];
+            TypeId hga[4];
+            int hgn;
+            aggregate_of(t, du.recv[i], &hm, &hd, hgp, hga, &hgn);
+            const DefId dmm = find_method_cstr(t, hm, hd, "deref_mut");
+            if (dmm.node == NODE_NONE) {
+              char tn[96];
+              render_type(t, du.recv[i], tn, sizeof tn);
+              typechecker_errorf(t, name.start, name.end - name.start,
+                                 "cannot call a '&mut self' method through '%s': it has 'deref' but no 'deref_mut'", tn);
+              return TYPE_NONE;
+            }
+            du.method[i] = dmm;
+          }
+        }
+        du.target = target;
+        ast_add_deref_use(t->ast, &du);
+        ast_set_resolution_def(t->ast, mname, mhit);
+        return subst_type(t, decl_type_in(t, mhit.module, mhit.node), tgp, tga, tgn);
+      }
+      cur = target;
+    }
+    deref_capped = du.n == 8;
+  }
   char ty[96];
   render_type(t, base, ty, sizeof ty);
   typechecker_errorf(
       t, name.start, name.end - name.start, "no field or method '%.*s' on '%s'", (int)(name.end - name.start),
       t->source + name.start, ty);
-  typechecker_notef(t, "fields are accessed as 'value.name'; methods must be declared in an 'extend' block or provided by a bound");
+  if (deref_capped)
+    typechecker_notef(t, "auto-deref stopped after its maximum of 8 hops");
+  else
+    typechecker_notef(t, "fields are accessed as 'value.name'; methods must be declared in an 'extend' block or provided by a bound");
   return TYPE_NONE;
 }
 
