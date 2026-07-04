@@ -915,6 +915,34 @@ static void test_visibility_of_test_fns(void) {
             "@test\nfn helper() { }\n@test\nfn uses_helper() { helper(); }\nfn main() i32 { return 0; }\n");
 }
 
+// `Interface::assoc()` resolved by the expected type, on GENERIC targets: let annotation, return
+// position, function/method argument (the receiver instance binds the extend's generics), and struct
+// field. With no expected type the call is uninferable and must say so.
+static void test_iface_assoc_generic_targets(void) {
+  static const char *const GEN =
+      "struct Pair<T> { pub a: T, pub b: T }\n"
+      "extend<T: Default> Pair<T> as Default {\n"
+      "  fn default() Pair<T> { return Pair::<T> { a: T::default(), b: T::default() }; }\n"
+      "}\n";
+  char src[2048];
+  snprintf(src, sizeof src, "%s%s", GEN,
+           "struct Holder { pub p: Pair<i32> }\n"
+           "fn ret_pos() Pair<i32> { return Default::default(); }\n"
+           "fn take(p: Pair<i32>) i32 { return p.a; }\n"
+           "fn main() i32 {\n"
+           "  let ann: Pair<i32> = Default::default();\n"
+           "  let x = take(Default::default());\n"
+           "  let mut v = Vector::<Pair<i32>>::new();\n"
+           "  v.push(Default::default());\n"
+           "  let h = Holder { p: Default::default() };\n"
+           "  return ret_pos().b + ann.a + x + h.p.a + v.len() as i32 - 1;\n"
+           "}\n");
+  expect_ok("Interface::assoc() infers generic targets from every expected-type position", src);
+  snprintf(src, sizeof src, "%s%s", GEN, "fn main() i32 { let x = Default::default(); return 0; }\n");
+  expect_error("Interface::assoc() with no expected type is uninferable", src,
+               "cannot infer the implementing type");
+}
+
 // Labeled break/continue target resolution + `loop`-expression value typing rules.
 static void test_labeled_loops(void) {
   expect_ok("labels + loop expression typecheck",
@@ -1108,6 +1136,7 @@ int main(void) {
   test_labeled_loops();
   test_assert_builtins();
   test_visibility_of_test_fns();
+  test_iface_assoc_generic_targets();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

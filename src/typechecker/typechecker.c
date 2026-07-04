@@ -3829,8 +3829,9 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
   }
   // `Interface::assoc()` resolved by the expected type: `let p: Point = Default::default();` picks the method
   // from the expected type's `extend ExpectedType as Interface` extend. Codegen uses the call's result type to
-  // emit the concrete `ExpectedType__assoc`. (Generic targets via the interface name are deferred; use the
-  // explicit `Type::<Args>::assoc()` form for those.)
+  // emit the concrete `ExpectedType__assoc`. The expected type flows in from every annotation position: a
+  // let/return, a call argument's declared parameter (tc_param_expected), or a struct field. Generic-instance
+  // targets bind the extend's generics from the instance args in check_call.
   if (bd && bd->kind == NODE_INTERFACE && expected != TYPE_NONE) {
     ModuleId emod;
     NodeId edecl;
@@ -3846,7 +3847,14 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
     }
   }
   if (!bd || (bd->kind != NODE_STRUCT && bd->kind != NODE_ENUM)) {
-    typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'::' base must be a struct or enum type");
+    if (bd && bd->kind == NODE_INTERFACE) { // `Interface::assoc()` with no expected type to pick the impl
+      typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                         "cannot infer the implementing type for this interface call");
+      typechecker_notef(t, "annotate the destination ('let x: T = ..') or call it as 'Type::%.*s()'",
+                        (int)(mname.end - mname.start), t->source + mname.start);
+    } else {
+      typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'::' base must be a struct or enum type");
+    }
     return TYPE_NONE;
   }
   if (bd->kind == NODE_ENUM) {
@@ -4121,6 +4129,70 @@ static TypeId tc_check_assert(TypeChecker *t, const Node *const n, const int kin
   return ast_builtin(BT_VOID);
 }
 
+// Is `e` an `Interface::assoc(..)` call (`Default::default()`)? Such an argument resolves through an
+// expected type, so the caller hands it the declared parameter type (resolutions predate type-checking).
+static bool tc_is_iface_assoc_call(TypeChecker *t, const NodeId e) {
+  const Node *const en = ast_at_const(t->ast, e);
+  if (en->kind != NODE_CALL)
+    return false;
+  const Node *const cn = ast_at_const(t->ast, en->as.call.callee);
+  if (cn->kind != NODE_MEMBER || !cn->as.member.path)
+    return false;
+  const DefId ob = ast_resolution_def(t->ast, cn->as.member.object);
+  return ob.node != NODE_NONE && (ob.module == t->ast->module || (t->package && ob.module < t->package->count)) &&
+         ast_at_const(mod_ast(t, ob.module), ob.node)->kind == NODE_INTERFACE;
+}
+
+// The declared, CONCRETE type of the parameter that argument `argi` binds to, for a plain named-fn
+// callee; TYPE_NONE when unknown (closure/fn-type/variadic callee, or a generic parameter type).
+static TypeId tc_param_expected(TypeChecker *t, const TypeId callee, const Node *const callee_node, const uint32_t argi) {
+  if (callee == TYPE_NONE)
+    return TYPE_NONE;
+  const Ty *const ct = ast_type_at(t->ast, callee);
+  if (ct->kind != TYPE_FUNCTION)
+    return TYPE_NONE;
+  Ast *const fa = mod_ast(t, ct->module);
+  const Node *const fn = ast_at_const(fa, ct->as.decl);
+  if (fn->kind != NODE_FUNCTION)
+    return TYPE_NONE;
+  uint32_t skip = 0; // a method callee binds the receiver to the first (self) parameter
+  if (callee_node->kind == NODE_MEMBER && !callee_node->as.member.path && fn->as.function.params.len > 0) {
+    const DefId md = ast_resolution_def(t->ast, callee_node->as.member.member);
+    if (md.node != NODE_NONE && ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION)
+      skip = 1;
+  }
+  if (argi + skip >= fn->as.function.params.len)
+    return TYPE_NONE;
+  TypeId pt = decl_type_in(t, ct->module, ast_list(fa, fn->as.function.params)[argi + skip]);
+  // A generic-instance receiver (`v.push(..)` on a Vector<Pair<i32>>): bind the extend's generics to the
+  // instance's args positionally (as check_call does later) so an abstract `v: T` param turns concrete.
+  if (pt != TYPE_NONE && !ast_type_concrete(t->ast, pt) && skip) {
+    const DefId md = ast_resolution_def(t->ast, callee_node->as.member.member);
+    const NodeId ext = md.node != NODE_NONE ? enclosing_extend(t, md.module, md.node) : NODE_NONE;
+    ModuleId rm;
+    NodeId rd;
+    DefId gp[4];
+    TypeId ga[4];
+    int gn = 0;
+    if (ext != NODE_NONE &&
+        aggregate_of(t, strip(t, ast_type(t->ast, callee_node->as.member.object)), &rm, &rd, gp, ga, &gn) && gn > 0) {
+      Ast *const ma = mod_ast(t, md.module);
+      const NodeList ig = ast_at_const(ma, ext)->as.extend_def.generics;
+      const NodeId *const gids = ast_list(ma, ig);
+      DefId sp[4];
+      TypeId sa[4];
+      int ns = 0;
+      for (uint32_t i = 0; i < ig.len && (int)i < gn && ns < 4; i++) {
+        sp[ns] = (DefId){md.module, gids[i]};
+        sa[ns] = ga[i];
+        ns++;
+      }
+      pt = subst_type(t, pt, sp, sa, ns);
+    }
+  }
+  return pt != TYPE_NONE && ast_type_concrete(t->ast, pt) ? pt : TYPE_NONE;
+}
+
 static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, const TypeId want) {
   // `Enum::Variant(args)` is construction, not a function call.
   const Node *const path_callee = ast_at_const(t->ast, n->as.call.callee);
@@ -4197,6 +4269,10 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(t->ast, args);
   for (uint32_t i = 0; i < args.len; i++) {
+    // An `Interface::assoc()` argument (`take(Default::default())`) resolves through the declared
+    // parameter type, exactly like a let annotation (t->expected is consumed by check_member).
+    if (tc_is_iface_assoc_call(t, aids[i]))
+      t->expected = tc_param_expected(t, callee, path_callee, i);
     check_expr(t, aids[i]);
     // A by-value Free argument is moved to the callee (which owns/frees it) -- marked IMMEDIATELY so a
     // later argument reusing the same value (`f(s, s)`, `f(s, &mut s)`) is flagged by its own check.
@@ -4881,9 +4957,17 @@ static TypeId check_struct_init(TypeChecker *t, const Node *const n) {
   const NodeId *const ids = ast_list(t->ast, fields);
   for (uint32_t i = 0; i < fields.len; i++) {
     const Node *const fi = ast_at_const(t->ast, ids[i]);
+    const Span fname = name_span(t, fi->as.field_initializer.name);
+    // An `Interface::assoc()` field value (`Holder { p: Default::default() }`) resolves through the
+    // field's declared type -- pre-resolved here; the code below re-resolves it for diagnostics.
+    if (variant == NODE_NONE && decl != NODE_NONE && tc_is_iface_assoc_call(t, fi->as.field_initializer.value)) {
+      const NodeId field = find_member(t, smod, decl, fname);
+      const TypeId ft = field != NODE_NONE ? subst_type(t, decl_type_in(t, smod, field), gp, ga, gn) : TYPE_NONE;
+      if (ft != TYPE_NONE && ast_type_concrete(t->ast, ft))
+        t->expected = ft;
+    }
     check_expr(t, fi->as.field_initializer.value);
     tc_mark_move(t, fi->as.field_initializer.value); // a Free value placed in a field is moved into the struct
-    const Span fname = name_span(t, fi->as.field_initializer.name);
     if (variant != NODE_NONE) { // resolve the field against the variant's struct payload
       Ast *const va = mod_ast(t, vmod);
       const NodeList vpl = ast_at_const(va, variant)->as.variant.payload;
