@@ -50,13 +50,13 @@ struct TypeChecker {
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
     TypeId expected;          // target type of the expression being checked (let annotation / return / assignment RHS), or TYPE_NONE; consumed once by check_expr
-    NodeId moved[256];        // Free-typed bindings moved out of the current function; using one again is an error
+    NodeId moved[1024];       // Free-typed bindings moved out of the current function; using one again is an error
     uint32_t nmoved;          // (reset per function; best-effort linear move/use-after-move analysis)
-    NodeId uninit[64];        // deferred-init bindings (`let mut x: T;`) not yet assigned on the current path
+    NodeId uninit[256];       // deferred-init bindings (`let mut x: T;`) not yet assigned on the current path
     uint32_t nuninit;         // (definite-initialization: reading one is an error; assigning it clears it)
-    NodeId freed[64];         // bindings consumed by an explicit `.free()` -- using one is a use-after-free
+    NodeId freed[256];        // bindings consumed by an explicit `.free()` -- using one is a use-after-free
     uint32_t nfreed;          // (vs an ordinary move; flavors the diagnostic, the `moved` set gates it)
-    Borrow borrows[64];       // live `&`/`&mut` borrows on the current path; the aliasing rule is checked
+    Borrow borrows[256];      // live `&`/`&mut` borrows on the current path; the aliasing rule is checked
     uint32_t nborrows;        // against these (borrow checker); reset per function, part of the flow state
     uint32_t scope_depth;     // lexical block nesting; a borrow is dropped when its binding's scope exits
     uint32_t loop_depth;      // inside a loop condition/body: node-id order no longer implies execution
