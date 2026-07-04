@@ -799,8 +799,12 @@ static NodeId parse_extend(Parser *p) {
       ast_push(p->ast, fn);
     } else if (check(p, Type) && !is_public) {
       ast_push(p->ast, parse_type_alias(p, false));
+    } else if (check(p, Const)) { // associated constant: `[pub] const NAME: T = value;`
+      const NodeId cn = parse_const(p);
+      ast_at(p->ast, cn)->as.const_def.is_public = is_public;
+      ast_push(p->ast, cn);
     } else {
-      error_here(p, is_public ? "'pub' may only be applied to a function here" : "expected extension item");
+      error_here(p, is_public ? "'pub' may only be applied to a function or const here" : "expected extension item");
       advance(p);
     }
   }

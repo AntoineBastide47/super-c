@@ -1019,6 +1019,39 @@ static NodeId find_member_cstr(TypeChecker *t, const ModuleId m, const NodeId de
   return NODE_NONE;
 }
 
+// An associated constant `Type::NAME`: a `const` item in a non-generic extend of (m, decl) -- searched
+// in the type's home module, then the current module (a local extension). A foreign extend's const must
+// be `pub` to be seen. {_, NODE_NONE} if absent.
+static DefId find_assoc_const(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name) {
+  const ModuleId scopes[2] = {m, t->ast->module};
+  const int ns = m == t->ast->module ? 1 : 2;
+  for (int s = 0; s < ns; s++) {
+    const ModuleId sm = scopes[s];
+    Ast *const a = mod_ast(t, sm);
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(a, ids[i]);
+      if (it->kind != NODE_EXTEND || it->as.extend_def.generics.len)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      if (tg.module != m || tg.node != decl)
+        continue;
+      const NodeId *const mids = ast_list(a, it->as.extend_def.items);
+      for (uint32_t j = 0; j < it->as.extend_def.items.len; j++) {
+        const Node *const cn = ast_at_const(a, mids[j]);
+        if (cn->kind != NODE_CONST)
+          continue;
+        if (sm != t->ast->module && !cn->as.const_def.is_public)
+          continue;
+        if (spans_eq2(t->source, name, mod_src(t, sm), ast_at_const(a, cn->as.const_def.name)->as.name.text))
+          return (DefId){sm, mids[j]};
+      }
+    }
+  }
+  return (DefId){0, NODE_NONE};
+}
+
 // Find a method named `name` in any top-level extend of module `m` whose target type resolves to `decl`.
 // `name` is a span into the *caller's* source; member names are compared against each searched module's
 // source. Find a method for type `decl` (declared in module `m`): searches the type's home module, then the
@@ -3872,10 +3905,15 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
     ast_set_resolution_def(t->ast, n->as.member.member, method);
     return decl_type_in(t, method.module, method.node);
   }
+  const DefId ac = find_assoc_const(t, bmod, bdecl, mname);
+  if (ac.node != NODE_NONE) {
+    ast_set_resolution_def(t->ast, n->as.member.member, ac);
+    return decl_type_in(t, ac.module, ac.node);
+  }
   typechecker_errorf(
       t, mname.start, mname.end - mname.start, "no %s '%.*s' on this %s",
-      bd->kind == NODE_ENUM ? "variant or method" : "associated method", (int)(mname.end - mname.start),
-      t->source + mname.start, bd->kind == NODE_ENUM ? "enum" : "struct");
+      bd->kind == NODE_ENUM ? "variant, method, or constant" : "associated method or constant",
+      (int)(mname.end - mname.start), t->source + mname.start, bd->kind == NODE_ENUM ? "enum" : "struct");
   return TYPE_NONE;
 }
 

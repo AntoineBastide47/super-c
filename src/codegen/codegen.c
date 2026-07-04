@@ -4424,13 +4424,47 @@ static void emit_expr(Codegen *c, const NodeId id) {
             emit_cstr(c, ov);
           else
             emit_ident_mod(c, d.module, dn->as.const_def.name);
-        } else if (dn && dn->kind == NODE_CONST) {
+        } else if (dn && dn->kind == NODE_CONST && decl_is_toplevel(c, d.module, d.node)) {
           char nm[160];
           render_qualified(c, d.module, dn->as.const_def.name, nm, sizeof nm);
           emit_cstr(c, nm);
         } else if (dn && dn->kind == NODE_FUNCTION) {
           char nm[160];
           render_qualified(c, d.module, dn->as.function.name, nm, sizeof nm);
+          emit_cstr(c, nm);
+        } else if (dn && dn->kind == NODE_CONST) { // an associated constant `Type::NAME`
+          // Reproduce the definition's `<mod>__<Type>__NAME` spelling: the enclosing extend names the type.
+          Ast *const da = cg_mod_ast(c, d.module);
+          const NodeList ditems = ast_at_const(da, da->root)->as.program.items;
+          const NodeId *const dids = ast_list(da, ditems);
+          DefId target = {0, NODE_NONE};
+          for (uint32_t di = 0; di < ditems.len && target.node == NODE_NONE; di++) {
+            const Node *const de = ast_at_const(da, dids[di]);
+            if (de->kind != NODE_EXTEND)
+              continue;
+            const NodeId *const dmids = ast_list(da, de->as.extend_def.items);
+            for (uint32_t dj = 0; dj < de->as.extend_def.items.len; dj++)
+              if (dmids[dj] == d.node) {
+                target = ast_resolution_def(da, de->as.extend_def.target_type);
+                break;
+              }
+          }
+          char nm[256];
+          size_t k = render_modpfx(c, d.module, nm, sizeof nm);
+          const int bb = c->package && target.node != NODE_NONE
+                             ? package_builtin_of_decl(c->package, target.module, target.node)
+                             : -1;
+          if (bb >= 0)
+            k = buf_append(nm, sizeof nm, k, BUILTIN_NAMES[bb]);
+          else if (target.node != NODE_NONE)
+            k += render_ident_src(cg_mod_src(c, target.module),
+                                  name_span_in(c, target.module,
+                                               ast_at_const(cg_mod_ast(c, target.module), target.node)->as.aggregate.name),
+                                  nm + k, sizeof nm - k);
+          k = buf_append(nm, sizeof nm, k, "__");
+          render_ident_src(cg_mod_src(c, d.module),
+                           ast_at_const(da, ast_at_const(da, d.node)->as.const_def.name)->as.name.text,
+                           nm + k, sizeof nm - k);
           emit_cstr(c, nm);
         } else {
           emit_variant_value(c, d, ast_type(c->ast, id)); // Enum::Variant (or unresolved -> 0)
@@ -9560,6 +9594,47 @@ static void emit_toplevel_const(Codegen *c, const NodeId id) {
 
 // The module's public consts -- emitted into the header (multi-file build) so other modules can name them.
 // A public `static mut` gets an `extern` DECLARATION here; its single definition stays in the .c.
+// Associated constants (`extend T { const NAME: U = ..; }`): per-TU `static const` named
+// `<mod>__<Type>__NAME` -- public ones live in the header (like top-level pub consts), private in the .c.
+static void emit_assoc_consts(Codegen *c, const bool public_pass) {
+  const NodeList items = program_items(c);
+  const NodeId *const ids = ast_list(c->ast, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const n = ast_at_const(c->ast, ids[i]);
+    if (n->kind != NODE_EXTEND || n->as.extend_def.generics.len || n->as.extend_def.target_type == NODE_NONE)
+      continue;
+    const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
+    if (target.node == NODE_NONE)
+      continue;
+    const NodeId *const mids = ast_list(c->ast, n->as.extend_def.items);
+    for (uint32_t j = 0; j < n->as.extend_def.items.len; j++) {
+      const Node *const cn = ast_at_const(c->ast, mids[j]);
+      if (cn->kind != NODE_CONST || (c->multifile && cn->as.const_def.is_public != public_pass))
+        continue;
+      char nm[256];
+      size_t k = render_modpfx(c, c->ast->module, nm, sizeof nm);
+      const int bb = c->package ? package_builtin_of_decl(c->package, target.module, target.node) : -1;
+      if (bb >= 0)
+        k = buf_append(nm, sizeof nm, k, BUILTIN_NAMES[bb]);
+      else
+        k += render_ident_src(cg_mod_src(c, target.module),
+                              name_span_in(c, target.module, ast_at_const(cg_mod_ast(c, target.module), target.node)->as.aggregate.name),
+                              nm + k, sizeof nm - k);
+      k = buf_append(nm, sizeof nm, k, "__");
+      render_ident(c, name_span(c, cn->as.const_def.name), nm + k, sizeof nm - k);
+      char decl[320];
+      render_type_node(c, cn->as.const_def.type, nm, decl, sizeof decl);
+      if (cg_ceval(c))
+        emit(c, "__attribute__((unused)) ");
+      emit(c, "static const ");
+      emit_cstr(c, decl);
+      emit(c, " = ");
+      emit_initializer(c, cn->as.const_def.type, cn->as.const_def.value);
+      emit(c, ";\n");
+    }
+  }
+}
+
 static void emit_public_consts(Codegen *c) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
@@ -9578,6 +9653,7 @@ static void emit_public_consts(Codegen *c) {
       emit_toplevel_const(c, ids[i]);
     }
   }
+  emit_assoc_consts(c, true); // public associated constants live header-side too
 }
 
 // Phase 4: top-level consts, then function / method bodies.
@@ -9595,6 +9671,7 @@ static void phase_bodies(Codegen *c) {
     else if (n->kind == NODE_STATIC_ASSERT) // file-scope check, after phase_types so sizeof(struct) is defined
       emit_static_assert(c, n);
   }
+  emit_assoc_consts(c, false); // private associated constants (single-file: this pass emits them all)
 
   emit_default_methods(c, PROTO_ALL, true);  // inherited interface default-method bodies
   emit_specializations(c, true);            // concrete generic free-function instantiations
