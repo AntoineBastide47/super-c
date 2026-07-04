@@ -1612,6 +1612,23 @@ static void test_question_operator(void) {
       PRE "fn g() Option<i32> { defer unsafe putchar('D'); let v = Option::<i32>::none()?; unsafe putchar('Z'); return Option::<i32>::some(v); }\n"
           "fn main() i32 { let r = switch g() { Some(_) => 1, None => 2, }; unsafe putchar(10); unsafe exit(r - 2); }\n",
       0, "D\n"); // 'D' from the defer, never 'Z'; g() returns None -> r == 2 -> exit 0
+  sc_run_program(
+      "? converts the error via From, routing overloads by source type",
+      PRE "struct IoErr { pub code: i32 }\nstruct NetErr { pub code: i32 }\nstruct AppErr { pub code: i32 }\n"
+          "extend AppErr as From<IoErr> { fn from(value: IoErr) AppErr { return AppErr { code: value.code + 100 }; } }\n"
+          "extend AppErr as From<NetErr> { fn from(value: NetErr) AppErr { return AppErr { code: value.code + 200 }; } }\n"
+          "fn io(fail: bool) Result<i32, IoErr> { if fail { return Result::<i32, IoErr>::Err(IoErr { code: 1 }); }\n"
+          "  return Result::<i32, IoErr>::Ok(3); }\n"
+          "fn net(fail: bool) Result<i32, NetErr> { if fail { return Result::<i32, NetErr>::Err(NetErr { code: 2 }); }\n"
+          "  return Result::<i32, NetErr>::Ok(4); }\n"
+          "fn run(f: bool) Result<i32, AppErr> { let a = io(false)?; let b = net(f)?;\n"
+          "  return Result::<i32, AppErr>::Ok(a + b); }\n"
+          "fn main() i32 {\n"
+          "  let ok = switch run(false) { Ok(v) => v, Err(_) => -1 };\n"      // 7
+          "  let err = switch run(true) { Ok(_) => -1, Err(e) => e.code };\n" // 202 via From<NetErr>
+          "  unsafe exit(ok + err - 179);\n"                                        // 7 + 202 - 179 = 30
+          "}\n",
+      30, "");
 }
 
 static void test_free_raii(void) {

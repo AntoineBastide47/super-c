@@ -874,6 +874,23 @@ static void test_numeric_suffixes_widening(void) {
                "does not fit in its suffixed type");
 }
 
+// `?` error conversion: differing Result error types are accepted exactly when the caller's error
+// type provides From<callee's error>; otherwise the mismatch stays an error (with the From hint).
+static void test_question_error_conversion(void) {
+  expect_ok("? converts through From",
+            "struct IoErr { pub code: i32 }\nstruct AppErr { pub code: i32 }\n"
+            "extend AppErr as From<IoErr> { fn from(value: IoErr) AppErr { return AppErr { code: value.code }; } }\n"
+            "fn io() Result<i32, IoErr> { return Result::<i32, IoErr>::Ok(1); }\n"
+            "fn run() Result<i32, AppErr> { let v = io()?; return Result::<i32, AppErr>::Ok(v); }\n"
+            "fn main() i32 { return 0; }\n");
+  expect_error("? without a From conversion still mismatches",
+               "struct IoErr { pub code: i32 }\nstruct AppErr { pub code: i32 }\n"
+               "fn io() Result<i32, IoErr> { return Result::<i32, IoErr>::Ok(1); }\n"
+               "fn run() Result<i32, AppErr> { let v = io()?; return Result::<i32, AppErr>::Ok(v); }\n"
+               "fn main() i32 { return 0; }\n",
+               "does not match the function's error type");
+}
+
 // `static mut` module globals: assignable and mutably borrowable; plain consts stay immutable; `mut`
 // is mandatory; owning (Free) types are rejected (no scope would ever run their destructor).
 static void test_static_mut(void) {
@@ -1021,6 +1038,8 @@ int main(void) {
   test_explicit_free_mutability();
   test_dyn();
   test_numeric_suffixes_widening();
+  test_static_mut();
+  test_question_error_conversion();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;
