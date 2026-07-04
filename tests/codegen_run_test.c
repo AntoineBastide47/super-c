@@ -1064,6 +1064,22 @@ static void test_std_types(void) {
       PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(10); v.push(20); v.push(12);\n"
           "  let mut sum = 0; for x in v.iter() { sum = sum + *x; } v.free(); unsafe exit(sum); }\n", // iter borrows -> &i32
       42, "");
+  // Iterator adapters (std/iter.spc): lazy map/filter/enumerate/zip pipelines with fold/count/collect
+  // drains. Element types are pinned by the closure signature or the source's Iterator conformance
+  // (bound-driven inference); adapters store the closure by value (fn-value instance structs).
+  sc_run_program(
+      "std iterator adapters",
+      PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(1); v.push(2); v.push(3); v.push(4);\n"
+          "  let mut w = Vector::<i32>::new(); w.push(10); w.push(20);\n"
+          "  let k = 2;\n"
+          "  let s = fold(map(v.iter(), |x: &i32| *x * k), 0, |a: i32, x: i32| a + x);\n" // capture k: 20
+          "  let odd = count(filter(v.iter(), |x: &i32| *x % 2 == 1)) as i32;\n"          // 2
+          "  let mut e = 0; for p in enumerate(v.iter()) { e = e + (p.0 as i32) + *p.1; }\n" // 6+10=16
+          "  let mut z = 0; for q in zip(v.iter(), w.iter()) { z = z + *q.0 + *q.1; }\n"     // 33
+          "  let mut d = collect(map(w.iter(), |x: &i32| *x + 1));\n"                            // [11, 21]
+          "  let mut c = 0; for y in d.iter() { c = c + *y; }\n"                             // 32
+          "  d.free(); w.free(); v.free(); unsafe exit(s + odd + e + z + c); }\n",
+      103, ""); // 20 + 2 + 16 + 33 + 32
   // String numeric formatting: from_i64 / from_u64 / push_i64 / push_f64.
   sc_run_program(
       "std String int/float to-string",

@@ -142,6 +142,9 @@ struct Codegen {
                              // interface's module): the extend's module -- an extra cg_find_method scope,
                              // so the body's `self.m()` finds an override living in a LOCAL extension
     bool dflt_home_set;
+    bool fnval_pass;         // instance-struct bodies over FUNCTION VALUES (closure envs are TU-local) are
+                             // deferred out of the header: false = the normal pass skips them; true = the
+                             // .c pass (after emit_closures' env typedefs) emits exactly them
     NodeId slice_raw;        // the array node currently emitted as the inner `.ptr` of an array->slice
                              // coercion wrap; suppresses re-entrant coercion so it emits as a bare array
     NodeId dyn_raw;          // same re-entry guard for a `&T` -> `&dyn I` fat-pair coercion wrap
@@ -359,6 +362,7 @@ static TypeId subst_lookup(Codegen *c, ModuleId m, NodeId decl);
 static TypeId subst_resolve(Codegen *c, TypeId t);
 static bool type_is_concrete(Codegen *c, TypeId t);
 static bool cg_type_mentions_fnval(Codegen *c, TypeId t);
+static bool inst_mentions_fnval(Codegen *c, const TyInstance *it);
 static size_t buf_append(char *out, size_t cap, size_t at, const char *text);
 static NodeList program_items(Codegen *c);
 // Which prototypes a pass emits: everything (single file), only public + extern (a module's header),
@@ -7541,6 +7545,9 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
   const NodeId *const iids = ast_list(c->ast, items);
   char inm[200];
   inst_name(c, it, inm, sizeof inm);
+  // A fn-value instance (an adapter struct holding a closure): its struct body is .c-local, so every
+  // method is static and its prototypes belong to the private pass, whatever the written visibility.
+  const bool ifnv = inst_mentions_fnval(c, it);
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, iids[i]);
     if (n->kind != NODE_EXTEND || !n->as.extend_def.generics.len)
@@ -7564,7 +7571,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
       // Ordinary methods gate on `which` here; a GENERIC method decides per recorded instantiation
       // below (a spec over a function value is always static -> the .c pass, whatever the visibility).
       if (with_body ? mn->as.function.body == NODE_NONE
-                    : (mn->as.function.generics.len == 0 && !want_fn(which, mn->as.function.is_public)))
+                    : (mn->as.function.generics.len == 0 && !want_fn(which, !ifnv && mn->as.function.is_public)))
         continue;
       // Bind the extend's generics (e.g. T) from the instance's args -- shared by every spec below.
       c->nsubst = 0;
@@ -7577,7 +7584,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
       size_t at = buf_append(nm, sizeof nm, 0, inm);
       at = buf_append(nm, sizeof nm, at, "__");
       render_ident(c, name_span(c, mn->as.function.name), nm + at, sizeof nm - at);
-      const bool stat = c->multifile && !mn->as.function.is_public;
+      const bool stat = c->multifile && (ifnv || !mn->as.function.is_public);
       if (c->minst_only && mn->as.function.generics.len == 0) { // foreign-instance pass: only the
         c->nsubst = 0;                                          // recorded generic-method specs are ours
         continue;
@@ -7608,7 +7615,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
         if (inst.method != mids[j] || inst.instance != mi_inst)
           continue;
         c->nsubst = nimpl;
-        bool fnval = false; // a type arg naming a function value (closure env / fn symbol) is TU-local
+        bool fnval = ifnv; // a type arg naming a function value (closure env / fn symbol) is TU-local
         for (uint32_t g = 0; g < mg.len && g < inst.n && c->nsubst < 8; g++) {
           c->subst[c->nsubst].param = (DefId){c->ast->module, mgids[g]};
           c->subst[c->nsubst].concrete = mi_src == c->ast ? inst.targs[g] : ast_reintern(c->ast, mi_src, inst.targs[g]);
@@ -7924,6 +7931,8 @@ static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool 
     emit(c, "typedef %s %s %s;\n", agg_kw(dn), nm, nm); // `union` for an instance of an untagged union (SSO String)
     return;
   }
+  if (inst_mentions_fnval(c, it) != c->fnval_pass) // fn-value instance bodies defer to the .c (env typedefs first)
+    return;
   const NodeList gens = dn->as.aggregate.generics;
   const NodeId *const gids = ast_list(c->ast, gens);
   c->nsubst = 0;
@@ -7970,6 +7979,8 @@ static void emit_enum_inst(Codegen *c, const TyInstance *const it, const bool wi
     emit(c, "typedef struct %s %s;\n", nm, nm);
     return;
   }
+  if (inst_mentions_fnval(c, it) != c->fnval_pass) // fn-value instance bodies defer to the .c (env typedefs first)
+    return;
   const NodeList gens = dn->as.aggregate.generics;
   const NodeId *const gids = ast_list(c->ast, gens);
   c->nsubst = 0;
@@ -8616,6 +8627,46 @@ static void emit_rehomed_structs(Codegen *c, const bool with_body) {
     free(state);
 }
 
+// Instance-struct bodies over FUNCTION VALUES: their fields name a closure's TU-local env struct, so
+// phase_types skipped them (the header keeps only the forward typedef) and this .c pass -- running right
+// after emit_closures' env typedefs -- emits exactly them, dependency-first. Non-fnval dependencies are
+// already complete via the included header (the emit gate in emit_struct_inst/emit_enum_inst skips them).
+static void emit_fnval_instance_structs(Codegen *c) {
+  const size_t n = c->ast->instances.len;
+  uint8_t *const state = calloc(n ? n : 1, 1);
+  c->fnval_pass = true;
+  if (state) {
+    c->inst_emit_state = state; // emit_home_dep routes nested by-value deps through the shared state
+    c->inst_emit_n = n;
+    for (size_t i = 0; i < n; i++) {
+      emit_inst_dfs(c, (uint32_t)i, state, n, true);
+      emit_rehomed_struct_dfs(c, (uint32_t)i, state, n, true);
+    }
+    c->inst_emit_state = NULL;
+    c->inst_emit_n = 0;
+    free(state);
+  } else { // OOM: insertion order (correct unless a fnval instance embeds a later one by value)
+    for (size_t i = 0; i < n; i++) {
+      const TyInstance it = c->ast->instances.data[i];
+      bool concrete = true;
+      for (uint8_t k = 0; k < it.n; k++)
+        concrete &= type_is_concrete(c, it.args[k]);
+      if (!concrete)
+        continue;
+      if (it.module == c->ast->module) {
+        const NodeKind dk = ast_at_const(c->ast, it.decl)->kind;
+        if (dk == NODE_STRUCT)
+          emit_struct_inst(c, &it, true);
+        else if (dk == NODE_ENUM)
+          emit_enum_inst(c, &it, true);
+      } else if (inst_rehomed_here(c, &it)) {
+        emit_rehomed_struct(c, &it, true);
+      }
+    }
+  }
+  c->fnval_pass = false;
+}
+
 // Methods of every cross-module instance re-homed here: template (extends + method bodies) sourced from the
 // owner via the c->ast swap, while generic-method uses (map<U>) are still read from this (home) module's
 // method_insts (keyed by the receiver's home-pool TypeId), since that is where the uses were recorded.
@@ -8674,6 +8725,16 @@ static bool cg_type_mentions_fnval(Codegen *c, const TypeId t) {
     default:
       return false;
   }
+}
+
+// Does any of `it`'s type args name a function value? Such an instance's struct body (a closure's env
+// field), methods, and layout assert are all TU-local: the body defers to the .c after the env typedefs,
+// and every method emits static (two TUs can never share a closure type, so nothing is lost).
+static bool inst_mentions_fnval(Codegen *c, const TyInstance *const it) {
+  for (uint8_t i = 0; i < it->n; i++)
+    if (cg_type_mentions_fnval(c, it->args[i]))
+      return true;
+  return false;
 }
 
 // Generic-method specs recorded HERE over a foreign instance that is NOT re-homed here: a method type
@@ -8799,8 +8860,8 @@ static void emit_layout_asserts(Codegen *c) {
     bool concrete = true;
     for (uint8_t k = 0; k < it.n; k++)
       concrete &= type_is_concrete(c, it.args[k]);
-    if (!concrete)
-      continue;
+    if (!concrete || inst_mentions_fnval(c, &it))
+      continue; // a closure env's layout is codegen-internal: no assert (the struct is .c-local anyway)
     const TypeId t = ast_intern_instance(c->ast, it.module, it.decl, it.args, it.n);
     uint64_t size, align;
     if (!consteval_layout(ce, c->ast->module, t, &size, &align))
@@ -9341,6 +9402,7 @@ static void phase_prototypes(Codegen *c, const int which) {
   }
   if (which != PROTO_PUBLIC) { // free-function specs, closures and callback specs are static -> .c only
     emit_closures(c, false); // first: env struct typedefs, which spec prototypes may take as params
+    emit_fnval_instance_structs(c); // then instance structs embedding those envs (fn-value type args)
     emit_specializations(c, false);
     emit_callback_specializations(c, false);
   }
