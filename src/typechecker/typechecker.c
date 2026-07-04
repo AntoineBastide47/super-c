@@ -161,6 +161,7 @@ static TypeId check_member(TypeChecker *t, const Node *n, bool prefer_method);
 static TypeId subst_type(TypeChecker *t, TypeId ty, const DefId *params, const TypeId *args, int n);
 static bool aggregate_of(TypeChecker *t, TypeId ty, ModuleId *mod, NodeId *decl, DefId *params, TypeId *args, int *n);
 static bool dyn_coerce(TypeChecker *t, NodeId node, TypeId src, TypeId dyn_ty);
+static bool tc_box_of(TypeChecker *t, const Ty *y, TypeId *inner, bool *global_alloc);
 
 TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, const Package *package) {
   TypeChecker *const t = calloc(1, sizeof *t);
@@ -682,9 +683,35 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
   }
   // A reference erases to a trait object: `&T`/`&mut T` -> `&dyn I` (`&mut dyn I` needs a `&mut T`
   // source), when T implements I. The site is recorded so codegen materializes the {data, vt} pair.
+  // An explicit `&`/`&mut` over an OWNED trait object instead reborrows it: `&Box<dyn I>` -> `&dyn I`
+  // (layout-identical; codegen derefs the reference back to the pair -- the TYPE_NONE-src record).
   if (ex->kind == TYPE_DYN && ex->qualifier != TYPE_QUAL_NONE && ac->kind == TYPE_REFERENCE &&
-      (ex->qualifier == TYPE_QUAL_CONST || ac->qualifier == TYPE_QUAL_MUT))
+      (ex->qualifier == TYPE_QUAL_CONST || ac->qualifier == TYPE_QUAL_MUT)) {
+    const Ty *const rel = ast_type_at(t->ast, ac->as.elem);
+    if (rel->kind == TYPE_DYN) {
+      if (rel->qualifier != TYPE_QUAL_NONE || rel->module != ex->module || rel->as.decl != ex->as.decl)
+        return false;
+      ast_add_dyn_use(t->ast, node, TYPE_NONE, expected);
+      return true;
+    }
     return dyn_coerce(t, node, ac->as.elem, expected);
+  }
+  // `Box<T>` erases to the OWNED trait object `Box<dyn I>`: a MOVE of the box (the by-value move
+  // machinery already fires -- the source is a Free value in a move position). Only the default
+  // allocator: a stateful allocator cannot live in the per-type const vtable whose drop glue frees.
+  if (ex->kind == TYPE_DYN && ex->qualifier == TYPE_QUAL_NONE && ac->kind == TYPE_INSTANCE) {
+    TypeId inner;
+    bool galloc;
+    if (tc_box_of(t, ac, &inner, &galloc)) {
+      if (!galloc) {
+        const Span sp = ast_at_const(t->ast, node)->span;
+        typechecker_errorf(t, sp.start, sp.end - sp.start,
+                           "only a default-allocated 'Box<T>' can be erased to 'Box<dyn I>'");
+        return true; // reported
+      }
+      return dyn_coerce(t, node, inner, expected);
+    }
+  }
   // Trait-object reborrow weakening: `&mut dyn I` satisfies a `&dyn I` slot (same layout, no work).
   if (ex->kind == TYPE_DYN && ac->kind == TYPE_DYN && ex->module == ac->module && ex->as.decl == ac->as.decl &&
       ex->qualifier == TYPE_QUAL_CONST && ac->qualifier == TYPE_QUAL_MUT)
@@ -2452,6 +2479,16 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
           return ast_builtin((BuiltinType)bb);
         const Node *const dn = ast_at_const(mod_ast(t, d.module), d.node);
         const NodeList args = n->as.type_path.args;
+        // A foreign signature's `Box<dyn I>`: the intercepted owned trait object, not a Box instance.
+        if (args.len == 1 && t->package) {
+          const Node *const an = ast_at_const(a, ast_list(a, args)[0]);
+          if (an->kind == NODE_DYN_TYPE && an->as.indirect_type.qualifier == TYPE_QUAL_NONE) {
+            ModuleId bm;
+            const NodeId bx = package_prelude_lookup(t->package, "Box", 3, true, &bm);
+            if (d.module == bm && d.node == bx)
+              return lower_type_in(t, m, ast_list(a, args)[0]);
+          }
+        }
         if ((dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) && dn->as.aggregate.generics.len > 0 &&
             (args.len > 0 || agg_has_default_at(t, d.module, dn, args.len))) {
           const NodeId *const aids = ast_list(a, args); // a foreign generic application (Box<T>) -> an instance
@@ -2619,6 +2656,40 @@ static int slice_kind(TypeChecker *t, const TypeId tid, TypeId *const elem) {
   return kind;
 }
 
+// The TYPE_DYN behind a `dyn I` node, with `qual` as the flavor: the node's own for `&[mut] dyn I`,
+// forced TYPE_QUAL_NONE by the intercepted owned `Box<dyn I>` spelling. Memoizes onto the node.
+static TypeId resolve_dyn_node(TypeChecker *t, const NodeId id, const TypeQualifier qual) {
+  Ast *const a = t->ast;
+  const Node *const n = ast_at_const(a, id);
+  const NodeId inner = n->as.indirect_type.type;
+  const DefId d = ast_at_const(a, inner)->kind == NODE_TYPE_PATH ? ast_resolution_def(a, inner)
+                                                                 : (DefId){0, NODE_NONE};
+  TypeId result = TYPE_ERROR;
+  if (d.node == NODE_NONE || ast_at_const(mod_ast(t, d.module), d.node)->kind != NODE_INTERFACE)
+    typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'dyn' requires an interface");
+  else if (dyn_compatible(t, d, n->span))
+    result = ast_intern_type(a, (Ty){.kind = TYPE_DYN, .qualifier = qual, .module = d.module, .as.decl = d.node});
+  ast_set_type(a, id, result);
+  return result;
+}
+
+// Is `y` a prelude `Box<T, A>` instance? Yields T and whether A is the default `Global` allocator.
+static bool tc_box_of(TypeChecker *t, const Ty *const y, TypeId *const inner, bool *const global_alloc) {
+  if (y->kind != TYPE_INSTANCE || !t->package)
+    return false;
+  const TyInstance *const it = ast_instance(t->ast, y->as.inst);
+  ModuleId bm;
+  const NodeId bx = package_prelude_lookup(t->package, "Box", 3, true, &bm);
+  if (it->module != bm || it->decl != bx || it->n < 1)
+    return false;
+  *inner = it->args[0];
+  ModuleId gm;
+  const NodeId gd = package_prelude_lookup(t->package, "Global", 6, true, &gm);
+  const Ty *const ay = it->n >= 2 ? ast_type_at(t->ast, it->args[1]) : NULL;
+  *global_alloc = ay && ay->kind == TYPE_STRUCT && ay->module == gm && ay->as.decl == gd;
+  return true;
+}
+
 // Lower an AST type node to an interned TypeId (memoized in the `types` side table).
 static TypeId resolve_type(TypeChecker *t, const NodeId id) {
   if (id == NODE_NONE)
@@ -2634,6 +2705,25 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
       const NodeList parts = n->as.type_path.parts;
       const NodeList args = n->as.type_path.args;
       const NodeId *const arg_ids = ast_list(a, args);
+      // `Box<dyn I>` is intercepted: the OWNED trait object, NOT a Box instance (a per-type const
+      // vtable cannot carry a stateful allocator, so only the default Box spelling erases). A bare
+      // `dyn I` (qualifier NONE) under any other generic head has no meaning.
+      for (uint32_t i = 0; i < args.len && t->package; i++) {
+        const Node *const an = ast_at_const(a, arg_ids[i]);
+        if (an->kind != NODE_DYN_TYPE || an->as.indirect_type.qualifier != TYPE_QUAL_NONE)
+          continue;
+        ModuleId bm;
+        const NodeId bx = package_prelude_lookup(t->package, "Box", 3, true, &bm);
+        const DefId hd = ast_resolution_def(a, id);
+        if (args.len == 1 && hd.module == bm && hd.node == bx) {
+          result = resolve_dyn_node(t, arg_ids[0], TYPE_QUAL_NONE);
+        } else {
+          typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                             "a bare 'dyn' type can only be the generic argument of 'Box'");
+        }
+        ast_set_type(a, id, result);
+        return result;
+      }
       for (uint32_t i = 0; i < args.len; i++)
         resolve_type(t, arg_ids[i]); // resolve type args first so their TypeIds exist
       const DefId d = ast_resolution_def(a, id);
@@ -2747,23 +2837,13 @@ static TypeId resolve_type(TypeChecker *t, const NodeId id) {
       result = ast_intern_type(a, (Ty){.kind = TYPE_FUNCTION, .module = a->module, .as.decl = id});
       break;
     case NODE_DYN_TYPE: {
-      const NodeId inner = n->as.indirect_type.type;
-      const DefId d = ast_at_const(a, inner)->kind == NODE_TYPE_PATH ? ast_resolution_def(a, inner)
-                                                                     : (DefId){0, NODE_NONE};
-      if (d.node == NODE_NONE || ast_at_const(mod_ast(t, d.module), d.node)->kind != NODE_INTERFACE) {
-        typechecker_errorf(t, n->span.start, n->span.end - n->span.start, "'dyn' requires an interface");
-        break;
-      }
-      if (!dyn_compatible(t, d, n->span))
-        break;
       if (n->as.indirect_type.qualifier == TYPE_QUAL_NONE) {
-        // Owned trait objects (`Box<dyn I>`) are not built yet; a bare `dyn I` has no size of its own.
+        // Reached only OUTSIDE the `Box<dyn I>` interception: a bare `dyn I` is not a value type.
         typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
-                           "a 'dyn' type must be behind a reference: '&dyn I' or '&mut dyn I'");
+                           "a 'dyn' type must be '&dyn I', '&mut dyn I', or 'Box<dyn I>'");
         break;
       }
-      result = ast_intern_type(
-          a, (Ty){.kind = TYPE_DYN, .qualifier = n->as.indirect_type.qualifier, .module = d.module, .as.decl = d.node});
+      result = resolve_dyn_node(t, id, n->as.indirect_type.qualifier);
       break;
     }
     default:
@@ -3685,6 +3765,11 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       } else if (rty->kind == TYPE_GENERIC) {
         DefId iface;
         resolvable = find_bound_method(t, rty->module, rty->as.decl, fname, &iface).node != NODE_NONE;
+      } else if (rty->kind == TYPE_DYN && rty->qualifier == TYPE_QUAL_NONE) {
+        // An OWNED trait object: `.free()` runs the vtable's drop glue and consumes the binding
+        // (codegen emits the `<Iface>__dyn_free` helper; a borrowed dyn stays the no-op below).
+        tc_mark_move(t, path_callee->as.member.object);
+        return ast_builtin(BT_VOID);
       }
     }
     if (!resolvable)
@@ -4131,11 +4216,16 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       const Ty *const rvt = ast_type_at(t->ast, ast_type(t->ast, recv));
       const TypeKind rvk = rvt->kind;
       if (rvk == TYPE_DYN) {
-        // The data pointer's mutability is the TYPE's (`&dyn` vs `&mut dyn`), not the binding's.
+        // Borrowed: the data pointer's mutability is the TYPE's (`&dyn` vs `&mut dyn`), not the
+        // binding's. Owned (`Box<dyn I>`): the binding's, like any owned value.
         if (rvt->qualifier == TYPE_QUAL_CONST) {
           const Span rsp = ast_at_const(t->ast, recv)->span;
           typechecker_errorf(t, rsp.start, rsp.end - rsp.start,
                              "cannot call a '&mut self' method through '&dyn' (use '&mut dyn')");
+        } else if (rvt->qualifier == TYPE_QUAL_NONE && !receiver_mutable(t, recv)) {
+          const Span rsp = ast_at_const(t->ast, recv)->span;
+          typechecker_errorf(t, rsp.start, rsp.end - rsp.start,
+                             "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')");
         }
       } else {
         const bool consuming_free =

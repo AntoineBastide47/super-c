@@ -906,6 +906,27 @@ static void test_dyn(void) {
       DYN_PRELUDE "fn f<T: Shape>(x: &T) f64 { let d: &dyn Shape = x; return d.area(); }\n"
                   "fn main() i32 { let c = Circle { r: 1.0 }; return f(&c) as i32; }\n",
       "cannot erase a generic type parameter");
+  // Owned trait objects.
+  expect_ok(
+      "Box<dyn> erasure, dispatch, reborrow, explicit free",
+      DYN_PRELUDE
+      "fn view(a: &dyn Shape) f64 { return a.area(); }\n"
+      "fn main() i32 { let mut b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n"
+      "  b.scale(2.0); let v = view(&b); b.free(); return v as i32; }\n");
+  expect_error(
+      "use after freeing an owned dyn",
+      DYN_PRELUDE "fn main() i32 { let mut b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n"
+                  "  b.free(); return b.area() as i32; }\n",
+      "use of moved value");
+  expect_error(
+      "&mut self through an immutable owned dyn binding",
+      DYN_PRELUDE "fn main() i32 { let b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n"
+                  "  b.scale(2.0); return 0; }\n",
+      "cannot call a '&mut self' method on an immutable binding");
+  expect_error(
+      "bare dyn as a non-Box generic argument",
+      DYN_PRELUDE "fn main() i32 { let v: Vector<dyn Shape> = Vector::<dyn Shape>::new(); return 0; }\n",
+      "can only be the generic argument of 'Box'");
 }
 
 int main(void) {
