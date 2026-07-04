@@ -2177,10 +2177,35 @@ static void test_numeric_suffixes_widening(void) {
                  13, "");
 }
 
+// std string->number parsing: whole-string, radix forms, per-width range checks, float mantissa/exponent.
+static void test_str_parse(void) {
+  sc_run_program(
+      "str parse: decimal/radix/float accept + reject",
+      PRE "fn main() i32 {\n"
+          "  let a = \"123\".parse_i32().unwrap();\n"
+          "  let b = \"-42\".parse_i64().unwrap();\n"
+          "  let c = \"ff\".parse_u64_radix(16).unwrap();\n"
+          "  let d = \"1010\".parse_i64_radix(2).unwrap();\n"
+          "  let e = \"3.5\".parse_f64().unwrap();\n"
+          "  let f = \"1e3\".parse_f32().unwrap();\n"
+          "  let r1 = \"12x\".parse_i32().is_none();\n"
+          "  let r2 = \"\".parse_i64().is_none();\n"
+          "  let r3 = \"256\".parse_u8().is_none();\n"
+          "  let r4 = \"-1\".parse_u64().is_none();\n"
+          "  let r5 = \"9223372036854775808\".parse_i64().is_none();\n"
+          "  let r6 = \"-9223372036854775808\".parse_i64().is_some();\n"
+          "  let ok = a == 123 && b == -42 && c == 255 && d == 10 && e == 3.5 && f == 1000.0\n"
+          "        && r1 && r2 && r3 && r4 && r5 && r6;\n"
+          "  unsafe exit(switch ok { true => 9, false => 1 });\n"
+          "}\n",
+      9, "");
+}
+
 int main(void) {
   // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
   static void (*const tests[])(void) = {
       test_dyn,            test_raw_strings,       test_numeric_suffixes_widening,
+      test_str_parse,
       test_bug_regressions,    test_attributes,           test_free_raii,
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,
