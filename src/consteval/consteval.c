@@ -366,9 +366,10 @@ static bool aggregate_layout(ConstEval *ce, const ModuleId dm, const NodeId dn, 
   const NodeId *const fids = ast_list(a, fs);
   for (uint32_t i = 0; i < fs.len; i++) {
     const Node *const f = ast_at_const(a, fids[i]);
-    if (f->kind != NODE_FIELD)
+    const bool tuple_member = d->as.aggregate.is_tuple; // a tuple struct's member IS its type node
+    if (!tuple_member && f->kind != NODE_FIELD)
       continue;
-    const TypeId ft = ce_type(a, f->as.field.type);
+    const TypeId ft = ce_type(a, tuple_member ? fids[i] : f->as.field.type);
     if (ft == TYPE_NONE)
       return false; // the struct hasn't been type-checked yet; stay unfoldable rather than guess
     if (!acc_field(ce, &acc, dm, ft, env, depth))

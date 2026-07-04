@@ -612,6 +612,24 @@ static NodeId parse_struct(Parser *p) {
   advance(p);
   const NodeId name = identifier(p);
   const NodeList generics = parse_generics(p);
+  if (match(p, Semicolon)) // unit struct `struct S;`: sugar for an empty body
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_STRUCT,
+                    .span = span_new(start, previous_end(p)),
+                    .as.aggregate = {.name = name, .generics = generics, .members = {0}},
+                });
+  if (match(p, LeftParen)) { // tuple struct `struct Pair(A, B);`: positional TYPE members
+    const NodeList types = parse_comma_types(p, RightParen);
+    expect(p, RightParen, "')'");
+    expect(p, Semicolon, "';'");
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_STRUCT,
+                    .span = span_new(start, previous_end(p)),
+                    .as.aggregate = {.name = name, .generics = generics, .members = types, .is_tuple = true},
+                });
+  }
   expect(p, LeftBrace, "'{'");
   const NodeList fields = parse_fields(p);
   expect(p, RightBrace, "'}'");

@@ -4379,6 +4379,25 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
       ct = ast_type_at(t->ast, callee);
     }
   }
+  if (ct->kind == TYPE_STRUCT) { // `Pair(1, 2)`: tuple-struct construction through call syntax
+    const Node *const sd = ast_at_const(mod_ast(t, ct->module), ct->as.decl);
+    if (sd->kind == NODE_STRUCT && sd->as.aggregate.is_tuple) {
+      const ModuleId sm = ct->module;
+      const NodeId sdecl = ct->as.decl;
+      const NodeId *const mids = ast_list(mod_ast(t, sm), sd->as.aggregate.members);
+      if (args.len != sd->as.aggregate.members.len) {
+        typechecker_errorf(t, sp.start, sp.end - sp.start, "tuple struct takes %u element%s, got %u",
+                           sd->as.aggregate.members.len, sd->as.aggregate.members.len == 1 ? "" : "s", args.len);
+        return TYPE_NONE;
+      }
+      for (uint32_t i = 0; i < args.len; i++) {
+        const TypeId et = lower_type_in(t, sm, mids[i]);
+        if (!compatible(t, et, aids[i]))
+          err_mismatch(t, aids[i], et);
+      }
+      return named_type_of(t, sm, sdecl);
+    }
+  }
   if (ct->kind != TYPE_FUNCTION) {
     typechecker_errorf(t, sp.start, sp.end - sp.start, "called value is not a function");
     return TYPE_NONE;
@@ -4914,6 +4933,19 @@ static TypeId check_member(TypeChecker *t, const Node *const n, const bool prefe
     for (uint32_t i = name.start; i < name.end && digits; i++)
       digits = t->source[i] >= '0' && t->source[i] <= '9';
     if (digits) {
+      const Node *const bd0 = ast_at_const(mod_ast(t, bmod), bdecl);
+      if (bd0->kind == NODE_STRUCT && bd0->as.aggregate.is_tuple) { // positional tuple-struct element
+        uint32_t idx = 0;
+        for (uint32_t i = name.start; i < name.end; i++)
+          idx = idx * 10 + (uint32_t)(t->source[i] - '0');
+        if (idx >= bd0->as.aggregate.members.len) {
+          typechecker_errorf(t, name.start, name.end - name.start, "tuple struct has no element %u", idx);
+          return TYPE_NONE;
+        }
+        const NodeId tnode = ast_list(mod_ast(t, bmod), bd0->as.aggregate.members)[idx];
+        ast_set_resolution_def(t->ast, mname, (DefId){bmod, tnode});
+        return subst_type(t, lower_type_in(t, bmod, tnode), gp, ga, gn);
+      }
       char fld[8];
       snprintf(fld, sizeof fld, "_%.*s", (int)(name.end - name.start), (const char *)t->source + name.start);
       fhit = find_member_cstr(t, bmod, bdecl, fld);
@@ -6760,7 +6792,9 @@ static bool tc_embeds_by_value(TypeChecker *t, const ModuleId m, const NodeId d,
     const Node *const mn = ast_at_const(a, mids[i]);
     NodeId tns[16];
     uint32_t ntn = 0;
-    if (mn->kind == NODE_FIELD) {
+    if (dn->as.aggregate.is_tuple) {
+      tns[ntn++] = mids[i]; // a tuple struct's member IS its type node
+    } else if (mn->kind == NODE_FIELD) {
       tns[ntn++] = mn->as.field.type;
     } else if (mn->kind == NODE_VARIANT) {
       const NodeId *const pl = ast_list(a, mn->as.variant.payload);
@@ -6840,6 +6874,10 @@ static void check_item(TypeChecker *t, const NodeId id) {
     case NODE_ENUM: {
       const NodeList members = n->as.aggregate.members;
       const NodeId *const ids = ast_list(t->ast, members);
+      if (n->as.aggregate.is_tuple) { // tuple struct: members ARE type nodes
+        for (uint32_t i = 0; i < members.len; i++)
+          resolve_type(t, ids[i]);
+      } else
       for (uint32_t i = 0; i < members.len; i++) {
         const Node *const m = ast_at_const(t->ast, ids[i]);
         if (m->kind == NODE_FIELD) {
