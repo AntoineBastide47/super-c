@@ -297,6 +297,245 @@ extend str {
     pub fn lines(self: &str) Lines {
         return Lines { s: self.slice(0, self.len), i: 0 };
     }
+
+    // --- string -> number parsing ----------------------------------------------------------------
+    // Whole-string parses: the entire view must be `[+|-]digits` (no surrounding whitespace; trim
+    // first). Radix forms accept 2..=36 with case-insensitive digits. Empty input, a stray sign,
+    // an invalid digit, or overflow all yield `None`.
+
+    pub fn parse_u64_radix(self: &str, radix: u32) Option<u64> {
+        let mut start: usize = 0;
+        if self.len > 0 && self.byte_at(0) == b'+' {
+            start = 1;
+        }
+        return __str_digits_u64(self, radix, start);
+    }
+
+    pub fn parse_i64_radix(self: &str, radix: u32) Option<i64> {
+        if self.len == 0 {
+            return Option::<i64>::None;
+        }
+        let b0 = self.byte_at(0);
+        let neg = b0 == b'-';
+        let mut start: usize = 0;
+        if neg || b0 == b'+' {
+            start = 1;
+        }
+        return switch __str_digits_u64(self, radix, start) {
+            Some(v) => switch neg {
+                // |i64::MIN| = 2^63 is spellable only with the sign; unsigned negate avoids overflow
+                true => switch v <= 0x8000_0000_0000_0000u64 {
+                    true => Option::<i64>::Some((0 - v) as i64),
+                    false => Option::<i64>::None,
+                },
+                false => switch v <= 0x7FFF_FFFF_FFFF_FFFFu64 {
+                    true => Option::<i64>::Some(v as i64),
+                    false => Option::<i64>::None,
+                },
+            },
+            None => Option::<i64>::None,
+        };
+    }
+
+    pub fn parse_u64(self: &str) Option<u64> { return self.parse_u64_radix(10); }
+    pub fn parse_i64(self: &str) Option<i64> { return self.parse_i64_radix(10); }
+    pub fn parse_usize(self: &str) Option<usize> {
+        return switch self.parse_u64() {
+            Some(v) => Option::<usize>::Some(v as usize),
+            None => Option::<usize>::None,
+        };
+    }
+    pub fn parse_isize(self: &str) Option<isize> {
+        return switch self.parse_i64() {
+            Some(v) => Option::<isize>::Some(v as isize),
+            None => Option::<isize>::None,
+        };
+    }
+    pub fn parse_u32(self: &str) Option<u32> {
+        return switch self.parse_u64() {
+            Some(v) => switch v <= 0xFFFF_FFFFu64 {
+                true => Option::<u32>::Some(v as u32),
+                false => Option::<u32>::None,
+            },
+            None => Option::<u32>::None,
+        };
+    }
+    pub fn parse_u16(self: &str) Option<u16> {
+        return switch self.parse_u64() {
+            Some(v) => switch v <= 65535 {
+                true => Option::<u16>::Some(v as u16),
+                false => Option::<u16>::None,
+            },
+            None => Option::<u16>::None,
+        };
+    }
+    pub fn parse_u8(self: &str) Option<u8> {
+        return switch self.parse_u64() {
+            Some(v) => switch v <= 255 {
+                true => Option::<u8>::Some(v as u8),
+                false => Option::<u8>::None,
+            },
+            None => Option::<u8>::None,
+        };
+    }
+    pub fn parse_i32(self: &str) Option<i32> {
+        return switch self.parse_i64() {
+            Some(v) => switch v >= -2_147_483_648 && v <= 2_147_483_647 {
+                true => Option::<i32>::Some(v as i32),
+                false => Option::<i32>::None,
+            },
+            None => Option::<i32>::None,
+        };
+    }
+    pub fn parse_i16(self: &str) Option<i16> {
+        return switch self.parse_i64() {
+            Some(v) => switch v >= -32_768 && v <= 32_767 {
+                true => Option::<i16>::Some(v as i16),
+                false => Option::<i16>::None,
+            },
+            None => Option::<i16>::None,
+        };
+    }
+    pub fn parse_i8(self: &str) Option<i8> {
+        return switch self.parse_i64() {
+            Some(v) => switch v >= -128 && v <= 127 {
+                true => Option::<i8>::Some(v as i8),
+                false => Option::<i8>::None,
+            },
+            None => Option::<i8>::None,
+        };
+    }
+
+    // Decimal float: `[+|-] digits [. digits] [(e|E) [+|-] digits]`. Computed as an integer mantissa
+    // scaled by a power of ten -- exact for the common cases; the last ulp is not guaranteed for
+    // extreme magnitudes.
+    pub fn parse_f64(self: &str) Option<f64> {
+        let n = self.len;
+        if n == 0 {
+            return Option::<f64>::None;
+        }
+        let mut i: usize = 0;
+        let b0 = self.byte_at(0);
+        let neg = b0 == b'-';
+        if neg || b0 == b'+' {
+            i = 1;
+        }
+        let mut mant: u64 = 0;
+        let mut exp10: i64 = 0;
+        let mut any = false;
+        while i < n {
+            let b = self.byte_at(i);
+            if b < b'0' || b > b'9' {
+                break;
+            }
+            any = true;
+            if mant <= 1_844_674_407_370_955_160u64 {
+                mant = mant * 10 + ((b - b'0') as u64);
+            } else {
+                exp10 += 1; // mantissa saturated: keep the scale, drop precision
+            }
+            i += 1;
+        }
+        if i < n && self.byte_at(i) == b'.' {
+            i += 1;
+            while i < n {
+                let b = self.byte_at(i);
+                if b < b'0' || b > b'9' {
+                    break;
+                }
+                any = true;
+                if mant <= 1_844_674_407_370_955_160u64 {
+                    mant = mant * 10 + ((b - b'0') as u64);
+                    exp10 -= 1;
+                }
+                i += 1;
+            }
+        }
+        if !any {
+            return Option::<f64>::None;
+        }
+        if i < n && (self.byte_at(i) == b'e' || self.byte_at(i) == b'E') {
+            i += 1;
+            let mut eneg = false;
+            if i < n && (self.byte_at(i) == b'+' || self.byte_at(i) == b'-') {
+                eneg = self.byte_at(i) == b'-';
+                i += 1;
+            }
+            let mut e: i64 = 0;
+            let mut eany = false;
+            while i < n {
+                let b = self.byte_at(i);
+                if b < b'0' || b > b'9' {
+                    break;
+                }
+                eany = true;
+                if e < 10_000 {
+                    e = e * 10 + ((b - b'0') as i64);
+                }
+                i += 1;
+            }
+            if !eany {
+                return Option::<f64>::None;
+            }
+            exp10 += switch eneg { true => 0 - e, false => e };
+        }
+        if i != n {
+            return Option::<f64>::None;
+        }
+        let mut v = mant as f64;
+        let mut e = exp10;
+        while e > 0 {
+            v = v * 10.0;
+            e -= 1;
+        }
+        while e < 0 {
+            v = v / 10.0;
+            e += 1;
+        }
+        if neg {
+            v = 0.0 - v;
+        }
+        return Option::<f64>::Some(v);
+    }
+
+    pub fn parse_f32(self: &str) Option<f32> {
+        return switch self.parse_f64() {
+            Some(v) => Option::<f32>::Some(v as f32),
+            None => Option::<f32>::None,
+        };
+    }
+}
+
+// Digits of `s` in `[start, s.len)` in `radix`, all consumed exactly.
+// `None` on radix outside 2..=36, empty digit run, an invalid digit, or u64 overflow.
+fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
+    if radix < 2 || radix > 36 || start >= s.len {
+        return Option::<u64>::None;
+    }
+    let r = radix as u64;
+    let mut acc: u64 = 0;
+    let mut i = start;
+    while i < s.len {
+        let b = s.byte_at(i);
+        let mut d: u32 = 99;
+        if b >= b'0' && b <= b'9' {
+            d = (b - b'0') as u32;
+        } else if b >= b'a' && b <= b'z' {
+            d = (b - b'a') as u32 + 10;
+        } else if b >= b'A' && b <= b'Z' {
+            d = (b - b'A') as u32 + 10;
+        }
+        if d >= radix {
+            return Option::<u64>::None;
+        }
+        let dv = d as u64;
+        if acc > (0xFFFF_FFFF_FFFF_FFFFu64 - dv) / r {
+            return Option::<u64>::None; // would overflow u64
+        }
+        acc = acc * r + dv;
+        i += 1;
+    }
+    return Option::<u64>::Some(acc);
 }
 
 extend Bytes as Iterator<u8> {
