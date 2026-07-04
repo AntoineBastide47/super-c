@@ -421,21 +421,23 @@ generated `build/` tree (you never reason about the build layout), anything else
 written (`<...>` for bare names). Calling any extern binding requires an `unsafe` block or prefix at
 the call site.
 
-Whole C sources and libraries can be pulled into the build, beyond declarations:
+Whole C sources and libraries come along automatically: a backing header that resolves next to the
+`.spc` file pulls in its same-stem `.c` sibling with no ceremony —
 
 ```superc
-@c.source("vendor/foo.c")   // compile this C file into the program
-@c.link("m")                // and link -lm (a value starting with '-' passes through verbatim)
-extern "C" "vendor/foo.h" {
-    fn foo_run(n: i32) i32;
+extern "C" "native.h" {      // native.c beside it is discovered and compiled into the build
+    fn native_mix(a: i32, b: i32) i32;
 }
 ```
 
-`@c.source` emits a wrapper translation unit into `build/` (an absolute `#include` of the file, so
-its own relative includes keep resolving), meaning `cc build/**/*.c` picks it up automatically;
-paths resolve relative to the declaring `.spc` file. `@c.link` flags are written to
-`build/__ldflags` (one per line — `cc ... $(cat build/__ldflags)`) and applied automatically to
-`--test` builds.
+— while `@c.source("impl.c")` names an implementation that lives elsewhere, and `@c.link("m")`
+declares a library (a value starting with `-` passes through verbatim). Each source becomes a
+wrapper translation unit in `build/` (an absolute `#include`, so the file's own relative includes
+keep resolving), meaning `cc build/**/*.c` picks everything up; paths resolve relative to the
+declaring `.spc` file. Link flags are written to `build/__ldflags` (one per line —
+`cc ... $(cat build/__ldflags)`) and applied automatically to `--test` builds. A library declares
+its flag once where its bindings live — the bundled `math`/`pthread`/`dlfcn` ffi modules already
+do, so importing them is all it takes.
 
 Variadics work in both directions. A binding can take `...`:
 
