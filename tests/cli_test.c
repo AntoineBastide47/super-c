@@ -475,6 +475,33 @@ static void test_module_features(void) {
   CHECK(run_cmd(crun, NULL, 0) == 115, "const + alias + qualified construct + extension method run (12+3+100)");
 }
 
+// A public `static mut` global: extern-declared in its module's header, defined once in the .c, and
+// readable/assignable across modules (both through the owning module's functions and directly by path).
+static void test_cross_module_static_mut(void) {
+  char root[4112], spc[4170], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/statics", DIR);
+  mkfile(root, "state.spc",
+         "pub static mut hits: i64 = 0;\n"
+         "pub fn record() { hits += 1; }\n");
+  mkfile(root, "main.spc",
+         "import state;\n"
+         "fn main() i32 {\n"
+         "  state::record();\n"
+         "  state::record();\n"
+         "  state::hits += 3;\n"
+         "  return (state::hits - 5) as i32;\n"
+         "}\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module static mut compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/statics.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "static mut C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 0, "writes from both modules land on the one definition");
+}
+
 // A7: a generic defined in one module, instantiated over a user struct held BY VALUE in another. The
 // generic's module cannot see the user type's layout, so the owner-emits model would produce an
 // incomplete-type field; instead the instance is re-homed to the user module and full-monomorphized
@@ -991,6 +1018,7 @@ int main(void) {
   test_ctfe_memory();
   test_ctfe_gaps();
   test_module_features();
+  test_cross_module_static_mut();
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();
   test_emit_macro_export();

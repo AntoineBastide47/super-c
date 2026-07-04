@@ -874,6 +874,22 @@ static void test_numeric_suffixes_widening(void) {
                "does not fit in its suffixed type");
 }
 
+// `static mut` module globals: assignable and mutably borrowable; plain consts stay immutable; `mut`
+// is mandatory; owning (Free) types are rejected (no scope would ever run their destructor).
+static void test_static_mut(void) {
+  expect_ok("static mut is assignable and borrowable",
+            "static mut counter: i32 = 10;\n"
+            "fn bump() { counter += 5; }\n"
+            "fn main() i32 { counter = counter + 1; bump(); let r = &mut counter; *r += 1; return counter; }\n");
+  expect_error("a const is not assignable", "const K: i32 = 5;\nfn main() i32 { K = 6; return 0; }\n",
+               "cannot assign");
+  expect_error("static requires mut", "static counter: i32 = 0;\nfn main() i32 { return 0; }\n",
+               "expected 'mut' after 'static'");
+  expect_error("static mut rejects owning types",
+               "static mut v: Vector<i32> = Vector::<i32>::new();\nfn main() i32 { return 0; }\n",
+               "cannot hold an owning");
+}
+
 static void test_dyn(void) {
   expect_ok(
       "dyn coercion + vtable dispatch",

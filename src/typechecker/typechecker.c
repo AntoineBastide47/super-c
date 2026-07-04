@@ -3497,15 +3497,35 @@ static TypeId check_binary(TypeChecker *t, const Node *const n, const NodeId id)
 
 // Can the lvalue at `node` be assigned to? A mutable `let`, a deref/index/member reached through
 // something mutable. Parameters and consts are immutable.
+// Does a `::` path value (`mod::NAME`) name a `static mut` global -- the one path form that is an
+// assignable place?
+static bool tc_path_static_mut(TypeChecker *t, const NodeId id) {
+  const Node *const n = ast_at_const(t->ast, id);
+  DefId d = ast_resolution_def(t->ast, id); // multi-segment module paths record on the outer node
+  if (d.node == NODE_NONE)
+    d = ast_resolution_def(t->ast, n->as.member.member); // local Type::X records on the member
+  if (d.node == NODE_NONE)
+    return false;
+  const Node *const dn = ast_at_const(mod_ast(t, d.module), d.node);
+  return dn->kind == NODE_CONST && dn->as.const_def.is_static_mut;
+}
+
 static bool is_assignable(TypeChecker *t, const NodeId node_in) {
   const NodeId node = peel_wrappers(t, node_in); // `unsafe p[0] = v` assigns through the wrapper
   const Node *const n = ast_at_const(t->ast, node);
   switch (n->kind) {
     case NODE_IDENTIFIER: {
+      const DefId dd = ast_resolution_def(t->ast, node); // a `static mut` may live in another module
+      if (dd.node != NODE_NONE && dd.module != t->ast->module) {
+        const Node *const fdn = ast_at_const(mod_ast(t, dd.module), dd.node);
+        return fdn->kind == NODE_CONST && fdn->as.const_def.is_static_mut;
+      }
       const NodeId d = ast_resolution(t->ast, node);
       if (d == NODE_NONE)
         return false;
       const Node *const dn = ast_at_const(t->ast, d);
+      if (dn->kind == NODE_CONST) // `static mut` is assignable; a plain const never is
+        return dn->as.const_def.is_static_mut;
       if (dn->kind == NODE_LET)
         return dn->as.let_stmt.is_mutable;
       if (dn->kind == NODE_PARAMETER) // `fn f(mut p: T)` makes the by-value parameter assignable
@@ -3527,6 +3547,8 @@ static bool is_assignable(TypeChecker *t, const NodeId node_in) {
     }
     case NODE_INDEX:
     case NODE_MEMBER: {
+      if (n->kind == NODE_MEMBER && n->as.member.path)
+        return tc_path_static_mut(t, node); // `mod::STATIC = v`
       const NodeId obj = n->kind == NODE_INDEX ? n->as.index.object : n->as.member.object;
       TypeId oty = ast_type(t->ast, obj);
       // Auto-deref (INDEX only, mirroring the read path): a store through a reference base is governed by
@@ -3593,8 +3615,8 @@ static bool is_place(TypeChecker *t, const NodeId id) {
     case NODE_IDENTIFIER:
     case NODE_INDEX:
       return true;
-    case NODE_MEMBER:
-      return !n->as.member.path; // a field/element access is a place; `Enum::Variant` is not
+    case NODE_MEMBER: // a field/element access is a place; of `::` paths only `mod::STATIC` is
+      return !n->as.member.path || tc_path_static_mut(t, peel_wrappers(t, id));
     case NODE_UNARY:
       return n->as.unary.op == Star; // `*p` deref
     default:
@@ -6332,6 +6354,12 @@ static void check_item(TypeChecker *t, const NodeId id) {
         check_expr(t, n->as.const_def.value);
         if (!compatible(t, declared, n->as.const_def.value))
           err_mismatch(t, n->as.const_def.value, declared);
+      }
+      // A `static mut` global has no owning scope, so nothing would ever run its destructor.
+      if (n->as.const_def.is_static_mut && tc_type_is_free(t, declared)) {
+        typechecker_errorf(t, n->span.start, n->span.end - n->span.start,
+                           "a 'static mut' cannot hold an owning (Free) type");
+        typechecker_notef(t, "no scope ever frees a global; store a scalar/view or manage the value locally");
       }
       break;
     }

@@ -197,8 +197,9 @@ typedef struct {
         } type_alias;
         struct {
             NodeId name, type, value;
-            bool is_public; // `pub const`
-            bool is_extern; // `extern "C"` const (no initializer): value resolved from the backing C header
+            bool is_public;     // `pub const`
+            bool is_extern;     // `extern "C"` const (no initializer): value resolved from the backing C header
+            bool is_static_mut; // `static mut`: a module-level mutable global -- assignable, never CTFE-folded
         } const_def;
         struct {
             NodeId abi;
