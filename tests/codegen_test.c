@@ -286,9 +286,11 @@ static void test_array_literals(void) {
   expect_absent(
       "array literal let is not a compound literal", "fn f() void { let a: [i32; 3] = [1, 2, 3]; }\n",
       "(int32_t[3]){ 1, 2, 3 }");
-  expect_contains(
+  expect_contains( // g is CTFE-opaque (extern call) so the call site -- the shape under test -- survives folding
       "array literal argument is a compound literal",
-      "fn g(a: [i32; 3]) i32 { return a[0]; }\nfn f() i32 { return g([1, 2, 3]); }\n", "(int32_t[3]){ 1, 2, 3 }");
+      "extern \"C\" { fn putchar(c: i32) i32; }\n"
+      "fn g(a: [i32; 3]) i32 { unsafe putchar(0); return a[0]; }\nfn f() i32 { return g([1, 2, 3]); }\n",
+      "(int32_t[3]){ 1, 2, 3 }");
 }
 
 // Multiple returns lower to a generated `<fn>_ret` struct and a compound-literal return.
@@ -354,8 +356,10 @@ static void test_attributes(void) {
   expect_contains(
       "aligned struct", "@c.align(64)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32; }\n",
       "__attribute__((aligned(64)))");
-  // export renames the symbol AND every call site to it; no `static`.
-  const char *const EX = "@c.export(\"sc_init\")\nfn init() i32 { return 0; }\nfn main() i32 { return init(); }\n";
+  // export renames the symbol AND every call site to it; no `static`. (init is CTFE-opaque via an
+  // extern call so the call site under test isn't folded to a constant.)
+  const char *const EX = "extern \"C\" { fn putchar(c: i32) i32; }\n@c.export(\"sc_init\")\n"
+                         "fn init() i32 { unsafe putchar(0); return 0; }\nfn main() i32 { return init(); }\n";
   expect_contains("export defines the exact symbol", EX, "int32_t sc_init(void)");
   expect_contains("export rewrites the call site", EX, "return sc_init()");
   expect_absent("export elides the Super-C name", EX, " init(");
@@ -393,8 +397,10 @@ static void test_literals(void) {
 // Win 1: a free fn called with a statically-known callback is specialized (direct call, param elided);
 // a runtime callback keeps the pointer original.
 static void test_callback_specialization(void) {
-  static const char KNOWN[] = "fn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\n"
-                              "fn inc(x: i32) i32 { return x + 1; }\n"
+  // inc is CTFE-opaque (extern call) so the specialized call site under test isn't folded away.
+  static const char KNOWN[] = "extern \"C\" { fn putchar(c: i32) i32; }\n"
+                              "fn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\n"
+                              "fn inc(x: i32) i32 { unsafe putchar(0); return x + 1; }\n"
                               "fn use() i32 { return apply(10, inc); }\n";
   expect_contains("callback specialization emitted", KNOWN, "apply__cb_inc(");
   expect_contains("callback call site elides the callback arg", KNOWN, "apply__cb_inc(10)");

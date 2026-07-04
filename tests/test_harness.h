@@ -30,6 +30,7 @@
 #include "ast/ast.h"
 #include "ast/parser.h"
 #include "codegen/codegen.h"
+#include "consteval/consteval.h"
 #include "lexer/lexer.h"
 #include "module/loader.h"
 #include "resolver/resolver.h"
@@ -248,6 +249,7 @@ TH_UNUSED static ScResult sc_compile(const char *name, const char *source, const
   pp->modules[uidx].source_len = len;
   pp->modules[uidx].ast = r.ast;
   pp->count++;
+  pp->ceval = consteval_new(pp, 0, 0); // default budgets -- CTFE folds in codegen, exactly like the CLI
 
   char tmpl[] = "/tmp/scgenXXXXXX";
   char *const dir = mkdtemp(tmpl);
@@ -309,6 +311,7 @@ TH_UNUSED static ScResult sc_compile(const char *name, const char *source, const
   // Hand the user AST back to the caller; detach it from the package so package_free won't double-free it.
   r.ast = pp->modules[uidx].ast;
   pp->modules[uidx].ast = NULL;
+  consteval_free(&pp->ceval);
   package_free(&pp);
   return r;
 }

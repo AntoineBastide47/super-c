@@ -494,6 +494,25 @@ static void test_deref(void) {
       106, ""); // len 8 + two-hop |-5| + wrapper abs 100 + i32::max(-7,-20) = 106
 }
 
+// Extend generics of a bare `Type::assoc(args)` call are inferred from the argument types and the
+// expected type, with trailing declared defaults filled -- `Box::new(v)` needs no turbofish.
+static void test_ctor_inference(void) {
+  sc_run_program(
+      "assoc-fn generics inferred from args/annotation",
+      PRE "fn main() i32 {\n"
+          "  let b = Box::new(String::from_str(\"hi\"));\n"
+          "  let n = b.len() as i32;\n"
+          "  let v: Box<i32> = Box::new(30);\n"
+          "  let nested = Box::new(Box::new(9));\n"
+          "  let mut w: Vector<i32> = Vector::with_capacity(4);\n"
+          "  w.push(1);\n"
+          "  let r = n + *v.get() + *nested.get().get() + w[0];\n"
+          "  b.free(); v.free(); nested.free(); w.free();\n"
+          "  unsafe exit(r);\n"
+          "}\n",
+      42, ""); // len 2 + 30 + 9 + 1
+}
+
 static void test_field_vs_method(void) {
   // `s.len` (field read) and `s.len()` (method call) are distinct even when they share a name:
   // a bare member access resolves field-first, a call callee resolves method-first.
@@ -2048,6 +2067,14 @@ static void test_static_assert(void) {
           "static_assert(2 * 3 == 6);\n"
           "fn main() i32 { static_assert(sizeof(i64) == 8, \"i64\"); unsafe exit(0); }\n",
       0, "");
+  // CTFE unsigned arithmetic wraps like the emitted C even when the left operand is a signed
+  // literal (`0 - (x as u32)` is u32 math): i32::abs's unsigned-negate body must fold.
+  sc_run_program(
+      "static_assert folds unsigned wrap + abs",
+      PRE "fn f() i32 { let x = 0 - 42; return x.abs(); }\n"
+          "fn g() u32 { let y: u32 = 4294967254; return 0 - y; }\n"
+          "fn main() i32 { static_assert(f() == 42, \"abs\"); static_assert(g() == 42, \"wrap\"); unsafe exit(0); }\n",
+      0, "");
 }
 
 // Regressions for codegen/runtime bugs from the cross-stage hunt. Generated C is compiled under
@@ -2426,7 +2453,8 @@ int main(void) {
       test_opaque_extern,      test_variadics,            test_complex,
       test_atomics,            test_tuple_destructure,    test_enums,
       test_mut_match_binding,  test_structs_and_methods,  test_let_owning_mut,
-      test_field_vs_method,    test_deref,                test_generic_self_receiver, test_pointers,
+      test_field_vs_method,    test_deref,                test_ctor_inference,
+      test_generic_self_receiver, test_pointers,
       test_str,                test_misc,
   };
   const int nt = (int)(sizeof tests / sizeof *tests);

@@ -909,6 +909,13 @@ static void test_deref(void) {
                "extend B { pub fn deref(self: &B) &A { unsafe { let p = null as *const A; return &*p; } } }\n"
                "fn main() i32 { let a = A { x: 1 }; a.missing(); return 0; }\n",
                "cyclic deref chain");
+  expect_ok("assoc-fn extend generics inferred from args and annotation",
+            "fn main() i32 {\n"
+            "  let b = Box::new(String::from_str(\"hi\"));\n"      // T from the arg, A defaulted
+            "  let v: Box<i32> = Box::new(1);\n"                    // and from the annotation
+            "  let w: Vector<i32> = Vector::with_capacity(4);\n"    // annotation only
+            "  return (b.len() as i32) + *v.get() + w.len() as i32;\n"
+            "}\n");
   expect_error("a by-value aggregate method never auto-derefs",
                "struct Inner { pub k: i32 }\n"
                "extend Inner { pub fn consume(self: Inner) i32 { return self.k; } }\n"
