@@ -1183,8 +1183,8 @@ static DefId find_interface_method(TypeChecker *t, const ModuleId m, const NodeI
 
 // A DEFAULT (bodied) interface method named `name` inherited by concrete type `tdecl` through one of its
 // `extend tdecl as Iface` extends -- the fallback when `tdecl` provides no method of its own by that name.
-// Restricted to interfaces in the CURRENT module: codegen synthesizes `tdecl__name` only for same-module
-// interfaces (the default body lives in the current Ast), so resolving a cross-module default would dangle.
+// The interface may live in ANY module: the module holding the extend synthesizes `tdecl__name` by
+// sourcing the default body from the interface's Ast (emit_default_methods' owner-Ast swap).
 static DefId find_default_method(TypeChecker *t, const ModuleId tmod, const NodeId tdecl, const Span name) {
   const ModuleId scopes[2] = {tmod, t->ast->module};
   const int ns = tmod == t->ast->module ? 1 : 2;
@@ -1201,8 +1201,8 @@ static DefId find_default_method(TypeChecker *t, const ModuleId tmod, const Node
       if (tg.module != tmod || tg.node != tdecl)
         continue;
       const DefId iff = ast_resolution_def(a, it->as.extend_def.interface_type);
-      if (iff.node == NODE_NONE || iff.module != t->ast->module)
-        continue; // only same-module interface defaults are emittable
+      if (iff.node == NODE_NONE)
+        continue;
       const DefId mth = find_interface_method(t, iff.module, iff.node, name, 0);
       if (mth.node != NODE_NONE && ast_at_const(mod_ast(t, mth.module), mth.node)->as.function.body != NODE_NONE)
         return mth;
@@ -2437,17 +2437,16 @@ static bool dyn_coerce(TypeChecker *t, const NodeId node, const TypeId src, cons
     snprintf(nm, sizeof nm, "%.*s", (int)(mn.end - mn.start), (const char *)isrc + mn.start);
     if (find_method_cstr(t, tmod, tdecl, nm).node != NODE_NONE)
       continue;
-    // No override: a default body is emittable only when the `extend .. as I` lives in I's own
-    // module (emit_default_methods synthesizes `T__method` there; its symbol is what glue calls).
+    // No override: a default body backs the vtable slot -- the extend's module synthesizes `T__method`
+    // (extern from the type's home, or file-local for a local extension, which erases only same-TU).
     ModuleId emod = 0;
-    if (m->as.function.body != NODE_NONE && find_extend_as(t, tmod, tdecl, iface, &emod) != NODE_NONE &&
-        emod == iface.module)
+    if (m->as.function.body != NODE_NONE && find_extend_as(t, tmod, tdecl, iface, &emod) != NODE_NONE)
       continue;
     char tn[96];
     render_type(t, src, tn, sizeof tn);
     typechecker_errorf(t, sp.start, sp.end - sp.start,
                        "cannot erase '%s' to 'dyn': method '%s' has no emittable implementation", tn, nm);
-    typechecker_notef(t, "a default method body of a cross-module interface cannot back a vtable; override it");
+    typechecker_notef(t, "implement the method in an 'extend %s as ..' block or give it a default body", tn);
     return true; // reported
   }
   ast_add_dyn_use(t->ast, node, src, dyn_ty);

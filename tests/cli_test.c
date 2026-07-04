@@ -984,6 +984,55 @@ static void test_module_imports(void) {
   CHECK(run_cmd(crun, NULL, 0) == 140, "alias (10) + glob (20) + facade-glob dtag (100) + deep::dtag/10 (10)");
 }
 
+// Cross-module interface DEFAULT methods: the interface (with bodied defaults) lives in its own module,
+// conformances elsewhere. Covers the extend in the type's home (extern synth, called from a third module
+// and through a dyn vtable), a LOCAL extension of an imported type (file-local synth), and a builtin
+// target (`extend i32 as I` -- Self substitutes to the builtin). Built -Werror and run.
+static void test_cross_module_defaults(void) {
+  char root[4112], spc[4170], cmd[8320], buf[512];
+  snprintf(root, sizeof root, "%s/xdflt", DIR);
+  mkfile(root, "shapes.spc",
+         "pub interface Shape {\n"
+         "  fn area(self: &Self) i32;\n"
+         "  fn double_area(self: &Self) i32 { return self.area() * 2; }\n"
+         "  fn describe(self: &Self) i32 { return self.double_area() + 1; }\n"
+         "}\n");
+  mkfile(root, "circle.spc",
+         "import shapes;\n"
+         "pub struct Circle { pub r: i32 }\n"
+         "extend Circle as shapes::Shape {\n"
+         "  pub fn area(self: &Circle) i32 { return self.r * self.r * 3; }\n"
+         "}\n");
+  mkfile(root, "point.spc", "pub struct Point { pub x: i32 }\n");
+  mkfile(root, "main.spc",
+         "import circle;\n"
+         "import shapes;\n"
+         "import point;\n"
+         "extend point::Point as shapes::Shape {\n" // local extension: synth defaults stay file-local
+         "  pub fn area(self: &point::Point) i32 { return self.x; }\n"
+         "}\n"
+         "extend i32 as shapes::Shape {\n"
+         "  pub fn area(self: &i32) i32 { return *self; }\n"
+         "}\n"
+         "fn dyn_describe(sh: &dyn shapes::Shape) i32 { return sh.describe(); }\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "fn main() i32 {\n"
+         "  let c = circle::Circle { r: 2 };\n"  // describe = 2*2*3*2+1 = 25
+         "  let p = point::Point { x: 5 };\n"    // describe = 5*2+1 = 11
+         "  let n: i32 = 4;\n"                   // describe = 4*2+1 = 9
+         "  unsafe exit(c.describe() + dyn_describe(&c) + p.describe() + n.describe());\n" // 25+25+11+9
+         "}\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module defaults compile: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/xdflt.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "cross-module-defaults C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 70, "defaults dispatch: direct (25) + dyn (25) + local ext (11) + builtin (9)");
+}
+
 // Format conformances across the prelude, built as a multi-file tree: String/Vector/Option/Result render
 // to a String. This exercises the prelude header-include graph -- a value type conforming to a prelude
 // interface must NOT pull the interface module's header (that re-formed a cycle: interfaces -> result ->
@@ -1117,6 +1166,7 @@ int main(void) {
   test_cross_module_dyn();
   test_ffi_bindings();
   test_module_imports();
+  test_cross_module_defaults();
   test_format_conformances();
   test_module_errors();
   test_extensionless_appends();
