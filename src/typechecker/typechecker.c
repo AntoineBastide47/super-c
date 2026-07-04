@@ -5708,10 +5708,27 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       break;
     }
     case NODE_SIZEOF:
-    case NODE_ALIGNOF:
-      resolve_type(t, n->as.single.value); // validate the type; its byte size/alignment is a usize
+    case NODE_ALIGNOF: {
+      // `sizeof(T)` sizes the type; `sizeof(x)` (the resolver bound a VALUE) sizes x's checked type --
+      // recorded on the operand node so codegen and CTFE read one place. The value is never evaluated.
+      const NodeId v = n->as.single.value;
+      const DefId d = ast_resolution_def(a, v);
+      const NodeKind dk = d.node != NODE_NONE && d.module == t->ast->module ? ast_at_const(a, d.node)->kind
+                                                                            : NODE_NONE_KIND;
+      if (dk == NODE_LET || dk == NODE_PARAMETER || dk == NODE_FOR || dk == NODE_IDENTIFIER ||
+          dk == NODE_PATTERN_NAME || dk == NODE_CONST) {
+        const TypeId vt = ast_type(a, d.node);
+        if (vt == TYPE_NONE) {
+          const Span vsp = ast_at_const(a, v)->span;
+          typechecker_errorf(t, vsp.start, vsp.end - vsp.start, "cannot take the size of this value here");
+        }
+        ast_set_type(a, v, vt);
+      } else {
+        resolve_type(t, v); // validate the type; its byte size/alignment is a usize
+      }
       result = ast_builtin(BT_USIZE);
       break;
+    }
     case NODE_VA_EXPR: {
       // `va_start(ap, last)` / `va_arg(ap, T)` / `va_end(ap)`: `ap` must be a `va_list`. va_arg yields T;
       // va_start / va_end are void. The last named parameter (va_start) is checked for resolution only.

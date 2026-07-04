@@ -4423,7 +4423,28 @@ static void emit_expr(Codegen *c, const NodeId id) {
     case NODE_SIZEOF:
     case NODE_ALIGNOF: {
       char ty[256];
-      render_type_node(c, n->as.single.value, "", ty, sizeof ty); // substitutes T inside a specialization
+      const DefId d = ast_resolution_def(c->ast, n->as.single.value);
+      const Node *const dn = d.node != NODE_NONE ? ast_at_const(cg_mod_ast(c, d.module), d.node) : NULL;
+      if (dn && (dn->kind == NODE_LET || dn->kind == NODE_PARAMETER || dn->kind == NODE_FOR ||
+                 dn->kind == NODE_IDENTIFIER || dn->kind == NODE_PATTERN_NAME || dn->kind == NODE_CONST)) {
+        if (n->kind == NODE_ALIGNOF) {
+          // `_Alignof` takes only a TYPE in C11 (the expression form is a GNU extension): render the
+          // value's checked type, peeling arrays (an array aligns exactly like its element, and the
+          // element type never needs the possibly-unknown length).
+          TypeId vt = subst_resolve(c, ast_type(c->ast, n->as.single.value));
+          for (const Ty *y = ast_type_at(c->ast, vt); y->kind == TYPE_ARRAY; y = ast_type_at(c->ast, vt))
+            vt = y->as.elem;
+          render_type_id(c, vt, "", ty, sizeof ty);
+        } else if (dn->kind == NODE_CONST && (!c->mangle || decl_is_toplevel(c, d.module, d.node))) {
+          // `sizeof(x)` on a VALUE: C sizeof takes an (unevaluated) expression, so emit the value's own
+          // C name -- this also sizes array locals correctly whether or not the type carries a length.
+          render_qualified(c, d.module, dn->as.const_def.name, ty, sizeof ty); // a top-level const is mangled
+        } else {
+          render_ident(c, cg_decl_name_span(c, d.node), ty, sizeof ty);
+        }
+      } else {
+        render_type_node(c, n->as.single.value, "", ty, sizeof ty); // substitutes T inside a specialization
+      }
       emit(c, n->kind == NODE_ALIGNOF ? "_Alignof(%s)" : "sizeof(%s)", ty);
       break;
     }

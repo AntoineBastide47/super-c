@@ -81,7 +81,6 @@ typedef enum TokenType {
   Tilde, // ~
   Bang, // !
   Question, // ?
-  QuestionQuestion, // ??
 
   EqualEqual, // ==
   BangEqual, // !=

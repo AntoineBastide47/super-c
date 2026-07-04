@@ -897,7 +897,7 @@ static void scan_token(Lexer *l, TokenWriter *w) {
         EMIT(PipePipe);
       EMIT(match_byte(l, '=') ? PipeEqual : Pipe);
     case '?':
-      EMIT(match_byte(l, '?') ? QuestionQuestion : Question);
+      EMIT(Question);
     case '/':
       if (match_byte(l, '/')) {
         line_comment(l);
