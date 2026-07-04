@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h> // opendir/readdir, to prune stale outputs
+#include <limits.h> // PATH_MAX, for @c.source path resolution
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -912,9 +913,119 @@ static char *write_test_main(Package *p, const TestPlan *plan) {
   return path;
 }
 
+// External C code pulled in by `@c.source("f.c")` / `@c.link("m")` on extern blocks. Each source file
+// becomes a wrapper TU `build/__ext<N>_<stem>.c` holding one absolute #include of the original file --
+// the file stays in place, so its own relative includes keep resolving against its directory, and a
+// plain `cc build/**/*.c` picks it up. Sources are deduped by resolved path. Link values become
+// `-l<v>` (verbatim when the value starts with '-'), written to `build/__ldflags` (one per line, for
+// the user's link command) and appended to the --test link line.
+typedef struct {
+  char **ld;
+  size_t nld, ldcap;
+  bool err;
+} ExtC;
+
+static void ext_c_free(ExtC *x) {
+  for (size_t i = 0; i < x->nld; i++)
+    free(x->ld[i]);
+  free(x->ld);
+}
+
+static void ext_c_collect(Package *p, ExtC *x, char ***kept, size_t *nkept, size_t *kcap, bool *keep_ok) {
+  char seen[64][PATH_MAX];
+  size_t nseen = 0, nsrc = 0;
+  for (size_t m = 0; m < p->count; m++) {
+    const Ast *const a = p->modules[m].ast;
+    if (!a)
+      continue;
+    for (size_t i = 0; i < a->attrs.len; i++) {
+      const Attr *const at = &a->attrs.data[i];
+      if ((at->kind != ATTR_C_SOURCE && at->kind != ATTR_C_LINK) || at->str.end <= at->str.start)
+        continue;
+      const int vl = (int)(at->str.end - at->str.start);
+      const char *const v = p->modules[m].source + at->str.start;
+      if (at->kind == ATTR_C_LINK) {
+        char flag[256];
+        snprintf(flag, sizeof flag, v[0] == '-' ? "%.*s" : "-l%.*s", vl, v);
+        bool dup = false;
+        for (size_t k = 0; k < x->nld && !dup; k++)
+          dup = !strcmp(x->ld[k], flag);
+        if (dup)
+          continue;
+        if (x->nld == x->ldcap) {
+          x->ldcap = x->ldcap ? x->ldcap * 2 : 4;
+          x->ld = realloc(x->ld, x->ldcap * sizeof *x->ld);
+          if (!x->ld)
+            oom();
+        }
+        x->ld[x->nld++] = strdup(flag);
+        continue;
+      }
+      // @c.source: resolve relative to the declaring module's file first, then as written.
+      char rel[PATH_MAX], rsl[PATH_MAX];
+      const char *const file = p->modules[m].file;
+      const char *const slash = file ? strrchr(file, '/') : NULL;
+      if (slash)
+        snprintf(rel, sizeof rel, "%.*s/%.*s", (int)(slash - file), file, vl, v);
+      else
+        snprintf(rel, sizeof rel, "%.*s", vl, v);
+      if (!realpath(rel, rsl)) {
+        snprintf(rel, sizeof rel, "%.*s", vl, v);
+        if (!realpath(rel, rsl)) {
+          fprintf(stderr, "error: cannot find C source '%.*s' (imported by %s)\n", vl, v, file ? file : "?");
+          x->err = true;
+          continue;
+        }
+      }
+      bool dup = false;
+      for (size_t k = 0; k < nseen && !dup; k++)
+        dup = !strcmp(seen[k], rsl);
+      if (dup)
+        continue;
+      if (nseen < sizeof seen / sizeof seen[0])
+        snprintf(seen[nseen++], PATH_MAX, "%s", rsl);
+      char stem[64]; // sanitized basename, for a readable wrapper name
+      const char *base = strrchr(rsl, '/');
+      base = base ? base + 1 : rsl;
+      size_t sl = 0;
+      for (const char *s = base; *s && *s != '.' && sl < sizeof stem - 1; s++)
+        stem[sl++] = (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') ? *s : '_';
+      stem[sl] = '\0';
+      char name[96];
+      snprintf(name, sizeof name, "__ext%zu_%s", nsrc++, stem);
+      char *const path = build_out_path(p->root_dir, name, ".c");
+      FILE *const f = path ? open_out(path) : NULL;
+      if (!f) {
+        if (path)
+          perror(path);
+        free(path);
+        x->err = true;
+        continue;
+      }
+      fprintf(f, "/* external C source pulled in by @c.source -- generated, do not edit */\n#include \"%s\"\n", rsl);
+      fclose(f);
+      *keep_ok &= keep_push(kept, nkept, kcap, path);
+    }
+  }
+  char ldpath[4096];
+  if ((size_t)snprintf(ldpath, sizeof ldpath, "%s/build/__ldflags", p->root_dir) < sizeof ldpath) {
+    if (x->nld) {
+      FILE *const f = fopen(ldpath, "w");
+      if (f) {
+        for (size_t i = 0; i < x->nld; i++)
+          fprintf(f, "%s\n", x->ld[i]);
+        fclose(f);
+      }
+    } else {
+      unlink(ldpath); // the last @c.link was removed: never leave stale flags behind
+    }
+  }
+}
+
 // Compile the emitted build tree (+ the runner) with $CC and execute the test binary, forwarding the
 // runner options. Returns the runner's exit code (the failure count), or 1 on a build failure.
-static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfiles, const size_t nc) {
+static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfiles, const size_t nc,
+                              const ExtC *ext) {
   const char *cc = getenv("CC");
   if (!cc || !*cc)
     cc = "cc";
@@ -941,6 +1052,8 @@ static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfile
   for (size_t i = 0; i < nc; i++)
     if (cfiles[i] && strlen(cfiles[i]) > 2 && !strcmp(cfiles[i] + strlen(cfiles[i]) - 2, ".c"))
       CMD_APPEND(" '%s'", cfiles[i]);
+  for (size_t i = 0; ext && i < ext->nld; i++) // `@c.link` libraries/flags
+    CMD_APPEND(" %s", ext->ld[i]);
   const int brc = system(cmd);
   if (brc != 0) {
     fprintf(stderr, "%s: test build failed (%s)\n", BIN_NAME, cc);
@@ -998,6 +1111,9 @@ static int run_package(Package *p, const TestOpts *topts) {
   char **kept = NULL; // every output written this run; stale .c/.h not in here are pruned below
   size_t nkept = 0, kcap = 0;
   bool keep_ok = keep_push(&kept, &nkept, &kcap, build_out_path(p->root_dir, "super_rt", ".h"));
+  ExtC ext = {0}; // `@c.source` wrapper TUs land in kept[]; `@c.link` flags feed the --test link line
+  ext_c_collect(p, &ext, &kept, &nkept, &kcap, &keep_ok);
+  err |= ext.err;
   bool *const live = compute_emit_live(p);
   ModuleId *const order = malloc((p->count ? p->count : 1) * sizeof *order);
   if (!order) { // OOM: package_emit_order writes through `order` -- bail with an error instead of segfaulting
@@ -1084,13 +1200,14 @@ static int run_package(Package *p, const TestOpts *topts) {
         rc = 1;
       } else {
         keep_push(&kept, &nkept, &kcap, runner); // owned by kept[] now
-        rc = test_build_and_run(p, topts, kept, nkept);
+        rc = test_build_and_run(p, topts, kept, nkept, &ext);
       }
     }
   }
   for (size_t i = 0; i < nkept; i++)
     free(kept[i]);
   free(kept);
+  ext_c_free(&ext);
   if (testing)
     test_plan_free(&plan);
   return rc;

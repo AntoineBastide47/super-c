@@ -943,6 +943,8 @@ static int attr_kind_of(const Parser *p, const Token name, bool *wants_str, bool
   if (tok_text_is(p, name, "export")) { *wants_str = true; return ATTR_EXPORT; }
   if (tok_text_is(p, name, "import")) { *wants_str = true; return ATTR_IMPORT; }
   if (tok_text_is(p, name, "section")) { *wants_str = true; return ATTR_SECTION; }
+  if (tok_text_is(p, name, "source")) { *wants_str = true; return ATTR_C_SOURCE; }
+  if (tok_text_is(p, name, "link")) { *wants_str = true; return ATTR_C_LINK; }
   return -1;
 }
 
@@ -1136,6 +1138,12 @@ static NodeId parse_item(Parser *p) {
         parser_errorf(p, sp.start, sp.end - sp.start,
                       "'@test' / '@test_init' / '@test_free' may only be applied to a non-generic function");
       }
+    }
+    if ((attrs[i].kind == ATTR_C_SOURCE || attrs[i].kind == ATTR_C_LINK) &&
+        (id == NODE_NONE || ast_at(p->ast, id)->kind != NODE_EXTERN_BLOCK)) {
+      const Span sp = id != NODE_NONE ? ast_at(p->ast, id)->span : (Span){0, 0};
+      parser_errorf(p, sp.start, sp.end - sp.start,
+                    "'@c.source' / '@c.link' may only be applied to an 'extern \"C\"' block");
     }
     if (attrs[i].kind == ATTR_EMIT_MACRO) { // C macro export: only meaningful for a generic struct/enum
       const Node *const d = id != NODE_NONE ? ast_at(p->ast, id) : NULL;

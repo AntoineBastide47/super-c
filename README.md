@@ -403,6 +403,22 @@ extern "C" {
 libraries can be used as-is. `extern "C" "header.h" { .. }` emits the matching `#include`. Calling
 any extern binding requires an `unsafe` block or prefix at the call site.
 
+Whole C sources and libraries can be pulled into the build, beyond declarations:
+
+```superc
+@c.source("vendor/foo.c")   // compile this C file into the program
+@c.link("m")                // and link -lm (a value starting with '-' passes through verbatim)
+extern "C" "vendor/foo.h" {
+    fn foo_run(n: i32) i32;
+}
+```
+
+`@c.source` emits a wrapper translation unit into `build/` (an absolute `#include` of the file, so
+its own relative includes keep resolving), meaning `cc build/**/*.c` picks it up automatically;
+paths resolve relative to the declaring `.spc` file. `@c.link` flags are written to
+`build/__ldflags` (one per line — `cc ... $(cat build/__ldflags)`) and applied automatically to
+`--test` builds.
+
 Variadics work in both directions. A binding can take `...`:
 
 ```superc
