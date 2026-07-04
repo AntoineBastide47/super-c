@@ -1349,7 +1349,8 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
       const DefId d = ast_resolution_def(c->ast, tn);
       if (d.node != NODE_NONE) {
         const TypeId nt = ast_type(c->ast, tn); // a generic application (Vec<i32>) -> its specialized name
-        if (nt != TYPE_NONE && ast_type_at(c->ast, nt)->kind == TYPE_INSTANCE) {
+        if (nt != TYPE_NONE && (ast_type_at(c->ast, nt)->kind == TYPE_INSTANCE ||
+                                ast_type_at(c->ast, nt)->kind == TYPE_DYN)) { // intercepted `Box<dyn I>`
           render_type_id(c, nt, decl, out, cap);
           break;
         }
@@ -2502,6 +2503,16 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
     const Ty *const raw = ast_type_at(c->ast, ast_type(c->ast, recv));
     const bool isref = raw->kind == TYPE_POINTER || raw->kind == TYPE_REFERENCE; // receiver already a pointer
     const Ty *const rt = ast_type_at(c->ast, subst_resolve(c, strip_ptr(c, ast_type(c->ast, recv))));
+    if (rt->kind == TYPE_DYN && rt->qualifier == TYPE_QUAL_NONE) {
+      // An owned trait object: run the vtable's drop glue (a borrowed dyn falls to the no-op below).
+      char stem[176];
+      render_iface_stem(c, rt->module, rt->as.decl, stem, sizeof stem);
+      emit(c, "%s__dyn_free", stem);
+      emit(c, isref ? "(" : "(&");
+      emit_expr(c, recv);
+      emit(c, ")");
+      return;
+    }
     ModuleId om = 0;
     NodeId od = NODE_NONE;
     if (rt->kind == TYPE_INSTANCE) {
@@ -3317,15 +3328,27 @@ static bool emit_dyn_coercion(Codegen *c, const NodeId id) {
   const DynUse *const du = ast_dyn_use_at(c->ast, id);
   if (!du)
     return false;
+  if (du->src == TYPE_NONE) { // reborrow of an owned dyn (`&b` where b: Box<dyn I>): deref the pair
+    emit(c, "(*(");
+    c->dyn_raw = id;
+    emit_expr(c, id);
+    c->dyn_raw = NODE_NONE;
+    emit(c, "))");
+    return true;
+  }
   const Ty *const dy = ast_type_at(c->ast, du->dyn);
   char dt[240], pair[368];
   render_type_id(c, du->dyn, "", dt, sizeof dt);
   dyn_pair_stem(c, du->src, dy->module, dy->as.decl, pair, sizeof pair);
+  // The data pointer: a reference source is already the pointer; a `Box<T>` source (the OWNED
+  // erasure, a move) surrenders its heap pointer.
+  const Ty *const nat = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, id)));
+  const bool box_src = nat->kind == TYPE_INSTANCE;
   emit(c, "((%s){ .data = (void *)(", dt);
   c->dyn_raw = id;
   emit_expr(c, id);
   c->dyn_raw = NODE_NONE;
-  emit(c, "), .vt = &%s__vtbl })", pair);
+  emit(c, "%s, .vt = &%s__vtbl })", box_src ? ").ptr" : ")", pair);
   return true;
 }
 
@@ -5372,6 +5395,8 @@ static bool cg_type_is_free(Codegen *c, const TypeId ty) {
   const Ty *const y = ast_type_at(c->ast, subst_resolve(c, ty));
   if (y->kind == TYPE_FUNCTION) // an owning closure value frees its env's captures at scope exit
     return cg_fn_owns(c, y);
+  if (y->kind == TYPE_DYN) // only the owned form (`Box<dyn I>`) frees, through its vtable drop glue
+    return y->qualifier == TYPE_QUAL_NONE;
   if (y->kind == TYPE_STRUCT)
     return cg_free_method(c, y->module, y->as.decl).node != NODE_NONE;
   if (y->kind != TYPE_INSTANCE)
@@ -5684,6 +5709,14 @@ static bool emit_free_target(Codegen *c, const TypeId bt) {
     char sym[220];
     closure_sym_in(c, y->module, y->as.decl, sym, sizeof sym);
     emit(c, "%s_env_free", sym);
+    return true;
+  }
+  if (y->kind == TYPE_DYN) { // an owned trait object frees through its vtable's drop glue
+    if (y->qualifier != TYPE_QUAL_NONE)
+      return false;
+    char stem[176];
+    render_iface_stem(c, y->module, y->as.decl, stem, sizeof stem);
+    emit(c, "%s__dyn_free", stem);
     return true;
   }
   if (y->kind == TYPE_INSTANCE) {
@@ -8285,8 +8318,11 @@ static void emit_dyn_typedefs(Codegen *c) {
         buf_join3(memb, sizeof memb, "void ", "", inner);
       emit(c, "    %s;\n", memb);
     }
-    emit(c, "} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n#endif\n", stem, stem,
-         stem, stem);
+    emit(c, "} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n", stem, stem, stem,
+         stem);
+    // The whole RAII integration for `Box<dyn I>`: emit_free_target names this helper, so scope-exit
+    // frees, conditional-move flags, container element frees and explicit `.free()` all reuse it.
+    emit(c, "static inline void %s__dyn_free(%s__dyn *const d) { d->vt->__free(d->data); }\n#endif\n", stem, stem);
   }
 }
 
@@ -8350,9 +8386,36 @@ static void emit_dyn_tables(Codegen *c) {
         emit(c, ", _a%u", p);
       emit(c, "); }\n");
     }
+    // The `__free` drop-glue slot: real only when this TU ERASES a `Box<T>` of this pair (an owned
+    // dyn always carries a drop-glue vtable from its creation TU; borrowed-only pairs keep 0 and
+    // never call it). Mirrors `Box<T,Global>::free`: deep-free the pointee, then release the block.
+    bool owned = false;
+    for (size_t j = 0; j < c->ast->dyn_uses.len && !owned; j++) {
+      const DynUse oj = c->ast->dyn_uses.data[j];
+      const Ty oy = *ast_type_at(c->ast, oj.dyn);
+      owned = oj.src == src && oy.module == dy.module && oy.as.decl == dy.as.decl && oy.qualifier == TYPE_QUAL_NONE;
+    }
+    if (owned && c->package) {
+      ModuleId gm;
+      const NodeId gd = package_prelude_lookup(c->package, "Global", 6, true, &gm);
+      char gt[160];
+      render_qualified(c, gm, ast_at_const(cg_mod_ast(c, gm), gd)->as.aggregate.name, gt, sizeof gt);
+      emit(c, "static void %s____free(void *__self) {\n", pair);
+      if (cg_type_is_free(c, src)) {
+        emit(c, "    ");
+        emit_free_target(c, src);
+        emit(c, "((%s *)__self);\n", recv);
+      }
+      emit(c, "    %s __g = %s__default_();\n    %s__dealloc(&__g, __self, sizeof(%s), _Alignof(%s));\n}\n", gt, gt,
+           gt, recv, recv);
+    }
     char stem[176];
     render_iface_stem(c, dy.module, dy.as.decl, stem, sizeof stem);
-    emit(c, "static const %s__vt %s__vtbl __attribute__((unused)) = { 0", stem, pair);
+    emit(c, "static const %s__vt %s__vtbl __attribute__((unused)) = { ", stem, pair);
+    if (owned)
+      emit(c, "%s____free", pair);
+    else
+      emit(c, "0");
     for (uint32_t k = 0; k < idn->as.interface_def.items.len; k++) {
       const Node *const m = ast_at_const(ia, mids[k]);
       if (!cg_dyn_method(c, dy.module, m))

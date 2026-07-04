@@ -2073,6 +2073,45 @@ static void test_dyn(void) {
           "fn id<T>(x: T) T { return x; }\n"
           "fn main() i32 { let c = Circle { r: 2 }; let d: &dyn Shape = &c; unsafe exit(id(d).area()); }\n",
       42, "");
+  // Owned trait objects: Box<T> -> Box<dyn I> moves; the vtable's drop glue deep-frees the pointee
+  // ('F' per Res) + releases the block on every path -- container elements, explicit .free(), a
+  // consuming by-value param, a runtime-chosen return, and plain scope exit. &Box<dyn> reborrows.
+  sc_run_program(
+      "Box<dyn> ownership round-trip",
+      PRE "interface Shape { fn area(self: &Self) i32; fn grow(self: &mut Self, k: i32); }\n"
+          "struct Res { pub id: i32 }\n"
+          "extend Res as Free { pub fn free(self: &mut Res) { unsafe putchar(70); } }\n"
+          "extend Res as Shape {\n"
+          "  pub fn area(self: &Res) i32 { return self.id; }\n"
+          "  pub fn grow(self: &mut Res, k: i32) { self.id = self.id + k; }\n"
+          "}\n"
+          "struct Sq { pub s: i32 }\n"
+          "extend Sq as Shape {\n"
+          "  pub fn area(self: &Sq) i32 { return self.s * self.s; }\n"
+          "  pub fn grow(self: &mut Sq, k: i32) { self.s = self.s + k; }\n"
+          "}\n"
+          "fn view(a: &dyn Shape) i32 { return a.area(); }\n"
+          "fn consume(b: Box<dyn Shape>) i32 { return b.area(); }\n" // frees its param ('F' for Res)
+          "fn pick(c: bool) Box<dyn Shape> {\n"
+          "  if c { return Box::<Res>::new(Res { id: 1 }); }\n"
+          "  return Box::<Sq>::new(Sq { s: 2 });\n"
+          "}\n"
+          "fn main() i32 {\n"
+          "  let mut v: Vector<Box<dyn Shape>> = Vector::<Box<dyn Shape>>::new();\n"
+          "  v.push(Box::<Res>::new(Res { id: 3 }));\n"
+          "  v.push(Box::<Sq>::new(Sq { s: 2 }));\n"
+          "  let mut total = 0;\n"
+          "  for i in 0..v.len() { total = total + v.at(i).area(); }\n" // 3 + 4 = 7
+          "  let mut b: Box<dyn Shape> = Box::<Res>::new(Res { id: 10 });\n"
+          "  b.grow(5);\n"                       // &mut self through the owned dyn
+          "  total = total + view(&b);\n"        // + 15 -> 22
+          "  b.free();\n"                        // 'F'
+          "  total = total + consume(Box::<Res>::new(Res { id: 8 }));\n" // + 8 -> 30, 'F' inside
+          "  let p = pick(false);\n"
+          "  total = total + p.area();\n"        // + 4 -> 34; p auto-freed
+          "  return total;\n"                    // scope exit: v's Res element -> the third 'F'
+          "}\n",
+      34, "FFF");
 }
 
 int main(void) {
