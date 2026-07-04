@@ -823,9 +823,31 @@ static void resolve_expr(Resolver *r, const NodeId id) {
       resolve_type(r, n->as.cast.type);
       break;
     case NODE_SIZEOF:
-    case NODE_ALIGNOF:
-      resolve_type(r, n->as.single.value);
+    case NODE_ALIGNOF: {
+      // `sizeof(T)` or `sizeof(x)`: a LONE identifier prefers the type namespace (any visible type of
+      // that name wins), then falls back to a value binding -- `sizeof(buf)` sizes buf's checked type.
+      // Anything structured (`*mut T`, `[T; N]`, paths, generics) is always a type.
+      const NodeId v = n->as.single.value;
+      const Node *const vn = ast_at_const(r->ast, v);
+      if (vn->kind == NODE_TYPE_PATH && vn->as.type_path.parts.len == 1 && vn->as.type_path.args.len == 0) {
+        const NodeId first = ast_list(r->ast, vn->as.type_path.parts)[0];
+        const Span name = name_span(r, first);
+        bool is_type = is_builtin_type(r->source, name) || span_is(r->source, name, "Self") ||
+                       lookup(r, name, NS_TYPE, NULL) != NODE_NONE;
+        if (!is_type && r->package) {
+          ModuleId mid;
+          is_type = package_prelude_lookup(r->package, (const char *)r->source + name.start, name.end - name.start,
+                                           true, &mid) != NODE_NONE ||
+                    glob_lookup(r, name, true, &mid) != NODE_NONE;
+        }
+        if (!is_type) {
+          resolve_ref(r, v, first, NS_VALUE, "type or value");
+          break;
+        }
+      }
+      resolve_type(r, v);
       break;
+    }
     case NODE_VA_EXPR:
       resolve_expr(r, n->as.va_op.ap);
       if (n->as.va_op.op == VA_ARG)

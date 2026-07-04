@@ -71,7 +71,6 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Tilde",
     "Bang",
     "Question",
-    "QuestionQuestion",
 
     "EqualEqual",
     "BangEqual",
