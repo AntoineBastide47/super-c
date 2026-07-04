@@ -67,6 +67,11 @@ bool package_method_used(const Package *p, DefId d);
 // Like package_lookup but across every prelude module; sets *out_mid to the owning module on a hit.
 NodeId package_prelude_lookup(const Package *p, const char *name, size_t name_len, bool want_type, ModuleId *out_mid);
 
+// package_lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid`
+// itself, then every module it imports breadth-first in declaration order. First hit wins; sets *out_mid.
+NodeId package_glob_lookup(const Package *p, ModuleId mid, const char *name, size_t name_len, bool want_type,
+                           ModuleId *out_mid);
+
 // Move every concrete cross-module generic instantiation into its template module's instance table, so
 // the owning module emits the specialization (struct + methods) in its header/.c and users just include
 // it -- mirroring non-generic cross-module types. Run after typechecking, before codegen. `standalone` is

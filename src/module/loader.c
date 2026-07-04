@@ -506,6 +506,46 @@ NodeId package_prelude_lookup(const Package *p, const char *name, const size_t n
   return NODE_NONE;
 }
 
+NodeId package_glob_lookup(const Package *p, const ModuleId mid, const char *name, const size_t name_len,
+                           const bool want_type, ModuleId *const out_mid) {
+  const size_t n = p->count;
+  if ((size_t)mid >= n)
+    return NODE_NONE;
+  bool seen[n]; // each module enqueues once, so queue length is bounded by n
+  ModuleId queue[n];
+  memset(seen, 0, n);
+  size_t head = 0, tail = 0;
+  queue[tail++] = mid;
+  seen[mid] = true;
+  while (head < tail) {
+    const ModuleId m = queue[head++];
+    const NodeId d = package_lookup(p, m, name, name_len, want_type);
+    if (d != NODE_NONE) {
+      if (out_mid)
+        *out_mid = m;
+      return d;
+    }
+    const Ast *const ast = p->modules[m].ast;
+    if (!ast)
+      continue;
+    const NodeList items = ast_at_const(ast, ast->root)->as.program.items;
+    const NodeId *const ids = ast_list(ast, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const it = ast_at_const(ast, ids[i]);
+      if (it->kind != NODE_IMPORT)
+        continue;
+      char *const path = join_parts(ast, p->modules[m].source, it->as.import_decl.path, "::");
+      const int c = package_find(p, path, strlen(path));
+      free(path);
+      if (c >= 0 && !seen[c]) {
+        seen[c] = true;
+        queue[tail++] = (ModuleId)c;
+      }
+    }
+  }
+  return NODE_NONE;
+}
+
 #define MODULE_NONE ((ModuleId)0xFFFF)
 
 // Is `m` a user (non-prelude) module? The standalone REPL/test Ast lives at module == p->count (outside
