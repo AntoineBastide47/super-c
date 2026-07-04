@@ -850,6 +850,30 @@ static void test_explicit_free_mutability(void) {
   "  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n" \
   "}\n"
 
+// Numeric literal suffixes pin their type; implicit widening is lossless-only (same-signedness wider,
+// unsigned into wider signed, f32->f64) -- narrowing / sign changes / usize stay explicit `as` casts.
+static void test_numeric_suffixes_widening(void) {
+  expect_ok("suffixed literals + lossless widening",
+            "fn take(x: i64) i64 { return x; }\n"
+            "fn main() i32 {\n"
+            "  let a = 200u8; let b = 0xFFu64; let c = 1f32; let d = 0b1010i64; let e = 5usize;\n"
+            "  let s: i16 = 3; let w: i32 = s; let u: u8 = 7; let x: u32 = u; let y: i64 = u;\n"
+            "  let f: f32 = 1.5; let g: f64 = f;\n"
+            "  let m = w + y; let r = take(w);\n"
+            "  return 0;\n"
+            "}\n");
+  expect_error("narrowing stays explicit", "fn main() i32 { let x: i32 = 5i64; return 0; }\n", "mismatched types");
+  expect_error("same-width sign change stays explicit", "fn main() i32 { let x: u32 = 5i32; return 0; }\n",
+               "mismatched types");
+  expect_error("suffixed literal does not adapt down", "fn main() i32 { let x: u8 = 5u16; return 0; }\n",
+               "mismatched types");
+  expect_error("f64 literal never narrows", "fn main() i32 { let x: f32 = 1.5f64; return 0; }\n", "mismatched types");
+  expect_error("usize widening stays explicit", "fn main() i32 { let x: usize = 5u32; return 0; }\n",
+               "mismatched types");
+  expect_error("suffix range check", "fn main() i32 { let x = 300i8; return 0; }\n",
+               "does not fit in its suffixed type");
+}
+
 static void test_dyn(void) {
   expect_ok(
       "dyn coercion + vtable dispatch",
@@ -980,6 +1004,7 @@ int main(void) {
   test_closures();
   test_explicit_free_mutability();
   test_dyn();
+  test_numeric_suffixes_widening();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

@@ -529,6 +529,12 @@ ALWAYS_INLINE TypeId ast_builtin(const BuiltinType b) {
   return (TypeId)b + 1;
 }
 
+// If the numeric literal in src[start,end) carries a type suffix (`1u8`, `1.0f32`, `0xFFu64`), returns
+// the named builtin and stores the suffix's start offset in *sfx_start (left untouched otherwise);
+// else BT_COUNT. In a hex literal a trailing [a-fA-F] run is digits, so an f32/f64 tail never counts
+// there (suffixes in hex must start with a non-hex letter: u8/i32/usize/...).
+BuiltinType ast_numeric_suffix(const uint8_t *src, uint32_t start, uint32_t end, uint32_t *sfx_start);
+
 ALWAYS_INLINE void ast_set_type(Ast *a, const NodeId n, const TypeId t) {
   a->types.data[n] = t;
 }
