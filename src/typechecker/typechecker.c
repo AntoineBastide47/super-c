@@ -1052,8 +1052,9 @@ static void mark_format_helpers(TypeChecker *t) {
   // (src/codegen/codegen.c): the per-arg appenders, the `new` builder constructor, the `print` writer, and
   // an interpolated String argument's `as_str`. A missing entry only surfaces as a link error in a format
   // test, so the codegen-run format cases guard this list.
-  static const char *const helpers[] = {"new",      "print",    "push_i64", "push_u64",   "push_f64",
-                                        "push_hex_i64", "push_hex", "push_byte", "push_str", "as_str"};
+  static const char *const helpers[] = {"new",          "print",    "eprint",    "push_i64",      "push_u64",
+                                        "push_f64",     "push_hex_i64", "push_hex", "push_byte", "push_str",
+                                        "as_str",       "push_bin", "push_f64_prec", "push_padded"};
   for (size_t i = 0; i < sizeof helpers / sizeof helpers[0]; i++)
     find_method_cstr(t, sm, sd, helpers[i]); // a successful lookup marks the method used (see find_method_cstr)
 }
@@ -4124,12 +4125,16 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   const NodeList params = named ? fn->as.function.params : clos ? fn->as.closure.params : fn->as.function_type.params;
   const NodeList returns = named ? fn->as.function.returns : clos ? fn->as.closure.returns : fn->as.function_type.returns;
 
-  // A `format`/`print`/`println` builtin call: its codegen-synthesized String<Global> helpers must survive
-  // demand-driven pruning, so mark them used now (harmless if it is the String `.print()`/`.println()` method).
+  // A format builtin call (`format`/`print`/`println`/`eprint`/`eprintln`): its codegen-synthesized
+  // String<Global> helpers must survive demand-driven pruning, so mark them used now (harmless if it is
+  // the String `.print()`/`.println()` method).
+  bool fmt_builtin = false;
   if (named && t->package && fmod < t->package->count && t->package->modules[fmod].prelude) {
     const Span fnm = ast_at_const(fa, fn->as.function.name)->as.name.text;
-    if (span_is(mod_src(t, fmod), fnm, "format") || span_is(mod_src(t, fmod), fnm, "print") ||
-        span_is(mod_src(t, fmod), fnm, "println"))
+    fmt_builtin = span_is(mod_src(t, fmod), fnm, "format") || span_is(mod_src(t, fmod), fnm, "print") ||
+                  span_is(mod_src(t, fmod), fnm, "println") || span_is(mod_src(t, fmod), fnm, "eprint") ||
+                  span_is(mod_src(t, fmod), fnm, "eprintln");
+    if (fmt_builtin)
       mark_format_helpers(t);
   }
 
@@ -4490,7 +4495,8 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   }
   // A string literal in a C-vararg slot has no `str` meaning to C: default it to `*const char` so codegen
   // emits the bare NUL-terminated literal (what `%s` expects), mirroring the fixed-param coercion.
-  if (variadic && args.len >= expected) {
+  // NOT for the format builtins: their args are Super-C values (a literal formats as a `str` view).
+  if (variadic && !fmt_builtin && args.len >= expected) {
     const TypeId cstr =
         ast_intern_type(t->ast, (Ty){.kind = TYPE_POINTER, .qualifier = TYPE_QUAL_CONST, .as.elem = ast_builtin(BT_CHAR)});
     for (uint32_t i = expected; i < args.len; i++) {

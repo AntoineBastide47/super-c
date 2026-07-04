@@ -38,6 +38,9 @@ extern "C" {
     fn strlen(s: *const char) usize;
     fn putchar(c: i32) i32;
     fn snprintf(buf: *mut char, n: usize, fmt: *const char, ...) i32;
+    type FILE;
+    fn fputc(c: i32, f: *mut FILE) i32;
+    fn __sc_stderr() *mut FILE;
 }
 
 // Heap representation. `cap`'s top bit is the "is large" discriminant; its real value is the low 63 bits.
@@ -315,6 +318,66 @@ extend<A: Allocator> String<A> {
             self.push_hex((0 as u64) - (value as u64), upper);
         } else {
             self.push_hex(value as u64, upper);
+        }
+    }
+
+    // Append the base-2 digits of an unsigned integer ('{:b}', no "0b" prefix). 0 prints as "0".
+    pub fn push_bin(self: &mut String<A>, value: u64) {
+        if value >= 2 {
+            self.push_bin(value / 2);
+        }
+        self.push_byte((48 + value % 2) as u8);
+    }
+
+    // Append a floating-point value with exactly `prec` digits after the decimal point ('{:.N}').
+    pub fn push_f64_prec(self: &mut String<A>, value: f64, prec: u32) {
+        let buf = self.alloc.alloc(64, 1) as *mut char;
+        let n = unsafe snprintf(buf, 64, "%.*f", prec as i32, value);
+        if n > 0 {
+            let mut m = n as usize;
+            if m > 63 {
+                m = 63; // snprintf reports the WOULD-BE length; only the truncated bytes exist
+            }
+            self.push_bytes(buf as *const u8, m);
+        }
+        self.alloc.dealloc(buf as *mut void, 64, 1);
+    }
+
+    // Append `s` in a `width`-byte field padded with `fill` ('{:>8}', '{:08}', '{:^6}').
+    // `align`: 0 = left, 1 = right, 2 = center. A right-aligned zero fill is numeric-aware:
+    // a leading '-' stays in front of the zeros.
+    pub fn push_padded(self: &mut String<A>, s: str, width: usize, fill: u8, align: u8) {
+        let n = s.len;
+        if width <= n {
+            self.push_str(s);
+            return;
+        }
+        let pad = width - n;
+        if align == 1 && fill == 48 && n > 0 && s.byte_at(0) == 45 {
+            self.push_byte(45);
+            let mut k: usize = 0;
+            while k < pad {
+                self.push_byte(48);
+                k += 1;
+            }
+            self.push_str(s.slice(1, n));
+            return;
+        }
+        let mut lead: usize = 0;
+        if align == 1 {
+            lead = pad;
+        } else if align == 2 {
+            lead = pad / 2;
+        }
+        let mut i: usize = 0;
+        while i < lead {
+            self.push_byte(fill);
+            i += 1;
+        }
+        self.push_str(s);
+        while i < pad {
+            self.push_byte(fill);
+            i += 1;
         }
     }
 
@@ -775,6 +838,21 @@ extend<A: Allocator> String<A> {
         self.print();
         unsafe putchar(10);
     }
+
+    // Write the UTF-8 bytes to stderr (no trailing newline) -- the `eprint`/`eprintln` builtins' writer.
+    pub fn eprint(self: &String<A>) {
+        let n = self.len();
+        let p = self.as_ptr();
+        let err = unsafe __sc_stderr();
+        for i in 0..n {
+            unsafe fputc(unsafe p[i] as i32, err);
+        }
+    }
+
+    pub fn eprintln(self: &String<A>) {
+        self.eprint();
+        unsafe fputc(10, unsafe __sc_stderr());
+    }
 }
 
 extend<A: Allocator + Default> String<A> {
@@ -932,3 +1010,5 @@ extend<A: Allocator> String<A> as Index<u8, str> {
 pub fn format(fmt: str, ...) String { return String::<Global>::new(); }
 pub fn print(fmt: str, ...) { }
 pub fn println(fmt: str, ...) { }
+pub fn eprint(fmt: str, ...) { }   // like print/println, written to stderr
+pub fn eprintln(fmt: str, ...) { }

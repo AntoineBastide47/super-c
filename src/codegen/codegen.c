@@ -2377,65 +2377,120 @@ static void emit_fmt_cstr(Codegen *c, const size_t a, const size_t b) {
   emit(c, "\"");
 }
 
-// Append one format argument to the builder `f`, by its static type: any integer/float, bool, char, str, or
-// String. Anything else (e.g. a Vector) is rejected -- call its `.fmt()` and pass the resulting String.
-// spec: 0 = default; 'x'/'X' = lowercase/uppercase hex (integer args only).
-static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg, const char spec) {
-  const TypeId t = subst_resolve(c, ast_type(c->ast, arg));
-  const Ty *const y = ast_type_at(c->ast, t);
-  if (spec == 'x' || spec == 'X') { // hex: integers only
-    const bool up = spec == 'X';
+// The raw-string variant of emit_fmt_cstr: bytes are verbatim (C-significant ones re-escaped, like
+// emit_raw_c_string) but `{{`/`}}` still collapse to one literal brace.
+static void emit_fmt_raw_cstr(Codegen *c, const size_t a, const size_t b) {
+  const uint8_t *const src = c->source;
+  emit(c, "\"");
+  for (size_t i = a; i < b;) {
+    if ((src[i] == '{' || src[i] == '}') && i + 1 < b && src[i + 1] == src[i]) {
+      emit(c, "%c", src[i]);
+      i += 2;
+      continue;
+    }
+    const uint8_t byte = src[i++];
+    if (byte == '"' || byte == '\\')
+      emit(c, "\\%c", byte);
+    else if (byte == '\n')
+      emit(c, "\\n");
+    else if (byte < 0x20)
+      emit(c, "\\%03o", byte);
+    else
+      emit(c, "%c", byte);
+  }
+  emit(c, "\"");
+}
+
+// A parsed `{...}` placeholder: `{:[fill][<^>][0][width][.prec][x|X|b]}`.
+typedef struct {
+    char type;   // 0 = default; 'x'/'X' hex; 'b' binary (integers only)
+    char align;  // 0 = default (right for numbers, left otherwise); '<' / '^' / '>'
+    uint8_t fill; // pad byte (0 = default ' '; the '0' flag sets '0')
+    int width;   // minimum field width (0 = none)
+    int prec;    // digits after the decimal point (-1 = none; floats only)
+} FmtSpec;
+
+// The C unsigned type matching a builtin's width, for two's-complement '{:b}' of signed values.
+static const char *bt_unsigned_cast(const BuiltinType b) {
+  switch (b) {
+    case BT_I8: case BT_U8: case BT_CHAR: return "uint8_t";
+    case BT_I16: case BT_U16: return "uint16_t";
+    case BT_I32: case BT_U32: return "uint32_t";
+    default: return "uint64_t"; // i64/u64/isize/usize
+  }
+}
+
+// Append arg's UNPADDED rendering into builder `tb` by its static type: any integer/float, bool, char,
+// str, or String. Anything else (e.g. a Vector) is rejected -- call its `.fmt()` first.
+static bool fmt_arg_core(Codegen *c, const char *const tb, const NodeId arg, const FmtSpec *const sp, const Ty *const y,
+                         const TypeId t) {
+  if (sp->type == 'x' || sp->type == 'X') { // hex: integers only
+    const bool up = sp->type == 'X';
     if (y->kind != TYPE_BUILTIN)
       return false;
     switch (y->as.builtin) {
       case BT_I8: case BT_I16: case BT_I32: case BT_I64: case BT_ISIZE:
-        emit(c, "String__Global__push_hex_i64(&%s, (int64_t)(", f);
+        emit(c, "String__Global__push_hex_i64(&%s, (int64_t)(", tb);
         emit_expr(c, arg);
         emit(c, "), %s);\n", up ? "true" : "false");
         return true;
       case BT_U8: case BT_U16: case BT_U32: case BT_U64: case BT_USIZE: case BT_CHAR:
-        emit(c, "String__Global__push_hex(&%s, (uint64_t)(", f);
+        emit(c, "String__Global__push_hex(&%s, (uint64_t)(", tb);
         emit_expr(c, arg);
         emit(c, "), %s);\n", up ? "true" : "false");
         return true;
       default:
         return false;
     }
+  }
+  if (sp->type == 'b') { // binary: integers only; signed values print their width's two's complement bits
+    if (y->kind != TYPE_BUILTIN || !(y->as.builtin >= BT_CHAR && y->as.builtin <= BT_USIZE))
+      return false;
+    emit(c, "String__Global__push_bin(&%s, (uint64_t)(%s)(", tb, bt_unsigned_cast(y->as.builtin));
+    emit_expr(c, arg);
+    emit(c, "));\n");
+    return true;
   }
   if (y->kind == TYPE_BUILTIN) {
     switch (y->as.builtin) {
       case BT_BOOL:
         emit(c, "if (");
         emit_expr(c, arg);
-        emit(c, ") String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });", f);
-        emit(c, " else String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n", f);
+        emit(c, ") String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });", tb);
+        emit(c, " else String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n", tb);
         return true;
       case BT_CHAR:
-        emit(c, "String__Global__push_byte(&%s, (uint8_t)(", f);
+        emit(c, "String__Global__push_byte(&%s, (uint8_t)(", tb);
         emit_expr(c, arg);
         emit(c, "));\n");
         return true;
       case BT_I8: case BT_I16: case BT_I32: case BT_I64: case BT_ISIZE:
-        emit(c, "String__Global__push_i64(&%s, (int64_t)(", f);
+        emit(c, "String__Global__push_i64(&%s, (int64_t)(", tb);
         emit_expr(c, arg);
         emit(c, "));\n");
         return true;
       case BT_U8: case BT_U16: case BT_U32: case BT_U64: case BT_USIZE:
-        emit(c, "String__Global__push_u64(&%s, (uint64_t)(", f);
+        emit(c, "String__Global__push_u64(&%s, (uint64_t)(", tb);
         emit_expr(c, arg);
         emit(c, "));\n");
         return true;
       case BT_F32: case BT_F64:
-        emit(c, "String__Global__push_f64(&%s, (double)(", f);
-        emit_expr(c, arg);
-        emit(c, "));\n");
+        if (sp->prec >= 0) {
+          emit(c, "String__Global__push_f64_prec(&%s, (double)(", tb);
+          emit_expr(c, arg);
+          emit(c, "), %d);\n", sp->prec);
+        } else {
+          emit(c, "String__Global__push_f64(&%s, (double)(", tb);
+          emit_expr(c, arg);
+          emit(c, "));\n");
+        }
         return true;
       default:
         return false;
     }
   }
   if (cg_struct_name_is(c, y, "str")) {
-    emit(c, "String__Global__push_str(&%s, ", f);
+    emit(c, "String__Global__push_str(&%s, ", tb);
     emit_expr(c, arg);
     emit(c, ");\n");
     return true;
@@ -2447,7 +2502,7 @@ static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg, c
     char sm[200];
     render_type_id(c, t, "", sm, sizeof sm); // the arg's concrete instance: String__Global / String__MyAlloc
     if (is_lvalue(c, arg)) { // borrow a named String (the caller still owns it)
-      emit(c, "String__Global__push_str(&%s, %s__as_str(&(", f, sm);
+      emit(c, "String__Global__push_str(&%s, %s__as_str(&(", tb, sm);
       emit_expr(c, arg);
       emit(c, ")));\n");
     } else { // a temporary (e.g. `v.fmt()`): materialize, append, then free it (no leak)
@@ -2455,15 +2510,47 @@ static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg, c
       fresh(c, tmp, sizeof tmp);
       emit(c, "{ %s %s = ", sm, tmp);
       emit_expr(c, arg);
-      emit(c, "; String__Global__push_str(&%s, %s__as_str(&%s)); %s__free(&%s); }\n", f, sm, tmp, sm, tmp);
+      emit(c, "; String__Global__push_str(&%s, %s__as_str(&%s)); %s__free(&%s); }\n", tb, sm, tmp, sm, tmp);
     }
     return true;
   }
   return false;
 }
 
-// True if (m, node) is the prelude `format`/`print`/`println` builtin. Their calls are always desugared
-// (emit_format_builtin), so the declarations themselves emit no C (the stub bodies are never used).
+// Append one format argument to builder `f`, honoring the parsed spec: type/precision render through
+// fmt_arg_core; a width pads via push_padded (str args directly, everything else through a scratch
+// String). Default alignment: right for numbers, left otherwise; the '0' flag zero-pads numerics.
+static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg, const FmtSpec *const sp) {
+  const TypeId t = subst_resolve(c, ast_type(c->ast, arg));
+  const Ty *const y = ast_type_at(c->ast, t);
+  if (sp->prec >= 0 && !(y->kind == TYPE_BUILTIN && (y->as.builtin == BT_F32 || y->as.builtin == BT_F64)))
+    return false; // precision is float-only
+  if (sp->width <= 0)
+    return fmt_arg_core(c, f, arg, sp, y, t);
+  const bool numeric = y->kind == TYPE_BUILTIN && y->as.builtin >= BT_I8 && y->as.builtin <= BT_F64;
+  const int align = sp->align == '<' ? 0 : sp->align == '^' ? 2 : sp->align == '>' ? 1 : (numeric ? 1 : 0);
+  const unsigned fill = sp->fill ? sp->fill : ' ';
+  if (cg_struct_name_is(c, y, "str")) { // a str view pads directly, no scratch buffer
+    emit(c, "String__Global__push_padded(&%s, ", f);
+    emit_expr(c, arg);
+    emit(c, ", %d, %u, %d);\n", sp->width, fill, align);
+    return true;
+  }
+  char tmp[32];
+  fresh(c, tmp, sizeof tmp);
+  emit(c, "{ String__Global %s = String__Global__new();\n", tmp);
+  if (!fmt_arg_core(c, tmp, arg, sp, y, t)) {
+    emit(c, "String__Global__free(&%s); }\n", tmp);
+    return false;
+  }
+  emit(c, "String__Global__push_padded(&%s, String__Global__as_str(&%s), %d, %u, %d);\n", f, tmp, sp->width, fill,
+       align);
+  emit(c, "String__Global__free(&%s); }\n", tmp);
+  return true;
+}
+
+// True if (m, node) is a prelude format builtin (`format`/`print`/`println`/`eprint`/`eprintln`). Their
+// calls are always desugared (emit_format_builtin), so the declarations themselves emit no C.
 static bool cg_is_format_builtin(Codegen *c, const ModuleId m, const NodeId node) {
   if (!c->package || m >= c->package->count || !c->package->modules[m].prelude)
     return false;
@@ -2472,7 +2559,8 @@ static bool cg_is_format_builtin(Codegen *c, const ModuleId m, const NodeId node
     return false;
   const Span fn = ast_at_const(a, ast_at_const(a, node)->as.function.name)->as.name.text;
   return span_is(cg_mod_src(c, m), fn, "format") || span_is(cg_mod_src(c, m), fn, "print") ||
-         span_is(cg_mod_src(c, m), fn, "println");
+         span_is(cg_mod_src(c, m), fn, "println") || span_is(cg_mod_src(c, m), fn, "eprint") ||
+         span_is(cg_mod_src(c, m), fn, "eprintln");
 }
 
 // `format`/`print`/`println`: a string-literal first arg with `{}` placeholders + matching trailing args.
@@ -2491,14 +2579,21 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
   if (ast_at_const(da, d.node)->kind != NODE_FUNCTION)
     return false;
   const Span fn = ast_at_const(da, ast_at_const(da, d.node)->as.function.name)->as.name.text;
-  const int kind = span_is(cg_mod_src(c, d.module), fn, "format") ? 1 : span_is(cg_mod_src(c, d.module), fn, "print") ? 2
-                   : span_is(cg_mod_src(c, d.module), fn, "println") ? 3 : 0;
+  const uint8_t *const dsrc = cg_mod_src(c, d.module);
+  const int kind = span_is(dsrc, fn, "format")     ? 1
+                   : span_is(dsrc, fn, "print")    ? 2
+                   : span_is(dsrc, fn, "println")  ? 3
+                   : span_is(dsrc, fn, "eprint")   ? 4
+                   : span_is(dsrc, fn, "eprintln") ? 5
+                                                   : 0;
   if (!kind)
     return false;
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(c->ast, args);
   const Node *const fmtn = args.len ? ast_at_const(c->ast, aids[0]) : NULL;
-  if (!fmtn || fmtn->kind != NODE_LITERAL || fmtn->as.literal.token_type != StringLiteral) {
+  const bool is_raw = fmtn && fmtn->kind == NODE_LITERAL && fmtn->as.literal.token_type == RawStringLiteral;
+  if (!fmtn || fmtn->kind != NODE_LITERAL ||
+      (fmtn->as.literal.token_type != StringLiteral && !is_raw)) {
     codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: format string must be a string literal");
     codegen_notef(c, "format strings are parsed at compile time so placeholders can be checked");
     return true;
@@ -2508,44 +2603,76 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
   emit(c, "({ String__Global %s = String__Global__new();\n", f);
   const Span raw = fmtn->as.literal.raw;
   const uint8_t *const src = c->source;
-  size_t i = raw.start + 1;
-  const size_t end = raw.end - 1;
+  const Span content = is_raw ? raw_string_content(src, raw) : (Span){raw.start + 1, raw.end - 1};
+  size_t i = content.start;
+  const size_t end = content.end;
   size_t seg = i;
   uint32_t ai = 1;
+#define FMT_SEG(from, to)                                                                                              \
+  do {                                                                                                                 \
+    emit(c, "String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);                                        \
+    if (is_raw)                                                                                                        \
+      emit_fmt_raw_cstr(c, from, to);                                                                                  \
+    else                                                                                                               \
+      emit_fmt_cstr(c, from, to);                                                                                      \
+    emit(c, ", .len = sizeof(");                                                                                       \
+    if (is_raw)                                                                                                        \
+      emit_fmt_raw_cstr(c, from, to);                                                                                  \
+    else                                                                                                               \
+      emit_fmt_cstr(c, from, to);                                                                                      \
+    emit(c, ") - 1 });\n");                                                                                            \
+  } while (0)
   while (i < end) {
     if ((src[i] == '{' || src[i] == '}') && i + 1 < end && src[i + 1] == src[i]) {
       i += 2;
       continue;
     }
-    if (src[i] == '{') { // a placeholder `{}` or `{:x}` / `{:X}` (hex). Scan to the closing `}`.
-      char spec = 0;
+    if (src[i] == '{') { // a placeholder `{:[fill][<^>][0][width][.prec][x|X|b]}`; scan to the closing `}`
+      FmtSpec sp = {.type = 0, .align = 0, .fill = 0, .width = 0, .prec = -1};
       size_t j = i + 1;
-      if (j < end && src[j] == ':' && j + 1 < end) {
-        spec = (char)src[j + 1];
-        j += 2;
-      }
-      if (j < end && src[j] == '}' && (spec == 0 || spec == 'x' || spec == 'X')) {
-        if (i > seg) {
-          emit(c, "String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
-          emit_fmt_cstr(c, seg, i);
-          emit(c, ", .len = sizeof(");
-          emit_fmt_cstr(c, seg, i);
-          emit(c, ") - 1 });\n");
+      if (j < end && src[j] == ':') {
+        j++;
+        if (j + 1 < end && (src[j + 1] == '<' || src[j + 1] == '>' || src[j + 1] == '^') && src[j] != '}') {
+          sp.fill = src[j]; // an explicit fill byte, only when an alignment follows it
+          sp.align = (char)src[j + 1];
+          j += 2;
+        } else if (j < end && (src[j] == '<' || src[j] == '>' || src[j] == '^')) {
+          sp.align = (char)src[j];
+          j++;
         }
+        if (j < end && src[j] == '0' && !sp.fill) { // the '0' flag: zero-pad (numeric-aware in push_padded)
+          sp.fill = '0';
+          j++;
+        }
+        while (j < end && src[j] >= '0' && src[j] <= '9')
+          sp.width = sp.width * 10 + (src[j++] - '0');
+        if (j < end && src[j] == '.') {
+          j++;
+          sp.prec = 0;
+          while (j < end && src[j] >= '0' && src[j] <= '9')
+            sp.prec = sp.prec * 10 + (src[j++] - '0');
+        }
+        if (j < end && (src[j] == 'x' || src[j] == 'X' || src[j] == 'b')) {
+          sp.type = (char)src[j];
+          j++;
+        }
+      }
+      if (j < end && src[j] == '}') {
+        if (i > seg)
+          FMT_SEG(seg, i);
         if (ai >= args.len) {
           codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more `{}` placeholders than arguments");
           codegen_notef(c, "add an argument for each placeholder or escape literal braces as '{{' and '}}'");
           emit(c, "%s; })", f);
           return true;
         }
-        if (!emit_format_arg(c, f, aids[ai], spec)) {
+        if (!emit_format_arg(c, f, aids[ai], &sp)) {
           const Span as = ast_at_const(c->ast, aids[ai])->span;
           codegen_errorf(c, as.start, as.end - as.start,
-                         spec ? "codegen: `{:x}`/`{:X}` hex format requires an integer argument"
-                              : "codegen: argument is not directly formattable (call its .fmt())");
-          if (spec)
-            codegen_notef(c, "hex formatting is currently implemented only for integer types");
-          else
+                         sp.type      ? "codegen: `{:x}`/`{:X}`/`{:b}` formats require an integer argument"
+                         : sp.prec >= 0 ? "codegen: `{:.N}` precision requires a float argument"
+                                        : "codegen: argument is not directly formattable (call its .fmt())");
+          if (!sp.type && sp.prec < 0)
             codegen_notef(c, "implement Format for this type or pass a value that already formats directly");
         }
         ai++;
@@ -2556,23 +2683,21 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
     }
     i++;
   }
-  if (end > seg) {
-    emit(c, "String__Global__push_str(&%s, (str){ .ptr = (const uint8_t*)", f);
-    emit_fmt_cstr(c, seg, end);
-    emit(c, ", .len = sizeof(");
-    emit_fmt_cstr(c, seg, end);
-    emit(c, ") - 1 });\n");
-  }
+  if (end > seg)
+    FMT_SEG(seg, end);
+#undef FMT_SEG
   if (ai < args.len) {
     codegen_errorf(c, n->span.start, n->span.end - n->span.start, "codegen: more arguments than `{}` placeholders");
     codegen_notef(c, "remove the extra argument or add a matching '{}' placeholder");
   }
-  if (kind == 3)
+  if (kind == 3 || kind == 5)
     emit(c, "String__Global__push_byte(&%s, 10);\n", f);
   if (kind == 1) {
     emit(c, "%s; })", f); // format: yield the built String
-  } else {
-    emit(c, "String__Global__print(&%s); String__Global__free(&%s); })", f, f); // print/println: write to stdout, then free
+  } else if (kind >= 4) { // eprint/eprintln: write to stderr, then free
+    emit(c, "String__Global__eprint(&%s); String__Global__free(&%s); })", f, f);
+  } else { // print/println: write to stdout, then free
+    emit(c, "String__Global__print(&%s); String__Global__free(&%s); })", f, f);
   }
   return true;
 }
