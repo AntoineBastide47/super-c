@@ -984,26 +984,33 @@ static void test_module_imports(void) {
   CHECK(run_cmd(crun, NULL, 0) == 140, "alias (10) + glob (20) + facade-glob dtag (100) + deep::dtag/10 (10)");
 }
 
-// External C code imports: `@c.source("f.c")` on an extern block emits a wrapper TU into build/
-// (an absolute #include, so the file's own relative includes still resolve) and `@c.link("m")`
-// lands in build/__ldflags -- so `cc build/**/*.c $(cat build/__ldflags)` builds the whole program.
-// A missing source is a hard error; removing the attributes prunes the wrapper and the flags file.
+// External C code imports. A backing header next to the .spc AUTO-DISCOVERS its same-stem `.c`
+// sibling (no attribute needed); `@c.source("f.c")` pulls in a differently-named implementation; both
+// emit wrapper TUs into build/ (an absolute #include, so the file's own relative includes still
+// resolve). `@c.link("m")` lands in build/__ldflags -- so `cc build/**/*.c $(cat build/__ldflags)`
+// builds the whole program. A missing @c.source is a hard error; removing the code prunes the
+// wrappers and the flags file.
 static void test_external_c_sources(void) {
   char root[4112], spc[4170], cmd[8320], buf[512];
   snprintf(root, sizeof root, "%s/extc", DIR);
   mkfile(root, "helper.h", "int helper_add(int a, int b);\n");
   mkfile(root, "helper.c", "#include \"helper.h\"\nint helper_add(int a, int b) { return a + b; }\n");
+  mkfile(root, "extra.h", "int extra_mul(int a, int b);\n"); // stem differs from the implementation's
+  mkfile(root, "impl_extra.c", "#include \"extra.h\"\nint extra_mul(int a, int b) { return a * b; }\n");
   mkfile(root, "main.spc",
-         "@c.source(\"helper.c\")\n"
-         "@c.link(\"m\")\n"
-         "extern \"C\" \"helper.h\" {\n" // relative to THIS .spc; the compiler rewrites it for build/
+         "extern \"C\" \"helper.h\" {\n" // relative to THIS .spc; helper.c is discovered automatically
          "  fn helper_add(a: i32, b: i32) i32;\n"
          "}\n"
+         "@c.source(\"impl_extra.c\")\n" // a differently-named implementation still needs the attribute
+         "@c.link(\"m\")\n"
+         "extern \"C\" \"extra.h\" {\n" // no extra.c sibling: nothing auto-discovered for this one
+         "  fn extra_mul(a: i32, b: i32) i32;\n"
+         "}\n"
          "extern \"C\" { fn exit(code: i32) void; }\n"
-         "fn main() i32 { unsafe exit(helper_add(20, 22)); }\n");
+         "fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
-  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "@c.source/@c.link compile: %s", buf);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "auto-discovered + @c.source compile: %s", buf);
   snprintf(cmd, sizeof cmd, "cat '%s/build/__ldflags' 2>&1", root);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0 && strstr(buf, "-lm"), "@c.link lands in build/__ldflags: %s", buf);
   char bin[4200], ccmd[8320], crun[8320];
@@ -1011,16 +1018,17 @@ static void test_external_c_sources(void) {
   snprintf(ccmd, sizeof ccmd,
            "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') $(cat '%s/build/__ldflags') -o '%s' 2>&1",
            root, root, bin);
-  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "external C source compiles via the build tree: %s", buf);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "external C sources compile via the build tree: %s", buf);
   snprintf(crun, sizeof crun, "'%s'", bin);
-  CHECK(run_cmd(crun, NULL, 0) == 42, "helper_add(20, 22) through @c.source");
-  mkfile(root, "main.spc", // drop the attributes: the wrapper TU and __ldflags must disappear
+  CHECK(run_cmd(crun, NULL, 0) == 48, "helper_add (42, auto) + extra_mul (6, @c.source)");
+  mkfile(root, "main.spc", // drop the extern blocks: the wrapper TUs and __ldflags must disappear
          "extern \"C\" { fn exit(code: i32) void; }\n"
          "fn main() i32 { unsafe exit(0); }\n");
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "attribute-free recompile: %s", buf);
-  snprintf(cmd, sizeof cmd, "test ! -e '%s/build/__ext0_helper.c' && test ! -e '%s/build/__ldflags'", root, root);
-  CHECK(run_cmd(cmd, NULL, 0) == 0, "stale wrapper TU and __ldflags are pruned");
+  snprintf(cmd, sizeof cmd, "test $(find '%s/build' -name '__ext*' | wc -l) -eq 0 && test ! -e '%s/build/__ldflags'",
+           root, root);
+  CHECK(run_cmd(cmd, NULL, 0) == 0, "stale wrapper TUs and __ldflags are pruned");
   mkfile(root, "main.spc", // a missing source file is a hard error
          "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);

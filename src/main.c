@@ -913,12 +913,16 @@ static char *write_test_main(Package *p, const TestPlan *plan) {
   return path;
 }
 
-// External C code pulled in by `@c.source("f.c")` / `@c.link("m")` on extern blocks. Each source file
-// becomes a wrapper TU `build/__ext<N>_<stem>.c` holding one absolute #include of the original file --
-// the file stays in place, so its own relative includes keep resolving against its directory, and a
-// plain `cc build/**/*.c` picks it up. Sources are deduped by resolved path. Link values become
-// `-l<v>` (verbatim when the value starts with '-'), written to `build/__ldflags` (one per line, for
-// the user's link command) and appended to the --test link line.
+// External C code compiled into the build. Sources come from `@c.source("f.c")` on an extern block OR
+// implicitly: a backing header (`extern "C" "native.h"`) that resolves next to the declaring .spc with a
+// same-stem sibling `.c` pulls that sibling in automatically -- `@c.source` is only needed when the
+// implementation is named or located differently. Each source becomes a wrapper TU
+// `build/__ext<N>_<stem>.c` holding one absolute #include of the original file -- the file stays in
+// place, so its own relative includes keep resolving against its directory, and a plain
+// `cc build/**/*.c` picks it up. Sources are deduped by resolved path. `@c.link` values become `-l<v>`
+// (verbatim when the value starts with '-'), written to `build/__ldflags` (one per line, for the user's
+// link command) and appended to the --test link line; libraries declare their own flag once (the ffi
+// math/pthread/dlfcn bindings do), so importers never repeat it.
 typedef struct {
   char **ld;
   size_t nld, ldcap;
@@ -931,6 +935,46 @@ static void ext_c_free(ExtC *x) {
   free(x->ld);
 }
 
+// `<dir of file>/<v>` when `file` has a directory, else `v` -- the module-relative candidate path.
+static void ext_c_rel(const char *file, const char *v, const int vl, char *out, const size_t cap) {
+  const char *const slash = file ? strrchr(file, '/') : NULL;
+  if (slash)
+    snprintf(out, cap, "%.*s/%.*s", (int)(slash - file), file, vl, v);
+  else
+    snprintf(out, cap, "%.*s", vl, v);
+}
+
+// Wrap one RESOLVED external C source path into a build/ TU (deduped across explicit and implicit adds).
+static void ext_c_wrap(Package *p, ExtC *x, const char *rsl, char seen[][PATH_MAX], size_t *nseen, size_t *nsrc,
+                       char ***kept, size_t *nkept, size_t *kcap, bool *keep_ok) {
+  for (size_t k = 0; k < *nseen; k++)
+    if (!strcmp(seen[k], rsl))
+      return;
+  if (*nseen < 64)
+    snprintf(seen[(*nseen)++], PATH_MAX, "%s", rsl);
+  char stem[64]; // sanitized basename, for a readable wrapper name
+  const char *base = strrchr(rsl, '/');
+  base = base ? base + 1 : rsl;
+  size_t sl = 0;
+  for (const char *s = base; *s && *s != '.' && sl < sizeof stem - 1; s++)
+    stem[sl++] = (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') ? *s : '_';
+  stem[sl] = '\0';
+  char name[96];
+  snprintf(name, sizeof name, "__ext%zu_%s", (*nsrc)++, stem);
+  char *const path = build_out_path(p->root_dir, name, ".c");
+  FILE *const f = path ? open_out(path) : NULL;
+  if (!f) {
+    if (path)
+      perror(path);
+    free(path);
+    x->err = true;
+    return;
+  }
+  fprintf(f, "/* external C source pulled into the build -- generated, do not edit */\n#include \"%s\"\n", rsl);
+  fclose(f);
+  *keep_ok &= keep_push(kept, nkept, kcap, path);
+}
+
 static void ext_c_collect(Package *p, ExtC *x, char ***kept, size_t *nkept, size_t *kcap, bool *keep_ok) {
   char seen[64][PATH_MAX];
   size_t nseen = 0, nsrc = 0;
@@ -938,6 +982,7 @@ static void ext_c_collect(Package *p, ExtC *x, char ***kept, size_t *nkept, size
     const Ast *const a = p->modules[m].ast;
     if (!a)
       continue;
+    const char *const file = p->modules[m].file;
     for (size_t i = 0; i < a->attrs.len; i++) {
       const Attr *const at = &a->attrs.data[i];
       if ((at->kind != ATTR_C_SOURCE && at->kind != ATTR_C_LINK) || at->str.end <= at->str.start)
@@ -963,12 +1008,7 @@ static void ext_c_collect(Package *p, ExtC *x, char ***kept, size_t *nkept, size
       }
       // @c.source: resolve relative to the declaring module's file first, then as written.
       char rel[PATH_MAX], rsl[PATH_MAX];
-      const char *const file = p->modules[m].file;
-      const char *const slash = file ? strrchr(file, '/') : NULL;
-      if (slash)
-        snprintf(rel, sizeof rel, "%.*s/%.*s", (int)(slash - file), file, vl, v);
-      else
-        snprintf(rel, sizeof rel, "%.*s", vl, v);
+      ext_c_rel(file, v, vl, rel, sizeof rel);
       if (!realpath(rel, rsl)) {
         snprintf(rel, sizeof rel, "%.*s", vl, v);
         if (!realpath(rel, rsl)) {
@@ -977,34 +1017,32 @@ static void ext_c_collect(Package *p, ExtC *x, char ***kept, size_t *nkept, size
           continue;
         }
       }
-      bool dup = false;
-      for (size_t k = 0; k < nseen && !dup; k++)
-        dup = !strcmp(seen[k], rsl);
-      if (dup)
+      ext_c_wrap(p, x, rsl, seen, &nseen, &nsrc, kept, nkept, kcap, keep_ok);
+    }
+    // Implicit sources: a backing header that resolves next to this module with a same-stem `.c`
+    // sibling pulls the sibling in (convention over configuration; the dedup absorbs an explicit
+    // @c.source naming the same file). A header with no sibling stays declaration-only, as before.
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const ids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len; i++) {
+      const Node *const n = ast_at_const(a, ids[i]);
+      if (n->kind != NODE_EXTERN_BLOCK || n->as.extern_block.header == NODE_NONE)
         continue;
-      if (nseen < sizeof seen / sizeof seen[0])
-        snprintf(seen[nseen++], PATH_MAX, "%s", rsl);
-      char stem[64]; // sanitized basename, for a readable wrapper name
-      const char *base = strrchr(rsl, '/');
-      base = base ? base + 1 : rsl;
-      size_t sl = 0;
-      for (const char *s = base; *s && *s != '.' && sl < sizeof stem - 1; s++)
-        stem[sl++] = (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') ? *s : '_';
-      stem[sl] = '\0';
-      char name[96];
-      snprintf(name, sizeof name, "__ext%zu_%s", nsrc++, stem);
-      char *const path = build_out_path(p->root_dir, name, ".c");
-      FILE *const f = path ? open_out(path) : NULL;
-      if (!f) {
-        if (path)
-          perror(path);
-        free(path);
-        x->err = true;
+      const Span hs = ast_at_const(a, n->as.extern_block.header)->span;
+      const int hl = (int)(hs.end - hs.start) - 2; // strip the string-literal quotes
+      if (hl <= 2)
         continue;
-      }
-      fprintf(f, "/* external C source pulled in by @c.source -- generated, do not edit */\n#include \"%s\"\n", rsl);
-      fclose(f);
-      *keep_ok &= keep_push(kept, nkept, kcap, path);
+      char rel[PATH_MAX], habs[PATH_MAX], cabs[PATH_MAX];
+      ext_c_rel(file, p->modules[m].source + hs.start + 1, hl, rel, sizeof rel);
+      if (!realpath(rel, habs))
+        continue; // not a module-local header (a system/bundled one): nothing to discover
+      const size_t hn = strlen(rel);
+      const char *const dot = strrchr(rel, '.');
+      if (!dot || hn < 2)
+        continue;
+      snprintf(rel + (dot - rel), sizeof rel - (size_t)(dot - rel), ".c");
+      if (realpath(rel, cabs))
+        ext_c_wrap(p, x, cabs, seen, &nseen, &nsrc, kept, nkept, kcap, keep_ok);
     }
   }
   char ldpath[4096];

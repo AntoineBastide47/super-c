@@ -4,6 +4,7 @@
 // own values are used rather than hardcoded numbers. They are runtime flag values (e.g.
 // `dlopen(p, RTLD_NOW | RTLD_GLOBAL)`), not Super-C constant expressions.
 
+@c.link("dl")
 extern "C" "dlfcn.h" {
     pub fn dlopen(path: *const char, flags: i32) *mut void;
     pub fn dlsym(handle: *mut void, symbol: *const char) *mut void;
