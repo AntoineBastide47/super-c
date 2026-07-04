@@ -2170,8 +2170,11 @@ static bool dyn_coerce(TypeChecker *t, const NodeId node, const TypeId src, cons
     snprintf(nm, sizeof nm, "%.*s", (int)(mn.end - mn.start), (const char *)isrc + mn.start);
     if (find_method_cstr(t, tmod, tdecl, nm).node != NODE_NONE)
       continue;
-    // No override: only a SAME-module default body is emittable (codegen synthesizes those).
-    if (m->as.function.body != NODE_NONE && iface.module == t->ast->module)
+    // No override: a default body is emittable only when the `extend .. as I` lives in I's own
+    // module (emit_default_methods synthesizes `T__method` there; its symbol is what glue calls).
+    ModuleId emod = 0;
+    if (m->as.function.body != NODE_NONE && find_extend_as(t, tmod, tdecl, iface, &emod) != NODE_NONE &&
+        emod == iface.module)
       continue;
     char tn[96];
     render_type(t, src, tn, sizeof tn);
@@ -2505,6 +2508,15 @@ static TypeId lower_type_in(TypeChecker *t, const ModuleId m, const NodeId id) {
     }
     case NODE_FUNCTION_TYPE:
       return ast_intern_type(t->ast, (Ty){.kind = TYPE_FUNCTION, .module = m, .as.decl = id});
+    case NODE_DYN_TYPE: { // a foreign signature's `&[mut] dyn I` (its own module already validated it)
+      const NodeId inner = n->as.indirect_type.type;
+      const DefId d = ast_at_const(a, inner)->kind == NODE_TYPE_PATH ? ast_resolution_def(a, inner)
+                                                                     : (DefId){0, NODE_NONE};
+      if (d.node == NODE_NONE || ast_at_const(mod_ast(t, d.module), d.node)->kind != NODE_INTERFACE)
+        return TYPE_ERROR;
+      return ast_intern_type(
+          t->ast, (Ty){.kind = TYPE_DYN, .qualifier = n->as.indirect_type.qualifier, .module = d.module, .as.decl = d.node});
+    }
     default:
       return TYPE_ERROR;
   }

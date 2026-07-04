@@ -764,6 +764,51 @@ static void test_cross_module_interface(void) {
   CHECK(run_cmd(crun, NULL, 0) == 36, "imported-interface bound dispatches to Sq::area (6*6)");
 }
 
+// Cross-module trait objects: a pub interface (with a default method) in one module, erased over a
+// foreign type AND a local type in another; both modules erase (guarded typedefs must not collide),
+// and the foreign default's synthesized `Circle__tag` must export for the user TU's glue. -Werror.
+static void test_cross_module_dyn(void) {
+  char root[4112], spc[4170], cmd[8320], buf[256];
+  snprintf(root, sizeof root, "%s/dyn", DIR);
+  mkfile(root, "shapes.spc",
+         "pub interface Shape {\n"
+         "    fn area(self: &Self) i32;\n"
+         "    fn tag(self: &Self) i32 { return 7; }\n"
+         "}\n"
+         "pub struct Circle { pub r: i32 }\n"
+         "extend Circle as Shape {\n"
+         "    pub fn area(self: &Circle) i32 { return 3 * self.r * self.r; }\n"
+         "}\n"
+         "pub fn local_view(s: &dyn Shape) i32 { return s.area(); }\n");
+  mkfile(root, "main.spc",
+         "import shapes;\n"
+         "extern \"C\" { fn exit(code: i32) void; }\n"
+         "struct Sq { pub s: i32 }\n"
+         "extend Sq as shapes::Shape {\n"
+         "    pub fn area(self: &Sq) i32 { return self.s * self.s; }\n"
+         "    pub fn tag(self: &Sq) i32 { return 4; }\n"
+         "}\n"
+         "fn total(a: &dyn shapes::Shape, b: &dyn shapes::Shape) i32 { return a.area() + b.area(); }\n"
+         "fn main() i32 {\n"
+         "    let c = shapes::Circle { r: 1 };\n"
+         "    let q = Sq { s: 2 };\n"
+         "    let d: &dyn shapes::Shape = &c;\n"          // foreign type + foreign interface
+         "    let t = total(&c, &q);\n"                   // 3 + 4 = 7
+         "    let u = shapes::local_view(&q);\n"          // 4 (the other module erases too)
+         "    let w = d.tag() + q.tag();\n"               // 7 (foreign default) + 4 = 11
+         "    unsafe exit(t + u + w + d.area());\n"       // 7 + 4 + 11 + 3 = 25
+         "}\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "cross-module dyn compiles: %s", buf);
+  char bin[4200], ccmd[8320], crun[8320];
+  snprintf(bin, sizeof bin, "%s/dyn.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "cross-module dyn C compiles -Werror: %s", buf);
+  snprintf(crun, sizeof crun, "'%s'", bin);
+  CHECK(run_cmd(crun, NULL, 0) == 25, "cross-module vtables dispatch (7+4+11+3)");
+}
+
 // The bundled `ffi/` bindings, imported by a C header's bare name (`import math;` -> ffi/math.spc, no
 // `ffi::` prefix). Exercises the FFI path end-to-end: the ffi search root, a `pub` raw `extern "C"`
 // binding emitted with its real unmangled C symbol (and no clashing prototype, since the std headers are
@@ -945,6 +990,7 @@ int main(void) {
   test_prelude_output_is_demand_driven();
   test_cross_module_nested_rehomed_instance();
   test_cross_module_interface();
+  test_cross_module_dyn();
   test_ffi_bindings();
   test_module_imports();
   test_format_conformances();
