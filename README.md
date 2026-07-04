@@ -385,6 +385,9 @@ fn main() i32 {
 ```
 
 `import P as Q;` aliases a module and `import P as *;` brings its public items into scope unqualified.
+Imports are public, C-style: a glob import of a facade module also exposes everything the facade
+itself imports, and any transitively loaded module stays reachable by its qualified path (`b::foo()`)
+without a direct import.
 
 ### C interop (FFI)
 
