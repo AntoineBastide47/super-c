@@ -475,6 +475,69 @@ static void test_module_features(void) {
   CHECK(run_cmd(crun, NULL, 0) == 115, "const + alias + qualified construct + extension method run (12+3+100)");
 }
 
+// The --test pipeline end to end: @test collection across modules, per-module @test_init/@test_free
+// fixtures (RAII-freed), the @test_init(global) suite env, @test(should_panic), fork isolation of a
+// failing assertion (later tests still run; failure count = exit code), --test-filter selection, and
+// --test-no-fork (should_panic skipped). The generated assert message carries expression + values.
+static void test_test_pipeline(void) {
+  char root[4112], spc[4170], cmd[8500], buf[4096];
+  snprintf(root, sizeof root, "%s/tpipe", DIR);
+  mkfile(root, "env.spc",
+         "pub struct Env { pub tag: String }\n"
+         "@test_init(global)\n"
+         "fn suite() Env { return Env { tag: String::from_str(\"suite\") }; }\n"
+         "@test_free(global)\n"
+         "fn suite_down(env: &mut Env) { eprintln(\"teardown {}\", env.tag.as_str()); }\n");
+  mkfile(root, "main.spc",
+         "import env;\n"
+         "struct Fx { pub v: Vector<i32> }\n"
+         "@test_init\n"
+         "fn setup() Fx { let mut v = Vector::<i32>::new(); v.push(1); v.push(2); return Fx { v: v }; }\n"
+         "@test\n"
+         "fn drains(fx: &mut Fx, e: &env::Env) {\n"
+         "  let mut s = 0;\n"
+         "  while let Some(x) = fx.v.pop() { s += x; }\n"
+         "  assert_eq(s, 3);\n"
+         "  assert_eq(e.tag.len(), 5);\n"
+         "}\n"
+         "@test\n"
+         "fn fails() { assert_eq(2 * 3, 7); }\n"
+         "@test(should_panic)\n"
+         "fn boom() { panic(\"boom\"); }\n"
+         "fn main() i32 { return 0; }\n");
+  snprintf(spc, sizeof spc, "%s/main.spc", root);
+  snprintf(cmd, sizeof cmd, "%s --test '%s' 2>&1", SC, spc);
+  const int rc = run_cmd(cmd, buf, sizeof buf);
+  CHECK(rc == 1, "one failing test -> exit 1 (got %d): %s", rc, buf);
+  CHECK_STR_CONTAINS(buf, "running 3 tests");
+  CHECK_STR_CONTAINS(buf, "test main::drains ... ok");
+  CHECK_STR_CONTAINS(buf, "test main::boom ... ok (panicked as expected)");
+  CHECK_STR_CONTAINS(buf, "test main::fails ... FAILED");
+  CHECK_STR_CONTAINS(buf, "assertion failed: `2 * 3 == 7`");
+  CHECK_STR_CONTAINS(buf, "left:  6");
+  CHECK_STR_CONTAINS(buf, "right: 7");
+  CHECK_STR_CONTAINS(buf, "teardown suite");
+  CHECK_STR_CONTAINS(buf, "2 passed, 1 failed");
+  // --test-filter narrows selection; a fully passing selection exits 0.
+  snprintf(cmd, sizeof cmd, "%s --test --test-filter=drains --test-jobs=2 '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "filtered run passes: %s", buf);
+  CHECK_STR_CONTAINS(buf, "running 1 test");
+  CHECK_STR_CONTAINS(buf, "1 passed, 0 failed");
+  // --test-no-fork runs in-process and skips should_panic tests.
+  snprintf(cmd, sizeof cmd, "%s --test --test-no-fork --test-filter=boom '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "no-fork skips should_panic: %s", buf);
+  CHECK_STR_CONTAINS(buf, "skipped (should_panic needs fork)");
+  // A normal (non---test) build of the same tree still compiles and runs its own main.
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "normal build of a tree with tests: %s", buf);
+  char bin[4200], ccmd[8500];
+  snprintf(bin, sizeof bin, "%s/tpipe.bin", DIR);
+  snprintf(ccmd, sizeof ccmd, "cc -std=c11 $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
+  CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "normal C build (tests not emitted): %s", buf);
+  snprintf(cmd, sizeof cmd, "'%s'", bin);
+  CHECK(run_cmd(cmd, NULL, 0) == 0, "the user's main is the entry point outside --test");
+}
+
 // A public `static mut` global: extern-declared in its module's header, defined once in the .c, and
 // readable/assignable across modules (both through the owning module's functions and directly by path).
 static void test_cross_module_static_mut(void) {
@@ -1019,6 +1082,7 @@ int main(void) {
   test_ctfe_gaps();
   test_module_features();
   test_cross_module_static_mut();
+  test_test_pipeline();
   test_cross_module_generic_by_value();
   test_cross_module_generic_bound_dispatch();
   test_emit_macro_export();

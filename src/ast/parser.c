@@ -965,6 +965,32 @@ static bool parse_attribute(Parser *p, Attr *const out) {
     }
     return true;
   }
+  // Bare test attributes: `@test[(should_panic)]`, `@test_init[(global)]`, `@test_free[(global)]`.
+  // The optional flag lands in `arg` (1 = should_panic / global).
+  const int tk = tok_text_is(p, ns, "test")        ? ATTR_TEST
+                 : tok_text_is(p, ns, "test_init") ? ATTR_TEST_INIT
+                 : tok_text_is(p, ns, "test_free") ? ATTR_TEST_FREE
+                                                   : -1;
+  if (tk >= 0 && !check(p, Dot)) {
+    *out = (Attr){.kind = (uint8_t)tk};
+    if (match(p, LeftParen)) {
+      const Token a = raw_peek(p);
+      const bool ok = check(p, Identifier) && (tk == ATTR_TEST ? tok_text_is(p, a, "should_panic")
+                                                               : tok_text_is(p, a, "global"));
+      if (ok) {
+        out->arg = 1;
+        advance(p);
+      } else {
+        parser_errorf(p, token_start(a), token_len(a) ? token_len(a) : 1,
+                      tk == ATTR_TEST ? "attribute '@test' accepts only '(should_panic)'"
+                                      : "'@test_init' / '@test_free' accept only '(global)'");
+        while (!check(p, RightParen) && !at_end(p))
+          advance(p);
+      }
+      expect(p, RightParen, "')'");
+    }
+    return true;
+  }
   if (!tok_text_is(p, ns, "c")) {
     parser_errorf(p, token_start(ns), token_len(ns), "unknown attribute namespace; only '@c.*' and '@emit_macro' are supported");
     parser_notef(p, "use '@c.<name>' for C attributes or bare '@emit_macro' for generic C macro emission");
@@ -1103,6 +1129,14 @@ static NodeId parse_item(Parser *p) {
       return NODE_NONE;
   }
   for (int i = 0; i < nattr; i++) { // attach the leading attributes to the item they decorate
+    if (attrs[i].kind == ATTR_TEST || attrs[i].kind == ATTR_TEST_INIT || attrs[i].kind == ATTR_TEST_FREE) {
+      const Node *const d = id != NODE_NONE ? ast_at(p->ast, id) : NULL;
+      if (!d || d->kind != NODE_FUNCTION || d->as.function.generics.len) {
+        const Span sp = d ? d->span : (Span){0, 0};
+        parser_errorf(p, sp.start, sp.end - sp.start,
+                      "'@test' / '@test_init' / '@test_free' may only be applied to a non-generic function");
+      }
+    }
     if (attrs[i].kind == ATTR_EMIT_MACRO) { // C macro export: only meaningful for a generic struct/enum
       const Node *const d = id != NODE_NONE ? ast_at(p->ast, id) : NULL;
       if (!d || (d->kind != NODE_STRUCT && d->kind != NODE_ENUM) || !d->as.aggregate.generics.len) {

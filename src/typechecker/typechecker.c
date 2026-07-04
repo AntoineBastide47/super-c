@@ -4027,6 +4027,74 @@ static TypeId iter_elem_type(TypeChecker *t, const TypeId it) {
   return TYPE_NONE;
 }
 
+// `assert` / `assert_eq` / `assert_ne` (prelude builtins, desugared in codegen): arguments are checked
+// with BORROW semantics -- the desugar only reads them, so no moves are marked and an owned value stays
+// usable after the assertion. kind: 1 = assert, 2 = assert_eq, 3 = assert_ne.
+static TypeId tc_check_assert(TypeChecker *t, const Node *const n, const int kind) {
+  const NodeList args = n->as.call.args;
+  const NodeId *const aids = ast_list(t->ast, args);
+  const Span sp = n->span;
+  if (kind == 1) { // assert(cond [, msg: str])
+    if (args.len < 1 || args.len > 2) {
+      typechecker_errorf(t, sp.start, sp.end - sp.start, "'assert' takes a condition and an optional str message");
+      for (uint32_t i = 0; i < args.len; i++)
+        check_expr(t, aids[i]);
+      return ast_builtin(BT_VOID);
+    }
+    const TypeId ct = check_expr(t, aids[0]);
+    if (ct != TYPE_NONE && !is_bool(t, ct))
+      typechecker_errorf(t, sp.start, sp.end - sp.start, "'assert' condition must be 'bool'");
+    if (args.len == 2) {
+      const TypeId mt = check_expr(t, aids[1]);
+      if (mt != TYPE_NONE && strip(t, mt) != prelude_str_type(t))
+        typechecker_errorf(t, sp.start, sp.end - sp.start, "'assert' message must be a 'str'");
+    }
+    return ast_builtin(BT_VOID);
+  }
+  const char *const nm = kind == 2 ? "assert_eq" : "assert_ne";
+  if (args.len != 2) {
+    typechecker_errorf(t, sp.start, sp.end - sp.start, "'%s' takes exactly two arguments", nm);
+    for (uint32_t i = 0; i < args.len; i++)
+      check_expr(t, aids[i]);
+    return ast_builtin(BT_VOID);
+  }
+  const TypeId lt = check_expr(t, aids[0]);
+  t->expected = lt; // the right side adapts to the left (`assert_eq(x_u8, 3)`)
+  const TypeId rt = check_expr(t, aids[1]);
+  if (lt == TYPE_NONE || rt == TYPE_NONE)
+    return ast_builtin(BT_VOID);
+  if (lt != rt && !compatible(t, lt, aids[1]) && !compatible(t, rt, aids[0]))
+    err_mismatch(t, aids[1], lt);
+  // Comparability of the (ref-stripped) operand type: builtins, `str`, payload-less enums, and any
+  // aggregate with an `eq` method (its lookup here also marks it used for demand-driven emission).
+  const TypeId base = strip(t, lt);
+  const Ty *const y = ast_type_at(t->ast, base);
+  bool comparable = y->kind == TYPE_BUILTIN && y->as.builtin != BT_VOID && y->as.builtin != BT_VALIST;
+  comparable |= base == prelude_str_type(t);
+  if (!comparable && (y->kind == TYPE_STRUCT || y->kind == TYPE_INSTANCE || y->kind == TYPE_ENUM)) {
+    ModuleId om;
+    NodeId od;
+    DefId gp[4];
+    TypeId ga[4];
+    int gn;
+    if (aggregate_of(t, base, &om, &od, gp, ga, &gn)) {
+      comparable = find_method_cstr(t, om, od, "eq").node != NODE_NONE;
+      if (!comparable && is_plain_enum(t, base))
+        comparable = true; // a payload-less enum compares by tag (a plain C enum)
+      // a String argument's failure message prints through as_str -- keep it emitted
+      if (comparable)
+        find_method_cstr(t, om, od, "as_str");
+    }
+  }
+  if (!comparable) {
+    char ty[96];
+    render_type(t, lt, ty, sizeof ty);
+    typechecker_errorf(t, sp.start, sp.end - sp.start, "'%s' cannot compare values of type '%s'", nm, ty);
+    typechecker_notef(t, "implement 'Eq' (an 'eq' method) for the type, or compare a field/element instead");
+  }
+  return ast_builtin(BT_VOID);
+}
+
 static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, const TypeId want) {
   // `Enum::Variant(args)` is construction, not a function call.
   const Node *const path_callee = ast_at_const(t->ast, n->as.call.callee);
@@ -4076,6 +4144,21 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
     callee = check_member(t, path_callee, true); // `obj.name(args)`: resolve `name` as a method, not a field
   } else {
     callee = check_expr(t, n->as.call.callee);
+  }
+  // The assert builtins divert BEFORE the argument loop: their args are read, never moved.
+  if (path_callee->kind == NODE_IDENTIFIER && t->package) {
+    const DefId ad = ast_resolution_def(t->ast, n->as.call.callee);
+    if (ad.node != NODE_NONE && ad.module < t->package->count && t->package->modules[ad.module].prelude &&
+        ast_at_const(mod_ast(t, ad.module), ad.node)->kind == NODE_FUNCTION) {
+      const Span anm =
+          ast_at_const(mod_ast(t, ad.module), ast_at_const(mod_ast(t, ad.module), ad.node)->as.function.name)->as.name.text;
+      const int akind = span_is(mod_src(t, ad.module), anm, "assert")      ? 1
+                        : span_is(mod_src(t, ad.module), anm, "assert_eq") ? 2
+                        : span_is(mod_src(t, ad.module), anm, "assert_ne") ? 3
+                                                                           : 0;
+      if (akind)
+        return tc_check_assert(t, n, akind);
+    }
   }
   const NodeList args = n->as.call.args;
   const NodeId *const aids = ast_list(t->ast, args);
