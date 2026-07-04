@@ -360,6 +360,60 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
     }
 }
 
+// Comparator-driven sorting (no `Ord` required: the closure decides the order).
+extend<T, A: Allocator> Vector<T, A> {
+    // Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
+    // The sift is inlined: a generic method calling another generic method with its own F is not
+    // transitively instantiated yet, so the helper stays inside the one specialization.
+    pub fn sort_by<F: fn(&T, &T) i32>(self: &mut Vector<T, A>, cmp: F) {
+        let n = self.len;
+        if n < 2 { return; }
+        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
+        let mut start = n / 2;
+        let mut end = n;
+        loop {
+            let mut r: usize = 0;
+            if phase == 0 {
+                if start == 0 { phase = 1; continue; }
+                start = start - 1;
+                r = start;
+            } else {
+                if end <= 1 { break; }
+                end = end - 1;
+                self.swap(0, end);
+            }
+            let mut lim = n;
+            if phase == 1 { lim = end; }
+            let mut child = 2 * r + 1;
+            while child < lim {
+                if child + 1 < lim && cmp(&unsafe self.ptr[child], &unsafe self.ptr[child + 1]) < 0 { child = child + 1; }
+                if cmp(&unsafe self.ptr[r], &unsafe self.ptr[child]) >= 0 { break; }
+                self.swap(r, child);
+                r = child;
+                child = 2 * r + 1;
+            }
+        }
+    }
+
+    // Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`).
+    pub fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
+        let n = self.len;
+        if n < 2 { return; }
+        let mut i: usize = 1; // insertion sort through swaps: key extraction stays borrow-only
+        while i < n {
+            let mut j = i;
+            while j > 0 {
+                let prev = key(&unsafe self.ptr[j - 1]);
+                let cur = key(&unsafe self.ptr[j]);
+                if prev.cmp(&cur) <= 0 { break; }
+                self.swap(j - 1, j);
+                j = j - 1;
+            }
+            i = i + 1;
+        }
+    }
+}
+
 // A borrowing cursor over a Vector's elements. `for x in v.iter()` yields a borrow `&T` of each element.
 pub struct VecIter<T> {
     pub data: *const T,
