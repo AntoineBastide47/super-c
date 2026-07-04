@@ -922,8 +922,14 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
     case IntegerLiteral: // an integer literal fits any int *or* float/complex slot (`let f: f64 = 0;`)
       if (tc_literal_pinned(t, v))
         return false; // a suffixed literal is its named type: only exact match or widening (above)
-      return et->kind == TYPE_BUILTIN &&
-             (bt_is_int(et->as.builtin) || bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin));
+      if (et->kind != TYPE_BUILTIN ||
+          !(bt_is_int(et->as.builtin) || bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin)))
+        return false;
+      // Record the adaptation on the node: the literal IS the slot's type (`let y: u32 = 4294967254;`
+      // is a u32, not an over-range i32), so const-eval range-checks and folds it as such.
+      if (bt_is_int(et->as.builtin) && v == ast_at_const(t->ast, node))
+        ast_set_type(t->ast, node, expected);
+      return true;
     case CharacterLiteral: // an ASCII char literal fits any int slot too (`contains_byte('l')`), like `b'l'`
       return et->kind == TYPE_BUILTIN && bt_is_int(et->as.builtin);
     case FloatLiteral: // a float literal fits a float or complex slot (no implicit float->int truncation)
@@ -4602,6 +4608,60 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
           rsubp[nrsub] = (DefId){md.module, gids[i]};
           rsuba[nrsub] = sa[i];
           nrsub++;
+        }
+      }
+    }
+    // `Box::new(v)` on a BARE generic type name (no turbofish, not all-defaulted): infer the extend's
+    // generics by unifying the method's declared params against the argument types and its return type
+    // against the expected type, fill trailing declared defaults (`A = Global`), and record the resulting
+    // instance on the base -- codegen then mangles the call from it (`Box__String__Global__new`), exactly
+    // as if the turbofish had been written.
+    if (nrsub == 0 && callee_node->as.member.path && md.node != NODE_NONE &&
+        ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION) {
+      const DefId ob = ast_resolution_def(t->ast, callee_node->as.member.object);
+      const Node *const od = ob.node != NODE_NONE ? ast_at_const(mod_ast(t, ob.module), ob.node) : NULL;
+      const TypeId oty = ast_type(t->ast, callee_node->as.member.object);
+      const bool have_inst = oty != TYPE_NONE && ast_type_at(t->ast, oty)->kind == TYPE_INSTANCE;
+      const NodeId extend = enclosing_extend(t, md.module, md.node);
+      if (od && !have_inst && extend != NODE_NONE && (od->kind == NODE_STRUCT || od->kind == NODE_ENUM) &&
+          od->as.aggregate.generics.len > 0 && od->as.aggregate.generics.len <= 4) {
+        Ast *const ma = mod_ast(t, md.module);
+        const NodeList eg = ast_at_const(ma, extend)->as.extend_def.generics;
+        const uint32_t ng = od->as.aggregate.generics.len;
+        if (eg.len >= ng) { // the extend's generics pair positionally with the target type's
+          const NodeId *const gids = ast_list(ma, eg);
+          DefId egp[4];
+          TypeId bound[4];
+          for (uint32_t i = 0; i < ng; i++) {
+            egp[i] = (DefId){md.module, gids[i]};
+            bound[i] = TYPE_NONE;
+          }
+          const Node *const mfn = ast_at_const(ma, md.node);
+          const NodeId *const mp = ast_list(ma, mfn->as.function.params);
+          for (uint32_t i = 0; i < args.len && i < mfn->as.function.params.len; i++)
+            unify_infer(t, decl_type_in(t, md.module, mp[i]), ast_type(t->ast, aids[i]), egp, bound, (int)ng);
+          if (want != TYPE_NONE && mfn->as.function.returns.len == 1) {
+            const NodeId r0 = ast_list(ma, mfn->as.function.returns)[0];
+            const Node *const rn = ast_at_const(ma, r0);
+            const TypeId rty = lower_type_in(t, md.module, rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0);
+            unify_infer(t, rty, strip(t, want), egp, bound, (int)ng);
+          }
+          uint8_t nb = 0;
+          while (nb < ng && bound[nb] != TYPE_NONE)
+            nb++;
+          apply_default_args(t, ob.module, od, bound, &nb);
+          bool all = nb == ng;
+          for (uint8_t i = 0; i < nb && all; i++)
+            all = bound[i] != TYPE_NONE && ast_type_concrete(t->ast, bound[i]);
+          if (all) {
+            const TypeId inst = ast_intern_instance(t->ast, ob.module, ob.node, bound, (uint8_t)ng);
+            ast_set_type(t->ast, callee_node->as.member.object, inst);
+            for (uint32_t i = 0; i < ng && nrsub < 4; i++) {
+              rsubp[nrsub] = egp[i];
+              rsuba[nrsub] = bound[i];
+              nrsub++;
+            }
+          }
         }
       }
     }

@@ -44,6 +44,8 @@ struct ConstEval {
     CePending *pending; // static_asserts deferred until the whole package has type-checked
     size_t npending, cpending;
     CeCalls *calls; // Zig-style CTFE call memoization; lives for the whole compile
+    struct { ModuleId m; NodeId n; bool user; } ufree[64]; // cache: (m, decl) -> has a non-prelude Free
+    uint8_t nufree;
 };
 
 static const ConstValue CE_NONE = {0};
@@ -1075,6 +1077,51 @@ static DefId ce_find_method(const ConstEval *ce, const CeRecv *r, const ModuleId
   return (DefId){0, NODE_NONE};
 }
 
+// Does aggregate (dm, dn) conform to `Free` through a NON-prelude extend? The interpreter never runs
+// the codegen-inserted scope/temporary frees, so folding an evaluation that constructs such a value
+// would silently drop whatever its user `free` body does (print, mutate reachable state, ...) --
+// construction therefore refuses to fold. Prelude frees only release modeled heap memory, which the
+// per-evaluation object store discards anyway, so the std containers keep folding. Cached per decl.
+static bool ce_user_free(ConstEval *ce, const ModuleId dm, const NodeId dn) {
+  for (uint8_t i = 0; i < ce->nufree; i++)
+    if (ce->ufree[i].m == dm && ce->ufree[i].n == dn)
+      return ce->ufree[i].user;
+  bool user = false;
+  for (size_t mm = 0; mm < ce->nmods && !user; mm++) {
+    if (ce->pkg->modules[mm].prelude)
+      continue;
+    const Ast *const a = ce_ast(ce, (ModuleId)mm);
+    if (!a || !a->nodes.len)
+      continue;
+    const NodeList items = ast_at_const(a, a->root)->as.program.items;
+    const NodeId *const iids = ast_list(a, items);
+    for (uint32_t i = 0; i < items.len && !user; i++) {
+      const Node *const it = ast_at_const(a, iids[i]);
+      if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
+        continue;
+      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      if (tg.module != dm || tg.node != dn)
+        continue;
+      const NodeId *const mids = ast_list(a, it->as.extend_def.items);
+      for (uint32_t k = 0; k < it->as.extend_def.items.len; k++) {
+        const Node *const mn = ast_at_const(a, mids[k]);
+        if (mn->kind == NODE_FUNCTION &&
+            ce_span_is(ce, (ModuleId)mm, ast_at_const(a, mn->as.function.name)->as.name.text, "free")) {
+          user = true;
+          break;
+        }
+      }
+    }
+  }
+  if (ce->nufree < (uint8_t)(sizeof ce->ufree / sizeof *ce->ufree)) {
+    ce->ufree[ce->nufree].m = dm;
+    ce->ufree[ce->nufree].n = dn;
+    ce->ufree[ce->nufree].user = user;
+    ce->nufree++;
+  }
+  return user;
+}
+
 // --- frames and values --------------------------------------------------------------------------
 
 static CeVal ce_clone(ConstEval *ce, const CeVal v, const int depth);
@@ -1265,6 +1312,21 @@ static bool ce_dispatch(ConstEval *ce, const CeRecv *r, const ModuleId scope, co
 }
 
 // --- scalar operations --------------------------------------------------------------------------
+
+// C's usual arithmetic conversions for two integer operands, as the emitted expression computes:
+// sub-int types promote to (signed) int first, then the wider type wins and unsigned wins a width
+// tie -- so `0 - y` on a u32 is u32 math even though the literal's own recorded type is signed.
+static BuiltinType ce_arith_common(const BuiltinType a, const BuiltinType b) {
+  if (a == BT_COUNT || b == BT_COUNT)
+    return a == BT_COUNT ? b : a;
+  const int wa = bt_bits(a) < 32 ? 32 : bt_bits(a), wb = bt_bits(b) < 32 ? 32 : bt_bits(b);
+  const bool ua = bt_bits(a) >= 32 && bt_unsigned(a), ub = bt_bits(b) >= 32 && bt_unsigned(b);
+  const int w = wa > wb ? wa : wb;
+  bool u = ua; // same signedness: the wider type, keeping it
+  if (ua != ub) // mixed: unsigned wins at equal-or-greater width, a wider signed type absorbs (i64 op u32)
+    u = (ua ? wa : wb) >= (ua ? wb : wa);
+  return u ? (w == 64 ? BT_U64 : BT_U32) : (w == 64 ? BT_I64 : BT_I32);
+}
 
 // One integer binary op. `rt`/`b` describe the RESULT, `ob` the operands' shared type. Unsigned
 // arithmetic of width >= 32 wraps exactly like the emitted C (u8/u16 promote to int in C, so their
@@ -1868,6 +1930,8 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
         }
         if (dn->as.variant.payload.len > 0)
           return CV_NIL; // a payload variant used as a value must be CALLED
+        if (ce_user_free(ce, d.module, edecl))
+          return CV_NIL; // its user free's effects would be dropped
         const uint32_t o = ce_obj_new(ce, 1);
         if (!o)
           return CV_NIL;
@@ -2168,8 +2232,14 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
         return ce_float_op(op, l, r, m, rt, ce_builtin_of(ce, f, m, rt));
       if (l.kind != CV_INT || r.kind != CV_INT)
         return CV_NIL;
-      return ce_int_op(ce, op, l, r, m, rt, ce_builtin_of(ce, f, m, rt),
-                       ce_builtin_of(ce, f, m, ce_type(a, n->as.binary.left)));
+      // The operands' shared type follows the emitted C's usual arithmetic conversions (arithmetic AND
+      // comparisons); a shift's type is its promoted LEFT operand only.
+      const BuiltinType rb = ce_builtin_of(ce, f, m, rt);
+      const BuiltinType lb = ce_builtin_of(ce, f, m, ce_type(a, n->as.binary.left));
+      BuiltinType ob = lb;
+      if (op != LeftShift && op != RightShift)
+        ob = ce_arith_common(lb != BT_COUNT ? lb : rb, ce_builtin_of(ce, f, m, ce_type(a, n->as.binary.right)));
+      return ce_int_op(ce, op, l, r, m, rt, rb, ob);
     }
     case NODE_CALL: {
       CeVal rets[8];
@@ -2300,7 +2370,7 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
           NodeId edecl = NODE_NONE;
           const int pos = ce_variant_pos(ce, vd.module, vd.node, &edecl);
           const Node *const var = ast_at_const(ce_ast(ce, vd.module), vd.node);
-          if (pos < 0 || !var->as.variant.struct_payload)
+          if (pos < 0 || !var->as.variant.struct_payload || ce_user_free(ce, vd.module, edecl))
             return CV_NIL;
           const NodeId *const pfids = ast_list(ce_ast(ce, vd.module), var->as.variant.payload);
           const uint32_t o = ce_obj_new(ce, 1 + var->as.variant.payload.len);
@@ -2346,6 +2416,8 @@ static CeVal ev(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id) {
       const Node *const d = ast_at_const(da, r.dn);
       if (d->kind != NODE_STRUCT || d->as.aggregate.is_union)
         return CV_NIL; // untagged unions overlap: not element-representable
+      if (ce_user_free(ce, r.dm, r.dn))
+        return CV_NIL; // its user free's effects would be dropped
       const uint32_t o = ce_obj_new(ce, ce_field_count(ce, r.dm, r.dn));
       if (!o)
         return CV_NIL;
@@ -3472,7 +3544,7 @@ static bool ce_call(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId id
     const int pos = ce_variant_pos(ce, fd.module, fd.node, &edecl);
     if (pos < 0 || !ce_enum_tagged(ce, fd.module, edecl))
       return false;
-    if (fn->as.variant.payload.len != nargs)
+    if (fn->as.variant.payload.len != nargs || ce_user_free(ce, fd.module, edecl))
       return false;
     const uint32_t o = ce_obj_new(ce, 1 + nargs);
     if (!o)
