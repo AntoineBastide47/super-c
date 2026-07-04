@@ -105,13 +105,13 @@ struct Codegen {
     struct {
         DefId param;
         TypeId concrete;
-    } subst[8];
+    } subst[16];
     int nsubst;
     struct {
         DefId fn;
         uint8_t n;
         TypeId args[4];
-    } insts[256];
+    } insts[1024];
     int ninsts;
     bool insts_overflow; // set once if a module exceeds `insts` -> a loud diagnostic, never a silent omission
     // Win 1 — callback specialization: a same-module free fn called with a statically-known non-capturing
@@ -122,7 +122,7 @@ struct Codegen {
         uint32_t cbidx;      // that parameter's position (so the matching argument is elided)
         DefId callee;        // the statically-known callee bound to it (named fn / closure node)
         bool callee_closure; // callee.node is a NODE_CLOSURE
-    } cb_insts[128];
+    } cb_insts[256];
     int n_cb_insts;
     NodeId cb_keep_fns[128]; // qualifying free fns that still need the pointer original (a runtime caller)
     int n_cb_keep;
@@ -981,7 +981,7 @@ static void expand_nested_insts(Codegen *c) {
     const NodeList gens = fnn->as.function.generics;
     const NodeId *const gids = ast_list(c->ast, gens);
     c->nsubst = 0;
-    for (uint32_t g = 0; g < gens.len && g < fn_n && c->nsubst < 8; g++) {
+    for (uint32_t g = 0; g < gens.len && g < fn_n && c->nsubst < 16; g++) {
       c->subst[c->nsubst].param = (DefId){fn.module, gids[g]};
       c->subst[c->nsubst].concrete = fargs[g];
       c->nsubst++;
@@ -7405,7 +7405,7 @@ static void emit_specializations(Codegen *c, const bool with_body) {
       const NodeList gens = fnnode->as.function.generics;
       const NodeId *const gids = ast_list(c->ast, gens);
       c->nsubst = 0;
-      for (uint32_t g = 0; g < gens.len && g < c->insts[i].n && c->nsubst < 8; g++) {
+      for (uint32_t g = 0; g < gens.len && g < c->insts[i].n && c->nsubst < 16; g++) {
         c->subst[c->nsubst].param = (DefId){fn.module, gids[g]};
         c->subst[c->nsubst].concrete = c->insts[i].args[g];
         c->nsubst++;
@@ -7442,7 +7442,7 @@ static void emit_specializations(Codegen *c, const bool with_body) {
     const NodeList gens = fnnode->as.function.generics;
     const NodeId *const gids = ast_list(owner, gens);
     c->nsubst = 0;
-    for (uint32_t g = 0; g < gens.len && g < c->insts[i].n && c->nsubst < 8; g++) {
+    for (uint32_t g = 0; g < gens.len && g < c->insts[i].n && c->nsubst < 16; g++) {
       c->subst[c->nsubst].param = (DefId){fn.module, gids[g]};
       c->subst[c->nsubst].concrete = oargs[g];
       c->nsubst++;
@@ -7638,7 +7638,7 @@ static bool seed_emitted_generic_method_signature_instances(Codegen *c) {
       const NodeId *const gids = ast_list(c->ast, gens);
       const int saved = c->nsubst;
       c->nsubst = 0;
-      for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
+      for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 16; g++) {
         c->subst[c->nsubst].param = (DefId){c->ast->module, gids[g]};
         c->subst[c->nsubst].concrete = it.args[g];
         c->nsubst++;
@@ -7710,7 +7710,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
         continue;
       // Bind the extend's generics (e.g. T) from the instance's args -- shared by every spec below.
       c->nsubst = 0;
-      for (uint32_t g = 0; g < gens.len && g < it->n && c->nsubst < 8; g++) {
+      for (uint32_t g = 0; g < gens.len && g < it->n && c->nsubst < 16; g++) {
         c->subst[c->nsubst].param = (DefId){c->ast->module, gids[g]};
         c->subst[c->nsubst].concrete = it->args[g];
         c->nsubst++;
@@ -7751,7 +7751,7 @@ static void emit_inst_methods(Codegen *c, const TyInstance *const it, Ast *const
           continue;
         c->nsubst = nimpl;
         bool fnval = ifnv; // a type arg naming a function value (closure env / fn symbol) is TU-local
-        for (uint32_t g = 0; g < mg.len && g < inst.n && c->nsubst < 8; g++) {
+        for (uint32_t g = 0; g < mg.len && g < inst.n && c->nsubst < 16; g++) {
           c->subst[c->nsubst].param = (DefId){c->ast->module, mgids[g]};
           c->subst[c->nsubst].concrete = mi_src == c->ast ? inst.targs[g] : ast_reintern(c->ast, mi_src, inst.targs[g]);
           fnval |= cg_type_mentions_fnval(c, c->subst[c->nsubst].concrete);
@@ -8071,7 +8071,7 @@ static void emit_struct_inst(Codegen *c, const TyInstance *const it, const bool 
   const NodeList gens = dn->as.aggregate.generics;
   const NodeId *const gids = ast_list(c->ast, gens);
   c->nsubst = 0;
-  for (uint32_t i = 0; i < gens.len && i < it->n && c->nsubst < 8; i++) {
+  for (uint32_t i = 0; i < gens.len && i < it->n && c->nsubst < 16; i++) {
     c->subst[c->nsubst].param = (DefId){it->module, gids[i]};
     c->subst[c->nsubst].concrete = it->args[i];
     c->nsubst++;
@@ -8119,7 +8119,7 @@ static void emit_enum_inst(Codegen *c, const TyInstance *const it, const bool wi
   const NodeList gens = dn->as.aggregate.generics;
   const NodeId *const gids = ast_list(c->ast, gens);
   c->nsubst = 0;
-  for (uint32_t i = 0; i < gens.len && i < it->n && c->nsubst < 8; i++) {
+  for (uint32_t i = 0; i < gens.len && i < it->n && c->nsubst < 16; i++) {
     c->subst[c->nsubst].param = (DefId){it->module, gids[i]};
     c->subst[c->nsubst].concrete = it->args[i];
     c->nsubst++;
@@ -8254,7 +8254,7 @@ static void emit_inst_dfs(Codegen *c, const uint32_t idx, uint8_t *const state, 
     const NodeId *const gids = ast_list(c->ast, gens);
     const int saved = c->nsubst;
     c->nsubst = 0;
-    for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
+    for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 16; g++) {
       c->subst[c->nsubst].param = (DefId){it.module, gids[g]};
       c->subst[c->nsubst].concrete = it.args[g];
       c->nsubst++;
@@ -10033,7 +10033,7 @@ static void emit_header_includes(Codegen *c) {
       const NodeList gens = dn->as.aggregate.generics;
       const NodeId *const gids = ast_list(c->ast, gens);
       c->nsubst = 0;
-      for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 8; g++) {
+      for (uint32_t g = 0; g < gens.len && g < it.n && c->nsubst < 16; g++) {
         c->subst[c->nsubst].param = (DefId){it.module, gids[g]};
         c->subst[c->nsubst].concrete = it.args[g];
         c->nsubst++;

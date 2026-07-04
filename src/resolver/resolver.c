@@ -380,12 +380,12 @@ static void resolve_module_decl(Resolver *r, const NodeId ref, const ModuleId mi
 static bool resolve_qualified_member(Resolver *r, const NodeId id) {
   if (!r->package)
     return false;
-  NodeId chain[16]; // the `::` member nodes, outermost..innermost; must bottom out at a base identifier
+  NodeId chain[32]; // the `::` member nodes, outermost..innermost; must bottom out at a base identifier
   uint32_t cc = 0;
   NodeId base = NODE_NONE;
   for (NodeId curid = id;;) {
     const Node *const cn = ast_at_const(r->ast, curid);
-    if (cn->kind != NODE_MEMBER || !cn->as.member.path || cc >= 16)
+    if (cn->kind != NODE_MEMBER || !cn->as.member.path || cc >= 32)
       return false;
     chain[cc++] = curid;
     const NodeId o = cn->as.member.object;
@@ -399,7 +399,7 @@ static bool resolve_qualified_member(Resolver *r, const NodeId id) {
     curid = o;
   }
   const uint32_t N = cc + 1; // segment count: base + one per chain link
-  NodeId seg[17];            // segment name nodes, base..outer; chain[N-1-i] introduces seg[i] (i>=1)
+  NodeId seg[33];            // segment name nodes, base..outer; chain[N-1-i] introduces seg[i] (i>=1)
   seg[0] = base;
   for (uint32_t i = 1; i < N; i++)
     seg[i] = ast_at_const(r->ast, chain[N - 1 - i])->as.member.member;
