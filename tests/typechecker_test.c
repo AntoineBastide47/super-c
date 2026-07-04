@@ -874,6 +874,26 @@ static void test_numeric_suffixes_widening(void) {
                "does not fit in its suffixed type");
 }
 
+// Assert builtins: read (never move) their arguments, require agreeing comparable types, a bool
+// condition, and a str message.
+static void test_assert_builtins(void) {
+  expect_ok("assert args are borrowed, not moved",
+            "fn main() i32 {\n"
+            "  let s = String::from_str(\"hi\");\n"
+            "  assert_eq(s.len(), 2);\n"
+            "  assert_ne(s.as_str(), \"bye\");\n"
+            "  assert(s.len() > 0, \"still usable\");\n"
+            "  return s.len() as i32 - 2;\n" // s alive after the asserts
+            "}\n");
+  expect_error("assert_eq needs agreeing types", "fn main() i32 { assert_eq(1, \"one\"); return 0; }\n",
+               "mismatched types");
+  expect_error("assert condition must be bool", "fn main() i32 { assert(1); return 0; }\n", "must be 'bool'");
+  expect_error("assert message must be str", "fn main() i32 { assert(true, 5); return 0; }\n", "must be a 'str'");
+  expect_error("non-comparable types are rejected",
+               "struct P { pub x: i32 }\nfn main() i32 { assert_eq(P { x: 1 }, P { x: 1 }); return 0; }\n",
+               "cannot compare");
+}
+
 // Labeled break/continue target resolution + `loop`-expression value typing rules.
 static void test_labeled_loops(void) {
   expect_ok("labels + loop expression typecheck",
@@ -1065,6 +1085,7 @@ int main(void) {
   test_static_mut();
   test_question_error_conversion();
   test_labeled_loops();
+  test_assert_builtins();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

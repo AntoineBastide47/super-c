@@ -164,6 +164,7 @@ struct Codegen {
     uint32_t nloops;
     uint32_t label_seq;  // allocator for loop_stack[].seq
     uint32_t pending_cnt; // loop-stack index + 1 whose body block emit_block_from is about to emit (0 = none)
+    CgTestInfo test;      // --test mode plan slice for this module (test.enabled false otherwise)
     // RAII: locals of a `Free`-implementing type are freed at scope exit, UNLESS moved out (passed by
     // value, bound to another name, or returned) -- a moved value is owned (and freed) elsewhere. `moved`
     // holds bindings moved UNCONDITIONALLY (on every path), whose auto-free is elided outright.
@@ -325,6 +326,7 @@ static void emit_try(Codegen *c, NodeId id, const Node *n);
 static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId srcTy, char *out, size_t cap);
 static int cg_loop_push(Codegen *c, NodeId node, bool is_expr);
 static void cg_loop_pop(Codegen *c, int le);
+static bool cg_test_skip(Codegen *c, NodeId fn);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
@@ -405,6 +407,10 @@ Ast *codegen_take_ast(Codegen *c) {
 
 void codegen_set_multifile(Codegen *c, const bool on) {
   c->multifile = on;
+}
+
+void codegen_set_test_info(Codegen *c, const CgTestInfo *ti) {
+  c->test = *ti;
 }
 
 // --- low-level helpers ---------------------------------------------------------------------
@@ -2549,8 +2555,9 @@ static bool emit_format_arg(Codegen *c, const char *const f, const NodeId arg, c
   return true;
 }
 
-// True if (m, node) is a prelude format builtin (`format`/`print`/`println`/`eprint`/`eprintln`). Their
-// calls are always desugared (emit_format_builtin), so the declarations themselves emit no C.
+// True if (m, node) is a prelude format builtin (`format`/`print`/`println`/`eprint`/`eprintln`) or an
+// assert builtin (`assert`/`assert_eq`/`assert_ne`). Their calls are always desugared
+// (emit_format_builtin / emit_assert_builtin), so the declarations themselves emit no C.
 static bool cg_is_format_builtin(Codegen *c, const ModuleId m, const NodeId node) {
   if (!c->package || m >= c->package->count || !c->package->modules[m].prelude)
     return false;
@@ -2560,7 +2567,202 @@ static bool cg_is_format_builtin(Codegen *c, const ModuleId m, const NodeId node
   const Span fn = ast_at_const(a, ast_at_const(a, node)->as.function.name)->as.name.text;
   return span_is(cg_mod_src(c, m), fn, "format") || span_is(cg_mod_src(c, m), fn, "print") ||
          span_is(cg_mod_src(c, m), fn, "println") || span_is(cg_mod_src(c, m), fn, "eprint") ||
-         span_is(cg_mod_src(c, m), fn, "eprintln");
+         span_is(cg_mod_src(c, m), fn, "eprintln") || span_is(cg_mod_src(c, m), fn, "assert") ||
+         span_is(cg_mod_src(c, m), fn, "assert_eq") || span_is(cg_mod_src(c, m), fn, "assert_ne");
+}
+
+// The 1-based source line of offset `off` (baked into assertion failure messages).
+static unsigned cg_line_of(const Codegen *c, const uint32_t off) {
+  unsigned line = 1;
+  for (uint32_t i = 0; i < off && i < c->len; i++)
+    line += c->source[i] == '\n';
+  return line;
+}
+
+// Emit `text` C-string-escaped with '%' doubled (it lands inside an fprintf format string).
+static void emit_pct_escaped(Codegen *c, const uint8_t *const text, const size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    const uint8_t byte = text[i];
+    if (byte == '%')
+      emit_cstr(c, "%%");
+    else if (byte == '"' || byte == '\\')
+      emit(c, "\\%c", byte);
+    else if (byte == '\n')
+      emit_cstr(c, "\\n");
+    else if (byte < 0x20)
+      emit(c, "\\%03o", byte);
+    else
+      emit(c, "%c", byte);
+  }
+}
+
+// The current module's source file path, for baked assertion locations.
+static const char *cg_file(const Codegen *c) {
+  if (c->package && c->ast->module < c->package->count && c->package->modules[c->ast->module].file)
+    return c->package->modules[c->ast->module].file;
+  return "<src>";
+}
+
+// `assert`/`assert_eq`/`assert_ne` call detection: 0 = not one, else the kind (1/2/3).
+static int cg_assert_kind(Codegen *c, const Node *const n) {
+  if (!c->package)
+    return 0;
+  const Node *const callee = ast_at_const(c->ast, n->as.call.callee);
+  if (callee->kind != NODE_IDENTIFIER)
+    return 0;
+  const DefId d = ast_resolution_def(c->ast, n->as.call.callee);
+  if (d.node == NODE_NONE || d.module >= c->package->count || !c->package->modules[d.module].prelude)
+    return 0;
+  const Ast *const da = cg_mod_ast(c, d.module);
+  if (ast_at_const(da, d.node)->kind != NODE_FUNCTION)
+    return 0;
+  const Span fn = ast_at_const(da, ast_at_const(da, d.node)->as.function.name)->as.name.text;
+  return span_is(cg_mod_src(c, d.module), fn, "assert")      ? 1
+         : span_is(cg_mod_src(c, d.module), fn, "assert_eq") ? 2
+         : span_is(cg_mod_src(c, d.module), fn, "assert_ne") ? 3
+                                                             : 0;
+}
+
+// One `left:`/`right:` value line of an assert_eq failure, for a directly printable operand type
+// (integers, floats, bool, char, str, String); other types print no values. `acc` is the C
+// expression naming the (ref-stripped) operand.
+static void emit_assert_value_line(Codegen *c, const char *const label, const char *const acc, const Ty *const y,
+                                   const TypeId base) {
+  emit(c, "fprintf(stderr, \"  %s ", label);
+  if (y->kind == TYPE_BUILTIN) {
+    switch (y->as.builtin) {
+      case BT_BOOL: emit(c, "%%s\\n\", %s ? \"true\" : \"false\");\n", acc); return;
+      case BT_CHAR: emit(c, "'%%c'\\n\", (int)%s);\n", acc); return;
+      case BT_I8: case BT_I16: case BT_I32: case BT_I64: case BT_ISIZE:
+        emit(c, "%%lld\\n\", (long long)%s);\n", acc);
+        return;
+      case BT_U8: case BT_U16: case BT_U32: case BT_U64: case BT_USIZE:
+        emit(c, "%%llu\\n\", (unsigned long long)%s);\n", acc);
+        return;
+      case BT_F32: case BT_F64: emit(c, "%%g\\n\", (double)%s);\n", acc); return;
+      default: break;
+    }
+  }
+  if (cg_struct_name_is(c, y, "str")) {
+    emit(c, "\\\"%%.*s\\\"\\n\", (int)%s.len, (const char *)%s.ptr);\n", acc, acc);
+    return;
+  }
+  if (cg_struct_name_is(c, y, "String")) {
+    char sm[200];
+    render_type_id(c, base, "", sm, sizeof sm);
+    emit(c, "\\\"%%.*s\\\"\\n\", (int)%s__as_str(&%s).len, (const char *)%s__as_str(&%s).ptr);\n", sm, acc, sm, acc);
+    return;
+  }
+  emit_cstr(c, "(value of a non-printable type)\\n\");\n");
+}
+
+// Desugar an assert-builtin call: bake the failing expression's source text and file:line into an
+// fprintf + abort, printing left/right values where the type allows. Arguments are read, never moved;
+// an rvalue Free operand of assert_eq/ne is freed on the passing path (abort owns the failing one).
+static bool emit_assert_builtin(Codegen *c, const Node *const n) {
+  const int kind = cg_assert_kind(c, n);
+  if (!kind)
+    return false;
+  const NodeList args = n->as.call.args;
+  const NodeId *const aids = ast_list(c->ast, args);
+  const unsigned line = cg_line_of(c, n->span.start);
+  const char *const file = cg_file(c);
+  if (kind == 1) { // assert(cond [, msg])
+    const Span cs = ast_at_const(c->ast, aids[0])->span;
+    emit_cstr(c, "({ if (!(");
+    emit_expr(c, aids[0]);
+    emit_cstr(c, ")) { ");
+    if (args.len == 2) {
+      emit_cstr(c, "const str __scm = ");
+      emit_expr(c, aids[1]);
+      emit_cstr(c, "; ");
+    }
+    emit_cstr(c, "fprintf(stderr, \"assertion failed: `");
+    emit_pct_escaped(c, c->source + cs.start, cs.end - cs.start);
+    emit_cstr(c, "`");
+    if (args.len == 2)
+      emit_cstr(c, ": %.*s");
+    emit_cstr(c, "\\n  at ");
+    emit_pct_escaped(c, (const uint8_t *)file, strlen(file));
+    emit(c, ":%u\\n\"", line);
+    if (args.len == 2)
+      emit_cstr(c, ", (int)__scm.len, (const char *)__scm.ptr");
+    emit_cstr(c, "); abort(); } })");
+    return true;
+  }
+  // assert_eq / assert_ne
+  const Span ls = ast_at_const(c->ast, aids[0])->span, rs = ast_at_const(c->ast, aids[1])->span;
+  const TypeId lt = subst_resolve(c, ast_type(c->ast, aids[0]));
+  const int depth = cg_ref_depth(c, lt);
+  const TypeId base = strip_ptr(c, lt);
+  const Ty *const y = ast_type_at(c->ast, base);
+  char l[32], r[32];
+  fresh(c, l, sizeof l);
+  fresh(c, r, sizeof r);
+  char lacc[48], racc[48]; // the ref-stripped operand access (`__scN` or `(*__scN)`)
+  snprintf(lacc, sizeof lacc, depth ? "(*%s)" : "%s", l);
+  snprintf(racc, sizeof racc, depth ? "(*%s)" : "%s", r);
+  char ldecl[256], rdecl[256]; // typed temps (not __auto_type): an adapting literal takes the left's C type
+  render_type_id(c, lt, l, ldecl, sizeof ldecl);
+  render_type_id(c, lt, r, rdecl, sizeof rdecl);
+  emit(c, "({ %s = ", ldecl);
+  emit_expr(c, aids[0]);
+  emit(c, "; %s = ", rdecl);
+  emit_expr(c, aids[1]);
+  emit_cstr(c, "; if (");
+  if (kind == 2)
+    emit_cstr(c, "!(");
+  // the comparison, by the operands' (ref-stripped) type
+  if (cg_struct_name_is(c, y, "str")) {
+    emit(c, "%s.len == %s.len && (%s.len == 0 || memcmp(%s.ptr, %s.ptr, %s.len) == 0)", lacc, racc, lacc, lacc, racc,
+         lacc);
+  } else if (y->kind == TYPE_STRUCT || y->kind == TYPE_INSTANCE ||
+             (y->kind == TYPE_ENUM &&
+              aggregate_has_payload_in(c, y->module, ast_at_const(cg_mod_ast(c, y->module), y->as.decl)))) {
+    ModuleId om = y->module;
+    NodeId od = y->as.decl;
+    if (y->kind == TYPE_INSTANCE) {
+      const TyInstance *const it = ast_instance(c->ast, y->as.inst);
+      om = it->module;
+      od = it->decl;
+    }
+    const DefId eq = cg_find_method_cstr(c, om, od, "eq");
+    emit_op_method(c, y, om, od, eq);
+    emit(c, "(&%s, &%s)", lacc, racc);
+  } else { // builtins and payload-less enums compare directly
+    emit(c, "%s == %s", lacc, racc);
+  }
+  emit_cstr(c, kind == 2 ? ")) {\n" : ") {\n");
+  c->depth++;
+  emit_indent(c);
+  emit_cstr(c, "fprintf(stderr, \"assertion failed: `");
+  emit_pct_escaped(c, c->source + ls.start, ls.end - ls.start);
+  emit_cstr(c, kind == 2 ? " == " : " != ");
+  emit_pct_escaped(c, c->source + rs.start, rs.end - rs.start);
+  emit_cstr(c, "`\\n\");\n");
+  emit_indent(c);
+  emit_assert_value_line(c, "left: ", lacc, y, base);
+  emit_indent(c);
+  emit_assert_value_line(c, "right:", racc, y, base);
+  emit_indent(c);
+  emit_cstr(c, "fprintf(stderr, \"  at ");
+  emit_pct_escaped(c, (const uint8_t *)file, strlen(file));
+  emit(c, ":%u\\n\");\n", line);
+  emit_indent(c);
+  emit_cstr(c, "abort();\n");
+  c->depth--;
+  emit_indent(c);
+  emit_cstr(c, "}");
+  // an rvalue Free operand was materialized into the temp: free it on the passing path
+  for (int i = 0; i < 2; i++) {
+    if (!is_lvalue(c, aids[i]) && depth == 0 && cg_type_is_free(c, base)) {
+      emit_cstr(c, " ");
+      emit_free_target(c, base);
+      emit(c, "(&%s);", i == 0 ? l : r);
+    }
+  }
+  emit_cstr(c, " })");
+  return true;
 }
 
 // `format`/`print`/`println`: a string-literal first arg with `{}` placeholders + matching trailing args.
@@ -2709,6 +2911,8 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId *const aids = ast_list(c->ast, args);
 
   if (emit_format_builtin(c, n)) // format/print/println: split the literal + per-arg appends
+    return;
+  if (emit_assert_builtin(c, n)) // assert/assert_eq/assert_ne: location + expression text + values
     return;
 
   // `x.free()` Free intrinsic: only when the type checker left it unresolved (an unbounded generic
@@ -9072,7 +9276,8 @@ static void phase_prototypes(Codegen *c, const int which) {
     if (n->kind == NODE_FUNCTION) {
       if (n->as.function.generics.len)
         continue; // a generic template emits nothing; its specializations are emitted separately
-      if (cb_specialized_away(c, ids[i]) || cg_is_format_builtin(c, c->ast->module, ids[i]))
+      if (cb_specialized_away(c, ids[i]) || cg_is_format_builtin(c, c->ast->module, ids[i]) ||
+          cg_test_skip(c, ids[i]))
         continue; // its pointer original is unused (every caller took the specialized path) / a format builtin
       if (want_fn(which, n->as.function.is_public))
         emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, false, NULL, false);
@@ -9183,7 +9388,8 @@ static void phase_bodies(Codegen *c) {
   for (uint32_t i = 0; i < items.len; i++) {
     const Node *const n = ast_at_const(c->ast, ids[i]);
     if (n->kind == NODE_FUNCTION && !n->as.function.generics.len && n->as.function.body != NODE_NONE &&
-        !cb_specialized_away(c, ids[i]) && !cg_is_format_builtin(c, c->ast->module, ids[i])) {
+        !cb_specialized_away(c, ids[i]) && !cg_is_format_builtin(c, c->ast->module, ids[i]) &&
+        !cg_test_skip(c, ids[i])) {
       emit_function(c, ids[i], (DefId){0, NODE_NONE}, false, true, NULL, false);
     } else if (n->kind == NODE_EXTEND && !n->as.extend_def.generics.len) {
       const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
@@ -9653,6 +9859,93 @@ void codegen_emit_header(Codegen *c, FILE *out) {
   c->buf_len = 0; // reuse the buffer for the .c
 }
 
+// A @test/@test_init/@test_free function emits only under --test; under --test the program's own
+// `main` is skipped instead (the synthesized runner provides the entry point).
+static bool cg_test_skip(Codegen *c, const NodeId fn) {
+  if (c->test.enabled) {
+    const Node *const f = ast_at_const(c->ast, fn);
+    return f->kind == NODE_FUNCTION &&
+           span_is(c->source, ast_at_const(c->ast, f->as.function.name)->as.name.text, "main");
+  }
+  return cg_attr(c, c->ast->module, fn, ATTR_TEST) || cg_attr(c, c->ast->module, fn, ATTR_TEST_INIT) ||
+         cg_attr(c, c->ast->module, fn, ATTR_TEST_FREE);
+}
+
+// The TypeId of a test-plan fixture/global-env decl, interned into this module's pool (so the wrapper
+// can render it and query Free-ness through the ordinary machinery).
+static TypeId cg_test_type(Codegen *c, const DefId d, const bool is_enum) {
+  return ast_intern_type(
+      c->ast, (Ty){.kind = is_enum ? TYPE_ENUM : TYPE_STRUCT, .module = d.module, .as.decl = d.node});
+}
+
+// --test wrappers, one per @test fn: `void __sc_test_w_<module>_<node>(void *genv)` runs
+// setup -> test -> teardown -> RAII free of the fixture. They live in the SAME TU as the (possibly
+// static) test functions, so private tests need no linkage change; only the wrappers are extern.
+// The module declaring `@test_init(global)` also gets the `__sc_test_genv_init/_free` pair.
+static void emit_test_wrappers(Codegen *c) {
+  if (!c->test.enabled || (!c->test.ntests && c->test.genv_init == NODE_NONE))
+    return;
+  emit_cstr(c, "\n/* --test wrappers */\n");
+  for (uint32_t i = 0; i < c->test.ntests; i++) {
+    const NodeId fn = c->test.tests[i];
+    const uint8_t w = c->test.wants[i];
+    char fname[200];
+    render_qualified(c, c->ast->module, ast_at_const(c->ast, fn)->as.function.name, fname, sizeof fname);
+    emit(c, "void __sc_test_w_%u_%u(void *__genv) {\n  (void)__genv;\n", (unsigned)c->ast->module, (unsigned)fn);
+    if (w & 1) {
+      const TypeId fxt = cg_test_type(c, c->test.fx_type, c->test.fx_is_enum);
+      char decl[256], init[200];
+      render_type_id(c, fxt, "__fx", decl, sizeof decl);
+      render_qualified(c, c->ast->module, ast_at_const(c->ast, c->test.fx_init)->as.function.name, init, sizeof init);
+      emit(c, "  %s = %s();\n", decl, init);
+    }
+    emit(c, "  %s(", fname);
+    if (w & 1)
+      emit_cstr(c, "&__fx");
+    if (w & 2) {
+      const TypeId gt = cg_test_type(c, c->test.genv_type, c->test.genv_is_enum);
+      char gty[200];
+      render_type_id(c, gt, "", gty, sizeof gty);
+      emit(c, "%s(const %s *)__genv", (w & 1) ? ", " : "", gty);
+    }
+    emit_cstr(c, ");\n");
+    if ((w & 1) && c->test.fx_free != NODE_NONE) {
+      char fre[200];
+      render_qualified(c, c->ast->module, ast_at_const(c->ast, c->test.fx_free)->as.function.name, fre, sizeof fre);
+      emit(c, "  %s(&__fx);\n", fre);
+    }
+    if (w & 1) {
+      const TypeId fxt = cg_test_type(c, c->test.fx_type, c->test.fx_is_enum);
+      if (cg_type_is_free(c, fxt)) {
+        emit_cstr(c, "  ");
+        emit_free_target(c, fxt);
+        emit_cstr(c, "(&__fx);\n");
+      }
+    }
+    emit_cstr(c, "}\n");
+  }
+  if (c->test.genv_init != NODE_NONE) {
+    const TypeId gt = cg_test_type(c, c->test.genv_type, c->test.genv_is_enum);
+    char gdecl[256], gty[200], init[200];
+    render_type_id(c, gt, "__sc_genv", gdecl, sizeof gdecl);
+    render_type_id(c, gt, "", gty, sizeof gty);
+    render_qualified(c, c->ast->module, ast_at_const(c->ast, c->test.genv_init)->as.function.name, init, sizeof init);
+    emit(c, "void *__sc_test_genv_init(void) { static %s; __sc_genv = %s(); return &__sc_genv; }\n", gdecl, init);
+    emit_cstr(c, "void __sc_test_genv_free(void *__p) {\n  (void)__p;\n");
+    if (c->test.genv_free != NODE_NONE) {
+      char fre[200];
+      render_qualified(c, c->ast->module, ast_at_const(c->ast, c->test.genv_free)->as.function.name, fre, sizeof fre);
+      emit(c, "  %s((%s *)__p);\n", fre, gty);
+    }
+    if (cg_type_is_free(c, gt)) {
+      emit_cstr(c, "  ");
+      emit_free_target(c, gt);
+      emit(c, "((%s *)__p);\n", gty);
+    }
+    emit_cstr(c, "}\n");
+  }
+}
+
 void codegen_emit(Codegen *c, FILE *out) {
   build_enum_index(c);
   collect_insts(c); // generic instantiations needed by this module (emitted as static specializations)
@@ -9666,6 +9959,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     emit(c, "\n");
     emit_dyn_tables(c); // vtables + glue: after every method prototype, before the bodies that use them
     phase_bodies(c);
+    emit_test_wrappers(c);
   } else {
     emit_cstr(c, SUPER_RT_INCLUDES);
     emit_extern_includes(c);
@@ -9680,6 +9974,7 @@ void codegen_emit(Codegen *c, FILE *out) {
     emit(c, "\n");
     emit_dyn_tables(c);
     phase_bodies(c);
+    emit_test_wrappers(c);
   }
   errors_finalize(
       &c->errors, &c->errors_notes, &c->errors_start, &c->errors_len, c->source, c->len,

@@ -35,6 +35,9 @@ typedef enum {
   ATTR_INLINE, ATTR_ALWAYS_INLINE, ATTR_NOINLINE, ATTR_NORETURN,
   ATTR_ALIGN, ATTR_PACKED, ATTR_EXPORT, ATTR_IMPORT, ATTR_SECTION, ATTR_USED, ATTR_UNUSED,
   ATTR_EMIT_MACRO, // `@emit_macro` (bare, no `c.`): emit this generic type as reusable C DECLARE/DEFINE macros
+  ATTR_TEST,       // `@test` / `@test(should_panic)` (arg = 1): a test function (compiled/run under --test)
+  ATTR_TEST_INIT,  // `@test_init` (per-module fixture producer) / `@test_init(global)` (arg = 1: suite setup)
+  ATTR_TEST_FREE,  // `@test_free` / `@test_free(global)`: optional out-of-band teardown (memory is RAII's job)
 } AttrKind;
 
 typedef struct {

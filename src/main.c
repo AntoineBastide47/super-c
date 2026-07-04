@@ -6,7 +6,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h> // unlink/rmdir, to prune stale outputs
+#include <sys/wait.h> // WIFEXITED/WEXITSTATUS for the --test build/run child processes
+#include <unistd.h>   // unlink/rmdir, to prune stale outputs
 #if defined(__APPLE__)
 #  include <mach-o/dyld.h> // _NSGetExecutablePath
 #elif defined(__linux__)
@@ -85,6 +86,293 @@ static void flush_assert_err(void *ctx, const ModuleId m, const NodeId cond, con
   VEC_DEINIT(starts)
   VEC_DEINIT(lens)
   p->ok = false;
+}
+
+// --- --test mode -----------------------------------------------------------------------------
+
+typedef struct {
+    bool enabled;
+    int jobs;           // --test-jobs=N (0 = one per online core)
+    bool no_fork;       // --test-no-fork: run in-process (first crash ends the run; should_panic skipped)
+    const char *filter; // --test-filter=S: run only tests whose module::name contains S
+} TestOpts;
+
+typedef struct {
+    ModuleId mod;
+    NodeId fn;
+    bool should_panic;
+    uint8_t wants; // bit0 = module fixture param, bit1 = global env param
+} TestCase;
+
+typedef struct {
+    TestCase *cases;
+    size_t ncases, ccap;
+    NodeId *fx_init, *fx_free; // per module ([package count]; NODE_NONE = absent)
+    DefId *fx_type;
+    bool *fx_is_enum;
+    ModuleId genv_mod;
+    NodeId genv_init, genv_free;
+    DefId genv_type;
+    bool genv_is_enum;
+    bool ok;
+} TestPlan;
+
+// A test-plan validation error, rendered with the compiler's usual source excerpt.
+static void test_err(Package *p, const ModuleId m, const Span sp, const char *fmt, ...) {
+  const Module *const mod = &p->modules[m];
+  String_Vec errors = VEC_INIT;
+  String_Vec notes = VEC_INIT;
+  U32_Vec starts = VEC_INIT;
+  U32_Vec lens = VEC_INIT;
+  va_list args;
+  va_start(args, fmt);
+  errors_vemitf(&errors, &notes, &starts, &lens, sp.start, sp.end - sp.start, fmt, args);
+  va_end(args);
+  errors_finalize(&errors, &notes, &starts, &lens, (const uint8_t *)mod->source, mod->source_len, mod->file);
+  errors_log(&errors);
+  for (size_t i = 0; i < errors.len; i++)
+    free(errors.data[i]);
+  VEC_DEINIT(errors)
+  VEC_DEINIT(notes)
+  VEC_DEINIT(starts)
+  VEC_DEINIT(lens)
+  p->ok = false;
+}
+
+// The plain struct/enum decl a type NODE names, or {0, NODE_NONE} (fixtures must be nominal and
+// non-generic so wrappers can render and compare them across modules).
+static DefId test_type_decl(const Package *p, const Ast *a, const NodeId tnode, bool *is_enum) {
+  if (tnode == NODE_NONE)
+    return (DefId){0, NODE_NONE};
+  const Node *const tn = ast_at_const(a, tnode);
+  if (tn->kind != NODE_TYPE_PATH && tn->kind != NODE_IDENTIFIER)
+    return (DefId){0, NODE_NONE};
+  const DefId d = ast_resolution_def(a, tnode);
+  if (d.node == NODE_NONE || d.module >= p->count)
+    return (DefId){0, NODE_NONE};
+  const Node *const dn = ast_at_const(p->modules[d.module].ast, d.node);
+  if ((dn->kind != NODE_STRUCT && dn->kind != NODE_ENUM) || dn->as.aggregate.generics.len)
+    return (DefId){0, NODE_NONE};
+  *is_enum = dn->kind == NODE_ENUM;
+  return d;
+}
+
+// A function's single return type node (unwrapping a named return), or NODE_NONE.
+static NodeId test_fn_ret_node(const Ast *a, const Node *fn) {
+  if (fn->as.function.returns.len != 1)
+    return NODE_NONE;
+  const NodeId r0 = ast_list(a, fn->as.function.returns)[0];
+  const Node *const rn = ast_at_const(a, r0);
+  return rn->kind == NODE_PARAMETER ? rn->as.parameter.type : r0;
+}
+
+static bool test_fn_returns_nothing(const Ast *a, const char *src, const Node *fn) {
+  if (fn->as.function.returns.len == 0)
+    return true;
+  const NodeId rn = test_fn_ret_node(a, fn);
+  if (rn == NODE_NONE)
+    return false;
+  const Node *const n = ast_at_const(a, rn);
+  return n->kind == NODE_IDENTIFIER && n->as.name.text.end - n->as.name.text.start == 4 &&
+         memcmp(src + n->as.name.text.start, "void", 4) == 0;
+}
+
+// Classify one @test parameter against the module fixture / global env types. Returns the `wants` bit
+// (1 = fixture, 2 = genv) or 0 with an error emitted.
+static uint8_t test_param_bit(Package *p, const ModuleId m, const NodeId pnode, const DefId fx, const DefId genv) {
+  const Ast *const a = p->modules[m].ast;
+  const Node *const pn = ast_at_const(a, pnode);
+  const Span sp = pn->span;
+  const NodeId tnode = pn->as.parameter.type;
+  const Node *const tn = tnode != NODE_NONE ? ast_at_const(a, tnode) : NULL;
+  if (!tn || tn->kind != NODE_REFERENCE_TYPE) {
+    test_err(p, m, sp, "a '@test' parameter must be a reference to the module fixture or the global env");
+    return 0;
+  }
+  bool is_enum = false;
+  const DefId d = test_type_decl(p, a, tn->as.indirect_type.type, &is_enum);
+  if (fx.node != NODE_NONE && d.module == fx.module && d.node == fx.node)
+    return 1;
+  if (genv.node != NODE_NONE && d.module == genv.module && d.node == genv.node) {
+    if (tn->as.indirect_type.qualifier == TYPE_QUAL_MUT) {
+      test_err(p, m, sp, "the global test env is shared: take it as '&', not '&mut'");
+      return 0;
+    }
+    return 2;
+  }
+  test_err(p, m, sp, "this parameter matches neither the module's '@test_init' fixture nor the global env");
+  return 0;
+}
+
+static void test_plan_free(TestPlan *plan) {
+  free(plan->cases);
+  free(plan->fx_init);
+  free(plan->fx_free);
+  free(plan->fx_type);
+  free(plan->fx_is_enum);
+}
+
+// Collect and validate every @test/@test_init/@test_free in the package into a runnable plan.
+static void test_plan_build(Package *p, TestPlan *plan) {
+  memset(plan, 0, sizeof *plan);
+  plan->ok = true;
+  plan->genv_init = plan->genv_free = NODE_NONE;
+  const size_t nm = p->count ? p->count : 1;
+  plan->fx_init = malloc(nm * sizeof *plan->fx_init);
+  plan->fx_free = malloc(nm * sizeof *plan->fx_free);
+  plan->fx_type = calloc(nm, sizeof *plan->fx_type);
+  plan->fx_is_enum = calloc(nm, sizeof *plan->fx_is_enum);
+  if (!plan->fx_init || !plan->fx_free || !plan->fx_type || !plan->fx_is_enum) {
+    plan->ok = false;
+    return;
+  }
+  for (size_t i = 0; i < nm; i++) {
+    plan->fx_init[i] = plan->fx_free[i] = NODE_NONE;
+    plan->fx_type[i] = (DefId){0, NODE_NONE};
+  }
+  // Pass 1: fixture producers/teardowns (module + global), so pass 2 can classify test params.
+  for (size_t m = 0; m < p->count; m++) {
+    const Ast *const a = p->modules[m].ast;
+    if (!a || p->modules[m].prelude)
+      continue;
+    for (size_t i = 0; i < a->attrs.len; i++) {
+      const Attr *const at = &a->attrs.data[i];
+      if (at->kind != ATTR_TEST_INIT && at->kind != ATTR_TEST_FREE)
+        continue;
+      const Node *const fn = ast_at_const(a, at->owner);
+      const Span sp = fn->span;
+      if (at->kind == ATTR_TEST_INIT) {
+        if (fn->as.function.params.len != 0) {
+          test_err(p, m, sp, "'@test_init' takes no parameters");
+          continue;
+        }
+        bool is_enum = false;
+        const DefId d = test_type_decl(p, a, test_fn_ret_node(a, fn), &is_enum);
+        if (d.node == NODE_NONE) {
+          test_err(p, m, sp, "'@test_init' must return a plain (non-generic) struct or enum fixture");
+          continue;
+        }
+        if (at->arg) { // global
+          if (plan->genv_init != NODE_NONE) {
+            test_err(p, m, sp, "duplicate '@test_init(global)' (one per test tree)");
+            continue;
+          }
+          plan->genv_mod = (ModuleId)m;
+          plan->genv_init = at->owner;
+          plan->genv_type = d;
+          plan->genv_is_enum = is_enum;
+        } else {
+          if (plan->fx_init[m] != NODE_NONE) {
+            test_err(p, m, sp, "duplicate '@test_init' (one per module)");
+            continue;
+          }
+          plan->fx_init[m] = at->owner;
+          plan->fx_type[m] = d;
+          plan->fx_is_enum[m] = is_enum;
+        }
+      }
+    }
+  }
+  for (size_t m = 0; m < p->count; m++) { // @test_free after every init is known
+    const Ast *const a = p->modules[m].ast;
+    if (!a || p->modules[m].prelude)
+      continue;
+    for (size_t i = 0; i < a->attrs.len; i++) {
+      const Attr *const at = &a->attrs.data[i];
+      if (at->kind != ATTR_TEST_FREE)
+        continue;
+      const Node *const fn = ast_at_const(a, at->owner);
+      const Span sp = fn->span;
+      const bool global = at->arg != 0;
+      const DefId want = global ? plan->genv_type : plan->fx_type[m];
+      if ((global ? plan->genv_init : plan->fx_init[m]) == NODE_NONE || (global && plan->genv_mod != (ModuleId)m)) {
+        test_err(p, m, sp, "'@test_free%s' has no matching '@test_init%s' in this module", global ? "(global)" : "",
+                 global ? "(global)" : "");
+        continue;
+      }
+      bool ok = fn->as.function.params.len == 1 && test_fn_returns_nothing(a, p->modules[m].source, fn);
+      if (ok) {
+        const Node *const pn = ast_at_const(a, ast_list(a, fn->as.function.params)[0]);
+        const Node *const tn = pn->as.parameter.type != NODE_NONE ? ast_at_const(a, pn->as.parameter.type) : NULL;
+        bool is_enum = false;
+        const DefId d = tn && tn->kind == NODE_REFERENCE_TYPE ? test_type_decl(p, a, tn->as.indirect_type.type, &is_enum)
+                                                              : (DefId){0, NODE_NONE};
+        ok = tn && tn->kind == NODE_REFERENCE_TYPE && tn->as.indirect_type.qualifier == TYPE_QUAL_MUT &&
+             d.module == want.module && d.node == want.node;
+      }
+      if (!ok) {
+        test_err(p, m, sp, "'@test_free%s' must be 'fn(&mut <fixture>)' returning nothing", global ? "(global)" : "");
+        continue;
+      }
+      if (global) {
+        if (plan->genv_free != NODE_NONE) {
+          test_err(p, m, sp, "duplicate '@test_free(global)'");
+          continue;
+        }
+        plan->genv_free = at->owner;
+      } else {
+        if (plan->fx_free[m] != NODE_NONE) {
+          test_err(p, m, sp, "duplicate '@test_free' (one per module)");
+          continue;
+        }
+        plan->fx_free[m] = at->owner;
+      }
+    }
+  }
+  // Pass 2: the tests themselves.
+  for (size_t m = 0; m < p->count; m++) {
+    const Ast *const a = p->modules[m].ast;
+    if (!a || p->modules[m].prelude)
+      continue;
+    for (size_t i = 0; i < a->attrs.len; i++) {
+      const Attr *const at = &a->attrs.data[i];
+      if (at->kind != ATTR_TEST)
+        continue;
+      const Node *const fn = ast_at_const(a, at->owner);
+      const Span sp = fn->span;
+      if (!test_fn_returns_nothing(a, p->modules[m].source, fn)) {
+        test_err(p, m, sp, "a '@test' function returns nothing");
+        continue;
+      }
+      const NodeList params = fn->as.function.params;
+      if (params.len > 2) {
+        test_err(p, m, sp, "a '@test' function takes at most the module fixture and the global env");
+        continue;
+      }
+      uint8_t wants = 0;
+      bool bad = false;
+      const NodeId *const pids = ast_list(a, params);
+      for (uint32_t k = 0; k < params.len && !bad; k++) {
+        const uint8_t bit = test_param_bit(p, (ModuleId)m, pids[k], plan->fx_type[m],
+                                           plan->genv_init != NODE_NONE ? plan->genv_type : (DefId){0, NODE_NONE});
+        if (!bit) {
+          bad = true;
+        } else if (wants & bit) {
+          test_err(p, m, sp, "duplicate '@test' parameter kind");
+          bad = true;
+        } else if (bit == 1 && (wants & 2)) {
+          test_err(p, m, sp, "the module fixture parameter must come before the global env");
+          bad = true;
+        }
+        wants |= bit;
+      }
+      if (bad)
+        continue;
+      if (plan->ncases == plan->ccap) {
+        const size_t nc = plan->ccap ? plan->ccap * 2 : 32;
+        TestCase *const g = realloc(plan->cases, nc * sizeof *g);
+        if (!g) {
+          plan->ok = false;
+          return;
+        }
+        plan->cases = g;
+        plan->ccap = nc;
+      }
+      plan->cases[plan->ncases++] =
+          (TestCase){.mod = (ModuleId)m, .fn = at->owner, .should_panic = at->arg != 0, .wants = wants};
+    }
+  }
+  plan->ok &= p->ok;
 }
 
 // Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
@@ -333,11 +621,181 @@ static void prune_orphans(const char *dir, char *const *keep, const size_t nkeep
   closedir(d);
 }
 
+// The fixed part of the generated test runner: option parsing, fork-per-test isolation with a
+// waitpid job pool (--jobs), an in-process fallback (--no-fork, should_panic skipped), substring
+// selection (--filter), per-test reporting, and the summary/exit code.
+static const char *const TEST_RUNNER_MAIN =
+    "static int sc_match(const char *name, const char *filter) {\n"
+    "  return !filter || strstr(name, filter) != NULL;\n"
+    "}\n"
+    "int main(int argc, char **argv) {\n"
+    "  setvbuf(stdout, NULL, _IOLBF, 0); /* forked children must not inherit (and re-flush) buffered lines */\n"
+    "  int jobs = 0, no_fork = 0;\n"
+    "  const char *filter = NULL;\n"
+    "  for (int i = 1; i < argc; i++) {\n"
+    "    if (!strncmp(argv[i], \"--jobs=\", 7)) jobs = atoi(argv[i] + 7);\n"
+    "    else if (!strcmp(argv[i], \"--no-fork\")) no_fork = 1;\n"
+    "    else if (!strncmp(argv[i], \"--filter=\", 9)) filter = argv[i] + 9;\n"
+    "  }\n"
+    "  if (jobs < 1) { long n = sysconf(_SC_NPROCESSORS_ONLN); jobs = n > 0 ? (int)n : 1; }\n"
+    "  int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];\n"
+    "  int nsel = 0;\n"
+    "  for (int i = 0; i < SC_NTESTS; i++)\n"
+    "    if (sc_match(SC_TESTS[i].name, filter)) sel[nsel++] = i;\n"
+    "  printf(\"running %d test%s\\n\", nsel, nsel == 1 ? \"\" : \"s\");\n"
+    "  void *genv = NULL;\n"
+    "  if (nsel > 0) genv = sc_genv_init();\n"
+    "  int passed = 0, failed = 0, skipped = 0;\n"
+    "  if (no_fork) {\n"
+    "    for (int k = 0; k < nsel; k++) {\n"
+    "      const int i = sel[k];\n"
+    "      if (SC_TESTS[i].should_panic) {\n"
+    "        printf(\"test %s ... skipped (should_panic needs fork)\\n\", SC_TESTS[i].name);\n"
+    "        skipped++;\n"
+    "        continue;\n"
+    "      }\n"
+    "      SC_TESTS[i].fn(genv);\n"
+    "      printf(\"test %s ... ok\\n\", SC_TESTS[i].name);\n"
+    "      passed++;\n"
+    "    }\n"
+    "  } else {\n"
+    "    pid_t pid_of[SC_NTESTS > 0 ? SC_NTESTS : 1];\n"
+    "    int active = 0, next = 0;\n"
+    "    while (next < nsel || active > 0) {\n"
+    "      while (active < jobs && next < nsel) {\n"
+    "        const pid_t pid = fork();\n"
+    "        if (pid == 0) { SC_TESTS[sel[next]].fn(genv); _exit(0); }\n"
+    "        if (pid < 0) { perror(\"fork\"); return 101; }\n"
+    "        pid_of[next++] = pid;\n"
+    "        active++;\n"
+    "      }\n"
+    "      int st = 0;\n"
+    "      const pid_t done = wait(&st);\n"
+    "      if (done < 0) break;\n"
+    "      active--;\n"
+    "      int ti = -1;\n"
+    "      for (int k = 0; k < next; k++)\n"
+    "        if (pid_of[k] == done) { ti = sel[k]; pid_of[k] = -1; break; }\n"
+    "      if (ti < 0) continue;\n"
+    "      const int crashed = !(WIFEXITED(st) && WEXITSTATUS(st) == 0);\n"
+    "      if (crashed == SC_TESTS[ti].should_panic) {\n"
+    "        printf(\"test %s ... ok%s\\n\", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? \" (panicked as expected)\" : \"\");\n"
+    "        passed++;\n"
+    "      } else {\n"
+    "        printf(\"test %s ... FAILED%s\\n\", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? \" (expected a panic)\" : \"\");\n"
+    "        failed++;\n"
+    "      }\n"
+    "      fflush(stdout);\n"
+    "    }\n"
+    "  }\n"
+    "  if (genv) sc_genv_free(genv);\n"
+    "  if (skipped)\n"
+    "    printf(\"\\n%d passed, %d failed, %d skipped\\n\", passed, failed, skipped);\n"
+    "  else\n"
+    "    printf(\"\\n%d passed, %d failed\\n\", passed, failed);\n"
+    "  return failed > 100 ? 100 : failed;\n"
+    "}\n";
+
+// Write build/__test_main.c: extern wrapper prototypes, the test table (display names are
+// `module::fn`), the global-env hooks (stubs when absent), and the fixed runner above.
+static char *write_test_main(Package *p, const TestPlan *plan) {
+  char *const path = build_out_path(p->root_dir, "__test_main", ".c");
+  if (!path)
+    return NULL;
+  FILE *const f = open_out(path);
+  if (!f) {
+    perror(path);
+    free(path);
+    return NULL;
+  }
+  fputs("/* generated by super-c --test */\n"
+        "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n"
+        "#include <sys/wait.h>\n\n",
+        f);
+  for (size_t i = 0; i < plan->ncases; i++)
+    fprintf(f, "extern void __sc_test_w_%u_%u(void *);\n", (unsigned)plan->cases[i].mod, (unsigned)plan->cases[i].fn);
+  fputs("\ntypedef void (*sc_test_fn)(void *);\n"
+        "static const struct { const char *name; sc_test_fn fn; int should_panic; } SC_TESTS[] = {\n",
+        f);
+  for (size_t i = 0; i < plan->ncases; i++) {
+    const TestCase *const tc = &plan->cases[i];
+    const Ast *const a = p->modules[tc->mod].ast;
+    const Span nm = ast_at_const(a, ast_at_const(a, tc->fn)->as.function.name)->as.name.text;
+    fprintf(f, "  { \"%s::%.*s\", __sc_test_w_%u_%u, %d },\n", p->modules[tc->mod].path, (int)(nm.end - nm.start),
+            p->modules[tc->mod].source + nm.start, (unsigned)tc->mod, (unsigned)tc->fn, tc->should_panic ? 1 : 0);
+  }
+  fprintf(f, "};\nenum { SC_NTESTS = %zu };\n\n", plan->ncases);
+  if (plan->genv_init != NODE_NONE) {
+    fputs("extern void *__sc_test_genv_init(void);\nextern void __sc_test_genv_free(void *);\n"
+          "static void *sc_genv_init(void) { return __sc_test_genv_init(); }\n"
+          "static void sc_genv_free(void *p) { __sc_test_genv_free(p); }\n\n",
+          f);
+  } else {
+    fputs("static void *sc_genv_init(void) { return NULL; }\n"
+          "static void sc_genv_free(void *p) { (void)p; }\n\n",
+          f);
+  }
+  fputs(TEST_RUNNER_MAIN, f);
+  fclose(f);
+  return path;
+}
+
+// Compile the emitted build tree (+ the runner) with $CC and execute the test binary, forwarding the
+// runner options. Returns the runner's exit code (the failure count), or 1 on a build failure.
+static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfiles, const size_t nc) {
+  const char *cc = getenv("CC");
+  if (!cc || !*cc)
+    cc = "cc";
+  size_t cap = 4096, at = 0;
+  char *cmd = malloc(cap);
+  if (!cmd)
+    return 1;
+#define CMD_APPEND(...)                                                                                                \
+  do {                                                                                                                 \
+    const int need = snprintf(NULL, 0, __VA_ARGS__);                                                                   \
+    if (at + (size_t)need + 1 > cap) {                                                                                 \
+      while (at + (size_t)need + 1 > cap)                                                                              \
+        cap *= 2;                                                                                                      \
+      char *const g = realloc(cmd, cap);                                                                               \
+      if (!g) {                                                                                                        \
+        free(cmd);                                                                                                     \
+        return 1;                                                                                                      \
+      }                                                                                                                \
+      cmd = g;                                                                                                         \
+    }                                                                                                                  \
+    at += (size_t)snprintf(cmd + at, cap - at, __VA_ARGS__);                                                           \
+  } while (0)
+  CMD_APPEND("%s -std=c11 -o '%s/build/__tests'", cc, p->root_dir);
+  for (size_t i = 0; i < nc; i++)
+    if (cfiles[i] && strlen(cfiles[i]) > 2 && !strcmp(cfiles[i] + strlen(cfiles[i]) - 2, ".c"))
+      CMD_APPEND(" '%s'", cfiles[i]);
+  const int brc = system(cmd);
+  if (brc != 0) {
+    fprintf(stderr, "%s: test build failed (%s)\n", BIN_NAME, cc);
+    free(cmd);
+    return 1;
+  }
+  at = 0;
+  CMD_APPEND("'%s/build/__tests'", p->root_dir);
+  if (to->jobs > 0)
+    CMD_APPEND(" --jobs=%d", to->jobs);
+  if (to->no_fork)
+    CMD_APPEND(" --no-fork");
+  if (to->filter)
+    CMD_APPEND(" '--filter=%s'", to->filter);
+#undef CMD_APPEND
+  const int rrc = system(cmd);
+  free(cmd);
+  if (rrc < 0)
+    return 1;
+  return WIFEXITED(rrc) ? WEXITSTATUS(rrc) : 1;
+}
+
 // Compile a loaded Package as global phases (resolve all -> type-check all -> emit all), so name
 // resolution sees every module's declarations. Output is always a `<root>/build/` tree mirroring the
 // module paths: a `super_rt.h` plus one `.c`/`.h` per module (the std prelude is its own unmangled
 // module the others include). Symbols are mangled only when there is more than one user module.
-static int run_package(Package *p) {
+static int run_package(Package *p, const TestOpts *topts) {
   for (size_t i = 0; i < p->count; i++)
     p->ok = resolve_one(p, &p->modules[i].ast, p->modules[i].source, p->modules[i].source_len) && p->ok;
   if (!p->ok)
@@ -352,6 +810,16 @@ static int run_package(Package *p) {
   if (!p->ok)
     return 1;
   package_propagate_instances(p, NULL); // owners emit the generic instances used across module boundaries
+
+  TestPlan plan = {0};
+  const bool testing = topts && topts->enabled;
+  if (testing) {
+    test_plan_build(p, &plan);
+    if (!plan.ok) {
+      test_plan_free(&plan);
+      return 1;
+    }
+  }
 
   write_super_rt(p->root_dir);
   bool err = false;
@@ -372,6 +840,31 @@ static int run_package(Package *p) {
     Module *const m = &p->modules[i];
     Codegen *c = codegen_new(m->ast, m->source, m->source_len, p);
     codegen_set_multifile(c, true); // always a build/ tree, even for a lone module
+    NodeId tids[512];   // this module's test-plan slice; must outlive codegen_emit below
+    uint8_t wants[512]; // (CgTestInfo keeps pointers into these)
+    if (testing) {
+      uint32_t nt = 0;
+      for (size_t k = 0; k < plan.ncases && nt < 512; k++)
+        if (plan.cases[k].mod == i) {
+          tids[nt] = plan.cases[k].fn;
+          wants[nt++] = plan.cases[k].wants;
+        }
+      const CgTestInfo ti = {
+          .enabled = true,
+          .tests = tids,
+          .wants = wants,
+          .ntests = nt,
+          .fx_init = plan.fx_init[i],
+          .fx_free = plan.fx_free[i],
+          .fx_type = plan.fx_type[i],
+          .fx_is_enum = plan.fx_is_enum[i],
+          .genv_init = plan.genv_mod == i ? plan.genv_init : NODE_NONE,
+          .genv_free = plan.genv_mod == i ? plan.genv_free : NODE_NONE,
+          .genv_type = plan.genv_type,
+          .genv_is_enum = plan.genv_is_enum,
+      };
+      codegen_set_test_info(c, &ti);
+    }
     char *const hpath = build_out_path(p->root_dir, m->path, ".h"); // public header alongside the .c
     FILE *const hout = hpath ? open_out(hpath) : NULL;
     if (hout) {
@@ -407,17 +900,35 @@ static int run_package(Package *p) {
   char broot[4096];
   if (keep_ok && (size_t)snprintf(broot, sizeof broot, "%s/build", p->root_dir) < sizeof broot)
     prune_orphans(broot, kept, nkept);
+  int rc = err ? 1 : 0;
+  if (testing && !err) { // synthesize the runner, then compile + execute the whole tree
+    if (plan.ncases == 0) {
+      fprintf(stderr, "%s: no '@test' functions found\n", BIN_NAME);
+      rc = 1;
+    } else {
+      char *const runner = write_test_main(p, &plan);
+      if (!runner) {
+        rc = 1;
+      } else {
+        keep_push(&kept, &nkept, &kcap, runner); // owned by kept[] now
+        rc = test_build_and_run(p, topts, kept, nkept);
+      }
+    }
+  }
   for (size_t i = 0; i < nkept; i++)
     free(kept[i]);
   free(kept);
-  return err ? 1 : 0;
+  if (testing)
+    test_plan_free(&plan);
+  return rc;
 }
 
-static int run_file(const char *path, const char *std_dir, const uint32_t ce_steps, const uint64_t ce_mem) {
+static int run_file(const char *path, const char *std_dir, const uint32_t ce_steps, const uint64_t ce_mem,
+                    const TestOpts *topts) {
   Package *p = package_load(path, std_dir);
   if (p->ok)
     p->ceval = consteval_new(p, ce_steps, ce_mem); // always on; the flags only bound its budgets
-  const int rc = p->ok ? run_package(p) : 1;
+  const int rc = p->ok ? run_package(p, topts) : 1;
   consteval_free(&p->ceval);
   package_free(&p);
   return rc;
@@ -469,6 +980,7 @@ int main(const int argc, char **argv) {
   uint32_t ce_steps = 0; // 0 = the evaluator's defaults
   uint64_t ce_mem = 0;
   const char *file = NULL;
+  TestOpts topts = {0};
   bool bad = false;
   for (int i = 1; i < argc; i++) {
     if (strncmp(argv[i], "--const-eval-steps=", 19) == 0) {
@@ -480,6 +992,15 @@ int main(const int argc, char **argv) {
     } else if (strncmp(argv[i], "--const-eval-memory=", 20) == 0) {
       ce_mem = parse_size(argv[i] + 20);
       bad |= ce_mem == 0;
+    } else if (strcmp(argv[i], "--test") == 0) {
+      topts.enabled = true;
+    } else if (strncmp(argv[i], "--test-jobs=", 12) == 0) {
+      topts.jobs = atoi(argv[i] + 12);
+      bad |= topts.jobs < 1;
+    } else if (strcmp(argv[i], "--test-no-fork") == 0) {
+      topts.no_fork = true;
+    } else if (strncmp(argv[i], "--test-filter=", 14) == 0) {
+      topts.filter = argv[i] + 14;
     } else if (argv[i][0] == '-' && argv[i][1] == '-') {
       bad = true; // unknown flag
     } else if (!file) {
@@ -488,12 +1009,16 @@ int main(const int argc, char **argv) {
       file = ""; // more than one input: fall through to usage
     }
   }
+  bad |= !topts.enabled && (topts.jobs || topts.no_fork || topts.filter); // --test-* imply --test
   if (bad || !file || !*file) {
-    fprintf(stderr, "Usage: %s [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] <path/to/script>\n", BIN_NAME);
+    fprintf(stderr,
+            "Usage: %s [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]]\n"
+            "       %*s [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n",
+            BIN_NAME, (int)strlen(BIN_NAME), "");
     return 1;
   }
   char *const std_dir = exe_std_dir(argv[0]);
-  const int rc = run_file(file, std_dir, ce_steps, ce_mem);
+  const int rc = run_file(file, std_dir, ce_steps, ce_mem, &topts);
   free(std_dir);
   return rc;
 }

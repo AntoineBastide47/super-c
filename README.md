@@ -445,6 +445,46 @@ Supported: `inline`, `always_inline`, `noinline`, `noreturn`, `align(N)`, `packe
 both its definition and every call site. Bare `@emit_macro` on a generic struct or enum additionally
 exports it as a reusable C macro for consumption from plain C.
 
+### Testing
+
+```superc
+struct Fx { pub v: Vector<i32> }
+
+@test_init
+fn setup() Fx {                       // per-module fixture: built fresh for each test that asks
+    let mut v = Vector::<i32>::new();
+    v.push(1); v.push(2);
+    return Fx { v: v };
+}
+
+@test
+fn drains(fx: &mut Fx) {              // declare the parameter to receive the fixture
+    let mut s = 0;
+    while let Some(x) = fx.v.pop() { s += x; }
+    assert_eq(s, 3);
+}
+
+@test(should_panic)
+fn rejects_bad_input() { panic("boom"); }
+```
+
+```sh
+./super-c --test app.spc                      # collect @test fns, build, run (fork-isolated, parallel)
+./super-c --test --test-filter=drains app.spc # substring selection
+./super-c --test --test-jobs=4 app.spc        # bound the process pool (default: one per core)
+./super-c --test --test-no-fork app.spc       # in-process, for debuggers (should_panic is skipped)
+```
+
+Each test runs in a forked child, so a panic, a failed assertion, or a crash fails just that test —
+and `@test(should_panic)` passes only when the body aborts. `@test_init` returns a fixture value the
+test takes by parameter (torn down by the optional `@test_free`, then RAII); `@test_init(global)` /
+`@test_free(global)` build a suite-wide env once in the parent, passed to tests as a shared `&` —
+fork's copy-on-write makes cross-test mutation impossible by construction. `assert(cond[, "msg"])`,
+`assert_eq(a, b)`, and `assert_ne(a, b)` are compiler builtins: a failure prints the expression's
+source text, the left/right values, and its `file:line`, and the arguments are only read (asserting
+on an owned `String` leaves it usable). In a normal (non-`--test`) build, test functions are not
+emitted at all.
+
 ### Compile-time assertions
 
 ```superc
@@ -553,8 +593,11 @@ raw strings (`r"…"` / `r#"…"#`), numeric literal suffixes (`1u8`, `0xFFu64`,
 lossless widening (`i32 → i64`, `u8 → i32`, `f32 → f64`), module-level mutable globals (`static mut`),
 `?` error conversion through `From` conformances, string→number parsing (`"ff".parse_u64_radix(16)`,
 `"3.5".parse_f64()`), formatted printing with width / alignment / fill / zero-pad / precision / hex /
-binary specifiers (`{:>8}`, `{:08.2}`, `{:b}`) plus `eprint` / `eprintln` to stderr,
-`static_assert`, `@c.*` attributes, the module system with an auto-imported `std` prelude (containers,
+binary specifiers (`{:>8}`, `{:08.2}`, `{:b}`) plus `eprint` / `eprintln` to stderr, a test pipeline
+(`--test` with `@test` / `@test(should_panic)` / `@test_init` / `@test_free` fixtures incl. a global
+suite env, fork-isolated parallel execution, and assert builtins that report expression text, values,
+and `file:line`), `static_assert`, `@c.*` attributes, the module system with an auto-imported `std`
+prelude (containers,
 iterators/algorithms, pluggable allocators), `extern "C"` FFI (custom header includes, variadics in
 both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
 
