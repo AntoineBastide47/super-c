@@ -195,6 +195,16 @@ static void test_ctfe(void) {
   CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "memoized fib(40) folds under a small budget: %s", buf);
   CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
   CHECK(strstr(gc, "_Static_assert(true, \"memoized\")") != NULL, "the call cache collapsed the recursion");
+
+  // raw strings are CTFE-visible: hash-delimited content (with an interior quote) folds like any literal
+  write_file(spc,
+             "const G: str = r#\"say \"hi\"\"#;\n"
+             "static_assert(G.len() == 8, \"raw folds\");\n"
+             "fn main() i32 { return 0; }\n");
+  snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "raw-string CTFE compiles: %s", buf);
+  CHECK(read_file(out, gc, sizeof gc), "generated main.c exists");
+  CHECK(strstr(gc, "_Static_assert(true, \"raw folds\")") != NULL, "raw string len folded at compile time");
 }
 
 // CTFE over aggregates and the abstract heap: structs + methods + operator/extend dispatch, local

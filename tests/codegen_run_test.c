@@ -2141,10 +2141,26 @@ static void test_dyn(void) {
       82, "F");
 }
 
+// Raw strings `r"…"` / `r#"…"#`: verbatim bytes (no escape processing), a `str` view like normal string
+// literals, coercing to bare C strings in FFI `*const char` slots, and CTFE-evaluable (hash delimiters).
+static void test_raw_strings(void) {
+  sc_run_program("raw string is verbatim (backslash-n is two bytes)",
+                 PRE "fn main() i32 { let s = r\"a\\nb\"; unsafe exit(s.len() as i32); }\n", 4, "");
+  // (the CTFE fold of a raw const is asserted in cli_test.c -- the harness path has no ConstEval)
+  sc_run_program("hash-delimited raw string holds quotes",
+                 PRE "const G: str = r#\"say \"hi\"\"#;\n"
+                     "fn main() i32 { unsafe exit(G.len() as i32); }\n",
+                 8, "");
+  sc_run_program("raw string in an FFI *const char slot",
+                 "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\n"
+                 "fn main() i32 { unsafe printf(r\"x=%d\", 42); return 0; }\n",
+                 0, "x=42");
+}
+
 int main(void) {
   // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
   static void (*const tests[])(void) = {
-      test_dyn,
+      test_dyn,            test_raw_strings,
       test_bug_regressions,    test_attributes,           test_free_raii,
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,

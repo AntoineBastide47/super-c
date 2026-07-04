@@ -801,7 +801,8 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
       return et->kind == TYPE_BUILTIN && bt_is_int(et->as.builtin);
     case FloatLiteral: // a float literal fits a float or complex slot (no implicit float->int truncation)
       return et->kind == TYPE_BUILTIN && (bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin));
-    case StringLiteral: { // a string literal is a NUL-terminated C string: it coerces to a `*const char` /
+    case StringLiteral:
+    case RawStringLiteral: { // a string literal is a NUL-terminated C string: it coerces to a `*const char` /
       // `*const u8` FFI slot (e.g. printf's `fmt`), emitting the bare C literal instead of a `str` view.
       if (et->kind != TYPE_POINTER || et->qualifier != TYPE_QUAL_CONST)
         return false;
@@ -4322,7 +4323,8 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
         ast_intern_type(t->ast, (Ty){.kind = TYPE_POINTER, .qualifier = TYPE_QUAL_CONST, .as.elem = ast_builtin(BT_CHAR)});
     for (uint32_t i = expected; i < args.len; i++) {
       const Node *const a = ast_at_const(t->ast, aids[i]);
-      if (a->kind == NODE_LITERAL && a->as.literal.token_type == StringLiteral)
+      if (a->kind == NODE_LITERAL &&
+          (a->as.literal.token_type == StringLiteral || a->as.literal.token_type == RawStringLiteral))
         ast_set_type(t->ast, aids[i], cstr);
     }
   }
@@ -4884,8 +4886,9 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
         case ByteCharacterLiteral: result = ast_builtin(BT_U8); break;
         case True:
         case False: result = ast_builtin(BT_BOOL); break;
-        case StringLiteral: result = prelude_str_type(t); break; // a `str` view over the literal bytes
-        default: result = TYPE_NONE; break; // Null, RawString (deferred)
+        case StringLiteral:
+        case RawStringLiteral: result = prelude_str_type(t); break; // a `str` view over the literal bytes
+        default: result = TYPE_NONE; break; // Null
       }
       break;
     case NODE_IDENTIFIER: {
