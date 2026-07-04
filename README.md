@@ -649,9 +649,14 @@ designated initializers), first-class ranges and slicing (`a[lo..hi]`), `for` ov
 `Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while` / `loop`
 (a value-yielding expression via `break <expr>`), labeled loops with labeled `break` / `continue`
 (`'outer: for .. { break 'outer; }`, defer-correct unwinding), `if let` / `while let`, `defer`,
-raw strings (`r"…"` / `r#"…"#`), numeric literal suffixes (`1u8`, `0xFFu64`, `1.0f32`) with implicit
+raw strings (`r"…"` / `r#"…"#`), hex floats (`0x1.8p3`) and byte strings (`b"…"` → `[]u8`), numeric
+literal suffixes (`1u8`, `0xFFu64`, `1.0f32`) with implicit
 lossless widening (`i32 → i64`, `u8 → i32`, `f32 → f64`), module-level mutable globals (`static mut`),
-`?` error conversion through `From` conformances, string→number parsing (`"ff".parse_u64_radix(16)`,
+`?` error conversion through `From` conformances, `_` discard bindings, `sizeof`/`alignof` on values, unit and tuple structs (`struct S;`,
+`struct Pair(i32, str);` with `p.0` access and `Pair(1, "a")` construction), associated constants
+(`extend T { const N: i32 = ..; }` → `T::N`), `x @ pat` bindings and rest patterns (`V(a, ..)`,
+`S { f, .. }`), float `Eq`/`Ord`/`Hash` via the IEEE-754 total order (`total_cmp`; floats sort and
+key Maps), `Vector::sort_by`/`sort_by_key`, string→number parsing (`"ff".parse_u64_radix(16)`,
 `"3.5".parse_f64()`), formatted printing with width / alignment / fill / zero-pad / precision / hex /
 binary specifiers (`{:>8}`, `{:08.2}`, `{:b}`) plus `eprint` / `eprintln` to stderr, a test pipeline
 (`--test` with `@test` / `@test(should_panic)` / `@test_init` / `@test_free` fixtures incl. a global
