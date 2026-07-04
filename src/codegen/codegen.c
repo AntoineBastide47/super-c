@@ -2934,6 +2934,29 @@ static bool emit_format_builtin(Codegen *c, const Node *const n) {
   return true;
 }
 
+// One auto-deref hop's call opener: the C symbol of deref/deref_mut method `md` dispatched on wrapper
+// type `recv` (`Box__String__deref_mut(`), mirroring the method-call prefix logic below. The chain is
+// recorded by the typechecker (DerefUse); the receiver argument and the closing `)`s are the caller's.
+static void emit_deref_hop(Codegen *c, const TypeId recv, const DefId md) {
+  const Ty *const b = ast_type_at(c->ast, subst_resolve(c, recv));
+  Ast *const ma = cg_mod_ast(c, md.module);
+  if (b->kind == TYPE_INSTANCE) {
+    char inm[200];
+    inst_name(c, ast_instance(c->ast, b->as.inst), inm, sizeof inm);
+    emit_cstr(c, inm);
+    emit_paste(c);
+    emit(c, "__");
+  } else if (b->kind == TYPE_STRUCT || b->kind == TYPE_ENUM) {
+    char pfx[64];
+    render_modpfx(c, md.module, pfx, sizeof pfx);
+    emit_cstr(c, pfx);
+    emit_ident_mod(c, b->module, ast_at_const(cg_mod_ast(c, b->module), b->as.decl)->as.aggregate.name);
+    emit(c, "__");
+  }
+  emit_ident_mod(c, md.module, ast_at_const(ma, md.node)->as.function.name);
+  emit(c, "(");
+}
+
 static void emit_call(Codegen *c, const NodeId id, const Node *n) {
   const NodeId callee_id = n->as.call.callee;
   const Node *const callee = ast_at_const(c->ast, callee_id);
@@ -3322,6 +3345,9 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       }
       const TypeId obj_t = ast_type(c->ast, obj);
       const TypeId pointee = strip_ptr(c, obj_t);
+      // An auto-deref'd call: dispatch on the recorded chain's final type; the receiver is wrapped in the
+      // chain's deref calls below (each hop returns the next pointee's address).
+      const DerefUse *const du = ast_deref_use_at(c->ast, callee->as.member.member);
       // A method on a generic-parameter receiver (`w: T`, `T: Writer`) resolved to the interface method;
       // once the param is monomorphized, dispatch to the concrete type's `as`-extend method (`File__write`).
       if (ast_type_at(c->ast, pointee)->kind == TYPE_GENERIC) {
@@ -3380,7 +3406,7 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         }
       }
       Ast *const ma = cg_mod_ast(c, md.module);
-      const Ty *const base = ast_type_at(c->ast, subst_resolve(c, pointee));
+      const Ty *const base = ast_type_at(c->ast, subst_resolve(c, du ? du->target : pointee));
       // self-by-pointer is decided from the self parameter's own type node (in the method's module).
       const NodeList params = ast_at_const(ma, md.node)->as.function.params;
       const NodeId self_type = params.len ? ast_at_const(ma, ast_list(ma, params)[0])->as.parameter.type : NODE_NONE;
@@ -3389,7 +3415,8 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       const bool obj_ptr = ast_type_at(c->ast, obj_t)->kind == TYPE_POINTER || ast_type_at(c->ast, obj_t)->kind == TYPE_REFERENCE;
       // `&self` on a temporary (call result, literal, ...): C cannot take its address, so materialize the
       // receiver into a statement-expression temp and pass `&temp`. Mutations to a temporary are moot.
-      const bool materialize = self_ptr && !obj_ptr && !is_lvalue(c, obj);
+      // An auto-deref chain always needs the wrapper's address, whatever the final self takes.
+      const bool materialize = (self_ptr || du) && !obj_ptr && !is_lvalue(c, obj);
       // A materialized Free temporary (e.g. `make_string().len()`) must be freed after the call or it
       // leaks -- unless the result borrows INTO it (a reference/pointer return), in which case freeing it
       // would dangle the result, so it is left alone.
@@ -3446,7 +3473,23 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
       emit(c, "(");
 
       bool wrote = false;
-      if (params.len > 0) { // bind the receiver to the implicit self parameter
+      if (params.len > 0 && du) {
+        // Auto-deref: wrap the wrapper's address in the chain, innermost hop first --
+        // `B__deref(A__deref(&obj))`; a by-value final self (a scalar pointee) copies out with `*`.
+        if (!self_ptr)
+          emit(c, "*");
+        for (uint8_t i = du->n; i-- > 0;)
+          emit_deref_hop(c, du->recv[i], du->method[i]);
+        if (materialize)
+          emit(c, "&%s", tmp);
+        else if (!obj_ptr)
+          emit_prefixed(c, obj, "&");
+        else
+          emit_expr(c, obj);
+        for (uint8_t i = 0; i < du->n; i++)
+          emit(c, ")");
+        wrote = true;
+      } else if (params.len > 0) { // bind the receiver to the implicit self parameter
         if (materialize)
           emit(c, "&%s", tmp);
         else if (self_ptr && !obj_ptr)

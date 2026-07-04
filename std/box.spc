@@ -53,6 +53,20 @@ extend<T, A: Allocator + Default> Box<T, A> {
     }
 }
 
+// Auto-deref: `b.len()` on a `Box<String>` dispatches to `String::len` through `deref`; a `&mut self`
+// method goes through `deref_mut` and needs a `mut` binding. Box's own methods (get/set/free/..) win.
+extend<T, A: Allocator> Box<T, A> as Deref<T> {
+    pub fn deref(self: &Box<T, A>) &T {
+        return unsafe &self.ptr[0];
+    }
+}
+
+extend<T, A: Allocator> Box<T, A> as DerefMut<T> {
+    pub fn deref_mut(self: &mut Box<T, A>) &mut T {
+        return &mut unsafe self.ptr[0];
+    }
+}
+
 // Free the allocation AND deep-free the boxed value. Auto-`Free`: a `Box` is released at scope exit. Sound
 // because `get` returns a borrow (`&T`) rather than a sharing copy, so the box is the only owner of the
 // value. The inner `.free()` is a no-op when `T` isn't a Free type.

@@ -877,6 +877,47 @@ static void test_numeric_suffixes_widening(void) {
 
 // Assert builtins: read (never move) their arguments, require agreeing comparable types, a bool
 // condition, and a str message.
+// Auto-deref: method lookup follows `deref`/`deref_mut` hops (wrapper methods win, `&mut self`
+// targets require `deref_mut` AND a mutable binding, cycles and by-value aggregate targets error).
+static void test_deref(void) {
+  expect_ok("methods resolve through Box's deref/deref_mut",
+            "fn main() i32 {\n"
+            "  let mut b: Box<String> = Box::<String>::new(String::from_str(\"hi\"));\n"
+            "  b.push_str(\" there\");\n"
+            "  let n = b.len();\n"
+            "  return n as i32;\n"
+            "}\n");
+  expect_ok("by-value builtin method through a plain wrapper's deref",
+            "struct V { pub n: i32 }\n"
+            "extend V { pub fn deref(self: &V) &i32 { return &self.n; } }\n"
+            "fn main() i32 { let v = V { n: 0 - 4 }; return v.abs(); }\n");
+  expect_error("&mut self through deref needs a mut binding",
+               "fn main() i32 {\n"
+               "  let b: Box<String> = Box::<String>::new(String::new());\n"
+               "  b.push_str(\"x\");\n"
+               "  return 0;\n"
+               "}\n",
+               "cannot call a '&mut self' method on an immutable binding");
+  expect_error("deref without deref_mut cannot reach &mut self methods",
+               "struct W { pub s: String }\n"
+               "extend W { pub fn deref(self: &W) &String { return &self.s; } }\n"
+               "fn main() i32 { let mut w = W { s: String::new() }; w.push_str(\"x\"); return 0; }\n",
+               "it has 'deref' but no 'deref_mut'");
+  expect_error("cyclic deref chains are rejected",
+               "struct A { pub x: i32 }\nstruct B { pub y: i32 }\n"
+               "extend A { pub fn deref(self: &A) &B { unsafe { let p = null as *const B; return &*p; } } }\n"
+               "extend B { pub fn deref(self: &B) &A { unsafe { let p = null as *const A; return &*p; } } }\n"
+               "fn main() i32 { let a = A { x: 1 }; a.missing(); return 0; }\n",
+               "cyclic deref chain");
+  expect_error("a by-value aggregate method never auto-derefs",
+               "struct Inner { pub k: i32 }\n"
+               "extend Inner { pub fn consume(self: Inner) i32 { return self.k; } }\n"
+               "struct W { pub inner: Inner }\n"
+               "extend W { pub fn deref(self: &W) &Inner { return &self.inner; } }\n"
+               "fn main() i32 { let w = W { inner: Inner { k: 1 } }; return w.consume(); }\n",
+               "cannot call a by-value 'self' method through auto-deref");
+}
+
 static void test_assert_builtins(void) {
   expect_ok("assert args are borrowed, not moved",
             "fn main() i32 {\n"
@@ -1135,6 +1176,7 @@ int main(void) {
   test_static_mut();
   test_question_error_conversion();
   test_labeled_loops();
+  test_deref();
   test_assert_builtins();
   test_visibility_of_test_fns();
   test_iface_assoc_generic_targets();

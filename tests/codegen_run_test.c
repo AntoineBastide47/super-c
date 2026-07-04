@@ -471,6 +471,29 @@ static void test_let_owning_mut(void) {
       42, "");
 }
 
+// Auto-deref: `b.m()` follows the typechecker-recorded `deref`/`deref_mut` chain in the emitted C
+// (`String__push_str(Box__..__deref_mut(&b), ..)`), multi-hop and by-value-builtin included; a
+// wrapper's own method always shadows the pointee's.
+static void test_deref(void) {
+  sc_run_program(
+      "deref + deref_mut through Box, two hops, wrapper shadowing",
+      PRE "struct Meters { pub v: i32 }\n"
+          "extend Meters { pub fn deref(self: &Meters) &i32 { return &self.v; } pub fn abs(self: &Meters) i32 { return 100; } }\n"
+          "fn main() i32 {\n"
+          "  let mut b: Box<String> = Box::<String>::new(String::from_str(\"hi\"));\n"
+          "  b.push_str(\" there\");\n"
+          "  let n = b.len() as i32;\n"
+          "  let bb: Box<Box<i32>> = Box::<Box<i32>>::new(Box::<i32>::new(0 - 5));\n"
+          "  let two_hop = bb.abs();\n"
+          "  let m = Meters { v: 0 - 7 };\n"
+          "  let own = m.abs();\n"
+          "  let thru = m.max(0 - 20);\n"
+          "  b.free(); bb.free();\n"
+          "  unsafe exit(n + two_hop + own + thru);\n"
+          "}\n",
+      106, ""); // len 8 + two-hop |-5| + wrapper abs 100 + i32::max(-7,-20) = 106
+}
+
 static void test_field_vs_method(void) {
   // `s.len` (field read) and `s.len()` (method call) are distinct even when they share a name:
   // a bare member access resolves field-first, a call callee resolves method-first.
@@ -2403,7 +2426,7 @@ int main(void) {
       test_opaque_extern,      test_variadics,            test_complex,
       test_atomics,            test_tuple_destructure,    test_enums,
       test_mut_match_binding,  test_structs_and_methods,  test_let_owning_mut,
-      test_field_vs_method,    test_generic_self_receiver, test_pointers,
+      test_field_vs_method,    test_deref,                test_generic_self_receiver, test_pointers,
       test_str,                test_misc,
   };
   const int nt = (int)(sizeof tests / sizeof *tests);
