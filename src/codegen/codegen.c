@@ -4620,8 +4620,10 @@ static void emit_expr(Codegen *c, const NodeId id) {
 
 // --- match lowering ------------------------------------------------------------------------
 
-static bool pat_trivial(const NodeKind k) {
-  return k == NODE_PATTERN_WILDCARD || k == NODE_PATTERN_NAME || k == NODE_IDENTIFIER;
+static bool pat_trivial(const Node *const p) {
+  if (p->kind == NODE_PATTERN_NAME) // `x @ pat` carries a sub-pattern: its test is the child's
+    return p->as.pattern.children.len == 0;
+  return p->kind == NODE_PATTERN_WILDCARD || p->kind == NODE_IDENTIFIER;
 }
 
 static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
@@ -4639,6 +4641,8 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
           emit_tag_mod(c, vd.module, en, vd.node);
         else
           emit(c, "0");
+      } else if (p->as.pattern.children.len) { // `x @ pat`: the sub-pattern decides the match
+        emit_pattern_test(c, ast_list(c->ast, p->as.pattern.children)[0], scrut);
       } else {
         emit(c, "1");
       }
@@ -4685,7 +4689,7 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
         char vn[128];
         render_variant_name(c, vd.module, vd.node, vn, sizeof vn);
         for (uint32_t i = 0; i < ch.len; i++) {
-          if (pat_trivial(ast_at_const(c->ast, ids[i])->kind))
+          if (pat_trivial(ast_at_const(c->ast, ids[i])))
             continue;
           char sub[256];
           snprintf(sub, sizeof sub, "%s.payload.%s._%u", scrut, vn, i);
@@ -4729,7 +4733,7 @@ static void emit_pattern_test(Codegen *c, const NodeId pid, const char *scrut) {
         const Node *const f = ast_at_const(c->ast, ids[i]);
         const NodeList sub = f->as.pattern.children;
         const NodeId subpat = sub.len ? ast_list(c->ast, sub)[0] : NODE_NONE;
-        if (subpat == NODE_NONE || pat_trivial(ast_at_const(c->ast, subpat)->kind))
+        if (subpat == NODE_NONE || pat_trivial(ast_at_const(c->ast, subpat)))
           continue;
         char m[128];
         render_ident(c, name_span(c, f->as.pattern.name), m, sizeof m);
@@ -4793,6 +4797,8 @@ static void emit_pattern_binds(Codegen *c, const NodeId pid, const char *scrut, 
       // `Some(x)` is immutable, and the typechecker rejects mutating it.
       const bool is_mut = ast_at_const(c->ast, p->as.pattern.name)->as.name.is_mutable;
       emit_bind(c, pid, name_span(c, p->as.pattern.name), is_mut, scrut, by_ref);
+      if (p->as.pattern.children.len) // `x @ pat`: the sub-pattern's own binds land alongside x
+        emit_pattern_binds(c, ast_list(c->ast, p->as.pattern.children)[0], scrut, by_ref);
       break;
     }
     case NODE_IDENTIFIER:

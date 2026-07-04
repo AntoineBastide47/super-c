@@ -989,9 +989,13 @@ static void resolve_pattern(Resolver *r, const NodeId id) {
     case NODE_IDENTIFIER: // shorthand struct-pattern field binding
       declare(r, id, id, NS_VALUE);
       break;
-    case NODE_PATTERN_NAME:
+    case NODE_PATTERN_NAME: {
       declare(r, n->as.pattern.name, id, NS_VALUE);
+      const NodeId *const subs = ast_list(r->ast, n->as.pattern.children); // `x @ pat`: the sub-pattern
+      for (uint32_t i = 0; i < n->as.pattern.children.len; i++)
+        resolve_pattern(r, subs[i]);
       break;
+    }
     case NODE_PATTERN_TUPLE:   // constructor name deferred to the type checker
     case NODE_PATTERN_STRUCT:  // type name deferred
     case NODE_PATTERN_FIELD: { // field name deferred
