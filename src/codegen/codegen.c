@@ -138,6 +138,10 @@ struct Codegen {
     bool borrowed;           // true while emitting a re-homed instance with c->ast swapped to the owner
                              // module: the per-module enum index belongs to the home module, so enum-tag
                              // lookups must scan the owner's enums instead of trusting the stale index
+    ModuleId dflt_home;      // while synthesizing a cross-module interface default (c->ast swapped to the
+                             // interface's module): the extend's module -- an extra cg_find_method scope,
+                             // so the body's `self.m()` finds an override living in a LOCAL extension
+    bool dflt_home_set;
     NodeId slice_raw;        // the array node currently emitted as the inner `.ptr` of an array->slice
                              // coercion wrap; suppresses re-entrant coercion so it emits as a bare array
     NodeId dyn_raw;          // same re-entry guard for a `&T` -> `&dyn I` fat-pair coercion wrap
@@ -2146,8 +2150,13 @@ static bool cg_span_eq(const uint8_t *const sa, const Span a, const uint8_t *con
 // name by span (`name` in `nsrc`) when `lit` is NULL, else against the C-string `lit`. {_,NODE_NONE} if none.
 static DefId cg_find_method_impl(
     Codegen *c, const ModuleId tmod, const NodeId tdecl, const uint8_t *const nsrc, const Span name, const char *const lit) {
-  const ModuleId scopes[2] = {tmod, c->ast->module};
-  const int ns = tmod == c->ast->module ? 1 : 2;
+  ModuleId scopes[3];
+  int ns = 0;
+  scopes[ns++] = tmod;
+  if (c->ast->module != tmod)
+    scopes[ns++] = c->ast->module;
+  if (c->dflt_home_set && c->dflt_home != tmod && c->dflt_home != c->ast->module)
+    scopes[ns++] = c->dflt_home; // a synthesized default's body: the extend's own module counts too
   for (int s = 0; s < ns; s++) {
     const ModuleId m = scopes[s];
     Ast *const a = cg_mod_ast(c, m);
@@ -7646,9 +7655,10 @@ static void emit_method_specializations(Codegen *c, const int which, const bool 
 
 // Emit interface DEFAULT method bodies inherited by `extend T as Iface` extends in this module that do not
 // override them: synthesize `T__<name>` with the interface's abstract `Self` substituted to T, so a call
-// resolved to the default (`x.lt(y)`) links. Same-module interfaces only (emit_function reads the current
-// Ast); generic extends and generic defaults are skipped. `which`/`with_body` mirror the
-// prototype vs body split of phase_prototypes / phase_bodies.
+// resolved to the default (`x.lt(y)`) links. A cross-module interface's body is sourced from its own Ast
+// via the c->ast swap (like re-homed instances); the symbol is prefixed by the INTERFACE's module either
+// way, matching what call sites and vtable glue emit. Generic extends and generic defaults are skipped.
+// `which`/`with_body` mirror the prototype vs body split of phase_prototypes / phase_bodies.
 static void emit_default_methods(Codegen *c, const int which, const bool with_body) {
   const NodeList items = program_items(c);
   const NodeId *const ids = ast_list(c->ast, items);
@@ -7659,35 +7669,58 @@ static void emit_default_methods(Codegen *c, const int which, const bool with_bo
       continue;
     const DefId iface = ast_resolution_def(c->ast, n->as.extend_def.interface_type);
     const DefId target = ast_resolution_def(c->ast, n->as.extend_def.target_type);
-    if (iface.node == NODE_NONE || iface.module != c->ast->module || target.node == NODE_NONE)
-      continue; // only same-module interface defaults are emittable here
-    const Node *const tn = ast_at_const(c->ast, target.node);
+    if (iface.node == NODE_NONE || target.node == NODE_NONE)
+      continue;
+    const bool foreign = iface.module != c->ast->module;
+    if (foreign && (!c->package || iface.module >= c->package->count))
+      continue;
+    Ast *const ia = cg_mod_ast(c, iface.module);
+    // Self substitutes to the target -- a builtin's synthetic core decl maps back to its TYPE_BUILTIN.
+    const int bb = c->package ? package_builtin_of_decl(c->package, target.module, target.node) : -1;
+    const Node *const tn = ast_at_const(cg_mod_ast(c, target.module), target.node);
     const TypeId tty = ast_intern_type(
-        c->ast, (Ty){.kind = tn->kind == NODE_ENUM ? TYPE_ENUM : TYPE_STRUCT, .module = target.module, .as.decl = target.node});
-    const NodeList req = ast_at_const(c->ast, iface.node)->as.interface_def.items;
-    const NodeId *const rids = ast_list(c->ast, req);
+        ia, bb >= 0 ? (Ty){.kind = TYPE_BUILTIN, .as.builtin = (BuiltinType)bb}
+                    : (Ty){.kind = tn->kind == NODE_ENUM ? TYPE_ENUM : TYPE_STRUCT, .module = target.module, .as.decl = target.node});
+    const NodeList req = ast_at_const(ia, iface.node)->as.interface_def.items;
+    const NodeId *const rids = ast_list(ia, req);
     const NodeList have = n->as.extend_def.items;
     const NodeId *const hids = ast_list(c->ast, have);
+    // `pub` cannot be written on an interface item: a default body's visibility is its interface's
+    // (a pub interface's synthesized `T__method` backs cross-module dyn vtables, so it must export).
+    // A LOCAL extension of an imported type resolves this default only from this module, so its copy
+    // stays file-local -- several modules may each extend the same imported type without colliding.
+    const bool vis = ast_at_const(ia, iface.node)->as.interface_def.is_public && target.module == c->ast->module;
     for (uint32_t r = 0; r < req.len; r++) {
-      const Node *const rm = ast_at_const(c->ast, rids[r]);
+      const Node *const rm = ast_at_const(ia, rids[r]);
       if (rm->kind != NODE_FUNCTION || rm->as.function.body == NODE_NONE) // only DEFAULT (bodied) methods
         continue;
       if (rm->as.function.generics.len)
         continue;
-      // `pub` cannot be written on an interface item: a default body's visibility is its interface's
-      // (a pub interface's synthesized `T__method` backs cross-module dyn vtables, so it must export).
-      const bool vis = ast_at_const(c->ast, iface.node)->as.interface_def.is_public;
       if (!with_body && !want_fn(which, vis))
         continue;
-      const Span rmn = ast_at_const(c->ast, rm->as.function.name)->as.name.text;
+      const Span rmn = ast_at_const(ia, rm->as.function.name)->as.name.text;
       bool overridden = false;
       for (uint32_t h = 0; h < have.len && !overridden; h++) {
         const Node *const hm = ast_at_const(c->ast, hids[h]);
         overridden = hm->kind == NODE_FUNCTION &&
-                     cg_span_eq(c->source, ast_at_const(c->ast, hm->as.function.name)->as.name.text, c->source, rmn);
+                     cg_span_eq(c->source, ast_at_const(c->ast, hm->as.function.name)->as.name.text,
+                                cg_mod_src(c, iface.module), rmn);
       }
       if (overridden)
         continue;
+      Ast *const home = c->ast;
+      const uint8_t *const hsrc = c->source;
+      const size_t hlen = c->len;
+      size_t oninst = 0; // transient owner interns (subst_resolve during the body) roll back below
+      if (foreign) {
+        c->source = cg_mod_src(c, iface.module); // before the ast swap: cg_mod_src keys off c->ast->module
+        c->len = c->package->modules[iface.module].source_len;
+        c->ast = ia;
+        c->borrowed = true;
+        c->dflt_home = home->module; // the extend's module: a LOCAL extension's overrides live there
+        c->dflt_home_set = true;
+        oninst = ia->instances.len;
+      }
       c->nsubst = 1;
       c->subst[0].param = iface; // the interface's `Self` is a TYPE_GENERIC keyed by (iface.module, interface node)
       c->subst[0].concrete = tty;
@@ -7699,6 +7732,14 @@ static void emit_default_methods(Codegen *c, const int which, const bool with_bo
       function_name(c, rids[r], target, dnm, sizeof dnm, true);
       emit_function(c, rids[r], target, false, with_body, dnm, c->multifile && !vis);
       c->nsubst = 0;
+      if (foreign) {
+        ia->instances.len = oninst;
+        c->borrowed = false;
+        c->dflt_home_set = false;
+        c->ast = home;
+        c->source = hsrc;
+        c->len = hlen;
+      }
     }
   }
 }
@@ -9586,6 +9627,8 @@ static void emit_referenced_includes(Codegen *c) {
     // interface would include the interface module, which references that very type by value).
     if (cg_decl_is_interface_member(c, d.module, d.node))
       continue;
+    if (package_builtin_of_decl(c->package, d.module, d.node) >= 0)
+      continue; // an `extend i32` target: the synthetic core decl has no C representation (matches emit-live)
     want[d.module] = true;
   }
   for (size_t i = 0; i < c->ast->type_pool.len; i++) {
