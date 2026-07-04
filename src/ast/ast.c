@@ -281,11 +281,14 @@ BuiltinType ast_numeric_suffix(const uint8_t *src, const uint32_t start, const u
       {"f32", 3, BT_F32},     {"f64", 3, BT_F64},     {"i8", 2, BT_I8},   {"u8", 2, BT_U8},
   };
   const bool hex = end - start > 2 && src[start] == '0' && (src[start + 1] | 0x20) == 'x';
+  bool hexf = false; // a hex FLOAT (it has a binary 'p' exponent): a trailing f32/f64 IS a suffix there
+  for (uint32_t i = start + 2; hex && i < end && !hexf; i++)
+    hexf = (src[i] | 0x20) == 'p';
   for (size_t k = 0; k < sizeof SFX / sizeof *SFX; k++) {
     const uint32_t n = SFX[k].len;
     if (end - start <= n || memcmp(src + end - n, SFX[k].s, n) != 0)
       continue;
-    if (hex && SFX[k].s[0] == 'f')
+    if (hex && !hexf && SFX[k].s[0] == 'f')
       continue; // 0x..f32: that 'f' is a hex digit, not a suffix
     if (sfx_start)
       *sfx_start = end - n;

@@ -58,6 +58,7 @@ typedef enum TokenType {
   ByteCharacterLiteral,
   StringLiteral,
   RawStringLiteral,
+  ByteStringLiteral, // b"...": a static `[]u8` view (escapes allowed, bytes not text)
 
   // Delimiters and punctuation
   LeftBrace, // {

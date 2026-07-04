@@ -171,7 +171,11 @@ static void test_errors(void) {
   expect_error("prefix separator", "0x_FF", "invalid numeric separator");
   expect_error("fraction separator", "1._0", "invalid numeric separator");
   expect_error("exponent separator", "1e+_3", "invalid numeric separator");
-  expect_error("hex float", "0x1.8p+2", "floating-point literals are not supported");
+  { // hex floats are C-syntax FloatLiterals now; a missing 'p' exponent is the error case
+    static const TokenType hf[] = {FloatLiteral, FloatLiteral, Eof};
+    expect_tokens("hex float", "0x1.8p+2 0x1p-2f64", hf, sizeof hf / sizeof hf[0]);
+  }
+  expect_error("hex float without exponent", "0x1.8", "requires a binary exponent");
   expect_error("unknown escape", "\"\\q\"", "unknown escape");
   expect_error("short hex escape", "\"\\xF\"", "exactly two");
   expect_error("surrogate escape", "\"\\u{D800}\"", "not a valid Unicode scalar");
@@ -183,7 +187,10 @@ static void test_errors(void) {
   expect_error("unicode identifier", "λ", "identifiers may contain only ASCII");
   expect_error("reserved hash", "#define", "no preprocessor");
   expect_error("reserved dollar", "$x", "reserved");
-  expect_error("byte string", "b\"abc\"", "byte string literals are not supported");
+  { // b"..." is a ByteStringLiteral ([]u8 view) now
+    static const TokenType bs[] = {ByteStringLiteral, Eof};
+    expect_tokens("byte string", "b\"ab\\x00c\"", bs, sizeof bs / sizeof bs[0]);
+  }
 
   const char nul_source[] = {'a', 0, 'b'};
   expect_error_bytes("embedded NUL", nul_source, sizeof nul_source, "NUL byte is not allowed");
