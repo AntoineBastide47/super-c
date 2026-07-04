@@ -1064,6 +1064,19 @@ static void test_std_types(void) {
       PRE "fn main() i32 { let mut v = Vector::<i32>::new(); v.push(10); v.push(20); v.push(12);\n"
           "  let mut sum = 0; for x in v.iter() { sum = sum + *x; } v.free(); unsafe exit(sum); }\n", // iter borrows -> &i32
       42, "");
+  // A CTFE-foldable multi-return call must NOT collapse to its first value: the tuple destructure
+  // reads both (the fold is suppressed; single-value calls still fold).
+  sc_run_program(
+      "multi-return call with foldable args",
+      PRE "fn divmod(a, b: i32) (i32, i32) { return a / b, a % b; }\n"
+          "fn main() i32 { let (q, r) = divmod(17, 5); unsafe exit(q * 10 + r); }\n",
+      32, "");
+  // Explicit `.free()` on an IMMUTABLE owned binding: the local must not be emitted `const` (the
+  // Free call takes `&mut self`).
+  sc_run_program(
+      "explicit free on an immutable binding",
+      PRE "fn main() i32 { let s = String::from_str(\"hello\"); let n = s.len(); s.free(); unsafe exit(n as i32); }\n",
+      5, "");
   // Iterator adapters (std/iter.spc): lazy map/filter/enumerate/zip pipelines with fold/count/collect
   // drains. Element types are pinned by the closure signature or the source's Iterator conformance
   // (bound-driven inference); adapters store the closure by value (fn-value instance structs).
