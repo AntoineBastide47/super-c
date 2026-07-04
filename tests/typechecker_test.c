@@ -240,13 +240,14 @@ static void test_errors(void) {
       "fn main() i32 { let mut buf: [char; 8]; unsafe memset(&mut buf[0], 0, 8); return 0; }\n");
   expect_error("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
   expect_error("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
-  expect_error("f32 is not Eq", "fn needs<T: Eq>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) { return 1; } return 0; }\n",
-               "does not satisfy bound 'Eq'");
-  expect_error("f32 is not Ord", "fn needs<T: Ord>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) { return 1; } return 0; }\n",
+  // Floats satisfy Eq/Ord/Hash through the IEEE-754 TOTAL order (std/core.spc total_cmp bit trick);
+  // complex numbers still have no order at all.
+  expect_ok("f32 is Eq/Ord/Hash via total order",
+            "fn needs<T: Eq>(x: T) bool { return true; }\nfn ord<T: Ord>(x: T) bool { return true; }\n"
+            "fn h<T: Hash>(x: T) bool { return true; }\n"
+            "fn main() i32 { if needs::<f32>(0.0) && ord::<f32>(0.0) && h::<f32>(0.0) { return 1; } return 0; }\n");
+  expect_error("c64 is not Ord", "fn ord<T: Ord>(x: T) bool { return true; }\nfn main() i32 { if ord::<c64>(0.0 as c64) { return 1; } return 0; }\n",
                "does not satisfy bound 'Ord'");
-  expect_error("f32 is not Hash",
-               "fn needs<T: Hash>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) { return 1; } return 0; }\n",
-               "does not satisfy bound 'Hash'");
   expect_error( // only char *literals* coerce; a char value needs an explicit conversion
       "non-literal char not assignable to u8", "fn f(c: char) u8 { return c; }\n", "mismatched types");
   expect_error(
