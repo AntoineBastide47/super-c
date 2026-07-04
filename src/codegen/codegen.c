@@ -1297,6 +1297,33 @@ static void emit_reescaped(Codegen *c, const Span s, const bool is_char) {
   emit(c, "%c", q);
 }
 
+// The content bytes of a raw string literal `r##"…"##`: past the `r`, the `#` run, and the quotes.
+static Span raw_string_content(const uint8_t *src, const Span s) {
+  uint32_t i = s.start + 1, h = 0;
+  while (src[i] == '#')
+    i++, h++;
+  return (Span){i + 1, s.end - 1 - h};
+}
+
+// Emit raw-string content as a C string literal: the bytes are verbatim (no Super-C escapes), so only
+// C-significant bytes need escaping. Control bytes become fixed-width `\NNN` octal (immune to a following
+// digit); non-ASCII UTF-8 bytes pass through unchanged.
+static void emit_raw_c_string(Codegen *c, const Span content) {
+  emit(c, "\"");
+  for (uint32_t i = content.start; i < content.end; i++) {
+    const uint8_t b = c->source[i];
+    if (b == '"' || b == '\\')
+      emit(c, "\\%c", b);
+    else if (b == '\n')
+      emit(c, "\\n");
+    else if (b < 0x20)
+      emit(c, "\\%03o", b);
+    else
+      emit(c, "%c", b);
+  }
+  emit(c, "\"");
+}
+
 static void emit_literal(Codegen *c, const NodeId id, const Node *n) {
   const Span s = n->as.literal.raw;
   switch (n->as.literal.token_type) {
@@ -1342,11 +1369,24 @@ static void emit_literal(Codegen *c, const NodeId id, const Node *n) {
       else
         emit_span(c, s);
       break;
-    case RawStringLiteral:
-      codegen_errorf(c, s.start, s.end - s.start, "codegen: raw string literals are not yet supported");
-      codegen_notef(c, "use a normal escaped string literal for now");
-      emit_span(c, s);
+    case RawStringLiteral: {
+      // Same shape as StringLiteral: bare C literal in an FFI `*const char/u8` slot, else a `str` view.
+      // The content is verbatim source bytes, so the length is the content span itself.
+      const Span rc = raw_string_content(c->source, s);
+      const TypeId tid = ast_type(c->ast, id);
+      const Ty *const ty = tid == TYPE_NONE ? NULL : ast_type_at(c->ast, tid);
+      if (ty && ty->kind == TYPE_POINTER) {
+        const Ty *const pe = ast_type_at(c->ast, ty->as.elem);
+        if (pe->kind == TYPE_BUILTIN && pe->as.builtin == BT_U8)
+          emit(c, "(const uint8_t *)");
+        emit_raw_c_string(c, rc);
+        break;
+      }
+      emit(c, "(str){ (const uint8_t *)");
+      emit_raw_c_string(c, rc);
+      emit(c, ", %u }", rc.end - rc.start);
       break;
+    }
     default:
       emit_number(c, s, n->as.literal.token_type);
       break;

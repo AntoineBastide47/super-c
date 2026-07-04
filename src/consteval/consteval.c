@@ -1416,13 +1416,13 @@ static CeVal eval_str_literal(ConstEval *ce, const CeFrame *f, const ModuleId m,
   const uint8_t *const src = ce_src(ce, m);
   Span sp = n->as.literal.raw;
   const bool raw = n->as.literal.token_type == RawStringLiteral;
-  size_t i = sp.start;
+  size_t i = sp.start, hashes = 0;
   while (i < sp.end && src[i] != '"')
-    i++; // past r / b prefixes
+    hashes += src[i] == '#', i++; // past r / b prefixes and the raw `#` run
   if (i >= sp.end)
     return CV_NIL;
   i++; // past the opening quote
-  const size_t end = sp.end - 1; // the closing quote
+  const size_t end = sp.end - 1 - (raw ? hashes : 0); // the closing quote (raw: minus the trailing `#` run)
   uint8_t bytes[4096];
   uint32_t nb = 0;
   while (i < end) {
