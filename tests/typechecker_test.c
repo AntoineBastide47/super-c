@@ -894,6 +894,27 @@ static void test_assert_builtins(void) {
                "cannot compare");
 }
 
+// Test-attributed functions are invisible to non-test code (they are not emitted outside --test):
+// calls, fn-value references, and suite-method calls are all rejected; test->test calls are fine.
+static void test_visibility_of_test_fns(void) {
+  expect_error("non-test code cannot call a @test fn",
+               "@test\nfn a() { }\nfn b() { a(); }\nfn main() i32 { b(); return 0; }\n",
+               "can only be called from other test functions");
+  expect_error("non-test code cannot take a @test fn as a value",
+               "@test\nfn a() { }\nfn main() i32 { let f = a; f(); return 0; }\n",
+               "can only be called from other test functions");
+  expect_error("non-test code cannot call a suite test method",
+               "struct S { pub x: i32 }\n"
+               "extend S {\n"
+               "  @test_init fn setup() S { return S { x: 1 }; }\n"
+               "  @test fn t(self: &S) { }\n"
+               "}\n"
+               "fn main() i32 { let s = S { x: 2 }; s.t(); return 0; }\n",
+               "can only be called from other test functions");
+  expect_ok("a test may call another test (and its fixtures)",
+            "@test\nfn helper() { }\n@test\nfn uses_helper() { helper(); }\nfn main() i32 { return 0; }\n");
+}
+
 // Labeled break/continue target resolution + `loop`-expression value typing rules.
 static void test_labeled_loops(void) {
   expect_ok("labels + loop expression typecheck",
@@ -1086,6 +1107,7 @@ int main(void) {
   test_question_error_conversion();
   test_labeled_loops();
   test_assert_builtins();
+  test_visibility_of_test_fns();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

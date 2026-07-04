@@ -339,6 +339,33 @@ static BuiltinType bt_of(const TypeChecker *t, const TypeId x) {
   return y->kind == TYPE_BUILTIN ? y->as.builtin : BT_COUNT;
 }
 
+// Does function (m, fn) carry a @test/@test_init/@test_free attribute? Such functions are not
+// emitted outside --test, so non-test code may not reference them.
+static bool tc_is_test_fn(const TypeChecker *t, const ModuleId m, const NodeId fn) {
+  const Ast *const a = mod_ast(t, m);
+  for (size_t i = 0; i < a->attrs.len; i++) {
+    const Attr *const at = &a->attrs.data[i];
+    if (at->owner == fn && (at->kind == ATTR_TEST || at->kind == ATTR_TEST_INIT || at->kind == ATTR_TEST_FREE))
+      return true;
+  }
+  return false;
+}
+
+// Is the function body being checked itself test-attributed (test code may call test code)?
+static bool tc_in_test_fn(const TypeChecker *t) {
+  return t->current_fn != NODE_NONE && tc_is_test_fn(t, t->ast->module, t->current_fn);
+}
+
+// Reject a non-test reference to a test-attributed function (it would be an undefined symbol in a
+// normal build). `sp` is the referencing expression.
+static void tc_check_test_ref(TypeChecker *t, const DefId d, const Span sp) {
+  if (d.node == NODE_NONE || !tc_is_test_fn(t, d.module, d.node) || tc_in_test_fn(t))
+    return;
+  typechecker_errorf(t, sp.start, sp.end - sp.start,
+                     "a '@test' function can only be called from other test functions");
+  typechecker_notef(t, "test functions are not compiled outside 'super-c --test'; move shared logic into a plain function");
+}
+
 // A numeric literal whose type suffix pins it: it never adapts to a context type (only widens).
 static bool tc_literal_pinned(const TypeChecker *t, const Node *n) {
   return n->kind == NODE_LITERAL &&
@@ -4145,6 +4172,14 @@ static TypeId check_call(TypeChecker *t, const Node *const n, const NodeId id, c
   } else {
     callee = check_expr(t, n->as.call.callee);
   }
+  // Suite test methods are invisible outside test code (identifier callees are checked at their
+  // NODE_IDENTIFIER; this covers `obj.m()` and `Type::m()` callees).
+  if (path_callee->kind == NODE_MEMBER) {
+    const DefId md = ast_resolution_def(t->ast, path_callee->as.member.member);
+    const bool addressable = md.module == t->ast->module || (t->package && md.module < t->package->count);
+    if (md.node != NODE_NONE && addressable && ast_at_const(mod_ast(t, md.module), md.node)->kind == NODE_FUNCTION)
+      tc_check_test_ref(t, md, n->span);
+  }
   // The assert builtins divert BEFORE the argument loop: their args are read, never moved.
   if (path_callee->kind == NODE_IDENTIFIER && t->package) {
     const DefId ad = ast_resolution_def(t->ast, n->as.call.callee);
@@ -5170,6 +5205,9 @@ static TypeId check_expr(TypeChecker *t, const NodeId id) {
       // the owning module via the full DefId -- `decl_type` alone would read the current module's pool.
       const DefId d = ast_resolution_def(a, id);
       result = decl_type_in(t, d.module, d.node);
+      // A test-attributed fn is invisible to non-test code (covers direct calls and fn-value refs).
+      if (d.node != NODE_NONE && ast_at_const(mod_ast(t, d.module), d.node)->kind == NODE_FUNCTION)
+        tc_check_test_ref(t, d, n->span);
       if (d.module == t->ast->module && d.node != NODE_NONE) {
         for (uint32_t i = 0; i < t->nmoved; i++) // a moved/freed Free binding is dead
           if (t->moved[i] == d.node) {
