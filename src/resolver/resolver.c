@@ -204,7 +204,8 @@ static NodeId lookup(const Resolver *r, const Span name, const Namespace ns, uin
 }
 
 // Look up `name` among the modules this module glob-imports (`import P as *;`): their public items are in
-// scope unqualified here. Returns the decl and sets *out_mid, or NODE_NONE.
+// scope unqualified here -- including, since imports are public (C-style), the public items of every
+// module the target transitively imports. Returns the decl and sets *out_mid, or NODE_NONE.
 static NodeId glob_lookup(const Resolver *r, const Span name, const bool want_type, ModuleId *const out_mid) {
   if (!r->package)
     return NODE_NONE;
@@ -217,12 +218,10 @@ static NodeId glob_lookup(const Resolver *r, const Span name, const bool want_ty
     const int m = import_target(r, n->as.import_decl.path);
     if (m < 0)
       continue;
-    const NodeId d =
-        package_lookup(r->package, (ModuleId)m, (const char *)r->source + name.start, name.end - name.start, want_type);
-    if (d != NODE_NONE) {
-      *out_mid = (ModuleId)m;
+    const NodeId d = package_glob_lookup(
+        r->package, (ModuleId)m, (const char *)r->source + name.start, name.end - name.start, want_type, out_mid);
+    if (d != NODE_NONE)
       return d;
-    }
   }
   return NODE_NONE;
 }

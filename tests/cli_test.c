@@ -954,26 +954,34 @@ static void test_ffi_bindings(void) {
 
 // Import forms + mangling: an alias import (`s::tag`), a glob import (bare `tag`), two modules with a
 // same-named public function (module mangling must keep them distinct), and a module named like a C
-// stdlib header (`string`) -- the relative-include build must not shadow <string.h>. Built with -Werror.
+// stdlib header (`string`) -- the relative-include build must not shadow <string.h>. Imports are public
+// (C-style): a glob import of a facade also exposes what the facade imports, and any transitively loaded
+// module is reachable by its qualified path without a direct import. Built with -Werror.
 static void test_module_imports(void) {
   char root[4112], spc[4170], cmd[8320], buf[256];
   snprintf(root, sizeof root, "%s/imp", DIR);
   mkfile(root, "string.spc", "pub fn tag() i32 { return 10; }\n"); // collides with <string.h> by name
   mkfile(root, "math.spc", "pub fn tag() i32 { return 20; }\n");   // same fn name -> mangling disambiguates
+  mkfile(root, "deep.spc", "pub fn dtag() i32 { return 100; }\npub struct D { pub v: i32 }\n");
+  mkfile(root, "facade.spc", "import deep;\n"); // re-exports deep through any glob of facade
   mkfile(root, "main.spc",
          "import string as s;\n"
          "import math as *;\n"
+         "import facade as *;\n"
          "extern \"C\" { fn exit(code: i32) void; }\n"
-         "fn main() i32 { unsafe exit(s::tag() + tag()); }\n");
+         "fn main() i32 {\n"
+         "  let d = D { v: deep::dtag() / 10 };\n" // D + dtag via the facade glob; deep:: qualified, unimported
+         "  unsafe exit(s::tag() + tag() + dtag() + d.v);\n"
+         "}\n");
   snprintf(spc, sizeof spc, "%s/main.spc", root);
   snprintf(cmd, sizeof cmd, "%s '%s' 2>&1", SC, spc);
-  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "alias+glob+stdlib-named modules compile: %s", buf);
+  CHECK(run_cmd(cmd, buf, sizeof buf) == 0, "alias+glob+facade+stdlib-named modules compile: %s", buf);
   char bin[4200], ccmd[8320], crun[8320];
   snprintf(bin, sizeof bin, "%s/imp.bin", DIR);
   snprintf(ccmd, sizeof ccmd, "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') -o '%s' 2>&1", root, bin);
   CHECK(run_cmd(ccmd, buf, sizeof buf) == 0, "import-forms C compiles (no <string.h> shadow): %s", buf);
   snprintf(crun, sizeof crun, "'%s'", bin);
-  CHECK(run_cmd(crun, NULL, 0) == 30, "alias s::tag (10) + glob tag (20), mangled distinctly");
+  CHECK(run_cmd(crun, NULL, 0) == 140, "alias (10) + glob (20) + facade-glob dtag (100) + deep::dtag/10 (10)");
 }
 
 // Format conformances across the prelude, built as a multi-file tree: String/Vector/Option/Result render
