@@ -2259,11 +2259,45 @@ static void test_labeled_loops(void) {
                  0, "IIIOIIO\n");
 }
 
+// `if let` / `while let`: pattern-binding conditionals desugared to two-arm switches (wildcard arm
+// synthesized; while let wraps in `loop { .. _ => break }`). Chains, or-patterns, labels, expressions.
+static void test_if_let_while_let(void) {
+  sc_run_program(
+      "if let / else if let chain + or-pattern + expression form",
+      PRE "enum Shape { Circle(f64), Square(f64), Empty }\n"
+          "fn area(s: Shape) f64 {\n"
+          "  if let Circle(r) = s { return 3.0 * r * r; }\n"
+          "  else if let Square(w) = s { return w * w; }\n"
+          "  else { return 0.0; }\n"
+          "}\n"
+          "fn main() i32 {\n"
+          "  let a = area(Shape::Circle(2.0)) + area(Shape::Square(3.0)) + area(Shape::Empty);\n" // 21
+          "  let mut hit = 0;\n"
+          "  if let Circle(_) | Square(_) = Shape::Square(1.0) { hit = 1; }\n"
+          "  let d = if let Some(x) = Option::<i32>::Some(7) { x; } else { 0; };\n"
+          "  unsafe exit(switch a == 21.0 && hit == 1 && d == 7 { true => 3, false => 1 });\n"
+          "}\n",
+      3, "");
+  sc_run_program(
+      "while let drains an Option source; labeled break through it",
+      PRE "fn main() i32 {\n"
+          "  let mut v = Vector::<i32>::new();\n"
+          "  v.push(4); v.push(9); v.push(5);\n"
+          "  let mut sum = 0;\n"
+          "  'w: while let Some(x) = v.pop() {\n"
+          "    if x == 9 { break 'w; }\n"
+          "    sum += x;\n"
+          "  }\n"
+          "  unsafe exit(sum);\n" // pops 5 (sum 5), then 9 -> break
+          "}\n",
+      5, "");
+}
+
 int main(void) {
   // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
   static void (*const tests[])(void) = {
       test_dyn,            test_raw_strings,       test_numeric_suffixes_widening,
-      test_str_parse,      test_labeled_loops,
+      test_str_parse,      test_labeled_loops,     test_if_let_while_let,
       test_bug_regressions,    test_attributes,           test_free_raii,
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,
