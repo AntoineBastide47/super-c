@@ -22,6 +22,8 @@ static NodeId parse_item(Parser *p);
 static NodeId parse_statement(Parser *p);
 static NodeId parse_block(Parser *p);
 static NodeId parse_if(Parser *p);
+static NodeId desugar_let_match(Parser *p, uint32_t start, NodeId pattern, NodeId value, NodeId then_block,
+                                NodeId else_branch);
 static NodeId parse_expression(Parser *p);
 static NodeId parse_expression_after(Parser *p, NodeId left);
 static NodeId parse_binary(Parser *p, int minimum);
@@ -1154,6 +1156,25 @@ static NodeId parse_struct_initializer_after(Parser *p, const NodeId type, const
               });
 }
 
+// A pattern with optional `A | B | C` alternatives (a switch arm's / if-let's pattern grammar).
+static NodeId parse_pattern_alts(Parser *p, const uint32_t arm_start) {
+  NodeId pattern = parse_pattern(p);
+  if (check(p, Pipe)) { // or-pattern: matches if any alternative matches
+    const uint32_t alt_mark = ast_mark(p->ast);
+    ast_push(p->ast, pattern);
+    while (match(p, Pipe))
+      ast_push(p->ast, parse_pattern(p));
+    const NodeList alts = ast_commit(p->ast, alt_mark);
+    pattern = ast_add(
+        p->ast, (Node){
+                    .kind = NODE_PATTERN_OR,
+                    .span = span_new(arm_start, previous_end(p)),
+                    .as.pattern = {.name = NODE_NONE, .children = alts},
+                });
+  }
+  return pattern;
+}
+
 static NodeId parse_switch(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   advance(p);
@@ -1166,20 +1187,7 @@ static NodeId parse_switch(Parser *p) {
   while (!check(p, RightBrace) && !at_end(p)) {
     const uint32_t arm_start = token_start(raw_peek(p));
     match(p, Case);
-    NodeId pattern = parse_pattern(p);
-    if (check(p, Pipe)) { // `A | B | C =>` or-pattern: matches if any alternative matches
-      const uint32_t alt_mark = ast_mark(p->ast);
-      ast_push(p->ast, pattern);
-      while (match(p, Pipe))
-        ast_push(p->ast, parse_pattern(p));
-      const NodeList alts = ast_commit(p->ast, alt_mark);
-      pattern = ast_add(
-          p->ast, (Node){
-                      .kind = NODE_PATTERN_OR,
-                      .span = span_new(arm_start, previous_end(p)),
-                      .as.pattern = {.name = NODE_NONE, .children = alts},
-                  });
-    }
+    const NodeId pattern = parse_pattern_alts(p, arm_start);
     const NodeId guard = match(p, If) ? parse_expression(p) : NODE_NONE;
     expect(p, FatArrow, "'=>'");
     const NodeId body = check(p, LeftBrace) ? parse_block(p) : parse_expression(p);
@@ -1908,9 +1916,42 @@ static NodeId parse_let(Parser *p) {
               });
 }
 
+// `if let P = e { A } [else B]` / `while let P = e { body }` desugar target: a two-arm switch
+// `switch e { P => A, _ => B }` -- the wildcard arm is synthesized (an empty block without an else).
+static NodeId desugar_let_match(Parser *p, const uint32_t start, const NodeId pattern, const NodeId value,
+                                const NodeId then_block, NodeId else_branch) {
+  const uint32_t end = previous_end(p);
+  if (else_branch == NODE_NONE)
+    else_branch = ast_add(p->ast, (Node){.kind = NODE_BLOCK, .span = span_new(end, end)});
+  const NodeId wild = ast_add(p->ast, (Node){.kind = NODE_PATTERN_WILDCARD, .span = span_new(start, start)});
+  const uint32_t mark = ast_mark(p->ast);
+  ast_push(p->ast, ast_add(p->ast, (Node){.kind = NODE_MATCH_ARM,
+                                          .span = node_span(p, then_block),
+                                          .as.match_arm = {.pattern = pattern, .guard = NODE_NONE, .body = then_block}}));
+  ast_push(p->ast, ast_add(p->ast, (Node){.kind = NODE_MATCH_ARM,
+                                          .span = node_span(p, else_branch),
+                                          .as.match_arm = {.pattern = wild, .guard = NODE_NONE, .body = else_branch}}));
+  const NodeList arms = ast_commit(p->ast, mark);
+  return ast_add(p->ast, (Node){.kind = NODE_MATCH,
+                                .span = span_new(start, end),
+                                .as.match_expr = {.value = value, .arms = arms}});
+}
+
 static NodeId parse_if(Parser *p) {
   const uint32_t start = token_start(raw_peek(p));
   advance(p);
+  if (check(p, Let)) { // `if let <pattern> = <expr> { .. } [else ..]` (LL(1): `let` commits)
+    advance(p);
+    const NodeId pattern = parse_pattern_alts(p, start);
+    expect(p, Equal, "'='");
+    const bool old = p->allow_struct_initializer;
+    p->allow_struct_initializer = false;
+    const NodeId value = parse_expression(p);
+    p->allow_struct_initializer = old;
+    const NodeId then_branch = parse_block(p);
+    const NodeId else_branch = match(p, Else) ? (check(p, If) ? parse_if(p) : parse_block(p)) : NODE_NONE;
+    return desugar_let_match(p, start, pattern, value, then_branch, else_branch);
+  }
   const bool old = p->allow_struct_initializer; // a bare `{` after the condition is the block, never a struct literal
   p->allow_struct_initializer = false;
   const NodeId condition = parse_expression(p);
@@ -1933,6 +1974,37 @@ static NodeId parse_loop_stmt(Parser *p, const uint32_t start, const Span label)
   switch (peek_type(p)) {
     case While: {
       advance(p);
+      if (check(p, Let)) { // `while let P = e { body }` -> `loop { switch e { P => body, _ => break } }`
+        advance(p);
+        const NodeId pattern = parse_pattern_alts(p, start);
+        expect(p, Equal, "'='");
+        const bool old = p->allow_struct_initializer;
+        p->allow_struct_initializer = false;
+        const NodeId value = parse_expression(p);
+        p->allow_struct_initializer = old;
+        const NodeId body = parse_block(p);
+        const uint32_t end = previous_end(p);
+        const NodeId brk = ast_add(p->ast, (Node){.kind = NODE_BREAK, .span = span_new(end, end)});
+        const uint32_t bmark = ast_mark(p->ast);
+        ast_push(p->ast, brk);
+        const NodeList bstmts = ast_commit(p->ast, bmark);
+        const NodeId brk_block =
+            ast_add(p->ast, (Node){.kind = NODE_BLOCK, .span = span_new(end, end), .as.block = {.statements = bstmts}});
+        const NodeId m = desugar_let_match(p, start, pattern, value, body, brk_block);
+        const NodeId ms =
+            ast_add(p->ast, (Node){.kind = NODE_EXPRESSION_STATEMENT, .span = node_span(p, m), .as.single = {.value = m}});
+        const uint32_t lmark = ast_mark(p->ast);
+        ast_push(p->ast, ms);
+        const NodeList lstmts = ast_commit(p->ast, lmark);
+        const NodeId lbody =
+            ast_add(p->ast, (Node){.kind = NODE_BLOCK, .span = span_new(start, end), .as.block = {.statements = lstmts}});
+        return ast_add(
+            p->ast, (Node){
+                        .kind = NODE_WHILE,
+                        .span = span_new(start, end),
+                        .as.while_stmt = {.condition = NODE_NONE, .body = lbody, .label = label},
+                    });
+      }
       const bool old = p->allow_struct_initializer; // see parse_if: condition cannot end in a struct literal
       p->allow_struct_initializer = false;
       const NodeId condition = parse_expression(p);
@@ -2059,8 +2131,13 @@ static NodeId parse_statement_inner(Parser *p) {
       return ast_add(
           p->ast, (Node){.kind = NODE_DEFER, .span = span_new(start, previous_end(p)), .as.single = {.value = value}});
     }
-    case If:
-      return parse_if(p);
+    case If: {
+      const NodeId f = parse_if(p);
+      if (f != NODE_NONE && ast_at_const(p->ast, f)->kind == NODE_MATCH) // an if-let: a switch statement
+        return ast_add(
+            p->ast, (Node){.kind = NODE_EXPRESSION_STATEMENT, .span = node_span(p, f), .as.single = {.value = f}});
+      return f;
+    }
     case Label: { // `'name: loop/while/do/for` -- a labeled loop statement (LL(1): Label is unambiguous)
       const Span label = token_span(raw_peek(p));
       advance(p);

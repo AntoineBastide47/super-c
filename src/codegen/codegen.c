@@ -314,6 +314,7 @@ static void cg_conv_suffix(Codegen *c, DefId target, const char *lit, TypeId src
 static const char *cg_conv_lit(Codegen *c, ModuleId m, Span name);
 static void emit_block(Codegen *c, NodeId id);
 static void emit_if(Codegen *c, const Node *n);
+static void emit_match_stmt(Codegen *c, NodeId id);
 static void emit_if_expr(Codegen *c, NodeId id);
 static void emit_array_braces(Codegen *c, const Node *n);
 static void emit_auto_free(Codegen *c, NodeId letId);
@@ -4522,6 +4523,15 @@ static void emit_arm_body(Codegen *c, const NodeId body, const int mode, const c
   } else if (ast_at_const(c->ast, body)->kind == NODE_BLOCK) {
     emit_indent(c);
     emit_block(c, body);
+    emit(c, "\n");
+  } else if (ast_at_const(c->ast, body)->kind == NODE_MATCH) {
+    // A statement-position arm whose body is itself a match: `if let .. else if let ..` chains
+    // desugar the trailing chain into the wildcard arm. Emit it as a statement, not a value.
+    emit_indent(c);
+    emit_match_stmt(c, body);
+  } else if (ast_at_const(c->ast, body)->kind == NODE_IF) {
+    emit_indent(c); // same, for `if let .. else if <cond> ..`
+    emit_if(c, ast_at_const(c->ast, body));
     emit(c, "\n");
   } else {
     emit_indent(c);
