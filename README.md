@@ -134,6 +134,45 @@ fn classify(n: i32) i32 {
 ranges, or variants). Payload-less enums lower to plain C `enum`s; payload-bearing ones lower to tagged
 unions.
 
+### Loops, labels, and `let` conditionals
+
+```superc
+fn main() i32 {
+    let mut v = Vector::<i32>::new();
+    v.push(3); v.push(8); v.push(5);
+
+    // `loop` is an expression: `break <value>` yields it
+    let mut n = 0;
+    let seed = loop {
+        n += 1;
+        if n * n > 20 { break n; }
+    };
+
+    // labels route break/continue through nested loops (defers still run, innermost first)
+    let mut pairs = 0;
+    'outer: for i in 0..4 {
+        for j in 0..4 {
+            if i + j == seed { break 'outer; }
+            pairs += 1;
+        }
+    }
+
+    // `while let` drains a source; `if let` tests one pattern
+    let mut last_even = 0;
+    while let Some(x) = v.pop() {
+        if let 8 = x { last_even = x; }
+        println("popped {:>4}", x); // right-aligned in 4 columns
+    }
+
+    return seed + pairs + last_even - 24; // 5 + 11 + 8 - 24 = 0
+}
+```
+
+`if let P = e { .. } else { .. }` and `while let P = e { .. }` desugar to two-arm switches, so any
+switch pattern (payloads, or-patterns, literals) works. Format placeholders accept
+`{:[fill][<^>][0][width][.precision][x|X|b]}` — `{:08.2}` zero-pads a float to width 8 with 2
+decimals, `{:b}` prints binary — and `eprint` / `eprintln` mirror `print` / `println` onto stderr.
+
 ### Generics (monomorphized)
 
 ```superc
@@ -507,7 +546,14 @@ and function pointers, trait objects (`&dyn I` / `&mut dyn I` / `Box<dyn I>` wit
 vtables and drop glue, plus structural `dyn fn(..) ..` for stored closures and heterogeneous handler
 lists), references/pointers/`new`, slices and arrays (including
 designated initializers), first-class ranges and slicing (`a[lo..hi]`), `for` over user iterators (an
-`Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while`, `defer`,
+`Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while` / `loop`
+(a value-yielding expression via `break <expr>`), labeled loops with labeled `break` / `continue`
+(`'outer: for .. { break 'outer; }`, defer-correct unwinding), `if let` / `while let`, `defer`,
+raw strings (`r"…"` / `r#"…"#`), numeric literal suffixes (`1u8`, `0xFFu64`, `1.0f32`) with implicit
+lossless widening (`i32 → i64`, `u8 → i32`, `f32 → f64`), module-level mutable globals (`static mut`),
+`?` error conversion through `From` conformances, string→number parsing (`"ff".parse_u64_radix(16)`,
+`"3.5".parse_f64()`), formatted printing with width / alignment / fill / zero-pad / precision / hex /
+binary specifiers (`{:>8}`, `{:08.2}`, `{:b}`) plus `eprint` / `eprintln` to stderr,
 `static_assert`, `@c.*` attributes, the module system with an auto-imported `std` prelude (containers,
 iterators/algorithms, pluggable allocators), `extern "C"` FFI (custom header includes, variadics in
 both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
