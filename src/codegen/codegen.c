@@ -7002,7 +7002,10 @@ static void emit_default_methods(Codegen *c, const int which, const bool with_bo
         continue;
       if (rm->as.function.generics.len)
         continue;
-      if (!with_body && !want_fn(which, rm->as.function.is_public))
+      // `pub` cannot be written on an interface item: a default body's visibility is its interface's
+      // (a pub interface's synthesized `T__method` backs cross-module dyn vtables, so it must export).
+      const bool vis = ast_at_const(c->ast, iface.node)->as.interface_def.is_public;
+      if (!with_body && !want_fn(which, vis))
         continue;
       const Span rmn = ast_at_const(c->ast, rm->as.function.name)->as.name.text;
       bool overridden = false;
@@ -7018,7 +7021,11 @@ static void emit_default_methods(Codegen *c, const int which, const bool with_bo
       c->subst[0].concrete = tty;
       if (!with_body) // the default's `<T__name>_ret` typedef (multi-return), under the Self subst
         emit_ret_struct(c, rids[r], target);
-      emit_function(c, rids[r], target, false, with_body, NULL, c->multifile && !rm->as.function.is_public);
+      // The name is passed explicitly so `spec_static` is honored: without it emit_function derives
+      // linkage from the method's own (never-writable) `pub`, hiding a pub interface's synth default.
+      char dnm[256];
+      function_name(c, rids[r], target, dnm, sizeof dnm, true);
+      emit_function(c, rids[r], target, false, with_body, dnm, c->multifile && !vis);
       c->nsubst = 0;
     }
   }
@@ -8225,13 +8232,18 @@ static bool cg_dyn_target(Codegen *c, const Ty *const sy, ModuleId *const tm, No
 // drop-glue slot + one fn pointer per self-method, interface decl order) and the fat {data, vt} pair.
 // Self-contained (only `void *` and fn pointers), so they emit before all aggregate bodies.
 static void emit_dyn_typedefs(Codegen *c) {
-  const DynUse *const du = c->ast->dyn_uses.data;
-  for (size_t i = 0; i < c->ast->dyn_uses.len; i++) {
-    const Ty dy = *ast_type_at(c->ast, du[i].dyn);
+  // Any MENTION of `&[mut] dyn I` (a param/return/let annotation, not just a coercion) interned a
+  // TYPE_DYN into this module's pool -- scan it, deduped by interface. Reinterning a method's param
+  // types below may APPEND to the pool (even new TYPE_DYNs, for a method that itself takes a dyn):
+  // re-read `len` each iteration and never hold a pointer into the pool across an emission.
+  for (size_t i = 0; i < c->ast->type_pool.len; i++) {
+    const Ty dy = c->ast->type_pool.data[i];
+    if (dy.kind != TYPE_DYN)
+      continue;
     bool seen = false;
     for (size_t j = 0; j < i && !seen; j++) {
-      const Ty pj = *ast_type_at(c->ast, du[j].dyn);
-      seen = pj.module == dy.module && pj.as.decl == dy.as.decl;
+      const Ty pj = c->ast->type_pool.data[j];
+      seen = pj.kind == TYPE_DYN && pj.module == dy.module && pj.as.decl == dy.as.decl;
     }
     if (seen)
       continue;
@@ -8240,6 +8252,9 @@ static void emit_dyn_typedefs(Codegen *c) {
     Ast *const ia = cg_mod_ast(c, dy.module);
     const Node *const idn = ast_at_const(ia, dy.as.decl);
     const NodeId *const mids = ast_list(ia, idn->as.interface_def.items);
+    // Guarded: every module erasing this interface emits the identical block into its header, and a
+    // TU including several of those headers must define the structs exactly once.
+    emit(c, "#ifndef SC_DYN_%s\n#define SC_DYN_%s\n", stem, stem);
     emit(c, "typedef struct %s__vt {\n    void (*__free)(void *self);\n", stem);
     for (uint32_t k = 0; k < idn->as.interface_def.items.len; k++) {
       const Node *const m = ast_at_const(ia, mids[k]);
@@ -8270,7 +8285,8 @@ static void emit_dyn_typedefs(Codegen *c) {
         buf_join3(memb, sizeof memb, "void ", "", inner);
       emit(c, "    %s;\n", memb);
     }
-    emit(c, "} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n", stem, stem, stem, stem);
+    emit(c, "} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n#endif\n", stem, stem,
+         stem, stem);
   }
 }
 
