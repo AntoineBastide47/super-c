@@ -2852,7 +2852,7 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
     case NODE_WHILE: {
       bool first = n->as.while_stmt.is_do; // `do {} while`: the body runs before the first test
       for (;;) {
-        if (!first) {
+        if (!first && n->as.while_stmt.condition != NODE_NONE) { // condition-less `loop`: only break exits
           const CeVal c = ev_rval(ce, f, m, n->as.while_stmt.condition);
           if (c.kind != CV_BOOL)
             return xfail(f);
@@ -2978,8 +2978,12 @@ static int exec_stmt(ConstEval *ce, CeFrame *f, const ModuleId m, const NodeId i
       return X_RETURN;
     }
     case NODE_BREAK:
+      if (n->as.flow.label.end > n->as.flow.label.start || n->as.flow.value != NODE_NONE)
+        return X_BAIL; // labeled / value-carrying breaks route beyond the innermost loop: stay runtime
       return X_BREAK;
     case NODE_CONTINUE:
+      if (n->as.flow.label.end > n->as.flow.label.start)
+        return X_BAIL;
       return X_CONTINUE;
     case NODE_DEFER:
       if (f->ndefers >= CE_MAX_DEFERS)

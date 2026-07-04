@@ -243,6 +243,8 @@ static TokenType keywords(const uint8_t *lexeme, const size_t len) {
           if (memcmp(lexeme, "enum", 4) == 0)
             return Enum;
           return Identifier;
+        case 'l':
+          return memcmp(lexeme, "loop", 4) == 0 ? Loop : Identifier;
         case 'm':
           return memcmp(lexeme, "move", 4) == 0 ? Move : Identifier;
         case 'n':
@@ -531,6 +533,18 @@ static void string(Lexer *l, TokenWriter *w) {
 
   l->current = i;
   lexer_error(l, "unterminated string literal");
+}
+
+// After an opening quote: is this a loop label `'name` rather than a character literal? An identifier
+// run NOT closed by another quote is a label (`'a'` stays a char literal; `'a` is a label).
+static bool label_ahead(const Lexer *l) {
+  size_t i = l->current; // just past the opening quote
+  const uint8_t b = i < l->len ? l->bytes[i] : 0;
+  if (!(b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')))
+    return false;
+  while (i < l->len && is_id_part[l->bytes[i]])
+    i++;
+  return i >= l->len || l->bytes[i] != '\'';
 }
 
 static void character(Lexer *l, TokenWriter *w, const bool byte_character) {
@@ -908,6 +922,13 @@ static void scan_token(Lexer *l, TokenWriter *w) {
       string(l, w);
       return;
     case '\'':
+      // A loop label `'name` vs a character literal `'a'`: an identifier run after the quote that is
+      // NOT closed by another quote is a label ('outer: while ..; break 'outer;).
+      if (label_ahead(l)) {
+        while (is_id_part[peek_byte(l)])
+          l->current++;
+        EMIT(Label);
+      }
       character(l, w, false);
       return;
 

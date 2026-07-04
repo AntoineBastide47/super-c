@@ -2218,11 +2218,52 @@ static void test_str_parse(void) {
       9, "");
 }
 
+// Labeled break/continue across nested loops (goto-routed, defer-correct) and `loop` expressions
+// yielding a value through `break <expr>`.
+static void test_labeled_loops(void) {
+  sc_run_program("labeled break/continue + loop expression",
+                 PRE "fn main() i32 {\n"
+                     "  let mut hits = 0;\n"
+                     "  'outer: for i in 0..5 { for j in 0..5 {\n"
+                     "    if i * j == 6 { break 'outer; }\n"
+                     "    hits += 1;\n"
+                     "  } }\n"
+                     "  let mut sum = 0;\n"
+                     "  'rows: for i in 0..4 { for j in 0..4 {\n"
+                     "    if j > i { continue 'rows; }\n"
+                     "    sum += 1;\n"
+                     "  } }\n"
+                     "  let mut n = 0;\n"
+                     "  let v = loop { n += 1; if n == 7 { break n * 10; } };\n"
+                     "  let mut k = 0;\n"
+                     "  'w: while true { k += 1; if k == 3 { break 'w; } }\n"
+                     "  let mut z = 0;\n"
+                     "  loop { z += 1; if z == 2 { break; } }\n"
+                     "  unsafe exit(switch hits == 13 && sum == 10 && v == 70 && k == 3 && z == 2 {\n"
+                     "    true => 11, false => 1 });\n"
+                     "}\n",
+                 11, "");
+  // A labeled break from the inner loop runs the pending defers of BOTH loops, innermost first.
+  sc_run_program("labeled break runs defers outward",
+                 PRE "fn main() i32 {\n"
+                     "  'outer: for i in 0..3 {\n"
+                     "    defer unsafe putchar('O');\n"
+                     "    for j in 0..3 {\n"
+                     "      defer unsafe putchar('I');\n"
+                     "      if i == 1 && j == 1 { break 'outer; }\n"
+                     "    }\n"
+                     "  }\n"
+                     "  unsafe putchar(10);\n"
+                     "  return 0;\n"
+                     "}\n",
+                 0, "IIIOIIO\n");
+}
+
 int main(void) {
   // The independent units, fanned out across cores by the parallel-for; schedule(dynamic) balances the tail.
   static void (*const tests[])(void) = {
       test_dyn,            test_raw_strings,       test_numeric_suffixes_widening,
-      test_str_parse,
+      test_str_parse,      test_labeled_loops,
       test_bug_regressions,    test_attributes,           test_free_raii,
       test_conditional_move_free, test_container_free_raii, test_free_intrinsic,
       test_std_container_auto_free, test_switch_binding_modes, test_raii_move_edges,

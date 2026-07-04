@@ -2,6 +2,7 @@
 
 static const char *const TOKEN_TYPE_NAMES[] = {
     "Identifier",
+    "Label",
 
     "As",
     "Import",
@@ -22,6 +23,7 @@ static const char *const TOKEN_TYPE_NAMES[] = {
     "Extend",
     "In",
     "Let",
+    "Loop",
     "Switch",
     "Move",
     "Mut",

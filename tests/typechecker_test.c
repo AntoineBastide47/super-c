@@ -874,6 +874,30 @@ static void test_numeric_suffixes_widening(void) {
                "does not fit in its suffixed type");
 }
 
+// Labeled break/continue target resolution + `loop`-expression value typing rules.
+static void test_labeled_loops(void) {
+  expect_ok("labels + loop expression typecheck",
+            "fn main() i32 {\n"
+            "  'a: for i in 0..3 { for j in 0..3 { if j > i { continue 'a; } if i * j == 2 { break 'a; } } }\n"
+            "  let v = loop { break 5; };\n"
+            "  return v;\n"
+            "}\n");
+  expect_error("break outside a loop", "fn main() i32 { break; return 0; }\n", "outside of a loop");
+  expect_error("unknown label", "fn main() i32 { 'a: for i in 0..3 { break 'b; } return 0; }\n",
+               "no enclosing loop is labeled");
+  expect_error("value break needs a loop expression", "fn main() i32 { while true { break 5; } return 0; }\n",
+               "can only carry a value inside a 'loop' expression");
+  expect_error("bare break mixed into a value loop",
+               "fn main() i32 { let v = loop { break 1; break; }; return v; }\n",
+               "must carry a value");
+  expect_error("break values must agree",
+               "fn main() i32 { let mut i = 0; let v = loop { i += 1; if i == 1 { break \"s\"; } break 1; }; return 0; }\n",
+               "mismatched types");
+  expect_error("a closure body cannot break an outer loop",
+               "fn main() i32 { for i in 0..3 { let f = fn() void { break; }; f(); } return 0; }\n",
+               "outside of a loop");
+}
+
 // `?` error conversion: differing Result error types are accepted exactly when the caller's error
 // type provides From<callee's error>; otherwise the mismatch stays an error (with the From hint).
 static void test_question_error_conversion(void) {
@@ -1040,6 +1064,7 @@ int main(void) {
   test_numeric_suffixes_widening();
   test_static_mut();
   test_question_error_conversion();
+  test_labeled_loops();
   if (failures) {
     fprintf(stderr, "%d typechecker test failure%s\n", failures, failures == 1 ? "" : "s");
     return 1;

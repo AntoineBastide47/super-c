@@ -757,7 +757,10 @@ static void resolve_stmt(Resolver *r, const NodeId id) {
     case NODE_STATIC_ASSERT:
       resolve_expr(r, n->as.binary.left);
       break;
-    default: // NODE_BREAK, NODE_CONTINUE
+    case NODE_BREAK:
+      resolve_expr(r, n->as.flow.value); // `break <expr>` -- the value a `loop` expression yields
+      break;
+    default: // NODE_CONTINUE
       break;
   }
 }
@@ -865,6 +868,9 @@ static void resolve_expr(Resolver *r, const NodeId id) {
         resolve_expr(r, n->as.new_expr.initializer); // resolves the shared type node
       else
         resolve_type(r, n->as.new_expr.type);
+      break;
+    case NODE_WHILE: // `loop { .. }` as an expression
+      resolve_block(r, n->as.while_stmt.body);
       break;
     case NODE_ARRAY_LITERAL:
     case NODE_TUPLE: {

@@ -1445,6 +1445,16 @@ static NodeId parse_primary(Parser *p) {
     return parse_switch(p);
   if (type == If) // `if cond { a; } else { b; }` as a value (one-token lookahead, LL(1))
     return parse_if(p);
+  if (type == Loop) { // `loop { .. }` as a value: yields what its `break <expr>`s produce
+    advance(p);
+    const NodeId body = parse_block(p);
+    return ast_add(
+        p->ast, (Node){
+                    .kind = NODE_WHILE,
+                    .span = span_new(start, previous_end(p)),
+                    .as.while_stmt = {.condition = NODE_NONE, .body = body},
+                });
+  }
   if (check(p, Sizeof) || check(p, Alignof)) { // `sizeof(T)` / `alignof(T)` -> usize
     const bool is_align = check(p, Alignof);
     advance(p);
@@ -1916,6 +1926,70 @@ static NodeId parse_if(Parser *p) {
 }
 
 static NodeId parse_statement_inner(Parser *p);
+
+// The four loop statements (`while` / `do..while` / `for..in` / `loop`), sharing the optional `'name:`
+// label. `loop { .. }` is an infinite loop: NODE_WHILE with condition == NODE_NONE.
+static NodeId parse_loop_stmt(Parser *p, const uint32_t start, const Span label) {
+  switch (peek_type(p)) {
+    case While: {
+      advance(p);
+      const bool old = p->allow_struct_initializer; // see parse_if: condition cannot end in a struct literal
+      p->allow_struct_initializer = false;
+      const NodeId condition = parse_expression(p);
+      p->allow_struct_initializer = old;
+      const NodeId body = parse_block(p);
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_WHILE,
+                      .span = span_new(start, node_span(p, body).end),
+                      .as.while_stmt = {.condition = condition, .body = body, .label = label},
+                  });
+    }
+    case Do: { // `do { .. } while (cond);` -- body runs once before the condition is tested
+      advance(p);
+      const NodeId body = parse_block(p);
+      expect(p, While, "'while'");
+      const bool old = p->allow_struct_initializer;
+      p->allow_struct_initializer = false;
+      const NodeId condition = parse_expression(p);
+      p->allow_struct_initializer = old;
+      expect(p, Semicolon, "';'");
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_WHILE,
+                      .span = span_new(start, previous_end(p)),
+                      .as.while_stmt = {.condition = condition, .body = body, .is_do = true, .label = label},
+                  });
+    }
+    case For: {
+      advance(p);
+      const NodeId binding = identifier(p);
+      expect(p, In, "'in'");
+      const bool old = p->allow_struct_initializer;
+      p->allow_struct_initializer = false;
+      const NodeId iterable = parse_range(p, RANGE_FOR); // a range `(start)?..(=)?(end)?` or a plain collection
+      p->allow_struct_initializer = old;
+      const NodeId body = parse_block(p);
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_FOR,
+                      .span = span_new(start, node_span(p, body).end),
+                      .as.for_stmt = {.binding = binding, .iterable = iterable, .body = body, .label = label},
+                  });
+    }
+    default: { // Loop
+      advance(p);
+      const NodeId body = parse_block(p);
+      return ast_add(
+          p->ast, (Node){
+                      .kind = NODE_WHILE,
+                      .span = span_new(start, node_span(p, body).end),
+                      .as.while_stmt = {.condition = NODE_NONE, .body = body, .label = label},
+                  });
+    }
+  }
+}
+
 // Depth-guarded entry: caps block/statement nesting (each `{ .. }` recurses parse_block -> parse_statement)
 // so deeply nested blocks diagnose instead of overflowing the stack. The `advance` keeps the enclosing block
 // loop making progress so it terminates rather than spinning on the unconsumed token.
@@ -1963,8 +2037,19 @@ static NodeId parse_statement_inner(Parser *p) {
     case Continue: {
       const NodeKind kind = check(p, Break) ? NODE_BREAK : NODE_CONTINUE;
       advance(p);
+      Span label = {0, 0}; // `break 'name [expr];` / `continue 'name;`
+      if (check(p, Label)) {
+        const Token lt = raw_peek(p);
+        label = token_span(lt);
+        advance(p);
+      }
+      NodeId value = NODE_NONE;
+      if (kind == NODE_BREAK && !check(p, Semicolon))
+        value = parse_expression(p); // `break <expr>;` -- the value a `loop` expression yields
       expect(p, Semicolon, "';'");
-      return ast_add(p->ast, (Node){.kind = kind, .span = span_new(start, previous_end(p))});
+      return ast_add(p->ast, (Node){.kind = kind,
+                                    .span = span_new(start, previous_end(p)),
+                                    .as.flow = {.value = value, .label = label}});
     }
     case Defer: {
       advance(p);
@@ -1976,52 +2061,21 @@ static NodeId parse_statement_inner(Parser *p) {
     }
     case If:
       return parse_if(p);
-    case While: {
+    case Label: { // `'name: loop/while/do/for` -- a labeled loop statement (LL(1): Label is unambiguous)
+      const Span label = token_span(raw_peek(p));
       advance(p);
-      const bool old = p->allow_struct_initializer; // see parse_if: condition cannot end in a struct literal
-      p->allow_struct_initializer = false;
-      const NodeId condition = parse_expression(p);
-      p->allow_struct_initializer = old;
-      const NodeId body = parse_block(p);
-      return ast_add(
-          p->ast, (Node){
-                      .kind = NODE_WHILE,
-                      .span = span_new(start, node_span(p, body).end),
-                      .as.while_stmt = {.condition = condition, .body = body},
-                  });
+      expect(p, Colon, "':'");
+      if (!check(p, While) && !check(p, Do) && !check(p, For) && !check(p, Loop)) {
+        error_here(p, "a label must be followed by 'loop', 'while', 'do', or 'for'");
+        return NODE_NONE;
+      }
+      return parse_loop_stmt(p, start, label);
     }
-    case Do: { // `do { .. } while (cond);` -- body runs once before the condition is tested
-      advance(p);
-      const NodeId body = parse_block(p);
-      expect(p, While, "'while'");
-      const bool old = p->allow_struct_initializer;
-      p->allow_struct_initializer = false;
-      const NodeId condition = parse_expression(p);
-      p->allow_struct_initializer = old;
-      expect(p, Semicolon, "';'");
-      return ast_add(
-          p->ast, (Node){
-                      .kind = NODE_WHILE,
-                      .span = span_new(start, previous_end(p)),
-                      .as.while_stmt = {.condition = condition, .body = body, .is_do = true},
-                  });
-    }
-    case For: {
-      advance(p);
-      const NodeId binding = identifier(p);
-      expect(p, In, "'in'");
-      const bool old = p->allow_struct_initializer;
-      p->allow_struct_initializer = false;
-      const NodeId iterable = parse_range(p, RANGE_FOR); // a range `(start)?..(=)?(end)?` or a plain collection
-      p->allow_struct_initializer = old;
-      const NodeId body = parse_block(p);
-      return ast_add(
-          p->ast, (Node){
-                      .kind = NODE_FOR,
-                      .span = span_new(start, node_span(p, body).end),
-                      .as.for_stmt = {.binding = binding, .iterable = iterable, .body = body},
-                  });
-    }
+    case While:
+    case Do:
+    case For:
+    case Loop:
+      return parse_loop_stmt(p, start, (Span){0, 0});
     case Unsafe: {
       const NodeId expression = parse_expression(p);
       const Node *const node = ast_at_const(p->ast, expression);

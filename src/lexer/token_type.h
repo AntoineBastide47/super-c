@@ -8,6 +8,7 @@
 typedef enum TokenType {
   // Names
   Identifier,
+  Label, // 'name -- a loop label ('outer: while ..; break 'outer;)
 
   // Reserved words
   As,
@@ -29,6 +30,7 @@ typedef enum TokenType {
   Extend,
   In,
   Let,
+  Loop,
   Switch,
   Move,
   Mut,
