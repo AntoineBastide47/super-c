@@ -873,6 +873,16 @@ static void test_numeric_suffixes_widening(void) {
                "mismatched types");
   expect_error("suffix range check", "fn main() i32 { let x = 300i8; return 0; }\n",
                "does not fit in its suffixed type");
+  // An ADAPTING (unsuffixed) literal is range-checked against the slot/operand type it adopts.
+  expect_error("out-of-range literal in a slot", "fn main() i32 { let a: u8 = 999; return 0; }\n",
+               "out of range for 'u8'");
+  expect_error("out-of-range literal adapting in arithmetic",
+               "fn main() i32 { let x: u8 = 5; let y = x + 999; return y as i32; }\n", "out of range for 'u8'");
+  expect_error("negative literal into an unsigned slot", "fn main() i32 { let a: u32 = -1; return 0; }\n",
+               "out of range for 'u32'");
+  expect_ok("extreme literals fit their signed slots",
+            "fn main() i32 { let a: i8 = -128; let b: i16 = -32768; let c: u32 = 4294967295;\n"
+            "  return (a as i32) + (b as i32) + ((c & 1) as i32); }\n");
 }
 
 // Assert builtins: read (never move) their arguments, require agreeing comparable types, a bool

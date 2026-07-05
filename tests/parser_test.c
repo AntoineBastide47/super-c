@@ -478,7 +478,25 @@ static void test_bug_regressions(void) {
   }
 }
 
+// Pathological FLAT expressions are diagnosed, not stack-overflowed: a left-deep binary chain
+// costs the parser no recursion but every later phase walks its spine recursively, and a `=` chain
+// recurses right through parse_expression -- both are capped like parenthesized nesting.
+static void test_pathological_depth(void) {
+  static char big[131072];
+  size_t k = (size_t)snprintf(big, sizeof big, "fn f() i32 { return 1");
+  for (int i = 0; i < 8000; i++)
+    k += (size_t)snprintf(big + k, sizeof big - k, " + 1");
+  snprintf(big + k, sizeof big - k, "; }\n");
+  CHECK(parse_has_error(big), "over-long binary chain is rejected");
+  k = (size_t)snprintf(big, sizeof big, "fn f() void { let mut a: i32 = 0; ");
+  for (int i = 0; i < 1000; i++)
+    k += (size_t)snprintf(big + k, sizeof big - k, "a = ");
+  snprintf(big + k, sizeof big - k, "1; }\n");
+  CHECK(parse_has_error(big), "over-deep assignment chain is rejected");
+}
+
 int main(void) {
+  test_pathological_depth();
   test_bug_regressions();
   test_items_and_types();
   test_attributes();

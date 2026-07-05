@@ -1841,11 +1841,18 @@ ALWAYS_INLINE int precedence(const TokenType type) {
 }
 
 static NodeId parse_binary_after(Parser *p, NodeId left, const int minimum) {
+  // This loop builds a LEFT-deep tree at zero recursion cost, but every later phase walks that
+  // spine recursively -- an unbounded `1 + 1 + ...` chain would overflow their stacks, so cap it.
+  unsigned chain = 0;
   for (;;) {
     const TokenType op = peek_type(p);
     const int prec = precedence(op);
     if (prec < minimum)
       break;
+    if (++chain > 4096) {
+      error_here(p, "expression nested too deeply");
+      return left;
+    }
     advance(p);
     const NodeId right = parse_binary(p, prec + 1);
     left = ast_add(
@@ -1873,8 +1880,16 @@ static NodeId parse_expression_after(Parser *p, const NodeId left) {
     return parse_range_value(p, left);
   if (!assignment_operator(peek_type(p)))
     return left;
+  // Right-recursive (`a = b = c`): parse_unary's guard closes before this recursion opens, so the
+  // chain must hold a depth level of its own or a pathological `a = a = ...` overflows the stack.
+  if (p->depth >= PARSE_MAX_DEPTH) {
+    error_here(p, "expression nested too deeply");
+    return left;
+  }
+  p->depth++;
   const TokenType op = token_type(advance(p));
   const NodeId right = parse_expression(p);
+  p->depth--;
   return ast_add(
       p->ast, (Node){
                   .kind = NODE_ASSIGNMENT,

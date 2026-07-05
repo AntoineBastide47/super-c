@@ -715,6 +715,32 @@ static void test_checked_arith(void) {
   sc_run_program( // unsigned overflow wraps (two's complement) -- the prelude's hashing relies on this
       "unsigned arithmetic wraps (no trap)",
       PRE "fn main() i32 { let a: u32 = 4294967295; let b: u32 = 3; let c: u32 = a + b; unsafe exit(c as i32); }\n", 2, "");
+  sc_run_program( // sub-int unsigned ops wrap AT THEIR WIDTH (plain C would promote to int: u16*u16 is UB)
+      "u8/u16 arithmetic wraps at its width",
+      PRE "fn main() i32 {\n"
+          "  let a: u16 = 65535; let b: u16 = 65535;\n"
+          "  let m = (a * b) as u64;\n"                       // wraps at 16 bits: 1
+          "  let x: u8 = 200; let y: u8 = 200;\n"
+          "  let s = (x + y) as u64;\n"                       // wraps at 8 bits: 144
+          "  unsafe exit((m + s - 145) as i32);\n"
+          "}\n",
+      0, "");
+  sc_run_program( // a folded i64 MIN must stay SIGNED in C (`-9223372036854775808ll` parses unsigned)
+      "folded i64 MIN compares signed",
+      PRE "fn main() i32 {\n"
+          "  let m: i64 = (9223372036854775808u64 as i64);\n"
+          "  if m < 0 { unsafe exit(0); }\n"
+          "  unsafe exit(1);\n"
+          "}\n",
+      0, "");
+  sc_run_program( // an adapting literal is emitted AS the operand's C type: u32 math stays 32-bit
+      "u32 literal multiplication wraps at 32 bits",
+      PRE "fn main() i32 {\n"
+          "  let v: u32 = 36;\n"
+          "  let r = (v * 3075809419) as u64;\n"              // 36 * 3075809419 mod 2^32
+          "  unsafe exit((r == 3354956684) as i32);\n"
+          "}\n",
+      1, "");
   char first[256];
   size_t n = sc_stage_errors("constant signed overflow is a compile error",
                              "const X: i32 = 2147483647 + 1;\nfn main() i32 { return 0; }\n", ST_CODEGEN, first,
@@ -727,6 +753,11 @@ static void test_checked_arith(void) {
   CHECK(n >= 1, "const div-by-zero: expected a codegen error");
   if (n)
     CHECK(strstr(first, "division by zero") != NULL, "const div0: message missing 'division by zero':\n%s", first);
+  n = sc_stage_errors("constant shift out of range is a compile error",
+                      "const X: i32 = 1 << 40;\nfn main() i32 { return 0; }\n", ST_CODEGEN, first, sizeof first);
+  CHECK(n >= 1, "const shift: expected a codegen error");
+  if (n)
+    CHECK(strstr(first, "shift out of range") != NULL, "const shift: message missing 'shift out of range':\n%s", first);
 }
 
 // Default generic arguments: an under-applied generic (`Pair<bool>`) fills its trailing params from their

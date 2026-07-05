@@ -1350,7 +1350,7 @@ static CeVal ce_int_op(ConstEval *ce, const TokenType op, const CeVal l, const C
   }
   const int bits = ob == BT_COUNT ? 64 : bt_bits(ob);
   int64_t v;
-  if (uns && bits >= 32) { // C unsigned arithmetic: mod 2^bits, no trap
+  if (uns) { // unsigned arithmetic wraps AT ITS WIDTH, no trap (codegen emits u8/u16 ops in uint32_t)
     const uint64_t ul = (uint64_t)l.as.i, ur = (uint64_t)r.as.i;
     uint64_t u;
     switch (op) {
@@ -1369,11 +1369,11 @@ static CeVal ce_int_op(ConstEval *ce, const TokenType op, const CeVal l, const C
       case Pipe: u = ul | ur; break;
       case Caret: u = ul ^ ur; break;
       case LeftShift:
-        if (r.as.i < 0 || r.as.i >= bits) return CV_NIL;
+        if (r.as.i < 0 || r.as.i >= bits) { ce_trap(ce, "shift out of range"); return CV_NIL; }
         u = ul << r.as.i;
         break;
       case RightShift:
-        if (r.as.i < 0 || r.as.i >= bits) return CV_NIL;
+        if (r.as.i < 0 || r.as.i >= bits) { ce_trap(ce, "shift out of range"); return CV_NIL; }
         u = ul >> r.as.i;
         break;
       default:
@@ -1394,24 +1394,30 @@ static CeVal ce_int_op(ConstEval *ce, const TokenType op, const CeVal l, const C
       break;
     case Slash:
       if (r.as.i == 0) { ce_trap(ce, "division by zero"); return CV_NIL; }
-      if (l.as.i == INT64_MIN && r.as.i == -1) { ce_trap(ce, "arithmetic overflow"); return CV_NIL; }
+      if (r.as.i == -1 && l.as.i == (bits == 64 ? INT64_MIN : -(int64_t)((uint64_t)1 << (bits - 1)))) {
+        ce_trap(ce, "arithmetic overflow"); // MIN / -1 overflows the type: the runtime traps at its width
+        return CV_NIL;
+      }
       v = l.as.i / r.as.i;
       break;
     case Percent:
       if (r.as.i == 0) { ce_trap(ce, "division by zero"); return CV_NIL; }
-      if (l.as.i == INT64_MIN && r.as.i == -1) { ce_trap(ce, "arithmetic overflow"); return CV_NIL; }
+      if (r.as.i == -1 && l.as.i == (bits == 64 ? INT64_MIN : -(int64_t)((uint64_t)1 << (bits - 1)))) {
+        ce_trap(ce, "arithmetic overflow");
+        return CV_NIL;
+      }
       v = l.as.i % r.as.i;
       break;
     case Ampersand: v = l.as.i & r.as.i; break;
     case Pipe: v = l.as.i | r.as.i; break;
     case Caret: v = l.as.i ^ r.as.i; break;
-    case LeftShift:
-      if (r.as.i < 0 || r.as.i >= bits) return CV_NIL;
-      v = (int64_t)((uint64_t)l.as.i << r.as.i);
+    case LeftShift: // value bits past the width are DISCARDED (the runtime computes at the width)
+      if (r.as.i < 0 || r.as.i >= bits) { ce_trap(ce, "shift out of range"); return CV_NIL; }
+      v = wrap_to(ob, (int64_t)((uint64_t)l.as.i << r.as.i));
       break;
-    case RightShift:
-      if (r.as.i < 0 || r.as.i >= bits) return CV_NIL;
-      v = uns ? (int64_t)((uint64_t)l.as.i >> r.as.i) : l.as.i >> r.as.i;
+    case RightShift: // arithmetic (sign-propagating) on signed operands
+      if (r.as.i < 0 || r.as.i >= bits) { ce_trap(ce, "shift out of range"); return CV_NIL; }
+      v = l.as.i >> r.as.i;
       break;
     default:
       return CV_NIL;
