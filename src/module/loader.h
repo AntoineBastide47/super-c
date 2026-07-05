@@ -71,6 +71,11 @@ NodeId package_prelude_lookup(const Package *p, const char *name, size_t name_le
 NodeId package_glob_lookup(const Package *p, ModuleId mid, const char *name, size_t name_len, bool want_type,
                            ModuleId *out_mid);
 
+// Fill `out` (capacity p->count) with the modules `mid` transitively imports (excluding `mid` itself),
+// breadth-first in declaration order. Returns the count. Extensions and other non-name items travel with
+// imports (C-style), so callers search these modules after the item's home and the current module.
+size_t package_import_closure(const Package *p, ModuleId mid, ModuleId *out);
+
 // Move every concrete cross-module generic instantiation into its template module's instance table, so
 // the owning module emits the specialization (struct + methods) in its header/.c and users just include
 // it -- mirroring non-generic cross-module types. Run after typechecking, before codegen. `standalone` is

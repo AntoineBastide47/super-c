@@ -337,6 +337,7 @@ static bool cg_test_skip(Codegen *c, NodeId fn, bool method);
 static void emit_condition(Codegen *c, NodeId id);
 static void render_type_node(Codegen *c, NodeId tn, const char *decl, char *out, size_t cap);
 static void render_type_id(Codegen *c, TypeId t, const char *decl, char *out, size_t cap);
+static DefId cg_method_extend_target(Codegen *c, DefId md);
 static size_t render_qualified(Codegen *c, ModuleId owner, NodeId name_node, char *buf, size_t cap);
 static NodeId fn_array_return(Codegen *c, NodeId fn_id);
 static void emit_ret_struct_named(Codegen *c, NodeId fn_id, const char *nm);
@@ -1472,6 +1473,31 @@ static TypeId subst_lookup(Codegen *c, const ModuleId m, const NodeId decl) {
   return TYPE_NONE;
 }
 
+// The name node of a top-level decl: aliases keep their name in `type_alias.name`, aggregates in
+// `aggregate.name` (distinct union members) -- so target/typedef mangling reads the right one.
+static NodeId cg_decl_name_node(const Node *const dn) {
+  return dn->kind == NODE_TYPE_ALIAS ? dn->as.type_alias.name : dn->as.aggregate.name;
+}
+
+// Is the value alias (m, aliasDecl) the target of an extend in its own module? Such an alias is NOMINAL:
+// it emits a real `typedef <underlying> <Alias>;`, is spelled by name, and its methods mangle `<Alias>__*`
+// -- so `type Token = u64; extend Token { .. }` stays a named C typedef instead of dissolving into u64.
+// A plain (un-extended) value alias keeps the old transparent behavior (inlined to its underlying type).
+static bool cg_alias_extended(Codegen *c, const ModuleId m, const NodeId aliasDecl) {
+  Ast *const a = cg_mod_ast(c, m);
+  const NodeList items = ast_at_const(a, a->root)->as.program.items;
+  const NodeId *const ids = ast_list(a, items);
+  for (uint32_t i = 0; i < items.len; i++) {
+    const Node *const it = ast_at_const(a, ids[i]);
+    if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
+      continue;
+    const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+    if (tg.module == m && tg.node == aliasDecl)
+      return true;
+  }
+  return false;
+}
+
 // any leading `*` / trailing `[]` already threaded in) into `out`.
 static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char *out, const size_t cap) {
   if (tn == NODE_NONE) {
@@ -1490,6 +1516,13 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
           render_type_id(c, nt, decl, out, cap);
           break;
         }
+        // `Self` in an extend of a builtin (directly or through a transparent alias) resolves to the
+        // builtin's synthetic core decl -- a nameless struct node -- so spell the C builtin instead.
+        const int bb = c->package ? package_builtin_of_decl(c->package, d.module, d.node) : -1;
+        if (bb >= 0) {
+          buf_join3(out, cap, BUILTIN_C[bb], SEP(decl), decl);
+          break;
+        }
         const Node *const dn = ast_at_const(cg_mod_ast(c, d.module), d.node);
         if (dn->kind == NODE_STRUCT || dn->kind == NODE_ENUM) {
           char nm[160];
@@ -1498,6 +1531,10 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
         } else if (dn->kind == NODE_TYPE_ALIAS && dn->as.type_alias.type == NODE_NONE) {
           char nm[160]; // opaque extern "C" handle: its real (unmangled) C name from the header, never `void`
           render_ident_src(cg_mod_src(c, d.module), ast_at_const(cg_mod_ast(c, d.module), dn->as.type_alias.name)->as.name.text, nm, sizeof nm);
+          buf_join3(out, cap, nm, SEP(decl), decl);
+        } else if (dn->kind == NODE_TYPE_ALIAS && !dn->as.type_alias.generics.len && cg_alias_extended(c, d.module, d.node)) {
+          char nm[160]; // nominal alias (`type Token = u64;` with an extend): its own mangled typedef name
+          render_qualified(c, d.module, dn->as.type_alias.name, nm, sizeof nm);
           buf_join3(out, cap, nm, SEP(decl), decl);
         } else if (dn->kind == NODE_TYPE_ALIAS && d.module == c->ast->module) {
           render_type_node(c, dn->as.type_alias.type, decl, out, cap); // transparent (same module)
@@ -3292,7 +3329,11 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
         render_modpfx(c, md.module, pfx, sizeof pfx);
         emit_cstr(c, pfx);
         if (td.node != NODE_NONE) { // `Type::method` -> `Target__method`; a `module::func` has no target type
-          emit_ident_mod(c, td.module, ast_at_const(cg_mod_ast(c, td.module), td.node)->as.aggregate.name);
+          const int bb = c->package ? package_builtin_of_decl(c->package, td.module, td.node) : -1;
+          if (bb >= 0) // a nominal alias base spells its own name; a builtin core decl its C builtin
+            emit_cstr(c, BUILTIN_NAMES[bb]);
+          else
+            emit_ident_mod(c, td.module, cg_decl_name_node(ast_at_const(cg_mod_ast(c, td.module), td.node)));
           emit(c, "__");
         }
       }
@@ -3451,7 +3492,18 @@ static void emit_call(Codegen *c, const NodeId id, const Node *n) {
           emit(c, "__auto_type %s = ", tres); // capture the result, then free the temp, then yield it
         }
       }
-      if (c->macro && base->kind == TYPE_GENERIC) {
+      // A method on a nominal alias (`extend Token` with `type Token = u64;`): the receiver lowers to the
+      // underlying builtin, but the method mangles by the alias's own name -- so anchor the symbol on the
+      // extend's target, not on `base`, and definition + call agree on `Token__method`.
+      const DefId xt = cg_method_extend_target(c, md);
+      const Node *const xtn = xt.node != NODE_NONE ? ast_at_const(cg_mod_ast(c, xt.module), xt.node) : NULL;
+      if (xtn && xtn->kind == NODE_TYPE_ALIAS) {
+        char pfx[64];
+        render_modpfx(c, md.module, pfx, sizeof pfx);
+        emit_cstr(c, pfx);
+        emit_ident_mod(c, xt.module, cg_decl_name_node(xtn));
+        emit(c, "__");
+      } else if (c->macro && base->kind == TYPE_GENERIC) {
         // A bound-method call on a generic param inside a generic macro template (`elem.clone()` where
         // `T: Clone`): the concrete arg is unknown here, so paste the param's mangle token with the method
         // to form the extend symbol at invocation time (`_SCM_T ## __clone` -> `Bar__clone`). The method must
@@ -6937,8 +6989,8 @@ static void function_name(Codegen *c, const NodeId fn, const DefId target, char 
     const int bb = c->package ? package_builtin_of_decl(c->package, target.module, target.node) : -1;
     if (bb >= 0) { // `extend i32 { .. }`: the target is a builtin, mangled by its own name (i32__<method>)
       k = buf_append(out, cap, k, BUILTIN_NAMES[bb]);
-    } else {
-      const Span ts = name_span_in(c, target.module, ast_at_const(cg_mod_ast(c, target.module), target.node)->as.aggregate.name);
+    } else { // struct/enum or a nominal alias (`extend Token`) -- mangled by the target's own name
+      const Span ts = name_span_in(c, target.module, cg_decl_name_node(ast_at_const(cg_mod_ast(c, target.module), target.node)));
       k += render_ident_src(cg_mod_src(c, target.module), ts, out + k, cap - k);
     }
     if (k + 2 < cap) {
@@ -9069,6 +9121,14 @@ static void phase_forward(Codegen *c) {
       emit(c, " ");
       emit_local_type_name(c, n->as.aggregate.name);
       emit(c, ";\n");
+    } else if (n->kind == NODE_TYPE_ALIAS && n->as.type_alias.type != NODE_NONE && !n->as.type_alias.generics.len &&
+               cg_alias_extended(c, c->ast->module, ids[i])) {
+      // A nominal value alias (`type Token = u64;` with an extend): a real `typedef <underlying> Token;`, so
+      // the name Token exists in C. Rendered from the underlying type node (never recurses into this alias).
+      char nm[160], d[256];
+      render_qualified(c, c->ast->module, n->as.type_alias.name, nm, sizeof nm);
+      render_type_node(c, n->as.type_alias.type, nm, d, sizeof d);
+      emit(c, "typedef %s;\n", d);
     }
   }
   emit_aggregate_specializations(c, false); // forward typedefs for generic struct instantiations
@@ -9734,7 +9794,7 @@ static void emit_assoc_consts(Codegen *c, const bool public_pass) {
         k = buf_append(nm, sizeof nm, k, BUILTIN_NAMES[bb]);
       else
         k += render_ident_src(cg_mod_src(c, target.module),
-                              name_span_in(c, target.module, ast_at_const(cg_mod_ast(c, target.module), target.node)->as.aggregate.name),
+                              name_span_in(c, target.module, cg_decl_name_node(ast_at_const(cg_mod_ast(c, target.module), target.node))),
                               nm + k, sizeof nm - k);
       k = buf_append(nm, sizeof nm, k, "__");
       render_ident(c, name_span(c, cn->as.const_def.name), nm + k, sizeof nm - k);

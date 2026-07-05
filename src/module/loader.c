@@ -505,6 +505,40 @@ NodeId package_prelude_lookup(const Package *p, const char *name, const size_t n
   return NODE_NONE;
 }
 
+size_t package_import_closure(const Package *p, const ModuleId mid, ModuleId *const out) {
+  const size_t n = p->count;
+  if ((size_t)mid >= n && (size_t)mid != n) // the standalone Ast (module == count) has no import decls to walk
+    return 0;
+  bool seen[n + 1];
+  memset(seen, 0, n + 1);
+  seen[mid] = true;
+  size_t count = 0, head = 0;
+  ModuleId cur = mid;
+  while (true) { // BFS: out[] doubles as the queue; `cur` starts it off without enqueuing mid itself
+    const Ast *const ast = (size_t)cur < n ? p->modules[cur].ast : NULL;
+    if (ast) {
+      const NodeList items = ast_at_const(ast, ast->root)->as.program.items;
+      const NodeId *const ids = ast_list(ast, items);
+      for (uint32_t i = 0; i < items.len; i++) {
+        const Node *const it = ast_at_const(ast, ids[i]);
+        if (it->kind != NODE_IMPORT)
+          continue;
+        char *const path = join_parts(ast, p->modules[cur].source, it->as.import_decl.path, "::");
+        const int c = package_find(p, path, strlen(path));
+        free(path);
+        if (c >= 0 && !seen[c]) {
+          seen[c] = true;
+          out[count++] = (ModuleId)c;
+        }
+      }
+    }
+    if (head >= count)
+      break;
+    cur = out[head++];
+  }
+  return count;
+}
+
 NodeId package_glob_lookup(const Package *p, const ModuleId mid, const char *name, const size_t name_len,
                            const bool want_type, ModuleId *const out_mid) {
   const size_t n = p->count;
