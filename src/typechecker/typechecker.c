@@ -260,6 +260,42 @@ static uint64_t bt_int_max(const BuiltinType b) {
   }
 }
 
+// The unsigned magnitude of integer literal node `v` (decimal/0x/0b/0o, `_` separators, suffix
+// excluded). False when the digits overflow u64 (check_literal diagnoses that separately).
+static bool tc_literal_u64(const TypeChecker *t, const Node *const v, uint64_t *const out) {
+  const Span lr = v->as.literal.raw;
+  uint32_t end = lr.end;
+  ast_numeric_suffix(t->source, lr.start, lr.end, &end);
+  const uint8_t *p = t->source + lr.start;
+  size_t len = end - lr.start;
+  unsigned base = 10;
+  if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'x') { base = 16, p += 2, len -= 2; }
+  else if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'b') { base = 2, p += 2, len -= 2; }
+  else if (len >= 2 && p[0] == '0' && (p[1] | 0x20) == 'o') { base = 8, p += 2, len -= 2; }
+  uint64_t acc = 0;
+  for (size_t i = 0; i < len; i++) {
+    const uint8_t ch = p[i];
+    if (ch == '_')
+      continue;
+    const unsigned d = ch <= '9' ? (unsigned)(ch - '0') : (unsigned)((ch | 0x20) - 'a' + 10);
+    if (d >= base || acc > (UINT64_MAX - d) / base)
+      return false;
+    acc = acc * base + d;
+  }
+  *out = acc;
+  return true;
+}
+
+// Does an integer literal of magnitude `mag` (negated by a `-` prefix when `neg`) fit builtin `b`?
+static bool tc_lit_in_range(const BuiltinType b, const uint64_t mag, const bool neg) {
+  const uint64_t mx = bt_int_max(b);
+  if (neg) {
+    const bool sgn = b == BT_I8 || b == BT_I16 || b == BT_I32 || b == BT_I64 || b == BT_ISIZE;
+    return sgn && (mx == 0 || mag <= mx + 1); // |min| = max + 1
+  }
+  return mx == 0 || mag <= mx;
+}
+
 // Implicit LOSSLESS numeric widening: same-signedness to a strictly wider integer, unsigned to a
 // strictly wider signed integer, and f32 -> f64. usize/isize stay explicit (platform-width), as do
 // narrowing, same-width sign changes, and int<->float (`as`).
@@ -926,9 +962,21 @@ static bool compatible(TypeChecker *t, const TypeId expected, const NodeId node)
           !(bt_is_int(et->as.builtin) || bt_is_float(et->as.builtin) || bt_is_complex(et->as.builtin)))
         return false;
       // Record the adaptation on the node: the literal IS the slot's type (`let y: u32 = 4294967254;`
-      // is a u32, not an over-range i32), so const-eval range-checks and folds it as such.
-      if (bt_is_int(et->as.builtin) && v == ast_at_const(t->ast, node))
-        ast_set_type(t->ast, node, expected);
+      // is a u32, not an over-range i32), so const-eval range-checks and folds it as such. A value the
+      // slot cannot hold (`let a: u8 = 999;`) is an error, not a silent wrap.
+      if (bt_is_int(et->as.builtin)) {
+        uint64_t mag;
+        const bool neg = v != ast_at_const(t->ast, node); // a `-literal` was unwrapped above
+        if (tc_literal_u64(t, v, &mag) && !tc_lit_in_range(et->as.builtin, mag, neg)) {
+          char tn[96];
+          render_type(t, expected, tn, sizeof tn);
+          const Span vsp = ast_at_const(t->ast, node)->span;
+          typechecker_errorf(t, vsp.start, vsp.end - vsp.start, "integer literal is out of range for '%s'", tn);
+          return true; // reported here: don't cascade a second "mismatched types"
+        }
+        if (!neg)
+          ast_set_type(t->ast, node, expected);
+      }
       return true;
     case CharacterLiteral: // an ASCII char literal fits any int slot too (`contains_byte('l')`), like `b'l'`
       return et->kind == TYPE_BUILTIN && bt_is_int(et->as.builtin);
@@ -3391,10 +3439,39 @@ static TypeId binary_numeric(
   }
   if (l == r)
     return l;
-  if (ast_at_const(t->ast, ln)->kind == NODE_LITERAL && !tc_literal_pinned(t, ast_at_const(t->ast, ln)))
+  // An adapting literal is RE-TYPED as the other operand: codegen suffixes it as that C type
+  // (a bare `3075809419` in u32 math would be C `long`, silently escaping the 32-bit wrap). A value
+  // the operand type cannot hold (`x_u8 + 999`) is an error, not a silent wrap.
+  if (ast_at_const(t->ast, ln)->kind == NODE_LITERAL && !tc_literal_pinned(t, ast_at_const(t->ast, ln))) {
+    if (is_int(t, r)) {
+      uint64_t mag;
+      if (tc_literal_u64(t, ast_at_const(t->ast, ln), &mag) &&
+          !tc_lit_in_range(ast_type_at(t->ast, r)->as.builtin, mag, false)) {
+        char tn[96];
+        render_type(t, r, tn, sizeof tn);
+        const Span lsp = ast_at_const(t->ast, ln)->span;
+        typechecker_errorf(t, lsp.start, lsp.end - lsp.start, "integer literal is out of range for '%s'", tn);
+      } else {
+        ast_set_type(t->ast, ln, r);
+      }
+    }
     return r; // l adapts to r (a suffixed literal is pinned and never adapts)
-  if (ast_at_const(t->ast, rn)->kind == NODE_LITERAL && !tc_literal_pinned(t, ast_at_const(t->ast, rn)))
+  }
+  if (ast_at_const(t->ast, rn)->kind == NODE_LITERAL && !tc_literal_pinned(t, ast_at_const(t->ast, rn))) {
+    if (is_int(t, l)) {
+      uint64_t mag;
+      if (tc_literal_u64(t, ast_at_const(t->ast, rn), &mag) &&
+          !tc_lit_in_range(ast_type_at(t->ast, l)->as.builtin, mag, false)) {
+        char tn[96];
+        render_type(t, l, tn, sizeof tn);
+        const Span rsp = ast_at_const(t->ast, rn)->span;
+        typechecker_errorf(t, rsp.start, rsp.end - rsp.start, "integer literal is out of range for '%s'", tn);
+      } else {
+        ast_set_type(t->ast, rn, l);
+      }
+    }
     return l; // r adapts to l
+  }
   if (bt_widens(bt_of(t, l), bt_of(t, r)))
     return r; // lossless widening also applies between operands: `x_u8 + y_i32` computes as i32
   if (bt_widens(bt_of(t, r), bt_of(t, l)))

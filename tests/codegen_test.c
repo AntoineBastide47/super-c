@@ -86,7 +86,7 @@ static void test_ranges(void) {
   expect_contains("inclusive range", RANGES, "for (int32_t i = 1; i <= 5; i++)");
   expect_contains("open-start range", RANGES, "for (int32_t i = 0; i < 4; i++)");
   expect_contains("open-end range", RANGES, "for (int32_t i = 100; ; i++)");
-  expect_contains("usize end range", "fn f(n: usize) void { for i in 0..n { } }\n", "for (size_t i = 0; i < n; i++)");
+  expect_contains("usize end range", "fn f(n: usize) void { for i in 0..n { } }\n", "for (size_t i = 0ULL; i < n; i++)");
   expect_contains("bare if lowers", RANGES, "if (i >= 103)");
   expect_contains("bare while lowers", RANGES, "while (s < 0)");
 }

@@ -1188,9 +1188,13 @@ static const char *ref_derefs(int d) {
 // Emit an integer/float literal, removing `_` separators and rewriting radix forms C can't read:
 // `0b…` → decimal, `0o…` → C octal `0…`, leading-zero decimals → stripped (else C reads octal).
 // A Super-C type suffix (`1u8`, `1.0f32`) is stripped and re-emitted as the C equivalent.
-static void emit_number(Codegen *c, const Span s, const TokenType tt) {
+// `rb` is the literal's CHECKED type (BT_COUNT when unknown): an unsuffixed literal is emitted with
+// that type's C suffix, so a `u32`-typed `2418620064` is `2418620064U` -- bare, C would type it
+// `long` and drag the surrounding arithmetic into signed 64-bit (UB on overflow, wrong comparisons).
+static void emit_number(Codegen *c, const Span s, const TokenType tt, const BuiltinType rb) {
   uint32_t sfx = s.end;
   const BuiltinType sb = ast_numeric_suffix(c->source, s.start, s.end, &sfx);
+  const BuiltinType eb = sb != BT_COUNT ? sb : tt == IntegerLiteral ? rb : BT_COUNT;
   char buf[256];
   size_t n = 0;
   for (uint32_t i = s.start; i < sfx && n < sizeof buf - 1; i++)
@@ -1204,7 +1208,9 @@ static void emit_number(Codegen *c, const Span s, const TokenType tt) {
       unsigned long long v = 0;
       for (size_t i = 2; i < n; i++)
         v = (v << 1) | (unsigned long long)(buf[i] - '0');
-      emit(c, "%llu", v);
+      // past i64 with no typed suffix: pin unsigned (else "implicitly unsigned" warning); a typed
+      // literal gets its C suffix from the switch below instead
+      emit(c, v > 0x7fffffffffffffffull && eb == BT_COUNT ? "%lluull" : "%llu", v);
     } else if (k == 'o' || k == 'O') {
       emit(c, "0%s", buf + 2);
     } else if (k == 'x' || k == 'X') {
@@ -1214,14 +1220,19 @@ static void emit_number(Codegen *c, const Span s, const TokenType tt) {
       while (i + 1 < n && buf[i] == '0')
         i++;
       emit_cstr(c, buf + i);
+      if (eb == BT_COUNT && strtoull(buf + i, NULL, 10) > 0x7fffffffffffffffull)
+        emit(c, "ull"); // a bare decimal past i64 would be "implicitly unsigned" (warning); say so
     }
+  } else if (tt == IntegerLiteral && eb == BT_COUNT && strtoull(buf, NULL, 10) > 0x7fffffffffffffffull) {
+    emit_cstr(c, buf);
+    emit(c, "ull");
   } else {
     emit_cstr(c, buf);
     const bool hexf = n > 2 && buf[0] == '0' && (buf[1] | 0x20) == 'x'; // a hex float's 'p' already floats it
     if (!hexf && (sb == BT_F32 || sb == BT_F64) && !memchr(buf, '.', n) && !memchr(buf, 'e', n) && !memchr(buf, 'E', n))
       emit(c, ".0"); // `1f32` must still read as a C floating constant
   }
-  switch (sb) { // C-side suffix so the constant carries its type without conversion warnings
+  switch (eb) { // C-side suffix so the constant carries its type without conversion warnings
     case BT_I64: case BT_ISIZE: emit(c, "LL"); break;
     case BT_U8: case BT_U16: case BT_U32: emit(c, "U"); break;
     case BT_U64: case BT_USIZE: emit(c, "ULL"); break;
@@ -1438,7 +1449,11 @@ static void emit_literal(Codegen *c, const NodeId id, const Node *n) {
       break;
     }
     default:
-      emit_number(c, s, n->as.literal.token_type);
+    {
+      const TypeId lt = subst_resolve(c, ast_type(c->ast, id));
+      const Ty *const lty = lt == TYPE_NONE ? NULL : ast_type_at(c->ast, lt);
+      emit_number(c, s, n->as.literal.token_type, lty && lty->kind == TYPE_BUILTIN ? lty->as.builtin : BT_COUNT);
+    }
       break;
   }
 }
@@ -3949,8 +3964,14 @@ static void emit_expr(Codegen *c, const NodeId id) {
           const Ty *const vt = v.type != TYPE_NONE ? ast_type_at(c->ast, v.type) : NULL;
           const BuiltinType vb = vt && vt->kind == TYPE_BUILTIN ? vt->as.builtin : BT_COUNT;
           const bool uns = vb == BT_U8 || vb == BT_U16 || vb == BT_U32 || vb == BT_U64 || vb == BT_USIZE;
+          // The C suffix follows the constant's TYPE, not its magnitude: a u32-typed 4294967255 must
+          // be `U` (unsigned int) -- `ull` would silently lift the surrounding math to 64 bits.
           if (uns)
-            emit(c, (uint64_t)v.i > 0x7fffffffull ? "%lluull" : "%llu", (unsigned long long)v.i);
+            emit(c, vb == BT_U64 || vb == BT_USIZE ? "%lluULL" : "%lluU", (unsigned long long)v.i);
+          else if (v.i == INT64_MIN) // `-9223372036854775808ll` is unary minus on an UNSIGNED literal: wrong type
+            emit(c, "(-9223372036854775807ll - 1)");
+          else if (vb == BT_I64 || vb == BT_ISIZE)
+            emit(c, "%lldLL", (long long)v.i);
           else
             emit(c, v.i > 0x7fffffffll || v.i < -0x80000000ll ? "%lldll" : "%lld", (long long)v.i);
           return;
@@ -5460,15 +5481,18 @@ static void cg_int_range(const BuiltinType b, long long *mn, long long *mx) {
   }
 }
 
-// Checked integer arithmetic for `+ - * / %`. Returns true if it emitted a (possibly checked) form; false
-// to let the caller emit the plain operator. Signed `+ - *` trap on overflow; integer `/ %` trap on
-// divide-by-zero; UNSIGNED WRAPS (no check -- the prelude's hashing/probing rely on it). In a constant
-// context the plain operator is emitted (kept a constant expression) and a literal-operand overflow /
-// divide-by-zero is a COMPILE-TIME error.
+// Checked integer arithmetic for `+ - * / % << >>`. Returns true if it emitted a (possibly checked)
+// form; false to let the caller emit the plain operator. Signed `+ - *` trap on overflow; integer
+// `/ %` trap on divide-by-zero and (signed) MIN/-1; shifts trap on a count outside the operand's
+// width and compute on the unsigned counterpart (both are UB in plain C); UNSIGNED `+ - *` WRAPS AT
+// ITS WIDTH (u8/u16 in uint32_t -- plain C would promote them to signed int, where `u16 * u16`
+// overflows: UB). In a constant context the plain operator is emitted (kept a constant expression)
+// and a literal-operand overflow / divide-by-zero / bad shift is a COMPILE-TIME error.
 static bool cg_emit_checked_arith(Codegen *c, const Node *const n, const NodeId id) {
   const TokenType op = n->as.binary.op;
   const bool add = op == Plus, sub = op == Minus, mul = op == Star, dv = op == Slash, rm = op == Percent;
-  if (!(add || sub || mul || dv || rm))
+  const bool shl = op == LeftShift, shr = op == RightShift;
+  if (!(add || sub || mul || dv || rm || shl || shr))
     return false;
   const TypeId rt = subst_resolve(c, ast_type(c->ast, id));
   const Ty *const ry = rt == TYPE_NONE ? NULL : ast_type_at(c->ast, rt);
@@ -5487,11 +5511,20 @@ static bool cg_emit_checked_arith(Codegen *c, const Node *const n, const NodeId 
   const Ty *const rtt = ast_type_at(c->ast, subst_resolve(c, ast_type(c->ast, R)));
   if (lt->kind != TYPE_BUILTIN || rtt->kind != TYPE_BUILTIN)
     return false;
+  const int bits = b == BT_I8 || b == BT_U8     ? 8
+                   : b == BT_I16 || b == BT_U16 ? 16
+                   : b == BT_I32 || b == BT_U32 ? 32
+                                                : 64;
   long lv, rv;
   if (cg_int_lit(c, L, &lv) && cg_int_lit(c, R, &rv)) { // both literal -> evaluate at compile time
     const char *bad = NULL;
     if ((dv || rm) && rv == 0) {
       bad = "constant division by zero";
+    } else if (shl || shr) {
+      if (rv < 0 || rv >= bits)
+        bad = "constant shift out of range";
+    } else if (sgn && (dv || rm) && rv == -1 && lv == INT64_MIN) {
+      bad = "constant arithmetic overflow"; // guarded here: computing it below would be UB in the compiler too
     } else if (sgn) {
       long long res = 0;
       bool ov = add   ? __builtin_saddll_overflow(lv, rv, &res)
@@ -5521,6 +5554,35 @@ static bool cg_emit_checked_arith(Codegen *c, const Node *const n, const NodeId 
     emit(c, ", &__sc_r)) { __sc_panic(\"arithmetic overflow\"); } __sc_r; })");
     return true;
   }
+  if (uns && (add || sub || mul) && bits < 32) {
+    // Sub-int unsigned arithmetic wraps AT ITS WIDTH: plain C promotes u8/u16 to (signed) int, where
+    // `u16 * u16` can overflow -- UB. Compute in uint32_t (defined) and truncate back down.
+    emit(c, "((%s)((uint32_t)", rts);
+    emit_expr(c, L);
+    emit(c, " %s (uint32_t)", add ? "+" : sub ? "-" : "*");
+    emit_expr(c, R);
+    emit(c, "))");
+    return true;
+  }
+  if (shl || shr) {
+    // A shift count >= the operand's width (or negative) is UB in plain C: trap it like an overflow.
+    // Left shifts compute on the unsigned counterpart (a negative signed lhs shifted left is UB) and
+    // truncate back, so overflowing VALUE bits are discarded; only the count traps.
+    const char *const uts = bits == 8 ? "uint8_t" : bits == 16 ? "uint16_t" : bits == 32 ? "uint32_t" : "uint64_t";
+    char a[32], s[32];
+    fresh(c, a, sizeof a);
+    fresh(c, s, sizeof s);
+    emit(c, "({ %s %s = ", rts, a);
+    emit_expr(c, L);
+    emit(c, "; int64_t %s = (int64_t)(", s);
+    emit_expr(c, R);
+    emit(c, "); if ((uint64_t)%s >= %d) { __sc_panic(\"shift out of range\"); } ", s, bits);
+    if (shl)
+      emit(c, "(%s)((%s)((%s)%s << %s)); })", rts, uts, uts, a, s);
+    else
+      emit(c, "(%s)(%s >> %s); })", rts, a, s); // >> on signed is arithmetic (sign-propagating)
+    return true;
+  }
   if (dv || rm) { // divide-by-zero trap for both signed and unsigned
     char a[32], d[32];
     fresh(c, a, sizeof a);
@@ -5529,10 +5591,15 @@ static bool cg_emit_checked_arith(Codegen *c, const Node *const n, const NodeId 
     emit_expr(c, L);
     emit(c, "; %s %s = ", rts, d);
     emit_expr(c, R);
-    emit(c, "; if (%s == 0) { __sc_panic(\"divide by zero\"); } (%s %s %s); })", d, a, dv ? "/" : "%", d);
+    emit(c, "; if (%s == 0) { __sc_panic(\"divide by zero\"); } ", d);
+    if (sgn) { // MIN / -1 (and MIN %% -1) overflow the type: UB in plain C, so trap like an overflow
+      const char *const mn = bits == 8 ? "INT8_MIN" : bits == 16 ? "INT16_MIN" : bits == 32 ? "INT32_MIN" : "INT64_MIN";
+      emit(c, "if (%s == -1 && %s == %s) { __sc_panic(\"arithmetic overflow\"); } ", d, a, mn);
+    }
+    emit(c, "(%s %s %s); })", a, dv ? "/" : "%", d);
     return true;
   }
-  return false; // unsigned + - * : plain (wraps)
+  return false; // unsigned (32-/64-bit) + - * : plain (wraps)
 }
 
 // `for i in lo..hi` -> a counting loop. A missing start counts from 0; a missing end runs
