@@ -29,7 +29,8 @@ struct Resolver {
     U32_Vec symbol_previous; // chain links parallel to symbols, encoded as index + 1
     U32_Vec scope_starts; // stack of symbols.len at each scope entry
     SymbolIndex symbol_index; // (namespace, name hash) -> newest matching symbol index + 1
-    NodeId current_self;  // type 'Self' refers to inside the current interface/extension (else NODE_NONE)
+    DefId current_self;   // decl 'Self' refers to inside the current interface/extension (else node NODE_NONE);
+                          // a full DefId: an extend target may resolve cross-module (imported type, builtin core decl)
     bool in_generic;      // resolving inside a generic fn/extend: closures here can't be monomorphized yet
     // Open closures, innermost last. A value ref binding below a closure's floor is a CAPTURE (copied
     // into its env by codegen): collected per closure (deduped, discovery order), committed to the node's
@@ -484,8 +485,8 @@ static void resolve_type(Resolver *r, const NodeId id) {
         const NodeId first = ast_list(r->ast, parts)[0];
         const Span name = name_span(r, first);
         if (span_is(r->source, name, "Self")) {
-          if (r->current_self != NODE_NONE)
-            ast_set_resolution(r->ast, id, r->current_self);
+          if (r->current_self.node != NODE_NONE)
+            ast_set_resolution_def(r->ast, id, r->current_self);
           else
             resolver_errorf(
                 r, name.start, name.end - name.start, "'Self' is only valid inside an interface or extension");
@@ -638,8 +639,8 @@ static void resolve_item(Resolver *r, const NodeId id) {
       scope_enter(r);
       declare_generics(r, n->as.interface_def.generics);
       resolve_bounds(r, n->as.interface_def.bounds);
-      const NodeId old_self = r->current_self;
-      r->current_self = id;
+      const DefId old_self = r->current_self;
+      r->current_self = (DefId){r->ast->module, id};
       resolve_associated_items(r, n->as.interface_def.items);
       r->current_self = old_self;
       scope_exit(r);
@@ -662,9 +663,15 @@ static void resolve_item(Resolver *r, const NodeId id) {
             ast_set_resolution_def(r->ast, target, (DefId){r->package->core_module, bd});
         }
       }
-      const NodeId old_self = r->current_self;
-      const NodeId resolved = target == NODE_NONE ? NODE_NONE : ast_resolution(r->ast, target);
-      r->current_self = resolved != NODE_NONE ? resolved : id;
+      // `extend Token { .. }` where `type Token = u64;`: the extend stays ANCHORED on the alias decl (its
+      // methods mangle `Token__*` and it emits a real `typedef uint64_t Token;`). The alias is transparent
+      // for VALUES -- dispatch peels it to the underlying type on the fly (tc_peel_target) so a `Token`- or
+      // `u64`-typed receiver finds these methods -- but nominal for NAMES, so definition and cross-module
+      // call agree on one C symbol. `Self` here resolves to the alias, so a `Self` return spells `Token`.
+      const DefId old_self = r->current_self;
+      const DefId resolved =
+          target == NODE_NONE ? (DefId){r->ast->module, NODE_NONE} : ast_resolution_def(r->ast, target);
+      r->current_self = resolved.node != NODE_NONE ? resolved : (DefId){r->ast->module, id};
       const bool saved_generic = r->in_generic;
       r->in_generic = saved_generic || n->as.extend_def.generics.len > 0; // methods inherit the extend's generics
       resolve_associated_items(r, n->as.extend_def.items);

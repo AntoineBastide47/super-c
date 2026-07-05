@@ -49,6 +49,8 @@ struct TypeChecker {
     uint32_t nclos;           // mutated capture is recorded (as `&mut`) on EVERY enclosing closure
     const Package *package;   // to follow imported decls into their origin module (NULL = no imports)
     unsigned alias_depth;     // type-alias expansion depth, bounded so a cyclic alias diagnoses instead of recursing forever
+    ModuleId *ext_scope;      // extension-search scopes: [current module, its transitive imports...]; built lazily
+    int n_ext_scope;          // entries in ext_scope, or -1 until built
     TypeId expected;          // target type of the expression being checked (let annotation / return / assignment RHS), or TYPE_NONE; consumed once by check_expr
     NodeId moved[1024];       // Free-typed bindings moved out of the current function; using one again is an error
     uint32_t nmoved;          // (reset per function; best-effort linear move/use-after-move analysis)
@@ -194,6 +196,7 @@ TypeChecker *typechecker_new(Ast *ast, const char *source, const size_t len, con
   t->source = (const uint8_t *)source;
   t->len = len;
   t->package = package;
+  t->n_ext_scope = -1;
   ERRORS_INIT(t);
   return t;
 }
@@ -202,6 +205,7 @@ void typechecker_free(TypeChecker **t) {
   if (!t || !*t)
     return;
   ast_free(&(*t)->ast);
+  free((*t)->ext_scope);
   TcDepthMap_deinit(&(*t)->binding_depth);
   ERRORS_DEINIT(t);
   free(*t);
@@ -1073,14 +1077,64 @@ static NodeId find_member_cstr(TypeChecker *t, const ModuleId m, const NodeId de
   return NODE_NONE;
 }
 
+// The scopes that may hold an extension visible at the current check site: the current module, then its
+// transitive imports (imports are public and C-style, so a module's extensions travel with it like any
+// other name). Built once per run. Callers iterate the type's HOME module first -- it wins ties -- then
+// these, skipping the home. That makes `extend Token { .. }` in an imported module (an alias of u64, so
+// the extend targets u64's core decl) reachable from every importer.
+static int ext_scopes(TypeChecker *t, const ModuleId **out) {
+  if (t->n_ext_scope < 0) {
+    const size_t cap = 1 + (t->package ? t->package->count : 0);
+    t->ext_scope = malloc(cap * sizeof *t->ext_scope);
+    if (!t->ext_scope)
+      oom();
+    t->ext_scope[0] = t->ast->module;
+    t->n_ext_scope =
+        1 + (t->package ? (int)package_import_closure(t->package, t->ast->module, t->ext_scope + 1) : 0);
+  }
+  *out = t->ext_scope;
+  return t->n_ext_scope;
+}
+
 // An associated constant `Type::NAME`: a `const` item in a non-generic extend of (m, decl) -- searched
-// in the type's home module, then the current module (a local extension). A foreign extend's const must
-// be `pub` to be seen. {_, NODE_NONE} if absent.
+// The type-identity an extend's target dispatches on. Usually the target decl itself, but a transparent
+// alias (`extend Token` with `type Token = u64;`) dispatches on its UNDERLYING type -- a builtin's core
+// decl, or the struct/enum/instance it lowers to -- so a `Token`- or plain-`u64`-typed receiver matches
+// it. The extend keeps its own (alias) identity for mangling; only method LOOKUP peels. Opaque/generic
+// aliases keep their nominal identity (no body to lower to).
+static DefId tc_peel_target(TypeChecker *t, const DefId tg) {
+  if (tg.node == NODE_NONE)
+    return tg;
+  const Node *const dn = ast_at_const(mod_ast(t, tg.module), tg.node);
+  if (dn->kind != NODE_TYPE_ALIAS || dn->as.type_alias.type == NODE_NONE || dn->as.type_alias.generics.len)
+    return tg;
+  const Ty *const ty = ast_type_at(t->ast, named_type_of(t, tg.module, tg.node));
+  switch (ty->kind) {
+    case TYPE_BUILTIN: {
+      const NodeId bd = t->package ? package_builtin_decl(t->package, ty->as.builtin) : NODE_NONE;
+      return bd != NODE_NONE ? (DefId){t->package->core_module, bd} : tg;
+    }
+    case TYPE_STRUCT:
+    case TYPE_ENUM:
+      return (DefId){ty->module, ty->as.decl};
+    case TYPE_INSTANCE: {
+      const TyInstance *const it = ast_instance(t->ast, ty->as.inst);
+      return (DefId){it->module, it->decl};
+    }
+    default:
+      return tg;
+  }
+}
+
+// in the type's home module, then the current module and its imports (ext_scopes). A foreign extend's
+// const must be `pub` to be seen. {_, NODE_NONE} if absent.
 static DefId find_assoc_const(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name) {
-  const ModuleId scopes[2] = {m, t->ast->module};
-  const int ns = m == t->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId sm = scopes[s];
+  const ModuleId *imp;
+  const int ni = ext_scopes(t, &imp);
+  for (int s = -1; s < ni; s++) {
+    const ModuleId sm = s < 0 ? m : imp[s];
+    if (s >= 0 && sm == m)
+      continue;
     Ast *const a = mod_ast(t, sm);
     const NodeList items = ast_at_const(a, a->root)->as.program.items;
     const NodeId *const ids = ast_list(a, items);
@@ -1088,7 +1142,7 @@ static DefId find_assoc_const(TypeChecker *t, const ModuleId m, const NodeId dec
       const Node *const it = ast_at_const(a, ids[i]);
       if (it->kind != NODE_EXTEND || it->as.extend_def.generics.len)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      const DefId tg = tc_peel_target(t, ast_resolution_def(a, it->as.extend_def.target_type));
       if (tg.module != m || tg.node != decl)
         continue;
       const NodeId *const mids = ast_list(a, it->as.extend_def.items);
@@ -1113,10 +1167,12 @@ static DefId find_assoc_const(TypeChecker *t, const ModuleId m, const NodeId dec
 // mangled by this module). Matches the method name by span (`name`) when `lit` is NULL, else against the
 // C-string `lit`. Marks the resolved method used (demand-driven emission). {_, NODE_NONE} if not found.
 static DefId find_method_impl(TypeChecker *t, const ModuleId m, const NodeId decl, const Span name, const char *const lit) {
-  const ModuleId scopes[2] = {m, t->ast->module};
-  const int ns = m == t->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId mm = scopes[s];
+  const ModuleId *imp;
+  const int ni = ext_scopes(t, &imp);
+  for (int s = -1; s < ni; s++) {
+    const ModuleId mm = s < 0 ? m : imp[s];
+    if (s >= 0 && mm == m)
+      continue;
     Ast *const a = mod_ast(t, mm);
     const NodeList items = ast_at_const(a, a->root)->as.program.items;
     const NodeId *const ids = ast_list(a, items);
@@ -1124,7 +1180,7 @@ static DefId find_method_impl(TypeChecker *t, const ModuleId m, const NodeId dec
       const Node *const it = ast_at_const(a, ids[i]);
       if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      const DefId tg = tc_peel_target(t, ast_resolution_def(a, it->as.extend_def.target_type));
       if (tg.module != m || tg.node != decl)
         continue;
       const NodeList ms = it->as.extend_def.items;
@@ -1208,10 +1264,12 @@ static DefId tc_find_from_for(TypeChecker *t, const TypeId target, const TypeId 
     return (DefId){0, NODE_NONE};
   const ModuleId m = ty->module;
   const NodeId decl = ty->as.decl;
-  const ModuleId scopes[2] = {m, t->ast->module};
-  const int ns = m == t->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId mm = scopes[s];
+  const ModuleId *imp;
+  const int ni = ext_scopes(t, &imp);
+  for (int s = -1; s < ni; s++) {
+    const ModuleId mm = s < 0 ? m : imp[s];
+    if (s >= 0 && mm == m)
+      continue;
     Ast *const a = mod_ast(t, mm);
     const NodeList items = ast_at_const(a, a->root)->as.program.items;
     const NodeId *const ids = ast_list(a, items);
@@ -1219,7 +1277,7 @@ static DefId tc_find_from_for(TypeChecker *t, const TypeId target, const TypeId 
       const Node *const it = ast_at_const(a, ids[i]);
       if (it->kind != NODE_EXTEND || it->as.extend_def.target_type == NODE_NONE || it->as.extend_def.generics.len)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      const DefId tg = tc_peel_target(t, ast_resolution_def(a, it->as.extend_def.target_type));
       if (tg.module != m || tg.node != decl)
         continue;
       const NodeList ms = it->as.extend_def.items;
@@ -1276,10 +1334,12 @@ static DefId find_interface_method(TypeChecker *t, const ModuleId m, const NodeI
 // The interface may live in ANY module: the module holding the extend synthesizes `tdecl__name` by
 // sourcing the default body from the interface's Ast (emit_default_methods' owner-Ast swap).
 static DefId find_default_method(TypeChecker *t, const ModuleId tmod, const NodeId tdecl, const Span name) {
-  const ModuleId scopes[2] = {tmod, t->ast->module};
-  const int ns = tmod == t->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId m = scopes[s];
+  const ModuleId *imp;
+  const int ni = ext_scopes(t, &imp);
+  for (int s = -1; s < ni; s++) {
+    const ModuleId m = s < 0 ? tmod : imp[s];
+    if (s >= 0 && m == tmod)
+      continue;
     Ast *const a = mod_ast(t, m);
     const NodeList items = ast_at_const(a, a->root)->as.program.items;
     const NodeId *const ids = ast_list(a, items);
@@ -1287,7 +1347,7 @@ static DefId find_default_method(TypeChecker *t, const ModuleId tmod, const Node
       const Node *const it = ast_at_const(a, ids[i]);
       if (it->kind != NODE_EXTEND || it->as.extend_def.interface_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      const DefId tg = tc_peel_target(t, ast_resolution_def(a, it->as.extend_def.target_type));
       if (tg.module != tmod || tg.node != tdecl)
         continue;
       const DefId iff = ast_resolution_def(a, it->as.extend_def.interface_type);
@@ -1345,10 +1405,12 @@ static bool tc_type_is_free(TypeChecker *t, const TypeId ty) {
   }
   if (!aggregate_of(t, strip(t, ty), &om, &od, gp, ga, &gn))
     return false;
-  const ModuleId scopes[2] = {om, t->ast->module};
-  const int ns = om == t->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId m = scopes[s];
+  const ModuleId *imp;
+  const int ni = ext_scopes(t, &imp);
+  for (int s = -1; s < ni; s++) {
+    const ModuleId m = s < 0 ? om : imp[s];
+    if (s >= 0 && m == om)
+      continue;
     Ast *const a = mod_ast(t, m);
     const NodeList items = ast_at_const(a, a->root)->as.program.items;
     const NodeId *const ids = ast_list(a, items);
@@ -1356,7 +1418,7 @@ static bool tc_type_is_free(TypeChecker *t, const TypeId ty) {
       const Node *const it = ast_at_const(a, ids[i]);
       if (it->kind != NODE_EXTEND || it->as.extend_def.interface_type == NODE_NONE || it->as.extend_def.target_type == NODE_NONE)
         continue;
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      const DefId tg = tc_peel_target(t, ast_resolution_def(a, it->as.extend_def.target_type));
       if (tg.module != om || tg.node != od)
         continue;
       const DefId tr = ast_resolution_def(a, it->as.extend_def.interface_type);
@@ -2307,10 +2369,12 @@ static bool tc_param_bound_provides(TypeChecker *t, const ModuleId pmod, const N
 // NODE_NONE if absent. *imod receives the extend's module.
 static NodeId find_extend_as(TypeChecker *t, const ModuleId tmod, const NodeId tdecl, const DefId iface,
                            ModuleId *const imod) {
-  const ModuleId scopes[2] = {tmod, t->ast->module};
-  const int ns = tmod == t->ast->module ? 1 : 2;
-  for (int s = 0; s < ns; s++) {
-    const ModuleId m = scopes[s];
+  const ModuleId *imp;
+  const int ni = ext_scopes(t, &imp);
+  for (int s = -1; s < ni; s++) {
+    const ModuleId m = s < 0 ? tmod : imp[s];
+    if (s >= 0 && m == tmod)
+      continue;
     Ast *const a = mod_ast(t, m);
     const NodeList items = ast_at_const(a, a->root)->as.program.items;
     const NodeId *const ids = ast_list(a, items);
@@ -2319,7 +2383,7 @@ static NodeId find_extend_as(TypeChecker *t, const ModuleId tmod, const NodeId t
       if (it->kind != NODE_EXTEND || it->as.extend_def.interface_type == NODE_NONE || it->as.extend_def.target_type == NODE_NONE)
         continue;
       const DefId tr = ast_resolution_def(a, it->as.extend_def.interface_type);
-      const DefId tg = ast_resolution_def(a, it->as.extend_def.target_type);
+      const DefId tg = tc_peel_target(t, ast_resolution_def(a, it->as.extend_def.target_type));
       if (tr.module == iface.module && tr.node == iface.node && tg.module == tmod && tg.node == tdecl) {
         *imod = m;
         return ids[i];
@@ -3918,6 +3982,36 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
     const DefId b = ast_resolution_def(t->ast, obj); // carries the module too (a prelude type isn't local)
     bmod = b.module;
     bdecl = b.node;
+    // A builtin name as a `::` base (`i32::MAX`, `u64::max(..)`) is not a name binding: map it to the
+    // builtin's synthetic core decl, whose extends (`extend i32 { .. }`) hold the methods and consts.
+    if (bdecl == NODE_NONE && t->package) {
+      const int bb = builtin_of(t->source, on->span);
+      const NodeId bnd = bb >= 0 ? package_builtin_decl(t->package, (BuiltinType)bb) : NODE_NONE;
+      if (bnd != NODE_NONE) {
+        bmod = t->package->core_module;
+        bdecl = bnd;
+      }
+    }
+    // A transparent alias as a `::` base (`Token::new` where `type Token = u64;`): lower it and use the
+    // underlying type's decl, matching how the alias's own extends resolved their target. Opaque aliases
+    // keep their own identity and fall through unchanged.
+    if (bdecl != NODE_NONE && ast_at_const(mod_ast(t, bmod), bdecl)->kind == NODE_TYPE_ALIAS) {
+      const TypeId at = named_type_of(t, bmod, bdecl);
+      const Ty *const aty = at == TYPE_NONE || at == TYPE_ERROR ? NULL : ast_type_at(t->ast, at);
+      if (aty && aty->kind == TYPE_BUILTIN && t->package) {
+        bmod = t->package->core_module;
+        bdecl = package_builtin_decl(t->package, aty->as.builtin);
+      } else if (aty && (aty->kind == TYPE_STRUCT || aty->kind == TYPE_ENUM)) {
+        bmod = aty->module;
+        bdecl = aty->as.decl;
+      } else if (aty && aty->kind == TYPE_INSTANCE) {
+        const TyInstance *const ai = ast_instance(t->ast, aty->as.inst);
+        bmod = ai->module;
+        bdecl = ai->decl;
+        inst_ty = at;
+        ast_set_type(t->ast, obj, at);
+      }
+    }
     // A bare all-defaulted generic name as a `::` base (`String::from_str`) denotes its defaulted instance
     // (`String<Global>`): record that instance as the base's type so the assoc call substitutes the extend's
     // generics and codegen mangles it as `String__Global__from_str`.
@@ -3942,6 +4036,9 @@ static TypeId check_path_member(TypeChecker *t, const Node *const n, const NodeI
       bmod = it->module;
       bdecl = it->decl;
       inst_ty = bt;
+    } else if (ty->kind == TYPE_BUILTIN && t->package) { // `mod::Token::new` with `type Token = u64;`
+      bmod = t->package->core_module;
+      bdecl = package_builtin_decl(t->package, ty->as.builtin);
     } else {
       bmod = ty->module;
       bdecl = bt != TYPE_NONE && (ty->kind == TYPE_STRUCT || ty->kind == TYPE_ENUM) ? ty->as.decl : NODE_NONE;

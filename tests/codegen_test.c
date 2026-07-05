@@ -238,6 +238,26 @@ static void test_constness(void) {
 }
 
 // Enum lowering: payload-less -> a plain C enum; a payload-bearing enum -> a tagged union.
+// A value alias with an extend is a NOMINAL C typedef: `type Token = u64;` emits `typedef uint64_t Token;`,
+// its methods mangle `Token__*` (never `u64__*`), a `Self` return spells `Token`, and a call on the alias
+// value resolves to the same `Token__*` symbol -- so definition and call agree (the cross-module link bug).
+static void test_alias_extend(void) {
+  static const char *const A =
+      "pub type Token = u64;\n"
+      "extend Token {\n"
+      "  pub fn new(v: u32) Token { return v as u64; }\n"
+      "  pub fn start(self: Self) u32 { return self as u32; }\n"
+      "  pub fn next(self: Self) Token { return Token::new(self.start() + 1); }\n"
+      "}\n"
+      "fn main() i32 { let t = Token::new(3); let u = t.next(); return u.start() as i32; }\n";
+  expect_contains("value alias emits a named typedef", A, "typedef uint64_t Token;");
+  expect_contains("alias method mangles by the alias name", A, "Token Token__new(");
+  expect_contains("Self return spells the alias", A, "uint32_t Token__start(const Token self)");
+  expect_contains("method call resolves to the alias symbol", A, "Token__start(");
+  expect_absent("no method dissolves into the underlying builtin", A, "u64__start");
+  expect_absent("no constructor dissolves into the underlying builtin", A, "u64__new");
+}
+
 static void test_enums(void) {
   static const char *const PLAIN = "enum Color { Red, Green, Blue, }\nfn f(c: Color) i32 { return 0; }\n";
   expect_contains("payload-less enum is a C enum", PLAIN, "Color_Red");
@@ -428,6 +448,7 @@ int main(void) {
   test_constness();
   test_binding_constness();
   test_enums();
+  test_alias_extend();
   test_if_expression();
   test_array_literals();
   test_multi_return();

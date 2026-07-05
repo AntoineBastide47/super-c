@@ -513,6 +513,27 @@ static void test_ctor_inference(void) {
       42, ""); // len 2 + 30 + 9 + 1
 }
 
+// `extend Alias` where the alias is transparent: methods land on the underlying type (a builtin's
+// synthetic core decl here), `Self` spells the C builtin, and `Alias::assoc(..)` mangles/dispatches
+// like a direct builtin extend -- the packed-token shape the selfhost lexer uses.
+static void test_alias_extend(void) {
+  sc_run_program(
+      "extend an alias of u64: packed-token methods",
+      PRE "pub type Token = u64;\n"
+          "extend Token {\n"
+          "  pub fn new(start: u32, len: u32) Token { return (start as u64) | ((len as u64) << 32); }\n"
+          "  pub fn start(self: Self) u32 { return self as u32; }\n"
+          "  pub fn len(self: Self) u32 { return ((self >> 32) & 0xFFFFFF) as u32; }\n"
+          "  pub fn end(self: Self) u32 { return self.start() + self.len(); }\n"
+          "}\n"
+          "fn main() i32 {\n"
+          "  let t = Token::new(30, 5);\n"
+          "  let raw: u64 = t;\n"
+          "  unsafe exit((t.end() + raw.len() + u64::max(1, 2) as u32) as i32);\n"
+          "}\n",
+      42, ""); // end 35 + len 5 + max 2
+}
+
 static void test_field_vs_method(void) {
   // `s.len` (field read) and `s.len()` (method call) are distinct even when they share a name:
   // a bare member access resolves field-first, a call callee resolves method-first.
@@ -2484,7 +2505,7 @@ int main(void) {
       test_opaque_extern,      test_variadics,            test_complex,
       test_atomics,            test_tuple_destructure,    test_enums,
       test_mut_match_binding,  test_structs_and_methods,  test_let_owning_mut,
-      test_field_vs_method,    test_deref,                test_ctor_inference,
+      test_field_vs_method,    test_deref,                test_ctor_inference,      test_alias_extend,
       test_generic_self_receiver, test_pointers,
       test_str,                test_misc,
   };

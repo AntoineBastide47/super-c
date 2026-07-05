@@ -935,6 +935,36 @@ static void test_deref(void) {
                "cannot call a by-value 'self' method through auto-deref");
 }
 
+// A transparent alias is the underlying type, so `extend Alias { .. }` attaches its methods to that
+// type (an alias of a builtin targets the builtin's synthetic core decl), `Self` inside lowers to it,
+// and `Alias::assoc(..)` / `u64::method(..)` path bases resolve through it.
+static void test_alias_extend(void) {
+  expect_ok("extend an alias of a builtin: methods, Self, assoc call",
+            "pub type Token = u64;\n"
+            "extend Token {\n"
+            "  pub fn new(start: u32, len: u32) Token { return (start as u64) | ((len as u64) << 32); }\n"
+            "  pub fn start(self: Self) u32 { return self as u32; }\n"
+            "  pub fn len(self: Self) u32 { return ((self >> 32) & 0xFFFFFF) as u32; }\n"
+            "  pub fn end(self: Self) u32 { return self.start() + self.len(); }\n"
+            "}\n"
+            "fn main() i32 {\n"
+            "  let t = Token::new(3, 5);\n"
+            "  let raw: u64 = t;\n" // the alias is transparent: the methods ride plain u64 too
+            "  return (t.end() + raw.start()) as i32 - 11;\n"
+            "}\n");
+  expect_ok("extend an alias of a struct targets the struct",
+            "struct P { pub x: i32 }\n"
+            "pub type Q = P;\n"
+            "extend Q { pub fn get(self: &Self) i32 { return self.x; } }\n"
+            "fn main() i32 { let p = P { x: 7 }; return p.get() - 7; }\n");
+  expect_ok("builtin name as a '::' base",
+            "fn main() i32 { return u64::max(1, 2) as i32 - 2; }\n");
+  expect_error("unknown methods through an alias still diagnose on the underlying type",
+               "pub type Token = u64;\n"
+               "fn main() i32 { let t: Token = 1; return t.missing(); }\n",
+               "no field or method 'missing' on 'u64'");
+}
+
 static void test_assert_builtins(void) {
   expect_ok("assert args are borrowed, not moved",
             "fn main() i32 {\n"
@@ -1194,6 +1224,7 @@ int main(void) {
   test_question_error_conversion();
   test_labeled_loops();
   test_deref();
+  test_alias_extend();
   test_assert_builtins();
   test_visibility_of_test_fns();
   test_iface_assoc_generic_targets();
