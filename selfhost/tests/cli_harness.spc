@@ -20,7 +20,7 @@ pub struct CliResult { pub exit: i32, pub out: *mut char }
 extend CliResult {
     pub fn out_has(self: &CliResult, needle: str) bool {
         if self.out == null { return false; }
-        return unsafe cstring::strstr(self.out as *const char, needle.ptr as *const char) != null;
+        return unsafe cstring::strstr(self.out, needle.ptr as *const char) != null;
     }
     pub fn free(self: &mut CliResult) void {
         if self.out != null { unsafe stdlib::free(self.out as *mut void); self.out = null; }
@@ -100,7 +100,7 @@ extend Proj {
         unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/%s".ptr as *const char, self.rootp(), rel.ptr as *const char);
         let f = unsafe stdio::fopen((&path.b[0]) as *const char, "w".ptr as *const char);
         if f != null {
-            if content.len > 0 { let _ = unsafe stdio::fwrite(content.ptr as *const void, 1, content.len, f); }
+            if content.len > 0 { let _ = unsafe stdio::fwrite(content.ptr, 1, content.len, f); }
             unsafe stdio::fclose(f);
         }
     }
@@ -166,7 +166,7 @@ extend Proj {
         unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/build/%s".ptr as *const char, self.rootp(), rel.ptr as *const char);
         let buf = slurp((&path.b[0]) as *const char);
         if buf == null { return false; }
-        let found = unsafe cstring::strstr(buf as *const char, needle.ptr as *const char) != null;
+        let found = unsafe cstring::strstr(buf, needle.ptr as *const char) != null;
         unsafe stdlib::free(buf as *mut void);
         return found;
     }

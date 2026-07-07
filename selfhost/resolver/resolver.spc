@@ -69,14 +69,14 @@ fn name_hash(src: *const u8, s: tok::Span) u32 {
 fn span_eq(src: *const u8, a: tok::Span, b: tok::Span) bool {
     let la = a.end - a.start;
     if la != b.end - b.start { return false; }
-    return unsafe cstring::memcmp((src + a.start as usize) as *const void,
-                                  (src + b.start as usize) as *const void, la as usize) == 0;
+    return unsafe cstring::memcmp((src + a.start as usize),
+                                  (src + b.start as usize), la as usize) == 0;
 }
 
 fn span_is(src: *const u8, s: tok::Span, lit: *const char) bool {
     let n = unsafe cstring::strlen(lit);
     if (s.end - s.start) as usize != n { return false; }
-    return unsafe cstring::memcmp((src + s.start as usize) as *const void, lit as *const void, n) == 0;
+    return unsafe cstring::memcmp((src + s.start as usize), lit, n) == 0;
 }
 
 // The BuiltinType index of name `s` (matching ast's enum order), or -1. Pointer/reference forms wrap one
@@ -229,7 +229,7 @@ extend Resolver {
             }
             let s = self.name_span(unsafe seg_ids[i as usize]);
             let l = (s.end - s.start) as usize;
-            unsafe cstring::memcpy((out + at) as *mut void, (self.source + s.start as usize) as *const void, l);
+            unsafe cstring::memcpy((out + at) as *mut void, (self.source + s.start as usize), l);
             at = at + l;
             i = i + 1;
         }
@@ -243,7 +243,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
         let buf = self.join_segs(ids, parts.len);
-        let m = pkg.find(buf as *const char, unsafe cstring::strlen(buf as *const char));
+        let m = pkg.find(buf, unsafe cstring::strlen(buf));
         unsafe stdlib::free(buf as *mut void);
         return m;
     }
@@ -283,7 +283,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
         let buf = self.join_segs(ids, parts.len - 1); // module = every segment but the last
-        let m = pkg.find(buf as *const char, unsafe cstring::strlen(buf as *const char));
+        let m = pkg.find(buf, unsafe cstring::strlen(buf));
         unsafe stdlib::free(buf as *mut void);
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize] };
@@ -386,8 +386,8 @@ extend Resolver {
         let mut m = nn - 1; // longest module prefix leaving >=1 trailing segment
         while m >= 1 && !done {
             let buf = self.join_segs(seg.as_ptr(), m);
-            let len = unsafe cstring::strlen(buf as *const char);
-            let found = pkg.find(buf as *const char, len);
+            let len = unsafe cstring::strlen(buf);
+            let found = pkg.find(buf, len);
             if found >= 0 {
                 let mid = found as ModuleId;
                 if nn - m == 1 { // module::decl -- a function (preferred) or type
@@ -401,7 +401,7 @@ extend Resolver {
                     } else {
                         self.errors.emitf(dn.start, dn.end - dn.start,
                                           "no public item '%.*s' in module '%s'".ptr as *const char,
-                                          dl as i32, dnm, buf as *const char);
+                                          dl as i32, dnm, buf);
                         self.errors.notef("the module was found, but this item is missing or not public".ptr as *const char);
                     }
                     handled = true;
@@ -660,101 +660,104 @@ extend Resolver {
     }
 
     fn resolve_associated_items(self: &mut Self, items: NodeList) void {
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let iid = self.child(items, i);
-            let kind = self.ast.at_const(iid).kind;
-            if kind == NodeKind::NODE_FUNCTION {
-                self.resolve_function(iid);
-            } else if kind == NodeKind::NODE_TYPE_ALIAS {
-                self.resolve_type_alias(iid);
-            } else if kind == NodeKind::NODE_CONST {
-                let cd = self.ast.at_const(iid).as_data.const_def;
-                self.resolve_type(cd.ty);
-                self.resolve_expr(cd.value);
-            }
-            i = i + 1;
+            switch self.ast.at_const(iid).kind {
+                NODE_FUNCTION => { self.resolve_function(iid); },
+                NODE_TYPE_ALIAS => { self.resolve_type_alias(iid); },
+                NODE_CONST => {
+                    let cd = self.ast.at_const(iid).as_data.const_def;
+                    self.resolve_type(cd.ty);
+                    self.resolve_expr(cd.value);
+                },
+                _ => {},
+            };
         }
     }
 
     fn resolve_item(self: &mut Self, id: NodeId) void {
         let kind = self.ast.at_const(id).kind;
-        if kind == NodeKind::NODE_FUNCTION {
-            self.resolve_function(id);
-        } else if kind == NodeKind::NODE_STRUCT || kind == NodeKind::NODE_ENUM {
-            let ag = self.ast.at_const(id).as_data.aggregate;
-            self.scope_enter();
-            self.declare_generics(ag.generics);
-            if ag.is_tuple { // tuple struct: members ARE type nodes
-                let mut i: u32 = 0;
-                while i < ag.members.len { let mid = self.child(ag.members, i); self.resolve_type(mid); i = i + 1; }
-            } else {
-                self.resolve_members(ag.members);
-            }
-            self.scope_exit();
-        } else if kind == NodeKind::NODE_INTERFACE {
-            let it = self.ast.at_const(id).as_data.interface_def;
-            self.scope_enter();
-            self.declare_generics(it.generics);
-            self.resolve_bounds(it.bounds);
-            let old_self = self.current_self;
-            self.current_self = DefId { module: self.ast.module, node: id };
-            self.resolve_associated_items(it.items);
-            self.current_self = old_self;
-            self.scope_exit();
-        } else if kind == NodeKind::NODE_EXTEND {
-            let ex = self.ast.at_const(id).as_data.extend_def;
-            self.scope_enter();
-            self.declare_generics(ex.generics);
-            self.resolve_type(ex.target_type);
-            self.resolve_type(ex.interface_type);
-            // `extend i32 { .. }`: a builtin target is not a name binding. Point it at the builtin's synthetic
-            // core decl so this extend matches `i32` receivers like any extension.
-            if ex.target_type != NODE_NONE && self.package != null
-                && self.ast.resolution(ex.target_type) == NODE_NONE {
-                let tk = self.ast.at_const(ex.target_type).kind;
-                if tk == NodeKind::NODE_TYPE_PATH {
-                    let tparts = self.ast.at_const(ex.target_type).as_data.type_path.parts;
-                    if tparts.len == 1 {
-                        let seg0 = self.child(tparts, 0);
-                        let b = builtin_index(self.source, self.name_span(seg0));
-                        let pkg = unsafe &*self.package;
-                        let mut bd = NODE_NONE;
-                        if b >= 0 { bd = pkg.builtin_decl(b as BuiltinType); }
-                        if bd != NODE_NONE {
-                            self.ast.set_resolution_def(ex.target_type, DefId { module: pkg.core_module, node: bd });
+        switch kind {
+            NODE_FUNCTION => { self.resolve_function(id); },
+            NODE_STRUCT | NODE_ENUM => {
+                let ag = self.ast.at_const(id).as_data.aggregate;
+                self.scope_enter();
+                self.declare_generics(ag.generics);
+                if ag.is_tuple { // tuple struct: members ARE type nodes
+                    for i in 0..ag.members.len { let mid = self.child(ag.members, i); self.resolve_type(mid); }
+                } else {
+                    self.resolve_members(ag.members);
+                }
+                self.scope_exit();
+            },
+            NODE_INTERFACE => {
+                let it = self.ast.at_const(id).as_data.interface_def;
+                self.scope_enter();
+                self.declare_generics(it.generics);
+                self.resolve_bounds(it.bounds);
+                let old_self = self.current_self;
+                self.current_self = DefId { module: self.ast.module, node: id };
+                self.resolve_associated_items(it.items);
+                self.current_self = old_self;
+                self.scope_exit();
+            },
+            NODE_EXTEND => {
+                let ex = self.ast.at_const(id).as_data.extend_def;
+                self.scope_enter();
+                self.declare_generics(ex.generics);
+                self.resolve_type(ex.target_type);
+                self.resolve_type(ex.interface_type);
+                // `extend i32 { .. }`: a builtin target is not a name binding. Point it at the builtin's synthetic
+                // core decl so this extend matches `i32` receivers like any extension.
+                if ex.target_type != NODE_NONE && self.package != null
+                    && self.ast.resolution(ex.target_type) == NODE_NONE {
+                    let tk = self.ast.at_const(ex.target_type).kind;
+                    if tk == NodeKind::NODE_TYPE_PATH {
+                        let tparts = self.ast.at_const(ex.target_type).as_data.type_path.parts;
+                        if tparts.len == 1 {
+                            let seg0 = self.child(tparts, 0);
+                            let b = builtin_index(self.source, self.name_span(seg0));
+                            let pkg = unsafe &*self.package;
+                            let mut bd = NODE_NONE;
+                            if b >= 0 { bd = pkg.builtin_decl(b as BuiltinType); }
+                            if bd != NODE_NONE {
+                                self.ast.set_resolution_def(ex.target_type, DefId { module: pkg.core_module, node: bd });
+                            }
                         }
                     }
                 }
-            }
-            // `Self` here resolves to the extend target (alias-anchored) if it resolved, else the extend node.
-            let old_self = self.current_self;
-            let mut resolved = DefId { module: self.ast.module, node: NODE_NONE };
-            if ex.target_type != NODE_NONE { resolved = self.ast.resolution_def(ex.target_type); }
-            if resolved.node != NODE_NONE {
-                self.current_self = resolved;
-            } else {
-                self.current_self = DefId { module: self.ast.module, node: id };
-            }
-            let saved_generic = self.in_generic;
-            self.in_generic = saved_generic || ex.generics.len > 0; // methods inherit the extend's generics
-            self.resolve_associated_items(ex.items);
-            self.in_generic = saved_generic;
-            self.current_self = old_self;
-            self.scope_exit();
-        } else if kind == NodeKind::NODE_TYPE_ALIAS {
-            self.resolve_type_alias(id);
-        } else if kind == NodeKind::NODE_CONST {
-            let cd = self.ast.at_const(id).as_data.const_def;
-            self.resolve_type(cd.ty);
-            self.resolve_expr(cd.value);
-        } else if kind == NodeKind::NODE_EXTERN_BLOCK {
-            let inner = self.ast.at_const(id).as_data.extern_block.items;
-            self.resolve_associated_items(inner);
-        } else if kind == NodeKind::NODE_STATIC_ASSERT {
-            let left = self.ast.at_const(id).as_data.binary.left;
-            self.resolve_expr(left);
-        }
+                // `Self` here resolves to the extend target (alias-anchored) if it resolved, else the extend node.
+                let old_self = self.current_self;
+                let mut resolved = DefId { module: self.ast.module, node: NODE_NONE };
+                if ex.target_type != NODE_NONE { resolved = self.ast.resolution_def(ex.target_type); }
+                if resolved.node != NODE_NONE {
+                    self.current_self = resolved;
+                } else {
+                    self.current_self = DefId { module: self.ast.module, node: id };
+                }
+                let saved_generic = self.in_generic;
+                self.in_generic = saved_generic || ex.generics.len > 0; // methods inherit the extend's generics
+                self.resolve_associated_items(ex.items);
+                self.in_generic = saved_generic;
+                self.current_self = old_self;
+                self.scope_exit();
+            },
+            NODE_TYPE_ALIAS => { self.resolve_type_alias(id); },
+            NODE_CONST => {
+                let cd = self.ast.at_const(id).as_data.const_def;
+                self.resolve_type(cd.ty);
+                self.resolve_expr(cd.value);
+            },
+            NODE_EXTERN_BLOCK => {
+                let inner = self.ast.at_const(id).as_data.extern_block.items;
+                self.resolve_associated_items(inner);
+            },
+            NODE_STATIC_ASSERT => {
+                let left = self.ast.at_const(id).as_data.binary.left;
+                self.resolve_expr(left);
+            },
+            _ => {},
+        };
     }
 
     // -- statements ----------------------------------------------------------------------------------------
@@ -781,61 +784,66 @@ extend Resolver {
     fn resolve_stmt(self: &mut Self, id: NodeId) void {
         if id == NODE_NONE { return; }
         let kind = self.ast.at_const(id).kind;
-        if kind == NodeKind::NODE_BLOCK {
-            self.resolve_block(id);
-        } else if kind == NodeKind::NODE_LET {
-            let ld = self.ast.at_const(id).as_data.let_stmt;
-            self.resolve_type(ld.ty);
-            self.resolve_expr(ld.value);
-            let nmkind = self.ast.at_const(ld.name).kind;
-            if nmkind == NodeKind::NODE_PATTERN_TUPLE { // `let (a, b) = ..`: each element declares itself
-                let children = self.ast.at_const(ld.name).as_data.pattern.children;
-                let mut i: u32 = 0;
-                while i < children.len {
-                    let cid = self.child(children, i);
-                    self.declare(cid, cid, Namespace::NS_VALUE);
-                    self.ast.set_resolution(cid, id); // back-point to the let so mutability is recoverable
-                    i = i + 1;
+        switch kind {
+            NODE_BLOCK => { self.resolve_block(id); },
+            NODE_LET => {
+                let ld = self.ast.at_const(id).as_data.let_stmt;
+                self.resolve_type(ld.ty);
+                self.resolve_expr(ld.value);
+                let nmkind = self.ast.at_const(ld.name).kind;
+                if nmkind == NodeKind::NODE_PATTERN_TUPLE { // `let (a, b) = ..`: each element declares itself
+                    let children = self.ast.at_const(ld.name).as_data.pattern.children;
+                    for i in 0..children.len {
+                        let cid = self.child(children, i);
+                        self.declare(cid, cid, Namespace::NS_VALUE);
+                        self.ast.set_resolution(cid, id); // back-point to the let so mutability is recoverable
+                    }
+                } else {
+                    self.declare(ld.name, id, Namespace::NS_VALUE); // bound only after its initializer
                 }
-            } else {
-                self.declare(ld.name, id, Namespace::NS_VALUE); // bound only after its initializer
-            }
-        } else if kind == NodeKind::NODE_CONST {
-            let cd = self.ast.at_const(id).as_data.const_def;
-            self.resolve_type(cd.ty);
-            self.resolve_expr(cd.value);
-            self.declare(cd.name, id, Namespace::NS_VALUE);
-        } else if kind == NodeKind::NODE_RETURN {
-            let values = self.ast.at_const(id).as_data.return_stmt.values;
-            let mut i: u32 = 0;
-            while i < values.len { let v = self.child(values, i); self.resolve_expr(v); i = i + 1; }
-        } else if kind == NodeKind::NODE_DEFER {
-            let v = self.ast.at_const(id).as_data.single.value;
-            self.resolve_expr(v);
-        } else if kind == NodeKind::NODE_IF {
-            self.resolve_if(id);
-        } else if kind == NodeKind::NODE_WHILE {
-            let wd = self.ast.at_const(id).as_data.while_stmt;
-            self.resolve_expr(wd.condition);
-            self.resolve_block(wd.body);
-        } else if kind == NodeKind::NODE_FOR {
-            let fr = self.ast.at_const(id).as_data.for_stmt;
-            self.resolve_expr(fr.iterable); // evaluated before the binding is in scope
-            self.scope_enter();
-            self.declare(fr.binding, id, Namespace::NS_VALUE);
-            self.resolve_block(fr.body);
-            self.scope_exit();
-        } else if kind == NodeKind::NODE_EXPRESSION_STATEMENT {
-            let v = self.ast.at_const(id).as_data.single.value;
-            self.resolve_expr(v);
-        } else if kind == NodeKind::NODE_STATIC_ASSERT {
-            let left = self.ast.at_const(id).as_data.binary.left;
-            self.resolve_expr(left);
-        } else if kind == NodeKind::NODE_BREAK {
-            let v = self.ast.at_const(id).as_data.flow.value;
-            self.resolve_expr(v);
-        }
-        // NODE_CONTINUE: nothing to resolve
+            },
+            NODE_CONST => {
+                let cd = self.ast.at_const(id).as_data.const_def;
+                self.resolve_type(cd.ty);
+                self.resolve_expr(cd.value);
+                self.declare(cd.name, id, Namespace::NS_VALUE);
+            },
+            NODE_RETURN => {
+                let values = self.ast.at_const(id).as_data.return_stmt.values;
+                for i in 0..values.len { let v = self.child(values, i); self.resolve_expr(v); }
+            },
+            NODE_DEFER => {
+                let v = self.ast.at_const(id).as_data.single.value;
+                self.resolve_expr(v);
+            },
+            NODE_IF => { self.resolve_if(id); },
+            NODE_WHILE => {
+                let wd = self.ast.at_const(id).as_data.while_stmt;
+                self.resolve_expr(wd.condition);
+                self.resolve_block(wd.body);
+            },
+            NODE_FOR => {
+                let fr = self.ast.at_const(id).as_data.for_stmt;
+                self.resolve_expr(fr.iterable); // evaluated before the binding is in scope
+                self.scope_enter();
+                self.declare(fr.binding, id, Namespace::NS_VALUE);
+                self.resolve_block(fr.body);
+                self.scope_exit();
+            },
+            NODE_EXPRESSION_STATEMENT => {
+                let v = self.ast.at_const(id).as_data.single.value;
+                self.resolve_expr(v);
+            },
+            NODE_STATIC_ASSERT => {
+                let left = self.ast.at_const(id).as_data.binary.left;
+                self.resolve_expr(left);
+            },
+            NODE_BREAK => {
+                let v = self.ast.at_const(id).as_data.flow.value;
+                self.resolve_expr(v);
+            },
+            _ => {}, // NODE_CONTINUE and leaves: nothing to resolve
+        };
     }
 
     // -- expressions ---------------------------------------------------------------------------------------
@@ -843,124 +851,126 @@ extend Resolver {
     fn resolve_expr(self: &mut Self, id: NodeId) void {
         if id == NODE_NONE { return; }
         let kind = self.ast.at_const(id).kind;
-        if kind == NodeKind::NODE_IDENTIFIER {
-            self.resolve_ref(id, id, Namespace::NS_VALUE, "value".ptr as *const char); // also covers 'self'
-        } else if kind == NodeKind::NODE_UNARY {
-            let op = self.ast.at_const(id).as_data.unary.operand;
-            self.resolve_expr(op);
-        } else if kind == NodeKind::NODE_BINARY || kind == NodeKind::NODE_ASSIGNMENT {
-            let bd = self.ast.at_const(id).as_data.binary;
-            self.resolve_expr(bd.left);
-            self.resolve_expr(bd.right);
-        } else if kind == NodeKind::NODE_CALL {
-            let cd = self.ast.at_const(id).as_data.call;
-            // `Pair(1, 2)`: a callee identifier that is not a value may name a TYPE (tuple-struct construction).
-            let callee_kind = self.ast.at_const(cd.callee).kind;
-            let mut as_type = false;
-            if callee_kind == NodeKind::NODE_IDENTIFIER {
-                let cname = self.name_span(cd.callee);
-                if self.sym_lookup(cname, Namespace::NS_VALUE).decl == NODE_NONE
-                    && self.sym_lookup(cname, Namespace::NS_TYPE).decl != NODE_NONE {
-                    as_type = true;
+        switch kind {
+            NODE_IDENTIFIER => {
+                self.resolve_ref(id, id, Namespace::NS_VALUE, "value".ptr as *const char); // also covers 'self'
+            },
+            NODE_UNARY => {
+                let op = self.ast.at_const(id).as_data.unary.operand;
+                self.resolve_expr(op);
+            },
+            NODE_BINARY | NODE_ASSIGNMENT => {
+                let bd = self.ast.at_const(id).as_data.binary;
+                self.resolve_expr(bd.left);
+                self.resolve_expr(bd.right);
+            },
+            NODE_CALL => {
+                let cd = self.ast.at_const(id).as_data.call;
+                // `Pair(1, 2)`: a callee identifier that is not a value may name a TYPE (tuple-struct construction).
+                let callee_kind = self.ast.at_const(cd.callee).kind;
+                let mut as_type = false;
+                if callee_kind == NodeKind::NODE_IDENTIFIER {
+                    let cname = self.name_span(cd.callee);
+                    if self.sym_lookup(cname, Namespace::NS_VALUE).decl == NODE_NONE
+                        && self.sym_lookup(cname, Namespace::NS_TYPE).decl != NODE_NONE {
+                        as_type = true;
+                    }
                 }
-            }
-            if as_type {
-                self.resolve_ref(cd.callee, cd.callee, Namespace::NS_TYPE, "type".ptr as *const char);
-            } else {
-                self.resolve_expr(cd.callee);
-            }
-            let mut i: u32 = 0;
-            while i < cd.args.len { let a = self.child(cd.args, i); self.resolve_expr(a); i = i + 1; }
-        } else if kind == NodeKind::NODE_INDEX {
-            let ix = self.ast.at_const(id).as_data.index;
-            self.resolve_expr(ix.object);
-            self.resolve_expr(ix.index);
-        } else if kind == NodeKind::NODE_MEMBER {
-            self.resolve_member(id);
-        } else if kind == NodeKind::NODE_CAST {
-            let ct = self.ast.at_const(id).as_data.cast;
-            self.resolve_expr(ct.expression);
-            self.resolve_type(ct.ty);
-        } else if kind == NodeKind::NODE_SIZEOF || kind == NodeKind::NODE_ALIGNOF {
-            self.resolve_sizeof(id);
-        } else if kind == NodeKind::NODE_VA_EXPR {
-            let vo = self.ast.at_const(id).as_data.va_op;
-            self.resolve_expr(vo.ap);
-            if vo.op == VA_ARG { self.resolve_type(vo.extra); }
-            else if vo.op == VA_START { self.resolve_expr(vo.extra); }
-        } else if kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
-            let sp = self.ast.at_const(id).as_data.specialization;
-            let inner_kind = self.ast.at_const(sp.expression).kind;
-            let mut as_type = false;
-            if inner_kind == NodeKind::NODE_IDENTIFIER {
-                let iname = self.name_span(sp.expression);
-                if self.sym_lookup(iname, Namespace::NS_VALUE).decl == NODE_NONE { as_type = true; }
-            }
-            if as_type {
-                self.resolve_ref(sp.expression, sp.expression, Namespace::NS_TYPE, "type".ptr as *const char);
-            } else {
-                self.resolve_expr(sp.expression);
-            }
-            let mut i: u32 = 0;
-            while i < sp.types.len { let t = self.child(sp.types, i); self.resolve_type(t); i = i + 1; }
-        } else if kind == NodeKind::NODE_MATCH {
-            let md = self.ast.at_const(id).as_data.match_expr;
-            self.resolve_expr(md.value);
-            let mut i: u32 = 0;
-            while i < md.arms.len {
-                let aid = self.child(md.arms, i);
-                let arm = self.ast.at_const(aid).as_data.match_arm;
-                self.scope_enter();
-                self.resolve_pattern(arm.pattern);
-                self.resolve_expr(arm.guard);
-                self.resolve_expr(arm.body);
-                self.scope_exit();
-                i = i + 1;
-            }
-        } else if kind == NodeKind::NODE_NEW {
-            let ne = self.ast.at_const(id).as_data.new_expr;
-            if ne.initializer != NODE_NONE { self.resolve_expr(ne.initializer); }
-            else { self.resolve_type(ne.ty); }
-        } else if kind == NodeKind::NODE_WHILE { // `loop { .. }` as an expression
-            let body = self.ast.at_const(id).as_data.while_stmt.body;
-            self.resolve_block(body);
-        } else if kind == NodeKind::NODE_ARRAY_LITERAL || kind == NodeKind::NODE_TUPLE {
-            let elements = self.ast.at_const(id).as_data.array_literal.elements;
-            let mut i: u32 = 0;
-            while i < elements.len {
-                let eid = self.child(elements, i);
-                let ek = self.ast.at_const(eid).kind;
-                if ek == NodeKind::NODE_FIELD_INITIALIZER { // designated `[index] = value`
-                    let fi = self.ast.at_const(eid).as_data.field_initializer;
-                    self.resolve_expr(fi.name);
-                    self.resolve_expr(fi.value);
+                if as_type {
+                    self.resolve_ref(cd.callee, cd.callee, Namespace::NS_TYPE, "type".ptr as *const char);
                 } else {
-                    self.resolve_expr(eid);
+                    self.resolve_expr(cd.callee);
                 }
-                i = i + 1;
-            }
-        } else if kind == NodeKind::NODE_STRUCT_INITIALIZER {
-            let si = self.ast.at_const(id).as_data.struct_initializer;
-            self.resolve_type_name(si.ty);
-            let mut i: u32 = 0;
-            while i < si.fields.len {
-                let fid = self.child(si.fields, i);
-                let val = self.ast.at_const(fid).as_data.field_initializer.value; // field names deferred
-                self.resolve_expr(val);
-                i = i + 1;
-            }
-        } else if kind == NodeKind::NODE_BLOCK {
-            self.resolve_block(id);
-        } else if kind == NodeKind::NODE_CLOSURE {
-            self.resolve_closure(id);
-        } else if kind == NodeKind::NODE_IF {
-            self.resolve_if(id);
-        } else if kind == NodeKind::NODE_RANGE {
-            let pr = self.ast.at_const(id).as_data.pattern_range;
-            self.resolve_expr(pr.start);
-            self.resolve_expr(pr.end);
-        }
-        // NODE_LITERAL and other leaves: nothing to resolve
+                for i in 0..cd.args.len { let a = self.child(cd.args, i); self.resolve_expr(a); }
+            },
+            NODE_INDEX => {
+                let ix = self.ast.at_const(id).as_data.index;
+                self.resolve_expr(ix.object);
+                self.resolve_expr(ix.index);
+            },
+            NODE_MEMBER => { self.resolve_member(id); },
+            NODE_CAST => {
+                let ct = self.ast.at_const(id).as_data.cast;
+                self.resolve_expr(ct.expression);
+                self.resolve_type(ct.ty);
+            },
+            NODE_SIZEOF | NODE_ALIGNOF => { self.resolve_sizeof(id); },
+            NODE_VA_EXPR => {
+                let vo = self.ast.at_const(id).as_data.va_op;
+                self.resolve_expr(vo.ap);
+                if vo.op == VA_ARG { self.resolve_type(vo.extra); }
+                else if vo.op == VA_START { self.resolve_expr(vo.extra); }
+            },
+            NODE_GENERIC_SPECIALIZATION => {
+                let sp = self.ast.at_const(id).as_data.specialization;
+                let inner_kind = self.ast.at_const(sp.expression).kind;
+                let mut as_type = false;
+                if inner_kind == NodeKind::NODE_IDENTIFIER {
+                    let iname = self.name_span(sp.expression);
+                    if self.sym_lookup(iname, Namespace::NS_VALUE).decl == NODE_NONE { as_type = true; }
+                }
+                if as_type {
+                    self.resolve_ref(sp.expression, sp.expression, Namespace::NS_TYPE, "type".ptr as *const char);
+                } else {
+                    self.resolve_expr(sp.expression);
+                }
+                for i in 0..sp.types.len { let t = self.child(sp.types, i); self.resolve_type(t); }
+            },
+            NODE_MATCH => {
+                let md = self.ast.at_const(id).as_data.match_expr;
+                self.resolve_expr(md.value);
+                for i in 0..md.arms.len {
+                    let aid = self.child(md.arms, i);
+                    let arm = self.ast.at_const(aid).as_data.match_arm;
+                    self.scope_enter();
+                    self.resolve_pattern(arm.pattern);
+                    self.resolve_expr(arm.guard);
+                    self.resolve_expr(arm.body);
+                    self.scope_exit();
+                }
+            },
+            NODE_NEW => {
+                let ne = self.ast.at_const(id).as_data.new_expr;
+                if ne.initializer != NODE_NONE { self.resolve_expr(ne.initializer); }
+                else { self.resolve_type(ne.ty); }
+            },
+            NODE_WHILE => { // `loop { .. }` as an expression
+                let body = self.ast.at_const(id).as_data.while_stmt.body;
+                self.resolve_block(body);
+            },
+            NODE_ARRAY_LITERAL | NODE_TUPLE => {
+                let elements = self.ast.at_const(id).as_data.array_literal.elements;
+                for i in 0..elements.len {
+                    let eid = self.child(elements, i);
+                    let ek = self.ast.at_const(eid).kind;
+                    if ek == NodeKind::NODE_FIELD_INITIALIZER { // designated `[index] = value`
+                        let fi = self.ast.at_const(eid).as_data.field_initializer;
+                        self.resolve_expr(fi.name);
+                        self.resolve_expr(fi.value);
+                    } else {
+                        self.resolve_expr(eid);
+                    }
+                }
+            },
+            NODE_STRUCT_INITIALIZER => {
+                let si = self.ast.at_const(id).as_data.struct_initializer;
+                self.resolve_type_name(si.ty);
+                for i in 0..si.fields.len {
+                    let fid = self.child(si.fields, i);
+                    let val = self.ast.at_const(fid).as_data.field_initializer.value; // field names deferred
+                    self.resolve_expr(val);
+                }
+            },
+            NODE_BLOCK => { self.resolve_block(id); },
+            NODE_CLOSURE => { self.resolve_closure(id); },
+            NODE_IF => { self.resolve_if(id); },
+            NODE_RANGE => {
+                let pr = self.ast.at_const(id).as_data.pattern_range;
+                self.resolve_expr(pr.start);
+                self.resolve_expr(pr.end);
+            },
+            _ => {}, // NODE_LITERAL and other leaves: nothing to resolve
+        };
     }
 
     fn resolve_member(self: &mut Self, id: NodeId) void {
@@ -1048,11 +1058,9 @@ extend Resolver {
         let top = self.closures.len() - 1;
         let ncaps = self.closures.at(top).caps.len();
         let mark = self.ast.mark();
-        let mut k: usize = 0;
-        while k < ncaps {
+        for k in 0..ncaps {
             let cap = *self.closures.at(top).caps.at(k);
             self.ast.push(cap);
-            k = k + 1;
         }
         let list = self.ast.commit(mark);
         self.ast.at(id).as_data.closure.captures = list;
@@ -1065,69 +1073,77 @@ extend Resolver {
     fn resolve_pattern(self: &mut Self, id: NodeId) void {
         if id == NODE_NONE { return; }
         let kind = self.ast.at_const(id).kind;
-        if kind == NodeKind::NODE_IDENTIFIER { // shorthand struct-pattern field binding
-            self.declare(id, id, Namespace::NS_VALUE);
-        } else if kind == NodeKind::NODE_PATTERN_NAME {
-            let pd = self.ast.at_const(id).as_data.pattern;
-            self.declare(pd.name, id, Namespace::NS_VALUE);
-            let mut i: u32 = 0;
-            while i < pd.children.len { let s = self.child(pd.children, i); self.resolve_pattern(s); i = i + 1; }
-        } else if kind == NodeKind::NODE_PATTERN_TUPLE || kind == NodeKind::NODE_PATTERN_STRUCT
-            || kind == NodeKind::NODE_PATTERN_FIELD {
-            let children = self.ast.at_const(id).as_data.pattern.children;
-            let mut i: u32 = 0;
-            while i < children.len { let c = self.child(children, i); self.resolve_pattern(c); i = i + 1; }
-        } else if kind == NodeKind::NODE_PATTERN_OR { // alternatives bind the same names; declare the first's
-            let children = self.ast.at_const(id).as_data.pattern.children;
-            if children.len != 0 { let c0 = self.child(children, 0); self.resolve_pattern(c0); }
-        }
-        // NODE_PATTERN_WILDCARD, NODE_PATTERN_LITERAL, NODE_PATTERN_RANGE: nothing to bind
+        switch kind {
+            NODE_IDENTIFIER => { // shorthand struct-pattern field binding
+                self.declare(id, id, Namespace::NS_VALUE);
+            },
+            NODE_PATTERN_NAME => {
+                let pd = self.ast.at_const(id).as_data.pattern;
+                self.declare(pd.name, id, Namespace::NS_VALUE);
+                for i in 0..pd.children.len { let s = self.child(pd.children, i); self.resolve_pattern(s); }
+            },
+            NODE_PATTERN_TUPLE | NODE_PATTERN_STRUCT | NODE_PATTERN_FIELD => {
+                let children = self.ast.at_const(id).as_data.pattern.children;
+                for i in 0..children.len { let c = self.child(children, i); self.resolve_pattern(c); }
+            },
+            NODE_PATTERN_OR => { // alternatives bind the same names; declare the first's
+                let children = self.ast.at_const(id).as_data.pattern.children;
+                if children.len != 0 { let c0 = self.child(children, 0); self.resolve_pattern(c0); }
+            },
+            _ => {}, // NODE_PATTERN_WILDCARD, NODE_PATTERN_LITERAL, NODE_PATTERN_RANGE: nothing to bind
+        };
     }
 
     // -- driver --------------------------------------------------------------------------------------------
 
     // Top-level items are visible regardless of order, so declare them all before resolving bodies.
     fn collect_items(self: &mut Self, items: NodeList) void {
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let id = self.child(items, i);
-            let kind = self.ast.at_const(id).kind;
-            if kind == NodeKind::NODE_FUNCTION {
-                let nm = self.ast.at_const(id).as_data.function.name;
-                self.declare(nm, id, Namespace::NS_VALUE);
-            } else if kind == NodeKind::NODE_CONST {
-                let nm = self.ast.at_const(id).as_data.const_def.name;
-                self.declare(nm, id, Namespace::NS_VALUE);
-            } else if kind == NodeKind::NODE_STRUCT || kind == NodeKind::NODE_ENUM {
-                let nm = self.ast.at_const(id).as_data.aggregate.name;
-                self.declare(nm, id, Namespace::NS_TYPE);
-            } else if kind == NodeKind::NODE_INTERFACE {
-                let nm = self.ast.at_const(id).as_data.interface_def.name;
-                self.declare(nm, id, Namespace::NS_TYPE);
-            } else if kind == NodeKind::NODE_TYPE_ALIAS {
-                let nm = self.ast.at_const(id).as_data.type_alias.name;
-                self.declare(nm, id, Namespace::NS_TYPE);
-            } else if kind == NodeKind::NODE_EXTERN_BLOCK {
-                let inner = self.ast.at_const(id).as_data.extern_block.items;
-                let mut j: u32 = 0;
-                while j < inner.len {
-                    let iid = self.child(inner, j);
-                    let ik = self.ast.at_const(iid).kind;
-                    if ik == NodeKind::NODE_FUNCTION {
-                        let nm = self.ast.at_const(iid).as_data.function.name;
-                        self.declare(nm, iid, Namespace::NS_VALUE);
-                    } else if ik == NodeKind::NODE_TYPE_ALIAS {
-                        let nm = self.ast.at_const(iid).as_data.type_alias.name;
-                        self.declare(nm, iid, Namespace::NS_TYPE);
-                    } else if ik == NodeKind::NODE_CONST {
-                        let nm = self.ast.at_const(iid).as_data.const_def.name;
-                        self.declare(nm, iid, Namespace::NS_VALUE);
+            switch self.ast.at_const(id).kind {
+                NODE_FUNCTION => {
+                    let nm = self.ast.at_const(id).as_data.function.name;
+                    self.declare(nm, id, Namespace::NS_VALUE);
+                },
+                NODE_CONST => {
+                    let nm = self.ast.at_const(id).as_data.const_def.name;
+                    self.declare(nm, id, Namespace::NS_VALUE);
+                },
+                NODE_STRUCT | NODE_ENUM => {
+                    let nm = self.ast.at_const(id).as_data.aggregate.name;
+                    self.declare(nm, id, Namespace::NS_TYPE);
+                },
+                NODE_INTERFACE => {
+                    let nm = self.ast.at_const(id).as_data.interface_def.name;
+                    self.declare(nm, id, Namespace::NS_TYPE);
+                },
+                NODE_TYPE_ALIAS => {
+                    let nm = self.ast.at_const(id).as_data.type_alias.name;
+                    self.declare(nm, id, Namespace::NS_TYPE);
+                },
+                NODE_EXTERN_BLOCK => {
+                    let inner = self.ast.at_const(id).as_data.extern_block.items;
+                    for j in 0..inner.len {
+                        let iid = self.child(inner, j);
+                        switch self.ast.at_const(iid).kind {
+                            NODE_FUNCTION => {
+                                let nm = self.ast.at_const(iid).as_data.function.name;
+                                self.declare(nm, iid, Namespace::NS_VALUE);
+                            },
+                            NODE_TYPE_ALIAS => {
+                                let nm = self.ast.at_const(iid).as_data.type_alias.name;
+                                self.declare(nm, iid, Namespace::NS_TYPE);
+                            },
+                            NODE_CONST => {
+                                let nm = self.ast.at_const(iid).as_data.const_def.name;
+                                self.declare(nm, iid, Namespace::NS_VALUE);
+                            },
+                            _ => {},
+                        };
                     }
-                    j = j + 1;
-                }
-            }
-            // NODE_EXTEND has no module-scope name
-            i = i + 1;
+                },
+                _ => {}, // NODE_EXTEND has no module-scope name
+            };
         }
     }
 
@@ -1135,7 +1151,7 @@ extend Resolver {
         if self.package == null { return null; }
         let pkg = unsafe &*self.package;
         let m = self.ast.module;
-        if (m as usize) < pkg.modules.len() { return pkg.modules.at(m as usize).file as *const char; }
+        if (m as usize) < pkg.modules.len() { return pkg.modules.at(m as usize).file; }
         return null;
     }
 

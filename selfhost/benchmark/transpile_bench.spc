@@ -46,7 +46,7 @@ fn ignore_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) vo
 fn resolve_one(p: &mut loader::Package, i: usize) void {
     let pkg = (&*p) as *const loader::Package;
     let m = p.modules.index_mut(i);
-    let src = m.source as *const char;
+    let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);
@@ -65,7 +65,7 @@ fn resolve_one(p: &mut loader::Package, i: usize) void {
 fn typecheck_one(p: &mut loader::Package, i: usize) void {
     let pkg = (&mut *p) as *mut loader::Package;
     let m = p.modules.index_mut(i);
-    let src = m.source as *const char;
+    let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);
@@ -111,7 +111,7 @@ fn transpile_once() Timing {
     i = 0;
     while i < n {
         let ma = (&mut p.modules.index_mut(i).ast) as *mut Ast;
-        let src = p.modules.at(i).source as *const char;
+        let src = p.modules.at(i).source;
         let slen = p.modules.at(i).source_len;
         let pkg2 = (&mut p) as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
         let mut c = cg::Codegen::new(ma, src, slen, pkg2);

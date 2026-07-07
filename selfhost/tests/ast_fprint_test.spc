@@ -316,7 +316,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
 }
 
 fn has(buf: *mut char, needle: str) bool {
-    return unsafe cstring::strstr(buf as *const char, needle.ptr as *const char) != null;
+    return unsafe cstring::strstr(buf, needle.ptr as *const char) != null;
 }
 
 @test fn dump() {

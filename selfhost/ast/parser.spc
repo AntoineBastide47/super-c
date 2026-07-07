@@ -71,7 +71,7 @@ extend Parser {
 
     pub fn text_is(self: &Self, t: Token, s: *const char) bool {
         let sl = unsafe cstring::strlen(s);
-        return (t.len() as usize) == sl && unsafe cstring::memcmp((unsafe (self.source + (t.start() as usize))) as *const void, s as *const void, sl) == 0;
+        return (t.len() as usize) == sl && unsafe cstring::memcmp((unsafe (self.source + (t.start() as usize))), s, sl) == 0;
     }
 
     pub fn peek_ident_is(self: &Self, kw: *const char) bool {
@@ -426,8 +426,7 @@ extend Parser {
             let names = self.ast.commit(names_mark);
             self.expect(TokenType::Colon, "':'".ptr as *const char);
             let ty = self.parse_type();
-            let mut i: u32 = 0;
-            while i < names.len {
+            for i in 0..names.len {
                 let name = *self.ast.children.at((names.start + i) as usize);
                 let span_start = self.node_span(name).start;
                 let span_end = self.node_span(ty).end;
@@ -438,7 +437,6 @@ extend Parser {
                     as_data: NodeAs { parameter: ParameterData { name: name, ty: ty, is_mutable: is_mutable } },
                 });
                 self.ast.push(param);
-                i = i + 1;
             }
             if !self.match(TokenType::Comma) { break; }
         }
@@ -1956,18 +1954,15 @@ extend Parser {
     }
 
     pub fn add_attrs_to(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) void {
-        let mut i: usize = 0;
-        while i < attrs.len() {
+        for i in 0..attrs.len() {
             let mut attr = *attrs.at(i);
             attr.owner = owner;
             self.ast.add_attr(attr);
-            i = i + 1;
         }
     }
 
     pub fn validate_item_attrs(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) void {
-        let mut i: usize = 0;
-        while i < attrs.len() {
+        for i in 0..attrs.len() {
             let attr = attrs.at(i);
             let mut sp = Span::empty();
             let mut valid_test = false;
@@ -1988,7 +1983,6 @@ extend Parser {
                 self.errorf(sp.start, sp.end - sp.start, "'@emit_macro' may only be applied to a generic struct or enum".ptr as *const char);
                 self.notef("write it before a declaration like 'struct Box<T> { ... }' or 'enum Option<T> { ... }'".ptr as *const char);
             }
-            i = i + 1;
         }
     }
 
