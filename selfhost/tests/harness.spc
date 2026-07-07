@@ -53,7 +53,7 @@ fn copy_msg(dst: *mut char, s: *const char) void {
     if s == null { return; }
     let n = unsafe cstring::strlen(s);
     let k = if n < 511 { n; } else { 511 as usize; };
-    unsafe cstring::memcpy(dst as *mut void, s as *const void, k);
+    unsafe cstring::memcpy(dst as *mut void, s, k);
     unsafe dst[k] = 0 as char;
 }
 
@@ -203,7 +203,7 @@ pub fn ident_is(a: &Ast, src: *const char, id: NodeId, name: *const char) bool {
     let e = nd.as_data.name.text.end;
     let l = unsafe cstring::strlen(name);
     if (e - s) as usize != l { return false; }
-    return unsafe cstring::memcmp((src + s as usize) as *const void, name as *const void, l) == 0;
+    return unsafe cstring::memcmp((src + s as usize), name, l) == 0;
 }
 
 // Read a whole stream into a fresh NUL-terminated heap buffer (caller frees). Seeks to the end for the
@@ -262,7 +262,7 @@ pub fn compile_c(src: str) CompiledC {
     // definitions (`str`, monomorphized Slice/Box, ...) are inspectable, not just the user snippet.
     let mut mi: usize = 0;
     while mi < n {
-        let msrc = p.modules.at(mi).source as *const char;
+        let msrc = p.modules.at(mi).source;
         let mslen = p.modules.at(mi).source_len;
         let ma = (&mut p.modules.index_mut(mi).ast) as *mut Ast; // codegen borrows the ast in place
         let cgpkg = (&mut p) as *mut loader::Package;
@@ -295,7 +295,7 @@ extend RunResult {
     pub fn ok(self: &Self) bool { return self.built && self.exit == 0; }
     pub fn out_has(self: &Self, needle: str) bool {
         if self.out == null { return false; }
-        return unsafe cstring::strstr(self.out as *const char, needle.ptr as *const char) != null;
+        return unsafe cstring::strstr(self.out, needle.ptr as *const char) != null;
     }
     pub fn free(self: &mut Self) void {
         if self.out != null { unsafe stdlib::free(self.out as *mut void); self.out = null; }
@@ -332,7 +332,7 @@ pub fn compile_and_run(src: str) RunResult {
     unsafe stdio::snprintf((&mut spc.b[0]) as *mut char, 512, "%s/main.spc".ptr as *const char, dirp);
     let wf = unsafe stdio::fopen((&spc.b[0]) as *const char, "w".ptr as *const char);
     if wf == null { rm_dir(dirp); return r; }
-    if src.len > 0 { let _ = unsafe stdio::fwrite(src.ptr as *const void, 1, src.len, wf); }
+    if src.len > 0 { let _ = unsafe stdio::fwrite(src.ptr, 1, src.len, wf); }
     unsafe stdio::fclose(wf);
     let mut sc = unsafe stdlib::getenv("SUPERC".ptr as *const char);
     if sc == null || (unsafe *sc) == (0 as char) { sc = "./super-c".ptr as *const char; }
@@ -417,7 +417,7 @@ pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
 fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
     let pkg = (&*p) as *const loader::Package;
     let m = p.modules.index_mut(i);
-    let src = m.source as *const char;
+    let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);
@@ -444,7 +444,7 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
 fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
     let pkg = (&mut *p) as *mut loader::Package;
     let m = p.modules.index_mut(i);
-    let src = m.source as *const char;
+    let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);

@@ -11,9 +11,11 @@
 // matching free multiset. (The C suite additionally links under ASan; `super-c build` uses plain cc, so the
 // multiset check -- not ASan -- is what catches leaks / double-frees here.)
 //
-// The matrix is reduced vs the C suite (which fans out ~2900 scenarios across cores via OpenMP): here it
-// covers OR switch chains through depth 4 and ORB general chains through depth 3, split into fork-parallel
-// @tests -- exhaustive per op, at meaningful nesting, while keeping the serial per-fork build cost bounded.
+// FULL depth, matching tests/raii_gen_test.c (MAX_SWITCH_DEPTH=6, MAX_GENERAL_DEPTH=5): OR switch chains
+// through depth 6 and ORB general chains through depth 5 -- hundreds of scenarios per op. Scenarios batch
+// into programs (ID_CAP ids each) and the ops fork-parallelize across @tests; within a fork the batches
+// build+run serially (no OpenMP fan-out), so raii_gen is the slow part of the run -- the cost of exhaustive
+// RAII coverage. (The C suite additionally runs under ASan; here the free-multiset check catches the bugs.)
 import tests::harness as h;
 import stdio;
 import stdlib;
@@ -51,7 +53,7 @@ fn ap(b: *mut char, at: i32, cap: i32, s: *const char) i32 {
     let mut n = unsafe cstring::strlen(s) as i32;
     if at + n >= cap { n = cap - 1 - at; }
     if n < 0 { n = 0; }
-    unsafe cstring::memcpy((b + at as usize) as *mut void, s as *const void, n as usize);
+    unsafe cstring::memcpy((b + at as usize) as *mut void, s, n as usize);
     let end = at + n;
     unsafe b[end as usize] = 0 as char;
     return end;
@@ -320,19 +322,19 @@ fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *c
     }
 }
 
-// Run every OR-switch shape (through depth 4) for one switch mode.
+// Run every OR-switch shape (through depth 6, matching tests/raii_gen_test.c's MAX_SWITCH_DEPTH) per mode.
 fn run_switch(op: i32) void {
     let mut g = new_gen();
     let mut sh = Buf16 {};
-    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 4, "OR".ptr as *const char, op);
+    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 6, "OR".ptr as *const char, op);
     g.finish();
 }
 
-// Run every ORB general shape (through depth 3) for one ownership op.
+// Run every ORB general shape (through depth 5, matching tests/raii_gen_test.c's MAX_GENERAL_DEPTH) per op.
 fn run_general(op: i32) void {
     let mut g = new_gen();
     let mut sh = Buf16 {};
-    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 3, "ORB".ptr as *const char, op);
+    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 5, "ORB".ptr as *const char, op);
     g.finish();
 }
 

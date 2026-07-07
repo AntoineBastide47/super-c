@@ -142,59 +142,63 @@ fn decode_at_b(l: &Lexer, b: u8, current: usize, size: *mut usize) u32 {
 }
 
 fn memeq(p: *const u8, text: str) bool {
-    return unsafe cstring::memcmp(p as *const void, text.ptr as *const void, text.len) == 0;
+    return unsafe cstring::memcmp(p, text.ptr, text.len) == 0;
 }
 
 fn keywords(lexeme: *const u8, len: usize) TokenType {
     let first = unsafe lexeme[0];
-    if len == 2 {
-        if first == 'a' as u8 && memeq(lexeme, "as") { return TokenType::As; }
-        if first == 'd' as u8 && memeq(lexeme, "do") { return TokenType::Do; }
-        if first == 'f' as u8 && memeq(lexeme, "fn") { return TokenType::Fn; }
-        if first == 'i' as u8 && memeq(lexeme, "if") { return TokenType::If; }
-        if first == 'i' as u8 && memeq(lexeme, "in") { return TokenType::In; }
-    } else if len == 3 {
-        if first == 'd' as u8 && memeq(lexeme, "dyn") { return TokenType::Dyn; }
-        if first == 'f' as u8 && memeq(lexeme, "for") { return TokenType::For; }
-        if first == 'l' as u8 && memeq(lexeme, "let") { return TokenType::Let; }
-        if first == 'm' as u8 && memeq(lexeme, "mut") { return TokenType::Mut; }
-        if first == 'n' as u8 && memeq(lexeme, "new") { return TokenType::New; }
-        if first == 'p' as u8 && memeq(lexeme, "pub") { return TokenType::Pub; }
-    } else if len == 4 {
-        if first == 'c' as u8 && memeq(lexeme, "case") { return TokenType::Case; }
-        if first == 'e' as u8 && memeq(lexeme, "else") { return TokenType::Else; }
-        if first == 'e' as u8 && memeq(lexeme, "enum") { return TokenType::Enum; }
-        if first == 'l' as u8 && memeq(lexeme, "loop") { return TokenType::Loop; }
-        if first == 'm' as u8 && memeq(lexeme, "move") { return TokenType::Move; }
-        if first == 'n' as u8 && memeq(lexeme, "null") { return TokenType::Null; }
-        if first == 's' as u8 && memeq(lexeme, "self") { return TokenType::SelfLower; }
-        if first == 'S' as u8 && memeq(lexeme, "Self") { return TokenType::SelfUpper; }
-        if first == 't' as u8 && memeq(lexeme, "true") { return TokenType::True; }
-        if first == 't' as u8 && memeq(lexeme, "type") { return TokenType::Type; }
-    } else if len == 5 {
-        if first == 'b' as u8 && memeq(lexeme, "break") { return TokenType::Break; }
-        if first == 'c' as u8 && memeq(lexeme, "const") { return TokenType::Const; }
-        if first == 'd' as u8 && memeq(lexeme, "defer") { return TokenType::Defer; }
-        if first == 'f' as u8 && memeq(lexeme, "false") { return TokenType::False; }
-        if first == 'u' as u8 && memeq(lexeme, "union") { return TokenType::Union; }
-        if first == 'w' as u8 && memeq(lexeme, "where") { return TokenType::Where; }
-        if first == 'w' as u8 && memeq(lexeme, "while") { return TokenType::While; }
-    } else if len == 6 {
-        if first == 'e' as u8 && memeq(lexeme, "extend") { return TokenType::Extend; }
-        if first == 'e' as u8 && memeq(lexeme, "extern") { return TokenType::Extern; }
-        if first == 'i' as u8 && memeq(lexeme, "import") { return TokenType::Import; }
-        if first == 'r' as u8 && memeq(lexeme, "return") { return TokenType::Return; }
-        if first == 's' as u8 && memeq(lexeme, "struct") { return TokenType::Struct; }
-        if first == 's' as u8 && memeq(lexeme, "switch") { return TokenType::Switch; }
-        if first == 's' as u8 && memeq(lexeme, "sizeof") { return TokenType::Sizeof; }
-        if first == 'u' as u8 && memeq(lexeme, "unsafe") { return TokenType::Unsafe; }
-    } else if len == 7 {
-        if memeq(lexeme, "alignof") { return TokenType::Alignof; }
-    } else if len == 8 {
-        if memeq(lexeme, "continue") { return TokenType::Continue; }
-    } else if len == 9 {
-        if memeq(lexeme, "interface") { return TokenType::Interface; }
-    }
+    switch len {
+        2 => {
+            if first == 'a' as u8 && memeq(lexeme, "as") { return TokenType::As; }
+            if first == 'd' as u8 && memeq(lexeme, "do") { return TokenType::Do; }
+            if first == 'f' as u8 && memeq(lexeme, "fn") { return TokenType::Fn; }
+            if first == 'i' as u8 && memeq(lexeme, "if") { return TokenType::If; }
+            if first == 'i' as u8 && memeq(lexeme, "in") { return TokenType::In; }
+        },
+        3 => {
+            if first == 'd' as u8 && memeq(lexeme, "dyn") { return TokenType::Dyn; }
+            if first == 'f' as u8 && memeq(lexeme, "for") { return TokenType::For; }
+            if first == 'l' as u8 && memeq(lexeme, "let") { return TokenType::Let; }
+            if first == 'm' as u8 && memeq(lexeme, "mut") { return TokenType::Mut; }
+            if first == 'n' as u8 && memeq(lexeme, "new") { return TokenType::New; }
+            if first == 'p' as u8 && memeq(lexeme, "pub") { return TokenType::Pub; }
+        },
+        4 => {
+            if first == 'c' as u8 && memeq(lexeme, "case") { return TokenType::Case; }
+            if first == 'e' as u8 && memeq(lexeme, "else") { return TokenType::Else; }
+            if first == 'e' as u8 && memeq(lexeme, "enum") { return TokenType::Enum; }
+            if first == 'l' as u8 && memeq(lexeme, "loop") { return TokenType::Loop; }
+            if first == 'm' as u8 && memeq(lexeme, "move") { return TokenType::Move; }
+            if first == 'n' as u8 && memeq(lexeme, "null") { return TokenType::Null; }
+            if first == 's' as u8 && memeq(lexeme, "self") { return TokenType::SelfLower; }
+            if first == 'S' as u8 && memeq(lexeme, "Self") { return TokenType::SelfUpper; }
+            if first == 't' as u8 && memeq(lexeme, "true") { return TokenType::True; }
+            if first == 't' as u8 && memeq(lexeme, "type") { return TokenType::Type; }
+        },
+        5 => {
+            if first == 'b' as u8 && memeq(lexeme, "break") { return TokenType::Break; }
+            if first == 'c' as u8 && memeq(lexeme, "const") { return TokenType::Const; }
+            if first == 'd' as u8 && memeq(lexeme, "defer") { return TokenType::Defer; }
+            if first == 'f' as u8 && memeq(lexeme, "false") { return TokenType::False; }
+            if first == 'u' as u8 && memeq(lexeme, "union") { return TokenType::Union; }
+            if first == 'w' as u8 && memeq(lexeme, "where") { return TokenType::Where; }
+            if first == 'w' as u8 && memeq(lexeme, "while") { return TokenType::While; }
+        },
+        6 => {
+            if first == 'e' as u8 && memeq(lexeme, "extend") { return TokenType::Extend; }
+            if first == 'e' as u8 && memeq(lexeme, "extern") { return TokenType::Extern; }
+            if first == 'i' as u8 && memeq(lexeme, "import") { return TokenType::Import; }
+            if first == 'r' as u8 && memeq(lexeme, "return") { return TokenType::Return; }
+            if first == 's' as u8 && memeq(lexeme, "struct") { return TokenType::Struct; }
+            if first == 's' as u8 && memeq(lexeme, "switch") { return TokenType::Switch; }
+            if first == 's' as u8 && memeq(lexeme, "sizeof") { return TokenType::Sizeof; }
+            if first == 'u' as u8 && memeq(lexeme, "unsafe") { return TokenType::Unsafe; }
+        },
+        7 => { if memeq(lexeme, "alignof") { return TokenType::Alignof; } },
+        8 => { if memeq(lexeme, "continue") { return TokenType::Continue; } },
+        9 => { if memeq(lexeme, "interface") { return TokenType::Interface; } },
+        _ => {},
+    };
     return TokenType::Identifier;
 }
 

@@ -82,7 +82,7 @@ extend Errors {
         let add = unsafe string::strlen(msg as *const char) + "\n  = note: ".len + 1;
         let next = unsafe stdlib::malloc(old_len + add + 1) as *mut char;
         if next == null { oom(); }
-        if old_len != 0 { unsafe string::memcpy(next as *mut void, old as *const void, old_len); }
+        if old_len != 0 { unsafe string::memcpy(next as *mut void, old, old_len); }
         unsafe stdio::snprintf(next + old_len, add + 1, "\n  = note: %s".ptr as *const char, msg);
         unsafe stdlib::free(old as *mut void);
         unsafe stdlib::free(msg as *mut void);
@@ -115,18 +115,15 @@ extend Errors {
                 i = i + 1;
             }
         }
-        let mut k: usize = 0;
-        while k < self.errors.len() {
+        for k in 0..self.errors.len() {
             let mut notes = "".ptr as *const char;
             if k < self.notes.len() { notes = (*self.notes.at(k)) as *const char; }
             let block = render((*self.errors.at(k)) as *const char, source, &line_starts, len, *self.starts.at(k), *self.lens.at(k), file, notes);
             unsafe stdlib::free((*self.errors.at(k)) as *mut void);
             self.errors.set(k, block);
-            k = k + 1;
         }
         let mut w: usize = 0;
-        k = 0;
-        while k < self.errors.len() {
+        for k in 0..self.errors.len() {
             let mut dup = false;
             let mut j: usize = 0;
             while j < w && !dup {
@@ -139,17 +136,14 @@ extend Errors {
                 if w != k { self.errors.set(w, (*self.errors.at(k)) as *mut char); }
                 w = w + 1;
             }
-            k = k + 1;
         }
         self.errors.truncate(w);
         line_starts.free();
     }
 
     pub fn log(self: &Self) void {
-        let mut i: usize = 0;
-        while i < self.errors.len() {
+        for i in 0..self.errors.len() {
             unsafe stdio::fprintf(stdio::stderr(), "%s\n".ptr as *const char, *self.errors.at(i));
-            i = i + 1;
         }
     }
 }

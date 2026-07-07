@@ -76,7 +76,7 @@ pub struct LookupHit { pub node: NodeId, pub mid: ModuleId }
 fn dup_cstr(s: *const char) *mut char {
     let n = unsafe cstring::strlen(s);
     let d = unsafe stdlib::malloc(n + 1) as *mut char;
-    unsafe cstring::memcpy(d as *mut void, s as *const void, n + 1);
+    unsafe cstring::memcpy(d as *mut void, s, n + 1);
     return d;
 }
 
@@ -116,7 +116,7 @@ fn dir_of(path: *const char) *mut char {
     if slash == null { return dup_cstr(".".ptr as *const char); }
     let n = (slash as usize) - (path as usize);
     let d = unsafe stdlib::malloc(n + 1) as *mut char;
-    unsafe cstring::memcpy(d as *mut void, path as *const void, n);
+    unsafe cstring::memcpy(d as *mut void, path, n);
     unsafe d[n] = 0 as char;
     return d;
 }
@@ -130,7 +130,7 @@ fn stem_of(path: *const char) *mut char {
     let mut n = unsafe cstring::strlen(base);
     if dot != null { n = (dot as usize) - (base as usize); }
     let d = unsafe stdlib::malloc(n + 1) as *mut char;
-    unsafe cstring::memcpy(d as *mut void, base as *const void, n);
+    unsafe cstring::memcpy(d as *mut void, base, n);
     unsafe d[n] = 0 as char;
     return d;
 }
@@ -152,12 +152,12 @@ fn join_parts(ast: &Ast, src: *const char, parts: NodeList, sep: *const char) *m
     i = 0;
     while i < parts.len {
         if i != 0 {
-            unsafe cstring::memcpy((out + at) as *mut void, sep as *const void, seplen);
+            unsafe cstring::memcpy((out + at) as *mut void, sep, seplen);
             at = at + seplen;
         }
         let sp = ast.at_const(unsafe ids[i as usize]).as_data.name.text;
         let l = (sp.end - sp.start) as usize;
-        unsafe cstring::memcpy((out + at) as *mut void, (src + sp.start as usize) as *const void, l);
+        unsafe cstring::memcpy((out + at) as *mut void, (src + sp.start as usize), l);
         at = at + l;
         i = i + 1;
     }
@@ -264,9 +264,9 @@ extend Package {
     pub fn find(self: &Self, path: *const char, path_len: usize) i32 {
         let mut i: usize = 0;
         while i < self.modules.len() {
-            let mp = self.modules.at(i).path as *const char;
+            let mp = self.modules.at(i).path;
             if unsafe cstring::strlen(mp) == path_len
-                && unsafe cstring::memcmp(mp as *const void, path as *const void, path_len) == 0 {
+                && unsafe cstring::memcmp(mp, path, path_len) == 0 {
                 return i as i32;
             }
             i = i + 1;
@@ -289,14 +289,14 @@ extend Package {
     // A module already loaded (an import cycle) simply resolves to its id: modules are parsed whole before
     // any resolution, so mutual imports need no special handling.
     fn load_module(self: &mut Self, mod_path: *mut char, file_path: *mut char) i32 {
-        let existing = self.find(mod_path as *const char, unsafe cstring::strlen(mod_path as *const char));
+        let existing = self.find(mod_path, unsafe cstring::strlen(mod_path));
         if existing >= 0 {
             unsafe stdlib::free(mod_path as *mut void);
             unsafe stdlib::free(file_path as *mut void);
             return existing;
         }
 
-        let fc = read_file(file_path as *const char);
+        let fc = read_file(file_path);
         if fc.ptr == null {
             unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%s' (%s)\n".ptr as *const char,
                                   mod_path, file_path);
@@ -306,7 +306,7 @@ extend Package {
             return -1;
         }
 
-        let parsed = parse_source(fc.ptr as *const char, fc.len, file_path as *const char);
+        let parsed = parse_source(fc.ptr as *const char, fc.len, file_path);
         let ok = parsed.ok;
         let id = self.add_module(mod_path, file_path, fc.ptr, fc.len, parsed.ast, ok);
         if !ok {
@@ -325,14 +325,14 @@ extend Package {
             let m = self.modules.at(id as usize);
             let items = m.ast.at_const(m.ast.root).as_data.program.items;
             let ids = m.ast.list(items);
-            let src = m.source as *const char;
+            let src = m.source;
             let mut i: u32 = 0;
             while i < items.len {
                 let n = m.ast.at_const(unsafe ids[i as usize]);
                 if n.kind == NodeKind::NODE_IMPORT {
                     let parts = n.as_data.import_decl.path;
                     child_paths.push(join_parts(&m.ast, src, parts, "::".ptr as *const char));
-                    child_files.push(resolve_import_file(root_dir as *const char, std_root as *const char,
+                    child_files.push(resolve_import_file(root_dir, std_root,
                                                          &m.ast, src, parts));
                 }
                 i = i + 1;
@@ -356,7 +356,7 @@ extend Package {
         let mut i: usize = 0;
         while i < self.modules.len() {
             let is_core = self.modules.at(i).has_ast
-                && unsafe cstring::strcmp(self.modules.at(i).path as *const char,
+                && unsafe cstring::strcmp(self.modules.at(i).path,
                                           "__std::core".ptr as *const char) == 0;
             if is_core {
                 let mut b: usize = 0;
@@ -421,7 +421,7 @@ extend Package {
     pub fn lookup(self: &Self, mid: ModuleId, name: *const char, name_len: usize, want_type: bool) NodeId {
         if !self.modules.at(mid as usize).has_ast { return NODE_NONE; }
         let ast = unsafe &*self.module_ast_ptr(mid);
-        let src = self.modules.at(mid as usize).source as *const char;
+        let src = self.modules.at(mid as usize).source;
         let items = ast.at_const(ast.root).as_data.program.items;
         let ids = ast.list(items);
         let mut i: u32 = 0;
@@ -483,8 +483,8 @@ extend Package {
                         let sp = ast.at_const(nn).as_data.name.text;
                         let l = (sp.end - sp.start) as usize;
                         if l == name_len
-                            && unsafe cstring::memcmp((src + sp.start as usize) as *const void,
-                                                      name as *const void, name_len) == 0 {
+                            && unsafe cstring::memcmp((src + sp.start as usize),
+                                                      name, name_len) == 0 {
                             return iid;
                         }
                     }
@@ -498,8 +498,8 @@ extend Package {
                 let sp = ast.at_const(name_node).as_data.name.text;
                 let l = (sp.end - sp.start) as usize;
                 if l == name_len
-                    && unsafe cstring::memcmp((src + sp.start as usize) as *const void,
-                                              name as *const void, name_len) == 0 {
+                    && unsafe cstring::memcmp((src + sp.start as usize),
+                                              name, name_len) == 0 {
                     return nid;
                 }
             }
@@ -547,13 +547,13 @@ extend Package {
                 let md = self.modules.at(mo as usize);
                 let items = md.ast.at_const(md.ast.root).as_data.program.items;
                 let ids = md.ast.list(items);
-                let src = md.source as *const char;
+                let src = md.source;
                 let mut i: u32 = 0;
                 while i < items.len {
                     let it = md.ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
                         let path = join_parts(&md.ast, src, it.as_data.import_decl.path, "::".ptr as *const char);
-                        let c = self.find(path as *const char, unsafe cstring::strlen(path as *const char));
+                        let c = self.find(path, unsafe cstring::strlen(path));
                         unsafe stdlib::free(path as *mut void);
                         if c >= 0 && !*seen.at(c as usize) {
                             seen.set(c as usize, true);
@@ -586,13 +586,13 @@ extend Package {
                 let ast = unsafe &*self.module_ast_ptr(cur);
                 let items = ast.at_const(ast.root).as_data.program.items;
                 let ids = ast.list(items);
-                let src = self.modules.at(cur as usize).source as *const char;
+                let src = self.modules.at(cur as usize).source;
                 let mut i: u32 = 0;
                 while i < items.len {
                     let it = ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
                         let path = join_parts(&*ast, src, it.as_data.import_decl.path, "::".ptr as *const char);
-                        let c = self.find(path as *const char, unsafe cstring::strlen(path as *const char));
+                        let c = self.find(path, unsafe cstring::strlen(path));
                         unsafe stdlib::free(path as *mut void);
                         if c >= 0 && !*seen.at(c as usize) {
                             seen.set(c as usize, true);
@@ -1207,7 +1207,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         let fl = dl + 1 + nl + 1;
         let file = unsafe stdlib::malloc(fl) as *mut char;
         unsafe stdio::snprintf(file, fl, "%s/%s".ptr as *const char, std_dir, nmk);
-        if unsafe shim::sc_stat_isdir(file as *const char) == 1 { // a dir literally named "*.spc"
+        if unsafe shim::sc_stat_isdir(file) == 1 { // a dir literally named "*.spc"
             unsafe stdlib::free(file as *mut void);
             unsafe stdlib::free(nmk as *mut void);
             k = k + 1;
@@ -1216,7 +1216,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         let mut dup = false;
         let mut i2: usize = 0;
         while i2 < p.modules.len() {
-            if same_file(p.modules.at(i2).file as *const char, file as *const char) {
+            if same_file(p.modules.at(i2).file, file) {
                 p.modules.index_mut(i2).prelude = true;
                 dup = true;
                 break;
@@ -1225,7 +1225,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         }
         if !dup {
             let stem = stem_of(nmk as *const char);
-            let sl = unsafe cstring::strlen(stem as *const char);
+            let sl = unsafe cstring::strlen(stem);
             let pl = 7 + sl + 1; // "__std::" is 7 chars
             let modpath = unsafe stdlib::malloc(pl) as *mut char;
             unsafe stdio::snprintf(modpath, pl, "__std::%s".ptr as *const char, stem);

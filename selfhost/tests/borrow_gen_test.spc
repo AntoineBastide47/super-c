@@ -410,7 +410,7 @@ fn snippet_ok(i: i32) bool {
 fn bundle(idx: *const i32, n: i32, label: str) {
     let mut src = Buf8192 {};
     let mut calls = Buf2048 {};
-    let mut at: i32 = unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 8192, PRE.ptr as *const char);
+    let mut at: i32 = unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 8192, "%s".ptr as *const char, PRE.ptr as *const char);
     let mut cat: i32 = 0;
     let mut ok = true;
     unsafe calls.b[0] = 0 as char;

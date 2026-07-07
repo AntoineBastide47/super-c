@@ -30,7 +30,7 @@ struct Buf128 { pub b: [char; 128] }
 fn sc_strdup(s: *const char) *mut char {
     let n = unsafe cstring::strlen(s);
     let d = unsafe stdlib::malloc(n + 1) as *mut char;
-    unsafe cstring::memcpy(d as *mut void, s as *const void, n + 1);
+    unsafe cstring::memcpy(d as *mut void, s, n + 1);
     return d;
 }
 
@@ -91,7 +91,7 @@ fn build_out_path(root_dir: *const char, mod_path: *const char, ext: *const char
         }
         s = unsafe (s + 1);
     }
-    unsafe cstring::memcpy((out + at) as *mut void, ext as *const void, unsafe cstring::strlen(ext) + 1);
+    unsafe cstring::memcpy((out + at) as *mut void, ext, unsafe cstring::strlen(ext) + 1);
     return out;
 }
 
@@ -100,29 +100,29 @@ fn mkdir_p(path: *const char) void {
     let n = unsafe cstring::strlen(path);
     if n == 0 || n >= 4096 { return; }
     let mut buf = PathBuf { };
-    unsafe cstring::memcpy((&mut buf.b[0]) as *mut void, path as *const void, n + 1);
+    unsafe cstring::memcpy((&mut buf.b[0]) as *mut void, path, n + 1);
     let base = (&mut buf.b[0]) as *mut char;
     let mut i: usize = 1;
     while i < n {
         if (unsafe base[i]) == ('/' as char) {
             unsafe base[i] = 0 as char;
-            let _ = unsafe shim::sc_mkdir(base as *const char);
+            let _ = unsafe shim::sc_mkdir(base);
             unsafe base[i] = '/' as char;
         }
         i = i + 1;
     }
-    let _ = unsafe shim::sc_mkdir(base as *const char);
+    let _ = unsafe shim::sc_mkdir(base);
 }
 
 // Open `path` for writing, creating any missing parent directories first.
 fn open_out(path: *mut char) *mut stdio::FILE {
-    let slash = unsafe cstring::strrchr(path as *const char, '/' as i32);
+    let slash = unsafe cstring::strrchr(path, '/' as i32);
     if slash != null {
         unsafe *slash = 0 as char;
-        mkdir_p(path as *const char);
+        mkdir_p(path);
         unsafe *slash = '/' as char;
     }
-    return unsafe stdio::fopen(path as *const char, "w".ptr as *const char);
+    return unsafe stdio::fopen(path, "w".ptr as *const char);
 }
 
 // Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
@@ -322,7 +322,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
 fn resolve_module(p: &mut loader::Package, i: usize) bool {
     let pkg = (&*p) as *const loader::Package;
     let m = p.modules.index_mut(i);
-    let src = m.source as *const char;
+    let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);
@@ -343,7 +343,7 @@ fn resolve_module(p: &mut loader::Package, i: usize) bool {
 fn typecheck_module(p: &mut loader::Package, i: usize) bool {
     let pkg = (&mut *p) as *mut loader::Package;
     let m = p.modules.index_mut(i);
-    let src = m.source as *const char;
+    let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);
@@ -367,7 +367,7 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     let sp = unsafe (*p).modules.at(m as usize).ast.at_const(cond).span;
     let src = unsafe (*p).modules.at(m as usize).source as *const u8;
     let len = unsafe (*p).modules.at(m as usize).source_len;
-    let file = unsafe (*p).modules.at(m as usize).file as *const char;
+    let file = unsafe (*p).modules.at(m as usize).file;
     let mut errs = diag::Errors::new();
     if msg != null {
         errs.emitf(sp.start, sp.end - sp.start, "static assertion cannot be evaluated: %s".ptr as *const char, msg);
@@ -425,7 +425,7 @@ fn ext_c_wrap(root: *const char, keep: &mut KeepList, seen: &mut Vector<*mut cha
     let path = build_out_path(root, (&nm.b[0]) as *const char, ".c".ptr as *const char);
     let f: *mut stdio::FILE = if path != null { open_out(path); } else { null; };
     if f == null {
-        if path != null { unsafe stdio::perror(path as *const char); unsafe stdlib::free(path as *mut void); }
+        if path != null { unsafe stdio::perror(path); unsafe stdlib::free(path as *mut void); }
         unsafe *err = true;
         return;
     }
@@ -436,7 +436,7 @@ fn ext_c_wrap(root: *const char, keep: &mut KeepList, seen: &mut Vector<*mut cha
 }
 
 fn ext_c_collect(p: &mut loader::Package, keep: &mut KeepList, keep_ok: *mut bool, err: *mut bool) void {
-    let root = p.root_dir as *const char;
+    let root = p.root_dir;
     let mut ld = Vector::<*mut char>::new();
     let mut seen = Vector::<*mut char>::new();
     let mut nsrc: u32 = 0;
@@ -444,8 +444,8 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut KeepList, keep_ok: *mut boo
     let mut m: usize = 0;
     while m < n {
         if !p.modules.at(m).has_ast { m = m + 1; continue; }
-        let file = p.modules.at(m).file as *const char;
-        let src = p.modules.at(m).source as *const char;
+        let file = p.modules.at(m).file;
+        let src = p.modules.at(m).source;
         let ap = mod_ast_c(&*p, m as ModuleId);
         let mut ai: usize = 0;
         while ai < unsafe (*ap).attrs.len() {
@@ -514,14 +514,14 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut KeepList, keep_ok: *mut boo
     let ldpath = build_out_path(root, "__ldflags".ptr as *const char, "".ptr as *const char);
     if ldpath != null {
         if ld.len() != 0 {
-            let f = unsafe stdio::fopen(ldpath as *const char, "w".ptr as *const char);
+            let f = unsafe stdio::fopen(ldpath, "w".ptr as *const char);
             if f != null {
                 let mut k: usize = 0;
                 while k < ld.len() { unsafe stdio::fprintf(f, "%s\n".ptr as *const char, *ld.index_mut(k)); k = k + 1; }
                 unsafe stdio::fclose(f);
             }
         } else {
-            let _ = unsafe shim::sc_unlink(ldpath as *const char);
+            let _ = unsafe shim::sc_unlink(ldpath);
         }
         unsafe stdlib::free(ldpath as *mut void);
     }
@@ -574,7 +574,7 @@ extend TestPlan {
 fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) void {
     let src = p.modules.at(m as usize).source as *const u8;
     let len = p.modules.at(m as usize).source_len;
-    let file = p.modules.at(m as usize).file as *const char;
+    let file = p.modules.at(m as usize).file;
     let mut errs = diag::Errors::new();
     errs.emitf(sp.start, sp.end - sp.start, "%s".ptr as *const char, msg);
     errs.finalize(src, len, file);
@@ -621,7 +621,7 @@ fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, 
     if n.kind != NodeKind::NODE_IDENTIFIER { return false; }
     let t = n.as_data.name.text;
     if (t.end - t.start) != 4 { return false; }
-    return unsafe cstring::memcmp((src + t.start as usize) as *const void, "void".ptr as *const void, 4) == 0;
+    return unsafe cstring::memcmp((src + t.start as usize), "void".ptr, 4) == 0;
 }
 
 // Classify one @test parameter: 1 = fixture/receiver, 2 = global env, 0 with an error emitted.
@@ -695,7 +695,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
     let mut m: usize = 0;
     while m < n {
         if !p.modules.at(m).has_ast || p.modules.at(m).prelude { m = m + 1; continue; }
-        let src = p.modules.at(m).source as *const char;
+        let src = p.modules.at(m).source;
         let nattr = unsafe (*(mod_ast_c(&*p, m as ModuleId))).attrs.len();
         let mut ai: usize = 0;
         while ai < nattr {
@@ -795,7 +795,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
     m = 0;
     while m < n {
         if !p.modules.at(m).has_ast || p.modules.at(m).prelude { m = m + 1; continue; }
-        let src = p.modules.at(m).source as *const char;
+        let src = p.modules.at(m).source;
         let nattr = unsafe (*(mod_ast_c(&*p, m as ModuleId))).attrs.len();
         let mut ai: usize = 0;
         while ai < nattr {
@@ -859,7 +859,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
     m = 0;
     while m < n {
         if !p.modules.at(m).has_ast || p.modules.at(m).prelude { m = m + 1; continue; }
-        let src = p.modules.at(m).source as *const char;
+        let src = p.modules.at(m).source;
         let nattr = unsafe (*(mod_ast_c(&*p, m as ModuleId))).attrs.len();
         let mut ai: usize = 0;
         while ai < nattr {
@@ -888,7 +888,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             }
             let nmnode = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(at.owner).as_data.function.name;
             let nmsp = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(nmnode).as_data.name.text;
-            if ext == NODE_NONE && (nmsp.end - nmsp.start) == 4 && unsafe cstring::memcmp((src + nmsp.start as usize) as *const void, "main".ptr as *const void, 4) == 0 {
+            if ext == NODE_NONE && (nmsp.end - nmsp.start) == 4 && unsafe cstring::memcmp((src + nmsp.start as usize), "main".ptr, 4) == 0 {
                 test_err(&mut *p, m as ModuleId, sp, "'main' cannot be a '@test' (it is replaced by the test runner)".ptr as *const char);
                 ai = ai + 1; continue;
             }
@@ -1018,10 +1018,10 @@ int main(int argc, char **argv) {
 // `module::Type::method`), the global-env hooks (stubs when absent), and the fixed runner. Returns the
 // path (ownership to the caller / keep-list), or null.
 fn write_test_main(p: &mut loader::Package, plan: &TestPlan) *mut char {
-    let path = build_out_path(p.root_dir as *const char, "__test_main".ptr as *const char, ".c".ptr as *const char);
+    let path = build_out_path(p.root_dir, "__test_main".ptr as *const char, ".c".ptr as *const char);
     if path == null { return null; }
     let f = open_out(path);
-    if f == null { unsafe stdio::perror(path as *const char); unsafe stdlib::free(path as *mut void); return null; }
+    if f == null { unsafe stdio::perror(path); unsafe stdlib::free(path as *mut void); return null; }
     unsafe stdio::fputs("/* generated by super-c --test */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\n\n".ptr as *const char, f);
     let mut ci: usize = 0;
     while ci < plan.cases.len() {
@@ -1036,14 +1036,14 @@ fn write_test_main(p: &mut loader::Package, plan: &TestPlan) *mut char {
         let a = mod_ast_c(&*p, tc.mod);
         let nmnode = unsafe (*a).at_const(tc.func).as_data.function.name;
         let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
-        let modpath = p.modules.at(tc.mod as usize).path as *const char;
-        let msrc = p.modules.at(tc.mod as usize).source as *const char;
+        let modpath = p.modules.at(tc.mod as usize).path;
+        let msrc = p.modules.at(tc.mod as usize).source;
         unsafe stdio::fprintf(f, "  { \"%s::".ptr as *const char, modpath);
         if tc.suite.node != NODE_NONE {
             let sa = mod_ast_c(&*p, tc.suite.module);
             let snmn = unsafe (*sa).at_const(tc.suite.node).as_data.aggregate.name;
             let snm = unsafe (*sa).at_const(snmn).as_data.name.text;
-            let ssrc = p.modules.at(tc.suite.module as usize).source as *const char;
+            let ssrc = p.modules.at(tc.suite.module as usize).source;
             unsafe stdio::fprintf(f, "%.*s::".ptr as *const char, (snm.end - snm.start) as i32, unsafe (ssrc + snm.start as usize));
         }
         let spflag = if tc.should_panic { 1 as i32; } else { 0 as i32; };
@@ -1071,7 +1071,7 @@ extend Cmd {
             self.cap = self.cap * 2;
             self.data = unsafe stdlib::realloc(self.data as *mut void, self.cap) as *mut char;
         }
-        unsafe cstring::memcpy((self.data + self.at) as *mut void, s as *const void, sl + 1);
+        unsafe cstring::memcpy((self.data + self.at) as *mut void, s, sl + 1);
         self.at = self.at + sl;
     }
     fn free(self: &mut Self) void { unsafe stdlib::free(self.data as *mut void); }
@@ -1083,7 +1083,7 @@ extend Cmd {
 fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepList, out_bin: *const char) i32 {
     let mut cc = unsafe stdlib::getenv("CC".ptr as *const char);
     if cc == null || (unsafe *cc) == (0 as char) { cc = "cc".ptr as *const char; }
-    let root = p.root_dir as *const char;
+    let root = p.root_dir;
     let mut cmd = Cmd::new();
     cmd.append(cc);
     if out_bin != null {
@@ -1098,10 +1098,10 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
     let mut i: usize = 0;
     while i < keep.n {
         let cf = unsafe keep.data[i];
-        let l = unsafe cstring::strlen(cf as *const char);
-        if l > 2 && unsafe cstring::strcmp((cf as *const char + (l - 2)) as *const char, ".c".ptr as *const char) == 0 {
+        let l = unsafe cstring::strlen(cf);
+        if l > 2 && unsafe cstring::strcmp((cf + (l - 2)) as *const char, ".c".ptr as *const char) == 0 {
             cmd.append(" '".ptr as *const char);
-            cmd.append(cf as *const char);
+            cmd.append(cf);
             cmd.append("'".ptr as *const char);
         }
         i = i + 1;
@@ -1109,7 +1109,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
     // @c.link flags (one per line in build/__ldflags)
     let ldpath = build_out_path(root, "__ldflags".ptr as *const char, "".ptr as *const char);
     if ldpath != null {
-        let lf = unsafe stdio::fopen(ldpath as *const char, "rb".ptr as *const char);
+        let lf = unsafe stdio::fopen(ldpath, "rb".ptr as *const char);
         if lf != null {
             let mut line = PathBuf {};
             while unsafe stdio::fgets((&mut line.b[0]) as *mut char, 4096, lf) != null {
@@ -1121,7 +1121,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
         }
         unsafe stdlib::free(ldpath as *mut void);
     }
-    let brc = unsafe stdlib::system(cmd.data as *const char);
+    let brc = unsafe stdlib::system(cmd.data);
     if brc != 0 {
         let mut what = "test build".ptr as *const char;
         if out_bin != null { what = "build".ptr as *const char; }
@@ -1145,7 +1145,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
         run.append(unsafe (*topts).filter);
         run.append("'".ptr as *const char);
     }
-    let rrc = unsafe stdlib::system(run.data as *const char);
+    let rrc = unsafe stdlib::system(run.data);
     cmd.free();
     run.free();
     if rrc < 0 { return 1; }
@@ -1191,8 +1191,8 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
         if !plan.ok { plan.free(); return 1; }
     }
 
-    write_super_rt(p.root_dir as *const char);
-    let root = p.root_dir as *const char;
+    write_super_rt(p.root_dir);
+    let root = p.root_dir;
     let mut keep = KeepList::new();
     let mut keep_ok = keep.push(build_out_path(root, "super_rt".ptr as *const char, ".h".ptr as *const char));
     let mut err = false;
@@ -1212,9 +1212,9 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
         let mi = unsafe order[oi];
         if live != null && !(unsafe live[mi as usize]) { oi = oi + 1; continue; }
         let m_ast = mod_ast_m(&mut *p, mi);
-        let src = p.modules.at(mi as usize).source as *const char;
+        let src = p.modules.at(mi as usize).source;
         let slen = p.modules.at(mi as usize).source_len;
-        let mpath = p.modules.at(mi as usize).path as *const char;
+        let mpath = p.modules.at(mi as usize).path;
         let pkg = (&mut *p) as *mut loader::Package;
         let mut c = cg::Codegen::new(m_ast, src, slen, pkg);
         c.set_multifile(true);
@@ -1329,9 +1329,9 @@ fn exe_std_dir(argv0: *const char) *mut char {
     let dirlen = if slash != null { (slash as usize) - (path as usize); } else { 1 as usize; };
     let out = unsafe stdlib::malloc(dirlen + 5) as *mut char;
     if out == null { return null; }
-    if slash != null { unsafe cstring::memcpy(out as *mut void, path as *const void, dirlen); }
+    if slash != null { unsafe cstring::memcpy(out as *mut void, path, dirlen); }
     else { unsafe out[0] = '.' as char; }
-    unsafe cstring::memcpy((out + dirlen) as *mut void, "/std".ptr as *const void, 4);
+    unsafe cstring::memcpy((out + dirlen) as *mut void, "/std".ptr, 4);
     unsafe out[dirlen + 4] = 0 as char;
     return out;
 }
