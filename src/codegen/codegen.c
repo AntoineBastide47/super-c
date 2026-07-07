@@ -1594,7 +1594,13 @@ static void render_type_node(Codegen *c, const NodeId tn, const char *decl, char
       const TypeQualifier q = n->as.indirect_type.qualifier;
       // `&T` -> `const T *`, `&mut T` -> `T *`; a raw pointer is const-pointee only for `*const`.
       const bool const_pointee = n->kind == NODE_REFERENCE_TYPE ? q != TYPE_QUAL_MUT : q == TYPE_QUAL_CONST;
-      if (const_pointee) {
+      const bool elem_is_ptr = ptr != TYPE_NONE && ast_type_at(c->ast, ptr)->kind == TYPE_POINTER;
+      if (const_pointee && elem_is_ptr) {
+        // Element is a pointer: east-const the pointer (`char *const *`), not its pointee.
+        char cinner[486];
+        buf_join3(cinner, sizeof cinner, "const ", "", inner);
+        render_type_node(c, n->as.indirect_type.type, cinner, out, cap);
+      } else if (const_pointee) {
         char base[512];
         render_type_node(c, n->as.indirect_type.type, inner, base, sizeof base);
         // A reference-to-reference (`&&T`) already renders its pointee `const` -- don't double the keyword.
@@ -1707,7 +1713,14 @@ static void render_type_id(Codegen *c, const TypeId t, const char *decl, char *o
       buf_join3(inner, sizeof inner, "*", "", decl);
       // `&T` -> `const T *`, `&mut T` -> `T *`; a raw pointer is const-pointee only for `*const`.
       const bool const_pointee = ty->kind == TYPE_REFERENCE ? ty->qualifier != TYPE_QUAL_MUT : ty->qualifier == TYPE_QUAL_CONST;
-      if (const_pointee) {
+      const bool elem_is_ptr = ast_type_at(c->ast, subst_resolve(c, ty->as.elem))->kind == TYPE_POINTER;
+      if (const_pointee && elem_is_ptr) {
+        // The element is itself a pointer (resolve generics first): `const T` must qualify the POINTER
+        // (east: `char *const *`), not its pointee (`const char **`, an illegal 2nd-level qualifier).
+        char cinner[486];
+        buf_join3(cinner, sizeof cinner, "const ", "", inner);
+        render_type_id(c, ty->as.elem, cinner, out, cap);
+      } else if (const_pointee) {
         char base[512];
         render_type_id(c, ty->as.elem, inner, base, sizeof base);
         // A reference-to-reference (`&&T`) already renders its pointee `const` -- don't double the keyword.

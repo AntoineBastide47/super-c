@@ -1062,8 +1062,11 @@ static void ext_c_collect(Package *p, ExtC *x, char ***kept, size_t *nkept, size
 
 // Compile the emitted build tree (+ the runner) with $CC and execute the test binary, forwarding the
 // runner options. Returns the runner's exit code (the failure count), or 1 on a build failure.
+// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
+// linked to that path and we return; otherwise it links `<root>/build/__tests` and executes it as the
+// test runner, forwarding `to`'s options.
 static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfiles, const size_t nc,
-                              const ExtC *ext) {
+                              const ExtC *ext, const char *out_bin) {
   const char *cc = getenv("CC");
   if (!cc || !*cc)
     cc = "cc";
@@ -1086,7 +1089,10 @@ static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfile
     }                                                                                                                  \
     at += (size_t)snprintf(cmd + at, cap - at, __VA_ARGS__);                                                           \
   } while (0)
-  CMD_APPEND("%s -std=c11 -o '%s/build/__tests'", cc, p->root_dir);
+  if (out_bin)
+    CMD_APPEND("%s -std=c11 -o '%s'", cc, out_bin);
+  else
+    CMD_APPEND("%s -std=c11 -o '%s/build/__tests'", cc, p->root_dir);
   for (size_t i = 0; i < nc; i++)
     if (cfiles[i] && strlen(cfiles[i]) > 2 && !strcmp(cfiles[i] + strlen(cfiles[i]) - 2, ".c"))
       CMD_APPEND(" '%s'", cfiles[i]);
@@ -1094,9 +1100,13 @@ static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfile
     CMD_APPEND(" %s", ext->ld[i]);
   const int brc = system(cmd);
   if (brc != 0) {
-    fprintf(stderr, "%s: test build failed (%s)\n", BIN_NAME, cc);
+    fprintf(stderr, "%s: %s failed (%s)\n", BIN_NAME, out_bin ? "build" : "test build", cc);
     free(cmd);
     return 1;
+  }
+  if (out_bin) { // the `build` subcommand: linked the program, nothing to run
+    free(cmd);
+    return 0;
   }
   at = 0;
   CMD_APPEND("'%s/build/__tests'", p->root_dir);
@@ -1118,7 +1128,7 @@ static int test_build_and_run(Package *p, const TestOpts *to, char *const *cfile
 // resolution sees every module's declarations. Output is always a `<root>/build/` tree mirroring the
 // module paths: a `super_rt.h` plus one `.c`/`.h` per module (the std prelude is its own unmangled
 // module the others include). Symbols are mangled only when there is more than one user module.
-static int run_package(Package *p, const TestOpts *topts) {
+static int run_package(Package *p, const TestOpts *topts, const char *out_bin) {
   for (size_t i = 0; i < p->count; i++)
     p->ok = resolve_one(p, &p->modules[i].ast, p->modules[i].source, p->modules[i].source_len) && p->ok;
   if (!p->ok)
@@ -1228,7 +1238,10 @@ static int run_package(Package *p, const TestOpts *topts) {
   if (keep_ok && (size_t)snprintf(broot, sizeof broot, "%s/build", p->root_dir) < sizeof broot)
     prune_orphans(broot, kept, nkept);
   int rc = err ? 1 : 0;
-  if (testing && !err) { // synthesize the runner, then compile + execute the whole tree
+  if (out_bin) { // the `build` subcommand: link the whole tree into a program at out_bin
+    if (!err)
+      rc = test_build_and_run(p, NULL, kept, nkept, &ext, out_bin);
+  } else if (testing && !err) { // synthesize the runner, then compile + execute the whole tree
     if (plan.ncases == 0) {
       fprintf(stderr, "%s: no '@test' functions found\n", BIN_NAME);
       rc = 1;
@@ -1238,7 +1251,7 @@ static int run_package(Package *p, const TestOpts *topts) {
         rc = 1;
       } else {
         keep_push(&kept, &nkept, &kcap, runner); // owned by kept[] now
-        rc = test_build_and_run(p, topts, kept, nkept, &ext);
+        rc = test_build_and_run(p, topts, kept, nkept, &ext, NULL);
       }
     }
   }
@@ -1252,11 +1265,11 @@ static int run_package(Package *p, const TestOpts *topts) {
 }
 
 static int run_file(const char *path, const char *std_dir, const uint32_t ce_steps, const uint64_t ce_mem,
-                    const TestOpts *topts) {
+                    const TestOpts *topts, const char *out_bin) {
   Package *p = package_load(path, std_dir);
   if (p->ok)
     p->ceval = consteval_new(p, ce_steps, ce_mem); // always on; the flags only bound its budgets
-  const int rc = p->ok ? run_package(p, topts) : 1;
+  const int rc = p->ok ? run_package(p, topts, out_bin) : 1;
   consteval_free(&p->ceval);
   package_free(&p);
   return rc;
@@ -1308,10 +1321,19 @@ int main(const int argc, char **argv) {
   uint32_t ce_steps = 0; // 0 = the evaluator's defaults
   uint64_t ce_mem = 0;
   const char *file = NULL;
+  const char *out_bin = NULL; // set by the `build` subcommand (via -o, or defaulted)
+  bool build_mode = false;
   TestOpts topts = {0};
   bool bad = false;
   for (int i = 1; i < argc; i++) {
-    if (strncmp(argv[i], "--const-eval-steps=", 19) == 0) {
+    if (!build_mode && !file && strcmp(argv[i], "build") == 0) {
+      build_mode = true; // `super-c build <root.spc> [-o out]`: emit + link a program
+    } else if (strcmp(argv[i], "-o") == 0) {
+      if (i + 1 < argc)
+        out_bin = argv[++i];
+      else
+        bad = true;
+    } else if (strncmp(argv[i], "--const-eval-steps=", 19) == 0) {
       const uint64_t v = parse_size(argv[i] + 19);
       if (!v || v > UINT32_MAX)
         bad = true;
@@ -1338,15 +1360,20 @@ int main(const int argc, char **argv) {
     }
   }
   bad |= !topts.enabled && (topts.jobs || topts.no_fork || topts.filter); // --test-* imply --test
+  bad |= out_bin && !build_mode;   // -o is only meaningful for `build`
+  bad |= build_mode && topts.enabled; // `build` and `--test` are mutually exclusive
+  if (build_mode && !out_bin)
+    out_bin = "a.out"; // cc-style default output name
   if (bad || !file || !*file) {
     fprintf(stderr,
             "Usage: %s [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]]\n"
-            "       %*s [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n",
-            BIN_NAME, (int)strlen(BIN_NAME), "");
+            "       %*s [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n"
+            "       %*s build [-o <out>] <path/to/script>\n",
+            BIN_NAME, (int)strlen(BIN_NAME), "", (int)strlen(BIN_NAME), "");
     return 1;
   }
   char *const std_dir = exe_std_dir(argv[0]);
-  const int rc = run_file(file, std_dir, ce_steps, ce_mem, &topts);
+  const int rc = run_file(file, std_dir, ce_steps, ce_mem, &topts, out_bin);
   free(std_dir);
   return rc;
 }

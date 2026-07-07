@@ -79,10 +79,15 @@ TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 RTEST_SRCS := $(wildcard tests/*_rtest.c)
 RTEST_BINS := $(RTEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
+# Self-hosted tests: Super-C `@test` files under selfhost/tests/ that import the self-hosted compiler
+# modules / std and run through `super-c --test` (dogfooding the language's own test framework on itself).
+# They are aggregated by selfhost/run_tests.spc, the compilation ROOT (module imports resolve from there).
+SELFHOST_TEST_ROOT := selfhost/run_tests.spc
+
 BENCHMARK_SRCS := $(wildcard benchmark/*_bench.c)
 BENCHMARK_BINS := $(BENCHMARK_SRCS:benchmark/%.c=$(BUILD_DIR)/benchmark/%)
 
-.PHONY: all build run release test rtest bench clean
+.PHONY: all build run release test rtest selfhost-test bench clean
 
 all: $(BIN)
 
@@ -96,10 +101,15 @@ ifeq ($(PROFILE),dev)
 test: $(BIN) $(TEST_BINS)
 	@for test in $(TEST_BINS); do $$test || exit 1; done
 	@$(MAKE) PROFILE=release rtest
+	@$(MAKE) selfhost-test
 else
 test:
 	@$(MAKE) PROFILE=dev test
 endif
+
+# Run the self-hosted @test suite (selfhost/tests/*.spc) through `super-c --test` via its aggregator root.
+selfhost-test: $(BIN)
+	@./$(BIN) --test $(SELFHOST_TEST_ROOT)
 
 ifeq ($(PROFILE),release)
 rtest: $(RTEST_BINS)
