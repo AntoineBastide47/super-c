@@ -633,15 +633,19 @@ extend Codegen {
     fn inst_name(self: &Self, it: &TyInstance, out: *mut char, cap: usize) void {
         if self.is_self_instance(&*it) { bappend(out, cap, 0, "NAME".ptr as *const char); return; }
         let mut at = self.render_qualified(it.module, unsafe (*self.mod_ast(it.module)).at_const(it.decl).as_data.aggregate.name, out, cap);
-        let sent = CG_PASTE;
+        // The paste sentinel as a NUL-terminated 1-char string (bappend does strlen; a bare `&CG_PASTE`
+        // would read past the single byte into adjacent stack garbage -- the C side uses `char sent[2]`).
+        let mut sentbuf = Buf256 {};
+        unsafe sentbuf.b[0] = CG_PASTE;
+        let sent = (&sentbuf.b[0]) as *const char;
         let mut i: u8 = 0;
         while i < it.n {
             if self.macro_mode {
-                if i != 0 { at = bappend(out, cap, at, (&sent) as *const char); }
+                if i != 0 { at = bappend(out, cap, at, sent); }
                 else { at = bappend(out, cap, at, "__".ptr as *const char); }
                 if i != 0 { at = bappend(out, cap, at, "__".ptr as *const char); }
-                else { at = bappend(out, cap, at, (&sent) as *const char); }
-                if i != 0 { at = bappend(out, cap, at, (&sent) as *const char); }
+                else { at = bappend(out, cap, at, sent); }
+                if i != 0 { at = bappend(out, cap, at, sent); }
                 let mut e = Buf256 {};
                 self.macro_arg_token(it.args[i as usize], (&mut e.b[0]) as *mut char, 176);
                 at = bappend(out, cap, at, (&e.b[0]) as *const char);

@@ -15,5 +15,7 @@ import tests::parser_test;
 import tests::codegen_test;
 import tests::borrow_gen_test;
 import tests::codegen_run_test;
+import tests::raii_gen_test;
+import tests::cli_test;
 
 fn main() i32 { return 0; }
