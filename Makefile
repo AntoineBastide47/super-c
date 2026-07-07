@@ -84,8 +84,9 @@ RTEST_BINS := $(RTEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 # They are aggregated by selfhost/run_tests.spc, the compilation ROOT (module imports resolve from there).
 SELFHOST_TEST_ROOT := selfhost/run_tests.spc
 
-BENCHMARK_SRCS := $(wildcard benchmark/*_bench.c)
-BENCHMARK_BINS := $(BENCHMARK_SRCS:benchmark/%.c=$(BUILD_DIR)/benchmark/%)
+# Self-hosted benchmark: transpiles the whole compiler (selfhost/main.spc's module closure) to C and times
+# each phase. Aggregated by selfhost/run_bench.spc (the compilation ROOT, like run_tests.spc).
+SELFHOST_BENCH_ROOT := selfhost/run_bench.spc
 
 .PHONY: all build run release test rtest selfhost-test bench clean
 
@@ -119,17 +120,14 @@ rtest:
 	@$(MAKE) PROFILE=release rtest
 endif
 
-ifeq ($(PROFILE),release)
-bench: $(BENCHMARK_BINS)
-	@printf '\n========== Benchmarks ==========\n'
-	@for benchmark in $(BENCHMARK_BINS); do \
-	   printf '\n--- %s ---\n' "$$(basename $$benchmark)"; \
-	   $$benchmark || exit 1; \
-	 done
-else
-bench:
-	@$(MAKE) PROFILE=release bench
-endif
+# Benchmark: how long does the compiler take to transpile itself to C? Emit the benchmark (which links the
+# whole self-hosted compiler + a transpile-timing main) via the C super-c, compile it -O2, and run it from
+# the repo root (it reads selfhost/main.spc + std/ffi as its corpus).
+bench: $(BIN)
+	@printf '\n========== Transpile benchmark ==========\n'
+	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
+	@$(CC) $(CSTD) -O2 $$(find selfhost/build -name '*.c') -o $(BUILD_DIR)/selfhost-bench
+	@$(BUILD_DIR)/selfhost-bench
 
 # raii_gen and codegen_run are OpenMP-parallelized; every other test links without it ($(OMP) stays empty).
 $(BUILD_DIR)/tests/raii_gen_test $(BUILD_DIR)/tests/codegen_run_test: OMP := $(OMP_FLAGS)
@@ -138,11 +136,6 @@ $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
 	@$(call ECHO,LINK,$@)
 	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) -DSUPERC_STD_DIR='"$(CURDIR)/std"' $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT) $(OMP)
-
-$(BUILD_DIR)/benchmark/%: benchmark/%.c $(LIB_OBJS)
-	@mkdir -p $(@D)
-	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT)
 
 $(BIN): $(LIB_OBJS) $(BUILD_DIR)/main.o
 	@$(call ECHO,LINK,$@)
@@ -158,7 +151,7 @@ $(BUILD_DIR)/main.o: CPPFLAGS_EXTRA := -DBIN_NAME='"$(BIN)"'
 
 # Header-dependency tracking: -MMD -MP emits a .d file beside each object/binary listing the
 # headers it includes (plus phony header targets so deleting a header doesn't break the build).
-DEPS := $(LIB_OBJS:.o=.d) $(BUILD_DIR)/main.d $(addsuffix .d,$(TEST_BINS) $(RTEST_BINS) $(BENCHMARK_BINS))
+DEPS := $(LIB_OBJS:.o=.d) $(BUILD_DIR)/main.d $(addsuffix .d,$(TEST_BINS) $(RTEST_BINS))
 -include $(DEPS)
 
 clean:
