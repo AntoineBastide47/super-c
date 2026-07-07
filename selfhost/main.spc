@@ -125,6 +125,40 @@ fn open_out(path: *mut char) *mut stdio::FILE {
     return unsafe stdio::fopen(path as *const char, "w".ptr as *const char);
 }
 
+// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
+// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
+// program no longer produces (a removed module/instance/@test-runner/@c.source wrapper) -- a stale TU would
+// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
+fn prune_orphans(dir: *const char, keep: &KeepList) void {
+    let d = unsafe shim::sc_opendir(dir);
+    if d == null { return; }
+    loop {
+        let e = unsafe shim::sc_readdir(d);
+        if e == null { break; }
+        let name = unsafe shim::sc_dirent_name(e);
+        if unsafe cstring::strcmp(name, ".".ptr as *const char) == 0 || unsafe cstring::strcmp(name, "..".ptr as *const char) == 0 { continue; }
+        let mut pb = PathBuf { };
+        let np = unsafe stdio::snprintf((&mut pb.b[0]) as *mut char, 4096, "%s/%s".ptr as *const char, dir, name);
+        if np < 0 || (np as usize) >= 4096 { continue; }
+        let path = (&pb.b[0]) as *const char;
+        if unsafe shim::sc_stat_isdir(path) != 0 {
+            prune_orphans(path, &*keep);
+            let _ = unsafe shim::sc_rmdir(path); // no-op unless the recursion just emptied it
+            continue;
+        }
+        let l = unsafe cstring::strlen(name); // only generated .c/.h translation units are ours to prune
+        if !(l >= 2 && (unsafe name[l - 2]) == ('.' as char) && ((unsafe name[l - 1]) == ('c' as char) || (unsafe name[l - 1]) == ('h' as char))) { continue; }
+        let mut kept = false;
+        let mut i: usize = 0;
+        while i < keep.n && !kept {
+            if unsafe cstring::strcmp(keep.data[i] as *const char, path) == 0 { kept = true; }
+            i = i + 1;
+        }
+        if !kept { let _ = unsafe shim::sc_unlink(path); }
+    }
+    let _ = unsafe shim::sc_closedir(d);
+}
+
 // The runtime header shared by every generated module: the C standard library includes.
 fn write_super_rt(root_dir: *const char) void {
     let path = build_out_path(root_dir, "super_rt".ptr as *const char, ".h".ptr as *const char);
@@ -1229,6 +1263,13 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
     }
     unsafe stdlib::free(order as *mut void);
     if live != null { unsafe stdlib::free(live as *mut void); }
+    // Drop outputs from a previous build that this program no longer emits, so the tree matches the current
+    // sources. Skip on a keep-list OOM -- never risk deleting a live output.
+    if keep_ok {
+        let mut broot = PathBuf { };
+        let bn = unsafe stdio::snprintf((&mut broot.b[0]) as *mut char, 4096, "%s/build".ptr as *const char, root);
+        if bn > 0 && (bn as usize) < 4096 { prune_orphans((&broot.b[0]) as *const char, &keep); }
+    }
     let mut rc: i32 = if err { 1; } else { 0 as i32; };
     if out_bin != null {
         if !err { rc = test_build_and_run(&*p, null as *const TestOpts, &keep, out_bin); }
