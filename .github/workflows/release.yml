@@ -1,0 +1,115 @@
+name: Release
+
+# Owner-only, manual-trigger release: builds the `super-c` binary for macOS and Linux and publishes a
+# GitHub Release with one tarball per platform. It is dispatch-only (never runs on push/PR), and every job
+# is gated to the repository owner, so only the owner can start it. (In a public repo the workflow file is
+# still readable; the guard controls who can RUN it. Make the repo private to also restrict who can see it.)
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/publish (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write            # needed to create the tag + release
+
+concurrency:
+  group: release-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Only the repository owner may run this.
+    if: github.actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Toolchain cache -------------------------------------------------------------------------------
+      # Cache the package-manager download areas so re-runs never re-fetch the C toolchain / any deps.
+      # GitHub runners already ship a working `cc`, so nothing is installed by default -- these caches pay
+      # off the moment a compiler/dep install is added below, and cost nothing otherwise. NOTE: only the
+      # *installation* is cached; build OUTPUTS are never cached (see the Clean step).
+      - name: Cache Homebrew downloads (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Caches/Homebrew/downloads
+          key: cc-brew-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          restore-keys: cc-brew-${{ runner.os }}-
+
+      - name: Cache apt archives (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: cc-apt-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          restore-keys: cc-apt-${{ runner.os }}-
+
+      # Add compiler/dep installs here if ever needed (e.g. a pinned clang/gcc, libomp); their downloads
+      # land in the caches above. The default build needs only the preinstalled `cc`.
+      - name: Toolchain info
+        run: cc --version
+
+      # --- Clean build (never reuse cached build files) --------------------------------------------------
+      - name: Clean any build tree
+        run: make clean
+
+      - name: Build release binary
+        run: make release
+
+      - name: Smoke-check the binary
+        run: |
+          test -x ./super-c
+          file ./super-c
+
+      # --- Package one tarball per platform (binary only) -----------------------------------------------
+      - name: Package
+        run: |
+          set -eu
+          arch="$(uname -m)"
+          name="super-c-${{ matrix.target }}-${arch}"
+          mkdir -p dist
+          cp super-c "dist/${name}"
+          tar -C dist -czf "${name}.tar.gz" "${name}"
+          echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "${{ github.event.inputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "${{ github.event.inputs.tag }}" \
+            --generate-notes \
+            dist/*.tar.gz
