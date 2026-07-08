@@ -82,7 +82,7 @@ fn dup_cstr(s: *const char) *mut char {
 
 // True if `path` names something that can be opened for reading (replaces access(path, F_OK)).
 fn path_exists(path: *const char) bool {
-    let f = unsafe stdio::fopen(path, "rb".ptr as *const char);
+    let f = unsafe stdio::fopen(path, "rb".ptr() as *const char);
     if f == null { return false; }
     unsafe stdio::fclose(f);
     return true;
@@ -90,7 +90,7 @@ fn path_exists(path: *const char) bool {
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer; ptr==null on any I/O error.
 fn read_file(path: *const char) FileContents {
-    let f = unsafe stdio::fopen(path, "rb".ptr as *const char);
+    let f = unsafe stdio::fopen(path, "rb".ptr() as *const char);
     if f == null { return FileContents { ptr: null, len: 0 }; }
     if unsafe stdio::fseek(f, 0, SEEK_END) != 0 { unsafe stdio::fclose(f); return FileContents { ptr: null, len: 0 }; }
     let s = unsafe stdio::ftell(f);
@@ -113,7 +113,7 @@ fn read_file(path: *const char) FileContents {
 // The directory portion of `path` (without trailing slash), or "." when there is none.
 fn dir_of(path: *const char) *mut char {
     let slash = unsafe cstring::strrchr(path, '/' as i32);
-    if slash == null { return dup_cstr(".".ptr as *const char); }
+    if slash == null { return dup_cstr(".".ptr() as *const char); }
     let n = (slash as usize) - (path as usize);
     let d = unsafe stdlib::malloc(n + 1) as *mut char;
     unsafe cstring::memcpy(d as *mut void, path, n);
@@ -167,10 +167,10 @@ fn join_parts(ast: &Ast, src: *const char, parts: NodeList, sep: *const char) *m
 
 // "<root_dir>/<parts joined by '/'>.spc".
 fn module_file_path(root_dir: *const char, ast: &Ast, src: *const char, parts: NodeList) *mut char {
-    let rel = join_parts(&*ast, src, parts, "/".ptr as *const char);
+    let rel = join_parts(&*ast, src, parts, "/".ptr() as *const char);
     let n = unsafe cstring::strlen(root_dir) + 1 + unsafe cstring::strlen(rel as *const char) + 4 + 1;
     let out = unsafe stdlib::malloc(n) as *mut char;
-    unsafe stdio::snprintf(out, n, "%s/%s.spc".ptr as *const char, root_dir, rel);
+    unsafe stdio::snprintf(out, n, "%s/%s.spc".ptr() as *const char, root_dir, rel);
     unsafe stdlib::free(rel as *mut void);
     return out;
 }
@@ -179,7 +179,7 @@ fn module_file_path(root_dir: *const char, ast: &Ast, src: *const char, parts: N
 fn join2(a: *const char, b: *const char) *mut char {
     let n = unsafe cstring::strlen(a) + 1 + unsafe cstring::strlen(b) + 1;
     let out = unsafe stdlib::malloc(n) as *mut char;
-    unsafe stdio::snprintf(out, n, "%s/%s".ptr as *const char, a, b);
+    unsafe stdio::snprintf(out, n, "%s/%s".ptr() as *const char, a, b);
     return out;
 }
 
@@ -196,7 +196,7 @@ fn resolve_import_file(root_dir: *const char, std_root: *const char, ast: &Ast, 
         return std_rel;
     }
     unsafe stdlib::free(std_rel as *mut void);
-    let ffi_base = join2(std_root, "ffi".ptr as *const char);
+    let ffi_base = join2(std_root, "ffi".ptr() as *const char);
     let ffi_rel = module_file_path(ffi_base as *const char, &*ast, src, parts);
     unsafe stdlib::free(ffi_base as *mut void);
     if path_exists(ffi_rel as *const char) {
@@ -298,7 +298,7 @@ extend Package {
 
         let fc = read_file(file_path);
         if fc.ptr == null {
-            unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%s' (%s)\n".ptr as *const char,
+            unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%s' (%s)\n".ptr() as *const char,
                                   mod_path, file_path);
             self.ok = false;
             unsafe stdlib::free(mod_path as *mut void);
@@ -331,7 +331,7 @@ extend Package {
                 let n = m.ast.at_const(unsafe ids[i as usize]);
                 if n.kind == NodeKind::NODE_IMPORT {
                     let parts = n.as_data.import_decl.path;
-                    child_paths.push(join_parts(&m.ast, src, parts, "::".ptr as *const char));
+                    child_paths.push(join_parts(&m.ast, src, parts, "::".ptr() as *const char));
                     child_files.push(resolve_import_file(root_dir, std_root,
                                                          &m.ast, src, parts));
                 }
@@ -357,7 +357,7 @@ extend Package {
         while i < self.modules.len() {
             let is_core = self.modules.at(i).has_ast
                 && unsafe cstring::strcmp(self.modules.at(i).path,
-                                          "__std::core".ptr as *const char) == 0;
+                                          "__std::core".ptr() as *const char) == 0;
             if is_core {
                 let mut b: usize = 0;
                 while b < BT_COUNT_N {
@@ -552,7 +552,7 @@ extend Package {
                 while i < items.len {
                     let it = md.ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
-                        let path = join_parts(&md.ast, src, it.as_data.import_decl.path, "::".ptr as *const char);
+                        let path = join_parts(&md.ast, src, it.as_data.import_decl.path, "::".ptr() as *const char);
                         let c = self.find(path, unsafe cstring::strlen(path));
                         unsafe stdlib::free(path as *mut void);
                         if c >= 0 && !*seen.at(c as usize) {
@@ -591,7 +591,7 @@ extend Package {
                 while i < items.len {
                     let it = ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
-                        let path = join_parts(&*ast, src, it.as_data.import_decl.path, "::".ptr as *const char);
+                        let path = join_parts(&*ast, src, it.as_data.import_decl.path, "::".ptr() as *const char);
                         let c = self.find(path, unsafe cstring::strlen(path));
                         unsafe stdlib::free(path as *mut void);
                         if c >= 0 && !*seen.at(c as usize) {
@@ -1141,12 +1141,12 @@ pub fn package_load(root_file: *const char, std_dir: *const char) Package {
 pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) Package {
     let mut p = Package::new();
     p.ok = true;
-    p.root_dir = dup_cstr(".".ptr as *const char);
+    p.root_dir = dup_cstr(".".ptr() as *const char);
     if std_dir != null { p.std_root = dir_of(std_dir); }
     load_prelude(&mut p, std_dir);
-    let parsed = parse_source(src, len, "<harness>".ptr as *const char);
+    let parsed = parse_source(src, len, "<harness>".ptr() as *const char);
     let ok = parsed.ok;
-    let id = p.add_module(dup_cstr("main".ptr as *const char), dup_cstr("<harness>".ptr as *const char),
+    let id = p.add_module(dup_cstr("main".ptr() as *const char), dup_cstr("<harness>".ptr() as *const char),
                           dup_cstr(src), len, parsed.ast, ok);
     if ok { p.modules.index_mut(id as usize).ast.module = id as ModuleId; }
     else { p.ok = false; }
@@ -1182,7 +1182,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         let nm = unsafe shim::sc_dirent_name(e);
         let l = unsafe cstring::strlen(nm);
         if l < 5 { continue; }
-        if unsafe cstring::strcmp((nm + (l - 4)) as *const char, ".spc".ptr as *const char) != 0 { continue; }
+        if unsafe cstring::strcmp((nm + (l - 4)) as *const char, ".spc".ptr() as *const char) != 0 { continue; }
         names.push(dup_cstr(nm));
     }
     let _ = unsafe shim::sc_closedir(dir);
@@ -1206,7 +1206,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         let nl = unsafe cstring::strlen(nmk as *const char);
         let fl = dl + 1 + nl + 1;
         let file = unsafe stdlib::malloc(fl) as *mut char;
-        unsafe stdio::snprintf(file, fl, "%s/%s".ptr as *const char, std_dir, nmk);
+        unsafe stdio::snprintf(file, fl, "%s/%s".ptr() as *const char, std_dir, nmk);
         if unsafe shim::sc_stat_isdir(file) == 1 { // a dir literally named "*.spc"
             unsafe stdlib::free(file as *mut void);
             unsafe stdlib::free(nmk as *mut void);
@@ -1228,7 +1228,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
             let sl = unsafe cstring::strlen(stem);
             let pl = 7 + sl + 1; // "__std::" is 7 chars
             let modpath = unsafe stdlib::malloc(pl) as *mut char;
-            unsafe stdio::snprintf(modpath, pl, "__std::%s".ptr as *const char, stem);
+            unsafe stdio::snprintf(modpath, pl, "__std::%s".ptr() as *const char, stem);
             unsafe stdlib::free(stem as *mut void);
             let id = p.load_module(modpath, file); // takes ownership of modpath + file
             if id >= 0 { p.modules.index_mut(id as usize).prelude = true; }

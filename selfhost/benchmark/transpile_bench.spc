@@ -85,7 +85,7 @@ fn transpile_once() Timing {
     let mut r = Timing { parse: 0.0, resolve: 0.0, typecheck: 0.0, codegen: 0.0, src_bytes: 0, out_bytes: 0, modules: 0 };
 
     let a0 = time::cpu_seconds();
-    let mut p = loader::package_load(ROOT.ptr as *const char, STD_DIR.ptr as *const char);
+    let mut p = loader::package_load(ROOT.ptr() as *const char, STD_DIR.ptr() as *const char);
     let a1 = time::cpu_seconds();
 
     let n = p.modules.len();
@@ -140,11 +140,11 @@ fn transpile_once() Timing {
 pub fn run() i32 {
     let warm = transpile_once(); // warm caches + report corpus size
     if warm.modules == 0 || warm.out_bytes == 0 {
-        unsafe stdio::fprintf(stdio::stderr(), "transpile-bench: failed to transpile %s (run from the repo root)\n".ptr as *const char, ROOT.ptr as *const char);
+        unsafe stdio::fprintf(stdio::stderr(), "transpile-bench: failed to transpile %s (run from the repo root)\n".ptr() as *const char, ROOT.ptr() as *const char);
         return 1;
     }
-    unsafe stdio::printf("transpiling the super-c compiler: %s\n".ptr as *const char, ROOT.ptr as *const char);
-    unsafe stdio::printf("  %zu modules, %.1f KiB source -> %.1f KiB C   (%d iterations)\n\n".ptr as *const char,
+    unsafe stdio::printf("transpiling the super-c compiler: %s\n".ptr() as *const char, ROOT.ptr() as *const char);
+    unsafe stdio::printf("  %zu modules, %.1f KiB source -> %.1f KiB C   (%d iterations)\n\n".ptr() as *const char,
         warm.modules, (warm.src_bytes as f64) / 1024.0, (warm.out_bytes as f64) / 1024.0, ITERS);
 
     let mut sp: f64 = 0.0;
@@ -170,15 +170,15 @@ pub fn run() i32 {
     let ac = sc / fi * 1000.0;
     let avg_total = ap + ar + at + ac;
 
-    unsafe stdio::printf("  %-12s %10s\n".ptr as *const char, "phase".ptr as *const char, "avg ms".ptr as *const char);
-    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr as *const char, "parse".ptr as *const char, ap, ap / avg_total * 100.0);
-    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr as *const char, "resolve".ptr as *const char, ar, ar / avg_total * 100.0);
-    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr as *const char, "typecheck".ptr as *const char, at, at / avg_total * 100.0);
-    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr as *const char, "codegen".ptr as *const char, ac, ac / avg_total * 100.0);
-    unsafe stdio::printf("  %-12s %10.2f  (best %.2f ms)\n\n".ptr as *const char, "total".ptr as *const char, avg_total, best * 1000.0);
+    unsafe stdio::printf("  %-12s %10s\n".ptr() as *const char, "phase".ptr() as *const char, "avg ms".ptr() as *const char);
+    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr() as *const char, "parse".ptr() as *const char, ap, ap / avg_total * 100.0);
+    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr() as *const char, "resolve".ptr() as *const char, ar, ar / avg_total * 100.0);
+    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr() as *const char, "typecheck".ptr() as *const char, at, at / avg_total * 100.0);
+    unsafe stdio::printf("  %-12s %10.2f  (%4.1f%%)\n".ptr() as *const char, "codegen".ptr() as *const char, ac, ac / avg_total * 100.0);
+    unsafe stdio::printf("  %-12s %10.2f  (best %.2f ms)\n\n".ptr() as *const char, "total".ptr() as *const char, avg_total, best * 1000.0);
 
     let mbps = (warm.src_bytes as f64) / (best) / 1e6;
-    unsafe stdio::printf("  throughput: %.2f MB/s source  (%.1f KiB compiler in %.2f ms)\n".ptr as *const char,
+    unsafe stdio::printf("  throughput: %.2f MB/s source  (%.1f KiB compiler in %.2f ms)\n".ptr() as *const char,
         mbps, (warm.src_bytes as f64) / 1024.0, best * 1000.0);
     return 0;
 }

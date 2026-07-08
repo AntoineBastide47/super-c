@@ -42,7 +42,7 @@ fn associated_new_name() {
     let method_id = unsafe ids[0];
     assert(c.ast.at_const(method_id).kind == NodeKind::NODE_FUNCTION, "associated new name: extension item should be a function");
     let name_id = c.ast.at_const(method_id).as_data.function.name;
-    assert(h::ident_is(&c.ast, src.ptr as *const char, name_id, "new".ptr as *const char), "associated new name: method should be named new");
+    assert(h::ident_is(&c.ast, src.ptr() as *const char, name_id, "new".ptr() as *const char), "associated new name: method should be named new");
     c.ast.free();
 }
 

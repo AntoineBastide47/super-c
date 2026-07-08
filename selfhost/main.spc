@@ -78,7 +78,7 @@ fn build_out_path(root_dir: *const char, mod_path: *const char, ext: *const char
     let n = unsafe cstring::strlen(root_dir) + 8 + unsafe cstring::strlen(mod_path) + unsafe cstring::strlen(ext);
     let out = unsafe stdlib::malloc(n) as *mut char;
     if out == null { return null; }
-    let mut at = unsafe stdio::snprintf(out, n, "%s/build/".ptr as *const char, root_dir) as usize;
+    let mut at = unsafe stdio::snprintf(out, n, "%s/build/".ptr() as *const char, root_dir) as usize;
     let mut s = mod_path;
     while (unsafe *s) != (0 as char) {
         if (unsafe *s) == (':' as char) && (unsafe *(s + 1)) == (':' as char) {
@@ -122,7 +122,7 @@ fn open_out(path: *mut char) *mut stdio::FILE {
         mkdir_p(path);
         unsafe *slash = '/' as char;
     }
-    return unsafe stdio::fopen(path, "w".ptr as *const char);
+    return unsafe stdio::fopen(path, "w".ptr() as *const char);
 }
 
 // Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
@@ -136,9 +136,9 @@ fn prune_orphans(dir: *const char, keep: &KeepList) void {
         let e = unsafe shim::sc_readdir(d);
         if e == null { break; }
         let name = unsafe shim::sc_dirent_name(e);
-        if unsafe cstring::strcmp(name, ".".ptr as *const char) == 0 || unsafe cstring::strcmp(name, "..".ptr as *const char) == 0 { continue; }
+        if unsafe cstring::strcmp(name, ".".ptr() as *const char) == 0 || unsafe cstring::strcmp(name, "..".ptr() as *const char) == 0 { continue; }
         let mut pb = PathBuf { };
-        let np = unsafe stdio::snprintf((&mut pb.b[0]) as *mut char, 4096, "%s/%s".ptr as *const char, dir, name);
+        let np = unsafe stdio::snprintf((&mut pb.b[0]) as *mut char, 4096, "%s/%s".ptr() as *const char, dir, name);
         if np < 0 || (np as usize) >= 4096 { continue; }
         let path = (&pb.b[0]) as *const char;
         if unsafe shim::sc_stat_isdir(path) != 0 {
@@ -161,13 +161,13 @@ fn prune_orphans(dir: *const char, keep: &KeepList) void {
 
 // The runtime header shared by every generated module: the C standard library includes.
 fn write_super_rt(root_dir: *const char) void {
-    let path = build_out_path(root_dir, "super_rt".ptr as *const char, ".h".ptr as *const char);
+    let path = build_out_path(root_dir, "super_rt".ptr() as *const char, ".h".ptr() as *const char);
     if path == null { return; }
     let f = open_out(path);
     if f != null {
-        unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr as *const char, f);
+        unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr() as *const char, f);
         unsafe stdio::fputs(cg::super_rt_includes(), f);
-        unsafe stdio::fputs("#endif\n".ptr as *const char, f);
+        unsafe stdio::fputs("#endif\n".ptr() as *const char, f);
         unsafe stdio::fclose(f);
     }
     unsafe stdlib::free(path as *mut void);
@@ -370,9 +370,9 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     let file = unsafe (*p).modules.at(m as usize).file;
     let mut errs = diag::Errors::new();
     if msg != null {
-        errs.emitf(sp.start, sp.end - sp.start, "static assertion cannot be evaluated: %s".ptr as *const char, msg);
+        errs.emitf(sp.start, sp.end - sp.start, "static assertion cannot be evaluated: %s".ptr() as *const char, msg);
     } else {
-        errs.emitf(sp.start, sp.end - sp.start, "static assertion failed".ptr as *const char);
+        errs.emitf(sp.start, sp.end - sp.start, "static assertion failed".ptr() as *const char);
     }
     errs.finalize(src, len, file);
     errs.log();
@@ -393,9 +393,9 @@ fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) void {
     if file != null { slash = unsafe cstring::strrchr(file, '/' as i32); }
     if slash != null {
         let dlen = ((slash as usize) - (file as usize)) as i32;
-        unsafe stdio::snprintf(out, 4096, "%.*s/%.*s".ptr as *const char, dlen, file, vl, v);
+        unsafe stdio::snprintf(out, 4096, "%.*s/%.*s".ptr() as *const char, dlen, file, vl, v);
     } else {
-        unsafe stdio::snprintf(out, 4096, "%.*s".ptr as *const char, vl, v);
+        unsafe stdio::snprintf(out, 4096, "%.*s".ptr() as *const char, vl, v);
     }
 }
 
@@ -421,15 +421,15 @@ fn ext_c_wrap(root: *const char, keep: &mut KeepList, seen: &mut Vector<*mut cha
     let mut nm = Buf128 {};
     let idx = unsafe *nsrc;
     unsafe *nsrc = idx + 1;
-    unsafe stdio::snprintf((&mut nm.b[0]) as *mut char, 128, "__ext%u_%s".ptr as *const char, idx, (&stem.b[0]) as *const char);
-    let path = build_out_path(root, (&nm.b[0]) as *const char, ".c".ptr as *const char);
+    unsafe stdio::snprintf((&mut nm.b[0]) as *mut char, 128, "__ext%u_%s".ptr() as *const char, idx, (&stem.b[0]) as *const char);
+    let path = build_out_path(root, (&nm.b[0]) as *const char, ".c".ptr() as *const char);
     let f: *mut stdio::FILE = if path != null { open_out(path); } else { null; };
     if f == null {
         if path != null { unsafe stdio::perror(path); unsafe stdlib::free(path as *mut void); }
         unsafe *err = true;
         return;
     }
-    unsafe stdio::fprintf(f, "/* external C source pulled into the build -- generated, do not edit */\n#include \"%s\"\n".ptr as *const char, rsl);
+    unsafe stdio::fprintf(f, "/* external C source pulled into the build -- generated, do not edit */\n#include \"%s\"\n".ptr() as *const char, rsl);
     unsafe stdio::fclose(f);
     let ko = unsafe *keep_ok;
     unsafe *keep_ok = keep.push(path) && ko;
@@ -457,8 +457,8 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut KeepList, keep_ok: *mut boo
             let v = unsafe (src + at.str_span.start as usize) as *const char;
             if is_link {
                 let mut flag = Buf128 {};
-                if (unsafe *v) == ('-' as char) { unsafe stdio::snprintf((&mut flag.b[0]) as *mut char, 128, "%.*s".ptr as *const char, vl, v); }
-                else { unsafe stdio::snprintf((&mut flag.b[0]) as *mut char, 128, "-l%.*s".ptr as *const char, vl, v); }
+                if (unsafe *v) == ('-' as char) { unsafe stdio::snprintf((&mut flag.b[0]) as *mut char, 128, "%.*s".ptr() as *const char, vl, v); }
+                else { unsafe stdio::snprintf((&mut flag.b[0]) as *mut char, 128, "-l%.*s".ptr() as *const char, vl, v); }
                 let mut dup = false;
                 let mut k: usize = 0;
                 while k < ld.len() { if unsafe cstring::strcmp((*ld.index_mut(k)) as *const char, (&flag.b[0]) as *const char) == 0 { dup = true; break; } k = k + 1; }
@@ -470,9 +470,9 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut KeepList, keep_ok: *mut boo
             let mut rsl = PathBuf {};
             ext_rel(file, v, vl, (&mut rel.b[0]) as *mut char);
             if unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut rsl.b[0]) as *mut char) == null {
-                unsafe stdio::snprintf((&mut rel.b[0]) as *mut char, 4096, "%.*s".ptr as *const char, vl, v);
+                unsafe stdio::snprintf((&mut rel.b[0]) as *mut char, 4096, "%.*s".ptr() as *const char, vl, v);
                 if unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut rsl.b[0]) as *mut char) == null {
-                    unsafe stdio::fprintf(stdio::stderr(), "error: cannot find C source '%.*s'\n".ptr as *const char, vl, v);
+                    unsafe stdio::fprintf(stdio::stderr(), "error: cannot find C source '%.*s'\n".ptr() as *const char, vl, v);
                     unsafe *err = true;
                     ai = ai + 1;
                     continue;
@@ -511,13 +511,13 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut KeepList, keep_ok: *mut boo
         }
         m = m + 1;
     }
-    let ldpath = build_out_path(root, "__ldflags".ptr as *const char, "".ptr as *const char);
+    let ldpath = build_out_path(root, "__ldflags".ptr() as *const char, "".ptr() as *const char);
     if ldpath != null {
         if ld.len() != 0 {
-            let f = unsafe stdio::fopen(ldpath, "w".ptr as *const char);
+            let f = unsafe stdio::fopen(ldpath, "w".ptr() as *const char);
             if f != null {
                 let mut k: usize = 0;
-                while k < ld.len() { unsafe stdio::fprintf(f, "%s\n".ptr as *const char, *ld.index_mut(k)); k = k + 1; }
+                while k < ld.len() { unsafe stdio::fprintf(f, "%s\n".ptr() as *const char, *ld.index_mut(k)); k = k + 1; }
                 unsafe stdio::fclose(f);
             }
         } else {
@@ -576,7 +576,7 @@ fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const cha
     let len = p.modules.at(m as usize).source_len;
     let file = p.modules.at(m as usize).file;
     let mut errs = diag::Errors::new();
-    errs.emitf(sp.start, sp.end - sp.start, "%s".ptr as *const char, msg);
+    errs.emitf(sp.start, sp.end - sp.start, "%s".ptr() as *const char, msg);
     errs.finalize(src, len, file);
     errs.log();
     errs.free();
@@ -621,7 +621,7 @@ fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, 
     if n.kind != NodeKind::NODE_IDENTIFIER { return false; }
     let t = n.as_data.name.text;
     if (t.end - t.start) != 4 { return false; }
-    return unsafe cstring::memcmp((src + t.start as usize), "void".ptr, 4) == 0;
+    return unsafe cstring::memcmp((src + t.start as usize), "void".ptr(), 4) == 0;
 }
 
 // Classify one @test parameter: 1 = fixture/receiver, 2 = global env, 0 with an error emitted.
@@ -631,7 +631,7 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     let tnode = unsafe (*a).at_const(pnode).as_data.parameter.ty;
     let tk = if tnode != NODE_NONE { unsafe (*a).at_const(tnode).kind; } else { NodeKind::NODE_NONE_KIND; };
     if tnode == NODE_NONE || tk != NodeKind::NODE_REFERENCE_TYPE {
-        test_err(&mut *p, m, sp, "a '@test' parameter must be a reference to the module fixture or the global env".ptr as *const char);
+        test_err(&mut *p, m, sp, "a '@test' parameter must be a reference to the module fixture or the global env".ptr() as *const char);
         return 0;
     }
     let it = unsafe (*a).at_const(tnode).as_data.indirect_type;
@@ -640,12 +640,12 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     if fx.node != NODE_NONE && d.module == fx.module && d.node == fx.node { return 1; }
     if genv.node != NODE_NONE && d.module == genv.module && d.node == genv.node {
         if it.qualifier == TypeQualifier::TYPE_QUAL_MUT {
-            test_err(&mut *p, m, sp, "the global test env is shared: take it as '&', not '&mut'".ptr as *const char);
+            test_err(&mut *p, m, sp, "the global test env is shared: take it as '&', not '&mut'".ptr() as *const char);
             return 0;
         }
         return 2;
     }
-    test_err(&mut *p, m, sp, "this parameter matches neither the module's '@test_init' fixture nor the global env".ptr as *const char);
+    test_err(&mut *p, m, sp, "this parameter matches neither the module's '@test_init' fixture nor the global env".ptr() as *const char);
     return 0;
 }
 
@@ -705,56 +705,56 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             let mut bad_ext = false;
             let ext = test_owner_extend(&*p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
             if ext != NODE_NONE && bad_ext {
-                test_err(&mut *p, m as ModuleId, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr as *const char);
+                test_err(&mut *p, m as ModuleId, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr() as *const char);
                 ai = ai + 1; continue;
             }
             let mut target = DefId { module: 0, node: NODE_NONE };
             let mut target_is_enum = false;
             if ext != NODE_NONE {
                 if at.arg != 0 {
-                    test_err(&mut *p, m as ModuleId, sp, "'(global)' is not allowed on a method; declare the global pair at top level".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "'(global)' is not allowed on a method; declare the global pair at top level".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 let tt = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(ext).as_data.extend_def.target_type;
                 target = test_type_decl(&*p, m as ModuleId, tt, (&mut target_is_enum) as *mut bool);
                 if target.node == NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "a test suite's extend target must be a plain (non-generic) struct or enum".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "a test suite's extend target must be a plain (non-generic) struct or enum".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
             }
             if at.kind == AttrKind::ATTR_TEST_INIT as u8 {
                 let plen = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(at.owner).as_data.function.params.len;
                 if plen != 0 {
-                    test_err(&mut *p, m as ModuleId, sp, "'@test_init' takes no parameters".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "'@test_init' takes no parameters".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 let mut is_enum = false;
                 let ret = test_fn_ret_node(&*p, m as ModuleId, at.owner);
                 let d = test_type_decl(&*p, m as ModuleId, ret, (&mut is_enum) as *mut bool);
                 if d.node == NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "'@test_init' must return a plain (non-generic) struct or enum fixture".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "'@test_init' must return a plain (non-generic) struct or enum fixture".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 if ext != NODE_NONE {
                     if d.module != target.module || d.node != target.node {
-                        test_err(&mut *p, m as ModuleId, sp, "a suite '@test_init' method must return the extended type itself".ptr as *const char);
+                        test_err(&mut *p, m as ModuleId, sp, "a suite '@test_init' method must return the extended type itself".ptr() as *const char);
                         ai = ai + 1; continue;
                     }
                     let si = plan_suite_of(&mut *plan, m as ModuleId, target, target_is_enum, true);
                     if plan.suites.at(si as usize).init != NODE_NONE {
-                        test_err(&mut *p, m as ModuleId, sp, "duplicate suite '@test_init' (one per type per module)".ptr as *const char);
+                        test_err(&mut *p, m as ModuleId, sp, "duplicate suite '@test_init' (one per type per module)".ptr() as *const char);
                         ai = ai + 1; continue;
                     }
                     plan.suites.index_mut(si as usize).init = at.owner;
                 } else if at.arg != 0 {
                     if plan.genv_init != NODE_NONE {
-                        test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_init(global)' (one per test tree)".ptr as *const char);
+                        test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_init(global)' (one per test tree)".ptr() as *const char);
                         ai = ai + 1; continue;
                     }
                     plan.genv_mod = m as ModuleId; plan.genv_init = at.owner; plan.genv_type = d; plan.genv_is_enum = is_enum;
                 } else {
                     if (*plan.fx_init.at(m)) != NODE_NONE {
-                        test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_init' (one per module)".ptr as *const char);
+                        test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_init' (one per module)".ptr() as *const char);
                         ai = ai + 1; continue;
                     }
                     *plan.fx_init.index_mut(m) = at.owner;
@@ -777,12 +777,12 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                     }
                 }
                 if !ok {
-                    test_err(&mut *p, m as ModuleId, sp, "a suite '@test_free' must be 'fn(self: &mut <the extended type>)' returning nothing".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "a suite '@test_free' must be 'fn(self: &mut <the extended type>)' returning nothing".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 let si = plan_suite_of(&mut *plan, m as ModuleId, target, target_is_enum, true);
                 if plan.suites.at(si as usize).fre != NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate suite '@test_free'".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "duplicate suite '@test_free'".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 plan.suites.index_mut(si as usize).fre = at.owner;
@@ -808,7 +808,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             let want = if global { plan.genv_type; } else { *plan.fx_type.at(m); };
             let has_init = if global { plan.genv_init; } else { *plan.fx_init.at(m); };
             if has_init == NODE_NONE || (global && plan.genv_mod != m as ModuleId) {
-                test_err(&mut *p, m as ModuleId, sp, if global { "'@test_free(global)' has no matching '@test_init(global)' in this module".ptr as *const char; } else { "'@test_free' has no matching '@test_init' in this module".ptr as *const char; });
+                test_err(&mut *p, m as ModuleId, sp, if global { "'@test_free(global)' has no matching '@test_init(global)' in this module".ptr() as *const char; } else { "'@test_free' has no matching '@test_init' in this module".ptr() as *const char; });
                 ai = ai + 1; continue;
             }
             let mut ok = false;
@@ -825,18 +825,18 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 }
             }
             if !ok {
-                test_err(&mut *p, m as ModuleId, sp, if global { "'@test_free(global)' must be 'fn(&mut <fixture>)' returning nothing".ptr as *const char; } else { "'@test_free' must be 'fn(&mut <fixture>)' returning nothing".ptr as *const char; });
+                test_err(&mut *p, m as ModuleId, sp, if global { "'@test_free(global)' must be 'fn(&mut <fixture>)' returning nothing".ptr() as *const char; } else { "'@test_free' must be 'fn(&mut <fixture>)' returning nothing".ptr() as *const char; });
                 ai = ai + 1; continue;
             }
             if global {
                 if plan.genv_free != NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_free(global)'".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_free(global)'".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 plan.genv_free = at.owner;
             } else {
                 if (*plan.fx_free.at(m)) != NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_free' (one per module)".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_free' (one per module)".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 *plan.fx_free.index_mut(m) = at.owner;
@@ -851,7 +851,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
         let s = *plan.suites.at(si);
         if s.init == NODE_NONE && s.fre != NODE_NONE {
             let sp = unsafe (*(mod_ast_c(&*p, s.mod))).at_const(s.fre).span;
-            test_err(&mut *p, s.mod, sp, "a suite '@test_free' has no matching '@test_init' method on this type in this module".ptr as *const char);
+            test_err(&mut *p, s.mod, sp, "a suite '@test_free' has no matching '@test_init' method on this type in this module".ptr() as *const char);
         }
         si = si + 1;
     }
@@ -869,7 +869,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             let mut bad_ext = false;
             let ext = test_owner_extend(&*p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
             if ext != NODE_NONE && bad_ext {
-                test_err(&mut *p, m as ModuleId, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr as *const char);
+                test_err(&mut *p, m as ModuleId, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr() as *const char);
                 ai = ai + 1; continue;
             }
             let mut suite = DefId { module: 0, node: NODE_NONE };
@@ -878,23 +878,23 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 let tt = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(ext).as_data.extend_def.target_type;
                 suite = test_type_decl(&*p, m as ModuleId, tt, (&mut suite_is_enum) as *mut bool);
                 if suite.node == NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "a test suite's extend target must be a plain (non-generic) struct or enum".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "a test suite's extend target must be a plain (non-generic) struct or enum".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
             }
             if !test_fn_returns_nothing(&*p, m as ModuleId, src, at.owner) {
-                test_err(&mut *p, m as ModuleId, sp, "a '@test' function returns nothing".ptr as *const char);
+                test_err(&mut *p, m as ModuleId, sp, "a '@test' function returns nothing".ptr() as *const char);
                 ai = ai + 1; continue;
             }
             let nmnode = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(at.owner).as_data.function.name;
             let nmsp = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(nmnode).as_data.name.text;
-            if ext == NODE_NONE && (nmsp.end - nmsp.start) == 4 && unsafe cstring::memcmp((src + nmsp.start as usize), "main".ptr, 4) == 0 {
-                test_err(&mut *p, m as ModuleId, sp, "'main' cannot be a '@test' (it is replaced by the test runner)".ptr as *const char);
+            if ext == NODE_NONE && (nmsp.end - nmsp.start) == 4 && unsafe cstring::memcmp((src + nmsp.start as usize), "main".ptr(), 4) == 0 {
+                test_err(&mut *p, m as ModuleId, sp, "'main' cannot be a '@test' (it is replaced by the test runner)".ptr() as *const char);
                 ai = ai + 1; continue;
             }
             let params = unsafe (*(mod_ast_c(&*p, m as ModuleId))).at_const(at.owner).as_data.function.params;
             if params.len > 2 {
-                test_err(&mut *p, m as ModuleId, sp, "a '@test' function takes at most the fixture (or 'self') and the global env".ptr as *const char);
+                test_err(&mut *p, m as ModuleId, sp, "a '@test' function takes at most the fixture (or 'self') and the global env".ptr() as *const char);
                 ai = ai + 1; continue;
             }
             let fx = if ext != NODE_NONE { suite; } else { *plan.fx_type.at(m); };
@@ -907,10 +907,10 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 let bit = test_param_bit(&mut *p, m as ModuleId, pid, fx, genv_ty);
                 if bit == 0 { bad = true; }
                 else if (wants & bit) != 0 {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test' parameter kind".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test' parameter kind".ptr() as *const char);
                     bad = true;
                 } else if bit == 1 && (wants & 2) != 0 {
-                    test_err(&mut *p, m as ModuleId, sp, "the fixture ('self') parameter must come before the global env".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "the fixture ('self') parameter must come before the global env".ptr() as *const char);
                     bad = true;
                 }
                 wants = wants | bit;
@@ -922,7 +922,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             if ext != NODE_NONE && (wants & 1) != 0 {
                 let si2 = plan_suite_of(&mut *plan, m as ModuleId, suite, suite_is_enum, false);
                 if si2 < 0 || plan.suites.at(si2 as usize).init == NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "no '@test_init' method on this type in this module produces the receiver".ptr as *const char);
+                    test_err(&mut *p, m as ModuleId, sp, "no '@test_init' method on this type in this module produces the receiver".ptr() as *const char);
                     ai = ai + 1; continue;
                 }
                 suite_init = plan.suites.at(si2 as usize).init;
@@ -1011,25 +1011,25 @@ int main(int argc, char **argv) {
     printf("\n%d passed, %d failed\n", passed, failed);
   return failed > 100 ? 100 : failed;
 }
-"#.ptr as *const char;
+"#.ptr() as *const char;
 }
 
 // Write build/__test_main.c: extern wrapper prototypes, the test table (display names `module::fn` or
 // `module::Type::method`), the global-env hooks (stubs when absent), and the fixed runner. Returns the
 // path (ownership to the caller / keep-list), or null.
 fn write_test_main(p: &mut loader::Package, plan: &TestPlan) *mut char {
-    let path = build_out_path(p.root_dir, "__test_main".ptr as *const char, ".c".ptr as *const char);
+    let path = build_out_path(p.root_dir, "__test_main".ptr() as *const char, ".c".ptr() as *const char);
     if path == null { return null; }
     let f = open_out(path);
     if f == null { unsafe stdio::perror(path); unsafe stdlib::free(path as *mut void); return null; }
-    unsafe stdio::fputs("/* generated by super-c --test */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\n\n".ptr as *const char, f);
+    unsafe stdio::fputs("/* generated by super-c --test */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\n\n".ptr() as *const char, f);
     let mut ci: usize = 0;
     while ci < plan.cases.len() {
         let tc = *plan.cases.at(ci);
-        unsafe stdio::fprintf(f, "extern void __sc_test_w_%u_%u(void *);\n".ptr as *const char, tc.mod as u32, tc.func);
+        unsafe stdio::fprintf(f, "extern void __sc_test_w_%u_%u(void *);\n".ptr() as *const char, tc.mod as u32, tc.func);
         ci = ci + 1;
     }
-    unsafe stdio::fputs("\ntypedef void (*sc_test_fn)(void *);\nstatic const struct { const char *name; sc_test_fn fn; int should_panic; } SC_TESTS[] = {\n".ptr as *const char, f);
+    unsafe stdio::fputs("\ntypedef void (*sc_test_fn)(void *);\nstatic const struct { const char *name; sc_test_fn fn; int should_panic; } SC_TESTS[] = {\n".ptr() as *const char, f);
     ci = 0;
     while ci < plan.cases.len() {
         let tc = *plan.cases.at(ci);
@@ -1038,23 +1038,23 @@ fn write_test_main(p: &mut loader::Package, plan: &TestPlan) *mut char {
         let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
         let modpath = p.modules.at(tc.mod as usize).path;
         let msrc = p.modules.at(tc.mod as usize).source;
-        unsafe stdio::fprintf(f, "  { \"%s::".ptr as *const char, modpath);
+        unsafe stdio::fprintf(f, "  { \"%s::".ptr() as *const char, modpath);
         if tc.suite.node != NODE_NONE {
             let sa = mod_ast_c(&*p, tc.suite.module);
             let snmn = unsafe (*sa).at_const(tc.suite.node).as_data.aggregate.name;
             let snm = unsafe (*sa).at_const(snmn).as_data.name.text;
             let ssrc = p.modules.at(tc.suite.module as usize).source;
-            unsafe stdio::fprintf(f, "%.*s::".ptr as *const char, (snm.end - snm.start) as i32, unsafe (ssrc + snm.start as usize));
+            unsafe stdio::fprintf(f, "%.*s::".ptr() as *const char, (snm.end - snm.start) as i32, unsafe (ssrc + snm.start as usize));
         }
         let spflag = if tc.should_panic { 1 as i32; } else { 0 as i32; };
-        unsafe stdio::fprintf(f, "%.*s\", __sc_test_w_%u_%u, %d },\n".ptr as *const char, (nm.end - nm.start) as i32, unsafe (msrc + nm.start as usize), tc.mod as u32, tc.func, spflag);
+        unsafe stdio::fprintf(f, "%.*s\", __sc_test_w_%u_%u, %d },\n".ptr() as *const char, (nm.end - nm.start) as i32, unsafe (msrc + nm.start as usize), tc.mod as u32, tc.func, spflag);
         ci = ci + 1;
     }
-    unsafe stdio::fprintf(f, "};\nenum { SC_NTESTS = %zu };\n\n".ptr as *const char, plan.cases.len());
+    unsafe stdio::fprintf(f, "};\nenum { SC_NTESTS = %zu };\n\n".ptr() as *const char, plan.cases.len());
     if plan.genv_init != NODE_NONE {
-        unsafe stdio::fputs("extern void *__sc_test_genv_init(void);\nextern void __sc_test_genv_free(void *);\nstatic void *sc_genv_init(void) { return __sc_test_genv_init(); }\nstatic void sc_genv_free(void *p) { __sc_test_genv_free(p); }\n\n".ptr as *const char, f);
+        unsafe stdio::fputs("extern void *__sc_test_genv_init(void);\nextern void __sc_test_genv_free(void *);\nstatic void *sc_genv_init(void) { return __sc_test_genv_init(); }\nstatic void sc_genv_free(void *p) { __sc_test_genv_free(p); }\n\n".ptr() as *const char, f);
     } else {
-        unsafe stdio::fputs("static void *sc_genv_init(void) { return NULL; }\nstatic void sc_genv_free(void *p) { (void)p; }\n\n".ptr as *const char, f);
+        unsafe stdio::fputs("static void *sc_genv_init(void) { return NULL; }\nstatic void sc_genv_free(void *p) { (void)p; }\n\n".ptr() as *const char, f);
     }
     unsafe stdio::fputs(test_runner_main(), f);
     unsafe stdio::fclose(f);
@@ -1081,41 +1081,41 @@ extend Cmd {
 // linked to that path and we return; otherwise it links `<root>/build/__tests` and runs it as the test
 // runner, forwarding `topts`' options.
 fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepList, out_bin: *const char) i32 {
-    let mut cc = unsafe stdlib::getenv("CC".ptr as *const char);
-    if cc == null || (unsafe *cc) == (0 as char) { cc = "cc".ptr as *const char; }
+    let mut cc = unsafe stdlib::getenv("CC".ptr() as *const char);
+    if cc == null || (unsafe *cc) == (0 as char) { cc = "cc".ptr() as *const char; }
     let root = p.root_dir;
     let mut cmd = Cmd::new();
     cmd.append(cc);
     if out_bin != null {
-        cmd.append(" -std=c11 -o '".ptr as *const char);
+        cmd.append(" -std=c11 -o '".ptr() as *const char);
         cmd.append(out_bin);
-        cmd.append("'".ptr as *const char);
+        cmd.append("'".ptr() as *const char);
     } else {
-        cmd.append(" -std=c11 -o '".ptr as *const char);
+        cmd.append(" -std=c11 -o '".ptr() as *const char);
         cmd.append(root);
-        cmd.append("/build/__tests'".ptr as *const char);
+        cmd.append("/build/__tests'".ptr() as *const char);
     }
     let mut i: usize = 0;
     while i < keep.n {
         let cf = unsafe keep.data[i];
         let l = unsafe cstring::strlen(cf);
-        if l > 2 && unsafe cstring::strcmp((cf + (l - 2)) as *const char, ".c".ptr as *const char) == 0 {
-            cmd.append(" '".ptr as *const char);
+        if l > 2 && unsafe cstring::strcmp((cf + (l - 2)) as *const char, ".c".ptr() as *const char) == 0 {
+            cmd.append(" '".ptr() as *const char);
             cmd.append(cf);
-            cmd.append("'".ptr as *const char);
+            cmd.append("'".ptr() as *const char);
         }
         i = i + 1;
     }
     // @c.link flags (one per line in build/__ldflags)
-    let ldpath = build_out_path(root, "__ldflags".ptr as *const char, "".ptr as *const char);
+    let ldpath = build_out_path(root, "__ldflags".ptr() as *const char, "".ptr() as *const char);
     if ldpath != null {
-        let lf = unsafe stdio::fopen(ldpath, "rb".ptr as *const char);
+        let lf = unsafe stdio::fopen(ldpath, "rb".ptr() as *const char);
         if lf != null {
             let mut line = PathBuf {};
             while unsafe stdio::fgets((&mut line.b[0]) as *mut char, 4096, lf) != null {
                 let ll = unsafe cstring::strlen((&line.b[0]) as *const char);
                 if ll > 0 && unsafe line.b[ll - 1] == ('\n' as char) { unsafe line.b[ll - 1] = 0 as char; }
-                if unsafe line.b[0] != (0 as char) { cmd.append(" ".ptr as *const char); cmd.append((&line.b[0]) as *const char); }
+                if unsafe line.b[0] != (0 as char) { cmd.append(" ".ptr() as *const char); cmd.append((&line.b[0]) as *const char); }
             }
             unsafe stdio::fclose(lf);
         }
@@ -1123,27 +1123,27 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
     }
     let brc = unsafe stdlib::system(cmd.data);
     if brc != 0 {
-        let mut what = "test build".ptr as *const char;
-        if out_bin != null { what = "build".ptr as *const char; }
-        unsafe stdio::fprintf(stdio::stderr(), "super-c: %s failed (%s)\n".ptr as *const char, what, cc);
+        let mut what = "test build".ptr() as *const char;
+        if out_bin != null { what = "build".ptr() as *const char; }
+        unsafe stdio::fprintf(stdio::stderr(), "super-c: %s failed (%s)\n".ptr() as *const char, what, cc);
         cmd.free();
         return 1;
     }
     if out_bin != null { cmd.free(); return 0; } // the `build` subcommand: linked the program, nothing to run
     let mut run = Cmd::new();
-    run.append("'".ptr as *const char);
+    run.append("'".ptr() as *const char);
     run.append(root);
-    run.append("/build/__tests'".ptr as *const char);
+    run.append("/build/__tests'".ptr() as *const char);
     if unsafe (*topts).jobs > 0 {
         let mut jb = Buf64 {};
-        unsafe stdio::snprintf((&mut jb.b[0]) as *mut char, 64, " --jobs=%d".ptr as *const char, unsafe (*topts).jobs);
+        unsafe stdio::snprintf((&mut jb.b[0]) as *mut char, 64, " --jobs=%d".ptr() as *const char, unsafe (*topts).jobs);
         run.append((&jb.b[0]) as *const char);
     }
-    if unsafe (*topts).no_fork { run.append(" --no-fork".ptr as *const char); }
+    if unsafe (*topts).no_fork { run.append(" --no-fork".ptr() as *const char); }
     if unsafe (*topts).filter != null {
-        run.append(" '--filter=".ptr as *const char);
+        run.append(" '--filter=".ptr() as *const char);
         run.append(unsafe (*topts).filter);
-        run.append("'".ptr as *const char);
+        run.append("'".ptr() as *const char);
     }
     let rrc = unsafe stdlib::system(run.data);
     cmd.free();
@@ -1194,7 +1194,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
     write_super_rt(p.root_dir);
     let root = p.root_dir;
     let mut keep = KeepList::new();
-    let mut keep_ok = keep.push(build_out_path(root, "super_rt".ptr as *const char, ".h".ptr as *const char));
+    let mut keep_ok = keep.push(build_out_path(root, "super_rt".ptr() as *const char, ".h".ptr() as *const char));
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
     ext_c_collect(&mut *p, &mut keep, (&mut keep_ok) as *mut bool, (&mut err) as *mut bool);
@@ -1240,11 +1240,11 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
             };
             c.set_test_info((&ti) as *const cg::CgTestInfo);
         }
-        let hpath = build_out_path(root, mpath, ".h".ptr as *const char);
+        let hpath = build_out_path(root, mpath, ".h".ptr() as *const char);
         let hout: *mut stdio::FILE = if hpath != null { open_out(hpath); } else { null; };
         if hout != null { c.codegen_emit_header(hout); unsafe stdio::fclose(hout); }
         keep_ok = keep.push(hpath) && keep_ok;
-        let opath = build_out_path(root, mpath, ".c".ptr as *const char);
+        let opath = build_out_path(root, mpath, ".c".ptr() as *const char);
         let out: *mut stdio::FILE = if opath != null { open_out(opath); } else { null; };
         if out == null {
             if opath != null { unsafe stdio::perror(opath as *const char); }
@@ -1267,7 +1267,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
     // sources. Skip on a keep-list OOM -- never risk deleting a live output.
     if keep_ok {
         let mut broot = PathBuf { };
-        let bn = unsafe stdio::snprintf((&mut broot.b[0]) as *mut char, 4096, "%s/build".ptr as *const char, root);
+        let bn = unsafe stdio::snprintf((&mut broot.b[0]) as *mut char, 4096, "%s/build".ptr() as *const char, root);
         if bn > 0 && (bn as usize) < 4096 { prune_orphans((&broot.b[0]) as *const char, &keep); }
     }
     let mut rc: i32 = if err { 1; } else { 0 as i32; };
@@ -1275,7 +1275,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
         if !err { rc = test_build_and_run(&*p, null as *const TestOpts, &keep, out_bin); }
     } else if testing && !err {
         if plan.cases.len() == 0 {
-            unsafe stdio::fputs("super-c: no '@test' functions found\n".ptr as *const char, stdio::stderr());
+            unsafe stdio::fputs("super-c: no '@test' functions found\n".ptr() as *const char, stdio::stderr());
             rc = 1;
         } else {
             let runner = write_test_main(&mut *p, &plan);
@@ -1331,7 +1331,7 @@ fn exe_std_dir(argv0: *const char) *mut char {
     if out == null { return null; }
     if slash != null { unsafe cstring::memcpy(out as *mut void, path, dirlen); }
     else { unsafe out[0] = '.' as char; }
-    unsafe cstring::memcpy((out + dirlen) as *mut void, "/std".ptr, 4);
+    unsafe cstring::memcpy((out + dirlen) as *mut void, "/std".ptr(), 4);
     unsafe out[dirlen + 4] = 0 as char;
     return out;
 }
@@ -1349,47 +1349,47 @@ fn main() i32 {
     let mut i: i32 = 1;
     while i < argc {
         let arg = unsafe argv[i as usize] as *const char;
-        if !build_mode && file == null && unsafe cstring::strcmp(arg, "build".ptr as *const char) == 0 {
+        if !build_mode && file == null && unsafe cstring::strcmp(arg, "build".ptr() as *const char) == 0 {
             build_mode = true; // `super-c build <root.spc> [-o out]`: emit + link a program
-        } else if unsafe cstring::strcmp(arg, "-o".ptr as *const char) == 0 {
+        } else if unsafe cstring::strcmp(arg, "-o".ptr() as *const char) == 0 {
             if i + 1 < argc { i = i + 1; out_bin = unsafe argv[i as usize] as *const char; }
             else { bad = true; }
-        } else if unsafe cstring::strncmp(arg, "--const-eval-steps=".ptr as *const char, 19) == 0 {
+        } else if unsafe cstring::strncmp(arg, "--const-eval-steps=".ptr() as *const char, 19) == 0 {
             let v = parse_size(unsafe (arg + 19));
             if v == 0 || v > 4294967295u64 { bad = true; }
             else { ce_steps = v as u32; }
-        } else if unsafe cstring::strncmp(arg, "--const-eval-memory=".ptr as *const char, 20) == 0 {
+        } else if unsafe cstring::strncmp(arg, "--const-eval-memory=".ptr() as *const char, 20) == 0 {
             ce_mem = parse_size(unsafe (arg + 20));
             if ce_mem == 0 { bad = true; }
-        } else if unsafe cstring::strcmp(arg, "--test".ptr as *const char) == 0 {
+        } else if unsafe cstring::strcmp(arg, "--test".ptr() as *const char) == 0 {
             topts.enabled = true;
-        } else if unsafe cstring::strncmp(arg, "--test-jobs=".ptr as *const char, 12) == 0 {
+        } else if unsafe cstring::strncmp(arg, "--test-jobs=".ptr() as *const char, 12) == 0 {
             topts.jobs = unsafe stdlib::atoi(arg + 12);
             if topts.jobs < 1 { bad = true; }
-        } else if unsafe cstring::strcmp(arg, "--test-no-fork".ptr as *const char) == 0 {
+        } else if unsafe cstring::strcmp(arg, "--test-no-fork".ptr() as *const char) == 0 {
             topts.no_fork = true;
-        } else if unsafe cstring::strncmp(arg, "--test-filter=".ptr as *const char, 14) == 0 {
+        } else if unsafe cstring::strncmp(arg, "--test-filter=".ptr() as *const char, 14) == 0 {
             topts.filter = unsafe (arg + 14);
         } else if (unsafe arg[0]) == ('-' as char) && (unsafe arg[1]) == ('-' as char) {
             bad = true;
         } else if file == null {
             file = arg;
         } else {
-            file = "".ptr as *const char;
+            file = "".ptr() as *const char;
         }
         i = i + 1;
     }
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null) { bad = true; }
     if out_bin != null && !build_mode { bad = true; }   // -o is only meaningful for `build`
     if build_mode && topts.enabled { bad = true; }      // `build` and `--test` are mutually exclusive
-    if build_mode && out_bin == null { out_bin = "a.out".ptr as *const char; } // cc-style default
+    if build_mode && out_bin == null { out_bin = "a.out".ptr() as *const char; } // cc-style default
     if bad || file == null || (unsafe *file) == (0 as char) {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n".ptr as *const char,
+            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n".ptr() as *const char,
             stdio::stderr());
         return 1;
     }
-    let arg0: *const char = if argc > 0 { unsafe argv[0] as *const char; } else { "super-c".ptr as *const char; };
+    let arg0: *const char = if argc > 0 { unsafe argv[0] as *const char; } else { "super-c".ptr() as *const char; };
     let std_dir = exe_std_dir(arg0);
     let rc = run_file(file, std_dir as *const char, ce_steps, ce_mem, (&topts) as *const TestOpts, out_bin);
     if std_dir != null { unsafe stdlib::free(std_dir as *mut void); }

@@ -129,7 +129,7 @@ pub struct TypeAliasData { pub name: NodeId, pub generics: NodeList, pub ty: Nod
 pub struct ConstData { pub name: NodeId, pub ty: NodeId, pub value: NodeId, pub is_public: bool, pub is_extern: bool, pub is_static_mut: bool }
 pub struct ExternBlockData { pub abi: NodeId, pub header: NodeId, pub items: NodeList }
 pub struct ImportData { pub path: NodeList, pub alias: NodeId, pub glob: bool }
-pub struct GenericParamData { pub name: NodeId, pub bounds: NodeList, pub default_type: NodeId }
+pub struct GenericParamData { pub name: NodeId, pub bounds: NodeList, pub default_type: NodeId, pub is_const: bool, pub const_type: NodeId }
 pub struct WherePredicateData { pub ty: NodeId, pub bounds: NodeList }
 pub struct TypePathData { pub parts: NodeList, pub args: NodeList }
 pub struct IndirectTypeData { pub ty: NodeId, pub qualifier: TypeQualifier }
@@ -235,6 +235,7 @@ pub enum TypeKind {
     TYPE_OPAQUE,
     TYPE_DYN,
     TYPE_NEVER,
+    TYPE_CONST, // a const-generic argument value (as_data.value)
 }
 
 pub struct TyArr { pub elem: TypeId, pub len: u32 }
@@ -244,6 +245,7 @@ pub union TyAs {
     pub decl: NodeId,
     pub inst: u32,
     pub arr: TyArr,
+    pub value: i64, // TYPE_CONST: a const-generic value
 }
 pub struct Ty { pub kind: TypeKind, pub qualifier: u8, pub module: ModuleId, pub as_data: TyAs }
 
@@ -402,6 +404,11 @@ extend Ast {
 
     pub fn instance(self: &Self, index: u32) &TyInstance { return self.instances.at(index as usize); }
 
+    // A const-generic argument value, interned as a module-independent TYPE_CONST.
+    pub fn const_value(self: &mut Self, v: i64) TypeId {
+        return self.intern_type(Ty { kind: TypeKind::TYPE_CONST, module: 0, as_data: TyAs { value: v } });
+    }
+
     pub fn add_method_inst(self: &mut Self, instance: TypeId, method: NodeId, targs: *const TypeId, n: u8) bool {
         let mut m = n;
         if m > 4 { m = 4; }
@@ -556,25 +563,25 @@ pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut 
         hexf = (unsafe src[i] | 0x20u8) == 'p' as u8;
         i = i + 1;
     }
-    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "isize".ptr, 5) == 0 { if sfx_start != null { unsafe *sfx_start = end - 5; } return BuiltinType::BT_ISIZE; }
-    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "usize".ptr, 5) == 0 { if sfx_start != null { unsafe *sfx_start = end - 5; } return BuiltinType::BT_USIZE; }
+    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "isize".ptr(), 5) == 0 { if sfx_start != null { unsafe *sfx_start = end - 5; } return BuiltinType::BT_ISIZE; }
+    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "usize".ptr(), 5) == 0 { if sfx_start != null { unsafe *sfx_start = end - 5; } return BuiltinType::BT_USIZE; }
     let mut n: u32 = 3;
     if end - start > n {
         let p = unsafe (src + ((end - n) as usize));
-        if unsafe cstring::memcmp(p, "i16".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I16; }
-        if unsafe cstring::memcmp(p, "i32".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I32; }
-        if unsafe cstring::memcmp(p, "i64".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I64; }
-        if unsafe cstring::memcmp(p, "u16".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U16; }
-        if unsafe cstring::memcmp(p, "u32".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U32; }
-        if unsafe cstring::memcmp(p, "u64".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U64; }
-        if (!hex || hexf) && unsafe cstring::memcmp(p, "f32".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_F32; }
-        if (!hex || hexf) && unsafe cstring::memcmp(p, "f64".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_F64; }
+        if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I16; }
+        if unsafe cstring::memcmp(p, "i32".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I32; }
+        if unsafe cstring::memcmp(p, "i64".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I64; }
+        if unsafe cstring::memcmp(p, "u16".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U16; }
+        if unsafe cstring::memcmp(p, "u32".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U32; }
+        if unsafe cstring::memcmp(p, "u64".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U64; }
+        if (!hex || hexf) && unsafe cstring::memcmp(p, "f32".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_F32; }
+        if (!hex || hexf) && unsafe cstring::memcmp(p, "f64".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_F64; }
     }
     n = 2;
     if end - start > n {
         let p = unsafe (src + ((end - n) as usize));
-        if unsafe cstring::memcmp(p, "i8".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I8; }
-        if unsafe cstring::memcmp(p, "u8".ptr, n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U8; }
+        if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I8; }
+        if unsafe cstring::memcmp(p, "u8".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U8; }
     }
     return BuiltinType::BT_COUNT;
 }

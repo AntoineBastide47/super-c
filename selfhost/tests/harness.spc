@@ -44,7 +44,7 @@ extend Compiled {
     pub fn ok(self: &Self) bool { return self.errors == 0; }
     // Whether the first error message contains `needle` (matched as a substring).
     pub fn msg_has(self: &Self, needle: str) bool {
-        return unsafe cstring::strstr((&self.first[0]) as *const char, needle.ptr as *const char) != null;
+        return unsafe cstring::strstr((&self.first[0]) as *const char, needle.ptr() as *const char) != null;
     }
 }
 
@@ -62,7 +62,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     let mut r = Compiled {};
 
     // Parse stage: lex + parse standalone (no package needed to see syntax errors).
-    let mut lx = lex::Lexer::new(src.ptr as *const char, src.len);
+    let mut lx = lex::Lexer::new(src.ptr() as *const char, src.len());
     lx.scan_tokens();
     if lx.has_errors() {
         r.errors = lx.errors.errors.len();
@@ -73,7 +73,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src.ptr as *const char, src.len);
+    let mut ps = par::Parser::new(toks, src.ptr() as *const char, src.len());
     ps.build_ast();
     if ps.has_errors() {
         r.errors = ps.errors.errors.len();
@@ -86,7 +86,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     if stop == STAGE_PARSE { return r; }
 
     // Semantic stages need the prelude: load the snippet as module 0 alongside std, exactly like the CLI.
-    let mut p = loader::package_from_source(src.ptr as *const char, src.len, "std".ptr as *const char);
+    let mut p = loader::package_from_source(src.ptr() as *const char, src.len(), "std".ptr() as *const char);
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
     p.ceval = (&mut ceval) as *mut void;
@@ -115,12 +115,12 @@ pub struct ParsedAst { pub errors: usize, pub ast: Ast }
 
 pub fn parse_ast(src: str) ParsedAst {
     let mut r = ParsedAst { errors: 0, ast: Ast::new(0) };
-    let mut lx = lex::Lexer::new(src.ptr as *const char, src.len);
+    let mut lx = lex::Lexer::new(src.ptr() as *const char, src.len());
     lx.scan_tokens();
     if lx.has_errors() { r.errors = lx.errors.errors.len(); lx.free(); return r; }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src.ptr as *const char, src.len);
+    let mut ps = par::Parser::new(toks, src.ptr() as *const char, src.len());
     ps.build_ast();
     if ps.has_errors() { r.errors = ps.errors.errors.len(); }
     r.ast = ps.take_ast();
@@ -130,12 +130,12 @@ pub fn parse_ast(src: str) ParsedAst {
 
 // True if `src` fails to lex or parse (the parse-stage rejection oracle).
 pub fn parse_has_error(src: str) bool {
-    let mut lx = lex::Lexer::new(src.ptr as *const char, src.len);
+    let mut lx = lex::Lexer::new(src.ptr() as *const char, src.len());
     lx.scan_tokens();
     if lx.has_errors() { lx.free(); return true; }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src.ptr as *const char, src.len);
+    let mut ps = par::Parser::new(toks, src.ptr() as *const char, src.len());
     ps.build_ast();
     let e = ps.has_errors();
     ps.free();
@@ -153,7 +153,7 @@ pub struct CompiledAst {
 
 pub fn compile_ast(src: str, stop: i32) CompiledAst {
     let mut out = CompiledAst { errors: 0, stage: stop, ast: Ast::new(0) };
-    let mut p = loader::package_from_source(src.ptr as *const char, src.len, "std".ptr as *const char);
+    let mut p = loader::package_from_source(src.ptr() as *const char, src.len(), "std".ptr() as *const char);
     if !p.ok {
         out.errors = 1; out.stage = STAGE_PARSE;
         p.free();
@@ -229,7 +229,7 @@ extend CompiledC {
     pub fn ok(self: &Self) bool { return self.errors == 0; }
     pub fn code_has(self: &Self, needle: str) bool {
         if self.code == null { return false; }
-        return unsafe cstring::strstr(self.code as *const char, needle.ptr as *const char) != null;
+        return unsafe cstring::strstr(self.code as *const char, needle.ptr() as *const char) != null;
     }
     pub fn free(self: &mut Self) void {
         if self.code != null { unsafe stdlib::free(self.code as *mut void); self.code = null; }
@@ -240,7 +240,7 @@ extend CompiledC {
 // `code` is null; codegen-stage diagnostics also set `errors` but the (partial) code is still returned.
 pub fn compile_c(src: str) CompiledC {
     let mut out = CompiledC { errors: 0, code: null };
-    let mut p = loader::package_from_source(src.ptr as *const char, src.len, "std".ptr as *const char);
+    let mut p = loader::package_from_source(src.ptr() as *const char, src.len(), "std".ptr() as *const char);
     if !p.ok { out.errors = 1; p.free(); return out; }
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
@@ -295,7 +295,7 @@ extend RunResult {
     pub fn ok(self: &Self) bool { return self.built && self.exit == 0; }
     pub fn out_has(self: &Self, needle: str) bool {
         if self.out == null { return false; }
-        return unsafe cstring::strstr(self.out, needle.ptr as *const char) != null;
+        return unsafe cstring::strstr(self.out, needle.ptr() as *const char) != null;
     }
     pub fn free(self: &mut Self) void {
         if self.out != null { unsafe stdlib::free(self.out as *mut void); self.out = null; }
@@ -304,7 +304,7 @@ extend RunResult {
 
 // Read a whole file into a fresh NUL-terminated buffer (caller frees); null if it cannot be opened.
 fn slurp(path: *const char) *mut char {
-    let f = unsafe stdio::fopen(path, "rb".ptr as *const char);
+    let f = unsafe stdio::fopen(path, "rb".ptr() as *const char);
     if f == null { return null; }
     let buf = read_stream(f);
     unsafe stdio::fclose(f);
@@ -313,7 +313,7 @@ fn slurp(path: *const char) *mut char {
 
 fn rm_dir(dir: *const char) void {
     let mut cmd = Path512 {};
-    unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 512, "rm -rf '%s'".ptr as *const char, dir);
+    unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 512, "rm -rf '%s'".ptr() as *const char, dir);
     let _ = unsafe stdlib::system((&cmd.b[0]) as *const char);
 }
 
@@ -325,28 +325,28 @@ pub fn compile_and_run(src: str) RunResult {
     unsafe R_SEQ = unsafe R_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut dir = Path256 {};
-    unsafe stdio::snprintf((&mut dir.b[0]) as *mut char, 256, "/tmp/scr_%d_%llu".ptr as *const char, pid, unsafe R_SEQ);
+    unsafe stdio::snprintf((&mut dir.b[0]) as *mut char, 256, "/tmp/scr_%d_%llu".ptr() as *const char, pid, unsafe R_SEQ);
     let dirp = (&dir.b[0]) as *const char;
     if unsafe shim::sc_mkdir(dirp) != 0 { return r; }
     let mut spc = Path512 {};
-    unsafe stdio::snprintf((&mut spc.b[0]) as *mut char, 512, "%s/main.spc".ptr as *const char, dirp);
-    let wf = unsafe stdio::fopen((&spc.b[0]) as *const char, "w".ptr as *const char);
+    unsafe stdio::snprintf((&mut spc.b[0]) as *mut char, 512, "%s/main.spc".ptr() as *const char, dirp);
+    let wf = unsafe stdio::fopen((&spc.b[0]) as *const char, "w".ptr() as *const char);
     if wf == null { rm_dir(dirp); return r; }
-    if src.len > 0 { let _ = unsafe stdio::fwrite(src.ptr, 1, src.len, wf); }
+    if src.len() > 0 { let _ = unsafe stdio::fwrite(src.ptr(), 1, src.len(), wf); }
     unsafe stdio::fclose(wf);
-    let mut sc = unsafe stdlib::getenv("SUPERC".ptr as *const char);
-    if sc == null || (unsafe *sc) == (0 as char) { sc = "./super-c".ptr as *const char; }
+    let mut sc = unsafe stdlib::getenv("SUPERC".ptr() as *const char);
+    if sc == null || (unsafe *sc) == (0 as char) { sc = "./super-c".ptr() as *const char; }
     let mut cmd = Path1024 {};
     unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 1024,
-        "%s build '%s/main.spc' -o '%s/prog' >/dev/null 2>&1".ptr as *const char, sc, dirp, dirp);
+        "%s build '%s/main.spc' -o '%s/prog' >/dev/null 2>&1".ptr() as *const char, sc, dirp, dirp);
     let brc = unsafe stdlib::system((&cmd.b[0]) as *const char);
     if brc != 0 { rm_dir(dirp); return r; } // did not build
     r.built = true;
-    unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 1024, "'%s/prog' > '%s/out' 2>&1".ptr as *const char, dirp, dirp);
+    unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 1024, "'%s/prog' > '%s/out' 2>&1".ptr() as *const char, dirp, dirp);
     let rrc = unsafe stdlib::system((&cmd.b[0]) as *const char);
     if unsafe shim::sc_wifexited(rrc) != 0 { r.exit = unsafe shim::sc_wexitstatus(rrc); }
     let mut op = Path512 {};
-    unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/out".ptr as *const char, dirp);
+    unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/out".ptr() as *const char, dirp);
     r.out = slurp((&op.b[0]) as *const char);
     rm_dir(dirp);
     return r;

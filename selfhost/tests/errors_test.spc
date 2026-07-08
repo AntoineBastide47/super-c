@@ -10,29 +10,29 @@ struct Buf202 { pub b: [char; 202] }
 struct Buf151 { pub b: [char; 151] }
 
 fn contains(hay: *const char, needle: str) bool {
-    return unsafe cstring::strstr(hay, needle.ptr as *const char) != null;
+    return unsafe cstring::strstr(hay, needle.ptr() as *const char) != null;
 }
 fn streq(a: *const char, b: str) bool {
-    return unsafe cstring::strcmp(a, b.ptr as *const char) == 0;
+    return unsafe cstring::strcmp(a, b.ptr() as *const char) == 0;
 }
 fn offset_of(src: str, needle: str) u32 {
-    let p = unsafe cstring::strstr(src.ptr as *const char, needle.ptr as *const char);
+    let p = unsafe cstring::strstr(src.ptr() as *const char, needle.ptr() as *const char);
     if p == null { return 0; }
-    return ((p as usize) - (src.ptr as usize)) as u32;
+    return ((p as usize) - (src.ptr() as usize)) as u32;
 }
 
 // Emit one message at (off, span) over `src`, finalize with `file`, and hand back the rendered block 0.
 // The Errors value is returned so the caller can free it after inspecting the (borrowed) block pointer.
 fn render_into(e: &mut diag::Errors, src: str, msg: str, off: u32, span: u32, file: *const char) *const char {
-    e.emitf(off, span, "%s".ptr as *const char, msg.ptr as *const char);
-    e.finalize(src.ptr as *const u8, src.len, file);
+    e.emitf(off, span, "%s".ptr() as *const char, msg.ptr() as *const char);
+    e.finalize(src.ptr() as *const u8, src.len(), file);
     return (*e.errors.at(0)) as *const char;
 }
 
 @test
 fn emit_collects() {
     let mut e = diag::Errors::new();
-    e.emitf(12, 3, "count is %d for %s".ptr as *const char, 7, "x".ptr as *const char);
+    e.emitf(12, 3, "count is %d for %s".ptr() as *const char, 7, "x".ptr() as *const char);
     assert(e.errors.len() == 1 && e.starts.len() == 1 && e.lens.len() == 1, "one message + span recorded");
     assert(streq((*e.errors.at(0)) as *const char, "count is 7 for x"), "varargs formatting"); // pre-finalize
     assert(*e.starts.at(0) == 12 && *e.lens.at(0) == 3, "span recorded verbatim");
@@ -57,7 +57,7 @@ fn line_col_and_carets() {
 fn file_in_location() {
     let src = "ab\ncd\n  foo bar\n";
     let mut e = diag::Errors::new();
-    let b = render_into(&mut e, src, "boom", offset_of(src, "bar"), 3, "src/foo.spc".ptr as *const char);
+    let b = render_into(&mut e, src, "boom", offset_of(src, "bar"), 3, "src/foo.spc".ptr() as *const char);
     assert(contains(b, "--> src/foo.spc:3:7"), "file:line:col");
     e.free();
 }
@@ -66,9 +66,9 @@ fn file_in_location() {
 fn notes() {
     let src = "let x = y;\n";
     let mut e = diag::Errors::new();
-    e.emitf(offset_of(src, "y"), 1, "%s".ptr as *const char, "unknown name".ptr as *const char);
-    e.notef("did you mean '%s'?".ptr as *const char, "x".ptr as *const char);
-    e.finalize(src.ptr as *const u8, src.len, null);
+    e.emitf(offset_of(src, "y"), 1, "%s".ptr() as *const char, "unknown name".ptr() as *const char);
+    e.notef("did you mean '%s'?".ptr() as *const char, "x".ptr() as *const char);
+    e.finalize(src.ptr() as *const u8, src.len(), null);
     let b = (*e.errors.at(0)) as *const char;
     assert(contains(b, "error: unknown name"), "error line");
     assert(contains(b, "= note: did you mean 'x'?"), "note line");
@@ -107,7 +107,7 @@ fn long_line_windowing() {
     while i < 200 { buf.b[i] = 'x' as char; i = i + 1; }
     buf.b[200] = '\n' as char;
     let mut e = diag::Errors::new();
-    e.emitf(180, 3, "%s".ptr as *const char, "m".ptr as *const char);
+    e.emitf(180, 3, "%s".ptr() as *const char, "m".ptr() as *const char);
     e.finalize((&buf.b[0]) as *const u8, 201, null);
     let b = (*e.errors.at(0)) as *const char;
     assert(contains(b, "--> 1:181"), "column past the window");
@@ -124,7 +124,7 @@ fn long_line_windowing() {
 fn offset_past_eof() {
     let src = "abc\n";
     let mut e = diag::Errors::new();
-    let b = render_into(&mut e, src, "eof", (src.len as u32) + 50, 1, null); // clamped to src_len, no OOB
+    let b = render_into(&mut e, src, "eof", (src.len() as u32) + 50, 1, null); // clamped to src_len, no OOB
     assert(contains(b, "error: eof"), "renders without overrun");
     e.free();
 }

@@ -14,7 +14,7 @@ const REFS: str = "struct P { pub x: i32, }\nfn reads(r: &P) i32 { return r.x; }
 
 const EXTERN: str = "extern \"C\" {\n  fn putchar(c: i32) i32;\n}\nfn main() i32 { let r: i32 = unsafe putchar(72); }\n";
 
-const STR: str = "fn f(s: str) usize { return s.len; }\nfn main() i32 { let g: str = \"hi\"; return 0; }\n";
+const STR: str = "fn f(s: str) usize { return s.len(); }\nfn main() i32 { let g: str = \"hi\"; return 0; }\n";
 
 const CONSTNESS: str = "fn f(a: i32) i32 {\n  let x: i32 = a;\n  let mut y: i32 = a;\n  y = y + 1;\n  return x + y;\n}\n";
 
@@ -103,7 +103,7 @@ fn str() {
     h::expect_c("str forward typedef", STR, "typedef struct str str;");
     h::expect_c("str struct body", STR, "struct str {\n  const uint8_t *ptr;\n  size_t len;\n};");
     h::expect_c("str param", STR, "size_t f(str const s)");
-    h::expect_c("str member access", STR, "s.len");
+    h::expect_c("str len() emits method call", STR, "str__len(&s)");
     h::expect_c("str literal", STR, "(str){ (const uint8_t *)\"hi\", sizeof(\"hi\") - 1 }");
 }
 
@@ -239,6 +239,21 @@ fn literals() {
     h::expect_c("binary literal", "fn f() i32 { let a: i32 = 0b101; return a; }\n", "= 5;");
     h::expect_c("digit separators", "fn f() i32 { let a: i32 = 1_000; return a; }\n", "= 1000;");
     h::expect_c("keyword identifier", "fn f() i32 { let register: i32 = 1; return register; }\n", "register_");
+}
+
+@test
+fn const_generics() {
+    let CG: str = "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 { let a = Buff::<i32, 4> { b: [1, 2, 3, 4] }; let c = Buff::<u8, 2> { b: [1u8, 2u8] }; return a.b[0] + c.b[1] as i32 + a.cap() as i32; }\n";
+    // Distinct (type-arg, const-arg) tuples monomorphize to distinct C types...
+    h::expect_c("const-generic instance name (i32, 4)", CG, "Buff__i32__4");
+    h::expect_c("const-generic instance name (u8, 2)", CG, "Buff__u8__2");
+    // ...whose array field is sized by the const value (not the identifier `N`)...
+    h::expect_c("const-generic array field sized (i32)", CG, "int32_t b[4]");
+    h::expect_c("const-generic array field sized (u8)", CG, "uint8_t b[2]");
+    h::expect_c_absent("const param does not leak as `N` into C", CG, "b[N]");
+    // ...and the const param folds to its value in expression position.
+    h::expect_c("const param value in method body (4)", CG, "return 4;");
+    h::expect_c("const param value in method body (2)", CG, "return 2;");
 }
 
 @test

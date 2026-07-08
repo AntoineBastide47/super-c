@@ -52,7 +52,7 @@ fn nearest_shadow() {
     let outer_let = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0); // created first
     let inner_let = h::nth_kind(&c.ast, NodeKind::NODE_LET, 1);
     let mut uses: [NodeId; 4] = [0 as NodeId, 0 as NodeId, 0 as NodeId, 0 as NodeId];
-    let n = value_uses(&c.ast, src.ptr as *const char, "x".ptr as *const char, (&mut uses[0]) as *mut NodeId, 4);
+    let n = value_uses(&c.ast, src.ptr() as *const char, "x".ptr() as *const char, (&mut uses[0]) as *mut NodeId, 4);
     assert_eq(n, 2);
     assert(c.ast.resolution(uses[0]) == inner_let, "inner g(x) binds to the inner let");
     assert(c.ast.resolution(uses[1]) == outer_let, "outer g(x) binds to the outer let");
@@ -69,7 +69,7 @@ fn namespace_separation() {
     let struct_decl = h::nth_kind(&c.ast, NodeKind::NODE_STRUCT, 0);
     let const_decl = h::nth_kind(&c.ast, NodeKind::NODE_CONST, 0);
     let mut uses: [NodeId; 4] = [0 as NodeId, 0 as NodeId, 0 as NodeId, 0 as NodeId];
-    let n = value_uses(&c.ast, src.ptr as *const char, "Foo".ptr as *const char, (&mut uses[0]) as *mut NodeId, 4);
+    let n = value_uses(&c.ast, src.ptr() as *const char, "Foo".ptr() as *const char, (&mut uses[0]) as *mut NodeId, 4);
     assert_eq(n, 1); // the value use is the let initializer
     assert(c.ast.resolution(uses[0]) == const_decl, "value Foo binds to the const, not the struct");
     // The type use is the `: Foo` annotation, resolved on the NODE_TYPE_PATH.

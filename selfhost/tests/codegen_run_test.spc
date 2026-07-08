@@ -14,9 +14,9 @@ struct Buf4096 { pub b: [char; 4096] }
 // Splice PRE ahead of `body`, build+run the program, and assert it exits with `code`.
 fn run_exit(label: str, body: str, code: i32) {
     let mut buf = Buf4096 {};
-    unsafe stdio::snprintf((&mut buf.b[0]) as *mut char, 4096, "%s%s".ptr as *const char,
-        PRE.ptr as *const char, body.ptr as *const char);
-    let src = str { ptr: (&buf.b[0]) as *const u8, len: unsafe cstring::strlen((&buf.b[0]) as *const char) };
+    unsafe stdio::snprintf((&mut buf.b[0]) as *mut char, 4096, "%s%s".ptr() as *const char,
+        PRE.ptr() as *const char, body.ptr() as *const char);
+    let src = str::from_raw((&buf.b[0]) as *const u8, unsafe cstring::strlen((&buf.b[0]) as *const char));
     h::expect_exit(label, src, code);
 }
 
@@ -66,6 +66,13 @@ fn structs_and_methods() {
         "struct Inner { pub v: i32, }\nstruct Outer { pub inner: Inner, }\nfn main() i32 { let o: Outer = Outer { inner: Inner { v: 7, }, }; unsafe exit(o.inner.v); }\n", 7);
     run_exit("heap struct via new",
         "struct Box { pub v: i32, }\nfn main() i32 { let b: *Box = new Box { v: 9, }; unsafe exit(b.v); }\n", 9);
+}
+
+@test
+fn const_generics() {
+    run_exit("distinct const-generic instances + value use",
+        "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<i32, 8> { b: [0, 0, 0, 0, 0, 0, 0, 9] };\n  unsafe exit(a.b[0] + a.b[3] + c.b[7] + a.cap() as i32 + c.cap() as i32);\n}\n",
+        26); // 1 + 4 + 9 + a.cap()=4 + c.cap()=8
 }
 
 @test

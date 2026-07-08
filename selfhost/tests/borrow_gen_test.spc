@@ -23,7 +23,7 @@ const SINK: str = "struct Own { pub id: i32 }\nextend Own as Free { fn free(self
 
 // Make a `str` view over a filled, NUL-terminated buffer.
 fn buf_str(p: *const char) str {
-    return str { ptr: p as *const u8, len: unsafe cstring::strlen(p) };
+    return str::from_raw(p as *const u8, unsafe cstring::strlen(p));
 }
 
 // Two borrow-place overlap rules: whole `p` (index 0) overlaps everything; `p.a` (1) and `p.b` (2) are disjoint.
@@ -35,7 +35,7 @@ fn overlap(i: i32, j: i32) bool {
 fn use_ref(out: *mut char, name: str, pi: i32) {
     let mut fmt = "*%s";
     if pi == 0 { fmt = "%s.a"; }
-    unsafe stdio::snprintf(out, 64, fmt.ptr as *const char, name.ptr as *const char);
+    unsafe stdio::snprintf(out, 64, fmt.ptr() as *const char, name.ptr() as *const char);
 }
 
 // Compile through the typechecker only and assert the accept/reject verdict; a rejection must be a
@@ -51,7 +51,7 @@ fn check_case(label: str, src: str, expect_ok: bool) {
 fn case_pre(pre: str, body: str, label: str, ok: bool) {
     let mut src = Buf2048 {};
     unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 2048,
-        "%s%s".ptr as *const char, pre.ptr as *const char, body.ptr as *const char);
+        "%s%s".ptr() as *const char, pre.ptr() as *const char, body.ptr() as *const char);
     check_case(label, buf_str((&src.b[0]) as *const char), ok);
 }
 
@@ -74,9 +74,9 @@ fn aliasing() {
                     use_ref((&mut u2.b[0]) as *mut char, "b2", p2);
                     let mut src = Buf2048 {};
                     unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 2048,
-                        "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let b1 = &%s%s;\n  let b2 = &%s%s;\n  let keep = %s + %s; return keep; }\n".ptr as *const char,
-                        PRE.ptr as *const char, kinds[k1].ptr as *const char, places[p1].ptr as *const char,
-                        kinds[k2].ptr as *const char, places[p2].ptr as *const char,
+                        "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let b1 = &%s%s;\n  let b2 = &%s%s;\n  let keep = %s + %s; return keep; }\n".ptr() as *const char,
+                        PRE.ptr() as *const char, kinds[k1].ptr() as *const char, places[p1].ptr() as *const char,
+                        kinds[k2].ptr() as *const char, places[p2].ptr() as *const char,
                         (&u1.b[0]) as *const char, (&u2.b[0]) as *const char);
                     let want = !(overlap(p1, p2) && (k1 != 0 || k2 != 0));
                     check_case("aliasing", buf_str((&src.b[0]) as *const char), want);
@@ -106,9 +106,9 @@ fn use_while_borrowed() {
                 use_ref((&mut ur.b[0]) as *mut char, "r", p1);
                 let mut src = Buf2048 {};
                 unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 2048,
-                    "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let r = &%s%s;\n  let y = %s;\n  let keep = %s; return keep; }\n".ptr as *const char,
-                    PRE.ptr as *const char, kinds[k].ptr as *const char, places[p1].ptr as *const char,
-                    places[p2].ptr as *const char, (&ur.b[0]) as *const char);
+                    "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let r = &%s%s;\n  let y = %s;\n  let keep = %s; return keep; }\n".ptr() as *const char,
+                    PRE.ptr() as *const char, kinds[k].ptr() as *const char, places[p1].ptr() as *const char,
+                    places[p2].ptr() as *const char, (&ur.b[0]) as *const char);
                 let want = !(overlap(p1, p2) && k != 0);
                 check_case("use while borrowed", buf_str((&src.b[0]) as *const char), want);
                 p2 = p2 + 1;
@@ -134,9 +134,9 @@ fn nll() {
                 use_ref((&mut ur.b[0]) as *mut char, "r", p1);
                 let mut src = Buf2048 {};
                 unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 2048,
-                    "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let r = &%s%s;\n  let used = %s;\n  let y = %s; return used; }\n".ptr as *const char,
-                    PRE.ptr as *const char, kinds[k].ptr as *const char, places[p1].ptr as *const char,
-                    (&ur.b[0]) as *const char, places[p2].ptr as *const char);
+                    "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let r = &%s%s;\n  let used = %s;\n  let y = %s; return used; }\n".ptr() as *const char,
+                    PRE.ptr() as *const char, kinds[k].ptr() as *const char, places[p1].ptr() as *const char,
+                    (&ur.b[0]) as *const char, places[p2].ptr() as *const char);
                 check_case("nll", buf_str((&src.b[0]) as *const char), true);
                 p2 = p2 + 1;
             }
@@ -347,10 +347,10 @@ fn aliasing3() {
                             use_ref((&mut u3.b[0]) as *mut char, "b3", p3);
                             let mut src = Buf2048 {};
                             unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 2048,
-                                "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let b1 = &%s%s;\n  let b2 = &%s%s;\n  let b3 = &%s%s;\n  let keep = %s + %s + %s; return keep; }\n".ptr as *const char,
-                                PRE.ptr as *const char, kinds[k1].ptr as *const char, places[p1].ptr as *const char,
-                                kinds[k2].ptr as *const char, places[p2].ptr as *const char,
-                                kinds[k3].ptr as *const char, places[p3].ptr as *const char,
+                                "%sfn main() i32 { let mut p = P { a: 1, b: 2 };\n  let b1 = &%s%s;\n  let b2 = &%s%s;\n  let b3 = &%s%s;\n  let keep = %s + %s + %s; return keep; }\n".ptr() as *const char,
+                                PRE.ptr() as *const char, kinds[k1].ptr() as *const char, places[p1].ptr() as *const char,
+                                kinds[k2].ptr() as *const char, places[p2].ptr() as *const char,
+                                kinds[k3].ptr() as *const char, places[p3].ptr() as *const char,
                                 (&u1.b[0]) as *const char, (&u2.b[0]) as *const char, (&u3.b[0]) as *const char);
                             let bad = (overlap(p1, p2) && (k1 != 0 || k2 != 0)) || (overlap(p1, p3) && (k1 != 0 || k3 != 0)) || (overlap(p2, p3) && (k2 != 0 || k3 != 0));
                             check_case("aliasing3", buf_str((&src.b[0]) as *const char), !bad);
@@ -410,7 +410,7 @@ fn snippet_ok(i: i32) bool {
 fn bundle(idx: *const i32, n: i32, label: str) {
     let mut src = Buf8192 {};
     let mut calls = Buf2048 {};
-    let mut at: i32 = unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 8192, "%s".ptr as *const char, PRE.ptr as *const char);
+    let mut at: i32 = unsafe stdio::snprintf((&mut src.b[0]) as *mut char, 8192, "%s".ptr() as *const char, PRE.ptr() as *const char);
     let mut cat: i32 = 0;
     let mut ok = true;
     unsafe calls.b[0] = 0 as char;
@@ -418,18 +418,18 @@ fn bundle(idx: *const i32, n: i32, label: str) {
     while i < n {
         let bi = unsafe idx[i as usize];
         at = at + unsafe stdio::snprintf((&mut src.b[at as usize]) as *mut char, (8192 - at) as usize,
-            "fn s%d() i32 { %s }\n".ptr as *const char, i, snippet_body(bi).ptr as *const char);
+            "fn s%d() i32 { %s }\n".ptr() as *const char, i, snippet_body(bi).ptr() as *const char);
         let mut sep = "";
         if i != 0 { sep = " + "; }
         cat = cat + unsafe stdio::snprintf((&mut calls.b[cat as usize]) as *mut char, (2048 - cat) as usize,
-            "%ss%d()".ptr as *const char, sep.ptr as *const char, i);
+            "%ss%d()".ptr() as *const char, sep.ptr() as *const char, i);
         ok = ok && snippet_ok(bi);
         i = i + 1;
     }
-    let mut tail = "0".ptr as *const char;
+    let mut tail = "0".ptr() as *const char;
     if n != 0 { tail = (&calls.b[0]) as *const char; }
     unsafe stdio::snprintf((&mut src.b[at as usize]) as *mut char, (8192 - at) as usize,
-        "fn main() i32 { return %s; }\n".ptr as *const char, tail);
+        "fn main() i32 { return %s; }\n".ptr() as *const char, tail);
     check_case(label, buf_str((&src.b[0]) as *const char), ok);
 }
 
@@ -457,7 +457,7 @@ fn composition() {
             while t < nv { idx.b[k as usize] = av.b[t as usize]; k = k + 1; t = t + 1; }
             idx.b[k as usize] = j; k = k + 1;
             let mut lbuf = Buf2048 {};
-            unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle: valids + invalid #%d".ptr as *const char, j);
+            unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle: valids + invalid #%d".ptr() as *const char, j);
             bundle((&idx.b[0]) as *const i32, k, buf_str((&lbuf.b[0]) as *const char));
         }
         j = j + 1;
@@ -471,7 +471,7 @@ fn composition() {
             let mut pair = IdxBuf {};
             pair.b[0] = a; pair.b[1] = b;
             let mut lbuf = Buf2048 {};
-            unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle pair (%d,%d)".ptr as *const char, a, b);
+            unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle pair (%d,%d)".ptr() as *const char, a, b);
             bundle((&pair.b[0]) as *const i32, 2, buf_str((&lbuf.b[0]) as *const char));
             b = b + 1;
         }

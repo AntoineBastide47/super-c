@@ -3,8 +3,8 @@
 //
 // `str` is a non-owning (ptr, len) view: it never allocates, resizes, or mutates the bytes it points
 // at, so its whole API returns either sub-views (`str`) or scalar values. Owning/mutating operations
-// live on `String`. The two fields are public -- a `str` is a plain fat pointer -- so `s.ptr` / `s.len`
-// are usable directly; the `len()` / `is_empty()` / `ptr()` methods exist for API parity with `String`.
+// live on `String`. The `(ptr, len)` fields are PRIVATE -- read them through the `.ptr()` / `.len()`
+// accessors, and build a view from raw parts with `str::from_raw(ptr, len)` (the only way to make one).
 //
 // Borrowed iterators (`bytes`, `chars`, `split`, `lines`) live at the bottom of this module as small
 // cursor structs implementing `Iterator`, so `for b in s.bytes() { .. }` works.
@@ -16,15 +16,20 @@ extern "C" {
 
 // A borrowed view over UTF-8 bytes -- the type of a string literal. Non-owning: the bytes outlive it.
 pub struct str {
-    pub ptr: *const u8, // start of the bytes
-    pub len: usize,     // number of bytes
+    ptr: *const u8, // start of the bytes
+    len: usize,     // number of bytes
 }
 
 extend str {
+    // Construct a view over `len` bytes at `ptr`. The building block for the rest of std and for callers
+    // bridging from a raw C buffer -- the fields are private, so this is the only way to make a `str`.
+    pub fn from_raw(ptr: *const u8, len: usize) str {
+        return str { ptr: ptr, len: len };
+    }
+
     // --- length & raw access -------------------------------------------------------------------
 
-    // Number of bytes in the view. `s.len()` (this method) and the public `s.len` field are the same
-    // value; the method exists so `str` and `String` share one `.len()` surface.
+    // Number of bytes in the view. `s.len()` is the accessor for the private `len` field.
     pub fn len(self: &str) usize {
         return self.len;
     }
@@ -509,13 +514,13 @@ extend str {
 // Digits of `s` in `[start, s.len)` in `radix`, all consumed exactly.
 // `None` on radix outside 2..=36, empty digit run, an invalid digit, or u64 overflow.
 fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
-    if radix < 2 || radix > 36 || start >= s.len {
+    if radix < 2 || radix > 36 || start >= s.len() {
         return Option::<u64>::None;
     }
     let r = radix as u64;
     let mut acc: u64 = 0;
     let mut i = start;
-    while i < s.len {
+    while i < s.len() {
         let b = s.byte_at(i);
         let mut d: u32 = 99;
         if b >= b'0' && b <= b'9' {

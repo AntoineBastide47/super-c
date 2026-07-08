@@ -19,7 +19,7 @@ pub struct Errors {
 }
 
 pub fn oom() void {
-    unsafe stdio::fputs("fatal: out of memory\n".ptr as *const char, stdio::stderr());
+    unsafe stdio::fputs("fatal: out of memory\n".ptr() as *const char, stdio::stderr());
     unsafe stdlib::abort();
 }
 
@@ -79,11 +79,11 @@ extend Errors {
         let old = (*self.notes.at(n - 1)) as *mut char;
         let mut old_len: usize = 0;
         if old != null { old_len = unsafe string::strlen(old as *const char); }
-        let add = unsafe string::strlen(msg as *const char) + "\n  = note: ".len + 1;
+        let add = unsafe string::strlen(msg as *const char) + "\n  = note: ".len() + 1;
         let next = unsafe stdlib::malloc(old_len + add + 1) as *mut char;
         if next == null { oom(); }
         if old_len != 0 { unsafe string::memcpy(next as *mut void, old, old_len); }
-        unsafe stdio::snprintf(next + old_len, add + 1, "\n  = note: %s".ptr as *const char, msg);
+        unsafe stdio::snprintf(next + old_len, add + 1, "\n  = note: %s".ptr() as *const char, msg);
         unsafe stdlib::free(old as *mut void);
         unsafe stdlib::free(msg as *mut void);
         self.notes.set(n - 1, next);
@@ -116,7 +116,7 @@ extend Errors {
             }
         }
         for k in 0..self.errors.len() {
-            let mut notes = "".ptr as *const char;
+            let mut notes = "".ptr() as *const char;
             if k < self.notes.len() { notes = (*self.notes.at(k)) as *const char; }
             let block = render((*self.errors.at(k)) as *const char, source, &line_starts, len, *self.starts.at(k), *self.lens.at(k), file, notes);
             unsafe stdlib::free((*self.errors.at(k)) as *mut void);
@@ -143,7 +143,7 @@ extend Errors {
 
     pub fn log(self: &Self) void {
         for i in 0..self.errors.len() {
-            unsafe stdio::fprintf(stdio::stderr(), "%s\n".ptr as *const char, *self.errors.at(i));
+            unsafe stdio::fprintf(stdio::stderr(), "%s\n".ptr() as *const char, *self.errors.at(i));
         }
     }
 }
@@ -207,11 +207,11 @@ fn render(
     if bar == null { oom(); }
     unsafe string::memset(bar as *mut void, '^' as i32, carets);
     unsafe bar[carets] = 0 as char;
-    let mut fpfx = "".ptr as *const char;
-    let mut fsep = "".ptr as *const char;
+    let mut fpfx = "".ptr() as *const char;
+    let mut fsep = "".ptr() as *const char;
     if file != null && unsafe file[0] != 0 as char {
         fpfx = file;
-        fsep = ":".ptr as *const char;
+        fsep = ":".ptr() as *const char;
     }
     let cap = unsafe string::strlen(msg) + unsafe string::strlen(notes) + line_len + real_col + carets + unsafe string::strlen(fpfx) + 160;
     let out = unsafe stdlib::malloc(cap) as *mut char;
@@ -219,7 +219,7 @@ fn render(
     unsafe stdio::snprintf(
         out,
         cap,
-        "error: %s\n--> %s%s%zu:%zu\n |\n%zu | %.*s\n | %*s%s%s".ptr as *const char,
+        "error: %s\n--> %s%s%zu:%zu\n |\n%zu | %.*s\n | %*s%s%s".ptr() as *const char,
         msg,
         fpfx,
         fsep,
@@ -229,7 +229,7 @@ fn render(
         line_len as i32,
         line_ptr,
         caret_col as i32,
-        "".ptr as *const char,
+        "".ptr() as *const char,
         bar,
         notes,
     );

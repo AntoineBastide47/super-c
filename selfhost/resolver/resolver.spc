@@ -83,12 +83,12 @@ fn span_is(src: *const u8, s: tok::Span, lit: *const char) bool {
 // of these, which resolves on its own.
 fn builtin_index(src: *const u8, s: tok::Span) i32 {
     let mut names: [*const char; 18] = [
-        "bool".ptr as *const char, "char".ptr as *const char, "i8".ptr as *const char,
-        "i16".ptr as *const char, "i32".ptr as *const char, "i64".ptr as *const char,
-        "isize".ptr as *const char, "u8".ptr as *const char, "u16".ptr as *const char,
-        "u32".ptr as *const char, "u64".ptr as *const char, "usize".ptr as *const char,
-        "f32".ptr as *const char, "f64".ptr as *const char, "c32".ptr as *const char,
-        "c64".ptr as *const char, "va_list".ptr as *const char, "void".ptr as *const char,
+        "bool".ptr() as *const char, "char".ptr() as *const char, "i8".ptr() as *const char,
+        "i16".ptr() as *const char, "i32".ptr() as *const char, "i64".ptr() as *const char,
+        "isize".ptr() as *const char, "u8".ptr() as *const char, "u16".ptr() as *const char,
+        "u32".ptr() as *const char, "u64".ptr() as *const char, "usize".ptr() as *const char,
+        "f32".ptr() as *const char, "f64".ptr() as *const char, "c32".ptr() as *const char,
+        "c64".ptr() as *const char, "va_list".ptr() as *const char, "void".ptr() as *const char,
     ];
     let mut i: usize = 0;
     while i < 18 {
@@ -164,7 +164,7 @@ extend Resolver {
     fn declare(self: &mut Self, name_node: NodeId, decl: NodeId, ns: Namespace) void {
         if name_node == NODE_NONE { return; }
         let name = self.name_span(name_node);
-        if ns == Namespace::NS_VALUE && span_is(self.source, name, "_".ptr as *const char) { return; }
+        if ns == Namespace::NS_VALUE && span_is(self.source, name, "_".ptr() as *const char) { return; }
         let hash = name_hash(self.source, name);
         let key = symbol_key(hash, ns as u8);
         let mut head: u32 = 0;
@@ -179,7 +179,7 @@ extend Resolver {
                 let width = (name.end - name.start) as i32;
                 let sptr = unsafe (self.source + name.start as usize) as *const char;
                 self.errors.emitf(name.start, name.end - name.start,
-                                  "duplicate definition of '%.*s'".ptr as *const char, width, sptr);
+                                  "duplicate definition of '%.*s'".ptr() as *const char, width, sptr);
                 return;
             }
             current = *self.symbol_previous.at(i);
@@ -330,9 +330,9 @@ extend Resolver {
             self.ast.set_resolution_def(refn, DefId { module: mid, node: decl });
         } else {
             self.errors.emitf(name.start, name.end - name.start,
-                              "no public %s '%.*s' in the imported module".ptr as *const char,
+                              "no public %s '%.*s' in the imported module".ptr() as *const char,
                               kind, nl as i32, nm);
-            self.errors.notef("only 'pub' top-level items are visible across module boundaries".ptr as *const char);
+            self.errors.notef("only 'pub' top-level items are visible across module boundaries".ptr() as *const char);
         }
     }
 
@@ -400,15 +400,15 @@ extend Resolver {
                         self.ast.set_resolution_def(id, DefId { module: mid, node: decl });
                     } else {
                         self.errors.emitf(dn.start, dn.end - dn.start,
-                                          "no public item '%.*s' in module '%s'".ptr as *const char,
+                                          "no public item '%.*s' in module '%s'".ptr() as *const char,
                                           dl as i32, dnm, buf);
-                        self.errors.notef("the module was found, but this item is missing or not public".ptr as *const char);
+                        self.errors.notef("the module was found, but this item is missing or not public".ptr() as *const char);
                     }
                     handled = true;
                 } else if nn - m == 2 { // module::Type::method -- record the Type
                     let chain1 = *chain.at(1);
                     let tspan = self.name_span(*seg.at(m as usize));
-                    self.resolve_module_decl(chain1, mid, tspan, true, "type".ptr as *const char);
+                    self.resolve_module_decl(chain1, mid, tspan, true, "type".ptr() as *const char);
                     handled = true;
                 }
                 done = true; // deeper than module::Type::method is not supported here
@@ -471,9 +471,9 @@ extend Resolver {
         }
         let width = (name.end - name.start) as i32;
         let sptr = unsafe (self.source + name.start as usize) as *const char;
-        self.errors.emitf(name.start, name.end - name.start, "cannot find %s '%.*s'".ptr as *const char,
+        self.errors.emitf(name.start, name.end - name.start, "cannot find %s '%.*s'".ptr() as *const char,
                           kind, width, sptr);
-        self.errors.notef("check spelling, imports, and whether the item is declared before this use".ptr as *const char);
+        self.errors.notef("check spelling, imports, and whether the item is declared before this use".ptr() as *const char);
     }
 
     // -- types ---------------------------------------------------------------------------------------------
@@ -491,8 +491,10 @@ extend Resolver {
         let mut i: u32 = 0;
         while i < generics.len {
             let gid = self.child(generics, i);
-            let nm = self.ast.at_const(gid).as_data.generic_param.name;
-            self.declare(nm, gid, Namespace::NS_TYPE);
+            let gp = self.ast.at_const(gid).as_data.generic_param;
+            self.declare(gp.name, gid, Namespace::NS_TYPE);
+            // A const-generic param is also a value, so it resolves in value position (e.g. `[T; N]`).
+            if gp.is_const { self.declare(gp.name, gid, Namespace::NS_VALUE); }
             i = i + 1;
         }
         // Bounds and defaults after every parameter is in scope, so they may refer to each other.
@@ -502,6 +504,7 @@ extend Resolver {
             let gp = self.ast.at_const(gid).as_data.generic_param;
             self.resolve_bounds(gp.bounds);
             if gp.default_type != NODE_NONE { self.resolve_type(gp.default_type); }
+            if gp.const_type != NODE_NONE { self.resolve_type(gp.const_type); }
             i = i + 1;
         }
     }
@@ -525,7 +528,7 @@ extend Resolver {
             let mq = self.module_qualified_type(tp.parts);
             if mq.mid >= 0 {
                 let tspan = self.name_span(mq.type_node);
-                self.resolve_module_decl(id, mq.mid as ModuleId, tspan, true, "type".ptr as *const char);
+                self.resolve_module_decl(id, mq.mid as ModuleId, tspan, true, "type".ptr() as *const char);
                 let mut i: u32 = 0;
                 while i < tp.args.len { let a = self.child(tp.args, i); self.resolve_type(a); i = i + 1; }
                 return;
@@ -533,16 +536,16 @@ extend Resolver {
             if tp.parts.len > 0 {
                 let first = self.child(tp.parts, 0);
                 let name = self.name_span(first);
-                if span_is(self.source, name, "Self".ptr as *const char) {
+                if span_is(self.source, name, "Self".ptr() as *const char) {
                     if self.current_self.node != NODE_NONE {
                         let cs = self.current_self;
                         self.ast.set_resolution_def(id, cs);
                     } else {
                         self.errors.emitf(name.start, name.end - name.start,
-                                          "'Self' is only valid inside an interface or extension".ptr as *const char);
+                                          "'Self' is only valid inside an interface or extension".ptr() as *const char);
                     }
                 } else {
-                    self.resolve_ref(id, first, Namespace::NS_TYPE, "type".ptr as *const char);
+                    self.resolve_ref(id, first, Namespace::NS_TYPE, "type".ptr() as *const char);
                 }
             }
             let mut i: u32 = 0;
@@ -581,7 +584,7 @@ extend Resolver {
     fn resolve_type_name(self: &mut Self, id: NodeId) void {
         if id == NODE_NONE { return; }
         if self.ast.at_const(id).kind == NodeKind::NODE_IDENTIFIER {
-            self.resolve_ref(id, id, Namespace::NS_TYPE, "type".ptr as *const char);
+            self.resolve_ref(id, id, Namespace::NS_TYPE, "type".ptr() as *const char);
         } else {
             self.resolve_type(id);
         }
@@ -853,7 +856,7 @@ extend Resolver {
         let kind = self.ast.at_const(id).kind;
         switch kind {
             NODE_IDENTIFIER => {
-                self.resolve_ref(id, id, Namespace::NS_VALUE, "value".ptr as *const char); // also covers 'self'
+                self.resolve_ref(id, id, Namespace::NS_VALUE, "value".ptr() as *const char); // also covers 'self'
             },
             NODE_UNARY => {
                 let op = self.ast.at_const(id).as_data.unary.operand;
@@ -877,7 +880,7 @@ extend Resolver {
                     }
                 }
                 if as_type {
-                    self.resolve_ref(cd.callee, cd.callee, Namespace::NS_TYPE, "type".ptr as *const char);
+                    self.resolve_ref(cd.callee, cd.callee, Namespace::NS_TYPE, "type".ptr() as *const char);
                 } else {
                     self.resolve_expr(cd.callee);
                 }
@@ -910,7 +913,7 @@ extend Resolver {
                     if self.sym_lookup(iname, Namespace::NS_VALUE).decl == NODE_NONE { as_type = true; }
                 }
                 if as_type {
-                    self.resolve_ref(sp.expression, sp.expression, Namespace::NS_TYPE, "type".ptr as *const char);
+                    self.resolve_ref(sp.expression, sp.expression, Namespace::NS_TYPE, "type".ptr() as *const char);
                 } else {
                     self.resolve_expr(sp.expression);
                 }
@@ -989,10 +992,10 @@ extend Resolver {
                 if decl != NODE_NONE {
                     self.ast.set_resolution_def(id, DefId { module: nm.mid, node: decl });
                 } else {
-                    self.resolve_module_decl(id, nm.mid, mn, true, "item".ptr as *const char);
+                    self.resolve_module_decl(id, nm.mid, mn, true, "item".ptr() as *const char);
                 }
             } else {
-                self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, "type".ptr as *const char);
+                self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, "type".ptr() as *const char);
             }
         } else {
             self.resolve_expr(mb.object); // member name needs a type; deferred to the type checker
@@ -1009,7 +1012,7 @@ extend Resolver {
                 let first = self.child(tp.parts, 0);
                 let name = self.name_span(first);
                 let mut is_type = is_builtin_type(self.source, name)
-                    || span_is(self.source, name, "Self".ptr as *const char)
+                    || span_is(self.source, name, "Self".ptr() as *const char)
                     || self.sym_lookup(name, Namespace::NS_TYPE).decl != NODE_NONE;
                 if !is_type && self.package != null {
                     let pkg = unsafe &*self.package;
@@ -1019,7 +1022,7 @@ extend Resolver {
                         || self.glob_lookup(name, true).node != NODE_NONE;
                 }
                 if !is_type {
-                    self.resolve_ref(v, first, Namespace::NS_VALUE, "type or value".ptr as *const char);
+                    self.resolve_ref(v, first, Namespace::NS_VALUE, "type or value".ptr() as *const char);
                     return;
                 }
             }
@@ -1031,12 +1034,12 @@ extend Resolver {
         if self.in_generic {
             let sp = self.ast.at_const(id).span;
             self.errors.emitf(sp.start, sp.end - sp.start,
-                              "closures inside generic functions are not yet supported".ptr as *const char);
+                              "closures inside generic functions are not yet supported".ptr() as *const char);
         }
         if self.closures.len() >= 8 {
             let sp = self.ast.at_const(id).span;
             self.errors.emitf(sp.start, sp.end - sp.start,
-                              "closures nested too deeply (max 8)".ptr as *const char);
+                              "closures nested too deeply (max 8)".ptr() as *const char);
             return;
         }
         let cl = self.ast.at_const(id).as_data.closure;
