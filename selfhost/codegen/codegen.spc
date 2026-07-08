@@ -455,16 +455,17 @@ extend Codegen {
         if cap != 0 { unsafe buf[0] = 0 as char; }
         if !self.mangle { return 0; }
         if unsafe (*self.package).modules[m as usize].prelude { return 0; }
-        let path = unsafe (*self.package).modules[m as usize].path;
+        let path = unsafe (*self.package).modules[m as usize].path.as_str();
+        let n = path.len();
         let mut at: usize = 0;
         let mut i: usize = 0;
-        while unsafe path[i] != 0 as char {
-            if unsafe path[i] == ':' as char && unsafe path[i + 1] == ':' as char {
+        while i < n {
+            if path.byte_at(i) == ':' as u8 && i + 1 < n && path.byte_at(i + 1) == ':' as u8 {
                 i = i + 1;
                 if at + 2 < cap { unsafe buf[at] = '_' as char; unsafe buf[at + 1] = '_' as char; }
                 at = at + 2;
             } else {
-                if at + 1 < cap { unsafe buf[at] = unsafe path[i]; }
+                if at + 1 < cap { unsafe buf[at] = path.byte_at(i) as char; }
                 at = at + 1;
             }
             i = i + 1;
@@ -7296,7 +7297,7 @@ extend Codegen {
             if need_core { unsafe want[unsafe (*self.package).core_module as usize] = true; }
         }
         for m in 0..nmod {
-            if unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules[m].path); }
+            if unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules[m].path.as_str()); }
         }
         unsafe stdlib::free(want as *mut void);
     }
@@ -7370,7 +7371,7 @@ extend Codegen {
             }
         }
         for m in 0..nmod {
-            if m != cur as usize && unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules[m].path); }
+            if m != cur as usize && unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules[m].path.as_str()); }
         }
         unsafe stdlib::free(want as *mut void);
     }
@@ -7407,8 +7408,8 @@ extend Codegen {
             let mut done = false;
             let cm = self.cur_module();
             if self.package != null && (cm as usize) < unsafe (*self.package).modules.len() {
-                let file = unsafe (*self.package).modules[cm as usize].file;
-                if file != null {
+                if unsafe (*self.package).modules[cm as usize].file.len() != 0 {
+                    let file = unsafe (*self.package).modules[cm as usize].file.cstr();
                     let mut rel = Buf4096 {};
                     let hp = unsafe (self.source + s as usize) as *const char;
                     let hlen = (e - s) as i32;
@@ -7422,7 +7423,7 @@ extend Codegen {
                     let mut absb = Buf4096 {};
                     let mut rootb = Buf4096 {};
                     let ra = unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut absb.b[0]) as *mut char);
-                    let rr = unsafe shim::sc_realpath(unsafe (*self.package).root_dir, (&mut rootb.b[0]) as *mut char);
+                    let rr = unsafe shim::sc_realpath(unsafe (*self.package).root_dir.cstr(), (&mut rootb.b[0]) as *mut char);
                     if ra != null && rr != null {
                         let rl = unsafe cstring::strlen((&rootb.b[0]) as *const char);
                         self.emit_cstr("#include \"".ptr() as *const char);
@@ -7448,7 +7449,7 @@ extend Codegen {
         }
     }
     fn emit_includes(self: &mut Self) void {
-        let p = unsafe (*self.package).modules[self.cur_module() as usize].path;
+        let p = unsafe (*self.package).modules[self.cur_module() as usize].path.as_str();
         self.emit_modpath_include(p);
         self.emit_referenced_includes();
         self.emit_cstr("\n".ptr() as *const char);
@@ -7534,16 +7535,17 @@ extend Codegen {
         let mut guard = Buf160 {};
         let np = (&mut guard.b[0]) as *mut char;
         let mut at = bappend(np, 160, 0, "SUPER_".ptr() as *const char);
-        let mp = unsafe (*self.package).modules[self.cur_module() as usize].path;
+        let mp = unsafe (*self.package).modules[self.cur_module() as usize].path.as_str();
+        let n = mp.len();
         let mut i: usize = 0;
-        while unsafe mp[i] != 0 as char && at + 2 < 160 {
-            if unsafe mp[i] == ':' as char && unsafe mp[i + 1] == ':' as char {
+        while i < n && at + 2 < 160 {
+            if mp.byte_at(i) == ':' as u8 && i + 1 < n && mp.byte_at(i + 1) == ':' as u8 {
                 unsafe guard.b[at] = '_' as char;
                 unsafe guard.b[at + 1] = '_' as char;
                 at = at + 2;
                 i = i + 1;
             } else {
-                unsafe guard.b[at] = unsafe mp[i];
+                unsafe guard.b[at] = mp.byte_at(i) as char;
                 at = at + 1;
             }
             i = i + 1;
@@ -7608,7 +7610,7 @@ extend Codegen {
         let src = self.source;
         let ln = self.len;
         let mut file: *const char = null;
-        if self.package != null && (self.cur_module() as usize) < self.pkg_count() { file = unsafe (*self.package).modules[self.cur_module() as usize].file; }
+        if self.package != null && (self.cur_module() as usize) < self.pkg_count() { file = unsafe (*self.package).modules[self.cur_module() as usize].file.cstr(); }
         self.errors.finalize(src, ln, file);
         if self.buf_len != 0 { unsafe stdio::fwrite(self.buf, 1, self.buf_len, out); }
     }
@@ -7975,11 +7977,12 @@ extend Codegen {
 // ---- header/source #include machinery ----
 extend Codegen {
     fn module_depth(self: &Self) usize {
-        let p = unsafe (*self.package).modules[self.cur_module() as usize].path;
+        let p = unsafe (*self.package).modules[self.cur_module() as usize].path.as_str();
+        let n = p.len();
         let mut d: usize = 0;
         let mut i: usize = 0;
-        while unsafe p[i] != 0 as char {
-            if unsafe p[i] == ':' as char && unsafe p[i + 1] == ':' as char { d = d + 1; i = i + 1; }
+        while i < n {
+            if p.byte_at(i) == ':' as u8 && i + 1 < n && p.byte_at(i + 1) == ':' as u8 { d = d + 1; i = i + 1; }
             i = i + 1;
         }
         return d;
@@ -7988,16 +7991,17 @@ extend Codegen {
         let d = self.module_depth();
         for i in 0..d { self.emit_cstr("../".ptr() as *const char); }
     }
-    fn emit_modpath_include(self: &mut Self, path: *const char) void {
+    fn emit_modpath_include(self: &mut Self, path: str) void {
         self.emit_cstr("#include \"".ptr() as *const char);
         self.emit_rel_prefix();
+        let n = path.len();
         let mut i: usize = 0;
-        while unsafe path[i] != 0 as char {
-            if unsafe path[i] == ':' as char && unsafe path[i + 1] == ':' as char {
+        while i < n {
+            if path.byte_at(i) == ':' as u8 && i + 1 < n && path.byte_at(i + 1) == ':' as u8 {
                 self.emit_cstr("/".ptr() as *const char);
                 i = i + 1;
             } else {
-                self.emit_bytes(unsafe (path + i) as *const char, 1);
+                self.emit_bytes(unsafe (path.ptr() + i) as *const char, 1);
             }
             i = i + 1;
         }
@@ -8168,10 +8172,11 @@ extend Codegen {
             else { self.emit("%c".ptr() as *const char, byte as i32); }
         }
     }
-    fn cg_file(self: &Self) *const char {
+    fn cg_file(self: &mut Self) *const char {
         if self.package != null && (self.cur_module() as usize) < self.pkg_count() {
-            let f = unsafe (*self.package).modules[self.cur_module() as usize].file;
-            if f != null { return f as *const char; }
+            if unsafe (*self.package).modules[self.cur_module() as usize].file.len() != 0 {
+                return unsafe (*self.package).modules[self.cur_module() as usize].file.cstr();
+            }
         }
         return "<src>".ptr() as *const char;
     }
