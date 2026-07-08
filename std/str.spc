@@ -27,6 +27,14 @@ extend str {
         return str { ptr: ptr, len: len };
     }
 
+    // View a NUL-terminated C string as a `str` (length found by scanning to the NUL). Zero-copy:
+    // the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
+    pub fn from_cstr(s: *const char) str {
+        let mut n: usize = 0;
+        while unsafe s[n] != (0 as char) { n += 1; }
+        return str::from_raw(s as *const u8, n);
+    }
+
     // --- length & raw access -------------------------------------------------------------------
 
     // Number of bytes in the view. `s.len()` is the accessor for the private `len` field.

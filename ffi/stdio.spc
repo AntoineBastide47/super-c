@@ -9,7 +9,7 @@ extern "C" {
     pub type FILE;
 
     // Open / close / flush.
-    pub fn fopen(path: *const char, mode: *const char) *mut FILE;
+    @c.import("fopen") fn c_fopen(path: *const char, mode: *const char) *mut FILE;
     pub fn freopen(path: *const char, mode: *const char, stream: *mut FILE) *mut FILE;
     pub fn fclose(stream: *mut FILE) i32;
     pub fn fflush(stream: *mut FILE) i32;
@@ -67,7 +67,7 @@ pub struct File {
 extend File {
     // Open `path` with a C `fopen` mode ("r", "w", "a", "rb", ...). `None` if the file cannot be opened.
     pub fn open(path: &mut String, mode: &mut String) Option<File> {
-        let h = unsafe fopen(path.cstr(), mode.cstr());
+        let h = unsafe c_fopen(path.cstr(), mode.cstr());
         if h == null {
             return Option::<File>::None;
         }
@@ -114,6 +114,14 @@ extend File as Writer {
     fn write(self: &mut File, bytes: []u8) usize {
         return unsafe fwrite(bytes.as_ptr() as *const void, 1, bytes.len(), self.handle);
     }
+}
+
+// Open `path` with a C `fopen` mode ("r", "w", "a", "rb", ...), returning the raw handle (`null` on
+// failure) for callers that manage `fclose` themselves. Both args are NUL-terminated into temporaries.
+pub fn fopen(path: str, mode: str) *mut FILE {
+    let mut p = String::from_str(path);
+    let mut m = String::from_str(mode);
+    return unsafe c_fopen(p.cstr(), m.cstr());
 }
 
 pub fn stdin() *mut FILE { return unsafe __sc_stdin(); }
