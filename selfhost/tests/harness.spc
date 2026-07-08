@@ -256,11 +256,11 @@ pub fn compile_c(src: str) CompiledC {
     // Emit EVERY module's header + .c (like tests/test_harness.h's sc_codegen concatenation), so prelude
     // definitions (`str`, monomorphized Slice/Box, ...) are inspectable, not just the user snippet.
     for mi in 0..n {
-        let msrc = p.modules[mi].source;
-        let mslen = p.modules[mi].source_len;
+        let msrc = p.modules[mi].source.as_str().ptr() as *const char;
+        let mslen = p.modules[mi].source.len();
         let ma = (&mut p.modules[mi].ast) as *mut Ast; // codegen borrows the ast in place
         let cgpkg = (&mut p) as *mut loader::Package;
-        let mut c = cg::Codegen::new(ma, msrc, mslen, cgpkg);
+        let mut c = cg::Codegen::new(ma, str::from_raw(msrc as *const u8, mslen), cgpkg);
         c.set_multifile(true);
         c.codegen_emit_header(f);
         c.codegen_emit(f);
@@ -408,8 +408,8 @@ pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
 fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
     let pkg = p as *const loader::Package;
     let m = &mut p.modules[i];
-    let src = m.source;
-    let len = m.source_len;
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut rr = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
@@ -434,8 +434,8 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
 fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
-    let src = m.source;
-    let len = m.source_len;
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);

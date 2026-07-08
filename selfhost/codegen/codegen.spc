@@ -308,20 +308,20 @@ extend Codegen as Free {
 }
 
 extend Codegen {
-    pub fn new(ast: *mut Ast, source: *const char, len: usize, package: *mut loader::Package) Codegen {
+    pub fn new(ast: *mut Ast, source: str, package: *mut loader::Package) Codegen {
         let mut user_mods: usize = 0;
         if package != null {
             for i in 0..unsafe (*package).modules.len() { if !unsafe (*package).modules[i].prelude { user_mods = user_mods + 1; } }
         }
         let mangle = user_mods > 1;
-        let cap = len * 4 + 4096;
+        let cap = source.len() * 4 + 4096;
         let buf = unsafe stdlib::malloc(cap) as *mut char;
         if buf == null { diag::oom(); }
         // Fixed-array fields are omitted -> partial init zero-fills them (NODE_NONE == 0).
         return Codegen {
             ast: ast,
-            source: source as *const u8,
-            len: len,
+            source: source.ptr(),
+            len: source.len(),
             buf: buf,
             buf_cap: cap,
             enum_of_variant: Map::<u32, u32>::new(),
@@ -349,7 +349,7 @@ extend Codegen {
     }
     fn mod_src(self: &Self, m: ModuleId) *const u8 {
         if self.package != null && m != unsafe (*self.ast).module {
-            return unsafe (*self.package).modules[m as usize].source as *const u8;
+            return unsafe (*self.package).modules[m as usize].source.as_str().ptr();
         }
         return self.source;
     }
@@ -780,7 +780,7 @@ extend Codegen {
             if foreign {
                 let owner = self.mod_ast(fn2.module);
                 self.source = self.mod_src(fn2.module);
-                self.len = unsafe (*self.package).modules[fn2.module as usize].source_len;
+                self.len = unsafe (*self.package).modules[fn2.module as usize].source.len();
                 self.borrowed = true;
                 oninst = unsafe (*owner).instances.len();
                 self.ast = owner;
@@ -6174,7 +6174,7 @@ extend Codegen {
         let mut oit = *it;
         for k in 0..it.n { unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k as usize]); }
         self.source = osrc;
-        self.len = unsafe (*self.package).modules[it.module as usize].source_len;
+        self.len = unsafe (*self.package).modules[it.module as usize].source.len();
         self.borrowed = true;
         self.ast = self.mod_ast(it.module);
         let dk = unsafe (*self.cur_ast()).at_const(oit.decl).kind;
@@ -6444,7 +6444,7 @@ extend Codegen {
             let mut oit = it;
             for k in 0..it.n { unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k as usize]); }
             self.source = osrc;
-            self.len = unsafe (*self.package).modules[it.module as usize].source_len;
+            self.len = unsafe (*self.package).modules[it.module as usize].source.len();
             self.borrowed = true;
             self.ast = self.mod_ast(it.module);
             self.emit_inst_methods(&oit, self.mod_ast(home_mod), itTy, which, with_body);
@@ -6482,7 +6482,7 @@ extend Codegen {
             let mut oit = it;
             for k2 in 0..it.n { unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k2 as usize]); }
             self.source = osrc;
-            self.len = unsafe (*self.package).modules[it.module as usize].source_len;
+            self.len = unsafe (*self.package).modules[it.module as usize].source.len();
             self.borrowed = true;
             self.minst_only = true;
             self.ast = self.mod_ast(it.module);
@@ -6532,7 +6532,7 @@ extend Codegen {
             for k2 in 0..inst.n { unsafe oargs.t[k2 as usize] = unsafe (*owner).reintern(unsafe (&*home), inst.args[k2 as usize]); }
             self.ast = owner;
             self.source = osrc;
-            self.len = unsafe (*self.package).modules[fn2.module as usize].source_len;
+            self.len = unsafe (*self.package).modules[fn2.module as usize].source.len();
             self.borrowed = true;
             let gens = unsafe (*self.cur_ast()).at_const(fn2.node).as_data.function.generics;
             let gids = unsafe (*self.cur_ast()).list(gens);
@@ -6605,7 +6605,7 @@ extend Codegen {
                 let mut oninst: usize = 0;
                 if foreign {
                     self.source = self.mod_src(iface.module);
-                    self.len = unsafe (*self.package).modules[iface.module as usize].source_len;
+                    self.len = unsafe (*self.package).modules[iface.module as usize].source.len();
                     self.ast = self.mod_ast(iface.module);
                     self.borrowed = true;
                     self.dflt_home = unsafe (*home).module;
@@ -7237,7 +7237,7 @@ extend Codegen {
                 let tmod = t.module;
                 let tdecl = t.as_data.decl;
                 self.source = self.mod_src(tmod);
-                self.len = unsafe (*self.package).modules[tmod as usize].source_len;
+                self.len = unsafe (*self.package).modules[tmod as usize].source.len();
                 self.ast = self.mod_ast(tmod);
                 self.emit_enum_full(tdecl);
                 self.ast = sa;

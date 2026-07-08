@@ -270,7 +270,7 @@ extend TypeChecker {
     }
     fn mod_src(self: &Self, m: ModuleId) *const u8 {
         if self.package != null && m != self.ast.module {
-            return unsafe (*self.package).modules[m as usize].source as *const u8;
+            return unsafe (*self.package).modules[m as usize].source.as_str().ptr();
         }
         return self.source;
     }
