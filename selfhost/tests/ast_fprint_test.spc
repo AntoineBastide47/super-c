@@ -88,16 +88,13 @@ fn kind_name(k: ast::NodeKind) str {
 }
 
 fn indent(out: *mut stdio::FILE, depth: u32) void {
-    let mut i: u32 = 0;
-    while i < depth { unsafe stdio::fputs("  ".ptr() as *const char, out); i = i + 1; }
+    for i in 0..depth { unsafe stdio::fputs("  ".ptr() as *const char, out); }
 }
 
 fn print_list(out: *mut stdio::FILE, a: &ast::Ast, list: ast::NodeList, source: *const char, depth: u32) void {
     let ids = a.list(list);
-    let mut i: u32 = 0;
-    while i < list.len {
+    for i in 0..list.len {
         print_node(out, &*a, unsafe ids[i as usize], source, depth);
-        i = i + 1;
     }
 }
 

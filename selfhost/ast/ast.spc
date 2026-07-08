@@ -334,7 +334,7 @@ extend Ast {
     pub fn commit(self: &mut Self, mark: u32) NodeList {
         let list = NodeList { start: self.children.len() as u32, len: (self.scratch.len() as u32) - mark };
         for i in (mark as usize)..self.scratch.len() {
-            self.children.push(*self.scratch.at(i));
+            self.children.push(self.scratch[i]);
         }
         self.scratch.truncate(mark as usize);
         return list;
@@ -514,7 +514,7 @@ extend Ast {
         return self.deref_uses.at((idx - 1) as usize) as *const DerefUse;
     }
 
-    pub fn at(self: &mut Self, id: NodeId) &mut Node { return self.nodes.index_mut(id as usize); }
+    pub fn at(self: &mut Self, id: NodeId) &mut Node { return &mut self.nodes[id as usize]; }
     pub fn at_const(self: &Self, id: NodeId) &Node { return self.nodes.at(id as usize); }
     pub fn list(self: &Self, list: NodeList) *const NodeId { return unsafe (self.children.as_ptr() + (list.start as usize)); }
     pub fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) void { self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl }; }

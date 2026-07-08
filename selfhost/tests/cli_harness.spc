@@ -22,7 +22,9 @@ extend CliResult {
         if self.out == null { return false; }
         return unsafe cstring::strstr(self.out, needle.ptr() as *const char) != null;
     }
-    pub fn free(self: &mut CliResult) void {
+}
+extend CliResult as Free {
+    pub fn free(self: &mut Self) void {
         if self.out != null { unsafe stdlib::free(self.out as *mut void); self.out = null; }
     }
 }
@@ -156,7 +158,6 @@ extend Proj {
         unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/.runout".ptr() as *const char, self.rootp());
         let mut r = exec((&base.b[0]) as *const char, (&op.b[0]) as *const char);
         let e = r.exit;
-        r.free();
         return e;
     }
 
@@ -186,10 +187,11 @@ extend Proj {
         let mut r = self.compile(mainrel);
         assert(r.exit != 0, "expected nonzero exit on a bad program");
         assert(r.out_has(want), "diagnostic missing expected text");
-        r.free();
     }
+}
 
-    pub fn free(self: &mut Proj) void {
+extend Proj as Free {
+    pub fn free(self: &mut Self) void {
         let mut cmd = Path512 {};
         unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 512, "rm -rf '%s'".ptr() as *const char, self.rootp());
         let _ = unsafe stdlib::system((&cmd.b[0]) as *const char);

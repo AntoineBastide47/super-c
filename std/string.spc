@@ -355,10 +355,8 @@ extend<A: Allocator> String<A> {
         let pad = width - n;
         if align == 1 && fill == 48 && n > 0 && s.byte_at(0) == 45 {
             self.push_byte(45);
-            let mut k: usize = 0;
-            while k < pad {
+            for k in 0..pad {
                 self.push_byte(48);
-                k += 1;
             }
             self.push_str(s.slice(1, n));
             return;

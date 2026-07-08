@@ -5,28 +5,24 @@ import lexer::token_type as *;
 import lexer::lexer as *;
 
 fn expect_tokens(src: str, expected: []TokenType) {
-    let mut lx = Lexer::new(src.ptr() as *const char, src.len());
+    let mut lx = Lexer::new(src);
     lx.scan_tokens();
     assert(!lx.has_errors(), "unexpected lexer error");
     let mut toks = lx.take_tokens();
     lx.free();
     assert_eq(toks.len(), expected.len());
     let n = if toks.len() < expected.len() { toks.len(); } else { expected.len(); };
-    let mut i: usize = 0;
-    while i < n {
-        assert((*toks.at(i)).kind() == expected[i], "token type mismatch");
-        i = i + 1;
+    for i in 0..n {
+        assert(toks[i].kind() == expected[i], "token type mismatch");
     }
-    toks.free();
 }
 
 fn expect_error(src: str) {
-    let mut lx = Lexer::new(src.ptr() as *const char, src.len());
+    let mut lx = Lexer::new(src);
     lx.scan_tokens();
     assert(lx.has_errors(), "expected a lexer error");
     let mut toks = lx.take_tokens();
     lx.free();
-    toks.free();
 }
 
 @test

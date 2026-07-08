@@ -49,11 +49,10 @@ extend Compiled {
 }
 
 // Copy at most 511 bytes of `s` into dst[512], NUL-terminated (dst is pre-zeroed by the caller).
-fn copy_msg(dst: *mut char, s: *const char) void {
-    if s == null { return; }
-    let n = unsafe cstring::strlen(s);
+fn copy_msg(dst: *mut char, s: &String) void {
+    let n = s.len();
     let k = if n < 511 { n; } else { 511 as usize; };
-    unsafe cstring::memcpy(dst as *mut void, s, k);
+    if k > 0 { unsafe cstring::memcpy(dst as *mut void, s.as_ptr() as *const void, k); }
     unsafe dst[k] = 0 as char;
 }
 
@@ -62,23 +61,23 @@ pub fn compile(src: str, stop: i32) Compiled {
     let mut r = Compiled {};
 
     // Parse stage: lex + parse standalone (no package needed to see syntax errors).
-    let mut lx = lex::Lexer::new(src.ptr() as *const char, src.len());
+    let mut lx = lex::Lexer::new(src);
     lx.scan_tokens();
     if lx.has_errors() {
         r.errors = lx.errors.errors.len();
         r.stage = STAGE_PARSE;
-        if r.errors > 0 { copy_msg((&mut r.first[0]) as *mut char, (*lx.errors.errors.at(0)) as *const char); }
+        if r.errors > 0 { copy_msg((&mut r.first[0]) as *mut char, lx.errors.errors.at(0)); }
         lx.free();
         return r;
     }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src.ptr() as *const char, src.len());
+    let mut ps = par::Parser::new(toks, src);
     ps.build_ast();
     if ps.has_errors() {
         r.errors = ps.errors.errors.len();
         r.stage = STAGE_PARSE;
-        if r.errors > 0 { copy_msg((&mut r.first[0]) as *mut char, (*ps.errors.errors.at(0)) as *const char); }
+        if r.errors > 0 { copy_msg((&mut r.first[0]) as *mut char, ps.errors.errors.at(0)); }
         ps.free();
         return r;
     }
@@ -94,16 +93,14 @@ pub fn compile(src: str, stop: i32) Compiled {
     let n = p.modules.len();
     let uidx = n - 1; // the user module is loaded last, after the prelude
     // Resolve every module (prelude first, user last); snapshot the user module's diagnostics.
-    let mut i: usize = 0;
-    while i < n { h_resolve(&mut p, i, uidx, (&mut r) as *mut Compiled); i = i + 1; }
+    for i in 0..n { h_resolve(&mut p, i, uidx, (&mut r) as *mut Compiled); }
     if r.errors != 0 || stop == STAGE_RESOLVE {
         if r.errors != 0 { r.stage = STAGE_RESOLVE; }
         ceval.free(); p.free();
         return r;
     }
     // Typecheck every module; snapshot the user module's diagnostics.
-    i = 0;
-    while i < n { h_typecheck(&mut p, i, uidx, (&mut r) as *mut Compiled); i = i + 1; }
+    for i in 0..n { h_typecheck(&mut p, i, uidx, (&mut r) as *mut Compiled); }
     if r.errors != 0 { r.stage = STAGE_TYPECHECK; }
     ceval.free(); p.free();
     return r;
@@ -115,12 +112,12 @@ pub struct ParsedAst { pub errors: usize, pub ast: Ast }
 
 pub fn parse_ast(src: str) ParsedAst {
     let mut r = ParsedAst { errors: 0, ast: Ast::new(0) };
-    let mut lx = lex::Lexer::new(src.ptr() as *const char, src.len());
+    let mut lx = lex::Lexer::new(src);
     lx.scan_tokens();
     if lx.has_errors() { r.errors = lx.errors.errors.len(); lx.free(); return r; }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src.ptr() as *const char, src.len());
+    let mut ps = par::Parser::new(toks, src);
     ps.build_ast();
     if ps.has_errors() { r.errors = ps.errors.errors.len(); }
     r.ast = ps.take_ast();
@@ -130,12 +127,12 @@ pub fn parse_ast(src: str) ParsedAst {
 
 // True if `src` fails to lex or parse (the parse-stage rejection oracle).
 pub fn parse_has_error(src: str) bool {
-    let mut lx = lex::Lexer::new(src.ptr() as *const char, src.len());
+    let mut lx = lex::Lexer::new(src);
     lx.scan_tokens();
     if lx.has_errors() { lx.free(); return true; }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src.ptr() as *const char, src.len());
+    let mut ps = par::Parser::new(toks, src);
     ps.build_ast();
     let e = ps.has_errors();
     ps.free();
@@ -165,16 +162,14 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
     let n = p.modules.len();
     let uidx = n - 1;
     let mut rr = Compiled {};
-    let mut i: usize = 0;
-    while i < n { h_resolve(&mut p, i, uidx, (&mut rr) as *mut Compiled); i = i + 1; }
+    for i in 0..n { h_resolve(&mut p, i, uidx, (&mut rr) as *mut Compiled); }
     if rr.errors == 0 && stop != STAGE_RESOLVE {
-        i = 0;
-        while i < n { h_typecheck(&mut p, i, uidx, (&mut rr) as *mut Compiled); i = i + 1; }
+        for i in 0..n { h_typecheck(&mut p, i, uidx, (&mut rr) as *mut Compiled); }
     }
     out.errors = rr.errors;
     // Detach the user module's AST so package_free leaves it alone; the caller frees it.
-    let a = p.modules.index_mut(uidx).ast;
-    p.modules.index_mut(uidx).ast = Ast::new(0);
+    let a = p.modules[uidx].ast;
+    p.modules[uidx].ast = Ast::new(0);
     out.ast = a;
     ceval.free(); p.free();
     return out;
@@ -231,6 +226,8 @@ extend CompiledC {
         if self.code == null { return false; }
         return unsafe cstring::strstr(self.code as *const char, needle.ptr() as *const char) != null;
     }
+}
+extend CompiledC as Free {
     pub fn free(self: &mut Self) void {
         if self.code != null { unsafe stdlib::free(self.code as *mut void); self.code = null; }
     }
@@ -248,11 +245,9 @@ pub fn compile_c(src: str) CompiledC {
     let n = p.modules.len();
     let uidx = n - 1;
     let mut rr = Compiled {};
-    let mut i: usize = 0;
-    while i < n { h_resolve(&mut p, i, uidx, (&mut rr) as *mut Compiled); i = i + 1; }
+    for i in 0..n { h_resolve(&mut p, i, uidx, (&mut rr) as *mut Compiled); }
     if rr.errors == 0 {
-        i = 0;
-        while i < n { h_typecheck(&mut p, i, uidx, (&mut rr) as *mut Compiled); i = i + 1; }
+        for i in 0..n { h_typecheck(&mut p, i, uidx, (&mut rr) as *mut Compiled); }
     }
     if rr.errors != 0 { out.errors = rr.errors; ceval.free(); p.free(); return out; }
     loader::package_propagate_instances(&mut p);
@@ -260,11 +255,10 @@ pub fn compile_c(src: str) CompiledC {
     if f == null { out.errors = 1; ceval.free(); p.free(); return out; }
     // Emit EVERY module's header + .c (like tests/test_harness.h's sc_codegen concatenation), so prelude
     // definitions (`str`, monomorphized Slice/Box, ...) are inspectable, not just the user snippet.
-    let mut mi: usize = 0;
-    while mi < n {
-        let msrc = p.modules.at(mi).source;
-        let mslen = p.modules.at(mi).source_len;
-        let ma = (&mut p.modules.index_mut(mi).ast) as *mut Ast; // codegen borrows the ast in place
+    for mi in 0..n {
+        let msrc = p.modules[mi].source;
+        let mslen = p.modules[mi].source_len;
+        let ma = (&mut p.modules[mi].ast) as *mut Ast; // codegen borrows the ast in place
         let cgpkg = (&mut p) as *mut loader::Package;
         let mut c = cg::Codegen::new(ma, msrc, mslen, cgpkg);
         c.set_multifile(true);
@@ -272,7 +266,6 @@ pub fn compile_c(src: str) CompiledC {
         c.codegen_emit(f);
         if mi == uidx && c.has_errors() { out.errors = c.errors.errors.len(); }
         c.free();
-        mi = mi + 1;
     }
     out.code = read_stream(f);
     unsafe stdio::fclose(f);
@@ -297,6 +290,8 @@ extend RunResult {
         if self.out == null { return false; }
         return unsafe cstring::strstr(self.out, needle.ptr() as *const char) != null;
     }
+}
+extend RunResult as Free {
     pub fn free(self: &mut Self) void {
         if self.out != null { unsafe stdlib::free(self.out as *mut void); self.out = null; }
     }
@@ -357,7 +352,6 @@ pub fn expect_run(label: str, src: str, want: str) {
     let mut r = compile_and_run(src);
     assert(r.ok(), label);
     assert(r.out_has(want), label);
-    r.free();
 }
 
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
@@ -366,7 +360,6 @@ pub fn expect_exit(label: str, src: str, code: i32) {
     let mut r = compile_and_run(src);
     assert(r.built, label);
     assert_eq(r.exit, code);
-    r.free();
 }
 
 // Require the snippet to compile cleanly AND its generated C to contain `needle`.
@@ -374,14 +367,12 @@ pub fn expect_c(label: str, src: str, needle: str) {
     let mut c = compile_c(src);
     assert(c.ok(), label);
     assert(c.code_has(needle), label);
-    c.free();
 }
 // Require the snippet to compile cleanly AND its generated C to NOT contain `needle`.
 pub fn expect_c_absent(label: str, src: str, needle: str) {
     let mut c = compile_c(src);
     assert(c.ok(), label);
     assert(!c.code_has(needle), label);
-    c.free();
 }
 
 // expect_ok / expect_err: the accept-vs-reject oracle for semantic tests.
@@ -415,13 +406,13 @@ pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
 
 // Mirror main.spc's resolve_module, capturing module `i`'s diagnostics when it is the user module (cap).
 fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
-    let pkg = (&*p) as *const loader::Package;
-    let m = p.modules.index_mut(i);
+    let pkg = p as *const loader::Package;
+    let m = &mut p.modules[i];
     let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);
-    let mut rr = res::Resolver::new(a, src, len, pkg);
+    let mut rr = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
     p.override_ast = (&mut rr.ast) as *mut Ast;
     rr.resolve();
@@ -430,25 +421,24 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
     if i == cap {
         let c = rr.errors.errors.len();
         if c > 0 {
-            unsafe (*out).errors = c;
-            let msg = (*rr.errors.errors.at(0)) as *const char;
-            unsafe copy_msg((&mut (*out).first[0]) as *mut char, msg);
+            unsafe out.errors = c;
+            unsafe copy_msg((&mut out.first[0]) as *mut char, rr.errors.errors.at(0));
         }
     }
     let back = rr.take_ast();
     rr.free();
-    p.modules.index_mut(i).ast = back;
+    p.modules[i].ast = back;
 }
 
 // Mirror main.spc's typecheck_module, capturing the user module's diagnostics.
 fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
-    let pkg = (&mut *p) as *mut loader::Package;
-    let m = p.modules.index_mut(i);
+    let pkg = p as *mut loader::Package;
+    let m = &mut p.modules[i];
     let src = m.source;
     let len = m.source_len;
     let a = m.ast;
     m.ast = Ast::new(0);
-    let mut t = tc::TypeChecker::new(a, src, len, pkg);
+    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
     p.override_ast = (&mut t.ast) as *mut Ast;
     t.check();
@@ -457,12 +447,11 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {
-            unsafe (*out).errors = c;
-            let msg = (*t.errors.errors.at(0)) as *const char;
-            unsafe copy_msg((&mut (*out).first[0]) as *mut char, msg);
+            unsafe out.errors = c;
+            unsafe copy_msg((&mut out.first[0]) as *mut char, t.errors.errors.at(0));
         }
     }
     let back = t.take_ast();
     t.free();
-    p.modules.index_mut(i).ast = back;
+    p.modules[i].ast = back;
 }
