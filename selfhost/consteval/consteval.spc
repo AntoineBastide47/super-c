@@ -293,7 +293,7 @@ extend ConstEval {
         return unsafe (*self.pkg).modules[m as usize].has_ast;
     }
     fn ce_src(self: &Self, m: ModuleId) *const u8 {
-        return unsafe (*self.pkg).modules[m as usize].source as *const u8;
+        return unsafe (*self.pkg).modules[m as usize].source.as_str().ptr();
     }
     fn is_prelude(self: &Self, m: ModuleId) bool {
         return unsafe (*self.pkg).modules[m as usize].prelude;

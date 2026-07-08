@@ -49,8 +49,8 @@ fn ignore_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) vo
 fn resolve_one(p: &mut loader::Package, i: usize) void {
     let pkg = (&*p) as *const loader::Package;
     let m = &mut p.modules[i];
-    let src = m.source;
-    let len = m.source_len;
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
@@ -67,8 +67,8 @@ fn resolve_one(p: &mut loader::Package, i: usize) void {
 fn typecheck_one(p: &mut loader::Package, i: usize) void {
     let pkg = (&mut *p) as *mut loader::Package;
     let m = &mut p.modules[i];
-    let src = m.source;
-    let len = m.source_len;
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
@@ -93,7 +93,7 @@ fn transpile_once() Timing {
     let n = p.modules.len();
     r.modules = n;
     let mut i: usize = 0;
-    while i < n { r.src_bytes = r.src_bytes + p.modules[i].source_len; i = i + 1; }
+    while i < n { r.src_bytes = r.src_bytes + p.modules[i].source.len(); i = i + 1; }
 
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
@@ -113,10 +113,10 @@ fn transpile_once() Timing {
     i = 0;
     while i < n {
         let ma = (&mut p.modules[i].ast) as *mut Ast;
-        let src = p.modules[i].source;
-        let slen = p.modules[i].source_len;
+        let src = p.modules[i].source.as_str().ptr() as *const char;
+        let slen = p.modules[i].source.len();
         let pkg2 = (&mut p) as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
-        let mut c = cg::Codegen::new(ma, src, slen, pkg2);
+        let mut c = cg::Codegen::new(ma, str::from_raw(src as *const u8, slen), pkg2);
         c.set_multifile(true);
         c.codegen_emit_header(f);
         c.codegen_emit(f);
@@ -135,7 +135,7 @@ fn transpile_once() Timing {
     let lx0 = time::cpu_seconds();
     i = 0;
     while i < n {
-        let mut lx = lexer::Lexer::new(str::from_raw(p.modules[i].source as *const u8, p.modules[i].source_len));
+        let mut lx = lexer::Lexer::new(p.modules[i].source.as_str());
         lx.scan_tokens();
         lx.free();
         i = i + 1;
@@ -145,8 +145,8 @@ fn transpile_once() Timing {
     // Count source lines (untimed -- a constant of the corpus) for a lines/sec figure.
     i = 0;
     while i < n {
-        let src = p.modules[i].source;
-        let len = p.modules[i].source_len;
+        let src = p.modules[i].source.as_str().ptr() as *const char;
+        let len = p.modules[i].source.len();
         let mut j: usize = 0;
         while j < len {
             if unsafe (src[j] as u8) == 10 { r.src_lines = r.src_lines + 1; }

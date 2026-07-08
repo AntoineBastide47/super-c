@@ -18,8 +18,7 @@ pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
 pub struct Module {
     pub path: *mut char,   // "std::string"; the root module is its file stem (owned)
     pub file: *mut char,   // filesystem path the source was read from (owned)
-    pub source: *mut char, // NUL-terminated file contents (owned)
-    pub source_len: usize,
+    pub source: String,    // file contents (owned; span offsets index into it)
     pub ast: Ast,          // parsed AST (empty + has_ast=false if the file failed to lex/parse)
     pub has_ast: bool,
     pub prelude: bool,     // part of the auto-imported std prelude
@@ -29,7 +28,7 @@ extend Module as Free {
     pub fn free(self: &mut Self) void {
         unsafe stdlib::free(self.path as *mut void);
         unsafe stdlib::free(self.file as *mut void);
-        unsafe stdlib::free(self.source as *mut void);
+        self.source.free();
         self.ast.free();
     }
 }
@@ -64,7 +63,6 @@ pub struct Package {
 pub struct ParseResult { pub ast: Ast, pub ok: bool }
 
 // The bytes of a file plus their length; `ptr == null` signals any I/O error (mirrors read_file's NULL).
-pub struct FileContents { pub ptr: *mut char, pub len: usize }
 
 // A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
 pub struct LookupHit { pub node: NodeId, pub mid: ModuleId }
@@ -89,25 +87,26 @@ fn path_exists(path: *const char) bool {
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer; ptr==null on any I/O error.
-fn read_file(path: *const char) FileContents {
+fn read_file(path: *const char) Option<String> {
     let f = stdio::fopen(str::from_cstr(path), "rb");
-    if f == null { return FileContents { ptr: null, len: 0 }; }
-    if unsafe stdio::fseek(f, 0, SEEK_END) != 0 { unsafe stdio::fclose(f); return FileContents { ptr: null, len: 0 }; }
+    if f == null { return Option::<String>::None; }
+    if unsafe stdio::fseek(f, 0, SEEK_END) != 0 { unsafe stdio::fclose(f); return Option::<String>::None; }
     let s = unsafe stdio::ftell(f);
     unsafe stdio::rewind(f);
-    if s < 0 { unsafe stdio::fclose(f); return FileContents { ptr: null, len: 0 }; }
+    if s < 0 { unsafe stdio::fclose(f); return Option::<String>::None; }
     let sz = s as usize;
     let buf = unsafe stdlib::malloc(sz + 1) as *mut char;
-    if buf == null { unsafe stdio::fclose(f); return FileContents { ptr: null, len: 0 }; }
+    if buf == null { unsafe stdio::fclose(f); return Option::<String>::None; }
     let n = unsafe stdio::fread(buf as *mut void, 1, sz, f);
     if n != sz && unsafe stdio::ferror(f) != 0 {
         unsafe stdlib::free(buf as *mut void);
         unsafe stdio::fclose(f);
-        return FileContents { ptr: null, len: 0 };
+        return Option::<String>::None;
     }
     unsafe stdio::fclose(f);
-    unsafe buf[n] = 0 as char;
-    return FileContents { ptr: buf, len: n };
+    let out = String::from_str(str::from_raw(buf as *const u8, n));
+    unsafe stdlib::free(buf as *mut void);
+    return Option::<String>::Some(out);
 }
 
 // The directory portion of `path` (without trailing slash), or "." when there is none.
@@ -274,11 +273,11 @@ extend Package {
     }
 
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
-    fn add_module(self: &mut Self, path: *mut char, file: *mut char, source: *mut char, source_len: usize,
+    fn add_module(self: &mut Self, path: *mut char, file: *mut char, source: String,
                   ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
         self.modules.push(Module {
-            path: path, file: file, source: source, source_len: source_len,
+            path: path, file: file, source: source,
             ast: ast, has_ast: has_ast, prelude: false,
         });
         return id;
@@ -295,19 +294,22 @@ extend Package {
             return existing;
         }
 
-        let fc = read_file(file_path);
-        if fc.ptr == null {
-            unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%s' (%s)\n".ptr() as *const char,
-                                  mod_path, file_path);
-            self.ok = false;
-            unsafe stdlib::free(mod_path as *mut void);
-            unsafe stdlib::free(file_path as *mut void);
-            return -1;
-        }
+        let mut source = String::new();
+        switch read_file(file_path) {
+            Some(s) => { source = s; },
+            None => {
+                unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%s' (%s)\n".ptr() as *const char,
+                                      mod_path, file_path);
+                self.ok = false;
+                unsafe stdlib::free(mod_path as *mut void);
+                unsafe stdlib::free(file_path as *mut void);
+                return -1;
+            },
+        };
 
-        let parsed = parse_source(fc.ptr as *const char, fc.len, file_path);
+        let parsed = parse_source(source.as_str().ptr() as *const char, source.len(), file_path);
         let ok = parsed.ok;
-        let id = self.add_module(mod_path, file_path, fc.ptr, fc.len, parsed.ast, ok);
+        let id = self.add_module(mod_path, file_path, source, parsed.ast, ok);
         if !ok {
             self.ok = false;
             return id;
@@ -324,7 +326,7 @@ extend Package {
             let m = self.modules.at(id as usize);
             let items = m.ast.at_const(m.ast.root).as_data.program.items;
             let ids = m.ast.list(items);
-            let src = m.source;
+            let src = m.source.as_str().ptr() as *const char;
             for i in 0..items.len {
                 let n = m.ast.at_const(unsafe ids[i as usize]);
                 if n.kind == NodeKind::NODE_IMPORT {
@@ -415,7 +417,7 @@ extend Package {
     pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast { return NODE_NONE; }
         let ast = unsafe &*self.module_ast_ptr(mid);
-        let src = self.modules[mid as usize].source;
+        let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
         let items = ast.at_const(ast.root).as_data.program.items;
         let ids = ast.list(items);
         for i in 0..items.len {
@@ -534,7 +536,7 @@ extend Package {
                 let md = self.modules.at(mo as usize);
                 let items = md.ast.at_const(md.ast.root).as_data.program.items;
                 let ids = md.ast.list(items);
-                let src = md.source;
+                let src = md.source.as_str().ptr() as *const char;
                 for i in 0..items.len {
                     let it = md.ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
@@ -568,7 +570,7 @@ extend Package {
                 let ast = unsafe &*self.module_ast_ptr(cur);
                 let items = ast.at_const(ast.root).as_data.program.items;
                 let ids = ast.list(items);
-                let src = self.modules[cur as usize].source;
+                let src = self.modules[cur as usize].source.as_str().ptr() as *const char;
                 for i in 0..items.len {
                     let it = ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
@@ -1098,7 +1100,7 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     let parsed = parse_source(src, len, "<harness>".ptr() as *const char);
     let ok = parsed.ok;
     let id = p.add_module(dup_cstr("main".ptr() as *const char), dup_cstr("<harness>".ptr() as *const char),
-                          dup_cstr(src), len, parsed.ast, ok);
+                          String::from_str(str::from_raw(src as *const u8, len)), parsed.ast, ok);
     if ok { p.modules[id as usize].ast.module = id as ModuleId; }
     else { p.ok = false; }
     p.seed_core();
