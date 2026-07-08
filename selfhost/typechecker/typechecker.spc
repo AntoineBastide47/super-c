@@ -5755,7 +5755,7 @@ extend TypeChecker {
         for i in 0..items.len { self.check_item(unsafe ((*self.cur_ast()).list(items))[i as usize]); }
         self.close_instances();
         let mut file: *const char = null;
-        if self.package != null && (self.ast.module as usize) < self.pkg_count() { file = unsafe (*self.package).modules[self.ast.module as usize].file; }
+        if self.package != null && (self.ast.module as usize) < self.pkg_count() { file = unsafe (*self.package).modules[self.ast.module as usize].file.cstr(); }
         self.errors.finalize(self.source, self.len, file);
     }
 

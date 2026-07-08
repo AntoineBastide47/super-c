@@ -16,8 +16,8 @@ pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
 // source text and parsed Ast. The C loader used a NULL `Ast*` to mean "failed to lex/parse"; here the Ast
 // is held by value (like Parser.ast), so `has_ast` records that validity instead.
 pub struct Module {
-    pub path: *mut char,   // "std::string"; the root module is its file stem (owned)
-    pub file: *mut char,   // filesystem path the source was read from (owned)
+    pub path: String,      // "std::string"; the root module is its file stem (owned)
+    pub file: String,      // filesystem path the source was read from (owned)
     pub source: String,    // file contents (owned; span offsets index into it)
     pub ast: Ast,          // parsed AST (empty + has_ast=false if the file failed to lex/parse)
     pub has_ast: bool,
@@ -26,8 +26,8 @@ pub struct Module {
 
 extend Module as Free {
     pub fn free(self: &mut Self) void {
-        unsafe stdlib::free(self.path as *mut void);
-        unsafe stdlib::free(self.file as *mut void);
+        self.path.free();
+        self.file.free();
         self.source.free();
         self.ast.free();
     }
@@ -38,8 +38,8 @@ extend Module as Free {
 // emit-order/instance-propagation fields are added when those stages are ported.)
 pub struct Package {
     pub modules: Vector<Module>,
-    pub root_dir: *mut char, // source root: the directory of the root file; imports resolve relative to it
-    pub std_root: *mut char, // second import search root (parent of std/)
+    pub root_dir: String,    // source root: the directory of the root file; imports resolve relative to it
+    pub std_root: String,    // second import search root (parent of std/); empty = none
     pub ok: bool,            // false if any read/parse/cycle error was reported during loading
     // Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     // `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
@@ -71,24 +71,17 @@ pub struct LookupHit { pub node: NodeId, pub mid: ModuleId }
 // Path + string helpers (heap-allocated results; callers own them).
 // ---------------------------------------------------------------------------------------------------------
 
-fn dup_cstr(s: *const char) *mut char {
-    let n = unsafe cstring::strlen(s);
-    let d = unsafe stdlib::malloc(n + 1) as *mut char;
-    unsafe cstring::memcpy(d as *mut void, s, n + 1);
-    return d;
-}
-
 // True if `path` names something that can be opened for reading (replaces access(path, F_OK)).
-fn path_exists(path: *const char) bool {
-    let f = stdio::fopen(str::from_cstr(path), "rb");
+fn path_exists(path: str) bool {
+    let f = stdio::fopen(path, "rb");
     if f == null { return false; }
     unsafe stdio::fclose(f);
     return true;
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer; ptr==null on any I/O error.
-fn read_file(path: *const char) Option<String> {
-    let f = stdio::fopen(str::from_cstr(path), "rb");
+fn read_file(path: str) Option<String> {
+    let f = stdio::fopen(path, "rb");
     if f == null { return Option::<String>::None; }
     if unsafe stdio::fseek(f, 0, SEEK_END) != 0 { unsafe stdio::fclose(f); return Option::<String>::None; }
     let s = unsafe stdio::ftell(f);
@@ -110,99 +103,71 @@ fn read_file(path: *const char) Option<String> {
 }
 
 // The directory portion of `path` (without trailing slash), or "." when there is none.
-fn dir_of(path: *const char) *mut char {
-    let slash = unsafe cstring::strrchr(path, '/' as i32);
-    if slash == null { return dup_cstr(".".ptr() as *const char); }
-    let n = (slash as usize) - (path as usize);
-    let d = unsafe stdlib::malloc(n + 1) as *mut char;
-    unsafe cstring::memcpy(d as *mut void, path, n);
-    unsafe d[n] = 0 as char;
-    return d;
+fn dir_of(path: str) String {
+    let n = path.len();
+    let mut slash: i64 = -1;
+    let mut i: usize = 0;
+    while i < n { if path.byte_at(i) == '/' as u8 { slash = i as i64; } i = i + 1; }
+    if slash < 0 { return String::from_str("."); }
+    return String::from_str(path.slice(0, slash as usize));
 }
 
 // The file stem (basename without extension): "dir/std/string.spc" -> "string".
-fn stem_of(path: *const char) *mut char {
-    let slash = unsafe cstring::strrchr(path, '/' as i32);
-    let mut base = path;
-    if slash != null { base = unsafe (slash + 1) as *const char; }
-    let dot = unsafe cstring::strrchr(base, '.' as i32);
-    let mut n = unsafe cstring::strlen(base);
-    if dot != null { n = (dot as usize) - (base as usize); }
-    let d = unsafe stdlib::malloc(n + 1) as *mut char;
-    unsafe cstring::memcpy(d as *mut void, base, n);
-    unsafe d[n] = 0 as char;
-    return d;
+fn stem_of(path: str) String {
+    let n = path.len();
+    let mut bstart: usize = 0;
+    let mut i: usize = 0;
+    while i < n { if path.byte_at(i) == '/' as u8 { bstart = i + 1; } i = i + 1; }
+    let mut dot: i64 = -1;
+    i = bstart;
+    while i < n { if path.byte_at(i) == '.' as u8 { dot = i as i64; } i = i + 1; }
+    let end = if dot >= 0 { dot as usize; } else { n; };
+    return String::from_str(path.slice(bstart, end));
 }
 
 // Join an import's path parts with `sep` ("::" for a module path, "/" for a file path).
-fn join_parts(ast: &Ast, src: *const char, parts: NodeList, sep: *const char) *mut char {
+fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
     let ids = ast.list(parts);
-    let seplen = unsafe cstring::strlen(sep);
-    let mut total: usize = 0;
+    let mut out = String::new();
     let mut i: u32 = 0;
     while i < parts.len {
+        if i != 0 { out.push_str(sep); }
         let sp = ast.at_const(unsafe ids[i as usize]).as_data.name.text;
-        total = total + (sp.end - sp.start) as usize;
-        if i != 0 { total = total + seplen; }
+        out.push_str(src.slice(sp.start as usize, sp.end as usize));
         i = i + 1;
     }
-    let out = unsafe stdlib::malloc(total + 1) as *mut char;
-    let mut at: usize = 0;
-    i = 0;
-    while i < parts.len {
-        if i != 0 {
-            unsafe cstring::memcpy((out + at) as *mut void, sep, seplen);
-            at = at + seplen;
-        }
-        let sp = ast.at_const(unsafe ids[i as usize]).as_data.name.text;
-        let l = (sp.end - sp.start) as usize;
-        unsafe cstring::memcpy((out + at) as *mut void, (src + sp.start as usize), l);
-        at = at + l;
-        i = i + 1;
-    }
-    unsafe out[at] = 0 as char;
     return out;
 }
 
 // "<root_dir>/<parts joined by '/'>.spc".
-fn module_file_path(root_dir: *const char, ast: &Ast, src: *const char, parts: NodeList) *mut char {
-    let rel = join_parts(&*ast, src, parts, "/".ptr() as *const char);
-    let n = unsafe cstring::strlen(root_dir) + 1 + unsafe cstring::strlen(rel as *const char) + 4 + 1;
-    let out = unsafe stdlib::malloc(n) as *mut char;
-    unsafe stdio::snprintf(out, n, "%s/%s.spc".ptr() as *const char, root_dir, rel);
-    unsafe stdlib::free(rel as *mut void);
+fn module_file_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String {
+    let rel = join_parts(&*ast, src, parts, "/");
+    let mut out = String::from_str(root_dir);
+    out.push_str("/");
+    out.push_str(rel.as_str());
+    out.push_str(".spc");
     return out;
 }
 
 // Heap "<a>/<b>".
-fn join2(a: *const char, b: *const char) *mut char {
-    let n = unsafe cstring::strlen(a) + 1 + unsafe cstring::strlen(b) + 1;
-    let out = unsafe stdlib::malloc(n) as *mut char;
-    unsafe stdio::snprintf(out, n, "%s/%s".ptr() as *const char, a, b);
+fn join2(a: str, b: str) String {
+    let mut out = String::from_str(a);
+    out.push_str("/");
+    out.push_str(b);
     return out;
 }
 
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
 // finds <std_root>/std/x.spc), then the bundled `ffi/` bindings (so a bare `import stdio;` finds
 // <std_root>/ffi/stdio.spc). Returns the first path that exists, else the project-relative path. Owned.
-fn resolve_import_file(root_dir: *const char, std_root: *const char, ast: &Ast, src: *const char,
-                       parts: NodeList) *mut char {
+fn resolve_import_file(root_dir: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
     let root_rel = module_file_path(root_dir, &*ast, src, parts);
-    if path_exists(root_rel as *const char) || std_root == null { return root_rel; }
+    if path_exists(root_rel.as_str()) || std_root.is_empty() { return root_rel; }
     let std_rel = module_file_path(std_root, &*ast, src, parts);
-    if path_exists(std_rel as *const char) {
-        unsafe stdlib::free(root_rel as *mut void);
-        return std_rel;
-    }
-    unsafe stdlib::free(std_rel as *mut void);
-    let ffi_base = join2(std_root, "ffi".ptr() as *const char);
-    let ffi_rel = module_file_path(ffi_base as *const char, &*ast, src, parts);
-    unsafe stdlib::free(ffi_base as *mut void);
-    if path_exists(ffi_rel as *const char) {
-        unsafe stdlib::free(root_rel as *mut void);
-        return ffi_rel;
-    }
-    unsafe stdlib::free(ffi_rel as *mut void);
+    if path_exists(std_rel.as_str()) { return std_rel; }
+    let ffi_base = join2(std_root, "ffi");
+    let ffi_rel = module_file_path(ffi_base.as_str(), &*ast, src, parts);
+    if path_exists(ffi_rel.as_str()) { return ffi_rel; }
     return root_rel;
 }
 
@@ -240,8 +205,8 @@ extend Package {
     pub fn new() Package {
         return Package {
             modules: Vector::<Module>::new(),
-            root_dir: null,
-            std_root: null,
+            root_dir: String::new(),
+            std_root: String::new(),
             ok: true,
             core_module: 0,
             core_seeded: false,
@@ -263,17 +228,13 @@ extend Package {
     // Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
     pub fn find(self: &Self, path: str) i32 {
         for i in 0..self.modules.len() {
-            let mp = self.modules[i].path;
-            if unsafe cstring::strlen(mp) == path.len()
-                && unsafe cstring::memcmp(mp, path.ptr(), path.len()) == 0 {
-                return i as i32;
-            }
+            if self.modules[i].path.as_str() == path { return i as i32; }
         }
         return -1;
     }
 
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
-    fn add_module(self: &mut Self, path: *mut char, file: *mut char, source: String,
+    fn add_module(self: &mut Self, path: String, file: String, source: String,
                   ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
         self.modules.push(Module {
@@ -286,30 +247,31 @@ extend Package {
     // DFS load: takes ownership of `mod_path` and `file_path`. Returns the module's id (or -1 if unreadable).
     // A module already loaded (an import cycle) simply resolves to its id: modules are parsed whole before
     // any resolution, so mutual imports need no special handling.
-    fn load_module(self: &mut Self, mod_path: *mut char, file_path: *mut char) i32 {
-        let existing = self.find(str::from_raw(mod_path as *const u8, unsafe cstring::strlen(mod_path)));
-        if existing >= 0 {
-            unsafe stdlib::free(mod_path as *mut void);
-            unsafe stdlib::free(file_path as *mut void);
-            return existing;
-        }
+    fn load_module(self: &mut Self, mod_path: str, file_path: str) i32 {
+        let existing = self.find(mod_path);
+        if existing >= 0 { return existing; }
 
         let mut source = String::new();
         switch read_file(file_path) {
             Some(s) => { source = s; },
             None => {
-                unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%s' (%s)\n".ptr() as *const char,
-                                      mod_path, file_path);
+                unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%.*s' (%.*s)\n".ptr() as *const char,
+                                      mod_path.len() as i32, mod_path.ptr(), file_path.len() as i32, file_path.ptr());
                 self.ok = false;
-                unsafe stdlib::free(mod_path as *mut void);
-                unsafe stdlib::free(file_path as *mut void);
                 return -1;
             },
         };
 
-        let parsed = parse_source(source.as_str().ptr() as *const char, source.len(), file_path);
+        // NUL-terminate file_path into a scratch buffer for parse_source's diagnostics (read only during the call).
+        let mut fb = RealBuf { };
+        let fl = file_path.len();
+        if fl < 4096 {
+            unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, file_path.ptr() as *const void, fl);
+            unsafe fb.b[fl] = 0 as char;
+        } else { unsafe fb.b[0] = 0 as char; }
+        let parsed = parse_source(source.as_str().ptr() as *const char, source.len(), (&fb.b[0]) as *const char);
         let ok = parsed.ok;
-        let id = self.add_module(mod_path, file_path, source, parsed.ast, ok);
+        let id = self.add_module(String::from_str(mod_path), String::from_str(file_path), source, parsed.ast, ok);
         if !ok {
             self.ok = false;
             return id;
@@ -318,26 +280,24 @@ extend Package {
 
         // Collect this module's import (path, file) pairs BEFORE recursing: recursion pushes to
         // self.modules, which may realloc and move this module's by-value Ast, invalidating a live borrow.
-        let root_dir = self.root_dir;
-        let std_root = self.std_root;
-        let mut child_paths = Vector::<*mut char>::new();
-        let mut child_files = Vector::<*mut char>::new();
+        let root_dir = self.root_dir.as_str();
+        let std_root = self.std_root.as_str();
+        let mut child_paths = Vector::<String>::new();
+        let mut child_files = Vector::<String>::new();
         {
             let m = self.modules.at(id as usize);
             let items = m.ast.at_const(m.ast.root).as_data.program.items;
             let ids = m.ast.list(items);
-            let src = m.source.as_str().ptr() as *const char;
+            let src = m.source.as_str();
             for i in 0..items.len {
                 let n = m.ast.at_const(unsafe ids[i as usize]);
                 if n.kind == NodeKind::NODE_IMPORT {
                     let parts = n.as_data.import_decl.path;
-                    let cp = join_parts(&m.ast, src, parts, "::".ptr() as *const char);
+                    let cp = join_parts(&m.ast, src, parts, "::");
                     // Skip already-loaded modules here: resolve_import_file probes the filesystem (up to 3
                     // path_exists per edge) only for load_module's own dedup to discard the result. A hot std/
                     // ffi module imported by many modules would otherwise be re-probed once per importer.
-                    if self.find(str::from_raw(cp as *const u8, unsafe cstring::strlen(cp))) >= 0 {
-                        unsafe stdlib::free(cp as *mut void);
-                    } else {
+                    if self.find(cp.as_str()) < 0 {
                         child_paths.push(cp);
                         child_files.push(resolve_import_file(root_dir, std_root, &m.ast, src, parts));
                     }
@@ -345,7 +305,7 @@ extend Package {
             }
         }
         for k in 0..child_paths.len() {
-            self.load_module(child_paths[k] as *mut char, child_files[k] as *mut char);
+            self.load_module(child_paths[k].as_str(), child_files[k].as_str());
         }
         return id;
     }
@@ -357,8 +317,7 @@ extend Package {
         self.core_seeded = false;
         for i in 0..self.modules.len() {
             let is_core = self.modules[i].has_ast
-                && unsafe cstring::strcmp(self.modules[i].path,
-                                          "__std::core".ptr() as *const char) == 0;
+                && self.modules[i].path.as_str() == "__std::core";
             if is_core {
                 for b in 0..BT_COUNT_N {
                     let id = self.modules[i].ast.add(Node {
@@ -536,13 +495,12 @@ extend Package {
                 let md = self.modules.at(mo as usize);
                 let items = md.ast.at_const(md.ast.root).as_data.program.items;
                 let ids = md.ast.list(items);
-                let src = md.source.as_str().ptr() as *const char;
+                let src = md.source.as_str();
                 for i in 0..items.len {
                     let it = md.ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
-                        let path = join_parts(&md.ast, src, it.as_data.import_decl.path, "::".ptr() as *const char);
-                        let c = self.find(str::from_raw(path as *const u8, unsafe cstring::strlen(path)));
-                        unsafe stdlib::free(path as *mut void);
+                        let path = join_parts(&md.ast, src, it.as_data.import_decl.path, "::");
+                        let c = self.find(path.as_str());
                         if c >= 0 && !seen[c as usize] {
                             seen.set(c as usize, true);
                             queue.push(c as ModuleId);
@@ -570,13 +528,12 @@ extend Package {
                 let ast = unsafe &*self.module_ast_ptr(cur);
                 let items = ast.at_const(ast.root).as_data.program.items;
                 let ids = ast.list(items);
-                let src = self.modules[cur as usize].source.as_str().ptr() as *const char;
+                let src = self.modules[cur as usize].source.as_str();
                 for i in 0..items.len {
                     let it = ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
-                        let path = join_parts(&*ast, src, it.as_data.import_decl.path, "::".ptr() as *const char);
-                        let c = self.find(str::from_raw(path as *const u8, unsafe cstring::strlen(path)));
-                        unsafe stdlib::free(path as *mut void);
+                        let path = join_parts(&*ast, src, it.as_data.import_decl.path, "::");
+                        let c = self.find(path.as_str());
                         if c >= 0 && !seen[c as usize] {
                             seen.set(c as usize, true);
                             out.push(c as ModuleId);
@@ -650,8 +607,8 @@ extend Package {
 extend Package as Free {
     pub fn free(self: &mut Self) void {
         self.modules.free();
-        unsafe stdlib::free(self.root_dir as *mut void);
-        unsafe stdlib::free(self.std_root as *mut void);
+        self.root_dir.free();
+        self.std_root.free();
         self.method_used.free();
     }
 }
@@ -1078,9 +1035,11 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
 pub fn package_load(root_file: *const char, std_dir: *const char) Package {
     let mut p = Package::new();
     p.ok = true;
-    p.root_dir = dir_of(root_file);
-    if std_dir != null { p.std_root = dir_of(std_dir); }
-    p.load_module(stem_of(root_file), dup_cstr(root_file));
+    p.root_dir = dir_of(str::from_cstr(root_file));
+    if std_dir != null { p.std_root = dir_of(str::from_cstr(std_dir)); }
+    let rp = stem_of(str::from_cstr(root_file));
+    let rf = String::from_cstr(root_file);
+    p.load_module(rp.as_str(), rf.as_str());
     load_prelude(&mut p, std_dir);
     p.seed_core();
     return p;
@@ -1094,12 +1053,12 @@ pub fn package_load(root_file: *const char, std_dir: *const char) Package {
 pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) Package {
     let mut p = Package::new();
     p.ok = true;
-    p.root_dir = dup_cstr(".".ptr() as *const char);
-    if std_dir != null { p.std_root = dir_of(std_dir); }
+    p.root_dir = String::from_str(".");
+    if std_dir != null { p.std_root = dir_of(str::from_cstr(std_dir)); }
     load_prelude(&mut p, std_dir);
     let parsed = parse_source(src, len, "<harness>".ptr() as *const char);
     let ok = parsed.ok;
-    let id = p.add_module(dup_cstr("main".ptr() as *const char), dup_cstr("<harness>".ptr() as *const char),
+    let id = p.add_module(String::from_str("main"), String::from_str("<harness>"),
                           String::from_str(str::from_raw(src as *const u8, len)), parsed.ast, ok);
     if ok { p.modules[id as usize].ast.module = id as ModuleId; }
     else { p.ok = false; }
@@ -1112,22 +1071,36 @@ struct RealBuf { pub b: [char; 4096] }
 
 // Canonical (realpath) form of `path` as a fresh heap string, or null if it can't be resolved.
 // Two paths name the same file iff their canon_of results are non-null and strcmp-equal.
-fn canon_of(path: *const char) *mut char {
-    if path == null { return null; }
+fn canon_of(path: str) String {
+    let n = path.len();
+    if n >= 4096 { return String::new(); }
+    let mut pb = RealBuf { };
+    unsafe cstring::memcpy((&mut pb.b[0]) as *mut void, path.ptr() as *const void, n);
+    unsafe pb.b[n] = 0 as char;
     let mut r = RealBuf { };
-    if unsafe shim::sc_realpath(path, (&mut r.b[0]) as *mut char) == null { return null; }
-    return dup_cstr((&r.b[0]) as *const char);
+    if unsafe shim::sc_realpath((&pb.b[0]) as *const char, (&mut r.b[0]) as *mut char) == null { return String::new(); }
+    return String::from_cstr((&r.b[0]) as *const char);
 }
 
 // Auto-import the prelude: every TOP-LEVEL `<std_dir>/*.spc` (not subdirectories) becomes a prelude module
 // whose public items resolve unqualified. A file already loaded (explicitly imported) is flagged in place;
 // otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
 // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
+// Byte-lexicographic order of two names with a length tiebreak (equivalent to strcmp over NUL-free views).
+fn name_cmp(a: &String, b: &String) i32 {
+    let la = a.len();
+    let lb = b.len();
+    let m = if la < lb { la; } else { lb; };
+    let c = unsafe cstring::memcmp(a.as_str().ptr() as *const void, b.as_str().ptr() as *const void, m);
+    if c != 0 { return c; }
+    return (la as i32) - (lb as i32);
+}
+
 fn load_prelude(p: &mut Package, std_dir: *const char) void {
     if std_dir == null { return; }
     let dir = unsafe shim::sc_opendir(std_dir);
     if dir == null { return; }
-    let mut names = Vector::<*mut char>::new();
+    let mut names = Vector::<String>::new();
     loop {
         let e = unsafe shim::sc_readdir(dir);
         if e == null { break; }
@@ -1135,63 +1108,42 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         let l = unsafe cstring::strlen(nm);
         if l < 5 { continue; }
         if unsafe cstring::strcmp((nm + (l - 4)) as *const char, ".spc".ptr() as *const char) != 0 { continue; }
-        names.push(dup_cstr(nm));
+        names.push(String::from_cstr(nm));
     }
     let _ = unsafe shim::sc_closedir(dir);
-    // sort by name (small: the std/ file list)
-    names.sort_by(|a: &*mut char, b: &*mut char| unsafe cstring::strcmp((*a) as *const char, (*b) as *const char));
+    // sort by name (small: the std/ file list) -- byte-lexicographic with a length tiebreak (equivalent to
+    // strcmp over these NUL-free views).
+    names.sort_by(|a: &String, b: &String| name_cmp(a, b));
     // Canonicalize the already-loaded modules' paths ONCE (the user's explicit import closure). A std file
     // is a duplicate iff it was explicitly imported, so only these initial modules can match; the __std::
     // modules appended below have distinct names and never do. Precomputing here makes the dedup O(S+M)
     // realpaths instead of O(S*M) -- realpath walks the filesystem, so it dominated the profile otherwise.
     let m0 = p.modules.len();
-    let mut canon = Vector::<*mut char>::new();
-    for ci in 0..m0 { 
-        canon.push(canon_of(p.modules[ci].file));
+    let mut canon = Vector::<String>::new();
+    for ci in 0..m0 {
+        canon.push(canon_of(p.modules[ci].file.as_str()));
     }
 
     for k in 0..names.len() {
-        let nmk = names[k];
-        let dl = unsafe cstring::strlen(std_dir);
-        let nl = unsafe cstring::strlen(nmk as *const char);
-        let fl = dl + 1 + nl + 1;
-        let file = unsafe stdlib::malloc(fl) as *mut char;
-        unsafe stdio::snprintf(file, fl, "%s/%s".ptr() as *const char, std_dir, nmk);
-        if unsafe shim::sc_stat_isdir(file) == 1 { // a dir literally named "*.spc"
-            unsafe stdlib::free(file as *mut void);
-            unsafe stdlib::free(nmk as *mut void);
-            continue;
-        }
-        let rf = canon_of(file as *const char);
+        let mut file = join2(str::from_cstr(std_dir), names[k].as_str());
+        if unsafe shim::sc_stat_isdir(file.cstr()) == 1 { continue; } // a dir literally named "*.spc"
+        let rf = canon_of(file.as_str());
         let mut dup = false;
-        if rf != null {
+        if !rf.is_empty() {
             for i2 in 0..canon.len() {
-                let c = canon[i2];
-                if c != null && unsafe cstring::strcmp(c as *const char, rf as *const char) == 0 {
+                if !canon[i2].is_empty() && canon[i2].as_str() == rf.as_str() {
                     p.modules[i2].prelude = true;
                     dup = true;
                     break;
                 }
             }
         }
-        if rf != null { unsafe stdlib::free(rf as *mut void); }
         if !dup {
-            let stem = stem_of(nmk as *const char);
-            let sl = unsafe cstring::strlen(stem);
-            let pl = 7 + sl + 1; // "__std::" is 7 chars
-            let modpath = unsafe stdlib::malloc(pl) as *mut char;
-            unsafe stdio::snprintf(modpath, pl, "__std::%s".ptr() as *const char, stem);
-            unsafe stdlib::free(stem as *mut void);
-            let id = p.load_module(modpath, file); // takes ownership of modpath + file
+            let stem = stem_of(names[k].as_str());
+            let mut modpath = String::from_str("__std::");
+            modpath.push_str(stem.as_str());
+            let id = p.load_module(modpath.as_str(), file.as_str());
             if id >= 0 { p.modules[id as usize].prelude = true; }
-        } else {
-            unsafe stdlib::free(file as *mut void);
         }
-        unsafe stdlib::free(nmk as *mut void);
-    }
-
-    for ci in 0..canon.len() {
-        let c = canon[ci];
-        if c != null { unsafe stdlib::free(c as *mut void); }
     }
 }

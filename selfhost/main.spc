@@ -45,20 +45,21 @@ fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
 // ---------------------------------------------------------------------------------------------------------
 
 // "<root>/build/<mod path, '::' -> '/'><ext>" (heap-allocated; caller owns). Generated includes are relative.
-fn build_out_path(root_dir: *const char, mod_path: *const char, ext: *const char) String {
-    let mut out = String::from_cstr(root_dir);
+fn build_out_path(root_dir: str, mod_path: str, ext: str) String {
+    let mut out = String::from_str(root_dir);
     out.push_str("/build/");
-    let mut s = mod_path;
-    while (unsafe *s) != (0 as char) {
-        if (unsafe *s) == (':' as char) && (unsafe *(s + 1)) == (':' as char) {
+    let n = mod_path.len();
+    let mut i: usize = 0;
+    while i < n {
+        if mod_path.byte_at(i) == ':' as u8 && i + 1 < n && mod_path.byte_at(i + 1) == ':' as u8 {
             out.push_byte('/' as u8);
-            s = unsafe (s + 2);
+            i = i + 2;
         } else {
-            out.push_byte((unsafe *s) as u8);
-            s = unsafe (s + 1);
+            out.push_byte(mod_path.byte_at(i) as u8);
+            i = i + 1;
         }
     }
-    out.push_str(str::from_cstr(ext));
+    out.push_str(ext);
     return out;
 }
 
@@ -128,8 +129,8 @@ fn prune_orphans(dir: *const char, keep: &Vector<String>) void {
 }
 
 // The runtime header shared by every generated module: the C standard library includes.
-fn write_super_rt(root_dir: *const char) void {
-    let path = build_out_path(root_dir, "super_rt".ptr() as *const char, ".h".ptr() as *const char);
+fn write_super_rt(root_dir: str) void {
+    let path = build_out_path(root_dir, "super_rt", ".h");
     let f = open_out(path.as_str());
     if f != null {
         unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr() as *const char, f);
@@ -308,7 +309,7 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     let sp = unsafe (*p).modules[m as usize].ast.at_const(cond).span;
     let src = unsafe (*p).modules[m as usize].source.as_str().ptr();
     let len = unsafe (*p).modules[m as usize].source.len();
-    let file = unsafe (*p).modules[m as usize].file;
+    let file = unsafe (*p).modules[m as usize].file.cstr();
     let mut errs = diag::Errors::new();
     if msg != null {
         errs.emit(sp.start, sp.end - sp.start, format("static assertion cannot be evaluated: {}", diag::cstr(msg)));
@@ -341,7 +342,7 @@ fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) void {
 }
 
 // Wrap one RESOLVED external C source path `rsl` into a build/ TU (deduped across explicit + implicit adds).
-fn ext_c_wrap(root: *const char, keep: &mut Vector<String>, seen: &mut Vector<String>, nsrc: *mut u32,
+fn ext_c_wrap(root: str, keep: &mut Vector<String>, seen: &mut Vector<String>, nsrc: *mut u32,
               rsl: *const char, err: *mut bool) void {
     for k in 0..seen.len() { if seen[k].as_str() == str::from_cstr(rsl) { return; } }
     seen.push(String::from_cstr(rsl));
@@ -362,7 +363,7 @@ fn ext_c_wrap(root: *const char, keep: &mut Vector<String>, seen: &mut Vector<St
     let idx = unsafe *nsrc;
     unsafe *nsrc = idx + 1;
     unsafe stdio::snprintf((&mut nm.b[0]) as *mut char, 128, "__ext%u_%s".ptr() as *const char, idx, (&stem.b[0]) as *const char);
-    let mut path = build_out_path(root, (&nm.b[0]) as *const char, ".c".ptr() as *const char);
+    let mut path = build_out_path(root, str::from_cstr((&nm.b[0]) as *const char), ".c");
     let f = open_out(path.as_str());
     if f == null {
         unsafe stdio::perror(path.cstr());
@@ -375,14 +376,14 @@ fn ext_c_wrap(root: *const char, keep: &mut Vector<String>, seen: &mut Vector<St
 }
 
 fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool) void {
-    let root = p.root_dir;
+    let root = p.root_dir.as_str();
     let mut ld = Vector::<String>::new();
     let mut seen = Vector::<String>::new();
     let mut nsrc: u32 = 0;
     let n = p.modules.len();
     for m in 0..n {
         if !p.modules[m].has_ast { continue; }
-        let file = p.modules[m].file;
+        let file = p.modules[m].file.cstr();
         let src = p.modules[m].source.as_str().ptr() as *const char;
         let ap = mod_ast_c(&*p, m as ModuleId);
         for ai in 0..unsafe (*ap).attrs.len() {
@@ -441,7 +442,7 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
             }
         }
     }
-    let mut ldpath = build_out_path(root, "__ldflags".ptr() as *const char, "".ptr() as *const char);
+    let mut ldpath = build_out_path(root, "__ldflags", "");
     if ld.len() != 0 {
         let f = stdio::fopen(ldpath.as_str(), "w");
         if f != null {
@@ -494,7 +495,7 @@ extend TestPlan as Free {
 fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) void {
     let src = p.modules[m as usize].source.as_str().ptr();
     let len = p.modules[m as usize].source.len();
-    let file = p.modules[m as usize].file;
+    let file = p.modules[m as usize].file.cstr();
     let mut errs = diag::Errors::new();
     errs.emit(sp.start, sp.end - sp.start, String::from_cstr(msg));
     errs.finalize(src, len, file);
@@ -918,7 +919,7 @@ int main(int argc, char **argv) {
 // `module::Type::method`), the global-env hooks (stubs when absent), and the fixed runner. Returns the
 // path (ownership to the caller / keep-list), or null.
 fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
-    let mut path = build_out_path(p.root_dir, "__test_main".ptr() as *const char, ".c".ptr() as *const char);
+    let mut path = build_out_path(p.root_dir.as_str(), "__test_main", ".c");
     let f = open_out(path.as_str());
     if f == null { unsafe stdio::perror(path.cstr()); return Option::<String>::None; }
     unsafe stdio::fputs("/* generated by super-c --test */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\n\n".ptr() as *const char, f);
@@ -932,9 +933,9 @@ fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
         let a = mod_ast_c(&*p, tc.mod);
         let nmnode = unsafe (*a).at_const(tc.func).as_data.function.name;
         let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
-        let modpath = p.modules[tc.mod as usize].path;
+        let modpath = p.modules[tc.mod as usize].path.as_str();
         let msrc = p.modules[tc.mod as usize].source.as_str().ptr() as *const char;
-        unsafe stdio::fprintf(f, "  { \"%s::".ptr() as *const char, modpath);
+        unsafe stdio::fprintf(f, "  { \"%.*s::".ptr() as *const char, modpath.len() as i32, modpath.ptr());
         if tc.suite.node != NODE_NONE {
             let sa = mod_ast_c(&*p, tc.suite.module);
             let snmn = unsafe (*sa).at_const(tc.suite.node).as_data.aggregate.name;
@@ -963,7 +964,7 @@ fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
 fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: *const char) i32 {
     let mut cc = stdlib::getenv("CC");
     if cc == null || (unsafe *cc) == (0 as char) { cc = "cc".ptr() as *const char; }
-    let root = p.root_dir;
+    let root = p.root_dir.as_str();
     let mut cmd = String::new();
     cmd.push_str(str::from_cstr(cc));
     if out_bin != null {
@@ -972,7 +973,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
         cmd.push_str("'");
     } else {
         cmd.push_str(" -std=c11 -o '");
-        cmd.push_str(str::from_cstr(root));
+        cmd.push_str(root);
         cmd.push_str("/build/__tests'");
     }
     for i in 0..keep.len() {
@@ -984,7 +985,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
         }
     }
     // @c.link flags (one per line in build/__ldflags)
-    let ldpath = build_out_path(root, "__ldflags".ptr() as *const char, "".ptr() as *const char);
+    let ldpath = build_out_path(root, "__ldflags", "");
     let lf = stdio::fopen(ldpath.as_str(), "rb");
     if lf != null {
         let mut line = PathBuf {};
@@ -1005,7 +1006,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
     if out_bin != null { return 0; } // the `build` subcommand: linked the program, nothing to run
     let mut run = String::new();
     run.push_str("'");
-    run.push_str(str::from_cstr(root));
+    run.push_str(root);
     run.push_str("/build/__tests'");
     if unsafe (*topts).jobs > 0 {
         let mut jb = Buf64 {};
@@ -1058,10 +1059,10 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
         if !plan.ok { return 1; }
     }
 
-    write_super_rt(p.root_dir);
-    let root = p.root_dir;
+    write_super_rt(p.root_dir.as_str());
+    let root = p.root_dir.as_str();
     let mut keep = Vector::<String>::new();
-    keep.push(build_out_path(root, "super_rt".ptr() as *const char, ".h".ptr() as *const char));
+    keep.push(build_out_path(root, "super_rt", ".h"));
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
     ext_c_collect(&mut *p, &mut keep, (&mut err) as *mut bool);
@@ -1079,7 +1080,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
         let m_ast = mod_ast_m(&mut *p, mi);
         let src = p.modules[mi as usize].source.as_str().ptr() as *const char;
         let slen = p.modules[mi as usize].source.len();
-        let mpath = p.modules[mi as usize].path;
+        let mpath = p.modules[mi as usize].path.as_str();
         let pkg = (&mut *p) as *mut loader::Package;
         let mut c = cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg);
         c.set_multifile(true);
@@ -1105,11 +1106,11 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
             };
             c.set_test_info((&ti) as *const cg::CgTestInfo);
         }
-        let hpath = build_out_path(root, mpath, ".h".ptr() as *const char);
+        let hpath = build_out_path(root, mpath, ".h");
         let hout = open_out(hpath.as_str());
         if hout != null { c.codegen_emit_header(hout); unsafe stdio::fclose(hout); }
         keep.push(hpath);
-        let mut opath = build_out_path(root, mpath, ".c".ptr() as *const char);
+        let mut opath = build_out_path(root, mpath, ".c");
         let out = open_out(opath.as_str());
         if out == null {
             unsafe stdio::perror(opath.cstr());

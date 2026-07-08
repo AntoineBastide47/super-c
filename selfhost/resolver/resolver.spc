@@ -5,6 +5,10 @@ import ast::ast as *;
 import module::loader as loader;
 import utils::errors as diag;
 
+// A scratch buffer to NUL-terminate a module's file path (a `str` view into an owned String) before
+// handing it to the C-string diagnostic renderer.
+struct FileScratch { pub b: [char; 4096] }
+
 // Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
 pub enum Namespace { NS_VALUE, NS_TYPE }
 
@@ -1118,12 +1122,12 @@ extend Resolver {
         }
     }
 
-    fn package_file(self: &Self) *const char {
-        if self.package == null { return null; }
+    fn package_file(self: &Self) str {
+        if self.package == null { return ""; }
         let pkg = unsafe &*self.package;
         let m = self.ast.module;
-        if (m as usize) < pkg.modules.len() { return pkg.modules[m as usize].file; }
-        return null;
+        if (m as usize) < pkg.modules.len() { return pkg.modules[m as usize].file.as_str(); }
+        return "";
     }
 
     pub fn resolve(self: &mut Self) void {
@@ -1136,10 +1140,16 @@ extend Resolver {
             self.resolve_item(cid);
         }
         self.scope_exit();
-        let file = self.package_file();
-        let src = self.source;
-        let ln = self.len;
-        self.errors.finalize(src, ln, file);
+        let fstr = self.package_file();
+        let mut fb = FileScratch {};
+        let mut file: *const char = null;
+        let fl = fstr.len();
+        if fl != 0 && fl < 4096 {
+            unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, fstr.ptr() as *const void, fl);
+            unsafe fb.b[fl] = 0 as char;
+            file = (&fb.b[0]) as *const char;
+        }
+        self.errors.finalize(self.source, self.len, file);
     }
 
     pub fn has_errors(self: &Self) bool { return self.errors.has_errors(); }
