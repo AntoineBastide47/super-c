@@ -82,7 +82,7 @@ fn dup_cstr(s: *const char) *mut char {
 
 // True if `path` names something that can be opened for reading (replaces access(path, F_OK)).
 fn path_exists(path: *const char) bool {
-    let f = unsafe stdio::fopen(path, "rb".ptr() as *const char);
+    let f = stdio::fopen(str::from_cstr(path), "rb");
     if f == null { return false; }
     unsafe stdio::fclose(f);
     return true;
@@ -90,7 +90,7 @@ fn path_exists(path: *const char) bool {
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer; ptr==null on any I/O error.
 fn read_file(path: *const char) FileContents {
-    let f = unsafe stdio::fopen(path, "rb".ptr() as *const char);
+    let f = stdio::fopen(str::from_cstr(path), "rb");
     if f == null { return FileContents { ptr: null, len: 0 }; }
     if unsafe stdio::fseek(f, 0, SEEK_END) != 0 { unsafe stdio::fclose(f); return FileContents { ptr: null, len: 0 }; }
     let s = unsafe stdio::ftell(f);

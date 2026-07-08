@@ -210,5 +210,7 @@ pub fn run() i32 {
 
     unsafe stdio::printf("  codegen emits %.1f KiB C at %.1f MB/s;  best end-to-end %.2f MB/s source\n".ptr() as *const char,
         (warm.out_bytes as f64) / 1024.0, (warm.out_bytes as f64) / ac / 1000.0, srcf / best / 1e6);
+    unsafe stdio::printf("%s".ptr() as *const char, "  * per-phase MB/s & kloc/s are that stage ALONE (whole corpus / its own time). Phases run\n".ptr() as *const char);
+    unsafe stdio::printf("%s".ptr() as *const char, "    in series, so total time = sum of phases and total rate is below EVERY stage's rate.\n".ptr() as *const char);
     return 0;
 }

@@ -123,7 +123,7 @@ fn open_out(path: *mut char) *mut stdio::FILE {
         mkdir_p(path);
         unsafe *slash = '/' as char;
     }
-    return unsafe stdio::fopen(path, "w".ptr() as *const char);
+    return stdio::fopen(str::from_cstr(path), "w");
 }
 
 // Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
@@ -480,7 +480,7 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut KeepList, keep_ok: *mut boo
     let ldpath = build_out_path(root, "__ldflags".ptr() as *const char, "".ptr() as *const char);
     if ldpath != null {
         if ld.len() != 0 {
-            let f = unsafe stdio::fopen(ldpath, "w".ptr() as *const char);
+            let f = stdio::fopen(str::from_cstr(ldpath), "w");
             if f != null {
                 for k in 0..ld.len() { unsafe stdio::fprintf(f, "%s\n".ptr() as *const char, ld[k]); }
                 unsafe stdio::fclose(f);
@@ -1022,7 +1022,7 @@ extend Cmd as Free {
 // linked to that path and we return; otherwise it links `<root>/build/__tests` and runs it as the test
 // runner, forwarding `topts`' options.
 fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepList, out_bin: *const char) i32 {
-    let mut cc = unsafe stdlib::getenv("CC".ptr() as *const char);
+    let mut cc = stdlib::getenv("CC");
     if cc == null || (unsafe *cc) == (0 as char) { cc = "cc".ptr() as *const char; }
     let root = p.root_dir;
     let mut cmd = Cmd::new();
@@ -1048,7 +1048,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
     // @c.link flags (one per line in build/__ldflags)
     let ldpath = build_out_path(root, "__ldflags".ptr() as *const char, "".ptr() as *const char);
     if ldpath != null {
-        let lf = unsafe stdio::fopen(ldpath, "rb".ptr() as *const char);
+        let lf = stdio::fopen(str::from_cstr(ldpath), "rb");
         if lf != null {
             let mut line = PathBuf {};
             while unsafe stdio::fgets((&mut line.b[0]) as *mut char, 4096, lf) != null {
@@ -1060,7 +1060,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
         }
         unsafe stdlib::free(ldpath as *mut void);
     }
-    let brc = unsafe stdlib::system(cmd.data);
+    let brc = stdlib::system(str::from_cstr(cmd.data));
     if brc != 0 {
         let mut what = "test build".ptr() as *const char;
         if out_bin != null { what = "build".ptr() as *const char; }
@@ -1083,7 +1083,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &KeepLi
         run.append(unsafe (*topts).filter);
         run.append("'".ptr() as *const char);
     }
-    let rrc = unsafe stdlib::system(run.data);
+    let rrc = stdlib::system(str::from_cstr(run.data));
     if rrc < 0 { return 1; }
     if unsafe shim::sc_wifexited(rrc) != 0 { return unsafe shim::sc_wexitstatus(rrc); }
     return 1;

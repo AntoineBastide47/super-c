@@ -299,7 +299,7 @@ extend RunResult as Free {
 
 // Read a whole file into a fresh NUL-terminated buffer (caller frees); null if it cannot be opened.
 fn slurp(path: *const char) *mut char {
-    let f = unsafe stdio::fopen(path, "rb".ptr() as *const char);
+    let f = stdio::fopen(str::from_cstr(path), "rb");
     if f == null { return null; }
     let buf = read_stream(f);
     unsafe stdio::fclose(f);
@@ -309,7 +309,7 @@ fn slurp(path: *const char) *mut char {
 fn rm_dir(dir: *const char) void {
     let mut cmd = Path512 {};
     unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 512, "rm -rf '%s'".ptr() as *const char, dir);
-    let _ = unsafe stdlib::system((&cmd.b[0]) as *const char);
+    let _ = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
 }
 
 // Build `src` into a standalone program via `super-c build`, run it, and capture stdout+stderr + exit code.
@@ -325,20 +325,20 @@ pub fn compile_and_run(src: str) RunResult {
     if unsafe shim::sc_mkdir(dirp) != 0 { return r; }
     let mut spc = Path512 {};
     unsafe stdio::snprintf((&mut spc.b[0]) as *mut char, 512, "%s/main.spc".ptr() as *const char, dirp);
-    let wf = unsafe stdio::fopen((&spc.b[0]) as *const char, "w".ptr() as *const char);
+    let wf = stdio::fopen(str::from_cstr((&spc.b[0]) as *const char), "w");
     if wf == null { rm_dir(dirp); return r; }
     if src.len() > 0 { let _ = unsafe stdio::fwrite(src.ptr(), 1, src.len(), wf); }
     unsafe stdio::fclose(wf);
-    let mut sc = unsafe stdlib::getenv("SUPERC".ptr() as *const char);
+    let mut sc = stdlib::getenv("SUPERC");
     if sc == null || (unsafe *sc) == (0 as char) { sc = "./super-c".ptr() as *const char; }
     let mut cmd = Path1024 {};
     unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 1024,
         "%s build '%s/main.spc' -o '%s/prog' >/dev/null 2>&1".ptr() as *const char, sc, dirp, dirp);
-    let brc = unsafe stdlib::system((&cmd.b[0]) as *const char);
+    let brc = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
     if brc != 0 { rm_dir(dirp); return r; } // did not build
     r.built = true;
     unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 1024, "'%s/prog' > '%s/out' 2>&1".ptr() as *const char, dirp, dirp);
-    let rrc = unsafe stdlib::system((&cmd.b[0]) as *const char);
+    let rrc = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
     if unsafe shim::sc_wifexited(rrc) != 0 { r.exit = unsafe shim::sc_wexitstatus(rrc); }
     let mut op = Path512 {};
     unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/out".ptr() as *const char, dirp);
