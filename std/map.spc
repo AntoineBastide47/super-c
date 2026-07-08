@@ -64,8 +64,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         unsafe memset(self.used as *mut void, 0, newcap); // mark every slot empty
         self.cap = newcap;
         self.len = 0;
-        let mut i: usize = 0;
-        while i < oldcap {
+        for i in 0..oldcap {
             if unsafe oldused[i] == 1 {
                 let j = self.slot(&unsafe oldkeys[i]);
                 unsafe self.keys[j] = unsafe oldkeys[i];
@@ -73,7 +72,6 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
                 unsafe self.used[j] = 1;
                 self.len = self.len + 1;
             }
-            i = i + 1;
         }
         if oldcap > 0 {
             self.alloc.dealloc(oldkeys as *mut void, oldcap * sizeof(K), alignof(K));
@@ -162,13 +160,11 @@ extend<K: Hash + Eq, V, A: Allocator + Default> Map<K, V, A> {
 // owned only by its slot. Each occupied key/value `.free()` is a no-op when K / V isn't a Free type.
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
     pub fn free(self: &mut Map<K, V, A>) {
-        let mut i: usize = 0;
-        while i < self.cap {
+        for i in 0..self.cap {
             if unsafe self.used[i] != 0 {
                 unsafe self.keys[i].free(); // no-op if K isn't Free
                 unsafe self.vals[i].free(); // no-op if V isn't Free
             }
-            i = i + 1;
         }
         self.alloc.dealloc(self.keys as *mut void, self.cap * sizeof(K), alignof(K));
         self.alloc.dealloc(self.vals as *mut void, self.cap * sizeof(V), alignof(V));

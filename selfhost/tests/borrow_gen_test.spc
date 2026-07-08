@@ -61,14 +61,10 @@ fn case_pre(pre: str, body: str, label: str, ok: bool) {
 fn aliasing() {
     let kinds: [str; 2] = ["", "mut "];
     let places: [str; 3] = ["p", "p.a", "p.b"];
-    let mut k1: i32 = 0;
-    while k1 < 2 {
-        let mut k2: i32 = 0;
-        while k2 < 2 {
-            let mut p1: i32 = 0;
-            while p1 < 3 {
-                let mut p2: i32 = 0;
-                while p2 < 3 {
+    for k1 in 0..2 {
+        for k2 in 0..2 {
+            for p1 in 0..3 {
+                for p2 in 0..3 {
                     let mut u1 = Buf64 {}; let mut u2 = Buf64 {};
                     use_ref((&mut u1.b[0]) as *mut char, "b1", p1);
                     use_ref((&mut u2.b[0]) as *mut char, "b2", p2);
@@ -80,13 +76,9 @@ fn aliasing() {
                         (&u1.b[0]) as *const char, (&u2.b[0]) as *const char);
                     let want = !(overlap(p1, p2) && (k1 != 0 || k2 != 0));
                     check_case("aliasing", buf_str((&src.b[0]) as *const char), want);
-                    p2 = p2 + 1;
                 }
-                p1 = p1 + 1;
             }
-            k2 = k2 + 1;
         }
-        k1 = k1 + 1;
     }
 }
 
@@ -96,12 +88,9 @@ fn aliasing() {
 fn use_while_borrowed() {
     let kinds: [str; 2] = ["", "mut "];
     let places: [str; 3] = ["p", "p.a", "p.b"];
-    let mut k: i32 = 0;
-    while k < 2 {
-        let mut p1: i32 = 0;
-        while p1 < 3 {
-            let mut p2: i32 = 0;
-            while p2 < 3 {
+    for k in 0..2 {
+        for p1 in 0..3 {
+            for p2 in 0..3 {
                 let mut ur = Buf64 {};
                 use_ref((&mut ur.b[0]) as *mut char, "r", p1);
                 let mut src = Buf2048 {};
@@ -111,11 +100,8 @@ fn use_while_borrowed() {
                     places[p2].ptr() as *const char, (&ur.b[0]) as *const char);
                 let want = !(overlap(p1, p2) && k != 0);
                 check_case("use while borrowed", buf_str((&src.b[0]) as *const char), want);
-                p2 = p2 + 1;
             }
-            p1 = p1 + 1;
         }
-        k = k + 1;
     }
 }
 
@@ -124,12 +110,9 @@ fn use_while_borrowed() {
 fn nll() {
     let kinds: [str; 2] = ["", "mut "];
     let places: [str; 3] = ["p", "p.a", "p.b"];
-    let mut k: i32 = 0;
-    while k < 2 {
-        let mut p1: i32 = 0;
-        while p1 < 3 {
-            let mut p2: i32 = 0;
-            while p2 < 3 {
+    for k in 0..2 {
+        for p1 in 0..3 {
+            for p2 in 0..3 {
                 let mut ur = Buf64 {};
                 use_ref((&mut ur.b[0]) as *mut char, "r", p1);
                 let mut src = Buf2048 {};
@@ -138,11 +121,8 @@ fn nll() {
                     PRE.ptr() as *const char, kinds[k].ptr() as *const char, places[p1].ptr() as *const char,
                     (&ur.b[0]) as *const char, places[p2].ptr() as *const char);
                 check_case("nll", buf_str((&src.b[0]) as *const char), true);
-                p2 = p2 + 1;
             }
-            p1 = p1 + 1;
         }
-        k = k + 1;
     }
 }
 
@@ -329,18 +309,12 @@ fn third_audit() {
 fn aliasing3() {
     let kinds: [str; 2] = ["", "mut "];
     let places: [str; 3] = ["p", "p.a", "p.b"];
-    let mut k1: i32 = 0;
-    while k1 < 2 {
-        let mut k2: i32 = 0;
-        while k2 < 2 {
-            let mut k3: i32 = 0;
-            while k3 < 2 {
-                let mut p1: i32 = 0;
-                while p1 < 3 {
-                    let mut p2: i32 = 0;
-                    while p2 < 3 {
-                        let mut p3: i32 = 0;
-                        while p3 < 3 {
+    for k1 in 0..2 {
+        for k2 in 0..2 {
+            for k3 in 0..2 {
+                for p1 in 0..3 {
+                    for p2 in 0..3 {
+                        for p3 in 0..3 {
                             let mut u1 = Buf64 {}; let mut u2 = Buf64 {}; let mut u3 = Buf64 {};
                             use_ref((&mut u1.b[0]) as *mut char, "b1", p1);
                             use_ref((&mut u2.b[0]) as *mut char, "b2", p2);
@@ -354,17 +328,11 @@ fn aliasing3() {
                                 (&u1.b[0]) as *const char, (&u2.b[0]) as *const char, (&u3.b[0]) as *const char);
                             let bad = (overlap(p1, p2) && (k1 != 0 || k2 != 0)) || (overlap(p1, p3) && (k1 != 0 || k3 != 0)) || (overlap(p2, p3) && (k2 != 0 || k3 != 0));
                             check_case("aliasing3", buf_str((&src.b[0]) as *const char), !bad);
-                            p3 = p3 + 1;
                         }
-                        p2 = p2 + 1;
                     }
-                    p1 = p1 + 1;
                 }
-                k3 = k3 + 1;
             }
-            k2 = k2 + 1;
         }
-        k1 = k1 + 1;
     }
 }
 
@@ -414,8 +382,7 @@ fn bundle(idx: *const i32, n: i32, label: str) {
     let mut cat: i32 = 0;
     let mut ok = true;
     unsafe calls.b[0] = 0 as char;
-    let mut i: i32 = 0;
-    while i < n {
+    for i in 0..n {
         let bi = unsafe idx[i as usize];
         at = at + unsafe stdio::snprintf((&mut src.b[at as usize]) as *mut char, (8192 - at) as usize,
             "fn s%d() i32 { %s }\n".ptr() as *const char, i, snippet_body(bi).ptr() as *const char);
@@ -424,7 +391,6 @@ fn bundle(idx: *const i32, n: i32, label: str) {
         cat = cat + unsafe stdio::snprintf((&mut calls.b[cat as usize]) as *mut char, (2048 - cat) as usize,
             "%ss%d()".ptr() as *const char, sep.ptr() as *const char, i);
         ok = ok && snippet_ok(bi);
-        i = i + 1;
     }
     let mut tail = "0".ptr() as *const char;
     if n != 0 { tail = (&calls.b[0]) as *const char; }
@@ -440,41 +406,32 @@ fn composition() {
     // All valids bundled -> accept.
     let mut av = IdxBuf {};
     let mut nv: i32 = 0;
-    let mut i: i32 = 0;
-    while i < 16 {
+    for i in 0..16 {
         if snippet_ok(i) { av.b[nv as usize] = i; nv = nv + 1; }
-        i = i + 1;
     }
     bundle((&av.b[0]) as *const i32, nv, "bundle: all valid scenarios");
 
     // Every invalid snippet, surrounded by all the valids -> reject.
-    let mut j: i32 = 0;
-    while j < 16 {
+    for j in 0..16 {
         if !snippet_ok(j) {
             let mut idx = IdxBuf {};
             let mut k: i32 = 0;
-            let mut t: i32 = 0;
-            while t < nv { idx.b[k as usize] = av.b[t as usize]; k = k + 1; t = t + 1; }
+            for t in 0..nv { idx.b[k as usize] = av.b[t as usize]; k = k + 1; }
             idx.b[k as usize] = j; k = k + 1;
             let mut lbuf = Buf2048 {};
             unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle: valids + invalid #%d".ptr() as *const char, j);
             bundle((&idx.b[0]) as *const i32, k, buf_str((&lbuf.b[0]) as *const char));
         }
-        j = j + 1;
     }
 
     // Every ordered pair of scenarios -> accept iff both are valid.
-    let mut a: i32 = 0;
-    while a < 16 {
-        let mut b: i32 = 0;
-        while b < 16 {
+    for a in 0..16 {
+        for b in 0..16 {
             let mut pair = IdxBuf {};
             pair.b[0] = a; pair.b[1] = b;
             let mut lbuf = Buf2048 {};
             unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle pair (%d,%d)".ptr() as *const char, a, b);
             bundle((&pair.b[0]) as *const i32, 2, buf_str((&lbuf.b[0]) as *const char));
-            b = b + 1;
         }
-        a = a + 1;
     }
 }

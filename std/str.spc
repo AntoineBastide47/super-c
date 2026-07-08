@@ -237,10 +237,8 @@ extend str as Hash {
     // 64-bit FNV-1a over the bytes (matching String::hash, so a `str` and an equal `String` hash alike).
     pub fn hash(self: &str) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             h = (h ^ (unsafe self.ptr[i] as u64)) * 0x100000001b3;
-            i = i + 1;
         }
         return h;
     }

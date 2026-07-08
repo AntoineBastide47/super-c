@@ -1,40 +1,36 @@
-import stdio;
 import stdlib;
 import string;
-import unistd;
 
 pub const ERRORS_MAX: usize = 256;
-pub const STDERR_FILENO: i32 = 2;
-
-extern "C" {
-    fn vsnprintf(buf: *mut char, n: usize, fmt: *const char, ap: va_list) i32;
-    fn va_copy(dst: va_list, src: va_list) void;
-}
 
 pub struct Errors {
-    pub errors: Vector<*mut char>,
-    pub notes: Vector<*mut char>,
+    pub errors: Vector<String>,
+    pub notes: Vector<String>,
     pub starts: Vector<u32>,
     pub lens: Vector<u32>,
 }
 
 pub fn oom() void {
-    unsafe stdio::fputs("fatal: out of memory\n".ptr() as *const char, stdio::stderr());
+    eprint("fatal: out of memory\n");
     unsafe stdlib::abort();
 }
 
-fn dup_empty() *mut char {
-    let p = unsafe stdlib::malloc(1) as *mut char;
-    if p == null { oom(); }
-    unsafe p[0] = 0 as char;
-    return p;
+// A borrowed `str` view of a NUL-terminated C string (for routing a raw C string through `format(...)`).
+pub fn cstr(p: *const char) str {
+    return str::from_raw(p as *const u8, unsafe string::strlen(p));
+}
+
+// A borrowed `str` view of the source bytes in the span [start, end) -- the idiomatic replacement for the
+// old `%.*s` (width, source+start) diagnostic argument pair.
+pub fn span_str(src: *const u8, start: u32, end: u32) str {
+    return str::from_raw(unsafe (src + start as usize), (end - start) as usize);
 }
 
 extend Errors {
     pub fn new() Errors {
         return Errors {
-            errors: Vector::<*mut char>::new(),
-            notes: Vector::<*mut char>::new(),
+            errors: Vector::<String>::new(),
+            notes: Vector::<String>::new(),
             starts: Vector::<u32>::new(),
             lens: Vector::<u32>::new(),
         };
@@ -44,56 +40,22 @@ extend Errors {
         return self.errors.len() != 0;
     }
 
-    pub fn vemitf(self: &mut Self, at: u32, len: u32, fmt: *const char, mut args: va_list) void {
+    // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
+    // [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
+    pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) void {
         if self.errors.len() >= ERRORS_MAX { return; }
-        let mut copy = args;
-        unsafe va_copy(copy, args);
-        let msg_len = unsafe vsnprintf(null, 0, fmt, copy);
-        va_end(copy);
-        let result = unsafe stdlib::malloc((msg_len as usize) + 1) as *mut char;
-        if result == null { oom(); }
-        unsafe vsnprintf(result, (msg_len as usize) + 1, fmt, args);
-        self.errors.push(result);
-        self.notes.push(dup_empty());
+        self.errors.push(msg);
+        self.notes.push(String::new());
         self.starts.push(at);
         self.lens.push(len);
     }
 
-    pub fn emitf(self: &mut Self, at: u32, len: u32, fmt: *const char, ...) void {
-        let mut args: va_list;
-        va_start(args, fmt);
-        self.vemitf(at, len, fmt, args);
-        va_end(args);
-    }
-
-    pub fn vnotef(self: &mut Self, fmt: *const char, mut args: va_list) void {
+    // Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
+    pub fn note(self: &mut Self, msg: String) void {
         let n = self.errors.len();
         if n == 0 || self.notes.len() < n { return; }
-        let mut copy = args;
-        unsafe va_copy(copy, args);
-        let msg_len = unsafe vsnprintf(null, 0, fmt, copy);
-        va_end(copy);
-        let msg = unsafe stdlib::malloc((msg_len as usize) + 1) as *mut char;
-        if msg == null { oom(); }
-        unsafe vsnprintf(msg, (msg_len as usize) + 1, fmt, args);
-        let old = (*self.notes.at(n - 1)) as *mut char;
-        let mut old_len: usize = 0;
-        if old != null { old_len = unsafe string::strlen(old as *const char); }
-        let add = unsafe string::strlen(msg as *const char) + "\n  = note: ".len() + 1;
-        let next = unsafe stdlib::malloc(old_len + add + 1) as *mut char;
-        if next == null { oom(); }
-        if old_len != 0 { unsafe string::memcpy(next as *mut void, old, old_len); }
-        unsafe stdio::snprintf(next + old_len, add + 1, "\n  = note: %s".ptr() as *const char, msg);
-        unsafe stdlib::free(old as *mut void);
-        unsafe stdlib::free(msg as *mut void);
-        self.notes.set(n - 1, next);
-    }
-
-    pub fn notef(self: &mut Self, fmt: *const char, ...) void {
-        let mut args: va_list;
-        va_start(args, fmt);
-        self.vnotef(fmt, args);
-        va_end(args);
+        self.notes[n - 1].push_str("\n  = note: ");
+        self.notes[n - 1].push_string(&msg);
     }
 
     pub fn finalize(self: &mut Self, source: *const u8, len: usize, file: *const char) void {
@@ -116,34 +78,26 @@ extend Errors {
             }
         }
         for k in 0..self.errors.len() {
-            let mut notes = "".ptr() as *const char;
-            if k < self.notes.len() { notes = (*self.notes.at(k)) as *const char; }
-            let block = render((*self.errors.at(k)) as *const char, source, &line_starts, len, *self.starts.at(k), *self.lens.at(k), file, notes);
-            unsafe stdlib::free((*self.errors.at(k)) as *mut void);
+            let block = render(self.errors.at(k), source, &line_starts, len, self.starts[k], self.lens[k], file, self.notes.at(k));
             self.errors.set(k, block);
         }
-        let mut w: usize = 0;
+        // Order-preserving dedup of identical rendered blocks (the same error can be emitted from more
+        // than one pass). Cold path: clone survivors into a fresh vector, drop the rest.
+        let mut uniq = Vector::<String>::new();
         for k in 0..self.errors.len() {
-            let mut dup = false;
-            let mut j: usize = 0;
-            while j < w && !dup {
-                dup = unsafe string::strcmp((*self.errors.at(j)) as *const char, (*self.errors.at(k)) as *const char) == 0;
-                j = j + 1;
+            let mut seen = false;
+            for j in 0..uniq.len() {
+                if uniq[j].equals(self.errors.at(k)) { seen = true; }
             }
-            if dup {
-                unsafe stdlib::free((*self.errors.at(k)) as *mut void);
-            } else {
-                if w != k { self.errors.set(w, (*self.errors.at(k)) as *mut char); }
-                w = w + 1;
-            }
+            if !seen { uniq.push(self.errors[k].clone()); }
         }
-        self.errors.truncate(w);
-        line_starts.free();
+        self.errors.free();
+        self.errors = uniq;
     }
 
     pub fn log(self: &Self) void {
         for i in 0..self.errors.len() {
-            unsafe stdio::fprintf(stdio::stderr(), "%s\n".ptr() as *const char, *self.errors.at(i));
+            self.errors[i].eprintln();
         }
     }
 }
@@ -162,26 +116,28 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
     let mut hi = line_starts.len();
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if *line_starts.at(mid) <= off { lo = mid + 1; }
+        if line_starts[mid] <= off { lo = mid + 1; }
         else { hi = mid; }
     }
     if lo == 0 { return 0; }
     return lo - 1;
 }
 
+// Render one diagnostic into a pretty source-annotated block: the message, a `--> file:line:col`
+// location, the offending source line (windowed to 120 cols), a caret run under the span, and notes.
 fn render(
-    msg: *const char,
+    msg: &String,
     source: *const u8,
     line_starts: &Vector<u32>,
     src_len: usize,
     mut off: u32,
     span: u32,
     file: *const char,
-    notes: *const char,
-) *mut char {
+    notes: &String,
+) String {
     if off as usize > src_len { off = src_len as u32; }
     let li = line_index(&*line_starts, off);
-    let lstart = *line_starts.at(li);
+    let lstart = line_starts[li];
     let mut lend = lstart as usize;
     while lend < src_len && unsafe source[lend] != 10 && unsafe source[lend] != 13 { lend = lend + 1; }
     let line_no = li + 1;
@@ -203,36 +159,24 @@ fn render(
         if disp_end > off as usize { carets = disp_end - off as usize; }
         else { carets = 1; }
     }
-    let bar = unsafe stdlib::malloc(carets + 1) as *mut char;
-    if bar == null { oom(); }
-    unsafe string::memset(bar as *mut void, '^' as i32, carets);
-    unsafe bar[carets] = 0 as char;
-    let mut fpfx = "".ptr() as *const char;
-    let mut fsep = "".ptr() as *const char;
+    let mut out = String::new();
+    out.push_str("error: ");
+    out.push_string(msg);
+    out.push_str("\n--> ");
     if file != null && unsafe file[0] != 0 as char {
-        fpfx = file;
-        fsep = ":".ptr() as *const char;
+        out.push_bytes(file as *const u8, unsafe string::strlen(file));
+        out.push_byte(58); // ':'
     }
-    let cap = unsafe string::strlen(msg) + unsafe string::strlen(notes) + line_len + real_col + carets + unsafe string::strlen(fpfx) + 160;
-    let out = unsafe stdlib::malloc(cap) as *mut char;
-    if out == null { oom(); }
-    unsafe stdio::snprintf(
-        out,
-        cap,
-        "error: %s\n--> %s%s%zu:%zu\n |\n%zu | %.*s\n | %*s%s%s".ptr() as *const char,
-        msg,
-        fpfx,
-        fsep,
-        line_no,
-        real_col + 1,
-        line_no,
-        line_len as i32,
-        line_ptr,
-        caret_col as i32,
-        "".ptr() as *const char,
-        bar,
-        notes,
-    );
-    unsafe stdlib::free(bar as *mut void);
+    out.push_u64(line_no as u64);
+    out.push_byte(58);
+    out.push_u64((real_col + 1) as u64);
+    out.push_str("\n |\n");
+    out.push_u64(line_no as u64);
+    out.push_str(" | ");
+    out.push_bytes(line_ptr, line_len);
+    out.push_str("\n | ");
+    for _ in 0..caret_col { out.push_byte(32); }  // ' '
+    for _ in 0..carets { out.push_byte(94); }     // '^'
+    out.push_string(notes);
     return out;
 }

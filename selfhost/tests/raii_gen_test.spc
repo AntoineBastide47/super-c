@@ -162,10 +162,8 @@ fn multiset_eq(a: *const char, b: *const char) bool {
         cb.c[k] = cb.c[k] + 1;
         i = i + 1;
     }
-    let mut j: usize = 0;
-    while j < 256 {
+    for j in 0..256 {
         if ca.c[j] != cb.c[j] { return false; }
-        j = j + 1;
     }
     return true;
 }
@@ -285,7 +283,6 @@ extend Gen {
         assert(r.built, "raii-gen: batch failed to build");
         assert_eq(r.exit, 0);
         assert(multiset_eq(r.out, (&self.exp[0]) as *const char), "raii-gen: free multiset mismatch (leak or double-free)");
-        r.free();
         self.at = ap(self.prog, 0, PROG_CAP, TR_PRE.ptr() as *const char);
         self.cat = 0; self.calls[0] = 0 as char;
         self.eat = 0; self.exp[0] = 0 as char;
@@ -314,11 +311,9 @@ fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *c
     }
     if at == max_depth { return; }
     let alen = unsafe cstring::strlen(alphabet) as i32;
-    let mut i: i32 = 0;
-    while i < alen {
+    for i in 0..alen {
         unsafe sh[at as usize] = unsafe alphabet[i as usize];
         enum_shapes(g, sh, at + 1, max_depth, alphabet, op);
-        i = i + 1;
     }
 }
 

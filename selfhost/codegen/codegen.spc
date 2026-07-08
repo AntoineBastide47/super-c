@@ -296,12 +296,22 @@ pub struct Codegen {
     pub errors: diag::Errors,
 }
 
+extend Codegen as Free {
+    // The Ast is borrowed (not owned); free only what codegen allocated itself.
+    pub fn free(self: &mut Self) void {
+        if self.buf != null { unsafe stdlib::free(self.buf as *mut void); }
+        self.enum_of_variant.free();
+        self.errors.free();
+        if self.type_state != null { unsafe stdlib::free(self.type_state as *mut void); }
+        if self.inst_emit_state != null { unsafe stdlib::free(self.inst_emit_state as *mut void); }
+    }
+}
+
 extend Codegen {
     pub fn new(ast: *mut Ast, source: *const char, len: usize, package: *mut loader::Package) Codegen {
         let mut user_mods: usize = 0;
         if package != null {
-            let mut i: usize = 0;
-            while i < unsafe (*package).modules.len() { if !unsafe (*package).modules.at(i).prelude { user_mods = user_mods + 1; } i = i + 1; }
+            for i in 0..unsafe (*package).modules.len() { if !unsafe (*package).modules[i].prelude { user_mods = user_mods + 1; } }
         }
         let mangle = user_mods > 1;
         let cap = len * 4 + 4096;
@@ -324,15 +334,6 @@ extend Codegen {
 
     pub fn take_ast(self: &mut Self) *mut Ast { return self.ast; }
 
-    // The Ast is borrowed (not owned); free only what codegen allocated itself.
-    pub fn free(self: &mut Self) void {
-        if self.buf != null { unsafe stdlib::free(self.buf as *mut void); }
-        self.enum_of_variant.free();
-        self.errors.free();
-        if self.type_state != null { unsafe stdlib::free(self.type_state as *mut void); }
-        if self.inst_emit_state != null { unsafe stdlib::free(self.inst_emit_state as *mut void); }
-    }
-
     pub fn has_errors(self: &Self) bool { return self.errors.has_errors(); }
     pub fn log_errors(self: &Self) void { self.errors.log(); }
     pub fn set_multifile(self: &mut Self, on: bool) void { self.multifile = on; }
@@ -342,13 +343,13 @@ extend Codegen {
     fn cur_ast(self: &Self) *mut Ast { return self.ast; }
     fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != unsafe (*self.ast).module {
-            return unsafe ((&mut (*self.package).modules.index_mut(m as usize).ast) as *mut Ast);
+            return unsafe ((&mut (*self.package).modules[m as usize].ast) as *mut Ast);
         }
         return self.ast;
     }
     fn mod_src(self: &Self, m: ModuleId) *const u8 {
         if self.package != null && m != unsafe (*self.ast).module {
-            return unsafe (*self.package).modules.at(m as usize).source as *const u8;
+            return unsafe (*self.package).modules[m as usize].source as *const u8;
         }
         return self.source;
     }
@@ -453,8 +454,8 @@ extend Codegen {
     fn render_modpfx(self: &Self, m: ModuleId, buf: *mut char, cap: usize) usize {
         if cap != 0 { unsafe buf[0] = 0 as char; }
         if !self.mangle { return 0; }
-        if unsafe (*self.package).modules.at(m as usize).prelude { return 0; }
-        let path = unsafe (*self.package).modules.at(m as usize).path;
+        if unsafe (*self.package).modules[m as usize].prelude { return 0; }
+        let path = unsafe (*self.package).modules[m as usize].path;
         let mut at: usize = 0;
         let mut i: usize = 0;
         while unsafe path[i] != 0 as char {
@@ -498,15 +499,12 @@ extend Codegen {
     fn build_enum_index(self: &mut Self) void {
         let a = self.cur_ast();
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let iid = unsafe ((*a).list(items))[i as usize];
             if unsafe (*a).at_const(iid).kind == NodeKind::NODE_ENUM {
                 let ms = unsafe (*a).at_const(iid).as_data.aggregate.members;
-                let mut j: u32 = 0;
-                while j < ms.len { self.enum_of_variant.insert(unsafe ((*a).list(ms))[j as usize], iid); j = j + 1; }
+                for j in 0..ms.len { self.enum_of_variant.insert(unsafe ((*a).list(ms))[j as usize], iid); }
             }
-            i = i + 1;
         }
     }
 
@@ -556,14 +554,12 @@ extend Codegen {
         if fn2.kind != NodeKind::NODE_FUNCTION_TYPE { self.render_iface_stem(m, decl, out, cap); return; }
         let mut at = bappend(out, cap, 0, "dynfn".ptr() as *const char);
         let ftp = fn2.as_data.function_type;
-        let mut i: u32 = 0;
-        while i < ftp.params.len {
+        for i in 0..ftp.params.len {
             let pid = unsafe ((*da).list(ftp.params))[i as usize];
             let mut e = Buf256 {};
             self.mangle_type(unsafe (*self.cur_ast()).reintern(unsafe (&*da), unsafe (*da).type_of(pid)), (&mut e.b[0]) as *mut char, 176);
             at = bappend(out, cap, at, "__".ptr() as *const char);
             at = bappend(out, cap, at, (&e.b[0]) as *const char);
-            i = i + 1;
         }
         if ftp.returns.len == 1 {
             let r0 = unsafe ((*da).list(ftp.returns))[0];
@@ -584,13 +580,11 @@ extend Codegen {
     }
     fn spec_name(self: &Self, fn2: DefId, args: *const TypeId, n: i32, out: *mut char, cap: usize) void {
         let mut at = self.render_qualified(fn2.module, unsafe (*self.mod_ast(fn2.module)).at_const(fn2.node).as_data.function.name, out, cap);
-        let mut i: i32 = 0;
-        while i < n {
+        for i in 0..n {
             at = bappend(out, cap, at, "__".ptr() as *const char);
             let mut e = Buf256 {};
             self.mangle_type(unsafe args[i as usize], (&mut e.b[0]) as *mut char, 176);
             at = bappend(out, cap, at, (&e.b[0]) as *const char);
-            i = i + 1;
         }
     }
     fn render_macro_param(self: &Self, m: ModuleId, decl: NodeId, buf: *mut char, cap: usize) usize {
@@ -623,12 +617,10 @@ extend Codegen {
         let sa = self.mod_ast(self.macro_self_mod);
         let gens = unsafe (*sa).at_const(self.macro_self).as_data.aggregate.generics;
         if gens.len != (it.n as u32) { return false; }
-        let mut i: u8 = 0;
-        while i < it.n {
+        for i in 0..it.n {
             let gid = unsafe ((*sa).list(gens))[i as usize];
             let y = self.type_at(it.args[i as usize]);
             if y.kind != TypeKind::TYPE_GENERIC || y.as_data.decl != gid || y.module != self.macro_self_mod { return false; }
-            i = i + 1;
         }
         return true;
     }
@@ -640,8 +632,7 @@ extend Codegen {
         let mut sentbuf = Buf256 {};
         unsafe sentbuf.b[0] = CG_PASTE;
         let sent = (&sentbuf.b[0]) as *const char;
-        let mut i: u8 = 0;
-        while i < it.n {
+        for i in 0..it.n {
             if self.macro_mode {
                 if i != 0 { at = bappend(out, cap, at, sent); }
                 else { at = bappend(out, cap, at, "__".ptr() as *const char); }
@@ -657,14 +648,12 @@ extend Codegen {
                 self.mangle_type(self.subst_resolve(it.args[i as usize]), (&mut e.b[0]) as *mut char, 176);
                 at = bappend(out, cap, at, (&e.b[0]) as *const char);
             }
-            i = i + 1;
         }
     }
 
     // ---- monomorphization substitution ----
     fn subst_lookup(self: &Self, m: ModuleId, decl: NodeId) TypeId {
-        let mut i: i32 = 0;
-        while i < self.nsubst { if self.subst[i as usize].param.module == m && self.subst[i as usize].param.node == decl { return self.subst[i as usize].concrete; } i = i + 1; }
+        for i in 0..self.nsubst { if self.subst[i as usize].param.module == m && self.subst[i as usize].param.node == decl { return self.subst[i as usize].concrete; } }
         return TYPE_NONE;
     }
     fn subst_resolve(self: &Self, t: TypeId) TypeId {
@@ -686,8 +675,7 @@ extend Codegen {
             let src = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
             let mut na = TyArgs4 {};
             let mut changed = false;
-            let mut i: u8 = 0;
-            while i < src.n { na.t[i as usize] = self.subst_resolve(src.args[i as usize]); if na.t[i as usize] != src.args[i as usize] { changed = true; } i = i + 1; }
+            for i in 0..src.n { na.t[i as usize] = self.subst_resolve(src.args[i as usize]); if na.t[i as usize] != src.args[i as usize] { changed = true; } }
             if changed { return unsafe (*self.cur_ast()).intern_instance(src.module, src.decl, (&na.t[0]) as *const TypeId, src.n); }
             return t;
         }
@@ -716,8 +704,7 @@ extend Codegen {
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY { return self.type_is_concrete(y.as_data.elem); }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
-            let mut i: u8 = 0;
-            while i < it.n { if !self.type_is_concrete(it.args[i as usize]) { return false; } i = i + 1; }
+            for i in 0..it.n { if !self.type_is_concrete(it.args[i as usize]) { return false; } }
             return true;
         }
         return true;
@@ -743,29 +730,25 @@ extend Codegen {
         return fn2;
     }
     fn record_inst(self: &mut Self, fn2: DefId, args: *const TypeId, n: i32, site: NodeId) void {
-        let mut i: i32 = 0;
-        while i < self.ninsts {
+        for i in 0..self.ninsts {
             if self.insts[i as usize].func.module == fn2.module && self.insts[i as usize].func.node == fn2.node && (self.insts[i as usize].n as i32) == n {
                 let mut same = true;
-                let mut j: i32 = 0;
-                while j < n { if self.insts[i as usize].args[j as usize] != unsafe args[j as usize] { same = false; } j = j + 1; }
+                for j in 0..n { if self.insts[i as usize].args[j as usize] != unsafe args[j as usize] { same = false; } }
                 if same { return; }
             }
-            i = i + 1;
         }
         if self.ninsts >= 1024 {
             if !self.insts_overflow {
                 self.insts_overflow = true;
                 let sp = unsafe (*self.cur_ast()).at_const(site).span;
-                self.errors.emitf(sp.start, sp.end - sp.start, "codegen: too many distinct generic instantiations in one module (max %d)".ptr() as *const char, 1024);
+                self.errors.emit(sp.start, sp.end - sp.start, format("codegen: too many distinct generic instantiations in one module (max {})", 1024));
             }
             return;
         }
         let k = self.ninsts;
         self.insts[k as usize].func = fn2;
         self.insts[k as usize].n = n as u8;
-        let mut j: i32 = 0;
-        while j < n { self.insts[k as usize].args[j as usize] = unsafe args[j as usize]; j = j + 1; }
+        for j in 0..n { self.insts[k as usize].args[j as usize] = unsafe args[j as usize]; }
         self.ninsts = k + 1;
     }
     fn collect_insts(self: &mut Self) void {
@@ -783,15 +766,13 @@ extend Codegen {
         self.expand_nested_insts();
     }
     fn expand_nested_insts(self: &mut Self) void {
-        let mut i: i32 = 0;
-        while i < self.ninsts {
+        for i in 0..self.ninsts {
             let fn2 = self.insts[i as usize].func;
             let fn_n = self.insts[i as usize].n;
             let mut fargs = TyArgs4 {};
-            let mut k: u8 = 0;
-            while k < fn_n { fargs.t[k as usize] = self.insts[i as usize].args[k as usize]; k = k + 1; }
+            for k in 0..fn_n { fargs.t[k as usize] = self.insts[i as usize].args[k as usize]; }
             let foreign = fn2.module != self.cur_module();
-            if foreign && (self.package == null || (fn2.module as usize) >= self.pkg_count()) { i = i + 1; continue; }
+            if foreign && (self.package == null || (fn2.module as usize) >= self.pkg_count()) { continue; }
             let home = self.ast;
             let hsrc = self.source;
             let hlen = self.len;
@@ -799,12 +780,11 @@ extend Codegen {
             if foreign {
                 let owner = self.mod_ast(fn2.module);
                 self.source = self.mod_src(fn2.module);
-                self.len = unsafe (*self.package).modules.at(fn2.module as usize).source_len;
+                self.len = unsafe (*self.package).modules[fn2.module as usize].source_len;
                 self.borrowed = true;
                 oninst = unsafe (*owner).instances.len();
                 self.ast = owner;
-                let mut kk: u8 = 0;
-                while kk < fn_n { fargs.t[kk as usize] = unsafe (*self.cur_ast()).reintern(unsafe (&*home), fargs.t[kk as usize]); kk = kk + 1; }
+                for kk in 0..fn_n { fargs.t[kk as usize] = unsafe (*self.cur_ast()).reintern(unsafe (&*home), fargs.t[kk as usize]); }
             }
             let fnn = unsafe (*self.cur_ast()).at_const(fn2.node);
             let fsp = fnn.span;
@@ -828,12 +808,10 @@ extend Codegen {
                 let g2 = self.generic_call_target(nid, (&mut args.t[0]) as *mut TypeId, (&mut n) as *mut i32);
                 if g2.node == NODE_NONE { nid = nid + 1; continue; }
                 let mut concrete = true;
-                let mut kk: i32 = 0;
-                while kk < n {
+                for kk in 0..n {
                     args.t[kk as usize] = self.subst_resolve(args.t[kk as usize]);
                     if !self.type_is_concrete(args.t[kk as usize]) { concrete = false; }
                     if foreign { args.t[kk as usize] = unsafe (*home).reintern(unsafe (&*self.cur_ast()), args.t[kk as usize]); }
-                    kk = kk + 1;
                 }
                 if concrete { self.record_inst(g2, (&args.t[0]) as *const TypeId, n, nid); }
                 nid = nid + 1;
@@ -846,7 +824,6 @@ extend Codegen {
                 self.source = hsrc;
                 self.len = hlen;
             }
-            i = i + 1;
         }
     }
 }
@@ -855,15 +832,13 @@ extend Codegen {
     fn cg_alias_extended(self: &Self, m: ModuleId, aliasDecl: NodeId) bool {
         let a = self.mod_ast(m);
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let iid = unsafe ((*a).list(items))[i as usize];
             let it = unsafe (*a).at_const(iid);
             if it.kind == NodeKind::NODE_EXTEND && it.as_data.extend_def.target_type != NODE_NONE {
                 let tg = unsafe (*a).resolution_def(it.as_data.extend_def.target_type);
                 if tg.module == m && tg.node == aliasDecl { return true; }
             }
-            i = i + 1;
         }
         return false;
     }
@@ -915,8 +890,8 @@ extend Codegen {
                         buf_join3(out, cap, (&p.b[0]) as *const char, sep(decl), decl);
                     } else { buf_join3(out, cap, "void".ptr() as *const char, sep(decl), decl); }
                 } else {
-                    self.errors.emitf(n.span.start, n.span.end - n.span.start, "codegen: opaque type is not yet supported".ptr() as *const char);
-                    self.errors.notef("opaque extern types are supported through 'extern \"C\" { type Name; }' aliases".ptr() as *const char);
+                    self.errors.emit(n.span.start, n.span.end - n.span.start, format("codegen: opaque type is not yet supported"));
+                    self.errors.note(format("{}", "opaque extern types are supported through 'extern \"C\" { type Name; }' aliases"));
                     buf_join3(out, cap, "void".ptr() as *const char, sep(decl), decl);
                 }
                 return;
@@ -929,7 +904,7 @@ extend Codegen {
             let b = builtin_of(self.source, s);
             if b >= 0 { buf_join3(out, cap, builtin_c(b as BuiltinType), sep(decl), decl); }
             else {
-                self.errors.emitf(s.start, s.end - s.start, "codegen: unresolved type '%.*s'".ptr() as *const char, (s.end - s.start) as i32, src_at(self.source, s.start));
+                self.errors.emit(s.start, s.end - s.start, format("codegen: unresolved type '{}'", diag::span_str(self.source, s.start, s.end)));
                 buf_join3(out, cap, "void".ptr() as *const char, sep(decl), decl);
             }
             return;
@@ -1030,12 +1005,12 @@ extend Codegen {
             } else if ft.returns.len == 0 {
                 buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner.b[0]) as *const char);
             } else {
-                self.errors.emitf(n.span.start, n.span.end - n.span.start, "codegen: multi-return function pointer is not yet supported".ptr() as *const char);
+                self.errors.emit(n.span.start, n.span.end - n.span.start, format("codegen: multi-return function pointer is not yet supported"));
                 buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner.b[0]) as *const char);
             }
             return;
         }
-        self.errors.emitf(n.span.start, n.span.end - n.span.start, "codegen: unsupported type".ptr() as *const char);
+        self.errors.emit(n.span.start, n.span.end - n.span.start, format("codegen: unsupported type"));
         buf_join3(out, cap, "void".ptr() as *const char, sep(decl), decl);
     }
 
@@ -1193,15 +1168,12 @@ extend Codegen {
         if m == self.cur_module() && !self.borrowed { return self.enclosing_enum(variant); }
         let a = self.mod_ast(m);
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let iid = unsafe ((*a).list(items))[i as usize];
             if unsafe (*a).at_const(iid).kind == NodeKind::NODE_ENUM {
                 let ms = unsafe (*a).at_const(iid).as_data.aggregate.members;
-                let mut j: u32 = 0;
-                while j < ms.len { if unsafe ((*a).list(ms))[j as usize] == variant { return iid; } j = j + 1; }
+                for j in 0..ms.len { if unsafe ((*a).list(ms))[j as usize] == variant { return iid; } }
             }
-            i = i + 1;
         }
         return NODE_NONE;
     }
@@ -1223,10 +1195,8 @@ extend Codegen {
     fn aggregate_has_payload_in(self: &Self, m: ModuleId, enum_decl: NodeId) bool {
         let a = self.mod_ast(m);
         let members = unsafe (*a).at_const(enum_decl).as_data.aggregate.members;
-        let mut i: u32 = 0;
-        while i < members.len {
+        for i in 0..members.len {
             if unsafe (*a).at_const(unsafe ((*a).list(members))[i as usize]).as_data.variant.payload.len > 0 { return true; }
-            i = i + 1;
         }
         return false;
     }
@@ -1261,14 +1231,12 @@ extend Codegen {
         if fnn.kind != NodeKind::NODE_CLOSURE { return false; }
         let caps = fnn.as_data.closure.captures;
         let mut_caps = fnn.as_data.closure.mut_caps;
-        let mut i: u32 = 0;
-        while i < caps.len {
+        for i in 0..caps.len {
             let cid = unsafe ((*fa).list(caps))[i as usize];
             if ((mut_caps >> (i as u64)) & 1u64) == 0 {
                 let rt = unsafe (*self.cur_ast()).reintern(unsafe (&*fa), unsafe (*fa).type_of(cid));
                 if self.cg_type_is_free(rt) { return true; }
             }
-            i = i + 1;
         }
         return false;
     }
@@ -1277,8 +1245,8 @@ extend Codegen {
         let ty = self.type_at(tid);
         if ty.kind != TypeKind::TYPE_INSTANCE { return false; }
         let it = *unsafe (*self.cur_ast()).instance(ty.as_data.inst);
-        let sh = unsafe (*self.package).prelude_lookup("Slice".ptr() as *const char, 5, true);
-        let mh = unsafe (*self.package).prelude_lookup("SliceMut".ptr() as *const char, 8, true);
+        let sh = unsafe (*self.package).prelude_lookup("Slice", true);
+        let mh = unsafe (*self.package).prelude_lookup("SliceMut", true);
         let is_slice = (it.module == sh.mid && it.decl == sh.node) || (it.module == mh.mid && it.decl == mh.node);
         if is_slice && it.n == 1 && elem != null { unsafe *elem = it.args[0]; }
         return is_slice && it.n == 1;
@@ -1288,7 +1256,7 @@ extend Codegen {
         let ty = self.type_at(tid);
         if ty.kind != TypeKind::TYPE_INSTANCE { return false; }
         let it = *unsafe (*self.cur_ast()).instance(ty.as_data.inst);
-        let rh = unsafe (*self.package).prelude_lookup("Range".ptr() as *const char, 5, true);
+        let rh = unsafe (*self.package).prelude_lookup("Range", true);
         let is_range = it.n == 1 && it.module == rh.mid && it.decl == rh.node;
         if is_range && elem != null { unsafe *elem = it.args[0]; }
         return is_range;
@@ -1296,14 +1264,12 @@ extend Codegen {
     fn cg_free_extend(self: &Self, tmod: ModuleId, tdecl: NodeId) DefId {
         let mut ns = 1;
         if tmod != self.cur_module() { ns = 2; }
-        let mut s = 0;
-        while s < ns {
+        for s in 0..ns {
             let mut m = tmod;
             if s == 1 { m = self.cur_module(); }
             let a = self.mod_ast(m);
             let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            let mut i: u32 = 0;
-            while i < items.len {
+            for i in 0..items.len {
                 let iid = unsafe ((*a).list(items))[i as usize];
                 let it = unsafe (*a).at_const(iid);
                 if it.kind == NodeKind::NODE_EXTEND && it.as_data.extend_def.interface_type != NODE_NONE && it.as_data.extend_def.target_type != NODE_NONE {
@@ -1318,9 +1284,7 @@ extend Codegen {
                         }
                     }
                 }
-                i = i + 1;
             }
-            s = s + 1;
         }
         return DefId { module: 0, node: NODE_NONE };
     }
@@ -1329,26 +1293,22 @@ extend Codegen {
         if ext.node == NODE_NONE { return DefId { module: 0, node: NODE_NONE }; }
         let a = self.mod_ast(ext.module);
         let ms = unsafe (*a).at_const(ext.node).as_data.extend_def.items;
-        let mut j: u32 = 0;
-        while j < ms.len {
+        for j in 0..ms.len {
             let mid = unsafe ((*a).list(ms))[j as usize];
             let mn = unsafe (*a).at_const(mid);
             if mn.kind == NodeKind::NODE_FUNCTION && span_is(self.mod_src(ext.module), unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text, "free".ptr() as *const char) { return DefId { module: ext.module, node: mid }; }
-            j = j + 1;
         }
         return DefId { module: 0, node: NODE_NONE };
     }
     fn cg_param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
         let a = self.mod_ast(m);
         let bs = unsafe (*a).at_const(gp).as_data.generic_param.bounds;
-        let mut i: u32 = 0;
-        while i < bs.len {
+        for i in 0..bs.len {
             let bd = unsafe (*a).resolution_def(unsafe ((*a).list(bs))[i as usize]);
             if bd.node != NODE_NONE {
                 let bn = unsafe (*self.mod_ast(bd.module)).at_const(bd.node);
                 if bn.kind == NodeKind::NODE_INTERFACE && span_is(self.mod_src(bd.module), unsafe (*self.mod_ast(bd.module)).at_const(bn.as_data.interface_def.name).as_data.name.text, "Free".ptr() as *const char) { return true; }
             }
-            i = i + 1;
         }
         return false;
     }
@@ -1372,18 +1332,15 @@ extend Codegen {
         return true;
     }
     fn cg_is_moved(self: &Self, decl: NodeId) bool {
-        let mut i: u32 = 0;
-        while i < self.nmoved { if self.moved[i as usize] == decl { return true; } i = i + 1; }
+        for i in 0..self.nmoved { if self.moved[i as usize] == decl { return true; } }
         return false;
     }
     fn cg_is_cond_moved(self: &Self, decl: NodeId) bool {
-        let mut i: u32 = 0;
-        while i < self.ncond_moved { if self.cond_moved[i as usize] == decl { return true; } i = i + 1; }
+        for i in 0..self.ncond_moved { if self.cond_moved[i as usize] == decl { return true; } }
         return false;
     }
     fn cg_is_cond_site(self: &Self, expr: NodeId) bool {
-        let mut i: u32 = 0;
-        while i < self.ncond_sites { if self.cond_sites[i as usize] == expr { return true; } i = i + 1; }
+        for i in 0..self.ncond_sites { if self.cond_sites[i as usize] == expr { return true; } }
         return false;
     }
 
@@ -1394,21 +1351,18 @@ extend Codegen {
         scopes.s[0] = tmod; ns = 1;
         if self.cur_module() != tmod { scopes.s[ns as usize] = self.cur_module(); ns = ns + 1; }
         if self.dflt_home_set && self.dflt_home != tmod && self.dflt_home != self.cur_module() { scopes.s[ns as usize] = self.dflt_home; ns = ns + 1; }
-        let mut s: i32 = 0;
-        while s < ns {
+        for s in 0..ns {
             let m = scopes.s[s as usize];
             let a = self.mod_ast(m);
             let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            let mut i: u32 = 0;
-            while i < items.len {
+            for i in 0..items.len {
                 let iid = unsafe ((*a).list(items))[i as usize];
                 let it = unsafe (*a).at_const(iid);
                 if it.kind == NodeKind::NODE_EXTEND && it.as_data.extend_def.target_type != NODE_NONE {
                     let tg = unsafe (*a).resolution_def(it.as_data.extend_def.target_type);
                     if tg.module == tmod && tg.node == tdecl {
                         let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
-                        let mut j: u32 = 0;
-                        while j < ms.len {
+                        for j in 0..ms.len {
                             let mid = unsafe ((*a).list(ms))[j as usize];
                             let mn = unsafe (*a).at_const(mid);
                             if mn.kind == NodeKind::NODE_FUNCTION {
@@ -1418,13 +1372,10 @@ extend Codegen {
                                 else { hit = spans_eq2(nsrc, name, self.mod_src(m), mname); }
                                 if hit { return DefId { module: m, node: mid }; }
                             }
-                            j = j + 1;
                         }
                     }
                 }
-                i = i + 1;
             }
-            s = s + 1;
         }
         return DefId { module: 0, node: NODE_NONE };
     }
@@ -1617,8 +1568,7 @@ extend Codegen {
                 else {
                     let mut b = Bytes4 {};
                     let bn = utf8_encode(cp, (&mut b.b[0]) as *mut u8);
-                    let mut kk: i32 = 0;
-                    while kk < bn { self.emit("\\%03o".ptr() as *const char, b.b[kk as usize] as u32); kk = kk + 1; }
+                    for kk in 0..bn { self.emit("\\%03o".ptr() as *const char, b.b[kk as usize] as u32); }
                 }
             } else {
                 self.emit("\\%c".ptr() as *const char, e as i32);
@@ -1651,7 +1601,7 @@ extend Codegen {
         let callee = unsafe (*self.cur_ast()).at_const(id).as_data.call.callee;
         if unsafe (*self.cur_ast()).at_const(callee).kind != NodeKind::NODE_IDENTIFIER { return false; }
         let d = unsafe (*self.cur_ast()).resolution_def(callee);
-        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() || !unsafe (*self.package).modules.at(d.module as usize).prelude { return false; }
+        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() || !unsafe (*self.package).modules[d.module as usize].prelude { return false; }
         if unsafe (*self.mod_ast(d.module)).at_const(d.node).kind != NodeKind::NODE_FUNCTION { return false; }
         let fnamenode = unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function.name;
         let fnm = unsafe (*self.mod_ast(d.module)).at_const(fnamenode).as_data.name.text;
@@ -1677,8 +1627,8 @@ extend Codegen {
         }
         if !ok_lit {
             let sspan = unsafe (*self.cur_ast()).at_const(id).span;
-            self.errors.emitf(sspan.start, sspan.end - sspan.start, "%s".ptr() as *const char, "codegen: format string must be a string literal".ptr() as *const char);
-            self.errors.notef("format strings are parsed at compile time so placeholders can be checked".ptr() as *const char);
+            self.errors.emit(sspan.start, sspan.end - sspan.start, format("{}", "codegen: format string must be a string literal"));
+            self.errors.note(format("format strings are parsed at compile time so placeholders can be checked"));
             return true;
         }
         let mut ff = Buf32 {};
@@ -1736,8 +1686,8 @@ extend Codegen {
                     if i > seg { self.emit_fmt_seg(fp, is_raw, seg, i); }
                     if ai >= args.len {
                         let sspan = unsafe (*self.cur_ast()).at_const(id).span;
-                        self.errors.emitf(sspan.start, sspan.end - sspan.start, "%s".ptr() as *const char, "codegen: more `{}` placeholders than arguments".ptr() as *const char);
-                        self.errors.notef("add an argument for each placeholder or escape literal braces as '{{' and '}}'".ptr() as *const char);
+                        self.errors.emit(sspan.start, sspan.end - sspan.start, format("{}", "codegen: more `{}` placeholders than arguments"));
+                        self.errors.note(format("{}", "add an argument for each placeholder or escape literal braces as '{{' and '}}'"));
                         self.emit("%s; })".ptr() as *const char, fp);
                         return true;
                     }
@@ -1745,8 +1695,8 @@ extend Codegen {
                     if !self.emit_format_arg(fp, argid, &sp) {
                         let aspan = unsafe (*self.cur_ast()).at_const(argid).span;
                         let msg = if (sp.ty != 0 as char) { "codegen: `{:x}`/`{:X}`/`{:b}` formats require an integer argument".ptr() as *const char; } else if (sp.prec >= 0) { "codegen: `{:.N}` precision requires a float argument".ptr() as *const char; } else { "codegen: argument is not directly formattable (call its .fmt())".ptr() as *const char; };
-                        self.errors.emitf(aspan.start, aspan.end - aspan.start, "%s".ptr() as *const char, msg);
-                        if sp.ty == 0 as char && sp.prec < 0 { self.errors.notef("implement Format for this type or pass a value that already formats directly".ptr() as *const char); }
+                        self.errors.emit(aspan.start, aspan.end - aspan.start, format("{}", diag::cstr(msg)));
+                        if sp.ty == 0 as char && sp.prec < 0 { self.errors.note(format("implement Format for this type or pass a value that already formats directly")); }
                     }
                     ai = ai + 1;
                     i = j + 1;
@@ -1759,8 +1709,8 @@ extend Codegen {
         if endc > seg { self.emit_fmt_seg(fp, is_raw, seg, endc); }
         if ai < args.len {
             let sspan = unsafe (*self.cur_ast()).at_const(id).span;
-            self.errors.emitf(sspan.start, sspan.end - sspan.start, "%s".ptr() as *const char, "codegen: more arguments than `{}` placeholders".ptr() as *const char);
-            self.errors.notef("remove the extra argument or add a matching '{}' placeholder".ptr() as *const char);
+            self.errors.emit(sspan.start, sspan.end - sspan.start, format("{}", "codegen: more arguments than `{}` placeholders"));
+            self.errors.note(format("{}", "remove the extra argument or add a matching '{}' placeholder"));
         }
         if kind == 3 || kind == 5 { self.emit("String__Global__push_byte(&%s, 10);\n".ptr() as *const char, fp); }
         if kind == 1 {
@@ -1874,8 +1824,7 @@ extend Codegen {
         self.depth = self.depth - 1;
         self.emit_indent();
         self.emit_cstr("}".ptr() as *const char);
-        let mut i: i32 = 0;
-        while i < 2 {
+        for i in 0..2 {
             let ai = if (i == 0) { a0; } else { a1; };
             if !self.is_lvalue(ai) && depth == 0 && self.cg_type_is_free(base) {
                 self.emit_cstr(" ".ptr() as *const char);
@@ -1883,7 +1832,6 @@ extend Codegen {
                 let nmp = if (i == 0) { lp; } else { rp; };
                 self.emit("(&%s);".ptr() as *const char, nmp);
             }
-            i = i + 1;
         }
         self.emit_cstr(" })".ptr() as *const char);
         return true;
@@ -1926,14 +1874,12 @@ extend Codegen {
         let ps = unsafe (*self.cur_ast()).at_const(fnNode).as_data.function.params;
         let pids = unsafe (*self.cur_ast()).list(ps);
         let mut found: i32 = -1;
-        let mut i: u32 = 0;
-        while i < ps.len {
+        for i in 0..ps.len {
             let tn = unsafe (*self.cur_ast()).at_const(unsafe pids[i as usize]).as_data.parameter.ty;
             if tn != NODE_NONE && unsafe (*self.cur_ast()).at_const(tn).kind == NodeKind::NODE_FUNCTION_TYPE {
                 if found >= 0 { return false; }
                 found = i as i32;
             }
-            i = i + 1;
         }
         if found < 0 { return false; }
         unsafe (*cbidx) = found as u32;
@@ -1962,11 +1908,9 @@ extend Codegen {
         return uses == callees;
     }
     fn cb_record(self: &mut Self, fn2: DefId, param: NodeId, cbidx: u32, callee: DefId, is_closure: bool) void {
-        let mut i: i32 = 0;
-        while i < self.n_cb_insts {
+        for i in 0..self.n_cb_insts {
             let ci = self.cb_insts[i as usize];
             if ci.func.node == fn2.node && ci.func.module == fn2.module && ci.callee.node == callee.node && ci.callee.module == callee.module && ci.callee_closure == is_closure { return; }
-            i = i + 1;
         }
         if self.n_cb_insts >= 256 { return; }
         self.cb_insts[self.n_cb_insts as usize].func = fn2;
@@ -1977,8 +1921,7 @@ extend Codegen {
         self.n_cb_insts = self.n_cb_insts + 1;
     }
     fn cb_keep(self: &mut Self, fn2: NodeId) void {
-        let mut i: i32 = 0;
-        while i < self.n_cb_keep { if self.cb_keep_fns[i as usize] == fn2 { return; } i = i + 1; }
+        for i in 0..self.n_cb_keep { if self.cb_keep_fns[i as usize] == fn2 { return; } }
         if self.n_cb_keep < 128 { self.cb_keep_fns[self.n_cb_keep as usize] = fn2; self.n_cb_keep = self.n_cb_keep + 1; }
     }
     fn cg_decl_name_node(self: &Self, m: ModuleId, decl: NodeId) NodeId {
@@ -2010,8 +1953,7 @@ extend Codegen {
         self.emit_cstr("(".ptr() as *const char);
     }
     fn emit_call_args(self: &mut Self, args: NodeList) void {
-        let mut i: u32 = 0;
-        while i < args.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); i = i + 1; }
+        for i in 0..args.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); }
     }
     fn emit_call_path(self: &mut Self, id: NodeId, n: Node, callee: Node) bool {
         let args = n.as_data.call.args;
@@ -2188,8 +2130,7 @@ extend Codegen {
                 self.emit_expr(obj);
                 self.emit("; %s.vt->%s(%s.data".ptr() as *const char, (&tmp.b[0]) as *const char, (&mn.b[0]) as *const char, (&tmp.b[0]) as *const char);
             }
-            let mut i: u32 = 0;
-            while i < args.len { self.emit_cstr(", ".ptr() as *const char); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); i = i + 1; }
+            for i in 0..args.len { self.emit_cstr(", ".ptr() as *const char); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); }
             self.emit_cstr(")".ptr() as *const char);
             if !simple { self.emit_cstr("; })".ptr() as *const char); }
             return true;
@@ -2204,6 +2145,8 @@ extend Codegen {
         let mut sk = NodeKind::NODE_NONE_KIND;
         if self_type != NODE_NONE { sk = unsafe (*ma).at_const(self_type).kind; }
         let self_ptr = sk == NodeKind::NODE_POINTER_TYPE || sk == NodeKind::NODE_REFERENCE_TYPE;
+        let mut self_is_mut = false;
+        if self_ptr && self_type != NODE_NONE { self_is_mut = unsafe (*ma).at_const(self_type).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT; }
         let obj_ptr = self.type_at(obj_t).kind == TypeKind::TYPE_POINTER || self.type_at(obj_t).kind == TypeKind::TYPE_REFERENCE;
         let materialize = (self_ptr || du != null) && !obj_ptr && !self.is_lvalue(obj);
         let crt = unsafe (*self.cur_ast()).type_of(id);
@@ -2259,7 +2202,7 @@ extend Codegen {
             self.emit_cstr(builtin_name(base.as_data.builtin));
             self.emit_cstr("__".ptr() as *const char);
         } else {
-            self.errors.emitf(n.span.start, n.span.end - n.span.start, "codegen: method receiver is not a struct or enum".ptr() as *const char);
+            self.errors.emit(n.span.start, n.span.end - n.span.start, format("codegen: method receiver is not a struct or enum"));
         }
         self.emit_ident_mod(md.module, unsafe (*ma).at_const(md.node).as_data.function.name);
         self.emit_method_targs(id, md);
@@ -2272,18 +2215,16 @@ extend Codegen {
             if materialize { self.emit("&%s".ptr() as *const char, (&tmp.b[0]) as *const char); }
             else if !obj_ptr { self.emit_prefixed(obj, "&".ptr() as *const char); }
             else { self.emit_expr(obj); }
-            let mut j: u8 = 0;
-            while j < unsafe (*du).n { self.emit_cstr(")".ptr() as *const char); j = j + 1; }
+            for j in 0..unsafe (*du).n { self.emit_cstr(")".ptr() as *const char); }
             wrote = true;
         } else if params.len > 0 {
             if materialize { self.emit("&%s".ptr() as *const char, (&tmp.b[0]) as *const char); }
-            else if self_ptr && !obj_ptr { self.emit_prefixed(obj, "&".ptr() as *const char); }
+            else if self_ptr && !obj_ptr { self.emit_recv_addr(obj, self_is_mut); }
             else if !self_ptr && obj_ptr { self.emit_prefixed(obj, "*".ptr() as *const char); }
             else { self.emit_expr(obj); }
             wrote = true;
         }
-        let mut i: u32 = 0;
-        while i < args.len { if wrote || i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); i = i + 1; }
+        for i in 0..args.len { if wrote || i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); }
         self.emit_cstr(")".ptr() as *const char);
         if materialize {
             if free_tmp {
@@ -2355,8 +2296,7 @@ extend Codegen {
                     let mut tn = Buf256 {};
                     self.render_type_id(self.subst_resolve(unsafe (*self.cur_ast()).type_of(id)), "".ptr() as *const char, (&mut tn.b[0]) as *mut char, 200);
                     self.emit("(%s){ ".ptr() as *const char, (&tn.b[0]) as *const char);
-                    let mut i: u32 = 0;
-                    while i < args.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit("._%u = ".ptr() as *const char, i); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); i = i + 1; }
+                    for i in 0..args.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit("._%u = ".ptr() as *const char, i); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); }
                     if args.len != 0 { self.emit_cstr(" }".ptr() as *const char); } else { self.emit_cstr("0 }".ptr() as *const char); }
                     return;
                 }
@@ -2379,8 +2319,7 @@ extend Codegen {
         // callback specialization: call site with known callback
         if callee.kind == NodeKind::NODE_IDENTIFIER {
             let fn2 = unsafe (*self.cur_ast()).resolution_def(callee_id);
-            let mut k: i32 = 0;
-            while k < self.n_cb_insts {
+            for k in 0..self.n_cb_insts {
                 if self.cb_insts[k as usize].func.node == fn2.node && self.cb_insts[k as usize].func.module == fn2.module {
                     let cbidx = self.cb_insts[k as usize].cbidx;
                     let mut ac = DefId { module: 0, node: NODE_NONE };
@@ -2393,13 +2332,11 @@ extend Codegen {
                         self.emit_cstr((&nm.b[0]) as *const char);
                         self.emit_cstr("(".ptr() as *const char);
                         let mut wrote = false;
-                        let mut i: u32 = 0;
-                        while i < args.len { if i != cbidx { if wrote { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); wrote = true; } i = i + 1; }
+                        for i in 0..args.len { if i != cbidx { if wrote { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); wrote = true; } }
                         self.emit_cstr(")".ptr() as *const char);
                         return;
                     }
                 }
-                k = k + 1;
             }
         }
         // call through a dyn-fn / capturing-closure value
@@ -2422,8 +2359,7 @@ extend Codegen {
                     self.emit_expr(callee_id);
                     self.emit("; %s.vt->call(%s.data".ptr() as *const char, (&tmp.b[0]) as *const char, (&tmp.b[0]) as *const char);
                 }
-                let mut i: u32 = 0;
-                while i < args.len { self.emit_cstr(", ".ptr() as *const char); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); i = i + 1; }
+                for i in 0..args.len { self.emit_cstr(", ".ptr() as *const char); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); }
                 self.emit_cstr(")".ptr() as *const char);
                 if !simple { self.emit_cstr("; })".ptr() as *const char); }
                 return;
@@ -2434,8 +2370,7 @@ extend Codegen {
                 self.emit("%s(&(".ptr() as *const char, (&sym.b[0]) as *const char);
                 self.emit_expr(callee_id);
                 self.emit_cstr(")".ptr() as *const char);
-                let mut i: u32 = 0;
-                while i < args.len { self.emit_cstr(", ".ptr() as *const char); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); i = i + 1; }
+                for i in 0..args.len { self.emit_cstr(", ".ptr() as *const char); self.emit_expr(unsafe ((*self.cur_ast()).list(args))[i as usize]); }
                 self.emit_cstr(")".ptr() as *const char);
                 return;
             }
@@ -2445,8 +2380,7 @@ extend Codegen {
         let mut gn: i32 = 0;
         let g = self.generic_call_target(id, (&mut ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32);
         if g.node != NODE_NONE {
-            let mut k: i32 = 0;
-            while k < gn { ga.t[k as usize] = self.subst_resolve(ga.t[k as usize]); k = k + 1; }
+            for k in 0..gn { ga.t[k as usize] = self.subst_resolve(ga.t[k as usize]); }
             let mut nm = Buf256 {};
             self.spec_name(g, (&ga.t[0]) as *const TypeId, gn, (&mut nm.b[0]) as *mut char, 256);
             self.emit_cstr((&nm.b[0]) as *const char);
@@ -2479,14 +2413,12 @@ extend Codegen {
                     self.emit("(%s){ .tag = ".ptr() as *const char, (&t.b[0]) as *const char);
                     if en != NODE_NONE { self.emit_tag_mod(vd.module, en, vd.node); } else { self.emit_cstr("0".ptr() as *const char); }
                     self.emit(", .payload.%s = {".ptr() as *const char, (&vn.b[0]) as *const char);
-                    let mut i: u32 = 0;
-                    while i < fields.len {
+                    for i in 0..fields.len {
                         let fi = unsafe (*self.cur_ast()).at_const(unsafe ((*self.cur_ast()).list(fields))[i as usize]).as_data.field_initializer;
                         if i != 0 { self.emit_cstr(", .".ptr() as *const char); } else { self.emit_cstr(" .".ptr() as *const char); }
                         self.emit_ident(self.name_span(fi.name));
                         self.emit_cstr(" = ".ptr() as *const char);
                         if unsafe (*self.cur_ast()).at_const(fi.value).kind == NodeKind::NODE_ARRAY_LITERAL { self.emit_array_braces(fi.value); } else { self.emit_expr(fi.value); }
-                        i = i + 1;
                     }
                     if fields.len != 0 { self.emit_cstr(" } }".ptr() as *const char); } else { self.emit_cstr("0 } }".ptr() as *const char); }
                     return;
@@ -2685,10 +2617,9 @@ extend Codegen {
                 if nameK == NodeKind::NODE_PATTERN_TUPLE {
                     self.emit_tuple_let(id);
                     let children = unsafe (*self.cur_ast()).at_const(nameN).as_data.pattern.children;
-                    let mut i: u32 = 0;
-                    while i < children.len {
+                    for i in 0..children.len {
                         let eid = unsafe ((*self.cur_ast()).list(children))[i as usize];
-                        if !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(eid)) || self.cg_is_moved(eid) || span_is(self.mod_src(self.cur_module()), self.name_span(eid), "_".ptr() as *const char) { i = i + 1; continue; }
+                        if !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(eid)) || self.cg_is_moved(eid) || span_is(self.mod_src(self.cur_module()), self.name_span(eid), "_".ptr() as *const char) { continue; }
                         if self.cg_is_cond_moved(eid) {
                             let mut fl = Buf32 {};
                             cg_move_flag((&mut fl.b[0]) as *mut char, 32, eid);
@@ -2696,7 +2627,6 @@ extend Codegen {
                             self.emit("bool %s = false;\n".ptr() as *const char, (&fl.b[0]) as *const char);
                         }
                         self.cg_register_auto_free(eid);
-                        i = i + 1;
                     }
                     return;
                 }
@@ -2834,7 +2764,7 @@ extend Codegen {
                 self.emit_cstr("}\n".ptr() as *const char);
             },
             NODE_DEFER => {
-                if self.defer_top >= 256 { self.errors.emitf(n.span.start, n.span.end - n.span.start, "codegen: too many nested 'defer' statements".ptr() as *const char); }
+                if self.defer_top >= 256 { self.errors.emit(n.span.start, n.span.end - n.span.start, format("codegen: too many nested 'defer' statements")); }
                 else { let t = self.defer_top; self.defer_kind[t as usize] = 0; self.defer_stack[t as usize] = n.as_data.single.value; self.defer_top = t + 1; }
             },
             NODE_EXPRESSION_STATEMENT => { self.emit_expr_stmt(n.as_data.single.value); },
@@ -3000,8 +2930,7 @@ extend Codegen {
             return;
         }
         self.emit("return (%s){ ".ptr() as *const char, crp);
-        let mut i: u32 = 0;
-        while i < vals.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(vals))[i as usize]); i = i + 1; }
+        for i in 0..vals.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe ((*self.cur_ast()).list(vals))[i as usize]); }
         self.emit_cstr(" };\n".ptr() as *const char);
     }
     fn cg_loop_body_tail(self: &mut Self, dbase: u32, le: i32) void {
@@ -3060,8 +2989,7 @@ extend Codegen {
             self.emit_expr(fs.iterable);
             self.emit(")[%s];\n".ptr() as *const char, (&idx.b[0]) as *const char);
             let dbase = self.defer_top;
-            let mut i: u32 = 0;
-            while i < stmts.len { self.emit_indent(); self.emit_stmt(unsafe ((*self.cur_ast()).list(stmts))[i as usize]); i = i + 1; }
+            for i in 0..stmts.len { self.emit_indent(); self.emit_stmt(unsafe ((*self.cur_ast()).list(stmts))[i as usize]); }
             self.cg_loop_body_tail(dbase, le);
             self.depth = self.depth - 1;
             self.emit_indent();
@@ -3088,8 +3016,7 @@ extend Codegen {
             self.emit_binding(selem, self.name_span(fs.binding), true);
             self.emit(" = %s.ptr[%s];\n".ptr() as *const char, (&s.b[0]) as *const char, (&idx.b[0]) as *const char);
             let dbase = self.defer_top;
-            let mut i: u32 = 0;
-            while i < stmts.len { self.emit_indent(); self.emit_stmt(unsafe ((*self.cur_ast()).list(stmts))[i as usize]); i = i + 1; }
+            for i in 0..stmts.len { self.emit_indent(); self.emit_stmt(unsafe ((*self.cur_ast()).list(stmts))[i as usize]); }
             self.cg_loop_body_tail(dbase, le);
             self.depth = self.depth - 1;
             self.emit_indent();
@@ -3120,8 +3047,7 @@ extend Codegen {
             self.emit(" = %s.start; %s.inclusive ? %s <= %s.end : %s < %s.end; %s++) {\n".ptr() as *const char, (&rr.b[0]) as *const char, (&rr.b[0]) as *const char, (&nm.b[0]) as *const char, (&rr.b[0]) as *const char, (&nm.b[0]) as *const char, (&rr.b[0]) as *const char, (&nm.b[0]) as *const char);
             self.depth = self.depth + 1;
             let dbase = self.defer_top;
-            let mut i: u32 = 0;
-            while i < stmts.len { self.emit_indent(); self.emit_stmt(unsafe ((*self.cur_ast()).list(stmts))[i as usize]); i = i + 1; }
+            for i in 0..stmts.len { self.emit_indent(); self.emit_stmt(unsafe ((*self.cur_ast()).list(stmts))[i as usize]); }
             self.cg_loop_body_tail(dbase, le);
             self.depth = self.depth - 1;
             self.emit_indent();
@@ -3221,7 +3147,7 @@ extend Codegen {
             }
         }
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        self.errors.emitf(sp.start, sp.end - sp.start, "codegen: cannot iterate over a non-array/slice value".ptr() as *const char);
+        self.errors.emit(sp.start, sp.end - sp.start, format("codegen: cannot iterate over a non-array/slice value"));
     }
     fn emit_initializer(self: &mut Self, tn: NodeId, val: NodeId) void {
         if unsafe (*self.cur_ast()).at_const(val).kind == NodeKind::NODE_ARRAY_LITERAL && tn != NODE_NONE && unsafe (*self.cur_ast()).at_const(tn).kind == NodeKind::NODE_ARRAY_TYPE { self.emit_array_braces(val); }
@@ -3265,18 +3191,15 @@ extend Codegen {
         if pk == NodeKind::NODE_PATTERN_TUPLE {
             let ch = p.as_data.pattern.children;
             let mut nn: i32 = 0;
-            let mut i: u32 = 0;
-            while i < ch.len { nn = nn + self.cg_arm_frees(unsafe ((*self.cur_ast()).list(ch))[i as usize], do_emit); i = i + 1; }
+            for i in 0..ch.len { nn = nn + self.cg_arm_frees(unsafe ((*self.cur_ast()).list(ch))[i as usize], do_emit); }
             return nn;
         }
         if pk == NodeKind::NODE_PATTERN_STRUCT {
             let ch = p.as_data.pattern.children;
             let mut nn: i32 = 0;
-            let mut i: u32 = 0;
-            while i < ch.len {
+            for i in 0..ch.len {
                 let sub = unsafe (*self.cur_ast()).at_const(unsafe ((*self.cur_ast()).list(ch))[i as usize]).as_data.pattern.children;
                 if sub.len != 0 { nn = nn + self.cg_arm_frees(unsafe ((*self.cur_ast()).list(sub))[0], do_emit); }
-                i = i + 1;
             }
             return nn;
         }
@@ -3429,28 +3352,23 @@ extend Codegen {
         let e = unsafe (*a).at_const(enumDecl);
         if e.kind != NodeKind::NODE_ENUM { return NODE_NONE; }
         let ms = e.as_data.aggregate.members;
-        let mut i: u32 = 0;
-        while i < ms.len {
+        for i in 0..ms.len {
             let vid = unsafe ((*a).list(ms))[i as usize];
             let v = unsafe (*a).at_const(vid);
             if v.kind == NodeKind::NODE_VARIANT && span_is(self.mod_src(m), unsafe (*a).at_const(v.as_data.variant.name).as_data.name.text, lit) { return vid; }
-            i = i + 1;
         }
         return NODE_NONE;
     }
     fn cg_method_extend_target(self: &Self, md: DefId) DefId {
         let a = self.mod_ast(md.module);
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let iid = unsafe ((*a).list(items))[i as usize];
             let it = unsafe (*a).at_const(iid);
             if it.kind == NodeKind::NODE_EXTEND {
                 let ms = it.as_data.extend_def.items;
-                let mut j: u32 = 0;
-                while j < ms.len { if unsafe ((*a).list(ms))[j as usize] == md.node { return unsafe (*a).resolution_def(it.as_data.extend_def.target_type); } j = j + 1; }
+                for j in 0..ms.len { if unsafe ((*a).list(ms))[j as usize] == md.node { return unsafe (*a).resolution_def(it.as_data.extend_def.target_type); } }
             }
-            i = i + 1;
         }
         return DefId { module: 0, node: NODE_NONE };
     }
@@ -3534,11 +3452,9 @@ extend Codegen {
         if nk == NodeKind::NODE_MATCH {
             let arms = unsafe (*self.cur_ast()).at_const(e).as_data.match_expr.arms;
             let ids = unsafe (*self.cur_ast()).list(arms);
-            let mut i: u32 = 0;
-            while i < arms.len {
+            for i in 0..arms.len {
                 let body = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.match_arm.body;
                 self.cg_mark_move_tail(body, true, pass);
-                i = i + 1;
             }
         } else if nk == NodeKind::NODE_IF {
             let tb = unsafe (*self.cur_ast()).at_const(e).as_data.if_stmt.then_branch;
@@ -3567,8 +3483,7 @@ extend Codegen {
         if nk == NodeKind::NODE_BLOCK {
             let ss = unsafe (*self.cur_ast()).at_const(id).as_data.block.statements;
             let ids = unsafe (*self.cur_ast()).list(ss);
-            let mut i: u32 = 0;
-            while i < ss.len { self.cg_scan_moves(unsafe ids[i as usize], cond, pass); i = i + 1; }
+            for i in 0..ss.len { self.cg_scan_moves(unsafe ids[i as usize], cond, pass); }
         } else if nk == NodeKind::NODE_LET {
             let v = unsafe (*self.cur_ast()).at_const(id).as_data.let_stmt.value;
             self.cg_mark_move_tail(v, cond, pass);
@@ -3576,12 +3491,10 @@ extend Codegen {
         } else if nk == NodeKind::NODE_RETURN {
             let vs = unsafe (*self.cur_ast()).at_const(id).as_data.return_stmt.values;
             let ids = unsafe (*self.cur_ast()).list(vs);
-            let mut i: u32 = 0;
-            while i < vs.len {
+            for i in 0..vs.len {
                 let vid = unsafe ids[i as usize];
                 self.cg_mark_move_tail(vid, cond, pass);
                 self.cg_scan_moves(vid, cond, pass);
-                i = i + 1;
             }
         } else if nk == NodeKind::NODE_ASSIGNMENT {
             let l = unsafe (*self.cur_ast()).at_const(id).as_data.binary.left;
@@ -3592,12 +3505,10 @@ extend Codegen {
         } else if nk == NodeKind::NODE_STRUCT_INITIALIZER {
             let fs = unsafe (*self.cur_ast()).at_const(id).as_data.struct_initializer.fields;
             let ids = unsafe (*self.cur_ast()).list(fs);
-            let mut i: u32 = 0;
-            while i < fs.len {
+            for i in 0..fs.len {
                 let v = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.field_initializer.value;
                 self.cg_mark_move_tail(v, cond, pass);
                 self.cg_scan_moves(v, cond, pass);
-                i = i + 1;
             }
         } else if nk == NodeKind::NODE_IF {
             let cnd = unsafe (*self.cur_ast()).at_const(id).as_data.if_stmt.condition;
@@ -3622,11 +3533,9 @@ extend Codegen {
             self.cg_scan_moves(val, cond, pass);
             let arms = unsafe (*self.cur_ast()).at_const(id).as_data.match_expr.arms;
             let ids = unsafe (*self.cur_ast()).list(arms);
-            let mut i: u32 = 0;
-            while i < arms.len {
+            for i in 0..arms.len {
                 let body = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.match_arm.body;
                 self.cg_scan_moves(body, true, pass);
-                i = i + 1;
             }
         } else if nk == NodeKind::NODE_EXPRESSION_STATEMENT || nk == NodeKind::NODE_DEFER {
             self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.single.value, cond, pass);
@@ -3657,32 +3566,27 @@ extend Codegen {
             }
             let args = unsafe (*self.cur_ast()).at_const(id).as_data.call.args;
             let ids = unsafe (*self.cur_ast()).list(args);
-            let mut i: u32 = 0;
-            while i < args.len {
+            for i in 0..args.len {
                 let aid = unsafe ids[i as usize];
                 self.cg_mark_move(aid, cond, pass, true);
                 self.cg_scan_moves(aid, cond, pass);
-                i = i + 1;
             }
         } else if nk == NodeKind::NODE_CLOSURE {
             let caps = unsafe (*self.cur_ast()).at_const(id).as_data.closure.captures;
             let mut_caps = unsafe (*self.cur_ast()).at_const(id).as_data.closure.mut_caps;
             let cids = unsafe (*self.cur_ast()).list(caps);
             let mut site_pushed = false;
-            let mut i: u32 = 0;
-            while i < caps.len {
+            for i in 0..caps.len {
                 let decl = unsafe cids[i as usize];
-                if ((mut_caps >> (i as u64)) & (1 as u64)) != 0 as u64 || !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(decl)) { i = i + 1; continue; }
+                if ((mut_caps >> (i as u64)) & (1 as u64)) != 0 as u64 || !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(decl)) { continue; }
                 let patb = unsafe (*self.cur_ast()).at_const(decl).kind == NodeKind::NODE_PATTERN_NAME;
                 if pass == 0 {
                     if (!cond || patb) && self.nmoved < 512 { self.moved[self.nmoved as usize] = decl; self.nmoved = self.nmoved + 1; }
-                    i = i + 1;
                     continue;
                 }
-                if patb || !cond || self.cg_is_moved(decl) { i = i + 1; continue; }
+                if patb || !cond || self.cg_is_moved(decl) { continue; }
                 if !self.cg_is_cond_moved(decl) && self.ncond_moved < 256 { self.cond_moved[self.ncond_moved as usize] = decl; self.ncond_moved = self.ncond_moved + 1; }
                 if !site_pushed && self.ncond_sites < 256 { self.cond_sites[self.ncond_sites as usize] = id; self.ncond_sites = self.ncond_sites + 1; site_pushed = true; }
-                i = i + 1;
             }
         } else if nk == NodeKind::NODE_BINARY {
             let l = unsafe (*self.cur_ast()).at_const(id).as_data.binary.left;
@@ -3792,7 +3696,7 @@ extend Codegen {
             }
             if bad != null {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
-                self.errors.emitf(sp.start, sp.end - sp.start, "%s".ptr() as *const char, bad);
+                self.errors.emit(sp.start, sp.end - sp.start, format("{}", diag::cstr(bad)));
             }
         }
         if self.const_ctx { return false; }
@@ -3914,7 +3818,7 @@ extend Codegen {
             let mut gtmp = Buf32 {};
             let mut ptmp = Buf32 {};
             self.render_type_id(src, "".ptr() as *const char, (&mut envn.b[0]) as *mut char, 256);
-            let gh = unsafe (*self.package).prelude_lookup("Global".ptr() as *const char, 6, true);
+            let gh = unsafe (*self.package).prelude_lookup("Global", true);
             self.render_qualified(gh.mid, unsafe (*self.mod_ast(gh.mid)).at_const(gh.node).as_data.aggregate.name, (&mut gt.b[0]) as *mut char, 160);
             self.fresh((&mut vtmp.b[0]) as *mut char, 32);
             self.fresh((&mut gtmp.b[0]) as *mut char, 32);
@@ -3989,11 +3893,9 @@ extend Codegen {
     }
     fn cg_attr(self: &Self, m: ModuleId, owner: NodeId, kind: AttrKind) *const Attr {
         let a = self.mod_ast(m);
-        let mut i: usize = 0;
-        while i < unsafe (*a).attrs.len() {
+        for i in 0..unsafe (*a).attrs.len() {
             let at = unsafe (*a).attrs.at(i);
             if at.owner == owner && at.kind == (kind as u8) { return at as *const Attr; }
-            i = i + 1;
         }
         return null;
     }
@@ -4011,8 +3913,7 @@ extend Codegen {
     fn decl_is_toplevel(self: &Self, m: ModuleId, node: NodeId) bool {
         let a = self.mod_ast(m);
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-        let mut i: u32 = 0;
-        while i < items.len { if unsafe ((*a).list(items))[i as usize] == node { return true; } i = i + 1; }
+        for i in 0..items.len { if unsafe ((*a).list(items))[i as usize] == node { return true; } }
         return false;
     }
     fn cg_env_capture(self: &Self, decl: NodeId, is_mut: *mut bool) i32 {
@@ -4020,13 +3921,11 @@ extend Codegen {
         let caps = unsafe (*self.cur_ast()).at_const(self.env_clos).as_data.closure.captures;
         let mut_caps = unsafe (*self.cur_ast()).at_const(self.env_clos).as_data.closure.mut_caps;
         let cids = unsafe (*self.cur_ast()).list(caps);
-        let mut i: u32 = 0;
-        while i < caps.len {
+        for i in 0..caps.len {
             if unsafe cids[i as usize] == decl {
                 unsafe (*is_mut) = ((mut_caps >> (i as u64)) & (1 as u64)) != 0 as u64;
                 return i as i32;
             }
-            i = i + 1;
         }
         return -1;
     }
@@ -4165,7 +4064,7 @@ extend Codegen {
             }
         }
         self.emit_cstr("(".ptr() as *const char);
-        self.emit_expr(bd.left);
+        self.emit_place(bd.left, true);
         self.emit(" %s ".ptr() as *const char, c_op(bd.op));
         self.emit_expr(bd.right);
         self.emit_cstr(")".ptr() as *const char);
@@ -4262,8 +4161,7 @@ extend Codegen {
                 if en != NODE_NONE { self.emit_tag_mod(vd.module, en, vd.node); } else { self.emit_cstr("0".ptr() as *const char); }
                 let mut vn = Buf128 {};
                 self.render_variant_name(vd.module, vd.node, (&mut vn.b[0]) as *mut char, 128);
-                let mut i: u32 = 0;
-                while i < ch.len {
+                for i in 0..ch.len {
                     let cid = unsafe ((*self.cur_ast()).list(ch))[i as usize];
                     if !self.pat_trivial(cid) {
                         let mut sub = Buf256 {};
@@ -4271,7 +4169,6 @@ extend Codegen {
                         self.emit_cstr(" && ".ptr() as *const char);
                         self.emit_pattern_test(cid, (&sub.b[0]) as *const char);
                     }
-                    i = i + 1;
                 }
             } else if ch.len == 1 { self.emit_pattern_test(unsafe ((*self.cur_ast()).list(ch))[0], scrut); }
             else { self.emit_cstr("1".ptr() as *const char); }
@@ -4295,8 +4192,7 @@ extend Codegen {
             } else {
                 unsafe stdio::snprintf((&mut prefix.b[0]) as *mut char, 300, "%s".ptr() as *const char, scrut);
             }
-            let mut i: u32 = 0;
-            while i < ch.len {
+            for i in 0..ch.len {
                 let fid = unsafe ((*self.cur_ast()).list(ch))[i as usize];
                 let f = unsafe (*self.cur_ast()).at_const(fid);
                 let sub = f.as_data.pattern.children;
@@ -4311,19 +4207,16 @@ extend Codegen {
                     self.emit_pattern_test(subpat, (&acc.b[0]) as *const char);
                     wrote = true;
                 }
-                i = i + 1;
             }
             if !wrote { self.emit_cstr("1".ptr() as *const char); }
         }
         else if pk == NodeKind::NODE_PATTERN_OR {
             let alts = p.as_data.pattern.children;
             if alts.len == 0 { self.emit_cstr("1".ptr() as *const char); return; }
-            let mut i: u32 = 0;
-            while i < alts.len {
+            for i in 0..alts.len {
                 if i != 0 { self.emit_cstr(" || (".ptr() as *const char); } else { self.emit_cstr("(".ptr() as *const char); }
                 self.emit_pattern_test(unsafe ((*self.cur_ast()).list(alts))[i as usize], scrut);
                 self.emit_cstr(")".ptr() as *const char);
-                i = i + 1;
             }
         }
         else { self.emit_cstr("1".ptr() as *const char); }
@@ -4362,13 +4255,11 @@ extend Codegen {
             let mut vn = Buf128 {};
             vn.b[0] = 0 as char;
             if vd.node != NODE_NONE && unsafe (*self.mod_ast(vd.module)).at_const(vd.node).kind == NodeKind::NODE_VARIANT { self.render_variant_name(vd.module, vd.node, (&mut vn.b[0]) as *mut char, 128); }
-            let mut i: u32 = 0;
-            while i < ch.len {
+            for i in 0..ch.len {
                 let mut sub = Buf256 {};
                 if vn.b[0] != 0 as char { unsafe stdio::snprintf((&mut sub.b[0]) as *mut char, 256, "%s.payload.%s._%u".ptr() as *const char, scrut, (&vn.b[0]) as *const char, i); }
                 else { unsafe stdio::snprintf((&mut sub.b[0]) as *mut char, 256, "%s".ptr() as *const char, scrut); }
                 self.emit_pattern_binds(unsafe ((*self.cur_ast()).list(ch))[i as usize], (&sub.b[0]) as *const char, by_ref);
-                i = i + 1;
             }
         }
         else if pk == NodeKind::NODE_PATTERN_STRUCT {
@@ -4381,8 +4272,7 @@ extend Codegen {
                 unsafe stdio::snprintf((&mut prefix.b[0]) as *mut char, 300, "%s.payload.%s".ptr() as *const char, scrut, (&vn.b[0]) as *const char);
             } else { unsafe stdio::snprintf((&mut prefix.b[0]) as *mut char, 300, "%s".ptr() as *const char, scrut); }
             let ch = p.as_data.pattern.children;
-            let mut i: u32 = 0;
-            while i < ch.len {
+            for i in 0..ch.len {
                 let fid = unsafe ((*self.cur_ast()).list(ch))[i as usize];
                 let f = unsafe (*self.cur_ast()).at_const(fid);
                 let mut m = Buf128 {};
@@ -4391,7 +4281,6 @@ extend Codegen {
                 unsafe stdio::snprintf((&mut acc.b[0]) as *mut char, 440, "%s.%s".ptr() as *const char, (&prefix.b[0]) as *const char, (&m.b[0]) as *const char);
                 let sub = f.as_data.pattern.children;
                 if sub.len != 0 { self.emit_pattern_binds(unsafe ((*self.cur_ast()).list(sub))[0], (&acc.b[0]) as *const char, by_ref); }
-                i = i + 1;
             }
         }
         else if pk == NodeKind::NODE_PATTERN_OR {
@@ -4399,7 +4288,7 @@ extend Codegen {
             if alts.len != 0 { self.emit_pattern_binds(unsafe ((*self.cur_ast()).list(alts))[0], scrut, by_ref); }
         }
     }
-    fn emit_index(self: &mut Self, id: NodeId) void {
+    fn emit_index(self: &mut Self, id: NodeId, want_mut: bool) void {
         let n = *unsafe (*self.cur_ast()).at_const(id);
         let obj = n.as_data.index.object;
         let idxNode = n.as_data.index.index;
@@ -4424,7 +4313,7 @@ extend Codegen {
                     else { om = bt.module; od = bt.as_data.decl; }
                     let mth = self.cg_find_method_cstr(om, od, "index_range".ptr() as *const char);
                     if mth.node != NODE_NONE {
-                        let rh = unsafe (*self.package).prelude_lookup("Range".ptr() as *const char, 5, true);
+                        let rh = unsafe (*self.package).prelude_lookup("Range", true);
                         let usz = Ast::builtin(BuiltinType::BT_USIZE);
                         let rangeTy = unsafe (*self.cur_ast()).intern_instance(rh.mid, rh.node, (&usz) as *const TypeId, 1);
                         let mut rn = Buf256 {};
@@ -4501,7 +4390,13 @@ extend Codegen {
             let mut od = NODE_NONE;
             if bt.kind == TypeKind::TYPE_INSTANCE { let it = *unsafe (*self.cur_ast()).instance(bt.as_data.inst); om = it.module; od = it.decl; }
             else { om = bt.module; od = bt.as_data.decl; }
-            let mth = self.cg_find_method_cstr(om, od, "index".ptr() as *const char);
+            // A `&mut self` method receiver (or address-of-mut) wants the mutable place, so select
+            // `index_mut` -- `&(*index_mut(v,i))` folds to `index_mut(v,i)` (a mutable element pointer),
+            // avoiding the const `index` that would mutate through a `const T*`. Falls back to `index`.
+            let mut mname = "index".ptr() as *const char;
+            if want_mut { mname = "index_mut".ptr() as *const char; }
+            let mut mth = self.cg_find_method_cstr(om, od, mname);
+            if mth.node == NODE_NONE && want_mut { mth = self.cg_find_method_cstr(om, od, "index".ptr() as *const char); }
             if mth.node != NODE_NONE {
                 let mam = self.mod_ast(mth.module);
                 let mrets = unsafe (*mam).at_const(mth.node).as_data.function.returns;
@@ -4562,7 +4457,7 @@ extend Codegen {
             let mut nconst = licnt >= 0;
             if lenN != NODE_NONE { nconst = self.cg_int_lit(lenN, (&mut nv) as *mut i64); }
             if self.cg_int_lit(idxNode, (&mut iv) as *mut i64) && nconst {
-                if iv < 0 || iv >= nv { let sp = unsafe (*self.cur_ast()).at_const(idxNode).span; self.errors.emitf(sp.start, sp.end - sp.start, "index %ld is out of bounds for an array of length %ld".ptr() as *const char, iv, nv); }
+                if iv < 0 || iv >= nv { let sp = unsafe (*self.cur_ast()).at_const(idxNode).span; self.errors.emit(sp.start, sp.end - sp.start, format("index {} is out of bounds for an array of length {}", iv, nv)); }
                 self.emit_expr(obj);
                 self.emit_cstr("[".ptr() as *const char);
                 self.emit_expr(idxNode);
@@ -4582,7 +4477,19 @@ extend Codegen {
         self.emit_expr(idxNode);
         self.emit_cstr("]".ptr() as *const char);
     }
-    fn emit_member(self: &mut Self, id: NodeId) void {
+    // Emit a place expression, selecting `index_mut` for a scalar `v[i]` index base when the place is used
+    // mutably (assignment LHS, `&mut`, `&mut self` method receiver). With `want_mut == false` this is exactly
+    // `emit_expr` (member->emit_member(false)==emit_expr, index->emit_index(false)==emit_expr).
+    fn emit_place(self: &mut Self, id: NodeId, want_mut: bool) void {
+        let k = unsafe (*self.cur_ast()).at_const(id).kind;
+        if k == NodeKind::NODE_MEMBER { self.emit_member(id, want_mut); }
+        else if want_mut && k == NodeKind::NODE_INDEX
+                && unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).at_const(id).as_data.index.index).kind != NodeKind::NODE_RANGE {
+            self.emit_index(id, true);
+        } else { self.emit_expr(id); }
+    }
+
+    fn emit_member(self: &mut Self, id: NodeId, want_mut: bool) void {
         let n = *unsafe (*self.cur_ast()).at_const(id);
         if n.as_data.member.path {
             let mut d = unsafe (*self.cur_ast()).resolution_def(id);
@@ -4612,8 +4519,7 @@ extend Codegen {
                     let de = unsafe (*da).at_const(did);
                     if de.kind == NodeKind::NODE_EXTEND {
                         let dmis = de.as_data.extend_def.items;
-                        let mut dj: u32 = 0;
-                        while dj < dmis.len { if unsafe ((*da).list(dmis))[dj as usize] == d.node { target = unsafe (*da).resolution_def(de.as_data.extend_def.target_type); } dj = dj + 1; }
+                        for dj in 0..dmis.len { if unsafe ((*da).list(dmis))[dj as usize] == d.node { target = unsafe (*da).resolution_def(de.as_data.extend_def.target_type); } }
                     }
                     di = di + 1;
                 }
@@ -4635,7 +4541,7 @@ extend Codegen {
         }
         let ot = *self.type_at(unsafe (*self.cur_ast()).type_of(n.as_data.member.object));
         let ptr = ot.kind == TypeKind::TYPE_POINTER || ot.kind == TypeKind::TYPE_REFERENCE;
-        self.emit_expr(n.as_data.member.object);
+        self.emit_place(n.as_data.member.object, want_mut);
         if ptr { self.emit_cstr("->".ptr() as *const char); } else { self.emit_cstr(".".ptr() as *const char); }
         let msp = self.name_span(n.as_data.member.member);
         if unsafe self.source[msp.start as usize] >= '0' as u8 && unsafe self.source[msp.start as usize] <= '9' as u8 { self.emit_cstr("_".ptr() as *const char); }
@@ -4803,8 +4709,7 @@ extend Codegen {
         self.depth = self.depth + 1;
         let dbase = self.defer_top;
         let stmts = n.as_data.block.statements;
-        let mut i: u32 = 0;
-        while i < stmts.len {
+        for i in 0..stmts.len {
             let sid = unsafe ((*self.cur_ast()).list(stmts))[i as usize];
             let s = *unsafe (*self.cur_ast()).at_const(sid);
             self.emit_indent();
@@ -4814,7 +4719,6 @@ extend Codegen {
                 self.emit_expr(s.as_data.single.value);
                 self.emit_cstr(";\n".ptr() as *const char);
             } else { self.emit_stmt(sid); }
-            i = i + 1;
         }
         self.emit_defers_to(dbase);
         self.defer_top = dbase;
@@ -4843,6 +4747,25 @@ extend Codegen {
         self.emit_cstr(prefix);
         if primary { self.emit_expr(obj); }
         else { self.emit_cstr("(".ptr() as *const char); self.emit_expr(obj); self.emit_cstr(")".ptr() as *const char); }
+    }
+
+    // Emit `&recv` for a by-value method receiver. When the callee takes `&mut self` and `recv` is `v[i]`
+    // (a scalar index overload), route through `index_mut` so the element is reached mutably -- otherwise
+    // `v[i].mut_method()` would mutate through the const `index` pointer.
+    fn emit_recv_addr(self: &mut Self, obj: NodeId, want_mut: bool) void {
+        if want_mut {
+            let k = unsafe (*self.cur_ast()).at_const(obj).kind;
+            let idx_ok = k == NodeKind::NODE_INDEX
+                && unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).at_const(obj).as_data.index.index).kind != NodeKind::NODE_RANGE;
+            if idx_ok || k == NodeKind::NODE_MEMBER {
+                // `&(*index_mut(v,i))` folds to `index_mut(v,i)`; for a `v[i].field.method()` receiver the
+                // member chain routes its index base through index_mut too (via emit_place).
+                self.emit_cstr("&".ptr() as *const char);
+                self.emit_place(obj, true);
+                return;
+            }
+        }
+        self.emit_prefixed(obj, "&".ptr() as *const char);
     }
     fn emit_slice_base(self: &mut Self, obj: NodeId, rd: i32) void {
         if rd == 0 { self.emit_expr(obj); return; }
@@ -4878,8 +4801,7 @@ extend Codegen {
         self.emit_tag_mod(v.module, en, v.node);
         if args.len != 0 {
             self.emit(", .payload.%s = { ".ptr() as *const char, (&vn.b[0]) as *const char);
-            let mut i: u32 = 0;
-            while i < args.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe aids[i as usize]); i = i + 1; }
+            for i in 0..args.len { if i != 0 { self.emit_cstr(", ".ptr() as *const char); } self.emit_expr(unsafe aids[i as usize]); }
             self.emit_cstr(" }".ptr() as *const char);
         }
         self.emit_cstr(" }".ptr() as *const char);
@@ -5005,8 +4927,7 @@ extend Codegen {
     fn emit_array_braces(self: &mut Self, id: NodeId) void {
         let elements = unsafe (*self.cur_ast()).at_const(id).as_data.array_literal.elements;
         self.emit_cstr("{ ".ptr() as *const char);
-        let mut i: u32 = 0;
-        while i < elements.len {
+        for i in 0..elements.len {
             if i != 0 { self.emit_cstr(", ".ptr() as *const char); }
             let eid = unsafe ((*self.cur_ast()).list(elements))[i as usize];
             let el = unsafe (*self.cur_ast()).at_const(eid);
@@ -5028,7 +4949,6 @@ extend Codegen {
             } else {
                 self.emit_expr(eid);
             }
-            i = i + 1;
         }
         self.emit_cstr(" }".ptr() as *const char);
     }
@@ -5097,8 +5017,9 @@ extend Codegen {
                     self.emit_expr(operand);
                     self.emit_cstr("})".ptr() as *const char);
                 } else {
+                    let addr_mut = op == TokenType::Ampersand && n.as_data.unary.qualifier == TypeQualifier::TYPE_QUAL_MUT;
                     self.emit("(%s".ptr() as *const char, c_op(op));
-                    self.emit_expr(operand);
+                    self.emit_place(operand, addr_mut);
                     self.emit_cstr(")".ptr() as *const char);
                 }
             },
@@ -5152,15 +5073,13 @@ extend Codegen {
                     let mut wrapped = false;
                     if self.cg_is_cond_site(id) {
                         let caps = n.as_data.closure.captures;
-                        let mut i: u32 = 0;
-                        while i < caps.len {
+                        for i in 0..caps.len {
                             let cid = unsafe ((*self.cur_ast()).list(caps))[i as usize];
-                            if ((n.as_data.closure.mut_caps >> (i as u64)) & 1u64) != 0 || !self.cg_is_cond_moved(cid) { i = i + 1; continue; }
+                            if ((n.as_data.closure.mut_caps >> (i as u64)) & 1u64) != 0 || !self.cg_is_cond_moved(cid) { continue; }
                             let mut fl = Buf32 {};
                             cg_move_flag((&mut fl.b[0]) as *mut char, 32, cid);
                             if wrapped { self.emit("%s = true, ".ptr() as *const char, (&fl.b[0]) as *const char); } else { self.emit("(%s = true, ".ptr() as *const char, (&fl.b[0]) as *const char); }
                             wrapped = true;
-                            i = i + 1;
                         }
                     }
                     self.emit("((%s_env){ ".ptr() as *const char, (&nm.b[0]) as *const char);
@@ -5194,8 +5113,8 @@ extend Codegen {
                 if n.as_data.pattern_range.inclusive { incl = "true".ptr() as *const char; }
                 self.emit(", .inclusive = %s }".ptr() as *const char, incl);
             },
-            NODE_INDEX => { self.emit_index(id); },
-            NODE_MEMBER => { self.emit_member(id); },
+            NODE_INDEX => { self.emit_index(id, false); },
+            NODE_MEMBER => { self.emit_member(id, false); },
             NODE_CAST => {
                 let mut t = Buf256 {};
                 self.render_type_node(n.as_data.cast.ty, "".ptr() as *const char, (&mut t.b[0]) as *mut char, 256);
@@ -5255,7 +5174,7 @@ extend Codegen {
                 self.emit_cstr("})".ptr() as *const char);
             },
             _ => {
-                self.errors.emitf(n.span.start, n.span.end - n.span.start, "codegen: unsupported expression".ptr() as *const char);
+                self.errors.emit(n.span.start, n.span.end - n.span.start, format("codegen: unsupported expression"));
             },
         };
     }
@@ -5363,8 +5282,7 @@ fn builtin_name(b: BuiltinType) *const char {
     return "void".ptr() as *const char;
 }
 fn builtin_of(src: *const u8, s: tok::Span) i32 {
-    let mut i: i32 = 0;
-    while i < (BuiltinType::BT_COUNT as i32) { if span_is(src, s, builtin_name(i as BuiltinType)) { return i; } i = i + 1; }
+    for i in 0..(BuiltinType::BT_COUNT as i32) { if span_is(src, s, builtin_name(i as BuiltinType)) { return i; } }
     return -1;
 }
 
@@ -5493,8 +5411,7 @@ extend Codegen {
         }
         if rets.len <= 1 { return; }
         self.emit_cstr("typedef struct { ".ptr() as *const char);
-        let mut i: u32 = 0;
-        while i < rets.len {
+        for i in 0..rets.len {
             let rid = unsafe ((*self.cur_ast()).list(rets))[i as usize];
             let rn = unsafe (*self.cur_ast()).at_const(rid);
             let tn = if (rn.kind == NodeKind::NODE_PARAMETER) { rn.as_data.parameter.ty; } else { rid; };
@@ -5504,7 +5421,6 @@ extend Codegen {
             self.render_type_node(tn, (&fld.b[0]) as *const char, (&mut d.b[0]) as *mut char, 256);
             self.emit_cstr((&d.b[0]) as *const char);
             self.emit_cstr("; ".ptr() as *const char);
-            i = i + 1;
         }
         self.emit("} %s_ret;\n".ptr() as *const char, nm);
     }
@@ -5522,29 +5438,23 @@ extend Codegen {
         let mut n: i32 = 0;
         let cur = self.cur_module();
         let ns = if tmod == cur { 1; } else { 2; };
-        let mut s: i32 = 0;
-        while s < ns {
+        for s in 0..ns {
             let m = if s == 0 { tmod; } else { cur; };
             let a = self.mod_ast(m);
             let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            let mut i: u32 = 0;
-            while i < items.len {
+            for i in 0..items.len {
                 let iid = unsafe ((*a).list(items))[i as usize];
                 let it = unsafe (*a).at_const(iid);
-                if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.target_type == NODE_NONE { i = i + 1; continue; }
+                if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.target_type == NODE_NONE { continue; }
                 let tg = unsafe (*a).resolution_def(it.as_data.extend_def.target_type);
-                if tg.module != tmod || tg.node != tdecl { i = i + 1; continue; }
+                if tg.module != tmod || tg.node != tdecl { continue; }
                 let ms = it.as_data.extend_def.items;
-                let mut j: u32 = 0;
-                while j < ms.len {
+                for j in 0..ms.len {
                     let mid = unsafe ((*a).list(ms))[j as usize];
                     let mn = unsafe (*a).at_const(mid);
                     if mn.kind == NodeKind::NODE_FUNCTION && span_is(self.mod_src(m), unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text, lit) { n = n + 1; }
-                    j = j + 1;
                 }
-                i = i + 1;
             }
-            s = s + 1;
         }
         return n;
     }
@@ -5630,15 +5540,13 @@ extend Codegen {
         }
         if k == NodeKind::NODE_BLOCK {
             let ids = unsafe (*self.cur_ast()).list(n.as_data.block.statements);
-            let mut i: u32 = 0;
-            while i < n.as_data.block.statements.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } i = i + 1; }
+            for i in 0..n.as_data.block.statements.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } }
             return false;
         }
         if k == NodeKind::NODE_LET { return self.cg_subtree_uses(n.as_data.let_stmt.value, param); }
         if k == NodeKind::NODE_RETURN {
             let ids = unsafe (*self.cur_ast()).list(n.as_data.return_stmt.values);
-            let mut i: u32 = 0;
-            while i < n.as_data.return_stmt.values.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } i = i + 1; }
+            for i in 0..n.as_data.return_stmt.values.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } }
             return false;
         }
         if k == NodeKind::NODE_DEFER || k == NodeKind::NODE_EXPRESSION_STATEMENT { return self.cg_subtree_uses(n.as_data.single.value, param); }
@@ -5648,11 +5556,9 @@ extend Codegen {
         if k == NodeKind::NODE_MATCH {
             if self.cg_subtree_uses(n.as_data.match_expr.value, param) { return true; }
             let ids = unsafe (*self.cur_ast()).list(n.as_data.match_expr.arms);
-            let mut i: u32 = 0;
-            while i < n.as_data.match_expr.arms.len {
+            for i in 0..n.as_data.match_expr.arms.len {
                 let arm = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]);
                 if self.cg_subtree_uses(arm.as_data.match_arm.guard, param) || self.cg_subtree_uses(arm.as_data.match_arm.body, param) { return true; }
-                i = i + 1;
             }
             return false;
         }
@@ -5661,8 +5567,7 @@ extend Codegen {
         if k == NodeKind::NODE_CALL {
             if self.cg_subtree_uses(n.as_data.call.callee, param) { return true; }
             let ids = unsafe (*self.cur_ast()).list(n.as_data.call.args);
-            let mut i: u32 = 0;
-            while i < n.as_data.call.args.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } i = i + 1; }
+            for i in 0..n.as_data.call.args.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } }
             return false;
         }
         if k == NodeKind::NODE_INDEX { return self.cg_subtree_uses(n.as_data.index.object, param) || self.cg_subtree_uses(n.as_data.index.index, param); }
@@ -5673,17 +5578,14 @@ extend Codegen {
         if k == NodeKind::NODE_VA_EXPR { return self.cg_subtree_uses(n.as_data.va_op.ap, param) || self.cg_subtree_uses(n.as_data.va_op.extra, param); }
         if k == NodeKind::NODE_ARRAY_LITERAL {
             let ids = unsafe (*self.cur_ast()).list(n.as_data.array_literal.elements);
-            let mut i: u32 = 0;
-            while i < n.as_data.array_literal.elements.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } i = i + 1; }
+            for i in 0..n.as_data.array_literal.elements.len { if self.cg_subtree_uses(unsafe ids[i as usize], param) { return true; } }
             return false;
         }
         if k == NodeKind::NODE_STRUCT_INITIALIZER {
             let ids = unsafe (*self.cur_ast()).list(n.as_data.struct_initializer.fields);
-            let mut i: u32 = 0;
-            while i < n.as_data.struct_initializer.fields.len {
+            for i in 0..n.as_data.struct_initializer.fields.len {
                 let fv = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.field_initializer.value;
                 if self.cg_subtree_uses(fv, param) { return true; }
-                i = i + 1;
             }
             return false;
         }
@@ -5797,8 +5699,7 @@ extend Codegen {
             let pids = unsafe (*self.cur_ast()).list(f.params);
             self.nparam_flags = 0;
             self.nunused_params = 0;
-            let mut i: u32 = 0;
-            while i < f.params.len {
+            for i in 0..f.params.len {
                 let pid = unsafe pids[i as usize];
                 if self.cg_will_auto_free(pid) {
                     self.cg_register_auto_free(pid);
@@ -5807,7 +5708,6 @@ extend Codegen {
                     self.unused_params[self.nunused_params as usize] = pid;
                     self.nunused_params = self.nunused_params + 1;
                 }
-                i = i + 1;
             }
             self.emit_block_from(f.body, 0);
             self.emit_cstr("\n\n".ptr() as *const char);
@@ -5820,7 +5720,7 @@ extend Codegen {
 // ---- backend stubs: filled in below, kept as at-least-decls so the whole file compiles green ----
 extend Codegen {
     fn cg_is_format_builtin(self: &Self, m: ModuleId, node: NodeId) bool {
-        if self.package == null || (m as usize) >= self.pkg_count() || !unsafe (*self.package).modules.at(m as usize).prelude { return false; }
+        if self.package == null || (m as usize) >= self.pkg_count() || !unsafe (*self.package).modules[m as usize].prelude { return false; }
         let a = self.mod_ast(m);
         if unsafe (*a).at_const(node).kind != NodeKind::NODE_FUNCTION { return false; }
         let fnm = unsafe (*a).at_const(unsafe (*a).at_const(node).as_data.function.name).as_data.name.text;
@@ -5840,15 +5740,13 @@ extend Codegen {
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
-            let mut i: u8 = 0;
-            while i < it.n { if self.cg_type_mentions_fnval(it.args[i as usize]) { return true; } i = i + 1; }
+            for i in 0..it.n { if self.cg_type_mentions_fnval(it.args[i as usize]) { return true; } }
             return false;
         }
         return false;
     }
     fn inst_mentions_fnval(self: &Self, it: &TyInstance) bool {
-        let mut i: u8 = 0;
-        while i < it.n { if self.cg_type_mentions_fnval(it.args[i as usize]) { return true; } i = i + 1; }
+        for i in 0..it.n { if self.cg_type_mentions_fnval(it.args[i as usize]) { return true; } }
         return false;
     }
 
@@ -5867,8 +5765,7 @@ extend Codegen {
         self.emit("#ifndef SUPER_ENUM_%s\n#define SUPER_ENUM_%s\n".ptr() as *const char, (&nm.b[0]) as *const char, (&nm.b[0]) as *const char);
         self.emit_cstr("typedef enum { ".ptr() as *const char);
         let ms = ag.members;
-        let mut j: u32 = 0;
-        while j < ms.len {
+        for j in 0..ms.len {
             if j != 0 { self.emit_cstr(", ".ptr() as *const char); }
             let mid = unsafe ((*self.cur_ast()).list(ms))[j as usize];
             self.emit_tag(enum_id, mid);
@@ -5880,7 +5777,6 @@ extend Codegen {
                 self.emit_expr(disc);
                 self.const_ctx = sc;
             }
-            j = j + 1;
         }
         self.emit_cstr(" } ".ptr() as *const char);
         self.emit_local_type_name(ag.name);
@@ -5893,8 +5789,7 @@ extend Codegen {
         self.emit("#ifndef SUPER_ENUMTAG_%s\n#define SUPER_ENUMTAG_%s\n".ptr() as *const char, (&nm.b[0]) as *const char, (&nm.b[0]) as *const char);
         self.emit_cstr("typedef enum { ".ptr() as *const char);
         let ms = ag.members;
-        let mut j: u32 = 0;
-        while j < ms.len {
+        for j in 0..ms.len {
             if j != 0 { self.emit_cstr(", ".ptr() as *const char); }
             let mid = unsafe ((*self.cur_ast()).list(ms))[j as usize];
             self.emit_tag(enum_id, mid);
@@ -5906,7 +5801,6 @@ extend Codegen {
                 self.emit_expr(disc);
                 self.const_ctx = sc;
             }
-            j = j + 1;
         }
         self.emit_cstr(" } ".ptr() as *const char);
         self.emit_local_type_name(ag.name);
@@ -5922,16 +5816,14 @@ extend Codegen {
         self.emit_cstr("union {\n".ptr() as *const char);
         self.depth = self.depth + 1;
         let ms = ag.members;
-        let mut j: u32 = 0;
-        while j < ms.len {
+        for j in 0..ms.len {
             let mid = unsafe ((*self.cur_ast()).list(ms))[j as usize];
             let v = unsafe (*self.cur_ast()).at_const(mid).as_data.variant;
             let payload = v.payload;
-            if payload.len == 0 { j = j + 1; continue; }
+            if payload.len == 0 { continue; }
             self.emit_indent();
             self.emit_cstr("struct { ".ptr() as *const char);
-            let mut k: u32 = 0;
-            while k < payload.len {
+            for k in 0..payload.len {
                 let pid = unsafe ((*self.cur_ast()).list(payload))[k as usize];
                 let pe = unsafe (*self.cur_ast()).at_const(pid);
                 let mut d = Buf256 {};
@@ -5947,13 +5839,11 @@ extend Codegen {
                 }
                 self.emit_cstr((&d.b[0]) as *const char);
                 self.emit_cstr("; ".ptr() as *const char);
-                k = k + 1;
             }
             self.emit_cstr("} ".ptr() as *const char);
             let vsp = self.name_span(v.name);
             self.emit_span(vsp);
             self.emit_cstr(";\n".ptr() as *const char);
-            j = j + 1;
         }
         self.depth = self.depth - 1;
         self.emit_indent();
@@ -5986,8 +5876,7 @@ extend Codegen {
             self.emit_enum_struct_body(declId);
         } else if ag.is_tuple {
             self.depth = self.depth + 1;
-            let mut j: u32 = 0;
-            while j < ag.members.len {
+            for j in 0..ag.members.len {
                 let ftn = unsafe ((*self.cur_ast()).list(ag.members))[j as usize];
                 let mut nm = Buf32 {};
                 unsafe stdio::snprintf((&mut nm.b[0]) as *mut char, 16, "_%u".ptr() as *const char, j);
@@ -5996,13 +5885,11 @@ extend Codegen {
                 self.emit_indent();
                 self.emit_cstr((&d.b[0]) as *const char);
                 self.emit_cstr(";\n".ptr() as *const char);
-                j = j + 1;
             }
             self.depth = self.depth - 1;
         } else {
             self.depth = self.depth + 1;
-            let mut j: u32 = 0;
-            while j < ag.members.len {
+            for j in 0..ag.members.len {
                 let fid = unsafe ((*self.cur_ast()).list(ag.members))[j as usize];
                 let fld = unsafe (*self.cur_ast()).at_const(fid).as_data.field;
                 let mut nm = Buf128 {};
@@ -6013,7 +5900,6 @@ extend Codegen {
                 self.emit_indent();
                 self.emit_cstr((&d.b[0]) as *const char);
                 self.emit_cstr(";\n".ptr() as *const char);
-                j = j + 1;
             }
             self.depth = self.depth - 1;
         }
@@ -6040,8 +5926,7 @@ extend Codegen {
         }
         self.emit("%s %s {\n".ptr() as *const char, kw, (&nm.b[0]) as *const char);
         self.depth = self.depth + 1;
-        let mut j: u32 = 0;
-        while j < ag.members.len {
+        for j in 0..ag.members.len {
             let fid = unsafe ((*self.cur_ast()).list(ag.members))[j as usize];
             let fld = unsafe (*self.cur_ast()).at_const(fid).as_data.field;
             let mut fnm = Buf128 {};
@@ -6052,7 +5937,6 @@ extend Codegen {
             self.emit_indent();
             self.emit_cstr((&d.b[0]) as *const char);
             self.emit_cstr(";\n".ptr() as *const char);
-            j = j + 1;
         }
         self.depth = self.depth - 1;
         self.emit_cstr("};\n".ptr() as *const char);
@@ -6092,37 +5976,30 @@ extend Codegen {
     fn emit_generic_enum_shared(self: &mut Self) void {
         let mut seen = Ids64 {};
         let mut ns: i32 = 0;
-        let mut i: usize = 0;
-        while i < unsafe (*self.cur_ast()).instances.len() {
+        for i in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(i as u32);
-            if it.module != self.cur_module() { i = i + 1; continue; }
-            if unsafe (*self.cur_ast()).at_const(it.decl).kind != NodeKind::NODE_ENUM { i = i + 1; continue; }
+            if it.module != self.cur_module() { continue; }
+            if unsafe (*self.cur_ast()).at_const(it.decl).kind != NodeKind::NODE_ENUM { continue; }
             let mut concrete = true;
-            let mut k: u8 = 0;
-            while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete { i = i + 1; continue; }
+            for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+            if !concrete { continue; }
             let mut dup = false;
-            let mut s: i32 = 0;
-            while s < ns { if unsafe seen.b[s as usize] == it.decl { dup = true; } s = s + 1; }
-            if dup { i = i + 1; continue; }
+            for s in 0..ns { if unsafe seen.b[s as usize] == it.decl { dup = true; } }
+            if dup { continue; }
             if ns < 64 { unsafe seen.b[ns as usize] = it.decl; ns = ns + 1; }
             if self.aggregate_has_payload(it.decl) { self.emit_enum_tag_decl(it.decl); } else { self.emit_enum_full(it.decl); }
-            i = i + 1;
         }
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut ii: u32 = 0;
-        while ii < items.len {
+        for ii in 0..items.len {
             let did = unsafe ids[ii as usize];
             let dn = unsafe (*self.cur_ast()).at_const(did);
-            if dn.kind != NodeKind::NODE_ENUM || dn.as_data.aggregate.generics.len == 0 || !dn.as_data.aggregate.is_public { ii = ii + 1; continue; }
+            if dn.kind != NodeKind::NODE_ENUM || dn.as_data.aggregate.generics.len == 0 || !dn.as_data.aggregate.is_public { continue; }
             let mut dup = false;
-            let mut s: i32 = 0;
-            while s < ns { if unsafe seen.b[s as usize] == did { dup = true; } s = s + 1; }
-            if dup { ii = ii + 1; continue; }
+            for s in 0..ns { if unsafe seen.b[s as usize] == did { dup = true; } }
+            if dup { continue; }
             if ns < 64 { unsafe seen.b[ns as usize] = did; ns = ns + 1; }
             if self.aggregate_has_payload(did) { self.emit_enum_tag_decl(did); } else { self.emit_enum_full(did); }
-            ii = ii + 1;
         }
     }
     fn push_home_dep(self: &Self, st0: TypeId, deps: *mut TypeId, nh: *mut i32) void {
@@ -6134,8 +6011,7 @@ extend Codegen {
             y = *self.type_at(st);
         }
         if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM && y.kind != TypeKind::TYPE_INSTANCE { return; }
-        let mut i: i32 = 0;
-        while i < unsafe (*nh) { if unsafe deps[i as usize] == st { return; } i = i + 1; }
+        for i in 0..unsafe (*nh) { if unsafe deps[i as usize] == st { return; } }
         let cur = unsafe (*nh);
         unsafe deps[cur as usize] = st;
         unsafe (*nh) = cur + 1;
@@ -6159,8 +6035,7 @@ extend Codegen {
         if idx as usize >= nstate || unsafe state[idx as usize] != 0 as u8 { return; }
         let it = *unsafe (*self.cur_ast()).instance(idx);
         let mut concrete = true;
-        let mut k: u8 = 0;
-        while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
+        for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
         if it.module != self.cur_module() || !concrete { return; }
         unsafe state[idx as usize] = 1 as u8;
         let ag = unsafe (*self.cur_ast()).at_const(it.decl).as_data.aggregate;
@@ -6178,28 +6053,23 @@ extend Codegen {
             g = g + 1;
         }
         let mids = unsafe (*self.cur_ast()).list(ag.members);
-        let mut m: u32 = 0;
-        while m < ag.members.len {
+        for m in 0..ag.members.len {
             let mn = unsafe (*self.cur_ast()).at_const(unsafe mids[m as usize]);
             if dk == NodeKind::NODE_STRUCT && mn.kind == NodeKind::NODE_FIELD {
                 let ft = self.subst_resolve(unsafe (*self.cur_ast()).type_of(mn.as_data.field.ty));
                 self.push_home_dep(ft, (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
             } else if dk == NodeKind::NODE_ENUM && mn.kind == NodeKind::NODE_VARIANT {
                 let pids = unsafe (*self.cur_ast()).list(mn.as_data.variant.payload);
-                let mut kk: u32 = 0;
-                while kk < mn.as_data.variant.payload.len {
+                for kk in 0..mn.as_data.variant.payload.len {
                     let pf = unsafe (*self.cur_ast()).at_const(unsafe pids[kk as usize]);
                     let ptn = if (pf.kind == NodeKind::NODE_FIELD) { pf.as_data.field.ty; } else { unsafe pids[kk as usize]; };
                     let ft = self.subst_resolve(unsafe (*self.cur_ast()).type_of(ptn));
                     self.push_home_dep(ft, (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
-                    kk = kk + 1;
                 }
             }
-            m = m + 1;
         }
         self.nsubst = saved;
-        let mut d: i32 = 0;
-        while d < nh { self.emit_home_dep(unsafe deps.t[d as usize]); d = d + 1; }
+        for d in 0..nh { self.emit_home_dep(unsafe deps.t[d as usize]); }
         if dk == NodeKind::NODE_STRUCT { self.emit_struct_inst(&it, with_body); }
         else if dk == NodeKind::NODE_ENUM { self.emit_enum_inst(&it, with_body); }
         unsafe state[idx as usize] = 2 as u8;
@@ -6213,8 +6083,7 @@ extend Codegen {
         let mut deps = TyArgs32 {};
         let mut nh: i32 = 0;
         let mids = unsafe (*self.cur_ast()).list(members);
-        let mut i: u32 = 0;
-        while i < members.len {
+        for i in 0..members.len {
             let m = unsafe (*self.cur_ast()).at_const(unsafe mids[i as usize]);
             if n_kind == NodeKind::NODE_STRUCT && is_tuple {
                 self.push_home_dep(unsafe (*self.cur_ast()).type_of(unsafe mids[i as usize]), (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
@@ -6222,34 +6091,27 @@ extend Codegen {
                 self.push_home_dep(unsafe (*self.cur_ast()).type_of(m.as_data.field.ty), (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
             } else if n_kind == NodeKind::NODE_ENUM && m.kind == NodeKind::NODE_VARIANT {
                 let plids = unsafe (*self.cur_ast()).list(m.as_data.variant.payload);
-                let mut kk: u32 = 0;
-                while kk < m.as_data.variant.payload.len {
+                for kk in 0..m.as_data.variant.payload.len {
                     let pf = unsafe (*self.cur_ast()).at_const(unsafe plids[kk as usize]);
                     let ptn = if (pf.kind == NodeKind::NODE_FIELD) { pf.as_data.field.ty; } else { unsafe plids[kk as usize]; };
                     self.push_home_dep(unsafe (*self.cur_ast()).type_of(ptn), (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
-                    kk = kk + 1;
                 }
             }
-            i = i + 1;
         }
-        let mut d: i32 = 0;
-        while d < nh { self.emit_home_dep(unsafe deps.t[d as usize]); d = d + 1; }
+        for d in 0..nh { self.emit_home_dep(unsafe deps.t[d as usize]); }
         self.emit_type_decl(declId);
         unsafe state[declId as usize] = 2 as u8;
     }
     fn cg_type_state(self: &mut Self) *mut u8 { if self.type_state == null { self.type_state = unsafe stdlib::calloc(unsafe (*self.cur_ast()).nodes.len(), 1) as *mut u8; } return self.type_state; }
     fn emit_agg_spec_fallback(self: &mut Self, with_body: bool) void {
-        let mut i: usize = 0;
-        while i < unsafe (*self.cur_ast()).instances.len() {
+        for i in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(i as u32);
             let mut concrete = true;
-            let mut k: u8 = 0;
-            while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if it.module != self.cur_module() || !concrete { i = i + 1; continue; }
+            for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+            if it.module != self.cur_module() || !concrete { continue; }
             let dk = unsafe (*self.cur_ast()).at_const(it.decl).kind;
             if dk == NodeKind::NODE_STRUCT { self.emit_struct_inst(&it, with_body); }
             else if dk == NodeKind::NODE_ENUM { self.emit_enum_inst(&it, with_body); }
-            i = i + 1;
         }
     }
     fn emit_aggregate_specializations(self: &mut Self, with_body: bool) void {
@@ -6265,15 +6127,13 @@ extend Codegen {
             let cnt = if n != 0 { n; } else { 1 as usize; };
             let state = unsafe stdlib::calloc(cnt, 1) as *mut u8;
             if state == null { self.emit_agg_spec_fallback(with_body); return; }
-            let mut i: usize = 0;
-            while i < n { self.emit_inst_dfs(i as u32, state, n, with_body); i = i + 1; }
+            for i in 0..n { self.emit_inst_dfs(i as u32, state, n, with_body); }
             unsafe stdlib::free(state as *mut void);
         }
     }
     fn inst_rehomed_here(self: &Self, it: &TyInstance) bool {
         if self.package == null || it.module == self.cur_module() { return false; }
-        let mut k: u8 = 0;
-        while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { return false; } k = k + 1; }
+        for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { return false; } }
         return unsafe (*self.package).instance_home(unsafe (&*self.cur_ast()), it) == self.cur_module();
     }
     fn rehome_subst_type(self: &mut Self, owner_mod: ModuleId, it: &TyInstance, t: TypeId) TypeId {
@@ -6299,8 +6159,7 @@ extend Codegen {
             let inst = *unsafe (*self.mod_ast(owner_mod)).instance(ty.as_data.inst);
             let mut na = TyArgs4 {};
             let nn = if (inst.n < 4) { inst.n; } else { 4 as u8; };
-            let mut i: u8 = 0;
-            while i < nn { unsafe na.t[i as usize] = self.rehome_subst_type(owner_mod, it, inst.args[i as usize]); i = i + 1; }
+            for i in 0..nn { unsafe na.t[i as usize] = self.rehome_subst_type(owner_mod, it, inst.args[i as usize]); }
             return unsafe (*self.cur_ast()).intern_instance(inst.module, inst.decl, (&na.t[0]) as *const TypeId, nn);
         }
         return unsafe (*self.cur_ast()).reintern(unsafe (&*self.mod_ast(owner_mod)), t);
@@ -6313,10 +6172,9 @@ extend Codegen {
         let osrc = self.mod_src(it.module);
         let oninst = unsafe (*owner).instances.len();
         let mut oit = *it;
-        let mut k: u8 = 0;
-        while k < it.n { unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k as usize]); k = k + 1; }
+        for k in 0..it.n { unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k as usize]); }
         self.source = osrc;
-        self.len = unsafe (*self.package).modules.at(it.module as usize).source_len;
+        self.len = unsafe (*self.package).modules[it.module as usize].source_len;
         self.borrowed = true;
         self.ast = self.mod_ast(it.module);
         let dk = unsafe (*self.cur_ast()).at_const(oit.decl).kind;
@@ -6340,8 +6198,7 @@ extend Codegen {
         let mut deps = TyArgs32 {};
         let mut nh: i32 = 0;
         let mids = unsafe (*self.mod_ast(owner_mod)).list(members);
-        let mut m: u32 = 0;
-        while m < members.len {
+        for m in 0..members.len {
             let mid = unsafe mids[m as usize];
             let mnk = unsafe (*self.mod_ast(owner_mod)).at_const(mid).kind;
             if dn_kind == NodeKind::NODE_STRUCT && mnk == NodeKind::NODE_FIELD {
@@ -6352,21 +6209,17 @@ extend Codegen {
             } else if dn_kind == NodeKind::NODE_ENUM && mnk == NodeKind::NODE_VARIANT {
                 let payload = unsafe (*self.mod_ast(owner_mod)).at_const(mid).as_data.variant.payload;
                 let pids = unsafe (*self.mod_ast(owner_mod)).list(payload);
-                let mut kk: u32 = 0;
-                while kk < payload.len {
+                for kk in 0..payload.len {
                     let pid = unsafe pids[kk as usize];
                     let pfk = unsafe (*self.mod_ast(owner_mod)).at_const(pid).kind;
                     let tn = if (pfk == NodeKind::NODE_FIELD) { unsafe (*self.mod_ast(owner_mod)).at_const(pid).as_data.field.ty; } else { pid; };
                     let fnode_ty = unsafe (*self.mod_ast(owner_mod)).type_of(tn);
                     let ft = self.rehome_subst_type(owner_mod, &it, fnode_ty);
                     self.push_home_dep(ft, (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
-                    kk = kk + 1;
                 }
             }
-            m = m + 1;
         }
-        let mut d: i32 = 0;
-        while d < nh { self.emit_home_dep(unsafe deps.t[d as usize]); d = d + 1; }
+        for d in 0..nh { self.emit_home_dep(unsafe deps.t[d as usize]); }
         self.emit_rehomed_struct(&it, with_body);
         unsafe state[idx as usize] = 2 as u8;
     }
@@ -6377,11 +6230,9 @@ extend Codegen {
             let state = self.inst_emit_state;
             let nstate = self.inst_emit_n;
             if state == null {
-                let mut ii: usize = 0;
-                while ii < n {
+                for ii in 0..n {
                     let it = *unsafe (*self.cur_ast()).instance(ii as u32);
                     if self.inst_rehomed_here(&it) { self.emit_rehomed_struct(&it, with_body); }
-                    ii = ii + 1;
                 }
                 return;
             }
@@ -6391,25 +6242,21 @@ extend Codegen {
             let cnt = if n != 0 { n; } else { 1 as usize; };
             let state = unsafe stdlib::calloc(cnt, 1) as *mut u8;
             if state == null {
-                let mut ii: usize = 0;
-                while ii < n {
+                for ii in 0..n {
                     let it = *unsafe (*self.cur_ast()).instance(ii as u32);
                     if self.inst_rehomed_here(&it) { self.emit_rehomed_struct(&it, with_body); }
-                    ii = ii + 1;
                 }
                 return;
             }
-            let mut ii: usize = 0;
-            while ii < n { self.emit_rehomed_struct_dfs(ii as u32, state, n, with_body); ii = ii + 1; }
+            for ii in 0..n { self.emit_rehomed_struct_dfs(ii as u32, state, n, with_body); }
             unsafe stdlib::free(state as *mut void);
         }
     }
     fn emit_rehomed_forwards(self: &mut Self) void {
         if self.package == null { return; }
-        let mut i: usize = 0;
-        while i < unsafe (*self.cur_ast()).instances.len() {
+        for i in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(i as u32);
-            if !self.inst_rehomed_here(&it) { i = i + 1; continue; }
+            if !self.inst_rehomed_here(&it) { continue; }
             let dn_kind = unsafe (*self.mod_ast(it.module)).at_const(it.decl).kind;
             let mut inm = Buf200 {};
             self.inst_name(&it, (&mut inm.b[0]) as *mut char, 200);
@@ -6422,7 +6269,6 @@ extend Codegen {
                 self.render_qualified(it.module, anm, (&mut en.b[0]) as *mut char, 160);
                 self.emit("typedef %s %s;\n".ptr() as *const char, (&en.b[0]) as *const char, (&inm.b[0]) as *const char);
             }
-            i = i + 1;
         }
     }
     fn emit_fnval_instance_structs(self: &mut Self) void {
@@ -6433,23 +6279,19 @@ extend Codegen {
         if state != null {
             self.inst_emit_state = state;
             self.inst_emit_n = n;
-            let mut i: usize = 0;
-            while i < n {
+            for i in 0..n {
                 self.emit_inst_dfs(i as u32, state, n, true);
                 self.emit_rehomed_struct_dfs(i as u32, state, n, true);
-                i = i + 1;
             }
             self.inst_emit_state = null;
             self.inst_emit_n = 0;
             unsafe stdlib::free(state as *mut void);
         } else {
-            let mut i: usize = 0;
-            while i < n {
+            for i in 0..n {
                 let it = *unsafe (*self.cur_ast()).instance(i as u32);
                 let mut concrete = true;
-                let mut k: u8 = 0;
-                while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-                if !concrete { i = i + 1; continue; }
+                for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+                if !concrete { continue; }
                 if it.module == self.cur_module() {
                     let dk = unsafe (*self.cur_ast()).at_const(it.decl).kind;
                     if dk == NodeKind::NODE_STRUCT { self.emit_struct_inst(&it, true); }
@@ -6457,7 +6299,6 @@ extend Codegen {
                 } else if self.inst_rehomed_here(&it) {
                     self.emit_rehomed_struct(&it, true);
                 }
-                i = i + 1;
             }
         }
         self.fnval_pass = false;
@@ -6466,13 +6307,12 @@ extend Codegen {
         if self.package == null { return; }
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             let ng = unsafe (*self.cur_ast()).at_const(nid).as_data.aggregate.generics.len;
-            if (nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM) || ng == 0 { i = i + 1; continue; }
-            if self.cg_attr(self.cur_module(), nid, AttrKind::ATTR_EMIT_MACRO) == null { i = i + 1; continue; }
+            if (nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM) || ng == 0 { continue; }
+            if self.cg_attr(self.cur_module(), nid, AttrKind::ATTR_EMIT_MACRO) == null { continue; }
             if nk == NodeKind::NODE_ENUM {
                 if self.aggregate_has_payload(nid) { self.emit_enum_tag_decl(nid); } else { self.emit_enum_full(nid); }
             }
@@ -6480,7 +6320,6 @@ extend Codegen {
             self.emit_generic_macro(nid, true);
             self.emit_generic_method_macros(nid);
             self.emit_generic_conformance_macros(nid);
-            i = i + 1;
         }
     }
     fn emit_inst_methods(self: &mut Self, it: &TyInstance, mi_src: *mut Ast, mi_inst: TypeId, which: i32, with_body: bool) void {
@@ -6489,33 +6328,31 @@ extend Codegen {
         let mut inm = Buf200 {};
         self.inst_name(it, (&mut inm.b[0]) as *mut char, 200);
         let ifnv = self.inst_mentions_fnval(it);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe iids[i as usize];
             let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { i = i + 1; continue; }
-            if unsafe (*self.cur_ast()).resolution(ed.target_type) != it.decl { i = i + 1; continue; }
+            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { continue; }
+            if unsafe (*self.cur_ast()).resolution(ed.target_type) != it.decl { continue; }
             let itrait = self.extend_interface(nid);
             if itrait.node != NODE_NONE {
                 let itty = unsafe (*self.cur_ast()).intern_instance(it.module, it.decl, (&it.args[0]) as *const TypeId, it.n);
-                if !self.cg_type_satisfies(itty, itrait, 0) { i = i + 1; continue; }
+                if !self.cg_type_satisfies(itty, itrait, 0) { continue; }
             }
-            if !self.cg_extend_bounds_hold(nid, (&it.args[0]) as *const TypeId, it.n) { i = i + 1; continue; }
+            if !self.cg_extend_bounds_hold(nid, (&it.args[0]) as *const TypeId, it.n) { continue; }
             let gens = ed.generics;
             let gids = unsafe (*self.cur_ast()).list(gens);
             let ms = ed.items;
             let mids = unsafe (*self.cur_ast()).list(ms);
-            let mut j: u32 = 0;
-            while j < ms.len {
+            for j in 0..ms.len {
                 let mid = unsafe mids[j as usize];
                 let mf = unsafe (*self.cur_ast()).at_const(mid).as_data.function;
                 let mk_kind = unsafe (*self.cur_ast()).at_const(mid).kind;
-                if mk_kind != NodeKind::NODE_FUNCTION { j = j + 1; continue; }
+                if mk_kind != NodeKind::NODE_FUNCTION { continue; }
                 let mut skip = false;
                 if with_body { skip = mf.body == NODE_NONE; }
                 else { skip = mf.generics.len == 0 && !want_fn(which, !ifnv && mf.is_public); }
-                if skip { j = j + 1; continue; }
+                if skip { continue; }
                 self.nsubst = 0;
                 let mut g: u32 = 0;
                 while g < gens.len && g < it.n as u32 && self.nsubst < 16 {
@@ -6530,27 +6367,24 @@ extend Codegen {
                 let mnsp = self.name_span(mf.name);
                 self.render_ident(mnsp, unsafe ((&mut nm.b[0]) as *mut char + at) as *mut char, 320 - at);
                 let stat = self.multifile && (ifnv || !mf.is_public);
-                if self.minst_only && mf.generics.len == 0 { self.nsubst = 0; j = j + 1; continue; }
+                if self.minst_only && mf.generics.len == 0 { self.nsubst = 0; continue; }
                 if mf.generics.len == 0 {
                     let mdef = DefId { module: self.cur_module(), node: mid };
                     if self.multifile && itrait.node == NODE_NONE && self.cg_attr(self.cur_module(), it.decl, AttrKind::ATTR_EMIT_MACRO) == null && !unsafe (*self.package).method_used_get(mdef) {
                         self.nsubst = 0;
-                        j = j + 1;
                         continue;
                     }
                     if !with_body { self.emit_ret_struct_named(mid, (&nm.b[0]) as *const char); }
                     self.emit_function(mid, DefId { module: 0, node: NODE_NONE }, false, with_body, (&nm.b[0]) as *const char, stat);
                     self.nsubst = 0;
-                    j = j + 1;
                     continue;
                 }
                 let nimpl = self.nsubst;
                 let mg = mf.generics;
                 let mgids = unsafe (*self.cur_ast()).list(mg);
-                let mut mk: usize = 0;
-                while mk < unsafe (*mi_src).method_insts.len() {
-                    let minst = unsafe *(*mi_src).method_insts.at(mk);
-                    if minst.method != mid || minst.instance != mi_inst { mk = mk + 1; continue; }
+                for mk in 0..unsafe (*mi_src).method_insts.len() {
+                    let minst = unsafe (*mi_src).method_insts[mk];
+                    if minst.method != mid || minst.instance != mi_inst { continue; }
                     self.nsubst = nimpl;
                     let mut fnval = ifnv;
                     let mut mgi: u32 = 0;
@@ -6564,63 +6398,53 @@ extend Codegen {
                     }
                     let mut wf = false;
                     if fnval { wf = which != PROTO_PUBLIC; } else { wf = want_fn(which, mf.is_public); }
-                    if !with_body && !wf { mk = mk + 1; continue; }
+                    if !with_body && !wf { continue; }
                     let mut snm = Buf400 {};
                     let mut a2 = bappend((&mut snm.b[0]) as *mut char, 400, 0, (&nm.b[0]) as *const char);
-                    let mut gg: u8 = 0;
-                    while gg < minst.n {
+                    for gg in 0..minst.n {
                         a2 = bappend((&mut snm.b[0]) as *mut char, 400, a2, "__".ptr() as *const char);
                         let tg = if (mi_src == self.cur_ast()) { minst.targs[gg as usize]; } else { unsafe (*self.cur_ast()).reintern(unsafe (&*mi_src), minst.targs[gg as usize]); };
                         let mut e = Buf176 {};
                         self.mangle_type(tg, (&mut e.b[0]) as *mut char, 176);
                         a2 = bappend((&mut snm.b[0]) as *mut char, 400, a2, (&e.b[0]) as *const char);
-                        gg = gg + 1;
                     }
                     if !with_body { self.emit_ret_struct_named(mid, (&snm.b[0]) as *const char); }
                     self.emit_function(mid, DefId { module: 0, node: NODE_NONE }, false, with_body, (&snm.b[0]) as *const char, stat || fnval);
-                    mk = mk + 1;
                 }
                 self.nsubst = 0;
-                j = j + 1;
             }
-            i = i + 1;
         }
     }
     fn emit_method_specializations(self: &mut Self, which: i32, with_body: bool) void {
-        let mut ii: usize = 0;
-        while ii < unsafe (*self.cur_ast()).instances.len() {
+        for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
-            if it.module != self.cur_module() { ii = ii + 1; continue; }
+            if it.module != self.cur_module() { continue; }
             let mut concrete = true;
-            let mut k: u8 = 0;
-            while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete { ii = ii + 1; continue; }
+            for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+            if !concrete { continue; }
             let itTy = unsafe (*self.cur_ast()).intern_instance(it.module, it.decl, (&it.args[0]) as *const TypeId, it.n);
             let src = self.cur_ast();
             self.emit_inst_methods(&it, src, itTy, which, with_body);
             self.nsubst = 0;
-            ii = ii + 1;
         }
     }
     fn emit_rehomed_methods(self: &mut Self, which: i32, with_body: bool) void {
         if self.package == null { return; }
-        let mut ii: usize = 0;
-        while ii < unsafe (*self.cur_ast()).instances.len() {
+        for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let home = self.cur_ast();
             let home_mod = unsafe (*home).module;
             let hsrc = self.source;
             let hlen = self.len;
             let it = *unsafe (*home).instance(ii as u32);
-            if !self.inst_rehomed_here(&it) { ii = ii + 1; continue; }
+            if !self.inst_rehomed_here(&it) { continue; }
             let itTy = unsafe (*home).intern_instance(it.module, it.decl, (&it.args[0]) as *const TypeId, it.n);
             let owner = self.mod_ast(it.module);
             let osrc = self.mod_src(it.module);
             let oninst = unsafe (*owner).instances.len();
             let mut oit = it;
-            let mut k: u8 = 0;
-            while k < it.n { unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k as usize]); k = k + 1; }
+            for k in 0..it.n { unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k as usize]); }
             self.source = osrc;
-            self.len = unsafe (*self.package).modules.at(it.module as usize).source_len;
+            self.len = unsafe (*self.package).modules[it.module as usize].source_len;
             self.borrowed = true;
             self.ast = self.mod_ast(it.module);
             self.emit_inst_methods(&oit, self.mod_ast(home_mod), itTy, which, with_body);
@@ -6630,39 +6454,35 @@ extend Codegen {
             self.source = hsrc;
             self.len = hlen;
             self.nsubst = 0;
-            ii = ii + 1;
         }
     }
     fn emit_local_method_insts(self: &mut Self, which: i32, with_body: bool) void {
         if self.package == null || (!with_body && which == PROTO_PUBLIC) { return; }
-        let mut ii: usize = 0;
-        while ii < unsafe (*self.cur_ast()).instances.len() {
+        for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let home = self.cur_ast();
             let home_mod = unsafe (*home).module;
             let hsrc = self.source;
             let hlen = self.len;
             let it = *unsafe (*home).instance(ii as u32);
-            if it.module == home_mod || it.module as usize >= self.pkg_count() || self.inst_rehomed_here(&it) { ii = ii + 1; continue; }
+            if it.module == home_mod || it.module as usize >= self.pkg_count() || self.inst_rehomed_here(&it) { continue; }
             let mut concrete = true;
-            let mut k: u8 = 0;
-            while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete { ii = ii + 1; continue; }
+            for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+            if !concrete { continue; }
             let itTy = unsafe (*home).intern_instance(it.module, it.decl, (&it.args[0]) as *const TypeId, it.n);
             let mut any = false;
             let mut mk: usize = 0;
             while mk < unsafe (*home).method_insts.len() && !any {
-                if unsafe (*home).method_insts.at(mk).instance == itTy { any = true; }
+                if unsafe (*home).method_insts[mk].instance == itTy { any = true; }
                 mk = mk + 1;
             }
-            if !any { ii = ii + 1; continue; }
+            if !any { continue; }
             let owner = self.mod_ast(it.module);
             let osrc = self.mod_src(it.module);
             let oninst = unsafe (*owner).instances.len();
             let mut oit = it;
-            let mut k2: u8 = 0;
-            while k2 < it.n { unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k2 as usize]); k2 = k2 + 1; }
+            for k2 in 0..it.n { unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe (&*home), it.args[k2 as usize]); }
             self.source = osrc;
-            self.len = unsafe (*self.package).modules.at(it.module as usize).source_len;
+            self.len = unsafe (*self.package).modules[it.module as usize].source_len;
             self.borrowed = true;
             self.minst_only = true;
             self.ast = self.mod_ast(it.module);
@@ -6674,18 +6494,15 @@ extend Codegen {
             self.source = hsrc;
             self.len = hlen;
             self.nsubst = 0;
-            ii = ii + 1;
         }
     }
     fn emit_specializations(self: &mut Self, with_body: bool) void {
-        let mut i: i32 = 0;
-        while i < self.ninsts {
+        for i in 0..self.ninsts {
             let inst = self.insts[i as usize];
             let fn2 = inst.func;
             let mut concrete = true;
-            let mut k: u8 = 0;
-            while k < inst.n { if !self.type_is_concrete(inst.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete { i = i + 1; continue; }
+            for k in 0..inst.n { if !self.type_is_concrete(inst.args[k as usize]) { concrete = false; } }
+            if !concrete { continue; }
             if fn2.module == self.cur_module() {
                 let gens = unsafe (*self.cur_ast()).at_const(fn2.node).as_data.function.generics;
                 let gids = unsafe (*self.cur_ast()).list(gens);
@@ -6702,10 +6519,9 @@ extend Codegen {
                 if !with_body { self.emit_ret_struct_named(fn2.node, (&nm.b[0]) as *const char); }
                 self.emit_function(fn2.node, DefId { module: 0, node: NODE_NONE }, false, with_body, (&nm.b[0]) as *const char, true);
                 self.nsubst = 0;
-                i = i + 1;
                 continue;
             }
-            if self.package == null || fn2.module as usize >= self.pkg_count() { i = i + 1; continue; }
+            if self.package == null || fn2.module as usize >= self.pkg_count() { continue; }
             let home = self.cur_ast();
             let hsrc = self.source;
             let hlen = self.len;
@@ -6713,11 +6529,10 @@ extend Codegen {
             let osrc = self.mod_src(fn2.module);
             let oninst = unsafe (*owner).instances.len();
             let mut oargs = TyArgs4 {};
-            let mut k2: u8 = 0;
-            while k2 < inst.n { unsafe oargs.t[k2 as usize] = unsafe (*owner).reintern(unsafe (&*home), inst.args[k2 as usize]); k2 = k2 + 1; }
+            for k2 in 0..inst.n { unsafe oargs.t[k2 as usize] = unsafe (*owner).reintern(unsafe (&*home), inst.args[k2 as usize]); }
             self.ast = owner;
             self.source = osrc;
-            self.len = unsafe (*self.package).modules.at(fn2.module as usize).source_len;
+            self.len = unsafe (*self.package).modules[fn2.module as usize].source_len;
             self.borrowed = true;
             let gens = unsafe (*self.cur_ast()).at_const(fn2.node).as_data.function.generics;
             let gids = unsafe (*self.cur_ast()).list(gens);
@@ -6739,23 +6554,21 @@ extend Codegen {
             self.ast = home;
             self.source = hsrc;
             self.len = hlen;
-            i = i + 1;
         }
     }
     fn emit_default_methods(self: &mut Self, which: i32, with_body: bool) void {
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-            if nk != NodeKind::NODE_EXTEND || ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE || ed.generics.len != 0 { i = i + 1; continue; }
+            if nk != NodeKind::NODE_EXTEND || ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE || ed.generics.len != 0 { continue; }
             let iface = unsafe (*self.cur_ast()).resolution_def(ed.interface_type);
             let target = unsafe (*self.cur_ast()).resolution_def(ed.target_type);
-            if iface.node == NODE_NONE || target.node == NODE_NONE { i = i + 1; continue; }
+            if iface.node == NODE_NONE || target.node == NODE_NONE { continue; }
             let foreign = iface.module != self.cur_module();
-            if foreign && (self.package == null || iface.module as usize >= self.pkg_count()) { i = i + 1; continue; }
+            if foreign && (self.package == null || iface.module as usize >= self.pkg_count()) { continue; }
             let mut bb: i32 = -1;
             if self.package != null { bb = unsafe (*self.package).builtin_of_decl(target.module, target.node); }
             let tkind_is_enum = unsafe (*self.mod_ast(target.module)).at_const(target.node).kind == NodeKind::NODE_ENUM;
@@ -6769,12 +6582,11 @@ extend Codegen {
             let have = ed.items;
             let hids = unsafe (*self.cur_ast()).list(have);
             let vis = unsafe (*ia).at_const(iface.node).as_data.interface_def.is_public && target.module == self.cur_module();
-            let mut r: u32 = 0;
-            while r < req.len {
+            for r in 0..req.len {
                 let rid = unsafe rids[r as usize];
                 let rm = unsafe (*ia).at_const(rid);
-                if rm.kind != NodeKind::NODE_FUNCTION || rm.as_data.function.body == NODE_NONE || rm.as_data.function.generics.len != 0 { r = r + 1; continue; }
-                if !with_body && !want_fn(which, vis) { r = r + 1; continue; }
+                if rm.kind != NodeKind::NODE_FUNCTION || rm.as_data.function.body == NODE_NONE || rm.as_data.function.generics.len != 0 { continue; }
+                if !with_body && !want_fn(which, vis) { continue; }
                 let rmn = unsafe (*ia).at_const(rm.as_data.function.name).as_data.name.text;
                 let mut overridden = false;
                 let mut h: u32 = 0;
@@ -6786,14 +6598,14 @@ extend Codegen {
                     }
                     h = h + 1;
                 }
-                if overridden { r = r + 1; continue; }
+                if overridden { continue; }
                 let home = self.cur_ast();
                 let hsrc = self.source;
                 let hlen = self.len;
                 let mut oninst: usize = 0;
                 if foreign {
                     self.source = self.mod_src(iface.module);
-                    self.len = unsafe (*self.package).modules.at(iface.module as usize).source_len;
+                    self.len = unsafe (*self.package).modules[iface.module as usize].source_len;
                     self.ast = self.mod_ast(iface.module);
                     self.borrowed = true;
                     self.dflt_home = unsafe (*home).module;
@@ -6817,9 +6629,7 @@ extend Codegen {
                     self.source = hsrc;
                     self.len = hlen;
                 }
-                r = r + 1;
             }
-            i = i + 1;
         }
     }
     fn emit_closure_fn(self: &mut Self, id: NodeId, with_body: bool) void {
@@ -6830,8 +6640,7 @@ extend Codegen {
         if caps && !with_body {
             self.emit_cstr("typedef struct { ".ptr() as *const char);
             let cids = unsafe (*self.cur_ast()).list(cl.captures);
-            let mut i: u32 = 0;
-            while i < cl.captures.len {
+            for i in 0..cl.captures.len {
                 let cid = unsafe cids[i as usize];
                 let mut fnm = Buf128 {};
                 let csp = self.cg_decl_name_span(cid);
@@ -6843,23 +6652,20 @@ extend Codegen {
                 let mut d = Buf300 {};
                 self.render_type_id(ft, (&fnm.b[0]) as *const char, (&mut d.b[0]) as *mut char, 300);
                 self.emit("%s; ".ptr() as *const char, (&d.b[0]) as *const char);
-                i = i + 1;
             }
             self.emit("} %s_env;\n".ptr() as *const char, (&nm.b[0]) as *const char);
             let fnty = Ty { kind: TypeKind::TYPE_FUNCTION, module: self.cur_module(), as_data: TyAs { decl: id } };
             if self.cg_fn_owns(&fnty) {
                 self.emit("static __attribute__((unused)) void %s_env_free(%s_env *const __e) { ".ptr() as *const char, (&nm.b[0]) as *const char, (&nm.b[0]) as *const char);
-                let mut i2: u32 = 0;
-                while i2 < cl.captures.len {
+                for i2 in 0..cl.captures.len {
                     let cid = unsafe cids[i2 as usize];
-                    if (((cl.mut_caps >> (i2 as u64)) & (1 as u64)) != 0 as u64) || !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(cid)) { i2 = i2 + 1; continue; }
+                    if (((cl.mut_caps >> (i2 as u64)) & (1 as u64)) != 0 as u64) || !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(cid)) { continue; }
                     let mut fnm = Buf128 {};
                     let csp = self.cg_decl_name_span(cid);
                     self.render_ident(csp, (&mut fnm.b[0]) as *mut char, 128);
                     if self.emit_free_target(unsafe (*self.cur_ast()).type_of(cid)) {
                         self.emit("(&__e->%s); ".ptr() as *const char, (&fnm.b[0]) as *const char);
                     }
-                    i2 = i2 + 1;
                 }
                 self.emit_cstr("}\n".ptr() as *const char);
             }
@@ -6933,12 +6739,10 @@ extend Codegen {
         self.env_clos = saved_env;
     }
     fn emit_closures(self: &mut Self, with_body: bool) void {
-        let mut i: usize = 0;
-        while i < unsafe (*self.cur_ast()).nodes.len() {
+        for i in 0..unsafe (*self.cur_ast()).nodes.len() {
             if unsafe (*self.cur_ast()).at_const(i as NodeId).kind == NodeKind::NODE_CLOSURE {
                 self.emit_closure_fn(i as NodeId, with_body);
             }
-            i = i + 1;
         }
     }
     fn cb_specialized_away(self: &Self, fnId: NodeId) bool {
@@ -6952,8 +6756,7 @@ extend Codegen {
             i = i + 1;
         }
         if !any { return false; }
-        let mut j: i32 = 0;
-        while j < self.n_cb_keep { if self.cb_keep_fns[j as usize] == fnId { return false; } j = j + 1; }
+        for j in 0..self.n_cb_keep { if self.cb_keep_fns[j as usize] == fnId { return false; } }
         return true;
     }
     fn collect_callbacks(self: &mut Self) void {
@@ -6990,10 +6793,9 @@ extend Codegen {
         }
     }
     fn emit_callback_specializations(self: &mut Self, with_body: bool) void {
-        let mut i: i32 = 0;
-        while i < self.n_cb_insts {
+        for i in 0..self.n_cb_insts {
             let ci = self.cb_insts[i as usize];
-            if ci.func.module != self.cur_module() { i = i + 1; continue; }
+            if ci.func.module != self.cur_module() { continue; }
             self.cb_param = ci.param;
             self.cb_callee = ci.callee;
             self.cb_callee_closure = ci.callee_closure;
@@ -7001,14 +6803,12 @@ extend Codegen {
             self.cb_spec_name(ci.func, self.cb_callee, self.cb_callee_closure, (&mut nm.b[0]) as *mut char, 300);
             self.emit_function(ci.func.node, DefId { module: 0, node: NODE_NONE }, false, with_body, (&nm.b[0]) as *const char, true);
             self.cb_param = NODE_NONE;
-            i = i + 1;
         }
     }
     fn emit_dyn_typedefs(self: &mut Self) void {
-        let mut i: usize = 0;
-        while i < unsafe (*self.cur_ast()).type_pool.len() {
+        for i in 0..unsafe (*self.cur_ast()).type_pool.len() {
             let dy = *unsafe (*self.cur_ast()).type_at(i as TypeId);
-            if dy.kind != TypeKind::TYPE_DYN { i = i + 1; continue; }
+            if dy.kind != TypeKind::TYPE_DYN { continue; }
             let mut seen = false;
             let mut j: usize = 0;
             while j < i && !seen {
@@ -7016,7 +6816,7 @@ extend Codegen {
                 if pj.kind == TypeKind::TYPE_DYN && pj.module == dy.module && pj.as_data.decl == dy.as_data.decl { seen = true; }
                 j = j + 1;
             }
-            if seen { i = i + 1; continue; }
+            if seen { continue; }
             let mut stem = Buf176 {};
             self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem.b[0]) as *mut char, 176);
             let sp = (&stem.b[0]) as *const char;
@@ -7028,15 +6828,13 @@ extend Codegen {
                 let pid = unsafe (*self.mod_ast(dy.module)).list(ftp);
                 let mut inner = Buf512 {};
                 let mut at = bappend((&mut inner.b[0]) as *mut char, 512, 0, "(*call)(void *self".ptr() as *const char);
-                let mut p: u32 = 0;
-                while p < ftp.len {
+                for p in 0..ftp.len {
                     let src_ty = unsafe (*self.mod_ast(dy.module)).type_of(unsafe pid[p as usize]);
                     let pt_ty = unsafe (*self.cur_ast()).reintern(unsafe (&*self.mod_ast(dy.module)), src_ty);
                     let mut pt = Buf200 {};
                     self.render_type_id(pt_ty, "".ptr() as *const char, (&mut pt.b[0]) as *mut char, 200);
                     at = bappend((&mut inner.b[0]) as *mut char, 512, at, ", ".ptr() as *const char);
                     at = bappend((&mut inner.b[0]) as *mut char, 512, at, (&pt.b[0]) as *const char);
-                    p = p + 1;
                 }
                 bappend((&mut inner.b[0]) as *mut char, 512, at, ")".ptr() as *const char);
                 let rt = self.cg_dynfn_ret(dy.module, dy.as_data.decl);
@@ -7046,15 +6844,13 @@ extend Codegen {
                 self.emit("    %s;\n".ptr() as *const char, (&memb.b[0]) as *const char);
                 self.emit("} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n".ptr() as *const char, sp, sp, sp, sp);
                 self.emit("static inline void %s__dyn_free(%s__dyn *const d) { d->vt->__free(d->data); }\n#endif\n".ptr() as *const char, sp, sp);
-                i = i + 1;
                 continue;
             }
             let idn_items = unsafe (*self.mod_ast(dy.module)).at_const(dy.as_data.decl).as_data.interface_def.items;
             let mids = unsafe (*self.mod_ast(dy.module)).list(idn_items);
-            let mut km: u32 = 0;
-            while km < idn_items.len {
+            for km in 0..idn_items.len {
                 let mid = unsafe mids[km as usize];
-                if !self.cg_dyn_method(dy.module, mid) { km = km + 1; continue; }
+                if !self.cg_dyn_method(dy.module, mid) { continue; }
                 let mname_node = unsafe (*self.mod_ast(dy.module)).at_const(mid).as_data.function.name;
                 let mut mn = Buf128 {};
                 render_ident_src(self.mod_src(dy.module), unsafe (*self.mod_ast(dy.module)).at_const(mname_node).as_data.name.text, (&mut mn.b[0]) as *mut char, 128);
@@ -7081,11 +6877,9 @@ extend Codegen {
                 if rt != TYPE_NONE { self.render_type_id(rt, (&inner.b[0]) as *const char, (&mut memb.b[0]) as *mut char, 600); }
                 else { buf_join3((&mut memb.b[0]) as *mut char, 600, "void ".ptr() as *const char, "".ptr() as *const char, (&inner.b[0]) as *const char); }
                 self.emit("    %s;\n".ptr() as *const char, (&memb.b[0]) as *const char);
-                km = km + 1;
             }
             self.emit("} %s__vt;\ntypedef struct %s__dyn { void *data; const %s__vt *vt; } %s__dyn;\n".ptr() as *const char, sp, sp, sp, sp);
             self.emit("static inline void %s__dyn_free(%s__dyn *const d) { d->vt->__free(d->data); }\n#endif\n".ptr() as *const char, sp, sp);
-            i = i + 1;
         }
     }
     fn emit_dynfn_table(self: &mut Self, src: TypeId, dy: Ty) void {
@@ -7102,8 +6896,7 @@ extend Codegen {
         else { bappend((&mut rts.b[0]) as *mut char, 256, 0, "void".ptr() as *const char); }
         self.emit("static __attribute__((unused)) %s %s__call(void *__self".ptr() as *const char, (&rts.b[0]) as *const char, pp);
         let pid = unsafe (*self.mod_ast(dy.module)).list(sig_params);
-        let mut p: u32 = 0;
-        while p < sig_params.len {
+        for p in 0..sig_params.len {
             let mut an = Buf32 {};
             unsafe stdio::snprintf((&mut an.b[0]) as *mut char, 16, "_a%u".ptr() as *const char, p);
             let src_ty = unsafe (*self.mod_ast(dy.module)).type_of(unsafe pid[p as usize]);
@@ -7111,7 +6904,6 @@ extend Codegen {
             let mut pd = Buf240 {};
             self.render_type_id(pt_ty, (&an.b[0]) as *const char, (&mut pd.b[0]) as *mut char, 240);
             self.emit(", %s".ptr() as *const char, (&pd.b[0]) as *const char);
-            p = p + 1;
         }
         self.emit_cstr(") { ".ptr() as *const char);
         if !capt { self.emit_cstr("(void)__self; ".ptr() as *const char); }
@@ -7131,18 +6923,16 @@ extend Codegen {
             self.emit("(const %s *)__self".ptr() as *const char, (&envn.b[0]) as *const char);
             wrote = true;
         }
-        let mut p2: u32 = 0;
-        while p2 < sig_params.len {
+        for p2 in 0..sig_params.len {
             if wrote || p2 != 0 { self.emit_cstr(", ".ptr() as *const char); }
             self.emit("_a%u".ptr() as *const char, p2);
             wrote = true;
-            p2 = p2 + 1;
         }
         self.emit_cstr("); }\n".ptr() as *const char);
         let mut owned = false;
         let mut jj: usize = 0;
         while jj < unsafe (*self.cur_ast()).dyn_uses.len() && !owned {
-            let oju = *unsafe (*self.cur_ast()).dyn_uses.at(jj);
+            let oju = unsafe (*self.cur_ast()).dyn_uses[jj];
             if oju.src == src {
                 let oy = *unsafe (*self.cur_ast()).type_at(oju.dyn_ty);
                 if oy.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 { owned = true; }
@@ -7150,7 +6940,7 @@ extend Codegen {
             jj = jj + 1;
         }
         if owned && self.package != null {
-            let hit = unsafe (*self.package).prelude_lookup("Global".ptr() as *const char, 6, true);
+            let hit = unsafe (*self.package).prelude_lookup("Global", true);
             let gname = unsafe (*self.mod_ast(hit.mid)).at_const(hit.node).as_data.aggregate.name;
             let mut gt = Buf160 {};
             self.render_qualified(hit.mid, gname, (&mut gt.b[0]) as *mut char, 160);
@@ -7176,17 +6966,16 @@ extend Codegen {
     }
     fn emit_dyn_tables(self: &mut Self) void {
         let n = unsafe (*self.cur_ast()).dyn_uses.len();
-        let mut i: usize = 0;
-        while i < n {
-            let dui = *unsafe (*self.cur_ast()).dyn_uses.at(i);
-            if dui.src == TYPE_NONE { i = i + 1; continue; }
+        for i in 0..n {
+            let dui = unsafe (*self.cur_ast()).dyn_uses[i];
+            if dui.src == TYPE_NONE { continue; }
             let dy = *unsafe (*self.cur_ast()).type_at(dui.dyn_ty);
             let mut istem = Buf176 {};
             self.dyn_stem(dy.module, dy.as_data.decl, (&mut istem.b[0]) as *mut char, 176);
             let mut seen = false;
             let mut j: usize = 0;
             while j < i && !seen {
-                let duj = *unsafe (*self.cur_ast()).dyn_uses.at(j);
+                let duj = unsafe (*self.cur_ast()).dyn_uses[j];
                 if duj.src != dui.src { j = j + 1; continue; }
                 let pj = *unsafe (*self.cur_ast()).type_at(duj.dyn_ty);
                 if pj.module == dy.module && pj.as_data.decl == dy.as_data.decl { seen = true; }
@@ -7197,17 +6986,16 @@ extend Codegen {
                 }
                 j = j + 1;
             }
-            if seen { i = i + 1; continue; }
+            if seen { continue; }
             let src = dui.src;
             let sy = *unsafe (*self.cur_ast()).type_at(src);
             if unsafe (*self.mod_ast(dy.module)).at_const(dy.as_data.decl).kind == NodeKind::NODE_FUNCTION_TYPE {
                 self.emit_dynfn_table(src, dy);
-                i = i + 1;
                 continue;
             }
             let mut tm: ModuleId = 0;
             let mut td: NodeId = NODE_NONE;
-            if !self.cg_dyn_target(&sy, (&mut tm) as *mut ModuleId, (&mut td) as *mut NodeId) { i = i + 1; continue; }
+            if !self.cg_dyn_target(&sy, (&mut tm) as *mut ModuleId, (&mut td) as *mut NodeId) { continue; }
             let mut pair = Buf368 {};
             self.dyn_pair_stem(src, dy.module, dy.as_data.decl, (&mut pair.b[0]) as *mut char, 368);
             let pp = (&pair.b[0]) as *const char;
@@ -7216,10 +7004,9 @@ extend Codegen {
             let rvp = (&recv.b[0]) as *const char;
             let idn_items = unsafe (*self.mod_ast(dy.module)).at_const(dy.as_data.decl).as_data.interface_def.items;
             let mids = unsafe (*self.mod_ast(dy.module)).list(idn_items);
-            let mut km: u32 = 0;
-            while km < idn_items.len {
+            for km in 0..idn_items.len {
                 let mid = unsafe mids[km as usize];
-                if !self.cg_dyn_method(dy.module, mid) { km = km + 1; continue; }
+                if !self.cg_dyn_method(dy.module, mid) { continue; }
                 let mnamenode = unsafe (*self.mod_ast(dy.module)).at_const(mid).as_data.function.name;
                 let mspan = unsafe (*self.mod_ast(dy.module)).at_const(mnamenode).as_data.name.text;
                 let mut mn = Buf128 {};
@@ -7251,18 +7038,17 @@ extend Codegen {
                 let mut p2: u32 = 1;
                 while p2 < mparams.len { self.emit(", _a%u".ptr() as *const char, p2); p2 = p2 + 1; }
                 self.emit_cstr("); }\n".ptr() as *const char);
-                km = km + 1;
             }
             let mut owned = false;
             let mut ojo: usize = 0;
             while ojo < unsafe (*self.cur_ast()).dyn_uses.len() && !owned {
-                let du = *unsafe (*self.cur_ast()).dyn_uses.at(ojo);
+                let du = unsafe (*self.cur_ast()).dyn_uses[ojo];
                 let oy = *unsafe (*self.cur_ast()).type_at(du.dyn_ty);
                 if du.src == src && oy.module == dy.module && oy.as_data.decl == dy.as_data.decl && oy.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 { owned = true; }
                 ojo = ojo + 1;
             }
             if owned && self.package != null {
-                let hit = unsafe (*self.package).prelude_lookup("Global".ptr() as *const char, 6, true);
+                let hit = unsafe (*self.package).prelude_lookup("Global", true);
                 let gname = unsafe (*self.mod_ast(hit.mid)).at_const(hit.node).as_data.aggregate.name;
                 let mut gt = Buf160 {};
                 self.render_qualified(hit.mid, gname, (&mut gt.b[0]) as *mut char, 160);
@@ -7279,18 +7065,15 @@ extend Codegen {
             self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem.b[0]) as *mut char, 176);
             self.emit("static const %s__vt %s__vtbl __attribute__((unused)) = { ".ptr() as *const char, (&stem.b[0]) as *const char, pp);
             if owned { self.emit("%s____free".ptr() as *const char, pp); } else { self.emit_cstr("0".ptr() as *const char); }
-            let mut km2: u32 = 0;
-            while km2 < idn_items.len {
+            for km2 in 0..idn_items.len {
                 let mid = unsafe mids[km2 as usize];
-                if !self.cg_dyn_method(dy.module, mid) { km2 = km2 + 1; continue; }
+                if !self.cg_dyn_method(dy.module, mid) { continue; }
                 let mnamenode = unsafe (*self.mod_ast(dy.module)).at_const(mid).as_data.function.name;
                 let mut mn = Buf128 {};
                 render_ident_src(self.mod_src(dy.module), unsafe (*self.mod_ast(dy.module)).at_const(mnamenode).as_data.name.text, (&mut mn.b[0]) as *mut char, 128);
                 self.emit(", %s__%s".ptr() as *const char, pp, (&mn.b[0]) as *const char);
-                km2 = km2 + 1;
             }
             self.emit_cstr(" };\n".ptr() as *const char);
-            i = i + 1;
         }
         if unsafe (*self.cur_ast()).dyn_uses.len() != 0 { self.emit_cstr("\n".ptr() as *const char); }
     }
@@ -7300,39 +7083,34 @@ extend Codegen {
         let mut any = false;
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             let ng = unsafe (*self.cur_ast()).at_const(nid).as_data.aggregate.generics.len;
-            if (nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM) || ng != 0 { i = i + 1; continue; }
-            if nk == NodeKind::NODE_ENUM && !self.aggregate_has_payload(nid) { i = i + 1; continue; }
+            if (nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM) || ng != 0 { continue; }
+            if nk == NodeKind::NODE_ENUM && !self.aggregate_has_payload(nid) { continue; }
             let tkind = if (nk == NodeKind::NODE_ENUM) { TypeKind::TYPE_ENUM; } else { TypeKind::TYPE_STRUCT; };
             let t = unsafe (*self.cur_ast()).intern_type(Ty { kind: tkind, module: self.cur_module(), as_data: TyAs { decl: nid } });
             let lo = unsafe (*ce).layout(self.cur_module(), t);
-            if !lo.ok { i = i + 1; continue; }
+            if !lo.ok { continue; }
             let mut nm = Buf256 {};
             self.render_type_id(t, "".ptr() as *const char, (&mut nm.b[0]) as *mut char, 256);
             self.emit("_Static_assert(sizeof(%s) == %llu && _Alignof(%s) == %llu, \"super-c layout model mismatch: %s\");\n".ptr() as *const char, (&nm.b[0]) as *const char, lo.size, (&nm.b[0]) as *const char, lo.align, (&nm.b[0]) as *const char);
             any = true;
-            i = i + 1;
         }
-        let mut ii: usize = 0;
-        while ii < unsafe (*self.cur_ast()).instances.len() {
+        for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
-            if it.module != self.cur_module() { ii = ii + 1; continue; }
+            if it.module != self.cur_module() { continue; }
             let mut concrete = true;
-            let mut k: u8 = 0;
-            while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete || self.inst_mentions_fnval(&it) { ii = ii + 1; continue; }
+            for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+            if !concrete || self.inst_mentions_fnval(&it) { continue; }
             let t = unsafe (*self.cur_ast()).intern_instance(it.module, it.decl, (&it.args[0]) as *const TypeId, it.n);
             let lo = unsafe (*ce).layout(self.cur_module(), t);
-            if !lo.ok { ii = ii + 1; continue; }
+            if !lo.ok { continue; }
             let mut nm = Buf256 {};
             self.render_type_id(t, "".ptr() as *const char, (&mut nm.b[0]) as *mut char, 256);
             self.emit("_Static_assert(sizeof(%s) == %llu && _Alignof(%s) == %llu, \"super-c layout model mismatch: %s\");\n".ptr() as *const char, (&nm.b[0]) as *const char, lo.size, (&nm.b[0]) as *const char, lo.align, (&nm.b[0]) as *const char);
             any = true;
-            ii = ii + 1;
         }
         if any { self.emit_cstr("\n".ptr() as *const char); }
     }
@@ -7362,22 +7140,20 @@ extend Codegen {
     fn emit_assoc_consts(self: &mut Self, public_pass: bool) void {
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-            if nk != NodeKind::NODE_EXTEND || ed.generics.len != 0 || ed.target_type == NODE_NONE { i = i + 1; continue; }
+            if nk != NodeKind::NODE_EXTEND || ed.generics.len != 0 || ed.target_type == NODE_NONE { continue; }
             let target = unsafe (*self.cur_ast()).resolution_def(ed.target_type);
-            if target.node == NODE_NONE { i = i + 1; continue; }
+            if target.node == NODE_NONE { continue; }
             let mids = unsafe (*self.cur_ast()).list(ed.items);
-            let mut j: u32 = 0;
-            while j < ed.items.len {
+            for j in 0..ed.items.len {
                 let mid = unsafe mids[j as usize];
                 let cnk = unsafe (*self.cur_ast()).at_const(mid).kind;
-                if cnk != NodeKind::NODE_CONST { j = j + 1; continue; }
+                if cnk != NodeKind::NODE_CONST { continue; }
                 let cd = unsafe (*self.cur_ast()).at_const(mid).as_data.const_def;
-                if self.multifile && cd.is_public != public_pass { j = j + 1; continue; }
+                if self.multifile && cd.is_public != public_pass { continue; }
                 let mut nm = Buf256 {};
                 let np = (&mut nm.b[0]) as *mut char;
                 let mut k = self.render_modpfx(self.cur_module(), np, 256);
@@ -7400,21 +7176,18 @@ extend Codegen {
                 self.emit_cstr(" = ".ptr() as *const char);
                 self.emit_initializer(cd.ty, cd.value);
                 self.emit_cstr(";\n".ptr() as *const char);
-                j = j + 1;
             }
-            i = i + 1;
         }
     }
     fn emit_public_consts(self: &mut Self) void {
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-            if nk != NodeKind::NODE_CONST { i = i + 1; continue; }
+            if nk != NodeKind::NODE_CONST { continue; }
             let cd = unsafe (*self.cur_ast()).at_const(nid).as_data.const_def;
-            if !cd.is_public { i = i + 1; continue; }
+            if !cd.is_public { continue; }
             if cd.is_static_mut {
                 let mut nm = Buf160 {};
                 self.render_qualified(self.cur_module(), cd.name, (&mut nm.b[0]) as *mut char, 160);
@@ -7426,23 +7199,20 @@ extend Codegen {
             } else {
                 self.emit_toplevel_const(nid);
             }
-            i = i + 1;
         }
         self.emit_assoc_consts(true);
     }
     fn emit_referenced_fwd(self: &mut Self) void {
         let cur = self.cur_module();
         let np = unsafe (*self.cur_ast()).type_pool.len();
-        let mut i: usize = 0;
-        while i < np {
+        for i in 0..np {
             let t = *unsafe (*self.cur_ast()).type_at(i as TypeId);
             if t.kind == TypeKind::TYPE_INSTANCE {
                 let it = *unsafe (*self.cur_ast()).instance(t.as_data.inst);
-                if it.module == cur || it.module as usize >= self.pkg_count() { i = i + 1; continue; }
+                if it.module == cur || it.module as usize >= self.pkg_count() { continue; }
                 let mut concrete = true;
-                let mut k: u8 = 0;
-                while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-                if !concrete { i = i + 1; continue; }
+                for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+                if !concrete { continue; }
                 let idn_kind = unsafe (*self.mod_ast(it.module)).at_const(it.decl).kind;
                 if idn_kind == NodeKind::NODE_STRUCT || self.aggregate_has_payload_in(it.module, it.decl) {
                     let kw = agg_kw(unsafe (*self.mod_ast(it.module)).at_const(it.decl));
@@ -7450,11 +7220,10 @@ extend Codegen {
                     self.inst_name(&it, (&mut inm.b[0]) as *mut char, 200);
                     self.emit("typedef %s %s %s;\n".ptr() as *const char, kw, (&inm.b[0]) as *const char, (&inm.b[0]) as *const char);
                 }
-                i = i + 1;
                 continue;
             }
-            if t.module == cur || t.module as usize >= self.pkg_count() { i = i + 1; continue; }
-            if self.package != null && unsafe (*self.package).builtin_of_decl(t.module, t.as_data.decl) >= 0 { i = i + 1; continue; }
+            if t.module == cur || t.module as usize >= self.pkg_count() { continue; }
+            if self.package != null && unsafe (*self.package).builtin_of_decl(t.module, t.as_data.decl) >= 0 { continue; }
             if t.kind == TypeKind::TYPE_STRUCT || (t.kind == TypeKind::TYPE_ENUM && self.aggregate_has_payload_in(t.module, t.as_data.decl)) {
                 let kw = agg_kw(unsafe (*self.mod_ast(t.module)).at_const(t.as_data.decl));
                 let anm = unsafe (*self.mod_ast(t.module)).at_const(t.as_data.decl).as_data.aggregate.name;
@@ -7468,14 +7237,13 @@ extend Codegen {
                 let tmod = t.module;
                 let tdecl = t.as_data.decl;
                 self.source = self.mod_src(tmod);
-                self.len = unsafe (*self.package).modules.at(tmod as usize).source_len;
+                self.len = unsafe (*self.package).modules[tmod as usize].source_len;
                 self.ast = self.mod_ast(tmod);
                 self.emit_enum_full(tdecl);
                 self.ast = sa;
                 self.source = ss;
                 self.len = sl;
             }
-            i = i + 1;
         }
     }
     fn emit_referenced_includes(self: &mut Self) void {
@@ -7483,35 +7251,29 @@ extend Codegen {
         let cur = self.cur_module();
         let want = unsafe stdlib::calloc(if nmod != 0 { nmod; } else { 1 as usize; }, 1) as *mut bool;
         if want == null { return; }
-        let mut i: usize = 0;
-        while i < unsafe (*self.cur_ast()).resolutions.len() {
-            let d = *unsafe (*self.cur_ast()).resolutions.at(i);
-            if d.node == NODE_NONE || d.module == cur || d.module as usize >= nmod { i = i + 1; continue; }
-            if self.cg_decl_is_interface_member(d.module, d.node) { i = i + 1; continue; }
-            if unsafe (*self.package).builtin_of_decl(d.module, d.node) >= 0 { i = i + 1; continue; }
+        for i in 0..unsafe (*self.cur_ast()).resolutions.len() {
+            let d = unsafe (*self.cur_ast()).resolutions[i];
+            if d.node == NODE_NONE || d.module == cur || d.module as usize >= nmod { continue; }
+            if self.cg_decl_is_interface_member(d.module, d.node) { continue; }
+            if unsafe (*self.package).builtin_of_decl(d.module, d.node) >= 0 { continue; }
             unsafe want[d.module as usize] = true;
-            i = i + 1;
         }
-        let mut ti: usize = 0;
-        while ti < unsafe (*self.cur_ast()).type_pool.len() {
+        for ti in 0..unsafe (*self.cur_ast()).type_pool.len() {
             let t = *unsafe (*self.cur_ast()).type_at(ti as TypeId);
-            if (t.kind != TypeKind::TYPE_STRUCT && t.kind != TypeKind::TYPE_ENUM && t.kind != TypeKind::TYPE_FUNCTION) || t.module == cur || t.module as usize >= nmod { ti = ti + 1; continue; }
-            if unsafe (*self.package).builtin_of_decl(t.module, t.as_data.decl) >= 0 { ti = ti + 1; continue; }
-            if t.kind == TypeKind::TYPE_FUNCTION && self.cg_decl_is_interface_member(t.module, t.as_data.decl) { ti = ti + 1; continue; }
+            if (t.kind != TypeKind::TYPE_STRUCT && t.kind != TypeKind::TYPE_ENUM && t.kind != TypeKind::TYPE_FUNCTION) || t.module == cur || t.module as usize >= nmod { continue; }
+            if unsafe (*self.package).builtin_of_decl(t.module, t.as_data.decl) >= 0 { continue; }
+            if t.kind == TypeKind::TYPE_FUNCTION && self.cg_decl_is_interface_member(t.module, t.as_data.decl) { continue; }
             unsafe want[t.module as usize] = true;
-            ti = ti + 1;
         }
-        let mut ii: usize = 0;
-        while ii < unsafe (*self.cur_ast()).instances.len() {
+        for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
             let mut concrete = (it.module as usize) < nmod || it.module == cur;
             let mut k: u8 = 0;
             while k < it.n && concrete { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete { ii = ii + 1; continue; }
+            if !concrete { continue; }
             let home = unsafe (*self.package).instance_home(unsafe (&*self.cur_ast()), &it);
             if it.module != cur && (it.module as usize) < nmod { unsafe want[it.module as usize] = true; }
             if home != cur && (home as usize) < nmod { unsafe want[home as usize] = true; }
-            ii = ii + 1;
         }
         if unsafe (*self.package).core_seeded && unsafe (*self.package).core_module != cur && (unsafe (*self.package).core_module as usize) < nmod {
             let mut need_core = false;
@@ -7533,10 +7295,8 @@ extend Codegen {
             }
             if need_core { unsafe want[unsafe (*self.package).core_module as usize] = true; }
         }
-        let mut m: usize = 0;
-        while m < nmod {
-            if unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules.at(m).path); }
-            m = m + 1;
+        for m in 0..nmod {
+            if unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules[m].path); }
         }
         unsafe stdlib::free(want as *mut void);
     }
@@ -7550,8 +7310,7 @@ extend Codegen {
         let mut pub_const_expr = false;
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             if (nk == NodeKind::NODE_STRUCT || nk == NodeKind::NODE_ENUM) && unsafe (*self.cur_ast()).at_const(nid).as_data.aggregate.generics.len == 0 {
@@ -7559,13 +7318,11 @@ extend Codegen {
             } else if nk == NodeKind::NODE_FUNCTION && unsafe (*self.cur_ast()).at_const(nid).as_data.function.returns.len > 1 {
                 let rets = unsafe (*self.cur_ast()).at_const(nid).as_data.function.returns;
                 let rids = unsafe (*self.cur_ast()).list(rets);
-                let mut r: u32 = 0;
-                while r < rets.len {
+                for r in 0..rets.len {
                     let rid = unsafe rids[r as usize];
                     let rn = unsafe (*self.cur_ast()).at_const(rid);
                     let rtn = if (rn.kind == NodeKind::NODE_PARAMETER) { rn.as_data.parameter.ty; } else { rid; };
                     self.mark_layout_module(unsafe (*self.cur_ast()).type_of(rtn), want, nmod);
-                    r = r + 1;
                 }
             } else if nk == NodeKind::NODE_CONST {
                 let cd = unsafe (*self.cur_ast()).at_const(nid).as_data.const_def;
@@ -7574,17 +7331,15 @@ extend Codegen {
                     if cd.is_public && cd.value != NODE_NONE && unsafe (*self.cur_ast()).at_const(cd.value).kind != NodeKind::NODE_LITERAL { pub_const_expr = true; }
                 }
             }
-            i = i + 1;
         }
-        let mut ii: usize = 0;
-        while ii < unsafe (*self.cur_ast()).instances.len() {
+        for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
             let mut concrete = (it.module as usize) < nmod || it.module == cur;
             let mut k: u8 = 0;
             while k < it.n && concrete { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete { ii = ii + 1; continue; }
+            if !concrete { continue; }
             let home = unsafe (*self.package).instance_home(unsafe (&*self.cur_ast()), &it);
-            if home != cur { ii = ii + 1; continue; }
+            if home != cur { continue; }
             if it.module == cur {
                 let ag = unsafe (*self.cur_ast()).at_const(it.decl).as_data.aggregate;
                 let gids = unsafe (*self.cur_ast()).list(ag.generics);
@@ -7600,30 +7355,22 @@ extend Codegen {
                 self.nsubst = 0;
             } else {
                 if (it.module as usize) < nmod { unsafe want[it.module as usize] = true; }
-                let mut k2: u8 = 0;
-                while k2 < it.n { self.mark_layout_module(it.args[k2 as usize], want, nmod); k2 = k2 + 1; }
+                for k2 in 0..it.n { self.mark_layout_module(it.args[k2 as usize], want, nmod); }
             }
-            ii = ii + 1;
         }
         self.nsubst = saved;
         if pub_const_expr {
-            let mut ri: usize = 0;
-            while ri < unsafe (*self.cur_ast()).resolutions.len() {
-                let d = *unsafe (*self.cur_ast()).resolutions.at(ri);
+            for ri in 0..unsafe (*self.cur_ast()).resolutions.len() {
+                let d = unsafe (*self.cur_ast()).resolutions[ri];
                 if d.node != NODE_NONE && d.module != cur && (d.module as usize) < nmod && !self.cg_decl_is_interface_member(d.module, d.node) { unsafe want[d.module as usize] = true; }
-                ri = ri + 1;
             }
-            let mut ti: usize = 0;
-            while ti < unsafe (*self.cur_ast()).type_pool.len() {
+            for ti in 0..unsafe (*self.cur_ast()).type_pool.len() {
                 let t = *unsafe (*self.cur_ast()).type_at(ti as TypeId);
                 if (t.kind == TypeKind::TYPE_STRUCT || t.kind == TypeKind::TYPE_ENUM) && t.module != cur && (t.module as usize) < nmod && unsafe (*self.package).builtin_of_decl(t.module, t.as_data.decl) < 0 { unsafe want[t.module as usize] = true; }
-                ti = ti + 1;
             }
         }
-        let mut m: usize = 0;
-        while m < nmod {
-            if m != cur as usize && unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules.at(m).path); }
-            m = m + 1;
+        for m in 0..nmod {
+            if m != cur as usize && unsafe want[m] { self.emit_modpath_include(unsafe (*self.package).modules[m].path); }
         }
         unsafe stdlib::free(want as *mut void);
     }
@@ -7660,7 +7407,7 @@ extend Codegen {
             let mut done = false;
             let cm = self.cur_module();
             if self.package != null && (cm as usize) < unsafe (*self.package).modules.len() {
-                let file = unsafe (*self.package).modules.at(cm as usize).file;
+                let file = unsafe (*self.package).modules[cm as usize].file;
                 if file != null {
                     let mut rel = Buf4096 {};
                     let hp = unsafe (self.source + s as usize) as *const char;
@@ -7701,7 +7448,7 @@ extend Codegen {
         }
     }
     fn emit_includes(self: &mut Self) void {
-        let p = unsafe (*self.package).modules.at(self.cur_module() as usize).path;
+        let p = unsafe (*self.package).modules[self.cur_module() as usize].path;
         self.emit_modpath_include(p);
         self.emit_referenced_includes();
         self.emit_cstr("\n".ptr() as *const char);
@@ -7713,8 +7460,7 @@ extend Codegen {
     fn emit_test_wrappers(self: &mut Self) void {
         if !self.test.enabled || (self.test.ncases == 0 && self.test.genv_init == NODE_NONE) { return; }
         self.emit_cstr("\n/* --test wrappers */\n".ptr() as *const char);
-        let mut i: u32 = 0;
-        while i < self.test.ncases {
+        for i in 0..self.test.ncases {
             let tc = unsafe self.test.cases[i as usize];
             let suite = tc.suite.node != NODE_NONE;
             let fx_type = if (suite) { tc.suite; } else { self.test.fx_type; };
@@ -7757,7 +7503,6 @@ extend Codegen {
                 }
             }
             self.emit_cstr("}\n".ptr() as *const char);
-            i = i + 1;
         }
         if self.test.genv_init != NODE_NONE {
             let gt = self.cg_test_type(self.test.genv_type, self.test.genv_is_enum);
@@ -7789,7 +7534,7 @@ extend Codegen {
         let mut guard = Buf160 {};
         let np = (&mut guard.b[0]) as *mut char;
         let mut at = bappend(np, 160, 0, "SUPER_".ptr() as *const char);
-        let mp = unsafe (*self.package).modules.at(self.cur_module() as usize).path;
+        let mp = unsafe (*self.package).modules[self.cur_module() as usize].path;
         let mut i: usize = 0;
         while unsafe mp[i] != 0 as char && at + 2 < 160 {
             if unsafe mp[i] == ':' as char && unsafe mp[i + 1] == ':' as char {
@@ -7863,27 +7608,24 @@ extend Codegen {
         let src = self.source;
         let ln = self.len;
         let mut file: *const char = null;
-        if self.package != null && (self.cur_module() as usize) < self.pkg_count() { file = unsafe (*self.package).modules.at(self.cur_module() as usize).file; }
+        if self.package != null && (self.cur_module() as usize) < self.pkg_count() { file = unsafe (*self.package).modules[self.cur_module() as usize].file; }
         self.errors.finalize(src, ln, file);
         if self.buf_len != 0 { unsafe stdio::fwrite(self.buf, 1, self.buf_len, out); }
     }
     fn seed_emitted_type_instances(self: &mut Self) void {
-        let mut pass: i32 = 0;
-        while pass < 32 {
+        for pass in 0..32 {
             if !self.seed_emitted_generic_method_signature_instances() { return; }
-            pass = pass + 1;
         }
     }
     fn phase_forward(self: &mut Self) void {
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             if nk == NodeKind::NODE_STRUCT {
                 let ag = unsafe (*self.cur_ast()).at_const(nid).as_data.aggregate;
-                if ag.generics.len != 0 { i = i + 1; continue; }
+                if ag.generics.len != 0 { continue; }
                 let kw = agg_kw(unsafe (*self.cur_ast()).at_const(nid));
                 self.emit("typedef %s ".ptr() as *const char, kw);
                 self.emit_local_type_name(ag.name);
@@ -7892,10 +7634,9 @@ extend Codegen {
                 self.emit_cstr(";\n".ptr() as *const char);
             } else if nk == NodeKind::NODE_ENUM {
                 let ag = unsafe (*self.cur_ast()).at_const(nid).as_data.aggregate;
-                if ag.generics.len != 0 { i = i + 1; continue; }
+                if ag.generics.len != 0 { continue; }
                 if !self.aggregate_has_payload(nid) {
                     self.emit_enum_full(nid);
-                    i = i + 1;
                     continue;
                 }
                 self.emit_enum_tag_decl(nid);
@@ -7914,7 +7655,6 @@ extend Codegen {
                     self.emit("typedef %s;\n".ptr() as *const char, (&d.b[0]) as *const char);
                 }
             }
-            i = i + 1;
         }
         self.emit_aggregate_specializations(false);
         self.emit_rehomed_forwards();
@@ -7929,14 +7669,12 @@ extend Codegen {
         let cnt = if ni != 0 { ni; } else { 1 as usize; };
         self.inst_emit_state = unsafe stdlib::calloc(cnt, 1) as *mut u8;
         if self.inst_emit_state != null { self.inst_emit_n = ni; } else { self.inst_emit_n = 0; }
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             if self.type_emittable(nid) {
                 if state != null { self.emit_type_dfs(nid, state); }
                 else { self.emit_type_decl(nid); }
             }
-            i = i + 1;
         }
         self.emit_aggregate_specializations(true);
         self.emit_rehomed_structs(true);
@@ -7948,8 +7686,7 @@ extend Codegen {
     fn phase_ret_structs(self: &mut Self) void {
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             if nk == NodeKind::NODE_FUNCTION {
@@ -7958,41 +7695,36 @@ extend Codegen {
                 }
             } else if nk == NodeKind::NODE_EXTEND {
                 let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
-                if ed.generics.len != 0 { i = i + 1; continue; }
+                if ed.generics.len != 0 { continue; }
                 let target = unsafe (*self.cur_ast()).resolution_def(ed.target_type);
                 let ms = ed.items;
                 let mids = unsafe (*self.cur_ast()).list(ms);
-                let mut j: u32 = 0;
-                while j < ms.len {
+                for j in 0..ms.len {
                     let mid = unsafe mids[j as usize];
                     if unsafe (*self.cur_ast()).at_const(mid).kind == NodeKind::NODE_FUNCTION { self.emit_ret_struct(mid, target); }
-                    j = j + 1;
                 }
             }
-            i = i + 1;
         }
     }
     fn phase_prototypes(self: &mut Self, which: i32) void {
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             if nk == NodeKind::NODE_FUNCTION {
                 let ff = unsafe (*self.cur_ast()).at_const(nid).as_data.function;
-                if ff.generics.len != 0 { i = i + 1; continue; }
-                if self.cb_specialized_away(nid) || self.cg_is_format_builtin(self.cur_module(), nid) || self.cg_test_skip(nid, false) { i = i + 1; continue; }
+                if ff.generics.len != 0 { continue; }
+                if self.cb_specialized_away(nid) || self.cg_is_format_builtin(self.cur_module(), nid) || self.cg_test_skip(nid, false) { continue; }
                 if want_fn(which, ff.is_public) {
                     self.emit_function(nid, DefId { module: 0, node: NODE_NONE }, false, false, null, false);
                 }
             } else if nk == NodeKind::NODE_EXTEND {
                 let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
-                if ed.generics.len != 0 { i = i + 1; continue; }
+                if ed.generics.len != 0 { continue; }
                 let target = unsafe (*self.cur_ast()).resolution_def(ed.target_type);
                 let mids = unsafe (*self.cur_ast()).list(ed.items);
-                let mut j: u32 = 0;
-                while j < ed.items.len {
+                for j in 0..ed.items.len {
                     let mid = unsafe mids[j as usize];
                     let mk_kind = unsafe (*self.cur_ast()).at_const(mid).kind;
                     if mk_kind == NodeKind::NODE_FUNCTION {
@@ -8001,10 +7733,8 @@ extend Codegen {
                             self.emit_function(mid, target, false, false, null, false);
                         }
                     }
-                    j = j + 1;
                 }
             }
-            i = i + 1;
         }
         if which != PROTO_PUBLIC {
             self.emit_closures(false);
@@ -8020,8 +7750,7 @@ extend Codegen {
     fn phase_bodies(self: &mut Self) void {
         let items = self.program_items();
         let ids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             if nk == NodeKind::NODE_CONST {
@@ -8030,7 +7759,6 @@ extend Codegen {
             } else if nk == NodeKind::NODE_STATIC_ASSERT {
                 self.emit_static_assert(nid);
             }
-            i = i + 1;
         }
         self.emit_assoc_consts(false);
         self.emit_default_methods(PROTO_ALL, true);
@@ -8040,8 +7768,7 @@ extend Codegen {
         self.emit_local_method_insts(PROTO_ALL, true);
         self.emit_closures(true);
         self.emit_callback_specializations(true);
-        let mut i2: u32 = 0;
-        while i2 < items.len {
+        for i2 in 0..items.len {
             let nid = unsafe ids[i2 as usize];
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
             if nk == NodeKind::NODE_FUNCTION {
@@ -8054,8 +7781,7 @@ extend Codegen {
                 if ed.generics.len == 0 {
                     let target = unsafe (*self.cur_ast()).resolution_def(ed.target_type);
                     let mids = unsafe (*self.cur_ast()).list(ed.items);
-                    let mut j: u32 = 0;
-                    while j < ed.items.len {
+                    for j in 0..ed.items.len {
                         let mid = unsafe mids[j as usize];
                         let mk_kind = unsafe (*self.cur_ast()).at_const(mid).kind;
                         if mk_kind == NodeKind::NODE_FUNCTION {
@@ -8064,11 +7790,9 @@ extend Codegen {
                                 self.emit_function(mid, target, false, true, null, false);
                             }
                         }
-                        j = j + 1;
                     }
                 }
             }
-            i2 = i2 + 1;
         }
     }
 }
@@ -8101,19 +7825,17 @@ extend Codegen {
             return false;
         }
         let ns = if tmod == self.cur_module() { 1; } else { 2; };
-        let mut s: i32 = 0;
-        while s < ns {
+        for s in 0..ns {
             let m = if s == 0 { tmod; } else { self.cur_module(); };
             let a = self.mod_ast(m);
             let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            let mut i: u32 = 0;
-            while i < items.len {
+            for i in 0..items.len {
                 let iid = unsafe ((*a).list(items))[i as usize];
                 let it = unsafe (*a).at_const(iid);
-                if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.interface_type == NODE_NONE || it.as_data.extend_def.target_type == NODE_NONE { i = i + 1; continue; }
+                if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.interface_type == NODE_NONE || it.as_data.extend_def.target_type == NODE_NONE { continue; }
                 let tr = unsafe (*a).resolution_def(it.as_data.extend_def.interface_type);
                 let tg = unsafe (*a).resolution_def(it.as_data.extend_def.target_type);
-                if tr.module != iface.module || tr.node != iface.node || tg.module != tmod || tg.node != tdecl { i = i + 1; continue; }
+                if tr.module != iface.module || tr.node != iface.node || tg.module != tmod || tg.node != tdecl { continue; }
                 let gens = it.as_data.extend_def.generics;
                 let gids = unsafe (*a).list(gens);
                 let mut ok = true;
@@ -8130,9 +7852,7 @@ extend Codegen {
                     g = g + 1;
                 }
                 if ok { return true; }
-                i = i + 1;
             }
-            s = s + 1;
         }
         return false;
     }
@@ -8150,11 +7870,9 @@ extend Codegen {
         while g < gens.len && g < n as u32 {
             let gb = unsafe (*self.cur_ast()).at_const(unsafe gids[g as usize]).as_data.generic_param.bounds;
             let gbids = unsafe (*self.cur_ast()).list(gb);
-            let mut b: u32 = 0;
-            while b < gb.len {
+            for b in 0..gb.len {
                 let gbi = unsafe (*self.cur_ast()).resolution_def(unsafe gbids[b as usize]);
                 if gbi.node != NODE_NONE && !self.cg_type_satisfies(unsafe args[g as usize], gbi, 0) { return false; }
-                b = b + 1;
             }
             g = g + 1;
         }
@@ -8171,14 +7889,12 @@ extend Codegen {
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
             let mut concrete = true;
-            let mut i: u8 = 0;
-            while i < it.n { if !self.type_is_concrete(it.args[i as usize]) { concrete = false; } i = i + 1; }
+            for i in 0..it.n { if !self.type_is_concrete(it.args[i as usize]) { concrete = false; } }
             if concrete {
                 let before = unsafe (*self.cur_ast()).instances.len();
                 unsafe (*self.cur_ast()).intern_instance(it.module, it.decl, (&it.args[0]) as *const TypeId, it.n);
                 if unsafe (*self.cur_ast()).instances.len() != before { changed = true; }
-                let mut j: u8 = 0;
-                while j < it.n { if self.seed_type_instances_from_type(it.args[j as usize]) { changed = true; } j = j + 1; }
+                for j in 0..it.n { if self.seed_type_instances_from_type(it.args[j as usize]) { changed = true; } }
             }
         } else if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_ARRAY {
             if self.seed_type_instances_from_type(y.as_data.elem) { changed = true; }
@@ -8194,48 +7910,41 @@ extend Codegen {
         let f = unsafe (*self.cur_ast()).at_const(fn_id).as_data.function;
         let mut changed = false;
         let pids = unsafe (*self.cur_ast()).list(f.params);
-        let mut i: u32 = 0;
-        while i < f.params.len {
+        for i in 0..f.params.len {
             let ptn = unsafe (*self.cur_ast()).at_const(unsafe pids[i as usize]).as_data.parameter.ty;
             if self.seed_type_instances_from_type_node(ptn) { changed = true; }
-            i = i + 1;
         }
         let rids = unsafe (*self.cur_ast()).list(f.returns);
-        let mut r: u32 = 0;
-        while r < f.returns.len {
+        for r in 0..f.returns.len {
             let rid = unsafe rids[r as usize];
             let rn = unsafe (*self.cur_ast()).at_const(rid);
             let rtn = if (rn.kind == NodeKind::NODE_PARAMETER) { rn.as_data.parameter.ty; } else { rid; };
             if self.seed_type_instances_from_type_node(rtn) { changed = true; }
-            r = r + 1;
         }
         return changed;
     }
     fn seed_emitted_generic_method_signature_instances(self: &mut Self) bool {
         let mut changed = false;
-        let mut ii: usize = 0;
-        while ii < unsafe (*self.cur_ast()).instances.len() {
+        for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
-            if it.module != self.cur_module() { ii = ii + 1; continue; }
+            if it.module != self.cur_module() { continue; }
             let mut concrete = true;
-            let mut k: u8 = 0;
-            while k < it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } k = k + 1; }
-            if !concrete { ii = ii + 1; continue; }
+            for k in 0..it.n { if !self.type_is_concrete(it.args[k as usize]) { concrete = false; } }
+            if !concrete { continue; }
             let items = self.program_items();
             let iids = unsafe (*self.cur_ast()).list(items);
-            let mut i: u32 = 0;
-            while i < items.len {
+            for i in 0..items.len {
                 let nid = unsafe iids[i as usize];
                 let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
                 let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-                if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { i = i + 1; continue; }
-                if unsafe (*self.cur_ast()).resolution(ed.target_type) != it.decl { i = i + 1; continue; }
+                if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { continue; }
+                if unsafe (*self.cur_ast()).resolution(ed.target_type) != it.decl { continue; }
                 let itrait = self.extend_interface(nid);
                 if itrait.node != NODE_NONE {
                     let itty = unsafe (*self.cur_ast()).intern_instance(it.module, it.decl, (&it.args[0]) as *const TypeId, it.n);
-                    if !self.cg_type_satisfies(itty, itrait, 0) { i = i + 1; continue; }
+                    if !self.cg_type_satisfies(itty, itrait, 0) { continue; }
                 }
-                if !self.cg_extend_bounds_hold(nid, (&it.args[0]) as *const TypeId, it.n) { i = i + 1; continue; }
+                if !self.cg_extend_bounds_hold(nid, (&it.args[0]) as *const TypeId, it.n) { continue; }
                 let gens = ed.generics;
                 let gids = unsafe (*self.cur_ast()).list(gens);
                 let saved = self.nsubst;
@@ -8249,19 +7958,15 @@ extend Codegen {
                 }
                 let ms = ed.items;
                 let mids = unsafe (*self.cur_ast()).list(ms);
-                let mut j: u32 = 0;
-                while j < ms.len {
+                for j in 0..ms.len {
                     let mid = unsafe mids[j as usize];
                     let mn = unsafe (*self.cur_ast()).at_const(mid);
                     if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len == 0 {
                         if self.seed_type_instances_from_fn_signature(mid) { changed = true; }
                     }
-                    j = j + 1;
                 }
                 self.nsubst = saved;
-                i = i + 1;
             }
-            ii = ii + 1;
         }
         return changed;
     }
@@ -8270,7 +7975,7 @@ extend Codegen {
 // ---- header/source #include machinery ----
 extend Codegen {
     fn module_depth(self: &Self) usize {
-        let p = unsafe (*self.package).modules.at(self.cur_module() as usize).path;
+        let p = unsafe (*self.package).modules[self.cur_module() as usize].path;
         let mut d: usize = 0;
         let mut i: usize = 0;
         while unsafe p[i] != 0 as char {
@@ -8281,8 +7986,7 @@ extend Codegen {
     }
     fn emit_rel_prefix(self: &mut Self) void {
         let d = self.module_depth();
-        let mut i: usize = 0;
-        while i < d { self.emit_cstr("../".ptr() as *const char); i = i + 1; }
+        for i in 0..d { self.emit_cstr("../".ptr() as *const char); }
     }
     fn emit_modpath_include(self: &mut Self, path: *const char) void {
         self.emit_cstr("#include \"".ptr() as *const char);
@@ -8308,8 +8012,7 @@ extend Codegen {
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
-            let mut i: u8 = 0;
-            while i < it.n { if self.type_mentions_builtin(it.args[i as usize]) { return true; } i = i + 1; }
+            for i in 0..it.n { if self.type_mentions_builtin(it.args[i as usize]) { return true; } }
             return false;
         }
         return false;
@@ -8321,16 +8024,13 @@ extend Codegen {
         if nk != NodeKind::NODE_FUNCTION { return false; }
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         let ids = unsafe (*a).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let it = unsafe (*a).at_const(unsafe ids[i as usize]);
             if it.kind == NodeKind::NODE_INTERFACE {
                 let ms = it.as_data.interface_def.items;
                 let mids = unsafe (*a).list(ms);
-                let mut j: u32 = 0;
-                while j < ms.len { if unsafe mids[j as usize] == node { return true; } j = j + 1; }
+                for j in 0..ms.len { if unsafe mids[j as usize] == node { return true; } }
             }
-            i = i + 1;
         }
         return false;
     }
@@ -8355,8 +8055,7 @@ extend Codegen {
         let dk = unsafe (*self.cur_ast()).at_const(dn_id).kind;
         let ms = ag.members;
         let mids = unsafe (*self.cur_ast()).list(ms);
-        let mut m: u32 = 0;
-        while m < ms.len {
+        for m in 0..ms.len {
             let mid = unsafe mids[m as usize];
             let mnk = unsafe (*self.cur_ast()).at_const(mid).kind;
             if dk == NodeKind::NODE_STRUCT && ag.is_tuple {
@@ -8367,16 +8066,13 @@ extend Codegen {
             } else if dk == NodeKind::NODE_ENUM && mnk == NodeKind::NODE_VARIANT {
                 let payload = unsafe (*self.cur_ast()).at_const(mid).as_data.variant.payload;
                 let plids = unsafe (*self.cur_ast()).list(payload);
-                let mut k: u32 = 0;
-                while k < payload.len {
+                for k in 0..payload.len {
                     let pid = unsafe plids[k as usize];
                     let pfk = unsafe (*self.cur_ast()).at_const(pid).kind;
                     let tn = if (pfk == NodeKind::NODE_FIELD) { unsafe (*self.cur_ast()).at_const(pid).as_data.field.ty; } else { pid; };
                     self.mark_layout_module(unsafe (*self.cur_ast()).type_of(tn), want, nmod);
-                    k = k + 1;
                 }
             }
-            m = m + 1;
         }
     }
 }
@@ -8463,20 +8159,18 @@ extend Codegen {
         return line;
     }
     fn emit_pct_escaped(self: &mut Self, text: *const u8, len: usize) void {
-        let mut i: usize = 0;
-        while i < len {
+        for i in 0..len {
             let byte = unsafe text[i];
             if byte == '%' as u8 { self.emit_cstr("%%".ptr() as *const char); }
             else if byte == '"' as u8 || byte == '\\' as u8 { self.emit("\\%c".ptr() as *const char, byte as i32); }
             else if byte == '\n' as u8 { self.emit_cstr("\\n".ptr() as *const char); }
             else if byte < 0x20 as u8 { self.emit("\\%03o".ptr() as *const char, byte as i32); }
             else { self.emit("%c".ptr() as *const char, byte as i32); }
-            i = i + 1;
         }
     }
     fn cg_file(self: &Self) *const char {
         if self.package != null && (self.cur_module() as usize) < self.pkg_count() {
-            let f = unsafe (*self.package).modules.at(self.cur_module() as usize).file;
+            let f = unsafe (*self.package).modules[self.cur_module() as usize].file;
             if f != null { return f as *const char; }
         }
         return "<src>".ptr() as *const char;
@@ -8486,7 +8180,7 @@ extend Codegen {
         let callee = unsafe (*self.cur_ast()).at_const(id).as_data.call.callee;
         if unsafe (*self.cur_ast()).at_const(callee).kind != NodeKind::NODE_IDENTIFIER { return 0; }
         let d = unsafe (*self.cur_ast()).resolution_def(callee);
-        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() || !unsafe (*self.package).modules.at(d.module as usize).prelude { return 0; }
+        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() || !unsafe (*self.package).modules[d.module as usize].prelude { return 0; }
         if unsafe (*self.mod_ast(d.module)).at_const(d.node).kind != NodeKind::NODE_FUNCTION { return 0; }
         let fnamenode = unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function.name;
         let fnm = unsafe (*self.mod_ast(d.module)).at_const(fnamenode).as_data.name.text;
@@ -8733,13 +8427,11 @@ extend Codegen {
         if tmp == null { diag::oom(); }
         unsafe cstring::memcpy(tmp as *mut void, (self.buf + start), nlen);
         self.buf_len = start;
-        let mut i: usize = 0;
-        while i < nlen {
+        for i in 0..nlen {
             let ch = unsafe tmp[i];
             if ch == '\n' as char { self.emit_bytes(" \\\n".ptr() as *const char, 3); }
             else if ch == CG_PASTE { self.emit_bytes("##".ptr() as *const char, 2); }
             else { self.emit_bytes(unsafe (tmp + i) as *const char, 1); }
-            i = i + 1;
         }
         self.emit_bytes("\n".ptr() as *const char, 1);
         unsafe stdlib::free(tmp as *mut void);
@@ -8747,22 +8439,20 @@ extend Codegen {
     fn emit_generic_macro_methods(self: &mut Self, declId: NodeId, define: bool) void {
         let items = self.program_items();
         let iids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe iids[i as usize];
             let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { i = i + 1; continue; }
-            if unsafe (*self.cur_ast()).resolution(ed.target_type) != declId { i = i + 1; continue; }
-            if ed.interface_type != NODE_NONE { i = i + 1; continue; }
+            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { continue; }
+            if unsafe (*self.cur_ast()).resolution(ed.target_type) != declId { continue; }
+            if ed.interface_type != NODE_NONE { continue; }
             let mids = unsafe (*self.cur_ast()).list(ed.items);
-            let mut j: u32 = 0;
-            while j < ed.items.len {
+            for j in 0..ed.items.len {
                 let mid = unsafe mids[j as usize];
                 let mf = unsafe (*self.cur_ast()).at_const(mid).as_data.function;
                 let mk = unsafe (*self.cur_ast()).at_const(mid).kind;
-                if mk != NodeKind::NODE_FUNCTION || mf.generics.len != 0 || mf.returns.len > 1 { j = j + 1; continue; }
-                if define && mf.body == NODE_NONE { j = j + 1; continue; }
+                if mk != NodeKind::NODE_FUNCTION || mf.generics.len != 0 || mf.returns.len > 1 { continue; }
+                if define && mf.body == NODE_NONE { continue; }
                 let mut nm = Buf320 {};
                 let mut at = bappend((&mut nm.b[0]) as *mut char, 320, 0, "NAME".ptr() as *const char);
                 unsafe nm.b[at] = CG_PASTE;
@@ -8771,9 +8461,7 @@ extend Codegen {
                 let mnsp = self.name_span(mf.name);
                 self.render_ident(mnsp, unsafe ((&mut nm.b[0]) as *mut char + at) as *mut char, 320 - at);
                 self.emit_function(mid, DefId { module: 0, node: NODE_NONE }, false, define, (&nm.b[0]) as *const char, false);
-                j = j + 1;
             }
-            i = i + 1;
         }
     }
     fn conformance_tag(self: &Self, extend_id: NodeId, out: *mut char, cap: usize) usize {
@@ -8795,12 +8483,10 @@ extend Codegen {
         self.emit("#define %s_%s_%s(".ptr() as *const char, (&stem.b[0]) as *const char, (&tag.b[0]) as *const char, word);
         let gens = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.generics;
         let gids = unsafe (*self.cur_ast()).list(gens);
-        let mut i: u32 = 0;
-        while i < gens.len {
+        for i in 0..gens.len {
             let mut p = Buf64 {};
             self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p.b[0]) as *mut char, 64);
             self.emit("%s, _SCM_%s, ".ptr() as *const char, (&p.b[0]) as *const char, (&p.b[0]) as *const char);
-            i = i + 1;
         }
         self.emit_cstr("NAME) ".ptr() as *const char);
         self.macro_mode = true;
@@ -8810,13 +8496,12 @@ extend Codegen {
         let start = self.buf_len;
         let mids = unsafe (*self.cur_ast()).list(unsafe (*self.cur_ast()).at_const(implId).as_data.extend_def.items);
         let msn = unsafe (*self.cur_ast()).at_const(implId).as_data.extend_def.items.len;
-        let mut j: u32 = 0;
-        while j < msn {
+        for j in 0..msn {
             let mid = unsafe mids[j as usize];
             let mf = unsafe (*self.cur_ast()).at_const(mid).as_data.function;
             let mk = unsafe (*self.cur_ast()).at_const(mid).kind;
-            if mk != NodeKind::NODE_FUNCTION || mf.generics.len != 0 || mf.returns.len > 1 { j = j + 1; continue; }
-            if define && mf.body == NODE_NONE { j = j + 1; continue; }
+            if mk != NodeKind::NODE_FUNCTION || mf.generics.len != 0 || mf.returns.len > 1 { continue; }
+            if define && mf.body == NODE_NONE { continue; }
             let mut nm = Buf320 {};
             let mut at = bappend((&mut nm.b[0]) as *mut char, 320, 0, "NAME".ptr() as *const char);
             unsafe nm.b[at] = CG_PASTE;
@@ -8825,7 +8510,6 @@ extend Codegen {
             let mnsp = self.name_span(mf.name);
             self.render_ident(mnsp, unsafe ((&mut nm.b[0]) as *mut char + at) as *mut char, 320 - at);
             self.emit_function(mid, DefId { module: 0, node: NODE_NONE }, false, define, (&nm.b[0]) as *const char, false);
-            j = j + 1;
         }
         self.macro_mode = false;
         self.macro_self = NODE_NONE;
@@ -8835,16 +8519,14 @@ extend Codegen {
     fn emit_generic_conformance_macros(self: &mut Self, declId: NodeId) void {
         let items = self.program_items();
         let iids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe iids[i as usize];
             let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 || ed.interface_type == NODE_NONE { i = i + 1; continue; }
-            if unsafe (*self.cur_ast()).resolution(ed.target_type) != declId { i = i + 1; continue; }
+            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 || ed.interface_type == NODE_NONE { continue; }
+            if unsafe (*self.cur_ast()).resolution(ed.target_type) != declId { continue; }
             self.emit_generic_conformance_macro(declId, nid, false);
             self.emit_generic_conformance_macro(declId, nid, true);
-            i = i + 1;
         }
     }
     fn emit_generic_macro(self: &mut Self, declId: NodeId, define: bool) void {
@@ -8856,12 +8538,10 @@ extend Codegen {
         let gids = unsafe (*self.cur_ast()).list(gens);
         let word = if (define) { "DEFINE".ptr() as *const char; } else { "DECLARE".ptr() as *const char; };
         self.emit("#define %s_%s(".ptr() as *const char, (&stem.b[0]) as *const char, word);
-        let mut i: u32 = 0;
-        while i < gens.len {
+        for i in 0..gens.len {
             let mut p = Buf64 {};
             self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p.b[0]) as *mut char, 64);
             self.emit("%s, _SCM_%s, ".ptr() as *const char, (&p.b[0]) as *const char, (&p.b[0]) as *const char);
-            i = i + 1;
         }
         self.emit_cstr("NAME) ".ptr() as *const char);
         self.macro_mode = true;
@@ -8877,8 +8557,7 @@ extend Codegen {
                 self.depth = self.depth + 1;
                 let fs = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.members;
                 let fids = unsafe (*self.cur_ast()).list(fs);
-                let mut jj: u32 = 0;
-                while jj < fs.len {
+                for jj in 0..fs.len {
                     let f = unsafe (*self.cur_ast()).at_const(unsafe fids[jj as usize]).as_data.field;
                     let mut fnm = Buf128 {};
                     let fnsp = self.name_span(f.name);
@@ -8888,7 +8567,6 @@ extend Codegen {
                     self.emit_indent();
                     self.emit_cstr((&dd.b[0]) as *const char);
                     self.emit_cstr(";\n".ptr() as *const char);
-                    jj = jj + 1;
                 }
                 self.depth = self.depth - 1;
                 self.emit_cstr("};\n".ptr() as *const char);
@@ -8919,8 +8597,7 @@ extend Codegen {
         at = bappend(out, cap, at, "__".ptr() as *const char);
         let mg = unsafe (*self.cur_ast()).at_const(methodId).as_data.function.generics;
         let mgids = unsafe (*self.cur_ast()).list(mg);
-        let mut k: u32 = 0;
-        while k < mg.len {
+        for k in 0..mg.len {
             if k != 0 {
                 if at < cap { unsafe out[at] = CG_PASTE; at = at + 1; }
                 at = bappend(out, cap, at, "__".ptr() as *const char);
@@ -8928,7 +8605,6 @@ extend Codegen {
             if at < cap { unsafe out[at] = CG_PASTE; at = at + 1; }
             at = bappend(out, cap, at, "_SCM_".ptr() as *const char);
             at = at + self.render_macro_param(self.cur_module(), unsafe mgids[k as usize], unsafe (out + at) as *mut char, cap - at);
-            k = k + 1;
         }
     }
     fn emit_generic_method_macro(self: &mut Self, declId: NodeId, methodId: NodeId, define: bool) void {
@@ -8943,22 +8619,18 @@ extend Codegen {
         self.emit("#define %s_%s_%s(".ptr() as *const char, (&stem.b[0]) as *const char, (&mnm.b[0]) as *const char, word);
         let gens = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.generics;
         let gids = unsafe (*self.cur_ast()).list(gens);
-        let mut i: u32 = 0;
-        while i < gens.len {
+        for i in 0..gens.len {
             let mut p = Buf64 {};
             self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p.b[0]) as *mut char, 64);
             self.emit("%s, _SCM_%s, ".ptr() as *const char, (&p.b[0]) as *const char, (&p.b[0]) as *const char);
-            i = i + 1;
         }
         self.emit_cstr("NAME".ptr() as *const char);
         let mg = unsafe (*self.cur_ast()).at_const(methodId).as_data.function.generics;
         let mgids = unsafe (*self.cur_ast()).list(mg);
-        let mut k: u32 = 0;
-        while k < mg.len {
+        for k in 0..mg.len {
             let mut p = Buf64 {};
             self.render_macro_param(self.cur_module(), unsafe mgids[k as usize], (&mut p.b[0]) as *mut char, 64);
             self.emit(", %s, _SCM_%s".ptr() as *const char, (&p.b[0]) as *const char, (&p.b[0]) as *const char);
-            k = k + 1;
         }
         self.emit_cstr(") ".ptr() as *const char);
         self.macro_mode = true;
@@ -8977,16 +8649,14 @@ extend Codegen {
     fn emit_generic_method_macros(self: &mut Self, declId: NodeId) void {
         let items = self.program_items();
         let iids = unsafe (*self.cur_ast()).list(items);
-        let mut i: u32 = 0;
-        while i < items.len {
+        for i in 0..items.len {
             let nid = unsafe iids[i as usize];
             let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
             let nk = unsafe (*self.cur_ast()).at_const(nid).kind;
-            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { i = i + 1; continue; }
-            if unsafe (*self.cur_ast()).resolution(ed.target_type) != declId { i = i + 1; continue; }
+            if nk != NodeKind::NODE_EXTEND || ed.generics.len == 0 { continue; }
+            if unsafe (*self.cur_ast()).resolution(ed.target_type) != declId { continue; }
             let mids = unsafe (*self.cur_ast()).list(ed.items);
-            let mut j: u32 = 0;
-            while j < ed.items.len {
+            for j in 0..ed.items.len {
                 let mid = unsafe mids[j as usize];
                 let mf = unsafe (*self.cur_ast()).at_const(mid).as_data.function;
                 let mk = unsafe (*self.cur_ast()).at_const(mid).kind;
@@ -8994,9 +8664,7 @@ extend Codegen {
                     self.emit_generic_method_macro(declId, mid, false);
                     self.emit_generic_method_macro(declId, mid, true);
                 }
-                j = j + 1;
             }
-            i = i + 1;
         }
     }
 }

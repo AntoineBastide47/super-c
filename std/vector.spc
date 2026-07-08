@@ -102,10 +102,8 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     pub fn clear(self: &mut Vector<T, A>) {
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             unsafe self.ptr[i].free();
-            i = i + 1;
         }
         self.len = 0;
     }
@@ -191,22 +189,18 @@ extend<T, A: Allocator> Vector<T, A> {
     // by value would free the Vector's still-owned copy).
     pub fn map<U, F: fn(&T) U>(self: &Vector<T, A>, f: F) Vector<U, A> {
         let mut out = Vector::<U, A>::with_capacity_in(self.alloc, self.len);
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             out.push(f(self.at(i)));
-            i = i + 1;
         }
         return out;
     }
 
     // A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
     pub fn find<F: fn(&T) bool>(self: &Vector<T, A>, pred: F) Option<&T> {
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             if pred(self.at(i)) {
                 return Option::<&T>::Some(&unsafe self.ptr[i]);
             }
-            i = i + 1;
         }
         return Option::<&T>::None;
     }
@@ -215,8 +209,7 @@ extend<T, A: Allocator> Vector<T, A> {
     // elements are freed (no-op when T isn't Free) so nothing leaks.
     pub fn retain<F: fn(&T) bool>(self: &mut Vector<T, A>, pred: F) {
         let mut w: usize = 0;
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             if pred(&unsafe self.ptr[i]) {
                 if w != i {
                     unsafe self.ptr[w] = unsafe self.ptr[i];
@@ -225,7 +218,6 @@ extend<T, A: Allocator> Vector<T, A> {
             } else {
                 unsafe self.ptr[i].free();
             }
-            i = i + 1;
         }
         self.len = w;
     }
@@ -244,10 +236,8 @@ extend<T, A: Allocator + Default> Vector<T, A> {
 // buffer is the only owner of each live element. Each element `.free()` is a no-op when `T` isn't a Free type.
 extend<T, A: Allocator> Vector<T, A> as Free {
     pub fn free(self: &mut Vector<T, A>) {
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             unsafe self.ptr[i].free(); // free the element (no-op if T isn't Free)
-            i = i + 1;
         }
         self.alloc.dealloc(self.ptr as *mut void, self.cap * sizeof(T), alignof(T));
         self.ptr = null;
@@ -265,20 +255,16 @@ extend<T, A: Allocator + Default> Vector<T, A> as Default {
 extend<T: Eq, A: Allocator> Vector<T, A> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub fn contains(self: &Vector<T, A>, x: &T) bool {
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             if unsafe self.ptr[i].eq(x) { return true; }
-            i = i + 1;
         }
         return false;
     }
 
     // Index of the first element equal to `x`, or `None`.
     pub fn position(self: &Vector<T, A>, x: &T) Option<usize> {
-        let mut i: usize = 0;
-        while i < self.len {
+        for i in 0..self.len {
             if unsafe self.ptr[i].eq(x) { return Option::<usize>::Some(i); }
-            i = i + 1;
         }
         return Option::<usize>::None;
     }
@@ -469,11 +455,9 @@ extend<T: Clone, A: Allocator> Vector<T, A> as Clone {
     // A deep copy: a fresh backing store (same allocator) whose elements are independent clones.
     pub fn clone(self: &Vector<T, A>) Vector<T, A> {
         let mut out = Vector::<T, A>::with_capacity_in(self.alloc, self.len());
-        let mut i: usize = 0;
-        while i < self.len() {
+        for i in 0..self.len() {
             let e = self.at(i);
             out.push(e.clone());
-            i = i + 1;
         }
         return out;
     }
@@ -482,12 +466,10 @@ extend<T: Clone, A: Allocator> Vector<T, A> as Clone {
 extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
     pub fn eq(self: &Vector<T, A>, other: &Vector<T, A>) bool {
         if self.len() != other.len() { return false; }
-        let mut i: usize = 0;
-        while i < self.len() {
+        for i in 0..self.len() {
             let a = self.at(i);
             let b = other.at(i);
             if !a.eq(b) { return false; }
-            i = i + 1;
         }
         return true;
     }
@@ -497,11 +479,9 @@ extend<T: Hash, A: Allocator> Vector<T, A> as Hash {
     // FNV-1a over the elements' own hashes.
     pub fn hash(self: &Vector<T, A>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
-        let mut i: usize = 0;
-        while i < self.len() {
+        for i in 0..self.len() {
             let e = self.at(i);
             h = (h ^ e.hash()) * 0x100000001b3;
-            i = i + 1;
         }
         return h;
     }
@@ -511,14 +491,11 @@ extend<T: Format, A: Allocator> Vector<T, A> as Format {
     // `[e0, e1, ...]` with each element rendered through its own `fmt`.
     pub fn fmt(self: &Vector<T, A>) String {
         let mut s = String::from_str("[");
-        let mut i: usize = 0;
-        while i < self.len() {
+        for i in 0..self.len() {
             if i > 0 { s.push_str(", "); }
             let e = self.at(i);
-            let mut es = e.fmt();
+            let es = e.fmt();
             s.push_string(&es);
-            es.free();
-            i = i + 1;
         }
         s.push_str("]");
         return s;

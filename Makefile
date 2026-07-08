@@ -62,9 +62,10 @@ build: $(BIN)
 $(BIN): $(COMPILER_SRCS)
 	@printf '  SELF-BUILD  %s  (via %s, %s)\n' '$(BIN)' '$(SUPERC)' '$(PROFILE)'
 	@rm -rf selfhost/build
-	@$(SUPERC) selfhost/main.spc >/dev/null
+	@$(SUPERC) selfhost/main.spc
 	@$(CC) $(CSTD) $(OPT) $$(find selfhost/build -name '*.c') -o '$(BIN).new' $(LDOPT)
 	@mv -f '$(BIN).new' '$(BIN)'
+	@cp '$(BIN)' 'cli-backup-macos'
 	@$(STRIP)
 
 run: $(BIN)
@@ -94,6 +95,8 @@ bench: $(BIN)
 # raise ITERS in selfhost/benchmark/transpile_bench.spc (default 8, ~1s) or pass RATE=N (default 1000 Hz).
 # Needs samply:  brew install samply  (or  cargo install samply).
 RATE ?= 1000
+# Never strip the binary built for a profiling run -- symbols must survive even under PROFILE=release.
+profile: STRIP := :
 profile: $(BIN)
 	@rm -rf selfhost/build
 	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null

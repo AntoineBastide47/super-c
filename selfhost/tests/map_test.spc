@@ -15,7 +15,6 @@ fn insert_get_len() {
     assert(m.contains_key(&k2), "contains_key present");
     let k9: i32 = 99;
     assert(m.get(&k9).is_none(), "get missing key returns None");
-    m.free();
 }
 
 @test
@@ -25,7 +24,6 @@ fn overwrite() {
     assert_eq(m.len(), 1);             // no growth on overwrite
     let k1: i32 = 1;
     assert(*m.get(&k1).unwrap() == 111, "value overwritten");
-    m.free();
 }
 
 @test
@@ -37,22 +35,17 @@ fn remove_present_and_absent() {
     assert(r.is_some() && r.unwrap() == 20, "remove returns the value");
     assert(m.len() == 1 && !m.contains_key(&k2), "key gone after remove");
     assert(m.remove(&k2).is_none(), "remove of an absent key returns None");
-    m.free();
 }
 
 @test
 fn growth_rehash() {
     let mut m = Map::<i32, i32>::new();
-    let mut i: i32 = 0;
-    while i < 100 { m.insert(i, i * 2); i = i + 1; }
+    for i in 0..100 { m.insert(i, i * 2); }
     assert_eq(m.len(), 100);
     let mut ok = true;
-    i = 0;
-    while i < 100 {
+    for i in 0..100 {
         let g = m.get(&i);
         if !(g.is_some() && *g.unwrap() == i * 2) { ok = false; }
-        i = i + 1;
     }
     assert(ok, "all 100 keys retrievable after growth/rehash");
-    m.free();
 }
