@@ -141,24 +141,24 @@ fn spans_eq2(sa: *const u8, a: tok::Span, sb: *const u8, b: tok::Span) bool {
 }
 
 fn builtin_name(b: BuiltinType) *const char {
-    if b == BuiltinType::BT_BOOL { return "bool".ptr as *const char; }
-    if b == BuiltinType::BT_CHAR { return "char".ptr as *const char; }
-    if b == BuiltinType::BT_I8 { return "i8".ptr as *const char; }
-    if b == BuiltinType::BT_I16 { return "i16".ptr as *const char; }
-    if b == BuiltinType::BT_I32 { return "i32".ptr as *const char; }
-    if b == BuiltinType::BT_I64 { return "i64".ptr as *const char; }
-    if b == BuiltinType::BT_ISIZE { return "isize".ptr as *const char; }
-    if b == BuiltinType::BT_U8 { return "u8".ptr as *const char; }
-    if b == BuiltinType::BT_U16 { return "u16".ptr as *const char; }
-    if b == BuiltinType::BT_U32 { return "u32".ptr as *const char; }
-    if b == BuiltinType::BT_U64 { return "u64".ptr as *const char; }
-    if b == BuiltinType::BT_USIZE { return "usize".ptr as *const char; }
-    if b == BuiltinType::BT_F32 { return "f32".ptr as *const char; }
-    if b == BuiltinType::BT_F64 { return "f64".ptr as *const char; }
-    if b == BuiltinType::BT_C32 { return "c32".ptr as *const char; }
-    if b == BuiltinType::BT_C64 { return "c64".ptr as *const char; }
-    if b == BuiltinType::BT_VALIST { return "va_list".ptr as *const char; }
-    return "void".ptr as *const char;
+    if b == BuiltinType::BT_BOOL { return "bool".ptr() as *const char; }
+    if b == BuiltinType::BT_CHAR { return "char".ptr() as *const char; }
+    if b == BuiltinType::BT_I8 { return "i8".ptr() as *const char; }
+    if b == BuiltinType::BT_I16 { return "i16".ptr() as *const char; }
+    if b == BuiltinType::BT_I32 { return "i32".ptr() as *const char; }
+    if b == BuiltinType::BT_I64 { return "i64".ptr() as *const char; }
+    if b == BuiltinType::BT_ISIZE { return "isize".ptr() as *const char; }
+    if b == BuiltinType::BT_U8 { return "u8".ptr() as *const char; }
+    if b == BuiltinType::BT_U16 { return "u16".ptr() as *const char; }
+    if b == BuiltinType::BT_U32 { return "u32".ptr() as *const char; }
+    if b == BuiltinType::BT_U64 { return "u64".ptr() as *const char; }
+    if b == BuiltinType::BT_USIZE { return "usize".ptr() as *const char; }
+    if b == BuiltinType::BT_F32 { return "f32".ptr() as *const char; }
+    if b == BuiltinType::BT_F64 { return "f64".ptr() as *const char; }
+    if b == BuiltinType::BT_C32 { return "c32".ptr() as *const char; }
+    if b == BuiltinType::BT_C64 { return "c64".ptr() as *const char; }
+    if b == BuiltinType::BT_VALIST { return "va_list".ptr() as *const char; }
+    return "void".ptr() as *const char;
 }
 
 fn builtin_of(src: *const u8, s: tok::Span) i32 {
@@ -360,7 +360,7 @@ extend TypeChecker {
     fn tc_loop_pop(self: &mut Self, le: i32, sp: tok::Span) void {
         if le < 0 { return; }
         if self.loop_stack[le as usize].saw_value && self.loop_stack[le as usize].saw_bare {
-            self.errors.emitf(sp.start, sp.end - sp.start, "every 'break' in a value-yielding 'loop' must carry a value".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "every 'break' in a value-yielding 'loop' must carry a value".ptr() as *const char);
         }
         self.nloops = le as u32;
     }
@@ -394,8 +394,8 @@ extend TypeChecker {
     }
     fn tc_check_test_ref(self: &mut Self, d: DefId, sp: tok::Span) void {
         if d.node == NODE_NONE || !self.tc_is_test_fn(d.module, d.node) || self.tc_in_test_fn() { return; }
-        self.errors.emitf(sp.start, sp.end - sp.start, "a '@test' function can only be called from other test functions".ptr as *const char);
-        self.errors.notef("test functions are not compiled outside 'super-c --test'; move shared logic into a plain function".ptr as *const char);
+        self.errors.emitf(sp.start, sp.end - sp.start, "a '@test' function can only be called from other test functions".ptr() as *const char);
+        self.errors.notef("test functions are not compiled outside 'super-c --test'; move shared logic into a plain function".ptr() as *const char);
     }
 
     // ---- literal helpers ----
@@ -474,8 +474,8 @@ extend TypeChecker {
 
     // ---- error / misc ----
     fn err_unsafe(self: &mut Self, sp: tok::Span, what: *const char) void {
-        self.errors.emitf(sp.start, sp.end - sp.start, "%s requires an 'unsafe' block".ptr as *const char, what);
-        self.errors.notef("wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'".ptr as *const char);
+        self.errors.emitf(sp.start, sp.end - sp.start, "%s requires an 'unsafe' block".ptr() as *const char, what);
+        self.errors.notef("wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'".ptr() as *const char);
     }
     fn tc_attr(self: &Self, m: ModuleId, owner: NodeId, kind: AttrKind) *const Attr {
         let a = self.mod_ast(m);
@@ -512,72 +512,72 @@ extend TypeChecker {
     fn render_type(self: &Self, tid: TypeId, buf: *mut char, cap: usize) void {
         let ty = *self.type_at(tid);
         if ty.kind == TypeKind::TYPE_BUILTIN {
-            unsafe stdio::snprintf(buf, cap, "%s".ptr as *const char, builtin_name(ty.as_data.builtin));
+            unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, builtin_name(ty.as_data.builtin));
         } else if ty.kind == TypeKind::TYPE_NEVER {
-            unsafe stdio::snprintf(buf, cap, "%s".ptr as *const char, "never".ptr as *const char);
+            unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "never".ptr() as *const char);
         } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
             let mut inb = Buf96 {};
             self.render_type(ty.as_data.elem, (&mut inb.b[0]) as *mut char, 96);
-            let mut pfx = "&".ptr as *const char;
-            if ty.kind == TypeKind::TYPE_POINTER { pfx = "*".ptr as *const char; }
-            let mut mq = "".ptr as *const char;
-            if ty.qualifier == (TypeQualifier::TYPE_QUAL_MUT as u8) { mq = "mut ".ptr as *const char; }
-            unsafe stdio::snprintf(buf, cap, "%s%s%s".ptr as *const char, pfx, mq, (&inb.b[0]) as *const char);
+            let mut pfx = "&".ptr() as *const char;
+            if ty.kind == TypeKind::TYPE_POINTER { pfx = "*".ptr() as *const char; }
+            let mut mq = "".ptr() as *const char;
+            if ty.qualifier == (TypeQualifier::TYPE_QUAL_MUT as u8) { mq = "mut ".ptr() as *const char; }
+            unsafe stdio::snprintf(buf, cap, "%s%s%s".ptr() as *const char, pfx, mq, (&inb.b[0]) as *const char);
         } else if ty.kind == TypeKind::TYPE_SLICE {
             let mut inb = Buf96 {};
             self.render_type(ty.as_data.elem, (&mut inb.b[0]) as *mut char, 96);
-            unsafe stdio::snprintf(buf, cap, "[]%s".ptr as *const char, (&inb.b[0]) as *const char);
+            unsafe stdio::snprintf(buf, cap, "[]%s".ptr() as *const char, (&inb.b[0]) as *const char);
         } else if ty.kind == TypeKind::TYPE_ARRAY {
             let mut inb = Buf96 {};
             self.render_type(ty.as_data.arr.elem, (&mut inb.b[0]) as *mut char, 96);
-            unsafe stdio::snprintf(buf, cap, "[%s]".ptr as *const char, (&inb.b[0]) as *const char);
+            unsafe stdio::snprintf(buf, cap, "[%s]".ptr() as *const char, (&inb.b[0]) as *const char);
         } else if ty.kind == TypeKind::TYPE_STRUCT || ty.kind == TypeKind::TYPE_ENUM || ty.kind == TypeKind::TYPE_GENERIC {
             let a = self.mod_ast(ty.module);
             let d = unsafe (*a).at_const(ty.as_data.decl);
             let mut nm = d.as_data.aggregate.name;
             if d.kind == NodeKind::NODE_GENERIC_PARAM { nm = d.as_data.generic_param.name; }
             let s = unsafe (*a).at_const(nm).as_data.name.text;
-            unsafe stdio::snprintf(buf, cap, "%.*s".ptr as *const char, (s.end - s.start) as i32, src_at(self.mod_src(ty.module), s.start));
+            unsafe stdio::snprintf(buf, cap, "%.*s".ptr() as *const char, (s.end - s.start) as i32, src_at(self.mod_src(ty.module), s.start));
         } else if ty.kind == TypeKind::TYPE_OPAQUE {
             let a = self.mod_ast(ty.module);
             let s = unsafe (*a).at_const(unsafe (*a).at_const(ty.as_data.decl).as_data.type_alias.name).as_data.name.text;
-            unsafe stdio::snprintf(buf, cap, "%.*s".ptr as *const char, (s.end - s.start) as i32, src_at(self.mod_src(ty.module), s.start));
+            unsafe stdio::snprintf(buf, cap, "%.*s".ptr() as *const char, (s.end - s.start) as i32, src_at(self.mod_src(ty.module), s.start));
         } else if ty.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(ty.as_data.inst);
             let a = self.mod_ast(it.module);
             let s = unsafe (*a).at_const(unsafe (*a).at_const(it.decl).as_data.aggregate.name).as_data.name.text;
-            let at0 = unsafe stdio::snprintf(buf, cap, "%.*s<".ptr as *const char, (s.end - s.start) as i32, src_at(self.mod_src(it.module), s.start));
+            let at0 = unsafe stdio::snprintf(buf, cap, "%.*s<".ptr() as *const char, (s.end - s.start) as i32, src_at(self.mod_src(it.module), s.start));
             let mut at = at0 as usize;
             let mut i: u8 = 0;
             while i < it.n && at < cap {
                 let mut argb = Buf96 {};
                 self.render_type(it.args[i as usize], (&mut argb.b[0]) as *mut char, 64);
-                let mut sep = "".ptr as *const char;
-                if i != 0 { sep = ", ".ptr as *const char; }
+                let mut sep = "".ptr() as *const char;
+                if i != 0 { sep = ", ".ptr() as *const char; }
                 let mut room: usize = 0;
                 if cap > at { room = cap - at; }
-                let w = unsafe stdio::snprintf((buf + at) as *mut char, room, "%s%s".ptr as *const char, sep, (&argb.b[0]) as *const char);
+                let w = unsafe stdio::snprintf((buf + at) as *mut char, room, "%s%s".ptr() as *const char, sep, (&argb.b[0]) as *const char);
                 at = at + (w as usize);
                 i = i + 1;
             }
-            if at < cap { unsafe stdio::snprintf((buf + at) as *mut char, cap - at, "%s".ptr as *const char, ">".ptr as *const char); }
+            if at < cap { unsafe stdio::snprintf((buf + at) as *mut char, cap - at, "%s".ptr() as *const char, ">".ptr() as *const char); }
         } else if ty.kind == TypeKind::TYPE_FUNCTION {
-            unsafe stdio::snprintf(buf, cap, "%s".ptr as *const char, "fn".ptr as *const char);
+            unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "fn".ptr() as *const char);
         } else if ty.kind == TypeKind::TYPE_DYN {
             let a = self.mod_ast(ty.module);
-            let mut pfx = "Box<dyn ".ptr as *const char;
-            if ty.qualifier == (TypeQualifier::TYPE_QUAL_MUT as u8) { pfx = "&mut dyn ".ptr as *const char; }
-            else if ty.qualifier == (TypeQualifier::TYPE_QUAL_CONST as u8) { pfx = "&dyn ".ptr as *const char; }
-            let mut sfx = "".ptr as *const char;
-            if ty.qualifier == (TypeQualifier::TYPE_QUAL_NONE as u8) { sfx = ">".ptr as *const char; }
+            let mut pfx = "Box<dyn ".ptr() as *const char;
+            if ty.qualifier == (TypeQualifier::TYPE_QUAL_MUT as u8) { pfx = "&mut dyn ".ptr() as *const char; }
+            else if ty.qualifier == (TypeQualifier::TYPE_QUAL_CONST as u8) { pfx = "&dyn ".ptr() as *const char; }
+            let mut sfx = "".ptr() as *const char;
+            if ty.qualifier == (TypeQualifier::TYPE_QUAL_NONE as u8) { sfx = ">".ptr() as *const char; }
             if unsafe (*a).at_const(ty.as_data.decl).kind == NodeKind::NODE_FUNCTION_TYPE {
-                unsafe stdio::snprintf(buf, cap, "%sfn(..) ..%s".ptr as *const char, pfx, sfx);
+                unsafe stdio::snprintf(buf, cap, "%sfn(..) ..%s".ptr() as *const char, pfx, sfx);
             } else {
                 let s = unsafe (*a).at_const(unsafe (*a).at_const(ty.as_data.decl).as_data.interface_def.name).as_data.name.text;
-                unsafe stdio::snprintf(buf, cap, "%s%.*s%s".ptr as *const char, pfx, (s.end - s.start) as i32, src_at(self.mod_src(ty.module), s.start), sfx);
+                unsafe stdio::snprintf(buf, cap, "%s%.*s%s".ptr() as *const char, pfx, (s.end - s.start) as i32, src_at(self.mod_src(ty.module), s.start), sfx);
             }
         } else {
-            unsafe stdio::snprintf(buf, cap, "%s".ptr as *const char, "?".ptr as *const char);
+            unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "?".ptr() as *const char);
         }
     }
 
@@ -587,7 +587,7 @@ extend TypeChecker {
         self.render_type(expected, (&mut e.b[0]) as *mut char, 96);
         self.render_type(unsafe (*self.cur_ast()).type_of(node), (&mut f.b[0]) as *mut char, 96);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emitf(sp.start, sp.end - sp.start, "mismatched types: expected '%s', found '%s'".ptr as *const char, (&e.b[0]) as *const char, (&f.b[0]) as *const char);
+        self.errors.emitf(sp.start, sp.end - sp.start, "mismatched types: expected '%s', found '%s'".ptr() as *const char, (&e.b[0]) as *const char, (&f.b[0]) as *const char);
     }
 
     // ---- function-type helpers ----
@@ -909,7 +909,7 @@ extend TypeChecker {
             if aliased_node == NODE_NONE { return unsafe (*self.cur_ast()).intern_type(Ty { kind: TypeKind::TYPE_OPAQUE, module: m, as_data: TyAs { decl: decl } }); }
             if self.alias_depth >= TYPE_ALIAS_MAX_DEPTH {
                 let sp = unsafe (*a).at_const(decl).span;
-                self.errors.emitf(sp.start, sp.end - sp.start, "type alias is cyclic".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "type alias is cyclic".ptr() as *const char);
                 return TYPE_ERROR;
             }
             self.alias_depth = self.alias_depth + 1;
@@ -961,28 +961,28 @@ extend TypeChecker {
     // ---- prelude type intercepts ----
     fn prelude_str_type(self: &mut Self) TypeId {
         if self.package == null { return TYPE_ERROR; }
-        let hit = unsafe (*self.package).prelude_lookup("str".ptr as *const char, 3, true);
+        let hit = unsafe (*self.package).prelude_lookup("str".ptr() as *const char, 3, true);
         if hit.node != NODE_NONE { return self.named_type_of(hit.mid, hit.node); }
         return TYPE_ERROR;
     }
     fn prelude_slice_type(self: &mut Self, elem: TypeId, mut2: bool) TypeId {
         if self.package == null { return TYPE_ERROR; }
-        let mut hit = unsafe (*self.package).prelude_lookup("Slice".ptr as *const char, 5, true);
-        if mut2 { hit = unsafe (*self.package).prelude_lookup("SliceMut".ptr as *const char, 8, true); }
+        let mut hit = unsafe (*self.package).prelude_lookup("Slice".ptr() as *const char, 5, true);
+        if mut2 { hit = unsafe (*self.package).prelude_lookup("SliceMut".ptr() as *const char, 8, true); }
         if hit.node != NODE_NONE { return unsafe (*self.cur_ast()).intern_instance(hit.mid, hit.node, (&elem) as *const TypeId, 1); }
         return TYPE_ERROR;
     }
     fn prelude_range_type(self: &mut Self, elem: TypeId) TypeId {
         if self.package == null { return TYPE_ERROR; }
-        let hit = unsafe (*self.package).prelude_lookup("Range".ptr as *const char, 5, true);
+        let hit = unsafe (*self.package).prelude_lookup("Range".ptr() as *const char, 5, true);
         if hit.node != NODE_NONE { return unsafe (*self.cur_ast()).intern_instance(hit.mid, hit.node, (&elem) as *const TypeId, 1); }
         return TYPE_ERROR;
     }
     fn prelude_tuple_type(self: &mut Self, args: *const TypeId, n: u32) TypeId {
         if self.package == null || n < 2 || n > 4 { return TYPE_ERROR; }
-        let mut nm = "Tuple2".ptr as *const char;
-        if n == 3 { nm = "Tuple3".ptr as *const char; }
-        else if n == 4 { nm = "Tuple4".ptr as *const char; }
+        let mut nm = "Tuple2".ptr() as *const char;
+        if n == 3 { nm = "Tuple3".ptr() as *const char; }
+        else if n == 4 { nm = "Tuple4".ptr() as *const char; }
         let hit = unsafe (*self.package).prelude_lookup(nm, 6, true);
         if hit.node != NODE_NONE { return unsafe (*self.cur_ast()).intern_instance(hit.mid, hit.node, args, n as u8); }
         return TYPE_ERROR;
@@ -1001,18 +1001,18 @@ extend TypeChecker {
         return it.n as i32;
     }
     fn tuple_args_of(self: &Self, tid: TypeId, out: *mut TypeId, maxn: i32) i32 {
-        let n2 = self.prelude_instance_args(tid, "Tuple2".ptr as *const char, 6, out, maxn);
+        let n2 = self.prelude_instance_args(tid, "Tuple2".ptr() as *const char, 6, out, maxn);
         if n2 >= 0 { return n2; }
-        let n3 = self.prelude_instance_args(tid, "Tuple3".ptr as *const char, 6, out, maxn);
+        let n3 = self.prelude_instance_args(tid, "Tuple3".ptr() as *const char, 6, out, maxn);
         if n3 >= 0 { return n3; }
-        return self.prelude_instance_args(tid, "Tuple4".ptr as *const char, 6, out, maxn);
+        return self.prelude_instance_args(tid, "Tuple4".ptr() as *const char, 6, out, maxn);
     }
     fn range_instance_elem(self: &Self, tid: TypeId) TypeId {
         if self.package == null { return TYPE_NONE; }
         let ty = self.type_at(tid);
         if ty.kind != TypeKind::TYPE_INSTANCE { return TYPE_NONE; }
         let it = *unsafe (*self.cur_ast()).instance(ty.as_data.inst);
-        let hit = unsafe (*self.package).prelude_lookup("Range".ptr as *const char, 5, true);
+        let hit = unsafe (*self.package).prelude_lookup("Range".ptr() as *const char, 5, true);
         if it.n == 1 && it.module == hit.mid && it.decl == hit.node { return it.args[0]; }
         return TYPE_NONE;
     }
@@ -1023,8 +1023,8 @@ extend TypeChecker {
         if ty.kind != TypeKind::TYPE_INSTANCE { return 0; }
         let it = *unsafe (*self.cur_ast()).instance(ty.as_data.inst);
         if it.n != 1 { return 0; }
-        let sh = unsafe (*self.package).prelude_lookup("Slice".ptr as *const char, 5, true);
-        let mh = unsafe (*self.package).prelude_lookup("SliceMut".ptr as *const char, 8, true);
+        let sh = unsafe (*self.package).prelude_lookup("Slice".ptr() as *const char, 5, true);
+        let mh = unsafe (*self.package).prelude_lookup("SliceMut".ptr() as *const char, 8, true);
         let mut kind: i32 = 0;
         if it.module == sh.mid && it.decl == sh.node { kind = 1; }
         else if it.module == mh.mid && it.decl == mh.node { kind = 2; }
@@ -1034,10 +1034,10 @@ extend TypeChecker {
     fn tc_box_of(self: &Self, y: &Ty, inner: *mut TypeId, global_alloc: *mut bool) bool {
         if y.kind != TypeKind::TYPE_INSTANCE || self.package == null { return false; }
         let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
-        let bh = unsafe (*self.package).prelude_lookup("Box".ptr as *const char, 3, true);
+        let bh = unsafe (*self.package).prelude_lookup("Box".ptr() as *const char, 3, true);
         if it.module != bh.mid || it.decl != bh.node || it.n < 1 { return false; }
         unsafe *inner = it.args[0];
-        let gh = unsafe (*self.package).prelude_lookup("Global".ptr as *const char, 6, true);
+        let gh = unsafe (*self.package).prelude_lookup("Global".ptr() as *const char, 6, true);
         let mut ga = false;
         if it.n >= 2 {
             let ay = self.type_at(it.args[1]);
@@ -1062,7 +1062,13 @@ extend TypeChecker {
         else if dk == NodeKind::NODE_CONST { result = self.lower_type_in(m, unsafe (*a).at_const(decl).as_data.const_def.ty); }
         else if dk == NodeKind::NODE_LET { result = self.lower_type_in(m, unsafe (*a).at_const(decl).as_data.let_stmt.ty); }
         else if dk == NodeKind::NODE_FUNCTION { result = unsafe (*self.cur_ast()).intern_type(Ty { kind: TypeKind::TYPE_FUNCTION, module: m, as_data: TyAs { decl: decl } }); }
-        else if dk == NodeKind::NODE_STRUCT || dk == NodeKind::NODE_ENUM || dk == NodeKind::NODE_GENERIC_PARAM { result = self.named_type_of(m, decl); }
+        else if dk == NodeKind::NODE_GENERIC_PARAM {
+            let gp = unsafe (*a).at_const(decl).as_data.generic_param;
+            // In value position a const-generic param has its declared type (e.g. usize); a type param is TYPE_GENERIC.
+            if gp.is_const { result = self.lower_type_in(m, gp.const_type); }
+            else { result = self.named_type_of(m, decl); }
+        }
+        else if dk == NodeKind::NODE_STRUCT || dk == NodeKind::NODE_ENUM { result = self.named_type_of(m, decl); }
         if local { unsafe (*self.cur_ast()).set_type(decl, result); }
         return result;
     }
@@ -1075,6 +1081,18 @@ extend TypeChecker {
         if d.node != NODE_NONE { return self.named_type_of(d.module, d.node); }
         let b = builtin_of(self.source, self.name_span(id));
         if b >= 0 { return Ast::builtin(b as BuiltinType); }
+        return TYPE_ERROR;
+    }
+
+    // Fold a const-generic argument expression (e.g. the `4` in `Buff<i32, 4>`) to an interned TYPE_CONST value.
+    fn tc_const_arg(self: &mut Self, m: ModuleId, aid: NodeId) TypeId {
+        let ceptr = self.ceval();
+        if ceptr != null {
+            let lv = unsafe (*ceptr).eval(m, aid);
+            if lv.kind == ce::CONST_INT { return unsafe (*self.cur_ast()).const_value(lv.as_data.i); }
+        }
+        let sp = unsafe (*self.mod_ast(m)).at_const(aid).span;
+        self.errors.emitf(sp.start, sp.end - sp.start, "const generic argument must be a constant integer".ptr() as *const char);
         return TYPE_ERROR;
     }
 
@@ -1103,7 +1121,7 @@ extend TypeChecker {
                     let a0 = unsafe ((*a).list(args))[0];
                     let an = unsafe (*a).at_const(a0);
                     if an.kind == NodeKind::NODE_DYN_TYPE && an.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE {
-                        let bh = unsafe (*self.package).prelude_lookup("Box".ptr as *const char, 3, true);
+                        let bh = unsafe (*self.package).prelude_lookup("Box".ptr() as *const char, 3, true);
                         if d.module == bh.mid && d.node == bh.node { return self.lower_type_in(m, a0); }
                     }
                 }
@@ -1113,10 +1131,16 @@ extend TypeChecker {
                     let mut i: u32 = 0;
                     while i < args.len && tn < 4 {
                         let aid = unsafe ((*a).list(args))[i as usize];
+                        if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LITERAL {
+                            ta.t[tn as usize] = self.tc_const_arg(m, aid);
+                            tn = tn + 1;
+                            i = i + 1;
+                            continue;
+                        }
                         ta.t[tn as usize] = self.lower_type_in(m, aid);
                         if ta.t[tn as usize] != TYPE_NONE && self.type_at(ta.t[tn as usize]).kind == TypeKind::TYPE_ARRAY && self.type_at(ta.t[tn as usize]).as_data.arr.len == 0 {
                             let asp = unsafe (*a).at_const(aid).span;
-                            self.errors.emitf(asp.start, asp.end - asp.start, "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct".ptr as *const char);
+                            self.errors.emitf(asp.start, asp.end - asp.start, "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct".ptr() as *const char);
                             ta.t[tn as usize] = TYPE_NONE;
                         }
                         tn = tn + 1;
@@ -1189,13 +1213,13 @@ extend TypeChecker {
                     let aid = unsafe ((*a).list(args))[i as usize];
                     let an = unsafe (*a).at_const(aid);
                     if an.kind != NodeKind::NODE_DYN_TYPE || an.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE { i = i + 1; continue; }
-                    let bh = unsafe (*self.package).prelude_lookup("Box".ptr as *const char, 3, true);
+                    let bh = unsafe (*self.package).prelude_lookup("Box".ptr() as *const char, 3, true);
                     let hd = unsafe (*a).resolution_def(id);
                     if args.len == 1 && hd.module == bh.mid && hd.node == bh.node {
                         result = self.resolve_dyn_node(unsafe ((*a).list(args))[0], TypeQualifier::TYPE_QUAL_NONE);
                     } else {
                         let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emitf(sp.start, sp.end - sp.start, "a bare 'dyn' type can only be the generic argument of 'Box'".ptr as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "a bare 'dyn' type can only be the generic argument of 'Box'".ptr() as *const char);
                     }
                     unsafe (*self.cur_ast()).set_type(id, result);
                     return result;
@@ -1221,11 +1245,15 @@ extend TypeChecker {
                             let mut j: u32 = 0;
                             while j < args.len && tn < 4 {
                                 let aid = unsafe ((*a).list(args))[j as usize];
-                                ta.t[tn as usize] = self.resolve_type(aid);
-                                if ta.t[tn as usize] != TYPE_NONE && self.type_at(ta.t[tn as usize]).kind == TypeKind::TYPE_ARRAY && self.type_at(ta.t[tn as usize]).as_data.arr.len == 0 {
-                                    let asp = unsafe (*a).at_const(aid).span;
-                                    self.errors.emitf(asp.start, asp.end - asp.start, "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct".ptr as *const char);
-                                    ta.t[tn as usize] = TYPE_NONE;
+                                if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LITERAL {
+                                    ta.t[tn as usize] = self.tc_const_arg(self.ast.module, aid);
+                                } else {
+                                    ta.t[tn as usize] = self.resolve_type(aid);
+                                    if ta.t[tn as usize] != TYPE_NONE && self.type_at(ta.t[tn as usize]).kind == TypeKind::TYPE_ARRAY && self.type_at(ta.t[tn as usize]).as_data.arr.len == 0 {
+                                        let asp = unsafe (*a).at_const(aid).span;
+                                        self.errors.emitf(asp.start, asp.end - asp.start, "a fixed-size array cannot be a generic type argument; use a slice '[]T' or wrap it in a struct".ptr() as *const char);
+                                        ta.t[tn as usize] = TYPE_NONE;
+                                    }
                                 }
                                 tn = tn + 1;
                                 j = j + 1;
@@ -1234,9 +1262,9 @@ extend TypeChecker {
                             result = unsafe (*self.cur_ast()).intern_instance(d.module, d.node, (&ta.t[0]) as *const TypeId, tn);
                         } else {
                             result = self.named_type_of(d.module, d.node);
-                            if dnk == NodeKind::NODE_INTERFACE && parts.len != 0 && !span_is(self.source, self.name_span(unsafe ((*a).list(parts))[0]), "Self".ptr as *const char) {
+                            if dnk == NodeKind::NODE_INTERFACE && parts.len != 0 && !span_is(self.source, self.name_span(unsafe ((*a).list(parts))[0]), "Self".ptr() as *const char) {
                                 let isp = self.name_span(unsafe ((*a).list(parts))[0]);
-                                self.errors.emitf(isp.start, isp.end - isp.start, "an interface is not a type; use '&dyn %.*s', 'Box<dyn %.*s>', or a generic bound".ptr as *const char, (isp.end - isp.start) as i32, src_at(self.source, isp.start), (isp.end - isp.start) as i32, src_at(self.source, isp.start));
+                                self.errors.emitf(isp.start, isp.end - isp.start, "an interface is not a type; use '&dyn %.*s', 'Box<dyn %.*s>', or a generic bound".ptr() as *const char, (isp.end - isp.start) as i32, src_at(self.source, isp.start), (isp.end - isp.start) as i32, src_at(self.source, isp.start));
                             }
                             if d.module == self.ast.module {
                                 for k in 1..parts.len {
@@ -1260,7 +1288,7 @@ extend TypeChecker {
                 let elems = unsafe (*a).at_const(id).as_data.array_literal.elements;
                 if elems.len > 4 {
                     let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emitf(sp.start, sp.end - sp.start, "tuple arity is limited to 4 elements".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "tuple arity is limited to 4 elements".ptr() as *const char);
                 } else {
                     let mut targs = Tys4 {};
                     for i in 0..elems.len { targs.t[i as usize] = self.resolve_type(unsafe ((*a).list(elems))[i as usize]); }
@@ -1286,7 +1314,7 @@ extend TypeChecker {
                 let q = unsafe (*a).at_const(id).as_data.indirect_type.qualifier;
                 if q == TypeQualifier::TYPE_QUAL_NONE {
                     let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emitf(sp.start, sp.end - sp.start, "a 'dyn' type must be '&dyn I', '&mut dyn I', or 'Box<dyn I>'".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "a 'dyn' type must be '&dyn I', '&mut dyn I', or 'Box<dyn I>'".ptr() as *const char);
                 } else {
                     result = self.resolve_dyn_node(id, q);
                 }
@@ -1321,7 +1349,7 @@ extend TypeChecker {
         if unsafe (*a).at_const(inner).kind == NodeKind::NODE_FUNCTION_TYPE {
             let sp = unsafe (*a).at_const(id).span;
             let mut concrete = qual != TypeQualifier::TYPE_QUAL_MUT;
-            if !concrete { self.errors.emitf(sp.start, sp.end - sp.start, "a 'dyn fn' is always called through a shared view; write '&dyn fn(..) ..'".ptr as *const char); }
+            if !concrete { self.errors.emitf(sp.start, sp.end - sp.start, "a 'dyn fn' is always called through a shared view; write '&dyn fn(..) ..'".ptr() as *const char); }
             let ftp = unsafe (*a).at_const(inner).as_data.function_type;
             let mut i: u32 = 0;
             while concrete && i < ftp.params.len { concrete = self.type_at(self.resolve_type(unsafe ((*a).list(ftp.params))[i as usize])).kind != TypeKind::TYPE_GENERIC; i = i + 1; }
@@ -1334,7 +1362,7 @@ extend TypeChecker {
                 i = i + 1;
             }
             if concrete { result = self.tc_intern_dynfn(self.ast.module, inner, qual); }
-            else if qual != TypeQualifier::TYPE_QUAL_MUT { self.errors.emitf(sp.start, sp.end - sp.start, "a 'dyn fn' signature cannot name a generic parameter".ptr as *const char); }
+            else if qual != TypeQualifier::TYPE_QUAL_MUT { self.errors.emitf(sp.start, sp.end - sp.start, "a 'dyn fn' signature cannot name a generic parameter".ptr() as *const char); }
             unsafe (*self.cur_ast()).set_type(id, result);
             return result;
         }
@@ -1342,7 +1370,7 @@ extend TypeChecker {
         if unsafe (*a).at_const(inner).kind == NodeKind::NODE_TYPE_PATH { d = unsafe (*a).resolution_def(inner); }
         let sp = unsafe (*a).at_const(id).span;
         if d.node == NODE_NONE || unsafe (*self.mod_ast(d.module)).at_const(d.node).kind != NodeKind::NODE_INTERFACE {
-            self.errors.emitf(sp.start, sp.end - sp.start, "'dyn' requires an interface".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "'dyn' requires an interface".ptr() as *const char);
         } else if self.dyn_compatible(d, sp) {
             result = unsafe (*self.cur_ast()).intern_type(Ty { kind: TypeKind::TYPE_DYN, qualifier: qual as u8, module: d.module, as_data: TyAs { decl: d.node } });
         }
@@ -1356,7 +1384,7 @@ extend TypeChecker {
         if mn.kind != NodeKind::NODE_FUNCTION || mn.as_data.function.params.len == 0 { return false; }
         let p0 = unsafe ((*ia).list(mn.as_data.function.params))[0];
         let pnm = unsafe (*ia).at_const(unsafe (*ia).at_const(p0).as_data.parameter.name).as_data.name.text;
-        return span_is(self.mod_src(imod), pnm, "self".ptr as *const char);
+        return span_is(self.mod_src(imod), pnm, "self".ptr() as *const char);
     }
 
     fn tc_mentions_self(self: &Self, imod: ModuleId, tn: NodeId, iface: DefId) bool {
@@ -1398,8 +1426,8 @@ extend TypeChecker {
         let idn = unsafe (*ia).at_const(iface.node).as_data.interface_def;
         let mut why: *const char = null;
         let mut mn = tok::Span { start: 0, end: 0 };
-        if idn.generics.len != 0 { why = "the interface has generic parameters".ptr as *const char; }
-        else if idn.bounds.len != 0 { why = "the interface has superinterfaces".ptr as *const char; }
+        if idn.generics.len != 0 { why = "the interface has generic parameters".ptr() as *const char; }
+        else if idn.bounds.len != 0 { why = "the interface has superinterfaces".ptr() as *const char; }
         let mut i: u32 = 0;
         while why == null && i < idn.items.len {
             let mid = unsafe ((*ia).list(idn.items))[i as usize];
@@ -1410,13 +1438,13 @@ extend TypeChecker {
                 let st = unsafe (*ia).at_const(p0).as_data.parameter.ty;
                 let mut sk = NodeKind::NODE_NONE_KIND;
                 if st != NODE_NONE { sk = unsafe (*ia).at_const(st).kind; }
-                if m.generics.len != 0 { why = "a method has its own generic parameters".ptr as *const char; }
-                else if sk != NodeKind::NODE_REFERENCE_TYPE && sk != NodeKind::NODE_POINTER_TYPE { why = "a method takes 'Self' by value".ptr as *const char; }
-                else if m.returns.len > 1 { why = "a method has multiple return values".ptr as *const char; }
+                if m.generics.len != 0 { why = "a method has its own generic parameters".ptr() as *const char; }
+                else if sk != NodeKind::NODE_REFERENCE_TYPE && sk != NodeKind::NODE_POINTER_TYPE { why = "a method takes 'Self' by value".ptr() as *const char; }
+                else if m.returns.len > 1 { why = "a method has multiple return values".ptr() as *const char; }
                 let mut p: u32 = 1;
                 while why == null && p < m.params.len {
                     let pid = unsafe ((*ia).list(m.params))[p as usize];
-                    if self.tc_mentions_self(iface.module, unsafe (*ia).at_const(pid).as_data.parameter.ty, iface) { why = "a method mentions 'Self' outside the receiver".ptr as *const char; }
+                    if self.tc_mentions_self(iface.module, unsafe (*ia).at_const(pid).as_data.parameter.ty, iface) { why = "a method mentions 'Self' outside the receiver".ptr() as *const char; }
                     p = p + 1;
                 }
                 let mut r: u32 = 0;
@@ -1424,7 +1452,7 @@ extend TypeChecker {
                     let rid = unsafe ((*ia).list(m.returns))[r as usize];
                     let rn = unsafe (*ia).at_const(rid);
                     let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, rid);
-                    if self.tc_mentions_self(iface.module, tn, iface) { why = "a method mentions 'Self' outside the receiver".ptr as *const char; }
+                    if self.tc_mentions_self(iface.module, tn, iface) { why = "a method mentions 'Self' outside the receiver".ptr() as *const char; }
                     r = r + 1;
                 }
             }
@@ -1432,8 +1460,8 @@ extend TypeChecker {
         }
         if why == null { return true; }
         let inm = unsafe (*ia).at_const(idn.name).as_data.name.text;
-        self.errors.emitf(at.start, at.end - at.start, "interface '%.*s' is not dyn-compatible: %s".ptr as *const char, (inm.end - inm.start) as i32, src_at(isrc, inm.start), why);
-        if mn.end > mn.start { self.errors.notef("offending method: '%.*s'".ptr as *const char, (mn.end - mn.start) as i32, src_at(isrc, mn.start)); }
+        self.errors.emitf(at.start, at.end - at.start, "interface '%.*s' is not dyn-compatible: %s".ptr() as *const char, (inm.end - inm.start) as i32, src_at(isrc, inm.start), why);
+        if mn.end > mn.start { self.errors.notef("offending method: '%.*s'".ptr() as *const char, (mn.end - mn.start) as i32, src_at(isrc, mn.start)); }
         return false;
     }
 
@@ -1880,7 +1908,7 @@ extend TypeChecker {
     fn is_free_iface(self: &Self, tr: DefId) bool {
         if tr.node == NODE_NONE { return false; }
         let trn = unsafe (*self.mod_ast(tr.module)).at_const(tr.node);
-        return trn.kind == NodeKind::NODE_INTERFACE && span_is(self.mod_src(tr.module), unsafe (*self.mod_ast(tr.module)).at_const(trn.as_data.interface_def.name).as_data.name.text, "Free".ptr as *const char);
+        return trn.kind == NodeKind::NODE_INTERFACE && span_is(self.mod_src(tr.module), unsafe (*self.mod_ast(tr.module)).at_const(trn.as_data.interface_def.name).as_data.name.text, "Free".ptr() as *const char);
     }
     fn tc_param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
         let a = self.mod_ast(m);
@@ -1976,36 +2004,36 @@ extend TypeChecker {
         self.render_type(self.strip(target), (&mut ty.b[0]) as *mut char, 96);
         let ma = self.mod_ast(md.module);
         let mn = unsafe (*ma).at_const(unsafe (*ma).at_const(md.node).as_data.function.name).as_data.name.text;
-        self.errors.emitf(at.start, at.end - at.start, "cannot call '%s::%.*s': unsatisfied interface bounds".ptr as *const char, (&ty.b[0]) as *const char, (mn.end - mn.start) as i32, src_at(self.mod_src(md.module), mn.start));
-        self.errors.notef("these bounds come from the extend block that defines the method".ptr as *const char);
+        self.errors.emitf(at.start, at.end - at.start, "cannot call '%s::%.*s': unsatisfied interface bounds".ptr() as *const char, (&ty.b[0]) as *const char, (mn.end - mn.start) as i32, src_at(self.mod_src(md.module), mn.start));
+        self.errors.notef("these bounds come from the extend block that defines the method".ptr() as *const char);
     }
 
     fn mark_format_helpers(self: &mut Self) void {
         if self.package == null { return; }
-        let sh = unsafe (*self.package).prelude_lookup("String".ptr as *const char, 6, true);
+        let sh = unsafe (*self.package).prelude_lookup("String".ptr() as *const char, 6, true);
         if sh.node == NODE_NONE { return; }
         let mut names = Names14 {};
-        names.n[0] = "new".ptr as *const char;
-        names.n[1] = "print".ptr as *const char;
-        names.n[2] = "eprint".ptr as *const char;
-        names.n[3] = "push_i64".ptr as *const char;
-        names.n[4] = "push_u64".ptr as *const char;
-        names.n[5] = "push_f64".ptr as *const char;
-        names.n[6] = "push_hex_i64".ptr as *const char;
-        names.n[7] = "push_hex".ptr as *const char;
-        names.n[8] = "push_byte".ptr as *const char;
-        names.n[9] = "push_str".ptr as *const char;
-        names.n[10] = "as_str".ptr as *const char;
-        names.n[11] = "push_bin".ptr as *const char;
-        names.n[12] = "push_f64_prec".ptr as *const char;
-        names.n[13] = "push_padded".ptr as *const char;
+        names.n[0] = "new".ptr() as *const char;
+        names.n[1] = "print".ptr() as *const char;
+        names.n[2] = "eprint".ptr() as *const char;
+        names.n[3] = "push_i64".ptr() as *const char;
+        names.n[4] = "push_u64".ptr() as *const char;
+        names.n[5] = "push_f64".ptr() as *const char;
+        names.n[6] = "push_hex_i64".ptr() as *const char;
+        names.n[7] = "push_hex".ptr() as *const char;
+        names.n[8] = "push_byte".ptr() as *const char;
+        names.n[9] = "push_str".ptr() as *const char;
+        names.n[10] = "as_str".ptr() as *const char;
+        names.n[11] = "push_bin".ptr() as *const char;
+        names.n[12] = "push_f64_prec".ptr() as *const char;
+        names.n[13] = "push_padded".ptr() as *const char;
         let mut i: usize = 0;
         while i < 14 { self.find_method_cstr(sh.mid, sh.node, names.n[i]); i = i + 1; }
     }
 
     fn resolve_conversion(self: &mut Self, name: tok::Span, want: TypeId) DefId {
-        let is_into = span_is(self.source, name, "into".ptr as *const char);
-        let is_try = span_is(self.source, name, "try_into".ptr as *const char);
+        let is_into = span_is(self.source, name, "into".ptr() as *const char);
+        let is_try = span_is(self.source, name, "try_into".ptr() as *const char);
         if (!is_into && !is_try) || want == TYPE_NONE { return DefId { module: 0, node: NODE_NONE }; }
         let mut m: ModuleId = 0;
         let mut decl = NODE_NONE;
@@ -2017,8 +2045,8 @@ extend TypeChecker {
             if gn < 1 { return DefId { module: 0, node: NODE_NONE }; }
             if !self.aggregate_of(self.strip(ga.t[0]), (&mut m) as *mut ModuleId, (&mut decl) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) { return DefId { module: 0, node: NODE_NONE }; }
         }
-        let mut lit = "from".ptr as *const char;
-        if is_try { lit = "try_from".ptr as *const char; }
+        let mut lit = "from".ptr() as *const char;
+        if is_try { lit = "try_from".ptr() as *const char; }
         return self.find_method_cstr(m, decl, lit);
     }
 
@@ -2047,7 +2075,7 @@ extend TypeChecker {
                         while j < ms.len {
                             let mid = unsafe ((*a).list(ms))[j as usize];
                             let mn = unsafe (*a).at_const(mid);
-                            if mn.kind == NodeKind::NODE_FUNCTION && span_is(self.mod_src(mm), unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text, "from".ptr as *const char) {
+                            if mn.kind == NodeKind::NODE_FUNCTION && span_is(self.mod_src(mm), unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text, "from".ptr() as *const char) {
                                 let ps = mn.as_data.function.params;
                                 if ps.len == 1 && self.decl_type_in(mm, unsafe ((*a).list(ps))[0]) == src {
                                     unsafe (*self.package).mark_method_used(DefId { module: mm, node: mid });
@@ -2071,7 +2099,7 @@ extend TypeChecker {
         let sy = *self.type_at(src);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
         if sy.kind == TypeKind::TYPE_GENERIC {
-            self.errors.emitf(sp.start, sp.end - sp.start, "cannot erase a generic type parameter to 'dyn'".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "cannot erase a generic type parameter to 'dyn'".ptr() as *const char);
             return true;
         }
         if !self.type_satisfies(src, iface, 0) { return false; }
@@ -2095,14 +2123,14 @@ extend TypeChecker {
             if self.dyn_method(iface.module, mid) {
                 let mn = unsafe (*ia).at_const(unsafe (*ia).at_const(mid).as_data.function.name).as_data.name.text;
                 let mut nmb = Buf96 {};
-                unsafe stdio::snprintf((&mut nmb.b[0]) as *mut char, 96, "%.*s".ptr as *const char, (mn.end - mn.start) as i32, src_at(isrc, mn.start));
+                unsafe stdio::snprintf((&mut nmb.b[0]) as *mut char, 96, "%.*s".ptr() as *const char, (mn.end - mn.start) as i32, src_at(isrc, mn.start));
                 if self.find_method_cstr(tmod, tdecl, (&nmb.b[0]) as *const char).node != NODE_NONE { i = i + 1; continue; }
                 let mut emod: ModuleId = 0;
                 if unsafe (*ia).at_const(mid).as_data.function.body != NODE_NONE && self.find_extend_as(tmod, tdecl, iface, (&mut emod) as *mut ModuleId) != NODE_NONE { i = i + 1; continue; }
                 let mut tn = Buf96 {};
                 self.render_type(src, (&mut tn.b[0]) as *mut char, 96);
-                self.errors.emitf(sp.start, sp.end - sp.start, "cannot erase '%s' to 'dyn': method '%s' has no emittable implementation".ptr as *const char, (&tn.b[0]) as *const char, (&nmb.b[0]) as *const char);
-                self.errors.notef("implement the method in an 'extend .. as ..' block or give it a default body".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "cannot erase '%s' to 'dyn': method '%s' has no emittable implementation".ptr() as *const char, (&tn.b[0]) as *const char, (&nmb.b[0]) as *const char);
+                self.errors.notef("implement the method in an 'extend .. as ..' block or give it a default body".ptr() as *const char);
                 return true;
             }
             i = i + 1;
@@ -2118,13 +2146,19 @@ extend TypeChecker {
         let ex = *self.type_at(expected);
         let ac = *self.type_at(actual);
         if ac.kind == TypeKind::TYPE_NEVER { return true; }
-        if ex.kind == TypeKind::TYPE_POINTER && ac.kind == TypeKind::TYPE_REFERENCE && ex.as_data.elem == ac.as_data.elem
-            && (ac.qualifier == (TypeQualifier::TYPE_QUAL_MUT as u8) || ex.qualifier == (TypeQualifier::TYPE_QUAL_CONST as u8)) { return true; }
+        // A reference coalesces to its raw-pointer form (`&T` -> `*const T`, `&mut T` -> `*mut T`).
+        // Normalizing it here lets the single pointer rule below apply transitively, so `&T` reaches
+        // `*const void` via `*const T` (ref -> ptr -> void) with no special case.
+        let mut acp = ac;
+        if ac.kind == TypeKind::TYPE_REFERENCE && ex.kind == TypeKind::TYPE_POINTER {
+            acp.kind = TypeKind::TYPE_POINTER;
+            if acp.qualifier != (TypeQualifier::TYPE_QUAL_MUT as u8) { acp.qualifier = TypeQualifier::TYPE_QUAL_CONST as u8; }
+        }
         if ex.kind == TypeKind::TYPE_REFERENCE && ac.kind == TypeKind::TYPE_REFERENCE && ex.as_data.elem == ac.as_data.elem
             && ex.qualifier != (TypeQualifier::TYPE_QUAL_MUT as u8) && ac.qualifier == (TypeQualifier::TYPE_QUAL_MUT as u8) { return true; }
-        if ex.kind == TypeKind::TYPE_POINTER && ac.kind == TypeKind::TYPE_POINTER
-            && (ex.as_data.elem == ac.as_data.elem || ex.as_data.elem == Ast::builtin(BuiltinType::BT_VOID))
-            && (ex.qualifier == (TypeQualifier::TYPE_QUAL_CONST as u8) || ac.qualifier != (TypeQualifier::TYPE_QUAL_CONST as u8)) { return true; }
+        if ex.kind == TypeKind::TYPE_POINTER && acp.kind == TypeKind::TYPE_POINTER
+            && (ex.as_data.elem == acp.as_data.elem || ex.as_data.elem == Ast::builtin(BuiltinType::BT_VOID))
+            && (ex.qualifier == (TypeQualifier::TYPE_QUAL_CONST as u8) || acp.qualifier != (TypeQualifier::TYPE_QUAL_CONST as u8)) { return true; }
         if ex.kind == TypeKind::TYPE_FUNCTION && ac.kind == TypeKind::TYPE_FUNCTION { return self.fn_compatible(expected, actual); }
         if ex.kind == TypeKind::TYPE_ARRAY && ac.kind == TypeKind::TYPE_ARRAY {
             if ex.as_data.arr.len != 0 && ac.as_data.arr.len != 0 && ex.as_data.arr.len != ac.as_data.arr.len { return false; }
@@ -2164,12 +2198,12 @@ extend TypeChecker {
             }
             if exsig != TYPE_NONE && ac.kind == TypeKind::TYPE_FUNCTION {
                 if unsafe (*self.mod_ast(ac.module)).at_const(ac.as_data.decl).kind == NodeKind::NODE_FUNCTION_TYPE {
-                    self.errors.emitf(sp.start, sp.end - sp.start, "a runtime 'fn(..)' pointer cannot erase to 'dyn fn'; wrap it in a closure".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "a runtime 'fn(..)' pointer cannot erase to 'dyn fn'; wrap it in a closure".ptr() as *const char);
                     return true;
                 }
                 if !self.dynfn_sig_ok(exsig, actual) { return false; }
                 if ex.qualifier != (TypeQualifier::TYPE_QUAL_NONE as u8) && self.fn_is_capturing(actual) {
-                    self.errors.emitf(sp.start, sp.end - sp.start, "a capturing closure must be borrowed to view it as '&dyn fn': write '&f'".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "a capturing closure must be borrowed to view it as '&dyn fn': write '&f'".ptr() as *const char);
                     return true;
                 }
                 unsafe (*self.cur_ast()).add_dyn_use(node, actual, expected);
@@ -2180,7 +2214,7 @@ extend TypeChecker {
                 let mut galloc = false;
                 if self.tc_box_of(&ac, (&mut inner) as *mut TypeId, (&mut galloc) as *mut bool) {
                     if !galloc {
-                        self.errors.emitf(sp.start, sp.end - sp.start, "only a default-allocated 'Box<T>' can be erased to 'Box<dyn I>'".ptr as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "only a default-allocated 'Box<T>' can be erased to 'Box<dyn I>'".ptr() as *const char);
                         return true;
                     }
                     return self.dyn_coerce(node, inner, expected);
@@ -2207,7 +2241,7 @@ extend TypeChecker {
                     let mut tn = Buf96 {};
                     self.render_type(expected, (&mut tn.b[0]) as *mut char, 96);
                     let vsp = unsafe (*self.cur_ast()).at_const(node).span;
-                    self.errors.emitf(vsp.start, vsp.end - vsp.start, "integer literal is out of range for '%s'".ptr as *const char, (&tn.b[0]) as *const char);
+                    self.errors.emitf(vsp.start, vsp.end - vsp.start, "integer literal is out of range for '%s'".ptr() as *const char, (&tn.b[0]) as *const char);
                     return true;
                 }
                 if !neg { unsafe (*self.cur_ast()).set_type(node, expected); }
@@ -2246,7 +2280,7 @@ extend TypeChecker {
         let end_ok = !has_end || end == TYPE_NONE || self.is_int(end);
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         if !start_ok || !end_ok {
-            self.errors.emitf(sp.start, sp.end - sp.start, "range bounds must be integers".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "range bounds must be integers".ptr() as *const char);
             return TYPE_NONE;
         }
         if !has_start { return end; }
@@ -2322,7 +2356,7 @@ extend TypeChecker {
                 let mut ga = Tys4 {};
                 let mut gn: i32 = 0;
                 if !self.aggregate_of(oty, (&mut om) as *mut ModuleId, (&mut od) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) { return false; }
-                let im = self.find_method_cstr(om, od, "index_mut".ptr as *const char);
+                let im = self.find_method_cstr(om, od, "index_mut".ptr() as *const char);
                 if im.node == NODE_NONE { return false; }
                 let ia = self.mod_ast(im.module);
                 let irs = unsafe (*ia).at_const(im.node).as_data.function.returns;
@@ -2379,7 +2413,7 @@ extend TypeChecker {
         let d = unsafe (*a).resolution_def(expr);
         if d.module != self.ast.module || d.node == NODE_NONE || self.tc_capture_index(self.clos_stack[(self.nclos - 1) as usize], d.node) < 0 || !self.tc_type_is_free(unsafe (*a).type_of(expr)) { return false; }
         let sp = unsafe (*a).at_const(expr).span;
-        self.errors.emitf(sp.start, sp.end - sp.start, "cannot move a captured value out of a closure (the closure's env owns it)".ptr as *const char);
+        self.errors.emitf(sp.start, sp.end - sp.start, "cannot move a captured value out of a closure (the closure's env owns it)".ptr() as *const char);
         return true;
     }
 
@@ -2408,7 +2442,7 @@ extend TypeChecker {
                 if self.borrow_dead_after(self.borrows[i as usize], expr) { self.borrow_tombstone_at(i); }
                 else {
                     let sp = unsafe (*a).at_const(expr).span;
-                    self.errors.emitf(sp.start, sp.end - sp.start, "cannot move this value while it is borrowed".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "cannot move this value while it is borrowed".ptr() as *const char);
                     break;
                 }
             }
@@ -2418,7 +2452,7 @@ extend TypeChecker {
         if self.nmoved < 1024 { let k = self.nmoved; self.moved[k as usize] = d.node; self.nmoved = k + 1; }
         else {
             let sp = unsafe (*a).at_const(expr).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "too many moved values in one function (move-analysis limit)".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "too many moved values in one function (move-analysis limit)".ptr() as *const char);
         }
     }
 
@@ -2432,7 +2466,7 @@ extend TypeChecker {
         if self.nuninit < 256 { let k = self.nuninit; self.uninit[k as usize] = decl; self.nuninit = k + 1; }
         else {
             let sp = unsafe (*self.cur_ast()).at_const(decl).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "too many uninitialized bindings in one function (definite-init analysis limit)".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "too many uninitialized bindings in one function (definite-init analysis limit)".ptr() as *const char);
         }
     }
     fn tc_init(self: &mut Self, decl: NodeId) void {
@@ -2533,7 +2567,7 @@ extend TypeChecker {
     }
     fn tc_flow_overflow(self: &mut Self, at: NodeId) void {
         let sp = unsafe (*self.cur_ast()).at_const(at).span;
-        self.errors.emitf(sp.start, sp.end - sp.start, "too many flow facts to merge across branches in one function (analysis limit)".ptr as *const char);
+        self.errors.emitf(sp.start, sp.end - sp.start, "too many flow facts to merge across branches in one function (analysis limit)".ptr() as *const char);
     }
 
     fn tc_stmt_returns(self: &Self, id: NodeId) bool {
@@ -2565,7 +2599,7 @@ extend TypeChecker {
             if (b.region as u32) >= d { i = i + 1; continue; }
             if b.binding != NODE_NONE && b.root != NODE_NONE && self.tc_binding_depth(b.root) >= d {
                 let sp = unsafe (*self.cur_ast()).at_const(b.origin).span;
-                self.errors.emitf(sp.start, sp.end - sp.start, "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored".ptr() as *const char);
                 i = i + 1;
                 continue;
             }
@@ -2763,12 +2797,12 @@ extend TypeChecker {
             if b.root != root || (kind == BORROW_SHARED && b.kind == BORROW_SHARED) || !self.places_overlap(place, b.place) { i = i + 1; continue; }
             if self.borrow_dead_after(b, origin) { self.borrow_tombstone_at(i); i = i + 1; continue; }
             let sp = unsafe (*self.cur_ast()).at_const(origin).span;
-            let mut k1 = "immutable".ptr as *const char;
-            if kind == BORROW_MUT { k1 = "mutable".ptr as *const char; }
-            let mut k2 = "immutable".ptr as *const char;
-            if b.kind == BORROW_MUT { k2 = "mutable".ptr as *const char; }
-            self.errors.emitf(sp.start, sp.end - sp.start, "cannot borrow this value as %s while it is already borrowed as %s".ptr as *const char, k1, k2);
-            self.errors.notef("a value may have many '&' borrows or a single '&mut', not both; the earlier borrow must end first".ptr as *const char);
+            let mut k1 = "immutable".ptr() as *const char;
+            if kind == BORROW_MUT { k1 = "mutable".ptr() as *const char; }
+            let mut k2 = "immutable".ptr() as *const char;
+            if b.kind == BORROW_MUT { k2 = "mutable".ptr() as *const char; }
+            self.errors.emitf(sp.start, sp.end - sp.start, "cannot borrow this value as %s while it is already borrowed as %s".ptr() as *const char, k1, k2);
+            self.errors.notef("a value may have many '&' borrows or a single '&mut', not both; the earlier borrow must end first".ptr() as *const char);
             return true;
         }
         return false;
@@ -2780,7 +2814,7 @@ extend TypeChecker {
             self.nborrows = k + 1;
         } else {
             let sp = unsafe (*self.cur_ast()).at_const(origin).span;
-            self.errors.emitf(sp.start, 1, "too many simultaneous borrows in one function (borrow-checker limit)".ptr as *const char);
+            self.errors.emitf(sp.start, 1, "too many simultaneous borrows in one function (borrow-checker limit)".ptr() as *const char);
         }
     }
     fn borrow_create(self: &mut Self, place: NodeId, kind: u8, origin: NodeId) void {
@@ -3022,10 +3056,10 @@ extend TypeChecker {
                 let reqdef = DefId { module: iface.module, node: rid };
                 if hm == NODE_NONE {
                     let at = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type).span;
-                    self.errors.emitf(at.start, at.end - at.start, "missing method '%.*s' required by this interface".ptr as *const char, (rn.end - rn.start) as i32, src_at(self.mod_src(iface.module), rn.start));
+                    self.errors.emitf(at.start, at.end - at.start, "missing method '%.*s' required by this interface".ptr() as *const char, (rn.end - rn.start) as i32, src_at(self.mod_src(iface.module), rn.start));
                 } else if !self.extend_method_signature_matches(reqdef, hm, subp, suba, nsub) {
                     let at = unsafe (*self.cur_ast()).at_const(hm).span;
-                    self.errors.emitf(at.start, at.end - at.start, "method '%.*s' does not match interface signature".ptr as *const char, (rn.end - rn.start) as i32, src_at(self.mod_src(iface.module), rn.start));
+                    self.errors.emitf(at.start, at.end - at.start, "method '%.*s' does not match interface signature".ptr() as *const char, (rn.end - rn.start) as i32, src_at(self.mod_src(iface.module), rn.start));
                 }
             }
             i = i + 1;
@@ -3036,7 +3070,7 @@ extend TypeChecker {
             let sb = unsafe (*ia).resolution_def(unsafe ((*ia).list(bounds))[i as usize]);
             if sb.node != NODE_NONE && !self.type_satisfies(self_ty, sb, 0) {
                 let at = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type).span;
-                self.errors.emitf(at.start, at.end - at.start, "type does not satisfy required superinterface".ptr as *const char);
+                self.errors.emitf(at.start, at.end - at.start, "type does not satisfy required superinterface".ptr() as *const char);
             }
             i = i + 1;
         }
@@ -3139,11 +3173,11 @@ extend TypeChecker {
 }
 
 fn arith_method_name(op: TokenType) *const char {
-    if op == TokenType::Plus { return "add".ptr as *const char; }
-    if op == TokenType::Minus { return "sub".ptr as *const char; }
-    if op == TokenType::Star { return "mul".ptr as *const char; }
-    if op == TokenType::Slash { return "div".ptr as *const char; }
-    if op == TokenType::Percent { return "rem".ptr as *const char; }
+    if op == TokenType::Plus { return "add".ptr() as *const char; }
+    if op == TokenType::Minus { return "sub".ptr() as *const char; }
+    if op == TokenType::Star { return "mul".ptr() as *const char; }
+    if op == TokenType::Slash { return "div".ptr() as *const char; }
+    if op == TokenType::Percent { return "rem".ptr() as *const char; }
     return null;
 }
 
@@ -3160,36 +3194,36 @@ extend TypeChecker {
         if op == TokenType::Unsafe { self.unsafe_depth = self.unsafe_depth - 1; }
         let sp = unsafe (*a).at_const(id).span;
         if op == TokenType::Minus {
-            if opnd != TYPE_NONE && !self.is_numeric(opnd) { self.errors.emitf(sp.start, sp.end - sp.start, "unary '-' requires a numeric operand".ptr as *const char); }
+            if opnd != TYPE_NONE && !self.is_numeric(opnd) { self.errors.emitf(sp.start, sp.end - sp.start, "unary '-' requires a numeric operand".ptr() as *const char); }
             return opnd;
         }
         if op == TokenType::Bang {
-            if opnd != TYPE_NONE && !self.is_bool(opnd) { self.errors.emitf(sp.start, sp.end - sp.start, "unary '!' requires a 'bool' operand".ptr as *const char); }
+            if opnd != TYPE_NONE && !self.is_bool(opnd) { self.errors.emitf(sp.start, sp.end - sp.start, "unary '!' requires a 'bool' operand".ptr() as *const char); }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
         if op == TokenType::Tilde {
-            if opnd != TYPE_NONE && !self.is_int(opnd) { self.errors.emitf(sp.start, sp.end - sp.start, "unary '~' requires an integer operand".ptr as *const char); }
+            if opnd != TYPE_NONE && !self.is_int(opnd) { self.errors.emitf(sp.start, sp.end - sp.start, "unary '~' requires an integer operand".ptr() as *const char); }
             return opnd;
         }
         if op == TokenType::Star {
             if opnd == TYPE_NONE { return TYPE_NONE; }
             let ot = *self.type_at(opnd);
             if ot.kind == TypeKind::TYPE_POINTER || ot.kind == TypeKind::TYPE_REFERENCE {
-                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 { self.err_unsafe(sp, "dereferencing a raw pointer".ptr as *const char); }
+                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 { self.err_unsafe(sp, "dereferencing a raw pointer".ptr() as *const char); }
                 if !self.is_place(operand) {
                     let mut i = bm;
                     while i < self.nborrows { if self.borrows[i as usize].binding == NODE_NONE && self.borrows[i as usize].kind == BORROW_SHARED { self.borrow_tombstone_at(i); } i = i + 1; }
                 }
                 return ot.as_data.elem;
             }
-            self.errors.emitf(sp.start, sp.end - sp.start, "cannot dereference a non-pointer".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "cannot dereference a non-pointer".ptr() as *const char);
             return TYPE_NONE;
         }
         if op == TokenType::Ampersand {
             let mut2 = qual == TypeQualifier::TYPE_QUAL_MUT;
             if mut2 && self.is_place(operand) && !self.is_assignable(operand) {
                 let osp = unsafe (*a).at_const(operand).span;
-                self.errors.emitf(osp.start, osp.end - osp.start, "cannot take '&mut' of an immutable binding (bind it with 'mut')".ptr as *const char);
+                self.errors.emitf(osp.start, osp.end - osp.start, "cannot take '&mut' of an immutable binding (bind it with 'mut')".ptr() as *const char);
             }
             if mut2 { self.tc_mark_capture_mut(operand); }
             let mut opw = operand;
@@ -3205,7 +3239,7 @@ extend TypeChecker {
             if !self.is_place(opw) && opnd != TYPE_NONE && self.type_at(opnd).kind != TypeKind::TYPE_BUILTIN
                 && (onk == NodeKind::NODE_CALL || onk == NodeKind::NODE_IF || onk == NodeKind::NODE_MATCH || onk == NodeKind::NODE_BLOCK || onk == NodeKind::NODE_BINARY || onk == NodeKind::NODE_ASSIGNMENT || onk == NodeKind::NODE_CAST) {
                 let osp = unsafe (*a).at_const(opw).span;
-                self.errors.emitf(osp.start, osp.end - osp.start, "cannot take the address of a temporary value; bind it to a 'let' first".ptr as *const char);
+                self.errors.emitf(osp.start, osp.end - osp.start, "cannot take the address of a temporary value; bind it to a 'let' first".ptr() as *const char);
             }
             let mut bk = BORROW_SHARED;
             if mut2 { bk = BORROW_MUT; }
@@ -3217,12 +3251,12 @@ extend TypeChecker {
             let os = self.strip(opnd);
             let mut oa = Tys4 {};
             let mut fa = Tys4 {};
-            let nopt = self.prelude_instance_args(os, "Option".ptr as *const char, 6, (&mut oa.t[0]) as *mut TypeId, 2);
+            let nopt = self.prelude_instance_args(os, "Option".ptr() as *const char, 6, (&mut oa.t[0]) as *mut TypeId, 2);
             let mut nres: i32 = -1;
-            if nopt < 0 { nres = self.prelude_instance_args(os, "Result".ptr as *const char, 6, (&mut oa.t[0]) as *mut TypeId, 2); }
+            if nopt < 0 { nres = self.prelude_instance_args(os, "Result".ptr() as *const char, 6, (&mut oa.t[0]) as *mut TypeId, 2); }
             if nopt < 0 && nres < 0 {
-                self.errors.emitf(sp.start, sp.end - sp.start, "'?' requires an Option or Result operand".ptr as *const char);
-                self.errors.notef("the operand must be an Option<T> or Result<T, E> value".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "'?' requires an Option or Result operand".ptr() as *const char);
+                self.errors.notef("the operand must be an Option<T> or Result<T, E> value".ptr() as *const char);
                 return TYPE_NONE;
             }
             let mut fnret: TypeId = TYPE_NONE;
@@ -3234,15 +3268,15 @@ extend TypeChecker {
             let mut frs = TYPE_NONE;
             if fnret != TYPE_NONE { frs = self.strip(fnret); }
             if nopt >= 0 {
-                if self.prelude_instance_args(frs, "Option".ptr as *const char, 6, (&mut fa.t[0]) as *mut TypeId, 2) < 0 {
-                    self.errors.emitf(sp.start, sp.end - sp.start, "'?' on an Option requires the function to return an Option".ptr as *const char);
-                    self.errors.notef("change the function return type or handle None explicitly".ptr as *const char);
+                if self.prelude_instance_args(frs, "Option".ptr() as *const char, 6, (&mut fa.t[0]) as *mut TypeId, 2) < 0 {
+                    self.errors.emitf(sp.start, sp.end - sp.start, "'?' on an Option requires the function to return an Option".ptr() as *const char);
+                    self.errors.notef("change the function return type or handle None explicitly".ptr() as *const char);
                 }
                 return oa.t[0];
             }
-            if self.prelude_instance_args(frs, "Result".ptr as *const char, 6, (&mut fa.t[0]) as *mut TypeId, 2) < 0 {
-                self.errors.emitf(sp.start, sp.end - sp.start, "'?' on a Result requires the function to return a Result".ptr as *const char);
-                self.errors.notef("the function must return Result<_, E> with the same error type".ptr as *const char);
+            if self.prelude_instance_args(frs, "Result".ptr() as *const char, 6, (&mut fa.t[0]) as *mut TypeId, 2) < 0 {
+                self.errors.emitf(sp.start, sp.end - sp.start, "'?' on a Result requires the function to return a Result".ptr() as *const char);
+                self.errors.notef("the function must return Result<_, E> with the same error type".ptr() as *const char);
             } else if oa.t[1] != fa.t[1] {
                 let conv = self.tc_find_from_for(fa.t[1], oa.t[1]);
                 if conv.node != NODE_NONE { unsafe (*self.cur_ast()).set_resolution_def(id, conv); }
@@ -3251,7 +3285,7 @@ extend TypeChecker {
                     let mut a2 = Buf96 {};
                     self.render_type(oa.t[1], (&mut a1.b[0]) as *mut char, 96);
                     self.render_type(fa.t[1], (&mut a2.b[0]) as *mut char, 96);
-                    self.errors.emitf(sp.start, sp.end - sp.start, "'?' error type '%s' does not match the function's error type '%s'".ptr as *const char, (&a1.b[0]) as *const char, (&a2.b[0]) as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "'?' error type '%s' does not match the function's error type '%s'".ptr() as *const char, (&a1.b[0]) as *const char, (&a2.b[0]) as *const char);
                 }
             }
             return oa.t[0];
@@ -3265,9 +3299,9 @@ extend TypeChecker {
         let mut ok = self.is_numeric(l) && self.is_numeric(r);
         if require_int { ok = self.is_int(l) && self.is_int(r); }
         if !ok {
-            let mut w = "numeric".ptr as *const char;
-            if require_int { w = "integer".ptr as *const char; }
-            self.errors.emitf(sp.start, sp.end - sp.start, "operator requires %s operands".ptr as *const char, w);
+            let mut w = "numeric".ptr() as *const char;
+            if require_int { w = "integer".ptr() as *const char; }
+            self.errors.emitf(sp.start, sp.end - sp.start, "operator requires %s operands".ptr() as *const char, w);
             return TYPE_NONE;
         }
         if l == r { return l; }
@@ -3280,7 +3314,7 @@ extend TypeChecker {
                     let mut tn = Buf96 {};
                     self.render_type(r, (&mut tn.b[0]) as *mut char, 96);
                     let lsp = unsafe (*self.cur_ast()).at_const(ln).span;
-                    self.errors.emitf(lsp.start, lsp.end - lsp.start, "integer literal is out of range for '%s'".ptr as *const char, (&tn.b[0]) as *const char);
+                    self.errors.emitf(lsp.start, lsp.end - lsp.start, "integer literal is out of range for '%s'".ptr() as *const char, (&tn.b[0]) as *const char);
                 } else { unsafe (*self.cur_ast()).set_type(ln, r); }
             }
             return r;
@@ -3294,7 +3328,7 @@ extend TypeChecker {
                     let mut tn = Buf96 {};
                     self.render_type(l, (&mut tn.b[0]) as *mut char, 96);
                     let rsp = unsafe (*self.cur_ast()).at_const(rn).span;
-                    self.errors.emitf(rsp.start, rsp.end - rsp.start, "integer literal is out of range for '%s'".ptr as *const char, (&tn.b[0]) as *const char);
+                    self.errors.emitf(rsp.start, rsp.end - rsp.start, "integer literal is out of range for '%s'".ptr() as *const char, (&tn.b[0]) as *const char);
                 } else { unsafe (*self.cur_ast()).set_type(rn, l); }
             }
             return l;
@@ -3313,16 +3347,16 @@ extend TypeChecker {
         if !lp && !rp { return TYPE_NONE; }
         unsafe *handled = true;
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        if self.unsafe_depth == 0 { self.err_unsafe(sp, "raw pointer arithmetic".ptr as *const char); }
+        if self.unsafe_depth == 0 { self.err_unsafe(sp, "raw pointer arithmetic".ptr() as *const char); }
         let minus = unsafe (*self.cur_ast()).at_const(id).as_data.binary.op == TokenType::Minus;
         if lp && rp {
             if minus && l == r { return Ast::builtin(BuiltinType::BT_ISIZE); }
-            self.errors.emitf(sp.start, sp.end - sp.start, "invalid pointer arithmetic".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "invalid pointer arithmetic".ptr() as *const char);
             return TYPE_NONE;
         }
         if lp && self.is_int(r) { return l; }
         if rp && !minus && self.is_int(l) { return r; }
-        self.errors.emitf(sp.start, sp.end - sp.start, "pointer arithmetic requires an integer offset".ptr as *const char);
+        self.errors.emitf(sp.start, sp.end - sp.start, "pointer arithmetic requires an integer offset".ptr() as *const char);
         return TYPE_NONE;
     }
 
@@ -3341,7 +3375,7 @@ extend TypeChecker {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
                 let mut ty = Buf96 {};
                 self.render_type(ls, (&mut ty.b[0]) as *mut char, 96);
-                self.errors.emitf(sp.start, sp.end - sp.start, "type parameter '%s' has no '%s' method for this operator (add a bound that provides it)".ptr as *const char, (&ty.b[0]) as *const char, m);
+                self.errors.emitf(sp.start, sp.end - sp.start, "type parameter '%s' has no '%s' method for this operator (add a bound that provides it)".ptr() as *const char, (&ty.b[0]) as *const char, m);
                 unsafe *out = TYPE_NONE;
             }
             return true;
@@ -3359,7 +3393,7 @@ extend TypeChecker {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
                 let mut ty = Buf96 {};
                 self.render_type(ls, (&mut ty.b[0]) as *mut char, 96);
-                self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no '%s' method for this operator".ptr as *const char, (&ty.b[0]) as *const char, m);
+                self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no '%s' method for this operator".ptr() as *const char, (&ty.b[0]) as *const char, m);
                 unsafe *out = TYPE_NONE;
             } else {
                 if !self.method_extend_bounds_hold(ls, md) {
@@ -3403,7 +3437,7 @@ extend TypeChecker {
             return self.binary_numeric(id, l, ln, r, rn, true);
         }
         if op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe {
-            if (l != TYPE_NONE && !self.is_bool(l)) || (r != TYPE_NONE && !self.is_bool(r)) { self.errors.emitf(sp.start, sp.end - sp.start, "logical operator requires 'bool' operands".ptr as *const char); }
+            if (l != TYPE_NONE && !self.is_bool(l)) || (r != TYPE_NONE && !self.is_bool(r)) { self.errors.emitf(sp.start, sp.end - sp.start, "logical operator requires 'bool' operands".ptr() as *const char); }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
         // comparisons
@@ -3421,16 +3455,16 @@ extend TypeChecker {
             let mut ga = Tys4 {};
             let mut gn: i32 = 0;
             if self.aggregate_of(ls, (&mut om) as *mut ModuleId, (&mut od) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) {
-                let mut mm = "eq".ptr as *const char;
-                if ord { mm = "cmp".ptr as *const char; }
+                let mut mm = "eq".ptr() as *const char;
+                if ord { mm = "cmp".ptr() as *const char; }
                 let md = self.find_method_cstr(om, od, mm);
                 if md.node == NODE_NONE {
                     let mut ty = Buf96 {};
                     self.render_type(ls, (&mut ty.b[0]) as *mut char, 96);
-                    let mut iface = "Eq".ptr as *const char;
-                    if ord { iface = "Ord".ptr as *const char; }
-                    self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no '%s' method for this operator (implement %s)".ptr as *const char, (&ty.b[0]) as *const char, mm, iface);
-                    self.errors.notef("operator overloads are resolved through interface-style methods".ptr as *const char);
+                    let mut iface = "Eq".ptr() as *const char;
+                    if ord { iface = "Ord".ptr() as *const char; }
+                    self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no '%s' method for this operator (implement %s)".ptr() as *const char, (&ty.b[0]) as *const char, mm, iface);
+                    self.errors.notef("operator overloads are resolved through interface-style methods".ptr() as *const char);
                 } else if !self.method_extend_bounds_hold(ls, md) {
                     self.err_method_extend_bounds(sp, ls, md);
                 } else {
@@ -3442,12 +3476,12 @@ extend TypeChecker {
         }
         if ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_GENERIC {
             let gy = *self.type_at(ls);
-            let mut mm = "eq".ptr as *const char;
-            if ord { mm = "cmp".ptr as *const char; }
+            let mut mm = "eq".ptr() as *const char;
+            if ord { mm = "cmp".ptr() as *const char; }
             if !self.tc_param_bound_provides(gy.module, gy.as_data.decl, mm) {
-                let mut iface = "Eq".ptr as *const char;
-                if ord { iface = "Ord".ptr as *const char; }
-                self.errors.emitf(sp.start, sp.end - sp.start, "type parameter has no '%s' method for this operator (add a `%s` bound)".ptr as *const char, mm, iface);
+                let mut iface = "Eq".ptr() as *const char;
+                if ord { iface = "Ord".ptr() as *const char; }
+                self.errors.emitf(sp.start, sp.end - sp.start, "type parameter has no '%s' method for this operator (add a `%s` bound)".ptr() as *const char, mm, iface);
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
@@ -3470,9 +3504,9 @@ extend TypeChecker {
         let mut gn: i32 = 0;
         let inst = self.aggregate_of(enum_ty, (&mut amod) as *mut ModuleId, (&mut adecl) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32);
         if args.len != payload.len {
-            let mut s2 = "s".ptr as *const char;
-            if payload.len == 1 { s2 = "".ptr as *const char; }
-            self.errors.emitf(sp.start, sp.end - sp.start, "variant expects %u argument%s, found %u".ptr as *const char, payload.len, s2, args.len);
+            let mut s2 = "s".ptr() as *const char;
+            if payload.len == 1 { s2 = "".ptr() as *const char; }
+            self.errors.emitf(sp.start, sp.end - sp.start, "variant expects %u argument%s, found %u".ptr() as *const char, payload.len, s2, args.len);
         } else {
             let mut k: u32 = 0;
             while k < args.len {
@@ -3557,7 +3591,7 @@ extend TypeChecker {
         let mut ga = Tys4 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(it, (&mut im) as *mut ModuleId, (&mut idl) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) { return TYPE_NONE; }
-        let nx = self.find_method_cstr(im, idl, "next".ptr as *const char);
+        let nx = self.find_method_cstr(im, idl, "next".ptr() as *const char);
         if nx.node == NODE_NONE { return TYPE_NONE; }
         let na = self.mod_ast(nx.module);
         let rets = unsafe (*na).at_const(nx.node).as_data.function.returns;
@@ -3595,23 +3629,23 @@ extend TypeChecker {
         let sp = unsafe (*a).at_const(id).span;
         if kind == 1 {
             if args.len < 1 || args.len > 2 {
-                self.errors.emitf(sp.start, sp.end - sp.start, "'assert' takes a condition and an optional str message".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "'assert' takes a condition and an optional str message".ptr() as *const char);
                 let mut i: u32 = 0;
                 while i < args.len { self.check_expr(unsafe ((*a).list(args))[i as usize]); i = i + 1; }
                 return Ast::builtin(BuiltinType::BT_VOID);
             }
             let ct = self.check_expr(unsafe ((*a).list(args))[0]);
-            if ct != TYPE_NONE && !self.is_bool(ct) { self.errors.emitf(sp.start, sp.end - sp.start, "'assert' condition must be 'bool'".ptr as *const char); }
+            if ct != TYPE_NONE && !self.is_bool(ct) { self.errors.emitf(sp.start, sp.end - sp.start, "'assert' condition must be 'bool'".ptr() as *const char); }
             if args.len == 2 {
                 let mt = self.check_expr(unsafe ((*a).list(args))[1]);
-                if mt != TYPE_NONE && self.strip(mt) != self.prelude_str_type() { self.errors.emitf(sp.start, sp.end - sp.start, "'assert' message must be a 'str'".ptr as *const char); }
+                if mt != TYPE_NONE && self.strip(mt) != self.prelude_str_type() { self.errors.emitf(sp.start, sp.end - sp.start, "'assert' message must be a 'str'".ptr() as *const char); }
             }
             return Ast::builtin(BuiltinType::BT_VOID);
         }
-        let mut nm = "assert_eq".ptr as *const char;
-        if kind == 3 { nm = "assert_ne".ptr as *const char; }
+        let mut nm = "assert_eq".ptr() as *const char;
+        if kind == 3 { nm = "assert_ne".ptr() as *const char; }
         if args.len != 2 {
-            self.errors.emitf(sp.start, sp.end - sp.start, "'%s' takes exactly two arguments".ptr as *const char, nm);
+            self.errors.emitf(sp.start, sp.end - sp.start, "'%s' takes exactly two arguments".ptr() as *const char, nm);
             let mut i: u32 = 0;
             while i < args.len { self.check_expr(unsafe ((*a).list(args))[i as usize]); i = i + 1; }
             return Ast::builtin(BuiltinType::BT_VOID);
@@ -3632,16 +3666,16 @@ extend TypeChecker {
             let mut ga = Tys4 {};
             let mut gn: i32 = 0;
             if self.aggregate_of(base, (&mut om) as *mut ModuleId, (&mut od) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) {
-                comparable = self.find_method_cstr(om, od, "eq".ptr as *const char).node != NODE_NONE;
+                comparable = self.find_method_cstr(om, od, "eq".ptr() as *const char).node != NODE_NONE;
                 if !comparable && self.is_plain_enum(base) { comparable = true; }
-                if comparable { self.find_method_cstr(om, od, "as_str".ptr as *const char); }
+                if comparable { self.find_method_cstr(om, od, "as_str".ptr() as *const char); }
             }
         }
         if !comparable {
             let mut ty = Buf96 {};
             self.render_type(lt, (&mut ty.b[0]) as *mut char, 96);
-            self.errors.emitf(sp.start, sp.end - sp.start, "'%s' cannot compare values of type '%s'".ptr as *const char, nm, (&ty.b[0]) as *const char);
-            self.errors.notef("implement 'Eq' (an 'eq' method) for the type, or compare a field/element instead".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "'%s' cannot compare values of type '%s'".ptr() as *const char, nm, (&ty.b[0]) as *const char);
+            self.errors.notef("implement 'Eq' (an 'eq' method) for the type, or compare a field/element instead".ptr() as *const char);
         }
         return Ast::builtin(BuiltinType::BT_VOID);
     }
@@ -3740,7 +3774,7 @@ extend TypeChecker {
         let f = unsafe (*self.mod_ast(m)).at_const(field);
         let inside_owner = (self.package == null || m == self.ast.module) && owner == self.current_self;
         if f.kind == NodeKind::NODE_FIELD && !f.as_data.field.is_public && !inside_owner {
-            self.errors.emitf(at.start, at.end - at.start, "field '%.*s' is private".ptr as *const char, (at.end - at.start) as i32, src_at(self.source, at.start));
+            self.errors.emitf(at.start, at.end - at.start, "field '%.*s' is private".ptr() as *const char, (at.end - at.start) as i32, src_at(self.source, at.start));
         }
     }
 
@@ -3752,7 +3786,7 @@ extend TypeChecker {
         // `x.free()` intrinsic no-op check
         if pck == NodeKind::NODE_MEMBER && !unsafe (*a).at_const(callee_id).as_data.member.path && unsafe (*a).at_const(id).as_data.call.args.len == 0 {
             let mem = unsafe (*a).at_const(callee_id).as_data.member.member;
-            if span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free".ptr as *const char) {
+            if span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free".ptr() as *const char) {
                 let obj = unsafe (*a).at_const(callee_id).as_data.member.object;
                 let rt = self.check_expr(obj);
                 let fname = self.name_span(mem);
@@ -3765,7 +3799,7 @@ extend TypeChecker {
                         let mut gp = Defs4 {};
                         let mut ga = Tys4 {};
                         let mut gn: i32 = 0;
-                        if self.aggregate_of(self.strip(rt), (&mut om) as *mut ModuleId, (&mut od) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) { resolvable = self.find_method_cstr(om, od, "free".ptr as *const char).node != NODE_NONE; }
+                        if self.aggregate_of(self.strip(rt), (&mut om) as *mut ModuleId, (&mut od) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) { resolvable = self.find_method_cstr(om, od, "free".ptr() as *const char).node != NODE_NONE; }
                     } else if rty.kind == TypeKind::TYPE_GENERIC {
                         let mut iface = DefId { module: 0, node: NODE_NONE };
                         resolvable = self.find_bound_method(rty.module, rty.as_data.decl, fname, (&mut iface) as *mut DefId).node != NODE_NONE;
@@ -3803,9 +3837,9 @@ extend TypeChecker {
             if ad.node != NODE_NONE && (ad.module as usize) < self.pkg_count() && unsafe (*self.package).modules.at(ad.module as usize).prelude && unsafe (*self.mod_ast(ad.module)).at_const(ad.node).kind == NodeKind::NODE_FUNCTION {
                 let anm = unsafe (*self.mod_ast(ad.module)).at_const(unsafe (*self.mod_ast(ad.module)).at_const(ad.node).as_data.function.name).as_data.name.text;
                 let mut akind: i32 = 0;
-                if span_is(self.mod_src(ad.module), anm, "assert".ptr as *const char) { akind = 1; }
-                else if span_is(self.mod_src(ad.module), anm, "assert_eq".ptr as *const char) { akind = 2; }
-                else if span_is(self.mod_src(ad.module), anm, "assert_ne".ptr as *const char) { akind = 3; }
+                if span_is(self.mod_src(ad.module), anm, "assert".ptr() as *const char) { akind = 1; }
+                else if span_is(self.mod_src(ad.module), anm, "assert_eq".ptr() as *const char) { akind = 2; }
+                else if span_is(self.mod_src(ad.module), anm, "assert_ne".ptr() as *const char) { akind = 3; }
                 if akind != 0 { return self.tc_check_assert(id, akind); }
             }
         }
@@ -3836,9 +3870,9 @@ extend TypeChecker {
                 let sdecl = ct.as_data.decl;
                 let members = sd.as_data.aggregate.members;
                 if args.len != members.len {
-                    let mut s2 = "s".ptr as *const char;
-                    if members.len == 1 { s2 = "".ptr as *const char; }
-                    self.errors.emitf(sp.start, sp.end - sp.start, "tuple struct takes %u element%s, got %u".ptr as *const char, members.len, s2, args.len);
+                    let mut s2 = "s".ptr() as *const char;
+                    if members.len == 1 { s2 = "".ptr() as *const char; }
+                    self.errors.emitf(sp.start, sp.end - sp.start, "tuple struct takes %u element%s, got %u".ptr() as *const char, members.len, s2, args.len);
                     return TYPE_NONE;
                 }
                 let mut k: u32 = 0;
@@ -3852,7 +3886,7 @@ extend TypeChecker {
             }
         }
         if ct.kind != TypeKind::TYPE_FUNCTION {
-            self.errors.emitf(sp.start, sp.end - sp.start, "called value is not a function".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "called value is not a function".ptr() as *const char);
             return TYPE_NONE;
         }
         let fmod = ct.module;
@@ -3860,7 +3894,7 @@ extend TypeChecker {
         let fa = self.mod_ast(fmod);
         let fk = unsafe (*fa).at_const(fdecl).kind;
         let named = fk == NodeKind::NODE_FUNCTION;
-        if named && unsafe (*fa).at_const(fdecl).as_data.function.is_extern && self.unsafe_depth == 0 { self.err_unsafe(sp, "calling an extern \"C\" function".ptr as *const char); }
+        if named && unsafe (*fa).at_const(fdecl).as_data.function.is_extern && self.unsafe_depth == 0 { self.err_unsafe(sp, "calling an extern \"C\" function".ptr() as *const char); }
         let clos = fk == NodeKind::NODE_CLOSURE;
         let mut params = NodeList { start: 0, len: 0 };
         let mut returns = NodeList { start: 0, len: 0 };
@@ -3870,7 +3904,7 @@ extend TypeChecker {
         let mut fmt_builtin = false;
         if named && self.package != null && (fmod as usize) < self.pkg_count() && unsafe (*self.package).modules.at(fmod as usize).prelude {
             let fnm = unsafe (*fa).at_const(unsafe (*fa).at_const(fdecl).as_data.function.name).as_data.name.text;
-            fmt_builtin = span_is(self.mod_src(fmod), fnm, "format".ptr as *const char) || span_is(self.mod_src(fmod), fnm, "print".ptr as *const char) || span_is(self.mod_src(fmod), fnm, "println".ptr as *const char) || span_is(self.mod_src(fmod), fnm, "eprint".ptr as *const char) || span_is(self.mod_src(fmod), fnm, "eprintln".ptr as *const char);
+            fmt_builtin = span_is(self.mod_src(fmod), fnm, "format".ptr() as *const char) || span_is(self.mod_src(fmod), fnm, "print".ptr() as *const char) || span_is(self.mod_src(fmod), fnm, "println".ptr() as *const char) || span_is(self.mod_src(fmod), fnm, "eprint".ptr() as *const char) || span_is(self.mod_src(fmod), fnm, "eprintln".ptr() as *const char);
             if fmt_builtin { self.mark_format_helpers(); }
         }
         let mut skip: u32 = 0;
@@ -3892,7 +3926,7 @@ extend TypeChecker {
         let a = self.cur_ast();
         let mem = unsafe (*a).at_const(callee_id).as_data.member.member;
         let recv = unsafe (*a).at_const(callee_id).as_data.member.object;
-        let is_free = span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free".ptr as *const char);
+        let is_free = span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free".ptr() as *const char);
         if is_free {
             let rty = *self.type_at(unsafe (*a).type_of(recv));
             let mut thru = NODE_NONE;
@@ -3910,7 +3944,7 @@ extend TypeChecker {
                     let rk = unsafe (*a).at_const(b.root).kind;
                     if rk == NodeKind::NODE_LET || rk == NodeKind::NODE_PATTERN_NAME || rk == NodeKind::NODE_IDENTIFIER || rk == NodeKind::NODE_FOR {
                         let rsp = unsafe (*a).at_const(recv).span;
-                        self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot free a borrowed value: its owning binding frees it again at scope exit".ptr as *const char);
+                        self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot free a borrowed value: its owning binding frees it again at scope exit".ptr() as *const char);
                         through_owner = true;
                     }
                 }
@@ -4117,10 +4151,10 @@ extend TypeChecker {
         let expected = params.len - skip;
         let bad = if_bool(variadic, args.len < expected, args.len != expected);
         if bad {
-            let mut s2 = "s".ptr as *const char;
-            if expected == 1 { s2 = "".ptr as *const char; }
-            if variadic { self.errors.emitf(sp.start, sp.end - sp.start, "expected at least %u argument%s, found %u".ptr as *const char, expected, s2, args.len); }
-            else { self.errors.emitf(sp.start, sp.end - sp.start, "expected %u argument%s, found %u".ptr as *const char, expected, s2, args.len); }
+            let mut s2 = "s".ptr() as *const char;
+            if expected == 1 { s2 = "".ptr() as *const char; }
+            if variadic { self.errors.emitf(sp.start, sp.end - sp.start, "expected at least %u argument%s, found %u".ptr() as *const char, expected, s2, args.len); }
+            else { self.errors.emitf(sp.start, sp.end - sp.start, "expected %u argument%s, found %u".ptr() as *const char, expected, s2, args.len); }
         } else {
             let mut i: u32 = 0;
             while i < expected {
@@ -4132,7 +4166,7 @@ extend TypeChecker {
                     let at = unsafe (*a).type_of(aid);
                     if pt != at && at != TYPE_NONE && self.fn_is_capturing(at) {
                         let asp = unsafe (*a).at_const(aid).span;
-                        self.errors.emitf(asp.start, asp.end - asp.start, "a capturing closure cannot be passed as a bare 'fn' pointer".ptr as *const char);
+                        self.errors.emitf(asp.start, asp.end - asp.start, "a capturing closure cannot be passed as a bare 'fn' pointer".ptr() as *const char);
                     } else if at == TYPE_NONE || self.at_not_fn(at) || !self.fn_compatible_subst(pt, at, (&gparams.d[0]) as *const DefId, (&gargs.t[0]) as *const TypeId, gn, (&rsubp.d[0]) as *const DefId, (&rsuba.t[0]) as *const TypeId, nrsub) {
                         self.err_mismatch(aid, pt);
                     }
@@ -4158,13 +4192,13 @@ extend TypeChecker {
                 let recv = unsafe (*a).at_const(callee_id).as_data.member.object;
                 let rvt = *self.type_at(unsafe (*a).type_of(recv));
                 if rvt.kind == TypeKind::TYPE_DYN {
-                    if rvt.qualifier == (TypeQualifier::TYPE_QUAL_CONST as u8) { let rsp = unsafe (*a).at_const(recv).span; self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot call a '&mut self' method through '&dyn' (use '&mut dyn')".ptr as *const char); }
-                    else if rvt.qualifier == (TypeQualifier::TYPE_QUAL_NONE as u8) && !self.receiver_mutable(recv) { let rsp = unsafe (*a).at_const(recv).span; self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')".ptr as *const char); }
+                    if rvt.qualifier == (TypeQualifier::TYPE_QUAL_CONST as u8) { let rsp = unsafe (*a).at_const(recv).span; self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot call a '&mut self' method through '&dyn' (use '&mut dyn')".ptr() as *const char); }
+                    else if rvt.qualifier == (TypeQualifier::TYPE_QUAL_NONE as u8) && !self.receiver_mutable(recv) { let rsp = unsafe (*a).at_const(recv).span; self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')".ptr() as *const char); }
                 } else {
-                    let consuming_free = rvt.kind != TypeKind::TYPE_REFERENCE && rvt.kind != TypeKind::TYPE_POINTER && span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(unsafe (*a).at_const(callee_id).as_data.member.member).as_data.name.text, "free".ptr as *const char);
+                    let consuming_free = rvt.kind != TypeKind::TYPE_REFERENCE && rvt.kind != TypeKind::TYPE_POINTER && span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(unsafe (*a).at_const(callee_id).as_data.member.member).as_data.name.text, "free".ptr() as *const char);
                     if !consuming_free {
                         self.tc_mark_capture_mut(recv);
-                        if !self.receiver_mutable(recv) { let rsp = unsafe (*a).at_const(recv).span; self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')".ptr as *const char); }
+                        if !self.receiver_mutable(recv) { let rsp = unsafe (*a).at_const(recv).span; self.errors.emitf(rsp.start, rsp.end - rsp.start, "cannot call a '&mut self' method on an immutable binding (bind it with 'mut')".ptr() as *const char); }
                     }
                 }
             }
@@ -4213,7 +4247,7 @@ extend TypeChecker {
                             let mut tn = Buf96 {};
                             self.render_type(garg, (&mut tn.b[0]) as *mut char, 96);
                             let bsp = unsafe (*fa).at_const(bid).span;
-                            self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'".ptr as *const char, (&tn.b[0]) as *const char, (bsp.end - bsp.start) as i32, src_at(self.mod_src(fmod), bsp.start));
+                            self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'".ptr() as *const char, (&tn.b[0]) as *const char, (bsp.end - bsp.start) as i32, src_at(self.mod_src(fmod), bsp.start));
                         }
                     }
                 } else {
@@ -4222,7 +4256,7 @@ extend TypeChecker {
                         let mut tn = Buf96 {};
                         self.render_type(unsafe gargs[i as usize], (&mut tn.b[0]) as *mut char, 96);
                         let bsp = unsafe (*fa).at_const(bid).span;
-                        self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'".ptr as *const char, (&tn.b[0]) as *const char, (bsp.end - bsp.start) as i32, src_at(self.mod_src(fmod), bsp.start));
+                        self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy bound '%.*s'".ptr() as *const char, (&tn.b[0]) as *const char, (bsp.end - bsp.start) as i32, src_at(self.mod_src(fmod), bsp.start));
                     }
                 }
                 b = b + 1;
@@ -4245,7 +4279,7 @@ extend TypeChecker {
                         if wy.kind != TypeKind::TYPE_GENERIC && (wy.kind != TypeKind::TYPE_FUNCTION || !self.fn_compatible_subst(bt, wt, gparams, gargs, gn, rsubp, rsuba, nrsub)) {
                             let mut tn = Buf96 {};
                             self.render_type(wt, (&mut tn.b[0]) as *mut char, 96);
-                            self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy a where-clause bound".ptr as *const char, (&tn.b[0]) as *const char);
+                            self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy a where-clause bound".ptr() as *const char, (&tn.b[0]) as *const char);
                         }
                     }
                 } else {
@@ -4253,7 +4287,7 @@ extend TypeChecker {
                     if bi.node != NODE_NONE && !self.type_satisfies(wt, bi, 0) {
                         let mut tn = Buf96 {};
                         self.render_type(wt, (&mut tn.b[0]) as *mut char, 96);
-                        self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy a where-clause bound".ptr as *const char, (&tn.b[0]) as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "type '%s' does not satisfy a where-clause bound".ptr() as *const char, (&tn.b[0]) as *const char);
                     }
                 }
                 b = b + 1;
@@ -4294,7 +4328,7 @@ extend TypeChecker {
                     let mut k = name.start;
                     while k < name.end { idx = idx * 10 + (unsafe (self.source)[k as usize] - '0' as u8) as u32; k = k + 1; }
                     if idx >= bd0.as_data.aggregate.members.len {
-                        self.errors.emitf(name.start, name.end - name.start, "tuple struct has no element %u".ptr as *const char, idx);
+                        self.errors.emitf(name.start, name.end - name.start, "tuple struct has no element %u".ptr() as *const char, idx);
                         return TYPE_NONE;
                     }
                     let tnode = unsafe ((*self.mod_ast(bmod)).list(bd0.as_data.aggregate.members))[idx as usize];
@@ -4302,7 +4336,7 @@ extend TypeChecker {
                     return self.subst_type(self.lower_type_in(bmod, tnode), (&gp.d[0]) as *const DefId, (&ga.t[0]) as *const TypeId, gn);
                 }
                 let mut fld = Buf96 {};
-                unsafe stdio::snprintf((&mut fld.b[0]) as *mut char, 8, "_%.*s".ptr as *const char, (name.end - name.start) as i32, src_at(self.source, name.start));
+                unsafe stdio::snprintf((&mut fld.b[0]) as *mut char, 8, "_%.*s".ptr() as *const char, (name.end - name.start) as i32, src_at(self.source, name.start));
                 fhit = self.find_member_cstr(bmod, bdecl, (&fld.b[0]) as *const char);
             }
             if fhit == NODE_NONE && prefer_method {
@@ -4320,7 +4354,7 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: bmod, node: fhit });
                 if unsafe (*self.mod_ast(bmod)).at_const(fhit).kind == NodeKind::NODE_FIELD {
                     self.check_field_visibility(bmod, fhit, bdecl, name);
-                    if self.unsafe_depth == 0 && self.through_raw_pointer(obj) { self.err_unsafe(unsafe (*a).at_const(id).span, "accessing a field through a raw pointer".ptr as *const char); }
+                    if self.unsafe_depth == 0 && self.through_raw_pointer(obj) { self.err_unsafe(unsafe (*a).at_const(id).span, "accessing a field through a raw pointer".ptr() as *const char); }
                 }
                 return self.subst_type(self.decl_type_in(bmod, fhit), (&gp.d[0]) as *const DefId, (&ga.t[0]) as *const TypeId, gn);
             }
@@ -4376,7 +4410,7 @@ extend TypeChecker {
                 let mut cga = Tys4 {};
                 let mut cgn: i32 = 0;
                 if !self.aggregate_of(cur, (&mut cm) as *mut ModuleId, (&mut cd) as *mut NodeId, (&cgp.d[0]) as *mut DefId, (&cga.t[0]) as *mut TypeId, (&mut cgn) as *mut i32) { break; }
-                let dm = self.find_method_cstr(cm, cd, "deref".ptr as *const char);
+                let dm = self.find_method_cstr(cm, cd, "deref".ptr() as *const char);
                 if dm.node == NODE_NONE { break; }
                 let dret = self.tc_method_ret(cur, dm);
                 if dret == TYPE_NONE { break; }
@@ -4386,7 +4420,7 @@ extend TypeChecker {
                 let mut cyc = false;
                 let mut z: i32 = 0;
                 while z < nseen { if seen.t[z as usize] == target { cyc = true; } z = z + 1; }
-                if cyc { self.errors.emitf(name.start, name.end - name.start, "cyclic deref chain while resolving '%.*s'".ptr as *const char, (name.end - name.start) as i32, src_at(self.source, name.start)); return TYPE_NONE; }
+                if cyc { self.errors.emitf(name.start, name.end - name.start, "cyclic deref chain while resolving '%.*s'".ptr() as *const char, (name.end - name.start) as i32, src_at(self.source, name.start)); return TYPE_NONE; }
                 du.recv[du.n as usize] = cur;
                 du.method[du.n as usize] = dm;
                 du.n = du.n + 1;
@@ -4409,7 +4443,7 @@ extend TypeChecker {
                 if mhit.node != NODE_NONE {
                     let sk = self.method_self_kind(mhit);
                     if sk == 0 && tty.kind != TypeKind::TYPE_BUILTIN {
-                        self.errors.emitf(name.start, name.end - name.start, "cannot call a by-value 'self' method through auto-deref".ptr as *const char);
+                        self.errors.emitf(name.start, name.end - name.start, "cannot call a by-value 'self' method through auto-deref".ptr() as *const char);
                         return TYPE_NONE;
                     }
                     if sk == 2 {
@@ -4421,11 +4455,11 @@ extend TypeChecker {
                             let mut hga = Tys4 {};
                             let mut hgn: i32 = 0;
                             self.aggregate_of(du.recv[hi as usize], (&mut hm) as *mut ModuleId, (&mut hd) as *mut NodeId, (&hgp.d[0]) as *mut DefId, (&hga.t[0]) as *mut TypeId, (&mut hgn) as *mut i32);
-                            let dmm = self.find_method_cstr(hm, hd, "deref_mut".ptr as *const char);
+                            let dmm = self.find_method_cstr(hm, hd, "deref_mut".ptr() as *const char);
                             if dmm.node == NODE_NONE {
                                 let mut tn = Buf96 {};
                                 self.render_type(du.recv[hi as usize], (&mut tn.b[0]) as *mut char, 96);
-                                self.errors.emitf(name.start, name.end - name.start, "cannot call a '&mut self' method through '%s': it has 'deref' but no 'deref_mut'".ptr as *const char, (&tn.b[0]) as *const char);
+                                self.errors.emitf(name.start, name.end - name.start, "cannot call a '&mut self' method through '%s': it has 'deref' but no 'deref_mut'".ptr() as *const char, (&tn.b[0]) as *const char);
                                 return TYPE_NONE;
                             }
                             du.method[hi as usize] = dmm;
@@ -4443,9 +4477,9 @@ extend TypeChecker {
         }
         let mut ty = Buf96 {};
         self.render_type(base, (&mut ty.b[0]) as *mut char, 96);
-        self.errors.emitf(name.start, name.end - name.start, "no field or method '%.*s' on '%s'".ptr as *const char, (name.end - name.start) as i32, src_at(self.source, name.start), (&ty.b[0]) as *const char);
-        if deref_capped { self.errors.notef("auto-deref stopped after its maximum of 8 hops".ptr as *const char); }
-        else { self.errors.notef("fields are accessed as 'value.name'; methods must be declared in an 'extend' block or provided by a bound".ptr as *const char); }
+        self.errors.emitf(name.start, name.end - name.start, "no field or method '%.*s' on '%s'".ptr() as *const char, (name.end - name.start) as i32, src_at(self.source, name.start), (&ty.b[0]) as *const char);
+        if deref_capped { self.errors.notef("auto-deref stopped after its maximum of 8 hops".ptr() as *const char); }
+        else { self.errors.notef("fields are accessed as 'value.name'; methods must be declared in an 'extend' block or provided by a bound".ptr() as *const char); }
         return TYPE_NONE;
     }
 
@@ -4522,9 +4556,9 @@ extend TypeChecker {
         if bdecl == NODE_NONE || (bd_kind != NodeKind::NODE_STRUCT && bd_kind != NodeKind::NODE_ENUM) {
             let sp = unsafe (*a).at_const(id).span;
             if bdecl != NODE_NONE && bd_kind == NodeKind::NODE_INTERFACE {
-                self.errors.emitf(sp.start, sp.end - sp.start, "cannot infer the implementing type for this interface call".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "cannot infer the implementing type for this interface call".ptr() as *const char);
             } else {
-                self.errors.emitf(sp.start, sp.end - sp.start, "'::' base must be a struct or enum type".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "'::' base must be a struct or enum type".ptr() as *const char);
             }
             return TYPE_NONE;
         }
@@ -4539,9 +4573,9 @@ extend TypeChecker {
         if method.node != NODE_NONE { unsafe (*self.cur_ast()).set_resolution_def(mem, method); return self.decl_type_in(method.module, method.node); }
         let ac = self.find_assoc_const(bmod, bdecl, mname);
         if ac.node != NODE_NONE { unsafe (*self.cur_ast()).set_resolution_def(mem, ac); return self.decl_type_in(ac.module, ac.node); }
-        let mut kindw = "associated method or constant".ptr as *const char;
-        if bd_kind == NodeKind::NODE_ENUM { kindw = "variant, method, or constant".ptr as *const char; }
-        self.errors.emitf(mname.start, mname.end - mname.start, "no %s '%.*s' on this type".ptr as *const char, kindw, (mname.end - mname.start) as i32, src_at(self.source, mname.start));
+        let mut kindw = "associated method or constant".ptr() as *const char;
+        if bd_kind == NodeKind::NODE_ENUM { kindw = "variant, method, or constant".ptr() as *const char; }
+        self.errors.emitf(mname.start, mname.end - mname.start, "no %s '%.*s' on this type".ptr() as *const char, kindw, (mname.end - mname.start) as i32, src_at(self.source, mname.start));
         return TYPE_NONE;
     }
 
@@ -4592,7 +4626,7 @@ extend TypeChecker {
                 if field == NODE_NONE {
                     let mut ty = Buf96 {};
                     self.render_type(sty, (&mut ty.b[0]) as *mut char, 96);
-                    self.errors.emitf(fname.start, fname.end - fname.start, "no field '%.*s' on '%s'".ptr as *const char, (fname.end - fname.start) as i32, src_at(self.source, fname.start), (&ty.b[0]) as *const char);
+                    self.errors.emitf(fname.start, fname.end - fname.start, "no field '%.*s' on '%s'".ptr() as *const char, (fname.end - fname.start) as i32, src_at(self.source, fname.start), (&ty.b[0]) as *const char);
                 } else {
                     unsafe (*self.cur_ast()).set_resolution_def(fnn, DefId { module: vmod, node: field });
                     let ft = self.subst_type(self.lower_type_in(vmod, unsafe (*self.mod_ast(vmod)).at_const(field).as_data.field.ty), (&gp.d[0]) as *const DefId, (&ga.t[0]) as *const TypeId, gn);
@@ -4606,7 +4640,7 @@ extend TypeChecker {
             if field == NODE_NONE {
                 let mut ty = Buf96 {};
                 self.render_type(sty, (&mut ty.b[0]) as *mut char, 96);
-                self.errors.emitf(fname.start, fname.end - fname.start, "no field '%.*s' on '%s'".ptr as *const char, (fname.end - fname.start) as i32, src_at(self.source, fname.start), (&ty.b[0]) as *const char);
+                self.errors.emitf(fname.start, fname.end - fname.start, "no field '%.*s' on '%s'".ptr() as *const char, (fname.end - fname.start) as i32, src_at(self.source, fname.start), (&ty.b[0]) as *const char);
                 i = i + 1;
                 continue;
             }
@@ -4628,7 +4662,7 @@ extend TypeChecker {
             let sp = unsafe (*a).at_const(ifd.condition).span;
             let mut ty = Buf96 {};
             self.render_type(c, (&mut ty.b[0]) as *mut char, 96);
-            self.errors.emitf(sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'".ptr as *const char, (&ty.b[0]) as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'".ptr() as *const char, (&ty.b[0]) as *const char);
         }
         self.borrow_release_to(bm);
         let pre = self.tc_flow_save();
@@ -4749,15 +4783,15 @@ extend TypeChecker {
             let mut k: u32 = 0;
             while k < variants.len { if (covered.c[(k >> 6) as usize] & (1u64 << ((k & 63) as u64))) == 0 { nmiss = nmiss + 1; } k = k + 1; }
             if nmiss == 0 { return; }
-            let mut s2 = "s".ptr as *const char;
-            if nmiss == 1 { s2 = "".ptr as *const char; }
-            self.errors.emitf(sp.start, sp.end - sp.start, "switch is not exhaustive: missing %u variant%s".ptr as *const char, nmiss, s2);
-            self.errors.notef("match every variant or add a '_' arm".ptr as *const char);
+            let mut s2 = "s".ptr() as *const char;
+            if nmiss == 1 { s2 = "".ptr() as *const char; }
+            self.errors.emitf(sp.start, sp.end - sp.start, "switch is not exhaustive: missing %u variant%s".ptr() as *const char, nmiss, s2);
+            self.errors.notef("match every variant or add a '_' arm".ptr() as *const char);
             return;
         }
         if base == Ast::builtin(BuiltinType::BT_BOOL) && tcov && fcov { return; }
-        self.errors.emitf(sp.start, sp.end - sp.start, "switch is not exhaustive".ptr as *const char);
-        self.errors.notef("add a '_' arm to cover the remaining values".ptr as *const char);
+        self.errors.emitf(sp.start, sp.end - sp.start, "switch is not exhaustive".ptr() as *const char);
+        self.errors.notef("add a '_' arm to cover the remaining values".ptr() as *const char);
     }
 
     fn check_assignment(self: &mut Self, id: NodeId) TypeId {
@@ -4789,10 +4823,10 @@ extend TypeChecker {
         }
         if !self.is_assignable(bd.left) {
             let sp = unsafe (*a).at_const(bd.left).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "cannot assign to this expression".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "cannot assign to this expression".ptr() as *const char);
         } else if self.borrow_conflicting_write(bd.left, id) {
             let sp = unsafe (*a).at_const(bd.left).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "cannot assign to this value while it is borrowed".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "cannot assign to this value while it is borrowed".ptr() as *const char);
         } else if !self.compatible(l, bd.right) { self.err_mismatch(bd.right, l); }
         return l;
     }
@@ -4814,8 +4848,8 @@ extend TypeChecker {
             if (i as i32) < sn && sigp.t[i as usize] != TYPE_NONE { unsafe (*self.cur_ast()).set_type(pid, sigp.t[i as usize]); }
             else {
                 let psp = unsafe (*a).at_const(pid).span;
-                self.errors.emitf(psp.start, psp.end - psp.start, "closure parameter needs a type annotation (no expected function type supplies one)".ptr as *const char);
-                self.errors.notef("annotate it (`|x: i32| ..`) or bind the closure where a 'fn' type is expected".ptr as *const char);
+                self.errors.emitf(psp.start, psp.end - psp.start, "closure parameter needs a type annotation (no expected function type supplies one)".ptr() as *const char);
+                self.errors.notef("annotate it (`|x: i32| ..`) or bind the closure where a 'fn' type is expected".ptr() as *const char);
             }
             i = i + 1;
         }
@@ -4823,7 +4857,7 @@ extend TypeChecker {
         while i < params.len { self.decl_type(unsafe ((*a).list(params))[i as usize]); i = i + 1; }
         if self.nclos >= 8 {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "closures nested too deeply (max 8)".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "closures nested too deeply (max 8)".ptr() as *const char);
             return TYPE_NONE;
         }
         let cn = self.nclos;
@@ -4852,22 +4886,22 @@ extend TypeChecker {
             let is_mut = ((mut_caps >> (i as u64)) & 1u64) != 0;
             if cty != TYPE_NONE && !is_mut && self.type_at(cty).kind == TypeKind::TYPE_ARRAY {
                 let sp = unsafe (*a).at_const(id).span;
-                self.errors.emitf(sp.start, sp.end - sp.start, "closure cannot capture a fixed-size array by copy; capture a slice instead".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "closure cannot capture a fixed-size array by copy; capture a slice instead".ptr() as *const char);
                 i = i + 1;
                 continue;
             }
             if cty == TYPE_NONE || is_mut || !self.tc_type_is_free(cty) { i = i + 1; continue; }
             if self.is_moved(cid) {
                 let sp = unsafe (*a).at_const(id).span;
-                self.errors.emitf(sp.start, sp.end - sp.start, "closure captures a moved value (use of moved value)".ptr as *const char);
+                self.errors.emitf(sp.start, sp.end - sp.start, "closure captures a moved value (use of moved value)".ptr() as *const char);
             }
             let mut f: u32 = 0;
-            while f < self.nclos { if self.tc_capture_index(self.clos_stack[f as usize], cid) >= 0 { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot take ownership of a value also captured by an enclosing closure".ptr as *const char); break; } f = f + 1; }
+            while f < self.nclos { if self.tc_capture_index(self.clos_stack[f as usize], cid) >= 0 { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot take ownership of a value also captured by an enclosing closure".ptr() as *const char); break; } f = f + 1; }
             let mut b: u32 = 0;
             while b < self.nborrows {
                 if self.borrows[b as usize].root == cid {
                     if self.borrow_dead_after(self.borrows[b as usize], id) { self.borrow_tombstone_at(b); }
-                    else { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot capture this value while it is borrowed".ptr as *const char); break; }
+                    else { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot capture this value while it is borrowed".ptr() as *const char); break; }
                 }
                 b = b + 1;
             }
@@ -4886,7 +4920,7 @@ extend TypeChecker {
         let mut obj = self.check_expr(obj_n);
         if !addr_ctx && !place_use && self.borrow_conflicting_read(id) {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr() as *const char);
         }
         if self.type_at(obj).kind == TypeKind::TYPE_REFERENCE {
             let mut p = obj;
@@ -4901,7 +4935,7 @@ extend TypeChecker {
             let mut selem: TypeId = TYPE_NONE;
             let mut user_result = TYPE_NONE;
             if ot.kind == TypeKind::TYPE_ARRAY || ot.kind == TypeKind::TYPE_POINTER {
-                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 { self.err_unsafe(unsafe (*a).at_const(obj_n).span, "slicing a raw pointer".ptr as *const char); }
+                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 { self.err_unsafe(unsafe (*a).at_const(obj_n).span, "slicing a raw pointer".ptr() as *const char); }
                 elem = ot.as_data.elem;
             } else if self.slice_kind(obj, (&mut selem) as *mut TypeId) != 0 { elem = selem; }
             else if ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE {
@@ -4912,27 +4946,27 @@ extend TypeChecker {
                 let mut gn: i32 = 0;
                 let sp = unsafe (*a).at_const(obj_n).span;
                 if self.aggregate_of(self.strip(obj), (&mut om) as *mut ModuleId, (&mut od) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) {
-                    let md = self.find_method_cstr(om, od, "index_range".ptr as *const char);
+                    let md = self.find_method_cstr(om, od, "index_range".ptr() as *const char);
                     if md.node == NODE_NONE {
                         let mut ty = Buf96 {};
                         self.render_type(self.strip(obj), (&mut ty.b[0]) as *mut char, 96);
-                        self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no 'index_range' method for '[..]'".ptr as *const char, (&ty.b[0]) as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no 'index_range' method for '[..]'".ptr() as *const char, (&ty.b[0]) as *const char);
                     } else if !self.method_extend_bounds_hold(self.strip(obj), md) { self.err_method_extend_bounds(sp, self.strip(obj), md); }
                     else {
-                        if unsafe (*a).at_const(index_n).as_data.pattern_range.end == NODE_NONE && self.find_method_cstr(om, od, "len".ptr as *const char).node == NODE_NONE {
+                        if unsafe (*a).at_const(index_n).as_data.pattern_range.end == NODE_NONE && self.find_method_cstr(om, od, "len".ptr() as *const char).node == NODE_NONE {
                             let mut ty = Buf96 {};
                             self.render_type(self.strip(obj), (&mut ty.b[0]) as *mut char, 96);
-                            self.errors.emitf(sp.start, sp.end - sp.start, "an open-ended range index needs a 'len' method on '%s' to supply the end".ptr as *const char, (&ty.b[0]) as *const char);
+                            self.errors.emitf(sp.start, sp.end - sp.start, "an open-ended range index needs a 'len' method on '%s' to supply the end".ptr() as *const char, (&ty.b[0]) as *const char);
                         }
                         self.prelude_range_type(Ast::builtin(BuiltinType::BT_USIZE));
                         user_result = self.tc_method_ret(self.strip(obj), md);
                     }
                 }
-            } else if obj != TYPE_NONE { let sp = unsafe (*a).at_const(obj_n).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot slice this expression".ptr as *const char); }
+            } else if obj != TYPE_NONE { let sp = unsafe (*a).at_const(obj_n).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot slice this expression".ptr() as *const char); }
             let bstart = unsafe (*a).at_const(index_n).as_data.pattern_range.start;
             let bend = unsafe (*a).at_const(index_n).as_data.pattern_range.end;
-            if bstart != NODE_NONE { let bt = self.check_expr(bstart); if bt != TYPE_NONE && !self.is_int(bt) && unsafe (*a).at_const(bstart).kind != NodeKind::NODE_LITERAL { let sp = unsafe (*a).at_const(bstart).span; self.errors.emitf(sp.start, sp.end - sp.start, "range bound must be an integer".ptr as *const char); } }
-            if bend != NODE_NONE { let bt = self.check_expr(bend); if bt != TYPE_NONE && !self.is_int(bt) && unsafe (*a).at_const(bend).kind != NodeKind::NODE_LITERAL { let sp = unsafe (*a).at_const(bend).span; self.errors.emitf(sp.start, sp.end - sp.start, "range bound must be an integer".ptr as *const char); } }
+            if bstart != NODE_NONE { let bt = self.check_expr(bstart); if bt != TYPE_NONE && !self.is_int(bt) && unsafe (*a).at_const(bstart).kind != NodeKind::NODE_LITERAL { let sp = unsafe (*a).at_const(bstart).span; self.errors.emitf(sp.start, sp.end - sp.start, "range bound must be an integer".ptr() as *const char); } }
+            if bend != NODE_NONE { let bt = self.check_expr(bend); if bt != TYPE_NONE && !self.is_int(bt) && unsafe (*a).at_const(bend).kind != NodeKind::NODE_LITERAL { let sp = unsafe (*a).at_const(bend).span; self.errors.emitf(sp.start, sp.end - sp.start, "range bound must be an integer".ptr() as *const char); } }
             if user_result != TYPE_NONE { return user_result; }
             if elem != TYPE_NONE { return self.prelude_slice_type(elem, false); }
             return TYPE_NONE;
@@ -4943,7 +4977,7 @@ extend TypeChecker {
         if obj != TYPE_NONE {
             let mut selem: TypeId = TYPE_NONE;
             if ot.kind == TypeKind::TYPE_ARRAY || ot.kind == TypeKind::TYPE_POINTER {
-                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 { self.err_unsafe(unsafe (*a).at_const(obj_n).span, "indexing a raw pointer".ptr as *const char); }
+                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 { self.err_unsafe(unsafe (*a).at_const(obj_n).span, "indexing a raw pointer".ptr() as *const char); }
                 result = ot.as_data.elem;
             } else if self.slice_kind(obj, (&mut selem) as *mut TypeId) != 0 { result = selem; }
             else if ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE {
@@ -4955,11 +4989,11 @@ extend TypeChecker {
                 let mut gn: i32 = 0;
                 let sp = unsafe (*a).at_const(obj_n).span;
                 if self.aggregate_of(self.strip(obj), (&mut om) as *mut ModuleId, (&mut od) as *mut NodeId, (&gp.d[0]) as *mut DefId, (&ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32) {
-                    let md = self.find_method_cstr(om, od, "index".ptr as *const char);
+                    let md = self.find_method_cstr(om, od, "index".ptr() as *const char);
                     if md.node == NODE_NONE {
                         let mut ty = Buf96 {};
                         self.render_type(self.strip(obj), (&mut ty.b[0]) as *mut char, 96);
-                        self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no 'index' method for '[]'".ptr as *const char, (&ty.b[0]) as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "'%s' has no 'index' method for '[]'".ptr() as *const char, (&ty.b[0]) as *const char);
                     } else if !self.method_extend_bounds_hold(self.strip(obj), md) { self.err_method_extend_bounds(sp, self.strip(obj), md); result = TYPE_NONE; }
                     else {
                         let p1 = self.tc_method_param(self.strip(obj), md, 1);
@@ -4968,9 +5002,9 @@ extend TypeChecker {
                         if result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_REFERENCE { result = self.type_at(result).as_data.elem; }
                     }
                 }
-            } else { let sp = unsafe (*a).at_const(obj_n).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot index this expression".ptr as *const char); }
+            } else { let sp = unsafe (*a).at_const(obj_n).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot index this expression".ptr() as *const char); }
         }
-        if !overloaded && idx != TYPE_NONE && !self.is_int(idx) && unsafe (*a).at_const(index_n).kind != NodeKind::NODE_LITERAL { let sp = unsafe (*a).at_const(index_n).span; self.errors.emitf(sp.start, sp.end - sp.start, "index must be an integer".ptr as *const char); }
+        if !overloaded && idx != TYPE_NONE && !self.is_int(idx) && unsafe (*a).at_const(index_n).kind != NodeKind::NODE_LITERAL { let sp = unsafe (*a).at_const(index_n).span; self.errors.emitf(sp.start, sp.end - sp.start, "index must be an integer".ptr() as *const char); }
         return result;
     }
 
@@ -4995,7 +5029,7 @@ extend TypeChecker {
             self.tc_flow_set(&mpre);
             self.check_pattern(arm.pattern, scrut, bind_ref);
             let g = self.check_expr(arm.guard);
-            if arm.guard != NODE_NONE && g != TYPE_NONE && !self.is_bool(g) { let sp = unsafe (*a).at_const(arm.guard).span; self.errors.emitf(sp.start, sp.end - sp.start, "match guard must be 'bool'".ptr as *const char); }
+            if arm.guard != NODE_NONE && g != TYPE_NONE && !self.is_bool(g) { let sp = unsafe (*a).at_const(arm.guard).span; self.errors.emitf(sp.start, sp.end - sp.start, "match guard must be 'bool'".ptr() as *const char); }
             let body = self.check_expr(arm.body);
             if self.tc_flow_collect((&mut acc) as *mut FlowState) { ovf = true; }
             let body_never = body != TYPE_NONE && self.type_at(body).kind == TypeKind::TYPE_NEVER;
@@ -5033,17 +5067,17 @@ extend TypeChecker {
                         let mut freed = false;
                         for k in 0..self.nfreed { if self.freed[k as usize] == d.node { freed = true; } }
                         let sp = unsafe (*a).at_const(id).span;
-                        let mut msg = "use of moved value".ptr as *const char;
-                        if freed { msg = "use after free".ptr as *const char; }
+                        let mut msg = "use of moved value".ptr() as *const char;
+                        if freed { msg = "use after free".ptr() as *const char; }
                         self.errors.emitf(sp.start, sp.end - sp.start, msg);
                     }
-                    if !addr_ctx && self.tc_is_uninit(d.node) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "use of possibly uninitialized value".ptr as *const char); }
-                    if !addr_ctx && !place_use && self.borrow_conflicting_read(id) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr as *const char); }
+                    if !addr_ctx && self.tc_is_uninit(d.node) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "use of possibly uninitialized value".ptr() as *const char); }
+                    if !addr_ctx && !place_use && self.borrow_conflicting_read(id) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr() as *const char); }
                 }
             },
             NODE_UNARY => {
                 result = self.check_unary(id);
-                if unsafe (*a).at_const(id).as_data.unary.op == TokenType::Star && !addr_ctx && !place_use && self.borrow_conflicting_read(id) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr as *const char); }
+                if unsafe (*a).at_const(id).as_data.unary.op == TokenType::Star && !addr_ctx && !place_use && self.borrow_conflicting_read(id) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr() as *const char); }
             },
             NODE_BINARY => { result = self.check_binary(id); },
             NODE_ASSIGNMENT => { result = self.check_assignment(id); },
@@ -5056,7 +5090,7 @@ extend TypeChecker {
                 self.place_use = value_read;
                 if unsafe (*a).at_const(id).as_data.member.path { result = self.check_path_member(id, expected); }
                 else { self.expected = expected; result = self.check_member(id, false); }
-                if value_read && !place_use && self.borrow_conflicting_read(id) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr as *const char); }
+                if value_read && !place_use && self.borrow_conflicting_read(id) { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot use this value while it is mutably borrowed".ptr() as *const char); }
             },
             NODE_CAST => {
                 let src = self.check_expr(unsafe (*a).at_const(id).as_data.cast.expression);
@@ -5073,7 +5107,7 @@ extend TypeChecker {
                         self.render_type(src, (&mut s.b[0]) as *mut char, 96);
                         self.render_type(dst, (&mut d.b[0]) as *mut char, 96);
                         let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emitf(sp.start, sp.end - sp.start, "invalid cast from '%s' to '%s'".ptr as *const char, (&s.b[0]) as *const char, (&d.b[0]) as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "invalid cast from '%s' to '%s'".ptr() as *const char, (&s.b[0]) as *const char, (&d.b[0]) as *const char);
                     }
                 }
                 result = dst;
@@ -5085,7 +5119,7 @@ extend TypeChecker {
                 if d.node != NODE_NONE && d.module == self.ast.module { dk = unsafe (*a).at_const(d.node).kind; }
                 if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_CONST {
                     let vt = unsafe (*a).type_of(d.node);
-                    if vt == TYPE_NONE { let vsp = unsafe (*a).at_const(v).span; self.errors.emitf(vsp.start, vsp.end - vsp.start, "cannot take the size of this value here".ptr as *const char); }
+                    if vt == TYPE_NONE { let vsp = unsafe (*a).at_const(v).span; self.errors.emitf(vsp.start, vsp.end - vsp.start, "cannot take the size of this value here".ptr() as *const char); }
                     unsafe (*self.cur_ast()).set_type(v, vt);
                 } else { self.resolve_type(v); }
                 result = Ast::builtin(BuiltinType::BT_USIZE);
@@ -5103,7 +5137,7 @@ extend TypeChecker {
                         let sp = unsafe (*a).at_const(vo.ap).span;
                         let mut ty = Buf96 {};
                         self.render_type(apt, (&mut ty.b[0]) as *mut char, 96);
-                        self.errors.emitf(sp.start, sp.end - sp.start, "expected a 'va_list', found '%s'".ptr as *const char, (&ty.b[0]) as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "expected a 'va_list', found '%s'".ptr() as *const char, (&ty.b[0]) as *const char);
                     }
                 }
                 if vo.op == VA_ARG { result = self.resolve_type(vo.extra); }
@@ -5156,7 +5190,7 @@ extend TypeChecker {
                 let elem = self.range_type(id, s, e);
                 if unsafe (*a).at_const(id).as_data.pattern_range.start == NODE_NONE || unsafe (*a).at_const(id).as_data.pattern_range.end == NODE_NONE {
                     let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emitf(sp.start, sp.end - sp.start, "a range value needs both a start and an end".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "a range value needs both a start and an end".ptr() as *const char);
                 } else { result = if_ty(elem != TYPE_NONE, self.prelude_range_type(elem), TYPE_NONE); }
             },
             _ => {},
@@ -5195,8 +5229,8 @@ extend TypeChecker {
                 i = i + 1;
             }
             let sp = unsafe (*a).at_const(id).span;
-            if overflow { self.errors.emitf(sp.start, sp.end - sp.start, "integer literal is too large to fit in a 64-bit integer".ptr as *const char); }
-            else if sb != BuiltinType::BT_COUNT && bt_int_max(sb) != 0 && acc > bt_int_max(sb) { self.errors.emitf(sp.start, sp.end - sp.start, "integer literal does not fit in its suffixed type".ptr as *const char); }
+            if overflow { self.errors.emitf(sp.start, sp.end - sp.start, "integer literal is too large to fit in a 64-bit integer".ptr() as *const char); }
+            else if sb != BuiltinType::BT_COUNT && bt_int_max(sb) != 0 && acc > bt_int_max(sb) { self.errors.emitf(sp.start, sp.end - sp.start, "integer literal does not fit in its suffixed type".ptr() as *const char); }
             return result;
         }
         if tt == TokenType::FloatLiteral {
@@ -5205,7 +5239,7 @@ extend TypeChecker {
             return Ast::builtin(BuiltinType::BT_F32);
         }
         if tt == TokenType::CharacterLiteral {
-            if self.char_literal_cp(lr) > 0xFF { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "character literal does not fit in 'char' (one byte); use a string or an integer".ptr as *const char); }
+            if self.char_literal_cp(lr) > 0xFF { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "character literal does not fit in 'char' (one byte); use a string or an integer".ptr() as *const char); }
             return Ast::builtin(BuiltinType::BT_CHAR);
         }
         if tt == TokenType::ByteCharacterLiteral { return Ast::builtin(BuiltinType::BT_U8); }
@@ -5218,7 +5252,7 @@ extend TypeChecker {
     fn check_array_literal(self: &mut Self, id: NodeId) TypeId {
         let a = self.cur_ast();
         let elements = unsafe (*a).at_const(id).as_data.array_literal.elements;
-        if elements.len == 0 { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot infer the element type of an empty array literal".ptr as *const char); return TYPE_NONE; }
+        if elements.len == 0 { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "cannot infer the element type of an empty array literal".ptr() as *const char); return TYPE_NONE; }
         let mut elem = TYPE_NONE;
         let mut i: u32 = 0;
         while i < elements.len {
@@ -5229,10 +5263,10 @@ extend TypeChecker {
                 let it = self.check_expr(el.as_data.field_initializer.name);
                 if it != TYPE_NONE {
                     let iy = *self.type_at(it);
-                    if !(iy.kind == TypeKind::TYPE_BUILTIN && (bt_is_int(iy.as_data.builtin) || iy.as_data.builtin == BuiltinType::BT_CHAR)) { let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span; self.errors.emitf(sp.start, sp.end - sp.start, "array designator index must be an integer".ptr as *const char); }
+                    if !(iy.kind == TypeKind::TYPE_BUILTIN && (bt_is_int(iy.as_data.builtin) || iy.as_data.builtin == BuiltinType::BT_CHAR)) { let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span; self.errors.emitf(sp.start, sp.end - sp.start, "array designator index must be an integer".ptr() as *const char); }
                     else {
                         let ceptr = self.ceval();
-                        if ceptr != null && unsafe (*ceptr).eval(self.ast.module, el.as_data.field_initializer.name).kind == ce::CONST_NONE { let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span; self.errors.emitf(sp.start, sp.end - sp.start, "array designator index must be a constant expression".ptr as *const char); }
+                        if ceptr != null && unsafe (*ceptr).eval(self.ast.module, el.as_data.field_initializer.name).kind == ce::CONST_NONE { let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span; self.errors.emitf(sp.start, sp.end - sp.start, "array designator index must be a constant expression".ptr() as *const char); }
                     }
                 }
                 et = self.check_expr(el.as_data.field_initializer.value);
@@ -5283,13 +5317,13 @@ extend TypeChecker {
         let ifd = unsafe (*a).at_const(id).as_data.if_stmt;
         let bm = self.borrow_mark();
         let c = self.check_expr(ifd.condition);
-        if c != TYPE_NONE && !self.is_bool(c) { let sp = unsafe (*a).at_const(ifd.condition).span; let mut ty = Buf96 {}; self.render_type(c, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'".ptr as *const char, (&ty.b[0]) as *const char); }
+        if c != TYPE_NONE && !self.is_bool(c) { let sp = unsafe (*a).at_const(ifd.condition).span; let mut ty = Buf96 {}; self.render_type(c, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(sp.start, sp.end - sp.start, "if condition must be 'bool', found '%s'".ptr() as *const char, (&ty.b[0]) as *const char); }
         self.borrow_release_to(bm);
         let ifpre = self.tc_flow_save();
         let then_ty = self.check_expr(ifd.then_branch);
         if ifd.else_branch == NODE_NONE {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "an 'if' used as a value must have an 'else' branch".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "an 'if' used as a value must have an 'else' branch".ptr() as *const char);
             return TYPE_NONE;
         }
         let mut acc = FlowState {};
@@ -5309,7 +5343,7 @@ extend TypeChecker {
     fn check_tuple_value(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let elems = unsafe (*a).at_const(id).as_data.array_literal.elements;
-        if elems.len > 4 { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "tuple arity is limited to 4 elements".ptr as *const char); return TYPE_NONE; }
+        if elems.len > 4 { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "tuple arity is limited to 4 elements".ptr() as *const char); return TYPE_NONE; }
         let mut wargs = Tys4 {};
         let mut wn: i32 = -1;
         if expected != TYPE_NONE { wn = self.tuple_args_of(self.strip(expected), (&mut wargs.t[0]) as *mut TypeId, 4); }
@@ -5373,17 +5407,17 @@ extend TypeChecker {
         }
         if !ok && !stashed && tn < 0 {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emitf(sp.start, sp.end - sp.start, "a tuple binding requires a multi-value function call or a tuple value".ptr as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "a tuple binding requires a multi-value function call or a tuple value".ptr() as *const char);
             return;
         }
         let nret = if_u32(stashed, self.mret_total, if_u32(tn >= 0, tn as u32, returns.len));
         if names.len != nret {
             let sp = unsafe (*a).at_const(id).span;
-            let mut s1 = "s".ptr as *const char;
-            if names.len == 1 { s1 = "".ptr as *const char; }
-            let mut s2 = "s".ptr as *const char;
-            if nret == 1 { s2 = "".ptr as *const char; }
-            self.errors.emitf(sp.start, sp.end - sp.start, "expected %u binding%s, the call returns %u value%s".ptr as *const char, names.len, s1, nret, s2);
+            let mut s1 = "s".ptr() as *const char;
+            if names.len == 1 { s1 = "".ptr() as *const char; }
+            let mut s2 = "s".ptr() as *const char;
+            if nret == 1 { s2 = "".ptr() as *const char; }
+            self.errors.emitf(sp.start, sp.end - sp.start, "expected %u binding%s, the call returns %u value%s".ptr() as *const char, names.len, s1, nret, s2);
         }
         let mut i: u32 = 0;
         while i < names.len {
@@ -5423,18 +5457,18 @@ extend TypeChecker {
             let esc = self.addr_escape(vid);
             if esc != 0 {
                 let sp = unsafe (*a).at_const(vid).span;
-                let mut w = "local variable".ptr as *const char;
-                if esc == 2 { w = "function parameter".ptr as *const char; }
-                self.errors.emitf(sp.start, sp.end - sp.start, "returning a pointer/reference to a %s, which does not outlive the call".ptr as *const char, w);
+                let mut w = "local variable".ptr() as *const char;
+                if esc == 2 { w = "function parameter".ptr() as *const char; }
+                self.errors.emitf(sp.start, sp.end - sp.start, "returning a pointer/reference to a %s, which does not outlive the call".ptr() as *const char, w);
             }
             i = i + 1;
         }
         let expected = if_u32(returns_void, 0, rets.len);
         if values.len != expected {
             let sp = unsafe (*a).at_const(id).span;
-            let mut s2 = "s".ptr as *const char;
-            if expected == 1 { s2 = "".ptr as *const char; }
-            self.errors.emitf(sp.start, sp.end - sp.start, "expected %u return value%s, found %u".ptr as *const char, expected, s2, values.len);
+            let mut s2 = "s".ptr() as *const char;
+            if expected == 1 { s2 = "".ptr() as *const char; }
+            self.errors.emitf(sp.start, sp.end - sp.start, "expected %u return value%s, found %u".ptr() as *const char, expected, s2, values.len);
             return;
         }
         if returns_void { return; }
@@ -5457,16 +5491,16 @@ extend TypeChecker {
         if c != TYPE_NONE && !self.is_bool(c) {
             let mut ty = Buf96 {};
             self.render_type(c, (&mut ty.b[0]) as *mut char, 96);
-            self.errors.emitf(sp.start, sp.end - sp.start, "static_assert condition must be 'bool', found '%s'".ptr as *const char, (&ty.b[0]) as *const char);
+            self.errors.emitf(sp.start, sp.end - sp.start, "static_assert condition must be 'bool', found '%s'".ptr() as *const char, (&ty.b[0]) as *const char);
             return;
         }
         let ceptr = self.ceval();
         if ceptr == null { return; }
         let v = unsafe (*ceptr).eval(self.ast.module, left);
-        if v.kind == ce::CONST_BOOL && v.as_data.i == 0 { self.errors.emitf(sp.start, sp.end - sp.start, "static assertion failed".ptr as *const char); }
+        if v.kind == ce::CONST_BOOL && v.as_data.i == 0 { self.errors.emitf(sp.start, sp.end - sp.start, "static assertion failed".ptr() as *const char); }
         else if v.kind == ce::CONST_NONE {
             let trap = unsafe (*ceptr).ce_trap_get();
-            if trap != null { self.errors.emitf(sp.start, sp.end - sp.start, "static assertion cannot be evaluated: %s".ptr as *const char, trap); }
+            if trap != null { self.errors.emitf(sp.start, sp.end - sp.start, "static assertion cannot be evaluated: %s".ptr() as *const char, trap); }
             else { unsafe (*ceptr).defer_assert(self.ast.module, left); }
         }
     }
@@ -5520,11 +5554,11 @@ extend TypeChecker {
                 } else if valued { binding = unsafe (*self.cur_ast()).type_of(value); }
                 else {
                     let sp = self.name_span(nm);
-                    self.errors.emitf(sp.start, sp.end - sp.start, "cannot infer type of '%.*s'".ptr as *const char, (sp.end - sp.start) as i32, src_at(self.source, sp.start));
+                    self.errors.emitf(sp.start, sp.end - sp.start, "cannot infer type of '%.*s'".ptr() as *const char, (sp.end - sp.start) as i32, src_at(self.source, sp.start));
                 }
                 unsafe (*self.cur_ast()).set_type(id, binding);
                 if annotated && !valued {
-                    if self.tc_type_is_free(binding) { let sp = self.name_span(nm); self.errors.emitf(sp.start, sp.end - sp.start, "a Free-typed binding must be initialized when declared (it is freed at scope exit)".ptr as *const char); }
+                    if self.tc_type_is_free(binding) { let sp = self.name_span(nm); self.errors.emitf(sp.start, sp.end - sp.start, "a Free-typed binding must be initialized when declared (it is freed at scope exit)".ptr() as *const char); }
                     else { self.tc_add_uninit(id); }
                 }
                 let binding_is_ref = binding != TYPE_NONE && self.type_at(binding).kind == TypeKind::TYPE_REFERENCE;
@@ -5556,7 +5590,7 @@ extend TypeChecker {
                 self.borrow_release_to(bm);
                 self.tc_flow_set(&pre);
                 if self.ndefers < 256 { let k = self.ndefers; self.defer_stack[k as usize] = dv; self.defer_depth[k as usize] = self.scope_depth; self.ndefers = k + 1; }
-                else { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "too many pending 'defer' statements in one function (analysis limit)".ptr as *const char); }
+                else { let sp = unsafe (*a).at_const(id).span; self.errors.emitf(sp.start, sp.end - sp.start, "too many pending 'defer' statements in one function (analysis limit)".ptr() as *const char); }
             },
             NODE_IF => { self.check_if_stmt(id); },
             NODE_WHILE => {
@@ -5568,7 +5602,7 @@ extend TypeChecker {
                     let sp = unsafe (*a).at_const(unsafe (*a).at_const(id).as_data.while_stmt.condition).span;
                     let mut ty = Buf96 {};
                     self.render_type(c, (&mut ty.b[0]) as *mut char, 96);
-                    self.errors.emitf(sp.start, sp.end - sp.start, "while condition must be 'bool', found '%s'".ptr as *const char, (&ty.b[0]) as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "while condition must be 'bool', found '%s'".ptr() as *const char, (&ty.b[0]) as *const char);
                 }
                 self.borrow_release_to(bm);
                 let body = unsafe (*a).at_const(id).as_data.while_stmt.body;
@@ -5607,7 +5641,7 @@ extend TypeChecker {
                     if elem == TYPE_NONE && it != TYPE_NONE { elem = self.iter_elem_type(it); }
                     if elem == TYPE_NONE && it != TYPE_NONE {
                         let sp = unsafe (*self.cur_ast()).at_const(iter).span;
-                        self.errors.emitf(sp.start, sp.end - sp.start, "cannot iterate over this value (need an array, slice, range, or an Iterator)".ptr as *const char);
+                        self.errors.emitf(sp.start, sp.end - sp.start, "cannot iterate over this value (need an array, slice, range, or an Iterator)".ptr() as *const char);
                     }
                 }
                 unsafe (*self.cur_ast()).set_type(id, elem);
@@ -5634,8 +5668,8 @@ extend TypeChecker {
                 let le = self.tc_find_loop(lb);
                 if le < 0 {
                     let sp = unsafe (*a).at_const(id).span;
-                    if lb.end > lb.start { self.errors.emitf(sp.start, sp.end - sp.start, "no enclosing loop is labeled %.*s".ptr as *const char, (lb.end - lb.start) as i32, src_at(self.source, lb.start)); }
-                    else { let mut w = "continue".ptr as *const char; if nk == NodeKind::NODE_BREAK { w = "break".ptr as *const char; } self.errors.emitf(sp.start, sp.end - sp.start, "'%s' outside of a loop".ptr as *const char, w); }
+                    if lb.end > lb.start { self.errors.emitf(sp.start, sp.end - sp.start, "no enclosing loop is labeled %.*s".ptr() as *const char, (lb.end - lb.start) as i32, src_at(self.source, lb.start)); }
+                    else { let mut w = "continue".ptr() as *const char; if nk == NodeKind::NODE_BREAK { w = "break".ptr() as *const char; } self.errors.emitf(sp.start, sp.end - sp.start, "'%s' outside of a loop".ptr() as *const char, w); }
                     let fv = unsafe (*a).at_const(id).as_data.flow.value;
                     if fv != NODE_NONE { self.check_expr(fv); }
                     return;
@@ -5647,7 +5681,7 @@ extend TypeChecker {
                 self.expected = self.loop_stack[le as usize].break_ty;
                 let vt = self.check_expr(fv);
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
-                if !self.loop_stack[le as usize].value_loop { self.errors.emitf(sp.start, sp.end - sp.start, "'break' can only carry a value inside a 'loop' expression".ptr as *const char); }
+                if !self.loop_stack[le as usize].value_loop { self.errors.emitf(sp.start, sp.end - sp.start, "'break' can only carry a value inside a 'loop' expression".ptr() as *const char); }
                 else if self.loop_stack[le as usize].break_ty == TYPE_NONE { self.loop_stack[le as usize].break_ty = vt; }
                 else if !self.compatible(self.loop_stack[le as usize].break_ty, fv) { self.err_mismatch(fv, self.loop_stack[le as usize].break_ty); }
                 self.loop_stack[le as usize].saw_value = true;
@@ -5719,7 +5753,7 @@ extend TypeChecker {
                         j = j + 1;
                     }
                     if matchId != NODE_NONE { unsafe (*self.cur_ast()).set_resolution_def(fldName, DefId { module: bmod, node: matchId }); }
-                    else { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(fn2.start, fn2.end - fn2.start, "no field '%.*s' on '%s'".ptr as *const char, (fn2.end - fn2.start) as i32, src_at(self.source, fn2.start), (&ty.b[0]) as *const char); }
+                    else { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(fn2.start, fn2.end - fn2.start, "no field '%.*s' on '%s'".ptr() as *const char, (fn2.end - fn2.start) as i32, src_at(self.source, fn2.start), (&ty.b[0]) as *const char); }
                     let fc = unsafe (*self.cur_ast()).at_const(fid).as_data.pattern.children;
                     let mut k: u32 = 0;
                     while k < fc.len { self.check_pattern(unsafe ((*self.cur_ast()).list(fc))[k as usize], ft, bind_ref); k = k + 1; }
@@ -5745,7 +5779,7 @@ extend TypeChecker {
                 let fname = self.name_span(nameId);
                 let field = self.find_member(bmod, decl, fname);
                 if field != NODE_NONE { unsafe (*self.cur_ast()).set_resolution_def(nameId, DefId { module: bmod, node: field }); field_type = self.subst_type(self.decl_type_in(bmod, field), (&gp.d[0]) as *const DefId, (&ga.t[0]) as *const TypeId, gn); }
-                else { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(fname.start, fname.end - fname.start, "no field '%.*s' on '%s'".ptr as *const char, (fname.end - fname.start) as i32, src_at(self.source, fname.start), (&ty.b[0]) as *const char); }
+                else { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(fname.start, fname.end - fname.start, "no field '%.*s' on '%s'".ptr() as *const char, (fname.end - fname.start) as i32, src_at(self.source, fname.start), (&ty.b[0]) as *const char); }
             }
             let children = unsafe (*self.cur_ast()).at_const(id).as_data.pattern.children;
             let mut i: u32 = 0;
@@ -5765,11 +5799,11 @@ extend TypeChecker {
             let mut variant = NODE_NONE;
             if nameId != NODE_NONE {
                 let vname = self.name_span(nameId);
-                if decl == NODE_NONE { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(vname.start, vname.end - vname.start, "pattern '%.*s(..)' expects an enum, but the value has type '%s'".ptr as *const char, (vname.end - vname.start) as i32, src_at(self.source, vname.start), (&ty.b[0]) as *const char); }
+                if decl == NODE_NONE { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(vname.start, vname.end - vname.start, "pattern '%.*s(..)' expects an enum, but the value has type '%s'".ptr() as *const char, (vname.end - vname.start) as i32, src_at(self.source, vname.start), (&ty.b[0]) as *const char); }
                 else {
                     variant = self.find_member(bmod, decl, vname);
                     if variant != NODE_NONE { unsafe (*self.cur_ast()).set_resolution_def(nameId, DefId { module: bmod, node: variant }); }
-                    else { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(vname.start, vname.end - vname.start, "no variant '%.*s' on '%s'".ptr as *const char, (vname.end - vname.start) as i32, src_at(self.source, vname.start), (&ty.b[0]) as *const char); }
+                    else { let mut ty = Buf96 {}; self.render_type(base, (&mut ty.b[0]) as *mut char, 96); self.errors.emitf(vname.start, vname.end - vname.start, "no variant '%.*s' on '%s'".ptr() as *const char, (vname.end - vname.start) as i32, src_at(self.source, vname.start), (&ty.b[0]) as *const char); }
                 }
             }
             let children = unsafe (*self.cur_ast()).at_const(id).as_data.pattern.children;
@@ -5844,12 +5878,12 @@ extend TypeChecker {
                 let params = unsafe (*a).at_const(id).as_data.function.params;
                 for i in 0..params.len { self.decl_type(unsafe ((*a).list(params))[i as usize]); }
                 let fnd = unsafe (*self.cur_ast()).at_const(id).as_data.function;
-                if fnd.is_variadic && !fnd.is_extern && params.len == 0 { let sp = self.name_span(fnd.name); self.errors.emitf(sp.start, sp.end - sp.start, "a variadic function needs at least one fixed parameter before '...'".ptr as *const char); }
-                if span_is(self.source, self.name_span(fnd.name), "main".ptr as *const char) {
+                if fnd.is_variadic && !fnd.is_extern && params.len == 0 { let sp = self.name_span(fnd.name); self.errors.emitf(sp.start, sp.end - sp.start, "a variadic function needs at least one fixed parameter before '...'".ptr() as *const char); }
+                if span_is(self.source, self.name_span(fnd.name), "main".ptr() as *const char) {
                     let rets = fnd.returns;
                     let mut rt = TYPE_NONE;
                     if rets.len == 1 { let r0 = unsafe ((*self.cur_ast()).list(rets))[0]; let rn = unsafe (*self.cur_ast()).at_const(r0); rt = self.resolve_type(if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0)); }
-                    if params.len != 0 || rets.len != 1 || rt != Ast::builtin(BuiltinType::BT_I32) { let sp = self.name_span(fnd.name); self.errors.emitf(sp.start, sp.end - sp.start, "'main' must be declared 'fn main() i32'".ptr as *const char); }
+                    if params.len != 0 || rets.len != 1 || rt != Ast::builtin(BuiltinType::BT_I32) { let sp = self.name_span(fnd.name); self.errors.emitf(sp.start, sp.end - sp.start, "'main' must be declared 'fn main() i32'".ptr() as *const char); }
                 }
                 let saved = self.current_returns;
                 let savedfn = self.current_fn;
@@ -5878,7 +5912,7 @@ extend TypeChecker {
                         else {
                             if mn.as_data.variant.value != NODE_NONE {
                                 let vt = self.check_expr(mn.as_data.variant.value);
-                                if vt != TYPE_NONE && !self.is_int(vt) { let sp = unsafe (*self.cur_ast()).at_const(mn.as_data.variant.value).span; self.errors.emitf(sp.start, sp.end - sp.start, "enum discriminant must be an integer".ptr as *const char); }
+                                if vt != TYPE_NONE && !self.is_int(vt) { let sp = unsafe (*self.cur_ast()).at_const(mn.as_data.variant.value).span; self.errors.emitf(sp.start, sp.end - sp.start, "enum discriminant must be an integer".ptr() as *const char); }
                             }
                             let payload = mn.as_data.variant.payload;
                             for j in 0..payload.len {
@@ -5891,8 +5925,8 @@ extend TypeChecker {
                 }
                 if agg.generics.len == 0 && self.tc_embeds_by_value(self.ast.module, id, self.ast.module, id, 0) {
                     let sp = unsafe (*self.cur_ast()).at_const(id).span;
-                    self.errors.emitf(sp.start, sp.end - sp.start, "this type embeds itself by value, so it would have infinite size".ptr as *const char);
-                    self.errors.notef("break the cycle with a pointer ('*mut T'), a reference, or 'Box<T>'".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "this type embeds itself by value, so it would have infinite size".ptr() as *const char);
+                    self.errors.notef("break the cycle with a pointer ('*mut T'), a reference, or 'Box<T>'".ptr() as *const char);
                 }
             },
             NODE_INTERFACE => { self.check_associated(unsafe (*a).at_const(id).as_data.interface_def.items); },
@@ -5912,8 +5946,8 @@ extend TypeChecker {
                 if cd.value != NODE_NONE { self.check_expr(cd.value); if !self.compatible(declared, cd.value) { self.err_mismatch(cd.value, declared); } }
                 if cd.is_static_mut && self.tc_type_is_free(declared) {
                     let sp = unsafe (*self.cur_ast()).at_const(id).span;
-                    self.errors.emitf(sp.start, sp.end - sp.start, "a 'static mut' cannot hold an owning (Free) type".ptr as *const char);
-                    self.errors.notef("no scope ever frees a global; store a scalar/view or manage the value locally".ptr as *const char);
+                    self.errors.emitf(sp.start, sp.end - sp.start, "a 'static mut' cannot hold an owning (Free) type".ptr() as *const char);
+                    self.errors.notef("no scope ever frees a global; store a scalar/view or manage the value locally".ptr() as *const char);
                 }
             },
             NODE_TYPE_ALIAS => { let _ = self.resolve_type(unsafe (*a).at_const(id).as_data.type_alias.ty); },

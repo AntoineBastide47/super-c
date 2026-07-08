@@ -68,20 +68,20 @@ fn id_need(op: i32) i32 {
 // The Super-C TYPE for shape[p..], e.g. "OR" -> "Option<Result<Tr, i32>>".
 fn ty(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32) i32 {
     let c = unsafe sh[p as usize];
-    if c == (0 as char) { return ap(b, at, cap, "Tr".ptr as *const char); }
+    if c == (0 as char) { return ap(b, at, cap, "Tr".ptr() as *const char); }
     if c == 'O' {
-        let mut a = ap(b, at, cap, "Option<".ptr as *const char);
+        let mut a = ap(b, at, cap, "Option<".ptr() as *const char);
         a = ty(b, a, cap, sh, p + 1);
-        return ap(b, a, cap, ">".ptr as *const char);
+        return ap(b, a, cap, ">".ptr() as *const char);
     }
     if c == 'R' {
-        let mut a = ap(b, at, cap, "Result<".ptr as *const char);
+        let mut a = ap(b, at, cap, "Result<".ptr() as *const char);
         a = ty(b, a, cap, sh, p + 1);
-        return ap(b, a, cap, ", i32>".ptr as *const char);
+        return ap(b, a, cap, ", i32>".ptr() as *const char);
     }
-    let mut a = ap(b, at, cap, "Box<".ptr as *const char);
+    let mut a = ap(b, at, cap, "Box<".ptr() as *const char);
     a = ty(b, a, cap, sh, p + 1);
-    return ap(b, a, cap, ">".ptr as *const char);
+    return ap(b, a, cap, ">".ptr() as *const char);
 }
 
 // A Super-C EXPRESSION building shape[p..] wrapping a single `Tr { id }`.
@@ -89,7 +89,7 @@ fn bld(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, id: i32) i32 {
     let c = unsafe sh[p as usize];
     if c == (0 as char) {
         let mut t = Buf1024 {};
-        unsafe stdio::snprintf((&mut t.b[0]) as *mut char, 1024, "Tr { id: %d }".ptr as *const char, id);
+        unsafe stdio::snprintf((&mut t.b[0]) as *mut char, 1024, "Tr { id: %d }".ptr() as *const char, id);
         return ap(b, at, cap, (&t.b[0]) as *const char);
     }
     let mut inner = Buf1024 {};
@@ -97,15 +97,15 @@ fn bld(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, id: i32) i32 {
     let innerp = (&inner.b[0]) as *const char;
     let mut hdr = Buf1024 {};
     if c == 'O' {
-        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 1024, "Option::<%s>::Some(".ptr as *const char, innerp);
+        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 1024, "Option::<%s>::Some(".ptr() as *const char, innerp);
     } else if c == 'R' {
-        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 1024, "Result::<%s, i32>::Ok(".ptr as *const char, innerp);
+        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 1024, "Result::<%s, i32>::Ok(".ptr() as *const char, innerp);
     } else {
-        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 1024, "Box::<%s>::new(".ptr as *const char, innerp);
+        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 1024, "Box::<%s>::new(".ptr() as *const char, innerp);
     }
     let mut a = ap(b, at, cap, (&hdr.b[0]) as *const char);
     a = bld(b, a, cap, sh, p + 1, id);
-    return ap(b, a, cap, ")".ptr as *const char);
+    return ap(b, a, cap, ")".ptr() as *const char);
 }
 
 // A nested switch over an O/R chain. mode 0: move the leaf Tr out (yields Tr); 1: read the leaf id without
@@ -116,27 +116,27 @@ fn sw(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, var: *const char
     if c == (0 as char) {
         if mode == 0 { return ap(b, at, cap, var); }
         let mut t = Buf1024 {};
-        unsafe stdio::snprintf((&mut t.b[0]) as *mut char, 1024, "%s.id".ptr as *const char, var);
+        unsafe stdio::snprintf((&mut t.b[0]) as *mut char, 1024, "%s.id".ptr() as *const char, var);
         return ap(b, at, cap, (&t.b[0]) as *const char);
     }
     let mut nv = Buf64 {};
-    unsafe stdio::snprintf((&mut nv.b[0]) as *mut char, 64, "%s_%d".ptr as *const char, var, p);
+    unsafe stdio::snprintf((&mut nv.b[0]) as *mut char, 64, "%s_%d".ptr() as *const char, var, p);
     let nvp = (&nv.b[0]) as *const char;
-    let pfx = if mode == 2 && top != 0 { "&".ptr as *const char; } else { "".ptr as *const char; };
-    let dead = if mode == 0 { "Tr { id: 0 }".ptr as *const char; } else { "0".ptr as *const char; };
+    let pfx = if mode == 2 && top != 0 { "&".ptr() as *const char; } else { "".ptr() as *const char; };
+    let dead = if mode == 0 { "Tr { id: 0 }".ptr() as *const char; } else { "0".ptr() as *const char; };
     let mut hdr = Buf256 {};
     if c == 'O' {
-        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 256, "switch %s%s { Some(%s) => ".ptr as *const char, pfx, var, nvp);
+        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 256, "switch %s%s { Some(%s) => ".ptr() as *const char, pfx, var, nvp);
     } else {
-        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 256, "switch %s%s { Ok(%s) => ".ptr as *const char, pfx, var, nvp);
+        unsafe stdio::snprintf((&mut hdr.b[0]) as *mut char, 256, "switch %s%s { Ok(%s) => ".ptr() as *const char, pfx, var, nvp);
     }
     let mut a = ap(b, at, cap, (&hdr.b[0]) as *const char);
     a = sw(b, a, cap, sh, p + 1, nvp, mode, 0);
     let mut tail = Buf256 {};
     if c == 'O' {
-        unsafe stdio::snprintf((&mut tail.b[0]) as *mut char, 256, ", None => %s, }".ptr as *const char, dead);
+        unsafe stdio::snprintf((&mut tail.b[0]) as *mut char, 256, ", None => %s, }".ptr() as *const char, dead);
     } else {
-        unsafe stdio::snprintf((&mut tail.b[0]) as *mut char, 256, ", Err(_) => %s, }".ptr as *const char, dead);
+        unsafe stdio::snprintf((&mut tail.b[0]) as *mut char, 256, ", Err(_) => %s, }".ptr() as *const char, dead);
     }
     return ap(b, a, cap, (&tail.b[0]) as *const char);
 }
@@ -187,7 +187,7 @@ struct Gen {
 fn new_gen() Gen {
     let p = unsafe stdlib::malloc(PROG_CAP as usize) as *mut char;
     let mut g = Gen { prog: p, at: 0, cat: 0, eat: 0, idc: 0, sc: 0, nbatch: 0 };
-    g.at = ap(g.prog, 0, PROG_CAP, TR_PRE.ptr as *const char);
+    g.at = ap(g.prog, 0, PROG_CAP, TR_PRE.ptr() as *const char);
     return g;
 }
 
@@ -222,53 +222,53 @@ extend Gen {
         let progp = self.prog;
 
         if op == OP_FREE {
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; return 0; }\n".ptr as *const char, sc, e0p);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; return 0; }\n".ptr() as *const char, sc, e0p);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_CALL {
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn c%d(v: %s) i32 { return 0; }\n".ptr as *const char, sc, tp);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn c%d(v: %s) i32 { return 0; }\n".ptr() as *const char, sc, tp);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { return c%d(%s); }\n".ptr as *const char, sc, sc, e0p);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { return c%d(%s); }\n".ptr() as *const char, sc, sc, e0p);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_COND_T || op == OP_COND_F {
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn c%d(v: %s) i32 { return 0; }\n".ptr as *const char, sc, tp);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn c%d(v: %s) i32 { return 0; }\n".ptr() as *const char, sc, tp);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d(flag: bool) i32 { let mut acc = 0; let v = %s; if flag { acc = c%d(v); } return acc; }\n".ptr as *const char, sc, e0p, sc);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d(flag: bool) i32 { let mut acc = 0; let v = %s; if flag { acc = c%d(v); } return acc; }\n".ptr() as *const char, sc, e0p, sc);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_REASSIGN {
             let mut e1 = Buf2048 {};
             let _ = bld((&mut e1.b[0]) as *mut char, 0, 2048, sh, 0, id1);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let mut v = %s; v = %s; return 0; }\n".ptr as *const char, sc, e0p, (&e1.b[0]) as *const char);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let mut v = %s; v = %s; return 0; }\n".ptr() as *const char, sc, e0p, (&e1.b[0]) as *const char);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_VECTOR {
             let mut e1 = Buf2048 {};
             let mut e2 = Buf2048 {};
             let _ = bld((&mut e1.b[0]) as *mut char, 0, 2048, sh, 0, id1);
             let _ = bld((&mut e2.b[0]) as *mut char, 0, 2048, sh, 0, id2);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let mut vec = Vector::<%s>::new(); vec.push(%s); vec.push(%s); vec.push(%s); return 0; }\n".ptr as *const char, sc, tp, e0p, (&e1.b[0]) as *const char, (&e2.b[0]) as *const char);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let mut vec = Vector::<%s>::new(); vec.push(%s); vec.push(%s); vec.push(%s); return 0; }\n".ptr() as *const char, sc, tp, e0p, (&e1.b[0]) as *const char, (&e2.b[0]) as *const char);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_VPOP {
             let mut e1 = Buf2048 {};
             let _ = bld((&mut e1.b[0]) as *mut char, 0, 2048, sh, 0, id1);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let mut vec = Vector::<%s>::new(); vec.push(%s); vec.push(%s); let popped = vec.pop(); return 0; }\n".ptr as *const char, sc, tp, e0p, (&e1.b[0]) as *const char);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let mut vec = Vector::<%s>::new(); vec.push(%s); vec.push(%s); let popped = vec.pop(); return 0; }\n".ptr() as *const char, sc, tp, e0p, (&e1.b[0]) as *const char);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_SW_MOVE {
             let mut s_ = Buf8192 {};
-            let _ = sw((&mut s_.b[0]) as *mut char, 0, 8192, sh, 0, "v".ptr as *const char, 0, 1);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; let t = %s; return t.id; }\n".ptr as *const char, sc, e0p, (&s_.b[0]) as *const char);
+            let _ = sw((&mut s_.b[0]) as *mut char, 0, 8192, sh, 0, "v".ptr() as *const char, 0, 1);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; let t = %s; return t.id; }\n".ptr() as *const char, sc, e0p, (&s_.b[0]) as *const char);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_SW_FREE {
             let mut s_ = Buf8192 {};
-            let _ = sw((&mut s_.b[0]) as *mut char, 0, 8192, sh, 0, "v".ptr as *const char, 1, 1);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; return %s; }\n".ptr as *const char, sc, e0p, (&s_.b[0]) as *const char);
+            let _ = sw((&mut s_.b[0]) as *mut char, 0, 8192, sh, 0, "v".ptr() as *const char, 1, 1);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; return %s; }\n".ptr() as *const char, sc, e0p, (&s_.b[0]) as *const char);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         } else if op == OP_SW_PEEK {
             let mut s_ = Buf8192 {};
-            let _ = sw((&mut s_.b[0]) as *mut char, 0, 8192, sh, 0, "v".ptr as *const char, 2, 1);
-            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; let r = %s; return r; }\n".ptr as *const char, sc, e0p, (&s_.b[0]) as *const char);
+            let _ = sw((&mut s_.b[0]) as *mut char, 0, 8192, sh, 0, "v".ptr() as *const char, 2, 1);
+            unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 8192, "fn sc%d() i32 { let v = %s; let r = %s; return r; }\n".ptr() as *const char, sc, e0p, (&s_.b[0]) as *const char);
             self.at = ap(progp, self.at, PROG_CAP, fbp);
         }
 
-        unsafe stdio::snprintf((&mut cb.b[0]) as *mut char, 256, "  acc = acc + sc%d(%s);\n".ptr as *const char, sc, callarg(op));
+        unsafe stdio::snprintf((&mut cb.b[0]) as *mut char, 256, "  acc = acc + sc%d(%s);\n".ptr() as *const char, sc, callarg(op));
         self.cat = ap((&mut self.calls[0]) as *mut char, self.cat, 16384, (&cb.b[0]) as *const char);
         self.sc = self.sc + 1;
     }
@@ -277,16 +277,16 @@ extend Gen {
     // free multiset. Then reset for the next batch.
     fn flush(self: &mut Gen) void {
         if self.sc == 0 { return; }
-        self.at = ap(self.prog, self.at, PROG_CAP, "fn main() i32 { let mut acc = 0;\n".ptr as *const char);
+        self.at = ap(self.prog, self.at, PROG_CAP, "fn main() i32 { let mut acc = 0;\n".ptr() as *const char);
         self.at = ap(self.prog, self.at, PROG_CAP, (&self.calls[0]) as *const char);
-        self.at = ap(self.prog, self.at, PROG_CAP, "  if acc == 2147483647 { unsafe putchar(33); }\n  unsafe exit(0); }\n".ptr as *const char);
-        let src = str { ptr: self.prog as *const u8, len: self.at as usize };
+        self.at = ap(self.prog, self.at, PROG_CAP, "  if acc == 2147483647 { unsafe putchar(33); }\n  unsafe exit(0); }\n".ptr() as *const char);
+        let src = str::from_raw(self.prog as *const u8, self.at as usize);
         let mut r = h::compile_and_run(src);
         assert(r.built, "raii-gen: batch failed to build");
         assert_eq(r.exit, 0);
         assert(multiset_eq(r.out, (&self.exp[0]) as *const char), "raii-gen: free multiset mismatch (leak or double-free)");
         r.free();
-        self.at = ap(self.prog, 0, PROG_CAP, TR_PRE.ptr as *const char);
+        self.at = ap(self.prog, 0, PROG_CAP, TR_PRE.ptr() as *const char);
         self.cat = 0; self.calls[0] = 0 as char;
         self.eat = 0; self.exp[0] = 0 as char;
         self.idc = 0; self.sc = 0;
@@ -301,9 +301,9 @@ extend Gen {
 
 // The argument list a scenario call takes: COND variants pass a bool flag; everything else is nullary.
 fn callarg(op: i32) *const char {
-    if op == OP_COND_T { return "true".ptr as *const char; }
-    if op == OP_COND_F { return "false".ptr as *const char; }
-    return "".ptr as *const char;
+    if op == OP_COND_T { return "true".ptr() as *const char; }
+    if op == OP_COND_F { return "false".ptr() as *const char; }
+    return "".ptr() as *const char;
 }
 
 // Enumerate every shape over `alphabet` up to `max_depth` (length >= 1), emitting `op` for each.
@@ -326,7 +326,7 @@ fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *c
 fn run_switch(op: i32) void {
     let mut g = new_gen();
     let mut sh = Buf16 {};
-    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 6, "OR".ptr as *const char, op);
+    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 6, "OR".ptr() as *const char, op);
     g.finish();
 }
 
@@ -334,7 +334,7 @@ fn run_switch(op: i32) void {
 fn run_general(op: i32) void {
     let mut g = new_gen();
     let mut sh = Buf16 {};
-    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 5, "ORB".ptr as *const char, op);
+    enum_shapes(&mut g, (&mut sh.b[0]) as *mut char, 0, 5, "ORB".ptr() as *const char, op);
     g.finish();
 }
 

@@ -37,7 +37,6 @@ build/
 .idea/
 .vscode/
 **/.DS_Store
-SuperC-Specs.html
 super-c
 examples
 todos

@@ -89,11 +89,11 @@ fn match_byte(l: &mut Lexer, expected: u8) bool {
 }
 
 fn lexer_error(l: &mut Lexer, message: *const char) void {
-    l.errors.emitf(l.start as u32, (l.current - l.start) as u32, "%s".ptr as *const char, message);
+    l.errors.emitf(l.start as u32, (l.current - l.start) as u32, "%s".ptr() as *const char, message);
 }
 
 fn lexer_error_at(l: &mut Lexer, at: usize, len: usize, message: *const char) void {
-    l.errors.emitf(at as u32, len as u32, "%s".ptr as *const char, message);
+    l.errors.emitf(at as u32, len as u32, "%s".ptr() as *const char, message);
 }
 
 fn lexer_errorf(l: &mut Lexer, at: u32, len: u32, fmt: *const char, ...) void {
@@ -142,7 +142,7 @@ fn decode_at_b(l: &Lexer, b: u8, current: usize, size: *mut usize) u32 {
 }
 
 fn memeq(p: *const u8, text: str) bool {
-    return unsafe cstring::memcmp(p, text.ptr, text.len) == 0;
+    return unsafe cstring::memcmp(p, text.ptr(), text.len()) == 0;
 }
 
 fn keywords(lexeme: *const u8, len: usize) TokenType {
@@ -216,7 +216,7 @@ fn validate_utf8_at(l: &mut Lexer, i: *mut usize) bool {
     let mut size: usize = 0;
     decode_at_b(&*l, unsafe l.bytes[unsafe *i], unsafe *i, &mut size);
     if size == 0 {
-        lexer_error_at(&mut *l, unsafe *i, 1, "source is not valid UTF-8".ptr as *const char);
+        lexer_error_at(&mut *l, unsafe *i, 1, "source is not valid UTF-8".ptr() as *const char);
         unsafe *i = unsafe *i + 1;
         return false;
     }
@@ -247,7 +247,7 @@ fn line_comment(l: &mut Lexer) void {
         let b = unsafe l.bytes[i];
         if b == 10 || b == 13 { break; }
         if b == 0 {
-            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments".ptr as *const char);
+            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments".ptr() as *const char);
             i = i + 1;
         } else if b >= 0x80u8 { validate_utf8_at(&mut *l, &mut i); }
         else { i = i + 1; }
@@ -271,20 +271,20 @@ fn block_comment(l: &mut Lexer) void {
                 return;
             }
         } else if b == 0 {
-            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments".ptr as *const char);
+            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments".ptr() as *const char);
             i = i + 1;
         } else if b >= 0x80u8 { validate_utf8_at(&mut *l, &mut i); }
         else { i = i + 1; }
     }
     l.current = i;
     let start = l.start;
-    lexer_error_at(&mut *l, start, 2, "unterminated block comment".ptr as *const char);
+    lexer_error_at(&mut *l, start, 2, "unterminated block comment".ptr() as *const char);
 }
 
 fn escape(l: &mut Lexer, byte_character: bool) u32 {
     if is_eof(&*l) {
         let current = l.current;
-        lexer_error_at(&mut *l, current, 0, "unterminated escape sequence".ptr as *const char);
+        lexer_error_at(&mut *l, current, 0, "unterminated escape sequence".ptr() as *const char);
         return UINT32_MAX;
     }
     let at = l.current - 1;
@@ -304,7 +304,7 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
             return value;
         }
         let err_len = l.current - at;
-        lexer_error_at(&mut *l, at, err_len, "\\x escape requires exactly two hexadecimal digits".ptr as *const char);
+        lexer_error_at(&mut *l, at, err_len, "\\x escape requires exactly two hexadecimal digits".ptr() as *const char);
         while l.current < l.len && l.current < at + 4 && is_hex(unsafe l.bytes[l.current]) { l.current = l.current + 1; }
         return UINT32_MAX;
     }
@@ -315,12 +315,12 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
                 match_byte(&mut *l, '}' as u8);
             }
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escapes are not allowed in byte character literals".ptr as *const char);
+            lexer_error_at(&mut *l, at, err_len, "Unicode escapes are not allowed in byte character literals".ptr() as *const char);
             return UINT32_MAX;
         }
         if !match_byte(&mut *l, '{' as u8) {
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escape must use \\u{...} syntax".ptr as *const char);
+            lexer_error_at(&mut *l, at, err_len, "Unicode escape must use \\u{...} syntax".ptr() as *const char);
             return UINT32_MAX;
         }
         let mut value: u32 = 0;
@@ -332,18 +332,18 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
         }
         if digits == 0 || digits > 6 || !match_byte(&mut *l, '}' as u8) {
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escape requires 1 to 6 hexadecimal digits".ptr as *const char);
+            lexer_error_at(&mut *l, at, err_len, "Unicode escape requires 1 to 6 hexadecimal digits".ptr() as *const char);
             return UINT32_MAX;
         }
         if value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF) {
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escape is not a valid Unicode scalar value".ptr as *const char);
+            lexer_error_at(&mut *l, at, err_len, "Unicode escape is not a valid Unicode scalar value".ptr() as *const char);
             return UINT32_MAX;
         }
         return value;
     }
     let err_len = l.current - at;
-    lexer_error_at(&mut *l, at, err_len, "unknown escape sequence".ptr as *const char);
+    lexer_error_at(&mut *l, at, err_len, "unknown escape sequence".ptr() as *const char);
     return UINT32_MAX;
 }
 
@@ -363,7 +363,7 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
             i = l.current;
         } else if b == 10 || b == 13 {
             l.current = i - 1;
-            lexer_error(&mut *l, "unterminated string literal".ptr as *const char);
+            lexer_error(&mut *l, "unterminated string literal".ptr() as *const char);
             while l.current < l.len {
                 let recovery = unsafe l.bytes[l.current];
                 l.current = l.current + 1;
@@ -371,14 +371,14 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
             }
             return;
         } else if b == 0 {
-            lexer_error_at(&mut *l, i - 1, 1, "NUL byte is not allowed in string literals".ptr as *const char);
+            lexer_error_at(&mut *l, i - 1, 1, "NUL byte is not allowed in string literals".ptr() as *const char);
         } else if b >= 0x80u8 {
             i = i - 1;
             validate_utf8_at(&mut *l, &mut i);
         }
     }
     l.current = i;
-    lexer_error(&mut *l, "unterminated string literal".ptr as *const char);
+    lexer_error(&mut *l, "unterminated string literal".ptr() as *const char);
 }
 
 fn label_ahead(l: &Lexer) bool {
@@ -399,10 +399,10 @@ fn character(l: &mut Lexer, byte_character: bool) void {
         l.current = l.current + 1;
         if b == '\'' as u8 {
             if !malformed && count != 1 {
-                if byte_character { lexer_error(&mut *l, "byte character literal must contain exactly one byte".ptr as *const char); }
-                else { lexer_error(&mut *l, "character literal must contain exactly one Unicode scalar value".ptr as *const char); }
+                if byte_character { lexer_error(&mut *l, "byte character literal must contain exactly one byte".ptr() as *const char); }
+                else { lexer_error(&mut *l, "character literal must contain exactly one Unicode scalar value".ptr() as *const char); }
             } else if invalid_byte {
-                lexer_error(&mut *l, "byte character literal may contain only ASCII or a \\xNN escape".ptr as *const char);
+                lexer_error(&mut *l, "byte character literal may contain only ASCII or a \\xNN escape".ptr() as *const char);
             }
             if byte_character { add_token(&mut *l, TokenType::ByteCharacterLiteral); }
             else { add_token(&mut *l, TokenType::CharacterLiteral); }
@@ -410,12 +410,12 @@ fn character(l: &mut Lexer, byte_character: bool) void {
         }
         if b == 10 || b == 13 {
             l.current = l.current - 1;
-            lexer_error(&mut *l, "unterminated character literal".ptr as *const char);
+            lexer_error(&mut *l, "unterminated character literal".ptr() as *const char);
             return;
         }
         if b == 0 {
             let at = l.current - 1;
-            lexer_error_at(&mut *l, at, 1, "NUL byte is not allowed in character literals".ptr as *const char);
+            lexer_error_at(&mut *l, at, 1, "NUL byte is not allowed in character literals".ptr() as *const char);
             count = count + 1;
         } else if b == '\\' as u8 {
             if escape(&mut *l, byte_character) == UINT32_MAX { malformed = true; }
@@ -427,7 +427,7 @@ fn character(l: &mut Lexer, byte_character: bool) void {
             decode_at_b(&*l, b, l.current - 1, &mut size);
             if size == 0 {
                 let at = l.current - 1;
-                lexer_error_at(&mut *l, at, 1, "source is not valid UTF-8".ptr as *const char);
+                lexer_error_at(&mut *l, at, 1, "source is not valid UTF-8".ptr() as *const char);
                 malformed = true;
             } else {
                 l.current = l.current + size - 1;
@@ -436,7 +436,7 @@ fn character(l: &mut Lexer, byte_character: bool) void {
             }
         }
     }
-    lexer_error(&mut *l, "unterminated character literal".ptr as *const char);
+    lexer_error(&mut *l, "unterminated character literal".ptr() as *const char);
 }
 
 fn raw_string_ahead(l: &Lexer, hashes: *mut usize) bool {
@@ -450,7 +450,7 @@ fn raw_string_ahead(l: &Lexer, hashes: *mut usize) bool {
 fn raw_string(l: &mut Lexer, hashes: usize) void {
     if hashes > 255 {
         let start = l.start;
-        lexer_error_at(&mut *l, start, hashes + 1, "raw string delimiter contains more than 255 '#' characters".ptr as *const char);
+        lexer_error_at(&mut *l, start, hashes + 1, "raw string delimiter contains more than 255 '#' characters".ptr() as *const char);
     }
     let mut i = l.current + hashes + 1;
     while i < l.len {
@@ -469,13 +469,13 @@ fn raw_string(l: &mut Lexer, hashes: usize) void {
             }
             i = i + 1;
         } else if b == 0 {
-            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in raw string literals".ptr as *const char);
+            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in raw string literals".ptr() as *const char);
             i = i + 1;
         } else if b >= 0x80u8 { validate_utf8_at(&mut *l, &mut i); }
         else { i = i + 1; }
     }
     l.current = i;
-    lexer_error(&mut *l, "unterminated raw string literal".ptr as *const char);
+    lexer_error(&mut *l, "unterminated raw string literal".ptr() as *const char);
 }
 
 fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(u8) bool) void {
@@ -534,7 +534,7 @@ fn number(l: &mut Lexer) void {
                     let next = i + 1 < l.len && digit(unsafe l.bytes[i + 1]);
                     if (!prev || !next) && error_at == USIZE_MAX {
                         error_at = i;
-                        error = "invalid numeric separator".ptr as *const char;
+                        error = "invalid numeric separator".ptr() as *const char;
                     }
                 } else {
                     if radix == 16 && saw_digit && (b == 'p' as u8 || b == 'P' as u8) { break; }
@@ -546,9 +546,9 @@ fn number(l: &mut Lexer) void {
                     }
                     if error_at == USIZE_MAX {
                         error_at = i;
-                        if radix == 2 { error = "invalid digit in binary literal".ptr as *const char; }
-                        else if radix == 8 { error = "invalid digit in octal literal".ptr as *const char; }
-                        else { error = "invalid digit in hexadecimal literal".ptr as *const char; }
+                        if radix == 2 { error = "invalid digit in binary literal".ptr() as *const char; }
+                        else if radix == 8 { error = "invalid digit in octal literal".ptr() as *const char; }
+                        else { error = "invalid digit in hexadecimal literal".ptr() as *const char; }
                     }
                 }
                 i = i + 1;
@@ -556,7 +556,7 @@ fn number(l: &mut Lexer) void {
             l.current = i;
             if !saw_digit && error_at == USIZE_MAX {
                 error_at = component_start;
-                error = "radix prefix must be followed by at least one digit".ptr as *const char;
+                error = "radix prefix must be followed by at least one digit".ptr() as *const char;
             }
             let mut hex_float = false;
             if radix == 16 && error_at == USIZE_MAX && peek_byte(&*l) == '.' as u8 && is_hex(peek_byte_n(&*l, 1)) {
@@ -572,24 +572,24 @@ fn number(l: &mut Lexer) void {
                 while is_dec(peek_byte(&*l)) { l.current = l.current + 1; }
                 if l.current == exp_start {
                     error_at = exp_start;
-                    error = "hexadecimal float exponent requires at least one decimal digit".ptr as *const char;
+                    error = "hexadecimal float exponent requires at least one decimal digit".ptr() as *const char;
                 } else if is_id_part_byte(peek_byte(&*l)) {
                     let sfx = l.current;
                     while is_id_part_byte(peek_byte(&*l)) { l.current = l.current + 1; }
                     if num_suffix_kind(unsafe (l.bytes + sfx), l.current - sfx) != 1 {
                         error_at = sfx;
-                        error = "a hexadecimal float takes only an 'f32' or 'f64' suffix".ptr as *const char;
+                        error = "a hexadecimal float takes only an 'f32' or 'f64' suffix".ptr() as *const char;
                     }
                 }
             } else if hex_float && error_at == USIZE_MAX {
                 error_at = l.current;
-                error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3".ptr as *const char;
+                error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3".ptr() as *const char;
             }
             if !hex_float && peek_byte(&*l) == '.' as u8 {
                 if error_at == USIZE_MAX {
                     error_at = l.current;
-                    if radix == 16 { error = "a hexadecimal float needs a fraction digit and a binary exponent: 0x1.8p3".ptr as *const char; }
-                    else { error = "octal and binary floating-point literals are not supported".ptr as *const char; }
+                    if radix == 16 { error = "a hexadecimal float needs a fraction digit and a binary exponent: 0x1.8p3".ptr() as *const char; }
+                    else { error = "octal and binary floating-point literals are not supported".ptr() as *const char; }
                 }
                 l.current = l.current + 1;
                 while !is_eof(&*l) {
@@ -608,13 +608,13 @@ fn number(l: &mut Lexer) void {
     }
     let integer_start = l.current;
     digits(&mut *l, integer_start - 1, &mut error_at, is_dec);
-    if error_at != USIZE_MAX { error = "invalid numeric separator".ptr as *const char; }
+    if error_at != USIZE_MAX { error = "invalid numeric separator".ptr() as *const char; }
     if peek_byte(&*l) == '.' as u8 && peek_byte_n(&*l, 1) != '.' as u8 {
         is_float = true;
         l.current = l.current + 1;
         let fraction_start = l.current;
         digits(&mut *l, fraction_start, &mut error_at, is_dec);
-        if error_at != USIZE_MAX && error == null { error = "invalid numeric separator".ptr as *const char; }
+        if error_at != USIZE_MAX && error == null { error = "invalid numeric separator".ptr() as *const char; }
     }
     if peek_byte(&*l) == 'e' as u8 || peek_byte(&*l) == 'E' as u8 {
         is_float = true;
@@ -624,9 +624,9 @@ fn number(l: &mut Lexer) void {
         digits(&mut *l, exponent_start, &mut error_at, is_dec);
         if l.current == exponent_start && error_at == USIZE_MAX {
             error_at = exponent_start;
-            error = "exponent requires at least one decimal digit".ptr as *const char;
+            error = "exponent requires at least one decimal digit".ptr() as *const char;
         } else if error_at != USIZE_MAX && error == null {
-            error = "invalid numeric separator".ptr as *const char;
+            error = "invalid numeric separator".ptr() as *const char;
         }
     }
     if is_id_part_byte(peek_byte(&*l)) {
@@ -636,12 +636,12 @@ fn number(l: &mut Lexer) void {
         if k < 0 {
             if error_at == USIZE_MAX {
                 error_at = sfx_start;
-                error = "invalid suffix or trailing identifier characters after numeric literal".ptr as *const char;
+                error = "invalid suffix or trailing identifier characters after numeric literal".ptr() as *const char;
             }
         } else if is_float && k == 0 {
             if error_at == USIZE_MAX {
                 error_at = sfx_start;
-                error = "a float literal cannot take an integer suffix".ptr as *const char;
+                error = "a float literal cannot take an integer suffix".ptr() as *const char;
             }
         } else if k == 1 { is_float = true; }
     }
@@ -753,11 +753,11 @@ fn scan_token(l: &mut Lexer) void {
             } else { identifier(&mut *l); }
             return;
         },
-        '#' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'#' is not valid in Super-C source; Super-C has no preprocessor".ptr as *const char); return; },
+        '#' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'#' is not valid in Super-C source; Super-C has no preprocessor".ptr() as *const char); return; },
         '@' => { add_token(&mut *l, TokenType::At); return; },
-        '$' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'$' is reserved".ptr as *const char); return; },
-        '`' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'`' is reserved".ptr as *const char); return; },
-        0 => { let start = l.start; lexer_error_at(&mut *l, start, 1, "NUL byte is not allowed in source".ptr as *const char); return; },
+        '$' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'$' is reserved".ptr() as *const char); return; },
+        '`' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'`' is reserved".ptr() as *const char); return; },
+        0 => { let start = l.start; lexer_error_at(&mut *l, start, 1, "NUL byte is not allowed in source".ptr() as *const char); return; },
         'a'..='z' | 'A'..='Z' | '_' => { identifier(&mut *l); return; },
         _ => {
             if c >= 0x80u8 {
@@ -765,17 +765,17 @@ fn scan_token(l: &mut Lexer) void {
                 let cp = decode_at_b(&*l, c, l.current, &mut size);
                 if size == 0 {
                     let start = l.start;
-                    lexer_error_at(&mut *l, start, 1, "source is not valid UTF-8".ptr as *const char);
+                    lexer_error_at(&mut *l, start, 1, "source is not valid UTF-8".ptr() as *const char);
                     l.current = l.current + 1;
                 } else {
                     l.current = l.current + size;
                     let start = l.start;
-                    if cp == 0xFEFF { lexer_error_at(&mut *l, start, size, "UTF-8 BOM is allowed only at the start of a file".ptr as *const char); }
-                    else { lexer_error_at(&mut *l, start, size, "identifiers may contain only ASCII letters, digits, and '_'".ptr as *const char); }
+                    if cp == 0xFEFF { lexer_error_at(&mut *l, start, size, "UTF-8 BOM is allowed only at the start of a file".ptr() as *const char); }
+                    else { lexer_error_at(&mut *l, start, size, "identifiers may contain only ASCII letters, digits, and '_'".ptr() as *const char); }
                 }
             } else {
                 let start = l.start as u32;
-                lexer_errorf(&mut *l, start, 1, "unexpected character '%c'".ptr as *const char, c as i32);
+                lexer_errorf(&mut *l, start, 1, "unexpected character '%c'".ptr() as *const char, c as i32);
             }
         }
     };

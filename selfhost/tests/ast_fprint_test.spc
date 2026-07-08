@@ -89,7 +89,7 @@ fn kind_name(k: ast::NodeKind) str {
 
 fn indent(out: *mut stdio::FILE, depth: u32) void {
     let mut i: u32 = 0;
-    while i < depth { unsafe stdio::fputs("  ".ptr as *const char, out); i = i + 1; }
+    while i < depth { unsafe stdio::fputs("  ".ptr() as *const char, out); i = i + 1; }
 }
 
 fn print_list(out: *mut stdio::FILE, a: &ast::Ast, list: ast::NodeList, source: *const char, depth: u32) void {
@@ -108,19 +108,19 @@ fn print_child(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *co
 fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) void {
     let n = *a.at_const(id);
     indent(out, depth);
-    unsafe stdio::fprintf(out, "%s".ptr as *const char, kind_name(n.kind).ptr as *const char);
+    unsafe stdio::fprintf(out, "%s".ptr() as *const char, kind_name(n.kind).ptr() as *const char);
     if n.kind == ast::NodeKind::NODE_IDENTIFIER {
         let t = n.as_data.name.text;
-        unsafe stdio::fprintf(out, " `%.*s`".ptr as *const char, (t.end - t.start) as i32, unsafe (source + t.start as usize) as *const char);
+        unsafe stdio::fprintf(out, " `%.*s`".ptr() as *const char, (t.end - t.start) as i32, unsafe (source + t.start as usize) as *const char);
     } else if n.kind == ast::NodeKind::NODE_LITERAL {
         let r = n.as_data.literal.raw;
-        unsafe stdio::fprintf(out, " %.*s".ptr as *const char, (r.end - r.start) as i32, unsafe (source + r.start as usize) as *const char);
+        unsafe stdio::fprintf(out, " %.*s".ptr() as *const char, (r.end - r.start) as i32, unsafe (source + r.start as usize) as *const char);
     } else if n.kind == ast::NodeKind::NODE_UNARY {
-        unsafe stdio::fprintf(out, " %s".ptr as *const char, n.as_data.unary.op.name().ptr as *const char);
+        unsafe stdio::fprintf(out, " %s".ptr() as *const char, n.as_data.unary.op.name().ptr() as *const char);
     } else if n.kind == ast::NodeKind::NODE_BINARY || n.kind == ast::NodeKind::NODE_ASSIGNMENT {
-        unsafe stdio::fprintf(out, " %s".ptr as *const char, n.as_data.binary.op.name().ptr as *const char);
+        unsafe stdio::fprintf(out, " %s".ptr() as *const char, n.as_data.binary.op.name().ptr() as *const char);
     }
-    unsafe stdio::fprintf(out, " [%u..%u]\n".ptr as *const char, n.span.start, n.span.end);
+    unsafe stdio::fprintf(out, " [%u..%u]\n".ptr() as *const char, n.span.start, n.span.end);
     let d = depth + 1;
     switch n.kind {
         NODE_PROGRAM => { print_list(out, &*a, n.as_data.program.items, source, d); },
@@ -316,7 +316,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
 }
 
 fn has(buf: *mut char, needle: str) bool {
-    return unsafe cstring::strstr(buf, needle.ptr as *const char) != null;
+    return unsafe cstring::strstr(buf, needle.ptr() as *const char) != null;
 }
 
 @test fn dump() {
@@ -325,7 +325,7 @@ fn has(buf: *mut char, needle: str) bool {
     assert(pr.errors == 0, "clean parse");
     let f = unsafe tmpfile();
     assert(f != null, "tmpfile");
-    ast_fprint(f, &pr.ast, src.ptr as *const char);
+    ast_fprint(f, &pr.ast, src.ptr() as *const char);
     let buf = read_stream(f);
     unsafe stdio::fclose(f);
     assert(buf != null, "captured dump");

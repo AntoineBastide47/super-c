@@ -559,11 +559,11 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
 "#);
     let mut cc2 = Cmd {};
     unsafe stdio::snprintf((&mut cc2.b[0]) as *mut char, 2048,
-        "cc -std=c11 -Wall -Wextra -Werror -I'%s/build' '%s/cuser.c' -o '%s/cbin' 2>/dev/null".ptr as *const char,
+        "cc -std=c11 -Wall -Wextra -Werror -I'%s/build' '%s/cuser.c' -o '%s/cbin' 2>/dev/null".ptr() as *const char,
         p.rootp(), p.rootp(), p.rootp());
     assert_eq(cli::run_shell((&cc2.b[0]) as *const char), 0);
     let mut cr = Cmd {};
-    unsafe stdio::snprintf((&mut cr.b[0]) as *mut char, 2048, "'%s/cbin'".ptr as *const char, p.rootp());
+    unsafe stdio::snprintf((&mut cr.b[0]) as *mut char, 2048, "'%s/cbin'".ptr() as *const char, p.rootp());
     assert_eq(cli::run_shell((&cr.b[0]) as *const char), 0);
 
     // the attribute is rejected on a non-generic type
@@ -850,7 +850,7 @@ fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
     r2.free();
     let mut prune = Cmd {};
     unsafe stdio::snprintf((&mut prune.b[0]) as *mut char, 2048,
-        "test $(find '%s/build' -name '__ext*' | wc -l) -eq 0 && test ! -e '%s/build/__ldflags'".ptr as *const char,
+        "test $(find '%s/build' -name '__ext*' | wc -l) -eq 0 && test ! -e '%s/build/__ldflags'".ptr() as *const char,
         p.rootp(), p.rootp());
     assert_eq(cli::run_shell((&prune.b[0]) as *const char), 0);
 

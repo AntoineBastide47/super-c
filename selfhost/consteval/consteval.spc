@@ -315,7 +315,7 @@ extend ConstEval {
     }
     fn ce_tick(self: &mut Self) bool {
         self.steps = self.steps + 1;
-        if self.steps > self.max_steps { self.ce_trap("const-eval step budget exceeded".ptr as *const char); return false; }
+        if self.steps > self.max_steps { self.ce_trap("const-eval step budget exceeded".ptr() as *const char); return false; }
         return true;
     }
 
@@ -1007,7 +1007,7 @@ extend ConstEval {
                                     let mid = unsafe ((*a).list(ms))[k as usize];
                                     if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FUNCTION {
                                         let mname = self.name_text(mm as ModuleId, unsafe (*a).at_const(mid).as_data.function.name);
-                                        if self.ce_span_is(mm as ModuleId, mname, "free".ptr as *const char) { user = true; break; }
+                                        if self.ce_span_is(mm as ModuleId, mname, "free".ptr() as *const char) { user = true; break; }
                                     }
                                     k = k + 1;
                                 }
@@ -1066,7 +1066,7 @@ extend ConstEval {
 
     fn ce_obj_new(self: &mut Self, len: u32) u32 {
         if self.objs.len() as u32 >= CE_MAX_OBJS || self.live_slots + (len as u64) > self.max_slots {
-            self.ce_trap("const-eval memory budget exceeded".ptr as *const char);
+            self.ce_trap("const-eval memory budget exceeded".ptr() as *const char);
             return 0;
         }
         let mut slots = Vector::<CeVal>::new();
@@ -1083,7 +1083,7 @@ extend ConstEval {
     fn ce_obj_resize(self: &mut Self, id: u32, len: u32) bool {
         let cur = unsafe (*self.obj_ptr(id)).slots.len() as u32;
         if len > cur && self.live_slots + ((len - cur) as u64) > self.max_slots {
-            self.ce_trap("const-eval memory budget exceeded".ptr as *const char);
+            self.ce_trap("const-eval memory budget exceeded".ptr() as *const char);
             return false;
         }
         let o = self.obj_ptr(id);
@@ -1172,24 +1172,24 @@ extend ConstEval {
 
     fn ce_loadp(self: &mut Self, p: CeVal) ValRes {
         if p.kind != CV_PTR { return ValRes { ok: false }; }
-        if p.as_data.p.obj == 0 { self.ce_trap("null dereference".ptr as *const char); return ValRes { ok: false }; }
+        if p.as_data.p.obj == 0 { self.ce_trap("null dereference".ptr() as *const char); return ValRes { ok: false }; }
         let o = self.obj_ptr(p.as_data.p.obj);
         if o == null { return ValRes { ok: false }; }
-        if unsafe (*o).dead != 0 { self.ce_trap("use after free".ptr as *const char); return ValRes { ok: false }; }
-        if (p.as_data.p.off as usize) >= unsafe (*o).slots.len() { self.ce_trap("out-of-bounds access".ptr as *const char); return ValRes { ok: false }; }
+        if unsafe (*o).dead != 0 { self.ce_trap("use after free".ptr() as *const char); return ValRes { ok: false }; }
+        if (p.as_data.p.off as usize) >= unsafe (*o).slots.len() { self.ce_trap("out-of-bounds access".ptr() as *const char); return ValRes { ok: false }; }
         let out = *unsafe (*o).slots.at(p.as_data.p.off as usize);
         return ValRes { ok: out.kind != CV_NIL_K, v: out };
     }
 
     fn ce_storep(self: &mut Self, p: CeVal, v: CeVal) bool {
         if p.kind != CV_PTR || v.kind == CV_NIL_K { return false; }
-        if p.as_data.p.obj == 0 { self.ce_trap("null dereference".ptr as *const char); return false; }
+        if p.as_data.p.obj == 0 { self.ce_trap("null dereference".ptr() as *const char); return false; }
         let cv = self.ce_clone(v, 0);
         if cv.kind == CV_NIL_K { return false; }
         let o = self.obj_ptr(p.as_data.p.obj);
         if o == null { return false; }
-        if unsafe (*o).dead != 0 { self.ce_trap("use after free".ptr as *const char); return false; }
-        if (p.as_data.p.off as usize) >= unsafe (*o).slots.len() { self.ce_trap("out-of-bounds access".ptr as *const char); return false; }
+        if unsafe (*o).dead != 0 { self.ce_trap("use after free".ptr() as *const char); return false; }
+        if (p.as_data.p.off as usize) >= unsafe (*o).slots.len() { self.ce_trap("out-of-bounds access".ptr() as *const char); return false; }
         unsafe (*o).slots.set(p.as_data.p.off as usize, cv);
         return true;
     }
@@ -1252,13 +1252,13 @@ extend ConstEval {
                 Plus => { u = ul + ur; },
                 Minus => { u = ul - ur; },
                 Star => { u = ul * ur; },
-                Slash => { if ur == 0 { self.ce_trap("division by zero".ptr as *const char); return cv_nil(); } u = ul / ur; },
-                Percent => { if ur == 0 { self.ce_trap("division by zero".ptr as *const char); return cv_nil(); } u = ul % ur; },
+                Slash => { if ur == 0 { self.ce_trap("division by zero".ptr() as *const char); return cv_nil(); } u = ul / ur; },
+                Percent => { if ur == 0 { self.ce_trap("division by zero".ptr() as *const char); return cv_nil(); } u = ul % ur; },
                 Ampersand => { u = ul & ur; },
                 Pipe => { u = ul | ur; },
                 Caret => { u = ul ^ ur; },
-                LeftShift => { if r.as_data.i < 0 || r.as_data.i >= (bits as i64) { self.ce_trap("shift out of range".ptr as *const char); return cv_nil(); } u = ul << (r.as_data.i as u64); },
-                RightShift => { if r.as_data.i < 0 || r.as_data.i >= (bits as i64) { self.ce_trap("shift out of range".ptr as *const char); return cv_nil(); } u = ul >> (r.as_data.i as u64); },
+                LeftShift => { if r.as_data.i < 0 || r.as_data.i >= (bits as i64) { self.ce_trap("shift out of range".ptr() as *const char); return cv_nil(); } u = ul << (r.as_data.i as u64); },
+                RightShift => { if r.as_data.i < 0 || r.as_data.i >= (bits as i64) { self.ce_trap("shift out of range".ptr() as *const char); return cv_nil(); } u = ul >> (r.as_data.i as u64); },
                 _ => { return cv_nil(); },
             };
             v = wrap_to(ob, u as i64);
@@ -1269,34 +1269,34 @@ extend ConstEval {
         let mut type_min = I64_MIN;
         if bits != 64 { type_min = -(((1u64 << ((bits - 1) as u64)) as i64)); }
         switch op {
-            Plus => { let o = add_ovf(li, ri); if o.ovf { self.ce_trap("arithmetic overflow".ptr as *const char); return cv_nil(); } v = o.v; },
-            Minus => { let o = sub_ovf(li, ri); if o.ovf { self.ce_trap("arithmetic overflow".ptr as *const char); return cv_nil(); } v = o.v; },
-            Star => { let o = mul_ovf(li, ri); if o.ovf { self.ce_trap("arithmetic overflow".ptr as *const char); return cv_nil(); } v = o.v; },
+            Plus => { let o = add_ovf(li, ri); if o.ovf { self.ce_trap("arithmetic overflow".ptr() as *const char); return cv_nil(); } v = o.v; },
+            Minus => { let o = sub_ovf(li, ri); if o.ovf { self.ce_trap("arithmetic overflow".ptr() as *const char); return cv_nil(); } v = o.v; },
+            Star => { let o = mul_ovf(li, ri); if o.ovf { self.ce_trap("arithmetic overflow".ptr() as *const char); return cv_nil(); } v = o.v; },
             Slash => {
-                if ri == 0 { self.ce_trap("division by zero".ptr as *const char); return cv_nil(); }
-                if ri == -1 && li == type_min { self.ce_trap("arithmetic overflow".ptr as *const char); return cv_nil(); }
+                if ri == 0 { self.ce_trap("division by zero".ptr() as *const char); return cv_nil(); }
+                if ri == -1 && li == type_min { self.ce_trap("arithmetic overflow".ptr() as *const char); return cv_nil(); }
                 v = li / ri;
             },
             Percent => {
-                if ri == 0 { self.ce_trap("division by zero".ptr as *const char); return cv_nil(); }
-                if ri == -1 && li == type_min { self.ce_trap("arithmetic overflow".ptr as *const char); return cv_nil(); }
+                if ri == 0 { self.ce_trap("division by zero".ptr() as *const char); return cv_nil(); }
+                if ri == -1 && li == type_min { self.ce_trap("arithmetic overflow".ptr() as *const char); return cv_nil(); }
                 v = li % ri;
             },
             Ampersand => { v = li & ri; },
             Pipe => { v = li | ri; },
             Caret => { v = li ^ ri; },
             LeftShift => {
-                if ri < 0 || ri >= (bits as i64) { self.ce_trap("shift out of range".ptr as *const char); return cv_nil(); }
+                if ri < 0 || ri >= (bits as i64) { self.ce_trap("shift out of range".ptr() as *const char); return cv_nil(); }
                 v = wrap_to(ob, ((li as u64) << (ri as u64)) as i64);
             },
             RightShift => {
-                if ri < 0 || ri >= (bits as i64) { self.ce_trap("shift out of range".ptr as *const char); return cv_nil(); }
+                if ri < 0 || ri >= (bits as i64) { self.ce_trap("shift out of range".ptr() as *const char); return cv_nil(); }
                 v = li >> ri;
             },
             _ => { return cv_nil(); },
         };
         if b != BuiltinType::BT_COUNT && !fits(b, v) {
-            if bt_signed(b) { self.ce_trap("arithmetic overflow".ptr as *const char); }
+            if bt_signed(b) { self.ce_trap("arithmetic overflow".ptr() as *const char); }
             return cv_nil();
         }
         return CeVal { kind: CV_INT, tm: tm, ty: rt, as_data: CeValAs { i: v } };
@@ -1372,8 +1372,8 @@ extend ConstEval {
             let fid = unsafe ((*da).list(dms))[kk as usize];
             if unsafe (*da).at_const(fid).kind == NodeKind::NODE_FIELD {
                 let fn2 = self.name_text(rr.r.dm, unsafe (*da).at_const(fid).as_data.field.name);
-                if self.ce_span_is(rr.r.dm, fn2, "ptr".ptr as *const char) { ptr_i = idx; }
-                else if self.ce_span_is(rr.r.dm, fn2, "len".ptr as *const char) { len_i = idx; }
+                if self.ce_span_is(rr.r.dm, fn2, "ptr".ptr() as *const char) { ptr_i = idx; }
+                else if self.ce_span_is(rr.r.dm, fn2, "len".ptr() as *const char) { len_i = idx; }
                 idx = idx + 1;
             }
             kk = kk + 1;
@@ -1465,7 +1465,7 @@ extend ConstEval {
                         let iid = unsafe ((*a).list(items))[i as usize];
                         if unsafe (*a).at_const(iid).kind == NodeKind::NODE_STRUCT && !unsafe (*a).at_const(iid).as_data.aggregate.is_union {
                             let nm = self.name_text(mm, unsafe (*a).at_const(iid).as_data.aggregate.name);
-                            if self.ce_span_is(mm, nm, "Range".ptr as *const char) {
+                            if self.ce_span_is(mm, nm, "Range".ptr() as *const char) {
                                 unsafe *dm = mm;
                                 unsafe *dn = iid;
                                 return true;
@@ -1568,7 +1568,7 @@ extend ConstEval {
             let it = *unsafe (*self.ast_ptr(wm)).instance(y.as_data.inst);
             let da = self.ast_ptr(it.module);
             let dn = self.name_text(it.module, unsafe (*da).at_const(it.decl).as_data.aggregate.name);
-            if !self.ce_span_is(it.module, dn, "Slice".ptr as *const char) && !self.ce_span_is(it.module, dn, "SliceMut".ptr as *const char) { return cv_nil(); }
+            if !self.ce_span_is(it.module, dn, "Slice".ptr() as *const char) && !self.ce_span_is(it.module, dn, "SliceMut".ptr() as *const char) { return cv_nil(); }
             if self.obj_ptr(v.as_data.p.obj) == null { return cv_nil(); }
             let arrlen = unsafe (*self.obj_ptr(v.as_data.p.obj)).slots.len() as i64;
             let so = self.ce_obj_new(2);
@@ -1690,7 +1690,7 @@ extend ConstEval {
                 let br = self.ce_base_obj(f, m, obj_n);
                 if !br.ok { return ValRes { ok: false }; }
                 let olen = unsafe (*self.obj_ptr(br.obj)).slots.len() as u64;
-                if iv.as_data.i < 0 || (iv.as_data.i as u64) >= olen { self.ce_trap("out-of-bounds access".ptr as *const char); return ValRes { ok: false }; }
+                if iv.as_data.i < 0 || (iv.as_data.i as u64) >= olen { self.ce_trap("out-of-bounds access".ptr() as *const char); return ValRes { ok: false }; }
                 return ValRes { ok: true, v: CeVal { kind: CV_PTR, tm: 0, ty: TYPE_NONE, as_data: CeValAs { p: CvPtr { obj: br.obj, off: iv.as_data.i as u32 } } } };
             }
             if yk == TypeKind::TYPE_STRUCT || yk == TypeKind::TYPE_INSTANCE {
@@ -1701,7 +1701,7 @@ extend ConstEval {
                 let mut args: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
                 args[0] = recvr.v;
                 args[1] = iv;
-                let dr = self.ce_dispatch(rr.r, m, "index_mut".ptr as *const char, (&args[0]) as *const CeVal, 2);
+                let dr = self.ce_dispatch(rr.r, m, "index_mut".ptr() as *const char, (&args[0]) as *const CeVal, 2);
                 if !dr.ok || dr.v.kind != CV_PTR { return ValRes { ok: false }; }
                 return ValRes { ok: true, v: dr.v };
             }
@@ -1900,8 +1900,8 @@ extend ConstEval {
             if o == null || unsafe (*o).is_enum == 0 { return cv_nil(); }
             let odm = unsafe (*o).dm;
             let odn = unsafe (*o).dn;
-            let mut okv = self.ce_variant_named(odm, odn, "Some".ptr as *const char);
-            if okv < 0 { okv = self.ce_variant_named(odm, odn, "Ok".ptr as *const char); }
+            let mut okv = self.ce_variant_named(odm, odn, "Some".ptr() as *const char);
+            if okv < 0 { okv = self.ce_variant_named(odm, odn, "Ok".ptr() as *const char); }
             if okv < 0 { return cv_nil(); }
             let o2 = self.obj_ptr(v.as_data.p.obj);
             let tag = unsafe (*o2).slots.at(0).as_data.i;
@@ -2018,13 +2018,13 @@ extend ConstEval {
             let lyk = unsafe (*self.ast_ptr(sr.m)).type_at(sr.t).kind;
             if lyk == TypeKind::TYPE_STRUCT || lyk == TypeKind::TYPE_INSTANCE {
                 let mut mn: *const char = null;
-                if op == TokenType::Plus { mn = "add".ptr as *const char; }
-                else if op == TokenType::Minus { mn = "sub".ptr as *const char; }
-                else if op == TokenType::Star { mn = "mul".ptr as *const char; }
-                else if op == TokenType::Slash { mn = "div".ptr as *const char; }
-                else if op == TokenType::Percent { mn = "rem".ptr as *const char; }
-                else if op == TokenType::EqualEqual || op == TokenType::BangEqual { mn = "eq".ptr as *const char; }
-                else if op == TokenType::LessThan || op == TokenType::LessThanEqual || op == TokenType::GreaterThan || op == TokenType::GreaterThanEqual { mn = "cmp".ptr as *const char; }
+                if op == TokenType::Plus { mn = "add".ptr() as *const char; }
+                else if op == TokenType::Minus { mn = "sub".ptr() as *const char; }
+                else if op == TokenType::Star { mn = "mul".ptr() as *const char; }
+                else if op == TokenType::Slash { mn = "div".ptr() as *const char; }
+                else if op == TokenType::Percent { mn = "rem".ptr() as *const char; }
+                else if op == TokenType::EqualEqual || op == TokenType::BangEqual { mn = "eq".ptr() as *const char; }
+                else if op == TokenType::LessThan || op == TokenType::LessThanEqual || op == TokenType::GreaterThan || op == TokenType::GreaterThanEqual { mn = "cmp".ptr() as *const char; }
                 if mn != null {
                     let rr = self.ce_recv_of(f, sr.m, sr.t);
                     if !rr.ok { return cv_nil(); }
@@ -2196,7 +2196,7 @@ extend ConstEval {
                 let mut args: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
                 args[0] = recv;
                 args[1] = iv;
-                let dr = self.ce_dispatch(rr.r, m, "index_range".ptr as *const char, (&args[0]) as *const CeVal, 2);
+                let dr = self.ce_dispatch(rr.r, m, "index_range".ptr() as *const char, (&args[0]) as *const CeVal, 2);
                 if !dr.ok || dr.v.kind != CV_AGG { return cv_nil(); }
                 return dr.v;
             }
@@ -2205,7 +2205,7 @@ extend ConstEval {
             let mut args: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
             args[0] = recv;
             args[1] = iv;
-            let dr = self.ce_dispatch(rr.r, m, "index".ptr as *const char, (&args[0]) as *const CeVal, 2);
+            let dr = self.ce_dispatch(rr.r, m, "index".ptr() as *const char, (&args[0]) as *const CeVal, 2);
             if !dr.ok || dr.v.kind != CV_PTR { return cv_nil(); }
             let lr = self.ce_loadp(dr.v);
             if !lr.ok { return cv_nil(); }
@@ -2894,7 +2894,7 @@ extend ConstEval {
         loop {
             let mut args: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
             args[0] = itp;
-            let dr = self.ce_dispatch(rr.r, m, "next".ptr as *const char, (&args[0]) as *const CeVal, 1);
+            let dr = self.ce_dispatch(rr.r, m, "next".ptr() as *const char, (&args[0]) as *const CeVal, 1);
             if !dr.ok || dr.v.kind != CV_AGG { return Flow::Bail; }
             let oo = self.obj_ptr(dr.v.as_data.p.obj);
             if oo == null || unsafe (*oo).is_enum == 0 { return Flow::Bail; }
@@ -3007,7 +3007,7 @@ extend ConstEval {
         let nm = self.name_text(fm, unsafe (*fa).at_const(fnode).as_data.function.name);
         let rt = self.ce_type(m, callId);
         let mut out = Rets { ok: false, n: 0 };
-        if self.ce_span_is(fm, nm, "malloc".ptr as *const char) {
+        if self.ce_span_is(fm, nm, "malloc".ptr() as *const char) {
             if nargs != 1 || unsafe args[0].kind != CV_INT || unsafe args[0].as_data.i < 0 { return out; }
             let o = self.ce_obj_new(0);
             if o == 0 { return out; }
@@ -3019,7 +3019,7 @@ extend ConstEval {
             out.ok = true;
             return out;
         }
-        if self.ce_span_is(fm, nm, "realloc".ptr as *const char) {
+        if self.ce_span_is(fm, nm, "realloc".ptr() as *const char) {
             if nargs != 2 || unsafe args[0].kind != CV_PTR || unsafe args[1].kind != CV_INT || unsafe args[1].as_data.i < 0 { return out; }
             let nbytes = unsafe args[1].as_data.i as u64;
             if unsafe args[0].as_data.p.obj == 0 {
@@ -3035,7 +3035,7 @@ extend ConstEval {
             }
             let b = self.obj_ptr(unsafe args[0].as_data.p.obj);
             if b == null || unsafe (*b).heap == 0 || unsafe args[0].as_data.p.off != 0 { return out; }
-            if unsafe (*b).dead != 0 { self.ce_trap("use after free".ptr as *const char); return out; }
+            if unsafe (*b).dead != 0 { self.ce_trap("use after free".ptr() as *const char); return out; }
             if unsafe (*b).et != TYPE_NONE {
                 let esz = unsafe (*b).esz;
                 if esz == 0 || nbytes % esz != 0 { return out; }
@@ -3047,23 +3047,23 @@ extend ConstEval {
             out.ok = true;
             return out;
         }
-        if self.ce_span_is(fm, nm, "free".ptr as *const char) {
+        if self.ce_span_is(fm, nm, "free".ptr() as *const char) {
             if nargs != 1 || unsafe args[0].kind != CV_PTR { return out; }
             if unsafe args[0].as_data.p.obj == 0 { out.ok = true; return out; }
             let b = self.obj_ptr(unsafe args[0].as_data.p.obj);
             if b == null || unsafe (*b).heap == 0 || unsafe args[0].as_data.p.off != 0 { return out; }
-            if unsafe (*b).dead != 0 { self.ce_trap("double free".ptr as *const char); return out; }
+            if unsafe (*b).dead != 0 { self.ce_trap("double free".ptr() as *const char); return out; }
             unsafe (*b).dead = 1;
             out.ok = true;
             return out;
         }
-        if self.ce_span_is(fm, nm, "memset".ptr as *const char) {
+        if self.ce_span_is(fm, nm, "memset".ptr() as *const char) {
             if nargs != 3 || unsafe args[0].kind != CV_PTR || unsafe args[1].kind != CV_INT || unsafe args[2].kind != CV_INT || unsafe args[2].as_data.i < 0 { return out; }
             let n = unsafe args[2].as_data.i as u64;
             if unsafe args[0].as_data.p.obj == 0 { out.ok = n == 0; return out; }
             let b = self.obj_ptr(unsafe args[0].as_data.p.obj);
             if b == null || unsafe (*b).heap == 0 { return out; }
-            if unsafe (*b).dead != 0 { self.ce_trap("use after free".ptr as *const char); return out; }
+            if unsafe (*b).dead != 0 { self.ce_trap("use after free".ptr() as *const char); return out; }
             if unsafe (*b).et == TYPE_NONE && unsafe args[0].as_data.p.off == 0 {
                 let bytes = unsafe (*b).bytes;
                 if !self.ce_obj_resize(unsafe args[0].as_data.p.obj, bytes as u32) { return out; }
@@ -3077,7 +3077,7 @@ extend ConstEval {
             if esz == 0 || n % esz != 0 { return out; }
             let count = n / esz;
             let off = unsafe args[0].as_data.p.off as u64;
-            if off + count > unsafe (*bb).slots.len() as u64 { self.ce_trap("out-of-bounds access".ptr as *const char); return out; }
+            if off + count > unsafe (*bb).slots.len() as u64 { self.ce_trap("out-of-bounds access".ptr() as *const char); return out; }
             let mut fill = cv_nil();
             if esz == 1 { fill = CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_U8), as_data: CeValAs { i: unsafe args[1].as_data.i & 0xff } }; }
             else {
@@ -3096,8 +3096,8 @@ extend ConstEval {
             out.ok = true;
             return out;
         }
-        if self.ce_span_is(fm, nm, "abort".ptr as *const char) { self.ce_trap("abort reached at compile time".ptr as *const char); return out; }
-        if self.ce_span_is(fm, nm, "__sc_panic_str".ptr as *const char) || self.ce_span_is(fm, nm, "__sc_panic".ptr as *const char) { self.ce_trap("panic reached at compile time".ptr as *const char); return out; }
+        if self.ce_span_is(fm, nm, "abort".ptr() as *const char) { self.ce_trap("abort reached at compile time".ptr() as *const char); return out; }
+        if self.ce_span_is(fm, nm, "__sc_panic_str".ptr() as *const char) || self.ce_span_is(fm, nm, "__sc_panic".ptr() as *const char) { self.ce_trap("panic reached at compile time".ptr() as *const char); return out; }
         // libm
         let ln = (nm.end - nm.start) as usize;
         if ln >= 24 || nargs < 1 || nargs > 3 { return out; }
@@ -3119,7 +3119,7 @@ extend ConstEval {
         let mut ok = false;
         if nargs == 1 { let r = libm1(np, inv[0]); ok = r.ok; v = r.v; }
         else if nargs == 2 { let r = libm2(np, inv[0], inv[1]); ok = r.ok; v = r.v; }
-        else { if unsafe cstring::strcmp(np, "fma".ptr as *const char) == 0 { v = unsafe math::fma(inv[0], inv[1], inv[2]); ok = true; } }
+        else { if unsafe cstring::strcmp(np, "fma".ptr() as *const char) == 0 { v = unsafe math::fma(inv[0], inv[1], inv[2]); ok = true; } }
         if !ok { return out; }
         if f32suf { v = (v as f32) as f64; }
         out.vals[0] = CeVal { kind: CV_FLOAT, tm: m, ty: rt, as_data: CeValAs { f: v } };
@@ -3142,7 +3142,7 @@ extend ConstEval {
         else { params = unsafe (*fa).at_const(fnode).as_data.function.params; body = unsafe (*fa).at_const(fnode).as_data.function.body; }
         if body == NODE_NONE || params.len != nargs { return out; }
         if !closure && unsafe (*fa).at_const(fnode).as_data.function.is_variadic { return out; }
-        if self.nframes >= CE_MAX_FRAMES { self.ce_trap("const-eval call depth exceeded".ptr as *const char); return out; }
+        if self.nframes >= CE_MAX_FRAMES { self.ce_trap("const-eval call depth exceeded".ptr() as *const char); return out; }
         let mut g = ce_frame_zero();
         let gp = (&mut g) as *mut CeFrame;
         if self_decl != NODE_NONE && !self.ce_subst_add(gp, self_pm, self_decl, self_am, self_at) { return out; }
@@ -3314,14 +3314,14 @@ extend ConstEval {
                 du = unsafe (*a).deref_use_at(unsafe (*a).at_const(callee).as_data.member.member);
                 if fd.node == NODE_NONE {
                     let mname = self.name_text(m, unsafe (*a).at_const(callee).as_data.member.member);
-                    if !self.ce_span_is(m, mname, "free".ptr as *const char) || nargs != 0 { return out; }
+                    if !self.ce_span_is(m, mname, "free".ptr() as *const char) || nargs != 0 { return out; }
                     let sr = self.ce_strip_refptr(f, rtm, rtt);
                     if !sr.ok { return out; }
                     let rr = self.ce_recv_of(f, sr.m, sr.t);
                     if !rr.ok { return out; }
                     if rr.r.dn == NODE_NONE { out.ok = true; return out; }
                     let mut extnode = NODE_NONE;
-                    let md = self.ce_find_method(rr.r, m, 0, tok::Span::empty(), "free".ptr as *const char, (&mut extnode) as *mut NodeId);
+                    let md = self.ce_find_method(rr.r, m, 0, tok::Span::empty(), "free".ptr() as *const char, (&mut extnode) as *mut NodeId);
                     if md.node == NODE_NONE { out.ok = true; return out; }
                     let mut recv = cv_nil();
                     let pr = self.ev_place(f, m, recv_expr);
@@ -3580,43 +3580,43 @@ extend ConstEval as Free {
 }
 
 fn libm1(name: *const char, x: f64) DblRes {
-    if unsafe cstring::strcmp(name, "sqrt".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::sqrt(x) }; }
-    if unsafe cstring::strcmp(name, "cbrt".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::cbrt(x) }; }
-    if unsafe cstring::strcmp(name, "exp".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::exp(x) }; }
-    if unsafe cstring::strcmp(name, "exp2".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::exp2(x) }; }
-    if unsafe cstring::strcmp(name, "expm1".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::expm1(x) }; }
-    if unsafe cstring::strcmp(name, "log".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log(x) }; }
-    if unsafe cstring::strcmp(name, "log2".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log2(x) }; }
-    if unsafe cstring::strcmp(name, "log10".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log10(x) }; }
-    if unsafe cstring::strcmp(name, "log1p".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log1p(x) }; }
-    if unsafe cstring::strcmp(name, "sin".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::sin(x) }; }
-    if unsafe cstring::strcmp(name, "cos".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::cos(x) }; }
-    if unsafe cstring::strcmp(name, "tan".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::tan(x) }; }
-    if unsafe cstring::strcmp(name, "asin".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::asin(x) }; }
-    if unsafe cstring::strcmp(name, "acos".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::acos(x) }; }
-    if unsafe cstring::strcmp(name, "atan".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::atan(x) }; }
-    if unsafe cstring::strcmp(name, "sinh".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::sinh(x) }; }
-    if unsafe cstring::strcmp(name, "cosh".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::cosh(x) }; }
-    if unsafe cstring::strcmp(name, "tanh".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::tanh(x) }; }
-    if unsafe cstring::strcmp(name, "asinh".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::asinh(x) }; }
-    if unsafe cstring::strcmp(name, "acosh".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::acosh(x) }; }
-    if unsafe cstring::strcmp(name, "atanh".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::atanh(x) }; }
-    if unsafe cstring::strcmp(name, "floor".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::floor(x) }; }
-    if unsafe cstring::strcmp(name, "ceil".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::ceil(x) }; }
-    if unsafe cstring::strcmp(name, "round".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::round(x) }; }
-    if unsafe cstring::strcmp(name, "trunc".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::trunc(x) }; }
-    if unsafe cstring::strcmp(name, "fabs".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fabs(x) }; }
+    if unsafe cstring::strcmp(name, "sqrt".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::sqrt(x) }; }
+    if unsafe cstring::strcmp(name, "cbrt".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::cbrt(x) }; }
+    if unsafe cstring::strcmp(name, "exp".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::exp(x) }; }
+    if unsafe cstring::strcmp(name, "exp2".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::exp2(x) }; }
+    if unsafe cstring::strcmp(name, "expm1".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::expm1(x) }; }
+    if unsafe cstring::strcmp(name, "log".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log(x) }; }
+    if unsafe cstring::strcmp(name, "log2".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log2(x) }; }
+    if unsafe cstring::strcmp(name, "log10".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log10(x) }; }
+    if unsafe cstring::strcmp(name, "log1p".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::log1p(x) }; }
+    if unsafe cstring::strcmp(name, "sin".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::sin(x) }; }
+    if unsafe cstring::strcmp(name, "cos".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::cos(x) }; }
+    if unsafe cstring::strcmp(name, "tan".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::tan(x) }; }
+    if unsafe cstring::strcmp(name, "asin".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::asin(x) }; }
+    if unsafe cstring::strcmp(name, "acos".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::acos(x) }; }
+    if unsafe cstring::strcmp(name, "atan".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::atan(x) }; }
+    if unsafe cstring::strcmp(name, "sinh".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::sinh(x) }; }
+    if unsafe cstring::strcmp(name, "cosh".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::cosh(x) }; }
+    if unsafe cstring::strcmp(name, "tanh".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::tanh(x) }; }
+    if unsafe cstring::strcmp(name, "asinh".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::asinh(x) }; }
+    if unsafe cstring::strcmp(name, "acosh".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::acosh(x) }; }
+    if unsafe cstring::strcmp(name, "atanh".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::atanh(x) }; }
+    if unsafe cstring::strcmp(name, "floor".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::floor(x) }; }
+    if unsafe cstring::strcmp(name, "ceil".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::ceil(x) }; }
+    if unsafe cstring::strcmp(name, "round".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::round(x) }; }
+    if unsafe cstring::strcmp(name, "trunc".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::trunc(x) }; }
+    if unsafe cstring::strcmp(name, "fabs".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fabs(x) }; }
     return DblRes { ok: false, v: 0.0 };
 }
 
 fn libm2(name: *const char, x: f64, y: f64) DblRes {
-    if unsafe cstring::strcmp(name, "pow".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::pow(x, y) }; }
-    if unsafe cstring::strcmp(name, "hypot".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::hypot(x, y) }; }
-    if unsafe cstring::strcmp(name, "atan2".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::atan2(x, y) }; }
-    if unsafe cstring::strcmp(name, "fmod".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fmod(x, y) }; }
-    if unsafe cstring::strcmp(name, "copysign".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::copysign(x, y) }; }
-    if unsafe cstring::strcmp(name, "fmin".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fmin(x, y) }; }
-    if unsafe cstring::strcmp(name, "fmax".ptr as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fmax(x, y) }; }
+    if unsafe cstring::strcmp(name, "pow".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::pow(x, y) }; }
+    if unsafe cstring::strcmp(name, "hypot".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::hypot(x, y) }; }
+    if unsafe cstring::strcmp(name, "atan2".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::atan2(x, y) }; }
+    if unsafe cstring::strcmp(name, "fmod".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fmod(x, y) }; }
+    if unsafe cstring::strcmp(name, "copysign".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::copysign(x, y) }; }
+    if unsafe cstring::strcmp(name, "fmin".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fmin(x, y) }; }
+    if unsafe cstring::strcmp(name, "fmax".ptr() as *const char) == 0 { return DblRes { ok: true, v: unsafe math::fmax(x, y) }; }
     return DblRes { ok: false, v: 0.0 };
 }
 

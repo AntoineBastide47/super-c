@@ -8,8 +8,8 @@ fn ok() {
     h::expect_ok("field access", "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.x; }\n");
     h::expect_ok("method call binds self", "struct P { pub x: i32, }\nextend P { fn get(self: P) i32 { return self.x; } }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.get(); }\n");
     h::expect_ok("entry point fn main() i32", "fn main() i32 { return 0; }\n");
-    h::expect_ok("string literal is str", "fn main() i32 { let s: str = \"hi\"; let n: usize = s.len; }\n");
-    h::expect_ok("str ptr field indexes to u8", "fn first(s: str) u8 { return unsafe s.ptr[0]; }\n");
+    h::expect_ok("string literal is str", "fn main() i32 { let s: str = \"hi\"; let n: usize = s.len(); }\n");
+    h::expect_ok("str ptr field indexes to u8", "fn first(s: str) u8 { return unsafe s.ptr()[0]; }\n");
     h::expect_ok("private field reachable via self", "struct S { v: i32, }\nextend S { fn get(self: &S) i32 { return self.v; } }\n");
     h::expect_ok("private field constructible inside extend", "struct S { v: i32, }\nextend S { fn make() S { return S { v: 1, }; } }\n");
     h::expect_ok("pub field readable from outside", "struct S { pub v: i32, }\nfn f(s: S) i32 { return s.v; }\n");
