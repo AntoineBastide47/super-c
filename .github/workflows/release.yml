@@ -84,7 +84,16 @@ jobs:
         run: make clean
 
       - name: Build release binary
-        run: make release BIN="super-c${BINEXT:-}"
+        # mingw hides POSIX prototypes (realpath, ...) under -std=c11's __STRICT_ANSI__; build the
+        # Windows leg with -std=gnu11 (same POSIX define) so they are declared. mingw links their
+        # implementations from libmingwex automatically. Other platforms keep the Makefile default.
+        run: |
+          set -eu
+          if [ "${{ runner.os }}" = Windows ]; then
+            make release BIN="super-c${BINEXT:-}" CSTD="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
+          else
+            make release BIN="super-c${BINEXT:-}"
+          fi
 
       - name: Smoke-check the binary
         run: |
