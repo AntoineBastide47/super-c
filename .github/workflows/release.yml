@@ -1,6 +1,6 @@
 name: Release
 
-# Owner-only, manual-trigger release: builds the `super-c` binary for macOS and Linux and publishes a
+# Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes a
 # GitHub Release with one tarball per platform. It is dispatch-only (never runs on push/PR), and every job
 # is gated to the repository owner, so only the owner can start it. (In a public repo the workflow file is
 # still readable; the guard controls who can RUN it. Make the repo private to also restrict who can see it.)
@@ -31,7 +31,14 @@ jobs:
             target: linux
           - os: macos-latest
             target: macos
+          - os: windows-latest
+            target: windows
     runs-on: ${{ matrix.os }}
+    # Run every step in bash so the shared build steps behave identically on the Windows runner
+    # (Git Bash), not just on Linux/macOS.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -60,20 +67,31 @@ jobs:
 
       # Add compiler/dep installs here if ever needed (e.g. a pinned clang/gcc, libomp); their downloads
       # land in the caches above. The default build needs only the preinstalled `cc`.
+      # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
+      # mingw-clean: realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call.
+      - name: Set up mingw-w64 + make (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install -y --no-progress make mingw
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "BINEXT=.exe" >> "$GITHUB_ENV"
+
       - name: Toolchain info
-        run: cc --version
+        run: ${CC:-cc} --version
 
       # --- Clean build (never reuse cached build files) --------------------------------------------------
       - name: Clean any build tree
         run: make clean
 
       - name: Build release binary
-        run: make release
+        run: make release BIN="super-c${BINEXT:-}"
 
       - name: Smoke-check the binary
         run: |
-          test -x ./super-c
-          file ./super-c
+          set -eu
+          bin="super-c${BINEXT:-}"
+          test -x "./$bin"
+          if [ "${{ runner.os }}" != Windows ]; then file "./$bin"; fi
 
       # --- Package one tarball per platform (binary only) -----------------------------------------------
       - name: Package
@@ -81,10 +99,17 @@ jobs:
           set -eu
           arch="$(uname -m)"
           name="super-c-${{ matrix.target }}-${arch}"
+          bin="super-c${BINEXT:-}"
           mkdir -p dist
-          cp super-c "dist/${name}"
-          tar -C dist -czf "${name}.tar.gz" "${name}"
-          echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
+          if [ "${{ matrix.target }}" = windows ]; then
+            cp "$bin" "dist/${name}.exe"
+            ( cd dist && 7z a -bso0 "../${name}.zip" "${name}.exe" )
+            echo "ASSET=${name}.zip" >> "$GITHUB_ENV"
+          else
+            cp "$bin" "dist/${name}"
+            tar -C dist -czf "${name}.tar.gz" "${name}"
+            echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -112,4 +137,4 @@ jobs:
             --target "${{ github.sha }}" \
             --title "${{ github.event.inputs.tag }}" \
             --generate-notes \
-            dist/*.tar.gz
+            dist/*
