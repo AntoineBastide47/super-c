@@ -306,6 +306,7 @@ extend ConstEval {
         return TYPE_NONE;
     }
 
+    @c.cold
     fn ce_trap(self: &mut Self, msg: str) void {
         if self.trap.len() == 0 { self.trap = msg; }
     }

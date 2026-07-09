@@ -235,6 +235,9 @@ pub struct Codegen {
     pub len: usize,
     pub buf: String,
     pub enum_of_variant: Map<u32, u32>,
+    // CG-3: memoize cg_free_extend by (tmod,tdecl). A Codegen is per-module, so cur_module (the 2nd search
+    // scope) is constant, and the scanned EXTEND items are stable -> the result is a pure function of the key.
+    pub free_ext_cache: Map<u64, DefId>,
     pub depth: u32,
     pub tmp: u32,
     pub current_ret: [char; 128],
@@ -297,6 +300,7 @@ extend Codegen as Free {
     pub fn free(self: &mut Self) void {
         self.buf.free();
         self.enum_of_variant.free();
+        self.free_ext_cache.free();
         self.errors.free();
         if self.type_state != null { unsafe stdlib::free(self.type_state as *mut void); }
         if self.inst_emit_state != null { unsafe stdlib::free(self.inst_emit_state as *mut void); }
@@ -318,6 +322,7 @@ extend Codegen {
             len: source.len(),
             buf: String::with_capacity(cap),
             enum_of_variant: Map::<u32, u32>::new(),
+            free_ext_cache: Map::<u64, DefId>::new(),
             package: package,
             mangle: mangle,
             multifile: mangle,
@@ -1238,6 +1243,18 @@ extend Codegen {
         return is_range;
     }
     fn cg_free_extend(self: &Self, tmod: ModuleId, tdecl: NodeId) DefId {
+        let key = ((tmod as u64) << 32) | (tdecl as u64);
+        return switch self.free_ext_cache.get(&key) {
+            Some(d) => *d,
+            None => {
+                let r = self.cg_free_extend_uncached(tmod, tdecl);
+                let mp = (self as *const Codegen) as *mut Codegen;
+                unsafe { (*mp).free_ext_cache.insert(key, r); }
+                r;
+            },
+        };
+    }
+    fn cg_free_extend_uncached(self: &Self, tmod: ModuleId, tdecl: NodeId) DefId {
         let mut ns = 1;
         if tmod != self.cur_module() { ns = 2; }
         for s in 0..ns {
@@ -1360,6 +1377,56 @@ extend Codegen {
     }
     fn cg_find_method_cstr(self: &Self, tmod: ModuleId, tdecl: NodeId, lit: *const char) DefId {
         return self.cg_find_method_impl(tmod, tdecl, null, tok::Span::empty(), lit);
+    }
+
+    // CG-1: a conservative, allocation-free "could this node fold?" pre-filter. Returns false ONLY when the
+    // node is PROVABLY a runtime value, so the hot const-ness probes can skip the eval() call. It mirrors the
+    // consteval interpreter's nil-propagation on the f==null (codegen) path EXACTLY: a compound folds only if
+    // all its operands could, and a name folds only to a fn / valid non-static-mut const (unresolved / unknown
+    // kinds stay conservative TRUE). Invariant: cg_maybe_const(id)==false => eval(id)==CONST_NONE, so gating a
+    // probe with `&& cg_maybe_const(id)` never suppresses a real fold -> emitted C stays byte-identical.
+    fn cg_def_const_ok(self: &Self, d: DefId) bool {
+        if d.node == NODE_NONE { return true; }
+        if (d.module as usize) >= unsafe (*self.package).modules.len() { return true; }
+        let dk = unsafe (*self.mod_ast(d.module)).at_const(d.node).kind;
+        if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT { return true; }
+        if dk == NodeKind::NODE_CONST {
+            let cd = unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.const_def;
+            return cd.value != NODE_NONE && !cd.is_static_mut;
+        }
+        return false;
+    }
+    fn cg_maybe_const(self: &Self, id: NodeId) bool {
+        if id == NODE_NONE { return true; }
+        let a = self.cur_ast();
+        let n = *unsafe (*a).at_const(id);
+        let k = n.kind;
+        if k == NodeKind::NODE_LITERAL || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF { return true; }
+        if k == NodeKind::NODE_BINARY { return self.cg_maybe_const(n.as_data.binary.left) && self.cg_maybe_const(n.as_data.binary.right); }
+        if k == NodeKind::NODE_UNARY { return self.cg_maybe_const(n.as_data.unary.operand); }
+        if k == NodeKind::NODE_CAST { return self.cg_maybe_const(n.as_data.cast.expression); }
+        if k == NodeKind::NODE_INDEX { return self.cg_maybe_const(n.as_data.index.object) && self.cg_maybe_const(n.as_data.index.index); }
+        if k == NodeKind::NODE_CALL {
+            if !self.cg_maybe_const(n.as_data.call.callee) { return false; }
+            let args = n.as_data.call.args;
+            let ids = unsafe (*a).list(args);
+            for i in 0..args.len { if !self.cg_maybe_const(unsafe ids[i as usize]) { return false; } }
+            return true;
+        }
+        if k == NodeKind::NODE_IDENTIFIER {
+            let mut d = unsafe (*a).resolution_def(id);
+            if d.node == NODE_NONE { d = DefId { module: unsafe (*a).module, node: unsafe (*a).resolution(id) }; }
+            return self.cg_def_const_ok(d);
+        }
+        if k == NodeKind::NODE_MEMBER {
+            if n.as_data.member.path {
+                let mut d = unsafe (*a).resolution_def(id);
+                if d.node == NODE_NONE { d = unsafe (*a).resolution_def(n.as_data.member.member); }
+                return self.cg_def_const_ok(d);
+            }
+            return self.cg_maybe_const(n.as_data.member.object);
+        }
+        return true;
     }
 
     fn is_lvalue(self: &Self, id: NodeId) bool {
@@ -3962,7 +4029,7 @@ extend Codegen {
             v = n.as_data.unary.operand;
             n = *unsafe (*self.cur_ast()).at_const(v);
         }
-        if self.ceval() != null && n.kind == NodeKind::NODE_CALL && unsafe (*self.ceval()).eval(self.cur_module(), v).kind != ce::CONST_NONE { self.emit_cstr(";\n".ptr() as *const char); return; }
+        if self.ceval() != null && n.kind == NodeKind::NODE_CALL && self.cg_maybe_const(v) && unsafe (*self.ceval()).eval(self.cur_module(), v).kind != ce::CONST_NONE { self.emit_cstr(";\n".ptr() as *const char); return; }
         if n.kind == NodeKind::NODE_BLOCK { self.emit_block(v); self.emit_cstr("\n".ptr() as *const char); return; }
         if n.kind == NodeKind::NODE_IF { self.emit_if(v); self.emit_cstr("\n".ptr() as *const char); return; }
         if n.kind == NodeKind::NODE_MATCH { self.emit_match_stmt(v); return; }
@@ -4681,7 +4748,7 @@ extend Codegen {
     }
     fn emits_own_parens(self: &mut Self, id: NodeId) bool {
         let n = *unsafe (*self.cur_ast()).at_const(id);
-        if self.ceval() != null && unsafe (*self.ceval()).eval(self.cur_module(), id).kind != ce::CONST_NONE { return false; }
+        if self.ceval() != null && self.cg_maybe_const(id) && unsafe (*self.ceval()).eval(self.cur_module(), id).kind != ce::CONST_NONE { return false; }
         if n.kind == NodeKind::NODE_BINARY || n.kind == NodeKind::NODE_CAST { return true; }
         if n.kind == NodeKind::NODE_UNARY {
             if n.as_data.unary.op != TokenType::Move && n.as_data.unary.op != TokenType::Unsafe { return true; }
@@ -4962,7 +5029,7 @@ extend Codegen {
         if id != self.dyn_raw && self.emit_dyn_coercion(id) { return; }
         let n = *unsafe (*self.cur_ast()).at_const(id);
         let nk = n.kind;
-        if self.ceval() != null && (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_CAST || nk == NodeKind::NODE_CALL || nk == NodeKind::NODE_SIZEOF || nk == NodeKind::NODE_ALIGNOF) {
+        if self.ceval() != null && (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_CAST || nk == NodeKind::NODE_CALL || nk == NodeKind::NODE_SIZEOF || nk == NodeKind::NODE_ALIGNOF) && self.cg_maybe_const(id) {
             let v = unsafe (*self.ceval()).eval(self.cur_module(), id);
             if v.kind == ce::CONST_BOOL { if v.as_data.i != 0 { self.emit_cstr("true".ptr() as *const char); } else { self.emit_cstr("false".ptr() as *const char); } return; }
             if v.kind == ce::CONST_INT {
@@ -5644,6 +5711,12 @@ extend Codegen {
         let mut gn: usize = 0;
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_ALWAYS_INLINE) != null { gn = addg((&mut g.b[0]) as *mut char, 256, gn, "always_inline".ptr() as *const char); }
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_NOINLINE) != null { gn = addg((&mut g.b[0]) as *mut char, 256, gn, "noinline".ptr() as *const char); }
+        // @c.cold: mark rare/error paths cold + noinline (bundled, mirroring the reference C `COLD` macro) so
+        // the optimizer keeps them out of the hot path's I-cache and predicts their branches as unlikely.
+        if self.cg_attr(fmod, fn_id, AttrKind::ATTR_COLD) != null {
+            gn = addg((&mut g.b[0]) as *mut char, 256, gn, "cold".ptr() as *const char);
+            if self.cg_attr(fmod, fn_id, AttrKind::ATTR_NOINLINE) == null { gn = addg((&mut g.b[0]) as *mut char, 256, gn, "noinline".ptr() as *const char); }
+        }
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_USED) != null { gn = addg((&mut g.b[0]) as *mut char, 256, gn, "used".ptr() as *const char); }
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_UNUSED) != null { gn = addg((&mut g.b[0]) as *mut char, 256, gn, "unused".ptr() as *const char); }
         if is_static && self.cg_attr(fmod, fn_id, AttrKind::ATTR_USED) == null { gn = addg((&mut g.b[0]) as *mut char, 256, gn, "unused".ptr() as *const char); }

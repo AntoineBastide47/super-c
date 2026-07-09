@@ -14,6 +14,7 @@ pub enum AttrKind {
     ATTR_INLINE, ATTR_ALWAYS_INLINE, ATTR_NOINLINE, ATTR_NORETURN,
     ATTR_ALIGN, ATTR_PACKED, ATTR_EXPORT, ATTR_IMPORT, ATTR_SECTION, ATTR_USED, ATTR_UNUSED,
     ATTR_EMIT_MACRO, ATTR_TEST, ATTR_TEST_INIT, ATTR_TEST_FREE, ATTR_C_SOURCE, ATTR_C_LINK,
+    ATTR_COLD,
 }
 
 pub struct Attr {
@@ -273,6 +274,45 @@ pub struct DynUse { pub node: NodeId, pub src: TypeId, pub dyn_ty: TypeId }
 pub struct DerefUse { pub node: NodeId, pub target: TypeId, pub n: u8, pub recv: [TypeId; 8], pub method: [DefId; 8] }
 pub struct MethodInst { pub instance: TypeId, pub method: NodeId, pub n: u8, pub targs: [TypeId; 4] }
 
+// Field-wise Hash/Eq over the SIGNIFICANT prefix (module/decl/n + args[0..n]) — deliberately NOT a
+// sizeof-memcmp, so the unused args[n..4] tail (left uninitialized by the `{module,decl,n}` literal) can
+// never affect identity. This exactly mirrors intern_instance's linear comparison, keeping the interned
+// index numbering byte-identical.
+extend TyInstance as Hash {
+    pub fn hash(self: &Self) u64 {
+        let mut h: u64 = 1469598103934665603u64;
+        h = (h ^ (self.module as u64)) * 1099511628211u64;
+        h = (h ^ (self.decl as u64)) * 1099511628211u64;
+        h = (h ^ (self.n as u64)) * 1099511628211u64;
+        for i in 0..self.n { h = (h ^ (self.args[i] as u64)) * 1099511628211u64; }
+        return h;
+    }
+}
+extend TyInstance as Eq {
+    pub fn eq(self: &Self, other: &Self) bool {
+        if self.module != other.module || self.decl != other.decl || self.n != other.n { return false; }
+        for i in 0..self.n { if self.args[i] != other.args[i] { return false; } }
+        return true;
+    }
+}
+extend MethodInst as Hash {
+    pub fn hash(self: &Self) u64 {
+        let mut h: u64 = 1469598103934665603u64;
+        h = (h ^ (self.instance as u64)) * 1099511628211u64;
+        h = (h ^ (self.method as u64)) * 1099511628211u64;
+        h = (h ^ (self.n as u64)) * 1099511628211u64;
+        for i in 0..self.n { h = (h ^ (self.targs[i] as u64)) * 1099511628211u64; }
+        return h;
+    }
+}
+extend MethodInst as Eq {
+    pub fn eq(self: &Self, other: &Self) bool {
+        if self.instance != other.instance || self.method != other.method || self.n != other.n { return false; }
+        for i in 0..self.n { if self.targs[i] != other.targs[i] { return false; } }
+        return true;
+    }
+}
+
 pub struct Ast {
     pub nodes: Vector<Node>,
     pub children: Vector<u32>,
@@ -285,6 +325,11 @@ pub struct Ast {
     pub mono_at: Vector<u32>,
     pub instances: Vector<TyInstance>,
     pub method_insts: Vector<MethodInst>,
+    // O(1) dedupe HINT indices mirroring instances/method_insts (TC-2): key -> its position. A hint because
+    // codegen truncate()s `instances` during owner-swap emission, so a lookup always VERIFIES the hinted slot
+    // still holds the same value before trusting it (else falls through to a fresh push) — self-healing.
+    pub instance_index: Map<TyInstance, u32>,
+    pub method_inst_index: Map<MethodInst, u32>,
     pub dyn_uses: Vector<DynUse>,
     pub dyn_at: Vector<u32>,
     pub deref_uses: Vector<DerefUse>,
@@ -308,6 +353,8 @@ extend Ast {
             mono_at: Vector::<u32>::new(),
             instances: Vector::<TyInstance>::new(),
             method_insts: Vector::<MethodInst>::new(),
+            instance_index: Map::<TyInstance, u32>::new(),
+            method_inst_index: Map::<MethodInst, u32>::new(),
             dyn_uses: Vector::<DynUse>::new(),
             dyn_at: Vector::<u32>::new(),
             deref_uses: Vector::<DerefUse>::new(),
@@ -381,24 +428,17 @@ extend Ast {
     pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
         if m > 4 { m = 4; }
-        let mut idx = self.instances.len() as u32;
-        for i in 0..self.instances.len() {
-            let it = self.instances.at(i);
-            if it.module == module && it.decl == decl && it.n == m {
-                let mut same = true;
-                for j in 0..m {
-                    if it.args[j] != unsafe args[j] { same = false; break; }
-                }
-                if same { idx = i as u32; break; }
-            }
+        let mut it = TyInstance { module: module, decl: decl, n: m };
+        for j in 0..m {
+            it.args[j] = unsafe args[j];
         }
-        if idx == self.instances.len() as u32 {
-            let mut it = TyInstance { module: module, decl: decl, n: m };
-            for j in 0..m {
-                it.args[j] = unsafe args[j];
-            }
-            self.instances.push(it);
-        }
+        let hinted = switch self.instance_index.get(&it) { Some(id) => *id, None => 0xFFFFFFFFu32, };
+        let cur = self.instances.len();
+        let mut idx = cur as u32;
+        let mut valid = false;
+        if hinted != 0xFFFFFFFFu32 && (hinted as usize) < cur { valid = self.instances.at(hinted as usize).eq(&it); }
+        if valid { idx = hinted; }
+        else { self.instances.push(it); self.instance_index.insert(it, idx); }
         return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
 
@@ -412,21 +452,16 @@ extend Ast {
     pub fn add_method_inst(self: &mut Self, instance: TypeId, method: NodeId, targs: *const TypeId, n: u8) bool {
         let mut m = n;
         if m > 4 { m = 4; }
-        for i in 0..self.method_insts.len() {
-            let mi = self.method_insts.at(i);
-            if mi.instance == instance && mi.method == method && mi.n == m {
-                let mut same = true;
-                for j in 0..m {
-                    if mi.targs[j] != unsafe targs[j] { same = false; break; }
-                }
-                if same { return false; }
-            }
-        }
         let mut mi = MethodInst { instance: instance, method: method, n: m };
         for j in 0..m {
             mi.targs[j] = unsafe targs[j];
         }
+        let hinted = switch self.method_inst_index.get(&mi) { Some(id) => *id, None => 0xFFFFFFFFu32, };
+        if hinted != 0xFFFFFFFFu32 && (hinted as usize) < self.method_insts.len()
+            && self.method_insts.at(hinted as usize).eq(&mi) { return false; }
+        let idx = self.method_insts.len() as u32;
         self.method_insts.push(mi);
+        self.method_inst_index.insert(mi, idx);
         return true;
     }
 
@@ -547,6 +582,8 @@ extend Ast as Free {
         self.mono_at.free();
         self.instances.free();
         self.method_insts.free();
+        self.instance_index.free();
+        self.method_inst_index.free();
         self.dyn_uses.free();
         self.dyn_at.free();
         self.deref_uses.free();

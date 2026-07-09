@@ -97,6 +97,7 @@ extend Parser {
         return self.ast.at_const(id).span;
     }
 
+    @c.cold
     pub fn error_here(self: &mut Self, message: str) void {
         let t = self.raw_peek();
         self.errors.emit(t.start(), t.len(), String::from_str(message));
@@ -1805,6 +1806,7 @@ extend Parser {
         if self.text_is(name, "inline") { return AttrKind::ATTR_INLINE as i32; }
         if self.text_is(name, "always_inline") { return AttrKind::ATTR_ALWAYS_INLINE as i32; }
         if self.text_is(name, "noinline") { return AttrKind::ATTR_NOINLINE as i32; }
+        if self.text_is(name, "cold") { return AttrKind::ATTR_COLD as i32; }
         if self.text_is(name, "noreturn") { return AttrKind::ATTR_NORETURN as i32; }
         if self.text_is(name, "packed") { return AttrKind::ATTR_PACKED as i32; }
         if self.text_is(name, "used") { return AttrKind::ATTR_USED as i32; }
@@ -1883,7 +1885,7 @@ extend Parser {
         let kind = self.attr_kind_of(name, &mut wants_str, &mut wants_int);
         if kind < 0 {
             self.errors.emit(name.start(), name.len(), format("unknown attribute '@c.{}'", diag::span_str(self.source, name.start(), name.end())));
-            self.errors.note(format("supported '@c' attributes include export, import, noreturn, always_inline, used, unused, section, packed, and align"));
+            self.errors.note(format("supported '@c' attributes include export, import, noreturn, always_inline, cold, used, unused, section, packed, and align"));
             return false;
         }
         *out = Attr { owner: NODE_NONE, kind: kind as u8, arg: 0, str_span: Span::empty() };

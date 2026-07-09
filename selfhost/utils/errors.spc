@@ -42,6 +42,7 @@ extend Errors {
 
     // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
     // [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
+    @c.cold
     pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) void {
         if self.errors.len() >= ERRORS_MAX { return; }
         self.errors.push(msg);
@@ -51,6 +52,7 @@ extend Errors {
     }
 
     // Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
+    @c.cold
     pub fn note(self: &mut Self, msg: String) void {
         let n = self.errors.len();
         if n == 0 || self.notes.len() < n { return; }
@@ -58,6 +60,7 @@ extend Errors {
         self.notes[n - 1].push_string(&msg);
     }
 
+    @c.cold
     pub fn finalize(self: &mut Self, source: *const u8, len: usize, file: *const char) void {
         if self.errors.len() == 0 { return; }
         let mut line_starts = Vector::<u32>::new();
@@ -95,6 +98,7 @@ extend Errors {
         self.errors = uniq;
     }
 
+    @c.cold
     pub fn log(self: &Self) void {
         for i in 0..self.errors.len() {
             self.errors[i].eprintln();
@@ -125,6 +129,7 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
 
 // Render one diagnostic into a pretty source-annotated block: the message, a `--> file:line:col`
 // location, the offending source line (windowed to 120 cols), a caret run under the span, and notes.
+@c.cold
 fn render(
     msg: &String,
     source: *const u8,
