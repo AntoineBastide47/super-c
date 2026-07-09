@@ -13,8 +13,7 @@ CSTD := -std=c11 -D_POSIX_C_SOURCE=200809L
 # Backend C flags for the transpiled compiler. release: aggressive optimization + LTO; dev: -O1 + address/
 # undefined sanitizers so the self-hosted compiler is checked while you work on it. (bench/profile use their
 # own -O2, below -- you never want LTO build cost or sanitizer slowdown when measuring/profiling.)
-RELEASE_OPT   := -O3 -DNDEBUG -finline-functions -fomit-frame-pointer \
-                 -ffunction-sections -fdata-sections -flto -fPIE
+RELEASE_OPT   := -O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -flto -fPIE
 RELEASE_LDOPT := -flto -Wl,-O2
 
 DEBUG_OPT := -g -O1 -fsanitize=address -fno-omit-frame-pointer \
@@ -82,12 +81,12 @@ test selfhost-test: $(BIN)
 	@SUPERC='./$(BIN)' ./$(BIN) --test $(SELFHOST_TEST_ROOT)
 
 # Transpile benchmark: the compiler emits the self-transpile timing program, cc -O2 compiles + runs it.
-bench: release
+bench: $(BIN)
 	@printf '\n========== Transpile benchmark ==========\n'
 	@rm -rf selfhost/build
 	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
 	@mkdir -p build
-	@$(CC) $(CSTD) -O2 $$(find selfhost/build -name '*.c') -o build/selfhost-bench
+	@$(CC) $(CSTD) $(RELEASE_OPT) $$(find selfhost/build -name '*.c') -o build/selfhost-bench $(RELEASE_LDOPT)
 	@build/selfhost-bench
 
 # Profile the transpile benchmark with samply (CPU sampling -> Firefox Profiler UI). Same build as `bench`
