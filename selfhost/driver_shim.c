@@ -36,6 +36,34 @@ int sc_stat_isdir(const char *path) {
   return S_ISDIR(st.st_mode) ? 1 : 0;
 }
 
+/* DT_DIR/DT_UNKNOWN are BSD/Linux extensions hidden under strict _POSIX_C_SOURCE; their values are a
+   stable ABI so define them if the header didn't. (The d_type FIELD itself is present on both platforms.) */
+#ifndef DT_UNKNOWN
+#  define DT_UNKNOWN 0
+#endif
+#ifndef DT_DIR
+#  define DT_DIR 4
+#endif
+
+/* Directory-entry type straight from readdir's d_type: 1 dir, 0 non-dir, -1 unknown (caller must stat). */
+int sc_dirent_isdir(void *entry) {
+  unsigned char t = ((struct dirent *)entry)->d_type;
+  if (t == DT_DIR)
+    return 1;
+  if (t == DT_UNKNOWN)
+    return -1;
+  return 0;
+}
+
+/* 1 iff both paths resolve to the same physical file (same device + inode), 0 if not, -1 if either
+   can't be stat'd. Ground-truth file identity -- cheaper than realpath (one stat each, no readdir). */
+int sc_same_file(const char *a, const char *b) {
+  struct stat sa, sb;
+  if (stat(a, &sa) != 0 || stat(b, &sb) != 0)
+    return -1;
+  return (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) ? 1 : 0;
+}
+
 int sc_wifexited(int status) { return WIFEXITED(status) ? 1 : 0; }
 int sc_wexitstatus(int status) { return WEXITSTATUS(status); }
 

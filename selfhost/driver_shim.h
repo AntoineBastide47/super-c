@@ -8,6 +8,8 @@ int sc_argc(void);                                   /* the process argument cou
 char **sc_argv(void);                                /* the process argument vector */
 const char *sc_dirent_name(void *entry);             /* ((struct dirent *)entry)->d_name */
 int sc_stat_isdir(const char *path);                 /* 1 dir, 0 not, -1 on stat failure */
+int sc_dirent_isdir(void *entry);                    /* readdir d_type: 1 dir, 0 not, -1 unknown */
+int sc_same_file(const char *a, const char *b);      /* 1 same file (dev+ino), 0 not, -1 stat failure */
 int sc_wifexited(int status);                        /* WIFEXITED(status) as 0/1 */
 int sc_wexitstatus(int status);                      /* WEXITSTATUS(status) */
 char *sc_realpath(const char *path, char *resolved); /* realpath(3) */

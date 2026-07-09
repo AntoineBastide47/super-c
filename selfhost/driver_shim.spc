@@ -7,6 +7,8 @@ extern "C" "driver_shim.h" {
     pub fn sc_argv() *mut *mut char;
     pub fn sc_dirent_name(entry: *mut void) *const char;
     pub fn sc_stat_isdir(path: *const char) i32;
+    pub fn sc_dirent_isdir(entry: *mut void) i32;
+    pub fn sc_same_file(a: *const char, b: *const char) i32;
     pub fn sc_wifexited(status: i32) i32;
     pub fn sc_wexitstatus(status: i32) i32;
     pub fn sc_realpath(path: *const char, resolved: *mut char) *mut char;
