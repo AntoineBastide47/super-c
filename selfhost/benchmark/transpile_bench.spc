@@ -135,7 +135,7 @@ fn transpile_once() Timing {
     let lx0 = time::cpu_seconds();
     i = 0;
     while i < n {
-        let mut lx = lexer::Lexer::new(p.modules[i].source.as_str());
+        let mut lx = lexer::Lexer::new(&mut p.modules[i].source);
         lx.scan_tokens();
         lx.free();
         i = i + 1;
@@ -149,7 +149,7 @@ fn transpile_once() Timing {
         let len = p.modules[i].source.len();
         let mut j: usize = 0;
         while j < len {
-            if unsafe (src[j] as u8) == 10 { r.src_lines = r.src_lines + 1; }
+            if unsafe (src[j] as u8) == b'\n' { r.src_lines = r.src_lines + 1; }
             j = j + 1;
         }
         i = i + 1;

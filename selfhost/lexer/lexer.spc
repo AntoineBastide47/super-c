@@ -7,6 +7,39 @@ pub const EOF_CH: u8 = 0;
 pub const UINT32_MAX: u32 = 0xFFFFFFFFu32;
 pub const USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
 
+// Read-ahead sentinel padding a lexed source buffer MUST carry past its logical end (all NUL): the loader
+// pads every module source (String::pad_nul) so the lexer's scan loops (identifier/whitespace) can drop
+// their per-byte bounds check and rely on the trailing NUL to terminate. Only 1 byte is strictly required.
+pub const SOURCE_PAD: usize = 8;
+
+// Per-byte character-class flags, indexed by byte value (see build_char_class). Held BY VALUE in each Lexer
+// so there is no global mutable state (the compiler lexes many sources, possibly concurrently in-process).
+pub const CC_ID_START: u8 = 1u8;
+pub const CC_ID_PART: u8 = 2u8;
+pub const CC_DIGIT: u8 = 4u8;
+pub const CC_HEX: u8 = 8u8;
+pub const CC_WS: u8 = 16u8;
+pub struct CharClass { pub f: [u8; 256] }
+
+fn build_char_class() CharClass {
+    let mut c = CharClass {};
+    let mut i: usize = 0;
+    while i < 256 {
+        let b = i as u8;
+        let is_lower = b >= b'a' && b <= b'z';
+        let is_upper = b >= b'A' && b <= b'Z';
+        let is_digit = b >= b'0' && b <= b'9';
+        let mut fl: u8 = 0u8;
+        if b == b'_' || is_lower || is_upper { fl = fl | CC_ID_START | CC_ID_PART; }
+        if is_digit { fl = fl | CC_ID_PART | CC_DIGIT | CC_HEX; }
+        if (b >= b'a' && b <= b'f') || (b >= b'A' && b <= b'F') { fl = fl | CC_HEX; }
+        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\x0b' || b == b'\x0c' || b == b'\r' { fl = fl | CC_WS; }
+        unsafe { c.f[i] = fl; }
+        i = i + 1;
+    }
+    return c;
+}
+
 pub struct Lexer {
     pub bytes: *const u8,
     pub len: usize,
@@ -15,18 +48,25 @@ pub struct Lexer {
     pub file: *const char,
     pub tokens: Vector<Token>,
     pub errors: diag::Errors,
+    pub class: CharClass,
 }
 
 extend Lexer {
-    pub fn new(source: str) Lexer {
+    // Takes the source BY &mut String so the constructor can guarantee SOURCE_PAD trailing NUL bytes past its
+    // end (in place, no copy) -- every lexer input is padded regardless of caller, so the scan loops may
+    // over-read up to SOURCE_PAD bytes safely. len is unchanged; `bytes` is re-read after the (possible) grow.
+    pub fn new(source: &mut String) Lexer {
+        source.pad_nul(SOURCE_PAD);
+        let s = source.as_str();
         return Lexer {
-            bytes: source.ptr(),
-            len: source.len(),
+            bytes: s.ptr(),
+            len: s.len(),
             start: 0,
             current: 0,
             file: null,
             tokens: Vector::<Token>::new(),
             errors: diag::Errors::new(),
+            class: build_char_class(),
         };
     }
 
@@ -198,8 +238,10 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
 }
 
 fn identifier(l: &mut Lexer) void {
+    // Scan the [_A-Za-z0-9] run via the class table. No bounds check: the trailing-NUL sentinel (SOURCE_PAD)
+    // is not id-part, so the run stops at (or before) len -- exactly the old boundary.
     let mut i = l.current;
-    while i < l.len && is_id_part_byte(unsafe l.bytes[i]) { i = i + 1; }
+    while (l.class.f[(unsafe l.bytes[i]) as usize] & CC_ID_PART) != 0u8 { i = i + 1; }
     l.current = i;
     let identifier_len = i - l.start;
     let mut kind = TokenType::Identifier;
@@ -220,19 +262,11 @@ fn validate_utf8_at(l: &mut Lexer, i: *mut usize) bool {
 }
 
 fn whitespace(l: &mut Lexer) void {
+    // Skip a maximal run of whitespace bytes via the class table. No bounds check: the trailing-NUL sentinel
+    // is not WS, so the run stops at (or before) len. '\r' and '\n' are both WS, so advancing one byte at a
+    // time is identical to the old explicit CRLF handling.
     let mut i = l.current;
-    while i < l.len {
-        let b = unsafe l.bytes[i];
-        if b == 32 || b == 9 || b == 10 || b == 11 || b == 12 {
-            i = i + 1;
-        } else if b == 13 {
-            i = i + 1;
-            if i < l.len && unsafe l.bytes[i] == 10 { i = i + 1; }
-        } else {
-            l.current = i;
-            return;
-        }
-    }
+    while (l.class.f[(unsafe l.bytes[i]) as usize] & CC_WS) != 0u8 { i = i + 1; }
     l.current = i;
 }
 
@@ -240,8 +274,8 @@ fn line_comment(l: &mut Lexer) void {
     let mut i = l.current;
     while i < l.len {
         let b = unsafe l.bytes[i];
-        if b == 10 || b == 13 { break; }
-        if b == 0 {
+        if b == b'\n' || b == b'\r' { break; }
+        if b == b'\0' {
             lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments");
             i = i + 1;
         } else if b >= 0x80u8 { validate_utf8_at(&mut *l, &mut i); }
@@ -265,7 +299,7 @@ fn block_comment(l: &mut Lexer) void {
                 l.current = i;
                 return;
             }
-        } else if b == 0 {
+        } else if b == b'\0' {
             lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments");
             i = i + 1;
         } else if b >= 0x80u8 { validate_utf8_at(&mut *l, &mut i); }
@@ -356,7 +390,7 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
             l.current = i;
             escape(&mut *l, false);
             i = l.current;
-        } else if b == 10 || b == 13 {
+        } else if b == b'\n' || b == b'\r' {
             l.current = i - 1;
             lexer_error(&mut *l, "unterminated string literal");
             while l.current < l.len {
@@ -365,7 +399,7 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
                 if recovery == '"' as u8 { break; }
             }
             return;
-        } else if b == 0 {
+        } else if b == b'\0' {
             lexer_error_at(&mut *l, i - 1, 1, "NUL byte is not allowed in string literals");
         } else if b >= 0x80u8 {
             i = i - 1;
@@ -403,12 +437,12 @@ fn character(l: &mut Lexer, byte_character: bool) void {
             else { add_token(&mut *l, TokenType::CharacterLiteral); }
             return;
         }
-        if b == 10 || b == 13 {
+        if b == b'\n' || b == b'\r' {
             l.current = l.current - 1;
             lexer_error(&mut *l, "unterminated character literal");
             return;
         }
-        if b == 0 {
+        if b == b'\0' {
             let at = l.current - 1;
             lexer_error_at(&mut *l, at, 1, "NUL byte is not allowed in character literals");
             count = count + 1;
@@ -463,7 +497,7 @@ fn raw_string(l: &mut Lexer, hashes: usize) void {
                 return;
             }
             i = i + 1;
-        } else if b == 0 {
+        } else if b == b'\0' {
             lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in raw string literals");
             i = i + 1;
         } else if b >= 0x80u8 { validate_utf8_at(&mut *l, &mut i); }
@@ -651,7 +685,7 @@ fn scan_token(l: &mut Lexer) void {
     let c = unsafe l.bytes[l.current];
     if c < 0x80u8 { l.current = l.current + 1; }
     switch c {
-        32 | 9 | 11 | 12 | 10 | 13 => { whitespace(&mut *l); return; },
+        b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\n' | b'\r' => { whitespace(&mut *l); return; },
         '{' => { add_token(&mut *l, TokenType::LeftBrace); return; },
         '}' => { add_token(&mut *l, TokenType::RightBrace); return; },
         '(' => { add_token(&mut *l, TokenType::LeftParen); return; },
@@ -752,7 +786,7 @@ fn scan_token(l: &mut Lexer) void {
         '@' => { add_token(&mut *l, TokenType::At); return; },
         '$' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'$' is reserved"); return; },
         '`' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "'`' is reserved"); return; },
-        0 => { let start = l.start; lexer_error_at(&mut *l, start, 1, "NUL byte is not allowed in source"); return; },
+        b'\0' => { let start = l.start; lexer_error_at(&mut *l, start, 1, "NUL byte is not allowed in source"); return; },
         'a'..='z' | 'A'..='Z' | '_' => { identifier(&mut *l); return; },
         _ => {
             if c >= 0x80u8 {
