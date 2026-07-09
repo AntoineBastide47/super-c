@@ -69,6 +69,19 @@ pub struct Package {
     // pipeline). Replaces Package::lookup's linear item scan with an O(1) probe.
     pub lk_index: Vector<Map<u64, LkEnt>>,
     pub lk_built: Vector<bool>,
+    // Import-resolution directory cache (Opt 1): each candidate search directory is scanned ONCE (opendir/
+    // readdir) and its entry names cached, so resolve_import_file answers "does <dir>/<file> exist?" from
+    // memory instead of an fopen probe per candidate. Scales: a directory with N modules imported M times
+    // costs 1 scan, not M*<up to 3> fopens. A listing MISS still falls back to fopen (byte-identical vs the
+    // old path_exists even under case-insensitive filesystems).
+    pub dir_cache: DirCache,
+}
+
+// Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
+pub struct DirCache {
+    pub dirs: Vector<String>,
+    pub entries: Vector<Vector<String>>,
+    pub ok: Vector<bool>,
 }
 
 // The parse pipeline's result: an Ast plus whether lex/parse succeeded (mirrors the C `Ast*`/NULL return).
@@ -185,17 +198,74 @@ fn join2(a: str, b: str) String {
     return out;
 }
 
+extend DirCache {
+    pub fn new() DirCache {
+        return DirCache { dirs: Vector::<String>::new(), entries: Vector::<Vector<String>>::new(), ok: Vector::<bool>::new() };
+    }
+    // Index of `dir` in the cache, scanning (opendir/readdir) it once on first request.
+    fn index_of(self: &mut Self, dir: str) usize {
+        for i in 0..self.dirs.len() { if self.dirs[i].as_str() == dir { return i; } }
+        let mut names = Vector::<String>::new();
+        let mut dok = false;
+        let mut db = RealBuf { };
+        let dl = dir.len();
+        if dl < 4096 {
+            unsafe cstring::memcpy((&mut db.b[0]) as *mut void, dir.ptr() as *const void, dl);
+            unsafe db.b[dl] = 0 as char;
+            let d = unsafe shim::sc_opendir((&db.b[0]) as *const char);
+            if d != null {
+                dok = true;
+                loop {
+                    let e = unsafe shim::sc_readdir(d);
+                    if e == null { break; }
+                    names.push(String::from_cstr(unsafe shim::sc_dirent_name(e)));
+                }
+                let _ = unsafe shim::sc_closedir(d);
+            }
+        }
+        self.dirs.push(String::from_str(dir));
+        self.entries.push(names);
+        self.ok.push(dok);
+        return self.dirs.len() - 1;
+    }
+    // Does `path` (a <dir>/<file>) exist? Answered from the cached listing; a listing miss (dir present but
+    // the name not listed) falls back to fopen so the result matches path_exists exactly, incl. case-
+    // insensitive filesystems. A missing directory is authoritative (fopen would fail too), saving the probe.
+    pub fn exists(self: &mut Self, path: str) bool {
+        let n = path.len();
+        let mut slash: i64 = -1;
+        let mut i: usize = 0;
+        while i < n { if path.byte_at(i) == '/' as u8 { slash = i as i64; } i = i + 1; }
+        if slash < 0 { return path_exists(path); }
+        let dir = path.slice(0, slash as usize);
+        let file = path.slice((slash as usize) + 1, n);
+        let idx = self.index_of(dir);
+        if !self.ok[idx] { return false; }
+        let ents = self.entries.at(idx);
+        for k in 0..ents.len() { if ents[k].as_str() == file { return true; } }
+        return path_exists(path);
+    }
+}
+extend DirCache as Free {
+    pub fn free(self: &mut Self) void {
+        self.dirs.free();
+        self.entries.free();
+        self.ok.free();
+    }
+}
+
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
 // finds <std_root>/std/x.spc), then the bundled `ffi/` bindings (so a bare `import stdio;` finds
 // <std_root>/ffi/stdio.spc). Returns the first path that exists, else the project-relative path. Owned.
-fn resolve_import_file(root_dir: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
+fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
+    let dc = dca as *mut DirCache;
     let root_rel = module_file_path(root_dir, &*ast, src, parts);
-    if path_exists(root_rel.as_str()) || std_root.is_empty() { return root_rel; }
+    if unsafe (*dc).exists(root_rel.as_str()) || std_root.is_empty() { return root_rel; }
     let std_rel = module_file_path(std_root, &*ast, src, parts);
-    if path_exists(std_rel.as_str()) { return std_rel; }
+    if unsafe (*dc).exists(std_rel.as_str()) { return std_rel; }
     let ffi_base = join2(std_root, "ffi");
     let ffi_rel = module_file_path(ffi_base.as_str(), &*ast, src, parts);
-    if path_exists(ffi_rel.as_str()) { return ffi_rel; }
+    if unsafe (*dc).exists(ffi_rel.as_str()) { return ffi_rel; }
     return root_rel;
 }
 
@@ -247,6 +317,7 @@ extend Package {
             mod_refs_ready: false,
             lk_index: Vector::<Map<u64, LkEnt>>::new(),
             lk_built: Vector::<bool>::new(),
+            dir_cache: DirCache::new(),
         };
     }
 
@@ -315,6 +386,10 @@ extend Package {
         // self.modules, which may realloc and move this module's by-value Ast, invalidating a live borrow.
         let root_dir = self.root_dir.as_str();
         let std_root = self.std_root.as_str();
+        // Address of the dir_cache field, taken BEFORE borrowing self.modules below (the cast releases the
+        // &mut immediately; dir_cache is a disjoint field so mutating it doesn't alias the `m` borrow). Passed
+        // as a usize because `*mut DirCache` is move-tracked (Free pointee) and would move out of the loop.
+        let dca = (&mut self.dir_cache) as *mut DirCache as usize;
         let mut child_paths = Vector::<String>::new();
         let mut child_files = Vector::<String>::new();
         {
@@ -332,7 +407,7 @@ extend Package {
                     // ffi module imported by many modules would otherwise be re-probed once per importer.
                     if self.find(cp.as_str()) < 0 {
                         child_paths.push(cp);
-                        child_files.push(resolve_import_file(root_dir, std_root, &m.ast, src, parts));
+                        child_files.push(resolve_import_file(dca, root_dir, std_root, &m.ast, src, parts));
                     }
                 }
             }
@@ -761,6 +836,7 @@ extend Package as Free {
         self.mod_refs.free();
         self.lk_index.free();
         self.lk_built.free();
+        self.dir_cache.free();
     }
 }
 
@@ -1223,17 +1299,13 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
 // A PATH_MAX realpath scratch buffer (the omitted array field zero-fills on partial init).
 struct RealBuf { pub b: [char; 4096] }
 
-// Canonical (realpath) form of `path` as a fresh heap string, or null if it can't be resolved.
-// Two paths name the same file iff their canon_of results are non-null and strcmp-equal.
-fn canon_of(path: str) String {
+// The final path component of `path` (a view into it) -- "dir/std/string.spc" -> "string.spc".
+fn basename_of(path: str) str {
     let n = path.len();
-    if n >= 4096 { return String::new(); }
-    let mut pb = RealBuf { };
-    unsafe cstring::memcpy((&mut pb.b[0]) as *mut void, path.ptr() as *const void, n);
-    unsafe pb.b[n] = 0 as char;
-    let mut r = RealBuf { };
-    if unsafe shim::sc_realpath((&pb.b[0]) as *const char, (&mut r.b[0]) as *mut char) == null { return String::new(); }
-    return String::from_cstr((&r.b[0]) as *const char);
+    let mut b: usize = 0;
+    let mut i: usize = 0;
+    while i < n { if path.byte_at(i) == '/' as u8 { b = i + 1; } i = i + 1; }
+    return path.slice(b, n);
 }
 
 // Auto-import the prelude: every TOP-LEVEL `<std_dir>/*.spc` (not subdirectories) becomes a prelude module
@@ -1262,34 +1334,35 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         let l = unsafe cstring::strlen(nm);
         if l < 5 { continue; }
         if unsafe cstring::strcmp((nm + (l - 4)) as *const char, ".spc".ptr() as *const char) != 0 { continue; }
+        // Skip subdirectories named "*.spc" straight from readdir's d_type; only DT_UNKNOWN needs a stat.
+        let dt = unsafe shim::sc_dirent_isdir(e);
+        if dt == 1 { continue; }
+        if dt < 0 {
+            let mut probe = join2(str::from_cstr(std_dir), str::from_cstr(nm));
+            if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 { continue; }
+        }
         names.push(String::from_cstr(nm));
     }
     let _ = unsafe shim::sc_closedir(dir);
     // sort by name (small: the std/ file list) -- byte-lexicographic with a length tiebreak (equivalent to
     // strcmp over these NUL-free views).
     names.sort_by(|a: &String, b: &String| name_cmp(a, b));
-    // Canonicalize the already-loaded modules' paths ONCE (the user's explicit import closure). A std file
-    // is a duplicate iff it was explicitly imported, so only these initial modules can match; the __std::
-    // modules appended below have distinct names and never do. Precomputing here makes the dedup O(S+M)
-    // realpaths instead of O(S*M) -- realpath walks the filesystem, so it dominated the profile otherwise.
+    // Dedup: a std file is already loaded iff some already-loaded module has the SAME basename AND is the
+    // same physical file (dev+ino). The basename pre-filter (a plain string compare, no syscall) keeps this
+    // O(std files) even for huge projects -- user modules almost never share a std/ basename, so we stat-
+    // confirm only the rare collisions -- and inode identity is exact + realpath-free (no getdirentries). The
+    // __std:: modules appended below have distinct names and never match, so scanning only the initial m0 is
+    // sufficient.
     let m0 = p.modules.len();
-    let mut canon = Vector::<String>::new();
-    for ci in 0..m0 {
-        canon.push(canon_of(p.modules[ci].file.as_str()));
-    }
-
     for k in 0..names.len() {
         let mut file = join2(str::from_cstr(std_dir), names[k].as_str());
-        if unsafe shim::sc_stat_isdir(file.cstr()) == 1 { continue; } // a dir literally named "*.spc"
-        let rf = canon_of(file.as_str());
         let mut dup = false;
-        if !rf.is_empty() {
-            for i2 in 0..canon.len() {
-                if !canon[i2].is_empty() && canon[i2].as_str() == rf.as_str() {
-                    p.modules[i2].prelude = true;
-                    dup = true;
-                    break;
-                }
+        for i2 in 0..m0 {
+            if basename_of(p.modules[i2].file.as_str()) == names[k].as_str()
+                && unsafe shim::sc_same_file(file.cstr(), p.modules[i2].file.cstr()) == 1 {
+                p.modules[i2].prelude = true;
+                dup = true;
+                break;
             }
         }
         if !dup {
