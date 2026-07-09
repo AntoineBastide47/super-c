@@ -10,6 +10,7 @@
 
 #include "ast/parser.h"
 #include "lexer/lexer.h"
+#include "utils/path.h"
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer; NULL on any I/O error.
 static char *read_file(const char *path, size_t *size) {
@@ -228,7 +229,7 @@ static int load_module(Package *p, char *mod_path, char *file_path) {
 // True if `a` and `b` name the same file on disk (after symlink/.. resolution).
 static bool same_file(const char *a, const char *b) {
   char ra[PATH_MAX], rb[PATH_MAX];
-  return a && b && realpath(a, ra) && realpath(b, rb) && strcmp(ra, rb) == 0;
+  return a && b && sc_realpath(a, ra, sizeof ra) && sc_realpath(b, rb, sizeof rb) && strcmp(ra, rb) == 0;
 }
 
 static int cmp_str(const void *a, const void *b) {
