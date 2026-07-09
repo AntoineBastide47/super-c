@@ -64,6 +64,11 @@ else
   STRIP_BIN := :
 endif
 
+# libm: needed on Linux (glibc splits it out) for the CTFE interpreter's <math.h>
+# calls; a harmless no-op on macOS where it re-exports from libSystem. Must follow
+# the objects on the link line for --as-needed (default on modern Linux) to keep it.
+LDLIBS := -lm
+
 SRC_DIR   := src
 BUILD_DIR := build/$(PROFILE)
 
@@ -127,16 +132,16 @@ $(BUILD_DIR)/tests/raii_gen_test $(BUILD_DIR)/tests/codegen_run_test: OMP := $(O
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
 	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) -DSUPERC_STD_DIR='"$(CURDIR)/std"' $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT) $(OMP)
+	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) -DSUPERC_STD_DIR='"$(CURDIR)/std"' $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT) $(OMP) $(LDLIBS)
 
 $(BUILD_DIR)/benchmark/%: benchmark/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
 	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT)
+	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT) $(LDLIBS)
 
 $(BIN): $(LIB_OBJS) $(BUILD_DIR)/main.o
 	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $^ -o $@ $(LDOPT)
+	$(Q)$(CC) $(CSTD) $(OPT) $^ -o $@ $(LDOPT) $(LDLIBS)
 	@$(STRIP_BIN)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
