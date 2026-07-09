@@ -686,7 +686,7 @@ extend TypeChecker {
         let fnn = unsafe (*fa).at_const(fy.as_data.decl);
         if fnn.kind != NodeKind::NODE_CLOSURE { return false; }
         let caps = fnn.as_data.closure.captures;
-        let mut_caps = fnn.as_data.closure.mut_caps;
+        let mut_caps = fnn.as_data.closure.mut_caps as u64;
         for i in 0..caps.len {
             let cid = unsafe ((*fa).list(caps))[i as usize];
             if ((mut_caps >> (i as u64)) & 1u64) == 0 {
@@ -715,8 +715,8 @@ extend TypeChecker {
             let idx = self.tc_capture_index(self.clos_stack[f as usize], d.node);
             if idx >= 0 {
                 let cs = self.clos_stack[f as usize];
-                let old = unsafe (*self.cur_ast()).at(cs).as_data.closure.mut_caps;
-                unsafe (*self.cur_ast()).at(cs).as_data.closure.mut_caps = old | (1u64 << (idx as u64));
+                let old = unsafe (*self.cur_ast()).at(cs).as_data.closure.mut_caps as u64;
+                unsafe (*self.cur_ast()).at(cs).as_data.closure.mut_caps = (old | (1u64 << (idx as u64))) as u32;
             }
         }
     }
@@ -4687,7 +4687,7 @@ extend TypeChecker {
         self.nclos = self.nclos - 1;
         // capture validation
         let caps = unsafe (*a).at_const(id).as_data.closure.captures;
-        let mut_caps = unsafe (*a).at_const(id).as_data.closure.mut_caps;
+        let mut_caps = unsafe (*a).at_const(id).as_data.closure.mut_caps as u64;
         for i in 0..caps.len {
             let cid = unsafe ((*a).list(caps))[i as usize];
             let cty = self.decl_type(cid);

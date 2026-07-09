@@ -148,7 +148,9 @@ pub struct FlowData { pub value: NodeId, pub label: tok::Span }
 pub struct UnaryData { pub op: tt::TokenType, pub operand: NodeId, pub qualifier: TypeQualifier }
 pub struct BinaryData { pub op: tt::TokenType, pub left: NodeId, pub right: NodeId }
 pub struct CallData { pub callee: NodeId, pub args: NodeList }
-pub struct ClosureData { pub params: NodeList, pub returns: NodeList, pub body: NodeId, pub expr_body: bool, pub captures: NodeList, pub mut_caps: u64 }
+// mut_caps is a u32 mutated-capture bitmask (≤32 captures). u32 (not u64) is deliberate: it leaves
+// ClosureData with no 8-aligned member, so NodeAs stays 4-aligned and Node is 56 bytes instead of 64.
+pub struct ClosureData { pub params: NodeList, pub returns: NodeList, pub body: NodeId, pub expr_body: bool, pub captures: NodeList, pub mut_caps: u32 }
 pub struct IndexData { pub object: NodeId, pub index: NodeId }
 pub struct MemberData { pub object: NodeId, pub member: NodeId, pub pointer: bool, pub path: bool }
 pub struct CastData { pub expression: NodeId, pub ty: NodeId }
@@ -251,11 +253,15 @@ pub union TyAs {
 pub struct Ty { pub kind: TypeKind, pub qualifier: u8, pub module: ModuleId, pub as_data: TyAs }
 
 extend Ty as Hash {
+    // Word-wise FNV over Ty's raw storage. Ty is 8-aligned (its `value: i64` forces alignof 8) and power-of-2
+    // sized, so `sizeof(Ty)/8` aligned u64 loads cover every byte the per-byte loop did -- ~8x fewer rounds.
+    // The hash only selects a probe bucket: `eq` stays a full memcmp and intern_type numbers TypeIds in
+    // insertion order, so the hash function never affects interned identity or emitted output.
     pub fn hash(self: &Self) u64 {
-        let p = self as *const Ty as *const u8;
+        let p = self as *const Ty as *const u64;
         let mut h: u64 = 1469598103934665603u64;
-        for i in 0..sizeof(Ty) {
-            h = h ^ (unsafe p[i] as u64);
+        for i in 0..(sizeof(Ty) / 8) {
+            h = h ^ (unsafe p[i]);
             h = h * 1099511628211u64;
         }
         return h;

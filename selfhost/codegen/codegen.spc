@@ -1211,7 +1211,7 @@ extend Codegen {
         let fnn = *unsafe (*fa).at_const(fy.as_data.decl);
         if fnn.kind != NodeKind::NODE_CLOSURE { return false; }
         let caps = fnn.as_data.closure.captures;
-        let mut_caps = fnn.as_data.closure.mut_caps;
+        let mut_caps = fnn.as_data.closure.mut_caps as u64;
         for i in 0..caps.len {
             let cid = unsafe ((*fa).list(caps))[i as usize];
             if ((mut_caps >> (i as u64)) & 1u64) == 0 {
@@ -3457,7 +3457,7 @@ extend Codegen {
     }
     fn emit_capture_init(self: &mut Self, clos: NodeId, idx: u32) void {
         let caps = unsafe (*self.cur_ast()).at_const(clos).as_data.closure.captures;
-        let mut_caps = unsafe (*self.cur_ast()).at_const(clos).as_data.closure.mut_caps;
+        let mut_caps = unsafe (*self.cur_ast()).at_const(clos).as_data.closure.mut_caps as u64;
         let decl = unsafe ((*self.cur_ast()).list(caps))[idx as usize];
         let want_ptr = ((mut_caps >> (idx as u64)) & (1 as u64)) != 0 as u64;
         let mut nm = Buf128 {};
@@ -3643,7 +3643,7 @@ extend Codegen {
             }
         } else if nk == NodeKind::NODE_CLOSURE {
             let caps = unsafe (*self.cur_ast()).at_const(id).as_data.closure.captures;
-            let mut_caps = unsafe (*self.cur_ast()).at_const(id).as_data.closure.mut_caps;
+            let mut_caps = unsafe (*self.cur_ast()).at_const(id).as_data.closure.mut_caps as u64;
             let cids = unsafe (*self.cur_ast()).list(caps);
             let mut site_pushed = false;
             for i in 0..caps.len {
@@ -3989,7 +3989,7 @@ extend Codegen {
     fn cg_env_capture(self: &Self, decl: NodeId, is_mut: *mut bool) i32 {
         if self.env_clos == NODE_NONE || decl == NODE_NONE { return -1; }
         let caps = unsafe (*self.cur_ast()).at_const(self.env_clos).as_data.closure.captures;
-        let mut_caps = unsafe (*self.cur_ast()).at_const(self.env_clos).as_data.closure.mut_caps;
+        let mut_caps = unsafe (*self.cur_ast()).at_const(self.env_clos).as_data.closure.mut_caps as u64;
         let cids = unsafe (*self.cur_ast()).list(caps);
         for i in 0..caps.len {
             if unsafe cids[i as usize] == decl {
@@ -5145,7 +5145,7 @@ extend Codegen {
                         let caps = n.as_data.closure.captures;
                         for i in 0..caps.len {
                             let cid = unsafe ((*self.cur_ast()).list(caps))[i as usize];
-                            if ((n.as_data.closure.mut_caps >> (i as u64)) & 1u64) != 0 || !self.cg_is_cond_moved(cid) { continue; }
+                            if (((n.as_data.closure.mut_caps as u64) >> (i as u64)) & 1u64) != 0 || !self.cg_is_cond_moved(cid) { continue; }
                             let mut fl = Buf32 {};
                             cg_move_flag((&mut fl.b[0]) as *mut char, 32, cid);
                             if wrapped { self.buf.format_into("{} = true, ", diag::cstr((&fl.b[0]) as *const char)); } else { self.buf.format_into("({} = true, ", diag::cstr((&fl.b[0]) as *const char)); }
@@ -6722,7 +6722,7 @@ extend Codegen {
                 let csp = self.cg_decl_name_span(cid);
                 self.render_ident(csp, (&mut fnm.b[0]) as *mut char, 128);
                 let mut ft = unsafe (*self.cur_ast()).type_of(cid);
-                if ((cl.mut_caps >> (i as u64)) & (1 as u64)) != 0 as u64 {
+                if (((cl.mut_caps as u64) >> (i as u64)) & (1 as u64)) != 0 as u64 {
                     ft = unsafe (*self.cur_ast()).intern_type(Ty { kind: TypeKind::TYPE_POINTER, qualifier: TypeQualifier::TYPE_QUAL_MUT as u8, as_data: TyAs { elem: ft } });
                 }
                 let mut d = Buf300 {};
@@ -6735,7 +6735,7 @@ extend Codegen {
                 self.buf.format_into("static __attribute__((unused)) void {}_env_free({}_env *const __e) {{ ", diag::cstr((&nm.b[0]) as *const char), diag::cstr((&nm.b[0]) as *const char));
                 for i2 in 0..cl.captures.len {
                     let cid = unsafe cids[i2 as usize];
-                    if (((cl.mut_caps >> (i2 as u64)) & (1 as u64)) != 0 as u64) || !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(cid)) { continue; }
+                    if ((((cl.mut_caps as u64) >> (i2 as u64)) & (1 as u64)) != 0 as u64) || !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(cid)) { continue; }
                     let mut fnm = Buf128 {};
                     let csp = self.cg_decl_name_span(cid);
                     self.render_ident(csp, (&mut fnm.b[0]) as *mut char, 128);
