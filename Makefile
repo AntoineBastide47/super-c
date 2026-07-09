@@ -82,7 +82,7 @@ test selfhost-test: $(BIN)
 	@SUPERC='./$(BIN)' ./$(BIN) --test $(SELFHOST_TEST_ROOT)
 
 # Transpile benchmark: the compiler emits the self-transpile timing program, cc -O2 compiles + runs it.
-bench: $(BIN)
+bench: release
 	@printf '\n========== Transpile benchmark ==========\n'
 	@rm -rf selfhost/build
 	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
