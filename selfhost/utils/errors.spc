@@ -69,12 +69,12 @@ extend Errors {
         let mut i: usize = 0;
         while i < len {
             let b = unsafe source[i];
-            if b == 10 {
+            if b == b'\n' {
                 i = i + 1;
                 line_starts.push(i as u32);
-            } else if b == 13 {
+            } else if b == b'\r' {
                 i = i + 1;
-                if i < len && unsafe source[i] == 10 { i = i + 1; }
+                if i < len && unsafe source[i] == b'\n' { i = i + 1; }
                 line_starts.push(i as u32);
             } else {
                 i = i + 1;

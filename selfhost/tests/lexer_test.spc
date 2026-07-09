@@ -5,7 +5,8 @@ import lexer::token_type as *;
 import lexer::lexer as *;
 
 fn expect_tokens(src: str, expected: []TokenType) {
-    let mut lx = Lexer::new(src);
+    let mut s = String::from_str(src);
+    let mut lx = Lexer::new(&mut s);
     lx.scan_tokens();
     assert(!lx.has_errors(), "unexpected lexer error");
     let mut toks = lx.take_tokens();
@@ -18,7 +19,8 @@ fn expect_tokens(src: str, expected: []TokenType) {
 }
 
 fn expect_error(src: str) {
-    let mut lx = Lexer::new(src);
+    let mut s = String::from_str(src);
+    let mut lx = Lexer::new(&mut s);
     lx.scan_tokens();
     assert(lx.has_errors(), "expected a lexer error");
     let mut toks = lx.take_tokens();

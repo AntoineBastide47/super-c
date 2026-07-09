@@ -60,8 +60,10 @@ fn copy_msg(dst: *mut char, s: &String) void {
 pub fn compile(src: str, stop: i32) Compiled {
     let mut r = Compiled {};
 
-    // Parse stage: lex + parse standalone (no package needed to see syntax errors).
-    let mut lx = lex::Lexer::new(src);
+    // Parse stage: lex + parse standalone (no package needed to see syntax errors). The lexer pads its
+    // source, so give it an owned String copy of `src`.
+    let mut s = String::from_str(src);
+    let mut lx = lex::Lexer::new(&mut s);
     lx.scan_tokens();
     if lx.has_errors() {
         r.errors = lx.errors.errors.len();
@@ -72,7 +74,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src);
+    let mut ps = par::Parser::new(toks, s.as_str());
     ps.build_ast();
     if ps.has_errors() {
         r.errors = ps.errors.errors.len();
@@ -112,12 +114,13 @@ pub struct ParsedAst { pub errors: usize, pub ast: Ast }
 
 pub fn parse_ast(src: str) ParsedAst {
     let mut r = ParsedAst { errors: 0, ast: Ast::new(0) };
-    let mut lx = lex::Lexer::new(src);
+    let mut s = String::from_str(src);
+    let mut lx = lex::Lexer::new(&mut s);
     lx.scan_tokens();
     if lx.has_errors() { r.errors = lx.errors.errors.len(); lx.free(); return r; }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src);
+    let mut ps = par::Parser::new(toks, s.as_str());
     ps.build_ast();
     if ps.has_errors() { r.errors = ps.errors.errors.len(); }
     r.ast = ps.take_ast();
@@ -127,12 +130,13 @@ pub fn parse_ast(src: str) ParsedAst {
 
 // True if `src` fails to lex or parse (the parse-stage rejection oracle).
 pub fn parse_has_error(src: str) bool {
-    let mut lx = lex::Lexer::new(src);
+    let mut s = String::from_str(src);
+    let mut lx = lex::Lexer::new(&mut s);
     lx.scan_tokens();
     if lx.has_errors() { lx.free(); return true; }
     let mut toks = lx.take_tokens();
     lx.free();
-    let mut ps = par::Parser::new(toks, src);
+    let mut ps = par::Parser::new(toks, s.as_str());
     ps.build_ast();
     let e = ps.has_errors();
     ps.free();

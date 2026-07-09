@@ -186,6 +186,18 @@ extend<A: Allocator> String<A> {
         }
     }
 
+    // Read-ahead sentinel padding: guarantee at least `n` zero bytes immediately after the logical end,
+    // WITHOUT changing len. Code that establishes this may then over-read up to `n` bytes past the end
+    // safely -- e.g. a lexer whose scan loops rely on the trailing NUL to terminate (no per-byte bounds
+    // check) or that reads 8-byte words. Pre-size with with_capacity(len+n) and this never reallocates.
+    pub fn pad_nul(self: &mut String<A>, n: usize) {
+        self.reserve_exact(n);
+        let l = self.len();
+        let p = self.data_ptr();
+        let mut i: usize = 0;
+        while i < n { unsafe p[l + i] = 0; i = i + 1; }
+    }
+
     // --- raw tail writes: for an external writer (a C vsnprintf/memcpy) that fills the spare region ------
 
     // Reserve room for `additional` more bytes and return a writable pointer at the current end (into the

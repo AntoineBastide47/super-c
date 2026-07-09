@@ -138,8 +138,13 @@ fn read_file(path: str) Option<String> {
         return Option::<String>::None;
     }
     unsafe stdio::fclose(f);
-    let out = String::from_str(str::from_raw(buf as *const u8, n));
+    // Pre-size to content + read-ahead padding so neither the content copy nor pad_nul reallocates, then
+    // append lexer::SOURCE_PAD trailing NUL bytes PAST len (len stays n) -- a read-ahead sentinel the lexer
+    // relies on to over-read safely (see lexer::SOURCE_PAD).
+    let mut out = String::with_capacity(n + lexer::SOURCE_PAD);
+    out.push_str(str::from_raw(buf as *const u8, n));
     unsafe stdlib::free(buf as *mut void);
+    out.pad_nul(lexer::SOURCE_PAD);
     return Option::<String>::Some(out);
 }
 
@@ -270,9 +275,8 @@ fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src:
 }
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
-fn parse_source(source: *const char, len: usize, file: *const char) ParseResult {
-    let src = str::from_raw(source as *const u8, len);
-    let mut lx = lexer::Lexer::new(src);
+fn parse_source(source: &mut String, file: *const char) ParseResult {
+    let mut lx = lexer::Lexer::new(&mut *source);   // pads `source` in place; the lexer over-reads into padding
     lx.set_file(file);
     lx.scan_tokens();
     if lx.has_errors() {
@@ -282,6 +286,7 @@ fn parse_source(source: *const char, len: usize, file: *const char) ParseResult 
     }
     let toks = lx.take_tokens();
     lx.free();
+    let src = source.as_str();   // padding lives past len -> invisible to the parser
     let mut ps = parser::Parser::new(toks, src);
     ps.set_file(file);
     ps.build_ast();
@@ -373,7 +378,7 @@ extend Package {
             unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, file_path.ptr() as *const void, fl);
             unsafe fb.b[fl] = 0 as char;
         } else { unsafe fb.b[0] = 0 as char; }
-        let parsed = parse_source(source.as_str().ptr() as *const char, source.len(), (&fb.b[0]) as *const char);
+        let parsed = parse_source(&mut source, (&fb.b[0]) as *const char);
         let ok = parsed.ok;
         let id = self.add_module(String::from_str(mod_path), String::from_str(file_path), source, parsed.ast, ok);
         if !ok {
@@ -1286,10 +1291,11 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     p.root_dir = String::from_str(".");
     if std_dir != null { p.std_root = dir_of(str::from_cstr(std_dir)); }
     load_prelude(&mut p, std_dir);
-    let parsed = parse_source(src, len, "<harness>".ptr() as *const char);
+    let mut source = String::from_str(str::from_raw(src as *const u8, len));
+    let parsed = parse_source(&mut source, "<harness>".ptr() as *const char);
     let ok = parsed.ok;
     let id = p.add_module(String::from_str("main"), String::from_str("<harness>"),
-                          String::from_str(str::from_raw(src as *const u8, len)), parsed.ast, ok);
+                          source, parsed.ast, ok);
     if ok { p.modules[id as usize].ast.module = id as ModuleId; }
     else { p.ok = false; }
     p.seed_core();
