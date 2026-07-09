@@ -1597,13 +1597,16 @@ extend Codegen {
         else if span_is(dsrc, fnm, "println".ptr() as *const char) { kind = 3; }
         else if span_is(dsrc, fnm, "eprint".ptr() as *const char) { kind = 4; }
         else if span_is(dsrc, fnm, "eprintln".ptr() as *const char) { kind = 5; }
+        else if span_is(dsrc, fnm, "format_into".ptr() as *const char) { kind = 6; }
         if kind == 0 { return false; }
         let args = unsafe (*self.cur_ast()).at_const(id).as_data.call.args;
         let aids = unsafe (*self.cur_ast()).list(args);
+        // format_into(dst, "template", args..): the template literal is arg[1]; format/print use arg[0].
+        let ti: u32 = if (kind == 6) { 1u32; } else { 0u32; };
         let mut is_raw = false;
         let mut ok_lit = false;
-        if args.len != 0 {
-            let a0 = unsafe aids[0 as usize];
+        if args.len > ti {
+            let a0 = unsafe aids[ti as usize];
             if unsafe (*self.cur_ast()).at_const(a0).kind == NodeKind::NODE_LITERAL {
                 let tt = unsafe (*self.cur_ast()).at_const(a0).as_data.literal.token_type;
                 is_raw = tt == TokenType::RawStringLiteral;
@@ -1618,16 +1621,27 @@ extend Codegen {
         }
         let mut ff = Buf32 {};
         self.fresh((&mut ff.b[0]) as *mut char, 32);
-        let fp = (&ff.b[0]) as *const char;
-        self.emit("({ String__Global %s = String__Global__new();\n".ptr() as *const char, fp);
-        let a0 = unsafe aids[0 as usize];
+        let mut fpb = Buf64 {};
+        let mut fp = (&ff.b[0]) as *const char;
+        if kind == 6 {
+            // Append into the caller's buffer: bind a String* to the &mut String dst, and route every
+            // push through `(*ptr)` so the helpers' `&%s` folds back to the pointer (zero allocation).
+            self.emit("({ String__Global *%s = ".ptr() as *const char, (&ff.b[0]) as *const char);
+            self.emit_expr(unsafe aids[0 as usize]);
+            self.emit_cstr(";\n".ptr() as *const char);
+            unsafe stdio::snprintf((&mut fpb.b[0]) as *mut char, 64, "(*%s)".ptr() as *const char, (&ff.b[0]) as *const char);
+            fp = (&fpb.b[0]) as *const char;
+        } else {
+            self.emit("({ String__Global %s = String__Global__new();\n".ptr() as *const char, fp);
+        }
+        let a0 = unsafe aids[ti as usize];
         let raw = unsafe (*self.cur_ast()).at_const(a0).as_data.literal.raw;
         let src = self.source;
         let content = if (is_raw) { raw_string_content(src, raw); } else { tok::Span { start: raw.start + 1, end: raw.end - 1 }; };
         let mut i = content.start as usize;
         let endc = content.end as usize;
         let mut seg = i;
-        let mut ai: u32 = 1;
+        let mut ai: u32 = ti + 1;
         while i < endc {
             if (unsafe src[i] == '{' as u8 || unsafe src[i] == '}' as u8) && i + 1 < endc && unsafe src[i + 1] == unsafe src[i] {
                 i = i + 2;
@@ -1698,7 +1712,9 @@ extend Codegen {
             self.errors.note(format("{}", "remove the extra argument or add a matching '{}' placeholder"));
         }
         if kind == 3 || kind == 5 { self.emit("String__Global__push_byte(&%s, 10);\n".ptr() as *const char, fp); }
-        if kind == 1 {
+        if kind == 6 {
+            self.emit_cstr("})".ptr() as *const char); // void: appended in place, dst is borrowed (no free)
+        } else if kind == 1 {
             self.emit("%s; })".ptr() as *const char, fp);
         } else if kind >= 4 {
             self.emit("String__Global__eprint(&%s); String__Global__free(&%s); })".ptr() as *const char, fp, fp);
@@ -1773,7 +1789,7 @@ extend Codegen {
         self.emit_cstr("; if (".ptr() as *const char);
         if kind == 2 { self.emit_cstr("!(".ptr() as *const char); }
         if self.cg_struct_name_is(&y, "str".ptr() as *const char) {
-            self.emit("%s.len == %s.len && (%s.len == 0 || memcmp(%s.ptr, %s.ptr, %s.len) == 0)".ptr() as *const char, laccp, raccp, laccp, laccp, raccp, laccp);
+            format_into(&mut self.buf, "{}.len == {}.len && ({}.len == 0 || memcmp({}.ptr, {}.ptr, {}.len) == 0)", diag::cstr(laccp), diag::cstr(raccp), diag::cstr(laccp), diag::cstr(laccp), diag::cstr(raccp), diag::cstr(laccp));
         } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE || (y.kind == TypeKind::TYPE_ENUM && self.aggregate_has_payload_in(y.module, y.as_data.decl)) {
             let mut om = y.module;
             let mut od = y.as_data.decl;
@@ -5710,7 +5726,7 @@ extend Codegen {
         if unsafe (*a).at_const(node).kind != NodeKind::NODE_FUNCTION { return false; }
         let fnm = unsafe (*a).at_const(unsafe (*a).at_const(node).as_data.function.name).as_data.name.text;
         let s = self.mod_src(m);
-        return span_is(s, fnm, "format".ptr() as *const char) || span_is(s, fnm, "print".ptr() as *const char)
+        return span_is(s, fnm, "format".ptr() as *const char) || span_is(s, fnm, "format_into".ptr() as *const char) || span_is(s, fnm, "print".ptr() as *const char)
             || span_is(s, fnm, "println".ptr() as *const char) || span_is(s, fnm, "eprint".ptr() as *const char)
             || span_is(s, fnm, "eprintln".ptr() as *const char) || span_is(s, fnm, "assert".ptr() as *const char)
             || span_is(s, fnm, "assert_eq".ptr() as *const char) || span_is(s, fnm, "assert_ne".ptr() as *const char);

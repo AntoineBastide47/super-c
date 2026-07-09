@@ -3721,7 +3721,7 @@ extend TypeChecker {
         let mut fmt_builtin = false;
         if named && self.package != null && (fmod as usize) < self.pkg_count() && unsafe (*self.package).modules[fmod as usize].prelude {
             let fnm = unsafe (*fa).at_const(unsafe (*fa).at_const(fdecl).as_data.function.name).as_data.name.text;
-            fmt_builtin = span_is(self.mod_src(fmod), fnm, "format") || span_is(self.mod_src(fmod), fnm, "print") || span_is(self.mod_src(fmod), fnm, "println") || span_is(self.mod_src(fmod), fnm, "eprint") || span_is(self.mod_src(fmod), fnm, "eprintln");
+            fmt_builtin = span_is(self.mod_src(fmod), fnm, "format") || span_is(self.mod_src(fmod), fnm, "format_into") || span_is(self.mod_src(fmod), fnm, "print") || span_is(self.mod_src(fmod), fnm, "println") || span_is(self.mod_src(fmod), fnm, "eprint") || span_is(self.mod_src(fmod), fnm, "eprintln");
             if fmt_builtin { self.mark_format_helpers(); }
         }
         let mut skip: u32 = 0;
