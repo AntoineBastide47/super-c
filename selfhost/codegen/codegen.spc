@@ -235,9 +235,7 @@ pub struct Codegen {
     pub ast: *mut Ast,
     pub source: *const u8,
     pub len: usize,
-    pub buf: *mut char,
-    pub buf_len: usize,
-    pub buf_cap: usize,
+    pub buf: String,
     pub enum_of_variant: Map<u32, u32>,
     pub depth: u32,
     pub tmp: u32,
@@ -299,7 +297,7 @@ pub struct Codegen {
 extend Codegen as Free {
     // The Ast is borrowed (not owned); free only what codegen allocated itself.
     pub fn free(self: &mut Self) void {
-        if self.buf != null { unsafe stdlib::free(self.buf as *mut void); }
+        self.buf.free();
         self.enum_of_variant.free();
         self.errors.free();
         if self.type_state != null { unsafe stdlib::free(self.type_state as *mut void); }
@@ -315,15 +313,12 @@ extend Codegen {
         }
         let mangle = user_mods > 1;
         let cap = source.len() * 4 + 4096;
-        let buf = unsafe stdlib::malloc(cap) as *mut char;
-        if buf == null { diag::oom(); }
         // Fixed-array fields are omitted -> partial init zero-fills them (NODE_NONE == 0).
         return Codegen {
             ast: ast,
             source: source.ptr(),
             len: source.len(),
-            buf: buf,
-            buf_cap: cap,
+            buf: String::with_capacity(cap),
             enum_of_variant: Map::<u32, u32>::new(),
             package: package,
             mangle: mangle,
@@ -376,21 +371,11 @@ extend Codegen {
         self.closure_sym_in(self.cur_module(), id, out, cap);
     }
 
-    // ---- low-level output buffer ----
-    fn emit_reserve(self: &mut Self, extra: usize) void {
-        if self.buf_len + extra <= self.buf_cap { return; }
-        let mut cap = self.buf_cap;
-        if cap == 0 { cap = 4096; }
-        while cap < self.buf_len + extra { cap = cap * 2; }
-        let nb = unsafe stdlib::realloc(self.buf as *mut void, cap) as *mut char;
-        if nb == null { diag::oom(); }
-        self.buf = nb;
-        self.buf_cap = cap;
-    }
+    // ---- low-level output buffer (a String: growth + RAII come from it; we fill its spare tail) ----
     fn emit_bytes(self: &mut Self, p: *const char, n: usize) void {
-        self.emit_reserve(n);
-        unsafe cstring::memcpy((self.buf + self.buf_len) as *mut void, p, n);
-        self.buf_len = self.buf_len + n;
+        let tail = self.buf.spare_mut(n) as *mut void;
+        unsafe cstring::memcpy(tail, p as *const void, n);
+        self.buf.advance_len(n);
     }
     fn emit_cstr(self: &mut Self, text: *const char) void {
         self.emit_bytes(text, unsafe cstring::strlen(text));
@@ -398,15 +383,14 @@ extend Codegen {
     fn vemit(self: &mut Self, fmt: *const char, mut args: va_list) void {
         let mut copy = args;
         unsafe va_copy(copy, args);
-        let avail = self.buf_cap - self.buf_len;
-        let n = unsafe vsnprintf((self.buf + self.buf_len) as *mut char, avail, fmt, copy);
+        let avail = self.buf.capacity() - self.buf.len();
+        let n = unsafe vsnprintf(self.buf.spare_mut(0) as *mut char, avail, fmt, copy);
         va_end(copy);
         if n > 0 {
             if (n as usize) >= avail {
-                self.emit_reserve((n as usize) + 1);
-                unsafe vsnprintf((self.buf + self.buf_len) as *mut char, (n as usize) + 1, fmt, args);
+                unsafe vsnprintf(self.buf.spare_mut((n as usize) + 1) as *mut char, (n as usize) + 1, fmt, args);
             }
-            self.buf_len = self.buf_len + (n as usize);
+            self.buf.advance_len(n as usize);
         }
     }
     fn emit(self: &mut Self, fmt: *const char, ...) void {
@@ -7576,8 +7560,8 @@ extend Codegen {
         self.emit_cstr("\n".ptr() as *const char);
         self.emit_public_consts();
         self.emit_cstr("\n#endif\n".ptr() as *const char);
-        if self.buf_len != 0 { unsafe stdio::fwrite(self.buf, 1, self.buf_len, out); }
-        self.buf_len = 0;
+        if self.buf.len() != 0 { unsafe stdio::fwrite(self.buf.as_ptr() as *const void, 1, self.buf.len(), out); }
+        self.buf.clear();
     }
     pub fn codegen_emit(self: &mut Self, out: *mut stdio::FILE) void {
         self.build_enum_index();
@@ -7612,7 +7596,7 @@ extend Codegen {
         let mut file: *const char = null;
         if self.package != null && (self.cur_module() as usize) < self.pkg_count() { file = unsafe (*self.package).modules[self.cur_module() as usize].file.cstr(); }
         self.errors.finalize(src, ln, file);
-        if self.buf_len != 0 { unsafe stdio::fwrite(self.buf, 1, self.buf_len, out); }
+        if self.buf.len() != 0 { unsafe stdio::fwrite(self.buf.as_ptr() as *const void, 1, self.buf.len(), out); }
     }
     fn seed_emitted_type_instances(self: &mut Self) void {
         for pass in 0..32 {
@@ -8424,14 +8408,14 @@ extend Codegen {
         }
     }
     fn macro_finish(self: &mut Self, start: usize) void {
-        if self.buf_len <= start { return; }
-        let mut endp = self.buf_len;
-        while endp > start && unsafe self.buf[endp - 1] == '\n' as char { endp = endp - 1; }
+        if self.buf.len() <= start { return; }
+        let mut endp = self.buf.len();
+        while endp > start && unsafe self.buf.as_ptr()[endp - 1] == ('\n' as u8) { endp = endp - 1; }
         let nlen = endp - start;
         let tmp = unsafe stdlib::malloc(nlen) as *mut char;
         if tmp == null { diag::oom(); }
-        unsafe cstring::memcpy(tmp as *mut void, (self.buf + start), nlen);
-        self.buf_len = start;
+        unsafe cstring::memcpy(tmp as *mut void, (self.buf.as_ptr() + start) as *const void, nlen);
+        self.buf.truncate(start);
         for i in 0..nlen {
             let ch = unsafe tmp[i];
             if ch == '\n' as char { self.emit_bytes(" \\\n".ptr() as *const char, 3); }
@@ -8498,7 +8482,7 @@ extend Codegen {
         self.macro_self = declId;
         self.macro_self_mod = self.cur_module();
         self.nsubst = 0;
-        let start = self.buf_len;
+        let start = self.buf.len();
         let mids = unsafe (*self.cur_ast()).list(unsafe (*self.cur_ast()).at_const(implId).as_data.extend_def.items);
         let msn = unsafe (*self.cur_ast()).at_const(implId).as_data.extend_def.items.len;
         for j in 0..msn {
@@ -8553,7 +8537,7 @@ extend Codegen {
         self.macro_self = declId;
         self.macro_self_mod = self.cur_module();
         self.nsubst = 0;
-        let start = self.buf_len;
+        let start = self.buf.len();
         if !define {
             if dn_kind == NodeKind::NODE_STRUCT {
                 let kw = agg_kw(unsafe (*self.cur_ast()).at_const(declId));
@@ -8642,7 +8626,7 @@ extend Codegen {
         self.macro_self = declId;
         self.macro_self_mod = self.cur_module();
         self.nsubst = 0;
-        let start = self.buf_len;
+        let start = self.buf.len();
         let mut ov = Buf400 {};
         self.macro_method_name(methodId, (&mut ov.b[0]) as *mut char, 400);
         self.emit_function(methodId, DefId { module: 0, node: NODE_NONE }, false, define, (&ov.b[0]) as *const char, false);

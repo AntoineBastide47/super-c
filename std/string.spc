@@ -186,6 +186,22 @@ extend<A: Allocator> String<A> {
         }
     }
 
+    // --- raw tail writes: for an external writer (a C vsnprintf/memcpy) that fills the spare region ------
+
+    // Reserve room for `additional` more bytes and return a writable pointer at the current end (into the
+    // spare capacity, `capacity() - len()` bytes of it). Write up to that many bytes there, then commit them
+    // with `advance_len`. The returned pointer is invalidated by any later growth -- re-fetch after one.
+    pub fn spare_mut(self: &mut String<A>, additional: usize) *mut u8 {
+        self.reserve(additional);
+        return unsafe (self.data_ptr() + self.len());
+    }
+
+    // Grow the length by `n` bytes just written into the spare region via `spare_mut`. Caller guarantees
+    // `len() + n <= capacity()` and that those `n` bytes were initialised.
+    pub fn advance_len(self: &mut String<A>, n: usize) {
+        self.set_len(self.len() + n);
+    }
+
     // Free unused capacity. A heap string short enough to fit inline moves back onto the stack and frees
     // its buffer; otherwise it reallocs down to its length. Inline strings are already minimal.
     pub fn shrink_to_fit(self: &mut String<A>) {
