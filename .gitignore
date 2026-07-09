@@ -1,7 +1,3 @@
-# Build output (Makefile uses build/ and emits the binary at the repo root)
-build/
-/javascript_engine
-
 # Object files and other compiled intermediates
 *.o
 *.obj
@@ -33,10 +29,10 @@ build/
 *.idb
 *.pdb
 
-# Editors / OS
-.idea/
+# Editors / Project
 .vscode/
 **/.DS_Store
+build
 super-c
 examples
 todos
