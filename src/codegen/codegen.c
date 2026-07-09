@@ -2,12 +2,14 @@
 #include "consteval/consteval.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "module/loader.h"
 #include "types/hashmap.h"
+#include "utils/path.h"
 
 // Lowers a resolved, type-checked Ast to a single C translation unit (see plan in
 // src/codegen). Names are already bound (`ast_resolution`) and every expression typed
@@ -302,7 +304,7 @@ static const char *const BUILTIN_C[BT_COUNT] = {
 static void emit_expr(Codegen *c, NodeId id);
 static NodeId array_length_of(Codegen *c, NodeId iter);
 static long array_literal_count(Codegen *c, NodeId obj);
-static bool cg_int_lit(Codegen *c, NodeId e, long *out);
+static bool cg_int_lit(Codegen *c, NodeId e, long long *out);
 static bool cg_emit_checked_arith(Codegen *c, const Node *n, NodeId id);
 
 // The runtime free-flag name for a conditionally-moved Free binding (decl node `decl`): `__mv<decl>`.
@@ -4496,12 +4498,12 @@ static void emit_expr(Codegen *c, const NodeId id) {
         const NodeId lenN = oty->kind == TYPE_ARRAY ? array_length_of(c, obj) : NODE_NONE;
         const long licnt = oty->kind == TYPE_ARRAY && lenN == NODE_NONE ? array_literal_count(c, obj) : -1;
         if (lenN != NODE_NONE || licnt >= 0) { // a fixed array with a known length
-          long iv = 0, nv = licnt;
+          long long iv = 0, nv = licnt;
           const bool nconst = lenN != NODE_NONE ? cg_int_lit(c, lenN, &nv) : licnt >= 0;
           if (cg_int_lit(c, idx, &iv) && nconst) { // both constant -> compile-time bounds check
             if (iv < 0 || iv >= nv) {
               const Span sp = ast_at_const(c->ast, idx)->span;
-              codegen_errorf(c, sp.start, sp.end - sp.start, "index %ld is out of bounds for an array of length %ld",
+              codegen_errorf(c, sp.start, sp.end - sp.start, "index %lld is out of bounds for an array of length %lld",
                              iv, nv);
             }
             emit_expr(c, obj);
@@ -5492,7 +5494,7 @@ static long array_literal_count(Codegen *c, NodeId obj) {
 
 // Parse a non-negative integer literal node's value (decimal / 0x / 0b / 0o, `_` separators and any type
 // suffix tolerated). Returns true with *out set; false if `e` is not a plain integer literal.
-static bool cg_int_lit(Codegen *c, const NodeId e, long *out) {
+static bool cg_int_lit(Codegen *c, const NodeId e, long long *out) {
   const Node *const n = ast_at_const(c->ast, e);
   if (n->kind != NODE_LITERAL || n->as.literal.token_type != IntegerLiteral)
     return false;
@@ -5516,7 +5518,7 @@ static bool cg_int_lit(Codegen *c, const NodeId e, long *out) {
   if (k == 0)
     return false;
   char *end = NULL;
-  const long v = strtol(buf, &end, 0);
+  const long long v = strtoll(buf, &end, 0);
   if (end == buf)
     return false;
   *out = v;
@@ -5567,7 +5569,7 @@ static bool cg_emit_checked_arith(Codegen *c, const Node *const n, const NodeId 
                    : b == BT_I16 || b == BT_U16 ? 16
                    : b == BT_I32 || b == BT_U32 ? 32
                                                 : 64;
-  long lv, rv;
+  long long lv, rv;
   if (cg_int_lit(c, L, &lv) && cg_int_lit(c, R, &rv)) { // both literal -> evaluate at compile time
     const char *bad = NULL;
     if ((dv || rm) && rv == 0) {
@@ -10286,7 +10288,7 @@ static void emit_extern_includes(Codegen *c) {
       const char *const slash = strrchr(file, '/');
       snprintf(rel, sizeof rel, "%.*s/%.*s", slash ? (int)(slash - file) : 1, slash ? file : ".", (int)(e - s),
                (const char *)c->source + s);
-      if (realpath(rel, abs) && realpath(c->package->root_dir, rootabs)) {
+      if (sc_realpath(rel, abs, sizeof abs) && sc_realpath(c->package->root_dir, rootabs, sizeof rootabs)) {
         const size_t rl = strlen(rootabs);
         emit(c, "#include \"");
         if (strncmp(abs, rootabs, rl) == 0 && abs[rl] == '/') {
