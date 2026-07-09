@@ -1022,10 +1022,15 @@ extend<A: Allocator> String<A> as Index<u8, str> {
 // writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the compiler splits the
 // literal and emits the per-argument appends at each call site.)
 pub fn format(fmt: str, ...) String { return String::<Global>::new(); }
-// Like `format`, but APPENDS the rendered output into an existing `dst` buffer instead of returning a new
-// String -- zero allocation (reuses dst's capacity). Lowered by codegen; this body is never emitted.
-pub fn format_into(dst: &mut String, fmt: str, ...) void { }
 pub fn print(fmt: str, ...) { }
 pub fn println(fmt: str, ...) { }
 pub fn eprint(fmt: str, ...) { }   // like print/println, written to stderr
 pub fn eprintln(fmt: str, ...) { }
+
+// Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String --
+// zero allocation (reuses the buffer's capacity). It is a METHOD so the receiver's `&mut` borrow defers
+// past the argument evaluation (a free-fn `&mut dst` arg would collide with `self.X` format args).
+// Lowered by codegen; this body is never emitted.
+extend<A: Allocator> String<A> {
+    pub fn format_into(self: &mut String<A>, fmt: str, ...) void { }
+}
