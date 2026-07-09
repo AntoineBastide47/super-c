@@ -27,7 +27,7 @@ extern "C" {
 const ROOT: str = "selfhost/main.spc";
 const STD_DIR: str = "std";
 const WARMUP: i32 = 1;
-const ITERS: i32 = 8;
+const ITERS: i32 = 80;
 
 pub struct Timing {
     pub lex: f64,
