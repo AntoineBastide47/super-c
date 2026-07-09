@@ -1,5 +1,5 @@
 # Self-hosted build. An existing super-c ($(SUPERC)) compiles the compiler, its @test suite, and the
-# transpile benchmark straight from the .spc sources in selfhost/ -- this Makefile compiles no C of its own.
+# transpile benchmark straight from the .spc sources in src/ -- this Makefile compiles no C of its own.
 #
 # $(SUPERC) is the bootstrap. It defaults to the repo-local ./super-c, which then rebuilds itself; point it
 # at any working super-c to build from a clean slate, e.g.  make SUPERC=/path/to/super-c  (a fresh checkout
@@ -34,13 +34,13 @@ endif
 # The compiler's own sources: its module closure reachable from main.spc plus the C driver shim. Changing
 # any of these rebuilds $(BIN); the test/bench entry roots are excluded (they are not part of the compiler).
 COMPILER_SRCS := $(shell find selfhost -name '*.spc' \
-                   -not -path 'selfhost/tests/*' \
-                   -not -path 'selfhost/benchmark/*' \
+                   -not -path 'src/tests/*' \
+                   -not -path 'src/benchmark/*' \
                    -not -name 'run_tests.spc' -not -name 'run_bench.spc' 2>/dev/null) \
-                 selfhost/driver_shim.c selfhost/driver_shim.h
+                 src/driver_shim.c src/driver_shim.h
 
-SELFHOST_TEST_ROOT  := selfhost/run_tests.spc
-SELFHOST_BENCH_ROOT := selfhost/run_bench.spc
+SELFHOST_TEST_ROOT  := src/run_tests.spc
+SELFHOST_BENCH_ROOT := src/run_bench.spc
 
 .PHONY: all build run release test bench profile clean distclean
 
@@ -56,13 +56,13 @@ all: $(BIN)
 build: $(BIN)
 
 # Build the self-hosted compiler from its .spc sources using the existing $(SUPERC): $(SUPERC) transpiles
-# the module closure to a fresh selfhost/build tree, then $(CC) compiles it with the profile's flags.
+# the module closure to a fresh src/build tree, then $(CC) compiles it with the profile's flags.
 # Link to a temp name and mv into place so a running $(SUPERC) that IS $(BIN) is never overwritten mid-build.
 $(BIN): $(COMPILER_SRCS)
 	@printf '  SELF-BUILD  %s  (via %s, %s)\n' '$(BIN)' '$(SUPERC)' '$(PROFILE)'
-	@rm -rf selfhost/build
-	@$(SUPERC) selfhost/main.spc
-	@$(CC) $(CSTD) $(OPT) $$(find selfhost/build -name '*.c') -o '$(BIN).new' $(LDOPT)
+	@rm -rf src/build
+	@$(SUPERC) src/main.spc
+	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o '$(BIN).new' $(LDOPT)
 	@mv -f '$(BIN).new' '$(BIN)'
 	@cp '$(BIN)' 'cli-backup-macos'
 	@$(STRIP)
@@ -83,30 +83,30 @@ test: $(BIN)
 # Transpile benchmark: the compiler emits the self-transpile timing program, cc -O2 compiles + runs it.
 bench: $(BIN)
 	@printf '\n========== Transpile benchmark ==========\n'
-	@rm -rf selfhost/build
+	@rm -rf src/build
 	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
 	@mkdir -p build
-	@$(CC) $(CSTD) $(RELEASE_OPT) $$(find selfhost/build -name '*.c') -o build/selfhost-bench $(RELEASE_LDOPT)
+	@$(CC) $(CSTD) $(RELEASE_OPT) $$(find src/build -name '*.c') -o build/selfhost-bench $(RELEASE_LDOPT)
 	@build/selfhost-bench
 
 # Profile the transpile benchmark with samply (CPU sampling -> Firefox Profiler UI). Same build as `bench`
 # but -O2 -g -fno-omit-frame-pointer so optimized hotspots still symbolicate to source. For more samples,
-# raise ITERS in selfhost/benchmark/transpile_bench.spc (default 8, ~1s) or pass RATE=N (default 1000 Hz).
+# raise ITERS in src/benchmark/transpile_bench.spc (default 8, ~1s) or pass RATE=N (default 1000 Hz).
 # Needs samply:  brew install samply  (or  cargo install samply).
 RATE ?= 1000
 # Never strip the binary built for a profiling run -- symbols must survive even under PROFILE=release.
 profile: STRIP := :
 profile: $(BIN)
-	@rm -rf selfhost/build
+	@rm -rf src/build
 	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
 	@mkdir -p build
-	@$(CC) $(CSTD) -O2 -g -fno-omit-frame-pointer $$(find selfhost/build -name '*.c') -o build/selfhost-bench
+	@$(CC) $(CSTD) -O2 -g -fno-omit-frame-pointer $$(find src/build -name '*.c') -o build/selfhost-bench
 	@samply record --rate $(RATE) build/selfhost-bench
 
 # clean drops build artifacts + emitted C but KEEPS $(BIN) -- it is the bootstrap that rebuilds itself.
 # distclean also removes the binary (you then need an external $(SUPERC) to build again).
 clean:
-	@rm -rf build selfhost/build '$(BIN).new' *.out profile.json.gz
+	@rm -rf build src/build '$(BIN).new' *.out profile.json.gz
 
 distclean: clean
 	@rm -f '$(BIN)'
