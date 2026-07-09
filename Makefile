@@ -42,7 +42,7 @@ COMPILER_SRCS := $(shell find selfhost -name '*.spc' \
 SELFHOST_TEST_ROOT  := selfhost/run_tests.spc
 SELFHOST_BENCH_ROOT := selfhost/run_bench.spc
 
-.PHONY: all build run release test selfhost-test bench profile clean distclean
+.PHONY: all build run release test bench profile clean distclean
 
 # `make clean <goals>` (e.g. `make clean bench -j7`) races: a parallel `rm -rf build` can delete outputs
 # from under a concurrent build. When clean is combined with other goals, run serially so it finishes first.
@@ -77,7 +77,7 @@ release:
 
 # Run the self-hosted @test suite through the freshly built compiler. SUPERC is exported so the behavioral
 # tests' compile_and_run drives the SAME binary when it builds+runs snippets.
-test selfhost-test: $(BIN)
+test: $(BIN)
 	@SUPERC='./$(BIN)' ./$(BIN) --test $(SELFHOST_TEST_ROOT)
 
 # Transpile benchmark: the compiler emits the self-transpile timing program, cc -O2 compiles + runs it.
