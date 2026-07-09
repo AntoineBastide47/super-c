@@ -57,6 +57,18 @@ pub struct Package {
     // The driver points these at the in-flight Ast for the duration of the stage. (MODULE_NONE = inactive.)
     pub override_mod: ModuleId,
     pub override_ast: *mut Ast,
+    // Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
+    // has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
+    // makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
+    // (module_imports falls back to the linear scan if queried before the build).
+    pub mod_refs: Vector<u64>,
+    pub mod_refs_w: usize,
+    pub mod_refs_ready: bool,
+    // Per-module public-decl name index (LD-2): lk_index[mid] maps fnv_name(name)*2+is_type -> LkEnt, built
+    // lazily on first lookup into `mid` (top-level decl names are parse-final, so it stays valid for the whole
+    // pipeline). Replaces Package::lookup's linear item scan with an O(1) probe.
+    pub lk_index: Vector<Map<u64, LkEnt>>,
+    pub lk_built: Vector<bool>,
 }
 
 // The parse pipeline's result: an Ast plus whether lex/parse succeeded (mirrors the C `Ast*`/NULL return).
@@ -66,6 +78,22 @@ pub struct ParseResult { pub ast: Ast, pub ok: bool }
 
 // A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
 pub struct LookupHit { pub node: NodeId, pub mid: ModuleId }
+
+// One entry in a module's public-decl name index (LD-2): the decl node to return plus the source span of its
+// name, kept so a lookup can VERIFY the name bytes match (guarding against the ~impossible 64-bit hash
+// collision — on a verify miss we fall back to the linear scan, so the result is always exact).
+pub struct LkEnt { pub node: NodeId, pub start: u32, pub len: u32 }
+
+// FNV-1a over a name's bytes; the per-module lookup index keys on `fnv_name(name)*2 + is_type`.
+fn fnv_name(name: str) u64 {
+    let p = name.ptr();
+    let mut h: u64 = 1469598103934665603u64;
+    for i in 0..name.len() {
+        h = h ^ (unsafe p[i as usize] as u64);
+        h = h * 1099511628211u64;
+    }
+    return h;
+}
 
 // ---------------------------------------------------------------------------------------------------------
 // Path + string helpers (heap-allocated results; callers own them).
@@ -214,6 +242,11 @@ extend Package {
             ceval: null,
             override_mod: 0xFFFF as ModuleId,
             override_ast: null,
+            mod_refs: Vector::<u64>::new(),
+            mod_refs_w: 0,
+            mod_refs_ready: false,
+            lk_index: Vector::<Map<u64, LkEnt>>::new(),
+            lk_built: Vector::<bool>::new(),
         };
     }
 
@@ -371,9 +404,91 @@ extend Package {
     // Cross-module name lookup.
     // ------------------------------------------------------------------------------------------------------
 
+    // Build module `mid`'s public-decl name index on first use (idempotent). Mirrors lookup_linear's exact
+    // traversal + classification, inserting the FIRST occurrence per (name, is_type) key. Top-level decl
+    // names/spans are parse-final, so the index stays valid for the whole pipeline.
+    pub fn ensure_lk_index(self: &mut Self, mid: ModuleId) void {
+        let m = mid as usize;
+        while self.lk_index.len() <= m { self.lk_index.push(Map::<u64, LkEnt>::new()); }
+        while self.lk_built.len() <= m { self.lk_built.push(false); }
+        if self.lk_built[m] { return; }
+        self.lk_built[m] = true;
+        if !self.modules[m].has_ast { return; }
+        // srcp is raw (Copy) so no borrow of self lingers while lk_emit takes &mut self below; `ast` comes
+        // from a raw ptr (not a tracked self-borrow), so reading through it across lk_emit calls is fine.
+        let srcp = self.modules[m].source.as_str().ptr() as *const char;
+        let ast = unsafe &*self.module_ast_ptr(mid);
+        let items = ast.at_const(ast.root).as_data.program.items;
+        let ids = ast.list(items);
+        for i in 0..items.len {
+            let nid = unsafe ids[i as usize];
+            let n = ast.at_const(nid);
+            if n.kind == NodeKind::NODE_EXTERN_BLOCK {
+                let inner = n.as_data.extern_block.items;
+                let iids = ast.list(inner);
+                for j in 0..inner.len {
+                    let iid = unsafe iids[j as usize];
+                    let it = ast.at_const(iid);
+                    let mut nn: NodeId = NODE_NONE;
+                    let mut ip = false;
+                    let mut it_type = false;
+                    let mut ok = true;
+                    if it.kind == NodeKind::NODE_FUNCTION { nn = it.as_data.function.name; ip = it.as_data.function.is_public; it_type = false; }
+                    else if it.kind == NodeKind::NODE_TYPE_ALIAS { nn = it.as_data.type_alias.name; ip = it.as_data.type_alias.is_public; it_type = true; }
+                    else if it.kind == NodeKind::NODE_CONST { nn = it.as_data.const_def.name; ip = it.as_data.const_def.is_public; it_type = false; }
+                    else { ok = false; }
+                    if ok && ip { let sp = ast.at_const(nn).as_data.name.text; self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, it_type, iid); }
+                }
+            } else {
+                let mut name_node: NodeId = NODE_NONE;
+                let mut is_pub = false;
+                let mut is_type = false;
+                let mut consider = true;
+                if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM { name_node = n.as_data.aggregate.name; is_pub = n.as_data.aggregate.is_public; is_type = true; }
+                else if n.kind == NodeKind::NODE_TYPE_ALIAS { name_node = n.as_data.type_alias.name; is_pub = n.as_data.type_alias.is_public; is_type = true; }
+                else if n.kind == NodeKind::NODE_INTERFACE { name_node = n.as_data.interface_def.name; is_pub = n.as_data.interface_def.is_public; is_type = true; }
+                else if n.kind == NodeKind::NODE_FUNCTION { name_node = n.as_data.function.name; is_pub = n.as_data.function.is_public; is_type = false; }
+                else if n.kind == NodeKind::NODE_CONST { name_node = n.as_data.const_def.name; is_pub = n.as_data.const_def.is_public; is_type = false; }
+                else { consider = false; }
+                if consider && is_pub { let sp = ast.at_const(name_node).as_data.name.text; self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, is_type, nid); }
+            }
+        }
+    }
+
+    // Hash a decl's name (bytes at srcp[start..end]) into a (name-hash*2+is_type) key and insert into
+    // module-slot `m`'s index, first occurrence wins (matches lookup_linear's first-match order).
+    fn lk_emit(self: &mut Self, m: usize, srcp: *const char, start: u32, end: u32, is_type: bool, node: NodeId) void {
+        let len = end - start;
+        let np = unsafe (srcp + start as usize) as *const u8;
+        let nm = str::from_raw(np, len as usize);
+        let key = fnv_name(nm) * 2u64 + (if is_type { 1u64; } else { 0u64; });
+        let ent = LkEnt { node: node, start: start, len: len };
+        let mp = &mut self.lk_index[m];
+        if mp.get(&key).is_none() { mp.insert(key, ent); }
+    }
+
     // Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`, otherwise
-    // a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE.
+    // a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1) via the name index.
     pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
+        if !self.modules[mid as usize].has_ast { return NODE_NONE; }
+        let mp = (self as *const Package) as *mut Package;
+        unsafe { (*mp).ensure_lk_index(mid); }
+        let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
+        let key = fnv_name(name) * 2u64 + (if want_type { 1u64; } else { 0u64; });
+        return switch self.lk_index[mid as usize].get(&key) {
+            Some(e) => {
+                let mut r: NodeId = NODE_NONE;
+                if (e.len as usize) == name.len()
+                    && unsafe cstring::memcmp((src + e.start as usize), name.ptr(), name.len()) == 0 { r = e.node; }
+                else { r = self.lookup_linear(mid, name, want_type); } // 64-bit key collision (~never) -> exact scan
+                r;
+            },
+            None => NODE_NONE,
+        };
+    }
+
+    // Linear public-decl scan (LD-2 collision fallback; the original lookup body, semantics unchanged).
+    fn lookup_linear(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast { return NODE_NONE; }
         let ast = unsafe &*self.module_ast_ptr(mid);
         let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
@@ -554,13 +669,46 @@ extend Package {
 
     // Does module `from`'s code reference anything in module `to` (a cross-module use edge)?
     fn module_imports(self: &Self, from: ModuleId, to: ModuleId) bool {
-        if (from as usize) >= self.modules.len() || !self.modules[from as usize].has_ast { return false; }
+        let n = self.modules.len();
+        if (from as usize) >= n || !self.modules[from as usize].has_ast { return false; }
+        // Fast path: O(1) bitset query once built (see build_mod_refs). `to >= n` is untracked, so fall
+        // through to the linear scan (preserves exact semantics for the standalone-test Ast at module==n).
+        if self.mod_refs_ready && (to as usize) < n {
+            let word = self.mod_refs[(from as usize) * self.mod_refs_w + (to as usize) / 64];
+            return (word & (1u64 << (((to as usize) % 64) as u64))) != 0;
+        }
         let r = &self.modules[from as usize].ast.resolutions;
         for i in 0..r.len() {
             let d = r[i];
             if d.node != NODE_NONE && d.module == to { return true; }
         }
         return false;
+    }
+
+    // Build the cross-module reference bitset from every module's (resolve-final) resolutions. One pass over
+    // all resolutions, O(total resolutions), done once before instance propagation. Idempotent.
+    pub fn build_mod_refs(self: &mut Self) void {
+        let n = self.modules.len();
+        let w = (n + 63) / 64;
+        self.mod_refs_w = w;
+        self.mod_refs.clear();
+        let total = n * w;
+        for _z in 0..total { self.mod_refs.push(0u64); }
+        for from in 0..n {
+            if !self.modules[from].has_ast { continue; }
+            let base = from * w;
+            let r = &self.modules[from].ast.resolutions;
+            for k in 0..r.len() {
+                let d = r[k];
+                let to = d.module as usize;
+                if d.node != NODE_NONE && to < n {
+                    let idx = base + to / 64;
+                    let cur = self.mod_refs[idx];
+                    self.mod_refs[idx] = cur | (1u64 << ((to % 64) as u64));
+                }
+            }
+        }
+        self.mod_refs_ready = true;
     }
 
     // The user module a type argument's layout is complete in, or MODULE_NONE (self-contained / builtin).
@@ -610,6 +758,9 @@ extend Package as Free {
         self.root_dir.free();
         self.std_root.free();
         self.method_used.free();
+        self.mod_refs.free();
+        self.lk_index.free();
+        self.lk_built.free();
     }
 }
 
@@ -916,6 +1067,9 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
 // Owners emit the generic instances used across module boundaries: iterate to a fixpoint.
 pub fn package_propagate_instances(p: &mut Package) void {
     let n = p.modules.len();
+    // Resolutions are final now; build the cross-module reference bitset once so module_imports (hot inside
+    // instance_home_in, called per instance-arg here and in codegen) is an O(1) query, not a linear scan.
+    p.build_mod_refs();
     // Instances are only ever appended and re-interning one is idempotent, so each needs processing exactly
     // once; the fixpoint exists only to reach instances CREATED while processing earlier ones. Track how far
     // each module's instance table has been consumed and re-scan only the newly-appended tail per sweep -- the

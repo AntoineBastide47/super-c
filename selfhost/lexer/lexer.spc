@@ -88,10 +88,12 @@ fn match_byte(l: &mut Lexer, expected: u8) bool {
     return true;
 }
 
+@c.cold
 fn lexer_error(l: &mut Lexer, message: str) void {
     l.errors.emit(l.start as u32, (l.current - l.start) as u32, String::from_str(message));
 }
 
+@c.cold
 fn lexer_error_at(l: &mut Lexer, at: usize, len: usize, message: str) void {
     l.errors.emit(at as u32, len as u32, String::from_str(message));
 }

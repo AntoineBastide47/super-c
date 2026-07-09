@@ -90,6 +90,11 @@ pub struct TypeChecker {
     pub alias_depth: u32,
     pub ext_scope: Vector<ModuleId>,
     pub n_ext_scope: i32,
+    // TC-1: per-module list of EXTEND item ids (item order), built lazily. The find_*/dispatch scans iterate
+    // this instead of every top-level item; targets are still peeled on-demand in the same order, so type
+    // interning (hence emitted C) is byte-identical.
+    pub ext_items: Vector<Vector<NodeId>>,
+    pub ext_items_built: Vector<bool>,
     pub expected: TypeId,
     pub moved: [NodeId; 1024],
     pub nmoved: u32,
@@ -229,6 +234,8 @@ extend TypeChecker {
             alias_depth: 0,
             ext_scope: Vector::<ModuleId>::new(),
             n_ext_scope: -1,
+            ext_items: Vector::<Vector<NodeId>>::new(),
+            ext_items_built: Vector::<bool>::new(),
             expected: TYPE_NONE,
             nmoved: 0,
             nuninit: 0,
@@ -458,6 +465,7 @@ extend TypeChecker {
     }
 
     // ---- error / misc ----
+    @c.cold
     fn err_unsafe(self: &mut Self, sp: tok::Span, what: str) void {
         self.errors.emit(sp.start, sp.end - sp.start, format("{} requires an 'unsafe' block", what));
         self.errors.note(format("{}", "wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'"));
@@ -564,6 +572,7 @@ extend TypeChecker {
         }
     }
 
+    @c.cold
     fn err_mismatch(self: &mut Self, node: NodeId, expected: TypeId) void {
         let mut e = Buf96 {};
         let mut f = Buf96 {};
@@ -1434,6 +1443,24 @@ extend TypeChecker {
     }
     fn ext_scope_at(self: &Self, i: i32) ModuleId { return self.ext_scope[i as usize]; }
 
+    // Build (once) module `mm`'s list of top-level EXTEND item ids. No type interning happens here, so it is
+    // safe to build lazily at any point during type-checking.
+    fn ensure_ext_items(self: &mut Self, mm: ModuleId) void {
+        let idx = mm as usize;
+        while self.ext_items.len() <= idx { self.ext_items.push(Vector::<NodeId>::new()); }
+        while self.ext_items_built.len() <= idx { self.ext_items_built.push(false); }
+        if self.ext_items_built[idx] { return; }
+        self.ext_items_built[idx] = true;
+        let a = self.mod_ast(mm);
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe ((*a).list(items))[i as usize];
+            if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND { self.ext_items[idx].push(iid); }
+        }
+    }
+    fn ext_items_len(self: &Self, mm: ModuleId) usize { return self.ext_items[mm as usize].len(); }
+    fn ext_items_at(self: &Self, mm: ModuleId, i: usize) NodeId { return self.ext_items[mm as usize][i]; }
+
     // The type-identity an extend's target dispatches on (peeling a transparent alias).
     fn tc_peel_target(self: &mut Self, tg: DefId) DefId {
         if tg.node == NODE_NONE { return tg; }
@@ -1519,12 +1546,13 @@ extend TypeChecker {
             let mut mm = m;
             if s >= 0 { mm = self.ext_scope_at(s); }
             if s >= 0 && mm == m { s = s + 1; continue; }
+            self.ensure_ext_items(mm);
             let a = self.mod_ast(mm);
-            let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            for i in 0..items.len {
-                let iid = unsafe ((*a).list(items))[i as usize];
+            let ne = self.ext_items_len(mm);
+            for i in 0..ne {
+                let iid = self.ext_items_at(mm, i);
                 let it = unsafe (*a).at_const(iid);
-                if it.kind == NodeKind::NODE_EXTEND && it.as_data.extend_def.target_type != NODE_NONE {
+                if it.as_data.extend_def.target_type != NODE_NONE {
                     let tg = self.tc_peel_target(unsafe (*a).resolution_def(it.as_data.extend_def.target_type));
                     if tg.module == m && tg.node == decl {
                         let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
@@ -1559,12 +1587,13 @@ extend TypeChecker {
             let mut sm = m;
             if s >= 0 { sm = self.ext_scope_at(s); }
             if s >= 0 && sm == m { s = s + 1; continue; }
+            self.ensure_ext_items(sm);
             let a = self.mod_ast(sm);
-            let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            for i in 0..items.len {
-                let iid = unsafe ((*a).list(items))[i as usize];
+            let ne = self.ext_items_len(sm);
+            for i in 0..ne {
+                let iid = self.ext_items_at(sm, i);
                 let it = unsafe (*a).at_const(iid);
-                if it.kind == NodeKind::NODE_EXTEND && it.as_data.extend_def.generics.len == 0 {
+                if it.as_data.extend_def.generics.len == 0 {
                     let tg = self.tc_peel_target(unsafe (*a).resolution_def(it.as_data.extend_def.target_type));
                     if tg.module == m && tg.node == decl {
                         let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
@@ -1590,12 +1619,13 @@ extend TypeChecker {
             let mut m = tmod;
             if s >= 0 { m = self.ext_scope_at(s); }
             if s >= 0 && m == tmod { s = s + 1; continue; }
+            self.ensure_ext_items(m);
             let a = self.mod_ast(m);
-            let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            for i in 0..items.len {
-                let iid = unsafe ((*a).list(items))[i as usize];
+            let ne = self.ext_items_len(m);
+            for i in 0..ne {
+                let iid = self.ext_items_at(m, i);
                 let it = unsafe (*a).at_const(iid);
-                if it.kind == NodeKind::NODE_EXTEND && it.as_data.extend_def.interface_type != NODE_NONE && it.as_data.extend_def.target_type != NODE_NONE {
+                if it.as_data.extend_def.interface_type != NODE_NONE && it.as_data.extend_def.target_type != NODE_NONE {
                     let tr = unsafe (*a).resolution_def(it.as_data.extend_def.interface_type);
                     let tg = self.tc_peel_target(unsafe (*a).resolution_def(it.as_data.extend_def.target_type));
                     if tr.module == iface.module && tr.node == iface.node && tg.module == tmod && tg.node == tdecl {
@@ -1639,12 +1669,13 @@ extend TypeChecker {
             let mut m = tmod;
             if s >= 0 { m = self.ext_scope_at(s); }
             if s >= 0 && m == tmod { s = s + 1; continue; }
+            self.ensure_ext_items(m);
             let a = self.mod_ast(m);
-            let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-            for i in 0..items.len {
-                let iid = unsafe ((*a).list(items))[i as usize];
+            let ne = self.ext_items_len(m);
+            for i in 0..ne {
+                let iid = self.ext_items_at(m, i);
                 let it = unsafe (*a).at_const(iid);
-                if it.kind == NodeKind::NODE_EXTEND && it.as_data.extend_def.interface_type != NODE_NONE {
+                if it.as_data.extend_def.interface_type != NODE_NONE {
                     let tg = self.tc_peel_target(unsafe (*a).resolution_def(it.as_data.extend_def.target_type));
                     if tg.module == tmod && tg.node == tdecl {
                         let iff = unsafe (*a).resolution_def(it.as_data.extend_def.interface_type);
@@ -5766,6 +5797,8 @@ extend TypeChecker {
 extend TypeChecker as Free {
     pub fn free(self: &mut Self) void {
         self.ext_scope.free();
+        self.ext_items.free();
+        self.ext_items_built.free();
         self.binding_depth.free();
         self.errors.free();
         self.ast.free();
