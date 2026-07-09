@@ -12,13 +12,13 @@ struct FileScratch { pub b: [char; 4096] }
 // Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
 pub enum Namespace { NS_VALUE, NS_TYPE }
 
-// One live binding on the scope stack. (The C compiler packed the namespace into a Token's type slot to
-// keep this 16 bytes; the port stores the span + namespace directly.)
+// One live binding on the scope stack. 16 bytes (a power-of-2 stride for the hot linear scope scan): the
+// namespace rides in the top bit of `decl` -- NodeIds are far below 2^31 -- so no separate `ns` byte is
+// needed. Mask `decl & 0x7FFFFFFF` for the real NodeId; `decl >> 31` recovers the Namespace.
 pub struct Symbol {
     pub hash: u32,
     pub decl: NodeId,
     pub name: tok::Span,
-    pub ns: u8,
 }
 
 // An open closure being resolved: a value ref binding below `floor` is a CAPTURE (copied into its env by
@@ -153,7 +153,7 @@ extend Resolver {
         while self.symbols.len() as u32 > start {
             let index = self.symbols.len() - 1;
             let hash = self.symbols[index].hash;
-            let ns = self.symbols[index].ns;
+            let ns = (self.symbols[index].decl >> 31) as u8;
             let previous = self.symbol_previous[index];
             self.symbols.truncate(index);
             let key = symbol_key(hash, ns);
@@ -184,7 +184,7 @@ extend Resolver {
             }
             current = self.symbol_previous[i];
         }
-        self.symbols.push(Symbol { hash: hash, decl: decl, name: name, ns: ns as u8 });
+        self.symbols.push(Symbol { hash: hash, decl: decl | ((ns as u32) << 31), name: name });
         self.symbol_previous.push(head);
         self.symbol_index.insert(key, self.symbols.len() as u32);
     }
@@ -199,7 +199,7 @@ extend Resolver {
         while current != 0 {
             let i = (current - 1) as usize;
             let sname = self.symbols[i].name;
-            let sdecl = self.symbols[i].decl;
+            let sdecl = self.symbols[i].decl & 0x7FFFFFFF;
             if span_eq(self.source, sname, name) { return SymLookup { decl: sdecl, idx: current }; }
             current = self.symbol_previous[i];
         }
