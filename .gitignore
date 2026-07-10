@@ -31,6 +31,7 @@
 
 # Editors / Project
 .vscode/
+.tokensave/
 **/.DS_Store
 build
 super-c

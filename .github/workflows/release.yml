@@ -83,6 +83,29 @@ jobs:
       - name: Clean any build tree
         run: make clean
 
+      # --- Bootstrap ------------------------------------------------------------------------------------
+      # The build is self-hosted: `make` needs an existing super-c ($(SUPERC)) to transpile the .spc
+      # sources. Download this platform's binary from the latest release to use as the bootstrap. (The very
+      # first release -- and any release introducing a tag/flag the previous release's binary lacks -- must
+      # be seeded once by publishing a locally-built binary as a release; every run after that self-sustains.)
+      - name: Fetch bootstrap super-c from the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          arch="$(uname -m)"
+          name="super-c-${{ matrix.target }}-${arch}"
+          if [ "${{ matrix.target }}" = windows ]; then
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
+            7z x -y "${name}.zip" >/dev/null
+            mv "${name}.exe" super-c.exe
+          else
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
+            tar xzf "${name}.tar.gz"
+            mv "${name}" super-c
+            chmod +x super-c
+          fi
+
       - name: Build release binary
         # mingw hides POSIX prototypes (realpath, ...) under -std=c11's __STRICT_ANSI__; build the
         # Windows leg with -std=gnu11 (same POSIX define) so they are declared. mingw links their
@@ -90,9 +113,9 @@ jobs:
         run: |
           set -eu
           if [ "${{ runner.os }}" = Windows ]; then
-            make release BIN="super-c${BINEXT:-}" CSTD="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
+            make release BIN="super-c${BINEXT:-}" SUPERC="./super-c${BINEXT:-}" CSTD="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
           else
-            make release BIN="super-c${BINEXT:-}"
+            make release BIN="super-c${BINEXT:-}" SUPERC="./super-c${BINEXT:-}"
           fi
 
       - name: Smoke-check the binary

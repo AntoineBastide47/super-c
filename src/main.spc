@@ -1243,8 +1243,8 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
     return rc;
 }
 
-fn run_file(path: *const char, std_dir: *const char, ce_steps: u32, ce_mem: u64, topts: *const TestOpts, out_bin: *const char, target: i32) i32 {
-    let mut p = loader::package_load(path, std_dir);
+fn run_file(path: *const char, std_dir: *const char, ce_steps: u32, ce_mem: u64, topts: *const TestOpts, out_bin: *const char, target: i32, bootstrap_tags: bool) i32 {
+    let mut p = loader::package_load(path, std_dir, bootstrap_tags);
     let mut rc: i32 = 1;
     if p.ok {
         let pkg = (&mut p) as *mut loader::Package;
@@ -1302,6 +1302,7 @@ fn main() i32 {
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
     let mut bad = false;
     let mut target: i32 = unsafe shim::sc_host_platform(); // @platform gate target; --target= overrides
+    let mut bootstrap_tags = false; // --bootstrap-tags: accept unknown @attributes (build across a new tag)
     let mut i: i32 = 1;
     while i < argc {
         let arg = unsafe argv[i as usize] as *const char;
@@ -1332,6 +1333,8 @@ fn main() i32 {
             else if unsafe cstring::strcmp(t, "macos".ptr() as *const char) == 0 { target = 1; }
             else if unsafe cstring::strcmp(t, "linux".ptr() as *const char) == 0 { target = 2; }
             else { bad = true; }
+        } else if unsafe cstring::strcmp(arg, "--bootstrap-tags".ptr() as *const char) == 0 {
+            bootstrap_tags = true;
         } else if (unsafe arg[0]) == ('-' as char) && (unsafe arg[1]) == ('-' as char) {
             bad = true;
         } else if file == null {
@@ -1347,13 +1350,13 @@ fn main() i32 {
     if build_mode && out_bin == null { out_bin = "a.out".ptr() as *const char; } // cc-style default
     if bad || file == null || (unsafe *file) == (0 as char) {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n".ptr() as *const char,
+            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n".ptr() as *const char,
             stdio::stderr());
         return 1;
     }
     let arg0: *const char = if argc > 0 { unsafe argv[0] as *const char; } else { "super-c".ptr() as *const char; };
     let std_dir = exe_std_dir(arg0);
-    let rc = run_file(file, std_dir as *const char, ce_steps, ce_mem, (&topts) as *const TestOpts, out_bin, target);
+    let rc = run_file(file, std_dir as *const char, ce_steps, ce_mem, (&topts) as *const TestOpts, out_bin, target, bootstrap_tags);
     if std_dir != null { unsafe stdlib::free(std_dir as *mut void); }
     return rc;
 }

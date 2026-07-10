@@ -40,7 +40,7 @@ SRC_DIR   := src
 BUILD_DIR := build/$(PROFILE)
 # The compiler's own sources: its module closure reachable from main.spc plus the C driver shim. Changing
 # any of these rebuilds $(BIN); the test/bench entry roots are excluded (they are not part of the compiler).
-COMPILER_SRCS := $(shell find selfhost -name '*.spc' \
+COMPILER_SRCS := $(shell find src -name '*.spc' \
                    -not -path 'src/tests/*' \
                    -not -path 'src/benchmark/*' \
                    -not -name 'run_tests.spc' -not -name 'run_bench.spc' 2>/dev/null) \
@@ -65,11 +65,19 @@ build: $(BIN)
 # Build the self-hosted compiler from its .spc sources using the existing $(SUPERC): $(SUPERC) transpiles
 # the module closure to a fresh src/build tree, then $(CC) compiles it with the profile's flags.
 # Link to a temp name and mv into place so a running $(SUPERC) that IS $(BIN) is never overwritten mid-build.
+# Two stages so a $(SUPERC) that predates a tag can still build source that uses it. Stage 1 passes
+# --bootstrap-tags: any @attribute the bootstrap doesn't know is parsed and ignored, so the build always
+# goes through and yields a tag-aware compiler. Stage 2 rebuilds the tree with that compiler and NO flag --
+# a strict, self-hosted build (also catches misspelled attributes, which stage 1 would silently ignore).
 $(BIN): $(COMPILER_SRCS)
 	@printf '  SELF-BUILD  %s  (via %s, %s)\n' '$(BIN)' '$(SUPERC)' '$(PROFILE)'
 	@rm -rf src/build
-	@$(SUPERC) src/main.spc
+	@$(SUPERC) --bootstrap-tags src/main.spc
+	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o 'stage1-$(BIN)' $(LDOPT)
+	@rm -rf src/build
+	@./'stage1-$(BIN)' src/main.spc
 	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o '$(BIN).new' $(LDOPT)
+	@rm -f 'stage1-$(BIN)'
 	@mv -f '$(BIN).new' '$(BIN)'
 	@$(STRIP)
 
@@ -95,47 +103,6 @@ bench: $(BIN)
 	@$(CC) $(CSTD) $(RELEASE_OPT) $$(find src/build -name '*.c') -o build/selfhost-bench $(RELEASE_LDOPT)
 	@build/selfhost-bench
 
-ifeq ($(PROFILE),release)
-bench: $(BENCHMARK_BINS)
-	@printf '\n========== Benchmarks ==========\n'
-	@for benchmark in $(BENCHMARK_BINS); do \
-	   printf '\n--- %s ---\n' "$$(basename $$benchmark)"; \
-	   $$benchmark || exit 1; \
-	 done
-else
-bench:
-	@$(MAKE) PROFILE=release bench
-endif
-
-# raii_gen and codegen_run are OpenMP-parallelized; every other test links without it ($(OMP) stays empty).
-$(BUILD_DIR)/tests/raii_gen_test $(BUILD_DIR)/tests/codegen_run_test: OMP := $(OMP_FLAGS)
-
-$(BUILD_DIR)/tests/%: tests/%.c $(LIB_OBJS)
-	@mkdir -p $(@D)
-	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) -DSUPERC_STD_DIR='"$(CURDIR)/std"' $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT) $(OMP) $(LDLIBS)
-
-$(BUILD_DIR)/benchmark/%: benchmark/%.c $(LIB_OBJS)
-	@mkdir -p $(@D)
-	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $< $(LIB_OBJS) -o $@ $(LDOPT) $(LDLIBS)
-
-$(BIN): $(LIB_OBJS) $(BUILD_DIR)/main.o
-	@$(call ECHO,LINK,$@)
-	$(Q)$(CC) $(CSTD) $(OPT) $^ -o $@ $(LDOPT) $(LDLIBS)
-	@$(STRIP_BIN)
-
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
-	@mkdir -p $(@D)
-	@$(call ECHO,CC,$<)
-	$(Q)$(CC) $(CSTD) $(OPT) $(WARN) $(INCLUDE) $(DEPFLAGS) $(CPPFLAGS_EXTRA) -c $< -o $@
-
-$(BUILD_DIR)/main.o: CPPFLAGS_EXTRA := -DBIN_NAME='"$(BIN)"'
-
-# Header-dependency tracking: -MMD -MP emits a .d file beside each object/binary listing the
-# headers it includes (plus phony header targets so deleting a header doesn't break the build).
-DEPS := $(LIB_OBJS:.o=.d) $(BUILD_DIR)/main.d $(addsuffix .d,$(TEST_BINS) $(RTEST_BINS) $(BENCHMARK_BINS))
--include $(DEPS)
 # Profile the transpile benchmark with samply (CPU sampling -> Firefox Profiler UI). Same build as `bench`
 # but -O2 -g -fno-omit-frame-pointer so optimized hotspots still symbolicate to source. For more samples,
 # raise ITERS in src/benchmark/transpile_bench.spc (default 8, ~1s) or pass RATE=N (default 1000 Hz).
@@ -153,7 +120,7 @@ profile: $(BIN)
 # clean drops build artifacts + emitted C but KEEPS $(BIN) -- it is the bootstrap that rebuilds itself.
 # distclean also removes the binary (you then need an external $(SUPERC) to build again).
 clean:
-	@rm -rf build src/build '$(BIN).new' *.out profile.json.gz
+	@rm -rf build src/build '$(BIN).new' 'stage1-$(BIN)' *.out profile.json.gz
 
 distclean: clean
 	@rm -f '$(BIN)'

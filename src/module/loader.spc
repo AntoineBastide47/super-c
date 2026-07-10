@@ -275,7 +275,7 @@ fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src:
 }
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
-fn parse_source(source: &mut String, file: *const char) ParseResult {
+fn parse_source(source: &mut String, file: *const char, bootstrap_tags: bool) ParseResult {
     let mut lx = lexer::Lexer::new(&mut *source);   // pads `source` in place; the lexer over-reads into padding
     lx.set_file(file);
     lx.scan_tokens();
@@ -289,6 +289,7 @@ fn parse_source(source: &mut String, file: *const char) ParseResult {
     let src = source.as_str();   // padding lives past len -> invisible to the parser
     let mut ps = parser::Parser::new(toks, src);
     ps.set_file(file);
+    ps.set_bootstrap_tags(bootstrap_tags);
     ps.build_ast();
     if ps.has_errors() {
         ps.log_errors();
@@ -356,7 +357,7 @@ extend Package {
     // DFS load: takes ownership of `mod_path` and `file_path`. Returns the module's id (or -1 if unreadable).
     // A module already loaded (an import cycle) simply resolves to its id: modules are parsed whole before
     // any resolution, so mutual imports need no special handling.
-    fn load_module(self: &mut Self, mod_path: str, file_path: str) i32 {
+    fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool) i32 {
         let existing = self.find(mod_path);
         if existing >= 0 { return existing; }
 
@@ -378,7 +379,7 @@ extend Package {
             unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, file_path.ptr() as *const void, fl);
             unsafe fb.b[fl] = 0 as char;
         } else { unsafe fb.b[0] = 0 as char; }
-        let parsed = parse_source(&mut source, (&fb.b[0]) as *const char);
+        let parsed = parse_source(&mut source, (&fb.b[0]) as *const char, bootstrap_tags);
         let ok = parsed.ok;
         let id = self.add_module(String::from_str(mod_path), String::from_str(file_path), source, parsed.ast, ok);
         if !ok {
@@ -418,7 +419,7 @@ extend Package {
             }
         }
         for k in 0..child_paths.len() {
-            self.load_module(child_paths[k].as_str(), child_files[k].as_str());
+            self.load_module(child_paths[k].as_str(), child_files[k].as_str(), bootstrap_tags);
         }
         return id;
     }
@@ -1267,14 +1268,14 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
 
 // Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 // `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
-pub fn package_load(root_file: *const char, std_dir: *const char) Package {
+pub fn package_load(root_file: *const char, std_dir: *const char, bootstrap_tags: bool) Package {
     let mut p = Package::new();
     p.ok = true;
     p.root_dir = dir_of(str::from_cstr(root_file));
     if std_dir != null { p.std_root = dir_of(str::from_cstr(std_dir)); }
     let rp = stem_of(str::from_cstr(root_file));
     let rf = String::from_cstr(root_file);
-    p.load_module(rp.as_str(), rf.as_str());
+    p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags);
     load_prelude(&mut p, std_dir);
     p.seed_core();
     return p;
@@ -1292,7 +1293,7 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     if std_dir != null { p.std_root = dir_of(str::from_cstr(std_dir)); }
     load_prelude(&mut p, std_dir);
     let mut source = String::from_str(str::from_raw(src as *const u8, len));
-    let parsed = parse_source(&mut source, "<harness>".ptr() as *const char);
+    let parsed = parse_source(&mut source, "<harness>".ptr() as *const char, false);
     let ok = parsed.ok;
     let id = p.add_module(String::from_str("main"), String::from_str("<harness>"),
                           source, parsed.ast, ok);
@@ -1375,7 +1376,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
             let stem = stem_of(names[k].as_str());
             let mut modpath = String::from_str("__std::");
             modpath.push_str(stem.as_str());
-            let id = p.load_module(modpath.as_str(), file.as_str());
+            let id = p.load_module(modpath.as_str(), file.as_str(), false);
             if id >= 0 { p.modules[id as usize].prelude = true; }
         }
     }
