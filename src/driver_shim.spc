@@ -3,8 +3,6 @@
 // The backing "driver_shim.h" resolves next to this file; its same-stem sibling driver_shim.c is
 // discovered and compiled automatically.
 extern "C" "driver_shim.h" {
-    pub fn sc_argc() i32;
-    pub fn sc_argv() *mut *mut char;
     pub fn sc_dirent_name(entry: *mut void) *const char;
     pub fn sc_stat_isdir(path: *const char) i32;
     pub fn sc_dirent_isdir(entry: *mut void) i32;

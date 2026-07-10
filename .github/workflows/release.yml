@@ -1,7 +1,7 @@
 name: Release
 
-# Owner-only, manual-trigger release: builds the checked-in C snapshot in src/build for macOS, Linux and
-# Windows and publishes a GitHub Release with one archive per platform.
+# Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes
+# a GitHub Release with one archive per platform.
 on:
   workflow_dispatch:
     inputs:
@@ -94,11 +94,14 @@ jobs:
 
       # Add compiler/dep installs here if ever needed (e.g. a pinned clang/gcc, libomp); their downloads
       # land in the caches above. The default build needs only the preinstalled `cc`.
-      # Windows ships no Unix C toolchain; pull in mingw-w64 gcc. The compiler source is
+      # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
       # mingw-clean: realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call.
-      - name: Set up mingw-w64 (Windows)
+      - name: Set up mingw-w64 + make (Windows)
         if: runner.os == 'Windows'
         run: |
+          if ! command -v make >/dev/null 2>&1; then
+            choco install -y --no-progress make
+          fi
           find_mingw_bin() {
             { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
               while read -r dir; do
@@ -118,25 +121,44 @@ jobs:
           echo "CC=gcc" >> "$GITHUB_ENV"
           echo "BINEXT=.exe" >> "$GITHUB_ENV"
 
-      # --- Clean outputs only: src/build is the checked-in C input tree. ---------------------------------
+      # --- Clean outputs only; restore the committed src/build snapshot the Windows leg compiles ---------
       - name: Clean release outputs
-        run: rm -rf build dist super-c super-c.exe super-c.new super-c.exe.new stage1-super-c stage1-super-c.exe *.out profile.json.gz
+        run: make clean && rm -rf bootstrap && git checkout -- src/build
 
-      - name: Build release binary
-        # Compile the committed src/build C snapshot directly. mingw hides POSIX prototypes under
-        # -std=c11's __STRICT_ANSI__, so the Windows leg uses gnu11.
+      # --- Bootstrap (macOS/Linux only) -----------------------------------------------------------------
+      # These legs self-host: fetch the previous release's binary and let `make release` rebuild from it.
+      # Windows can't bootstrap from a prior binary, so it compiles the committed src/build snapshot below.
+      - name: Fetch bootstrap super-c from the latest release
+        if: runner.os != 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          test -d src/build
-          cstd="-std=c11 -D_POSIX_C_SOURCE=200809L"
-          if [ "${{ runner.os }}" = Windows ]; then
-            cstd="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
+          arch="$(uname -m)"
+          name="super-c-${{ matrix.target }}-${arch}"
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
+          tar xzf "${name}.tar.gz"
+          if [ -f "${name}/super-c" ]; then
+            mv "${name}/super-c" super-c
+          else
+            mv "${name}" super-c
           fi
-          bin="super-c${BINEXT:-}"
-          cc_bin="${CC:-cc}"
-          "$cc_bin" $cstd -O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections \
-            $(find src/build -name '*.c' | sort) -o "$bin" -lm
-          strip "$bin" 2>/dev/null || true
+          chmod +x super-c
+
+      - name: Build release binary
+        # macOS/Linux self-host through the previous release via `make release`. Windows has no binary to
+        # bootstrap from, so it compiles the committed C snapshot in src/build directly (__ext0_driver_shim.c
+        # pulls in src/driver_shim.c). mingw hides POSIX prototypes under -std=c11's __STRICT_ANSI__, so the
+        # Windows leg uses gnu11.
+        run: |
+          set -eu
+          if [ "${{ runner.os }}" = Windows ]; then
+            bin="super-c${BINEXT:-}"
+            test -n "$(find src/build -name '*.c' -print -quit)"
+            "${CC:-gcc}" -std=gnu11 -D_POSIX_C_SOURCE=200809L -O2 $(find src/build -name '*.c') -o "$bin" -lm
+          else
+            make release BIN="super-c${BINEXT:-}" SUPERC="./super-c${BINEXT:-}"
+          fi
 
       - name: Check binary
         run: |
