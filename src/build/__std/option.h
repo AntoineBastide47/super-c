@@ -26,6 +26,8 @@ typedef struct Option__u32 Option__u32;
 typedef struct Option__ptr_u32 Option__ptr_u32;
 typedef struct Option__bool Option__bool;
 typedef struct Option__ptr_bool Option__ptr_bool;
+typedef struct Option__str Option__str;
+typedef struct Option__ptr_str Option__ptr_str;
 typedef struct Option__u64 Option__u64;
 typedef struct Option__ptr_u64 Option__ptr_u64;
 typedef struct Option__u16 Option__u16;
@@ -39,7 +41,6 @@ typedef struct Option__i16 Option__i16;
 typedef struct Option__i8 Option__i8;
 typedef struct Option__f64 Option__f64;
 typedef struct Option__f32 Option__f32;
-typedef struct Option__str Option__str;
 
 struct Option__ptr_u8 {
   OptionTag tag;
@@ -87,6 +88,18 @@ struct Option__ptr_bool {
   OptionTag tag;
   union {
     struct { const bool *_0; } Some;
+  } payload;
+};
+struct Option__str {
+  OptionTag tag;
+  union {
+    struct { str _0; } Some;
+  } payload;
+};
+struct Option__ptr_str {
+  OptionTag tag;
+  union {
+    struct { const str *_0; } Some;
   } payload;
 };
 struct Option__u64 {
@@ -167,12 +180,6 @@ struct Option__f32 {
     struct { float _0; } Some;
   } payload;
 };
-struct Option__str {
-  OptionTag tag;
-  union {
-    struct { str _0; } Some;
-  } payload;
-};
 
 Option__ptr_u8 Option__ptr_u8__some(const uint8_t *const value);
 Option__ptr_u8 Option__ptr_u8__none(void);
@@ -231,6 +238,18 @@ Option__ptr_bool Option__ptr_bool__none(void);
 bool Option__ptr_bool__is_some(const Option__ptr_bool *const self);
 bool Option__ptr_bool__is_none(const Option__ptr_bool *const self);
 Option__ptr_bool Option__ptr_bool__default_(void);
+Option__str Option__str__some(str const value);
+Option__str Option__str__none(void);
+bool Option__str__is_some(const Option__str *const self);
+bool Option__str__is_none(const Option__str *const self);
+Option__str Option__str__default_(void);
+bool Option__str__eq(const Option__str *const self, const Option__str *const other);
+uint64_t Option__str__hash(const Option__str *const self);
+Option__ptr_str Option__ptr_str__some(const str *const value);
+Option__ptr_str Option__ptr_str__none(void);
+bool Option__ptr_str__is_some(const Option__ptr_str *const self);
+bool Option__ptr_str__is_none(const Option__ptr_str *const self);
+Option__ptr_str Option__ptr_str__default_(void);
 Option__u64 Option__u64__some(uint64_t const value);
 Option__u64 Option__u64__none(void);
 bool Option__u64__is_some(const Option__u64 *const self);
@@ -336,13 +355,6 @@ void Option__f32__free(Option__f32 *const self);
 Option__f32 Option__f32__clone(const Option__f32 *const self);
 bool Option__f32__eq(const Option__f32 *const self, const Option__f32 *const other);
 uint64_t Option__f32__hash(const Option__f32 *const self);
-Option__str Option__str__some(str const value);
-Option__str Option__str__none(void);
-bool Option__str__is_some(const Option__str *const self);
-bool Option__str__is_none(const Option__str *const self);
-Option__str Option__str__default_(void);
-bool Option__str__eq(const Option__str *const self, const Option__str *const other);
-uint64_t Option__str__hash(const Option__str *const self);
 
 
 #endif

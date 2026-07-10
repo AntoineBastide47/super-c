@@ -72,7 +72,7 @@ build: $(BIN)
 $(BIN): $(COMPILER_SRCS)
 	@printf '  SELF-BUILD  %s  (via %s, %s)\n' '$(BIN)' '$(SUPERC)' '$(PROFILE)'
 	@rm -rf src/build
-	@$(SUPERC) --bootstrap-tags src/main.spc || { rm -rf src/build; $(SUPERC) src/main.spc --bootstrap-tags; }
+	@$(SUPERC) --bootstrap-tags src/main.spc
 	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o 'stage1-$(BIN)' $(LDOPT)
 	@rm -rf src/build
 	@./'stage1-$(BIN)' src/main.spc

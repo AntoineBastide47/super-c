@@ -1291,9 +1291,12 @@ fn exe_std_dir(argv0: *const char) *mut char {
     return out;
 }
 
-fn main() i32 {
-    let argc = unsafe shim::sc_argc();
-    let argv = unsafe shim::sc_argv();
+fn argv_cstr(argv: &Vector<str>, i: i32) *const char {
+    return (*argv.at(i as usize)).ptr() as *const char;
+}
+
+fn main(argv: Vector<str>) i32 {
+    let argc = argv.len() as i32;
     let mut ce_steps: u32 = 0;
     let mut ce_mem: u64 = 0;
     let mut file: *const char = null;
@@ -1305,11 +1308,11 @@ fn main() i32 {
     let mut bootstrap_tags = false; // --bootstrap-tags: accept unknown @attributes (build across a new tag)
     let mut i: i32 = 1;
     while i < argc {
-        let arg = unsafe argv[i as usize] as *const char;
+        let arg = argv_cstr(&argv, i);
         if !build_mode && file == null && unsafe cstring::strcmp(arg, "build".ptr() as *const char) == 0 {
             build_mode = true; // `super-c build <root.spc> [-o out]`: emit + link a program
         } else if unsafe cstring::strcmp(arg, "-o".ptr() as *const char) == 0 {
-            if i + 1 < argc { i = i + 1; out_bin = unsafe argv[i as usize] as *const char; }
+            if i + 1 < argc { i = i + 1; out_bin = argv_cstr(&argv, i); }
             else { bad = true; }
         } else if unsafe cstring::strncmp(arg, "--const-eval-steps=".ptr() as *const char, 19) == 0 {
             let v = parse_size(unsafe (arg + 19));
@@ -1354,7 +1357,7 @@ fn main() i32 {
             stdio::stderr());
         return 1;
     }
-    let arg0: *const char = if argc > 0 { unsafe argv[0] as *const char; } else { "super-c".ptr() as *const char; };
+    let arg0: *const char = if argc > 0 { argv_cstr(&argv, 0); } else { "super-c".ptr() as *const char; };
     let std_dir = exe_std_dir(arg0);
     let rc = run_file(file, std_dir as *const char, ce_steps, ce_mem, (&topts) as *const TestOpts, out_bin, target, bootstrap_tags);
     if std_dir != null { unsafe stdlib::free(std_dir as *mut void); }

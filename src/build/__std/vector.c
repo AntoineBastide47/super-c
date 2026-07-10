@@ -15,6 +15,8 @@ _Static_assert(sizeof(Vector__u32__Global) == 24 && _Alignof(Vector__u32__Global
 _Static_assert(sizeof(VecIter__u32) == 24 && _Alignof(VecIter__u32) == 8, "super-c layout model mismatch: VecIter__u32");
 _Static_assert(sizeof(Vector__bool__Global) == 24 && _Alignof(Vector__bool__Global) == 8, "super-c layout model mismatch: Vector__bool__Global");
 _Static_assert(sizeof(VecIter__bool) == 24 && _Alignof(VecIter__bool) == 8, "super-c layout model mismatch: VecIter__bool");
+_Static_assert(sizeof(Vector__str__Global) == 24 && _Alignof(Vector__str__Global) == 8, "super-c layout model mismatch: Vector__str__Global");
+_Static_assert(sizeof(VecIter__str) == 24 && _Alignof(VecIter__str) == 8, "super-c layout model mismatch: VecIter__str");
 _Static_assert(sizeof(Vector__Vector__bool__Global__Global) == 24 && _Alignof(Vector__Vector__bool__Global__Global) == 8, "super-c layout model mismatch: Vector__Vector__bool__Global__Global");
 _Static_assert(sizeof(VecIter__Vector__bool__Global) == 24 && _Alignof(VecIter__Vector__bool__Global) == 8, "super-c layout model mismatch: VecIter__Vector__bool__Global");
 _Static_assert(sizeof(Vector__u64__Global) == 24 && _Alignof(Vector__u64__Global) == 8, "super-c layout model mismatch: Vector__u64__Global");
@@ -31,6 +33,7 @@ _Static_assert(sizeof(VecIter__Vector__u32__Global) == 24 && _Alignof(VecIter__V
 static __attribute__((unused)) void Vector__String__Global__Global__sift_down(Vector__String__Global__Global *const self, size_t const root, size_t const end);
 static __attribute__((unused)) void Vector__u32__Global__sift_down(Vector__u32__Global *const self, size_t const root, size_t const end);
 static __attribute__((unused)) void Vector__bool__Global__sift_down(Vector__bool__Global *const self, size_t const root, size_t const end);
+static __attribute__((unused)) void Vector__str__Global__sift_down(Vector__str__Global *const self, size_t const root, size_t const end);
 static __attribute__((unused)) void Vector__u64__Global__sift_down(Vector__u64__Global *const self, size_t const root, size_t const end);
 static __attribute__((unused)) void Vector__u16__Global__sift_down(Vector__u16__Global *const self, size_t const root, size_t const end);
 static __attribute__((unused)) void Vector__usize__Global__sift_down(Vector__usize__Global *const self, size_t const root, size_t const end);
@@ -629,6 +632,190 @@ Option__ptr_bool VecIter__bool__next(VecIter__bool *const self) {
   return Option__ptr_bool__some(r);
 }
 
+Vector__str__Global Vector__str__Global__new_in(Global const alloc) {
+  return (Vector__str__Global){ .ptr = NULL, .len = 0ULL, .cap = 0ULL, .alloc = alloc };
+}
+
+Vector__str__Global Vector__str__Global__with_capacity_in(Global const alloc, size_t const cap) {
+  Vector__str__Global v = (Vector__str__Global){ .ptr = NULL, .len = 0ULL, .cap = 0ULL, .alloc = alloc };
+  if (cap > 0ULL) {
+    (v.ptr = ((str *)Global__alloc(&v.alloc, (cap * sizeof(str)), _Alignof(str))));
+    (v.cap = cap);
+  }
+  return v;
+}
+
+size_t Vector__str__Global__len(const Vector__str__Global *const self) {
+  return self->len;
+}
+
+void Vector__str__Global__reserve(Vector__str__Global *const self, size_t const additional) {
+  const size_t needed = (self->len + additional);
+  if (needed <= self->cap) {
+    return;
+  }
+  size_t new_cap = (self->cap * 2ULL);
+  if (new_cap == 0ULL) {
+    (new_cap = 8ULL);
+  }
+  if (new_cap < needed) {
+    (new_cap = needed);
+  }
+  str *const p = ((str *)Global__realloc(&self->alloc, ((void *)self->ptr), (self->cap * sizeof(str)), (new_cap * sizeof(str)), _Alignof(str)));
+  (self->ptr = p);
+  (self->cap = new_cap);
+}
+
+void Vector__str__Global__push(Vector__str__Global *const self, str const value) {
+  Vector__str__Global__reserve(self, 1ULL);
+  (self->ptr[self->len] = value);
+  (self->len = (self->len + 1ULL));
+}
+
+const str *Vector__str__Global__at(const Vector__str__Global *const self, size_t const index) {
+  return (&self->ptr[index]);
+}
+
+Option__ptr_str Vector__str__Global__get(const Vector__str__Global *const self, size_t const index) {
+  if (index >= self->len) {
+    return (Option__ptr_str){ .tag = Option_None };
+  }
+  return (Option__ptr_str){ .tag = Option_Some, .payload.Some = { (&self->ptr[index]) } };
+}
+
+void Vector__str__Global__set(Vector__str__Global *const self, size_t const index, str const value) {
+  (void)(self->ptr[index]);
+  (self->ptr[index] = value);
+}
+
+void Vector__str__Global__clear(Vector__str__Global *const self) {
+  for (size_t i = 0ULL; i < self->len; i++) {
+    (void)(self->ptr[i]);
+  }
+  (self->len = 0ULL);
+}
+
+void Vector__str__Global__truncate(Vector__str__Global *const self, size_t const new_len) {
+  if (new_len < self->len) {
+    size_t i = new_len;
+    while (i < self->len) {
+      (void)(self->ptr[i]);
+      (i = (i + 1ULL));
+    }
+    (self->len = new_len);
+  }
+}
+
+const str *Vector__str__Global__as_ptr(const Vector__str__Global *const self) {
+  return self->ptr;
+}
+
+void Vector__str__Global__swap(Vector__str__Global *const self, size_t const i, size_t const j) {
+  const __auto_type tmp = self->ptr[i];
+  (self->ptr[i] = self->ptr[j]);
+  (self->ptr[j] = tmp);
+}
+
+Vector__str__Global Vector__str__Global__new(void) {
+  return Vector__str__Global__new_in(Global__default_());
+}
+
+void Vector__str__Global__free(Vector__str__Global *const self) {
+  for (size_t i = 0ULL; i < self->len; i++) {
+    (void)(self->ptr[i]);
+  }
+  Global__dealloc(&self->alloc, ((void *)self->ptr), (self->cap * sizeof(str)), _Alignof(str));
+  (self->ptr = NULL);
+  (self->len = 0ULL);
+  (self->cap = 0ULL);
+}
+
+Vector__str__Global Vector__str__Global__default_(void) {
+  return Vector__str__Global__new();
+}
+
+static __attribute__((unused)) void Vector__str__Global__sift_down(Vector__str__Global *const self, size_t const root, size_t const end) {
+  size_t r = root;
+  size_t child = ((2ULL * r) + 1ULL);
+  while (child < end) {
+    if (((child + 1ULL) < end) && (str__cmp(&self->ptr[child], (&self->ptr[(child + 1ULL)])) < 0)) {
+      (child = (child + 1ULL));
+    }
+    if (str__cmp(&self->ptr[r], (&self->ptr[child])) >= 0) {
+      return;
+    }
+    Vector__str__Global__swap(self, r, child);
+    (r = child);
+    (child = ((2ULL * r) + 1ULL));
+  }
+}
+
+const str *Vector__str__Global__index(const Vector__str__Global *const self, size_t const i) {
+  return (&self->ptr[i]);
+}
+
+Slice__str Vector__str__Global__index_range(const Vector__str__Global *const self, Range__usize const r) {
+  const size_t hi = ({
+    size_t __sc6;
+    if (r.inclusive) {
+      __sc6 = (r.end + 1ULL);
+    } else {
+      __sc6 = r.end;
+    }
+    __sc6;
+  });
+  return (Slice__str){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
+}
+
+str *Vector__str__Global__index_mut(Vector__str__Global *const self, size_t const i) {
+  return (&self->ptr[i]);
+}
+
+SliceMut__str Vector__str__Global__index_range_mut(Vector__str__Global *const self, Range__usize const r) {
+  const size_t hi = ({
+    size_t __sc7;
+    if (r.inclusive) {
+      __sc7 = (r.end + 1ULL);
+    } else {
+      __sc7 = r.end;
+    }
+    __sc7;
+  });
+  return (SliceMut__str){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
+}
+
+bool Vector__str__Global__eq(const Vector__str__Global *const self, const Vector__str__Global *const other) {
+  if (Vector__str__Global__len(self) != Vector__str__Global__len(other)) {
+    return false;
+  }
+  for (size_t i = 0ULL; i < Vector__str__Global__len(self); i++) {
+    const str *const a = Vector__str__Global__at(self, i);
+    const str *const b = Vector__str__Global__at(other, i);
+    if (!str__eq(a, b)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+uint64_t Vector__str__Global__hash(const Vector__str__Global *const self) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (size_t i = 0ULL; i < Vector__str__Global__len(self); i++) {
+    const str *const e = Vector__str__Global__at(self, i);
+    (h = ((h ^ str__hash(e)) * 0x100000001b3ULL));
+  }
+  return h;
+}
+
+Option__ptr_str VecIter__str__next(VecIter__str *const self) {
+  if (self->idx >= self->stop) {
+    return Option__ptr_str__none();
+  }
+  const str *const r = (&self->data[self->idx]);
+  (self->idx = (self->idx + 1ULL));
+  return Option__ptr_str__some(r);
+}
+
 Vector__Vector__bool__Global__Global Vector__Vector__bool__Global__Global__new_in(Global const alloc) {
   return (Vector__Vector__bool__Global__Global){ .ptr = NULL, .len = 0ULL, .cap = 0ULL, .alloc = alloc };
 }
@@ -737,13 +924,13 @@ const Vector__bool__Global *Vector__Vector__bool__Global__Global__index(const Ve
 
 Slice__Vector__bool__Global Vector__Vector__bool__Global__Global__index_range(const Vector__Vector__bool__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc6;
+    size_t __sc8;
     if (r.inclusive) {
-      __sc6 = (r.end + 1ULL);
+      __sc8 = (r.end + 1ULL);
     } else {
-      __sc6 = r.end;
+      __sc8 = r.end;
     }
-    __sc6;
+    __sc8;
   });
   return (Slice__Vector__bool__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -754,13 +941,13 @@ Vector__bool__Global *Vector__Vector__bool__Global__Global__index_mut(Vector__Ve
 
 SliceMut__Vector__bool__Global Vector__Vector__bool__Global__Global__index_range_mut(Vector__Vector__bool__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc7;
+    size_t __sc9;
     if (r.inclusive) {
-      __sc7 = (r.end + 1ULL);
+      __sc9 = (r.end + 1ULL);
     } else {
-      __sc7 = r.end;
+      __sc9 = r.end;
     }
-    __sc7;
+    __sc9;
   });
   return (SliceMut__Vector__bool__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -930,13 +1117,13 @@ const uint64_t *Vector__u64__Global__index(const Vector__u64__Global *const self
 
 Slice__u64 Vector__u64__Global__index_range(const Vector__u64__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc8;
+    size_t __sc10;
     if (r.inclusive) {
-      __sc8 = (r.end + 1ULL);
+      __sc10 = (r.end + 1ULL);
     } else {
-      __sc8 = r.end;
+      __sc10 = r.end;
     }
-    __sc8;
+    __sc10;
   });
   return (Slice__u64){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -947,13 +1134,13 @@ uint64_t *Vector__u64__Global__index_mut(Vector__u64__Global *const self, size_t
 
 SliceMut__u64 Vector__u64__Global__index_range_mut(Vector__u64__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc9;
+    size_t __sc11;
     if (r.inclusive) {
-      __sc9 = (r.end + 1ULL);
+      __sc11 = (r.end + 1ULL);
     } else {
-      __sc9 = r.end;
+      __sc11 = r.end;
     }
-    __sc9;
+    __sc11;
   });
   return (SliceMut__u64){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1107,13 +1294,13 @@ const Vector__String__Global__Global *Vector__Vector__String__Global__Global__Gl
 
 Slice__Vector__String__Global__Global Vector__Vector__String__Global__Global__Global__index_range(const Vector__Vector__String__Global__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc10;
+    size_t __sc12;
     if (r.inclusive) {
-      __sc10 = (r.end + 1ULL);
+      __sc12 = (r.end + 1ULL);
     } else {
-      __sc10 = r.end;
+      __sc12 = r.end;
     }
-    __sc10;
+    __sc12;
   });
   return (Slice__Vector__String__Global__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1124,13 +1311,13 @@ Vector__String__Global__Global *Vector__Vector__String__Global__Global__Global__
 
 SliceMut__Vector__String__Global__Global Vector__Vector__String__Global__Global__Global__index_range_mut(Vector__Vector__String__Global__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc11;
+    size_t __sc13;
     if (r.inclusive) {
-      __sc11 = (r.end + 1ULL);
+      __sc13 = (r.end + 1ULL);
     } else {
-      __sc11 = r.end;
+      __sc13 = r.end;
     }
-    __sc11;
+    __sc13;
   });
   return (SliceMut__Vector__String__Global__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1315,13 +1502,13 @@ const uint16_t *Vector__u16__Global__index(const Vector__u16__Global *const self
 
 Slice__u16 Vector__u16__Global__index_range(const Vector__u16__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc12;
+    size_t __sc14;
     if (r.inclusive) {
-      __sc12 = (r.end + 1ULL);
+      __sc14 = (r.end + 1ULL);
     } else {
-      __sc12 = r.end;
+      __sc14 = r.end;
     }
-    __sc12;
+    __sc14;
   });
   return (Slice__u16){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1332,13 +1519,13 @@ uint16_t *Vector__u16__Global__index_mut(Vector__u16__Global *const self, size_t
 
 SliceMut__u16 Vector__u16__Global__index_range_mut(Vector__u16__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc13;
+    size_t __sc15;
     if (r.inclusive) {
-      __sc13 = (r.end + 1ULL);
+      __sc15 = (r.end + 1ULL);
     } else {
-      __sc13 = r.end;
+      __sc15 = r.end;
     }
-    __sc13;
+    __sc15;
   });
   return (SliceMut__u16){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1508,13 +1695,13 @@ const size_t *Vector__usize__Global__index(const Vector__usize__Global *const se
 
 Slice__usize Vector__usize__Global__index_range(const Vector__usize__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc14;
+    size_t __sc16;
     if (r.inclusive) {
-      __sc14 = (r.end + 1ULL);
+      __sc16 = (r.end + 1ULL);
     } else {
-      __sc14 = r.end;
+      __sc16 = r.end;
     }
-    __sc14;
+    __sc16;
   });
   return (Slice__usize){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1525,13 +1712,13 @@ size_t *Vector__usize__Global__index_mut(Vector__usize__Global *const self, size
 
 SliceMut__usize Vector__usize__Global__index_range_mut(Vector__usize__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc15;
+    size_t __sc17;
     if (r.inclusive) {
-      __sc15 = (r.end + 1ULL);
+      __sc17 = (r.end + 1ULL);
     } else {
-      __sc15 = r.end;
+      __sc17 = r.end;
     }
-    __sc15;
+    __sc17;
   });
   return (SliceMut__usize){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1685,13 +1872,13 @@ const Vector__u32__Global *Vector__Vector__u32__Global__Global__index(const Vect
 
 Slice__Vector__u32__Global Vector__Vector__u32__Global__Global__index_range(const Vector__Vector__u32__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc16;
+    size_t __sc18;
     if (r.inclusive) {
-      __sc16 = (r.end + 1ULL);
+      __sc18 = (r.end + 1ULL);
     } else {
-      __sc16 = r.end;
+      __sc18 = r.end;
     }
-    __sc16;
+    __sc18;
   });
   return (Slice__Vector__u32__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1702,13 +1889,13 @@ Vector__u32__Global *Vector__Vector__u32__Global__Global__index_mut(Vector__Vect
 
 SliceMut__Vector__u32__Global Vector__Vector__u32__Global__Global__index_range_mut(Vector__Vector__u32__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc17;
+    size_t __sc19;
     if (r.inclusive) {
-      __sc17 = (r.end + 1ULL);
+      __sc19 = (r.end + 1ULL);
     } else {
-      __sc17 = r.end;
+      __sc19 = r.end;
     }
-    __sc17;
+    __sc19;
   });
   return (SliceMut__Vector__u32__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1764,11 +1951,11 @@ Option__Vector__bool__Global Option__Vector__bool__Global__none(void) {
 
 bool Option__Vector__bool__Global__is_some(const Option__Vector__bool__Global *const self) {
   {
-    const Option__Vector__bool__Global *const __sc18 = self;
-    if ((*__sc18).tag == Option_Some) {
+    const Option__Vector__bool__Global *const __sc20 = self;
+    if ((*__sc20).tag == Option_Some) {
       return true;
     }
-    else if ((*__sc18).tag == Option_None) {
+    else if ((*__sc20).tag == Option_None) {
       return false;
     }
     else { __builtin_unreachable(); }
@@ -1777,11 +1964,11 @@ bool Option__Vector__bool__Global__is_some(const Option__Vector__bool__Global *c
 
 bool Option__Vector__bool__Global__is_none(const Option__Vector__bool__Global *const self) {
   {
-    const Option__Vector__bool__Global *const __sc19 = self;
-    if ((*__sc19).tag == Option_Some) {
+    const Option__Vector__bool__Global *const __sc21 = self;
+    if ((*__sc21).tag == Option_Some) {
       return false;
     }
-    else if ((*__sc19).tag == Option_None) {
+    else if ((*__sc21).tag == Option_None) {
       return true;
     }
     else { __builtin_unreachable(); }
@@ -1794,12 +1981,12 @@ Option__Vector__bool__Global Option__Vector__bool__Global__default_(void) {
 
 void Option__Vector__bool__Global__free(Option__Vector__bool__Global *const self) {
   {
-    Option__Vector__bool__Global *const __sc20 = self;
-    if ((*__sc20).tag == Option_Some) {
-      const __auto_type v = &((*__sc20).payload.Some._0);
+    Option__Vector__bool__Global *const __sc22 = self;
+    if ((*__sc22).tag == Option_Some) {
+      const __auto_type v = &((*__sc22).payload.Some._0);
       Vector__bool__Global__free(v);
     }
-    else if ((*__sc20).tag == Option_None) {
+    else if ((*__sc22).tag == Option_None) {
       {
       }
     }
@@ -1808,12 +1995,12 @@ void Option__Vector__bool__Global__free(Option__Vector__bool__Global *const self
 
 Option__Vector__bool__Global Option__Vector__bool__Global__clone(const Option__Vector__bool__Global *const self) {
   {
-    const Option__Vector__bool__Global *const __sc21 = self;
-    if ((*__sc21).tag == Option_Some) {
-      const __auto_type v = &((*__sc21).payload.Some._0);
+    const Option__Vector__bool__Global *const __sc23 = self;
+    if ((*__sc23).tag == Option_Some) {
+      const __auto_type v = &((*__sc23).payload.Some._0);
       return (Option__Vector__bool__Global){ .tag = Option_Some, .payload.Some = { Vector__bool__Global__clone(v) } };
     }
-    else if ((*__sc21).tag == Option_None) {
+    else if ((*__sc23).tag == Option_None) {
       return (Option__Vector__bool__Global){ .tag = Option_None };
     }
     else { __builtin_unreachable(); }
@@ -1822,24 +2009,24 @@ Option__Vector__bool__Global Option__Vector__bool__Global__clone(const Option__V
 
 bool Option__Vector__bool__Global__eq(const Option__Vector__bool__Global *const self, const Option__Vector__bool__Global *const other) {
   {
-    const Option__Vector__bool__Global *const __sc22 = self;
-    if ((*__sc22).tag == Option_Some) {
-      const __auto_type a = &((*__sc22).payload.Some._0);
+    const Option__Vector__bool__Global *const __sc24 = self;
+    if ((*__sc24).tag == Option_Some) {
+      const __auto_type a = &((*__sc24).payload.Some._0);
       return ({
-        bool __sc23;
-        const Option__Vector__bool__Global *const __sc24 = other;
-        if ((*__sc24).tag == Option_Some) {
-          const __auto_type b = &((*__sc24).payload.Some._0);
-          __sc23 = Vector__bool__Global__eq(a, b);
+        bool __sc25;
+        const Option__Vector__bool__Global *const __sc26 = other;
+        if ((*__sc26).tag == Option_Some) {
+          const __auto_type b = &((*__sc26).payload.Some._0);
+          __sc25 = Vector__bool__Global__eq(a, b);
         }
-        else if ((*__sc24).tag == Option_None) {
-          __sc23 = false;
+        else if ((*__sc26).tag == Option_None) {
+          __sc25 = false;
         }
         else { __builtin_unreachable(); }
-        __sc23;
+        __sc25;
       });
     }
-    else if ((*__sc22).tag == Option_None) {
+    else if ((*__sc24).tag == Option_None) {
       return Option__Vector__bool__Global__is_none(other);
     }
     else { __builtin_unreachable(); }
@@ -1848,12 +2035,12 @@ bool Option__Vector__bool__Global__eq(const Option__Vector__bool__Global *const 
 
 uint64_t Option__Vector__bool__Global__hash(const Option__Vector__bool__Global *const self) {
   {
-    const Option__Vector__bool__Global *const __sc25 = self;
-    if ((*__sc25).tag == Option_Some) {
-      const __auto_type v = &((*__sc25).payload.Some._0);
+    const Option__Vector__bool__Global *const __sc27 = self;
+    if ((*__sc27).tag == Option_Some) {
+      const __auto_type v = &((*__sc27).payload.Some._0);
       return ((Vector__bool__Global__hash(v) * 0x100000001b3ULL) + 1ULL);
     }
-    else if ((*__sc25).tag == Option_None) {
+    else if ((*__sc27).tag == Option_None) {
       return 0ULL;
     }
     else { __builtin_unreachable(); }
@@ -1870,11 +2057,11 @@ Option__ptr_Vector__bool__Global Option__ptr_Vector__bool__Global__none(void) {
 
 bool Option__ptr_Vector__bool__Global__is_some(const Option__ptr_Vector__bool__Global *const self) {
   {
-    const Option__ptr_Vector__bool__Global *const __sc26 = self;
-    if ((*__sc26).tag == Option_Some) {
+    const Option__ptr_Vector__bool__Global *const __sc28 = self;
+    if ((*__sc28).tag == Option_Some) {
       return true;
     }
-    else if ((*__sc26).tag == Option_None) {
+    else if ((*__sc28).tag == Option_None) {
       return false;
     }
     else { __builtin_unreachable(); }
@@ -1883,11 +2070,11 @@ bool Option__ptr_Vector__bool__Global__is_some(const Option__ptr_Vector__bool__G
 
 bool Option__ptr_Vector__bool__Global__is_none(const Option__ptr_Vector__bool__Global *const self) {
   {
-    const Option__ptr_Vector__bool__Global *const __sc27 = self;
-    if ((*__sc27).tag == Option_Some) {
+    const Option__ptr_Vector__bool__Global *const __sc29 = self;
+    if ((*__sc29).tag == Option_Some) {
       return false;
     }
-    else if ((*__sc27).tag == Option_None) {
+    else if ((*__sc29).tag == Option_None) {
       return true;
     }
     else { __builtin_unreachable(); }
@@ -1912,13 +2099,13 @@ const Vector__bool__Global *Slice__Vector__bool__Global__index(const Slice__Vect
 
 Slice__Vector__bool__Global Slice__Vector__bool__Global__index_range(const Slice__Vector__bool__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc28;
+    size_t __sc30;
     if (r.inclusive) {
-      __sc28 = (r.end + 1ULL);
+      __sc30 = (r.end + 1ULL);
     } else {
-      __sc28 = r.end;
+      __sc30 = r.end;
     }
-    __sc28;
+    __sc30;
   });
   return (Slice__Vector__bool__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1937,13 +2124,13 @@ const Vector__bool__Global *SliceMut__Vector__bool__Global__index(const SliceMut
 
 Slice__Vector__bool__Global SliceMut__Vector__bool__Global__index_range(const SliceMut__Vector__bool__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc29;
+    size_t __sc31;
     if (r.inclusive) {
-      __sc29 = (r.end + 1ULL);
+      __sc31 = (r.end + 1ULL);
     } else {
-      __sc29 = r.end;
+      __sc31 = r.end;
     }
-    __sc29;
+    __sc31;
   });
   return (Slice__Vector__bool__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1954,13 +2141,13 @@ Vector__bool__Global *SliceMut__Vector__bool__Global__index_mut(SliceMut__Vector
 
 SliceMut__Vector__bool__Global SliceMut__Vector__bool__Global__index_range_mut(SliceMut__Vector__bool__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc30;
+    size_t __sc32;
     if (r.inclusive) {
-      __sc30 = (r.end + 1ULL);
+      __sc32 = (r.end + 1ULL);
     } else {
-      __sc30 = r.end;
+      __sc32 = r.end;
     }
-    __sc30;
+    __sc32;
   });
   return (SliceMut__Vector__bool__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -1975,11 +2162,11 @@ Option__Vector__String__Global__Global Option__Vector__String__Global__Global__n
 
 bool Option__Vector__String__Global__Global__is_some(const Option__Vector__String__Global__Global *const self) {
   {
-    const Option__Vector__String__Global__Global *const __sc31 = self;
-    if ((*__sc31).tag == Option_Some) {
+    const Option__Vector__String__Global__Global *const __sc33 = self;
+    if ((*__sc33).tag == Option_Some) {
       return true;
     }
-    else if ((*__sc31).tag == Option_None) {
+    else if ((*__sc33).tag == Option_None) {
       return false;
     }
     else { __builtin_unreachable(); }
@@ -1988,11 +2175,11 @@ bool Option__Vector__String__Global__Global__is_some(const Option__Vector__Strin
 
 bool Option__Vector__String__Global__Global__is_none(const Option__Vector__String__Global__Global *const self) {
   {
-    const Option__Vector__String__Global__Global *const __sc32 = self;
-    if ((*__sc32).tag == Option_Some) {
+    const Option__Vector__String__Global__Global *const __sc34 = self;
+    if ((*__sc34).tag == Option_Some) {
       return false;
     }
-    else if ((*__sc32).tag == Option_None) {
+    else if ((*__sc34).tag == Option_None) {
       return true;
     }
     else { __builtin_unreachable(); }
@@ -2005,12 +2192,12 @@ Option__Vector__String__Global__Global Option__Vector__String__Global__Global__d
 
 void Option__Vector__String__Global__Global__free(Option__Vector__String__Global__Global *const self) {
   {
-    Option__Vector__String__Global__Global *const __sc33 = self;
-    if ((*__sc33).tag == Option_Some) {
-      const __auto_type v = &((*__sc33).payload.Some._0);
+    Option__Vector__String__Global__Global *const __sc35 = self;
+    if ((*__sc35).tag == Option_Some) {
+      const __auto_type v = &((*__sc35).payload.Some._0);
       Vector__String__Global__Global__free(v);
     }
-    else if ((*__sc33).tag == Option_None) {
+    else if ((*__sc35).tag == Option_None) {
       {
       }
     }
@@ -2019,12 +2206,12 @@ void Option__Vector__String__Global__Global__free(Option__Vector__String__Global
 
 Option__Vector__String__Global__Global Option__Vector__String__Global__Global__clone(const Option__Vector__String__Global__Global *const self) {
   {
-    const Option__Vector__String__Global__Global *const __sc34 = self;
-    if ((*__sc34).tag == Option_Some) {
-      const __auto_type v = &((*__sc34).payload.Some._0);
+    const Option__Vector__String__Global__Global *const __sc36 = self;
+    if ((*__sc36).tag == Option_Some) {
+      const __auto_type v = &((*__sc36).payload.Some._0);
       return (Option__Vector__String__Global__Global){ .tag = Option_Some, .payload.Some = { Vector__String__Global__Global__clone(v) } };
     }
-    else if ((*__sc34).tag == Option_None) {
+    else if ((*__sc36).tag == Option_None) {
       return (Option__Vector__String__Global__Global){ .tag = Option_None };
     }
     else { __builtin_unreachable(); }
@@ -2033,24 +2220,24 @@ Option__Vector__String__Global__Global Option__Vector__String__Global__Global__c
 
 bool Option__Vector__String__Global__Global__eq(const Option__Vector__String__Global__Global *const self, const Option__Vector__String__Global__Global *const other) {
   {
-    const Option__Vector__String__Global__Global *const __sc35 = self;
-    if ((*__sc35).tag == Option_Some) {
-      const __auto_type a = &((*__sc35).payload.Some._0);
+    const Option__Vector__String__Global__Global *const __sc37 = self;
+    if ((*__sc37).tag == Option_Some) {
+      const __auto_type a = &((*__sc37).payload.Some._0);
       return ({
-        bool __sc36;
-        const Option__Vector__String__Global__Global *const __sc37 = other;
-        if ((*__sc37).tag == Option_Some) {
-          const __auto_type b = &((*__sc37).payload.Some._0);
-          __sc36 = Vector__String__Global__Global__eq(a, b);
+        bool __sc38;
+        const Option__Vector__String__Global__Global *const __sc39 = other;
+        if ((*__sc39).tag == Option_Some) {
+          const __auto_type b = &((*__sc39).payload.Some._0);
+          __sc38 = Vector__String__Global__Global__eq(a, b);
         }
-        else if ((*__sc37).tag == Option_None) {
-          __sc36 = false;
+        else if ((*__sc39).tag == Option_None) {
+          __sc38 = false;
         }
         else { __builtin_unreachable(); }
-        __sc36;
+        __sc38;
       });
     }
-    else if ((*__sc35).tag == Option_None) {
+    else if ((*__sc37).tag == Option_None) {
       return Option__Vector__String__Global__Global__is_none(other);
     }
     else { __builtin_unreachable(); }
@@ -2059,12 +2246,12 @@ bool Option__Vector__String__Global__Global__eq(const Option__Vector__String__Gl
 
 uint64_t Option__Vector__String__Global__Global__hash(const Option__Vector__String__Global__Global *const self) {
   {
-    const Option__Vector__String__Global__Global *const __sc38 = self;
-    if ((*__sc38).tag == Option_Some) {
-      const __auto_type v = &((*__sc38).payload.Some._0);
+    const Option__Vector__String__Global__Global *const __sc40 = self;
+    if ((*__sc40).tag == Option_Some) {
+      const __auto_type v = &((*__sc40).payload.Some._0);
       return ((Vector__String__Global__Global__hash(v) * 0x100000001b3ULL) + 1ULL);
     }
-    else if ((*__sc38).tag == Option_None) {
+    else if ((*__sc40).tag == Option_None) {
       return 0ULL;
     }
     else { __builtin_unreachable(); }
@@ -2076,17 +2263,17 @@ String__Global Option__Vector__String__Global__Global__fmt(const Option__Vector_
     return String__Global__from_str((str){ (const uint8_t *)"None", sizeof("None") - 1 });
   }
   String__Global inner = ({
-    String__Global __sc39;
-    const Option__Vector__String__Global__Global *const __sc40 = self;
-    if ((*__sc40).tag == Option_Some) {
-      const __auto_type v = &((*__sc40).payload.Some._0);
-      __sc39 = Vector__String__Global__Global__fmt(v);
+    String__Global __sc41;
+    const Option__Vector__String__Global__Global *const __sc42 = self;
+    if ((*__sc42).tag == Option_Some) {
+      const __auto_type v = &((*__sc42).payload.Some._0);
+      __sc41 = Vector__String__Global__Global__fmt(v);
     }
-    else if ((*__sc40).tag == Option_None) {
-      __sc39 = String__Global__new();
+    else if ((*__sc42).tag == Option_None) {
+      __sc41 = String__Global__new();
     }
     else { __builtin_unreachable(); }
-    __sc39;
+    __sc41;
   });
   String__Global s = String__Global__from_str((str){ (const uint8_t *)"Some(", sizeof("Some(") - 1 });
   String__Global__push_string(&s, (&inner));
@@ -2105,11 +2292,11 @@ Option__ptr_Vector__String__Global__Global Option__ptr_Vector__String__Global__G
 
 bool Option__ptr_Vector__String__Global__Global__is_some(const Option__ptr_Vector__String__Global__Global *const self) {
   {
-    const Option__ptr_Vector__String__Global__Global *const __sc41 = self;
-    if ((*__sc41).tag == Option_Some) {
+    const Option__ptr_Vector__String__Global__Global *const __sc43 = self;
+    if ((*__sc43).tag == Option_Some) {
       return true;
     }
-    else if ((*__sc41).tag == Option_None) {
+    else if ((*__sc43).tag == Option_None) {
       return false;
     }
     else { __builtin_unreachable(); }
@@ -2118,11 +2305,11 @@ bool Option__ptr_Vector__String__Global__Global__is_some(const Option__ptr_Vecto
 
 bool Option__ptr_Vector__String__Global__Global__is_none(const Option__ptr_Vector__String__Global__Global *const self) {
   {
-    const Option__ptr_Vector__String__Global__Global *const __sc42 = self;
-    if ((*__sc42).tag == Option_Some) {
+    const Option__ptr_Vector__String__Global__Global *const __sc44 = self;
+    if ((*__sc44).tag == Option_Some) {
       return false;
     }
-    else if ((*__sc42).tag == Option_None) {
+    else if ((*__sc44).tag == Option_None) {
       return true;
     }
     else { __builtin_unreachable(); }
@@ -2147,13 +2334,13 @@ const Vector__String__Global__Global *Slice__Vector__String__Global__Global__ind
 
 Slice__Vector__String__Global__Global Slice__Vector__String__Global__Global__index_range(const Slice__Vector__String__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc43;
+    size_t __sc45;
     if (r.inclusive) {
-      __sc43 = (r.end + 1ULL);
+      __sc45 = (r.end + 1ULL);
     } else {
-      __sc43 = r.end;
+      __sc45 = r.end;
     }
-    __sc43;
+    __sc45;
   });
   return (Slice__Vector__String__Global__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -2172,13 +2359,13 @@ const Vector__String__Global__Global *SliceMut__Vector__String__Global__Global__
 
 Slice__Vector__String__Global__Global SliceMut__Vector__String__Global__Global__index_range(const SliceMut__Vector__String__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc44;
+    size_t __sc46;
     if (r.inclusive) {
-      __sc44 = (r.end + 1ULL);
+      __sc46 = (r.end + 1ULL);
     } else {
-      __sc44 = r.end;
+      __sc46 = r.end;
     }
-    __sc44;
+    __sc46;
   });
   return (Slice__Vector__String__Global__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -2189,13 +2376,13 @@ Vector__String__Global__Global *SliceMut__Vector__String__Global__Global__index_
 
 SliceMut__Vector__String__Global__Global SliceMut__Vector__String__Global__Global__index_range_mut(SliceMut__Vector__String__Global__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc45;
+    size_t __sc47;
     if (r.inclusive) {
-      __sc45 = (r.end + 1ULL);
+      __sc47 = (r.end + 1ULL);
     } else {
-      __sc45 = r.end;
+      __sc47 = r.end;
     }
-    __sc45;
+    __sc47;
   });
   return (SliceMut__Vector__String__Global__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -2210,11 +2397,11 @@ Option__Vector__u32__Global Option__Vector__u32__Global__none(void) {
 
 bool Option__Vector__u32__Global__is_some(const Option__Vector__u32__Global *const self) {
   {
-    const Option__Vector__u32__Global *const __sc46 = self;
-    if ((*__sc46).tag == Option_Some) {
+    const Option__Vector__u32__Global *const __sc48 = self;
+    if ((*__sc48).tag == Option_Some) {
       return true;
     }
-    else if ((*__sc46).tag == Option_None) {
+    else if ((*__sc48).tag == Option_None) {
       return false;
     }
     else { __builtin_unreachable(); }
@@ -2223,11 +2410,11 @@ bool Option__Vector__u32__Global__is_some(const Option__Vector__u32__Global *con
 
 bool Option__Vector__u32__Global__is_none(const Option__Vector__u32__Global *const self) {
   {
-    const Option__Vector__u32__Global *const __sc47 = self;
-    if ((*__sc47).tag == Option_Some) {
+    const Option__Vector__u32__Global *const __sc49 = self;
+    if ((*__sc49).tag == Option_Some) {
       return false;
     }
-    else if ((*__sc47).tag == Option_None) {
+    else if ((*__sc49).tag == Option_None) {
       return true;
     }
     else { __builtin_unreachable(); }
@@ -2240,12 +2427,12 @@ Option__Vector__u32__Global Option__Vector__u32__Global__default_(void) {
 
 void Option__Vector__u32__Global__free(Option__Vector__u32__Global *const self) {
   {
-    Option__Vector__u32__Global *const __sc48 = self;
-    if ((*__sc48).tag == Option_Some) {
-      const __auto_type v = &((*__sc48).payload.Some._0);
+    Option__Vector__u32__Global *const __sc50 = self;
+    if ((*__sc50).tag == Option_Some) {
+      const __auto_type v = &((*__sc50).payload.Some._0);
       Vector__u32__Global__free(v);
     }
-    else if ((*__sc48).tag == Option_None) {
+    else if ((*__sc50).tag == Option_None) {
       {
       }
     }
@@ -2254,12 +2441,12 @@ void Option__Vector__u32__Global__free(Option__Vector__u32__Global *const self) 
 
 Option__Vector__u32__Global Option__Vector__u32__Global__clone(const Option__Vector__u32__Global *const self) {
   {
-    const Option__Vector__u32__Global *const __sc49 = self;
-    if ((*__sc49).tag == Option_Some) {
-      const __auto_type v = &((*__sc49).payload.Some._0);
+    const Option__Vector__u32__Global *const __sc51 = self;
+    if ((*__sc51).tag == Option_Some) {
+      const __auto_type v = &((*__sc51).payload.Some._0);
       return (Option__Vector__u32__Global){ .tag = Option_Some, .payload.Some = { Vector__u32__Global__clone(v) } };
     }
-    else if ((*__sc49).tag == Option_None) {
+    else if ((*__sc51).tag == Option_None) {
       return (Option__Vector__u32__Global){ .tag = Option_None };
     }
     else { __builtin_unreachable(); }
@@ -2268,24 +2455,24 @@ Option__Vector__u32__Global Option__Vector__u32__Global__clone(const Option__Vec
 
 bool Option__Vector__u32__Global__eq(const Option__Vector__u32__Global *const self, const Option__Vector__u32__Global *const other) {
   {
-    const Option__Vector__u32__Global *const __sc50 = self;
-    if ((*__sc50).tag == Option_Some) {
-      const __auto_type a = &((*__sc50).payload.Some._0);
+    const Option__Vector__u32__Global *const __sc52 = self;
+    if ((*__sc52).tag == Option_Some) {
+      const __auto_type a = &((*__sc52).payload.Some._0);
       return ({
-        bool __sc51;
-        const Option__Vector__u32__Global *const __sc52 = other;
-        if ((*__sc52).tag == Option_Some) {
-          const __auto_type b = &((*__sc52).payload.Some._0);
-          __sc51 = Vector__u32__Global__eq(a, b);
+        bool __sc53;
+        const Option__Vector__u32__Global *const __sc54 = other;
+        if ((*__sc54).tag == Option_Some) {
+          const __auto_type b = &((*__sc54).payload.Some._0);
+          __sc53 = Vector__u32__Global__eq(a, b);
         }
-        else if ((*__sc52).tag == Option_None) {
-          __sc51 = false;
+        else if ((*__sc54).tag == Option_None) {
+          __sc53 = false;
         }
         else { __builtin_unreachable(); }
-        __sc51;
+        __sc53;
       });
     }
-    else if ((*__sc50).tag == Option_None) {
+    else if ((*__sc52).tag == Option_None) {
       return Option__Vector__u32__Global__is_none(other);
     }
     else { __builtin_unreachable(); }
@@ -2294,12 +2481,12 @@ bool Option__Vector__u32__Global__eq(const Option__Vector__u32__Global *const se
 
 uint64_t Option__Vector__u32__Global__hash(const Option__Vector__u32__Global *const self) {
   {
-    const Option__Vector__u32__Global *const __sc53 = self;
-    if ((*__sc53).tag == Option_Some) {
-      const __auto_type v = &((*__sc53).payload.Some._0);
+    const Option__Vector__u32__Global *const __sc55 = self;
+    if ((*__sc55).tag == Option_Some) {
+      const __auto_type v = &((*__sc55).payload.Some._0);
       return ((Vector__u32__Global__hash(v) * 0x100000001b3ULL) + 1ULL);
     }
-    else if ((*__sc53).tag == Option_None) {
+    else if ((*__sc55).tag == Option_None) {
       return 0ULL;
     }
     else { __builtin_unreachable(); }
@@ -2316,11 +2503,11 @@ Option__ptr_Vector__u32__Global Option__ptr_Vector__u32__Global__none(void) {
 
 bool Option__ptr_Vector__u32__Global__is_some(const Option__ptr_Vector__u32__Global *const self) {
   {
-    const Option__ptr_Vector__u32__Global *const __sc54 = self;
-    if ((*__sc54).tag == Option_Some) {
+    const Option__ptr_Vector__u32__Global *const __sc56 = self;
+    if ((*__sc56).tag == Option_Some) {
       return true;
     }
-    else if ((*__sc54).tag == Option_None) {
+    else if ((*__sc56).tag == Option_None) {
       return false;
     }
     else { __builtin_unreachable(); }
@@ -2329,11 +2516,11 @@ bool Option__ptr_Vector__u32__Global__is_some(const Option__ptr_Vector__u32__Glo
 
 bool Option__ptr_Vector__u32__Global__is_none(const Option__ptr_Vector__u32__Global *const self) {
   {
-    const Option__ptr_Vector__u32__Global *const __sc55 = self;
-    if ((*__sc55).tag == Option_Some) {
+    const Option__ptr_Vector__u32__Global *const __sc57 = self;
+    if ((*__sc57).tag == Option_Some) {
       return false;
     }
-    else if ((*__sc55).tag == Option_None) {
+    else if ((*__sc57).tag == Option_None) {
       return true;
     }
     else { __builtin_unreachable(); }
@@ -2358,13 +2545,13 @@ const Vector__u32__Global *Slice__Vector__u32__Global__index(const Slice__Vector
 
 Slice__Vector__u32__Global Slice__Vector__u32__Global__index_range(const Slice__Vector__u32__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc56;
+    size_t __sc58;
     if (r.inclusive) {
-      __sc56 = (r.end + 1ULL);
+      __sc58 = (r.end + 1ULL);
     } else {
-      __sc56 = r.end;
+      __sc58 = r.end;
     }
-    __sc56;
+    __sc58;
   });
   return (Slice__Vector__u32__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -2383,13 +2570,13 @@ const Vector__u32__Global *SliceMut__Vector__u32__Global__index(const SliceMut__
 
 Slice__Vector__u32__Global SliceMut__Vector__u32__Global__index_range(const SliceMut__Vector__u32__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc57;
+    size_t __sc59;
     if (r.inclusive) {
-      __sc57 = (r.end + 1ULL);
+      __sc59 = (r.end + 1ULL);
     } else {
-      __sc57 = r.end;
+      __sc59 = r.end;
     }
-    __sc57;
+    __sc59;
   });
   return (Slice__Vector__u32__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -2400,13 +2587,13 @@ Vector__u32__Global *SliceMut__Vector__u32__Global__index_mut(SliceMut__Vector__
 
 SliceMut__Vector__u32__Global SliceMut__Vector__u32__Global__index_range_mut(SliceMut__Vector__u32__Global *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc58;
+    size_t __sc60;
     if (r.inclusive) {
-      __sc58 = (r.end + 1ULL);
+      __sc60 = (r.end + 1ULL);
     } else {
-      __sc58 = r.end;
+      __sc60 = r.end;
     }
-    __sc58;
+    __sc60;
   });
   return (SliceMut__Vector__u32__Global){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }

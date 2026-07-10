@@ -345,6 +345,26 @@ extend TypeChecker {
         return unsafe (*self.cur_ast()).intern_type(Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: q as u8, as_data: TyAs { elem: elem } });
     }
 
+    fn tc_is_prelude_decl(self: &Self, t: TypeId, name: str) bool {
+        if self.package == null { return false; }
+        let hit = unsafe (*self.package).prelude_lookup(name, true);
+        if hit.node == NODE_NONE { return false; }
+        let y = self.type_at(t);
+        return y.kind == TypeKind::TYPE_STRUCT && y.module == hit.mid && y.as_data.decl == hit.node;
+    }
+    fn tc_main_params_ok(self: &Self, params: NodeList) bool {
+        if params.len == 0 { return true; }
+        if params.len != 1 || self.package == null { return false; }
+        let ids = unsafe (*self.cur_ast()).list(params);
+        let argv = self.type_at(unsafe (*self.cur_ast()).type_of(unsafe ids[0]));
+        if argv.kind != TypeKind::TYPE_INSTANCE { return false; }
+        let hit = unsafe (*self.package).prelude_lookup("Vector", true);
+        if hit.node == NODE_NONE { return false; }
+        let it = unsafe (*self.cur_ast()).instance(argv.as_data.inst);
+        return it.module == hit.mid && it.decl == hit.node && it.n >= 1
+            && self.tc_is_prelude_decl(it.args[0], "str");
+    }
+
     // ---- loop stack ----
     fn tc_loop_push(self: &mut Self, label: tok::Span, node: NodeId, value_loop: bool) i32 {
         if self.nloops >= 32 { return -1; }
@@ -5655,7 +5675,7 @@ extend TypeChecker {
                     let rets = fnd.returns;
                     let mut rt = TYPE_NONE;
                     if rets.len == 1 { let r0 = unsafe ((*self.cur_ast()).list(rets))[0]; let rn = unsafe (*self.cur_ast()).at_const(r0); rt = self.resolve_type(if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0)); }
-                    if params.len != 0 || rets.len != 1 || rt != Ast::builtin(BuiltinType::BT_I32) { let sp = self.name_span(fnd.name); self.errors.emit(sp.start, sp.end - sp.start, format("'main' must be declared 'fn main() i32'")); }
+                    if !self.tc_main_params_ok(params) || rets.len != 1 || rt != Ast::builtin(BuiltinType::BT_I32) { let sp = self.name_span(fnd.name); self.errors.emit(sp.start, sp.end - sp.start, format("'main' must be declared 'fn main() i32' or 'fn main(argv: Vector<str>) i32'")); }
                 }
                 let saved = self.current_returns;
                 let savedfn = self.current_fn;
@@ -5808,8 +5828,5 @@ extend TypeChecker as Free {
 fn if_bool(c: bool, a: bool, b: bool) bool { if c { return a; } return b; }
 fn if_u32(c: bool, a: u32, b: u32) u32 { if c { return a; } return b; }
 fn if_nl(c: bool, a: NodeList, b: NodeList) NodeList { if c { return a; } return b; }
-
-
-
 
 

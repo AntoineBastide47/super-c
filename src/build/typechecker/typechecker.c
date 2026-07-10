@@ -73,6 +73,8 @@ static __attribute__((unused)) ast__ast__BuiltinType typechecker__typechecker__T
 static __attribute__((unused)) bool typechecker__typechecker__TypeChecker__is_plain_enum(const typechecker__typechecker__TypeChecker *const self, uint32_t const x);
 static __attribute__((unused)) uint32_t typechecker__typechecker__TypeChecker__strip(const typechecker__typechecker__TypeChecker *const self, uint32_t const x0);
 static __attribute__((unused)) uint32_t typechecker__typechecker__TypeChecker__tc_ref(typechecker__typechecker__TypeChecker *const self, uint32_t const elem, bool const mut2);
+static __attribute__((unused)) bool typechecker__typechecker__TypeChecker__tc_is_prelude_decl(const typechecker__typechecker__TypeChecker *const self, uint32_t const t, str const name);
+static __attribute__((unused)) bool typechecker__typechecker__TypeChecker__tc_main_params_ok(const typechecker__typechecker__TypeChecker *const self, ast__ast__NodeList const params);
 static __attribute__((unused)) int32_t typechecker__typechecker__TypeChecker__tc_loop_push(typechecker__typechecker__TypeChecker *const self, lexer__token__Span const label, uint32_t const node, bool const value_loop);
 static __attribute__((unused)) void typechecker__typechecker__TypeChecker__tc_loop_pop(typechecker__typechecker__TypeChecker *const self, int32_t const le, lexer__token__Span const sp);
 static __attribute__((unused)) int32_t typechecker__typechecker__TypeChecker__tc_find_loop(const typechecker__typechecker__TypeChecker *const self, lexer__token__Span const label);
@@ -555,6 +557,38 @@ static __attribute__((unused)) uint32_t typechecker__typechecker__TypeChecker__t
     (q = ast__ast__TypeQualifier_TYPE_QUAL_MUT);
   }
   return ast__ast__Ast__intern_type(&((*typechecker__typechecker__TypeChecker__cur_ast(self))), (ast__ast__Ty){ .kind = ast__ast__TypeKind_TYPE_REFERENCE, .qualifier = ((uint8_t)q), .as_data = (ast__ast__TyAs){ .elem = elem } });
+}
+
+static __attribute__((unused)) bool typechecker__typechecker__TypeChecker__tc_is_prelude_decl(const typechecker__typechecker__TypeChecker *const self, uint32_t const t, str const name) {
+  if (self->package == NULL) {
+    return false;
+  }
+  const module__loader__LookupHit hit = module__loader__Package__prelude_lookup(&((*self->package)), name, true);
+  if (hit.node == ast__ast__NODE_NONE) {
+    return false;
+  }
+  const ast__ast__Ty *const y = typechecker__typechecker__TypeChecker__type_at(self, t);
+  return (((y->kind == ast__ast__TypeKind_TYPE_STRUCT) && (y->module == hit.mid)) && (y->as_data.decl == hit.node));
+}
+
+static __attribute__((unused)) bool typechecker__typechecker__TypeChecker__tc_main_params_ok(const typechecker__typechecker__TypeChecker *const self, ast__ast__NodeList const params) {
+  if (params.len == 0U) {
+    return true;
+  }
+  if ((params.len != 1U) || (self->package == NULL)) {
+    return false;
+  }
+  const uint32_t *const ids = ast__ast__Ast__list(&((*typechecker__typechecker__TypeChecker__cur_ast(self))), params);
+  const ast__ast__Ty *const argv = typechecker__typechecker__TypeChecker__type_at(self, ast__ast__Ast__type_of(&((*typechecker__typechecker__TypeChecker__cur_ast(self))), ids[0]));
+  if (argv->kind != ast__ast__TypeKind_TYPE_INSTANCE) {
+    return false;
+  }
+  const module__loader__LookupHit hit = module__loader__Package__prelude_lookup(&((*self->package)), (str){ (const uint8_t *)"Vector", sizeof("Vector") - 1 }, true);
+  if (hit.node == ast__ast__NODE_NONE) {
+    return false;
+  }
+  const ast__ast__TyInstance *const it = ast__ast__Ast__instance(&((*typechecker__typechecker__TypeChecker__cur_ast(self))), argv->as_data.inst);
+  return ((((it->module == hit.mid) && (it->decl == hit.node)) && (it->n >= 1U)) && typechecker__typechecker__TypeChecker__tc_is_prelude_decl(self, it->args[0], (str){ (const uint8_t *)"str", sizeof("str") - 1 }));
 }
 
 static __attribute__((unused)) int32_t typechecker__typechecker__TypeChecker__tc_loop_push(typechecker__typechecker__TypeChecker *const self, lexer__token__Span const label, uint32_t const node, bool const value_loop) {
@@ -8401,10 +8435,10 @@ __sc295; }));
             const ast__ast__Node *const rn = ast__ast__Ast__at_const(&((*typechecker__typechecker__TypeChecker__cur_ast(self))), r0);
             (rt = typechecker__typechecker__TypeChecker__resolve_type(self, typechecker__typechecker__if_node((rn->kind == ast__ast__NodeKind_NODE_PARAMETER), rn->as_data.parameter.ty, r0)));
           }
-          if (((params.len != 0U) || (rets.len != 1U)) || (rt != 5U)) {
+          if (((!typechecker__typechecker__TypeChecker__tc_main_params_ok(self, params)) || (rets.len != 1U)) || (rt != 5U)) {
             const lexer__token__Span sp = typechecker__typechecker__TypeChecker__name_span(self, fnd.name);
             utils__errors__Errors__emit(&self->errors, sp.start, (sp.end - sp.start), ({ String__Global __sc296 = String__Global__new();
-String__Global__push_str(&__sc296, (str){ .ptr = (const uint8_t*)"'main' must be declared 'fn main() i32'", .len = sizeof("'main' must be declared 'fn main() i32'") - 1 });
+String__Global__push_str(&__sc296, (str){ .ptr = (const uint8_t*)"'main' must be declared 'fn main() i32' or 'fn main(argv: Vector<str>) i32'", .len = sizeof("'main' must be declared 'fn main() i32' or 'fn main(argv: Vector<str>) i32'") - 1 });
 __sc296; }));
           }
         }

@@ -96,7 +96,9 @@ fn errors() {
     h::expect_err_msg("main returning void", "fn main() void { }\n", "'main' must be declared 'fn main() i32'");
     h::expect_err_msg("main with no return type", "fn main() { return; }\n", "'main' must be declared 'fn main() i32'");
     h::expect_err_msg("main with a wrong return type", "fn main() bool { return true; }\n", "'main' must be declared 'fn main() i32'");
-    h::expect_err_msg("main with parameters", "fn main(x: i32) i32 { return 0; }\n", "'main' must be declared 'fn main() i32'");
+    h::expect_ok("main with argv vector", "fn main(argv: Vector<str>) i32 { return argv.len() as i32; }\n");
+    h::expect_err_msg("main with raw argv", "fn main(argc: i32, argv: *mut *mut char) i32 { return argc; }\n", "fn main(argv: Vector<str>) i32");
+    h::expect_err_msg("main with bad parameters", "fn main(x: i32) i32 { return 0; }\n", "'main' must be declared 'fn main() i32' or 'fn main(argv: Vector<str>) i32'");
 }
 
 @test

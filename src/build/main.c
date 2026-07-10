@@ -65,7 +65,8 @@ static __attribute__((unused)) int32_t main__run_package(module__loader__Package
 static __attribute__((unused)) int32_t main__run_file(const char *const path, const char *const std_dir, uint32_t const ce_steps, uint64_t const ce_mem, const main__TestOpts *const topts, const char *const out_bin, int32_t const target, bool const bootstrap_tags);
 static __attribute__((unused)) uint64_t main__parse_size(const char *const s);
 static __attribute__((unused)) char *main__exe_std_dir(const char *const argv0);
-int main(void);
+static __attribute__((unused)) const char *main__argv_cstr(const Vector__str__Global *const argv, int32_t const i);
+int __sc_user_main(Vector__str__Global argv);
 
 Vector__main__TestCase__Global Vector__main__TestCase__Global__new_in(Global const alloc) {
   return (Vector__main__TestCase__Global){ .ptr = NULL, .len = 0ULL, .cap = 0ULL, .alloc = alloc };
@@ -2159,9 +2160,12 @@ static __attribute__((unused)) char *main__exe_std_dir(const char *const argv0) 
   return out;
 }
 
-int main(void) {
-  const int32_t argc = sc_argc();
-  char **const argv = sc_argv();
+static __attribute__((unused)) const char *main__argv_cstr(const Vector__str__Global *const argv, int32_t const i) {
+  return ((const char *)str__ptr(&((*Vector__str__Global__at(argv, ((size_t)i))))));
+}
+
+int __sc_user_main(Vector__str__Global argv) {
+  const int32_t argc = ((int32_t)Vector__str__Global__len(&argv));
   uint32_t ce_steps = 0U;
   uint64_t ce_mem = 0ULL;
   const char *file = NULL;
@@ -2173,13 +2177,13 @@ int main(void) {
   bool bootstrap_tags = false;
   int32_t i = 1;
   while (i < argc) {
-    const char *const arg = ((const char *)argv[((size_t)i)]);
+    const char *const arg = main__argv_cstr((&argv), i);
     if (((!build_mode) && (file == NULL)) && (strcmp(arg, ((const char *)({ __auto_type __sc201 = (str){ (const uint8_t *)"build", sizeof("build") - 1 }; str__ptr(&__sc201); }))) == 0)) {
       (build_mode = true);
     } else if (strcmp(arg, ((const char *)({ __auto_type __sc202 = (str){ (const uint8_t *)"-o", sizeof("-o") - 1 }; str__ptr(&__sc202); }))) == 0) {
       if (({ int32_t __sc_r; if (__builtin_add_overflow(i, 1, &__sc_r)) { __sc_panic("arithmetic overflow"); } __sc_r; }) < argc) {
         (i = ({ int32_t __sc_r; if (__builtin_add_overflow(i, 1, &__sc_r)) { __sc_panic("arithmetic overflow"); } __sc_r; }));
-        (out_bin = ((const char *)argv[((size_t)i)]));
+        (out_bin = main__argv_cstr((&argv), i));
       } else {
         (bad = true);
       }
@@ -2242,22 +2246,47 @@ int main(void) {
   }
   if ((bad || (file == NULL)) || ((*file) == 0)) {
     fputs(((const char *)({ __auto_type __sc216 = (str){ (const uint8_t *)"Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n", sizeof("Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n") - 1 }; str__ptr(&__sc216); })), stdio__stderr());
-    return 1;
+    {
+      __auto_type __sc217 = 1;
+      Vector__str__Global__free(&argv);
+      return __sc217;
+    }
   }
   const char *const arg0 = ({
-    const char *__sc217;
+    const char *__sc218;
     if (argc > 0) {
-      __sc217 = ((const char *)argv[0]);
+      __sc218 = main__argv_cstr((&argv), 0);
     } else {
-      __sc217 = ((const char *)({ __auto_type __sc218 = (str){ (const uint8_t *)"super-c", sizeof("super-c") - 1 }; str__ptr(&__sc218); }));
+      __sc218 = ((const char *)({ __auto_type __sc219 = (str){ (const uint8_t *)"super-c", sizeof("super-c") - 1 }; str__ptr(&__sc219); }));
     }
-    __sc217;
+    __sc218;
   });
   char *const std_dir = main__exe_std_dir(arg0);
   const int32_t rc = main__run_file(file, ((const char *)std_dir), ce_steps, ce_mem, ((const main__TestOpts *)(&topts)), out_bin, target, bootstrap_tags);
   if (std_dir != NULL) {
     free(((void *)std_dir));
   }
-  return rc;
+  {
+    __auto_type __sc220 = rc;
+    Vector__str__Global__free(&argv);
+    return __sc220;
+  }
+}
+
+
+static Vector__str__Global __sc_argv_to_vector(int argc, char **argv) {
+  Vector__str__Global out = (Vector__str__Global){0};
+  if (argc > 0) {
+    out.alloc = (Global){};
+    out.ptr = (str *)Global__alloc(&out.alloc, sizeof(str) * (size_t)argc, _Alignof(str));
+    out.len = (size_t)argc;
+    out.cap = (size_t)argc;
+    for (int i = 0; i < argc; i++) { out.ptr[i] = str__from_cstr(argv[i]); }
+  }
+  return out;
+}
+
+int main(int argc, char **argv) {
+  return __sc_user_main(__sc_argv_to_vector(argc, argv));
 }
 

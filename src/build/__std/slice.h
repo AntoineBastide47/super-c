@@ -4,9 +4,11 @@
 #include "../super_rt.h"
 typedef struct Option Option;
 typedef struct Range__usize Range__usize;
+typedef struct str str;
 typedef struct Option__ptr_u8 Option__ptr_u8;
 typedef struct Option__ptr_u32 Option__ptr_u32;
 typedef struct Option__ptr_bool Option__ptr_bool;
+typedef struct Option__ptr_str Option__ptr_str;
 typedef struct Option__ptr_u64 Option__ptr_u64;
 typedef struct Option__ptr_u16 Option__ptr_u16;
 typedef struct Option__ptr_usize Option__ptr_usize;
@@ -16,6 +18,8 @@ typedef struct Slice__u32 Slice__u32;
 typedef struct SliceMut__u32 SliceMut__u32;
 typedef struct Slice__bool Slice__bool;
 typedef struct SliceMut__bool SliceMut__bool;
+typedef struct Slice__str Slice__str;
+typedef struct SliceMut__str SliceMut__str;
 typedef struct SliceMut__u8 SliceMut__u8;
 typedef struct Slice__u64 Slice__u64;
 typedef struct SliceMut__u64 SliceMut__u64;
@@ -42,6 +46,14 @@ struct Slice__bool {
 };
 struct SliceMut__bool {
   bool *ptr;
+  size_t len;
+};
+struct Slice__str {
+  const str *ptr;
+  size_t len;
+};
+struct SliceMut__str {
+  str *ptr;
   size_t len;
 };
 struct SliceMut__u8 {
@@ -97,6 +109,16 @@ const bool *SliceMut__bool__index(const SliceMut__bool *const self, size_t const
 Slice__bool SliceMut__bool__index_range(const SliceMut__bool *const self, Range__usize const r);
 bool *SliceMut__bool__index_mut(SliceMut__bool *const self, size_t const i);
 SliceMut__bool SliceMut__bool__index_range_mut(SliceMut__bool *const self, Range__usize const r);
+size_t Slice__str__len(const Slice__str *const self);
+const str *Slice__str__as_ptr(const Slice__str *const self);
+const str *Slice__str__index(const Slice__str *const self, size_t const i);
+Slice__str Slice__str__index_range(const Slice__str *const self, Range__usize const r);
+size_t SliceMut__str__len(const SliceMut__str *const self);
+str *SliceMut__str__as_mut_ptr(const SliceMut__str *const self);
+const str *SliceMut__str__index(const SliceMut__str *const self, size_t const i);
+Slice__str SliceMut__str__index_range(const SliceMut__str *const self, Range__usize const r);
+str *SliceMut__str__index_mut(SliceMut__str *const self, size_t const i);
+SliceMut__str SliceMut__str__index_range_mut(SliceMut__str *const self, Range__usize const r);
 size_t SliceMut__u8__len(const SliceMut__u8 *const self);
 uint8_t *SliceMut__u8__as_mut_ptr(const SliceMut__u8 *const self);
 const uint8_t *SliceMut__u8__index(const SliceMut__u8 *const self, size_t const i);

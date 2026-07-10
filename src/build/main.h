@@ -64,6 +64,7 @@ typedef struct codegen__codegen__CgTestCase codegen__codegen__CgTestCase;
 typedef struct consteval__consteval__ConstEval consteval__consteval__ConstEval;
 typedef struct codegen__codegen__Codegen codegen__codegen__Codegen;
 typedef struct codegen__codegen__CgTestInfo codegen__codegen__CgTestInfo;
+typedef struct Vector__str__Global Vector__str__Global;
 typedef struct Option__module__loader__Module Option__module__loader__Module;
 typedef struct Option__ptr_module__loader__Module Option__ptr_module__loader__Module;
 typedef struct Option__usize Option__usize;
@@ -131,6 +132,11 @@ typedef struct Option__ptr_main__TestSuite Option__ptr_main__TestSuite;
 typedef struct VecIter__main__TestSuite VecIter__main__TestSuite;
 typedef struct Slice__main__TestSuite Slice__main__TestSuite;
 typedef struct SliceMut__main__TestSuite SliceMut__main__TestSuite;
+typedef struct Option__str Option__str;
+typedef struct Option__ptr_str Option__ptr_str;
+typedef struct VecIter__str VecIter__str;
+typedef struct Slice__str Slice__str;
+typedef struct SliceMut__str SliceMut__str;
 typedef struct Option__ptr_u8 Option__ptr_u8;
 #include "ast/ast.h"
 #include "codegen/codegen.h"

@@ -5672,6 +5672,34 @@ fn addg(g: *mut char, cap: usize, gn: usize, s: *const char) usize {
 }
 
 extend Codegen {
+    fn cg_is_prelude_decl(self: &Self, t: TypeId, name: str) bool {
+        if self.package == null { return false; }
+        let hit = unsafe (*self.package).prelude_lookup(name, true);
+        if hit.node == NODE_NONE { return false; }
+        let y = self.type_at(t);
+        return y.kind == TypeKind::TYPE_STRUCT && y.module == hit.mid && y.as_data.decl == hit.node;
+    }
+    fn cg_main_argv_vector(self: &Self, params: NodeList) bool {
+        if params.len != 1 || self.package == null { return false; }
+        let ids = unsafe (*self.cur_ast()).list(params);
+        let argv = self.type_at(unsafe (*self.cur_ast()).type_of(unsafe ids[0]));
+        if argv.kind != TypeKind::TYPE_INSTANCE { return false; }
+        let hit = unsafe (*self.package).prelude_lookup("Vector", true);
+        if hit.node == NODE_NONE { return false; }
+        let it = unsafe (*self.cur_ast()).instance(argv.as_data.inst);
+        return it.module == hit.mid && it.decl == hit.node && it.n >= 1
+            && self.cg_is_prelude_decl(it.args[0], "str");
+    }
+    fn emit_main_argv_wrapper(self: &mut Self, params: NodeList) void {
+        let ids = unsafe (*self.cur_ast()).list(params);
+        let ty = unsafe (*self.cur_ast()).type_of(unsafe ids[0]);
+        let mut vec = Buf256 {};
+        self.render_type_id(ty, "".ptr() as *const char, (&mut vec.b[0]) as *mut char, 256);
+        self.buf.format_into(
+            "\nstatic {} __sc_argv_to_vector(int argc, char **argv) {{\n  {} out = ({}){{0}};\n  if (argc > 0) {{\n    out.alloc = (Global){{}};\n    out.ptr = (str *)Global__alloc(&out.alloc, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) {{ out.ptr[i] = str__from_cstr(argv[i]); }}\n  }}\n  return out;\n}}\n\nint main(int argc, char **argv) {{\n  return __sc_user_main(__sc_argv_to_vector(argc, argv));\n}}\n\n",
+            diag::cstr((&vec.b[0]) as *const char), diag::cstr((&vec.b[0]) as *const char), diag::cstr((&vec.b[0]) as *const char));
+    }
+
     // Emit a function signature; with_body emits the block, otherwise a prototype `;`.
     fn emit_function(self: &mut Self, fn_id: NodeId, target: DefId, extern_q: bool, with_body: bool, name_override: *const char, spec_static: bool) void {
         let f = unsafe (*self.cur_ast()).at_const(fn_id).as_data.function;
@@ -5682,6 +5710,10 @@ extend Codegen {
             self.function_name(fn_id, target, (&mut nm.b[0]) as *mut char, 256, !extern_q);
         }
         let is_main = target.node == NODE_NONE && name_override == null && span_is(self.source, self.name_span(f.name), "main".ptr() as *const char);
+        let main_argv_vector = is_main && self.cg_main_argv_vector(f.params);
+        if main_argv_vector {
+            bappend((&mut nm.b[0]) as *mut char, 256, 0, "__sc_user_main".ptr() as *const char);
+        }
         let exported = self.cg_attr(self.cur_module(), fn_id, AttrKind::ATTR_EXPORT) != null;
         let is_static = if name_override != null { spec_static; } else { self.multifile && !extern_q && !is_main && !exported && !f.is_public; };
         let mut ps = Buf1024 {};
@@ -5787,6 +5819,7 @@ extend Codegen {
             }
             self.emit_block_from(f.body, 0);
             self.emit_cstr("\n\n".ptr() as *const char);
+            if main_argv_vector { self.emit_main_argv_wrapper(f.params); }
         } else {
             self.emit_cstr(";\n".ptr() as *const char);
         }
