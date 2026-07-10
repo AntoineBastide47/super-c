@@ -91,7 +91,7 @@ fn open_out(path: str) *mut stdio::FILE {
     let mut i: usize = 0;
     while i < n { if (unsafe p[i]) == ('/' as u8) { slash = i; } i = i + 1; }
     if slash < n { mkdir_p(str::from_raw(p, slash)); }
-    return stdio::fopen(path, "w");
+    return stdio::fopen(path, "wb"); // binary: keep '\n' literal so Windows text-mode CRLF can't break \-continued macros (super_rt.h)
 }
 
 // Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
@@ -444,7 +444,7 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
     }
     let mut ldpath = build_out_path(root, "__ldflags", "");
     if ld.len() != 0 {
-        let f = stdio::fopen(ldpath.as_str(), "w");
+        let f = stdio::fopen(ldpath.as_str(), "wb"); // binary: no CRLF so linker flags read back clean on Windows
         if f != null {
             for k in 0..ld.len() { unsafe stdio::fprintf(f, "%s\n".ptr() as *const char, ld[k].cstr()); }
             unsafe stdio::fclose(f);
