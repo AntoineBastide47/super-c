@@ -6,8 +6,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #if defined(_WIN32)
-#  include <direct.h> /* _mkdir */
-#  include <io.h>     /* _access */
+#  include <direct.h>  /* _mkdir, _rmdir */
+#  include <io.h>      /* _access, _unlink */
+#  include <process.h> /* _getpid */
+#  include <windows.h>
 #else
 #  include <sys/wait.h> /* WIFEXITED/WEXITSTATUS */
 #endif
@@ -15,22 +17,6 @@
 #  include <crt_externs.h>  /* _NSGetArgc/_NSGetArgv */
 #  include <mach-o/dyld.h>  /* _NSGetExecutablePath */
 #endif
-
-int sc_argc(void) {
-#if defined(__APPLE__)
-  return *_NSGetArgc();
-#else
-  return 0;
-#endif
-}
-
-char **sc_argv(void) {
-#if defined(__APPLE__)
-  return *_NSGetArgv();
-#else
-  return (char **)0;
-#endif
-}
 
 const char *sc_dirent_name(void *entry) { return ((struct dirent *)entry)->d_name; }
 
@@ -69,10 +55,35 @@ int sc_dirent_isdir(void *entry) {
 /* 1 iff both paths resolve to the same physical file (same device + inode), 0 if not, -1 if either
    can't be stat'd. Ground-truth file identity -- cheaper than realpath (one stat each, no readdir). */
 int sc_same_file(const char *a, const char *b) {
+#if defined(_WIN32)
+  /* mingw's stat() leaves st_ino == 0, so the POSIX dev+ino test below would report ANY two same-volume
+     files as identical -- which made load_prelude wrongly dedup std/string.spc against ffi/string.spc and
+     drop the whole String module. Use the real Win32 identity (volume serial + 64-bit file index). */
+  BY_HANDLE_FILE_INFORMATION ia, ib;
+  const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+  HANDLE ha = CreateFileA(a, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  if (ha == INVALID_HANDLE_VALUE)
+    return -1;
+  HANDLE hb = CreateFileA(b, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  if (hb == INVALID_HANDLE_VALUE) {
+    CloseHandle(ha);
+    return -1;
+  }
+  int ok = GetFileInformationByHandle(ha, &ia) && GetFileInformationByHandle(hb, &ib);
+  CloseHandle(ha);
+  CloseHandle(hb);
+  if (!ok)
+    return -1;
+  return (ia.dwVolumeSerialNumber == ib.dwVolumeSerialNumber && ia.nFileIndexHigh == ib.nFileIndexHigh &&
+          ia.nFileIndexLow == ib.nFileIndexLow)
+             ? 1
+             : 0;
+#else
   struct stat sa, sb;
   if (stat(a, &sa) != 0 || stat(b, &sb) != 0)
     return -1;
   return (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) ? 1 : 0;
+#endif
 }
 
 #if defined(_WIN32)
@@ -103,7 +114,15 @@ char *sc_realpath(const char *path, char *resolved) {
 }
 
 int sc_exe_path(char *buf, unsigned size) {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+  DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)size);
+  if (n == 0 || n >= (DWORD)size)
+    return -1;
+  for (char *p = buf; *p; p++)
+    if (*p == '\\')
+      *p = '/';
+  return 0;
+#elif defined(__APPLE__)
   uint32_t sz = size;
   return _NSGetExecutablePath(buf, &sz);
 #elif defined(__linux__)
@@ -119,7 +138,13 @@ int sc_exe_path(char *buf, unsigned size) {
 #endif
 }
 
-int sc_getpid(void) { return (int)getpid(); }
+int sc_getpid(void) {
+#if defined(_WIN32)
+  return (int)_getpid();
+#else
+  return (int)getpid();
+#endif
+}
 
 /* Host/target platform index, resolved by the compiler that builds this shim: 0 windows, 1 macos, 2 linux.
    The self-hosted driver reads it as the default `--target`, so @platform gating matches the native build. */
@@ -140,8 +165,20 @@ int sc_mkdir(const char *path) {
   return mkdir(path, 0775);
 #endif
 }
-int sc_rmdir(const char *path) { return rmdir(path); }
-int sc_unlink(const char *path) { return unlink(path); }
+int sc_rmdir(const char *path) {
+#if defined(_WIN32)
+  return _rmdir(path);
+#else
+  return rmdir(path);
+#endif
+}
+int sc_unlink(const char *path) {
+#if defined(_WIN32)
+  return _unlink(path);
+#else
+  return unlink(path);
+#endif
+}
 void *sc_opendir(const char *path) { return (void *)opendir(path); }
 void *sc_readdir(void *dir) { return (void *)readdir((DIR *)dir); }
 int sc_closedir(void *dir) { return closedir((DIR *)dir); }

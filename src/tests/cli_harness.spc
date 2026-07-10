@@ -100,7 +100,7 @@ extend Proj {
         let _ = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
         let mut path = Path512 {};
         unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
-        let f = stdio::fopen(str::from_cstr((&path.b[0]) as *const char), "w");
+        let f = stdio::fopen(str::from_cstr((&path.b[0]) as *const char), "wb"); // binary: no Windows CRLF in emitted test files
         if f != null {
             if content.len() > 0 { let _ = unsafe stdio::fwrite(content.ptr(), 1, content.len(), f); }
             unsafe stdio::fclose(f);

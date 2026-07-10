@@ -705,7 +705,7 @@ static __attribute__((unused)) FILE *main__open_out(str const path) {
   if (slash < n) {
     main__mkdir_p(str__from_raw(p, slash));
   }
-  return stdio__fopen(path, (str){ (const uint8_t *)"w", sizeof("w") - 1 });
+  return stdio__fopen(path, (str){ (const uint8_t *)"wb", sizeof("wb") - 1 });
 }
 
 static __attribute__((unused)) void main__prune_orphans(const char *const dir, const Vector__String__Global__Global *const keep) {
@@ -1180,7 +1180,7 @@ static __attribute__((unused)) void main__ext_c_collect(module__loader__Package 
   }
   String__Global ldpath = main__build_out_path(root, (str){ (const uint8_t *)"__ldflags", sizeof("__ldflags") - 1 }, (str){ (const uint8_t *)"", sizeof("") - 1 });
   if (Vector__String__Global__Global__len(&ld) != 0ULL) {
-    FILE *const f = stdio__fopen(String__Global__as_str(&ldpath), (str){ (const uint8_t *)"w", sizeof("w") - 1 });
+    FILE *const f = stdio__fopen(String__Global__as_str(&ldpath), (str){ (const uint8_t *)"wb", sizeof("wb") - 1 });
     if (f != NULL) {
       for (size_t k = 0ULL; k < Vector__String__Global__Global__len(&ld); k++) {
         fprintf(f, ((const char *)({ __auto_type __sc69 = (str){ (const uint8_t *)"%s\n", sizeof("%s\n") - 1 }; str__ptr(&__sc69); })), String__Global__cstr(&(*({ __auto_type __sc70 = &ld; Vector__String__Global__Global__index_mut(__sc70, k); }))));
