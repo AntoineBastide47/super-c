@@ -71,7 +71,6 @@ $(BIN): $(COMPILER_SRCS)
 	@$(SUPERC) src/main.spc
 	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o '$(BIN).new' $(LDOPT)
 	@mv -f '$(BIN).new' '$(BIN)'
-	@cp '$(BIN)' 'cli-backup-macos'
 	@$(STRIP)
 
 run: $(BIN)

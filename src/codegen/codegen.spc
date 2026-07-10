@@ -11,7 +11,7 @@ import utils::errors as diag;
 
 extern "C" {
     fn strtoull(s: *const char, endptr: *mut *mut char, base: i32) u64;
-    fn strtol(s: *const char, endptr: *mut *mut char, base: i32) i64;
+    fn strtoll(s: *const char, endptr: *mut *mut char, base: i32) i64;
 }
 
 // The full C standard library include block the generated runtime pulls in. Emitted verbatim into the
@@ -3956,7 +3956,7 @@ extend Codegen {
         buf.b[k] = 0 as char;
         if k == 0 { return false; }
         let mut endp: *mut char = null;
-        let v = unsafe strtol((&buf.b[0]) as *const char, (&mut endp) as *mut *mut char, 0);
+        let v = unsafe strtoll((&buf.b[0]) as *const char, (&mut endp) as *mut *mut char, 0);
         if endp == (&mut buf.b[0]) as *mut char { return false; }
         unsafe *out = v;
         return true;
@@ -6817,6 +6817,8 @@ extend Codegen {
     fn emit_closures(self: &mut Self, with_body: bool) void {
         for i in 0..unsafe (*self.cur_ast()).nodes.len() {
             if unsafe (*self.cur_ast()).at_const(i as NodeId).kind == NodeKind::NODE_CLOSURE {
+                // A @platform-gated-away item is never typechecked; skip its orphaned, untyped closures.
+                if unsafe (*self.cur_ast()).type_of(i as NodeId) == TYPE_NONE { continue; }
                 self.emit_closure_fn(i as NodeId, with_body);
             }
         }

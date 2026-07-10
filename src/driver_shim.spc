@@ -14,6 +14,7 @@ extern "C" "driver_shim.h" {
     pub fn sc_realpath(path: *const char, resolved: *mut char) *mut char;
     pub fn sc_exe_path(buf: *mut char, size: u32) i32;
     pub fn sc_getpid() i32;
+    pub fn sc_host_platform() i32;
     pub fn sc_mkdir(path: *const char) i32;
     pub fn sc_rmdir(path: *const char) i32;
     pub fn sc_unlink(path: *const char) i32;
