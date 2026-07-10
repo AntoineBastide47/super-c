@@ -88,7 +88,7 @@ extern "C" {
 // with value-producing siblings (`None => panic("empty")`).
 @c.noreturn
 pub fn panic(msg: str) void {
-    unsafe __sc_panic_str(msg.ptr, msg.len);
+    unsafe __sc_panic_str(msg.ptr(), msg.len());
 }
 
 extend i8 as Eq {
