@@ -13,8 +13,8 @@ extern "C" {
     pub fn exit(code: i32) void;
     pub fn abort() void;
     pub fn atexit(handler: fn() void) i32;
-    pub fn getenv(name: *const char) *const char;
-    pub fn system(command: *const char) i32;
+    @c.import("getenv") fn c_getenv(name: *const char) *const char;
+    @c.import("system") fn c_system(command: *const char) i32;
 
     // Numeric parsing. `ato*` return 0 on a bad parse; `strto*` report where parsing stopped via endptr.
     pub fn atoi(s: *const char) i32;
@@ -42,11 +42,24 @@ extern "C" {
 // The value of environment variable `name`, or `None` if unset (a fresh owned copy -- the C buffer is not
 // retained).
 pub fn get_env(name: &mut String) Option<String> {
-    let p = unsafe getenv(name.cstr());
+    let p = unsafe c_getenv(name.cstr());
     if p == null {
         return Option::<String>::None;
     }
     return Option::<String>::Some(String::from_cstr(p));
+}
+
+// The raw value of environment variable `name` (`null` if unset). Borrows libc's buffer -- copy it if you
+// need it past the next environment change. `name` is NUL-terminated into a temporary before the call.
+pub fn getenv(name: str) *const char {
+    let mut n = String::from_str(name);
+    return unsafe c_getenv(n.cstr());
+}
+
+// Run `command` through the shell (NUL-terminated into a temporary), returning its raw `wait`-style status.
+pub fn system(command: str) i32 {
+    let mut c = String::from_str(command);
+    return unsafe c_system(c.cstr());
 }
 
 // Parse a base-10 integer, ignoring leading whitespace and trailing junk (0 on a non-numeric string).

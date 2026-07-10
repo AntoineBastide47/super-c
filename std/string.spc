@@ -136,7 +136,7 @@ extend<A: Allocator> String<A> {
 
     // A new string through an explicit allocator, holding a copy of `text`'s bytes.
     pub fn from_str_in(alloc: A, text: str) String<A> {
-        let mut s = String::<A>::with_capacity_in(alloc, text.len);
+        let mut s = String::<A>::with_capacity_in(alloc, text.len());
         s.push_str(text);
         return s;
     }
@@ -184,6 +184,34 @@ extend<A: Allocator> String<A> {
         if needed > self.capacity() {
             self.grow_to(needed);
         }
+    }
+
+    // Read-ahead sentinel padding: guarantee at least `n` zero bytes immediately after the logical end,
+    // WITHOUT changing len. Code that establishes this may then over-read up to `n` bytes past the end
+    // safely -- e.g. a lexer whose scan loops rely on the trailing NUL to terminate (no per-byte bounds
+    // check) or that reads 8-byte words. Pre-size with with_capacity(len+n) and this never reallocates.
+    pub fn pad_nul(self: &mut String<A>, n: usize) {
+        self.reserve_exact(n);
+        let l = self.len();
+        let p = self.data_ptr();
+        let mut i: usize = 0;
+        while i < n { unsafe p[l + i] = 0; i = i + 1; }
+    }
+
+    // --- raw tail writes: for an external writer (a C vsnprintf/memcpy) that fills the spare region ------
+
+    // Reserve room for `additional` more bytes and return a writable pointer at the current end (into the
+    // spare capacity, `capacity() - len()` bytes of it). Write up to that many bytes there, then commit them
+    // with `advance_len`. The returned pointer is invalidated by any later growth -- re-fetch after one.
+    pub fn spare_mut(self: &mut String<A>, additional: usize) *mut u8 {
+        self.reserve(additional);
+        return unsafe (self.data_ptr() + self.len());
+    }
+
+    // Grow the length by `n` bytes just written into the spare region via `spare_mut`. Caller guarantees
+    // `len() + n <= capacity()` and that those `n` bytes were initialised.
+    pub fn advance_len(self: &mut String<A>, n: usize) {
+        self.set_len(self.len() + n);
     }
 
     // Free unused capacity. A heap string short enough to fit inline moves back onto the stack and frees
@@ -266,7 +294,7 @@ extend<A: Allocator> String<A> {
 
     // Append the bytes of a `str` (e.g. a string literal).
     pub fn push_str(self: &mut String<A>, text: str) {
-        self.push_bytes(text.ptr, text.len);
+        self.push_bytes(text.ptr(), text.len());
     }
 
     // Append another String's bytes.
@@ -347,7 +375,7 @@ extend<A: Allocator> String<A> {
     // `align`: 0 = left, 1 = right, 2 = center. A right-aligned zero fill is numeric-aware:
     // a leading '-' stays in front of the zeros.
     pub fn push_padded(self: &mut String<A>, s: str, width: usize, fill: u8, align: u8) {
-        let n = s.len;
+        let n = s.len();
         if width <= n {
             self.push_str(s);
             return;
@@ -355,10 +383,8 @@ extend<A: Allocator> String<A> {
         let pad = width - n;
         if align == 1 && fill == 48 && n > 0 && s.byte_at(0) == 45 {
             self.push_byte(45);
-            let mut k: usize = 0;
-            while k < pad {
+            for k in 0..pad {
                 self.push_byte(48);
-                k += 1;
             }
             self.push_str(s.slice(1, n));
             return;
@@ -404,15 +430,15 @@ extend<A: Allocator> String<A> {
 
     // Insert a `str` at byte index `i` (0 <= i <= len), shifting the tail right.
     pub fn insert_str(self: &mut String<A>, i: usize, text: str) {
-        if text.len == 0 {
+        if text.len() == 0 {
             return;
         }
-        self.reserve(text.len);
+        self.reserve(text.len());
         let len = self.len();
         let p = self.data_ptr();
-        unsafe memmove((unsafe (p + i) + text.len) as *mut void, (unsafe (p + i)) as *const void, len - i);
-        unsafe memcpy((unsafe (p + i)) as *mut void, text.ptr as *const void, text.len);
-        self.set_len(len + text.len);
+        unsafe memmove((unsafe (p + i) + text.len()) as *mut void, (unsafe (p + i)) as *const void, len - i);
+        unsafe memcpy((unsafe (p + i)) as *mut void, text.ptr() as *const void, text.len());
+        self.set_len(len + text.len());
     }
 
     // --- remove --------------------------------------------------------------------------------
@@ -487,7 +513,7 @@ extend<A: Allocator> String<A> {
     }
 
     pub fn as_str(self: &String<A>) str {
-        return str { ptr: self.as_ptr(), len: self.len() };
+        return str::from_raw(self.as_ptr(), self.len());
     }
 
     // Borrowed iterators over the bytes -- delegate to the `str` view: valid until the next mutation, and
@@ -574,13 +600,13 @@ extend<A: Allocator> String<A> {
 
     pub fn eq_str(self: &String<A>, text: str) bool {
         let n = self.len();
-        if n != text.len {
+        if n != text.len() {
             return false;
         }
         if n == 0 {
             return true;
         }
-        return unsafe memcmp(self.as_ptr() as *const void, text.ptr as *const void, n) == 0;
+        return unsafe memcmp(self.as_ptr() as *const void, text.ptr() as *const void, n) == 0;
     }
 
     // ASCII-case-insensitive content equality (multibyte bytes must match exactly).
@@ -618,24 +644,24 @@ extend<A: Allocator> String<A> {
     // --- search --------------------------------------------------------------------------------
 
     pub fn starts_with(self: &String<A>, prefix: str) bool {
-        if prefix.len > self.len() {
+        if prefix.len() > self.len() {
             return false;
         }
-        if prefix.len == 0 {
+        if prefix.len() == 0 {
             return true;
         }
-        return unsafe memcmp(self.as_ptr() as *const void, prefix.ptr as *const void, prefix.len) == 0;
+        return unsafe memcmp(self.as_ptr() as *const void, prefix.ptr() as *const void, prefix.len()) == 0;
     }
 
     pub fn ends_with(self: &String<A>, suffix: str) bool {
         let n = self.len();
-        if suffix.len > n {
+        if suffix.len() > n {
             return false;
         }
-        if suffix.len == 0 {
+        if suffix.len() == 0 {
             return true;
         }
-        return unsafe memcmp((unsafe (self.as_ptr() + (n - suffix.len))) as *const void, suffix.ptr as *const void, suffix.len) == 0;
+        return unsafe memcmp((unsafe (self.as_ptr() + (n - suffix.len()))) as *const void, suffix.ptr() as *const void, suffix.len()) == 0;
     }
 
     // First index of byte `b`, or `len` (a past-the-end sentinel) if absent.
@@ -684,16 +710,16 @@ extend<A: Allocator> String<A> {
     // First byte index where `needle` occurs, or `len` if absent (naive O(n*m) window scan).
     pub fn find(self: &String<A>, needle: str) usize {
         let n = self.len();
-        if needle.len == 0 {
+        if needle.len() == 0 {
             return 0;
         }
-        if needle.len > n {
+        if needle.len() > n {
             return n;
         }
         let p = self.as_ptr();
-        let last = n - needle.len;
+        let last = n - needle.len();
         for i in 0..=last {
-            if unsafe memcmp((unsafe (p + i)) as *const void, needle.ptr as *const void, needle.len) == 0 {
+            if unsafe memcmp((unsafe (p + i)) as *const void, needle.ptr() as *const void, needle.len()) == 0 {
                 return i;
             }
         }
@@ -703,17 +729,17 @@ extend<A: Allocator> String<A> {
     // Last byte index where `needle` occurs, or `len` if absent.
     pub fn rfind(self: &String<A>, needle: str) usize {
         let n = self.len();
-        if needle.len == 0 {
+        if needle.len() == 0 {
             return n;
         }
-        if needle.len > n {
+        if needle.len() > n {
             return n;
         }
         let p = self.as_ptr();
-        let mut i = n - needle.len + 1; // one past the highest candidate; walk down to 0
+        let mut i = n - needle.len() + 1; // one past the highest candidate; walk down to 0
         while i > 0 {
             i = i - 1;
-            if unsafe memcmp((unsafe (p + i)) as *const void, needle.ptr as *const void, needle.len) == 0 {
+            if unsafe memcmp((unsafe (p + i)) as *const void, needle.ptr() as *const void, needle.len()) == 0 {
                 return i;
             }
         }
@@ -763,19 +789,19 @@ extend<A: Allocator> String<A> {
     // Unmatched runs are copied in bulk (memcpy via push_bytes); only the replacements interrupt the copy.
     pub fn replace(self: &String<A>, from: str, to: str) String<A> {
         let n = self.len();
-        if from.len == 0 || from.len > n {
+        if from.len() == 0 || from.len() > n {
             return self.clone();
         }
         let p = self.as_ptr();
         let mut out = String::<A>::new_in(self.alloc);
-        let last = n - from.len;
+        let last = n - from.len();
         let mut i: usize = 0;
         let mut run: usize = 0; // start of the pending unmatched run
         while i <= last {
-            if unsafe memcmp((unsafe (p + i)) as *const void, from.ptr as *const void, from.len) == 0 {
+            if unsafe memcmp((unsafe (p + i)) as *const void, from.ptr() as *const void, from.len()) == 0 {
                 out.push_bytes((unsafe (p + run)) as *const u8, i - run);
                 out.push_str(to);
-                i = i + from.len;
+                i = i + from.len();
                 run = i;
             } else {
                 i = i + 1;
@@ -994,7 +1020,7 @@ extend<A: Allocator> String<A> as Writer {
 // on UTF-8 boundaries. No IndexMut: bytes are mutated through the growing/UTF-8-aware String API.
 extend<A: Allocator> String<A> as Index<u8, str> {
     pub fn index(self: &String<A>, i: usize) &u8 {
-        return &unsafe self.as_str().ptr[i];
+        return &unsafe self.as_str().ptr()[i];
     }
     pub fn index_range(self: &String<A>, r: Range<usize>) str {
         let hi = if r.inclusive { r.end + 1; } else { r.end; };
@@ -1012,3 +1038,11 @@ pub fn print(fmt: str, ...) { }
 pub fn println(fmt: str, ...) { }
 pub fn eprint(fmt: str, ...) { }   // like print/println, written to stderr
 pub fn eprintln(fmt: str, ...) { }
+
+// Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String --
+// zero allocation (reuses the buffer's capacity). It is a METHOD so the receiver's `&mut` borrow defers
+// past the argument evaluation (a free-fn `&mut dst` arg would collide with `self.X` format args).
+// Lowered by codegen; this body is never emitted.
+extend<A: Allocator> String<A> {
+    pub fn format_into(self: &mut String<A>, fmt: str, ...) void { }
+}
