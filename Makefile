@@ -13,8 +13,8 @@ CSTD := -std=c11 -D_POSIX_C_SOURCE=200809L
 # Backend C flags for the transpiled compiler. release: aggressive optimization + LTO; dev: -O1 + address/
 # undefined sanitizers so the self-hosted compiler is checked while you work on it. (bench/profile use their
 # own -O2, below -- you never want LTO build cost or sanitizer slowdown when measuring/profiling.)
-RELEASE_OPT   := -O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -flto -fPIE
-RELEASE_LDOPT := -flto -Wl,-O2
+RELEASE_OPT   := -O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -flto=auto -fPIE
+RELEASE_LDOPT := -flto=auto -Wl,-O2
 
 DEBUG_OPT := -g -O1 -fsanitize=address -fno-omit-frame-pointer \
              -fsanitize-recover=address -fsanitize=undefined \
@@ -72,7 +72,7 @@ build: $(BIN)
 $(BIN): $(COMPILER_SRCS)
 	@printf '  SELF-BUILD  %s  (via %s, %s)\n' '$(BIN)' '$(SUPERC)' '$(PROFILE)'
 	@rm -rf src/build
-	@$(SUPERC) --bootstrap-tags src/main.spc
+	@$(SUPERC) --bootstrap-tags src/main.spc || { rm -rf src/build; $(SUPERC) src/main.spc --bootstrap-tags; }
 	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o 'stage1-$(BIN)' $(LDOPT)
 	@rm -rf src/build
 	@./'stage1-$(BIN)' src/main.spc
