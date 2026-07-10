@@ -8,6 +8,7 @@
 #if defined(_WIN32)
 #  include <direct.h> /* _mkdir */
 #  include <io.h>     /* _access */
+#  include <windows.h>
 #else
 #  include <sys/wait.h> /* WIFEXITED/WEXITSTATUS */
 #endif
@@ -103,7 +104,15 @@ char *sc_realpath(const char *path, char *resolved) {
 }
 
 int sc_exe_path(char *buf, unsigned size) {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+  DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)size);
+  if (n == 0 || n >= (DWORD)size)
+    return -1;
+  for (char *p = buf; *p; p++)
+    if (*p == '\\')
+      *p = '/';
+  return 0;
+#elif defined(__APPLE__)
   uint32_t sz = size;
   return _NSGetExecutablePath(buf, &sz);
 #elif defined(__linux__)

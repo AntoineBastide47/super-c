@@ -73,10 +73,10 @@ $(BIN): $(COMPILER_SRCS)
 	@printf '  SELF-BUILD  %s  (via %s, %s)\n' '$(BIN)' '$(SUPERC)' '$(PROFILE)'
 	@rm -rf src/build
 	@$(SUPERC) --bootstrap-tags src/main.spc
-	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o 'stage1-$(BIN)' $(LDOPT)
+	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o 'stage1-$(BIN)' $(LDOPT) $(LDLIBS)
 	@rm -rf src/build
 	@./'stage1-$(BIN)' src/main.spc
-	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o '$(BIN).new' $(LDOPT)
+	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o '$(BIN).new' $(LDOPT) $(LDLIBS)
 	@rm -f 'stage1-$(BIN)'
 	@mv -f '$(BIN).new' '$(BIN)'
 	@$(STRIP)
@@ -100,7 +100,7 @@ bench: $(BIN)
 	@rm -rf src/build
 	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
 	@mkdir -p build
-	@$(CC) $(CSTD) $(RELEASE_OPT) $$(find src/build -name '*.c') -o build/selfhost-bench $(RELEASE_LDOPT)
+	@$(CC) $(CSTD) $(RELEASE_OPT) $$(find src/build -name '*.c') -o build/selfhost-bench $(RELEASE_LDOPT) $(LDLIBS)
 	@build/selfhost-bench
 
 # Profile the transpile benchmark with samply (CPU sampling -> Firefox Profiler UI). Same build as `bench`
