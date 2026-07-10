@@ -24,7 +24,7 @@ extern "C" {
     fn tmpfile() *mut stdio::FILE;
 }
 
-const ROOT: str = "selfhost/main.spc";
+const ROOT: str = "src/main.spc";
 const STD_DIR: str = "std";
 const WARMUP: i32 = 1;
 const ITERS: i32 = 8;
@@ -87,7 +87,7 @@ fn transpile_once() Timing {
     let mut r = Timing { lex: 0.0, parse: 0.0, resolve: 0.0, typecheck: 0.0, codegen: 0.0, src_bytes: 0, src_lines: 0, out_bytes: 0, modules: 0 };
 
     let a0 = time::cpu_seconds();
-    let mut p = loader::package_load(ROOT.ptr() as *const char, STD_DIR.ptr() as *const char);
+    let mut p = loader::package_load(ROOT.ptr() as *const char, STD_DIR.ptr() as *const char, false);
     let a1 = time::cpu_seconds();
 
     let n = p.modules.len();

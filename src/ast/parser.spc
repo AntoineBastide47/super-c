@@ -20,6 +20,7 @@ pub struct Parser {
     pub ast: Ast,
     pub file: *const char,
     pub errors: diag::Errors,
+    pub bootstrap_tags: bool,   // accept unknown @attributes without error (bootstrap across a new tag)
 }
 
 extend Parser {
@@ -36,10 +37,25 @@ extend Parser {
             ast: Ast::new(token_count),
             file: null,
             errors: diag::Errors::new(),
+            bootstrap_tags: false,
         };
     }
 
     pub fn set_file(self: &mut Self, file: *const char) void { self.file = file; }
+    pub fn set_bootstrap_tags(self: &mut Self, v: bool) void { self.bootstrap_tags = v; }
+
+    // Consume a balanced `(...)` if the attribute has an argument list -- lets the parser skip past the
+    // args of an attribute whose shape it does not recognize (generic/unknown-tag handling).
+    fn skip_attr_args(self: &mut Self) void {
+        if self.match(TokenType::LeftParen) {
+            let mut depth = 1;
+            while depth > 0 && !self.at_end() {
+                if self.check(TokenType::LeftParen) { depth = depth + 1; }
+                else if self.check(TokenType::RightParen) { depth = depth - 1; }
+                self.advance();
+            }
+        }
+    }
 
     pub fn take_ast(self: &mut Self) Ast {
         let out = self.ast;
@@ -1901,8 +1917,15 @@ extend Parser {
             return true;
         }
         if !self.text_is(ns, "c") {
-            self.errors.emit(ns.start(), ns.len(), format("unknown attribute namespace; only '@c.*' and '@emit_macro' are supported"));
-            self.errors.note(format("use '@c.<name>' for C attributes or bare '@emit_macro' for generic C macro emission"));
+            // Unknown attribute: the parser always accepts @path(args) generically; recognition is a
+            // semantic concern. Skip any .subpath and a balanced arg list. Unknown is an error unless
+            // --bootstrap-tags (which lets an older compiler build source that uses a tag it ignores).
+            while self.match(TokenType::Dot) { if self.check(TokenType::Identifier) { self.advance(); } else { break; } }
+            self.skip_attr_args();
+            if !self.bootstrap_tags {
+                self.errors.emit(ns.start(), ns.len(), format("unknown attribute '@{}'; pass --bootstrap-tags to accept unknown attributes", diag::span_str(self.source, ns.start(), ns.end())));
+            }
+            return false;
         }
         self.expect(TokenType::Dot, "'.'");
         if self.at_end() || self.check(TokenType::LeftParen) || self.check(TokenType::RightParen) || self.check(TokenType::Semicolon) || self.check(TokenType::Dot) {
@@ -1915,8 +1938,11 @@ extend Parser {
         let mut wants_int = false;
         let kind = self.attr_kind_of(name, &mut wants_str, &mut wants_int);
         if kind < 0 {
-            self.errors.emit(name.start(), name.len(), format("unknown attribute '@c.{}'", diag::span_str(self.source, name.start(), name.end())));
-            self.errors.note(format("supported '@c' attributes include export, import, noreturn, always_inline, cold, used, unused, section, packed, and align"));
+            self.skip_attr_args();   // accept the tag generically; recognition is semantic
+            if !self.bootstrap_tags {
+                self.errors.emit(name.start(), name.len(), format("unknown attribute '@c.{}'; pass --bootstrap-tags to accept unknown attributes", diag::span_str(self.source, name.start(), name.end())));
+                self.errors.note(format("supported '@c' attributes include export, import, noreturn, always_inline, cold, used, unused, section, packed, and align"));
+            }
             return false;
         }
         *out = Attr { owner: NODE_NONE, kind: kind as u8, arg: 0, str_span: Span::empty() };
