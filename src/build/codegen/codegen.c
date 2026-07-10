@@ -260,6 +260,9 @@ static __attribute__((unused)) void codegen__codegen__Codegen__render_params(cod
 static __attribute__((unused)) void codegen__codegen__Codegen__function_name(codegen__codegen__Codegen *const self, uint32_t const fn_id, ast__ast__DefId const target, char *const out, size_t const cap, bool const prefixed);
 static __attribute__((unused)) bool codegen__codegen__Codegen__cg_subtree_uses(const codegen__codegen__Codegen *const self, uint32_t const id, uint32_t const param);
 static __attribute__((unused)) size_t codegen__codegen__addg(char *const g, size_t const cap, size_t const gn, const char *const s);
+static __attribute__((unused)) bool codegen__codegen__Codegen__cg_is_prelude_decl(const codegen__codegen__Codegen *const self, uint32_t const t, str const name);
+static __attribute__((unused)) bool codegen__codegen__Codegen__cg_main_argv_vector(const codegen__codegen__Codegen *const self, ast__ast__NodeList const params);
+static __attribute__((unused)) void codegen__codegen__Codegen__emit_main_argv_wrapper(codegen__codegen__Codegen *const self, ast__ast__NodeList const params);
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_function(codegen__codegen__Codegen *const self, uint32_t const fn_id, ast__ast__DefId const target, bool const extern_q, bool const with_body, const char *const name_override, bool const spec_static);
 static __attribute__((unused)) bool codegen__codegen__Codegen__cg_is_format_builtin(const codegen__codegen__Codegen *const self, uint16_t const m, uint32_t const node);
 static __attribute__((unused)) bool codegen__codegen__Codegen__cg_type_mentions_fnval(const codegen__codegen__Codegen *const self, uint32_t const t);
@@ -8952,6 +8955,51 @@ static __attribute__((unused)) size_t codegen__codegen__addg(char *const g, size
   return codegen__codegen__bappend(g, cap, at, s);
 }
 
+static __attribute__((unused)) bool codegen__codegen__Codegen__cg_is_prelude_decl(const codegen__codegen__Codegen *const self, uint32_t const t, str const name) {
+  if (self->package == NULL) {
+    return false;
+  }
+  const module__loader__LookupHit hit = module__loader__Package__prelude_lookup(&((*self->package)), name, true);
+  if (hit.node == ast__ast__NODE_NONE) {
+    return false;
+  }
+  const ast__ast__Ty *const y = codegen__codegen__Codegen__type_at(self, t);
+  return (((y->kind == ast__ast__TypeKind_TYPE_STRUCT) && (y->module == hit.mid)) && (y->as_data.decl == hit.node));
+}
+
+static __attribute__((unused)) bool codegen__codegen__Codegen__cg_main_argv_vector(const codegen__codegen__Codegen *const self, ast__ast__NodeList const params) {
+  if ((params.len != 1U) || (self->package == NULL)) {
+    return false;
+  }
+  const uint32_t *const ids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), params);
+  const ast__ast__Ty *const argv = codegen__codegen__Codegen__type_at(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), ids[0]));
+  if (argv->kind != ast__ast__TypeKind_TYPE_INSTANCE) {
+    return false;
+  }
+  const module__loader__LookupHit hit = module__loader__Package__prelude_lookup(&((*self->package)), (str){ (const uint8_t *)"Vector", sizeof("Vector") - 1 }, true);
+  if (hit.node == ast__ast__NODE_NONE) {
+    return false;
+  }
+  const ast__ast__TyInstance *const it = ast__ast__Ast__instance(&((*codegen__codegen__Codegen__cur_ast(self))), argv->as_data.inst);
+  return ((((it->module == hit.mid) && (it->decl == hit.node)) && (it->n >= 1U)) && codegen__codegen__Codegen__cg_is_prelude_decl(self, it->args[0], (str){ (const uint8_t *)"str", sizeof("str") - 1 }));
+}
+
+static __attribute__((unused)) void codegen__codegen__Codegen__emit_main_argv_wrapper(codegen__codegen__Codegen *const self, ast__ast__NodeList const params) {
+  const uint32_t *const ids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), params);
+  const uint32_t ty = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), ids[0]);
+  codegen__codegen__Buf256 vec = (codegen__codegen__Buf256){0};
+  codegen__codegen__Codegen__render_type_id(self, ty, ((const char *)({ __auto_type __sc1091 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1091); })), ((char *)(&vec.b[0])), 256ULL);
+  ({ String__Global *__sc1092 = &(self->buf);
+String__Global__push_str(&(*__sc1092), (str){ .ptr = (const uint8_t*)"\nstatic ", .len = sizeof("\nstatic ") - 1 });
+String__Global__push_str(&(*__sc1092), utils__errors__cstr(((const char *)(&vec.b[0]))));
+String__Global__push_str(&(*__sc1092), (str){ .ptr = (const uint8_t*)" __sc_argv_to_vector(int argc, char **argv) {\n  ", .len = sizeof(" __sc_argv_to_vector(int argc, char **argv) {\n  ") - 1 });
+String__Global__push_str(&(*__sc1092), utils__errors__cstr(((const char *)(&vec.b[0]))));
+String__Global__push_str(&(*__sc1092), (str){ .ptr = (const uint8_t*)" out = (", .len = sizeof(" out = (") - 1 });
+String__Global__push_str(&(*__sc1092), utils__errors__cstr(((const char *)(&vec.b[0]))));
+String__Global__push_str(&(*__sc1092), (str){ .ptr = (const uint8_t*)"){0};\n  if (argc > 0) {\n    out.alloc = (Global){};\n    out.ptr = (str *)Global__alloc(&out.alloc, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) { out.ptr[i] = str__from_cstr(argv[i]); }\n  }\n  return out;\n}\n\nint main(int argc, char **argv) {\n  return __sc_user_main(__sc_argv_to_vector(argc, argv));\n}\n\n", .len = sizeof("){0};\n  if (argc > 0) {\n    out.alloc = (Global){};\n    out.ptr = (str *)Global__alloc(&out.alloc, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) { out.ptr[i] = str__from_cstr(argv[i]); }\n  }\n  return out;\n}\n\nint main(int argc, char **argv) {\n  return __sc_user_main(__sc_argv_to_vector(argc, argv));\n}\n\n") - 1 });
+});
+}
+
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_function(codegen__codegen__Codegen *const self, uint32_t const fn_id, ast__ast__DefId const target, bool const extern_q, bool const with_body, const char *const name_override, bool const spec_static) {
   const ast__ast__FunctionData f = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), fn_id)->as_data.function;
   codegen__codegen__Buf256 nm = (codegen__codegen__Buf256){0};
@@ -8960,72 +9008,76 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_function(cod
   } else {
     codegen__codegen__Codegen__function_name(self, fn_id, target, ((char *)(&nm.b[0])), 256ULL, (!extern_q));
   }
-  const bool is_main = (((target.node == ast__ast__NODE_NONE) && (name_override == NULL)) && codegen__codegen__span_is(self->source, codegen__codegen__Codegen__name_span(self, f.name), ((const char *)({ __auto_type __sc1091 = (str){ (const uint8_t *)"main", sizeof("main") - 1 }; str__ptr(&__sc1091); }))));
+  const bool is_main = (((target.node == ast__ast__NODE_NONE) && (name_override == NULL)) && codegen__codegen__span_is(self->source, codegen__codegen__Codegen__name_span(self, f.name), ((const char *)({ __auto_type __sc1093 = (str){ (const uint8_t *)"main", sizeof("main") - 1 }; str__ptr(&__sc1093); }))));
+  const bool main_argv_vector = (is_main && codegen__codegen__Codegen__cg_main_argv_vector(self, f.params));
+  if (main_argv_vector) {
+    codegen__codegen__bappend(((char *)(&nm.b[0])), 256ULL, 0ULL, ((const char *)({ __auto_type __sc1094 = (str){ (const uint8_t *)"__sc_user_main", sizeof("__sc_user_main") - 1 }; str__ptr(&__sc1094); })));
+  }
   const bool exported = (codegen__codegen__Codegen__cg_attr(self, codegen__codegen__Codegen__cur_module(self), fn_id, ast__ast__AttrKind_ATTR_EXPORT) != NULL);
   const bool is_static = ({
-    bool __sc1092;
+    bool __sc1095;
     if (name_override != NULL) {
-      __sc1092 = spec_static;
+      __sc1095 = spec_static;
     } else {
-      __sc1092 = ((((self->multifile && (!extern_q)) && (!is_main)) && (!exported)) && (!f.is_public));
+      __sc1095 = ((((self->multifile && (!extern_q)) && (!is_main)) && (!exported)) && (!f.is_public));
     }
-    __sc1092;
+    __sc1095;
   });
   codegen__codegen__Buf1024 ps = (codegen__codegen__Buf1024){0};
   codegen__codegen__Codegen__render_params(self, f.params, ((char *)(&ps.b[0])), 1024ULL);
-  if (f.is_variadic && (strcmp(((const char *)(&ps.b[0])), ((const char *)({ __auto_type __sc1093 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1093); }))) != 0)) {
+  if (f.is_variadic && (strcmp(((const char *)(&ps.b[0])), ((const char *)({ __auto_type __sc1096 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1096); }))) != 0)) {
     const size_t psl = strlen(((const char *)(&ps.b[0])));
-    codegen__codegen__bappend(((char *)(&ps.b[0])), 1024ULL, psl, ((const char *)({ __auto_type __sc1094 = (str){ (const uint8_t *)", ...", sizeof(", ...") - 1 }; str__ptr(&__sc1094); })));
+    codegen__codegen__bappend(((char *)(&ps.b[0])), 1024ULL, psl, ((const char *)({ __auto_type __sc1097 = (str){ (const uint8_t *)", ...", sizeof(", ...") - 1 }; str__ptr(&__sc1097); })));
   }
   codegen__codegen__Buf1320 decl = (codegen__codegen__Buf1320){0};
   size_t at = 0ULL;
   (decl.b[0] = 0);
   if (extern_q) {
-    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1095 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1095); }))));
+    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1098 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1098); }))));
   }
   (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)(&nm.b[0]))));
   if (extern_q) {
-    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1096 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1096); }))));
+    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1099 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1099); }))));
   }
-  (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1097 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1097); }))));
+  (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1100 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1100); }))));
   (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)(&ps.b[0]))));
-  codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1098 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1098); })));
+  codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1101 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1101); })));
   if (extern_q) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1099 = (str){ (const uint8_t *)"extern ", sizeof("extern ") - 1 }; str__ptr(&__sc1099); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1102 = (str){ (const uint8_t *)"extern ", sizeof("extern ") - 1 }; str__ptr(&__sc1102); })));
   }
   if (is_static) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1100 = (str){ (const uint8_t *)"static ", sizeof("static ") - 1 }; str__ptr(&__sc1100); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1103 = (str){ (const uint8_t *)"static ", sizeof("static ") - 1 }; str__ptr(&__sc1103); })));
   }
   const uint16_t fmod = codegen__codegen__Codegen__cur_module(self);
   if (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_NORETURN) != NULL) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1101 = (str){ (const uint8_t *)"_Noreturn ", sizeof("_Noreturn ") - 1 }; str__ptr(&__sc1101); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1104 = (str){ (const uint8_t *)"_Noreturn ", sizeof("_Noreturn ") - 1 }; str__ptr(&__sc1104); })));
   }
   if ((codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_INLINE) != NULL) || (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_ALWAYS_INLINE) != NULL)) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1102 = (str){ (const uint8_t *)"inline ", sizeof("inline ") - 1 }; str__ptr(&__sc1102); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1105 = (str){ (const uint8_t *)"inline ", sizeof("inline ") - 1 }; str__ptr(&__sc1105); })));
   }
   codegen__codegen__Buf256 g = (codegen__codegen__Buf256){0};
   (g.b[0] = 0);
   size_t gn = 0ULL;
   if (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_ALWAYS_INLINE) != NULL) {
-    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1103 = (str){ (const uint8_t *)"always_inline", sizeof("always_inline") - 1 }; str__ptr(&__sc1103); }))));
+    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1106 = (str){ (const uint8_t *)"always_inline", sizeof("always_inline") - 1 }; str__ptr(&__sc1106); }))));
   }
   if (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_NOINLINE) != NULL) {
-    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1104 = (str){ (const uint8_t *)"noinline", sizeof("noinline") - 1 }; str__ptr(&__sc1104); }))));
+    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1107 = (str){ (const uint8_t *)"noinline", sizeof("noinline") - 1 }; str__ptr(&__sc1107); }))));
   }
   if (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_COLD) != NULL) {
-    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1105 = (str){ (const uint8_t *)"cold", sizeof("cold") - 1 }; str__ptr(&__sc1105); }))));
+    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1108 = (str){ (const uint8_t *)"cold", sizeof("cold") - 1 }; str__ptr(&__sc1108); }))));
     if (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_NOINLINE) == NULL) {
-      (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1106 = (str){ (const uint8_t *)"noinline", sizeof("noinline") - 1 }; str__ptr(&__sc1106); }))));
+      (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1109 = (str){ (const uint8_t *)"noinline", sizeof("noinline") - 1 }; str__ptr(&__sc1109); }))));
     }
   }
   if (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_USED) != NULL) {
-    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1107 = (str){ (const uint8_t *)"used", sizeof("used") - 1 }; str__ptr(&__sc1107); }))));
+    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1110 = (str){ (const uint8_t *)"used", sizeof("used") - 1 }; str__ptr(&__sc1110); }))));
   }
   if (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_UNUSED) != NULL) {
-    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1108 = (str){ (const uint8_t *)"unused", sizeof("unused") - 1 }; str__ptr(&__sc1108); }))));
+    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1111 = (str){ (const uint8_t *)"unused", sizeof("unused") - 1 }; str__ptr(&__sc1111); }))));
   }
   if (is_static && (codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_USED) == NULL)) {
-    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1109 = (str){ (const uint8_t *)"unused", sizeof("unused") - 1 }; str__ptr(&__sc1109); }))));
+    (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)({ __auto_type __sc1112 = (str){ (const uint8_t *)"unused", sizeof("unused") - 1 }; str__ptr(&__sc1112); }))));
   }
   const ast__ast__Attr *const sec = codegen__codegen__Codegen__cg_attr(self, fmod, fn_id, ast__ast__AttrKind_ATTR_SECTION);
   if (sec != NULL) {
@@ -9038,57 +9090,57 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_function(cod
     memcpy(((void *)(&nm2.b[0])), (codegen__codegen__Codegen__mod_src(self, fmod) + ((size_t)sp.start)), nl);
     (nm2.b[nl] = 0);
     codegen__codegen__Buf160 sb = (codegen__codegen__Buf160){0};
-    snprintf(((char *)(&sb.b[0])), 160ULL, ((const char *)({ __auto_type __sc1110 = (str){ (const uint8_t *)"section(\"%s\")", sizeof("section(\"%s\")") - 1 }; str__ptr(&__sc1110); })), ((const char *)(&nm2.b[0])));
+    snprintf(((char *)(&sb.b[0])), 160ULL, ((const char *)({ __auto_type __sc1113 = (str){ (const uint8_t *)"section(\"%s\")", sizeof("section(\"%s\")") - 1 }; str__ptr(&__sc1113); })), ((const char *)(&nm2.b[0])));
     (gn = codegen__codegen__addg(((char *)(&g.b[0])), 256ULL, gn, ((const char *)(&sb.b[0]))));
   }
   if (gn != 0ULL) {
-    ({ String__Global *__sc1111 = &(self->buf);
-String__Global__push_str(&(*__sc1111), (str){ .ptr = (const uint8_t*)"__attribute__((", .len = sizeof("__attribute__((") - 1 });
-String__Global__push_str(&(*__sc1111), utils__errors__cstr(((const char *)(&g.b[0]))));
-String__Global__push_str(&(*__sc1111), (str){ .ptr = (const uint8_t*)")) ", .len = sizeof(")) ") - 1 });
+    ({ String__Global *__sc1114 = &(self->buf);
+String__Global__push_str(&(*__sc1114), (str){ .ptr = (const uint8_t*)"__attribute__((", .len = sizeof("__attribute__((") - 1 });
+String__Global__push_str(&(*__sc1114), utils__errors__cstr(((const char *)(&g.b[0]))));
+String__Global__push_str(&(*__sc1114), (str){ .ptr = (const uint8_t*)")) ", .len = sizeof(")) ") - 1 });
 });
   }
   const ast__ast__NodeList rets = f.returns;
   (self->current_ret[0] = 0);
   (self->current_fn_ret_node = ast__ast__NODE_NONE);
-  if (((target.node == ast__ast__NODE_NONE) && (!extern_q)) && codegen__codegen__span_is(self->source, codegen__codegen__Codegen__name_span(self, f.name), ((const char *)({ __auto_type __sc1112 = (str){ (const uint8_t *)"main", sizeof("main") - 1 }; str__ptr(&__sc1112); })))) {
-    ({ String__Global *__sc1113 = &(self->buf);
-String__Global__push_str(&(*__sc1113), (str){ .ptr = (const uint8_t*)"int ", .len = sizeof("int ") - 1 });
-String__Global__push_str(&(*__sc1113), utils__errors__cstr(((const char *)(&decl.b[0]))));
+  if (((target.node == ast__ast__NODE_NONE) && (!extern_q)) && codegen__codegen__span_is(self->source, codegen__codegen__Codegen__name_span(self, f.name), ((const char *)({ __auto_type __sc1115 = (str){ (const uint8_t *)"main", sizeof("main") - 1 }; str__ptr(&__sc1115); })))) {
+    ({ String__Global *__sc1116 = &(self->buf);
+String__Global__push_str(&(*__sc1116), (str){ .ptr = (const uint8_t*)"int ", .len = sizeof("int ") - 1 });
+String__Global__push_str(&(*__sc1116), utils__errors__cstr(((const char *)(&decl.b[0]))));
 });
   } else if (rets.len > 1U) {
-    codegen__codegen__buf_join3(((char *)(&self->current_ret[0])), 128ULL, ((const char *)(&nm.b[0])), ((const char *)({ __auto_type __sc1114 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1114); })), ((const char *)({ __auto_type __sc1115 = (str){ (const uint8_t *)"_ret", sizeof("_ret") - 1 }; str__ptr(&__sc1115); })));
-    const char *const cr = ((const char *)(&self->current_ret[0]));
-    codegen__codegen__Codegen__emit_cstr(self, cr);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1116 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1116); })));
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
-  } else if (codegen__codegen__Codegen__fn_array_return(self, fn_id) != ast__ast__NODE_NONE) {
     codegen__codegen__buf_join3(((char *)(&self->current_ret[0])), 128ULL, ((const char *)(&nm.b[0])), ((const char *)({ __auto_type __sc1117 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1117); })), ((const char *)({ __auto_type __sc1118 = (str){ (const uint8_t *)"_ret", sizeof("_ret") - 1 }; str__ptr(&__sc1118); })));
     const char *const cr = ((const char *)(&self->current_ret[0]));
     codegen__codegen__Codegen__emit_cstr(self, cr);
     codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1119 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1119); })));
     codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
+  } else if (codegen__codegen__Codegen__fn_array_return(self, fn_id) != ast__ast__NODE_NONE) {
+    codegen__codegen__buf_join3(((char *)(&self->current_ret[0])), 128ULL, ((const char *)(&nm.b[0])), ((const char *)({ __auto_type __sc1120 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1120); })), ((const char *)({ __auto_type __sc1121 = (str){ (const uint8_t *)"_ret", sizeof("_ret") - 1 }; str__ptr(&__sc1121); })));
+    const char *const cr = ((const char *)(&self->current_ret[0]));
+    codegen__codegen__Codegen__emit_cstr(self, cr);
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1122 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1122); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
   } else if (rets.len == 1U) {
     const uint32_t r0 = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), rets)[0];
     const ast__ast__Node *const rn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), r0);
     (self->current_fn_ret_node = ({
-      uint32_t __sc1120;
+      uint32_t __sc1123;
       if (rn->kind == ast__ast__NodeKind_NODE_PARAMETER) {
-        __sc1120 = rn->as_data.parameter.ty;
+        __sc1123 = rn->as_data.parameter.ty;
       } else {
-        __sc1120 = r0;
+        __sc1123 = r0;
       }
-      __sc1120;
+      __sc1123;
     }));
     codegen__codegen__Buf1400 out = (codegen__codegen__Buf1400){0};
     codegen__codegen__Codegen__render_type_node(self, self->current_fn_ret_node, ((const char *)(&decl.b[0])), ((char *)(&out.b[0])), 1400ULL);
     codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&out.b[0])));
   } else {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1121 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1121); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1124 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1124); })));
     codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
   }
   if (with_body && (f.body != ast__ast__NODE_NONE)) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1122 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1122); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1125 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1125); })));
     (self->defer_top = 0U);
     (self->loop_defer_base = 0U);
     (self->nmoved = 0U);
@@ -9113,14 +9165,17 @@ String__Global__push_str(&(*__sc1113), utils__errors__cstr(((const char *)(&decl
       }
     }
     codegen__codegen__Codegen__emit_block_from(self, f.body, 0U);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1123 = (str){ (const uint8_t *)"\n\n", sizeof("\n\n") - 1 }; str__ptr(&__sc1123); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1126 = (str){ (const uint8_t *)"\n\n", sizeof("\n\n") - 1 }; str__ptr(&__sc1126); })));
+    if (main_argv_vector) {
+      codegen__codegen__Codegen__emit_main_argv_wrapper(self, f.params);
+    }
   } else {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1124 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1124); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1127 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1127); })));
   }
 }
 
 static __attribute__((unused)) bool codegen__codegen__Codegen__cg_is_format_builtin(const codegen__codegen__Codegen *const self, uint16_t const m, uint32_t const node) {
-  if (((self->package == NULL) || (((size_t)m) >= codegen__codegen__Codegen__pkg_count(self))) || (!(*({ __auto_type __sc1125 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1125, ((size_t)m)); })).prelude)) {
+  if (((self->package == NULL) || (((size_t)m) >= codegen__codegen__Codegen__pkg_count(self))) || (!(*({ __auto_type __sc1128 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1128, ((size_t)m)); })).prelude)) {
     return false;
   }
   ast__ast__Ast *const a = codegen__codegen__Codegen__mod_ast(self, m);
@@ -9129,7 +9184,7 @@ static __attribute__((unused)) bool codegen__codegen__Codegen__cg_is_format_buil
   }
   const lexer__token__Span fnm = ast__ast__Ast__at_const(&((*a)), ast__ast__Ast__at_const(&((*a)), node)->as_data.function.name)->as_data.name.text;
   const uint8_t *const s = codegen__codegen__Codegen__mod_src(self, m);
-  return ((((((((codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1126 = (str){ (const uint8_t *)"format", sizeof("format") - 1 }; str__ptr(&__sc1126); }))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1127 = (str){ (const uint8_t *)"format_into", sizeof("format_into") - 1 }; str__ptr(&__sc1127); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1128 = (str){ (const uint8_t *)"print", sizeof("print") - 1 }; str__ptr(&__sc1128); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1129 = (str){ (const uint8_t *)"println", sizeof("println") - 1 }; str__ptr(&__sc1129); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1130 = (str){ (const uint8_t *)"eprint", sizeof("eprint") - 1 }; str__ptr(&__sc1130); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1131 = (str){ (const uint8_t *)"eprintln", sizeof("eprintln") - 1 }; str__ptr(&__sc1131); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1132 = (str){ (const uint8_t *)"assert", sizeof("assert") - 1 }; str__ptr(&__sc1132); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1133 = (str){ (const uint8_t *)"assert_eq", sizeof("assert_eq") - 1 }; str__ptr(&__sc1133); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1134 = (str){ (const uint8_t *)"assert_ne", sizeof("assert_ne") - 1 }; str__ptr(&__sc1134); }))));
+  return ((((((((codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1129 = (str){ (const uint8_t *)"format", sizeof("format") - 1 }; str__ptr(&__sc1129); }))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1130 = (str){ (const uint8_t *)"format_into", sizeof("format_into") - 1 }; str__ptr(&__sc1130); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1131 = (str){ (const uint8_t *)"print", sizeof("print") - 1 }; str__ptr(&__sc1131); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1132 = (str){ (const uint8_t *)"println", sizeof("println") - 1 }; str__ptr(&__sc1132); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1133 = (str){ (const uint8_t *)"eprint", sizeof("eprint") - 1 }; str__ptr(&__sc1133); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1134 = (str){ (const uint8_t *)"eprintln", sizeof("eprintln") - 1 }; str__ptr(&__sc1134); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1135 = (str){ (const uint8_t *)"assert", sizeof("assert") - 1 }; str__ptr(&__sc1135); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1136 = (str){ (const uint8_t *)"assert_eq", sizeof("assert_eq") - 1 }; str__ptr(&__sc1136); })))) || codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1137 = (str){ (const uint8_t *)"assert_ne", sizeof("assert_ne") - 1 }; str__ptr(&__sc1137); }))));
 }
 
 static __attribute__((unused)) bool codegen__codegen__Codegen__cg_type_mentions_fnval(const codegen__codegen__Codegen *const self, uint32_t const t) {
@@ -9167,7 +9222,7 @@ static __attribute__((unused)) bool codegen__codegen__Codegen__inst_mentions_fnv
 static __attribute__((unused)) bool codegen__codegen__Codegen__cg_test_skip(const codegen__codegen__Codegen *const self, uint32_t const fn2, bool const method) {
   if (self->test.enabled) {
     const ast__ast__Node *const f = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), fn2);
-    return (((!method) && (f->kind == ast__ast__NodeKind_NODE_FUNCTION)) && codegen__codegen__span_is(self->source, ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), f->as_data.function.name)->as_data.name.text, ((const char *)({ __auto_type __sc1135 = (str){ (const uint8_t *)"main", sizeof("main") - 1 }; str__ptr(&__sc1135); }))));
+    return (((!method) && (f->kind == ast__ast__NodeKind_NODE_FUNCTION)) && codegen__codegen__span_is(self->source, ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), f->as_data.function.name)->as_data.name.text, ((const char *)({ __auto_type __sc1138 = (str){ (const uint8_t *)"main", sizeof("main") - 1 }; str__ptr(&__sc1138); }))));
   }
   return (((codegen__codegen__Codegen__cg_attr(self, codegen__codegen__Codegen__cur_module(self), fn2, ast__ast__AttrKind_ATTR_TEST) != NULL) || (codegen__codegen__Codegen__cg_attr(self, codegen__codegen__Codegen__cur_module(self), fn2, ast__ast__AttrKind_ATTR_TEST_INIT) != NULL)) || (codegen__codegen__Codegen__cg_attr(self, codegen__codegen__Codegen__cur_module(self), fn2, ast__ast__AttrKind_ATTR_TEST_FREE) != NULL));
 }
@@ -9176,66 +9231,66 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_enum_full(co
   const ast__ast__AggregateData ag = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), enum_id)->as_data.aggregate;
   codegen__codegen__Buf160 nm = (codegen__codegen__Buf160){0};
   codegen__codegen__Codegen__render_qualified(self, codegen__codegen__Codegen__cur_module(self), ag.name, ((char *)(&nm.b[0])), 160ULL);
-  ({ String__Global *__sc1136 = &(self->buf);
-String__Global__push_str(&(*__sc1136), (str){ .ptr = (const uint8_t*)"#ifndef SUPER_ENUM_", .len = sizeof("#ifndef SUPER_ENUM_") - 1 });
-String__Global__push_str(&(*__sc1136), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1136), (str){ .ptr = (const uint8_t*)"\n#define SUPER_ENUM_", .len = sizeof("\n#define SUPER_ENUM_") - 1 });
-String__Global__push_str(&(*__sc1136), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1136), (str){ .ptr = (const uint8_t*)"\n", .len = sizeof("\n") - 1 });
+  ({ String__Global *__sc1139 = &(self->buf);
+String__Global__push_str(&(*__sc1139), (str){ .ptr = (const uint8_t*)"#ifndef SUPER_ENUM_", .len = sizeof("#ifndef SUPER_ENUM_") - 1 });
+String__Global__push_str(&(*__sc1139), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1139), (str){ .ptr = (const uint8_t*)"\n#define SUPER_ENUM_", .len = sizeof("\n#define SUPER_ENUM_") - 1 });
+String__Global__push_str(&(*__sc1139), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1139), (str){ .ptr = (const uint8_t*)"\n", .len = sizeof("\n") - 1 });
 });
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1137 = (str){ (const uint8_t *)"typedef enum { ", sizeof("typedef enum { ") - 1 }; str__ptr(&__sc1137); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1140 = (str){ (const uint8_t *)"typedef enum { ", sizeof("typedef enum { ") - 1 }; str__ptr(&__sc1140); })));
   const ast__ast__NodeList ms = ag.members;
   for (uint32_t j = 0U; j < ms.len; j++) {
     if (j != 0U) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1138 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1138); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1141 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1141); })));
     }
     const uint32_t mid = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), ms)[((size_t)j)];
     codegen__codegen__Codegen__emit_tag(self, enum_id, mid);
     const uint32_t disc = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), mid)->as_data.variant.value;
     if (disc != ast__ast__NODE_NONE) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1139 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1139); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1142 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1142); })));
       const bool sc = self->const_ctx;
       (self->const_ctx = true);
       codegen__codegen__Codegen__emit_expr(self, disc);
       (self->const_ctx = sc);
     }
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1140 = (str){ (const uint8_t *)" } ", sizeof(" } ") - 1 }; str__ptr(&__sc1140); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1143 = (str){ (const uint8_t *)" } ", sizeof(" } ") - 1 }; str__ptr(&__sc1143); })));
   codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1141 = (str){ (const uint8_t *)";\n#endif\n", sizeof(";\n#endif\n") - 1 }; str__ptr(&__sc1141); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1144 = (str){ (const uint8_t *)";\n#endif\n", sizeof(";\n#endif\n") - 1 }; str__ptr(&__sc1144); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_enum_tag_decl(codegen__codegen__Codegen *const self, uint32_t const enum_id) {
   const ast__ast__AggregateData ag = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), enum_id)->as_data.aggregate;
   codegen__codegen__Buf160 nm = (codegen__codegen__Buf160){0};
   codegen__codegen__Codegen__render_qualified(self, codegen__codegen__Codegen__cur_module(self), ag.name, ((char *)(&nm.b[0])), 160ULL);
-  ({ String__Global *__sc1142 = &(self->buf);
-String__Global__push_str(&(*__sc1142), (str){ .ptr = (const uint8_t*)"#ifndef SUPER_ENUMTAG_", .len = sizeof("#ifndef SUPER_ENUMTAG_") - 1 });
-String__Global__push_str(&(*__sc1142), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1142), (str){ .ptr = (const uint8_t*)"\n#define SUPER_ENUMTAG_", .len = sizeof("\n#define SUPER_ENUMTAG_") - 1 });
-String__Global__push_str(&(*__sc1142), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1142), (str){ .ptr = (const uint8_t*)"\n", .len = sizeof("\n") - 1 });
+  ({ String__Global *__sc1145 = &(self->buf);
+String__Global__push_str(&(*__sc1145), (str){ .ptr = (const uint8_t*)"#ifndef SUPER_ENUMTAG_", .len = sizeof("#ifndef SUPER_ENUMTAG_") - 1 });
+String__Global__push_str(&(*__sc1145), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1145), (str){ .ptr = (const uint8_t*)"\n#define SUPER_ENUMTAG_", .len = sizeof("\n#define SUPER_ENUMTAG_") - 1 });
+String__Global__push_str(&(*__sc1145), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1145), (str){ .ptr = (const uint8_t*)"\n", .len = sizeof("\n") - 1 });
 });
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1143 = (str){ (const uint8_t *)"typedef enum { ", sizeof("typedef enum { ") - 1 }; str__ptr(&__sc1143); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1146 = (str){ (const uint8_t *)"typedef enum { ", sizeof("typedef enum { ") - 1 }; str__ptr(&__sc1146); })));
   const ast__ast__NodeList ms = ag.members;
   for (uint32_t j = 0U; j < ms.len; j++) {
     if (j != 0U) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1144 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1144); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1147 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1147); })));
     }
     const uint32_t mid = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), ms)[((size_t)j)];
     codegen__codegen__Codegen__emit_tag(self, enum_id, mid);
     const uint32_t disc = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), mid)->as_data.variant.value;
     if (disc != ast__ast__NODE_NONE) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1145 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1145); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1148 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1148); })));
       const bool sc = self->const_ctx;
       (self->const_ctx = true);
       codegen__codegen__Codegen__emit_expr(self, disc);
       (self->const_ctx = sc);
     }
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1146 = (str){ (const uint8_t *)" } ", sizeof(" } ") - 1 }; str__ptr(&__sc1146); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1149 = (str){ (const uint8_t *)" } ", sizeof(" } ") - 1 }; str__ptr(&__sc1149); })));
   codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1147 = (str){ (const uint8_t *)"Tag;\n#endif\n", sizeof("Tag;\n#endif\n") - 1 }; str__ptr(&__sc1147); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1150 = (str){ (const uint8_t *)"Tag;\n#endif\n", sizeof("Tag;\n#endif\n") - 1 }; str__ptr(&__sc1150); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_enum_struct_body(codegen__codegen__Codegen *const self, uint32_t const dn_id) {
@@ -9243,9 +9298,9 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_enum_struct_
   (self->depth = (self->depth + 1U));
   codegen__codegen__Codegen__emit_indent(self);
   codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1148 = (str){ (const uint8_t *)"Tag tag;\n", sizeof("Tag tag;\n") - 1 }; str__ptr(&__sc1148); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1151 = (str){ (const uint8_t *)"Tag tag;\n", sizeof("Tag tag;\n") - 1 }; str__ptr(&__sc1151); })));
   codegen__codegen__Codegen__emit_indent(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1149 = (str){ (const uint8_t *)"union {\n", sizeof("union {\n") - 1 }; str__ptr(&__sc1149); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1152 = (str){ (const uint8_t *)"union {\n", sizeof("union {\n") - 1 }; str__ptr(&__sc1152); })));
   (self->depth = (self->depth + 1U));
   const ast__ast__NodeList ms = ag.members;
   for (uint32_t j = 0U; j < ms.len; j++) {
@@ -9256,7 +9311,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_enum_struct_
       continue;
     }
     codegen__codegen__Codegen__emit_indent(self);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1150 = (str){ (const uint8_t *)"struct { ", sizeof("struct { ") - 1 }; str__ptr(&__sc1150); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1153 = (str){ (const uint8_t *)"struct { ", sizeof("struct { ") - 1 }; str__ptr(&__sc1153); })));
     for (uint32_t k = 0U; k < payload.len; k++) {
       const uint32_t pid = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), payload)[((size_t)k)];
       const ast__ast__Node *const pe = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), pid);
@@ -9268,20 +9323,20 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_enum_struct_
         codegen__codegen__Codegen__render_type_node(self, pe->as_data.field.ty, ((const char *)(&m.b[0])), ((char *)(&d.b[0])), 256ULL);
       } else {
         codegen__codegen__Buf32 fld = (codegen__codegen__Buf32){0};
-        snprintf(((char *)(&fld.b[0])), 24ULL, ((const char *)({ __auto_type __sc1151 = (str){ (const uint8_t *)"_%u", sizeof("_%u") - 1 }; str__ptr(&__sc1151); })), k);
+        snprintf(((char *)(&fld.b[0])), 24ULL, ((const char *)({ __auto_type __sc1154 = (str){ (const uint8_t *)"_%u", sizeof("_%u") - 1 }; str__ptr(&__sc1154); })), k);
         codegen__codegen__Codegen__render_type_node(self, pid, ((const char *)(&fld.b[0])), ((char *)(&d.b[0])), 256ULL);
       }
       codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&d.b[0])));
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1152 = (str){ (const uint8_t *)"; ", sizeof("; ") - 1 }; str__ptr(&__sc1152); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1155 = (str){ (const uint8_t *)"; ", sizeof("; ") - 1 }; str__ptr(&__sc1155); })));
     }
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1153 = (str){ (const uint8_t *)"} ", sizeof("} ") - 1 }; str__ptr(&__sc1153); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1156 = (str){ (const uint8_t *)"} ", sizeof("} ") - 1 }; str__ptr(&__sc1156); })));
     const lexer__token__Span vsp = codegen__codegen__Codegen__name_span(self, v.name);
     codegen__codegen__Codegen__emit_span(self, vsp);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1154 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1154); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1157 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1157); })));
   }
   (self->depth = (self->depth - 1U));
   codegen__codegen__Codegen__emit_indent(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1155 = (str){ (const uint8_t *)"} payload;\n", sizeof("} payload;\n") - 1 }; str__ptr(&__sc1155); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1158 = (str){ (const uint8_t *)"} payload;\n", sizeof("} payload;\n") - 1 }; str__ptr(&__sc1158); })));
   (self->depth = (self->depth - 1U));
 }
 
@@ -9289,9 +9344,9 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_type_decl(co
   const ast__ast__AggregateData ag = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId)->as_data.aggregate;
   const ast__ast__NodeKind kind = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId)->kind;
   const char *const kw = codegen__codegen__agg_kw(ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId));
-  ({ String__Global *__sc1156 = &(self->buf);
-String__Global__push_str(&(*__sc1156), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1156), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+  ({ String__Global *__sc1159 = &(self->buf);
+String__Global__push_str(&(*__sc1159), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1159), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
 });
   const ast__ast__Attr *const pk = codegen__codegen__Codegen__cg_attr(self, codegen__codegen__Codegen__cur_module(self), declId, ast__ast__AttrKind_ATTR_PACKED);
   const ast__ast__Attr *const al = codegen__codegen__Codegen__cg_attr(self, codegen__codegen__Codegen__cur_module(self), declId, ast__ast__AttrKind_ATTR_ALIGN);
@@ -9300,24 +9355,24 @@ String__Global__push_str(&(*__sc1156), (str){ .ptr = (const uint8_t*)" ", .len =
     (g.b[0] = 0);
     size_t gn = 0ULL;
     if (pk != NULL) {
-      (gn = codegen__codegen__bappend(((char *)(&g.b[0])), 64ULL, gn, ((const char *)({ __auto_type __sc1157 = (str){ (const uint8_t *)"packed", sizeof("packed") - 1 }; str__ptr(&__sc1157); }))));
+      (gn = codegen__codegen__bappend(((char *)(&g.b[0])), 64ULL, gn, ((const char *)({ __auto_type __sc1160 = (str){ (const uint8_t *)"packed", sizeof("packed") - 1 }; str__ptr(&__sc1160); }))));
     }
     if (al != NULL) {
       if (gn != 0ULL) {
-        (gn = codegen__codegen__bappend(((char *)(&g.b[0])), 64ULL, gn, ((const char *)({ __auto_type __sc1158 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1158); }))));
+        (gn = codegen__codegen__bappend(((char *)(&g.b[0])), 64ULL, gn, ((const char *)({ __auto_type __sc1161 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1161); }))));
       }
       codegen__codegen__Buf32 a = (codegen__codegen__Buf32){0};
-      snprintf(((char *)(&a.b[0])), 32ULL, ((const char *)({ __auto_type __sc1159 = (str){ (const uint8_t *)"aligned(%u)", sizeof("aligned(%u)") - 1 }; str__ptr(&__sc1159); })), (*al).arg);
+      snprintf(((char *)(&a.b[0])), 32ULL, ((const char *)({ __auto_type __sc1162 = (str){ (const uint8_t *)"aligned(%u)", sizeof("aligned(%u)") - 1 }; str__ptr(&__sc1162); })), (*al).arg);
       codegen__codegen__bappend(((char *)(&g.b[0])), 64ULL, gn, ((const char *)(&a.b[0])));
     }
-    ({ String__Global *__sc1160 = &(self->buf);
-String__Global__push_str(&(*__sc1160), (str){ .ptr = (const uint8_t*)"__attribute__((", .len = sizeof("__attribute__((") - 1 });
-String__Global__push_str(&(*__sc1160), utils__errors__cstr(((const char *)(&g.b[0]))));
-String__Global__push_str(&(*__sc1160), (str){ .ptr = (const uint8_t*)")) ", .len = sizeof(")) ") - 1 });
+    ({ String__Global *__sc1163 = &(self->buf);
+String__Global__push_str(&(*__sc1163), (str){ .ptr = (const uint8_t*)"__attribute__((", .len = sizeof("__attribute__((") - 1 });
+String__Global__push_str(&(*__sc1163), utils__errors__cstr(((const char *)(&g.b[0]))));
+String__Global__push_str(&(*__sc1163), (str){ .ptr = (const uint8_t*)")) ", .len = sizeof(")) ") - 1 });
 });
   }
   codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1161 = (str){ (const uint8_t *)" {\n", sizeof(" {\n") - 1 }; str__ptr(&__sc1161); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1164 = (str){ (const uint8_t *)" {\n", sizeof(" {\n") - 1 }; str__ptr(&__sc1164); })));
   if (kind == ast__ast__NodeKind_NODE_ENUM) {
     codegen__codegen__Codegen__emit_enum_struct_body(self, declId);
   } else if (ag.is_tuple) {
@@ -9325,12 +9380,12 @@ String__Global__push_str(&(*__sc1160), (str){ .ptr = (const uint8_t*)")) ", .len
     for (uint32_t j = 0U; j < ag.members.len; j++) {
       const uint32_t ftn = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), ag.members)[((size_t)j)];
       codegen__codegen__Buf32 nm = (codegen__codegen__Buf32){0};
-      snprintf(((char *)(&nm.b[0])), 16ULL, ((const char *)({ __auto_type __sc1162 = (str){ (const uint8_t *)"_%u", sizeof("_%u") - 1 }; str__ptr(&__sc1162); })), j);
+      snprintf(((char *)(&nm.b[0])), 16ULL, ((const char *)({ __auto_type __sc1165 = (str){ (const uint8_t *)"_%u", sizeof("_%u") - 1 }; str__ptr(&__sc1165); })), j);
       codegen__codegen__Buf256 d = (codegen__codegen__Buf256){0};
       codegen__codegen__Codegen__render_type_node(self, ftn, ((const char *)(&nm.b[0])), ((char *)(&d.b[0])), 256ULL);
       codegen__codegen__Codegen__emit_indent(self);
       codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&d.b[0])));
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1163 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1163); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1166 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1166); })));
     }
     (self->depth = (self->depth - 1U));
   } else {
@@ -9345,11 +9400,11 @@ String__Global__push_str(&(*__sc1160), (str){ .ptr = (const uint8_t*)")) ", .len
       codegen__codegen__Codegen__render_type_node(self, fld.ty, ((const char *)(&nm.b[0])), ((char *)(&d.b[0])), 256ULL);
       codegen__codegen__Codegen__emit_indent(self);
       codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&d.b[0])));
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1164 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1164); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1167 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1167); })));
     }
     (self->depth = (self->depth - 1U));
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1165 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1165); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1168 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1168); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_struct_inst(codegen__codegen__Codegen *const self, const ast__ast__TyInstance *const it, bool const with_body) {
@@ -9357,14 +9412,14 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_struct_inst(
   codegen__codegen__Buf200 nm = (codegen__codegen__Buf200){0};
   codegen__codegen__Codegen__inst_name(self, it, ((char *)(&nm.b[0])), 200ULL);
   if (!with_body) {
-    ({ String__Global *__sc1166 = &(self->buf);
-String__Global__push_str(&(*__sc1166), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1166), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1166), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1166), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1166), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1166), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1166), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+    ({ String__Global *__sc1169 = &(self->buf);
+String__Global__push_str(&(*__sc1169), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1169), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1169), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1169), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1169), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1169), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1169), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
     return;
   }
@@ -9381,11 +9436,11 @@ String__Global__push_str(&(*__sc1166), (str){ .ptr = (const uint8_t*)";\n", .len
     (self->nsubst = ({ int32_t __sc_r; if (__builtin_add_overflow(self->nsubst, 1, &__sc_r)) { __sc_panic("arithmetic overflow"); } __sc_r; }));
     (i = (i + 1U));
   }
-  ({ String__Global *__sc1167 = &(self->buf);
-String__Global__push_str(&(*__sc1167), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1167), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1167), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1167), (str){ .ptr = (const uint8_t*)" {\n", .len = sizeof(" {\n") - 1 });
+  ({ String__Global *__sc1170 = &(self->buf);
+String__Global__push_str(&(*__sc1170), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1170), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1170), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1170), (str){ .ptr = (const uint8_t*)" {\n", .len = sizeof(" {\n") - 1 });
 });
   (self->depth = (self->depth + 1U));
   for (uint32_t j = 0U; j < ag.members.len; j++) {
@@ -9398,10 +9453,10 @@ String__Global__push_str(&(*__sc1167), (str){ .ptr = (const uint8_t*)" {\n", .le
     codegen__codegen__Codegen__render_type_node(self, fld.ty, ((const char *)(&fnm.b[0])), ((char *)(&d.b[0])), 256ULL);
     codegen__codegen__Codegen__emit_indent(self);
     codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&d.b[0])));
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1168 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1168); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1171 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1171); })));
   }
   (self->depth = (self->depth - 1U));
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1169 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1169); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1172 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1172); })));
   (self->nsubst = 0);
 }
 
@@ -9411,23 +9466,23 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_enum_inst(co
   const ast__ast__AggregateData ag = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), it->decl)->as_data.aggregate;
   if (!codegen__codegen__Codegen__aggregate_has_payload(self, it->decl)) {
     if (with_body) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1170 = (str){ (const uint8_t *)"typedef ", sizeof("typedef ") - 1 }; str__ptr(&__sc1170); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1173 = (str){ (const uint8_t *)"typedef ", sizeof("typedef ") - 1 }; str__ptr(&__sc1173); })));
       codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-      ({ String__Global *__sc1171 = &(self->buf);
-String__Global__push_str(&(*__sc1171), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1171), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1171), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+      ({ String__Global *__sc1174 = &(self->buf);
+String__Global__push_str(&(*__sc1174), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1174), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1174), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
     }
     return;
   }
   if (!with_body) {
-    ({ String__Global *__sc1172 = &(self->buf);
-String__Global__push_str(&(*__sc1172), (str){ .ptr = (const uint8_t*)"typedef struct ", .len = sizeof("typedef struct ") - 1 });
-String__Global__push_str(&(*__sc1172), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1172), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1172), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1172), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+    ({ String__Global *__sc1175 = &(self->buf);
+String__Global__push_str(&(*__sc1175), (str){ .ptr = (const uint8_t*)"typedef struct ", .len = sizeof("typedef struct ") - 1 });
+String__Global__push_str(&(*__sc1175), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1175), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1175), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1175), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
     return;
   }
@@ -9443,13 +9498,13 @@ String__Global__push_str(&(*__sc1172), (str){ .ptr = (const uint8_t*)";\n", .len
     (self->nsubst = ({ int32_t __sc_r; if (__builtin_add_overflow(self->nsubst, 1, &__sc_r)) { __sc_panic("arithmetic overflow"); } __sc_r; }));
     (i = (i + 1U));
   }
-  ({ String__Global *__sc1173 = &(self->buf);
-String__Global__push_str(&(*__sc1173), (str){ .ptr = (const uint8_t*)"struct ", .len = sizeof("struct ") - 1 });
-String__Global__push_str(&(*__sc1173), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1173), (str){ .ptr = (const uint8_t*)" {\n", .len = sizeof(" {\n") - 1 });
+  ({ String__Global *__sc1176 = &(self->buf);
+String__Global__push_str(&(*__sc1176), (str){ .ptr = (const uint8_t*)"struct ", .len = sizeof("struct ") - 1 });
+String__Global__push_str(&(*__sc1176), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1176), (str){ .ptr = (const uint8_t*)" {\n", .len = sizeof(" {\n") - 1 });
 });
   codegen__codegen__Codegen__emit_enum_struct_body(self, it->decl);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1174 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1174); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1177 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1177); })));
   (self->nsubst = 0);
 }
 
@@ -9602,13 +9657,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_inst_dfs(cod
       for (uint32_t kk = 0U; kk < mn->as_data.variant.payload.len; kk++) {
         const ast__ast__Node *const pf = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), pids[((size_t)kk)]);
         const uint32_t ptn = ({
-          uint32_t __sc1175;
+          uint32_t __sc1178;
           if (pf->kind == ast__ast__NodeKind_NODE_FIELD) {
-            __sc1175 = pf->as_data.field.ty;
+            __sc1178 = pf->as_data.field.ty;
           } else {
-            __sc1175 = pids[((size_t)kk)];
+            __sc1178 = pids[((size_t)kk)];
           }
-          __sc1175;
+          __sc1178;
         });
         const uint32_t ft = codegen__codegen__Codegen__subst_resolve(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), ptn));
         codegen__codegen__Codegen__push_home_dep(self, ft, ((uint32_t *)(&deps.t[0])), ((int32_t *)(&nh)));
@@ -9649,13 +9704,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_type_dfs(cod
       for (uint32_t kk = 0U; kk < m->as_data.variant.payload.len; kk++) {
         const ast__ast__Node *const pf = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), plids[((size_t)kk)]);
         const uint32_t ptn = ({
-          uint32_t __sc1176;
+          uint32_t __sc1179;
           if (pf->kind == ast__ast__NodeKind_NODE_FIELD) {
-            __sc1176 = pf->as_data.field.ty;
+            __sc1179 = pf->as_data.field.ty;
           } else {
-            __sc1176 = plids[((size_t)kk)];
+            __sc1179 = plids[((size_t)kk)];
           }
-          __sc1176;
+          __sc1179;
         });
         codegen__codegen__Codegen__push_home_dep(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), ptn), ((uint32_t *)(&deps.t[0])), ((int32_t *)(&nh)));
       }
@@ -9715,13 +9770,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_aggregate_sp
     }
   } else {
     const size_t cnt = ({
-      size_t __sc1177;
+      size_t __sc1180;
       if (n != 0ULL) {
-        __sc1177 = n;
+        __sc1180 = n;
       } else {
-        __sc1177 = 1ULL;
+        __sc1180 = 1ULL;
       }
-      __sc1177;
+      __sc1180;
     });
     uint8_t *const state = ((uint8_t *)calloc(cnt, 1ULL));
     if (state == NULL) {
@@ -9774,13 +9829,13 @@ static __attribute__((unused)) uint32_t codegen__codegen__Codegen__rehome_subst_
     const ast__ast__TyInstance inst = (*ast__ast__Ast__instance(&((*codegen__codegen__Codegen__mod_ast(self, owner_mod))), ty.as_data.inst));
     codegen__codegen__TyArgs4 na = (codegen__codegen__TyArgs4){0};
     const uint8_t nn = ({
-      uint8_t __sc1178;
+      uint8_t __sc1181;
       if (inst.n < 4U) {
-        __sc1178 = inst.n;
+        __sc1181 = inst.n;
       } else {
-        __sc1178 = 4U;
+        __sc1181 = 4U;
       }
-      __sc1178;
+      __sc1181;
     });
     for (uint8_t i = 0U; i < nn; i++) {
       (na.t[((size_t)i)] = codegen__codegen__Codegen__rehome_subst_type(self, owner_mod, it, inst.args[((size_t)i)]));
@@ -9802,7 +9857,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_rehomed_stru
     (oit.args[((size_t)k)] = ast__ast__Ast__reintern(&((*owner)), (&(*home)), it->args[((size_t)k)]));
   }
   (self->source = osrc);
-  (self->len = String__Global__len(&(*({ __auto_type __sc1179 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1179, ((size_t)it->module)); })).source));
+  (self->len = String__Global__len(&(*({ __auto_type __sc1182 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1182, ((size_t)it->module)); })).source));
   (self->borrowed = true);
   (self->ast = codegen__codegen__Codegen__mod_ast(self, it->module));
   const ast__ast__NodeKind dk = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), oit.decl)->kind;
@@ -9850,13 +9905,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_rehomed_stru
         const uint32_t pid = pids[((size_t)kk)];
         const ast__ast__NodeKind pfk = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, owner_mod))), pid)->kind;
         const uint32_t tn = ({
-          uint32_t __sc1180;
+          uint32_t __sc1183;
           if (pfk == ast__ast__NodeKind_NODE_FIELD) {
-            __sc1180 = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, owner_mod))), pid)->as_data.field.ty;
+            __sc1183 = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, owner_mod))), pid)->as_data.field.ty;
           } else {
-            __sc1180 = pid;
+            __sc1183 = pid;
           }
-          __sc1180;
+          __sc1183;
         });
         const uint32_t fnode_ty = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__mod_ast(self, owner_mod))), tn);
         const uint32_t ft = codegen__codegen__Codegen__rehome_subst_type(self, owner_mod, (&it), fnode_ty);
@@ -9895,13 +9950,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_rehomed_stru
     }
   } else {
     const size_t cnt = ({
-      size_t __sc1181;
+      size_t __sc1184;
       if (n != 0ULL) {
-        __sc1181 = n;
+        __sc1184 = n;
       } else {
-        __sc1181 = 1ULL;
+        __sc1184 = 1ULL;
       }
-      __sc1181;
+      __sc1184;
     });
     uint8_t *const state = ((uint8_t *)calloc(cnt, 1ULL));
     if (state == NULL) {
@@ -9934,25 +9989,25 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_rehomed_forw
     codegen__codegen__Codegen__inst_name(self, (&it), ((char *)(&inm.b[0])), 200ULL);
     if ((dn_kind == ast__ast__NodeKind_NODE_STRUCT) || codegen__codegen__Codegen__aggregate_has_payload_in(self, it.module, it.decl)) {
       const char *const kw = codegen__codegen__agg_kw(ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, it.module))), it.decl));
-      ({ String__Global *__sc1182 = &(self->buf);
-String__Global__push_str(&(*__sc1182), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1182), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1182), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1182), utils__errors__cstr(((const char *)(&inm.b[0]))));
-String__Global__push_str(&(*__sc1182), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1182), utils__errors__cstr(((const char *)(&inm.b[0]))));
-String__Global__push_str(&(*__sc1182), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+      ({ String__Global *__sc1185 = &(self->buf);
+String__Global__push_str(&(*__sc1185), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1185), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1185), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1185), utils__errors__cstr(((const char *)(&inm.b[0]))));
+String__Global__push_str(&(*__sc1185), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1185), utils__errors__cstr(((const char *)(&inm.b[0]))));
+String__Global__push_str(&(*__sc1185), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
     } else {
       const uint32_t anm = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, it.module))), it.decl)->as_data.aggregate.name;
       codegen__codegen__Buf160 en = (codegen__codegen__Buf160){0};
       codegen__codegen__Codegen__render_qualified(self, it.module, anm, ((char *)(&en.b[0])), 160ULL);
-      ({ String__Global *__sc1183 = &(self->buf);
-String__Global__push_str(&(*__sc1183), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1183), utils__errors__cstr(((const char *)(&en.b[0]))));
-String__Global__push_str(&(*__sc1183), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1183), utils__errors__cstr(((const char *)(&inm.b[0]))));
-String__Global__push_str(&(*__sc1183), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+      ({ String__Global *__sc1186 = &(self->buf);
+String__Global__push_str(&(*__sc1186), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1186), utils__errors__cstr(((const char *)(&en.b[0]))));
+String__Global__push_str(&(*__sc1186), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1186), utils__errors__cstr(((const char *)(&inm.b[0]))));
+String__Global__push_str(&(*__sc1186), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
     }
   }
@@ -9961,13 +10016,13 @@ String__Global__push_str(&(*__sc1183), (str){ .ptr = (const uint8_t*)";\n", .len
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_fnval_instance_structs(codegen__codegen__Codegen *const self) {
   const size_t n = Vector__ast__ast__TyInstance__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).instances);
   const size_t cnt = ({
-    size_t __sc1184;
+    size_t __sc1187;
     if (n != 0ULL) {
-      __sc1184 = n;
+      __sc1187 = n;
     } else {
-      __sc1184 = 1ULL;
+      __sc1187 = 1ULL;
     }
-    __sc1184;
+    __sc1187;
   });
   uint8_t *const state = ((uint8_t *)calloc(cnt, 1ULL));
   (self->fnval_pass = true);
@@ -10094,7 +10149,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_inst_methods
       }
       codegen__codegen__Buf320 nm = (codegen__codegen__Buf320){0};
       size_t at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, 0ULL, ((const char *)(&inm.b[0])));
-      (at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, at, ((const char *)({ __auto_type __sc1185 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1185); }))));
+      (at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, at, ((const char *)({ __auto_type __sc1188 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1188); }))));
       const lexer__token__Span mnsp = codegen__codegen__Codegen__name_span(self, mf.name);
       codegen__codegen__Codegen__render_ident(self, mnsp, ((char *)(((char *)(&nm.b[0])) + at)), (320ULL - at));
       const bool stat = (self->multifile && (ifnv || (!mf.is_public)));
@@ -10119,7 +10174,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_inst_methods
       const ast__ast__NodeList mg = mf.generics;
       const uint32_t *const mgids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), mg);
       for (size_t mk = 0ULL; mk < Vector__ast__ast__MethodInst__Global__len(&(*mi_src).method_insts); mk++) {
-        const ast__ast__MethodInst minst = (*({ __auto_type __sc1186 = &(*mi_src).method_insts; Vector__ast__ast__MethodInst__Global__index(__sc1186, mk); }));
+        const ast__ast__MethodInst minst = (*({ __auto_type __sc1189 = &(*mi_src).method_insts; Vector__ast__ast__MethodInst__Global__index(__sc1189, mk); }));
         if ((minst.method != mid) || (minst.instance != mi_inst)) {
           continue;
         }
@@ -10128,13 +10183,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_inst_methods
         uint32_t mgi = 0U;
         while (((mgi < mg.len) && (mgi < ((uint32_t)minst.n))) && (self->nsubst < 16)) {
           const uint32_t ta = ({
-            uint32_t __sc1187;
+            uint32_t __sc1190;
             if (mi_src == codegen__codegen__Codegen__cur_ast(self)) {
-              __sc1187 = minst.targs[((size_t)mgi)];
+              __sc1190 = minst.targs[((size_t)mgi)];
             } else {
-              __sc1187 = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*mi_src)), minst.targs[((size_t)mgi)]);
+              __sc1190 = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*mi_src)), minst.targs[((size_t)mgi)]);
             }
-            __sc1187;
+            __sc1190;
           });
           (self->subst[((size_t)self->nsubst)].param = (ast__ast__DefId){ .module = codegen__codegen__Codegen__cur_module(self), .node = mgids[((size_t)mgi)] });
           (self->subst[((size_t)self->nsubst)].concrete = ta);
@@ -10156,15 +10211,15 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_inst_methods
         codegen__codegen__Buf400 snm = (codegen__codegen__Buf400){0};
         size_t a2 = codegen__codegen__bappend(((char *)(&snm.b[0])), 400ULL, 0ULL, ((const char *)(&nm.b[0])));
         for (uint8_t gg = 0U; gg < minst.n; gg++) {
-          (a2 = codegen__codegen__bappend(((char *)(&snm.b[0])), 400ULL, a2, ((const char *)({ __auto_type __sc1188 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1188); }))));
+          (a2 = codegen__codegen__bappend(((char *)(&snm.b[0])), 400ULL, a2, ((const char *)({ __auto_type __sc1191 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1191); }))));
           const uint32_t tg = ({
-            uint32_t __sc1189;
+            uint32_t __sc1192;
             if (mi_src == codegen__codegen__Codegen__cur_ast(self)) {
-              __sc1189 = minst.targs[((size_t)gg)];
+              __sc1192 = minst.targs[((size_t)gg)];
             } else {
-              __sc1189 = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*mi_src)), minst.targs[((size_t)gg)]);
+              __sc1192 = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*mi_src)), minst.targs[((size_t)gg)]);
             }
-            __sc1189;
+            __sc1192;
           });
           codegen__codegen__Buf176 e = (codegen__codegen__Buf176){0};
           codegen__codegen__Codegen__mangle_type(self, tg, ((char *)(&e.b[0])), 176ULL);
@@ -10224,7 +10279,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_rehomed_meth
       (oit.args[((size_t)k)] = ast__ast__Ast__reintern(&((*owner)), (&(*home)), it.args[((size_t)k)]));
     }
     (self->source = osrc);
-    (self->len = String__Global__len(&(*({ __auto_type __sc1190 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1190, ((size_t)it.module)); })).source));
+    (self->len = String__Global__len(&(*({ __auto_type __sc1193 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1193, ((size_t)it.module)); })).source));
     (self->borrowed = true);
     (self->ast = codegen__codegen__Codegen__mod_ast(self, it.module));
     codegen__codegen__Codegen__emit_inst_methods(self, (&oit), codegen__codegen__Codegen__mod_ast(self, home_mod), itTy, which, with_body);
@@ -10263,7 +10318,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_local_method
     bool any = false;
     size_t mk = 0ULL;
     while ((mk < Vector__ast__ast__MethodInst__Global__len(&(*home).method_insts)) && (!any)) {
-      if ((*({ __auto_type __sc1191 = &(*home).method_insts; Vector__ast__ast__MethodInst__Global__index(__sc1191, mk); })).instance == itTy) {
+      if ((*({ __auto_type __sc1194 = &(*home).method_insts; Vector__ast__ast__MethodInst__Global__index(__sc1194, mk); })).instance == itTy) {
         (any = true);
       }
       (mk = (mk + 1ULL));
@@ -10279,7 +10334,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_local_method
       (oit.args[((size_t)k2)] = ast__ast__Ast__reintern(&((*owner)), (&(*home)), it.args[((size_t)k2)]));
     }
     (self->source = osrc);
-    (self->len = String__Global__len(&(*({ __auto_type __sc1192 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1192, ((size_t)it.module)); })).source));
+    (self->len = String__Global__len(&(*({ __auto_type __sc1195 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1195, ((size_t)it.module)); })).source));
     (self->borrowed = true);
     (self->minst_only = true);
     (self->ast = codegen__codegen__Codegen__mod_ast(self, it.module));
@@ -10342,7 +10397,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_specializati
     }
     (self->ast = owner);
     (self->source = osrc);
-    (self->len = String__Global__len(&(*({ __auto_type __sc1193 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1193, ((size_t)fn2.module)); })).source));
+    (self->len = String__Global__len(&(*({ __auto_type __sc1196 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1196, ((size_t)fn2.module)); })).source));
     (self->borrowed = true);
     const ast__ast__NodeList gens = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), fn2.node)->as_data.function.generics;
     const uint32_t *const gids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), gens);
@@ -10437,7 +10492,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_default_meth
       size_t oninst = 0ULL;
       if (foreign) {
         (self->source = codegen__codegen__Codegen__mod_src(self, iface.module));
-        (self->len = String__Global__len(&(*({ __auto_type __sc1194 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1194, ((size_t)iface.module)); })).source));
+        (self->len = String__Global__len(&(*({ __auto_type __sc1197 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1197, ((size_t)iface.module)); })).source));
         (self->ast = codegen__codegen__Codegen__mod_ast(self, iface.module));
         (self->borrowed = true);
         (self->dflt_home = (*home).module);
@@ -10473,7 +10528,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_closure_fn(c
   codegen__codegen__Buf200 nm = (codegen__codegen__Buf200){0};
   codegen__codegen__Codegen__closure_name(self, id, ((char *)(&nm.b[0])), 200ULL);
   if (caps && (!with_body)) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1195 = (str){ (const uint8_t *)"typedef struct { ", sizeof("typedef struct { ") - 1 }; str__ptr(&__sc1195); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1198 = (str){ (const uint8_t *)"typedef struct { ", sizeof("typedef struct { ") - 1 }; str__ptr(&__sc1198); })));
     const uint32_t *const cids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), cl.captures);
     for (uint32_t i = 0U; i < cl.captures.len; i++) {
       const uint32_t cid = cids[((size_t)i)];
@@ -10481,73 +10536,73 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_closure_fn(c
       const lexer__token__Span csp = codegen__codegen__Codegen__cg_decl_name_span(self, cid);
       codegen__codegen__Codegen__render_ident(self, csp, ((char *)(&fnm.b[0])), 128ULL);
       uint32_t ft = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), cid);
-      if ((({ uint64_t __sc1196 = ((uint64_t)cl.mut_caps); int64_t __sc1197 = (int64_t)(((uint64_t)i)); if ((uint64_t)__sc1197 >= 64) { __sc_panic("shift out of range"); } (uint64_t)(__sc1196 >> __sc1197); }) & 1ULL) != 0ULL) {
+      if ((({ uint64_t __sc1199 = ((uint64_t)cl.mut_caps); int64_t __sc1200 = (int64_t)(((uint64_t)i)); if ((uint64_t)__sc1200 >= 64) { __sc_panic("shift out of range"); } (uint64_t)(__sc1199 >> __sc1200); }) & 1ULL) != 0ULL) {
         (ft = ast__ast__Ast__intern_type(&((*codegen__codegen__Codegen__cur_ast(self))), (ast__ast__Ty){ .kind = ast__ast__TypeKind_TYPE_POINTER, .qualifier = 2U, .as_data = (ast__ast__TyAs){ .elem = ft } }));
       }
       codegen__codegen__Buf300 d = (codegen__codegen__Buf300){0};
       codegen__codegen__Codegen__render_type_id(self, ft, ((const char *)(&fnm.b[0])), ((char *)(&d.b[0])), 300ULL);
-      ({ String__Global *__sc1198 = &(self->buf);
-String__Global__push_str(&(*__sc1198), utils__errors__cstr(((const char *)(&d.b[0]))));
-String__Global__push_str(&(*__sc1198), (str){ .ptr = (const uint8_t*)"; ", .len = sizeof("; ") - 1 });
+      ({ String__Global *__sc1201 = &(self->buf);
+String__Global__push_str(&(*__sc1201), utils__errors__cstr(((const char *)(&d.b[0]))));
+String__Global__push_str(&(*__sc1201), (str){ .ptr = (const uint8_t*)"; ", .len = sizeof("; ") - 1 });
 });
     }
-    ({ String__Global *__sc1199 = &(self->buf);
-String__Global__push_str(&(*__sc1199), (str){ .ptr = (const uint8_t*)"} ", .len = sizeof("} ") - 1 });
-String__Global__push_str(&(*__sc1199), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1199), (str){ .ptr = (const uint8_t*)"_env;\n", .len = sizeof("_env;\n") - 1 });
+    ({ String__Global *__sc1202 = &(self->buf);
+String__Global__push_str(&(*__sc1202), (str){ .ptr = (const uint8_t*)"} ", .len = sizeof("} ") - 1 });
+String__Global__push_str(&(*__sc1202), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1202), (str){ .ptr = (const uint8_t*)"_env;\n", .len = sizeof("_env;\n") - 1 });
 });
     const ast__ast__Ty fnty = (ast__ast__Ty){ .kind = ast__ast__TypeKind_TYPE_FUNCTION, .module = codegen__codegen__Codegen__cur_module(self), .as_data = (ast__ast__TyAs){ .decl = id } };
     if (codegen__codegen__Codegen__cg_fn_owns(self, (&fnty))) {
-      ({ String__Global *__sc1200 = &(self->buf);
-String__Global__push_str(&(*__sc1200), (str){ .ptr = (const uint8_t*)"static __attribute__((unused)) void ", .len = sizeof("static __attribute__((unused)) void ") - 1 });
-String__Global__push_str(&(*__sc1200), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1200), (str){ .ptr = (const uint8_t*)"_env_free(", .len = sizeof("_env_free(") - 1 });
-String__Global__push_str(&(*__sc1200), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1200), (str){ .ptr = (const uint8_t*)"_env *const __e) { ", .len = sizeof("_env *const __e) { ") - 1 });
+      ({ String__Global *__sc1203 = &(self->buf);
+String__Global__push_str(&(*__sc1203), (str){ .ptr = (const uint8_t*)"static __attribute__((unused)) void ", .len = sizeof("static __attribute__((unused)) void ") - 1 });
+String__Global__push_str(&(*__sc1203), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1203), (str){ .ptr = (const uint8_t*)"_env_free(", .len = sizeof("_env_free(") - 1 });
+String__Global__push_str(&(*__sc1203), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1203), (str){ .ptr = (const uint8_t*)"_env *const __e) { ", .len = sizeof("_env *const __e) { ") - 1 });
 });
       for (uint32_t i2 = 0U; i2 < cl.captures.len; i2++) {
         const uint32_t cid = cids[((size_t)i2)];
-        if (((({ uint64_t __sc1201 = ((uint64_t)cl.mut_caps); int64_t __sc1202 = (int64_t)(((uint64_t)i2)); if ((uint64_t)__sc1202 >= 64) { __sc_panic("shift out of range"); } (uint64_t)(__sc1201 >> __sc1202); }) & 1ULL) != 0ULL) || (!codegen__codegen__Codegen__cg_type_is_free(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), cid)))) {
+        if (((({ uint64_t __sc1204 = ((uint64_t)cl.mut_caps); int64_t __sc1205 = (int64_t)(((uint64_t)i2)); if ((uint64_t)__sc1205 >= 64) { __sc_panic("shift out of range"); } (uint64_t)(__sc1204 >> __sc1205); }) & 1ULL) != 0ULL) || (!codegen__codegen__Codegen__cg_type_is_free(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), cid)))) {
           continue;
         }
         codegen__codegen__Buf128 fnm = (codegen__codegen__Buf128){0};
         const lexer__token__Span csp = codegen__codegen__Codegen__cg_decl_name_span(self, cid);
         codegen__codegen__Codegen__render_ident(self, csp, ((char *)(&fnm.b[0])), 128ULL);
         if (codegen__codegen__Codegen__emit_free_target(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), cid))) {
-          ({ String__Global *__sc1203 = &(self->buf);
-String__Global__push_str(&(*__sc1203), (str){ .ptr = (const uint8_t*)"(&__e->", .len = sizeof("(&__e->") - 1 });
-String__Global__push_str(&(*__sc1203), utils__errors__cstr(((const char *)(&fnm.b[0]))));
-String__Global__push_str(&(*__sc1203), (str){ .ptr = (const uint8_t*)"); ", .len = sizeof("); ") - 1 });
+          ({ String__Global *__sc1206 = &(self->buf);
+String__Global__push_str(&(*__sc1206), (str){ .ptr = (const uint8_t*)"(&__e->", .len = sizeof("(&__e->") - 1 });
+String__Global__push_str(&(*__sc1206), utils__errors__cstr(((const char *)(&fnm.b[0]))));
+String__Global__push_str(&(*__sc1206), (str){ .ptr = (const uint8_t*)"); ", .len = sizeof("); ") - 1 });
 });
         }
       }
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1204 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1204); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1207 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1207); })));
     }
   }
   codegen__codegen__Buf1024 ps = (codegen__codegen__Buf1024){0};
   codegen__codegen__Codegen__render_params(self, cl.params, ((char *)(&ps.b[0])), 1024ULL);
   codegen__codegen__Buf1320 decl = (codegen__codegen__Buf1320){0};
   size_t at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, 0ULL, ((const char *)(&nm.b[0])));
-  (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1205 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1205); }))));
+  (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1208 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1208); }))));
   if (caps) {
-    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1206 = (str){ (const uint8_t *)"const ", sizeof("const ") - 1 }; str__ptr(&__sc1206); }))));
+    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1209 = (str){ (const uint8_t *)"const ", sizeof("const ") - 1 }; str__ptr(&__sc1209); }))));
     (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)(&nm.b[0]))));
-    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1207 = (str){ (const uint8_t *)"_env *const __env", sizeof("_env *const __env") - 1 }; str__ptr(&__sc1207); }))));
-    if (strcmp(((const char *)(&ps.b[0])), ((const char *)({ __auto_type __sc1208 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1208); }))) != 0) {
-      (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1209 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1209); }))));
+    (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1210 = (str){ (const uint8_t *)"_env *const __env", sizeof("_env *const __env") - 1 }; str__ptr(&__sc1210); }))));
+    if (strcmp(((const char *)(&ps.b[0])), ((const char *)({ __auto_type __sc1211 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1211); }))) != 0) {
+      (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1212 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1212); }))));
       (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)(&ps.b[0]))));
     }
   } else {
     (at = codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)(&ps.b[0]))));
   }
-  codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1210 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1210); })));
+  codegen__codegen__bappend(((char *)(&decl.b[0])), 1320ULL, at, ((const char *)({ __auto_type __sc1213 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1213); })));
   const uint32_t body = cl.body;
   const bool expr_body = cl.expr_body;
   uint32_t rt = ast__ast__TYPE_NONE;
   if (expr_body) {
     (rt = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), body));
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1211 = (str){ (const uint8_t *)"static __attribute__((unused)) ", sizeof("static __attribute__((unused)) ") - 1 }; str__ptr(&__sc1211); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1214 = (str){ (const uint8_t *)"static __attribute__((unused)) ", sizeof("static __attribute__((unused)) ") - 1 }; str__ptr(&__sc1214); })));
   codegen__codegen__Buf1400 out = (codegen__codegen__Buf1400){0};
   if (expr_body) {
     codegen__codegen__Codegen__render_type_id(self, rt, ((const char *)(&decl.b[0])), ((char *)(&out.b[0])), 1400ULL);
@@ -10557,34 +10612,34 @@ String__Global__push_str(&(*__sc1203), (str){ .ptr = (const uint8_t*)"); ", .len
       const uint32_t r0 = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), rets)[0];
       const ast__ast__Node *const rn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), r0);
       const uint32_t rtn = ({
-        uint32_t __sc1212;
+        uint32_t __sc1215;
         if (rn->kind == ast__ast__NodeKind_NODE_PARAMETER) {
-          __sc1212 = rn->as_data.parameter.ty;
+          __sc1215 = rn->as_data.parameter.ty;
         } else {
-          __sc1212 = r0;
+          __sc1215 = r0;
         }
-        __sc1212;
+        __sc1215;
       });
       codegen__codegen__Codegen__render_type_node(self, rtn, ((const char *)(&decl.b[0])), ((char *)(&out.b[0])), 1400ULL);
     } else {
-      codegen__codegen__buf_join3(((char *)(&out.b[0])), 1400ULL, ((const char *)({ __auto_type __sc1213 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1213); })), ((const char *)({ __auto_type __sc1214 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1214); })), ((const char *)(&decl.b[0])));
+      codegen__codegen__buf_join3(((char *)(&out.b[0])), 1400ULL, ((const char *)({ __auto_type __sc1216 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1216); })), ((const char *)({ __auto_type __sc1217 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1217); })), ((const char *)(&decl.b[0])));
     }
   }
   codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&out.b[0])));
   if (!with_body) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1215 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1215); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1218 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1218); })));
     return;
   }
   (self->current_ret[0] = 0);
   const uint32_t saved_env = self->env_clos;
   (self->env_clos = ({
-    uint32_t __sc1216;
+    uint32_t __sc1219;
     if (caps) {
-      __sc1216 = id;
+      __sc1219 = id;
     } else {
-      __sc1216 = ast__ast__NODE_NONE;
+      __sc1219 = ast__ast__NODE_NONE;
     }
-    __sc1216;
+    __sc1219;
   }));
   if (expr_body) {
     bool is_void = false;
@@ -10592,22 +10647,22 @@ String__Global__push_str(&(*__sc1203), (str){ .ptr = (const uint8_t*)"); ", .len
       const ast__ast__Ty rty = (*codegen__codegen__Codegen__type_at(self, rt));
       (is_void = ((rty.kind == ast__ast__TypeKind_TYPE_BUILTIN) && (rty.as_data.builtin == ast__ast__BuiltinType_BT_VOID)));
     }
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1217 = (str){ (const uint8_t *)" {\n", sizeof(" {\n") - 1 }; str__ptr(&__sc1217); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1220 = (str){ (const uint8_t *)" {\n", sizeof(" {\n") - 1 }; str__ptr(&__sc1220); })));
     (self->depth = (self->depth + 1U));
     codegen__codegen__Codegen__emit_indent(self);
     if (!is_void) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1218 = (str){ (const uint8_t *)"return ", sizeof("return ") - 1 }; str__ptr(&__sc1218); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1221 = (str){ (const uint8_t *)"return ", sizeof("return ") - 1 }; str__ptr(&__sc1221); })));
     }
     codegen__codegen__Codegen__emit_expr(self, body);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1219 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1219); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1222 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1222); })));
     (self->depth = (self->depth - 1U));
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1220 = (str){ (const uint8_t *)"}\n\n", sizeof("}\n\n") - 1 }; str__ptr(&__sc1220); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1223 = (str){ (const uint8_t *)"}\n\n", sizeof("}\n\n") - 1 }; str__ptr(&__sc1223); })));
   } else {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1221 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1221); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1224 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1224); })));
     (self->defer_top = 0U);
     (self->loop_defer_base = 0U);
     codegen__codegen__Codegen__emit_block(self, body);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1222 = (str){ (const uint8_t *)"\n\n", sizeof("\n\n") - 1 }; str__ptr(&__sc1222); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1225 = (str){ (const uint8_t *)"\n\n", sizeof("\n\n") - 1 }; str__ptr(&__sc1225); })));
   }
   (self->env_clos = saved_env);
 }
@@ -10691,13 +10746,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__collect_callbacks
     ast__ast__DefId callee = (ast__ast__DefId){ .module = 0U, .node = ast__ast__NODE_NONE };
     bool isclo = false;
     const bool known = ({
-      bool __sc1223;
+      bool __sc1226;
       if (cbidx < args.len) {
-        __sc1223 = codegen__codegen__Codegen__cb_known_callee(self, aids[((size_t)cbidx)], ((ast__ast__DefId *)(&callee)), ((bool *)(&isclo)));
+        __sc1226 = codegen__codegen__Codegen__cb_known_callee(self, aids[((size_t)cbidx)], ((ast__ast__DefId *)(&callee)), ((bool *)(&isclo)));
       } else {
-        __sc1223 = false;
+        __sc1226 = false;
       }
-      __sc1223;
+      __sc1226;
     });
     if (known) {
       codegen__codegen__Codegen__cb_record(self, fn2, param, cbidx, callee, isclo);
@@ -10746,61 +10801,61 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_dyn_typedefs
     codegen__codegen__Codegen__dyn_stem(self, dy.module, dy.as_data.decl, ((char *)(&stem.b[0])), 176ULL);
     const char *const sp = ((const char *)(&stem.b[0]));
     const ast__ast__NodeKind idn_kind = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), dy.as_data.decl)->kind;
-    ({ String__Global *__sc1224 = &(self->buf);
-String__Global__push_str(&(*__sc1224), (str){ .ptr = (const uint8_t*)"#ifndef SC_DYN_", .len = sizeof("#ifndef SC_DYN_") - 1 });
-String__Global__push_str(&(*__sc1224), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1224), (str){ .ptr = (const uint8_t*)"\n#define SC_DYN_", .len = sizeof("\n#define SC_DYN_") - 1 });
-String__Global__push_str(&(*__sc1224), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1224), (str){ .ptr = (const uint8_t*)"\n", .len = sizeof("\n") - 1 });
+    ({ String__Global *__sc1227 = &(self->buf);
+String__Global__push_str(&(*__sc1227), (str){ .ptr = (const uint8_t*)"#ifndef SC_DYN_", .len = sizeof("#ifndef SC_DYN_") - 1 });
+String__Global__push_str(&(*__sc1227), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1227), (str){ .ptr = (const uint8_t*)"\n#define SC_DYN_", .len = sizeof("\n#define SC_DYN_") - 1 });
+String__Global__push_str(&(*__sc1227), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1227), (str){ .ptr = (const uint8_t*)"\n", .len = sizeof("\n") - 1 });
 });
-    ({ String__Global *__sc1225 = &(self->buf);
-String__Global__push_str(&(*__sc1225), (str){ .ptr = (const uint8_t*)"typedef struct ", .len = sizeof("typedef struct ") - 1 });
-String__Global__push_str(&(*__sc1225), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1225), (str){ .ptr = (const uint8_t*)"__vt {\n    void (*__free)(void *self);\n", .len = sizeof("__vt {\n    void (*__free)(void *self);\n") - 1 });
+    ({ String__Global *__sc1228 = &(self->buf);
+String__Global__push_str(&(*__sc1228), (str){ .ptr = (const uint8_t*)"typedef struct ", .len = sizeof("typedef struct ") - 1 });
+String__Global__push_str(&(*__sc1228), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1228), (str){ .ptr = (const uint8_t*)"__vt {\n    void (*__free)(void *self);\n", .len = sizeof("__vt {\n    void (*__free)(void *self);\n") - 1 });
 });
     if (idn_kind == ast__ast__NodeKind_NODE_FUNCTION_TYPE) {
       const ast__ast__NodeList ftp = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), dy.as_data.decl)->as_data.function_type.params;
       const uint32_t *const pid = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), ftp);
       codegen__codegen__Buf512 inner = (codegen__codegen__Buf512){0};
-      size_t at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, 0ULL, ((const char *)({ __auto_type __sc1226 = (str){ (const uint8_t *)"(*call)(void *self", sizeof("(*call)(void *self") - 1 }; str__ptr(&__sc1226); })));
+      size_t at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, 0ULL, ((const char *)({ __auto_type __sc1229 = (str){ (const uint8_t *)"(*call)(void *self", sizeof("(*call)(void *self") - 1 }; str__ptr(&__sc1229); })));
       for (uint32_t p = 0U; p < ftp.len; p++) {
         const uint32_t src_ty = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), pid[((size_t)p)]);
         const uint32_t pt_ty = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*codegen__codegen__Codegen__mod_ast(self, dy.module))), src_ty);
         codegen__codegen__Buf200 pt = (codegen__codegen__Buf200){0};
-        codegen__codegen__Codegen__render_type_id(self, pt_ty, ((const char *)({ __auto_type __sc1227 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1227); })), ((char *)(&pt.b[0])), 200ULL);
-        (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1228 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1228); }))));
+        codegen__codegen__Codegen__render_type_id(self, pt_ty, ((const char *)({ __auto_type __sc1230 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1230); })), ((char *)(&pt.b[0])), 200ULL);
+        (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1231 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1231); }))));
         (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)(&pt.b[0]))));
       }
-      codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1229 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1229); })));
+      codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1232 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1232); })));
       const uint32_t rt = codegen__codegen__Codegen__cg_dynfn_ret(self, dy.module, dy.as_data.decl);
       codegen__codegen__Buf600 memb = (codegen__codegen__Buf600){0};
       if (rt != ast__ast__TYPE_NONE) {
         codegen__codegen__Codegen__render_type_id(self, rt, ((const char *)(&inner.b[0])), ((char *)(&memb.b[0])), 600ULL);
       } else {
-        codegen__codegen__buf_join3(((char *)(&memb.b[0])), 600ULL, ((const char *)({ __auto_type __sc1230 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1230); })), ((const char *)({ __auto_type __sc1231 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1231); })), ((const char *)(&inner.b[0])));
+        codegen__codegen__buf_join3(((char *)(&memb.b[0])), 600ULL, ((const char *)({ __auto_type __sc1233 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1233); })), ((const char *)({ __auto_type __sc1234 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1234); })), ((const char *)(&inner.b[0])));
       }
-      ({ String__Global *__sc1232 = &(self->buf);
-String__Global__push_str(&(*__sc1232), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
-String__Global__push_str(&(*__sc1232), utils__errors__cstr(((const char *)(&memb.b[0]))));
-String__Global__push_str(&(*__sc1232), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+      ({ String__Global *__sc1235 = &(self->buf);
+String__Global__push_str(&(*__sc1235), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
+String__Global__push_str(&(*__sc1235), utils__errors__cstr(((const char *)(&memb.b[0]))));
+String__Global__push_str(&(*__sc1235), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
-      ({ String__Global *__sc1233 = &(self->buf);
-String__Global__push_str(&(*__sc1233), (str){ .ptr = (const uint8_t*)"} ", .len = sizeof("} ") - 1 });
-String__Global__push_str(&(*__sc1233), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1233), (str){ .ptr = (const uint8_t*)"__vt;\ntypedef struct ", .len = sizeof("__vt;\ntypedef struct ") - 1 });
-String__Global__push_str(&(*__sc1233), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1233), (str){ .ptr = (const uint8_t*)"__dyn { void *data; const ", .len = sizeof("__dyn { void *data; const ") - 1 });
-String__Global__push_str(&(*__sc1233), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1233), (str){ .ptr = (const uint8_t*)"__vt *vt; } ", .len = sizeof("__vt *vt; } ") - 1 });
-String__Global__push_str(&(*__sc1233), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1233), (str){ .ptr = (const uint8_t*)"__dyn;\n", .len = sizeof("__dyn;\n") - 1 });
+      ({ String__Global *__sc1236 = &(self->buf);
+String__Global__push_str(&(*__sc1236), (str){ .ptr = (const uint8_t*)"} ", .len = sizeof("} ") - 1 });
+String__Global__push_str(&(*__sc1236), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1236), (str){ .ptr = (const uint8_t*)"__vt;\ntypedef struct ", .len = sizeof("__vt;\ntypedef struct ") - 1 });
+String__Global__push_str(&(*__sc1236), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1236), (str){ .ptr = (const uint8_t*)"__dyn { void *data; const ", .len = sizeof("__dyn { void *data; const ") - 1 });
+String__Global__push_str(&(*__sc1236), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1236), (str){ .ptr = (const uint8_t*)"__vt *vt; } ", .len = sizeof("__vt *vt; } ") - 1 });
+String__Global__push_str(&(*__sc1236), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1236), (str){ .ptr = (const uint8_t*)"__dyn;\n", .len = sizeof("__dyn;\n") - 1 });
 });
-      ({ String__Global *__sc1234 = &(self->buf);
-String__Global__push_str(&(*__sc1234), (str){ .ptr = (const uint8_t*)"static inline void ", .len = sizeof("static inline void ") - 1 });
-String__Global__push_str(&(*__sc1234), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1234), (str){ .ptr = (const uint8_t*)"__dyn_free(", .len = sizeof("__dyn_free(") - 1 });
-String__Global__push_str(&(*__sc1234), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1234), (str){ .ptr = (const uint8_t*)"__dyn *const d) { d->vt->__free(d->data); }\n#endif\n", .len = sizeof("__dyn *const d) { d->vt->__free(d->data); }\n#endif\n") - 1 });
+      ({ String__Global *__sc1237 = &(self->buf);
+String__Global__push_str(&(*__sc1237), (str){ .ptr = (const uint8_t*)"static inline void ", .len = sizeof("static inline void ") - 1 });
+String__Global__push_str(&(*__sc1237), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1237), (str){ .ptr = (const uint8_t*)"__dyn_free(", .len = sizeof("__dyn_free(") - 1 });
+String__Global__push_str(&(*__sc1237), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1237), (str){ .ptr = (const uint8_t*)"__dyn *const d) { d->vt->__free(d->data); }\n#endif\n", .len = sizeof("__dyn *const d) { d->vt->__free(d->data); }\n#endif\n") - 1 });
 });
       continue;
     }
@@ -10817,51 +10872,51 @@ String__Global__push_str(&(*__sc1234), (str){ .ptr = (const uint8_t*)"__dyn *con
       const ast__ast__NodeList mparams = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), mid)->as_data.function.params;
       const uint32_t *const pids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), mparams);
       codegen__codegen__Buf512 inner = (codegen__codegen__Buf512){0};
-      size_t at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, 0ULL, ((const char *)({ __auto_type __sc1235 = (str){ (const uint8_t *)"(*", sizeof("(*") - 1 }; str__ptr(&__sc1235); })));
+      size_t at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, 0ULL, ((const char *)({ __auto_type __sc1238 = (str){ (const uint8_t *)"(*", sizeof("(*") - 1 }; str__ptr(&__sc1238); })));
       (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)(&mn.b[0]))));
-      (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1236 = (str){ (const uint8_t *)")(void *self", sizeof(")(void *self") - 1 }; str__ptr(&__sc1236); }))));
+      (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1239 = (str){ (const uint8_t *)")(void *self", sizeof(")(void *self") - 1 }; str__ptr(&__sc1239); }))));
       uint32_t p = 1U;
       while (p < mparams.len) {
         const uint32_t ptn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), pids[((size_t)p)])->as_data.parameter.ty;
         const uint32_t src_ty = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), ptn);
         const uint32_t pt_ty = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*codegen__codegen__Codegen__mod_ast(self, dy.module))), src_ty);
         codegen__codegen__Buf200 pt = (codegen__codegen__Buf200){0};
-        codegen__codegen__Codegen__render_type_id(self, pt_ty, ((const char *)({ __auto_type __sc1237 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1237); })), ((char *)(&pt.b[0])), 200ULL);
-        (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1238 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1238); }))));
+        codegen__codegen__Codegen__render_type_id(self, pt_ty, ((const char *)({ __auto_type __sc1240 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1240); })), ((char *)(&pt.b[0])), 200ULL);
+        (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1241 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1241); }))));
         (at = codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)(&pt.b[0]))));
         (p = (p + 1U));
       }
-      codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1239 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1239); })));
+      codegen__codegen__bappend(((char *)(&inner.b[0])), 512ULL, at, ((const char *)({ __auto_type __sc1242 = (str){ (const uint8_t *)")", sizeof(")") - 1 }; str__ptr(&__sc1242); })));
       const uint32_t rt = codegen__codegen__Codegen__cg_dyn_ret(self, dy.module, mid);
       codegen__codegen__Buf600 memb = (codegen__codegen__Buf600){0};
       if (rt != ast__ast__TYPE_NONE) {
         codegen__codegen__Codegen__render_type_id(self, rt, ((const char *)(&inner.b[0])), ((char *)(&memb.b[0])), 600ULL);
       } else {
-        codegen__codegen__buf_join3(((char *)(&memb.b[0])), 600ULL, ((const char *)({ __auto_type __sc1240 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1240); })), ((const char *)({ __auto_type __sc1241 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1241); })), ((const char *)(&inner.b[0])));
+        codegen__codegen__buf_join3(((char *)(&memb.b[0])), 600ULL, ((const char *)({ __auto_type __sc1243 = (str){ (const uint8_t *)"void ", sizeof("void ") - 1 }; str__ptr(&__sc1243); })), ((const char *)({ __auto_type __sc1244 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1244); })), ((const char *)(&inner.b[0])));
       }
-      ({ String__Global *__sc1242 = &(self->buf);
-String__Global__push_str(&(*__sc1242), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
-String__Global__push_str(&(*__sc1242), utils__errors__cstr(((const char *)(&memb.b[0]))));
-String__Global__push_str(&(*__sc1242), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+      ({ String__Global *__sc1245 = &(self->buf);
+String__Global__push_str(&(*__sc1245), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
+String__Global__push_str(&(*__sc1245), utils__errors__cstr(((const char *)(&memb.b[0]))));
+String__Global__push_str(&(*__sc1245), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
     }
-    ({ String__Global *__sc1243 = &(self->buf);
-String__Global__push_str(&(*__sc1243), (str){ .ptr = (const uint8_t*)"} ", .len = sizeof("} ") - 1 });
-String__Global__push_str(&(*__sc1243), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1243), (str){ .ptr = (const uint8_t*)"__vt;\ntypedef struct ", .len = sizeof("__vt;\ntypedef struct ") - 1 });
-String__Global__push_str(&(*__sc1243), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1243), (str){ .ptr = (const uint8_t*)"__dyn { void *data; const ", .len = sizeof("__dyn { void *data; const ") - 1 });
-String__Global__push_str(&(*__sc1243), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1243), (str){ .ptr = (const uint8_t*)"__vt *vt; } ", .len = sizeof("__vt *vt; } ") - 1 });
-String__Global__push_str(&(*__sc1243), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1243), (str){ .ptr = (const uint8_t*)"__dyn;\n", .len = sizeof("__dyn;\n") - 1 });
+    ({ String__Global *__sc1246 = &(self->buf);
+String__Global__push_str(&(*__sc1246), (str){ .ptr = (const uint8_t*)"} ", .len = sizeof("} ") - 1 });
+String__Global__push_str(&(*__sc1246), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1246), (str){ .ptr = (const uint8_t*)"__vt;\ntypedef struct ", .len = sizeof("__vt;\ntypedef struct ") - 1 });
+String__Global__push_str(&(*__sc1246), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1246), (str){ .ptr = (const uint8_t*)"__dyn { void *data; const ", .len = sizeof("__dyn { void *data; const ") - 1 });
+String__Global__push_str(&(*__sc1246), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1246), (str){ .ptr = (const uint8_t*)"__vt *vt; } ", .len = sizeof("__vt *vt; } ") - 1 });
+String__Global__push_str(&(*__sc1246), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1246), (str){ .ptr = (const uint8_t*)"__dyn;\n", .len = sizeof("__dyn;\n") - 1 });
 });
-    ({ String__Global *__sc1244 = &(self->buf);
-String__Global__push_str(&(*__sc1244), (str){ .ptr = (const uint8_t*)"static inline void ", .len = sizeof("static inline void ") - 1 });
-String__Global__push_str(&(*__sc1244), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1244), (str){ .ptr = (const uint8_t*)"__dyn_free(", .len = sizeof("__dyn_free(") - 1 });
-String__Global__push_str(&(*__sc1244), utils__errors__cstr(sp));
-String__Global__push_str(&(*__sc1244), (str){ .ptr = (const uint8_t*)"__dyn *const d) { d->vt->__free(d->data); }\n#endif\n", .len = sizeof("__dyn *const d) { d->vt->__free(d->data); }\n#endif\n") - 1 });
+    ({ String__Global *__sc1247 = &(self->buf);
+String__Global__push_str(&(*__sc1247), (str){ .ptr = (const uint8_t*)"static inline void ", .len = sizeof("static inline void ") - 1 });
+String__Global__push_str(&(*__sc1247), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1247), (str){ .ptr = (const uint8_t*)"__dyn_free(", .len = sizeof("__dyn_free(") - 1 });
+String__Global__push_str(&(*__sc1247), utils__errors__cstr(sp));
+String__Global__push_str(&(*__sc1247), (str){ .ptr = (const uint8_t*)"__dyn *const d) { d->vt->__free(d->data); }\n#endif\n", .len = sizeof("__dyn *const d) { d->vt->__free(d->data); }\n#endif\n") - 1 });
 });
   }
 }
@@ -10877,36 +10932,36 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_dynfn_table(
   const uint32_t rt = codegen__codegen__Codegen__cg_dynfn_ret(self, dy.module, dy.as_data.decl);
   codegen__codegen__Buf256 rts = (codegen__codegen__Buf256){0};
   if (rt != ast__ast__TYPE_NONE) {
-    codegen__codegen__Codegen__render_type_id(self, rt, ((const char *)({ __auto_type __sc1245 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1245); })), ((char *)(&rts.b[0])), 256ULL);
+    codegen__codegen__Codegen__render_type_id(self, rt, ((const char *)({ __auto_type __sc1248 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1248); })), ((char *)(&rts.b[0])), 256ULL);
   } else {
-    codegen__codegen__bappend(((char *)(&rts.b[0])), 256ULL, 0ULL, ((const char *)({ __auto_type __sc1246 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1246); })));
+    codegen__codegen__bappend(((char *)(&rts.b[0])), 256ULL, 0ULL, ((const char *)({ __auto_type __sc1249 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1249); })));
   }
-  ({ String__Global *__sc1247 = &(self->buf);
-String__Global__push_str(&(*__sc1247), (str){ .ptr = (const uint8_t*)"static __attribute__((unused)) ", .len = sizeof("static __attribute__((unused)) ") - 1 });
-String__Global__push_str(&(*__sc1247), utils__errors__cstr(((const char *)(&rts.b[0]))));
-String__Global__push_str(&(*__sc1247), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1247), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1247), (str){ .ptr = (const uint8_t*)"__call(void *__self", .len = sizeof("__call(void *__self") - 1 });
+  ({ String__Global *__sc1250 = &(self->buf);
+String__Global__push_str(&(*__sc1250), (str){ .ptr = (const uint8_t*)"static __attribute__((unused)) ", .len = sizeof("static __attribute__((unused)) ") - 1 });
+String__Global__push_str(&(*__sc1250), utils__errors__cstr(((const char *)(&rts.b[0]))));
+String__Global__push_str(&(*__sc1250), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1250), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1250), (str){ .ptr = (const uint8_t*)"__call(void *__self", .len = sizeof("__call(void *__self") - 1 });
 });
   const uint32_t *const pid = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), sig_params);
   for (uint32_t p = 0U; p < sig_params.len; p++) {
     codegen__codegen__Buf32 an = (codegen__codegen__Buf32){0};
-    snprintf(((char *)(&an.b[0])), 16ULL, ((const char *)({ __auto_type __sc1248 = (str){ (const uint8_t *)"_a%u", sizeof("_a%u") - 1 }; str__ptr(&__sc1248); })), p);
+    snprintf(((char *)(&an.b[0])), 16ULL, ((const char *)({ __auto_type __sc1251 = (str){ (const uint8_t *)"_a%u", sizeof("_a%u") - 1 }; str__ptr(&__sc1251); })), p);
     const uint32_t src_ty = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), pid[((size_t)p)]);
     const uint32_t pt_ty = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*codegen__codegen__Codegen__mod_ast(self, dy.module))), src_ty);
     codegen__codegen__Buf240 pd = (codegen__codegen__Buf240){0};
     codegen__codegen__Codegen__render_type_id(self, pt_ty, ((const char *)(&an.b[0])), ((char *)(&pd.b[0])), 240ULL);
-    ({ String__Global *__sc1249 = &(self->buf);
-String__Global__push_str(&(*__sc1249), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_str(&(*__sc1249), utils__errors__cstr(((const char *)(&pd.b[0]))));
+    ({ String__Global *__sc1252 = &(self->buf);
+String__Global__push_str(&(*__sc1252), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_str(&(*__sc1252), utils__errors__cstr(((const char *)(&pd.b[0]))));
 });
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1250 = (str){ (const uint8_t *)") { ", sizeof(") { ") - 1 }; str__ptr(&__sc1250); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1253 = (str){ (const uint8_t *)") { ", sizeof(") { ") - 1 }; str__ptr(&__sc1253); })));
   if (!capt) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1251 = (str){ (const uint8_t *)"(void)__self; ", sizeof("(void)__self; ") - 1 }; str__ptr(&__sc1251); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1254 = (str){ (const uint8_t *)"(void)__self; ", sizeof("(void)__self; ") - 1 }; str__ptr(&__sc1254); })));
   }
   if (rt != ast__ast__TYPE_NONE) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1252 = (str){ (const uint8_t *)"return ", sizeof("return ") - 1 }; str__ptr(&__sc1252); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1255 = (str){ (const uint8_t *)"return ", sizeof("return ") - 1 }; str__ptr(&__sc1255); })));
   }
   codegen__codegen__Buf240 sym = (codegen__codegen__Buf240){0};
   if (fd_kind == ast__ast__NodeKind_NODE_CLOSURE) {
@@ -10916,33 +10971,33 @@ String__Global__push_str(&(*__sc1249), utils__errors__cstr(((const char *)(&pd.b
     codegen__codegen__Codegen__render_qualified(self, sy.module, fname, ((char *)(&sym.b[0])), 240ULL);
   }
   codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&sym.b[0])));
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1253 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1253); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1256 = (str){ (const uint8_t *)"(", sizeof("(") - 1 }; str__ptr(&__sc1256); })));
   bool wrote = false;
   codegen__codegen__Buf256 envn = (codegen__codegen__Buf256){0};
   if (capt) {
-    codegen__codegen__Codegen__render_type_id(self, src, ((const char *)({ __auto_type __sc1254 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1254); })), ((char *)(&envn.b[0])), 256ULL);
-    ({ String__Global *__sc1255 = &(self->buf);
-String__Global__push_str(&(*__sc1255), (str){ .ptr = (const uint8_t*)"(const ", .len = sizeof("(const ") - 1 });
-String__Global__push_str(&(*__sc1255), utils__errors__cstr(((const char *)(&envn.b[0]))));
-String__Global__push_str(&(*__sc1255), (str){ .ptr = (const uint8_t*)" *)__self", .len = sizeof(" *)__self") - 1 });
+    codegen__codegen__Codegen__render_type_id(self, src, ((const char *)({ __auto_type __sc1257 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1257); })), ((char *)(&envn.b[0])), 256ULL);
+    ({ String__Global *__sc1258 = &(self->buf);
+String__Global__push_str(&(*__sc1258), (str){ .ptr = (const uint8_t*)"(const ", .len = sizeof("(const ") - 1 });
+String__Global__push_str(&(*__sc1258), utils__errors__cstr(((const char *)(&envn.b[0]))));
+String__Global__push_str(&(*__sc1258), (str){ .ptr = (const uint8_t*)" *)__self", .len = sizeof(" *)__self") - 1 });
 });
     (wrote = true);
   }
   for (uint32_t p2 = 0U; p2 < sig_params.len; p2++) {
     if (wrote || (p2 != 0U)) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1256 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1256); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1259 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1259); })));
     }
-    ({ String__Global *__sc1257 = &(self->buf);
-String__Global__push_str(&(*__sc1257), (str){ .ptr = (const uint8_t*)"_a", .len = sizeof("_a") - 1 });
-String__Global__push_u64(&(*__sc1257), (uint64_t)(p2));
+    ({ String__Global *__sc1260 = &(self->buf);
+String__Global__push_str(&(*__sc1260), (str){ .ptr = (const uint8_t*)"_a", .len = sizeof("_a") - 1 });
+String__Global__push_u64(&(*__sc1260), (uint64_t)(p2));
 });
     (wrote = true);
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1258 = (str){ (const uint8_t *)"); }\n", sizeof("); }\n") - 1 }; str__ptr(&__sc1258); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1261 = (str){ (const uint8_t *)"); }\n", sizeof("); }\n") - 1 }; str__ptr(&__sc1261); })));
   bool owned = false;
   size_t jj = 0ULL;
   while ((jj < Vector__ast__ast__DynUse__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses)) && (!owned)) {
-    const ast__ast__DynUse oju = (*({ __auto_type __sc1259 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1259, jj); }));
+    const ast__ast__DynUse oju = (*({ __auto_type __sc1262 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1262, jj); }));
     if (oju.src == src) {
       const ast__ast__Ty oy = (*ast__ast__Ast__type_at(&((*codegen__codegen__Codegen__cur_ast(self))), oju.dyn_ty));
       if (oy.qualifier == 0U) {
@@ -10957,69 +11012,69 @@ String__Global__push_u64(&(*__sc1257), (uint64_t)(p2));
     codegen__codegen__Buf160 gt = (codegen__codegen__Buf160){0};
     codegen__codegen__Codegen__render_qualified(self, hit.mid, gname, ((char *)(&gt.b[0])), 160ULL);
     const char *const gtp = ((const char *)(&gt.b[0]));
-    ({ String__Global *__sc1260 = &(self->buf);
-String__Global__push_str(&(*__sc1260), (str){ .ptr = (const uint8_t*)"static void ", .len = sizeof("static void ") - 1 });
-String__Global__push_str(&(*__sc1260), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1260), (str){ .ptr = (const uint8_t*)"____free(void *__self) {\n", .len = sizeof("____free(void *__self) {\n") - 1 });
+    ({ String__Global *__sc1263 = &(self->buf);
+String__Global__push_str(&(*__sc1263), (str){ .ptr = (const uint8_t*)"static void ", .len = sizeof("static void ") - 1 });
+String__Global__push_str(&(*__sc1263), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1263), (str){ .ptr = (const uint8_t*)"____free(void *__self) {\n", .len = sizeof("____free(void *__self) {\n") - 1 });
 });
     if (capt) {
       if (codegen__codegen__Codegen__cg_fn_owns(self, (&sy))) {
         codegen__codegen__Buf240 csym = (codegen__codegen__Buf240){0};
         codegen__codegen__Codegen__closure_sym_in(self, sy.module, sy.as_data.decl, ((char *)(&csym.b[0])), 240ULL);
-        ({ String__Global *__sc1261 = &(self->buf);
-String__Global__push_str(&(*__sc1261), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
-String__Global__push_str(&(*__sc1261), utils__errors__cstr(((const char *)(&csym.b[0]))));
-String__Global__push_str(&(*__sc1261), (str){ .ptr = (const uint8_t*)"_env_free((", .len = sizeof("_env_free((") - 1 });
-String__Global__push_str(&(*__sc1261), utils__errors__cstr(((const char *)(&envn.b[0]))));
-String__Global__push_str(&(*__sc1261), (str){ .ptr = (const uint8_t*)" *)__self);\n", .len = sizeof(" *)__self);\n") - 1 });
+        ({ String__Global *__sc1264 = &(self->buf);
+String__Global__push_str(&(*__sc1264), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
+String__Global__push_str(&(*__sc1264), utils__errors__cstr(((const char *)(&csym.b[0]))));
+String__Global__push_str(&(*__sc1264), (str){ .ptr = (const uint8_t*)"_env_free((", .len = sizeof("_env_free((") - 1 });
+String__Global__push_str(&(*__sc1264), utils__errors__cstr(((const char *)(&envn.b[0]))));
+String__Global__push_str(&(*__sc1264), (str){ .ptr = (const uint8_t*)" *)__self);\n", .len = sizeof(" *)__self);\n") - 1 });
 });
       }
-      ({ String__Global *__sc1262 = &(self->buf);
-String__Global__push_str(&(*__sc1262), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
-String__Global__push_str(&(*__sc1262), utils__errors__cstr(gtp));
-String__Global__push_str(&(*__sc1262), (str){ .ptr = (const uint8_t*)" __g = ", .len = sizeof(" __g = ") - 1 });
-String__Global__push_str(&(*__sc1262), utils__errors__cstr(gtp));
-String__Global__push_str(&(*__sc1262), (str){ .ptr = (const uint8_t*)"__default_();\n    ", .len = sizeof("__default_();\n    ") - 1 });
-String__Global__push_str(&(*__sc1262), utils__errors__cstr(gtp));
-String__Global__push_str(&(*__sc1262), (str){ .ptr = (const uint8_t*)"__dealloc(&__g, __self, sizeof(", .len = sizeof("__dealloc(&__g, __self, sizeof(") - 1 });
-String__Global__push_str(&(*__sc1262), utils__errors__cstr(((const char *)(&envn.b[0]))));
-String__Global__push_str(&(*__sc1262), (str){ .ptr = (const uint8_t*)"), _Alignof(", .len = sizeof("), _Alignof(") - 1 });
-String__Global__push_str(&(*__sc1262), utils__errors__cstr(((const char *)(&envn.b[0]))));
-String__Global__push_str(&(*__sc1262), (str){ .ptr = (const uint8_t*)"));\n", .len = sizeof("));\n") - 1 });
+      ({ String__Global *__sc1265 = &(self->buf);
+String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
+String__Global__push_str(&(*__sc1265), utils__errors__cstr(gtp));
+String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)" __g = ", .len = sizeof(" __g = ") - 1 });
+String__Global__push_str(&(*__sc1265), utils__errors__cstr(gtp));
+String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"__default_();\n    ", .len = sizeof("__default_();\n    ") - 1 });
+String__Global__push_str(&(*__sc1265), utils__errors__cstr(gtp));
+String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"__dealloc(&__g, __self, sizeof(", .len = sizeof("__dealloc(&__g, __self, sizeof(") - 1 });
+String__Global__push_str(&(*__sc1265), utils__errors__cstr(((const char *)(&envn.b[0]))));
+String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"), _Alignof(", .len = sizeof("), _Alignof(") - 1 });
+String__Global__push_str(&(*__sc1265), utils__errors__cstr(((const char *)(&envn.b[0]))));
+String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"));\n", .len = sizeof("));\n") - 1 });
 });
     } else {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1263 = (str){ (const uint8_t *)"    (void)__self;\n", sizeof("    (void)__self;\n") - 1 }; str__ptr(&__sc1263); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1266 = (str){ (const uint8_t *)"    (void)__self;\n", sizeof("    (void)__self;\n") - 1 }; str__ptr(&__sc1266); })));
     }
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1264 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1264); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1267 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1267); })));
   }
   codegen__codegen__Buf176 stem = (codegen__codegen__Buf176){0};
   codegen__codegen__Codegen__dyn_stem(self, dy.module, dy.as_data.decl, ((char *)(&stem.b[0])), 176ULL);
-  ({ String__Global *__sc1265 = &(self->buf);
-String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"static const ", .len = sizeof("static const ") - 1 });
-String__Global__push_str(&(*__sc1265), utils__errors__cstr(((const char *)(&stem.b[0]))));
-String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"__vt ", .len = sizeof("__vt ") - 1 });
-String__Global__push_str(&(*__sc1265), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1265), (str){ .ptr = (const uint8_t*)"__vtbl __attribute__((unused)) = { ", .len = sizeof("__vtbl __attribute__((unused)) = { ") - 1 });
+  ({ String__Global *__sc1268 = &(self->buf);
+String__Global__push_str(&(*__sc1268), (str){ .ptr = (const uint8_t*)"static const ", .len = sizeof("static const ") - 1 });
+String__Global__push_str(&(*__sc1268), utils__errors__cstr(((const char *)(&stem.b[0]))));
+String__Global__push_str(&(*__sc1268), (str){ .ptr = (const uint8_t*)"__vt ", .len = sizeof("__vt ") - 1 });
+String__Global__push_str(&(*__sc1268), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1268), (str){ .ptr = (const uint8_t*)"__vtbl __attribute__((unused)) = { ", .len = sizeof("__vtbl __attribute__((unused)) = { ") - 1 });
 });
   if (owned) {
-    ({ String__Global *__sc1266 = &(self->buf);
-String__Global__push_str(&(*__sc1266), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1266), (str){ .ptr = (const uint8_t*)"____free", .len = sizeof("____free") - 1 });
+    ({ String__Global *__sc1269 = &(self->buf);
+String__Global__push_str(&(*__sc1269), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1269), (str){ .ptr = (const uint8_t*)"____free", .len = sizeof("____free") - 1 });
 });
   } else {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1267 = (str){ (const uint8_t *)"0", sizeof("0") - 1 }; str__ptr(&__sc1267); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1270 = (str){ (const uint8_t *)"0", sizeof("0") - 1 }; str__ptr(&__sc1270); })));
   }
-  ({ String__Global *__sc1268 = &(self->buf);
-String__Global__push_str(&(*__sc1268), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_str(&(*__sc1268), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1268), (str){ .ptr = (const uint8_t*)"__call };\n", .len = sizeof("__call };\n") - 1 });
+  ({ String__Global *__sc1271 = &(self->buf);
+String__Global__push_str(&(*__sc1271), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_str(&(*__sc1271), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1271), (str){ .ptr = (const uint8_t*)"__call };\n", .len = sizeof("__call };\n") - 1 });
 });
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_dyn_tables(codegen__codegen__Codegen *const self) {
   const size_t n = Vector__ast__ast__DynUse__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses);
   for (size_t i = 0ULL; i < n; i++) {
-    const ast__ast__DynUse dui = (*({ __auto_type __sc1269 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1269, i); }));
+    const ast__ast__DynUse dui = (*({ __auto_type __sc1272 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1272, i); }));
     if (dui.src == ast__ast__TYPE_NONE) {
       continue;
     }
@@ -11029,7 +11084,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_dyn_tables(c
     bool seen = false;
     size_t j = 0ULL;
     while ((j < i) && (!seen)) {
-      const ast__ast__DynUse duj = (*({ __auto_type __sc1270 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1270, j); }));
+      const ast__ast__DynUse duj = (*({ __auto_type __sc1273 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1273, j); }));
       if (duj.src != dui.src) {
         (j = (j + 1ULL));
         continue;
@@ -11064,7 +11119,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_dyn_tables(c
     codegen__codegen__Codegen__dyn_pair_stem(self, src, dy.module, dy.as_data.decl, ((char *)(&pair.b[0])), 368ULL);
     const char *const pp = ((const char *)(&pair.b[0]));
     codegen__codegen__Buf256 recv = (codegen__codegen__Buf256){0};
-    codegen__codegen__Codegen__render_type_id(self, src, ((const char *)({ __auto_type __sc1271 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1271); })), ((char *)(&recv.b[0])), 256ULL);
+    codegen__codegen__Codegen__render_type_id(self, src, ((const char *)({ __auto_type __sc1274 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1274); })), ((char *)(&recv.b[0])), 256ULL);
     const char *const rvp = ((const char *)(&recv.b[0]));
     const ast__ast__NodeList idn_items = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), dy.as_data.decl)->as_data.interface_def.items;
     const uint32_t *const mids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), idn_items);
@@ -11080,65 +11135,65 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_dyn_tables(c
       const uint32_t rt = codegen__codegen__Codegen__cg_dyn_ret(self, dy.module, mid);
       codegen__codegen__Buf256 rts = (codegen__codegen__Buf256){0};
       if (rt != ast__ast__TYPE_NONE) {
-        codegen__codegen__Codegen__render_type_id(self, rt, ((const char *)({ __auto_type __sc1272 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1272); })), ((char *)(&rts.b[0])), 256ULL);
+        codegen__codegen__Codegen__render_type_id(self, rt, ((const char *)({ __auto_type __sc1275 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1275); })), ((char *)(&rts.b[0])), 256ULL);
       } else {
-        codegen__codegen__bappend(((char *)(&rts.b[0])), 256ULL, 0ULL, ((const char *)({ __auto_type __sc1273 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1273); })));
+        codegen__codegen__bappend(((char *)(&rts.b[0])), 256ULL, 0ULL, ((const char *)({ __auto_type __sc1276 = (str){ (const uint8_t *)"void", sizeof("void") - 1 }; str__ptr(&__sc1276); })));
       }
-      ({ String__Global *__sc1274 = &(self->buf);
-String__Global__push_str(&(*__sc1274), (str){ .ptr = (const uint8_t*)"static __attribute__((unused)) ", .len = sizeof("static __attribute__((unused)) ") - 1 });
-String__Global__push_str(&(*__sc1274), utils__errors__cstr(((const char *)(&rts.b[0]))));
-String__Global__push_str(&(*__sc1274), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1274), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1274), (str){ .ptr = (const uint8_t*)"__", .len = sizeof("__") - 1 });
-String__Global__push_str(&(*__sc1274), utils__errors__cstr(((const char *)(&mn.b[0]))));
-String__Global__push_str(&(*__sc1274), (str){ .ptr = (const uint8_t*)"(void *__self", .len = sizeof("(void *__self") - 1 });
+      ({ String__Global *__sc1277 = &(self->buf);
+String__Global__push_str(&(*__sc1277), (str){ .ptr = (const uint8_t*)"static __attribute__((unused)) ", .len = sizeof("static __attribute__((unused)) ") - 1 });
+String__Global__push_str(&(*__sc1277), utils__errors__cstr(((const char *)(&rts.b[0]))));
+String__Global__push_str(&(*__sc1277), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1277), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1277), (str){ .ptr = (const uint8_t*)"__", .len = sizeof("__") - 1 });
+String__Global__push_str(&(*__sc1277), utils__errors__cstr(((const char *)(&mn.b[0]))));
+String__Global__push_str(&(*__sc1277), (str){ .ptr = (const uint8_t*)"(void *__self", .len = sizeof("(void *__self") - 1 });
 });
       const ast__ast__NodeList mparams = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), mid)->as_data.function.params;
       const uint32_t *const pids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), mparams);
       uint32_t p = 1U;
       while (p < mparams.len) {
         codegen__codegen__Buf32 an = (codegen__codegen__Buf32){0};
-        snprintf(((char *)(&an.b[0])), 16ULL, ((const char *)({ __auto_type __sc1275 = (str){ (const uint8_t *)"_a%u", sizeof("_a%u") - 1 }; str__ptr(&__sc1275); })), p);
+        snprintf(((char *)(&an.b[0])), 16ULL, ((const char *)({ __auto_type __sc1278 = (str){ (const uint8_t *)"_a%u", sizeof("_a%u") - 1 }; str__ptr(&__sc1278); })), p);
         const uint32_t ptn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), pids[((size_t)p)])->as_data.parameter.ty;
         const uint32_t src_ty = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), ptn);
         const uint32_t pt_ty = ast__ast__Ast__reintern(&((*codegen__codegen__Codegen__cur_ast(self))), (&(*codegen__codegen__Codegen__mod_ast(self, dy.module))), src_ty);
         codegen__codegen__Buf240 pd = (codegen__codegen__Buf240){0};
         codegen__codegen__Codegen__render_type_id(self, pt_ty, ((const char *)(&an.b[0])), ((char *)(&pd.b[0])), 240ULL);
-        ({ String__Global *__sc1276 = &(self->buf);
-String__Global__push_str(&(*__sc1276), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_str(&(*__sc1276), utils__errors__cstr(((const char *)(&pd.b[0]))));
+        ({ String__Global *__sc1279 = &(self->buf);
+String__Global__push_str(&(*__sc1279), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_str(&(*__sc1279), utils__errors__cstr(((const char *)(&pd.b[0]))));
 });
         (p = (p + 1U));
       }
       if (rt != ast__ast__TYPE_NONE) {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1277 = (str){ (const uint8_t *)") { return ", sizeof(") { return ") - 1 }; str__ptr(&__sc1277); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1280 = (str){ (const uint8_t *)") { return ", sizeof(") { return ") - 1 }; str__ptr(&__sc1280); })));
       } else {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1278 = (str){ (const uint8_t *)") { ", sizeof(") { ") - 1 }; str__ptr(&__sc1278); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1281 = (str){ (const uint8_t *)") { ", sizeof(") { ") - 1 }; str__ptr(&__sc1281); })));
       }
       ast__ast__DefId cm = codegen__codegen__Codegen__cg_find_method(self, tm, td, codegen__codegen__Codegen__mod_src(self, dy.module), mspan);
       if (cm.node == ast__ast__NODE_NONE) {
         (cm = (ast__ast__DefId){ .module = dy.module, .node = mid });
       }
       codegen__codegen__Codegen__emit_op_method(self, sy, tm, td, cm);
-      ({ String__Global *__sc1279 = &(self->buf);
-String__Global__push_str(&(*__sc1279), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
-String__Global__push_str(&(*__sc1279), utils__errors__cstr(rvp));
-String__Global__push_str(&(*__sc1279), (str){ .ptr = (const uint8_t*)" *)__self", .len = sizeof(" *)__self") - 1 });
+      ({ String__Global *__sc1282 = &(self->buf);
+String__Global__push_str(&(*__sc1282), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
+String__Global__push_str(&(*__sc1282), utils__errors__cstr(rvp));
+String__Global__push_str(&(*__sc1282), (str){ .ptr = (const uint8_t*)" *)__self", .len = sizeof(" *)__self") - 1 });
 });
       uint32_t p2 = 1U;
       while (p2 < mparams.len) {
-        ({ String__Global *__sc1280 = &(self->buf);
-String__Global__push_str(&(*__sc1280), (str){ .ptr = (const uint8_t*)", _a", .len = sizeof(", _a") - 1 });
-String__Global__push_u64(&(*__sc1280), (uint64_t)(p2));
+        ({ String__Global *__sc1283 = &(self->buf);
+String__Global__push_str(&(*__sc1283), (str){ .ptr = (const uint8_t*)", _a", .len = sizeof(", _a") - 1 });
+String__Global__push_u64(&(*__sc1283), (uint64_t)(p2));
 });
         (p2 = (p2 + 1U));
       }
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1281 = (str){ (const uint8_t *)"); }\n", sizeof("); }\n") - 1 }; str__ptr(&__sc1281); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1284 = (str){ (const uint8_t *)"); }\n", sizeof("); }\n") - 1 }; str__ptr(&__sc1284); })));
     }
     bool owned = false;
     size_t ojo = 0ULL;
     while ((ojo < Vector__ast__ast__DynUse__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses)) && (!owned)) {
-      const ast__ast__DynUse du = (*({ __auto_type __sc1282 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1282, ojo); }));
+      const ast__ast__DynUse du = (*({ __auto_type __sc1285 = &(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses; Vector__ast__ast__DynUse__Global__index(__sc1285, ojo); }));
       const ast__ast__Ty oy = (*ast__ast__Ast__type_at(&((*codegen__codegen__Codegen__cur_ast(self))), du.dyn_ty));
       if ((((du.src == src) && (oy.module == dy.module)) && (oy.as_data.decl == dy.as_data.decl)) && (oy.qualifier == 0U)) {
         (owned = true);
@@ -11151,50 +11206,50 @@ String__Global__push_u64(&(*__sc1280), (uint64_t)(p2));
       codegen__codegen__Buf160 gt = (codegen__codegen__Buf160){0};
       codegen__codegen__Codegen__render_qualified(self, hit.mid, gname, ((char *)(&gt.b[0])), 160ULL);
       const char *const gtp = ((const char *)(&gt.b[0]));
-      ({ String__Global *__sc1283 = &(self->buf);
-String__Global__push_str(&(*__sc1283), (str){ .ptr = (const uint8_t*)"static void ", .len = sizeof("static void ") - 1 });
-String__Global__push_str(&(*__sc1283), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1283), (str){ .ptr = (const uint8_t*)"____free(void *__self) {\n", .len = sizeof("____free(void *__self) {\n") - 1 });
+      ({ String__Global *__sc1286 = &(self->buf);
+String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)"static void ", .len = sizeof("static void ") - 1 });
+String__Global__push_str(&(*__sc1286), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)"____free(void *__self) {\n", .len = sizeof("____free(void *__self) {\n") - 1 });
 });
       if (codegen__codegen__Codegen__cg_type_is_free(self, src)) {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1284 = (str){ (const uint8_t *)"    ", sizeof("    ") - 1 }; str__ptr(&__sc1284); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1287 = (str){ (const uint8_t *)"    ", sizeof("    ") - 1 }; str__ptr(&__sc1287); })));
         codegen__codegen__Codegen__emit_free_target(self, src);
-        ({ String__Global *__sc1285 = &(self->buf);
-String__Global__push_str(&(*__sc1285), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
-String__Global__push_str(&(*__sc1285), utils__errors__cstr(rvp));
-String__Global__push_str(&(*__sc1285), (str){ .ptr = (const uint8_t*)" *)__self);\n", .len = sizeof(" *)__self);\n") - 1 });
+        ({ String__Global *__sc1288 = &(self->buf);
+String__Global__push_str(&(*__sc1288), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
+String__Global__push_str(&(*__sc1288), utils__errors__cstr(rvp));
+String__Global__push_str(&(*__sc1288), (str){ .ptr = (const uint8_t*)" *)__self);\n", .len = sizeof(" *)__self);\n") - 1 });
 });
       }
-      ({ String__Global *__sc1286 = &(self->buf);
-String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
-String__Global__push_str(&(*__sc1286), utils__errors__cstr(gtp));
-String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)" __g = ", .len = sizeof(" __g = ") - 1 });
-String__Global__push_str(&(*__sc1286), utils__errors__cstr(gtp));
-String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)"__default_();\n    ", .len = sizeof("__default_();\n    ") - 1 });
-String__Global__push_str(&(*__sc1286), utils__errors__cstr(gtp));
-String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)"__dealloc(&__g, __self, sizeof(", .len = sizeof("__dealloc(&__g, __self, sizeof(") - 1 });
-String__Global__push_str(&(*__sc1286), utils__errors__cstr(rvp));
-String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)"), _Alignof(", .len = sizeof("), _Alignof(") - 1 });
-String__Global__push_str(&(*__sc1286), utils__errors__cstr(rvp));
-String__Global__push_str(&(*__sc1286), (str){ .ptr = (const uint8_t*)"));\n}\n", .len = sizeof("));\n}\n") - 1 });
+      ({ String__Global *__sc1289 = &(self->buf);
+String__Global__push_str(&(*__sc1289), (str){ .ptr = (const uint8_t*)"    ", .len = sizeof("    ") - 1 });
+String__Global__push_str(&(*__sc1289), utils__errors__cstr(gtp));
+String__Global__push_str(&(*__sc1289), (str){ .ptr = (const uint8_t*)" __g = ", .len = sizeof(" __g = ") - 1 });
+String__Global__push_str(&(*__sc1289), utils__errors__cstr(gtp));
+String__Global__push_str(&(*__sc1289), (str){ .ptr = (const uint8_t*)"__default_();\n    ", .len = sizeof("__default_();\n    ") - 1 });
+String__Global__push_str(&(*__sc1289), utils__errors__cstr(gtp));
+String__Global__push_str(&(*__sc1289), (str){ .ptr = (const uint8_t*)"__dealloc(&__g, __self, sizeof(", .len = sizeof("__dealloc(&__g, __self, sizeof(") - 1 });
+String__Global__push_str(&(*__sc1289), utils__errors__cstr(rvp));
+String__Global__push_str(&(*__sc1289), (str){ .ptr = (const uint8_t*)"), _Alignof(", .len = sizeof("), _Alignof(") - 1 });
+String__Global__push_str(&(*__sc1289), utils__errors__cstr(rvp));
+String__Global__push_str(&(*__sc1289), (str){ .ptr = (const uint8_t*)"));\n}\n", .len = sizeof("));\n}\n") - 1 });
 });
     }
     codegen__codegen__Buf176 stem = (codegen__codegen__Buf176){0};
     codegen__codegen__Codegen__dyn_stem(self, dy.module, dy.as_data.decl, ((char *)(&stem.b[0])), 176ULL);
-    ({ String__Global *__sc1287 = &(self->buf);
-String__Global__push_str(&(*__sc1287), (str){ .ptr = (const uint8_t*)"static const ", .len = sizeof("static const ") - 1 });
-String__Global__push_str(&(*__sc1287), utils__errors__cstr(((const char *)(&stem.b[0]))));
-String__Global__push_str(&(*__sc1287), (str){ .ptr = (const uint8_t*)"__vt ", .len = sizeof("__vt ") - 1 });
-String__Global__push_str(&(*__sc1287), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1287), (str){ .ptr = (const uint8_t*)"__vtbl __attribute__((unused)) = { ", .len = sizeof("__vtbl __attribute__((unused)) = { ") - 1 });
+    ({ String__Global *__sc1290 = &(self->buf);
+String__Global__push_str(&(*__sc1290), (str){ .ptr = (const uint8_t*)"static const ", .len = sizeof("static const ") - 1 });
+String__Global__push_str(&(*__sc1290), utils__errors__cstr(((const char *)(&stem.b[0]))));
+String__Global__push_str(&(*__sc1290), (str){ .ptr = (const uint8_t*)"__vt ", .len = sizeof("__vt ") - 1 });
+String__Global__push_str(&(*__sc1290), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1290), (str){ .ptr = (const uint8_t*)"__vtbl __attribute__((unused)) = { ", .len = sizeof("__vtbl __attribute__((unused)) = { ") - 1 });
 });
     if (owned) {
-      ({ String__Global *__sc1288 = &(self->buf);
-String__Global__push_str(&(*__sc1288), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1288), (str){ .ptr = (const uint8_t*)"____free", .len = sizeof("____free") - 1 });
+      ({ String__Global *__sc1291 = &(self->buf);
+String__Global__push_str(&(*__sc1291), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1291), (str){ .ptr = (const uint8_t*)"____free", .len = sizeof("____free") - 1 });
 });
     } else {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1289 = (str){ (const uint8_t *)"0", sizeof("0") - 1 }; str__ptr(&__sc1289); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1292 = (str){ (const uint8_t *)"0", sizeof("0") - 1 }; str__ptr(&__sc1292); })));
     }
     for (uint32_t km2 = 0U; km2 < idn_items.len; km2++) {
       const uint32_t mid = mids[((size_t)km2)];
@@ -11204,17 +11259,17 @@ String__Global__push_str(&(*__sc1288), (str){ .ptr = (const uint8_t*)"____free",
       const uint32_t mnamenode = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), mid)->as_data.function.name;
       codegen__codegen__Buf128 mn = (codegen__codegen__Buf128){0};
       codegen__codegen__render_ident_src(codegen__codegen__Codegen__mod_src(self, dy.module), ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, dy.module))), mnamenode)->as_data.name.text, ((char *)(&mn.b[0])), 128ULL);
-      ({ String__Global *__sc1290 = &(self->buf);
-String__Global__push_str(&(*__sc1290), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_str(&(*__sc1290), utils__errors__cstr(pp));
-String__Global__push_str(&(*__sc1290), (str){ .ptr = (const uint8_t*)"__", .len = sizeof("__") - 1 });
-String__Global__push_str(&(*__sc1290), utils__errors__cstr(((const char *)(&mn.b[0]))));
+      ({ String__Global *__sc1293 = &(self->buf);
+String__Global__push_str(&(*__sc1293), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_str(&(*__sc1293), utils__errors__cstr(pp));
+String__Global__push_str(&(*__sc1293), (str){ .ptr = (const uint8_t*)"__", .len = sizeof("__") - 1 });
+String__Global__push_str(&(*__sc1293), utils__errors__cstr(((const char *)(&mn.b[0]))));
 });
     }
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1291 = (str){ (const uint8_t *)" };\n", sizeof(" };\n") - 1 }; str__ptr(&__sc1291); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1294 = (str){ (const uint8_t *)" };\n", sizeof(" };\n") - 1 }; str__ptr(&__sc1294); })));
   }
   if (Vector__ast__ast__DynUse__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).dyn_uses) != 0ULL) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1292 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1292); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1295 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1295); })));
   }
 }
 
@@ -11237,13 +11292,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_layout_asser
       continue;
     }
     const ast__ast__TypeKind tkind = ({
-      ast__ast__TypeKind __sc1293;
+      ast__ast__TypeKind __sc1296;
       if (nk == ast__ast__NodeKind_NODE_ENUM) {
-        __sc1293 = ast__ast__TypeKind_TYPE_ENUM;
+        __sc1296 = ast__ast__TypeKind_TYPE_ENUM;
       } else {
-        __sc1293 = ast__ast__TypeKind_TYPE_STRUCT;
+        __sc1296 = ast__ast__TypeKind_TYPE_STRUCT;
       }
-      __sc1293;
+      __sc1296;
     });
     const uint32_t t = ast__ast__Ast__intern_type(&((*codegen__codegen__Codegen__cur_ast(self))), (ast__ast__Ty){ .kind = tkind, .module = codegen__codegen__Codegen__cur_module(self), .as_data = (ast__ast__TyAs){ .decl = nid } });
     const consteval__consteval__Layout lo = consteval__consteval__ConstEval__layout(&((*ce)), codegen__codegen__Codegen__cur_module(self), t);
@@ -11251,19 +11306,19 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_layout_asser
       continue;
     }
     codegen__codegen__Buf256 nm = (codegen__codegen__Buf256){0};
-    codegen__codegen__Codegen__render_type_id(self, t, ((const char *)({ __auto_type __sc1294 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1294); })), ((char *)(&nm.b[0])), 256ULL);
-    ({ String__Global *__sc1295 = &(self->buf);
-String__Global__push_str(&(*__sc1295), (str){ .ptr = (const uint8_t*)"_Static_assert(sizeof(", .len = sizeof("_Static_assert(sizeof(") - 1 });
-String__Global__push_str(&(*__sc1295), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1295), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
-String__Global__push_u64(&(*__sc1295), (uint64_t)(lo.size));
-String__Global__push_str(&(*__sc1295), (str){ .ptr = (const uint8_t*)" && _Alignof(", .len = sizeof(" && _Alignof(") - 1 });
-String__Global__push_str(&(*__sc1295), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1295), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
-String__Global__push_u64(&(*__sc1295), (uint64_t)(lo.align));
-String__Global__push_str(&(*__sc1295), (str){ .ptr = (const uint8_t*)", \"super-c layout model mismatch: ", .len = sizeof(", \"super-c layout model mismatch: ") - 1 });
-String__Global__push_str(&(*__sc1295), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1295), (str){ .ptr = (const uint8_t*)"\");\n", .len = sizeof("\");\n") - 1 });
+    codegen__codegen__Codegen__render_type_id(self, t, ((const char *)({ __auto_type __sc1297 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1297); })), ((char *)(&nm.b[0])), 256ULL);
+    ({ String__Global *__sc1298 = &(self->buf);
+String__Global__push_str(&(*__sc1298), (str){ .ptr = (const uint8_t*)"_Static_assert(sizeof(", .len = sizeof("_Static_assert(sizeof(") - 1 });
+String__Global__push_str(&(*__sc1298), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1298), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
+String__Global__push_u64(&(*__sc1298), (uint64_t)(lo.size));
+String__Global__push_str(&(*__sc1298), (str){ .ptr = (const uint8_t*)" && _Alignof(", .len = sizeof(" && _Alignof(") - 1 });
+String__Global__push_str(&(*__sc1298), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1298), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
+String__Global__push_u64(&(*__sc1298), (uint64_t)(lo.align));
+String__Global__push_str(&(*__sc1298), (str){ .ptr = (const uint8_t*)", \"super-c layout model mismatch: ", .len = sizeof(", \"super-c layout model mismatch: ") - 1 });
+String__Global__push_str(&(*__sc1298), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1298), (str){ .ptr = (const uint8_t*)"\");\n", .len = sizeof("\");\n") - 1 });
 });
     (any = true);
   }
@@ -11287,24 +11342,24 @@ String__Global__push_str(&(*__sc1295), (str){ .ptr = (const uint8_t*)"\");\n", .
       continue;
     }
     codegen__codegen__Buf256 nm = (codegen__codegen__Buf256){0};
-    codegen__codegen__Codegen__render_type_id(self, t, ((const char *)({ __auto_type __sc1296 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1296); })), ((char *)(&nm.b[0])), 256ULL);
-    ({ String__Global *__sc1297 = &(self->buf);
-String__Global__push_str(&(*__sc1297), (str){ .ptr = (const uint8_t*)"_Static_assert(sizeof(", .len = sizeof("_Static_assert(sizeof(") - 1 });
-String__Global__push_str(&(*__sc1297), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1297), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
-String__Global__push_u64(&(*__sc1297), (uint64_t)(lo.size));
-String__Global__push_str(&(*__sc1297), (str){ .ptr = (const uint8_t*)" && _Alignof(", .len = sizeof(" && _Alignof(") - 1 });
-String__Global__push_str(&(*__sc1297), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1297), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
-String__Global__push_u64(&(*__sc1297), (uint64_t)(lo.align));
-String__Global__push_str(&(*__sc1297), (str){ .ptr = (const uint8_t*)", \"super-c layout model mismatch: ", .len = sizeof(", \"super-c layout model mismatch: ") - 1 });
-String__Global__push_str(&(*__sc1297), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1297), (str){ .ptr = (const uint8_t*)"\");\n", .len = sizeof("\");\n") - 1 });
+    codegen__codegen__Codegen__render_type_id(self, t, ((const char *)({ __auto_type __sc1299 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1299); })), ((char *)(&nm.b[0])), 256ULL);
+    ({ String__Global *__sc1300 = &(self->buf);
+String__Global__push_str(&(*__sc1300), (str){ .ptr = (const uint8_t*)"_Static_assert(sizeof(", .len = sizeof("_Static_assert(sizeof(") - 1 });
+String__Global__push_str(&(*__sc1300), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1300), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
+String__Global__push_u64(&(*__sc1300), (uint64_t)(lo.size));
+String__Global__push_str(&(*__sc1300), (str){ .ptr = (const uint8_t*)" && _Alignof(", .len = sizeof(" && _Alignof(") - 1 });
+String__Global__push_str(&(*__sc1300), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1300), (str){ .ptr = (const uint8_t*)") == ", .len = sizeof(") == ") - 1 });
+String__Global__push_u64(&(*__sc1300), (uint64_t)(lo.align));
+String__Global__push_str(&(*__sc1300), (str){ .ptr = (const uint8_t*)", \"super-c layout model mismatch: ", .len = sizeof(", \"super-c layout model mismatch: ") - 1 });
+String__Global__push_str(&(*__sc1300), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1300), (str){ .ptr = (const uint8_t*)"\");\n", .len = sizeof("\");\n") - 1 });
 });
     (any = true);
   }
   if (any) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1298 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1298); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1301 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1301); })));
   }
 }
 
@@ -11316,24 +11371,24 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_toplevel_con
   codegen__codegen__Codegen__render_type_node(self, cd.ty, ((const char *)(&nm.b[0])), ((char *)(&decl.b[0])), 256ULL);
   if (cd.is_static_mut) {
     if (!cd.is_public) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1299 = (str){ (const uint8_t *)"static ", sizeof("static ") - 1 }; str__ptr(&__sc1299); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1302 = (str){ (const uint8_t *)"static ", sizeof("static ") - 1 }; str__ptr(&__sc1302); })));
     }
     codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1300 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1300); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1303 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1303); })));
     codegen__codegen__Codegen__emit_initializer(self, cd.ty, cd.value);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1301 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1301); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1304 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1304); })));
     return;
   }
   if (codegen__codegen__Codegen__ceval(self) != NULL) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1302 = (str){ (const uint8_t *)"__attribute__((unused)) ", sizeof("__attribute__((unused)) ") - 1 }; str__ptr(&__sc1302); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1305 = (str){ (const uint8_t *)"__attribute__((unused)) ", sizeof("__attribute__((unused)) ") - 1 }; str__ptr(&__sc1305); })));
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1303 = (str){ (const uint8_t *)"static const ", sizeof("static const ") - 1 }; str__ptr(&__sc1303); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1306 = (str){ (const uint8_t *)"static const ", sizeof("static const ") - 1 }; str__ptr(&__sc1306); })));
   codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
   if (cd.value != ast__ast__NODE_NONE) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1304 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1304); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1307 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1307); })));
     codegen__codegen__Codegen__emit_initializer(self, cd.ty, cd.value);
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1305 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1305); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1308 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1308); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_assoc_consts(codegen__codegen__Codegen *const self, bool const public_pass) {
@@ -11374,19 +11429,19 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_assoc_consts
         const lexer__token__Span tsp = codegen__codegen__Codegen__name_span_in(self, target.module, codegen__codegen__Codegen__cg_decl_name_node(self, target.module, target.node));
         (k = (k + codegen__codegen__render_ident_src(codegen__codegen__Codegen__mod_src(self, target.module), tsp, ((char *)(np + k)), (256ULL - k))));
       }
-      (k = codegen__codegen__bappend(np, 256ULL, k, ((const char *)({ __auto_type __sc1306 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1306); }))));
+      (k = codegen__codegen__bappend(np, 256ULL, k, ((const char *)({ __auto_type __sc1309 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1309); }))));
       const lexer__token__Span csp = codegen__codegen__Codegen__name_span(self, cd.name);
       codegen__codegen__Codegen__render_ident(self, csp, ((char *)(np + k)), (256ULL - k));
       codegen__codegen__Buf320 decl = (codegen__codegen__Buf320){0};
       codegen__codegen__Codegen__render_type_node(self, cd.ty, ((const char *)np), ((char *)(&decl.b[0])), 320ULL);
       if (codegen__codegen__Codegen__ceval(self) != NULL) {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1307 = (str){ (const uint8_t *)"__attribute__((unused)) ", sizeof("__attribute__((unused)) ") - 1 }; str__ptr(&__sc1307); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1310 = (str){ (const uint8_t *)"__attribute__((unused)) ", sizeof("__attribute__((unused)) ") - 1 }; str__ptr(&__sc1310); })));
       }
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1308 = (str){ (const uint8_t *)"static const ", sizeof("static const ") - 1 }; str__ptr(&__sc1308); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1311 = (str){ (const uint8_t *)"static const ", sizeof("static const ") - 1 }; str__ptr(&__sc1311); })));
       codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1309 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1309); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1312 = (str){ (const uint8_t *)" = ", sizeof(" = ") - 1 }; str__ptr(&__sc1312); })));
       codegen__codegen__Codegen__emit_initializer(self, cd.ty, cd.value);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1310 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1310); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1313 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1313); })));
     }
   }
 }
@@ -11409,9 +11464,9 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_public_const
       codegen__codegen__Codegen__render_qualified(self, codegen__codegen__Codegen__cur_module(self), cd.name, ((char *)(&nm.b[0])), 160ULL);
       codegen__codegen__Buf256 decl = (codegen__codegen__Buf256){0};
       codegen__codegen__Codegen__render_type_node(self, cd.ty, ((const char *)(&nm.b[0])), ((char *)(&decl.b[0])), 256ULL);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1311 = (str){ (const uint8_t *)"extern ", sizeof("extern ") - 1 }; str__ptr(&__sc1311); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1314 = (str){ (const uint8_t *)"extern ", sizeof("extern ") - 1 }; str__ptr(&__sc1314); })));
       codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&decl.b[0])));
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1312 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1312); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1315 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1315); })));
     } else {
       codegen__codegen__Codegen__emit_toplevel_const(self, nid);
     }
@@ -11443,14 +11498,14 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_referenced_f
         const char *const kw = codegen__codegen__agg_kw(ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, it.module))), it.decl));
         codegen__codegen__Buf200 inm = (codegen__codegen__Buf200){0};
         codegen__codegen__Codegen__inst_name(self, (&it), ((char *)(&inm.b[0])), 200ULL);
-        ({ String__Global *__sc1313 = &(self->buf);
-String__Global__push_str(&(*__sc1313), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1313), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1313), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1313), utils__errors__cstr(((const char *)(&inm.b[0]))));
-String__Global__push_str(&(*__sc1313), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1313), utils__errors__cstr(((const char *)(&inm.b[0]))));
-String__Global__push_str(&(*__sc1313), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+        ({ String__Global *__sc1316 = &(self->buf);
+String__Global__push_str(&(*__sc1316), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1316), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1316), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1316), utils__errors__cstr(((const char *)(&inm.b[0]))));
+String__Global__push_str(&(*__sc1316), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1316), utils__errors__cstr(((const char *)(&inm.b[0]))));
+String__Global__push_str(&(*__sc1316), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
       }
       continue;
@@ -11466,14 +11521,14 @@ String__Global__push_str(&(*__sc1313), (str){ .ptr = (const uint8_t*)";\n", .len
       const uint32_t anm = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, t.module))), t.as_data.decl)->as_data.aggregate.name;
       codegen__codegen__Buf160 nm = (codegen__codegen__Buf160){0};
       codegen__codegen__Codegen__render_qualified(self, t.module, anm, ((char *)(&nm.b[0])), 160ULL);
-      ({ String__Global *__sc1314 = &(self->buf);
-String__Global__push_str(&(*__sc1314), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1314), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1314), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1314), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1314), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1314), utils__errors__cstr(((const char *)(&nm.b[0]))));
-String__Global__push_str(&(*__sc1314), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+      ({ String__Global *__sc1317 = &(self->buf);
+String__Global__push_str(&(*__sc1317), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1317), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1317), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1317), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1317), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1317), utils__errors__cstr(((const char *)(&nm.b[0]))));
+String__Global__push_str(&(*__sc1317), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
     } else if (t.kind == ast__ast__TypeKind_TYPE_ENUM) {
       ast__ast__Ast *const sa = codegen__codegen__Codegen__cur_ast(self);
@@ -11482,7 +11537,7 @@ String__Global__push_str(&(*__sc1314), (str){ .ptr = (const uint8_t*)";\n", .len
       const uint16_t tmod = t.module;
       const uint32_t tdecl = t.as_data.decl;
       (self->source = codegen__codegen__Codegen__mod_src(self, tmod));
-      (self->len = String__Global__len(&(*({ __auto_type __sc1315 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1315, ((size_t)tmod)); })).source));
+      (self->len = String__Global__len(&(*({ __auto_type __sc1318 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1318, ((size_t)tmod)); })).source));
       (self->ast = codegen__codegen__Codegen__mod_ast(self, tmod));
       codegen__codegen__Codegen__emit_enum_full(self, tdecl);
       (self->ast = sa);
@@ -11496,19 +11551,19 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_referenced_i
   const size_t nmod = codegen__codegen__Codegen__pkg_count(self);
   const uint16_t cur = codegen__codegen__Codegen__cur_module(self);
   bool *const want = ((bool *)calloc(({
-    size_t __sc1316;
+    size_t __sc1319;
     if (nmod != 0ULL) {
-      __sc1316 = nmod;
+      __sc1319 = nmod;
     } else {
-      __sc1316 = 1ULL;
+      __sc1319 = 1ULL;
     }
-    __sc1316;
+    __sc1319;
   }), 1ULL));
   if (want == NULL) {
     return;
   }
   for (size_t i = 0ULL; i < Vector__ast__ast__DefId__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).resolutions); i++) {
-    const ast__ast__DefId d = (*({ __auto_type __sc1317 = &(*codegen__codegen__Codegen__cur_ast(self)).resolutions; Vector__ast__ast__DefId__Global__index(__sc1317, i); }));
+    const ast__ast__DefId d = (*({ __auto_type __sc1320 = &(*codegen__codegen__Codegen__cur_ast(self)).resolutions; Vector__ast__ast__DefId__Global__index(__sc1320, i); }));
     if (((d.node == ast__ast__NODE_NONE) || (d.module == cur)) || (((size_t)d.module) >= nmod)) {
       continue;
     }
@@ -11593,7 +11648,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_referenced_i
   }
   for (size_t m = 0ULL; m < nmod; m++) {
     if (want[m]) {
-      codegen__codegen__Codegen__emit_modpath_include(self, String__Global__as_str(&(*({ __auto_type __sc1318 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1318, m); })).path));
+      codegen__codegen__Codegen__emit_modpath_include(self, String__Global__as_str(&(*({ __auto_type __sc1321 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1321, m); })).path));
     }
   }
   free(((void *)want));
@@ -11603,13 +11658,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_header_inclu
   const size_t nmod = codegen__codegen__Codegen__pkg_count(self);
   const uint16_t cur = codegen__codegen__Codegen__cur_module(self);
   bool *const want = ((bool *)calloc(({
-    size_t __sc1319;
+    size_t __sc1322;
     if (nmod != 0ULL) {
-      __sc1319 = nmod;
+      __sc1322 = nmod;
     } else {
-      __sc1319 = 1ULL;
+      __sc1322 = 1ULL;
     }
-    __sc1319;
+    __sc1322;
   }), 1ULL));
   if (want == NULL) {
     return;
@@ -11631,13 +11686,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_header_inclu
         const uint32_t rid = rids[((size_t)r)];
         const ast__ast__Node *const rn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), rid);
         const uint32_t rtn = ({
-          uint32_t __sc1320;
+          uint32_t __sc1323;
           if (rn->kind == ast__ast__NodeKind_NODE_PARAMETER) {
-            __sc1320 = rn->as_data.parameter.ty;
+            __sc1323 = rn->as_data.parameter.ty;
           } else {
-            __sc1320 = rid;
+            __sc1323 = rid;
           }
-          __sc1320;
+          __sc1323;
         });
         codegen__codegen__Codegen__mark_layout_module(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), rtn), want, nmod);
       }
@@ -11693,7 +11748,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_header_inclu
   (self->nsubst = saved);
   if (pub_const_expr) {
     for (size_t ri = 0ULL; ri < Vector__ast__ast__DefId__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).resolutions); ri++) {
-      const ast__ast__DefId d = (*({ __auto_type __sc1321 = &(*codegen__codegen__Codegen__cur_ast(self)).resolutions; Vector__ast__ast__DefId__Global__index(__sc1321, ri); }));
+      const ast__ast__DefId d = (*({ __auto_type __sc1324 = &(*codegen__codegen__Codegen__cur_ast(self)).resolutions; Vector__ast__ast__DefId__Global__index(__sc1324, ri); }));
       if ((((d.node != ast__ast__NODE_NONE) && (d.module != cur)) && (((size_t)d.module) < nmod)) && (!codegen__codegen__Codegen__cg_decl_is_interface_member(self, d.module, d.node))) {
         (want[((size_t)d.module)] = true);
       }
@@ -11707,7 +11762,7 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_header_inclu
   }
   for (size_t m = 0ULL; m < nmod; m++) {
     if ((m != ((size_t)cur)) && want[m]) {
-      codegen__codegen__Codegen__emit_modpath_include(self, String__Global__as_str(&(*({ __auto_type __sc1322 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1322, m); })).path));
+      codegen__codegen__Codegen__emit_modpath_include(self, String__Global__as_str(&(*({ __auto_type __sc1325 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1325, m); })).path));
     }
   }
   free(((void *)want));
@@ -11758,17 +11813,17 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_extern_inclu
     bool done = false;
     const uint16_t cm = codegen__codegen__Codegen__cur_module(self);
     if ((self->package != NULL) && (((size_t)cm) < Vector__module__loader__Module__Global__len(&(*self->package).modules))) {
-      if (String__Global__len(&(*({ __auto_type __sc1323 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1323, ((size_t)cm)); })).file) != 0ULL) {
-        const char *const file = String__Global__cstr(&(*({ __auto_type __sc1324 = &(*self->package).modules; Vector__module__loader__Module__Global__index_mut(__sc1324, ((size_t)cm)); })).file);
+      if (String__Global__len(&(*({ __auto_type __sc1326 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1326, ((size_t)cm)); })).file) != 0ULL) {
+        const char *const file = String__Global__cstr(&(*({ __auto_type __sc1327 = &(*self->package).modules; Vector__module__loader__Module__Global__index_mut(__sc1327, ((size_t)cm)); })).file);
         codegen__codegen__Buf4096 rel = (codegen__codegen__Buf4096){0};
         const char *const hp = ((const char *)(self->source + ((size_t)s)));
         const int32_t hlen = ((int32_t)(e - s));
         char *const slash = strrchr(file, 47);
         if (slash != NULL) {
           const int32_t dlen = ((int32_t)(((size_t)slash) - ((size_t)file)));
-          snprintf(((char *)(&rel.b[0])), 4096ULL, ((const char *)({ __auto_type __sc1325 = (str){ (const uint8_t *)"%.*s/%.*s", sizeof("%.*s/%.*s") - 1 }; str__ptr(&__sc1325); })), dlen, file, hlen, hp);
+          snprintf(((char *)(&rel.b[0])), 4096ULL, ((const char *)({ __auto_type __sc1328 = (str){ (const uint8_t *)"%.*s/%.*s", sizeof("%.*s/%.*s") - 1 }; str__ptr(&__sc1328); })), dlen, file, hlen, hp);
         } else {
-          snprintf(((char *)(&rel.b[0])), 4096ULL, ((const char *)({ __auto_type __sc1326 = (str){ (const uint8_t *)"./%.*s", sizeof("./%.*s") - 1 }; str__ptr(&__sc1326); })), hlen, hp);
+          snprintf(((char *)(&rel.b[0])), 4096ULL, ((const char *)({ __auto_type __sc1329 = (str){ (const uint8_t *)"./%.*s", sizeof("./%.*s") - 1 }; str__ptr(&__sc1329); })), hlen, hp);
         }
         codegen__codegen__Buf4096 absb = (codegen__codegen__Buf4096){0};
         codegen__codegen__Buf4096 rootb = (codegen__codegen__Buf4096){0};
@@ -11776,15 +11831,15 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_extern_inclu
         char *const rr = sc_realpath(String__Global__cstr(&(*self->package).root_dir), ((char *)(&rootb.b[0])));
         if ((ra != NULL) && (rr != NULL)) {
           const size_t rl = strlen(((const char *)(&rootb.b[0])));
-          codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1327 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1327); })));
+          codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1330 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1330); })));
           if ((strncmp(((const char *)(&absb.b[0])), ((const char *)(&rootb.b[0])), rl) == 0) && (absb.b[rl] == 47)) {
             codegen__codegen__Codegen__emit_rel_prefix(self);
-            codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1328 = (str){ (const uint8_t *)"../", sizeof("../") - 1 }; str__ptr(&__sc1328); })));
+            codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1331 = (str){ (const uint8_t *)"../", sizeof("../") - 1 }; str__ptr(&__sc1331); })));
             codegen__codegen__Codegen__emit_cstr(self, ((const char *)(((const char *)(&absb.b[0])) + (rl + 1ULL))));
           } else {
             codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&absb.b[0])));
           }
-          codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1329 = (str){ (const uint8_t *)"\"\n", sizeof("\"\n") - 1 }; str__ptr(&__sc1329); })));
+          codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1332 = (str){ (const uint8_t *)"\"\n", sizeof("\"\n") - 1 }; str__ptr(&__sc1332); })));
           (done = true);
         }
       }
@@ -11792,15 +11847,15 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_extern_inclu
     if (!done) {
       const bool local = ((self->source[((size_t)s)] == 46U) || (self->source[((size_t)s)] == 47U));
       if (local) {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1330 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1330); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1333 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1333); })));
       } else {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1331 = (str){ (const uint8_t *)"#include <", sizeof("#include <") - 1 }; str__ptr(&__sc1331); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1334 = (str){ (const uint8_t *)"#include <", sizeof("#include <") - 1 }; str__ptr(&__sc1334); })));
       }
       codegen__codegen__Codegen__emit_bytes(self, ((const char *)(self->source + ((size_t)s))), ((size_t)(e - s)));
       if (local) {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1332 = (str){ (const uint8_t *)"\"\n", sizeof("\"\n") - 1 }; str__ptr(&__sc1332); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1335 = (str){ (const uint8_t *)"\"\n", sizeof("\"\n") - 1 }; str__ptr(&__sc1335); })));
       } else {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1333 = (str){ (const uint8_t *)">\n", sizeof(">\n") - 1 }; str__ptr(&__sc1333); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1336 = (str){ (const uint8_t *)">\n", sizeof(">\n") - 1 }; str__ptr(&__sc1336); })));
       }
     }
     (i = (i + 1U));
@@ -11808,21 +11863,21 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_extern_inclu
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_includes(codegen__codegen__Codegen *const self) {
-  const str p = String__Global__as_str(&(*({ __auto_type __sc1334 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1334, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).path);
+  const str p = String__Global__as_str(&(*({ __auto_type __sc1337 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1337, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).path);
   codegen__codegen__Codegen__emit_modpath_include(self, p);
   codegen__codegen__Codegen__emit_referenced_includes(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1335 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1335); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1338 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1338); })));
 }
 
 static __attribute__((unused)) uint32_t codegen__codegen__Codegen__cg_test_type(codegen__codegen__Codegen *const self, ast__ast__DefId const d, bool const is_enum) {
   const ast__ast__TypeKind tk = ({
-    ast__ast__TypeKind __sc1336;
+    ast__ast__TypeKind __sc1339;
     if (is_enum) {
-      __sc1336 = ast__ast__TypeKind_TYPE_ENUM;
+      __sc1339 = ast__ast__TypeKind_TYPE_ENUM;
     } else {
-      __sc1336 = ast__ast__TypeKind_TYPE_STRUCT;
+      __sc1339 = ast__ast__TypeKind_TYPE_STRUCT;
     }
-    __sc1336;
+    __sc1339;
   });
   return ast__ast__Ast__intern_type(&((*codegen__codegen__Codegen__cur_ast(self))), (ast__ast__Ty){ .kind = tk, .module = d.module, .as_data = (ast__ast__TyAs){ .decl = d.node } });
 }
@@ -11831,165 +11886,165 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_test_wrapper
   if ((!self->test.enabled) || ((self->test.ncases == 0U) && (self->test.genv_init == ast__ast__NODE_NONE))) {
     return;
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1337 = (str){ (const uint8_t *)"\n/* --test wrappers */\n", sizeof("\n/* --test wrappers */\n") - 1 }; str__ptr(&__sc1337); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1340 = (str){ (const uint8_t *)"\n/* --test wrappers */\n", sizeof("\n/* --test wrappers */\n") - 1 }; str__ptr(&__sc1340); })));
   for (uint32_t i = 0U; i < self->test.ncases; i++) {
     const codegen__codegen__CgTestCase tc = self->test.cases[((size_t)i)];
     const bool suite = (tc.suite.node != ast__ast__NODE_NONE);
     const ast__ast__DefId fx_type = ({
-      ast__ast__DefId __sc1338;
+      ast__ast__DefId __sc1341;
       if (suite) {
-        __sc1338 = tc.suite;
+        __sc1341 = tc.suite;
       } else {
-        __sc1338 = self->test.fx_type;
-      }
-      __sc1338;
-    });
-    const bool fx_is_enum = ({
-      bool __sc1339;
-      if (suite) {
-        __sc1339 = tc.suite_is_enum;
-      } else {
-        __sc1339 = self->test.fx_is_enum;
-      }
-      __sc1339;
-    });
-    const uint32_t fx_init = ({
-      uint32_t __sc1340;
-      if (suite) {
-        __sc1340 = tc.suite_init;
-      } else {
-        __sc1340 = self->test.fx_init;
-      }
-      __sc1340;
-    });
-    const uint32_t fx_free = ({
-      uint32_t __sc1341;
-      if (suite) {
-        __sc1341 = tc.suite_free;
-      } else {
-        __sc1341 = self->test.fx_free;
+        __sc1341 = self->test.fx_type;
       }
       __sc1341;
     });
-    const ast__ast__DefId target = ({
-      ast__ast__DefId __sc1342;
+    const bool fx_is_enum = ({
+      bool __sc1342;
       if (suite) {
-        __sc1342 = tc.suite;
+        __sc1342 = tc.suite_is_enum;
       } else {
-        __sc1342 = (ast__ast__DefId){ .module = 0U, .node = ast__ast__NODE_NONE };
+        __sc1342 = self->test.fx_is_enum;
       }
       __sc1342;
     });
+    const uint32_t fx_init = ({
+      uint32_t __sc1343;
+      if (suite) {
+        __sc1343 = tc.suite_init;
+      } else {
+        __sc1343 = self->test.fx_init;
+      }
+      __sc1343;
+    });
+    const uint32_t fx_free = ({
+      uint32_t __sc1344;
+      if (suite) {
+        __sc1344 = tc.suite_free;
+      } else {
+        __sc1344 = self->test.fx_free;
+      }
+      __sc1344;
+    });
+    const ast__ast__DefId target = ({
+      ast__ast__DefId __sc1345;
+      if (suite) {
+        __sc1345 = tc.suite;
+      } else {
+        __sc1345 = (ast__ast__DefId){ .module = 0U, .node = ast__ast__NODE_NONE };
+      }
+      __sc1345;
+    });
     codegen__codegen__Buf240 fname = (codegen__codegen__Buf240){0};
     codegen__codegen__Codegen__function_name(self, tc.func, target, ((char *)(&fname.b[0])), 240ULL, true);
-    ({ String__Global *__sc1343 = &(self->buf);
-String__Global__push_str(&(*__sc1343), (str){ .ptr = (const uint8_t*)"void __sc_test_w_", .len = sizeof("void __sc_test_w_") - 1 });
-String__Global__push_u64(&(*__sc1343), (uint64_t)(((uint32_t)codegen__codegen__Codegen__cur_module(self))));
-String__Global__push_str(&(*__sc1343), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
-String__Global__push_u64(&(*__sc1343), (uint64_t)(tc.func));
-String__Global__push_str(&(*__sc1343), (str){ .ptr = (const uint8_t*)"(void *__genv) {\n  (void)__genv;\n", .len = sizeof("(void *__genv) {\n  (void)__genv;\n") - 1 });
+    ({ String__Global *__sc1346 = &(self->buf);
+String__Global__push_str(&(*__sc1346), (str){ .ptr = (const uint8_t*)"void __sc_test_w_", .len = sizeof("void __sc_test_w_") - 1 });
+String__Global__push_u64(&(*__sc1346), (uint64_t)(((uint32_t)codegen__codegen__Codegen__cur_module(self))));
+String__Global__push_str(&(*__sc1346), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
+String__Global__push_u64(&(*__sc1346), (uint64_t)(tc.func));
+String__Global__push_str(&(*__sc1346), (str){ .ptr = (const uint8_t*)"(void *__genv) {\n  (void)__genv;\n", .len = sizeof("(void *__genv) {\n  (void)__genv;\n") - 1 });
 });
     if ((tc.wants & 1U) != 0U) {
       const uint32_t fxt = codegen__codegen__Codegen__cg_test_type(self, fx_type, fx_is_enum);
       codegen__codegen__Buf256 decl = (codegen__codegen__Buf256){0};
-      codegen__codegen__Codegen__render_type_id(self, fxt, ((const char *)({ __auto_type __sc1344 = (str){ (const uint8_t *)"__fx", sizeof("__fx") - 1 }; str__ptr(&__sc1344); })), ((char *)(&decl.b[0])), 256ULL);
+      codegen__codegen__Codegen__render_type_id(self, fxt, ((const char *)({ __auto_type __sc1347 = (str){ (const uint8_t *)"__fx", sizeof("__fx") - 1 }; str__ptr(&__sc1347); })), ((char *)(&decl.b[0])), 256ULL);
       codegen__codegen__Buf240 init = (codegen__codegen__Buf240){0};
       codegen__codegen__Codegen__function_name(self, fx_init, target, ((char *)(&init.b[0])), 240ULL, true);
-      ({ String__Global *__sc1345 = &(self->buf);
-String__Global__push_str(&(*__sc1345), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
-String__Global__push_str(&(*__sc1345), utils__errors__cstr(((const char *)(&decl.b[0]))));
-String__Global__push_str(&(*__sc1345), (str){ .ptr = (const uint8_t*)" = ", .len = sizeof(" = ") - 1 });
-String__Global__push_str(&(*__sc1345), utils__errors__cstr(((const char *)(&init.b[0]))));
-String__Global__push_str(&(*__sc1345), (str){ .ptr = (const uint8_t*)"();\n", .len = sizeof("();\n") - 1 });
+      ({ String__Global *__sc1348 = &(self->buf);
+String__Global__push_str(&(*__sc1348), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
+String__Global__push_str(&(*__sc1348), utils__errors__cstr(((const char *)(&decl.b[0]))));
+String__Global__push_str(&(*__sc1348), (str){ .ptr = (const uint8_t*)" = ", .len = sizeof(" = ") - 1 });
+String__Global__push_str(&(*__sc1348), utils__errors__cstr(((const char *)(&init.b[0]))));
+String__Global__push_str(&(*__sc1348), (str){ .ptr = (const uint8_t*)"();\n", .len = sizeof("();\n") - 1 });
 });
     }
-    ({ String__Global *__sc1346 = &(self->buf);
-String__Global__push_str(&(*__sc1346), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
-String__Global__push_str(&(*__sc1346), utils__errors__cstr(((const char *)(&fname.b[0]))));
-String__Global__push_str(&(*__sc1346), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
+    ({ String__Global *__sc1349 = &(self->buf);
+String__Global__push_str(&(*__sc1349), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
+String__Global__push_str(&(*__sc1349), utils__errors__cstr(((const char *)(&fname.b[0]))));
+String__Global__push_str(&(*__sc1349), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
 });
     if ((tc.wants & 1U) != 0U) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1347 = (str){ (const uint8_t *)"&__fx", sizeof("&__fx") - 1 }; str__ptr(&__sc1347); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1350 = (str){ (const uint8_t *)"&__fx", sizeof("&__fx") - 1 }; str__ptr(&__sc1350); })));
     }
     if ((tc.wants & 2U) != 0U) {
       const uint32_t gt = codegen__codegen__Codegen__cg_test_type(self, self->test.genv_type, self->test.genv_is_enum);
       codegen__codegen__Buf200 gty = (codegen__codegen__Buf200){0};
-      codegen__codegen__Codegen__render_type_id(self, gt, ((const char *)({ __auto_type __sc1348 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1348); })), ((char *)(&gty.b[0])), 200ULL);
+      codegen__codegen__Codegen__render_type_id(self, gt, ((const char *)({ __auto_type __sc1351 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1351); })), ((char *)(&gty.b[0])), 200ULL);
       const char *const sep = ({
-        const char *__sc1349;
+        const char *__sc1352;
         if ((tc.wants & 1U) != 0U) {
-          __sc1349 = ((const char *)({ __auto_type __sc1350 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1350); }));
+          __sc1352 = ((const char *)({ __auto_type __sc1353 = (str){ (const uint8_t *)", ", sizeof(", ") - 1 }; str__ptr(&__sc1353); }));
         } else {
-          __sc1349 = ((const char *)({ __auto_type __sc1351 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1351); }));
+          __sc1352 = ((const char *)({ __auto_type __sc1354 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1354); }));
         }
-        __sc1349;
+        __sc1352;
       });
-      ({ String__Global *__sc1352 = &(self->buf);
-String__Global__push_str(&(*__sc1352), utils__errors__cstr(sep));
-String__Global__push_str(&(*__sc1352), (str){ .ptr = (const uint8_t*)"(const ", .len = sizeof("(const ") - 1 });
-String__Global__push_str(&(*__sc1352), utils__errors__cstr(((const char *)(&gty.b[0]))));
-String__Global__push_str(&(*__sc1352), (str){ .ptr = (const uint8_t*)" *)__genv", .len = sizeof(" *)__genv") - 1 });
+      ({ String__Global *__sc1355 = &(self->buf);
+String__Global__push_str(&(*__sc1355), utils__errors__cstr(sep));
+String__Global__push_str(&(*__sc1355), (str){ .ptr = (const uint8_t*)"(const ", .len = sizeof("(const ") - 1 });
+String__Global__push_str(&(*__sc1355), utils__errors__cstr(((const char *)(&gty.b[0]))));
+String__Global__push_str(&(*__sc1355), (str){ .ptr = (const uint8_t*)" *)__genv", .len = sizeof(" *)__genv") - 1 });
 });
     }
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1353 = (str){ (const uint8_t *)");\n", sizeof(");\n") - 1 }; str__ptr(&__sc1353); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1356 = (str){ (const uint8_t *)");\n", sizeof(");\n") - 1 }; str__ptr(&__sc1356); })));
     if (((tc.wants & 1U) != 0U) && (fx_free != ast__ast__NODE_NONE)) {
       codegen__codegen__Buf240 fre = (codegen__codegen__Buf240){0};
       codegen__codegen__Codegen__function_name(self, fx_free, target, ((char *)(&fre.b[0])), 240ULL, true);
-      ({ String__Global *__sc1354 = &(self->buf);
-String__Global__push_str(&(*__sc1354), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
-String__Global__push_str(&(*__sc1354), utils__errors__cstr(((const char *)(&fre.b[0]))));
-String__Global__push_str(&(*__sc1354), (str){ .ptr = (const uint8_t*)"(&__fx);\n", .len = sizeof("(&__fx);\n") - 1 });
+      ({ String__Global *__sc1357 = &(self->buf);
+String__Global__push_str(&(*__sc1357), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
+String__Global__push_str(&(*__sc1357), utils__errors__cstr(((const char *)(&fre.b[0]))));
+String__Global__push_str(&(*__sc1357), (str){ .ptr = (const uint8_t*)"(&__fx);\n", .len = sizeof("(&__fx);\n") - 1 });
 });
     }
     if ((tc.wants & 1U) != 0U) {
       const uint32_t fxt = codegen__codegen__Codegen__cg_test_type(self, fx_type, fx_is_enum);
       if (codegen__codegen__Codegen__cg_type_is_free(self, fxt)) {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1355 = (str){ (const uint8_t *)"  ", sizeof("  ") - 1 }; str__ptr(&__sc1355); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1358 = (str){ (const uint8_t *)"  ", sizeof("  ") - 1 }; str__ptr(&__sc1358); })));
         codegen__codegen__Codegen__emit_free_target(self, fxt);
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1356 = (str){ (const uint8_t *)"(&__fx);\n", sizeof("(&__fx);\n") - 1 }; str__ptr(&__sc1356); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1359 = (str){ (const uint8_t *)"(&__fx);\n", sizeof("(&__fx);\n") - 1 }; str__ptr(&__sc1359); })));
       }
     }
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1357 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1357); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1360 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1360); })));
   }
   if (self->test.genv_init != ast__ast__NODE_NONE) {
     const uint32_t gt = codegen__codegen__Codegen__cg_test_type(self, self->test.genv_type, self->test.genv_is_enum);
     codegen__codegen__Buf256 gdecl = (codegen__codegen__Buf256){0};
-    codegen__codegen__Codegen__render_type_id(self, gt, ((const char *)({ __auto_type __sc1358 = (str){ (const uint8_t *)"__sc_genv", sizeof("__sc_genv") - 1 }; str__ptr(&__sc1358); })), ((char *)(&gdecl.b[0])), 256ULL);
+    codegen__codegen__Codegen__render_type_id(self, gt, ((const char *)({ __auto_type __sc1361 = (str){ (const uint8_t *)"__sc_genv", sizeof("__sc_genv") - 1 }; str__ptr(&__sc1361); })), ((char *)(&gdecl.b[0])), 256ULL);
     codegen__codegen__Buf200 gty = (codegen__codegen__Buf200){0};
-    codegen__codegen__Codegen__render_type_id(self, gt, ((const char *)({ __auto_type __sc1359 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1359); })), ((char *)(&gty.b[0])), 200ULL);
+    codegen__codegen__Codegen__render_type_id(self, gt, ((const char *)({ __auto_type __sc1362 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1362); })), ((char *)(&gty.b[0])), 200ULL);
     const uint32_t giname = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), self->test.genv_init)->as_data.function.name;
     codegen__codegen__Buf200 init = (codegen__codegen__Buf200){0};
     codegen__codegen__Codegen__render_qualified(self, codegen__codegen__Codegen__cur_module(self), giname, ((char *)(&init.b[0])), 200ULL);
-    ({ String__Global *__sc1360 = &(self->buf);
-String__Global__push_str(&(*__sc1360), (str){ .ptr = (const uint8_t*)"void *__sc_test_genv_init(void) { static ", .len = sizeof("void *__sc_test_genv_init(void) { static ") - 1 });
-String__Global__push_str(&(*__sc1360), utils__errors__cstr(((const char *)(&gdecl.b[0]))));
-String__Global__push_str(&(*__sc1360), (str){ .ptr = (const uint8_t*)"; __sc_genv = ", .len = sizeof("; __sc_genv = ") - 1 });
-String__Global__push_str(&(*__sc1360), utils__errors__cstr(((const char *)(&init.b[0]))));
-String__Global__push_str(&(*__sc1360), (str){ .ptr = (const uint8_t*)"(); return &__sc_genv; }\n", .len = sizeof("(); return &__sc_genv; }\n") - 1 });
+    ({ String__Global *__sc1363 = &(self->buf);
+String__Global__push_str(&(*__sc1363), (str){ .ptr = (const uint8_t*)"void *__sc_test_genv_init(void) { static ", .len = sizeof("void *__sc_test_genv_init(void) { static ") - 1 });
+String__Global__push_str(&(*__sc1363), utils__errors__cstr(((const char *)(&gdecl.b[0]))));
+String__Global__push_str(&(*__sc1363), (str){ .ptr = (const uint8_t*)"; __sc_genv = ", .len = sizeof("; __sc_genv = ") - 1 });
+String__Global__push_str(&(*__sc1363), utils__errors__cstr(((const char *)(&init.b[0]))));
+String__Global__push_str(&(*__sc1363), (str){ .ptr = (const uint8_t*)"(); return &__sc_genv; }\n", .len = sizeof("(); return &__sc_genv; }\n") - 1 });
 });
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1361 = (str){ (const uint8_t *)"void __sc_test_genv_free(void *__p) {\n  (void)__p;\n", sizeof("void __sc_test_genv_free(void *__p) {\n  (void)__p;\n") - 1 }; str__ptr(&__sc1361); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1364 = (str){ (const uint8_t *)"void __sc_test_genv_free(void *__p) {\n  (void)__p;\n", sizeof("void __sc_test_genv_free(void *__p) {\n  (void)__p;\n") - 1 }; str__ptr(&__sc1364); })));
     if (self->test.genv_free != ast__ast__NODE_NONE) {
       const uint32_t gfname = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), self->test.genv_free)->as_data.function.name;
       codegen__codegen__Buf200 fre = (codegen__codegen__Buf200){0};
       codegen__codegen__Codegen__render_qualified(self, codegen__codegen__Codegen__cur_module(self), gfname, ((char *)(&fre.b[0])), 200ULL);
-      ({ String__Global *__sc1362 = &(self->buf);
-String__Global__push_str(&(*__sc1362), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
-String__Global__push_str(&(*__sc1362), utils__errors__cstr(((const char *)(&fre.b[0]))));
-String__Global__push_str(&(*__sc1362), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
-String__Global__push_str(&(*__sc1362), utils__errors__cstr(((const char *)(&gty.b[0]))));
-String__Global__push_str(&(*__sc1362), (str){ .ptr = (const uint8_t*)" *)__p);\n", .len = sizeof(" *)__p);\n") - 1 });
+      ({ String__Global *__sc1365 = &(self->buf);
+String__Global__push_str(&(*__sc1365), (str){ .ptr = (const uint8_t*)"  ", .len = sizeof("  ") - 1 });
+String__Global__push_str(&(*__sc1365), utils__errors__cstr(((const char *)(&fre.b[0]))));
+String__Global__push_str(&(*__sc1365), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
+String__Global__push_str(&(*__sc1365), utils__errors__cstr(((const char *)(&gty.b[0]))));
+String__Global__push_str(&(*__sc1365), (str){ .ptr = (const uint8_t*)" *)__p);\n", .len = sizeof(" *)__p);\n") - 1 });
 });
     }
     if (codegen__codegen__Codegen__cg_type_is_free(self, gt)) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1363 = (str){ (const uint8_t *)"  ", sizeof("  ") - 1 }; str__ptr(&__sc1363); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1366 = (str){ (const uint8_t *)"  ", sizeof("  ") - 1 }; str__ptr(&__sc1366); })));
       codegen__codegen__Codegen__emit_free_target(self, gt);
-      ({ String__Global *__sc1364 = &(self->buf);
-String__Global__push_str(&(*__sc1364), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
-String__Global__push_str(&(*__sc1364), utils__errors__cstr(((const char *)(&gty.b[0]))));
-String__Global__push_str(&(*__sc1364), (str){ .ptr = (const uint8_t*)" *)__p);\n", .len = sizeof(" *)__p);\n") - 1 });
+      ({ String__Global *__sc1367 = &(self->buf);
+String__Global__push_str(&(*__sc1367), (str){ .ptr = (const uint8_t*)"((", .len = sizeof("((") - 1 });
+String__Global__push_str(&(*__sc1367), utils__errors__cstr(((const char *)(&gty.b[0]))));
+String__Global__push_str(&(*__sc1367), (str){ .ptr = (const uint8_t*)" *)__p);\n", .len = sizeof(" *)__p);\n") - 1 });
 });
     }
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1365 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1365); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1368 = (str){ (const uint8_t *)"}\n", sizeof("}\n") - 1 }; str__ptr(&__sc1368); })));
   }
 }
 
@@ -11997,8 +12052,8 @@ void codegen__codegen__Codegen__codegen_emit_header(codegen__codegen__Codegen *c
   codegen__codegen__Codegen__build_enum_index(self);
   codegen__codegen__Buf160 guard = (codegen__codegen__Buf160){0};
   char *const np = ((char *)(&guard.b[0]));
-  size_t at = codegen__codegen__bappend(np, 160ULL, 0ULL, ((const char *)({ __auto_type __sc1366 = (str){ (const uint8_t *)"SUPER_", sizeof("SUPER_") - 1 }; str__ptr(&__sc1366); })));
-  const str mp = String__Global__as_str(&(*({ __auto_type __sc1367 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1367, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).path);
+  size_t at = codegen__codegen__bappend(np, 160ULL, 0ULL, ((const char *)({ __auto_type __sc1369 = (str){ (const uint8_t *)"SUPER_", sizeof("SUPER_") - 1 }; str__ptr(&__sc1369); })));
+  const str mp = String__Global__as_str(&(*({ __auto_type __sc1370 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1370, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).path);
   const size_t n = str__len(&mp);
   size_t i = 0ULL;
   while ((i < n) && ((at + 2ULL) < 160ULL)) {
@@ -12014,7 +12069,7 @@ void codegen__codegen__Codegen__codegen_emit_header(codegen__codegen__Codegen *c
     (i = (i + 1ULL));
   }
   (guard.b[at] = 0);
-  codegen__codegen__bappend(np, 160ULL, at, ((const char *)({ __auto_type __sc1368 = (str){ (const uint8_t *)"_H", sizeof("_H") - 1 }; str__ptr(&__sc1368); })));
+  codegen__codegen__bappend(np, 160ULL, at, ((const char *)({ __auto_type __sc1371 = (str){ (const uint8_t *)"_H", sizeof("_H") - 1 }; str__ptr(&__sc1371); })));
   size_t gi = 0ULL;
   while (guard.b[gi] != 0) {
     const char ch = guard.b[gi];
@@ -12024,29 +12079,29 @@ void codegen__codegen__Codegen__codegen_emit_header(codegen__codegen__Codegen *c
     (gi = (gi + 1ULL));
   }
   const char *const gp = ((const char *)np);
-  ({ String__Global *__sc1369 = &(self->buf);
-String__Global__push_str(&(*__sc1369), (str){ .ptr = (const uint8_t*)"#ifndef ", .len = sizeof("#ifndef ") - 1 });
-String__Global__push_str(&(*__sc1369), utils__errors__cstr(gp));
-String__Global__push_str(&(*__sc1369), (str){ .ptr = (const uint8_t*)"\n#define ", .len = sizeof("\n#define ") - 1 });
-String__Global__push_str(&(*__sc1369), utils__errors__cstr(gp));
-String__Global__push_str(&(*__sc1369), (str){ .ptr = (const uint8_t*)"\n\n", .len = sizeof("\n\n") - 1 });
+  ({ String__Global *__sc1372 = &(self->buf);
+String__Global__push_str(&(*__sc1372), (str){ .ptr = (const uint8_t*)"#ifndef ", .len = sizeof("#ifndef ") - 1 });
+String__Global__push_str(&(*__sc1372), utils__errors__cstr(gp));
+String__Global__push_str(&(*__sc1372), (str){ .ptr = (const uint8_t*)"\n#define ", .len = sizeof("\n#define ") - 1 });
+String__Global__push_str(&(*__sc1372), utils__errors__cstr(gp));
+String__Global__push_str(&(*__sc1372), (str){ .ptr = (const uint8_t*)"\n\n", .len = sizeof("\n\n") - 1 });
 });
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1370 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1370); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1373 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1373); })));
   codegen__codegen__Codegen__emit_rel_prefix(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1371 = (str){ (const uint8_t *)"super_rt.h\"\n", sizeof("super_rt.h\"\n") - 1 }; str__ptr(&__sc1371); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1374 = (str){ (const uint8_t *)"super_rt.h\"\n", sizeof("super_rt.h\"\n") - 1 }; str__ptr(&__sc1374); })));
   codegen__codegen__Codegen__emit_extern_includes(self);
   codegen__codegen__Codegen__emit_referenced_fwd(self);
   codegen__codegen__Codegen__emit_header_includes(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1372 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1372); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1375 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1375); })));
   codegen__codegen__Codegen__phase_forward(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1373 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1373); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1376 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1376); })));
   codegen__codegen__Codegen__phase_types(self);
   codegen__codegen__Codegen__phase_ret_structs(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1374 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1374); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1377 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1377); })));
   codegen__codegen__Codegen__phase_prototypes(self, codegen__codegen__PROTO_PUBLIC);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1375 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1375); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1378 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1378); })));
   codegen__codegen__Codegen__emit_public_consts(self);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1376 = (str){ (const uint8_t *)"\n#endif\n", sizeof("\n#endif\n") - 1 }; str__ptr(&__sc1376); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1379 = (str){ (const uint8_t *)"\n#endif\n", sizeof("\n#endif\n") - 1 }; str__ptr(&__sc1379); })));
   if (String__Global__len(&self->buf) != 0ULL) {
     fwrite(((const void *)String__Global__as_ptr(&self->buf)), 1ULL, String__Global__len(&self->buf), out);
   }
@@ -12061,22 +12116,22 @@ void codegen__codegen__Codegen__codegen_emit(codegen__codegen__Codegen *const se
     codegen__codegen__Codegen__emit_includes(self);
     codegen__codegen__Codegen__emit_layout_asserts(self);
     codegen__codegen__Codegen__phase_prototypes(self, codegen__codegen__PROTO_PRIVATE);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1377 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1377); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1380 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1380); })));
     codegen__codegen__Codegen__emit_dyn_tables(self);
     codegen__codegen__Codegen__phase_bodies(self);
     codegen__codegen__Codegen__emit_test_wrappers(self);
   } else {
     codegen__codegen__Codegen__emit_cstr(self, codegen__codegen__super_rt_includes());
     codegen__codegen__Codegen__emit_extern_includes(self);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1378 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1378); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1381 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1381); })));
     codegen__codegen__Codegen__phase_forward(self);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1379 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1379); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1382 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1382); })));
     codegen__codegen__Codegen__phase_types(self);
     codegen__codegen__Codegen__phase_ret_structs(self);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1380 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1380); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1383 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1383); })));
     codegen__codegen__Codegen__emit_layout_asserts(self);
     codegen__codegen__Codegen__phase_prototypes(self, codegen__codegen__PROTO_ALL);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1381 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1381); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1384 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1384); })));
     codegen__codegen__Codegen__emit_dyn_tables(self);
     codegen__codegen__Codegen__phase_bodies(self);
     codegen__codegen__Codegen__emit_test_wrappers(self);
@@ -12085,7 +12140,7 @@ void codegen__codegen__Codegen__codegen_emit(codegen__codegen__Codegen *const se
   const size_t ln = self->len;
   const char *file = NULL;
   if ((self->package != NULL) && (((size_t)codegen__codegen__Codegen__cur_module(self)) < codegen__codegen__Codegen__pkg_count(self))) {
-    (file = String__Global__cstr(&(*({ __auto_type __sc1382 = &(*self->package).modules; Vector__module__loader__Module__Global__index_mut(__sc1382, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).file));
+    (file = String__Global__cstr(&(*({ __auto_type __sc1385 = &(*self->package).modules; Vector__module__loader__Module__Global__index_mut(__sc1385, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).file));
   }
   utils__errors__Errors__finalize(&self->errors, src, ln, file);
   if (String__Global__len(&self->buf) != 0ULL) {
@@ -12113,15 +12168,15 @@ static __attribute__((unused)) void codegen__codegen__Codegen__phase_forward(cod
         continue;
       }
       const char *const kw = codegen__codegen__agg_kw(ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), nid));
-      ({ String__Global *__sc1383 = &(self->buf);
-String__Global__push_str(&(*__sc1383), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1383), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1383), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+      ({ String__Global *__sc1386 = &(self->buf);
+String__Global__push_str(&(*__sc1386), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1386), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1386), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
 });
       codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1384 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1384); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1387 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1387); })));
       codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1385 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1385); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1388 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1388); })));
     } else if (nk == ast__ast__NodeKind_NODE_ENUM) {
       const ast__ast__AggregateData ag = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), nid)->as_data.aggregate;
       if (ag.generics.len != 0U) {
@@ -12132,11 +12187,11 @@ String__Global__push_str(&(*__sc1383), (str){ .ptr = (const uint8_t*)" ", .len =
         continue;
       }
       codegen__codegen__Codegen__emit_enum_tag_decl(self, nid);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1386 = (str){ (const uint8_t *)"typedef struct ", sizeof("typedef struct ") - 1 }; str__ptr(&__sc1386); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1389 = (str){ (const uint8_t *)"typedef struct ", sizeof("typedef struct ") - 1 }; str__ptr(&__sc1389); })));
       codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1387 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1387); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1390 = (str){ (const uint8_t *)" ", sizeof(" ") - 1 }; str__ptr(&__sc1390); })));
       codegen__codegen__Codegen__emit_local_type_name(self, ag.name);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1388 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1388); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1391 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1391); })));
     } else if (nk == ast__ast__NodeKind_NODE_TYPE_ALIAS) {
       const ast__ast__TypeAliasData ta = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), nid)->as_data.type_alias;
       if (((ta.ty != ast__ast__NODE_NONE) && (ta.generics.len == 0U)) && codegen__codegen__Codegen__cg_alias_extended(self, codegen__codegen__Codegen__cur_module(self), nid)) {
@@ -12144,10 +12199,10 @@ String__Global__push_str(&(*__sc1383), (str){ .ptr = (const uint8_t*)" ", .len =
         codegen__codegen__Codegen__render_qualified(self, codegen__codegen__Codegen__cur_module(self), ta.name, ((char *)(&nm.b[0])), 160ULL);
         codegen__codegen__Buf256 d = (codegen__codegen__Buf256){0};
         codegen__codegen__Codegen__render_type_node(self, ta.ty, ((const char *)(&nm.b[0])), ((char *)(&d.b[0])), 256ULL);
-        ({ String__Global *__sc1389 = &(self->buf);
-String__Global__push_str(&(*__sc1389), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1389), utils__errors__cstr(((const char *)(&d.b[0]))));
-String__Global__push_str(&(*__sc1389), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
+        ({ String__Global *__sc1392 = &(self->buf);
+String__Global__push_str(&(*__sc1392), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1392), utils__errors__cstr(((const char *)(&d.b[0]))));
+String__Global__push_str(&(*__sc1392), (str){ .ptr = (const uint8_t*)";\n", .len = sizeof(";\n") - 1 });
 });
       }
     }
@@ -12164,13 +12219,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__phase_types(codeg
   uint8_t *const state = codegen__codegen__Codegen__cg_type_state(self);
   const size_t ni = Vector__ast__ast__TyInstance__Global__len(&(*codegen__codegen__Codegen__cur_ast(self)).instances);
   const size_t cnt = ({
-    size_t __sc1390;
+    size_t __sc1393;
     if (ni != 0ULL) {
-      __sc1390 = ni;
+      __sc1393 = ni;
     } else {
-      __sc1390 = 1ULL;
+      __sc1393 = 1ULL;
     }
-    __sc1390;
+    __sc1393;
   });
   (self->inst_emit_state = ((uint8_t *)calloc(cnt, 1ULL)));
   if (self->inst_emit_state != NULL) {
@@ -12359,23 +12414,23 @@ static __attribute__((unused)) bool codegen__codegen__Codegen__cg_type_satisfies
     return false;
   }
   const int32_t ns = ({
-    int32_t __sc1391;
+    int32_t __sc1394;
     if (tmod == codegen__codegen__Codegen__cur_module(self)) {
-      __sc1391 = 1;
+      __sc1394 = 1;
     } else {
-      __sc1391 = 2;
+      __sc1394 = 2;
     }
-    __sc1391;
+    __sc1394;
   });
   for (int32_t s = 0; s < ns; s++) {
     const uint16_t m = ({
-      uint16_t __sc1392;
+      uint16_t __sc1395;
       if (s == 0) {
-        __sc1392 = tmod;
+        __sc1395 = tmod;
       } else {
-        __sc1392 = codegen__codegen__Codegen__cur_module(self);
+        __sc1395 = codegen__codegen__Codegen__cur_module(self);
       }
-      __sc1392;
+      __sc1395;
     });
     ast__ast__Ast *const a = codegen__codegen__Codegen__mod_ast(self, m);
     const ast__ast__NodeList items = ast__ast__Ast__at_const(&((*a)), (*a).root)->as_data.program.items;
@@ -12499,13 +12554,13 @@ static __attribute__((unused)) bool codegen__codegen__Codegen__seed_type_instanc
     const uint32_t rid = rids[((size_t)r)];
     const ast__ast__Node *const rn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), rid);
     const uint32_t rtn = ({
-      uint32_t __sc1393;
+      uint32_t __sc1396;
       if (rn->kind == ast__ast__NodeKind_NODE_PARAMETER) {
-        __sc1393 = rn->as_data.parameter.ty;
+        __sc1396 = rn->as_data.parameter.ty;
       } else {
-        __sc1393 = rid;
+        __sc1396 = rid;
       }
-      __sc1393;
+      __sc1396;
     });
     if (codegen__codegen__Codegen__seed_type_instances_from_type_node(self, rtn)) {
       (changed = true);
@@ -12581,7 +12636,7 @@ static __attribute__((unused)) bool codegen__codegen__Codegen__seed_emitted_gene
 }
 
 static __attribute__((unused)) size_t codegen__codegen__Codegen__module_depth(const codegen__codegen__Codegen *const self) {
-  const str p = String__Global__as_str(&(*({ __auto_type __sc1394 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1394, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).path);
+  const str p = String__Global__as_str(&(*({ __auto_type __sc1397 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1397, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).path);
   const size_t n = str__len(&p);
   size_t d = 0ULL;
   size_t i = 0ULL;
@@ -12598,25 +12653,25 @@ static __attribute__((unused)) size_t codegen__codegen__Codegen__module_depth(co
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_rel_prefix(codegen__codegen__Codegen *const self) {
   const size_t d = codegen__codegen__Codegen__module_depth(self);
   for (size_t i = 0ULL; i < d; i++) {
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1395 = (str){ (const uint8_t *)"../", sizeof("../") - 1 }; str__ptr(&__sc1395); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1398 = (str){ (const uint8_t *)"../", sizeof("../") - 1 }; str__ptr(&__sc1398); })));
   }
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_modpath_include(codegen__codegen__Codegen *const self, str const path) {
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1396 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1396); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1399 = (str){ (const uint8_t *)"#include \"", sizeof("#include \"") - 1 }; str__ptr(&__sc1399); })));
   codegen__codegen__Codegen__emit_rel_prefix(self);
   const size_t n = str__len(&path);
   size_t i = 0ULL;
   while (i < n) {
     if (((str__byte_at(&path, i) == 58U) && ((i + 1ULL) < n)) && (str__byte_at(&path, (i + 1ULL)) == 58U)) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1397 = (str){ (const uint8_t *)"/", sizeof("/") - 1 }; str__ptr(&__sc1397); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1400 = (str){ (const uint8_t *)"/", sizeof("/") - 1 }; str__ptr(&__sc1400); })));
       (i = (i + 1ULL));
     } else {
       codegen__codegen__Codegen__emit_bytes(self, ((const char *)(str__ptr(&path) + i)), 1ULL);
     }
     (i = (i + 1ULL));
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1398 = (str){ (const uint8_t *)".h\"\n", sizeof(".h\"\n") - 1 }; str__ptr(&__sc1398); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1401 = (str){ (const uint8_t *)".h\"\n", sizeof(".h\"\n") - 1 }; str__ptr(&__sc1401); })));
 }
 
 static __attribute__((unused)) bool codegen__codegen__Codegen__type_mentions_builtin(const codegen__codegen__Codegen *const self, uint32_t const t) {
@@ -12716,13 +12771,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__mark_aggregate_la
         const uint32_t pid = plids[((size_t)k)];
         const ast__ast__NodeKind pfk = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), pid)->kind;
         const uint32_t tn = ({
-          uint32_t __sc1399;
+          uint32_t __sc1402;
           if (pfk == ast__ast__NodeKind_NODE_FIELD) {
-            __sc1399 = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), pid)->as_data.field.ty;
+            __sc1402 = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), pid)->as_data.field.ty;
           } else {
-            __sc1399 = pid;
+            __sc1402 = pid;
           }
-          __sc1399;
+          __sc1402;
         });
         codegen__codegen__Codegen__mark_layout_module(self, ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__cur_ast(self))), tn), want, nmod);
       }
@@ -12738,7 +12793,7 @@ static __attribute__((unused)) bool codegen__codegen__Codegen__cg_dyn_method(con
   }
   const uint32_t p0 = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, im))), mf.params)[0];
   const uint32_t p0name = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, im))), p0)->as_data.parameter.name;
-  return codegen__codegen__span_is(codegen__codegen__Codegen__mod_src(self, im), ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, im))), p0name)->as_data.name.text, ((const char *)({ __auto_type __sc1400 = (str){ (const uint8_t *)"self", sizeof("self") - 1 }; str__ptr(&__sc1400); })));
+  return codegen__codegen__span_is(codegen__codegen__Codegen__mod_src(self, im), ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, im))), p0name)->as_data.name.text, ((const char *)({ __auto_type __sc1403 = (str){ (const uint8_t *)"self", sizeof("self") - 1 }; str__ptr(&__sc1403); })));
 }
 
 static __attribute__((unused)) uint32_t codegen__codegen__Codegen__cg_dyn_ret(codegen__codegen__Codegen *const self, uint16_t const im, uint32_t const m_id) {
@@ -12749,13 +12804,13 @@ static __attribute__((unused)) uint32_t codegen__codegen__Codegen__cg_dyn_ret(co
   const uint32_t r0 = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, im))), rets)[0];
   const ast__ast__Node *const rn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, im))), r0);
   const uint32_t rtn = ({
-    uint32_t __sc1401;
+    uint32_t __sc1404;
     if (rn->kind == ast__ast__NodeKind_NODE_PARAMETER) {
-      __sc1401 = rn->as_data.parameter.ty;
+      __sc1404 = rn->as_data.parameter.ty;
     } else {
-      __sc1401 = r0;
+      __sc1404 = r0;
     }
-    __sc1401;
+    __sc1404;
   });
   const uint32_t rt = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__mod_ast(self, im))), rtn);
   if (rt == ast__ast__TYPE_NONE) {
@@ -12792,13 +12847,13 @@ static __attribute__((unused)) uint32_t codegen__codegen__Codegen__cg_dynfn_ret(
   const uint32_t r0 = ast__ast__Ast__list(&((*codegen__codegen__Codegen__mod_ast(self, m))), ft.returns)[0];
   const ast__ast__Node *const rn = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, m))), r0);
   const uint32_t rtn = ({
-    uint32_t __sc1402;
+    uint32_t __sc1405;
     if (rn->kind == ast__ast__NodeKind_NODE_PARAMETER) {
-      __sc1402 = rn->as_data.parameter.ty;
+      __sc1405 = rn->as_data.parameter.ty;
     } else {
-      __sc1402 = r0;
+      __sc1405 = r0;
     }
-    __sc1402;
+    __sc1405;
   });
   const uint32_t rt = ast__ast__Ast__type_of(&((*codegen__codegen__Codegen__mod_ast(self, m))), rtn);
   if (rt == ast__ast__TYPE_NONE) {
@@ -12860,12 +12915,12 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_pct_escaped(
   for (size_t i = 0ULL; i < len; i++) {
     const uint8_t byte = text[i];
     if (byte == 37U) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1403 = (str){ (const uint8_t *)"%%", sizeof("%%") - 1 }; str__ptr(&__sc1403); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1406 = (str){ (const uint8_t *)"%%", sizeof("%%") - 1 }; str__ptr(&__sc1406); })));
     } else if ((byte == 34U) || (byte == 92U)) {
       String__Global__push_byte(&self->buf, 92U);
       String__Global__push_byte(&self->buf, ((uint8_t)((int32_t)byte)));
     } else if (byte == 10U) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1404 = (str){ (const uint8_t *)"\\n", sizeof("\\n") - 1 }; str__ptr(&__sc1404); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1407 = (str){ (const uint8_t *)"\\n", sizeof("\\n") - 1 }; str__ptr(&__sc1407); })));
     } else if (byte < 32U) {
       codegen__codegen__Codegen__emit_octal_escape(self, ((uint32_t)((int32_t)byte)));
     } else {
@@ -12876,11 +12931,11 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_pct_escaped(
 
 static __attribute__((unused)) const char *codegen__codegen__Codegen__cg_file(codegen__codegen__Codegen *const self) {
   if ((self->package != NULL) && (((size_t)codegen__codegen__Codegen__cur_module(self)) < codegen__codegen__Codegen__pkg_count(self))) {
-    if (String__Global__len(&(*({ __auto_type __sc1405 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1405, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).file) != 0ULL) {
-      return String__Global__cstr(&(*({ __auto_type __sc1406 = &(*self->package).modules; Vector__module__loader__Module__Global__index_mut(__sc1406, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).file);
+    if (String__Global__len(&(*({ __auto_type __sc1408 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1408, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).file) != 0ULL) {
+      return String__Global__cstr(&(*({ __auto_type __sc1409 = &(*self->package).modules; Vector__module__loader__Module__Global__index_mut(__sc1409, ((size_t)codegen__codegen__Codegen__cur_module(self))); })).file);
     }
   }
-  return ((const char *)({ __auto_type __sc1407 = (str){ (const uint8_t *)"<src>", sizeof("<src>") - 1 }; str__ptr(&__sc1407); }));
+  return ((const char *)({ __auto_type __sc1410 = (str){ (const uint8_t *)"<src>", sizeof("<src>") - 1 }; str__ptr(&__sc1410); }));
 }
 
 static __attribute__((unused)) int32_t codegen__codegen__Codegen__cg_assert_kind(const codegen__codegen__Codegen *const self, uint32_t const id) {
@@ -12892,7 +12947,7 @@ static __attribute__((unused)) int32_t codegen__codegen__Codegen__cg_assert_kind
     return 0;
   }
   const ast__ast__DefId d = ast__ast__Ast__resolution_def(&((*codegen__codegen__Codegen__cur_ast(self))), callee);
-  if (((d.node == ast__ast__NODE_NONE) || (((size_t)d.module) >= codegen__codegen__Codegen__pkg_count(self))) || (!(*({ __auto_type __sc1408 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1408, ((size_t)d.module)); })).prelude)) {
+  if (((d.node == ast__ast__NODE_NONE) || (((size_t)d.module) >= codegen__codegen__Codegen__pkg_count(self))) || (!(*({ __auto_type __sc1411 = &(*self->package).modules; Vector__module__loader__Module__Global__index(__sc1411, ((size_t)d.module)); })).prelude)) {
     return 0;
   }
   if (ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, d.module))), d.node)->kind != ast__ast__NodeKind_NODE_FUNCTION) {
@@ -12901,94 +12956,94 @@ static __attribute__((unused)) int32_t codegen__codegen__Codegen__cg_assert_kind
   const uint32_t fnamenode = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, d.module))), d.node)->as_data.function.name;
   const lexer__token__Span fnm = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, d.module))), fnamenode)->as_data.name.text;
   const uint8_t *const s = codegen__codegen__Codegen__mod_src(self, d.module);
-  if (codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1409 = (str){ (const uint8_t *)"assert", sizeof("assert") - 1 }; str__ptr(&__sc1409); })))) {
+  if (codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1412 = (str){ (const uint8_t *)"assert", sizeof("assert") - 1 }; str__ptr(&__sc1412); })))) {
     return 1;
   }
-  if (codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1410 = (str){ (const uint8_t *)"assert_eq", sizeof("assert_eq") - 1 }; str__ptr(&__sc1410); })))) {
+  if (codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1413 = (str){ (const uint8_t *)"assert_eq", sizeof("assert_eq") - 1 }; str__ptr(&__sc1413); })))) {
     return 2;
   }
-  if (codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1411 = (str){ (const uint8_t *)"assert_ne", sizeof("assert_ne") - 1 }; str__ptr(&__sc1411); })))) {
+  if (codegen__codegen__span_is(s, fnm, ((const char *)({ __auto_type __sc1414 = (str){ (const uint8_t *)"assert_ne", sizeof("assert_ne") - 1 }; str__ptr(&__sc1414); })))) {
     return 3;
   }
   return 0;
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_assert_value_line(codegen__codegen__Codegen *const self, const char *const label, const char *const acc, ast__ast__Ty const y, uint32_t const base) {
-  ({ String__Global *__sc1412 = &(self->buf);
-String__Global__push_str(&(*__sc1412), (str){ .ptr = (const uint8_t*)"fprintf(stderr, \"  ", .len = sizeof("fprintf(stderr, \"  ") - 1 });
-String__Global__push_str(&(*__sc1412), utils__errors__cstr(label));
-String__Global__push_str(&(*__sc1412), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+  ({ String__Global *__sc1415 = &(self->buf);
+String__Global__push_str(&(*__sc1415), (str){ .ptr = (const uint8_t*)"fprintf(stderr, \"  ", .len = sizeof("fprintf(stderr, \"  ") - 1 });
+String__Global__push_str(&(*__sc1415), utils__errors__cstr(label));
+String__Global__push_str(&(*__sc1415), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
 });
   if (y.kind == ast__ast__TypeKind_TYPE_BUILTIN) {
     const ast__ast__BuiltinType bt = y.as_data.builtin;
     if (bt == ast__ast__BuiltinType_BT_BOOL) {
-      ({ String__Global *__sc1413 = &(self->buf);
-String__Global__push_str(&(*__sc1413), (str){ .ptr = (const uint8_t*)"%s\\n\", ", .len = sizeof("%s\\n\", ") - 1 });
-String__Global__push_str(&(*__sc1413), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1413), (str){ .ptr = (const uint8_t*)" ? \"true\" : \"false\");\n", .len = sizeof(" ? \"true\" : \"false\");\n") - 1 });
+      ({ String__Global *__sc1416 = &(self->buf);
+String__Global__push_str(&(*__sc1416), (str){ .ptr = (const uint8_t*)"%s\\n\", ", .len = sizeof("%s\\n\", ") - 1 });
+String__Global__push_str(&(*__sc1416), utils__errors__cstr(acc));
+String__Global__push_str(&(*__sc1416), (str){ .ptr = (const uint8_t*)" ? \"true\" : \"false\");\n", .len = sizeof(" ? \"true\" : \"false\");\n") - 1 });
 });
       return;
     }
     if (bt == ast__ast__BuiltinType_BT_CHAR) {
-      ({ String__Global *__sc1414 = &(self->buf);
-String__Global__push_str(&(*__sc1414), (str){ .ptr = (const uint8_t*)"'%c'\\n\", (int)", .len = sizeof("'%c'\\n\", (int)") - 1 });
-String__Global__push_str(&(*__sc1414), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1414), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
-});
-      return;
-    }
-    if (((((bt == ast__ast__BuiltinType_BT_I8) || (bt == ast__ast__BuiltinType_BT_I16)) || (bt == ast__ast__BuiltinType_BT_I32)) || (bt == ast__ast__BuiltinType_BT_I64)) || (bt == ast__ast__BuiltinType_BT_ISIZE)) {
-      ({ String__Global *__sc1415 = &(self->buf);
-String__Global__push_str(&(*__sc1415), (str){ .ptr = (const uint8_t*)"%lld\\n\", (long long)", .len = sizeof("%lld\\n\", (long long)") - 1 });
-String__Global__push_str(&(*__sc1415), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1415), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
-});
-      return;
-    }
-    if (((((bt == ast__ast__BuiltinType_BT_U8) || (bt == ast__ast__BuiltinType_BT_U16)) || (bt == ast__ast__BuiltinType_BT_U32)) || (bt == ast__ast__BuiltinType_BT_U64)) || (bt == ast__ast__BuiltinType_BT_USIZE)) {
-      ({ String__Global *__sc1416 = &(self->buf);
-String__Global__push_str(&(*__sc1416), (str){ .ptr = (const uint8_t*)"%llu\\n\", (unsigned long long)", .len = sizeof("%llu\\n\", (unsigned long long)") - 1 });
-String__Global__push_str(&(*__sc1416), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1416), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
-});
-      return;
-    }
-    if ((bt == ast__ast__BuiltinType_BT_F32) || (bt == ast__ast__BuiltinType_BT_F64)) {
       ({ String__Global *__sc1417 = &(self->buf);
-String__Global__push_str(&(*__sc1417), (str){ .ptr = (const uint8_t*)"%g\\n\", (double)", .len = sizeof("%g\\n\", (double)") - 1 });
+String__Global__push_str(&(*__sc1417), (str){ .ptr = (const uint8_t*)"'%c'\\n\", (int)", .len = sizeof("'%c'\\n\", (int)") - 1 });
 String__Global__push_str(&(*__sc1417), utils__errors__cstr(acc));
 String__Global__push_str(&(*__sc1417), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
 });
       return;
     }
-  }
-  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1418 = (str){ (const uint8_t *)"str", sizeof("str") - 1 }; str__ptr(&__sc1418); })))) {
-    ({ String__Global *__sc1419 = &(self->buf);
-String__Global__push_str(&(*__sc1419), (str){ .ptr = (const uint8_t*)"\\\"%.*s\\\"\\n\", (int)", .len = sizeof("\\\"%.*s\\\"\\n\", (int)") - 1 });
-String__Global__push_str(&(*__sc1419), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1419), (str){ .ptr = (const uint8_t*)".len, (const char *)", .len = sizeof(".len, (const char *)") - 1 });
-String__Global__push_str(&(*__sc1419), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1419), (str){ .ptr = (const uint8_t*)".ptr);\n", .len = sizeof(".ptr);\n") - 1 });
+    if (((((bt == ast__ast__BuiltinType_BT_I8) || (bt == ast__ast__BuiltinType_BT_I16)) || (bt == ast__ast__BuiltinType_BT_I32)) || (bt == ast__ast__BuiltinType_BT_I64)) || (bt == ast__ast__BuiltinType_BT_ISIZE)) {
+      ({ String__Global *__sc1418 = &(self->buf);
+String__Global__push_str(&(*__sc1418), (str){ .ptr = (const uint8_t*)"%lld\\n\", (long long)", .len = sizeof("%lld\\n\", (long long)") - 1 });
+String__Global__push_str(&(*__sc1418), utils__errors__cstr(acc));
+String__Global__push_str(&(*__sc1418), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
 });
-    return;
+      return;
+    }
+    if (((((bt == ast__ast__BuiltinType_BT_U8) || (bt == ast__ast__BuiltinType_BT_U16)) || (bt == ast__ast__BuiltinType_BT_U32)) || (bt == ast__ast__BuiltinType_BT_U64)) || (bt == ast__ast__BuiltinType_BT_USIZE)) {
+      ({ String__Global *__sc1419 = &(self->buf);
+String__Global__push_str(&(*__sc1419), (str){ .ptr = (const uint8_t*)"%llu\\n\", (unsigned long long)", .len = sizeof("%llu\\n\", (unsigned long long)") - 1 });
+String__Global__push_str(&(*__sc1419), utils__errors__cstr(acc));
+String__Global__push_str(&(*__sc1419), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
+});
+      return;
+    }
+    if ((bt == ast__ast__BuiltinType_BT_F32) || (bt == ast__ast__BuiltinType_BT_F64)) {
+      ({ String__Global *__sc1420 = &(self->buf);
+String__Global__push_str(&(*__sc1420), (str){ .ptr = (const uint8_t*)"%g\\n\", (double)", .len = sizeof("%g\\n\", (double)") - 1 });
+String__Global__push_str(&(*__sc1420), utils__errors__cstr(acc));
+String__Global__push_str(&(*__sc1420), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
+});
+      return;
+    }
   }
-  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1420 = (str){ (const uint8_t *)"String", sizeof("String") - 1 }; str__ptr(&__sc1420); })))) {
-    codegen__codegen__Buf200 sm = (codegen__codegen__Buf200){0};
-    codegen__codegen__Codegen__render_type_id(self, base, ((const char *)({ __auto_type __sc1421 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1421); })), ((char *)(&sm.b[0])), 200ULL);
+  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1421 = (str){ (const uint8_t *)"str", sizeof("str") - 1 }; str__ptr(&__sc1421); })))) {
     ({ String__Global *__sc1422 = &(self->buf);
 String__Global__push_str(&(*__sc1422), (str){ .ptr = (const uint8_t*)"\\\"%.*s\\\"\\n\", (int)", .len = sizeof("\\\"%.*s\\\"\\n\", (int)") - 1 });
-String__Global__push_str(&(*__sc1422), utils__errors__cstr(((const char *)(&sm.b[0]))));
-String__Global__push_str(&(*__sc1422), (str){ .ptr = (const uint8_t*)"__as_str(&", .len = sizeof("__as_str(&") - 1 });
 String__Global__push_str(&(*__sc1422), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1422), (str){ .ptr = (const uint8_t*)").len, (const char *)", .len = sizeof(").len, (const char *)") - 1 });
-String__Global__push_str(&(*__sc1422), utils__errors__cstr(((const char *)(&sm.b[0]))));
-String__Global__push_str(&(*__sc1422), (str){ .ptr = (const uint8_t*)"__as_str(&", .len = sizeof("__as_str(&") - 1 });
+String__Global__push_str(&(*__sc1422), (str){ .ptr = (const uint8_t*)".len, (const char *)", .len = sizeof(".len, (const char *)") - 1 });
 String__Global__push_str(&(*__sc1422), utils__errors__cstr(acc));
-String__Global__push_str(&(*__sc1422), (str){ .ptr = (const uint8_t*)").ptr);\n", .len = sizeof(").ptr);\n") - 1 });
+String__Global__push_str(&(*__sc1422), (str){ .ptr = (const uint8_t*)".ptr);\n", .len = sizeof(".ptr);\n") - 1 });
 });
     return;
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1423 = (str){ (const uint8_t *)"(value of a non-printable type)\\n\");\n", sizeof("(value of a non-printable type)\\n\");\n") - 1 }; str__ptr(&__sc1423); })));
+  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1423 = (str){ (const uint8_t *)"String", sizeof("String") - 1 }; str__ptr(&__sc1423); })))) {
+    codegen__codegen__Buf200 sm = (codegen__codegen__Buf200){0};
+    codegen__codegen__Codegen__render_type_id(self, base, ((const char *)({ __auto_type __sc1424 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1424); })), ((char *)(&sm.b[0])), 200ULL);
+    ({ String__Global *__sc1425 = &(self->buf);
+String__Global__push_str(&(*__sc1425), (str){ .ptr = (const uint8_t*)"\\\"%.*s\\\"\\n\", (int)", .len = sizeof("\\\"%.*s\\\"\\n\", (int)") - 1 });
+String__Global__push_str(&(*__sc1425), utils__errors__cstr(((const char *)(&sm.b[0]))));
+String__Global__push_str(&(*__sc1425), (str){ .ptr = (const uint8_t*)"__as_str(&", .len = sizeof("__as_str(&") - 1 });
+String__Global__push_str(&(*__sc1425), utils__errors__cstr(acc));
+String__Global__push_str(&(*__sc1425), (str){ .ptr = (const uint8_t*)").len, (const char *)", .len = sizeof(").len, (const char *)") - 1 });
+String__Global__push_str(&(*__sc1425), utils__errors__cstr(((const char *)(&sm.b[0]))));
+String__Global__push_str(&(*__sc1425), (str){ .ptr = (const uint8_t*)"__as_str(&", .len = sizeof("__as_str(&") - 1 });
+String__Global__push_str(&(*__sc1425), utils__errors__cstr(acc));
+String__Global__push_str(&(*__sc1425), (str){ .ptr = (const uint8_t*)").ptr);\n", .len = sizeof(").ptr);\n") - 1 });
+});
+    return;
+  }
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1426 = (str){ (const uint8_t *)"(value of a non-printable type)\\n\");\n", sizeof("(value of a non-printable type)\\n\");\n") - 1 }; str__ptr(&__sc1426); })));
 }
 
 static __attribute__((unused)) bool codegen__codegen__bt_is_numeric(ast__ast__BuiltinType const b) {
@@ -13013,57 +13068,57 @@ static __attribute__((unused)) bool codegen__codegen__bt_is_binfmt(ast__ast__Bui
 
 static __attribute__((unused)) const char *codegen__codegen__bt_unsigned_cast(ast__ast__BuiltinType const b) {
   if (((b == ast__ast__BuiltinType_BT_I8) || (b == ast__ast__BuiltinType_BT_U8)) || (b == ast__ast__BuiltinType_BT_CHAR)) {
-    return ((const char *)({ __auto_type __sc1424 = (str){ (const uint8_t *)"uint8_t", sizeof("uint8_t") - 1 }; str__ptr(&__sc1424); }));
+    return ((const char *)({ __auto_type __sc1427 = (str){ (const uint8_t *)"uint8_t", sizeof("uint8_t") - 1 }; str__ptr(&__sc1427); }));
   }
   if ((b == ast__ast__BuiltinType_BT_I16) || (b == ast__ast__BuiltinType_BT_U16)) {
-    return ((const char *)({ __auto_type __sc1425 = (str){ (const uint8_t *)"uint16_t", sizeof("uint16_t") - 1 }; str__ptr(&__sc1425); }));
+    return ((const char *)({ __auto_type __sc1428 = (str){ (const uint8_t *)"uint16_t", sizeof("uint16_t") - 1 }; str__ptr(&__sc1428); }));
   }
   if ((b == ast__ast__BuiltinType_BT_I32) || (b == ast__ast__BuiltinType_BT_U32)) {
-    return ((const char *)({ __auto_type __sc1426 = (str){ (const uint8_t *)"uint32_t", sizeof("uint32_t") - 1 }; str__ptr(&__sc1426); }));
+    return ((const char *)({ __auto_type __sc1429 = (str){ (const uint8_t *)"uint32_t", sizeof("uint32_t") - 1 }; str__ptr(&__sc1429); }));
   }
-  return ((const char *)({ __auto_type __sc1427 = (str){ (const uint8_t *)"uint64_t", sizeof("uint64_t") - 1 }; str__ptr(&__sc1427); }));
+  return ((const char *)({ __auto_type __sc1430 = (str){ (const uint8_t *)"uint64_t", sizeof("uint64_t") - 1 }; str__ptr(&__sc1430); }));
 }
 
 static __attribute__((unused)) bool codegen__codegen__Codegen__fmt_arg_core(codegen__codegen__Codegen *const self, const char *const tb, uint32_t const arg, const codegen__codegen__FmtSpec *const sp, ast__ast__Ty const y, uint32_t const t) {
   if ((sp->ty == 120) || (sp->ty == 88)) {
     const char *const ud = ({
-      const char *__sc1428;
+      const char *__sc1431;
       if (sp->ty == 88) {
-        __sc1428 = ((const char *)({ __auto_type __sc1429 = (str){ (const uint8_t *)"true", sizeof("true") - 1 }; str__ptr(&__sc1429); }));
+        __sc1431 = ((const char *)({ __auto_type __sc1432 = (str){ (const uint8_t *)"true", sizeof("true") - 1 }; str__ptr(&__sc1432); }));
       } else {
-        __sc1428 = ((const char *)({ __auto_type __sc1430 = (str){ (const uint8_t *)"false", sizeof("false") - 1 }; str__ptr(&__sc1430); }));
+        __sc1431 = ((const char *)({ __auto_type __sc1433 = (str){ (const uint8_t *)"false", sizeof("false") - 1 }; str__ptr(&__sc1433); }));
       }
-      __sc1428;
+      __sc1431;
     });
     if (y.kind != ast__ast__TypeKind_TYPE_BUILTIN) {
       return false;
     }
     const ast__ast__BuiltinType b = y.as_data.builtin;
     if (codegen__codegen__bt_is_signed_int(b)) {
-      ({ String__Global *__sc1431 = &(self->buf);
-String__Global__push_str(&(*__sc1431), (str){ .ptr = (const uint8_t*)"String__Global__push_hex_i64(&", .len = sizeof("String__Global__push_hex_i64(&") - 1 });
-String__Global__push_str(&(*__sc1431), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1431), (str){ .ptr = (const uint8_t*)", (int64_t)(", .len = sizeof(", (int64_t)(") - 1 });
+      ({ String__Global *__sc1434 = &(self->buf);
+String__Global__push_str(&(*__sc1434), (str){ .ptr = (const uint8_t*)"String__Global__push_hex_i64(&", .len = sizeof("String__Global__push_hex_i64(&") - 1 });
+String__Global__push_str(&(*__sc1434), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1434), (str){ .ptr = (const uint8_t*)", (int64_t)(", .len = sizeof(", (int64_t)(") - 1 });
 });
       codegen__codegen__Codegen__emit_expr(self, arg);
-      ({ String__Global *__sc1432 = &(self->buf);
-String__Global__push_str(&(*__sc1432), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
-String__Global__push_str(&(*__sc1432), utils__errors__cstr(ud));
-String__Global__push_str(&(*__sc1432), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
+      ({ String__Global *__sc1435 = &(self->buf);
+String__Global__push_str(&(*__sc1435), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
+String__Global__push_str(&(*__sc1435), utils__errors__cstr(ud));
+String__Global__push_str(&(*__sc1435), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
 });
       return true;
     }
     if (codegen__codegen__bt_is_unsigned_int(b) || (b == ast__ast__BuiltinType_BT_CHAR)) {
-      ({ String__Global *__sc1433 = &(self->buf);
-String__Global__push_str(&(*__sc1433), (str){ .ptr = (const uint8_t*)"String__Global__push_hex(&", .len = sizeof("String__Global__push_hex(&") - 1 });
-String__Global__push_str(&(*__sc1433), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1433), (str){ .ptr = (const uint8_t*)", (uint64_t)(", .len = sizeof(", (uint64_t)(") - 1 });
+      ({ String__Global *__sc1436 = &(self->buf);
+String__Global__push_str(&(*__sc1436), (str){ .ptr = (const uint8_t*)"String__Global__push_hex(&", .len = sizeof("String__Global__push_hex(&") - 1 });
+String__Global__push_str(&(*__sc1436), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1436), (str){ .ptr = (const uint8_t*)", (uint64_t)(", .len = sizeof(", (uint64_t)(") - 1 });
 });
       codegen__codegen__Codegen__emit_expr(self, arg);
-      ({ String__Global *__sc1434 = &(self->buf);
-String__Global__push_str(&(*__sc1434), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
-String__Global__push_str(&(*__sc1434), utils__errors__cstr(ud));
-String__Global__push_str(&(*__sc1434), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
+      ({ String__Global *__sc1437 = &(self->buf);
+String__Global__push_str(&(*__sc1437), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
+String__Global__push_str(&(*__sc1437), utils__errors__cstr(ud));
+String__Global__push_str(&(*__sc1437), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
 });
       return true;
     }
@@ -13073,138 +13128,138 @@ String__Global__push_str(&(*__sc1434), (str){ .ptr = (const uint8_t*)");\n", .le
     if ((y.kind != ast__ast__TypeKind_TYPE_BUILTIN) || (!codegen__codegen__bt_is_binfmt(y.as_data.builtin))) {
       return false;
     }
-    ({ String__Global *__sc1435 = &(self->buf);
-String__Global__push_str(&(*__sc1435), (str){ .ptr = (const uint8_t*)"String__Global__push_bin(&", .len = sizeof("String__Global__push_bin(&") - 1 });
-String__Global__push_str(&(*__sc1435), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1435), (str){ .ptr = (const uint8_t*)", (uint64_t)(", .len = sizeof(", (uint64_t)(") - 1 });
-String__Global__push_str(&(*__sc1435), utils__errors__cstr(codegen__codegen__bt_unsigned_cast(y.as_data.builtin)));
-String__Global__push_str(&(*__sc1435), (str){ .ptr = (const uint8_t*)")(", .len = sizeof(")(") - 1 });
+    ({ String__Global *__sc1438 = &(self->buf);
+String__Global__push_str(&(*__sc1438), (str){ .ptr = (const uint8_t*)"String__Global__push_bin(&", .len = sizeof("String__Global__push_bin(&") - 1 });
+String__Global__push_str(&(*__sc1438), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1438), (str){ .ptr = (const uint8_t*)", (uint64_t)(", .len = sizeof(", (uint64_t)(") - 1 });
+String__Global__push_str(&(*__sc1438), utils__errors__cstr(codegen__codegen__bt_unsigned_cast(y.as_data.builtin)));
+String__Global__push_str(&(*__sc1438), (str){ .ptr = (const uint8_t*)")(", .len = sizeof(")(") - 1 });
 });
     codegen__codegen__Codegen__emit_expr(self, arg);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1436 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1436); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1439 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1439); })));
     return true;
   }
   if (y.kind == ast__ast__TypeKind_TYPE_BUILTIN) {
     const ast__ast__BuiltinType b = y.as_data.builtin;
     if (b == ast__ast__BuiltinType_BT_BOOL) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1437 = (str){ (const uint8_t *)"if (", sizeof("if (") - 1 }; str__ptr(&__sc1437); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1440 = (str){ (const uint8_t *)"if (", sizeof("if (") - 1 }; str__ptr(&__sc1440); })));
       codegen__codegen__Codegen__emit_expr(self, arg);
-      ({ String__Global *__sc1438 = &(self->buf);
-String__Global__push_str(&(*__sc1438), (str){ .ptr = (const uint8_t*)") String__Global__push_str(&", .len = sizeof(") String__Global__push_str(&") - 1 });
-String__Global__push_str(&(*__sc1438), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1438), (str){ .ptr = (const uint8_t*)", (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });", .len = sizeof(", (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });") - 1 });
+      ({ String__Global *__sc1441 = &(self->buf);
+String__Global__push_str(&(*__sc1441), (str){ .ptr = (const uint8_t*)") String__Global__push_str(&", .len = sizeof(") String__Global__push_str(&") - 1 });
+String__Global__push_str(&(*__sc1441), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1441), (str){ .ptr = (const uint8_t*)", (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });", .len = sizeof(", (str){ .ptr = (const uint8_t*)\"true\", .len = 4 });") - 1 });
 });
-      ({ String__Global *__sc1439 = &(self->buf);
-String__Global__push_str(&(*__sc1439), (str){ .ptr = (const uint8_t*)" else String__Global__push_str(&", .len = sizeof(" else String__Global__push_str(&") - 1 });
-String__Global__push_str(&(*__sc1439), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1439), (str){ .ptr = (const uint8_t*)", (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n", .len = sizeof(", (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n") - 1 });
+      ({ String__Global *__sc1442 = &(self->buf);
+String__Global__push_str(&(*__sc1442), (str){ .ptr = (const uint8_t*)" else String__Global__push_str(&", .len = sizeof(" else String__Global__push_str(&") - 1 });
+String__Global__push_str(&(*__sc1442), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1442), (str){ .ptr = (const uint8_t*)", (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n", .len = sizeof(", (str){ .ptr = (const uint8_t*)\"false\", .len = 5 });\n") - 1 });
 });
       return true;
     }
     if (b == ast__ast__BuiltinType_BT_CHAR) {
-      ({ String__Global *__sc1440 = &(self->buf);
-String__Global__push_str(&(*__sc1440), (str){ .ptr = (const uint8_t*)"String__Global__push_byte(&", .len = sizeof("String__Global__push_byte(&") - 1 });
-String__Global__push_str(&(*__sc1440), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1440), (str){ .ptr = (const uint8_t*)", (uint8_t)(", .len = sizeof(", (uint8_t)(") - 1 });
+      ({ String__Global *__sc1443 = &(self->buf);
+String__Global__push_str(&(*__sc1443), (str){ .ptr = (const uint8_t*)"String__Global__push_byte(&", .len = sizeof("String__Global__push_byte(&") - 1 });
+String__Global__push_str(&(*__sc1443), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1443), (str){ .ptr = (const uint8_t*)", (uint8_t)(", .len = sizeof(", (uint8_t)(") - 1 });
 });
       codegen__codegen__Codegen__emit_expr(self, arg);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1441 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1441); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1444 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1444); })));
       return true;
     }
     if (codegen__codegen__bt_is_signed_int(b)) {
-      ({ String__Global *__sc1442 = &(self->buf);
-String__Global__push_str(&(*__sc1442), (str){ .ptr = (const uint8_t*)"String__Global__push_i64(&", .len = sizeof("String__Global__push_i64(&") - 1 });
-String__Global__push_str(&(*__sc1442), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1442), (str){ .ptr = (const uint8_t*)", (int64_t)(", .len = sizeof(", (int64_t)(") - 1 });
+      ({ String__Global *__sc1445 = &(self->buf);
+String__Global__push_str(&(*__sc1445), (str){ .ptr = (const uint8_t*)"String__Global__push_i64(&", .len = sizeof("String__Global__push_i64(&") - 1 });
+String__Global__push_str(&(*__sc1445), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1445), (str){ .ptr = (const uint8_t*)", (int64_t)(", .len = sizeof(", (int64_t)(") - 1 });
 });
       codegen__codegen__Codegen__emit_expr(self, arg);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1443 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1443); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1446 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1446); })));
       return true;
     }
     if (codegen__codegen__bt_is_unsigned_int(b)) {
-      ({ String__Global *__sc1444 = &(self->buf);
-String__Global__push_str(&(*__sc1444), (str){ .ptr = (const uint8_t*)"String__Global__push_u64(&", .len = sizeof("String__Global__push_u64(&") - 1 });
-String__Global__push_str(&(*__sc1444), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1444), (str){ .ptr = (const uint8_t*)", (uint64_t)(", .len = sizeof(", (uint64_t)(") - 1 });
+      ({ String__Global *__sc1447 = &(self->buf);
+String__Global__push_str(&(*__sc1447), (str){ .ptr = (const uint8_t*)"String__Global__push_u64(&", .len = sizeof("String__Global__push_u64(&") - 1 });
+String__Global__push_str(&(*__sc1447), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1447), (str){ .ptr = (const uint8_t*)", (uint64_t)(", .len = sizeof(", (uint64_t)(") - 1 });
 });
       codegen__codegen__Codegen__emit_expr(self, arg);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1445 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1445); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1448 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1448); })));
       return true;
     }
     if ((b == ast__ast__BuiltinType_BT_F32) || (b == ast__ast__BuiltinType_BT_F64)) {
       if (sp->prec >= 0) {
-        ({ String__Global *__sc1446 = &(self->buf);
-String__Global__push_str(&(*__sc1446), (str){ .ptr = (const uint8_t*)"String__Global__push_f64_prec(&", .len = sizeof("String__Global__push_f64_prec(&") - 1 });
-String__Global__push_str(&(*__sc1446), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1446), (str){ .ptr = (const uint8_t*)", (double)(", .len = sizeof(", (double)(") - 1 });
+        ({ String__Global *__sc1449 = &(self->buf);
+String__Global__push_str(&(*__sc1449), (str){ .ptr = (const uint8_t*)"String__Global__push_f64_prec(&", .len = sizeof("String__Global__push_f64_prec(&") - 1 });
+String__Global__push_str(&(*__sc1449), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1449), (str){ .ptr = (const uint8_t*)", (double)(", .len = sizeof(", (double)(") - 1 });
 });
         codegen__codegen__Codegen__emit_expr(self, arg);
-        ({ String__Global *__sc1447 = &(self->buf);
-String__Global__push_str(&(*__sc1447), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
-String__Global__push_i64(&(*__sc1447), (int64_t)(sp->prec));
-String__Global__push_str(&(*__sc1447), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
+        ({ String__Global *__sc1450 = &(self->buf);
+String__Global__push_str(&(*__sc1450), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
+String__Global__push_i64(&(*__sc1450), (int64_t)(sp->prec));
+String__Global__push_str(&(*__sc1450), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
 });
       } else {
-        ({ String__Global *__sc1448 = &(self->buf);
-String__Global__push_str(&(*__sc1448), (str){ .ptr = (const uint8_t*)"String__Global__push_f64(&", .len = sizeof("String__Global__push_f64(&") - 1 });
-String__Global__push_str(&(*__sc1448), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1448), (str){ .ptr = (const uint8_t*)", (double)(", .len = sizeof(", (double)(") - 1 });
+        ({ String__Global *__sc1451 = &(self->buf);
+String__Global__push_str(&(*__sc1451), (str){ .ptr = (const uint8_t*)"String__Global__push_f64(&", .len = sizeof("String__Global__push_f64(&") - 1 });
+String__Global__push_str(&(*__sc1451), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1451), (str){ .ptr = (const uint8_t*)", (double)(", .len = sizeof(", (double)(") - 1 });
 });
         codegen__codegen__Codegen__emit_expr(self, arg);
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1449 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1449); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1452 = (str){ (const uint8_t *)"));\n", sizeof("));\n") - 1 }; str__ptr(&__sc1452); })));
       }
       return true;
     }
     return false;
   }
-  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1450 = (str){ (const uint8_t *)"str", sizeof("str") - 1 }; str__ptr(&__sc1450); })))) {
-    ({ String__Global *__sc1451 = &(self->buf);
-String__Global__push_str(&(*__sc1451), (str){ .ptr = (const uint8_t*)"String__Global__push_str(&", .len = sizeof("String__Global__push_str(&") - 1 });
-String__Global__push_str(&(*__sc1451), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1451), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1453 = (str){ (const uint8_t *)"str", sizeof("str") - 1 }; str__ptr(&__sc1453); })))) {
+    ({ String__Global *__sc1454 = &(self->buf);
+String__Global__push_str(&(*__sc1454), (str){ .ptr = (const uint8_t*)"String__Global__push_str(&", .len = sizeof("String__Global__push_str(&") - 1 });
+String__Global__push_str(&(*__sc1454), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1454), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
 });
     codegen__codegen__Codegen__emit_expr(self, arg);
-    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1452 = (str){ (const uint8_t *)");\n", sizeof(");\n") - 1 }; str__ptr(&__sc1452); })));
+    codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1455 = (str){ (const uint8_t *)");\n", sizeof(");\n") - 1 }; str__ptr(&__sc1455); })));
     return true;
   }
-  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1453 = (str){ (const uint8_t *)"String", sizeof("String") - 1 }; str__ptr(&__sc1453); })))) {
+  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1456 = (str){ (const uint8_t *)"String", sizeof("String") - 1 }; str__ptr(&__sc1456); })))) {
     codegen__codegen__Buf200 sm = (codegen__codegen__Buf200){0};
-    codegen__codegen__Codegen__render_type_id(self, t, ((const char *)({ __auto_type __sc1454 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1454); })), ((char *)(&sm.b[0])), 200ULL);
+    codegen__codegen__Codegen__render_type_id(self, t, ((const char *)({ __auto_type __sc1457 = (str){ (const uint8_t *)"", sizeof("") - 1 }; str__ptr(&__sc1457); })), ((char *)(&sm.b[0])), 200ULL);
     const char *const smp = ((const char *)(&sm.b[0]));
     if (codegen__codegen__Codegen__is_lvalue(self, arg)) {
-      ({ String__Global *__sc1455 = &(self->buf);
-String__Global__push_str(&(*__sc1455), (str){ .ptr = (const uint8_t*)"String__Global__push_str(&", .len = sizeof("String__Global__push_str(&") - 1 });
-String__Global__push_str(&(*__sc1455), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1455), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_str(&(*__sc1455), utils__errors__cstr(smp));
-String__Global__push_str(&(*__sc1455), (str){ .ptr = (const uint8_t*)"__as_str(&(", .len = sizeof("__as_str(&(") - 1 });
+      ({ String__Global *__sc1458 = &(self->buf);
+String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)"String__Global__push_str(&", .len = sizeof("String__Global__push_str(&") - 1 });
+String__Global__push_str(&(*__sc1458), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_str(&(*__sc1458), utils__errors__cstr(smp));
+String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)"__as_str(&(", .len = sizeof("__as_str(&(") - 1 });
 });
       codegen__codegen__Codegen__emit_expr(self, arg);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1456 = (str){ (const uint8_t *)")));\n", sizeof(")));\n") - 1 }; str__ptr(&__sc1456); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1459 = (str){ (const uint8_t *)")));\n", sizeof(")));\n") - 1 }; str__ptr(&__sc1459); })));
     } else {
       codegen__codegen__Buf32 tmp = (codegen__codegen__Buf32){0};
       codegen__codegen__Codegen__fresh(self, ((char *)(&tmp.b[0])), 32ULL);
       const char *const tmpp = ((const char *)(&tmp.b[0]));
-      ({ String__Global *__sc1457 = &(self->buf);
-String__Global__push_str(&(*__sc1457), (str){ .ptr = (const uint8_t*)"{ ", .len = sizeof("{ ") - 1 });
-String__Global__push_str(&(*__sc1457), utils__errors__cstr(smp));
-String__Global__push_str(&(*__sc1457), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
-String__Global__push_str(&(*__sc1457), utils__errors__cstr(tmpp));
-String__Global__push_str(&(*__sc1457), (str){ .ptr = (const uint8_t*)" = ", .len = sizeof(" = ") - 1 });
+      ({ String__Global *__sc1460 = &(self->buf);
+String__Global__push_str(&(*__sc1460), (str){ .ptr = (const uint8_t*)"{ ", .len = sizeof("{ ") - 1 });
+String__Global__push_str(&(*__sc1460), utils__errors__cstr(smp));
+String__Global__push_str(&(*__sc1460), (str){ .ptr = (const uint8_t*)" ", .len = sizeof(" ") - 1 });
+String__Global__push_str(&(*__sc1460), utils__errors__cstr(tmpp));
+String__Global__push_str(&(*__sc1460), (str){ .ptr = (const uint8_t*)" = ", .len = sizeof(" = ") - 1 });
 });
       codegen__codegen__Codegen__emit_expr(self, arg);
-      ({ String__Global *__sc1458 = &(self->buf);
-String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)"; String__Global__push_str(&", .len = sizeof("; String__Global__push_str(&") - 1 });
-String__Global__push_str(&(*__sc1458), utils__errors__cstr(tb));
-String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_str(&(*__sc1458), utils__errors__cstr(smp));
-String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)"__as_str(&", .len = sizeof("__as_str(&") - 1 });
-String__Global__push_str(&(*__sc1458), utils__errors__cstr(tmpp));
-String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)")); ", .len = sizeof(")); ") - 1 });
-String__Global__push_str(&(*__sc1458), utils__errors__cstr(smp));
-String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)"__free(&", .len = sizeof("__free(&") - 1 });
-String__Global__push_str(&(*__sc1458), utils__errors__cstr(tmpp));
-String__Global__push_str(&(*__sc1458), (str){ .ptr = (const uint8_t*)"); }\n", .len = sizeof("); }\n") - 1 });
+      ({ String__Global *__sc1461 = &(self->buf);
+String__Global__push_str(&(*__sc1461), (str){ .ptr = (const uint8_t*)"; String__Global__push_str(&", .len = sizeof("; String__Global__push_str(&") - 1 });
+String__Global__push_str(&(*__sc1461), utils__errors__cstr(tb));
+String__Global__push_str(&(*__sc1461), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_str(&(*__sc1461), utils__errors__cstr(smp));
+String__Global__push_str(&(*__sc1461), (str){ .ptr = (const uint8_t*)"__as_str(&", .len = sizeof("__as_str(&") - 1 });
+String__Global__push_str(&(*__sc1461), utils__errors__cstr(tmpp));
+String__Global__push_str(&(*__sc1461), (str){ .ptr = (const uint8_t*)")); ", .len = sizeof(")); ") - 1 });
+String__Global__push_str(&(*__sc1461), utils__errors__cstr(smp));
+String__Global__push_str(&(*__sc1461), (str){ .ptr = (const uint8_t*)"__free(&", .len = sizeof("__free(&") - 1 });
+String__Global__push_str(&(*__sc1461), utils__errors__cstr(tmpp));
+String__Global__push_str(&(*__sc1461), (str){ .ptr = (const uint8_t*)"); }\n", .len = sizeof("); }\n") - 1 });
 });
     }
     return true;
@@ -13223,69 +13278,38 @@ static __attribute__((unused)) bool codegen__codegen__Codegen__emit_format_arg(c
   }
   const bool numeric = ((y.kind == ast__ast__TypeKind_TYPE_BUILTIN) && codegen__codegen__bt_is_numeric(y.as_data.builtin));
   const int32_t align = ({
-    int32_t __sc1459;
+    int32_t __sc1462;
     if (sp->align == 60) {
-      __sc1459 = 0;
+      __sc1462 = 0;
     } else if (sp->align == 94) {
-      __sc1459 = 2;
+      __sc1462 = 2;
     } else if (sp->align == 62) {
-      __sc1459 = 1;
+      __sc1462 = 1;
     } else if (numeric) {
-      __sc1459 = 1;
+      __sc1462 = 1;
     } else {
-      __sc1459 = 0;
+      __sc1462 = 0;
     }
-    __sc1459;
+    __sc1462;
   });
   const uint8_t fill = ({
-    uint8_t __sc1460;
+    uint8_t __sc1463;
     if (sp->fill != 0U) {
-      __sc1460 = sp->fill;
+      __sc1463 = sp->fill;
     } else {
-      __sc1460 = 32U;
+      __sc1463 = 32U;
     }
-    __sc1460;
+    __sc1463;
   });
-  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1461 = (str){ (const uint8_t *)"str", sizeof("str") - 1 }; str__ptr(&__sc1461); })))) {
-    ({ String__Global *__sc1462 = &(self->buf);
-String__Global__push_str(&(*__sc1462), (str){ .ptr = (const uint8_t*)"String__Global__push_padded(&", .len = sizeof("String__Global__push_padded(&") - 1 });
-String__Global__push_str(&(*__sc1462), utils__errors__cstr(f));
-String__Global__push_str(&(*__sc1462), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+  if (codegen__codegen__Codegen__cg_struct_name_is(self, (&y), ((const char *)({ __auto_type __sc1464 = (str){ (const uint8_t *)"str", sizeof("str") - 1 }; str__ptr(&__sc1464); })))) {
+    ({ String__Global *__sc1465 = &(self->buf);
+String__Global__push_str(&(*__sc1465), (str){ .ptr = (const uint8_t*)"String__Global__push_padded(&", .len = sizeof("String__Global__push_padded(&") - 1 });
+String__Global__push_str(&(*__sc1465), utils__errors__cstr(f));
+String__Global__push_str(&(*__sc1465), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
 });
     codegen__codegen__Codegen__emit_expr(self, arg);
-    ({ String__Global *__sc1463 = &(self->buf);
-String__Global__push_str(&(*__sc1463), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_i64(&(*__sc1463), (int64_t)(sp->width));
-String__Global__push_str(&(*__sc1463), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_u64(&(*__sc1463), (uint64_t)(((uint32_t)fill)));
-String__Global__push_str(&(*__sc1463), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_i64(&(*__sc1463), (int64_t)(align));
-String__Global__push_str(&(*__sc1463), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
-});
-    return true;
-  }
-  codegen__codegen__Buf32 tmp = (codegen__codegen__Buf32){0};
-  codegen__codegen__Codegen__fresh(self, ((char *)(&tmp.b[0])), 32ULL);
-  const char *const tp = ((const char *)(&tmp.b[0]));
-  ({ String__Global *__sc1464 = &(self->buf);
-String__Global__push_str(&(*__sc1464), (str){ .ptr = (const uint8_t*)"{ String__Global ", .len = sizeof("{ String__Global ") - 1 });
-String__Global__push_str(&(*__sc1464), utils__errors__cstr(tp));
-String__Global__push_str(&(*__sc1464), (str){ .ptr = (const uint8_t*)" = String__Global__new();\n", .len = sizeof(" = String__Global__new();\n") - 1 });
-});
-  if (!codegen__codegen__Codegen__fmt_arg_core(self, tp, arg, sp, y, t)) {
-    ({ String__Global *__sc1465 = &(self->buf);
-String__Global__push_str(&(*__sc1465), (str){ .ptr = (const uint8_t*)"String__Global__free(&", .len = sizeof("String__Global__free(&") - 1 });
-String__Global__push_str(&(*__sc1465), utils__errors__cstr(tp));
-String__Global__push_str(&(*__sc1465), (str){ .ptr = (const uint8_t*)"); }\n", .len = sizeof("); }\n") - 1 });
-});
-    return false;
-  }
-  ({ String__Global *__sc1466 = &(self->buf);
-String__Global__push_str(&(*__sc1466), (str){ .ptr = (const uint8_t*)"String__Global__push_padded(&", .len = sizeof("String__Global__push_padded(&") - 1 });
-String__Global__push_str(&(*__sc1466), utils__errors__cstr(f));
-String__Global__push_str(&(*__sc1466), (str){ .ptr = (const uint8_t*)", String__Global__as_str(&", .len = sizeof(", String__Global__as_str(&") - 1 });
-String__Global__push_str(&(*__sc1466), utils__errors__cstr(tp));
-String__Global__push_str(&(*__sc1466), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
+    ({ String__Global *__sc1466 = &(self->buf);
+String__Global__push_str(&(*__sc1466), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
 String__Global__push_i64(&(*__sc1466), (int64_t)(sp->width));
 String__Global__push_str(&(*__sc1466), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
 String__Global__push_u64(&(*__sc1466), (uint64_t)(((uint32_t)fill)));
@@ -13293,17 +13317,48 @@ String__Global__push_str(&(*__sc1466), (str){ .ptr = (const uint8_t*)", ", .len 
 String__Global__push_i64(&(*__sc1466), (int64_t)(align));
 String__Global__push_str(&(*__sc1466), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
 });
+    return true;
+  }
+  codegen__codegen__Buf32 tmp = (codegen__codegen__Buf32){0};
+  codegen__codegen__Codegen__fresh(self, ((char *)(&tmp.b[0])), 32ULL);
+  const char *const tp = ((const char *)(&tmp.b[0]));
   ({ String__Global *__sc1467 = &(self->buf);
-String__Global__push_str(&(*__sc1467), (str){ .ptr = (const uint8_t*)"String__Global__free(&", .len = sizeof("String__Global__free(&") - 1 });
+String__Global__push_str(&(*__sc1467), (str){ .ptr = (const uint8_t*)"{ String__Global ", .len = sizeof("{ String__Global ") - 1 });
 String__Global__push_str(&(*__sc1467), utils__errors__cstr(tp));
-String__Global__push_str(&(*__sc1467), (str){ .ptr = (const uint8_t*)"); }\n", .len = sizeof("); }\n") - 1 });
+String__Global__push_str(&(*__sc1467), (str){ .ptr = (const uint8_t*)" = String__Global__new();\n", .len = sizeof(" = String__Global__new();\n") - 1 });
+});
+  if (!codegen__codegen__Codegen__fmt_arg_core(self, tp, arg, sp, y, t)) {
+    ({ String__Global *__sc1468 = &(self->buf);
+String__Global__push_str(&(*__sc1468), (str){ .ptr = (const uint8_t*)"String__Global__free(&", .len = sizeof("String__Global__free(&") - 1 });
+String__Global__push_str(&(*__sc1468), utils__errors__cstr(tp));
+String__Global__push_str(&(*__sc1468), (str){ .ptr = (const uint8_t*)"); }\n", .len = sizeof("); }\n") - 1 });
+});
+    return false;
+  }
+  ({ String__Global *__sc1469 = &(self->buf);
+String__Global__push_str(&(*__sc1469), (str){ .ptr = (const uint8_t*)"String__Global__push_padded(&", .len = sizeof("String__Global__push_padded(&") - 1 });
+String__Global__push_str(&(*__sc1469), utils__errors__cstr(f));
+String__Global__push_str(&(*__sc1469), (str){ .ptr = (const uint8_t*)", String__Global__as_str(&", .len = sizeof(", String__Global__as_str(&") - 1 });
+String__Global__push_str(&(*__sc1469), utils__errors__cstr(tp));
+String__Global__push_str(&(*__sc1469), (str){ .ptr = (const uint8_t*)"), ", .len = sizeof("), ") - 1 });
+String__Global__push_i64(&(*__sc1469), (int64_t)(sp->width));
+String__Global__push_str(&(*__sc1469), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_u64(&(*__sc1469), (uint64_t)(((uint32_t)fill)));
+String__Global__push_str(&(*__sc1469), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_i64(&(*__sc1469), (int64_t)(align));
+String__Global__push_str(&(*__sc1469), (str){ .ptr = (const uint8_t*)");\n", .len = sizeof(");\n") - 1 });
+});
+  ({ String__Global *__sc1470 = &(self->buf);
+String__Global__push_str(&(*__sc1470), (str){ .ptr = (const uint8_t*)"String__Global__free(&", .len = sizeof("String__Global__free(&") - 1 });
+String__Global__push_str(&(*__sc1470), utils__errors__cstr(tp));
+String__Global__push_str(&(*__sc1470), (str){ .ptr = (const uint8_t*)"); }\n", .len = sizeof("); }\n") - 1 });
 });
   return true;
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_fmt_cstr(codegen__codegen__Codegen *const self, size_t const a, size_t const b) {
   const uint8_t *const src = self->source;
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1468 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1468); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1471 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1471); })));
   size_t i = a;
   while (i < b) {
     if ((((src[i] == 123U) || (src[i] == 125U)) && ((i + 1ULL) < b)) && (src[(i + 1ULL)] == src[i])) {
@@ -13314,11 +13369,11 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_fmt_cstr(cod
     if ((src[i] == 92U) && ((i + 1ULL) < b)) {
       const uint8_t e = src[(i + 1ULL)];
       if ((e == 120U) && ((i + 3ULL) < b)) {
-        const int32_t v = ((({ int32_t __sc1469 = codegen__codegen__hex_val(src[(i + 2ULL)]); int64_t __sc1470 = (int64_t)(4); if ((uint64_t)__sc1470 >= 32) { __sc_panic("shift out of range"); } (int32_t)((uint32_t)((uint32_t)__sc1469 << __sc1470)); }) | codegen__codegen__hex_val(src[(i + 3ULL)])) & 0xFF);
+        const int32_t v = ((({ int32_t __sc1472 = codegen__codegen__hex_val(src[(i + 2ULL)]); int64_t __sc1473 = (int64_t)(4); if ((uint64_t)__sc1473 >= 32) { __sc_panic("shift out of range"); } (int32_t)((uint32_t)((uint32_t)__sc1472 << __sc1473)); }) | codegen__codegen__hex_val(src[(i + 3ULL)])) & 0xFF);
         codegen__codegen__Codegen__emit_octal_escape(self, ((uint32_t)v));
         (i = (i + 4ULL));
       } else if (e == 48U) {
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1471 = (str){ (const uint8_t *)"\\000", sizeof("\\000") - 1 }; str__ptr(&__sc1471); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1474 = (str){ (const uint8_t *)"\\000", sizeof("\\000") - 1 }; str__ptr(&__sc1474); })));
         (i = (i + 2ULL));
       } else {
         String__Global__push_byte(&self->buf, 92U);
@@ -13330,12 +13385,12 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_fmt_cstr(cod
     String__Global__push_byte(&self->buf, ((uint8_t)((int32_t)src[i])));
     (i = (i + 1ULL));
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1472 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1472); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1475 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1475); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_fmt_raw_cstr(codegen__codegen__Codegen *const self, size_t const a, size_t const b) {
   const uint8_t *const src = self->source;
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1473 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1473); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1476 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1476); })));
   size_t i = a;
   while (i < b) {
     if ((((src[i] == 123U) || (src[i] == 125U)) && ((i + 1ULL) < b)) && (src[(i + 1ULL)] == src[i])) {
@@ -13349,34 +13404,34 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_fmt_raw_cstr
       String__Global__push_byte(&self->buf, 92U);
       String__Global__push_byte(&self->buf, ((uint8_t)((int32_t)byte)));
     } else if (byte == 10U) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1474 = (str){ (const uint8_t *)"\\n", sizeof("\\n") - 1 }; str__ptr(&__sc1474); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1477 = (str){ (const uint8_t *)"\\n", sizeof("\\n") - 1 }; str__ptr(&__sc1477); })));
     } else if (byte < 32U) {
       codegen__codegen__Codegen__emit_octal_escape(self, ((uint32_t)((int32_t)byte)));
     } else {
       String__Global__push_byte(&self->buf, ((uint8_t)((int32_t)byte)));
     }
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1475 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1475); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1478 = (str){ (const uint8_t *)"\"", sizeof("\"") - 1 }; str__ptr(&__sc1478); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_fmt_seg(codegen__codegen__Codegen *const self, const char *const f, bool const is_raw, size_t const from, size_t const to) {
-  ({ String__Global *__sc1476 = &(self->buf);
-String__Global__push_str(&(*__sc1476), (str){ .ptr = (const uint8_t*)"String__Global__push_str(&", .len = sizeof("String__Global__push_str(&") - 1 });
-String__Global__push_str(&(*__sc1476), utils__errors__cstr(f));
-String__Global__push_str(&(*__sc1476), (str){ .ptr = (const uint8_t*)", (str){ .ptr = (const uint8_t*)", .len = sizeof(", (str){ .ptr = (const uint8_t*)") - 1 });
+  ({ String__Global *__sc1479 = &(self->buf);
+String__Global__push_str(&(*__sc1479), (str){ .ptr = (const uint8_t*)"String__Global__push_str(&", .len = sizeof("String__Global__push_str(&") - 1 });
+String__Global__push_str(&(*__sc1479), utils__errors__cstr(f));
+String__Global__push_str(&(*__sc1479), (str){ .ptr = (const uint8_t*)", (str){ .ptr = (const uint8_t*)", .len = sizeof(", (str){ .ptr = (const uint8_t*)") - 1 });
 });
   if (is_raw) {
     codegen__codegen__Codegen__emit_fmt_raw_cstr(self, from, to);
   } else {
     codegen__codegen__Codegen__emit_fmt_cstr(self, from, to);
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1477 = (str){ (const uint8_t *)", .len = sizeof(", sizeof(", .len = sizeof(") - 1 }; str__ptr(&__sc1477); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1480 = (str){ (const uint8_t *)", .len = sizeof(", sizeof(", .len = sizeof(") - 1 }; str__ptr(&__sc1480); })));
   if (is_raw) {
     codegen__codegen__Codegen__emit_fmt_raw_cstr(self, from, to);
   } else {
     codegen__codegen__Codegen__emit_fmt_cstr(self, from, to);
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1478 = (str){ (const uint8_t *)") - 1 });\n", sizeof(") - 1 });\n") - 1 }; str__ptr(&__sc1478); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1481 = (str){ (const uint8_t *)") - 1 });\n", sizeof(") - 1 });\n") - 1 }; str__ptr(&__sc1481); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__macro_stem(const codegen__codegen__Codegen *const self, uint16_t const m, uint32_t const aggregate_name, char *const out, size_t const cap) {
@@ -13411,14 +13466,14 @@ static __attribute__((unused)) void codegen__codegen__Codegen__macro_finish(code
   for (size_t i = 0ULL; i < nlen; i++) {
     const char ch = tmp[i];
     if (ch == 10) {
-      codegen__codegen__Codegen__emit_bytes(self, ((const char *)({ __auto_type __sc1479 = (str){ (const uint8_t *)" \\\n", sizeof(" \\\n") - 1 }; str__ptr(&__sc1479); })), 3ULL);
+      codegen__codegen__Codegen__emit_bytes(self, ((const char *)({ __auto_type __sc1482 = (str){ (const uint8_t *)" \\\n", sizeof(" \\\n") - 1 }; str__ptr(&__sc1482); })), 3ULL);
     } else if (ch == codegen__codegen__CG_PASTE) {
-      codegen__codegen__Codegen__emit_bytes(self, ((const char *)({ __auto_type __sc1480 = (str){ (const uint8_t *)"##", sizeof("##") - 1 }; str__ptr(&__sc1480); })), 2ULL);
+      codegen__codegen__Codegen__emit_bytes(self, ((const char *)({ __auto_type __sc1483 = (str){ (const uint8_t *)"##", sizeof("##") - 1 }; str__ptr(&__sc1483); })), 2ULL);
     } else {
       codegen__codegen__Codegen__emit_bytes(self, ((const char *)(tmp + i)), 1ULL);
     }
   }
-  codegen__codegen__Codegen__emit_bytes(self, ((const char *)({ __auto_type __sc1481 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1481); })), 1ULL);
+  codegen__codegen__Codegen__emit_bytes(self, ((const char *)({ __auto_type __sc1484 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1484); })), 1ULL);
   free(((void *)tmp));
 }
 
@@ -13450,10 +13505,10 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_generic_macr
         continue;
       }
       codegen__codegen__Buf320 nm = (codegen__codegen__Buf320){0};
-      size_t at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, 0ULL, ((const char *)({ __auto_type __sc1482 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1482); })));
+      size_t at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, 0ULL, ((const char *)({ __auto_type __sc1485 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1485); })));
       (nm.b[at] = codegen__codegen__CG_PASTE);
       (at = (at + 1ULL));
-      (at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, at, ((const char *)({ __auto_type __sc1483 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1483); }))));
+      (at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, at, ((const char *)({ __auto_type __sc1486 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1486); }))));
       const lexer__token__Span mnsp = codegen__codegen__Codegen__name_span(self, mf.name);
       codegen__codegen__Codegen__render_ident(self, mnsp, ((char *)(((char *)(&nm.b[0])) + at)), (320ULL - at));
       codegen__codegen__Codegen__emit_function(self, mid, (ast__ast__DefId){ .module = 0U, .node = ast__ast__NODE_NONE }, false, define, ((const char *)(&nm.b[0])), false);
@@ -13463,20 +13518,20 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_generic_macr
 
 static __attribute__((unused)) size_t codegen__codegen__Codegen__conformance_tag(const codegen__codegen__Codegen *const self, uint32_t const extend_id, char *const out, size_t const cap) {
   const ast__ast__DefId it = ast__ast__Ast__resolution_def(&((*codegen__codegen__Codegen__cur_ast(self))), ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), extend_id)->as_data.extend_def.interface_type);
-  const size_t at = codegen__codegen__bappend(out, cap, 0ULL, ((const char *)({ __auto_type __sc1484 = (str){ (const uint8_t *)"as_", sizeof("as_") - 1 }; str__ptr(&__sc1484); })));
+  const size_t at = codegen__codegen__bappend(out, cap, 0ULL, ((const char *)({ __auto_type __sc1487 = (str){ (const uint8_t *)"as_", sizeof("as_") - 1 }; str__ptr(&__sc1487); })));
   if (it.node == ast__ast__NODE_NONE) {
     return at;
   }
   const uint32_t trname = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, it.module))), it.node)->as_data.interface_def.name;
   const lexer__token__Span sp = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__mod_ast(self, it.module))), trname)->as_data.name.text;
   const size_t room = ({
-    size_t __sc1485;
+    size_t __sc1488;
     if (cap > at) {
-      __sc1485 = (cap - at);
+      __sc1488 = (cap - at);
     } else {
-      __sc1485 = 0ULL;
+      __sc1488 = 0ULL;
     }
-    __sc1485;
+    __sc1488;
   });
   return (at + codegen__codegen__render_ident_src(codegen__codegen__Codegen__mod_src(self, it.module), sp, ((char *)(out + at)), room));
 }
@@ -13488,36 +13543,36 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_generic_conf
   codegen__codegen__Buf128 tag = (codegen__codegen__Buf128){0};
   codegen__codegen__Codegen__conformance_tag(self, implId, ((char *)(&tag.b[0])), 128ULL);
   const char *const word = ({
-    const char *__sc1486;
+    const char *__sc1489;
     if (define) {
-      __sc1486 = ((const char *)({ __auto_type __sc1487 = (str){ (const uint8_t *)"DEFINE", sizeof("DEFINE") - 1 }; str__ptr(&__sc1487); }));
+      __sc1489 = ((const char *)({ __auto_type __sc1490 = (str){ (const uint8_t *)"DEFINE", sizeof("DEFINE") - 1 }; str__ptr(&__sc1490); }));
     } else {
-      __sc1486 = ((const char *)({ __auto_type __sc1488 = (str){ (const uint8_t *)"DECLARE", sizeof("DECLARE") - 1 }; str__ptr(&__sc1488); }));
+      __sc1489 = ((const char *)({ __auto_type __sc1491 = (str){ (const uint8_t *)"DECLARE", sizeof("DECLARE") - 1 }; str__ptr(&__sc1491); }));
     }
-    __sc1486;
+    __sc1489;
   });
-  ({ String__Global *__sc1489 = &(self->buf);
-String__Global__push_str(&(*__sc1489), (str){ .ptr = (const uint8_t*)"#define ", .len = sizeof("#define ") - 1 });
-String__Global__push_str(&(*__sc1489), utils__errors__cstr(((const char *)(&stem.b[0]))));
-String__Global__push_str(&(*__sc1489), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
-String__Global__push_str(&(*__sc1489), utils__errors__cstr(((const char *)(&tag.b[0]))));
-String__Global__push_str(&(*__sc1489), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
-String__Global__push_str(&(*__sc1489), utils__errors__cstr(word));
-String__Global__push_str(&(*__sc1489), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
+  ({ String__Global *__sc1492 = &(self->buf);
+String__Global__push_str(&(*__sc1492), (str){ .ptr = (const uint8_t*)"#define ", .len = sizeof("#define ") - 1 });
+String__Global__push_str(&(*__sc1492), utils__errors__cstr(((const char *)(&stem.b[0]))));
+String__Global__push_str(&(*__sc1492), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
+String__Global__push_str(&(*__sc1492), utils__errors__cstr(((const char *)(&tag.b[0]))));
+String__Global__push_str(&(*__sc1492), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
+String__Global__push_str(&(*__sc1492), utils__errors__cstr(word));
+String__Global__push_str(&(*__sc1492), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
 });
   const ast__ast__NodeList gens = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId)->as_data.aggregate.generics;
   const uint32_t *const gids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), gens);
   for (uint32_t i = 0U; i < gens.len; i++) {
     codegen__codegen__Buf64 p = (codegen__codegen__Buf64){0};
     codegen__codegen__Codegen__render_macro_param(self, codegen__codegen__Codegen__cur_module(self), gids[((size_t)i)], ((char *)(&p.b[0])), 64ULL);
-    ({ String__Global *__sc1490 = &(self->buf);
-String__Global__push_str(&(*__sc1490), utils__errors__cstr(((const char *)(&p.b[0]))));
-String__Global__push_str(&(*__sc1490), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
-String__Global__push_str(&(*__sc1490), utils__errors__cstr(((const char *)(&p.b[0]))));
-String__Global__push_str(&(*__sc1490), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+    ({ String__Global *__sc1493 = &(self->buf);
+String__Global__push_str(&(*__sc1493), utils__errors__cstr(((const char *)(&p.b[0]))));
+String__Global__push_str(&(*__sc1493), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
+String__Global__push_str(&(*__sc1493), utils__errors__cstr(((const char *)(&p.b[0]))));
+String__Global__push_str(&(*__sc1493), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
 });
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1491 = (str){ (const uint8_t *)"NAME) ", sizeof("NAME) ") - 1 }; str__ptr(&__sc1491); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1494 = (str){ (const uint8_t *)"NAME) ", sizeof("NAME) ") - 1 }; str__ptr(&__sc1494); })));
   (self->macro_mode = true);
   (self->macro_self = declId);
   (self->macro_self_mod = codegen__codegen__Codegen__cur_module(self));
@@ -13536,10 +13591,10 @@ String__Global__push_str(&(*__sc1490), (str){ .ptr = (const uint8_t*)", ", .len 
       continue;
     }
     codegen__codegen__Buf320 nm = (codegen__codegen__Buf320){0};
-    size_t at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, 0ULL, ((const char *)({ __auto_type __sc1492 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1492); })));
+    size_t at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, 0ULL, ((const char *)({ __auto_type __sc1495 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1495); })));
     (nm.b[at] = codegen__codegen__CG_PASTE);
     (at = (at + 1ULL));
-    (at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, at, ((const char *)({ __auto_type __sc1493 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1493); }))));
+    (at = codegen__codegen__bappend(((char *)(&nm.b[0])), 320ULL, at, ((const char *)({ __auto_type __sc1496 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1496); }))));
     const lexer__token__Span mnsp = codegen__codegen__Codegen__name_span(self, mf.name);
     codegen__codegen__Codegen__render_ident(self, mnsp, ((char *)(((char *)(&nm.b[0])) + at)), (320ULL - at));
     codegen__codegen__Codegen__emit_function(self, mid, (ast__ast__DefId){ .module = 0U, .node = ast__ast__NODE_NONE }, false, define, ((const char *)(&nm.b[0])), false);
@@ -13547,7 +13602,7 @@ String__Global__push_str(&(*__sc1490), (str){ .ptr = (const uint8_t*)", ", .len 
   (self->macro_mode = false);
   (self->macro_self = ast__ast__NODE_NONE);
   codegen__codegen__Codegen__macro_finish(self, start);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1494 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1494); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1497 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1497); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_generic_conformance_macros(codegen__codegen__Codegen *const self, uint32_t const declId) {
@@ -13576,32 +13631,32 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_generic_macr
   const ast__ast__NodeList gens = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId)->as_data.aggregate.generics;
   const uint32_t *const gids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), gens);
   const char *const word = ({
-    const char *__sc1495;
+    const char *__sc1498;
     if (define) {
-      __sc1495 = ((const char *)({ __auto_type __sc1496 = (str){ (const uint8_t *)"DEFINE", sizeof("DEFINE") - 1 }; str__ptr(&__sc1496); }));
+      __sc1498 = ((const char *)({ __auto_type __sc1499 = (str){ (const uint8_t *)"DEFINE", sizeof("DEFINE") - 1 }; str__ptr(&__sc1499); }));
     } else {
-      __sc1495 = ((const char *)({ __auto_type __sc1497 = (str){ (const uint8_t *)"DECLARE", sizeof("DECLARE") - 1 }; str__ptr(&__sc1497); }));
+      __sc1498 = ((const char *)({ __auto_type __sc1500 = (str){ (const uint8_t *)"DECLARE", sizeof("DECLARE") - 1 }; str__ptr(&__sc1500); }));
     }
-    __sc1495;
+    __sc1498;
   });
-  ({ String__Global *__sc1498 = &(self->buf);
-String__Global__push_str(&(*__sc1498), (str){ .ptr = (const uint8_t*)"#define ", .len = sizeof("#define ") - 1 });
-String__Global__push_str(&(*__sc1498), utils__errors__cstr(((const char *)(&stem.b[0]))));
-String__Global__push_str(&(*__sc1498), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
-String__Global__push_str(&(*__sc1498), utils__errors__cstr(word));
-String__Global__push_str(&(*__sc1498), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
+  ({ String__Global *__sc1501 = &(self->buf);
+String__Global__push_str(&(*__sc1501), (str){ .ptr = (const uint8_t*)"#define ", .len = sizeof("#define ") - 1 });
+String__Global__push_str(&(*__sc1501), utils__errors__cstr(((const char *)(&stem.b[0]))));
+String__Global__push_str(&(*__sc1501), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
+String__Global__push_str(&(*__sc1501), utils__errors__cstr(word));
+String__Global__push_str(&(*__sc1501), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
 });
   for (uint32_t i = 0U; i < gens.len; i++) {
     codegen__codegen__Buf64 p = (codegen__codegen__Buf64){0};
     codegen__codegen__Codegen__render_macro_param(self, codegen__codegen__Codegen__cur_module(self), gids[((size_t)i)], ((char *)(&p.b[0])), 64ULL);
-    ({ String__Global *__sc1499 = &(self->buf);
-String__Global__push_str(&(*__sc1499), utils__errors__cstr(((const char *)(&p.b[0]))));
-String__Global__push_str(&(*__sc1499), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
-String__Global__push_str(&(*__sc1499), utils__errors__cstr(((const char *)(&p.b[0]))));
-String__Global__push_str(&(*__sc1499), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+    ({ String__Global *__sc1502 = &(self->buf);
+String__Global__push_str(&(*__sc1502), utils__errors__cstr(((const char *)(&p.b[0]))));
+String__Global__push_str(&(*__sc1502), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
+String__Global__push_str(&(*__sc1502), utils__errors__cstr(((const char *)(&p.b[0]))));
+String__Global__push_str(&(*__sc1502), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
 });
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1500 = (str){ (const uint8_t *)"NAME) ", sizeof("NAME) ") - 1 }; str__ptr(&__sc1500); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1503 = (str){ (const uint8_t *)"NAME) ", sizeof("NAME) ") - 1 }; str__ptr(&__sc1503); })));
   (self->macro_mode = true);
   (self->macro_self = declId);
   (self->macro_self_mod = codegen__codegen__Codegen__cur_module(self));
@@ -13610,14 +13665,14 @@ String__Global__push_str(&(*__sc1499), (str){ .ptr = (const uint8_t*)", ", .len 
   if (!define) {
     if (dn_kind == ast__ast__NodeKind_NODE_STRUCT) {
       const char *const kw = codegen__codegen__agg_kw(ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId));
-      ({ String__Global *__sc1501 = &(self->buf);
-String__Global__push_str(&(*__sc1501), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
-String__Global__push_str(&(*__sc1501), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1501), (str){ .ptr = (const uint8_t*)" NAME NAME;\n", .len = sizeof(" NAME NAME;\n") - 1 });
+      ({ String__Global *__sc1504 = &(self->buf);
+String__Global__push_str(&(*__sc1504), (str){ .ptr = (const uint8_t*)"typedef ", .len = sizeof("typedef ") - 1 });
+String__Global__push_str(&(*__sc1504), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1504), (str){ .ptr = (const uint8_t*)" NAME NAME;\n", .len = sizeof(" NAME NAME;\n") - 1 });
 });
-      ({ String__Global *__sc1502 = &(self->buf);
-String__Global__push_str(&(*__sc1502), utils__errors__cstr(kw));
-String__Global__push_str(&(*__sc1502), (str){ .ptr = (const uint8_t*)" NAME {\n", .len = sizeof(" NAME {\n") - 1 });
+      ({ String__Global *__sc1505 = &(self->buf);
+String__Global__push_str(&(*__sc1505), utils__errors__cstr(kw));
+String__Global__push_str(&(*__sc1505), (str){ .ptr = (const uint8_t*)" NAME {\n", .len = sizeof(" NAME {\n") - 1 });
 });
       (self->depth = (self->depth + 1U));
       const ast__ast__NodeList fs = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId)->as_data.aggregate.members;
@@ -13631,39 +13686,39 @@ String__Global__push_str(&(*__sc1502), (str){ .ptr = (const uint8_t*)" NAME {\n"
         codegen__codegen__Codegen__render_type_node(self, f.ty, ((const char *)(&fnm.b[0])), ((char *)(&dd.b[0])), 256ULL);
         codegen__codegen__Codegen__emit_indent(self);
         codegen__codegen__Codegen__emit_cstr(self, ((const char *)(&dd.b[0])));
-        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1503 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1503); })));
+        codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1506 = (str){ (const uint8_t *)";\n", sizeof(";\n") - 1 }; str__ptr(&__sc1506); })));
       }
       (self->depth = (self->depth - 1U));
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1504 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1504); })));
-    } else if (codegen__codegen__Codegen__aggregate_has_payload(self, declId)) {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1505 = (str){ (const uint8_t *)"typedef struct NAME NAME;\n", sizeof("typedef struct NAME NAME;\n") - 1 }; str__ptr(&__sc1505); })));
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1506 = (str){ (const uint8_t *)"struct NAME {\n", sizeof("struct NAME {\n") - 1 }; str__ptr(&__sc1506); })));
-      codegen__codegen__Codegen__emit_enum_struct_body(self, declId);
       codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1507 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1507); })));
+    } else if (codegen__codegen__Codegen__aggregate_has_payload(self, declId)) {
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1508 = (str){ (const uint8_t *)"typedef struct NAME NAME;\n", sizeof("typedef struct NAME NAME;\n") - 1 }; str__ptr(&__sc1508); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1509 = (str){ (const uint8_t *)"struct NAME {\n", sizeof("struct NAME {\n") - 1 }; str__ptr(&__sc1509); })));
+      codegen__codegen__Codegen__emit_enum_struct_body(self, declId);
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1510 = (str){ (const uint8_t *)"};\n", sizeof("};\n") - 1 }; str__ptr(&__sc1510); })));
     } else {
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1508 = (str){ (const uint8_t *)"typedef ", sizeof("typedef ") - 1 }; str__ptr(&__sc1508); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1511 = (str){ (const uint8_t *)"typedef ", sizeof("typedef ") - 1 }; str__ptr(&__sc1511); })));
       codegen__codegen__Codegen__emit_local_type_name(self, dn_name);
-      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1509 = (str){ (const uint8_t *)" NAME;\n", sizeof(" NAME;\n") - 1 }; str__ptr(&__sc1509); })));
+      codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1512 = (str){ (const uint8_t *)" NAME;\n", sizeof(" NAME;\n") - 1 }; str__ptr(&__sc1512); })));
     }
   }
   codegen__codegen__Codegen__emit_generic_macro_methods(self, declId, define);
   (self->macro_mode = false);
   (self->macro_self = ast__ast__NODE_NONE);
   codegen__codegen__Codegen__macro_finish(self, start);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1510 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1510); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1513 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1513); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__macro_method_name(const codegen__codegen__Codegen *const self, uint32_t const methodId, char *const out, size_t const cap) {
   const uint32_t mnnode = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), methodId)->as_data.function.name;
   const lexer__token__Span mnsp = codegen__codegen__Codegen__name_span(self, mnnode);
-  size_t at = codegen__codegen__bappend(out, cap, 0ULL, ((const char *)({ __auto_type __sc1511 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1511); })));
+  size_t at = codegen__codegen__bappend(out, cap, 0ULL, ((const char *)({ __auto_type __sc1514 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1514); })));
   if (at < cap) {
     (out[at] = codegen__codegen__CG_PASTE);
     (at = (at + 1ULL));
   }
-  (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1512 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1512); }))));
+  (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1515 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1515); }))));
   (at = (at + codegen__codegen__Codegen__render_ident(self, mnsp, ((char *)(out + at)), (cap - at))));
-  (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1513 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1513); }))));
+  (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1516 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1516); }))));
   const ast__ast__NodeList mg = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), methodId)->as_data.function.generics;
   const uint32_t *const mgids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), mg);
   for (uint32_t k = 0U; k < mg.len; k++) {
@@ -13672,13 +13727,13 @@ static __attribute__((unused)) void codegen__codegen__Codegen__macro_method_name
         (out[at] = codegen__codegen__CG_PASTE);
         (at = (at + 1ULL));
       }
-      (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1514 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1514); }))));
+      (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1517 = (str){ (const uint8_t *)"__", sizeof("__") - 1 }; str__ptr(&__sc1517); }))));
     }
     if (at < cap) {
       (out[at] = codegen__codegen__CG_PASTE);
       (at = (at + 1ULL));
     }
-    (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1515 = (str){ (const uint8_t *)"_SCM_", sizeof("_SCM_") - 1 }; str__ptr(&__sc1515); }))));
+    (at = codegen__codegen__bappend(out, cap, at, ((const char *)({ __auto_type __sc1518 = (str){ (const uint8_t *)"_SCM_", sizeof("_SCM_") - 1 }; str__ptr(&__sc1518); }))));
     (at = (at + codegen__codegen__Codegen__render_macro_param(self, codegen__codegen__Codegen__cur_module(self), mgids[((size_t)k)], ((char *)(out + at)), (cap - at))));
   }
 }
@@ -13692,49 +13747,49 @@ static __attribute__((unused)) void codegen__codegen__Codegen__emit_generic_meth
   const lexer__token__Span mnsp = codegen__codegen__Codegen__name_span(self, mnnode);
   codegen__codegen__Codegen__render_ident(self, mnsp, ((char *)(&mnm.b[0])), 64ULL);
   const char *const word = ({
-    const char *__sc1516;
+    const char *__sc1519;
     if (define) {
-      __sc1516 = ((const char *)({ __auto_type __sc1517 = (str){ (const uint8_t *)"DEFINE", sizeof("DEFINE") - 1 }; str__ptr(&__sc1517); }));
+      __sc1519 = ((const char *)({ __auto_type __sc1520 = (str){ (const uint8_t *)"DEFINE", sizeof("DEFINE") - 1 }; str__ptr(&__sc1520); }));
     } else {
-      __sc1516 = ((const char *)({ __auto_type __sc1518 = (str){ (const uint8_t *)"DECLARE", sizeof("DECLARE") - 1 }; str__ptr(&__sc1518); }));
+      __sc1519 = ((const char *)({ __auto_type __sc1521 = (str){ (const uint8_t *)"DECLARE", sizeof("DECLARE") - 1 }; str__ptr(&__sc1521); }));
     }
-    __sc1516;
+    __sc1519;
   });
-  ({ String__Global *__sc1519 = &(self->buf);
-String__Global__push_str(&(*__sc1519), (str){ .ptr = (const uint8_t*)"#define ", .len = sizeof("#define ") - 1 });
-String__Global__push_str(&(*__sc1519), utils__errors__cstr(((const char *)(&stem.b[0]))));
-String__Global__push_str(&(*__sc1519), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
-String__Global__push_str(&(*__sc1519), utils__errors__cstr(((const char *)(&mnm.b[0]))));
-String__Global__push_str(&(*__sc1519), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
-String__Global__push_str(&(*__sc1519), utils__errors__cstr(word));
-String__Global__push_str(&(*__sc1519), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
+  ({ String__Global *__sc1522 = &(self->buf);
+String__Global__push_str(&(*__sc1522), (str){ .ptr = (const uint8_t*)"#define ", .len = sizeof("#define ") - 1 });
+String__Global__push_str(&(*__sc1522), utils__errors__cstr(((const char *)(&stem.b[0]))));
+String__Global__push_str(&(*__sc1522), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
+String__Global__push_str(&(*__sc1522), utils__errors__cstr(((const char *)(&mnm.b[0]))));
+String__Global__push_str(&(*__sc1522), (str){ .ptr = (const uint8_t*)"_", .len = sizeof("_") - 1 });
+String__Global__push_str(&(*__sc1522), utils__errors__cstr(word));
+String__Global__push_str(&(*__sc1522), (str){ .ptr = (const uint8_t*)"(", .len = sizeof("(") - 1 });
 });
   const ast__ast__NodeList gens = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), declId)->as_data.aggregate.generics;
   const uint32_t *const gids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), gens);
   for (uint32_t i = 0U; i < gens.len; i++) {
     codegen__codegen__Buf64 p = (codegen__codegen__Buf64){0};
     codegen__codegen__Codegen__render_macro_param(self, codegen__codegen__Codegen__cur_module(self), gids[((size_t)i)], ((char *)(&p.b[0])), 64ULL);
-    ({ String__Global *__sc1520 = &(self->buf);
-String__Global__push_str(&(*__sc1520), utils__errors__cstr(((const char *)(&p.b[0]))));
-String__Global__push_str(&(*__sc1520), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
-String__Global__push_str(&(*__sc1520), utils__errors__cstr(((const char *)(&p.b[0]))));
-String__Global__push_str(&(*__sc1520), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+    ({ String__Global *__sc1523 = &(self->buf);
+String__Global__push_str(&(*__sc1523), utils__errors__cstr(((const char *)(&p.b[0]))));
+String__Global__push_str(&(*__sc1523), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
+String__Global__push_str(&(*__sc1523), utils__errors__cstr(((const char *)(&p.b[0]))));
+String__Global__push_str(&(*__sc1523), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
 });
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1521 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1521); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1524 = (str){ (const uint8_t *)"NAME", sizeof("NAME") - 1 }; str__ptr(&__sc1524); })));
   const ast__ast__NodeList mg = ast__ast__Ast__at_const(&((*codegen__codegen__Codegen__cur_ast(self))), methodId)->as_data.function.generics;
   const uint32_t *const mgids = ast__ast__Ast__list(&((*codegen__codegen__Codegen__cur_ast(self))), mg);
   for (uint32_t k = 0U; k < mg.len; k++) {
     codegen__codegen__Buf64 p = (codegen__codegen__Buf64){0};
     codegen__codegen__Codegen__render_macro_param(self, codegen__codegen__Codegen__cur_module(self), mgids[((size_t)k)], ((char *)(&p.b[0])), 64ULL);
-    ({ String__Global *__sc1522 = &(self->buf);
-String__Global__push_str(&(*__sc1522), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
-String__Global__push_str(&(*__sc1522), utils__errors__cstr(((const char *)(&p.b[0]))));
-String__Global__push_str(&(*__sc1522), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
-String__Global__push_str(&(*__sc1522), utils__errors__cstr(((const char *)(&p.b[0]))));
+    ({ String__Global *__sc1525 = &(self->buf);
+String__Global__push_str(&(*__sc1525), (str){ .ptr = (const uint8_t*)", ", .len = sizeof(", ") - 1 });
+String__Global__push_str(&(*__sc1525), utils__errors__cstr(((const char *)(&p.b[0]))));
+String__Global__push_str(&(*__sc1525), (str){ .ptr = (const uint8_t*)", _SCM_", .len = sizeof(", _SCM_") - 1 });
+String__Global__push_str(&(*__sc1525), utils__errors__cstr(((const char *)(&p.b[0]))));
 });
   }
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1523 = (str){ (const uint8_t *)") ", sizeof(") ") - 1 }; str__ptr(&__sc1523); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1526 = (str){ (const uint8_t *)") ", sizeof(") ") - 1 }; str__ptr(&__sc1526); })));
   (self->macro_mode = true);
   (self->macro_self = declId);
   (self->macro_self_mod = codegen__codegen__Codegen__cur_module(self));
@@ -13746,7 +13801,7 @@ String__Global__push_str(&(*__sc1522), utils__errors__cstr(((const char *)(&p.b[
   (self->macro_mode = false);
   (self->macro_self = ast__ast__NODE_NONE);
   codegen__codegen__Codegen__macro_finish(self, start);
-  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1524 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1524); })));
+  codegen__codegen__Codegen__emit_cstr(self, ((const char *)({ __auto_type __sc1527 = (str){ (const uint8_t *)"\n", sizeof("\n") - 1 }; str__ptr(&__sc1527); })));
 }
 
 static __attribute__((unused)) void codegen__codegen__Codegen__emit_generic_method_macros(codegen__codegen__Codegen *const self, uint32_t const declId) {

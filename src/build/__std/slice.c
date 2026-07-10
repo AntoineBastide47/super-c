@@ -2,12 +2,15 @@
 #include "../__std/core.h"
 #include "../__std/option.h"
 #include "../__std/range.h"
+#include "../__std/str.h"
 
 _Static_assert(sizeof(Slice__u8) == 16 && _Alignof(Slice__u8) == 8, "super-c layout model mismatch: Slice__u8");
 _Static_assert(sizeof(Slice__u32) == 16 && _Alignof(Slice__u32) == 8, "super-c layout model mismatch: Slice__u32");
 _Static_assert(sizeof(SliceMut__u32) == 16 && _Alignof(SliceMut__u32) == 8, "super-c layout model mismatch: SliceMut__u32");
 _Static_assert(sizeof(Slice__bool) == 16 && _Alignof(Slice__bool) == 8, "super-c layout model mismatch: Slice__bool");
 _Static_assert(sizeof(SliceMut__bool) == 16 && _Alignof(SliceMut__bool) == 8, "super-c layout model mismatch: SliceMut__bool");
+_Static_assert(sizeof(Slice__str) == 16 && _Alignof(Slice__str) == 8, "super-c layout model mismatch: Slice__str");
+_Static_assert(sizeof(SliceMut__str) == 16 && _Alignof(SliceMut__str) == 8, "super-c layout model mismatch: SliceMut__str");
 _Static_assert(sizeof(SliceMut__u8) == 16 && _Alignof(SliceMut__u8) == 8, "super-c layout model mismatch: SliceMut__u8");
 _Static_assert(sizeof(Slice__u64) == 16 && _Alignof(Slice__u64) == 8, "super-c layout model mismatch: Slice__u64");
 _Static_assert(sizeof(SliceMut__u64) == 16 && _Alignof(SliceMut__u64) == 8, "super-c layout model mismatch: SliceMut__u64");
@@ -176,6 +179,73 @@ SliceMut__bool SliceMut__bool__index_range_mut(SliceMut__bool *const self, Range
   return (SliceMut__bool){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
 
+size_t Slice__str__len(const Slice__str *const self) {
+  return self->len;
+}
+
+const str *Slice__str__as_ptr(const Slice__str *const self) {
+  return self->ptr;
+}
+
+const str *Slice__str__index(const Slice__str *const self, size_t const i) {
+  return (&self->ptr[i]);
+}
+
+Slice__str Slice__str__index_range(const Slice__str *const self, Range__usize const r) {
+  const size_t hi = ({
+    size_t __sc7;
+    if (r.inclusive) {
+      __sc7 = (r.end + 1ULL);
+    } else {
+      __sc7 = r.end;
+    }
+    __sc7;
+  });
+  return (Slice__str){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
+}
+
+size_t SliceMut__str__len(const SliceMut__str *const self) {
+  return self->len;
+}
+
+str *SliceMut__str__as_mut_ptr(const SliceMut__str *const self) {
+  return self->ptr;
+}
+
+const str *SliceMut__str__index(const SliceMut__str *const self, size_t const i) {
+  return (&self->ptr[i]);
+}
+
+Slice__str SliceMut__str__index_range(const SliceMut__str *const self, Range__usize const r) {
+  const size_t hi = ({
+    size_t __sc8;
+    if (r.inclusive) {
+      __sc8 = (r.end + 1ULL);
+    } else {
+      __sc8 = r.end;
+    }
+    __sc8;
+  });
+  return (Slice__str){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
+}
+
+str *SliceMut__str__index_mut(SliceMut__str *const self, size_t const i) {
+  return (&self->ptr[i]);
+}
+
+SliceMut__str SliceMut__str__index_range_mut(SliceMut__str *const self, Range__usize const r) {
+  const size_t hi = ({
+    size_t __sc9;
+    if (r.inclusive) {
+      __sc9 = (r.end + 1ULL);
+    } else {
+      __sc9 = r.end;
+    }
+    __sc9;
+  });
+  return (SliceMut__str){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
+}
+
 size_t SliceMut__u8__len(const SliceMut__u8 *const self) {
   return self->len;
 }
@@ -190,13 +260,13 @@ const uint8_t *SliceMut__u8__index(const SliceMut__u8 *const self, size_t const 
 
 Slice__u8 SliceMut__u8__index_range(const SliceMut__u8 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc7;
+    size_t __sc10;
     if (r.inclusive) {
-      __sc7 = (r.end + 1ULL);
+      __sc10 = (r.end + 1ULL);
     } else {
-      __sc7 = r.end;
+      __sc10 = r.end;
     }
-    __sc7;
+    __sc10;
   });
   return (Slice__u8){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -207,13 +277,13 @@ uint8_t *SliceMut__u8__index_mut(SliceMut__u8 *const self, size_t const i) {
 
 SliceMut__u8 SliceMut__u8__index_range_mut(SliceMut__u8 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc8;
+    size_t __sc11;
     if (r.inclusive) {
-      __sc8 = (r.end + 1ULL);
+      __sc11 = (r.end + 1ULL);
     } else {
-      __sc8 = r.end;
+      __sc11 = r.end;
     }
-    __sc8;
+    __sc11;
   });
   return (SliceMut__u8){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -232,13 +302,13 @@ const uint64_t *Slice__u64__index(const Slice__u64 *const self, size_t const i) 
 
 Slice__u64 Slice__u64__index_range(const Slice__u64 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc9;
+    size_t __sc12;
     if (r.inclusive) {
-      __sc9 = (r.end + 1ULL);
+      __sc12 = (r.end + 1ULL);
     } else {
-      __sc9 = r.end;
+      __sc12 = r.end;
     }
-    __sc9;
+    __sc12;
   });
   return (Slice__u64){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -257,13 +327,13 @@ const uint64_t *SliceMut__u64__index(const SliceMut__u64 *const self, size_t con
 
 Slice__u64 SliceMut__u64__index_range(const SliceMut__u64 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc10;
+    size_t __sc13;
     if (r.inclusive) {
-      __sc10 = (r.end + 1ULL);
+      __sc13 = (r.end + 1ULL);
     } else {
-      __sc10 = r.end;
+      __sc13 = r.end;
     }
-    __sc10;
+    __sc13;
   });
   return (Slice__u64){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -274,13 +344,13 @@ uint64_t *SliceMut__u64__index_mut(SliceMut__u64 *const self, size_t const i) {
 
 SliceMut__u64 SliceMut__u64__index_range_mut(SliceMut__u64 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc11;
+    size_t __sc14;
     if (r.inclusive) {
-      __sc11 = (r.end + 1ULL);
+      __sc14 = (r.end + 1ULL);
     } else {
-      __sc11 = r.end;
+      __sc14 = r.end;
     }
-    __sc11;
+    __sc14;
   });
   return (SliceMut__u64){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -299,13 +369,13 @@ const uint16_t *Slice__u16__index(const Slice__u16 *const self, size_t const i) 
 
 Slice__u16 Slice__u16__index_range(const Slice__u16 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc12;
+    size_t __sc15;
     if (r.inclusive) {
-      __sc12 = (r.end + 1ULL);
+      __sc15 = (r.end + 1ULL);
     } else {
-      __sc12 = r.end;
+      __sc15 = r.end;
     }
-    __sc12;
+    __sc15;
   });
   return (Slice__u16){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -324,13 +394,13 @@ const uint16_t *SliceMut__u16__index(const SliceMut__u16 *const self, size_t con
 
 Slice__u16 SliceMut__u16__index_range(const SliceMut__u16 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc13;
+    size_t __sc16;
     if (r.inclusive) {
-      __sc13 = (r.end + 1ULL);
+      __sc16 = (r.end + 1ULL);
     } else {
-      __sc13 = r.end;
+      __sc16 = r.end;
     }
-    __sc13;
+    __sc16;
   });
   return (Slice__u16){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -341,13 +411,13 @@ uint16_t *SliceMut__u16__index_mut(SliceMut__u16 *const self, size_t const i) {
 
 SliceMut__u16 SliceMut__u16__index_range_mut(SliceMut__u16 *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc14;
+    size_t __sc17;
     if (r.inclusive) {
-      __sc14 = (r.end + 1ULL);
+      __sc17 = (r.end + 1ULL);
     } else {
-      __sc14 = r.end;
+      __sc17 = r.end;
     }
-    __sc14;
+    __sc17;
   });
   return (SliceMut__u16){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -366,13 +436,13 @@ const size_t *Slice__usize__index(const Slice__usize *const self, size_t const i
 
 Slice__usize Slice__usize__index_range(const Slice__usize *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc15;
+    size_t __sc18;
     if (r.inclusive) {
-      __sc15 = (r.end + 1ULL);
+      __sc18 = (r.end + 1ULL);
     } else {
-      __sc15 = r.end;
+      __sc18 = r.end;
     }
-    __sc15;
+    __sc18;
   });
   return (Slice__usize){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -391,13 +461,13 @@ const size_t *SliceMut__usize__index(const SliceMut__usize *const self, size_t c
 
 Slice__usize SliceMut__usize__index_range(const SliceMut__usize *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc16;
+    size_t __sc19;
     if (r.inclusive) {
-      __sc16 = (r.end + 1ULL);
+      __sc19 = (r.end + 1ULL);
     } else {
-      __sc16 = r.end;
+      __sc19 = r.end;
     }
-    __sc16;
+    __sc19;
   });
   return (Slice__usize){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }
@@ -408,13 +478,13 @@ size_t *SliceMut__usize__index_mut(SliceMut__usize *const self, size_t const i) 
 
 SliceMut__usize SliceMut__usize__index_range_mut(SliceMut__usize *const self, Range__usize const r) {
   const size_t hi = ({
-    size_t __sc17;
+    size_t __sc20;
     if (r.inclusive) {
-      __sc17 = (r.end + 1ULL);
+      __sc20 = (r.end + 1ULL);
     } else {
-      __sc17 = r.end;
+      __sc20 = r.end;
     }
-    __sc17;
+    __sc20;
   });
   return (SliceMut__usize){ .ptr = (self->ptr + r.start), .len = (hi - r.start) };
 }

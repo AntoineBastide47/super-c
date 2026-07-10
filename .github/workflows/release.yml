@@ -1,9 +1,7 @@
 name: Release
 
-# Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes a
-# GitHub Release with one tarball per platform. It is dispatch-only (never runs on push/PR), and every job
-# is gated to the repository owner, so only the owner can start it. (In a public repo the workflow file is
-# still readable; the guard controls who can RUN it. Make the repo private to also restrict who can see it.)
+# Owner-only, manual-trigger release: builds the checked-in C snapshot in src/build for macOS, Linux and
+# Windows and publishes a GitHub Release with one archive per platform.
 on:
   workflow_dispatch:
     inputs:
@@ -65,6 +63,23 @@ jobs:
           key: cc-apt-${{ runner.os }}-${{ hashFiles('Makefile') }}
           restore-keys: cc-apt-${{ runner.os }}-
 
+      - name: Set up C compiler (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v cc >/dev/null 2>&1; then
+            brew install llvm
+            echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+            echo "CC=clang" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up C compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v cc >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential
+          fi
+
       - name: Cache mingw-w64 install (Windows)
         if: runner.os == 'Windows'
         id: cache-mingw
@@ -75,72 +90,53 @@ jobs:
             C:\ProgramData\mingw64
             C:\tools\mingw64
           key: mingw-w64-${{ runner.os }}-choco-v1
+          restore-keys: mingw-w64-${{ runner.os }}-
 
       # Add compiler/dep installs here if ever needed (e.g. a pinned clang/gcc, libomp); their downloads
       # land in the caches above. The default build needs only the preinstalled `cc`.
-      # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
+      # Windows ships no Unix C toolchain; pull in mingw-w64 gcc. The compiler source is
       # mingw-clean: realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call.
-      - name: Set up mingw-w64 + make (Windows)
+      - name: Set up mingw-w64 (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install -y --no-progress make
-          if [ "${{ steps.cache-mingw.outputs.cache-hit }}" != true ]; then
+          find_mingw_bin() {
+            { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
+              while read -r dir; do
+                if [ -x "$dir/gcc.exe" ] || [ -x "$dir/gcc" ]; then
+                  echo "$dir"
+                  break
+                fi
+              done
+          }
+          mingw_bin="$(find_mingw_bin)"
+          if [ -z "$mingw_bin" ]; then
             choco install -y --no-progress mingw
+            mingw_bin="$(find_mingw_bin)"
           fi
-          mingw_bin="$({ find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } | head -n 1)"
           test -n "$mingw_bin"
           cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
           echo "CC=gcc" >> "$GITHUB_ENV"
           echo "BINEXT=.exe" >> "$GITHUB_ENV"
 
-      # --- Clean build (never reuse cached build files) --------------------------------------------------
-      - name: Clean any build tree
-        run: rm -rf build dist *.out profile.json.gz super-c.new "super-c${BINEXT:-}"
-
-      # --- Bootstrap ------------------------------------------------------------------------------------
-      # The build is self-hosted: `make` needs an existing super-c ($(SUPERC)) to transpile the .spc
-      # sources. Download this platform's binary from the latest release to use as the bootstrap. (The very
-      # first release -- and any release introducing a tag/flag the previous release's binary lacks -- must
-      # be seeded once by publishing a locally-built binary as a release; every run after that self-sustains.)
-      - name: Fetch bootstrap super-c from the latest release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          arch="$(uname -m)"
-          name="super-c-${{ matrix.target }}-${arch}"
-          if [ "${{ matrix.target }}" = windows ]; then
-            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
-            7z x -y "${name}.zip" >/dev/null
-            if [ -f "${name}/super-c.exe" ]; then
-              mv "${name}/super-c.exe" super-c.exe
-            else
-              mv "${name}.exe" super-c.exe
-            fi
-          else
-            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
-            tar xzf "${name}.tar.gz"
-            if [ -f "${name}/super-c" ]; then
-              mv "${name}/super-c" super-c
-            else
-              mv "${name}" super-c
-            fi
-            chmod +x super-c
-          fi
+      # --- Clean outputs only: src/build is the checked-in C input tree. ---------------------------------
+      - name: Clean release outputs
+        run: rm -rf build dist super-c super-c.exe super-c.new super-c.exe.new stage1-super-c stage1-super-c.exe *.out profile.json.gz
 
       - name: Build release binary
-        # mingw hides POSIX prototypes (realpath, ...) under -std=c11's __STRICT_ANSI__; build the
-        # Windows leg with -std=gnu11 (same POSIX define) so they are declared. mingw links their
-        # implementations from libmingwex automatically. Other platforms keep the Makefile default.
+        # Compile the committed src/build C snapshot directly. mingw hides POSIX prototypes under
+        # -std=c11's __STRICT_ANSI__, so the Windows leg uses gnu11.
         run: |
           set -eu
-          bin="super-c${BINEXT:-}"
-          test -n "$(find src/build -name '*.c' -print -quit)"
+          test -d src/build
+          cstd="-std=c11 -D_POSIX_C_SOURCE=200809L"
           if [ "${{ runner.os }}" = Windows ]; then
-            ${CC:-cc} -std=gnu11 -D_POSIX_C_SOURCE=200809L $(find src/build -name '*.c') -o "$bin" -lm
-          else
-            ${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L $(find src/build -name '*.c') -o "$bin" -lm
+            cstd="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
           fi
+          bin="super-c${BINEXT:-}"
+          cc_bin="${CC:-cc}"
+          "$cc_bin" $cstd -O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections \
+            $(find src/build -name '*.c' | sort) -o "$bin" -lm
+          strip "$bin" 2>/dev/null || true
 
       - name: Check binary
         run: |
