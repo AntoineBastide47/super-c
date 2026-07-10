@@ -65,6 +65,17 @@ jobs:
           key: cc-apt-${{ runner.os }}-${{ hashFiles('Makefile') }}
           restore-keys: cc-apt-${{ runner.os }}-
 
+      - name: Cache mingw-w64 install (Windows)
+        if: runner.os == 'Windows'
+        id: cache-mingw
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib\mingw
+            C:\ProgramData\mingw64
+            C:\tools\mingw64
+          key: mingw-w64-${{ runner.os }}-choco-v1
+
       # Add compiler/dep installs here if ever needed (e.g. a pinned clang/gcc, libomp); their downloads
       # land in the caches above. The default build needs only the preinstalled `cc`.
       # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
@@ -72,16 +83,19 @@ jobs:
       - name: Set up mingw-w64 + make (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install -y --no-progress make mingw
+          choco install -y --no-progress make
+          if [ "${{ steps.cache-mingw.outputs.cache-hit }}" != true ]; then
+            choco install -y --no-progress mingw
+          fi
+          mingw_bin="$({ find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } | head -n 1)"
+          test -n "$mingw_bin"
+          cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
           echo "CC=gcc" >> "$GITHUB_ENV"
           echo "BINEXT=.exe" >> "$GITHUB_ENV"
 
-      - name: Toolchain info
-        run: ${CC:-cc} --version
-
       # --- Clean build (never reuse cached build files) --------------------------------------------------
       - name: Clean any build tree
-        run: rm -rf build dist *.out profile.json.gz
+        run: rm -rf build dist *.out profile.json.gz super-c.new "super-c${BINEXT:-}"
 
       # --- Bootstrap ------------------------------------------------------------------------------------
       # The build is self-hosted: `make` needs an existing super-c ($(SUPERC)) to transpile the .spc
@@ -98,11 +112,19 @@ jobs:
           if [ "${{ matrix.target }}" = windows ]; then
             gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
             7z x -y "${name}.zip" >/dev/null
-            mv "${name}.exe" super-c.exe
+            if [ -f "${name}/super-c.exe" ]; then
+              mv "${name}/super-c.exe" super-c.exe
+            else
+              mv "${name}.exe" super-c.exe
+            fi
           else
             gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
             tar xzf "${name}.tar.gz"
-            mv "${name}" super-c
+            if [ -f "${name}/super-c" ]; then
+              mv "${name}/super-c" super-c
+            else
+              mv "${name}" super-c
+            fi
             chmod +x super-c
           fi
 
@@ -113,15 +135,12 @@ jobs:
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          opt="-O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -flto -fPIE"
-          ldopt="-flto -Wl,-O2"
           test -n "$(find src/build -name '*.c' -print -quit)"
           if [ "${{ runner.os }}" = Windows ]; then
-            ${CC:-cc} -std=gnu11 -D_POSIX_C_SOURCE=200809L $opt $(find src/build -name '*.c') -o "$bin" $ldopt -lm
+            ${CC:-cc} -std=gnu11 -D_POSIX_C_SOURCE=200809L $(find src/build -name '*.c') -o "$bin" -lm
           else
-            ${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L $opt $(find src/build -name '*.c') -o "$bin" $ldopt -lm
+            ${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L $(find src/build -name '*.c') -o "$bin" -lm
           fi
-          strip "$bin"
 
       - name: Check binary
         run: |
@@ -130,20 +149,22 @@ jobs:
           test -x "./$bin"
           if [ "${{ runner.os }}" != Windows ]; then file "./$bin"; fi
 
-      # --- Package one tarball per platform (binary only) -----------------------------------------------
+      # --- Package one archive per platform -------------------------------------------------------------
       - name: Package
         run: |
           set -eu
           arch="$(uname -m)"
           name="super-c-${{ matrix.target }}-${arch}"
           bin="super-c${BINEXT:-}"
-          mkdir -p dist
+          mkdir -p "dist/${name}"
           if [ "${{ matrix.target }}" = windows ]; then
-            cp "$bin" "dist/${name}.exe"
-            ( cd dist && 7z a -bso0 "../${name}.zip" "${name}.exe" )
+            cp "$bin" "dist/${name}/super-c.exe"
+            cp -R std ffi "dist/${name}/"
+            ( cd dist && 7z a -bso0 "../${name}.zip" "${name}" )
             echo "ASSET=${name}.zip" >> "$GITHUB_ENV"
           else
-            cp "$bin" "dist/${name}"
+            cp "$bin" "dist/${name}/super-c"
+            cp -R std ffi "dist/${name}/"
             tar -C dist -czf "${name}.tar.gz" "${name}"
             echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
           fi
