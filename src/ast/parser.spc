@@ -1869,6 +1869,37 @@ extend Parser {
             }
             return true;
         }
+        if self.text_is(ns, "platform") && !self.check(TokenType::Dot) {
+            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
+            if !self.match(TokenType::LeftParen) {
+                self.errors.emit(ns.start(), ns.len(), format("attribute '@platform' requires a platform list, e.g. '@platform(windows)' or '@platform(linux | macos)'"));
+                return true;
+            }
+            let mut mask: u32 = 0;
+            let mut ok = true;
+            loop {
+                let neg = self.match(TokenType::Bang);
+                if !self.check(TokenType::Identifier) {
+                    self.error_here("expected a platform name: windows, macos, or linux");
+                    ok = false;
+                    break;
+                }
+                let p = self.advance();
+                let bit = if self.text_is(p, "windows") { 1u32; } else if self.text_is(p, "macos") { 2u32; } else if self.text_is(p, "linux") { 4u32; } else { 0u32; };
+                if bit == 0 {
+                    self.errors.emit(p.start(), p.len(), format("unknown platform '{}'; expected windows, macos, or linux", diag::span_str(self.source, p.start(), p.end())));
+                    ok = false;
+                    break;
+                }
+                let term = if neg { bit ^ 7u32; } else { bit; };
+                mask = mask | term;
+                if !self.match(TokenType::Pipe) { break; }
+            }
+            if !ok { while !self.check(TokenType::RightParen) && !self.at_end() { self.advance(); } }
+            self.expect(TokenType::RightParen, "')'");
+            out.arg = mask;
+            return true;
+        }
         if !self.text_is(ns, "c") {
             self.errors.emit(ns.start(), ns.len(), format("unknown attribute namespace; only '@c.*' and '@emit_macro' are supported"));
             self.errors.note(format("use '@c.<name>' for C attributes or bare '@emit_macro' for generic C macro emission"));
@@ -1977,6 +2008,9 @@ extend Parser {
             if attr.kind == AttrKind::ATTR_EMIT_MACRO as u8 && !generic_aggregate {
                 self.errors.emit(sp.start, sp.end - sp.start, format("'@emit_macro' may only be applied to a generic struct or enum"));
                 self.errors.note(format("write it before a declaration like 'struct Box<T> {{ ... }}' or 'enum Option<T> {{ ... }}'"));
+            }
+            if attr.kind == AttrKind::ATTR_PLATFORM as u8 && owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_IMPORT {
+                self.errors.emit(sp.start, sp.end - sp.start, format("'@platform' cannot gate an 'import'; gate the declarations instead"));
             }
         }
     }

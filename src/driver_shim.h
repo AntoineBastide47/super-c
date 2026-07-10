@@ -15,6 +15,7 @@ int sc_wexitstatus(int status);                      /* WEXITSTATUS(status) */
 char *sc_realpath(const char *path, char *resolved); /* realpath(3) */
 int sc_exe_path(char *buf, unsigned size);           /* absolute path of the running binary; 0 on success */
 int sc_getpid(void);                                 /* getpid(); for unique temp paths */
+int sc_host_platform(void);                          /* build target: 0 windows, 1 macos, 2 linux */
 
 int sc_mkdir(const char *path);   /* mkdir(path, 0775); ignores EEXIST at the caller */
 int sc_rmdir(const char *path);   /* rmdir(path) */
