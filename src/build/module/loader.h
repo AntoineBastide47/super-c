@@ -1,0 +1,495 @@
+#ifndef SUPER_MODULE__LOADER_H
+#define SUPER_MODULE__LOADER_H
+
+#include "../super_rt.h"
+#ifndef SUPER_ENUM_ast__ast__BuiltinType
+#define SUPER_ENUM_ast__ast__BuiltinType
+typedef enum { ast__ast__BuiltinType_BT_BOOL, ast__ast__BuiltinType_BT_CHAR, ast__ast__BuiltinType_BT_I8, ast__ast__BuiltinType_BT_I16, ast__ast__BuiltinType_BT_I32, ast__ast__BuiltinType_BT_I64, ast__ast__BuiltinType_BT_ISIZE, ast__ast__BuiltinType_BT_U8, ast__ast__BuiltinType_BT_U16, ast__ast__BuiltinType_BT_U32, ast__ast__BuiltinType_BT_U64, ast__ast__BuiltinType_BT_USIZE, ast__ast__BuiltinType_BT_F32, ast__ast__BuiltinType_BT_F64, ast__ast__BuiltinType_BT_C32, ast__ast__BuiltinType_BT_C64, ast__ast__BuiltinType_BT_VALIST, ast__ast__BuiltinType_BT_VOID, ast__ast__BuiltinType_BT_COUNT } ast__ast__BuiltinType;
+#endif
+typedef struct Global Global;
+typedef struct String__Global String__Global;
+typedef struct ast__ast__Ast ast__ast__Ast;
+typedef struct ast__ast__Node ast__ast__Node;
+typedef struct Vector__ast__ast__Node__Global Vector__ast__ast__Node__Global;
+typedef struct Vector__u32__Global Vector__u32__Global;
+typedef struct ast__ast__DefId ast__ast__DefId;
+typedef struct Vector__ast__ast__DefId__Global Vector__ast__ast__DefId__Global;
+typedef struct ast__ast__Ty ast__ast__Ty;
+typedef struct Vector__ast__ast__Ty__Global Vector__ast__ast__Ty__Global;
+typedef struct Map__ast__ast__Ty__u32__Global Map__ast__ast__Ty__u32__Global;
+typedef struct ast__ast__MonoUse ast__ast__MonoUse;
+typedef struct Vector__ast__ast__MonoUse__Global Vector__ast__ast__MonoUse__Global;
+typedef struct ast__ast__TyInstance ast__ast__TyInstance;
+typedef struct Vector__ast__ast__TyInstance__Global Vector__ast__ast__TyInstance__Global;
+typedef struct ast__ast__MethodInst ast__ast__MethodInst;
+typedef struct Vector__ast__ast__MethodInst__Global Vector__ast__ast__MethodInst__Global;
+typedef struct Map__ast__ast__TyInstance__u32__Global Map__ast__ast__TyInstance__u32__Global;
+typedef struct Map__ast__ast__MethodInst__u32__Global Map__ast__ast__MethodInst__u32__Global;
+typedef struct ast__ast__DynUse ast__ast__DynUse;
+typedef struct Vector__ast__ast__DynUse__Global Vector__ast__ast__DynUse__Global;
+typedef struct ast__ast__DerefUse ast__ast__DerefUse;
+typedef struct Vector__ast__ast__DerefUse__Global Vector__ast__ast__DerefUse__Global;
+typedef struct ast__ast__Attr ast__ast__Attr;
+typedef struct Vector__ast__ast__Attr__Global Vector__ast__ast__Attr__Global;
+typedef struct Vector__module__loader__Module__Global Vector__module__loader__Module__Global;
+typedef struct Vector__bool__Global Vector__bool__Global;
+typedef struct Vector__Vector__bool__Global__Global Vector__Vector__bool__Global__Global;
+typedef struct Vector__u64__Global Vector__u64__Global;
+typedef struct Map__u64__module__loader__LkEnt__Global Map__u64__module__loader__LkEnt__Global;
+typedef struct Vector__Map__u64__module__loader__LkEnt__Global__Global Vector__Map__u64__module__loader__LkEnt__Global__Global;
+typedef struct Vector__String__Global__Global Vector__String__Global__Global;
+typedef struct Vector__Vector__String__Global__Global__Global Vector__Vector__String__Global__Global__Global;
+typedef struct str str;
+typedef struct Option__String__Global Option__String__Global;
+typedef struct Option Option;
+typedef struct ast__ast__NodeList ast__ast__NodeList;
+typedef union ast__ast__NodeAs ast__ast__NodeAs;
+typedef struct ast__ast__NameData ast__ast__NameData;
+typedef struct lexer__token__Span lexer__token__Span;
+typedef struct lexer__lexer__Lexer lexer__lexer__Lexer;
+typedef struct ast__parser__Parser ast__parser__Parser;
+typedef struct ast__ast__ProgramData ast__ast__ProgramData;
+#ifndef SUPER_ENUM_ast__ast__NodeKind
+#define SUPER_ENUM_ast__ast__NodeKind
+typedef enum { ast__ast__NodeKind_NODE_NONE_KIND, ast__ast__NodeKind_NODE_PROGRAM, ast__ast__NodeKind_NODE_IDENTIFIER, ast__ast__NodeKind_NODE_LITERAL, ast__ast__NodeKind_NODE_FUNCTION, ast__ast__NodeKind_NODE_PARAMETER, ast__ast__NodeKind_NODE_STRUCT, ast__ast__NodeKind_NODE_FIELD, ast__ast__NodeKind_NODE_ENUM, ast__ast__NodeKind_NODE_VARIANT, ast__ast__NodeKind_NODE_INTERFACE, ast__ast__NodeKind_NODE_EXTEND, ast__ast__NodeKind_NODE_TYPE_ALIAS, ast__ast__NodeKind_NODE_CONST, ast__ast__NodeKind_NODE_STATIC_ASSERT, ast__ast__NodeKind_NODE_EXTERN_BLOCK, ast__ast__NodeKind_NODE_IMPORT, ast__ast__NodeKind_NODE_GENERIC_PARAM, ast__ast__NodeKind_NODE_WHERE_PREDICATE, ast__ast__NodeKind_NODE_TYPE_PATH, ast__ast__NodeKind_NODE_POINTER_TYPE, ast__ast__NodeKind_NODE_REFERENCE_TYPE, ast__ast__NodeKind_NODE_SLICE_TYPE, ast__ast__NodeKind_NODE_ARRAY_TYPE, ast__ast__NodeKind_NODE_FUNCTION_TYPE, ast__ast__NodeKind_NODE_DYN_TYPE, ast__ast__NodeKind_NODE_BLOCK, ast__ast__NodeKind_NODE_LET, ast__ast__NodeKind_NODE_RETURN, ast__ast__NodeKind_NODE_BREAK, ast__ast__NodeKind_NODE_CONTINUE, ast__ast__NodeKind_NODE_DEFER, ast__ast__NodeKind_NODE_IF, ast__ast__NodeKind_NODE_WHILE, ast__ast__NodeKind_NODE_FOR, ast__ast__NodeKind_NODE_EXPRESSION_STATEMENT, ast__ast__NodeKind_NODE_UNARY, ast__ast__NodeKind_NODE_BINARY, ast__ast__NodeKind_NODE_ASSIGNMENT, ast__ast__NodeKind_NODE_CALL, ast__ast__NodeKind_NODE_CLOSURE, ast__ast__NodeKind_NODE_INDEX, ast__ast__NodeKind_NODE_MEMBER, ast__ast__NodeKind_NODE_CAST, ast__ast__NodeKind_NODE_GENERIC_SPECIALIZATION, ast__ast__NodeKind_NODE_MATCH, ast__ast__NodeKind_NODE_MATCH_ARM, ast__ast__NodeKind_NODE_NEW, ast__ast__NodeKind_NODE_SIZEOF, ast__ast__NodeKind_NODE_ALIGNOF, ast__ast__NodeKind_NODE_VA_EXPR, ast__ast__NodeKind_NODE_ARRAY_LITERAL, ast__ast__NodeKind_NODE_STRUCT_INITIALIZER, ast__ast__NodeKind_NODE_FIELD_INITIALIZER, ast__ast__NodeKind_NODE_PATTERN_WILDCARD, ast__ast__NodeKind_NODE_PATTERN_LITERAL, ast__ast__NodeKind_NODE_PATTERN_NAME, ast__ast__NodeKind_NODE_PATTERN_TUPLE, ast__ast__NodeKind_NODE_PATTERN_STRUCT, ast__ast__NodeKind_NODE_PATTERN_FIELD, ast__ast__NodeKind_NODE_PATTERN_RANGE, ast__ast__NodeKind_NODE_PATTERN_OR, ast__ast__NodeKind_NODE_RANGE, ast__ast__NodeKind_NODE_TUPLE, ast__ast__NodeKind_NODE_TUPLE_TYPE, ast__ast__NodeKind_NODE_KIND_COUNT } ast__ast__NodeKind;
+#endif
+typedef struct ast__ast__ImportData ast__ast__ImportData;
+typedef struct ast__ast__AggregateData ast__ast__AggregateData;
+typedef struct ast__ast__ExternBlockData ast__ast__ExternBlockData;
+typedef struct ast__ast__FunctionData ast__ast__FunctionData;
+typedef struct ast__ast__TypeAliasData ast__ast__TypeAliasData;
+typedef struct ast__ast__ConstData ast__ast__ConstData;
+typedef struct ast__ast__InterfaceData ast__ast__InterfaceData;
+typedef struct Option__ptr_module__loader__LkEnt Option__ptr_module__loader__LkEnt;
+typedef struct Vector__u16__Global Vector__u16__Global;
+#ifndef SUPER_ENUM_ast__ast__TypeKind
+#define SUPER_ENUM_ast__ast__TypeKind
+typedef enum { ast__ast__TypeKind_TYPE_ERROR, ast__ast__TypeKind_TYPE_BUILTIN, ast__ast__TypeKind_TYPE_POINTER, ast__ast__TypeKind_TYPE_REFERENCE, ast__ast__TypeKind_TYPE_SLICE, ast__ast__TypeKind_TYPE_ARRAY, ast__ast__TypeKind_TYPE_FUNCTION, ast__ast__TypeKind_TYPE_STRUCT, ast__ast__TypeKind_TYPE_ENUM, ast__ast__TypeKind_TYPE_GENERIC, ast__ast__TypeKind_TYPE_INSTANCE, ast__ast__TypeKind_TYPE_OPAQUE, ast__ast__TypeKind_TYPE_DYN, ast__ast__TypeKind_TYPE_NEVER, ast__ast__TypeKind_TYPE_CONST } ast__ast__TypeKind;
+#endif
+typedef union ast__ast__TyAs ast__ast__TyAs;
+typedef struct ast__ast__FieldData ast__ast__FieldData;
+typedef struct ast__ast__VariantData ast__ast__VariantData;
+typedef struct ast__ast__ExtendData ast__ast__ExtendData;
+typedef struct ast__ast__ParameterData ast__ast__ParameterData;
+typedef struct ast__ast__CallData ast__ast__CallData;
+typedef struct ast__ast__MemberData ast__ast__MemberData;
+typedef struct Vector__usize__Global Vector__usize__Global;
+typedef struct ast__ast__SpecializationData ast__ast__SpecializationData;
+typedef struct Bytes Bytes;
+typedef struct Chars Chars;
+typedef struct Split Split;
+typedef struct Lines Lines;
+typedef struct Slice__u8 Slice__u8;
+typedef struct Range__usize Range__usize;
+typedef struct Option__ast__ast__Node Option__ast__ast__Node;
+typedef struct Option__ptr_ast__ast__Node Option__ptr_ast__ast__Node;
+typedef struct Option__usize Option__usize;
+typedef struct Result__usize__usize Result__usize__usize;
+typedef struct VecIter__ast__ast__Node VecIter__ast__ast__Node;
+typedef struct Slice__ast__ast__Node Slice__ast__ast__Node;
+typedef struct SliceMut__ast__ast__Node SliceMut__ast__ast__Node;
+typedef struct Option__u32 Option__u32;
+typedef struct Option__ptr_u32 Option__ptr_u32;
+typedef struct VecIter__u32 VecIter__u32;
+typedef struct Slice__u32 Slice__u32;
+typedef struct SliceMut__u32 SliceMut__u32;
+typedef struct Option__ast__ast__DefId Option__ast__ast__DefId;
+typedef struct Option__ptr_ast__ast__DefId Option__ptr_ast__ast__DefId;
+typedef struct VecIter__ast__ast__DefId VecIter__ast__ast__DefId;
+typedef struct Slice__ast__ast__DefId Slice__ast__ast__DefId;
+typedef struct SliceMut__ast__ast__DefId SliceMut__ast__ast__DefId;
+typedef struct Option__ast__ast__Ty Option__ast__ast__Ty;
+typedef struct Option__ptr_ast__ast__Ty Option__ptr_ast__ast__Ty;
+typedef struct VecIter__ast__ast__Ty VecIter__ast__ast__Ty;
+typedef struct Slice__ast__ast__Ty Slice__ast__ast__Ty;
+typedef struct SliceMut__ast__ast__Ty SliceMut__ast__ast__Ty;
+typedef struct MapKeys__ast__ast__Ty MapKeys__ast__ast__Ty;
+typedef struct MapValues__u32 MapValues__u32;
+typedef struct Option__ast__ast__MonoUse Option__ast__ast__MonoUse;
+typedef struct Option__ptr_ast__ast__MonoUse Option__ptr_ast__ast__MonoUse;
+typedef struct VecIter__ast__ast__MonoUse VecIter__ast__ast__MonoUse;
+typedef struct Slice__ast__ast__MonoUse Slice__ast__ast__MonoUse;
+typedef struct SliceMut__ast__ast__MonoUse SliceMut__ast__ast__MonoUse;
+typedef struct Option__ast__ast__TyInstance Option__ast__ast__TyInstance;
+typedef struct Option__ptr_ast__ast__TyInstance Option__ptr_ast__ast__TyInstance;
+typedef struct VecIter__ast__ast__TyInstance VecIter__ast__ast__TyInstance;
+typedef struct Slice__ast__ast__TyInstance Slice__ast__ast__TyInstance;
+typedef struct SliceMut__ast__ast__TyInstance SliceMut__ast__ast__TyInstance;
+typedef struct Option__ast__ast__MethodInst Option__ast__ast__MethodInst;
+typedef struct Option__ptr_ast__ast__MethodInst Option__ptr_ast__ast__MethodInst;
+typedef struct VecIter__ast__ast__MethodInst VecIter__ast__ast__MethodInst;
+typedef struct Slice__ast__ast__MethodInst Slice__ast__ast__MethodInst;
+typedef struct SliceMut__ast__ast__MethodInst SliceMut__ast__ast__MethodInst;
+typedef struct MapKeys__ast__ast__TyInstance MapKeys__ast__ast__TyInstance;
+typedef struct MapKeys__ast__ast__MethodInst MapKeys__ast__ast__MethodInst;
+typedef struct Option__ast__ast__DynUse Option__ast__ast__DynUse;
+typedef struct Option__ptr_ast__ast__DynUse Option__ptr_ast__ast__DynUse;
+typedef struct VecIter__ast__ast__DynUse VecIter__ast__ast__DynUse;
+typedef struct Slice__ast__ast__DynUse Slice__ast__ast__DynUse;
+typedef struct SliceMut__ast__ast__DynUse SliceMut__ast__ast__DynUse;
+typedef struct Option__ast__ast__DerefUse Option__ast__ast__DerefUse;
+typedef struct Option__ptr_ast__ast__DerefUse Option__ptr_ast__ast__DerefUse;
+typedef struct VecIter__ast__ast__DerefUse VecIter__ast__ast__DerefUse;
+typedef struct Slice__ast__ast__DerefUse Slice__ast__ast__DerefUse;
+typedef struct SliceMut__ast__ast__DerefUse SliceMut__ast__ast__DerefUse;
+typedef struct Option__ast__ast__Attr Option__ast__ast__Attr;
+typedef struct Option__ptr_ast__ast__Attr Option__ptr_ast__ast__Attr;
+typedef struct VecIter__ast__ast__Attr VecIter__ast__ast__Attr;
+typedef struct Slice__ast__ast__Attr Slice__ast__ast__Attr;
+typedef struct SliceMut__ast__ast__Attr SliceMut__ast__ast__Attr;
+typedef struct Option__module__loader__Module Option__module__loader__Module;
+typedef struct Option__ptr_module__loader__Module Option__ptr_module__loader__Module;
+typedef struct VecIter__module__loader__Module VecIter__module__loader__Module;
+typedef struct Slice__module__loader__Module Slice__module__loader__Module;
+typedef struct SliceMut__module__loader__Module SliceMut__module__loader__Module;
+typedef struct Option__bool Option__bool;
+typedef struct Option__ptr_bool Option__ptr_bool;
+typedef struct VecIter__bool VecIter__bool;
+typedef struct Slice__bool Slice__bool;
+typedef struct SliceMut__bool SliceMut__bool;
+typedef struct Option__Vector__bool__Global Option__Vector__bool__Global;
+typedef struct Option__ptr_Vector__bool__Global Option__ptr_Vector__bool__Global;
+typedef struct VecIter__Vector__bool__Global VecIter__Vector__bool__Global;
+typedef struct Slice__Vector__bool__Global Slice__Vector__bool__Global;
+typedef struct SliceMut__Vector__bool__Global SliceMut__Vector__bool__Global;
+typedef struct Option__u64 Option__u64;
+typedef struct Option__ptr_u64 Option__ptr_u64;
+typedef struct VecIter__u64 VecIter__u64;
+typedef struct Slice__u64 Slice__u64;
+typedef struct SliceMut__u64 SliceMut__u64;
+typedef struct Option__module__loader__LkEnt Option__module__loader__LkEnt;
+typedef struct MapKeys__u64 MapKeys__u64;
+typedef struct MapValues__module__loader__LkEnt MapValues__module__loader__LkEnt;
+typedef struct Option__Map__u64__module__loader__LkEnt__Global Option__Map__u64__module__loader__LkEnt__Global;
+typedef struct Option__ptr_Map__u64__module__loader__LkEnt__Global Option__ptr_Map__u64__module__loader__LkEnt__Global;
+typedef struct VecIter__Map__u64__module__loader__LkEnt__Global VecIter__Map__u64__module__loader__LkEnt__Global;
+typedef struct Slice__Map__u64__module__loader__LkEnt__Global Slice__Map__u64__module__loader__LkEnt__Global;
+typedef struct SliceMut__Map__u64__module__loader__LkEnt__Global SliceMut__Map__u64__module__loader__LkEnt__Global;
+typedef struct Option__ptr_String__Global Option__ptr_String__Global;
+typedef struct VecIter__String__Global VecIter__String__Global;
+typedef struct Slice__String__Global Slice__String__Global;
+typedef struct SliceMut__String__Global SliceMut__String__Global;
+typedef struct Option__Vector__String__Global__Global Option__Vector__String__Global__Global;
+typedef struct Option__ptr_Vector__String__Global__Global Option__ptr_Vector__String__Global__Global;
+typedef struct VecIter__Vector__String__Global__Global VecIter__Vector__String__Global__Global;
+typedef struct Slice__Vector__String__Global__Global Slice__Vector__String__Global__Global;
+typedef struct SliceMut__Vector__String__Global__Global SliceMut__Vector__String__Global__Global;
+typedef struct Option__u16 Option__u16;
+typedef struct Option__ptr_u16 Option__ptr_u16;
+typedef struct VecIter__u16 VecIter__u16;
+typedef struct Slice__u16 Slice__u16;
+typedef struct SliceMut__u16 SliceMut__u16;
+typedef struct Option__ptr_usize Option__ptr_usize;
+typedef struct VecIter__usize VecIter__usize;
+typedef struct Slice__usize Slice__usize;
+typedef struct SliceMut__usize SliceMut__usize;
+typedef struct Option__ptr_u8 Option__ptr_u8;
+#include "../stdio.h"
+#include "../stdlib.h"
+#include "../string.h"
+#include "../lexer/token.h"
+#include "../ast/ast.h"
+#include "../driver_shim.h"
+#include "../lexer/lexer.h"
+#include "../ast/parser.h"
+#include "../__std/interfaces.h"
+#include "../__std/map.h"
+#include "../__std/option.h"
+#include "../__std/slice.h"
+#include "../__std/str.h"
+#include "../__std/string.h"
+#include "../__std/vector.h"
+
+typedef struct module__loader__Module module__loader__Module;
+typedef struct module__loader__Package module__loader__Package;
+typedef struct module__loader__DirCache module__loader__DirCache;
+typedef struct module__loader__ParseResult module__loader__ParseResult;
+typedef struct module__loader__LookupHit module__loader__LookupHit;
+typedef struct module__loader__LkEnt module__loader__LkEnt;
+typedef struct module__loader__RealBuf module__loader__RealBuf;
+typedef struct Vector__module__loader__Module__Global Vector__module__loader__Module__Global;
+typedef struct Map__u64__module__loader__LkEnt__Global Map__u64__module__loader__LkEnt__Global;
+typedef struct Vector__Map__u64__module__loader__LkEnt__Global__Global Vector__Map__u64__module__loader__LkEnt__Global__Global;
+typedef struct Option__ptr_module__loader__LkEnt Option__ptr_module__loader__LkEnt;
+typedef struct Option__module__loader__Module Option__module__loader__Module;
+typedef struct Option__ptr_module__loader__Module Option__ptr_module__loader__Module;
+typedef struct VecIter__module__loader__Module VecIter__module__loader__Module;
+typedef struct Slice__module__loader__Module Slice__module__loader__Module;
+typedef struct SliceMut__module__loader__Module SliceMut__module__loader__Module;
+typedef struct Option__module__loader__LkEnt Option__module__loader__LkEnt;
+typedef struct MapValues__module__loader__LkEnt MapValues__module__loader__LkEnt;
+typedef struct Option__Map__u64__module__loader__LkEnt__Global Option__Map__u64__module__loader__LkEnt__Global;
+typedef struct Option__ptr_Map__u64__module__loader__LkEnt__Global Option__ptr_Map__u64__module__loader__LkEnt__Global;
+typedef struct VecIter__Map__u64__module__loader__LkEnt__Global VecIter__Map__u64__module__loader__LkEnt__Global;
+typedef struct Slice__Map__u64__module__loader__LkEnt__Global Slice__Map__u64__module__loader__LkEnt__Global;
+typedef struct SliceMut__Map__u64__module__loader__LkEnt__Global SliceMut__Map__u64__module__loader__LkEnt__Global;
+
+struct module__loader__Module {
+  String__Global path;
+  String__Global file;
+  String__Global source;
+  ast__ast__Ast ast;
+  bool has_ast;
+  bool prelude;
+};
+struct Vector__module__loader__Module__Global {
+  module__loader__Module *ptr;
+  size_t len;
+  size_t cap;
+  Global alloc;
+};
+struct Vector__Map__u64__module__loader__LkEnt__Global__Global {
+  Map__u64__module__loader__LkEnt__Global *ptr;
+  size_t len;
+  size_t cap;
+  Global alloc;
+};
+struct module__loader__DirCache {
+  Vector__String__Global__Global dirs;
+  Vector__Vector__String__Global__Global__Global entries;
+  Vector__bool__Global ok;
+};
+struct module__loader__Package {
+  Vector__module__loader__Module__Global modules;
+  String__Global root_dir;
+  String__Global std_root;
+  bool ok;
+  uint16_t core_module;
+  bool core_seeded;
+  uint32_t builtin_decls[18];
+  Vector__Vector__bool__Global__Global method_used;
+  void *ceval;
+  uint16_t override_mod;
+  ast__ast__Ast *override_ast;
+  Vector__u64__Global mod_refs;
+  size_t mod_refs_w;
+  bool mod_refs_ready;
+  Vector__Map__u64__module__loader__LkEnt__Global__Global lk_index;
+  Vector__bool__Global lk_built;
+  module__loader__DirCache dir_cache;
+};
+struct module__loader__ParseResult {
+  ast__ast__Ast ast;
+  bool ok;
+};
+struct module__loader__LookupHit {
+  uint32_t node;
+  uint16_t mid;
+};
+struct module__loader__LkEnt {
+  uint32_t node;
+  uint32_t start;
+  uint32_t len;
+};
+struct module__loader__RealBuf {
+  char b[4096];
+};
+struct Map__u64__module__loader__LkEnt__Global {
+  uint64_t *keys;
+  module__loader__LkEnt *vals;
+  uint8_t *used;
+  size_t len;
+  size_t cap;
+  Global alloc;
+};
+struct Option__ptr_module__loader__LkEnt {
+  OptionTag tag;
+  union {
+    struct { const module__loader__LkEnt *_0; } Some;
+  } payload;
+};
+struct Option__module__loader__Module {
+  OptionTag tag;
+  union {
+    struct { module__loader__Module _0; } Some;
+  } payload;
+};
+struct Option__ptr_module__loader__Module {
+  OptionTag tag;
+  union {
+    struct { const module__loader__Module *_0; } Some;
+  } payload;
+};
+struct VecIter__module__loader__Module {
+  const module__loader__Module *data;
+  size_t idx;
+  size_t stop;
+};
+struct Slice__module__loader__Module {
+  const module__loader__Module *ptr;
+  size_t len;
+};
+struct SliceMut__module__loader__Module {
+  module__loader__Module *ptr;
+  size_t len;
+};
+struct Option__module__loader__LkEnt {
+  OptionTag tag;
+  union {
+    struct { module__loader__LkEnt _0; } Some;
+  } payload;
+};
+struct MapValues__module__loader__LkEnt {
+  const module__loader__LkEnt *vals;
+  const uint8_t *used;
+  size_t idx;
+  size_t cap;
+};
+struct Option__Map__u64__module__loader__LkEnt__Global {
+  OptionTag tag;
+  union {
+    struct { Map__u64__module__loader__LkEnt__Global _0; } Some;
+  } payload;
+};
+struct Option__ptr_Map__u64__module__loader__LkEnt__Global {
+  OptionTag tag;
+  union {
+    struct { const Map__u64__module__loader__LkEnt__Global *_0; } Some;
+  } payload;
+};
+struct VecIter__Map__u64__module__loader__LkEnt__Global {
+  const Map__u64__module__loader__LkEnt__Global *data;
+  size_t idx;
+  size_t stop;
+};
+struct Slice__Map__u64__module__loader__LkEnt__Global {
+  const Map__u64__module__loader__LkEnt__Global *ptr;
+  size_t len;
+};
+struct SliceMut__Map__u64__module__loader__LkEnt__Global {
+  Map__u64__module__loader__LkEnt__Global *ptr;
+  size_t len;
+};
+
+void module__loader__Module__free(module__loader__Module *const self);
+module__loader__DirCache module__loader__DirCache__new(void);
+bool module__loader__DirCache__exists(module__loader__DirCache *const self, str const path);
+void module__loader__DirCache__free(module__loader__DirCache *const self);
+module__loader__Package module__loader__Package__new(void);
+int32_t module__loader__Package__find(const module__loader__Package *const self, str const path);
+void module__loader__Package__seed_core(module__loader__Package *const self);
+uint32_t module__loader__Package__builtin_decl(const module__loader__Package *const self, ast__ast__BuiltinType const b);
+int32_t module__loader__Package__builtin_of_decl(const module__loader__Package *const self, uint16_t const module, uint32_t const node);
+void module__loader__Package__mark_method_used(module__loader__Package *const self, ast__ast__DefId const d);
+bool module__loader__Package__method_used_get(const module__loader__Package *const self, ast__ast__DefId const d);
+void module__loader__Package__ensure_lk_index(module__loader__Package *const self, uint16_t const mid);
+uint32_t module__loader__Package__lookup(const module__loader__Package *const self, uint16_t const mid, str const name, bool const want_type);
+module__loader__LookupHit module__loader__Package__prelude_lookup(const module__loader__Package *const self, str const name, bool const want_type);
+module__loader__LookupHit module__loader__Package__glob_lookup(const module__loader__Package *const self, uint16_t const mid, str const name, bool const want_type);
+Vector__u16__Global module__loader__Package__import_closure(const module__loader__Package *const self, uint16_t const mid);
+void module__loader__Package__build_mod_refs(module__loader__Package *const self);
+uint16_t module__loader__Package__instance_home(const module__loader__Package *const self, const ast__ast__Ast *const a, const ast__ast__TyInstance *const it);
+uint16_t module__loader__Package__instance_home_mid(const module__loader__Package *const self, uint16_t const am, const ast__ast__TyInstance *const it);
+void module__loader__Package__free(module__loader__Package *const self);
+void module__loader__package_propagate_instances(module__loader__Package *const p);
+void module__loader__package_emit_order(const module__loader__Package *const p, uint16_t *const order);
+module__loader__Package module__loader__package_load(const char *const root_file, const char *const std_dir, bool const bootstrap_tags);
+module__loader__Package module__loader__package_from_source(const char *const src, size_t const len, const char *const std_dir);
+Vector__module__loader__Module__Global Vector__module__loader__Module__Global__new_in(Global const alloc);
+Vector__module__loader__Module__Global Vector__module__loader__Module__Global__with_capacity_in(Global const alloc, size_t const cap);
+size_t Vector__module__loader__Module__Global__len(const Vector__module__loader__Module__Global *const self);
+void Vector__module__loader__Module__Global__reserve(Vector__module__loader__Module__Global *const self, size_t const additional);
+void Vector__module__loader__Module__Global__push(Vector__module__loader__Module__Global *const self, module__loader__Module value);
+const module__loader__Module *Vector__module__loader__Module__Global__at(const Vector__module__loader__Module__Global *const self, size_t const index);
+Option__ptr_module__loader__Module Vector__module__loader__Module__Global__get(const Vector__module__loader__Module__Global *const self, size_t const index);
+void Vector__module__loader__Module__Global__set(Vector__module__loader__Module__Global *const self, size_t const index, module__loader__Module value);
+void Vector__module__loader__Module__Global__clear(Vector__module__loader__Module__Global *const self);
+void Vector__module__loader__Module__Global__truncate(Vector__module__loader__Module__Global *const self, size_t const new_len);
+const module__loader__Module *Vector__module__loader__Module__Global__as_ptr(const Vector__module__loader__Module__Global *const self);
+void Vector__module__loader__Module__Global__swap(Vector__module__loader__Module__Global *const self, size_t const i, size_t const j);
+Vector__module__loader__Module__Global Vector__module__loader__Module__Global__new(void);
+void Vector__module__loader__Module__Global__free(Vector__module__loader__Module__Global *const self);
+Vector__module__loader__Module__Global Vector__module__loader__Module__Global__default_(void);
+const module__loader__Module *Vector__module__loader__Module__Global__index(const Vector__module__loader__Module__Global *const self, size_t const i);
+Slice__module__loader__Module Vector__module__loader__Module__Global__index_range(const Vector__module__loader__Module__Global *const self, Range__usize const r);
+module__loader__Module *Vector__module__loader__Module__Global__index_mut(Vector__module__loader__Module__Global *const self, size_t const i);
+SliceMut__module__loader__Module Vector__module__loader__Module__Global__index_range_mut(Vector__module__loader__Module__Global *const self, Range__usize const r);
+Map__u64__module__loader__LkEnt__Global Map__u64__module__loader__LkEnt__Global__new_in(Global const alloc);
+size_t Map__u64__module__loader__LkEnt__Global__len(const Map__u64__module__loader__LkEnt__Global *const self);
+bool Map__u64__module__loader__LkEnt__Global__is_empty(const Map__u64__module__loader__LkEnt__Global *const self);
+void Map__u64__module__loader__LkEnt__Global__insert(Map__u64__module__loader__LkEnt__Global *const self, uint64_t const key, module__loader__LkEnt const value);
+Option__ptr_module__loader__LkEnt Map__u64__module__loader__LkEnt__Global__get(const Map__u64__module__loader__LkEnt__Global *const self, const uint64_t *const key);
+bool Map__u64__module__loader__LkEnt__Global__contains_key(const Map__u64__module__loader__LkEnt__Global *const self, const uint64_t *const key);
+Option__module__loader__LkEnt Map__u64__module__loader__LkEnt__Global__remove(Map__u64__module__loader__LkEnt__Global *const self, const uint64_t *const key);
+Map__u64__module__loader__LkEnt__Global Map__u64__module__loader__LkEnt__Global__new(void);
+void Map__u64__module__loader__LkEnt__Global__free(Map__u64__module__loader__LkEnt__Global *const self);
+MapKeys__u64 Map__u64__module__loader__LkEnt__Global__keys(const Map__u64__module__loader__LkEnt__Global *const self);
+Vector__Map__u64__module__loader__LkEnt__Global__Global Vector__Map__u64__module__loader__LkEnt__Global__Global__new_in(Global const alloc);
+Vector__Map__u64__module__loader__LkEnt__Global__Global Vector__Map__u64__module__loader__LkEnt__Global__Global__with_capacity_in(Global const alloc, size_t const cap);
+size_t Vector__Map__u64__module__loader__LkEnt__Global__Global__len(const Vector__Map__u64__module__loader__LkEnt__Global__Global *const self);
+void Vector__Map__u64__module__loader__LkEnt__Global__Global__reserve(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const additional);
+void Vector__Map__u64__module__loader__LkEnt__Global__Global__push(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, Map__u64__module__loader__LkEnt__Global value);
+const Map__u64__module__loader__LkEnt__Global *Vector__Map__u64__module__loader__LkEnt__Global__Global__at(const Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const index);
+Option__ptr_Map__u64__module__loader__LkEnt__Global Vector__Map__u64__module__loader__LkEnt__Global__Global__get(const Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const index);
+void Vector__Map__u64__module__loader__LkEnt__Global__Global__set(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const index, Map__u64__module__loader__LkEnt__Global value);
+void Vector__Map__u64__module__loader__LkEnt__Global__Global__clear(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self);
+void Vector__Map__u64__module__loader__LkEnt__Global__Global__truncate(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const new_len);
+const Map__u64__module__loader__LkEnt__Global *Vector__Map__u64__module__loader__LkEnt__Global__Global__as_ptr(const Vector__Map__u64__module__loader__LkEnt__Global__Global *const self);
+void Vector__Map__u64__module__loader__LkEnt__Global__Global__swap(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const i, size_t const j);
+Vector__Map__u64__module__loader__LkEnt__Global__Global Vector__Map__u64__module__loader__LkEnt__Global__Global__new(void);
+void Vector__Map__u64__module__loader__LkEnt__Global__Global__free(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self);
+Vector__Map__u64__module__loader__LkEnt__Global__Global Vector__Map__u64__module__loader__LkEnt__Global__Global__default_(void);
+const Map__u64__module__loader__LkEnt__Global *Vector__Map__u64__module__loader__LkEnt__Global__Global__index(const Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const i);
+Slice__Map__u64__module__loader__LkEnt__Global Vector__Map__u64__module__loader__LkEnt__Global__Global__index_range(const Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, Range__usize const r);
+Map__u64__module__loader__LkEnt__Global *Vector__Map__u64__module__loader__LkEnt__Global__Global__index_mut(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, size_t const i);
+SliceMut__Map__u64__module__loader__LkEnt__Global Vector__Map__u64__module__loader__LkEnt__Global__Global__index_range_mut(Vector__Map__u64__module__loader__LkEnt__Global__Global *const self, Range__usize const r);
+Option__ptr_module__loader__LkEnt Option__ptr_module__loader__LkEnt__some(const module__loader__LkEnt *const value);
+Option__ptr_module__loader__LkEnt Option__ptr_module__loader__LkEnt__none(void);
+bool Option__ptr_module__loader__LkEnt__is_some(const Option__ptr_module__loader__LkEnt *const self);
+bool Option__ptr_module__loader__LkEnt__is_none(const Option__ptr_module__loader__LkEnt *const self);
+Option__ptr_module__loader__LkEnt Option__ptr_module__loader__LkEnt__default_(void);
+Option__module__loader__Module Option__module__loader__Module__some(module__loader__Module value);
+Option__module__loader__Module Option__module__loader__Module__none(void);
+bool Option__module__loader__Module__is_some(const Option__module__loader__Module *const self);
+bool Option__module__loader__Module__is_none(const Option__module__loader__Module *const self);
+Option__module__loader__Module Option__module__loader__Module__default_(void);
+void Option__module__loader__Module__free(Option__module__loader__Module *const self);
+Option__ptr_module__loader__Module Option__ptr_module__loader__Module__some(const module__loader__Module *const value);
+Option__ptr_module__loader__Module Option__ptr_module__loader__Module__none(void);
+bool Option__ptr_module__loader__Module__is_some(const Option__ptr_module__loader__Module *const self);
+bool Option__ptr_module__loader__Module__is_none(const Option__ptr_module__loader__Module *const self);
+Option__ptr_module__loader__Module Option__ptr_module__loader__Module__default_(void);
+Option__ptr_module__loader__Module VecIter__module__loader__Module__next(VecIter__module__loader__Module *const self);
+size_t Slice__module__loader__Module__len(const Slice__module__loader__Module *const self);
+const module__loader__Module *Slice__module__loader__Module__as_ptr(const Slice__module__loader__Module *const self);
+const module__loader__Module *Slice__module__loader__Module__index(const Slice__module__loader__Module *const self, size_t const i);
+Slice__module__loader__Module Slice__module__loader__Module__index_range(const Slice__module__loader__Module *const self, Range__usize const r);
+size_t SliceMut__module__loader__Module__len(const SliceMut__module__loader__Module *const self);
+module__loader__Module *SliceMut__module__loader__Module__as_mut_ptr(const SliceMut__module__loader__Module *const self);
+const module__loader__Module *SliceMut__module__loader__Module__index(const SliceMut__module__loader__Module *const self, size_t const i);
+Slice__module__loader__Module SliceMut__module__loader__Module__index_range(const SliceMut__module__loader__Module *const self, Range__usize const r);
+module__loader__Module *SliceMut__module__loader__Module__index_mut(SliceMut__module__loader__Module *const self, size_t const i);
+SliceMut__module__loader__Module SliceMut__module__loader__Module__index_range_mut(SliceMut__module__loader__Module *const self, Range__usize const r);
+Option__module__loader__LkEnt Option__module__loader__LkEnt__some(module__loader__LkEnt const value);
+Option__module__loader__LkEnt Option__module__loader__LkEnt__none(void);
+bool Option__module__loader__LkEnt__is_some(const Option__module__loader__LkEnt *const self);
+bool Option__module__loader__LkEnt__is_none(const Option__module__loader__LkEnt *const self);
+Option__module__loader__LkEnt Option__module__loader__LkEnt__default_(void);
+Option__ptr_module__loader__LkEnt MapValues__module__loader__LkEnt__next(MapValues__module__loader__LkEnt *const self);
+Option__Map__u64__module__loader__LkEnt__Global Option__Map__u64__module__loader__LkEnt__Global__some(Map__u64__module__loader__LkEnt__Global value);
+Option__Map__u64__module__loader__LkEnt__Global Option__Map__u64__module__loader__LkEnt__Global__none(void);
+bool Option__Map__u64__module__loader__LkEnt__Global__is_some(const Option__Map__u64__module__loader__LkEnt__Global *const self);
+bool Option__Map__u64__module__loader__LkEnt__Global__is_none(const Option__Map__u64__module__loader__LkEnt__Global *const self);
+Option__Map__u64__module__loader__LkEnt__Global Option__Map__u64__module__loader__LkEnt__Global__default_(void);
+void Option__Map__u64__module__loader__LkEnt__Global__free(Option__Map__u64__module__loader__LkEnt__Global *const self);
+Option__ptr_Map__u64__module__loader__LkEnt__Global Option__ptr_Map__u64__module__loader__LkEnt__Global__some(const Map__u64__module__loader__LkEnt__Global *const value);
+Option__ptr_Map__u64__module__loader__LkEnt__Global Option__ptr_Map__u64__module__loader__LkEnt__Global__none(void);
+bool Option__ptr_Map__u64__module__loader__LkEnt__Global__is_some(const Option__ptr_Map__u64__module__loader__LkEnt__Global *const self);
+bool Option__ptr_Map__u64__module__loader__LkEnt__Global__is_none(const Option__ptr_Map__u64__module__loader__LkEnt__Global *const self);
+Option__ptr_Map__u64__module__loader__LkEnt__Global Option__ptr_Map__u64__module__loader__LkEnt__Global__default_(void);
+Option__ptr_Map__u64__module__loader__LkEnt__Global VecIter__Map__u64__module__loader__LkEnt__Global__next(VecIter__Map__u64__module__loader__LkEnt__Global *const self);
+size_t Slice__Map__u64__module__loader__LkEnt__Global__len(const Slice__Map__u64__module__loader__LkEnt__Global *const self);
+const Map__u64__module__loader__LkEnt__Global *Slice__Map__u64__module__loader__LkEnt__Global__as_ptr(const Slice__Map__u64__module__loader__LkEnt__Global *const self);
+const Map__u64__module__loader__LkEnt__Global *Slice__Map__u64__module__loader__LkEnt__Global__index(const Slice__Map__u64__module__loader__LkEnt__Global *const self, size_t const i);
+Slice__Map__u64__module__loader__LkEnt__Global Slice__Map__u64__module__loader__LkEnt__Global__index_range(const Slice__Map__u64__module__loader__LkEnt__Global *const self, Range__usize const r);
+size_t SliceMut__Map__u64__module__loader__LkEnt__Global__len(const SliceMut__Map__u64__module__loader__LkEnt__Global *const self);
+Map__u64__module__loader__LkEnt__Global *SliceMut__Map__u64__module__loader__LkEnt__Global__as_mut_ptr(const SliceMut__Map__u64__module__loader__LkEnt__Global *const self);
+const Map__u64__module__loader__LkEnt__Global *SliceMut__Map__u64__module__loader__LkEnt__Global__index(const SliceMut__Map__u64__module__loader__LkEnt__Global *const self, size_t const i);
+Slice__Map__u64__module__loader__LkEnt__Global SliceMut__Map__u64__module__loader__LkEnt__Global__index_range(const SliceMut__Map__u64__module__loader__LkEnt__Global *const self, Range__usize const r);
+Map__u64__module__loader__LkEnt__Global *SliceMut__Map__u64__module__loader__LkEnt__Global__index_mut(SliceMut__Map__u64__module__loader__LkEnt__Global *const self, size_t const i);
+SliceMut__Map__u64__module__loader__LkEnt__Global SliceMut__Map__u64__module__loader__LkEnt__Global__index_range_mut(SliceMut__Map__u64__module__loader__LkEnt__Global *const self, Range__usize const r);
+
+__attribute__((unused)) static const int32_t module__loader__SEEK_END = 2;
+__attribute__((unused)) static const size_t module__loader__BT_COUNT_N = 18ULL;
+
+#endif
