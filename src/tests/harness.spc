@@ -329,7 +329,7 @@ pub fn compile_and_run(src: str) RunResult {
     if unsafe shim::sc_mkdir(dirp) != 0 { return r; }
     let mut spc = Path512 {};
     unsafe stdio::snprintf((&mut spc.b[0]) as *mut char, 512, "%s/main.spc".ptr() as *const char, dirp);
-    let wf = stdio::fopen(str::from_cstr((&spc.b[0]) as *const char), "w");
+    let wf = stdio::fopen(str::from_cstr((&spc.b[0]) as *const char), "wb"); // binary: no Windows CRLF in emitted .spc sources
     if wf == null { rm_dir(dirp); return r; }
     if src.len() > 0 { let _ = unsafe stdio::fwrite(src.ptr(), 1, src.len(), wf); }
     unsafe stdio::fclose(wf);
