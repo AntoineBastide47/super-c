@@ -1155,8 +1155,8 @@ extend TypeChecker {
     }
 
     fn tc_dyn_same(self: &mut Self, a: &Ty, b: &Ty) bool {
-        let as2 = self.tc_dyn_fn_sig(&*a);
-        let bs = self.tc_dyn_fn_sig(&*b);
+        let as2 = self.tc_dyn_fn_sig(a);
+        let bs = self.tc_dyn_fn_sig(b);
         if as2 != TYPE_NONE != (bs != TYPE_NONE) {
             return false;
         }
@@ -3689,7 +3689,7 @@ extend TypeChecker {
             return;
         }
         // A reference-typed binding never owns its pointee: passing it borrows through it (an
-        // implicit reborrow -- the same pointer `&*p` would produce), so the binding is not
+        // implicit reborrow -- the same pointer `p` would produce), so the binding is not
         // consumed. Shared `&` is freely duplicable; `&mut` stays usable after the callee returns.
         let ek = self.type_at(unsafe (*a).type_of(expr)).kind;
         if ek == TypeKind::TYPE_REFERENCE || ek == TypeKind::TYPE_POINTER {

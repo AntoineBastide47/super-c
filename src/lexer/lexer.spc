@@ -134,16 +134,16 @@ fn add_token(l: &mut Lexer, token_type: TokenType) void {
 }
 
 fn add_match(l: &mut Lexer, expected: u8, matched: TokenType, unmatched: TokenType) void {
-    let kind = if match_byte(&mut *l, expected) {
+    let kind = if match_byte(l, expected) {
         matched;
     } else {
         unmatched;
     };
-    add_token(&mut *l, kind);
+    add_token(l, kind);
 }
 
 fn peek_byte(l: &Lexer) u8 {
-    if is_eof(&*l) {
+    if is_eof(l) {
         return EOF_CH;
     }
     return unsafe l.bytes[l.current];
@@ -157,7 +157,7 @@ fn peek_byte_n(l: &Lexer, n: usize) u8 {
 }
 
 fn match_byte(l: &mut Lexer, expected: u8) bool {
-    if peek_byte(&*l) != expected {
+    if peek_byte(l) != expected {
         return false;
     }
     l.current = l.current + 1;
@@ -373,14 +373,14 @@ fn identifier(l: &mut Lexer) void {
     if identifier_len <= 9 {
         kind = keywords(unsafe (l.bytes + l.start), identifier_len);
     }
-    add_token(&mut *l, kind);
+    add_token(l, kind);
 }
 
 fn validate_utf8_at(l: &mut Lexer, i: *mut usize) bool {
     let mut size: usize = 0;
-    decode_at_b(&*l, unsafe l.bytes[unsafe *i], unsafe *i, &mut size);
+    decode_at_b(l, unsafe l.bytes[unsafe *i], unsafe *i, &mut size);
     if size == 0 {
-        lexer_error_at(&mut *l, unsafe *i, 1, "source is not valid UTF-8");
+        lexer_error_at(l, unsafe *i, 1, "source is not valid UTF-8");
         unsafe *i = unsafe *i + 1;
         return false;
     }
@@ -407,10 +407,10 @@ fn line_comment(l: &mut Lexer) void {
             break;
         }
         if b == b'\0' {
-            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments");
+            lexer_error_at(l, i, 1, "NUL byte is not allowed in comments");
             i = i + 1;
         } else if b >= 0x80u8 {
-            validate_utf8_at(&mut *l, &mut i);
+            validate_utf8_at(l, &mut i);
         } else {
             i = i + 1;
         }
@@ -434,23 +434,23 @@ fn block_comment(l: &mut Lexer) void {
                 return;
             }
         } else if b == b'\0' {
-            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in comments");
+            lexer_error_at(l, i, 1, "NUL byte is not allowed in comments");
             i = i + 1;
         } else if b >= 0x80u8 {
-            validate_utf8_at(&mut *l, &mut i);
+            validate_utf8_at(l, &mut i);
         } else {
             i = i + 1;
         }
     }
     l.current = i;
     let start = l.start;
-    lexer_error_at(&mut *l, start, 2, "unterminated block comment");
+    lexer_error_at(l, start, 2, "unterminated block comment");
 }
 
 fn escape(l: &mut Lexer, byte_character: bool) u32 {
-    if is_eof(&*l) {
+    if is_eof(l) {
         let current = l.current;
-        lexer_error_at(&mut *l, current, 0, "unterminated escape sequence");
+        lexer_error_at(l, current, 0, "unterminated escape sequence");
         return UINT32_MAX;
     }
     let at = l.current - 1;
@@ -484,7 +484,7 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
             return value;
         }
         let err_len = l.current - at;
-        lexer_error_at(&mut *l, at, err_len, "\\x escape requires exactly two hexadecimal digits");
+        lexer_error_at(l, at, err_len, "\\x escape requires exactly two hexadecimal digits");
         while l.current < l.len && l.current < at + 4 && is_hex(unsafe l.bytes[l.current]) {
             l.current = l.current + 1;
         }
@@ -492,44 +492,44 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
     }
     if escaped == b'u' {
         if byte_character {
-            if match_byte(&mut *l, b'{') {
-                while is_hex(peek_byte(&*l)) {
+            if match_byte(l, b'{') {
+                while is_hex(peek_byte(l)) {
                     l.current = l.current + 1;
                 }
-                match_byte(&mut *l, b'}');
+                match_byte(l, b'}');
             }
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escapes are not allowed in byte character literals");
+            lexer_error_at(l, at, err_len, "Unicode escapes are not allowed in byte character literals");
             return UINT32_MAX;
         }
-        if !match_byte(&mut *l, b'{') {
+        if !match_byte(l, b'{') {
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escape must use \\u{...} syntax");
+            lexer_error_at(l, at, err_len, "Unicode escape must use \\u{...} syntax");
             return UINT32_MAX;
         }
         let mut value: u32 = 0;
         let mut digits: usize = 0;
-        while is_hex(peek_byte(&*l)) {
+        while is_hex(peek_byte(l)) {
             if digits < 6 {
-                value = value << 4 | hex_value(peek_byte(&*l)) as u32;
+                value = value << 4 | hex_value(peek_byte(l)) as u32;
             }
             digits = digits + 1;
             l.current = l.current + 1;
         }
-        if digits == 0 || digits > 6 || !match_byte(&mut *l, b'}') {
+        if digits == 0 || digits > 6 || !match_byte(l, b'}') {
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escape requires 1 to 6 hexadecimal digits");
+            lexer_error_at(l, at, err_len, "Unicode escape requires 1 to 6 hexadecimal digits");
             return UINT32_MAX;
         }
         if value > 0x10FFFF || value >= 0xD800 && value <= 0xDFFF {
             let err_len = l.current - at;
-            lexer_error_at(&mut *l, at, err_len, "Unicode escape is not a valid Unicode scalar value");
+            lexer_error_at(l, at, err_len, "Unicode escape is not a valid Unicode scalar value");
             return UINT32_MAX;
         }
         return value;
     }
     let err_len = l.current - at;
-    lexer_error_at(&mut *l, at, err_len, "unknown escape sequence");
+    lexer_error_at(l, at, err_len, "unknown escape sequence");
     return UINT32_MAX;
 }
 
@@ -540,16 +540,16 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
         i = i + 1;
         if b == b'"' {
             l.current = i;
-            add_token(&mut *l, kind);
+            add_token(l, kind);
             return;
         }
         if b == '\\' as u8 {
             l.current = i;
-            escape(&mut *l, false);
+            escape(l, false);
             i = l.current;
         } else if b == b'\n' || b == b'\r' {
             l.current = i - 1;
-            lexer_error(&mut *l, "unterminated string literal");
+            lexer_error(l, "unterminated string literal");
             while l.current < l.len {
                 let recovery = unsafe l.bytes[l.current];
                 l.current = l.current + 1;
@@ -559,14 +559,14 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
             }
             return;
         } else if b == b'\0' {
-            lexer_error_at(&mut *l, i - 1, 1, "NUL byte is not allowed in string literals");
+            lexer_error_at(l, i - 1, 1, "NUL byte is not allowed in string literals");
         } else if b >= 0x80u8 {
             i = i - 1;
-            validate_utf8_at(&mut *l, &mut i);
+            validate_utf8_at(l, &mut i);
         }
     }
     l.current = i;
-    lexer_error(&mut *l, "unterminated string literal");
+    lexer_error(l, "unterminated string literal");
 }
 
 fn label_ahead(l: &Lexer) bool {
@@ -588,37 +588,37 @@ fn character(l: &mut Lexer, byte_character: bool) void {
     let mut count: usize = 0;
     let mut malformed = false;
     let mut invalid_byte = false;
-    while !is_eof(&*l) {
+    while !is_eof(l) {
         let b = unsafe l.bytes[l.current];
         l.current = l.current + 1;
         if b == '\'' as u8 {
             if !malformed && count != 1 {
                 if byte_character {
-                    lexer_error(&mut *l, "byte character literal must contain exactly one byte");
+                    lexer_error(l, "byte character literal must contain exactly one byte");
                 } else {
-                    lexer_error(&mut *l, "character literal must contain exactly one Unicode scalar value");
+                    lexer_error(l, "character literal must contain exactly one Unicode scalar value");
                 }
             } else if invalid_byte {
-                lexer_error(&mut *l, "byte character literal may contain only ASCII or a \\xNN escape");
+                lexer_error(l, "byte character literal may contain only ASCII or a \\xNN escape");
             }
             if byte_character {
-                add_token(&mut *l, TokenType::ByteCharacterLiteral);
+                add_token(l, TokenType::ByteCharacterLiteral);
             } else {
-                add_token(&mut *l, TokenType::CharacterLiteral);
+                add_token(l, TokenType::CharacterLiteral);
             }
             return;
         }
         if b == b'\n' || b == b'\r' {
             l.current = l.current - 1;
-            lexer_error(&mut *l, "unterminated character literal");
+            lexer_error(l, "unterminated character literal");
             return;
         }
         if b == b'\0' {
             let at = l.current - 1;
-            lexer_error_at(&mut *l, at, 1, "NUL byte is not allowed in character literals");
+            lexer_error_at(l, at, 1, "NUL byte is not allowed in character literals");
             count = count + 1;
         } else if b == '\\' as u8 {
-            if escape(&mut *l, byte_character) == UINT32_MAX {
+            if escape(l, byte_character) == UINT32_MAX {
                 malformed = true;
             } else {
                 count = count + 1;
@@ -627,10 +627,10 @@ fn character(l: &mut Lexer, byte_character: bool) void {
             count = count + 1;
         } else {
             let mut size: usize = 0;
-            decode_at_b(&*l, b, l.current - 1, &mut size);
+            decode_at_b(l, b, l.current - 1, &mut size);
             if size == 0 {
                 let at = l.current - 1;
-                lexer_error_at(&mut *l, at, 1, "source is not valid UTF-8");
+                lexer_error_at(l, at, 1, "source is not valid UTF-8");
                 malformed = true;
             } else {
                 l.current = l.current + size - 1;
@@ -639,7 +639,7 @@ fn character(l: &mut Lexer, byte_character: bool) void {
             }
         }
     }
-    lexer_error(&mut *l, "unterminated character literal");
+    lexer_error(l, "unterminated character literal");
 }
 
 fn raw_string_ahead(l: &Lexer, hashes: *mut usize) bool {
@@ -657,7 +657,7 @@ fn raw_string_ahead(l: &Lexer, hashes: *mut usize) bool {
 fn raw_string(l: &mut Lexer, hashes: usize) void {
     if hashes > 255 {
         let start = l.start;
-        lexer_error_at(&mut *l, start, hashes + 1, "raw string delimiter contains more than 255 '#' characters");
+        lexer_error_at(l, start, hashes + 1, "raw string delimiter contains more than 255 '#' characters");
     }
     let mut i = l.current + hashes + 1;
     while i < l.len {
@@ -671,21 +671,21 @@ fn raw_string(l: &mut Lexer, hashes: usize) void {
             }
             if matched == hashes {
                 l.current = close;
-                add_token(&mut *l, TokenType::RawStringLiteral);
+                add_token(l, TokenType::RawStringLiteral);
                 return;
             }
             i = i + 1;
         } else if b == b'\0' {
-            lexer_error_at(&mut *l, i, 1, "NUL byte is not allowed in raw string literals");
+            lexer_error_at(l, i, 1, "NUL byte is not allowed in raw string literals");
             i = i + 1;
         } else if b >= 0x80u8 {
-            validate_utf8_at(&mut *l, &mut i);
+            validate_utf8_at(l, &mut i);
         } else {
             i = i + 1;
         }
     }
     l.current = i;
-    lexer_error(&mut *l, "unterminated raw string literal");
+    lexer_error(l, "unterminated raw string literal");
 }
 
 fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(u8) bool) void {
@@ -728,7 +728,7 @@ fn number(l: &mut Lexer) void {
     if unsafe l.bytes[l.start] == b'0' {
         let mut radix: u32 = 10;
         let mut digit: fn(u8) bool = is_dec;
-        let prefix = peek_byte(&*l);
+        let prefix = peek_byte(l);
         if prefix == b'x' || prefix == b'X' {
             radix = 16;
             digit = is_hex;
@@ -786,29 +786,29 @@ fn number(l: &mut Lexer) void {
                 error = "radix prefix must be followed by at least one digit";
             }
             let mut hex_float = false;
-            if radix == 16 && error_at == USIZE_MAX && peek_byte(&*l) == b'.' && is_hex(peek_byte_n(&*l, 1)) {
+            if radix == 16 && error_at == USIZE_MAX && peek_byte(l) == b'.' && is_hex(peek_byte_n(l, 1)) {
                 hex_float = true;
                 l.current = l.current + 1;
-                while is_hex(peek_byte(&*l)) {
+                while is_hex(peek_byte(l)) {
                     l.current = l.current + 1;
                 }
             }
-            if radix == 16 && error_at == USIZE_MAX && (peek_byte(&*l) == b'p' || peek_byte(&*l) == b'P') {
+            if radix == 16 && error_at == USIZE_MAX && (peek_byte(l) == b'p' || peek_byte(l) == b'P') {
                 hex_float = true;
                 l.current = l.current + 1;
-                if peek_byte(&*l) == b'+' || peek_byte(&*l) == b'-' {
+                if peek_byte(l) == b'+' || peek_byte(l) == b'-' {
                     l.current = l.current + 1;
                 }
                 let exp_start = l.current;
-                while is_dec(peek_byte(&*l)) {
+                while is_dec(peek_byte(l)) {
                     l.current = l.current + 1;
                 }
                 if l.current == exp_start {
                     error_at = exp_start;
                     error = "hexadecimal float exponent requires at least one decimal digit";
-                } else if is_id_part_byte(peek_byte(&*l)) {
+                } else if is_id_part_byte(peek_byte(l)) {
                     let sfx = l.current;
-                    while is_id_part_byte(peek_byte(&*l)) {
+                    while is_id_part_byte(peek_byte(l)) {
                         l.current = l.current + 1;
                     }
                     if num_suffix_kind(unsafe (l.bytes + sfx), l.current - sfx) != 1 {
@@ -820,7 +820,7 @@ fn number(l: &mut Lexer) void {
                 error_at = l.current;
                 error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3";
             }
-            if !hex_float && peek_byte(&*l) == b'.' {
+            if !hex_float && peek_byte(l) == b'.' {
                 if error_at == USIZE_MAX {
                     error_at = l.current;
                     if radix == 16 {
@@ -830,8 +830,8 @@ fn number(l: &mut Lexer) void {
                     }
                 }
                 l.current = l.current + 1;
-                while !is_eof(&*l) {
-                    let b = peek_byte(&*l);
+                while !is_eof(l) {
+                    let b = peek_byte(l);
                     if !is_id_part_byte(b) && b != b'.' && b != b'+' && b != b'-' {
                         break;
                     }
@@ -839,39 +839,39 @@ fn number(l: &mut Lexer) void {
                 }
             }
             if error_at != USIZE_MAX {
-                lexer_error_at(&mut *l, error_at, 1, error);
+                lexer_error_at(l, error_at, 1, error);
             } else {
                 if hex_float {
-                    add_token(&mut *l, TokenType::FloatLiteral);
+                    add_token(l, TokenType::FloatLiteral);
                 } else {
-                    add_token(&mut *l, TokenType::IntegerLiteral);
+                    add_token(l, TokenType::IntegerLiteral);
                 }
             }
             return;
         }
     }
     let integer_start = l.current;
-    digits(&mut *l, integer_start - 1, &mut error_at, is_dec);
+    digits(l, integer_start - 1, &mut error_at, is_dec);
     if error_at != USIZE_MAX {
         error = "invalid numeric separator";
     }
-    if peek_byte(&*l) == b'.' && peek_byte_n(&*l, 1) != b'.' {
+    if peek_byte(l) == b'.' && peek_byte_n(l, 1) != b'.' {
         is_float = true;
         l.current = l.current + 1;
         let fraction_start = l.current;
-        digits(&mut *l, fraction_start, &mut error_at, is_dec);
+        digits(l, fraction_start, &mut error_at, is_dec);
         if error_at != USIZE_MAX && error.len() == 0 {
             error = "invalid numeric separator";
         }
     }
-    if peek_byte(&*l) == b'e' || peek_byte(&*l) == b'E' {
+    if peek_byte(l) == b'e' || peek_byte(l) == b'E' {
         is_float = true;
         l.current = l.current + 1;
-        if peek_byte(&*l) == b'+' || peek_byte(&*l) == b'-' {
+        if peek_byte(l) == b'+' || peek_byte(l) == b'-' {
             l.current = l.current + 1;
         }
         let exponent_start = l.current;
-        digits(&mut *l, exponent_start, &mut error_at, is_dec);
+        digits(l, exponent_start, &mut error_at, is_dec);
         if l.current == exponent_start && error_at == USIZE_MAX {
             error_at = exponent_start;
             error = "exponent requires at least one decimal digit";
@@ -879,9 +879,9 @@ fn number(l: &mut Lexer) void {
             error = "invalid numeric separator";
         }
     }
-    if is_id_part_byte(peek_byte(&*l)) {
+    if is_id_part_byte(peek_byte(l)) {
         let sfx_start = l.current;
-        while is_id_part_byte(peek_byte(&*l)) {
+        while is_id_part_byte(peek_byte(l)) {
             l.current = l.current + 1;
         }
         let k = num_suffix_kind(unsafe (l.bytes + sfx_start), l.current - sfx_start);
@@ -900,12 +900,12 @@ fn number(l: &mut Lexer) void {
         }
     }
     if error_at != USIZE_MAX {
-        lexer_error_at(&mut *l, error_at, 1, error);
+        lexer_error_at(l, error_at, 1, error);
     } else {
         if is_float {
-            add_token(&mut *l, TokenType::FloatLiteral);
+            add_token(l, TokenType::FloatLiteral);
         } else {
-            add_token(&mut *l, TokenType::IntegerLiteral);
+            add_token(l, TokenType::IntegerLiteral);
         }
     }
 }
@@ -917,250 +917,250 @@ fn scan_token(l: &mut Lexer) void {
     }
     switch c {
         b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\n' | b'\r' => {
-            whitespace(&mut *l);
+            whitespace(l);
             return;
         },
         '{' => {
-            add_token(&mut *l, TokenType::LeftBrace);
+            add_token(l, TokenType::LeftBrace);
             return;
         },
         '}' => {
-            add_token(&mut *l, TokenType::RightBrace);
+            add_token(l, TokenType::RightBrace);
             return;
         },
         '(' => {
-            add_token(&mut *l, TokenType::LeftParen);
+            add_token(l, TokenType::LeftParen);
             return;
         },
         ')' => {
-            add_token(&mut *l, TokenType::RightParen);
+            add_token(l, TokenType::RightParen);
             return;
         },
         '[' => {
-            add_token(&mut *l, TokenType::LeftBracket);
+            add_token(l, TokenType::LeftBracket);
             return;
         },
         ']' => {
-            add_token(&mut *l, TokenType::RightBracket);
+            add_token(l, TokenType::RightBracket);
             return;
         },
         ',' => {
-            add_token(&mut *l, TokenType::Comma);
+            add_token(l, TokenType::Comma);
             return;
         },
         ';' => {
-            add_token(&mut *l, TokenType::Semicolon);
+            add_token(l, TokenType::Semicolon);
             return;
         },
         ':' => {
-            if match_byte(&mut *l, b':') {
-                add_token(&mut *l, TokenType::PathSeparator);
+            if match_byte(l, b':') {
+                add_token(l, TokenType::PathSeparator);
             } else {
-                add_token(&mut *l, TokenType::Colon);
+                add_token(l, TokenType::Colon);
             }
             return;
         },
         '~' => {
-            add_token(&mut *l, TokenType::Tilde);
+            add_token(l, TokenType::Tilde);
             return;
         },
         '%' => {
-            add_match(&mut *l, b'=', TokenType::PercentEqual, TokenType::Percent);
+            add_match(l, b'=', TokenType::PercentEqual, TokenType::Percent);
             return;
         },
         '^' => {
-            add_match(&mut *l, b'=', TokenType::CaretEqual, TokenType::Caret);
+            add_match(l, b'=', TokenType::CaretEqual, TokenType::Caret);
             return;
         },
         '+' => {
-            add_match(&mut *l, b'=', TokenType::PlusEqual, TokenType::Plus);
+            add_match(l, b'=', TokenType::PlusEqual, TokenType::Plus);
             return;
         },
         '-' => {
-            if match_byte(&mut *l, b'>') {
-                add_token(&mut *l, TokenType::Arrow);
+            if match_byte(l, b'>') {
+                add_token(l, TokenType::Arrow);
                 return;
             }
-            add_match(&mut *l, b'=', TokenType::MinusEqual, TokenType::Minus);
+            add_match(l, b'=', TokenType::MinusEqual, TokenType::Minus);
             return;
         },
         '*' => {
-            add_match(&mut *l, b'=', TokenType::StarEqual, TokenType::Star);
+            add_match(l, b'=', TokenType::StarEqual, TokenType::Star);
             return;
         },
         '=' => {
-            if match_byte(&mut *l, b'=') {
-                add_token(&mut *l, TokenType::EqualEqual);
+            if match_byte(l, b'=') {
+                add_token(l, TokenType::EqualEqual);
                 return;
             }
-            add_match(&mut *l, b'>', TokenType::FatArrow, TokenType::Equal);
+            add_match(l, b'>', TokenType::FatArrow, TokenType::Equal);
             return;
         },
         '!' => {
-            add_match(&mut *l, b'=', TokenType::BangEqual, TokenType::Bang);
+            add_match(l, b'=', TokenType::BangEqual, TokenType::Bang);
             return;
         },
         '<' => {
-            if match_byte(&mut *l, b'<') {
-                add_match(&mut *l, b'=', TokenType::LeftShiftEqual, TokenType::LeftShift);
+            if match_byte(l, b'<') {
+                add_match(l, b'=', TokenType::LeftShiftEqual, TokenType::LeftShift);
                 return;
             }
-            add_match(&mut *l, b'=', TokenType::LessThanEqual, TokenType::LessThan);
+            add_match(l, b'=', TokenType::LessThanEqual, TokenType::LessThan);
             return;
         },
         '>' => {
-            if match_byte(&mut *l, b'>') {
-                add_match(&mut *l, b'=', TokenType::RightShiftEqual, TokenType::RightShift);
+            if match_byte(l, b'>') {
+                add_match(l, b'=', TokenType::RightShiftEqual, TokenType::RightShift);
                 return;
             }
-            add_match(&mut *l, b'=', TokenType::GreaterThanEqual, TokenType::GreaterThan);
+            add_match(l, b'=', TokenType::GreaterThanEqual, TokenType::GreaterThan);
             return;
         },
         '&' => {
-            if match_byte(&mut *l, b'&') {
-                add_token(&mut *l, TokenType::AmpersandAmpersand);
+            if match_byte(l, b'&') {
+                add_token(l, TokenType::AmpersandAmpersand);
                 return;
             }
-            add_match(&mut *l, b'=', TokenType::AmpersandEqual, TokenType::Ampersand);
+            add_match(l, b'=', TokenType::AmpersandEqual, TokenType::Ampersand);
             return;
         },
         '|' => {
-            if match_byte(&mut *l, b'|') {
-                add_token(&mut *l, TokenType::PipePipe);
+            if match_byte(l, b'|') {
+                add_token(l, TokenType::PipePipe);
                 return;
             }
-            add_match(&mut *l, b'=', TokenType::PipeEqual, TokenType::Pipe);
+            add_match(l, b'=', TokenType::PipeEqual, TokenType::Pipe);
             return;
         },
         '?' => {
-            add_token(&mut *l, TokenType::Question);
+            add_token(l, TokenType::Question);
             return;
         },
         '/' => {
-            if match_byte(&mut *l, b'/') {
-                line_comment(&mut *l);
+            if match_byte(l, b'/') {
+                line_comment(l);
                 if l.keep_trivia {
                     // `///...` is a doc comment; `//...` a plain one. The 3rd byte decides.
                     let doc = l.current - l.start > 2 && unsafe l.bytes[l.start + 2] == b'/';
                     if doc {
-                        add_token(&mut *l, TokenType::DocLineComment);
+                        add_token(l, TokenType::DocLineComment);
                     } else {
-                        add_token(&mut *l, TokenType::LineComment);
+                        add_token(l, TokenType::LineComment);
                     }
                 }
-            } else if match_byte(&mut *l, b'*') {
-                block_comment(&mut *l);
+            } else if match_byte(l, b'*') {
+                block_comment(l);
                 if l.keep_trivia {
                     let doc = l.current - l.start > 4 && unsafe l.bytes[l.start + 2] == b'*';
                     if doc {
-                        add_token(&mut *l, TokenType::DocBlockComment);
+                        add_token(l, TokenType::DocBlockComment);
                     } else {
-                        add_token(&mut *l, TokenType::BlockComment);
+                        add_token(l, TokenType::BlockComment);
                     }
                 }
             } else {
-                add_match(&mut *l, b'=', TokenType::SlashEqual, TokenType::Slash);
+                add_match(l, b'=', TokenType::SlashEqual, TokenType::Slash);
             }
             return;
         },
         '.' => {
-            if match_byte(&mut *l, b'.') {
-                if match_byte(&mut *l, b'.') {
-                    add_token(&mut *l, TokenType::Ellipsis);
-                } else if match_byte(&mut *l, b'=') {
-                    add_token(&mut *l, TokenType::RangeInclusive);
+            if match_byte(l, b'.') {
+                if match_byte(l, b'.') {
+                    add_token(l, TokenType::Ellipsis);
+                } else if match_byte(l, b'=') {
+                    add_token(l, TokenType::RangeInclusive);
                 } else {
-                    add_token(&mut *l, TokenType::Range);
+                    add_token(l, TokenType::Range);
                 }
             } else {
-                add_token(&mut *l, TokenType::Dot);
+                add_token(l, TokenType::Dot);
             }
             return;
         },
         '"' => {
-            string_lit(&mut *l, TokenType::StringLiteral);
+            string_lit(l, TokenType::StringLiteral);
             return;
         },
         '\'' => {
-            if label_ahead(&*l) {
-                while is_id_part_byte(peek_byte(&*l)) {
+            if label_ahead(l) {
+                while is_id_part_byte(peek_byte(l)) {
                     l.current = l.current + 1;
                 }
-                add_token(&mut *l, TokenType::Label);
+                add_token(l, TokenType::Label);
                 return;
             }
-            character(&mut *l, false);
+            character(l, false);
             return;
         },
         '0'..='9' => {
-            number(&mut *l);
+            number(l);
             return;
         },
         'r' => {
             let mut hashes: usize = 0;
-            if raw_string_ahead(&*l, &mut hashes) {
-                raw_string(&mut *l, hashes);
+            if raw_string_ahead(l, &mut hashes) {
+                raw_string(l, hashes);
                 return;
             }
-            identifier(&mut *l);
+            identifier(l);
             return;
         },
         'b' => {
-            if peek_byte(&*l) == '\'' as u8 {
+            if peek_byte(l) == '\'' as u8 {
                 l.current = l.current + 1;
-                character(&mut *l, true);
-            } else if peek_byte(&*l) == b'"' {
+                character(l, true);
+            } else if peek_byte(l) == b'"' {
                 l.current = l.current + 1;
-                string_lit(&mut *l, TokenType::ByteStringLiteral);
+                string_lit(l, TokenType::ByteStringLiteral);
             } else {
-                identifier(&mut *l);
+                identifier(l);
             }
             return;
         },
         '#' => {
             let start = l.start;
-            lexer_error_at(&mut *l, start, 1, "'#' is not valid in Super-C source; Super-C has no preprocessor");
+            lexer_error_at(l, start, 1, "'#' is not valid in Super-C source; Super-C has no preprocessor");
             return;
         },
         '@' => {
-            add_token(&mut *l, TokenType::At);
+            add_token(l, TokenType::At);
             return;
         },
         '$' => {
             let start = l.start;
-            lexer_error_at(&mut *l, start, 1, "'$' is reserved");
+            lexer_error_at(l, start, 1, "'$' is reserved");
             return;
         },
         '`' => {
             let start = l.start;
-            lexer_error_at(&mut *l, start, 1, "'`' is reserved");
+            lexer_error_at(l, start, 1, "'`' is reserved");
             return;
         },
         b'\0' => {
             let start = l.start;
-            lexer_error_at(&mut *l, start, 1, "NUL byte is not allowed in source");
+            lexer_error_at(l, start, 1, "NUL byte is not allowed in source");
             return;
         },
         'a'..='z' | 'A'..='Z' | '_' => {
-            identifier(&mut *l);
+            identifier(l);
             return;
         },
         _ => {
             if c >= 0x80u8 {
                 let mut size: usize = 0;
-                let cp = decode_at_b(&*l, c, l.current, &mut size);
+                let cp = decode_at_b(l, c, l.current, &mut size);
                 if size == 0 {
                     let start = l.start;
-                    lexer_error_at(&mut *l, start, 1, "source is not valid UTF-8");
+                    lexer_error_at(l, start, 1, "source is not valid UTF-8");
                     l.current = l.current + 1;
                 } else {
                     l.current = l.current + size;
                     let start = l.start;
                     if cp == 0xFEFF {
-                        lexer_error_at(&mut *l, start, size, "UTF-8 BOM is allowed only at the start of a file");
+                        lexer_error_at(l, start, size, "UTF-8 BOM is allowed only at the start of a file");
                     } else {
                         lexer_error_at(
-                            &mut *l,
+                            l,
                             start,
                             size,
                             "identifiers may contain only ASCII letters, digits, and '_'",
@@ -1183,7 +1183,7 @@ extend Lexer {
         }
         while self.current < self.len {
             self.start = self.current;
-            scan_token(&mut *self);
+            scan_token(self);
         }
         self.tokens.push(Token::new(TokenType::Eof, self.len as u32, 0));
         self.errors.finalize(self.bytes, self.len, self.file);

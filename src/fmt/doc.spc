@@ -187,27 +187,27 @@ fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool)
                 unsafe (*r.out).push_byte(b' ');
                 r.col = r.col + 1;
             } else {
-                newline_into(&mut *r, indent, false);
+                newline_into(r, indent, false);
             }
         },
         DOC_SOFTLINE => {
             if !flat {
-                newline_into(&mut *r, indent, false);
+                newline_into(r, indent, false);
             }
         },
         DOC_HARDLINE => {
-            newline_into(&mut *r, indent, false);
+            newline_into(r, indent, false);
         },
         DOC_BLANKLINE => {
-            newline_into(&mut *r, indent, true);
+            newline_into(r, indent, true);
         },
         DOC_CONCAT => {
             for i in 0..n.b {
-                render_doc(&*p, &mut *r, *p.kids.at((n.a + i) as usize), indent, flat);
+                render_doc(p, r, *p.kids.at((n.a + i) as usize), indent, flat);
             }
         },
         DOC_INDENT => {
-            render_doc(&*p, &mut *r, n.a, indent + INDENT_WIDTH, flat);
+            render_doc(p, r, n.a, indent + INDENT_WIDTH, flat);
         },
         DOC_GROUP => {
             // Inside a flat parent everything stays flat; otherwise break iff the flat form
@@ -219,7 +219,7 @@ fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool)
                     f = false;
                 }
             }
-            render_doc(&*p, &mut *r, n.a, indent, f);
+            render_doc(p, r, n.a, indent, f);
         },
         DOC_IFBREAK => {
             if flat {
@@ -238,7 +238,7 @@ fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool)
 // Render `root` into `out` at the given width. The result always ends with exactly one newline.
 pub fn render(p: &DocPool, root: DocId, width: i32, out: &mut String) {
     let mut r = Renderer { col: 0, width: width, out: out as *mut String };
-    render_doc(&*p, &mut r, root, 0, false);
+    render_doc(p, &mut r, root, 0, false);
     // Normalize the tail: strip trailing blank lines/spaces, end with one '\n'.
     while out.len() > 0 {
         let b = out.as_str().byte_at(out.len() - 1);

@@ -96,13 +96,13 @@ fn indent(out: *mut stdio::FILE, depth: u32) void {
 fn print_list(out: *mut stdio::FILE, a: &ast::Ast, list: ast::NodeList, source: *const char, depth: u32) void {
     let ids = a.list(list);
     for i in 0..list.len {
-        print_node(out, &*a, unsafe ids[i as usize], source, depth);
+        print_node(out, a, unsafe ids[i as usize], source, depth);
     }
 }
 
 fn print_child(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) void {
     if id != ast::NODE_NONE {
-        print_node(out, &*a, id, source, depth);
+        print_node(out, a, id, source, depth);
     }
 }
 
@@ -135,183 +135,183 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
     let d = depth + 1;
     switch n.kind {
         NODE_PROGRAM => {
-            print_list(out, &*a, n.as_data.program.items, source, d);
+            print_list(out, a, n.as_data.program.items, source, d);
         },
         NODE_FUNCTION => {
-            print_child(out, &*a, n.as_data.function.name, source, d);
-            print_list(out, &*a, n.as_data.function.generics, source, d);
-            print_list(out, &*a, n.as_data.function.params, source, d);
-            print_list(out, &*a, n.as_data.function.returns, source, d);
-            print_list(out, &*a, n.as_data.function.where_clause, source, d);
-            print_child(out, &*a, n.as_data.function.body, source, d);
+            print_child(out, a, n.as_data.function.name, source, d);
+            print_list(out, a, n.as_data.function.generics, source, d);
+            print_list(out, a, n.as_data.function.params, source, d);
+            print_list(out, a, n.as_data.function.returns, source, d);
+            print_list(out, a, n.as_data.function.where_clause, source, d);
+            print_child(out, a, n.as_data.function.body, source, d);
         },
         NODE_PARAMETER => {
-            print_child(out, &*a, n.as_data.parameter.name, source, d);
-            print_child(out, &*a, n.as_data.parameter.ty, source, d);
+            print_child(out, a, n.as_data.parameter.name, source, d);
+            print_child(out, a, n.as_data.parameter.ty, source, d);
         },
         NODE_FIELD => {
-            print_child(out, &*a, n.as_data.field.name, source, d);
-            print_child(out, &*a, n.as_data.field.ty, source, d);
-            print_child(out, &*a, n.as_data.field.value, source, d);
+            print_child(out, a, n.as_data.field.name, source, d);
+            print_child(out, a, n.as_data.field.ty, source, d);
+            print_child(out, a, n.as_data.field.value, source, d);
         },
         NODE_STRUCT | NODE_ENUM => {
-            print_child(out, &*a, n.as_data.aggregate.name, source, d);
-            print_list(out, &*a, n.as_data.aggregate.generics, source, d);
-            print_list(out, &*a, n.as_data.aggregate.members, source, d);
+            print_child(out, a, n.as_data.aggregate.name, source, d);
+            print_list(out, a, n.as_data.aggregate.generics, source, d);
+            print_list(out, a, n.as_data.aggregate.members, source, d);
         },
         NODE_VARIANT => {
-            print_child(out, &*a, n.as_data.variant.name, source, d);
-            print_list(out, &*a, n.as_data.variant.payload, source, d);
+            print_child(out, a, n.as_data.variant.name, source, d);
+            print_list(out, a, n.as_data.variant.payload, source, d);
         },
         NODE_INTERFACE => {
-            print_child(out, &*a, n.as_data.interface_def.name, source, d);
-            print_list(out, &*a, n.as_data.interface_def.generics, source, d);
-            print_list(out, &*a, n.as_data.interface_def.bounds, source, d);
-            print_list(out, &*a, n.as_data.interface_def.items, source, d);
+            print_child(out, a, n.as_data.interface_def.name, source, d);
+            print_list(out, a, n.as_data.interface_def.generics, source, d);
+            print_list(out, a, n.as_data.interface_def.bounds, source, d);
+            print_list(out, a, n.as_data.interface_def.items, source, d);
         },
         NODE_EXTEND => {
-            print_list(out, &*a, n.as_data.extend_def.generics, source, d);
-            print_child(out, &*a, n.as_data.extend_def.interface_type, source, d);
-            print_child(out, &*a, n.as_data.extend_def.target_type, source, d);
-            print_list(out, &*a, n.as_data.extend_def.items, source, d);
+            print_list(out, a, n.as_data.extend_def.generics, source, d);
+            print_child(out, a, n.as_data.extend_def.interface_type, source, d);
+            print_child(out, a, n.as_data.extend_def.target_type, source, d);
+            print_list(out, a, n.as_data.extend_def.items, source, d);
         },
         NODE_TYPE_ALIAS => {
-            print_child(out, &*a, n.as_data.type_alias.name, source, d);
-            print_list(out, &*a, n.as_data.type_alias.generics, source, d);
-            print_child(out, &*a, n.as_data.type_alias.ty, source, d);
+            print_child(out, a, n.as_data.type_alias.name, source, d);
+            print_list(out, a, n.as_data.type_alias.generics, source, d);
+            print_child(out, a, n.as_data.type_alias.ty, source, d);
         },
         NODE_CONST => {
-            print_child(out, &*a, n.as_data.const_def.name, source, d);
-            print_child(out, &*a, n.as_data.const_def.ty, source, d);
-            print_child(out, &*a, n.as_data.const_def.value, source, d);
+            print_child(out, a, n.as_data.const_def.name, source, d);
+            print_child(out, a, n.as_data.const_def.ty, source, d);
+            print_child(out, a, n.as_data.const_def.value, source, d);
         },
         NODE_EXTERN_BLOCK => {
-            print_child(out, &*a, n.as_data.extern_block.abi, source, d);
-            print_list(out, &*a, n.as_data.extern_block.items, source, d);
+            print_child(out, a, n.as_data.extern_block.abi, source, d);
+            print_list(out, a, n.as_data.extern_block.items, source, d);
         },
         NODE_IMPORT => {
-            print_list(out, &*a, n.as_data.import_decl.path, source, d);
-            print_child(out, &*a, n.as_data.import_decl.alias, source, d);
+            print_list(out, a, n.as_data.import_decl.path, source, d);
+            print_child(out, a, n.as_data.import_decl.alias, source, d);
         },
         NODE_GENERIC_PARAM => {
-            print_child(out, &*a, n.as_data.generic_param.name, source, d);
-            print_list(out, &*a, n.as_data.generic_param.bounds, source, d);
-            print_child(out, &*a, n.as_data.generic_param.default_type, source, d);
+            print_child(out, a, n.as_data.generic_param.name, source, d);
+            print_list(out, a, n.as_data.generic_param.bounds, source, d);
+            print_child(out, a, n.as_data.generic_param.default_type, source, d);
         },
         NODE_WHERE_PREDICATE => {
-            print_child(out, &*a, n.as_data.where_predicate.ty, source, d);
-            print_list(out, &*a, n.as_data.where_predicate.bounds, source, d);
+            print_child(out, a, n.as_data.where_predicate.ty, source, d);
+            print_list(out, a, n.as_data.where_predicate.bounds, source, d);
         },
         NODE_TYPE_PATH => {
-            print_list(out, &*a, n.as_data.type_path.parts, source, d);
-            print_list(out, &*a, n.as_data.type_path.args, source, d);
+            print_list(out, a, n.as_data.type_path.parts, source, d);
+            print_list(out, a, n.as_data.type_path.args, source, d);
         },
         NODE_POINTER_TYPE | NODE_REFERENCE_TYPE | NODE_SLICE_TYPE | NODE_DYN_TYPE => {
-            print_child(out, &*a, n.as_data.indirect_type.ty, source, d);
+            print_child(out, a, n.as_data.indirect_type.ty, source, d);
         },
         NODE_ARRAY_TYPE => {
-            print_child(out, &*a, n.as_data.array_type.element, source, d);
-            print_child(out, &*a, n.as_data.array_type.length, source, d);
+            print_child(out, a, n.as_data.array_type.element, source, d);
+            print_child(out, a, n.as_data.array_type.length, source, d);
         },
         NODE_FUNCTION_TYPE => {
-            print_list(out, &*a, n.as_data.function_type.params, source, d);
-            print_list(out, &*a, n.as_data.function_type.returns, source, d);
+            print_list(out, a, n.as_data.function_type.params, source, d);
+            print_list(out, a, n.as_data.function_type.returns, source, d);
         },
         NODE_BLOCK => {
-            print_list(out, &*a, n.as_data.block.statements, source, d);
+            print_list(out, a, n.as_data.block.statements, source, d);
         },
         NODE_LET => {
-            print_child(out, &*a, n.as_data.let_stmt.name, source, d);
-            print_child(out, &*a, n.as_data.let_stmt.ty, source, d);
-            print_child(out, &*a, n.as_data.let_stmt.value, source, d);
+            print_child(out, a, n.as_data.let_stmt.name, source, d);
+            print_child(out, a, n.as_data.let_stmt.ty, source, d);
+            print_child(out, a, n.as_data.let_stmt.value, source, d);
         },
         NODE_RETURN => {
-            print_list(out, &*a, n.as_data.return_stmt.values, source, d);
+            print_list(out, a, n.as_data.return_stmt.values, source, d);
         },
         NODE_DEFER | NODE_EXPRESSION_STATEMENT => {
-            print_child(out, &*a, n.as_data.single.value, source, d);
+            print_child(out, a, n.as_data.single.value, source, d);
         },
         NODE_IF => {
-            print_child(out, &*a, n.as_data.if_stmt.condition, source, d);
-            print_child(out, &*a, n.as_data.if_stmt.then_branch, source, d);
-            print_child(out, &*a, n.as_data.if_stmt.else_branch, source, d);
+            print_child(out, a, n.as_data.if_stmt.condition, source, d);
+            print_child(out, a, n.as_data.if_stmt.then_branch, source, d);
+            print_child(out, a, n.as_data.if_stmt.else_branch, source, d);
         },
         NODE_WHILE => {
-            print_child(out, &*a, n.as_data.while_stmt.condition, source, d);
-            print_child(out, &*a, n.as_data.while_stmt.body, source, d);
+            print_child(out, a, n.as_data.while_stmt.condition, source, d);
+            print_child(out, a, n.as_data.while_stmt.body, source, d);
         },
         NODE_FOR => {
-            print_child(out, &*a, n.as_data.for_stmt.binding, source, d);
-            print_child(out, &*a, n.as_data.for_stmt.iterable, source, d);
-            print_child(out, &*a, n.as_data.for_stmt.body, source, d);
+            print_child(out, a, n.as_data.for_stmt.binding, source, d);
+            print_child(out, a, n.as_data.for_stmt.iterable, source, d);
+            print_child(out, a, n.as_data.for_stmt.body, source, d);
         },
         NODE_UNARY => {
-            print_child(out, &*a, n.as_data.unary.operand, source, d);
+            print_child(out, a, n.as_data.unary.operand, source, d);
         },
         NODE_BINARY | NODE_ASSIGNMENT | NODE_STATIC_ASSERT => {
-            print_child(out, &*a, n.as_data.binary.left, source, d);
-            print_child(out, &*a, n.as_data.binary.right, source, d);
+            print_child(out, a, n.as_data.binary.left, source, d);
+            print_child(out, a, n.as_data.binary.right, source, d);
         },
         NODE_CALL => {
-            print_child(out, &*a, n.as_data.call.callee, source, d);
-            print_list(out, &*a, n.as_data.call.args, source, d);
+            print_child(out, a, n.as_data.call.callee, source, d);
+            print_list(out, a, n.as_data.call.args, source, d);
         },
         NODE_CLOSURE => {
-            print_list(out, &*a, n.as_data.closure.params, source, d);
-            print_list(out, &*a, n.as_data.closure.returns, source, d);
-            print_child(out, &*a, n.as_data.closure.body, source, d);
+            print_list(out, a, n.as_data.closure.params, source, d);
+            print_list(out, a, n.as_data.closure.returns, source, d);
+            print_child(out, a, n.as_data.closure.body, source, d);
         },
         NODE_INDEX => {
-            print_child(out, &*a, n.as_data.index.object, source, d);
-            print_child(out, &*a, n.as_data.index.index, source, d);
+            print_child(out, a, n.as_data.index.object, source, d);
+            print_child(out, a, n.as_data.index.index, source, d);
         },
         NODE_MEMBER => {
-            print_child(out, &*a, n.as_data.member.object, source, d);
-            print_child(out, &*a, n.as_data.member.member, source, d);
+            print_child(out, a, n.as_data.member.object, source, d);
+            print_child(out, a, n.as_data.member.member, source, d);
         },
         NODE_CAST => {
-            print_child(out, &*a, n.as_data.cast.expression, source, d);
-            print_child(out, &*a, n.as_data.cast.ty, source, d);
+            print_child(out, a, n.as_data.cast.expression, source, d);
+            print_child(out, a, n.as_data.cast.ty, source, d);
         },
         NODE_GENERIC_SPECIALIZATION => {
-            print_child(out, &*a, n.as_data.specialization.expression, source, d);
-            print_list(out, &*a, n.as_data.specialization.types, source, d);
+            print_child(out, a, n.as_data.specialization.expression, source, d);
+            print_list(out, a, n.as_data.specialization.types, source, d);
         },
         NODE_MATCH => {
-            print_child(out, &*a, n.as_data.match_expr.value, source, d);
-            print_list(out, &*a, n.as_data.match_expr.arms, source, d);
+            print_child(out, a, n.as_data.match_expr.value, source, d);
+            print_list(out, a, n.as_data.match_expr.arms, source, d);
         },
         NODE_MATCH_ARM => {
-            print_child(out, &*a, n.as_data.match_arm.pattern, source, d);
-            print_child(out, &*a, n.as_data.match_arm.guard, source, d);
-            print_child(out, &*a, n.as_data.match_arm.body, source, d);
+            print_child(out, a, n.as_data.match_arm.pattern, source, d);
+            print_child(out, a, n.as_data.match_arm.guard, source, d);
+            print_child(out, a, n.as_data.match_arm.body, source, d);
         },
         NODE_NEW => {
-            print_child(out, &*a, n.as_data.new_expr.ty, source, d);
-            print_child(out, &*a, n.as_data.new_expr.initializer, source, d);
+            print_child(out, a, n.as_data.new_expr.ty, source, d);
+            print_child(out, a, n.as_data.new_expr.initializer, source, d);
         },
         NODE_VA_EXPR => {
-            print_child(out, &*a, n.as_data.va_op.ap, source, d);
-            print_child(out, &*a, n.as_data.va_op.extra, source, d);
+            print_child(out, a, n.as_data.va_op.ap, source, d);
+            print_child(out, a, n.as_data.va_op.extra, source, d);
         },
         NODE_ARRAY_LITERAL | NODE_TUPLE | NODE_TUPLE_TYPE => {
-            print_list(out, &*a, n.as_data.array_literal.elements, source, d);
+            print_list(out, a, n.as_data.array_literal.elements, source, d);
         },
         NODE_STRUCT_INITIALIZER => {
-            print_child(out, &*a, n.as_data.struct_initializer.ty, source, d);
-            print_list(out, &*a, n.as_data.struct_initializer.fields, source, d);
+            print_child(out, a, n.as_data.struct_initializer.ty, source, d);
+            print_list(out, a, n.as_data.struct_initializer.fields, source, d);
         },
         NODE_FIELD_INITIALIZER => {
-            print_child(out, &*a, n.as_data.field_initializer.name, source, d);
-            print_child(out, &*a, n.as_data.field_initializer.value, source, d);
+            print_child(out, a, n.as_data.field_initializer.name, source, d);
+            print_child(out, a, n.as_data.field_initializer.value, source, d);
         },
         NODE_PATTERN_NAME | NODE_PATTERN_TUPLE | NODE_PATTERN_STRUCT | NODE_PATTERN_FIELD | NODE_PATTERN_OR => {
-            print_child(out, &*a, n.as_data.pattern.name, source, d);
-            print_list(out, &*a, n.as_data.pattern.children, source, d);
+            print_child(out, a, n.as_data.pattern.name, source, d);
+            print_list(out, a, n.as_data.pattern.children, source, d);
         },
         NODE_PATTERN_RANGE | NODE_RANGE => {
-            print_child(out, &*a, n.as_data.pattern_range.start, source, d);
-            print_child(out, &*a, n.as_data.pattern_range.end, source, d);
+            print_child(out, a, n.as_data.pattern_range.start, source, d);
+            print_child(out, a, n.as_data.pattern_range.end, source, d);
         },
         _ => {},
     };
@@ -320,7 +320,7 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
 // Dump the AST rooted at `a.root` to `out` (the analog of ast.c's ast_fprint).
 fn ast_fprint(out: *mut stdio::FILE, a: &ast::Ast, source: *const char) void {
     if a.root != ast::NODE_NONE {
-        print_node(out, &*a, a.root, source, 0);
+        print_node(out, a, a.root, source, 0);
     }
 }
 
