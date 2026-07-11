@@ -7,10 +7,15 @@ import utils::errors as diag;
 
 // A scratch buffer to NUL-terminate a module's file path (a `str` view into an owned String) before
 // handing it to the C-string diagnostic renderer.
-struct FileScratch { pub b: [char; 4096] }
+struct FileScratch {
+    pub b: [char; 4096],
+}
 
 // Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
-pub enum Namespace { NS_VALUE, NS_TYPE }
+pub enum Namespace {
+    NS_VALUE,
+    NS_TYPE,
+}
 
 // One live binding on the scope stack. 16 bytes (a power-of-2 stride for the hot linear scope scan): the
 // namespace rides in the top bit of `decl` -- NodeIds are far below 2^31 -- so no separate `ns` byte is
@@ -53,14 +58,26 @@ pub struct Resolver {
 }
 
 // A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
-pub struct SymLookup { pub decl: NodeId, pub idx: u32 }
+pub struct SymLookup {
+    pub decl: NodeId,
+    pub idx: u32,
+}
 // A module-qualified type split: module id (-1 = not qualified) and the final type-name node.
-pub struct ModQual { pub mid: i32, pub type_node: NodeId }
+pub struct ModQual {
+    pub mid: i32,
+    pub type_node: NodeId,
+}
 // A leading-segment-as-module test result.
-pub struct ModName { pub found: bool, pub mid: ModuleId }
+pub struct ModName {
+    pub found: bool,
+    pub mid: ModuleId,
+}
 // One import usable as a leading path segment (its `as` alias, or a single-segment path), resolved once
 // by scan_imports so per-reference probes never rescan the item list.
-pub struct ModEntry { pub name: tok::Span, pub mid: ModuleId }
+pub struct ModEntry {
+    pub name: tok::Span,
+    pub mid: ModuleId,
+}
 
 // ---------------------------------------------------------------------------------------------------------
 // Span-based helpers (no resolver state).
@@ -70,7 +87,7 @@ fn name_hash(src: *const u8, s: tok::Span) u32 {
     let mut h: u32 = 2166136261u32;
     let mut i = s.start;
     while i < s.end {
-        h = h ^ (unsafe src[i as usize] as u32);
+        h = h ^ unsafe src[i as usize] as u32;
         h = h * 16777619u32;
         i = i + 1;
     }
@@ -82,8 +99,7 @@ fn span_eq(src: *const u8, a: tok::Span, b: tok::Span) bool {
     if la != b.end - b.start {
         return false;
     }
-    return unsafe cstring::memcmp((src + a.start as usize),
-        (src + b.start as usize), la as usize) == 0;
+    return unsafe cstring::memcmp(src + a.start as usize, src + b.start as usize, la as usize) == 0;
 }
 
 fn span_is(src: *const u8, s: tok::Span, lit: str) bool {
@@ -91,19 +107,31 @@ fn span_is(src: *const u8, s: tok::Span, lit: str) bool {
     if (s.end - s.start) as usize != n {
         return false;
     }
-    return unsafe cstring::memcmp((src + s.start as usize), lit.ptr(), n) == 0;
+    return unsafe cstring::memcmp(src + s.start as usize, lit.ptr(), n) == 0;
 }
 
 // The BuiltinType index of name `s` (matching ast's enum order), or -1. Pointer/reference forms wrap one
 // of these, which resolves on its own.
 fn builtin_index(src: *const u8, s: tok::Span) i32 {
     let names: [str; 18] = [
-        "bool", "char", "i8",
-        "i16", "i32", "i64",
-        "isize", "u8", "u16",
-        "u32", "u64", "usize",
-        "f32", "f64", "c32",
-        "c64", "va_list", "void",
+        "bool",
+        "char",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "usize",
+        "f32",
+        "f64",
+        "c32",
+        "c64",
+        "va_list",
+        "void",
     ];
     for i in 0..18 {
         if span_is(src, s, names[i]) {
@@ -118,7 +146,7 @@ fn is_builtin_type(src: *const u8, s: tok::Span) bool {
 }
 
 fn symbol_key(hash: u32, ns: u8) u64 {
-    return ((ns as u64) << 32) | (hash as u64);
+    return ns as u64 << 32 | hash as u64;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -152,7 +180,7 @@ extend Resolver {
     // The i-th element of `list` -- refetched each call so a closure-capture commit that grows ast.children
     // never leaves a dangling base pointer mid-iteration.
     fn child(self: &Self, list: NodeList, i: u32) NodeId {
-        return unsafe (self.ast.list(list))[i as usize];
+        return unsafe self.ast.list(list)[i as usize];
     }
 
     fn name_span(self: &Self, name_node: NodeId) tok::Span {
@@ -178,8 +206,7 @@ extend Resolver {
             let key = symbol_key(hash, ns);
             if previous != 0 {
                 self.symbol_index.insert(key, previous);
-            }
-            else {
+            } else {
                 self.symbol_index.remove(&key);
             }
         }
@@ -197,9 +224,12 @@ extend Resolver {
         let hash = name_hash(self.source, name);
         let key = symbol_key(hash, ns as u8);
         let mut head: u32 = 0;
-        if let Some(v) = self.symbol_index.get(&key) {
-            head = *v;
-        }
+        switch self.symbol_index.get(&key) {
+            Some(v) => {
+                head = *v;
+            },
+            _ => {},
+        };
         let scope_start = self.scope_starts[self.scope_starts.len() - 1];
         let mut current = head;
         while current != 0 {
@@ -209,13 +239,16 @@ extend Resolver {
             }
             let sname = self.symbols[i].name;
             if span_eq(self.source, sname, name) {
-                self.errors.emit(name.start, name.end - name.start,
-                    format("duplicate definition of '{}'", diag::span_str(self.source, name.start, name.end)));
+                self.errors.emit(
+                    name.start,
+                    name.end - name.start,
+                    format("duplicate definition of '{}'", diag::span_str(self.source, name.start, name.end)),
+                );
                 return;
             }
             current = self.symbol_previous[i];
         }
-        self.symbols.push(Symbol { hash: hash, decl: decl | ((ns as u32) << 31), name: name });
+        self.symbols.push(Symbol { hash: hash, decl: decl | ns as u32 << 31, name: name });
         self.symbol_previous.push(head);
         self.symbol_index.insert(key, self.symbols.len() as u32);
     }
@@ -226,9 +259,12 @@ extend Resolver {
         let hash = name_hash(self.source, name);
         let key = symbol_key(hash, ns as u8);
         let mut current: u32 = 0;
-        if let Some(v) = self.symbol_index.get(&key) {
-            current = *v;
-        }
+        switch self.symbol_index.get(&key) {
+            Some(v) => {
+                current = *v;
+            },
+            _ => {},
+        };
         while current != 0 {
             let i = (current - 1) as usize;
             let sname = self.symbols[i].name;
@@ -266,7 +302,7 @@ extend Resolver {
             }
             let s = self.name_span(unsafe seg_ids[i as usize]);
             let l = (s.end - s.start) as usize;
-            unsafe cstring::memcpy((out + at) as *mut void, (self.source + s.start as usize), l);
+            unsafe cstring::memcpy((out + at) as *mut void, self.source + s.start as usize, l);
             at = at + l;
             i = i + 1;
         }
@@ -313,8 +349,7 @@ extend Resolver {
             let mut nm = NODE_NONE;
             if alias != NODE_NONE {
                 nm = alias;
-            }
-            else if parts.len == 1 {
+            } else if parts.len == 1 {
                 nm = self.child(parts, 0);
             }
             if nm != NODE_NONE {
@@ -349,7 +384,8 @@ extend Resolver {
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize] };
         }
-        if parts.len == 2 { // `alias::Type`
+        if parts.len == 2 {
+            // `alias::Type`
             let nm = self.name_is_module(self.name_span(unsafe ids[0]));
             if nm.found {
                 return ModQual { mid: nm.mid as i32, type_node: unsafe ids[1] };
@@ -378,8 +414,7 @@ extend Resolver {
     }
 
     // Resolve a public top-level decl `name` in module `mid` and record it (cross-module) on `ref`.
-    fn resolve_module_decl(self: &mut Self, refn: NodeId, mid: ModuleId, name: tok::Span, want_type: bool,
-        kind: str) void {
+    fn resolve_module_decl(self: &mut Self, refn: NodeId, mid: ModuleId, name: tok::Span, want_type: bool, kind: str) void {
         let pkg = unsafe &*self.package;
         let nm = unsafe (self.source + name.start as usize) as *const char;
         let nl = (name.end - name.start) as usize;
@@ -387,8 +422,15 @@ extend Resolver {
         if decl != NODE_NONE {
             self.ast.set_resolution_def(refn, DefId { module: mid, node: decl });
         } else {
-            self.errors.emit(name.start, name.end - name.start,
-                format("no public {} '{}' in the imported module", kind, diag::span_str(self.source, name.start, name.end)));
+            self.errors.emit(
+                name.start,
+                name.end - name.start,
+                format(
+                    "no public {} '{}' in the imported module",
+                    kind,
+                    diag::span_str(self.source, name.start, name.end),
+                ),
+            );
             self.errors.note(format("only 'pub' top-level items are visible across module boundaries"));
         }
     }
@@ -463,7 +505,8 @@ extend Resolver {
             if found >= 0 {
                 unsafe buf[plen] = 0 as char; // NUL-terminate the matched prefix for diagnostics
                 let mid = found as ModuleId;
-                if nn - m == 1 { // module::decl -- a function (preferred) or type
+                if nn - m == 1 {
+                    // module::decl -- a function (preferred) or type
                     let dn = self.name_span(seg[m as usize]);
                     let dnm = unsafe (self.source + dn.start as usize) as *const char;
                     let dl = (dn.end - dn.start) as usize;
@@ -474,12 +517,20 @@ extend Resolver {
                     if decl != NODE_NONE {
                         self.ast.set_resolution_def(id, DefId { module: mid, node: decl });
                     } else {
-                        self.errors.emit(dn.start, dn.end - dn.start,
-                            format("no public item '{}' in module '{}'", diag::span_str(self.source, dn.start, dn.end), diag::cstr(buf)));
+                        self.errors.emit(
+                            dn.start,
+                            dn.end - dn.start,
+                            format(
+                                "no public item '{}' in module '{}'",
+                                diag::span_str(self.source, dn.start, dn.end),
+                                diag::cstr(buf),
+                            ),
+                        );
                         self.errors.note(format("the module was found, but this item is missing or not public"));
                     }
                     handled = true;
-                } else if nn - m == 2 { // module::Type::method -- record the Type
+                } else if nn - m == 2 {
+                    // module::Type::method -- record the Type
                     let chain1 = chain[1];
                     let tspan = self.name_span(seg[m as usize]);
                     self.resolve_module_decl(chain1, mid, tspan, true, "type");
@@ -505,15 +556,13 @@ extend Resolver {
     fn resolve_ref_hit(self: &mut Self, refn: NodeId, decl: NodeId, idx: u32, ns: Namespace) void {
         // A value binding declared outside an enclosing closure is a CAPTURE. Record it on every nested
         // closure whose floor it sits below. Module-level items (functions/consts) never capture.
-        if ns == Namespace::NS_VALUE && self.closures.len() != 0 && idx != 0
-            && (idx - 1) < self.closures[self.closures.len() - 1].floor {
+        if ns == Namespace::NS_VALUE && self.closures.len() != 0 && idx != 0 && idx - 1 < self.closures[self.closures.len() - 1].floor {
             let dk = self.ast.at_const(decl).kind;
-            if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR
-                || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME {
+            if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME {
                 let mut f = self.closures.len();
                 while f > 0 {
                     f = f - 1;
-                    if (idx - 1) >= self.closures[f].floor {
+                    if idx - 1 >= self.closures[f].floor {
                         break;
                     }
                     let mut seen = false;
@@ -553,8 +602,11 @@ extend Resolver {
                 return;
             }
         }
-        self.errors.emit(name.start, name.end - name.start,
-            format("cannot find {} '{}'", kind, diag::span_str(self.source, name.start, name.end)));
+        self.errors.emit(
+            name.start,
+            name.end - name.start,
+            format("cannot find {} '{}'", kind, diag::span_str(self.source, name.start, name.end)),
+        );
         self.errors.note(format("check spelling, imports, and whether the item is declared before this use"));
     }
 
@@ -642,8 +694,11 @@ extend Resolver {
                         let cs = self.current_self;
                         self.ast.set_resolution_def(id, cs);
                     } else {
-                        self.errors.emit(name.start, name.end - name.start,
-                            format("'Self' is only valid inside an interface or extension"));
+                        self.errors.emit(
+                            name.start,
+                            name.end - name.start,
+                            format("'Self' is only valid inside an interface or extension"),
+                        );
                     }
                 } else {
                     self.resolve_ref(id, first, Namespace::NS_TYPE, "type");
@@ -655,8 +710,7 @@ extend Resolver {
             }
             return;
         }
-        if kind == NodeKind::NODE_POINTER_TYPE || kind == NodeKind::NODE_REFERENCE_TYPE
-            || kind == NodeKind::NODE_SLICE_TYPE || kind == NodeKind::NODE_DYN_TYPE {
+        if kind == NodeKind::NODE_POINTER_TYPE || kind == NodeKind::NODE_REFERENCE_TYPE || kind == NodeKind::NODE_SLICE_TYPE || kind == NodeKind::NODE_DYN_TYPE {
             let t = self.ast.at_const(id).as_data.indirect_type.ty;
             self.resolve_type(t);
             return;
@@ -757,7 +811,8 @@ extend Resolver {
                 let fld = self.ast.at_const(mid).as_data.field;
                 self.declare(fld.name, mid, Namespace::NS_VALUE);
                 self.resolve_type(fld.ty);
-            } else { // NODE_VARIANT
+            } else {
+                // NODE_VARIANT
                 let vr = self.ast.at_const(mid).as_data.variant;
                 self.declare(vr.name, mid, Namespace::NS_VALUE);
                 self.resolve_expr(vr.value); // explicit discriminant (NODE_NONE when absent)
@@ -779,8 +834,12 @@ extend Resolver {
         for i in 0..items.len {
             let iid = self.child(items, i);
             switch self.ast.at_const(iid).kind {
-                NODE_FUNCTION => { self.resolve_function(iid); },
-                NODE_TYPE_ALIAS => { self.resolve_type_alias(iid); },
+                NODE_FUNCTION => {
+                    self.resolve_function(iid);
+                },
+                NODE_TYPE_ALIAS => {
+                    self.resolve_type_alias(iid);
+                },
                 NODE_CONST => {
                     let cd = self.ast.at_const(iid).as_data.const_def;
                     self.resolve_type(cd.ty);
@@ -794,12 +853,15 @@ extend Resolver {
     fn resolve_item(self: &mut Self, id: NodeId) void {
         let kind = self.ast.at_const(id).kind;
         switch kind {
-            NODE_FUNCTION => { self.resolve_function(id); },
+            NODE_FUNCTION => {
+                self.resolve_function(id);
+            },
             NODE_STRUCT | NODE_ENUM => {
                 let ag = self.ast.at_const(id).as_data.aggregate;
                 self.scope_enter();
                 self.declare_generics(ag.generics);
-                if ag.is_tuple { // tuple struct: members ARE type nodes
+                if ag.is_tuple {
+                    // tuple struct: members ARE type nodes
                     for i in 0..ag.members.len {
                         let mid = self.child(ag.members, i);
                         self.resolve_type(mid);
@@ -828,8 +890,7 @@ extend Resolver {
                 self.resolve_type(ex.interface_type);
                 // `extend i32 { .. }`: a builtin target is not a name binding. Point it at the builtin's synthetic
                 // core decl so this extend matches `i32` receivers like any extension.
-                if ex.target_type != NODE_NONE && self.package != null
-                    && self.ast.resolution(ex.target_type) == NODE_NONE {
+                if ex.target_type != NODE_NONE && self.package != null && self.ast.resolution(ex.target_type) == NODE_NONE {
                     let tk = self.ast.at_const(ex.target_type).kind;
                     if tk == NodeKind::NODE_TYPE_PATH {
                         let tparts = self.ast.at_const(ex.target_type).as_data.type_path.parts;
@@ -865,7 +926,9 @@ extend Resolver {
                 self.current_self = old_self;
                 self.scope_exit();
             },
-            NODE_TYPE_ALIAS => { self.resolve_type_alias(id); },
+            NODE_TYPE_ALIAS => {
+                self.resolve_type_alias(id);
+            },
             NODE_CONST => {
                 let cd = self.ast.at_const(id).as_data.const_def;
                 self.resolve_type(cd.ty);
@@ -908,13 +971,16 @@ extend Resolver {
         }
         let kind = self.ast.at_const(id).kind;
         switch kind {
-            NODE_BLOCK => { self.resolve_block(id); },
+            NODE_BLOCK => {
+                self.resolve_block(id);
+            },
             NODE_LET => {
                 let ld = self.ast.at_const(id).as_data.let_stmt;
                 self.resolve_type(ld.ty);
                 self.resolve_expr(ld.value);
                 let nmkind = self.ast.at_const(ld.name).kind;
-                if nmkind == NodeKind::NODE_PATTERN_TUPLE { // `let (a, b) = ..`: each element declares itself
+                if nmkind == NodeKind::NODE_PATTERN_TUPLE {
+                    // `let (a, b) = ..`: each element declares itself
                     let children = self.ast.at_const(ld.name).as_data.pattern.children;
                     for i in 0..children.len {
                         let cid = self.child(children, i);
@@ -942,7 +1008,9 @@ extend Resolver {
                 let v = self.ast.at_const(id).as_data.single.value;
                 self.resolve_expr(v);
             },
-            NODE_IF => { self.resolve_if(id); },
+            NODE_IF => {
+                self.resolve_if(id);
+            },
             NODE_WHILE => {
                 let wd = self.ast.at_const(id).as_data.while_stmt;
                 self.resolve_expr(wd.condition);
@@ -1023,20 +1091,23 @@ extend Resolver {
                 self.resolve_expr(ix.object);
                 self.resolve_expr(ix.index);
             },
-            NODE_MEMBER => { self.resolve_member(id); },
+            NODE_MEMBER => {
+                self.resolve_member(id);
+            },
             NODE_CAST => {
                 let ct = self.ast.at_const(id).as_data.cast;
                 self.resolve_expr(ct.expression);
                 self.resolve_type(ct.ty);
             },
-            NODE_SIZEOF | NODE_ALIGNOF => { self.resolve_sizeof(id); },
+            NODE_SIZEOF | NODE_ALIGNOF => {
+                self.resolve_sizeof(id);
+            },
             NODE_VA_EXPR => {
                 let vo = self.ast.at_const(id).as_data.va_op;
                 self.resolve_expr(vo.ap);
                 if vo.op == VA_ARG {
                     self.resolve_type(vo.extra);
-                }
-                else if vo.op == VA_START {
+                } else if vo.op == VA_START {
                     self.resolve_expr(vo.extra);
                 }
             },
@@ -1076,12 +1147,12 @@ extend Resolver {
                 let ne = self.ast.at_const(id).as_data.new_expr;
                 if ne.initializer != NODE_NONE {
                     self.resolve_expr(ne.initializer);
-                }
-                else {
+                } else {
                     self.resolve_type(ne.ty);
                 }
             },
-            NODE_WHILE => { // `loop { .. }` as an expression
+            NODE_WHILE => {
+                // `loop { .. }` as an expression
                 let body = self.ast.at_const(id).as_data.while_stmt.body;
                 self.resolve_block(body);
             },
@@ -1090,7 +1161,8 @@ extend Resolver {
                 for i in 0..elements.len {
                     let eid = self.child(elements, i);
                     let ek = self.ast.at_const(eid).kind;
-                    if ek == NodeKind::NODE_FIELD_INITIALIZER { // designated `[index] = value`
+                    if ek == NodeKind::NODE_FIELD_INITIALIZER {
+                        // designated `[index] = value`
                         let fi = self.ast.at_const(eid).as_data.field_initializer;
                         self.resolve_expr(fi.name);
                         self.resolve_expr(fi.value);
@@ -1108,9 +1180,15 @@ extend Resolver {
                     self.resolve_expr(val);
                 }
             },
-            NODE_BLOCK => { self.resolve_block(id); },
-            NODE_CLOSURE => { self.resolve_closure(id); },
-            NODE_IF => { self.resolve_if(id); },
+            NODE_BLOCK => {
+                self.resolve_block(id);
+            },
+            NODE_CLOSURE => {
+                self.resolve_closure(id);
+            },
+            NODE_IF => {
+                self.resolve_if(id);
+            },
             NODE_RANGE => {
                 let pr = self.ast.at_const(id).as_data.pattern_range;
                 self.resolve_expr(pr.start);
@@ -1162,11 +1240,13 @@ extend Resolver {
                     return;
                 }
                 let look = self.sym_lookup(name, Namespace::NS_TYPE);
-                if look.decl != NODE_NONE { // a scope-stack type: commit it directly (no re-lookup)
+                if look.decl != NODE_NONE {
+                    // a scope-stack type: commit it directly (no re-lookup)
                     self.resolve_ref_hit(v, look.decl, look.idx, Namespace::NS_TYPE);
                     return;
                 }
-                if self.package != null { // a prelude/glob type: commit the hit found while probing
+                if self.package != null {
+                    // a prelude/glob type: commit the hit found while probing
                     let pkg = unsafe &*self.package;
                     let nm = unsafe (self.source + name.start as usize) as *const char;
                     let nl = (name.end - name.start) as usize;
@@ -1189,20 +1269,20 @@ extend Resolver {
     fn resolve_closure(self: &mut Self, id: NodeId) void {
         if self.in_generic {
             let sp = self.ast.at_const(id).span;
-            self.errors.emit(sp.start, sp.end - sp.start,
-                format("closures inside generic functions are not yet supported"));
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("closures inside generic functions are not yet supported"),
+            );
         }
         if self.closures.len() >= 8 {
             let sp = self.ast.at_const(id).span;
-            self.errors.emit(sp.start, sp.end - sp.start,
-                format("closures nested too deeply (max 8)"));
+            self.errors.emit(sp.start, sp.end - sp.start, format("closures nested too deeply (max 8)"));
             return;
         }
         let cl = self.ast.at_const(id).as_data.closure;
         self.scope_enter();
-        self.closures.push(ClosureScope {
-                node: id, floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new(),
-            });
+        self.closures.push(ClosureScope { node: id, floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new() });
         for i in 0..cl.params.len {
             let pid = self.child(cl.params, i);
             let param = self.ast.at_const(pid).as_data.parameter;
@@ -1211,8 +1291,7 @@ extend Resolver {
         }
         if cl.expr_body {
             self.resolve_expr(cl.body);
-        }
-        else {
+        } else {
             self.resolve_block(cl.body);
         }
         // Commit the collected captures onto the closure node (discovery order, deduped).
@@ -1237,7 +1316,8 @@ extend Resolver {
         }
         let kind = self.ast.at_const(id).kind;
         switch kind {
-            NODE_IDENTIFIER => { // shorthand struct-pattern field binding
+            NODE_IDENTIFIER => {
+                // shorthand struct-pattern field binding
                 self.declare(id, id, Namespace::NS_VALUE);
             },
             NODE_PATTERN_NAME => {
@@ -1255,7 +1335,8 @@ extend Resolver {
                     self.resolve_pattern(c);
                 }
             },
-            NODE_PATTERN_OR => { // alternatives bind the same names; declare the first's
+            NODE_PATTERN_OR => {
+                // alternatives bind the same names; declare the first's
                 let children = self.ast.at_const(id).as_data.pattern.children;
                 if children.len != 0 {
                     let c0 = self.child(children, 0);
@@ -1325,7 +1406,7 @@ extend Resolver {
         }
         let pkg = unsafe &*self.package;
         let m = self.ast.module;
-        if (m as usize) < pkg.modules.len() {
+        if m as usize < pkg.modules.len() {
             return pkg.modules[m as usize].file.as_str();
         }
         return "";

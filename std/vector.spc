@@ -14,14 +14,13 @@ pub struct Vector<T, A = Global> {
 }
 
 extend<T, A: Allocator> Vector<T, A> {
-
     // Empty vector backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub fn new_in(alloc: A) Vector<T, A> {
-        return Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc, };
+        return Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc };
     }
 
     pub fn with_capacity_in(alloc: A, cap: usize) Vector<T, A> {
-        let mut v = Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc, };
+        let mut v = Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc };
         if cap > 0 {
             v.ptr = v.alloc.alloc(cap * sizeof(T), alignof(T)) as *mut T;
             v.cap = cap;
@@ -221,13 +220,16 @@ extend<T, A: Allocator> Vector<T, A> {
         }
         self.len = w;
     }
-
 }
 
 // Convenience constructors for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T, A: Allocator + Default> Vector<T, A> {
-    pub fn new() Vector<T, A> { return Vector::<T, A>::new_in(A::default()); }
-    pub fn with_capacity(cap: usize) Vector<T, A> { return Vector::<T, A>::with_capacity_in(A::default(), cap); }
+    pub fn new() Vector<T, A> {
+        return Vector::<T, A>::new_in(A::default());
+    }
+    pub fn with_capacity(cap: usize) Vector<T, A> {
+        return Vector::<T, A>::with_capacity_in(A::default(), cap);
+    }
 }
 
 // Free the buffer (through `A`) AND deep-free every element. Auto-`Free`: the Vector is released at scope
@@ -248,7 +250,9 @@ extend<T, A: Allocator> Vector<T, A> as Free {
 
 // Standard-interface conformances.
 extend<T, A: Allocator + Default> Vector<T, A> as Default {
-    pub fn default() Vector<T, A> { return Vector::<T, A>::new(); }
+    pub fn default() Vector<T, A> {
+        return Vector::<T, A>::new();
+    }
 }
 
 // Equality-based algorithms (available when the element type is `Eq`).
@@ -472,8 +476,12 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &Vector<T, A>, r: Range<usize>) []T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
+        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }
 
@@ -485,8 +493,12 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
         return &mut unsafe self.ptr[i];
     }
     pub fn index_range_mut(self: &mut Vector<T, A>, r: Range<usize>) []mut T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
+        return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }
 

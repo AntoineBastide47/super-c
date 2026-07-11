@@ -28,5 +28,5 @@ pub fn now() i64 {
 
 // Processor time consumed by the program so far, in seconds.
 pub fn cpu_seconds() f64 {
-    return (unsafe clock() as f64) / (CLOCKS_PER_SEC as f64);
+    return unsafe clock() as f64 / CLOCKS_PER_SEC as f64;
 }

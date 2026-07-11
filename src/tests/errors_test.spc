@@ -6,8 +6,12 @@ import utils::errors as diag;
 import string as cstring;
 
 // Array-field wrappers: `{}` init zero-fills the omitted array (Super-C has no `[v; N]` repeat literal).
-struct Buf202 { pub b: [char; 202] }
-struct Buf151 { pub b: [char; 151] }
+struct Buf202 {
+    pub b: [char; 202],
+}
+struct Buf151 {
+    pub b: [char; 151],
+}
 
 fn contains(hay: &String, needle: str) bool {
     return hay.contains(needle);
@@ -17,7 +21,7 @@ fn offset_of(src: str, needle: str) u32 {
     if p == null {
         return 0;
     }
-    return ((p as usize) - (src.ptr() as usize)) as u32;
+    return (p as usize - src.ptr() as usize) as u32;
 }
 
 // Emit one message at (off, span) over `src`, finalize with `file`, and return an owned copy of the
@@ -125,7 +129,7 @@ fn long_line_windowing() {
 fn offset_past_eof() {
     let src = "abc\n";
     let mut e = diag::Errors::new();
-    let b = render_into(&mut e, src, "eof", (src.len() as u32) + 50, 1, null); // clamped to src_len, no OOB
+    let b = render_into(&mut e, src, "eof", src.len() as u32 + 50, 1, null); // clamped to src_len, no OOB
     assert(contains(&b, "error: eof"), "renders without overrun");
     e.free();
 }

@@ -30,10 +30,10 @@ fn scratch_lists() {
     a.push(id3);
     let li = a.commit(inner);
     assert_eq(li.len, 2);
-    assert((unsafe (a.list(li))[0]) == id2 && (unsafe (a.list(li))[1]) == id3, "inner list contents");
+    assert(unsafe a.list(li)[0] == id2 && unsafe a.list(li)[1] == id3, "inner list contents");
     let lo = a.commit(outer);
     assert_eq(lo.len, 2);
-    assert((unsafe (a.list(lo))[0]) == id0 && (unsafe (a.list(lo))[1]) == id1, "outer list contents");
+    assert(unsafe a.list(lo)[0] == id0 && unsafe a.list(lo)[1] == id1, "outer list contents");
     assert_eq(a.scratch.len(), 0); // scratch fully drained after commits
     a.free();
 }
@@ -44,10 +44,20 @@ fn interner() {
     let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
     a.init_types();
     assert(a.type_at(TYPE_NONE).kind == TypeKind::TYPE_ERROR, "slot 0 is TYPE_ERROR");
-    assert_eq(Ast::builtin(BuiltinType::BT_I32), (BuiltinType::BT_I32 as TypeId) + 1);
+    assert_eq(Ast::builtin(BuiltinType::BT_I32), BuiltinType::BT_I32 as TypeId + 1);
     assert(a.type_at(Ast::builtin(BuiltinType::BT_I32)).kind == TypeKind::TYPE_BUILTIN, "builtin slot kind");
-    let pc = Ty { kind: TypeKind::TYPE_POINTER, qualifier: TypeQualifier::TYPE_QUAL_CONST as u8, module: 0, as_data: TyAs { elem: Ast::builtin(BuiltinType::BT_I32) } };
-    let pm = Ty { kind: TypeKind::TYPE_POINTER, qualifier: TypeQualifier::TYPE_QUAL_MUT as u8, module: 0, as_data: TyAs { elem: Ast::builtin(BuiltinType::BT_I32) } };
+    let pc = Ty {
+        kind: TypeKind::TYPE_POINTER,
+        qualifier: TypeQualifier::TYPE_QUAL_CONST as u8,
+        module: 0,
+        as_data: TyAs { elem: Ast::builtin(BuiltinType::BT_I32) },
+    };
+    let pm = Ty {
+        kind: TypeKind::TYPE_POINTER,
+        qualifier: TypeQualifier::TYPE_QUAL_MUT as u8,
+        module: 0,
+        as_data: TyAs { elem: Ast::builtin(BuiltinType::BT_I32) },
+    };
     let a1 = a.intern_type(pc);
     let a2 = a.intern_type(pc);
     let b1 = a.intern_type(pm);

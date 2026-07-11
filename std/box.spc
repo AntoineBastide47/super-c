@@ -11,10 +11,9 @@ pub struct Box<T, A = Global> {
 }
 
 extend<T, A: Allocator> Box<T, A> {
-
     // Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub fn new_in(alloc: A, value: T) Box<T, A> {
-        let mut b = Box::<T, A> { ptr: null, alloc: alloc, };
+        let mut b = Box::<T, A> { ptr: null, alloc: alloc };
         b.ptr = b.alloc.alloc(sizeof(T), alignof(T)) as *mut T;
         unsafe b.ptr[0] = value;
         return b;
@@ -43,7 +42,6 @@ extend<T, A: Allocator> Box<T, A> {
     pub fn map<U, F: fn(T) U>(self: &Box<T, A>, f: F) Box<U, A> {
         return Box::<U, A>::new_in(self.alloc, f(unsafe self.ptr[0]));
     }
-
 }
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).

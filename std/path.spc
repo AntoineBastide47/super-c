@@ -14,7 +14,7 @@ extern "C" {
 extend Path {
     fn own_inner(inner: String) *mut String {
         let p = unsafe malloc(sizeof(String)) as *mut String;
-        if (p as *mut void) == null {
+        if p as *mut void == null {
             unsafe abort();
         }
         unsafe p[0] = inner;
@@ -96,7 +96,7 @@ extend Path {
 
 extend Path as Free {
     pub fn free(self: &mut Path) {
-        if (self.inner as *mut void) != null {
+        if self.inner as *mut void != null {
             unsafe self.inner[0].free();
             unsafe free(self.inner as *mut void);
             self.inner = null;

@@ -49,7 +49,6 @@ extend<T> Slice<T> {
     pub fn as_ptr(self: &Slice<T>) *const T {
         return self.ptr;
     }
-
 }
 
 // A borrowed, writable view over `len` consecutive `T` at `ptr`.
@@ -107,7 +106,6 @@ extend<T> SliceMut<T> {
     pub fn as_mut_ptr(self: &SliceMut<T>) *mut T {
         return self.ptr;
     }
-
 }
 
 // Index conformances. The `[]` operator on slice VALUES keeps its inline lowering (the compiler builds
@@ -119,8 +117,12 @@ extend<T> Slice<T> as Index<T, []T> {
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &Slice<T>, r: Range<usize>) []T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
+        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }
 
@@ -129,8 +131,12 @@ extend<T> SliceMut<T> as Index<T, []T> {
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &SliceMut<T>, r: Range<usize>) []T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
+        return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }
 
@@ -139,7 +145,11 @@ extend<T> SliceMut<T> as IndexMut<T, []mut T> {
         return &mut unsafe self.ptr[i];
     }
     pub fn index_range_mut(self: &mut SliceMut<T>, r: Range<usize>) []mut T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start, };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
+        return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }

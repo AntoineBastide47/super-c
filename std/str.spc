@@ -31,7 +31,7 @@ extend str {
     // the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
     pub fn from_cstr(s: *const char) str {
         let mut n: usize = 0;
-        while unsafe s[n] != (0 as char) {
+        while unsafe s[n] != 0 as char {
             n += 1;
         }
         return str::from_raw(s as *const u8, n);
@@ -61,7 +61,7 @@ extend str {
     // The sub-view of bytes [start, end) -- allocation-free, it borrows `self`'s bytes. The caller
     // keeps `start`/`end` on UTF-8 boundaries (and within bounds).
     pub fn slice(self: &str, start: usize, end: usize) str {
-        return str { ptr: unsafe (self.ptr + start), len: end - start, };
+        return str { ptr: unsafe (self.ptr + start), len: end - start };
     }
 
     // --- search --------------------------------------------------------------------------------
@@ -83,7 +83,11 @@ extend str {
         if suffix.len == 0 {
             return true;
         }
-        return unsafe memcmp((unsafe (self.ptr + (self.len - suffix.len))) as *const void, suffix.ptr as *const void, suffix.len) == 0;
+        return unsafe memcmp(
+            (unsafe (self.ptr + (self.len - suffix.len))) as *const void,
+            suffix.ptr as *const void,
+            suffix.len,
+        ) == 0;
     }
 
     // First index of byte `byte`, or -1 if absent.
@@ -129,7 +133,7 @@ extend str {
             }
             start = start + 1;
         }
-        return str { ptr: unsafe (self.ptr + start), len: self.len - start, };
+        return str { ptr: unsafe (self.ptr + start), len: self.len - start };
     }
 
     // The view with trailing ASCII whitespace removed.
@@ -142,7 +146,7 @@ extend str {
             }
             end = end - 1;
         }
-        return str { ptr: self.ptr, len: end, };
+        return str { ptr: self.ptr, len: end };
     }
 
     // The view with ASCII whitespace removed from both ends.
@@ -248,7 +252,7 @@ extend str as Hash {
     pub fn hash(self: &str) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..self.len {
-            h = (h ^ (unsafe self.ptr[i] as u64)) * 0x100000001b3;
+            h = (h ^ unsafe self.ptr[i] as u64) * 0x100000001b3;
         }
         return h;
     }
@@ -257,7 +261,7 @@ extend str as Hash {
 extend str as Default {
     // The empty view (a null, zero-length `str`).
     pub fn default() str {
-        return str { ptr: null, len: 0, };
+        return str { ptr: null, len: 0 };
     }
 }
 
@@ -270,7 +274,11 @@ extend str as Index<u8, str> {
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &str, r: Range<usize>) str {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
         return self.slice(r.start, hi);
     }
 }
@@ -282,10 +290,23 @@ extend str as Index<u8, str> {
 // the end of the construction expression -- bind it to a `let` whose scope covers the loop. They live in
 // this module (alongside `str`), so no prelude header cycle arises.
 
-pub struct Bytes { pub s: str, pub i: usize }
-pub struct Chars { pub s: str, pub i: usize }
-pub struct Split { pub s: str, pub i: usize, pub sep: str }
-pub struct Lines { pub s: str, pub i: usize }
+pub struct Bytes {
+    pub s: str,
+    pub i: usize,
+}
+pub struct Chars {
+    pub s: str,
+    pub i: usize,
+}
+pub struct Split {
+    pub s: str,
+    pub i: usize,
+    pub sep: str,
+}
+pub struct Lines {
+    pub s: str,
+    pub i: usize,
+}
 
 extend str {
     // Iterate the raw bytes (`u8`).
@@ -350,8 +371,12 @@ extend str {
         };
     }
 
-    pub fn parse_u64(self: &str) Option<u64> { return self.parse_u64_radix(10); }
-    pub fn parse_i64(self: &str) Option<i64> { return self.parse_i64_radix(10); }
+    pub fn parse_u64(self: &str) Option<u64> {
+        return self.parse_u64_radix(10);
+    }
+    pub fn parse_i64(self: &str) Option<i64> {
+        return self.parse_i64_radix(10);
+    }
     pub fn parse_usize(self: &str) Option<usize> {
         return switch self.parse_u64() {
             Some(v) => Option::<usize>::Some(v as usize),
@@ -443,7 +468,7 @@ extend str {
             }
             any = true;
             if mant <= 1_844_674_407_370_955_160u64 {
-                mant = mant * 10 + ((b - b'0') as u64);
+                mant = mant * 10 + (b - b'0') as u64;
             } else {
                 exp10 += 1; // mantissa saturated: keep the scale, drop precision
             }
@@ -458,7 +483,7 @@ extend str {
                 }
                 any = true;
                 if mant <= 1_844_674_407_370_955_160u64 {
-                    mant = mant * 10 + ((b - b'0') as u64);
+                    mant = mant * 10 + (b - b'0') as u64;
                     exp10 -= 1;
                 }
                 i += 1;
@@ -483,14 +508,17 @@ extend str {
                 }
                 eany = true;
                 if e < 10_000 {
-                    e = e * 10 + ((b - b'0') as i64);
+                    e = e * 10 + (b - b'0') as i64;
                 }
                 i += 1;
             }
             if !eany {
                 return Option::<f64>::None;
             }
-            exp10 += switch eneg { true => 0 - e, false => e };
+            exp10 += (switch eneg {
+                true => 0 - e,
+                false => e,
+            });
         }
         if i != n {
             return Option::<f64>::None;
@@ -593,11 +621,12 @@ extend Chars as Iterator<u32> {
         let mut k: usize = 1;
         while k < n {
             let cb = self.s.byte_at(self.i + k);
-            if (cb & 0xC0) != 0x80 { // a non-continuation byte where one is required -> malformed
+            if (cb & 0xC0) != 0x80 {
+                // a non-continuation byte where one is required -> malformed
                 self.i = self.i + 1;
                 return Option::<u32>::Some(0xFFFD);
             }
-            cp = (cp << 6) | ((cb & 0x3F) as u32);
+            cp = cp << 6 | (cb & 0x3F) as u32;
             k = k + 1;
         }
         self.i = self.i + n;
@@ -622,7 +651,7 @@ extend Split as Iterator<str> {
             self.i = self.s.len() + 1;
             return Option::<str>::Some(tail);
         }
-        let j = self.i + (pos as usize);
+        let j = self.i + pos as usize;
         let piece = self.s.slice(self.i, j);
         self.i = j + self.sep.len();
         return Option::<str>::Some(piece);

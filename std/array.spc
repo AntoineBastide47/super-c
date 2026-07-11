@@ -11,7 +11,6 @@ pub struct Array<T, const N: usize> {
 }
 
 extend<T, const N: usize> Array<T, N> {
-
     pub fn len(self: &Array<T, N>) usize {
         return N;
     }
@@ -145,7 +144,9 @@ extend<T: Free, const N: usize> Array<T, N> as Free {
 
 // Standard-interface conformances.
 extend<T: Default, const N: usize> Array<T, N> as Default {
-    pub fn default() Array<T, N> { return Array::<T, N>::new(); }
+    pub fn default() Array<T, N> {
+        return Array::<T, N>::new();
+    }
 }
 
 // Equality-based algorithms (available when the element type is `Eq`).
@@ -153,7 +154,9 @@ extend<T: Eq, const N: usize> Array<T, N> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub fn contains(self: &Array<T, N>, x: &T) bool {
         for i in 0..N {
-            if self.data[i].eq(x) { return true; }
+            if self.data[i].eq(x) {
+                return true;
+            }
         }
         return false;
     }
@@ -161,7 +164,9 @@ extend<T: Eq, const N: usize> Array<T, N> {
     // Index of the first element equal to `x`, or `None`.
     pub fn position(self: &Array<T, N>, x: &T) Option<usize> {
         for i in 0..N {
-            if self.data[i].eq(x) { return Option::<usize>::Some(i); }
+            if self.data[i].eq(x) {
+                return Option::<usize>::Some(i);
+            }
         }
         return Option::<usize>::None;
     }
@@ -171,10 +176,14 @@ extend<T: Eq, const N: usize> Array<T, N> {
 extend<T: Ord, const N: usize> Array<T, N> {
     // True if the elements are in non-decreasing order (per `Ord`).
     pub fn is_sorted(self: &Array<T, N>) bool {
-        if N < 2 { return true; }
+        if N < 2 {
+            return true;
+        }
         let mut i: usize = 0;
         while i + 1 < N {
-            if self.data[i].cmp(&self.data[i + 1]) > 0 { return false; }
+            if self.data[i].cmp(&self.data[i + 1]) > 0 {
+                return false;
+            }
             i = i + 1;
         }
         return true;
@@ -188,8 +197,14 @@ extend<T: Ord, const N: usize> Array<T, N> {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let c = self.data[mid].cmp(x);
-            if c == 0 { return Result::<usize, usize>::Ok(mid); }
-            if c < 0 { lo = mid + 1; } else { hi = mid; }
+            if c == 0 {
+                return Result::<usize, usize>::Ok(mid);
+            }
+            if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
         return Result::<usize, usize>::Err(lo);
     }
@@ -199,8 +214,12 @@ extend<T: Ord, const N: usize> Array<T, N> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && self.data[child].cmp(&self.data[child + 1]) < 0 { child = child + 1; }
-            if self.data[r].cmp(&self.data[child]) >= 0 { return; }
+            if child + 1 < end && self.data[child].cmp(&self.data[child + 1]) < 0 {
+                child = child + 1;
+            }
+            if self.data[r].cmp(&self.data[child]) >= 0 {
+                return;
+            }
             self.swap(r, child);
             r = child;
             child = 2 * r + 1;
@@ -209,7 +228,9 @@ extend<T: Ord, const N: usize> Array<T, N> {
 
     // Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
     pub fn sort(self: &mut Array<T, N>) {
-        if N < 2 { return; }
+        if N < 2 {
+            return;
+        }
         let mut start = N / 2;
         while start > 0 {
             start = start - 1;
@@ -230,27 +251,40 @@ extend<T, const N: usize> Array<T, N> {
     // The sift is inlined for the same reason as Vector::sort_by: a generic method calling another
     // generic method with its own F is not transitively instantiated yet.
     pub fn sort_by<F: fn(&T, &T) i32>(self: &mut Array<T, N>, cmp: F) {
-        if N < 2 { return; }
+        if N < 2 {
+            return;
+        }
         let mut phase: usize = 0; // 0: heapify roots N/2-1..0; 1: pop the max to the end, re-sift
         let mut start = N / 2;
         let mut end = N;
         loop {
             let mut r: usize = 0;
             if phase == 0 {
-                if start == 0 { phase = 1; continue; }
+                if start == 0 {
+                    phase = 1;
+                    continue;
+                }
                 start = start - 1;
                 r = start;
             } else {
-                if end <= 1 { break; }
+                if end <= 1 {
+                    break;
+                }
                 end = end - 1;
                 self.swap(0, end);
             }
             let mut lim = N;
-            if phase == 1 { lim = end; }
+            if phase == 1 {
+                lim = end;
+            }
             let mut child = 2 * r + 1;
             while child < lim {
-                if child + 1 < lim && cmp(&self.data[child], &self.data[child + 1]) < 0 { child = child + 1; }
-                if cmp(&self.data[r], &self.data[child]) >= 0 { break; }
+                if child + 1 < lim && cmp(&self.data[child], &self.data[child + 1]) < 0 {
+                    child = child + 1;
+                }
+                if cmp(&self.data[r], &self.data[child]) >= 0 {
+                    break;
+                }
                 self.swap(r, child);
                 r = child;
                 child = 2 * r + 1;
@@ -260,14 +294,18 @@ extend<T, const N: usize> Array<T, N> {
 
     // Sort in place by a derived `Ord` key (`a.sort_by_key(|p: &P| p.age)`).
     pub fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Array<T, N>, key: F) {
-        if N < 2 { return; }
+        if N < 2 {
+            return;
+        }
         let mut i: usize = 1; // insertion sort through swaps: key extraction stays borrow-only
         while i < N {
             let mut j = i;
             while j > 0 {
                 let prev = key(&self.data[j - 1]);
                 let cur = key(&self.data[j]);
-                if prev.cmp(&cur) <= 0 { break; }
+                if prev.cmp(&cur) <= 0 {
+                    break;
+                }
                 self.swap(j - 1, j);
                 j = j - 1;
             }
@@ -284,8 +322,12 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
         return &self.data[i];
     }
     pub fn index_range(self: &Array<T, N>, r: Range<usize>) []T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return Slice::<T> { ptr: unsafe (self.as_ptr() + r.start), len: hi - r.start, };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
+        return Slice::<T> { ptr: unsafe (self.as_ptr() + r.start), len: hi - r.start };
     }
 }
 
@@ -297,9 +339,13 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
         return &mut self.data[i];
     }
     pub fn index_range_mut(self: &mut Array<T, N>, r: Range<usize>) []mut T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
         let p = (&mut self.data[0]) as *mut T;
-        return SliceMut::<T> { ptr: unsafe (p + r.start), len: hi - r.start, };
+        return SliceMut::<T> { ptr: unsafe (p + r.start), len: hi - r.start };
     }
 }
 
@@ -323,7 +369,9 @@ extend<T: Eq, const N: usize> Array<T, N> as Eq {
         for i in 0..N {
             let a = self.at(i);
             let b = other.at(i);
-            if !a.eq(b) { return false; }
+            if !a.eq(b) {
+                return false;
+            }
         }
         return true;
     }
@@ -346,7 +394,9 @@ extend<T: Format, const N: usize> Array<T, N> as Format {
     pub fn fmt(self: &Array<T, N>) String {
         let mut s = String::from_str("[");
         for i in 0..N {
-            if i > 0 { s.push_str(", "); }
+            if i > 0 {
+                s.push_str(", ");
+            }
             let e = self.at(i);
             let es = e.fmt();
             s.push_string(&es);
