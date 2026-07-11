@@ -19,9 +19,7 @@ pub const CC_ID_PART: u8 = 2u8;
 pub const CC_DIGIT: u8 = 4u8;
 pub const CC_HEX: u8 = 8u8;
 pub const CC_WS: u8 = 16u8;
-pub struct CharClass {
-    pub f: [u8; 256],
-}
+pub type CharClass = Array<u8, 256>;
 
 fn build_char_class() CharClass {
     let mut c = CharClass {};
@@ -45,7 +43,7 @@ fn build_char_class() CharClass {
             fl = fl | CC_WS;
         }
         unsafe {
-            c.f[i] = fl;
+            c[i] = fl;
         }
         i = i + 1;
     }
@@ -57,7 +55,7 @@ pub struct Lexer {
     pub len: usize,
     pub start: usize,
     pub current: usize,
-    pub file: *const char,
+    pub file: str,
     pub tokens: Vector<Token>,
     pub errors: diag::Errors,
     pub class: CharClass,
@@ -84,7 +82,7 @@ extend Lexer {
         };
     }
 
-    pub fn set_file(self: &mut Self, file: *const char) void {
+    pub fn set_file(self: &mut Self, file: str) void {
         self.file = file;
     }
 }
@@ -101,34 +99,34 @@ fn is_eof(l: &Lexer) bool {
 }
 
 fn is_id_start(b: u8) bool {
-    return b == '_' || b >= 'a' as u8 && b <= 'z' as u8 || b >= 'A' as u8 && b <= 'Z' as u8;
+    return b == '_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z';
 }
 
 fn is_id_part_byte(b: u8) bool {
-    return is_id_start(b) || b >= '0' as u8 && b <= '9' as u8;
+    return is_id_start(b) || b >= b'0' && b <= b'9';
 }
 
 fn is_dec(b: u8) bool {
-    return b >= '0' as u8 && b <= '9' as u8;
+    return b >= b'0' && b <= b'9';
 }
 fn is_hex(b: u8) bool {
-    return is_dec(b) || b >= 'A' as u8 && b <= 'F' as u8 || b >= 'a' as u8 && b <= 'f' as u8;
+    return is_dec(b) || b >= b'A' && b <= b'F' || b >= b'a' && b <= b'f';
 }
 fn is_oct(b: u8) bool {
-    return b >= '0' as u8 && b <= '7' as u8;
+    return b >= b'0' && b <= b'7';
 }
 fn is_bin(b: u8) bool {
-    return b == '0' as u8 || b == '1' as u8;
+    return b == b'0' || b == b'1';
 }
 
 fn hex_value(b: u8) i32 {
-    if b <= '9' as u8 {
-        return (b - '0' as u8) as i32;
+    if b <= b'9' {
+        return (b - b'0') as i32;
     }
-    if b <= 'F' as u8 {
-        return (b - 'A' as u8 + 10) as i32;
+    if b <= b'F' {
+        return (b - b'A' + 10) as i32;
     }
-    return (b - 'a' as u8 + 10) as i32;
+    return (b - b'a' + 10) as i32;
 }
 
 fn add_token(l: &mut Lexer, token_type: TokenType) void {
@@ -225,120 +223,120 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
     let first = unsafe lexeme[0];
     switch len {
         2 => {
-            if first == 'a' as u8 && memeq(lexeme, "as") {
+            if first == b'a' && memeq(lexeme, "as") {
                 return TokenType::As;
             }
-            if first == 'd' as u8 && memeq(lexeme, "do") {
+            if first == b'd' && memeq(lexeme, "do") {
                 return TokenType::Do;
             }
-            if first == 'f' as u8 && memeq(lexeme, "fn") {
+            if first == b'f' && memeq(lexeme, "fn") {
                 return TokenType::Fn;
             }
-            if first == 'i' as u8 && memeq(lexeme, "if") {
+            if first == b'i' && memeq(lexeme, "if") {
                 return TokenType::If;
             }
-            if first == 'i' as u8 && memeq(lexeme, "in") {
+            if first == b'i' && memeq(lexeme, "in") {
                 return TokenType::In;
             }
         },
         3 => {
-            if first == 'd' as u8 && memeq(lexeme, "dyn") {
+            if first == b'd' && memeq(lexeme, "dyn") {
                 return TokenType::Dyn;
             }
-            if first == 'f' as u8 && memeq(lexeme, "for") {
+            if first == b'f' && memeq(lexeme, "for") {
                 return TokenType::For;
             }
-            if first == 'l' as u8 && memeq(lexeme, "let") {
+            if first == b'l' && memeq(lexeme, "let") {
                 return TokenType::Let;
             }
-            if first == 'm' as u8 && memeq(lexeme, "mut") {
+            if first == b'm' && memeq(lexeme, "mut") {
                 return TokenType::Mut;
             }
-            if first == 'n' as u8 && memeq(lexeme, "new") {
+            if first == b'n' && memeq(lexeme, "new") {
                 return TokenType::New;
             }
-            if first == 'p' as u8 && memeq(lexeme, "pub") {
+            if first == b'p' && memeq(lexeme, "pub") {
                 return TokenType::Pub;
             }
         },
         4 => {
-            if first == 'c' as u8 && memeq(lexeme, "case") {
+            if first == b'c' && memeq(lexeme, "case") {
                 return TokenType::Case;
             }
-            if first == 'e' as u8 && memeq(lexeme, "else") {
+            if first == b'e' && memeq(lexeme, "else") {
                 return TokenType::Else;
             }
-            if first == 'e' as u8 && memeq(lexeme, "enum") {
+            if first == b'e' && memeq(lexeme, "enum") {
                 return TokenType::Enum;
             }
-            if first == 'l' as u8 && memeq(lexeme, "loop") {
+            if first == b'l' && memeq(lexeme, "loop") {
                 return TokenType::Loop;
             }
-            if first == 'm' as u8 && memeq(lexeme, "move") {
+            if first == b'm' && memeq(lexeme, "move") {
                 return TokenType::Move;
             }
-            if first == 'n' as u8 && memeq(lexeme, "null") {
+            if first == b'n' && memeq(lexeme, "null") {
                 return TokenType::Null;
             }
-            if first == 's' as u8 && memeq(lexeme, "self") {
+            if first == b's' && memeq(lexeme, "self") {
                 return TokenType::SelfLower;
             }
-            if first == 'S' as u8 && memeq(lexeme, "Self") {
+            if first == b'S' && memeq(lexeme, "Self") {
                 return TokenType::SelfUpper;
             }
-            if first == 't' as u8 && memeq(lexeme, "true") {
+            if first == b't' && memeq(lexeme, "true") {
                 return TokenType::True;
             }
-            if first == 't' as u8 && memeq(lexeme, "type") {
+            if first == b't' && memeq(lexeme, "type") {
                 return TokenType::Type;
             }
         },
         5 => {
-            if first == 'b' as u8 && memeq(lexeme, "break") {
+            if first == b'b' && memeq(lexeme, "break") {
                 return TokenType::Break;
             }
-            if first == 'c' as u8 && memeq(lexeme, "const") {
+            if first == b'c' && memeq(lexeme, "const") {
                 return TokenType::Const;
             }
-            if first == 'd' as u8 && memeq(lexeme, "defer") {
+            if first == b'd' && memeq(lexeme, "defer") {
                 return TokenType::Defer;
             }
-            if first == 'f' as u8 && memeq(lexeme, "false") {
+            if first == b'f' && memeq(lexeme, "false") {
                 return TokenType::False;
             }
-            if first == 'u' as u8 && memeq(lexeme, "union") {
+            if first == b'u' && memeq(lexeme, "union") {
                 return TokenType::Union;
             }
-            if first == 'w' as u8 && memeq(lexeme, "where") {
+            if first == b'w' && memeq(lexeme, "where") {
                 return TokenType::Where;
             }
-            if first == 'w' as u8 && memeq(lexeme, "while") {
+            if first == b'w' && memeq(lexeme, "while") {
                 return TokenType::While;
             }
         },
         6 => {
-            if first == 'e' as u8 && memeq(lexeme, "extend") {
+            if first == b'e' && memeq(lexeme, "extend") {
                 return TokenType::Extend;
             }
-            if first == 'e' as u8 && memeq(lexeme, "extern") {
+            if first == b'e' && memeq(lexeme, "extern") {
                 return TokenType::Extern;
             }
-            if first == 'i' as u8 && memeq(lexeme, "import") {
+            if first == b'i' && memeq(lexeme, "import") {
                 return TokenType::Import;
             }
-            if first == 'r' as u8 && memeq(lexeme, "return") {
+            if first == b'r' && memeq(lexeme, "return") {
                 return TokenType::Return;
             }
-            if first == 's' as u8 && memeq(lexeme, "struct") {
+            if first == b's' && memeq(lexeme, "struct") {
                 return TokenType::Struct;
             }
-            if first == 's' as u8 && memeq(lexeme, "switch") {
+            if first == b's' && memeq(lexeme, "switch") {
                 return TokenType::Switch;
             }
-            if first == 's' as u8 && memeq(lexeme, "sizeof") {
+            if first == b's' && memeq(lexeme, "sizeof") {
                 return TokenType::Sizeof;
             }
-            if first == 'u' as u8 && memeq(lexeme, "unsafe") {
+            if first == b'u' && memeq(lexeme, "unsafe") {
                 return TokenType::Unsafe;
             }
         },
@@ -366,7 +364,7 @@ fn identifier(l: &mut Lexer) void {
     // Scan the [_A-Za-z0-9] run via the class table. No bounds check: the trailing-NUL sentinel (SOURCE_PAD)
     // is not id-part, so the run stops at (or before) len -- exactly the old boundary.
     let mut i = l.current;
-    while (l.class.f[(unsafe l.bytes[i]) as usize] & CC_ID_PART) != 0u8 {
+    while (l.class[(unsafe l.bytes[i]) as usize] & CC_ID_PART) != 0u8 {
         i = i + 1;
     }
     l.current = i;
@@ -395,7 +393,7 @@ fn whitespace(l: &mut Lexer) void {
     // is not WS, so the run stops at (or before) len. '\r' and '\n' are both WS, so advancing one byte at a
     // time is identical to the old explicit CRLF handling.
     let mut i = l.current;
-    while (l.class.f[(unsafe l.bytes[i]) as usize] & CC_WS) != 0u8 {
+    while (l.class[(unsafe l.bytes[i]) as usize] & CC_WS) != 0u8 {
         i = i + 1;
     }
     l.current = i;
@@ -425,10 +423,10 @@ fn block_comment(l: &mut Lexer) void {
     let mut depth: usize = 1;
     while i < l.len {
         let b = unsafe l.bytes[i];
-        if b == '/' as u8 && i + 1 < l.len && unsafe l.bytes[i + 1] == '*' as u8 {
+        if b == b'/' && i + 1 < l.len && unsafe l.bytes[i + 1] == b'*' {
             depth = depth + 1;
             i = i + 2;
-        } else if b == '*' as u8 && i + 1 < l.len && unsafe l.bytes[i + 1] == '/' as u8 {
+        } else if b == b'*' && i + 1 < l.len && unsafe l.bytes[i + 1] == b'/' {
             i = i + 2;
             depth = depth - 1;
             if depth == 0 {
@@ -458,13 +456,13 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
     let at = l.current - 1;
     let escaped = unsafe l.bytes[l.current];
     l.current = l.current + 1;
-    if escaped == 'n' as u8 {
+    if escaped == b'n' {
         return 10;
     }
-    if escaped == 'r' as u8 {
+    if escaped == b'r' {
         return 13;
     }
-    if escaped == 't' as u8 {
+    if escaped == b't' {
         return 9;
     }
     if escaped == '\\' as u8 {
@@ -473,13 +471,13 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
     if escaped == '\'' as u8 {
         return '\'' as u32;
     }
-    if escaped == '"' as u8 && !byte_character {
+    if escaped == b'"' && !byte_character {
         return '"' as u32;
     }
-    if escaped == '0' as u8 {
+    if escaped == b'0' {
         return 0;
     }
-    if escaped == 'x' as u8 {
+    if escaped == b'x' {
         if l.current + 2 <= l.len && is_hex(unsafe l.bytes[l.current]) && is_hex(unsafe l.bytes[l.current + 1]) {
             let value = (hex_value(unsafe l.bytes[l.current]) << 4 | hex_value(unsafe l.bytes[l.current + 1])) as u32;
             l.current = l.current + 2;
@@ -492,19 +490,19 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
         }
         return UINT32_MAX;
     }
-    if escaped == 'u' as u8 {
+    if escaped == b'u' {
         if byte_character {
-            if match_byte(&mut *l, '{' as u8) {
+            if match_byte(&mut *l, b'{') {
                 while is_hex(peek_byte(&*l)) {
                     l.current = l.current + 1;
                 }
-                match_byte(&mut *l, '}' as u8);
+                match_byte(&mut *l, b'}');
             }
             let err_len = l.current - at;
             lexer_error_at(&mut *l, at, err_len, "Unicode escapes are not allowed in byte character literals");
             return UINT32_MAX;
         }
-        if !match_byte(&mut *l, '{' as u8) {
+        if !match_byte(&mut *l, b'{') {
             let err_len = l.current - at;
             lexer_error_at(&mut *l, at, err_len, "Unicode escape must use \\u{...} syntax");
             return UINT32_MAX;
@@ -518,7 +516,7 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
             digits = digits + 1;
             l.current = l.current + 1;
         }
-        if digits == 0 || digits > 6 || !match_byte(&mut *l, '}' as u8) {
+        if digits == 0 || digits > 6 || !match_byte(&mut *l, b'}') {
             let err_len = l.current - at;
             lexer_error_at(&mut *l, at, err_len, "Unicode escape requires 1 to 6 hexadecimal digits");
             return UINT32_MAX;
@@ -540,7 +538,7 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
     while i < l.len {
         let b = unsafe l.bytes[i];
         i = i + 1;
-        if b == '"' as u8 {
+        if b == b'"' {
             l.current = i;
             add_token(&mut *l, kind);
             return;
@@ -555,7 +553,7 @@ fn string_lit(l: &mut Lexer, kind: TokenType) void {
             while l.current < l.len {
                 let recovery = unsafe l.bytes[l.current];
                 l.current = l.current + 1;
-                if recovery == '"' as u8 {
+                if recovery == b'"' {
                     break;
                 }
             }
@@ -646,10 +644,10 @@ fn character(l: &mut Lexer, byte_character: bool) void {
 
 fn raw_string_ahead(l: &Lexer, hashes: *mut usize) bool {
     let mut i = l.current;
-    while i < l.len && unsafe l.bytes[i] == '#' as u8 {
+    while i < l.len && unsafe l.bytes[i] == b'#' {
         i = i + 1;
     }
-    if i >= l.len || unsafe l.bytes[i] != '"' as u8 {
+    if i >= l.len || unsafe l.bytes[i] != b'"' {
         return false;
     }
     unsafe *hashes = i - l.current;
@@ -664,10 +662,10 @@ fn raw_string(l: &mut Lexer, hashes: usize) void {
     let mut i = l.current + hashes + 1;
     while i < l.len {
         let b = unsafe l.bytes[i];
-        if b == '"' as u8 {
+        if b == b'"' {
             let mut close = i + 1;
             let mut matched: usize = 0;
-            while matched < hashes && close < l.len && unsafe l.bytes[close] == '#' as u8 {
+            while matched < hashes && close < l.len && unsafe l.bytes[close] == b'#' {
                 close = close + 1;
                 matched = matched + 1;
             }
@@ -696,7 +694,7 @@ fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(
         let b = unsafe l.bytes[i];
         if pred(b) {
             i = i + 1;
-        } else if b == '_' as u8 {
+        } else if b == b'_' {
             let prev = i > component_start && pred(unsafe l.bytes[i - 1]);
             let next = i + 1 < l.len && pred(unsafe l.bytes[i + 1]);
             if (!prev || !next) && unsafe *error_at == USIZE_MAX {
@@ -727,17 +725,17 @@ fn number(l: &mut Lexer) void {
     let mut error_at = USIZE_MAX;
     let mut error: str = "";
     let mut is_float = false;
-    if unsafe l.bytes[l.start] == '0' as u8 {
+    if unsafe l.bytes[l.start] == b'0' {
         let mut radix: u32 = 10;
         let mut digit: fn(u8) bool = is_dec;
         let prefix = peek_byte(&*l);
-        if prefix == 'x' as u8 || prefix == 'X' as u8 {
+        if prefix == b'x' || prefix == b'X' {
             radix = 16;
             digit = is_hex;
-        } else if prefix == 'o' as u8 || prefix == 'O' as u8 {
+        } else if prefix == b'o' || prefix == b'O' {
             radix = 8;
             digit = is_oct;
-        } else if prefix == 'b' as u8 || prefix == 'B' as u8 {
+        } else if prefix == b'b' || prefix == b'B' {
             radix = 2;
             digit = is_bin;
         }
@@ -750,7 +748,7 @@ fn number(l: &mut Lexer) void {
                 let b = unsafe l.bytes[i];
                 if digit(b) {
                     saw_digit = true;
-                } else if b == '_' as u8 {
+                } else if b == b'_' {
                     let prev = i > component_start && digit(unsafe l.bytes[i - 1]);
                     let next = i + 1 < l.len && digit(unsafe l.bytes[i + 1]);
                     if (!prev || !next) && error_at == USIZE_MAX {
@@ -758,7 +756,7 @@ fn number(l: &mut Lexer) void {
                         error = "invalid numeric separator";
                     }
                 } else {
-                    if radix == 16 && saw_digit && (b == 'p' as u8 || b == 'P' as u8) {
+                    if radix == 16 && saw_digit && (b == b'p' || b == b'P') {
                         break;
                     }
                     let mut j = i;
@@ -788,17 +786,17 @@ fn number(l: &mut Lexer) void {
                 error = "radix prefix must be followed by at least one digit";
             }
             let mut hex_float = false;
-            if radix == 16 && error_at == USIZE_MAX && peek_byte(&*l) == '.' as u8 && is_hex(peek_byte_n(&*l, 1)) {
+            if radix == 16 && error_at == USIZE_MAX && peek_byte(&*l) == b'.' && is_hex(peek_byte_n(&*l, 1)) {
                 hex_float = true;
                 l.current = l.current + 1;
                 while is_hex(peek_byte(&*l)) {
                     l.current = l.current + 1;
                 }
             }
-            if radix == 16 && error_at == USIZE_MAX && (peek_byte(&*l) == 'p' as u8 || peek_byte(&*l) == 'P' as u8) {
+            if radix == 16 && error_at == USIZE_MAX && (peek_byte(&*l) == b'p' || peek_byte(&*l) == b'P') {
                 hex_float = true;
                 l.current = l.current + 1;
-                if peek_byte(&*l) == '+' as u8 || peek_byte(&*l) == '-' as u8 {
+                if peek_byte(&*l) == b'+' || peek_byte(&*l) == b'-' {
                     l.current = l.current + 1;
                 }
                 let exp_start = l.current;
@@ -822,7 +820,7 @@ fn number(l: &mut Lexer) void {
                 error_at = l.current;
                 error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3";
             }
-            if !hex_float && peek_byte(&*l) == '.' as u8 {
+            if !hex_float && peek_byte(&*l) == b'.' {
                 if error_at == USIZE_MAX {
                     error_at = l.current;
                     if radix == 16 {
@@ -834,7 +832,7 @@ fn number(l: &mut Lexer) void {
                 l.current = l.current + 1;
                 while !is_eof(&*l) {
                     let b = peek_byte(&*l);
-                    if !is_id_part_byte(b) && b != '.' as u8 && b != '+' as u8 && b != '-' as u8 {
+                    if !is_id_part_byte(b) && b != b'.' && b != b'+' && b != b'-' {
                         break;
                     }
                     l.current = l.current + 1;
@@ -857,7 +855,7 @@ fn number(l: &mut Lexer) void {
     if error_at != USIZE_MAX {
         error = "invalid numeric separator";
     }
-    if peek_byte(&*l) == '.' as u8 && peek_byte_n(&*l, 1) != '.' as u8 {
+    if peek_byte(&*l) == b'.' && peek_byte_n(&*l, 1) != b'.' {
         is_float = true;
         l.current = l.current + 1;
         let fraction_start = l.current;
@@ -866,10 +864,10 @@ fn number(l: &mut Lexer) void {
             error = "invalid numeric separator";
         }
     }
-    if peek_byte(&*l) == 'e' as u8 || peek_byte(&*l) == 'E' as u8 {
+    if peek_byte(&*l) == b'e' || peek_byte(&*l) == b'E' {
         is_float = true;
         l.current = l.current + 1;
-        if peek_byte(&*l) == '+' as u8 || peek_byte(&*l) == '-' as u8 {
+        if peek_byte(&*l) == b'+' || peek_byte(&*l) == b'-' {
             l.current = l.current + 1;
         }
         let exponent_start = l.current;
@@ -955,7 +953,7 @@ fn scan_token(l: &mut Lexer) void {
             return;
         },
         ':' => {
-            if match_byte(&mut *l, ':' as u8) {
+            if match_byte(&mut *l, b':') {
                 add_token(&mut *l, TokenType::PathSeparator);
             } else {
                 add_token(&mut *l, TokenType::Colon);
@@ -967,71 +965,71 @@ fn scan_token(l: &mut Lexer) void {
             return;
         },
         '%' => {
-            add_match(&mut *l, '=' as u8, TokenType::PercentEqual, TokenType::Percent);
+            add_match(&mut *l, b'=', TokenType::PercentEqual, TokenType::Percent);
             return;
         },
         '^' => {
-            add_match(&mut *l, '=' as u8, TokenType::CaretEqual, TokenType::Caret);
+            add_match(&mut *l, b'=', TokenType::CaretEqual, TokenType::Caret);
             return;
         },
         '+' => {
-            add_match(&mut *l, '=' as u8, TokenType::PlusEqual, TokenType::Plus);
+            add_match(&mut *l, b'=', TokenType::PlusEqual, TokenType::Plus);
             return;
         },
         '-' => {
-            if match_byte(&mut *l, '>' as u8) {
+            if match_byte(&mut *l, b'>') {
                 add_token(&mut *l, TokenType::Arrow);
                 return;
             }
-            add_match(&mut *l, '=' as u8, TokenType::MinusEqual, TokenType::Minus);
+            add_match(&mut *l, b'=', TokenType::MinusEqual, TokenType::Minus);
             return;
         },
         '*' => {
-            add_match(&mut *l, '=' as u8, TokenType::StarEqual, TokenType::Star);
+            add_match(&mut *l, b'=', TokenType::StarEqual, TokenType::Star);
             return;
         },
         '=' => {
-            if match_byte(&mut *l, '=' as u8) {
+            if match_byte(&mut *l, b'=') {
                 add_token(&mut *l, TokenType::EqualEqual);
                 return;
             }
-            add_match(&mut *l, '>' as u8, TokenType::FatArrow, TokenType::Equal);
+            add_match(&mut *l, b'>', TokenType::FatArrow, TokenType::Equal);
             return;
         },
         '!' => {
-            add_match(&mut *l, '=' as u8, TokenType::BangEqual, TokenType::Bang);
+            add_match(&mut *l, b'=', TokenType::BangEqual, TokenType::Bang);
             return;
         },
         '<' => {
-            if match_byte(&mut *l, '<' as u8) {
-                add_match(&mut *l, '=' as u8, TokenType::LeftShiftEqual, TokenType::LeftShift);
+            if match_byte(&mut *l, b'<') {
+                add_match(&mut *l, b'=', TokenType::LeftShiftEqual, TokenType::LeftShift);
                 return;
             }
-            add_match(&mut *l, '=' as u8, TokenType::LessThanEqual, TokenType::LessThan);
+            add_match(&mut *l, b'=', TokenType::LessThanEqual, TokenType::LessThan);
             return;
         },
         '>' => {
-            if match_byte(&mut *l, '>' as u8) {
-                add_match(&mut *l, '=' as u8, TokenType::RightShiftEqual, TokenType::RightShift);
+            if match_byte(&mut *l, b'>') {
+                add_match(&mut *l, b'=', TokenType::RightShiftEqual, TokenType::RightShift);
                 return;
             }
-            add_match(&mut *l, '=' as u8, TokenType::GreaterThanEqual, TokenType::GreaterThan);
+            add_match(&mut *l, b'=', TokenType::GreaterThanEqual, TokenType::GreaterThan);
             return;
         },
         '&' => {
-            if match_byte(&mut *l, '&' as u8) {
+            if match_byte(&mut *l, b'&') {
                 add_token(&mut *l, TokenType::AmpersandAmpersand);
                 return;
             }
-            add_match(&mut *l, '=' as u8, TokenType::AmpersandEqual, TokenType::Ampersand);
+            add_match(&mut *l, b'=', TokenType::AmpersandEqual, TokenType::Ampersand);
             return;
         },
         '|' => {
-            if match_byte(&mut *l, '|' as u8) {
+            if match_byte(&mut *l, b'|') {
                 add_token(&mut *l, TokenType::PipePipe);
                 return;
             }
-            add_match(&mut *l, '=' as u8, TokenType::PipeEqual, TokenType::Pipe);
+            add_match(&mut *l, b'=', TokenType::PipeEqual, TokenType::Pipe);
             return;
         },
         '?' => {
@@ -1039,21 +1037,21 @@ fn scan_token(l: &mut Lexer) void {
             return;
         },
         '/' => {
-            if match_byte(&mut *l, '/' as u8) {
+            if match_byte(&mut *l, b'/') {
                 line_comment(&mut *l);
                 if l.keep_trivia {
                     // `///...` is a doc comment; `//...` a plain one. The 3rd byte decides.
-                    let doc = l.current - l.start > 2 && unsafe l.bytes[l.start + 2] == '/' as u8;
+                    let doc = l.current - l.start > 2 && unsafe l.bytes[l.start + 2] == b'/';
                     if doc {
                         add_token(&mut *l, TokenType::DocLineComment);
                     } else {
                         add_token(&mut *l, TokenType::LineComment);
                     }
                 }
-            } else if match_byte(&mut *l, '*' as u8) {
+            } else if match_byte(&mut *l, b'*') {
                 block_comment(&mut *l);
                 if l.keep_trivia {
-                    let doc = l.current - l.start > 4 && unsafe l.bytes[l.start + 2] == '*' as u8;
+                    let doc = l.current - l.start > 4 && unsafe l.bytes[l.start + 2] == b'*';
                     if doc {
                         add_token(&mut *l, TokenType::DocBlockComment);
                     } else {
@@ -1061,15 +1059,15 @@ fn scan_token(l: &mut Lexer) void {
                     }
                 }
             } else {
-                add_match(&mut *l, '=' as u8, TokenType::SlashEqual, TokenType::Slash);
+                add_match(&mut *l, b'=', TokenType::SlashEqual, TokenType::Slash);
             }
             return;
         },
         '.' => {
-            if match_byte(&mut *l, '.' as u8) {
-                if match_byte(&mut *l, '.' as u8) {
+            if match_byte(&mut *l, b'.') {
+                if match_byte(&mut *l, b'.') {
                     add_token(&mut *l, TokenType::Ellipsis);
-                } else if match_byte(&mut *l, '=' as u8) {
+                } else if match_byte(&mut *l, b'=') {
                     add_token(&mut *l, TokenType::RangeInclusive);
                 } else {
                     add_token(&mut *l, TokenType::Range);
@@ -1111,7 +1109,7 @@ fn scan_token(l: &mut Lexer) void {
             if peek_byte(&*l) == '\'' as u8 {
                 l.current = l.current + 1;
                 character(&mut *l, true);
-            } else if peek_byte(&*l) == '"' as u8 {
+            } else if peek_byte(&*l) == b'"' {
                 l.current = l.current + 1;
                 string_lit(&mut *l, TokenType::ByteStringLiteral);
             } else {

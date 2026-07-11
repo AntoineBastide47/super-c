@@ -10,6 +10,10 @@ pub struct Array<T, const N: usize> {
     data: [T; N], // the N elements, all always initialized (private)
 }
 
+extern "C" {
+    fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
+}
+
 extend<T, const N: usize> Array<T, N> {
     pub fn len(self: &Array<T, N>) usize {
         return N;
@@ -55,6 +59,13 @@ extend<T, const N: usize> Array<T, N> {
 
     pub fn as_ptr(self: &Array<T, N>) *const T {
         return (&self.data[0]) as *const T;
+    }
+
+    // Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Caller guarantees
+    // `n <= N * sizeof(T)` and that the bytes form valid `T`s; overwritten elements are NOT
+    // freed (raw overwrite, unlike `set`).
+    pub fn copy_from(self: &mut Array<T, N>, src: *const void, n: usize) {
+        unsafe memcpy((&mut self.data[0]) as *mut void, src, n);
     }
 
     // Exchange the elements at `i` and `j` (both must be in range).

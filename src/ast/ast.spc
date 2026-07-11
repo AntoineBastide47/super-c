@@ -928,11 +928,11 @@ extend Ast as Free {
 }
 
 pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut u32) BuiltinType {
-    let hex = end - start > 2 && unsafe src[start] == '0' as u8 && (unsafe src[start + 1] | 0x20u8) == 'x' as u8;
+    let hex = end - start > 2 && unsafe src[start] == b'0' && (unsafe src[start + 1] | 0x20u8) == b'x';
     let mut hexf = false;
     let mut i = start + 2;
     while hex && i < end && !hexf {
-        hexf = (unsafe src[i] | 0x20u8) == 'p' as u8;
+        hexf = (unsafe src[i] | 0x20u8) == b'p';
         i = i + 1;
     }
     if end - start > 5 && unsafe cstring::memcmp(unsafe src + end - 5, "isize".ptr(), 5) == 0 {

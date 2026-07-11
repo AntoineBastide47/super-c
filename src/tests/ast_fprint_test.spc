@@ -337,7 +337,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
     if buf == null {
         return null;
     }
-    let got = unsafe stdio::fread(buf as *mut void, 1, sz as usize, f);
+    let got = unsafe stdio::fread(buf, 1, sz as usize, f);
     unsafe buf[got] = 0 as char;
     return buf;
 }
@@ -365,6 +365,6 @@ fn dump() {
     assert(has(buf, "Return"), "dump names the return");
     assert(has(buf, "Binary Plus"), "operator name printed for binary nodes");
     assert(has(buf, ".."), "node spans printed as [start..end]");
-    unsafe stdlib::free(buf as *mut void);
+    unsafe stdlib::free(buf);
     pr.ast.free();
 }

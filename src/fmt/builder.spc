@@ -187,7 +187,6 @@ fn emit_gap_vertical(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::
         i = i + 1;
     }
     segs.free();
-    first;
 }
 
 // Leading trivia at the start of a braced body or file: each segment on its own line, followed by

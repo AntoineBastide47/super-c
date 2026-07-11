@@ -65,7 +65,7 @@ extend Errors {
     }
 
     @c.cold
-    pub fn finalize(self: &mut Self, source: *const u8, len: usize, file: *const char) void {
+    pub fn finalize(self: &mut Self, source: *const u8, len: usize, file: str) void {
         if self.errors.len() == 0 {
             return;
         }
@@ -163,7 +163,7 @@ fn render(
     src_len: usize,
     mut off: u32,
     span: u32,
-    file: *const char,
+    file: str,
     notes: &String,
 ) String {
     if off as usize > src_len {
@@ -208,8 +208,8 @@ fn render(
     out.push_str("error: ");
     out.push_string(msg);
     out.push_str("\n--> ");
-    if file != null && unsafe file[0] != 0 as char {
-        out.push_bytes(file as *const u8, unsafe string::strlen(file));
+    if file.len() != 0 {
+        out.push_str(file);
         out.push_byte(58); // ':'
     }
     out.push_u64(line_no as u64);
