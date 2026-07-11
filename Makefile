@@ -98,7 +98,7 @@ test: $(BIN)
 bench: $(BIN)
 	@printf '\n========== Transpile benchmark ==========\n'
 	@rm -rf src/build
-	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
+	@./$(BIN) $(SELFHOST_BENCH_ROOT)
 	@mkdir -p build
 	@$(CC) $(CSTD) $(RELEASE_OPT) $$(find src/build -name '*.c') -o build/selfhost-bench $(RELEASE_LDOPT) $(LDLIBS)
 	@build/selfhost-bench
@@ -112,7 +112,7 @@ RATE ?= 1000
 profile: STRIP := :
 profile: $(BIN)
 	@rm -rf src/build
-	@./$(BIN) $(SELFHOST_BENCH_ROOT) >/dev/null
+	@./$(BIN) $(SELFHOST_BENCH_ROOT)
 	@mkdir -p build
 	@$(CC) $(CSTD) -O2 -g -fno-omit-frame-pointer $$(find src/build -name '*.c') -o build/selfhost-bench
 	@samply record --rate $(RATE) build/selfhost-bench

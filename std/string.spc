@@ -40,6 +40,8 @@ extern "C" {
     fn snprintf(buf: *mut char, n: usize, fmt: *const char, ...) i32;
     type FILE;
     fn fputc(c: i32, f: *mut FILE) i32;
+    fn fwrite(p: *const void, size: usize, n: usize, f: *mut FILE) usize;
+    fn __sc_stdout() *mut FILE;
     fn __sc_stderr() *mut FILE;
 }
 
@@ -405,6 +407,44 @@ extend<A: Allocator> String<A> {
             self.push_byte(fill);
             i += 1;
         }
+    }
+
+    // Pad, in place, the field appended since `from` (a prior `len()`) to `width` bytes — the
+    // no-temporary twin of `push_padded` for values formatted directly into this string: one
+    // reserve, one memmove of the field, then fill. Same rules: `align` 0 = left, 1 = right,
+    // 2 = center; a right-aligned zero fill keeps a leading '-' in front of the zeros.
+    pub fn pad_at(self: &mut String<A>, from: usize, width: usize, fill: u8, align: u8) {
+        let n = self.len() - from;
+        if width <= n {
+            return;
+        }
+        let pad = width - n;
+        self.reserve(pad);
+        let p = unsafe (self.data_ptr() + from);
+        let mut lead: usize = 0;
+        if align == 1 {
+            lead = pad;
+        } else if align == 2 {
+            lead = pad / 2;
+        }
+        let mut sign: usize = 0;
+        if align == 1 && fill == 48 && n > 0 && unsafe p[0] == 45 {
+            sign = 1;
+        }
+        if lead > 0 {
+            unsafe memmove(unsafe (p + sign + lead) as *mut void, unsafe (p + sign) as *const void, n - sign);
+        }
+        let mut i = sign;
+        while i < sign + lead {
+            unsafe p[i] = fill;
+            i += 1;
+        }
+        i = lead + n;
+        while i < width {
+            unsafe p[i] = fill;
+            i += 1;
+        }
+        self.set_len(from + width);
     }
 
     // Append a floating-point value formatted by C's "%g" (compact, round-trip-ish). The scratch buffer is
@@ -853,11 +893,7 @@ extend<A: Allocator> String<A> {
 
     // Write the UTF-8 bytes to stdout (no trailing newline).
     pub fn print(self: &String<A>) {
-        let n = self.len();
-        let p = self.as_ptr();
-        for i in 0..n {
-            unsafe putchar(unsafe p[i] as i32);
-        }
+        unsafe fwrite(self.as_ptr() as *const void, 1, self.len(), unsafe __sc_stdout());
     }
 
     pub fn println(self: &String<A>) {
@@ -867,12 +903,7 @@ extend<A: Allocator> String<A> {
 
     // Write the UTF-8 bytes to stderr (no trailing newline) -- the `eprint`/`eprintln` builtins' writer.
     pub fn eprint(self: &String<A>) {
-        let n = self.len();
-        let p = self.as_ptr();
-        let err = unsafe __sc_stderr();
-        for i in 0..n {
-            unsafe fputc(unsafe p[i] as i32, err);
-        }
+        unsafe fwrite(self.as_ptr() as *const void, 1, self.len(), unsafe __sc_stderr());
     }
 
     pub fn eprintln(self: &String<A>) {
