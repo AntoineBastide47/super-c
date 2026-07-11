@@ -79,6 +79,7 @@ $(BIN): $(COMPILER_SRCS)
 	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o '$(BIN).new' $(LDOPT) $(LDLIBS)
 	@rm -f 'stage1-$(BIN)'
 	@mv -f '$(BIN).new' '$(BIN)'
+	@rm -rf ./*.dSYM
 	@$(STRIP)
 
 run: $(BIN)

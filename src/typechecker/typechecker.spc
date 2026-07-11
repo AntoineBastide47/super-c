@@ -5111,7 +5111,13 @@ extend TypeChecker {
             NODE_GENERIC_SPECIALIZATION => {
                 let inner = unsafe (*a).at_const(id).as_data.specialization.expression;
                 let types = unsafe (*a).at_const(id).as_data.specialization.types;
-                for i in 0..types.len { self.resolve_type(unsafe ((*a).list(types))[i as usize]); }
+                // A literal arg is a const-generic value: cache its TYPE_CONST so both the
+                // aggregate instance below and fn-turbofish binding (type_of) see it.
+                for i in 0..types.len {
+                    let tid = unsafe ((*a).list(types))[i as usize];
+                    if unsafe (*a).at_const(tid).kind == NodeKind::NODE_LITERAL { unsafe (*self.cur_ast()).set_type(tid, self.tc_const_arg(self.ast.module, tid)); }
+                    else { self.resolve_type(tid); }
+                }
                 let d = unsafe (*a).resolution_def(inner);
                 let mut is_agg = false;
                 if d.node != NODE_NONE { let dn = unsafe (*self.mod_ast(d.module)).at_const(d.node); is_agg = (dn.kind == NodeKind::NODE_ENUM || dn.kind == NodeKind::NODE_STRUCT) && dn.as_data.aggregate.generics.len > 0 && types.len > 0; }
@@ -5119,7 +5125,7 @@ extend TypeChecker {
                     let mut ta = Tys4 {};
                     let mut tn: u8 = 0;
                     let mut j: u32 = 0;
-                    while j < types.len && tn < 4 { ta.t[tn as usize] = self.resolve_type(unsafe ((*a).list(types))[j as usize]); tn = tn + 1; j = j + 1; }
+                    while j < types.len && tn < 4 { let tj = unsafe ((*a).list(types))[j as usize]; ta.t[tn as usize] = if unsafe (*a).at_const(tj).kind == NodeKind::NODE_LITERAL { unsafe (*a).type_of(tj); } else { self.resolve_type(tj); }; tn = tn + 1; j = j + 1; }
                     self.apply_default_args(d.module, d.node, (&mut ta.t[0]) as *mut TypeId, (&mut tn) as *mut u8);
                     result = unsafe (*self.cur_ast()).intern_instance(d.module, d.node, (&ta.t[0]) as *const TypeId, tn);
                 } else { result = self.check_expr(inner); }
