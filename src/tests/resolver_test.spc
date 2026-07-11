@@ -49,7 +49,7 @@ fn value_uses(a: &Ast, src: *const char, name: *const char, out: *mut NodeId, ca
     let mut n: usize = 0;
     let mut id: NodeId = 1;
     while id as usize < a.nodes.len() {
-        if h::ident_is(&*a, src, id, name) && a.resolution(id) != NODE_NONE && n < cap {
+        if h::ident_is(a, src, id, name) && a.resolution(id) != NODE_NONE && n < cap {
             unsafe out[n] = id;
             n = n + 1;
         }

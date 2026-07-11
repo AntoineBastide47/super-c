@@ -47,7 +47,7 @@ fn ignore_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) vo
 
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
 fn resolve_one(p: &mut loader::Package, i: usize) void {
-    let pkg = (&*p) as *const loader::Package;
+    let pkg = (p) as *const loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
@@ -65,7 +65,7 @@ fn resolve_one(p: &mut loader::Package, i: usize) void {
 
 // Type-check module `i` in place (mirrors main.spc's typecheck_module).
 fn typecheck_one(p: &mut loader::Package, i: usize) void {
-    let pkg = (&mut *p) as *mut loader::Package;
+    let pkg = (p) as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();

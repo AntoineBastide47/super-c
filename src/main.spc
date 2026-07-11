@@ -134,7 +134,7 @@ fn prune_orphans(dir: *const char, keep: &Vector<String>) void {
         }
         let path = (&pb[0]) as *const char;
         if unsafe shim::sc_stat_isdir(path) != 0 {
-            prune_orphans(path, &*keep);
+            prune_orphans(path, keep);
             let _ = unsafe shim::sc_rmdir(path); // no-op unless the recursion just emptied it
             continue;
         }
@@ -184,17 +184,17 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
     if t == TYPE_NONE {
         return false;
     }
-    let y = unsafe *mod_ast_c(&*p, am).type_at(t);
+    let y = unsafe *mod_ast_c(p, am).type_at(t);
     if y.kind == TypeKind::TYPE_BUILTIN {
         return true;
     }
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
-        return ast_type_mentions_builtin(&*p, am, y.as_data.elem);
+        return ast_type_mentions_builtin(p, am, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = unsafe *mod_ast_c(&*p, am).instance(y.as_data.inst);
+        let it = unsafe *mod_ast_c(p, am).instance(y.as_data.inst);
         for i in 0..it.n {
-            if ast_type_mentions_builtin(&*p, am, it.args[i as usize]) {
+            if ast_type_mentions_builtin(p, am, it.args[i as usize]) {
                 return true;
             }
         }
@@ -207,10 +207,10 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
     if t == TYPE_NONE {
         return false;
     }
-    let y = unsafe *mod_ast_c(&*p, am).type_at(t);
+    let y = unsafe *mod_ast_c(p, am).type_at(t);
     let mut changed = false;
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
-        if mark_type_modules(&*p, am, y.as_data.elem, live) {
+        if mark_type_modules(p, am, y.as_data.elem, live) {
             changed = true;
         }
     } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_FUNCTION {
@@ -220,7 +220,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
             }
         }
     } else if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = unsafe *mod_ast_c(&*p, am).instance(y.as_data.inst);
+        let it = unsafe *mod_ast_c(p, am).instance(y.as_data.inst);
         let np = p.modules.len();
         if it.module as usize < np {
             if mark_live(live, np, it.module) {
@@ -234,10 +234,10 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
             }
         }
         for i in 0..it.n {
-            if mark_type_modules(&*p, am, it.args[i as usize], live) {
+            if mark_type_modules(p, am, it.args[i as usize], live) {
                 changed = true;
             }
-            if p.core_seeded && ast_type_mentions_builtin(&*p, am, it.args[i as usize]) {
+            if p.core_seeded && ast_type_mentions_builtin(p, am, it.args[i as usize]) {
                 if mark_live(live, np, p.core_module) {
                     changed = true;
                 }
@@ -270,7 +270,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             if !unsafe live[m] || !p.modules[m].has_ast {
                 continue;
             }
-            let a = mod_ast_c(&*p, m as ModuleId);
+            let a = mod_ast_c(p, m as ModuleId);
             let nr = unsafe (*a).resolutions.len();
             for r in 0..nr {
                 let d = unsafe (*a).resolutions[r];
@@ -285,7 +285,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             }
             let nt = unsafe (*a).type_pool.len();
             for ti in 0..nt {
-                if mark_type_modules(&*p, m as ModuleId, ti as TypeId, live) {
+                if mark_type_modules(p, m as ModuleId, ti as TypeId, live) {
                     changed = true;
                 }
             }
@@ -304,10 +304,10 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
                     }
                 }
                 for k in 0..it.n {
-                    if mark_type_modules(&*p, m as ModuleId, it.args[k as usize], live) {
+                    if mark_type_modules(p, m as ModuleId, it.args[k as usize], live) {
                         changed = true;
                     }
-                    if p.core_seeded && ast_type_mentions_builtin(&*p, m as ModuleId, it.args[k as usize]) {
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, it.args[k as usize]) {
                         if mark_live(live, n, p.core_module) {
                             changed = true;
                         }
@@ -318,10 +318,10 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             for moi in 0..nmo {
                 let mu = unsafe (*a).mono[moi];
                 for k in 0..mu.n {
-                    if mark_type_modules(&*p, m as ModuleId, mu.args[k as usize], live) {
+                    if mark_type_modules(p, m as ModuleId, mu.args[k as usize], live) {
                         changed = true;
                     }
-                    if p.core_seeded && ast_type_mentions_builtin(&*p, m as ModuleId, mu.args[k as usize]) {
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, mu.args[k as usize]) {
                         if mark_live(live, n, p.core_module) {
                             changed = true;
                         }
@@ -331,14 +331,14 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             let nmi = unsafe (*a).method_insts.len();
             for xi in 0..nmi {
                 let miu = unsafe (*a).method_insts[xi];
-                if mark_type_modules(&*p, m as ModuleId, miu.instance, live) {
+                if mark_type_modules(p, m as ModuleId, miu.instance, live) {
                     changed = true;
                 }
                 for k in 0..miu.n {
-                    if mark_type_modules(&*p, m as ModuleId, miu.targs[k as usize], live) {
+                    if mark_type_modules(p, m as ModuleId, miu.targs[k as usize], live) {
                         changed = true;
                     }
-                    if p.core_seeded && ast_type_mentions_builtin(&*p, m as ModuleId, miu.targs[k as usize]) {
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, miu.targs[k as usize]) {
                         if mark_live(live, n, p.core_module) {
                             changed = true;
                         }
@@ -354,7 +354,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
 // Pipeline stages over one module (move the Ast out of its slot, run, and restore it).
 // ---------------------------------------------------------------------------------------------------------
 fn resolve_module(p: &mut loader::Package, i: usize) bool {
-    let pkg = (&*p) as *const loader::Package;
+    let pkg = (p) as *const loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
@@ -377,7 +377,7 @@ fn resolve_module(p: &mut loader::Package, i: usize) bool {
 }
 
 fn typecheck_module(p: &mut loader::Package, i: usize) bool {
-    let pkg = (&mut *p) as *mut loader::Package;
+    let pkg = (p) as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
@@ -512,7 +512,7 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
         }
         let file = p.modules[m].file.cstr();
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let ap = mod_ast_c(&*p, m as ModuleId);
+        let ap = mod_ast_c(p, m as ModuleId);
         for ai in 0..unsafe (*ap).attrs.len() {
             let at = unsafe (*ap).attrs[ai];
             let is_src = at.kind == AttrKind::ATTR_C_SOURCE as u8;
@@ -557,7 +557,7 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
                     continue;
                 }
             }
-            ext_c_wrap(root, &mut *keep, &mut seen, (&mut nsrc) as *mut u32, (&rsl[0]), err);
+            ext_c_wrap(root, keep, &mut seen, (&mut nsrc) as *mut u32, (&rsl[0]), err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
         let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
@@ -600,7 +600,7 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
             }
             let mut cabs = PathBuf {};
             if unsafe shim::sc_realpath((&rel[0]), (&mut cabs[0])) != null {
-                ext_c_wrap(root, &mut *keep, &mut seen, (&mut nsrc) as *mut u32, (&cabs[0]), err);
+                ext_c_wrap(root, keep, &mut seen, (&mut nsrc) as *mut u32, (&cabs[0]), err);
             }
         }
     }
@@ -713,7 +713,7 @@ fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: *mu
     if tnode == NODE_NONE {
         return none;
     }
-    let a = mod_ast_c(&*p, am);
+    let a = mod_ast_c(p, am);
     let tk = unsafe (*a).at_const(tnode).kind;
     if tk != NodeKind::NODE_TYPE_PATH && tk != NodeKind::NODE_IDENTIFIER {
         return none;
@@ -722,7 +722,7 @@ fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: *mu
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
         return none;
     }
-    let da = mod_ast_c(&*p, d.module);
+    let da = mod_ast_c(p, d.module);
     let dk = unsafe (*da).at_const(d.node).kind;
     let gen = unsafe (*da).at_const(d.node).as_data.aggregate.generics;
     if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM || gen.len != 0 {
@@ -734,7 +734,7 @@ fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: *mu
 
 // A function's single return type node (unwrapping a named return), or NODE_NONE.
 fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) NodeId {
-    let a = mod_ast_c(&*p, am);
+    let a = mod_ast_c(p, am);
     let rets = unsafe (*a).at_const(fnode).as_data.function.returns;
     if rets.len != 1 {
         return NODE_NONE;
@@ -748,12 +748,12 @@ fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) NodeId {
 }
 
 fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, fnode: NodeId) bool {
-    let a = mod_ast_c(&*p, am);
+    let a = mod_ast_c(p, am);
     let rets = unsafe (*a).at_const(fnode).as_data.function.returns;
     if rets.len == 0 {
         return true;
     }
-    let rn = test_fn_ret_node(&*p, am, fnode);
+    let rn = test_fn_ret_node(p, am, fnode);
     if rn == NODE_NONE {
         return false;
     }
@@ -770,7 +770,7 @@ fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, 
 
 // Classify one @test parameter: 1 = fixture/receiver, 2 = global env, 0 with an error emitted.
 fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId, genv: DefId) u8 {
-    let a = mod_ast_c(&*p, m);
+    let a = mod_ast_c(p, m);
     let sp = unsafe (*a).at_const(pnode).span;
     let tnode = unsafe (*a).at_const(pnode).as_data.parameter.ty;
     let tk = if tnode != NODE_NONE {
@@ -780,7 +780,7 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     };
     if tnode == NODE_NONE || tk != NodeKind::NODE_REFERENCE_TYPE {
         test_err(
-            &mut *p,
+            p,
             m,
             sp,
             "a '@test' parameter must be a reference to the module fixture or the global env".ptr() as *const char,
@@ -789,19 +789,19 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     }
     let it = unsafe (*a).at_const(tnode).as_data.indirect_type;
     let mut is_enum = false;
-    let d = test_type_decl(&*p, m, it.ty, (&mut is_enum) as *mut bool);
+    let d = test_type_decl(p, m, it.ty, (&mut is_enum) as *mut bool);
     if fx.node != NODE_NONE && d.module == fx.module && d.node == fx.node {
         return 1;
     }
     if genv.node != NODE_NONE && d.module == genv.module && d.node == genv.node {
         if it.qualifier == TypeQualifier::TYPE_QUAL_MUT {
-            test_err(&mut *p, m, sp, "the global test env is shared: take it as '&', not '&mut'".ptr() as *const char);
+            test_err(p, m, sp, "the global test env is shared: take it as '&', not '&mut'".ptr() as *const char);
             return 0;
         }
         return 2;
     }
     test_err(
-        &mut *p,
+        p,
         m,
         sp,
         "this parameter matches neither the module's '@test_init' fixture nor the global env".ptr() as *const char,
@@ -812,7 +812,7 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
 // The inherent, non-generic extend whose items contain `fnode`, or NODE_NONE. `*bad` is set when it IS a
 // method but of a conformance/generic extend (not suite-able).
 fn test_owner_extend(p: &loader::Package, am: ModuleId, fnode: NodeId, bad: *mut bool) NodeId {
-    let a = mod_ast_c(&*p, am);
+    let a = mod_ast_c(p, am);
     let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     let ids = unsafe (*a).list(items);
     for i in 0..items.len {
@@ -855,18 +855,18 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             continue;
         }
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let nattr = unsafe (*mod_ast_c(&*p, m as ModuleId)).attrs.len();
+        let nattr = unsafe (*mod_ast_c(p, m as ModuleId)).attrs.len();
         for ai in 0..nattr {
-            let at = unsafe (*mod_ast_c(&*p, m as ModuleId)).attrs[ai];
+            let at = unsafe (*mod_ast_c(p, m as ModuleId)).attrs[ai];
             if at.kind != AttrKind::ATTR_TEST_INIT as u8 && at.kind != AttrKind::ATTR_TEST_FREE as u8 {
                 continue;
             }
-            let sp = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).span;
+            let sp = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).span;
             let mut bad_ext = false;
-            let ext = test_owner_extend(&*p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
+            let ext = test_owner_extend(p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
             if ext != NODE_NONE && bad_ext {
                 test_err(
-                    &mut *p,
+                    p,
                     m as ModuleId,
                     sp,
                     "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr() as *const char,
@@ -878,18 +878,18 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             if ext != NODE_NONE {
                 if at.arg != 0 {
                     test_err(
-                        &mut *p,
+                        p,
                         m as ModuleId,
                         sp,
                         "'(global)' is not allowed on a method; declare the global pair at top level".ptr() as *const char,
                     );
                     continue;
                 }
-                let tt = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
-                target = test_type_decl(&*p, m as ModuleId, tt, (&mut target_is_enum) as *mut bool);
+                let tt = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
+                target = test_type_decl(p, m as ModuleId, tt, (&mut target_is_enum) as *mut bool);
                 if target.node == NODE_NONE {
                     test_err(
-                        &mut *p,
+                        p,
                         m as ModuleId,
                         sp,
                         "a test suite's extend target must be a plain (non-generic) struct or enum".ptr() as *const char,
@@ -898,17 +898,17 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 }
             }
             if at.kind == AttrKind::ATTR_TEST_INIT as u8 {
-                let plen = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).as_data.function.params.len;
+                let plen = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).as_data.function.params.len;
                 if plen != 0 {
-                    test_err(&mut *p, m as ModuleId, sp, "'@test_init' takes no parameters".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "'@test_init' takes no parameters".ptr() as *const char);
                     continue;
                 }
                 let mut is_enum = false;
-                let ret = test_fn_ret_node(&*p, m as ModuleId, at.owner);
-                let d = test_type_decl(&*p, m as ModuleId, ret, (&mut is_enum) as *mut bool);
+                let ret = test_fn_ret_node(p, m as ModuleId, at.owner);
+                let d = test_type_decl(p, m as ModuleId, ret, (&mut is_enum) as *mut bool);
                 if d.node == NODE_NONE {
                     test_err(
-                        &mut *p,
+                        p,
                         m as ModuleId,
                         sp,
                         "'@test_init' must return a plain (non-generic) struct or enum fixture".ptr() as *const char,
@@ -918,17 +918,17 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 if ext != NODE_NONE {
                     if d.module != target.module || d.node != target.node {
                         test_err(
-                            &mut *p,
+                            p,
                             m as ModuleId,
                             sp,
                             "a suite '@test_init' method must return the extended type itself".ptr() as *const char,
                         );
                         continue;
                     }
-                    let si = plan_suite_of(&mut *plan, m as ModuleId, target, target_is_enum, true);
+                    let si = plan_suite_of(plan, m as ModuleId, target, target_is_enum, true);
                     if plan.suites[si as usize].init != NODE_NONE {
                         test_err(
-                            &mut *p,
+                            p,
                             m as ModuleId,
                             sp,
                             "duplicate suite '@test_init' (one per type per module)".ptr() as *const char,
@@ -939,7 +939,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 } else if at.arg != 0 {
                     if plan.genv_init != NODE_NONE {
                         test_err(
-                            &mut *p,
+                            p,
                             m as ModuleId,
                             sp,
                             "duplicate '@test_init(global)' (one per test tree)".ptr() as *const char,
@@ -953,7 +953,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 } else {
                     if plan.fx_init[m] != NODE_NONE {
                         test_err(
-                            &mut *p,
+                            p,
                             m as ModuleId,
                             sp,
                             "duplicate '@test_init' (one per module)".ptr() as *const char,
@@ -969,34 +969,34 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                     continue;
                 }
                 let mut ok = false;
-                let params = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).as_data.function.params;
-                if params.len == 1 && test_fn_returns_nothing(&*p, m as ModuleId, src, at.owner) {
-                    let p0 = unsafe (*mod_ast_c(&*p, m as ModuleId)).list(params)[0];
-                    let pty = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(p0).as_data.parameter.ty;
+                let params = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).as_data.function.params;
+                if params.len == 1 && test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
+                    let p0 = unsafe (*mod_ast_c(p, m as ModuleId)).list(params)[0];
+                    let pty = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(p0).as_data.parameter.ty;
                     let ptk = if pty != NODE_NONE {
-                        unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(pty).kind;
+                        unsafe (*mod_ast_c(p, m as ModuleId)).at_const(pty).kind;
                     } else {
                         NodeKind::NODE_NONE_KIND;
                     };
                     if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
-                        let it = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(pty).as_data.indirect_type;
+                        let it = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(pty).as_data.indirect_type;
                         let mut ie = false;
-                        let d = test_type_decl(&*p, m as ModuleId, it.ty, (&mut ie) as *mut bool);
+                        let d = test_type_decl(p, m as ModuleId, it.ty, (&mut ie) as *mut bool);
                         ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == target.module && d.node == target.node;
                     }
                 }
                 if !ok {
                     test_err(
-                        &mut *p,
+                        p,
                         m as ModuleId,
                         sp,
                         "a suite '@test_free' must be 'fn(self: &mut <the extended type>)' returning nothing".ptr() as *const char,
                     );
                     continue;
                 }
-                let si = plan_suite_of(&mut *plan, m as ModuleId, target, target_is_enum, true);
+                let si = plan_suite_of(plan, m as ModuleId, target, target_is_enum, true);
                 if plan.suites[si as usize].fre != NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate suite '@test_free'".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate suite '@test_free'".ptr() as *const char);
                     continue;
                 }
                 plan.suites[si as usize].fre = at.owner;
@@ -1009,17 +1009,17 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             continue;
         }
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let nattr = unsafe (*mod_ast_c(&*p, m as ModuleId)).attrs.len();
+        let nattr = unsafe (*mod_ast_c(p, m as ModuleId)).attrs.len();
         for ai in 0..nattr {
-            let at = unsafe (*mod_ast_c(&*p, m as ModuleId)).attrs[ai];
+            let at = unsafe (*mod_ast_c(p, m as ModuleId)).attrs[ai];
             if at.kind != AttrKind::ATTR_TEST_FREE as u8 {
                 continue;
             }
             let mut be = false;
-            if test_owner_extend(&*p, m as ModuleId, at.owner, (&mut be) as *mut bool) != NODE_NONE {
+            if test_owner_extend(p, m as ModuleId, at.owner, (&mut be) as *mut bool) != NODE_NONE {
                 continue;
             }
-            let sp = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).span;
+            let sp = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).span;
             let global = at.arg != 0;
             let want = if global {
                 plan.genv_type;
@@ -1033,7 +1033,7 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             };
             if has_init == NODE_NONE || global && plan.genv_mod != m as ModuleId {
                 test_err(
-                    &mut *p,
+                    p,
                     m as ModuleId,
                     sp,
                     if global {
@@ -1045,25 +1045,25 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 continue;
             }
             let mut ok = false;
-            let params = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).as_data.function.params;
-            if params.len == 1 && test_fn_returns_nothing(&*p, m as ModuleId, src, at.owner) {
-                let p0 = unsafe (*mod_ast_c(&*p, m as ModuleId)).list(params)[0];
-                let pty = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(p0).as_data.parameter.ty;
+            let params = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).as_data.function.params;
+            if params.len == 1 && test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
+                let p0 = unsafe (*mod_ast_c(p, m as ModuleId)).list(params)[0];
+                let pty = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(p0).as_data.parameter.ty;
                 let ptk = if pty != NODE_NONE {
-                    unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(pty).kind;
+                    unsafe (*mod_ast_c(p, m as ModuleId)).at_const(pty).kind;
                 } else {
                     NodeKind::NODE_NONE_KIND;
                 };
                 if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
-                    let it = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(pty).as_data.indirect_type;
+                    let it = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(pty).as_data.indirect_type;
                     let mut ie = false;
-                    let d = test_type_decl(&*p, m as ModuleId, it.ty, (&mut ie) as *mut bool);
+                    let d = test_type_decl(p, m as ModuleId, it.ty, (&mut ie) as *mut bool);
                     ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == want.module && d.node == want.node;
                 }
             }
             if !ok {
                 test_err(
-                    &mut *p,
+                    p,
                     m as ModuleId,
                     sp,
                     if global {
@@ -1076,13 +1076,13 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             }
             if global {
                 if plan.genv_free != NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_free(global)'".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate '@test_free(global)'".ptr() as *const char);
                     continue;
                 }
                 plan.genv_free = at.owner;
             } else {
                 if plan.fx_free[m] != NODE_NONE {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test_free' (one per module)".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate '@test_free' (one per module)".ptr() as *const char);
                     continue;
                 }
                 plan.fx_free[m] = at.owner;
@@ -1093,9 +1093,9 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
     for si in 0..plan.suites.len() {
         let s = plan.suites[si];
         if s.init == NODE_NONE && s.fre != NODE_NONE {
-            let sp = unsafe (*mod_ast_c(&*p, s.mod)).at_const(s.fre).span;
+            let sp = unsafe (*mod_ast_c(p, s.mod)).at_const(s.fre).span;
             test_err(
-                &mut *p,
+                p,
                 s.mod,
                 sp,
                 "a suite '@test_free' has no matching '@test_init' method on this type in this module".ptr() as *const char,
@@ -1108,18 +1108,18 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             continue;
         }
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let nattr = unsafe (*mod_ast_c(&*p, m as ModuleId)).attrs.len();
+        let nattr = unsafe (*mod_ast_c(p, m as ModuleId)).attrs.len();
         for ai in 0..nattr {
-            let at = unsafe (*mod_ast_c(&*p, m as ModuleId)).attrs[ai];
+            let at = unsafe (*mod_ast_c(p, m as ModuleId)).attrs[ai];
             if at.kind != AttrKind::ATTR_TEST as u8 {
                 continue;
             }
-            let sp = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).span;
+            let sp = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).span;
             let mut bad_ext = false;
-            let ext = test_owner_extend(&*p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
+            let ext = test_owner_extend(p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
             if ext != NODE_NONE && bad_ext {
                 test_err(
-                    &mut *p,
+                    p,
                     m as ModuleId,
                     sp,
                     "test attributes are only allowed on methods of a non-generic inherent 'extend'".ptr() as *const char,
@@ -1129,11 +1129,11 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             let mut suite = DefId { module: 0, node: NODE_NONE };
             let mut suite_is_enum = false;
             if ext != NODE_NONE {
-                let tt = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
-                suite = test_type_decl(&*p, m as ModuleId, tt, (&mut suite_is_enum) as *mut bool);
+                let tt = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
+                suite = test_type_decl(p, m as ModuleId, tt, (&mut suite_is_enum) as *mut bool);
                 if suite.node == NODE_NONE {
                     test_err(
-                        &mut *p,
+                        p,
                         m as ModuleId,
                         sp,
                         "a test suite's extend target must be a plain (non-generic) struct or enum".ptr() as *const char,
@@ -1141,29 +1141,29 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                     continue;
                 }
             }
-            if !test_fn_returns_nothing(&*p, m as ModuleId, src, at.owner) {
-                test_err(&mut *p, m as ModuleId, sp, "a '@test' function returns nothing".ptr() as *const char);
+            if !test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
+                test_err(p, m as ModuleId, sp, "a '@test' function returns nothing".ptr() as *const char);
                 continue;
             }
-            let nmnode = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).as_data.function.name;
-            let nmsp = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(nmnode).as_data.name.text;
+            let nmnode = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).as_data.function.name;
+            let nmsp = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(nmnode).as_data.name.text;
             if ext == NODE_NONE && nmsp.end - nmsp.start == 4 && unsafe cstring::memcmp(
                 src + nmsp.start as usize,
                 "main".ptr(),
                 4,
             ) == 0 {
                 test_err(
-                    &mut *p,
+                    p,
                     m as ModuleId,
                     sp,
                     "'main' cannot be a '@test' (it is replaced by the test runner)".ptr() as *const char,
                 );
                 continue;
             }
-            let params = unsafe (*mod_ast_c(&*p, m as ModuleId)).at_const(at.owner).as_data.function.params;
+            let params = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).as_data.function.params;
             if params.len > 2 {
                 test_err(
-                    &mut *p,
+                    p,
                     m as ModuleId,
                     sp,
                     "a '@test' function takes at most the fixture (or 'self') and the global env".ptr() as *const char,
@@ -1184,16 +1184,16 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             let mut bad = false;
             let mut k: u32 = 0;
             while k < params.len && !bad {
-                let pid = unsafe (*mod_ast_c(&*p, m as ModuleId)).list(params)[k as usize];
-                let bit = test_param_bit(&mut *p, m as ModuleId, pid, fx, genv_ty);
+                let pid = unsafe (*mod_ast_c(p, m as ModuleId)).list(params)[k as usize];
+                let bit = test_param_bit(p, m as ModuleId, pid, fx, genv_ty);
                 if bit == 0 {
                     bad = true;
                 } else if (wants & bit) != 0 {
-                    test_err(&mut *p, m as ModuleId, sp, "duplicate '@test' parameter kind".ptr() as *const char);
+                    test_err(p, m as ModuleId, sp, "duplicate '@test' parameter kind".ptr() as *const char);
                     bad = true;
                 } else if bit == 1 && (wants & 2) != 0 {
                     test_err(
-                        &mut *p,
+                        p,
                         m as ModuleId,
                         sp,
                         "the fixture ('self') parameter must come before the global env".ptr() as *const char,
@@ -1209,10 +1209,10 @@ fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             let mut suite_init = NODE_NONE;
             let mut suite_free = NODE_NONE;
             if ext != NODE_NONE && (wants & 1) != 0 {
-                let si2 = plan_suite_of(&mut *plan, m as ModuleId, suite, suite_is_enum, false);
+                let si2 = plan_suite_of(plan, m as ModuleId, suite, suite_is_enum, false);
                 if si2 < 0 || plan.suites[si2 as usize].init == NODE_NONE {
                     test_err(
-                        &mut *p,
+                        p,
                         m as ModuleId,
                         sp,
                         "no '@test_init' method on this type in this module produces the receiver".ptr() as *const char,
@@ -1417,14 +1417,14 @@ fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
     );
     for ci in 0..plan.cases.len() {
         let tc = plan.cases[ci];
-        let a = mod_ast_c(&*p, tc.mod);
+        let a = mod_ast_c(p, tc.mod);
         let nmnode = unsafe (*a).at_const(tc.func).as_data.function.name;
         let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
         let modpath = p.modules[tc.mod as usize].path.as_str();
         let msrc = p.modules[tc.mod as usize].source.as_str().ptr() as *const char;
         unsafe stdio::fprintf(f, "  { \"%.*s::".ptr() as *const char, modpath.len() as i32, modpath.ptr());
         if tc.suite.node != NODE_NONE {
-            let sa = mod_ast_c(&*p, tc.suite.module);
+            let sa = mod_ast_c(p, tc.suite.module);
             let snmn = unsafe (*sa).at_const(tc.suite.node).as_data.aggregate.name;
             let snm = unsafe (*sa).at_const(snmn).as_data.name.text;
             let ssrc = p.modules[tc.suite.module as usize].source.as_str().ptr() as *const char;
@@ -1594,17 +1594,17 @@ fn platform_filter(p: &mut loader::Package, target: i32) void {
 }
 
 fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32) i32 {
-    platform_filter(&mut *p, target);
+    platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
-        let ok = resolve_module(&mut *p, i);
+        let ok = resolve_module(p, i);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
     }
     for i in 0..n {
-        let ok = typecheck_module(&mut *p, i);
+        let ok = typecheck_module(p, i);
         p.ok = ok && p.ok;
     }
     if !p.ok {
@@ -1613,18 +1613,18 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, ta
     // static_asserts undecidable in module order re-evaluate now that every module is fully typed.
     let ceptr = p.ceval as *mut ce::ConstEval;
     if ceptr != null {
-        let pv = (&mut *p) as *mut loader::Package;
+        let pv = (p) as *mut loader::Package;
         unsafe (*ceptr).flush_asserts(flush_assert_err, pv);
     }
     if !p.ok {
         return 1;
     }
-    loader::package_propagate_instances(&mut *p);
+    loader::package_propagate_instances(p);
 
     let testing = topts != null && unsafe (*topts).enabled;
     let mut plan = TestPlan::new(n);
     if testing {
-        test_plan_build(&mut *p, &mut plan);
+        test_plan_build(p, &mut plan);
         if !plan.ok {
             return 1;
         }
@@ -1636,8 +1636,8 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, ta
     keep.push(build_out_path(root, "super_rt", ".h"));
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
-    ext_c_collect(&mut *p, &mut keep, (&mut err) as *mut bool);
-    let live = compute_emit_live(&*p);
+    ext_c_collect(p, &mut keep, (&mut err) as *mut bool);
+    let live = compute_emit_live(p);
     let osz = if n != 0 {
         n;
     } else {
@@ -1650,17 +1650,17 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, ta
         }
         return 1;
     }
-    loader::package_emit_order(&*p, order);
+    loader::package_emit_order(p, order);
     for oi in 0..n {
         let mi = unsafe order[oi];
         if live != null && !unsafe live[mi as usize] {
             continue;
         }
-        let m_ast = mod_ast_m(&mut *p, mi);
+        let m_ast = mod_ast_m(p, mi);
         let src = p.modules[mi as usize].source.as_str().ptr() as *const char;
         let slen = p.modules[mi as usize].source.len();
         let mpath = p.modules[mi as usize].path.as_str();
-        let pkg = (&mut *p) as *mut loader::Package;
+        let pkg = (p) as *mut loader::Package;
         let mut c = cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg);
         c.set_multifile(true);
         let mut tcases = TCases {}; // must outlive codegen_emit (CgTestInfo keeps a pointer into it)
@@ -1754,17 +1754,17 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, ta
     };
     if out_bin.len() != 0 {
         if !err {
-            rc = test_build_and_run(&*p, null, &keep, out_bin);
+            rc = test_build_and_run(p, null, &keep, out_bin);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
             unsafe stdio::fputs("super-c: no '@test' functions found\n".ptr() as *const char, stdio::stderr());
             rc = 1;
         } else {
-            switch write_test_main(&mut *p, &plan) {
+            switch write_test_main(p, &plan) {
                 Some(runner) => {
                     keep.push(runner);
-                    rc = test_build_and_run(&*p, topts, &keep, "");
+                    rc = test_build_and_run(p, topts, &keep, "");
                 },
                 None => {
                     rc = 1;

@@ -887,7 +887,7 @@ extend Codegen {
         return true;
     }
     fn inst_name(self: &Self, it: &TyInstance, out: *mut char, cap: usize) void {
-        if self.is_self_instance(&*it) {
+        if self.is_self_instance(it) {
             bappend(out, cap, 0, "NAME".ptr() as *const char);
             return;
         }

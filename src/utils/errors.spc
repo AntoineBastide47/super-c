@@ -169,7 +169,7 @@ fn render(
     if off as usize > src_len {
         off = src_len as u32;
     }
-    let li = line_index(&*line_starts, off);
+    let li = line_index(line_starts, off);
     let lstart = line_starts[li];
     let mut lend = lstart as usize;
     while lend < src_len && unsafe source[lend] != 10 && unsafe source[lend] != 13 {

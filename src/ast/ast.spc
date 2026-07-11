@@ -791,7 +791,7 @@ extend Ast {
                 let inst = *src.instance(ty.as_data.inst);
                 let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
                 for i in 0..inst.n {
-                    na[i] = self.reintern(&*src, inst.args[i]);
+                    na[i] = self.reintern(src, inst.args[i]);
                 }
                 self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
             },

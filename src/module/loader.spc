@@ -233,7 +233,7 @@ fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
 
 // "<root_dir>/<parts joined by '/'>.spc".
 fn module_file_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String {
-    let rel = join_parts(&*ast, src, parts, "/");
+    let rel = join_parts(ast, src, parts, "/");
     let mut out = String::from_str(root_dir);
     out.push_str("/");
     out.push_str(rel.as_str());
@@ -333,16 +333,16 @@ extend DirCache as Free {
 // <std_root>/ffi/stdio.spc). Returns the first path that exists, else the project-relative path. Owned.
 fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
     let dc = dca as *mut DirCache;
-    let root_rel = module_file_path(root_dir, &*ast, src, parts);
+    let root_rel = module_file_path(root_dir, ast, src, parts);
     if unsafe (*dc).exists(root_rel.as_str()) || std_root.is_empty() {
         return root_rel;
     }
-    let std_rel = module_file_path(std_root, &*ast, src, parts);
+    let std_rel = module_file_path(std_root, ast, src, parts);
     if unsafe (*dc).exists(std_rel.as_str()) {
         return std_rel;
     }
     let ffi_base = join2(std_root, "ffi");
-    let ffi_rel = module_file_path(ffi_base.as_str(), &*ast, src, parts);
+    let ffi_rel = module_file_path(ffi_base.as_str(), ast, src, parts);
     if unsafe (*dc).exists(ffi_rel.as_str()) {
         return ffi_rel;
     }
@@ -351,7 +351,7 @@ fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src:
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
 fn parse_source(source: &mut String, file: str, bootstrap_tags: bool) ParseResult {
-    let mut lx = lexer::Lexer::new(&mut *source); // pads `source` in place; the lexer over-reads into padding
+    let mut lx = lexer::Lexer::new(source); // pads `source` in place; the lexer over-reads into padding
     lx.set_file(file);
     lx.scan_tokens();
     if lx.has_errors() {
@@ -894,7 +894,7 @@ extend Package {
                 for i in 0..items.len {
                     let it = ast.at_const(unsafe ids[i as usize]);
                     if it.kind == NodeKind::NODE_IMPORT {
-                        let path = join_parts(&*ast, src, it.as_data.import_decl.path, "::");
+                        let path = join_parts(ast, src, it.as_data.import_decl.path, "::");
                         let c = self.find(path.as_str());
                         if c >= 0 && !seen[c as usize] {
                             seen.set(c as usize, true);
@@ -1044,17 +1044,17 @@ fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
 // True when `t` mentions a function VALUE type anywhere (a TYPE_FUNCTION, possibly nested): its C symbol
 // (and env struct) is local to the module defining it, so a use over it must stay in the calling module.
 fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
-    let y = unsafe *pkg_ast_c(&*p, mid).type_at(t);
+    let y = unsafe *pkg_ast_c(p, mid).type_at(t);
     if y.kind == TypeKind::TYPE_FUNCTION {
         return true;
     }
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
-        return type_mentions_fnval(&*p, mid, y.as_data.elem);
+        return type_mentions_fnval(p, mid, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = unsafe *pkg_ast_c(&*p, mid).instance(y.as_data.inst);
+        let it = unsafe *pkg_ast_c(p, mid).instance(y.as_data.inst);
         for i in 0..it.n {
-            if type_mentions_fnval(&*p, mid, it.args[i as usize]) {
+            if type_mentions_fnval(p, mid, it.args[i as usize]) {
                 return true;
             }
         }
@@ -1077,25 +1077,25 @@ fn subst_reintern_type(
     if t == TYPE_NONE {
         return TYPE_NONE;
     }
-    let ty = unsafe *pkg_ast_c(&*p, om).type_at(t);
+    let ty = unsafe *pkg_ast_c(p, om).type_at(t);
     if ty.kind == TypeKind::TYPE_GENERIC {
         for i in 0..nargs {
             if ty.module == gmod && ty.as_data.decl == unsafe gids[i as usize] {
                 return unsafe args[i as usize];
             }
         }
-        let d = pkg_ast_m(&mut *p, dm);
-        let o = pkg_ast_c(&*p, om);
+        let d = pkg_ast_m(p, dm);
+        let o = pkg_ast_c(p, om);
         return unsafe (*d).reintern(&*o, t);
     }
     if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE || ty.kind == TypeKind::TYPE_SLICE || ty.kind == TypeKind::TYPE_ARRAY {
         let mut nt = ty;
-        nt.as_data.elem = subst_reintern_type(&mut *p, dm, om, ty.as_data.elem, gmod, gids, args, nargs);
-        let d = pkg_ast_m(&mut *p, dm);
+        nt.as_data.elem = subst_reintern_type(p, dm, om, ty.as_data.elem, gmod, gids, args, nargs);
+        let d = pkg_ast_m(p, dm);
         return unsafe (*d).intern_type(nt);
     }
     if ty.kind == TypeKind::TYPE_INSTANCE {
-        let inst = unsafe *pkg_ast_c(&*p, om).instance(ty.as_data.inst);
+        let inst = unsafe *pkg_ast_c(p, om).instance(ty.as_data.inst);
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         let m = if inst.n < 4 {
             inst.n;
@@ -1103,13 +1103,13 @@ fn subst_reintern_type(
             4 as u8;
         };
         for i in 0..m {
-            na[i as usize] = subst_reintern_type(&mut *p, dm, om, inst.args[i as usize], gmod, gids, args, nargs);
+            na[i as usize] = subst_reintern_type(p, dm, om, inst.args[i as usize], gmod, gids, args, nargs);
         }
-        let d = pkg_ast_m(&mut *p, dm);
+        let d = pkg_ast_m(p, dm);
         return unsafe (*d).intern_instance(inst.module, inst.decl, &na[0], m);
     }
-    let d = pkg_ast_m(&mut *p, dm);
-    let o = pkg_ast_c(&*p, om);
+    let d = pkg_ast_m(p, dm);
+    let o = pkg_ast_c(p, om);
     return unsafe (*d).reintern(&*o, t);
 }
 
@@ -1129,20 +1129,20 @@ fn reintern_nested_type(
     if t == TYPE_NONE {
         return;
     }
-    let before = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
-    let mut st = subst_reintern_type(&mut *p, dm, om, t, gmod, gids, args, nargs);
-    let mut y = unsafe *pkg_ast_c(&*p, dm).type_at(st);
+    let before = unsafe (*pkg_ast_c(p, dm)).instances.len();
+    let mut st = subst_reintern_type(p, dm, om, t, gmod, gids, args, nargs);
+    let mut y = unsafe *pkg_ast_c(p, dm).type_at(st);
     while y.kind == TypeKind::TYPE_ARRAY {
         st = y.as_data.elem;
-        y = unsafe *pkg_ast_c(&*p, dm).type_at(st);
+        y = unsafe *pkg_ast_c(p, dm).type_at(st);
     }
     if y.kind != TypeKind::TYPE_INSTANCE {
         return;
     }
-    let it = unsafe *pkg_ast_c(&*p, dm).instance(y.as_data.inst);
+    let it = unsafe *pkg_ast_c(p, dm).instance(y.as_data.inst);
     let mut concrete = true;
     for i in 0..it.n {
-        if !unsafe (*pkg_ast_c(&*p, dm)).type_concrete(it.args[i as usize]) {
+        if !unsafe (*pkg_ast_c(p, dm)).type_concrete(it.args[i as usize]) {
             concrete = false;
         }
     }
@@ -1167,20 +1167,20 @@ fn reintern_nested_type(
             4 as u8;
         };
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
-        let hbefore = unsafe (*pkg_ast_c(&*p, hm)).instances.len();
+        let hbefore = unsafe (*pkg_ast_c(p, hm)).instances.len();
         for k in 0..m {
-            let h = pkg_ast_m(&mut *p, hm);
-            let d = pkg_ast_c(&*p, dm);
+            let h = pkg_ast_m(p, hm);
+            let d = pkg_ast_c(p, dm);
             na[k as usize] = unsafe (*h).reintern(&*d, it.args[k as usize]);
         }
-        let h = pkg_ast_m(&mut *p, hm);
+        let h = pkg_ast_m(p, hm);
         let _ = unsafe (*h).intern_instance(it.module, it.decl, &na[0], m);
-        let hafter = unsafe (*pkg_ast_c(&*p, hm)).instances.len();
+        let hafter = unsafe (*pkg_ast_c(p, hm)).instances.len();
         if hafter != hbefore {
             unsafe *changed = true;
         }
     }
-    let after = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
+    let after = unsafe (*pkg_ast_c(p, dm)).instances.len();
     if after != before {
         unsafe *changed = true;
     }
@@ -1201,34 +1201,34 @@ fn reintern_nested_instance_deps(
         return;
     }
     let decl = it.decl;
-    let dn_kind = unsafe (*pkg_ast_c(&*p, itmod)).at_const(decl).kind;
-    let generics = unsafe (*pkg_ast_c(&*p, itmod)).at_const(decl).as_data.aggregate.generics;
+    let dn_kind = unsafe (*pkg_ast_c(p, itmod)).at_const(decl).kind;
+    let generics = unsafe (*pkg_ast_c(p, itmod)).at_const(decl).as_data.aggregate.generics;
     if dn_kind != NodeKind::NODE_STRUCT && dn_kind != NodeKind::NODE_ENUM || generics.len == 0 {
         return;
     }
-    let members = unsafe (*pkg_ast_c(&*p, itmod)).at_const(decl).as_data.aggregate.members;
-    let gids = unsafe (*pkg_ast_c(&*p, itmod)).list(generics);
-    let mids = unsafe (*pkg_ast_c(&*p, itmod)).list(members);
+    let members = unsafe (*pkg_ast_c(p, itmod)).at_const(decl).as_data.aggregate.members;
+    let gids = unsafe (*pkg_ast_c(p, itmod)).list(generics);
+    let mids = unsafe (*pkg_ast_c(p, itmod)).list(members);
     for m in 0..members.len {
         let mid = unsafe mids[m as usize];
-        let mnk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(mid).kind;
+        let mnk = unsafe (*pkg_ast_c(p, itmod)).at_const(mid).kind;
         if dn_kind == NodeKind::NODE_STRUCT && mnk == NodeKind::NODE_FIELD {
-            let fty = unsafe (*pkg_ast_c(&*p, itmod)).at_const(mid).as_data.field.ty;
-            let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(fty);
-            reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
+            let fty = unsafe (*pkg_ast_c(p, itmod)).at_const(mid).as_data.field.ty;
+            let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(fty);
+            reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
         } else if dn_kind == NodeKind::NODE_ENUM && mnk == NodeKind::NODE_VARIANT {
-            let payload = unsafe (*pkg_ast_c(&*p, itmod)).at_const(mid).as_data.variant.payload;
-            let pids = unsafe (*pkg_ast_c(&*p, itmod)).list(payload);
+            let payload = unsafe (*pkg_ast_c(p, itmod)).at_const(mid).as_data.variant.payload;
+            let pids = unsafe (*pkg_ast_c(p, itmod)).list(payload);
             for k in 0..payload.len {
                 let pfid = unsafe pids[k as usize];
-                let pfk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(pfid).kind;
+                let pfk = unsafe (*pkg_ast_c(p, itmod)).at_const(pfid).kind;
                 let tn = if pfk == NodeKind::NODE_FIELD {
-                    unsafe (*pkg_ast_c(&*p, itmod)).at_const(pfid).as_data.field.ty;
+                    unsafe (*pkg_ast_c(p, itmod)).at_const(pfid).as_data.field.ty;
                 } else {
                     pfid;
                 };
-                let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(tn);
-                reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
+                let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(tn);
+                reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
             }
         }
     }
@@ -1249,59 +1249,59 @@ fn reintern_method_signature_deps(
         return;
     }
     let itdecl = it.decl;
-    let root = unsafe (*pkg_ast_c(&*p, itmod)).root;
-    let items = unsafe (*pkg_ast_c(&*p, itmod)).at_const(root).as_data.program.items;
-    let ids = unsafe (*pkg_ast_c(&*p, itmod)).list(items);
+    let root = unsafe (*pkg_ast_c(p, itmod)).root;
+    let items = unsafe (*pkg_ast_c(p, itmod)).at_const(root).as_data.program.items;
+    let ids = unsafe (*pkg_ast_c(p, itmod)).list(items);
     for i in 0..items.len {
         let eid = unsafe ids[i as usize];
-        let ek = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).kind;
+        let ek = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).kind;
         if ek != NodeKind::NODE_EXTEND {
             continue;
         }
-        let egen = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).as_data.extend_def.generics;
+        let egen = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).as_data.extend_def.generics;
         if egen.len == 0 {
             continue;
         }
-        let etgt = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).as_data.extend_def.target_type;
-        if unsafe (*pkg_ast_c(&*p, itmod)).resolution(etgt) != itdecl {
+        let etgt = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).as_data.extend_def.target_type;
+        if unsafe (*pkg_ast_c(p, itmod)).resolution(etgt) != itdecl {
             continue;
         }
-        let gids = unsafe (*pkg_ast_c(&*p, itmod)).list(egen);
-        let eitems = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).as_data.extend_def.items;
-        let emids = unsafe (*pkg_ast_c(&*p, itmod)).list(eitems);
+        let gids = unsafe (*pkg_ast_c(p, itmod)).list(egen);
+        let eitems = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).as_data.extend_def.items;
+        let emids = unsafe (*pkg_ast_c(p, itmod)).list(eitems);
         for mm in 0..eitems.len {
             let fnid = unsafe emids[mm as usize];
-            let fnk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).kind;
+            let fnk = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).kind;
             if fnk != NodeKind::NODE_FUNCTION {
                 continue;
             }
-            let fgen = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).as_data.function.generics;
-            let frets = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).as_data.function.returns;
+            let fgen = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).as_data.function.generics;
+            let frets = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).as_data.function.returns;
             if fgen.len != 0 || frets.len > 1 {
                 continue;
             }
-            let fparams = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).as_data.function.params;
-            let pids = unsafe (*pkg_ast_c(&*p, itmod)).list(fparams);
+            let fparams = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).as_data.function.params;
+            let pids = unsafe (*pkg_ast_c(p, itmod)).list(fparams);
             let mut k: u32 = 0;
             while k < fparams.len {
                 let pid = unsafe pids[k as usize];
-                let pty = unsafe (*pkg_ast_c(&*p, itmod)).at_const(pid).as_data.parameter.ty;
-                let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(pty);
-                reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
+                let pty = unsafe (*pkg_ast_c(p, itmod)).at_const(pid).as_data.parameter.ty;
+                let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(pty);
+                reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
                 k = k + 1;
             }
-            let rids = unsafe (*pkg_ast_c(&*p, itmod)).list(frets);
+            let rids = unsafe (*pkg_ast_c(p, itmod)).list(frets);
             k = 0;
             while k < frets.len {
                 let rid = unsafe rids[k as usize];
-                let rk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(rid).kind;
+                let rk = unsafe (*pkg_ast_c(p, itmod)).at_const(rid).kind;
                 let tn = if rk == NodeKind::NODE_PARAMETER {
-                    unsafe (*pkg_ast_c(&*p, itmod)).at_const(rid).as_data.parameter.ty;
+                    unsafe (*pkg_ast_c(p, itmod)).at_const(rid).as_data.parameter.ty;
                 } else {
                     rid;
                 };
-                let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(tn);
-                reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
+                let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(tn);
+                reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
                 k = k + 1;
             }
         }
@@ -1315,7 +1315,7 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
     // sm's Ast lives inline in `p.modules`, which never reallocs during propagation, so its address is stable
     // for the whole call. Cache it once: interleaved pkg_ast_m writes stop the C compiler from proving the
     // reload invariant, so re-deriving it per use cost a bounds-check + offset every time.
-    let s = pkg_ast_c(&*p, sm);
+    let s = pkg_ast_c(p, sm);
     let n = unsafe (*s).instances.len();
     let np = p.modules.len();
     for i in start..n {
@@ -1344,22 +1344,22 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
             if dm == sm {
                 na[k2 as usize] = it.args[k2 as usize];
             } else {
-                let d = pkg_ast_m(&mut *p, dm);
+                let d = pkg_ast_m(p, dm);
                 na[k2 as usize] = unsafe (*d).reintern(&*s, it.args[k2 as usize]);
             }
         }
         if dm != sm {
-            let before = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
-            let d = pkg_ast_m(&mut *p, dm);
+            let before = unsafe (*pkg_ast_c(p, dm)).instances.len();
+            let d = pkg_ast_m(p, dm);
             let _ = unsafe (*d).intern_instance(it.module, it.decl, &na[0], m);
-            let after = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
+            let after = unsafe (*pkg_ast_c(p, dm)).instances.len();
             if after != before {
                 changed = true;
             }
         }
         let cp = (&mut changed) as *mut bool;
-        reintern_nested_instance_deps(&mut *p, dm, &it, &na[0], m, cp);
-        reintern_method_signature_deps(&mut *p, dm, &it, &na[0], m, cp);
+        reintern_nested_instance_deps(p, dm, &it, &na[0], m, cp);
+        reintern_method_signature_deps(p, dm, &it, &na[0], m, cp);
     }
     return changed;
 }
@@ -1368,7 +1368,7 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
 // so that module emits the matching `Inst__method__targs` specialization. Returns true on growth.
 fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
     let mut changed = false;
-    let s = pkg_ast_c(&*p, sm); // stable for the call (see reintern_cross_module); avoids re-deriving per node
+    let s = pkg_ast_c(p, sm); // stable for the call (see reintern_cross_module); avoids re-deriving per node
     let n = unsafe (*s).nodes.len();
     let np = p.modules.len();
     let mut i: NodeId = 0;
@@ -1395,8 +1395,8 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             continue;
         }
         let om = md.module;
-        let mnk = unsafe (*pkg_ast_c(&*p, om)).at_const(md.node).kind;
-        let mgen = unsafe (*pkg_ast_c(&*p, om)).at_const(md.node).as_data.function.generics;
+        let mnk = unsafe (*pkg_ast_c(p, om)).at_const(md.node).kind;
+        let mgen = unsafe (*pkg_ast_c(p, om)).at_const(md.node).as_data.function.generics;
         if mnk != NodeKind::NODE_FUNCTION || mgen.len == 0 {
             i = i + 1;
             continue;
@@ -1444,7 +1444,7 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             dm = home;
         }
         for kk in 0..mtn {
-            if type_mentions_fnval(&*p, sm, unsafe (*mu).args[kk as usize]) {
+            if type_mentions_fnval(p, sm, unsafe (*mu).args[kk as usize]) {
                 dm = sm;
                 break;
             }
@@ -1452,7 +1452,7 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
         let rinst = if dm == sm {
             rty;
         } else {
-            let d = pkg_ast_m(&mut *p, dm);
+            let d = pkg_ast_m(p, dm);
             unsafe (*d).reintern(&*s, rty);
         };
         let mut targs: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
@@ -1460,11 +1460,11 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             if dm == sm {
                 targs[t as usize] = unsafe (*mu).args[t as usize];
             } else {
-                let d = pkg_ast_m(&mut *p, dm);
+                let d = pkg_ast_m(p, dm);
                 targs[t as usize] = unsafe (*d).reintern(&*s, (*mu).args[t as usize]);
             }
         }
-        let d = pkg_ast_m(&mut *p, dm);
+        let d = pkg_ast_m(p, dm);
         if unsafe (*d).add_method_inst(rinst, md.node, &targs[0], mtn) {
             changed = true;
         }
@@ -1493,14 +1493,14 @@ pub fn package_propagate_instances(p: &mut Package) void {
         for u in 0..n {
             if p.modules[u].has_ast {
                 let start = proc_inst[u];
-                let ni = unsafe (*pkg_ast_c(&*p, u as ModuleId)).instances.len();
+                let ni = unsafe (*pkg_ast_c(p, u as ModuleId)).instances.len();
                 if start < ni {
-                    if reintern_cross_module(&mut *p, u as ModuleId, start) {
+                    if reintern_cross_module(p, u as ModuleId, start) {
                         changed = true;
                     }
                     proc_inst[u] = ni;
                 }
-                if reintern_method_insts(&mut *p, u as ModuleId) {
+                if reintern_method_insts(p, u as ModuleId) {
                     changed = true;
                 }
             }
@@ -1532,7 +1532,7 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
         if !p.modules[a].has_ast {
             continue;
         }
-        let aa = pkg_ast_c(&*p, a as ModuleId);
+        let aa = pkg_ast_c(p, a as ModuleId);
         let mut i: usize = 0;
         while i < unsafe (*aa).instances.len() {
             let it = unsafe *(*aa).instance(i as u32);
@@ -1598,7 +1598,7 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
                 i = i + 1;
                 continue;
             }
-            let bast = pkg_ast_c(&*p, fd.module);
+            let bast = pkg_ast_c(p, fd.module);
             if unsafe (*bast).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
                 i = i + 1;
                 continue;
