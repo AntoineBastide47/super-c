@@ -10,7 +10,6 @@ pub enum Option<T> {
 }
 
 extend<T> Option<T> {
-
     pub fn some(value: T) Option<T> {
         return Option::<T>::Some(value);
     }
@@ -134,7 +133,10 @@ extend<T> Option<T> {
     // is freed and `other` is returned; on `None` the unused `other` param is freed by auto-`Free`.
     pub fn and<U>(self: Option<T>, other: Option<U>) Option<U> {
         return switch self {
-            Some(mut v) => { v.free(); other; },
+            Some(v) => {
+                v.free();
+                other;
+            },
             None => Option::<U>::None,
         };
     }
@@ -142,7 +144,9 @@ extend<T> Option<T> {
 
 // The default Option is the empty one.
 extend<T> Option<T> as Default {
-    pub fn default() Option<T> { return Option::<T>::none(); }
+    pub fn default() Option<T> {
+        return Option::<T>::none();
+    }
 }
 
 // Auto-`Free` exactly when the payload is: freeing a `Some(t)` deep-frees `t` in place (the `&mut self`
@@ -193,7 +197,8 @@ extend<T: Format> Option<T> as Format {
         if self.is_none() {
             return String::from_str("None");
         }
-        let mut inner = switch self { // Some -- bind and format the payload (None arm is unreachable here)
+        let mut inner = switch self {
+            // Some -- bind and format the payload (None arm is unreachable here)
             Some(v) => v.fmt(),
             None => String::new(),
         };

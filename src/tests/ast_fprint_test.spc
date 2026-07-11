@@ -112,10 +112,20 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
     unsafe stdio::fprintf(out, "%s".ptr() as *const char, kind_name(n.kind).ptr() as *const char);
     if n.kind == ast::NodeKind::NODE_IDENTIFIER {
         let t = n.as_data.name.text;
-        unsafe stdio::fprintf(out, " `%.*s`".ptr() as *const char, (t.end - t.start) as i32, unsafe (source + t.start as usize) as *const char);
+        unsafe stdio::fprintf(
+            out,
+            " `%.*s`".ptr() as *const char,
+            (t.end - t.start) as i32,
+            unsafe (source + t.start as usize) as *const char,
+        );
     } else if n.kind == ast::NodeKind::NODE_LITERAL {
         let r = n.as_data.literal.raw;
-        unsafe stdio::fprintf(out, " %.*s".ptr() as *const char, (r.end - r.start) as i32, unsafe (source + r.start as usize) as *const char);
+        unsafe stdio::fprintf(
+            out,
+            " %.*s".ptr() as *const char,
+            (r.end - r.start) as i32,
+            unsafe (source + r.start as usize) as *const char,
+        );
     } else if n.kind == ast::NodeKind::NODE_UNARY {
         unsafe stdio::fprintf(out, " %s".ptr() as *const char, n.as_data.unary.op.name().ptr() as *const char);
     } else if n.kind == ast::NodeKind::NODE_BINARY || n.kind == ast::NodeKind::NODE_ASSIGNMENT {
@@ -124,7 +134,9 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
     unsafe stdio::fprintf(out, " [%u..%u]\n".ptr() as *const char, n.span.start, n.span.end);
     let d = depth + 1;
     switch n.kind {
-        NODE_PROGRAM => { print_list(out, &*a, n.as_data.program.items, source, d); },
+        NODE_PROGRAM => {
+            print_list(out, &*a, n.as_data.program.items, source, d);
+        },
         NODE_FUNCTION => {
             print_child(out, &*a, n.as_data.function.name, source, d);
             print_list(out, &*a, n.as_data.function.generics, source, d);
@@ -205,14 +217,20 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
             print_list(out, &*a, n.as_data.function_type.params, source, d);
             print_list(out, &*a, n.as_data.function_type.returns, source, d);
         },
-        NODE_BLOCK => { print_list(out, &*a, n.as_data.block.statements, source, d); },
+        NODE_BLOCK => {
+            print_list(out, &*a, n.as_data.block.statements, source, d);
+        },
         NODE_LET => {
             print_child(out, &*a, n.as_data.let_stmt.name, source, d);
             print_child(out, &*a, n.as_data.let_stmt.ty, source, d);
             print_child(out, &*a, n.as_data.let_stmt.value, source, d);
         },
-        NODE_RETURN => { print_list(out, &*a, n.as_data.return_stmt.values, source, d); },
-        NODE_DEFER | NODE_EXPRESSION_STATEMENT => { print_child(out, &*a, n.as_data.single.value, source, d); },
+        NODE_RETURN => {
+            print_list(out, &*a, n.as_data.return_stmt.values, source, d);
+        },
+        NODE_DEFER | NODE_EXPRESSION_STATEMENT => {
+            print_child(out, &*a, n.as_data.single.value, source, d);
+        },
         NODE_IF => {
             print_child(out, &*a, n.as_data.if_stmt.condition, source, d);
             print_child(out, &*a, n.as_data.if_stmt.then_branch, source, d);
@@ -227,7 +245,9 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
             print_child(out, &*a, n.as_data.for_stmt.iterable, source, d);
             print_child(out, &*a, n.as_data.for_stmt.body, source, d);
         },
-        NODE_UNARY => { print_child(out, &*a, n.as_data.unary.operand, source, d); },
+        NODE_UNARY => {
+            print_child(out, &*a, n.as_data.unary.operand, source, d);
+        },
         NODE_BINARY | NODE_ASSIGNMENT | NODE_STATIC_ASSERT => {
             print_child(out, &*a, n.as_data.binary.left, source, d);
             print_child(out, &*a, n.as_data.binary.right, source, d);
@@ -313,7 +333,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
         return null;
     }
     unsafe stdio::rewind(f);
-    let buf = unsafe stdlib::malloc((sz as usize) + 1) as *mut char;
+    let buf = unsafe stdlib::malloc(sz as usize + 1) as *mut char;
     if buf == null {
         return null;
     }
@@ -326,7 +346,8 @@ fn has(buf: *mut char, needle: str) bool {
     return unsafe cstring::strstr(buf, needle.ptr() as *const char) != null;
 }
 
-@test fn dump() {
+@test
+fn dump() {
     let src = "fn add(a: i32, b: i32) i32 { return a + b; }\n";
     let mut pr = h::parse_ast(src);
     assert(pr.errors == 0, "clean parse");

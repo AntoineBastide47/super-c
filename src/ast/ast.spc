@@ -5,16 +5,38 @@ import lexer::token_type as tt;
 pub type NodeId = u32;
 pub const NODE_NONE: NodeId = 0;
 
-pub struct NodeList { pub start: u32, pub len: u32 }
+pub struct NodeList {
+    pub start: u32,
+    pub len: u32,
+}
 pub type ModuleId = u16;
 
-pub struct DefId { pub module: ModuleId, pub node: NodeId }
+pub struct DefId {
+    pub module: ModuleId,
+    pub node: NodeId,
+}
 
 pub enum AttrKind {
-    ATTR_INLINE, ATTR_ALWAYS_INLINE, ATTR_NOINLINE, ATTR_NORETURN,
-    ATTR_ALIGN, ATTR_PACKED, ATTR_EXPORT, ATTR_IMPORT, ATTR_SECTION, ATTR_USED, ATTR_UNUSED,
-    ATTR_EMIT_MACRO, ATTR_TEST, ATTR_TEST_INIT, ATTR_TEST_FREE, ATTR_C_SOURCE, ATTR_C_LINK,
-    ATTR_COLD, ATTR_PLATFORM,
+    ATTR_INLINE,
+    ATTR_ALWAYS_INLINE,
+    ATTR_NOINLINE,
+    ATTR_NORETURN,
+    ATTR_ALIGN,
+    ATTR_PACKED,
+    ATTR_EXPORT,
+    ATTR_IMPORT,
+    ATTR_SECTION,
+    ATTR_USED,
+    ATTR_UNUSED,
+    ATTR_EMIT_MACRO,
+    ATTR_TEST,
+    ATTR_TEST_INIT,
+    ATTR_TEST_FREE,
+    ATTR_C_SOURCE,
+    ATTR_C_LINK,
+    ATTR_COLD,
+    ATTR_PLATFORM,
+    ATTR_FMT_SKIP,
 }
 
 pub struct Attr {
@@ -24,7 +46,11 @@ pub struct Attr {
     pub str_span: tok::Span,
 }
 
-pub enum TypeQualifier { TYPE_QUAL_NONE, TYPE_QUAL_CONST, TYPE_QUAL_MUT }
+pub enum TypeQualifier {
+    TYPE_QUAL_NONE,
+    TYPE_QUAL_CONST,
+    TYPE_QUAL_MUT,
+}
 
 pub enum NodeKind {
     NODE_NONE_KIND,
@@ -99,9 +125,17 @@ pub const VA_START: u8 = 0;
 pub const VA_ARG: u8 = 1;
 pub const VA_END: u8 = 2;
 
-pub struct ProgramData { pub items: NodeList }
-pub struct NameData { pub text: tok::Span, pub is_mutable: bool }
-pub struct LiteralData { pub raw: tok::Span, pub token_type: tt::TokenType }
+pub struct ProgramData {
+    pub items: NodeList,
+}
+pub struct NameData {
+    pub text: tok::Span,
+    pub is_mutable: bool,
+}
+pub struct LiteralData {
+    pub raw: tok::Span,
+    pub token_type: tt::TokenType,
+}
 pub struct FunctionData {
     pub name: NodeId,
     pub generics: NodeList,
@@ -113,7 +147,11 @@ pub struct FunctionData {
     pub is_extern: bool,
     pub is_variadic: bool,
 }
-pub struct ParameterData { pub name: NodeId, pub ty: NodeId, pub is_mutable: bool }
+pub struct ParameterData {
+    pub name: NodeId,
+    pub ty: NodeId,
+    pub is_mutable: bool,
+}
 pub struct AggregateData {
     pub name: NodeId,
     pub generics: NodeList,
@@ -122,47 +160,199 @@ pub struct AggregateData {
     pub is_union: bool,
     pub is_tuple: bool,
 }
-pub struct FieldData { pub name: NodeId, pub ty: NodeId, pub value: NodeId, pub is_public: bool }
-pub struct VariantData { pub name: NodeId, pub payload: NodeList, pub struct_payload: bool, pub value: NodeId }
-pub struct InterfaceData { pub name: NodeId, pub generics: NodeList, pub bounds: NodeList, pub items: NodeList, pub is_public: bool }
-pub struct ExtendData { pub generics: NodeList, pub interface_type: NodeId, pub target_type: NodeId, pub items: NodeList }
-pub struct TypeAliasData { pub name: NodeId, pub generics: NodeList, pub ty: NodeId, pub is_public: bool }
-pub struct ConstData { pub name: NodeId, pub ty: NodeId, pub value: NodeId, pub is_public: bool, pub is_extern: bool, pub is_static_mut: bool }
-pub struct ExternBlockData { pub abi: NodeId, pub header: NodeId, pub items: NodeList }
-pub struct ImportData { pub path: NodeList, pub alias: NodeId, pub glob: bool }
-pub struct GenericParamData { pub name: NodeId, pub bounds: NodeList, pub default_type: NodeId, pub is_const: bool, pub const_type: NodeId }
-pub struct WherePredicateData { pub ty: NodeId, pub bounds: NodeList }
-pub struct TypePathData { pub parts: NodeList, pub args: NodeList }
-pub struct IndirectTypeData { pub ty: NodeId, pub qualifier: TypeQualifier }
-pub struct ArrayTypeData { pub element: NodeId, pub length: NodeId }
-pub struct FunctionTypeData { pub params: NodeList, pub returns: NodeList, pub is_move: bool }
-pub struct BlockData { pub statements: NodeList }
-pub struct LetData { pub name: NodeId, pub ty: NodeId, pub value: NodeId, pub is_mutable: bool }
-pub struct SingleData { pub value: NodeId }
-pub struct VaOpData { pub op: u8, pub ap: NodeId, pub extra: NodeId }
-pub struct ReturnData { pub values: NodeList }
-pub struct IfData { pub condition: NodeId, pub then_branch: NodeId, pub else_branch: NodeId }
-pub struct WhileData { pub condition: NodeId, pub body: NodeId, pub is_do: bool, pub label: tok::Span }
-pub struct ForData { pub binding: NodeId, pub iterable: NodeId, pub body: NodeId, pub label: tok::Span }
-pub struct FlowData { pub value: NodeId, pub label: tok::Span }
-pub struct UnaryData { pub op: tt::TokenType, pub operand: NodeId, pub qualifier: TypeQualifier }
-pub struct BinaryData { pub op: tt::TokenType, pub left: NodeId, pub right: NodeId }
-pub struct CallData { pub callee: NodeId, pub args: NodeList }
+pub struct FieldData {
+    pub name: NodeId,
+    pub ty: NodeId,
+    pub value: NodeId,
+    pub is_public: bool,
+}
+pub struct VariantData {
+    pub name: NodeId,
+    pub payload: NodeList,
+    pub struct_payload: bool,
+    pub value: NodeId,
+}
+pub struct InterfaceData {
+    pub name: NodeId,
+    pub generics: NodeList,
+    pub bounds: NodeList,
+    pub items: NodeList,
+    pub is_public: bool,
+}
+pub struct ExtendData {
+    pub generics: NodeList,
+    pub interface_type: NodeId,
+    pub target_type: NodeId,
+    pub items: NodeList,
+}
+pub struct TypeAliasData {
+    pub name: NodeId,
+    pub generics: NodeList,
+    pub ty: NodeId,
+    pub is_public: bool,
+}
+pub struct ConstData {
+    pub name: NodeId,
+    pub ty: NodeId,
+    pub value: NodeId,
+    pub is_public: bool,
+    pub is_extern: bool,
+    pub is_static_mut: bool,
+}
+pub struct ExternBlockData {
+    pub abi: NodeId,
+    pub header: NodeId,
+    pub items: NodeList,
+}
+pub struct ImportData {
+    pub path: NodeList,
+    pub alias: NodeId,
+    pub glob: bool,
+}
+pub struct GenericParamData {
+    pub name: NodeId,
+    pub bounds: NodeList,
+    pub default_type: NodeId,
+    pub is_const: bool,
+    pub const_type: NodeId,
+}
+pub struct WherePredicateData {
+    pub ty: NodeId,
+    pub bounds: NodeList,
+}
+pub struct TypePathData {
+    pub parts: NodeList,
+    pub args: NodeList,
+}
+pub struct IndirectTypeData {
+    pub ty: NodeId,
+    pub qualifier: TypeQualifier,
+}
+pub struct ArrayTypeData {
+    pub element: NodeId,
+    pub length: NodeId,
+}
+pub struct FunctionTypeData {
+    pub params: NodeList,
+    pub returns: NodeList,
+    pub is_move: bool,
+}
+pub struct BlockData {
+    pub statements: NodeList,
+}
+pub struct LetData {
+    pub name: NodeId,
+    pub ty: NodeId,
+    pub value: NodeId,
+    pub is_mutable: bool,
+}
+pub struct SingleData {
+    pub value: NodeId,
+}
+pub struct VaOpData {
+    pub op: u8,
+    pub ap: NodeId,
+    pub extra: NodeId,
+}
+pub struct ReturnData {
+    pub values: NodeList,
+}
+pub struct IfData {
+    pub condition: NodeId,
+    pub then_branch: NodeId,
+    pub else_branch: NodeId,
+}
+pub struct WhileData {
+    pub condition: NodeId,
+    pub body: NodeId,
+    pub is_do: bool,
+    pub label: tok::Span,
+}
+pub struct ForData {
+    pub binding: NodeId,
+    pub iterable: NodeId,
+    pub body: NodeId,
+    pub label: tok::Span,
+}
+pub struct FlowData {
+    pub value: NodeId,
+    pub label: tok::Span,
+}
+pub struct UnaryData {
+    pub op: tt::TokenType,
+    pub operand: NodeId,
+    pub qualifier: TypeQualifier,
+}
+pub struct BinaryData {
+    pub op: tt::TokenType,
+    pub left: NodeId,
+    pub right: NodeId,
+}
+pub struct CallData {
+    pub callee: NodeId,
+    pub args: NodeList,
+}
 // mut_caps is a u32 mutated-capture bitmask (≤32 captures). u32 (not u64) is deliberate: it leaves
 // ClosureData with no 8-aligned member, so NodeAs stays 4-aligned and Node is 56 bytes instead of 64.
-pub struct ClosureData { pub params: NodeList, pub returns: NodeList, pub body: NodeId, pub expr_body: bool, pub captures: NodeList, pub mut_caps: u32 }
-pub struct IndexData { pub object: NodeId, pub index: NodeId }
-pub struct MemberData { pub object: NodeId, pub member: NodeId, pub pointer: bool, pub path: bool }
-pub struct CastData { pub expression: NodeId, pub ty: NodeId }
-pub struct SpecializationData { pub expression: NodeId, pub types: NodeList }
-pub struct MatchData { pub value: NodeId, pub arms: NodeList }
-pub struct MatchArmData { pub pattern: NodeId, pub guard: NodeId, pub body: NodeId }
-pub struct NewData { pub ty: NodeId, pub initializer: NodeId }
-pub struct ArrayLiteralData { pub elements: NodeList }
-pub struct StructInitializerData { pub ty: NodeId, pub fields: NodeList }
-pub struct FieldInitializerData { pub name: NodeId, pub value: NodeId }
-pub struct PatternData { pub name: NodeId, pub children: NodeList }
-pub struct PatternRangeData { pub start: NodeId, pub end: NodeId, pub inclusive: bool }
+pub struct ClosureData {
+    pub params: NodeList,
+    pub returns: NodeList,
+    pub body: NodeId,
+    pub expr_body: bool,
+    pub captures: NodeList,
+    pub mut_caps: u32,
+}
+pub struct IndexData {
+    pub object: NodeId,
+    pub index: NodeId,
+}
+pub struct MemberData {
+    pub object: NodeId,
+    pub member: NodeId,
+    pub pointer: bool,
+    pub path: bool,
+}
+pub struct CastData {
+    pub expression: NodeId,
+    pub ty: NodeId,
+}
+pub struct SpecializationData {
+    pub expression: NodeId,
+    pub types: NodeList,
+}
+pub struct MatchData {
+    pub value: NodeId,
+    pub arms: NodeList,
+}
+pub struct MatchArmData {
+    pub pattern: NodeId,
+    pub guard: NodeId,
+    pub body: NodeId,
+}
+pub struct NewData {
+    pub ty: NodeId,
+    pub initializer: NodeId,
+}
+pub struct ArrayLiteralData {
+    pub elements: NodeList,
+}
+pub struct StructInitializerData {
+    pub ty: NodeId,
+    pub fields: NodeList,
+}
+pub struct FieldInitializerData {
+    pub name: NodeId,
+    pub value: NodeId,
+}
+pub struct PatternData {
+    pub name: NodeId,
+    pub children: NodeList,
+}
+pub struct PatternRangeData {
+    pub start: NodeId,
+    pub end: NodeId,
+    pub inclusive: bool,
+}
 
 pub union NodeAs {
     pub program: ProgramData,
@@ -212,14 +402,34 @@ pub union NodeAs {
     pub pattern_range: PatternRangeData,
 }
 
-pub struct Node { pub kind: NodeKind, pub span: tok::Span, pub as_data: NodeAs }
+pub struct Node {
+    pub kind: NodeKind,
+    pub span: tok::Span,
+    pub as_data: NodeAs,
+}
 
 pub type TypeId = u32;
 pub const TYPE_NONE: TypeId = 0;
 
 pub enum BuiltinType {
-    BT_BOOL, BT_CHAR, BT_I8, BT_I16, BT_I32, BT_I64, BT_ISIZE,
-    BT_U8, BT_U16, BT_U32, BT_U64, BT_USIZE, BT_F32, BT_F64, BT_C32, BT_C64, BT_VALIST, BT_VOID,
+    BT_BOOL,
+    BT_CHAR,
+    BT_I8,
+    BT_I16,
+    BT_I32,
+    BT_I64,
+    BT_ISIZE,
+    BT_U8,
+    BT_U16,
+    BT_U32,
+    BT_U64,
+    BT_USIZE,
+    BT_F32,
+    BT_F64,
+    BT_C32,
+    BT_C64,
+    BT_VALIST,
+    BT_VOID,
     BT_COUNT,
 }
 
@@ -241,7 +451,10 @@ pub enum TypeKind {
     TYPE_CONST, // a const-generic argument value (as_data.value)
 }
 
-pub struct TyArr { pub elem: TypeId, pub len: u32 }
+pub struct TyArr {
+    pub elem: TypeId,
+    pub len: u32,
+}
 pub union TyAs {
     pub builtin: BuiltinType,
     pub elem: TypeId,
@@ -250,7 +463,12 @@ pub union TyAs {
     pub arr: TyArr,
     pub value: i64, // TYPE_CONST: a const-generic value
 }
-pub struct Ty { pub kind: TypeKind, pub qualifier: u8, pub module: ModuleId, pub as_data: TyAs }
+pub struct Ty {
+    pub kind: TypeKind,
+    pub qualifier: u8,
+    pub module: ModuleId,
+    pub as_data: TyAs,
+}
 
 extend Ty as Hash {
     // Word-wise FNV over Ty's raw storage. Ty is 8-aligned (its `value: i64` forces alignof 8) and power-of-2
@@ -260,8 +478,8 @@ extend Ty as Hash {
     pub fn hash(self: &Self) u64 {
         let p = self as *const Ty as *const u64;
         let mut h: u64 = 1469598103934665603u64;
-        for i in 0..(sizeof(Ty) / 8) {
-            h = h ^ (unsafe p[i]);
+        for i in 0..sizeof(Ty) / 8 {
+            h = h ^ unsafe p[i];
             h = h * 1099511628211u64;
         }
         return h;
@@ -274,11 +492,35 @@ extend Ty as Eq {
     }
 }
 
-pub struct TyInstance { pub module: ModuleId, pub decl: NodeId, pub n: u8, pub args: [TypeId; 4] }
-pub struct MonoUse { pub node: NodeId, pub n: u8, pub args: [TypeId; 4] }
-pub struct DynUse { pub node: NodeId, pub src: TypeId, pub dyn_ty: TypeId }
-pub struct DerefUse { pub node: NodeId, pub target: TypeId, pub n: u8, pub recv: [TypeId; 8], pub method: [DefId; 8] }
-pub struct MethodInst { pub instance: TypeId, pub method: NodeId, pub n: u8, pub targs: [TypeId; 4] }
+pub struct TyInstance {
+    pub module: ModuleId,
+    pub decl: NodeId,
+    pub n: u8,
+    pub args: [TypeId; 4],
+}
+pub struct MonoUse {
+    pub node: NodeId,
+    pub n: u8,
+    pub args: [TypeId; 4],
+}
+pub struct DynUse {
+    pub node: NodeId,
+    pub src: TypeId,
+    pub dyn_ty: TypeId,
+}
+pub struct DerefUse {
+    pub node: NodeId,
+    pub target: TypeId,
+    pub n: u8,
+    pub recv: [TypeId; 8],
+    pub method: [DefId; 8],
+}
+pub struct MethodInst {
+    pub instance: TypeId,
+    pub method: NodeId,
+    pub n: u8,
+    pub targs: [TypeId; 4],
+}
 
 // Field-wise Hash/Eq over the SIGNIFICANT prefix (module/decl/n + args[0..n]) — deliberately NOT a
 // sizeof-memcmp, so the unused args[n..4] tail (left uninitialized by the `{module,decl,n}` literal) can
@@ -287,11 +529,11 @@ pub struct MethodInst { pub instance: TypeId, pub method: NodeId, pub n: u8, pub
 extend TyInstance as Hash {
     pub fn hash(self: &Self) u64 {
         let mut h: u64 = 1469598103934665603u64;
-        h = (h ^ (self.module as u64)) * 1099511628211u64;
-        h = (h ^ (self.decl as u64)) * 1099511628211u64;
-        h = (h ^ (self.n as u64)) * 1099511628211u64;
+        h = (h ^ self.module as u64) * 1099511628211u64;
+        h = (h ^ self.decl as u64) * 1099511628211u64;
+        h = (h ^ self.n as u64) * 1099511628211u64;
         for i in 0..self.n {
-            h = (h ^ (self.args[i] as u64)) * 1099511628211u64;
+            h = (h ^ self.args[i] as u64) * 1099511628211u64;
         }
         return h;
     }
@@ -312,11 +554,11 @@ extend TyInstance as Eq {
 extend MethodInst as Hash {
     pub fn hash(self: &Self) u64 {
         let mut h: u64 = 1469598103934665603u64;
-        h = (h ^ (self.instance as u64)) * 1099511628211u64;
-        h = (h ^ (self.method as u64)) * 1099511628211u64;
-        h = (h ^ (self.n as u64)) * 1099511628211u64;
+        h = (h ^ self.instance as u64) * 1099511628211u64;
+        h = (h ^ self.method as u64) * 1099511628211u64;
+        h = (h ^ self.n as u64) * 1099511628211u64;
         for i in 0..self.n {
-            h = (h ^ (self.targs[i] as u64)) * 1099511628211u64;
+            h = (h ^ self.targs[i] as u64) * 1099511628211u64;
         }
         return h;
     }
@@ -405,8 +647,8 @@ extend Ast {
     }
 
     pub fn commit(self: &mut Self, mark: u32) NodeList {
-        let list = NodeList { start: self.children.len() as u32, len: (self.scratch.len() as u32) - mark };
-        for i in (mark as usize)..self.scratch.len() {
+        let list = NodeList { start: self.children.len() as u32, len: self.scratch.len() as u32 - mark };
+        for i in mark as usize..self.scratch.len() {
             self.children.push(self.scratch[i]);
         }
         self.scratch.truncate(mark as usize);
@@ -432,10 +674,10 @@ extend Ast {
         let err = Ty { kind: TypeKind::TYPE_ERROR };
         self.type_pool.push(err);
         self.type_index.insert(err, 0);
-        for b in 0..(BuiltinType::BT_COUNT as u8) {
+        for b in 0..BuiltinType::BT_COUNT as u8 {
             let t = Ty { kind: TypeKind::TYPE_BUILTIN, as_data: TyAs { builtin: b as BuiltinType } };
             self.type_pool.push(t);
-            self.type_index.insert(t, (b as TypeId) + 1);
+            self.type_index.insert(t, b as TypeId + 1);
         }
     }
 
@@ -460,17 +702,19 @@ extend Ast {
         for j in 0..m {
             it.args[j] = unsafe args[j];
         }
-        let hinted = switch self.instance_index.get(&it) { Some(id) => *id, None => 0xFFFFFFFFu32, };
+        let hinted = switch self.instance_index.get(&it) {
+            Some(id) => *id,
+            None => 0xFFFFFFFFu32,
+        };
         let cur = self.instances.len();
         let mut idx = cur as u32;
         let mut valid = false;
-        if hinted != 0xFFFFFFFFu32 && (hinted as usize) < cur {
+        if hinted != 0xFFFFFFFFu32 && hinted as usize < cur {
             valid = self.instances.at(hinted as usize).eq(&it);
         }
         if valid {
             idx = hinted;
-        }
-        else {
+        } else {
             self.instances.push(it);
             self.instance_index.insert(it, idx);
         }
@@ -495,9 +739,13 @@ extend Ast {
         for j in 0..m {
             mi.targs[j] = unsafe targs[j];
         }
-        let hinted = switch self.method_inst_index.get(&mi) { Some(id) => *id, None => 0xFFFFFFFFu32, };
-        if hinted != 0xFFFFFFFFu32 && (hinted as usize) < self.method_insts.len()
-            && self.method_insts.at(hinted as usize).eq(&mi) {
+        let hinted = switch self.method_inst_index.get(&mi) {
+            Some(id) => *id,
+            None => 0xFFFFFFFFu32,
+        };
+        if hinted != 0xFFFFFFFFu32 && hinted as usize < self.method_insts.len() && self.method_insts.at(hinted as usize).eq(
+            &mi,
+        ) {
             return false;
         }
         let idx = self.method_insts.len() as u32;
@@ -617,7 +865,7 @@ extend Ast {
         return self.nodes.at(id as usize);
     }
     pub fn list(self: &Self, list: NodeList) *const NodeId {
-        return unsafe (self.children.as_ptr() + (list.start as usize));
+        return unsafe (self.children.as_ptr() + list.start as usize);
     }
     pub fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) void {
         self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl };
@@ -632,7 +880,7 @@ extend Ast {
         self.resolutions[ref_id as usize] = decl;
     }
     pub fn builtin(b: BuiltinType) TypeId {
-        return (b as TypeId) + 1;
+        return b as TypeId + 1;
     }
     pub fn set_type(self: &mut Self, n: NodeId, t: TypeId) void {
         self.types[n as usize] = t;
@@ -687,13 +935,13 @@ pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut 
         hexf = (unsafe src[i] | 0x20u8) == 'p' as u8;
         i = i + 1;
     }
-    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "isize".ptr(), 5) == 0 {
+    if end - start > 5 && unsafe cstring::memcmp(unsafe src + end - 5, "isize".ptr(), 5) == 0 {
         if sfx_start != null {
             unsafe *sfx_start = end - 5;
         }
         return BuiltinType::BT_ISIZE;
     }
-    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "usize".ptr(), 5) == 0 {
+    if end - start > 5 && unsafe cstring::memcmp(unsafe src + end - 5, "usize".ptr(), 5) == 0 {
         if sfx_start != null {
             unsafe *sfx_start = end - 5;
         }
@@ -701,7 +949,7 @@ pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut 
     }
     let mut n: u32 = 3;
     if end - start > n {
-        let p = unsafe (src + ((end - n) as usize));
+        let p = unsafe (src + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 {
             if sfx_start != null {
                 unsafe *sfx_start = end - n;
@@ -753,7 +1001,7 @@ pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut 
     }
     n = 2;
     if end - start > n {
-        let p = unsafe (src + ((end - n) as usize));
+        let p = unsafe (src + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 {
             if sfx_start != null {
                 unsafe *sfx_start = end - n;

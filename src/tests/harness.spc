@@ -53,7 +53,11 @@ extend Compiled {
 // Copy at most 511 bytes of `s` into dst[512], NUL-terminated (dst is pre-zeroed by the caller).
 fn copy_msg(dst: *mut char, s: &String) void {
     let n = s.len();
-    let k = if n < 511 { n; } else { 511 as usize; };
+    let k = if n < 511 {
+        n;
+    } else {
+        511 as usize;
+    };
     if k > 0 {
         unsafe cstring::memcpy(dst as *mut void, s.as_ptr() as *const void, k);
     }
@@ -130,7 +134,10 @@ pub fn compile(src: str, stop: i32) Compiled {
 
 // Lex + parse a source standalone (no package/prelude) and hand back the AST for shape inspection.
 // `errors` > 0 means the snippet failed to lex or parse. The AST is owned by the caller (`.free()`).
-pub struct ParsedAst { pub errors: usize, pub ast: Ast }
+pub struct ParsedAst {
+    pub errors: usize,
+    pub ast: Ast,
+}
 
 pub fn parse_ast(src: str) ParsedAst {
     let mut r = ParsedAst { errors: 0, ast: Ast::new(0) };
@@ -219,7 +226,7 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
 pub fn nth_kind(a: &Ast, kind: NodeKind, nth: usize) NodeId {
     let mut seen: usize = 0;
     let mut id: NodeId = 1;
-    while (id as usize) < a.nodes.len() {
+    while id as usize < a.nodes.len() {
         if a.at_const(id).kind == kind {
             if seen == nth {
                 return id;
@@ -243,7 +250,7 @@ pub fn ident_is(a: &Ast, src: *const char, id: NodeId, name: *const char) bool {
     if (e - s) as usize != l {
         return false;
     }
-    return unsafe cstring::memcmp((src + s as usize), name, l) == 0;
+    return unsafe cstring::memcmp(src + s as usize, name, l) == 0;
 }
 
 // Read a whole stream into a fresh NUL-terminated heap buffer (caller frees). Seeks to the end for the
@@ -256,7 +263,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
         return null;
     }
     unsafe stdio::rewind(f);
-    let buf = unsafe stdlib::malloc((sz as usize) + 1) as *mut char;
+    let buf = unsafe stdlib::malloc(sz as usize + 1) as *mut char;
     if buf == null {
         return null;
     }
@@ -267,7 +274,10 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
 
 // The generated C for the user snippet (module 0's header + .c concatenated), for substring inspection --
 // the analog of tests/test_harness.h's sc_codegen. `code` is owned (call `.free()`).
-pub struct CompiledC { pub errors: usize, pub code: *mut char }
+pub struct CompiledC {
+    pub errors: usize,
+    pub code: *mut char,
+}
 
 extend CompiledC {
     pub fn ok(self: &Self) bool {
@@ -352,14 +362,24 @@ pub fn compile_c(src: str) CompiledC {
 
 // ---- compile-and-run: build a snippet into a real program and execute it (for behavior tests) ----------
 // Path scratch buffers (`{}` zero-fills; no `[v;N]` repeat literal).
-struct Path256 { pub b: [char; 256] }
-struct Path512 { pub b: [char; 512] }
-struct Path1024 { pub b: [char; 1024] }
+struct Path256 {
+    pub b: [char; 256],
+}
+struct Path512 {
+    pub b: [char; 512],
+}
+struct Path1024 {
+    pub b: [char; 1024],
+}
 
 static mut R_SEQ: u64 = 0;
 
 // The captured result of compiling+running a snippet: whether it built, its exit code, and stdout+stderr.
-pub struct RunResult { pub built: bool, pub exit: i32, pub out: *mut char }
+pub struct RunResult {
+    pub built: bool,
+    pub exit: i32,
+    pub out: *mut char,
+}
 
 extend RunResult {
     pub fn ok(self: &Self) bool {
@@ -406,7 +426,13 @@ pub fn compile_and_run(src: str) RunResult {
     unsafe R_SEQ = unsafe R_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut dir = Path256 {};
-    unsafe stdio::snprintf((&mut dir.b[0]) as *mut char, 256, "/tmp/scr_%d_%llu".ptr() as *const char, pid, unsafe R_SEQ);
+    unsafe stdio::snprintf(
+        (&mut dir.b[0]) as *mut char,
+        256,
+        "/tmp/scr_%d_%llu".ptr() as *const char,
+        pid,
+        unsafe R_SEQ,
+    );
     let dirp = (&dir.b[0]) as *const char;
     if unsafe shim::sc_mkdir(dirp) != 0 {
         return r;
@@ -423,19 +449,31 @@ pub fn compile_and_run(src: str) RunResult {
     }
     unsafe stdio::fclose(wf);
     let mut sc = stdlib::getenv("SUPERC");
-    if sc == null || (unsafe *sc) == (0 as char) {
+    if sc == null || unsafe *sc == 0 as char {
         sc = "./super-c".ptr() as *const char;
     }
     let mut cmd = Path1024 {};
-    unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 1024,
-        "%s build '%s/main.spc' -o '%s/prog' >/dev/null 2>&1".ptr() as *const char, sc, dirp, dirp);
+    unsafe stdio::snprintf(
+        (&mut cmd.b[0]) as *mut char,
+        1024,
+        "%s build '%s/main.spc' -o '%s/prog' >/dev/null 2>&1".ptr() as *const char,
+        sc,
+        dirp,
+        dirp,
+    );
     let brc = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
     if brc != 0 {
         rm_dir(dirp);
         return r;
     } // did not build
     r.built = true;
-    unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 1024, "'%s/prog' > '%s/out' 2>&1".ptr() as *const char, dirp, dirp);
+    unsafe stdio::snprintf(
+        (&mut cmd.b[0]) as *mut char,
+        1024,
+        "'%s/prog' > '%s/out' 2>&1".ptr() as *const char,
+        dirp,
+        dirp,
+    );
     let rrc = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
     if unsafe shim::sc_wifexited(rrc) != 0 {
         r.exit = unsafe shim::sc_wexitstatus(rrc);

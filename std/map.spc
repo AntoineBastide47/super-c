@@ -19,10 +19,9 @@ pub struct Map<K, V, A = Global> {
 }
 
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
-
     // Empty map backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub fn new_in(alloc: A) Map<K, V, A> {
-        return Map::<K, V, A> { keys: null, vals: null, used: null, len: 0, cap: 0, alloc: alloc, };
+        return Map::<K, V, A> { keys: null, vals: null, used: null, len: 0, cap: 0, alloc: alloc };
     }
 
     pub fn len(self: &Map<K, V, A>) usize {
@@ -35,7 +34,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
 
     // The slot a key occupies, or the first empty slot on its probe sequence. Requires cap > 0.
     fn slot(self: &Map<K, V, A>, key: &K) usize {
-        let mut i = (key.hash() as usize) % self.cap;
+        let mut i = key.hash() as usize % self.cap;
         while unsafe self.used[i] != 0 {
             if unsafe self.keys[i].eq(key) {
                 return i;
@@ -83,11 +82,13 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     // Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
     // replaced value are freed (no-ops for non-Free types). Takes ownership of `key` and `value`.
     pub fn insert(self: &mut Map<K, V, A>, key: K, value: V) {
-        if self.cap == 0 || (self.len + 1) * 4 >= self.cap * 3 { // grow past a 0.75 load factor
+        if self.cap == 0 || (self.len + 1) * 4 >= self.cap * 3 {
+            // grow past a 0.75 load factor
             self.grow();
         }
         let i = self.slot(&key);
-        if unsafe self.used[i] != 0 { // overwrite: keep the stored key, free the duplicate + the old value
+        if unsafe self.used[i] != 0 {
+            // overwrite: keep the stored key, free the duplicate + the old value
             let mut dup = key;
             dup.free();
             unsafe self.vals[i].free();
@@ -147,12 +148,13 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         }
         return Option::<V>::Some(removed);
     }
-
 }
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<K: Hash + Eq, V, A: Allocator + Default> Map<K, V, A> {
-    pub fn new() Map<K, V, A> { return Map::<K, V, A>::new_in(A::default()); }
+    pub fn new() Map<K, V, A> {
+        return Map::<K, V, A>::new_in(A::default());
+    }
 }
 
 // Free the three arrays AND deep-free every stored key/value. Auto-`Free`: the Map is released at scope

@@ -9,7 +9,8 @@ extern "C" {
     pub type FILE;
 
     // Open / close / flush.
-    @c.import("fopen") fn c_fopen(path: *const char, mode: *const char) *mut FILE;
+    @c.import("fopen")
+    fn c_fopen(path: *const char, mode: *const char) *mut FILE;
     pub fn freopen(path: *const char, mode: *const char, stream: *mut FILE) *mut FILE;
     pub fn fclose(stream: *mut FILE) i32;
     pub fn fflush(stream: *mut FILE) i32;

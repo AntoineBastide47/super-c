@@ -6,11 +6,14 @@
 import tests::cli_harness as cli;
 import stdio;
 
-struct Cmd { pub b: [char; 2048] }
+struct Cmd {
+    pub b: [char; 2048],
+}
 
 // A valid file compiles (exit 0), emits its module .c under build/, and that C compiles + runs with the exit
 // code the program requests.
-@test fn compiles_file() {
+@test
+fn compiles_file() {
     let mut p = cli::proj_new();
     p.mkfile("prog.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(7); }\n");
     let mut r = p.compile("prog.spc");
@@ -23,19 +26,26 @@ struct Cmd { pub b: [char; 2048] }
 
 // A second module's enums used across the boundary: value return, payload-less match, payload construction
 // and match. Drives the multi-file build/ tree (subdirs) through cc + run.
-@test fn cross_module_enum() {
+@test
+fn cross_module_enum() {
     let mut p = cli::proj_new();
-    p.mkfile("lib/lib.spc", r#"pub enum Color { Red, Green = 5, Blue }
+    p.mkfile(
+        "lib/lib.spc",
+        r#"pub enum Color { Red, Green = 5, Blue }
 pub enum Box { Empty, Filled(i32) }
 pub fn red() Color { return Color::Red; }
-"#);
-    p.mkfile("xm.spc", r#"import lib::lib;
+"#,
+    );
+    p.mkfile(
+        "xm.spc",
+        r#"import lib::lib;
 extern "C" { fn exit(code: i32) void; }
 fn color_code(c: lib::lib::Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }
 fn box_amt(b: lib::lib::Box) i32 { return switch b { Filled(n) => n, Empty => -1, }; }
 fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
   unsafe exit(color_code(c) + box_amt(b)); }
-"#);
+"#,
+    );
     let mut r = p.compile("xm.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -46,9 +56,12 @@ fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
 // --const-eval end to end: folded static_assert (true passes / false errors at Super-C level), folded
 // designated indices, folded sizeof over the computed layout, [T; N] as a generic arg, and the layout
 // _Static_asserts landing in the C and PASSING under -Werror.
-@test fn const_eval_flag() {
+@test
+fn const_eval_flag() {
     let mut p = cli::proj_new();
-    p.mkfile("main.spc", r#"extern "C" { fn exit(code: i32) void; }
+    p.mkfile(
+        "main.spc",
+        r#"extern "C" { fn exit(code: i32) void; }
 const K: i32 = 2;
 struct Pt { pub x: i32, pub y: u8 }
 struct Wrap<T> { pub v: T }
@@ -60,7 +73,8 @@ fn main() i32 {
   let w = Wrap::<[i32; 4]> { v: [1, 2, 3, 4] };
   unsafe exit(a[2] + a[3] + a[0] + w.v[3] + (sizeof((i32, bool)) as i32));
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     assert(p.gen_has("main.c", "[2] = 30"), "const designator index folded into the C output");
@@ -87,9 +101,12 @@ fn main() i32 {
 // Implicit CTFE: folded-argument calls RUN at compile time (recursion, loops, switch, compound assignment),
 // call sites emit the literal, pure statement-position calls vanish, unfoldable/over-budget callees degrade
 // to runtime calls, and the compile stays fast.
-@test fn ctfe() {
+@test
+fn ctfe() {
     let mut p = cli::proj_new();
-    p.mkfile("main.spc", r#"extern "C" { fn rand() i32; }
+    p.mkfile(
+        "main.spc",
+        r#"extern "C" { fn rand() i32; }
 fn fib(n: i32) i32 {
   if n < 2 { return n; }
   return fib(n - 1) + fib(n - 2);
@@ -110,7 +127,8 @@ fn main() i32 {
   if late() < 0 { return 1; }
   return x;
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     assert(p.gen_has("main.c", r#"_Static_assert(true, "ctfe")"#), "fib(20) ran at compile time");
@@ -125,40 +143,52 @@ fn main() i32 {
     assert_eq(p.run_bin(), 8);
 
     // an over-budget callee bails to a runtime call instead of hanging the compiler
-    p.mkfile("main.spc", r#"fn spin() i32 {
+    p.mkfile(
+        "main.spc",
+        r#"fn spin() i32 {
   let mut i = 0;
   while true { i += 1; if i > 100_000_000 { return i; } }
   return 0;
 }
 fn main() i32 { if spin() > 0 { return 3; } return 4; }
-"#);
+"#,
+    );
     let mut s = p.compile("main.spc");
     assert_eq(s.exit, 0);
     assert(p.gen_has("main.c", "spin()"), "over-budget callee stays a runtime call");
 
     // --const-eval-steps starves a loop-driven assert -> reports the budget
-    p.mkfile("main.spc", r#"fn burn() i32 { let mut i = 0; while i < 1_000_000 { i += 1; } return i; }
+    p.mkfile(
+        "main.spc",
+        r#"fn burn() i32 { let mut i = 0; while i < 1_000_000 { i += 1; } return i; }
 static_assert(burn() == 1_000_000, "needs execution");
 fn main() i32 { return 0; }
-"#);
+"#,
+    );
     let mut b = p.compile_flags("--const-eval-steps=4096", "main.spc");
     assert(b.exit != 0, "a starved assert fails the build");
     assert(b.out_has("step budget exceeded"), "and blames the budget");
 
     // the (fn, args) call memo folds fib(40) comfortably inside a 100k-step budget
-    p.mkfile("main.spc", r#"fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
+    p.mkfile(
+        "main.spc",
+        r#"fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
 static_assert(fib(40) == 102_334_155, "memoized");
 fn main() i32 { return 0; }
-"#);
+"#,
+    );
     let mut m = p.compile_flags("--const-eval-steps=100000", "main.spc");
     assert_eq(m.exit, 0);
     assert(p.gen_has("main.c", r#"_Static_assert(true, "memoized")"#), "the call cache collapsed the recursion");
 
     // raw strings are CTFE-visible (hash-delimited content with an interior quote folds like any literal)
-    p.mkfile("main.spc", r##"const G: str = r#"say "hi""#;
+    p.mkfile(
+        "main.spc",
+        r##"const G: str = r#"say "hi""#;
 static_assert(G.len() == 8, "raw folds");
 fn main() i32 { return 0; }
-"##);
+"##,
+    );
     let mut rw = p.compile("main.spc");
     assert_eq(rw.exit, 0);
     assert(p.gen_has("main.c", r#"_Static_assert(true, "raw folds")"#), "raw string len folded at compile time");
@@ -167,9 +197,12 @@ fn main() i32 { return 0; }
 // CTFE over aggregates and the abstract heap: structs + methods + extend dispatch, local arrays, generics,
 // intercepted malloc/free, payload enums through switch, and a std Vector round trip -- all interpreted.
 // Also: an assert may precede its callee (deferred re-check) and a would-be trap reports its reason.
-@test fn ctfe_memory() {
+@test
+fn ctfe_memory() {
     let mut p = cli::proj_new();
-    p.mkfile("main.spc", r#"static_assert(vec_sum() == 44, "deferred: asserts may precede their callee");
+    p.mkfile(
+        "main.spc",
+        r#"static_assert(vec_sum() == 44, "deferred: asserts may precede their callee");
 struct Pt { x: i32, y: i32 }
 extend Pt {
   pub fn mag2(self: &Pt) i32 { return self.x * self.x + self.y * self.y; }
@@ -209,10 +242,14 @@ fn vec_sum() i32 {
   return s;
 }
 fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "deferred: asserts may precede their callee")"#), "assert above its callee folds");
+    assert(
+        p.gen_has("main.c", r#"_Static_assert(true, "deferred: asserts may precede their callee")"#),
+        "assert above its callee folds",
+    );
     assert(p.gen_has("main.c", r#"_Static_assert(true, "aggregates fold")"#), "structs/arrays/methods fold");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "the abstract heap folds")"#), "malloc/free fold");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "payload enums fold")"#), "Option + switch folds");
@@ -221,16 +258,21 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
     assert_eq(p.run_bin(), 0);
 
     // a would-be runtime trap in a required-const context reports its reason
-    p.mkfile("main.spc", r#"fn div0(n: i32) i32 { return 10 / n; }
+    p.mkfile(
+        "main.spc",
+        r#"fn div0(n: i32) i32 { return 10 / n; }
 static_assert(div0(0) == 1, "traps");
 fn main() i32 { return 0; }
-"#);
+"#,
+    );
     let mut d = p.compile("main.spc");
     assert(d.exit != 0, "a trapping assert fails the build");
     assert(d.out_has("division by zero"), "and names the trap");
 
     // use-after-free is caught by the abstract heap
-    p.mkfile("main.spc", r#"extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
+    p.mkfile(
+        "main.spc",
+        r#"extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
 fn uaf() i32 {
   let p = unsafe malloc(sizeof(i32)) as *mut i32;
   unsafe p[0] = 1;
@@ -239,7 +281,8 @@ fn uaf() i32 {
 }
 static_assert(uaf() == 1, "uaf");
 fn main() i32 { return 0; }
-"#);
+"#,
+    );
     let mut u = p.compile("main.spc");
     assert(u.exit != 0, "use-after-free fails the build");
     assert(u.out_has("use after free"), "and names it");
@@ -247,9 +290,12 @@ fn main() i32 { return 0; }
 
 // The last CTFE surface: `?` early return, array->slice coercion, range indexing into a Vector, struct-
 // payload variants + struct patterns, &CONST, interface DEFAULT bodies, and Map/Set.
-@test fn ctfe_gaps() {
+@test
+fn ctfe_gaps() {
     let mut p = cli::proj_new();
-    p.mkfile("main.spc", r#"const K: i32 = 40;
+    p.mkfile(
+        "main.spc",
+        r#"const K: i32 = 40;
 fn check(k: i32) Result<i32, i32> {
   if k < 0 { return Result::<i32, i32>::Err(-1); }
   return Result::<i32, i32>::Ok(k + 1);
@@ -301,7 +347,8 @@ fn g5() i32 {
 }
 static_assert(g5() == 43, "Map and Set fold");
 fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5() - 43; }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     assert(p.gen_has("main.c", r#"_Static_assert(true, "try both paths")"#), "? folds both ways");
@@ -316,21 +363,28 @@ fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5(
 
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
 // construction, and a local extension method on an imported type.
-@test fn module_features() {
+@test
+fn module_features() {
     let mut p = cli::proj_new();
-    p.mkfile("lib/lib.spc", r#"pub struct Vec2 { pub x: i32, pub y: i32 }
+    p.mkfile(
+        "lib/lib.spc",
+        r#"pub struct Vec2 { pub x: i32, pub y: i32 }
 pub type V = Vec2;
 pub const BASE: i32 = 100;
 pub fn mk(a: i32, b: i32) Vec2 { return Vec2 { x: a, y: b }; }
-"#);
-    p.mkfile("feat.spc", r#"import lib::lib;
+"#,
+    );
+    p.mkfile(
+        "feat.spc",
+        r#"import lib::lib;
 extern "C" { fn exit(code: i32) void; }
 extend lib::lib::Vec2 { fn sum(self: &lib::lib::Vec2) i32 { return self.x + self.y; } }
 fn main() i32 {
   let v: lib::lib::V = lib::lib::Vec2 { x: 5, y: 7 };
   let w = lib::lib::mk(1, 2);
   unsafe exit(v.sum() + w.sum() + lib::lib::BASE); }
-"#);
+"#,
+    );
     let mut r = p.compile("feat.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -340,19 +394,23 @@ fn main() i32 {
 
 // A public `static mut` global: extern-declared in its header, defined once, readable/assignable across
 // modules (both through the owning module's functions and directly by path).
-@test fn cross_module_static_mut() {
+@test
+fn cross_module_static_mut() {
     let mut p = cli::proj_new();
     p.mkfile("state.spc", r#"pub static mut hits: i64 = 0;
 pub fn record() { hits += 1; }
 "#);
-    p.mkfile("main.spc", r#"import state;
+    p.mkfile(
+        "main.spc",
+        r#"import state;
 fn main() i32 {
   state::record();
   state::record();
   state::hits += 3;
   return (state::hits - 5) as i32;
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -362,15 +420,21 @@ fn main() i32 {
 
 // The --test pipeline end to end: @test collection across modules, per-module and global fixtures, method
 // suites (fixture-as-self), should_panic, fork isolation of a failing assertion, --test-filter, --test-no-fork.
-@test fn test_pipeline() {
+@test
+fn test_pipeline() {
     let mut p = cli::proj_new();
-    p.mkfile("env.spc", r#"pub struct Env { pub tag: String }
+    p.mkfile(
+        "env.spc",
+        r#"pub struct Env { pub tag: String }
 @test_init(global)
 fn suite() Env { return Env { tag: String::from_str("suite") }; }
 @test_free(global)
 fn suite_down(env: &mut Env) { eprintln("teardown {}", env.tag.as_str()); }
-"#);
-    p.mkfile("main.spc", r#"import env;
+"#,
+    );
+    p.mkfile(
+        "main.spc",
+        r#"import env;
 struct Fx { pub v: Vector<i32> }
 @test_init
 fn setup() Fx { let mut v = Vector::<i32>::new(); v.push(1); v.push(2); return Fx { v: v }; }
@@ -399,7 +463,8 @@ extend Counter {
   }
 }
 fn main() i32 { return 0; }
-"#);
+"#,
+    );
     let mut r = p.compile_flags("--test", "main.spc");
     assert_eq(r.exit, 1);
     assert(r.out_has("running 4 tests"), "collected 4 tests");
@@ -431,16 +496,22 @@ fn main() i32 { return 0; }
 
 // A generic defined in one module, instantiated over a user struct held BY VALUE in another: the instance is
 // re-homed to the user module and full-monomorphized there. -Werror is the placement proof.
-@test fn cross_module_generic_by_value() {
+@test
+fn cross_module_generic_by_value() {
     let mut p = cli::proj_new();
-    p.mkfile("opt/opt.spc", r#"pub enum Opt<T> { Some(T), None }
+    p.mkfile(
+        "opt/opt.spc",
+        r#"pub enum Opt<T> { Some(T), None }
 extend<T> Opt<T> {
   pub fn unwrap_or(self: &Opt<T>, d: T) T { return switch self { Some(v) => *v, None => d, }; }
   pub fn map<U>(self: &Opt<T>, f: fn(T) U) Opt<U> {
     return switch self { Some(v) => Opt::<U>::Some(f(*v)), None => Opt::<U>::None, }; }
 }
-"#);
-    p.mkfile("genbv.spc", r#"import opt::opt;
+"#,
+    );
+    p.mkfile(
+        "genbv.spc",
+        r#"import opt::opt;
 extern "C" { fn exit(code: i32) void; }
 struct Bar { pub x: i32 }
 fn bx(b: Bar) i32 { return b.x; }
@@ -449,10 +520,14 @@ fn main() i32 {
   let a = o.unwrap_or(Bar { x: 0 }).x;
   let m = o.map(bx).unwrap_or(0);
   unsafe exit(a + m); }
-"#);
+"#,
+    );
     let mut r = p.compile("genbv.spc");
     assert_eq(r.exit, 0);
-    assert(p.gen_has("genbv.h", "struct opt__opt__Opt__genbv__Bar {"), "instance full-monomorphized in the user module's header");
+    assert(
+        p.gen_has("genbv.h", "struct opt__opt__Opt__genbv__Bar {"),
+        "instance full-monomorphized in the user module's header",
+    );
     let mut cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 60);
@@ -460,15 +535,21 @@ fn main() i32 {
 
 // A cross-module generic instance whose bounded extend calls a BOUND METHOD on the element; the bound call
 // dispatches through the subst (T -> Bar) to the concrete Bar__clone.
-@test fn cross_module_generic_bound_dispatch() {
+@test
+fn cross_module_generic_bound_dispatch() {
     let mut p = cli::proj_new();
-    p.mkfile("bx/bx.spc", r#"pub interface Clone { fn clone(self: &Self) Self; }
+    p.mkfile(
+        "bx/bx.spc",
+        r#"pub interface Clone { fn clone(self: &Self) Self; }
 pub struct Bx<T> { pub v: T }
 extend<T: Clone> Bx<T> {
   pub fn dup(self: &Bx<T>) Bx<T> { return Bx::<T> { v: self.v.clone() }; }
 }
-"#);
-    p.mkfile("genbd.spc", r#"import bx::bx;
+"#,
+    );
+    p.mkfile(
+        "genbd.spc",
+        r#"import bx::bx;
 extern "C" { fn exit(code: i32) void; }
 struct Bar { pub x: i32 }
 extend Bar as bx::bx::Clone { fn clone(self: &Self) Bar { return Bar { x: self.x }; } }
@@ -476,7 +557,8 @@ fn main() i32 {
   let b = bx::bx::Bx::<Bar> { v: Bar { x: 21 } };
   let d = b.dup();
   unsafe exit(d.v.x + b.v.x); }
-"#);
+"#,
+    );
     let mut r = p.compile("genbd.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -486,14 +568,18 @@ fn main() i32 {
 
 // @emit_macro on a generic type emits reusable C DECLARE/DEFINE templates into its header; Super-C's own
 // instances stay full-monomorphized; a plain-C consumer can instantiate the template; rejected on non-generics.
-@test fn emit_macro_export() {
+@test
+fn emit_macro_export() {
     let mut p = cli::proj_new();
-    p.mkfile("emac.spc", r#"extern "C" { fn exit(code: i32) void; }
+    p.mkfile(
+        "emac.spc",
+        r#"extern "C" { fn exit(code: i32) void; }
 @emit_macro
 pub struct Pair<T> { pub a: T, pub b: T }
 extend<T> Pair<T> { pub fn pick(self: &Pair<T>, second: bool) T { if second { return self.b; } return self.a; } }
 fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p.a); }
-"#);
+"#,
+    );
     let mut r = p.compile("emac.spc");
     assert_eq(r.exit, 0);
     assert(p.gen_has("emac.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
@@ -503,17 +589,25 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
     assert_eq(p.run_bin(), 7);
 
     // a plain-C consumer instantiates the template over its own C type (no Super-C compiler involved)
-    p.mkfile("cuser.c", r#"#include "emac.h"
+    p.mkfile(
+        "cuser.c",
+        r#"#include "emac.h"
 typedef struct { int n; } CT;
 PAIR_DECLARE(CT, CT, Pair__CT)
 PAIR_DEFINE(CT, CT, Pair__CT)
 int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
   return Pair__CT__pick(&p, 1).n == 9 ? 0 : 1; }
-"#);
+"#,
+    );
     let mut cc2 = Cmd {};
-    unsafe stdio::snprintf((&mut cc2.b[0]) as *mut char, 2048,
+    unsafe stdio::snprintf(
+        (&mut cc2.b[0]) as *mut char,
+        2048,
         "cc -std=c11 -Wall -Wextra -Werror -I'%s/build' '%s/cuser.c' -o '%s/cbin' 2>/dev/null".ptr() as *const char,
-        p.rootp(), p.rootp(), p.rootp());
+        p.rootp(),
+        p.rootp(),
+        p.rootp(),
+    );
     assert_eq(cli::run_shell((&cc2.b[0]) as *const char), 0);
     let mut cr = Cmd {};
     unsafe stdio::snprintf((&mut cr.b[0]) as *mut char, 2048, "'%s/cbin'".ptr() as *const char, p.rootp());
@@ -528,16 +622,20 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
 
 // Per-extend bound filtering: a bounded extension block instantiated over a type that does NOT satisfy the
 // bound must not be specialized (its body would call an unprovided method); only the unbounded block emits.
-@test fn per_extend_bound_filtering() {
+@test
+fn per_extend_bound_filtering() {
     let mut p = cli::proj_new();
-    p.mkfile("pibf.spc", r#"extern "C" { fn exit(code: i32) void; }
+    p.mkfile(
+        "pibf.spc",
+        r#"extern "C" { fn exit(code: i32) void; }
 pub interface Marker { fn mark(self: &Self) i32; }
 pub struct Wrap<T> { pub v: T }
 extend<T> Wrap<T> { pub fn raw(self: &Wrap<T>) i32 { return 7; } }
 extend<T: Marker> Wrap<T> { pub fn marked(self: &Wrap<T>) i32 { return self.v.mark(); } }
 struct Plain { pub n: i32 }
 fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()); }
-"#);
+"#,
+    );
     let mut r = p.compile("pibf.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -547,9 +645,12 @@ fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()
 
 // A non-Default allocator must still get all String<A> methods/conformances that only need an explicit or
 // stored allocator (a multi-file regression: warning-clean without a sentinel `RawAlloc: Default`).
-@test fn string_non_default_allocator() {
+@test
+fn string_non_default_allocator() {
     let mut p = cli::proj_new();
-    p.mkfile("main.spc", r#"extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
+    p.mkfile(
+        "main.spc",
+        r#"extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
 struct RawAlloc {}
 extend RawAlloc as Allocator {
   fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe malloc(n); }
@@ -566,7 +667,8 @@ fn main() i32 {
   f.free(); c.free(); s.free();
   if ok { unsafe exit(42); } unsafe exit(1);
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -576,9 +678,12 @@ fn main() i32 {
 
 // Eager emission must stay warning-clean under -Wunused-function: generic methods, inherited defaults and
 // private functions may be omitted or explicitly marked unused.
-@test fn warning_clean_unused_emission() {
+@test
+fn warning_clean_unused_emission() {
     let mut p = cli::proj_new();
-    p.mkfile("main.spc", r#"extern "C" { fn exit(code: i32) void; }
+    p.mkfile(
+        "main.spc",
+        r#"extern "C" { fn exit(code: i32) void; }
 fn unused_private() i32 { return 99; }
 interface I { fn value(self: &Self) i32; fn unused_default(self: &Self) i32 { return 123; } }
 struct S { pub x: i32 }
@@ -589,7 +694,8 @@ extend<T> Wrap<T> {
   fn unused_method(self: &Self) T { return self.v; }
 }
 fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(s.value() + w.get()); }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -598,7 +704,8 @@ fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(
 }
 
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
-@test fn prelude_output_is_demand_driven() {
+@test
+fn prelude_output_is_demand_driven() {
     let mut p = cli::proj_new();
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(42); }\n");
     let mut r = p.compile("main.spc");
@@ -613,20 +720,27 @@ fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(
 
 // Cross-module re-homed generic instances must discover by-value nested generic fields before emission:
 // Outer<Bar> contains Inner<Bar> by value; both must be re-homed and emitted in dependency order.
-@test fn cross_module_nested_rehomed_instance() {
+@test
+fn cross_module_nested_rehomed_instance() {
     let mut p = cli::proj_new();
-    p.mkfile("lib/lib.spc", r#"pub struct Inner<T> { pub value: T }
+    p.mkfile(
+        "lib/lib.spc",
+        r#"pub struct Inner<T> { pub value: T }
 pub struct Outer<T> { pub inner: Inner<T> }
 extend<T> Outer<T> { pub fn get(self: &Self) T { return self.inner.value; } }
-"#);
-    p.mkfile("main.spc", r#"import lib::lib;
+"#,
+    );
+    p.mkfile(
+        "main.spc",
+        r#"import lib::lib;
 extern "C" { fn exit(code: i32) void; }
 struct Bar { pub x: i32 }
 fn main() i32 {
   let o = lib::lib::Outer::<Bar> { inner: lib::lib::Inner::<Bar> { value: Bar { x: 42 } } };
   unsafe exit(o.get().x);
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -636,16 +750,20 @@ fn main() i32 {
 
 // A pub interface in one module, implemented over a local type and consumed by a bounded generic in another:
 // the bound resolves across the import, the extend satisfies it, and the bounded call dispatches.
-@test fn cross_module_interface() {
+@test
+fn cross_module_interface() {
     let mut p = cli::proj_new();
     p.mkfile("shapes.spc", "pub interface Area { fn area(self: *mut Self) i32; }\n");
-    p.mkfile("main.spc", r#"import shapes;
+    p.mkfile(
+        "main.spc",
+        r#"import shapes;
 extern "C" { fn exit(code: i32) void; }
 struct Sq { pub s: i32 }
 extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return unsafe (self.s * self.s); } }
 fn total<T: shapes::Area>(x: &mut T) i32 { return x.area(); }
 fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -655,9 +773,12 @@ fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); }
 
 // Cross-module trait objects: a pub interface (with a default) erased over a foreign type AND a local type
 // in another module; both modules erase; the foreign default's synthesized tag exports for the user TU.
-@test fn cross_module_dyn() {
+@test
+fn cross_module_dyn() {
     let mut p = cli::proj_new();
-    p.mkfile("shapes.spc", r#"pub interface Shape {
+    p.mkfile(
+        "shapes.spc",
+        r#"pub interface Shape {
     fn area(self: &Self) i32;
     fn tag(self: &Self) i32 { return 7; }
 }
@@ -666,8 +787,11 @@ extend Circle as Shape {
     pub fn area(self: &Circle) i32 { return 3 * self.r * self.r; }
 }
 pub fn local_view(s: &dyn Shape) i32 { return s.area(); }
-"#);
-    p.mkfile("main.spc", r#"import shapes;
+"#,
+    );
+    p.mkfile(
+        "main.spc",
+        r#"import shapes;
 extern "C" { fn exit(code: i32) void; }
 struct Sq { pub s: i32 }
 extend Sq as shapes::Shape {
@@ -684,7 +808,8 @@ fn main() i32 {
     let w = d.tag() + q.tag();
     unsafe exit(t + u + w + d.area());
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -694,9 +819,12 @@ fn main() i32 {
 
 // The bundled ffi/ bindings, imported by a C header's bare name (import math; -> ffi/math.spc): a raw pub
 // extern binding with its real unmangled C symbol, and a thin wrapper -- compiled -Werror + linked -lm.
-@test fn ffi_bindings() {
+@test
+fn ffi_bindings() {
     let mut p = cli::proj_new();
-    p.mkfile("main.spc", r#"import math;
+    p.mkfile(
+        "main.spc",
+        r#"import math;
 import ctype;
 extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
@@ -706,7 +834,8 @@ fn main() i32 {
   if ctype::is_alpha(53) { acc = acc + 10; }
   unsafe exit(s + acc);
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("-lm");
@@ -716,13 +845,16 @@ fn main() i32 {
 
 // Import forms + mangling: an alias import, a glob import, two modules with a same-named public function
 // (module mangling keeps them distinct), and a module named like a C stdlib header (string).
-@test fn module_imports() {
+@test
+fn module_imports() {
     let mut p = cli::proj_new();
     p.mkfile("string.spc", "pub fn tag() i32 { return 10; }\n");
     p.mkfile("math.spc", "pub fn tag() i32 { return 20; }\n");
     p.mkfile("deep.spc", "pub fn dtag() i32 { return 100; }\npub struct D { pub v: i32 }\n");
     p.mkfile("facade.spc", "import deep;\n");
-    p.mkfile("main.spc", r#"import string as s;
+    p.mkfile(
+        "main.spc",
+        r#"import string as s;
 import math as *;
 import facade as *;
 extern "C" { fn exit(code: i32) void; }
@@ -730,7 +862,8 @@ fn main() i32 {
   let d = D { v: deep::dtag() / 10 };
   unsafe exit(s::tag() + tag() + dtag() + d.v);
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -741,13 +874,16 @@ fn main() i32 {
 // External C code imports: a backing header auto-discovers its same-stem .c sibling; @c.source pulls a
 // differently-named impl; @c.link lands in build/__ldflags; removing the code prunes the wrappers + flags;
 // a missing @c.source is a hard error.
-@test fn external_c_sources() {
+@test
+fn external_c_sources() {
     let mut p = cli::proj_new();
     p.mkfile("helper.h", "int helper_add(int a, int b);\n");
     p.mkfile("helper.c", "#include \"helper.h\"\nint helper_add(int a, int b) { return a + b; }\n");
     p.mkfile("extra.h", "int extra_mul(int a, int b);\n");
     p.mkfile("impl_extra.c", "#include \"extra.h\"\nint extra_mul(int a, int b) { return a * b; }\n");
-    p.mkfile("main.spc", r#"extern "C" "helper.h" {
+    p.mkfile(
+        "main.spc",
+        r#"extern "C" "helper.h" {
   fn helper_add(a: i32, b: i32) i32;
 }
 @c.source("impl_extra.c")
@@ -757,7 +893,8 @@ extern "C" "extra.h" {
 }
 extern "C" { fn exit(code: i32) void; }
 fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     assert(p.gen_has("__ldflags", "-lm"), "@c.link lands in build/__ldflags");
@@ -770,13 +907,20 @@ fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
     let mut r2 = p.compile("main.spc");
     assert_eq(r2.exit, 0);
     let mut prune = Cmd {};
-    unsafe stdio::snprintf((&mut prune.b[0]) as *mut char, 2048,
+    unsafe stdio::snprintf(
+        (&mut prune.b[0]) as *mut char,
+        2048,
         "test $(find '%s/build' -name '__ext*' | wc -l) -eq 0 && test ! -e '%s/build/__ldflags'".ptr() as *const char,
-        p.rootp(), p.rootp());
+        p.rootp(),
+        p.rootp(),
+    );
     assert_eq(cli::run_shell((&prune.b[0]) as *const char), 0);
 
     // a missing source file is a hard error
-    p.mkfile("main.spc", "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
+    p.mkfile(
+        "main.spc",
+        "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n",
+    );
     let mut miss = p.compile("main.spc");
     assert(miss.exit != 0, "missing @c.source errors");
     assert(miss.out_has("cannot find C source"), "and names it");
@@ -784,22 +928,31 @@ fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
 
 // Cross-module interface DEFAULT methods: the interface (with bodied defaults) lives in its own module,
 // conformances elsewhere (type's home, a local extension of an imported type, and a builtin target `i32`).
-@test fn cross_module_defaults() {
+@test
+fn cross_module_defaults() {
     let mut p = cli::proj_new();
-    p.mkfile("shapes.spc", r#"pub interface Shape {
+    p.mkfile(
+        "shapes.spc",
+        r#"pub interface Shape {
   fn area(self: &Self) i32;
   fn double_area(self: &Self) i32 { return self.area() * 2; }
   fn describe(self: &Self) i32 { return self.double_area() + 1; }
 }
-"#);
-    p.mkfile("circle.spc", r#"import shapes;
+"#,
+    );
+    p.mkfile(
+        "circle.spc",
+        r#"import shapes;
 pub struct Circle { pub r: i32 }
 extend Circle as shapes::Shape {
   pub fn area(self: &Circle) i32 { return self.r * self.r * 3; }
 }
-"#);
+"#,
+    );
     p.mkfile("point.spc", "pub struct Point { pub x: i32 }\n");
-    p.mkfile("main.spc", r#"import circle;
+    p.mkfile(
+        "main.spc",
+        r#"import circle;
 import shapes;
 import point;
 extend point::Point as shapes::Shape {
@@ -816,7 +969,8 @@ fn main() i32 {
   let n: i32 = 4;
   unsafe exit(c.describe() + dyn_describe(&c) + p.describe() + n.describe());
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -826,9 +980,12 @@ fn main() i32 {
 
 // Format conformances across the prelude, built multi-file: String/Vector/Option/Result render to a String.
 // A value type conforming to a prelude interface must NOT pull the interface module's header (no cycle).
-@test fn format_conformances() {
+@test
+fn format_conformances() {
     let mut p = cli::proj_new();
-    p.mkfile("fmt.spc", r#"extern "C" { fn exit(code: i32) void; }
+    p.mkfile(
+        "fmt.spc",
+        r#"extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
   let mut v = Vector::<String>::new();
   v.push(String::from_str("a")); v.push(String::from_str("b"));
@@ -838,7 +995,8 @@ fn main() i32 {
   let r = Result::<String, String>::Ok(String::from_str("y"));
   let mut rs = r.fmt();
   unsafe exit(vs.len() as i32 + os.len() as i32 + rs.len() as i32); }
-"#);
+"#,
+    );
     let mut r = p.compile("fmt.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -848,17 +1006,26 @@ fn main() i32 {
 
 // Mutually-recursive modules: import cycles are legal; mutual fn calls and mutual POINTER-linked types work;
 // a mutual BY-VALUE embedding is the one impossible shape (infinite size) and gets its own diagnostic.
-@test fn module_cycles() {
+@test
+fn module_cycles() {
     let mut p = cli::proj_new();
-    p.mkfile("a.spc", r#"import b;
+    p.mkfile(
+        "a.spc",
+        r#"import b;
 pub struct AN { pub v: i32, pub link: *mut b::BN }
 pub fn even(n: i32) i32 { if n == 0 { return 1; } return b::odd(n - 1); }
-"#);
-    p.mkfile("b.spc", r#"import a;
+"#,
+    );
+    p.mkfile(
+        "b.spc",
+        r#"import a;
 pub struct BN { pub v: i32, pub link: *mut a::AN }
 pub fn odd(n: i32) i32 { if n == 0 { return 0; } return a::even(n - 1); }
-"#);
-    p.mkfile("main.spc", r#"import a;
+"#,
+    );
+    p.mkfile(
+        "main.spc",
+        r#"import a;
 import b;
 extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
@@ -867,7 +1034,8 @@ fn main() i32 {
   let linked = unsafe (*bn.link).v + bn.v;
   unsafe exit(linked + a::even(10) * 10);
 }
-"#);
+"#,
+    );
     let mut r = p.compile("main.spc");
     assert_eq(r.exit, 0);
     let mut cc = p.cc_build("");
@@ -883,13 +1051,17 @@ fn main() i32 {
 }
 
 // Module-layer negative paths: missing modules and using a non-public type/const/field across modules.
-@test fn module_errors() {
+@test
+fn module_errors() {
     let mut miss = cli::proj_new();
     miss.mkfile("main.spc", "import nope::nope;\nfn main() i32 { return 0; }\n");
     miss.expect_fail("main.spc", "cannot open module");
 
     let mut privty = cli::proj_new();
-    privty.mkfile("main.spc", "import lib::lib;\nfn use_it(p: lib::lib::Secret) i32 { return 0; }\nfn main() i32 { return 0; }\n");
+    privty.mkfile(
+        "main.spc",
+        "import lib::lib;\nfn use_it(p: lib::lib::Secret) i32 { return 0; }\nfn main() i32 { return 0; }\n",
+    );
     privty.mkfile("lib/lib.spc", "enum Secret { A, B }\npub fn ok() i32 { return 1; }\n");
     privty.expect_fail("main.spc", "no public type");
 
@@ -905,7 +1077,8 @@ fn main() i32 {
 }
 
 // An extensionless input still produces build/<stem>.c.
-@test fn extensionless_appends() {
+@test
+fn extensionless_appends() {
     let mut p = cli::proj_new();
     p.mkfile("noext", "fn main() i32 { }\n");
     let mut r = p.compile("noext");
@@ -913,7 +1086,8 @@ fn main() i32 {
 }
 
 // A missing input file is a nonzero exit and the path is named.
-@test fn missing_file() {
+@test
+fn missing_file() {
     let mut p = cli::proj_new();
     let mut r = p.compile("does_not_exist.spc");
     assert(r.exit != 0, "a missing input file is a nonzero exit");
@@ -921,7 +1095,8 @@ fn main() i32 {
 }
 
 // argc > 2 exits 1 with usage.
-@test fn usage() {
+@test
+fn usage() {
     let mut p = cli::proj_new();
     let mut r = p.run_raw("a b");
     assert_eq(r.exit, 1);
@@ -929,7 +1104,8 @@ fn main() i32 {
 }
 
 // A type error: no output file is written, the diagnostic is reported, and the exit is nonzero.
-@test fn error_exit_code() {
+@test
+fn error_exit_code() {
     let mut p = cli::proj_new();
     p.mkfile("bad.spc", "fn main() i32 { let x: bool = 1; }\n");
     let mut r = p.compile("bad.spc");

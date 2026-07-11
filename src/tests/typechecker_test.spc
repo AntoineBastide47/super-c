@@ -5,173 +5,544 @@ import tests::harness as h;
 
 @test
 fn ok() {
-    h::expect_ok("field access", "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.x; }\n");
-    h::expect_ok("method call binds self", "struct P { pub x: i32, }\nextend P { fn get(self: P) i32 { return self.x; } }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.get(); }\n");
+    h::expect_ok(
+        "field access",
+        "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.x; }\n",
+    );
+    h::expect_ok(
+        "method call binds self",
+        "struct P { pub x: i32, }\nextend P { fn get(self: P) i32 { return self.x; } }\nfn main() i32 { let p: P = P { x: 1, }; let y: i32 = p.get(); }\n",
+    );
     h::expect_ok("entry point fn main() i32", "fn main() i32 { return 0; }\n");
     h::expect_ok("string literal is str", "fn main() i32 { let s: str = \"hi\"; let n: usize = s.len(); }\n");
     h::expect_ok("str ptr field indexes to u8", "fn first(s: str) u8 { return unsafe s.ptr()[0]; }\n");
-    h::expect_ok("private field reachable via self", "struct S { v: i32, }\nextend S { fn get(self: &S) i32 { return self.v; } }\n");
-    h::expect_ok("private field constructible inside extend", "struct S { v: i32, }\nextend S { fn make() S { return S { v: 1, }; } }\n");
+    h::expect_ok(
+        "private field reachable via self",
+        "struct S { v: i32, }\nextend S { fn get(self: &S) i32 { return self.v; } }\n",
+    );
+    h::expect_ok(
+        "private field constructible inside extend",
+        "struct S { v: i32, }\nextend S { fn make() S { return S { v: 1, }; } }\n",
+    );
     h::expect_ok("pub field readable from outside", "struct S { pub v: i32, }\nfn f(s: S) i32 { return s.v; }\n");
-    h::expect_ok("field and same-named method coexist", "struct S { pub len: i32, }\nextend S { pub fn len(self: &S) i32 { return self.len; } }\nfn use(s: S) i32 { return s.len + s.len(); }\n");
+    h::expect_ok(
+        "field and same-named method coexist",
+        "struct S { pub len: i32, }\nextend S { pub fn len(self: &S) i32 { return self.len; } }\nfn use(s: S) i32 { return s.len + s.len(); }\n",
+    );
     h::expect_ok("literal coercion", "fn main() i32 { let x: u8 = 5; }\n");
     h::expect_ok("inferred binding", "fn main() i32 { let x = 1; let y: i32 = x; }\n");
-    h::expect_ok("int literal initializes a float", "fn main() i32 { let f: f64 = 0; let g: f32 = 5; let h: f64 = -3; }\n");
+    h::expect_ok(
+        "int literal initializes a float",
+        "fn main() i32 { let f: f64 = 0; let g: f32 = 5; let h: f64 = -3; }\n",
+    );
     h::expect_ok("builtin Copy bound", "fn id<T: Copy>(x: T) T { return x; }\nfn main() i32 { return id::<i32>(0); }\n");
-    h::expect_ok("complex Clone Default Copy bounds", "fn id<T: Copy>(x: T) T { return x; }\nfn clone_of<T: Clone>(x: &T) T { return x.clone(); }\nfn zero<T: Default>() T { return T::default(); }\nfn main() i32 { let z: c64 = 1.0; let a = id::<c64>(z); let b = clone_of::<c64>(&a); let c = zero::<c64>(); return 0; }\n");
-    h::expect_ok("builtin inherent scalar methods", "fn main() i32 { let x: i32 = -5; let y: u32 = 8; let z: i32 = 9; let a = x.abs() + x.signum() + z.clamp(0, 7);\nlet f: f64 = 9.0; let g: f64 = -2.5; let h: f32 = 4.0; let r: f32 = h.sqrt();\nif !y.is_power_of_two() { return 1; } if !(f.sqrt() + g.abs()).is_finite() { return 2; } return a + r as i32; }\n");
-    h::expect_ok("char literal coerces to any int slot", "fn take(b: u8) u8 { return b; }\nfn main() i32 { let x: u8 = 'l'; let y: u32 = 'A'; let z: u8 = take('z'); }\n");
-    h::expect_ok("call argument types", "fn add(a: i32, b: i32) i32 { return a; }\nfn main() i32 { let z: i32 = add(1, 2); }\n");
+    h::expect_ok(
+        "complex Clone Default Copy bounds",
+        "fn id<T: Copy>(x: T) T { return x; }\nfn clone_of<T: Clone>(x: &T) T { return x.clone(); }\nfn zero<T: Default>() T { return T::default(); }\nfn main() i32 { let z: c64 = 1.0; let a = id::<c64>(z); let b = clone_of::<c64>(&a); let c = zero::<c64>(); return 0; }\n",
+    );
+    h::expect_ok(
+        "builtin inherent scalar methods",
+        "fn main() i32 { let x: i32 = -5; let y: u32 = 8; let z: i32 = 9; let a = x.abs() + x.signum() + z.clamp(0, 7);\nlet f: f64 = 9.0; let g: f64 = -2.5; let h: f32 = 4.0; let r: f32 = h.sqrt();\nif !y.is_power_of_two() { return 1; } if !(f.sqrt() + g.abs()).is_finite() { return 2; } return a + r as i32; }\n",
+    );
+    h::expect_ok(
+        "char literal coerces to any int slot",
+        "fn take(b: u8) u8 { return b; }\nfn main() i32 { let x: u8 = 'l'; let y: u32 = 'A'; let z: u8 = take('z'); }\n",
+    );
+    h::expect_ok(
+        "call argument types",
+        "fn add(a: i32, b: i32) i32 { return a; }\nfn main() i32 { let z: i32 = add(1, 2); }\n",
+    );
     h::expect_ok("bool condition", "fn main() i32 { if (true) { } }\n");
     h::expect_ok("switch name binding", "fn classify(c: u8) i32 { return switch c { 0 => 1, n => 2, _ => 0, }; }\n");
-    h::expect_ok("struct pattern field", "struct P { pub x: i32, }\nfn f(p: P) i32 { return switch p { P { x: v } => v, }; }\n");
+    h::expect_ok(
+        "struct pattern field",
+        "struct P { pub x: i32, }\nfn f(p: P) i32 { return switch p { P { x: v } => v, }; }\n",
+    );
     h::expect_ok("pointer offset", "fn f(p: *i32) i32 { let q: *i32 = unsafe (p + 1); return unsafe *q; }\n");
     h::expect_ok("pointer minus int", "fn f(p: *i32) i32 { let q: *i32 = unsafe (p - 1); return unsafe *q; }\n");
     h::expect_ok("int plus pointer", "fn f(p: *i32) i32 { let q: *i32 = unsafe (1 + p); return unsafe *q; }\n");
     h::expect_ok("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n");
     h::expect_ok("explicit void bare return", "fn f() void { return; }\n");
     h::expect_ok("range adopts usize bound", "fn f(n: usize) void { for i in 0..n { let x: usize = i; } }\n");
-    h::expect_ok("associated new call", "struct String {}\nextend String { fn new() String { return String {}; } }\nfn f() String { return String::new(); }\n");
-    h::expect_ok("reference coerces to const pointer", "fn take(p: *const i32) i32 { return unsafe *p; }\nfn give(x: i32) i32 { return take(&x); }\n");
-    h::expect_ok("pointer erases to void pointer", "fn take(p: *mut void) void {}\nfn cview(p: *const void) void {}\nfn f(x: *mut i32, c: *const i32) { take(x); cview(x); cview(c); }\n");
-    h::expect_err_msg("const pointer does not erase to mut void", "fn take(p: *mut void) void {}\nfn f(c: *const i32) { take(c); }\n", "mismatched types");
-    h::expect_err_msg("void pointer does not invent a type implicitly", "fn f(p: *mut void) *mut i32 { return p; }\n", "mismatched types");
+    h::expect_ok(
+        "associated new call",
+        "struct String {}\nextend String { fn new() String { return String {}; } }\nfn f() String { return String::new(); }\n",
+    );
+    h::expect_ok(
+        "reference coerces to const pointer",
+        "fn take(p: *const i32) i32 { return unsafe *p; }\nfn give(x: i32) i32 { return take(&x); }\n",
+    );
+    h::expect_ok(
+        "pointer erases to void pointer",
+        "fn take(p: *mut void) void {}\nfn cview(p: *const void) void {}\nfn f(x: *mut i32, c: *const i32) { take(x); cview(x); cview(c); }\n",
+    );
+    h::expect_err_msg(
+        "const pointer does not erase to mut void",
+        "fn take(p: *mut void) void {}\nfn f(c: *const i32) { take(c); }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "void pointer does not invent a type implicitly",
+        "fn f(p: *mut void) *mut i32 { return p; }\n",
+        "mismatched types",
+    );
 }
 
 @test
 fn errors() {
-    h::expect_err_msg("use after move", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let a = R { t: 1 }; let b = a; return a.t; }\n", "use of moved value");
-    h::expect_err_msg("use after conditional move", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n", "use of moved value");
-    h::expect_err_msg("use after move on both branches", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } else { take(a); } return a.t; }\n", "use of moved value");
-    h::expect_ok("sibling-branch move does not taint the other arm", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n");
-    h::expect_err_msg("use after explicit free", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n", "use after free");
-    h::expect_err_msg("use after by-value-self method call", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nextend R { fn consume(self: R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.consume(); return a.t; }\n", "use of moved value");
-    h::expect_ok("by-ref-self method call does not consume the receiver", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nextend R { fn peek(self: &R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n");
-    h::expect_err_msg("read of uninitialized binding", "fn main() i32 { let mut x: i32; return x; }\n", "use of possibly uninitialized value");
-    h::expect_err_msg("read of conditionally-initialized binding", "fn main() i32 { let mut x: i32; if true { x = 5; } return x; }\n", "use of possibly uninitialized value");
-    h::expect_err_msg("value read of uninitialized array element", "fn main() i32 { let mut a: [i32; 4]; return a[0]; }\n", "use of possibly uninitialized value");
-    h::expect_err_msg("deferred-init Free binding", "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n", "must be initialized when declared");
+    h::expect_err_msg(
+        "use after move",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let a = R { t: 1 }; let b = a; return a.t; }\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "use after conditional move",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "use after move on both branches",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } else { take(a); } return a.t; }\n",
+        "use of moved value",
+    );
+    h::expect_ok(
+        "sibling-branch move does not taint the other arm",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n",
+    );
+    h::expect_err_msg(
+        "use after explicit free",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n",
+        "use after free",
+    );
+    h::expect_err_msg(
+        "use after by-value-self method call",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nextend R { fn consume(self: R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.consume(); return a.t; }\n",
+        "use of moved value",
+    );
+    h::expect_ok(
+        "by-ref-self method call does not consume the receiver",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nextend R { fn peek(self: &R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n",
+    );
+    h::expect_err_msg(
+        "read of uninitialized binding",
+        "fn main() i32 { let mut x: i32; return x; }\n",
+        "use of possibly uninitialized value",
+    );
+    h::expect_err_msg(
+        "read of conditionally-initialized binding",
+        "fn main() i32 { let mut x: i32; if true { x = 5; } return x; }\n",
+        "use of possibly uninitialized value",
+    );
+    h::expect_err_msg(
+        "value read of uninitialized array element",
+        "fn main() i32 { let mut a: [i32; 4]; return a[0]; }\n",
+        "use of possibly uninitialized value",
+    );
+    h::expect_err_msg(
+        "deferred-init Free binding",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n",
+        "must be initialized when declared",
+    );
     h::expect_ok("definitely initialized before read", "fn main() i32 { let mut x: i32; x = 7; return x; }\n");
-    h::expect_ok("initialized on every branch before read", "fn main() i32 { let mut x: i32; if true { x = 5; } else { x = 6; } return x; }\n");
-    h::expect_ok("address of uninitialized buffer is not a read", "extern \"C\" { fn memset(p: *mut char, c: i32, n: usize) i32; }\nfn main() i32 { let mut buf: [char; 8]; unsafe memset(&mut buf[0], 0, 8); return 0; }\n");
+    h::expect_ok(
+        "initialized on every branch before read",
+        "fn main() i32 { let mut x: i32; if true { x = 5; } else { x = 6; } return x; }\n",
+    );
+    h::expect_ok(
+        "address of uninitialized buffer is not a read",
+        "extern \"C\" { fn memset(p: *mut char, c: i32, n: usize) i32; }\nfn main() i32 { let mut buf: [char; 8]; unsafe memset(&mut buf[0], 0, 8); return 0; }\n",
+    );
     h::expect_err_msg("let mismatch", "fn main() i32 { let b: bool = 1; }\n", "mismatched types");
-    h::expect_err_msg("float literal not assignable to int", "fn main() i32 { let i: i32 = 0.0; }\n", "mismatched types");
-    h::expect_ok("f32 is Eq/Ord/Hash via total order", "fn needs<T: Eq>(x: T) bool { return true; }\nfn ord<T: Ord>(x: T) bool { return true; }\nfn h<T: Hash>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) && ord::<f32>(0.0) && h::<f32>(0.0) { return 1; } return 0; }\n");
-    h::expect_err_msg("c64 is not Ord", "fn ord<T: Ord>(x: T) bool { return true; }\nfn main() i32 { if ord::<c64>(0.0 as c64) { return 1; } return 0; }\n", "does not satisfy bound 'Ord'");
+    h::expect_err_msg(
+        "float literal not assignable to int",
+        "fn main() i32 { let i: i32 = 0.0; }\n",
+        "mismatched types",
+    );
+    h::expect_ok(
+        "f32 is Eq/Ord/Hash via total order",
+        "fn needs<T: Eq>(x: T) bool { return true; }\nfn ord<T: Ord>(x: T) bool { return true; }\nfn h<T: Hash>(x: T) bool { return true; }\nfn main() i32 { if needs::<f32>(0.0) && ord::<f32>(0.0) && h::<f32>(0.0) { return 1; } return 0; }\n",
+    );
+    h::expect_err_msg(
+        "c64 is not Ord",
+        "fn ord<T: Ord>(x: T) bool { return true; }\nfn main() i32 { if ord::<c64>(0.0 as c64) { return 1; } return 0; }\n",
+        "does not satisfy bound 'Ord'",
+    );
     h::expect_err_msg("non-literal char not assignable to u8", "fn f(c: char) u8 { return c; }\n", "mismatched types");
     h::expect_err_msg("argument type", "fn g(a: bool) void {}\nfn main() i32 { g(1); }\n", "mismatched types");
     h::expect_err_msg("argument count", "fn g(a: i32) void {}\nfn main() i32 { g(1, 2); }\n", "expected 1 argument");
-    h::expect_err_msg("arithmetic operator without method", "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let b = P { x: 2 }; let c = a + b; return 0; }\n", "has no 'add' method");
-    h::expect_err_msg("index operator without method", "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; return a[0]; }\n", "has no 'index' method");
-    h::expect_err_msg("? in a non-Option/Result function", "fn f() i32 { let o = Option::<i32>::some(1); let v = o?; return v; }\n", "requires the function to return an Option");
-    h::expect_err_msg("? on a non-Option/Result operand", "fn f() Option<i32> { let x = 5; let v = x?; return Option::<i32>::some(v); }\n", "requires an Option or Result operand");
-    h::expect_err_msg("unknown field", "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; p.y; }\n", "no field or method 'y'");
-    h::expect_err_msg("unknown str field", "fn f(s: str) i32 { return s.bogus as i32; }\n", "no field or method 'bogus'");
-    h::expect_err_msg("private field read outside", "struct S { v: i32, }\nfn f(s: S) i32 { return s.v; }\n", "field 'v' is private");
-    h::expect_err_msg("private field init outside", "struct S { v: i32, }\nfn main() i32 { let s: S = S { v: 1, }; return 0; }\n", "field 'v' is private");
-    h::expect_err_msg("private field of another struct inside extend", "struct A { v: i32, }\nstruct B {}\nextend B { fn peek(a: A) i32 { return a.v; } }\n", "field 'v' is private");
+    h::expect_err_msg(
+        "arithmetic operator without method",
+        "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let b = P { x: 2 }; let c = a + b; return 0; }\n",
+        "has no 'add' method",
+    );
+    h::expect_err_msg(
+        "index operator without method",
+        "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; return a[0]; }\n",
+        "has no 'index' method",
+    );
+    h::expect_err_msg(
+        "? in a non-Option/Result function",
+        "fn f() i32 { let o = Option::<i32>::some(1); let v = o?; return v; }\n",
+        "requires the function to return an Option",
+    );
+    h::expect_err_msg(
+        "? on a non-Option/Result operand",
+        "fn f() Option<i32> { let x = 5; let v = x?; return Option::<i32>::some(v); }\n",
+        "requires an Option or Result operand",
+    );
+    h::expect_err_msg(
+        "unknown field",
+        "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { x: 1, }; p.y; }\n",
+        "no field or method 'y'",
+    );
+    h::expect_err_msg(
+        "unknown str field",
+        "fn f(s: str) i32 { return s.bogus as i32; }\n",
+        "no field or method 'bogus'",
+    );
+    h::expect_err_msg(
+        "private field read outside",
+        "struct S { v: i32, }\nfn f(s: S) i32 { return s.v; }\n",
+        "field 'v' is private",
+    );
+    h::expect_err_msg(
+        "private field init outside",
+        "struct S { v: i32, }\nfn main() i32 { let s: S = S { v: 1, }; return 0; }\n",
+        "field 'v' is private",
+    );
+    h::expect_err_msg(
+        "private field of another struct inside extend",
+        "struct A { v: i32, }\nstruct B {}\nextend B { fn peek(a: A) i32 { return a.v; } }\n",
+        "field 'v' is private",
+    );
     h::expect_err_msg("non-bool condition", "fn main() i32 { if (1) { } }\n", "must be 'bool'");
     h::expect_err_msg("assign immutable", "fn main() i32 { let x: i32 = 1; x = 2; }\n", "cannot assign");
-    h::expect_err_msg("assign immutable match binding", "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(x) => { x = 2; x; }, None => { 0; }, }; }\n", "cannot assign");
-    h::expect_ok("mut match binding is assignable", "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(mut x) => { x = 2; x; }, None => { 0; }, }; }\n");
-    h::expect_err_msg("owning-type let still not reassignable", "struct Buf { pub p: *mut u8, }\nfn f(b: Buf, c: Buf) { let x: Buf = b; x = c; }\n", "cannot assign");
-    h::expect_err_msg("&mut self on immutable let rejected", "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\nfn f(b: Buf) { let x: Buf = b; x.clear(); }\n", "cannot call a '&mut self' method on an immutable binding");
-    h::expect_ok("&mut self on let mut allowed", "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\nfn f(b: Buf) { let mut x: Buf = b; x.clear(); }\n");
-    h::expect_ok("&mut self through &mut param", "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\nfn f(b: &mut Buf) { b.clear(); }\n");
-    h::expect_err_msg("&mut of immutable binding rejected", "fn use_p(p: &mut i32) {}\nfn f() { let x: i32 = 1; use_p(&mut x); }\n", "cannot take '&mut'");
+    h::expect_err_msg(
+        "assign immutable match binding",
+        "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(x) => { x = 2; x; }, None => { 0; }, }; }\n",
+        "cannot assign",
+    );
+    h::expect_ok(
+        "mut match binding is assignable",
+        "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(mut x) => { x = 2; x; }, None => { 0; }, }; }\n",
+    );
+    h::expect_err_msg(
+        "owning-type let still not reassignable",
+        "struct Buf { pub p: *mut u8, }\nfn f(b: Buf, c: Buf) { let x: Buf = b; x = c; }\n",
+        "cannot assign",
+    );
+    h::expect_err_msg(
+        "&mut self on immutable let rejected",
+        "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\nfn f(b: Buf) { let x: Buf = b; x.clear(); }\n",
+        "cannot call a '&mut self' method on an immutable binding",
+    );
+    h::expect_ok(
+        "&mut self on let mut allowed",
+        "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\nfn f(b: Buf) { let mut x: Buf = b; x.clear(); }\n",
+    );
+    h::expect_ok(
+        "&mut self through &mut param",
+        "struct Buf { pub p: *mut u8, }\nextend Buf { fn clear(self: &mut Buf) { self.p = null; } }\nfn f(b: &mut Buf) { b.clear(); }\n",
+    );
+    h::expect_err_msg(
+        "&mut of immutable binding rejected",
+        "fn use_p(p: &mut i32) {}\nfn f() { let x: i32 = 1; use_p(&mut x); }\n",
+        "cannot take '&mut'",
+    );
     h::expect_ok("&mut of let mut allowed", "fn use_p(p: &mut i32) {}\nfn f() { let mut x: i32 = 1; use_p(&mut x); }\n");
-    h::expect_err_msg("return &local", "fn bad() *const i32 { let x: i32 = 10; return &x; }\n", "does not outlive the call");
-    h::expect_err_msg("return &mut local", "fn bad() *mut i32 { let mut x: i32 = 10; return &mut x; }\n", "does not outlive the call");
+    h::expect_err_msg(
+        "return &local",
+        "fn bad() *const i32 { let x: i32 = 10; return &x; }\n",
+        "does not outlive the call",
+    );
+    h::expect_err_msg(
+        "return &mut local",
+        "fn bad() *mut i32 { let mut x: i32 = 10; return &mut x; }\n",
+        "does not outlive the call",
+    );
     h::expect_err_msg("return &param", "fn bad(x: i32) *const i32 { return &x; }\n", "function parameter");
-    h::expect_err_msg("return (&local) as usize", "fn bad() usize { let x: i32 = 10; return ((&x) as usize); }\n", "does not outlive the call");
+    h::expect_err_msg(
+        "return (&local) as usize",
+        "fn bad() usize { let x: i32 = 10; return ((&x) as usize); }\n",
+        "does not outlive the call",
+    );
     h::expect_ok("return &global const is fine", "const G: i32 = 7;\nfn ok() &i32 { return &G; }\n");
     h::expect_ok("return a deref'd pointer param is fine", "fn ok(p: &i32) i32 { return *p; }\n");
-    h::expect_ok("address of a field through a reference param is fine", "struct P { pub x: i32 }\nfn ok(p: &P) &i32 { return &p.x; }\n");
+    h::expect_ok(
+        "address of a field through a reference param is fine",
+        "struct P { pub x: i32 }\nfn ok(p: &P) &i32 { return &p.x; }\n",
+    );
     h::expect_err_msg("return mismatch", "fn f() i32 { return true; }\n", "mismatched types");
     h::expect_err_msg("index non-array", "fn main() i32 { let x: i32 = 1; let y: i32 = x[0]; }\n", "cannot index");
-    h::expect_err_msg("unknown init field", "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { y: 1, }; }\n", "no field 'y'");
-    h::expect_err_msg("pointer plus pointer", "fn f(a: *i32, b: *i32) void { let c = unsafe (a + b); }\n", "invalid pointer arithmetic");
-    h::expect_err_msg("non-integer pointer offset", "fn f(p: *i32, y: f64) void { let q = unsafe (p + y); }\n", "pointer arithmetic requires an integer offset");
-    h::expect_err_msg("const pointer does not coerce to reference", "fn take(r: &i32) i32 { return *r; }\nfn give(p: *const i32) i32 { return take(p); }\n", "mismatched types");
+    h::expect_err_msg(
+        "unknown init field",
+        "struct P { pub x: i32, }\nfn main() i32 { let p: P = P { y: 1, }; }\n",
+        "no field 'y'",
+    );
+    h::expect_err_msg(
+        "pointer plus pointer",
+        "fn f(a: *i32, b: *i32) void { let c = unsafe (a + b); }\n",
+        "invalid pointer arithmetic",
+    );
+    h::expect_err_msg(
+        "non-integer pointer offset",
+        "fn f(p: *i32, y: f64) void { let q = unsafe (p + y); }\n",
+        "pointer arithmetic requires an integer offset",
+    );
+    h::expect_err_msg(
+        "const pointer does not coerce to reference",
+        "fn take(r: &i32) i32 { return *r; }\nfn give(p: *const i32) i32 { return take(p); }\n",
+        "mismatched types",
+    );
     h::expect_err_msg("main returning void", "fn main() void { }\n", "'main' must be declared 'fn main() i32'");
     h::expect_err_msg("main with no return type", "fn main() { return; }\n", "'main' must be declared 'fn main() i32'");
-    h::expect_err_msg("main with a wrong return type", "fn main() bool { return true; }\n", "'main' must be declared 'fn main() i32'");
+    h::expect_err_msg(
+        "main with a wrong return type",
+        "fn main() bool { return true; }\n",
+        "'main' must be declared 'fn main() i32'",
+    );
     h::expect_ok("main with argv vector", "fn main(argv: Vector<str>) i32 { return argv.len() as i32; }\n");
-    h::expect_err_msg("main with raw argv", "fn main(argc: i32, argv: *mut *mut char) i32 { return argc; }\n", "fn main(argv: Vector<str>) i32");
-    h::expect_err_msg("main with bad parameters", "fn main(x: i32) i32 { return 0; }\n", "'main' must be declared 'fn main() i32' or 'fn main(argv: Vector<str>) i32'");
+    h::expect_err_msg(
+        "main with raw argv",
+        "fn main(argc: i32, argv: *mut *mut char) i32 { return argc; }\n",
+        "fn main(argv: Vector<str>) i32",
+    );
+    h::expect_err_msg(
+        "main with bad parameters",
+        "fn main(x: i32) i32 { return 0; }\n",
+        "'main' must be declared 'fn main() i32' or 'fn main(argv: Vector<str>) i32'",
+    );
 }
 
 @test
 fn interface_bounds() {
-    h::expect_ok("bound satisfied + method dispatch", "interface Writer { fn write(self: *mut Self, n: i32) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self, n: i32) i32 { return n; } }\nfn use_w<T: Writer>(w: &mut T, n: i32) i32 { return w.write(n); }\nfn main() i32 { let mut f = File { count: 0 }; return use_w(&mut f, 1); }\n");
-    h::expect_ok("where clause + multi-bound satisfied", "interface A { fn a(self: *mut Self) i32; }\ninterface B { fn b(self: *mut Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { fn a(self: *mut Self) i32 { return unsafe self.v; } }\nextend S as B { fn b(self: *mut Self) i32 { return unsafe self.v; } }\nfn both<T>(x: &mut T) i32 where T: A + B { return x.a() + x.b(); }\nfn main() i32 { let mut s = S { v: 1 }; return both(&mut s); }\n");
-    h::expect_ok("conditional extension satisfied", "interface Free { fn free(self: *mut Self) i32; }\nstruct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return unsafe self.id; } }\nstruct Box<T> { pub inner: T }\nextend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\nfn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\nfn main() i32 { let mut b = Box::<Res> { inner: Res { id: 1 } }; return dispose(&mut b); }\n");
-    h::expect_err_msg("bound not satisfied (turbofish)", "interface Writer { fn write(self: *mut Self, n: i32) i32; }\nstruct Plain { pub x: i32 }\nfn use_w<T: Writer>(w: &mut T, n: i32) i32 { return w.write(n); }\nfn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n", "does not satisfy bound 'Writer'");
-    h::expect_err_msg("extend missing a required method", "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\nfn main() i32 { return 0; }\n", "missing method 'flush'");
-    h::expect_err_msg("where clause not satisfied", "interface Writer { fn write(self: *mut Self, n: i32) i32; }\nstruct Plain { pub x: i32 }\nfn use_w<T>(w: &mut T, n: i32) i32 where T: Writer { return w.write(n); }\nfn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n", "does not satisfy"); // selfhost worded: "does not satisfy a where-clause bound"
-    h::expect_err_msg("conditional extension: inner type lacks the bound", "interface Free { fn free(self: *mut Self) i32; }\nstruct Plain { pub n: i32 }\nstruct Box<T> { pub inner: T }\nextend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\nfn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\nfn main() i32 { let mut b = Box::<Plain> { inner: Plain { n: 1 } }; return dispose(&mut b); }\n", "does not satisfy bound 'Free'");
-    h::expect_err_msg("method not declared by any bound", "interface Writer { fn write(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\nfn f<T: Writer>(w: &mut T) i32 { return w.nope(); }\nfn main() i32 { let mut x = File { count: 0 }; return f(&mut x); }\n", "no field or method 'nope'");
-    h::expect_err_msg("conditional prelude associated default rejects unsatisfied key/value", "struct B { pub x: i32 }\nfn main() i32 { let xxx: Map<B, B> = Map::<B, B>::default(); return 0; }\n", "unsatisfied interface bounds");
-    h::expect_err_msg("conditional prelude interface associated default rejects expected type", "struct B { pub x: i32 }\nfn main() i32 { let xxx: Map<B, B> = Default::default(); return 0; }\n", "unsatisfied interface bounds");
-    h::expect_err_msg("conditional inherent method rejects unsatisfied receiver", "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn marked(self: &Self) i32 { return self.v.mark(); } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; return w.marked(); }\n", "unsatisfied interface bounds");
-    h::expect_err_msg("conditional associated method rejects unsatisfied target", "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn make(v: T) Wrap<T> { return Wrap::<T> { v: v }; } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain>::make(Plain { n: 1 }); return 0; }\n", "unsatisfied interface bounds");
-    h::expect_err_msg("conditional operator method rejects unsatisfied operands", "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn add(self: &Self, other: &Self) Wrap<T> { return Wrap::<T> { v: self.v }; } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; let z = w + w; return 0; }\n", "unsatisfied interface bounds");
-    h::expect_err_msg("conditional index method rejects unsatisfied receiver", "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn index(self: &Self, i: usize) i32 { return self.v.mark(); } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; return w[0]; }\n", "unsatisfied interface bounds");
-    h::expect_err_msg("interface method return signature mismatch", "interface I { fn f(self: &Self) i32; }\nstruct S { pub x: i32 }\nextend S as I { fn f(self: &Self) bool { return true; } }\nfn main() i32 { return 0; }\n", "does not match interface signature");
-    h::expect_err_msg("interface method arity signature mismatch", "interface I { fn f(self: &Self, x: i32) i32; }\nstruct S { pub x: i32 }\nextend S as I { fn f(self: &Self) i32 { return 0; } }\nfn main() i32 { return 0; }\n", "does not match interface signature");
-    h::expect_err_msg("subinterface extend requires explicit superinterface satisfaction", "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\ninterface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\nstruct S { pub x: i32 }\nextend S as OrdLike {\n  fn eq(self: &Self, other: &Self) bool { return self.x == other.x; }\n  fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; }\n}\nfn main() i32 { return 0; }\n", "required superinterface");
-    h::expect_ok("superinterface method visible through subinterface bound", "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\ninterface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\nfn same<T: OrdLike>(x: &T) bool { return x.eq(x); }\nstruct S { pub x: i32 }\nextend S as EqLike { fn eq(self: &Self, other: &Self) bool { return self.x == other.x; } }\nextend S as OrdLike { fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; } }\nfn main() i32 { let s = S { x: 1 }; if same(&s) { return 0; } return 1; }\n");
-    h::expect_ok("generic interface argument substituted in bound method return", "interface Getter<U> { fn get(self: &Self) U; }\nstruct S { pub x: i32 }\nextend S as Getter<i32> { fn get(self: &Self) i32 { return self.x; } }\nfn need<T: Getter<i32>>(x: &T) i32 { return x.get(); }\nfn main() i32 { let s = S { x: 7 }; return need(&s); }\n");
+    h::expect_ok(
+        "bound satisfied + method dispatch",
+        "interface Writer { fn write(self: *mut Self, n: i32) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self, n: i32) i32 { return n; } }\nfn use_w<T: Writer>(w: &mut T, n: i32) i32 { return w.write(n); }\nfn main() i32 { let mut f = File { count: 0 }; return use_w(&mut f, 1); }\n",
+    );
+    h::expect_ok(
+        "where clause + multi-bound satisfied",
+        "interface A { fn a(self: *mut Self) i32; }\ninterface B { fn b(self: *mut Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { fn a(self: *mut Self) i32 { return unsafe self.v; } }\nextend S as B { fn b(self: *mut Self) i32 { return unsafe self.v; } }\nfn both<T>(x: &mut T) i32 where T: A + B { return x.a() + x.b(); }\nfn main() i32 { let mut s = S { v: 1 }; return both(&mut s); }\n",
+    );
+    h::expect_ok(
+        "conditional extension satisfied",
+        "interface Free { fn free(self: *mut Self) i32; }\nstruct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return unsafe self.id; } }\nstruct Box<T> { pub inner: T }\nextend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\nfn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\nfn main() i32 { let mut b = Box::<Res> { inner: Res { id: 1 } }; return dispose(&mut b); }\n",
+    );
+    h::expect_err_msg(
+        "bound not satisfied (turbofish)",
+        "interface Writer { fn write(self: *mut Self, n: i32) i32; }\nstruct Plain { pub x: i32 }\nfn use_w<T: Writer>(w: &mut T, n: i32) i32 { return w.write(n); }\nfn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n",
+        "does not satisfy bound 'Writer'",
+    );
+    h::expect_err_msg(
+        "extend missing a required method",
+        "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\nfn main() i32 { return 0; }\n",
+        "missing method 'flush'",
+    );
+    h::expect_err_msg(
+        "where clause not satisfied",
+        "interface Writer { fn write(self: *mut Self, n: i32) i32; }\nstruct Plain { pub x: i32 }\nfn use_w<T>(w: &mut T, n: i32) i32 where T: Writer { return w.write(n); }\nfn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n",
+        "does not satisfy",
+    ); // selfhost worded: "does not satisfy a where-clause bound"
+    h::expect_err_msg(
+        "conditional extension: inner type lacks the bound",
+        "interface Free { fn free(self: *mut Self) i32; }\nstruct Plain { pub n: i32 }\nstruct Box<T> { pub inner: T }\nextend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\nfn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\nfn main() i32 { let mut b = Box::<Plain> { inner: Plain { n: 1 } }; return dispose(&mut b); }\n",
+        "does not satisfy bound 'Free'",
+    );
+    h::expect_err_msg(
+        "method not declared by any bound",
+        "interface Writer { fn write(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\nfn f<T: Writer>(w: &mut T) i32 { return w.nope(); }\nfn main() i32 { let mut x = File { count: 0 }; return f(&mut x); }\n",
+        "no field or method 'nope'",
+    );
+    h::expect_err_msg(
+        "conditional prelude associated default rejects unsatisfied key/value",
+        "struct B { pub x: i32 }\nfn main() i32 { let xxx: Map<B, B> = Map::<B, B>::default(); return 0; }\n",
+        "unsatisfied interface bounds",
+    );
+    h::expect_err_msg(
+        "conditional prelude interface associated default rejects expected type",
+        "struct B { pub x: i32 }\nfn main() i32 { let xxx: Map<B, B> = Default::default(); return 0; }\n",
+        "unsatisfied interface bounds",
+    );
+    h::expect_err_msg(
+        "conditional inherent method rejects unsatisfied receiver",
+        "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn marked(self: &Self) i32 { return self.v.mark(); } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; return w.marked(); }\n",
+        "unsatisfied interface bounds",
+    );
+    h::expect_err_msg(
+        "conditional associated method rejects unsatisfied target",
+        "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn make(v: T) Wrap<T> { return Wrap::<T> { v: v }; } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain>::make(Plain { n: 1 }); return 0; }\n",
+        "unsatisfied interface bounds",
+    );
+    h::expect_err_msg(
+        "conditional operator method rejects unsatisfied operands",
+        "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn add(self: &Self, other: &Self) Wrap<T> { return Wrap::<T> { v: self.v }; } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; let z = w + w; return 0; }\n",
+        "unsatisfied interface bounds",
+    );
+    h::expect_err_msg(
+        "conditional index method rejects unsatisfied receiver",
+        "interface Marker { fn mark(self: &Self) i32; }\nstruct Wrap<T> { pub v: T }\nextend<T: Marker> Wrap<T> { fn index(self: &Self, i: usize) i32 { return self.v.mark(); } }\nstruct Plain { pub n: i32 }\nfn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 1 } }; return w[0]; }\n",
+        "unsatisfied interface bounds",
+    );
+    h::expect_err_msg(
+        "interface method return signature mismatch",
+        "interface I { fn f(self: &Self) i32; }\nstruct S { pub x: i32 }\nextend S as I { fn f(self: &Self) bool { return true; } }\nfn main() i32 { return 0; }\n",
+        "does not match interface signature",
+    );
+    h::expect_err_msg(
+        "interface method arity signature mismatch",
+        "interface I { fn f(self: &Self, x: i32) i32; }\nstruct S { pub x: i32 }\nextend S as I { fn f(self: &Self) i32 { return 0; } }\nfn main() i32 { return 0; }\n",
+        "does not match interface signature",
+    );
+    h::expect_err_msg(
+        "subinterface extend requires explicit superinterface satisfaction",
+        "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\ninterface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\nstruct S { pub x: i32 }\nextend S as OrdLike {\n  fn eq(self: &Self, other: &Self) bool { return self.x == other.x; }\n  fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; }\n}\nfn main() i32 { return 0; }\n",
+        "required superinterface",
+    );
+    h::expect_ok(
+        "superinterface method visible through subinterface bound",
+        "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\ninterface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\nfn same<T: OrdLike>(x: &T) bool { return x.eq(x); }\nstruct S { pub x: i32 }\nextend S as EqLike { fn eq(self: &Self, other: &Self) bool { return self.x == other.x; } }\nextend S as OrdLike { fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; } }\nfn main() i32 { let s = S { x: 1 }; if same(&s) { return 0; } return 1; }\n",
+    );
+    h::expect_ok(
+        "generic interface argument substituted in bound method return",
+        "interface Getter<U> { fn get(self: &Self) U; }\nstruct S { pub x: i32 }\nextend S as Getter<i32> { fn get(self: &Self) i32 { return self.x; } }\nfn need<T: Getter<i32>>(x: &T) i32 { return x.get(); }\nfn main() i32 { let s = S { x: 7 }; return need(&s); }\n",
+    );
 }
 
 @test
 fn slices() {
     h::expect_ok("slice len + index read", "fn f(s: []i32) i32 { let n: usize = s.len; return s[0]; }\n");
     h::expect_ok("slice method resolves", "fn f(s: []i32) usize { return s.len(); }\n");
-    h::expect_ok("array coerces to []T", "fn take(s: []i32) i32 { return s[0]; }\nfn main() i32 { let a: [i32; 2] = [1, 2]; return take(a); }\n");
-    h::expect_ok("mutable array coerces to []mut T", "fn fill(s: []mut i32) { s[0] = 9; }\nfn main() i32 { let mut a: [i32; 2] = [0, 0]; fill(a); return a[0]; }\n");
+    h::expect_ok(
+        "array coerces to []T",
+        "fn take(s: []i32) i32 { return s[0]; }\nfn main() i32 { let a: [i32; 2] = [1, 2]; return take(a); }\n",
+    );
+    h::expect_ok(
+        "mutable array coerces to []mut T",
+        "fn fill(s: []mut i32) { s[0] = 9; }\nfn main() i32 { let mut a: [i32; 2] = [0, 0]; fill(a); return a[0]; }\n",
+    );
     h::expect_ok("[]mut element is assignable", "fn fill(s: []mut i32) { s[0] = 9; }\n");
     h::expect_err_msg("write to read-only slice", "fn f(s: []i32) { s[0] = 1; }\n", "cannot assign");
-    h::expect_err_msg("immutable array not []mut", "fn take(s: []mut i32) {}\nfn main() i32 { let a: [i32; 2] = [1, 2]; take(a); return 0; }\n", "mismatched types");
+    h::expect_err_msg(
+        "immutable array not []mut",
+        "fn take(s: []mut i32) {}\nfn main() i32 { let a: [i32; 2] = [1, 2]; take(a); return 0; }\n",
+        "mismatched types",
+    );
 }
 
 @test
 fn ffi() {
-    h::expect_ok("variadic call with extra args", "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { let f: char = '%'; unsafe printf(&f, 1, 2, 3); return 0; }\n");
-    h::expect_ok("variadic call with no extra args", "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { let f: char = '%'; unsafe printf(&f); return 0; }\n");
-    h::expect_err_msg("variadic call below fixed arity", "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { unsafe printf(); return 0; }\n", "at least 1 argument");
-    h::expect_ok("defined variadic ok", "fn s(n: i32, ...) i32 { let mut ap: va_list; va_start(ap, n); let v: i32 = va_arg(ap, i32); va_end(ap); return v; }\n");
+    h::expect_ok(
+        "variadic call with extra args",
+        "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { let f: char = '%'; unsafe printf(&f, 1, 2, 3); return 0; }\n",
+    );
+    h::expect_ok(
+        "variadic call with no extra args",
+        "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { let f: char = '%'; unsafe printf(&f); return 0; }\n",
+    );
+    h::expect_err_msg(
+        "variadic call below fixed arity",
+        "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { unsafe printf(); return 0; }\n",
+        "at least 1 argument",
+    );
+    h::expect_ok(
+        "defined variadic ok",
+        "fn s(n: i32, ...) i32 { let mut ap: va_list; va_start(ap, n); let v: i32 = va_arg(ap, i32); va_end(ap); return v; }\n",
+    );
     h::expect_err_msg("variadic needs a fixed param", "fn f(...) i32 { return 0; }\n", "at least one fixed parameter");
     h::expect_err_msg("va_arg needs a va_list", "fn f(n: i32) i32 { return va_arg(n, i32); }\n", "expected a 'va_list'");
     h::expect_ok("real literal initializes complex", "fn main() i32 { let z: c64 = 3.0; let w: c32 = 1; return 0; }\n");
-    h::expect_ok("complex arithmetic + real cast in", "fn main() i32 { let a: c64 = 2.0; let b: c64 = a + 1.0; let c: c64 = (3.0 as c64) * b; return 0; }\n");
-    h::expect_ok("c64 <-> c32 casts", "fn main() i32 { let a: c64 = 1.0; let b: c32 = a as c32; let c: c64 = b as c64; return 0; }\n");
-    h::expect_err_msg("complex to int cast rejected", "fn main() i32 { let z: c64 = 1.0; return z as i32; }\n", "invalid cast");
-    h::expect_ok("string literal -> *const char param", "extern \"C\" { fn puts(s: *const char) i32; }\nfn main() i32 { unsafe puts(\"hi\"); return 0; }\n");
-    h::expect_ok("string literal -> *const u8 param", "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return unsafe f(\"hi\"); }\n");
-    h::expect_ok("string literal as %s vararg", "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { unsafe printf(\"%s\", \"hi\"); return 0; }\n");
-    h::expect_ok("string literal stays str by default", "fn main() i32 { let s: str = \"hi\"; return s.len() as i32; }\n");
-    h::expect_err_msg("string literal not a mutable pointer", "extern \"C\" { fn f(s: *mut char) i32; }\nfn main() i32 { return unsafe f(\"hi\"); }\n", "mismatched types");
+    h::expect_ok(
+        "complex arithmetic + real cast in",
+        "fn main() i32 { let a: c64 = 2.0; let b: c64 = a + 1.0; let c: c64 = (3.0 as c64) * b; return 0; }\n",
+    );
+    h::expect_ok(
+        "c64 <-> c32 casts",
+        "fn main() i32 { let a: c64 = 1.0; let b: c32 = a as c32; let c: c64 = b as c64; return 0; }\n",
+    );
+    h::expect_err_msg(
+        "complex to int cast rejected",
+        "fn main() i32 { let z: c64 = 1.0; return z as i32; }\n",
+        "invalid cast",
+    );
+    h::expect_ok(
+        "string literal -> *const char param",
+        "extern \"C\" { fn puts(s: *const char) i32; }\nfn main() i32 { unsafe puts(\"hi\"); return 0; }\n",
+    );
+    h::expect_ok(
+        "string literal -> *const u8 param",
+        "extern \"C\" { fn f(s: *const u8) i32; }\nfn main() i32 { return unsafe f(\"hi\"); }\n",
+    );
+    h::expect_ok(
+        "string literal as %s vararg",
+        "extern \"C\" { fn printf(fmt: *const char, ...) i32; }\nfn main() i32 { unsafe printf(\"%s\", \"hi\"); return 0; }\n",
+    );
+    h::expect_ok(
+        "string literal stays str by default",
+        "fn main() i32 { let s: str = \"hi\"; return s.len() as i32; }\n",
+    );
+    h::expect_err_msg(
+        "string literal not a mutable pointer",
+        "extern \"C\" { fn f(s: *mut char) i32; }\nfn main() i32 { return unsafe f(\"hi\"); }\n",
+        "mismatched types",
+    );
 }
 
 @test
 fn static_assert() {
     h::expect_ok("static_assert item", "static_assert(1 == 1, \"ok\");\nfn main() i32 { return 0; }\n");
     h::expect_ok("static_assert no message", "fn main() i32 { static_assert(2 > 1); return 0; }\n");
-    h::expect_ok("static_assert over sizeof", "struct S { a: i64, }\nstatic_assert(sizeof(S) == 8);\nfn main() i32 { return 0; }\n");
-    h::expect_err_msg("static_assert needs bool", "static_assert(5, \"nope\");\nfn main() i32 { return 0; }\n", "must be 'bool'");
-    h::expect_err_msg("static_assert message must be a literal", "fn main() i32 { let m: i32 = 0; static_assert(true, m); return 0; }\n", "string literal");
+    h::expect_ok(
+        "static_assert over sizeof",
+        "struct S { a: i64, }\nstatic_assert(sizeof(S) == 8);\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_err_msg(
+        "static_assert needs bool",
+        "static_assert(5, \"nope\");\nfn main() i32 { return 0; }\n",
+        "must be 'bool'",
+    );
+    h::expect_err_msg(
+        "static_assert message must be a literal",
+        "fn main() i32 { let m: i32 = 0; static_assert(true, m); return 0; }\n",
+        "string literal",
+    );
 }
 
 @test
 fn bug_regressions() {
-    h::expect_err_msg("op rhs type-checked", "struct A { pub x: i32 }\nextend A { fn add(self: &A, o: &A) A { return A { x: self.x + o.x }; } }\nfn main() i32 { let a = A { x: 1 }; let p = a + 5; return p.x; }\n", "mismatched types");
-    h::expect_err_msg("unbounded generic operator", "fn add2<T>(a: T, b: T) T { return a + b; }\nfn main() i32 { let n: i32 = add2::<i32>(1, 2); return n; }\n", "no 'add' method for this operator");
-    h::expect_err_msg("write through shared ref", "struct S { pub x: i32 }\nfn main() i32 { let s = S { x: 1 }; let mut r: &S = &s; r.x = 99; return s.x; }\n", "cannot assign");
-    h::expect_err_msg("escape of &local index", "fn dangle() &i32 { let a: [i32; 3] = [1, 2, 3]; return &a[1]; }\nfn main() i32 { return *dangle(); }\n", "does not outlive");
-    h::expect_ok("mut ref coerces to shared ref", "fn read(r: &i32) i32 { return *r; }\nfn main() i32 { let mut x = 5; return read(&mut x); }\n");
-    h::expect_err_msg("char over one byte", "fn main() i32 { let c = '\\u{1F600}'; return c as i32; }\n", "does not fit in 'char'");
-    h::expect_err_msg("oversized integer literal", "fn main() i32 { let x = 0x1FFFFFFFFFFFFFFFF; return 0; }\n", "too large to fit in a 64-bit integer");
+    h::expect_err_msg(
+        "op rhs type-checked",
+        "struct A { pub x: i32 }\nextend A { fn add(self: &A, o: &A) A { return A { x: self.x + o.x }; } }\nfn main() i32 { let a = A { x: 1 }; let p = a + 5; return p.x; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "unbounded generic operator",
+        "fn add2<T>(a: T, b: T) T { return a + b; }\nfn main() i32 { let n: i32 = add2::<i32>(1, 2); return n; }\n",
+        "no 'add' method for this operator",
+    );
+    h::expect_err_msg(
+        "write through shared ref",
+        "struct S { pub x: i32 }\nfn main() i32 { let s = S { x: 1 }; let mut r: &S = &s; r.x = 99; return s.x; }\n",
+        "cannot assign",
+    );
+    h::expect_err_msg(
+        "escape of &local index",
+        "fn dangle() &i32 { let a: [i32; 3] = [1, 2, 3]; return &a[1]; }\nfn main() i32 { return *dangle(); }\n",
+        "does not outlive",
+    );
+    h::expect_ok(
+        "mut ref coerces to shared ref",
+        "fn read(r: &i32) i32 { return *r; }\nfn main() i32 { let mut x = 5; return read(&mut x); }\n",
+    );
+    h::expect_err_msg(
+        "char over one byte",
+        "fn main() i32 { let c = '\\u{1F600}'; return c as i32; }\n",
+        "does not fit in 'char'",
+    );
+    h::expect_err_msg(
+        "oversized integer literal",
+        "fn main() i32 { let x = 0x1FFFFFFFFFFFFFFFF; return 0; }\n",
+        "too large to fit in a 64-bit integer",
+    );
     // NOTE(divergence): tests/typechecker_test.c expects this REJECTED, but that verdict is specific to the
     // C sc_compile package layout -- the standalone compiler (C and self-hosted) accepts `Wrap::<[i32;3]>`,
     // so the in-process harness cannot reproduce the interning-order rejection. Case omitted.
@@ -180,25 +551,67 @@ fn bug_regressions() {
 @test
 fn switch_exhaustiveness() {
     // selfhost worded exhaustiveness as "switch is not exhaustive: missing N variant" (counts, not named).
-    h::expect_err_msg("switch missing a variant", "enum E { A, B, C }\nfn f(e: E) i32 { return switch e { A => 1, B => 2 }; }\n", "not exhaustive");
-    h::expect_err_msg("literal payload does not cover its variant", "fn f(o: Option<i32>) i32 { return switch o { Some(5) => 1, None => 0 }; }\n", "not exhaustive");
-    h::expect_err_msg("guarded arm covers nothing", "fn f(o: Option<i32>) i32 { return switch o { Some(x) if x > 0 => x, None => 0 }; }\n", "not exhaustive");
-    h::expect_err_msg("int switch needs a catch-all", "fn f(n: i32) i32 { return switch n { 1 => 1, 2 => 2 }; }\n", "not exhaustive");
-    h::expect_err_msg("bool switch needs both literals", "fn f(b: bool) i32 { return switch b { true => 1 }; }\n", "not exhaustive");
-    h::expect_ok("all variants cover the enum", "enum E { A, B, C }\nfn f(e: E) i32 { return switch e { A => 1, B => 2, C => 3 }; }\n");
-    h::expect_ok("or-pattern covers per alternative", "enum E { A, B, C }\nfn f(e: E) i32 { return switch e { A | B => 1, C => 3 }; }\n");
-    h::expect_ok("payload binding covers its variant", "fn f(o: Option<i32>) i32 { return switch o { Some(x) => x, None => 0 }; }\n");
+    h::expect_err_msg(
+        "switch missing a variant",
+        "enum E { A, B, C }\nfn f(e: E) i32 { return switch e { A => 1, B => 2 }; }\n",
+        "not exhaustive",
+    );
+    h::expect_err_msg(
+        "literal payload does not cover its variant",
+        "fn f(o: Option<i32>) i32 { return switch o { Some(5) => 1, None => 0 }; }\n",
+        "not exhaustive",
+    );
+    h::expect_err_msg(
+        "guarded arm covers nothing",
+        "fn f(o: Option<i32>) i32 { return switch o { Some(x) if x > 0 => x, None => 0 }; }\n",
+        "not exhaustive",
+    );
+    h::expect_err_msg(
+        "int switch needs a catch-all",
+        "fn f(n: i32) i32 { return switch n { 1 => 1, 2 => 2 }; }\n",
+        "not exhaustive",
+    );
+    h::expect_err_msg(
+        "bool switch needs both literals",
+        "fn f(b: bool) i32 { return switch b { true => 1 }; }\n",
+        "not exhaustive",
+    );
+    h::expect_ok(
+        "all variants cover the enum",
+        "enum E { A, B, C }\nfn f(e: E) i32 { return switch e { A => 1, B => 2, C => 3 }; }\n",
+    );
+    h::expect_ok(
+        "or-pattern covers per alternative",
+        "enum E { A, B, C }\nfn f(e: E) i32 { return switch e { A | B => 1, C => 3 }; }\n",
+    );
+    h::expect_ok(
+        "payload binding covers its variant",
+        "fn f(o: Option<i32>) i32 { return switch o { Some(x) => x, None => 0 }; }\n",
+    );
     h::expect_ok("true and false cover bool", "fn f(b: bool) i32 { return switch b { true => 1, false => 0 }; }\n");
     h::expect_ok("binding arm is a catch-all", "fn f(n: i32) i32 { return switch n { 0..10 => 1, x => x }; }\n");
 }
 
 @test
 fn never_type() {
-    h::expect_ok("panicking switch arm unifies", "fn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => panic(\"none\") }; }\n");
-    h::expect_ok("panicking else branch unifies", "fn f(n: i32) i32 { let d = if n > 0 { n; } else { panic(\"neg\"); }; return d; }\n");
+    h::expect_ok(
+        "panicking switch arm unifies",
+        "fn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => panic(\"none\") }; }\n",
+    );
+    h::expect_ok(
+        "panicking else branch unifies",
+        "fn f(n: i32) i32 { let d = if n > 0 { n; } else { panic(\"neg\"); }; return d; }\n",
+    );
     h::expect_ok("return panic fits any return type", "fn f() i32 { return panic(\"boom\"); }\n");
-    h::expect_ok("user noreturn fn also diverges", "extern \"C\" { fn abort() void; }\n@c.noreturn\nfn die() void { unsafe abort(); }\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => die() }; }\n");
-    h::expect_err_msg("non-noreturn void arm still mismatches", "fn nop() void {}\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => nop() }; }\n", "mismatched types");
+    h::expect_ok(
+        "user noreturn fn also diverges",
+        "extern \"C\" { fn abort() void; }\n@c.noreturn\nfn die() void { unsafe abort(); }\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => die() }; }\n",
+    );
+    h::expect_err_msg(
+        "non-noreturn void arm still mismatches",
+        "fn nop() void {}\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => nop() }; }\n",
+        "mismatched types",
+    );
 }
 
 @test
@@ -206,160 +619,504 @@ fn tuples() {
     h::expect_ok("tuple literal and access", "fn f() i32 { let t = (1, true); return t.0 + (t.1 as i32); }\n");
     h::expect_ok("tuple destructure", "fn f() i32 { let (a, b) = (1, 2); return a + b; }\n");
     h::expect_ok("tuple type annotation adapts literals", "fn f() u8 { let t: (u8, u8) = (1, 2); return t.0 + t.1; }\n");
-    h::expect_ok("tuple param and generic arg", "fn g(p: (i32, bool)) i32 { return p.0; }\nfn f() i32 { let mut v = Vector::<(i32, bool)>::new(); v.free(); return g((5, false)); }\n");
-    h::expect_err_msg("tuple arity capped at 4", "fn f() i32 { let t = (1, 2, 3, 4, 5); return 0; }\n", "tuple arity is limited to 4");
-    h::expect_err_msg("tuple index out of range", "fn f() i32 { let t = (1, 2); return t.9; }\n", "no field or method '9'");
-    h::expect_err_msg("tuple binding needs a tuple or multi-return", "fn f() i32 { let (a, b) = 5; return a + b; }\n", "tuple binding requires");
+    h::expect_ok(
+        "tuple param and generic arg",
+        "fn g(p: (i32, bool)) i32 { return p.0; }\nfn f() i32 { let mut v = Vector::<(i32, bool)>::new(); v.free(); return g((5, false)); }\n",
+    );
+    h::expect_err_msg(
+        "tuple arity capped at 4",
+        "fn f() i32 { let t = (1, 2, 3, 4, 5); return 0; }\n",
+        "tuple arity is limited to 4",
+    );
+    h::expect_err_msg(
+        "tuple index out of range",
+        "fn f() i32 { let t = (1, 2); return t.9; }\n",
+        "no field or method '9'",
+    );
+    h::expect_err_msg(
+        "tuple binding needs a tuple or multi-return",
+        "fn f() i32 { let (a, b) = 5; return a + b; }\n",
+        "tuple binding requires",
+    );
 }
 
 @test
 fn unsafe_enforcement() {
-    h::expect_err_msg("extern call needs unsafe", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { exit(0); return 0; }\n", "calling an extern \"C\" function requires an 'unsafe' block");
-    h::expect_err_msg("raw deref needs unsafe", "fn f(p: *i32) i32 { return *p; }\n", "dereferencing a raw pointer requires an 'unsafe' block");
-    h::expect_err_msg("raw index needs unsafe", "fn f(p: *i32) i32 { return p[1]; }\n", "indexing a raw pointer requires an 'unsafe' block");
-    h::expect_err_msg("pointer arithmetic needs unsafe", "fn f(p: *i32) *i32 { return p + 1; }\n", "raw pointer arithmetic requires an 'unsafe' block");
-    h::expect_err_msg("field through raw pointer needs unsafe", "struct S { pub v: i32 }\nfn f(p: *mut S) i32 { return p.v; }\n", "accessing a field through a raw pointer requires an 'unsafe' block");
-    h::expect_ok("unsafe block covers the operation", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe { exit(0); } return 0; }\n");
-    h::expect_ok("unsafe prefix covers the expression", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n");
-    h::expect_ok("unsafe deref index arith", "fn f(p: *mut i32) i32 { unsafe *p = 1; let x = unsafe p[0]; let q = unsafe (p + 1); return x + unsafe *q; }\n");
-    h::expect_ok("unsafe assignment through wrapper is a place", "struct S { pub v: i32 }\nfn f(p: *mut S) { unsafe p.v = 3; }\n");
+    h::expect_err_msg(
+        "extern call needs unsafe",
+        "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { exit(0); return 0; }\n",
+        "calling an extern \"C\" function requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "raw deref needs unsafe",
+        "fn f(p: *i32) i32 { return *p; }\n",
+        "dereferencing a raw pointer requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "raw index needs unsafe",
+        "fn f(p: *i32) i32 { return p[1]; }\n",
+        "indexing a raw pointer requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "pointer arithmetic needs unsafe",
+        "fn f(p: *i32) *i32 { return p + 1; }\n",
+        "raw pointer arithmetic requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "field through raw pointer needs unsafe",
+        "struct S { pub v: i32 }\nfn f(p: *mut S) i32 { return p.v; }\n",
+        "accessing a field through a raw pointer requires an 'unsafe' block",
+    );
+    h::expect_ok(
+        "unsafe block covers the operation",
+        "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe { exit(0); } return 0; }\n",
+    );
+    h::expect_ok(
+        "unsafe prefix covers the expression",
+        "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n",
+    );
+    h::expect_ok(
+        "unsafe deref index arith",
+        "fn f(p: *mut i32) i32 { unsafe *p = 1; let x = unsafe p[0]; let q = unsafe (p + 1); return x + unsafe *q; }\n",
+    );
+    h::expect_ok(
+        "unsafe assignment through wrapper is a place",
+        "struct S { pub v: i32 }\nfn f(p: *mut S) { unsafe p.v = 3; }\n",
+    );
     h::expect_ok("reference operations stay safe", "fn f(r: &mut i32) i32 { *r = 2; return *r; }\n");
     h::expect_ok("pointer comparison stays safe", "fn f(a: *i32, b: *i32) bool { return a == b; }\n");
 }
 
 @test
 fn closures() {
-    h::expect_ok("fn bound callable and satisfied", "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn inc(x: i32) i32 { return x + 1; }\nfn main() i32 { let b = 1; return apply(1, inc) + apply(1, |x: i32| x + b); }\n");
-    h::expect_ok("where-clause fn bound callable", "fn apply<F>(x: i32, f: F) i32 where F: fn(i32) i32 { return f(x); }\nfn main() i32 { return apply(1, |x: i32| x + 1); }\n");
-    h::expect_err_msg("fn bound signature mismatch", "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn main() i32 { return apply(1, |x: bool| x); }\n", "does not satisfy bound");
-    h::expect_err_msg("capturing closure into a bare fn param", "fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }\nfn main() i32 { let b = 1; return apply(|x: i32| x + b, 1); }\n", "a capturing closure cannot be passed as a bare 'fn' pointer");
-    h::expect_err_msg("capturing closure into a bare fn let", "fn main() i32 { let b = 1; let f: fn(i32) i32 = |x: i32| x + b; return f(1); }\n", "mismatch");
-    h::expect_ok("mutating a mut capture", "fn main() i32 { let mut n = 1; let f = fn(x: i32) i32 { n += x; return n; }; return f(1); }\n");
-    h::expect_err_msg("assignment to an immutable capture", "fn main() i32 { let n = 1; let f = fn(x: i32) i32 { n = x; return n; }; return f(1); }\n", "cannot assign");
-    h::expect_err_msg("&mut of an immutable capture", "fn bump(r: &mut i32) { *r += 1; }\nfn main() i32 { let n = 1; let f = fn(x: i32) i32 { bump(&mut n); return x; }; return f(1); }\n", "cannot take '&mut' of an immutable binding");
-    h::expect_err_msg("&mut self method on an immutable capture", "struct Counter { pub n: i32 }\nextend Counter { fn bump(self: &mut Counter) { self.n += 1; } }\nfn main() i32 {\n  let c: Counter = Counter { n: 0 };\n  let f = fn(x: i32) i32 { c.bump(); return x; };\n  return f(1);\n}\n", "cannot call a '&mut self' method on an immutable binding");
-    h::expect_ok("owning capture reads its value", "fn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + s.len() as i32;\n  return f(1) + f(2);\n}\n");
-    h::expect_err_msg("outer use after an owning capture", "fn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + s.len() as i32;\n  return f(1) + s.len() as i32;\n}\n", "use of moved value");
-    h::expect_err_msg("moving a capture out of the closure", "fn eat(s: String) i32 { return s.len() as i32; }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + eat(s);\n  return f(1);\n}\n", "cannot move a captured value out of a closure");
-    h::expect_err_msg("owning closure needs a fn move bound", "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n", "does not satisfy bound");
-    h::expect_ok("owning closure through a fn move bound", "fn apply<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x) + f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n");
-    h::expect_err_msg("fn move param cannot be passed twice", "fn use_once<F: fn move(i32) i32>(f: F) i32 { return f(1); }\nfn both<F: fn move(i32) i32>(f: F) i32 { return use_once(f) + use_once(f); }\nfn main() i32 { return both(|x: i32| x + 1); }\n", "use of moved value");
-    h::expect_err_msg("capturing a fixed-size array", "fn main() i32 { let a: [i32; 2] = [1, 2]; let f = |x: i32| x + a[0]; return f(1); }\n", "closure cannot capture a fixed-size array");
+    h::expect_ok(
+        "fn bound callable and satisfied",
+        "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn inc(x: i32) i32 { return x + 1; }\nfn main() i32 { let b = 1; return apply(1, inc) + apply(1, |x: i32| x + b); }\n",
+    );
+    h::expect_ok(
+        "where-clause fn bound callable",
+        "fn apply<F>(x: i32, f: F) i32 where F: fn(i32) i32 { return f(x); }\nfn main() i32 { return apply(1, |x: i32| x + 1); }\n",
+    );
+    h::expect_err_msg(
+        "fn bound signature mismatch",
+        "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn main() i32 { return apply(1, |x: bool| x); }\n",
+        "does not satisfy bound",
+    );
+    h::expect_err_msg(
+        "capturing closure into a bare fn param",
+        "fn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }\nfn main() i32 { let b = 1; return apply(|x: i32| x + b, 1); }\n",
+        "a capturing closure cannot be passed as a bare 'fn' pointer",
+    );
+    h::expect_err_msg(
+        "capturing closure into a bare fn let",
+        "fn main() i32 { let b = 1; let f: fn(i32) i32 = |x: i32| x + b; return f(1); }\n",
+        "mismatch",
+    );
+    h::expect_ok(
+        "mutating a mut capture",
+        "fn main() i32 { let mut n = 1; let f = fn(x: i32) i32 { n += x; return n; }; return f(1); }\n",
+    );
+    h::expect_err_msg(
+        "assignment to an immutable capture",
+        "fn main() i32 { let n = 1; let f = fn(x: i32) i32 { n = x; return n; }; return f(1); }\n",
+        "cannot assign",
+    );
+    h::expect_err_msg(
+        "&mut of an immutable capture",
+        "fn bump(r: &mut i32) { *r += 1; }\nfn main() i32 { let n = 1; let f = fn(x: i32) i32 { bump(&mut n); return x; }; return f(1); }\n",
+        "cannot take '&mut' of an immutable binding",
+    );
+    h::expect_err_msg(
+        "&mut self method on an immutable capture",
+        "struct Counter { pub n: i32 }\nextend Counter { fn bump(self: &mut Counter) { self.n += 1; } }\nfn main() i32 {\n  let c: Counter = Counter { n: 0 };\n  let f = fn(x: i32) i32 { c.bump(); return x; };\n  return f(1);\n}\n",
+        "cannot call a '&mut self' method on an immutable binding",
+    );
+    h::expect_ok(
+        "owning capture reads its value",
+        "fn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + s.len() as i32;\n  return f(1) + f(2);\n}\n",
+    );
+    h::expect_err_msg(
+        "outer use after an owning capture",
+        "fn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + s.len() as i32;\n  return f(1) + s.len() as i32;\n}\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "moving a capture out of the closure",
+        "fn eat(s: String) i32 { return s.len() as i32; }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + eat(s);\n  return f(1);\n}\n",
+        "cannot move a captured value out of a closure",
+    );
+    h::expect_err_msg(
+        "owning closure needs a fn move bound",
+        "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n",
+        "does not satisfy bound",
+    );
+    h::expect_ok(
+        "owning closure through a fn move bound",
+        "fn apply<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x) + f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n",
+    );
+    h::expect_err_msg(
+        "fn move param cannot be passed twice",
+        "fn use_once<F: fn move(i32) i32>(f: F) i32 { return f(1); }\nfn both<F: fn move(i32) i32>(f: F) i32 { return use_once(f) + use_once(f); }\nfn main() i32 { return both(|x: i32| x + 1); }\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "capturing a fixed-size array",
+        "fn main() i32 { let a: [i32; 2] = [1, 2]; let f = |x: i32| x + a[0]; return f(1); }\n",
+        "closure cannot capture a fixed-size array",
+    );
 }
 
 @test
 fn explicit_free_mutability() {
-    h::expect_ok("free on an immutable owned binding", "fn main() i32 { let v: Vector<i32> = Vector::<i32>::with_capacity(8); v.free(); return 0; }\n");
-    h::expect_err_msg("use after an explicit free still flagged", "fn main() i32 { let v: Vector<i32> = Vector::<i32>::new(); v.free(); return v.len() as i32; }\n", "use after free");
-    h::expect_err_msg("other &mut self methods still need mut", "fn main() i32 { let v: Vector<i32> = Vector::<i32>::new(); v.push(1); return 0; }\n", "cannot call a '&mut self' method on an immutable binding");
+    h::expect_ok(
+        "free on an immutable owned binding",
+        "fn main() i32 { let v: Vector<i32> = Vector::<i32>::with_capacity(8); v.free(); return 0; }\n",
+    );
+    h::expect_err_msg(
+        "use after an explicit free still flagged",
+        "fn main() i32 { let v: Vector<i32> = Vector::<i32>::new(); v.free(); return v.len() as i32; }\n",
+        "use after free",
+    );
+    h::expect_err_msg(
+        "other &mut self methods still need mut",
+        "fn main() i32 { let v: Vector<i32> = Vector::<i32>::new(); v.push(1); return 0; }\n",
+        "cannot call a '&mut self' method on an immutable binding",
+    );
 }
 
 @test
 fn numeric_suffixes_widening() {
-    h::expect_ok("suffixed literals + lossless widening", "fn take(x: i64) i64 { return x; }\nfn main() i32 {\n  let a = 200u8; let b = 0xFFu64; let c = 1f32; let d = 0b1010i64; let e = 5usize;\n  let s: i16 = 3; let w: i32 = s; let u: u8 = 7; let x: u32 = u; let y: i64 = u;\n  let f: f32 = 1.5; let g: f64 = f;\n  let m = w + y; let r = take(w);\n  return 0;\n}\n");
-    h::expect_err_msg("narrowing stays explicit", "fn main() i32 { let x: i32 = 5i64; return 0; }\n", "mismatched types");
-    h::expect_err_msg("same-width sign change stays explicit", "fn main() i32 { let x: u32 = 5i32; return 0; }\n", "mismatched types");
-    h::expect_err_msg("suffixed literal does not adapt down", "fn main() i32 { let x: u8 = 5u16; return 0; }\n", "mismatched types");
-    h::expect_err_msg("f64 literal never narrows", "fn main() i32 { let x: f32 = 1.5f64; return 0; }\n", "mismatched types");
-    h::expect_err_msg("usize widening stays explicit", "fn main() i32 { let x: usize = 5u32; return 0; }\n", "mismatched types");
-    h::expect_err_msg("suffix range check", "fn main() i32 { let x = 300i8; return 0; }\n", "does not fit in its suffixed type");
-    h::expect_err_msg("out-of-range literal in a slot", "fn main() i32 { let a: u8 = 999; return 0; }\n", "out of range for 'u8'");
-    h::expect_err_msg("out-of-range literal adapting in arithmetic", "fn main() i32 { let x: u8 = 5; let y = x + 999; return y as i32; }\n", "out of range for 'u8'");
-    h::expect_err_msg("negative literal into an unsigned slot", "fn main() i32 { let a: u32 = -1; return 0; }\n", "out of range for 'u32'");
-    h::expect_ok("extreme literals fit their signed slots", "fn main() i32 { let a: i8 = -128; let b: i16 = -32768; let c: u32 = 4294967295;\n  return (a as i32) + (b as i32) + ((c & 1) as i32); }\n");
+    h::expect_ok(
+        "suffixed literals + lossless widening",
+        "fn take(x: i64) i64 { return x; }\nfn main() i32 {\n  let a = 200u8; let b = 0xFFu64; let c = 1f32; let d = 0b1010i64; let e = 5usize;\n  let s: i16 = 3; let w: i32 = s; let u: u8 = 7; let x: u32 = u; let y: i64 = u;\n  let f: f32 = 1.5; let g: f64 = f;\n  let m = w + y; let r = take(w);\n  return 0;\n}\n",
+    );
+    h::expect_err_msg(
+        "narrowing stays explicit",
+        "fn main() i32 { let x: i32 = 5i64; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "same-width sign change stays explicit",
+        "fn main() i32 { let x: u32 = 5i32; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "suffixed literal does not adapt down",
+        "fn main() i32 { let x: u8 = 5u16; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "f64 literal never narrows",
+        "fn main() i32 { let x: f32 = 1.5f64; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "usize widening stays explicit",
+        "fn main() i32 { let x: usize = 5u32; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "suffix range check",
+        "fn main() i32 { let x = 300i8; return 0; }\n",
+        "does not fit in its suffixed type",
+    );
+    h::expect_err_msg(
+        "out-of-range literal in a slot",
+        "fn main() i32 { let a: u8 = 999; return 0; }\n",
+        "out of range for 'u8'",
+    );
+    h::expect_err_msg(
+        "out-of-range literal adapting in arithmetic",
+        "fn main() i32 { let x: u8 = 5; let y = x + 999; return y as i32; }\n",
+        "out of range for 'u8'",
+    );
+    h::expect_err_msg(
+        "negative literal into an unsigned slot",
+        "fn main() i32 { let a: u32 = -1; return 0; }\n",
+        "out of range for 'u32'",
+    );
+    h::expect_ok(
+        "extreme literals fit their signed slots",
+        "fn main() i32 { let a: i8 = -128; let b: i16 = -32768; let c: u32 = 4294967295;\n  return (a as i32) + (b as i32) + ((c & 1) as i32); }\n",
+    );
 }
 
 @test
 fn deref() {
-    h::expect_ok("methods resolve through Box's deref/deref_mut", "fn main() i32 {\n  let mut b: Box<String> = Box::<String>::new(String::from_str(\"hi\"));\n  b.push_str(\" there\");\n  let n = b.len();\n  return n as i32;\n}\n");
-    h::expect_ok("by-value builtin method through a plain wrapper's deref", "struct V { pub n: i32 }\nextend V { pub fn deref(self: &V) &i32 { return &self.n; } }\nfn main() i32 { let v = V { n: 0 - 4 }; return v.abs(); }\n");
-    h::expect_err_msg("&mut self through deref needs a mut binding", "fn main() i32 {\n  let b: Box<String> = Box::<String>::new(String::new());\n  b.push_str(\"x\");\n  return 0;\n}\n", "cannot call a '&mut self' method on an immutable binding");
-    h::expect_err_msg("deref without deref_mut cannot reach &mut self methods", "struct W { pub s: String }\nextend W { pub fn deref(self: &W) &String { return &self.s; } }\nfn main() i32 { let mut w = W { s: String::new() }; w.push_str(\"x\"); return 0; }\n", "it has 'deref' but no 'deref_mut'");
-    h::expect_err_msg("cyclic deref chains are rejected", "struct A { pub x: i32 }\nstruct B { pub y: i32 }\nextend A { pub fn deref(self: &A) &B { unsafe { let p = null as *const B; return &*p; } } }\nextend B { pub fn deref(self: &B) &A { unsafe { let p = null as *const A; return &*p; } } }\nfn main() i32 { let a = A { x: 1 }; a.missing(); return 0; }\n", "cyclic deref chain");
+    h::expect_ok(
+        "methods resolve through Box's deref/deref_mut",
+        "fn main() i32 {\n  let mut b: Box<String> = Box::<String>::new(String::from_str(\"hi\"));\n  b.push_str(\" there\");\n  let n = b.len();\n  return n as i32;\n}\n",
+    );
+    h::expect_ok(
+        "by-value builtin method through a plain wrapper's deref",
+        "struct V { pub n: i32 }\nextend V { pub fn deref(self: &V) &i32 { return &self.n; } }\nfn main() i32 { let v = V { n: 0 - 4 }; return v.abs(); }\n",
+    );
+    h::expect_err_msg(
+        "&mut self through deref needs a mut binding",
+        "fn main() i32 {\n  let b: Box<String> = Box::<String>::new(String::new());\n  b.push_str(\"x\");\n  return 0;\n}\n",
+        "cannot call a '&mut self' method on an immutable binding",
+    );
+    h::expect_err_msg(
+        "deref without deref_mut cannot reach &mut self methods",
+        "struct W { pub s: String }\nextend W { pub fn deref(self: &W) &String { return &self.s; } }\nfn main() i32 { let mut w = W { s: String::new() }; w.push_str(\"x\"); return 0; }\n",
+        "it has 'deref' but no 'deref_mut'",
+    );
+    h::expect_err_msg(
+        "cyclic deref chains are rejected",
+        "struct A { pub x: i32 }\nstruct B { pub y: i32 }\nextend A { pub fn deref(self: &A) &B { unsafe { let p = null as *const B; return &*p; } } }\nextend B { pub fn deref(self: &B) &A { unsafe { let p = null as *const A; return &*p; } } }\nfn main() i32 { let a = A { x: 1 }; a.missing(); return 0; }\n",
+        "cyclic deref chain",
+    );
     // NOTE(divergence): tests/typechecker_test.c accepts this. The standalone compiler does too, but the
     // self-hosted typechecker, driven in-process, fails to infer `T` for `Box::new(String::from_str(..))`
     // ("expected 'T', found 'String'") -- a cross-module assoc-fn inference gap this harness surfaces. Omitted.
-    h::expect_err_msg("a by-value aggregate method never auto-derefs", "struct Inner { pub k: i32 }\nextend Inner { pub fn consume(self: Inner) i32 { return self.k; } }\nstruct W { pub inner: Inner }\nextend W { pub fn deref(self: &W) &Inner { return &self.inner; } }\nfn main() i32 { let w = W { inner: Inner { k: 1 } }; return w.consume(); }\n", "cannot call a by-value 'self' method through auto-deref");
+    h::expect_err_msg(
+        "a by-value aggregate method never auto-derefs",
+        "struct Inner { pub k: i32 }\nextend Inner { pub fn consume(self: Inner) i32 { return self.k; } }\nstruct W { pub inner: Inner }\nextend W { pub fn deref(self: &W) &Inner { return &self.inner; } }\nfn main() i32 { let w = W { inner: Inner { k: 1 } }; return w.consume(); }\n",
+        "cannot call a by-value 'self' method through auto-deref",
+    );
 }
 
 @test
 fn alias_extend() {
-    h::expect_ok("extend an alias of a builtin: methods, Self, assoc call", "pub type Token = u64;\nextend Token {\n  pub fn new(start: u32, len: u32) Token { return (start as u64) | ((len as u64) << 32); }\n  pub fn start(self: Self) u32 { return self as u32; }\n  pub fn len(self: Self) u32 { return ((self >> 32) & 0xFFFFFF) as u32; }\n  pub fn end(self: Self) u32 { return self.start() + self.len(); }\n}\nfn main() i32 {\n  let t = Token::new(3, 5);\n  let raw: u64 = t;\n  return (t.end() + raw.start()) as i32 - 11;\n}\n");
-    h::expect_ok("extend an alias of a struct targets the struct", "struct P { pub x: i32 }\npub type Q = P;\nextend Q { pub fn get(self: &Self) i32 { return self.x; } }\nfn main() i32 { let p = P { x: 7 }; return p.get() - 7; }\n");
+    h::expect_ok(
+        "extend an alias of a builtin: methods, Self, assoc call",
+        "pub type Token = u64;\nextend Token {\n  pub fn new(start: u32, len: u32) Token { return (start as u64) | ((len as u64) << 32); }\n  pub fn start(self: Self) u32 { return self as u32; }\n  pub fn len(self: Self) u32 { return ((self >> 32) & 0xFFFFFF) as u32; }\n  pub fn end(self: Self) u32 { return self.start() + self.len(); }\n}\nfn main() i32 {\n  let t = Token::new(3, 5);\n  let raw: u64 = t;\n  return (t.end() + raw.start()) as i32 - 11;\n}\n",
+    );
+    h::expect_ok(
+        "extend an alias of a struct targets the struct",
+        "struct P { pub x: i32 }\npub type Q = P;\nextend Q { pub fn get(self: &Self) i32 { return self.x; } }\nfn main() i32 { let p = P { x: 7 }; return p.get() - 7; }\n",
+    );
     h::expect_ok("builtin name as a '::' base", "fn main() i32 { return u64::max(1, 2) as i32 - 2; }\n");
-    h::expect_err_msg("unknown methods through an alias still diagnose on the underlying type", "pub type Token = u64;\nfn main() i32 { let t: Token = 1; return t.missing(); }\n", "no field or method 'missing' on 'u64'");
+    h::expect_err_msg(
+        "unknown methods through an alias still diagnose on the underlying type",
+        "pub type Token = u64;\nfn main() i32 { let t: Token = 1; return t.missing(); }\n",
+        "no field or method 'missing' on 'u64'",
+    );
 }
 
 @test
 fn assert_builtins() {
-    h::expect_ok("assert args are borrowed, not moved", "fn main() i32 {\n  let s = String::from_str(\"hi\");\n  assert_eq(s.len(), 2);\n  assert_ne(s.as_str(), \"bye\");\n  assert(s.len() > 0, \"still usable\");\n  return s.len() as i32 - 2;\n}\n");
-    h::expect_err_msg("assert_eq needs agreeing types", "fn main() i32 { assert_eq(1, \"one\"); return 0; }\n", "mismatched types");
+    h::expect_ok(
+        "assert args are borrowed, not moved",
+        "fn main() i32 {\n  let s = String::from_str(\"hi\");\n  assert_eq(s.len(), 2);\n  assert_ne(s.as_str(), \"bye\");\n  assert(s.len() > 0, \"still usable\");\n  return s.len() as i32 - 2;\n}\n",
+    );
+    h::expect_err_msg(
+        "assert_eq needs agreeing types",
+        "fn main() i32 { assert_eq(1, \"one\"); return 0; }\n",
+        "mismatched types",
+    );
     h::expect_err_msg("assert condition must be bool", "fn main() i32 { assert(1); return 0; }\n", "must be 'bool'");
     h::expect_err_msg("assert message must be str", "fn main() i32 { assert(true, 5); return 0; }\n", "must be a 'str'");
-    h::expect_err_msg("non-comparable types are rejected", "struct P { pub x: i32 }\nfn main() i32 { assert_eq(P { x: 1 }, P { x: 1 }); return 0; }\n", "cannot compare");
+    h::expect_err_msg(
+        "non-comparable types are rejected",
+        "struct P { pub x: i32 }\nfn main() i32 { assert_eq(P { x: 1 }, P { x: 1 }); return 0; }\n",
+        "cannot compare",
+    );
 }
 
 @test
 fn visibility_of_test_fns() {
-    h::expect_err_msg("non-test code cannot call a @test fn", "@test\nfn a() { }\nfn b() { a(); }\nfn main() i32 { b(); return 0; }\n", "can only be called from other test functions");
-    h::expect_err_msg("non-test code cannot take a @test fn as a value", "@test\nfn a() { }\nfn main() i32 { let f = a; f(); return 0; }\n", "can only be called from other test functions");
-    h::expect_err_msg("non-test code cannot call a suite test method", "struct S { pub x: i32 }\nextend S {\n  @test_init fn setup() S { return S { x: 1 }; }\n  @test fn t(self: &S) { }\n}\nfn main() i32 { let s = S { x: 2 }; s.t(); return 0; }\n", "can only be called from other test functions");
-    h::expect_ok("a test may call another test (and its fixtures)", "@test\nfn helper() { }\n@test\nfn uses_helper() { helper(); }\nfn main() i32 { return 0; }\n");
+    h::expect_err_msg(
+        "non-test code cannot call a @test fn",
+        "@test\nfn a() { }\nfn b() { a(); }\nfn main() i32 { b(); return 0; }\n",
+        "can only be called from other test functions",
+    );
+    h::expect_err_msg(
+        "non-test code cannot take a @test fn as a value",
+        "@test\nfn a() { }\nfn main() i32 { let f = a; f(); return 0; }\n",
+        "can only be called from other test functions",
+    );
+    h::expect_err_msg(
+        "non-test code cannot call a suite test method",
+        "struct S { pub x: i32 }\nextend S {\n  @test_init fn setup() S { return S { x: 1 }; }\n  @test fn t(self: &S) { }\n}\nfn main() i32 { let s = S { x: 2 }; s.t(); return 0; }\n",
+        "can only be called from other test functions",
+    );
+    h::expect_ok(
+        "a test may call another test (and its fixtures)",
+        "@test\nfn helper() { }\n@test\nfn uses_helper() { helper(); }\nfn main() i32 { return 0; }\n",
+    );
 }
 
 @test
 fn iface_assoc_generic_targets() {
-    h::expect_ok("Interface::assoc() infers generic targets from every expected-type position", "struct Pair<T> { pub a: T, pub b: T }\nextend<T: Default> Pair<T> as Default {\n  fn default() Pair<T> { return Pair::<T> { a: T::default(), b: T::default() }; }\n}\nstruct Holder { pub p: Pair<i32> }\nfn ret_pos() Pair<i32> { return Default::default(); }\nfn take(p: Pair<i32>) i32 { return p.a; }\nfn main() i32 {\n  let ann: Pair<i32> = Default::default();\n  let x = take(Default::default());\n  let mut v = Vector::<Pair<i32>>::new();\n  v.push(Default::default());\n  let h = Holder { p: Default::default() };\n  return ret_pos().b + ann.a + x + h.p.a + v.len() as i32 - 1;\n}\n");
-    h::expect_err_msg("Interface::assoc() with no expected type is uninferable", "struct Pair<T> { pub a: T, pub b: T }\nextend<T: Default> Pair<T> as Default {\n  fn default() Pair<T> { return Pair::<T> { a: T::default(), b: T::default() }; }\n}\nfn main() i32 { let x = Default::default(); return 0; }\n", "cannot infer the implementing type");
+    h::expect_ok(
+        "Interface::assoc() infers generic targets from every expected-type position",
+        "struct Pair<T> { pub a: T, pub b: T }\nextend<T: Default> Pair<T> as Default {\n  fn default() Pair<T> { return Pair::<T> { a: T::default(), b: T::default() }; }\n}\nstruct Holder { pub p: Pair<i32> }\nfn ret_pos() Pair<i32> { return Default::default(); }\nfn take(p: Pair<i32>) i32 { return p.a; }\nfn main() i32 {\n  let ann: Pair<i32> = Default::default();\n  let x = take(Default::default());\n  let mut v = Vector::<Pair<i32>>::new();\n  v.push(Default::default());\n  let h = Holder { p: Default::default() };\n  return ret_pos().b + ann.a + x + h.p.a + v.len() as i32 - 1;\n}\n",
+    );
+    h::expect_err_msg(
+        "Interface::assoc() with no expected type is uninferable",
+        "struct Pair<T> { pub a: T, pub b: T }\nextend<T: Default> Pair<T> as Default {\n  fn default() Pair<T> { return Pair::<T> { a: T::default(), b: T::default() }; }\n}\nfn main() i32 { let x = Default::default(); return 0; }\n",
+        "cannot infer the implementing type",
+    );
 }
 
 @test
 fn labeled_loops() {
-    h::expect_ok("labels + loop expression typecheck", "fn main() i32 {\n  'a: for i in 0..3 { for j in 0..3 { if j > i { continue 'a; } if i * j == 2 { break 'a; } } }\n  let v = loop { break 5; };\n  return v;\n}\n");
+    h::expect_ok(
+        "labels + loop expression typecheck",
+        "fn main() i32 {\n  'a: for i in 0..3 { for j in 0..3 { if j > i { continue 'a; } if i * j == 2 { break 'a; } } }\n  let v = loop { break 5; };\n  return v;\n}\n",
+    );
     h::expect_err_msg("break outside a loop", "fn main() i32 { break; return 0; }\n", "outside of a loop");
-    h::expect_err_msg("unknown label", "fn main() i32 { 'a: for i in 0..3 { break 'b; } return 0; }\n", "no enclosing loop is labeled");
-    h::expect_err_msg("value break needs a loop expression", "fn main() i32 { while true { break 5; } return 0; }\n", "can only carry a value inside a 'loop' expression");
-    h::expect_err_msg("bare break mixed into a value loop", "fn main() i32 { let v = loop { break 1; break; }; return v; }\n", "must carry a value");
-    h::expect_err_msg("break values must agree", "fn main() i32 { let mut i = 0; let v = loop { i += 1; if i == 1 { break \"s\"; } break 1; }; return 0; }\n", "mismatched types");
-    h::expect_err_msg("a closure body cannot break an outer loop", "fn main() i32 { for i in 0..3 { let f = fn() void { break; }; f(); } return 0; }\n", "outside of a loop");
+    h::expect_err_msg(
+        "unknown label",
+        "fn main() i32 { 'a: for i in 0..3 { break 'b; } return 0; }\n",
+        "no enclosing loop is labeled",
+    );
+    h::expect_err_msg(
+        "value break needs a loop expression",
+        "fn main() i32 { while true { break 5; } return 0; }\n",
+        "can only carry a value inside a 'loop' expression",
+    );
+    h::expect_err_msg(
+        "bare break mixed into a value loop",
+        "fn main() i32 { let v = loop { break 1; break; }; return v; }\n",
+        "must carry a value",
+    );
+    h::expect_err_msg(
+        "break values must agree",
+        "fn main() i32 { let mut i = 0; let v = loop { i += 1; if i == 1 { break \"s\"; } break 1; }; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "a closure body cannot break an outer loop",
+        "fn main() i32 { for i in 0..3 { let f = fn() void { break; }; f(); } return 0; }\n",
+        "outside of a loop",
+    );
 }
 
 @test
 fn question_error_conversion() {
-    h::expect_ok("? converts through From", "struct IoErr { pub code: i32 }\nstruct AppErr { pub code: i32 }\nextend AppErr as From<IoErr> { fn from(value: IoErr) AppErr { return AppErr { code: value.code }; } }\nfn io() Result<i32, IoErr> { return Result::<i32, IoErr>::Ok(1); }\nfn run() Result<i32, AppErr> { let v = io()?; return Result::<i32, AppErr>::Ok(v); }\nfn main() i32 { return 0; }\n");
-    h::expect_err_msg("? without a From conversion still mismatches", "struct IoErr { pub code: i32 }\nstruct AppErr { pub code: i32 }\nfn io() Result<i32, IoErr> { return Result::<i32, IoErr>::Ok(1); }\nfn run() Result<i32, AppErr> { let v = io()?; return Result::<i32, AppErr>::Ok(v); }\nfn main() i32 { return 0; }\n", "does not match the function's error type");
+    h::expect_ok(
+        "? converts through From",
+        "struct IoErr { pub code: i32 }\nstruct AppErr { pub code: i32 }\nextend AppErr as From<IoErr> { fn from(value: IoErr) AppErr { return AppErr { code: value.code }; } }\nfn io() Result<i32, IoErr> { return Result::<i32, IoErr>::Ok(1); }\nfn run() Result<i32, AppErr> { let v = io()?; return Result::<i32, AppErr>::Ok(v); }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_err_msg(
+        "? without a From conversion still mismatches",
+        "struct IoErr { pub code: i32 }\nstruct AppErr { pub code: i32 }\nfn io() Result<i32, IoErr> { return Result::<i32, IoErr>::Ok(1); }\nfn run() Result<i32, AppErr> { let v = io()?; return Result::<i32, AppErr>::Ok(v); }\nfn main() i32 { return 0; }\n",
+        "does not match the function's error type",
+    );
 }
 
 @test
 fn static_mut() {
-    h::expect_ok("static mut is assignable and borrowable", "static mut counter: i32 = 10;\nfn bump() { counter += 5; }\nfn main() i32 { counter = counter + 1; bump(); let r = &mut counter; *r += 1; return counter; }\n");
-    h::expect_err_msg("a const is not assignable", "const K: i32 = 5;\nfn main() i32 { K = 6; return 0; }\n", "cannot assign");
-    h::expect_err_msg("static requires mut", "static counter: i32 = 0;\nfn main() i32 { return 0; }\n", "expected 'mut' after 'static'");
-    h::expect_err_msg("static mut rejects owning types", "static mut v: Vector<i32> = Vector::<i32>::new();\nfn main() i32 { return 0; }\n", "cannot hold an owning");
+    h::expect_ok(
+        "static mut is assignable and borrowable",
+        "static mut counter: i32 = 10;\nfn bump() { counter += 5; }\nfn main() i32 { counter = counter + 1; bump(); let r = &mut counter; *r += 1; return counter; }\n",
+    );
+    h::expect_err_msg(
+        "a const is not assignable",
+        "const K: i32 = 5;\nfn main() i32 { K = 6; return 0; }\n",
+        "cannot assign",
+    );
+    h::expect_err_msg(
+        "static requires mut",
+        "static counter: i32 = 0;\nfn main() i32 { return 0; }\n",
+        "expected 'mut' after 'static'",
+    );
+    h::expect_err_msg(
+        "static mut rejects owning types",
+        "static mut v: Vector<i32> = Vector::<i32>::new();\nfn main() i32 { return 0; }\n",
+        "cannot hold an owning",
+    );
 }
 
 @test
 fn dyn_t() {
-    h::expect_ok("dyn coercion + vtable dispatch", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn total(a: &dyn Shape) f64 { return a.area(); }\nfn main() i32 { let c = Circle { r: 1.0 }; let d: &dyn Shape = &c; let t = total(&c) + d.area() + d.tag() as f64; return 0; }\n");
-    h::expect_ok("&mut dyn allows &mut self methods", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let mut c = Circle { r: 1.0 }; let m: &mut dyn Shape = &mut c; m.scale(2.0); return 0; }\n");
-    h::expect_ok("&mut dyn weakens to &dyn", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn view(a: &dyn Shape) f64 { return a.area(); }\nfn main() i32 { let mut c = Circle { r: 1.0 }; let m: &mut dyn Shape = &mut c; return view(m) as i32; }\n");
-    h::expect_err_msg("&mut self method through &dyn", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let c = Circle { r: 1.0 }; let d: &dyn Shape = &c; d.scale(2.0); return 0; }\n", "cannot call a '&mut self' method through '&dyn'");
-    h::expect_err_msg("bare interface is not a type", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let c = Circle { r: 1.0 }; let w: Shape = c; return 0; }\n", "an interface is not a type");
-    h::expect_err_msg("erasing a non-conforming type", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nstruct Plain { pub x: i32 }\nfn main() i32 { let p = Plain { x: 1 }; let d: &dyn Shape = &p; return 0; }\n", "mismatched types");
-    h::expect_err_msg("&mut dyn needs a &mut source", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let c = Circle { r: 1.0 }; let m: &mut dyn Shape = &c; return 0; }\n", "mismatched types");
-    h::expect_err_msg("Self outside the receiver is not dyn-compatible", "interface Cloney { fn duplicate(self: &Self) Self; }\nstruct S { pub v: i32 }\nextend S as Cloney { pub fn duplicate(self: &S) S { return S { v: self.v }; } }\nfn main() i32 { let s = S { v: 1 }; let d: &dyn Cloney = &s; return 0; }\n", "not dyn-compatible");
-    h::expect_err_msg("by-value self is not dyn-compatible", "interface Sink { fn consume(self: Self) i32; }\nstruct S { pub v: i32 }\nextend S as Sink { pub fn consume(self: S) i32 { return self.v; } }\nfn main() i32 { let s = S { v: 1 }; let d: &dyn Sink = &s; return 0; }\n", "not dyn-compatible");
-    h::expect_err_msg("a generic interface is not dyn-compatible", "interface Producer<T> { fn make(self: &Self) i32; }\nstruct S { pub v: i32 }\nfn f(d: &dyn Producer) i32 { return 0; }\nfn main() i32 { return 0; }\n", "not dyn-compatible");
-    h::expect_err_msg("erasing a generic type parameter", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn f<T: Shape>(x: &T) f64 { let d: &dyn Shape = x; return d.area(); }\nfn main() i32 { let c = Circle { r: 1.0 }; return f(&c) as i32; }\n", "cannot erase a generic type parameter");
-    h::expect_ok("Box<dyn> erasure, dispatch, reborrow, explicit free", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn view(a: &dyn Shape) f64 { return a.area(); }\nfn main() i32 { let mut b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n  b.scale(2.0); let v = view(&b); b.free(); return v as i32; }\n");
-    h::expect_err_msg("use after freeing an owned dyn", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let mut b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n  b.free(); return b.area() as i32; }\n", "use of moved value");
-    h::expect_err_msg("&mut self through an immutable owned dyn binding", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n  b.scale(2.0); return 0; }\n", "cannot call a '&mut self' method on an immutable binding");
-    h::expect_err_msg("bare dyn as a non-Box generic argument", "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let v: Vector<dyn Shape> = Vector::<dyn Shape>::new(); return 0; }\n", "can only be the generic argument of 'Box'");
-    h::expect_ok("dyn fn: named fn, borrowed closure, owned box; structural instance unification", "fn double_it(x: i32) i32 { return x * 2; }\nfn run(f: &dyn fn(i32) i32, x: i32) i32 { return f(x); }\nfn main() i32 {\n  let d: &dyn fn(i32) i32 = double_it;\n  let k = 3; let f = |x: i32| x + k;\n  let b: Box<dyn fn(i32) i32> = |x: i32| x + k;\n  let mut v: Vector<Box<dyn fn(i32) i32>> = Vector::<Box<dyn fn(i32) i32>>::new();\n  v.push(double_it);\n  return d(1) + run(&f, 2) + b(3); }\n");
-    h::expect_err_msg("a capturing closure by value needs a borrow for &dyn fn", "fn take(f: &dyn fn(i32) i32) i32 { return f(1); }\nfn main() i32 { let k = 5; let f = |x: i32| x + k; return take(f); }\n", "must be borrowed");
-    h::expect_err_msg("a runtime fn pointer cannot erase", "fn main() i32 { let p: fn(i32) i32 = |x: i32| x; let d: &dyn fn(i32) i32 = p; return 0; }\n", "wrap it in a closure");
-    h::expect_err_msg("no &mut dyn fn flavor", "fn main() i32 { let k = 1; let f = |x: i32| x + k; let m: &mut dyn fn(i32) i32 = &f; return 0; }\n", "shared view");
-    h::expect_err_msg("dyn fn signature mismatch", "fn main() i32 { let k = 1; let f = |x: i32| x + k; let w: &dyn fn(i32) bool = &f; return 0; }\n", "mismatched types");
+    h::expect_ok(
+        "dyn coercion + vtable dispatch",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn total(a: &dyn Shape) f64 { return a.area(); }\nfn main() i32 { let c = Circle { r: 1.0 }; let d: &dyn Shape = &c; let t = total(&c) + d.area() + d.tag() as f64; return 0; }\n",
+    );
+    h::expect_ok(
+        "&mut dyn allows &mut self methods",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let mut c = Circle { r: 1.0 }; let m: &mut dyn Shape = &mut c; m.scale(2.0); return 0; }\n",
+    );
+    h::expect_ok(
+        "&mut dyn weakens to &dyn",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn view(a: &dyn Shape) f64 { return a.area(); }\nfn main() i32 { let mut c = Circle { r: 1.0 }; let m: &mut dyn Shape = &mut c; return view(m) as i32; }\n",
+    );
+    h::expect_err_msg(
+        "&mut self method through &dyn",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let c = Circle { r: 1.0 }; let d: &dyn Shape = &c; d.scale(2.0); return 0; }\n",
+        "cannot call a '&mut self' method through '&dyn'",
+    );
+    h::expect_err_msg(
+        "bare interface is not a type",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let c = Circle { r: 1.0 }; let w: Shape = c; return 0; }\n",
+        "an interface is not a type",
+    );
+    h::expect_err_msg(
+        "erasing a non-conforming type",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nstruct Plain { pub x: i32 }\nfn main() i32 { let p = Plain { x: 1 }; let d: &dyn Shape = &p; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "&mut dyn needs a &mut source",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let c = Circle { r: 1.0 }; let m: &mut dyn Shape = &c; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "Self outside the receiver is not dyn-compatible",
+        "interface Cloney { fn duplicate(self: &Self) Self; }\nstruct S { pub v: i32 }\nextend S as Cloney { pub fn duplicate(self: &S) S { return S { v: self.v }; } }\nfn main() i32 { let s = S { v: 1 }; let d: &dyn Cloney = &s; return 0; }\n",
+        "not dyn-compatible",
+    );
+    h::expect_err_msg(
+        "by-value self is not dyn-compatible",
+        "interface Sink { fn consume(self: Self) i32; }\nstruct S { pub v: i32 }\nextend S as Sink { pub fn consume(self: S) i32 { return self.v; } }\nfn main() i32 { let s = S { v: 1 }; let d: &dyn Sink = &s; return 0; }\n",
+        "not dyn-compatible",
+    );
+    h::expect_err_msg(
+        "a generic interface is not dyn-compatible",
+        "interface Producer<T> { fn make(self: &Self) i32; }\nstruct S { pub v: i32 }\nfn f(d: &dyn Producer) i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "not dyn-compatible",
+    );
+    h::expect_err_msg(
+        "erasing a generic type parameter",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn f<T: Shape>(x: &T) f64 { let d: &dyn Shape = x; return d.area(); }\nfn main() i32 { let c = Circle { r: 1.0 }; return f(&c) as i32; }\n",
+        "cannot erase a generic type parameter",
+    );
+    h::expect_ok(
+        "Box<dyn> erasure, dispatch, reborrow, explicit free",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn view(a: &dyn Shape) f64 { return a.area(); }\nfn main() i32 { let mut b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n  b.scale(2.0); let v = view(&b); b.free(); return v as i32; }\n",
+    );
+    h::expect_err_msg(
+        "use after freeing an owned dyn",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let mut b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n  b.free(); return b.area() as i32; }\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "&mut self through an immutable owned dyn binding",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let b: Box<dyn Shape> = Box::<Circle>::new(Circle { r: 1.0 });\n  b.scale(2.0); return 0; }\n",
+        "cannot call a '&mut self' method on an immutable binding",
+    );
+    h::expect_err_msg(
+        "bare dyn as a non-Box generic argument",
+        "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn main() i32 { let v: Vector<dyn Shape> = Vector::<dyn Shape>::new(); return 0; }\n",
+        "can only be the generic argument of 'Box'",
+    );
+    h::expect_ok(
+        "dyn fn: named fn, borrowed closure, owned box; structural instance unification",
+        "fn double_it(x: i32) i32 { return x * 2; }\nfn run(f: &dyn fn(i32) i32, x: i32) i32 { return f(x); }\nfn main() i32 {\n  let d: &dyn fn(i32) i32 = double_it;\n  let k = 3; let f = |x: i32| x + k;\n  let b: Box<dyn fn(i32) i32> = |x: i32| x + k;\n  let mut v: Vector<Box<dyn fn(i32) i32>> = Vector::<Box<dyn fn(i32) i32>>::new();\n  v.push(double_it);\n  return d(1) + run(&f, 2) + b(3); }\n",
+    );
+    h::expect_err_msg(
+        "a capturing closure by value needs a borrow for &dyn fn",
+        "fn take(f: &dyn fn(i32) i32) i32 { return f(1); }\nfn main() i32 { let k = 5; let f = |x: i32| x + k; return take(f); }\n",
+        "must be borrowed",
+    );
+    h::expect_err_msg(
+        "a runtime fn pointer cannot erase",
+        "fn main() i32 { let p: fn(i32) i32 = |x: i32| x; let d: &dyn fn(i32) i32 = p; return 0; }\n",
+        "wrap it in a closure",
+    );
+    h::expect_err_msg(
+        "no &mut dyn fn flavor",
+        "fn main() i32 { let k = 1; let f = |x: i32| x + k; let m: &mut dyn fn(i32) i32 = &f; return 0; }\n",
+        "shared view",
+    );
+    h::expect_err_msg(
+        "dyn fn signature mismatch",
+        "fn main() i32 { let k = 1; let f = |x: i32| x + k; let w: &dyn fn(i32) bool = &f; return 0; }\n",
+        "mismatched types",
+    );
 }
 
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,

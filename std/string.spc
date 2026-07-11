@@ -103,7 +103,7 @@ extend<A: Allocator> String<A> {
         if self.is_large() {
             let p = self.alloc.realloc(self.repr.large.ptr as *mut void, self.capacity(), new_cap, 1) as *mut u8;
             self.repr.large.ptr = p;
-            self.repr.large.cap = new_cap | ((1 as usize) << 63);
+            self.repr.large.cap = new_cap | 1 as usize << 63;
             return;
         }
         let cur = self.repr.small.len as usize;
@@ -113,7 +113,7 @@ extend<A: Allocator> String<A> {
         }
         self.repr.large.ptr = p;
         self.repr.large.len = cur;
-        self.repr.large.cap = new_cap | ((1 as usize) << 63);
+        self.repr.large.cap = new_cap | 1 as usize << 63;
     }
 
     // --- construction --------------------------------------------------------------------------
@@ -121,17 +121,17 @@ extend<A: Allocator> String<A> {
     // An empty string backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized
     // tag) -- inline, owns no heap yet. `small.len = 0` also clears the discriminant bit.
     pub fn new_in(alloc: A) String<A> {
-        return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc, };
+        return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
     }
 
     // Pre-size for `cap` bytes through an explicit allocator. Up to 23 stay inline (no allocation).
     pub fn with_capacity_in(mut alloc: A, cap: usize) String<A> {
         if cap <= 23 {
-            return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc, };
+            return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
         }
         let p = alloc.alloc(cap, 1) as *mut u8;
         return String::<A> {
-            repr: StringRepr { large: StringLarge { ptr: p, len: 0, cap: cap | ((1 as usize) << 63) } },
+            repr: StringRepr { large: StringLarge { ptr: p, len: 0, cap: cap | 1 as usize << 63 } },
             alloc: alloc,
         };
     }
@@ -157,7 +157,7 @@ extend<A: Allocator> String<A> {
     // Total bytes available before the next growth: the real heap capacity, or the 23-byte inline budget.
     pub fn capacity(self: &String<A>) usize {
         if self.is_large() {
-            return (self.repr.large.cap << 1) >> 1; // drop the discriminant bit
+            return self.repr.large.cap << 1 >> 1; // drop the discriminant bit
         }
         return 23;
     }
@@ -228,7 +228,8 @@ extend<A: Allocator> String<A> {
         let n = self.repr.large.len;
         let p = self.repr.large.ptr;
         let cap = self.capacity(); // read BEFORE any memcpy: the inline move overwrites the union's cap field
-        if n <= 23 { // move back inline, then free the heap buffer
+        if n <= 23 {
+            // move back inline, then free the heap buffer
             if n > 0 {
                 unsafe memcpy((&self.repr.small.data[0]) as *mut void, p as *const void, n);
             }
@@ -239,7 +240,7 @@ extend<A: Allocator> String<A> {
         if self.capacity() != n {
             let np = self.alloc.realloc(p as *mut void, self.capacity(), n, 1) as *mut u8;
             self.repr.large.ptr = np;
-            self.repr.large.cap = n | ((1 as usize) << 63);
+            self.repr.large.cap = n | 1 as usize << 63;
         }
     }
 
@@ -283,17 +284,17 @@ extend<A: Allocator> String<A> {
         if ch < 0x80 {
             self.push_byte(ch as u8);
         } else if ch < 0x800 {
-            self.push_byte((0xC0 | (ch >> 6)) as u8);
-            self.push_byte((0x80 | (ch & 0x3F)) as u8);
+            self.push_byte((0xC0 | ch >> 6) as u8);
+            self.push_byte((0x80 | ch & 0x3F) as u8);
         } else if ch < 0x10000 {
-            self.push_byte((0xE0 | (ch >> 12)) as u8);
-            self.push_byte((0x80 | ((ch >> 6) & 0x3F)) as u8);
-            self.push_byte((0x80 | (ch & 0x3F)) as u8);
+            self.push_byte((0xE0 | ch >> 12) as u8);
+            self.push_byte((0x80 | ch >> 6 & 0x3F) as u8);
+            self.push_byte((0x80 | ch & 0x3F) as u8);
         } else {
-            self.push_byte((0xF0 | (ch >> 18)) as u8);
-            self.push_byte((0x80 | ((ch >> 12) & 0x3F)) as u8);
-            self.push_byte((0x80 | ((ch >> 6) & 0x3F)) as u8);
-            self.push_byte((0x80 | (ch & 0x3F)) as u8);
+            self.push_byte((0xF0 | ch >> 18) as u8);
+            self.push_byte((0x80 | ch >> 12 & 0x3F) as u8);
+            self.push_byte((0x80 | ch >> 6 & 0x3F) as u8);
+            self.push_byte((0x80 | ch & 0x3F) as u8);
         }
     }
 
@@ -312,7 +313,7 @@ extend<A: Allocator> String<A> {
         if value >= 10 {
             self.push_u64(value / 10);
         }
-        self.push_byte((48 + (value % 10)) as u8);
+        self.push_byte((48 + value % 10) as u8);
     }
 
     // Append the base-10 digits of a signed integer, with a leading '-' when negative. The magnitude is
@@ -320,7 +321,7 @@ extend<A: Allocator> String<A> {
     pub fn push_i64(self: &mut String<A>, value: i64) {
         if value < 0 {
             self.push_byte(45);
-            self.push_u64((0 as u64) - (value as u64));
+            self.push_u64(0 as u64 - value as u64);
         } else {
             self.push_u64(value as u64);
         }
@@ -348,7 +349,7 @@ extend<A: Allocator> String<A> {
     pub fn push_hex_i64(self: &mut String<A>, value: i64, upper: bool) {
         if value < 0 {
             self.push_byte(45);
-            self.push_hex((0 as u64) - (value as u64), upper);
+            self.push_hex(0 as u64 - value as u64, upper);
         } else {
             self.push_hex(value as u64, upper);
         }
@@ -506,19 +507,19 @@ extend<A: Allocator> String<A> {
         }
         let p = self.data_ptr();
         let mut start = len - 1;
-        while start > 0 && (unsafe p[start] & 0xC0) == 0x80 { // skip 0b10xxxxxx continuation bytes
+        while start > 0 && (unsafe p[start] & 0xC0) == 0x80 {
+            // skip 0b10xxxxxx continuation bytes
             start = start - 1;
         }
         let n = len - start;
         let b0 = unsafe p[start] as u32;
         let mut ch: u32 = b0;
         if n == 2 {
-            ch = ((b0 & 0x1F) << 6) | ((unsafe p[start + 1] as u32) & 0x3F);
+            ch = (b0 & 0x1F) << 6 | unsafe p[start + 1] as u32 & 0x3F;
         } else if n == 3 {
-            ch = ((b0 & 0x0F) << 12) | (((unsafe p[start + 1] as u32) & 0x3F) << 6) | ((unsafe p[start + 2] as u32) & 0x3F);
+            ch = (b0 & 0x0F) << 12 | (unsafe p[start + 1] as u32 & 0x3F) << 6 | unsafe p[start + 2] as u32 & 0x3F;
         } else if n == 4 {
-            ch = ((b0 & 0x07) << 18) | (((unsafe p[start + 1] as u32) & 0x3F) << 12) |
-            (((unsafe p[start + 2] as u32) & 0x3F) << 6) | ((unsafe p[start + 3] as u32) & 0x3F);
+            ch = (b0 & 0x07) << 18 | (unsafe p[start + 1] as u32 & 0x3F) << 12 | (unsafe p[start + 2] as u32 & 0x3F) << 6 | unsafe p[start + 3] as u32 & 0x3F;
         }
         self.set_len(start);
         return ch;
@@ -708,7 +709,11 @@ extend<A: Allocator> String<A> {
         if suffix.len() == 0 {
             return true;
         }
-        return unsafe memcmp((unsafe (self.as_ptr() + (n - suffix.len()))) as *const void, suffix.ptr() as *const void, suffix.len()) == 0;
+        return unsafe memcmp(
+            (unsafe (self.as_ptr() + (n - suffix.len()))) as *const void,
+            suffix.ptr() as *const void,
+            suffix.len(),
+        ) == 0;
     }
 
     // First index of byte `b`, or `len` (a past-the-end sentinel) if absent.
@@ -804,7 +809,8 @@ extend<A: Allocator> String<A> {
         let p = self.data_ptr();
         for i in 0..n {
             let b = unsafe p[i];
-            if b >= 97 && b <= 122 { // 'a'..='z' -> 'A'..='Z'
+            if b >= 97 && b <= 122 {
+                // 'a'..='z' -> 'A'..='Z'
                 unsafe p[i] = b - 32;
             }
         }
@@ -815,7 +821,8 @@ extend<A: Allocator> String<A> {
         let p = self.data_ptr();
         for i in 0..n {
             let b = unsafe p[i];
-            if b >= 65 && b <= 90 { // 'A'..='Z' -> 'a'..='z'
+            if b >= 65 && b <= 90 {
+                // 'A'..='Z' -> 'a'..='z'
                 unsafe p[i] = b + 32;
             }
         }
@@ -995,7 +1002,7 @@ extend<A: Allocator> String<A> as Hash {
         let p = self.as_ptr();
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..n {
-            h = (h ^ (unsafe p[i] as u64)) * 0x100000001b3;
+            h = (h ^ unsafe p[i] as u64) * 0x100000001b3;
         }
         return h;
     }
@@ -1025,11 +1032,15 @@ extend<A: Allocator> String<A> as Ord {
 }
 
 extend<A: Allocator + Default> String<A> as Default {
-    pub fn default() String<A> { return String::<A>::new(); }
+    pub fn default() String<A> {
+        return String::<A>::new();
+    }
 }
 
 extend<A: Allocator + Default> String<A> as From<str> {
-    pub fn from(value: str) String<A> { return String::<A>::from_str(value); }
+    pub fn from(value: str) String<A> {
+        return String::<A>::from_str(value);
+    }
 }
 
 extend<A: Allocator> String<A> as Clone {
@@ -1050,7 +1061,9 @@ extend<A: Allocator> String<A> as Clone {
 // yields the default-allocator `String` (the universal text type) regardless of `self`'s allocator, so it
 // copies the bytes into a fresh `String<Global>`.
 extend<A: Allocator> String<A> as Format {
-    pub fn fmt(self: &String<A>) String<Global> { return String::<Global>::from_str(self.as_str()); }
+    pub fn fmt(self: &String<A>) String<Global> {
+        return String::<Global>::from_str(self.as_str());
+    }
 }
 
 extend<A: Allocator> String<A> as Writer {
@@ -1071,7 +1084,11 @@ extend<A: Allocator> String<A> as Index<u8, str> {
         return &unsafe self.as_str().ptr()[i];
     }
     pub fn index_range(self: &String<A>, r: Range<usize>) str {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
         return self.as_str().slice(r.start, hi);
     }
 }

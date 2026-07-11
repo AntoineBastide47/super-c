@@ -9,13 +9,20 @@ import stdlib;
 import string as cstring;
 import driver_shim as shim;
 
-struct Path512 { pub b: [char; 512] }
-struct Cmd8192 { pub b: [char; 8192] }
+struct Path512 {
+    pub b: [char; 512],
+}
+struct Cmd8192 {
+    pub b: [char; 8192],
+}
 
 static mut C_SEQ: u64 = 0;
 
 // The captured result of a subprocess: its exit code and combined stdout+stderr (`out`, owned).
-pub struct CliResult { pub exit: i32, pub out: *mut char }
+pub struct CliResult {
+    pub exit: i32,
+    pub out: *mut char,
+}
 
 extend CliResult {
     pub fn out_has(self: &CliResult, needle: str) bool {
@@ -37,7 +44,7 @@ extend CliResult as Free {
 // $SUPERC, or "./super-c" when unset -- the compiler under test (may be gen1 for the self-hosted check).
 fn superc() *const char {
     let mut sc = stdlib::getenv("SUPERC");
-    if sc == null || (unsafe *sc) == (0 as char) {
+    if sc == null || unsafe *sc == 0 as char {
         sc = "./super-c".ptr() as *const char;
     }
     return sc;
@@ -52,7 +59,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
         return null;
     }
     unsafe stdio::rewind(f);
-    let buf = unsafe stdlib::malloc((sz as usize) + 1) as *mut char;
+    let buf = unsafe stdlib::malloc(sz as usize + 1) as *mut char;
     if buf == null {
         return null;
     }
@@ -96,13 +103,21 @@ pub fn run_shell(cmd: *const char) i32 {
 }
 
 // A temp project root with helpers to write a source tree, compile it, and cc+run the emitted build/ tree.
-pub struct Proj { pub root: [char; 256] }
+pub struct Proj {
+    pub root: [char; 256],
+}
 
 pub fn proj_new() Proj {
     unsafe C_SEQ = unsafe C_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut p = Proj {};
-    unsafe stdio::snprintf((&mut p.root[0]) as *mut char, 256, "/tmp/sccli_%d_%llu".ptr() as *const char, pid, unsafe C_SEQ);
+    unsafe stdio::snprintf(
+        (&mut p.root[0]) as *mut char,
+        256,
+        "/tmp/sccli_%d_%llu".ptr() as *const char,
+        pid,
+        unsafe C_SEQ,
+    );
     let _ = unsafe shim::sc_mkdir((&p.root[0]) as *const char);
     return p;
 }
@@ -115,10 +130,22 @@ extend Proj {
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
     pub fn mkfile(self: &Proj, rel: str, content: str) void {
         let mut cmd = Cmd8192 {};
-        unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 8192, "mkdir -p \"$(dirname '%s/%s')\"".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
+        unsafe stdio::snprintf(
+            (&mut cmd.b[0]) as *mut char,
+            8192,
+            "mkdir -p \"$(dirname '%s/%s')\"".ptr() as *const char,
+            self.rootp(),
+            rel.ptr() as *const char,
+        );
         let _ = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
         let mut path = Path512 {};
-        unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
+        unsafe stdio::snprintf(
+            (&mut path.b[0]) as *mut char,
+            512,
+            "%s/%s".ptr() as *const char,
+            self.rootp(),
+            rel.ptr() as *const char,
+        );
         let f = stdio::fopen(str::from_cstr((&path.b[0]) as *const char), "wb"); // binary: no Windows CRLF in emitted test files
         if f != null {
             if content.len() > 0 {
@@ -131,7 +158,15 @@ extend Proj {
     // Compile <root>/mainrel with the given extra flags (compile-only mode: emits <root>/build/, no link).
     pub fn compile_flags(self: &Proj, flags: str, mainrel: str) CliResult {
         let mut base = Cmd8192 {};
-        unsafe stdio::snprintf((&mut base.b[0]) as *mut char, 8192, "%s %s '%s/%s'".ptr() as *const char, superc(), flags.ptr() as *const char, self.rootp(), mainrel.ptr() as *const char);
+        unsafe stdio::snprintf(
+            (&mut base.b[0]) as *mut char,
+            8192,
+            "%s %s '%s/%s'".ptr() as *const char,
+            superc(),
+            flags.ptr() as *const char,
+            self.rootp(),
+            mainrel.ptr() as *const char,
+        );
         let mut op = Path512 {};
         unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/.out".ptr() as *const char, self.rootp());
         return exec((&base.b[0]) as *const char, (&op.b[0]) as *const char);
@@ -144,7 +179,13 @@ extend Proj {
     // Run `$SUPERC <args>` verbatim (for flag-only invocations like usage checks); no path is appended.
     pub fn run_raw(self: &Proj, args: str) CliResult {
         let mut base = Cmd8192 {};
-        unsafe stdio::snprintf((&mut base.b[0]) as *mut char, 8192, "%s %s".ptr() as *const char, superc(), args.ptr() as *const char);
+        unsafe stdio::snprintf(
+            (&mut base.b[0]) as *mut char,
+            8192,
+            "%s %s".ptr() as *const char,
+            superc(),
+            args.ptr() as *const char,
+        );
         let mut op = Path512 {};
         unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/.out".ptr() as *const char, self.rootp());
         return exec((&base.b[0]) as *const char, (&op.b[0]) as *const char);
@@ -153,9 +194,15 @@ extend Proj {
     // cc the whole emitted build/ tree -Werror (plus any `extra` flags and @c.link __ldflags) into <root>/bin.
     pub fn cc_build(self: &Proj, extra: str) CliResult {
         let mut base = Cmd8192 {};
-        unsafe stdio::snprintf((&mut base.b[0]) as *mut char, 8192,
+        unsafe stdio::snprintf(
+            (&mut base.b[0]) as *mut char,
+            8192,
             "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') %s $(cat '%s/build/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
-            self.rootp(), extra.ptr() as *const char, self.rootp(), self.rootp());
+            self.rootp(),
+            extra.ptr() as *const char,
+            self.rootp(),
+            self.rootp(),
+        );
         let mut op = Path512 {};
         unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/.ccout".ptr() as *const char, self.rootp());
         return exec((&base.b[0]) as *const char, (&op.b[0]) as *const char);
@@ -165,9 +212,15 @@ extend Proj {
     // a tree containing @test functions is compiled as an ordinary program).
     pub fn cc_build_plain(self: &Proj, extra: str) CliResult {
         let mut base = Cmd8192 {};
-        unsafe stdio::snprintf((&mut base.b[0]) as *mut char, 8192,
+        unsafe stdio::snprintf(
+            (&mut base.b[0]) as *mut char,
+            8192,
             "cc -std=c11 $(find '%s/build' -name '*.c') %s $(cat '%s/build/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
-            self.rootp(), extra.ptr() as *const char, self.rootp(), self.rootp());
+            self.rootp(),
+            extra.ptr() as *const char,
+            self.rootp(),
+            self.rootp(),
+        );
         let mut op = Path512 {};
         unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/.ccout".ptr() as *const char, self.rootp());
         return exec((&base.b[0]) as *const char, (&op.b[0]) as *const char);
@@ -187,7 +240,13 @@ extend Proj {
     // True if the generated <root>/build/rel contains `needle` (the `grep -q` analog).
     pub fn gen_has(self: &Proj, rel: str, needle: str) bool {
         let mut path = Path512 {};
-        unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/build/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
+        unsafe stdio::snprintf(
+            (&mut path.b[0]) as *mut char,
+            512,
+            "%s/build/%s".ptr() as *const char,
+            self.rootp(),
+            rel.ptr() as *const char,
+        );
         let buf = slurp((&path.b[0]) as *const char);
         if buf == null {
             return false;
@@ -200,7 +259,13 @@ extend Proj {
     // True if <root>/build/rel exists (the `access(.., F_OK)` analog).
     pub fn gen_exists(self: &Proj, rel: str) bool {
         let mut path = Path512 {};
-        unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/build/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
+        unsafe stdio::snprintf(
+            (&mut path.b[0]) as *mut char,
+            512,
+            "%s/build/%s".ptr() as *const char,
+            self.rootp(),
+            rel.ptr() as *const char,
+        );
         let f = stdio::fopen(str::from_cstr((&path.b[0]) as *const char), "rb");
         if f == null {
             return false;

@@ -89,7 +89,16 @@ extend Errors {
             }
         }
         for k in 0..self.errors.len() {
-            let block = render(self.errors.at(k), source, &line_starts, len, self.starts[k], self.lens[k], file, self.notes.at(k));
+            let block = render(
+                self.errors.at(k),
+                source,
+                &line_starts,
+                len,
+                self.starts[k],
+                self.lens[k],
+                file,
+                self.notes.at(k),
+            );
             self.errors.set(k, block);
         }
         // Order-preserving dedup of identical rendered blocks (the same error can be emitted from more
@@ -134,8 +143,7 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
         let mid = lo + (hi - lo) / 2;
         if line_starts[mid] <= off {
             lo = mid + 1;
-        }
-        else {
+        } else {
             hi = mid;
         }
     }
@@ -172,29 +180,27 @@ fn render(
     let max_w: usize = 120;
     let mut disp_start = lstart as usize;
     let mut disp_end = lend;
-    if lend - (lstart as usize) > max_w {
-        if off as usize > (lstart as usize) + max_w / 2 {
-            disp_start = (off as usize) - max_w / 2;
+    if lend - lstart as usize > max_w {
+        if off as usize > lstart as usize + max_w / 2 {
+            disp_start = off as usize - max_w / 2;
         }
         if disp_start + max_w < lend {
             disp_end = disp_start + max_w;
-        }
-        else {
+        } else {
             disp_end = lend;
         }
     }
     let line_len = disp_end - disp_start;
     let line_ptr = unsafe (source + disp_start);
-    let caret_col = (off as usize) - disp_start;
+    let caret_col = off as usize - disp_start;
     let mut carets: usize = 1;
     if span >= 1 {
         carets = span as usize;
     }
-    if (off as usize) + carets > disp_end {
+    if off as usize + carets > disp_end {
         if disp_end > off as usize {
             carets = disp_end - off as usize;
-        }
-        else {
+        } else {
             carets = 1;
         }
     }

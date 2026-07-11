@@ -19,7 +19,7 @@ pub type Token = u64;
 
 extend Token {
     pub fn new(kind: TokenType, start: u32, len: u32) Token {
-        return (start as u64) | ((len as u64) << 32) | ((kind as u64) << 56);
+        return start as u64 | len as u64 << 32 | kind as u64 << 56;
     }
 
     pub fn start(self: Self) u32 {
@@ -27,7 +27,7 @@ extend Token {
     }
 
     pub fn len(self: Self) u32 {
-        return ((self >> 32) & 0xFFFFFF) as u32;
+        return (self >> 32 & 0xFFFFFF) as u32;
     }
 
     pub fn end(self: Self) u32 {

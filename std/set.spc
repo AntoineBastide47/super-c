@@ -7,10 +7,9 @@ pub struct Set<T, A = Global> {
 }
 
 extend<T: Hash + Eq, A: Allocator> Set<T, A> {
-
     // Empty set backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub fn new_in(alloc: A) Set<T, A> {
-        return Set::<T, A> { m: Map::<T, bool, A>::new_in(alloc), };
+        return Set::<T, A> { m: Map::<T, bool, A>::new_in(alloc) };
     }
 
     pub fn len(self: &Set<T, A>) usize {
@@ -44,7 +43,9 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T: Hash + Eq, A: Allocator + Default> Set<T, A> {
-    pub fn new() Set<T, A> { return Set::<T, A>::new_in(A::default()); }
+    pub fn new() Set<T, A> {
+        return Set::<T, A>::new_in(A::default());
+    }
 }
 
 // Free the inner map, including every stored key.

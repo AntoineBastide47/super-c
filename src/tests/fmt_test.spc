@@ -1,100 +1,126 @@
-// Formatter tests (fmt::formatter): golden spacing/indent/comment output, blank-line capping,
-// idempotence (fmt(fmt(x)) == fmt(x)), parse preservation, and the semantic oracle -- the emitted C of
-// an ugly program and of its formatted form must be byte-identical.
-import fmt::formatter as fmtr;
+// Canonical (document) formatter tests: goldens for spacing/indent/width breaking/comments/@fmt.skip,
+// idempotence (fmt(fmt(x)) == fmt(x)) baked into every golden, and the semantic oracle -- the emitted
+// C of an ugly program and of its formatted form must be byte-identical.
+import fmt::builder as fbld;
+import ast::ast as *;
 import tests::harness as h;
 import string as cstring;
 
-fn fmt_of(src: str) String {
+// Parse + format at `width`. Asserts the source parses (goldens are full programs).
+fn fmt_of(src: str, width: i32) String {
+    let mut pa = h::parse_ast(src);
+    assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
-    let ok = fmtr::format_source(src, null, &mut out);
-    assert(ok, "format_source rejected a lexable source");
+    fbld::format_program((&pa.ast) as *const Ast, src, width, &mut out);
+    pa.ast.free();
     return out;
 }
 
-fn expect_fmt(src: str, want: str) {
-    let mut out = fmt_of(src);
+fn expect_fmt_w(src: str, want: str, width: i32) {
+    let mut out = fmt_of(src, width);
     let got = out.as_str();
     assert(got.eq(&want), "formatted output mismatch");
-    // Idempotence and parse preservation hold for every golden.
-    let mut again = fmt_of(got);
+    // Idempotence and parse preservation for every golden.
+    assert(!h::parse_has_error(got), "formatted output does not parse");
+    let mut again = fmt_of(got, width);
     let got2 = again.as_str();
     assert(got2.eq(&got), "formatting is not idempotent");
-    // Parse preservation is only checkable when the golden is a full program (not a fragment).
-    if !h::parse_has_error(src) { assert(!h::parse_has_error(got), "formatted output does not parse"); }
     again.free();
     out.free();
 }
 
+fn expect_fmt(src: str, want: str) {
+    expect_fmt_w(src, want, 120);
+}
+
 @test
 fn golden_basic() {
-    expect_fmt("fn add(a:i32,b:i32)i32{\nreturn a+b;\n}", "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n");
+    // Fully canonical: single-line input becomes the one true form.
+    expect_fmt("fn add(a:i32,b:i32)i32{return a+b;}", "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n");
 }
 
 @test
 fn golden_spacing() {
-    // Generics vs comparison, turbofish, ranges, unary ops, pointers, casts, indexing.
-    expect_fmt("let v:Vector<i32> =Vector::<i32>::new();", "let v: Vector<i32> = Vector::<i32>::new();\n");
-    expect_fmt("if a<b&&c>d{return -1;}", "if a < b && c > d { return -1; }\n");
-    expect_fmt("for i in 0..self.len{unsafe self.ptr [ i ].free();}",
-        "for i in 0..self.len { unsafe self.ptr[i].free(); }\n");
-    expect_fmt("fn at(self:&Vector<T,A>,index:usize)&T{return &unsafe self.ptr[index];}",
-        "fn at(self: &Vector<T, A>, index: usize) &T { return &unsafe self.ptr[index]; }\n");
-    expect_fmt("let p=self.alloc.alloc(cap*sizeof (T),alignof (T))as*mut T;",
-        "let p = self.alloc.alloc(cap * sizeof(T), alignof(T)) as *mut T;\n");
-    expect_fmt("fn f(x:i32)(u64,usize){return (0,0);}", "fn f(x: i32) (u64, usize) { return (0, 0); }\n");
-    expect_fmt("let m=Map::<u64,Vector<NodeId>>::new();", "let m = Map::<u64, Vector<NodeId>>::new();\n");
-    expect_fmt("v.sort_by(|a:&i32,b:&i32|*b- *a);", "v.sort_by(|a: &i32, b: &i32| *b - *a);\n");
-    expect_fmt("fn map<U,F:fn (&T)U>(self:&Self,f:F)U{}", "fn map<U, F: fn(&T) U>(self: &Self, f: F) U {}\n");
-    // Slice-type heads glue to their element; `import` glues before `(` in @c attributes.
-    expect_fmt("fn w(bytes:[] u8)usize{return 0;}", "fn w(bytes: []u8) usize { return 0; }\n");
-    expect_fmt("fn r(x:[] mut T)[] mut T{return x;}", "fn r(x: []mut T) []mut T { return x; }\n");
-    expect_fmt("@c.import (\"fopen\")\nfn q(){}", "@c.import(\"fopen\")\nfn q() {}\n");
+    expect_fmt(
+        "fn t(){let v:Vector<i32> =Vector::<i32>::new();}",
+        "fn t() {\n    let v: Vector<i32> = Vector::<i32>::new();\n}\n",
+    );
+    expect_fmt(
+        "fn t(a:i32,b:i32,c:i32,d:i32)i32{if a<b&&c>d{return -1;}return 0;}",
+        "fn t(a: i32, b: i32, c: i32, d: i32) i32 {\n    if a < b && c > d {\n        return -1;\n    }\n    return 0;\n}\n",
+    );
+    expect_fmt(
+        "struct V{p:*mut i32}extend V{fn at(self:&V,index:usize)&i32{return &unsafe self.p[index];}}",
+        "struct V {\n    p: *mut i32,\n}\nextend V {\n    fn at(self: &V, index: usize) &i32 {\n        return &unsafe self.p[index];\n    }\n}\n",
+    );
+    expect_fmt(
+        "fn t(cap:usize)usize{return (cap*sizeof(i64))as usize;}",
+        "fn t(cap: usize) usize {\n    return (cap * sizeof(i64)) as usize;\n}\n",
+    );
+    expect_fmt("fn f(x:i32)(u64,usize){return (0,0);}", "fn f(x: i32) (u64, usize) {\n    return (0, 0);\n}\n");
 }
 
 @test
-fn golden_indent() {
-    expect_fmt("struct P{\nx:i32,\ny:i32,\n}\nextend P{\nfn go(self:&Self)i32{\nif self.x>0{\nreturn self.x;\n}\nreturn self.y;\n}\n}",
-        "struct P {\n    x: i32,\n    y: i32,\n}\nextend P {\n    fn go(self: &Self) i32 {\n        if self.x > 0 {\n            return self.x;\n        }\n        return self.y;\n    }\n}\n");
-    // A call broken across lines: arguments one level in, closer back at statement level.
-    expect_fmt("f(\na,\nb,\n);", "f(\n    a,\n    b,\n);\n");
+fn golden_parens() {
+    // The parser drops parentheses; precedence re-inserts exactly the needed ones.
+    expect_fmt(
+        "fn t(a:i32,b:i32,c:i32)i32{return (a+b)*c;}",
+        "fn t(a: i32, b: i32, c: i32) i32 {\n    return (a + b) * c;\n}\n",
+    );
+    expect_fmt(
+        "fn t(a:i32,b:i32,c:i32)i32{return a+b*c;}",
+        "fn t(a: i32, b: i32, c: i32) i32 {\n    return a + b * c;\n}\n",
+    );
+    expect_fmt("fn t(p:*mut i32)i32{return (*p)+1;}", "fn t(p: *mut i32) i32 {\n    return *p + 1;\n}\n");
+}
+
+@test
+fn golden_width_break() {
+    // A call that does not fit breaks with one argument per line and a trailing comma.
+    expect_fmt_w(
+        "fn t(){takes_many(first_argument,second_argument,third_argument);}",
+        "fn t() {\n    takes_many(\n        first_argument,\n        second_argument,\n        third_argument,\n    );\n}\n",
+        40,
+    );
+    // The same call at a comfortable width stays flat.
+    expect_fmt_w(
+        "fn t(){takes_many(first_argument,second_argument,third_argument);}",
+        "fn t() {\n    takes_many(first_argument, second_argument, third_argument);\n}\n",
+        120,
+    );
 }
 
 @test
 fn golden_comments() {
-    // A trailing line comment keeps its line, one space before it; standalone comments keep theirs.
-    expect_fmt("let x=1;// tail\n// lead\nlet y=2;", "let x = 1; // tail\n// lead\nlet y = 2;\n");
-    // Doc comments and block comments (multiline contents verbatim).
+    expect_fmt(
+        "// lead\nfn t(){let x=1;// tail\nlet y=2;}",
+        "// lead\nfn t() {\n    let x = 1; // tail\n    let y = 2;\n}\n",
+    );
     expect_fmt("/// doc line\nfn f(){}", "/// doc line\nfn f() {}\n");
-    expect_fmt("/* a\n   b */\nlet z=3;", "/* a\n   b */\nlet z = 3;\n");
-    // A comment between tokens on one line is spaced on both sides.
-    expect_fmt("let a=/*mid*/1;", "let a = /*mid*/ 1;\n");
+    expect_fmt("fn f(){\n// dangling\n}", "fn f() {\n    // dangling\n}\n");
+    expect_fmt("fn f(){let a=1;\n\n\n\nlet b=2;}", "fn f() {\n    let a = 1;\n\n    let b = 2;\n}\n");
 }
 
 @test
-fn blank_lines_capped() {
-    expect_fmt("let a=1;\n\n\n\nlet b=2;", "let a = 1;\n\nlet b = 2;\n");
-    // Leading blank lines dropped; exactly one trailing newline.
-    expect_fmt("\n\nlet a=1;", "let a = 1;\n");
-}
-
-@test
-fn preserves_single_line_blocks() {
-    // Author line breaks are preserved: single-line bodies stay single-line, multiline stays multiline.
-    expect_fmt("pub fn len(self:&Self)usize{return self.len;}",
-        "pub fn len(self: &Self) usize { return self.len; }\n");
+fn golden_fmt_skip() {
+    expect_fmt(
+        "@fmt.skip\nfn weird(  a:i32 )i32{ return   a; }\nfn n(a:i32)i32{return a;}",
+        "@fmt.skip\nfn weird(  a:i32 )i32{ return   a; }\nfn n(a: i32) i32 {\n    return a;\n}\n",
+    );
 }
 
 @test
 fn emitted_c_identical() {
     let ugly = "struct Pair{pub a:i32,pub b:i32}\nextend Pair{fn sum(self:&Self)i32{return self.a+self.b;}}\nfn main()i32{\nlet p=Pair{a:1,b:2,};\nlet mut t=0;\nfor i in 0..10{t=t+p.sum()*i;}\nreturn t&0;\n}";
-    let mut f = fmt_of(ugly);
+    let mut f = fmt_of(ugly, 120);
     let mut c1 = h::compile_c(ugly);
     let mut c2 = h::compile_c(f.as_str());
     assert(c1.ok(), "ugly variant does not compile");
     assert(c2.ok(), "formatted variant does not compile");
-    assert(unsafe cstring::strcmp(c1.code as *const char, c2.code as *const char) == 0,
-        "emitted C differs between ugly and formatted variants");
+    assert(
+        unsafe cstring::strcmp(c1.code as *const char, c2.code as *const char) == 0,
+        "emitted C differs between ugly and formatted variants",
+    );
     c1.free();
     c2.free();
     f.free();

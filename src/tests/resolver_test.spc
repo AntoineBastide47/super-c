@@ -7,14 +7,22 @@ import tests::harness as h;
 
 @test
 fn resolves() {
-    h::expect_resolve_ok("forward references",
-        "fn use_it(p: Pair) void { make(p); }\nfn make(p: Pair) void {}\nstruct Pair { left: i32, right: i32, }\n");
-    h::expect_resolve_ok("nested shadowing",
-        "fn f() void {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\nfn g(n: i32) void {}\n");
-    h::expect_resolve_ok("generics self and Self",
-        "struct Wrap<T> { value: T, }\ninterface Show { fn show(self: u8) void; }\nextend<T> Wrap<T> { fn get(self: Self) T { return self.value; } }\n");
-    h::expect_resolve_ok("loop match and let scopes",
-        "struct List {}\nfn each(items: List) void { for x in items { take(x); } }\nfn classify(c: u8) i32 { return switch c { 0 => 1, n => n, _ => 0, }; }\nfn take(n: i32) void {}\n");
+    h::expect_resolve_ok(
+        "forward references",
+        "fn use_it(p: Pair) void { make(p); }\nfn make(p: Pair) void {}\nstruct Pair { left: i32, right: i32, }\n",
+    );
+    h::expect_resolve_ok(
+        "nested shadowing",
+        "fn f() void {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\nfn g(n: i32) void {}\n",
+    );
+    h::expect_resolve_ok(
+        "generics self and Self",
+        "struct Wrap<T> { value: T, }\ninterface Show { fn show(self: u8) void; }\nextend<T> Wrap<T> { fn get(self: Self) T { return self.value; } }\n",
+    );
+    h::expect_resolve_ok(
+        "loop match and let scopes",
+        "struct List {}\nfn each(items: List) void { for x in items { take(x); } }\nfn classify(c: u8) i32 { return switch c { 0 => 1, n => n, _ => 0, }; }\nfn take(n: i32) void {}\n",
+    );
 }
 
 @test
@@ -23,9 +31,16 @@ fn errors() {
     h::expect_resolve_err_msg("undefined type", "fn f(x: Widget) void {}\n", "cannot find type 'Widget'");
     h::expect_resolve_err_msg("duplicate item", "struct P {}\nstruct P {}\n", "duplicate definition of 'P'");
     h::expect_resolve_err_msg("duplicate parameter", "fn f(a: i32, a: i32) void {}\n", "duplicate definition of 'a'");
-    h::expect_resolve_err_msg("duplicate let", "fn f() void { let x: i32 = 1; let x: i32 = 2; }\n", "duplicate definition of 'x'");
-    h::expect_resolve_err_msg("local escapes its block",
-        "fn f() void { { let x: i32 = 1; } use_x(x); }\nfn use_x(n: i32) void {}\n", "cannot find value 'x'");
+    h::expect_resolve_err_msg(
+        "duplicate let",
+        "fn f() void { let x: i32 = 1; let x: i32 = 2; }\n",
+        "duplicate definition of 'x'",
+    );
+    h::expect_resolve_err_msg(
+        "local escapes its block",
+        "fn f() void { { let x: i32 = 1; } use_x(x); }\nfn use_x(n: i32) void {}\n",
+        "cannot find value 'x'",
+    );
     h::expect_resolve_err_msg("Self outside extend", "fn f(x: Self) void {}\n", "'Self' is only valid");
 }
 
@@ -33,7 +48,7 @@ fn errors() {
 fn value_uses(a: &Ast, src: *const char, name: *const char, out: *mut NodeId, cap: usize) usize {
     let mut n: usize = 0;
     let mut id: NodeId = 1;
-    while (id as usize) < a.nodes.len() {
+    while id as usize < a.nodes.len() {
         if h::ident_is(&*a, src, id, name) && a.resolution(id) != NODE_NONE && n < cap {
             unsafe out[n] = id;
             n = n + 1;
@@ -75,7 +90,7 @@ fn namespace_separation() {
     // The type use is the `: Foo` annotation, resolved on the NODE_TYPE_PATH.
     let mut type_path: NodeId = NODE_NONE;
     let mut id: NodeId = 1;
-    while (id as usize) < c.ast.nodes.len() {
+    while id as usize < c.ast.nodes.len() {
         if c.ast.at_const(id).kind == NodeKind::NODE_TYPE_PATH && c.ast.resolution(id) != NODE_NONE {
             type_path = id;
         }
@@ -90,7 +105,7 @@ fn closure_captures(src: str, out: *mut u32, cap: usize) usize {
     let mut c = h::compile_ast(src, h::STAGE_RESOLVE);
     let mut n: usize = 0;
     let mut id: NodeId = 1;
-    while (id as usize) < c.ast.nodes.len() {
+    while id as usize < c.ast.nodes.len() {
         if c.ast.at_const(id).kind == NodeKind::NODE_CLOSURE && n < cap {
             unsafe out[n] = c.ast.at_const(id).as_data.closure.captures.len;
             n = n + 1;
@@ -107,18 +122,28 @@ fn closures() {
     // Params / module-level items are not captures.
     let mut n = closure_captures(
         "const K: i32 = 3;\nfn helper(n: i32) i32 { return n; }\nfn main() i32 { let f = |x: i32| helper(x) + K; return f(1); }\n",
-        (&mut caps[0]) as *mut u32, 4);
+        (&mut caps[0]) as *mut u32,
+        4,
+    );
     assert(n == 1 && caps[0] == 0, "params/module items are not captures");
     // Referencing an outer local is a capture (deduped: `base` twice is one).
-    n = closure_captures("fn main() i32 { let base = 10; let f = |x: i32| x + base + base; return f(1); }\n",
-        (&mut caps[0]) as *mut u32, 4);
+    n = closure_captures(
+        "fn main() i32 { let base = 10; let f = |x: i32| x + base + base; return f(1); }\n",
+        (&mut caps[0]) as *mut u32,
+        4,
+    );
     assert(n == 1 && caps[0] == 1, "one deduped capture expected");
-    n = closure_captures("fn add(b: i32, c: i32) i32 { let f = |x: i32| x + b + c; return f(1); }\n",
-        (&mut caps[0]) as *mut u32, 4);
+    n = closure_captures(
+        "fn add(b: i32, c: i32) i32 { let f = |x: i32| x + b + c; return f(1); }\n",
+        (&mut caps[0]) as *mut u32,
+        4,
+    );
     assert(n == 1 && caps[0] == 2, "two captures expected");
     // A nested closure captures through the outer one: both collect it.
     n = closure_captures(
         "fn main() i32 {\n  let base = 10;\n  let outer = fn(x: i32) i32 { let inner = |y: i32| y + base; return inner(x); };\n  return outer(1);\n}\n",
-        (&mut caps[0]) as *mut u32, 4);
+        (&mut caps[0]) as *mut u32,
+        4,
+    );
     assert(n == 2 && caps[0] == 1 && caps[1] == 1, "both closures capture 'base'");
 }

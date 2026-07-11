@@ -84,7 +84,17 @@ fn typecheck_one(p: &mut loader::Package, i: usize) void {
 
 // One full transpile of the compiler, timed per phase.
 fn transpile_once() Timing {
-    let mut r = Timing { lex: 0.0, parse: 0.0, resolve: 0.0, typecheck: 0.0, codegen: 0.0, src_bytes: 0, src_lines: 0, out_bytes: 0, modules: 0 };
+    let mut r = Timing {
+        lex: 0.0,
+        parse: 0.0,
+        resolve: 0.0,
+        typecheck: 0.0,
+        codegen: 0.0,
+        src_bytes: 0,
+        src_lines: 0,
+        out_bytes: 0,
+        modules: 0,
+    };
 
     let a0 = time::cpu_seconds();
     let mut p = loader::package_load(ROOT.ptr() as *const char, STD_DIR.ptr() as *const char, false);
@@ -160,7 +170,7 @@ fn transpile_once() Timing {
         let len = p.modules[i].source.len();
         let mut j: usize = 0;
         while j < len {
-            if unsafe (src[j] as u8) == b'\n' {
+            if unsafe src[j] as u8 == b'\n' {
                 r.src_lines = r.src_lines + 1;
             }
             j = j + 1;
@@ -178,12 +188,22 @@ fn transpile_once() Timing {
 pub fn run() i32 {
     let warm = transpile_once(); // warm caches + report corpus size
     if warm.modules == 0 || warm.out_bytes == 0 {
-        unsafe stdio::fprintf(stdio::stderr(), "transpile-bench: failed to transpile %s (run from the repo root)\n".ptr() as *const char, ROOT.ptr() as *const char);
+        unsafe stdio::fprintf(
+            stdio::stderr(),
+            "transpile-bench: failed to transpile %s (run from the repo root)\n".ptr() as *const char,
+            ROOT.ptr() as *const char,
+        );
         return 1;
     }
     unsafe stdio::printf("transpiling the super-c compiler: %s\n".ptr() as *const char, ROOT.ptr() as *const char);
-    unsafe stdio::printf("  %zu modules, %zu lines, %.1f KiB source -> %.1f KiB C   (%d iterations)\n\n".ptr() as *const char,
-        warm.modules, warm.src_lines, (warm.src_bytes as f64) / 1024.0, (warm.out_bytes as f64) / 1024.0, ITERS);
+    unsafe stdio::printf(
+        "  %zu modules, %zu lines, %.1f KiB source -> %.1f KiB C   (%d iterations)\n\n".ptr() as *const char,
+        warm.modules,
+        warm.src_lines,
+        warm.src_bytes as f64 / 1024.0,
+        warm.out_bytes as f64 / 1024.0,
+        ITERS,
+    );
 
     let mut sp: f64 = 0.0;
     let mut sr: f64 = 0.0;
@@ -215,17 +235,75 @@ pub fn run() i32 {
     let srcf = warm.src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
     let linesf = warm.src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
 
-    unsafe stdio::printf("  %-11s %9s %9s %9s %8s\n".ptr() as *const char, "phase".ptr() as *const char, "avg ms".ptr() as *const char, "MB/s".ptr() as *const char, "kloc/s".ptr() as *const char, "share".ptr() as *const char);
-    unsafe stdio::printf("  %-11s %9.2f %9.1f %9.1f   (of parse)\n".ptr() as *const char, "lex".ptr() as *const char, al, srcf / al / 1000.0, linesf / al);
-    unsafe stdio::printf("  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char, "parse".ptr() as *const char, ap, srcf / ap / 1000.0, linesf / ap, ap / avg_total * 100.0);
-    unsafe stdio::printf("  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char, "resolve".ptr() as *const char, ar, srcf / ar / 1000.0, linesf / ar, ar / avg_total * 100.0);
-    unsafe stdio::printf("  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char, "typecheck".ptr() as *const char, at, srcf / at / 1000.0, linesf / at, at / avg_total * 100.0);
-    unsafe stdio::printf("  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char, "codegen".ptr() as *const char, ac, srcf / ac / 1000.0, linesf / ac, ac / avg_total * 100.0);
-    unsafe stdio::printf("  %-11s %9.2f %9.1f %9.1f   (best %.2f ms)\n\n".ptr() as *const char, "total".ptr() as *const char, avg_total, srcf / avg_total / 1000.0, linesf / avg_total, best * 1000.0);
+    unsafe stdio::printf(
+        "  %-11s %9s %9s %9s %8s\n".ptr() as *const char,
+        "phase".ptr() as *const char,
+        "avg ms".ptr() as *const char,
+        "MB/s".ptr() as *const char,
+        "kloc/s".ptr() as *const char,
+        "share".ptr() as *const char,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f   (of parse)\n".ptr() as *const char,
+        "lex".ptr() as *const char,
+        al,
+        srcf / al / 1000.0,
+        linesf / al,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char,
+        "parse".ptr() as *const char,
+        ap,
+        srcf / ap / 1000.0,
+        linesf / ap,
+        ap / avg_total * 100.0,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char,
+        "resolve".ptr() as *const char,
+        ar,
+        srcf / ar / 1000.0,
+        linesf / ar,
+        ar / avg_total * 100.0,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char,
+        "typecheck".ptr() as *const char,
+        at,
+        srcf / at / 1000.0,
+        linesf / at,
+        at / avg_total * 100.0,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f %7.1f%%\n".ptr() as *const char,
+        "codegen".ptr() as *const char,
+        ac,
+        srcf / ac / 1000.0,
+        linesf / ac,
+        ac / avg_total * 100.0,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f   (best %.2f ms)\n\n".ptr() as *const char,
+        "total".ptr() as *const char,
+        avg_total,
+        srcf / avg_total / 1000.0,
+        linesf / avg_total,
+        best * 1000.0,
+    );
 
-    unsafe stdio::printf("  codegen emits %.1f KiB C at %.1f MB/s;  best end-to-end %.2f MB/s source\n".ptr() as *const char,
-        (warm.out_bytes as f64) / 1024.0, (warm.out_bytes as f64) / ac / 1000.0, srcf / best / 1e6);
-    unsafe stdio::printf("%s".ptr() as *const char, "  * per-phase MB/s & kloc/s are that stage ALONE (whole corpus / its own time). Phases run\n".ptr() as *const char);
-    unsafe stdio::printf("%s".ptr() as *const char, "    in series, so total time = sum of phases and total rate is below EVERY stage's rate.\n".ptr() as *const char);
+    unsafe stdio::printf(
+        "  codegen emits %.1f KiB C at %.1f MB/s;  best end-to-end %.2f MB/s source\n".ptr() as *const char,
+        warm.out_bytes as f64 / 1024.0,
+        warm.out_bytes as f64 / ac / 1000.0,
+        srcf / best / 1e6,
+    );
+    unsafe stdio::printf(
+        "%s".ptr() as *const char,
+        "  * per-phase MB/s & kloc/s are that stage ALONE (whole corpus / its own time). Phases run\n".ptr() as *const char,
+    );
+    unsafe stdio::printf(
+        "%s".ptr() as *const char,
+        "    in series, so total time = sum of phases and total rate is below EVERY stage's rate.\n".ptr() as *const char,
+    );
     return 0;
 }

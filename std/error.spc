@@ -14,7 +14,7 @@ extern "C" {
 extend Error {
     fn own_message(message: String) *mut String {
         let p = unsafe malloc(sizeof(String)) as *mut String;
-        if (p as *mut void) == null {
+        if p as *mut void == null {
             unsafe abort();
         }
         unsafe p[0] = message;
@@ -36,7 +36,7 @@ extend Error {
 
 extend Error as Free {
     pub fn free(self: &mut Error) {
-        if (self.message as *mut void) != null {
+        if self.message as *mut void != null {
             unsafe self.message[0].free();
             unsafe free(self.message as *mut void);
             self.message = null;

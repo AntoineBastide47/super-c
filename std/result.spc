@@ -10,7 +10,6 @@ pub enum Result<T, E> {
 }
 
 extend<T, E> Result<T, E> {
-
     pub fn ok(value: T) Result<T, E> {
         return Result::<T, E>::Ok(value);
     }
@@ -63,14 +62,20 @@ extend<T, E> Result<T, E> {
     pub fn unwrap_or(self: Result<T, E>, default: T) T {
         return switch self {
             Ok(v) => v,
-            Err(mut e) => { e.free(); default; },
+            Err(e) => {
+                e.free();
+                default;
+            },
         };
     }
 
     // The error value, or `default` on `Ok`. Consumes `self`; the discarded `Ok` payload is freed.
     pub fn err_or(self: Result<T, E>, default: E) E {
         return switch self {
-            Ok(mut v) => { v.free(); default; },
+            Ok(v) => {
+                v.free();
+                default;
+            },
             Err(e) => e,
         };
     }
@@ -112,7 +117,10 @@ extend<T, E> Result<T, E> {
     pub fn or(self: Result<T, E>, other: Result<T, E>) Result<T, E> {
         return switch self {
             Ok(v) => Result::<T, E>::Ok(v),
-            Err(mut e) => { e.free(); other; },
+            Err(e) => {
+                e.free();
+                other;
+            },
         };
     }
 
@@ -121,7 +129,10 @@ extend<T, E> Result<T, E> {
     pub fn get_ok(self: Result<T, E>) Option<T> {
         return switch self {
             Ok(v) => Option::<T>::Some(v),
-            Err(mut e) => { e.free(); Option::<T>::None; },
+            Err(e) => {
+                e.free();
+                Option::<T>::None;
+            },
         };
     }
 
@@ -129,7 +140,10 @@ extend<T, E> Result<T, E> {
     // freed.
     pub fn get_err(self: Result<T, E>) Option<E> {
         return switch self {
-            Ok(mut v) => { v.free(); Option::<E>::None; },
+            Ok(v) => {
+                v.free();
+                Option::<E>::None;
+            },
             Err(e) => Option::<E>::Some(e),
         };
     }
@@ -160,8 +174,14 @@ extend<T: Clone, E: Clone> Result<T, E> as Clone {
 extend<T: Eq, E: Eq> Result<T, E> as Eq {
     pub fn eq(self: &Result<T, E>, other: &Result<T, E>) bool {
         return switch self {
-            Ok(a) => switch other { Ok(b) => a.eq(b), Err(_) => false, },
-            Err(a) => switch other { Ok(_) => false, Err(b) => a.eq(b), },
+            Ok(a) => switch other {
+                Ok(b) => a.eq(b),
+                Err(_) => false,
+            },
+            Err(a) => switch other {
+                Ok(_) => false,
+                Err(b) => a.eq(b),
+            },
         };
     }
 }

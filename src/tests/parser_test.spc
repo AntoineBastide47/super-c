@@ -24,8 +24,14 @@ fn items_and_types() {
     assert(item(&c.ast, 1).kind == NodeKind::NODE_ENUM, "items and types: item 1 should be enum");
     assert(item(&c.ast, 2).kind == NodeKind::NODE_TYPE_ALIAS, "items and types: item 2 should be type alias");
     let cb_id = item(&c.ast, 2).as_data.type_alias.ty;
-    assert(c.ast.at_const(cb_id).kind == NodeKind::NODE_FUNCTION_TYPE, "items and types: callback should be a function type");
-    assert(c.ast.at_const(cb_id).as_data.function_type.returns.len == 2, "items and types: callback should have two returns");
+    assert(
+        c.ast.at_const(cb_id).kind == NodeKind::NODE_FUNCTION_TYPE,
+        "items and types: callback should be a function type",
+    );
+    assert(
+        c.ast.at_const(cb_id).as_data.function_type.returns.len == 2,
+        "items and types: callback should have two returns",
+    );
     assert(item(&c.ast, 3).kind == NodeKind::NODE_CONST, "items and types: item 3 should be const");
     assert(item(&c.ast, 4).kind == NodeKind::NODE_EXTERN_BLOCK, "items and types: item 4 should be extern");
     c.ast.free();
@@ -40,9 +46,15 @@ fn associated_new_name() {
     let ext_items = item(&c.ast, 1).as_data.extend_def.items;
     let ids = c.ast.list(ext_items);
     let method_id = unsafe ids[0];
-    assert(c.ast.at_const(method_id).kind == NodeKind::NODE_FUNCTION, "associated new name: extension item should be a function");
+    assert(
+        c.ast.at_const(method_id).kind == NodeKind::NODE_FUNCTION,
+        "associated new name: extension item should be a function",
+    );
     let name_id = c.ast.at_const(method_id).as_data.function.name;
-    assert(h::ident_is(&c.ast, src.ptr() as *const char, name_id, "new".ptr() as *const char), "associated new name: method should be named new");
+    assert(
+        h::ident_is(&c.ast, src.ptr() as *const char, name_id, "new".ptr() as *const char),
+        "associated new name: method should be named new",
+    );
     c.ast.free();
 }
 
@@ -55,10 +67,16 @@ fn functions_and_expressions() {
     assert(item(&c.ast, 0).as_data.function.generics.len == 1, "functions and expressions: expected one generic");
     assert(item(&c.ast, 0).as_data.function.params.len == 2, "functions and expressions: expected two parameters");
     assert(item(&c.ast, 0).as_data.function.returns.len == 1, "functions and expressions: expected one return");
-    assert(item(&c.ast, 0).as_data.function.where_clause.len == 1, "functions and expressions: expected one where predicate");
+    assert(
+        item(&c.ast, 0).as_data.function.where_clause.len == 1,
+        "functions and expressions: expected one where predicate",
+    );
     let body_id = item(&c.ast, 0).as_data.function.body;
     assert(c.ast.at_const(body_id).kind == NodeKind::NODE_BLOCK, "functions and expressions: expected function block");
-    assert(c.ast.at_const(body_id).as_data.block.statements.len == 6, "functions and expressions: expected 6 statements");
+    assert(
+        c.ast.at_const(body_id).as_data.block.statements.len == 6,
+        "functions and expressions: expected 6 statements",
+    );
     c.ast.free();
 }
 
@@ -68,7 +86,10 @@ fn traits_impls_match_and_new() {
     let mut c = h::parse_ast(src);
     assert(c.errors == 0, "interfaces extensions switch and new parses");
     let root = c.ast.root;
-    assert(c.ast.at_const(root).as_data.program.items.len == 3, "interfaces extensions switch and new: expected 3 items");
+    assert(
+        c.ast.at_const(root).as_data.program.items.len == 3,
+        "interfaces extensions switch and new: expected 3 items",
+    );
     assert(item(&c.ast, 0).kind == NodeKind::NODE_INTERFACE, "expected interface");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_EXTEND, "expected extension");
     assert(item(&c.ast, 2).kind == NodeKind::NODE_FUNCTION, "expected function");
@@ -83,19 +104,40 @@ fn grouped_parameters_and_returns() {
     let root = c.ast.root;
     assert(c.ast.at_const(root).as_data.program.items.len == 5, "grouped parameters and returns: expected 5 functions");
 
-    assert(item(&c.ast, 0).as_data.function.params.len == 4, "grouped parameters and returns: expected 4 slice parameters");
-    assert(item(&c.ast, 0).as_data.function.returns.len == 1, "grouped parameters and returns: expected one slice return");
+    assert(
+        item(&c.ast, 0).as_data.function.params.len == 4,
+        "grouped parameters and returns: expected 4 slice parameters",
+    );
+    assert(
+        item(&c.ast, 0).as_data.function.returns.len == 1,
+        "grouped parameters and returns: expected one slice return",
+    );
 
-    assert(item(&c.ast, 1).as_data.function.params.len == 2, "grouped parameters and returns: expected 2 divmod parameters");
-    assert(item(&c.ast, 1).as_data.function.returns.len == 2, "grouped parameters and returns: expected 2 divmod returns");
+    assert(
+        item(&c.ast, 1).as_data.function.params.len == 2,
+        "grouped parameters and returns: expected 2 divmod parameters",
+    );
+    assert(
+        item(&c.ast, 1).as_data.function.returns.len == 2,
+        "grouped parameters and returns: expected 2 divmod returns",
+    );
     let divmod_body_id = item(&c.ast, 1).as_data.function.body;
     let dbstmts = c.ast.at_const(divmod_body_id).as_data.block.statements;
     let dstmts = c.ast.list(dbstmts);
     let ret_id = unsafe dstmts[0];
-    assert(c.ast.at_const(ret_id).kind == NodeKind::NODE_RETURN, "grouped parameters and returns: expected return statement");
-    assert(c.ast.at_const(ret_id).as_data.return_stmt.values.len == 2, "grouped parameters and returns: expected 2 return values");
+    assert(
+        c.ast.at_const(ret_id).kind == NodeKind::NODE_RETURN,
+        "grouped parameters and returns: expected return statement",
+    );
+    assert(
+        c.ast.at_const(ret_id).as_data.return_stmt.values.len == 2,
+        "grouped parameters and returns: expected 2 return values",
+    );
 
-    assert(item(&c.ast, 2).as_data.function.returns.len == 2, "grouped parameters and returns: expected 2 named returns");
+    assert(
+        item(&c.ast, 2).as_data.function.returns.len == 2,
+        "grouped parameters and returns: expected 2 named returns",
+    );
     let open_rets = item(&c.ast, 2).as_data.function.returns;
     let open_returns = c.ast.list(open_rets);
     let or0 = unsafe open_returns[0];
@@ -106,7 +148,10 @@ fn grouped_parameters_and_returns() {
     assert(item(&c.ast, 3).as_data.function.returns.len == 0, "grouped parameters and returns: expected no log return");
 
     let risky_body_id = item(&c.ast, 4).as_data.function.body;
-    assert(c.ast.at_const(risky_body_id).as_data.block.statements.len == 2, "grouped parameters and returns: expected 2 unsafe statements");
+    assert(
+        c.ast.at_const(risky_body_id).as_data.block.statements.len == 2,
+        "grouped parameters and returns: expected 2 unsafe statements",
+    );
     c.ast.free();
 }
 
@@ -123,7 +168,10 @@ fn precedence() {
         let rvals = c.ast.at_const(ret_id).as_data.return_stmt.values;
         let vals = c.ast.list(rvals);
         let top_id = unsafe vals[0];
-        assert(c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && c.ast.at_const(top_id).as_data.binary.op == TokenType::Plus, "top operator is +");
+        assert(
+            c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && c.ast.at_const(top_id).as_data.binary.op == TokenType::Plus,
+            "top operator is +",
+        );
         let right_id = c.ast.at_const(top_id).as_data.binary.right;
         let left_id = c.ast.at_const(top_id).as_data.binary.left;
         assert(c.ast.at_const(right_id).as_data.binary.op == TokenType::Star, "* is the right child (binds tighter)");
@@ -140,7 +188,10 @@ fn precedence() {
         let rvals = c.ast.at_const(ret_id).as_data.return_stmt.values;
         let vals = c.ast.list(rvals);
         let top_id = unsafe vals[0];
-        assert(c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && c.ast.at_const(top_id).as_data.binary.op == TokenType::Minus, "top operator is -");
+        assert(
+            c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && c.ast.at_const(top_id).as_data.binary.op == TokenType::Minus,
+            "top operator is -",
+        );
         let left_id = c.ast.at_const(top_id).as_data.binary.left;
         assert(c.ast.at_const(left_id).as_data.binary.op == TokenType::Minus, "- is left-associative (left child is -)");
         c.ast.free();
@@ -153,11 +204,17 @@ fn generic_shift_split() {
     let mut c = h::parse_ast("type Nested = Vec<Vec<i32>>;\n");
     assert(c.errors == 0, "generic >> split parses");
     let outer_id = item(&c.ast, 0).as_data.type_alias.ty;
-    assert(c.ast.at_const(outer_id).kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(outer_id).as_data.type_path.args.len == 1, "outer Vec has one type argument");
+    assert(
+        c.ast.at_const(outer_id).kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(outer_id).as_data.type_path.args.len == 1,
+        "outer Vec has one type argument",
+    );
     let outer_args = c.ast.at_const(outer_id).as_data.type_path.args;
     let args = c.ast.list(outer_args);
     let inner_id = unsafe args[0];
-    assert(c.ast.at_const(inner_id).kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(inner_id).as_data.type_path.args.len == 1, "inner Vec<i32> parsed (>> was split)");
+    assert(
+        c.ast.at_const(inner_id).kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(inner_id).as_data.type_path.args.len == 1,
+        "inner Vec<i32> parsed (>> was split)",
+    );
     c.ast.free();
 }
 
@@ -239,7 +296,10 @@ fn closures() {
         let wbounds = c.ast.at_const(wp_id).as_data.where_predicate.bounds;
         let wbids = c.ast.list(wbounds);
         let wb0 = unsafe wbids[0];
-        assert(wbounds.len == 1 && c.ast.at_const(wb0).kind == NodeKind::NODE_FUNCTION_TYPE, "`where F: fn(..) ..` parses");
+        assert(
+            wbounds.len == 1 && c.ast.at_const(wb0).kind == NodeKind::NODE_FUNCTION_TYPE,
+            "`where F: fn(..) ..` parses",
+        );
         assert(!c.ast.at_const(wb0).as_data.function_type.is_move, "a plain fn bound is not `move`");
         c.ast.free();
     }
@@ -251,7 +311,10 @@ fn closures() {
         let gbounds = c.ast.at_const(gp_id).as_data.generic_param.bounds;
         let gbids = c.ast.list(gbounds);
         let gb0 = unsafe gbids[0];
-        assert(gbounds.len == 1 && c.ast.at_const(gb0).kind == NodeKind::NODE_FUNCTION_TYPE && c.ast.at_const(gb0).as_data.function_type.is_move, "`fn move(..) ..` parses with the move flag");
+        assert(
+            gbounds.len == 1 && c.ast.at_const(gb0).kind == NodeKind::NODE_FUNCTION_TYPE && c.ast.at_const(gb0).as_data.function_type.is_move,
+            "`fn move(..) ..` parses with the move flag",
+        );
         c.ast.free();
     }
     // `&dyn I` / `&mut dyn I` fold into ONE NODE_DYN_TYPE; the qualifier carries the flavor.
@@ -261,9 +324,18 @@ fn closures() {
         let d0 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 0);
         let d1 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 1);
         let d2 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 2);
-        assert(d0 != NODE_NONE && c.ast.at_const(d0).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_CONST, "`&dyn I` is one DYN_TYPE node (const flavor)");
-        assert(d1 != NODE_NONE && c.ast.at_const(d1).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT, "`&mut dyn I` carries the mut flavor");
-        assert(d2 != NODE_NONE && c.ast.at_const(d2).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE, "`Box<dyn I>`'s argument parses with the owned flavor");
+        assert(
+            d0 != NODE_NONE && c.ast.at_const(d0).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_CONST,
+            "`&dyn I` is one DYN_TYPE node (const flavor)",
+        );
+        assert(
+            d1 != NODE_NONE && c.ast.at_const(d1).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT,
+            "`&mut dyn I` carries the mut flavor",
+        );
+        assert(
+            d2 != NODE_NONE && c.ast.at_const(d2).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE,
+            "`Box<dyn I>`'s argument parses with the owned flavor",
+        );
         assert(h::nth_kind(&c.ast, NodeKind::NODE_REFERENCE_TYPE, 0) == NODE_NONE, "no reference node wraps a dyn type");
         c.ast.free();
     }
@@ -273,7 +345,10 @@ fn closures() {
         assert(c.errors == 0, "dyn fn type parses");
         let d0 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 0);
         let inner_ty = c.ast.at_const(d0).as_data.indirect_type.ty;
-        assert(d0 != NODE_NONE && c.ast.at_const(inner_ty).kind == NodeKind::NODE_FUNCTION_TYPE, "`&dyn fn(..) ..` parses as DYN_TYPE over FUNCTION_TYPE");
+        assert(
+            d0 != NODE_NONE && c.ast.at_const(inner_ty).kind == NodeKind::NODE_FUNCTION_TYPE,
+            "`&dyn fn(..) ..` parses as DYN_TYPE over FUNCTION_TYPE",
+        );
         c.ast.free();
     }
 }
@@ -303,16 +378,27 @@ fn bare_conditions_and_ranges() {
     let s2 = unsafe stmts[2];
     let it2 = c.ast.at_const(s2).as_data.for_stmt.iterable;
     assert(c.ast.at_const(it2).kind == NodeKind::NODE_RANGE, "0..10 iterable is NODE_RANGE");
-    assert(c.ast.at_const(it2).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it2).as_data.pattern_range.end != NODE_NONE && !c.ast.at_const(it2).as_data.pattern_range.inclusive, "0..10 is an exclusive range with both bounds");
+    assert(
+        c.ast.at_const(it2).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it2).as_data.pattern_range.end != NODE_NONE && !c.ast.at_const(
+            it2,
+        ).as_data.pattern_range.inclusive,
+        "0..10 is an exclusive range with both bounds",
+    );
     let s3 = unsafe stmts[3];
     let it3 = c.ast.at_const(s3).as_data.for_stmt.iterable;
     assert(c.ast.at_const(it3).as_data.pattern_range.inclusive, "1..=5 is inclusive");
     let s4 = unsafe stmts[4];
     let it4 = c.ast.at_const(s4).as_data.for_stmt.iterable;
-    assert(c.ast.at_const(it4).as_data.pattern_range.start == NODE_NONE && c.ast.at_const(it4).as_data.pattern_range.end != NODE_NONE, "..4 has no start");
+    assert(
+        c.ast.at_const(it4).as_data.pattern_range.start == NODE_NONE && c.ast.at_const(it4).as_data.pattern_range.end != NODE_NONE,
+        "..4 has no start",
+    );
     let s5 = unsafe stmts[5];
     let it5 = c.ast.at_const(s5).as_data.for_stmt.iterable;
-    assert(c.ast.at_const(it5).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it5).as_data.pattern_range.end == NODE_NONE, "6.. has no end");
+    assert(
+        c.ast.at_const(it5).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it5).as_data.pattern_range.end == NODE_NONE,
+        "6.. has no end",
+    );
     c.ast.free();
 
     assert(h::parse_has_error("fn f() void { for i in .. { } }\n"), "bare '..' range is rejected");
@@ -329,7 +415,10 @@ fn question_operator_parse() {
     let stmts = c.ast.list(bstmts);
     let let_id = unsafe stmts[0];
     let val_id = c.ast.at_const(let_id).as_data.let_stmt.value;
-    assert(c.ast.at_const(val_id).kind == NodeKind::NODE_UNARY && c.ast.at_const(val_id).as_data.unary.op == TokenType::Question, "g()? parses to a NODE_UNARY with op '?'");
+    assert(
+        c.ast.at_const(val_id).kind == NodeKind::NODE_UNARY && c.ast.at_const(val_id).as_data.unary.op == TokenType::Question,
+        "g()? parses to a NODE_UNARY with op '?'",
+    );
     let operand_id = c.ast.at_const(val_id).as_data.unary.operand;
     assert(c.ast.at_const(operand_id).kind == NodeKind::NODE_CALL, "the `?` operand is the call g()");
     c.ast.free();
@@ -347,10 +436,18 @@ fn range_value_expression() {
     let s0 = unsafe stmts[0];
     let av_id = c.ast.at_const(s0).as_data.let_stmt.value;
     assert(c.ast.at_const(av_id).kind == NodeKind::NODE_RANGE, "let a = 1..5 -> NODE_RANGE value");
-    assert(c.ast.at_const(av_id).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(av_id).as_data.pattern_range.end != NODE_NONE && !c.ast.at_const(av_id).as_data.pattern_range.inclusive, "1..5 has both bounds, exclusive");
+    assert(
+        c.ast.at_const(av_id).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(av_id).as_data.pattern_range.end != NODE_NONE && !c.ast.at_const(
+            av_id,
+        ).as_data.pattern_range.inclusive,
+        "1..5 has both bounds, exclusive",
+    );
     let s1 = unsafe stmts[1];
     let bv_id = c.ast.at_const(s1).as_data.let_stmt.value;
-    assert(c.ast.at_const(bv_id).kind == NodeKind::NODE_RANGE && c.ast.at_const(bv_id).as_data.pattern_range.inclusive, "0..=9 is an inclusive NODE_RANGE value");
+    assert(
+        c.ast.at_const(bv_id).kind == NodeKind::NODE_RANGE && c.ast.at_const(bv_id).as_data.pattern_range.inclusive,
+        "0..=9 is an inclusive NODE_RANGE value",
+    );
     c.ast.free();
 }
 
@@ -372,24 +469,42 @@ fn switch_pattern_ranges() {
     let arms = c.ast.list(arms_list);
     let a0 = unsafe arms[0];
     let p0 = c.ast.at_const(a0).as_data.match_arm.pattern;
-    assert(c.ast.at_const(p0).kind == NodeKind::NODE_PATTERN_RANGE && !c.ast.at_const(p0).as_data.pattern_range.inclusive, "10..20 is an exclusive pattern range");
-    assert(c.ast.at_const(p0).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(p0).as_data.pattern_range.end != NODE_NONE, "10..20 has both bounds");
+    assert(
+        c.ast.at_const(p0).kind == NodeKind::NODE_PATTERN_RANGE && !c.ast.at_const(p0).as_data.pattern_range.inclusive,
+        "10..20 is an exclusive pattern range",
+    );
+    assert(
+        c.ast.at_const(p0).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(p0).as_data.pattern_range.end != NODE_NONE,
+        "10..20 has both bounds",
+    );
     let a1 = unsafe arms[1];
     let p1 = c.ast.at_const(a1).as_data.match_arm.pattern;
-    assert(c.ast.at_const(p1).kind == NodeKind::NODE_PATTERN_RANGE && c.ast.at_const(p1).as_data.pattern_range.inclusive, "20..=30 is inclusive");
+    assert(
+        c.ast.at_const(p1).kind == NodeKind::NODE_PATTERN_RANGE && c.ast.at_const(p1).as_data.pattern_range.inclusive,
+        "20..=30 is inclusive",
+    );
     let a2 = unsafe arms[2];
     let p2 = c.ast.at_const(a2).as_data.match_arm.pattern;
-    assert(c.ast.at_const(p2).as_data.pattern_range.start == NODE_NONE && c.ast.at_const(p2).as_data.pattern_range.end != NODE_NONE, "..5 has no start");
+    assert(
+        c.ast.at_const(p2).as_data.pattern_range.start == NODE_NONE && c.ast.at_const(p2).as_data.pattern_range.end != NODE_NONE,
+        "..5 has no start",
+    );
     let a3 = unsafe arms[3];
     let p3 = c.ast.at_const(a3).as_data.match_arm.pattern;
-    assert(c.ast.at_const(p3).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(p3).as_data.pattern_range.end == NODE_NONE, "99.. has no end");
+    assert(
+        c.ast.at_const(p3).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(p3).as_data.pattern_range.end == NODE_NONE,
+        "99.. has no end",
+    );
     let a4 = unsafe arms[4];
     let p4 = c.ast.at_const(a4).as_data.match_arm.pattern;
     assert(c.ast.at_const(p4).kind == NodeKind::NODE_PATTERN_WILDCARD, "_ is a wildcard");
     c.ast.free();
 
     assert(h::parse_has_error("fn f(n: i32) i32 { return switch n { .. => 1, }; }\n"), "bare '..' pattern is rejected");
-    assert(h::parse_has_error("fn f(n: i32) i32 { return switch n { 0..= => 1, }; }\n"), "inclusive pattern without an end is rejected");
+    assert(
+        h::parse_has_error("fn f(n: i32) i32 { return switch n { 0..= => 1, }; }\n"),
+        "inclusive pattern without an end is rejected",
+    );
 }
 
 // `pub` sets is_public on structs, functions, methods, and fields; its absence leaves them private.
@@ -398,7 +513,10 @@ fn pub_modifiers() {
     let src = "pub struct S { pub x: i32, y: i32, }\nextend S { pub fn shown() {} fn hidden() {} }\npub fn f() {}\nfn g() {}\npub enum E { A, B }\nenum F { C }\npub const K: i32 = 1;\nconst L: i32 = 2;\npub type Ta = i32;\ntype Tb = i32;\n";
     let mut c = h::parse_ast(src);
     assert(c.errors == 0, "pub modifiers parses");
-    assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT && item(&c.ast, 0).as_data.aggregate.is_public, "pub struct is public");
+    assert(
+        item(&c.ast, 0).kind == NodeKind::NODE_STRUCT && item(&c.ast, 0).as_data.aggregate.is_public,
+        "pub struct is public",
+    );
     let members = item(&c.ast, 0).as_data.aggregate.members;
     let fields = c.ast.list(members);
     let f0 = unsafe fields[0];
@@ -413,12 +531,30 @@ fn pub_modifiers() {
     assert(!c.ast.at_const(m1).as_data.function.is_public, "non-pub method is private");
     assert(item(&c.ast, 2).as_data.function.is_public, "pub fn is public");
     assert(!item(&c.ast, 3).as_data.function.is_public, "non-pub fn is private");
-    assert(item(&c.ast, 4).kind == NodeKind::NODE_ENUM && item(&c.ast, 4).as_data.aggregate.is_public, "pub enum is public");
-    assert(item(&c.ast, 5).kind == NodeKind::NODE_ENUM && !item(&c.ast, 5).as_data.aggregate.is_public, "non-pub enum is private");
-    assert(item(&c.ast, 6).kind == NodeKind::NODE_CONST && item(&c.ast, 6).as_data.const_def.is_public, "pub const is public");
-    assert(item(&c.ast, 7).kind == NodeKind::NODE_CONST && !item(&c.ast, 7).as_data.const_def.is_public, "non-pub const is private");
-    assert(item(&c.ast, 8).kind == NodeKind::NODE_TYPE_ALIAS && item(&c.ast, 8).as_data.type_alias.is_public, "pub type is public");
-    assert(item(&c.ast, 9).kind == NodeKind::NODE_TYPE_ALIAS && !item(&c.ast, 9).as_data.type_alias.is_public, "non-pub type is private");
+    assert(
+        item(&c.ast, 4).kind == NodeKind::NODE_ENUM && item(&c.ast, 4).as_data.aggregate.is_public,
+        "pub enum is public",
+    );
+    assert(
+        item(&c.ast, 5).kind == NodeKind::NODE_ENUM && !item(&c.ast, 5).as_data.aggregate.is_public,
+        "non-pub enum is private",
+    );
+    assert(
+        item(&c.ast, 6).kind == NodeKind::NODE_CONST && item(&c.ast, 6).as_data.const_def.is_public,
+        "pub const is public",
+    );
+    assert(
+        item(&c.ast, 7).kind == NodeKind::NODE_CONST && !item(&c.ast, 7).as_data.const_def.is_public,
+        "non-pub const is private",
+    );
+    assert(
+        item(&c.ast, 8).kind == NodeKind::NODE_TYPE_ALIAS && item(&c.ast, 8).as_data.type_alias.is_public,
+        "pub type is public",
+    );
+    assert(
+        item(&c.ast, 9).kind == NodeKind::NODE_TYPE_ALIAS && !item(&c.ast, 9).as_data.type_alias.is_public,
+        "non-pub type is private",
+    );
     c.ast.free();
     assert(h::parse_has_error("pub let x: i32 = 1;\n"), "pub before a non-item is rejected");
 }

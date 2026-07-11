@@ -12,7 +12,6 @@ pub struct StaticVector<T, const N: usize> {
 }
 
 extend<T, const N: usize> StaticVector<T, N> {
-
     // Empty vector. The unused slots hold no elements (they are never read or freed).
     pub fn new() StaticVector<T, N> {
         let mut v = StaticVector::<T, N> {};
@@ -38,7 +37,9 @@ extend<T, const N: usize> StaticVector<T, N> {
 
     // Append `value`. Panics when the N slots are exhausted -- the capacity is fixed.
     pub fn push(self: &mut StaticVector<T, N>, value: T) {
-        if self.len == N { panic("StaticVector::push on a full vector"); }
+        if self.len == N {
+            panic("StaticVector::push on a full vector");
+        }
         let p = (&mut self.data[0]) as *mut T;
         unsafe p[self.len] = value;
         self.len = self.len + 1;
@@ -109,7 +110,9 @@ extend<T, const N: usize> StaticVector<T, N> {
 
     // Insert `value` at `index`, shifting later elements right. `index` must be <= len; panics when full.
     pub fn insert(self: &mut StaticVector<T, N>, index: usize, value: T) {
-        if self.len == N { panic("StaticVector::insert on a full vector"); }
+        if self.len == N {
+            panic("StaticVector::insert on a full vector");
+        }
         let p = (&mut self.data[0]) as *mut T;
         let mut i = self.len;
         while i > index {
@@ -229,7 +232,9 @@ extend<T: Free, const N: usize> StaticVector<T, N> as Free {
 
 // Standard-interface conformances.
 extend<T, const N: usize> StaticVector<T, N> as Default {
-    pub fn default() StaticVector<T, N> { return StaticVector::<T, N>::new(); }
+    pub fn default() StaticVector<T, N> {
+        return StaticVector::<T, N>::new();
+    }
 }
 
 // Equality-based algorithms (available when the element type is `Eq`).
@@ -237,7 +242,9 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub fn contains(self: &StaticVector<T, N>, x: &T) bool {
         for i in 0..self.len {
-            if self.data[i].eq(x) { return true; }
+            if self.data[i].eq(x) {
+                return true;
+            }
         }
         return false;
     }
@@ -245,7 +252,9 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     // Index of the first element equal to `x`, or `None`.
     pub fn position(self: &StaticVector<T, N>, x: &T) Option<usize> {
         for i in 0..self.len {
-            if self.data[i].eq(x) { return Option::<usize>::Some(i); }
+            if self.data[i].eq(x) {
+                return Option::<usize>::Some(i);
+            }
         }
         return Option::<usize>::None;
     }
@@ -253,7 +262,9 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     // Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
     // are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
     pub fn dedup(self: &mut StaticVector<T, N>) {
-        if self.len < 2 { return; }
+        if self.len < 2 {
+            return;
+        }
         let p = (&mut self.data[0]) as *mut T;
         let mut w: usize = 1;
         let mut r: usize = 1;
@@ -274,10 +285,14 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
 extend<T: Ord, const N: usize> StaticVector<T, N> {
     // True if the elements are in non-decreasing order (per `Ord`).
     pub fn is_sorted(self: &StaticVector<T, N>) bool {
-        if self.len < 2 { return true; }
+        if self.len < 2 {
+            return true;
+        }
         let mut i: usize = 0;
         while i + 1 < self.len {
-            if self.data[i].cmp(&self.data[i + 1]) > 0 { return false; }
+            if self.data[i].cmp(&self.data[i + 1]) > 0 {
+                return false;
+            }
             i = i + 1;
         }
         return true;
@@ -291,8 +306,14 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let c = self.data[mid].cmp(x);
-            if c == 0 { return Result::<usize, usize>::Ok(mid); }
-            if c < 0 { lo = mid + 1; } else { hi = mid; }
+            if c == 0 {
+                return Result::<usize, usize>::Ok(mid);
+            }
+            if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
         return Result::<usize, usize>::Err(lo);
     }
@@ -302,8 +323,12 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && self.data[child].cmp(&self.data[child + 1]) < 0 { child = child + 1; }
-            if self.data[r].cmp(&self.data[child]) >= 0 { return; }
+            if child + 1 < end && self.data[child].cmp(&self.data[child + 1]) < 0 {
+                child = child + 1;
+            }
+            if self.data[r].cmp(&self.data[child]) >= 0 {
+                return;
+            }
             self.swap(r, child);
             r = child;
             child = 2 * r + 1;
@@ -313,7 +338,9 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
     // Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
     pub fn sort(self: &mut StaticVector<T, N>) {
         let n = self.len;
-        if n < 2 { return; }
+        if n < 2 {
+            return;
+        }
         let mut start = n / 2;
         while start > 0 {
             start = start - 1;
@@ -335,27 +362,40 @@ extend<T, const N: usize> StaticVector<T, N> {
     // generic method with its own F is not transitively instantiated yet.
     pub fn sort_by<F: fn(&T, &T) i32>(self: &mut StaticVector<T, N>, cmp: F) {
         let n = self.len;
-        if n < 2 { return; }
+        if n < 2 {
+            return;
+        }
         let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
         let mut start = n / 2;
         let mut end = n;
         loop {
             let mut r: usize = 0;
             if phase == 0 {
-                if start == 0 { phase = 1; continue; }
+                if start == 0 {
+                    phase = 1;
+                    continue;
+                }
                 start = start - 1;
                 r = start;
             } else {
-                if end <= 1 { break; }
+                if end <= 1 {
+                    break;
+                }
                 end = end - 1;
                 self.swap(0, end);
             }
             let mut lim = n;
-            if phase == 1 { lim = end; }
+            if phase == 1 {
+                lim = end;
+            }
             let mut child = 2 * r + 1;
             while child < lim {
-                if child + 1 < lim && cmp(&self.data[child], &self.data[child + 1]) < 0 { child = child + 1; }
-                if cmp(&self.data[r], &self.data[child]) >= 0 { break; }
+                if child + 1 < lim && cmp(&self.data[child], &self.data[child + 1]) < 0 {
+                    child = child + 1;
+                }
+                if cmp(&self.data[r], &self.data[child]) >= 0 {
+                    break;
+                }
                 self.swap(r, child);
                 r = child;
                 child = 2 * r + 1;
@@ -366,14 +406,18 @@ extend<T, const N: usize> StaticVector<T, N> {
     // Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`).
     pub fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut StaticVector<T, N>, key: F) {
         let n = self.len;
-        if n < 2 { return; }
+        if n < 2 {
+            return;
+        }
         let mut i: usize = 1; // insertion sort through swaps: key extraction stays borrow-only
         while i < n {
             let mut j = i;
             while j > 0 {
                 let prev = key(&self.data[j - 1]);
                 let cur = key(&self.data[j]);
-                if prev.cmp(&cur) <= 0 { break; }
+                if prev.cmp(&cur) <= 0 {
+                    break;
+                }
                 self.swap(j - 1, j);
                 j = j - 1;
             }
@@ -391,8 +435,12 @@ extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
         return &self.data[i];
     }
     pub fn index_range(self: &StaticVector<T, N>, r: Range<usize>) []T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
-        return Slice::<T> { ptr: unsafe (self.as_ptr() + r.start), len: hi - r.start, };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
+        return Slice::<T> { ptr: unsafe (self.as_ptr() + r.start), len: hi - r.start };
     }
 }
 
@@ -404,9 +452,13 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
         return &mut self.data[i];
     }
     pub fn index_range_mut(self: &mut StaticVector<T, N>, r: Range<usize>) []mut T {
-        let hi = if r.inclusive { r.end + 1; } else { r.end; };
+        let hi = if r.inclusive {
+            r.end + 1;
+        } else {
+            r.end;
+        };
         let p = (&mut self.data[0]) as *mut T;
-        return SliceMut::<T> { ptr: unsafe (p + r.start), len: hi - r.start, };
+        return SliceMut::<T> { ptr: unsafe (p + r.start), len: hi - r.start };
     }
 }
 
@@ -426,11 +478,15 @@ extend<T: Clone, const N: usize> StaticVector<T, N> as Clone {
 
 extend<T: Eq, const N: usize> StaticVector<T, N> as Eq {
     pub fn eq(self: &StaticVector<T, N>, other: &StaticVector<T, N>) bool {
-        if self.len != other.len { return false; }
+        if self.len != other.len {
+            return false;
+        }
         for i in 0..self.len {
             let a = self.at(i);
             let b = other.at(i);
-            if !a.eq(b) { return false; }
+            if !a.eq(b) {
+                return false;
+            }
         }
         return true;
     }
@@ -453,7 +509,9 @@ extend<T: Format, const N: usize> StaticVector<T, N> as Format {
     pub fn fmt(self: &StaticVector<T, N>) String {
         let mut s = String::from_str("[");
         for i in 0..self.len {
-            if i > 0 { s.push_str(", "); }
+            if i > 0 {
+                s.push_str(", ");
+            }
             let e = self.at(i);
             let es = e.fmt();
             s.push_string(&es);

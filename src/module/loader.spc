@@ -85,24 +85,34 @@ pub struct DirCache {
 }
 
 // The parse pipeline's result: an Ast plus whether lex/parse succeeded (mirrors the C `Ast*`/NULL return).
-pub struct ParseResult { pub ast: Ast, pub ok: bool }
+pub struct ParseResult {
+    pub ast: Ast,
+    pub ok: bool,
+}
 
 // The bytes of a file plus their length; `ptr == null` signals any I/O error (mirrors read_file's NULL).
 
 // A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
-pub struct LookupHit { pub node: NodeId, pub mid: ModuleId }
+pub struct LookupHit {
+    pub node: NodeId,
+    pub mid: ModuleId,
+}
 
 // One entry in a module's public-decl name index (LD-2): the decl node to return plus the source span of its
 // name, kept so a lookup can VERIFY the name bytes match (guarding against the ~impossible 64-bit hash
 // collision — on a verify miss we fall back to the linear scan, so the result is always exact).
-pub struct LkEnt { pub node: NodeId, pub start: u32, pub len: u32 }
+pub struct LkEnt {
+    pub node: NodeId,
+    pub start: u32,
+    pub len: u32,
+}
 
 // FNV-1a over a name's bytes; the per-module lookup index keys on `fnv_name(name)*2 + is_type`.
 fn fnv_name(name: str) u64 {
     let p = name.ptr();
     let mut h: u64 = 1469598103934665603u64;
     for i in 0..name.len() {
-        h = h ^ (unsafe p[i as usize] as u64);
+        h = h ^ unsafe p[i as usize] as u64;
         h = h * 1099511628211u64;
     }
     return h;
@@ -115,7 +125,9 @@ fn fnv_name(name: str) u64 {
 // True if `path` names something that can be opened for reading (replaces access(path, F_OK)).
 fn path_exists(path: str) bool {
     let f = stdio::fopen(path, "rb");
-    if f == null { return false; }
+    if f == null {
+        return false;
+    }
     unsafe stdio::fclose(f);
     return true;
 }
@@ -123,14 +135,25 @@ fn path_exists(path: str) bool {
 // Read a whole file into a NUL-terminated, heap-allocated buffer; ptr==null on any I/O error.
 pub fn read_file(path: str) Option<String> {
     let f = stdio::fopen(path, "rb");
-    if f == null { return Option::<String>::None; }
-    if unsafe stdio::fseek(f, 0, SEEK_END) != 0 { unsafe stdio::fclose(f); return Option::<String>::None; }
+    if f == null {
+        return Option::<String>::None;
+    }
+    if unsafe stdio::fseek(f, 0, SEEK_END) != 0 {
+        unsafe stdio::fclose(f);
+        return Option::<String>::None;
+    }
     let s = unsafe stdio::ftell(f);
     unsafe stdio::rewind(f);
-    if s < 0 { unsafe stdio::fclose(f); return Option::<String>::None; }
+    if s < 0 {
+        unsafe stdio::fclose(f);
+        return Option::<String>::None;
+    }
     let sz = s as usize;
     let buf = unsafe stdlib::malloc(sz + 1) as *mut char;
-    if buf == null { unsafe stdio::fclose(f); return Option::<String>::None; }
+    if buf == null {
+        unsafe stdio::fclose(f);
+        return Option::<String>::None;
+    }
     let n = unsafe stdio::fread(buf as *mut void, 1, sz, f);
     if n != sz && unsafe stdio::ferror(f) != 0 {
         unsafe stdlib::free(buf as *mut void);
@@ -153,8 +176,15 @@ fn dir_of(path: str) String {
     let n = path.len();
     let mut slash: i64 = -1;
     let mut i: usize = 0;
-    while i < n { if path.byte_at(i) == '/' as u8 { slash = i as i64; } i = i + 1; }
-    if slash < 0 { return String::from_str("."); }
+    while i < n {
+        if path.byte_at(i) == '/' as u8 {
+            slash = i as i64;
+        }
+        i = i + 1;
+    }
+    if slash < 0 {
+        return String::from_str(".");
+    }
     return String::from_str(path.slice(0, slash as usize));
 }
 
@@ -163,11 +193,25 @@ fn stem_of(path: str) String {
     let n = path.len();
     let mut bstart: usize = 0;
     let mut i: usize = 0;
-    while i < n { if path.byte_at(i) == '/' as u8 { bstart = i + 1; } i = i + 1; }
+    while i < n {
+        if path.byte_at(i) == '/' as u8 {
+            bstart = i + 1;
+        }
+        i = i + 1;
+    }
     let mut dot: i64 = -1;
     i = bstart;
-    while i < n { if path.byte_at(i) == '.' as u8 { dot = i as i64; } i = i + 1; }
-    let end = if dot >= 0 { dot as usize; } else { n; };
+    while i < n {
+        if path.byte_at(i) == '.' as u8 {
+            dot = i as i64;
+        }
+        i = i + 1;
+    }
+    let end = if dot >= 0 {
+        dot as usize;
+    } else {
+        n;
+    };
     return String::from_str(path.slice(bstart, end));
 }
 
@@ -177,7 +221,9 @@ fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
     let mut out = String::new();
     let mut i: u32 = 0;
     while i < parts.len {
-        if i != 0 { out.push_str(sep); }
+        if i != 0 {
+            out.push_str(sep);
+        }
         let sp = ast.at_const(unsafe ids[i as usize]).as_data.name.text;
         out.push_str(src.slice(sp.start as usize, sp.end as usize));
         i = i + 1;
@@ -205,11 +251,19 @@ fn join2(a: str, b: str) String {
 
 extend DirCache {
     pub fn new() DirCache {
-        return DirCache { dirs: Vector::<String>::new(), entries: Vector::<Vector<String>>::new(), ok: Vector::<bool>::new() };
+        return DirCache {
+            dirs: Vector::<String>::new(),
+            entries: Vector::<Vector<String>>::new(),
+            ok: Vector::<bool>::new(),
+        };
     }
     // Index of `dir` in the cache, scanning (opendir/readdir) it once on first request.
     fn index_of(self: &mut Self, dir: str) usize {
-        for i in 0..self.dirs.len() { if self.dirs[i].as_str() == dir { return i; } }
+        for i in 0..self.dirs.len() {
+            if self.dirs[i].as_str() == dir {
+                return i;
+            }
+        }
         let mut names = Vector::<String>::new();
         let mut dok = false;
         let mut db = RealBuf {};
@@ -222,7 +276,9 @@ extend DirCache {
                 dok = true;
                 loop {
                     let e = unsafe shim::sc_readdir(d);
-                    if e == null { break; }
+                    if e == null {
+                        break;
+                    }
                     names.push(String::from_cstr(unsafe shim::sc_dirent_name(e)));
                 }
                 let _ = unsafe shim::sc_closedir(d);
@@ -240,14 +296,27 @@ extend DirCache {
         let n = path.len();
         let mut slash: i64 = -1;
         let mut i: usize = 0;
-        while i < n { if path.byte_at(i) == '/' as u8 { slash = i as i64; } i = i + 1; }
-        if slash < 0 { return path_exists(path); }
+        while i < n {
+            if path.byte_at(i) == '/' as u8 {
+                slash = i as i64;
+            }
+            i = i + 1;
+        }
+        if slash < 0 {
+            return path_exists(path);
+        }
         let dir = path.slice(0, slash as usize);
-        let file = path.slice((slash as usize) + 1, n);
+        let file = path.slice(slash as usize + 1, n);
         let idx = self.index_of(dir);
-        if !self.ok[idx] { return false; }
+        if !self.ok[idx] {
+            return false;
+        }
         let ents = self.entries.at(idx);
-        for k in 0..ents.len() { if ents[k].as_str() == file { return true; } }
+        for k in 0..ents.len() {
+            if ents[k].as_str() == file {
+                return true;
+            }
+        }
         return path_exists(path);
     }
 }
@@ -265,12 +334,18 @@ extend DirCache as Free {
 fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
     let dc = dca as *mut DirCache;
     let root_rel = module_file_path(root_dir, &*ast, src, parts);
-    if unsafe (*dc).exists(root_rel.as_str()) || std_root.is_empty() { return root_rel; }
+    if unsafe (*dc).exists(root_rel.as_str()) || std_root.is_empty() {
+        return root_rel;
+    }
     let std_rel = module_file_path(std_root, &*ast, src, parts);
-    if unsafe (*dc).exists(std_rel.as_str()) { return std_rel; }
+    if unsafe (*dc).exists(std_rel.as_str()) {
+        return std_rel;
+    }
     let ffi_base = join2(std_root, "ffi");
     let ffi_rel = module_file_path(ffi_base.as_str(), &*ast, src, parts);
-    if unsafe (*dc).exists(ffi_rel.as_str()) { return ffi_rel; }
+    if unsafe (*dc).exists(ffi_rel.as_str()) {
+        return ffi_rel;
+    }
     return root_rel;
 }
 
@@ -331,26 +406,26 @@ extend Package {
     // stage is holding it, else the module's own held Ast. Callers that read a module's Ast for a lookup
     // during resolve/typecheck must go through this so the current module resolves against the real Ast.
     fn module_ast_ptr(self: &Self, mid: ModuleId) *const Ast {
-        if mid == self.override_mod && self.override_ast != null { return self.override_ast as *const Ast; }
+        if mid == self.override_mod && self.override_ast != null {
+            return self.override_ast as *const Ast;
+        }
         return (&self.modules[mid as usize].ast) as *const Ast;
     }
 
     // Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
     pub fn find(self: &Self, path: str) i32 {
         for i in 0..self.modules.len() {
-            if self.modules[i].path.as_str() == path { return i as i32; }
+            if self.modules[i].path.as_str() == path {
+                return i as i32;
+            }
         }
         return -1;
     }
 
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
-    fn add_module(self: &mut Self, path: String, file: String, source: String,
-        ast: Ast, has_ast: bool) i32 {
+    fn add_module(self: &mut Self, path: String, file: String, source: String, ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
-        self.modules.push(Module {
-                path: path, file: file, source: source,
-                ast: ast, has_ast: has_ast, prelude: false,
-            });
+        self.modules.push(Module { path: path, file: file, source: source, ast: ast, has_ast: has_ast, prelude: false });
         return id;
     }
 
@@ -359,14 +434,24 @@ extend Package {
     // any resolution, so mutual imports need no special handling.
     fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool) i32 {
         let existing = self.find(mod_path);
-        if existing >= 0 { return existing; }
+        if existing >= 0 {
+            return existing;
+        }
 
         let mut source = String::new();
         switch read_file(file_path) {
-            Some(s) => { source = s; },
+            Some(s) => {
+                source = s;
+            },
             None => {
-                unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%.*s' (%.*s)\n".ptr() as *const char,
-                    mod_path.len() as i32, mod_path.ptr(), file_path.len() as i32, file_path.ptr());
+                unsafe stdio::fprintf(
+                    stdio::stderr(),
+                    "error: cannot open module '%.*s' (%.*s)\n".ptr() as *const char,
+                    mod_path.len() as i32,
+                    mod_path.ptr(),
+                    file_path.len() as i32,
+                    file_path.ptr(),
+                );
                 self.ok = false;
                 return -1;
             },
@@ -378,7 +463,9 @@ extend Package {
         if fl < 4096 {
             unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, file_path.ptr() as *const void, fl);
             unsafe fb.b[fl] = 0 as char;
-        } else { unsafe fb.b[0] = 0 as char; }
+        } else {
+            unsafe fb.b[0] = 0 as char;
+        }
         let parsed = parse_source(&mut source, (&fb.b[0]) as *const char, bootstrap_tags);
         let ok = parsed.ok;
         let id = self.add_module(String::from_str(mod_path), String::from_str(file_path), source, parsed.ast, ok);
@@ -430,14 +517,15 @@ extend Package {
     pub fn seed_core(self: &mut Self) void {
         self.core_seeded = false;
         for i in 0..self.modules.len() {
-            let is_core = self.modules[i].has_ast
-                && self.modules[i].path.as_str() == "__std::core";
+            let is_core = self.modules[i].has_ast && self.modules[i].path.as_str() == "__std::core";
             if is_core {
                 for b in 0..BT_COUNT_N {
-                    let id = self.modules[i].ast.add(Node {
+                    let id = self.modules[i].ast.add(
+                        Node {
                             kind: NodeKind::NODE_STRUCT,
                             as_data: NodeAs { aggregate: AggregateData { name: NODE_NONE, is_public: true } },
-                        });
+                        },
+                    );
                     self.builtin_decls[b] = id;
                 }
                 self.core_module = i as ModuleId;
@@ -449,35 +537,53 @@ extend Package {
 
     // The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins weren't seeded.
     pub fn builtin_decl(self: &Self, b: BuiltinType) NodeId {
-        if self.core_seeded && (b as usize) < BT_COUNT_N { return self.builtin_decls[b as usize]; }
+        if self.core_seeded && b as usize < BT_COUNT_N {
+            return self.builtin_decls[b as usize];
+        }
         return NODE_NONE;
     }
 
     // If (module, node) names a builtin's synthetic core decl, its BuiltinType; else -1.
     pub fn builtin_of_decl(self: &Self, module: ModuleId, node: NodeId) i32 {
-        if !self.core_seeded || module != self.core_module || node == NODE_NONE { return -1; }
+        if !self.core_seeded || module != self.core_module || node == NODE_NONE {
+            return -1;
+        }
         for b in 0..BT_COUNT_N {
-            if self.builtin_decls[b] == node { return b as i32; }
+            if self.builtin_decls[b] == node {
+                return b as i32;
+            }
         }
         return -1;
     }
 
     // Record / test a method DefId as referenced, for demand-driven instance-method emission.
     pub fn mark_method_used(self: &mut Self, d: DefId) void {
-        if d.node == NODE_NONE { return; }
+        if d.node == NODE_NONE {
+            return;
+        }
         let m = d.module as usize;
-        while self.method_used.len() <= m { self.method_used.push(Vector::<bool>::new()); }
+        while self.method_used.len() <= m {
+            self.method_used.push(Vector::<bool>::new());
+        }
         let inner = &mut self.method_used[m];
-        while inner.len() <= d.node as usize { inner.push(false); }
+        while inner.len() <= d.node as usize {
+            inner.push(false);
+        }
         inner.set(d.node as usize, true);
     }
 
     pub fn method_used_get(self: &Self, d: DefId) bool {
-        if d.node == NODE_NONE { return false; }
+        if d.node == NODE_NONE {
+            return false;
+        }
         let m = d.module as usize;
-        if m >= self.method_used.len() { return false; }
+        if m >= self.method_used.len() {
+            return false;
+        }
         let inner = self.method_used.at(m);
-        if d.node as usize >= inner.len() { return false; }
+        if d.node as usize >= inner.len() {
+            return false;
+        }
         return inner[d.node as usize];
     }
 
@@ -490,11 +596,19 @@ extend Package {
     // names/spans are parse-final, so the index stays valid for the whole pipeline.
     pub fn ensure_lk_index(self: &mut Self, mid: ModuleId) void {
         let m = mid as usize;
-        while self.lk_index.len() <= m { self.lk_index.push(Map::<u64, LkEnt>::new()); }
-        while self.lk_built.len() <= m { self.lk_built.push(false); }
-        if self.lk_built[m] { return; }
+        while self.lk_index.len() <= m {
+            self.lk_index.push(Map::<u64, LkEnt>::new());
+        }
+        while self.lk_built.len() <= m {
+            self.lk_built.push(false);
+        }
+        if self.lk_built[m] {
+            return;
+        }
         self.lk_built[m] = true;
-        if !self.modules[m].has_ast { return; }
+        if !self.modules[m].has_ast {
+            return;
+        }
         // srcp is raw (Copy) so no borrow of self lingers while lk_emit takes &mut self below; `ast` comes
         // from a raw ptr (not a tracked self-borrow), so reading through it across lk_emit calls is fine.
         let srcp = self.modules[m].source.as_str().ptr() as *const char;
@@ -514,24 +628,58 @@ extend Package {
                     let mut ip = false;
                     let mut it_type = false;
                     let mut ok = true;
-                    if it.kind == NodeKind::NODE_FUNCTION { nn = it.as_data.function.name; ip = it.as_data.function.is_public; it_type = false; }
-                    else if it.kind == NodeKind::NODE_TYPE_ALIAS { nn = it.as_data.type_alias.name; ip = it.as_data.type_alias.is_public; it_type = true; }
-                    else if it.kind == NodeKind::NODE_CONST { nn = it.as_data.const_def.name; ip = it.as_data.const_def.is_public; it_type = false; }
-                    else { ok = false; }
-                    if ok && ip { let sp = ast.at_const(nn).as_data.name.text; self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, it_type, iid); }
+                    if it.kind == NodeKind::NODE_FUNCTION {
+                        nn = it.as_data.function.name;
+                        ip = it.as_data.function.is_public;
+                        it_type = false;
+                    } else if it.kind == NodeKind::NODE_TYPE_ALIAS {
+                        nn = it.as_data.type_alias.name;
+                        ip = it.as_data.type_alias.is_public;
+                        it_type = true;
+                    } else if it.kind == NodeKind::NODE_CONST {
+                        nn = it.as_data.const_def.name;
+                        ip = it.as_data.const_def.is_public;
+                        it_type = false;
+                    } else {
+                        ok = false;
+                    }
+                    if ok && ip {
+                        let sp = ast.at_const(nn).as_data.name.text;
+                        self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, it_type, iid);
+                    }
                 }
             } else {
                 let mut name_node: NodeId = NODE_NONE;
                 let mut is_pub = false;
                 let mut is_type = false;
                 let mut consider = true;
-                if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM { name_node = n.as_data.aggregate.name; is_pub = n.as_data.aggregate.is_public; is_type = true; }
-                else if n.kind == NodeKind::NODE_TYPE_ALIAS { name_node = n.as_data.type_alias.name; is_pub = n.as_data.type_alias.is_public; is_type = true; }
-                else if n.kind == NodeKind::NODE_INTERFACE { name_node = n.as_data.interface_def.name; is_pub = n.as_data.interface_def.is_public; is_type = true; }
-                else if n.kind == NodeKind::NODE_FUNCTION { name_node = n.as_data.function.name; is_pub = n.as_data.function.is_public; is_type = false; }
-                else if n.kind == NodeKind::NODE_CONST { name_node = n.as_data.const_def.name; is_pub = n.as_data.const_def.is_public; is_type = false; }
-                else { consider = false; }
-                if consider && is_pub { let sp = ast.at_const(name_node).as_data.name.text; self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, is_type, nid); }
+                if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
+                    name_node = n.as_data.aggregate.name;
+                    is_pub = n.as_data.aggregate.is_public;
+                    is_type = true;
+                } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
+                    name_node = n.as_data.type_alias.name;
+                    is_pub = n.as_data.type_alias.is_public;
+                    is_type = true;
+                } else if n.kind == NodeKind::NODE_INTERFACE {
+                    name_node = n.as_data.interface_def.name;
+                    is_pub = n.as_data.interface_def.is_public;
+                    is_type = true;
+                } else if n.kind == NodeKind::NODE_FUNCTION {
+                    name_node = n.as_data.function.name;
+                    is_pub = n.as_data.function.is_public;
+                    is_type = false;
+                } else if n.kind == NodeKind::NODE_CONST {
+                    name_node = n.as_data.const_def.name;
+                    is_pub = n.as_data.const_def.is_public;
+                    is_type = false;
+                } else {
+                    consider = false;
+                }
+                if consider && is_pub {
+                    let sp = ast.at_const(name_node).as_data.name.text;
+                    self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, is_type, nid);
+                }
             }
         }
     }
@@ -542,26 +690,46 @@ extend Package {
         let len = end - start;
         let np = unsafe (srcp + start as usize) as *const u8;
         let nm = str::from_raw(np, len as usize);
-        let key = fnv_name(nm) * 2u64 + (if is_type { 1u64; } else { 0u64; });
+        let key = fnv_name(nm) * 2u64 + if is_type {
+            1u64;
+        } else {
+            0u64;
+        };
         let ent = LkEnt { node: node, start: start, len: len };
         let mp = &mut self.lk_index[m];
-        if mp.get(&key).is_none() { mp.insert(key, ent); }
+        if mp.get(&key).is_none() {
+            mp.insert(key, ent);
+        }
     }
 
     // Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`, otherwise
     // a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1) via the name index.
     pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
-        if !self.modules[mid as usize].has_ast { return NODE_NONE; }
-        let mp = (self as *const Package) as *mut Package;
-        unsafe { (*mp).ensure_lk_index(mid); }
+        if !self.modules[mid as usize].has_ast {
+            return NODE_NONE;
+        }
+        let mp = self as *const Package as *mut Package;
+        unsafe {
+            (*mp).ensure_lk_index(mid);
+        }
         let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
-        let key = fnv_name(name) * 2u64 + (if want_type { 1u64; } else { 0u64; });
+        let key = fnv_name(name) * 2u64 + if want_type {
+            1u64;
+        } else {
+            0u64;
+        };
         return switch self.lk_index[mid as usize].get(&key) {
             Some(e) => {
                 let mut r: NodeId = NODE_NONE;
-                if (e.len as usize) == name.len()
-                    && unsafe cstring::memcmp((src + e.start as usize), name.ptr(), name.len()) == 0 { r = e.node; }
-                else { r = self.lookup_linear(mid, name, want_type); } // 64-bit key collision (~never) -> exact scan
+                if e.len as usize == name.len() && unsafe cstring::memcmp(
+                    src + e.start as usize,
+                    name.ptr(),
+                    name.len(),
+                ) == 0 {
+                    r = e.node;
+                } else {
+                    r = self.lookup_linear(mid, name, want_type);
+                } // 64-bit key collision (~never) -> exact scan
                 r;
             },
             None => NODE_NONE,
@@ -570,7 +738,9 @@ extend Package {
 
     // Linear public-decl scan (LD-2 collision fallback; the original lookup body, semantics unchanged).
     fn lookup_linear(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
-        if !self.modules[mid as usize].has_ast { return NODE_NONE; }
+        if !self.modules[mid as usize].has_ast {
+            return NODE_NONE;
+        }
         let ast = unsafe &*self.module_ast_ptr(mid);
         let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
         let items = ast.at_const(ast.root).as_data.program.items;
@@ -631,9 +801,7 @@ extend Package {
                     if ok && ip && it_type == want_type {
                         let sp = ast.at_const(nn).as_data.name.text;
                         let l = (sp.end - sp.start) as usize;
-                        if l == name.len()
-                            && unsafe cstring::memcmp((src + sp.start as usize),
-                            name.ptr(), name.len()) == 0 {
+                        if l == name.len() && unsafe cstring::memcmp(src + sp.start as usize, name.ptr(), name.len()) == 0 {
                             return iid;
                         }
                     }
@@ -645,9 +813,7 @@ extend Package {
             if consider && is_pub && is_type == want_type {
                 let sp = ast.at_const(name_node).as_data.name.text;
                 let l = (sp.end - sp.start) as usize;
-                if l == name.len()
-                    && unsafe cstring::memcmp((src + sp.start as usize),
-                    name.ptr(), name.len()) == 0 {
+                if l == name.len() && unsafe cstring::memcmp(src + sp.start as usize, name.ptr(), name.len()) == 0 {
                     return nid;
                 }
             }
@@ -660,7 +826,9 @@ extend Package {
         for i in 0..self.modules.len() {
             if self.modules[i].prelude {
                 let d = self.lookup(i as ModuleId, name, want_type);
-                if d != NODE_NONE { return LookupHit { node: d, mid: i as ModuleId }; }
+                if d != NODE_NONE {
+                    return LookupHit { node: d, mid: i as ModuleId };
+                }
             }
         }
         return LookupHit { node: NODE_NONE, mid: 0 };
@@ -668,13 +836,16 @@ extend Package {
 
     // lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
     // then every module it imports breadth-first in declaration order. First hit wins.
-    pub fn glob_lookup(self: &Self, mid: ModuleId, name: str,
-        want_type: bool) LookupHit {
+    pub fn glob_lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) LookupHit {
         let n = self.modules.len();
         let mut result = LookupHit { node: NODE_NONE, mid: 0 };
-        if (mid as usize) >= n { return result; }
+        if mid as usize >= n {
+            return result;
+        }
         let mut seen = Vector::<bool>::new();
-        for s in 0..n { seen.push(false); }
+        for s in 0..n {
+            seen.push(false);
+        }
         let mut queue = Vector::<ModuleId>::new();
         queue.push(mid);
         seen.set(mid as usize, true);
@@ -712,15 +883,19 @@ extend Package {
     pub fn import_closure(self: &Self, mid: ModuleId) Vector<ModuleId> {
         let n = self.modules.len();
         let mut out = Vector::<ModuleId>::new();
-        if (mid as usize) > n { return out; } // the standalone Ast (module == count) has no imports to walk
+        if mid as usize > n {
+            return out;
+        } // the standalone Ast (module == count) has no imports to walk
         let mut seen = Vector::<bool>::new();
-        for s in 0..n + 1 { seen.push(false); }
+        for s in 0..n + 1 {
+            seen.push(false);
+        }
         seen.set(mid as usize, true);
         let mut head: usize = 0;
         let mut cur = mid;
         let mut go = true;
         while go {
-            if (cur as usize) < n && self.modules[cur as usize].has_ast {
+            if cur as usize < n && self.modules[cur as usize].has_ast {
                 let ast = unsafe &*self.module_ast_ptr(cur);
                 let items = ast.at_const(ast.root).as_data.program.items;
                 let ids = ast.list(items);
@@ -737,31 +912,39 @@ extend Package {
                     }
                 }
             }
-            if head >= out.len() { go = false; }
-            else { cur = out[head]; head = head + 1; }
+            if head >= out.len() {
+                go = false;
+            } else {
+                cur = out[head];
+                head = head + 1;
+            }
         }
         return out;
     }
 
     // Is `m` a user (non-prelude) module? The standalone test Ast lives at module == count (outside modules).
     fn module_is_user(self: &Self, m: ModuleId) bool {
-        return (m as usize) >= self.modules.len() || !self.modules[m as usize].prelude;
+        return m as usize >= self.modules.len() || !self.modules[m as usize].prelude;
     }
 
     // Does module `from`'s code reference anything in module `to` (a cross-module use edge)?
     fn module_imports(self: &Self, from: ModuleId, to: ModuleId) bool {
         let n = self.modules.len();
-        if (from as usize) >= n || !self.modules[from as usize].has_ast { return false; }
+        if from as usize >= n || !self.modules[from as usize].has_ast {
+            return false;
+        }
         // Fast path: O(1) bitset query once built (see build_mod_refs). `to >= n` is untracked, so fall
         // through to the linear scan (preserves exact semantics for the standalone-test Ast at module==n).
-        if self.mod_refs_ready && (to as usize) < n {
-            let word = self.mod_refs[(from as usize) * self.mod_refs_w + (to as usize) / 64];
-            return (word & (1u64 << (((to as usize) % 64) as u64))) != 0;
+        if self.mod_refs_ready && to as usize < n {
+            let word = self.mod_refs[from as usize * self.mod_refs_w + to as usize / 64];
+            return (word & 1u64 << (to as usize % 64) as u64) != 0;
         }
         let r = &self.modules[from as usize].ast.resolutions;
         for i in 0..r.len() {
             let d = r[i];
-            if d.node != NODE_NONE && d.module == to { return true; }
+            if d.node != NODE_NONE && d.module == to {
+                return true;
+            }
         }
         return false;
     }
@@ -774,9 +957,13 @@ extend Package {
         self.mod_refs_w = w;
         self.mod_refs.clear();
         let total = n * w;
-        for _z in 0..total { self.mod_refs.push(0u64); }
+        for _z in 0..total {
+            self.mod_refs.push(0u64);
+        }
         for from in 0..n {
-            if !self.modules[from].has_ast { continue; }
+            if !self.modules[from].has_ast {
+                continue;
+            }
             let base = from * w;
             let r = &self.modules[from].ast.resolutions;
             for k in 0..r.len() {
@@ -785,7 +972,7 @@ extend Package {
                 if d.node != NODE_NONE && to < n {
                     let idx = base + to / 64;
                     let cur = self.mod_refs[idx];
-                    self.mod_refs[idx] = cur | (1u64 << ((to % 64) as u64));
+                    self.mod_refs[idx] = cur | 1u64 << (to % 64) as u64;
                 }
             }
         }
@@ -799,9 +986,13 @@ extend Package {
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_ARRAY {
             return self.type_user_home(am, y.as_data.elem);
         }
-        if y.kind == TypeKind::TYPE_SLICE { return 0xFFFF as ModuleId; }
+        if y.kind == TypeKind::TYPE_SLICE {
+            return 0xFFFF as ModuleId;
+        }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_FUNCTION {
-            if self.module_is_user(y.module) { return y.module; }
+            if self.module_is_user(y.module) {
+                return y.module;
+            }
             return 0xFFFF as ModuleId;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
@@ -862,16 +1053,19 @@ fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
 // True when `t` mentions a function VALUE type anywhere (a TYPE_FUNCTION, possibly nested): its C symbol
 // (and env struct) is local to the module defining it, so a use over it must stay in the calling module.
 fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
-    let y = unsafe *(pkg_ast_c(&*p, mid)).type_at(t);
-    if y.kind == TypeKind::TYPE_FUNCTION { return true; }
-    if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE ||
-    y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+    let y = unsafe *pkg_ast_c(&*p, mid).type_at(t);
+    if y.kind == TypeKind::TYPE_FUNCTION {
+        return true;
+    }
+    if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         return type_mentions_fnval(&*p, mid, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = unsafe *(pkg_ast_c(&*p, mid)).instance(y.as_data.inst);
+        let it = unsafe *pkg_ast_c(&*p, mid).instance(y.as_data.inst);
         for i in 0..it.n {
-            if type_mentions_fnval(&*p, mid, it.args[i as usize]) { return true; }
+            if type_mentions_fnval(&*p, mid, it.args[i as usize]) {
+                return true;
+            }
         }
         return false;
     }
@@ -879,29 +1073,44 @@ fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
 }
 
 // Substitute the generic params `gids`->`args` while reinterning `owner`'s type `t` into `dest`'s pools.
-fn subst_reintern_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, gmod: ModuleId,
-    gids: *const NodeId, args: *const TypeId, nargs: u8) TypeId {
-    if t == TYPE_NONE { return TYPE_NONE; }
-    let ty = unsafe *(pkg_ast_c(&*p, om)).type_at(t);
+fn subst_reintern_type(
+    p: &mut Package,
+    dm: ModuleId,
+    om: ModuleId,
+    t: TypeId,
+    gmod: ModuleId,
+    gids: *const NodeId,
+    args: *const TypeId,
+    nargs: u8,
+) TypeId {
+    if t == TYPE_NONE {
+        return TYPE_NONE;
+    }
+    let ty = unsafe *pkg_ast_c(&*p, om).type_at(t);
     if ty.kind == TypeKind::TYPE_GENERIC {
         for i in 0..nargs {
-            if ty.module == gmod && ty.as_data.decl == unsafe gids[i as usize] { return unsafe args[i as usize]; }
+            if ty.module == gmod && ty.as_data.decl == unsafe gids[i as usize] {
+                return unsafe args[i as usize];
+            }
         }
         let d = pkg_ast_m(&mut *p, dm);
         let o = pkg_ast_c(&*p, om);
         return unsafe (*d).reintern(&*o, t);
     }
-    if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE ||
-    ty.kind == TypeKind::TYPE_SLICE || ty.kind == TypeKind::TYPE_ARRAY {
+    if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE || ty.kind == TypeKind::TYPE_SLICE || ty.kind == TypeKind::TYPE_ARRAY {
         let mut nt = ty;
         nt.as_data.elem = subst_reintern_type(&mut *p, dm, om, ty.as_data.elem, gmod, gids, args, nargs);
         let d = pkg_ast_m(&mut *p, dm);
         return unsafe (*d).intern_type(nt);
     }
     if ty.kind == TypeKind::TYPE_INSTANCE {
-        let inst = unsafe *(pkg_ast_c(&*p, om)).instance(ty.as_data.inst);
+        let inst = unsafe *pkg_ast_c(&*p, om).instance(ty.as_data.inst);
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
-        let m = if inst.n < 4 { inst.n; } else { 4 as u8; };
+        let m = if inst.n < 4 {
+            inst.n;
+        } else {
+            4 as u8;
+        };
         for i in 0..m {
             na[i as usize] = subst_reintern_type(&mut *p, dm, om, inst.args[i as usize], gmod, gids, args, nargs);
         }
@@ -915,33 +1124,59 @@ fn subst_reintern_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, g
 
 // Reintern one member/param/return type after substitution; if it lands on a concrete instance whose home
 // differs from `dest`, also seed that home's table. Sets `*changed` only on the final growth path (parity).
-fn reintern_nested_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, gmod: ModuleId,
-    gids: *const NodeId, args: *const TypeId, nargs: u8, changed: *mut bool) void {
-    if t == TYPE_NONE { return; }
-    let before = unsafe (*(pkg_ast_c(&*p, dm))).instances.len();
+fn reintern_nested_type(
+    p: &mut Package,
+    dm: ModuleId,
+    om: ModuleId,
+    t: TypeId,
+    gmod: ModuleId,
+    gids: *const NodeId,
+    args: *const TypeId,
+    nargs: u8,
+    changed: *mut bool,
+) void {
+    if t == TYPE_NONE {
+        return;
+    }
+    let before = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
     let mut st = subst_reintern_type(&mut *p, dm, om, t, gmod, gids, args, nargs);
-    let mut y = unsafe *(pkg_ast_c(&*p, dm)).type_at(st);
+    let mut y = unsafe *pkg_ast_c(&*p, dm).type_at(st);
     while y.kind == TypeKind::TYPE_ARRAY {
         st = y.as_data.elem;
-        y = unsafe *(pkg_ast_c(&*p, dm)).type_at(st);
+        y = unsafe *pkg_ast_c(&*p, dm).type_at(st);
     }
-    if y.kind != TypeKind::TYPE_INSTANCE { return; }
-    let it = unsafe *(pkg_ast_c(&*p, dm)).instance(y.as_data.inst);
+    if y.kind != TypeKind::TYPE_INSTANCE {
+        return;
+    }
+    let it = unsafe *pkg_ast_c(&*p, dm).instance(y.as_data.inst);
     let mut concrete = true;
     for i in 0..it.n {
-        if !unsafe (*(pkg_ast_c(&*p, dm))).type_concrete(it.args[i as usize]) { concrete = false; }
+        if !unsafe (*pkg_ast_c(&*p, dm)).type_concrete(it.args[i as usize]) {
+            concrete = false;
+        }
     }
-    if !concrete { return; }
+    if !concrete {
+        return;
+    }
     let np = p.modules.len();
     let home = p.instance_home_mid(dm, &it);
     let mut has_h = false;
     let mut hm: ModuleId = 0;
-    if (home as usize) < np { has_h = true; hm = home; }
-    else if dm == home { has_h = true; hm = dm; }
+    if home as usize < np {
+        has_h = true;
+        hm = home;
+    } else if dm == home {
+        has_h = true;
+        hm = dm;
+    }
     if has_h && hm != dm {
-        let m = if it.n < 4 { it.n; } else { 4 as u8; };
+        let m = if it.n < 4 {
+            it.n;
+        } else {
+            4 as u8;
+        };
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
-        let hbefore = unsafe (*(pkg_ast_c(&*p, hm))).instances.len();
+        let hbefore = unsafe (*pkg_ast_c(&*p, hm)).instances.len();
         for k in 0..m {
             let h = pkg_ast_m(&mut *p, hm);
             let d = pkg_ast_c(&*p, dm);
@@ -949,41 +1184,59 @@ fn reintern_nested_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, 
         }
         let h = pkg_ast_m(&mut *p, hm);
         let _ = unsafe (*h).intern_instance(it.module, it.decl, &na[0], m);
-        let hafter = unsafe (*(pkg_ast_c(&*p, hm))).instances.len();
-        if hafter != hbefore { unsafe *changed = true; }
+        let hafter = unsafe (*pkg_ast_c(&*p, hm)).instances.len();
+        if hafter != hbefore {
+            unsafe *changed = true;
+        }
     }
-    let after = unsafe (*(pkg_ast_c(&*p, dm))).instances.len();
-    if after != before { unsafe *changed = true; }
+    let after = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
+    if after != before {
+        unsafe *changed = true;
+    }
 }
 
 // Seed `dest` with the concrete instances nested in a generic aggregate's member/variant types.
-fn reintern_nested_instance_deps(p: &mut Package, dm: ModuleId, it: &TyInstance, args: *const TypeId,
-    nargs: u8, changed: *mut bool) void {
+fn reintern_nested_instance_deps(
+    p: &mut Package,
+    dm: ModuleId,
+    it: &TyInstance,
+    args: *const TypeId,
+    nargs: u8,
+    changed: *mut bool,
+) void {
     let np = p.modules.len();
     let itmod = it.module;
-    if (itmod as usize) >= np || !p.modules[itmod as usize].has_ast { return; }
+    if itmod as usize >= np || !p.modules[itmod as usize].has_ast {
+        return;
+    }
     let decl = it.decl;
-    let dn_kind = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(decl).kind;
-    let generics = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(decl).as_data.aggregate.generics;
-    if (dn_kind != NodeKind::NODE_STRUCT && dn_kind != NodeKind::NODE_ENUM) || generics.len == 0 { return; }
-    let members = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(decl).as_data.aggregate.members;
-    let gids = unsafe (*(pkg_ast_c(&*p, itmod))).list(generics);
-    let mids = unsafe (*(pkg_ast_c(&*p, itmod))).list(members);
+    let dn_kind = unsafe (*pkg_ast_c(&*p, itmod)).at_const(decl).kind;
+    let generics = unsafe (*pkg_ast_c(&*p, itmod)).at_const(decl).as_data.aggregate.generics;
+    if dn_kind != NodeKind::NODE_STRUCT && dn_kind != NodeKind::NODE_ENUM || generics.len == 0 {
+        return;
+    }
+    let members = unsafe (*pkg_ast_c(&*p, itmod)).at_const(decl).as_data.aggregate.members;
+    let gids = unsafe (*pkg_ast_c(&*p, itmod)).list(generics);
+    let mids = unsafe (*pkg_ast_c(&*p, itmod)).list(members);
     for m in 0..members.len {
         let mid = unsafe mids[m as usize];
-        let mnk = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(mid).kind;
+        let mnk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(mid).kind;
         if dn_kind == NodeKind::NODE_STRUCT && mnk == NodeKind::NODE_FIELD {
-            let fty = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(mid).as_data.field.ty;
-            let tt = unsafe (*(pkg_ast_c(&*p, itmod))).type_of(fty);
+            let fty = unsafe (*pkg_ast_c(&*p, itmod)).at_const(mid).as_data.field.ty;
+            let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(fty);
             reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
         } else if dn_kind == NodeKind::NODE_ENUM && mnk == NodeKind::NODE_VARIANT {
-            let payload = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(mid).as_data.variant.payload;
-            let pids = unsafe (*(pkg_ast_c(&*p, itmod))).list(payload);
+            let payload = unsafe (*pkg_ast_c(&*p, itmod)).at_const(mid).as_data.variant.payload;
+            let pids = unsafe (*pkg_ast_c(&*p, itmod)).list(payload);
             for k in 0..payload.len {
                 let pfid = unsafe pids[k as usize];
-                let pfk = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(pfid).kind;
-                let tn = if pfk == NodeKind::NODE_FIELD { unsafe (*(pkg_ast_c(&*p, itmod))).at_const(pfid).as_data.field.ty; } else { pfid; };
-                let tt = unsafe (*(pkg_ast_c(&*p, itmod))).type_of(tn);
+                let pfk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(pfid).kind;
+                let tn = if pfk == NodeKind::NODE_FIELD {
+                    unsafe (*pkg_ast_c(&*p, itmod)).at_const(pfid).as_data.field.ty;
+                } else {
+                    pfid;
+                };
+                let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(tn);
                 reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
             }
         }
@@ -991,50 +1244,72 @@ fn reintern_nested_instance_deps(p: &mut Package, dm: ModuleId, it: &TyInstance,
 }
 
 // Seed `dest` with concrete instances nested in a generic extend's method signatures over this instance.
-fn reintern_method_signature_deps(p: &mut Package, dm: ModuleId, it: &TyInstance, args: *const TypeId,
-    nargs: u8, changed: *mut bool) void {
+fn reintern_method_signature_deps(
+    p: &mut Package,
+    dm: ModuleId,
+    it: &TyInstance,
+    args: *const TypeId,
+    nargs: u8,
+    changed: *mut bool,
+) void {
     let np = p.modules.len();
     let itmod = it.module;
-    if (itmod as usize) >= np || !p.modules[itmod as usize].has_ast { return; }
+    if itmod as usize >= np || !p.modules[itmod as usize].has_ast {
+        return;
+    }
     let itdecl = it.decl;
-    let root = unsafe (*(pkg_ast_c(&*p, itmod))).root;
-    let items = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(root).as_data.program.items;
-    let ids = unsafe (*(pkg_ast_c(&*p, itmod))).list(items);
+    let root = unsafe (*pkg_ast_c(&*p, itmod)).root;
+    let items = unsafe (*pkg_ast_c(&*p, itmod)).at_const(root).as_data.program.items;
+    let ids = unsafe (*pkg_ast_c(&*p, itmod)).list(items);
     for i in 0..items.len {
         let eid = unsafe ids[i as usize];
-        let ek = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(eid).kind;
-        if ek != NodeKind::NODE_EXTEND { continue; }
-        let egen = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(eid).as_data.extend_def.generics;
-        if egen.len == 0 { continue; }
-        let etgt = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(eid).as_data.extend_def.target_type;
-        if unsafe (*(pkg_ast_c(&*p, itmod))).resolution(etgt) != itdecl { continue; }
-        let gids = unsafe (*(pkg_ast_c(&*p, itmod))).list(egen);
-        let eitems = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(eid).as_data.extend_def.items;
-        let emids = unsafe (*(pkg_ast_c(&*p, itmod))).list(eitems);
+        let ek = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).kind;
+        if ek != NodeKind::NODE_EXTEND {
+            continue;
+        }
+        let egen = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).as_data.extend_def.generics;
+        if egen.len == 0 {
+            continue;
+        }
+        let etgt = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).as_data.extend_def.target_type;
+        if unsafe (*pkg_ast_c(&*p, itmod)).resolution(etgt) != itdecl {
+            continue;
+        }
+        let gids = unsafe (*pkg_ast_c(&*p, itmod)).list(egen);
+        let eitems = unsafe (*pkg_ast_c(&*p, itmod)).at_const(eid).as_data.extend_def.items;
+        let emids = unsafe (*pkg_ast_c(&*p, itmod)).list(eitems);
         for mm in 0..eitems.len {
             let fnid = unsafe emids[mm as usize];
-            let fnk = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(fnid).kind;
-            if fnk != NodeKind::NODE_FUNCTION { continue; }
-            let fgen = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(fnid).as_data.function.generics;
-            let frets = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(fnid).as_data.function.returns;
-            if fgen.len != 0 || frets.len > 1 { continue; }
-            let fparams = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(fnid).as_data.function.params;
-            let pids = unsafe (*(pkg_ast_c(&*p, itmod))).list(fparams);
+            let fnk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).kind;
+            if fnk != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let fgen = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).as_data.function.generics;
+            let frets = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).as_data.function.returns;
+            if fgen.len != 0 || frets.len > 1 {
+                continue;
+            }
+            let fparams = unsafe (*pkg_ast_c(&*p, itmod)).at_const(fnid).as_data.function.params;
+            let pids = unsafe (*pkg_ast_c(&*p, itmod)).list(fparams);
             let mut k: u32 = 0;
             while k < fparams.len {
                 let pid = unsafe pids[k as usize];
-                let pty = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(pid).as_data.parameter.ty;
-                let tt = unsafe (*(pkg_ast_c(&*p, itmod))).type_of(pty);
+                let pty = unsafe (*pkg_ast_c(&*p, itmod)).at_const(pid).as_data.parameter.ty;
+                let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(pty);
                 reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
                 k = k + 1;
             }
-            let rids = unsafe (*(pkg_ast_c(&*p, itmod))).list(frets);
+            let rids = unsafe (*pkg_ast_c(&*p, itmod)).list(frets);
             k = 0;
             while k < frets.len {
                 let rid = unsafe rids[k as usize];
-                let rk = unsafe (*(pkg_ast_c(&*p, itmod))).at_const(rid).kind;
-                let tn = if rk == NodeKind::NODE_PARAMETER { unsafe (*(pkg_ast_c(&*p, itmod))).at_const(rid).as_data.parameter.ty; } else { rid; };
-                let tt = unsafe (*(pkg_ast_c(&*p, itmod))).type_of(tn);
+                let rk = unsafe (*pkg_ast_c(&*p, itmod)).at_const(rid).kind;
+                let tn = if rk == NodeKind::NODE_PARAMETER {
+                    unsafe (*pkg_ast_c(&*p, itmod)).at_const(rid).as_data.parameter.ty;
+                } else {
+                    rid;
+                };
+                let tt = unsafe (*pkg_ast_c(&*p, itmod)).type_of(tn);
                 reintern_nested_type(&mut *p, dm, itmod, tt, itmod, gids, args, nargs, changed);
                 k = k + 1;
             }
@@ -1056,27 +1331,40 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
         let it = unsafe *s.instance(i as u32);
         let mut concrete = true;
         for k in 0..it.n {
-            if !unsafe (*s).type_concrete(it.args[k as usize]) { concrete = false; }
+            if !unsafe (*s).type_concrete(it.args[k as usize]) {
+                concrete = false;
+            }
         }
-        if !concrete { continue; }
+        if !concrete {
+            continue;
+        }
         let home = p.instance_home_mid(sm, &it);
-        if (home as usize) >= np { continue; }
+        if home as usize >= np {
+            continue;
+        }
         let dm = home;
-        let m = if it.n < 4 { it.n; } else { 4 as u8; };
+        let m = if it.n < 4 {
+            it.n;
+        } else {
+            4 as u8;
+        };
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         for k2 in 0..m {
-            if dm == sm { na[k2 as usize] = it.args[k2 as usize]; }
-            else {
+            if dm == sm {
+                na[k2 as usize] = it.args[k2 as usize];
+            } else {
                 let d = pkg_ast_m(&mut *p, dm);
                 na[k2 as usize] = unsafe (*d).reintern(&*s, it.args[k2 as usize]);
             }
         }
         if dm != sm {
-            let before = unsafe (*(pkg_ast_c(&*p, dm))).instances.len();
+            let before = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
             let d = pkg_ast_m(&mut *p, dm);
             let _ = unsafe (*d).intern_instance(it.module, it.decl, &na[0], m);
-            let after = unsafe (*(pkg_ast_c(&*p, dm))).instances.len();
-            if after != before { changed = true; }
+            let after = unsafe (*pkg_ast_c(&*p, dm)).instances.len();
+            if after != before {
+                changed = true;
+            }
         }
         let cp = (&mut changed) as *mut bool;
         reintern_nested_instance_deps(&mut *p, dm, &it, &na[0], m, cp);
@@ -1093,54 +1381,102 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
     let n = unsafe (*s).nodes.len();
     let np = p.modules.len();
     let mut i: NodeId = 0;
-    while (i as usize) < n {
+    while i as usize < n {
         let ck = unsafe (*s).at_const(i).kind;
-        if ck != NodeKind::NODE_CALL { i = i + 1; continue; }
+        if ck != NodeKind::NODE_CALL {
+            i = i + 1;
+            continue;
+        }
         let callee_id = unsafe (*s).at_const(i).as_data.call.callee;
         let cek = unsafe (*s).at_const(callee_id).kind;
-        if cek != NodeKind::NODE_MEMBER { i = i + 1; continue; }
+        if cek != NodeKind::NODE_MEMBER {
+            i = i + 1;
+            continue;
+        }
         let member_id = unsafe (*s).at_const(callee_id).as_data.member.member;
         let md = unsafe (*s).resolution_def(member_id);
-        if md.node == NODE_NONE { i = i + 1; continue; }
-        if (md.module as usize) >= np || !p.modules[md.module as usize].has_ast { i = i + 1; continue; }
+        if md.node == NODE_NONE {
+            i = i + 1;
+            continue;
+        }
+        if md.module as usize >= np || !p.modules[md.module as usize].has_ast {
+            i = i + 1;
+            continue;
+        }
         let om = md.module;
-        let mnk = unsafe (*(pkg_ast_c(&*p, om))).at_const(md.node).kind;
-        let mgen = unsafe (*(pkg_ast_c(&*p, om))).at_const(md.node).as_data.function.generics;
-        if mnk != NodeKind::NODE_FUNCTION || mgen.len == 0 { i = i + 1; continue; }
+        let mnk = unsafe (*pkg_ast_c(&*p, om)).at_const(md.node).kind;
+        let mgen = unsafe (*pkg_ast_c(&*p, om)).at_const(md.node).as_data.function.generics;
+        if mnk != NodeKind::NODE_FUNCTION || mgen.len == 0 {
+            i = i + 1;
+            continue;
+        }
         let mu = unsafe (*s).type_args(i);
-        if mu == null || unsafe (*mu).n == 0 { i = i + 1; continue; }
+        if mu == null || unsafe (*mu).n == 0 {
+            i = i + 1;
+            continue;
+        }
         let object_id = unsafe (*s).at_const(callee_id).as_data.member.object;
         let mut rty = unsafe (*s).type_of(object_id);
         let du = unsafe (*s).deref_use_at(member_id);
-        if du != null { rty = unsafe (*du).target; }
+        if du != null {
+            rty = unsafe (*du).target;
+        }
         let mut yk = unsafe (*s).type_at(rty).kind;
         while yk == TypeKind::TYPE_POINTER || yk == TypeKind::TYPE_REFERENCE {
             rty = unsafe (*s).type_at(rty).as_data.elem;
             yk = unsafe (*s).type_at(rty).kind;
         }
-        if unsafe (*s).type_at(rty).kind != TypeKind::TYPE_INSTANCE || !unsafe (*s).type_concrete(rty) { i = i + 1; continue; }
-        let mtn = if unsafe (*mu).n < 4 { unsafe (*mu).n; } else { 4 as u8; };
+        if unsafe (*s).type_at(rty).kind != TypeKind::TYPE_INSTANCE || !unsafe (*s).type_concrete(rty) {
+            i = i + 1;
+            continue;
+        }
+        let mtn = if unsafe (*mu).n < 4 {
+            unsafe (*mu).n;
+        } else {
+            4 as u8;
+        };
         let mut concrete = true;
         for k in 0..mtn {
-            if !unsafe (*s).type_concrete((*mu).args[k as usize]) { concrete = false; }
+            if !unsafe (*s).type_concrete((*mu).args[k as usize]) {
+                concrete = false;
+            }
         }
-        if !concrete { i = i + 1; continue; }
+        if !concrete {
+            i = i + 1;
+            continue;
+        }
         let recv_inst = unsafe (*s).type_at(rty).as_data.inst;
         let recv = unsafe *s.instance(recv_inst);
         let home = p.instance_home_mid(sm, &recv);
         let mut dm = om;
-        if (home as usize) < np { dm = home; }
-        for kk in 0..mtn {
-            if type_mentions_fnval(&*p, sm, unsafe (*mu).args[kk as usize]) { dm = sm; break; }
+        if home as usize < np {
+            dm = home;
         }
-        let rinst = if dm == sm { rty; } else { let d = pkg_ast_m(&mut *p, dm); unsafe (*d).reintern(&*s, rty); };
+        for kk in 0..mtn {
+            if type_mentions_fnval(&*p, sm, unsafe (*mu).args[kk as usize]) {
+                dm = sm;
+                break;
+            }
+        }
+        let rinst = if dm == sm {
+            rty;
+        } else {
+            let d = pkg_ast_m(&mut *p, dm);
+            unsafe (*d).reintern(&*s, rty);
+        };
         let mut targs: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         for t in 0..mtn {
-            if dm == sm { targs[t as usize] = unsafe (*mu).args[t as usize]; }
-            else { let d = pkg_ast_m(&mut *p, dm); targs[t as usize] = unsafe (*d).reintern(&*s, (*mu).args[t as usize]); }
+            if dm == sm {
+                targs[t as usize] = unsafe (*mu).args[t as usize];
+            } else {
+                let d = pkg_ast_m(&mut *p, dm);
+                targs[t as usize] = unsafe (*d).reintern(&*s, (*mu).args[t as usize]);
+            }
         }
         let d = pkg_ast_m(&mut *p, dm);
-        if unsafe (*d).add_method_inst(rinst, md.node, &targs[0], mtn) { changed = true; }
+        if unsafe (*d).add_method_inst(rinst, md.node, &targs[0], mtn) {
+            changed = true;
+        }
         i = i + 1;
     }
     return changed;
@@ -1157,19 +1493,25 @@ pub fn package_propagate_instances(p: &mut Package) void {
     // each module's instance table has been consumed and re-scan only the newly-appended tail per sweep -- the
     // confirming sweep then touches just the handful the productive sweep added, not every instance again.
     let mut proc_inst = Vector::<usize>::new();
-    for u in 0..n { proc_inst.push(0); }
+    for u in 0..n {
+        proc_inst.push(0);
+    }
     let mut changed = true;
     while changed {
         changed = false;
         for u in 0..n {
             if p.modules[u].has_ast {
                 let start = proc_inst[u];
-                let ni = unsafe (*(pkg_ast_c(&*p, u as ModuleId))).instances.len();
+                let ni = unsafe (*pkg_ast_c(&*p, u as ModuleId)).instances.len();
                 if start < ni {
-                    if reintern_cross_module(&mut *p, u as ModuleId, start) { changed = true; }
+                    if reintern_cross_module(&mut *p, u as ModuleId, start) {
+                        changed = true;
+                    }
                     proc_inst[u] = ni;
                 }
-                if reintern_method_insts(&mut *p, u as ModuleId) { changed = true; }
+                if reintern_method_insts(&mut *p, u as ModuleId) {
+                    changed = true;
+                }
             }
         }
     }
@@ -1180,32 +1522,45 @@ pub fn package_propagate_instances(p: &mut Package) void {
 // `order` is caller-allocated with `modules.len()` entries.
 pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
     let n = p.modules.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let done = unsafe stdlib::calloc(n, 1) as *mut bool;
     let dep = unsafe stdlib::calloc(n * n, 1) as *mut bool;
     let indeg = unsafe stdlib::calloc(n, 4) as *mut u32;
     if done == null || dep == null || indeg == null {
-        for i in 0..n { unsafe order[i] = i as ModuleId; }
+        for i in 0..n {
+            unsafe order[i] = i as ModuleId;
+        }
         unsafe stdlib::free(done as *mut void);
         unsafe stdlib::free(dep as *mut void);
         unsafe stdlib::free(indeg as *mut void);
         return;
     }
     for a in 0..n {
-        if !p.modules[a].has_ast { continue; }
+        if !p.modules[a].has_ast {
+            continue;
+        }
         let aa = pkg_ast_c(&*p, a as ModuleId);
         let mut i: usize = 0;
         while i < unsafe (*aa).instances.len() {
             let it = unsafe *(*aa).instance(i as u32);
             let bi = it.module as usize;
-            if bi >= n || bi == a || (unsafe dep[a * n + bi]) { i = i + 1; continue; }
+            if bi >= n || bi == a || unsafe dep[a * n + bi] {
+                i = i + 1;
+                continue;
+            }
             let mut concrete = true;
             for k in 0..it.n {
-                if !unsafe (*aa).type_concrete(it.args[k as usize]) { concrete = false; }
+                if !unsafe (*aa).type_concrete(it.args[k as usize]) {
+                    concrete = false;
+                }
             }
             if concrete && p.instance_home_mid(a as ModuleId, &it) == a as ModuleId {
                 unsafe dep[a * n + bi] = true;
-                unsafe { indeg[a] = indeg[a] + 1; }
+                unsafe {
+                    indeg[a] = indeg[a] + 1;
+                }
             }
             i = i + 1;
         }
@@ -1213,17 +1568,28 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
         while i < unsafe (*aa).method_insts.len() {
             let miinst = unsafe (*aa).method_insts[i].instance;
             let y = unsafe *(*aa).type_at(miinst);
-            if y.kind != TypeKind::TYPE_INSTANCE { i = i + 1; continue; }
+            if y.kind != TypeKind::TYPE_INSTANCE {
+                i = i + 1;
+                continue;
+            }
             let bi = unsafe (*aa).instance(y.as_data.inst).module as usize;
-            if bi >= n || bi == a || (unsafe dep[a * n + bi]) { i = i + 1; continue; }
+            if bi >= n || bi == a || unsafe dep[a * n + bi] {
+                i = i + 1;
+                continue;
+            }
             unsafe dep[a * n + bi] = true;
-            unsafe { indeg[a] = indeg[a] + 1; }
+            unsafe {
+                indeg[a] = indeg[a] + 1;
+            }
             i = i + 1;
         }
         i = 0;
         while i < unsafe (*aa).mono.len() {
             let mnode = unsafe (*aa).mono[i].node;
-            if unsafe (*aa).at_const(mnode).kind != NodeKind::NODE_CALL { i = i + 1; continue; }
+            if unsafe (*aa).at_const(mnode).kind != NodeKind::NODE_CALL {
+                i = i + 1;
+                continue;
+            }
             let callee_id = unsafe (*aa).at_const(mnode).as_data.call.callee;
             let ck = unsafe (*aa).at_const(callee_id).kind;
             let fd = if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
@@ -1233,12 +1599,23 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
                 unsafe (*aa).resolution_def(callee_id);
             };
             let bi = fd.module as usize;
-            if fd.node == NODE_NONE || bi >= n || bi == a || (unsafe dep[a * n + bi]) { i = i + 1; continue; }
-            if !p.modules[bi].has_ast { i = i + 1; continue; }
+            if fd.node == NODE_NONE || bi >= n || bi == a || unsafe dep[a * n + bi] {
+                i = i + 1;
+                continue;
+            }
+            if !p.modules[bi].has_ast {
+                i = i + 1;
+                continue;
+            }
             let bast = pkg_ast_c(&*p, fd.module);
-            if unsafe (*bast).at_const(fd.node).kind != NodeKind::NODE_FUNCTION { i = i + 1; continue; }
+            if unsafe (*bast).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+                i = i + 1;
+                continue;
+            }
             unsafe dep[a * n + bi] = true;
-            unsafe { indeg[a] = indeg[a] + 1; }
+            unsafe {
+                indeg[a] = indeg[a] + 1;
+            }
             i = i + 1;
         }
     }
@@ -1246,18 +1623,29 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
         let mut pick = n;
         let mut i: usize = 0;
         while i < n {
-            if !(unsafe done[i]) && (unsafe indeg[i]) == 0 { pick = i; break; }
+            if !unsafe done[i] && unsafe indeg[i] == 0 {
+                pick = i;
+                break;
+            }
             i = i + 1;
         }
         if pick == n {
             i = 0;
-            while i < n { if !(unsafe done[i]) { pick = i; break; } i = i + 1; }
+            while i < n {
+                if !unsafe done[i] {
+                    pick = i;
+                    break;
+                }
+                i = i + 1;
+            }
         }
         unsafe order[kk] = pick as ModuleId;
         unsafe done[pick] = true;
         for x in 0..n {
-            if !(unsafe done[x]) && (unsafe dep[x * n + pick]) && (unsafe indeg[x]) > 0 {
-                unsafe { indeg[x] = indeg[x] - 1; }
+            if !unsafe done[x] && unsafe dep[x * n + pick] && unsafe indeg[x] > 0 {
+                unsafe {
+                    indeg[x] = indeg[x] - 1;
+                }
             }
         }
     }
@@ -1272,7 +1660,9 @@ pub fn package_load(root_file: *const char, std_dir: *const char, bootstrap_tags
     let mut p = Package::new();
     p.ok = true;
     p.root_dir = dir_of(str::from_cstr(root_file));
-    if std_dir != null { p.std_root = dir_of(str::from_cstr(std_dir)); }
+    if std_dir != null {
+        p.std_root = dir_of(str::from_cstr(std_dir));
+    }
     let rp = stem_of(str::from_cstr(root_file));
     let rf = String::from_cstr(root_file);
     p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags);
@@ -1290,28 +1680,39 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     let mut p = Package::new();
     p.ok = true;
     p.root_dir = String::from_str(".");
-    if std_dir != null { p.std_root = dir_of(str::from_cstr(std_dir)); }
+    if std_dir != null {
+        p.std_root = dir_of(str::from_cstr(std_dir));
+    }
     load_prelude(&mut p, std_dir);
     let mut source = String::from_str(str::from_raw(src as *const u8, len));
     let parsed = parse_source(&mut source, "<harness>".ptr() as *const char, false);
     let ok = parsed.ok;
-    let id = p.add_module(String::from_str("main"), String::from_str("<harness>"),
-        source, parsed.ast, ok);
-    if ok { p.modules[id as usize].ast.module = id as ModuleId; }
-    else { p.ok = false; }
+    let id = p.add_module(String::from_str("main"), String::from_str("<harness>"), source, parsed.ast, ok);
+    if ok {
+        p.modules[id as usize].ast.module = id as ModuleId;
+    } else {
+        p.ok = false;
+    }
     p.seed_core();
     return p;
 }
 
 // A PATH_MAX realpath scratch buffer (the omitted array field zero-fills on partial init).
-struct RealBuf { pub b: [char; 4096] }
+struct RealBuf {
+    pub b: [char; 4096],
+}
 
 // The final path component of `path` (a view into it) -- "dir/std/string.spc" -> "string.spc".
 fn basename_of(path: str) str {
     let n = path.len();
     let mut b: usize = 0;
     let mut i: usize = 0;
-    while i < n { if path.byte_at(i) == '/' as u8 { b = i + 1; } i = i + 1; }
+    while i < n {
+        if path.byte_at(i) == '/' as u8 {
+            b = i + 1;
+        }
+        i = i + 1;
+    }
     return path.slice(b, n);
 }
 
@@ -1323,30 +1724,50 @@ fn basename_of(path: str) str {
 fn name_cmp(a: &String, b: &String) i32 {
     let la = a.len();
     let lb = b.len();
-    let m = if la < lb { la; } else { lb; };
+    let m = if la < lb {
+        la;
+    } else {
+        lb;
+    };
     let c = unsafe cstring::memcmp(a.as_str().ptr() as *const void, b.as_str().ptr() as *const void, m);
-    if c != 0 { return c; }
-    return (la as i32) - (lb as i32);
+    if c != 0 {
+        return c;
+    }
+    return la as i32 - lb as i32;
 }
 
 fn load_prelude(p: &mut Package, std_dir: *const char) void {
-    if std_dir == null { return; }
+    if std_dir == null {
+        return;
+    }
     let dir = unsafe shim::sc_opendir(std_dir);
-    if dir == null { return; }
+    if dir == null {
+        return;
+    }
     let mut names = Vector::<String>::new();
     loop {
         let e = unsafe shim::sc_readdir(dir);
-        if e == null { break; }
+        if e == null {
+            break;
+        }
         let nm = unsafe shim::sc_dirent_name(e);
         let l = unsafe cstring::strlen(nm);
-        if l < 5 { continue; }
-        if unsafe cstring::strcmp((nm + (l - 4)) as *const char, ".spc".ptr() as *const char) != 0 { continue; }
+        if l < 5 {
+            continue;
+        }
+        if unsafe cstring::strcmp((nm + (l - 4)) as *const char, ".spc".ptr() as *const char) != 0 {
+            continue;
+        }
         // Skip subdirectories named "*.spc" straight from readdir's d_type; only DT_UNKNOWN needs a stat.
         let dt = unsafe shim::sc_dirent_isdir(e);
-        if dt == 1 { continue; }
+        if dt == 1 {
+            continue;
+        }
         if dt < 0 {
             let mut probe = join2(str::from_cstr(std_dir), str::from_cstr(nm));
-            if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 { continue; }
+            if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
+                continue;
+            }
         }
         names.push(String::from_cstr(nm));
     }
@@ -1365,8 +1786,10 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         let mut file = join2(str::from_cstr(std_dir), names[k].as_str());
         let mut dup = false;
         for i2 in 0..m0 {
-            if basename_of(p.modules[i2].file.as_str()) == names[k].as_str()
-                && unsafe shim::sc_same_file(file.cstr(), p.modules[i2].file.cstr()) == 1 {
+            if basename_of(p.modules[i2].file.as_str()) == names[k].as_str() && unsafe shim::sc_same_file(
+                file.cstr(),
+                p.modules[i2].file.cstr(),
+            ) == 1 {
                 p.modules[i2].prelude = true;
                 dup = true;
                 break;
@@ -1377,7 +1800,9 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
             let mut modpath = String::from_str("__std::");
             modpath.push_str(stem.as_str());
             let id = p.load_module(modpath.as_str(), file.as_str(), false);
-            if id >= 0 { p.modules[id as usize].prelude = true; }
+            if id >= 0 {
+                p.modules[id as usize].prelude = true;
+            }
         }
     }
 }

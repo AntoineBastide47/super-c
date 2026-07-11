@@ -93,15 +93,15 @@ pub fn panic(msg: str) void {
 
 extend i8 as Eq {
     pub fn eq(self: &i8, other: &i8) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend i8 as Ord {
     pub fn cmp(self: &i8, other: &i8) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -129,15 +129,15 @@ extend i8 as Copy {}
 
 extend i16 as Eq {
     pub fn eq(self: &i16, other: &i16) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend i16 as Ord {
     pub fn cmp(self: &i16, other: &i16) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -165,15 +165,15 @@ extend i16 as Copy {}
 
 extend i32 as Eq {
     pub fn eq(self: &i32, other: &i32) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend i32 as Ord {
     pub fn cmp(self: &i32, other: &i32) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -201,15 +201,15 @@ extend i32 as Copy {}
 
 extend i64 as Eq {
     pub fn eq(self: &i64, other: &i64) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend i64 as Ord {
     pub fn cmp(self: &i64, other: &i64) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -237,15 +237,15 @@ extend i64 as Copy {}
 
 extend isize as Eq {
     pub fn eq(self: &isize, other: &isize) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend isize as Ord {
     pub fn cmp(self: &isize, other: &isize) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -273,15 +273,15 @@ extend isize as Copy {}
 
 extend u8 as Eq {
     pub fn eq(self: &u8, other: &u8) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend u8 as Ord {
     pub fn cmp(self: &u8, other: &u8) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -309,15 +309,15 @@ extend u8 as Copy {}
 
 extend u16 as Eq {
     pub fn eq(self: &u16, other: &u16) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend u16 as Ord {
     pub fn cmp(self: &u16, other: &u16) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -345,15 +345,15 @@ extend u16 as Copy {}
 
 extend u32 as Eq {
     pub fn eq(self: &u32, other: &u32) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend u32 as Ord {
     pub fn cmp(self: &u32, other: &u32) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -381,15 +381,15 @@ extend u32 as Copy {}
 
 extend u64 as Eq {
     pub fn eq(self: &u64, other: &u64) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend u64 as Ord {
     pub fn cmp(self: &u64, other: &u64) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -417,15 +417,15 @@ extend u64 as Copy {}
 
 extend usize as Eq {
     pub fn eq(self: &usize, other: &usize) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend usize as Ord {
     pub fn cmp(self: &usize, other: &usize) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -453,15 +453,15 @@ extend usize as Copy {}
 
 extend char as Eq {
     pub fn eq(self: &char, other: &char) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend char as Ord {
     pub fn cmp(self: &char, other: &char) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -489,15 +489,15 @@ extend char as Copy {}
 
 extend bool as Eq {
     pub fn eq(self: &bool, other: &bool) bool {
-        return (*self) == (*other);
+        return *self == *other;
     }
 }
 extend bool as Ord {
     pub fn cmp(self: &bool, other: &bool) i32 {
-        if (*self) < (*other) {
+        if *self < *other {
             return -1;
         }
-        if (*self) > (*other) {
+        if *self > *other {
             return 1;
         }
         return 0;
@@ -526,8 +526,14 @@ extend bool as Copy {}
 // IEEE-754 totalOrder bit trick: flipping ALL bits of a negative float and only the sign bit of a
 // non-negative one yields unsigned integers that order exactly like totalOrder -- the basis for the
 // float `Eq`/`Ord`/`Hash` conformances and the `total_cmp` methods below.
-union F32Bits { pub u: u32, pub f: f32 }
-union F64Bits { pub u: u64, pub f: f64 }
+union F32Bits {
+    pub u: u32,
+    pub f: f32,
+}
+union F64Bits {
+    pub u: u64,
+    pub f: f64,
+}
 
 fn f32_total_key(x: f32) u32 {
     let b = F32Bits { f: x };
@@ -654,7 +660,7 @@ extend c64 as Copy {}
 extend i8 {
     pub fn abs(self: i8) i8 {
         if self < 0 {
-            return (0 - (self as u8)) as i8;
+            return (0 - self as u8) as i8;
         }
         return self;
     } // unsigned negate: no MIN overflow
@@ -699,7 +705,7 @@ extend i8 {
 extend i16 {
     pub fn abs(self: i16) i16 {
         if self < 0 {
-            return (0 - (self as u16)) as i16;
+            return (0 - self as u16) as i16;
         }
         return self;
     } // unsigned negate: no MIN overflow
@@ -744,7 +750,7 @@ extend i16 {
 extend i32 {
     pub fn abs(self: i32) i32 {
         if self < 0 {
-            return (0 - (self as u32)) as i32;
+            return (0 - self as u32) as i32;
         }
         return self;
     } // unsigned negate: no MIN overflow
@@ -789,7 +795,7 @@ extend i32 {
 extend i64 {
     pub fn abs(self: i64) i64 {
         if self < 0 {
-            return (0 - (self as u64)) as i64;
+            return (0 - self as u64) as i64;
         }
         return self;
     } // unsigned negate: no MIN overflow
@@ -834,7 +840,7 @@ extend i64 {
 extend isize {
     pub fn abs(self: isize) isize {
         if self < 0 {
-            return (0 - (self as usize)) as isize;
+            return (0 - self as usize) as isize;
         }
         return self;
     } // unsigned negate: no MIN overflow
@@ -878,7 +884,7 @@ extend isize {
 
 extend u8 {
     pub fn is_power_of_two(self: u8) bool {
-        return self != 0 && (self & (self - 1)) == 0;
+        return self != 0 && (self & self - 1) == 0;
     }
     pub fn min(self: u8, other: u8) u8 {
         if self < other {
@@ -905,7 +911,7 @@ extend u8 {
 
 extend u16 {
     pub fn is_power_of_two(self: u16) bool {
-        return self != 0 && (self & (self - 1)) == 0;
+        return self != 0 && (self & self - 1) == 0;
     }
     pub fn min(self: u16, other: u16) u16 {
         if self < other {
@@ -932,7 +938,7 @@ extend u16 {
 
 extend u32 {
     pub fn is_power_of_two(self: u32) bool {
-        return self != 0 && (self & (self - 1)) == 0;
+        return self != 0 && (self & self - 1) == 0;
     }
     pub fn min(self: u32, other: u32) u32 {
         if self < other {
@@ -959,7 +965,7 @@ extend u32 {
 
 extend u64 {
     pub fn is_power_of_two(self: u64) bool {
-        return self != 0 && (self & (self - 1)) == 0;
+        return self != 0 && (self & self - 1) == 0;
     }
     pub fn min(self: u64, other: u64) u64 {
         if self < other {
@@ -986,7 +992,7 @@ extend u64 {
 
 extend usize {
     pub fn is_power_of_two(self: usize) bool {
-        return self != 0 && (self & (self - 1)) == 0;
+        return self != 0 && (self & self - 1) == 0;
     }
     pub fn min(self: usize, other: usize) usize {
         if self < other {
@@ -1173,7 +1179,7 @@ extend f64 {
         return self != self;
     }
     pub fn is_infinite(self: f64) bool {
-        return !self.is_nan() && self == (1.0 as f64) / (0.0 as f64) || self == (-1.0 as f64) / (0.0 as f64);
+        return !self.is_nan() && self == 1.0 as f64 / 0.0 as f64 || self == -1.0 as f64 / 0.0 as f64;
     }
     pub fn is_finite(self: f64) bool {
         return !self.is_nan() && !self.is_infinite();
