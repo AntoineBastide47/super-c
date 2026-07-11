@@ -22,18 +22,18 @@ import stdlib;
 import string as cstring;
 
 // Ops the matrix exercises (mirrors the C enum).
-const OP_FREE: i32 = 0;     // scope-exit auto-free of a deeply nested owner
-const OP_CALL: i32 = 1;     // move the whole nested value by value into a consumer that frees it
-const OP_COND_T: i32 = 2;   // conditional move, true path (moves into the consumer)
-const OP_COND_F: i32 = 3;   // conditional move, false path (leaves it to free at scope exit)
+const OP_FREE: i32 = 0; // scope-exit auto-free of a deeply nested owner
+const OP_CALL: i32 = 1; // move the whole nested value by value into a consumer that frees it
+const OP_COND_T: i32 = 2; // conditional move, true path (moves into the consumer)
+const OP_COND_F: i32 = 3; // conditional move, false path (leaves it to free at scope exit)
 const OP_REASSIGN: i32 = 4; // reassigning a Free binding frees the old value
-const OP_VECTOR: i32 = 5;   // a Vector of nested owners deep-frees every element
-const OP_VPOP: i32 = 6;     // pop moves one element out; both it and the remainder free once
-const OP_SW_MOVE: i32 = 7;  // nested switch moves the leaf Tr out; it frees at scope exit
-const OP_SW_FREE: i32 = 8;  // nested switch binds-but-doesn't-move the leaf -> free elaboration at the arm
-const OP_SW_PEEK: i32 = 9;  // nested borrow-peek; the scrutinee stays owned and frees at scope exit
+const OP_VECTOR: i32 = 5; // a Vector of nested owners deep-frees every element
+const OP_VPOP: i32 = 6; // pop moves one element out; both it and the remainder free once
+const OP_SW_MOVE: i32 = 7; // nested switch moves the leaf Tr out; it frees at scope exit
+const OP_SW_FREE: i32 = 8; // nested switch binds-but-doesn't-move the leaf -> free elaboration at the arm
+const OP_SW_PEEK: i32 = 9; // nested borrow-peek; the scrutinee stays owned and frees at scope exit
 
-const ID_CAP: i32 = 60;       // ids map to bytes 48.. ; keep them printable (48+59 = 107 < 127)
+const ID_CAP: i32 = 60; // ids map to bytes 48.. ; keep them printable (48+59 = 107 < 127)
 const PROG_CAP: i32 = 524288; // 512 KiB per-batch program buffer
 
 // TR_PRE: exit/putchar bindings + the leaf tracker whose `free` prints its id byte.
@@ -51,8 +51,12 @@ struct Hist { pub c: [i32; 256] }
 // Bounded append into `b` at offset `at` (cap-limited); returns the new end offset. Always NUL-terminates.
 fn ap(b: *mut char, at: i32, cap: i32, s: *const char) i32 {
     let mut n = unsafe cstring::strlen(s) as i32;
-    if at + n >= cap { n = cap - 1 - at; }
-    if n < 0 { n = 0; }
+    if at + n >= cap {
+        n = cap - 1 - at;
+    }
+    if n < 0 {
+        n = 0;
+    }
     unsafe cstring::memcpy((b + at as usize) as *mut void, s, n as usize);
     let end = at + n;
     unsafe b[end as usize] = 0 as char;
@@ -60,15 +64,21 @@ fn ap(b: *mut char, at: i32, cap: i32, s: *const char) i32 {
 }
 
 fn id_need(op: i32) i32 {
-    if op == OP_REASSIGN || op == OP_VPOP { return 2; }
-    if op == OP_VECTOR { return 3; }
+    if op == OP_REASSIGN || op == OP_VPOP {
+        return 2;
+    }
+    if op == OP_VECTOR {
+        return 3;
+    }
     return 1;
 }
 
 // The Super-C TYPE for shape[p..], e.g. "OR" -> "Option<Result<Tr, i32>>".
 fn ty(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32) i32 {
     let c = unsafe sh[p as usize];
-    if c == (0 as char) { return ap(b, at, cap, "Tr".ptr() as *const char); }
+    if c == (0 as char) {
+        return ap(b, at, cap, "Tr".ptr() as *const char);
+    }
     if c == 'O' {
         let mut a = ap(b, at, cap, "Option<".ptr() as *const char);
         a = ty(b, a, cap, sh, p + 1);
@@ -114,7 +124,9 @@ fn bld(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, id: i32) i32 {
 fn sw(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, var: *const char, mode: i32, top: i32) i32 {
     let c = unsafe sh[p as usize];
     if c == (0 as char) {
-        if mode == 0 { return ap(b, at, cap, var); }
+        if mode == 0 {
+            return ap(b, at, cap, var);
+        }
         let mut t = Buf1024 {};
         unsafe stdio::snprintf((&mut t.b[0]) as *mut char, 1024, "%s.id".ptr() as *const char, var);
         return ap(b, at, cap, (&t.b[0]) as *const char);
@@ -143,13 +155,17 @@ fn sw(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, var: *const char
 
 // True if the two NUL-terminated byte strings are equal as MULTISETS (order-independent free-trace check).
 fn multiset_eq(a: *const char, b: *const char) bool {
-    if a == null || b == null { return false; }
+    if a == null || b == null {
+        return false;
+    }
     let mut ca = Hist {};
     let mut cb = Hist {};
     let mut i: usize = 0;
     loop {
         let ch = unsafe a[i];
-        if ch == (0 as char) { break; }
+        if ch == (0 as char) {
+            break;
+        }
         let k = (ch as u8) as usize;
         ca.c[k] = ca.c[k] + 1;
         i = i + 1;
@@ -157,13 +173,17 @@ fn multiset_eq(a: *const char, b: *const char) bool {
     i = 0;
     loop {
         let ch = unsafe b[i];
-        if ch == (0 as char) { break; }
+        if ch == (0 as char) {
+            break;
+        }
         let k = (ch as u8) as usize;
         cb.c[k] = cb.c[k] + 1;
         i = i + 1;
     }
     for j in 0..256 {
-        if ca.c[j] != cb.c[j] { return false; }
+        if ca.c[j] != cb.c[j] {
+            return false;
+        }
     }
     return true;
 }
@@ -199,16 +219,27 @@ extend Gen {
 
     // Emit one scenario for shape `sh` and operation `op`; flush first if the id budget would overflow.
     fn scenario(self: &mut Gen, sh: *const char, op: i32) void {
-        if self.idc + id_need(op) > ID_CAP { self.flush(); }
+        if self.idc + id_need(op) > ID_CAP {
+            self.flush();
+        }
         let mut tb = Buf1024 {};
         let _ = ty((&mut tb.b[0]) as *mut char, 0, 1024, sh, 0);
         let tp = (&tb.b[0]) as *const char;
-        let id0 = 48 + self.idc; self.idc = self.idc + 1;
+        let id0 = 48 + self.idc;
+        self.idc = self.idc + 1;
         let mut id1 = 0;
         let mut id2 = 0;
         self.push_id(id0);
-        if id_need(op) >= 2 { id1 = 48 + self.idc; self.idc = self.idc + 1; self.push_id(id1); }
-        if id_need(op) >= 3 { id2 = 48 + self.idc; self.idc = self.idc + 1; self.push_id(id2); }
+        if id_need(op) >= 2 {
+            id1 = 48 + self.idc;
+            self.idc = self.idc + 1;
+            self.push_id(id1);
+        }
+        if id_need(op) >= 3 {
+            id2 = 48 + self.idc;
+            self.idc = self.idc + 1;
+            self.push_id(id2);
+        }
 
         let mut e0 = Buf2048 {};
         let _ = bld((&mut e0.b[0]) as *mut char, 0, 2048, sh, 0, id0);
@@ -274,7 +305,9 @@ extend Gen {
     // Assemble the accumulated scenarios into one program, build + run it, and assert exit 0 with a matching
     // free multiset. Then reset for the next batch.
     fn flush(self: &mut Gen) void {
-        if self.sc == 0 { return; }
+        if self.sc == 0 {
+            return;
+        }
         self.at = ap(self.prog, self.at, PROG_CAP, "fn main() i32 { let mut acc = 0;\n".ptr() as *const char);
         self.at = ap(self.prog, self.at, PROG_CAP, (&self.calls[0]) as *const char);
         self.at = ap(self.prog, self.at, PROG_CAP, "  if acc == 2147483647 { unsafe putchar(33); }\n  unsafe exit(0); }\n".ptr() as *const char);
@@ -284,22 +317,32 @@ extend Gen {
         assert_eq(r.exit, 0);
         assert(multiset_eq(r.out, (&self.exp[0]) as *const char), "raii-gen: free multiset mismatch (leak or double-free)");
         self.at = ap(self.prog, 0, PROG_CAP, TR_PRE.ptr() as *const char);
-        self.cat = 0; self.calls[0] = 0 as char;
-        self.eat = 0; self.exp[0] = 0 as char;
-        self.idc = 0; self.sc = 0;
+        self.cat = 0;
+        self.calls[0] = 0 as char;
+        self.eat = 0;
+        self.exp[0] = 0 as char;
+        self.idc = 0;
+        self.sc = 0;
         self.nbatch = self.nbatch + 1;
     }
 
     fn finish(self: &mut Gen) void {
         self.flush();
-        if self.prog != null { unsafe stdlib::free(self.prog as *mut void); self.prog = null; }
+        if self.prog != null {
+            unsafe stdlib::free(self.prog as *mut void);
+            self.prog = null;
+        }
     }
 }
 
 // The argument list a scenario call takes: COND variants pass a bool flag; everything else is nullary.
 fn callarg(op: i32) *const char {
-    if op == OP_COND_T { return "true".ptr() as *const char; }
-    if op == OP_COND_F { return "false".ptr() as *const char; }
+    if op == OP_COND_T {
+        return "true".ptr() as *const char;
+    }
+    if op == OP_COND_F {
+        return "false".ptr() as *const char;
+    }
     return "".ptr() as *const char;
 }
 
@@ -309,7 +352,9 @@ fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *c
         unsafe sh[at as usize] = 0 as char;
         g.scenario(sh as *const char, op);
     }
-    if at == max_depth { return; }
+    if at == max_depth {
+        return;
+    }
     let alen = unsafe cstring::strlen(alphabet) as i32;
     for i in 0..alen {
         unsafe sh[at as usize] = unsafe alphabet[i as usize];
@@ -333,11 +378,29 @@ fn run_general(op: i32) void {
     g.finish();
 }
 
-@test fn switch_move() { run_switch(OP_SW_MOVE); }
-@test fn switch_free() { run_switch(OP_SW_FREE); }
-@test fn switch_peek() { run_switch(OP_SW_PEEK); }
-@test fn general_free() { run_general(OP_FREE); }
-@test fn general_call() { run_general(OP_CALL); }
-@test fn general_cond() { run_general(OP_COND_T); run_general(OP_COND_F); }
-@test fn general_reassign() { run_general(OP_REASSIGN); }
-@test fn general_vector() { run_general(OP_VECTOR); run_general(OP_VPOP); }
+@test fn switch_move() {
+    run_switch(OP_SW_MOVE);
+}
+@test fn switch_free() {
+    run_switch(OP_SW_FREE);
+}
+@test fn switch_peek() {
+    run_switch(OP_SW_PEEK);
+}
+@test fn general_free() {
+    run_general(OP_FREE);
+}
+@test fn general_call() {
+    run_general(OP_CALL);
+}
+@test fn general_cond() {
+    run_general(OP_COND_T);
+    run_general(OP_COND_F);
+}
+@test fn general_reassign() {
+    run_general(OP_REASSIGN);
+}
+@test fn general_vector() {
+    run_general(OP_VECTOR);
+    run_general(OP_VPOP);
+}

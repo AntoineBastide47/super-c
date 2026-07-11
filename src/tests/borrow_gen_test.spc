@@ -34,7 +34,9 @@ fn overlap(i: i32, j: i32) bool {
 // An i32-valued use of reference binding `name` that borrows place `pi`: `name.a` (whole, auto-deref) or `*name`.
 fn use_ref(out: *mut char, name: str, pi: i32) {
     let mut fmt = "*%s";
-    if pi == 0 { fmt = "%s.a"; }
+    if pi == 0 {
+        fmt = "%s.a";
+    }
     unsafe stdio::snprintf(out, 64, fmt.ptr() as *const char, name.ptr() as *const char);
 }
 
@@ -43,7 +45,9 @@ fn use_ref(out: *mut char, name: str, pi: i32) {
 fn check_case(label: str, src: str, expect_ok: bool) {
     let c = h::compile(src, h::STAGE_TYPECHECK);
     assert(c.ok() == expect_ok, label);
-    if !c.ok() && !expect_ok { assert(c.stage == h::STAGE_TYPECHECK, label); }
+    if !c.ok() && !expect_ok {
+        assert(c.stage == h::STAGE_TYPECHECK, label);
+    }
 }
 
 // Splice a prefix macro `pre` before a `body` snippet and check the verdict (the analog of the C
@@ -65,7 +69,8 @@ fn aliasing() {
         for k2 in 0..2 {
             for p1 in 0..3 {
                 for p2 in 0..3 {
-                    let mut u1 = Buf64 {}; let mut u2 = Buf64 {};
+                    let mut u1 = Buf64 {};
+                    let mut u2 = Buf64 {};
                     use_ref((&mut u1.b[0]) as *mut char, "b1", p1);
                     use_ref((&mut u2.b[0]) as *mut char, "b2", p2);
                     let mut src = Buf2048 {};
@@ -315,7 +320,9 @@ fn aliasing3() {
                 for p1 in 0..3 {
                     for p2 in 0..3 {
                         for p3 in 0..3 {
-                            let mut u1 = Buf64 {}; let mut u2 = Buf64 {}; let mut u3 = Buf64 {};
+                            let mut u1 = Buf64 {};
+                            let mut u2 = Buf64 {};
+                            let mut u3 = Buf64 {};
                             use_ref((&mut u1.b[0]) as *mut char, "b1", p1);
                             use_ref((&mut u2.b[0]) as *mut char, "b2", p2);
                             use_ref((&mut u3.b[0]) as *mut char, "b3", p3);
@@ -387,13 +394,17 @@ fn bundle(idx: *const i32, n: i32, label: str) {
         at = at + unsafe stdio::snprintf((&mut src.b[at as usize]) as *mut char, (8192 - at) as usize,
             "fn s%d() i32 { %s }\n".ptr() as *const char, i, snippet_body(bi).ptr() as *const char);
         let mut sep = "";
-        if i != 0 { sep = " + "; }
+        if i != 0 {
+            sep = " + ";
+        }
         cat = cat + unsafe stdio::snprintf((&mut calls.b[cat as usize]) as *mut char, (2048 - cat) as usize,
             "%ss%d()".ptr() as *const char, sep.ptr() as *const char, i);
         ok = ok && snippet_ok(bi);
     }
     let mut tail = "0".ptr() as *const char;
-    if n != 0 { tail = (&calls.b[0]) as *const char; }
+    if n != 0 {
+        tail = (&calls.b[0]) as *const char;
+    }
     unsafe stdio::snprintf((&mut src.b[at as usize]) as *mut char, (8192 - at) as usize,
         "fn main() i32 { return %s; }\n".ptr() as *const char, tail);
     check_case(label, buf_str((&src.b[0]) as *const char), ok);
@@ -407,7 +418,10 @@ fn composition() {
     let mut av = IdxBuf {};
     let mut nv: i32 = 0;
     for i in 0..16 {
-        if snippet_ok(i) { av.b[nv as usize] = i; nv = nv + 1; }
+        if snippet_ok(i) {
+            av.b[nv as usize] = i;
+            nv = nv + 1;
+        }
     }
     bundle((&av.b[0]) as *const i32, nv, "bundle: all valid scenarios");
 
@@ -416,8 +430,12 @@ fn composition() {
         if !snippet_ok(j) {
             let mut idx = IdxBuf {};
             let mut k: i32 = 0;
-            for t in 0..nv { idx.b[k as usize] = av.b[t as usize]; k = k + 1; }
-            idx.b[k as usize] = j; k = k + 1;
+            for t in 0..nv {
+                idx.b[k as usize] = av.b[t as usize];
+                k = k + 1;
+            }
+            idx.b[k as usize] = j;
+            k = k + 1;
             let mut lbuf = Buf2048 {};
             unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle: valids + invalid #%d".ptr() as *const char, j);
             bundle((&idx.b[0]) as *const i32, k, buf_str((&lbuf.b[0]) as *const char));
@@ -428,7 +446,8 @@ fn composition() {
     for a in 0..16 {
         for b in 0..16 {
             let mut pair = IdxBuf {};
-            pair.b[0] = a; pair.b[1] = b;
+            pair.b[0] = a;
+            pair.b[1] = b;
             let mut lbuf = Buf2048 {};
             unsafe stdio::snprintf((&mut lbuf.b[0]) as *mut char, 2048, "bundle pair (%d,%d)".ptr() as *const char, a, b);
             bundle((&pair.b[0]) as *const i32, 2, buf_str((&lbuf.b[0]) as *const char));

@@ -476,10 +476,16 @@ fn bug_regressions() {
         let mut s = String::new();
         s.push_str("fn main() i32 {");
         let mut i = 0;
-        while i < 700 { s.push_str("{"); i = i + 1; }
+        while i < 700 {
+            s.push_str("{");
+            i = i + 1;
+        }
         s.push_str(" return 0; ");
         i = 0;
-        while i < 700 { s.push_str("}"); i = i + 1; }
+        while i < 700 {
+            s.push_str("}");
+            i = i + 1;
+        }
         s.push_str("}");
         assert(h::parse_has_error(s.as_str()), "deeply nested blocks should diagnose, not crash");
         s.free();
@@ -494,7 +500,10 @@ fn pathological_depth() {
         let mut s = String::new();
         s.push_str("fn f() i32 { return 1");
         let mut i = 0;
-        while i < 8000 { s.push_str(" + 1"); i = i + 1; }
+        while i < 8000 {
+            s.push_str(" + 1");
+            i = i + 1;
+        }
         s.push_str("; }\n");
         assert(h::parse_has_error(s.as_str()), "over-long binary chain is rejected");
         s.free();
@@ -503,7 +512,10 @@ fn pathological_depth() {
         let mut s = String::new();
         s.push_str("fn f() void { let mut a: i32 = 0; ");
         let mut i = 0;
-        while i < 1000 { s.push_str("a = "); i = i + 1; }
+        while i < 1000 {
+            s.push_str("a = ");
+            i = i + 1;
+        }
         s.push_str("1; }\n");
         assert(h::parse_has_error(s.as_str()), "over-deep assignment chain is rejected");
         s.free();

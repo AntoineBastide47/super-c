@@ -97,6 +97,11 @@ pub enum TokenType {
     Arrow,
     FatArrow,
     Eof,
+    // Trivia: only emitted when Lexer.keep_trivia is set (the formatter); the parser never sees these.
+    LineComment,
+    BlockComment,
+    DocLineComment,
+    DocBlockComment,
 }
 
 extend TokenType {
@@ -200,6 +205,10 @@ extend TokenType {
             Arrow => "Arrow",
             FatArrow => "FatArrow",
             Eof => "Eof",
+            LineComment => "LineComment",
+            BlockComment => "BlockComment",
+            DocLineComment => "DocLineComment",
+            DocBlockComment => "DocBlockComment",
         };
     }
 }

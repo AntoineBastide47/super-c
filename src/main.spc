@@ -5,7 +5,10 @@ import stdio;
 import stdlib;
 import string as cstring;
 import lexer::token as tok;
+import lexer::lexer as lex;
 import ast::ast as *;
+import ast::parser as par;
+import fmt::formatter as fmtr;
 import driver_shim as shim;
 import module::loader as loader;
 import resolver::resolver as resolver;
@@ -67,7 +70,7 @@ fn build_out_path(root_dir: str, mod_path: str, ext: str) String {
 fn mkdir_p(path: str) void {
     let n = path.len();
     if n == 0 || n >= 4096 { return; }
-    let mut buf = PathBuf { };
+    let mut buf = PathBuf {};
     unsafe cstring::memcpy((&mut buf.b[0]) as *mut void, path.ptr() as *const void, n);
     unsafe buf.b[n] = 0 as char;
     let base = (&mut buf.b[0]) as *mut char;
@@ -106,7 +109,7 @@ fn prune_orphans(dir: *const char, keep: &Vector<String>) void {
         if e == null { break; }
         let name = unsafe shim::sc_dirent_name(e);
         if unsafe cstring::strcmp(name, ".".ptr() as *const char) == 0 || unsafe cstring::strcmp(name, "..".ptr() as *const char) == 0 { continue; }
-        let mut pb = PathBuf { };
+        let mut pb = PathBuf {};
         let np = unsafe stdio::snprintf((&mut pb.b[0]) as *mut char, 4096, "%s/%s".ptr() as *const char, dir, name);
         if np < 0 || (np as usize) >= 4096 { continue; }
         let path = (&pb.b[0]) as *const char;
@@ -154,7 +157,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
     let y = unsafe *(mod_ast_c(&*p, am)).type_at(t);
     if y.kind == TypeKind::TYPE_BUILTIN { return true; }
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE ||
-       y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+    y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         return ast_type_mentions_builtin(&*p, am, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
@@ -172,7 +175,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
     let y = unsafe *(mod_ast_c(&*p, am)).type_at(t);
     let mut changed = false;
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE ||
-       y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+    y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         if mark_type_modules(&*p, am, y.as_data.elem, live) { changed = true; }
     } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_FUNCTION {
         if p.builtin_of_decl(y.module, y.as_data.decl) < 0 {
@@ -212,7 +215,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             for r in 0..nr {
                 let d = unsafe (*a).resolutions[r];
                 if d.node != NODE_NONE && (d.module as usize) < n && (d.module as usize) != m &&
-                   p.builtin_of_decl(d.module, d.node) < 0 {
+                p.builtin_of_decl(d.module, d.node) < 0 {
                     if mark_live(live, n, d.module) { changed = true; }
                 }
             }
@@ -343,7 +346,7 @@ fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) void {
 
 // Wrap one RESOLVED external C source path `rsl` into a build/ TU (deduped across explicit + implicit adds).
 fn ext_c_wrap(root: str, keep: &mut Vector<String>, seen: &mut Vector<String>, nsrc: *mut u32,
-              rsl: *const char, err: *mut bool) void {
+    rsl: *const char, err: *mut bool) void {
     for k in 0..seen.len() { if seen[k].as_str() == str::from_cstr(rsl) { return; } }
     seen.push(String::from_cstr(rsl));
     let mut basep = unsafe cstring::strrchr(rsl, '/' as i32) as *const char;
@@ -1020,7 +1023,6 @@ fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
     return Option::<String>::Some(path);
 }
 
-
 // Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
 // linked to that path and we return; otherwise it links `<root>/build/__tests` and runs it as the test
 // runner, forwarding `topts`' options.
@@ -1180,7 +1182,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
         let pkg = (&mut *p) as *mut loader::Package;
         let mut c = cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg);
         c.set_multifile(true);
-        let mut tcases = TCases {};  // must outlive codegen_emit (CgTestInfo keeps a pointer into it)
+        let mut tcases = TCases {}; // must outlive codegen_emit (CgTestInfo keeps a pointer into it)
         if testing {
             let mut nt: u32 = 0;
             let mut tk: usize = 0;
@@ -1222,7 +1224,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
     if live != null { unsafe stdlib::free(live as *mut void); }
     // Drop outputs from a previous build that this program no longer emits, so the tree matches the current
     // sources. Skip on a keep-list OOM -- never risk deleting a live output.
-    let mut broot = PathBuf { };
+    let mut broot = PathBuf {};
     // root is a str view (not nul-terminated); bound the copy with %.*s or %s runs off the buffer end.
     let bn = unsafe stdio::snprintf((&mut broot.b[0]) as *mut char, 4096, "%.*s/build".ptr() as *const char, root.len() as i32, root.ptr() as *const char);
     if bn > 0 && (bn as usize) < 4096 { prune_orphans((&broot.b[0]) as *const char, &keep); }
@@ -1274,7 +1276,7 @@ fn parse_size(s: *const char) u64 {
 
 // The std/ directory next to the running binary ("<exe dir>/std"), so the prelude is found regardless of cwd.
 fn exe_std_dir(argv0: *const char) *mut char {
-    let mut buf = PathBuf { };
+    let mut buf = PathBuf {};
     let mut path = argv0;
     if unsafe shim::sc_exe_path((&mut buf.b[0]) as *mut char, 4096) == 0 { path = (&buf.b[0]) as *const char; }
     // Last path separator, '/' or '\\' (Windows), whichever occurs later -- branch-free, no platform detection.
@@ -1291,6 +1293,157 @@ fn exe_std_dir(argv0: *const char) *mut char {
     return out;
 }
 
+fn read_stdin() Option<String> {
+    let mut s = String::new();
+    let cap: usize = 65536;
+    let buf = unsafe stdlib::malloc(cap) as *mut u8;
+    if buf == null { return Option::<String>::None; }
+    let sin = stdio::stdin();
+    loop {
+        let n = unsafe stdio::fread(buf as *mut void, 1, cap, sin);
+        if n > 0 { s.push_bytes(buf as *const u8, n); }
+        if n < cap { break; }
+    }
+    unsafe stdlib::free(buf as *mut void);
+    return Option::<String>::Some(s);
+}
+
+// Byte-lexicographic name order with a length tiebreak: deterministic directory walks.
+fn fmt_name_cmp(a: &String, b: &String) i32 {
+    let la = a.len();
+    let lb = b.len();
+    let m = if la < lb { la; } else { lb; };
+    let c = unsafe cstring::memcmp(a.as_str().ptr() as *const void, b.as_str().ptr() as *const void, m);
+    if c != 0 { return c; }
+    return (la as i32) - (lb as i32);
+}
+
+// Recursively format every .spc under `dir` (sorted; dot-entries skipped). Returns 1 if any file
+// failed or (--check) needs formatting, else 0.
+fn fmt_dir(dir: str, write: bool, check: bool) i32 {
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    if dh == null {
+        eprintln("fmt: cannot read directory '{}'", dir);
+        d.free();
+        return 1;
+    }
+    let mut names = Vector::<String>::new();
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null { break; }
+        let nm = unsafe shim::sc_dirent_name(e);
+        if (unsafe nm[0]) == ('.' as char) { continue; } // ".", "..", hidden entries
+        names.push(String::from_cstr(nm));
+    }
+    unsafe shim::sc_closedir(dh);
+    names.sort_by(fmt_name_cmp);
+    let mut rc = 0;
+    for i in 0..names.len() {
+        let mut p = String::from_str(dir);
+        p.push_byte(b'/');
+        p.push_string(names.at(i));
+        let isdir = unsafe shim::sc_stat_isdir(p.cstr());
+        if isdir == 1 {
+            if fmt_dir(p.as_str(), write, check) != 0 { rc = 1; }
+        } else if names.at(i).as_str().ends_with(".spc") {
+            if fmt_one(p.cstr(), false, write, check) != 0 { rc = 1; }
+        }
+        p.free();
+    }
+    names.free();
+    d.free();
+    return rc;
+}
+
+// `super-c fmt`: canonical formatting. Prints to stdout by default; -w rewrites the file in place
+// (only when it changed); --check writes nothing, prints the path, and exits 1 when the file is not
+// already formatted. `-` reads stdin and formats to stdout. A directory recurses over its .spc files
+// (requires -w or --check). A file the compiler cannot lex or parse is never rewritten: diagnostics
+// are printed and the exit code is 1.
+fn run_fmt(path: *const char, write: bool, check: bool) i32 {
+    let is_stdin = (unsafe path[0]) == ('-' as char) && (unsafe path[1]) == (0 as char);
+    if is_stdin && write {
+        eprintln("fmt: -w cannot be used with stdin");
+        return 1;
+    }
+    if !is_stdin && unsafe shim::sc_stat_isdir(path) == 1 {
+        if !write && !check {
+            eprintln("fmt: '{}' is a directory; use -w or --check", diag::cstr(path));
+            return 1;
+        }
+        return fmt_dir(diag::cstr(path), write, check);
+    }
+    return fmt_one(path, is_stdin, write, check);
+}
+
+fn fmt_one(path: *const char, is_stdin: bool, write: bool, check: bool) i32 {
+    let src_opt = if is_stdin { read_stdin(); } else { loader::read_file(diag::cstr(path)); };
+    if src_opt.is_none() {
+        eprintln("fmt: cannot read '{}'", diag::cstr(path));
+        return 1;
+    }
+    let mut src = src_opt.unwrap();
+
+    // Reject sources that do not parse -- never rewrite something the compiler cannot read.
+    let mut vsrc = String::from_str(src.as_str());
+    let mut lx = lex::Lexer::new(&mut vsrc);
+    lx.set_file(path);
+    lx.scan_tokens();
+    if lx.has_errors() {
+        lx.log_errors();
+        lx.free();
+        vsrc.free();
+        src.free();
+        return 1;
+    }
+    let toks = lx.take_tokens();
+    lx.free();
+    let mut ps = par::Parser::new(toks, vsrc.as_str());
+    ps.set_file(path);
+    ps.build_ast();
+    let perr = ps.has_errors();
+    if perr { ps.errors.log(); }
+    ps.free();
+    vsrc.free();
+    if perr {
+        src.free();
+        return 1;
+    }
+
+    let mut out = String::new();
+    if !fmtr::format_source(src.as_str(), path, &mut out) {
+        out.free();
+        src.free();
+        return 1;
+    }
+    let src_view = src.as_str();
+    let same = out.len() == src.len() && out.as_str().eq(&src_view);
+    let mut rc = 0;
+    if check {
+        if !same {
+            print("{}\n", diag::cstr(path));
+            rc = 1;
+        }
+    } else if write {
+        if !same {
+            let f = stdio::fopen(diag::cstr(path), "wb");
+            if f == null {
+                eprintln("fmt: cannot write '{}'", diag::cstr(path));
+                rc = 1;
+            } else {
+                unsafe stdio::fwrite(out.as_str().ptr() as *const void, 1, out.len(), f);
+                unsafe stdio::fclose(f);
+            }
+        }
+    } else {
+        unsafe stdio::fwrite(out.as_str().ptr() as *const void, 1, out.len(), stdio::stdout());
+    }
+    out.free();
+    src.free();
+    return rc;
+}
+
 fn argv_cstr(argv: &Vector<str>, i: i32) *const char {
     return (*argv.at(i as usize)).ptr() as *const char;
 }
@@ -1302,6 +1455,10 @@ fn main(argv: Vector<str>) i32 {
     let mut file: *const char = null;
     let mut out_bin: *const char = null; // set by the `build` subcommand (via -o, or defaulted)
     let mut build_mode = false;
+    let mut fmt_mode = false;
+    let mut fmt_write = false;
+    let mut fmt_check = false;
+    let mut fmt_extra = Vector::<i32>::new(); // argv indices of extra `fmt` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
     let mut bad = false;
     let mut target: i32 = unsafe shim::sc_host_platform(); // @platform gate target; --target= overrides
@@ -1311,6 +1468,12 @@ fn main(argv: Vector<str>) i32 {
         let arg = argv_cstr(&argv, i);
         if !build_mode && file == null && unsafe cstring::strcmp(arg, "build".ptr() as *const char) == 0 {
             build_mode = true; // `super-c build <root.spc> [-o out]`: emit + link a program
+        } else if !build_mode && !fmt_mode && file == null && unsafe cstring::strcmp(arg, "fmt".ptr() as *const char) == 0 {
+            fmt_mode = true; // `super-c fmt [-w | --check] <file | ->`
+        } else if fmt_mode && unsafe cstring::strcmp(arg, "-w".ptr() as *const char) == 0 {
+            fmt_write = true;
+        } else if fmt_mode && unsafe cstring::strcmp(arg, "--check".ptr() as *const char) == 0 {
+            fmt_check = true;
         } else if unsafe cstring::strcmp(arg, "-o".ptr() as *const char) == 0 {
             if i + 1 < argc { i = i + 1; out_bin = argv_cstr(&argv, i); }
             else { bad = true; }
@@ -1342,21 +1505,34 @@ fn main(argv: Vector<str>) i32 {
             bad = true;
         } else if file == null {
             file = arg;
+        } else if fmt_mode {
+            fmt_extra.push(i); // `fmt` accepts any number of paths
         } else {
             file = "".ptr() as *const char;
         }
         i = i + 1;
     }
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null) { bad = true; }
-    if out_bin != null && !build_mode { bad = true; }   // -o is only meaningful for `build`
-    if build_mode && topts.enabled { bad = true; }      // `build` and `--test` are mutually exclusive
+    if out_bin != null && !build_mode { bad = true; } // -o is only meaningful for `build`
+    if build_mode && topts.enabled { bad = true; } // `build` and `--test` are mutually exclusive
+    if fmt_mode && (build_mode || topts.enabled) { bad = true; }
+    if fmt_write && fmt_check { bad = true; } // -w and --check are mutually exclusive
     if build_mode && out_bin == null { out_bin = "a.out".ptr() as *const char; } // cc-style default
     if bad || file == null || (unsafe *file) == (0 as char) {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n".ptr() as *const char,
+            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n       super-c fmt [-w | --check] <path/to/script | ->\n".ptr() as *const char,
             stdio::stderr());
         return 1;
     }
+    if fmt_mode {
+        let mut rc = run_fmt(file, fmt_write, fmt_check);
+        for k in 0..fmt_extra.len() {
+            if run_fmt(argv_cstr(&argv, *fmt_extra.at(k)), fmt_write, fmt_check) != 0 { rc = 1; }
+        }
+        fmt_extra.free();
+        return rc;
+    }
+    fmt_extra.free();
     let arg0: *const char = if argc > 0 { argv_cstr(&argv, 0); } else { "super-c".ptr() as *const char; };
     let std_dir = exe_std_dir(arg0);
     let rc = run_file(file, std_dir as *const char, ce_steps, ce_mem, (&topts) as *const TestOpts, out_bin, target, bootstrap_tags);

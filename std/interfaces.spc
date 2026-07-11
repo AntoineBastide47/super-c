@@ -14,11 +14,21 @@ pub interface Free {
 // Arithmetic operator overloading: `a + b` dispatches to `a.add(&b)`, and likewise `-`/`*`/`/`/`%` to
 // sub/mul/div/rem. The result is whatever the method returns (typically Self). A type need not name these
 // interfaces -- a bare method of the right name is enough -- but conforming documents the intent.
-pub interface Add { fn add(self: &Self, other: &Self) Self; }
-pub interface Sub { fn sub(self: &Self, other: &Self) Self; }
-pub interface Mul { fn mul(self: &Self, other: &Self) Self; }
-pub interface Div { fn div(self: &Self, other: &Self) Self; }
-pub interface Rem { fn rem(self: &Self, other: &Self) Self; }
+pub interface Add {
+    fn add(self: &Self, other: &Self) Self;
+}
+pub interface Sub {
+    fn sub(self: &Self, other: &Self) Self;
+}
+pub interface Mul {
+    fn mul(self: &Self, other: &Self) Self;
+}
+pub interface Div {
+    fn div(self: &Self, other: &Self) Self;
+}
+pub interface Rem {
+    fn rem(self: &Self, other: &Self) Self;
+}
 
 // Index operator overloading (`obj[i]` / `obj[lo..hi]`) lives in the sibling `traits` module as
 // `Index` / `IndexMut`: its range form mentions `Range` and the slice views, which this module must not.
@@ -107,12 +117,16 @@ pub struct Global {}
 extend Global as Allocator {
     pub fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
         let p = unsafe malloc(size);
-        if p == null { unsafe abort(); }
+        if p == null {
+            unsafe abort();
+        }
         return p;
     }
     pub fn realloc(self: &mut Global, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
         let p = unsafe realloc(ptr, new_size);
-        if p == null { unsafe abort(); }
+        if p == null {
+            unsafe abort();
+        }
         return p;
     }
     pub fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) void {
@@ -123,6 +137,7 @@ extend Global as Allocator {
 // `Global` is constructible from nothing, so containers' no-argument constructors (`Vector::new()`, ...)
 // can synthesize one. A stored `Global` is zero bytes.
 extend Global as Default {
-    pub fn default() Global { return Global {}; }
+    pub fn default() Global {
+        return Global {};
+    }
 }
-

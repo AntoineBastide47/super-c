@@ -76,7 +76,9 @@ fn namespace_separation() {
     let mut type_path: NodeId = NODE_NONE;
     let mut id: NodeId = 1;
     while (id as usize) < c.ast.nodes.len() {
-        if c.ast.at_const(id).kind == NodeKind::NODE_TYPE_PATH && c.ast.resolution(id) != NODE_NONE { type_path = id; }
+        if c.ast.at_const(id).kind == NodeKind::NODE_TYPE_PATH && c.ast.resolution(id) != NODE_NONE {
+            type_path = id;
+        }
         id = id + 1;
     }
     assert(type_path != NODE_NONE && c.ast.resolution(type_path) == struct_decl, "type Foo binds to the struct");

@@ -22,13 +22,16 @@ Super-C source (.spc)
 ## Quick start
 
 ```sh
-make                      # build the compiler -> ./super-c
-./super-c path/to/app.spc # emit C into  path/to/build/
-cc path/to/build/**/*.c -o app   # compile the generated C (no -I needed; includes are relative)
+# build the compiler -> ./super-c
+make release
+# emit C into  path/to/build/
+./super-c path/to/app.spc
+# compile the generated C (no -I needed; includes are relative)
+cc path/to/build/**/*.c -o app
 ./app
 ```
 
-The `std/` prelude (`String`, `str`, `Box`, `Option`, `Result`, `Vector`, `Map`, `Set`, slices) is
+The `std/` prelude (`String`, `str`, `Option`, `Result`, `Vector`, `Map`, ...) is
 auto-imported, so those types are in scope without any `import`.
 
 ## Language tour
@@ -44,12 +47,14 @@ fn main() i32 {
     let x: i32 = 10;     // explicit type
     let y = add(x, 20);  // inferred
     let mut sum = 0;     // mutable binding
-    for i in 0..=y { sum = sum + i; }
+    for i in 0..=y {
+        sum = sum + i;
+    }
     return sum % 256;
 }
 ```
 
-Builtin scalar types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 usize`, `f32`, `f64`,
+Builtin scalar types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 usize`, `f32 f64`,
 `c32`, `c64` (C `_Complex`), `void`. (`main` must be `fn main() i32`.) `while`, `for`, and `do { .. }
 while (cond);` loops are all available.
 

@@ -19,20 +19,27 @@ pub struct CliResult { pub exit: i32, pub out: *mut char }
 
 extend CliResult {
     pub fn out_has(self: &CliResult, needle: str) bool {
-        if self.out == null { return false; }
+        if self.out == null {
+            return false;
+        }
         return unsafe cstring::strstr(self.out, needle.ptr() as *const char) != null;
     }
 }
 extend CliResult as Free {
     pub fn free(self: &mut Self) void {
-        if self.out != null { unsafe stdlib::free(self.out as *mut void); self.out = null; }
+        if self.out != null {
+            unsafe stdlib::free(self.out as *mut void);
+            self.out = null;
+        }
     }
 }
 
 // $SUPERC, or "./super-c" when unset -- the compiler under test (may be gen1 for the self-hosted check).
 fn superc() *const char {
     let mut sc = stdlib::getenv("SUPERC");
-    if sc == null || (unsafe *sc) == (0 as char) { sc = "./super-c".ptr() as *const char; }
+    if sc == null || (unsafe *sc) == (0 as char) {
+        sc = "./super-c".ptr() as *const char;
+    }
     return sc;
 }
 
@@ -41,10 +48,14 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
     unsafe stdio::fflush(f);
     let _ = unsafe stdio::fseek(f, 0, stdio::SEEK_END);
     let sz = unsafe stdio::ftell(f);
-    if sz < 0 { return null; }
+    if sz < 0 {
+        return null;
+    }
     unsafe stdio::rewind(f);
     let buf = unsafe stdlib::malloc((sz as usize) + 1) as *mut char;
-    if buf == null { return null; }
+    if buf == null {
+        return null;
+    }
     let got = unsafe stdio::fread(buf as *mut void, 1, sz as usize, f);
     unsafe buf[got] = 0 as char;
     return buf;
@@ -53,7 +64,9 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
 // Read a whole file into a fresh NUL-terminated buffer (caller frees); null if it cannot be opened.
 fn slurp(path: *const char) *mut char {
     let f = stdio::fopen(str::from_cstr(path), "rb");
-    if f == null { return null; }
+    if f == null {
+        return null;
+    }
     let buf = read_stream(f);
     unsafe stdio::fclose(f);
     return buf;
@@ -65,7 +78,9 @@ fn exec(basecmd: *const char, outpath: *const char) CliResult {
     unsafe stdio::snprintf((&mut full.b[0]) as *mut char, 8192, "%s > '%s' 2>&1".ptr() as *const char, basecmd, outpath);
     let rc = stdlib::system(str::from_cstr((&full.b[0]) as *const char));
     let mut r = CliResult { exit: -1, out: null };
-    if unsafe shim::sc_wifexited(rc) != 0 { r.exit = unsafe shim::sc_wexitstatus(rc); }
+    if unsafe shim::sc_wifexited(rc) != 0 {
+        r.exit = unsafe shim::sc_wexitstatus(rc);
+    }
     r.out = slurp(outpath);
     return r;
 }
@@ -74,7 +89,9 @@ fn exec(basecmd: *const char, outpath: *const char) CliResult {
 // checks that need a custom cc invocation or a `find`/`test` pipeline.
 pub fn run_shell(cmd: *const char) i32 {
     let rc = stdlib::system(str::from_cstr(cmd));
-    if unsafe shim::sc_wifexited(rc) != 0 { return unsafe shim::sc_wexitstatus(rc); }
+    if unsafe shim::sc_wifexited(rc) != 0 {
+        return unsafe shim::sc_wexitstatus(rc);
+    }
     return -1;
 }
 
@@ -91,7 +108,9 @@ pub fn proj_new() Proj {
 }
 
 extend Proj {
-    pub fn rootp(self: &Proj) *const char { return (&self.root[0]) as *const char; }
+    pub fn rootp(self: &Proj) *const char {
+        return (&self.root[0]) as *const char;
+    }
 
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
     pub fn mkfile(self: &Proj, rel: str, content: str) void {
@@ -102,7 +121,9 @@ extend Proj {
         unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
         let f = stdio::fopen(str::from_cstr((&path.b[0]) as *const char), "wb"); // binary: no Windows CRLF in emitted test files
         if f != null {
-            if content.len() > 0 { let _ = unsafe stdio::fwrite(content.ptr(), 1, content.len(), f); }
+            if content.len() > 0 {
+                let _ = unsafe stdio::fwrite(content.ptr(), 1, content.len(), f);
+            }
             unsafe stdio::fclose(f);
         }
     }
@@ -116,7 +137,9 @@ extend Proj {
         return exec((&base.b[0]) as *const char, (&op.b[0]) as *const char);
     }
 
-    pub fn compile(self: &Proj, mainrel: str) CliResult { return self.compile_flags("", mainrel); }
+    pub fn compile(self: &Proj, mainrel: str) CliResult {
+        return self.compile_flags("", mainrel);
+    }
 
     // Run `$SUPERC <args>` verbatim (for flag-only invocations like usage checks); no path is appended.
     pub fn run_raw(self: &Proj, args: str) CliResult {
@@ -166,7 +189,9 @@ extend Proj {
         let mut path = Path512 {};
         unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/build/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
         let buf = slurp((&path.b[0]) as *const char);
-        if buf == null { return false; }
+        if buf == null {
+            return false;
+        }
         let found = unsafe cstring::strstr(buf, needle.ptr() as *const char) != null;
         unsafe stdlib::free(buf as *mut void);
         return found;
@@ -177,7 +202,9 @@ extend Proj {
         let mut path = Path512 {};
         unsafe stdio::snprintf((&mut path.b[0]) as *mut char, 512, "%s/build/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
         let f = stdio::fopen(str::from_cstr((&path.b[0]) as *const char), "rb");
-        if f == null { return false; }
+        if f == null {
+            return false;
+        }
         unsafe stdio::fclose(f);
         return true;
     }

@@ -2,7 +2,7 @@
 // rather than a `for` iterable, `switch` pattern, or `a[lo..hi]` slice (those are handled structurally
 // and never build a Range). Plain data: bind it, pass it around, and `for x in r` counts start..end.
 pub struct Range<T> {
-    pub start: T,     // first value (inclusive)
-    pub end: T,       // last value: excluded for `..`, included for `..=`
+    pub start: T, // first value (inclusive)
+    pub end: T, // last value: excluded for `..`, included for `..=`
     pub inclusive: bool,
 }

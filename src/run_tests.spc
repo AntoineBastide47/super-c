@@ -18,5 +18,6 @@ import tests::codegen_run_test;
 import tests::raii_gen_test;
 import tests::cli_test;
 import tests::ast_fprint_test;
+import tests::fmt_test;
 
 fn main() i32 { return 0; }

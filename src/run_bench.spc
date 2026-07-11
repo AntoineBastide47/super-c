@@ -3,4 +3,6 @@
 //   Run: super-c selfhost/run_bench.spc  (emit) + cc -O2, or `make bench`.
 import benchmark::transpile_bench as bench;
 
-fn main() i32 { return bench::run(); }
+fn main() i32 {
+    return bench::run();
+}

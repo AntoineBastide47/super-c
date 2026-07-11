@@ -124,6 +124,12 @@ pub fn fopen(path: str, mode: str) *mut FILE {
     return unsafe c_fopen(p.cstr(), m.cstr());
 }
 
-pub fn stdin() *mut FILE { return unsafe __sc_stdin(); }
-pub fn stdout() *mut FILE { return unsafe __sc_stdout(); }
-pub fn stderr() *mut FILE { return unsafe __sc_stderr(); }
+pub fn stdin() *mut FILE {
+    return unsafe __sc_stdin();
+}
+pub fn stdout() *mut FILE {
+    return unsafe __sc_stdout();
+}
+pub fn stderr() *mut FILE {
+    return unsafe __sc_stderr();
+}

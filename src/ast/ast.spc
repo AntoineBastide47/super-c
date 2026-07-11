@@ -290,14 +290,22 @@ extend TyInstance as Hash {
         h = (h ^ (self.module as u64)) * 1099511628211u64;
         h = (h ^ (self.decl as u64)) * 1099511628211u64;
         h = (h ^ (self.n as u64)) * 1099511628211u64;
-        for i in 0..self.n { h = (h ^ (self.args[i] as u64)) * 1099511628211u64; }
+        for i in 0..self.n {
+            h = (h ^ (self.args[i] as u64)) * 1099511628211u64;
+        }
         return h;
     }
 }
 extend TyInstance as Eq {
     pub fn eq(self: &Self, other: &Self) bool {
-        if self.module != other.module || self.decl != other.decl || self.n != other.n { return false; }
-        for i in 0..self.n { if self.args[i] != other.args[i] { return false; } }
+        if self.module != other.module || self.decl != other.decl || self.n != other.n {
+            return false;
+        }
+        for i in 0..self.n {
+            if self.args[i] != other.args[i] {
+                return false;
+            }
+        }
         return true;
     }
 }
@@ -307,14 +315,22 @@ extend MethodInst as Hash {
         h = (h ^ (self.instance as u64)) * 1099511628211u64;
         h = (h ^ (self.method as u64)) * 1099511628211u64;
         h = (h ^ (self.n as u64)) * 1099511628211u64;
-        for i in 0..self.n { h = (h ^ (self.targs[i] as u64)) * 1099511628211u64; }
+        for i in 0..self.n {
+            h = (h ^ (self.targs[i] as u64)) * 1099511628211u64;
+        }
         return h;
     }
 }
 extend MethodInst as Eq {
     pub fn eq(self: &Self, other: &Self) bool {
-        if self.instance != other.instance || self.method != other.method || self.n != other.n { return false; }
-        for i in 0..self.n { if self.targs[i] != other.targs[i] { return false; } }
+        if self.instance != other.instance || self.method != other.method || self.n != other.n {
+            return false;
+        }
+        for i in 0..self.n {
+            if self.targs[i] != other.targs[i] {
+                return false;
+            }
+        }
         return true;
     }
 }
@@ -381,8 +397,12 @@ extend Ast {
         return id;
     }
 
-    pub fn mark(self: &Self) u32 { return self.scratch.len() as u32; }
-    pub fn push(self: &mut Self, id: NodeId) void { self.scratch.push(id); }
+    pub fn mark(self: &Self) u32 {
+        return self.scratch.len() as u32;
+    }
+    pub fn push(self: &mut Self, id: NodeId) void {
+        self.scratch.push(id);
+    }
 
     pub fn commit(self: &mut Self, mark: u32) NodeList {
         let list = NodeList { start: self.children.len() as u32, len: (self.scratch.len() as u32) - mark };
@@ -433,7 +453,9 @@ extend Ast {
 
     pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
-        if m > 4 { m = 4; }
+        if m > 4 {
+            m = 4;
+        }
         let mut it = TyInstance { module: module, decl: decl, n: m };
         for j in 0..m {
             it.args[j] = unsafe args[j];
@@ -442,13 +464,22 @@ extend Ast {
         let cur = self.instances.len();
         let mut idx = cur as u32;
         let mut valid = false;
-        if hinted != 0xFFFFFFFFu32 && (hinted as usize) < cur { valid = self.instances.at(hinted as usize).eq(&it); }
-        if valid { idx = hinted; }
-        else { self.instances.push(it); self.instance_index.insert(it, idx); }
+        if hinted != 0xFFFFFFFFu32 && (hinted as usize) < cur {
+            valid = self.instances.at(hinted as usize).eq(&it);
+        }
+        if valid {
+            idx = hinted;
+        }
+        else {
+            self.instances.push(it);
+            self.instance_index.insert(it, idx);
+        }
         return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
 
-    pub fn instance(self: &Self, index: u32) &TyInstance { return self.instances.at(index as usize); }
+    pub fn instance(self: &Self, index: u32) &TyInstance {
+        return self.instances.at(index as usize);
+    }
 
     // A const-generic argument value, interned as a module-independent TYPE_CONST.
     pub fn const_value(self: &mut Self, v: i64) TypeId {
@@ -457,21 +488,27 @@ extend Ast {
 
     pub fn add_method_inst(self: &mut Self, instance: TypeId, method: NodeId, targs: *const TypeId, n: u8) bool {
         let mut m = n;
-        if m > 4 { m = 4; }
+        if m > 4 {
+            m = 4;
+        }
         let mut mi = MethodInst { instance: instance, method: method, n: m };
         for j in 0..m {
             mi.targs[j] = unsafe targs[j];
         }
         let hinted = switch self.method_inst_index.get(&mi) { Some(id) => *id, None => 0xFFFFFFFFu32, };
         if hinted != 0xFFFFFFFFu32 && (hinted as usize) < self.method_insts.len()
-            && self.method_insts.at(hinted as usize).eq(&mi) { return false; }
+            && self.method_insts.at(hinted as usize).eq(&mi) {
+            return false;
+        }
         let idx = self.method_insts.len() as u32;
         self.method_insts.push(mi);
         self.method_inst_index.insert(mi, idx);
         return true;
     }
 
-    pub fn add_attr(self: &mut Self, attr: Attr) void { self.attrs.push(attr); }
+    pub fn add_attr(self: &mut Self, attr: Attr) void {
+        self.attrs.push(attr);
+    }
 
     pub fn type_concrete(self: &Self, t: TypeId) bool {
         let ty = self.type_at(t);
@@ -481,7 +518,9 @@ extend Ast {
             TYPE_INSTANCE => {
                 let it = self.instance(ty.as_data.inst);
                 for i in 0..it.n {
-                    if !self.type_concrete(it.args[i]) { return false; }
+                    if !self.type_concrete(it.args[i]) {
+                        return false;
+                    }
                 }
                 true;
             },
@@ -490,7 +529,9 @@ extend Ast {
     }
 
     pub fn reintern(self: &mut Self, src: &Ast, t: TypeId) TypeId {
-        if t == TYPE_NONE { return t; }
+        if t == TYPE_NONE {
+            return t;
+        }
         let ty = *src.type_at(t);
         return switch ty.kind {
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => {
@@ -512,7 +553,9 @@ extend Ast {
 
     pub fn set_type_args(self: &mut Self, node: NodeId, args: *const TypeId, n: u8) void {
         let mut m = n;
-        if m > 4 { m = 4; }
+        if m > 4 {
+            m = 4;
+        }
         let mut u = MonoUse { node: node, n: m };
         for i in 0..m {
             u.args[i] = unsafe args[i];
@@ -523,9 +566,13 @@ extend Ast {
     }
 
     pub fn type_args(self: &Self, node: NodeId) *const MonoUse {
-        if node as usize >= self.mono_at.len() { return null; }
+        if node as usize >= self.mono_at.len() {
+            return null;
+        }
         let idx = self.mono_at[node as usize];
-        if idx == 0 { return null; }
+        if idx == 0 {
+            return null;
+        }
         return self.mono.at((idx - 1) as usize) as *const MonoUse;
     }
 
@@ -536,9 +583,13 @@ extend Ast {
     }
 
     pub fn dyn_use_at(self: &Self, node: NodeId) *const DynUse {
-        if node as usize >= self.dyn_at.len() { return null; }
+        if node as usize >= self.dyn_at.len() {
+            return null;
+        }
         let idx = self.dyn_at[node as usize];
-        if idx == 0 { return null; }
+        if idx == 0 {
+            return null;
+        }
         return self.dyn_uses.at((idx - 1) as usize) as *const DynUse;
     }
 
@@ -549,30 +600,60 @@ extend Ast {
     }
 
     pub fn deref_use_at(self: &Self, node: NodeId) *const DerefUse {
-        if node as usize >= self.deref_at.len() { return null; }
+        if node as usize >= self.deref_at.len() {
+            return null;
+        }
         let idx = self.deref_at[node as usize];
-        if idx == 0 { return null; }
+        if idx == 0 {
+            return null;
+        }
         return self.deref_uses.at((idx - 1) as usize) as *const DerefUse;
     }
 
-    pub fn at(self: &mut Self, id: NodeId) &mut Node { return &mut self.nodes[id as usize]; }
-    pub fn at_const(self: &Self, id: NodeId) &Node { return self.nodes.at(id as usize); }
-    pub fn list(self: &Self, list: NodeList) *const NodeId { return unsafe (self.children.as_ptr() + (list.start as usize)); }
-    pub fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) void { self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl }; }
-    pub fn resolution(self: &Self, ref_id: NodeId) NodeId { return self.resolutions[ref_id as usize].node; }
-    pub fn resolution_def(self: &Self, ref_id: NodeId) DefId { return self.resolutions[ref_id as usize]; }
-    pub fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) void { self.resolutions[ref_id as usize] = decl; }
-    pub fn builtin(b: BuiltinType) TypeId { return (b as TypeId) + 1; }
-    pub fn set_type(self: &mut Self, n: NodeId, t: TypeId) void { self.types[n as usize] = t; }
-    pub fn type_of(self: &Self, n: NodeId) TypeId { return self.types[n as usize]; }
-    pub fn type_at(self: &Self, t: TypeId) &Ty { return self.type_pool.at(t as usize); }
+    pub fn at(self: &mut Self, id: NodeId) &mut Node {
+        return &mut self.nodes[id as usize];
+    }
+    pub fn at_const(self: &Self, id: NodeId) &Node {
+        return self.nodes.at(id as usize);
+    }
+    pub fn list(self: &Self, list: NodeList) *const NodeId {
+        return unsafe (self.children.as_ptr() + (list.start as usize));
+    }
+    pub fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) void {
+        self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl };
+    }
+    pub fn resolution(self: &Self, ref_id: NodeId) NodeId {
+        return self.resolutions[ref_id as usize].node;
+    }
+    pub fn resolution_def(self: &Self, ref_id: NodeId) DefId {
+        return self.resolutions[ref_id as usize];
+    }
+    pub fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) void {
+        self.resolutions[ref_id as usize] = decl;
+    }
+    pub fn builtin(b: BuiltinType) TypeId {
+        return (b as TypeId) + 1;
+    }
+    pub fn set_type(self: &mut Self, n: NodeId, t: TypeId) void {
+        self.types[n as usize] = t;
+    }
+    pub fn type_of(self: &Self, n: NodeId) TypeId {
+        return self.types[n as usize];
+    }
+    pub fn type_at(self: &Self, t: TypeId) &Ty {
+        return self.type_pool.at(t as usize);
+    }
 }
 
 fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) void {
     let mut want = need;
-    if nodes_len > want { want = nodes_len; }
+    if nodes_len > want {
+        want = nodes_len;
+    }
     v.reserve(want);
-    while v.len() < want { v.push(0); }
+    while v.len() < want {
+        v.push(0);
+    }
 }
 
 extend Ast as Free {
@@ -606,25 +687,85 @@ pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut 
         hexf = (unsafe src[i] | 0x20u8) == 'p' as u8;
         i = i + 1;
     }
-    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "isize".ptr(), 5) == 0 { if sfx_start != null { unsafe *sfx_start = end - 5; } return BuiltinType::BT_ISIZE; }
-    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "usize".ptr(), 5) == 0 { if sfx_start != null { unsafe *sfx_start = end - 5; } return BuiltinType::BT_USIZE; }
+    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "isize".ptr(), 5) == 0 {
+        if sfx_start != null {
+            unsafe *sfx_start = end - 5;
+        }
+        return BuiltinType::BT_ISIZE;
+    }
+    if end - start > 5 && unsafe cstring::memcmp((unsafe src + end - 5), "usize".ptr(), 5) == 0 {
+        if sfx_start != null {
+            unsafe *sfx_start = end - 5;
+        }
+        return BuiltinType::BT_USIZE;
+    }
     let mut n: u32 = 3;
     if end - start > n {
         let p = unsafe (src + ((end - n) as usize));
-        if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I16; }
-        if unsafe cstring::memcmp(p, "i32".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I32; }
-        if unsafe cstring::memcmp(p, "i64".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I64; }
-        if unsafe cstring::memcmp(p, "u16".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U16; }
-        if unsafe cstring::memcmp(p, "u32".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U32; }
-        if unsafe cstring::memcmp(p, "u64".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U64; }
-        if (!hex || hexf) && unsafe cstring::memcmp(p, "f32".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_F32; }
-        if (!hex || hexf) && unsafe cstring::memcmp(p, "f64".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_F64; }
+        if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_I16;
+        }
+        if unsafe cstring::memcmp(p, "i32".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_I32;
+        }
+        if unsafe cstring::memcmp(p, "i64".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_I64;
+        }
+        if unsafe cstring::memcmp(p, "u16".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_U16;
+        }
+        if unsafe cstring::memcmp(p, "u32".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_U32;
+        }
+        if unsafe cstring::memcmp(p, "u64".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_U64;
+        }
+        if (!hex || hexf) && unsafe cstring::memcmp(p, "f32".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_F32;
+        }
+        if (!hex || hexf) && unsafe cstring::memcmp(p, "f64".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_F64;
+        }
     }
     n = 2;
     if end - start > n {
         let p = unsafe (src + ((end - n) as usize));
-        if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_I8; }
-        if unsafe cstring::memcmp(p, "u8".ptr(), n as usize) == 0 { if sfx_start != null { unsafe *sfx_start = end - n; } return BuiltinType::BT_U8; }
+        if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_I8;
+        }
+        if unsafe cstring::memcmp(p, "u8".ptr(), n as usize) == 0 {
+            if sfx_start != null {
+                unsafe *sfx_start = end - n;
+            }
+            return BuiltinType::BT_U8;
+        }
     }
     return BuiltinType::BT_COUNT;
 }

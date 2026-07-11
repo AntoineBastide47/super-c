@@ -43,7 +43,7 @@ pub struct Timing {
 
 // Deferred-assert sink: a clean self-transpile produces none, so this is never actually called; it just
 // satisfies flush_asserts' callback signature.
-fn ignore_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) void { }
+fn ignore_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) void {}
 
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
 fn resolve_one(p: &mut loader::Package, i: usize) void {
@@ -93,18 +93,27 @@ fn transpile_once() Timing {
     let n = p.modules.len();
     r.modules = n;
     let mut i: usize = 0;
-    while i < n { r.src_bytes = r.src_bytes + p.modules[i].source.len(); i = i + 1; }
+    while i < n {
+        r.src_bytes = r.src_bytes + p.modules[i].source.len();
+        i = i + 1;
+    }
 
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
     p.ceval = (&mut ceval) as *mut void;
 
     i = 0;
-    while i < n { resolve_one(&mut p, i); i = i + 1; }
+    while i < n {
+        resolve_one(&mut p, i);
+        i = i + 1;
+    }
     let a2 = time::cpu_seconds();
 
     i = 0;
-    while i < n { typecheck_one(&mut p, i); i = i + 1; }
+    while i < n {
+        typecheck_one(&mut p, i);
+        i = i + 1;
+    }
     ceval.flush_asserts(ignore_assert, null);
     let a3 = time::cpu_seconds();
 
@@ -125,7 +134,9 @@ fn transpile_once() Timing {
     }
     unsafe stdio::fflush(f);
     let sz = unsafe stdio::ftell(f);
-    if sz > 0 { r.out_bytes = sz as usize; }
+    if sz > 0 {
+        r.out_bytes = sz as usize;
+    }
     unsafe stdio::fclose(f);
     let a4 = time::cpu_seconds();
 
@@ -149,7 +160,9 @@ fn transpile_once() Timing {
         let len = p.modules[i].source.len();
         let mut j: usize = 0;
         while j < len {
-            if unsafe (src[j] as u8) == b'\n' { r.src_lines = r.src_lines + 1; }
+            if unsafe (src[j] as u8) == b'\n' {
+                r.src_lines = r.src_lines + 1;
+            }
             j = j + 1;
         }
         i = i + 1;
@@ -187,7 +200,9 @@ pub fn run() i32 {
         sc = sc + t.codegen;
         sl = sl + t.lex;
         let total = t.parse + t.resolve + t.typecheck + t.codegen;
-        if total < best { best = total; }
+        if total < best {
+            best = total;
+        }
         k = k + 1;
     }
     let fi = ITERS as f64;
@@ -197,7 +212,7 @@ pub fn run() i32 {
     let ac = sc / fi * 1000.0;
     let al = sl / fi * 1000.0;
     let avg_total = ap + ar + at + ac;
-    let srcf = warm.src_bytes as f64;   // source MB/s for an avg-ms figure = srcf / ms / 1000
+    let srcf = warm.src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
     let linesf = warm.src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
 
     unsafe stdio::printf("  %-11s %9s %9s %9s %8s\n".ptr() as *const char, "phase".ptr() as *const char, "avg ms".ptr() as *const char, "MB/s".ptr() as *const char, "kloc/s".ptr() as *const char, "share".ptr() as *const char);

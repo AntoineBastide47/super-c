@@ -44,7 +44,9 @@ extend Errors {
     // [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
     @c.cold
     pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) void {
-        if self.errors.len() >= ERRORS_MAX { return; }
+        if self.errors.len() >= ERRORS_MAX {
+            return;
+        }
         self.errors.push(msg);
         self.notes.push(String::new());
         self.starts.push(at);
@@ -55,14 +57,18 @@ extend Errors {
     @c.cold
     pub fn note(self: &mut Self, msg: String) void {
         let n = self.errors.len();
-        if n == 0 || self.notes.len() < n { return; }
+        if n == 0 || self.notes.len() < n {
+            return;
+        }
         self.notes[n - 1].push_str("\n  = note: ");
         self.notes[n - 1].push_string(&msg);
     }
 
     @c.cold
     pub fn finalize(self: &mut Self, source: *const u8, len: usize, file: *const char) void {
-        if self.errors.len() == 0 { return; }
+        if self.errors.len() == 0 {
+            return;
+        }
         let mut line_starts = Vector::<u32>::new();
         line_starts.reserve(len / 16);
         line_starts.push(0);
@@ -74,7 +80,9 @@ extend Errors {
                 line_starts.push(i as u32);
             } else if b == b'\r' {
                 i = i + 1;
-                if i < len && unsafe source[i] == b'\n' { i = i + 1; }
+                if i < len && unsafe source[i] == b'\n' {
+                    i = i + 1;
+                }
                 line_starts.push(i as u32);
             } else {
                 i = i + 1;
@@ -90,9 +98,13 @@ extend Errors {
         for k in 0..self.errors.len() {
             let mut seen = false;
             for j in 0..uniq.len() {
-                if uniq[j].equals(self.errors.at(k)) { seen = true; }
+                if uniq[j].equals(self.errors.at(k)) {
+                    seen = true;
+                }
             }
-            if !seen { uniq.push(self.errors[k].clone()); }
+            if !seen {
+                uniq.push(self.errors[k].clone());
+            }
         }
         self.errors.free();
         self.errors = uniq;
@@ -120,10 +132,16 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
     let mut hi = line_starts.len();
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if line_starts[mid] <= off { lo = mid + 1; }
-        else { hi = mid; }
+        if line_starts[mid] <= off {
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
     }
-    if lo == 0 { return 0; }
+    if lo == 0 {
+        return 0;
+    }
     return lo - 1;
 }
 
@@ -140,29 +158,45 @@ fn render(
     file: *const char,
     notes: &String,
 ) String {
-    if off as usize > src_len { off = src_len as u32; }
+    if off as usize > src_len {
+        off = src_len as u32;
+    }
     let li = line_index(&*line_starts, off);
     let lstart = line_starts[li];
     let mut lend = lstart as usize;
-    while lend < src_len && unsafe source[lend] != 10 && unsafe source[lend] != 13 { lend = lend + 1; }
+    while lend < src_len && unsafe source[lend] != 10 && unsafe source[lend] != 13 {
+        lend = lend + 1;
+    }
     let line_no = li + 1;
     let real_col = (off - lstart) as usize;
     let max_w: usize = 120;
     let mut disp_start = lstart as usize;
     let mut disp_end = lend;
     if lend - (lstart as usize) > max_w {
-        if off as usize > (lstart as usize) + max_w / 2 { disp_start = (off as usize) - max_w / 2; }
-        if disp_start + max_w < lend { disp_end = disp_start + max_w; }
-        else { disp_end = lend; }
+        if off as usize > (lstart as usize) + max_w / 2 {
+            disp_start = (off as usize) - max_w / 2;
+        }
+        if disp_start + max_w < lend {
+            disp_end = disp_start + max_w;
+        }
+        else {
+            disp_end = lend;
+        }
     }
     let line_len = disp_end - disp_start;
     let line_ptr = unsafe (source + disp_start);
     let caret_col = (off as usize) - disp_start;
     let mut carets: usize = 1;
-    if span >= 1 { carets = span as usize; }
+    if span >= 1 {
+        carets = span as usize;
+    }
     if (off as usize) + carets > disp_end {
-        if disp_end > off as usize { carets = disp_end - off as usize; }
-        else { carets = 1; }
+        if disp_end > off as usize {
+            carets = disp_end - off as usize;
+        }
+        else {
+            carets = 1;
+        }
     }
     let mut out = String::new();
     out.push_str("error: ");
@@ -180,8 +214,12 @@ fn render(
     out.push_str(" | ");
     out.push_bytes(line_ptr, line_len);
     out.push_str("\n | ");
-    for _ in 0..caret_col { out.push_byte(32); }  // ' '
-    for _ in 0..carets { out.push_byte(94); }     // '^'
+    for _ in 0..caret_col {
+        out.push_byte(32);
+    } // ' '
+    for _ in 0..carets {
+        out.push_byte(94);
+    } // '^'
     out.push_string(notes);
     return out;
 }

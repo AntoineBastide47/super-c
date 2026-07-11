@@ -16,12 +16,12 @@ pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
 // source text and parsed Ast. The C loader used a NULL `Ast*` to mean "failed to lex/parse"; here the Ast
 // is held by value (like Parser.ast), so `has_ast` records that validity instead.
 pub struct Module {
-    pub path: String,      // "std::string"; the root module is its file stem (owned)
-    pub file: String,      // filesystem path the source was read from (owned)
-    pub source: String,    // file contents (owned; span offsets index into it)
-    pub ast: Ast,          // parsed AST (empty + has_ast=false if the file failed to lex/parse)
+    pub path: String, // "std::string"; the root module is its file stem (owned)
+    pub file: String, // filesystem path the source was read from (owned)
+    pub source: String, // file contents (owned; span offsets index into it)
+    pub ast: Ast, // parsed AST (empty + has_ast=false if the file failed to lex/parse)
     pub has_ast: bool,
-    pub prelude: bool,     // part of the auto-imported std prelude
+    pub prelude: bool, // part of the auto-imported std prelude
 }
 
 extend Module as Free {
@@ -38,9 +38,9 @@ extend Module as Free {
 // emit-order/instance-propagation fields are added when those stages are ported.)
 pub struct Package {
     pub modules: Vector<Module>,
-    pub root_dir: String,    // source root: the directory of the root file; imports resolve relative to it
-    pub std_root: String,    // second import search root (parent of std/); empty = none
-    pub ok: bool,            // false if any read/parse/cycle error was reported during loading
+    pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
+    pub std_root: String, // second import search root (parent of std/); empty = none
+    pub ok: bool, // false if any read/parse/cycle error was reported during loading
     // Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     // `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
     pub core_module: ModuleId,
@@ -121,7 +121,7 @@ fn path_exists(path: str) bool {
 }
 
 // Read a whole file into a NUL-terminated, heap-allocated buffer; ptr==null on any I/O error.
-fn read_file(path: str) Option<String> {
+pub fn read_file(path: str) Option<String> {
     let f = stdio::fopen(path, "rb");
     if f == null { return Option::<String>::None; }
     if unsafe stdio::fseek(f, 0, SEEK_END) != 0 { unsafe stdio::fclose(f); return Option::<String>::None; }
@@ -212,7 +212,7 @@ extend DirCache {
         for i in 0..self.dirs.len() { if self.dirs[i].as_str() == dir { return i; } }
         let mut names = Vector::<String>::new();
         let mut dok = false;
-        let mut db = RealBuf { };
+        let mut db = RealBuf {};
         let dl = dir.len();
         if dl < 4096 {
             unsafe cstring::memcpy((&mut db.b[0]) as *mut void, dir.ptr() as *const void, dl);
@@ -276,7 +276,7 @@ fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src:
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
 fn parse_source(source: &mut String, file: *const char, bootstrap_tags: bool) ParseResult {
-    let mut lx = lexer::Lexer::new(&mut *source);   // pads `source` in place; the lexer over-reads into padding
+    let mut lx = lexer::Lexer::new(&mut *source); // pads `source` in place; the lexer over-reads into padding
     lx.set_file(file);
     lx.scan_tokens();
     if lx.has_errors() {
@@ -286,7 +286,7 @@ fn parse_source(source: &mut String, file: *const char, bootstrap_tags: bool) Pa
     }
     let toks = lx.take_tokens();
     lx.free();
-    let src = source.as_str();   // padding lives past len -> invisible to the parser
+    let src = source.as_str(); // padding lives past len -> invisible to the parser
     let mut ps = parser::Parser::new(toks, src);
     ps.set_file(file);
     ps.set_bootstrap_tags(bootstrap_tags);
@@ -345,12 +345,12 @@ extend Package {
 
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
     fn add_module(self: &mut Self, path: String, file: String, source: String,
-                  ast: Ast, has_ast: bool) i32 {
+        ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
         self.modules.push(Module {
-            path: path, file: file, source: source,
-            ast: ast, has_ast: has_ast, prelude: false,
-        });
+                path: path, file: file, source: source,
+                ast: ast, has_ast: has_ast, prelude: false,
+            });
         return id;
     }
 
@@ -366,14 +366,14 @@ extend Package {
             Some(s) => { source = s; },
             None => {
                 unsafe stdio::fprintf(stdio::stderr(), "error: cannot open module '%.*s' (%.*s)\n".ptr() as *const char,
-                                      mod_path.len() as i32, mod_path.ptr(), file_path.len() as i32, file_path.ptr());
+                    mod_path.len() as i32, mod_path.ptr(), file_path.len() as i32, file_path.ptr());
                 self.ok = false;
                 return -1;
             },
         };
 
         // NUL-terminate file_path into a scratch buffer for parse_source's diagnostics (read only during the call).
-        let mut fb = RealBuf { };
+        let mut fb = RealBuf {};
         let fl = file_path.len();
         if fl < 4096 {
             unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, file_path.ptr() as *const void, fl);
@@ -435,9 +435,9 @@ extend Package {
             if is_core {
                 for b in 0..BT_COUNT_N {
                     let id = self.modules[i].ast.add(Node {
-                        kind: NodeKind::NODE_STRUCT,
-                        as_data: NodeAs { aggregate: AggregateData { name: NODE_NONE, is_public: true } },
-                    });
+                            kind: NodeKind::NODE_STRUCT,
+                            as_data: NodeAs { aggregate: AggregateData { name: NODE_NONE, is_public: true } },
+                        });
                     self.builtin_decls[b] = id;
                 }
                 self.core_module = i as ModuleId;
@@ -633,7 +633,7 @@ extend Package {
                         let l = (sp.end - sp.start) as usize;
                         if l == name.len()
                             && unsafe cstring::memcmp((src + sp.start as usize),
-                                                      name.ptr(), name.len()) == 0 {
+                            name.ptr(), name.len()) == 0 {
                             return iid;
                         }
                     }
@@ -647,7 +647,7 @@ extend Package {
                 let l = (sp.end - sp.start) as usize;
                 if l == name.len()
                     && unsafe cstring::memcmp((src + sp.start as usize),
-                                              name.ptr(), name.len()) == 0 {
+                    name.ptr(), name.len()) == 0 {
                     return nid;
                 }
             }
@@ -669,7 +669,7 @@ extend Package {
     // lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
     // then every module it imports breadth-first in declaration order. First hit wins.
     pub fn glob_lookup(self: &Self, mid: ModuleId, name: str,
-                       want_type: bool) LookupHit {
+        want_type: bool) LookupHit {
         let n = self.modules.len();
         let mut result = LookupHit { node: NODE_NONE, mid: 0 };
         if (mid as usize) >= n { return result; }
@@ -865,7 +865,7 @@ fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
     let y = unsafe *(pkg_ast_c(&*p, mid)).type_at(t);
     if y.kind == TypeKind::TYPE_FUNCTION { return true; }
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE ||
-       y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+    y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         return type_mentions_fnval(&*p, mid, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
@@ -880,7 +880,7 @@ fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
 
 // Substitute the generic params `gids`->`args` while reinterning `owner`'s type `t` into `dest`'s pools.
 fn subst_reintern_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, gmod: ModuleId,
-                       gids: *const NodeId, args: *const TypeId, nargs: u8) TypeId {
+    gids: *const NodeId, args: *const TypeId, nargs: u8) TypeId {
     if t == TYPE_NONE { return TYPE_NONE; }
     let ty = unsafe *(pkg_ast_c(&*p, om)).type_at(t);
     if ty.kind == TypeKind::TYPE_GENERIC {
@@ -892,7 +892,7 @@ fn subst_reintern_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, g
         return unsafe (*d).reintern(&*o, t);
     }
     if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE ||
-       ty.kind == TypeKind::TYPE_SLICE || ty.kind == TypeKind::TYPE_ARRAY {
+    ty.kind == TypeKind::TYPE_SLICE || ty.kind == TypeKind::TYPE_ARRAY {
         let mut nt = ty;
         nt.as_data.elem = subst_reintern_type(&mut *p, dm, om, ty.as_data.elem, gmod, gids, args, nargs);
         let d = pkg_ast_m(&mut *p, dm);
@@ -916,7 +916,7 @@ fn subst_reintern_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, g
 // Reintern one member/param/return type after substitution; if it lands on a concrete instance whose home
 // differs from `dest`, also seed that home's table. Sets `*changed` only on the final growth path (parity).
 fn reintern_nested_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, gmod: ModuleId,
-                        gids: *const NodeId, args: *const TypeId, nargs: u8, changed: *mut bool) void {
+    gids: *const NodeId, args: *const TypeId, nargs: u8, changed: *mut bool) void {
     if t == TYPE_NONE { return; }
     let before = unsafe (*(pkg_ast_c(&*p, dm))).instances.len();
     let mut st = subst_reintern_type(&mut *p, dm, om, t, gmod, gids, args, nargs);
@@ -958,7 +958,7 @@ fn reintern_nested_type(p: &mut Package, dm: ModuleId, om: ModuleId, t: TypeId, 
 
 // Seed `dest` with the concrete instances nested in a generic aggregate's member/variant types.
 fn reintern_nested_instance_deps(p: &mut Package, dm: ModuleId, it: &TyInstance, args: *const TypeId,
-                                 nargs: u8, changed: *mut bool) void {
+    nargs: u8, changed: *mut bool) void {
     let np = p.modules.len();
     let itmod = it.module;
     if (itmod as usize) >= np || !p.modules[itmod as usize].has_ast { return; }
@@ -992,7 +992,7 @@ fn reintern_nested_instance_deps(p: &mut Package, dm: ModuleId, it: &TyInstance,
 
 // Seed `dest` with concrete instances nested in a generic extend's method signatures over this instance.
 fn reintern_method_signature_deps(p: &mut Package, dm: ModuleId, it: &TyInstance, args: *const TypeId,
-                                  nargs: u8, changed: *mut bool) void {
+    nargs: u8, changed: *mut bool) void {
     let np = p.modules.len();
     let itmod = it.module;
     if (itmod as usize) >= np || !p.modules[itmod as usize].has_ast { return; }
@@ -1296,7 +1296,7 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     let parsed = parse_source(&mut source, "<harness>".ptr() as *const char, false);
     let ok = parsed.ok;
     let id = p.add_module(String::from_str("main"), String::from_str("<harness>"),
-                          source, parsed.ast, ok);
+        source, parsed.ast, ok);
     if ok { p.modules[id as usize].ast.module = id as ModuleId; }
     else { p.ok = false; }
     p.seed_core();
