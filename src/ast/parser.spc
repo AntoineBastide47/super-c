@@ -119,11 +119,16 @@ extend Parser {
         self.errors.emit(t.start(), t.len(), String::from_str(message));
     }
 
-    pub fn expect(self: &mut Self, kind: TokenType, display: str) bool {
-        if self.match(kind) { return true; }
+    @c.cold
+    fn expect_fail(self: &mut Self, display: str) bool {
         let t = self.raw_peek();
         self.errors.emit(t.start(), t.len(), format("expected {}", display));
         return false;
+    }
+
+    pub fn expect(self: &mut Self, kind: TokenType, display: str) bool {
+        if self.match(kind) { return true; }
+        return self.expect_fail(display);
     }
 
     pub fn consume_type_gt(self: &mut Self) bool {
@@ -1119,11 +1124,13 @@ extend Parser {
             });
         }
         if kind == TokenType::Identifier {
-            let va = if self.peek_ident_is("va_start") {
+            let t = self.raw_peek();
+            let may_va = t.len() >= 6 && t.len() <= 8 && unsafe self.source[t.start() as usize] == 'v' as u8;
+            let va = if may_va && self.text_is(t, "va_start") {
                 VA_START as i32;
-            } else if self.peek_ident_is("va_arg") {
+            } else if may_va && self.text_is(t, "va_arg") {
                 VA_ARG as i32;
-            } else if self.peek_ident_is("va_end") {
+            } else if may_va && self.text_is(t, "va_end") {
                 VA_END as i32;
             } else {
                 -1;
@@ -1997,6 +2004,7 @@ extend Parser {
 
     pub fn parse_attributes(self: &mut Self, cap: usize) Vector<Attr> {
         let mut attrs = Vector::<Attr>::new();
+        if !self.check(TokenType::At) { return attrs; }
         attrs.reserve(cap);
         while self.check(TokenType::At) {
             let mut attr = Attr { owner: NODE_NONE, kind: 0, arg: 0, str_span: Span::empty() };

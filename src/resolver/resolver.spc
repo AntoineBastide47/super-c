@@ -45,6 +45,8 @@ pub struct Resolver {
     pub in_generic: bool,               // resolving inside a generic fn/extend
     pub closures: Vector<ClosureScope>, // open closures, innermost last
     pub package: *const loader::Package, // for resolving `import`ed module-qualified names (null = none)
+    pub mod_names: Vector<ModEntry>,    // leading-segment module names (alias / single-segment path), import order
+    pub glob_mids: Vector<ModuleId>,    // module ids of `import P as *;` imports, import order
     pub errors: diag::Errors,
 }
 
@@ -54,6 +56,9 @@ pub struct SymLookup { pub decl: NodeId, pub idx: u32 }
 pub struct ModQual { pub mid: i32, pub type_node: NodeId }
 // A leading-segment-as-module test result.
 pub struct ModName { pub found: bool, pub mid: ModuleId }
+// One import usable as a leading path segment (its `as` alias, or a single-segment path), resolved once
+// by scan_imports so per-reference probes never rescan the item list.
+pub struct ModEntry { pub name: tok::Span, pub mid: ModuleId }
 
 // ---------------------------------------------------------------------------------------------------------
 // Span-based helpers (no resolver state).
@@ -120,6 +125,8 @@ extend Resolver {
             in_generic: false,
             closures: Vector::<ClosureScope>::new(),
             package: package,
+            mod_names: Vector::<ModEntry>::new(),
+            glob_mids: Vector::<ModuleId>::new(),
             errors: diag::Errors::new(),
         };
     }
@@ -248,27 +255,37 @@ extend Resolver {
         return m;
     }
 
-    // True if `name` names an imported module usable as a single leading segment: its `as` alias, or a
-    // single-segment module path.
-    fn name_is_module(self: &Self, name: tok::Span) ModName {
-        if self.package == null { return ModName { found: false, mid: 0 }; }
+    // Resolve every import ONCE, up front: which names denote modules as a single leading segment (the
+    // `as` alias, or a single-segment path) and which module ids are glob-imported. name_is_module and
+    // glob_lookup then probe these tables instead of rescanning the item list per reference.
+    fn scan_imports(self: &mut Self) void {
+        if self.package == null { return; }
         let items = self.ast.at_const(self.ast.root).as_data.program.items;
-        let ids = self.ast.list(items);
         for i in 0..items.len {
-            let n = self.ast.at_const(unsafe ids[i as usize]);
-            if n.kind == NodeKind::NODE_IMPORT {
-                let alias = n.as_data.import_decl.alias;
-                let parts = n.as_data.import_decl.path;
-                let mut hit = false;
-                if alias != NODE_NONE {
-                    hit = span_eq(self.source, self.name_span(alias), name);
-                } else if parts.len == 1 {
-                    hit = span_eq(self.source, self.name_span(unsafe (self.ast.list(parts))[0]), name);
-                }
-                if hit {
-                    let m = self.import_target(parts);
-                    if m >= 0 { return ModName { found: true, mid: m as ModuleId }; }
-                }
+            let id = self.child(items, i);
+            if self.ast.at_const(id).kind != NodeKind::NODE_IMPORT { continue; }
+            let alias = self.ast.at_const(id).as_data.import_decl.alias;
+            let parts = self.ast.at_const(id).as_data.import_decl.path;
+            let glob = self.ast.at_const(id).as_data.import_decl.glob;
+            let m = self.import_target(parts);
+            if m < 0 { continue; }
+            if glob { self.glob_mids.push(m as ModuleId); }
+            let mut nm = NODE_NONE;
+            if alias != NODE_NONE { nm = alias; }
+            else if parts.len == 1 { nm = self.child(parts, 0); }
+            if nm != NODE_NONE {
+                let nsp = self.name_span(nm);
+                self.mod_names.push(ModEntry { name: nsp, mid: m as ModuleId });
+            }
+        }
+    }
+
+    // True if `name` names an imported module usable as a single leading segment (via scan_imports' table).
+    fn name_is_module(self: &Self, name: tok::Span) ModName {
+        let n = self.mod_names.len();
+        for i in 0..n {
+            if span_eq(self.source, self.mod_names[i].name, name) {
+                return ModName { found: true, mid: self.mod_names[i].mid };
             }
         }
         return ModName { found: false, mid: 0 };
@@ -293,24 +310,17 @@ extend Resolver {
         return ModQual { mid: -1, type_node: NODE_NONE };
     }
 
-    // Look up `name` among the modules this module glob-imports (`import P as *;`).
+    // Look up `name` among the modules this module glob-imports (via scan_imports' table).
     fn glob_lookup(self: &Self, name: tok::Span, want_type: bool) loader::LookupHit {
         let miss = loader::LookupHit { node: NODE_NONE, mid: 0 };
         if self.package == null { return miss; }
         let pkg = unsafe &*self.package;
-        let items = self.ast.at_const(self.ast.root).as_data.program.items;
-        let ids = self.ast.list(items);
         let nm = unsafe (self.source + name.start as usize) as *const char;
         let nl = (name.end - name.start) as usize;
-        for i in 0..items.len {
-            let n = self.ast.at_const(unsafe ids[i as usize]);
-            if n.kind == NodeKind::NODE_IMPORT && n.as_data.import_decl.glob {
-                let m = self.import_target(n.as_data.import_decl.path);
-                if m >= 0 {
-                    let hit = pkg.glob_lookup(m as ModuleId, str::from_raw(nm as *const u8, nl), want_type);
-                    if hit.node != NODE_NONE { return hit; }
-                }
-            }
+        let ng = self.glob_mids.len();
+        for i in 0..ng {
+            let hit = pkg.glob_lookup(self.glob_mids[i], str::from_raw(nm as *const u8, nl), want_type);
+            if hit.node != NODE_NONE { return hit; }
         }
         return miss;
     }
@@ -335,18 +345,20 @@ extend Resolver {
     // true if a module prefix matched (it has then handled or errored on the node).
     fn resolve_qualified_member(self: &mut Self, id: NodeId) bool {
         if self.package == null { return false; }
-        let mut chain = Vector::<NodeId>::new(); // `::` member nodes, outermost..innermost
+        let mut chain: [NodeId; 32] = [[0] = NODE_NONE]; // `::` member nodes, outermost..innermost
+        let mut cc: u32 = 0;
         let mut base = NODE_NONE;
         let mut curid = id;
         let mut bail = false;
         let mut go = true;
         while go {
             let cn = self.ast.at_const(curid);
-            if cn.kind != NodeKind::NODE_MEMBER || !cn.as_data.member.path || chain.len() >= 32 {
+            if cn.kind != NodeKind::NODE_MEMBER || !cn.as_data.member.path || cc >= 32 {
                 bail = true;
                 go = false;
             } else {
-                chain.push(curid);
+                chain[cc as usize] = curid;
+                cc = cc + 1;
                 let o = cn.as_data.member.object;
                 let on = self.ast.at_const(o);
                 if on.kind == NodeKind::NODE_IDENTIFIER {
@@ -363,26 +375,37 @@ extend Resolver {
         if bail {
             return false;
         }
-        let cc = chain.len() as u32;
         let nn = cc + 1; // segment count: base + one per chain link
-        let mut seg = Vector::<NodeId>::new();
-        seg.push(base);
+        let mut seg: [NodeId; 33] = [[0] = NODE_NONE];
+        seg[0] = base;
         let mut i: u32 = 1;
         while i < nn {
             let link = chain[(nn - 1 - i) as usize];
             let mem = self.ast.at_const(link).as_data.member.member;
-            seg.push(mem);
+            seg[i as usize] = mem;
             i = i + 1;
         }
         let pkg = unsafe &*self.package;
+        // Join the LONGEST candidate module prefix once; every shorter prefix is a byte prefix of it, so
+        // the probe loop just shrinks the viewed length instead of re-joining (and re-allocating) per try.
+        let buf = self.join_segs((&seg[0]) as *const NodeId, nn - 1);
+        let mut lens: [usize; 32] = [[0] = 0usize];
+        let mut plen: usize = 0;
+        i = 0;
+        while i < nn - 1 {
+            let s = self.name_span(seg[i as usize]);
+            lens[i as usize] = (s.end - s.start) as usize;
+            plen = plen + lens[i as usize];
+            if i != 0 { plen = plen + 2; }
+            i = i + 1;
+        }
         let mut handled = false;
         let mut done = false;
         let mut m = nn - 1; // longest module prefix leaving >=1 trailing segment
         while m >= 1 && !done {
-            let buf = self.join_segs(seg.as_ptr(), m);
-            let len = unsafe cstring::strlen(buf);
-            let found = pkg.find(str::from_raw(buf as *const u8, len));
+            let found = pkg.find(str::from_raw(buf as *const u8, plen));
             if found >= 0 {
+                unsafe buf[plen] = 0 as char; // NUL-terminate the matched prefix for diagnostics
                 let mid = found as ModuleId;
                 if nn - m == 1 { // module::decl -- a function (preferred) or type
                     let dn = self.name_span(seg[m as usize]);
@@ -406,44 +429,45 @@ extend Resolver {
                 }
                 done = true; // deeper than module::Type::method is not supported here
             }
-            unsafe stdlib::free(buf as *mut void);
-            if !done { m = m - 1; }
+            if !done {
+                m = m - 1;
+                if m >= 1 { plen = plen - lens[m as usize] - 2; }
+            }
         }
+        unsafe stdlib::free(buf as *mut void);
         return handled;
     }
 
     // -- references ----------------------------------------------------------------------------------------
 
-    fn resolve_ref(self: &mut Self, refn: NodeId, name_node: NodeId, ns: Namespace, kind: str) void {
-        if name_node == NODE_NONE { return; }
-        let name = self.name_span(name_node);
-        let look = self.sym_lookup(name, ns);
-        let decl = look.decl;
-        let idx = look.idx;
-        if decl != NODE_NONE {
-            // A value binding declared outside an enclosing closure is a CAPTURE. Record it on every nested
-            // closure whose floor it sits below. Module-level items (functions/consts) never capture.
-            if ns == Namespace::NS_VALUE && self.closures.len() != 0 && idx != 0
-                && (idx - 1) < self.closures[self.closures.len() - 1].floor {
-                let dk = self.ast.at_const(decl).kind;
-                if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR
-                    || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME {
-                    let mut f = self.closures.len();
-                    while f > 0 {
-                        f = f - 1;
-                        if (idx - 1) >= self.closures[f].floor { break; }
-                        let mut seen = false;
-                        let nc = self.closures[f].caps.len();
-                        for k in 0..nc {
-                            if self.closures[f].caps[k] == decl { seen = true; break; }
-                        }
-                        if !seen { self.closures[f].caps.push(decl); }
+    // Commit a scope-stack hit: record captures and the resolution. `idx` is the matched symbol's 1-based
+    // stack position from sym_lookup.
+    fn resolve_ref_hit(self: &mut Self, refn: NodeId, decl: NodeId, idx: u32, ns: Namespace) void {
+        // A value binding declared outside an enclosing closure is a CAPTURE. Record it on every nested
+        // closure whose floor it sits below. Module-level items (functions/consts) never capture.
+        if ns == Namespace::NS_VALUE && self.closures.len() != 0 && idx != 0
+            && (idx - 1) < self.closures[self.closures.len() - 1].floor {
+            let dk = self.ast.at_const(decl).kind;
+            if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR
+                || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME {
+                let mut f = self.closures.len();
+                while f > 0 {
+                    f = f - 1;
+                    if (idx - 1) >= self.closures[f].floor { break; }
+                    let mut seen = false;
+                    let nc = self.closures[f].caps.len();
+                    for k in 0..nc {
+                        if self.closures[f].caps[k] == decl { seen = true; break; }
                     }
+                    if !seen { self.closures[f].caps.push(decl); }
                 }
             }
-            self.ast.set_resolution(refn, decl);
-            return;
         }
+        self.ast.set_resolution(refn, decl);
+    }
+
+    // A name that missed the scope stack: builtin types, then the prelude/glob fallback, else an error.
+    fn resolve_ref_miss(self: &mut Self, refn: NodeId, name: tok::Span, ns: Namespace, kind: str) void {
         if ns == Namespace::NS_TYPE && is_builtin_type(self.source, name) { return; }
         // Unqualified fallback: the std prelude and this module's glob imports.
         if self.package != null {
@@ -461,6 +485,14 @@ extend Resolver {
         self.errors.emit(name.start, name.end - name.start,
                          format("cannot find {} '{}'", kind, diag::span_str(self.source, name.start, name.end)));
         self.errors.note(format("check spelling, imports, and whether the item is declared before this use"));
+    }
+
+    fn resolve_ref(self: &mut Self, refn: NodeId, name_node: NodeId, ns: Namespace, kind: str) void {
+        if name_node == NODE_NONE { return; }
+        let name = self.name_span(name_node);
+        let look = self.sym_lookup(name, ns);
+        if look.decl != NODE_NONE { self.resolve_ref_hit(refn, look.decl, look.idx, ns); return; }
+        self.resolve_ref_miss(refn, name, ns, kind);
     }
 
     // -- types ---------------------------------------------------------------------------------------------
@@ -843,18 +875,22 @@ extend Resolver {
             },
             NODE_CALL => {
                 let cd = self.ast.at_const(id).as_data.call;
-                // `Pair(1, 2)`: a callee identifier that is not a value may name a TYPE (tuple-struct construction).
+                // `Pair(1, 2)`: a callee identifier that is not a value may name a TYPE (tuple-struct
+                // construction). One lookup per namespace; the hit commits directly (no re-lookup).
                 let callee_kind = self.ast.at_const(cd.callee).kind;
-                let mut as_type = false;
                 if callee_kind == NodeKind::NODE_IDENTIFIER {
                     let cname = self.name_span(cd.callee);
-                    if self.sym_lookup(cname, Namespace::NS_VALUE).decl == NODE_NONE
-                        && self.sym_lookup(cname, Namespace::NS_TYPE).decl != NODE_NONE {
-                        as_type = true;
+                    let v = self.sym_lookup(cname, Namespace::NS_VALUE);
+                    if v.decl != NODE_NONE {
+                        self.resolve_ref_hit(cd.callee, v.decl, v.idx, Namespace::NS_VALUE);
+                    } else {
+                        let t = self.sym_lookup(cname, Namespace::NS_TYPE);
+                        if t.decl != NODE_NONE {
+                            self.resolve_ref_hit(cd.callee, t.decl, t.idx, Namespace::NS_TYPE);
+                        } else {
+                            self.resolve_ref_miss(cd.callee, cname, Namespace::NS_VALUE, "value");
+                        }
                     }
-                }
-                if as_type {
-                    self.resolve_ref(cd.callee, cd.callee, Namespace::NS_TYPE, "type");
                 } else {
                     self.resolve_expr(cd.callee);
                 }
@@ -881,13 +917,14 @@ extend Resolver {
             NODE_GENERIC_SPECIALIZATION => {
                 let sp = self.ast.at_const(id).as_data.specialization;
                 let inner_kind = self.ast.at_const(sp.expression).kind;
-                let mut as_type = false;
                 if inner_kind == NodeKind::NODE_IDENTIFIER {
                     let iname = self.name_span(sp.expression);
-                    if self.sym_lookup(iname, Namespace::NS_VALUE).decl == NODE_NONE { as_type = true; }
-                }
-                if as_type {
-                    self.resolve_ref(sp.expression, sp.expression, Namespace::NS_TYPE, "type");
+                    let v = self.sym_lookup(iname, Namespace::NS_VALUE);
+                    if v.decl != NODE_NONE {
+                        self.resolve_ref_hit(sp.expression, v.decl, v.idx, Namespace::NS_VALUE);
+                    } else {
+                        self.resolve_ref(sp.expression, sp.expression, Namespace::NS_TYPE, "type");
+                    }
                 } else {
                     self.resolve_expr(sp.expression);
                 }
@@ -985,20 +1022,28 @@ extend Resolver {
             if tp.parts.len == 1 && tp.args.len == 0 {
                 let first = self.child(tp.parts, 0);
                 let name = self.name_span(first);
-                let mut is_type = is_builtin_type(self.source, name)
-                    || span_is(self.source, name, "Self")
-                    || self.sym_lookup(name, Namespace::NS_TYPE).decl != NODE_NONE;
-                if !is_type && self.package != null {
+                if is_builtin_type(self.source, name) || span_is(self.source, name, "Self") {
+                    self.resolve_type(v);
+                    return;
+                }
+                let look = self.sym_lookup(name, Namespace::NS_TYPE);
+                if look.decl != NODE_NONE { // a scope-stack type: commit it directly (no re-lookup)
+                    self.resolve_ref_hit(v, look.decl, look.idx, Namespace::NS_TYPE);
+                    return;
+                }
+                if self.package != null { // a prelude/glob type: commit the hit found while probing
                     let pkg = unsafe &*self.package;
                     let nm = unsafe (self.source + name.start as usize) as *const char;
                     let nl = (name.end - name.start) as usize;
-                    is_type = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), true).node != NODE_NONE
-                        || self.glob_lookup(name, true).node != NODE_NONE;
+                    let mut hit = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), true);
+                    if hit.node == NODE_NONE { hit = self.glob_lookup(name, true); }
+                    if hit.node != NODE_NONE {
+                        self.ast.set_resolution_def(v, DefId { module: hit.mid, node: hit.node });
+                        return;
+                    }
                 }
-                if !is_type {
-                    self.resolve_ref(v, first, Namespace::NS_VALUE, "type or value");
-                    return;
-                }
+                self.resolve_ref(v, first, Namespace::NS_VALUE, "type or value");
+                return;
             }
         }
         self.resolve_type(v);
@@ -1133,6 +1178,7 @@ extend Resolver {
     pub fn resolve(self: &mut Self) void {
         let items = self.ast.at_const(self.ast.root).as_data.program.items;
         self.ast.init_resolutions();
+        self.scan_imports();
         self.scope_enter();
         self.collect_items(items);
         for i in 0..items.len {
@@ -1164,6 +1210,8 @@ extend Resolver as Free {
         self.scope_starts.free();
         self.symbol_index.free();
         self.closures.free();
+        self.mod_names.free();
+        self.glob_mids.free();
         self.errors.free();
     }
 }

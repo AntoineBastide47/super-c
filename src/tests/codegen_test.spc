@@ -47,7 +47,7 @@ fn ranges() {
     h::expect_c("inclusive range", RANGES, "for (int32_t i = 1; i <= 5; i++)");
     h::expect_c("open-start range", RANGES, "for (int32_t i = 0; i < 4; i++)");
     h::expect_c("open-end range", RANGES, "for (int32_t i = 100; ; i++)");
-    h::expect_c("usize end range", "fn f(n: usize) void { for i in 0..n { } }\n", "for (size_t i = 0ULL; i < n; i++)");
+    h::expect_c("usize end range hoists", "fn f(n: usize) void { for i in 0..n { } }\n", "for (size_t i = 0ULL, __sc0 = n; i < __sc0; i++)");
     h::expect_c("bare if lowers", RANGES, "if (i >= 103)");
     h::expect_c("bare while lowers", RANGES, "while (s < 0)");
 }
@@ -228,6 +228,11 @@ fn generics() {
     h::expect_c("generic specialization with substituted return", ID, "int32_t id__i32(");
     h::expect_c("second instantiation", ID, "id__bool(");
     h::expect_c_absent("no generic template emitted", ID, " id(");
+
+    // Transitive same-module chain: expanding f<i32> records g<i32>, whose expansion must
+    // itself run to reach h<i32> (regression: the expand worklist must re-read its bound).
+    let CHAIN: str = "fn h<T>(x: T) T { return x; }\nfn g<T>(x: T) T { return h(x); }\nfn f<T>(x: T) T { return g(x); }\nfn main() i32 { return f(41); }\n";
+    h::expect_c("transitive nested instantiation emits leaf", CHAIN, "int32_t h__i32(");
 
     let ENUM: str = "enum Opt<T> { Some(T), None }\nfn main() i32 { let a: Opt<i32> = Opt::<i32>::Some(1); let b: Opt<bool> = Opt::<bool>::None;\n  return switch a { Some(v) => v, None => 0, } + switch b { Some(_) => 1, None => 0, }; }\n";
     h::expect_c("generic enum tag is include-guarded", ENUM, "SUPER_ENUMTAG_Opt");
