@@ -5991,5 +5991,3 @@ extend TypeChecker as Free {
 fn if_bool(c: bool, a: bool, b: bool) bool { if c { return a; } return b; }
 fn if_u32(c: bool, a: u32, b: u32) u32 { if c { return a; } return b; }
 fn if_nl(c: bool, a: NodeList, b: NodeList) NodeList { if c { return a; } return b; }
-
-

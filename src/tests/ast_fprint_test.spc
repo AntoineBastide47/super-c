@@ -88,7 +88,9 @@ fn kind_name(k: ast::NodeKind) str {
 }
 
 fn indent(out: *mut stdio::FILE, depth: u32) void {
-    for i in 0..depth { unsafe stdio::fputs("  ".ptr() as *const char, out); }
+    for i in 0..depth {
+        unsafe stdio::fputs("  ".ptr() as *const char, out);
+    }
 }
 
 fn print_list(out: *mut stdio::FILE, a: &ast::Ast, list: ast::NodeList, source: *const char, depth: u32) void {
@@ -99,7 +101,9 @@ fn print_list(out: *mut stdio::FILE, a: &ast::Ast, list: ast::NodeList, source: 
 }
 
 fn print_child(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) void {
-    if id != ast::NODE_NONE { print_node(out, &*a, id, source, depth); }
+    if id != ast::NODE_NONE {
+        print_node(out, &*a, id, source, depth);
+    }
 }
 
 fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) void {
@@ -295,7 +299,9 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
 
 // Dump the AST rooted at `a.root` to `out` (the analog of ast.c's ast_fprint).
 fn ast_fprint(out: *mut stdio::FILE, a: &ast::Ast, source: *const char) void {
-    if a.root != ast::NODE_NONE { print_node(out, &*a, a.root, source, 0); }
+    if a.root != ast::NODE_NONE {
+        print_node(out, &*a, a.root, source, 0);
+    }
 }
 
 // Read a whole stream into a fresh NUL-terminated heap buffer (caller frees).
@@ -303,10 +309,14 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
     unsafe stdio::fflush(f);
     let _ = unsafe stdio::fseek(f, 0, stdio::SEEK_END);
     let sz = unsafe stdio::ftell(f);
-    if sz < 0 { return null; }
+    if sz < 0 {
+        return null;
+    }
     unsafe stdio::rewind(f);
     let buf = unsafe stdlib::malloc((sz as usize) + 1) as *mut char;
-    if buf == null { return null; }
+    if buf == null {
+        return null;
+    }
     let got = unsafe stdio::fread(buf as *mut void, 1, sz as usize, f);
     unsafe buf[got] = 0 as char;
     return buf;

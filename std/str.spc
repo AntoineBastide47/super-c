@@ -17,7 +17,7 @@ extern "C" {
 // A borrowed view over UTF-8 bytes -- the type of a string literal. Non-owning: the bytes outlive it.
 pub struct str {
     ptr: *const u8, // start of the bytes
-    len: usize,     // number of bytes
+    len: usize, // number of bytes
 }
 
 extend str {
@@ -31,7 +31,9 @@ extend str {
     // the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
     pub fn from_cstr(s: *const char) str {
         let mut n: usize = 0;
-        while unsafe s[n] != (0 as char) { n += 1; }
+        while unsafe s[n] != (0 as char) {
+            n += 1;
+        }
         return str::from_raw(s as *const u8, n);
     }
 

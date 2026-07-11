@@ -197,7 +197,10 @@ extend<A: Allocator> String<A> {
         let l = self.len();
         let p = self.data_ptr();
         let mut i: usize = 0;
-        while i < n { unsafe p[l + i] = 0; i = i + 1; }
+        while i < n {
+            unsafe p[l + i] = 0;
+            i = i + 1;
+        }
     }
 
     // --- raw tail writes: for an external writer (a C vsnprintf/memcpy) that fills the spare region ------
@@ -515,7 +518,7 @@ extend<A: Allocator> String<A> {
             ch = ((b0 & 0x0F) << 12) | (((unsafe p[start + 1] as u32) & 0x3F) << 6) | ((unsafe p[start + 2] as u32) & 0x3F);
         } else if n == 4 {
             ch = ((b0 & 0x07) << 18) | (((unsafe p[start + 1] as u32) & 0x3F) << 12) |
-                 (((unsafe p[start + 2] as u32) & 0x3F) << 6) | ((unsafe p[start + 3] as u32) & 0x3F);
+            (((unsafe p[start + 2] as u32) & 0x3F) << 6) | ((unsafe p[start + 3] as u32) & 0x3F);
         }
         self.set_len(start);
         return ch;
@@ -660,8 +663,12 @@ extend<A: Allocator> String<A> {
         for i in 0..n {
             let mut x = unsafe a[i];
             let mut y = unsafe b[i];
-            if x >= 65 && x <= 90 { x = x + 32; } // fold A-Z to a-z
-            if y >= 65 && y <= 90 { y = y + 32; }
+            if x >= 65 && x <= 90 {
+                x = x + 32;
+            } // fold A-Z to a-z
+            if y >= 65 && y <= 90 {
+                y = y + 32;
+            }
             if x != y {
                 return false;
             }
@@ -976,7 +983,9 @@ extend<A: Allocator> String<A> as Free {
 // Standard-interface conformances. Thin wrappers over the methods above so `String` can be used behind
 // generic bounds (`fn join<T: Format>(..)`, `fn max<T: Ord>(..)`) and so operators dispatch to it.
 extend<A: Allocator> String<A> as Eq {
-    pub fn eq(self: &String<A>, other: &String<A>) bool { return self.equals(other); }
+    pub fn eq(self: &String<A>, other: &String<A>) bool {
+        return self.equals(other);
+    }
 }
 
 extend<A: Allocator> String<A> as Hash {
@@ -998,11 +1007,19 @@ extend<A: Allocator> String<A> as Ord {
         let la = self.len();
         let lb = other.len();
         let mut n = la;
-        if lb < la { n = lb; }
+        if lb < la {
+            n = lb;
+        }
         let c = unsafe memcmp(self.as_ptr() as *const void, other.as_ptr() as *const void, n);
-        if c != 0 { return c; }
-        if la < lb { return -1; }
-        if la > lb { return 1; }
+        if c != 0 {
+            return c;
+        }
+        if la < lb {
+            return -1;
+        }
+        if la > lb {
+            return 1;
+        }
         return 0;
     }
 }
@@ -1064,16 +1081,18 @@ extend<A: Allocator> String<A> as Index<u8, str> {
 // String, or any `Format` type). `{{`/`}}` are literal braces. `format` returns the built String; `print`
 // writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the compiler splits the
 // literal and emits the per-argument appends at each call site.)
-pub fn format(fmt: str, ...) String { return String::<Global>::new(); }
-pub fn print(fmt: str, ...) { }
-pub fn println(fmt: str, ...) { }
-pub fn eprint(fmt: str, ...) { }   // like print/println, written to stderr
-pub fn eprintln(fmt: str, ...) { }
+pub fn format(fmt: str, ...) String {
+    return String::<Global>::new();
+}
+pub fn print(fmt: str, ...) {}
+pub fn println(fmt: str, ...) {}
+pub fn eprint(fmt: str, ...) {} // like print/println, written to stderr
+pub fn eprintln(fmt: str, ...) {}
 
 // Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String --
 // zero allocation (reuses the buffer's capacity). It is a METHOD so the receiver's `&mut` borrow defers
 // past the argument evaluation (a free-fn `&mut dst` arg would collide with `self.X` format args).
 // Lowered by codegen; this body is never emitted.
 extend<A: Allocator> String<A> {
-    pub fn format_into(self: &mut String<A>, fmt: str, ...) void { }
+    pub fn format_into(self: &mut String<A>, fmt: str, ...) void {}
 }

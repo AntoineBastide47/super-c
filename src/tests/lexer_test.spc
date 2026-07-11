@@ -31,12 +31,12 @@ fn expect_error(src: str) {
 fn keywords() {
     expect_tokens("as break case const continue defer do else enum extern false fn for if in let move mut new null return self Self struct true type unsafe where while switch interface extend match protocol augment name _ i32",
         [TokenType::As, TokenType::Break, TokenType::Case, TokenType::Const, TokenType::Continue, TokenType::Defer,
-         TokenType::Do, TokenType::Else, TokenType::Enum, TokenType::Extern, TokenType::False, TokenType::Fn,
-         TokenType::For, TokenType::If, TokenType::In, TokenType::Let, TokenType::Move, TokenType::Mut,
-         TokenType::New, TokenType::Null, TokenType::Return, TokenType::SelfLower, TokenType::SelfUpper,
-         TokenType::Struct, TokenType::True, TokenType::Type, TokenType::Unsafe, TokenType::Where, TokenType::While,
-         TokenType::Switch, TokenType::Interface, TokenType::Extend, TokenType::Identifier, TokenType::Identifier,
-         TokenType::Identifier, TokenType::Identifier, TokenType::Identifier, TokenType::Identifier, TokenType::Eof]);
+        TokenType::Do, TokenType::Else, TokenType::Enum, TokenType::Extern, TokenType::False, TokenType::Fn,
+        TokenType::For, TokenType::If, TokenType::In, TokenType::Let, TokenType::Move, TokenType::Mut,
+        TokenType::New, TokenType::Null, TokenType::Return, TokenType::SelfLower, TokenType::SelfUpper,
+        TokenType::Struct, TokenType::True, TokenType::Type, TokenType::Unsafe, TokenType::Where, TokenType::While,
+        TokenType::Switch, TokenType::Interface, TokenType::Extend, TokenType::Identifier, TokenType::Identifier,
+        TokenType::Identifier, TokenType::Identifier, TokenType::Identifier, TokenType::Identifier, TokenType::Eof]);
 }
 
 // `.` before a digit is a plain Dot (tuple element access `t.0`); `0.5` after an expression dot is a float.
@@ -44,11 +44,11 @@ fn keywords() {
 fn dot_digit() {
     expect_tokens("t.0 t.0.5",
         [TokenType::Identifier, TokenType::Dot, TokenType::IntegerLiteral, TokenType::Identifier, TokenType::Dot,
-         TokenType::FloatLiteral, TokenType::Eof]);
+        TokenType::FloatLiteral, TokenType::Eof]);
 }
 
 @test
 fn numeric_errors() {
     expect_error("0b102"); // invalid digit in binary
-    expect_error("0xFG");  // invalid digit in hexadecimal
+    expect_error("0xFG"); // invalid digit in hexadecimal
 }

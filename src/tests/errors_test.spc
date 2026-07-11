@@ -14,7 +14,9 @@ fn contains(hay: &String, needle: str) bool {
 }
 fn offset_of(src: str, needle: str) u32 {
     let p = unsafe cstring::strstr(src.ptr() as *const char, needle.ptr() as *const char);
-    if p == null { return 0; }
+    if p == null {
+        return 0;
+    }
     return ((p as usize) - (src.ptr() as usize)) as u32;
 }
 
@@ -100,7 +102,9 @@ fn line_starts_crlf() {
 @test
 fn long_line_windowing() {
     let mut buf = Buf202 {};
-    for i in 0..200 { buf.b[i] = 'x' as char; }
+    for i in 0..200 {
+        buf.b[i] = 'x' as char;
+    }
     buf.b[200] = '\n' as char;
     let mut e = diag::Errors::new();
     e.emit(180, 3, format("{}", "m"));
@@ -110,7 +114,9 @@ fn long_line_windowing() {
     assert(contains(&b, "^"), "a caret");
     // 150 x's in a row would mean no windowing; the 200-char line must be trimmed below that.
     let mut needle = Buf151 {};
-    for k in 0..150 { needle.b[k] = 'x' as char; }
+    for k in 0..150 {
+        needle.b[k] = 'x' as char;
+    }
     assert(!contains(&b, str::from_raw((&needle.b[0]) as *const u8, 150)), "long line windowed below 150 chars");
     e.free();
 }

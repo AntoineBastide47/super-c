@@ -49,6 +49,7 @@ pub struct Lexer {
     pub tokens: Vector<Token>,
     pub errors: diag::Errors,
     pub class: CharClass,
+    pub keep_trivia: bool, // emit comment tokens (the formatter); off for the parser path
 }
 
 extend Lexer {
@@ -67,6 +68,7 @@ extend Lexer {
             tokens: Vector::<Token>::new(),
             errors: diag::Errors::new(),
             class: build_char_class(),
+            keep_trivia: false,
         };
     }
 
@@ -80,7 +82,9 @@ extend Lexer as Free {
     }
 }
 
-fn is_eof(l: &Lexer) bool { return l.current >= l.len; }
+fn is_eof(l: &Lexer) bool {
+    return l.current >= l.len;
+}
 
 fn is_id_start(b: u8) bool {
     return b == '_' || (b >= 'a' as u8 && b <= 'z' as u8) || (b >= 'A' as u8 && b <= 'Z' as u8);
@@ -525,8 +529,8 @@ fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(
 fn num_suffix_kind(p: *const u8, n: usize) i32 {
     if n == 3 && (memeq(p, "f32") || memeq(p, "f64")) { return 1; }
     if (n == 2 && (memeq(p, "i8") || memeq(p, "u8"))) ||
-       (n == 3 && (memeq(p, "i16") || memeq(p, "i32") || memeq(p, "i64") || memeq(p, "u16") || memeq(p, "u32") || memeq(p, "u64"))) ||
-       (n == 5 && (memeq(p, "isize") || memeq(p, "usize"))) {
+    (n == 3 && (memeq(p, "i16") || memeq(p, "i32") || memeq(p, "i64") || memeq(p, "u16") || memeq(p, "u32") || memeq(p, "u64"))) ||
+    (n == 5 && (memeq(p, "isize") || memeq(p, "usize"))) {
         return 0;
     }
     return -1;
@@ -742,9 +746,22 @@ fn scan_token(l: &mut Lexer) void {
         },
         '?' => { add_token(&mut *l, TokenType::Question); return; },
         '/' => {
-            if match_byte(&mut *l, '/' as u8) { line_comment(&mut *l); }
-            else if match_byte(&mut *l, '*' as u8) { block_comment(&mut *l); }
-            else { add_match(&mut *l, '=' as u8, TokenType::SlashEqual, TokenType::Slash); }
+            if match_byte(&mut *l, '/' as u8) {
+                line_comment(&mut *l);
+                if l.keep_trivia {
+                    // `///...` is a doc comment; `//...` a plain one. The 3rd byte decides.
+                    let doc = l.current - l.start > 2 && unsafe l.bytes[l.start + 2] == '/' as u8;
+                    if doc { add_token(&mut *l, TokenType::DocLineComment); }
+                    else { add_token(&mut *l, TokenType::LineComment); }
+                }
+            } else if match_byte(&mut *l, '*' as u8) {
+                block_comment(&mut *l);
+                if l.keep_trivia {
+                    let doc = l.current - l.start > 4 && unsafe l.bytes[l.start + 2] == '*' as u8;
+                    if doc { add_token(&mut *l, TokenType::DocBlockComment); }
+                    else { add_token(&mut *l, TokenType::BlockComment); }
+                }
+            } else { add_match(&mut *l, '=' as u8, TokenType::SlashEqual, TokenType::Slash); }
             return;
         },
         '.' => {

@@ -8,9 +8,9 @@
 
 pub struct Vector<T, A = Global> {
     ptr: *mut T, // owned storage; null while cap == 0 (private)
-    len: usize,  // elements in use (private)
-    cap: usize,  // elements allocated (private)
-    alloc: A,    // the allocator the buffer was obtained through (private; zero-sized for Global)
+    len: usize, // elements in use (private)
+    cap: usize, // elements allocated (private)
+    alloc: A, // the allocator the buffer was obtained through (private; zero-sized for Global)
 }
 
 extend<T, A: Allocator> Vector<T, A> {
@@ -256,7 +256,9 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub fn contains(self: &Vector<T, A>, x: &T) bool {
         for i in 0..self.len {
-            if unsafe self.ptr[i].eq(x) { return true; }
+            if unsafe self.ptr[i].eq(x) {
+                return true;
+            }
         }
         return false;
     }
@@ -264,7 +266,9 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     // Index of the first element equal to `x`, or `None`.
     pub fn position(self: &Vector<T, A>, x: &T) Option<usize> {
         for i in 0..self.len {
-            if unsafe self.ptr[i].eq(x) { return Option::<usize>::Some(i); }
+            if unsafe self.ptr[i].eq(x) {
+                return Option::<usize>::Some(i);
+            }
         }
         return Option::<usize>::None;
     }
@@ -272,7 +276,9 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     // Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
     // are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
     pub fn dedup(self: &mut Vector<T, A>) {
-        if self.len < 2 { return; }
+        if self.len < 2 {
+            return;
+        }
         let mut w: usize = 1;
         let mut r: usize = 1;
         while r < self.len {
@@ -292,10 +298,14 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
 extend<T: Ord, A: Allocator> Vector<T, A> {
     // True if the elements are in non-decreasing order (per `Ord`).
     pub fn is_sorted(self: &Vector<T, A>) bool {
-        if self.len < 2 { return true; }
+        if self.len < 2 {
+            return true;
+        }
         let mut i: usize = 0;
         while i + 1 < self.len {
-            if unsafe self.ptr[i].cmp(&unsafe self.ptr[i + 1]) > 0 { return false; }
+            if unsafe self.ptr[i].cmp(&unsafe self.ptr[i + 1]) > 0 {
+                return false;
+            }
             i = i + 1;
         }
         return true;
@@ -309,8 +319,14 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let c = unsafe self.ptr[mid].cmp(x);
-            if c == 0 { return Result::<usize, usize>::Ok(mid); }
-            if c < 0 { lo = mid + 1; } else { hi = mid; }
+            if c == 0 {
+                return Result::<usize, usize>::Ok(mid);
+            }
+            if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
         return Result::<usize, usize>::Err(lo);
     }
@@ -320,8 +336,12 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && unsafe self.ptr[child].cmp(&unsafe self.ptr[child + 1]) < 0 { child = child + 1; }
-            if unsafe self.ptr[r].cmp(&unsafe self.ptr[child]) >= 0 { return; }
+            if child + 1 < end && unsafe self.ptr[child].cmp(&unsafe self.ptr[child + 1]) < 0 {
+                child = child + 1;
+            }
+            if unsafe self.ptr[r].cmp(&unsafe self.ptr[child]) >= 0 {
+                return;
+            }
             self.swap(r, child);
             r = child;
             child = 2 * r + 1;
@@ -331,7 +351,9 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
     // Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
     pub fn sort(self: &mut Vector<T, A>) {
         let n = self.len;
-        if n < 2 { return; }
+        if n < 2 {
+            return;
+        }
         let mut start = n / 2;
         while start > 0 {
             start = start - 1;
@@ -353,27 +375,40 @@ extend<T, A: Allocator> Vector<T, A> {
     // transitively instantiated yet, so the helper stays inside the one specialization.
     pub fn sort_by<F: fn(&T, &T) i32>(self: &mut Vector<T, A>, cmp: F) {
         let n = self.len;
-        if n < 2 { return; }
+        if n < 2 {
+            return;
+        }
         let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
         let mut start = n / 2;
         let mut end = n;
         loop {
             let mut r: usize = 0;
             if phase == 0 {
-                if start == 0 { phase = 1; continue; }
+                if start == 0 {
+                    phase = 1;
+                    continue;
+                }
                 start = start - 1;
                 r = start;
             } else {
-                if end <= 1 { break; }
+                if end <= 1 {
+                    break;
+                }
                 end = end - 1;
                 self.swap(0, end);
             }
             let mut lim = n;
-            if phase == 1 { lim = end; }
+            if phase == 1 {
+                lim = end;
+            }
             let mut child = 2 * r + 1;
             while child < lim {
-                if child + 1 < lim && cmp(&unsafe self.ptr[child], &unsafe self.ptr[child + 1]) < 0 { child = child + 1; }
-                if cmp(&unsafe self.ptr[r], &unsafe self.ptr[child]) >= 0 { break; }
+                if child + 1 < lim && cmp(&unsafe self.ptr[child], &unsafe self.ptr[child + 1]) < 0 {
+                    child = child + 1;
+                }
+                if cmp(&unsafe self.ptr[r], &unsafe self.ptr[child]) >= 0 {
+                    break;
+                }
                 self.swap(r, child);
                 r = child;
                 child = 2 * r + 1;
@@ -384,14 +419,18 @@ extend<T, A: Allocator> Vector<T, A> {
     // Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`).
     pub fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
         let n = self.len;
-        if n < 2 { return; }
+        if n < 2 {
+            return;
+        }
         let mut i: usize = 1; // insertion sort through swaps: key extraction stays borrow-only
         while i < n {
             let mut j = i;
             while j > 0 {
                 let prev = key(&unsafe self.ptr[j - 1]);
                 let cur = key(&unsafe self.ptr[j]);
-                if prev.cmp(&cur) <= 0 { break; }
+                if prev.cmp(&cur) <= 0 {
+                    break;
+                }
                 self.swap(j - 1, j);
                 j = j - 1;
             }
@@ -415,7 +454,9 @@ extend<T, A: Allocator> Vector<T, A> {
 
 extend<T> VecIter<T> as Iterator<&T> {
     pub fn next(self: &mut VecIter<T>) Option<&T> {
-        if self.idx >= self.stop { return Option::<&T>::none(); }
+        if self.idx >= self.stop {
+            return Option::<&T>::none();
+        }
         let r = &unsafe self.data[self.idx];
         self.idx = self.idx + 1;
         return Option::<&T>::some(r);
@@ -465,11 +506,15 @@ extend<T: Clone, A: Allocator> Vector<T, A> as Clone {
 
 extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
     pub fn eq(self: &Vector<T, A>, other: &Vector<T, A>) bool {
-        if self.len() != other.len() { return false; }
+        if self.len() != other.len() {
+            return false;
+        }
         for i in 0..self.len() {
             let a = self.at(i);
             let b = other.at(i);
-            if !a.eq(b) { return false; }
+            if !a.eq(b) {
+                return false;
+            }
         }
         return true;
     }
@@ -492,7 +537,9 @@ extend<T: Format, A: Allocator> Vector<T, A> as Format {
     pub fn fmt(self: &Vector<T, A>) String {
         let mut s = String::from_str("[");
         for i in 0..self.len() {
-            if i > 0 { s.push_str(", "); }
+            if i > 0 {
+                s.push_str(", ");
+            }
             let e = self.at(i);
             let es = e.fmt();
             s.push_string(&es);

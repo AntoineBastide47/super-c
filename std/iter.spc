@@ -44,7 +44,9 @@ extend<I: Iterator<T>, T, P: fn(T) bool> FilterIter<I, T, P> as Iterator<T> {
     pub fn next(self: &mut FilterIter<I, T, P>) Option<T> {
         loop {
             switch self.it.next() {
-                Some(x) => { if self.p(x) { return Option::<T>::Some(x); } },
+                Some(x) => { if self.p(x) {
+                        return Option::<T>::Some(x);
+                    } },
                 None => { return Option::<T>::None; },
             };
         }
@@ -106,21 +108,27 @@ extend<A: Iterator<TA>, B: Iterator<TB>, TA, TB> ZipIter<A, B, TA, TB> as Iterat
 pub fn fold<I: Iterator<T>, T, A, F: fn(A, T) A>(it: I, init: A, f: F) A {
     let mut i = it;
     let mut acc = init;
-    while let Some(x) = i.next() { acc = f(acc, x); }
+    while let Some(x) = i.next() {
+        acc = f(acc, x);
+    }
     return acc;
 }
 
 // Runs `f` on every element, for its effects.
 pub fn for_each<I: Iterator<T>, T, F: fn(T) void>(it: I, f: F) void {
     let mut i = it;
-    while let Some(x) = i.next() { f(x); }
+    while let Some(x) = i.next() {
+        f(x);
+    }
 }
 
 // The number of elements the iterator yields.
 pub fn count<I: Iterator<T>, T>(it: I) usize {
     let mut i = it;
     let mut n: usize = 0;
-    while let Some(_) = i.next() { n = n + 1; }
+    while let Some(_) = i.next() {
+        n = n + 1;
+    }
     return n;
 }
 
@@ -128,6 +136,8 @@ pub fn count<I: Iterator<T>, T>(it: I) usize {
 pub fn collect<I: Iterator<T>, T>(it: I) Vector<T> {
     let mut i = it;
     let mut v = Vector::<T>::new();
-    while let Some(x) = i.next() { v.push(x); }
+    while let Some(x) = i.next() {
+        v.push(x);
+    }
     return v;
 }

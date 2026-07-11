@@ -7,7 +7,7 @@
 
 pub struct Box<T, A = Global> {
     ptr: *mut T, // owns one T (private)
-    alloc: A,    // the allocator the block was obtained through (private; zero-sized for Global)
+    alloc: A, // the allocator the block was obtained through (private; zero-sized for Global)
 }
 
 extend<T, A: Allocator> Box<T, A> {

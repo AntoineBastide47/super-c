@@ -7,7 +7,7 @@
 // A borrowed, read-only view over `len` consecutive `T` at `ptr`.
 pub struct Slice<T> {
     pub ptr: *const T, // first element
-    pub len: usize,    // number of elements
+    pub len: usize, // number of elements
 }
 
 extend<T> Slice<T> {
@@ -55,7 +55,7 @@ extend<T> Slice<T> {
 // A borrowed, writable view over `len` consecutive `T` at `ptr`.
 pub struct SliceMut<T> {
     pub ptr: *mut T, // first element
-    pub len: usize,  // number of elements
+    pub len: usize, // number of elements
 }
 
 extend<T> SliceMut<T> {

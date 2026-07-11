@@ -10,12 +10,12 @@ extern "C" {
 }
 
 pub struct Map<K, V, A = Global> {
-    keys: *mut K,  // parallel arrays, slot i valid when used[i] == 1 (private)
+    keys: *mut K, // parallel arrays, slot i valid when used[i] == 1 (private)
     vals: *mut V,
     used: *mut u8, // 0 = empty, 1 = occupied
-    len: usize,    // occupied slots
-    cap: usize,    // total slots (a power of two is not required; probing wraps with %)
-    alloc: A,      // the allocator the arrays were obtained through (private; zero-sized for Global)
+    len: usize, // occupied slots
+    cap: usize, // total slots (a power of two is not required; probing wraps with %)
+    alloc: A, // the allocator the arrays were obtained through (private; zero-sized for Global)
 }
 
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {

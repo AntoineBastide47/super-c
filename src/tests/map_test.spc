@@ -6,7 +6,9 @@
 fn insert_get_len() {
     let mut m = Map::<i32, i32>::new();
     assert(m.is_empty(), "init is empty");
-    m.insert(1, 10); m.insert(2, 20); m.insert(3, 30);
+    m.insert(1, 10);
+    m.insert(2, 20);
+    m.insert(3, 30);
     assert_eq(m.len(), 3);
     let k1: i32 = 1;
     let g = m.get(&k1);
@@ -20,8 +22,9 @@ fn insert_get_len() {
 @test
 fn overwrite() {
     let mut m = Map::<i32, i32>::new();
-    m.insert(1, 10); m.insert(1, 111); // same key
-    assert_eq(m.len(), 1);             // no growth on overwrite
+    m.insert(1, 10);
+    m.insert(1, 111); // same key
+    assert_eq(m.len(), 1); // no growth on overwrite
     let k1: i32 = 1;
     assert(*m.get(&k1).unwrap() == 111, "value overwritten");
 }
@@ -29,7 +32,8 @@ fn overwrite() {
 @test
 fn remove_present_and_absent() {
     let mut m = Map::<i32, i32>::new();
-    m.insert(1, 10); m.insert(2, 20);
+    m.insert(1, 10);
+    m.insert(2, 20);
     let k2: i32 = 2;
     let r = m.remove(&k2);
     assert(r.is_some() && r.unwrap() == 20, "remove returns the value");
@@ -40,12 +44,16 @@ fn remove_present_and_absent() {
 @test
 fn growth_rehash() {
     let mut m = Map::<i32, i32>::new();
-    for i in 0..100 { m.insert(i, i * 2); }
+    for i in 0..100 {
+        m.insert(i, i * 2);
+    }
     assert_eq(m.len(), 100);
     let mut ok = true;
     for i in 0..100 {
         let g = m.get(&i);
-        if !(g.is_some() && *g.unwrap() == i * 2) { ok = false; }
+        if !(g.is_some() && *g.unwrap() == i * 2) {
+            ok = false;
+        }
     }
     assert(ok, "all 100 keys retrievable after growth/rehash");
 }

@@ -8,7 +8,7 @@
 
 pub struct StaticVector<T, const N: usize> {
     data: [T; N], // inline storage; only the first `len` slots hold live elements (private)
-    len: usize,   // elements in use (private)
+    len: usize, // elements in use (private)
 }
 
 extend<T, const N: usize> StaticVector<T, N> {

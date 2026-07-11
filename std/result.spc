@@ -173,7 +173,11 @@ extend<T: Format, E: Format> Result<T, E> as Format {
             Err(e) => e.fmt(),
         };
         let mut s = String::new();
-        if self.is_ok() { s.push_str("Ok("); } else { s.push_str("Err("); }
+        if self.is_ok() {
+            s.push_str("Ok(");
+        } else {
+            s.push_str("Err(");
+        }
         s.push_string(&inner);
         inner.free();
         s.push_str(")");
