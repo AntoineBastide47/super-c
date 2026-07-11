@@ -46,7 +46,7 @@ extend Compiled {
     }
     // Whether the first error message contains `needle` (matched as a substring).
     pub fn msg_has(self: &Self, needle: str) bool {
-        return unsafe cstring::strstr((&self.first[0]) as *const char, needle.ptr() as *const char) != null;
+        return unsafe cstring::strstr((&self.first[0]), needle.ptr() as *const char) != null;
     }
 }
 
@@ -59,7 +59,7 @@ fn copy_msg(dst: *mut char, s: &String) void {
         511 as usize;
     };
     if k > 0 {
-        unsafe cstring::memcpy(dst as *mut void, s.as_ptr() as *const void, k);
+        unsafe cstring::memcpy(dst, s.as_ptr(), k);
     }
     unsafe dst[k] = 0 as char;
 }
@@ -77,7 +77,7 @@ pub fn compile(src: str, stop: i32) Compiled {
         r.errors = lx.errors.errors.len();
         r.stage = STAGE_PARSE;
         if r.errors > 0 {
-            copy_msg((&mut r.first[0]) as *mut char, lx.errors.errors.at(0));
+            copy_msg((&mut r.first[0]), lx.errors.errors.at(0));
         }
         lx.free();
         return r;
@@ -90,7 +90,7 @@ pub fn compile(src: str, stop: i32) Compiled {
         r.errors = ps.errors.errors.len();
         r.stage = STAGE_PARSE;
         if r.errors > 0 {
-            copy_msg((&mut r.first[0]) as *mut char, ps.errors.errors.at(0));
+            copy_msg((&mut r.first[0]), ps.errors.errors.at(0));
         }
         ps.free();
         return r;
@@ -104,7 +104,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     let mut p = loader::package_from_source(src.ptr() as *const char, src.len(), "std".ptr() as *const char);
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = (&mut ceval) as *mut void;
+    p.ceval = (&mut ceval);
 
     let n = p.modules.len();
     let uidx = n - 1; // the user module is loaded last, after the prelude
@@ -199,7 +199,7 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
     }
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = (&mut ceval) as *mut void;
+    p.ceval = (&mut ceval);
     let n = p.modules.len();
     let uidx = n - 1;
     let mut rr = Compiled {};
@@ -267,7 +267,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
     if buf == null {
         return null;
     }
-    let got = unsafe stdio::fread(buf as *mut void, 1, sz as usize, f);
+    let got = unsafe stdio::fread(buf, 1, sz as usize, f);
     unsafe buf[got] = 0 as char;
     return buf;
 }
@@ -293,7 +293,7 @@ extend CompiledC {
 extend CompiledC as Free {
     pub fn free(self: &mut Self) void {
         if self.code != null {
-            unsafe stdlib::free(self.code as *mut void);
+            unsafe stdlib::free(self.code);
             self.code = null;
         }
     }
@@ -311,7 +311,7 @@ pub fn compile_c(src: str) CompiledC {
     }
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = (&mut ceval) as *mut void;
+    p.ceval = (&mut ceval);
     let n = p.modules.len();
     let uidx = n - 1;
     let mut rr = Compiled {};
@@ -395,7 +395,7 @@ extend RunResult {
 extend RunResult as Free {
     pub fn free(self: &mut Self) void {
         if self.out != null {
-            unsafe stdlib::free(self.out as *mut void);
+            unsafe stdlib::free(self.out);
             self.out = null;
         }
     }
@@ -414,8 +414,8 @@ fn slurp(path: *const char) *mut char {
 
 fn rm_dir(dir: *const char) void {
     let mut cmd = Path512 {};
-    unsafe stdio::snprintf((&mut cmd.b[0]) as *mut char, 512, "rm -rf '%s'".ptr() as *const char, dir);
-    let _ = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
+    unsafe stdio::snprintf((&mut cmd.b[0]), 512, "rm -rf '%s'".ptr() as *const char, dir);
+    let _ = stdlib::system(str::from_cstr((&cmd.b[0])));
 }
 
 // Build `src` into a standalone program via `super-c build`, run it, and capture stdout+stderr + exit code.
@@ -427,7 +427,7 @@ pub fn compile_and_run(src: str) RunResult {
     let pid = unsafe shim::sc_getpid();
     let mut dir = Path256 {};
     unsafe stdio::snprintf(
-        (&mut dir.b[0]) as *mut char,
+        (&mut dir.b[0]),
         256,
         "/tmp/scr_%d_%llu".ptr() as *const char,
         pid,
@@ -438,8 +438,8 @@ pub fn compile_and_run(src: str) RunResult {
         return r;
     }
     let mut spc = Path512 {};
-    unsafe stdio::snprintf((&mut spc.b[0]) as *mut char, 512, "%s/main.spc".ptr() as *const char, dirp);
-    let wf = stdio::fopen(str::from_cstr((&spc.b[0]) as *const char), "wb"); // binary: no Windows CRLF in emitted .spc sources
+    unsafe stdio::snprintf((&mut spc.b[0]), 512, "%s/main.spc".ptr() as *const char, dirp);
+    let wf = stdio::fopen(str::from_cstr((&spc.b[0])), "wb"); // binary: no Windows CRLF in emitted .spc sources
     if wf == null {
         rm_dir(dirp);
         return r;
@@ -454,33 +454,33 @@ pub fn compile_and_run(src: str) RunResult {
     }
     let mut cmd = Path1024 {};
     unsafe stdio::snprintf(
-        (&mut cmd.b[0]) as *mut char,
+        (&mut cmd.b[0]),
         1024,
         "%s build '%s/main.spc' -o '%s/prog' >/dev/null 2>&1".ptr() as *const char,
         sc,
         dirp,
         dirp,
     );
-    let brc = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
+    let brc = stdlib::system(str::from_cstr((&cmd.b[0])));
     if brc != 0 {
         rm_dir(dirp);
         return r;
     } // did not build
     r.built = true;
     unsafe stdio::snprintf(
-        (&mut cmd.b[0]) as *mut char,
+        (&mut cmd.b[0]),
         1024,
         "'%s/prog' > '%s/out' 2>&1".ptr() as *const char,
         dirp,
         dirp,
     );
-    let rrc = stdlib::system(str::from_cstr((&cmd.b[0]) as *const char));
+    let rrc = stdlib::system(str::from_cstr((&cmd.b[0])));
     if unsafe shim::sc_wifexited(rrc) != 0 {
         r.exit = unsafe shim::sc_wexitstatus(rrc);
     }
     let mut op = Path512 {};
-    unsafe stdio::snprintf((&mut op.b[0]) as *mut char, 512, "%s/out".ptr() as *const char, dirp);
-    r.out = slurp((&op.b[0]) as *const char);
+    unsafe stdio::snprintf((&mut op.b[0]), 512, "%s/out".ptr() as *const char, dirp);
+    r.out = slurp((&op.b[0]));
     rm_dir(dirp);
     return r;
 }
@@ -560,7 +560,7 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
         let c = rr.errors.errors.len();
         if c > 0 {
             unsafe out.errors = c;
-            unsafe copy_msg((&mut out.first[0]) as *mut char, rr.errors.errors.at(0));
+            unsafe copy_msg((&mut out.first[0]), rr.errors.errors.at(0));
         }
     }
     let back = rr.take_ast();
@@ -586,7 +586,7 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
         let c = t.errors.errors.len();
         if c > 0 {
             unsafe out.errors = c;
-            unsafe copy_msg((&mut out.first[0]) as *mut char, t.errors.errors.at(0));
+            unsafe copy_msg((&mut out.first[0]), t.errors.errors.at(0));
         }
     }
     let back = t.take_ast();

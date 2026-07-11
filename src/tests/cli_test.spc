@@ -224,7 +224,7 @@ fn heap() i32 {
   unsafe p[0] = 40;
   unsafe p[1] = unsafe p[0] + 2;
   let r = unsafe p[1];
-  unsafe free(p as *mut void);
+  unsafe free(p);
   return (r as i32);
 }
 static_assert(heap() == 42, "the abstract heap folds");
@@ -276,7 +276,7 @@ fn main() i32 { return 0; }
 fn uaf() i32 {
   let p = unsafe malloc(sizeof(i32)) as *mut i32;
   unsafe p[0] = 1;
-  unsafe free(p as *mut void);
+  unsafe free(p);
   return unsafe p[0];
 }
 static_assert(uaf() == 1, "uaf");
@@ -601,17 +601,17 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
     );
     let mut cc2 = Cmd {};
     unsafe stdio::snprintf(
-        (&mut cc2.b[0]) as *mut char,
+        (&mut cc2.b[0]),
         2048,
         "cc -std=c11 -Wall -Wextra -Werror -I'%s/build' '%s/cuser.c' -o '%s/cbin' 2>/dev/null".ptr() as *const char,
         p.rootp(),
         p.rootp(),
         p.rootp(),
     );
-    assert_eq(cli::run_shell((&cc2.b[0]) as *const char), 0);
+    assert_eq(cli::run_shell((&cc2.b[0])), 0);
     let mut cr = Cmd {};
-    unsafe stdio::snprintf((&mut cr.b[0]) as *mut char, 2048, "'%s/cbin'".ptr() as *const char, p.rootp());
-    assert_eq(cli::run_shell((&cr.b[0]) as *const char), 0);
+    unsafe stdio::snprintf((&mut cr.b[0]), 2048, "'%s/cbin'".ptr() as *const char, p.rootp());
+    assert_eq(cli::run_shell((&cr.b[0])), 0);
 
     // the attribute is rejected on a non-generic type
     p.mkfile("bad.spc", "@emit_macro\npub struct Plain { pub a: i32 }\nfn main() i32 { return 0; }\n");
@@ -908,13 +908,13 @@ fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
     assert_eq(r2.exit, 0);
     let mut prune = Cmd {};
     unsafe stdio::snprintf(
-        (&mut prune.b[0]) as *mut char,
+        (&mut prune.b[0]),
         2048,
         "test $(find '%s/build' -name '__ext*' | wc -l) -eq 0 && test ! -e '%s/build/__ldflags'".ptr() as *const char,
         p.rootp(),
         p.rootp(),
     );
-    assert_eq(cli::run_shell((&prune.b[0]) as *const char), 0);
+    assert_eq(cli::run_shell((&prune.b[0])), 0);
 
     // a missing source file is a hard error
     p.mkfile(

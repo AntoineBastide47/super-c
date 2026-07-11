@@ -26,9 +26,9 @@ fn offset_of(src: str, needle: str) u32 {
 
 // Emit one message at (off, span) over `src`, finalize with `file`, and return an owned copy of the
 // rendered block 0 (owned so the caller can free `e` before inspecting it).
-fn render_into(e: &mut diag::Errors, src: str, msg: str, off: u32, span: u32, file: *const char) String {
+fn render_into(e: &mut diag::Errors, src: str, msg: str, off: u32, span: u32, file: str) String {
     e.emit(off, span, format("{}", msg));
-    e.finalize(src.ptr() as *const u8, src.len(), file);
+    e.finalize(src.ptr(), src.len(), file);
     return e.errors.at(0).clone();
 }
 
@@ -46,7 +46,7 @@ fn emit_collects() {
 fn line_col_and_carets() {
     let src = "ab\ncd\n  foo bar\n"; // "bar" on line 3
     let mut e = diag::Errors::new();
-    let b = render_into(&mut e, src, "boom", offset_of(src, "bar"), 3, null);
+    let b = render_into(&mut e, src, "boom", offset_of(src, "bar"), 3, "");
     assert(contains(&b, "error: boom"), "message");
     assert(contains(&b, "--> 3:7"), "1-based line:col");
     assert(contains(&b, "3 | "), "gutter");
@@ -60,7 +60,7 @@ fn line_col_and_carets() {
 fn file_in_location() {
     let src = "ab\ncd\n  foo bar\n";
     let mut e = diag::Errors::new();
-    let b = render_into(&mut e, src, "boom", offset_of(src, "bar"), 3, "src/foo.spc".ptr() as *const char);
+    let b = render_into(&mut e, src, "boom", offset_of(src, "bar"), 3, "src/foo.spc");
     assert(contains(&b, "--> src/foo.spc:3:7"), "file:line:col");
     e.free();
 }
@@ -71,7 +71,7 @@ fn notes() {
     let mut e = diag::Errors::new();
     e.emit(offset_of(src, "y"), 1, format("{}", "unknown name"));
     e.note(format("did you mean '{}'?", "x"));
-    e.finalize(src.ptr() as *const u8, src.len(), null);
+    e.finalize(src.ptr(), src.len(), "");
     let b = e.errors.at(0).clone();
     assert(contains(&b, "error: unknown name"), "error line");
     assert(contains(&b, "= note: did you mean 'x'?"), "note line");
@@ -83,12 +83,12 @@ fn caret_clamping() {
     let src = "ab\ncd\n  foo bar\n";
     let off = offset_of(src, "bar");
     let mut e0 = diag::Errors::new();
-    let zero = render_into(&mut e0, src, "m", off, 0, null); // span < 1 -> a single caret
+    let zero = render_into(&mut e0, src, "m", off, 0, ""); // span < 1 -> a single caret
     assert(contains(&zero, "^") && !contains(&zero, "^^"), "zero span -> one caret");
     e0.free();
     // A span overrunning the line end is clamped to what remains ("bc" of "abc" -> 2 carets).
     let mut e1 = diag::Errors::new();
-    let over = render_into(&mut e1, "abc\n", "m", 1, 100, null);
+    let over = render_into(&mut e1, "abc\n", "m", 1, 100, "");
     assert(contains(&over, "^^") && !contains(&over, "^^^"), "overrun clamped");
     e1.free();
 }
@@ -98,7 +98,7 @@ fn line_starts_crlf() {
     // '\r' alone, '\n' alone, and '\r\n' together each start a new line; 'd' is line 4 col 1.
     let src = "a\rb\nc\r\nd";
     let mut e = diag::Errors::new();
-    let b = render_into(&mut e, src, "m", offset_of(src, "d"), 1, null);
+    let b = render_into(&mut e, src, "m", offset_of(src, "d"), 1, "");
     assert(contains(&b, "--> 4:1"), "mixed terminators");
     e.free();
 }
@@ -112,7 +112,7 @@ fn long_line_windowing() {
     buf.b[200] = '\n' as char;
     let mut e = diag::Errors::new();
     e.emit(180, 3, format("{}", "m"));
-    e.finalize((&buf.b[0]) as *const u8, 201, null);
+    e.finalize((&buf.b[0]) as *const u8, 201, "");
     let b = e.errors.at(0).clone();
     assert(contains(&b, "--> 1:181"), "column past the window");
     assert(contains(&b, "^"), "a caret");
@@ -129,7 +129,7 @@ fn long_line_windowing() {
 fn offset_past_eof() {
     let src = "abc\n";
     let mut e = diag::Errors::new();
-    let b = render_into(&mut e, src, "eof", src.len() as u32 + 50, 1, null); // clamped to src_len, no OOB
+    let b = render_into(&mut e, src, "eof", src.len() as u32 + 50, 1, ""); // clamped to src_len, no OOB
     assert(contains(&b, "error: eof"), "renders without overrun");
     e.free();
 }

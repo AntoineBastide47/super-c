@@ -95,15 +95,9 @@ pub struct CePending {
 }
 
 // Fixed-buffer wrappers: a struct field zero-inits its array (Super-C has no `[v; N]` repeat-init).
-pub struct Buf64 {
-    pub b: [char; 64],
-}
-pub struct Buf24 {
-    pub b: [char; 24],
-}
-pub struct Buf4096 {
-    pub b: [u8; 4096],
-}
+pub type Buf64 = Array<char, 64>;
+pub type Buf24 = Array<char, 24>;
+pub type Buf4096 = Array<u8, 4096>;
 
 // --- layout engine structs ----------------------------------------------------------------------
 
@@ -529,14 +523,14 @@ fn round_up(v: u64, a: u64) u64 {
 }
 
 fn hexval(ch: u8) i32 {
-    if ch >= '0' as u8 && ch <= '9' as u8 {
-        return (ch - '0' as u8) as i32;
+    if ch >= b'0' && ch <= b'9' {
+        return (ch - b'0') as i32;
     }
-    if ch >= 'a' as u8 && ch <= 'f' as u8 {
-        return (ch - 'a' as u8 + 10u8) as i32;
+    if ch >= b'a' && ch <= b'f' {
+        return (ch - b'a' + 10u8) as i32;
     }
-    if ch >= 'A' as u8 && ch <= 'F' as u8 {
-        return (ch - 'A' as u8 + 10u8) as i32;
+    if ch >= b'A' && ch <= b'F' {
+        return (ch - b'A' + 10u8) as i32;
     }
     return -1;
 }
@@ -553,22 +547,22 @@ extend ConstEval {
         let mut v: u64 = 0;
         let mut i = sp.start;
         let mut base: u64 = 10;
-        if sp.end - sp.start > 2 && unsafe src[i as usize] == '0' as u8 {
+        if sp.end - sp.start > 2 && unsafe src[i as usize] == b'0' {
             let r = unsafe src[(i + 1) as usize];
-            if r == 'x' as u8 || r == 'X' as u8 {
+            if r == b'x' || r == b'X' {
                 base = 16;
                 i = i + 2;
-            } else if r == 'b' as u8 || r == 'B' as u8 {
+            } else if r == b'b' || r == b'B' {
                 base = 2;
                 i = i + 2;
-            } else if r == 'o' as u8 || r == 'O' as u8 {
+            } else if r == b'o' || r == b'O' {
                 base = 8;
                 i = i + 2;
             }
         }
         while i < endd {
             let ch = unsafe src[i as usize];
-            if ch == '_' as u8 {
+            if ch == b'_' {
                 i = i + 1;
                 continue;
             }
@@ -595,7 +589,7 @@ extend ConstEval {
         let src = self.ce_src(m);
         let sp = unsafe (*a).at_const(id).as_data.literal.raw;
         let mut i = sp.start + 1;
-        if unsafe src[sp.start as usize] == 'b' as u8 {
+        if unsafe src[sp.start as usize] == b'b' {
             i = i + 1;
         }
         if i >= sp.end {
@@ -656,14 +650,14 @@ extend ConstEval {
         let mut k: usize = 0;
         let mut i = sp.start;
         while i < sp.end && k + 1 < 64 {
-            if unsafe src[i as usize] != '_' as u8 {
-                buf.b[k] = unsafe src[i as usize] as char;
+            if unsafe src[i as usize] != b'_' {
+                buf[k] = unsafe src[i as usize] as char;
                 k = k + 1;
             }
             i = i + 1;
         }
-        buf.b[k] = 0 as char;
-        let mut v = unsafe stdlib::strtod((&buf.b[0]) as *const char, null);
+        buf[k] = 0 as char;
+        let mut v = unsafe stdlib::strtod((&buf[0]), null);
         let b = type_builtin(a, self.ce_type(m, id));
         if b == BuiltinType::BT_F32 {
             v = v as f32 as f64;
@@ -1819,8 +1813,8 @@ extend ConstEval {
         let raw = unsafe (*a).at_const(id).as_data.literal.token_type == TokenType::RawStringLiteral;
         let mut i = sp.start;
         let mut hashes: u32 = 0;
-        while i < sp.end && unsafe src[i as usize] != '"' as u8 {
-            if unsafe src[i as usize] == '#' as u8 {
+        while i < sp.end && unsafe src[i as usize] != b'"' {
+            if unsafe src[i as usize] == b'#' {
                 hashes = hashes + 1;
             }
             i = i + 1;
@@ -1871,7 +1865,7 @@ extend ConstEval {
                     },
                 };
             }
-            bytes.b[nb as usize] = c;
+            bytes[nb as usize] = c;
             nb = nb + 1;
         }
         let rr = self.ce_recv_of(f, m, self.ce_type(m, id));
@@ -1896,7 +1890,7 @@ extend ConstEval {
                         kind: CV_INT,
                         tm: 0,
                         ty: Ast::builtin(BuiltinType::BT_U8),
-                        as_data: CeValAs { i: bytes.b[k as usize] as i64 },
+                        as_data: CeValAs { i: bytes[k as usize] as i64 },
                     },
                 );
             }
@@ -2338,8 +2332,8 @@ extend ConstEval {
             }
             let c0 = unsafe self.ce_src(m)[mname.start as usize];
             let mut idx: u32 = 0;
-            if c0 >= '0' as u8 && c0 <= '9' as u8 {
-                idx = (c0 - '0' as u8) as u32;
+            if c0 >= b'0' && c0 <= b'9' {
+                idx = (c0 - b'0') as u32;
             } else {
                 if unsafe (*o).dn == NODE_NONE {
                     return ValRes { ok: false };
@@ -2610,8 +2604,8 @@ extend ConstEval {
             }
             let c0 = unsafe src[mname.start as usize];
             let mut idx: u32 = 0;
-            if c0 >= '0' as u8 && c0 <= '9' as u8 {
-                idx = (c0 - '0' as u8) as u32;
+            if c0 >= b'0' && c0 <= b'9' {
+                idx = (c0 - b'0') as u32;
             } else {
                 if unsafe (*o).dn == NODE_NONE {
                     return cv_nil();
@@ -3013,7 +3007,7 @@ extend ConstEval {
                         res.ty = rt;
                         return res;
                     }
-                    if mn.byte_at(0) == 'c' as u8 {
+                    if mn.byte_at(0) == b'c' {
                         if res.kind != CV_INT {
                             return cv_nil();
                         }
@@ -4550,13 +4544,13 @@ extend ConstEval {
         }
         let mut name = Buf24 {};
         for ci in 0..ln {
-            name.b[ci] = unsafe self.ce_src(fm)[nm.start as usize + ci] as char;
+            name[ci] = unsafe self.ce_src(fm)[nm.start as usize + ci] as char;
         }
-        name.b[ln] = 0 as char;
+        name[ln] = 0 as char;
         let mut f32suf = false;
-        if ln > 1 && name.b[ln - 1] == 'f' as char {
+        if ln > 1 && name[ln - 1] == 'f' as char {
             f32suf = true;
-            name.b[ln - 1] = 0 as char;
+            name[ln - 1] = 0 as char;
         }
         let mut inv: [f64; 3] = [0.0f64, 0.0f64, 0.0f64];
         for i in 0..nargs {
@@ -4565,7 +4559,7 @@ extend ConstEval {
             }
             inv[i as usize] = unsafe args[i as usize].as_data.f;
         }
-        let nv = diag::cstr((&name.b[0]) as *const char);
+        let nv = diag::cstr((&name[0]));
         let mut v: f64 = 0.0;
         let mut ok = false;
         if nargs == 1 {

@@ -17,13 +17,13 @@ struct Buf4096 {
 fn run_exit(label: str, body: str, code: i32) {
     let mut buf = Buf4096 {};
     unsafe stdio::snprintf(
-        (&mut buf.b[0]) as *mut char,
+        (&mut buf.b[0]),
         4096,
         "%s%s".ptr() as *const char,
         PRE.ptr() as *const char,
         body.ptr() as *const char,
     );
-    let src = str::from_raw((&buf.b[0]) as *const u8, unsafe cstring::strlen((&buf.b[0]) as *const char));
+    let src = str::from_raw((&buf.b[0]) as *const u8, unsafe cstring::strlen((&buf.b[0])));
     h::expect_exit(label, src, code);
 }
 

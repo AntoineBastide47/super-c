@@ -263,30 +263,14 @@ pub struct CgTestInfo {
 }
 
 // zero-init buffer wrappers (fixed C-string scratch)
-pub struct Buf32 {
-    pub b: [char; 32],
-}
-pub struct ExtChain {
-    pub p: [i32; 64],
-}
-pub struct Bools64 {
-    pub b: [bool; 64],
-}
-pub struct Buf64 {
-    pub b: [char; 64],
-}
-pub struct Buf128 {
-    pub b: [char; 128],
-}
-pub struct Buf160 {
-    pub b: [char; 160],
-}
-pub struct Buf256 {
-    pub b: [char; 256],
-}
-pub struct Buf512 {
-    pub b: [char; 512],
-}
+pub type Buf32 = Array<char, 32>;
+pub type ExtChain = Array<i32, 64>;
+pub type Bools64 = Array<bool, 64>;
+pub type Buf64 = Array<char, 64>;
+pub type Buf128 = Array<char, 128>;
+pub type Buf160 = Array<char, 160>;
+pub type Buf256 = Array<char, 256>;
+pub type Buf512 = Array<char, 512>;
 
 pub struct Codegen {
     pub ast: *mut Ast,
@@ -414,17 +398,17 @@ extend Codegen as Free {
         self.ifm_set.free();
         self.call_list.free();
         if self.moved_stamp != null {
-            unsafe stdlib::free(self.moved_stamp as *mut void);
+            unsafe stdlib::free(self.moved_stamp);
         }
         if self.cond_stamp != null {
-            unsafe stdlib::free(self.cond_stamp as *mut void);
+            unsafe stdlib::free(self.cond_stamp);
         }
         self.errors.free();
         if self.type_state != null {
-            unsafe stdlib::free(self.type_state as *mut void);
+            unsafe stdlib::free(self.type_state);
         }
         if self.inst_emit_state != null {
-            unsafe stdlib::free(self.inst_emit_state as *mut void);
+            unsafe stdlib::free(self.inst_emit_state);
         }
     }
 }
@@ -522,8 +506,8 @@ extend Codegen {
         let mut k = self.render_modpfx(m, out, cap);
         k = bappend(out, cap, k, "closure_".ptr() as *const char);
         let mut idb = Buf32 {};
-        unsafe stdio::snprintf((&mut idb.b[0]) as *mut char, 16, "%u".ptr() as *const char, id);
-        bappend(out, cap, k, (&idb.b[0]) as *const char);
+        unsafe stdio::snprintf((&mut idb[0]), 16, "%u".ptr() as *const char, id);
+        bappend(out, cap, k, (&idb[0]));
     }
     fn closure_name(self: &Self, id: NodeId, out: *mut char, cap: usize) void {
         self.closure_sym_in(self.cur_module(), id, out, cap);
@@ -531,8 +515,8 @@ extend Codegen {
 
     // ---- low-level output buffer (a String: growth + RAII come from it; we fill its spare tail) ----
     fn emit_bytes(self: &mut Self, p: *const char, n: usize) void {
-        let tail = self.buf.spare_mut(n) as *mut void;
-        unsafe cstring::memcpy(tail, p as *const void, n);
+        let tail = self.buf.spare_mut(n);
+        unsafe cstring::memcpy(tail, p, n);
         self.buf.advance_len(n);
     }
     fn emit_cstr(self: &mut Self, text: *const char) void {
@@ -608,13 +592,13 @@ extend Codegen {
             if (self.modpfx_set & bit) == 0 {
                 let mp = self as *const Codegen as *mut Codegen;
                 let mut tb = Buf256 {};
-                let n2 = self.render_modpfx_uncached(m, (&mut tb.b[0]) as *mut char, 256);
+                let n2 = self.render_modpfx_uncached(m, (&mut tb[0]), 256);
                 if n2 + 1 < 256 && self.modpfx_cur as usize + n2 <= 4096 {
                     let off = self.modpfx_cur as usize;
                     let mut q: usize = 0;
                     while q < n2 {
                         unsafe {
-                            (*mp).modpfx_buf[off + q] = tb.b[q];
+                            (*mp).modpfx_buf[off + q] = tb[q];
                         }
                         q += 1;
                     }
@@ -630,7 +614,7 @@ extend Codegen {
                 let ln = self.modpfx_len[m as usize] as usize;
                 if ln + 1 <= cap {
                     let off = self.modpfx_off[m as usize] as usize;
-                    unsafe cstring::memcpy(buf as *mut void, (&self.modpfx_buf[off]) as *const void, ln);
+                    unsafe cstring::memcpy(buf, (&self.modpfx_buf[off]), ln);
                     unsafe buf[ln] = 0 as char;
                     return ln;
                 }
@@ -653,7 +637,7 @@ extend Codegen {
         let mut at: usize = 0;
         let mut i: usize = 0;
         while i < n {
-            if path.byte_at(i) == ':' as u8 && i + 1 < n && path.byte_at(i + 1) == ':' as u8 {
+            if path.byte_at(i) == b':' && i + 1 < n && path.byte_at(i + 1) == b':' {
                 i = i + 1;
                 if at + 2 < cap {
                     unsafe buf[at] = '_' as char;
@@ -703,15 +687,15 @@ extend Codegen {
         render_ident_src(
             self.mod_src(m),
             unsafe (*self.mod_ast(m)).at_const(name_node).as_data.name.text,
-            (&mut nm.b[0]) as *mut char,
+            (&mut nm[0]),
             160,
         );
-        self.emit_cstr((&nm.b[0]) as *const char);
+        self.emit_cstr((&nm[0]));
     }
     fn emit_local_type_name(self: &mut Self, aggregate_name: NodeId) void {
         let mut nm = Buf160 {};
-        self.render_qualified(self.cur_module(), aggregate_name, (&mut nm.b[0]) as *mut char, 160);
-        self.emit_cstr((&nm.b[0]) as *const char);
+        self.render_qualified(self.cur_module(), aggregate_name, (&mut nm[0]), 160);
+        self.emit_cstr((&nm[0]));
     }
     fn build_enum_index(self: &mut Self) void {
         let a = self.cur_ast();
@@ -741,25 +725,25 @@ extend Codegen {
             );
         } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
             let mut e = Buf256 {};
-            self.mangle_type(ty.as_data.elem, (&mut e.b[0]) as *mut char, 176);
-            unsafe stdio::snprintf(out, cap, "ptr_%s".ptr() as *const char, (&e.b[0]) as *const char);
+            self.mangle_type(ty.as_data.elem, (&mut e[0]), 176);
+            unsafe stdio::snprintf(out, cap, "ptr_%s".ptr() as *const char, (&e[0]));
         } else if ty.kind == TypeKind::TYPE_SLICE {
             let mut e = Buf256 {};
-            self.mangle_type(ty.as_data.elem, (&mut e.b[0]) as *mut char, 176);
-            unsafe stdio::snprintf(out, cap, "slice_%s".ptr() as *const char, (&e.b[0]) as *const char);
+            self.mangle_type(ty.as_data.elem, (&mut e[0]), 176);
+            unsafe stdio::snprintf(out, cap, "slice_%s".ptr() as *const char, (&e[0]));
         } else if ty.kind == TypeKind::TYPE_ARRAY {
             let mut e = Buf256 {};
-            self.mangle_type(ty.as_data.arr.elem, (&mut e.b[0]) as *mut char, 176);
+            self.mangle_type(ty.as_data.arr.elem, (&mut e[0]), 176);
             if ty.as_data.arr.len != 0 {
                 unsafe stdio::snprintf(
                     out,
                     cap,
                     "arr%u_%s".ptr() as *const char,
                     ty.as_data.arr.len,
-                    (&e.b[0]) as *const char,
+                    (&e[0]),
                 );
             } else {
-                unsafe stdio::snprintf(out, cap, "arr_%s".ptr() as *const char, (&e.b[0]) as *const char);
+                unsafe stdio::snprintf(out, cap, "arr_%s".ptr() as *const char, (&e[0]));
             }
         } else if ty.kind == TypeKind::TYPE_INSTANCE {
             self.inst_name(unsafe (*self.cur_ast()).instance(ty.as_data.inst), out, cap);
@@ -774,14 +758,14 @@ extend Codegen {
             }
         } else if ty.kind == TypeKind::TYPE_DYN {
             let mut e = Buf256 {};
-            self.dyn_stem(ty.module, ty.as_data.decl, (&mut e.b[0]) as *mut char, 176);
+            self.dyn_stem(ty.module, ty.as_data.decl, (&mut e[0]), 176);
             let mut pfx = "dynb".ptr() as *const char;
             if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
                 pfx = "dynm".ptr() as *const char;
             } else if ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
                 pfx = "dyn".ptr() as *const char;
             }
-            unsafe stdio::snprintf(out, cap, "%s_%s".ptr() as *const char, pfx, (&e.b[0]) as *const char);
+            unsafe stdio::snprintf(out, cap, "%s_%s".ptr() as *const char, pfx, (&e[0]));
         } else if ty.kind == TypeKind::TYPE_CONST {
             unsafe stdio::snprintf(out, cap, "%lld".ptr() as *const char, ty.as_data.value);
         } else {
@@ -802,11 +786,11 @@ extend Codegen {
             let mut e = Buf256 {};
             self.mangle_type(
                 unsafe (*self.cur_ast()).reintern(unsafe &*da, unsafe (*da).type_of(pid)),
-                (&mut e.b[0]) as *mut char,
+                (&mut e[0]),
                 176,
             );
             at = bappend(out, cap, at, "__".ptr() as *const char);
-            at = bappend(out, cap, at, (&e.b[0]) as *const char);
+            at = bappend(out, cap, at, (&e[0]));
         }
         if ftp.returns.len == 1 {
             let r0 = unsafe (*da).list(ftp.returns)[0];
@@ -815,24 +799,24 @@ extend Codegen {
             let mut e = Buf256 {};
             self.mangle_type(
                 unsafe (*self.cur_ast()).reintern(unsafe &*da, unsafe (*da).type_of(tn)),
-                (&mut e.b[0]) as *mut char,
+                (&mut e[0]),
                 176,
             );
             at = bappend(out, cap, at, "__r_".ptr() as *const char);
-            bappend(out, cap, at, (&e.b[0]) as *const char);
+            bappend(out, cap, at, (&e[0]));
         }
     }
     fn dyn_pair_stem(self: &Self, src: TypeId, im: ModuleId, iface: NodeId, out: *mut char, cap: usize) void {
         let mut sm = Buf256 {};
         let mut stem = Buf256 {};
-        self.mangle_type(src, (&mut sm.b[0]) as *mut char, 176);
-        self.dyn_stem(im, iface, (&mut stem.b[0]) as *mut char, 176);
+        self.mangle_type(src, (&mut sm[0]), 176);
+        self.dyn_stem(im, iface, (&mut stem[0]), 176);
         unsafe stdio::snprintf(
             out,
             cap,
             "%s__%s".ptr() as *const char,
-            (&sm.b[0]) as *const char,
-            (&stem.b[0]) as *const char,
+            (&sm[0]),
+            (&stem[0]),
         );
     }
     fn spec_name(self: &Self, fn2: DefId, args: *const TypeId, n: i32, out: *mut char, cap: usize) void {
@@ -845,8 +829,8 @@ extend Codegen {
         for i in 0..n {
             at = bappend(out, cap, at, "__".ptr() as *const char);
             let mut e = Buf256 {};
-            self.mangle_type(unsafe args[i as usize], (&mut e.b[0]) as *mut char, 176);
-            at = bappend(out, cap, at, (&e.b[0]) as *const char);
+            self.mangle_type(unsafe args[i as usize], (&mut e[0]), 176);
+            at = bappend(out, cap, at, (&e[0]));
         }
     }
     fn render_macro_param(self: &Self, m: ModuleId, decl: NodeId, buf: *mut char, cap: usize) usize {
@@ -916,8 +900,8 @@ extend Codegen {
         // The paste sentinel as a NUL-terminated 1-char string (bappend does strlen; a bare `&CG_PASTE`
         // would read past the single byte into adjacent stack garbage -- the C side uses `char sent[2]`).
         let mut sentbuf = Buf256 {};
-        unsafe sentbuf.b[0] = CG_PASTE;
-        let sent = (&sentbuf.b[0]) as *const char;
+        unsafe sentbuf[0] = CG_PASTE;
+        let sent = (&sentbuf[0]) as *const char;
         for i in 0..it.n {
             if self.macro_mode {
                 if i != 0 {
@@ -934,13 +918,13 @@ extend Codegen {
                     at = bappend(out, cap, at, sent);
                 }
                 let mut e = Buf256 {};
-                self.macro_arg_token(it.args[i as usize], (&mut e.b[0]) as *mut char, 176);
-                at = bappend(out, cap, at, (&e.b[0]) as *const char);
+                self.macro_arg_token(it.args[i as usize], (&mut e[0]), 176);
+                at = bappend(out, cap, at, (&e[0]));
             } else {
                 at = bappend(out, cap, at, "__".ptr() as *const char);
                 let mut e = Buf256 {};
-                self.mangle_type(self.subst_resolve(it.args[i as usize]), (&mut e.b[0]) as *mut char, 176);
-                at = bappend(out, cap, at, (&e.b[0]) as *const char);
+                self.mangle_type(self.subst_resolve(it.args[i as usize]), (&mut e[0]), 176);
+                at = bappend(out, cap, at, (&e[0]));
             }
         }
     }
@@ -980,8 +964,8 @@ extend Codegen {
             let mut na = TyArgs4 {};
             let mut changed = false;
             for i in 0..src.n {
-                na.t[i as usize] = self.subst_resolve(src.args[i as usize]);
-                if na.t[i as usize] != src.args[i as usize] {
+                na[i as usize] = self.subst_resolve(src.args[i as usize]);
+                if na[i as usize] != src.args[i as usize] {
                     changed = true;
                 }
             }
@@ -989,7 +973,7 @@ extend Codegen {
                 return unsafe (*self.cur_ast()).intern_instance(
                     src.module,
                     src.decl,
-                    (&na.t[0]) as *const TypeId,
+                    (&na[0]) as *const TypeId,
                     src.n,
                 );
             }
@@ -1120,9 +1104,9 @@ extend Codegen {
             if unsafe (*self.cur_ast()).at_const(i).kind == NodeKind::NODE_CALL {
                 let mut args = TyArgs4 {};
                 let mut n: i32 = 0;
-                let fn2 = self.generic_call_target(i, (&mut args.t[0]) as *mut TypeId, (&mut n) as *mut i32);
+                let fn2 = self.generic_call_target(i, (&mut args[0]) as *mut TypeId, (&mut n) as *mut i32);
                 if fn2.node != NODE_NONE {
-                    self.record_inst(fn2, (&args.t[0]) as *const TypeId, n, i);
+                    self.record_inst(fn2, (&args[0]) as *const TypeId, n, i);
                 }
             }
             i = i + 1;
@@ -1141,7 +1125,7 @@ extend Codegen {
             let fn_n = self.insts[cur].n;
             let mut fargs = TyArgs4 {};
             for k in 0..fn_n {
-                fargs.t[k as usize] = self.insts[cur].args[k as usize];
+                fargs[k as usize] = self.insts[cur].args[k as usize];
             }
             let foreign = fn2.module != self.cur_module();
             if foreign && (self.package == null || fn2.module as usize >= self.pkg_count()) {
@@ -1159,7 +1143,7 @@ extend Codegen {
                 oninst = unsafe (*owner).instances.len();
                 self.ast = owner;
                 for kk in 0..fn_n {
-                    fargs.t[kk as usize] = unsafe (*self.cur_ast()).reintern(unsafe &*home, fargs.t[kk as usize]);
+                    fargs[kk as usize] = unsafe (*self.cur_ast()).reintern(unsafe &*home, fargs[kk as usize]);
                 }
             }
             let fnn = unsafe (*self.cur_ast()).at_const(fn2.node);
@@ -1171,7 +1155,7 @@ extend Codegen {
                 let gid = unsafe (*self.cur_ast()).list(gens)[g as usize];
                 let ns = self.nsubst;
                 self.subst[ns as usize].param = DefId { module: fn2.module, node: gid };
-                self.subst[ns as usize].concrete = fargs.t[g as usize];
+                self.subst[ns as usize].concrete = fargs[g as usize];
                 self.nsubst = ns + 1;
                 g = g + 1;
             }
@@ -1199,22 +1183,22 @@ extend Codegen {
                 }
                 let mut args = TyArgs4 {};
                 let mut n: i32 = 0;
-                let g2 = self.generic_call_target(nid, (&mut args.t[0]) as *mut TypeId, (&mut n) as *mut i32);
+                let g2 = self.generic_call_target(nid, (&mut args[0]) as *mut TypeId, (&mut n) as *mut i32);
                 if g2.node == NODE_NONE {
                     continue;
                 }
                 let mut concrete = true;
                 for kk in 0..n {
-                    args.t[kk as usize] = self.subst_resolve(args.t[kk as usize]);
-                    if !self.type_is_concrete(args.t[kk as usize]) {
+                    args[kk as usize] = self.subst_resolve(args[kk as usize]);
+                    if !self.type_is_concrete(args[kk as usize]) {
                         concrete = false;
                     }
                     if foreign {
-                        args.t[kk as usize] = unsafe (*home).reintern(unsafe &*self.cur_ast(), args.t[kk as usize]);
+                        args[kk as usize] = unsafe (*home).reintern(unsafe &*self.cur_ast(), args[kk as usize]);
                     }
                 }
                 if concrete {
-                    self.record_inst(g2, (&args.t[0]) as *const TypeId, n, nid);
+                    self.record_inst(g2, (&args[0]) as *const TypeId, n, nid);
                 }
             }
             self.nsubst = 0;
@@ -1235,7 +1219,7 @@ extend Codegen {
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         // CG-4: only extends whose target resolves to aliasDecl can match.
         let mut ch = ExtChain {};
-        let nchain = self.cg_ext_chain(m, aliasDecl, (&mut ch.p[0]) as *mut i32, 64);
+        let nchain = self.cg_ext_chain(m, aliasDecl, (&mut ch[0]) as *mut i32, 64);
         let total = if nchain >= 0 {
             nchain;
         } else {
@@ -1243,7 +1227,7 @@ extend Codegen {
         };
         for x in 0..total {
             let i = if nchain >= 0 {
-                ch.p[x as usize];
+                ch[x as usize];
             } else {
                 x;
             };
@@ -1296,24 +1280,24 @@ extend Codegen {
                 let dn = *unsafe (*self.mod_ast(d.module)).at_const(d.node);
                 if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
                     let mut nm = Buf256 {};
-                    self.render_qualified(d.module, dn.as_data.aggregate.name, (&mut nm.b[0]) as *mut char, 160);
-                    buf_join3(out, cap, (&nm.b[0]) as *const char, sep(decl), decl);
+                    self.render_qualified(d.module, dn.as_data.aggregate.name, (&mut nm[0]), 160);
+                    buf_join3(out, cap, (&nm[0]), sep(decl), decl);
                 } else if dn.kind == NodeKind::NODE_TYPE_ALIAS && dn.as_data.type_alias.ty == NODE_NONE {
                     let mut nm = Buf256 {};
                     render_ident_src(
                         self.mod_src(d.module),
                         unsafe (*self.mod_ast(d.module)).at_const(dn.as_data.type_alias.name).as_data.name.text,
-                        (&mut nm.b[0]) as *mut char,
+                        (&mut nm[0]),
                         160,
                     );
-                    buf_join3(out, cap, (&nm.b[0]) as *const char, sep(decl), decl);
+                    buf_join3(out, cap, (&nm[0]), sep(decl), decl);
                 } else if dn.kind == NodeKind::NODE_TYPE_ALIAS && dn.as_data.type_alias.generics.len == 0 && self.cg_alias_extended(
                     d.module,
                     d.node,
                 ) {
                     let mut nm = Buf256 {};
-                    self.render_qualified(d.module, dn.as_data.type_alias.name, (&mut nm.b[0]) as *mut char, 160);
-                    buf_join3(out, cap, (&nm.b[0]) as *const char, sep(decl), decl);
+                    self.render_qualified(d.module, dn.as_data.type_alias.name, (&mut nm[0]), 160);
+                    buf_join3(out, cap, (&nm[0]), sep(decl), decl);
                 } else if dn.kind == NodeKind::NODE_TYPE_ALIAS && d.module == self.cur_module() {
                     self.render_type_node(dn.as_data.type_alias.ty, decl, out, cap);
                 } else if dn.kind == NodeKind::NODE_TYPE_ALIAS {
@@ -1324,8 +1308,8 @@ extend Codegen {
                         self.render_type_id(s, decl, out, cap);
                     } else if self.macro_mode && dn.kind == NodeKind::NODE_GENERIC_PARAM {
                         let mut p = Buf64 {};
-                        self.render_macro_param(d.module, d.node, (&mut p.b[0]) as *mut char, 64);
-                        buf_join3(out, cap, (&p.b[0]) as *const char, sep(decl), decl);
+                        self.render_macro_param(d.module, d.node, (&mut p[0]), 64);
+                        buf_join3(out, cap, (&p[0]), sep(decl), decl);
                     } else {
                         buf_join3(out, cap, "void".ptr() as *const char, sep(decl), decl);
                     }
@@ -1376,7 +1360,7 @@ extend Codegen {
                 if ay.kind == TypeKind::TYPE_ARRAY && ay.as_data.arr.len != 0 {
                     let mut spiral = Buf512 {};
                     unsafe stdio::snprintf(
-                        (&mut spiral.b[0]) as *mut char,
+                        (&mut spiral[0]),
                         480,
                         "(*%s)[%u]".ptr() as *const char,
                         decl,
@@ -1389,20 +1373,20 @@ extend Codegen {
                     let mut base = Buf512 {};
                     self.render_type_id(
                         ay.as_data.elem,
-                        (&spiral.b[0]) as *const char,
-                        (&mut base.b[0]) as *mut char,
+                        (&spiral[0]),
+                        (&mut base[0]),
                         512,
                     );
                     let mut pfx = "".ptr() as *const char;
-                    if cp && not_const_prefixed((&base.b[0]) as *const char) {
+                    if cp && not_const_prefixed((&base[0])) {
                         pfx = "const ".ptr() as *const char;
                     }
-                    buf_join3(out, cap, pfx, "".ptr() as *const char, (&base.b[0]) as *const char);
+                    buf_join3(out, cap, pfx, "".ptr() as *const char, (&base[0]));
                     return;
                 }
             }
             let mut inner = Buf512 {};
-            buf_join3((&mut inner.b[0]) as *mut char, 480, "*".ptr() as *const char, "".ptr() as *const char, decl);
+            buf_join3((&mut inner[0]), 480, "*".ptr() as *const char, "".ptr() as *const char, decl);
             let mut const_pointee = it.qualifier == TypeQualifier::TYPE_QUAL_CONST;
             if nk == NodeKind::NODE_REFERENCE_TYPE {
                 const_pointee = it.qualifier != TypeQualifier::TYPE_QUAL_MUT;
@@ -1415,23 +1399,23 @@ extend Codegen {
                 // Element is a pointer: east-const the pointer (`char *const *`), not its pointee.
                 let mut cinner = Buf512 {};
                 buf_join3(
-                    (&mut cinner.b[0]) as *mut char,
+                    (&mut cinner[0]),
                     480,
                     "const ".ptr() as *const char,
                     "".ptr() as *const char,
-                    (&inner.b[0]) as *const char,
+                    (&inner[0]),
                 );
-                self.render_type_node(it.ty, (&cinner.b[0]) as *const char, out, cap);
+                self.render_type_node(it.ty, (&cinner[0]), out, cap);
             } else if const_pointee {
                 let mut base = Buf512 {};
-                self.render_type_node(it.ty, (&inner.b[0]) as *const char, (&mut base.b[0]) as *mut char, 512);
+                self.render_type_node(it.ty, (&inner[0]), (&mut base[0]), 512);
                 let mut pfx = "const ".ptr() as *const char;
-                if !not_const_prefixed((&base.b[0]) as *const char) {
+                if !not_const_prefixed((&base[0])) {
                     pfx = "".ptr() as *const char;
                 }
-                buf_join3(out, cap, pfx, "".ptr() as *const char, (&base.b[0]) as *const char);
+                buf_join3(out, cap, pfx, "".ptr() as *const char, (&base[0]));
             } else {
-                self.render_type_node(it.ty, (&inner.b[0]) as *const char, out, cap);
+                self.render_type_node(it.ty, (&inner[0]), out, cap);
             }
             return;
         }
@@ -1452,24 +1436,24 @@ extend Codegen {
                 self.cg_const_len_subst(n.as_data.array_type.length);
             };
             if flen != 0 {
-                unsafe stdio::snprintf((&mut inner.b[0]) as *mut char, 480, "%s[%u]".ptr() as *const char, decl, flen);
+                unsafe stdio::snprintf((&mut inner[0]), 480, "%s[%u]".ptr() as *const char, decl, flen);
             } else if clen >= 0 {
                 // Monomorphized const-generic length (e.g. `[T; N]` with N bound to a value).
-                unsafe stdio::snprintf((&mut inner.b[0]) as *mut char, 480, "%s[%lld]".ptr() as *const char, decl, clen);
+                unsafe stdio::snprintf((&mut inner[0]), 480, "%s[%lld]".ptr() as *const char, decl, clen);
             } else {
                 let ls = unsafe (*self.cur_ast()).at_const(n.as_data.array_type.length).span;
-                let mut at = bappend((&mut inner.b[0]) as *mut char, 480, 0, decl);
-                at = bappend((&mut inner.b[0]) as *mut char, 480, at, "[".ptr() as *const char);
+                let mut at = bappend((&mut inner[0]), 480, 0, decl);
+                at = bappend((&mut inner[0]), 480, at, "[".ptr() as *const char);
                 at = bappend_bytes(
-                    (&mut inner.b[0]) as *mut char,
+                    (&mut inner[0]),
                     480,
                     at,
                     src_at(self.source, ls.start),
                     (ls.end - ls.start) as usize,
                 );
-                bappend((&mut inner.b[0]) as *mut char, 480, at, "]".ptr() as *const char);
+                bappend((&mut inner[0]), 480, at, "]".ptr() as *const char);
             }
-            self.render_type_node(n.as_data.array_type.element, (&inner.b[0]) as *const char, out, cap);
+            self.render_type_node(n.as_data.array_type.element, (&inner[0]), out, cap);
             return;
         }
         if nk == NodeKind::NODE_FUNCTION_TYPE {
@@ -1480,37 +1464,37 @@ extend Codegen {
             while i < ft.params.len && k < 480 {
                 let pid = unsafe (*self.cur_ast()).list(ft.params)[i as usize];
                 let mut t = Buf256 {};
-                self.render_type_node(pid, "".ptr() as *const char, (&mut t.b[0]) as *mut char, 256);
+                self.render_type_node(pid, "".ptr() as *const char, (&mut t[0]), 256);
                 if i != 0 {
-                    k = bappend((&mut params.b[0]) as *mut char, 480, k, ", ".ptr() as *const char);
+                    k = bappend((&mut params[0]), 480, k, ", ".ptr() as *const char);
                 }
-                k = bappend((&mut params.b[0]) as *mut char, 480, k, (&t.b[0]) as *const char);
+                k = bappend((&mut params[0]), 480, k, (&t[0]));
                 i = i + 1;
             }
             let mut inner = Buf512 {};
-            let mut at = bappend((&mut inner.b[0]) as *mut char, 512, 0, "(*".ptr() as *const char);
-            at = bappend((&mut inner.b[0]) as *mut char, 512, at, decl);
-            at = bappend((&mut inner.b[0]) as *mut char, 512, at, ")(".ptr() as *const char);
+            let mut at = bappend((&mut inner[0]), 512, 0, "(*".ptr() as *const char);
+            at = bappend((&mut inner[0]), 512, at, decl);
+            at = bappend((&mut inner[0]), 512, at, ")(".ptr() as *const char);
             let mut pstr = "void".ptr() as *const char;
             if ft.params.len != 0 {
-                pstr = (&params.b[0]) as *const char;
+                pstr = (&params[0]);
             }
-            at = bappend((&mut inner.b[0]) as *mut char, 512, at, pstr);
-            bappend((&mut inner.b[0]) as *mut char, 512, at, ")".ptr() as *const char);
+            at = bappend((&mut inner[0]), 512, at, pstr);
+            bappend((&mut inner[0]), 512, at, ")".ptr() as *const char);
             if ft.returns.len == 1 {
                 let r0 = unsafe (*self.cur_ast()).list(ft.returns)[0];
                 let rn = unsafe (*self.cur_ast()).at_const(r0);
                 let rtn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
-                self.render_type_node(rtn, (&inner.b[0]) as *const char, out, cap);
+                self.render_type_node(rtn, (&inner[0]), out, cap);
             } else if ft.returns.len == 0 {
-                buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner.b[0]) as *const char);
+                buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner[0]));
             } else {
                 self.errors.emit(
                     n.span.start,
                     n.span.end - n.span.start,
                     format("codegen: multi-return function pointer is not yet supported"),
                 );
-                buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner.b[0]) as *const char);
+                buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner[0]));
             }
             return;
         }
@@ -1529,16 +1513,16 @@ extend Codegen {
             self.render_qualified(
                 ty.module,
                 unsafe (*self.mod_ast(ty.module)).at_const(ty.as_data.decl).as_data.aggregate.name,
-                (&mut nm.b[0]) as *mut char,
+                (&mut nm[0]),
                 160,
             );
-            buf_join3(out, cap, (&nm.b[0]) as *const char, sep(decl), decl);
+            buf_join3(out, cap, (&nm[0]), sep(decl), decl);
         } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
             let el = *self.type_at(ty.as_data.elem);
             if el.kind == TypeKind::TYPE_ARRAY && el.as_data.arr.len != 0 {
                 let mut inner = Buf512 {};
                 unsafe stdio::snprintf(
-                    (&mut inner.b[0]) as *mut char,
+                    (&mut inner[0]),
                     480,
                     "(*%s)[%u]".ptr() as *const char,
                     decl,
@@ -1549,16 +1533,16 @@ extend Codegen {
                     cp = ty.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
                 }
                 let mut base = Buf512 {};
-                self.render_type_id(el.as_data.elem, (&inner.b[0]) as *const char, (&mut base.b[0]) as *mut char, 512);
+                self.render_type_id(el.as_data.elem, (&inner[0]), (&mut base[0]), 512);
                 let mut pfx = "".ptr() as *const char;
-                if cp && not_const_prefixed((&base.b[0]) as *const char) {
+                if cp && not_const_prefixed((&base[0])) {
                     pfx = "const ".ptr() as *const char;
                 }
-                buf_join3(out, cap, pfx, "".ptr() as *const char, (&base.b[0]) as *const char);
+                buf_join3(out, cap, pfx, "".ptr() as *const char, (&base[0]));
                 return;
             }
             let mut inner = Buf512 {};
-            buf_join3((&mut inner.b[0]) as *mut char, 480, "*".ptr() as *const char, "".ptr() as *const char, decl);
+            buf_join3((&mut inner[0]), 480, "*".ptr() as *const char, "".ptr() as *const char, decl);
             let mut const_pointee = ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8;
             if ty.kind == TypeKind::TYPE_REFERENCE {
                 const_pointee = ty.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
@@ -1569,23 +1553,23 @@ extend Codegen {
                 // (east: `char *const *`), not its pointee (`const char **`, an illegal 2nd-level qualifier).
                 let mut cinner = Buf512 {};
                 buf_join3(
-                    (&mut cinner.b[0]) as *mut char,
+                    (&mut cinner[0]),
                     480,
                     "const ".ptr() as *const char,
                     "".ptr() as *const char,
-                    (&inner.b[0]) as *const char,
+                    (&inner[0]),
                 );
-                self.render_type_id(ty.as_data.elem, (&cinner.b[0]) as *const char, out, cap);
+                self.render_type_id(ty.as_data.elem, (&cinner[0]), out, cap);
             } else if const_pointee {
                 let mut base = Buf512 {};
-                self.render_type_id(ty.as_data.elem, (&inner.b[0]) as *const char, (&mut base.b[0]) as *mut char, 512);
+                self.render_type_id(ty.as_data.elem, (&inner[0]), (&mut base[0]), 512);
                 let mut pfx = "const ".ptr() as *const char;
-                if !not_const_prefixed((&base.b[0]) as *const char) {
+                if !not_const_prefixed((&base[0])) {
                     pfx = "".ptr() as *const char;
                 }
-                buf_join3(out, cap, pfx, "".ptr() as *const char, (&base.b[0]) as *const char);
+                buf_join3(out, cap, pfx, "".ptr() as *const char, (&base[0]));
             } else {
-                self.render_type_id(ty.as_data.elem, (&inner.b[0]) as *const char, out, cap);
+                self.render_type_id(ty.as_data.elem, (&inner[0]), out, cap);
             }
         } else if ty.kind == TypeKind::TYPE_SLICE {
             buf_join3(out, cap, "SCslice".ptr() as *const char, sep(decl), decl);
@@ -1594,63 +1578,63 @@ extend Codegen {
             if ty.as_data.arr.len != 0 {
                 let mut lenb = Buf32 {};
                 unsafe stdio::snprintf(
-                    (&mut lenb.b[0]) as *mut char,
+                    (&mut lenb[0]),
                     16,
                     "[%u]".ptr() as *const char,
                     ty.as_data.arr.len,
                 );
                 buf_join3(
-                    (&mut inner.b[0]) as *mut char,
+                    (&mut inner[0]),
                     480,
                     decl,
                     "".ptr() as *const char,
-                    (&lenb.b[0]) as *const char,
+                    (&lenb[0]),
                 );
             } else {
-                buf_join3((&mut inner.b[0]) as *mut char, 480, "*".ptr() as *const char, "".ptr() as *const char, decl);
+                buf_join3((&mut inner[0]), 480, "*".ptr() as *const char, "".ptr() as *const char, decl);
             }
-            self.render_type_id(ty.as_data.elem, (&inner.b[0]) as *const char, out, cap);
+            self.render_type_id(ty.as_data.elem, (&inner[0]), out, cap);
         } else if ty.kind == TypeKind::TYPE_GENERIC {
             let s = self.subst_lookup(ty.module, ty.as_data.decl);
             if s != TYPE_NONE {
                 self.render_type_id(s, decl, out, cap);
             } else if self.macro_mode {
                 let mut p = Buf64 {};
-                self.render_macro_param(ty.module, ty.as_data.decl, (&mut p.b[0]) as *mut char, 64);
-                buf_join3(out, cap, (&p.b[0]) as *const char, sep(decl), decl);
+                self.render_macro_param(ty.module, ty.as_data.decl, (&mut p[0]), 64);
+                buf_join3(out, cap, (&p[0]), sep(decl), decl);
             } else {
                 buf_join3(out, cap, "void".ptr() as *const char, sep(decl), decl);
             }
         } else if ty.kind == TypeKind::TYPE_INSTANCE {
             let mut nm = Buf256 {};
-            self.inst_name(unsafe (*self.cur_ast()).instance(ty.as_data.inst), (&mut nm.b[0]) as *mut char, 200);
-            buf_join3(out, cap, (&nm.b[0]) as *const char, sep(decl), decl);
+            self.inst_name(unsafe (*self.cur_ast()).instance(ty.as_data.inst), (&mut nm[0]), 200);
+            buf_join3(out, cap, (&nm[0]), sep(decl), decl);
         } else if ty.kind == TypeKind::TYPE_OPAQUE {
             let mut nm = Buf256 {};
             let dn = *unsafe (*self.mod_ast(ty.module)).at_const(ty.as_data.decl);
             render_ident_src(
                 self.mod_src(ty.module),
                 unsafe (*self.mod_ast(ty.module)).at_const(dn.as_data.type_alias.name).as_data.name.text,
-                (&mut nm.b[0]) as *mut char,
+                (&mut nm[0]),
                 160,
             );
-            buf_join3(out, cap, (&nm.b[0]) as *const char, sep(decl), decl);
+            buf_join3(out, cap, (&nm[0]), sep(decl), decl);
         } else if ty.kind == TypeKind::TYPE_FUNCTION {
             if self.cg_fn_is_capturing(&ty) {
                 let mut envn = Buf256 {};
-                self.closure_sym_in(ty.module, ty.as_data.decl, (&mut envn.b[0]) as *mut char, 240);
-                let el2 = unsafe cstring::strlen((&envn.b[0]) as *const char);
-                bappend((&mut envn.b[0]) as *mut char, 240, el2, "_env".ptr() as *const char);
-                buf_join3(out, cap, (&envn.b[0]) as *const char, sep(decl), decl);
+                self.closure_sym_in(ty.module, ty.as_data.decl, (&mut envn[0]), 240);
+                let el2 = unsafe cstring::strlen((&envn[0]));
+                bappend((&mut envn[0]), 240, el2, "_env".ptr() as *const char);
+                buf_join3(out, cap, (&envn[0]), sep(decl), decl);
             } else {
                 self.render_fn_ptr_id(ty, decl, out, cap);
             }
         } else if ty.kind == TypeKind::TYPE_DYN {
             let mut nm = Buf256 {};
-            self.dyn_stem(ty.module, ty.as_data.decl, (&mut nm.b[0]) as *mut char, 200);
-            let dl = unsafe cstring::strlen((&nm.b[0]) as *const char);
-            bappend((&mut nm.b[0]) as *mut char, 200, dl, "__dyn".ptr() as *const char);
-            buf_join3(out, cap, (&nm.b[0]) as *const char, sep(decl), decl);
+            self.dyn_stem(ty.module, ty.as_data.decl, (&mut nm[0]), 200);
+            let dl = unsafe cstring::strlen((&nm[0]));
+            bappend((&mut nm[0]), 200, dl, "__dyn".ptr() as *const char);
+            buf_join3(out, cap, (&nm[0]), sep(decl), decl);
         } else {
             buf_join3(out, cap, "void".ptr() as *const char, sep(decl), decl);
         }
@@ -1693,25 +1677,25 @@ extend Codegen {
             self.render_type_id(
                 unsafe (*self.cur_ast()).reintern(unsafe &*fa, unsafe (*fa).type_of(anchor)),
                 "".ptr() as *const char,
-                (&mut tt.b[0]) as *mut char,
+                (&mut tt[0]),
                 256,
             );
             if i != 0 {
-                k = bappend((&mut params.b[0]) as *mut char, 480, k, ", ".ptr() as *const char);
+                k = bappend((&mut params[0]), 480, k, ", ".ptr() as *const char);
             }
-            k = bappend((&mut params.b[0]) as *mut char, 480, k, (&tt.b[0]) as *const char);
+            k = bappend((&mut params[0]), 480, k, (&tt[0]));
             i = i + 1;
         }
         let mut inner = Buf512 {};
-        let mut at = bappend((&mut inner.b[0]) as *mut char, 512, 0, "(*".ptr() as *const char);
-        at = bappend((&mut inner.b[0]) as *mut char, 512, at, decl);
-        at = bappend((&mut inner.b[0]) as *mut char, 512, at, ")(".ptr() as *const char);
+        let mut at = bappend((&mut inner[0]), 512, 0, "(*".ptr() as *const char);
+        at = bappend((&mut inner[0]), 512, at, decl);
+        at = bappend((&mut inner[0]), 512, at, ")(".ptr() as *const char);
         let mut pstr = "void".ptr() as *const char;
         if ps.len != 0 {
-            pstr = (&params.b[0]) as *const char;
+            pstr = (&params[0]);
         }
-        at = bappend((&mut inner.b[0]) as *mut char, 512, at, pstr);
-        bappend((&mut inner.b[0]) as *mut char, 512, at, ")".ptr() as *const char);
+        at = bappend((&mut inner[0]), 512, at, pstr);
+        bappend((&mut inner[0]), 512, at, ")".ptr() as *const char);
         let mut rt = TYPE_NONE;
         if rs.len == 1 {
             let r0 = unsafe (*fa).list(rs)[0];
@@ -1722,9 +1706,9 @@ extend Codegen {
             rt = unsafe (*self.cur_ast()).reintern(unsafe &*fa, unsafe (*fa).type_of(body));
         }
         if rt != TYPE_NONE {
-            self.render_type_id(rt, (&inner.b[0]) as *const char, out, cap);
+            self.render_type_id(rt, (&inner[0]), out, cap);
         } else {
-            buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner.b[0]) as *const char);
+            buf_join3(out, cap, "void ".ptr() as *const char, "".ptr() as *const char, (&inner[0]));
         }
     }
 }
@@ -1762,8 +1746,8 @@ extend Codegen {
     fn emit_tag_mod(self: &mut Self, m: ModuleId, enum_decl: NodeId, variant: NodeId) void {
         let src = self.mod_src(m);
         let mut pfx = Buf64 {};
-        self.render_modpfx(m, (&mut pfx.b[0]) as *mut char, 64);
-        self.emit_cstr((&pfx.b[0]) as *const char);
+        self.render_modpfx(m, (&mut pfx[0]), 64);
+        self.emit_cstr((&pfx[0]));
         let es = self.name_span_in(m, unsafe (*self.mod_ast(m)).at_const(enum_decl).as_data.aggregate.name);
         self.emit_bytes(src_at(src, es.start), (es.end - es.start) as usize);
         self.emit_str("_");
@@ -2042,19 +2026,19 @@ extend Codegen {
         let need = unsafe (*self.cur_ast()).nodes.len();
         if need > self.stamp_cap {
             if self.moved_stamp != null {
-                unsafe stdlib::free(self.moved_stamp as *mut void);
+                unsafe stdlib::free(self.moved_stamp);
             }
             if self.cond_stamp != null {
-                unsafe stdlib::free(self.cond_stamp as *mut void);
+                unsafe stdlib::free(self.cond_stamp);
             }
             self.moved_stamp = unsafe stdlib::calloc(need, 4) as *mut u32;
             self.cond_stamp = unsafe stdlib::calloc(need, 4) as *mut u32;
             if self.moved_stamp == null || self.cond_stamp == null {
                 if self.moved_stamp != null {
-                    unsafe stdlib::free(self.moved_stamp as *mut void);
+                    unsafe stdlib::free(self.moved_stamp);
                 }
                 if self.cond_stamp != null {
-                    unsafe stdlib::free(self.cond_stamp as *mut void);
+                    unsafe stdlib::free(self.cond_stamp);
                 }
                 self.moved_stamp = null;
                 self.cond_stamp = null;
@@ -2149,23 +2133,23 @@ extend Codegen {
     ) DefId {
         let mut scopes = ScopeArr {};
         let mut ns: i32 = 0;
-        scopes.s[0] = tmod;
+        scopes[0] = tmod;
         ns = 1;
         if self.cur_module() != tmod {
-            scopes.s[ns as usize] = self.cur_module();
+            scopes[ns as usize] = self.cur_module();
             ns = ns + 1;
         }
         if self.dflt_home_set && self.dflt_home != tmod && self.dflt_home != self.cur_module() {
-            scopes.s[ns as usize] = self.dflt_home;
+            scopes[ns as usize] = self.dflt_home;
             ns = ns + 1;
         }
         for s in 0..ns {
-            let m = scopes.s[s as usize];
+            let m = scopes[s as usize];
             let a = self.mod_ast(m);
             let items = unsafe (*a).at_const((*a).root).as_data.program.items;
             // CG-4: only extends whose target resolves to tdecl can match; walk that chain.
             let mut ch = ExtChain {};
-            let nchain = self.cg_ext_chain(m, tdecl, (&mut ch.p[0]) as *mut i32, 64);
+            let nchain = self.cg_ext_chain(m, tdecl, (&mut ch[0]) as *mut i32, 64);
             let total = if nchain >= 0 {
                 nchain;
             } else {
@@ -2173,7 +2157,7 @@ extend Codegen {
             };
             for x in 0..total {
                 let i = if nchain >= 0 {
-                    ch.p[x as usize];
+                    ch[x as usize];
                 } else {
                     x;
                 };
@@ -2333,9 +2317,7 @@ fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
     }
     return b;
 }
-pub struct ScopeArr {
-    pub s: [ModuleId; 3],
-}
+pub type ScopeArr = Array<ModuleId, 3>;
 
 fn cg_move_flag(out: *mut char, cap: usize, decl: NodeId) void {
     unsafe stdio::snprintf(out, cap, "__mv%u".ptr() as *const char, decl);
@@ -2465,14 +2447,14 @@ fn cg_arith_op_method(op: TokenType) *const char {
     return null;
 }
 fn hex_val(ch: u8) i32 {
-    if ch >= '0' as u8 && ch <= '9' as u8 {
-        return (ch - '0' as u8) as i32;
+    if ch >= b'0' && ch <= b'9' {
+        return (ch - b'0') as i32;
     }
-    if ch >= 'a' as u8 && ch <= 'f' as u8 {
-        return (ch - 'a' as u8) as i32 + 10;
+    if ch >= b'a' && ch <= b'f' {
+        return (ch - b'a') as i32 + 10;
     }
-    if ch >= 'A' as u8 && ch <= 'F' as u8 {
-        return (ch - 'A' as u8) as i32 + 10;
+    if ch >= b'A' && ch <= b'F' {
+        return (ch - b'A') as i32 + 10;
     }
     return 0;
 }
@@ -2501,7 +2483,7 @@ fn utf8_encode(cp: u32, out: *mut u8) i32 {
 fn raw_string_content(src: *const u8, s: tok::Span) tok::Span {
     let mut i = s.start + 1;
     let mut h: u32 = 0;
-    while unsafe src[i as usize] == '#' as u8 {
+    while unsafe src[i as usize] == b'#' {
         i = i + 1;
         h = h + 1;
     }
@@ -2524,21 +2506,21 @@ extend Codegen {
         let mut n: usize = 0;
         let mut i = s.start;
         while i < sfx && n < 255 {
-            if unsafe self.source[i as usize] != '_' as u8 {
-                buf.b[n] = unsafe self.source[i as usize] as char;
+            if unsafe self.source[i as usize] != b'_' {
+                buf[n] = unsafe self.source[i as usize] as char;
                 n = n + 1;
             }
             i = i + 1;
         }
-        buf.b[n] = 0 as char;
-        let bufp = (&buf.b[0]) as *const char;
-        if tt == TokenType::IntegerLiteral && n >= 2 && buf.b[0] == '0' as char {
-            let k = buf.b[1];
+        buf[n] = 0 as char;
+        let bufp = (&buf[0]) as *const char;
+        if tt == TokenType::IntegerLiteral && n >= 2 && buf[0] == '0' as char {
+            let k = buf[1];
             if k == 'b' as char || k == 'B' as char {
                 let mut v: u64 = 0;
                 let mut j: usize = 2;
                 while j < n {
-                    v = v << 1 | (buf.b[j] as u8 - '0' as u8) as u64;
+                    v = v << 1 | (buf[j] as u8 - b'0') as u64;
                     j = j + 1;
                 }
                 if v > 0x7FFFFFFFFFFFFFFFu64 && eb == BuiltinType::BT_COUNT {
@@ -2552,7 +2534,7 @@ extend Codegen {
                 self.emit_cstr(bufp);
             } else {
                 let mut z: usize = 0;
-                while z + 1 < n && buf.b[z] == '0' as char {
+                while z + 1 < n && buf[z] == '0' as char {
                     z = z + 1;
                 }
                 self.emit_cstr(unsafe (bufp + z) as *const char);
@@ -2565,7 +2547,7 @@ extend Codegen {
             self.emit_str("ull");
         } else {
             self.emit_cstr(bufp);
-            let hexf = n > 2 && buf.b[0] == '0' as char && (buf.b[1] as u8 | 0x20u8) == 'x' as u8;
+            let hexf = n > 2 && buf[0] == '0' as char && (buf[1] as u8 | 0x20u8) == b'x';
             if !hexf && (sb == BuiltinType::BT_F32 || sb == BuiltinType::BT_F64) && unsafe cstring::memchr(
                 bufp,
                 '.' as i32,
@@ -2616,34 +2598,34 @@ extend Codegen {
             }
             let e = unsafe src[i];
             i = i + 1;
-            if e == 'n' as u8 || e == 'r' as u8 || e == 't' as u8 || e == '\\' as u8 || e == '"' as u8 || e == '\'' as u8 {
+            if e == b'n' || e == b'r' || e == b't' || e == '\\' as u8 || e == b'"' || e == '\'' as u8 {
                 self.buf.push_byte('\\' as u8);
                 self.buf.push_byte(e as i32 as u8);
-            } else if e == '0' as u8 {
+            } else if e == b'0' {
                 self.emit_str("\\000");
-            } else if e == 'x' as u8 {
+            } else if e == b'x' {
                 let v = (hex_val(unsafe src[i]) << 4 | hex_val(unsafe src[i + 1])) as u32;
                 i = i + 2;
                 self.emit_octal_escape((v & 0xFFu32) as u32);
-            } else if e == 'u' as u8 {
-                if i < end && unsafe src[i] == '{' as u8 {
+            } else if e == b'u' {
+                if i < end && unsafe src[i] == b'{' {
                     i = i + 1;
                 }
                 let mut cp: u32 = 0;
-                while i < end && unsafe src[i] != '}' as u8 {
+                while i < end && unsafe src[i] != b'}' {
                     cp = cp << 4 | hex_val(unsafe src[i]) as u32;
                     i = i + 1;
                 }
-                if i < end && unsafe src[i] == '}' as u8 {
+                if i < end && unsafe src[i] == b'}' {
                     i = i + 1;
                 }
                 if is_char {
                     self.emit_octal_escape((cp & 0xFFu32) as u32);
                 } else {
                     let mut b = Bytes4 {};
-                    let bn = utf8_encode(cp, (&mut b.b[0]) as *mut u8);
+                    let bn = utf8_encode(cp, (&mut b[0]) as *mut u8);
                     for kk in 0..bn {
-                        self.emit_octal_escape(b.b[kk as usize] as u32 as u32);
+                        self.emit_octal_escape(b[kk as usize] as u32 as u32);
                     }
                 }
             } else {
@@ -2659,7 +2641,7 @@ extend Codegen {
         let mut i = content.start;
         while i < content.end {
             let b = unsafe self.source[i as usize];
-            if b == '"' as u8 || b == '\\' as u8 {
+            if b == b'"' || b == '\\' as u8 {
                 self.buf.push_byte('\\' as u8);
                 self.buf.push_byte(b as i32 as u8);
             } else if b == '\n' as u8 {
@@ -2675,9 +2657,7 @@ extend Codegen {
     }
 }
 
-pub struct Bytes4 {
-    pub b: [u8; 4],
-}
+pub type Bytes4 = Array<u8, 4>;
 
 // ---- stubs: filled in later chunks (codegen is never run by the stub main, so these keep the build green) ----
 extend Codegen {
@@ -2766,7 +2746,7 @@ extend Codegen {
             let mut brace = false;
             let mut k = content.start as usize;
             while k < content.end as usize {
-                if unsafe src[k] == '{' as u8 || unsafe src[k] == '}' as u8 {
+                if unsafe src[k] == b'{' || unsafe src[k] == b'}' {
                     brace = true;
                     break;
                 }
@@ -2788,22 +2768,22 @@ extend Codegen {
             }
         }
         let mut ff = Buf32 {};
-        self.fresh((&mut ff.b[0]) as *mut char, 32);
+        self.fresh((&mut ff[0]), 32);
         let mut fpb = Buf64 {};
-        let mut fp = (&ff.b[0]) as *const char;
+        let mut fp = (&ff[0]) as *const char;
         if kind == 6 {
             // Append into the receiver buffer: bind a String* to it, and route every push through `(*ptr)`
             // so the helpers' `&%s` folds back to the pointer (zero allocation).
-            self.buf.format_into("({{ String__Global *{} = &(", diag::cstr((&ff.b[0]) as *const char));
+            self.buf.format_into("({{ String__Global *{} = &(", diag::cstr((&ff[0])));
             self.emit_expr(dst_recv);
             self.emit_str(");\n");
             unsafe stdio::snprintf(
-                (&mut fpb.b[0]) as *mut char,
+                (&mut fpb[0]),
                 64,
                 "(*%s)".ptr() as *const char,
-                (&ff.b[0]) as *const char,
+                (&ff[0]),
             );
-            fp = (&fpb.b[0]) as *const char;
+            fp = (&fpb[0]);
         } else {
             self.buf.format_into("({{ String__Global {} = String__Global__new();\n", diag::cstr(fp));
         }
@@ -2812,45 +2792,45 @@ extend Codegen {
         let mut seg = i;
         let mut ai: u32 = ti + 1;
         while i < endc {
-            if (unsafe src[i] == '{' as u8 || unsafe src[i] == '}' as u8) && i + 1 < endc && unsafe src[i + 1] == unsafe src[i] {
+            if (unsafe src[i] == b'{' || unsafe src[i] == b'}') && i + 1 < endc && unsafe src[i + 1] == unsafe src[i] {
                 i = i + 2;
                 continue;
             }
-            if unsafe src[i] == '{' as u8 {
+            if unsafe src[i] == b'{' {
                 let mut sp = FmtSpec { ty: 0 as char, align: 0 as char, fill: 0 as u8, width: 0, prec: -1 };
                 let mut j = i + 1;
-                if j < endc && unsafe src[j] == ':' as u8 {
+                if j < endc && unsafe src[j] == b':' {
                     j = j + 1;
-                    if j + 1 < endc && (unsafe src[j + 1] == '<' as u8 || unsafe src[j + 1] == '>' as u8 || unsafe src[j + 1] == '^' as u8) && unsafe src[j] != '}' as u8 {
+                    if j + 1 < endc && (unsafe src[j + 1] == b'<' || unsafe src[j + 1] == b'>' || unsafe src[j + 1] == b'^') && unsafe src[j] != b'}' {
                         sp.fill = unsafe src[j];
                         sp.align = unsafe src[j + 1] as char;
                         j = j + 2;
-                    } else if j < endc && (unsafe src[j] == '<' as u8 || unsafe src[j] == '>' as u8 || unsafe src[j] == '^' as u8) {
+                    } else if j < endc && (unsafe src[j] == b'<' || unsafe src[j] == b'>' || unsafe src[j] == b'^') {
                         sp.align = unsafe src[j] as char;
                         j = j + 1;
                     }
-                    if j < endc && unsafe src[j] == '0' as u8 && sp.fill == 0 as u8 {
-                        sp.fill = '0' as u8;
+                    if j < endc && unsafe src[j] == b'0' && sp.fill == 0 as u8 {
+                        sp.fill = b'0';
                         j = j + 1;
                     }
-                    while j < endc && unsafe src[j] >= '0' as u8 && unsafe src[j] <= '9' as u8 {
+                    while j < endc && unsafe src[j] >= b'0' && unsafe src[j] <= b'9' {
                         sp.width = sp.width * 10 + (unsafe src[j] as i32 - '0' as i32);
                         j = j + 1;
                     }
-                    if j < endc && unsafe src[j] == '.' as u8 {
+                    if j < endc && unsafe src[j] == b'.' {
                         j = j + 1;
                         sp.prec = 0;
-                        while j < endc && unsafe src[j] >= '0' as u8 && unsafe src[j] <= '9' as u8 {
+                        while j < endc && unsafe src[j] >= b'0' && unsafe src[j] <= b'9' {
                             sp.prec = sp.prec * 10 + (unsafe src[j] as i32 - '0' as i32);
                             j = j + 1;
                         }
                     }
-                    if j < endc && (unsafe src[j] == 'x' as u8 || unsafe src[j] == 'X' as u8 || unsafe src[j] == 'b' as u8) {
+                    if j < endc && (unsafe src[j] == b'x' || unsafe src[j] == b'X' || unsafe src[j] == b'b') {
                         sp.ty = unsafe src[j] as char;
                         j = j + 1;
                     }
                 }
-                if j < endc && unsafe src[j] == '}' as u8 {
+                if j < endc && unsafe src[j] == b'}' {
                     if i > seg {
                         self.emit_fmt_seg(fp, is_raw, seg, i, false);
                     }
@@ -2975,28 +2955,28 @@ extend Codegen {
         let y = *self.type_at(base);
         let mut lb = Buf32 {};
         let mut rb = Buf32 {};
-        self.fresh((&mut lb.b[0]) as *mut char, 32);
-        self.fresh((&mut rb.b[0]) as *mut char, 32);
-        let lp = (&lb.b[0]) as *const char;
-        let rp = (&rb.b[0]) as *const char;
+        self.fresh((&mut lb[0]), 32);
+        self.fresh((&mut rb[0]), 32);
+        let lp = (&lb[0]) as *const char;
+        let rp = (&rb[0]) as *const char;
         let mut lacc = Buf64 {};
         let mut racc = Buf64 {};
         if depth != 0 {
-            unsafe stdio::snprintf((&mut lacc.b[0]) as *mut char, 48, "(*%s)".ptr() as *const char, lp);
-            unsafe stdio::snprintf((&mut racc.b[0]) as *mut char, 48, "(*%s)".ptr() as *const char, rp);
+            unsafe stdio::snprintf((&mut lacc[0]), 48, "(*%s)".ptr() as *const char, lp);
+            unsafe stdio::snprintf((&mut racc[0]), 48, "(*%s)".ptr() as *const char, rp);
         } else {
-            unsafe stdio::snprintf((&mut lacc.b[0]) as *mut char, 48, "%s".ptr() as *const char, lp);
-            unsafe stdio::snprintf((&mut racc.b[0]) as *mut char, 48, "%s".ptr() as *const char, rp);
+            unsafe stdio::snprintf((&mut lacc[0]), 48, "%s".ptr() as *const char, lp);
+            unsafe stdio::snprintf((&mut racc[0]), 48, "%s".ptr() as *const char, rp);
         }
-        let laccp = (&lacc.b[0]) as *const char;
-        let raccp = (&racc.b[0]) as *const char;
+        let laccp = (&lacc[0]) as *const char;
+        let raccp = (&racc[0]) as *const char;
         let mut ldecl = Buf256 {};
         let mut rdecl = Buf256 {};
-        self.render_type_id(lt, lp, (&mut ldecl.b[0]) as *mut char, 256);
-        self.render_type_id(lt, rp, (&mut rdecl.b[0]) as *mut char, 256);
-        self.buf.format_into("({{ {} = ", diag::cstr((&ldecl.b[0]) as *const char));
+        self.render_type_id(lt, lp, (&mut ldecl[0]), 256);
+        self.render_type_id(lt, rp, (&mut rdecl[0]), 256);
+        self.buf.format_into("({{ {} = ", diag::cstr((&ldecl[0])));
         self.emit_expr(a0);
-        self.buf.format_into("; {} = ", diag::cstr((&rdecl.b[0]) as *const char));
+        self.buf.format_into("; {} = ", diag::cstr((&rdecl[0])));
         self.emit_expr(a1);
         self.emit_str("; if (");
         if kind == 2 {
@@ -3105,12 +3085,12 @@ extend Codegen {
         let at = bappend(out, cap, at0, "__cb_".ptr() as *const char);
         let mut sym = Buf200 {};
         if is_closure {
-            self.closure_name(callee.node, (&mut sym.b[0]) as *mut char, 200);
+            self.closure_name(callee.node, (&mut sym[0]), 200);
         } else {
             let cn = unsafe (*self.mod_ast(callee.module)).at_const(callee.node).as_data.function.name;
-            self.render_qualified(callee.module, cn, (&mut sym.b[0]) as *mut char, 200);
+            self.render_qualified(callee.module, cn, (&mut sym[0]), 200);
         }
-        bappend(out, cap, at, (&sym.b[0]) as *const char);
+        bappend(out, cap, at, (&sym[0]));
     }
     fn cb_single_callback_param(self: &Self, fnNode: NodeId, cbidx: *mut u32, param: *mut NodeId) bool {
         let ps = unsafe (*self.cur_ast()).at_const(fnNode).as_data.function.params;
@@ -3205,14 +3185,14 @@ extend Codegen {
         let b = *self.type_at(self.subst_resolve(recv));
         if b.kind == TypeKind::TYPE_INSTANCE {
             let mut inm = Buf256 {};
-            self.inst_name(unsafe (*self.cur_ast()).instance(b.as_data.inst), (&mut inm.b[0]) as *mut char, 200);
-            self.emit_cstr((&inm.b[0]) as *const char);
+            self.inst_name(unsafe (*self.cur_ast()).instance(b.as_data.inst), (&mut inm[0]), 200);
+            self.emit_cstr((&inm[0]));
             self.emit_paste();
             self.emit_str("__");
         } else if b.kind == TypeKind::TYPE_STRUCT || b.kind == TypeKind::TYPE_ENUM {
             let mut pfx = Buf64 {};
-            self.render_modpfx(md.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(md.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             self.emit_ident_mod(
                 b.module,
                 unsafe (*self.mod_ast(b.module)).at_const(b.as_data.decl).as_data.aggregate.name,
@@ -3251,10 +3231,10 @@ extend Codegen {
             return false;
         }
         let mut ov = Buf256 {};
-        let ovr = self.cg_symbol_override(md.module, md.node, (&mut ov.b[0]) as *mut char, 160);
+        let ovr = self.cg_symbol_override(md.module, md.node, (&mut ov[0]), 160);
         if ovr || unsafe (*self.mod_ast(md.module)).at_const(md.node).as_data.function.is_extern {
             if ovr {
-                self.emit_cstr((&ov.b[0]) as *const char);
+                self.emit_cstr((&ov[0]));
             } else {
                 self.emit_ident_mod(
                     md.module,
@@ -3289,10 +3269,10 @@ extend Codegen {
             let mut inm = Buf256 {};
             self.inst_name(
                 unsafe (*self.cur_ast()).instance(self.type_at(base_t).as_data.inst),
-                (&mut inm.b[0]) as *mut char,
+                (&mut inm[0]),
                 200,
             );
-            self.emit_cstr((&inm.b[0]) as *const char);
+            self.emit_cstr((&inm[0]));
             self.emit_paste();
             self.emit_str("__");
         } else if param_tgt != TYPE_NONE && self.type_at(param_tgt).kind == TypeKind::TYPE_BUILTIN && self.package != null {
@@ -3310,8 +3290,8 @@ extend Codegen {
                 }
             }
             let mut pfx = Buf64 {};
-            self.render_modpfx(emd.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(emd.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             self.emit_cstr(builtin_name(bt));
             self.emit_str("__");
         } else if param_tgt != TYPE_NONE {
@@ -3332,28 +3312,28 @@ extend Codegen {
             }
             if rb.kind == TypeKind::TYPE_INSTANCE {
                 let mut inm = Buf256 {};
-                self.inst_name(unsafe (*self.cur_ast()).instance(rb.as_data.inst), (&mut inm.b[0]) as *mut char, 200);
-                self.emit_cstr((&inm.b[0]) as *const char);
+                self.inst_name(unsafe (*self.cur_ast()).instance(rb.as_data.inst), (&mut inm[0]), 200);
+                self.emit_cstr((&inm[0]));
                 self.emit_paste();
                 self.emit_str("__");
             } else if rb.kind == TypeKind::TYPE_STRUCT || rb.kind == TypeKind::TYPE_ENUM {
                 let mut pfx = Buf64 {};
-                self.render_modpfx(emd.module, (&mut pfx.b[0]) as *mut char, 64);
-                self.emit_cstr((&pfx.b[0]) as *const char);
+                self.render_modpfx(emd.module, (&mut pfx[0]), 64);
+                self.emit_cstr((&pfx[0]));
                 self.emit_ident_mod(omod, unsafe (*self.mod_ast(omod)).at_const(odecl).as_data.aggregate.name);
                 self.emit_str("__");
             }
         } else if self.macro_mode && td.node != NODE_NONE && unsafe (*self.mod_ast(td.module)).at_const(td.node).kind == NodeKind::NODE_GENERIC_PARAM {
             let mut pp = Buf64 {};
             self.emit_str("_SCM_");
-            self.render_macro_param(td.module, td.node, (&mut pp.b[0]) as *mut char, 64);
-            self.emit_cstr((&pp.b[0]) as *const char);
+            self.render_macro_param(td.module, td.node, (&mut pp[0]), 64);
+            self.emit_cstr((&pp[0]));
             self.emit_paste();
             self.emit_str("__");
         } else {
             let mut pfx = Buf64 {};
-            self.render_modpfx(md.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(md.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             if td.node != NODE_NONE {
                 let mut bb: i32 = -1;
                 if self.package != null {
@@ -3375,10 +3355,10 @@ extend Codegen {
                 td,
                 self.cg_conv_lit(self.cur_module(), self.name_span(member)),
                 a0t,
-                (&mut sfx.b[0]) as *mut char,
+                (&mut sfx[0]),
                 200,
             );
-            self.emit_cstr((&sfx.b[0]) as *const char);
+            self.emit_cstr((&sfx[0]));
         }
         self.emit_method_targs(id, emd);
         self.emit_str("(");
@@ -3419,14 +3399,14 @@ extend Codegen {
                 let it = *unsafe (*self.cur_ast()).instance(tb.as_data.inst);
                 ct = DefId { module: it.module, node: it.decl };
                 let mut inm = Buf256 {};
-                self.inst_name(unsafe (*self.cur_ast()).instance(tb.as_data.inst), (&mut inm.b[0]) as *mut char, 200);
-                self.emit_cstr((&inm.b[0]) as *const char);
+                self.inst_name(unsafe (*self.cur_ast()).instance(tb.as_data.inst), (&mut inm[0]), 200);
+                self.emit_cstr((&inm[0]));
                 self.emit_paste();
                 self.emit_str("__");
             } else {
                 let mut pfx = Buf64 {};
-                self.render_modpfx(md.module, (&mut pfx.b[0]) as *mut char, 64);
-                self.emit_cstr((&pfx.b[0]) as *const char);
+                self.render_modpfx(md.module, (&mut pfx[0]), 64);
+                self.emit_cstr((&pfx[0]));
                 self.emit_ident_mod(
                     tb.module,
                     unsafe (*self.mod_ast(tb.module)).at_const(tb.as_data.decl).as_data.aggregate.name,
@@ -3439,10 +3419,10 @@ extend Codegen {
                 ct,
                 self.cg_conv_lit(md.module, mdn),
                 unsafe (*self.cur_ast()).type_of(obj),
-                (&mut sfx.b[0]) as *mut char,
+                (&mut sfx[0]),
                 200,
             );
-            self.emit_cstr((&sfx.b[0]) as *const char);
+            self.emit_cstr((&sfx[0]));
             self.emit_str("(");
             self.emit_expr(obj);
             self.emit_str(")");
@@ -3488,7 +3468,7 @@ extend Codegen {
                 unsafe (*self.mod_ast(md.module)).at_const(
                     unsafe (*self.mod_ast(md.module)).at_const(md.node).as_data.function.name,
                 ).as_data.name.text,
-                (&mut mn.b[0]) as *mut char,
+                (&mut mn[0]),
                 128,
             );
             let ok = self.type_at(obj_t).kind;
@@ -3497,17 +3477,17 @@ extend Codegen {
             let mut tmp = Buf32 {};
             if simple {
                 self.emit_expr(obj);
-                self.buf.format_into(".vt->{}(", diag::cstr((&mn.b[0]) as *const char));
+                self.buf.format_into(".vt->{}(", diag::cstr((&mn[0])));
                 self.emit_expr(obj);
                 self.emit_str(".data");
             } else {
                 let mut dtn = Buf256 {};
-                self.render_type_id(dt, "".ptr() as *const char, (&mut dtn.b[0]) as *mut char, 240);
-                self.fresh((&mut tmp.b[0]) as *mut char, 32);
+                self.render_type_id(dt, "".ptr() as *const char, (&mut dtn[0]), 240);
+                self.fresh((&mut tmp[0]), 32);
                 self.buf.format_into(
                     "({{ const {} {} = ",
-                    diag::cstr((&dtn.b[0]) as *const char),
-                    diag::cstr((&tmp.b[0]) as *const char),
+                    diag::cstr((&dtn[0])),
+                    diag::cstr((&tmp[0])),
                 );
                 if obj_ind {
                     self.emit_str("*");
@@ -3515,9 +3495,9 @@ extend Codegen {
                 self.emit_expr(obj);
                 self.buf.format_into(
                     "; {}.vt->{}({}.data",
-                    diag::cstr((&tmp.b[0]) as *const char),
-                    diag::cstr((&mn.b[0]) as *const char),
-                    diag::cstr((&tmp.b[0]) as *const char),
+                    diag::cstr((&tmp[0])),
+                    diag::cstr((&mn[0])),
+                    diag::cstr((&tmp[0])),
                 );
             }
             for i in 0..args.len {
@@ -3564,13 +3544,13 @@ extend Codegen {
         let mut tmp = Buf32 {};
         let mut tres = Buf32 {};
         if materialize {
-            self.fresh((&mut tmp.b[0]) as *mut char, 32);
-            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&tmp.b[0]) as *const char));
+            self.fresh((&mut tmp[0]), 32);
+            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&tmp[0])));
             self.emit_expr(obj);
             self.emit_str("; ");
             if free_tmp && !void_ret {
-                self.fresh((&mut tres.b[0]) as *mut char, 32);
-                self.buf.format_into("__auto_type {} = ", diag::cstr((&tres.b[0]) as *const char));
+                self.fresh((&mut tres[0]), 32);
+                self.buf.format_into("__auto_type {} = ", diag::cstr((&tres[0])));
             }
         }
         let xt = self.cg_method_extend_target(md);
@@ -3580,27 +3560,27 @@ extend Codegen {
         }
         if xt.node != NODE_NONE && xtk == NodeKind::NODE_TYPE_ALIAS {
             let mut pfx = Buf64 {};
-            self.render_modpfx(md.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(md.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             self.emit_ident_mod(xt.module, self.cg_decl_name_node(xt.module, xt.node));
             self.emit_str("__");
         } else if self.macro_mode && base.kind == TypeKind::TYPE_GENERIC {
             let mut pp = Buf64 {};
             self.emit_str("_SCM_");
-            self.render_macro_param(base.module, base.as_data.decl, (&mut pp.b[0]) as *mut char, 64);
-            self.emit_cstr((&pp.b[0]) as *const char);
+            self.render_macro_param(base.module, base.as_data.decl, (&mut pp[0]), 64);
+            self.emit_cstr((&pp[0]));
             self.emit_paste();
             self.emit_str("__");
         } else if base.kind == TypeKind::TYPE_INSTANCE {
             let mut inm = Buf256 {};
-            self.inst_name(unsafe (*self.cur_ast()).instance(base.as_data.inst), (&mut inm.b[0]) as *mut char, 200);
-            self.emit_cstr((&inm.b[0]) as *const char);
+            self.inst_name(unsafe (*self.cur_ast()).instance(base.as_data.inst), (&mut inm[0]), 200);
+            self.emit_cstr((&inm[0]));
             self.emit_paste();
             self.emit_str("__");
         } else if base.kind == TypeKind::TYPE_STRUCT || base.kind == TypeKind::TYPE_ENUM {
             let mut pfx = Buf64 {};
-            self.render_modpfx(md.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(md.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             self.emit_ident_mod(
                 base.module,
                 unsafe (*self.mod_ast(base.module)).at_const(base.as_data.decl).as_data.aggregate.name,
@@ -3608,8 +3588,8 @@ extend Codegen {
             self.emit_str("__");
         } else if base.kind == TypeKind::TYPE_BUILTIN {
             let mut pfx = Buf64 {};
-            self.render_modpfx(md.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(md.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             self.emit_cstr(builtin_name(base.as_data.builtin));
             self.emit_str("__");
         } else {
@@ -3633,7 +3613,7 @@ extend Codegen {
                 self.emit_deref_hop(unsafe (*du).recv[i as usize], unsafe (*du).method[i as usize]);
             }
             if materialize {
-                self.buf.format_into("&{}", diag::cstr((&tmp.b[0]) as *const char));
+                self.buf.format_into("&{}", diag::cstr((&tmp[0])));
             } else if !obj_ptr {
                 self.emit_prefixed(obj, "&".ptr() as *const char);
             } else {
@@ -3645,7 +3625,7 @@ extend Codegen {
             wrote = true;
         } else if params.len > 0 {
             if materialize {
-                self.buf.format_into("&{}", diag::cstr((&tmp.b[0]) as *const char));
+                self.buf.format_into("&{}", diag::cstr((&tmp[0])));
             } else if self_ptr && !obj_ptr {
                 self.emit_recv_addr(obj, self_is_mut);
             } else if !self_ptr && obj_ptr {
@@ -3666,9 +3646,9 @@ extend Codegen {
             if free_tmp {
                 self.emit_str("; ");
                 self.emit_free_target(obj_t);
-                self.buf.format_into("(&{});", diag::cstr((&tmp.b[0]) as *const char));
+                self.buf.format_into("(&{});", diag::cstr((&tmp[0])));
                 if !void_ret {
-                    self.buf.format_into(" {};", diag::cstr((&tres.b[0]) as *const char));
+                    self.buf.format_into(" {};", diag::cstr((&tres[0])));
                 }
                 self.emit_str(" })");
             } else {
@@ -3702,8 +3682,8 @@ extend Codegen {
             let rt = *self.type_at(self.subst_resolve(self.strip_ptr(unsafe (*self.cur_ast()).type_of(recv))));
             if rt.kind == TypeKind::TYPE_DYN && rt.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
                 let mut stem = Buf256 {};
-                self.dyn_stem(rt.module, rt.as_data.decl, (&mut stem.b[0]) as *mut char, 176);
-                self.buf.format_into("{}__dyn_free", diag::cstr((&stem.b[0]) as *const char));
+                self.dyn_stem(rt.module, rt.as_data.decl, (&mut stem[0]), 176);
+                self.buf.format_into("{}__dyn_free", diag::cstr((&stem[0])));
                 if isref {
                     self.emit_str("(");
                 } else {
@@ -3739,8 +3719,8 @@ extend Codegen {
             } else if self.macro_mode && rt.kind == TypeKind::TYPE_GENERIC {
                 let mut pp = Buf64 {};
                 self.emit_str("_SCM_");
-                self.render_macro_param(rt.module, rt.as_data.decl, (&mut pp.b[0]) as *mut char, 64);
-                self.emit_cstr((&pp.b[0]) as *const char);
+                self.render_macro_param(rt.module, rt.as_data.decl, (&mut pp[0]), 64);
+                self.emit_cstr((&pp[0]));
                 self.emit_paste();
                 self.emit_str("__free");
                 if isref {
@@ -3767,10 +3747,10 @@ extend Codegen {
                     self.render_type_id(
                         self.subst_resolve(unsafe (*self.cur_ast()).type_of(id)),
                         "".ptr() as *const char,
-                        (&mut tn.b[0]) as *mut char,
+                        (&mut tn[0]),
                         200,
                     );
-                    self.buf.format_into("({}){{ ", diag::cstr((&tn.b[0]) as *const char));
+                    self.buf.format_into("({}){{ ", diag::cstr((&tn[0])));
                     for i in 0..args.len {
                         if i != 0 {
                             self.emit_str(", ");
@@ -3793,16 +3773,16 @@ extend Codegen {
             if d.module == self.cur_module() && d.node == self.cb_param {
                 let mut sym = Buf256 {};
                 if self.cb_callee_closure {
-                    self.closure_name(self.cb_callee.node, (&mut sym.b[0]) as *mut char, 200);
+                    self.closure_name(self.cb_callee.node, (&mut sym[0]), 200);
                 } else {
                     self.render_qualified(
                         self.cb_callee.module,
                         unsafe (*self.mod_ast(self.cb_callee.module)).at_const(self.cb_callee.node).as_data.function.name,
-                        (&mut sym.b[0]) as *mut char,
+                        (&mut sym[0]),
                         200,
                     );
                 }
-                self.emit_cstr((&sym.b[0]) as *const char);
+                self.emit_cstr((&sym[0]));
                 self.emit_str("(");
                 self.emit_call_args(args);
                 self.emit_str(")");
@@ -3827,8 +3807,8 @@ extend Codegen {
                     }
                     if known && ac.node == self.cb_insts[k as usize].callee.node && ac.module == self.cb_insts[k as usize].callee.module {
                         let mut nm = Buf256 {};
-                        self.cb_spec_name(fn2, ac, acclo, (&mut nm.b[0]) as *mut char, 260);
-                        self.emit_cstr((&nm.b[0]) as *const char);
+                        self.cb_spec_name(fn2, ac, acclo, (&mut nm[0]), 260);
+                        self.emit_cstr((&nm[0]));
                         self.emit_str("(");
                         let mut wrote = false;
                         for i in 0..args.len {
@@ -3863,20 +3843,20 @@ extend Codegen {
                     self.render_type_id(
                         self.subst_resolve(ct0),
                         "".ptr() as *const char,
-                        (&mut dtn.b[0]) as *mut char,
+                        (&mut dtn[0]),
                         240,
                     );
-                    self.fresh((&mut tmp.b[0]) as *mut char, 32);
+                    self.fresh((&mut tmp[0]), 32);
                     self.buf.format_into(
                         "({{ const {} {} = ",
-                        diag::cstr((&dtn.b[0]) as *const char),
-                        diag::cstr((&tmp.b[0]) as *const char),
+                        diag::cstr((&dtn[0])),
+                        diag::cstr((&tmp[0])),
                     );
                     self.emit_expr(callee_id);
                     self.buf.format_into(
                         "; {}.vt->call({}.data",
-                        diag::cstr((&tmp.b[0]) as *const char),
-                        diag::cstr((&tmp.b[0]) as *const char),
+                        diag::cstr((&tmp[0])),
+                        diag::cstr((&tmp[0])),
                     );
                 }
                 for i in 0..args.len {
@@ -3891,8 +3871,8 @@ extend Codegen {
             }
             if cty.kind == TypeKind::TYPE_FUNCTION && self.cg_fn_is_capturing(&cty) {
                 let mut sym = Buf256 {};
-                self.closure_sym_in(cty.module, cty.as_data.decl, (&mut sym.b[0]) as *mut char, 200);
-                self.buf.format_into("{}(&(", diag::cstr((&sym.b[0]) as *const char));
+                self.closure_sym_in(cty.module, cty.as_data.decl, (&mut sym[0]), 200);
+                self.buf.format_into("{}(&(", diag::cstr((&sym[0])));
                 self.emit_expr(callee_id);
                 self.emit_str(")");
                 for i in 0..args.len {
@@ -3906,14 +3886,14 @@ extend Codegen {
         // generic function specialization
         let mut ga = TyArgs4 {};
         let mut gn: i32 = 0;
-        let g = self.generic_call_target(id, (&mut ga.t[0]) as *mut TypeId, (&mut gn) as *mut i32);
+        let g = self.generic_call_target(id, (&mut ga[0]) as *mut TypeId, (&mut gn) as *mut i32);
         if g.node != NODE_NONE {
             for k in 0..gn {
-                ga.t[k as usize] = self.subst_resolve(ga.t[k as usize]);
+                ga[k as usize] = self.subst_resolve(ga[k as usize]);
             }
             let mut nm = Buf256 {};
-            self.spec_name(g, (&ga.t[0]) as *const TypeId, gn, (&mut nm.b[0]) as *mut char, 256);
-            self.emit_cstr((&nm.b[0]) as *const char);
+            self.spec_name(g, (&ga[0]) as *const TypeId, gn, (&mut nm[0]), 256);
+            self.emit_cstr((&nm[0]));
             self.emit_str("(");
             self.emit_call_args(args);
             self.emit_str(")");
@@ -3937,7 +3917,7 @@ extend Codegen {
     fn emit_struct_init(self: &mut Self, id: NodeId) void {
         let si = unsafe (*self.cur_ast()).at_const(id).as_data.struct_initializer;
         let mut t = Buf256 {};
-        self.render_type_node(si.ty, "".ptr() as *const char, (&mut t.b[0]) as *mut char, 256);
+        self.render_type_node(si.ty, "".ptr() as *const char, (&mut t[0]), 256);
         let fields = si.fields;
         let stn = si.ty;
         if unsafe (*self.cur_ast()).at_const(stn).kind == NodeKind::NODE_TYPE_PATH {
@@ -3949,14 +3929,14 @@ extend Codegen {
                 if vd.node != NODE_NONE && unsafe (*self.mod_ast(vd.module)).at_const(vd.node).kind == NodeKind::NODE_VARIANT {
                     let en = self.enclosing_enum_in(vd.module, vd.node);
                     let mut vn = Buf128 {};
-                    self.render_variant_name(vd.module, vd.node, (&mut vn.b[0]) as *mut char, 128);
-                    self.buf.format_into("({}){{ .tag = ", diag::cstr((&t.b[0]) as *const char));
+                    self.render_variant_name(vd.module, vd.node, (&mut vn[0]), 128);
+                    self.buf.format_into("({}){{ .tag = ", diag::cstr((&t[0])));
                     if en != NODE_NONE {
                         self.emit_tag_mod(vd.module, en, vd.node);
                     } else {
                         self.emit_str("0");
                     }
-                    self.buf.format_into(", .payload.{} = {{", diag::cstr((&vn.b[0]) as *const char));
+                    self.buf.format_into(", .payload.{} = {{", diag::cstr((&vn[0])));
                     for i in 0..fields.len {
                         let fi = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(fields)[i as usize]).as_data.field_initializer;
                         if i != 0 {
@@ -3989,9 +3969,9 @@ extend Codegen {
                 zero_fields = dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.members.len == 0;
             }
             if zero_fields {
-                self.buf.format_into("({}){{}}", diag::cstr((&t.b[0]) as *const char));
+                self.buf.format_into("({}){{}}", diag::cstr((&t[0])));
             } else {
-                self.buf.format_into("({}){{0}}", diag::cstr((&t.b[0]) as *const char));
+                self.buf.format_into("({}){{0}}", diag::cstr((&t[0])));
             }
             return;
         }
@@ -4009,14 +3989,14 @@ extend Codegen {
         }
         let mut st = Buf32 {};
         if arr_copy {
-            self.fresh((&mut st.b[0]) as *mut char, 32);
+            self.fresh((&mut st[0]), 32);
             self.buf.format_into(
                 "({{ {} {} = ",
-                diag::cstr((&t.b[0]) as *const char),
-                diag::cstr((&st.b[0]) as *const char),
+                diag::cstr((&t[0])),
+                diag::cstr((&st[0])),
             );
         }
-        self.buf.format_into("({}){{ ", diag::cstr((&t.b[0]) as *const char));
+        self.buf.format_into("({}){{ ", diag::cstr((&t[0])));
         i = 0;
         while i < fields.len {
             let fi = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(fields)[i as usize]).as_data.field_initializer;
@@ -4054,65 +4034,65 @@ extend Codegen {
                 i = i + 1;
                 continue;
             }
-            self.buf.format_into(" memcpy(&{}.", diag::cstr((&st.b[0]) as *const char));
+            self.buf.format_into(" memcpy(&{}.", diag::cstr((&st[0])));
             self.emit_ident(self.name_span(fi.name));
             self.emit_str(", &(");
             self.emit_expr(fi.value);
-            self.buf.format_into("), sizeof {}.", diag::cstr((&st.b[0]) as *const char));
+            self.buf.format_into("), sizeof {}.", diag::cstr((&st[0])));
             self.emit_ident(self.name_span(fi.name));
             self.emit_str(");");
             i = i + 1;
         }
-        self.buf.format_into(" {}; }})", diag::cstr((&st.b[0]) as *const char));
+        self.buf.format_into(" {}; }})", diag::cstr((&st[0])));
     }
     fn emit_new(self: &mut Self, id: NodeId) void {
         let ne = unsafe (*self.cur_ast()).at_const(id).as_data.new_expr;
         let mut t = Buf256 {};
-        self.render_type_node(ne.ty, "".ptr() as *const char, (&mut t.b[0]) as *mut char, 256);
+        self.render_type_node(ne.ty, "".ptr() as *const char, (&mut t[0]), 256);
         if ne.initializer == NODE_NONE {
             self.buf.format_into(
                 "(({}*)malloc(sizeof({})))",
-                diag::cstr((&t.b[0]) as *const char),
-                diag::cstr((&t.b[0]) as *const char),
+                diag::cstr((&t[0])),
+                diag::cstr((&t[0])),
             );
             return;
         }
         let mut tmp = Buf32 {};
-        self.fresh((&mut tmp.b[0]) as *mut char, 32);
+        self.fresh((&mut tmp[0]), 32);
         self.buf.format_into(
             "({{ {} *{} = malloc(sizeof({})); *{} = ",
-            diag::cstr((&t.b[0]) as *const char),
-            diag::cstr((&tmp.b[0]) as *const char),
-            diag::cstr((&t.b[0]) as *const char),
-            diag::cstr((&tmp.b[0]) as *const char),
+            diag::cstr((&t[0])),
+            diag::cstr((&tmp[0])),
+            diag::cstr((&t[0])),
+            diag::cstr((&tmp[0])),
         );
         self.emit_expr(ne.initializer);
-        self.buf.format_into("; {}; }})", diag::cstr((&tmp.b[0]) as *const char));
+        self.buf.format_into("; {}; }})", diag::cstr((&tmp[0])));
     }
     fn emit_match_expr(self: &mut Self, id: NodeId) void {
         let rt = unsafe (*self.cur_ast()).type_of(id);
         let mut res = Buf32 {};
-        self.fresh((&mut res.b[0]) as *mut char, 32);
+        self.fresh((&mut res[0]), 32);
         let mut decl = Buf256 {};
         if rt != TYPE_NONE {
-            self.render_type_id(rt, (&res.b[0]) as *const char, (&mut decl.b[0]) as *mut char, 256);
+            self.render_type_id(rt, (&res[0]), (&mut decl[0]), 256);
         } else {
             buf_join3(
-                (&mut decl.b[0]) as *mut char,
+                (&mut decl[0]),
                 256,
                 "int ".ptr() as *const char,
                 "".ptr() as *const char,
-                (&res.b[0]) as *const char,
+                (&res[0]),
             );
         }
         self.emit_str("({\n");
         self.depth = self.depth + 1;
         self.emit_indent();
-        self.emit_cstr((&decl.b[0]) as *const char);
+        self.emit_cstr((&decl[0]));
         self.emit_str(";\n");
-        self.emit_match_core(id, 1, (&res.b[0]) as *const char);
+        self.emit_match_core(id, 1, (&res[0]));
         self.emit_indent();
-        self.emit_cstr((&res.b[0]) as *const char);
+        self.emit_cstr((&res[0]));
         self.emit_str(";\n");
         self.depth = self.depth - 1;
         self.emit_indent();
@@ -4129,29 +4109,29 @@ extend Codegen {
     fn emit_if_expr(self: &mut Self, id: NodeId) void {
         let rt = unsafe (*self.cur_ast()).type_of(id);
         let mut res = Buf32 {};
-        self.fresh((&mut res.b[0]) as *mut char, 32);
+        self.fresh((&mut res[0]), 32);
         let mut decl = Buf256 {};
         if rt != TYPE_NONE {
-            self.render_type_id(rt, (&res.b[0]) as *const char, (&mut decl.b[0]) as *mut char, 256);
+            self.render_type_id(rt, (&res[0]), (&mut decl[0]), 256);
         } else {
             buf_join3(
-                (&mut decl.b[0]) as *mut char,
+                (&mut decl[0]),
                 256,
                 "int ".ptr() as *const char,
                 "".ptr() as *const char,
-                (&res.b[0]) as *const char,
+                (&res[0]),
             );
         }
         self.emit_str("({\n");
         self.depth = self.depth + 1;
         self.emit_indent();
-        self.emit_cstr((&decl.b[0]) as *const char);
+        self.emit_cstr((&decl[0]));
         self.emit_str(";\n");
         self.emit_indent();
-        self.emit_if_value(id, (&res.b[0]) as *const char);
+        self.emit_if_value(id, (&res[0]));
         self.emit_str("\n");
         self.emit_indent();
-        self.emit_cstr((&res.b[0]) as *const char);
+        self.emit_cstr((&res[0]));
         self.emit_str(";\n");
         self.depth = self.depth - 1;
         self.emit_indent();
@@ -4180,24 +4160,24 @@ extend Codegen {
         let okV = self.cg_enum_variant(om, od, okName2);
         let mut okName = Buf128 {};
         let mut failName = Buf128 {};
-        self.render_variant_name(om, okV, (&mut okName.b[0]) as *mut char, 128);
-        self.render_variant_name(om, failV, (&mut failName.b[0]) as *mut char, 128);
+        self.render_variant_name(om, okV, (&mut okName[0]), 128);
+        self.render_variant_name(om, failV, (&mut failName[0]), 128);
         let mut rtn = Buf256 {};
-        rtn.b[0] = 0 as char;
+        rtn[0] = 0 as char;
         if self.current_fn_ret_node != NODE_NONE {
-            self.render_type_node(self.current_fn_ret_node, "".ptr() as *const char, (&mut rtn.b[0]) as *mut char, 200);
+            self.render_type_node(self.current_fn_ret_node, "".ptr() as *const char, (&mut rtn[0]), 200);
         }
         let mut tmp = Buf32 {};
-        self.fresh((&mut tmp.b[0]) as *mut char, 32);
-        self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&tmp.b[0]) as *const char));
+        self.fresh((&mut tmp[0]), 32);
+        self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&tmp[0])));
         self.emit_expr(operand);
-        self.buf.format_into("; if ({}.tag == ", diag::cstr((&tmp.b[0]) as *const char));
+        self.buf.format_into("; if ({}.tag == ", diag::cstr((&tmp[0])));
         self.emit_tag_mod(om, od, failV);
         self.emit_str(") {\n");
         self.depth = self.depth + 1;
         self.emit_defers_to(0);
         self.emit_indent();
-        self.buf.format_into("return ({}){{ .tag = ", diag::cstr((&rtn.b[0]) as *const char));
+        self.buf.format_into("return ({}){{ .tag = ", diag::cstr((&rtn[0])));
         self.emit_tag_mod(om, od, failV);
         if !is_option {
             let conv = unsafe (*self.cur_ast()).resolution_def(id);
@@ -4205,11 +4185,11 @@ extend Codegen {
             if conv.node != NODE_NONE {
                 tg = self.cg_method_extend_target(conv);
             }
-            self.buf.format_into(", .payload.{}._0 = ", diag::cstr((&failName.b[0]) as *const char));
+            self.buf.format_into(", .payload.{}._0 = ", diag::cstr((&failName[0])));
             if tg.node != NODE_NONE {
                 let mut pfx = Buf64 {};
-                self.render_modpfx(conv.module, (&mut pfx.b[0]) as *mut char, 64);
-                self.emit_cstr((&pfx.b[0]) as *const char);
+                self.render_modpfx(conv.module, (&mut pfx[0]), 64);
+                self.emit_cstr((&pfx[0]));
                 self.emit_ident_mod(
                     tg.module,
                     unsafe (*self.mod_ast(tg.module)).at_const(tg.node).as_data.aggregate.name,
@@ -4224,20 +4204,20 @@ extend Codegen {
                     tg,
                     "from".ptr() as *const char,
                     self.subst_resolve(it.args[1]),
-                    (&mut sfx.b[0]) as *mut char,
+                    (&mut sfx[0]),
                     200,
                 );
-                self.emit_cstr((&sfx.b[0]) as *const char);
+                self.emit_cstr((&sfx[0]));
                 self.buf.format_into(
                     "({}.payload.{}._0)",
-                    diag::cstr((&tmp.b[0]) as *const char),
-                    diag::cstr((&failName.b[0]) as *const char),
+                    diag::cstr((&tmp[0])),
+                    diag::cstr((&failName[0])),
                 );
             } else {
                 self.buf.format_into(
                     "{}.payload.{}._0",
-                    diag::cstr((&tmp.b[0]) as *const char),
-                    diag::cstr((&failName.b[0]) as *const char),
+                    diag::cstr((&tmp[0])),
+                    diag::cstr((&failName[0])),
                 );
             }
         }
@@ -4246,8 +4226,8 @@ extend Codegen {
         self.emit_indent();
         self.buf.format_into(
             "}} {}.payload.{}._0; }})",
-            diag::cstr((&tmp.b[0]) as *const char),
-            diag::cstr((&okName.b[0]) as *const char),
+            diag::cstr((&tmp[0])),
+            diag::cstr((&okName[0])),
         );
     }
     fn emit_stmt(self: &mut Self, id: NodeId) void {
@@ -4296,9 +4276,9 @@ extend Codegen {
                         }
                         if self.cg_is_cond_moved(eid) {
                             let mut fl = Buf32 {};
-                            cg_move_flag((&mut fl.b[0]) as *mut char, 32, eid);
+                            cg_move_flag((&mut fl[0]), 32, eid);
                             self.emit_indent();
-                            self.buf.format_into("bool {} = false;\n", diag::cstr((&fl.b[0]) as *const char));
+                            self.buf.format_into("bool {} = false;\n", diag::cstr((&fl[0])));
                         }
                         self.cg_register_auto_free(eid);
                     }
@@ -4326,34 +4306,34 @@ extend Codegen {
                     }
                     if arrtn != NODE_NONE {
                         let mut nm = Buf128 {};
-                        self.render_ident(self.name_span(nameN), (&mut nm.b[0]) as *mut char, 128);
+                        self.render_ident(self.name_span(nameN), (&mut nm[0]), 128);
                         let mut decl = Buf512 {};
                         self.render_binding_node(
                             arrtn,
-                            (&nm.b[0]) as *const char,
+                            (&nm[0]),
                             false,
-                            (&mut decl.b[0]) as *mut char,
+                            (&mut decl[0]),
                             300,
                         );
-                        self.emit_cstr((&decl.b[0]) as *const char);
-                        self.buf.format_into("; memcpy({}, ", diag::cstr((&nm.b[0]) as *const char));
+                        self.emit_cstr((&decl[0]));
+                        self.buf.format_into("; memcpy({}, ", diag::cstr((&nm[0])));
                         self.emit_expr(lval);
-                        self.buf.format_into(", sizeof({}));\n", diag::cstr((&nm.b[0]) as *const char));
+                        self.buf.format_into(", sizeof({}));\n", diag::cstr((&nm[0])));
                         return;
                     }
                 }
                 if n.as_data.let_stmt.ty != NODE_NONE {
                     let mut nm = Buf128 {};
-                    self.render_ident(self.name_span(nameN), (&mut nm.b[0]) as *mut char, 128);
+                    self.render_ident(self.name_span(nameN), (&mut nm[0]), 128);
                     let mut decl = Buf512 {};
                     self.render_binding_node(
                         n.as_data.let_stmt.ty,
-                        (&nm.b[0]) as *const char,
+                        (&nm[0]),
                         is_const,
-                        (&mut decl.b[0]) as *mut char,
+                        (&mut decl[0]),
                         300,
                     );
-                    self.emit_cstr((&decl.b[0]) as *const char);
+                    self.emit_cstr((&decl[0]));
                 } else {
                     self.emit_binding(unsafe (*self.cur_ast()).type_of(id), self.name_span(nameN), is_const);
                 }
@@ -4364,9 +4344,9 @@ extend Codegen {
                 self.emit_str(";\n");
                 if autofree && self.cg_is_cond_moved(id) {
                     let mut fl = Buf32 {};
-                    cg_move_flag((&mut fl.b[0]) as *mut char, 32, id);
+                    cg_move_flag((&mut fl[0]), 32, id);
                     self.emit_indent();
-                    self.buf.format_into("bool {} = false;\n", diag::cstr((&fl.b[0]) as *const char));
+                    self.buf.format_into("bool {} = false;\n", diag::cstr((&fl[0])));
                 }
                 if autofree {
                     self.cg_register_auto_free(id);
@@ -4374,16 +4354,16 @@ extend Codegen {
             },
             NODE_CONST => {
                 let mut nm = Buf128 {};
-                self.render_ident(self.name_span(n.as_data.const_def.name), (&mut nm.b[0]) as *mut char, 128);
+                self.render_ident(self.name_span(n.as_data.const_def.name), (&mut nm[0]), 128);
                 let mut decl = Buf256 {};
                 self.render_type_node(
                     n.as_data.const_def.ty,
-                    (&nm.b[0]) as *const char,
-                    (&mut decl.b[0]) as *mut char,
+                    (&nm[0]),
+                    (&mut decl[0]),
                     256,
                 );
                 self.emit_str("static const ");
-                self.emit_cstr((&decl.b[0]) as *const char);
+                self.emit_cstr((&decl[0]));
                 if n.as_data.const_def.value != NODE_NONE {
                     self.emit_str(" = ");
                     let sc = self.const_ctx;
@@ -4515,7 +4495,7 @@ extend Codegen {
     }
     fn emit_binding(self: &mut Self, t: TypeId, name: tok::Span, is_const: bool) void {
         let mut nm = Buf128 {};
-        self.render_ident(name, (&mut nm.b[0]) as *mut char, 128);
+        self.render_ident(name, (&mut nm[0]), 128);
         let k = self.type_at(t).kind;
         // An abstract (generic template) or error type has no spellable C type here -- let C infer it, exactly
         // as the const-view of a pointer element would otherwise mis-qualify (`const int *` vs `int *const`).
@@ -4525,35 +4505,35 @@ extend Codegen {
             } else {
                 self.emit_str("__auto_type ");
             }
-            self.emit_cstr((&nm.b[0]) as *const char);
+            self.emit_cstr((&nm[0]));
             return;
         }
         if is_const && (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE) {
             let mut cn = Buf256 {};
             buf_join3(
-                (&mut cn.b[0]) as *mut char,
+                (&mut cn[0]),
                 200,
                 "const ".ptr() as *const char,
                 "".ptr() as *const char,
-                (&nm.b[0]) as *const char,
+                (&nm[0]),
             );
             let mut decl = Buf512 {};
-            self.render_type_id(t, (&cn.b[0]) as *const char, (&mut decl.b[0]) as *mut char, 512);
-            self.emit_cstr((&decl.b[0]) as *const char);
+            self.render_type_id(t, (&cn[0]), (&mut decl[0]), 512);
+            self.emit_cstr((&decl[0]));
         } else {
             let mut decl = Buf512 {};
-            self.render_type_id(t, (&nm.b[0]) as *const char, (&mut decl.b[0]) as *mut char, 512);
+            self.render_type_id(t, (&nm[0]), (&mut decl[0]), 512);
             if is_const {
                 self.emit_str("const ");
             }
-            self.emit_cstr((&decl.b[0]) as *const char);
+            self.emit_cstr((&decl[0]));
         }
     }
     fn render_binding_node(self: &mut Self, tn: NodeId, name: *const char, is_const: bool, out: *mut char, cap: usize) void {
         if is_const {
             let mut cn = Buf256 {};
-            buf_join3((&mut cn.b[0]) as *mut char, 200, "const ".ptr() as *const char, "".ptr() as *const char, name);
-            self.render_type_node(tn, (&cn.b[0]) as *const char, out, cap);
+            buf_join3((&mut cn[0]), 200, "const ".ptr() as *const char, "".ptr() as *const char, name);
+            self.render_type_node(tn, (&cn[0]), out, cap);
         } else {
             self.render_type_node(tn, name, out, cap);
         }
@@ -4576,7 +4556,7 @@ extend Codegen {
     fn emit_tuple_let(self: &mut Self, id: NodeId) void {
         let n = *unsafe (*self.cur_ast()).at_const(id);
         let mut tmp = Buf32 {};
-        self.fresh((&mut tmp.b[0]) as *mut char, 32);
+        self.fresh((&mut tmp[0]), 32);
         let pnm = unsafe (*self.cur_ast()).at_const(n.as_data.let_stmt.name).as_data.pattern.children;
         let mut freed_discard = false;
         let mut i: u32 = 0;
@@ -4593,7 +4573,7 @@ extend Codegen {
         if freed_discard {
             cq = "".ptr() as *const char;
         }
-        self.buf.format_into("{}__auto_type {} = ", diag::cstr(cq), diag::cstr((&tmp.b[0]) as *const char));
+        self.buf.format_into("{}__auto_type {} = ", diag::cstr(cq), diag::cstr((&tmp[0])));
         self.emit_expr(n.as_data.let_stmt.value);
         self.emit_str(";\n");
         let names = unsafe (*self.cur_ast()).at_const(n.as_data.let_stmt.name).as_data.pattern.children;
@@ -4601,14 +4581,14 @@ extend Codegen {
         while i < names.len {
             let nid = unsafe (*self.cur_ast()).list(names)[i as usize];
             let mut bn = Buf128 {};
-            self.render_ident(self.name_span(nid), (&mut bn.b[0]) as *mut char, 128);
-            if bn.b[0] == '_' as char && bn.b[1] == 0 as char {
+            self.render_ident(self.name_span(nid), (&mut bn[0]), 128);
+            if bn[0] == '_' as char && bn[1] == 0 as char {
                 if self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(nid)) {
                     self.emit_indent();
                     if self.emit_free_target(unsafe (*self.cur_ast()).type_of(nid)) {
-                        self.buf.format_into("(&{}._{})", diag::cstr((&tmp.b[0]) as *const char), i);
+                        self.buf.format_into("(&{}._{})", diag::cstr((&tmp[0])), i);
                     } else {
-                        self.buf.format_into("(void){}._{}", diag::cstr((&tmp.b[0]) as *const char), i);
+                        self.buf.format_into("(void){}._{}", diag::cstr((&tmp[0])), i);
                     }
                     self.emit_str(";\n");
                 }
@@ -4626,8 +4606,8 @@ extend Codegen {
             self.buf.format_into(
                 "{}__auto_type {} = {}._{};\n",
                 diag::cstr(ecq),
-                diag::cstr((&bn.b[0]) as *const char),
-                diag::cstr((&tmp.b[0]) as *const char),
+                diag::cstr((&bn[0])),
+                diag::cstr((&tmp[0])),
                 i,
             );
             i = i + 1;
@@ -4646,13 +4626,13 @@ extend Codegen {
                 self.emit_str("return;\n");
             } else {
                 let mut rv = Buf32 {};
-                self.fresh((&mut rv.b[0]) as *mut char, 32);
+                self.fresh((&mut rv[0]) as *mut char, 32);
                 self.emit_indent();
                 if has_ret {
                     self.buf.format_into(
                         "{} {} = ({}){{ ",
                         diag::cstr(crp),
-                        diag::cstr((&rv.b[0]) as *const char),
+                        diag::cstr((&rv[0])),
                         diag::cstr(crp),
                     );
                     let v0 = unsafe (*self.cur_ast()).list(vals)[0];
@@ -4680,13 +4660,13 @@ extend Codegen {
                         self.emit_str("}\n");
                         return;
                     }
-                    self.buf.format_into("__auto_type {} = ", diag::cstr((&rv.b[0]) as *const char));
+                    self.buf.format_into("__auto_type {} = ", diag::cstr((&rv[0])));
                     self.emit_expr(v0);
                     self.emit_str(";\n");
                 }
                 self.emit_defers_to(0);
                 self.emit_indent();
-                self.buf.format_into("return {};\n", diag::cstr((&rv.b[0]) as *const char));
+                self.buf.format_into("return {};\n", diag::cstr((&rv[0])));
             }
             self.depth = self.depth - 1;
             self.emit_indent();
@@ -4753,14 +4733,14 @@ extend Codegen {
         let hi = r.end;
         let name = self.name_span(fs.binding);
         let mut nm = Buf128 {};
-        self.render_ident(name, (&mut nm.b[0]) as *mut char, 128);
+        self.render_ident(name, (&mut nm[0]), 128);
         // Range semantics: both bounds are evaluated ONCE, left-to-right, before iteration --
         // a non-literal upper bound is materialized in the init clause so body effects
         // (e.g. growing the iterated vector) never re-enter the condition.
         let hoist = hi != NODE_NONE && unsafe (*self.cur_ast()).at_const(hi).kind != NodeKind::NODE_LITERAL;
         let mut hb = Buf32 {};
         if hoist {
-            self.fresh((&mut hb.b[0]) as *mut char, 32);
+            self.fresh((&mut hb[0]), 32);
         }
         self.emit_str("for (");
         self.emit_binding(unsafe (*self.cur_ast()).type_of(fs.iterable), name, false);
@@ -4771,7 +4751,7 @@ extend Codegen {
             self.emit_str("0");
         }
         if hoist {
-            self.buf.format_into(", {} = ", diag::cstr((&hb.b[0]) as *const char));
+            self.buf.format_into(", {} = ", diag::cstr((&hb[0])));
             self.emit_expr(hi);
         }
         self.emit_str("; ");
@@ -4780,14 +4760,14 @@ extend Codegen {
             if r.inclusive {
                 cmp = "<=".ptr() as *const char;
             }
-            self.buf.format_into("{} {} ", diag::cstr((&nm.b[0]) as *const char), diag::cstr(cmp));
+            self.buf.format_into("{} {} ", diag::cstr((&nm[0])), diag::cstr(cmp));
             if hoist {
-                self.buf.format_into("{}", diag::cstr((&hb.b[0]) as *const char));
+                self.buf.format_into("{}", diag::cstr((&hb[0])));
             } else {
                 self.emit_expr(hi);
             }
         }
-        self.buf.format_into("; {}++) ", diag::cstr((&nm.b[0]) as *const char));
+        self.buf.format_into("; {}++) ", diag::cstr((&nm[0])));
         self.pending_cnt = (self.cg_loop_find(id) + 1) as u32;
         self.emit_block(fs.body);
         self.emit_str("\n");
@@ -4803,13 +4783,13 @@ extend Codegen {
         let body = fs.body;
         let stmts = unsafe (*self.cur_ast()).at_const(body).as_data.block.statements;
         let mut idx = Buf32 {};
-        self.fresh((&mut idx.b[0]) as *mut char, 32);
+        self.fresh((&mut idx[0]), 32);
         if ity.kind == TypeKind::TYPE_ARRAY {
             let len = self.array_length_of(fs.iterable);
             self.buf.format_into(
                 "for (size_t {} = 0; {} < ",
-                diag::cstr((&idx.b[0]) as *const char),
-                diag::cstr((&idx.b[0]) as *const char),
+                diag::cstr((&idx[0])),
+                diag::cstr((&idx[0])),
             );
             if len != NODE_NONE {
                 self.emit_expr(len);
@@ -4820,13 +4800,13 @@ extend Codegen {
                 self.emit_expr(fs.iterable);
                 self.emit_str(")[0])");
             }
-            self.buf.format_into("; {}++) {{\n", diag::cstr((&idx.b[0]) as *const char));
+            self.buf.format_into("; {}++) {{\n", diag::cstr((&idx[0])));
             self.depth = self.depth + 1;
             self.emit_indent();
             self.emit_binding(ity.as_data.arr.elem, self.name_span(fs.binding), true);
             self.emit_str(" = (");
             self.emit_expr(fs.iterable);
-            self.buf.format_into(")[{}];\n", diag::cstr((&idx.b[0]) as *const char));
+            self.buf.format_into(")[{}];\n", diag::cstr((&idx[0])));
             let dbase = self.defer_top;
             for i in 0..stmts.len {
                 self.emit_indent();
@@ -4841,36 +4821,36 @@ extend Codegen {
         let mut selem: TypeId = TYPE_NONE;
         if self.cg_slice_elem(unsafe (*self.cur_ast()).type_of(fs.iterable), (&mut selem) as *mut TypeId) {
             let mut s = Buf32 {};
-            self.fresh((&mut s.b[0]) as *mut char, 32);
+            self.fresh((&mut s[0]), 32);
             let mut styp = Buf256 {};
             self.render_type_id(
                 unsafe (*self.cur_ast()).type_of(fs.iterable),
-                (&s.b[0]) as *const char,
-                (&mut styp.b[0]) as *mut char,
+                (&s[0]),
+                (&mut styp[0]),
                 200,
             );
             self.emit_str("{\n");
             self.depth = self.depth + 1;
             self.emit_indent();
-            self.emit_cstr((&styp.b[0]) as *const char);
+            self.emit_cstr((&styp[0]));
             self.emit_str(" = ");
             self.emit_expr(fs.iterable);
             self.emit_str(";\n");
             self.emit_indent();
             self.buf.format_into(
                 "for (size_t {} = 0; {} < {}.len; {}++) {{\n",
-                diag::cstr((&idx.b[0]) as *const char),
-                diag::cstr((&idx.b[0]) as *const char),
-                diag::cstr((&s.b[0]) as *const char),
-                diag::cstr((&idx.b[0]) as *const char),
+                diag::cstr((&idx[0])),
+                diag::cstr((&idx[0])),
+                diag::cstr((&s[0])),
+                diag::cstr((&idx[0])),
             );
             self.depth = self.depth + 1;
             self.emit_indent();
             self.emit_binding(selem, self.name_span(fs.binding), true);
             self.buf.format_into(
                 " = {}.ptr[{}];\n",
-                diag::cstr((&s.b[0]) as *const char),
-                diag::cstr((&idx.b[0]) as *const char),
+                diag::cstr((&s[0])),
+                diag::cstr((&idx[0])),
             );
             let dbase = self.defer_top;
             for i in 0..stmts.len {
@@ -4889,20 +4869,20 @@ extend Codegen {
         let mut relem: TypeId = TYPE_NONE;
         if self.cg_range_elem(unsafe (*self.cur_ast()).type_of(fs.iterable), (&mut relem) as *mut TypeId) {
             let mut rr = Buf32 {};
-            self.fresh((&mut rr.b[0]) as *mut char, 32);
+            self.fresh((&mut rr[0]), 32);
             let mut styp = Buf256 {};
             self.render_type_id(
                 unsafe (*self.cur_ast()).type_of(fs.iterable),
-                (&rr.b[0]) as *const char,
-                (&mut styp.b[0]) as *mut char,
+                (&rr[0]),
+                (&mut styp[0]),
                 200,
             );
             let mut nm = Buf128 {};
-            self.render_ident(self.name_span(fs.binding), (&mut nm.b[0]) as *mut char, 128);
+            self.render_ident(self.name_span(fs.binding), (&mut nm[0]), 128);
             self.emit_str("{\n");
             self.depth = self.depth + 1;
             self.emit_indent();
-            self.emit_cstr((&styp.b[0]) as *const char);
+            self.emit_cstr((&styp[0]));
             self.emit_str(" = ");
             self.emit_expr(fs.iterable);
             self.emit_str(";\n");
@@ -4911,13 +4891,13 @@ extend Codegen {
             self.emit_binding(relem, self.name_span(fs.binding), false);
             self.buf.format_into(
                 " = {}.start; {}.inclusive ? {} <= {}.end : {} < {}.end; {}++) {{\n",
-                diag::cstr((&rr.b[0]) as *const char),
-                diag::cstr((&rr.b[0]) as *const char),
-                diag::cstr((&nm.b[0]) as *const char),
-                diag::cstr((&rr.b[0]) as *const char),
-                diag::cstr((&nm.b[0]) as *const char),
-                diag::cstr((&rr.b[0]) as *const char),
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&rr[0])),
+                diag::cstr((&rr[0])),
+                diag::cstr((&nm[0])),
+                diag::cstr((&rr[0])),
+                diag::cstr((&nm[0])),
+                diag::cstr((&rr[0])),
+                diag::cstr((&nm[0])),
             );
             self.depth = self.depth + 1;
             let dbase = self.defer_top;
@@ -4987,14 +4967,14 @@ extend Codegen {
                     );
                     let mut itn = Buf32 {};
                     let mut ov = Buf32 {};
-                    self.fresh((&mut itn.b[0]) as *mut char, 32);
-                    self.fresh((&mut ov.b[0]) as *mut char, 32);
+                    self.fresh((&mut itn[0]), 32);
+                    self.fresh((&mut ov[0]), 32);
                     let mut vn = Buf128 {};
-                    self.render_variant_name(opt.module, some, (&mut vn.b[0]) as *mut char, 128);
+                    self.render_variant_name(opt.module, some, (&mut vn[0]), 128);
                     self.emit_str("{\n");
                     self.depth = self.depth + 1;
                     self.emit_indent();
-                    self.buf.format_into("__auto_type {} = ", diag::cstr((&itn.b[0]) as *const char));
+                    self.buf.format_into("__auto_type {} = ", diag::cstr((&itn[0])));
                     self.emit_expr(fs.iterable);
                     self.emit_str(";\n");
                     self.emit_indent();
@@ -5002,23 +4982,23 @@ extend Codegen {
                     self.depth = self.depth + 1;
                     self.emit_indent();
                     let mut odecl = Buf256 {};
-                    self.render_type_id(optTy, (&ov.b[0]) as *const char, (&mut odecl.b[0]) as *mut char, 256);
-                    self.emit_cstr((&odecl.b[0]) as *const char);
+                    self.render_type_id(optTy, (&ov[0]), (&mut odecl[0]), 256);
+                    self.emit_cstr((&odecl[0]));
                     self.emit_str(" = ");
                     if bt.kind == TypeKind::TYPE_INSTANCE {
                         let mut inm = Buf256 {};
                         self.inst_name(
                             unsafe (*self.cur_ast()).instance(bt.as_data.inst),
-                            (&mut inm.b[0]) as *mut char,
+                            (&mut inm[0]),
                             200,
                         );
-                        self.emit_cstr((&inm.b[0]) as *const char);
+                        self.emit_cstr((&inm[0]));
                         self.emit_paste();
                         self.emit_str("__");
                     } else {
                         let mut pfx = Buf64 {};
-                        self.render_modpfx(nx.module, (&mut pfx.b[0]) as *mut char, 64);
-                        self.emit_cstr((&pfx.b[0]) as *const char);
+                        self.render_modpfx(nx.module, (&mut pfx[0]), 64);
+                        self.emit_cstr((&pfx[0]));
                         self.emit_ident_mod(om, unsafe (*self.mod_ast(om)).at_const(od).as_data.aggregate.name);
                         self.emit_str("__");
                     }
@@ -5026,17 +5006,17 @@ extend Codegen {
                         nx.module,
                         unsafe (*self.mod_ast(nx.module)).at_const(nx.node).as_data.function.name,
                     );
-                    self.buf.format_into("(&{});\n", diag::cstr((&itn.b[0]) as *const char));
+                    self.buf.format_into("(&{});\n", diag::cstr((&itn[0])));
                     self.emit_indent();
-                    self.buf.format_into("if ({}.tag == ", diag::cstr((&ov.b[0]) as *const char));
+                    self.buf.format_into("if ({}.tag == ", diag::cstr((&ov[0])));
                     self.emit_tag_mod(opt.module, opt.node, none2);
                     self.emit_str(") break;\n");
                     self.emit_indent();
                     self.emit_binding(elem, self.name_span(fs.binding), true);
                     self.buf.format_into(
                         " = {}.payload.{}._0;\n",
-                        diag::cstr((&ov.b[0]) as *const char),
-                        diag::cstr((&vn.b[0]) as *const char),
+                        diag::cstr((&ov[0])),
+                        diag::cstr((&vn[0])),
                     );
                     let dbase = self.defer_top;
                     i = 0;
@@ -5072,12 +5052,12 @@ extend Codegen {
         let k = self.type_at(t).kind;
         if is_const && (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE) {
             let mut cn = Buf256 {};
-            buf_join3((&mut cn.b[0]) as *mut char, 200, "const ".ptr() as *const char, "".ptr() as *const char, name);
-            self.render_type_id(t, (&cn.b[0]) as *const char, out, cap);
+            buf_join3((&mut cn[0]), 200, "const ".ptr() as *const char, "".ptr() as *const char, name);
+            self.render_type_id(t, (&cn[0]), out, cap);
         } else if is_const {
             let mut body = Buf512 {};
-            self.render_type_id(t, name, (&mut body.b[0]) as *mut char, 512);
-            buf_join3(out, cap, "const ".ptr() as *const char, "".ptr() as *const char, (&body.b[0]) as *const char);
+            self.render_type_id(t, name, (&mut body[0]), 512);
+            buf_join3(out, cap, "const ".ptr() as *const char, "".ptr() as *const char, (&body[0]));
         } else {
             self.render_type_id(t, name, out, cap);
         }
@@ -5102,8 +5082,8 @@ extend Codegen {
                 self.emit_indent();
                 self.emit_free_target(t);
                 let mut b = Buf128 {};
-                self.render_ident(nm, (&mut b.b[0]) as *mut char, 128);
-                self.buf.format_into("(&{});\n", diag::cstr((&b.b[0]) as *const char));
+                self.render_ident(nm, (&mut b[0]), 128);
+                self.buf.format_into("(&{});\n", diag::cstr((&b[0])));
             }
             return 1;
         }
@@ -5166,8 +5146,8 @@ extend Codegen {
                 self.emit_expr(body);
                 self.emit_str(";\n");
             } else {
-                self.fresh((&mut r.b[0]) as *mut char, 32);
-                self.buf.format_into("{{ __auto_type {} = ", diag::cstr((&r.b[0]) as *const char));
+                self.fresh((&mut r[0]), 32);
+                self.buf.format_into("{{ __auto_type {} = ", diag::cstr((&r[0])));
                 self.emit_expr(body);
                 self.emit_str(";\n");
             }
@@ -5176,7 +5156,7 @@ extend Codegen {
             if voidret {
                 self.emit_str("return; }\n");
             } else {
-                self.buf.format_into("return {}; }}\n", diag::cstr((&r.b[0]) as *const char));
+                self.buf.format_into("return {}; }}\n", diag::cstr((&r[0])));
             }
             return;
         }
@@ -5208,7 +5188,7 @@ extend Codegen {
     fn emit_match_core(self: &mut Self, id: NodeId, mode: i32, result: *const char) void {
         let n = *unsafe (*self.cur_ast()).at_const(id);
         let mut scrut = Buf32 {};
-        self.fresh((&mut scrut.b[0]) as *mut char, 32);
+        self.fresh((&mut scrut[0]), 32);
         let outer = unsafe (*self.cur_ast()).type_of(n.as_data.match_expr.value);
         let mut derefs: u32 = 0;
         let mut base = outer;
@@ -5228,7 +5208,7 @@ extend Codegen {
         self.emit_indent();
         if by_ref {
             let mut aggr = Buf256 {};
-            self.render_type_id(base, "".ptr() as *const char, (&mut aggr.b[0]) as *mut char, 256);
+            self.render_type_id(base, "".ptr() as *const char, (&mut aggr[0]), 256);
             let mut cq = "const ".ptr() as *const char;
             if mut_ref {
                 cq = "".ptr() as *const char;
@@ -5236,8 +5216,8 @@ extend Codegen {
             self.buf.format_into(
                 "{}{} *const {} = ",
                 diag::cstr(cq),
-                diag::cstr((&aggr.b[0]) as *const char),
-                diag::cstr((&scrut.b[0]) as *const char),
+                diag::cstr((&aggr[0])),
+                diag::cstr((&scrut[0])),
             );
             let mut i: u32 = 0;
             while i + 1 < derefs {
@@ -5251,35 +5231,35 @@ extend Codegen {
                 i = i + 1;
             }
             unsafe stdio::snprintf(
-                (&mut access.b[0]) as *mut char,
+                (&mut access[0]),
                 40,
                 "(*%s)".ptr() as *const char,
-                (&scrut.b[0]) as *const char,
+                (&scrut[0]),
             );
         } else if bk == TypeKind::TYPE_ERROR || bk == TypeKind::TYPE_FUNCTION || bk == TypeKind::TYPE_GENERIC {
-            self.buf.format_into("const __auto_type {} = ", diag::cstr((&scrut.b[0]) as *const char));
+            self.buf.format_into("const __auto_type {} = ", diag::cstr((&scrut[0])));
             self.emit_expr(n.as_data.match_expr.value);
             unsafe stdio::snprintf(
-                (&mut access.b[0]) as *mut char,
+                (&mut access[0]),
                 40,
                 "%s".ptr() as *const char,
-                (&scrut.b[0]) as *const char,
+                (&scrut[0]),
             );
         } else {
             let mut d = Buf512 {};
-            self.render_binding_id(base, (&scrut.b[0]) as *const char, true, (&mut d.b[0]) as *mut char, 300);
-            self.emit_cstr((&d.b[0]) as *const char);
+            self.render_binding_id(base, (&scrut[0]), true, (&mut d[0]), 300);
+            self.emit_cstr((&d[0]));
             self.emit_str(" = ");
             self.emit_expr(n.as_data.match_expr.value);
             unsafe stdio::snprintf(
-                (&mut access.b[0]) as *mut char,
+                (&mut access[0]),
                 40,
                 "%s".ptr() as *const char,
-                (&scrut.b[0]) as *const char,
+                (&scrut[0]),
             );
         }
         self.emit_str(";\n");
-        let accp = (&access.b[0]) as *const char;
+        let accp = (&access[0]) as *const char;
         let arms = n.as_data.match_expr.arms;
         let mut has_guard = false;
         let mut i: u32 = 0;
@@ -5421,8 +5401,8 @@ extend Codegen {
         let want_ptr = (mut_caps >> idx as u64 & 1 as u64) != 0 as u64;
         let mut nm = Buf128 {};
         let csp = self.cg_decl_name_span(decl);
-        self.render_ident(csp, (&mut nm.b[0]) as *mut char, 128);
-        self.buf.format_into(".{} = ", diag::cstr((&nm.b[0]) as *const char));
+        self.render_ident(csp, (&mut nm[0]), 128);
+        self.buf.format_into(".{} = ", diag::cstr((&nm[0])));
         let mut outer_mut = false;
         let oi = self.cg_env_capture(decl, (&mut outer_mut) as *mut bool);
         if want_ptr {
@@ -5437,7 +5417,7 @@ extend Codegen {
         if oi >= 0 {
             self.emit_str("__env->");
         }
-        self.emit_cstr((&nm.b[0]) as *const char);
+        self.emit_cstr((&nm[0]));
     }
     fn cg_mark_move(self: &mut Self, expr0: NodeId, cond: bool, pass: i32, site: bool) void {
         if expr0 == NODE_NONE {
@@ -5755,11 +5735,11 @@ extend Codegen {
         }
         let mut l = Buf32 {};
         let mut r = Buf32 {};
-        self.fresh((&mut l.b[0]) as *mut char, 32);
-        self.fresh((&mut r.b[0]) as *mut char, 32);
-        self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&l.b[0]) as *const char));
+        self.fresh((&mut l[0]), 32);
+        self.fresh((&mut r[0]), 32);
+        self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&l[0])));
         self.emit_expr(bd.left);
-        self.buf.format_into("; __auto_type {} = ", diag::cstr((&r.b[0]) as *const char));
+        self.buf.format_into("; __auto_type {} = ", diag::cstr((&r[0])));
         self.emit_expr(bd.right);
         self.emit_str("; ");
         self.emit_op_method(bt, om, od, mth);
@@ -5774,9 +5754,9 @@ extend Codegen {
         self.buf.format_into(
             "({}{}, {}{}); }})",
             diag::cstr(lp),
-            diag::cstr((&l.b[0]) as *const char),
+            diag::cstr((&l[0])),
             diag::cstr(rp),
-            diag::cstr((&r.b[0]) as *const char),
+            diag::cstr((&r[0])),
         );
         return true;
     }
@@ -5876,8 +5856,8 @@ extend Codegen {
             return false;
         }
         let mut rts = Buf64 {};
-        self.render_type_id(rt, "".ptr() as *const char, (&mut rts.b[0]) as *mut char, 64);
-        let rtsp = (&rts.b[0]) as *const char;
+        self.render_type_id(rt, "".ptr() as *const char, (&mut rts[0]), 64);
+        let rtsp = (&rts[0]) as *const char;
         if sgn && (add || sub || mul) {
             let bn = if add {
                 "add".ptr() as *const char;
@@ -5920,10 +5900,10 @@ extend Codegen {
             };
             let mut a = Buf32 {};
             let mut s = Buf32 {};
-            self.fresh((&mut a.b[0]) as *mut char, 32);
-            self.fresh((&mut s.b[0]) as *mut char, 32);
-            let ap = (&a.b[0]) as *const char;
-            let sp2 = (&s.b[0]) as *const char;
+            self.fresh((&mut a[0]), 32);
+            self.fresh((&mut s[0]), 32);
+            let ap = (&a[0]) as *const char;
+            let sp2 = (&s[0]) as *const char;
             self.buf.format_into("({{ {} {} = ", diag::cstr(rtsp), diag::cstr(ap));
             self.emit_expr(lnode);
             self.buf.format_into("; int64_t {} = (int64_t)(", diag::cstr(sp2));
@@ -5950,10 +5930,10 @@ extend Codegen {
         if dv || rm {
             let mut a = Buf32 {};
             let mut d = Buf32 {};
-            self.fresh((&mut a.b[0]) as *mut char, 32);
-            self.fresh((&mut d.b[0]) as *mut char, 32);
-            let ap = (&a.b[0]) as *const char;
-            let dp = (&d.b[0]) as *const char;
+            self.fresh((&mut a[0]), 32);
+            self.fresh((&mut d[0]), 32);
+            let ap = (&a[0]) as *const char;
+            let dp = (&d[0]) as *const char;
             self.buf.format_into("({{ {} {} = ", diag::cstr(rtsp), diag::cstr(ap));
             self.emit_expr(lnode);
             self.buf.format_into("; {} {} = ", diag::cstr(rtsp), diag::cstr(dp));
@@ -6002,14 +5982,14 @@ extend Codegen {
             return false;
         }
         let mut styp = Buf256 {};
-        self.render_type_id(st, "".ptr() as *const char, (&mut styp.b[0]) as *mut char, 200);
-        self.buf.format_into("({}){{ .ptr = ", diag::cstr((&styp.b[0]) as *const char));
+        self.render_type_id(st, "".ptr() as *const char, (&mut styp[0]), 200);
+        self.buf.format_into("({}){{ .ptr = ", diag::cstr((&styp[0])));
         if is_lit {
             let mut et = Buf256 {};
-            self.render_type_id(selem, "".ptr() as *const char, (&mut et.b[0]) as *mut char, 256);
+            self.render_type_id(selem, "".ptr() as *const char, (&mut et[0]), 256);
             self.buf.format_into(
                 "({}[{}])",
-                diag::cstr((&et.b[0]) as *const char),
+                diag::cstr((&et[0])),
                 n.as_data.array_literal.elements.len,
             );
             self.emit_array_braces(id);
@@ -6042,15 +6022,15 @@ extend Codegen {
         let dy = *self.type_at(dynTy);
         let mut dt = Buf256 {};
         let mut pair = Buf512 {};
-        self.render_type_id(dynTy, "".ptr() as *const char, (&mut dt.b[0]) as *mut char, 240);
-        self.dyn_pair_stem(src, dy.module, dy.as_data.decl, (&mut pair.b[0]) as *mut char, 368);
+        self.render_type_id(dynTy, "".ptr() as *const char, (&mut dt[0]), 240);
+        self.dyn_pair_stem(src, dy.module, dy.as_data.decl, (&mut pair[0]), 368);
         let nat = *self.type_at(self.subst_resolve(unsafe (*self.cur_ast()).type_of(id)));
         if nat.kind == TypeKind::TYPE_FUNCTION {
             if !self.cg_fn_is_capturing(&nat) {
                 self.buf.format_into(
                     "(({}){{ .data = 0, .vt = &{}__vtbl }})",
-                    diag::cstr((&dt.b[0]) as *const char),
-                    diag::cstr((&pair.b[0]) as *const char),
+                    diag::cstr((&dt[0])),
+                    diag::cstr((&pair[0])),
                 );
                 return true;
             }
@@ -6059,53 +6039,53 @@ extend Codegen {
             let mut vtmp = Buf32 {};
             let mut gtmp = Buf32 {};
             let mut ptmp = Buf32 {};
-            self.render_type_id(src, "".ptr() as *const char, (&mut envn.b[0]) as *mut char, 256);
+            self.render_type_id(src, "".ptr() as *const char, (&mut envn[0]), 256);
             let gh = unsafe (*self.package).prelude_lookup("Global", true);
             self.render_qualified(
                 gh.mid,
                 unsafe (*self.mod_ast(gh.mid)).at_const(gh.node).as_data.aggregate.name,
-                (&mut gt.b[0]) as *mut char,
+                (&mut gt[0]),
                 160,
             );
-            self.fresh((&mut vtmp.b[0]) as *mut char, 32);
-            self.fresh((&mut gtmp.b[0]) as *mut char, 32);
-            self.fresh((&mut ptmp.b[0]) as *mut char, 32);
+            self.fresh((&mut vtmp[0]), 32);
+            self.fresh((&mut gtmp[0]), 32);
+            self.fresh((&mut ptmp[0]), 32);
             self.buf.format_into(
                 "({{ {} {} = ",
-                diag::cstr((&envn.b[0]) as *const char),
-                diag::cstr((&vtmp.b[0]) as *const char),
+                diag::cstr((&envn[0])),
+                diag::cstr((&vtmp[0])),
             );
             self.dyn_raw = id;
             self.emit_expr(id);
             self.dyn_raw = NODE_NONE;
             self.buf.format_into(
                 "; {} {} = {}__default_(); ",
-                diag::cstr((&gt.b[0]) as *const char),
-                diag::cstr((&gtmp.b[0]) as *const char),
-                diag::cstr((&gt.b[0]) as *const char),
+                diag::cstr((&gt[0])),
+                diag::cstr((&gtmp[0])),
+                diag::cstr((&gt[0])),
             );
             self.buf.format_into(
                 "{} *{} = ({} *){}__alloc(&{}, sizeof({}), _Alignof({})); *{} = {}; ",
-                diag::cstr((&envn.b[0]) as *const char),
-                diag::cstr((&ptmp.b[0]) as *const char),
-                diag::cstr((&envn.b[0]) as *const char),
-                diag::cstr((&gt.b[0]) as *const char),
-                diag::cstr((&gtmp.b[0]) as *const char),
-                diag::cstr((&envn.b[0]) as *const char),
-                diag::cstr((&envn.b[0]) as *const char),
-                diag::cstr((&ptmp.b[0]) as *const char),
-                diag::cstr((&vtmp.b[0]) as *const char),
+                diag::cstr((&envn[0])),
+                diag::cstr((&ptmp[0])),
+                diag::cstr((&envn[0])),
+                diag::cstr((&gt[0])),
+                diag::cstr((&gtmp[0])),
+                diag::cstr((&envn[0])),
+                diag::cstr((&envn[0])),
+                diag::cstr((&ptmp[0])),
+                diag::cstr((&vtmp[0])),
             );
             self.buf.format_into(
                 "(({}){{ .data = {}, .vt = &{}__vtbl }}); }})",
-                diag::cstr((&dt.b[0]) as *const char),
-                diag::cstr((&ptmp.b[0]) as *const char),
-                diag::cstr((&pair.b[0]) as *const char),
+                diag::cstr((&dt[0])),
+                diag::cstr((&ptmp[0])),
+                diag::cstr((&pair[0])),
             );
             return true;
         }
         let box_src = nat.kind == TypeKind::TYPE_INSTANCE;
-        self.buf.format_into("(({}){{ .data = (void *)(", diag::cstr((&dt.b[0]) as *const char));
+        self.buf.format_into("(({}){{ .data = (void *)(", diag::cstr((&dt[0])));
         self.dyn_raw = id;
         self.emit_expr(id);
         self.dyn_raw = NODE_NONE;
@@ -6113,7 +6093,7 @@ extend Codegen {
         if box_src {
             tail = ").ptr".ptr() as *const char;
         }
-        self.buf.format_into("{}, .vt = &{}__vtbl }})", diag::cstr(tail), diag::cstr((&pair.b[0]) as *const char));
+        self.buf.format_into("{}, .vt = &{}__vtbl }})", diag::cstr(tail), diag::cstr((&pair[0])));
         return true;
     }
     fn array_length_of(self: &mut Self, iter: NodeId) NodeId {
@@ -6171,31 +6151,31 @@ extend Codegen {
         let mut i = raw.start;
         while i < raw.end && k + 1 < 32 {
             let ch = unsafe self.source[i as usize];
-            if ch == '_' as u8 {
+            if ch == b'_' {
                 i = i + 1;
                 continue;
             }
-            if k == 0 && ch == '0' as u8 && i + 1 < raw.end {
-                buf.b[k] = ch as char;
+            if k == 0 && ch == b'0' && i + 1 < raw.end {
+                buf[k] = ch as char;
                 k = k + 1;
                 i = i + 1;
                 continue;
             }
-            let hexish = ch >= '0' as u8 && ch <= '9' as u8 || ch >= 'a' as u8 && ch <= 'f' as u8 || ch >= 'A' as u8 && ch <= 'F' as u8 || ch == 'x' as u8 || ch == 'X' as u8 || ch == 'b' as u8 || ch == 'B' as u8 || ch == 'o' as u8 || ch == 'O' as u8;
+            let hexish = ch >= b'0' && ch <= b'9' || ch >= b'a' && ch <= b'f' || ch >= b'A' && ch <= b'F' || ch == b'x' || ch == b'X' || ch == b'b' || ch == b'B' || ch == b'o' || ch == b'O';
             if !hexish {
                 break;
             }
-            buf.b[k] = ch as char;
+            buf[k] = ch as char;
             k = k + 1;
             i = i + 1;
         }
-        buf.b[k] = 0 as char;
+        buf[k] = 0 as char;
         if k == 0 {
             return false;
         }
         let mut endp: *mut char = null;
-        let v = unsafe strtoll((&buf.b[0]) as *const char, (&mut endp) as *mut *mut char, 0);
-        if endp == (&mut buf.b[0]) as *mut char {
+        let v = unsafe strtoll((&buf[0]), (&mut endp) as *mut *mut char, 0);
+        if endp == (&mut buf[0]) {
             return false;
         }
         unsafe *out = v;
@@ -6224,7 +6204,7 @@ extend Codegen {
         if nn >= cap {
             nn = cap - 1;
         }
-        unsafe cstring::memcpy(out as *mut void, src_at(self.mod_src(m), sp.start), nn);
+        unsafe cstring::memcpy(out, src_at(self.mod_src(m), sp.start), nn);
         unsafe out[nn] = 0 as char;
         return true;
     }
@@ -6270,8 +6250,8 @@ extend Codegen {
         }
         if self.cg_is_cond_moved(bid) {
             let mut fl = Buf32 {};
-            cg_move_flag((&mut fl.b[0]) as *mut char, 32, bid);
-            self.buf.format_into("if (!{}) ", diag::cstr((&fl.b[0]) as *const char));
+            cg_move_flag((&mut fl[0]), 32, bid);
+            self.buf.format_into("if (!{}) ", diag::cstr((&fl[0])));
         }
         self.emit_free_target(bt);
         let ln = *unsafe (*self.cur_ast()).at_const(bid);
@@ -6282,8 +6262,8 @@ extend Codegen {
             nameNode = bid;
         }
         let mut nm = Buf128 {};
-        self.render_ident(self.name_span(nameNode), (&mut nm.b[0]) as *mut char, 128);
-        self.buf.format_into("(&{});\n", diag::cstr((&nm.b[0]) as *const char));
+        self.render_ident(self.name_span(nameNode), (&mut nm[0]), 128);
+        self.buf.format_into("(&{});\n", diag::cstr((&nm[0])));
     }
     fn emit_expr_stmt(self: &mut Self, v0: NodeId) void {
         let mut v = v0;
@@ -6318,12 +6298,12 @@ extend Codegen {
             vt,
         ) {
             let mut tmp = Buf32 {};
-            self.fresh((&mut tmp.b[0]) as *mut char, 32);
-            self.buf.format_into("{{ __auto_type {} = ", diag::cstr((&tmp.b[0]) as *const char));
+            self.fresh((&mut tmp[0]), 32);
+            self.buf.format_into("{{ __auto_type {} = ", diag::cstr((&tmp[0])));
             self.emit_expr(v);
             self.emit_str("; ");
             self.emit_free_target(vt);
-            self.buf.format_into("(&{}); }}\n", diag::cstr((&tmp.b[0]) as *const char));
+            self.buf.format_into("(&{}); }}\n", diag::cstr((&tmp[0])));
             return;
         }
         self.emit_expr(v);
@@ -6360,8 +6340,8 @@ extend Codegen {
             ld.node,
         ) {
             let mut r = Buf32 {};
-            self.fresh((&mut r.b[0]) as *mut char, 32);
-            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&r.b[0]) as *const char));
+            self.fresh((&mut r[0]), 32);
+            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&r[0])));
             self.emit_expr(bd.right);
             self.emit_str("; ");
             self.emit_free_target(lt);
@@ -6369,7 +6349,7 @@ extend Codegen {
             self.emit_expr(bd.left);
             self.emit_str("); (");
             self.emit_expr(bd.left);
-            self.buf.format_into(" = {}); }})", diag::cstr((&r.b[0]) as *const char));
+            self.buf.format_into(" = {}); }})", diag::cstr((&r[0])));
             return;
         }
         if lhs.kind == NodeKind::NODE_INDEX && unsafe (*self.cur_ast()).at_const(lhs.as_data.index.index).kind != NodeKind::NODE_RANGE {
@@ -6410,11 +6390,11 @@ extend Codegen {
                     if bd.op == TokenType::Equal && lt != TYPE_NONE && self.cg_type_is_free(lt) {
                         let mut r = Buf32 {};
                         let mut p = Buf32 {};
-                        self.fresh((&mut r.b[0]) as *mut char, 32);
-                        self.fresh((&mut p.b[0]) as *mut char, 32);
-                        self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&r.b[0]) as *const char));
+                        self.fresh((&mut r[0]), 32);
+                        self.fresh((&mut p[0]), 32);
+                        self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&r[0])));
                         self.emit_expr(bd.right);
-                        self.buf.format_into("; __auto_type {} = ", diag::cstr((&p.b[0]) as *const char));
+                        self.buf.format_into("; __auto_type {} = ", diag::cstr((&p[0])));
                         self.emit_op_method(ibt, om, od, mth);
                         self.emit_str("(");
                         self.emit_prefixed(lhs.as_data.index.object, refp);
@@ -6424,9 +6404,9 @@ extend Codegen {
                         self.emit_free_target(lt);
                         self.buf.format_into(
                             "({}); (*{} = {}); }})",
-                            diag::cstr((&p.b[0]) as *const char),
-                            diag::cstr((&p.b[0]) as *const char),
-                            diag::cstr((&r.b[0]) as *const char),
+                            diag::cstr((&p[0])),
+                            diag::cstr((&p[0])),
+                            diag::cstr((&r[0])),
                         );
                     } else {
                         self.emit_str("(*");
@@ -6456,8 +6436,8 @@ extend Codegen {
                 return false;
             }
             let mut sym = Buf256 {};
-            self.closure_sym_in(y.module, y.as_data.decl, (&mut sym.b[0]) as *mut char, 220);
-            self.buf.format_into("{}_env_free", diag::cstr((&sym.b[0]) as *const char));
+            self.closure_sym_in(y.module, y.as_data.decl, (&mut sym[0]), 220);
+            self.buf.format_into("{}_env_free", diag::cstr((&sym[0])));
             return true;
         }
         if y.kind == TypeKind::TYPE_DYN {
@@ -6465,8 +6445,8 @@ extend Codegen {
                 return false;
             }
             let mut stem = Buf256 {};
-            self.dyn_stem(y.module, y.as_data.decl, (&mut stem.b[0]) as *mut char, 176);
-            self.buf.format_into("{}__dyn_free", diag::cstr((&stem.b[0]) as *const char));
+            self.dyn_stem(y.module, y.as_data.decl, (&mut stem[0]), 176);
+            self.buf.format_into("{}__dyn_free", diag::cstr((&stem[0])));
             return true;
         }
         let mut om: ModuleId = 0;
@@ -6487,14 +6467,14 @@ extend Codegen {
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let mut inm = Buf256 {};
-            self.inst_name(unsafe (*self.cur_ast()).instance(y.as_data.inst), (&mut inm.b[0]) as *mut char, 200);
-            self.emit_cstr((&inm.b[0]) as *const char);
+            self.inst_name(unsafe (*self.cur_ast()).instance(y.as_data.inst), (&mut inm[0]), 200);
+            self.emit_cstr((&inm[0]));
             self.emit_paste();
             self.emit_str("__");
         } else {
             let mut pfx = Buf64 {};
-            self.render_modpfx(dm.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(dm.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             self.emit_ident_mod(om, unsafe (*self.mod_ast(om)).at_const(od).as_data.aggregate.name);
             self.emit_str("__");
         }
@@ -6577,21 +6557,21 @@ extend Codegen {
                     self.emit_str("0");
                 }
                 let mut vn = Buf128 {};
-                self.render_variant_name(vd.module, vd.node, (&mut vn.b[0]) as *mut char, 128);
+                self.render_variant_name(vd.module, vd.node, (&mut vn[0]), 128);
                 for i in 0..ch.len {
                     let cid = unsafe (*self.cur_ast()).list(ch)[i as usize];
                     if !self.pat_trivial(cid) {
                         let mut sub = Buf256 {};
                         unsafe stdio::snprintf(
-                            (&mut sub.b[0]) as *mut char,
+                            (&mut sub[0]),
                             256,
                             "%s.payload.%s._%u".ptr() as *const char,
                             scrut,
-                            (&vn.b[0]) as *const char,
+                            (&vn[0]),
                             i,
                         );
                         self.emit_str(" && ");
-                        self.emit_pattern_test(cid, (&sub.b[0]) as *const char);
+                        self.emit_pattern_test(cid, (&sub[0]));
                     }
                 }
             } else if ch.len == 1 {
@@ -6623,16 +6603,16 @@ extend Codegen {
                 }
                 wrote = true;
                 let mut vn = Buf128 {};
-                self.render_variant_name(vd.module, vd.node, (&mut vn.b[0]) as *mut char, 128);
+                self.render_variant_name(vd.module, vd.node, (&mut vn[0]), 128);
                 unsafe stdio::snprintf(
-                    (&mut prefix.b[0]) as *mut char,
+                    (&mut prefix[0]),
                     300,
                     "%s.payload.%s".ptr() as *const char,
                     scrut,
-                    (&vn.b[0]) as *const char,
+                    (&vn[0]),
                 );
             } else {
-                unsafe stdio::snprintf((&mut prefix.b[0]) as *mut char, 300, "%s".ptr() as *const char, scrut);
+                unsafe stdio::snprintf((&mut prefix[0]), 300, "%s".ptr() as *const char, scrut);
             }
             for i in 0..ch.len {
                 let fid = unsafe (*self.cur_ast()).list(ch)[i as usize];
@@ -6644,19 +6624,19 @@ extend Codegen {
                 }
                 if subpat != NODE_NONE && !self.pat_trivial(subpat) {
                     let mut m = Buf128 {};
-                    self.render_ident(self.name_span(f.as_data.pattern.name), (&mut m.b[0]) as *mut char, 128);
+                    self.render_ident(self.name_span(f.as_data.pattern.name), (&mut m[0]), 128);
                     let mut acc = Buf512 {};
                     unsafe stdio::snprintf(
-                        (&mut acc.b[0]) as *mut char,
+                        (&mut acc[0]),
                         440,
                         "%s.%s".ptr() as *const char,
-                        (&prefix.b[0]) as *const char,
-                        (&m.b[0]) as *const char,
+                        (&prefix[0]),
+                        (&m[0]),
                     );
                     if wrote {
                         self.emit_str(" && ");
                     }
-                    self.emit_pattern_test(subpat, (&acc.b[0]) as *const char);
+                    self.emit_pattern_test(subpat, (&acc[0]));
                     wrote = true;
                 }
             }
@@ -6686,7 +6666,7 @@ extend Codegen {
         self.emit_indent();
         if by_ref {
             let mut nm = Buf128 {};
-            self.render_ident(name, (&mut nm.b[0]) as *mut char, 128);
+            self.render_ident(name, (&mut nm[0]), 128);
             let mut cq = "const ".ptr() as *const char;
             if is_mut {
                 cq = "".ptr() as *const char;
@@ -6694,7 +6674,7 @@ extend Codegen {
             self.buf.format_into(
                 "{}__auto_type {} = &({});\n",
                 diag::cstr(cq),
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
                 diag::cstr(scrut),
             );
         } else {
@@ -6725,27 +6705,27 @@ extend Codegen {
             }
             let ch = p.as_data.pattern.children;
             let mut vn = Buf128 {};
-            vn.b[0] = 0 as char;
+            vn[0] = 0 as char;
             if vd.node != NODE_NONE && unsafe (*self.mod_ast(vd.module)).at_const(vd.node).kind == NodeKind::NODE_VARIANT {
-                self.render_variant_name(vd.module, vd.node, (&mut vn.b[0]) as *mut char, 128);
+                self.render_variant_name(vd.module, vd.node, (&mut vn[0]), 128);
             }
             for i in 0..ch.len {
                 let mut sub = Buf256 {};
-                if vn.b[0] != 0 as char {
+                if vn[0] != 0 as char {
                     unsafe stdio::snprintf(
-                        (&mut sub.b[0]) as *mut char,
+                        (&mut sub[0]),
                         256,
                         "%s.payload.%s._%u".ptr() as *const char,
                         scrut,
-                        (&vn.b[0]) as *const char,
+                        (&vn[0]),
                         i,
                     );
                 } else {
-                    unsafe stdio::snprintf((&mut sub.b[0]) as *mut char, 256, "%s".ptr() as *const char, scrut);
+                    unsafe stdio::snprintf((&mut sub[0]), 256, "%s".ptr() as *const char, scrut);
                 }
                 self.emit_pattern_binds(
                     unsafe (*self.cur_ast()).list(ch)[i as usize],
-                    (&sub.b[0]) as *const char,
+                    (&sub[0]),
                     by_ref,
                 );
             }
@@ -6757,34 +6737,34 @@ extend Codegen {
             let mut prefix = Buf512 {};
             if vd.node != NODE_NONE && unsafe (*self.mod_ast(vd.module)).at_const(vd.node).kind == NodeKind::NODE_VARIANT {
                 let mut vn = Buf128 {};
-                self.render_variant_name(vd.module, vd.node, (&mut vn.b[0]) as *mut char, 128);
+                self.render_variant_name(vd.module, vd.node, (&mut vn[0]), 128);
                 unsafe stdio::snprintf(
-                    (&mut prefix.b[0]) as *mut char,
+                    (&mut prefix[0]),
                     300,
                     "%s.payload.%s".ptr() as *const char,
                     scrut,
-                    (&vn.b[0]) as *const char,
+                    (&vn[0]),
                 );
             } else {
-                unsafe stdio::snprintf((&mut prefix.b[0]) as *mut char, 300, "%s".ptr() as *const char, scrut);
+                unsafe stdio::snprintf((&mut prefix[0]), 300, "%s".ptr() as *const char, scrut);
             }
             let ch = p.as_data.pattern.children;
             for i in 0..ch.len {
                 let fid = unsafe (*self.cur_ast()).list(ch)[i as usize];
                 let f = unsafe (*self.cur_ast()).at_const(fid);
                 let mut m = Buf128 {};
-                self.render_ident(self.name_span(f.as_data.pattern.name), (&mut m.b[0]) as *mut char, 128);
+                self.render_ident(self.name_span(f.as_data.pattern.name), (&mut m[0]), 128);
                 let mut acc = Buf512 {};
                 unsafe stdio::snprintf(
-                    (&mut acc.b[0]) as *mut char,
+                    (&mut acc[0]),
                     440,
                     "%s.%s".ptr() as *const char,
-                    (&prefix.b[0]) as *const char,
-                    (&m.b[0]) as *const char,
+                    (&prefix[0]),
+                    (&m[0]),
                 );
                 let sub = f.as_data.pattern.children;
                 if sub.len != 0 {
-                    self.emit_pattern_binds(unsafe (*self.cur_ast()).list(sub)[0], (&acc.b[0]) as *const char, by_ref);
+                    self.emit_pattern_binds(unsafe (*self.cur_ast()).list(sub)[0], (&acc[0]), by_ref);
                 }
             }
         } else if pk == NodeKind::NODE_PATTERN_OR {
@@ -6840,32 +6820,32 @@ extend Codegen {
                             1,
                         );
                         let mut rn = Buf256 {};
-                        self.render_type_id(rangeTy, "".ptr() as *const char, (&mut rn.b[0]) as *mut char, 200);
+                        self.render_type_id(rangeTy, "".ptr() as *const char, (&mut rn[0]), 200);
                         let mut o = Buf32 {};
-                        self.fresh((&mut o.b[0]) as *mut char, 32);
+                        self.fresh((&mut o[0]), 32);
                         if refd > 0 {
-                            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o.b[0]) as *const char));
+                            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o[0])));
                             self.emit_prefixed(obj, ref_derefs(refd));
                         } else if self.is_lvalue(obj) {
-                            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o.b[0]) as *const char));
+                            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o[0])));
                             self.emit_prefixed(obj, "&".ptr() as *const char);
                         } else {
                             let mut v = Buf32 {};
-                            self.fresh((&mut v.b[0]) as *mut char, 32);
-                            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&v.b[0]) as *const char));
+                            self.fresh((&mut v[0]), 32);
+                            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&v[0])));
                             self.emit_expr(obj);
                             self.buf.format_into(
                                 "; __auto_type {} = &{}",
-                                diag::cstr((&o.b[0]) as *const char),
-                                diag::cstr((&v.b[0]) as *const char),
+                                diag::cstr((&o[0])),
+                                diag::cstr((&v[0])),
                             );
                         }
                         self.emit_str("; ");
                         self.emit_op_method(bt, om, od, mth);
                         self.buf.format_into(
                             "({}, ({}){{ .start = ",
-                            diag::cstr((&o.b[0]) as *const char),
-                            diag::cstr((&rn.b[0]) as *const char),
+                            diag::cstr((&o[0])),
+                            diag::cstr((&rn[0])),
                         );
                         if lo != NODE_NONE {
                             self.emit_expr(lo);
@@ -6879,7 +6859,7 @@ extend Codegen {
                             let lm = self.cg_find_method_cstr(om, od, "len".ptr() as *const char);
                             if lm.node != NODE_NONE {
                                 self.emit_op_method(bt, om, od, lm);
-                                self.buf.format_into("({})", diag::cstr((&o.b[0]) as *const char));
+                                self.buf.format_into("({})", diag::cstr((&o[0])));
                             } else {
                                 self.emit_str("0");
                             }
@@ -6897,7 +6877,7 @@ extend Codegen {
             self.render_type_id(
                 unsafe (*self.cur_ast()).type_of(id),
                 "".ptr() as *const char,
-                (&mut styp.b[0]) as *mut char,
+                (&mut styp[0]),
                 200,
             );
             let isslice = self.cg_slice_elem(roty, null);
@@ -6906,8 +6886,8 @@ extend Codegen {
                 arrlen = self.array_length_of(obj);
             }
             let mut b = Buf32 {};
-            self.fresh((&mut b.b[0]) as *mut char, 32);
-            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&b.b[0]) as *const char));
+            self.fresh((&mut b[0]), 32);
+            self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&b[0])));
             if refd > 0 {
                 self.emit_prefixed(obj, ref_derefs(refd + 1));
             } else {
@@ -6919,8 +6899,8 @@ extend Codegen {
             }
             self.buf.format_into(
                 "; ({}){{ .ptr = {}{} + ",
-                diag::cstr((&styp.b[0]) as *const char),
-                diag::cstr((&b.b[0]) as *const char),
+                diag::cstr((&styp[0])),
+                diag::cstr((&b[0])),
                 diag::cstr(sfx),
             );
             if lo != NODE_NONE {
@@ -6940,7 +6920,7 @@ extend Codegen {
                     self.emit_str(")");
                 }
             } else if isslice {
-                self.buf.format_into("{}.len", diag::cstr((&b.b[0]) as *const char));
+                self.buf.format_into("{}.len", diag::cstr((&b[0])));
             } else if arrlen != NODE_NONE {
                 self.emit_expr(arrlen);
             } else {
@@ -7013,30 +6993,30 @@ extend Codegen {
                     retref = mtn != NODE_NONE && unsafe (*mam).at_const(mtn).kind == NodeKind::NODE_REFERENCE_TYPE;
                 }
                 let mut o = Buf32 {};
-                self.fresh((&mut o.b[0]) as *mut char, 32);
+                self.fresh((&mut o[0]), 32);
                 if retref {
                     self.emit_str("(*");
                 }
                 if rd > 0 {
-                    self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o.b[0]) as *const char));
+                    self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o[0])));
                     self.emit_prefixed(obj, ref_derefs(rd));
                 } else if self.is_lvalue(obj) {
-                    self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o.b[0]) as *const char));
+                    self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&o[0])));
                     self.emit_prefixed(obj, "&".ptr() as *const char);
                 } else {
                     let mut v = Buf32 {};
-                    self.fresh((&mut v.b[0]) as *mut char, 32);
-                    self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&v.b[0]) as *const char));
+                    self.fresh((&mut v[0]), 32);
+                    self.buf.format_into("({{ __auto_type {} = ", diag::cstr((&v[0])));
                     self.emit_expr(obj);
                     self.buf.format_into(
                         "; __auto_type {} = &{}",
-                        diag::cstr((&o.b[0]) as *const char),
-                        diag::cstr((&v.b[0]) as *const char),
+                        diag::cstr((&o[0])),
+                        diag::cstr((&v[0])),
                     );
                 }
                 self.emit_str("; ");
                 self.emit_op_method(bt, om, od, mth);
-                self.buf.format_into("({}, ", diag::cstr((&o.b[0]) as *const char));
+                self.buf.format_into("({}, ", diag::cstr((&o[0])));
                 self.emit_expr(idxNode);
                 if retref {
                     self.emit_str("); }))");
@@ -7069,12 +7049,12 @@ extend Codegen {
             // Effectful base: evaluate the slice ONCE into a temp; `*(&elem)` keeps the
             // whole expression an lvalue so `xs[i] = v` still works.
             let mut sb = Buf32 {};
-            self.fresh((&mut sb.b[0]) as *mut char, 32);
-            self.buf.format_into("(*({{ __auto_type {} = ", diag::cstr((&sb.b[0]) as *const char));
+            self.fresh((&mut sb[0]), 32);
+            self.buf.format_into("(*({{ __auto_type {} = ", diag::cstr((&sb[0])));
             self.emit_slice_base(obj, rd2);
-            self.buf.format_into("; &{}.ptr[__sc_bounds(", diag::cstr((&sb.b[0]) as *const char));
+            self.buf.format_into("; &{}.ptr[__sc_bounds(", diag::cstr((&sb[0])));
             self.emit_expr(idxNode);
-            self.buf.format_into(", {}.len)]; }}))", diag::cstr((&sb.b[0]) as *const char));
+            self.buf.format_into(", {}.len)]; }}))", diag::cstr((&sb[0])));
             return;
         }
         let oty = *self.type_at(self.subst_resolve(unsafe (*self.cur_ast()).type_of(obj)));
@@ -7154,8 +7134,8 @@ extend Codegen {
             }
             if d.node != NODE_NONE && dk == NodeKind::NODE_CONST && unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.const_def.is_extern {
                 let mut ov = Buf256 {};
-                if self.cg_symbol_override(d.module, d.node, (&mut ov.b[0]) as *mut char, 160) {
-                    self.emit_cstr((&ov.b[0]) as *const char);
+                if self.cg_symbol_override(d.module, d.node, (&mut ov[0]), 160) {
+                    self.emit_cstr((&ov[0]));
                 } else {
                     self.emit_ident_mod(
                         d.module,
@@ -7167,19 +7147,19 @@ extend Codegen {
                 self.render_qualified(
                     d.module,
                     unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.const_def.name,
-                    (&mut nm.b[0]) as *mut char,
+                    (&mut nm[0]),
                     160,
                 );
-                self.emit_cstr((&nm.b[0]) as *const char);
+                self.emit_cstr((&nm[0]));
             } else if d.node != NODE_NONE && dk == NodeKind::NODE_FUNCTION {
                 let mut nm = Buf256 {};
                 self.render_qualified(
                     d.module,
                     unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function.name,
-                    (&mut nm.b[0]) as *mut char,
+                    (&mut nm[0]),
                     160,
                 );
-                self.emit_cstr((&nm.b[0]) as *const char);
+                self.emit_cstr((&nm[0]));
             } else if d.node != NODE_NONE && dk == NodeKind::NODE_CONST {
                 // associated const Type::NAME -> `<mod>__<Type>__NAME`
                 let da = self.mod_ast(d.module);
@@ -7200,13 +7180,13 @@ extend Codegen {
                     di = di + 1;
                 }
                 let mut nm = Buf512 {};
-                let mut k = self.render_modpfx(d.module, (&mut nm.b[0]) as *mut char, 256);
+                let mut k = self.render_modpfx(d.module, (&mut nm[0]), 256);
                 let mut bb: i32 = -1;
                 if self.package != null && target.node != NODE_NONE {
                     bb = unsafe (*self.package).builtin_of_decl(target.module, target.node);
                 }
                 if bb >= 0 {
-                    k = bappend((&mut nm.b[0]) as *mut char, 256, k, builtin_name(bb as BuiltinType));
+                    k = bappend((&mut nm[0]), 256, k, builtin_name(bb as BuiltinType));
                 } else if target.node != NODE_NONE {
                     k = k + render_ident_src(
                         self.mod_src(target.module),
@@ -7214,18 +7194,18 @@ extend Codegen {
                             target.module,
                             unsafe (*self.mod_ast(target.module)).at_const(target.node).as_data.aggregate.name,
                         ),
-                        unsafe ((&mut nm.b[0]) as *mut char + k),
+                        unsafe ((&mut nm[0]) as *mut char + k),
                         256 - k,
                     );
                 }
-                k = bappend((&mut nm.b[0]) as *mut char, 256, k, "__".ptr() as *const char);
+                k = bappend((&mut nm[0]), 256, k, "__".ptr() as *const char);
                 render_ident_src(
                     self.mod_src(d.module),
                     unsafe (*da).at_const(unsafe (*da).at_const(d.node).as_data.const_def.name).as_data.name.text,
-                    unsafe ((&mut nm.b[0]) as *mut char + k),
+                    unsafe ((&mut nm[0]) as *mut char + k),
                     256 - k,
                 );
-                self.emit_cstr((&nm.b[0]) as *const char);
+                self.emit_cstr((&nm[0]));
             } else {
                 self.emit_variant_value(d, unsafe (*self.cur_ast()).type_of(id));
             }
@@ -7240,7 +7220,7 @@ extend Codegen {
             self.emit_str(".");
         }
         let msp = self.name_span(n.as_data.member.member);
-        if unsafe self.source[msp.start as usize] >= '0' as u8 && unsafe self.source[msp.start as usize] <= '9' as u8 {
+        if unsafe self.source[msp.start as usize] >= b'0' && unsafe self.source[msp.start as usize] <= b'9' {
             self.emit_str("_");
         }
         self.emit_ident(msp);
@@ -7262,24 +7242,24 @@ extend Codegen {
                     vt = y.as_data.arr.elem;
                     y = self.type_at(vt);
                 }
-                self.render_type_id(vt, "".ptr() as *const char, (&mut ty.b[0]) as *mut char, 256);
+                self.render_type_id(vt, "".ptr() as *const char, (&mut ty[0]), 256);
             } else if dk == NodeKind::NODE_CONST && (!self.mangle || self.decl_is_toplevel(d.module, d.node)) {
                 self.render_qualified(
                     d.module,
                     unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.const_def.name,
-                    (&mut ty.b[0]) as *mut char,
+                    (&mut ty[0]),
                     256,
                 );
             } else {
-                self.render_ident(self.cg_decl_name_span(d.node), (&mut ty.b[0]) as *mut char, 256);
+                self.render_ident(self.cg_decl_name_span(d.node), (&mut ty[0]), 256);
             }
         } else {
-            self.render_type_node(vnode, "".ptr() as *const char, (&mut ty.b[0]) as *mut char, 256);
+            self.render_type_node(vnode, "".ptr() as *const char, (&mut ty[0]), 256);
         }
         if n.kind == NodeKind::NODE_ALIGNOF {
-            self.buf.format_into("_Alignof({})", diag::cstr((&ty.b[0]) as *const char));
+            self.buf.format_into("_Alignof({})", diag::cstr((&ty[0])));
         } else {
-            self.buf.format_into("sizeof({})", diag::cstr((&ty.b[0]) as *const char));
+            self.buf.format_into("sizeof({})", diag::cstr((&ty[0])));
         }
     }
     fn emit_loop_expr(self: &mut Self, id: NodeId) void {
@@ -7297,14 +7277,14 @@ extend Codegen {
         if has_val && le >= 0 {
             let mut vn = Buf32 {};
             unsafe stdio::snprintf(
-                (&mut vn.b[0]) as *mut char,
+                (&mut vn[0]),
                 32,
                 "__lv%u".ptr() as *const char,
                 self.loop_stack[le as usize].seq,
             );
             let mut decl = Buf256 {};
-            self.render_type_id(ty, (&vn.b[0]) as *const char, (&mut decl.b[0]) as *mut char, 256);
-            self.buf.format_into("{}; ", diag::cstr((&decl.b[0]) as *const char));
+            self.render_type_id(ty, (&vn[0]), (&mut decl[0]), 256);
+            self.buf.format_into("{}; ", diag::cstr((&decl[0])));
         }
         self.emit_str("for (;;) ");
         self.pending_cnt = (le + 1) as u32;
@@ -7395,9 +7375,9 @@ extend Codegen {
         let mut i: u32 = 0;
         while i < self.nparam_flags {
             let mut fl = Buf32 {};
-            cg_move_flag((&mut fl.b[0]) as *mut char, 32, self.param_flags[i as usize]);
+            cg_move_flag((&mut fl[0]), 32, self.param_flags[i as usize]);
             self.emit_indent();
-            self.buf.format_into("bool {} = false;\n", diag::cstr((&fl.b[0]) as *const char));
+            self.buf.format_into("bool {} = false;\n", diag::cstr((&fl[0])));
             i = i + 1;
         }
         self.nparam_flags = 0;
@@ -7406,19 +7386,19 @@ extend Codegen {
             let mut pn = Buf128 {};
             self.render_ident(
                 self.name_span(unsafe (*self.cur_ast()).at_const(self.unused_params[i as usize]).as_data.parameter.name),
-                (&mut pn.b[0]) as *mut char,
+                (&mut pn[0]),
                 128,
             );
-            if pn.b[0] == '_' as char && pn.b[1] == 0 as char {
+            if pn[0] == '_' as char && pn[1] == 0 as char {
                 unsafe stdio::snprintf(
-                    (&mut pn.b[0]) as *mut char,
+                    (&mut pn[0]),
                     128,
                     "__sc_u%u".ptr() as *const char,
                     self.unused_params[i as usize],
                 );
             }
             self.emit_indent();
-            self.buf.format_into("(void){};\n", diag::cstr((&pn.b[0]) as *const char));
+            self.buf.format_into("(void){};\n", diag::cstr((&pn[0])));
             i = i + 1;
         }
         self.nunused_params = 0;
@@ -7597,8 +7577,8 @@ extend Codegen {
             return;
         }
         let mut enm = Buf256 {};
-        self.render_enum_cname(v, en, enum_ty, (&mut enm.b[0]) as *mut char, 200);
-        self.buf.format_into("({}){{ .tag = ", diag::cstr((&enm.b[0]) as *const char));
+        self.render_enum_cname(v, en, enum_ty, (&mut enm[0]), 200);
+        self.buf.format_into("({}){{ .tag = ", diag::cstr((&enm[0])));
         self.emit_tag_mod(v.module, en, v.node);
         self.emit_str(" }");
     }
@@ -7610,12 +7590,12 @@ extend Codegen {
         }
         let mut enm = Buf256 {};
         let mut vn = Buf128 {};
-        self.render_enum_cname(v, en, enum_ty, (&mut enm.b[0]) as *mut char, 200);
-        self.render_variant_name(v.module, v.node, (&mut vn.b[0]) as *mut char, 128);
-        self.buf.format_into("({}){{ .tag = ", diag::cstr((&enm.b[0]) as *const char));
+        self.render_enum_cname(v, en, enum_ty, (&mut enm[0]), 200);
+        self.render_variant_name(v.module, v.node, (&mut vn[0]), 128);
+        self.buf.format_into("({}){{ .tag = ", diag::cstr((&enm[0])));
         self.emit_tag_mod(v.module, en, v.node);
         if args.len != 0 {
-            self.buf.format_into(", .payload.{} = {{ ", diag::cstr((&vn.b[0]) as *const char));
+            self.buf.format_into(", .payload.{} = {{ ", diag::cstr((&vn[0])));
             for i in 0..args.len {
                 if i != 0 {
                     self.emit_str(", ");
@@ -7635,22 +7615,22 @@ extend Codegen {
         let mut i: u8 = 0;
         while mu != null && i < unsafe (*mu).n {
             let mut e = Buf256 {};
-            self.mangle_type(self.subst_resolve(unsafe (*mu).args[i as usize]), (&mut e.b[0]) as *mut char, 176);
-            self.buf.format_into("__{}", diag::cstr((&e.b[0]) as *const char));
+            self.mangle_type(self.subst_resolve(unsafe (*mu).args[i as usize]), (&mut e[0]), 176);
+            self.buf.format_into("__{}", diag::cstr((&e[0])));
             i = i + 1;
         }
     }
     fn emit_op_method(self: &mut Self, bt: Ty, om: ModuleId, od: NodeId, mth: DefId) void {
         if bt.kind == TypeKind::TYPE_INSTANCE {
             let mut inm = Buf256 {};
-            self.inst_name(unsafe (*self.cur_ast()).instance(bt.as_data.inst), (&mut inm.b[0]) as *mut char, 200);
-            self.emit_cstr((&inm.b[0]) as *const char);
+            self.inst_name(unsafe (*self.cur_ast()).instance(bt.as_data.inst), (&mut inm[0]), 200);
+            self.emit_cstr((&inm[0]));
             self.emit_paste();
             self.emit_str("__");
         } else {
             let mut pfx = Buf64 {};
-            self.render_modpfx(mth.module, (&mut pfx.b[0]) as *mut char, 64);
-            self.emit_cstr((&pfx.b[0]) as *const char);
+            self.render_modpfx(mth.module, (&mut pfx[0]), 64);
+            self.emit_cstr((&pfx[0]));
             self.emit_ident_mod(om, unsafe (*self.mod_ast(om)).at_const(od).as_data.aggregate.name);
             self.emit_str("__");
         }
@@ -7701,11 +7681,11 @@ extend Codegen {
         }
         let mut lb = Buf32 {};
         let mut rb = Buf32 {};
-        self.fresh((&mut lb.b[0]) as *mut char, 32);
-        self.fresh((&mut rb.b[0]) as *mut char, 32);
-        self.buf.format_into("(({{ __auto_type {} = ", diag::cstr((&lb.b[0]) as *const char));
+        self.fresh((&mut lb[0]), 32);
+        self.fresh((&mut rb[0]), 32);
+        self.buf.format_into("(({{ __auto_type {} = ", diag::cstr((&lb[0])));
         self.emit_expr(bd.left);
-        self.buf.format_into("; __auto_type {} = ", diag::cstr((&rb.b[0]) as *const char));
+        self.buf.format_into("; __auto_type {} = ", diag::cstr((&rb[0])));
         self.emit_expr(bd.right);
         self.emit_str("; ");
         if op == TokenType::BangEqual {
@@ -7726,9 +7706,9 @@ extend Codegen {
         self.buf.format_into(
             "({}{}, {}{})",
             diag::cstr(lp),
-            diag::cstr((&lb.b[0]) as *const char),
+            diag::cstr((&lb[0])),
             diag::cstr(rp),
-            diag::cstr((&rb.b[0]) as *const char),
+            diag::cstr((&rb[0])),
         );
         if ord {
             self.buf.format_into(" {} 0)", diag::cstr(c_op(op)));
@@ -7767,8 +7747,8 @@ extend Codegen {
             }
             if dn.kind == NodeKind::NODE_FUNCTION {
                 let mut ov = Buf256 {};
-                if self.cg_symbol_override(d.module, d.node, (&mut ov.b[0]) as *mut char, 160) {
-                    self.emit_cstr((&ov.b[0]) as *const char);
+                if self.cg_symbol_override(d.module, d.node, (&mut ov[0]), 160) {
+                    self.emit_cstr((&ov[0]));
                     return;
                 }
             }
@@ -7778,14 +7758,14 @@ extend Codegen {
                 "main".ptr() as *const char,
             ) {
                 let mut nm = Buf256 {};
-                self.render_qualified(d.module, dn.as_data.function.name, (&mut nm.b[0]) as *mut char, 160);
-                self.emit_cstr((&nm.b[0]) as *const char);
+                self.render_qualified(d.module, dn.as_data.function.name, (&mut nm[0]), 160);
+                self.emit_cstr((&nm[0]));
                 return;
             }
             if dn.kind == NodeKind::NODE_CONST && dn.as_data.const_def.is_extern {
                 let mut ov = Buf256 {};
-                if self.cg_symbol_override(d.module, d.node, (&mut ov.b[0]) as *mut char, 160) {
-                    self.emit_cstr((&ov.b[0]) as *const char);
+                if self.cg_symbol_override(d.module, d.node, (&mut ov[0]), 160) {
+                    self.emit_cstr((&ov[0]));
                 } else {
                     self.emit_ident_mod(d.module, dn.as_data.const_def.name);
                 }
@@ -7793,8 +7773,8 @@ extend Codegen {
             }
             if dn.kind == NodeKind::NODE_CONST && (!self.mangle || self.decl_is_toplevel(d.module, d.node)) {
                 let mut nm = Buf256 {};
-                self.render_qualified(d.module, dn.as_data.const_def.name, (&mut nm.b[0]) as *mut char, 160);
-                self.emit_cstr((&nm.b[0]) as *const char);
+                self.render_qualified(d.module, dn.as_data.const_def.name, (&mut nm[0]), 160);
+                self.emit_cstr((&nm[0]));
                 return;
             }
         }
@@ -7893,20 +7873,20 @@ extend Codegen {
                     f32t = true;
                 }
                 let mut fb = Buf64 {};
-                unsafe stdio::snprintf((&mut fb.b[0]) as *mut char, 48, "%.17g".ptr() as *const char, v.as_data.f);
-                let fl = unsafe cstring::strlen((&fb.b[0]) as *const char);
-                let has = unsafe cstring::memchr(&fb.b[0], '.' as i32, fl) != null || unsafe cstring::memchr(
-                    &fb.b[0],
+                unsafe stdio::snprintf((&mut fb[0]), 48, "%.17g".ptr() as *const char, v.as_data.f);
+                let fl = unsafe cstring::strlen((&fb[0]));
+                let has = unsafe cstring::memchr(&fb[0], '.' as i32, fl) != null || unsafe cstring::memchr(
+                    &fb[0],
                     'e' as i32,
                     fl,
-                ) != null || unsafe cstring::memchr(&fb.b[0], 'E' as i32, fl) != null;
+                ) != null || unsafe cstring::memchr(&fb[0], 'E' as i32, fl) != null;
                 if !has {
-                    bappend((&mut fb.b[0]) as *mut char, 48, fl, ".0".ptr() as *const char);
+                    bappend((&mut fb[0]), 48, fl, ".0".ptr() as *const char);
                 }
                 if f32t {
-                    self.buf.format_into("{}f", diag::cstr((&fb.b[0]) as *const char));
+                    self.buf.format_into("{}f", diag::cstr((&fb[0])));
                 } else {
-                    self.emit_cstr((&fb.b[0]) as *const char);
+                    self.emit_cstr((&fb[0]));
                 }
                 return;
             }
@@ -7921,8 +7901,8 @@ extend Codegen {
                     self.buf.format_into("{}", cv); // monomorphized const-generic value
                 } else if self.cg_is_cond_site(id) {
                     let mut fl = Buf32 {};
-                    cg_move_flag((&mut fl.b[0]) as *mut char, 32, unsafe (*self.cur_ast()).resolution_def(id).node);
-                    self.buf.format_into("({} = true, ", diag::cstr((&fl.b[0]) as *const char));
+                    cg_move_flag((&mut fl[0]), 32, unsafe (*self.cur_ast()).resolution_def(id).node);
+                    self.buf.format_into("({} = true, ", diag::cstr((&fl[0])));
                     self.emit_ident_ref(id);
                     self.emit_str(")");
                 } else {
@@ -7943,10 +7923,10 @@ extend Codegen {
                     self.render_type_id(
                         unsafe (*self.cur_ast()).type_of(operand),
                         "".ptr() as *const char,
-                        (&mut ty.b[0]) as *mut char,
+                        (&mut ty[0]),
                         128,
                     );
-                    self.buf.format_into("(&({}){{", diag::cstr((&ty.b[0]) as *const char));
+                    self.buf.format_into("(&({}){{", diag::cstr((&ty[0])));
                     self.emit_expr(operand);
                     self.emit_str("})");
                 } else {
@@ -7996,7 +7976,7 @@ extend Codegen {
                 let arr_ret = ct != TYPE_NONE && self.type_at(ct).kind == TypeKind::TYPE_ARRAY;
                 let cn = unsafe (*self.cur_ast()).at_const(n.as_data.call.callee);
                 let mut freeflag = Buf32 {};
-                freeflag.b[0] = 0 as char;
+                freeflag[0] = 0 as char;
                 if cn.kind == NodeKind::NODE_MEMBER && !cn.as_data.member.path && cn.as_data.member.object != NODE_NONE && unsafe (*self.cur_ast()).at_const(
                     cn.as_data.member.object,
                 ).kind == NodeKind::NODE_IDENTIFIER && span_is(
@@ -8006,8 +7986,8 @@ extend Codegen {
                 ) {
                     let rd = unsafe (*self.cur_ast()).resolution_def(cn.as_data.member.object);
                     if rd.module == self.cur_module() && self.cg_is_cond_moved(rd.node) {
-                        cg_move_flag((&mut freeflag.b[0]) as *mut char, 32, rd.node);
-                        self.buf.format_into("({} = true, ", diag::cstr((&freeflag.b[0]) as *const char));
+                        cg_move_flag((&mut freeflag[0]), 32, rd.node);
+                        self.buf.format_into("({} = true, ", diag::cstr((&freeflag[0])));
                     }
                 }
                 if arr_ret {
@@ -8017,13 +7997,13 @@ extend Codegen {
                 if arr_ret {
                     self.emit_str(")._");
                 }
-                if freeflag.b[0] != 0 as char {
+                if freeflag[0] != 0 as char {
                     self.emit_str(")");
                 }
             },
             NODE_CLOSURE => {
                 let mut nm = Buf256 {};
-                self.closure_name(id, (&mut nm.b[0]) as *mut char, 200);
+                self.closure_name(id, (&mut nm[0]), 200);
                 if n.as_data.closure.captures.len != 0 {
                     let mut wrapped = false;
                     if self.cg_is_cond_site(id) {
@@ -8036,16 +8016,16 @@ extend Codegen {
                                 continue;
                             }
                             let mut fl = Buf32 {};
-                            cg_move_flag((&mut fl.b[0]) as *mut char, 32, cid);
+                            cg_move_flag((&mut fl[0]), 32, cid);
                             if wrapped {
-                                self.buf.format_into("{} = true, ", diag::cstr((&fl.b[0]) as *const char));
+                                self.buf.format_into("{} = true, ", diag::cstr((&fl[0])));
                             } else {
-                                self.buf.format_into("({} = true, ", diag::cstr((&fl.b[0]) as *const char));
+                                self.buf.format_into("({} = true, ", diag::cstr((&fl[0])));
                             }
                             wrapped = true;
                         }
                     }
-                    self.buf.format_into("(({}_env){{ ", diag::cstr((&nm.b[0]) as *const char));
+                    self.buf.format_into("(({}_env){{ ", diag::cstr((&nm[0])));
                     let caps = n.as_data.closure.captures;
                     for i in 0..caps.len {
                         if i != 0 {
@@ -8058,7 +8038,7 @@ extend Codegen {
                         self.emit_str(")");
                     }
                 } else {
-                    self.emit_cstr((&nm.b[0]) as *const char);
+                    self.emit_cstr((&nm[0]));
                 }
             },
             NODE_TUPLE => {
@@ -8066,10 +8046,10 @@ extend Codegen {
                 self.render_type_id(
                     unsafe (*self.cur_ast()).type_of(id),
                     "".ptr() as *const char,
-                    (&mut styp.b[0]) as *mut char,
+                    (&mut styp[0]),
                     200,
                 );
-                self.buf.format_into("({}){{ ", diag::cstr((&styp.b[0]) as *const char));
+                self.buf.format_into("({}){{ ", diag::cstr((&styp[0])));
                 let elems = n.as_data.array_literal.elements;
                 for i in 0..elems.len {
                     if i != 0 {
@@ -8086,10 +8066,10 @@ extend Codegen {
                 self.render_type_id(
                     unsafe (*self.cur_ast()).type_of(id),
                     "".ptr() as *const char,
-                    (&mut styp.b[0]) as *mut char,
+                    (&mut styp[0]),
                     200,
                 );
-                self.buf.format_into("({}){{ .start = ", diag::cstr((&styp.b[0]) as *const char));
+                self.buf.format_into("({}){{ .start = ", diag::cstr((&styp[0])));
                 self.emit_expr(n.as_data.pattern_range.start);
                 self.emit_str(", .end = ");
                 self.emit_expr(n.as_data.pattern_range.end);
@@ -8107,8 +8087,8 @@ extend Codegen {
             },
             NODE_CAST => {
                 let mut t = Buf256 {};
-                self.render_type_node(n.as_data.cast.ty, "".ptr() as *const char, (&mut t.b[0]) as *mut char, 256);
-                self.buf.format_into("(({})", diag::cstr((&t.b[0]) as *const char));
+                self.render_type_node(n.as_data.cast.ty, "".ptr() as *const char, (&mut t[0]), 256);
+                self.buf.format_into("(({})", diag::cstr((&t[0])));
                 self.emit_expr(n.as_data.cast.expression);
                 self.emit_str(")");
             },
@@ -8122,10 +8102,10 @@ extend Codegen {
                 let vo = n.as_data.va_op;
                 if vo.op == VA_ARG {
                     let mut ty = Buf256 {};
-                    self.render_type_node(vo.extra, "".ptr() as *const char, (&mut ty.b[0]) as *mut char, 256);
+                    self.render_type_node(vo.extra, "".ptr() as *const char, (&mut ty[0]), 256);
                     self.emit_str("va_arg(");
                     self.emit_expr(vo.ap);
-                    self.buf.format_into(", {})", diag::cstr((&ty.b[0]) as *const char));
+                    self.buf.format_into(", {})", diag::cstr((&ty[0])));
                 } else if vo.op == VA_START {
                     self.emit_str("va_start(");
                     self.emit_expr(vo.ap);
@@ -8149,10 +8129,10 @@ extend Codegen {
                 let mut et = Buf256 {};
                 if at != TYPE_NONE {
                     let ae = self.type_at(at).as_data.elem;
-                    self.render_type_id(ae, "".ptr() as *const char, (&mut et.b[0]) as *mut char, 256);
+                    self.render_type_id(ae, "".ptr() as *const char, (&mut et[0]), 256);
                 } else {
                     unsafe stdio::snprintf(
-                        (&mut et.b[0]) as *mut char,
+                        (&mut et[0]),
                         256,
                         "%s".ptr() as *const char,
                         "int".ptr() as *const char,
@@ -8160,7 +8140,7 @@ extend Codegen {
                 }
                 self.buf.format_into(
                     "({}[{}])",
-                    diag::cstr((&et.b[0]) as *const char),
+                    diag::cstr((&et[0])),
                     n.as_data.array_literal.elements.len,
                 );
                 self.emit_array_braces(id);
@@ -8232,18 +8212,18 @@ extend Codegen {
             self.render_type_id(
                 self.subst_resolve(unsafe (*self.cur_ast()).type_of(id)),
                 "".ptr() as *const char,
-                (&mut sn.b[0]) as *mut char,
+                (&mut sn[0]),
                 200,
             );
             let bc = tok::Span { start: s.start + 1, end: s.end };
-            self.buf.format_into("({}){{ .ptr = (const uint8_t *)", diag::cstr((&sn.b[0]) as *const char));
+            self.buf.format_into("({}){{ .ptr = (const uint8_t *)", diag::cstr((&sn[0])));
             self.emit_reescaped(bc, false);
             self.emit_str(", .len = sizeof(");
             self.emit_reescaped(bc, false);
             self.emit_str(") - 1 }");
         } else if tt == TokenType::ByteCharacterLiteral {
             self.emit_str("(uint8_t)");
-            if s.end > s.start && unsafe self.source[s.start as usize] == 'b' as u8 {
+            if s.end > s.start && unsafe self.source[s.start as usize] == b'b' {
                 self.emit_bytes(src_at(self.source, s.start + 1), (s.end - s.start - 1) as i32 as usize);
             } else {
                 self.emit_span(s);
@@ -8386,7 +8366,7 @@ fn render_ident_src(src: *const u8, s: tok::Span, buf: *mut char, cap: usize) us
         if copied > cap - 1 {
             copied = cap - 1;
         }
-        unsafe cstring::memcpy(buf as *mut void, src + s.start as usize, copied);
+        unsafe cstring::memcpy(buf, src + s.start as usize, copied);
         let mut written = copied;
         if suffix && written + 1 < cap {
             unsafe buf[written] = '_' as char;
@@ -8404,7 +8384,7 @@ fn bappend_bytes(out: *mut char, cap: usize, at: usize, text: *const char, n: us
         if copied > room {
             copied = room;
         }
-        unsafe cstring::memcpy((out + at) as *mut void, text, copied);
+        unsafe cstring::memcpy((out + at), text, copied);
         unsafe out[at + copied] = 0 as char;
     }
     return at + n;
@@ -8419,10 +8399,10 @@ fn is_c_keyword(src: *const u8, s: tok::Span) bool {
         return false;
     }
     let c0 = unsafe src[s.start as usize];
-    if c0 == 'N' as u8 {
+    if c0 == b'N' {
         return span_is(src, s, "NULL".ptr() as *const char);
     }
-    if c0 == '_' as u8 {
+    if c0 == b'_' {
         return span_is(src, s, "_Bool".ptr() as *const char) || span_is(src, s, "_Complex".ptr() as *const char) || span_is(
             src,
             s,
@@ -8433,61 +8413,61 @@ fn is_c_keyword(src: *const u8, s: tok::Span) bool {
             "_Static_assert".ptr() as *const char,
         ) || span_is(src, s, "_Thread_local".ptr() as *const char);
     }
-    if c0 == 'a' as u8 {
+    if c0 == b'a' {
         return span_is(src, s, "auto".ptr() as *const char);
     }
-    if c0 == 'b' as u8 {
+    if c0 == b'b' {
         return span_is(src, s, "break".ptr() as *const char) || span_is(src, s, "bool".ptr() as *const char);
     }
-    if c0 == 'c' as u8 {
+    if c0 == b'c' {
         return span_is(src, s, "case".ptr() as *const char) || span_is(src, s, "char".ptr() as *const char) || span_is(
             src,
             s,
             "const".ptr() as *const char,
         ) || span_is(src, s, "continue".ptr() as *const char);
     }
-    if c0 == 'd' as u8 {
+    if c0 == b'd' {
         return span_is(src, s, "default".ptr() as *const char) || span_is(src, s, "do".ptr() as *const char) || span_is(
             src,
             s,
             "double".ptr() as *const char,
         );
     }
-    if c0 == 'e' as u8 {
+    if c0 == b'e' {
         return span_is(src, s, "else".ptr() as *const char) || span_is(src, s, "enum".ptr() as *const char) || span_is(
             src,
             s,
             "extern".ptr() as *const char,
         );
     }
-    if c0 == 'f' as u8 {
+    if c0 == b'f' {
         return span_is(src, s, "float".ptr() as *const char) || span_is(src, s, "for".ptr() as *const char) || span_is(
             src,
             s,
             "false".ptr() as *const char,
         );
     }
-    if c0 == 'g' as u8 {
+    if c0 == b'g' {
         return span_is(src, s, "goto".ptr() as *const char);
     }
-    if c0 == 'i' as u8 {
+    if c0 == b'i' {
         return span_is(src, s, "if".ptr() as *const char) || span_is(src, s, "inline".ptr() as *const char) || span_is(
             src,
             s,
             "int".ptr() as *const char,
         );
     }
-    if c0 == 'l' as u8 {
+    if c0 == b'l' {
         return span_is(src, s, "long".ptr() as *const char);
     }
-    if c0 == 'r' as u8 {
+    if c0 == b'r' {
         return span_is(src, s, "register".ptr() as *const char) || span_is(src, s, "restrict".ptr() as *const char) || span_is(
             src,
             s,
             "return".ptr() as *const char,
         );
     }
-    if c0 == 's' as u8 {
+    if c0 == b's' {
         return span_is(src, s, "short".ptr() as *const char) || span_is(src, s, "signed".ptr() as *const char) || span_is(
             src,
             s,
@@ -8498,68 +8478,38 @@ fn is_c_keyword(src: *const u8, s: tok::Span) bool {
             "switch".ptr() as *const char,
         );
     }
-    if c0 == 't' as u8 {
+    if c0 == b't' {
         return span_is(src, s, "typedef".ptr() as *const char) || span_is(src, s, "true".ptr() as *const char);
     }
-    if c0 == 'u' as u8 {
+    if c0 == b'u' {
         return span_is(src, s, "union".ptr() as *const char) || span_is(src, s, "unsigned".ptr() as *const char);
     }
-    if c0 == 'v' as u8 {
+    if c0 == b'v' {
         return span_is(src, s, "void".ptr() as *const char) || span_is(src, s, "volatile".ptr() as *const char);
     }
-    if c0 == 'w' as u8 {
+    if c0 == b'w' {
         return span_is(src, s, "while".ptr() as *const char);
     }
     return false;
 }
 
-pub struct TyArgs4 {
-    pub t: [TypeId; 4],
-}
+pub type TyArgs4 = Array<TypeId, 4>;
 
 // ---- larger scratch buffers for the backend ----
-pub struct Buf176 {
-    pub b: [char; 176],
-}
-pub struct Buf200 {
-    pub b: [char; 200],
-}
-pub struct Buf240 {
-    pub b: [char; 240],
-}
-pub struct Buf300 {
-    pub b: [char; 300],
-}
-pub struct Buf320 {
-    pub b: [char; 320],
-}
-pub struct Buf368 {
-    pub b: [char; 368],
-}
-pub struct Buf400 {
-    pub b: [char; 400],
-}
-pub struct Buf600 {
-    pub b: [char; 600],
-}
-pub struct Buf1024 {
-    pub b: [char; 1024],
-}
-pub struct Buf1320 {
-    pub b: [char; 1320],
-}
-pub struct Buf1400 {
-    pub b: [char; 1400],
-}
-pub struct Buf4096 {
-    pub b: [char; 4096],
-}
-pub struct TyArgs32 {
-    pub t: [TypeId; 32],
-}
-pub struct Ids64 {
-    pub b: [NodeId; 64],
-}
+pub type Buf176 = Array<char, 176>;
+pub type Buf200 = Array<char, 200>;
+pub type Buf240 = Array<char, 240>;
+pub type Buf300 = Array<char, 300>;
+pub type Buf320 = Array<char, 320>;
+pub type Buf368 = Array<char, 368>;
+pub type Buf400 = Array<char, 400>;
+pub type Buf600 = Array<char, 600>;
+pub type Buf1024 = Array<char, 1024>;
+pub type Buf1320 = Array<char, 1320>;
+pub type Buf1400 = Array<char, 1400>;
+pub type Buf4096 = Array<char, 4096>;
+pub type TyArgs32 = Array<TypeId, 32>;
+pub type Ids64 = Array<NodeId, 64>;
 
 fn agg_kw(n: &Node) *const char {
     if n.kind == NodeKind::NODE_STRUCT && n.as_data.aggregate.is_union {
@@ -8622,10 +8572,10 @@ extend Codegen {
         let arr = self.fn_array_return(fn_id);
         if arr != NODE_NONE {
             let mut d = Buf256 {};
-            self.render_type_node(arr, "_".ptr() as *const char, (&mut d.b[0]) as *mut char, 256);
+            self.render_type_node(arr, "_".ptr() as *const char, (&mut d[0]), 256);
             self.buf.format_into(
                 "typedef struct {{ {}; }} {}_ret;\n",
-                diag::cstr((&d.b[0]) as *const char),
+                diag::cstr((&d[0])),
                 diag::cstr(nm),
             );
             return;
@@ -8643,10 +8593,10 @@ extend Codegen {
                 rid;
             };
             let mut fld = Buf32 {};
-            unsafe stdio::snprintf((&mut fld.b[0]) as *mut char, 16, "_%u".ptr() as *const char, i);
+            unsafe stdio::snprintf((&mut fld[0]), 16, "_%u".ptr() as *const char, i);
             let mut d = Buf256 {};
-            self.render_type_node(tn, (&fld.b[0]) as *const char, (&mut d.b[0]) as *mut char, 256);
-            self.emit_cstr((&d.b[0]) as *const char);
+            self.render_type_node(tn, (&fld[0]), (&mut d[0]), 256);
+            self.emit_cstr((&d[0]));
             self.emit_str("; ");
         }
         self.buf.format_into("}} {}_ret;\n", diag::cstr(nm));
@@ -8658,8 +8608,8 @@ extend Codegen {
             return;
         }
         let mut nm = Buf256 {};
-        self.function_name(fn_id, target, (&mut nm.b[0]) as *mut char, 256, true);
-        self.emit_ret_struct_named(fn_id, (&nm.b[0]) as *const char);
+        self.function_name(fn_id, target, (&mut nm[0]), 256, true);
+        self.emit_ret_struct_named(fn_id, (&nm[0]));
     }
 
     // The number of `from`/`try_from` methods across all extends targeting (tmod,tdecl).
@@ -8719,8 +8669,8 @@ extend Codegen {
         }
         let at = bappend(out, cap, 0, "__".ptr() as *const char);
         let mut e = Buf176 {};
-        self.mangle_type(self.subst_resolve(srcTy), (&mut e.b[0]) as *mut char, 176);
-        bappend(out, cap, at, (&e.b[0]) as *const char);
+        self.mangle_type(self.subst_resolve(srcTy), (&mut e[0]), 176);
+        bappend(out, cap, at, (&e[0]));
     }
 
     // "void" / "T0 p0, T1 p1" — a function's C parameter list.
@@ -8740,24 +8690,24 @@ extend Codegen {
             let mut nm = Buf128 {};
             self.render_ident(
                 unsafe (*self.cur_ast()).at_const(p.name).as_data.name.text,
-                (&mut nm.b[0]) as *mut char,
+                (&mut nm[0]),
                 128,
             );
-            if unsafe nm.b[0] == '_' as char && unsafe nm.b[1] == 0 as char {
-                unsafe stdio::snprintf((&mut nm.b[0]) as *mut char, 128, "__sc_u%u".ptr() as *const char, pid);
+            if unsafe nm[0] == '_' as char && unsafe nm[1] == 0 as char {
+                unsafe stdio::snprintf((&mut nm[0]), 128, "__sc_u%u".ptr() as *const char, pid);
             }
             let pty = unsafe (*self.cur_ast()).type_of(pid);
             let pconst = !p.is_mutable && !self.cg_type_is_free(pty);
             let mut d = Buf300 {};
             if p.ty == NODE_NONE {
-                self.render_type_id(self.subst_resolve(pty), (&nm.b[0]) as *const char, (&mut d.b[0]) as *mut char, 300);
+                self.render_type_id(self.subst_resolve(pty), (&nm[0]), (&mut d[0]), 300);
             } else {
-                self.render_binding_node(p.ty, (&nm.b[0]) as *const char, pconst, (&mut d.b[0]) as *mut char, 300);
+                self.render_binding_node(p.ty, (&nm[0]), pconst, (&mut d[0]), 300);
             }
             if any {
                 k = bappend(out, cap, k, ", ".ptr() as *const char);
             }
-            k = bappend(out, cap, k, (&d.b[0]) as *const char);
+            k = bappend(out, cap, k, (&d[0]));
             any = true;
             i = i + 1;
         }
@@ -9030,12 +8980,12 @@ extend Codegen {
         let ids = unsafe (*self.cur_ast()).list(params);
         let ty = unsafe (*self.cur_ast()).type_of(unsafe ids[0]);
         let mut vec = Buf256 {};
-        self.render_type_id(ty, "".ptr() as *const char, (&mut vec.b[0]) as *mut char, 256);
+        self.render_type_id(ty, "".ptr() as *const char, (&mut vec[0]), 256);
         self.buf.format_into(
             "\nstatic {} __sc_argv_to_vector(int argc, char **argv) {{\n  {} out = ({}){{0}};\n  if (argc > 0) {{\n    out.alloc = (Global){{}};\n    out.ptr = (str *)Global__alloc(&out.alloc, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) {{ out.ptr[i] = str__from_cstr(argv[i]); }}\n  }}\n  return out;\n}}\n\nint main(int argc, char **argv) {{\n  return __sc_user_main(__sc_argv_to_vector(argc, argv));\n}}\n\n",
-            diag::cstr((&vec.b[0]) as *const char),
-            diag::cstr((&vec.b[0]) as *const char),
-            diag::cstr((&vec.b[0]) as *const char),
+            diag::cstr((&vec[0])),
+            diag::cstr((&vec[0])),
+            diag::cstr((&vec[0])),
         );
     }
 
@@ -9052,9 +9002,9 @@ extend Codegen {
         let f = unsafe (*self.cur_ast()).at_const(fn_id).as_data.function;
         let mut nm = Buf256 {};
         if name_override != null {
-            bappend((&mut nm.b[0]) as *mut char, 256, 0, name_override);
+            bappend((&mut nm[0]), 256, 0, name_override);
         } else {
-            self.function_name(fn_id, target, (&mut nm.b[0]) as *mut char, 256, !extern_q);
+            self.function_name(fn_id, target, (&mut nm[0]), 256, !extern_q);
         }
         let is_main = target.node == NODE_NONE && name_override == null && span_is(
             self.source,
@@ -9063,7 +9013,7 @@ extend Codegen {
         );
         let main_argv_vector = is_main && self.cg_main_argv_vector(f.params);
         if main_argv_vector {
-            bappend((&mut nm.b[0]) as *mut char, 256, 0, "__sc_user_main".ptr() as *const char);
+            bappend((&mut nm[0]), 256, 0, "__sc_user_main".ptr() as *const char);
         }
         let exported = self.cg_attr(self.cur_module(), fn_id, AttrKind::ATTR_EXPORT) != null;
         let is_static = if name_override != null {
@@ -9072,24 +9022,24 @@ extend Codegen {
             self.multifile && !extern_q && !is_main && !exported && !f.is_public;
         };
         let mut ps = Buf1024 {};
-        self.render_params(f.params, (&mut ps.b[0]) as *mut char, 1024);
-        if f.is_variadic && unsafe cstring::strcmp((&ps.b[0]) as *const char, "void".ptr() as *const char) != 0 {
-            let psl = unsafe cstring::strlen((&ps.b[0]) as *const char);
-            bappend((&mut ps.b[0]) as *mut char, 1024, psl, ", ...".ptr() as *const char);
+        self.render_params(f.params, (&mut ps[0]), 1024);
+        if f.is_variadic && unsafe cstring::strcmp((&ps[0]), "void".ptr() as *const char) != 0 {
+            let psl = unsafe cstring::strlen((&ps[0]));
+            bappend((&mut ps[0]), 1024, psl, ", ...".ptr() as *const char);
         }
         let mut decl = Buf1320 {};
         let mut at: usize = 0;
-        unsafe decl.b[0] = 0 as char;
+        unsafe decl[0] = 0 as char;
         if extern_q {
-            at = bappend((&mut decl.b[0]) as *mut char, 1320, at, "(".ptr() as *const char);
+            at = bappend((&mut decl[0]), 1320, at, "(".ptr() as *const char);
         }
-        at = bappend((&mut decl.b[0]) as *mut char, 1320, at, (&nm.b[0]) as *const char);
+        at = bappend((&mut decl[0]), 1320, at, (&nm[0]));
         if extern_q {
-            at = bappend((&mut decl.b[0]) as *mut char, 1320, at, ")".ptr() as *const char);
+            at = bappend((&mut decl[0]), 1320, at, ")".ptr() as *const char);
         }
-        at = bappend((&mut decl.b[0]) as *mut char, 1320, at, "(".ptr() as *const char);
-        at = bappend((&mut decl.b[0]) as *mut char, 1320, at, (&ps.b[0]) as *const char);
-        bappend((&mut decl.b[0]) as *mut char, 1320, at, ")".ptr() as *const char);
+        at = bappend((&mut decl[0]), 1320, at, "(".ptr() as *const char);
+        at = bappend((&mut decl[0]), 1320, at, (&ps[0]));
+        bappend((&mut decl[0]), 1320, at, ")".ptr() as *const char);
 
         if extern_q {
             self.emit_str("extern ");
@@ -9110,30 +9060,30 @@ extend Codegen {
             self.emit_str("inline ");
         }
         let mut g = Buf256 {};
-        unsafe g.b[0] = 0 as char;
+        unsafe g[0] = 0 as char;
         let mut gn: usize = 0;
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_ALWAYS_INLINE) != null {
-            gn = addg((&mut g.b[0]) as *mut char, 256, gn, "always_inline".ptr() as *const char);
+            gn = addg((&mut g[0]), 256, gn, "always_inline".ptr() as *const char);
         }
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_NOINLINE) != null {
-            gn = addg((&mut g.b[0]) as *mut char, 256, gn, "noinline".ptr() as *const char);
+            gn = addg((&mut g[0]), 256, gn, "noinline".ptr() as *const char);
         }
         // @c.cold: mark rare/error paths cold + noinline (bundled, mirroring the reference C `COLD` macro) so
         // the optimizer keeps them out of the hot path's I-cache and predicts their branches as unlikely.
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_COLD) != null {
-            gn = addg((&mut g.b[0]) as *mut char, 256, gn, "cold".ptr() as *const char);
+            gn = addg((&mut g[0]), 256, gn, "cold".ptr() as *const char);
             if self.cg_attr(fmod, fn_id, AttrKind::ATTR_NOINLINE) == null {
-                gn = addg((&mut g.b[0]) as *mut char, 256, gn, "noinline".ptr() as *const char);
+                gn = addg((&mut g[0]), 256, gn, "noinline".ptr() as *const char);
             }
         }
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_USED) != null {
-            gn = addg((&mut g.b[0]) as *mut char, 256, gn, "used".ptr() as *const char);
+            gn = addg((&mut g[0]), 256, gn, "used".ptr() as *const char);
         }
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_UNUSED) != null {
-            gn = addg((&mut g.b[0]) as *mut char, 256, gn, "unused".ptr() as *const char);
+            gn = addg((&mut g[0]), 256, gn, "unused".ptr() as *const char);
         }
         if is_static && self.cg_attr(fmod, fn_id, AttrKind::ATTR_USED) == null {
-            gn = addg((&mut g.b[0]) as *mut char, 256, gn, "unused".ptr() as *const char);
+            gn = addg((&mut g[0]), 256, gn, "unused".ptr() as *const char);
         }
         let sec = self.cg_attr(fmod, fn_id, AttrKind::ATTR_SECTION);
         if sec != null {
@@ -9143,19 +9093,19 @@ extend Codegen {
                 nl = 127;
             }
             let mut nm2 = Buf128 {};
-            unsafe cstring::memcpy((&mut nm2.b[0]) as *mut void, self.mod_src(fmod) + sp.start as usize, nl);
-            unsafe nm2.b[nl] = 0 as char;
+            unsafe cstring::memcpy((&mut nm2[0]), self.mod_src(fmod) + sp.start as usize, nl);
+            unsafe nm2[nl] = 0 as char;
             let mut sb = Buf160 {};
             unsafe stdio::snprintf(
-                (&mut sb.b[0]) as *mut char,
+                (&mut sb[0]),
                 160,
                 "section(\"%s\")".ptr() as *const char,
-                (&nm2.b[0]) as *const char,
+                (&nm2[0]),
             );
-            gn = addg((&mut g.b[0]) as *mut char, 256, gn, (&sb.b[0]) as *const char);
+            gn = addg((&mut g[0]), 256, gn, (&sb[0]));
         }
         if gn != 0 {
-            self.buf.format_into("__attribute__(({})) ", diag::cstr((&g.b[0]) as *const char));
+            self.buf.format_into("__attribute__(({})) ", diag::cstr((&g[0])));
         }
 
         let rets = f.returns;
@@ -9166,31 +9116,31 @@ extend Codegen {
             self.name_span(f.name),
             "main".ptr() as *const char,
         ) {
-            self.buf.format_into("int {}", diag::cstr((&decl.b[0]) as *const char));
+            self.buf.format_into("int {}", diag::cstr((&decl[0])));
         } else if rets.len > 1 {
             buf_join3(
-                (&mut self.current_ret[0]) as *mut char,
+                (&mut self.current_ret[0]),
                 128,
-                (&nm.b[0]) as *const char,
+                (&nm[0]),
                 "".ptr() as *const char,
                 "_ret".ptr() as *const char,
             );
             let cr = (&self.current_ret[0]) as *const char;
             self.emit_cstr(cr);
             self.emit_str(" ");
-            self.emit_cstr((&decl.b[0]) as *const char);
+            self.emit_cstr((&decl[0]));
         } else if self.fn_array_return(fn_id) != NODE_NONE {
             buf_join3(
-                (&mut self.current_ret[0]) as *mut char,
+                (&mut self.current_ret[0]),
                 128,
-                (&nm.b[0]) as *const char,
+                (&nm[0]),
                 "".ptr() as *const char,
                 "_ret".ptr() as *const char,
             );
             let cr = (&self.current_ret[0]) as *const char;
             self.emit_cstr(cr);
             self.emit_str(" ");
-            self.emit_cstr((&decl.b[0]) as *const char);
+            self.emit_cstr((&decl[0]));
         } else if rets.len == 1 {
             let r0 = unsafe (*self.cur_ast()).list(rets)[0];
             let rn = unsafe (*self.cur_ast()).at_const(r0);
@@ -9202,14 +9152,14 @@ extend Codegen {
             let mut out = Buf1400 {};
             self.render_type_node(
                 self.current_fn_ret_node,
-                (&decl.b[0]) as *const char,
-                (&mut out.b[0]) as *mut char,
+                (&decl[0]),
+                (&mut out[0]),
                 1400,
             );
-            self.emit_cstr((&out.b[0]) as *const char);
+            self.emit_cstr((&out[0]));
         } else {
             self.emit_str("void ");
-            self.emit_cstr((&decl.b[0]) as *const char);
+            self.emit_cstr((&decl[0]));
         }
 
         if with_body && f.body != NODE_NONE {
@@ -9230,23 +9180,23 @@ extend Codegen {
             let mut uarr = Bools64 {};
             let mut np: i32 = 0;
             while np < 64 && np as u32 < f.params.len {
-                upids.b[np as usize] = unsafe pids[np as usize];
+                upids[np as usize] = unsafe pids[np as usize];
                 np += 1;
             }
             let mut uleft = np;
             if np > 0 {
                 self.cg_subtree_uses_multi(
                     f.body,
-                    (&upids.b[0]) as *const NodeId,
+                    (&upids[0]) as *const NodeId,
                     np,
-                    (&mut uarr.b[0]) as *mut bool,
+                    (&mut uarr[0]) as *mut bool,
                     (&mut uleft) as *mut i32,
                 );
             }
             for i in 0..f.params.len {
                 let pid = unsafe pids[i as usize];
                 let pused = if i < 64 {
-                    uarr.b[i as usize];
+                    uarr[i as usize];
                 } else {
                     self.cg_subtree_uses(f.body, pid);
                 };
@@ -9349,11 +9299,11 @@ extend Codegen {
     fn emit_enum_full(self: &mut Self, enum_id: NodeId) void {
         let ag = unsafe (*self.cur_ast()).at_const(enum_id).as_data.aggregate;
         let mut nm = Buf160 {};
-        self.render_qualified(self.cur_module(), ag.name, (&mut nm.b[0]) as *mut char, 160);
+        self.render_qualified(self.cur_module(), ag.name, (&mut nm[0]), 160);
         self.buf.format_into(
             "#ifndef SUPER_ENUM_{}\n#define SUPER_ENUM_{}\n",
-            diag::cstr((&nm.b[0]) as *const char),
-            diag::cstr((&nm.b[0]) as *const char),
+            diag::cstr((&nm[0])),
+            diag::cstr((&nm[0])),
         );
         self.emit_str("typedef enum { ");
         let ms = ag.members;
@@ -9379,11 +9329,11 @@ extend Codegen {
     fn emit_enum_tag_decl(self: &mut Self, enum_id: NodeId) void {
         let ag = unsafe (*self.cur_ast()).at_const(enum_id).as_data.aggregate;
         let mut nm = Buf160 {};
-        self.render_qualified(self.cur_module(), ag.name, (&mut nm.b[0]) as *mut char, 160);
+        self.render_qualified(self.cur_module(), ag.name, (&mut nm[0]), 160);
         self.buf.format_into(
             "#ifndef SUPER_ENUMTAG_{}\n#define SUPER_ENUMTAG_{}\n",
-            diag::cstr((&nm.b[0]) as *const char),
-            diag::cstr((&nm.b[0]) as *const char),
+            diag::cstr((&nm[0])),
+            diag::cstr((&nm[0])),
         );
         self.emit_str("typedef enum { ");
         let ms = ag.members;
@@ -9432,19 +9382,19 @@ extend Codegen {
                 if v.struct_payload {
                     let mut m = Buf128 {};
                     let msp = self.name_span(pe.as_data.field.name);
-                    self.render_ident(msp, (&mut m.b[0]) as *mut char, 128);
+                    self.render_ident(msp, (&mut m[0]), 128);
                     self.render_type_node(
                         pe.as_data.field.ty,
-                        (&m.b[0]) as *const char,
-                        (&mut d.b[0]) as *mut char,
+                        (&m[0]),
+                        (&mut d[0]),
                         256,
                     );
                 } else {
                     let mut fld = Buf32 {};
-                    unsafe stdio::snprintf((&mut fld.b[0]) as *mut char, 24, "_%u".ptr() as *const char, k);
-                    self.render_type_node(pid, (&fld.b[0]) as *const char, (&mut d.b[0]) as *mut char, 256);
+                    unsafe stdio::snprintf((&mut fld[0]), 24, "_%u".ptr() as *const char, k);
+                    self.render_type_node(pid, (&fld[0]), (&mut d[0]), 256);
                 }
-                self.emit_cstr((&d.b[0]) as *const char);
+                self.emit_cstr((&d[0]));
                 self.emit_str("; ");
             }
             self.emit_str("} ");
@@ -9466,25 +9416,25 @@ extend Codegen {
         let al = self.cg_attr(self.cur_module(), declId, AttrKind::ATTR_ALIGN);
         if pk != null || al != null {
             let mut g = Buf64 {};
-            unsafe g.b[0] = 0 as char;
+            unsafe g[0] = 0 as char;
             let mut gn: usize = 0;
             if pk != null {
-                gn = bappend((&mut g.b[0]) as *mut char, 64, gn, "packed".ptr() as *const char);
+                gn = bappend((&mut g[0]), 64, gn, "packed".ptr() as *const char);
             }
             if al != null {
                 if gn != 0 {
-                    gn = bappend((&mut g.b[0]) as *mut char, 64, gn, ", ".ptr() as *const char);
+                    gn = bappend((&mut g[0]), 64, gn, ", ".ptr() as *const char);
                 }
                 let mut a = Buf32 {};
                 unsafe stdio::snprintf(
-                    (&mut a.b[0]) as *mut char,
+                    (&mut a[0]),
                     32,
                     "aligned(%u)".ptr() as *const char,
                     unsafe (*al).arg,
                 );
-                bappend((&mut g.b[0]) as *mut char, 64, gn, (&a.b[0]) as *const char);
+                bappend((&mut g[0]), 64, gn, (&a[0]));
             }
-            self.buf.format_into("__attribute__(({})) ", diag::cstr((&g.b[0]) as *const char));
+            self.buf.format_into("__attribute__(({})) ", diag::cstr((&g[0])));
         }
         self.emit_local_type_name(ag.name);
         self.emit_str(" {\n");
@@ -9495,11 +9445,11 @@ extend Codegen {
             for j in 0..ag.members.len {
                 let ftn = unsafe (*self.cur_ast()).list(ag.members)[j as usize];
                 let mut nm = Buf32 {};
-                unsafe stdio::snprintf((&mut nm.b[0]) as *mut char, 16, "_%u".ptr() as *const char, j);
+                unsafe stdio::snprintf((&mut nm[0]), 16, "_%u".ptr() as *const char, j);
                 let mut d = Buf256 {};
-                self.render_type_node(ftn, (&nm.b[0]) as *const char, (&mut d.b[0]) as *mut char, 256);
+                self.render_type_node(ftn, (&nm[0]), (&mut d[0]), 256);
                 self.emit_indent();
-                self.emit_cstr((&d.b[0]) as *const char);
+                self.emit_cstr((&d[0]));
                 self.emit_str(";\n");
             }
             self.depth = self.depth - 1;
@@ -9510,11 +9460,11 @@ extend Codegen {
                 let fld = unsafe (*self.cur_ast()).at_const(fid).as_data.field;
                 let mut nm = Buf128 {};
                 let fnsp = self.name_span(fld.name);
-                self.render_ident(fnsp, (&mut nm.b[0]) as *mut char, 128);
+                self.render_ident(fnsp, (&mut nm[0]), 128);
                 let mut d = Buf256 {};
-                self.render_type_node(fld.ty, (&nm.b[0]) as *const char, (&mut d.b[0]) as *mut char, 256);
+                self.render_type_node(fld.ty, (&nm[0]), (&mut d[0]), 256);
                 self.emit_indent();
-                self.emit_cstr((&d.b[0]) as *const char);
+                self.emit_cstr((&d[0]));
                 self.emit_str(";\n");
             }
             self.depth = self.depth - 1;
@@ -9524,13 +9474,13 @@ extend Codegen {
     fn emit_struct_inst(self: &mut Self, it: &TyInstance, with_body: bool) void {
         let kw = agg_kw(unsafe (*self.cur_ast()).at_const(it.decl));
         let mut nm = Buf200 {};
-        self.inst_name(it, (&mut nm.b[0]) as *mut char, 200);
+        self.inst_name(it, (&mut nm[0]), 200);
         if !with_body {
             self.buf.format_into(
                 "typedef {} {} {};\n",
                 diag::cstr(kw),
-                diag::cstr((&nm.b[0]) as *const char),
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
+                diag::cstr((&nm[0])),
             );
             return;
         }
@@ -9547,18 +9497,18 @@ extend Codegen {
             self.nsubst = self.nsubst + 1;
             i = i + 1;
         }
-        self.buf.format_into("{} {} {{\n", diag::cstr(kw), diag::cstr((&nm.b[0]) as *const char));
+        self.buf.format_into("{} {} {{\n", diag::cstr(kw), diag::cstr((&nm[0])));
         self.depth = self.depth + 1;
         for j in 0..ag.members.len {
             let fid = unsafe (*self.cur_ast()).list(ag.members)[j as usize];
             let fld = unsafe (*self.cur_ast()).at_const(fid).as_data.field;
             let mut fnm = Buf128 {};
             let fnsp = self.name_span(fld.name);
-            self.render_ident(fnsp, (&mut fnm.b[0]) as *mut char, 128);
+            self.render_ident(fnsp, (&mut fnm[0]), 128);
             let mut d = Buf256 {};
-            self.render_type_node(fld.ty, (&fnm.b[0]) as *const char, (&mut d.b[0]) as *mut char, 256);
+            self.render_type_node(fld.ty, (&fnm[0]), (&mut d[0]), 256);
             self.emit_indent();
-            self.emit_cstr((&d.b[0]) as *const char);
+            self.emit_cstr((&d[0]));
             self.emit_str(";\n");
         }
         self.depth = self.depth - 1;
@@ -9567,21 +9517,21 @@ extend Codegen {
     }
     fn emit_enum_inst(self: &mut Self, it: &TyInstance, with_body: bool) void {
         let mut nm = Buf200 {};
-        self.inst_name(it, (&mut nm.b[0]) as *mut char, 200);
+        self.inst_name(it, (&mut nm[0]), 200);
         let ag = unsafe (*self.cur_ast()).at_const(it.decl).as_data.aggregate;
         if !self.aggregate_has_payload(it.decl) {
             if with_body {
                 self.emit_str("typedef ");
                 self.emit_local_type_name(ag.name);
-                self.buf.format_into(" {};\n", diag::cstr((&nm.b[0]) as *const char));
+                self.buf.format_into(" {};\n", diag::cstr((&nm[0])));
             }
             return;
         }
         if !with_body {
             self.buf.format_into(
                 "typedef struct {} {};\n",
-                diag::cstr((&nm.b[0]) as *const char),
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
+                diag::cstr((&nm[0])),
             );
             return;
         }
@@ -9597,7 +9547,7 @@ extend Codegen {
             self.nsubst = self.nsubst + 1;
             i = i + 1;
         }
-        self.buf.format_into("struct {} {{\n", diag::cstr((&nm.b[0]) as *const char));
+        self.buf.format_into("struct {} {{\n", diag::cstr((&nm[0])));
         self.emit_enum_struct_body(it.decl);
         self.emit_str("};\n");
         self.nsubst = 0;
@@ -9624,7 +9574,7 @@ extend Codegen {
             }
             let mut dup = false;
             for s in 0..ns {
-                if unsafe seen.b[s as usize] == it.decl {
+                if unsafe seen[s as usize] == it.decl {
                     dup = true;
                 }
             }
@@ -9632,7 +9582,7 @@ extend Codegen {
                 continue;
             }
             if ns < 64 {
-                unsafe seen.b[ns as usize] = it.decl;
+                unsafe seen[ns as usize] = it.decl;
                 ns = ns + 1;
             }
             if self.aggregate_has_payload(it.decl) {
@@ -9651,7 +9601,7 @@ extend Codegen {
             }
             let mut dup = false;
             for s in 0..ns {
-                if unsafe seen.b[s as usize] == did {
+                if unsafe seen[s as usize] == did {
                     dup = true;
                 }
             }
@@ -9659,7 +9609,7 @@ extend Codegen {
                 continue;
             }
             if ns < 64 {
-                unsafe seen.b[ns as usize] = did;
+                unsafe seen[ns as usize] = did;
                 ns = ns + 1;
             }
             if self.aggregate_has_payload(did) {
@@ -9742,7 +9692,7 @@ extend Codegen {
             let mn = unsafe (*self.cur_ast()).at_const(unsafe mids[m as usize]);
             if dk == NodeKind::NODE_STRUCT && mn.kind == NodeKind::NODE_FIELD {
                 let ft = self.subst_resolve(unsafe (*self.cur_ast()).type_of(mn.as_data.field.ty));
-                self.push_home_dep(ft, (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
+                self.push_home_dep(ft, (&mut deps[0]) as *mut TypeId, (&mut nh) as *mut i32);
             } else if dk == NodeKind::NODE_ENUM && mn.kind == NodeKind::NODE_VARIANT {
                 let pids = unsafe (*self.cur_ast()).list(mn.as_data.variant.payload);
                 for kk in 0..mn.as_data.variant.payload.len {
@@ -9753,13 +9703,13 @@ extend Codegen {
                         unsafe pids[kk as usize];
                     };
                     let ft = self.subst_resolve(unsafe (*self.cur_ast()).type_of(ptn));
-                    self.push_home_dep(ft, (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
+                    self.push_home_dep(ft, (&mut deps[0]) as *mut TypeId, (&mut nh) as *mut i32);
                 }
             }
         }
         self.nsubst = saved;
         for d in 0..nh {
-            self.emit_home_dep(unsafe deps.t[d as usize]);
+            self.emit_home_dep(unsafe deps[d as usize]);
         }
         if dk == NodeKind::NODE_STRUCT {
             self.emit_struct_inst(&it, with_body);
@@ -9784,13 +9734,13 @@ extend Codegen {
             if n_kind == NodeKind::NODE_STRUCT && is_tuple {
                 self.push_home_dep(
                     unsafe (*self.cur_ast()).type_of(unsafe mids[i as usize]),
-                    (&mut deps.t[0]) as *mut TypeId,
+                    (&mut deps[0]) as *mut TypeId,
                     (&mut nh) as *mut i32,
                 );
             } else if n_kind == NodeKind::NODE_STRUCT && m.kind == NodeKind::NODE_FIELD {
                 self.push_home_dep(
                     unsafe (*self.cur_ast()).type_of(m.as_data.field.ty),
-                    (&mut deps.t[0]) as *mut TypeId,
+                    (&mut deps[0]) as *mut TypeId,
                     (&mut nh) as *mut i32,
                 );
             } else if n_kind == NodeKind::NODE_ENUM && m.kind == NodeKind::NODE_VARIANT {
@@ -9804,14 +9754,14 @@ extend Codegen {
                     };
                     self.push_home_dep(
                         unsafe (*self.cur_ast()).type_of(ptn),
-                        (&mut deps.t[0]) as *mut TypeId,
+                        (&mut deps[0]) as *mut TypeId,
                         (&mut nh) as *mut i32,
                     );
                 }
             }
         }
         for d in 0..nh {
-            self.emit_home_dep(unsafe deps.t[d as usize]);
+            self.emit_home_dep(unsafe deps[d as usize]);
         }
         self.emit_type_decl(declId);
         unsafe state[declId as usize] = 2 as u8;
@@ -9873,7 +9823,7 @@ extend Codegen {
             for i in 0..n {
                 self.emit_inst_dfs(i as u32, state, n, with_body);
             }
-            unsafe stdlib::free(state as *mut void);
+            unsafe stdlib::free(state);
         }
     }
     fn inst_rehomed_here(self: &Self, it: &TyInstance) bool {
@@ -9919,9 +9869,9 @@ extend Codegen {
                 4 as u8;
             };
             for i in 0..nn {
-                unsafe na.t[i as usize] = self.rehome_subst_type(owner_mod, it, inst.args[i as usize]);
+                unsafe na[i as usize] = self.rehome_subst_type(owner_mod, it, inst.args[i as usize]);
             }
-            return unsafe (*self.cur_ast()).intern_instance(inst.module, inst.decl, (&na.t[0]) as *const TypeId, nn);
+            return unsafe (*self.cur_ast()).intern_instance(inst.module, inst.decl, (&na[0]) as *const TypeId, nn);
         }
         return unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(owner_mod), t);
     }
@@ -9976,7 +9926,7 @@ extend Codegen {
                 let fty = unsafe (*self.mod_ast(owner_mod)).at_const(mid).as_data.field.ty;
                 let fnode_ty = unsafe (*self.mod_ast(owner_mod)).type_of(fty);
                 let ft = self.rehome_subst_type(owner_mod, &it, fnode_ty);
-                self.push_home_dep(ft, (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
+                self.push_home_dep(ft, (&mut deps[0]) as *mut TypeId, (&mut nh) as *mut i32);
             } else if dn_kind == NodeKind::NODE_ENUM && mnk == NodeKind::NODE_VARIANT {
                 let payload = unsafe (*self.mod_ast(owner_mod)).at_const(mid).as_data.variant.payload;
                 let pids = unsafe (*self.mod_ast(owner_mod)).list(payload);
@@ -9990,12 +9940,12 @@ extend Codegen {
                     };
                     let fnode_ty = unsafe (*self.mod_ast(owner_mod)).type_of(tn);
                     let ft = self.rehome_subst_type(owner_mod, &it, fnode_ty);
-                    self.push_home_dep(ft, (&mut deps.t[0]) as *mut TypeId, (&mut nh) as *mut i32);
+                    self.push_home_dep(ft, (&mut deps[0]) as *mut TypeId, (&mut nh) as *mut i32);
                 }
             }
         }
         for d in 0..nh {
-            self.emit_home_dep(unsafe deps.t[d as usize]);
+            self.emit_home_dep(unsafe deps[d as usize]);
         }
         self.emit_rehomed_struct(&it, with_body);
         unsafe state[idx as usize] = 2 as u8;
@@ -10041,7 +9991,7 @@ extend Codegen {
             for ii in 0..n {
                 self.emit_rehomed_struct_dfs(ii as u32, state, n, with_body);
             }
-            unsafe stdlib::free(state as *mut void);
+            unsafe stdlib::free(state);
         }
     }
     fn emit_rehomed_forwards(self: &mut Self) void {
@@ -10055,23 +10005,23 @@ extend Codegen {
             }
             let dn_kind = unsafe (*self.mod_ast(it.module)).at_const(it.decl).kind;
             let mut inm = Buf200 {};
-            self.inst_name(&it, (&mut inm.b[0]) as *mut char, 200);
+            self.inst_name(&it, (&mut inm[0]), 200);
             if dn_kind == NodeKind::NODE_STRUCT || self.aggregate_has_payload_in(it.module, it.decl) {
                 let kw = agg_kw(unsafe (*self.mod_ast(it.module)).at_const(it.decl));
                 self.buf.format_into(
                     "typedef {} {} {};\n",
                     diag::cstr(kw),
-                    diag::cstr((&inm.b[0]) as *const char),
-                    diag::cstr((&inm.b[0]) as *const char),
+                    diag::cstr((&inm[0])),
+                    diag::cstr((&inm[0])),
                 );
             } else {
                 let anm = unsafe (*self.mod_ast(it.module)).at_const(it.decl).as_data.aggregate.name;
                 let mut en = Buf160 {};
-                self.render_qualified(it.module, anm, (&mut en.b[0]) as *mut char, 160);
+                self.render_qualified(it.module, anm, (&mut en[0]), 160);
                 self.buf.format_into(
                     "typedef {} {};\n",
-                    diag::cstr((&en.b[0]) as *const char),
-                    diag::cstr((&inm.b[0]) as *const char),
+                    diag::cstr((&en[0])),
+                    diag::cstr((&inm[0])),
                 );
             }
         }
@@ -10094,7 +10044,7 @@ extend Codegen {
             }
             self.inst_emit_state = null;
             self.inst_emit_n = 0;
-            unsafe stdlib::free(state as *mut void);
+            unsafe stdlib::free(state);
         } else {
             for i in 0..n {
                 let it = *unsafe (*self.cur_ast()).instance(i as u32);
@@ -10161,11 +10111,11 @@ extend Codegen {
         let items = self.program_items();
         let iids = unsafe (*self.cur_ast()).list(items);
         let mut inm = Buf200 {};
-        self.inst_name(it, (&mut inm.b[0]) as *mut char, 200);
+        self.inst_name(it, (&mut inm[0]), 200);
         let ifnv = self.inst_mentions_fnval(it);
         // CG-4: only extends whose target resolves to it.decl can match this instance.
         let mut ch = ExtChain {};
-        let nchain = self.cg_ext_chain(self.cur_module(), it.decl, (&mut ch.p[0]) as *mut i32, 64);
+        let nchain = self.cg_ext_chain(self.cur_module(), it.decl, (&mut ch[0]) as *mut i32, 64);
         let total = if nchain >= 0 {
             nchain;
         } else {
@@ -10173,7 +10123,7 @@ extend Codegen {
         };
         for x in 0..total {
             let i = if nchain >= 0 {
-                ch.p[x as usize];
+                ch[x as usize];
             } else {
                 x;
             };
@@ -10233,10 +10183,10 @@ extend Codegen {
                     g = g + 1;
                 }
                 let mut nm = Buf320 {};
-                let mut at = bappend((&mut nm.b[0]) as *mut char, 320, 0, (&inm.b[0]) as *const char);
-                at = bappend((&mut nm.b[0]) as *mut char, 320, at, "__".ptr() as *const char);
+                let mut at = bappend((&mut nm[0]), 320, 0, (&inm[0]));
+                at = bappend((&mut nm[0]), 320, at, "__".ptr() as *const char);
                 let mnsp = self.name_span(mf.name);
-                self.render_ident(mnsp, unsafe ((&mut nm.b[0]) as *mut char + at) as *mut char, 320 - at);
+                self.render_ident(mnsp, unsafe ((&mut nm[0]) as *mut char + at) as *mut char, 320 - at);
                 let stat = self.multifile && (ifnv || !mf.is_public);
                 if self.minst_only && mf.generics.len == 0 {
                     self.nsubst = 0;
@@ -10253,14 +10203,14 @@ extend Codegen {
                         continue;
                     }
                     if !with_body {
-                        self.emit_ret_struct_named(mid, (&nm.b[0]) as *const char);
+                        self.emit_ret_struct_named(mid, (&nm[0]));
                     }
                     self.emit_function(
                         mid,
                         DefId { module: 0, node: NODE_NONE },
                         false,
                         with_body,
-                        (&nm.b[0]) as *const char,
+                        (&nm[0]),
                         stat,
                     );
                     self.nsubst = 0;
@@ -10304,27 +10254,27 @@ extend Codegen {
                         continue;
                     }
                     let mut snm = Buf400 {};
-                    let mut a2 = bappend((&mut snm.b[0]) as *mut char, 400, 0, (&nm.b[0]) as *const char);
+                    let mut a2 = bappend((&mut snm[0]), 400, 0, (&nm[0]));
                     for gg in 0..minst.n {
-                        a2 = bappend((&mut snm.b[0]) as *mut char, 400, a2, "__".ptr() as *const char);
+                        a2 = bappend((&mut snm[0]), 400, a2, "__".ptr() as *const char);
                         let tg = if mi_src == self.cur_ast() {
                             minst.targs[gg as usize];
                         } else {
                             unsafe (*self.cur_ast()).reintern(unsafe &*mi_src, minst.targs[gg as usize]);
                         };
                         let mut e = Buf176 {};
-                        self.mangle_type(tg, (&mut e.b[0]) as *mut char, 176);
-                        a2 = bappend((&mut snm.b[0]) as *mut char, 400, a2, (&e.b[0]) as *const char);
+                        self.mangle_type(tg, (&mut e[0]), 176);
+                        a2 = bappend((&mut snm[0]), 400, a2, (&e[0]));
                     }
                     if !with_body {
-                        self.emit_ret_struct_named(mid, (&snm.b[0]) as *const char);
+                        self.emit_ret_struct_named(mid, (&snm[0]));
                     }
                     self.emit_function(
                         mid,
                         DefId { module: 0, node: NODE_NONE },
                         false,
                         with_body,
-                        (&snm.b[0]) as *const char,
+                        (&snm[0]),
                         stat || fnval,
                     );
                 }
@@ -10473,16 +10423,16 @@ extend Codegen {
                     g = g + 1;
                 }
                 let mut nm = Buf256 {};
-                self.spec_name(fn2, (&inst.args[0]) as *const TypeId, inst.n as i32, (&mut nm.b[0]) as *mut char, 256);
+                self.spec_name(fn2, (&inst.args[0]) as *const TypeId, inst.n as i32, (&mut nm[0]), 256);
                 if !with_body {
-                    self.emit_ret_struct_named(fn2.node, (&nm.b[0]) as *const char);
+                    self.emit_ret_struct_named(fn2.node, (&nm[0]));
                 }
                 self.emit_function(
                     fn2.node,
                     DefId { module: 0, node: NODE_NONE },
                     false,
                     with_body,
-                    (&nm.b[0]) as *const char,
+                    (&nm[0]),
                     true,
                 );
                 self.nsubst = 0;
@@ -10499,7 +10449,7 @@ extend Codegen {
             let oninst = unsafe (*owner).instances.len();
             let mut oargs = TyArgs4 {};
             for k2 in 0..inst.n {
-                unsafe oargs.t[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, inst.args[k2 as usize]);
+                unsafe oargs[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, inst.args[k2 as usize]);
             }
             self.ast = owner;
             self.source = osrc;
@@ -10511,21 +10461,21 @@ extend Codegen {
             let mut g: u32 = 0;
             while g < gens.len && g < inst.n as u32 && self.nsubst < 16 {
                 self.subst[self.nsubst as usize].param = DefId { module: fn2.module, node: unsafe gids[g as usize] };
-                self.subst[self.nsubst as usize].concrete = unsafe oargs.t[g as usize];
+                self.subst[self.nsubst as usize].concrete = unsafe oargs[g as usize];
                 self.nsubst = self.nsubst + 1;
                 g = g + 1;
             }
             let mut nm = Buf256 {};
-            self.spec_name(fn2, (&oargs.t[0]) as *const TypeId, inst.n as i32, (&mut nm.b[0]) as *mut char, 256);
+            self.spec_name(fn2, (&oargs[0]) as *const TypeId, inst.n as i32, (&mut nm[0]), 256);
             if !with_body {
-                self.emit_ret_struct_named(fn2.node, (&nm.b[0]) as *const char);
+                self.emit_ret_struct_named(fn2.node, (&nm[0]));
             }
             self.emit_function(
                 fn2.node,
                 DefId { module: 0, node: NODE_NONE },
                 false,
                 with_body,
-                (&nm.b[0]) as *const char,
+                (&nm[0]),
                 true,
             );
             self.nsubst = 0;
@@ -10618,9 +10568,9 @@ extend Codegen {
                     self.emit_ret_struct(rid, target);
                 }
                 let mut dnm = Buf256 {};
-                self.function_name(rid, target, (&mut dnm.b[0]) as *mut char, 256, true);
+                self.function_name(rid, target, (&mut dnm[0]), 256, true);
                 let stat = self.multifile && !vis;
-                self.emit_function(rid, target, false, with_body, (&dnm.b[0]) as *const char, stat);
+                self.emit_function(rid, target, false, with_body, (&dnm[0]), stat);
                 self.nsubst = 0;
                 if foreign {
                     unsafe (*self.cur_ast()).instances.truncate(oninst);
@@ -10637,7 +10587,7 @@ extend Codegen {
         let cl = unsafe (*self.cur_ast()).at_const(id).as_data.closure;
         let caps = cl.captures.len != 0;
         let mut nm = Buf200 {};
-        self.closure_name(id, (&mut nm.b[0]) as *mut char, 200);
+        self.closure_name(id, (&mut nm[0]), 200);
         if caps && !with_body {
             self.emit_str("typedef struct { ");
             let cids = unsafe (*self.cur_ast()).list(cl.captures);
@@ -10645,7 +10595,7 @@ extend Codegen {
                 let cid = unsafe cids[i as usize];
                 let mut fnm = Buf128 {};
                 let csp = self.cg_decl_name_span(cid);
-                self.render_ident(csp, (&mut fnm.b[0]) as *mut char, 128);
+                self.render_ident(csp, (&mut fnm[0]), 128);
                 let mut ft = unsafe (*self.cur_ast()).type_of(cid);
                 if (cl.mut_caps as u64 >> i as u64 & 1 as u64) != 0 as u64 {
                     ft = unsafe (*self.cur_ast()).intern_type(
@@ -10657,16 +10607,16 @@ extend Codegen {
                     );
                 }
                 let mut d = Buf300 {};
-                self.render_type_id(ft, (&fnm.b[0]) as *const char, (&mut d.b[0]) as *mut char, 300);
-                self.buf.format_into("{}; ", diag::cstr((&d.b[0]) as *const char));
+                self.render_type_id(ft, (&fnm[0]), (&mut d[0]), 300);
+                self.buf.format_into("{}; ", diag::cstr((&d[0])));
             }
-            self.buf.format_into("}} {}_env;\n", diag::cstr((&nm.b[0]) as *const char));
+            self.buf.format_into("}} {}_env;\n", diag::cstr((&nm[0])));
             let fnty = Ty { kind: TypeKind::TYPE_FUNCTION, module: self.cur_module(), as_data: TyAs { decl: id } };
             if self.cg_fn_owns(&fnty) {
                 self.buf.format_into(
                     "static __attribute__((unused)) void {}_env_free({}_env *const __e) {{ ",
-                    diag::cstr((&nm.b[0]) as *const char),
-                    diag::cstr((&nm.b[0]) as *const char),
+                    diag::cstr((&nm[0])),
+                    diag::cstr((&nm[0])),
                 );
                 for i2 in 0..cl.captures.len {
                     let cid = unsafe cids[i2 as usize];
@@ -10677,31 +10627,31 @@ extend Codegen {
                     }
                     let mut fnm = Buf128 {};
                     let csp = self.cg_decl_name_span(cid);
-                    self.render_ident(csp, (&mut fnm.b[0]) as *mut char, 128);
+                    self.render_ident(csp, (&mut fnm[0]), 128);
                     if self.emit_free_target(unsafe (*self.cur_ast()).type_of(cid)) {
-                        self.buf.format_into("(&__e->{}); ", diag::cstr((&fnm.b[0]) as *const char));
+                        self.buf.format_into("(&__e->{}); ", diag::cstr((&fnm[0])));
                     }
                 }
                 self.emit_str("}\n");
             }
         }
         let mut ps = Buf1024 {};
-        self.render_params(cl.params, (&mut ps.b[0]) as *mut char, 1024);
+        self.render_params(cl.params, (&mut ps[0]), 1024);
         let mut decl = Buf1320 {};
-        let mut at = bappend((&mut decl.b[0]) as *mut char, 1320, 0, (&nm.b[0]) as *const char);
-        at = bappend((&mut decl.b[0]) as *mut char, 1320, at, "(".ptr() as *const char);
+        let mut at = bappend((&mut decl[0]), 1320, 0, (&nm[0]));
+        at = bappend((&mut decl[0]), 1320, at, "(".ptr() as *const char);
         if caps {
-            at = bappend((&mut decl.b[0]) as *mut char, 1320, at, "const ".ptr() as *const char);
-            at = bappend((&mut decl.b[0]) as *mut char, 1320, at, (&nm.b[0]) as *const char);
-            at = bappend((&mut decl.b[0]) as *mut char, 1320, at, "_env *const __env".ptr() as *const char);
-            if unsafe cstring::strcmp((&ps.b[0]) as *const char, "void".ptr() as *const char) != 0 {
-                at = bappend((&mut decl.b[0]) as *mut char, 1320, at, ", ".ptr() as *const char);
-                at = bappend((&mut decl.b[0]) as *mut char, 1320, at, (&ps.b[0]) as *const char);
+            at = bappend((&mut decl[0]), 1320, at, "const ".ptr() as *const char);
+            at = bappend((&mut decl[0]), 1320, at, (&nm[0]));
+            at = bappend((&mut decl[0]), 1320, at, "_env *const __env".ptr() as *const char);
+            if unsafe cstring::strcmp((&ps[0]), "void".ptr() as *const char) != 0 {
+                at = bappend((&mut decl[0]), 1320, at, ", ".ptr() as *const char);
+                at = bappend((&mut decl[0]), 1320, at, (&ps[0]));
             }
         } else {
-            at = bappend((&mut decl.b[0]) as *mut char, 1320, at, (&ps.b[0]) as *const char);
+            at = bappend((&mut decl[0]), 1320, at, (&ps[0]));
         }
-        bappend((&mut decl.b[0]) as *mut char, 1320, at, ")".ptr() as *const char);
+        bappend((&mut decl[0]), 1320, at, ")".ptr() as *const char);
 
         let body = cl.body;
         let expr_body = cl.expr_body;
@@ -10712,7 +10662,7 @@ extend Codegen {
         self.emit_str("static __attribute__((unused)) ");
         let mut out = Buf1400 {};
         if expr_body {
-            self.render_type_id(rt, (&decl.b[0]) as *const char, (&mut out.b[0]) as *mut char, 1400);
+            self.render_type_id(rt, (&decl[0]), (&mut out[0]), 1400);
         } else {
             let rets = cl.returns;
             if rets.len == 1 {
@@ -10723,18 +10673,18 @@ extend Codegen {
                 } else {
                     r0;
                 };
-                self.render_type_node(rtn, (&decl.b[0]) as *const char, (&mut out.b[0]) as *mut char, 1400);
+                self.render_type_node(rtn, (&decl[0]), (&mut out[0]), 1400);
             } else {
                 buf_join3(
-                    (&mut out.b[0]) as *mut char,
+                    (&mut out[0]),
                     1400,
                     "void ".ptr() as *const char,
                     "".ptr() as *const char,
-                    (&decl.b[0]) as *const char,
+                    (&decl[0]),
                 );
             }
         }
-        self.emit_cstr((&out.b[0]) as *const char);
+        self.emit_cstr((&out[0]));
         if !with_body {
             self.emit_str(";\n");
             return;
@@ -10875,13 +10825,13 @@ extend Codegen {
             self.cb_callee = ci.callee;
             self.cb_callee_closure = ci.callee_closure;
             let mut nm = Buf300 {};
-            self.cb_spec_name(ci.func, self.cb_callee, self.cb_callee_closure, (&mut nm.b[0]) as *mut char, 300);
+            self.cb_spec_name(ci.func, self.cb_callee, self.cb_callee_closure, (&mut nm[0]), 300);
             self.emit_function(
                 ci.func.node,
                 DefId { module: 0, node: NODE_NONE },
                 false,
                 with_body,
-                (&nm.b[0]) as *const char,
+                (&nm[0]),
                 true,
             );
             self.cb_param = NODE_NONE;
@@ -10906,8 +10856,8 @@ extend Codegen {
                 continue;
             }
             let mut stem = Buf176 {};
-            self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem.b[0]) as *mut char, 176);
-            let sp = (&stem.b[0]) as *const char;
+            self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem[0]), 176);
+            let sp = (&stem[0]) as *const char;
             let idn_kind = unsafe (*self.mod_ast(dy.module)).at_const(dy.as_data.decl).kind;
             self.buf.format_into("#ifndef SC_DYN_{}\n#define SC_DYN_{}\n", diag::cstr(sp), diag::cstr(sp));
             self.buf.format_into("typedef struct {}__vt {{\n    void (*__free)(void *self);\n", diag::cstr(sp));
@@ -10915,30 +10865,30 @@ extend Codegen {
                 let ftp = unsafe (*self.mod_ast(dy.module)).at_const(dy.as_data.decl).as_data.function_type.params;
                 let pid = unsafe (*self.mod_ast(dy.module)).list(ftp);
                 let mut inner = Buf512 {};
-                let mut at = bappend((&mut inner.b[0]) as *mut char, 512, 0, "(*call)(void *self".ptr() as *const char);
+                let mut at = bappend((&mut inner[0]), 512, 0, "(*call)(void *self".ptr() as *const char);
                 for p in 0..ftp.len {
                     let src_ty = unsafe (*self.mod_ast(dy.module)).type_of(unsafe pid[p as usize]);
                     let pt_ty = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(dy.module), src_ty);
                     let mut pt = Buf200 {};
-                    self.render_type_id(pt_ty, "".ptr() as *const char, (&mut pt.b[0]) as *mut char, 200);
-                    at = bappend((&mut inner.b[0]) as *mut char, 512, at, ", ".ptr() as *const char);
-                    at = bappend((&mut inner.b[0]) as *mut char, 512, at, (&pt.b[0]) as *const char);
+                    self.render_type_id(pt_ty, "".ptr() as *const char, (&mut pt[0]), 200);
+                    at = bappend((&mut inner[0]), 512, at, ", ".ptr() as *const char);
+                    at = bappend((&mut inner[0]), 512, at, (&pt[0]));
                 }
-                bappend((&mut inner.b[0]) as *mut char, 512, at, ")".ptr() as *const char);
+                bappend((&mut inner[0]), 512, at, ")".ptr() as *const char);
                 let rt = self.cg_dynfn_ret(dy.module, dy.as_data.decl);
                 let mut memb = Buf600 {};
                 if rt != TYPE_NONE {
-                    self.render_type_id(rt, (&inner.b[0]) as *const char, (&mut memb.b[0]) as *mut char, 600);
+                    self.render_type_id(rt, (&inner[0]), (&mut memb[0]), 600);
                 } else {
                     buf_join3(
-                        (&mut memb.b[0]) as *mut char,
+                        (&mut memb[0]),
                         600,
                         "void ".ptr() as *const char,
                         "".ptr() as *const char,
-                        (&inner.b[0]) as *const char,
+                        (&inner[0]),
                     );
                 }
-                self.buf.format_into("    {};\n", diag::cstr((&memb.b[0]) as *const char));
+                self.buf.format_into("    {};\n", diag::cstr((&memb[0])));
                 self.buf.format_into(
                     "}} {}__vt;\ntypedef struct {}__dyn {{ void *data; const {}__vt *vt; }} {}__dyn;\n",
                     diag::cstr(sp),
@@ -10965,41 +10915,41 @@ extend Codegen {
                 render_ident_src(
                     self.mod_src(dy.module),
                     unsafe (*self.mod_ast(dy.module)).at_const(mname_node).as_data.name.text,
-                    (&mut mn.b[0]) as *mut char,
+                    (&mut mn[0]),
                     128,
                 );
                 let mparams = unsafe (*self.mod_ast(dy.module)).at_const(mid).as_data.function.params;
                 let pids = unsafe (*self.mod_ast(dy.module)).list(mparams);
                 let mut inner = Buf512 {};
-                let mut at = bappend((&mut inner.b[0]) as *mut char, 512, 0, "(*".ptr() as *const char);
-                at = bappend((&mut inner.b[0]) as *mut char, 512, at, (&mn.b[0]) as *const char);
-                at = bappend((&mut inner.b[0]) as *mut char, 512, at, ")(void *self".ptr() as *const char);
+                let mut at = bappend((&mut inner[0]), 512, 0, "(*".ptr() as *const char);
+                at = bappend((&mut inner[0]), 512, at, (&mn[0]));
+                at = bappend((&mut inner[0]), 512, at, ")(void *self".ptr() as *const char);
                 let mut p: u32 = 1;
                 while p < mparams.len {
                     let ptn = unsafe (*self.mod_ast(dy.module)).at_const(unsafe pids[p as usize]).as_data.parameter.ty;
                     let src_ty = unsafe (*self.mod_ast(dy.module)).type_of(ptn);
                     let pt_ty = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(dy.module), src_ty);
                     let mut pt = Buf200 {};
-                    self.render_type_id(pt_ty, "".ptr() as *const char, (&mut pt.b[0]) as *mut char, 200);
-                    at = bappend((&mut inner.b[0]) as *mut char, 512, at, ", ".ptr() as *const char);
-                    at = bappend((&mut inner.b[0]) as *mut char, 512, at, (&pt.b[0]) as *const char);
+                    self.render_type_id(pt_ty, "".ptr() as *const char, (&mut pt[0]), 200);
+                    at = bappend((&mut inner[0]), 512, at, ", ".ptr() as *const char);
+                    at = bappend((&mut inner[0]), 512, at, (&pt[0]));
                     p = p + 1;
                 }
-                bappend((&mut inner.b[0]) as *mut char, 512, at, ")".ptr() as *const char);
+                bappend((&mut inner[0]), 512, at, ")".ptr() as *const char);
                 let rt = self.cg_dyn_ret(dy.module, mid);
                 let mut memb = Buf600 {};
                 if rt != TYPE_NONE {
-                    self.render_type_id(rt, (&inner.b[0]) as *const char, (&mut memb.b[0]) as *mut char, 600);
+                    self.render_type_id(rt, (&inner[0]), (&mut memb[0]), 600);
                 } else {
                     buf_join3(
-                        (&mut memb.b[0]) as *mut char,
+                        (&mut memb[0]),
                         600,
                         "void ".ptr() as *const char,
                         "".ptr() as *const char,
-                        (&inner.b[0]) as *const char,
+                        (&inner[0]),
                     );
                 }
-                self.buf.format_into("    {};\n", diag::cstr((&memb.b[0]) as *const char));
+                self.buf.format_into("    {};\n", diag::cstr((&memb[0])));
             }
             self.buf.format_into(
                 "}} {}__vt;\ntypedef struct {}__dyn {{ void *data; const {}__vt *vt; }} {}__dyn;\n",
@@ -11020,30 +10970,30 @@ extend Codegen {
         let fd_kind = unsafe (*self.mod_ast(sy.module)).at_const(sy.as_data.decl).kind;
         let capt = self.cg_fn_is_capturing(&sy);
         let mut pair = Buf368 {};
-        self.dyn_pair_stem(src, dy.module, dy.as_data.decl, (&mut pair.b[0]) as *mut char, 368);
-        let pp = (&pair.b[0]) as *const char;
+        self.dyn_pair_stem(src, dy.module, dy.as_data.decl, (&mut pair[0]), 368);
+        let pp = (&pair[0]) as *const char;
         let sig_params = unsafe (*self.mod_ast(dy.module)).at_const(dy.as_data.decl).as_data.function_type.params;
         let rt = self.cg_dynfn_ret(dy.module, dy.as_data.decl);
         let mut rts = Buf256 {};
         if rt != TYPE_NONE {
-            self.render_type_id(rt, "".ptr() as *const char, (&mut rts.b[0]) as *mut char, 256);
+            self.render_type_id(rt, "".ptr() as *const char, (&mut rts[0]), 256);
         } else {
-            bappend((&mut rts.b[0]) as *mut char, 256, 0, "void".ptr() as *const char);
+            bappend((&mut rts[0]), 256, 0, "void".ptr() as *const char);
         }
         self.buf.format_into(
             "static __attribute__((unused)) {} {}__call(void *__self",
-            diag::cstr((&rts.b[0]) as *const char),
+            diag::cstr((&rts[0])),
             diag::cstr(pp),
         );
         let pid = unsafe (*self.mod_ast(dy.module)).list(sig_params);
         for p in 0..sig_params.len {
             let mut an = Buf32 {};
-            unsafe stdio::snprintf((&mut an.b[0]) as *mut char, 16, "_a%u".ptr() as *const char, p);
+            unsafe stdio::snprintf((&mut an[0]), 16, "_a%u".ptr() as *const char, p);
             let src_ty = unsafe (*self.mod_ast(dy.module)).type_of(unsafe pid[p as usize]);
             let pt_ty = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(dy.module), src_ty);
             let mut pd = Buf240 {};
-            self.render_type_id(pt_ty, (&an.b[0]) as *const char, (&mut pd.b[0]) as *mut char, 240);
-            self.buf.format_into(", {}", diag::cstr((&pd.b[0]) as *const char));
+            self.render_type_id(pt_ty, (&an[0]), (&mut pd[0]), 240);
+            self.buf.format_into(", {}", diag::cstr((&pd[0])));
         }
         self.emit_str(") { ");
         if !capt {
@@ -11054,18 +11004,18 @@ extend Codegen {
         }
         let mut sym = Buf240 {};
         if fd_kind == NodeKind::NODE_CLOSURE {
-            self.closure_sym_in(sy.module, sy.as_data.decl, (&mut sym.b[0]) as *mut char, 240);
+            self.closure_sym_in(sy.module, sy.as_data.decl, (&mut sym[0]), 240);
         } else {
             let fname = unsafe (*self.mod_ast(sy.module)).at_const(sy.as_data.decl).as_data.function.name;
-            self.render_qualified(sy.module, fname, (&mut sym.b[0]) as *mut char, 240);
+            self.render_qualified(sy.module, fname, (&mut sym[0]), 240);
         }
-        self.emit_cstr((&sym.b[0]) as *const char);
+        self.emit_cstr((&sym[0]));
         self.emit_str("(");
         let mut wrote = false;
         let mut envn = Buf256 {};
         if capt {
-            self.render_type_id(src, "".ptr() as *const char, (&mut envn.b[0]) as *mut char, 256);
-            self.buf.format_into("(const {} *)__self", diag::cstr((&envn.b[0]) as *const char));
+            self.render_type_id(src, "".ptr() as *const char, (&mut envn[0]), 256);
+            self.buf.format_into("(const {} *)__self", diag::cstr((&envn[0])));
             wrote = true;
         }
         for p2 in 0..sig_params.len {
@@ -11092,17 +11042,17 @@ extend Codegen {
             let hit = unsafe (*self.package).prelude_lookup("Global", true);
             let gname = unsafe (*self.mod_ast(hit.mid)).at_const(hit.node).as_data.aggregate.name;
             let mut gt = Buf160 {};
-            self.render_qualified(hit.mid, gname, (&mut gt.b[0]) as *mut char, 160);
-            let gtp = (&gt.b[0]) as *const char;
+            self.render_qualified(hit.mid, gname, (&mut gt[0]), 160);
+            let gtp = (&gt[0]) as *const char;
             self.buf.format_into("static void {}____free(void *__self) {{\n", diag::cstr(pp));
             if capt {
                 if self.cg_fn_owns(&sy) {
                     let mut csym = Buf240 {};
-                    self.closure_sym_in(sy.module, sy.as_data.decl, (&mut csym.b[0]) as *mut char, 240);
+                    self.closure_sym_in(sy.module, sy.as_data.decl, (&mut csym[0]), 240);
                     self.buf.format_into(
                         "    {}_env_free(({} *)__self);\n",
-                        diag::cstr((&csym.b[0]) as *const char),
-                        diag::cstr((&envn.b[0]) as *const char),
+                        diag::cstr((&csym[0])),
+                        diag::cstr((&envn[0])),
                     );
                 }
                 self.buf.format_into(
@@ -11110,8 +11060,8 @@ extend Codegen {
                     diag::cstr(gtp),
                     diag::cstr(gtp),
                     diag::cstr(gtp),
-                    diag::cstr((&envn.b[0]) as *const char),
-                    diag::cstr((&envn.b[0]) as *const char),
+                    diag::cstr((&envn[0])),
+                    diag::cstr((&envn[0])),
                 );
             } else {
                 self.emit_str("    (void)__self;\n");
@@ -11119,10 +11069,10 @@ extend Codegen {
             self.emit_str("}\n");
         }
         let mut stem = Buf176 {};
-        self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem.b[0]) as *mut char, 176);
+        self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem[0]), 176);
         self.buf.format_into(
             "static const {}__vt {}__vtbl __attribute__((unused)) = {{ ",
-            diag::cstr((&stem.b[0]) as *const char),
+            diag::cstr((&stem[0])),
             diag::cstr(pp),
         );
         if owned {
@@ -11141,7 +11091,7 @@ extend Codegen {
             }
             let dy = *unsafe (*self.cur_ast()).type_at(dui.dyn_ty);
             let mut istem = Buf176 {};
-            self.dyn_stem(dy.module, dy.as_data.decl, (&mut istem.b[0]) as *mut char, 176);
+            self.dyn_stem(dy.module, dy.as_data.decl, (&mut istem[0]), 176);
             let mut seen = false;
             let mut j: usize = 0;
             while j < i && !seen {
@@ -11155,8 +11105,8 @@ extend Codegen {
                     seen = true;
                 } else {
                     let mut jstem = Buf176 {};
-                    self.dyn_stem(pj.module, pj.as_data.decl, (&mut jstem.b[0]) as *mut char, 176);
-                    if unsafe cstring::strcmp((&istem.b[0]) as *const char, (&jstem.b[0]) as *const char) == 0 {
+                    self.dyn_stem(pj.module, pj.as_data.decl, (&mut jstem[0]), 176);
+                    if unsafe cstring::strcmp((&istem[0]), (&jstem[0])) == 0 {
                         seen = true;
                     }
                 }
@@ -11177,11 +11127,11 @@ extend Codegen {
                 continue;
             }
             let mut pair = Buf368 {};
-            self.dyn_pair_stem(src, dy.module, dy.as_data.decl, (&mut pair.b[0]) as *mut char, 368);
-            let pp = (&pair.b[0]) as *const char;
+            self.dyn_pair_stem(src, dy.module, dy.as_data.decl, (&mut pair[0]), 368);
+            let pp = (&pair[0]) as *const char;
             let mut recv = Buf256 {};
-            self.render_type_id(src, "".ptr() as *const char, (&mut recv.b[0]) as *mut char, 256);
-            let rvp = (&recv.b[0]) as *const char;
+            self.render_type_id(src, "".ptr() as *const char, (&mut recv[0]), 256);
+            let rvp = (&recv[0]) as *const char;
             let idn_items = unsafe (*self.mod_ast(dy.module)).at_const(dy.as_data.decl).as_data.interface_def.items;
             let mids = unsafe (*self.mod_ast(dy.module)).list(idn_items);
             for km in 0..idn_items.len {
@@ -11192,32 +11142,32 @@ extend Codegen {
                 let mnamenode = unsafe (*self.mod_ast(dy.module)).at_const(mid).as_data.function.name;
                 let mspan = unsafe (*self.mod_ast(dy.module)).at_const(mnamenode).as_data.name.text;
                 let mut mn = Buf128 {};
-                render_ident_src(self.mod_src(dy.module), mspan, (&mut mn.b[0]) as *mut char, 128);
+                render_ident_src(self.mod_src(dy.module), mspan, (&mut mn[0]), 128);
                 let rt = self.cg_dyn_ret(dy.module, mid);
                 let mut rts = Buf256 {};
                 if rt != TYPE_NONE {
-                    self.render_type_id(rt, "".ptr() as *const char, (&mut rts.b[0]) as *mut char, 256);
+                    self.render_type_id(rt, "".ptr() as *const char, (&mut rts[0]), 256);
                 } else {
-                    bappend((&mut rts.b[0]) as *mut char, 256, 0, "void".ptr() as *const char);
+                    bappend((&mut rts[0]), 256, 0, "void".ptr() as *const char);
                 }
                 self.buf.format_into(
                     "static __attribute__((unused)) {} {}__{}(void *__self",
-                    diag::cstr((&rts.b[0]) as *const char),
+                    diag::cstr((&rts[0])),
                     diag::cstr(pp),
-                    diag::cstr((&mn.b[0]) as *const char),
+                    diag::cstr((&mn[0])),
                 );
                 let mparams = unsafe (*self.mod_ast(dy.module)).at_const(mid).as_data.function.params;
                 let pids = unsafe (*self.mod_ast(dy.module)).list(mparams);
                 let mut p: u32 = 1;
                 while p < mparams.len {
                     let mut an = Buf32 {};
-                    unsafe stdio::snprintf((&mut an.b[0]) as *mut char, 16, "_a%u".ptr() as *const char, p);
+                    unsafe stdio::snprintf((&mut an[0]), 16, "_a%u".ptr() as *const char, p);
                     let ptn = unsafe (*self.mod_ast(dy.module)).at_const(unsafe pids[p as usize]).as_data.parameter.ty;
                     let src_ty = unsafe (*self.mod_ast(dy.module)).type_of(ptn);
                     let pt_ty = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(dy.module), src_ty);
                     let mut pd = Buf240 {};
-                    self.render_type_id(pt_ty, (&an.b[0]) as *const char, (&mut pd.b[0]) as *mut char, 240);
-                    self.buf.format_into(", {}", diag::cstr((&pd.b[0]) as *const char));
+                    self.render_type_id(pt_ty, (&an[0]), (&mut pd[0]), 240);
+                    self.buf.format_into(", {}", diag::cstr((&pd[0])));
                     p = p + 1;
                 }
                 if rt != TYPE_NONE {
@@ -11252,8 +11202,8 @@ extend Codegen {
                 let hit = unsafe (*self.package).prelude_lookup("Global", true);
                 let gname = unsafe (*self.mod_ast(hit.mid)).at_const(hit.node).as_data.aggregate.name;
                 let mut gt = Buf160 {};
-                self.render_qualified(hit.mid, gname, (&mut gt.b[0]) as *mut char, 160);
-                let gtp = (&gt.b[0]) as *const char;
+                self.render_qualified(hit.mid, gname, (&mut gt[0]), 160);
+                let gtp = (&gt[0]) as *const char;
                 self.buf.format_into("static void {}____free(void *__self) {{\n", diag::cstr(pp));
                 if self.cg_type_is_free(src) {
                     self.emit_str("    ");
@@ -11270,10 +11220,10 @@ extend Codegen {
                 );
             }
             let mut stem = Buf176 {};
-            self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem.b[0]) as *mut char, 176);
+            self.dyn_stem(dy.module, dy.as_data.decl, (&mut stem[0]), 176);
             self.buf.format_into(
                 "static const {}__vt {}__vtbl __attribute__((unused)) = {{ ",
-                diag::cstr((&stem.b[0]) as *const char),
+                diag::cstr((&stem[0])),
                 diag::cstr(pp),
             );
             if owned {
@@ -11291,10 +11241,10 @@ extend Codegen {
                 render_ident_src(
                     self.mod_src(dy.module),
                     unsafe (*self.mod_ast(dy.module)).at_const(mnamenode).as_data.name.text,
-                    (&mut mn.b[0]) as *mut char,
+                    (&mut mn[0]),
                     128,
                 );
-                self.buf.format_into(", {}__{}", diag::cstr(pp), diag::cstr((&mn.b[0]) as *const char));
+                self.buf.format_into(", {}__{}", diag::cstr(pp), diag::cstr((&mn[0])));
             }
             self.emit_str(" };\n");
         }
@@ -11333,14 +11283,14 @@ extend Codegen {
                 continue;
             }
             let mut nm = Buf256 {};
-            self.render_type_id(t, "".ptr() as *const char, (&mut nm.b[0]) as *mut char, 256);
+            self.render_type_id(t, "".ptr() as *const char, (&mut nm[0]), 256);
             self.buf.format_into(
                 "_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"super-c layout model mismatch: {}\");\n",
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
                 lo.size,
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
                 lo.align,
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
             );
             any = true;
         }
@@ -11364,14 +11314,14 @@ extend Codegen {
                 continue;
             }
             let mut nm = Buf256 {};
-            self.render_type_id(t, "".ptr() as *const char, (&mut nm.b[0]) as *mut char, 256);
+            self.render_type_id(t, "".ptr() as *const char, (&mut nm[0]), 256);
             self.buf.format_into(
                 "_Static_assert(sizeof({}) == {} && _Alignof({}) == {}, \"super-c layout model mismatch: {}\");\n",
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
                 lo.size,
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
                 lo.align,
-                diag::cstr((&nm.b[0]) as *const char),
+                diag::cstr((&nm[0])),
             );
             any = true;
         }
@@ -11382,14 +11332,14 @@ extend Codegen {
     fn emit_toplevel_const(self: &mut Self, id: NodeId) void {
         let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
         let mut nm = Buf160 {};
-        self.render_qualified(self.cur_module(), cd.name, (&mut nm.b[0]) as *mut char, 160);
+        self.render_qualified(self.cur_module(), cd.name, (&mut nm[0]), 160);
         let mut decl = Buf256 {};
-        self.render_type_node(cd.ty, (&nm.b[0]) as *const char, (&mut decl.b[0]) as *mut char, 256);
+        self.render_type_node(cd.ty, (&nm[0]), (&mut decl[0]), 256);
         if cd.is_static_mut {
             if !cd.is_public {
                 self.emit_str("static ");
             }
-            self.emit_cstr((&decl.b[0]) as *const char);
+            self.emit_cstr((&decl[0]));
             self.emit_str(" = ");
             self.emit_initializer(cd.ty, cd.value);
             self.emit_str(";\n");
@@ -11399,7 +11349,7 @@ extend Codegen {
             self.emit_str("__attribute__((unused)) ");
         }
         self.emit_str("static const ");
-        self.emit_cstr((&decl.b[0]) as *const char);
+        self.emit_cstr((&decl[0]));
         if cd.value != NODE_NONE {
             self.emit_str(" = ");
             self.emit_initializer(cd.ty, cd.value);
@@ -11432,7 +11382,7 @@ extend Codegen {
                     continue;
                 }
                 let mut nm = Buf256 {};
-                let np = (&mut nm.b[0]) as *mut char;
+                let np = (&mut nm[0]) as *mut char;
                 let mut k = self.render_modpfx(self.cur_module(), np, 256);
                 let mut bb: i32 = -1;
                 if self.package != null {
@@ -11448,12 +11398,12 @@ extend Codegen {
                 let csp = self.name_span(cd.name);
                 self.render_ident(csp, unsafe (np + k) as *mut char, 256 - k);
                 let mut decl = Buf320 {};
-                self.render_type_node(cd.ty, np as *const char, (&mut decl.b[0]) as *mut char, 320);
+                self.render_type_node(cd.ty, np as *const char, (&mut decl[0]), 320);
                 if self.ceval() != null {
                     self.emit_str("__attribute__((unused)) ");
                 }
                 self.emit_str("static const ");
-                self.emit_cstr((&decl.b[0]) as *const char);
+                self.emit_cstr((&decl[0]));
                 self.emit_str(" = ");
                 self.emit_initializer(cd.ty, cd.value);
                 self.emit_str(";\n");
@@ -11475,11 +11425,11 @@ extend Codegen {
             }
             if cd.is_static_mut {
                 let mut nm = Buf160 {};
-                self.render_qualified(self.cur_module(), cd.name, (&mut nm.b[0]) as *mut char, 160);
+                self.render_qualified(self.cur_module(), cd.name, (&mut nm[0]), 160);
                 let mut decl = Buf256 {};
-                self.render_type_node(cd.ty, (&nm.b[0]) as *const char, (&mut decl.b[0]) as *mut char, 256);
+                self.render_type_node(cd.ty, (&nm[0]), (&mut decl[0]), 256);
                 self.emit_str("extern ");
-                self.emit_cstr((&decl.b[0]) as *const char);
+                self.emit_cstr((&decl[0]));
                 self.emit_str(";\n");
             } else {
                 self.emit_toplevel_const(nid);
@@ -11510,12 +11460,12 @@ extend Codegen {
                 if idn_kind == NodeKind::NODE_STRUCT || self.aggregate_has_payload_in(it.module, it.decl) {
                     let kw = agg_kw(unsafe (*self.mod_ast(it.module)).at_const(it.decl));
                     let mut inm = Buf200 {};
-                    self.inst_name(&it, (&mut inm.b[0]) as *mut char, 200);
+                    self.inst_name(&it, (&mut inm[0]), 200);
                     self.buf.format_into(
                         "typedef {} {} {};\n",
                         diag::cstr(kw),
-                        diag::cstr((&inm.b[0]) as *const char),
-                        diag::cstr((&inm.b[0]) as *const char),
+                        diag::cstr((&inm[0])),
+                        diag::cstr((&inm[0])),
                     );
                 }
                 continue;
@@ -11526,19 +11476,49 @@ extend Codegen {
             if self.package != null && unsafe (*self.package).builtin_of_decl(t.module, t.as_data.decl) >= 0 {
                 continue;
             }
-            if t.kind == TypeKind::TYPE_STRUCT || t.kind == TypeKind::TYPE_ENUM && self.aggregate_has_payload_in(
+            if t.kind == TypeKind::TYPE_STRUCT && unsafe (*self.mod_ast(t.module)).at_const(t.as_data.decl).kind == NodeKind::NODE_TYPE_ALIAS {
+                // A nominal (extended) alias: a plain `typedef struct X X;` would clash with the owner
+                // header's `typedef <underlying> X;`. Re-emit the owner's typedef instead (an identical
+                // redeclaration is legal C11), fwd-declaring the underlying instance struct first.
+                let sa = self.cur_ast();
+                let ss = self.source;
+                let sl = self.len;
+                self.source = self.mod_src(t.module);
+                self.len = unsafe (*self.package).modules[t.module as usize].source.len();
+                self.ast = self.mod_ast(t.module);
+                let ta = unsafe (*self.cur_ast()).at_const(t.as_data.decl).as_data.type_alias;
+                let uty = unsafe (*self.cur_ast()).type_of(ta.ty);
+                if uty != TYPE_NONE && self.type_at(uty).kind == TypeKind::TYPE_INSTANCE {
+                    let uit = *unsafe (*self.cur_ast()).instance(self.type_at(uty).as_data.inst);
+                    let mut inm = Buf200 {};
+                    self.inst_name(&uit, (&mut inm[0]), 200);
+                    self.buf.format_into(
+                        "typedef struct {} {};\n",
+                        diag::cstr((&inm[0])),
+                        diag::cstr((&inm[0])),
+                    );
+                }
+                let mut nm = Buf160 {};
+                self.render_qualified(t.module, ta.name, (&mut nm[0]), 160);
+                let mut d = Buf256 {};
+                self.render_type_node(ta.ty, (&nm[0]), (&mut d[0]), 256);
+                self.buf.format_into("typedef {};\n", diag::cstr((&d[0])));
+                self.ast = sa;
+                self.source = ss;
+                self.len = sl;
+            } else if t.kind == TypeKind::TYPE_STRUCT || t.kind == TypeKind::TYPE_ENUM && self.aggregate_has_payload_in(
                 t.module,
                 t.as_data.decl,
             ) {
                 let kw = agg_kw(unsafe (*self.mod_ast(t.module)).at_const(t.as_data.decl));
                 let anm = unsafe (*self.mod_ast(t.module)).at_const(t.as_data.decl).as_data.aggregate.name;
                 let mut nm = Buf160 {};
-                self.render_qualified(t.module, anm, (&mut nm.b[0]) as *mut char, 160);
+                self.render_qualified(t.module, anm, (&mut nm[0]), 160);
                 self.buf.format_into(
                     "typedef {} {} {};\n",
                     diag::cstr(kw),
-                    diag::cstr((&nm.b[0]) as *const char),
-                    diag::cstr((&nm.b[0]) as *const char),
+                    diag::cstr((&nm[0])),
+                    diag::cstr((&nm[0])),
                 );
             } else if t.kind == TypeKind::TYPE_ENUM {
                 let sa = self.cur_ast();
@@ -11659,7 +11639,7 @@ extend Codegen {
                 self.emit_modpath_include(unsafe (*self.package).modules[m].path.as_str());
             }
         }
-        unsafe stdlib::free(want as *mut void);
+        unsafe stdlib::free(want);
     }
     fn emit_header_includes(self: &mut Self) void {
         let nmod = self.pkg_count();
@@ -11773,7 +11753,7 @@ extend Codegen {
                 self.emit_modpath_include(unsafe (*self.package).modules[m].path.as_str());
             }
         }
-        unsafe stdlib::free(want as *mut void);
+        unsafe stdlib::free(want);
     }
     fn emit_extern_includes(self: &mut Self) void {
         let items = self.program_items();
@@ -11835,7 +11815,7 @@ extend Codegen {
                     if slash != null {
                         let dlen = (slash as usize - file as usize) as i32;
                         unsafe stdio::snprintf(
-                            (&mut rel.b[0]) as *mut char,
+                            (&mut rel[0]),
                             4096,
                             "%.*s/%.*s".ptr() as *const char,
                             dlen,
@@ -11845,7 +11825,7 @@ extend Codegen {
                         );
                     } else {
                         unsafe stdio::snprintf(
-                            (&mut rel.b[0]) as *mut char,
+                            (&mut rel[0]),
                             4096,
                             "./%.*s".ptr() as *const char,
                             hlen,
@@ -11854,20 +11834,20 @@ extend Codegen {
                     }
                     let mut absb = Buf4096 {};
                     let mut rootb = Buf4096 {};
-                    let ra = unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut absb.b[0]) as *mut char);
+                    let ra = unsafe shim::sc_realpath((&rel[0]), (&mut absb[0]));
                     let rr = unsafe shim::sc_realpath(
                         unsafe (*self.package).root_dir.cstr(),
-                        (&mut rootb.b[0]) as *mut char,
+                        (&mut rootb[0]),
                     );
                     if ra != null && rr != null {
-                        let rl = unsafe cstring::strlen((&rootb.b[0]) as *const char);
+                        let rl = unsafe cstring::strlen((&rootb[0]));
                         self.emit_str("#include \"");
-                        if unsafe cstring::strncmp((&absb.b[0]) as *const char, (&rootb.b[0]) as *const char, rl) == 0 && unsafe absb.b[rl] == '/' as char {
+                        if unsafe cstring::strncmp((&absb[0]), (&rootb[0]), rl) == 0 && unsafe absb[rl] == '/' as char {
                             self.emit_rel_prefix();
                             self.emit_str("../");
-                            self.emit_cstr(unsafe ((&absb.b[0]) as *const char + (rl + 1)) as *const char);
+                            self.emit_cstr(unsafe ((&absb[0]) as *const char + (rl + 1)) as *const char);
                         } else {
-                            self.emit_cstr((&absb.b[0]) as *const char);
+                            self.emit_cstr((&absb[0]));
                         }
                         self.emit_str("\"\n");
                         done = true;
@@ -11875,7 +11855,7 @@ extend Codegen {
                 }
             }
             if !done {
-                let local = unsafe self.source[s as usize] == '.' as u8 || unsafe self.source[s as usize] == '/' as u8;
+                let local = unsafe self.source[s as usize] == b'.' || unsafe self.source[s as usize] == b'/';
                 if local {
                     self.emit_str("#include \"");
                 } else {
@@ -11939,7 +11919,7 @@ extend Codegen {
                 DefId { module: 0, node: NODE_NONE };
             };
             let mut fname = Buf240 {};
-            self.function_name(tc.func, target, (&mut fname.b[0]) as *mut char, 240, true);
+            self.function_name(tc.func, target, (&mut fname[0]), 240, true);
             self.buf.format_into(
                 "void __sc_test_w_{}_{}(void *__genv) {{\n  (void)__genv;\n",
                 self.cur_module() as u32,
@@ -11948,35 +11928,35 @@ extend Codegen {
             if (tc.wants & 1) != 0 {
                 let fxt = self.cg_test_type(fx_type, fx_is_enum);
                 let mut decl = Buf256 {};
-                self.render_type_id(fxt, "__fx".ptr() as *const char, (&mut decl.b[0]) as *mut char, 256);
+                self.render_type_id(fxt, "__fx".ptr() as *const char, (&mut decl[0]), 256);
                 let mut init = Buf240 {};
-                self.function_name(fx_init, target, (&mut init.b[0]) as *mut char, 240, true);
+                self.function_name(fx_init, target, (&mut init[0]), 240, true);
                 self.buf.format_into(
                     "  {} = {}();\n",
-                    diag::cstr((&decl.b[0]) as *const char),
-                    diag::cstr((&init.b[0]) as *const char),
+                    diag::cstr((&decl[0])),
+                    diag::cstr((&init[0])),
                 );
             }
-            self.buf.format_into("  {}(", diag::cstr((&fname.b[0]) as *const char));
+            self.buf.format_into("  {}(", diag::cstr((&fname[0])));
             if (tc.wants & 1) != 0 {
                 self.emit_str("&__fx");
             }
             if (tc.wants & 2) != 0 {
                 let gt = self.cg_test_type(self.test.genv_type, self.test.genv_is_enum);
                 let mut gty = Buf200 {};
-                self.render_type_id(gt, "".ptr() as *const char, (&mut gty.b[0]) as *mut char, 200);
+                self.render_type_id(gt, "".ptr() as *const char, (&mut gty[0]), 200);
                 let sep = if (tc.wants & 1) != 0 {
                     ", ".ptr() as *const char;
                 } else {
                     "".ptr() as *const char;
                 };
-                self.buf.format_into("{}(const {} *)__genv", diag::cstr(sep), diag::cstr((&gty.b[0]) as *const char));
+                self.buf.format_into("{}(const {} *)__genv", diag::cstr(sep), diag::cstr((&gty[0])));
             }
             self.emit_str(");\n");
             if (tc.wants & 1) != 0 && fx_free != NODE_NONE {
                 let mut fre = Buf240 {};
-                self.function_name(fx_free, target, (&mut fre.b[0]) as *mut char, 240, true);
-                self.buf.format_into("  {}(&__fx);\n", diag::cstr((&fre.b[0]) as *const char));
+                self.function_name(fx_free, target, (&mut fre[0]), 240, true);
+                self.buf.format_into("  {}(&__fx);\n", diag::cstr((&fre[0])));
             }
             if (tc.wants & 1) != 0 {
                 let fxt = self.cg_test_type(fx_type, fx_is_enum);
@@ -11991,32 +11971,32 @@ extend Codegen {
         if self.test.genv_init != NODE_NONE {
             let gt = self.cg_test_type(self.test.genv_type, self.test.genv_is_enum);
             let mut gdecl = Buf256 {};
-            self.render_type_id(gt, "__sc_genv".ptr() as *const char, (&mut gdecl.b[0]) as *mut char, 256);
+            self.render_type_id(gt, "__sc_genv".ptr() as *const char, (&mut gdecl[0]), 256);
             let mut gty = Buf200 {};
-            self.render_type_id(gt, "".ptr() as *const char, (&mut gty.b[0]) as *mut char, 200);
+            self.render_type_id(gt, "".ptr() as *const char, (&mut gty[0]), 200);
             let giname = unsafe (*self.cur_ast()).at_const(self.test.genv_init).as_data.function.name;
             let mut init = Buf200 {};
-            self.render_qualified(self.cur_module(), giname, (&mut init.b[0]) as *mut char, 200);
+            self.render_qualified(self.cur_module(), giname, (&mut init[0]), 200);
             self.buf.format_into(
                 "void *__sc_test_genv_init(void) {{ static {}; __sc_genv = {}(); return &__sc_genv; }}\n",
-                diag::cstr((&gdecl.b[0]) as *const char),
-                diag::cstr((&init.b[0]) as *const char),
+                diag::cstr((&gdecl[0])),
+                diag::cstr((&init[0])),
             );
             self.emit_str("void __sc_test_genv_free(void *__p) {\n  (void)__p;\n");
             if self.test.genv_free != NODE_NONE {
                 let gfname = unsafe (*self.cur_ast()).at_const(self.test.genv_free).as_data.function.name;
                 let mut fre = Buf200 {};
-                self.render_qualified(self.cur_module(), gfname, (&mut fre.b[0]) as *mut char, 200);
+                self.render_qualified(self.cur_module(), gfname, (&mut fre[0]), 200);
                 self.buf.format_into(
                     "  {}(({} *)__p);\n",
-                    diag::cstr((&fre.b[0]) as *const char),
-                    diag::cstr((&gty.b[0]) as *const char),
+                    diag::cstr((&fre[0])),
+                    diag::cstr((&gty[0])),
                 );
             }
             if self.cg_type_is_free(gt) {
                 self.emit_str("  ");
                 self.emit_free_target(gt);
-                self.buf.format_into("(({} *)__p);\n", diag::cstr((&gty.b[0]) as *const char));
+                self.buf.format_into("(({} *)__p);\n", diag::cstr((&gty[0])));
             }
             self.emit_str("}\n");
         }
@@ -12024,30 +12004,30 @@ extend Codegen {
     pub fn codegen_emit_header(self: &mut Self, out: *mut stdio::FILE) void {
         self.build_enum_index();
         let mut guard = Buf160 {};
-        let np = (&mut guard.b[0]) as *mut char;
+        let np = (&mut guard[0]) as *mut char;
         let mut at = bappend(np, 160, 0, "SUPER_".ptr() as *const char);
         let mp = unsafe (*self.package).modules[self.cur_module() as usize].path.as_str();
         let n = mp.len();
         let mut i: usize = 0;
         while i < n && at + 2 < 160 {
-            if mp.byte_at(i) == ':' as u8 && i + 1 < n && mp.byte_at(i + 1) == ':' as u8 {
-                unsafe guard.b[at] = '_' as char;
-                unsafe guard.b[at + 1] = '_' as char;
+            if mp.byte_at(i) == b':' && i + 1 < n && mp.byte_at(i + 1) == b':' {
+                unsafe guard[at] = '_' as char;
+                unsafe guard[at + 1] = '_' as char;
                 at = at + 2;
                 i = i + 1;
             } else {
-                unsafe guard.b[at] = mp.byte_at(i) as char;
+                unsafe guard[at] = mp.byte_at(i) as char;
                 at = at + 1;
             }
             i = i + 1;
         }
-        unsafe guard.b[at] = 0 as char;
+        unsafe guard[at] = 0 as char;
         bappend(np, 160, at, "_H".ptr() as *const char);
         let mut gi: usize = 0;
-        while unsafe guard.b[gi] != 0 as char {
-            let ch = unsafe guard.b[gi];
+        while unsafe guard[gi] != 0 as char {
+            let ch = unsafe guard[gi];
             if ch >= 'a' as char && ch <= 'z' as char {
-                unsafe guard.b[gi] = (ch as i32 - 32) as char;
+                unsafe guard[gi] = (ch as i32 - 32) as char;
             }
             gi = gi + 1;
         }
@@ -12070,7 +12050,7 @@ extend Codegen {
         self.emit_public_consts();
         self.emit_str("\n#endif\n");
         if self.buf.len() != 0 {
-            unsafe stdio::fwrite(self.buf.as_ptr() as *const void, 1, self.buf.len(), out);
+            unsafe stdio::fwrite(self.buf.as_ptr(), 1, self.buf.len(), out);
         }
         self.buf.clear();
     }
@@ -12104,13 +12084,13 @@ extend Codegen {
         }
         let src = self.source;
         let ln = self.len;
-        let mut file: *const char = null;
+        let mut file: str = "";
         if self.package != null && self.cur_module() as usize < self.pkg_count() {
-            file = unsafe (*self.package).modules[self.cur_module() as usize].file.cstr();
+            file = unsafe (*self.package).modules[self.cur_module() as usize].file.as_str();
         }
         self.errors.finalize(src, ln, file);
         if self.buf.len() != 0 {
-            unsafe stdio::fwrite(self.buf.as_ptr() as *const void, 1, self.buf.len(), out);
+            unsafe stdio::fwrite(self.buf.as_ptr(), 1, self.buf.len(), out);
         }
     }
     fn seed_emitted_type_instances(self: &mut Self) void {
@@ -12158,10 +12138,10 @@ extend Codegen {
                 let ta = unsafe (*self.cur_ast()).at_const(nid).as_data.type_alias;
                 if ta.ty != NODE_NONE && ta.generics.len == 0 && self.cg_alias_extended(self.cur_module(), nid) {
                     let mut nm = Buf160 {};
-                    self.render_qualified(self.cur_module(), ta.name, (&mut nm.b[0]) as *mut char, 160);
+                    self.render_qualified(self.cur_module(), ta.name, (&mut nm[0]), 160);
                     let mut d = Buf256 {};
-                    self.render_type_node(ta.ty, (&nm.b[0]) as *const char, (&mut d.b[0]) as *mut char, 256);
-                    self.buf.format_into("typedef {};\n", diag::cstr((&d.b[0]) as *const char));
+                    self.render_type_node(ta.ty, (&nm[0]), (&mut d[0]), 256);
+                    self.buf.format_into("typedef {};\n", diag::cstr((&d[0])));
                 }
             }
         }
@@ -12199,7 +12179,7 @@ extend Codegen {
         self.emit_aggregate_specializations(true);
         self.emit_rehomed_structs(true);
         self.emit_generic_macros();
-        unsafe stdlib::free(self.inst_emit_state as *mut void);
+        unsafe stdlib::free(self.inst_emit_state);
         self.inst_emit_state = null;
         self.inst_emit_n = 0;
     }
@@ -12384,7 +12364,7 @@ extend Codegen {
             tdecl = it.decl;
             let mut k: u8 = 0;
             while k < it.n && in_ < 4 {
-                unsafe iargs.t[in_ as usize] = it.args[k as usize];
+                unsafe iargs[in_ as usize] = it.args[k as usize];
                 in_ = in_ + 1;
                 k = k + 1;
             }
@@ -12432,7 +12412,7 @@ extend Codegen {
                     let mut b: u32 = 0;
                     while b < gb.len && ok {
                         let gbi = unsafe (*a).resolution_def(unsafe gbids[b as usize]);
-                        if gbi.node != NODE_NONE && !self.cg_type_satisfies(unsafe iargs.t[g as usize], gbi, depth + 1) {
+                        if gbi.node != NODE_NONE && !self.cg_type_satisfies(unsafe iargs[g as usize], gbi, depth + 1) {
                             ok = false;
                         }
                         b = b + 1;
@@ -12566,7 +12546,7 @@ extend Codegen {
             let iids = unsafe (*self.cur_ast()).list(items);
             // CG-4: only extends whose target resolves to it.decl can match this instance.
             let mut ch = ExtChain {};
-            let nchain = self.cg_ext_chain(self.cur_module(), it.decl, (&mut ch.p[0]) as *mut i32, 64);
+            let nchain = self.cg_ext_chain(self.cur_module(), it.decl, (&mut ch[0]) as *mut i32, 64);
             let total = if nchain >= 0 {
                 nchain;
             } else {
@@ -12574,7 +12554,7 @@ extend Codegen {
             };
             for x in 0..total {
                 let i = if nchain >= 0 {
-                    ch.p[x as usize];
+                    ch[x as usize];
                 } else {
                     x;
                 };
@@ -12642,7 +12622,7 @@ extend Codegen {
         let mut d: usize = 0;
         let mut i: usize = 0;
         while i < n {
-            if p.byte_at(i) == ':' as u8 && i + 1 < n && p.byte_at(i + 1) == ':' as u8 {
+            if p.byte_at(i) == b':' && i + 1 < n && p.byte_at(i + 1) == b':' {
                 d = d + 1;
                 i = i + 1;
             }
@@ -12662,7 +12642,7 @@ extend Codegen {
         let n = path.len();
         let mut i: usize = 0;
         while i < n {
-            if path.byte_at(i) == ':' as u8 && i + 1 < n && path.byte_at(i + 1) == ':' as u8 {
+            if path.byte_at(i) == b':' && i + 1 < n && path.byte_at(i + 1) == b':' {
                 self.emit_str("/");
                 i = i + 1;
             } else {
@@ -12944,9 +12924,9 @@ extend Codegen {
     fn emit_pct_escaped(self: &mut Self, text: *const u8, len: usize) void {
         for i in 0..len {
             let byte = unsafe text[i];
-            if byte == '%' as u8 {
+            if byte == b'%' {
                 self.emit_str("%%");
-            } else if byte == '"' as u8 || byte == '\\' as u8 {
+            } else if byte == b'"' || byte == '\\' as u8 {
                 self.buf.push_byte('\\' as u8);
                 self.buf.push_byte(byte as i32 as u8);
             } else if byte == '\n' as u8 {
@@ -13030,12 +13010,12 @@ extend Codegen {
         }
         if self.cg_struct_name_is(&y, "String".ptr() as *const char) {
             let mut sm = Buf200 {};
-            self.render_type_id(base, "".ptr() as *const char, (&mut sm.b[0]) as *mut char, 200);
+            self.render_type_id(base, "".ptr() as *const char, (&mut sm[0]), 200);
             self.buf.format_into(
                 "\\\"%.*s\\\"\\n\", (int){}__as_str(&{}).len, (const char *){}__as_str(&{}).ptr);\n",
-                diag::cstr((&sm.b[0]) as *const char),
+                diag::cstr((&sm[0])),
                 diag::cstr(acc),
-                diag::cstr((&sm.b[0]) as *const char),
+                diag::cstr((&sm[0])),
                 diag::cstr(acc),
             );
             return;
@@ -13176,16 +13156,16 @@ extend Codegen {
         }
         if self.cg_struct_name_is(&y, "String".ptr() as *const char) {
             let mut sm = Buf200 {};
-            self.render_type_id(t, "".ptr() as *const char, (&mut sm.b[0]) as *mut char, 200);
-            let smp = (&sm.b[0]) as *const char;
+            self.render_type_id(t, "".ptr() as *const char, (&mut sm[0]), 200);
+            let smp = (&sm[0]) as *const char;
             if self.is_lvalue(arg) {
                 self.buf.format_into("String__Global__push_str(&{}, {}__as_str(&(", diag::cstr(tb), diag::cstr(smp));
                 self.emit_expr(arg);
                 self.emit_str(")));\n");
             } else {
                 let mut tmp = Buf32 {};
-                self.fresh((&mut tmp.b[0]) as *mut char, 32);
-                let tmpp = (&tmp.b[0]) as *const char;
+                self.fresh((&mut tmp[0]), 32);
+                let tmpp = (&tmp[0]) as *const char;
                 self.buf.format_into("{{ {} {} = ", diag::cstr(smp), diag::cstr(tmpp));
                 self.emit_expr(arg);
                 self.buf.format_into(
@@ -13225,7 +13205,7 @@ extend Codegen {
         let fill = if sp.fill != 0 as u8 {
             sp.fill;
         } else {
-            ' ' as u8;
+            b' ';
         };
         if self.cg_struct_name_is(&y, "str".ptr() as *const char) {
             self.buf.format_into("String__Global__push_padded(&{}, ", diag::cstr(f));
@@ -13234,8 +13214,8 @@ extend Codegen {
             return true;
         }
         let mut tmp = Buf32 {};
-        self.fresh((&mut tmp.b[0]) as *mut char, 32);
-        let tp = (&tmp.b[0]) as *const char;
+        self.fresh((&mut tmp[0]), 32);
+        let tp = (&tmp[0]) as *const char;
         self.buf.format_into("{{ size_t {} = String__Global__len(&{});\n", diag::cstr(tp), diag::cstr(f));
         if !self.fmt_arg_core(f, arg, sp, y, t) {
             self.emit_str("}\n");
@@ -13257,18 +13237,18 @@ extend Codegen {
         self.emit_str("\"");
         let mut i = a;
         while i < b {
-            if (unsafe src[i] == '{' as u8 || unsafe src[i] == '}' as u8) && i + 1 < b && unsafe src[i + 1] == unsafe src[i] {
+            if (unsafe src[i] == b'{' || unsafe src[i] == b'}') && i + 1 < b && unsafe src[i + 1] == unsafe src[i] {
                 self.buf.push_byte((unsafe src[i] as i32) as u8);
                 i = i + 2;
                 continue;
             }
             if unsafe src[i] == '\\' as u8 && i + 1 < b {
                 let e = unsafe src[i + 1];
-                if e == 'x' as u8 && i + 3 < b {
+                if e == b'x' && i + 3 < b {
                     let v = (hex_val(unsafe src[i + 2]) << 4 | hex_val(unsafe src[i + 3])) & 0xFF;
                     self.emit_octal_escape(v as u32);
                     i = i + 4;
-                } else if e == '0' as u8 {
+                } else if e == b'0' {
                     self.emit_str("\\000");
                     i = i + 2;
                 } else {
@@ -13288,14 +13268,14 @@ extend Codegen {
         self.emit_str("\"");
         let mut i = a;
         while i < b {
-            if (unsafe src[i] == '{' as u8 || unsafe src[i] == '}' as u8) && i + 1 < b && unsafe src[i + 1] == unsafe src[i] {
+            if (unsafe src[i] == b'{' || unsafe src[i] == b'}') && i + 1 < b && unsafe src[i + 1] == unsafe src[i] {
                 self.buf.push_byte((unsafe src[i] as i32) as u8);
                 i = i + 2;
                 continue;
             }
             let byte = unsafe src[i];
             i = i + 1;
-            if byte == '"' as u8 || byte == '\\' as u8 {
+            if byte == b'"' || byte == '\\' as u8 {
                 self.buf.push_byte('\\' as u8);
                 self.buf.push_byte(byte as i32 as u8);
             } else if byte == '\n' as u8 {
@@ -13357,7 +13337,7 @@ extend Codegen {
         if tmp == null {
             diag::oom();
         }
-        unsafe cstring::memcpy(tmp as *mut void, (self.buf.as_ptr() + start) as *const void, nlen);
+        unsafe cstring::memcpy(tmp, (self.buf.as_ptr() + start), nlen);
         self.buf.truncate(start);
         for i in 0..nlen {
             let ch = unsafe tmp[i];
@@ -13370,7 +13350,7 @@ extend Codegen {
             }
         }
         self.emit_bytes("\n".ptr() as *const char, 1);
-        unsafe stdlib::free(tmp as *mut void);
+        unsafe stdlib::free(tmp);
     }
     fn emit_generic_macro_methods(self: &mut Self, declId: NodeId, define: bool) void {
         let items = self.program_items();
@@ -13400,18 +13380,18 @@ extend Codegen {
                     continue;
                 }
                 let mut nm = Buf320 {};
-                let mut at = bappend((&mut nm.b[0]) as *mut char, 320, 0, "NAME".ptr() as *const char);
-                unsafe nm.b[at] = CG_PASTE;
+                let mut at = bappend((&mut nm[0]), 320, 0, "NAME".ptr() as *const char);
+                unsafe nm[at] = CG_PASTE;
                 at = at + 1;
-                at = bappend((&mut nm.b[0]) as *mut char, 320, at, "__".ptr() as *const char);
+                at = bappend((&mut nm[0]), 320, at, "__".ptr() as *const char);
                 let mnsp = self.name_span(mf.name);
-                self.render_ident(mnsp, unsafe ((&mut nm.b[0]) as *mut char + at) as *mut char, 320 - at);
+                self.render_ident(mnsp, unsafe ((&mut nm[0]) as *mut char + at) as *mut char, 320 - at);
                 self.emit_function(
                     mid,
                     DefId { module: 0, node: NODE_NONE },
                     false,
                     define,
-                    (&nm.b[0]) as *const char,
+                    (&nm[0]),
                     false,
                 );
             }
@@ -13437,9 +13417,9 @@ extend Codegen {
     fn emit_generic_conformance_macro(self: &mut Self, declId: NodeId, implId: NodeId, define: bool) void {
         let dn_name = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.name;
         let mut stem = Buf160 {};
-        self.macro_stem(self.cur_module(), dn_name, (&mut stem.b[0]) as *mut char, 160);
+        self.macro_stem(self.cur_module(), dn_name, (&mut stem[0]), 160);
         let mut tag = Buf128 {};
-        self.conformance_tag(implId, (&mut tag.b[0]) as *mut char, 128);
+        self.conformance_tag(implId, (&mut tag[0]), 128);
         let word = if define {
             "DEFINE".ptr() as *const char;
         } else {
@@ -13447,19 +13427,19 @@ extend Codegen {
         };
         self.buf.format_into(
             "#define {}_{}_{}(",
-            diag::cstr((&stem.b[0]) as *const char),
-            diag::cstr((&tag.b[0]) as *const char),
+            diag::cstr((&stem[0])),
+            diag::cstr((&tag[0])),
             diag::cstr(word),
         );
         let gens = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.generics;
         let gids = unsafe (*self.cur_ast()).list(gens);
         for i in 0..gens.len {
             let mut p = Buf64 {};
-            self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p.b[0]) as *mut char, 64);
+            self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p[0]), 64);
             self.buf.format_into(
                 "{}, _SCM_{}, ",
-                diag::cstr((&p.b[0]) as *const char),
-                diag::cstr((&p.b[0]) as *const char),
+                diag::cstr((&p[0])),
+                diag::cstr((&p[0])),
             );
         }
         self.emit_str("NAME) ");
@@ -13481,18 +13461,18 @@ extend Codegen {
                 continue;
             }
             let mut nm = Buf320 {};
-            let mut at = bappend((&mut nm.b[0]) as *mut char, 320, 0, "NAME".ptr() as *const char);
-            unsafe nm.b[at] = CG_PASTE;
+            let mut at = bappend((&mut nm[0]), 320, 0, "NAME".ptr() as *const char);
+            unsafe nm[at] = CG_PASTE;
             at = at + 1;
-            at = bappend((&mut nm.b[0]) as *mut char, 320, at, "__".ptr() as *const char);
+            at = bappend((&mut nm[0]), 320, at, "__".ptr() as *const char);
             let mnsp = self.name_span(mf.name);
-            self.render_ident(mnsp, unsafe ((&mut nm.b[0]) as *mut char + at) as *mut char, 320 - at);
+            self.render_ident(mnsp, unsafe ((&mut nm[0]) as *mut char + at) as *mut char, 320 - at);
             self.emit_function(
                 mid,
                 DefId { module: 0, node: NODE_NONE },
                 false,
                 define,
-                (&nm.b[0]) as *const char,
+                (&nm[0]),
                 false,
             );
         }
@@ -13522,7 +13502,7 @@ extend Codegen {
         let dn_name = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.name;
         let dn_kind = unsafe (*self.cur_ast()).at_const(declId).kind;
         let mut stem = Buf160 {};
-        self.macro_stem(self.cur_module(), dn_name, (&mut stem.b[0]) as *mut char, 160);
+        self.macro_stem(self.cur_module(), dn_name, (&mut stem[0]), 160);
         let gens = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.generics;
         let gids = unsafe (*self.cur_ast()).list(gens);
         let word = if define {
@@ -13530,14 +13510,14 @@ extend Codegen {
         } else {
             "DECLARE".ptr() as *const char;
         };
-        self.buf.format_into("#define {}_{}(", diag::cstr((&stem.b[0]) as *const char), diag::cstr(word));
+        self.buf.format_into("#define {}_{}(", diag::cstr((&stem[0])), diag::cstr(word));
         for i in 0..gens.len {
             let mut p = Buf64 {};
-            self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p.b[0]) as *mut char, 64);
+            self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p[0]), 64);
             self.buf.format_into(
                 "{}, _SCM_{}, ",
-                diag::cstr((&p.b[0]) as *const char),
-                diag::cstr((&p.b[0]) as *const char),
+                diag::cstr((&p[0])),
+                diag::cstr((&p[0])),
             );
         }
         self.emit_str("NAME) ");
@@ -13558,11 +13538,11 @@ extend Codegen {
                     let f = unsafe (*self.cur_ast()).at_const(unsafe fids[jj as usize]).as_data.field;
                     let mut fnm = Buf128 {};
                     let fnsp = self.name_span(f.name);
-                    self.render_ident(fnsp, (&mut fnm.b[0]) as *mut char, 128);
+                    self.render_ident(fnsp, (&mut fnm[0]), 128);
                     let mut dd = Buf256 {};
-                    self.render_type_node(f.ty, (&fnm.b[0]) as *const char, (&mut dd.b[0]) as *mut char, 256);
+                    self.render_type_node(f.ty, (&fnm[0]), (&mut dd[0]), 256);
                     self.emit_indent();
-                    self.emit_cstr((&dd.b[0]) as *const char);
+                    self.emit_cstr((&dd[0]));
                     self.emit_str(";\n");
                 }
                 self.depth = self.depth - 1;
@@ -13621,11 +13601,11 @@ extend Codegen {
     fn emit_generic_method_macro(self: &mut Self, declId: NodeId, methodId: NodeId, define: bool) void {
         let dn_name = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.name;
         let mut stem = Buf160 {};
-        self.macro_stem(self.cur_module(), dn_name, (&mut stem.b[0]) as *mut char, 160);
+        self.macro_stem(self.cur_module(), dn_name, (&mut stem[0]), 160);
         let mnnode = unsafe (*self.cur_ast()).at_const(methodId).as_data.function.name;
         let mut mnm = Buf64 {};
         let mnsp = self.name_span(mnnode);
-        self.render_ident(mnsp, (&mut mnm.b[0]) as *mut char, 64);
+        self.render_ident(mnsp, (&mut mnm[0]), 64);
         let word = if define {
             "DEFINE".ptr() as *const char;
         } else {
@@ -13633,19 +13613,19 @@ extend Codegen {
         };
         self.buf.format_into(
             "#define {}_{}_{}(",
-            diag::cstr((&stem.b[0]) as *const char),
-            diag::cstr((&mnm.b[0]) as *const char),
+            diag::cstr((&stem[0])),
+            diag::cstr((&mnm[0])),
             diag::cstr(word),
         );
         let gens = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.generics;
         let gids = unsafe (*self.cur_ast()).list(gens);
         for i in 0..gens.len {
             let mut p = Buf64 {};
-            self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p.b[0]) as *mut char, 64);
+            self.render_macro_param(self.cur_module(), unsafe gids[i as usize], (&mut p[0]), 64);
             self.buf.format_into(
                 "{}, _SCM_{}, ",
-                diag::cstr((&p.b[0]) as *const char),
-                diag::cstr((&p.b[0]) as *const char),
+                diag::cstr((&p[0])),
+                diag::cstr((&p[0])),
             );
         }
         self.emit_str("NAME");
@@ -13653,11 +13633,11 @@ extend Codegen {
         let mgids = unsafe (*self.cur_ast()).list(mg);
         for k in 0..mg.len {
             let mut p = Buf64 {};
-            self.render_macro_param(self.cur_module(), unsafe mgids[k as usize], (&mut p.b[0]) as *mut char, 64);
+            self.render_macro_param(self.cur_module(), unsafe mgids[k as usize], (&mut p[0]), 64);
             self.buf.format_into(
                 ", {}, _SCM_{}",
-                diag::cstr((&p.b[0]) as *const char),
-                diag::cstr((&p.b[0]) as *const char),
+                diag::cstr((&p[0])),
+                diag::cstr((&p[0])),
             );
         }
         self.emit_str(") ");
@@ -13667,13 +13647,13 @@ extend Codegen {
         self.nsubst = 0;
         let start = self.buf.len();
         let mut ov = Buf400 {};
-        self.macro_method_name(methodId, (&mut ov.b[0]) as *mut char, 400);
+        self.macro_method_name(methodId, (&mut ov[0]), 400);
         self.emit_function(
             methodId,
             DefId { module: 0, node: NODE_NONE },
             false,
             define,
-            (&ov.b[0]) as *const char,
+            (&ov[0]),
             false,
         );
         self.macro_mode = false;

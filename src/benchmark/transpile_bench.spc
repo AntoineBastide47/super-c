@@ -97,7 +97,7 @@ fn transpile_once() Timing {
     };
 
     let a0 = time::cpu_seconds();
-    let mut p = loader::package_load(ROOT.ptr() as *const char, STD_DIR.ptr() as *const char, false);
+    let mut p = loader::package_load(ROOT, STD_DIR.ptr() as *const char, false);
     let a1 = time::cpu_seconds();
 
     let n = p.modules.len();
@@ -110,7 +110,7 @@ fn transpile_once() Timing {
 
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = (&mut ceval) as *mut void;
+    p.ceval = (&mut ceval);
 
     i = 0;
     while i < n {

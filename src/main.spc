@@ -27,15 +27,9 @@ pub struct TestOpts {
 }
 
 // A 4096-byte path scratch buffer; the omitted array field zero-fills on partial init.
-struct PathBuf {
-    pub b: [char; 4096],
-}
-struct Buf64 {
-    pub b: [char; 64],
-}
-struct Buf128 {
-    pub b: [char; 128],
-}
+type PathBuf = Array<char, 4096>;
+type Buf64 = Array<char, 64>;
+type Buf128 = Array<char, 128>;
 
 // ---------------------------------------------------------------------------------------------------------
 // Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
@@ -63,11 +57,11 @@ fn build_out_path(root_dir: str, mod_path: str, ext: str) String {
     let n = mod_path.len();
     let mut i: usize = 0;
     while i < n {
-        if mod_path.byte_at(i) == ':' as u8 && i + 1 < n && mod_path.byte_at(i + 1) == ':' as u8 {
-            out.push_byte('/' as u8);
+        if mod_path.byte_at(i) == b':' && i + 1 < n && mod_path.byte_at(i + 1) == b':' {
+            out.push_byte(b'/');
             i = i + 2;
         } else {
-            out.push_byte(mod_path.byte_at(i) as u8);
+            out.push_byte(mod_path.byte_at(i));
             i = i + 1;
         }
     }
@@ -81,18 +75,16 @@ fn mkdir_p(path: str) void {
     if n == 0 || n >= 4096 {
         return;
     }
-    let mut buf = PathBuf {};
-    unsafe cstring::memcpy((&mut buf.b[0]) as *mut void, path.ptr() as *const void, n);
-    unsafe buf.b[n] = 0 as char;
-    let base = (&mut buf.b[0]) as *mut char;
-    let mut i: usize = 1;
-    while i < n {
+    let mut buf = Array::<char, 4096>::new();
+    buf.copy_from(path.ptr(), n);
+    buf[n] = 0 as char;
+    let base = (&buf[0]) as *mut char;
+    for i in 1..n {
         if unsafe base[i] == '/' as char {
             unsafe base[i] = 0 as char;
             let _ = unsafe shim::sc_mkdir(base);
             unsafe base[i] = '/' as char;
         }
-        i = i + 1;
     }
     let _ = unsafe shim::sc_mkdir(base);
 }
@@ -102,17 +94,15 @@ fn open_out(path: str) *mut stdio::FILE {
     let p = path.ptr();
     let n = path.len();
     let mut slash: usize = n;
-    let mut i: usize = 0;
-    while i < n {
-        if unsafe p[i] == '/' as u8 {
+    for i in 0..n {
+        if unsafe p[i] == b'/' {
             slash = i;
         }
-        i = i + 1;
     }
     if slash < n {
         mkdir_p(str::from_raw(p, slash));
     }
-    return stdio::fopen(path, "wb"); // binary: keep '\n' literal so Windows text-mode CRLF can't break \-continued macros (super_rt.h)
+    return stdio::fopen(path, "wb");
 }
 
 // Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
@@ -136,12 +126,13 @@ fn prune_orphans(dir: *const char, keep: &Vector<String>) void {
         ) == 0 {
             continue;
         }
+        
         let mut pb = PathBuf {};
-        let np = unsafe stdio::snprintf((&mut pb.b[0]) as *mut char, 4096, "%s/%s".ptr() as *const char, dir, name);
+        let np = unsafe stdio::snprintf((&mut pb[0]), 4096, "%s/%s".ptr() as *const char, dir, name);
         if np < 0 || np as usize >= 4096 {
             continue;
         }
-        let path = (&pb.b[0]) as *const char;
+        let path = (&pb[0]) as *const char;
         if unsafe shim::sc_stat_isdir(path) != 0 {
             prune_orphans(path, &*keep);
             let _ = unsafe shim::sc_rmdir(path); // no-op unless the recursion just emptied it
@@ -413,7 +404,7 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     let sp = unsafe (*p).modules[m as usize].ast.at_const(cond).span;
     let src = unsafe (*p).modules[m as usize].source.as_str().ptr();
     let len = unsafe (*p).modules[m as usize].source.len();
-    let file = unsafe (*p).modules[m as usize].file.cstr();
+    let file = unsafe (*p).modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
     if msg != null {
         errs.emit(sp.start, sp.end - sp.start, format("static assertion cannot be evaluated: {}", diag::cstr(msg)));
@@ -474,7 +465,7 @@ fn ext_c_wrap(
     while unsafe *sp != 0 as char && unsafe *sp != '.' as char && sl < 63 {
         let c = unsafe *sp;
         let good = c >= 'a' as char && c <= 'z' as char || c >= 'A' as char && c <= 'Z' as char || c >= '0' as char && c <= '9' as char;
-        unsafe stem.b[sl] = if good {
+        unsafe stem[sl] = if good {
             c;
         } else {
             '_' as char;
@@ -482,18 +473,18 @@ fn ext_c_wrap(
         sl = sl + 1;
         sp = unsafe (sp + 1);
     }
-    unsafe stem.b[sl] = 0 as char;
+    unsafe stem[sl] = 0 as char;
     let mut nm = Buf128 {};
     let idx = unsafe *nsrc;
     unsafe *nsrc = idx + 1;
     unsafe stdio::snprintf(
-        (&mut nm.b[0]) as *mut char,
+        (&mut nm[0]),
         128,
         "__ext%u_%s".ptr() as *const char,
         idx,
-        (&stem.b[0]) as *const char,
+        (&stem[0]),
     );
-    let mut path = build_out_path(root, str::from_cstr((&nm.b[0]) as *const char), ".c");
+    let mut path = build_out_path(root, str::from_cstr((&nm[0])), ".c");
     let f = open_out(path.as_str());
     if f == null {
         unsafe stdio::perror(path.cstr());
@@ -534,28 +525,28 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
             if is_link {
                 let mut flag = Buf128 {};
                 if unsafe *v == '-' as char {
-                    unsafe stdio::snprintf((&mut flag.b[0]) as *mut char, 128, "%.*s".ptr() as *const char, vl, v);
+                    unsafe stdio::snprintf((&mut flag[0]), 128, "%.*s".ptr() as *const char, vl, v);
                 } else {
-                    unsafe stdio::snprintf((&mut flag.b[0]) as *mut char, 128, "-l%.*s".ptr() as *const char, vl, v);
+                    unsafe stdio::snprintf((&mut flag[0]), 128, "-l%.*s".ptr() as *const char, vl, v);
                 }
                 let mut dup = false;
                 for k in 0..ld.len() {
-                    if ld[k].as_str() == str::from_cstr((&flag.b[0]) as *const char) {
+                    if ld[k].as_str() == str::from_cstr((&flag[0])) {
                         dup = true;
                         break;
                     }
                 }
                 if !dup {
-                    ld.push(String::from_cstr((&flag.b[0]) as *const char));
+                    ld.push(String::from_cstr((&flag[0])));
                 }
                 continue;
             }
             let mut rel = PathBuf {};
             let mut rsl = PathBuf {};
-            ext_rel(file, v, vl, (&mut rel.b[0]) as *mut char);
-            if unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut rsl.b[0]) as *mut char) == null {
-                unsafe stdio::snprintf((&mut rel.b[0]) as *mut char, 4096, "%.*s".ptr() as *const char, vl, v);
-                if unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut rsl.b[0]) as *mut char) == null {
+            ext_rel(file, v, vl, (&mut rel[0]));
+            if unsafe shim::sc_realpath((&rel[0]), (&mut rsl[0])) == null {
+                unsafe stdio::snprintf((&mut rel[0]), 4096, "%.*s".ptr() as *const char, vl, v);
+                if unsafe shim::sc_realpath((&rel[0]), (&mut rsl[0])) == null {
                     unsafe stdio::fprintf(
                         stdio::stderr(),
                         "error: cannot find C source '%.*s'\n".ptr() as *const char,
@@ -566,7 +557,7 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
                     continue;
                 }
             }
-            ext_c_wrap(root, &mut *keep, &mut seen, (&mut nsrc) as *mut u32, (&rsl.b[0]) as *const char, err);
+            ext_c_wrap(root, &mut *keep, &mut seen, (&mut nsrc) as *mut u32, (&rsl[0]), err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
         let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
@@ -590,26 +581,26 @@ fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut b
             let hv = unsafe (src + (hs.start + 1) as usize) as *const char;
             let mut rel = PathBuf {};
             let mut habs = PathBuf {};
-            ext_rel(file, hv, hl, (&mut rel.b[0]) as *mut char);
-            if unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut habs.b[0]) as *mut char) == null {
+            ext_rel(file, hv, hl, (&mut rel[0]));
+            if unsafe shim::sc_realpath((&rel[0]), (&mut habs[0])) == null {
                 continue;
             }
-            let dot = unsafe cstring::strrchr((&rel.b[0]) as *const char, '.' as i32);
+            let dot = unsafe cstring::strrchr((&rel[0]), '.' as i32);
             if dot == null {
                 continue;
             }
-            let dotoff = dot as usize - (&rel.b[0]) as *const char as usize;
+            let dotoff = dot as usize - (&rel[0]) as usize;
             if dotoff + 2 >= 4096 {
                 continue;
             }
             unsafe {
-                rel.b[dotoff] = '.' as char;
-                rel.b[dotoff + 1] = 'c' as char;
-                rel.b[dotoff + 2] = 0 as char;
+                rel[dotoff] = '.' as char;
+                rel[dotoff + 1] = 'c' as char;
+                rel[dotoff + 2] = 0 as char;
             }
             let mut cabs = PathBuf {};
-            if unsafe shim::sc_realpath((&rel.b[0]) as *const char, (&mut cabs.b[0]) as *mut char) != null {
-                ext_c_wrap(root, &mut *keep, &mut seen, (&mut nsrc) as *mut u32, (&cabs.b[0]) as *const char, err);
+            if unsafe shim::sc_realpath((&rel[0]), (&mut cabs[0])) != null {
+                ext_c_wrap(root, &mut *keep, &mut seen, (&mut nsrc) as *mut u32, (&cabs[0]), err);
             }
         }
     }
@@ -707,7 +698,7 @@ extend TestPlan as Free {
 fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) void {
     let src = p.modules[m as usize].source.as_str().ptr();
     let len = p.modules[m as usize].source.len();
-    let file = p.modules[m as usize].file.cstr();
+    let file = p.modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
     errs.emit(sp.start, sp.end - sp.start, String::from_cstr(msg));
     errs.finalize(src, len, file);
@@ -1479,7 +1470,7 @@ fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
 // Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
 // linked to that path and we return; otherwise it links `<root>/build/__tests` and runs it as the test
 // runner, forwarding `topts`' options.
-fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: *const char) i32 {
+fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: str) i32 {
     let mut cc = stdlib::getenv("CC");
     if cc == null || unsafe *cc == 0 as char {
         cc = "cc".ptr() as *const char;
@@ -1487,9 +1478,9 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
     let root = p.root_dir.as_str();
     let mut cmd = String::new();
     cmd.push_str(str::from_cstr(cc));
-    if out_bin != null {
+    if out_bin.len() != 0 {
         cmd.push_str(" -std=c11 -o '");
-        cmd.push_str(str::from_cstr(out_bin));
+        cmd.push_str(out_bin);
         cmd.push_str("'");
     } else {
         cmd.push_str(" -std=c11 -o '");
@@ -1509,14 +1500,14 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
     let lf = stdio::fopen(ldpath.as_str(), "rb");
     if lf != null {
         let mut line = PathBuf {};
-        while unsafe stdio::fgets((&mut line.b[0]) as *mut char, 4096, lf) != null {
-            let ll = unsafe cstring::strlen((&line.b[0]) as *const char);
-            if ll > 0 && unsafe line.b[ll - 1] == '\n' as char {
-                unsafe line.b[ll - 1] = 0 as char;
+        while unsafe stdio::fgets((&mut line[0]), 4096, lf) != null {
+            let ll = unsafe cstring::strlen((&line[0]));
+            if ll > 0 && unsafe line[ll - 1] == '\n' as char {
+                unsafe line[ll - 1] = 0 as char;
             }
-            if unsafe line.b[0] != 0 as char {
+            if unsafe line[0] != 0 as char {
                 cmd.push_str(" ");
-                cmd.push_str(str::from_cstr((&line.b[0]) as *const char));
+                cmd.push_str(str::from_cstr((&line[0])));
             }
         }
         unsafe stdio::fclose(lf);
@@ -1524,13 +1515,13 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
     let brc = stdlib::system(cmd.as_str());
     if brc != 0 {
         let mut what = "test build".ptr() as *const char;
-        if out_bin != null {
+        if out_bin.len() != 0 {
             what = "build".ptr() as *const char;
         }
         unsafe stdio::fprintf(stdio::stderr(), "super-c: %s failed (%s)\n".ptr() as *const char, what, cc);
         return 1;
     }
-    if out_bin != null {
+    if out_bin.len() != 0 {
         return 0;
     } // the `build` subcommand: linked the program, nothing to run
     let mut run = String::new();
@@ -1539,8 +1530,8 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
     run.push_str("/build/__tests'");
     if unsafe (*topts).jobs > 0 {
         let mut jb = Buf64 {};
-        unsafe stdio::snprintf((&mut jb.b[0]) as *mut char, 64, " --jobs=%d".ptr() as *const char, unsafe (*topts).jobs);
-        run.push_str(str::from_cstr((&jb.b[0]) as *const char));
+        unsafe stdio::snprintf((&mut jb[0]), 64, " --jobs=%d".ptr() as *const char, unsafe (*topts).jobs);
+        run.push_str(str::from_cstr((&jb[0])));
     }
     if unsafe (*topts).no_fork {
         run.push_str(" --no-fork");
@@ -1561,9 +1552,7 @@ fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector
 }
 
 // One module's test-plan slice, kept alive across codegen_emit (CgTestInfo holds a pointer into it).
-struct TCases {
-    pub c: [cg::CgTestCase; 512],
-}
+type TCases = Array<cg::CgTestCase, 512>;
 
 // ---------------------------------------------------------------------------------------------------------
 // Global-phase compilation of a loaded package into a `<root>/build/` tree.
@@ -1604,7 +1593,7 @@ fn platform_filter(p: &mut loader::Package, target: i32) void {
     }
 }
 
-fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const char, target: i32) i32 {
+fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32) i32 {
     platform_filter(&mut *p, target);
     let n = p.modules.len();
     for i in 0..n {
@@ -1625,7 +1614,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
     let ceptr = p.ceval as *mut ce::ConstEval;
     if ceptr != null {
         let pv = (&mut *p) as *mut loader::Package;
-        unsafe (*ceptr).flush_asserts(flush_assert_err, pv as *mut void);
+        unsafe (*ceptr).flush_asserts(flush_assert_err, pv);
     }
     if !p.ok {
         return 1;
@@ -1657,7 +1646,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
     let order = unsafe stdlib::malloc(osz * 2) as *mut ModuleId;
     if order == null {
         if live != null {
-            unsafe stdlib::free(live as *mut void);
+            unsafe stdlib::free(live);
         }
         return 1;
     }
@@ -1681,7 +1670,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
             while tk < plan.cases.len() && nt < 512 {
                 let tc = plan.cases[tk];
                 if tc.mod == mi {
-                    tcases.c[nt as usize] = cg::CgTestCase {
+                    tcases[nt as usize] = cg::CgTestCase {
                         func: tc.func,
                         wants: tc.wants,
                         suite: tc.suite,
@@ -1705,7 +1694,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
             };
             let ti = cg::CgTestInfo {
                 enabled: true,
-                cases: (&tcases.c[0]) as *const cg::CgTestCase,
+                cases: (&tcases[0]) as *const cg::CgTestCase,
                 ncases: nt,
                 fx_init: plan.fx_init[mi as usize],
                 fx_free: plan.fx_free[mi as usize],
@@ -1740,32 +1729,32 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
         }
         keep.push(opath);
     }
-    unsafe stdlib::free(order as *mut void);
+    unsafe stdlib::free(order);
     if live != null {
-        unsafe stdlib::free(live as *mut void);
+        unsafe stdlib::free(live);
     }
     // Drop outputs from a previous build that this program no longer emits, so the tree matches the current
     // sources. Skip on a keep-list OOM -- never risk deleting a live output.
     let mut broot = PathBuf {};
     // root is a str view (not nul-terminated); bound the copy with %.*s or %s runs off the buffer end.
     let bn = unsafe stdio::snprintf(
-        (&mut broot.b[0]) as *mut char,
+        (&mut broot[0]),
         4096,
         "%.*s/build".ptr() as *const char,
         root.len() as i32,
         root.ptr() as *const char,
     );
     if bn > 0 && bn as usize < 4096 {
-        prune_orphans((&broot.b[0]) as *const char, &keep);
+        prune_orphans((&broot[0]), &keep);
     }
     let mut rc: i32 = if err {
         1;
     } else {
         0 as i32;
     };
-    if out_bin != null {
+    if out_bin.len() != 0 {
         if !err {
-            rc = test_build_and_run(&*p, null as *const TestOpts, &keep, out_bin);
+            rc = test_build_and_run(&*p, null, &keep, out_bin);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
@@ -1775,7 +1764,7 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
             switch write_test_main(&mut *p, &plan) {
                 Some(runner) => {
                     keep.push(runner);
-                    rc = test_build_and_run(&*p, topts, &keep, null as *const char);
+                    rc = test_build_and_run(&*p, topts, &keep, "");
                 },
                 None => {
                     rc = 1;
@@ -1787,12 +1776,12 @@ fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: *const 
 }
 
 fn run_file(
-    path: *const char,
+    path: str,
     std_dir: *const char,
     ce_steps: u32,
     ce_mem: u64,
     topts: *const TestOpts,
-    out_bin: *const char,
+    out_bin: str,
     target: i32,
     bootstrap_tags: bool,
 ) i32 {
@@ -1801,7 +1790,7 @@ fn run_file(
     if p.ok {
         let pkg = (&mut p) as *mut loader::Package;
         let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
-        p.ceval = (&mut ceval) as *mut void;
+        p.ceval = (&mut ceval);
         rc = run_package(&mut p, topts, out_bin, target);
         ceval.free();
     }
@@ -1812,7 +1801,7 @@ fn run_file(
 // "1024", "64K", "16M", "1G" -> bytes; 0 on malformed input.
 fn parse_size(s: *const char) u64 {
     let mut endp: *mut char = null;
-    let v = unsafe stdlib::strtoul(s, (&mut endp) as *mut void, 10);
+    let v = unsafe stdlib::strtoul(s, (&mut endp), 10);
     if endp as usize == s as usize || v == 0 {
         return 0;
     }
@@ -1839,8 +1828,8 @@ fn parse_size(s: *const char) u64 {
 fn exe_std_dir(argv0: *const char) *mut char {
     let mut buf = PathBuf {};
     let mut path = argv0;
-    if unsafe shim::sc_exe_path((&mut buf.b[0]) as *mut char, 4096) == 0 {
-        path = (&buf.b[0]) as *const char;
+    if unsafe shim::sc_exe_path((&mut buf[0]), 4096) == 0 {
+        path = (&buf[0]);
     }
     // Last path separator, '/' or '\\' (Windows), whichever occurs later -- branch-free, no platform detection.
     let s1 = unsafe cstring::strrchr(path, '/' as i32);
@@ -1860,11 +1849,11 @@ fn exe_std_dir(argv0: *const char) *mut char {
         return null;
     }
     if slash != null {
-        unsafe cstring::memcpy(out as *mut void, path, dirlen);
+        unsafe cstring::memcpy(out, path, dirlen);
     } else {
         unsafe out[0] = '.' as char;
     }
-    unsafe cstring::memcpy((out + dirlen) as *mut void, "/std".ptr(), 4);
+    unsafe cstring::memcpy((out + dirlen), "/std".ptr(), 4);
     unsafe out[dirlen + 4] = 0 as char;
     return out;
 }
@@ -1878,7 +1867,7 @@ fn read_stdin() Option<String> {
     }
     let sin = stdio::stdin();
     loop {
-        let n = unsafe stdio::fread(buf as *mut void, 1, cap, sin);
+        let n = unsafe stdio::fread(buf, 1, cap, sin);
         if n > 0 {
             s.push_bytes(buf as *const u8, n);
         }
@@ -1886,7 +1875,7 @@ fn read_stdin() Option<String> {
             break;
         }
     }
-    unsafe stdlib::free(buf as *mut void);
+    unsafe stdlib::free(buf);
     return Option::<String>::Some(s);
 }
 
@@ -1899,7 +1888,7 @@ fn fmt_name_cmp(a: &String, b: &String) i32 {
     } else {
         lb;
     };
-    let c = unsafe cstring::memcmp(a.as_str().ptr() as *const void, b.as_str().ptr() as *const void, m);
+    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
     if c != 0 {
         return c;
     }
@@ -1941,7 +1930,7 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
                 rc = 1;
             }
         } else if names.at(i).as_str().ends_with(".spc") {
-            if fmt_one(p.cstr(), false, write, check) != 0 {
+            if fmt_one(p.as_str(), false, write, check) != 0 {
                 rc = 1;
             }
         }
@@ -1957,30 +1946,30 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
 // already formatted. `-` reads stdin and formats to stdout. A directory recurses over its .spc files
 // (requires -w or --check). A file the compiler cannot lex or parse is never rewritten: diagnostics
 // are printed and the exit code is 1.
-fn run_fmt(path: *const char, write: bool, check: bool) i32 {
-    let is_stdin = unsafe path[0] == '-' as char && unsafe path[1] == 0 as char;
+fn run_fmt(path: str, write: bool, check: bool) i32 {
+    let is_stdin = path[0] == '-'  && path[1] == 0;
     if is_stdin && write {
         eprintln("fmt: -w cannot be used with stdin");
         return 1;
     }
-    if !is_stdin && unsafe shim::sc_stat_isdir(path) == 1 {
+    if !is_stdin && unsafe shim::sc_stat_isdir(path.ptr() as *char) == 1 {
         if !write && !check {
-            eprintln("fmt: '{}' is a directory; use -w or --check", diag::cstr(path));
+            eprintln("fmt: '{}' is a directory; use -w or --check", path);
             return 1;
         }
-        return fmt_dir(diag::cstr(path), write, check);
+        return fmt_dir(path, write, check);
     }
     return fmt_one(path, is_stdin, write, check);
 }
 
-fn fmt_one(path: *const char, is_stdin: bool, write: bool, check: bool) i32 {
+fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     let src_opt = if is_stdin {
         read_stdin();
     } else {
-        loader::read_file(diag::cstr(path));
+        loader::read_file(path);
     };
     if src_opt.is_none() {
-        eprintln("fmt: cannot read '{}'", diag::cstr(path));
+        eprintln("fmt: cannot read '{}'", path);
         return 1;
     }
     let mut src = src_opt.unwrap();
@@ -2039,7 +2028,7 @@ fn fmt_one(path: *const char, is_stdin: bool, write: bool, check: bool) i32 {
             "fmt: internal error: {} of {} comments would be dropped in '{}'; refusing",
             ncomments - emitted,
             ncomments,
-            diag::cstr(path),
+            path,
         );
         out.free();
         src.free();
@@ -2050,117 +2039,113 @@ fn fmt_one(path: *const char, is_stdin: bool, write: bool, check: bool) i32 {
     let mut rc = 0;
     if check {
         if !same {
-            print("{}\n", diag::cstr(path));
+            print("{}\n", path);
             rc = 1;
         }
     } else if write {
         if !same {
-            let f = stdio::fopen(diag::cstr(path), "wb");
+            let f = stdio::fopen(path, "wb");
             if f == null {
-                eprintln("fmt: cannot write '{}'", diag::cstr(path));
+                eprintln("fmt: cannot write '{}'", path);
                 rc = 1;
             } else {
-                unsafe stdio::fwrite(out.as_str().ptr() as *const void, 1, out.len(), f);
+                unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), f);
                 unsafe stdio::fclose(f);
             }
         }
     } else {
-        unsafe stdio::fwrite(out.as_str().ptr() as *const void, 1, out.len(), stdio::stdout());
+        unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), stdio::stdout());
     }
     out.free();
     src.free();
     return rc;
 }
 
-fn argv_cstr(argv: &Vector<str>, i: i32) *const char {
-    return (*argv.at(i as usize)).ptr() as *const char;
-}
-
 fn main(argv: Vector<str>) i32 {
-    let argc = argv.len() as i32;
+    let argc = argv.len();
     let mut ce_steps: u32 = 0;
     let mut ce_mem: u64 = 0;
-    let mut file: *const char = null;
-    let mut out_bin: *const char = null; // set by the `build` subcommand (via -o, or defaulted)
+    let mut file = "";
+    let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
     let mut build_mode = false;
     let mut fmt_mode = false;
     let mut fmt_write = false;
     let mut fmt_check = false;
 
-    let mut fmt_extra = Vector::<i32>::new(); // argv indices of extra `fmt` paths
+    let mut fmt_extra = Vector::<usize>::new(); // argv indices of extra `fmt` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
     let mut bad = false;
     let mut target: i32 = unsafe shim::sc_host_platform(); // @platform gate target; --target= overrides
     let mut bootstrap_tags = false; // --bootstrap-tags: accept unknown @attributes (build across a new tag)
-    let mut i: i32 = 1;
+    let mut i: usize = 1;
     while i < argc {
-        let arg = argv_cstr(&argv, i);
-        if !build_mode && file == null && unsafe cstring::strcmp(arg, "build".ptr() as *const char) == 0 {
+        let arg = argv[i];
+        if !build_mode && file.len() == 0 && arg == "build" {
             build_mode = true; // `super-c build <root.spc> [-o out]`: emit + link a program
-        } else if !build_mode && !fmt_mode && file == null && unsafe cstring::strcmp(arg, "fmt".ptr() as *const char) == 0 {
+        } else if !build_mode && !fmt_mode && file.len() == 0 && arg == "fmt" {
             fmt_mode = true; // `super-c fmt [-w | --check] <file | ->`
-        } else if fmt_mode && unsafe cstring::strcmp(arg, "-w".ptr() as *const char) == 0 {
+        } else if fmt_mode && arg == "-w" {
             fmt_write = true;
-        } else if fmt_mode && unsafe cstring::strcmp(arg, "--check".ptr() as *const char) == 0 {
+        } else if fmt_mode && arg == "--check" {
             fmt_check = true;
-        } else if unsafe cstring::strcmp(arg, "-o".ptr() as *const char) == 0 {
+        } else if arg == "-o" {
             if i + 1 < argc {
                 i = i + 1;
-                out_bin = argv_cstr(&argv, i);
+                out_bin = argv[i];
             } else {
                 bad = true;
             }
-        } else if unsafe cstring::strncmp(arg, "--const-eval-steps=".ptr() as *const char, 19) == 0 {
-            let v = parse_size(unsafe (arg + 19));
+        } else if arg[0..19] == "--const-eval-steps=" {
+            let v = parse_size((&arg[19]) as *char);
             if v == 0 || v > 4294967295u64 {
                 bad = true;
             } else {
                 ce_steps = v as u32;
             }
-        } else if unsafe cstring::strncmp(arg, "--const-eval-memory=".ptr() as *const char, 20) == 0 {
-            ce_mem = parse_size(unsafe (arg + 20));
+        } else if arg[0..20] == "--const-eval-memory=" {
+            ce_mem = parse_size((&arg[20]) as *char);
             if ce_mem == 0 {
                 bad = true;
             }
-        } else if unsafe cstring::strcmp(arg, "--test".ptr() as *const char) == 0 {
+        } else if arg == "--test"{
             topts.enabled = true;
-        } else if unsafe cstring::strncmp(arg, "--test-jobs=".ptr() as *const char, 12) == 0 {
-            topts.jobs = unsafe stdlib::atoi(arg + 12);
+        } else if arg[0..12] == "--test-jobs=" {
+            topts.jobs = unsafe stdlib::atoi((&arg[12]) as *char);
             if topts.jobs < 1 {
                 bad = true;
             }
-        } else if unsafe cstring::strcmp(arg, "--test-no-fork".ptr() as *const char) == 0 {
+        } else if arg == "--test-no-fork" {
             topts.no_fork = true;
-        } else if unsafe cstring::strncmp(arg, "--test-filter=".ptr() as *const char, 14) == 0 {
-            topts.filter = unsafe (arg + 14);
-        } else if unsafe cstring::strncmp(arg, "--target=".ptr() as *const char, 9) == 0 {
-            let t = unsafe (arg + 9);
-            if unsafe cstring::strcmp(t, "windows".ptr() as *const char) == 0 {
+        } else if arg[0..14] == "--test-filter=" {
+            topts.filter = (&arg[14]) as *char;
+        } else if arg[0..9] == "--target=" {
+            let t = arg[9..];
+            if t == "windows" {
                 target = 0;
-            } else if unsafe cstring::strcmp(t, "macos".ptr() as *const char) == 0 {
+            } else if t == "macos" {
                 target = 1;
-            } else if unsafe cstring::strcmp(t, "linux".ptr() as *const char) == 0 {
+            } else if t == "linux" {
                 target = 2;
             } else {
                 bad = true;
             }
-        } else if unsafe cstring::strcmp(arg, "--bootstrap-tags".ptr() as *const char) == 0 {
+        } else if arg == "--bootstrap-tags" {
             bootstrap_tags = true;
-        } else if unsafe arg[0] == '-' as char && unsafe arg[1] == '-' as char {
+        } else if arg[0] == '-' && arg[1] == '-' {
             bad = true;
-        } else if file == null {
+        } else if file.len() == 0 {
             file = arg;
         } else if fmt_mode {
             fmt_extra.push(i); // `fmt` accepts any number of paths
         } else {
-            file = "".ptr() as *const char;
+            file = "";
         }
         i = i + 1;
     }
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null) {
         bad = true;
     }
-    if out_bin != null && !build_mode {
+    if out_bin.len() != 0 && !build_mode {
         bad = true;
     } // -o is only meaningful for `build`
     if build_mode && topts.enabled {
@@ -2171,11 +2156,12 @@ fn main(argv: Vector<str>) i32 {
     }
     if fmt_write && fmt_check {
         bad = true;
-    } // -w and --check are mutually exclusive
-    if build_mode && out_bin == null {
-        out_bin = "a.out".ptr() as *const char;
-    } // cc-style default
-    if bad || file == null || unsafe *file == 0 as char {
+    }
+    // -w and --check are mutually exclusive
+    if build_mode && out_bin.len() == 0 {
+        out_bin = "a.out";
+    }
+    if bad || file.len() == 0 {
         unsafe stdio::fputs(
             "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n       super-c fmt [-w | --check] <path/to/script | ->\n".ptr() as *const char,
             stdio::stderr(),
@@ -2185,7 +2171,7 @@ fn main(argv: Vector<str>) i32 {
     if fmt_mode {
         let mut rc = run_fmt(file, fmt_write, fmt_check);
         for k in 0..fmt_extra.len() {
-            if run_fmt(argv_cstr(&argv, *fmt_extra.at(k)), fmt_write, fmt_check) != 0 {
+            if run_fmt(argv[*fmt_extra.at(k)], fmt_write, fmt_check) != 0 {
                 rc = 1;
             }
         }
@@ -2194,14 +2180,14 @@ fn main(argv: Vector<str>) i32 {
     }
     fmt_extra.free();
     let arg0: *const char = if argc > 0 {
-        argv_cstr(&argv, 0);
+        argv[0].ptr() as *const char;
     } else {
         "super-c".ptr() as *const char;
     };
     let std_dir = exe_std_dir(arg0);
     let rc = run_file(
         file,
-        std_dir as *const char,
+        std_dir,
         ce_steps,
         ce_mem,
         (&topts) as *const TestOpts,
@@ -2210,7 +2196,7 @@ fn main(argv: Vector<str>) i32 {
         bootstrap_tags,
     );
     if std_dir != null {
-        unsafe stdlib::free(std_dir as *mut void);
+        unsafe stdlib::free(std_dir);
     }
     return rc;
 }

@@ -7,9 +7,6 @@ import utils::errors as diag;
 
 // A scratch buffer to NUL-terminate a module's file path (a `str` view into an owned String) before
 // handing it to the C-string diagnostic renderer.
-struct FileScratch {
-    pub b: [char; 4096],
-}
 
 // Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
 pub enum Namespace {
@@ -302,7 +299,7 @@ extend Resolver {
             }
             let s = self.name_span(unsafe seg_ids[i as usize]);
             let l = (s.end - s.start) as usize;
-            unsafe cstring::memcpy((out + at) as *mut void, self.source + s.start as usize, l);
+            unsafe cstring::memcpy((out + at), self.source + s.start as usize, l);
             at = at + l;
             i = i + 1;
         }
@@ -319,7 +316,7 @@ extend Resolver {
         let ids = self.ast.list(parts);
         let buf = self.join_segs(ids, parts.len);
         let m = pkg.find(str::from_raw(buf as *const u8, unsafe cstring::strlen(buf)));
-        unsafe stdlib::free(buf as *mut void);
+        unsafe stdlib::free(buf);
         return m;
     }
 
@@ -380,7 +377,7 @@ extend Resolver {
         let ids = self.ast.list(parts);
         let buf = self.join_segs(ids, parts.len - 1); // module = every segment but the last
         let m = pkg.find(str::from_raw(buf as *const u8, unsafe cstring::strlen(buf)));
-        unsafe stdlib::free(buf as *mut void);
+        unsafe stdlib::free(buf);
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize] };
         }
@@ -545,7 +542,7 @@ extend Resolver {
                 }
             }
         }
-        unsafe stdlib::free(buf as *mut void);
+        unsafe stdlib::free(buf);
         return handled;
     }
 
@@ -1424,15 +1421,7 @@ extend Resolver {
         }
         self.scope_exit();
         let fstr = self.package_file();
-        let mut fb = FileScratch {};
-        let mut file: *const char = null;
-        let fl = fstr.len();
-        if fl != 0 && fl < 4096 {
-            unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, fstr.ptr() as *const void, fl);
-            unsafe fb.b[fl] = 0 as char;
-            file = (&fb.b[0]) as *const char;
-        }
-        self.errors.finalize(self.source, self.len, file);
+        self.errors.finalize(self.source, self.len, fstr);
     }
 
     pub fn has_errors(self: &Self) bool {

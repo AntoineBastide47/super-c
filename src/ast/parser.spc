@@ -22,7 +22,7 @@ pub struct Parser {
     pub depth: u32,
     pub allow_struct_initializer: bool,
     pub ast: Ast,
-    pub file: *const char,
+    pub file: str,
     pub errors: diag::Errors,
     pub bootstrap_tags: bool, // accept unknown @attributes without error (bootstrap across a new tag)
 }
@@ -39,13 +39,13 @@ extend Parser {
             depth: 0,
             allow_struct_initializer: true,
             ast: Ast::new(token_count),
-            file: null,
+            file: "",
             errors: diag::Errors::new(),
             bootstrap_tags: false,
         };
     }
 
-    pub fn set_file(self: &mut Self, file: *const char) void {
+    pub fn set_file(self: &mut Self, file: str) void {
         self.file = file;
     }
     pub fn set_bootstrap_tags(self: &mut Self, v: bool) void {
@@ -1415,7 +1415,7 @@ extend Parser {
                 self.ast.at(name).as_data.name.is_mutable = true;
             }
             let text = self.ast.at_const(name).as_data.name.text;
-            if text.end - text.start == 1 && unsafe self.source[text.start as usize] == '_' as u8 {
+            if text.end - text.start == 1 && unsafe self.source[text.start as usize] == b'_' {
                 return self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: self.node_span(name) });
             }
             if self.match(TokenType::LeftParen) {
@@ -1587,7 +1587,7 @@ extend Parser {
         }
         if kind == TokenType::Identifier {
             let t = self.raw_peek();
-            let may_va = t.len() >= 6 && t.len() <= 8 && unsafe self.source[t.start() as usize] == 'v' as u8;
+            let may_va = t.len() >= 6 && t.len() <= 8 && unsafe self.source[t.start() as usize] == b'v';
             let va = if may_va && self.text_is(t, "va_start") {
                 VA_START as i32;
             } else if may_va && self.text_is(t, "va_arg") {
@@ -2935,14 +2935,14 @@ extend Parser {
                     let mut i = lit.start();
                     while i < lit.end() && k + 1 < sizeof([char; 24]) {
                         let ch = unsafe self.source[i as usize];
-                        if ch != '_' as u8 {
+                        if ch != b'_' {
                             buf[k] = ch as char;
                             k = k + 1;
                         }
                         i = i + 1;
                     }
                     buf[k] = 0 as char;
-                    out.arg = unsafe stdlib::strtoul((&buf[0]) as *const char, null, 0) as u32;
+                    out.arg = unsafe stdlib::strtoul((&buf[0]), null, 0) as u32;
                 }
                 self.advance();
             } else {

@@ -154,9 +154,9 @@ pub fn read_file(path: str) Option<String> {
         unsafe stdio::fclose(f);
         return Option::<String>::None;
     }
-    let n = unsafe stdio::fread(buf as *mut void, 1, sz, f);
+    let n = unsafe stdio::fread(buf, 1, sz, f);
     if n != sz && unsafe stdio::ferror(f) != 0 {
-        unsafe stdlib::free(buf as *mut void);
+        unsafe stdlib::free(buf);
         unsafe stdio::fclose(f);
         return Option::<String>::None;
     }
@@ -166,7 +166,7 @@ pub fn read_file(path: str) Option<String> {
     // relies on to over-read safely (see lexer::SOURCE_PAD).
     let mut out = String::with_capacity(n + lexer::SOURCE_PAD);
     out.push_str(str::from_raw(buf as *const u8, n));
-    unsafe stdlib::free(buf as *mut void);
+    unsafe stdlib::free(buf);
     out.pad_nul(lexer::SOURCE_PAD);
     return Option::<String>::Some(out);
 }
@@ -177,7 +177,7 @@ fn dir_of(path: str) String {
     let mut slash: i64 = -1;
     let mut i: usize = 0;
     while i < n {
-        if path.byte_at(i) == '/' as u8 {
+        if path.byte_at(i) == b'/' {
             slash = i as i64;
         }
         i = i + 1;
@@ -194,7 +194,7 @@ fn stem_of(path: str) String {
     let mut bstart: usize = 0;
     let mut i: usize = 0;
     while i < n {
-        if path.byte_at(i) == '/' as u8 {
+        if path.byte_at(i) == b'/' {
             bstart = i + 1;
         }
         i = i + 1;
@@ -202,7 +202,7 @@ fn stem_of(path: str) String {
     let mut dot: i64 = -1;
     i = bstart;
     while i < n {
-        if path.byte_at(i) == '.' as u8 {
+        if path.byte_at(i) == b'.' {
             dot = i as i64;
         }
         i = i + 1;
@@ -269,9 +269,9 @@ extend DirCache {
         let mut db = RealBuf {};
         let dl = dir.len();
         if dl < 4096 {
-            unsafe cstring::memcpy((&mut db.b[0]) as *mut void, dir.ptr() as *const void, dl);
+            unsafe cstring::memcpy((&mut db.b[0]), dir.ptr(), dl);
             unsafe db.b[dl] = 0 as char;
-            let d = unsafe shim::sc_opendir((&db.b[0]) as *const char);
+            let d = unsafe shim::sc_opendir((&db.b[0]));
             if d != null {
                 dok = true;
                 loop {
@@ -297,7 +297,7 @@ extend DirCache {
         let mut slash: i64 = -1;
         let mut i: usize = 0;
         while i < n {
-            if path.byte_at(i) == '/' as u8 {
+            if path.byte_at(i) == b'/' {
                 slash = i as i64;
             }
             i = i + 1;
@@ -350,7 +350,7 @@ fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src:
 }
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
-fn parse_source(source: &mut String, file: *const char, bootstrap_tags: bool) ParseResult {
+fn parse_source(source: &mut String, file: str, bootstrap_tags: bool) ParseResult {
     let mut lx = lexer::Lexer::new(&mut *source); // pads `source` in place; the lexer over-reads into padding
     lx.set_file(file);
     lx.scan_tokens();
@@ -457,16 +457,7 @@ extend Package {
             },
         };
 
-        // NUL-terminate file_path into a scratch buffer for parse_source's diagnostics (read only during the call).
-        let mut fb = RealBuf {};
-        let fl = file_path.len();
-        if fl < 4096 {
-            unsafe cstring::memcpy((&mut fb.b[0]) as *mut void, file_path.ptr() as *const void, fl);
-            unsafe fb.b[fl] = 0 as char;
-        } else {
-            unsafe fb.b[0] = 0 as char;
-        }
-        let parsed = parse_source(&mut source, (&fb.b[0]) as *const char, bootstrap_tags);
+        let parsed = parse_source(&mut source, file_path, bootstrap_tags);
         let ok = parsed.ok;
         let id = self.add_module(String::from_str(mod_path), String::from_str(file_path), source, parsed.ast, ok);
         if !ok {
@@ -1532,9 +1523,9 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
         for i in 0..n {
             unsafe order[i] = i as ModuleId;
         }
-        unsafe stdlib::free(done as *mut void);
-        unsafe stdlib::free(dep as *mut void);
-        unsafe stdlib::free(indeg as *mut void);
+        unsafe stdlib::free(done);
+        unsafe stdlib::free(dep);
+        unsafe stdlib::free(indeg);
         return;
     }
     for a in 0..n {
@@ -1649,22 +1640,22 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
             }
         }
     }
-    unsafe stdlib::free(done as *mut void);
-    unsafe stdlib::free(dep as *mut void);
-    unsafe stdlib::free(indeg as *mut void);
+    unsafe stdlib::free(done);
+    unsafe stdlib::free(dep);
+    unsafe stdlib::free(indeg);
 }
 
 // Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 // `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
-pub fn package_load(root_file: *const char, std_dir: *const char, bootstrap_tags: bool) Package {
+pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) Package {
     let mut p = Package::new();
     p.ok = true;
-    p.root_dir = dir_of(str::from_cstr(root_file));
+    p.root_dir = dir_of(root_file);
     if std_dir != null {
         p.std_root = dir_of(str::from_cstr(std_dir));
     }
-    let rp = stem_of(str::from_cstr(root_file));
-    let rf = String::from_cstr(root_file);
+    let rp = stem_of(root_file);
+    let rf = String::from_str(root_file);
     p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags);
     load_prelude(&mut p, std_dir);
     p.seed_core();
@@ -1685,7 +1676,7 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     }
     load_prelude(&mut p, std_dir);
     let mut source = String::from_str(str::from_raw(src as *const u8, len));
-    let parsed = parse_source(&mut source, "<harness>".ptr() as *const char, false);
+    let parsed = parse_source(&mut source, "<harness>", false);
     let ok = parsed.ok;
     let id = p.add_module(String::from_str("main"), String::from_str("<harness>"), source, parsed.ast, ok);
     if ok {
@@ -1708,7 +1699,7 @@ fn basename_of(path: str) str {
     let mut b: usize = 0;
     let mut i: usize = 0;
     while i < n {
-        if path.byte_at(i) == '/' as u8 {
+        if path.byte_at(i) == b'/' {
             b = i + 1;
         }
         i = i + 1;
@@ -1729,7 +1720,7 @@ fn name_cmp(a: &String, b: &String) i32 {
     } else {
         lb;
     };
-    let c = unsafe cstring::memcmp(a.as_str().ptr() as *const void, b.as_str().ptr() as *const void, m);
+    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
     if c != 0 {
         return c;
     }
