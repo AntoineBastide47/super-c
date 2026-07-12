@@ -23,7 +23,7 @@ fn run_exit(label: str, body: str, code: i32) {
         PRE.ptr() as *const char,
         body.ptr() as *const char,
     );
-    let src = str::from_raw(&buf.b[0] as *const u8, unsafe cstring::strlen(&buf.b[0]));
+    let src = str::from_raw((&buf.b[0]) as *const u8, unsafe cstring::strlen(&buf.b[0]));
     h::expect_exit(label, src, code);
 }
 

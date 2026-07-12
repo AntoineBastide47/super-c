@@ -476,7 +476,7 @@ extend Ty as Hash {
     // The hash only selects a probe bucket: `eq` stays a full memcmp and intern_type numbers TypeIds in
     // insertion order, so the hash function never affects interned identity or emitted output.
     pub fn hash(self: &Self) u64 {
-        let p = self as *const Ty as *const u64;
+        let p = (self as *const Ty) as *const u64;
         let mut h: u64 = 1469598103934665603u64;
         for i in 0..sizeof(Ty) / 8 {
             h = h ^ unsafe p[i];

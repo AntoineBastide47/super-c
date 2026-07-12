@@ -286,7 +286,7 @@ extend Resolver {
             }
             i = i + 1;
         }
-        let out = unsafe stdlib::malloc(total + 1) as *mut char;
+        let out = (unsafe stdlib::malloc(total + 1)) as *mut char;
         let mut at: usize = 0;
         i = 0;
         while i < count {
@@ -396,7 +396,7 @@ extend Resolver {
             return miss;
         }
         let pkg = unsafe &*self.package;
-        let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
+        let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
         let nl = (name.end - name.start) as usize;
         let ng = self.glob_mids.len();
         for i in 0..ng {
@@ -411,7 +411,7 @@ extend Resolver {
     // Resolve a public top-level decl `name` in module `mid` and record it (cross-module) on `ref`.
     fn resolve_module_decl(self: &mut Self, refn: NodeId, mid: ModuleId, name: tok::Span, want_type: bool, kind: str) void {
         let pkg = unsafe &*self.package;
-        let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
+        let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
         let nl = (name.end - name.start) as usize;
         let decl = pkg.lookup(mid, str::from_raw(nm as *const u8, nl), want_type);
         if decl != NODE_NONE {
@@ -479,7 +479,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         // Join the LONGEST candidate module prefix once; every shorter prefix is a byte prefix of it, so
         // the probe loop just shrinks the viewed length instead of re-joining (and re-allocating) per try.
-        let buf = self.join_segs(&seg[0] as *const NodeId, nn - 1);
+        let buf = self.join_segs((&seg[0]) as *const NodeId, nn - 1);
         let mut lens: [usize; 32] = [[0] = 0usize];
         let mut plen: usize = 0;
         i = 0;
@@ -503,7 +503,7 @@ extend Resolver {
                 if nn - m == 1 {
                     // module::decl -- a function (preferred) or type
                     let dn = self.name_span(seg[m as usize]);
-                    let dnm = unsafe (self.source.ptr() + dn.start as usize) as *const char;
+                    let dnm = (unsafe (self.source.ptr() + dn.start as usize)) as *const char;
                     let dl = (dn.end - dn.start) as usize;
                     let mut decl = pkg.lookup(mid, str::from_raw(dnm as *const u8, dl), false);
                     if decl == NODE_NONE {
@@ -585,7 +585,7 @@ extend Resolver {
         // Unqualified fallback: the std prelude and this module's glob imports.
         if self.package != null {
             let pkg = unsafe &*self.package;
-            let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
+            let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
             let nl = (name.end - name.start) as usize;
             let want_type = ns == Namespace::NS_TYPE;
             let mut hit = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), want_type);
@@ -1205,7 +1205,7 @@ extend Resolver {
             if nm.found {
                 let mn = self.name_span(mb.member);
                 let pkg = unsafe &*self.package;
-                let nmp = unsafe (self.source.ptr() + mn.start as usize) as *const char;
+                let nmp = (unsafe (self.source.ptr() + mn.start as usize)) as *const char;
                 let nl = (mn.end - mn.start) as usize;
                 let decl = pkg.lookup(nm.mid, str::from_raw(nmp as *const u8, nl), false); // a value (function) export takes priority
                 if decl != NODE_NONE {
@@ -1243,7 +1243,7 @@ extend Resolver {
                 if self.package != null {
                     // a prelude/glob type: commit the hit found while probing
                     let pkg = unsafe &*self.package;
-                    let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
+                    let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
                     let nl = (name.end - name.start) as usize;
                     let mut hit = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), true);
                     if hit.node == NODE_NONE {

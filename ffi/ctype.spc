@@ -42,8 +42,8 @@ pub fn is_xdigit(b: u8) bool {
     return unsafe isxdigit(b as i32) != 0;
 }
 pub fn to_upper(b: u8) u8 {
-    return unsafe toupper(b as i32) as u8;
+    return (unsafe toupper(b as i32)) as u8;
 }
 pub fn to_lower(b: u8) u8 {
-    return unsafe tolower(b as i32) as u8;
+    return (unsafe tolower(b as i32)) as u8;
 }

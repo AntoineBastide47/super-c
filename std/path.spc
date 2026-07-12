@@ -13,7 +13,7 @@ extern "C" {
 
 extend Path {
     fn own_inner(inner: String) *mut String {
-        let p = unsafe malloc(sizeof(String)) as *mut String;
+        let p = (unsafe malloc(sizeof(String))) as *mut String;
         if p as *mut void == null {
             unsafe abort();
         }

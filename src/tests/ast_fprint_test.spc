@@ -116,7 +116,7 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
             out,
             " `%.*s`".ptr() as *const char,
             (t.end - t.start) as i32,
-            unsafe (source + t.start as usize) as *const char,
+            (unsafe (source + t.start as usize)) as *const char,
         );
     } else if n.kind == ast::NodeKind::NODE_LITERAL {
         let r = n.as_data.literal.raw;
@@ -124,7 +124,7 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
             out,
             " %.*s".ptr() as *const char,
             (r.end - r.start) as i32,
-            unsafe (source + r.start as usize) as *const char,
+            (unsafe (source + r.start as usize)) as *const char,
         );
     } else if n.kind == ast::NodeKind::NODE_UNARY {
         unsafe stdio::fprintf(out, " %s".ptr() as *const char, n.as_data.unary.op.name().ptr() as *const char);
@@ -333,7 +333,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
         return null;
     }
     unsafe stdio::rewind(f);
-    let buf = unsafe stdlib::malloc(sz as usize + 1) as *mut char;
+    let buf = (unsafe stdlib::malloc(sz as usize + 1)) as *mut char;
     if buf == null {
         return null;
     }

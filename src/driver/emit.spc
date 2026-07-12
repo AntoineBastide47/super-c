@@ -105,7 +105,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
     } else {
         1 as usize;
     };
-    let live = unsafe stdlib::calloc(sz, 1) as *mut bool;
+    let live = (unsafe stdlib::calloc(sz, 1)) as *mut bool;
     if live == null {
         return null;
     }
@@ -213,7 +213,7 @@ fn resolve_module(p: &mut loader::Package, i: usize) bool {
     m.ast = Ast::new(0);
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = &mut r.ast as *mut Ast;
+    p.override_ast = (&mut r.ast) as *mut Ast;
     r.resolve();
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
@@ -236,7 +236,7 @@ fn typecheck_module(p: &mut loader::Package, i: usize) bool {
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = &mut t.ast as *mut Ast;
+    p.override_ast = (&mut t.ast) as *mut Ast;
     t.check();
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
@@ -352,14 +352,14 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     keep.push(build_out_path(root, "super_rt", ".h"));
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
-    ext_c_collect(p, &mut keep, &mut err as *mut bool);
+    ext_c_collect(p, &mut keep, (&mut err) as *mut bool);
     let live = compute_emit_live(p);
     let osz = if n != 0 {
         n;
     } else {
         1 as usize;
     };
-    let order = unsafe stdlib::malloc(osz * 2) as *mut ModuleId;
+    let order = (unsafe stdlib::malloc(osz * 2)) as *mut ModuleId;
     if order == null {
         if live != null {
             unsafe stdlib::free(live);
@@ -410,7 +410,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
             };
             let ti = cg::CgTestInfo {
                 enabled: true,
-                cases: &tcases[0] as *const cg::CgTestCase,
+                cases: (&tcases[0]) as *const cg::CgTestCase,
                 ncases: nt,
                 fx_init: plan.fx_init[mi as usize],
                 fx_free: plan.fx_free[mi as usize],
@@ -421,7 +421,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
                 genv_type: plan.genv_type,
                 genv_is_enum: plan.genv_is_enum,
             };
-            c.set_test_info(&ti as *const cg::CgTestInfo);
+            c.set_test_info((&ti) as *const cg::CgTestInfo);
         }
         let hpath = build_out_path(root, mpath, ".h");
         let hout = open_out(hpath.as_str());

@@ -35,7 +35,7 @@ fn run_file(
     let mut p = loader::package_load(path, std_dir, bootstrap_tags);
     let mut rc: i32 = 1;
     if p.ok {
-        let pkg = &mut p as *mut loader::Package;
+        let pkg = (&mut p) as *mut loader::Package;
         let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
         p.ceval = &mut ceval;
         rc = run_package(&mut p, topts, out_bin, target);
@@ -91,7 +91,7 @@ fn exe_std_dir(argv0: *const char) *mut char {
     } else {
         1 as usize;
     };
-    let out = unsafe stdlib::malloc(dirlen + 5) as *mut char;
+    let out = (unsafe stdlib::malloc(dirlen + 5)) as *mut char;
     if out == null {
         return null;
     }
@@ -108,7 +108,7 @@ fn exe_std_dir(argv0: *const char) *mut char {
 fn read_stdin() Option<String> {
     let mut s = String::new();
     let cap: usize = 65536;
-    let buf = unsafe stdlib::malloc(cap) as *mut u8;
+    let buf = (unsafe stdlib::malloc(cap)) as *mut u8;
     if buf == null {
         return Option::<String>::None;
     }
@@ -264,7 +264,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     let mut out = String::new();
     let ast = ps.take_ast();
     ps.free();
-    let emitted = fbld::format_program(&ast as *const Ast, src.as_str(), 120, &mut out);
+    let emitted = fbld::format_program((&ast) as *const Ast, src.as_str(), 120, &mut out);
     let mut ast2 = ast;
     ast2.free();
     vsrc.free();
@@ -341,28 +341,28 @@ fn main(argv: Vector<str>) i32 {
                 bad = true;
             }
         } else if arg.starts_with("--const-eval-steps=") {
-            let v = parse_size(&arg[19] as *const char);
+            let v = parse_size((&arg[19]) as *const char);
             if v == 0 || v > 4294967295u64 {
                 bad = true;
             } else {
                 ce_steps = v as u32;
             }
         } else if arg.starts_with("--const-eval-memory=") {
-            ce_mem = parse_size(&arg[20] as *const char);
+            ce_mem = parse_size((&arg[20]) as *const char);
             if ce_mem == 0 {
                 bad = true;
             }
         } else if arg == "--test" {
             topts.enabled = true;
         } else if arg.starts_with("--test-jobs=") {
-            topts.jobs = unsafe stdlib::atoi(&arg[12] as *const char);
+            topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
             if topts.jobs < 1 {
                 bad = true;
             }
         } else if arg == "--test-no-fork" {
             topts.no_fork = true;
         } else if arg.starts_with("--test-filter=") {
-            topts.filter = &arg[14] as *const char;
+            topts.filter = (&arg[14]) as *const char;
         } else if arg.starts_with("--target=") {
             let t = arg[9..];
             if t == "windows" {
@@ -430,7 +430,7 @@ fn main(argv: Vector<str>) i32 {
         "super-c".ptr() as *const char;
     };
     let std_dir = exe_std_dir(arg0);
-    let rc = run_file(file, std_dir, ce_steps, ce_mem, &topts as *const TestOpts, out_bin, target, bootstrap_tags);
+    let rc = run_file(file, std_dir, ce_steps, ce_mem, (&topts) as *const TestOpts, out_bin, target, bootstrap_tags);
     if std_dir != null {
         unsafe stdlib::free(std_dir);
     }

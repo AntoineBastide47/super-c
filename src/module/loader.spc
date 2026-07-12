@@ -112,7 +112,7 @@ fn fnv_name(name: str) u64 {
     let p = name.ptr();
     let mut h: u64 = 1469598103934665603u64;
     for i in 0..name.len() {
-        h = h ^ unsafe p[i as usize] as u64;
+        h = h ^ (unsafe p[i as usize]) as u64;
         h = h * 1099511628211u64;
     }
     return h;
@@ -149,7 +149,7 @@ pub fn read_file(path: str) Option<String> {
         return Option::<String>::None;
     }
     let sz = s as usize;
-    let buf = unsafe stdlib::malloc(sz + 1) as *mut char;
+    let buf = (unsafe stdlib::malloc(sz + 1)) as *mut char;
     if buf == null {
         unsafe stdio::fclose(f);
         return Option::<String>::None;
@@ -407,7 +407,7 @@ extend Package {
         if mid == self.override_mod && self.override_ast != null {
             return self.override_ast as *const Ast;
         }
-        return &self.modules[mid as usize].ast as *const Ast;
+        return (&self.modules[mid as usize].ast) as *const Ast;
     }
 
     // Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
@@ -471,7 +471,7 @@ extend Package {
         // Address of the dir_cache field, taken BEFORE borrowing self.modules below (the cast releases the
         // &mut immediately; dir_cache is a disjoint field so mutating it doesn't alias the `m` borrow). Passed
         // as a usize because `*mut DirCache` is move-tracked (Free pointee) and would move out of the loop.
-        let dca = &mut self.dir_cache as *mut DirCache as usize;
+        let dca = ((&mut self.dir_cache) as *mut DirCache) as usize;
         let mut child_paths = Vector::<String>::new();
         let mut child_files = Vector::<String>::new();
         {
@@ -677,7 +677,7 @@ extend Package {
     // module-slot `m`'s index, first occurrence wins (matches lookup_linear's first-match order).
     fn lk_emit(self: &mut Self, m: usize, srcp: *const char, start: u32, end: u32, is_type: bool, node: NodeId) void {
         let len = end - start;
-        let np = unsafe (srcp + start as usize) as *const u8;
+        let np = (unsafe (srcp + start as usize)) as *const u8;
         let nm = str::from_raw(np, len as usize);
         let key = fnv_name(nm) * 2u64 + if is_type {
             1u64;
@@ -697,7 +697,7 @@ extend Package {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
         }
-        let mp = self as *const Package as *mut Package;
+        let mp = (self as *const Package) as *mut Package;
         unsafe {
             (*mp).ensure_lk_index(mid);
         }
@@ -1033,10 +1033,10 @@ extend Package as Free {
 // ---------------------------------------------------------------------------------------------------------
 
 fn pkg_ast_m(p: &mut Package, m: ModuleId) *mut Ast {
-    return &mut p.modules[m as usize].ast as *mut Ast;
+    return (&mut p.modules[m as usize].ast) as *mut Ast;
 }
 fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
-    return &p.modules[m as usize].ast as *const Ast;
+    return (&p.modules[m as usize].ast) as *const Ast;
 }
 
 // True when `t` mentions a function VALUE type anywhere (a TYPE_FUNCTION, possibly nested): its C symbol
@@ -1355,7 +1355,7 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
                 changed = true;
             }
         }
-        let cp = &mut changed as *mut bool;
+        let cp = (&mut changed) as *mut bool;
         reintern_nested_instance_deps(p, dm, &it, &na[0], m, cp);
         reintern_method_signature_deps(p, dm, &it, &na[0], m, cp);
     }
@@ -1514,9 +1514,9 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
     if n == 0 {
         return;
     }
-    let done = unsafe stdlib::calloc(n, 1) as *mut bool;
-    let dep = unsafe stdlib::calloc(n * n, 1) as *mut bool;
-    let indeg = unsafe stdlib::calloc(n, 4) as *mut u32;
+    let done = (unsafe stdlib::calloc(n, 1)) as *mut bool;
+    let dep = (unsafe stdlib::calloc(n * n, 1)) as *mut bool;
+    let indeg = (unsafe stdlib::calloc(n, 4)) as *mut u32;
     if done == null || dep == null || indeg == null {
         for i in 0..n {
             unsafe order[i] = i as ModuleId;
@@ -1561,7 +1561,7 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
                 i = i + 1;
                 continue;
             }
-            let bi = unsafe (*aa).instance(y.as_data.inst).module as usize;
+            let bi = (unsafe (*aa).instance(y.as_data.inst).module) as usize;
             if bi >= n || bi == a || unsafe dep[a * n + bi] {
                 i = i + 1;
                 continue;

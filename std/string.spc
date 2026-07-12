@@ -84,7 +84,7 @@ extend<A: Allocator> String<A> {
         if self.is_large() {
             return self.repr.large.ptr;
         }
-        return &self.repr.small.data[0] as *mut u8;
+        return (&self.repr.small.data[0]) as *mut u8;
     }
 
     // Set the byte length in whichever representation is active (caller keeps a small length <= 23).
@@ -109,7 +109,7 @@ extend<A: Allocator> String<A> {
         let cur = self.repr.small.len as usize;
         let p = self.alloc.alloc(new_cap, 1) as *mut u8;
         if cur > 0 {
-            unsafe memcpy(p as *mut void, &self.repr.small.data[0] as *const void, cur);
+            unsafe memcpy(p as *mut void, (&self.repr.small.data[0]) as *const void, cur);
         }
         self.repr.large.ptr = p;
         self.repr.large.len = cur;
@@ -231,7 +231,7 @@ extend<A: Allocator> String<A> {
         if n <= 23 {
             // move back inline, then free the heap buffer
             if n > 0 {
-                unsafe memcpy(&self.repr.small.data[0] as *mut void, p as *const void, n);
+                unsafe memcpy((&self.repr.small.data[0]) as *mut void, p as *const void, n);
             }
             self.alloc.dealloc(p as *mut void, cap, 1);
             self.repr.small.len = n as u8; // clears the discriminant (n <= 23)
@@ -266,7 +266,7 @@ extend<A: Allocator> String<A> {
         self.reserve(n);
         let len = self.len();
         let p = self.data_ptr();
-        unsafe memcpy(unsafe (p + len) as *mut void, src as *const void, n);
+        unsafe memcpy((unsafe (p + len)) as *mut void, src as *const void, n);
         self.set_len(len + n);
     }
 
@@ -436,7 +436,7 @@ extend<A: Allocator> String<A> {
             sign = 1;
         }
         if lead > 0 {
-            unsafe memmove(unsafe (p + sign + lead) as *mut void, unsafe (p + sign) as *const void, n - sign);
+            unsafe memmove((unsafe (p + sign + lead)) as *mut void, (unsafe (p + sign)) as *const void, n - sign);
         }
         let mut i = sign;
         while i < sign + lead {
@@ -467,7 +467,7 @@ extend<A: Allocator> String<A> {
         self.reserve(1);
         let len = self.len();
         let p = self.data_ptr();
-        unsafe memmove((unsafe (p + i) + 1) as *mut void, unsafe (p + i) as *const void, len - i);
+        unsafe memmove((unsafe (p + i) + 1) as *mut void, (unsafe (p + i)) as *const void, len - i);
         unsafe p[i] = b;
         self.set_len(len + 1);
     }
@@ -480,8 +480,8 @@ extend<A: Allocator> String<A> {
         self.reserve(text.len());
         let len = self.len();
         let p = self.data_ptr();
-        unsafe memmove((unsafe (p + i) + text.len()) as *mut void, unsafe (p + i) as *const void, len - i);
-        unsafe memcpy(unsafe (p + i) as *mut void, text.ptr() as *const void, text.len());
+        unsafe memmove((unsafe (p + i) + text.len()) as *mut void, (unsafe (p + i)) as *const void, len - i);
+        unsafe memcpy((unsafe (p + i)) as *mut void, text.ptr() as *const void, text.len());
         self.set_len(len + text.len());
     }
 
@@ -512,14 +512,14 @@ extend<A: Allocator> String<A> {
             start = start - 1;
         }
         let n = len - start;
-        let b0 = unsafe p[start] as u32;
+        let b0 = (unsafe p[start]) as u32;
         let mut ch: u32 = b0;
         if n == 2 {
-            ch = (b0 & 0x1F) << 6 | unsafe p[start + 1] as u32 & 0x3F;
+            ch = (b0 & 0x1F) << 6 | (unsafe p[start + 1]) as u32 & 0x3F;
         } else if n == 3 {
-            ch = (b0 & 0x0F) << 12 | (unsafe p[start + 1] as u32 & 0x3F) << 6 | unsafe p[start + 2] as u32 & 0x3F;
+            ch = (b0 & 0x0F) << 12 | ((unsafe p[start + 1]) as u32 & 0x3F) << 6 | (unsafe p[start + 2]) as u32 & 0x3F;
         } else if n == 4 {
-            ch = (b0 & 0x07) << 18 | (unsafe p[start + 1] as u32 & 0x3F) << 12 | (unsafe p[start + 2] as u32 & 0x3F) << 6 | unsafe p[start + 3] as u32 & 0x3F;
+            ch = (b0 & 0x07) << 18 | ((unsafe p[start + 1]) as u32 & 0x3F) << 12 | ((unsafe p[start + 2]) as u32 & 0x3F) << 6 | (unsafe p[start + 3]) as u32 & 0x3F;
         }
         self.set_len(start);
         return ch;
@@ -530,7 +530,7 @@ extend<A: Allocator> String<A> {
         let len = self.len();
         let p = self.data_ptr();
         let b = unsafe p[i];
-        unsafe memmove(unsafe (p + i) as *mut void, (unsafe (p + i) + 1) as *const void, len - i - 1);
+        unsafe memmove((unsafe (p + i)) as *mut void, (unsafe (p + i) + 1) as *const void, len - i - 1);
         self.set_len(len - 1);
         return b;
     }
@@ -553,7 +553,7 @@ extend<A: Allocator> String<A> {
         if self.is_large() {
             return self.repr.large.ptr as *const u8;
         }
-        return &self.repr.small.data[0] as *const u8;
+        return (&self.repr.small.data[0]) as *const u8;
     }
 
     pub fn as_str(self: &String<A>) str {
@@ -607,7 +607,7 @@ extend<A: Allocator> String<A> {
         let n = end - start;
         let mut s = String::<A>::with_capacity_in(self.alloc, n);
         if n > 0 {
-            unsafe memcpy(s.data_ptr() as *mut void, unsafe (self.as_ptr() + start) as *const void, n);
+            unsafe memcpy(s.data_ptr() as *mut void, (unsafe (self.as_ptr() + start)) as *const void, n);
             s.set_len(n);
         }
         return s;
@@ -622,7 +622,7 @@ extend<A: Allocator> String<A> {
             for k in 0..n {
                 let at = out.len();
                 let dst = out.data_ptr();
-                unsafe memcpy(unsafe (dst + at) as *mut void, src as *const void, len);
+                unsafe memcpy((unsafe (dst + at)) as *mut void, src as *const void, len);
                 out.set_len(at + len);
             }
         }
@@ -710,7 +710,7 @@ extend<A: Allocator> String<A> {
             return true;
         }
         return unsafe memcmp(
-            unsafe (self.as_ptr() + (n - suffix.len())) as *const void,
+            (unsafe (self.as_ptr() + (n - suffix.len()))) as *const void,
             suffix.ptr() as *const void,
             suffix.len(),
         ) == 0;
@@ -771,7 +771,7 @@ extend<A: Allocator> String<A> {
         let p = self.as_ptr();
         let last = n - needle.len();
         for i in 0..=last {
-            if unsafe memcmp(unsafe (p + i) as *const void, needle.ptr() as *const void, needle.len()) == 0 {
+            if unsafe memcmp((unsafe (p + i)) as *const void, needle.ptr() as *const void, needle.len()) == 0 {
                 return i;
             }
         }
@@ -791,7 +791,7 @@ extend<A: Allocator> String<A> {
         let mut i = n - needle.len() + 1; // one past the highest candidate; walk down to 0
         while i > 0 {
             i = i - 1;
-            if unsafe memcmp(unsafe (p + i) as *const void, needle.ptr() as *const void, needle.len()) == 0 {
+            if unsafe memcmp((unsafe (p + i)) as *const void, needle.ptr() as *const void, needle.len()) == 0 {
                 return i;
             }
         }
@@ -852,8 +852,8 @@ extend<A: Allocator> String<A> {
         let mut i: usize = 0;
         let mut run: usize = 0; // start of the pending unmatched run
         while i <= last {
-            if unsafe memcmp(unsafe (p + i) as *const void, from.ptr() as *const void, from.len()) == 0 {
-                out.push_bytes(unsafe (p + run) as *const u8, i - run);
+            if unsafe memcmp((unsafe (p + i)) as *const void, from.ptr() as *const void, from.len()) == 0 {
+                out.push_bytes((unsafe (p + run)) as *const u8, i - run);
                 out.push_str(to);
                 i = i + from.len();
                 run = i;
@@ -861,7 +861,7 @@ extend<A: Allocator> String<A> {
                 i = i + 1;
             }
         }
-        out.push_bytes(unsafe (p + run) as *const u8, n - run); // trailing run
+        out.push_bytes((unsafe (p + run)) as *const u8, n - run); // trailing run
         return out;
     }
 
@@ -878,7 +878,7 @@ extend<A: Allocator> String<A> {
             start = start + 1;
         }
         if start > 0 {
-            unsafe memmove(p as *mut void, unsafe (p + start) as *const void, len - start);
+            unsafe memmove(p as *mut void, (unsafe (p + start)) as *const void, len - start);
             self.set_len(len - start);
         }
     }
@@ -1002,7 +1002,7 @@ extend<A: Allocator> String<A> as Hash {
         let p = self.as_ptr();
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..n {
-            h = (h ^ unsafe p[i] as u64) * 0x100000001b3;
+            h = (h ^ (unsafe p[i]) as u64) * 0x100000001b3;
         }
         return h;
     }
