@@ -17,6 +17,8 @@ import codegen::codegen as cg;
 import utils::errors as diag;
 import driver::util as *;
 
+type PathBuf = Array<char, 4096>; // BOOTSTRAP(v0.3.2): local alias shim, revert after v0.4.0
+
 import driver::extc as *;
 import driver::test as *;
 

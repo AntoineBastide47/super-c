@@ -17,6 +17,10 @@ import codegen::codegen as cg;
 import utils::errors as diag;
 import driver::util as *;
 
+type PathBuf = Array<char, 4096>; // BOOTSTRAP(v0.3.2): local alias shim, revert after v0.4.0
+type Buf64 = Array<char, 64>; // BOOTSTRAP(v0.3.2)
+type Buf128 = Array<char, 128>; // BOOTSTRAP(v0.3.2)
+
 // ---------------------------------------------------------------------------------------------------------
 // External C sources/libs: `@c.source`/`@c.link` attrs + implicit backing-header `.c` siblings. Each resolved
 // source becomes a wrapper TU `build/__ext<N>_<stem>.c` (one absolute #include; the file stays in place so its

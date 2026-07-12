@@ -22,6 +22,8 @@ import driver::extc as *;
 import driver::test as *;
 import driver::emit as *;
 
+type PathBuf = Array<char, 4096>; // BOOTSTRAP(v0.3.2): local alias shim, revert after v0.4.0
+
 fn run_file(
     path: str,
     std_dir: *const char,
