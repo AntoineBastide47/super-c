@@ -45,6 +45,20 @@ jobs:
       # GitHub runners already ship a working `cc`, so nothing is installed by default -- these caches pay
       # off the moment a compiler/dep install is added below, and cost nothing otherwise. NOTE: only the
       # *installation* is cached; build OUTPUTS are never cached (see the Clean step).
+      # ccache: the compilation cache itself, shared across runs (keyed loose so every run
+      # restores the latest and saves its own). CCACHE_DIR pins one workspace path on all OSes.
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.target }}-
+
+      - name: Configure ccache dir
+        run: |
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+
       - name: Cache Homebrew downloads (macOS)
         if: runner.os == 'macOS'
         uses: actions/cache@v4
@@ -63,7 +77,7 @@ jobs:
           key: cc-apt-${{ runner.os }}-${{ hashFiles('Makefile') }}
           restore-keys: cc-apt-${{ runner.os }}-
 
-      - name: Set up C compiler (macOS)
+      - name: Set up C compiler + ccache (macOS)
         if: runner.os == 'macOS'
         run: |
           if ! command -v cc >/dev/null 2>&1; then
@@ -71,13 +85,18 @@ jobs:
             echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
             echo "CC=clang" >> "$GITHUB_ENV"
           fi
+          command -v ccache >/dev/null 2>&1 || brew install ccache
 
-      - name: Set up C compiler (Linux)
+      - name: Set up C compiler + ccache (Linux)
         if: runner.os == 'Linux'
         run: |
           if ! command -v cc >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y build-essential
+          fi
+          if ! command -v ccache >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ccache
           fi
 
       - name: Cache mingw-w64 install (Windows)
@@ -87,9 +106,10 @@ jobs:
         with:
           path: |
             C:\ProgramData\chocolatey\lib\mingw
+            C:\ProgramData\chocolatey\lib\ccache
             C:\ProgramData\mingw64
             C:\tools\mingw64
-          key: mingw-w64-${{ runner.os }}-choco-v1
+          key: mingw-w64-${{ runner.os }}-choco-v2
           restore-keys: mingw-w64-${{ runner.os }}-
 
       # Add compiler/dep installs here if ever needed (e.g. a pinned clang/gcc, libomp); their downloads
@@ -120,6 +140,7 @@ jobs:
           cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
           echo "CC=gcc" >> "$GITHUB_ENV"
           echo "BINEXT=.exe" >> "$GITHUB_ENV"
+          command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
 
       # --- Clean outputs only ---------------------------------------------------------------------------
       - name: Clean release outputs

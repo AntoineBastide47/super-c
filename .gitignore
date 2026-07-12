@@ -38,3 +38,6 @@ super-c
 examples
 todos
 profile.json.gz
+src/.gen-stage1/
+src/.gen-stage2/
+.obj/
