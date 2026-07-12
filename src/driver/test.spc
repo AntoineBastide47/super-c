@@ -17,9 +17,6 @@ import codegen::codegen as cg;
 import utils::errors as diag;
 import driver::util as *;
 
-type PathBuf = Array<char, 4096>; // BOOTSTRAP(v0.3.2): local alias shim, revert after v0.4.0
-type Buf64 = Array<char, 64>; // BOOTSTRAP(v0.3.2)
-
 // --test options (mirrors src/main.c TestOpts).
 pub struct TestOpts {
     pub enabled: bool,
