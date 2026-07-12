@@ -22,8 +22,8 @@ pub fn cstr(p: *const char) str {
 
 // A borrowed `str` view of the source bytes in the span [start, end) -- the idiomatic replacement for the
 // old `%.*s` (width, source+start) diagnostic argument pair.
-pub fn span_str(src: *const u8, start: u32, end: u32) str {
-    return str::from_raw(unsafe (src + start as usize), (end - start) as usize);
+pub fn span_str(src: str, start: u32, end: u32) str {
+    return src[start as usize..end as usize];
 }
 
 extend Errors {
@@ -65,22 +65,23 @@ extend Errors {
     }
 
     @c.cold
-    pub fn finalize(self: &mut Self, source: *const u8, len: usize, file: str) void {
+    pub fn finalize(self: &mut Self, source: str, file: str) void {
         if self.errors.len() == 0 {
             return;
         }
+        let len = source.len();
         let mut line_starts = Vector::<u32>::new();
         line_starts.reserve(len / 16);
         line_starts.push(0);
         let mut i: usize = 0;
         while i < len {
-            let b = unsafe source[i];
+            let b = source[i];
             if b == b'\n' {
                 i = i + 1;
                 line_starts.push(i as u32);
             } else if b == b'\r' {
                 i = i + 1;
-                if i < len && unsafe source[i] == b'\n' {
+                if i < len && source[i] == b'\n' {
                     i = i + 1;
                 }
                 line_starts.push(i as u32);
@@ -93,7 +94,6 @@ extend Errors {
                 self.errors.at(k),
                 source,
                 &line_starts,
-                len,
                 self.starts[k],
                 self.lens[k],
                 file,
@@ -156,23 +156,15 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
 // Render one diagnostic into a pretty source-annotated block: the message, a `--> file:line:col`
 // location, the offending source line (windowed to 120 cols), a caret run under the span, and notes.
 @c.cold
-fn render(
-    msg: &String,
-    source: *const u8,
-    line_starts: &Vector<u32>,
-    src_len: usize,
-    mut off: u32,
-    span: u32,
-    file: str,
-    notes: &String,
-) String {
+fn render(msg: &String, source: str, line_starts: &Vector<u32>, mut off: u32, span: u32, file: str, notes: &String) String {
+    let src_len = source.len();
     if off as usize > src_len {
         off = src_len as u32;
     }
     let li = line_index(line_starts, off);
     let lstart = line_starts[li];
     let mut lend = lstart as usize;
-    while lend < src_len && unsafe source[lend] != 10 && unsafe source[lend] != 13 {
+    while lend < src_len && source[lend] != 10 && source[lend] != 13 {
         lend = lend + 1;
     }
     let line_no = li + 1;
@@ -190,8 +182,6 @@ fn render(
             disp_end = lend;
         }
     }
-    let line_len = disp_end - disp_start;
-    let line_ptr = unsafe (source + disp_start);
     let caret_col = off as usize - disp_start;
     let mut carets: usize = 1;
     if span >= 1 {
@@ -218,7 +208,7 @@ fn render(
     out.push_str("\n |\n");
     out.push_u64(line_no as u64);
     out.push_str(" | ");
-    out.push_bytes(line_ptr, line_len);
+    out.push_str(source[disp_start..disp_end]);
     out.push_str("\n | ");
     for _ in 0..caret_col {
         out.push_byte(32);

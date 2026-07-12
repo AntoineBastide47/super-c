@@ -39,8 +39,7 @@ extend ClosureScope as Free {
 
 pub struct Resolver {
     pub ast: Ast,
-    pub source: *const u8,
-    pub len: usize,
+    pub source: str,
     pub symbols: Vector<Symbol>, // flat stack of live symbols across all open scopes
     pub symbol_previous: Vector<u32>, // chain links parallel to symbols, encoded as index + 1
     pub scope_starts: Vector<u32>, // stack of symbols.len at each scope entry
@@ -80,36 +79,36 @@ pub struct ModEntry {
 // Span-based helpers (no resolver state).
 // ---------------------------------------------------------------------------------------------------------
 
-fn name_hash(src: *const u8, s: tok::Span) u32 {
+fn name_hash(src: str, s: tok::Span) u32 {
     let mut h: u32 = 2166136261u32;
     let mut i = s.start;
     while i < s.end {
-        h = h ^ unsafe src[i as usize] as u32;
+        h = h ^ src[i as usize] as u32;
         h = h * 16777619u32;
         i = i + 1;
     }
     return h;
 }
 
-fn span_eq(src: *const u8, a: tok::Span, b: tok::Span) bool {
+fn span_eq(src: str, a: tok::Span, b: tok::Span) bool {
     let la = a.end - a.start;
     if la != b.end - b.start {
         return false;
     }
-    return unsafe cstring::memcmp(src + a.start as usize, src + b.start as usize, la as usize) == 0;
+    return unsafe cstring::memcmp(src.ptr() + a.start as usize, src.ptr() + b.start as usize, la as usize) == 0;
 }
 
-fn span_is(src: *const u8, s: tok::Span, lit: str) bool {
+fn span_is(src: str, s: tok::Span, lit: str) bool {
     let n = lit.len();
     if (s.end - s.start) as usize != n {
         return false;
     }
-    return unsafe cstring::memcmp(src + s.start as usize, lit.ptr(), n) == 0;
+    return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), n) == 0;
 }
 
 // The BuiltinType index of name `s` (matching ast's enum order), or -1. Pointer/reference forms wrap one
 // of these, which resolves on its own.
-fn builtin_index(src: *const u8, s: tok::Span) i32 {
+fn builtin_index(src: str, s: tok::Span) i32 {
     let names: [str; 18] = [
         "bool",
         "char",
@@ -138,7 +137,7 @@ fn builtin_index(src: *const u8, s: tok::Span) i32 {
     return -1;
 }
 
-fn is_builtin_type(src: *const u8, s: tok::Span) bool {
+fn is_builtin_type(src: str, s: tok::Span) bool {
     return builtin_index(src, s) >= 0;
 }
 
@@ -152,8 +151,7 @@ extend Resolver {
     pub fn new(ast: Ast, source: str, package: *const loader::Package) Resolver {
         return Resolver {
             ast: ast,
-            source: source.ptr(),
-            len: source.len(),
+            source: source,
             symbols: Vector::<Symbol>::new(),
             symbol_previous: Vector::<u32>::new(),
             scope_starts: Vector::<u32>::new(),
@@ -299,7 +297,7 @@ extend Resolver {
             }
             let s = self.name_span(unsafe seg_ids[i as usize]);
             let l = (s.end - s.start) as usize;
-            unsafe cstring::memcpy((out + at), self.source + s.start as usize, l);
+            unsafe cstring::memcpy(out + at, self.source.ptr() + s.start as usize, l);
             at = at + l;
             i = i + 1;
         }
@@ -398,7 +396,7 @@ extend Resolver {
             return miss;
         }
         let pkg = unsafe &*self.package;
-        let nm = unsafe (self.source + name.start as usize) as *const char;
+        let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
         let nl = (name.end - name.start) as usize;
         let ng = self.glob_mids.len();
         for i in 0..ng {
@@ -413,7 +411,7 @@ extend Resolver {
     // Resolve a public top-level decl `name` in module `mid` and record it (cross-module) on `ref`.
     fn resolve_module_decl(self: &mut Self, refn: NodeId, mid: ModuleId, name: tok::Span, want_type: bool, kind: str) void {
         let pkg = unsafe &*self.package;
-        let nm = unsafe (self.source + name.start as usize) as *const char;
+        let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
         let nl = (name.end - name.start) as usize;
         let decl = pkg.lookup(mid, str::from_raw(nm as *const u8, nl), want_type);
         if decl != NODE_NONE {
@@ -481,7 +479,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         // Join the LONGEST candidate module prefix once; every shorter prefix is a byte prefix of it, so
         // the probe loop just shrinks the viewed length instead of re-joining (and re-allocating) per try.
-        let buf = self.join_segs((&seg[0]) as *const NodeId, nn - 1);
+        let buf = self.join_segs(&seg[0] as *const NodeId, nn - 1);
         let mut lens: [usize; 32] = [[0] = 0usize];
         let mut plen: usize = 0;
         i = 0;
@@ -505,7 +503,7 @@ extend Resolver {
                 if nn - m == 1 {
                     // module::decl -- a function (preferred) or type
                     let dn = self.name_span(seg[m as usize]);
-                    let dnm = unsafe (self.source + dn.start as usize) as *const char;
+                    let dnm = unsafe (self.source.ptr() + dn.start as usize) as *const char;
                     let dl = (dn.end - dn.start) as usize;
                     let mut decl = pkg.lookup(mid, str::from_raw(dnm as *const u8, dl), false);
                     if decl == NODE_NONE {
@@ -587,7 +585,7 @@ extend Resolver {
         // Unqualified fallback: the std prelude and this module's glob imports.
         if self.package != null {
             let pkg = unsafe &*self.package;
-            let nm = unsafe (self.source + name.start as usize) as *const char;
+            let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
             let nl = (name.end - name.start) as usize;
             let want_type = ns == Namespace::NS_TYPE;
             let mut hit = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), want_type);
@@ -1207,7 +1205,7 @@ extend Resolver {
             if nm.found {
                 let mn = self.name_span(mb.member);
                 let pkg = unsafe &*self.package;
-                let nmp = unsafe (self.source + mn.start as usize) as *const char;
+                let nmp = unsafe (self.source.ptr() + mn.start as usize) as *const char;
                 let nl = (mn.end - mn.start) as usize;
                 let decl = pkg.lookup(nm.mid, str::from_raw(nmp as *const u8, nl), false); // a value (function) export takes priority
                 if decl != NODE_NONE {
@@ -1245,7 +1243,7 @@ extend Resolver {
                 if self.package != null {
                     // a prelude/glob type: commit the hit found while probing
                     let pkg = unsafe &*self.package;
-                    let nm = unsafe (self.source + name.start as usize) as *const char;
+                    let nm = unsafe (self.source.ptr() + name.start as usize) as *const char;
                     let nl = (name.end - name.start) as usize;
                     let mut hit = pkg.prelude_lookup(str::from_raw(nm as *const u8, nl), true);
                     if hit.node == NODE_NONE {
@@ -1421,7 +1419,7 @@ extend Resolver {
         }
         self.scope_exit();
         let fstr = self.package_file();
-        self.errors.finalize(self.source, self.len, fstr);
+        self.errors.finalize(self.source, fstr);
     }
 
     pub fn has_errors(self: &Self) bool {

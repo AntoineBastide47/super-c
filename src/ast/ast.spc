@@ -496,12 +496,12 @@ pub struct TyInstance {
     pub module: ModuleId,
     pub decl: NodeId,
     pub n: u8,
-    pub args: [TypeId; 4],
+    pub args: [TypeId; 8],
 }
 pub struct MonoUse {
     pub node: NodeId,
     pub n: u8,
-    pub args: [TypeId; 4],
+    pub args: [TypeId; 8],
 }
 pub struct DynUse {
     pub node: NodeId,
@@ -519,11 +519,11 @@ pub struct MethodInst {
     pub instance: TypeId,
     pub method: NodeId,
     pub n: u8,
-    pub targs: [TypeId; 4],
+    pub targs: [TypeId; 8],
 }
 
 // Field-wise Hash/Eq over the SIGNIFICANT prefix (module/decl/n + args[0..n]) — deliberately NOT a
-// sizeof-memcmp, so the unused args[n..4] tail (left uninitialized by the `{module,decl,n}` literal) can
+// sizeof-memcmp, so the unused args[n..8] tail (left uninitialized by the `{module,decl,n}` literal) can
 // never affect identity. This exactly mirrors intern_instance's linear comparison, keeping the interned
 // index numbering byte-identical.
 extend TyInstance as Hash {
@@ -695,8 +695,8 @@ extend Ast {
 
     pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
-        if m > 4 {
-            m = 4;
+        if m > 8 {
+            m = 8;
         }
         let mut it = TyInstance { module: module, decl: decl, n: m };
         for j in 0..m {
@@ -732,8 +732,8 @@ extend Ast {
 
     pub fn add_method_inst(self: &mut Self, instance: TypeId, method: NodeId, targs: *const TypeId, n: u8) bool {
         let mut m = n;
-        if m > 4 {
-            m = 4;
+        if m > 8 {
+            m = 8;
         }
         let mut mi = MethodInst { instance: instance, method: method, n: m };
         for j in 0..m {
@@ -789,7 +789,7 @@ extend Ast {
             },
             TYPE_INSTANCE => {
                 let inst = *src.instance(ty.as_data.inst);
-                let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
+                let mut na: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
                 for i in 0..inst.n {
                     na[i] = self.reintern(src, inst.args[i]);
                 }
@@ -801,8 +801,8 @@ extend Ast {
 
     pub fn set_type_args(self: &mut Self, node: NodeId, args: *const TypeId, n: u8) void {
         let mut m = n;
-        if m > 4 {
-            m = 4;
+        if m > 8 {
+            m = 8;
         }
         let mut u = MonoUse { node: node, n: m };
         for i in 0..m {
@@ -927,21 +927,21 @@ extend Ast as Free {
     }
 }
 
-pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut u32) BuiltinType {
-    let hex = end - start > 2 && unsafe src[start] == b'0' && (unsafe src[start + 1] | 0x20u8) == b'x';
+pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: *mut u32) BuiltinType {
+    let hex = end - start > 2 && src[start as usize] == b'0' && (src[(start + 1) as usize] | 0x20u8) == b'x';
     let mut hexf = false;
     let mut i = start + 2;
     while hex && i < end && !hexf {
-        hexf = (unsafe src[i] | 0x20u8) == b'p';
+        hexf = (src[i as usize] | 0x20u8) == b'p';
         i = i + 1;
     }
-    if end - start > 5 && unsafe cstring::memcmp(unsafe src + end - 5, "isize".ptr(), 5) == 0 {
+    if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "isize".ptr(), 5) == 0 {
         if sfx_start != null {
             unsafe *sfx_start = end - 5;
         }
         return BuiltinType::BT_ISIZE;
     }
-    if end - start > 5 && unsafe cstring::memcmp(unsafe src + end - 5, "usize".ptr(), 5) == 0 {
+    if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "usize".ptr(), 5) == 0 {
         if sfx_start != null {
             unsafe *sfx_start = end - 5;
         }
@@ -949,7 +949,7 @@ pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut 
     }
     let mut n: u32 = 3;
     if end - start > n {
-        let p = unsafe (src + (end - n) as usize);
+        let p = unsafe (src.ptr() + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 {
             if sfx_start != null {
                 unsafe *sfx_start = end - n;
@@ -1001,7 +1001,7 @@ pub fn ast_numeric_suffix(src: *const u8, start: u32, end: u32, sfx_start: *mut 
     }
     n = 2;
     if end - start > n {
-        let p = unsafe (src + (end - n) as usize);
+        let p = unsafe (src.ptr() + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 {
             if sfx_start != null {
                 unsafe *sfx_start = end - n;

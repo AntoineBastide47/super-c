@@ -14,8 +14,7 @@ pub enum RangeContext {
 }
 
 pub struct Parser {
-    pub source: *const u8,
-    pub len: usize,
+    pub source: str,
     pub tokens: Vector<Token>,
     pub current: usize,
     pub pending_gt: u32,
@@ -28,26 +27,22 @@ pub struct Parser {
 }
 
 extend Parser {
-    pub fn new(tokens: Vector<Token>, source: str) Parser {
+    pub fn new(tokens: Vector<Token>, source: str, file: str) Parser {
         let token_count = tokens.len();
         return Parser {
-            source: source.ptr(),
-            len: source.len(),
+            source: source,
             tokens: tokens,
             current: 0,
             pending_gt: 0,
             depth: 0,
             allow_struct_initializer: true,
             ast: Ast::new(token_count),
-            file: "",
+            file: file,
             errors: diag::Errors::new(),
             bootstrap_tags: false,
         };
     }
 
-    pub fn set_file(self: &mut Self, file: str) void {
-        self.file = file;
-    }
     pub fn set_bootstrap_tags(self: &mut Self, v: bool) void {
         self.bootstrap_tags = v;
     }
@@ -108,7 +103,11 @@ extend Parser {
 
     pub fn text_is(self: &Self, t: Token, s: str) bool {
         let sl = s.len();
-        return t.len() as usize == sl && unsafe cstring::memcmp(unsafe (self.source + t.start() as usize), s.ptr(), sl) == 0;
+        return t.len() as usize == sl && unsafe cstring::memcmp(
+            unsafe (self.source.ptr() + t.start() as usize),
+            s.ptr(),
+            sl,
+        ) == 0;
     }
 
     pub fn peek_ident_is(self: &Self, kw: str) bool {
@@ -1415,7 +1414,7 @@ extend Parser {
                 self.ast.at(name).as_data.name.is_mutable = true;
             }
             let text = self.ast.at_const(name).as_data.name.text;
-            if text.end - text.start == 1 && unsafe self.source[text.start as usize] == b'_' {
+            if text.end - text.start == 1 && self.source[text.start as usize] == b'_' {
                 return self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: self.node_span(name) });
             }
             if self.match(TokenType::LeftParen) {
@@ -1587,7 +1586,7 @@ extend Parser {
         }
         if kind == TokenType::Identifier {
             let t = self.raw_peek();
-            let may_va = t.len() >= 6 && t.len() <= 8 && unsafe self.source[t.start() as usize] == b'v';
+            let may_va = t.len() >= 6 && t.len() <= 8 && self.source[t.start() as usize] == b'v';
             let va = if may_va && self.text_is(t, "va_start") {
                 VA_START as i32;
             } else if may_va && self.text_is(t, "va_arg") {
@@ -1958,15 +1957,6 @@ extend Parser {
                         return self.parse_struct_initializer_after(tp, start);
                     }
                 }
-            } else if self.match(TokenType::As) {
-                let cast_type = self.parse_cast_type();
-                expr = self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_CAST,
-                        span: Span::new(start, self.node_span(cast_type).end),
-                        as_data: NodeAs { cast: CastData { expression: expr, ty: cast_type } },
-                    },
-                );
             } else if self.match(TokenType::Question) {
                 expr = self.ast.add(
                     Node {
@@ -2050,8 +2040,25 @@ extend Parser {
         return left;
     }
 
+    // `as` binds looser than every prefix operator (`*x as T` is `(*x) as T`) and tighter than
+    // any binary operator; left-associative chains (`x as A as B`) stay flat here.
+    pub fn parse_cast(self: &mut Self) NodeId {
+        let mut expr = self.parse_unary();
+        while self.match(TokenType::As) {
+            let cast_type = self.parse_cast_type();
+            expr = self.ast.add(
+                Node {
+                    kind: NodeKind::NODE_CAST,
+                    span: Span::new(self.node_span(expr).start, self.node_span(cast_type).end),
+                    as_data: NodeAs { cast: CastData { expression: expr, ty: cast_type } },
+                },
+            );
+        }
+        return expr;
+    }
+
     pub fn parse_binary(self: &mut Self, minimum: i32) NodeId {
-        return self.parse_binary_after(self.parse_unary(), minimum);
+        return self.parse_binary_after(self.parse_cast(), minimum);
     }
 
     pub fn parse_expression_after(self: &mut Self, left: NodeId) NodeId {
@@ -2934,7 +2941,7 @@ extend Parser {
                     let mut k: usize = 0;
                     let mut i = lit.start();
                     while i < lit.end() && k + 1 < sizeof([char; 24]) {
-                        let ch = unsafe self.source[i as usize];
+                        let ch = self.source[i as usize];
                         if ch != b'_' {
                             buf[k] = ch as char;
                             k = k + 1;
@@ -2942,7 +2949,7 @@ extend Parser {
                         i = i + 1;
                     }
                     buf[k] = 0 as char;
-                    out.arg = unsafe stdlib::strtoul((&buf[0]), null, 0) as u32;
+                    out.arg = unsafe stdlib::strtoul(&buf[0], null, 0) as u32;
                 }
                 self.advance();
             } else {
@@ -3113,11 +3120,11 @@ extend Parser {
         self.ast.root = self.ast.add(
             Node {
                 kind: NodeKind::NODE_PROGRAM,
-                span: Span::new(0, self.len as u32),
+                span: Span::new(0, self.source.len() as u32),
                 as_data: NodeAs { program: ProgramData { items: items } },
             },
         );
-        self.errors.finalize(self.source, self.len, self.file);
+        self.errors.finalize(self.source, self.file);
     }
 
     pub fn has_errors(self: &Self) bool {

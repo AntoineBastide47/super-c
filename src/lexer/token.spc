@@ -41,13 +41,4 @@ extend Token {
     pub fn span(self: Self) Span {
         return Span::new(self.start(), self.end());
     }
-
-    pub fn fprint(self: Self) void {
-        eprintln(
-            "Token {{ token_type: {}, span: Span {{ start: {}, end: {} }} }}",
-            self.kind().name(),
-            self.start(),
-            self.end(),
-        );
-    }
 }
