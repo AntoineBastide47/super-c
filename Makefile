@@ -6,7 +6,15 @@
 # with no ./super-c must supply one this way -- e.g. a release binary).
 SUPERC ?= ./super-c
 CC     ?= cc
+# ccache (if installed) makes stage-2 compiles ~free: at the self-hosting fixpoint its C is
+# byte-identical to stage 1's, so every object is a cache hit.
+ifneq ($(shell command -v ccache 2>/dev/null),)
+  CC := ccache $(CC)
+endif
 BIN    := super-c
+# All available cores for the generated-C compile fan-out (macOS: sysctl; Linux/msys: nproc;
+# Windows: the NUMBER_OF_PROCESSORS env var is always set).
+NPROC  := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo $${NUMBER_OF_PROCESSORS:-4})
 
 CSTD := -std=c11 -D_POSIX_C_SOURCE=200809L
 
@@ -27,7 +35,8 @@ ifeq ($(PROFILE),release)
   STRIP := strip '$(BIN)'
 else
   OPT   := $(DEBUG_OPT)
-  LDOPT :=
+  # sanitizers must also be passed at LINK time so their runtimes get linked
+  LDOPT := -fsanitize=address -fsanitize=undefined
   STRIP := :
 endif
 
@@ -71,12 +80,33 @@ build: $(BIN)
 # a strict, self-hosted build (also catches misspelled attributes, which stage 1 would silently ignore).
 $(BIN): $(COMPILER_SRCS)
 	@printf '  SELF-BUILD  %s  (via %s, %s)\n' '$(BIN)' '$(SUPERC)' '$(PROFILE)'
+
 	@rm -rf src/build
 	@$(SUPERC) --bootstrap-tags src/main.spc
-	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o 'stage1-$(BIN)' $(LDOPT) $(LDLIBS)
+	@sh mk/sync-generated.sh src/build src/.gen-stage1
+	@$(MAKE) --no-print-directory -j $(NPROC) -f mk/compile-generated.mk \
+		BUILD_DIR=src/.gen-stage1 \
+		OBJ_DIR=.obj/stage1 \
+		OUTPUT='stage1-$(BIN)' \
+		CC='$(CC)' \
+		CSTD='$(CSTD)' \
+		OPT='$(OPT)' \
+		LDOPT='$(LDOPT)' \
+		LDLIBS='$(LDLIBS)'
+
 	@rm -rf src/build
 	@./'stage1-$(BIN)' src/main.spc
-	@$(CC) $(CSTD) $(OPT) $$(find src/build -name '*.c') -o '$(BIN).new' $(LDOPT) $(LDLIBS)
+	@sh mk/sync-generated.sh src/build src/.gen-stage2
+	@$(MAKE) --no-print-directory -j $(NPROC) -f mk/compile-generated.mk \
+		BUILD_DIR=src/.gen-stage2 \
+		OBJ_DIR=.obj/stage2 \
+		OUTPUT='$(BIN).new' \
+		CC='$(CC)' \
+		CSTD='$(CSTD)' \
+		OPT='$(OPT)' \
+		LDOPT='$(LDOPT)' \
+		LDLIBS='$(LDLIBS)'
+
 	@rm -f 'stage1-$(BIN)'
 	@mv -f '$(BIN).new' '$(BIN)'
 	@rm -rf ./*.dSYM
@@ -121,7 +151,7 @@ profile: $(BIN)
 # clean drops build artifacts + emitted C but KEEPS $(BIN) -- it is the bootstrap that rebuilds itself.
 # distclean also removes the binary (you then need an external $(SUPERC) to build again).
 clean:
-	@rm -rf build src/build '$(BIN).new' 'stage1-$(BIN)' *.out profile.json.gz
+	@rm -rf build src/build src/.gen-stage1 src/.gen-stage2 .obj '$(BIN).new' 'stage1-$(BIN)' *.out profile.json.gz
 
 distclean: clean
 	@rm -f '$(BIN)'
