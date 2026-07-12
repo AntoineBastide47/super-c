@@ -41,7 +41,7 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     pub fn set(self: &mut Array<T, N>, index: usize, value: T) {
-        let p = (&mut self.data[0]) as *mut T;
+        let p = &mut self.data[0] as *mut T;
         unsafe p[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
         unsafe p[index] = value;
     }
@@ -58,19 +58,19 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     pub fn as_ptr(self: &Array<T, N>) *const T {
-        return (&self.data[0]) as *const T;
+        return &self.data[0] as *const T;
     }
 
     // Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Caller guarantees
     // `n <= N * sizeof(T)` and that the bytes form valid `T`s; overwritten elements are NOT
     // freed (raw overwrite, unlike `set`).
     pub fn copy_from(self: &mut Array<T, N>, src: *const void, n: usize) {
-        unsafe memcpy((&mut self.data[0]) as *mut void, src, n);
+        unsafe memcpy(&mut self.data[0] as *mut void, src, n);
     }
 
     // Exchange the elements at `i` and `j` (both must be in range).
     pub fn swap(self: &mut Array<T, N>, i: usize, j: usize) {
-        let p = (&mut self.data[0]) as *mut T;
+        let p = &mut self.data[0] as *mut T;
         let tmp = unsafe p[i];
         unsafe p[i] = unsafe p[j];
         unsafe p[j] = tmp;
@@ -95,7 +95,7 @@ extend<T, const N: usize> Array<T, N> {
     // value would free the Array's still-owned copy).
     pub fn map<U, F: fn(&T) U>(self: &Array<T, N>, f: F) Array<U, N> {
         let mut out = Array::<U, N> {};
-        let p = (&mut out.data[0]) as *mut U;
+        let p = &mut out.data[0] as *mut U;
         for i in 0..N {
             unsafe p[i] = f(self.at(i));
         }
@@ -122,7 +122,7 @@ extend<T, const N: usize> Array<T, N> {
 extend<T: Default, const N: usize> Array<T, N> {
     pub fn new() Array<T, N> {
         let mut a = Array::<T, N> {};
-        let p = (&mut a.data[0]) as *mut T;
+        let p = &mut a.data[0] as *mut T;
         for i in 0..N {
             unsafe p[i] = T::default();
         }
@@ -133,7 +133,7 @@ extend<T: Default, const N: usize> Array<T, N> {
 extend<T: Clone, const N: usize> Array<T, N> {
     pub fn filled(x: &T) Array<T, N> {
         let mut a = Array::<T, N> {};
-        let p = (&mut a.data[0]) as *mut T;
+        let p = &mut a.data[0] as *mut T;
         for i in 0..N {
             unsafe p[i] = x.clone();
         }
@@ -146,7 +146,7 @@ extend<T: Clone, const N: usize> Array<T, N> {
 // accessors borrow (`&T`) rather than hand out sharing copies, so the Array is the only owner.
 extend<T: Free, const N: usize> Array<T, N> as Free {
     pub fn free(self: &mut Array<T, N>) {
-        let p = (&mut self.data[0]) as *mut T;
+        let p = &mut self.data[0] as *mut T;
         for i in 0..N {
             unsafe p[i].free();
         }
@@ -330,6 +330,9 @@ extend<T, const N: usize> Array<T, N> {
 // elements. Views alias the inline buffer, so they are invalidated when the Array is moved.
 extend<T, const N: usize> Array<T, N> as Index<T, []T> {
     pub fn index(self: &Array<T, N>, i: usize) &T {
+        if i >= N {
+            panic("Array<T, N>[i]: index out of bounds");
+        }
         return &self.data[i];
     }
     pub fn index_range(self: &Array<T, N>, r: Range<usize>) []T {
@@ -338,6 +341,9 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
         } else {
             r.end;
         };
+        if r.start > hi || hi > N {
+            panic("Array<T, N>[a..b]: range out of bounds");
+        }
         return Slice::<T> { ptr: unsafe (self.as_ptr() + r.start), len: hi - r.start };
     }
 }
@@ -347,6 +353,9 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
 // `index_range_mut` is an in-place writable view.
 extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
     pub fn index_mut(self: &mut Array<T, N>, i: usize) &mut T {
+        if i >= N {
+            panic("Array<T, N>[i]: index out of bounds");
+        }
         return &mut self.data[i];
     }
     pub fn index_range_mut(self: &mut Array<T, N>, r: Range<usize>) []mut T {
@@ -355,7 +364,10 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
         } else {
             r.end;
         };
-        let p = (&mut self.data[0]) as *mut T;
+        let p = &mut self.data[0] as *mut T;
+        if r.start > hi || hi > N {
+            panic("Array<T, N>[a..b]: range out of bounds");
+        }
         return SliceMut::<T> { ptr: unsafe (p + r.start), len: hi - r.start };
     }
 }
@@ -366,7 +378,7 @@ extend<T: Clone, const N: usize> Array<T, N> as Clone {
     // A deep copy whose elements are independent clones.
     pub fn clone(self: &Array<T, N>) Array<T, N> {
         let mut out = Array::<T, N> {};
-        let p = (&mut out.data[0]) as *mut T;
+        let p = &mut out.data[0] as *mut T;
         for i in 0..N {
             let e = self.at(i);
             unsafe p[i] = e.clone();

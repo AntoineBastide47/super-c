@@ -473,6 +473,9 @@ extend<T> VecIter<T> as Iterator<&T> {
 // invalidated by any reallocating mutation (push/reserve).
 extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
     pub fn index(self: &Vector<T, A>, i: usize) &T {
+        if i >= self.len {
+            panic("Vector<T, A>[i]: index out of bounds");
+        }
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &Vector<T, A>, r: Range<usize>) []T {
@@ -481,6 +484,9 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
         } else {
             r.end;
         };
+        if r.start > hi || hi > self.len {
+            panic("Vector<T, A>[a..b]: range out of bounds");
+        }
         return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }
@@ -490,6 +496,9 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
 // `index_range_mut` is an in-place writable view.
 extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
     pub fn index_mut(self: &mut Vector<T, A>, i: usize) &mut T {
+        if i >= self.len {
+            panic("Vector<T, A>[i]: index out of bounds");
+        }
         return &mut unsafe self.ptr[i];
     }
     pub fn index_range_mut(self: &mut Vector<T, A>, r: Range<usize>) []mut T {
@@ -498,6 +507,9 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
         } else {
             r.end;
         };
+        if r.start > hi || hi > self.len {
+            panic("Vector<T, A>[a..b]: range out of bounds");
+        }
         return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }

@@ -47,7 +47,7 @@ fn ignore_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) vo
 
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
 fn resolve_one(p: &mut loader::Package, i: usize) void {
-    let pkg = (p) as *const loader::Package;
+    let pkg = p as *const loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
@@ -55,7 +55,7 @@ fn resolve_one(p: &mut loader::Package, i: usize) void {
     m.ast = Ast::new(0);
     let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut r.ast) as *mut Ast;
+    p.override_ast = &mut r.ast as *mut Ast;
     r.resolve();
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
@@ -65,7 +65,7 @@ fn resolve_one(p: &mut loader::Package, i: usize) void {
 
 // Type-check module `i` in place (mirrors main.spc's typecheck_module).
 fn typecheck_one(p: &mut loader::Package, i: usize) void {
-    let pkg = (p) as *mut loader::Package;
+    let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
@@ -73,7 +73,7 @@ fn typecheck_one(p: &mut loader::Package, i: usize) void {
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut t.ast) as *mut Ast;
+    p.override_ast = &mut t.ast as *mut Ast;
     t.check();
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
@@ -108,9 +108,9 @@ fn transpile_once() Timing {
         i = i + 1;
     }
 
-    let pkg = (&mut p) as *mut loader::Package;
+    let pkg = &mut p as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = (&mut ceval);
+    p.ceval = &mut ceval;
 
     i = 0;
     while i < n {
@@ -131,10 +131,10 @@ fn transpile_once() Timing {
     let f = unsafe tmpfile();
     i = 0;
     while i < n {
-        let ma = (&mut p.modules[i].ast) as *mut Ast;
+        let ma = &mut p.modules[i].ast as *mut Ast;
         let src = p.modules[i].source.as_str().ptr() as *const char;
         let slen = p.modules[i].source.len();
-        let pkg2 = (&mut p) as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
+        let pkg2 = &mut p as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
         let mut c = cg::Codegen::new(ma, str::from_raw(src as *const u8, slen), pkg2);
         c.set_multifile(true);
         c.codegen_emit_header(f);
@@ -156,7 +156,7 @@ fn transpile_once() Timing {
     let lx0 = time::cpu_seconds();
     i = 0;
     while i < n {
-        let mut lx = lexer::Lexer::new(&mut p.modules[i].source);
+        let mut lx = lexer::Lexer::new(&mut p.modules[i].source, "");
         lx.scan_tokens();
         lx.free();
         i = i + 1;

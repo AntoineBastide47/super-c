@@ -269,9 +269,9 @@ extend DirCache {
         let mut db = RealBuf {};
         let dl = dir.len();
         if dl < 4096 {
-            unsafe cstring::memcpy((&mut db.b[0]), dir.ptr(), dl);
+            unsafe cstring::memcpy(&mut db.b[0], dir.ptr(), dl);
             unsafe db.b[dl] = 0 as char;
-            let d = unsafe shim::sc_opendir((&db.b[0]));
+            let d = unsafe shim::sc_opendir(&db.b[0]);
             if d != null {
                 dok = true;
                 loop {
@@ -351,8 +351,7 @@ fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src:
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
 fn parse_source(source: &mut String, file: str, bootstrap_tags: bool) ParseResult {
-    let mut lx = lexer::Lexer::new(source); // pads `source` in place; the lexer over-reads into padding
-    lx.set_file(file);
+    let mut lx = lexer::Lexer::new(source, file);
     lx.scan_tokens();
     if lx.has_errors() {
         lx.log_errors();
@@ -362,8 +361,7 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool) ParseResul
     let toks = lx.take_tokens();
     lx.free();
     let src = source.as_str(); // padding lives past len -> invisible to the parser
-    let mut ps = parser::Parser::new(toks, src);
-    ps.set_file(file);
+    let mut ps = parser::Parser::new(toks, src, file);
     ps.set_bootstrap_tags(bootstrap_tags);
     ps.build_ast();
     if ps.has_errors() {
@@ -409,7 +407,7 @@ extend Package {
         if mid == self.override_mod && self.override_ast != null {
             return self.override_ast as *const Ast;
         }
-        return (&self.modules[mid as usize].ast) as *const Ast;
+        return &self.modules[mid as usize].ast as *const Ast;
     }
 
     // Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
@@ -473,7 +471,7 @@ extend Package {
         // Address of the dir_cache field, taken BEFORE borrowing self.modules below (the cast releases the
         // &mut immediately; dir_cache is a disjoint field so mutating it doesn't alias the `m` borrow). Passed
         // as a usize because `*mut DirCache` is move-tracked (Free pointee) and would move out of the loop.
-        let dca = (&mut self.dir_cache) as *mut DirCache as usize;
+        let dca = &mut self.dir_cache as *mut DirCache as usize;
         let mut child_paths = Vector::<String>::new();
         let mut child_files = Vector::<String>::new();
         {
@@ -1035,10 +1033,10 @@ extend Package as Free {
 // ---------------------------------------------------------------------------------------------------------
 
 fn pkg_ast_m(p: &mut Package, m: ModuleId) *mut Ast {
-    return (&mut p.modules[m as usize].ast) as *mut Ast;
+    return &mut p.modules[m as usize].ast as *mut Ast;
 }
 fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
-    return (&p.modules[m as usize].ast) as *const Ast;
+    return &p.modules[m as usize].ast as *const Ast;
 }
 
 // True when `t` mentions a function VALUE type anywhere (a TYPE_FUNCTION, possibly nested): its C symbol
@@ -1357,7 +1355,7 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
                 changed = true;
             }
         }
-        let cp = (&mut changed) as *mut bool;
+        let cp = &mut changed as *mut bool;
         reintern_nested_instance_deps(p, dm, &it, &na[0], m, cp);
         reintern_method_signature_deps(p, dm, &it, &na[0], m, cp);
     }

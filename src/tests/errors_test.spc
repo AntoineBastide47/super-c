@@ -28,7 +28,7 @@ fn offset_of(src: str, needle: str) u32 {
 // rendered block 0 (owned so the caller can free `e` before inspecting it).
 fn render_into(e: &mut diag::Errors, src: str, msg: str, off: u32, span: u32, file: str) String {
     e.emit(off, span, format("{}", msg));
-    e.finalize(src.ptr(), src.len(), file);
+    e.finalize(src, file);
     return e.errors.at(0).clone();
 }
 
@@ -71,7 +71,7 @@ fn notes() {
     let mut e = diag::Errors::new();
     e.emit(offset_of(src, "y"), 1, format("{}", "unknown name"));
     e.note(format("did you mean '{}'?", "x"));
-    e.finalize(src.ptr(), src.len(), "");
+    e.finalize(src, "");
     let b = e.errors.at(0).clone();
     assert(contains(&b, "error: unknown name"), "error line");
     assert(contains(&b, "= note: did you mean 'x'?"), "note line");
@@ -112,7 +112,7 @@ fn long_line_windowing() {
     buf.b[200] = '\n' as char;
     let mut e = diag::Errors::new();
     e.emit(180, 3, format("{}", "m"));
-    e.finalize((&buf.b[0]) as *const u8, 201, "");
+    e.finalize(str::from_raw(&buf.b[0] as *const u8, 201), "");
     let b = e.errors.at(0).clone();
     assert(contains(&b, "--> 1:181"), "column past the window");
     assert(contains(&b, "^"), "a caret");
@@ -121,7 +121,7 @@ fn long_line_windowing() {
     for k in 0..150 {
         needle.b[k] = 'x' as char;
     }
-    assert(!contains(&b, str::from_raw((&needle.b[0]) as *const u8, 150)), "long line windowed below 150 chars");
+    assert(!contains(&b, str::from_raw(&needle.b[0] as *const u8, 150)), "long line windowed below 150 chars");
     e.free();
 }
 

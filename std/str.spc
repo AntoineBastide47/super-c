@@ -84,7 +84,7 @@ extend str {
             return true;
         }
         return unsafe memcmp(
-            (unsafe (self.ptr + (self.len - suffix.len))) as *const void,
+            unsafe (self.ptr + (self.len - suffix.len)) as *const void,
             suffix.ptr as *const void,
             suffix.len,
         ) == 0;
@@ -110,7 +110,7 @@ extend str {
         }
         let last = self.len - needle.len;
         for i in 0..=last {
-            if unsafe memcmp((unsafe (self.ptr + i)) as *const void, needle.ptr as *const void, needle.len) == 0 {
+            if unsafe memcmp(unsafe (self.ptr + i) as *const void, needle.ptr as *const void, needle.len) == 0 {
                 return i as isize;
             }
         }
@@ -271,6 +271,9 @@ extend str as Default {
 // No IndexMut: a `str` is a read-only view.
 extend str as Index<u8, str> {
     pub fn index(self: &str, i: usize) &u8 {
+        if i >= self.len() {
+            panic("str[i]: index out of bounds");
+        }
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &str, r: Range<usize>) str {
@@ -279,6 +282,9 @@ extend str as Index<u8, str> {
         } else {
             r.end;
         };
+        if r.start > hi || hi > self.len() {
+            panic("str[a..b]: range out of bounds");
+        }
         return self.slice(r.start, hi);
     }
 }

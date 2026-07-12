@@ -11,7 +11,7 @@ fn fmt_of(src: str, width: i32) String {
     let mut pa = h::parse_ast(src);
     assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
-    fbld::format_program((&pa.ast) as *const Ast, src, width, &mut out);
+    fbld::format_program(&pa.ast as *const Ast, src, width, &mut out);
     pa.ast.free();
     return out;
 }

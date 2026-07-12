@@ -109,7 +109,7 @@ extend i8 as Ord {
 }
 extend i8 as Hash {
     pub fn hash(self: &i8) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend i8 as Clone {
@@ -145,7 +145,7 @@ extend i16 as Ord {
 }
 extend i16 as Hash {
     pub fn hash(self: &i16) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend i16 as Clone {
@@ -181,7 +181,7 @@ extend i32 as Ord {
 }
 extend i32 as Hash {
     pub fn hash(self: &i32) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend i32 as Clone {
@@ -217,7 +217,7 @@ extend i64 as Ord {
 }
 extend i64 as Hash {
     pub fn hash(self: &i64) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend i64 as Clone {
@@ -253,7 +253,7 @@ extend isize as Ord {
 }
 extend isize as Hash {
     pub fn hash(self: &isize) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend isize as Clone {
@@ -289,7 +289,7 @@ extend u8 as Ord {
 }
 extend u8 as Hash {
     pub fn hash(self: &u8) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend u8 as Clone {
@@ -325,7 +325,7 @@ extend u16 as Ord {
 }
 extend u16 as Hash {
     pub fn hash(self: &u16) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend u16 as Clone {
@@ -361,7 +361,7 @@ extend u32 as Ord {
 }
 extend u32 as Hash {
     pub fn hash(self: &u32) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend u32 as Clone {
@@ -397,7 +397,7 @@ extend u64 as Ord {
 }
 extend u64 as Hash {
     pub fn hash(self: &u64) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend u64 as Clone {
@@ -433,7 +433,7 @@ extend usize as Ord {
 }
 extend usize as Hash {
     pub fn hash(self: &usize) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend usize as Clone {
@@ -469,7 +469,7 @@ extend char as Ord {
 }
 extend char as Hash {
     pub fn hash(self: &char) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend char as Clone {
@@ -505,7 +505,7 @@ extend bool as Ord {
 }
 extend bool as Hash {
     pub fn hash(self: &bool) u64 {
-        return (*self) as u64;
+        return *self as u64;
     }
 }
 extend bool as Clone {

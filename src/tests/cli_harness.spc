@@ -78,8 +78,8 @@ fn slurp(path: *const char) *mut char {
 // Run `basecmd` with stdout+stderr redirected to `outpath`, capturing its exit code and that output.
 fn exec(basecmd: *const char, outpath: *const char) CliResult {
     let mut full = Cmd8192 {};
-    unsafe stdio::snprintf((&mut full[0]), 8192, "%s > '%s' 2>&1".ptr() as *const char, basecmd, outpath);
-    let rc = stdlib::system(str::from_cstr((&full[0])));
+    unsafe stdio::snprintf(&mut full[0], 8192, "%s > '%s' 2>&1".ptr() as *const char, basecmd, outpath);
+    let rc = stdlib::system(str::from_cstr(&full[0]));
     let mut r = CliResult { exit: -1, out: null };
     if unsafe shim::sc_wifexited(rc) != 0 {
         r.exit = unsafe shim::sc_wexitstatus(rc);
@@ -105,42 +105,30 @@ pub fn proj_new() Proj {
     unsafe C_SEQ = unsafe C_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut p = Proj {};
-    unsafe stdio::snprintf(
-        (&mut p[0]),
-        256,
-        "/tmp/sccli_%d_%llu".ptr() as *const char,
-        pid,
-        unsafe C_SEQ,
-    );
-    let _ = unsafe shim::sc_mkdir((&p[0]));
+    unsafe stdio::snprintf(&mut p[0], 256, "/tmp/sccli_%d_%llu".ptr() as *const char, pid, unsafe C_SEQ);
+    let _ = unsafe shim::sc_mkdir(&p[0]);
     return p;
 }
 
 extend Proj {
     pub fn rootp(self: &Proj) *const char {
-        return (&self[0]);
+        return &self[0];
     }
 
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
     pub fn mkfile(self: &Proj, rel: str, content: str) void {
         let mut cmd = Cmd8192 {};
         unsafe stdio::snprintf(
-            (&mut cmd[0]),
+            &mut cmd[0],
             8192,
             "mkdir -p \"$(dirname '%s/%s')\"".ptr() as *const char,
             self.rootp(),
             rel.ptr() as *const char,
         );
-        let _ = stdlib::system(str::from_cstr((&cmd[0])));
+        let _ = stdlib::system(str::from_cstr(&cmd[0]));
         let mut path = Path512 {};
-        unsafe stdio::snprintf(
-            (&mut path[0]),
-            512,
-            "%s/%s".ptr() as *const char,
-            self.rootp(),
-            rel.ptr() as *const char,
-        );
-        let f = stdio::fopen(str::from_cstr((&path[0])), "wb"); // binary: no Windows CRLF in emitted test files
+        unsafe stdio::snprintf(&mut path[0], 512, "%s/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
+        let f = stdio::fopen(str::from_cstr(&path[0]), "wb"); // binary: no Windows CRLF in emitted test files
         if f != null {
             if content.len() > 0 {
                 let _ = unsafe stdio::fwrite(content.ptr(), 1, content.len(), f);
@@ -153,7 +141,7 @@ extend Proj {
     pub fn compile_flags(self: &Proj, flags: str, mainrel: str) CliResult {
         let mut base = Cmd8192 {};
         unsafe stdio::snprintf(
-            (&mut base[0]),
+            &mut base[0],
             8192,
             "%s %s '%s/%s'".ptr() as *const char,
             superc(),
@@ -162,8 +150,8 @@ extend Proj {
             mainrel.ptr() as *const char,
         );
         let mut op = Path512 {};
-        unsafe stdio::snprintf((&mut op[0]), 512, "%s/.out".ptr() as *const char, self.rootp());
-        return exec((&base[0]), (&op[0]));
+        unsafe stdio::snprintf(&mut op[0], 512, "%s/.out".ptr() as *const char, self.rootp());
+        return exec(&base[0], &op[0]);
     }
 
     pub fn compile(self: &Proj, mainrel: str) CliResult {
@@ -173,23 +161,17 @@ extend Proj {
     // Run `$SUPERC <args>` verbatim (for flag-only invocations like usage checks); no path is appended.
     pub fn run_raw(self: &Proj, args: str) CliResult {
         let mut base = Cmd8192 {};
-        unsafe stdio::snprintf(
-            (&mut base[0]),
-            8192,
-            "%s %s".ptr() as *const char,
-            superc(),
-            args.ptr() as *const char,
-        );
+        unsafe stdio::snprintf(&mut base[0], 8192, "%s %s".ptr() as *const char, superc(), args.ptr() as *const char);
         let mut op = Path512 {};
-        unsafe stdio::snprintf((&mut op[0]), 512, "%s/.out".ptr() as *const char, self.rootp());
-        return exec((&base[0]), (&op[0]));
+        unsafe stdio::snprintf(&mut op[0], 512, "%s/.out".ptr() as *const char, self.rootp());
+        return exec(&base[0], &op[0]);
     }
 
     // cc the whole emitted build/ tree -Werror (plus any `extra` flags and @c.link __ldflags) into <root>/bin.
     pub fn cc_build(self: &Proj, extra: str) CliResult {
         let mut base = Cmd8192 {};
         unsafe stdio::snprintf(
-            (&mut base[0]),
+            &mut base[0],
             8192,
             "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') %s $(cat '%s/build/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
             self.rootp(),
@@ -198,8 +180,8 @@ extend Proj {
             self.rootp(),
         );
         let mut op = Path512 {};
-        unsafe stdio::snprintf((&mut op[0]), 512, "%s/.ccout".ptr() as *const char, self.rootp());
-        return exec((&base[0]), (&op[0]));
+        unsafe stdio::snprintf(&mut op[0], 512, "%s/.ccout".ptr() as *const char, self.rootp());
+        return exec(&base[0], &op[0]);
     }
 
     // cc the emitted tree WITHOUT -Werror (the analog of cli_test's plain `cc -std=c11` normal build, where
@@ -207,7 +189,7 @@ extend Proj {
     pub fn cc_build_plain(self: &Proj, extra: str) CliResult {
         let mut base = Cmd8192 {};
         unsafe stdio::snprintf(
-            (&mut base[0]),
+            &mut base[0],
             8192,
             "cc -std=c11 $(find '%s/build' -name '*.c') %s $(cat '%s/build/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
             self.rootp(),
@@ -216,17 +198,17 @@ extend Proj {
             self.rootp(),
         );
         let mut op = Path512 {};
-        unsafe stdio::snprintf((&mut op[0]), 512, "%s/.ccout".ptr() as *const char, self.rootp());
-        return exec((&base[0]), (&op[0]));
+        unsafe stdio::snprintf(&mut op[0], 512, "%s/.ccout".ptr() as *const char, self.rootp());
+        return exec(&base[0], &op[0]);
     }
 
     // Run the linked <root>/bin and return its exit code.
     pub fn run_bin(self: &Proj) i32 {
         let mut base = Path512 {};
-        unsafe stdio::snprintf((&mut base[0]), 512, "'%s/bin'".ptr() as *const char, self.rootp());
+        unsafe stdio::snprintf(&mut base[0], 512, "'%s/bin'".ptr() as *const char, self.rootp());
         let mut op = Path512 {};
-        unsafe stdio::snprintf((&mut op[0]), 512, "%s/.runout".ptr() as *const char, self.rootp());
-        let mut r = exec((&base[0]), (&op[0]));
+        unsafe stdio::snprintf(&mut op[0], 512, "%s/.runout".ptr() as *const char, self.rootp());
+        let mut r = exec(&base[0], &op[0]);
         let e = r.exit;
         return e;
     }
@@ -235,13 +217,13 @@ extend Proj {
     pub fn gen_has(self: &Proj, rel: str, needle: str) bool {
         let mut path = Path512 {};
         unsafe stdio::snprintf(
-            (&mut path[0]),
+            &mut path[0],
             512,
             "%s/build/%s".ptr() as *const char,
             self.rootp(),
             rel.ptr() as *const char,
         );
-        let buf = slurp((&path[0]));
+        let buf = slurp(&path[0]);
         if buf == null {
             return false;
         }
@@ -254,13 +236,13 @@ extend Proj {
     pub fn gen_exists(self: &Proj, rel: str) bool {
         let mut path = Path512 {};
         unsafe stdio::snprintf(
-            (&mut path[0]),
+            &mut path[0],
             512,
             "%s/build/%s".ptr() as *const char,
             self.rootp(),
             rel.ptr() as *const char,
         );
-        let f = stdio::fopen(str::from_cstr((&path[0])), "rb");
+        let f = stdio::fopen(str::from_cstr(&path[0]), "rb");
         if f == null {
             return false;
         }
@@ -279,7 +261,7 @@ extend Proj {
 extend Proj as Free {
     pub fn free(self: &mut Self) void {
         let mut cmd = Path512 {};
-        unsafe stdio::snprintf((&mut cmd[0]), 512, "rm -rf '%s'".ptr() as *const char, self.rootp());
-        let _ = stdlib::system(str::from_cstr((&cmd[0])));
+        unsafe stdio::snprintf(&mut cmd[0], 512, "rm -rf '%s'".ptr() as *const char, self.rootp());
+        let _ = stdlib::system(str::from_cstr(&cmd[0]));
     }
 }

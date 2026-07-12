@@ -641,6 +641,34 @@ fn tuples() {
 }
 
 @test
+fn null_is_not_a_value() {
+    h::expect_err_msg(
+        "null rejected for a str parameter",
+        "fn f(s: str) usize { return s.len(); }\nfn main() i32 { return f(null) as i32; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "null rejected in a str let",
+        "fn main() i32 { let s: str = null; return s.len() as i32; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "value == null rejected",
+        "fn main() i32 { let s = \"x\"; if s == null { return 1; } return 0; }\n",
+        "cannot compare 'str' with 'null'",
+    );
+    h::expect_err_msg(
+        "null == value rejected",
+        "fn main() i32 { let s = \"x\"; if null == s { return 1; } return 0; }\n",
+        "cannot compare 'str' with 'null'",
+    );
+    h::expect_ok(
+        "null still fine for pointers and fn values",
+        "fn cb() i32 { return 3; }\nfn main() i32 { let mut p: *const char = null; let f: fn() i32 = cb; if p == null && null == p && f != null { p = \"y\".ptr() as *const char; }\nif p != null { return 0; } return 9; }\n",
+    );
+}
+
+@test
 fn unsafe_enforcement() {
     h::expect_err_msg(
         "extern call needs unsafe",

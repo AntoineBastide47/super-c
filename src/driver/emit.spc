@@ -1,0 +1,492 @@
+// Global-phase pipeline: live-set pruning, per-module stages, platform filter, run_package.
+import stdio;
+import stdlib;
+import string as cstring;
+import lexer::token as tok;
+import lexer::lexer as lex;
+import lexer::token_type as ltt;
+import ast::ast as *;
+import ast::parser as par;
+import fmt::builder as fbld;
+import driver_shim as shim;
+import module::loader as loader;
+import resolver::resolver as resolver;
+import typechecker::typechecker as tc;
+import consteval::consteval as ce;
+import codegen::codegen as cg;
+import utils::errors as diag;
+import driver::util as *;
+
+import driver::extc as *;
+import driver::test as *;
+
+// ---------------------------------------------------------------------------------------------------------
+// Dead-module pruning of the emit set: a live module reaches its own decls + everything it references.
+// ---------------------------------------------------------------------------------------------------------
+fn mark_live(live: *mut bool, n: usize, m: ModuleId) bool {
+    if m as usize >= n || unsafe live[m as usize] {
+        return false;
+    }
+    unsafe live[m as usize] = true;
+    return true;
+}
+
+fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool {
+    if t == TYPE_NONE {
+        return false;
+    }
+    let y = unsafe *mod_ast_c(p, am).type_at(t);
+    if y.kind == TypeKind::TYPE_BUILTIN {
+        return true;
+    }
+    if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+        return ast_type_mentions_builtin(p, am, y.as_data.elem);
+    }
+    if y.kind == TypeKind::TYPE_INSTANCE {
+        let it = unsafe *mod_ast_c(p, am).instance(y.as_data.inst);
+        for i in 0..it.n {
+            if ast_type_mentions_builtin(p, am, it.args[i as usize]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bool) bool {
+    if t == TYPE_NONE {
+        return false;
+    }
+    let y = unsafe *mod_ast_c(p, am).type_at(t);
+    let mut changed = false;
+    if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+        if mark_type_modules(p, am, y.as_data.elem, live) {
+            changed = true;
+        }
+    } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_FUNCTION {
+        if p.builtin_of_decl(y.module, y.as_data.decl) < 0 {
+            if mark_live(live, p.modules.len(), y.module) {
+                changed = true;
+            }
+        }
+    } else if y.kind == TypeKind::TYPE_INSTANCE {
+        let it = unsafe *mod_ast_c(p, am).instance(y.as_data.inst);
+        let np = p.modules.len();
+        if it.module as usize < np {
+            if mark_live(live, np, it.module) {
+                changed = true;
+            }
+        }
+        let home = p.instance_home_mid(am, &it);
+        if home as usize < np {
+            if mark_live(live, np, home) {
+                changed = true;
+            }
+        }
+        for i in 0..it.n {
+            if mark_type_modules(p, am, it.args[i as usize], live) {
+                changed = true;
+            }
+            if p.core_seeded && ast_type_mentions_builtin(p, am, it.args[i as usize]) {
+                if mark_live(live, np, p.core_module) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+fn compute_emit_live(p: &loader::Package) *mut bool {
+    let n = p.modules.len();
+    let sz = if n != 0 {
+        n;
+    } else {
+        1 as usize;
+    };
+    let live = unsafe stdlib::calloc(sz, 1) as *mut bool;
+    if live == null {
+        return null;
+    }
+    for i in 0..n {
+        if !p.modules[i].prelude {
+            unsafe live[i] = true;
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for m in 0..n {
+            if !unsafe live[m] || !p.modules[m].has_ast {
+                continue;
+            }
+            let a = mod_ast_c(p, m as ModuleId);
+            let nr = unsafe (*a).resolutions.len();
+            for r in 0..nr {
+                let d = unsafe (*a).resolutions[r];
+                if d.node != NODE_NONE && d.module as usize < n && d.module as usize != m && p.builtin_of_decl(
+                    d.module,
+                    d.node,
+                ) < 0 {
+                    if mark_live(live, n, d.module) {
+                        changed = true;
+                    }
+                }
+            }
+            let nt = unsafe (*a).type_pool.len();
+            for ti in 0..nt {
+                if mark_type_modules(p, m as ModuleId, ti as TypeId, live) {
+                    changed = true;
+                }
+            }
+            let ni = unsafe (*a).instances.len();
+            for ii in 0..ni {
+                let it = unsafe *(*a).instance(ii as u32);
+                if it.module as usize < n {
+                    if mark_live(live, n, it.module) {
+                        changed = true;
+                    }
+                }
+                let home = p.instance_home_mid(m as ModuleId, &it);
+                if home as usize < n {
+                    if mark_live(live, n, home) {
+                        changed = true;
+                    }
+                }
+                for k in 0..it.n {
+                    if mark_type_modules(p, m as ModuleId, it.args[k as usize], live) {
+                        changed = true;
+                    }
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, it.args[k as usize]) {
+                        if mark_live(live, n, p.core_module) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            let nmo = unsafe (*a).mono.len();
+            for moi in 0..nmo {
+                let mu = unsafe (*a).mono[moi];
+                for k in 0..mu.n {
+                    if mark_type_modules(p, m as ModuleId, mu.args[k as usize], live) {
+                        changed = true;
+                    }
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, mu.args[k as usize]) {
+                        if mark_live(live, n, p.core_module) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            let nmi = unsafe (*a).method_insts.len();
+            for xi in 0..nmi {
+                let miu = unsafe (*a).method_insts[xi];
+                if mark_type_modules(p, m as ModuleId, miu.instance, live) {
+                    changed = true;
+                }
+                for k in 0..miu.n {
+                    if mark_type_modules(p, m as ModuleId, miu.targs[k as usize], live) {
+                        changed = true;
+                    }
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, miu.targs[k as usize]) {
+                        if mark_live(live, n, p.core_module) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return live;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Pipeline stages over one module (move the Ast out of its slot, run, and restore it).
+// ---------------------------------------------------------------------------------------------------------
+fn resolve_module(p: &mut loader::Package, i: usize) bool {
+    let pkg = p as *const loader::Package;
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let a = m.ast;
+    m.ast = Ast::new(0);
+    let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
+    p.override_mod = i as ModuleId;
+    p.override_ast = &mut r.ast as *mut Ast;
+    r.resolve();
+    p.override_mod = 0xFFFF as ModuleId;
+    p.override_ast = null;
+    let had = r.has_errors();
+    if had {
+        r.log_errors();
+    }
+    let back = r.take_ast();
+    r.free();
+    p.modules[i].ast = back;
+    return !had;
+}
+
+fn typecheck_module(p: &mut loader::Package, i: usize) bool {
+    let pkg = p as *mut loader::Package;
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let a = m.ast;
+    m.ast = Ast::new(0);
+    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    p.override_mod = i as ModuleId;
+    p.override_ast = &mut t.ast as *mut Ast;
+    t.check();
+    p.override_mod = 0xFFFF as ModuleId;
+    p.override_ast = null;
+    let had = t.has_errors();
+    if had {
+        t.log_errors();
+    }
+    let back = t.take_ast();
+    p.modules[i].ast = back;
+    return !had;
+}
+
+// A deferred static_assert that failed once the whole package was typed: render it against the owning module.
+fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) void {
+    let p = ctx as *mut loader::Package;
+    let sp = unsafe (*p).modules[m as usize].ast.at_const(cond).span;
+    let src = unsafe (*p).modules[m as usize].source.as_str();
+    let len = unsafe (*p).modules[m as usize].source.len();
+    let file = unsafe (*p).modules[m as usize].file.as_str();
+    let mut errs = diag::Errors::new();
+    if msg != null {
+        errs.emit(sp.start, sp.end - sp.start, format("static assertion cannot be evaluated: {}", diag::cstr(msg)));
+    } else {
+        errs.emit(sp.start, sp.end - sp.start, format("static assertion failed"));
+    }
+    errs.finalize(src, file);
+    errs.log();
+    errs.free();
+    unsafe (*p).ok = false;
+}
+
+type TCases = Array<cg::CgTestCase, 512>;
+
+// ---------------------------------------------------------------------------------------------------------
+// Global-phase compilation of a loaded package into a `<root>/build/` tree.
+// ---------------------------------------------------------------------------------------------------------
+// Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
+// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
+// target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
+fn platform_filter(p: &mut loader::Package, target: i32) void {
+    let n = p.modules.len();
+    for mi in 0..n {
+        let m = &mut p.modules[mi];
+        let root = m.ast.root;
+        if m.ast.at_const(root).kind != NodeKind::NODE_PROGRAM {
+            continue;
+        }
+        let items = m.ast.at_const(root).as_data.program.items;
+        let mut w: u32 = 0;
+        for j in 0..items.len {
+            let id = m.ast.children[(items.start + j) as usize];
+            let mut keep = true;
+            if m.ast.at_const(id).kind != NodeKind::NODE_IMPORT {
+                for k in 0..m.ast.attrs.len() {
+                    let at = m.ast.attrs.at(k);
+                    if at.owner == id && at.kind == AttrKind::ATTR_PLATFORM as u8 {
+                        if (at.arg >> target as u32 & 1u32) == 0 {
+                            keep = false;
+                        }
+                        break;
+                    }
+                }
+            }
+            if keep {
+                m.ast.children[(items.start + w) as usize] = id;
+                w = w + 1;
+            }
+        }
+        m.ast.at(root).as_data.program.items.len = w;
+    }
+}
+
+pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32) i32 {
+    platform_filter(p, target);
+    let n = p.modules.len();
+    for i in 0..n {
+        let ok = resolve_module(p, i);
+        p.ok = ok && p.ok;
+    }
+    if !p.ok {
+        return 1;
+    }
+    for i in 0..n {
+        let ok = typecheck_module(p, i);
+        p.ok = ok && p.ok;
+    }
+    if !p.ok {
+        return 1;
+    }
+    // static_asserts undecidable in module order re-evaluate now that every module is fully typed.
+    let ceptr = p.ceval as *mut ce::ConstEval;
+    if ceptr != null {
+        let pv = p as *mut loader::Package;
+        unsafe (*ceptr).flush_asserts(flush_assert_err, pv);
+    }
+    if !p.ok {
+        return 1;
+    }
+    loader::package_propagate_instances(p);
+
+    let testing = topts != null && unsafe (*topts).enabled;
+    let mut plan = TestPlan::new(n);
+    if testing {
+        test_plan_build(p, &mut plan);
+        if !plan.ok {
+            return 1;
+        }
+    }
+
+    write_super_rt(p.root_dir.as_str());
+    let root = p.root_dir.as_str();
+    let mut keep = Vector::<String>::new();
+    keep.push(build_out_path(root, "super_rt", ".h"));
+    let mut err = false;
+    // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
+    ext_c_collect(p, &mut keep, &mut err as *mut bool);
+    let live = compute_emit_live(p);
+    let osz = if n != 0 {
+        n;
+    } else {
+        1 as usize;
+    };
+    let order = unsafe stdlib::malloc(osz * 2) as *mut ModuleId;
+    if order == null {
+        if live != null {
+            unsafe stdlib::free(live);
+        }
+        return 1;
+    }
+    loader::package_emit_order(p, order);
+    for oi in 0..n {
+        let mi = unsafe order[oi];
+        if live != null && !unsafe live[mi as usize] {
+            continue;
+        }
+        let m_ast = mod_ast_m(p, mi);
+        let src = p.modules[mi as usize].source.as_str().ptr() as *const char;
+        let slen = p.modules[mi as usize].source.len();
+        let mpath = p.modules[mi as usize].path.as_str();
+        let pkg = p as *mut loader::Package;
+        let mut c = cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg);
+        c.set_multifile(true);
+        let mut tcases = TCases {}; // must outlive codegen_emit (CgTestInfo keeps a pointer into it)
+        if testing {
+            let mut nt: u32 = 0;
+            let mut tk: usize = 0;
+            while tk < plan.cases.len() && nt < 512 {
+                let tc = plan.cases[tk];
+                if tc.mod == mi {
+                    tcases[nt as usize] = cg::CgTestCase {
+                        func: tc.func,
+                        wants: tc.wants,
+                        suite: tc.suite,
+                        suite_is_enum: tc.suite_is_enum,
+                        suite_init: tc.suite_init,
+                        suite_free: tc.suite_free,
+                    };
+                    nt = nt + 1;
+                }
+                tk = tk + 1;
+            }
+            let gi = if plan.genv_mod == mi {
+                plan.genv_init;
+            } else {
+                NODE_NONE;
+            };
+            let gf = if plan.genv_mod == mi {
+                plan.genv_free;
+            } else {
+                NODE_NONE;
+            };
+            let ti = cg::CgTestInfo {
+                enabled: true,
+                cases: &tcases[0] as *const cg::CgTestCase,
+                ncases: nt,
+                fx_init: plan.fx_init[mi as usize],
+                fx_free: plan.fx_free[mi as usize],
+                fx_type: plan.fx_type[mi as usize],
+                fx_is_enum: plan.fx_is_enum[mi as usize],
+                genv_init: gi,
+                genv_free: gf,
+                genv_type: plan.genv_type,
+                genv_is_enum: plan.genv_is_enum,
+            };
+            c.set_test_info(&ti as *const cg::CgTestInfo);
+        }
+        let hpath = build_out_path(root, mpath, ".h");
+        let hout = open_out(hpath.as_str());
+        if hout != null {
+            c.codegen_emit_header(hout);
+            unsafe stdio::fclose(hout);
+        }
+        keep.push(hpath);
+        let mut opath = build_out_path(root, mpath, ".c");
+        let out = open_out(opath.as_str());
+        if out == null {
+            unsafe stdio::perror(opath.cstr());
+            err = true;
+        } else {
+            c.codegen_emit(out);
+            unsafe stdio::fclose(out);
+            if c.has_errors() {
+                c.log_errors();
+                err = true;
+            }
+        }
+        keep.push(opath);
+    }
+    unsafe stdlib::free(order);
+    if live != null {
+        unsafe stdlib::free(live);
+    }
+    // Drop outputs from a previous build that this program no longer emits, so the tree matches the current
+    // sources. Skip on a keep-list OOM -- never risk deleting a live output.
+    let mut broot = PathBuf {};
+    // root is a str view (not nul-terminated); bound the copy with %.*s or %s runs off the buffer end.
+    let bn = unsafe stdio::snprintf(
+        &mut broot[0],
+        4096,
+        "%.*s/build".ptr() as *const char,
+        root.len() as i32,
+        root.ptr() as *const char,
+    );
+    if bn > 0 && bn as usize < 4096 {
+        prune_orphans(&broot[0], &keep);
+    }
+    let mut rc: i32 = if err {
+        1;
+    } else {
+        0 as i32;
+    };
+    if out_bin.len() != 0 {
+        if !err {
+            rc = test_build_and_run(p, null, &keep, out_bin);
+        }
+    } else if testing && !err {
+        if plan.cases.len() == 0 {
+            unsafe stdio::fputs("super-c: no '@test' functions found\n".ptr() as *const char, stdio::stderr());
+            rc = 1;
+        } else {
+            switch write_test_main(p, &plan) {
+                Some(runner) => {
+                    keep.push(runner);
+                    rc = test_build_and_run(p, topts, &keep, "");
+                },
+                None => {
+                    rc = 1;
+                },
+            };
+        }
+    }
+    return rc;
+}

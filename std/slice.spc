@@ -114,6 +114,9 @@ extend<T> SliceMut<T> {
 // `index_range` honors the written bounds: `..=` includes `r.end`; an open end arrives as `len()`.
 extend<T> Slice<T> as Index<T, []T> {
     pub fn index(self: &Slice<T>, i: usize) &T {
+        if i >= self.len {
+            panic("Slice[i]: index out of bounds");
+        }
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &Slice<T>, r: Range<usize>) []T {
@@ -122,12 +125,18 @@ extend<T> Slice<T> as Index<T, []T> {
         } else {
             r.end;
         };
+        if r.start > hi || hi > self.len {
+            panic("Slice[a..b]: range out of bounds");
+        }
         return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }
 
 extend<T> SliceMut<T> as Index<T, []T> {
     pub fn index(self: &SliceMut<T>, i: usize) &T {
+        if i >= self.len {
+            panic("SliceMut[i]: index out of bounds");
+        }
         return &unsafe self.ptr[i];
     }
     pub fn index_range(self: &SliceMut<T>, r: Range<usize>) []T {
@@ -136,12 +145,18 @@ extend<T> SliceMut<T> as Index<T, []T> {
         } else {
             r.end;
         };
+        if r.start > hi || hi > self.len {
+            panic("Slice[a..b]: range out of bounds");
+        }
         return Slice::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }
 
 extend<T> SliceMut<T> as IndexMut<T, []mut T> {
     pub fn index_mut(self: &mut SliceMut<T>, i: usize) &mut T {
+        if i >= self.len {
+            panic("SliceMut[i]: index out of bounds");
+        }
         return &mut unsafe self.ptr[i];
     }
     pub fn index_range_mut(self: &mut SliceMut<T>, r: Range<usize>) []mut T {
@@ -150,6 +165,9 @@ extend<T> SliceMut<T> as IndexMut<T, []mut T> {
         } else {
             r.end;
         };
+        if r.start > hi || hi > self.len {
+            panic("SliceMut[a..b]: range out of bounds");
+        }
         return SliceMut::<T> { ptr: unsafe (self.ptr + r.start), len: hi - r.start };
     }
 }

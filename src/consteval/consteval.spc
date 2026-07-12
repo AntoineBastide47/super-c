@@ -106,7 +106,7 @@ pub struct LayoutEnv {
     pub pmod: ModuleId,
     pub params: *const NodeId,
     pub argm: ModuleId,
-    pub args: [TypeId; 4],
+    pub args: [TypeId; 8],
     pub n: u8,
 }
 
@@ -395,13 +395,13 @@ extend ConstEval {
         if m == unsafe (*self.pkg).override_mod && unsafe (*self.pkg).override_ast != null {
             return unsafe (*self.pkg).override_ast as *const Ast;
         }
-        return unsafe (&(*self.pkg).modules[m as usize].ast) as *const Ast;
+        return unsafe &(*self.pkg).modules[m as usize].ast as *const Ast;
     }
     fn mut_ast_ptr(self: &Self, m: ModuleId) *mut Ast {
         if m == unsafe (*self.pkg).override_mod && unsafe (*self.pkg).override_ast != null {
             return unsafe (*self.pkg).override_ast;
         }
-        return unsafe (&mut (*self.pkg).modules[m as usize].ast) as *mut Ast;
+        return unsafe &mut (*self.pkg).modules[m as usize].ast as *mut Ast;
     }
     fn has_ast(self: &Self, m: ModuleId) bool {
         if m as usize >= self.nmods {
@@ -409,8 +409,8 @@ extend ConstEval {
         }
         return unsafe (*self.pkg).modules[m as usize].has_ast;
     }
-    fn ce_src(self: &Self, m: ModuleId) *const u8 {
-        return unsafe (*self.pkg).modules[m as usize].source.as_str().ptr();
+    fn ce_src(self: &Self, m: ModuleId) str {
+        return unsafe (*self.pkg).modules[m as usize].source.as_str();
     }
     fn is_prelude(self: &Self, m: ModuleId) bool {
         return unsafe (*self.pkg).modules[m as usize].prelude;
@@ -469,8 +469,8 @@ extend ConstEval {
             return false;
         }
         return unsafe cstring::memcmp(
-            self.ce_src(ma) + a.start as usize,
-            self.ce_src(mb) + b.start as usize,
+            self.ce_src(ma).ptr() + a.start as usize,
+            self.ce_src(mb).ptr() + b.start as usize,
             la as usize,
         ) == 0;
     }
@@ -479,7 +479,7 @@ extend ConstEval {
         if (s.end - s.start) as usize != n {
             return false;
         }
-        return unsafe cstring::memcmp(self.ce_src(m) + s.start as usize, lit.ptr(), n) == 0;
+        return unsafe cstring::memcmp(self.ce_src(m).ptr() + s.start as usize, lit.ptr(), n) == 0;
     }
     fn name_text(self: &Self, m: ModuleId, name_node: NodeId) tok::Span {
         let a = self.ast_ptr(m);
@@ -543,12 +543,12 @@ extend ConstEval {
         let src = self.ce_src(m);
         let sp = unsafe (*a).at_const(id).as_data.literal.raw;
         let mut endd = sp.end;
-        unsafe ast_numeric_suffix(src, sp.start, sp.end, (&mut endd) as *mut u32);
+        unsafe ast_numeric_suffix(src, sp.start, sp.end, &mut endd as *mut u32);
         let mut v: u64 = 0;
         let mut i = sp.start;
         let mut base: u64 = 10;
-        if sp.end - sp.start > 2 && unsafe src[i as usize] == b'0' {
-            let r = unsafe src[(i + 1) as usize];
+        if sp.end - sp.start > 2 && src[i as usize] == b'0' {
+            let r = src[(i + 1) as usize];
             if r == b'x' || r == b'X' {
                 base = 16;
                 i = i + 2;
@@ -561,7 +561,7 @@ extend ConstEval {
             }
         }
         while i < endd {
-            let ch = unsafe src[i as usize];
+            let ch = src[i as usize];
             if ch == b'_' {
                 i = i + 1;
                 continue;
@@ -589,17 +589,17 @@ extend ConstEval {
         let src = self.ce_src(m);
         let sp = unsafe (*a).at_const(id).as_data.literal.raw;
         let mut i = sp.start + 1;
-        if unsafe src[sp.start as usize] == b'b' {
+        if src[sp.start as usize] == b'b' {
             i = i + 1;
         }
         if i >= sp.end {
             return ce_none();
         }
         let mut v: i64 = 0;
-        if unsafe src[i as usize] != '\\' as u8 {
-            v = unsafe src[i as usize] as i64;
+        if src[i as usize] != b'\\' {
+            v = src[i as usize] as i64;
         } else {
-            let e = unsafe src[(i + 1) as usize];
+            let e = src[(i + 1) as usize];
             switch e {
                 'n' => {
                     v = 10;
@@ -626,7 +626,7 @@ extend ConstEval {
                     v = 0;
                     let mut k = i + 2;
                     while k < sp.end - 1 {
-                        let d = hexval(unsafe src[k as usize]);
+                        let d = hexval(src[k as usize]);
                         if d < 0 {
                             return ce_none();
                         }
@@ -650,14 +650,14 @@ extend ConstEval {
         let mut k: usize = 0;
         let mut i = sp.start;
         while i < sp.end && k + 1 < 64 {
-            if unsafe src[i as usize] != b'_' {
-                buf[k] = unsafe src[i as usize] as char;
+            if src[i as usize] != b'_' {
+                buf[k] = src[i as usize] as char;
                 k = k + 1;
             }
             i = i + 1;
         }
         buf[k] = 0 as char;
-        let mut v = unsafe stdlib::strtod((&buf[0]), null);
+        let mut v = unsafe stdlib::strtod(&buf[0], null);
         let b = type_builtin(a, self.ce_type(m, id));
         if b == BuiltinType::BT_F32 {
             v = v as f32 as f64;
@@ -732,7 +732,7 @@ extend ConstEval {
                     if struct_payload {
                         tn = unsafe (*a).at_const(pid).as_data.field.ty;
                     }
-                    if !self.acc_field((&mut vs) as *mut LayoutAcc, dm, self.ce_type(dm, tn), env, depth) {
+                    if !self.acc_field(&mut vs as *mut LayoutAcc, dm, self.ce_type(dm, tn), env, depth) {
                         return Layout { ok: false };
                     }
                 }
@@ -773,7 +773,7 @@ extend ConstEval {
             if ft == TYPE_NONE {
                 return Layout { ok: false };
             }
-            if !self.acc_field((&mut acc) as *mut LayoutAcc, dm, ft, env, depth) {
+            if !self.acc_field(&mut acc as *mut LayoutAcc, dm, ft, env, depth) {
                 return Layout { ok: false };
             }
         }
@@ -862,12 +862,12 @@ extend ConstEval {
             let gens = unsafe (*da).at_const(it.decl).as_data.aggregate.generics;
             let mut frame = LayoutEnv { parent: env, pmod: it.module, params: unsafe (*da).list(gens), argm: m, n: 0 };
             let mut i: u32 = 0;
-            while i < gens.len && i as u8 < it.n && frame.n < 4 {
+            while i < gens.len && i as u8 < it.n && frame.n < 8 {
                 frame.args[frame.n as usize] = it.args[i as usize];
                 frame.n = frame.n + 1;
                 i = i + 1;
             }
-            return self.aggregate_layout(it.module, it.decl, (&frame) as *const LayoutEnv, depth + 1);
+            return self.aggregate_layout(it.module, it.decl, &frame as *const LayoutEnv, depth + 1);
         }
         return Layout { ok: false };
     }
@@ -938,12 +938,12 @@ extend ConstEval {
             envs[i as usize] = LayoutEnv {
                 parent: parent,
                 pmod: unsafe (*f).pmod,
-                params: unsafe (&(*f).params_g[i as usize]) as *const NodeId,
+                params: unsafe &(*f).params_g[i as usize] as *const NodeId,
                 argm: unsafe (*f).am[i as usize],
                 n: 1,
             };
             envs[i as usize].args[0] = unsafe (*f).at[i as usize];
-            parent = (&envs[i as usize]) as *const LayoutEnv;
+            parent = &envs[i as usize] as *const LayoutEnv;
         }
         return self.layout_of(m, t, parent, 0);
     }
@@ -1062,7 +1062,7 @@ extend ConstEval {
             if !changed {
                 return t;
             }
-            return unsafe (*self.mut_ast_ptr(m)).intern_instance(it.module, it.decl, (&na[0]) as *const TypeId, it.n);
+            return unsafe (*self.mut_ast_ptr(m)).intern_instance(it.module, it.decl, &na[0] as *const TypeId, it.n);
         }
         return t;
     }
@@ -1813,8 +1813,8 @@ extend ConstEval {
         let raw = unsafe (*a).at_const(id).as_data.literal.token_type == TokenType::RawStringLiteral;
         let mut i = sp.start;
         let mut hashes: u32 = 0;
-        while i < sp.end && unsafe src[i as usize] != b'"' {
-            if unsafe src[i as usize] == b'#' {
+        while i < sp.end && src[i as usize] != b'"' {
+            if src[i as usize] == b'#' {
                 hashes = hashes + 1;
             }
             i = i + 1;
@@ -1833,10 +1833,10 @@ extend ConstEval {
             if nb >= 4096 {
                 return cv_nil();
             }
-            let mut c = unsafe src[i as usize];
+            let mut c = src[i as usize];
             i = i + 1;
-            if !raw && c == '\\' as u8 && i < endpos {
-                let e = unsafe src[i as usize];
+            if !raw && c == b'\\' && i < endpos {
+                let e = src[i as usize];
                 i = i + 1;
                 switch e {
                     'n' => {
@@ -2089,7 +2089,7 @@ extend ConstEval {
         }
         let mut dm: ModuleId = 0;
         let mut dn: NodeId = NODE_NONE;
-        if !self.ce_range_decl((&mut dm) as *mut ModuleId, (&mut dn) as *mut NodeId) {
+        if !self.ce_range_decl(&mut dm as *mut ModuleId, &mut dn as *mut NodeId) {
             return cv_nil();
         }
         let mut sv = self.ev_in(f, m, start_n);
@@ -2425,7 +2425,7 @@ extend ConstEval {
                 ];
                 args[0] = recvr.v;
                 args[1] = iv;
-                let dr = self.ce_dispatch(rr.r, m, "index_mut", (&args[0]) as *const CeVal, 2);
+                let dr = self.ce_dispatch(rr.r, m, "index_mut", &args[0] as *const CeVal, 2);
                 if !dr.ok || dr.v.kind != CV_PTR {
                     return ValRes { ok: false };
                 }
@@ -2602,7 +2602,7 @@ extend ConstEval {
             if o == null || unsafe (*o).dead != 0 {
                 return cv_nil();
             }
-            let c0 = unsafe src[mname.start as usize];
+            let c0 = src[mname.start as usize];
             let mut idx: u32 = 0;
             if c0 >= b'0' && c0 <= b'9' {
                 idx = (c0 - b'0') as u32;
@@ -2659,7 +2659,7 @@ extend ConstEval {
                 return cv_nil();
             }
             let mut out = cv_nil();
-            if self.exec_match(f, m, id, (&mut out) as *mut CeVal) == Flow::Ok {
+            if self.exec_match(f, m, id, &mut out as *mut CeVal) == Flow::Ok {
                 return out;
             }
             return cv_nil();
@@ -2991,7 +2991,7 @@ extend ConstEval {
                     ];
                     args[0] = lhs;
                     args[1] = rhs;
-                    let dr = self.ce_dispatch(rr.r, m, mn, (&args[0]) as *const CeVal, 2);
+                    let dr = self.ce_dispatch(rr.r, m, mn, &args[0] as *const CeVal, 2);
                     if !dr.ok {
                         return cv_nil();
                     }
@@ -3206,7 +3206,7 @@ extend ConstEval {
                 ];
                 args[0] = recv;
                 args[1] = iv;
-                let dr = self.ce_dispatch(rr.r, m, "index_range", (&args[0]) as *const CeVal, 2);
+                let dr = self.ce_dispatch(rr.r, m, "index_range", &args[0] as *const CeVal, 2);
                 if !dr.ok || dr.v.kind != CV_AGG {
                     return cv_nil();
                 }
@@ -3219,7 +3219,7 @@ extend ConstEval {
             let mut args: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
             args[0] = recv;
             args[1] = iv;
-            let dr = self.ce_dispatch(rr.r, m, "index", (&args[0]) as *const CeVal, 2);
+            let dr = self.ce_dispatch(rr.r, m, "index", &args[0] as *const CeVal, 2);
             if !dr.ok || dr.v.kind != CV_PTR {
                 return cv_nil();
             }
@@ -4186,7 +4186,7 @@ extend ConstEval {
         loop {
             let mut args: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
             args[0] = itp;
-            let dr = self.ce_dispatch(rr.r, m, "next", (&args[0]) as *const CeVal, 1);
+            let dr = self.ce_dispatch(rr.r, m, "next", &args[0] as *const CeVal, 1);
             if !dr.ok || dr.v.kind != CV_AGG {
                 return Flow::Bail;
             }
@@ -4559,7 +4559,7 @@ extend ConstEval {
             }
             inv[i as usize] = unsafe args[i as usize].as_data.f;
         }
-        let nv = diag::cstr((&name[0]));
+        let nv = diag::cstr(&name[0]);
         let mut v: f64 = 0.0;
         let mut ok = false;
         if nargs == 1 {
@@ -4631,7 +4631,7 @@ extend ConstEval {
             return out;
         }
         let mut g = ce_frame_zero();
-        let gp = (&mut g) as *mut CeFrame;
+        let gp = &mut g as *mut CeFrame;
         if self_decl != NODE_NONE && !self.ce_subst_add(gp, self_pm, self_decl, self_am, self_at) {
             return out;
         }
@@ -4789,7 +4789,7 @@ extend ConstEval {
 
     fn ce_dispatch(self: &mut Self, r: CeRecv, scope: ModuleId, lit: str, args: *const CeVal, nargs: u32) ValRes {
         let mut extnode = NODE_NONE;
-        let md = self.ce_find_method(r, scope, 0, tok::Span::empty(), lit, (&mut extnode) as *mut NodeId);
+        let md = self.ce_find_method(r, scope, 0, tok::Span::empty(), lit, &mut extnode as *mut NodeId);
         if md.node == NODE_NONE {
             return ValRes { ok: false };
         }
@@ -4797,7 +4797,7 @@ extend ConstEval {
             md.module,
             md.node,
             extnode,
-            (&r) as *const CeRecv,
+            &r as *const CeRecv,
             null,
             null,
             0,
@@ -4896,7 +4896,7 @@ extend ConstEval {
                         return out;
                     }
                     let mut extnode = NODE_NONE;
-                    let md = self.ce_find_method(rr.r, m, 0, tok::Span::empty(), "free", (&mut extnode) as *mut NodeId);
+                    let md = self.ce_find_method(rr.r, m, 0, tok::Span::empty(), "free", &mut extnode as *mut NodeId);
                     if md.node == NODE_NONE {
                         out.ok = true;
                         return out;
@@ -4932,11 +4932,11 @@ extend ConstEval {
                         md.module,
                         md.node,
                         extnode,
-                        (&rr.r) as *const CeRecv,
+                        &rr.r as *const CeRecv,
                         null,
                         null,
                         0,
-                        (&avs[0]) as *const CeVal,
+                        &avs[0] as *const CeVal,
                         1,
                         0,
                         NODE_NONE,
@@ -5038,7 +5038,7 @@ extend ConstEval {
         let mut container = NODE_NONE;
         let mut ckind = 0;
         if fkind != NodeKind::NODE_CLOSURE {
-            ckind = self.ce_container_of(fd.module, fd.node, (&mut container) as *mut NodeId);
+            ckind = self.ce_container_of(fd.module, fd.node, &mut container as *mut NodeId);
         }
         let mut self_pm: ModuleId = 0;
         let mut self_decl = NODE_NONE;
@@ -5050,7 +5050,7 @@ extend ConstEval {
             }
             let mname = self.name_text(fam, unsafe (*self.ast_ptr(fam)).at_const(fnode).as_data.function.name);
             let mut extnode = NODE_NONE;
-            let md = self.ce_find_method(recv_id, m, fd.module, mname, "", (&mut extnode) as *mut NodeId);
+            let md = self.ce_find_method(recv_id, m, fd.module, mname, "", &mut extnode as *mut NodeId);
             if md.node != NODE_NONE {
                 fd = md;
                 fam = fd.module;
@@ -5090,7 +5090,7 @@ extend ConstEval {
                     return out;
                 }
             }
-            return self.ce_intercept(fd.module, fnode, (&argv[0]) as *const CeVal, nargs, m, id);
+            return self.ce_intercept(fd.module, fnode, &argv[0] as *const CeVal, nargs, m, id);
         }
 
         // arguments; a method receiver is param 0
@@ -5157,7 +5157,7 @@ extend ConstEval {
                     if !hrr.ok || self.ce_container_of(
                         unsafe (*du).method[hi as usize].module,
                         unsafe (*du).method[hi as usize].node,
-                        (&mut hext) as *mut NodeId,
+                        &mut hext as *mut NodeId,
                     ) != 1 {
                         return out;
                     }
@@ -5176,11 +5176,11 @@ extend ConstEval {
                         unsafe (*du).method[hi as usize].module,
                         unsafe (*du).method[hi as usize].node,
                         hext,
-                        (&hrr.r) as *const CeRecv,
+                        &hrr.r as *const CeRecv,
                         null,
                         null,
                         0,
-                        (&ha[0]) as *const CeVal,
+                        &ha[0] as *const CeVal,
                         1,
                         0,
                         NODE_NONE,
@@ -5219,7 +5219,7 @@ extend ConstEval {
         let mu = unsafe (*a).type_args(id);
         if mu != null {
             let mut k: u8 = 0;
-            while k < unsafe (*mu).n && k < 4 {
+            while k < unsafe (*mu).n && k < 8 {
                 monom[nmono as usize] = m;
                 monot[nmono as usize] = self.ce_subst_deep(f, m, unsafe (*mu).args[k as usize], 0);
                 nmono = nmono + 1;
@@ -5232,17 +5232,17 @@ extend ConstEval {
         }
         let mut rp: *const CeRecv = null;
         if have_recv_id {
-            rp = (&recv_id) as *const CeRecv;
+            rp = &recv_id as *const CeRecv;
         }
         return self.ce_invoke(
             fd.module,
             fd.node,
             ext_arg,
             rp,
-            (&monom[0]) as *const ModuleId,
-            (&monot[0]) as *const TypeId,
+            &monom[0] as *const ModuleId,
+            &monot[0] as *const TypeId,
             nmono,
-            (&argv[0]) as *const CeVal,
+            &argv[0] as *const CeVal,
             na,
             self_pm,
             self_decl,

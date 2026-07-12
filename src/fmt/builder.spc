@@ -240,7 +240,8 @@ fn emit_tail_list(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::Doc
 
 pub const PREC_ASSIGN: i32 = 0;
 pub const PREC_RANGE: i32 = 1;
-pub const PREC_UNARY: i32 = 12;
+pub const PREC_CAST: i32 = 12; // `as`: looser than prefix ops, tighter than any binary op (parser binary max = 11)
+pub const PREC_UNARY: i32 = 13;
 pub const PREC_POSTFIX: i32 = 14;
 pub const PREC_PRIMARY: i32 = 20;
 
@@ -262,7 +263,10 @@ fn expr_prec(b: &Builder, id: NodeId) i32 {
             }
             return PREC_UNARY;
         },
-        NODE_CAST | NODE_CALL | NODE_INDEX | NODE_MEMBER | NODE_GENERIC_SPECIALIZATION => {
+        NODE_CAST => {
+            return PREC_CAST;
+        },
+        NODE_CALL | NODE_INDEX | NODE_MEMBER | NODE_GENERIC_SPECIALIZATION => {
             return PREC_POSTFIX;
         },
         NODE_CLOSURE | NODE_MATCH => {
@@ -716,7 +720,7 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
             v.push(node_text(b, n.as_data.member.member));
         },
         NODE_CAST => {
-            v.push(b_expr_prec(b, n.as_data.cast.expression, PREC_POSTFIX));
+            v.push(b_expr_prec(b, n.as_data.cast.expression, PREC_CAST));
             v.push(b.p.txt(" as "));
             v.push(b_type(b, n.as_data.cast.ty));
         },
