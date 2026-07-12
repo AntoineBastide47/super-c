@@ -195,7 +195,7 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     }
     let it = unsafe (*a).at_const(tnode).as_data.indirect_type;
     let mut is_enum = false;
-    let d = test_type_decl(p, m, it.ty, &mut is_enum as *mut bool);
+    let d = test_type_decl(p, m, it.ty, (&mut is_enum) as *mut bool);
     if fx.node != NODE_NONE && d.module == fx.module && d.node == fx.node {
         return 1;
     }
@@ -269,7 +269,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             }
             let sp = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).span;
             let mut bad_ext = false;
-            let ext = test_owner_extend(p, m as ModuleId, at.owner, &mut bad_ext as *mut bool);
+            let ext = test_owner_extend(p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
             if ext != NODE_NONE && bad_ext {
                 test_err(
                     p,
@@ -292,7 +292,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                     continue;
                 }
                 let tt = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
-                target = test_type_decl(p, m as ModuleId, tt, &mut target_is_enum as *mut bool);
+                target = test_type_decl(p, m as ModuleId, tt, (&mut target_is_enum) as *mut bool);
                 if target.node == NODE_NONE {
                     test_err(
                         p,
@@ -311,7 +311,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 }
                 let mut is_enum = false;
                 let ret = test_fn_ret_node(p, m as ModuleId, at.owner);
-                let d = test_type_decl(p, m as ModuleId, ret, &mut is_enum as *mut bool);
+                let d = test_type_decl(p, m as ModuleId, ret, (&mut is_enum) as *mut bool);
                 if d.node == NODE_NONE {
                     test_err(
                         p,
@@ -382,7 +382,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                     if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
                         let it = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(pty).as_data.indirect_type;
                         let mut ie = false;
-                        let d = test_type_decl(p, m as ModuleId, it.ty, &mut ie as *mut bool);
+                        let d = test_type_decl(p, m as ModuleId, it.ty, (&mut ie) as *mut bool);
                         ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == target.module && d.node == target.node;
                     }
                 }
@@ -417,7 +417,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 continue;
             }
             let mut be = false;
-            if test_owner_extend(p, m as ModuleId, at.owner, &mut be as *mut bool) != NODE_NONE {
+            if test_owner_extend(p, m as ModuleId, at.owner, (&mut be) as *mut bool) != NODE_NONE {
                 continue;
             }
             let sp = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).span;
@@ -458,7 +458,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
                 if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
                     let it = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(pty).as_data.indirect_type;
                     let mut ie = false;
-                    let d = test_type_decl(p, m as ModuleId, it.ty, &mut ie as *mut bool);
+                    let d = test_type_decl(p, m as ModuleId, it.ty, (&mut ie) as *mut bool);
                     ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == want.module && d.node == want.node;
                 }
             }
@@ -517,7 +517,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             }
             let sp = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(at.owner).span;
             let mut bad_ext = false;
-            let ext = test_owner_extend(p, m as ModuleId, at.owner, &mut bad_ext as *mut bool);
+            let ext = test_owner_extend(p, m as ModuleId, at.owner, (&mut bad_ext) as *mut bool);
             if ext != NODE_NONE && bad_ext {
                 test_err(
                     p,
@@ -531,7 +531,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
             let mut suite_is_enum = false;
             if ext != NODE_NONE {
                 let tt = unsafe (*mod_ast_c(p, m as ModuleId)).at_const(ext).as_data.extend_def.target_type;
-                suite = test_type_decl(p, m as ModuleId, tt, &mut suite_is_enum as *mut bool);
+                suite = test_type_decl(p, m as ModuleId, tt, (&mut suite_is_enum) as *mut bool);
                 if suite.node == NODE_NONE {
                     test_err(
                         p,

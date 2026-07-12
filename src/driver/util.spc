@@ -26,10 +26,10 @@ pub type Buf128 = Array<char, 128>;
 // Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
 // ---------------------------------------------------------------------------------------------------------
 pub fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
-    return &p.modules[m as usize].ast as *const Ast;
+    return (&p.modules[m as usize].ast) as *const Ast;
 }
 pub fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
-    return &mut p.modules[m as usize].ast as *mut Ast;
+    return (&mut p.modules[m as usize].ast) as *mut Ast;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -69,7 +69,7 @@ pub fn mkdir_p(path: str) void {
     let mut buf = Array::<char, 4096>::new();
     buf.copy_from(path.ptr(), n);
     buf[n] = 0 as char;
-    let base = &buf[0] as *mut char;
+    let base = (&buf[0]) as *mut char;
     for i in 1..n {
         if unsafe base[i] == '/' as char {
             unsafe base[i] = 0 as char;
@@ -123,7 +123,7 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) void {
         if np < 0 || np as usize >= 4096 {
             continue;
         }
-        let path = &pb[0] as *const char;
+        let path = (&pb[0]) as *const char;
         if unsafe shim::sc_stat_isdir(path) != 0 {
             prune_orphans(path, keep);
             let _ = unsafe shim::sc_rmdir(path); // no-op unless the recursion just emptied it

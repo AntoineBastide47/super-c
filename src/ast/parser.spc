@@ -2949,7 +2949,7 @@ extend Parser {
                         i = i + 1;
                     }
                     buf[k] = 0 as char;
-                    out.arg = unsafe stdlib::strtoul(&buf[0], null, 0) as u32;
+                    out.arg = (unsafe stdlib::strtoul(&buf[0], null, 0)) as u32;
                 }
                 self.advance();
             } else {

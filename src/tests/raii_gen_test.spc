@@ -64,7 +64,7 @@ struct Hist {
 
 // Bounded append into `b` at offset `at` (cap-limited); returns the new end offset. Always NUL-terminates.
 fn ap(b: *mut char, at: i32, cap: i32, s: *const char) i32 {
-    let mut n = unsafe cstring::strlen(s) as i32;
+    let mut n = (unsafe cstring::strlen(s)) as i32;
     if at + n >= cap {
         n = cap - 1 - at;
     }
@@ -118,7 +118,7 @@ fn bld(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, id: i32) i32 {
     }
     let mut inner = Buf1024 {};
     let _ = ty(&mut inner.b[0], 0, 1024, sh, p + 1);
-    let innerp = &inner.b[0] as *const char;
+    let innerp = (&inner.b[0]) as *const char;
     let mut hdr = Buf1024 {};
     if c == 'O' {
         unsafe stdio::snprintf(&mut hdr.b[0], 1024, "Option::<%s>::Some(".ptr() as *const char, innerp);
@@ -147,7 +147,7 @@ fn sw(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, var: *const char
     }
     let mut nv = Buf64 {};
     unsafe stdio::snprintf(&mut nv.b[0], 64, "%s_%d".ptr() as *const char, var, p);
-    let nvp = &nv.b[0] as *const char;
+    let nvp = (&nv.b[0]) as *const char;
     let pfx = if mode == 2 && top != 0 {
         "&".ptr() as *const char;
     } else {
@@ -188,7 +188,7 @@ fn multiset_eq(a: *const char, b: *const char) bool {
         if ch == 0 as char {
             break;
         }
-        let k = ch as u8 as usize;
+        let k = (ch as u8) as usize;
         ca.c[k] = ca.c[k] + 1;
         i = i + 1;
     }
@@ -198,7 +198,7 @@ fn multiset_eq(a: *const char, b: *const char) bool {
         if ch == 0 as char {
             break;
         }
-        let k = ch as u8 as usize;
+        let k = (ch as u8) as usize;
         cb.c[k] = cb.c[k] + 1;
         i = i + 1;
     }
@@ -225,7 +225,7 @@ struct Gen {
 }
 
 fn new_gen() Gen {
-    let p = unsafe stdlib::malloc(PROG_CAP as usize) as *mut char;
+    let p = (unsafe stdlib::malloc(PROG_CAP as usize)) as *mut char;
     let mut g = Gen { prog: p, at: 0, cat: 0, eat: 0, idc: 0, sc: 0, nbatch: 0 };
     g.at = ap(g.prog, 0, PROG_CAP, TR_PRE.ptr() as *const char);
     return g;
@@ -246,7 +246,7 @@ extend Gen {
         }
         let mut tb = Buf1024 {};
         let _ = ty(&mut tb.b[0], 0, 1024, sh, 0);
-        let tp = &tb.b[0] as *const char;
+        let tp = (&tb.b[0]) as *const char;
         let id0 = 48 + self.idc;
         self.idc = self.idc + 1;
         let mut id1 = 0;
@@ -265,10 +265,10 @@ extend Gen {
 
         let mut e0 = Buf2048 {};
         let _ = bld(&mut e0.b[0], 0, 2048, sh, 0, id0);
-        let e0p = &e0.b[0] as *const char;
+        let e0p = (&e0.b[0]) as *const char;
         let sc = self.sc;
         let mut fb = Buf8192 {};
-        let fbp = &fb.b[0] as *const char;
+        let fbp = (&fb.b[0]) as *const char;
         let mut cb = Buf256 {};
         let progp = self.prog;
 
@@ -447,7 +447,7 @@ fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *c
     if at == max_depth {
         return;
     }
-    let alen = unsafe cstring::strlen(alphabet) as i32;
+    let alen = (unsafe cstring::strlen(alphabet)) as i32;
     for i in 0..alen {
         unsafe sh[at as usize] = unsafe alphabet[i as usize];
         enum_shapes(g, sh, at + 1, max_depth, alphabet, op);

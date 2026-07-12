@@ -720,7 +720,11 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
             v.push(node_text(b, n.as_data.member.member));
         },
         NODE_CAST => {
-            v.push(b_expr_prec(b, n.as_data.cast.expression, PREC_CAST));
+            // Print the operand at POSTFIX, not CAST: prefix-op and chained-cast operands keep
+            // their parens, so the output parses identically under the pre-flip bootstrap
+            // grammar (`as` used to bind tighter than prefix ops). Relax to PREC_CAST once
+            // every bootstrap release contains the precedence flip.
+            v.push(b_expr_prec(b, n.as_data.cast.expression, PREC_POSTFIX));
             v.push(b.p.txt(" as "));
             v.push(b_type(b, n.as_data.cast.ty));
         },

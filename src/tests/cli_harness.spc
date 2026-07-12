@@ -55,7 +55,7 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
         return null;
     }
     unsafe stdio::rewind(f);
-    let buf = unsafe stdlib::malloc(sz as usize + 1) as *mut char;
+    let buf = (unsafe stdlib::malloc(sz as usize + 1)) as *mut char;
     if buf == null {
         return null;
     }

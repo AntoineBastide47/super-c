@@ -690,7 +690,7 @@ fn bundle(idx: *const i32, n: i32, label: str) {
     for i in 0..n {
         let bi = unsafe idx[i as usize];
         at = at + unsafe stdio::snprintf(
-            &mut src.b[at as usize] as *mut char,
+            (&mut src.b[at as usize]) as *mut char,
             (8192 - at) as usize,
             "fn s%d() i32 { %s }\n".ptr() as *const char,
             i,
@@ -701,7 +701,7 @@ fn bundle(idx: *const i32, n: i32, label: str) {
             sep = " + ";
         }
         cat = cat + unsafe stdio::snprintf(
-            &mut calls.b[cat as usize] as *mut char,
+            (&mut calls.b[cat as usize]) as *mut char,
             (2048 - cat) as usize,
             "%ss%d()".ptr() as *const char,
             sep.ptr() as *const char,
@@ -714,7 +714,7 @@ fn bundle(idx: *const i32, n: i32, label: str) {
         tail = &calls.b[0];
     }
     unsafe stdio::snprintf(
-        &mut src.b[at as usize] as *mut char,
+        (&mut src.b[at as usize]) as *mut char,
         (8192 - at) as usize,
         "fn main() i32 { return %s; }\n".ptr() as *const char,
         tail,
@@ -735,7 +735,7 @@ fn composition() {
             nv = nv + 1;
         }
     }
-    bundle(&av.b[0] as *const i32, nv, "bundle: all valid scenarios");
+    bundle((&av.b[0]) as *const i32, nv, "bundle: all valid scenarios");
 
     // Every invalid snippet, surrounded by all the valids -> reject.
     for j in 0..16 {
@@ -750,7 +750,7 @@ fn composition() {
             k = k + 1;
             let mut lbuf = Buf2048 {};
             unsafe stdio::snprintf(&mut lbuf.b[0], 2048, "bundle: valids + invalid #%d".ptr() as *const char, j);
-            bundle(&idx.b[0] as *const i32, k, buf_str(&lbuf.b[0]));
+            bundle((&idx.b[0]) as *const i32, k, buf_str(&lbuf.b[0]));
         }
     }
 
@@ -762,7 +762,7 @@ fn composition() {
             pair.b[1] = b;
             let mut lbuf = Buf2048 {};
             unsafe stdio::snprintf(&mut lbuf.b[0], 2048, "bundle pair (%d,%d)".ptr() as *const char, a, b);
-            bundle(&pair.b[0] as *const i32, 2, buf_str(&lbuf.b[0]));
+            bundle((&pair.b[0]) as *const i32, 2, buf_str(&lbuf.b[0]));
         }
     }
 }

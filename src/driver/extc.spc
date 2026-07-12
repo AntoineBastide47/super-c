@@ -53,7 +53,7 @@ fn ext_c_wrap(
         }
     }
     seen.push(String::from_cstr(rsl));
-    let mut basep = unsafe cstring::strrchr(rsl, '/' as i32) as *const char;
+    let mut basep = (unsafe cstring::strrchr(rsl, '/' as i32)) as *const char;
     if basep != null {
         basep = unsafe (basep + 1);
     } else {
@@ -115,7 +115,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
                 continue;
             }
             let vl = (at.str_span.end - at.str_span.start) as i32;
-            let v = unsafe (src + at.str_span.start as usize) as *const char;
+            let v = (unsafe (src + at.str_span.start as usize)) as *const char;
             if is_link {
                 let mut flag = Buf128 {};
                 if unsafe *v == '-' as char {
@@ -151,7 +151,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
                     continue;
                 }
             }
-            ext_c_wrap(root, keep, &mut seen, &mut nsrc as *mut u32, &rsl[0], err);
+            ext_c_wrap(root, keep, &mut seen, (&mut nsrc) as *mut u32, &rsl[0], err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
         let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
@@ -172,7 +172,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             if hl <= 2 {
                 continue;
             }
-            let hv = unsafe (src + (hs.start + 1) as usize) as *const char;
+            let hv = (unsafe (src + (hs.start + 1) as usize)) as *const char;
             let mut rel = PathBuf {};
             let mut habs = PathBuf {};
             ext_rel(file, hv, hl, &mut rel[0]);
@@ -183,7 +183,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             if dot == null {
                 continue;
             }
-            let dotoff = dot as usize - &rel[0] as usize;
+            let dotoff = dot as usize - (&rel[0]) as usize;
             if dotoff + 2 >= 4096 {
                 continue;
             }
@@ -194,7 +194,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             }
             let mut cabs = PathBuf {};
             if unsafe shim::sc_realpath(&rel[0], &mut cabs[0]) != null {
-                ext_c_wrap(root, keep, &mut seen, &mut nsrc as *mut u32, &cabs[0], err);
+                ext_c_wrap(root, keep, &mut seen, (&mut nsrc) as *mut u32, &cabs[0], err);
             }
         }
     }
