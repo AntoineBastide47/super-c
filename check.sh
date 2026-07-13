@@ -17,7 +17,14 @@ if ! ./super-c lint src std ffi; then
     exit 1
 fi
 
-# 3) Bootstrap from the latest release binary; any failure fails the check.
+# 3) Full test suite with the current compiler.
+printf 'check: tests\n'
+if ! make test; then
+    printf 'check: FAILED -- test failures above\n' >&2
+    exit 1
+fi
+
+# 4) Bootstrap from the latest release binary; any failure fails the check.
 printf 'check: bootstrap rebuild from the latest release\n'
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

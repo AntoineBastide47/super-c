@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -182,3 +183,62 @@ int sc_unlink(const char *path) {
 void *sc_opendir(const char *path) { return (void *)opendir(path); }
 void *sc_readdir(void *dir) { return (void *)readdir((DIR *)dir); }
 int sc_closedir(void *dir) { return closedir((DIR *)dir); }
+
+/* ---- build-system helpers (build.toml engine) ---- */
+
+/* File modification time in seconds; 0 when the file does not exist. */
+long long sc_mtime(const char *path) {
+#if defined(_WIN32)
+  struct _stat64 st;
+  if (_stat64(path, &st) != 0)
+    return 0;
+  return (long long)st.st_mtime;
+#else
+  struct stat st;
+  if (stat(path, &st) != 0)
+    return 0;
+  return (long long)st.st_mtime;
+#endif
+}
+
+/* Online core count; 4 when it cannot be determined. */
+int sc_ncpu(void) {
+#if defined(_WIN32)
+  const char *n = getenv("NUMBER_OF_PROCESSORS");
+  int v = n ? atoi(n) : 0;
+  return v > 0 ? v : 4;
+#elif defined(__APPLE__)
+  /* _SC_NPROCESSORS_ONLN is hidden by strict _POSIX_C_SOURCE on macOS, and <sys/sysctl.h> does not
+     compile under it (u_int); declare the stable libc entry point directly. */
+  extern int sysctlbyname(const char *, void *, size_t *, void *, size_t);
+  int v = 0;
+  size_t len = sizeof v;
+  if (sysctlbyname("hw.ncpu", &v, &len, NULL, 0) != 0 || v < 1)
+    return 4;
+  return v;
+#else
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n > 0 ? (int)n : 4;
+#endif
+}
+
+/* Spawn a shell command with its output already redirected by the caller; the handle is only
+   used to wait for completion (sc_pclose returns the exit CODE, not the raw wait status). */
+void *sc_popen(const char *cmd) {
+#if defined(_WIN32)
+  return (void *)_popen(cmd, "r");
+#else
+  return (void *)popen(cmd, "r");
+#endif
+}
+
+int sc_pclose(void *f) {
+#if defined(_WIN32)
+  return _pclose((FILE *)f);
+#else
+  int st = pclose((FILE *)f);
+  if (WIFEXITED(st))
+    return WEXITSTATUS(st);
+  return st == 0 ? 0 : 1;
+#endif
+}

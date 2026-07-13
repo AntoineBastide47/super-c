@@ -21,6 +21,8 @@ import driver::util as *;
 import driver::extc as *;
 import driver::test as *;
 import driver::emit as *;
+import build_system::manifest as bman;
+import build_system::build as bsys;
 
 fn run_file(
     path: str,
@@ -445,6 +447,11 @@ fn main(argv: Vector<str>) i32 {
     let mut fmt_extra = Vector::<usize>::new(); // argv indices of extra `fmt` paths
     let mut lint_mode = false; // `super-c lint [--fix] <path> [<path2> ...]`
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
+    let mut run_mode = false; // `super-c run <command>`: run a build.toml command
+    let mut clean_mode = false; // `super-c clean`: remove build.toml outputs
+    let mut profile = ""; // --profile=NAME for build/run (default: manifest default-profile)
+    let mut out_dir = ""; // --out-dir=PATH: override the manifest's out-dir
+    let mut jobs: u32 = 0; // --jobs=N for build/run (0 = manifest / core count)
     let mut lint_extra = Vector::<usize>::new(); // argv indices of extra `lint` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
     let mut bad = false;
@@ -459,6 +466,10 @@ fn main(argv: Vector<str>) i32 {
             fmt_mode = true; // `super-c fmt [--check] <path...| ->`
         } else if !build_mode && !fmt_mode && !lint_mode && file.len() == 0 && arg == "lint" {
             lint_mode = true;
+        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && file.len() == 0 && arg == "run" {
+            run_mode = true; // `super-c run <command>`: build.toml command
+        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && file.len() == 0 && arg == "clean" {
+            clean_mode = true; // `super-c clean`: drop build.toml outputs
         } else if fmt_mode && arg == "--check" {
             fmt_check = true;
         } else if arg == "-o" {
@@ -508,6 +519,17 @@ fn main(argv: Vector<str>) i32 {
             bootstrap_tags = true;
         } else if lint_mode && arg == "--fix" {
             lint_fix = true;
+        } else if (build_mode || run_mode) && arg.starts_with("--profile=") {
+            profile = arg[10..];
+        } else if (build_mode || run_mode || clean_mode) && arg.starts_with("--out-dir=") {
+            out_dir = arg[10..];
+        } else if (build_mode || run_mode) && arg.starts_with("--jobs=") {
+            let v = unsafe stdlib::atoi((&arg[7]) as *const char);
+            if v < 1 {
+                bad = true;
+            } else {
+                jobs = v as u32;
+            }
         } else if arg.starts_with("--") {
             bad = true;
         } else if file.len() == 0 {
@@ -533,12 +555,23 @@ fn main(argv: Vector<str>) i32 {
     if fmt_mode && (build_mode || topts.enabled) {
         bad = true;
     }
-    if build_mode && out_bin.len() == 0 {
+    if (run_mode || clean_mode) && (topts.enabled || out_bin.len() != 0) {
+        bad = true;
+    }
+    // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
+    let manifest_mode = build_mode && file.len() == 0 || run_mode || clean_mode;
+    if build_mode && file.len() != 0 && out_bin.len() == 0 {
         out_bin = "a.out";
     }
-    if bad || file.len() == 0 {
+    if run_mode && file.len() == 0 {
+        bad = true; // `run` needs a command name
+    }
+    if clean_mode && file.len() != 0 {
+        bad = true;
+    }
+    if bad || file.len() == 0 && !manifest_mode {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [-o <out>] <path/to/script>\n       super-c fmt [-w | --check] <path/to/script | ->\n".ptr() as *const char,
+            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D]\n       super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | ->\n".ptr() as *const char,
             stdio::stderr(),
         );
         return 1;
@@ -563,6 +596,49 @@ fn main(argv: Vector<str>) i32 {
         for k in 0..lint_extra.len() {
             if run_lint(argv[*lint_extra.at(k)], std_dir as *const char, ce_steps, ce_mem, target, lint_fix) != 0 {
                 rc = 1;
+            }
+        }
+        if std_dir != null {
+            unsafe stdlib::free(std_dir);
+        }
+        return rc;
+    }
+    if manifest_mode {
+        let mo = bman::load("build.toml");
+        let mut rc = 1;
+        if !mo.is_none() {
+            let mut man = mo.unwrap();
+            if out_dir.len() != 0 {
+                man.out_dir = String::from_str(out_dir);
+            }
+            if clean_mode {
+                rc = bsys::manifest_clean(&man);
+            } else if run_mode {
+                rc = bsys::manifest_run(
+                    &man,
+                    file,
+                    profile,
+                    jobs,
+                    std_dir as *const char,
+                    ce_steps,
+                    ce_mem,
+                    target,
+                    bootstrap_tags,
+                    lint,
+                );
+            } else {
+                rc = bsys::manifest_build(
+                    &man,
+                    profile,
+                    out_bin,
+                    jobs,
+                    std_dir as *const char,
+                    ce_steps,
+                    ce_mem,
+                    target,
+                    bootstrap_tags,
+                    lint,
+                );
             }
         }
         if std_dir != null {

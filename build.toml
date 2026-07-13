@@ -1,0 +1,41 @@
+# Super-C's own manifest: `./super-c build` rebuilds the compiler in place (incremental, parallel,
+# ccache-aware), `./super-c run <cmd>` replaces the Makefile targets. Profiles: debug/dev/release/bench
+# are built in; `--profile=NAME` selects one (default dev = sanitized daily driver).
+bin = "super-c"
+root = "src/main.spc"
+# no ldlibs needed: @c.link flags from the ffi bindings (-lm) flow in via the emitted __ldflags
+
+# Two-stage self-hosting bootstrap (Makefile's SELF-BUILD): stage 1 builds with --bootstrap-tags so a
+# pre-tag bootstrap binary still parses new @attributes; stage 2 rebuilds strictly with the result.
+# At the fixpoint stage 2's C is byte-identical, so its objects are all cache hits.
+[command.bootstrap]
+run = [
+    "./super-c build --bootstrap-tags -o stage1-super-c",
+    "./stage1-super-c build",
+    "rm -f stage1-super-c",
+]
+
+[command.test]
+needs-build = true
+env = { SUPERC = "./super-c" }
+run = ["./super-c --test src/run_tests.spc"]
+
+[command.bench]
+needs-build = true
+run = [
+    "rm -rf src/build",
+    "./super-c src/run_bench.spc",
+    "mkdir -p build",
+    "cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -g -fno-omit-frame-pointer $(find src/build -name '*.c') -o build/selfhost-bench -lm",
+    "build/selfhost-bench",
+]
+
+[command.profile]
+needs-build = true
+run = [
+    "rm -rf src/build",
+    "./super-c src/run_bench.spc",
+    "mkdir -p build",
+    "cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -g -fno-omit-frame-pointer $(find src/build -name '*.c') -o build/selfhost-bench -lm",
+    "samply record --rate 1000 build/selfhost-bench",
+]
