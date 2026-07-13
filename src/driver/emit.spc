@@ -325,10 +325,14 @@ fn platform_filter(p: &mut loader::Package, target: i32) void {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// --lint: unused non-pub functions/structs. Referenced-based v1: an item is live if any resolution in a
-// non-prelude module points at it (self-references from a function's own body do not count). `pub` is the
-// spc-consumer export layer and @c.export/@c.used/extern the C-consumer layer -- all exempt. Methods in
-// `extend X as Iface` blocks are conformance obligations, also exempt.
+// --lint: unused non-pub items (functions/structs/unions/enums/interfaces/type aliases). Reachability v2:
+// entries are top-level items + extend members (disjoint spans; extend HEADERS are deliberately not
+// entries, so `extend Foo` alone is not a use of Foo). An item is live iff a root reaches it through the
+// resolution graph -- dead cycles and dead-only callers are caught. Roots = everything exempt from
+// reporting: `pub` (spc export layer), @c.export/@c.used/@emit_macro/extern (C export layer), @test*,
+// main, bodyless fns, `extend X as Iface` conformance members, and every module outside the reported set
+// (per-file `lint` invocations treat other modules as live; the full-build lint reports all non-prelude
+// modules, so cross-module dead cycles are caught there).
 fn item_has_attr(a: *const Ast, owner: NodeId, kind: AttrKind) bool {
     for i in 0..unsafe (*a).attrs.len() {
         let at = unsafe (*a).attrs.at(i);
@@ -339,33 +343,99 @@ fn item_has_attr(a: *const Ast, owner: NodeId, kind: AttrKind) bool {
     return false;
 }
 
-fn lint_mark_used(p: &loader::Package, used: &mut Vector<bool>, starts: &Vector<usize>) void {
-    for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
-            continue;
-        }
-        let a = mod_ast_c(p, m as ModuleId);
-        for i in 0..unsafe (*a).resolutions.len() {
-            let d = unsafe (*a).resolutions[i];
-            if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
-                continue;
-            }
-            // a reference from inside the target function's own body is recursion, not usage
-            if d.module as usize == m {
-                let dn = unsafe (*a).at_const(d.node);
-                if dn.kind == NodeKind::NODE_FUNCTION {
-                    let usp = unsafe (*a).at_const(i as NodeId).span;
-                    if usp.start >= dn.span.start && usp.end <= dn.span.end {
-                        continue;
-                    }
-                }
-            }
-            let slot = starts[d.module as usize] + d.node as usize;
-            if slot < used.len() {
-                used.set(slot, true);
-            }
+struct LintEnt {
+    pub start: u32,
+    pub end: u32,
+    pub node: NodeId,
+    pub root: bool,
+}
+
+fn lint_ent_cmp(a: &LintEnt, b: &LintEnt) i32 {
+    if a.start < b.start {
+        return -1;
+    }
+    if a.start > b.start {
+        return 1;
+    }
+    return 0;
+}
+
+fn lint_edge_cmp(a: &u64, b: &u64) i32 {
+    if *a < *b {
+        return -1;
+    }
+    if *a > *b {
+        return 1;
+    }
+    return 0;
+}
+
+// Innermost entry containing byte `pos`, or -1 (extend headers, imports, inter-item trivia).
+fn lint_owner(ents: &Vector<LintEnt>, pos: u32) i64 {
+    let mut lo: usize = 0;
+    let mut hi = ents.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if ents[mid].start <= pos {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
     }
+    if lo == 0 {
+        return -1;
+    }
+    let e = ents[lo - 1];
+    if pos < e.end {
+        return lo as i64 - 1;
+    }
+    return -1;
+}
+
+fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut Vector<LintEnt>) void {
+    let a = mod_ast_c(p, m as ModuleId);
+    // items of a module reported this run are candidates; everything else roots the graph
+    let reported = if only_mod >= 0 {
+        m == only_mod as usize;
+    } else {
+        !p.modules[m].prelude;
+    };
+    let src = p.modules[m].source.as_str();
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+    for i in 0..items.len {
+        let iid = unsafe (*a).list(items)[i as usize];
+        let it = unsafe (*a).at_const(iid);
+        if it.kind == NodeKind::NODE_IMPORT {
+            continue;
+        }
+        if it.kind == NodeKind::NODE_EXTEND {
+            let in_iface = it.as_data.extend_def.interface_type != NODE_NONE;
+            let ms = it.as_data.extend_def.items;
+            for j in 0..ms.len {
+                let mid = unsafe (*a).list(ms)[j as usize];
+                let msp = unsafe (*a).at_const(mid).span;
+                ents.push(
+                    LintEnt {
+                        start: msp.start,
+                        end: msp.end,
+                        node: mid,
+                        root: !(reported && lint_item_candidate(a, mid, in_iface)),
+                    },
+                );
+            }
+            continue;
+        }
+        let mut root = !(reported && lint_item_candidate(a, iid, false));
+        // `main` in the root module is the program entry: never reported, always a root
+        if !root && m == 0 && it.kind == NodeKind::NODE_FUNCTION {
+            let nsp = unsafe (*a).at_const(it.as_data.function.name).as_data.name.text;
+            if diag::span_str(src, nsp.start, nsp.end) == "main" {
+                root = true;
+            }
+        }
+        ents.push(LintEnt { start: it.span.start, end: it.span.end, node: iid, root: root });
+    }
+    ents.sort_by(lint_ent_cmp);
 }
 
 fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool) bool {
@@ -381,8 +451,22 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool) bool {
             AttrKind::ATTR_TEST,
         ) || item_has_attr(a, iid, AttrKind::ATTR_TEST_INIT) || item_has_attr(a, iid, AttrKind::ATTR_TEST_FREE));
     }
-    if it.kind == NodeKind::NODE_STRUCT {
+    if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
         return !it.as_data.aggregate.is_public && !item_has_attr(a, iid, AttrKind::ATTR_EXPORT) && !item_has_attr(
+            a,
+            iid,
+            AttrKind::ATTR_USED,
+        ) && !item_has_attr(a, iid, AttrKind::ATTR_EMIT_MACRO);
+    }
+    if it.kind == NodeKind::NODE_INTERFACE {
+        return !it.as_data.interface_def.is_public && !item_has_attr(a, iid, AttrKind::ATTR_EXPORT) && !item_has_attr(
+            a,
+            iid,
+            AttrKind::ATTR_USED,
+        );
+    }
+    if it.kind == NodeKind::NODE_TYPE_ALIAS {
+        return !it.as_data.type_alias.is_public && !item_has_attr(a, iid, AttrKind::ATTR_EXPORT) && !item_has_attr(
             a,
             iid,
             AttrKind::ATTR_USED,
@@ -401,27 +485,40 @@ fn lint_report_item(
 ) void {
     let it = unsafe (*a).at_const(iid);
     let src = p.modules[m as usize].source.as_str();
+    let mut what = "function";
+    let mut nid = NODE_NONE;
     if it.kind == NodeKind::NODE_FUNCTION {
-        let nsp = unsafe (*a).at_const(it.as_data.function.name).as_data.name.text;
-        if root_mod && diag::span_str(src, nsp.start, nsp.end) == "main" {
-            return;
-        }
-        errs.warn(
-            nsp.start,
-            nsp.end - nsp.start,
-            format("unused function '{}'", diag::span_str(src, nsp.start, nsp.end)),
-        );
+        nid = it.as_data.function.name;
+    } else if it.kind == NodeKind::NODE_STRUCT {
+        what = if it.as_data.aggregate.is_union {
+            "union";
+        } else {
+            "struct";
+        };
+        nid = it.as_data.aggregate.name;
+    } else if it.kind == NodeKind::NODE_ENUM {
+        what = "enum";
+        nid = it.as_data.aggregate.name;
+    } else if it.kind == NodeKind::NODE_INTERFACE {
+        what = "interface";
+        nid = it.as_data.interface_def.name;
     } else {
-        let nsp = unsafe (*a).at_const(it.as_data.aggregate.name).as_data.name.text;
-        errs.warn(nsp.start, nsp.end - nsp.start, format("unused struct '{}'", diag::span_str(src, nsp.start, nsp.end)));
+        what = "type alias";
+        nid = it.as_data.type_alias.name;
     }
+    let nsp = unsafe (*a).at_const(nid).as_data.name.text;
+    if root_mod && it.kind == NodeKind::NODE_FUNCTION && diag::span_str(src, nsp.start, nsp.end) == "main" {
+        return;
+    }
+    errs.warn(nsp.start, nsp.end - nsp.start, format("unused {} '{}'", what, diag::span_str(src, nsp.start, nsp.end)));
 }
 
 fn lint_unused_items(p: &mut loader::Package, only_mod: i32) void {
-    // one flat used-bitset over all modules' node ids
+    // one flat reachable-bitset over all modules' node ids
+    let nm = p.modules.len();
     let mut starts = Vector::<usize>::new();
     let mut total: usize = 0;
-    for m in 0..p.modules.len() {
+    for m in 0..nm {
         starts.push(total);
         if p.modules[m].has_ast {
             total = total + p.modules[m].ast.nodes.len();
@@ -432,7 +529,89 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) void {
     for i in 0..total {
         used.push(false);
     }
-    lint_mark_used(p, &mut used, &starts);
+    // Prelude modules only participate when the linted module IS prelude (std lint invocation): the
+    // prelude never references user code, and std cross-references must count when linting std itself.
+    let inc_prelude = only_mod >= 0 && p.modules[only_mod as usize].prelude;
+    let mut ents = Vector::<Vector<LintEnt>>::new();
+    for m in 0..nm {
+        let mut e = Vector::<LintEnt>::new();
+        if p.modules[m].has_ast && (!p.modules[m].prelude || inc_prelude) {
+            lint_build_entries(p, m, only_mod, &mut e);
+        }
+        ents.push(e);
+    }
+    // seed roots, then edge list (src item -> referenced item) from every module's resolution table
+    let mut queue = Vector::<u32>::new();
+    for m in 0..nm {
+        for k in 0..ents[m].len() {
+            if ents[m][k].root {
+                let slot = starts[m] + ents[m][k].node as usize;
+                if !used[slot] {
+                    used.set(slot, true);
+                    queue.push(slot as u32);
+                }
+            }
+        }
+    }
+    let mut edges = Vector::<u64>::new();
+    for m in 0..nm {
+        if ents[m].len() == 0 {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        for i in 0..unsafe (*a).resolutions.len() {
+            let d = unsafe (*a).resolutions[i];
+            if d.node == NODE_NONE || d.module as usize >= nm {
+                continue;
+            }
+            let dm = d.module as usize;
+            if ents[dm].len() == 0 {
+                continue;
+            }
+            let si = lint_owner(ents.at(m), unsafe (*a).at_const(i as NodeId).span.start);
+            if si < 0 {
+                continue;
+            }
+            let ta = mod_ast_c(p, d.module);
+            let di = lint_owner(ents.at(dm), unsafe (*ta).at_const(d.node).span.start);
+            if di < 0 {
+                continue;
+            }
+            let ss = (starts[m] + ents[m][si as usize].node as usize) as u64;
+            let ds = (starts[dm] + ents[dm][di as usize].node as usize) as u64;
+            if ss != ds {
+                edges.push(ss << 32 | ds);
+            }
+        }
+    }
+    edges.sort_by(lint_edge_cmp);
+    let mut qi: usize = 0;
+    while qi < queue.len() {
+        let sslot = queue[qi] as u64;
+        qi = qi + 1;
+        let key = sslot << 32;
+        let mut lo: usize = 0;
+        let mut hi = edges.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if edges[mid] < key {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        while lo < edges.len() && edges[lo] >> 32 == sslot {
+            let dst = (edges[lo] & 0xFFFFFFFF) as usize;
+            if !used[dst] {
+                used.set(dst, true);
+                queue.push(dst as u32);
+            }
+            lo = lo + 1;
+        }
+    }
+    edges.free();
+    queue.free();
+    ents.free();
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
             continue;
