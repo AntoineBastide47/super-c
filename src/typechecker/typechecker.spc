@@ -64,10 +64,6 @@ pub struct LoopEntry {
     pub saw_bare: bool,
 }
 
-pub struct ClosScope {
-    pub node: NodeId,
-} // (clos_stack element wrapper not needed; use [NodeId;8])
-
 // A captured snapshot of the flow-sensitive analysis state.
 pub struct FlowState {
     pub moved: [NodeId; 256],
@@ -121,6 +117,8 @@ pub struct TypeChecker {
     pub mret_n: u8,
     pub mret_total: u32,
     pub unsafe_depth: u32,
+    pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
+    pub lint: bool,
     pub loop_stack: [LoopEntry; 32],
     pub nloops: u32,
     pub loop_floor: u32,
@@ -401,6 +399,8 @@ extend TypeChecker {
             mret_n: 0,
             mret_total: 0,
             unsafe_depth: 0,
+            unsafe_used: 0,
+            lint: false,
             nloops: 0,
             loop_floor: 0,
             errors: diag::Errors::new(),
@@ -674,7 +674,7 @@ extend TypeChecker {
         return n.kind == NodeKind::NODE_LITERAL && n.as_data.literal.token_type == TokenType::IntegerLiteral;
     }
     // magnitude of an integer-literal node; ok=false on u64 overflow
-    fn tc_literal_u64(self: &Self, id: NodeId) BoxOf {
+    fn tc_literal_u64(self: &Self, _id: NodeId) BoxOf {
         // reuse BoxOf as {ok, inner=mag(as TypeId? no)} -> use a dedicated struct
         return BoxOf { ok: false, inner: 0, global_alloc: false };
     }
@@ -746,6 +746,13 @@ extend TypeChecker {
             return cp;
         }
         return 0;
+    }
+
+    // An operation that requires 'unsafe': counts against the innermost active marker (for the
+    // unnecessary-unsafe lint) and reports whether the requirement is unmet.
+    fn tc_needs_unsafe(self: &mut Self) bool {
+        self.unsafe_used = self.unsafe_used + 1;
+        return self.unsafe_depth == 0;
     }
 
     // ---- error / misc ----
@@ -870,23 +877,12 @@ extend TypeChecker {
                 if cap > at {
                     room = cap - at;
                 }
-                let w = unsafe stdio::snprintf(
-                    (buf + at) as *mut char,
-                    room,
-                    "%s%s".ptr() as *const char,
-                    sep,
-                    &argb[0],
-                );
+                let w = unsafe stdio::snprintf(buf + at, room, "%s%s".ptr() as *const char, sep, &argb[0]);
                 at = at + w as usize;
                 i = i + 1;
             }
             if at < cap {
-                unsafe stdio::snprintf(
-                    (buf + at) as *mut char,
-                    cap - at,
-                    "%s".ptr() as *const char,
-                    ">".ptr() as *const char,
-                );
+                unsafe stdio::snprintf(buf + at, cap - at, "%s".ptr() as *const char, ">".ptr() as *const char);
             }
         } else if ty.kind == TypeKind::TYPE_FUNCTION {
             unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "fn".ptr() as *const char);
@@ -2341,7 +2337,7 @@ extend TypeChecker {
             }
             i = i + 1;
         }
-        let mself = ((unsafe self) as *const TypeChecker) as *mut TypeChecker;
+        let mself = (self as *const TypeChecker) as *mut TypeChecker;
         unsafe (*mself).encl_ext_memo.insert(key, res);
         return res;
     }
@@ -2370,7 +2366,7 @@ extend TypeChecker {
             }
             i = i + 1;
         }
-        let mself = ((unsafe self) as *const TypeChecker) as *mut TypeChecker;
+        let mself = (self as *const TypeChecker) as *mut TypeChecker;
         unsafe (*mself).encl_trait_memo.insert(key, res);
         return res;
     }
@@ -4903,13 +4899,20 @@ extend TypeChecker {
         if op == TokenType::Ampersand {
             self.addr_ctx = true;
         }
+        let outer_unsafe_used = self.unsafe_used;
         if op == TokenType::Unsafe {
             self.unsafe_depth = self.unsafe_depth + 1;
+            self.unsafe_used = 0;
         }
         let bm = self.borrow_mark();
         let opnd = self.check_expr(operand);
         if op == TokenType::Unsafe {
             self.unsafe_depth = self.unsafe_depth - 1;
+            if self.lint && self.unsafe_used == 0 {
+                let usp = unsafe (*a).at_const(id).span;
+                self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
+            }
+            self.unsafe_used = outer_unsafe_used;
         }
         let sp = unsafe (*a).at_const(id).span;
         if op == TokenType::Minus {
@@ -4936,7 +4939,7 @@ extend TypeChecker {
             }
             let ot = *self.type_at(opnd);
             if ot.kind == TypeKind::TYPE_POINTER || ot.kind == TypeKind::TYPE_REFERENCE {
-                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 {
+                if ot.kind == TypeKind::TYPE_POINTER && self.tc_needs_unsafe() {
                     self.err_unsafe(sp, "dereferencing a raw pointer");
                 }
                 if !self.is_place(operand) {
@@ -5151,7 +5154,7 @@ extend TypeChecker {
         }
         unsafe *handled = true;
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        if self.unsafe_depth == 0 {
+        if self.tc_needs_unsafe() {
             self.err_unsafe(sp, "raw pointer arithmetic");
         }
         let minus = unsafe (*self.cur_ast()).at_const(id).as_data.binary.op == TokenType::Minus;
@@ -6023,7 +6026,7 @@ extend TypeChecker {
         let fa = self.mod_ast(fmod);
         let fk = unsafe (*fa).at_const(fdecl).kind;
         let named = fk == NodeKind::NODE_FUNCTION;
-        if named && unsafe (*fa).at_const(fdecl).as_data.function.is_extern && self.unsafe_depth == 0 {
+        if named && unsafe (*fa).at_const(fdecl).as_data.function.is_extern && self.tc_needs_unsafe() {
             self.err_unsafe(sp, "calling an extern \"C\" function");
         }
         let clos = fk == NodeKind::NODE_CLOSURE;
@@ -6065,12 +6068,11 @@ extend TypeChecker {
         }
         // receiver move/borrow bookkeeping for methods
         if pck == NodeKind::NODE_MEMBER && skip == 1 && unsafe (*a).at_const(callee_id).as_data.member.object != NODE_NONE {
-            self.check_call_receiver(id, callee_id, fmod, params, returns);
+            self.check_call_receiver(callee_id, fmod, params, returns);
         }
         // generic-instance receiver substitution + generic call inference
         let ret = self.check_call_finish(
             id,
-            callee,
             callee_id,
             fmod,
             fdecl,
@@ -6086,14 +6088,7 @@ extend TypeChecker {
         return ret;
     }
 
-    fn check_call_receiver(
-        self: &mut Self,
-        id: NodeId,
-        callee_id: NodeId,
-        fmod: ModuleId,
-        params: NodeList,
-        returns: NodeList,
-    ) void {
+    fn check_call_receiver(self: &mut Self, callee_id: NodeId, fmod: ModuleId, params: NodeList, returns: NodeList) void {
         let a = self.cur_ast();
         let mem = unsafe (*a).at_const(callee_id).as_data.member.member;
         let recv = unsafe (*a).at_const(callee_id).as_data.member.object;
@@ -6180,7 +6175,6 @@ extend TypeChecker {
     fn check_call_finish(
         self: &mut Self,
         id: NodeId,
-        callee: TypeId,
         callee_id: NodeId,
         fmod: ModuleId,
         fdecl: NodeId,
@@ -6822,7 +6816,7 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: bmod, node: fhit });
                 if unsafe (*self.mod_ast(bmod)).at_const(fhit).kind == NodeKind::NODE_FIELD {
                     self.check_field_visibility(bmod, fhit, bdecl, name);
-                    if self.unsafe_depth == 0 && self.through_raw_pointer(obj) {
+                    if self.tc_needs_unsafe() && self.through_raw_pointer(obj) {
                         self.err_unsafe(unsafe (*a).at_const(id).span, "accessing a field through a raw pointer");
                     }
                 }
@@ -7802,7 +7796,7 @@ extend TypeChecker {
             let mut selem: TypeId = TYPE_NONE;
             let mut user_result = TYPE_NONE;
             if ot.kind == TypeKind::TYPE_ARRAY || ot.kind == TypeKind::TYPE_POINTER {
-                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 {
+                if ot.kind == TypeKind::TYPE_POINTER && self.tc_needs_unsafe() {
                     self.err_unsafe(unsafe (*a).at_const(obj_n).span, "slicing a raw pointer");
                 }
                 elem = ot.as_data.elem;
@@ -7889,7 +7883,7 @@ extend TypeChecker {
         if obj != TYPE_NONE {
             let mut selem: TypeId = TYPE_NONE;
             if ot.kind == TypeKind::TYPE_ARRAY || ot.kind == TypeKind::TYPE_POINTER {
-                if ot.kind == TypeKind::TYPE_POINTER && self.unsafe_depth == 0 {
+                if ot.kind == TypeKind::TYPE_POINTER && self.tc_needs_unsafe() {
                     self.err_unsafe(unsafe (*a).at_const(obj_n).span, "indexing a raw pointer");
                 }
                 result = ot.as_data.elem;
@@ -8109,6 +8103,16 @@ extend TypeChecker {
             NODE_CAST => {
                 let src = self.check_expr(unsafe (*a).at_const(id).as_data.cast.expression);
                 let dst = self.resolve_type(unsafe (*a).at_const(id).as_data.cast.ty);
+                if self.lint && src != TYPE_NONE && src == dst && unsafe (*a).at_const(
+                    unsafe (*a).at_const(id).as_data.cast.expression,
+                ).kind != NodeKind::NODE_LITERAL {
+                    let csp = unsafe (*a).at_const(id).span;
+                    self.errors.warn(
+                        csp.start,
+                        csp.end - csp.start,
+                        format("unnecessary cast: the expression already has this type"),
+                    );
+                }
                 if src != TYPE_NONE && dst != TYPE_NONE && src != dst {
                     let sk = self.type_at(src).kind;
                     let dk = self.type_at(dst).kind;

@@ -8,6 +8,9 @@ pub struct Errors {
     pub notes: Vector<String>,
     pub starts: Vector<u32>,
     pub lens: Vector<u32>,
+    pub warns: Vector<String>, // non-fatal lint diagnostics (rendered like errors, never fail the build)
+    pub warn_starts: Vector<u32>,
+    pub warn_lens: Vector<u32>,
 }
 
 pub fn oom() void {
@@ -33,11 +36,29 @@ extend Errors {
             notes: Vector::<String>::new(),
             starts: Vector::<u32>::new(),
             lens: Vector::<u32>::new(),
+            warns: Vector::<String>::new(),
+            warn_starts: Vector::<u32>::new(),
+            warn_lens: Vector::<u32>::new(),
         };
     }
 
     pub fn has_errors(self: &Self) bool {
         return self.errors.len() != 0;
+    }
+
+    pub fn has_warnings(self: &Self) bool {
+        return self.warns.len() != 0;
+    }
+
+    // Record a non-fatal warning at [at, at+len). Takes ownership of `msg`.
+    @c.cold
+    pub fn warn(self: &mut Self, at: u32, len: u32, msg: String) void {
+        if self.warns.len() >= ERRORS_MAX {
+            return;
+        }
+        self.warns.push(msg);
+        self.warn_starts.push(at);
+        self.warn_lens.push(len);
     }
 
     // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
@@ -66,7 +87,7 @@ extend Errors {
 
     @c.cold
     pub fn finalize(self: &mut Self, source: str, file: str) void {
-        if self.errors.len() == 0 {
+        if self.errors.len() == 0 && self.warns.len() == 0 {
             return;
         }
         let len = source.len();
@@ -98,9 +119,25 @@ extend Errors {
                 self.lens[k],
                 file,
                 self.notes.at(k),
+                "error",
             );
             self.errors.set(k, block);
         }
+        let mut empty_note = String::new();
+        for k in 0..self.warns.len() {
+            let block = render(
+                self.warns.at(k),
+                source,
+                &line_starts,
+                self.warn_starts[k],
+                self.warn_lens[k],
+                file,
+                &empty_note,
+                "warning",
+            );
+            self.warns.set(k, block);
+        }
+        empty_note.free();
         // Order-preserving dedup of identical rendered blocks (the same error can be emitted from more
         // than one pass). Cold path: clone survivors into a fresh vector, drop the rest.
         let mut uniq = Vector::<String>::new();
@@ -121,6 +158,9 @@ extend Errors {
 
     @c.cold
     pub fn log(self: &Self) void {
+        for i in 0..self.warns.len() {
+            self.warns[i].eprintln();
+        }
         for i in 0..self.errors.len() {
             self.errors[i].eprintln();
         }
@@ -133,6 +173,9 @@ extend Errors as Free {
         self.notes.free();
         self.starts.free();
         self.lens.free();
+        self.warns.free();
+        self.warn_starts.free();
+        self.warn_lens.free();
     }
 }
 
@@ -156,7 +199,16 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
 // Render one diagnostic into a pretty source-annotated block: the message, a `--> file:line:col`
 // location, the offending source line (windowed to 120 cols), a caret run under the span, and notes.
 @c.cold
-fn render(msg: &String, source: str, line_starts: &Vector<u32>, mut off: u32, span: u32, file: str, notes: &String) String {
+fn render(
+    msg: &String,
+    source: str,
+    line_starts: &Vector<u32>,
+    mut off: u32,
+    span: u32,
+    file: str,
+    notes: &String,
+    kind: str,
+) String {
     let src_len = source.len();
     if off as usize > src_len {
         off = src_len as u32;
@@ -195,7 +247,8 @@ fn render(msg: &String, source: str, line_starts: &Vector<u32>, mut off: u32, sp
         }
     }
     let mut out = String::new();
-    out.push_str("error: ");
+    out.push_str(kind);
+    out.push_str(": ");
     out.push_string(msg);
     out.push_str("\n--> ");
     if file.len() != 0 {

@@ -112,7 +112,7 @@ fn fnv_name(name: str) u64 {
     let p = name.ptr();
     let mut h: u64 = 1469598103934665603u64;
     for i in 0..name.len() {
-        h = h ^ (unsafe p[i as usize]) as u64;
+        h = h ^ (unsafe p[i]) as u64;
         h = h * 1099511628211u64;
     }
     return h;
@@ -634,7 +634,7 @@ extend Package {
                     }
                     if ok && ip {
                         let sp = ast.at_const(nn).as_data.name.text;
-                        self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, it_type, iid);
+                        self.lk_emit(m, srcp, sp.start, sp.end, it_type, iid);
                     }
                 }
             } else {
@@ -667,7 +667,7 @@ extend Package {
                 }
                 if consider && is_pub {
                     let sp = ast.at_const(name_node).as_data.name.text;
-                    self.lk_emit(m, srcp, sp.start as u32, sp.end as u32, is_type, nid);
+                    self.lk_emit(m, srcp, sp.start, sp.end, is_type, nid);
                 }
             }
         }
@@ -1042,7 +1042,7 @@ fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
 // True when `t` mentions a function VALUE type anywhere (a TYPE_FUNCTION, possibly nested): its C symbol
 // (and env struct) is local to the module defining it, so a use over it must stay in the calling module.
 fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
-    let y = unsafe *pkg_ast_c(p, mid).type_at(t);
+    let y = *pkg_ast_c(p, mid).type_at(t);
     if y.kind == TypeKind::TYPE_FUNCTION {
         return true;
     }
@@ -1075,7 +1075,7 @@ fn subst_reintern_type(
     if t == TYPE_NONE {
         return TYPE_NONE;
     }
-    let ty = unsafe *pkg_ast_c(p, om).type_at(t);
+    let ty = *pkg_ast_c(p, om).type_at(t);
     if ty.kind == TypeKind::TYPE_GENERIC {
         for i in 0..nargs {
             if ty.module == gmod && ty.as_data.decl == unsafe gids[i as usize] {
@@ -1129,10 +1129,10 @@ fn reintern_nested_type(
     }
     let before = unsafe (*pkg_ast_c(p, dm)).instances.len();
     let mut st = subst_reintern_type(p, dm, om, t, gmod, gids, args, nargs);
-    let mut y = unsafe *pkg_ast_c(p, dm).type_at(st);
+    let mut y = *pkg_ast_c(p, dm).type_at(st);
     while y.kind == TypeKind::TYPE_ARRAY {
         st = y.as_data.elem;
-        y = unsafe *pkg_ast_c(p, dm).type_at(st);
+        y = *pkg_ast_c(p, dm).type_at(st);
     }
     if y.kind != TypeKind::TYPE_INSTANCE {
         return;
@@ -1317,7 +1317,7 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
     let n = unsafe (*s).instances.len();
     let np = p.modules.len();
     for i in start..n {
-        let it = unsafe *s.instance(i as u32);
+        let it = *s.instance(i as u32);
         let mut concrete = true;
         for k in 0..it.n {
             if !unsafe (*s).type_concrete(it.args[k as usize]) {
@@ -1435,7 +1435,7 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             continue;
         }
         let recv_inst = unsafe (*s).type_at(rty).as_data.inst;
-        let recv = unsafe *s.instance(recv_inst);
+        let recv = *s.instance(recv_inst);
         let home = p.instance_home_mid(sm, &recv);
         let mut dm = om;
         if home as usize < np {
@@ -1744,7 +1744,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) void {
         if l < 5 {
             continue;
         }
-        if unsafe cstring::strcmp((nm + (l - 4)) as *const char, ".spc".ptr() as *const char) != 0 {
+        if unsafe cstring::strcmp(nm + (l - 4), ".spc".ptr() as *const char) != 0 {
             continue;
         }
         // Skip subdirectories named "*.spc" straight from readdir's d_type; only DT_UNKNOWN needs a stat.

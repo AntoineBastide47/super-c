@@ -675,7 +675,7 @@ extend Codegen {
         if cap > off {
             rem = cap - off;
         }
-        return at + render_ident_src(self.mod_src(owner), s, (unsafe (buf + off)) as *mut char, rem);
+        return at + render_ident_src(self.mod_src(owner), s, unsafe (buf + off), rem);
     }
     fn render_iface_stem(self: &Self, m: ModuleId, iface: NodeId, out: *mut char, cap: usize) usize {
         return self.render_qualified(m, unsafe (*self.mod_ast(m)).at_const(iface).as_data.interface_def.name, out, cap);
@@ -901,7 +901,7 @@ extend Codegen {
         let y = *self.type_at(arg);
         if y.kind == TypeKind::TYPE_GENERIC {
             let at = bappend(out, cap, 0, "_SCM_".ptr() as *const char);
-            self.render_macro_param(y.module, y.as_data.decl, (unsafe (out + at)) as *mut char, cap - at);
+            self.render_macro_param(y.module, y.as_data.decl, unsafe (out + at), cap - at);
             return;
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
@@ -923,7 +923,7 @@ extend Codegen {
             if cap > at {
                 rem = cap - at;
             }
-            self.macro_arg_token(y.as_data.elem, (unsafe (out + at)) as *mut char, rem);
+            self.macro_arg_token(y.as_data.elem, unsafe (out + at), rem);
             return;
         }
         self.mangle_type(arg, out, cap);
@@ -2310,7 +2310,7 @@ fn ref_derefs(d0: i32) *const char {
         d = 7;
     }
     // C: `s + sizeof s - d` over "*******" (sizeof 8, incl NUL) -> (d-1) asterisks; ref_derefs(1) == "".
-    return (unsafe ("*******".ptr() as *const char + (8 - d) as usize)) as *const char;
+    return (unsafe ("*******".ptr() + (8 - d) as usize)) as *const char;
 }
 fn c_op(t: TokenType) *const char {
     if t == TokenType::Plus {
@@ -2509,7 +2509,7 @@ extend Codegen {
                     self.buf.format_into("{}", v);
                 }
             } else if k == 'o' as char || k == 'O' as char {
-                self.buf.format_into("0{}", diag::cstr((unsafe (bufp + 2)) as *const char));
+                self.buf.format_into("0{}", diag::cstr(unsafe (bufp + 2)));
             } else if k == 'x' as char || k == 'X' as char {
                 self.emit_cstr(bufp);
             } else {
@@ -2517,8 +2517,8 @@ extend Codegen {
                 while z + 1 < n && buf[z] == '0' as char {
                     z = z + 1;
                 }
-                self.emit_cstr((unsafe (bufp + z)) as *const char);
-                if eb == BuiltinType::BT_COUNT && unsafe strtoull((unsafe (bufp + z)) as *const char, null, 10) > 0x7FFFFFFFFFFFFFFFu64 {
+                self.emit_cstr(unsafe (bufp + z));
+                if eb == BuiltinType::BT_COUNT && unsafe strtoull(unsafe (bufp + z), null, 10) > 0x7FFFFFFFFFFFFFFFu64 {
                     self.emit_str("ull");
                 }
             }
@@ -2564,7 +2564,7 @@ extend Codegen {
             if src[i] != b'\\' {
                 if is_char && src[i] >= 0x80u8 {
                     let cp = (src[i] & 0x1Fu8) as u32 << 6 | (src[i + 1] & 0x3Fu8) as u32;
-                    self.emit_octal_escape((cp & 0xFFu32) as u32);
+                    self.emit_octal_escape(cp & 0xFFu32);
                     i = i + 2;
                     continue;
                 }
@@ -2586,7 +2586,7 @@ extend Codegen {
             } else if e == b'x' {
                 let v = (hex_val(src[i]) << 4 | hex_val(src[i + 1])) as u32;
                 i = i + 2;
-                self.emit_octal_escape((v & 0xFFu32) as u32);
+                self.emit_octal_escape(v & 0xFFu32);
             } else if e == b'u' {
                 if i < end && src[i] == b'{' {
                     i = i + 1;
@@ -2600,12 +2600,12 @@ extend Codegen {
                     i = i + 1;
                 }
                 if is_char {
-                    self.emit_octal_escape((cp & 0xFFu32) as u32);
+                    self.emit_octal_escape(cp & 0xFFu32);
                 } else {
                     let mut b = Bytes4 {};
                     let bn = utf8_encode(cp, (&mut b[0]) as *mut u8);
                     for kk in 0..bn {
-                        self.emit_octal_escape((b[kk as usize] as u32) as u32);
+                        self.emit_octal_escape(b[kk as usize] as u32);
                     }
                 }
             } else {
@@ -2627,7 +2627,7 @@ extend Codegen {
             } else if b == b'\n' {
                 self.emit_str("\\n");
             } else if b < 0x20u8 {
-                self.emit_octal_escape((b as u32) as u32);
+                self.emit_octal_escape(b as u32);
             } else {
                 self.buf.push_byte((b as i32) as u8);
             }
@@ -8108,12 +8108,12 @@ fn bappend_bytes(out: *mut char, cap: usize, at: usize, text: *const char, n: us
         let mut copied = n;
         if copied > room {
             copied = room;
-            unsafe CG_TRUNCATED = true;
+            CG_TRUNCATED = true;
         }
         unsafe cstring::memcpy(out + at, text, copied);
         unsafe out[at + copied] = 0 as char;
     } else {
-        unsafe CG_TRUNCATED = true;
+        CG_TRUNCATED = true;
     }
     return at + n;
 }
@@ -8413,7 +8413,7 @@ extend Codegen {
             let p = unsafe (*self.cur_ast()).at_const(pid).as_data.parameter;
             let mut nm = Buf128 {};
             self.render_ident(unsafe (*self.cur_ast()).at_const(p.name).as_data.name.text, &mut nm[0], 128);
-            if unsafe nm[0] == '_' as char && unsafe nm[1] == 0 as char {
+            if nm[0] == '_' as char && nm[1] == 0 as char {
                 unsafe stdio::snprintf(&mut nm[0], 128, "__sc_u%u".ptr() as *const char, pid);
             }
             let pty = unsafe (*self.cur_ast()).type_of(pid);
@@ -8463,7 +8463,7 @@ extend Codegen {
                 k = bappend(out, cap, k, builtin_name(bb as BuiltinType));
             } else {
                 let ts = self.name_span_in(target.module, self.cg_decl_name_node(target.module, target.node));
-                k = k + render_ident_src(self.mod_src(target.module), ts, (unsafe (out + k)) as *mut char, cap - k);
+                k = k + render_ident_src(self.mod_src(target.module), ts, unsafe (out + k), cap - k);
             }
             if k + 2 < cap {
                 unsafe out[k] = '_' as char;
@@ -8471,13 +8471,13 @@ extend Codegen {
                 k = k + 2;
             }
         }
-        k = k + self.render_ident(fname, (unsafe (out + k)) as *mut char, cap - k);
+        k = k + self.render_ident(fname, unsafe (out + k), cap - k);
         let params = unsafe (*self.cur_ast()).at_const(fn_id).as_data.function.params;
         let lit = self.cg_conv_lit(self.cur_module(), fname);
         if lit != null && target.node != NODE_NONE && params.len != 0 {
             let p0 = unsafe (*self.cur_ast()).list(params)[0];
             let p0ty = unsafe (*self.cur_ast()).type_of(unsafe (*self.cur_ast()).at_const(p0).as_data.parameter.ty);
-            self.cg_conv_suffix(target, lit, p0ty, (unsafe (out + k)) as *mut char, cap - k);
+            self.cg_conv_suffix(target, lit, p0ty, unsafe (out + k), cap - k);
         }
     }
 
@@ -8749,7 +8749,7 @@ extend Codegen {
         }
         let mut decl = Buf1320 {};
         let mut at: usize = 0;
-        unsafe decl[0] = 0 as char;
+        decl[0] = 0 as char;
         if extern_q {
             at = bappend(&mut decl[0], 1320, at, "(".ptr() as *const char);
         }
@@ -8780,7 +8780,7 @@ extend Codegen {
             self.emit_str("inline ");
         }
         let mut g = Buf256 {};
-        unsafe g[0] = 0 as char;
+        g[0] = 0 as char;
         let mut gn: usize = 0;
         if self.cg_attr(fmod, fn_id, AttrKind::ATTR_ALWAYS_INLINE) != null {
             gn = addg(&mut g[0], 256, gn, "always_inline".ptr() as *const char);
@@ -8814,7 +8814,7 @@ extend Codegen {
             }
             let mut nm2 = Buf128 {};
             unsafe cstring::memcpy(&mut nm2[0], self.mod_src(fmod).ptr() + sp.start as usize, nl);
-            unsafe nm2[nl] = 0 as char;
+            nm2[nl] = 0 as char;
             let mut sb = Buf160 {};
             unsafe stdio::snprintf(&mut sb[0], 160, "section(\"%s\")".ptr() as *const char, &nm2[0]);
             gn = addg(&mut g[0], 256, gn, &sb[0]);
@@ -9105,7 +9105,7 @@ extend Codegen {
         let al = self.cg_attr(self.cur_module(), declId, AttrKind::ATTR_ALIGN);
         if pk != null || al != null {
             let mut g = Buf64 {};
-            unsafe g[0] = 0 as char;
+            g[0] = 0 as char;
             let mut gn: usize = 0;
             if pk != null {
                 gn = bappend(&mut g[0], 64, gn, "packed".ptr() as *const char);
@@ -9249,7 +9249,7 @@ extend Codegen {
             }
             let mut dup = false;
             for s in 0..ns {
-                if unsafe seen[s as usize] == it.decl {
+                if seen[s as usize] == it.decl {
                     dup = true;
                 }
             }
@@ -9257,7 +9257,7 @@ extend Codegen {
                 continue;
             }
             if ns < 64 {
-                unsafe seen[ns as usize] = it.decl;
+                seen[ns as usize] = it.decl;
                 ns = ns + 1;
             }
             if self.aggregate_has_payload(it.decl) {
@@ -9276,7 +9276,7 @@ extend Codegen {
             }
             let mut dup = false;
             for s in 0..ns {
-                if unsafe seen[s as usize] == did {
+                if seen[s as usize] == did {
                     dup = true;
                 }
             }
@@ -9284,7 +9284,7 @@ extend Codegen {
                 continue;
             }
             if ns < 64 {
-                unsafe seen[ns as usize] = did;
+                seen[ns as usize] = did;
                 ns = ns + 1;
             }
             if self.aggregate_has_payload(did) {
@@ -9384,7 +9384,7 @@ extend Codegen {
         }
         self.nsubst = saved;
         for d in 0..nh {
-            self.emit_home_dep(unsafe deps[d as usize]);
+            self.emit_home_dep(deps[d as usize]);
         }
         if dk == NodeKind::NODE_STRUCT {
             self.emit_struct_inst(&it, with_body);
@@ -9436,7 +9436,7 @@ extend Codegen {
             }
         }
         for d in 0..nh {
-            self.emit_home_dep(unsafe deps[d as usize]);
+            self.emit_home_dep(deps[d as usize]);
         }
         self.emit_type_decl(declId);
         unsafe state[declId as usize] = 2 as u8;
@@ -9544,7 +9544,7 @@ extend Codegen {
                 4 as u8;
             };
             for i in 0..nn {
-                unsafe na[i as usize] = self.rehome_subst_type(owner_mod, it, inst.args[i as usize]);
+                na[i as usize] = self.rehome_subst_type(owner_mod, it, inst.args[i as usize]);
             }
             return unsafe (*self.cur_ast()).intern_instance(inst.module, inst.decl, (&na[0]) as *const TypeId, nn);
         }
@@ -9617,7 +9617,7 @@ extend Codegen {
             }
         }
         for d in 0..nh {
-            self.emit_home_dep(unsafe deps[d as usize]);
+            self.emit_home_dep(deps[d as usize]);
         }
         self.emit_rehomed_struct(&it, with_body);
         unsafe state[idx as usize] = 2 as u8;
@@ -9849,7 +9849,7 @@ extend Codegen {
                 let mut at = bappend(&mut nm[0], 320, 0, &inm[0]);
                 at = bappend(&mut nm[0], 320, at, "__".ptr() as *const char);
                 let mnsp = self.name_span(mf.name);
-                self.render_ident(mnsp, (unsafe ((&mut nm[0]) as *mut char + at)) as *mut char, 320 - at);
+                self.render_ident(mnsp, unsafe ((&mut nm[0]) as *mut char + at), 320 - at);
                 let stat = self.multifile && (ifnv || !mf.is_public);
                 if self.minst_only && mf.generics.len == 0 {
                     self.nsubst = 0;
@@ -10091,7 +10091,7 @@ extend Codegen {
             let oninst = unsafe (*owner).instances.len();
             let mut oargs = TyArgs8 {};
             for k2 in 0..inst.n {
-                unsafe oargs[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, inst.args[k2 as usize]);
+                oargs[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, inst.args[k2 as usize]);
             }
             self.ast = owner;
             self.source = osrc;
@@ -10102,7 +10102,7 @@ extend Codegen {
             let mut g: u32 = 0;
             while g < gens.len && g < inst.n as u32 && self.nsubst < 16 {
                 self.subst[self.nsubst as usize].param = DefId { module: fn2.module, node: unsafe gids[g as usize] };
-                self.subst[self.nsubst as usize].concrete = unsafe oargs[g as usize];
+                self.subst[self.nsubst as usize].concrete = oargs[g as usize];
                 self.nsubst = self.nsubst + 1;
                 g = g + 1;
             }
@@ -10993,11 +10993,11 @@ extend Codegen {
                     k = bappend(np, 256, k, builtin_name(bb as BuiltinType));
                 } else {
                     let tsp = self.name_span_in(target.module, self.cg_decl_name_node(target.module, target.node));
-                    k = k + render_ident_src(self.mod_src(target.module), tsp, (unsafe (np + k)) as *mut char, 256 - k);
+                    k = k + render_ident_src(self.mod_src(target.module), tsp, unsafe (np + k), 256 - k);
                 }
                 k = bappend(np, 256, k, "__".ptr() as *const char);
                 let csp = self.name_span(cd.name);
-                self.render_ident(csp, (unsafe (np + k)) as *mut char, 256 - k);
+                self.render_ident(csp, unsafe (np + k), 256 - k);
                 let mut decl = Buf320 {};
                 self.render_type_node(cd.ty, np as *const char, &mut decl[0], 320);
                 if self.ceval() != null {
@@ -11419,10 +11419,10 @@ extend Codegen {
                     if ra != null && rr != null {
                         let rl = unsafe cstring::strlen(&rootb[0]);
                         self.emit_str("#include \"");
-                        if unsafe cstring::strncmp(&absb[0], &rootb[0], rl) == 0 && unsafe absb[rl] == '/' as char {
+                        if unsafe cstring::strncmp(&absb[0], &rootb[0], rl) == 0 && absb[rl] == '/' as char {
                             self.emit_rel_prefix();
                             self.emit_str("../");
-                            self.emit_cstr((unsafe ((&absb[0]) as *const char + (rl + 1))) as *const char);
+                            self.emit_cstr(unsafe ((&absb[0]) as *const char + (rl + 1)));
                         } else {
                             self.emit_cstr(&absb[0]);
                         }
@@ -11580,23 +11580,23 @@ extend Codegen {
         let mut i: usize = 0;
         while i < n && at + 2 < 160 {
             if mp.byte_at(i) == b':' && i + 1 < n && mp.byte_at(i + 1) == b':' {
-                unsafe guard[at] = '_' as char;
-                unsafe guard[at + 1] = '_' as char;
+                guard[at] = '_' as char;
+                guard[at + 1] = '_' as char;
                 at = at + 2;
                 i = i + 1;
             } else {
-                unsafe guard[at] = mp.byte_at(i) as char;
+                guard[at] = mp.byte_at(i) as char;
                 at = at + 1;
             }
             i = i + 1;
         }
-        unsafe guard[at] = 0 as char;
+        guard[at] = 0 as char;
         bappend(np, 160, at, "_H".ptr() as *const char);
         let mut gi: usize = 0;
-        while unsafe guard[gi] != 0 as char {
-            let ch = unsafe guard[gi];
+        while guard[gi] != 0 as char {
+            let ch = guard[gi];
             if ch >= 'a' as char && ch <= 'z' as char {
-                unsafe guard[gi] = (ch as i32 - 32) as char;
+                guard[gi] = (ch as i32 - 32) as char;
             }
             gi = gi + 1;
         }
@@ -11652,13 +11652,12 @@ extend Codegen {
             self.emit_test_wrappers();
         }
         let src = self.source;
-        let ln = self.source.len();
         let mut file: str = "";
         if self.package != null && self.cur_module() as usize < self.pkg_count() {
             file = unsafe (*self.package).modules[self.cur_module() as usize].file.as_str();
         }
-        if unsafe CG_TRUNCATED {
-            unsafe CG_TRUNCATED = false;
+        if CG_TRUNCATED {
+            CG_TRUNCATED = false;
             self.errors.emit(
                 0,
                 0,
@@ -11900,7 +11899,7 @@ extend Codegen {
     // concrete types are cached, and only while self.ast is the home ast: TypeIds are pool-local
     // and non-concrete answers depend on the live subst stack. iface fields must fit the key.
     fn cg_type_satisfies(self: &mut Self, ty: TypeId, iface: DefId, depth: i32) bool {
-        if depth != 0 || self.ast != self.home_ast || iface.module as u32 >= 256 || iface.node as u32 >= 16777216 || !self.type_is_concrete(
+        if depth != 0 || self.ast != self.home_ast || iface.module as u32 >= 256 || iface.node >= 16777216 || !self.type_is_concrete(
             ty,
         ) {
             return self.cg_type_satisfies_uncached(ty, iface, depth);
@@ -11943,7 +11942,7 @@ extend Codegen {
             tdecl = it.decl;
             let mut k: u8 = 0;
             while k < it.n && in_ < 8 {
-                unsafe iargs[in_ as usize] = it.args[k as usize];
+                iargs[in_ as usize] = it.args[k as usize];
                 in_ = in_ + 1;
                 k = k + 1;
             }
@@ -11991,7 +11990,7 @@ extend Codegen {
                     let mut b: u32 = 0;
                     while b < gb.len && ok {
                         let gbi = unsafe (*a).resolution_def(unsafe gbids[b as usize]);
-                        if gbi.node != NODE_NONE && !self.cg_type_satisfies(unsafe iargs[g as usize], gbi, depth + 1) {
+                        if gbi.node != NODE_NONE && !self.cg_type_satisfies(iargs[g as usize], gbi, depth + 1) {
                             ok = false;
                         }
                         b = b + 1;
@@ -12960,11 +12959,11 @@ extend Codegen {
                 }
                 let mut nm = Buf320 {};
                 let mut at = bappend(&mut nm[0], 320, 0, "NAME".ptr() as *const char);
-                unsafe nm[at] = CG_PASTE;
+                nm[at] = CG_PASTE;
                 at = at + 1;
                 at = bappend(&mut nm[0], 320, at, "__".ptr() as *const char);
                 let mnsp = self.name_span(mf.name);
-                self.render_ident(mnsp, (unsafe ((&mut nm[0]) as *mut char + at)) as *mut char, 320 - at);
+                self.render_ident(mnsp, unsafe ((&mut nm[0]) as *mut char + at), 320 - at);
                 self.emit_function(mid, DefId { module: 0, node: NODE_NONE }, false, define, &nm[0], false);
             }
         }
@@ -12984,7 +12983,7 @@ extend Codegen {
         } else {
             0 as usize;
         };
-        return at + render_ident_src(self.mod_src(it.module), sp, (unsafe (out + at)) as *mut char, room);
+        return at + render_ident_src(self.mod_src(it.module), sp, unsafe (out + at), room);
     }
     fn emit_generic_conformance_macro(self: &mut Self, declId: NodeId, implId: NodeId, define: bool) void {
         let dn_name = unsafe (*self.cur_ast()).at_const(declId).as_data.aggregate.name;
@@ -13025,11 +13024,11 @@ extend Codegen {
             }
             let mut nm = Buf320 {};
             let mut at = bappend(&mut nm[0], 320, 0, "NAME".ptr() as *const char);
-            unsafe nm[at] = CG_PASTE;
+            nm[at] = CG_PASTE;
             at = at + 1;
             at = bappend(&mut nm[0], 320, at, "__".ptr() as *const char);
             let mnsp = self.name_span(mf.name);
-            self.render_ident(mnsp, (unsafe ((&mut nm[0]) as *mut char + at)) as *mut char, 320 - at);
+            self.render_ident(mnsp, unsafe ((&mut nm[0]) as *mut char + at), 320 - at);
             self.emit_function(mid, DefId { module: 0, node: NODE_NONE }, false, define, &nm[0], false);
         }
         self.macro_mode = false;
@@ -13125,7 +13124,7 @@ extend Codegen {
             at = at + 1;
         }
         at = bappend(out, cap, at, "__".ptr() as *const char);
-        at = at + self.render_ident(mnsp, (unsafe (out + at)) as *mut char, cap - at);
+        at = at + self.render_ident(mnsp, unsafe (out + at), cap - at);
         at = bappend(out, cap, at, "__".ptr() as *const char);
         let mg = unsafe (*self.cur_ast()).at_const(methodId).as_data.function.generics;
         let mgids = unsafe (*self.cur_ast()).list(mg);
@@ -13142,12 +13141,7 @@ extend Codegen {
                 at = at + 1;
             }
             at = bappend(out, cap, at, "_SCM_".ptr() as *const char);
-            at = at + self.render_macro_param(
-                self.cur_module(),
-                unsafe mgids[k as usize],
-                (unsafe (out + at)) as *mut char,
-                cap - at,
-            );
+            at = at + self.render_macro_param(self.cur_module(), unsafe mgids[k as usize], unsafe (out + at), cap - at);
         }
     }
     fn emit_generic_method_macro(self: &mut Self, declId: NodeId, methodId: NodeId, define: bool) void {

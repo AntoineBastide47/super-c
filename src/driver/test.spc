@@ -103,7 +103,6 @@ extend TestPlan as Free {
 // A test-plan validation error, rendered with the compiler's usual source excerpt.
 fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) void {
     let src = p.modules[m as usize].source.as_str();
-    let len = p.modules[m as usize].source.len();
     let file = p.modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
     errs.emit(sp.start, sp.end - sp.start, String::from_cstr(msg));
@@ -903,10 +902,10 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
         let mut line = PathBuf {};
         while unsafe stdio::fgets(&mut line[0], 4096, lf) != null {
             let ll = unsafe cstring::strlen(&line[0]);
-            if ll > 0 && unsafe line[ll - 1] == '\n' as char {
-                unsafe line[ll - 1] = 0 as char;
+            if ll > 0 && line[ll - 1] == '\n' as char {
+                line[ll - 1] = 0 as char;
             }
-            if unsafe line[0] != 0 as char {
+            if line[0] != 0 as char {
                 cmd.push_str(" ");
                 cmd.push_str(str::from_cstr(&line[0]));
             }

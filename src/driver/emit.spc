@@ -35,7 +35,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
     if t == TYPE_NONE {
         return false;
     }
-    let y = unsafe *mod_ast_c(p, am).type_at(t);
+    let y = *mod_ast_c(p, am).type_at(t);
     if y.kind == TypeKind::TYPE_BUILTIN {
         return true;
     }
@@ -58,7 +58,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
     if t == TYPE_NONE {
         return false;
     }
-    let y = unsafe *mod_ast_c(p, am).type_at(t);
+    let y = *mod_ast_c(p, am).type_at(t);
     let mut changed = false;
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         if mark_type_modules(p, am, y.as_data.elem, live) {
@@ -204,7 +204,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
 // ---------------------------------------------------------------------------------------------------------
 // Pipeline stages over one module (move the Ast out of its slot, run, and restore it).
 // ---------------------------------------------------------------------------------------------------------
-fn resolve_module(p: &mut loader::Package, i: usize) bool {
+fn resolve_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     let pkg = p as *const loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -212,13 +212,14 @@ fn resolve_module(p: &mut loader::Package, i: usize) bool {
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
+    r.lint = lint && !p.modules[i].prelude;
     p.override_mod = i as ModuleId;
     p.override_ast = (&mut r.ast) as *mut Ast;
     r.resolve();
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
     let had = r.has_errors();
-    if had {
+    if had || r.errors.has_warnings() {
         r.log_errors();
     }
     let back = r.take_ast();
@@ -227,7 +228,7 @@ fn resolve_module(p: &mut loader::Package, i: usize) bool {
     return !had;
 }
 
-fn typecheck_module(p: &mut loader::Package, i: usize) bool {
+fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -235,13 +236,14 @@ fn typecheck_module(p: &mut loader::Package, i: usize) bool {
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    t.lint = lint && !p.modules[i].prelude;
     p.override_mod = i as ModuleId;
     p.override_ast = (&mut t.ast) as *mut Ast;
     t.check();
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
     let had = t.has_errors();
-    if had {
+    if had || t.errors.has_warnings() {
         t.log_errors();
     }
     let back = t.take_ast();
@@ -254,7 +256,6 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     let p = ctx as *mut loader::Package;
     let sp = unsafe (*p).modules[m as usize].ast.at_const(cond).span;
     let src = unsafe (*p).modules[m as usize].source.as_str();
-    let len = unsafe (*p).modules[m as usize].source.len();
     let file = unsafe (*p).modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
     if msg != null {
@@ -309,18 +310,18 @@ fn platform_filter(p: &mut loader::Package, target: i32) void {
     }
 }
 
-pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32) i32 {
+pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32, lint: bool) i32 {
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
-        let ok = resolve_module(p, i);
+        let ok = resolve_module(p, i, lint);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
     }
     for i in 0..n {
-        let ok = typecheck_module(p, i);
+        let ok = typecheck_module(p, i, lint);
         p.ok = ok && p.ok;
     }
     if !p.ok {

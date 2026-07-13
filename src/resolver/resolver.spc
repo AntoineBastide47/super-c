@@ -51,6 +51,7 @@ pub struct Resolver {
     pub mod_names: Vector<ModEntry>, // leading-segment module names (alias / single-segment path), import order
     pub glob_mids: Vector<ModuleId>, // module ids of `import P as *;` imports, import order
     pub errors: diag::Errors,
+    pub lint: bool,
 }
 
 // A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
@@ -131,7 +132,7 @@ fn builtin_index(src: str, s: tok::Span) i32 {
     ];
     for i in 0..18 {
         if span_is(src, s, names[i]) {
-            return i as i32;
+            return i;
         }
     }
     return -1;
@@ -163,6 +164,7 @@ extend Resolver {
             mod_names: Vector::<ModEntry>::new(),
             glob_mids: Vector::<ModuleId>::new(),
             errors: diag::Errors::new(),
+            lint: false,
         };
     }
 
@@ -1418,6 +1420,9 @@ extend Resolver {
             self.resolve_item(cid);
         }
         self.scope_exit();
+        if self.lint {
+            self.lint_unused();
+        }
         let fstr = self.package_file();
         self.errors.finalize(self.source, fstr);
     }
@@ -1427,6 +1432,69 @@ extend Resolver {
     }
     pub fn log_errors(self: &Self) void {
         self.errors.log();
+    }
+
+    // ---- lint: unused local variables and parameters --------------------------------------------
+    // A decl is "used" when any node's resolution points at it. Only lets, and params of fns/closures
+    // that have bodies, are considered; `self` and `_`-prefixed names opt out.
+    fn lint_name_span(self: &Self, name: NodeId) tok::Span {
+        return self.ast.at_const(name).as_data.name.text;
+    }
+    fn lint_warn_unused(self: &mut Self, what: str, name: NodeId) void {
+        let sp = self.lint_name_span(name);
+        if sp.end <= sp.start {
+            return;
+        }
+        if self.source[sp.start as usize] == b'_' {
+            return;
+        }
+        if span_is(self.source, sp, "self") {
+            return;
+        }
+        self.errors.warn(
+            sp.start,
+            sp.end - sp.start,
+            format("unused {} '{}'", what, diag::span_str(self.source, sp.start, sp.end)),
+        );
+    }
+    fn lint_unused(self: &mut Self) void {
+        let n = self.ast.nodes.len();
+        let mut used = Vector::<bool>::new();
+        used.reserve(n);
+        for i in 0..n {
+            used.push(false);
+        }
+        for i in 0..self.ast.resolutions.len() {
+            let d = self.ast.resolutions[i];
+            if d.node != NODE_NONE && d.module == self.ast.module && d.node as usize < n && i != d.node as usize {
+                used.set(d.node as usize, true);
+            }
+        }
+        let mut i: u32 = 1;
+        while i as usize < n {
+            let nd = *self.ast.at_const(i);
+            if nd.kind == NodeKind::NODE_LET {
+                if !used[i as usize] && nd.as_data.let_stmt.name != NODE_NONE {
+                    self.lint_warn_unused("variable", nd.as_data.let_stmt.name);
+                }
+            } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE || nd.kind == NodeKind::NODE_CLOSURE {
+                let params = if nd.kind == NodeKind::NODE_CLOSURE {
+                    nd.as_data.closure.params;
+                } else {
+                    nd.as_data.function.params;
+                };
+                for k in 0..params.len {
+                    let pid = unsafe self.ast.list(params)[k as usize];
+                    let pk = self.ast.at_const(pid).kind;
+                    if !used[pid as usize] && pk == NodeKind::NODE_PARAMETER {
+                        let pname = self.ast.at_const(pid).as_data.parameter.name;
+                        self.lint_warn_unused("parameter", pname);
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        used.free();
     }
 }
 

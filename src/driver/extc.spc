@@ -65,7 +65,7 @@ fn ext_c_wrap(
     while unsafe *sp != 0 as char && unsafe *sp != '.' as char && sl < 63 {
         let c = unsafe *sp;
         let good = c >= 'a' as char && c <= 'z' as char || c >= 'A' as char && c <= 'Z' as char || c >= '0' as char && c <= '9' as char;
-        unsafe stem[sl] = if good {
+        stem[sl] = if good {
             c;
         } else {
             '_' as char;
@@ -73,7 +73,7 @@ fn ext_c_wrap(
         sl = sl + 1;
         sp = unsafe (sp + 1);
     }
-    unsafe stem[sl] = 0 as char;
+    stem[sl] = 0 as char;
     let mut nm = Buf128 {};
     let idx = unsafe *nsrc;
     unsafe *nsrc = idx + 1;
@@ -115,7 +115,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
                 continue;
             }
             let vl = (at.str_span.end - at.str_span.start) as i32;
-            let v = (unsafe (src + at.str_span.start as usize)) as *const char;
+            let v = unsafe (src + at.str_span.start);
             if is_link {
                 let mut flag = Buf128 {};
                 if unsafe *v == '-' as char {
@@ -172,7 +172,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             if hl <= 2 {
                 continue;
             }
-            let hv = (unsafe (src + (hs.start + 1) as usize)) as *const char;
+            let hv = unsafe (src + (hs.start + 1));
             let mut rel = PathBuf {};
             let mut habs = PathBuf {};
             ext_rel(file, hv, hl, &mut rel[0]);
@@ -187,7 +187,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             if dotoff + 2 >= 4096 {
                 continue;
             }
-            unsafe {
+            {
                 rel[dotoff] = '.' as char;
                 rel[dotoff + 1] = 'c' as char;
                 rel[dotoff + 2] = 0 as char;

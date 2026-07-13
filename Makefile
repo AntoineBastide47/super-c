@@ -109,7 +109,7 @@ $(BIN): $(COMPILER_SRCS)
 
 	@rm -f 'stage1-$(BIN)'
 	@mv -f '$(BIN).new' '$(BIN)'
-	@rm -rf ./*.dSYM
+	@rm -rf ./*.dSYM src/.gen-stage1 src/.gen-stage2
 	@$(STRIP)
 
 run: $(BIN)
