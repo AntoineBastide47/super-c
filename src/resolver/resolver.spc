@@ -786,7 +786,7 @@ extend Resolver {
         }
         self.resolve_where(fd.where_clause);
         if fd.body != NODE_NONE {
-            self.resolve_block(fd.body);
+            self.resolve_block_stmts(fd.body);
         }
         self.scope_exit();
         self.in_generic = saved_generic;
@@ -953,13 +953,20 @@ extend Resolver {
     }
 
     fn resolve_block(self: &mut Self, id: NodeId) {
-        let stmts = self.ast.at_const(id).as_data.block.statements;
         self.scope_enter();
+        self.resolve_block_stmts(id);
+        self.scope_exit();
+    }
+
+    // A function/closure BODY shares its parameters' scope (C semantics): a top-level `let` that
+    // reuses a parameter name is a duplicate definition, not a shadow -- the emitted C would be a
+    // same-scope redefinition otherwise.
+    fn resolve_block_stmts(self: &mut Self, id: NodeId) {
+        let stmts = self.ast.at_const(id).as_data.block.statements;
         for i in 0..stmts.len {
             let cid = self.child(stmts, i);
             self.resolve_stmt(cid);
         }
-        self.scope_exit();
     }
 
     fn resolve_stmt(self: &mut Self, id: NodeId) {
@@ -1289,7 +1296,7 @@ extend Resolver {
         if cl.expr_body {
             self.resolve_expr(cl.body);
         } else {
-            self.resolve_block(cl.body);
+            self.resolve_block_stmts(cl.body);
         }
         // Commit the collected captures onto the closure node (discovery order, deduped).
         let top = self.closures.len() - 1;

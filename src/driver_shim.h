@@ -26,5 +26,7 @@ long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
 int sc_ncpu(void);                    /* online core count; >= 1 */
 void *sc_popen(const char *cmd);      /* popen(cmd, "r") */
 int sc_pclose(void *f);               /* waits; returns the exit code */
+int sc_rename(const char *from, const char *to); /* rename(2); replaces an existing target on Windows too */
+int sc_setenv(const char *name, const char *value); /* setenv(3) overwrite / _putenv_s */
 
 #endif

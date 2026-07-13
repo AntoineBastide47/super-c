@@ -37,7 +37,6 @@ super-c
 examples
 todos.md
 profile.json.gz
-src/.gen-stage1/
-src/.gen-stage2/
+stage*-super-c
 .obj/
 release.sh

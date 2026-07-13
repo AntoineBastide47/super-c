@@ -23,4 +23,6 @@ extern "C" "driver_shim.h" {
     pub fn sc_ncpu() i32;
     pub fn sc_popen(cmd: *const char) *mut void;
     pub fn sc_pclose(f: *mut void) i32;
+    pub fn sc_rename(from: *const char, to: *const char) i32;
+    pub fn sc_setenv(name: *const char, value: *const char) i32;
 }

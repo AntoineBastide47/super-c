@@ -36,6 +36,14 @@ fn errors() {
         "fn f() { let x: i32 = 1; let x: i32 = 2; }\n",
         "duplicate definition of 'x'",
     );
+    // a body-top `let` shares the parameter scope (C semantics: the emitted C would otherwise be
+    // a same-scope redefinition); nested braces still shadow legally
+    h::expect_resolve_err_msg(
+        "body let reusing a parameter name",
+        "fn f(x: i32) i32 { let x: i32 = 2; return x; }\n",
+        "duplicate definition of 'x'",
+    );
+    h::expect_resolve_ok("nested block shadows a parameter", "fn f(x: i32) i32 { { let x: i32 = 2; return x; } }\n");
     h::expect_resolve_err_msg(
         "local escapes its block",
         "fn f() { { let x: i32 = 1; } use_x(x); }\nfn use_x(n: i32) {}\n",

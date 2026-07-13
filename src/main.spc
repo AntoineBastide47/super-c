@@ -222,6 +222,16 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>) String {
     return out;
 }
 
+// Convention fallback for rooted loads: when a src/ directory exists (manifest layout), it serves
+// as the secondary import root so tests/ and bench/ files linted from the project root resolve
+// their compiler-module imports.
+fn lint_alt() str {
+    if unsafe shim::sc_stat_isdir("src".ptr() as *const char) == 1 {
+        return "src";
+    }
+    return "";
+}
+
 fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool) i32 {
     // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
     // loading it as a root would invent errors. Load an empty root -- the prelude comes along as
@@ -243,7 +253,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         }
         if !found {
             p = if root.len() != 0 {
-                loader::package_load_rooted(path, root, std_dir, false);
+                loader::package_load_rooted(path, root, lint_alt(), std_dir, false);
             } else {
                 loader::package_load(path, std_dir, false);
             };
@@ -332,9 +342,19 @@ fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u6
 fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool) i32 {
     if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
         // every file under the directory resolves imports against the directory itself
-        return lint_dir(path, path, std_dir, ce_steps, ce_mem, target, fix);
+        let droot = if lint_alt().len() != 0 {
+            ".";
+        } else {
+            path;
+        };
+        return lint_dir(path, droot, std_dir, ce_steps, ce_mem, target, fix);
     }
-    return lint_one(path, "", std_dir, ce_steps, ce_mem, target, fix);
+    let froot = if lint_alt().len() != 0 {
+        ".";
+    } else {
+        "";
+    };
+    return lint_one(path, froot, std_dir, ce_steps, ce_mem, target, fix);
 }
 
 // `super-c fmt`: canonical formatting. Rewrites files in place by default (only when they changed);
@@ -449,8 +469,12 @@ fn main(argv: Vector<str>) i32 {
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
     let mut run_mode = false; // `super-c run <command>`: run a build.toml command
     let mut clean_mode = false; // `super-c clean`: remove build.toml outputs
+    let mut test_mode = false; // `super-c test`: build + run tests/ by convention
+    let mut bench_mode = false; // `super-c bench`: build + run bench/main.spc by convention
+    let mut bench_norun = false; // bench --no-run: build the bench binary only
     let mut profile = ""; // --profile=NAME for build/run (default: manifest default-profile)
     let mut out_dir = ""; // --out-dir=PATH: override the manifest's out-dir
+    let mut cstd = ""; // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
     let mut jobs: u32 = 0; // --jobs=N for build/run (0 = manifest / core count)
     let mut lint_extra = Vector::<usize>::new(); // argv indices of extra `lint` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
@@ -470,6 +494,12 @@ fn main(argv: Vector<str>) i32 {
             run_mode = true; // `super-c run <command>`: build.toml command
         } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && file.len() == 0 && arg == "clean" {
             clean_mode = true; // `super-c clean`: drop build.toml outputs
+        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && !test_mode && !bench_mode && file.len() == 0 && arg == "test" {
+            test_mode = true; // `super-c test`: tests/ by convention
+        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && !test_mode && !bench_mode && file.len() == 0 && arg == "bench" {
+            bench_mode = true; // `super-c bench`: bench/main.spc by convention
+        } else if bench_mode && arg == "--no-run" {
+            bench_norun = true;
         } else if fmt_mode && arg == "--check" {
             fmt_check = true;
         } else if arg == "-o" {
@@ -519,11 +549,13 @@ fn main(argv: Vector<str>) i32 {
             bootstrap_tags = true;
         } else if lint_mode && arg == "--fix" {
             lint_fix = true;
-        } else if (build_mode || run_mode) && arg.starts_with("--profile=") {
+        } else if (build_mode || run_mode || test_mode || bench_mode) && arg.starts_with("--profile=") {
             profile = arg[10..];
-        } else if (build_mode || run_mode || clean_mode) && arg.starts_with("--out-dir=") {
+        } else if (build_mode || run_mode || clean_mode || test_mode || bench_mode) && arg.starts_with("--out-dir=") {
             out_dir = arg[10..];
-        } else if (build_mode || run_mode) && arg.starts_with("--jobs=") {
+        } else if (build_mode || run_mode || test_mode || bench_mode) && arg.starts_with("--cstd=") {
+            cstd = arg[7..];
+        } else if (build_mode || run_mode || test_mode || bench_mode) && arg.starts_with("--jobs=") {
             let v = unsafe stdlib::atoi((&arg[7]) as *const char);
             if v < 1 {
                 bad = true;
@@ -555,23 +587,23 @@ fn main(argv: Vector<str>) i32 {
     if fmt_mode && (build_mode || topts.enabled) {
         bad = true;
     }
-    if (run_mode || clean_mode) && (topts.enabled || out_bin.len() != 0) {
+    if (run_mode || clean_mode || test_mode || bench_mode) && (topts.enabled || out_bin.len() != 0) {
         bad = true;
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
-    let manifest_mode = build_mode && file.len() == 0 || run_mode || clean_mode;
+    let manifest_mode = build_mode && file.len() == 0 || run_mode || clean_mode || test_mode || bench_mode;
     if build_mode && file.len() != 0 && out_bin.len() == 0 {
         out_bin = "a.out";
     }
     if run_mode && file.len() == 0 {
         bad = true; // `run` needs a command name
     }
-    if clean_mode && file.len() != 0 {
+    if (clean_mode || test_mode || bench_mode) && file.len() != 0 {
         bad = true;
     }
     if bad || file.len() == 0 && !manifest_mode {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D]\n       super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | ->\n".ptr() as *const char,
+            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D] [--cstd=F]\n       super-c test | super-c bench [--no-run] | super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | ->\n".ptr() as *const char,
             stdio::stderr(),
         );
         return 1;
@@ -611,12 +643,98 @@ fn main(argv: Vector<str>) i32 {
             if out_dir.len() != 0 {
                 man.out_dir = String::from_str(out_dir);
             }
+            if cstd.len() != 0 {
+                man.cstd = String::from_str(cstd);
+            }
             if clean_mode {
-                rc = bsys::manifest_clean(&man);
+                rc = if bsys::command_overrides(&man, "clean") {
+                    bsys::manifest_run(
+                        &man,
+                        "clean",
+                        profile,
+                        jobs,
+                        std_dir as *const char,
+                        ce_steps,
+                        ce_mem,
+                        target,
+                        bootstrap_tags,
+                        lint,
+                    );
+                } else {
+                    bsys::manifest_clean(&man);
+                };
+            } else if test_mode {
+                if bsys::command_overrides(&man, "test") {
+                    rc = bsys::manifest_run(
+                        &man,
+                        "test",
+                        profile,
+                        jobs,
+                        std_dir as *const char,
+                        ce_steps,
+                        ce_mem,
+                        target,
+                        bootstrap_tags,
+                        lint,
+                    );
+                } else {
+                    topts.enabled = true;
+                    rc = bsys::manifest_test(
+                        &man,
+                        profile,
+                        jobs,
+                        &topts,
+                        std_dir as *const char,
+                        ce_steps,
+                        ce_mem,
+                        target,
+                        bootstrap_tags,
+                    );
+                }
+            } else if bench_mode {
+                rc = if bsys::command_overrides(&man, "bench") {
+                    bsys::manifest_run(
+                        &man,
+                        "bench",
+                        profile,
+                        jobs,
+                        std_dir as *const char,
+                        ce_steps,
+                        ce_mem,
+                        target,
+                        bootstrap_tags,
+                        lint,
+                    );
+                } else {
+                    bsys::manifest_bench(
+                        &man,
+                        profile,
+                        bench_norun,
+                        jobs,
+                        std_dir as *const char,
+                        ce_steps,
+                        ce_mem,
+                        target,
+                        bootstrap_tags,
+                    );
+                };
             } else if run_mode {
                 rc = bsys::manifest_run(
                     &man,
                     file,
+                    profile,
+                    jobs,
+                    std_dir as *const char,
+                    ce_steps,
+                    ce_mem,
+                    target,
+                    bootstrap_tags,
+                    lint,
+                );
+            } else if bsys::command_overrides(&man, "build") {
+                rc = bsys::manifest_run(
+                    &man,
+                    "build",
                     profile,
                     jobs,
                     std_dir as *const char,

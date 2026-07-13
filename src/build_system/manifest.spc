@@ -36,6 +36,7 @@ extend Command as Free {
 }
 
 pub struct Manifest {
+    pub toml: Vector<toml::TomlItem>,
     pub bin: String,
     pub root: String,
     pub out_dir: String,
@@ -52,6 +53,7 @@ pub struct Manifest {
 
 extend Manifest as Free {
     pub fn free(self: &mut Self) {
+        self.toml.free();
         self.bin.free();
         self.root.free();
         self.out_dir.free();
@@ -69,6 +71,7 @@ extend Manifest as Free {
 extend Manifest {
     fn new() Self {
         return Manifest {
+            toml: Vector::<toml::TomlItem>::new(),
             bin: String::new(),
             root: String::new(),
             out_dir: String::new(),
@@ -289,6 +292,8 @@ pub fn load(path: str) Option<Manifest> {
             errs.emit(it.at, key.len() as u32, format("unknown section '{}'", sec));
         }
     }
+    // the name views above point into the items' section Strings: the Manifest takes ownership
+    m.toml = items;
     // defaults + validation
     if m.out_dir.len() == 0 {
         m.out_dir.push_str("build");
