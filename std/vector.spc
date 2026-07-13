@@ -316,11 +316,9 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
         let mut hi: usize = self.len;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let c = unsafe self.ptr[mid].cmp(x);
-            if c == 0 {
+            if unsafe self.ptr[mid] == *x {
                 return Result::<usize, usize>::Ok(mid);
-            }
-            if c < 0 {
+            } else if unsafe self.ptr[mid] < *x {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -531,6 +529,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
             let a = self.at(i);
             let b = other.at(i);
             if !a.eq(b) {
+                // ERROR: a[i] != b[i] does not work
                 return false;
             }
         }

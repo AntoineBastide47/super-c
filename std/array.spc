@@ -205,11 +205,9 @@ extend<T: Ord, const N: usize> Array<T, N> {
         let mut hi: usize = N;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let c = self.data[mid].cmp(x);
-            if c == 0 {
+            if self.data[mid] == x {
                 return Result::<usize, usize>::Ok(mid);
-            }
-            if c < 0 {
+            } else if self.data[mid] < x {
                 lo = mid + 1;
             } else {
                 hi = mid;
