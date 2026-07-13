@@ -11,7 +11,7 @@ Super-C is not a C dialect. It is its own language that uses C as a compilation 
 ```text
 Super-C source (.spc)
     -> lexer        (UTF-8, packed tokens)
-    -> parser       (predicated LL(1): one-token lookahead, no backtracking; flat AST arena)
+    -> parser       (context-free LL(1), left-factored operators, no predicates/backtracking; flat AST arena)
     -> resolver     (name binding, scopes, modules)
     -> typechecker  (type inference, generics, monomorphization, borrow checking)
     -> codegen      (readable C: build/ tree of .h/.c)

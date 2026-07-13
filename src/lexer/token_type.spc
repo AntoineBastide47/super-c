@@ -102,12 +102,20 @@ pub enum TokenType {
     BlockComment,
     DocLineComment,
     DocBlockComment,
+    // Keep new tokens at the end so an older bootstrap compiler retains the established numeric values.
+    Underscore,
+    Static,
+    StaticAssert,
+    VaStart,
+    VaArg,
+    VaEnd,
 }
 
 extend TokenType {
     pub fn name(self: Self) str {
         return switch self {
             Identifier => "Identifier",
+            Underscore => "Underscore",
             Label => "Label",
             As => "As",
             Import => "Import",
@@ -141,6 +149,8 @@ extend TokenType {
             SelfLower => "SelfLower",
             SelfUpper => "SelfUpper",
             Struct => "Struct",
+            Static => "Static",
+            StaticAssert => "StaticAssert",
             Interface => "Interface",
             True => "True",
             Type => "Type",
@@ -148,6 +158,9 @@ extend TokenType {
             Unsafe => "Unsafe",
             Where => "Where",
             While => "While",
+            VaStart => "VaStart",
+            VaArg => "VaArg",
+            VaEnd => "VaEnd",
             IntegerLiteral => "IntegerLiteral",
             FloatLiteral => "FloatLiteral",
             CharacterLiteral => "CharacterLiteral",
