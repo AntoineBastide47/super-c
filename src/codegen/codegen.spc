@@ -533,11 +533,6 @@ extend Codegen {
         self.buf.push_byte(('0' as u32 + (b >> 3 & 7u32)) as u8);
         self.buf.push_byte(('0' as u32 + (b & 7u32)) as u8);
     }
-    // Every `%`-format emit was migrated to `format_into`/direct pushes, so `emit` is now just a literal
-    // append -- no C vsnprintf/va_list left in the emitter.
-    fn emit(self: &mut Self, fmt: *const char) void {
-        self.emit_cstr(fmt);
-    }
     fn emit_indent(self: &mut Self) void {
         let mut n = self.depth * 2;
         while n != 0 {

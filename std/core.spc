@@ -397,7 +397,7 @@ extend u64 as Ord {
 }
 extend u64 as Hash {
     pub fn hash(self: &u64) u64 {
-        return (*self) as u64;
+        return *self;
     }
 }
 extend u64 as Clone {

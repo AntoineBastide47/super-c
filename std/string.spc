@@ -853,7 +853,7 @@ extend<A: Allocator> String<A> {
         let mut run: usize = 0; // start of the pending unmatched run
         while i <= last {
             if unsafe memcmp((unsafe (p + i)) as *const void, from.ptr() as *const void, from.len()) == 0 {
-                out.push_bytes((unsafe (p + run)) as *const u8, i - run);
+                out.push_bytes(unsafe (p + run), i - run);
                 out.push_str(to);
                 i = i + from.len();
                 run = i;
@@ -861,7 +861,7 @@ extend<A: Allocator> String<A> {
                 i = i + 1;
             }
         }
-        out.push_bytes((unsafe (p + run)) as *const u8, n - run); // trailing run
+        out.push_bytes(unsafe (p + run), n - run); // trailing run
         return out;
     }
 
@@ -1104,18 +1104,18 @@ extend<A: Allocator> String<A> as Index<u8, str> {
 // String, or any `Format` type). `{{`/`}}` are literal braces. `format` returns the built String; `print`
 // writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the compiler splits the
 // literal and emits the per-argument appends at each call site.)
-pub fn format(fmt: str, ...) String {
+pub fn format(_fmt: str, ...) String {
     return String::<Global>::new();
 }
-pub fn print(fmt: str, ...) {}
-pub fn println(fmt: str, ...) {}
-pub fn eprint(fmt: str, ...) {} // like print/println, written to stderr
-pub fn eprintln(fmt: str, ...) {}
+pub fn print(_fmt: str, ...) {}
+pub fn println(_fmt: str, ...) {}
+pub fn eprint(_fmt: str, ...) {} // like print/println, written to stderr
+pub fn eprintln(_fmt: str, ...) {}
 
 // Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String --
 // zero allocation (reuses the buffer's capacity). It is a METHOD so the receiver's `&mut` borrow defers
 // past the argument evaluation (a free-fn `&mut dst` arg would collide with `self.X` format args).
 // Lowered by codegen; this body is never emitted.
 extend<A: Allocator> String<A> {
-    pub fn format_into(self: &mut String<A>, fmt: str, ...) void {}
+    pub fn format_into(self: &mut String<A>, _fmt: str, ...) void {}
 }

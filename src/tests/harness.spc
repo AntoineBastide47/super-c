@@ -423,10 +423,10 @@ fn rm_dir(dir: *const char) void {
 // Each snippet gets its own temp dir (/tmp/scr_<pid>_<seq>) so build trees never collide -- fork-per-test safe.
 pub fn compile_and_run(src: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
-    unsafe R_SEQ = unsafe R_SEQ + 1;
+    R_SEQ = R_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut dir = Path256 {};
-    unsafe stdio::snprintf(&mut dir.b[0], 256, "/tmp/scr_%d_%llu".ptr() as *const char, pid, unsafe R_SEQ);
+    unsafe stdio::snprintf(&mut dir.b[0], 256, "/tmp/scr_%d_%llu".ptr() as *const char, pid, R_SEQ);
     let dirp = (&dir.b[0]) as *const char;
     if unsafe shim::sc_mkdir(dirp) != 0 {
         return r;

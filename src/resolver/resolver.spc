@@ -1470,6 +1470,35 @@ extend Resolver {
                 used.set(d.node as usize, true);
             }
         }
+        // params of interface methods (signatures, default bodies) and of `extend X as Iface`
+        // conformance impls are contract-fixed: exempt them all
+        let items = self.ast.at_const(self.ast.root).as_data.program.items;
+        for k in 0..items.len {
+            let iid = unsafe self.ast.list(items)[k as usize];
+            let ik = self.ast.at_const(iid).kind;
+            let is_iface_ext = ik == NodeKind::NODE_EXTEND && self.ast.at_const(iid).as_data.extend_def.interface_type != NODE_NONE;
+            if ik != NodeKind::NODE_INTERFACE && !is_iface_ext {
+                continue;
+            }
+            let ms = if is_iface_ext {
+                self.ast.at_const(iid).as_data.extend_def.items;
+            } else {
+                self.ast.at_const(iid).as_data.interface_def.items;
+            };
+            for j in 0..ms.len {
+                let mid = unsafe self.ast.list(ms)[j as usize];
+                if self.ast.at_const(mid).kind != NodeKind::NODE_FUNCTION {
+                    continue;
+                }
+                let ps = self.ast.at_const(mid).as_data.function.params;
+                for q in 0..ps.len {
+                    let pid = unsafe self.ast.list(ps)[q as usize];
+                    if pid as usize < n {
+                        used.set(pid as usize, true);
+                    }
+                }
+            }
+        }
         let mut i: u32 = 1;
         while i as usize < n {
             let nd = *self.ast.at_const(i);

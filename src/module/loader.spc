@@ -75,6 +75,7 @@ pub struct Package {
     // costs 1 scan, not M*<up to 3> fopens. A listing MISS still falls back to fopen (byte-identical vs the
     // old path_exists even under case-insensitive filesystems).
     pub dir_cache: DirCache,
+    pub lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
 }
 
 // Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
@@ -1646,9 +1647,18 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
 // Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 // `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
 pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) Package {
+    let mut d = dir_of(root_file);
+    let p = package_load_rooted(root_file, d.as_str(), std_dir, bootstrap_tags);
+    d.free();
+    return p;
+}
+
+// Like package_load, but imports resolve against an explicit package root instead of the root
+// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
+pub fn package_load_rooted(root_file: str, root_dir: str, std_dir: *const char, bootstrap_tags: bool) Package {
     let mut p = Package::new();
     p.ok = true;
-    p.root_dir = dir_of(root_file);
+    p.root_dir = String::from_str(root_dir);
     if std_dir != null {
         p.std_root = dir_of(str::from_cstr(std_dir));
     }

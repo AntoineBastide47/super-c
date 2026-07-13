@@ -189,8 +189,6 @@ pub struct RecvSubst {
     pub a: [TypeId; 8],
 }
 
-fn bt_widens_helper() void {}
-
 // --- span helpers -------------------------------------------------------------------------------
 fn span_is(src: str, s: tok::Span, lit: str) bool {
     let n = lit.len();
@@ -437,12 +435,6 @@ extend TypeChecker {
     fn cur_ast(self: &Self) *mut Ast {
         return (&self.ast) as *mut Ast;
     }
-    fn cur_module(self: &Self) ModuleId {
-        return self.ast.module;
-    }
-    fn has_pkg(self: &Self) bool {
-        return self.package != null;
-    }
 
     fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != self.ast.module {
@@ -672,11 +664,6 @@ extend TypeChecker {
         }
         let n = unsafe (*a).at_const(nid);
         return n.kind == NodeKind::NODE_LITERAL && n.as_data.literal.token_type == TokenType::IntegerLiteral;
-    }
-    // magnitude of an integer-literal node; ok=false on u64 overflow
-    fn tc_literal_u64(self: &Self, _id: NodeId) BoxOf {
-        // reuse BoxOf as {ok, inner=mag(as TypeId? no)} -> use a dedicated struct
-        return BoxOf { ok: false, inner: 0, global_alloc: false };
     }
     fn lit_mag(self: &Self, id: NodeId, out: *mut u64) bool {
         let n = unsafe (*self.cur_ast()).at_const(id);
@@ -1444,12 +1431,6 @@ extend TypeChecker {
             i = i + 1;
         }
         return it.n as i32;
-    }
-    fn prelude_instance_args(self: &Self, tid: TypeId, name: str, out: *mut TypeId, maxn: i32) i32 {
-        if self.package == null {
-            return -1;
-        }
-        return self.prelude_instance_args_hit(tid, unsafe (*self.package).prelude_lookup(name, true), out, maxn);
     }
     fn tuple_args_of(self: &Self, tid: TypeId, out: *mut TypeId, maxn: i32) i32 {
         let n2 = self.prelude_instance_args_hit(tid, self.ph_t2, out, maxn);
