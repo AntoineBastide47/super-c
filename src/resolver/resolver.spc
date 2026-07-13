@@ -1456,6 +1456,7 @@ extend Resolver {
             sp.end - sp.start,
             format("unused {} '{}'", what, diag::span_str(self.source, sp.start, sp.end)),
         );
+        self.errors.fix(sp.start, sp.start, 1);
     }
     fn lint_unused(self: &mut Self) void {
         let n = self.ast.nodes.len();

@@ -204,7 +204,9 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
 // ---------------------------------------------------------------------------------------------------------
 // Pipeline stages over one module (move the Ast out of its slot, run, and restore it).
 // ---------------------------------------------------------------------------------------------------------
-fn resolve_module(p: &mut loader::Package, i: usize, lint: bool) bool {
+// `fixes != null` = `lint --fix`: machine-applicable fixes are drained into it and warning output is
+// suppressed (the fix loop re-lints and the final plain pass prints what remains).
+fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vector<diag::LintFix>) bool {
     let pkg = p as *const loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -219,17 +221,22 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
     let had = r.has_errors();
-    if had || r.errors.has_warnings() {
+    if had || fixes == null && r.errors.has_warnings() {
         r.log_errors();
     }
     p.lint_warnings = p.lint_warnings + r.errors.warns.len() as u32;
+    if fixes != null {
+        for k in 0..r.errors.fixes.len() {
+            unsafe (*fixes).push(r.errors.fixes[k]);
+        }
+    }
     let back = r.take_ast();
     r.free();
     p.modules[i].ast = back;
     return !had;
 }
 
-fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool) bool {
+fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vector<diag::LintFix>) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -244,10 +251,15 @@ fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
     let had = t.has_errors();
-    if had || t.errors.has_warnings() {
+    if had || fixes == null && t.errors.has_warnings() {
         t.log_errors();
     }
     p.lint_warnings = p.lint_warnings + t.errors.warns.len() as u32;
+    if fixes != null {
+        for k in 0..t.errors.fixes.len() {
+            unsafe (*fixes).push(t.errors.fixes[k]);
+        }
+    }
     let back = t.take_ast();
     p.modules[i].ast = back;
     return !had;
@@ -459,24 +471,37 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) void {
 // ROOT module only (each listed path is its own invocation, so shared imports don't warn twice),
 // then the unused-items pass restricted to the root. No code is emitted. Errors exit 1; warnings
 // alone exit 0 (compiler-warning semantics).
-pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize) i32 {
+pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize, fixes: *mut Vector<diag::LintFix>) i32 {
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
-        let ok = resolve_module(p, i, i == lint_mod);
+        let fx = if i == lint_mod {
+            fixes;
+        } else {
+            null;
+        };
+        let ok = resolve_module(p, i, i == lint_mod, fx);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
     }
     for i in 0..n {
-        let ok = typecheck_module(p, i, i == lint_mod);
+        let fx = if i == lint_mod {
+            fixes;
+        } else {
+            null;
+        };
+        let ok = typecheck_module(p, i, i == lint_mod, fx);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
     }
-    lint_unused_items(p, lint_mod as i32);
+    // Report-only pass: skipped while `--fix` iterates (it yields no fixes and would print duplicates).
+    if fixes == null {
+        lint_unused_items(p, lint_mod as i32);
+    }
     if p.lint_warnings != 0 {
         return 1;
     }
@@ -487,14 +512,14 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
-        let ok = resolve_module(p, i, lint && !p.modules[i].prelude);
+        let ok = resolve_module(p, i, lint && !p.modules[i].prelude, null);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
     }
     for i in 0..n {
-        let ok = typecheck_module(p, i, lint && !p.modules[i].prelude);
+        let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null);
         p.ok = ok && p.ok;
     }
     if !p.ok {

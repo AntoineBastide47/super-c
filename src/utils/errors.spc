@@ -3,6 +3,14 @@ import string;
 
 pub const ERRORS_MAX: usize = 256;
 
+// A machine-applicable fix for a lint warning: kind 0 deletes [start, end); kind 1 inserts '_'
+// before `start` (unused-binding rename). Collected alongside `warn` and applied by `lint --fix`.
+pub struct LintFix {
+    pub start: u32,
+    pub end: u32,
+    pub kind: u8,
+}
+
 pub struct Errors {
     pub errors: Vector<String>,
     pub notes: Vector<String>,
@@ -11,6 +19,7 @@ pub struct Errors {
     pub warns: Vector<String>, // non-fatal lint diagnostics (rendered like errors, never fail the build)
     pub warn_starts: Vector<u32>,
     pub warn_lens: Vector<u32>,
+    pub fixes: Vector<LintFix>,
 }
 
 pub fn oom() void {
@@ -39,6 +48,7 @@ extend Errors {
             warns: Vector::<String>::new(),
             warn_starts: Vector::<u32>::new(),
             warn_lens: Vector::<u32>::new(),
+            fixes: Vector::<LintFix>::new(),
         };
     }
 
@@ -59,6 +69,12 @@ extend Errors {
         self.warns.push(msg);
         self.warn_starts.push(at);
         self.warn_lens.push(len);
+    }
+
+    // Attach a machine-applicable fix to the warning being emitted.
+    @c.cold
+    pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) void {
+        self.fixes.push(LintFix { start: start, end: end, kind: kind });
     }
 
     // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
@@ -176,6 +192,7 @@ extend Errors as Free {
         self.warns.free();
         self.warn_starts.free();
         self.warn_lens.free();
+        self.fixes.free();
     }
 }
 

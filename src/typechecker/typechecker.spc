@@ -4892,6 +4892,16 @@ extend TypeChecker {
             if self.lint && self.unsafe_used == 0 {
                 let usp = unsafe (*a).at_const(id).span;
                 self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
+                // Prefix form only: a bare block is not an expression, so `unsafe { .. }` keeps its marker.
+                // Delete just the keyword + trailing blanks -- the operand span excludes dropped grouping
+                // parens, so deleting up to it would swallow a '(' (`unsafe (a + 1)`).
+                if unsafe (*a).at_const(operand).kind != NodeKind::NODE_BLOCK {
+                    let mut fe = usp.start + 6;
+                    while fe as usize < self.source.len() && (self.source[fe as usize] == b' ' || self.source[fe as usize] == b'\t') {
+                        fe = fe + 1;
+                    }
+                    self.errors.fix(usp.start, fe, 0);
+                }
             }
             self.unsafe_used = outer_unsafe_used;
         }
@@ -8093,6 +8103,20 @@ extend TypeChecker {
                         csp.end - csp.start,
                         format("unnecessary cast: the expression already has this type"),
                     );
+                    // Delete ` as T`. Grouping parens are dropped without re-spanning, so skip the
+                    // fix if a ')' sits between the expression end and the cast end (`(x) as T`).
+                    let esp = unsafe (*a).at_const(unsafe (*a).at_const(id).as_data.cast.expression).span;
+                    let mut fixable = esp.end < csp.end && esp.start >= csp.start;
+                    let mut j = esp.end;
+                    while fixable && j < csp.end && self.source[j as usize] != b'a' {
+                        if self.source[j as usize] == b')' {
+                            fixable = false;
+                        }
+                        j = j + 1;
+                    }
+                    if fixable {
+                        self.errors.fix(esp.end, csp.end, 0);
+                    }
                 }
                 if src != TYPE_NONE && dst != TYPE_NONE && src != dst {
                     let sk = self.type_at(src).kind;
