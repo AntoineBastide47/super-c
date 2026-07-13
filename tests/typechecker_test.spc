@@ -1051,6 +1051,39 @@ fn static_mut() {
 @test
 fn dyn_t() {
     h::expect_ok(
+        "Box erase with a Default custom allocator",
+        "interface A { fn a(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return self.v; } }\nstruct Fwd { pub g: Global }\nextend Fwd as Default { pub fn default() Fwd { return Fwd { g: Global::default() }; } }\nextend Fwd as Allocator {\n  pub fn alloc(self: &mut Fwd, size: usize, align: usize) *mut void { return self.g.alloc(size, align); }\n  pub fn realloc(self: &mut Fwd, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void { return self.g.realloc(ptr, old_size, new_size, align); }\n  pub fn dealloc(self: &mut Fwd, ptr: *mut void, size: usize, align: usize) { self.g.dealloc(ptr, size, align); }\n}\nfn main() i32 { let b = Box::<S, Fwd>::new_in(Fwd::default(), S { v: 2 }); let d: Box<dyn A> = b; let n = d.a(); d.free(); return n; }\n",
+    );
+    h::expect_err_msg(
+        "Box erase requires a Default allocator",
+        "interface A { fn a(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return self.v; } }\nstruct NoDef { pub g: Global }\nextend NoDef as Allocator {\n  pub fn alloc(self: &mut NoDef, size: usize, align: usize) *mut void { return self.g.alloc(size, align); }\n  pub fn realloc(self: &mut NoDef, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void { return self.g.realloc(ptr, old_size, new_size, align); }\n  pub fn dealloc(self: &mut NoDef, ptr: *mut void, size: usize, align: usize) { self.g.dealloc(ptr, size, align); }\n}\nfn main() i32 { let b = Box::<S, NoDef>::new_in(NoDef { g: Global::default() }, S { v: 2 }); let d: Box<dyn A> = b; d.free(); return 0; }\n",
+        "must implement 'Default'",
+    );
+    h::expect_ok(
+        "dyn_cast to the concrete type",
+        "interface A { fn a(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return 1; } }\nfn f(x: &dyn A) i32 { return switch dyn_cast::<S>(x) { Some(s) => s.v, None => -1, }; }\nfn main() i32 { let s = S { v: 3 }; return f(&s); }\n",
+    );
+    h::expect_err_msg(
+        "dyn_cast rejects non-dyn values",
+        "fn main() i32 { let x = dyn_cast::<i32>(0); return 0; }\n",
+        "dyn_cast expects",
+    );
+    // superinterface hierarchy: inherited dispatch, upcasts, bound satisfaction, name collisions
+    h::expect_ok(
+        "dyn superinterface dispatch + upcast",
+        "interface A { fn a(self: &Self) i32; }\ninterface B: A { fn b(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return 1; } }\nextend S as B { pub fn b(self: &S) i32 { return self.v; } }\nfn f(x: &dyn B) i32 { let up: &dyn A = x; return x.a() + x.b() + up.a(); }\nfn main() i32 { let s = S { v: 2 }; return f(&s); }\n",
+    );
+    h::expect_err_msg(
+        "downcast direction is rejected",
+        "interface A { fn a(self: &Self) i32; }\ninterface B: A { fn b(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return 1; } }\nextend S as B { pub fn b(self: &S) i32 { return self.v; } }\nfn main() i32 { let s = S { v: 2 }; let a: &dyn A = &s; let b: &dyn B = a; return b.b(); }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "method name collision across the hierarchy is not dyn-compatible",
+        "interface A { fn go(self: &Self) i32; }\ninterface B: A { fn go(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn go(self: &S) i32 { return 1; } }\nfn main() i32 { let s = S { v: 2 }; let b: &dyn B = &s; return b.go(); }\n",
+        "share a name",
+    );
+    h::expect_ok(
         "dyn coercion + vtable dispatch",
         "interface Shape { fn area(self: &Self) f64; fn scale(self: &mut Self, k: f64); fn tag(self: &Self) i32 { return 7; } }\nstruct Circle { pub r: f64 }\nextend Circle as Shape {\n  pub fn area(self: &Circle) f64 { return self.r; }\n  pub fn scale(self: &mut Circle, k: f64) { self.r = k; }\n}\nfn total(a: &dyn Shape) f64 { return a.area(); }\nfn main() i32 { let c = Circle { r: 1.0 }; let d: &dyn Shape = &c; let t = total(&c) + d.area() + d.tag() as f64; return 0; }\n",
     );
@@ -1093,9 +1126,13 @@ fn dyn_t() {
         "not dyn-compatible",
     );
     h::expect_err_msg(
-        "a generic interface is not dyn-compatible",
+        "a generic dyn interface needs its type arguments",
         "interface Producer<T> { fn make(self: &Self) i32; }\nstruct S { pub v: i32 }\nfn f(d: &dyn Producer) i32 { return 0; }\nfn main() i32 { return 0; }\n",
-        "not dyn-compatible",
+        "type argument",
+    );
+    h::expect_ok(
+        "dyn over an instantiated generic interface",
+        "interface Producer<T> { fn make(self: &Self) T; }\nstruct S { pub v: i32 }\nextend S as Producer<i32> { pub fn make(self: &S) i32 { return self.v; } }\nfn f(d: &dyn Producer<i32>) i32 { return d.make(); }\nfn main() i32 { let s = S { v: 41 }; return f(&s) + 1; }\n",
     );
     h::expect_err_msg(
         "erasing a generic type parameter",

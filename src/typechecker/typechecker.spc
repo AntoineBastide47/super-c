@@ -885,10 +885,11 @@ extend TypeChecker {
             if ty.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
                 sfx = ">".ptr() as *const char;
             }
-            if unsafe (*a).at_const(ty.as_data.decl).kind == NodeKind::NODE_FUNCTION_TYPE {
+            let ddecl = unsafe (*self.cur_ast()).dyn_decl_of(&ty);
+            if unsafe (*a).at_const(ddecl).kind == NodeKind::NODE_FUNCTION_TYPE {
                 unsafe stdio::snprintf(buf, cap, "%sfn(..) ..%s".ptr() as *const char, pfx, sfx);
             } else {
-                let s = unsafe (*a).at_const(unsafe (*a).at_const(ty.as_data.decl).as_data.interface_def.name).as_data.name.text;
+                let s = unsafe (*a).at_const(unsafe (*a).at_const(ddecl).as_data.interface_def.name).as_data.name.text;
                 unsafe stdio::snprintf(
                     buf,
                     cap,
@@ -1126,10 +1127,11 @@ extend TypeChecker {
         if ty.kind != TypeKind::TYPE_DYN {
             return TYPE_NONE;
         }
-        if unsafe (*self.mod_ast(ty.module)).at_const(ty.as_data.decl).kind != NodeKind::NODE_FUNCTION_TYPE {
+        let dnode = unsafe (*self.cur_ast()).dyn_decl_of(ty);
+        if unsafe (*self.mod_ast(ty.module)).at_const(dnode).kind != NodeKind::NODE_FUNCTION_TYPE {
             return TYPE_NONE;
         }
-        return self.lower_type_in(ty.module, ty.as_data.decl);
+        return self.lower_type_in(ty.module, dnode);
     }
 
     fn tc_dyn_same(self: &mut Self, a: &Ty, b: &Ty) bool {
@@ -1141,7 +1143,7 @@ extend TypeChecker {
         if as2 != TYPE_NONE {
             return as2 == bs || self.fn_compatible(as2, bs);
         }
-        return a.module == b.module && a.as_data.decl == b.as_data.decl;
+        return a.module == b.module && a.as_data.inst == b.as_data.inst;
     }
 }
 
@@ -1732,13 +1734,21 @@ extend TypeChecker {
             if d.node == NODE_NONE || unsafe (*self.mod_ast(d.module)).at_const(d.node).kind != NodeKind::NODE_INTERFACE {
                 return TYPE_ERROR;
             }
-            return unsafe (*self.cur_ast()).intern_type(
-                Ty {
-                    kind: TypeKind::TYPE_DYN,
-                    qualifier: it.qualifier as u8,
-                    module: d.module,
-                    as_data: TyAs { decl: d.node },
-                },
+            let targs = unsafe (*a).at_const(inner).as_data.type_path.args;
+            let mut na = Tys8 {};
+            let mut nn: u8 = 0;
+            for ti in 0..targs.len {
+                if nn < 8 {
+                    na[nn as usize] = self.lower_type_in(m, unsafe (*a).list(targs)[ti as usize]);
+                    nn = nn + 1;
+                }
+            }
+            return unsafe (*self.cur_ast()).intern_dyn(
+                d.module,
+                d.node,
+                (&na[0]) as *const TypeId,
+                nn,
+                it.qualifier as u8,
             );
         }
         return TYPE_ERROR;
@@ -1960,7 +1970,9 @@ extend TypeChecker {
         loop {
             while self.dynfn_scan as usize < unsafe (*self.cur_ast()).type_pool.len() {
                 let e = *self.type_at(self.dynfn_scan);
-                if e.kind == TypeKind::TYPE_DYN && unsafe (*self.mod_ast(e.module)).at_const(e.as_data.decl).kind == NodeKind::NODE_FUNCTION_TYPE {
+                if e.kind == TypeKind::TYPE_DYN && unsafe (*self.mod_ast(e.module)).at_const(
+                    unsafe (*self.cur_ast()).dyn_decl_of(&e),
+                ).kind == NodeKind::NODE_FUNCTION_TYPE {
                     self.dynfn_list.push(self.dynfn_scan);
                 }
                 self.dynfn_scan = self.dynfn_scan + 1;
@@ -1970,21 +1982,13 @@ extend TypeChecker {
             }
             let e = *self.type_at(self.dynfn_list[idx]);
             idx = idx + 1;
-            let esig = self.lower_type_in(e.module, e.as_data.decl);
+            let edecl = unsafe (*self.cur_ast()).dyn_decl_of(&e);
+            let esig = self.lower_type_in(e.module, edecl);
             if esig == mysig || self.fn_compatible(esig, mysig) {
-                return unsafe (*self.cur_ast()).intern_type(
-                    Ty {
-                        kind: TypeKind::TYPE_DYN,
-                        qualifier: qual as u8,
-                        module: e.module,
-                        as_data: TyAs { decl: e.as_data.decl },
-                    },
-                );
+                return unsafe (*self.cur_ast()).intern_dyn(e.module, edecl, null, 0, qual as u8);
             }
         }
-        return unsafe (*self.cur_ast()).intern_type(
-            Ty { kind: TypeKind::TYPE_DYN, qualifier: qual as u8, module: m, as_data: TyAs { decl: sig } },
-        );
+        return unsafe (*self.cur_ast()).intern_dyn(m, sig, null, 0, qual as u8);
     }
 
     fn resolve_dyn_node(self: &mut Self, id: NodeId, qual: TypeQualifier) TypeId {
@@ -2034,10 +2038,34 @@ extend TypeChecker {
         let sp = unsafe (*a).at_const(id).span;
         if d.node == NODE_NONE || unsafe (*self.mod_ast(d.module)).at_const(d.node).kind != NodeKind::NODE_INTERFACE {
             self.errors.emit(sp.start, sp.end - sp.start, format("'dyn' requires an interface"));
-        } else if self.dyn_compatible(d, sp) {
-            result = unsafe (*self.cur_ast()).intern_type(
-                Ty { kind: TypeKind::TYPE_DYN, qualifier: qual as u8, module: d.module, as_data: TyAs { decl: d.node } },
-            );
+        } else {
+            // `dyn I<T, ..>`: lower the type-path arguments and check the count against the
+            // interface's generic parameters (zero args for a plain interface)
+            let targs = unsafe (*a).at_const(inner).as_data.type_path.args;
+            let ig = unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.interface_def.generics;
+            let mut na = Tys8 {};
+            let mut nn: u8 = 0;
+            for ti in 0..targs.len {
+                if nn < 8 {
+                    na[nn as usize] = self.resolve_type(unsafe (*a).list(targs)[ti as usize]);
+                    nn = nn + 1;
+                }
+            }
+            if targs.len != ig.len {
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("interface expects {} type argument(s), got {}", ig.len, targs.len),
+                );
+            } else if self.dyn_compatible(d, sp) {
+                result = unsafe (*self.cur_ast()).intern_dyn(
+                    d.module,
+                    d.node,
+                    (&na[0]) as *const TypeId,
+                    nn,
+                    qual as u8,
+                );
+            }
         }
         unsafe (*self.cur_ast()).set_type(id, result);
         return result;
@@ -2105,56 +2133,93 @@ extend TypeChecker {
         return false;
     }
 
+    // The transitive superinterface closure of `iface` (itself first), deduped, depth-capped.
+    fn dyn_super_closure(self: &mut Self, iface: DefId, out: *mut DefId, cap: i32) i32 {
+        let mut n: i32 = 0;
+        unsafe out[0] = iface;
+        n = 1;
+        let mut scan: i32 = 0;
+        while scan < n {
+            let cur = unsafe out[scan as usize];
+            let ca = self.mod_ast(cur.module);
+            let bs = unsafe (*ca).at_const(cur.node).as_data.interface_def.bounds;
+            for b in 0..bs.len {
+                let bd = unsafe (*ca).resolution_def(unsafe (*ca).list(bs)[b as usize]);
+                if bd.node == NODE_NONE || unsafe (*self.mod_ast(bd.module)).at_const(bd.node).kind != NodeKind::NODE_INTERFACE {
+                    continue;
+                }
+                let mut dup = false;
+                for k in 0..n {
+                    if unsafe out[k as usize].module == bd.module && unsafe out[k as usize].node == bd.node {
+                        dup = true;
+                    }
+                }
+                if !dup && n < cap {
+                    unsafe out[n as usize] = bd;
+                    n = n + 1;
+                }
+            }
+            scan = scan + 1;
+        }
+        return n;
+    }
+
     fn dyn_compatible(self: &mut Self, iface: DefId, at: tok::Span) bool {
         let ia = self.mod_ast(iface.module);
         let isrc = self.mod_src(iface.module);
         let idn = unsafe (*ia).at_const(iface.node).as_data.interface_def;
         let mut why: str = "";
         let mut mn = tok::Span { start: 0, end: 0 };
-        if idn.generics.len != 0 {
-            why = "the interface has generic parameters";
-        } else if idn.bounds.len != 0 {
-            why = "the interface has superinterfaces";
-        }
-        let mut i: u32 = 0;
-        while why.len() == 0 && i < idn.items.len {
-            let mid = unsafe (*ia).list(idn.items)[i as usize];
-            if self.dyn_method(iface.module, mid) {
-                let m = unsafe (*ia).at_const(mid).as_data.function;
-                mn = unsafe (*ia).at_const(m.name).as_data.name.text;
-                let p0 = unsafe (*ia).list(m.params)[0];
-                let st = unsafe (*ia).at_const(p0).as_data.parameter.ty;
-                let mut sk = NodeKind::NODE_NONE_KIND;
-                if st != NODE_NONE {
-                    sk = unsafe (*ia).at_const(st).kind;
+        // validate the whole superinterface closure: every method of every interface in it is
+        // dispatched through the SAME vtable (inherited methods are named fields), so each must
+        // be dyn-able and no two may share a name (they would collide as C struct fields)
+        let mut clo = Defs8 {};
+        let nclo = self.dyn_super_closure(iface, (&mut clo[0]) as *mut DefId, 8);
+        let mut ci: i32 = 0;
+        while why.len() == 0 && ci < nclo {
+            let cd = clo[ci as usize];
+            let ca = self.mod_ast(cd.module);
+            let cdn = unsafe (*ca).at_const(cd.node).as_data.interface_def;
+            if cdn.generics.len != 0 && ci != 0 {
+                // the root interface's generics are instantiated by the `dyn I<..>` arguments;
+                // generic SUPERinterfaces are not wired up yet
+                why = "a superinterface has generic parameters";
+                break;
+            }
+            for mi in 0..cdn.items.len {
+                let mid0 = unsafe (*ca).list(cdn.items)[mi as usize];
+                if !self.dyn_method(cd.module, mid0) {
+                    continue;
                 }
-                if m.generics.len != 0 {
-                    why = "a method has its own generic parameters";
-                } else if sk != NodeKind::NODE_REFERENCE_TYPE && sk != NodeKind::NODE_POINTER_TYPE {
-                    why = "a method takes 'Self' by value";
-                } else if m.returns.len > 1 {
-                    why = "a method has multiple return values";
-                }
-                let mut p: u32 = 1;
-                while why.len() == 0 && p < m.params.len {
-                    let pid = unsafe (*ia).list(m.params)[p as usize];
-                    if self.tc_mentions_self(iface.module, unsafe (*ia).at_const(pid).as_data.parameter.ty, iface) {
-                        why = "a method mentions 'Self' outside the receiver";
+                let nm0 = unsafe (*ca).at_const(unsafe (*ca).at_const(mid0).as_data.function.name).as_data.name.text;
+                let mut cj: i32 = 0;
+                while why.len() == 0 && cj < ci {
+                    let od = clo[cj as usize];
+                    let oa = self.mod_ast(od.module);
+                    let odn = unsafe (*oa).at_const(od.node).as_data.interface_def;
+                    for oi in 0..odn.items.len {
+                        let omid = unsafe (*oa).list(odn.items)[oi as usize];
+                        if self.dyn_method(od.module, omid) && spans_eq2(
+                            self.mod_src(cd.module),
+                            nm0,
+                            self.mod_src(od.module),
+                            unsafe (*oa).at_const(unsafe (*oa).at_const(omid).as_data.function.name).as_data.name.text,
+                        ) {
+                            why = "two methods in the superinterface hierarchy share a name";
+                            mn = nm0;
+                        }
                     }
-                    p = p + 1;
-                }
-                let mut r: u32 = 0;
-                while why.len() == 0 && r < m.returns.len {
-                    let rid = unsafe (*ia).list(m.returns)[r as usize];
-                    let rn = unsafe (*ia).at_const(rid);
-                    let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, rid);
-                    if self.tc_mentions_self(iface.module, tn, iface) {
-                        why = "a method mentions 'Self' outside the receiver";
-                    }
-                    r = r + 1;
+                    cj = cj + 1;
                 }
             }
-            i = i + 1;
+            ci = ci + 1;
+        }
+        let mut cx: i32 = 0;
+        while why.len() == 0 && cx < nclo {
+            if !self.dyn_iface_methods_ok(clo[cx as usize], &mut why, &mut mn) {
+                break;
+            }
+            cx = cx + 1;
         }
         if why.len() == 0 {
             return true;
@@ -2169,6 +2234,53 @@ extend TypeChecker {
             self.errors.note(format("offending method: '{}'", diag::span_str(isrc, mn.start, mn.end)));
         }
         return false;
+    }
+
+    // Per-interface dyn-ability of every method; on failure sets `why`/`mn` and returns false.
+    fn dyn_iface_methods_ok(self: &mut Self, iface: DefId, why: &mut str, mnp: &mut tok::Span) bool {
+        let ia = self.mod_ast(iface.module);
+        let idn = unsafe (*ia).at_const(iface.node).as_data.interface_def;
+        let mut i: u32 = 0;
+        while (*why).len() == 0 && i < idn.items.len {
+            let mid = unsafe (*ia).list(idn.items)[i as usize];
+            if self.dyn_method(iface.module, mid) {
+                let m = unsafe (*ia).at_const(mid).as_data.function;
+                *mnp = unsafe (*ia).at_const(m.name).as_data.name.text;
+                let p0 = unsafe (*ia).list(m.params)[0];
+                let st = unsafe (*ia).at_const(p0).as_data.parameter.ty;
+                let mut sk = NodeKind::NODE_NONE_KIND;
+                if st != NODE_NONE {
+                    sk = unsafe (*ia).at_const(st).kind;
+                }
+                if m.generics.len != 0 {
+                    *why = "a method has its own generic parameters";
+                } else if sk != NodeKind::NODE_REFERENCE_TYPE && sk != NodeKind::NODE_POINTER_TYPE {
+                    *why = "a method takes 'Self' by value";
+                } else if m.returns.len > 1 {
+                    *why = "a method has multiple return values";
+                }
+                let mut p: u32 = 1;
+                while (*why).len() == 0 && p < m.params.len {
+                    let pid = unsafe (*ia).list(m.params)[p as usize];
+                    if self.tc_mentions_self(iface.module, unsafe (*ia).at_const(pid).as_data.parameter.ty, iface) {
+                        *why = "a method mentions 'Self' outside the receiver";
+                    }
+                    p = p + 1;
+                }
+                let mut r: u32 = 0;
+                while (*why).len() == 0 && r < m.returns.len {
+                    let rid = unsafe (*ia).list(m.returns)[r as usize];
+                    let rn = unsafe (*ia).at_const(rid);
+                    let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, rid);
+                    if self.tc_mentions_self(iface.module, tn, iface) {
+                        *why = "a method mentions 'Self' outside the receiver";
+                    }
+                    r = r + 1;
+                }
+            }
+            i = i + 1;
+        }
+        return (*why).len() == 0;
     }
 
     // ---- extension / method lookup ----
@@ -2736,7 +2848,18 @@ extend TypeChecker {
             return true;
         }
         if y.kind == TypeKind::TYPE_DYN {
-            return y.module == iface.module && y.as_data.decl == iface.node;
+            let mut dclo = Defs8 {};
+            let nd = self.dyn_super_closure(
+                DefId { module: y.module, node: unsafe (*self.cur_ast()).dyn_decl_of(&y) },
+                (&mut dclo[0]) as *mut DefId,
+                8,
+            );
+            for di in 0..nd {
+                if dclo[di as usize].module == iface.module && dclo[di as usize].node == iface.node {
+                    return true;
+                }
+            }
+            return false;
         }
         let mut tmod: ModuleId = 0;
         let mut tdecl = NODE_NONE;
@@ -3097,8 +3220,12 @@ extend TypeChecker {
     }
 
     fn dyn_coerce(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) bool {
+        return self.dyn_coerce_alloc(node, src, dyn_ty, TYPE_NONE);
+    }
+
+    fn dyn_coerce_alloc(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId, balloc: TypeId) bool {
         let dy = *self.type_at(dyn_ty);
-        let iface = DefId { module: dy.module, node: dy.as_data.decl };
+        let iface = DefId { module: dy.module, node: unsafe (*self.cur_ast()).dyn_decl_of(&dy) };
         let sy = *self.type_at(src);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
         if sy.kind == TypeKind::TYPE_GENERIC {
@@ -3172,7 +3299,18 @@ extend TypeChecker {
                 return true;
             }
         }
-        unsafe (*self.cur_ast()).add_dyn_use(node, src, dyn_ty);
+        // Synthesize (superinterface, src) uses FIRST so codegen emits their vtables (the root
+        // vtable's __super_* fields point at them); the real use goes last so dyn_at[node] wins.
+        let mut sclo = Defs8 {};
+        let nsc = self.dyn_super_closure(iface, (&mut sclo[0]) as *mut DefId, 8);
+        let mut si: i32 = 1;
+        while si < nsc {
+            let sd = sclo[si as usize];
+            let sdy = unsafe (*self.cur_ast()).intern_dyn(sd.module, sd.node, null, 0, dy.qualifier);
+            unsafe (*self.cur_ast()).add_dyn_use_alloc(node, src, sdy, balloc);
+            si = si + 1;
+        }
+        unsafe (*self.cur_ast()).add_dyn_use_alloc(node, src, dyn_ty, balloc);
         return true;
     }
 
@@ -3248,7 +3386,33 @@ extend TypeChecker {
             let exsig = self.tc_dyn_fn_sig(&ex);
             let sp = unsafe (*self.cur_ast()).at_const(node).span;
             if ac.kind == TypeKind::TYPE_DYN {
-                return self.tc_dyn_same(&ex, &ac) && (ex.qualifier == ac.qualifier || ex.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 && ac.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8);
+                let qual_ok = ex.qualifier == ac.qualifier || ex.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 && ac.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+                if self.tc_dyn_same(&ex, &ac) {
+                    return qual_ok;
+                }
+                // upcast: dyn X coerces to dyn Y when Y is in X's superinterface closure; the fat
+                // value's data is reused and the vtable comes from the __super_* embed
+                if qual_ok && exsig == TYPE_NONE && unsafe (*self.mod_ast(ac.module)).at_const(
+                    unsafe (*self.cur_ast()).dyn_decl_of(&ac),
+                ).kind == NodeKind::NODE_INTERFACE {
+                    let mut uclo = Defs8 {};
+                    let nu = self.dyn_super_closure(
+                        DefId { module: ac.module, node: unsafe (*self.cur_ast()).dyn_decl_of(&ac) },
+                        (&mut uclo[0]) as *mut DefId,
+                        8,
+                    );
+                    let mut ui: i32 = 1;
+                    while ui < nu {
+                        if uclo[ui as usize].module == ex.module && uclo[ui as usize].node == unsafe (*self.cur_ast()).dyn_decl_of(
+                            &ex,
+                        ) {
+                            unsafe (*self.cur_ast()).add_dyn_use(node, actual, expected);
+                            return true;
+                        }
+                        ui = ui + 1;
+                    }
+                }
+                return false;
             }
             if ex.qualifier != TypeQualifier::TYPE_QUAL_NONE as u8 && ac.kind == TypeKind::TYPE_REFERENCE {
                 let rel = *self.type_at(ac.as_data.elem);
@@ -3298,15 +3462,26 @@ extend TypeChecker {
                 let mut inner: TypeId = TYPE_NONE;
                 let mut galloc = false;
                 if self.tc_box_of(&ac, (&mut inner) as *mut TypeId, (&mut galloc) as *mut bool) {
-                    if !galloc {
-                        self.errors.emit(
-                            sp.start,
-                            sp.end - sp.start,
-                            format("only a default-allocated 'Box<T>' can be erased to 'Box<dyn I>'"),
-                        );
-                        return true;
+                    let it2 = *unsafe (*self.cur_ast()).instance(ac.as_data.inst);
+                    let mut balloc = TYPE_NONE;
+                    if !galloc && it2.n >= 2 {
+                        balloc = it2.args[1];
+                        // the 2-word fat value cannot carry allocator state: the free glue
+                        // reconstructs the allocator via Default
+                        let dh = unsafe (*self.package).prelude_lookup("Default", true);
+                        let ddef = DefId { module: dh.mid, node: dh.node };
+                        if !self.type_satisfies(balloc, ddef, 0) {
+                            self.errors.emit(
+                                sp.start,
+                                sp.end - sp.start,
+                                format(
+                                    "the Box allocator must implement 'Default' to be erased to 'Box<dyn I>' (its state is not carried)",
+                                ),
+                            );
+                            return true;
+                        }
                     }
-                    return self.dyn_coerce(node, inner, expected);
+                    return self.dyn_coerce_alloc(node, inner, expected, balloc);
                 }
             }
             return false;
@@ -4765,6 +4940,26 @@ extend TypeChecker {
     // ---- operators ----
     fn method_recv_subst(self: &mut Self, recv: TypeId, md: DefId, rsubp: *mut DefId, rsuba: *mut TypeId) i32 {
         let mut nrsub: i32 = 0;
+        let rvy = *self.type_at(self.strip(recv));
+        if rvy.kind == TypeKind::TYPE_DYN {
+            // dyn receiver over an instantiated generic interface: map the interface's generic
+            // params to the dyn type's arguments (method sigs mention them directly)
+            let dinst = *unsafe (*self.cur_ast()).instance(rvy.as_data.inst);
+            if dinst.n > 0 && unsafe (*self.mod_ast(dinst.module)).at_const(dinst.decl).kind == NodeKind::NODE_INTERFACE {
+                let ig = unsafe (*self.mod_ast(dinst.module)).at_const(dinst.decl).as_data.interface_def.generics;
+                let mut gi: u8 = 0;
+                while gi < dinst.n && gi as u32 < ig.len && nrsub < 8 {
+                    unsafe rsubp[nrsub as usize] = DefId {
+                        module: dinst.module,
+                        node: unsafe (*self.mod_ast(dinst.module)).list(ig)[gi as usize],
+                    };
+                    unsafe rsuba[nrsub as usize] = dinst.args[gi as usize];
+                    nrsub = nrsub + 1;
+                    gi = gi + 1;
+                }
+                return nrsub;
+            }
+        }
         let mut rmod: ModuleId = 0;
         let mut rdecl = NODE_NONE;
         let mut gp = Defs8 {};
@@ -5958,6 +6153,55 @@ extend TypeChecker {
                 }
             }
         }
+        // dyn_cast::<T>(d): compiler intrinsic -- vtable type-id compare, Option<&T> result
+        if pck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            let spx = unsafe (*a).at_const(callee_id).as_data.specialization;
+            let tp_args = spx.types;
+            if unsafe (*a).at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && unsafe (*a).resolution_def(
+                spx.expression,
+            ).node == NODE_NONE && span_is(
+                self.source,
+                unsafe (*a).at_const(spx.expression).as_data.name.text,
+                "dyn_cast",
+            ) {
+                let sp2 = unsafe (*a).at_const(id).span;
+                let args2 = unsafe (*a).at_const(id).as_data.call.args;
+                if tp_args.len != 1 || args2.len != 1 {
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("dyn_cast takes exactly one type argument and one value"),
+                    );
+                    return TYPE_NONE;
+                }
+                let tt = self.resolve_type(unsafe (*a).list(tp_args)[0]);
+                let av = self.check_expr(unsafe (*a).list(args2)[0]);
+                let ay = *self.type_at(av);
+                if ay.kind != TypeKind::TYPE_DYN || ay.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 || self.tc_dyn_fn_sig(
+                    &ay,
+                ) != TYPE_NONE {
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("dyn_cast expects a '&dyn I' or '&mut dyn I' value"),
+                    );
+                    return TYPE_NONE;
+                }
+                let mut rq = TypeQualifier::TYPE_QUAL_CONST as u8;
+                if ay.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                    rq = TypeQualifier::TYPE_QUAL_MUT as u8;
+                }
+                let rt2 = unsafe (*self.cur_ast()).intern_type(
+                    Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: rq, module: 0, as_data: TyAs { elem: tt } },
+                );
+                let oh = unsafe (*self.package).prelude_lookup("Option", true);
+                let mut oa = Tys8 {};
+                oa[0] = rt2;
+                let ot = unsafe (*self.cur_ast()).intern_instance(oh.mid, oh.node, (&oa[0]) as *const TypeId, 1);
+                unsafe (*self.cur_ast()).set_type(id, ot);
+                return ot;
+            }
+        }
         let args = unsafe (*a).at_const(id).as_data.call.args;
         for i in 0..args.len {
             let aid = unsafe (*a).list(args)[i as usize];
@@ -6232,6 +6476,26 @@ extend TypeChecker {
                         rsuba[nrsub as usize] = ga[i as usize];
                         nrsub = nrsub + 1;
                         i = i + 1;
+                    }
+                }
+            }
+            // dyn receiver over an instantiated generic interface: interface generics -> dyn args
+            if nrsub == 0 {
+                let rvy2 = *self.type_at(recvbase);
+                if rvy2.kind == TypeKind::TYPE_DYN {
+                    let dinst = *unsafe (*self.cur_ast()).instance(rvy2.as_data.inst);
+                    if dinst.n > 0 && unsafe (*self.mod_ast(dinst.module)).at_const(dinst.decl).kind == NodeKind::NODE_INTERFACE {
+                        let dig = unsafe (*self.mod_ast(dinst.module)).at_const(dinst.decl).as_data.interface_def.generics;
+                        let mut gi: u8 = 0;
+                        while gi < dinst.n && gi as u32 < dig.len && nrsub < 8 {
+                            rsubp[nrsub as usize] = DefId {
+                                module: dinst.module,
+                                node: unsafe (*self.mod_ast(dinst.module)).list(dig)[gi as usize],
+                            };
+                            rsuba[nrsub as usize] = dinst.args[gi as usize];
+                            nrsub = nrsub + 1;
+                            gi = gi + 1;
+                        }
                     }
                 }
             }
@@ -6857,9 +7121,14 @@ extend TypeChecker {
         // generic/dyn receiver bound method
         let bt2 = *self.type_at(base);
         if bt2.kind == TypeKind::TYPE_GENERIC || bt2.kind == TypeKind::TYPE_DYN {
-            let gd = unsafe (*self.mod_ast(bt2.module)).at_const(bt2.as_data.decl);
+            let bdecl = if bt2.kind == TypeKind::TYPE_DYN {
+                unsafe (*self.cur_ast()).dyn_decl_of(&bt2);
+            } else {
+                bt2.as_data.decl;
+            };
+            let gd = unsafe (*self.mod_ast(bt2.module)).at_const(bdecl);
             if gd.kind == NodeKind::NODE_INTERFACE {
-                let m = self.find_interface_method(bt2.module, bt2.as_data.decl, name, 0);
+                let m = self.find_interface_method(bt2.module, bdecl, name, 0);
                 if m.node != NODE_NONE {
                     unsafe (*self.cur_ast()).set_resolution_def(mname, m);
                     return self.decl_type_in(m.module, m.node);

@@ -699,6 +699,3 @@ Roadmap, in priority order:
 4. **Coroutines** — `launch f(args)`: uncolored spawn on stackful coroutines with `Chan<T>`, staged
    from a single-threaded scheduler to M:N work stealing.
 5. **Tooling** — an LSP server, then syntax highlighting.
-
-Known language gaps: closures inside generic functions; `dyn` extensions (generic interfaces like
-`dyn Iterator<i32>`, superinterface dispatch, downcasting, custom-allocator `Box<dyn I>`).

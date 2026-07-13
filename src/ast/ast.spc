@@ -507,6 +507,7 @@ pub struct DynUse {
     pub node: NodeId,
     pub src: TypeId,
     pub dyn_ty: TypeId,
+    pub alloc: TypeId, // Box-erase allocator (TYPE_NONE = Global); its free glue calls A::default()
 }
 pub struct DerefUse {
     pub node: NodeId,
@@ -721,6 +722,22 @@ extend Ast {
         return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
 
+    // Intern a `dyn` type: the payload is an instance-table index carrying the interface decl
+    // and its (possibly empty) type arguments; `module` mirrors the interface's module so
+    // existing `dy.module` reads stay valid.
+    pub fn intern_dyn(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+        let ii = self.intern_instance(module, decl, args, n);
+        let idx = self.type_at(ii).as_data.inst;
+        return self.intern_type(
+            Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: idx } },
+        );
+    }
+
+    // The interface (or dyn-fn signature) node behind a TYPE_DYN payload.
+    pub fn dyn_decl_of(self: &Self, dy: &Ty) NodeId {
+        return self.instance(dy.as_data.inst).decl;
+    }
+
     pub fn instance(self: &Self, index: u32) &TyInstance {
         return self.instances.at(index as usize);
     }
@@ -793,6 +810,19 @@ extend Ast {
                 }
                 self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
             },
+            TYPE_DYN => {
+                // dyn payload is an instance index (interface + optional type args): remap it
+                // into this Ast's instance table, preserving kind/qualifier/module
+                let inst = *src.instance(ty.as_data.inst);
+                let mut na: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+                for i in 0..inst.n {
+                    na[i] = self.reintern(src, inst.args[i]);
+                }
+                let ii = self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
+                let mut nd = ty;
+                nd.as_data.inst = self.type_at(ii).as_data.inst;
+                self.intern_type(nd);
+            },
             _ => self.intern_type(ty),
         };
     }
@@ -823,7 +853,10 @@ extend Ast {
     }
 
     pub fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) {
-        self.dyn_uses.push(DynUse { node: node, src: src, dyn_ty: dyn_ty });
+        self.add_dyn_use_alloc(node, src, dyn_ty, TYPE_NONE);
+    }
+    pub fn add_dyn_use_alloc(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId, alloc: TypeId) {
+        self.dyn_uses.push(DynUse { node: node, src: src, dyn_ty: dyn_ty, alloc: alloc });
         ensure_u32_len(&mut self.dyn_at, self.nodes.len(), node as usize + 1);
         self.dyn_at[node as usize] = self.dyn_uses.len() as u32;
     }

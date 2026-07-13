@@ -599,6 +599,11 @@ extend Resolver {
                 return;
             }
         }
+        // `dyn_cast` is a compiler intrinsic (vtable type-id compare): no declaration exists;
+        // the typechecker recognizes the unresolved name and types the call.
+        if span_is(self.source, name, "dyn_cast") {
+            return;
+        }
         self.errors.emit(
             name.start,
             name.end - name.start,
