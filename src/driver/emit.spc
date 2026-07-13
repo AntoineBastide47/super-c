@@ -231,7 +231,6 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
         }
     }
     let back = r.take_ast();
-    r.free();
     p.modules[i].ast = back;
     return !had;
 }
@@ -266,7 +265,7 @@ fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut V
 }
 
 // A deferred static_assert that failed once the whole package was typed: render it against the owning module.
-fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) void {
+fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) {
     let p = ctx as *mut loader::Package;
     let sp = unsafe (*p).modules[m as usize].ast.at_const(cond).span;
     let src = unsafe (*p).modules[m as usize].source.as_str();
@@ -279,7 +278,6 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     }
     errs.finalize(src, file);
     errs.log();
-    errs.free();
     unsafe (*p).ok = false;
 }
 
@@ -291,7 +289,7 @@ type TCases = Array<cg::CgTestCase, 512>;
 // Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
 // parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
 // target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
-fn platform_filter(p: &mut loader::Package, target: i32) void {
+fn platform_filter(p: &mut loader::Package, target: i32) {
     let n = p.modules.len();
     for mi in 0..n {
         let m = &mut p.modules[mi];
@@ -392,7 +390,7 @@ fn lint_owner(ents: &Vector<LintEnt>, pos: u32) i64 {
     return -1;
 }
 
-fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut Vector<LintEnt>) void {
+fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut Vector<LintEnt>) {
     let a = mod_ast_c(p, m as ModuleId);
     // items of a module reported this run are candidates; everything else roots the graph
     let reported = if only_mod >= 0 {
@@ -482,7 +480,7 @@ fn lint_report_item(
     m: ModuleId,
     iid: NodeId,
     root_mod: bool,
-) void {
+) {
     let it = unsafe (*a).at_const(iid);
     let src = p.modules[m as usize].source.as_str();
     let mut what = "function";
@@ -513,7 +511,7 @@ fn lint_report_item(
     errs.warn(nsp.start, nsp.end - nsp.start, format("unused {} '{}'", what, diag::span_str(src, nsp.start, nsp.end)));
 }
 
-fn lint_unused_items(p: &mut loader::Package, only_mod: i32) void {
+fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
     // one flat reachable-bitset over all modules' node ids
     let nm = p.modules.len();
     let mut starts = Vector::<usize>::new();
@@ -609,9 +607,6 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) void {
             lo = lo + 1;
         }
     }
-    edges.free();
-    queue.free();
-    ents.free();
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
             continue;
@@ -640,10 +635,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) void {
             errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
             errs.log();
         }
-        errs.free();
     }
-    used.free();
-    starts.free();
 }
 
 // `super-c lint <root>`: resolve + typecheck the root's module closure with lints enabled for the

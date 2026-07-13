@@ -125,11 +125,10 @@ extend DocPool {
     }
 
     pub fn pair(self: &mut Self, a: DocId, b: DocId) DocId {
-        let mut v = Vector::<DocId>::new();
+        let mut v = Vector::<DocId>::with_capacity(2);
         v.push(a);
         v.push(b);
         let d = self.concat(&v);
-        v.free();
         return d;
     }
 }

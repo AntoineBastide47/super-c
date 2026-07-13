@@ -61,7 +61,7 @@ pub fn build_out_path(root_dir: str, mod_path: str, ext: str) String {
 }
 
 // Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
-pub fn mkdir_p(path: str) void {
+pub fn mkdir_p(path: str) {
     let n = path.len();
     if n == 0 || n >= 4096 {
         return;
@@ -100,7 +100,7 @@ pub fn open_out(path: str) *mut stdio::FILE {
 // drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
 // program no longer produces (a removed module/instance/@test-runner/@c.source wrapper) -- a stale TU would
 // otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
-pub fn prune_orphans(dir: *const char, keep: &Vector<String>) void {
+pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
     let d = unsafe shim::sc_opendir(dir);
     if d == null {
         return;
@@ -149,7 +149,7 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) void {
 }
 
 // The runtime header shared by every generated module: the C standard library includes.
-pub fn write_super_rt(root_dir: str) void {
+pub fn write_super_rt(root_dir: str) {
     let path = build_out_path(root_dir, "super_rt", ".h");
     let f = open_out(path.as_str());
     if f != null {

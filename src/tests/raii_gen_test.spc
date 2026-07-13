@@ -233,14 +233,14 @@ fn new_gen() Gen {
 
 extend Gen {
     // Record one id byte into the expected-free multiset.
-    fn push_id(self: &mut Gen, id: i32) void {
+    fn push_id(self: &mut Gen, id: i32) {
         self.exp[self.eat as usize] = id as char;
         self.eat = self.eat + 1;
         self.exp[self.eat as usize] = 0 as char;
     }
 
     // Emit one scenario for shape `sh` and operation `op`; flush first if the id budget would overflow.
-    fn scenario(self: &mut Gen, sh: *const char, op: i32) void {
+    fn scenario(self: &mut Gen, sh: *const char, op: i32) {
         if self.idc + id_need(op) > ID_CAP {
             self.flush();
         }
@@ -391,7 +391,7 @@ extend Gen {
 
     // Assemble the accumulated scenarios into one program, build + run it, and assert exit 0 with a matching
     // free multiset. Then reset for the next batch.
-    fn flush(self: &mut Gen) void {
+    fn flush(self: &mut Gen) {
         if self.sc == 0 {
             return;
         }
@@ -418,7 +418,7 @@ extend Gen {
         self.nbatch = self.nbatch + 1;
     }
 
-    fn finish(self: &mut Gen) void {
+    fn finish(self: &mut Gen) {
         self.flush();
         if self.prog != null {
             unsafe stdlib::free(self.prog);
@@ -439,7 +439,7 @@ fn callarg(op: i32) *const char {
 }
 
 // Enumerate every shape over `alphabet` up to `max_depth` (length >= 1), emitting `op` for each.
-fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *const char, op: i32) void {
+fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *const char, op: i32) {
     if at > 0 {
         unsafe sh[at as usize] = 0 as char;
         g.scenario(sh as *const char, op);
@@ -455,7 +455,7 @@ fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *c
 }
 
 // Run every OR-switch shape (through depth 6, matching tests/raii_gen_test.c's MAX_SWITCH_DEPTH) per mode.
-fn run_switch(op: i32) void {
+fn run_switch(op: i32) {
     let mut g = new_gen();
     let mut sh = Buf16 {};
     enum_shapes(&mut g, &mut sh.b[0], 0, 6, "OR".ptr() as *const char, op);
@@ -463,7 +463,7 @@ fn run_switch(op: i32) void {
 }
 
 // Run every ORB general shape (through depth 5, matching tests/raii_gen_test.c's MAX_GENERAL_DEPTH) per op.
-fn run_general(op: i32) void {
+fn run_general(op: i32) {
     let mut g = new_gen();
     let mut sh = Buf16 {};
     enum_shapes(&mut g, &mut sh.b[0], 0, 5, "ORB".ptr() as *const char, op);

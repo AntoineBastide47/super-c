@@ -9,11 +9,11 @@ import tests::harness as h;
 fn resolves() {
     h::expect_resolve_ok(
         "forward references",
-        "fn use_it(p: Pair) void { make(p); }\nfn make(p: Pair) void {}\nstruct Pair { left: i32, right: i32, }\n",
+        "fn use_it(p: Pair) { make(p); }\nfn make(p: Pair) {}\nstruct Pair { left: i32, right: i32, }\n",
     );
     h::expect_resolve_ok(
         "nested shadowing",
-        "fn f() void {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\nfn g(n: i32) void {}\n",
+        "fn f() {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\nfn g(n: i32) {}\n",
     );
     h::expect_resolve_ok(
         "generics self and Self",
@@ -21,27 +21,27 @@ fn resolves() {
     );
     h::expect_resolve_ok(
         "loop match and let scopes",
-        "struct List {}\nfn each(items: List) void { for x in items { take(x); } }\nfn classify(c: u8) i32 { return switch c { 0 => 1, n => n, _ => 0, }; }\nfn take(n: i32) void {}\n",
+        "struct List {}\nfn each(items: List) { for x in items { take(x); } }\nfn classify(c: u8) i32 { return switch c { 0 => 1, n => n, _ => 0, }; }\nfn take(n: i32) {}\n",
     );
 }
 
 @test
 fn errors() {
     h::expect_resolve_err_msg("undefined value", "fn main() i32 { bar(); }\n", "cannot find value 'bar'");
-    h::expect_resolve_err_msg("undefined type", "fn f(x: Widget) void {}\n", "cannot find type 'Widget'");
+    h::expect_resolve_err_msg("undefined type", "fn f(x: Widget) {}\n", "cannot find type 'Widget'");
     h::expect_resolve_err_msg("duplicate item", "struct P {}\nstruct P {}\n", "duplicate definition of 'P'");
-    h::expect_resolve_err_msg("duplicate parameter", "fn f(a: i32, a: i32) void {}\n", "duplicate definition of 'a'");
+    h::expect_resolve_err_msg("duplicate parameter", "fn f(a: i32, a: i32) {}\n", "duplicate definition of 'a'");
     h::expect_resolve_err_msg(
         "duplicate let",
-        "fn f() void { let x: i32 = 1; let x: i32 = 2; }\n",
+        "fn f() { let x: i32 = 1; let x: i32 = 2; }\n",
         "duplicate definition of 'x'",
     );
     h::expect_resolve_err_msg(
         "local escapes its block",
-        "fn f() void { { let x: i32 = 1; } use_x(x); }\nfn use_x(n: i32) void {}\n",
+        "fn f() { { let x: i32 = 1; } use_x(x); }\nfn use_x(n: i32) {}\n",
         "cannot find value 'x'",
     );
-    h::expect_resolve_err_msg("Self outside extend", "fn f(x: Self) void {}\n", "'Self' is only valid");
+    h::expect_resolve_err_msg("Self outside extend", "fn f(x: Self) {}\n", "'Self' is only valid");
 }
 
 // Collect all NODE_IDENTIFIER value-uses named `name` that the resolver bound, in creation order.
@@ -61,7 +61,7 @@ fn value_uses(a: &Ast, src: *const char, name: *const char, out: *mut NodeId, ca
 // Two uses of `x` bind to the two different `let x` decls: inner use to the inner let, outer to the outer.
 @test
 fn nearest_shadow() {
-    let src = "fn g(n: i32) void {}\nfn f() void {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\n";
+    let src = "fn g(n: i32) {}\nfn f() {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\n";
     let mut c = h::compile_ast(src, h::STAGE_RESOLVE);
     assert(c.errors == 0, "resolves cleanly");
     let outer_let = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0); // created first
@@ -72,7 +72,6 @@ fn nearest_shadow() {
     assert(c.ast.resolution(uses[0]) == inner_let, "inner g(x) binds to the inner let");
     assert(c.ast.resolution(uses[1]) == outer_let, "outer g(x) binds to the outer let");
     assert(inner_let != outer_let, "the two lets are distinct declarations");
-    c.ast.free();
 }
 
 // The same spelling in the value and type namespaces resolves to different decls.
@@ -97,7 +96,6 @@ fn namespace_separation() {
         id = id + 1;
     }
     assert(type_path != NODE_NONE && c.ast.resolution(type_path) == struct_decl, "type Foo binds to the struct");
-    c.ast.free();
 }
 
 // The capture count of each closure, in node order (inner closures complete first).
@@ -112,7 +110,6 @@ fn closure_captures(src: str, out: *mut u32, cap: usize) usize {
         }
         id = id + 1;
     }
-    c.ast.free();
     return n;
 }
 

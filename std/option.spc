@@ -134,7 +134,6 @@ extend<T> Option<T> {
     pub fn and<U>(self: Option<T>, other: Option<U>) Option<U> {
         return switch self {
             Some(v) => {
-                v.free();
                 other;
             },
             None => Option::<U>::None,
@@ -175,7 +174,7 @@ extend<T: Eq> Option<T> as Eq {
     pub fn eq(self: &Option<T>, other: &Option<T>) bool {
         return switch self {
             Some(a) => switch other {
-                Some(b) => a.eq(b),
+                Some(b) => *a == *b,
                 None => false,
             },
             None => other.is_none(),
@@ -204,7 +203,6 @@ extend<T: Format> Option<T> as Format {
         };
         let mut s = String::from_str("Some(");
         s.push_string(&inner);
-        inner.free();
         s.push_str(")");
         return s;
     }

@@ -353,7 +353,6 @@ fn main() i32 {
     let mut s = String::from_str("hi");
     s.push_str("!");
     s.println();
-    s.free();
 
     let o = Option::<i32>::some(v.len() as i32);
     return o.unwrap_or(0);   // 3
@@ -472,7 +471,7 @@ fn format(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
 
 ```superc
 @c.noreturn
-fn panic() void { /* ... */ }
+fn panic() { /* ... */ }
 
 @c.packed
 struct Header { pub magic: u32, pub version: u16 }

@@ -41,9 +41,8 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     pub fn set(self: &mut Array<T, N>, index: usize, value: T) {
-        let p = (&mut self.data[0]) as *mut T;
-        unsafe p[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
-        unsafe p[index] = value;
+        unsafe self.data[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
+        unsafe self.data[index] = value;
     }
 
     pub fn first(self: &Array<T, N>) Option<&T> {
@@ -146,9 +145,8 @@ extend<T: Clone, const N: usize> Array<T, N> {
 // accessors borrow (`&T`) rather than hand out sharing copies, so the Array is the only owner.
 extend<T: Free, const N: usize> Array<T, N> as Free {
     pub fn free(self: &mut Array<T, N>) {
-        let p = (&mut self.data[0]) as *mut T;
         for i in 0..N {
-            unsafe p[i].free();
+            unsafe self.data[i].free();
         }
     }
 }
@@ -165,7 +163,7 @@ extend<T: Eq, const N: usize> Array<T, N> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub fn contains(self: &Array<T, N>, x: &T) bool {
         for i in 0..N {
-            if self.data[i].eq(x) {
+            if self.data[i] == *x {
                 return true;
             }
         }
@@ -175,7 +173,7 @@ extend<T: Eq, const N: usize> Array<T, N> {
     // Index of the first element equal to `x`, or `None`.
     pub fn position(self: &Array<T, N>, x: &T) Option<usize> {
         for i in 0..N {
-            if self.data[i].eq(x) {
+            if self.data[i] == *x {
                 return Option::<usize>::Some(i);
             }
         }
@@ -192,7 +190,7 @@ extend<T: Ord, const N: usize> Array<T, N> {
         }
         let mut i: usize = 0;
         while i + 1 < N {
-            if self.data[i].cmp(&self.data[i + 1]) > 0 {
+            if self.data[i] > self.data[i + 1] {
                 return false;
             }
             i = i + 1;
@@ -225,10 +223,10 @@ extend<T: Ord, const N: usize> Array<T, N> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && self.data[child].cmp(&self.data[child + 1]) < 0 {
+            if child + 1 < end && self.data[child] < self.data[child + 1] {
                 child = child + 1;
             }
-            if self.data[r].cmp(&self.data[child]) >= 0 {
+            if self.data[r] >= self.data[child] {
                 return;
             }
             self.swap(r, child);
@@ -314,7 +312,7 @@ extend<T, const N: usize> Array<T, N> {
             while j > 0 {
                 let prev = key(&self.data[j - 1]);
                 let cur = key(&self.data[j]);
-                if prev.cmp(&cur) <= 0 {
+                if prev <= cur {
                     break;
                 }
                 self.swap(j - 1, j);
@@ -392,7 +390,7 @@ extend<T: Eq, const N: usize> Array<T, N> as Eq {
         for i in 0..N {
             let a = self.at(i);
             let b = other.at(i);
-            if !a.eq(b) {
+            if *a != *b {
                 return false;
             }
         }

@@ -77,7 +77,7 @@ extend Lexer {
 }
 
 extend Lexer as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.tokens.free();
         self.errors.free();
     }
@@ -118,11 +118,11 @@ fn hex_value(b: u8) i32 {
     return (b - b'a' + 10) as i32;
 }
 
-fn add_token(l: &mut Lexer, token_type: TokenType) void {
+fn add_token(l: &mut Lexer, token_type: TokenType) {
     l.tokens.push(Token::new(token_type, l.start as u32, (l.current - l.start) as u32));
 }
 
-fn add_match(l: &mut Lexer, expected: u8, matched: TokenType, unmatched: TokenType) void {
+fn add_match(l: &mut Lexer, expected: u8, matched: TokenType, unmatched: TokenType) {
     let kind = if match_byte(l, expected) {
         matched;
     } else {
@@ -154,12 +154,12 @@ fn match_byte(l: &mut Lexer, expected: u8) bool {
 }
 
 @c.cold
-fn lexer_error(l: &mut Lexer, message: str) void {
+fn lexer_error(l: &mut Lexer, message: str) {
     l.errors.emit(l.start as u32, (l.current - l.start) as u32, String::from_str(message));
 }
 
 @c.cold
-fn lexer_error_at(l: &mut Lexer, at: usize, len: usize, message: str) void {
+fn lexer_error_at(l: &mut Lexer, at: usize, len: usize, message: str) {
     l.errors.emit(at as u32, len as u32, String::from_str(message));
 }
 
@@ -349,7 +349,7 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
     return TokenType::Identifier;
 }
 
-fn identifier(l: &mut Lexer) void {
+fn identifier(l: &mut Lexer) {
     // Scan the [_A-Za-z0-9] run via the class table. No bounds check: the trailing-NUL sentinel (SOURCE_PAD)
     // is not id-part, so the run stops at (or before) len -- exactly the old boundary.
     let mut i = l.current;
@@ -377,7 +377,7 @@ fn validate_utf8_at(l: &mut Lexer, i: &mut usize) bool {
     return true;
 }
 
-fn whitespace(l: &mut Lexer) void {
+fn whitespace(l: &mut Lexer) {
     // Skip a maximal run of whitespace bytes via the class table. No bounds check: the trailing-NUL sentinel
     // is not WS, so the run stops at (or before) len. '\r' and '\n' are both WS, so advancing one byte at a
     // time is identical to the old explicit CRLF handling.
@@ -388,7 +388,7 @@ fn whitespace(l: &mut Lexer) void {
     l.current = i;
 }
 
-fn line_comment(l: &mut Lexer) void {
+fn line_comment(l: &mut Lexer) {
     let mut i = l.current;
     while i < l.bytes.len() {
         let b = l.bytes.byte_at(i);
@@ -407,7 +407,7 @@ fn line_comment(l: &mut Lexer) void {
     l.current = i;
 }
 
-fn block_comment(l: &mut Lexer) void {
+fn block_comment(l: &mut Lexer) {
     let mut i = l.current;
     let mut depth: usize = 1;
     while i < l.bytes.len() {
@@ -524,7 +524,7 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
     return UINT32_MAX;
 }
 
-fn string_lit(l: &mut Lexer, kind: TokenType) void {
+fn string_lit(l: &mut Lexer, kind: TokenType) {
     let mut i = l.current;
     while i < l.bytes.len() {
         let b = l.bytes.byte_at(i);
@@ -575,7 +575,7 @@ fn label_ahead(l: &Lexer) bool {
     return i >= l.bytes.len() || l.bytes.byte_at(i) != b'\'';
 }
 
-fn character(l: &mut Lexer, byte_character: bool) void {
+fn character(l: &mut Lexer, byte_character: bool) {
     let mut count: usize = 0;
     let mut malformed = false;
     let mut invalid_byte = false;
@@ -645,7 +645,7 @@ fn raw_string_ahead(l: &Lexer, hashes: *mut usize) bool {
     return true;
 }
 
-fn raw_string(l: &mut Lexer, hashes: usize) void {
+fn raw_string(l: &mut Lexer, hashes: usize) {
     if hashes > 255 {
         let start = l.start;
         lexer_error_at(l, start, hashes + 1, "raw string delimiter contains more than 255 '#' characters");
@@ -679,7 +679,7 @@ fn raw_string(l: &mut Lexer, hashes: usize) void {
     lexer_error(l, "unterminated raw string literal");
 }
 
-fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(u8) bool) void {
+fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(u8) bool) {
     let mut i = l.current;
     while i < l.bytes.len() {
         let b = l.bytes.byte_at(i);
@@ -712,7 +712,7 @@ fn num_suffix_kind(p: *const u8, n: usize) i32 {
     return -1;
 }
 
-fn number(l: &mut Lexer) void {
+fn number(l: &mut Lexer) {
     let mut error_at = USIZE_MAX;
     let mut error: str = "";
     let mut is_float = false;
@@ -901,7 +901,7 @@ fn number(l: &mut Lexer) void {
     }
 }
 
-fn scan_token(l: &mut Lexer) void {
+fn scan_token(l: &mut Lexer) {
     let c = l.bytes.byte_at(l.current);
     if c < 0x80u8 {
         l.current = l.current + 1;
@@ -1162,7 +1162,7 @@ fn scan_token(l: &mut Lexer) void {
 }
 
 extend Lexer {
-    pub fn scan_tokens(self: &mut Self) void {
+    pub fn scan_tokens(self: &mut Self) {
         self.tokens.reserve(self.bytes.len() / 5);
         if self.current == 0 && self.bytes.len() >= 3 && unsafe self.bytes.byte_at(0) == 0xEFu8 && unsafe self.bytes.byte_at(
             1,
@@ -1186,7 +1186,7 @@ extend Lexer {
     pub fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
-    pub fn log_errors(self: &Self) void {
+    pub fn log_errors(self: &Self) {
         self.errors.log();
     }
 }

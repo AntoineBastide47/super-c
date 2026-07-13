@@ -90,7 +90,7 @@ extend TestPlan {
     }
 }
 extend TestPlan as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.cases.free();
         self.fx_init.free();
         self.fx_free.free();
@@ -101,14 +101,13 @@ extend TestPlan as Free {
 }
 
 // A test-plan validation error, rendered with the compiler's usual source excerpt.
-fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) void {
+fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) {
     let src = p.modules[m as usize].source.as_str();
     let file = p.modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
     errs.emit(sp.start, sp.end - sp.start, String::from_cstr(msg));
     errs.finalize(src, file);
     errs.log();
-    errs.free();
     p.ok = false;
 }
 
@@ -252,7 +251,7 @@ fn plan_suite_of(plan: &mut TestPlan, m: ModuleId, ty: DefId, is_enum: bool, cre
 }
 
 // Collect + validate every @test/@test_init/@test_free in the package into a runnable plan.
-pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) void {
+pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
     let n = p.modules.len();
     // Pass 1: fixture producers/teardowns (module, suite, and global).
     for m in 0..n {

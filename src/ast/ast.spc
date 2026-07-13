@@ -642,7 +642,7 @@ extend Ast {
     pub fn mark(self: &Self) u32 {
         return self.scratch.len() as u32;
     }
-    pub fn push(self: &mut Self, id: NodeId) void {
+    pub fn push(self: &mut Self, id: NodeId) {
         self.scratch.push(id);
     }
 
@@ -655,7 +655,7 @@ extend Ast {
         return list;
     }
 
-    pub fn init_resolutions(self: &mut Self) void {
+    pub fn init_resolutions(self: &mut Self) {
         self.resolutions.clear();
         self.resolutions.reserve(self.nodes.len());
         for _ in 0..self.nodes.len() {
@@ -663,7 +663,7 @@ extend Ast {
         }
     }
 
-    pub fn init_types(self: &mut Self) void {
+    pub fn init_types(self: &mut Self) {
         self.types.clear();
         self.types.reserve(self.nodes.len());
         for _ in 0..self.nodes.len() {
@@ -710,7 +710,7 @@ extend Ast {
         let mut idx = cur as u32;
         let mut valid = false;
         if hinted != 0xFFFFFFFFu32 && hinted as usize < cur {
-            valid = self.instances.at(hinted as usize).eq(&it);
+            valid = self.instances[hinted as usize] == it;
         }
         if valid {
             idx = hinted;
@@ -743,9 +743,7 @@ extend Ast {
             Some(id) => *id,
             None => 0xFFFFFFFFu32,
         };
-        if hinted != 0xFFFFFFFFu32 && hinted as usize < self.method_insts.len() && self.method_insts.at(hinted as usize).eq(
-            &mi,
-        ) {
+        if hinted != 0xFFFFFFFFu32 && hinted as usize < self.method_insts.len() && self.method_insts[hinted as usize] == mi {
             return false;
         }
         let idx = self.method_insts.len() as u32;
@@ -754,7 +752,7 @@ extend Ast {
         return true;
     }
 
-    pub fn add_attr(self: &mut Self, attr: Attr) void {
+    pub fn add_attr(self: &mut Self, attr: Attr) {
         self.attrs.push(attr);
     }
 
@@ -799,7 +797,7 @@ extend Ast {
         };
     }
 
-    pub fn set_type_args(self: &mut Self, node: NodeId, args: *const TypeId, n: u8) void {
+    pub fn set_type_args(self: &mut Self, node: NodeId, args: *const TypeId, n: u8) {
         let mut m = n;
         if m > 8 {
             m = 8;
@@ -824,7 +822,7 @@ extend Ast {
         return self.mono.at((idx - 1) as usize) as *const MonoUse;
     }
 
-    pub fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) void {
+    pub fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) {
         self.dyn_uses.push(DynUse { node: node, src: src, dyn_ty: dyn_ty });
         ensure_u32_len(&mut self.dyn_at, self.nodes.len(), node as usize + 1);
         self.dyn_at[node as usize] = self.dyn_uses.len() as u32;
@@ -841,7 +839,7 @@ extend Ast {
         return self.dyn_uses.at((idx - 1) as usize) as *const DynUse;
     }
 
-    pub fn add_deref_use(self: &mut Self, du: &DerefUse) void {
+    pub fn add_deref_use(self: &mut Self, du: &DerefUse) {
         self.deref_uses.push(*du);
         ensure_u32_len(&mut self.deref_at, self.nodes.len(), du.node as usize + 1);
         self.deref_at[du.node as usize] = self.deref_uses.len() as u32;
@@ -867,7 +865,7 @@ extend Ast {
     pub fn list(self: &Self, list: NodeList) *const NodeId {
         return unsafe (self.children.as_ptr() + list.start as usize);
     }
-    pub fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) void {
+    pub fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
         self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl };
     }
     pub fn resolution(self: &Self, ref_id: NodeId) NodeId {
@@ -876,13 +874,13 @@ extend Ast {
     pub fn resolution_def(self: &Self, ref_id: NodeId) DefId {
         return self.resolutions[ref_id as usize];
     }
-    pub fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) void {
+    pub fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
         self.resolutions[ref_id as usize] = decl;
     }
     pub fn builtin(b: BuiltinType) TypeId {
         return b as TypeId + 1;
     }
-    pub fn set_type(self: &mut Self, n: NodeId, t: TypeId) void {
+    pub fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
         self.types[n as usize] = t;
     }
     pub fn type_of(self: &Self, n: NodeId) TypeId {
@@ -893,7 +891,7 @@ extend Ast {
     }
 }
 
-fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) void {
+fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {
     let mut want = need;
     if nodes_len > want {
         want = nodes_len;
@@ -905,7 +903,7 @@ fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) void {
 }
 
 extend Ast as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.nodes.free();
         self.children.free();
         self.scratch.free();

@@ -39,7 +39,6 @@ fn emit_collects() {
     assert(e.errors.len() == 1 && e.starts.len() == 1 && e.lens.len() == 1, "one message + span recorded");
     assert(e.errors.at(0).eq_str("count is 7 for x"), "format() rendering"); // pre-finalize
     assert(*e.starts.at(0) == 12 && *e.lens.at(0) == 3, "span recorded verbatim");
-    e.free();
 }
 
 @test
@@ -53,7 +52,6 @@ fn line_col_and_carets() {
     assert(contains(&b, "  foo bar"), "offending source line");
     assert(contains(&b, "^^^"), "span == 3 carets");
     assert(!contains(&b, "^^^^"), "...and no more than 3");
-    e.free();
 }
 
 @test
@@ -62,7 +60,6 @@ fn file_in_location() {
     let mut e = diag::Errors::new();
     let b = render_into(&mut e, src, "boom", offset_of(src, "bar"), 3, "src/foo.spc");
     assert(contains(&b, "--> src/foo.spc:3:7"), "file:line:col");
-    e.free();
 }
 
 @test
@@ -75,7 +72,6 @@ fn notes() {
     let b = e.errors.at(0).clone();
     assert(contains(&b, "error: unknown name"), "error line");
     assert(contains(&b, "= note: did you mean 'x'?"), "note line");
-    e.free();
 }
 
 @test
@@ -85,12 +81,11 @@ fn caret_clamping() {
     let mut e0 = diag::Errors::new();
     let zero = render_into(&mut e0, src, "m", off, 0, ""); // span < 1 -> a single caret
     assert(contains(&zero, "^") && !contains(&zero, "^^"), "zero span -> one caret");
-    e0.free();
+
     // A span overrunning the line end is clamped to what remains ("bc" of "abc" -> 2 carets).
     let mut e1 = diag::Errors::new();
     let over = render_into(&mut e1, "abc\n", "m", 1, 100, "");
     assert(contains(&over, "^^") && !contains(&over, "^^^"), "overrun clamped");
-    e1.free();
 }
 
 @test
@@ -100,7 +95,6 @@ fn line_starts_crlf() {
     let mut e = diag::Errors::new();
     let b = render_into(&mut e, src, "m", offset_of(src, "d"), 1, "");
     assert(contains(&b, "--> 4:1"), "mixed terminators");
-    e.free();
 }
 
 @test
@@ -122,7 +116,6 @@ fn long_line_windowing() {
         needle.b[k] = 'x' as char;
     }
     assert(!contains(&b, str::from_raw((&needle.b[0]) as *const u8, 150)), "long line windowed below 150 chars");
-    e.free();
 }
 
 @test
@@ -131,5 +124,4 @@ fn offset_past_eof() {
     let mut e = diag::Errors::new();
     let b = render_into(&mut e, src, "eof", src.len() as u32 + 50, 1, ""); // clamped to src_len, no OOB
     assert(contains(&b, "error: eof"), "renders without overrun");
-    e.free();
 }

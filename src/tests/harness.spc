@@ -51,7 +51,7 @@ extend Compiled {
 }
 
 // Copy at most 511 bytes of `s` into dst[512], NUL-terminated (dst is pre-zeroed by the caller).
-fn copy_msg(dst: *mut char, s: &String) void {
+fn copy_msg(dst: *mut char, s: &String) {
     let n = s.len();
     let k = if n < 511 {
         n;
@@ -79,11 +79,9 @@ pub fn compile(src: str, stop: i32) Compiled {
         if r.errors > 0 {
             copy_msg(&mut r.first[0], lx.errors.errors.at(0));
         }
-        lx.free();
         return r;
     }
     let mut toks = lx.take_tokens();
-    lx.free();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
     ps.build_ast();
     if ps.has_errors() {
@@ -92,10 +90,8 @@ pub fn compile(src: str, stop: i32) Compiled {
         if r.errors > 0 {
             copy_msg(&mut r.first[0], ps.errors.errors.at(0));
         }
-        ps.free();
         return r;
     }
-    ps.free();
     if stop == STAGE_PARSE {
         return r;
     }
@@ -116,8 +112,6 @@ pub fn compile(src: str, stop: i32) Compiled {
         if r.errors != 0 {
             r.stage = STAGE_RESOLVE;
         }
-        ceval.free();
-        p.free();
         return r;
     }
     // Typecheck every module; snapshot the user module's diagnostics.
@@ -127,8 +121,6 @@ pub fn compile(src: str, stop: i32) Compiled {
     if r.errors != 0 {
         r.stage = STAGE_TYPECHECK;
     }
-    ceval.free();
-    p.free();
     return r;
 }
 
@@ -146,18 +138,15 @@ pub fn parse_ast(src: str) ParsedAst {
     lx.scan_tokens();
     if lx.has_errors() {
         r.errors = lx.errors.errors.len();
-        lx.free();
         return r;
     }
     let mut toks = lx.take_tokens();
-    lx.free();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
     ps.build_ast();
     if ps.has_errors() {
         r.errors = ps.errors.errors.len();
     }
     r.ast = ps.take_ast();
-    ps.free();
     return r;
 }
 
@@ -167,15 +156,12 @@ pub fn parse_has_error(src: str) bool {
     let mut lx = lex::Lexer::new(&mut s, "");
     lx.scan_tokens();
     if lx.has_errors() {
-        lx.free();
         return true;
     }
     let mut toks = lx.take_tokens();
-    lx.free();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
     ps.build_ast();
     let e = ps.has_errors();
-    ps.free();
     return e;
 }
 
@@ -194,7 +180,6 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
     if !p.ok {
         out.errors = 1;
         out.stage = STAGE_PARSE;
-        p.free();
         return out;
     }
     let pkg = (&mut p) as *mut loader::Package;
@@ -216,8 +201,6 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
     let a = p.modules[uidx].ast;
     p.modules[uidx].ast = Ast::new(0);
     out.ast = a;
-    ceval.free();
-    p.free();
     return out;
 }
 
@@ -291,7 +274,7 @@ extend CompiledC {
     }
 }
 extend CompiledC as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         if self.code != null {
             unsafe stdlib::free(self.code);
             self.code = null;
@@ -306,7 +289,6 @@ pub fn compile_c(src: str) CompiledC {
     let mut p = loader::package_from_source(src.ptr() as *const char, src.len(), "std".ptr() as *const char);
     if !p.ok {
         out.errors = 1;
-        p.free();
         return out;
     }
     let pkg = (&mut p) as *mut loader::Package;
@@ -325,16 +307,12 @@ pub fn compile_c(src: str) CompiledC {
     }
     if rr.errors != 0 {
         out.errors = rr.errors;
-        ceval.free();
-        p.free();
         return out;
     }
     loader::package_propagate_instances(&mut p);
     let f = unsafe tmpfile();
     if f == null {
         out.errors = 1;
-        ceval.free();
-        p.free();
         return out;
     }
     // Emit EVERY module's header + .c (like tests/test_harness.h's sc_codegen concatenation), so prelude
@@ -351,12 +329,9 @@ pub fn compile_c(src: str) CompiledC {
         if mi == uidx && c.has_errors() {
             out.errors = c.errors.errors.len();
         }
-        c.free();
     }
     out.code = read_stream(f);
     unsafe stdio::fclose(f);
-    ceval.free();
-    p.free();
     return out;
 }
 
@@ -393,7 +368,7 @@ extend RunResult {
     }
 }
 extend RunResult as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         if self.out != null {
             unsafe stdlib::free(self.out);
             self.out = null;
@@ -412,7 +387,7 @@ fn slurp(path: *const char) *mut char {
     return buf;
 }
 
-fn rm_dir(dir: *const char) void {
+fn rm_dir(dir: *const char) {
     let mut cmd = Path512 {};
     unsafe stdio::snprintf(&mut cmd.b[0], 512, "rm -rf '%s'".ptr() as *const char, dir);
     let _ = stdlib::system(str::from_cstr(&cmd.b[0]));
@@ -531,7 +506,7 @@ pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
 }
 
 // Mirror main.spc's resolve_module, capturing module `i`'s diagnostics when it is the user module (cap).
-fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
+fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) {
     let pkg = p as *const loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -552,12 +527,11 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
         }
     }
     let back = rr.take_ast();
-    rr.free();
     p.modules[i].ast = back;
 }
 
 // Mirror main.spc's typecheck_module, capturing the user module's diagnostics.
-fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) void {
+fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -578,6 +552,5 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
         }
     }
     let back = t.take_ast();
-    t.free();
     p.modules[i].ast = back;
 }

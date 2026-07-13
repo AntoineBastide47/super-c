@@ -22,8 +22,6 @@ fn call_doc(p: &mut d::DocPool, args: []str) d::DocId {
     parts.push(p.txt(")"));
     let body = p.concat(&parts);
     let g = p.group(body);
-    inner.free();
-    parts.free();
     return g;
 }
 
@@ -36,8 +34,7 @@ fn render_of(p: &d::DocPool, root: d::DocId, width: i32) String {
 fn expect_render(p: &d::DocPool, root: d::DocId, width: i32, want: str) {
     let mut got = render_of(p, root, width);
     let gs = got.as_str();
-    assert(gs.eq(&want), "render mismatch");
-    got.free();
+    assert(gs == want, "render mismatch");
 }
 
 @test
@@ -45,7 +42,6 @@ fn group_fits_flat() {
     let mut p = d::DocPool::new(null);
     let g = call_doc(&mut p, ["first", "second", "third"]);
     expect_render(&p, g, 80, "foo(first, second, third)\n");
-    p.free();
 }
 
 @test
@@ -53,7 +49,6 @@ fn group_breaks_when_too_wide() {
     let mut p = d::DocPool::new(null);
     let g = call_doc(&mut p, ["first", "second", "third"]);
     expect_render(&p, g, 20, "foo(\n    first,\n    second,\n    third,\n)\n");
-    p.free();
 }
 
 @test
@@ -70,11 +65,9 @@ fn nested_groups_break_outer_first() {
     let cc = p.concat(&parts);
     let ind = p.indent(cc);
     let outer = p.group(ind);
-    parts.free();
     expect_render(&p, outer, 80, "let x = foo(a, b);\n");
     expect_render(&p, outer, 14, "let x =\n    foo(a, b);\n");
     expect_render(&p, outer, 12, "let x =\n    foo(\n        a,\n        b,\n    );\n");
-    p.free();
 }
 
 @test
@@ -91,11 +84,8 @@ fn hardline_forces_group_broken() {
     parts.push(p.txt("}"));
     let cc = p.concat(&parts);
     let g = p.group(cc);
-    body.free();
-    parts.free();
     // Even at huge width a hardline group breaks.
     expect_render(&p, g, 1000, "{\n    stmt;\n}\n");
-    p.free();
 }
 
 @test
@@ -107,9 +97,7 @@ fn blankline_and_span_text() {
     parts.push(p.blankline());
     parts.push(p.span(6, 11));
     let cc = p.concat(&parts);
-    parts.free();
     expect_render(&p, cc, 80, "hello\n\nworld\n");
-    p.free();
 }
 
 @test
@@ -122,10 +110,8 @@ fn flat_width_memo() {
     parts.push(l);
     parts.push(t); // shared DocId: DAG reuse is legal
     let cc = p.concat(&parts);
-    parts.free();
     assert_eq((*p.docs.at(cc as usize)).w, 9u32); // 4 + 1 + 4
     let h = p.hardline();
     let ph = p.pair(cc, h);
     assert_eq((*p.docs.at(ph as usize)).w, d::W_INF);
-    p.free();
 }

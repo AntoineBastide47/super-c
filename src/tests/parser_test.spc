@@ -34,7 +34,6 @@ fn items_and_types() {
     );
     assert(item(&c.ast, 3).kind == NodeKind::NODE_CONST, "items and types: item 3 should be const");
     assert(item(&c.ast, 4).kind == NodeKind::NODE_EXTERN_BLOCK, "items and types: item 4 should be extern");
-    c.ast.free();
 }
 
 @test
@@ -55,7 +54,6 @@ fn associated_new_name() {
         h::ident_is(&c.ast, src.ptr() as *const char, name_id, "new".ptr() as *const char),
         "associated new name: method should be named new",
     );
-    c.ast.free();
 }
 
 @test
@@ -77,7 +75,6 @@ fn functions_and_expressions() {
         c.ast.at_const(body_id).as_data.block.statements.len == 6,
         "functions and expressions: expected 6 statements",
     );
-    c.ast.free();
 }
 
 @test
@@ -93,7 +90,6 @@ fn traits_impls_match_and_new() {
     assert(item(&c.ast, 0).kind == NodeKind::NODE_INTERFACE, "expected interface");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_EXTEND, "expected extension");
     assert(item(&c.ast, 2).kind == NodeKind::NODE_FUNCTION, "expected function");
-    c.ast.free();
 }
 
 @test
@@ -152,7 +148,6 @@ fn grouped_parameters_and_returns() {
         c.ast.at_const(risky_body_id).as_data.block.statements.len == 2,
         "grouped parameters and returns: expected 2 unsafe statements",
     );
-    c.ast.free();
 }
 
 // Precedence: `*` binds tighter than `+`; `-` is left-associative.
@@ -176,7 +171,6 @@ fn precedence() {
         let left_id = c.ast.at_const(top_id).as_data.binary.left;
         assert(c.ast.at_const(right_id).as_data.binary.op == TokenType::Star, "* is the right child (binds tighter)");
         assert(c.ast.at_const(left_id).kind == NodeKind::NODE_LITERAL, "left operand is the literal 1");
-        c.ast.free();
     }
     {
         let mut c = h::parse_ast("fn f() i32 { return 1 - 2 - 3; }\n");
@@ -194,7 +188,6 @@ fn precedence() {
         );
         let left_id = c.ast.at_const(top_id).as_data.binary.left;
         assert(c.ast.at_const(left_id).as_data.binary.op == TokenType::Minus, "- is left-associative (left child is -)");
-        c.ast.free();
     }
 }
 
@@ -215,29 +208,26 @@ fn generic_shift_split() {
         c.ast.at_const(inner_id).kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(inner_id).as_data.type_path.args.len == 1,
         "inner Vec<i32> parsed (>> was split)",
     );
-    c.ast.free();
 }
 
 // The struct-initializer flag: `Foo {}` is a value, but in a condition the `{` opens the block.
 @test
 fn struct_initializer_flag() {
     {
-        let mut c = h::parse_ast("struct Foo { x: i32, }\nfn f() void { let p: Foo = Foo { x: 1, }; }\n");
+        let mut c = h::parse_ast("struct Foo { x: i32, }\nfn f() { let p: Foo = Foo { x: 1, }; }\n");
         assert(c.errors == 0, "struct init value parses");
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let val_id = c.ast.at_const(let_id).as_data.let_stmt.value;
         assert(c.ast.at_const(val_id).kind == NodeKind::NODE_STRUCT_INITIALIZER, "Foo {} is a struct initializer");
-        c.ast.free();
     }
     {
-        let mut c = h::parse_ast("fn g() void { if cond { } }\n");
+        let mut c = h::parse_ast("fn g() { if cond { } }\n");
         assert(c.errors == 0, "condition is not struct init parses");
         let iff_id = h::nth_kind(&c.ast, NodeKind::NODE_IF, 0);
         let cond_id = c.ast.at_const(iff_id).as_data.if_stmt.condition;
         let then_id = c.ast.at_const(iff_id).as_data.if_stmt.then_branch;
         assert(c.ast.at_const(cond_id).kind == NodeKind::NODE_IDENTIFIER, "`if cond {}` keeps cond as the value");
         assert(c.ast.at_const(then_id).kind == NodeKind::NODE_BLOCK, "the `{}` is the then-branch");
-        c.ast.free();
     }
 }
 
@@ -252,7 +242,6 @@ fn closures() {
         assert(c.ast.at_const(clo_id).kind == NodeKind::NODE_CLOSURE, "`|x| e` parses to a closure");
         assert(c.ast.at_const(clo_id).as_data.closure.expr_body, "compact closure has an expression body");
         assert(c.ast.at_const(clo_id).as_data.closure.params.len == 1, "the closure has one parameter");
-        c.ast.free();
     }
     // Anonymous `fn(..) Ret { .. }` -> a NODE_CLOSURE with a block body and an explicit return type.
     {
@@ -263,7 +252,6 @@ fn closures() {
         assert(c.ast.at_const(clo_id).kind == NodeKind::NODE_CLOSURE, "`fn(..) .. {}` parses to a closure");
         assert(!c.ast.at_const(clo_id).as_data.closure.expr_body, "anonymous fn has a block body");
         assert(c.ast.at_const(clo_id).as_data.closure.returns.len == 1, "anonymous fn keeps its explicit return type");
-        c.ast.free();
     }
     // Infix `|` is still bitwise-or, not a closure.
     {
@@ -271,7 +259,6 @@ fn closures() {
         assert(c.errors == 0, "bitwise or parses");
         assert(h::nth_kind(&c.ast, NodeKind::NODE_CLOSURE, 0) == NODE_NONE, "`a | b` is not a closure");
         assert(h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 0) != NODE_NONE, "`a | b` is a binary expression");
-        c.ast.free();
     }
     // `F: fn(i32) i32` -- a callable bound is a NODE_FUNCTION_TYPE in the generic param's bound list.
     {
@@ -286,7 +273,6 @@ fn closures() {
         assert(c.ast.at_const(b0).kind == NodeKind::NODE_FUNCTION_TYPE, "`fn(..) ..` parses as a bound");
         assert(c.ast.at_const(b0).as_data.function_type.params.len == 1, "the bound keeps its signature");
         assert(c.ast.at_const(b1).kind == NodeKind::NODE_TYPE_PATH, "an interface bound still follows `+`");
-        c.ast.free();
     }
     // The same form parses in a where clause.
     {
@@ -301,7 +287,6 @@ fn closures() {
             "`where F: fn(..) ..` parses",
         );
         assert(!c.ast.at_const(wb0).as_data.function_type.is_move, "a plain fn bound is not `move`");
-        c.ast.free();
     }
     // `fn move(..) ..`: the ownership-marked bound.
     {
@@ -315,11 +300,10 @@ fn closures() {
             gbounds.len == 1 && c.ast.at_const(gb0).kind == NodeKind::NODE_FUNCTION_TYPE && c.ast.at_const(gb0).as_data.function_type.is_move,
             "`fn move(..) ..` parses with the move flag",
         );
-        c.ast.free();
     }
     // `&dyn I` / `&mut dyn I` fold into ONE NODE_DYN_TYPE; the qualifier carries the flavor.
     {
-        let mut c = h::parse_ast("fn f(a: &dyn Shape, b: &mut dyn Shape, c: Box<dyn Shape>) void {}\n");
+        let mut c = h::parse_ast("fn f(a: &dyn Shape, b: &mut dyn Shape, c: Box<dyn Shape>) {}\n");
         assert(c.errors == 0, "dyn types parses");
         let d0 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 0);
         let d1 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 1);
@@ -337,7 +321,6 @@ fn closures() {
             "`Box<dyn I>`'s argument parses with the owned flavor",
         );
         assert(h::nth_kind(&c.ast, NodeKind::NODE_REFERENCE_TYPE, 0) == NODE_NONE, "no reference node wraps a dyn type");
-        c.ast.free();
     }
     // `&dyn fn(i32) i32`: a `dyn` over a function type (the anonymous one-method interface).
     {
@@ -349,21 +332,19 @@ fn closures() {
             d0 != NODE_NONE && c.ast.at_const(inner_ty).kind == NodeKind::NODE_FUNCTION_TYPE,
             "`&dyn fn(..) ..` parses as DYN_TYPE over FUNCTION_TYPE",
         );
-        c.ast.free();
     }
 }
 
 @test
 fn error_recovery() {
     // Two malformed lets produce multiple errors (>= 2), proving resync.
-    let mut c = h::parse_ast("fn f() void { let x: i32 = ; let y: i32 = ; }\n");
+    let mut c = h::parse_ast("fn f() { let x: i32 = ; let y: i32 = ; }\n");
     assert(c.errors >= 2, "two malformed lets produce multiple errors, proving resync");
-    c.ast.free();
 }
 
 @test
 fn bare_conditions_and_ranges() {
-    let src = "fn f() void {\n  if x { }\n  while y { }\n  for i in 0..10 { }\n  for i in 1..=5 { }\n  for i in ..4 { }\n  for i in 6.. { }\n}\n";
+    let src = "fn f() {\n  if x { }\n  while y { }\n  for i in 0..10 { }\n  for i in 1..=5 { }\n  for i in ..4 { }\n  for i in 6.. { }\n}\n";
     let mut c = h::parse_ast(src);
     assert(c.errors == 0, "bare conditions and ranges parses");
     let body_id = item(&c.ast, 0).as_data.function.body;
@@ -399,16 +380,15 @@ fn bare_conditions_and_ranges() {
         c.ast.at_const(it5).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it5).as_data.pattern_range.end == NODE_NONE,
         "6.. has no end",
     );
-    c.ast.free();
 
-    assert(h::parse_has_error("fn f() void { for i in .. { } }\n"), "bare '..' range is rejected");
-    assert(h::parse_has_error("fn f() void { for i in 0..= { } }\n"), "inclusive range without an end is rejected");
+    assert(h::parse_has_error("fn f() { for i in .. { } }\n"), "bare '..' range is rejected");
+    assert(h::parse_has_error("fn f() { for i in 0..= { } }\n"), "inclusive range without an end is rejected");
 }
 
 // The postfix `?` early-return operator parses to a NODE_UNARY whose op is the `?` token.
 @test
 fn question_operator_parse() {
-    let mut c = h::parse_ast("fn f() void { let x = g()?; }\n");
+    let mut c = h::parse_ast("fn f() { let x = g()?; }\n");
     assert(c.errors == 0, "question operator parses");
     let body_id = item(&c.ast, 0).as_data.function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
@@ -421,13 +401,12 @@ fn question_operator_parse() {
     );
     let operand_id = c.ast.at_const(val_id).as_data.unary.operand;
     assert(c.ast.at_const(operand_id).kind == NodeKind::NODE_CALL, "the `?` operand is the call g()");
-    c.ast.free();
 }
 
 // A `lo..hi` in expression position parses to a NODE_RANGE value, bounds + inclusive flag preserved.
 @test
 fn range_value_expression() {
-    let src = "fn f() void {\n  let a = 1..5;\n  let b = 0..=9;\n}\n";
+    let src = "fn f() {\n  let a = 1..5;\n  let b = 0..=9;\n}\n";
     let mut c = h::parse_ast(src);
     assert(c.errors == 0, "range value expression parses");
     let body_id = item(&c.ast, 0).as_data.function.body;
@@ -448,7 +427,6 @@ fn range_value_expression() {
         c.ast.at_const(bv_id).kind == NodeKind::NODE_RANGE && c.ast.at_const(bv_id).as_data.pattern_range.inclusive,
         "0..=9 is an inclusive NODE_RANGE value",
     );
-    c.ast.free();
 }
 
 @test
@@ -498,7 +476,6 @@ fn switch_pattern_ranges() {
     let a4 = unsafe arms[4];
     let p4 = c.ast.at_const(a4).as_data.match_arm.pattern;
     assert(c.ast.at_const(p4).kind == NodeKind::NODE_PATTERN_WILDCARD, "_ is a wildcard");
-    c.ast.free();
 
     assert(h::parse_has_error("fn f(n: i32) i32 { return switch n { .. => 1, }; }\n"), "bare '..' pattern is rejected");
     assert(
@@ -555,7 +532,6 @@ fn pub_modifiers() {
         item(&c.ast, 9).kind == NodeKind::NODE_TYPE_ALIAS && !item(&c.ast, 9).as_data.type_alias.is_public,
         "non-pub type is private",
     );
-    c.ast.free();
     assert(h::parse_has_error("pub let x: i32 = 1;\n"), "pub before a non-item is rejected");
 }
 
@@ -575,26 +551,23 @@ fn unions() {
         let f1 = unsafe fields[1];
         assert(c.ast.at_const(f0).as_data.field.is_public, "pub union field is public");
         assert(!c.ast.at_const(f1).as_data.field.is_public, "non-pub union field is private");
-        c.ast.free();
     }
     // A plain struct is not flagged is_union.
     {
         let mut c = h::parse_ast("struct S { x: i32, }\n");
         assert(c.errors == 0, "struct not union parses");
         assert(!item(&c.ast, 0).as_data.aggregate.is_union, "a struct is not is_union");
-        c.ast.free();
     }
 }
 
 // `@c.*` attributes parse into the Ast's attribute table; malformed ones are rejected.
 @test
 fn attributes() {
-    let mut c = h::parse_ast("@c.packed\nstruct H { x: u32, }\n@c.noreturn\n@c.export(\"sym\")\nfn die() void {}\n");
+    let mut c = h::parse_ast("@c.packed\nstruct H { x: u32, }\n@c.noreturn\n@c.export(\"sym\")\nfn die() {}\n");
     assert(c.errors == 0, "attributes parses");
     assert(c.ast.attrs.len() == 3, "three attributes recorded");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "attributed struct parses");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_FUNCTION, "attributed fn parses");
-    c.ast.free();
     assert(h::parse_has_error("@c.frobnicate\nfn m() {}\n"), "unknown attribute rejected");
     assert(h::parse_has_error("@rust.inline\nfn m() {}\n"), "unknown namespace rejected");
     assert(h::parse_has_error("@c.align\nstruct S { x: i32 }\n"), "align without an argument rejected");
@@ -624,7 +597,6 @@ fn bug_regressions() {
         }
         s.push_str("}");
         assert(h::parse_has_error(s.as_str()), "deeply nested blocks should diagnose, not crash");
-        s.free();
     }
 }
 
@@ -642,11 +614,10 @@ fn pathological_depth() {
         }
         s.push_str("; }\n");
         assert(h::parse_has_error(s.as_str()), "over-long binary chain is rejected");
-        s.free();
     }
     {
         let mut s = String::new();
-        s.push_str("fn f() void { let mut a: i32 = 0; ");
+        s.push_str("fn f() { let mut a: i32 = 0; ");
         let mut i = 0;
         while i < 1000 {
             s.push_str("a = ");
@@ -654,6 +625,5 @@ fn pathological_depth() {
         }
         s.push_str("1; }\n");
         assert(h::parse_has_error(s.as_str()), "over-deep assignment chain is rejected");
-        s.free();
     }
 }

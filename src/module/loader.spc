@@ -25,7 +25,7 @@ pub struct Module {
 }
 
 extend Module as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.path.free();
         self.file.free();
         self.source.free();
@@ -322,7 +322,7 @@ extend DirCache {
     }
 }
 extend DirCache as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.dirs.free();
         self.entries.free();
         self.ok.free();
@@ -356,22 +356,18 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool) ParseResul
     lx.scan_tokens();
     if lx.has_errors() {
         lx.log_errors();
-        lx.free();
         return ParseResult { ast: Ast::new(0), ok: false };
     }
     let toks = lx.take_tokens();
-    lx.free();
     let src = source.as_str(); // padding lives past len -> invisible to the parser
     let mut ps = parser::Parser::new(toks, src, file);
     ps.set_bootstrap_tags(bootstrap_tags);
     ps.build_ast();
     if ps.has_errors() {
         ps.log_errors();
-        ps.free();
         return ParseResult { ast: Ast::new(0), ok: false };
     }
     let out = ps.take_ast();
-    ps.free();
     return ParseResult { ast: out, ok: true };
 }
 
@@ -504,7 +500,7 @@ extend Package {
     // Inject one synthetic decl per builtin into the core prelude module (`__std::core`), so builtins are
     // nominal types that `extend i32 { .. }` can target. The decls live in the node pool only. Run after
     // loading, before resolve.
-    pub fn seed_core(self: &mut Self) void {
+    pub fn seed_core(self: &mut Self) {
         self.core_seeded = false;
         for i in 0..self.modules.len() {
             let is_core = self.modules[i].has_ast && self.modules[i].path.as_str() == "__std::core";
@@ -547,7 +543,7 @@ extend Package {
     }
 
     // Record / test a method DefId as referenced, for demand-driven instance-method emission.
-    pub fn mark_method_used(self: &mut Self, d: DefId) void {
+    pub fn mark_method_used(self: &mut Self, d: DefId) {
         if d.node == NODE_NONE {
             return;
         }
@@ -584,7 +580,7 @@ extend Package {
     // Build module `mid`'s public-decl name index on first use (idempotent). Mirrors lookup_linear's exact
     // traversal + classification, inserting the FIRST occurrence per (name, is_type) key. Top-level decl
     // names/spans are parse-final, so the index stays valid for the whole pipeline.
-    pub fn ensure_lk_index(self: &mut Self, mid: ModuleId) void {
+    pub fn ensure_lk_index(self: &mut Self, mid: ModuleId) {
         let m = mid as usize;
         while self.lk_index.len() <= m {
             self.lk_index.push(Map::<u64, LkEnt>::new());
@@ -676,7 +672,7 @@ extend Package {
 
     // Hash a decl's name (bytes at srcp[start..end]) into a (name-hash*2+is_type) key and insert into
     // module-slot `m`'s index, first occurrence wins (matches lookup_linear's first-match order).
-    fn lk_emit(self: &mut Self, m: usize, srcp: *const char, start: u32, end: u32, is_type: bool, node: NodeId) void {
+    fn lk_emit(self: &mut Self, m: usize, srcp: *const char, start: u32, end: u32, is_type: bool, node: NodeId) {
         let len = end - start;
         let np = (unsafe (srcp + start as usize)) as *const u8;
         let nm = str::from_raw(np, len as usize);
@@ -941,7 +937,7 @@ extend Package {
 
     // Build the cross-module reference bitset from every module's (resolve-final) resolutions. One pass over
     // all resolutions, O(total resolutions), done once before instance propagation. Idempotent.
-    pub fn build_mod_refs(self: &mut Self) void {
+    pub fn build_mod_refs(self: &mut Self) {
         let n = self.modules.len();
         let w = (n + 63) / 64;
         self.mod_refs_w = w;
@@ -1015,7 +1011,7 @@ extend Package {
 }
 
 extend Package as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.modules.free();
         self.root_dir.free();
         self.std_root.free();
@@ -1124,7 +1120,7 @@ fn reintern_nested_type(
     args: *const TypeId,
     nargs: u8,
     changed: *mut bool,
-) void {
+) {
     if t == TYPE_NONE {
         return;
     }
@@ -1193,7 +1189,7 @@ fn reintern_nested_instance_deps(
     args: *const TypeId,
     nargs: u8,
     changed: *mut bool,
-) void {
+) {
     let np = p.modules.len();
     let itmod = it.module;
     if itmod as usize >= np || !p.modules[itmod as usize].has_ast {
@@ -1241,7 +1237,7 @@ fn reintern_method_signature_deps(
     args: *const TypeId,
     nargs: u8,
     changed: *mut bool,
-) void {
+) {
     let np = p.modules.len();
     let itmod = it.module;
     if itmod as usize >= np || !p.modules[itmod as usize].has_ast {
@@ -1473,7 +1469,7 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
 }
 
 // Owners emit the generic instances used across module boundaries: iterate to a fixpoint.
-pub fn package_propagate_instances(p: &mut Package) void {
+pub fn package_propagate_instances(p: &mut Package) {
     let n = p.modules.len();
     // Resolutions are final now; build the cross-module reference bitset once so module_imports (hot inside
     // instance_home_in, called per instance-arg here and in codegen) is an O(1) query, not a linear scan.
@@ -1510,7 +1506,7 @@ pub fn package_propagate_instances(p: &mut Package) void {
 // Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
 // concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
 // `order` is caller-allocated with `modules.len()` entries.
-pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
+pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
     let n = p.modules.len();
     if n == 0 {
         return;
@@ -1649,7 +1645,6 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) void {
 pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) Package {
     let mut d = dir_of(root_file);
     let p = package_load_rooted(root_file, d.as_str(), std_dir, bootstrap_tags);
-    d.free();
     return p;
 }
 
@@ -1735,7 +1730,7 @@ fn name_cmp(a: &String, b: &String) i32 {
     return la as i32 - lb as i32;
 }
 
-fn load_prelude(p: &mut Package, std_dir: *const char) void {
+fn load_prelude(p: &mut Package, std_dir: *const char) {
     if std_dir == null {
         return;
     }

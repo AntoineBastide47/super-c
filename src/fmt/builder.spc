@@ -186,7 +186,6 @@ fn emit_gap_vertical(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::
         }
         i = i + 1;
     }
-    segs.free();
 }
 
 // Leading trivia at the start of a braced body or file: each segment on its own line, followed by
@@ -212,7 +211,6 @@ fn emit_lead_list(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::Doc
             parts.push(b.p.hardline());
         }
     }
-    segs.free();
 }
 
 // Dangling/trailing trivia before a closing brace or end of file.
@@ -233,7 +231,6 @@ fn emit_tail_list(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::Doc
             b.emitted_trivia = b.emitted_trivia + 1;
         }
     }
-    segs.free();
 }
 
 // ---- precedence -----------------------------------------------------------------------------------
@@ -287,7 +284,6 @@ fn b_expr_prec(b: &mut Builder, id: NodeId, min_prec: i32) d::DocId {
         v.push(e);
         v.push(b.p.txt(")"));
         let r = b.p.concat(&v);
-        v.free();
         return r;
     }
     return e;
@@ -302,7 +298,6 @@ fn b_comma_list(b: &mut Builder, open: str, elems: &Vector<d::DocId>, close: str
         v0.push(b.p.txt(open));
         v0.push(b.p.txt(close));
         let r0 = b.p.concat(&v0);
-        v0.free();
         return r0;
     }
     let mut inner = Vector::<d::DocId>::new();
@@ -318,14 +313,12 @@ fn b_comma_list(b: &mut Builder, open: str, elems: &Vector<d::DocId>, close: str
         inner.push(b.p.ifbreak(",", false));
     }
     let ic = b.p.concat(&inner);
-    inner.free();
     let mut parts = Vector::<d::DocId>::new();
     parts.push(b.p.txt(open));
     parts.push(b.p.indent(ic));
     parts.push(b.p.softline());
     parts.push(b.p.txt(close));
     let body = b.p.concat(&parts);
-    parts.free();
     return b.p.group(body);
 }
 
@@ -377,7 +370,6 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
                     }
                 }
                 v.push(b_comma_list(b, "<", &az, ">", false));
-                az.free();
             }
         },
         NODE_POINTER_TYPE => {
@@ -420,7 +412,6 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
             let mut ps = Vector::<d::DocId>::new();
             b_each(b, n.as_data.function_type.params, 1, &mut ps);
             v.push(b_comma_list(b, "(", &ps, ")", false));
-            ps.free();
             let rets = n.as_data.function_type.returns;
             if rets.len > 0 {
                 v.push(b.p.txt(" "));
@@ -435,7 +426,6 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
             let mut ts = Vector::<d::DocId>::new();
             b_each(b, n.as_data.array_literal.elements, 1, &mut ts);
             v.push(b_comma_list(b, "(", &ts, ")", false));
-            ts.free();
         },
         NODE_IDENTIFIER => {
             v.push(node_text(b, id));
@@ -445,7 +435,6 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
         }, // ellipsis `...` and friends: span verbatim
     };
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -458,7 +447,6 @@ fn b_returns(b: &mut Builder, rets: NodeList) d::DocId {
     let mut ts = Vector::<d::DocId>::new();
     b_each(b, rets, 1, &mut ts);
     let r = b_comma_list(b, "(", &ts, ")", false);
-    ts.free();
     return r;
 }
 
@@ -468,7 +456,6 @@ fn b_param(b: &mut Builder, id: NodeId) d::DocId {
     if n.kind != NodeKind::NODE_PARAMETER {
         // function-type params may be bare types
         let r0 = b_type(b, id);
-        v.free();
         return r0;
     }
     if n.as_data.parameter.is_mutable {
@@ -484,7 +471,6 @@ fn b_param(b: &mut Builder, id: NodeId) d::DocId {
         v.push(b_type(b, n.as_data.parameter.ty));
     }
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -515,7 +501,6 @@ fn b_generic_param(b: &mut Builder, id: NodeId) d::DocId {
         v.push(b_type(b, g.default_type));
     }
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -526,7 +511,6 @@ fn b_generics(b: &mut Builder, gens: NodeList, v: &mut Vector<d::DocId>) {
     let mut gs = Vector::<d::DocId>::new();
     b_each(b, gens, 4, &mut gs);
     v.push(b_comma_list(b, "<", &gs, ">", false));
-    gs.free();
 }
 
 // ---- patterns -------------------------------------------------------------------------------------
@@ -561,7 +545,6 @@ fn b_pattern(b: &mut Builder, id: NodeId) d::DocId {
             let mut cs = Vector::<d::DocId>::new();
             b_each(b, p.children, 2, &mut cs);
             v.push(b_comma_list(b, "(", &cs, ")", false));
-            cs.free();
         },
         NODE_PATTERN_STRUCT => {
             let p = n.as_data.pattern;
@@ -602,7 +585,6 @@ fn b_pattern(b: &mut Builder, id: NodeId) d::DocId {
         },
     };
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -702,7 +684,6 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
             let mut az = Vector::<d::DocId>::new();
             b_each(b, n.as_data.call.args, 0, &mut az);
             v.push(b_comma_list(b, "(", &az, ")", true));
-            az.free();
         },
         NODE_INDEX => {
             v.push(b_expr_prec(b, n.as_data.index.object, PREC_POSTFIX));
@@ -742,7 +723,6 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
             }
             v.push(b.p.txt("::"));
             v.push(b_comma_list(b, "<", &az, ">", false));
-            az.free();
         },
         NODE_CLOSURE => {
             let c = n.as_data.closure;
@@ -760,7 +740,6 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
                 }
                 v.push(b.p.txt("|"));
             }
-            ps.free();
             v.push(b.p.txt(" "));
             if c.expr_body {
                 v.push(b_expr(b, c.body));
@@ -830,20 +809,17 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
                     dv.push(b.p.txt("] = "));
                     dv.push(b_expr(b, fi.value));
                     let dd = b.p.concat(&dv);
-                    dv.free();
                     az.push(dd);
                 } else {
                     az.push(b_expr(b, e));
                 }
             }
             v.push(b_comma_list(b, "[", &az, "]", true));
-            az.free();
         },
         NODE_TUPLE => {
             let mut az = Vector::<d::DocId>::new();
             b_each(b, n.as_data.array_literal.elements, 0, &mut az);
             v.push(b_comma_list(b, "(", &az, ")", false));
-            az.free();
         },
         NODE_STRUCT_INITIALIZER => {
             v.push(b_expr_type_path(b, n.as_data.struct_initializer.ty));
@@ -867,7 +843,6 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
         },
     };
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -900,10 +875,8 @@ fn b_expr_type_path(b: &mut Builder, id: NodeId) d::DocId {
             }
         }
         v.push(b_comma_list(b, "<", &az, ">", false));
-        az.free();
     }
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -930,15 +903,12 @@ fn b_struct_init_fields(b: &mut Builder, fields: NodeList) d::DocId {
     }
     inner.push(b.p.ifbreak(",", false));
     let ic = b.p.concat(&inner);
-    inner.free();
     let mut parts = Vector::<d::DocId>::new();
     parts.push(b.p.txt("{"));
     parts.push(b.p.indent(ic));
     parts.push(b.p.line());
     parts.push(b.p.txt("}"));
     let body = b.p.concat(&parts);
-    parts.free();
-    fz.free();
     return b.p.group(body);
 }
 
@@ -1189,7 +1159,6 @@ fn b_stmt(b: &mut Builder, id: NodeId) d::DocId {
         },
     };
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1210,7 +1179,6 @@ fn b_if(b: &mut Builder, id: NodeId) d::DocId {
         }
     }
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1248,9 +1216,7 @@ fn b_match(b: &mut Builder, id: NodeId) d::DocId {
         v.push(b.p.hardline());
     }
     v.push(b.p.txt("}"));
-    body.free();
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1271,7 +1237,6 @@ fn b_match_arm(b: &mut Builder, id: NodeId) d::DocId {
     }
     v.push(b.p.txt(","));
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1320,14 +1285,10 @@ fn b_block(b: &mut Builder, id: NodeId) d::DocId {
             let ic = b.p.concat(&inner);
             v.push(b.p.indent(ic));
             v.push(b.p.hardline());
-            inner.free();
         }
-        segs.free();
     }
     v.push(b.p.txt("}"));
-    body.free();
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1367,7 +1328,6 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
                 ps.push(b.p.txt("..."));
             }
             v.push(b_comma_list(b, "(", &ps, ")", true));
-            ps.free();
             if f.returns.len > 0 {
                 v.push(b.p.txt(" "));
                 v.push(b_returns(b, f.returns));
@@ -1419,7 +1379,6 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
                 }
                 v.push(b_comma_list(b, "(", &fz, ")", false));
                 v.push(b.p.txt(";"));
-                fz.free();
             } else if a.members.len == 0 {
                 if n.span.end > n.span.start && b.src.byte_at((n.span.end - 1) as usize) == b';' {
                     v.push(b.p.txt(";"));
@@ -1454,7 +1413,6 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
                 v.push(b.p.indent(ic));
                 v.push(b.p.hardline());
                 v.push(b.p.txt("}"));
-                body.free();
             }
         },
         NODE_INTERFACE => {
@@ -1573,7 +1531,6 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
         },
     };
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1587,7 +1544,6 @@ fn b_field(b: &mut Builder, id: NodeId) d::DocId {
     v.push(b.p.txt(": "));
     v.push(b_type(b, f.ty));
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1610,7 +1566,6 @@ fn b_variant(b: &mut Builder, id: NodeId) d::DocId {
             let mut pz = Vector::<d::DocId>::new();
             b_each(b, va.payload, 1, &mut pz);
             v.push(b_comma_list(b, "(", &pz, ")", false));
-            pz.free();
         }
     }
     if va.value != NODE_NONE {
@@ -1618,7 +1573,6 @@ fn b_variant(b: &mut Builder, id: NodeId) d::DocId {
         v.push(b_expr(b, va.value));
     }
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1628,7 +1582,6 @@ fn b_item_body(b: &mut Builder, items: NodeList, outer: tok::Span) d::DocId {
     if items.len == 0 {
         v.push(b.p.txt("{}"));
         let r0 = b.p.concat(&v);
-        v.free();
         return r0;
     }
     v.push(b.p.txt("{"));
@@ -1652,9 +1605,7 @@ fn b_item_body(b: &mut Builder, items: NodeList, outer: tok::Span) d::DocId {
     v.push(b.p.indent(ic));
     v.push(b.p.hardline());
     v.push(b.p.txt("}"));
-    body.free();
     let r = b.p.concat(&v);
-    v.free();
     return r;
 }
 
@@ -1693,9 +1644,7 @@ pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String
     }
     emit_tail_list(&mut b, prev_end, source.len() as u32, &mut parts);
     let doc = b.p.concat(&parts);
-    parts.free();
     d::render(&b.p, doc, width, out);
     let n = b.emitted_trivia;
-    b.p.free();
     return n;
 }

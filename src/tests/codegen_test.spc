@@ -10,7 +10,7 @@ const RANGES: str = "fn f() i32 {\n  let mut s: i32 = 0;\n  for i in 0..10 { s =
 
 const SWITCH_RANGES: str = "fn classify(n: i32) i32 {\n  return switch n {\n    10..20 => 1,\n    20..=30 => 2,\n    ..5 => 3,\n    99.. => 4,\n    _ => 0,\n  };\n}\n";
 
-const REFS: str = "struct P { pub x: i32, }\nfn reads(r: &P) i32 { return r.x; }\nfn writes(w: &mut P) void { w.x = 1; }\nfn raw_c(pc: *const i32) i32 { return unsafe *pc; }\nfn raw_m(pm: *mut i32) void { unsafe *pm = 1; }\n";
+const REFS: str = "struct P { pub x: i32, }\nfn reads(r: &P) i32 { return r.x; }\nfn writes(w: &mut P) { w.x = 1; }\nfn raw_c(pc: *const i32) i32 { return unsafe *pc; }\nfn raw_m(pm: *mut i32) { unsafe *pm = 1; }\n";
 
 const EXTERN: str = "extern \"C\" {\n  fn putchar(c: i32) i32;\n}\nfn main() i32 { let r: i32 = unsafe putchar(72); }\n";
 
@@ -53,7 +53,7 @@ fn ranges() {
     h::expect_c("open-end range", RANGES, "for (int32_t i = 100; ; i++)");
     h::expect_c(
         "usize end range hoists",
-        "fn f(n: usize) void { for i in 0..n { } }\n",
+        "fn f(n: usize) { for i in 0..n { } }\n",
         "for (size_t i = 0ULL, __sc0 = n; i < __sc0; i++)",
     );
     h::expect_c("bare if lowers", RANGES, "if (i >= 103)");
@@ -209,10 +209,10 @@ fn if_expression() {
 
 @test
 fn array_literals() {
-    h::expect_c("array literal let is a brace list", "fn f() void { let a: [i32; 3] = [1, 2, 3]; }\n", "= { 1, 2, 3 }");
+    h::expect_c("array literal let is a brace list", "fn f() { let a: [i32; 3] = [1, 2, 3]; }\n", "= { 1, 2, 3 }");
     h::expect_c_absent(
         "array literal let is not a compound literal",
-        "fn f() void { let a: [i32; 3] = [1, 2, 3]; }\n",
+        "fn f() { let a: [i32; 3] = [1, 2, 3]; }\n",
         "(int32_t[3]){ 1, 2, 3 }",
     );
     h::expect_c(
@@ -255,11 +255,7 @@ fn slices_and_arrays() {
 
 @test
 fn errors() {
-    h::expect_c(
-        "defer lowers to scope-exit call",
-        "fn cleanup() void {}\nfn run() void { defer cleanup(); }\n",
-        "cleanup()",
-    );
+    h::expect_c("defer lowers to scope-exit call", "fn cleanup() {}\nfn run() { defer cleanup(); }\n", "cleanup()");
     h::expect_c("designated array init", "fn m() i32 { let t: [i32; 4] = [[2] = 9]; return t[2]; }\n", "[2] = 9");
     h::expect_c(
         "local const is static const",
@@ -276,7 +272,7 @@ fn errors() {
 
 @test
 fn attributes() {
-    h::expect_c("noreturn", "@c.noreturn\nfn die() void {}\nfn main() i32 { return 0; }\n", "_Noreturn");
+    h::expect_c("noreturn", "@c.noreturn\nfn die() {}\nfn main() i32 { return 0; }\n", "_Noreturn");
     h::expect_c(
         "always_inline",
         "@c.always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { return a(0); }\n",

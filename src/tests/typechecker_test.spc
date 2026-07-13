@@ -62,8 +62,8 @@ fn ok() {
     h::expect_ok("pointer minus int", "fn f(p: *i32) i32 { let q: *i32 = unsafe (p - 1); return unsafe *q; }\n");
     h::expect_ok("int plus pointer", "fn f(p: *i32) i32 { let q: *i32 = unsafe (1 + p); return unsafe *q; }\n");
     h::expect_ok("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n");
-    h::expect_ok("explicit void bare return", "fn f() void { return; }\n");
-    h::expect_ok("range adopts usize bound", "fn f(n: usize) void { for i in 0..n { let x: usize = i; } }\n");
+    h::expect_ok("explicit void bare return", "fn f() { return; }\n");
+    h::expect_ok("range adopts usize bound", "fn f(n: usize) { for i in 0..n { let x: usize = i; } }\n");
     h::expect_ok(
         "associated new call",
         "struct String {}\nextend String { fn new() String { return String {}; } }\nfn f() String { return String::new(); }\n",
@@ -74,11 +74,11 @@ fn ok() {
     );
     h::expect_ok(
         "pointer erases to void pointer",
-        "fn take(p: *mut void) void {}\nfn cview(p: *const void) void {}\nfn f(x: *mut i32, c: *const i32) { take(x); cview(x); cview(c); }\n",
+        "fn take(p: *mut void) {}\nfn cview(p: *const void) {}\nfn f(x: *mut i32, c: *const i32) { take(x); cview(x); cview(c); }\n",
     );
     h::expect_err_msg(
         "const pointer does not erase to mut void",
-        "fn take(p: *mut void) void {}\nfn f(c: *const i32) { take(c); }\n",
+        "fn take(p: *mut void) {}\nfn f(c: *const i32) { take(c); }\n",
         "mismatched types",
     );
     h::expect_err_msg(
@@ -97,31 +97,31 @@ fn errors() {
     );
     h::expect_err_msg(
         "use after conditional move",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n",
         "use of moved value",
     );
     h::expect_err_msg(
         "use after move on both branches",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } else { take(a); } return a.t; }\n",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } else { take(a); } return a.t; }\n",
         "use of moved value",
     );
     h::expect_ok(
         "sibling-branch move does not taint the other arm",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n",
     );
     h::expect_err_msg(
         "use after explicit free",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nfn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n",
         "use after free",
     );
     h::expect_err_msg(
         "use after by-value-self method call",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nextend R { fn consume(self: R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.consume(); return a.t; }\n",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nextend R { fn consume(self: R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.consume(); return a.t; }\n",
         "use of moved value",
     );
     h::expect_ok(
         "by-ref-self method call does not consume the receiver",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) void {}\nextend R { fn peek(self: &R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n",
+        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nextend R { fn peek(self: &R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n",
     );
     h::expect_err_msg(
         "read of uninitialized binding",
@@ -168,8 +168,8 @@ fn errors() {
         "does not satisfy bound 'Ord'",
     );
     h::expect_err_msg("non-literal char not assignable to u8", "fn f(c: char) u8 { return c; }\n", "mismatched types");
-    h::expect_err_msg("argument type", "fn g(a: bool) void {}\nfn main() i32 { g(1); }\n", "mismatched types");
-    h::expect_err_msg("argument count", "fn g(a: i32) void {}\nfn main() i32 { g(1, 2); }\n", "expected 1 argument");
+    h::expect_err_msg("argument type", "fn g(a: bool) {}\nfn main() i32 { g(1); }\n", "mismatched types");
+    h::expect_err_msg("argument count", "fn g(a: i32) {}\nfn main() i32 { g(1, 2); }\n", "expected 1 argument");
     h::expect_err_msg(
         "arithmetic operator without method",
         "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let b = P { x: 2 }; let c = a + b; return 0; }\n",
@@ -281,12 +281,12 @@ fn errors() {
     );
     h::expect_err_msg(
         "pointer plus pointer",
-        "fn f(a: *i32, b: *i32) void { let c = unsafe (a + b); }\n",
+        "fn f(a: *i32, b: *i32) { let c = unsafe (a + b); }\n",
         "invalid pointer arithmetic",
     );
     h::expect_err_msg(
         "non-integer pointer offset",
-        "fn f(p: *i32, y: f64) void { let q = unsafe (p + y); }\n",
+        "fn f(p: *i32, y: f64) { let q = unsafe (p + y); }\n",
         "pointer arithmetic requires an integer offset",
     );
     h::expect_err_msg(
@@ -294,7 +294,7 @@ fn errors() {
         "fn take(r: &i32) i32 { return *r; }\nfn give(p: *const i32) i32 { return take(p); }\n",
         "mismatched types",
     );
-    h::expect_err_msg("main returning void", "fn main() void { }\n", "'main' must be declared 'fn main() i32'");
+    h::expect_err_msg("main returning void", "fn main() { }\n", "'main' must be declared 'fn main() i32'");
     h::expect_err_msg("main with no return type", "fn main() { return; }\n", "'main' must be declared 'fn main() i32'");
     h::expect_err_msg(
         "main with a wrong return type",
@@ -605,11 +605,11 @@ fn never_type() {
     h::expect_ok("return panic fits any return type", "fn f() i32 { return panic(\"boom\"); }\n");
     h::expect_ok(
         "user noreturn fn also diverges",
-        "extern \"C\" { fn abort() void; }\n@c.noreturn\nfn die() void { unsafe abort(); }\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => die() }; }\n",
+        "extern \"C\" { fn abort() void; }\n@c.noreturn\nfn die() { unsafe abort(); }\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => die() }; }\n",
     );
     h::expect_err_msg(
         "non-noreturn void arm still mismatches",
-        "fn nop() void {}\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => nop() }; }\n",
+        "fn nop() {}\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => nop() }; }\n",
         "mismatched types",
     );
 }
@@ -1007,7 +1007,7 @@ fn labeled_loops() {
     );
     h::expect_err_msg(
         "a closure body cannot break an outer loop",
-        "fn main() i32 { for i in 0..3 { let f = fn() void { break; }; f(); } return 0; }\n",
+        "fn main() i32 { for i in 0..3 { let f = fn() { break; }; f(); } return 0; }\n",
         "outside of a loop",
     );
 }

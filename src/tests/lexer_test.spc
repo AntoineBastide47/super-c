@@ -10,7 +10,6 @@ fn expect_tokens(src: str, expected: []TokenType) {
     lx.scan_tokens();
     assert(!lx.has_errors(), "unexpected lexer error");
     let mut toks = lx.take_tokens();
-    lx.free();
     assert_eq(toks.len(), expected.len());
     let n = if toks.len() < expected.len() {
         toks.len();
@@ -28,7 +27,6 @@ fn expect_error(src: str) {
     lx.scan_tokens();
     assert(lx.has_errors(), "expected a lexer error");
     let mut _toks = lx.take_tokens(); // drained so RAII frees the tokens
-    lx.free();
 }
 
 @test

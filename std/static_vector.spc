@@ -69,7 +69,6 @@ extend<T, const N: usize> StaticVector<T, N> {
 
     pub fn set(self: &mut StaticVector<T, N>, index: usize, value: T) {
         let p = (&mut self.data[0]) as *mut T;
-        unsafe p[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
         unsafe p[index] = value;
     }
 
@@ -85,19 +84,17 @@ extend<T, const N: usize> StaticVector<T, N> {
     }
 
     pub fn clear(self: &mut StaticVector<T, N>) {
-        let p = (&mut self.data[0]) as *mut T;
         for i in 0..self.len {
-            unsafe p[i].free();
+            unsafe self.data[i].free();
         }
         self.len = 0;
     }
 
     pub fn truncate(self: &mut StaticVector<T, N>, new_len: usize) {
         if new_len < self.len {
-            let p = (&mut self.data[0]) as *mut T;
             let mut i = new_len;
             while i < self.len {
-                unsafe p[i].free();
+                unsafe self.data[i].free();
                 i = i + 1;
             }
             self.len = new_len;
@@ -197,16 +194,15 @@ extend<T, const N: usize> StaticVector<T, N> {
     // Keep only the elements matching `pred` (in place, preserving order). `pred` borrows (`&T`);
     // rejected elements are freed (no-op when T isn't Free) so nothing leaks.
     pub fn retain<F: fn(&T) bool>(self: &mut StaticVector<T, N>, pred: F) {
-        let p = (&mut self.data[0]) as *mut T;
         let mut w: usize = 0;
         for i in 0..self.len {
-            if pred(&unsafe p[i]) {
+            if pred(&unsafe self.data[i]) {
                 if w != i {
-                    unsafe p[w] = unsafe p[i];
+                    unsafe self.data[w] = unsafe self.data[i];
                 }
                 w = w + 1;
             } else {
-                unsafe p[i].free();
+                unsafe self.data[i].free();
             }
         }
         self.len = w;
@@ -222,9 +218,8 @@ extend<T, const N: usize> StaticVector<T, N> {
 // the same reason as Vector: the peek accessors borrow (`&T`) and the removers move the element out.
 extend<T: Free, const N: usize> StaticVector<T, N> as Free {
     pub fn free(self: &mut StaticVector<T, N>) {
-        let p = (&mut self.data[0]) as *mut T;
         for i in 0..self.len {
-            unsafe p[i].free();
+            unsafe self.data[i].free();
         }
         self.len = 0;
     }
@@ -242,7 +237,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub fn contains(self: &StaticVector<T, N>, x: &T) bool {
         for i in 0..self.len {
-            if self.data[i].eq(x) {
+            if self.data[i] == *x {
                 return true;
             }
         }
@@ -252,7 +247,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     // Index of the first element equal to `x`, or `None`.
     pub fn position(self: &StaticVector<T, N>, x: &T) Option<usize> {
         for i in 0..self.len {
-            if self.data[i].eq(x) {
+            if self.data[i] == *x {
                 return Option::<usize>::Some(i);
             }
         }
@@ -265,14 +260,13 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
         if self.len < 2 {
             return;
         }
-        let p = (&mut self.data[0]) as *mut T;
         let mut w: usize = 1;
         let mut r: usize = 1;
         while r < self.len {
-            if unsafe p[r].eq(&unsafe p[w - 1]) {
-                unsafe p[r].free();
+            if unsafe self.data[r] == unsafe self.data[w - 1] {
+                unsafe self.data[r].free();
             } else {
-                unsafe p[w] = unsafe p[r];
+                unsafe self.data[w] = unsafe self.data[r];
                 w = w + 1;
             }
             r = r + 1;
@@ -290,7 +284,7 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         }
         let mut i: usize = 0;
         while i + 1 < self.len {
-            if self.data[i].cmp(&self.data[i + 1]) > 0 {
+            if self.data[i] > self.data[i + 1] {
                 return false;
             }
             i = i + 1;
@@ -323,10 +317,10 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && self.data[child].cmp(&self.data[child + 1]) < 0 {
+            if child + 1 < end && self.data[child] < self.data[child + 1] {
                 child = child + 1;
             }
-            if self.data[r].cmp(&self.data[child]) >= 0 {
+            if self.data[r] >= self.data[child] {
                 return;
             }
             self.swap(r, child);
@@ -415,7 +409,7 @@ extend<T, const N: usize> StaticVector<T, N> {
             while j > 0 {
                 let prev = key(&self.data[j - 1]);
                 let cur = key(&self.data[j]);
-                if prev.cmp(&cur) <= 0 {
+                if prev <= cur {
                     break;
                 }
                 self.swap(j - 1, j);
@@ -496,7 +490,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> as Eq {
         for i in 0..self.len {
             let a = self.at(i);
             let b = other.at(i);
-            if !a.eq(b) {
+            if *a != *b {
                 return false;
             }
         }

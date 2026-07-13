@@ -36,7 +36,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     fn slot(self: &Map<K, V, A>, key: &K) usize {
         let mut i = key.hash() as usize % self.cap;
         while unsafe self.used[i] != 0 {
-            if unsafe self.keys[i].eq(key) {
+            if unsafe self.keys[i] == *key {
                 return i;
             }
             i = i + 1;
@@ -89,9 +89,6 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         let i = self.slot(&key);
         if unsafe self.used[i] != 0 {
             // overwrite: keep the stored key, free the duplicate + the old value
-            let mut dup = key;
-            dup.free();
-            unsafe self.vals[i].free();
             unsafe self.vals[i] = value;
             return;
         }
@@ -128,7 +125,6 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             return Option::<V>::None;
         }
         let removed = unsafe self.vals[i];
-        unsafe self.keys[i].free(); // the key for this entry is no longer referenced -- free it (no-op if not Free)
         unsafe self.used[i] = 0;
         self.len = self.len - 1;
         let mut j = i + 1;

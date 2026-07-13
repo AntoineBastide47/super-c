@@ -35,7 +35,7 @@
 build
 super-c
 examples
-todos
+todos.md
 profile.json.gz
 src/.gen-stage1/
 src/.gen-stage2/

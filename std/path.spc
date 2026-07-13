@@ -97,7 +97,7 @@ extend Path {
 extend Path as Free {
     pub fn free(self: &mut Path) {
         if self.inner as *mut void != null {
-            unsafe self.inner[0].free();
+            unsafe self.inner.free();
             unsafe free(self.inner as *mut void);
             self.inner = null;
         }
@@ -112,7 +112,7 @@ extend Path as Clone {
 
 extend Path as Eq {
     pub fn eq(self: &Path, other: &Path) bool {
-        return unsafe self.inner[0].eq(&unsafe other.inner[0]);
+        return unsafe self.inner[0] == unsafe other.inner[0];
     }
 }
 

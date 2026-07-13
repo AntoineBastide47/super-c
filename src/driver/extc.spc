@@ -25,7 +25,7 @@ import driver::util as *;
 // ---------------------------------------------------------------------------------------------------------
 
 // "<dir of file>/<v[0..vl]>" (or "<v>") into `out` (a 4096-byte buffer).
-fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) void {
+fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) {
     let mut slash: *mut char = null;
     if file != null {
         slash = unsafe cstring::strrchr(file, '/' as i32);
@@ -46,7 +46,7 @@ fn ext_c_wrap(
     nsrc: *mut u32,
     rsl: *const char,
     err: *mut bool,
-) void {
+) {
     for k in 0..seen.len() {
         if seen[k].as_str() == str::from_cstr(rsl) {
             return;
@@ -94,7 +94,7 @@ fn ext_c_wrap(
     keep.push(path);
 }
 
-pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool) void {
+pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool) {
     let root = p.root_dir.as_str();
     let mut ld = Vector::<String>::new();
     let mut seen = Vector::<String>::new();
