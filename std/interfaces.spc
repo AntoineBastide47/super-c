@@ -129,7 +129,7 @@ extend Global as Allocator {
         }
         return p;
     }
-    pub fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) void {
+    pub fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) {
         unsafe free(ptr);
     }
 }

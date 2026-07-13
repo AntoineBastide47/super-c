@@ -136,7 +136,7 @@ pub struct CeObj {
 }
 
 extend CeObj as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.slots.free();
     }
 }
@@ -426,7 +426,7 @@ extend ConstEval {
     }
 
     @c.cold
-    fn ce_trap(self: &mut Self, msg: str) void {
+    fn ce_trap(self: &mut Self, msg: str) {
         if self.trap.len() == 0 {
             self.trap = msg;
         }
@@ -451,7 +451,7 @@ extend ConstEval {
         }
         return inner[id as usize];
     }
-    fn slot_set(self: &mut Self, m: ModuleId, id: NodeId, v: ConstValue) void {
+    fn slot_set(self: &mut Self, m: ModuleId, id: NodeId, v: ConstValue) {
         if m as usize >= self.vals.len() {
             return;
         }
@@ -1383,7 +1383,7 @@ extend ConstEval {
     }
 
     // ---- object store ----
-    fn ce_objs_reset(self: &mut Self) void {
+    fn ce_objs_reset(self: &mut Self) {
         self.objs.clear();
         self.live_slots = 0;
     }
@@ -5286,11 +5286,11 @@ extend ConstEval {
         return self.trap;
     }
 
-    pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId) void {
+    pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId) {
         self.pending.push(CePending { m: m, cond: cond });
     }
 
-    pub fn flush_asserts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) void {
+    pub fn flush_asserts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
         for i in 0..self.pending.len() {
             let p = self.pending[i];
             let v = self.eval(p.m, p.cond);
@@ -5305,7 +5305,7 @@ extend ConstEval {
 }
 
 extend ConstEval as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.vals.free();
         self.objs.free();
         self.pending.free();

@@ -87,26 +87,26 @@ fn kind_name(k: ast::NodeKind) str {
     };
 }
 
-fn indent(out: *mut stdio::FILE, depth: u32) void {
+fn indent(out: *mut stdio::FILE, depth: u32) {
     for i in 0..depth {
         unsafe stdio::fputs("  ".ptr() as *const char, out);
     }
 }
 
-fn print_list(out: *mut stdio::FILE, a: &ast::Ast, list: ast::NodeList, source: *const char, depth: u32) void {
+fn print_list(out: *mut stdio::FILE, a: &ast::Ast, list: ast::NodeList, source: *const char, depth: u32) {
     let ids = a.list(list);
     for i in 0..list.len {
         print_node(out, a, unsafe ids[i as usize], source, depth);
     }
 }
 
-fn print_child(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) void {
+fn print_child(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) {
     if id != ast::NODE_NONE {
         print_node(out, a, id, source, depth);
     }
 }
 
-fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) void {
+fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *const char, depth: u32) {
     let n = *a.at_const(id);
     indent(out, depth);
     unsafe stdio::fprintf(out, "%s".ptr() as *const char, kind_name(n.kind).ptr() as *const char);
@@ -318,7 +318,7 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
 }
 
 // Dump the AST rooted at `a.root` to `out` (the analog of ast.c's ast_fprint).
-fn ast_fprint(out: *mut stdio::FILE, a: &ast::Ast, source: *const char) void {
+fn ast_fprint(out: *mut stdio::FILE, a: &ast::Ast, source: *const char) {
     if a.root != ast::NODE_NONE {
         print_node(out, a, a.root, source, 0);
     }
@@ -366,5 +366,4 @@ fn dump() {
     assert(has(buf, "Binary Plus"), "operator name printed for binary nodes");
     assert(has(buf, ".."), "node spans printed as [start..end]");
     unsafe stdlib::free(buf);
-    pr.ast.free();
 }

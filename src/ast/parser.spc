@@ -43,13 +43,13 @@ extend Parser {
         };
     }
 
-    pub fn set_bootstrap_tags(self: &mut Self, v: bool) void {
+    pub fn set_bootstrap_tags(self: &mut Self, v: bool) {
         self.bootstrap_tags = v;
     }
 
     // Consume a balanced `(...)` if the attribute has an argument list -- lets the parser skip past the
     // args of an attribute whose shape it does not recognize (generic/unknown-tag handling).
-    fn skip_attr_args(self: &mut Self) void {
+    fn skip_attr_args(self: &mut Self) {
         if self.match(TokenType::LeftParen) {
             let mut depth = 1;
             while depth > 0 && !self.at_end() {
@@ -144,7 +144,7 @@ extend Parser {
     }
 
     @c.cold
-    pub fn error_here(self: &mut Self, message: str) void {
+    pub fn error_here(self: &mut Self, message: str) {
         let t = self.raw_peek();
         self.errors.emit(t.start(), t.len(), String::from_str(message));
     }
@@ -2991,7 +2991,7 @@ extend Parser {
         return attrs;
     }
 
-    pub fn add_attrs_to(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) void {
+    pub fn add_attrs_to(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
         for i in 0..attrs.len() {
             let mut attr = attrs[i];
             attr.owner = owner;
@@ -2999,7 +2999,7 @@ extend Parser {
         }
     }
 
-    pub fn validate_item_attrs(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) void {
+    pub fn validate_item_attrs(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
         for i in 0..attrs.len() {
             let attr = attrs.at(i);
             let mut sp = Span::empty();
@@ -3104,7 +3104,7 @@ extend Parser {
         return kind == TokenType::Equal || kind == TokenType::PlusEqual || kind == TokenType::MinusEqual || kind == TokenType::StarEqual || kind == TokenType::SlashEqual || kind == TokenType::PercentEqual || kind == TokenType::AmpersandEqual || kind == TokenType::PipeEqual || kind == TokenType::CaretEqual || kind == TokenType::LeftShiftEqual || kind == TokenType::RightShiftEqual;
     }
 
-    pub fn build_ast(self: &mut Self) void {
+    pub fn build_ast(self: &mut Self) {
         let mark = self.ast.mark();
         while !self.at_end() {
             let before = self.current;
@@ -3130,13 +3130,13 @@ extend Parser {
     pub fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
-    pub fn log_errors(self: &Self) void {
+    pub fn log_errors(self: &Self) {
         self.errors.log();
     }
 }
 
 extend Parser as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.tokens.free();
         self.ast.free();
         self.errors.free();

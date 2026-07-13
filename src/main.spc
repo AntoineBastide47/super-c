@@ -40,9 +40,7 @@ fn run_file(
         let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
         p.ceval = &mut ceval;
         rc = run_package(&mut p, topts, out_bin, target, lint);
-        ceval.free();
     }
-    p.free();
     return rc;
 }
 
@@ -150,7 +148,6 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
     let dh = unsafe shim::sc_opendir(d.cstr());
     if dh == null {
         eprintln("fmt: cannot read directory '{}'", dir);
-        d.free();
         return 1;
     }
     let mut names = Vector::<String>::new();
@@ -182,10 +179,7 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
                 rc = 1;
             }
         }
-        p.free();
     }
-    names.free();
-    d.free();
     return rc;
 }
 
@@ -246,7 +240,6 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
             }
         }
         if !found {
-            p.free();
             p = if root.len() != 0 {
                 loader::package_load_rooted(path, root, std_dir, false);
             } else {
@@ -254,9 +247,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
             };
             lint_mod = 0;
         }
-        pathc.free();
         if !p.ok {
-            p.free();
             return 1;
         }
         let pkg = (&mut p) as *mut loader::Package;
@@ -264,8 +255,6 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         p.ceval = &mut ceval;
         if !fix {
             let rc = lint_package(&mut p, target, lint_mod, null);
-            ceval.free();
-            p.free();
             return rc;
         }
         let mut fixes = Vector::<diag::LintFix>::new();
@@ -284,11 +273,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
                 unsafe stdio::fclose(f);
                 applied = true;
             }
-            out.free();
         }
-        fixes.free();
-        ceval.free();
-        p.free();
         if errors || werr {
             return 1;
         }
@@ -307,7 +292,6 @@ fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u6
     let dh = unsafe shim::sc_opendir(d.cstr());
     if dh == null {
         eprintln("lint: cannot read directory '{}'", dir);
-        d.free();
         return 1;
     }
     let mut names = Vector::<String>::new();
@@ -339,10 +323,7 @@ fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u6
                 rc = 1;
             }
         }
-        p.free();
     }
-    names.free();
-    d.free();
     return rc;
 }
 
@@ -383,19 +364,15 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
 
     // Reject sources that do not parse -- never rewrite something the compiler cannot read.
     // Lexed with trivia so the doc pipeline can count comments; the parser gets a filtered stream.
-    let mut vsrc = String::from_str(src.as_str());
+    let mut vsrc = src.clone();
     let mut lx = lex::Lexer::new(&mut vsrc, path);
     lx.keep_trivia = true;
     lx.scan_tokens();
     if lx.has_errors() {
         lx.log_errors();
-        lx.free();
-        vsrc.free();
-        src.free();
         return 1;
     }
     let mut toks = lx.take_tokens();
-    lx.free();
     let mut ncomments: usize = 0;
     let mut sig = Vector::<tok::Token>::new();
     for i in 0..toks.len() {
@@ -407,7 +384,6 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
             sig.push(t);
         }
     }
-    toks.free();
     let mut ps = par::Parser::new(sig, vsrc.as_str(), path);
     ps.build_ast();
     let perr = ps.has_errors();
@@ -415,19 +391,12 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
         ps.errors.log();
     }
     if perr {
-        ps.free();
-        vsrc.free();
-        src.free();
         return 1;
     }
 
     let mut out = String::new();
     let ast = ps.take_ast();
-    ps.free();
     let emitted = fbld::format_program((&ast) as *const Ast, src.as_str(), 120, &mut out);
-    let mut ast2 = ast;
-    ast2.free();
-    vsrc.free();
     if emitted != ncomments {
         eprintln(
             "fmt: internal error: {} of {} comments would be dropped in '{}'; refusing",
@@ -435,12 +404,10 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
             ncomments,
             path,
         );
-        out.free();
-        src.free();
         return 1;
     }
     let src_view = src.as_str();
-    let same = out.len() == src.len() && out.as_str().eq(&src_view);
+    let same = out.len() == src.len() && out.as_str() == src_view;
     let mut rc = 0;
     if check {
         if !same {
@@ -461,8 +428,6 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     } else {
         unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), stdio::stdout());
     }
-    out.free();
-    src.free();
     return rc;
 }
 
@@ -568,7 +533,6 @@ fn main(argv: Vector<str>) i32 {
     if fmt_mode && (build_mode || topts.enabled) {
         bad = true;
     }
-    // -w and --check are mutually exclusive
     if build_mode && out_bin.len() == 0 {
         out_bin = "a.out";
     }
@@ -586,10 +550,8 @@ fn main(argv: Vector<str>) i32 {
                 rc = 1;
             }
         }
-        fmt_extra.free();
         return rc;
     }
-    fmt_extra.free();
     let arg0: *const char = if argc > 0 {
         argv[0].ptr() as *const char;
     } else {
@@ -603,13 +565,11 @@ fn main(argv: Vector<str>) i32 {
                 rc = 1;
             }
         }
-        lint_extra.free();
         if std_dir != null {
             unsafe stdlib::free(std_dir);
         }
         return rc;
     }
-    lint_extra.free();
     let rc = run_file(
         file,
         std_dir,

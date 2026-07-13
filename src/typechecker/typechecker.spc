@@ -580,7 +580,7 @@ extend TypeChecker {
         self.nloops = n + 1;
         return n as i32;
     }
-    fn tc_loop_pop(self: &mut Self, le: i32, sp: tok::Span) void {
+    fn tc_loop_pop(self: &mut Self, le: i32, sp: tok::Span) {
         if le < 0 {
             return;
         }
@@ -626,7 +626,7 @@ extend TypeChecker {
     fn tc_in_test_fn(self: &Self) bool {
         return self.current_fn != NODE_NONE && self.tc_is_test_fn(self.ast.module, self.current_fn);
     }
-    fn tc_check_test_ref(self: &mut Self, d: DefId, sp: tok::Span) void {
+    fn tc_check_test_ref(self: &mut Self, d: DefId, sp: tok::Span) {
         if d.node == NODE_NONE || !self.tc_is_test_fn(d.module, d.node) || self.tc_in_test_fn() {
             return;
         }
@@ -744,7 +744,7 @@ extend TypeChecker {
 
     // ---- error / misc ----
     @c.cold
-    fn err_unsafe(self: &mut Self, sp: tok::Span, what: str) void {
+    fn err_unsafe(self: &mut Self, sp: tok::Span, what: str) {
         self.errors.emit(sp.start, sp.end - sp.start, format("{} requires an 'unsafe' block", what));
         self.errors.note(format("{}", "wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'"));
     }
@@ -784,7 +784,7 @@ extend TypeChecker {
         return false;
     }
 
-    fn render_type(self: &Self, tid: TypeId, buf: *mut char, cap: usize) void {
+    fn render_type(self: &Self, tid: TypeId, buf: *mut char, cap: usize) {
         let ty = *self.type_at(tid);
         if ty.kind == TypeKind::TYPE_BUILTIN {
             unsafe stdio::snprintf(
@@ -905,7 +905,7 @@ extend TypeChecker {
     }
 
     @c.cold
-    fn err_mismatch(self: &mut Self, node: NodeId, expected: TypeId) void {
+    fn err_mismatch(self: &mut Self, node: NodeId, expected: TypeId) {
         let mut e = Buf96 {};
         let mut f = Buf96 {};
         self.render_type(expected, &mut e[0], 96);
@@ -957,8 +957,11 @@ extend TypeChecker {
             let rn = unsafe (*fa).at_const(r0);
             let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
             unsafe *ret = self.lower_type_in(m, tn);
+        } else if rs.len == 0 {
+            // an omitted return type IS void -- TYPE_NONE here would make call sites lenient
+            unsafe *ret = Ast::builtin(BuiltinType::BT_VOID);
         } else {
-            unsafe *ret = TYPE_NONE;
+            unsafe *ret = TYPE_NONE; // multi-return: callers read the component list instead
         }
         return ps.len as i32;
     }
@@ -1051,7 +1054,7 @@ extend TypeChecker {
         return false;
     }
 
-    fn tc_mark_capture_mut(self: &mut Self, expr0: NodeId) void {
+    fn tc_mark_capture_mut(self: &mut Self, expr0: NodeId) {
         if self.nclos == 0 {
             return;
         }
@@ -1239,7 +1242,7 @@ extend TypeChecker {
         return ty;
     }
 
-    fn unify_infer(self: &mut Self, param_ty: TypeId, arg_ty: TypeId, params: *const DefId, bound: *mut TypeId, n: i32) void {
+    fn unify_infer(self: &mut Self, param_ty: TypeId, arg_ty: TypeId, params: *const DefId, bound: *mut TypeId, n: i32) {
         if param_ty == TYPE_NONE || arg_ty == TYPE_NONE {
             return;
         }
@@ -1330,7 +1333,7 @@ extend TypeChecker {
         return unsafe (*da).at_const(gid).as_data.generic_param.default_type != NODE_NONE;
     }
 
-    fn apply_default_args(self: &mut Self, dmod: ModuleId, dn: NodeId, ta: *mut TypeId, tn: *mut u8) void {
+    fn apply_default_args(self: &mut Self, dmod: ModuleId, dn: NodeId, ta: *mut TypeId, tn: *mut u8) {
         let da = self.mod_ast(dmod);
         let gens = unsafe (*da).at_const(dn).as_data.aggregate.generics;
         if unsafe *tn >= gens.len as u8 {
@@ -2189,7 +2192,7 @@ extend TypeChecker {
 
     // Build (once) module `mm`'s list of top-level EXTEND item ids. No type interning happens here, so it is
     // safe to build lazily at any point during type-checking.
-    fn ensure_ext_items(self: &mut Self, mm: ModuleId) void {
+    fn ensure_ext_items(self: &mut Self, mm: ModuleId) {
         let idx = mm as usize;
         while self.ext_items.len() <= idx {
             self.ext_items.push(Vector::<NodeId>::new());
@@ -2563,7 +2566,7 @@ extend TypeChecker {
         out: *mut BoundIface,
         n: *mut i32,
         cap: i32,
-    ) void {
+    ) {
         let a = self.mod_ast(m);
         let mut i: u32 = 0;
         while i < bounds.len && unsafe *n < cap {
@@ -2951,7 +2954,7 @@ extend TypeChecker {
         }
         return true;
     }
-    fn err_method_extend_bounds(self: &mut Self, at: tok::Span, target: TypeId, md: DefId) void {
+    fn err_method_extend_bounds(self: &mut Self, at: tok::Span, target: TypeId, md: DefId) {
         let mut ty = Buf96 {};
         self.render_type(self.strip(target), &mut ty[0], 96);
         let ma = self.mod_ast(md.module);
@@ -2968,7 +2971,7 @@ extend TypeChecker {
         self.errors.note(format("these bounds come from the extend block that defines the method"));
     }
 
-    fn mark_format_helpers(self: &mut Self) void {
+    fn mark_format_helpers(self: &mut Self) {
         if self.package == null || self.fmt_marked {
             return;
         }
@@ -3594,7 +3597,7 @@ extend TypeChecker {
         };
         return 0;
     }
-    fn tc_record_binding_depth(self: &mut Self, decl: NodeId) void {
+    fn tc_record_binding_depth(self: &mut Self, decl: NodeId) {
         if decl != NODE_NONE {
             self.binding_depth.insert(decl, self.scope_depth);
         }
@@ -3635,14 +3638,14 @@ extend TypeChecker {
 
     // TC-5: moved[] membership bitset (bit index = decl NodeId). moved[] stays authoritative for
     // flow save/merge; the bits are updated at every mutation site so is_moved is O(1).
-    fn ms_bit_set(self: &mut Self, d: NodeId) void {
+    fn ms_bit_set(self: &mut Self, d: NodeId) {
         let idx = (d >> 6) as usize;
         while self.moved_bits.len() <= idx {
             self.moved_bits.push(0u64);
         }
         self.moved_bits.set(idx, self.moved_bits[idx] | 1u64 << (d & 63u32) as u64);
     }
-    fn ms_bit_clear(self: &mut Self, d: NodeId) void {
+    fn ms_bit_clear(self: &mut Self, d: NodeId) {
         let idx = (d >> 6) as usize;
         if idx < self.moved_bits.len() {
             self.moved_bits.set(idx, self.moved_bits[idx] & ~(1u64 << (d & 63u32) as u64));
@@ -3655,7 +3658,7 @@ extend TypeChecker {
         }
         return (self.moved_bits[idx] >> (decl & 63u32) as u64 & 1u64) != 0u64;
     }
-    fn tc_mark_move(self: &mut Self, expr0: NodeId) void {
+    fn tc_mark_move(self: &mut Self, expr0: NodeId) {
         if expr0 == NODE_NONE {
             return;
         }
@@ -3729,7 +3732,7 @@ extend TypeChecker {
         }
         return false;
     }
-    fn tc_add_uninit(self: &mut Self, decl: NodeId) void {
+    fn tc_add_uninit(self: &mut Self, decl: NodeId) {
         if self.tc_is_uninit(decl) {
             return;
         }
@@ -3746,7 +3749,7 @@ extend TypeChecker {
             );
         }
     }
-    fn tc_init(self: &mut Self, decl: NodeId) void {
+    fn tc_init(self: &mut Self, decl: NodeId) {
         let mut i: u32 = 0;
         while i < self.nuninit {
             if self.uninit[i as usize] == decl {
@@ -3757,7 +3760,7 @@ extend TypeChecker {
             i = i + 1;
         }
     }
-    fn tc_unmark_move(self: &mut Self, decl: NodeId) void {
+    fn tc_unmark_move(self: &mut Self, decl: NodeId) {
         let mut i: u32 = 0;
         while i < self.nmoved {
             if self.moved[i as usize] == decl {
@@ -3795,7 +3798,7 @@ extend TypeChecker {
     // ---- flow state save/set/collect ----
     // TC-4b: save/clear fill an uninitialized caller local through an out-param and only touch the
     // counted prefixes -- a by-value `FlowState {}` zero-fills ~3KB twice per branch construct.
-    fn tc_flow_save(self: &Self, s: &mut FlowState) void {
+    fn tc_flow_save(self: &Self, s: &mut FlowState) {
         s.nmoved = self.nmoved;
         for i in 0..self.nmoved {
             s.moved[i as usize] = self.moved[i as usize];
@@ -3813,7 +3816,7 @@ extend TypeChecker {
             s.borrows[i as usize] = self.borrows[i as usize];
         }
     }
-    fn tc_flow_set(self: &mut Self, s: &FlowState) void {
+    fn tc_flow_set(self: &mut Self, s: &FlowState) {
         for i in 0..self.nmoved {
             self.ms_bit_clear(self.moved[i as usize]);
         }
@@ -3835,7 +3838,7 @@ extend TypeChecker {
             self.borrows[i as usize] = s.borrows[i as usize];
         }
     }
-    fn tc_flow_clear(self: &Self, s: &mut FlowState) void {
+    fn tc_flow_clear(self: &Self, s: &mut FlowState) {
         s.nmoved = 0;
         s.nuninit = 0;
         s.nfreed = 0;
@@ -3916,7 +3919,7 @@ extend TypeChecker {
         }
         return overflow;
     }
-    fn tc_flow_overflow(self: &mut Self, at: NodeId) void {
+    fn tc_flow_overflow(self: &mut Self, at: NodeId) {
         let sp = unsafe (*self.cur_ast()).at_const(at).span;
         self.errors.emit(
             sp.start,
@@ -3950,10 +3953,10 @@ extend TypeChecker {
     }
 
     // ---- scope / borrow set ----
-    fn tc_scope_enter(self: &mut Self) void {
+    fn tc_scope_enter(self: &mut Self) {
         self.scope_depth = self.scope_depth + 1;
     }
-    fn tc_scope_exit(self: &mut Self) void {
+    fn tc_scope_exit(self: &mut Self) {
         let d = self.scope_depth;
         let mut w: u32 = 0;
         for i in 0..self.nborrows {
@@ -4207,7 +4210,7 @@ extend TypeChecker {
     fn borrow_mark(self: &Self) u32 {
         return self.nborrows;
     }
-    fn borrow_release_to(self: &mut Self, mark: u32) void {
+    fn borrow_release_to(self: &mut Self, mark: u32) {
         if self.nborrows <= mark {
             return;
         }
@@ -4222,7 +4225,7 @@ extend TypeChecker {
         }
         self.nborrows = w;
     }
-    fn borrow_tombstone_at(self: &mut Self, i: u32) void {
+    fn borrow_tombstone_at(self: &mut Self, i: u32) {
         self.borrows[i as usize].root = NODE_NONE;
         self.borrows[i as usize].binding = NODE_NONE;
     }
@@ -4231,7 +4234,7 @@ extend TypeChecker {
     // resolves to it. "any use after `after`" then collapses to one compare. Typechecker-added
     // resolutions never target a value binding except break/continue -> loop node (a `for` node IS
     // its loop binding), which tc_note_resolution folds in at the set site.
-    fn tc_build_last_use(self: &mut Self) void {
+    fn tc_build_last_use(self: &mut Self) {
         self.last_use_built = true;
         let n = unsafe (*self.cur_ast()).nodes.len();
         self.last_use.clear();
@@ -4249,7 +4252,7 @@ extend TypeChecker {
             nid = nid + 1;
         }
     }
-    fn tc_note_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) void {
+    fn tc_note_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
         if self.last_use_built && decl as usize < self.last_use.len() && ref_id > self.last_use[decl as usize] {
             self.last_use.set(decl as usize, ref_id);
         }
@@ -4323,7 +4326,7 @@ extend TypeChecker {
         }
         return false;
     }
-    fn borrow_push(self: &mut Self, root: NodeId, kind: u8, place: NodeId, origin: NodeId) void {
+    fn borrow_push(self: &mut Self, root: NodeId, kind: u8, place: NodeId, origin: NodeId) {
         if self.nborrows < 256 {
             let k = self.nborrows;
             self.borrows[k as usize] = Borrow {
@@ -4344,7 +4347,7 @@ extend TypeChecker {
             );
         }
     }
-    fn borrow_create(self: &mut Self, place: NodeId, kind: u8, origin: NodeId) void {
+    fn borrow_create(self: &mut Self, place: NodeId, kind: u8, origin: NodeId) {
         let root = self.borrow_place_root(place);
         if root == NODE_NONE {
             return;
@@ -4392,7 +4395,7 @@ extend TypeChecker {
         }
         return false;
     }
-    fn borrow_transfer_ref(self: &mut Self, init: NodeId, binding: NodeId) void {
+    fn borrow_transfer_ref(self: &mut Self, init: NodeId, binding: NodeId) {
         let a = self.cur_ast();
         let mut e = init;
         loop {
@@ -4447,7 +4450,7 @@ extend TypeChecker {
         }
         return false;
     }
-    fn borrow_nll_drop(self: &mut Self, block_id: NodeId, ids: *const NodeId, si: u32) void {
+    fn borrow_nll_drop(self: &mut Self, block_id: NodeId, ids: *const NodeId, si: u32) {
         let mut keep = Keep256 {};
         for k in 0..self.nborrows {
             keep[k as usize] = true;
@@ -4665,7 +4668,7 @@ extend TypeChecker {
         suba: *const TypeId,
         nsub: i32,
         depth: i32,
-    ) void {
+    ) {
         if iface.node == NODE_NONE || depth > 8 {
             return;
         }
@@ -4717,7 +4720,7 @@ extend TypeChecker {
             }
         }
     }
-    fn check_extend_conformance(self: &mut Self, id: NodeId) void {
+    fn check_extend_conformance(self: &mut Self, id: NodeId) {
         let iface = unsafe (*self.cur_ast()).resolution_def(
             unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type,
         );
@@ -4799,8 +4802,11 @@ extend TypeChecker {
     fn tc_method_ret(self: &mut Self, recv: TypeId, md: DefId) TypeId {
         let fa = self.mod_ast(md.module);
         let fnn = unsafe (*fa).at_const(md.node);
-        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.returns.len != 1 {
+        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.returns.len > 1 {
             return TYPE_NONE;
+        }
+        if fnn.as_data.function.returns.len == 0 {
+            return Ast::builtin(BuiltinType::BT_VOID);
         }
         let mut rsubp = Defs8 {};
         let mut rsuba = Tys8 {};
@@ -5707,7 +5713,7 @@ extend TypeChecker {
         gparams: *const DefId,
         bound: *mut TypeId,
         g: i32,
-    ) void {
+    ) {
         let fa = self.mod_ast(fmod);
         for pass in 0..2 {
             for i in 0..g {
@@ -5841,7 +5847,7 @@ extend TypeChecker {
         return true;
     }
 
-    fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, owner: NodeId, at: tok::Span) void {
+    fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, owner: NodeId, at: tok::Span) {
         let f = unsafe (*self.mod_ast(m)).at_const(field);
         let inside_owner = (self.package == null || m == self.ast.module) && owner == self.current_self;
         if f.kind == NodeKind::NODE_FIELD && !f.as_data.field.is_public && !inside_owner {
@@ -6079,7 +6085,7 @@ extend TypeChecker {
         return ret;
     }
 
-    fn check_call_receiver(self: &mut Self, callee_id: NodeId, fmod: ModuleId, params: NodeList, returns: NodeList) void {
+    fn check_call_receiver(self: &mut Self, callee_id: NodeId, fmod: ModuleId, params: NodeList, returns: NodeList) {
         let a = self.cur_ast();
         let mem = unsafe (*a).at_const(callee_id).as_data.member.member;
         let recv = unsafe (*a).at_const(callee_id).as_data.member.object;
@@ -6574,8 +6580,10 @@ extend TypeChecker {
                     );
                 }
                 self.mret_call = id;
+                return TYPE_NONE;
             }
-            return TYPE_NONE;
+            // an omitted return type IS void: the call must not type-check leniently
+            return Ast::builtin(BuiltinType::BT_VOID);
         }
         let r0 = unsafe (*fa).list(returns)[0];
         let rn = unsafe (*fa).at_const(r0);
@@ -6600,7 +6608,7 @@ extend TypeChecker {
         rsubp: *const DefId,
         rsuba: *const TypeId,
         nrsub: i32,
-    ) void {
+    ) {
         let a = self.cur_ast();
         let fa = self.mod_ast(fmod);
         let sp = unsafe (*a).at_const(id).span;
@@ -7336,7 +7344,7 @@ extend TypeChecker {
         return sty;
     }
 
-    fn check_if_stmt(self: &mut Self, id: NodeId) void {
+    fn check_if_stmt(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let ifd = unsafe (*a).at_const(id).as_data.if_stmt;
         let bm = self.borrow_mark();
@@ -7456,7 +7464,7 @@ extend TypeChecker {
         catchall: *mut bool,
         tcov: *mut bool,
         fcov: *mut bool,
-    ) void {
+    ) {
         if pid == NODE_NONE {
             return;
         }
@@ -7507,7 +7515,7 @@ extend TypeChecker {
             i = i + 1;
         }
     }
-    fn check_match_exhaustive(self: &mut Self, id: NodeId, scrut: TypeId) void {
+    fn check_match_exhaustive(self: &mut Self, id: NodeId, scrut: TypeId) {
         if scrut == TYPE_NONE {
             return;
         }
@@ -8566,7 +8574,7 @@ extend TypeChecker {
         return self.prelude_tuple_type((&targs[0]) as *const TypeId, elems.len);
     }
 
-    fn check_loop_body(self: &mut Self, body: NodeId) void {
+    fn check_loop_body(self: &mut Self, body: NodeId) {
         let nm0 = self.nmoved;
         let nb0 = self.nborrows;
         self.check_stmt(body);
@@ -8577,7 +8585,7 @@ extend TypeChecker {
         }
     }
 
-    fn check_tuple_let(self: &mut Self, id: NodeId) void {
+    fn check_tuple_let(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let value = unsafe (*a).at_const(id).as_data.let_stmt.value;
         let nm = unsafe (*a).at_const(id).as_data.let_stmt.name;
@@ -8669,7 +8677,7 @@ extend TypeChecker {
         }
     }
 
-    fn check_return(self: &mut Self, id: NodeId) void {
+    fn check_return(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let values = unsafe (*a).at_const(id).as_data.return_stmt.values;
         let rets = self.current_returns;
@@ -8728,7 +8736,7 @@ extend TypeChecker {
         }
     }
 
-    fn check_static_assert(self: &mut Self, id: NodeId) void {
+    fn check_static_assert(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let left = unsafe (*a).at_const(id).as_data.binary.left;
         let c = self.check_expr(left);
@@ -8760,7 +8768,7 @@ extend TypeChecker {
         }
     }
 
-    fn check_stmt(self: &mut Self, id: NodeId) void {
+    fn check_stmt(self: &mut Self, id: NodeId) {
         if id == NODE_NONE {
             return;
         }
@@ -9061,7 +9069,7 @@ extend TypeChecker {
         };
     }
 
-    fn check_pattern(self: &mut Self, id: NodeId, expected: TypeId, bind_ref: i32) void {
+    fn check_pattern(self: &mut Self, id: NodeId, expected: TypeId, bind_ref: i32) {
         if id == NODE_NONE {
             return;
         }
@@ -9363,7 +9371,7 @@ extend TypeChecker {
         return false;
     }
 
-    fn check_item(self: &mut Self, id: NodeId) void {
+    fn check_item(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let nk = unsafe (*a).at_const(id).kind;
         switch nk {
@@ -9523,13 +9531,13 @@ extend TypeChecker {
         };
     }
 
-    fn check_associated(self: &mut Self, items: NodeList) void {
+    fn check_associated(self: &mut Self, items: NodeList) {
         for i in 0..items.len {
             self.check_item(unsafe (*self.cur_ast()).list(items)[i as usize]);
         }
     }
 
-    fn close_instances(self: &mut Self) void {
+    fn close_instances(self: &mut Self) {
         let mut ii: usize = 0;
         while ii < unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
@@ -9600,7 +9608,7 @@ extend TypeChecker {
         }
     }
 
-    pub fn check(self: &mut Self) void {
+    pub fn check(self: &mut Self) {
         unsafe (*self.cur_ast()).init_types();
         let items = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).root).as_data.program.items;
         for i in 0..items.len {
@@ -9617,13 +9625,13 @@ extend TypeChecker {
     pub fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
-    pub fn log_errors(self: &Self) void {
+    pub fn log_errors(self: &Self) {
         self.errors.log();
     }
 }
 
 extend TypeChecker as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.ext_scope.free();
         self.ext_items.free();
         self.ext_items_built.free();

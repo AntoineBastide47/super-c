@@ -1,24 +1,24 @@
 // Small numeric and ordering helpers shared by user code without importing C headers.
 
 pub fn min<T: Ord>(a: T, b: T) T {
-    if a.cmp(&b) <= 0 {
+    if a <= b {
         return a;
     }
     return b;
 }
 
 pub fn max<T: Ord>(a: T, b: T) T {
-    if a.cmp(&b) >= 0 {
+    if a >= b {
         return a;
     }
     return b;
 }
 
 pub fn clamp<T: Ord>(value: T, lo: T, hi: T) T {
-    if value.cmp(&lo) < 0 {
+    if value < lo {
         return lo;
     }
-    if value.cmp(&hi) > 0 {
+    if value > hi {
         return hi;
     }
     return value;

@@ -22,7 +22,7 @@ pub struct Errors {
     pub fixes: Vector<LintFix>,
 }
 
-pub fn oom() void {
+pub fn oom() {
     eprint("fatal: out of memory\n");
     unsafe stdlib::abort();
 }
@@ -62,7 +62,7 @@ extend Errors {
 
     // Record a non-fatal warning at [at, at+len). Takes ownership of `msg`.
     @c.cold
-    pub fn warn(self: &mut Self, at: u32, len: u32, msg: String) void {
+    pub fn warn(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.warns.len() >= ERRORS_MAX {
             return;
         }
@@ -73,14 +73,14 @@ extend Errors {
 
     // Attach a machine-applicable fix to the warning being emitted.
     @c.cold
-    pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) void {
+    pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) {
         self.fixes.push(LintFix { start: start, end: end, kind: kind });
     }
 
     // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
     // [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
     @c.cold
-    pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) void {
+    pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.errors.len() >= ERRORS_MAX {
             return;
         }
@@ -92,7 +92,7 @@ extend Errors {
 
     // Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
     @c.cold
-    pub fn note(self: &mut Self, msg: String) void {
+    pub fn note(self: &mut Self, msg: String) {
         let n = self.errors.len();
         if n == 0 || self.notes.len() < n {
             return;
@@ -102,7 +102,7 @@ extend Errors {
     }
 
     @c.cold
-    pub fn finalize(self: &mut Self, source: str, file: str) void {
+    pub fn finalize(self: &mut Self, source: str, file: str) {
         if self.errors.len() == 0 && self.warns.len() == 0 {
             return;
         }
@@ -153,7 +153,7 @@ extend Errors {
             );
             self.warns.set(k, block);
         }
-        empty_note.free();
+
         // Order-preserving dedup of identical rendered blocks (the same error can be emitted from more
         // than one pass). Cold path: clone survivors into a fresh vector, drop the rest.
         let mut uniq = Vector::<String>::new();
@@ -173,7 +173,7 @@ extend Errors {
     }
 
     @c.cold
-    pub fn log(self: &Self) void {
+    pub fn log(self: &Self) {
         for i in 0..self.warns.len() {
             self.warns[i].eprintln();
         }
@@ -184,7 +184,7 @@ extend Errors {
 }
 
 extend Errors as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         self.errors.free();
         self.notes.free();
         self.starts.free();

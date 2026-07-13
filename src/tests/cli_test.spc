@@ -238,7 +238,6 @@ fn vec_sum() i32 {
   x.push(7);
   x.push(35);
   let s = x[0] + x[1] + (x.len() as i32);
-  x.free();
   return s;
 }
 fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
@@ -313,7 +312,6 @@ fn g2() i32 {
   x.push(10); x.push(20); x.push(30);
   let w = x[1..3];
   let r = (s.len() as i32) + s.get(4) + w.get(0) + w.get(1) + (w.len() as i32);
-  x.free();
   return r;
 }
 static_assert(g2() == 62, "slices + range indexing");
@@ -341,8 +339,6 @@ fn g5() i32 {
   s.insert(7);
   s.insert(7);
   let r = v + (m.len() as i32) + (s.len() as i32);
-  m.free();
-  s.free();
   return r;
 }
 static_assert(g5() == 43, "Map and Set fold");
@@ -655,7 +651,7 @@ struct RawAlloc {}
 extend RawAlloc as Allocator {
   fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe malloc(n); }
   fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe realloc(p, n); }
-  fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) void { unsafe free(p); }
+  fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) { unsafe free(p); }
 }
 fn main() i32 {
   let a = RawAlloc {};
@@ -664,7 +660,6 @@ fn main() i32 {
   let mut c = s.clone();
   let mut f = s.fmt();
   let ok = s.eq_str("abcdefghijklmnopqrstuvwxyz0123456789") && s.cmp(&c) == 0 && s.hash() == c.hash() && f.len() == s.len();
-  f.free(); c.free(); s.free();
   if ok { unsafe exit(42); } unsafe exit(1);
 }
 "#,

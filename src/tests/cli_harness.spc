@@ -29,7 +29,7 @@ extend CliResult {
     }
 }
 extend CliResult as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         if self.out != null {
             unsafe stdlib::free(self.out);
             self.out = null;
@@ -116,7 +116,7 @@ extend Proj {
     }
 
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
-    pub fn mkfile(self: &Proj, rel: str, content: str) void {
+    pub fn mkfile(self: &Proj, rel: str, content: str) {
         let mut cmd = Cmd8192 {};
         unsafe stdio::snprintf(
             &mut cmd[0],
@@ -251,7 +251,7 @@ extend Proj {
     }
 
     // Compile <root>/mainrel and assert a nonzero exit with a diagnostic containing `want` (expect_fail).
-    pub fn expect_fail(self: &Proj, mainrel: str, want: str) void {
+    pub fn expect_fail(self: &Proj, mainrel: str, want: str) {
         let mut r = self.compile(mainrel);
         assert(r.exit != 0, "expected nonzero exit on a bad program");
         assert(r.out_has(want), "diagnostic missing expected text");
@@ -259,7 +259,7 @@ extend Proj {
 }
 
 extend Proj as Free {
-    pub fn free(self: &mut Self) void {
+    pub fn free(self: &mut Self) {
         let mut cmd = Path512 {};
         unsafe stdio::snprintf(&mut cmd[0], 512, "rm -rf '%s'".ptr() as *const char, self.rootp());
         let _ = stdlib::system(str::from_cstr(&cmd[0]));

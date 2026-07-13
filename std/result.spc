@@ -63,7 +63,6 @@ extend<T, E> Result<T, E> {
         return switch self {
             Ok(v) => v,
             Err(e) => {
-                e.free();
                 default;
             },
         };
@@ -73,7 +72,6 @@ extend<T, E> Result<T, E> {
     pub fn err_or(self: Result<T, E>, default: E) E {
         return switch self {
             Ok(v) => {
-                v.free();
                 default;
             },
             Err(e) => e,
@@ -118,7 +116,6 @@ extend<T, E> Result<T, E> {
         return switch self {
             Ok(v) => Result::<T, E>::Ok(v),
             Err(e) => {
-                e.free();
                 other;
             },
         };
@@ -130,7 +127,6 @@ extend<T, E> Result<T, E> {
         return switch self {
             Ok(v) => Option::<T>::Some(v),
             Err(e) => {
-                e.free();
                 Option::<T>::None;
             },
         };
@@ -141,7 +137,6 @@ extend<T, E> Result<T, E> {
     pub fn get_err(self: Result<T, E>) Option<E> {
         return switch self {
             Ok(v) => {
-                v.free();
                 Option::<E>::None;
             },
             Err(e) => Option::<E>::Some(e),
@@ -175,12 +170,12 @@ extend<T: Eq, E: Eq> Result<T, E> as Eq {
     pub fn eq(self: &Result<T, E>, other: &Result<T, E>) bool {
         return switch self {
             Ok(a) => switch other {
-                Ok(b) => a.eq(b),
+                Ok(b) => *a == *b,
                 Err(_) => false,
             },
             Err(a) => switch other {
                 Ok(_) => false,
-                Err(b) => a.eq(b),
+                Err(b) => *a == *b,
             },
         };
     }
@@ -199,7 +194,6 @@ extend<T: Format, E: Format> Result<T, E> as Format {
             s.push_str("Err(");
         }
         s.push_string(&inner);
-        inner.free();
         s.push_str(")");
         return s;
     }

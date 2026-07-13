@@ -43,10 +43,10 @@ pub struct Timing {
 
 // Deferred-assert sink: a clean self-transpile produces none, so this is never actually called; it just
 // satisfies flush_asserts' callback signature.
-fn ignore_assert(_ctx: *mut void, _m: ModuleId, _cond: NodeId, _msg: *const char) void {}
+fn ignore_assert(_ctx: *mut void, _m: ModuleId, _cond: NodeId, _msg: *const char) {}
 
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
-fn resolve_one(p: &mut loader::Package, i: usize) void {
+fn resolve_one(p: &mut loader::Package, i: usize) {
     let pkg = p as *const loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -64,7 +64,7 @@ fn resolve_one(p: &mut loader::Package, i: usize) void {
 }
 
 // Type-check module `i` in place (mirrors main.spc's typecheck_module).
-fn typecheck_one(p: &mut loader::Package, i: usize) void {
+fn typecheck_one(p: &mut loader::Package, i: usize) {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -78,7 +78,6 @@ fn typecheck_one(p: &mut loader::Package, i: usize) void {
     p.override_mod = 0xFFFF as ModuleId;
     p.override_ast = null;
     let back = t.take_ast();
-    t.free();
     p.modules[i].ast = back;
 }
 
@@ -139,7 +138,6 @@ fn transpile_once() Timing {
         c.set_multifile(true);
         c.codegen_emit_header(f);
         c.codegen_emit(f);
-        c.free();
         i = i + 1;
     }
     unsafe stdio::fflush(f);
@@ -158,7 +156,6 @@ fn transpile_once() Timing {
     while i < n {
         let mut lx = lexer::Lexer::new(&mut p.modules[i].source, "");
         lx.scan_tokens();
-        lx.free();
         i = i + 1;
     }
     r.lex = time::cpu_seconds() - lx0;

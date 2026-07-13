@@ -85,7 +85,6 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     pub fn set(self: &mut Vector<T, A>, index: usize, value: T) {
-        unsafe self.ptr[index].free(); // free the replaced element (no-op if T isn't Free), like Map::insert
         unsafe self.ptr[index] = value;
     }
 
@@ -238,12 +237,9 @@ extend<T, A: Allocator + Default> Vector<T, A> {
 // buffer is the only owner of each live element. Each element `.free()` is a no-op when `T` isn't a Free type.
 extend<T, A: Allocator> Vector<T, A> as Free {
     pub fn free(self: &mut Vector<T, A>) {
-        for i in 0..self.len {
-            unsafe self.ptr[i].free(); // free the element (no-op if T isn't Free)
-        }
+        self.clear();
         self.alloc.dealloc(self.ptr as *mut void, self.cap * sizeof(T), alignof(T));
         self.ptr = null;
-        self.len = 0;
         self.cap = 0;
     }
 }
@@ -260,7 +256,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub fn contains(self: &Vector<T, A>, x: &T) bool {
         for i in 0..self.len {
-            if unsafe self.ptr[i].eq(x) {
+            if unsafe self.ptr[i] == *x {
                 return true;
             }
         }
@@ -270,7 +266,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     // Index of the first element equal to `x`, or `None`.
     pub fn position(self: &Vector<T, A>, x: &T) Option<usize> {
         for i in 0..self.len {
-            if unsafe self.ptr[i].eq(x) {
+            if unsafe self.ptr[i] == *x {
                 return Option::<usize>::Some(i);
             }
         }
@@ -284,15 +280,13 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
             return;
         }
         let mut w: usize = 1;
-        let mut r: usize = 1;
-        while r < self.len {
-            if unsafe self.ptr[r].eq(&unsafe self.ptr[w - 1]) {
+        for r in 0..self.len {
+            if unsafe self.ptr[r] == unsafe self.ptr[w - 1] {
                 unsafe self.ptr[r].free();
             } else {
                 unsafe self.ptr[w] = unsafe self.ptr[r];
                 w = w + 1;
             }
-            r = r + 1;
         }
         self.len = w;
     }
@@ -307,7 +301,7 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
         }
         let mut i: usize = 0;
         while i + 1 < self.len {
-            if unsafe self.ptr[i].cmp(&unsafe self.ptr[i + 1]) > 0 {
+            if unsafe self.ptr[i] > unsafe self.ptr[i + 1] {
                 return false;
             }
             i = i + 1;
@@ -340,10 +334,10 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && unsafe self.ptr[child].cmp(&unsafe self.ptr[child + 1]) < 0 {
+            if child + 1 < end && unsafe self.ptr[child] < unsafe self.ptr[child + 1] {
                 child = child + 1;
             }
-            if unsafe self.ptr[r].cmp(&unsafe self.ptr[child]) >= 0 {
+            if unsafe self.ptr[r] >= unsafe self.ptr[child] {
                 return;
             }
             self.swap(r, child);
@@ -432,7 +426,7 @@ extend<T, A: Allocator> Vector<T, A> {
             while j > 0 {
                 let prev = key(&unsafe self.ptr[j - 1]);
                 let cur = key(&unsafe self.ptr[j]);
-                if prev.cmp(&cur) <= 0 {
+                if prev <= cur {
                     break;
                 }
                 self.swap(j - 1, j);

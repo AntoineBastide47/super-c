@@ -11,7 +11,6 @@ fn arena() {
     let n2 = a.add(Node { kind: NodeKind::NODE_LITERAL });
     assert(n1 == 1 && n2 == 2, "add returns increasing ids");
     assert(a.at_const(n2).kind == NodeKind::NODE_LITERAL, "node payload stored");
-    a.free();
 }
 
 @test
@@ -35,7 +34,6 @@ fn scratch_lists() {
     assert_eq(lo.len, 2);
     assert(unsafe a.list(lo)[0] == id0 && unsafe a.list(lo)[1] == id1, "outer list contents");
     assert_eq(a.scratch.len(), 0); // scratch fully drained after commits
-    a.free();
 }
 
 @test
@@ -63,5 +61,4 @@ fn interner() {
     let b1 = a.intern_type(pm);
     assert(a1 == a2, "identical Ty interns to one id");
     assert(a1 != b1, "differing qualifier interns distinctly");
-    a.free();
 }

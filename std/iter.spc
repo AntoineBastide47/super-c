@@ -128,7 +128,7 @@ pub fn fold<I: Iterator<T>, T, A, F: fn(A, T) A>(it: I, init: A, f: F) A {
 }
 
 // Runs `f` on every element, for its effects.
-pub fn for_each<I: Iterator<T>, T, F: fn(T) void>(it: I, f: F) void {
+pub fn for_each<I: Iterator<T>, T, F: fn(T) void>(it: I, f: F) {
     let mut i = it;
     loop {
         switch i.next() {

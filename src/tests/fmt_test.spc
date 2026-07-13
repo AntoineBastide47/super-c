@@ -12,21 +12,18 @@ fn fmt_of(src: str, width: i32) String {
     assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
     fbld::format_program((&pa.ast) as *const Ast, src, width, &mut out);
-    pa.ast.free();
     return out;
 }
 
 fn expect_fmt_w(src: str, want: str, width: i32) {
     let mut out = fmt_of(src, width);
     let got = out.as_str();
-    assert(got.eq(&want), "formatted output mismatch");
+    assert(got == want, "formatted output mismatch");
     // Idempotence and parse preservation for every golden.
     assert(!h::parse_has_error(got), "formatted output does not parse");
     let mut again = fmt_of(got, width);
     let got2 = again.as_str();
-    assert(got2.eq(&got), "formatting is not idempotent");
-    again.free();
-    out.free();
+    assert(got2 == got, "formatting is not idempotent");
 }
 
 fn expect_fmt(src: str, want: str) {
@@ -121,7 +118,4 @@ fn emitted_c_identical() {
         unsafe cstring::strcmp(c1.code as *const char, c2.code as *const char) == 0,
         "emitted C differs between ugly and formatted variants",
     );
-    c1.free();
-    c2.free();
-    f.free();
 }

@@ -1117,5 +1117,5 @@ pub fn eprintln(_fmt: str, ...) {}
 // past the argument evaluation (a free-fn `&mut dst` arg would collide with `self.X` format args).
 // Lowered by codegen; this body is never emitted.
 extend<A: Allocator> String<A> {
-    pub fn format_into(self: &mut String<A>, _fmt: str, ...) void {}
+    pub fn format_into(self: &mut String<A>, _fmt: str, ...) {}
 }
