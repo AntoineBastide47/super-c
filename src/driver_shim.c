@@ -1,3 +1,10 @@
+/* This file needs POSIX.1-2008 (realpath, readlink, popen, setenv, ...); declare it BEFORE any
+   include so a bare `-std=c11` compile (the legacy `super-c build` path) still sees the prototypes
+   on glibc -- without this, implicit declarations truncate returned pointers and crash. */
+#ifndef _POSIX_C_SOURCE
+#  define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "driver_shim.h"
 
 #include <dirent.h>
@@ -240,5 +247,23 @@ int sc_pclose(void *f) {
   if (WIFEXITED(st))
     return WEXITSTATUS(st);
   return st == 0 ? 0 : 1;
+#endif
+}
+
+/* Atomic-ish rename for the build system's link-then-swap; Windows rename() refuses to replace. */
+int sc_rename(const char *from, const char *to) {
+#if defined(_WIN32)
+  _unlink(to);
+#endif
+  return rename(from, to);
+}
+
+/* Environment write for the build system (SUPERC for the test harness, SC_PROFILE/SC_CMD for
+   nested manifest-command invocations). */
+int sc_setenv(const char *name, const char *value) {
+#if defined(_WIN32)
+  return _putenv_s(name, value);
+#else
+  return setenv(name, value, 1);
 #endif
 }

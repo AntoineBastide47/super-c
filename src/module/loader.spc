@@ -40,6 +40,7 @@ pub struct Package {
     pub modules: Vector<Module>,
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub std_root: String, // second import search root (parent of std/); empty = none
+    pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
     // Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     // `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
@@ -332,10 +333,21 @@ extend DirCache as Free {
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
 // finds <std_root>/std/x.spc), then the bundled `ffi/` bindings (so a bare `import stdio;` finds
 // <std_root>/ffi/stdio.spc). Returns the first path that exists, else the project-relative path. Owned.
-fn resolve_import_file(dca: usize, root_dir: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
+fn resolve_import_file(dca: usize, root_dir: str, alt_root: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
     let dc = dca as *mut DirCache;
     let root_rel = module_file_path(root_dir, ast, src, parts);
-    if unsafe (*dc).exists(root_rel.as_str()) || std_root.is_empty() {
+    if unsafe (*dc).exists(root_rel.as_str()) {
+        return root_rel;
+    }
+    // Manifest convention fallback: tests/ and bench/ live beside src/, so a project-root-rooted
+    // load still resolves the compiler's own modules (and vice versa) through the src/ alt root.
+    if !alt_root.is_empty() {
+        let alt_rel = module_file_path(alt_root, ast, src, parts);
+        if unsafe (*dc).exists(alt_rel.as_str()) {
+            return alt_rel;
+        }
+    }
+    if std_root.is_empty() {
         return root_rel;
     }
     let std_rel = module_file_path(std_root, ast, src, parts);
@@ -381,6 +393,7 @@ extend Package {
             modules: Vector::<Module>::new(),
             root_dir: String::new(),
             std_root: String::new(),
+            alt_root: String::new(),
             ok: true,
             core_module: 0,
             core_seeded: false,
@@ -464,6 +477,7 @@ extend Package {
         // Collect this module's import (path, file) pairs BEFORE recursing: recursion pushes to
         // self.modules, which may realloc and move this module's by-value Ast, invalidating a live borrow.
         let root_dir = self.root_dir.as_str();
+        let alt_root = self.alt_root.as_str();
         let std_root = self.std_root.as_str();
         // Address of the dir_cache field, taken BEFORE borrowing self.modules below (the cast releases the
         // &mut immediately; dir_cache is a disjoint field so mutating it doesn't alias the `m` borrow). Passed
@@ -486,7 +500,7 @@ extend Package {
                     // ffi module imported by many modules would otherwise be re-probed once per importer.
                     if self.find(cp.as_str()) < 0 {
                         child_paths.push(cp);
-                        child_files.push(resolve_import_file(dca, root_dir, std_root, &m.ast, src, parts));
+                        child_files.push(resolve_import_file(dca, root_dir, alt_root, std_root, &m.ast, src, parts));
                     }
                 }
             }
@@ -1644,16 +1658,17 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
 // `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
 pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) Package {
     let mut d = dir_of(root_file);
-    let p = package_load_rooted(root_file, d.as_str(), std_dir, bootstrap_tags);
+    let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags);
     return p;
 }
 
 // Like package_load, but imports resolve against an explicit package root instead of the root
 // file's own directory (`super-c lint <dir>` lints nested package files in their true package).
-pub fn package_load_rooted(root_file: str, root_dir: str, std_dir: *const char, bootstrap_tags: bool) Package {
+pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir: *const char, bootstrap_tags: bool) Package {
     let mut p = Package::new();
     p.ok = true;
     p.root_dir = String::from_str(root_dir);
+    p.alt_root = String::from_str(alt_dir);
     if std_dir != null {
         p.std_root = dir_of(str::from_cstr(std_dir));
     }

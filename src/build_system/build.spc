@@ -91,6 +91,21 @@ fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     unsafe shim::sc_closedir(dh);
 }
 
+fn name_cmp(a: &String, b: &String) i32 {
+    let la = a.len();
+    let lb = b.len();
+    let mn = if la < lb {
+        la;
+    } else {
+        lb;
+    };
+    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), mn);
+    if c != 0 {
+        return c;
+    }
+    return la as i32 - lb as i32;
+}
+
 fn contains(v: &Vector<String>, s: str) bool {
     for i in 0..v.len() {
         if v.at(i).as_str() == s {
@@ -236,7 +251,12 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str) bool {
 fn resolve_cc(m: &mf::Manifest) String {
     let mut cc = String::new();
     // ccache makes fixpoint rebuilds (bootstrap stage 2) nearly free
-    if shell("ccache -V >/dev/null 2>&1") == 0 {
+    let probe = if unsafe shim::sc_host_platform() == 0 {
+        "ccache -V >nul 2>&1"; // cmd.exe has no /dev/null
+    } else {
+        "ccache -V >/dev/null 2>&1";
+    };
+    if shell(probe) == 0 {
         cc.push_str("ccache ");
     }
     if m.cc.len() != 0 {
@@ -252,10 +272,11 @@ fn resolve_cc(m: &mf::Manifest) String {
     return cc;
 }
 
+// Double quotes: understood by both sh (macOS/Linux) and cmd.exe (Windows _popen/system).
 fn push_quoted(cmd: &mut String, s: str) {
-    cmd.push_str(" '");
+    cmd.push_str(" \"");
     cmd.push_str(s);
-    cmd.push_str("'");
+    cmd.push_str("\"");
 }
 
 fn push_all(cmd: &mut String, flags: &Vector<String>) {
@@ -280,10 +301,38 @@ fn drain_job(j: &mut Job) i32 {
     return rc;
 }
 
-pub fn manifest_build(
+fn dirname_of(p: str) str {
+    let mut k = p.len();
+    while k > 0 && p[k - 1] != b'/' {
+        k = k - 1;
+    }
+    if k == 0 {
+        return ".";
+    }
+    return p.slice(0, k - 1);
+}
+
+// CLI flag beats the SC_PROFILE handed down by a running manifest command, which beats the default.
+pub fn resolve_profile(m: &mf::Manifest, cli: str) str {
+    if cli.len() != 0 {
+        return cli;
+    }
+    let env = stdlib::getenv("SC_PROFILE");
+    if env != null && unsafe *env != 0 as char {
+        return str::from_cstr(env);
+    }
+    return m.default_profile.as_str();
+}
+
+// Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`.
+fn engine_build(
     m: &mf::Manifest,
-    profile: str,
-    bin_override: str,
+    prof_name: str,
+    root: str,
+    root_dir: str,
+    alt: str,
+    sub: str,
+    bin: str,
     jobs_override: u32,
     std_dir: *const char,
     ce_steps: u32,
@@ -292,25 +341,15 @@ pub fn manifest_build(
     bootstrap_tags: bool,
     lint: bool,
 ) i32 {
-    let prof_name = if profile.len() != 0 {
-        profile;
-    } else {
-        m.default_profile.as_str();
-    };
     let pi = m.profile_index(prof_name);
     if pi < 0 {
         eprintln("build: unknown profile '{}'", prof_name);
         return 1;
     }
     let prof = m.profiles.at(pi as usize);
-    let bin = if bin_override.len() != 0 {
-        bin_override;
-    } else {
-        m.bin.as_str();
-    };
 
     // 1) transpile the closure to <root_dir>/build
-    let mut p = loader::package_load(m.root.as_str(), std_dir, bootstrap_tags);
+    let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags);
     if !p.ok {
         return 1;
     }
@@ -318,17 +357,16 @@ pub fn manifest_build(
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
     let rc = run_package(&mut p, null, "", target, lint);
-    let mut root_dir = p.root_dir.clone();
     if rc != 0 {
         return rc;
     }
 
-    // 2) content-sync into <out-dir>/<profile>/gen (unchanged files keep their mtime -- the
-    // staleness anchor); objects mirror it under <out-dir>/<profile>/obj.
-    let mut pdir = join2(m.out_dir.as_str(), prof_name);
+    // 2) content-sync into <out-dir>/<sub>/gen (unchanged files keep their mtime -- the
+    // staleness anchor); objects mirror it under <out-dir>/<sub>/obj.
+    let mut pdir = join2(m.out_dir.as_str(), sub);
     let mut gen = join2(pdir.as_str(), "gen");
     let mut obj = join2(pdir.as_str(), "obj");
-    let mut srcgen = join2(root_dir.as_str(), "build");
+    let mut srcgen = join2(root_dir, "build");
     mkdirs(gen.as_str());
     mkdirs(obj.as_str());
     let mut ret = sync_tree(srcgen.as_str(), gen.as_str());
@@ -378,9 +416,9 @@ pub fn manifest_build(
                 push_quoted(&mut cmd, cpath.as_str());
                 cmd.push_str(" -o");
                 push_quoted(&mut cmd, opath.as_str());
-                cmd.push_str(" > '");
+                cmd.push_str(" > \"");
                 cmd.push_str(log.as_str());
-                cmd.push_str("' 2>&1");
+                cmd.push_str("\" 2>&1");
                 if window.len() as u32 >= jobs {
                     let mut j0 = window.remove(0).unwrap();
                     if drain_job(&mut j0) != 0 {
@@ -448,10 +486,9 @@ pub fn manifest_build(
                 if shell(cmd.as_str()) != 0 {
                     ret = 1;
                 } else {
-                    let mut mv = String::from_str("mv -f");
-                    push_quoted(&mut mv, tmp.as_str());
-                    push_quoted(&mut mv, bin);
-                    if shell(mv.as_str()) != 0 {
+                    let mut binb = String::from_str(bin);
+                    if unsafe shim::sc_rename(tmp.cstr(), binb.cstr()) != 0 {
+                        eprintln("build: cannot move '{}' into place", bin);
                         ret = 1;
                     } else if prof.strip {
                         let mut st = String::from_str("strip");
@@ -463,6 +500,170 @@ pub fn manifest_build(
         }
     }
     return ret;
+}
+
+pub fn manifest_build(
+    m: &mf::Manifest,
+    profile: str,
+    bin_override: str,
+    jobs_override: u32,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    bootstrap_tags: bool,
+    lint: bool,
+) i32 {
+    let prof_name = resolve_profile(m, profile);
+    let bin = if bin_override.len() != 0 {
+        bin_override;
+    } else {
+        m.bin.as_str();
+    };
+    return engine_build(
+        m,
+        prof_name,
+        m.root.as_str(),
+        dirname_of(m.root.as_str()),
+        "",
+        prof_name,
+        bin,
+        jobs_override,
+        std_dir,
+        ce_steps,
+        ce_mem,
+        target,
+        bootstrap_tags,
+        lint,
+    );
+}
+
+// `super-c test`: build the project, then discover tests/**/*.spc by convention, synthesize an
+// aggregating root, and run the @test pipeline on it (SUPERC points at the fresh binary).
+pub fn manifest_test(
+    m: &mf::Manifest,
+    profile: str,
+    jobs_override: u32,
+    topts: *const TestOpts,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    bootstrap_tags: bool,
+) i32 {
+    if unsafe shim::sc_stat_isdir("tests".ptr() as *const char) != 1 {
+        eprintln("test: no tests/ directory next to src/");
+        return 1;
+    }
+    let rc = manifest_build(m, profile, "", jobs_override, std_dir, ce_steps, ce_mem, target, bootstrap_tags, false);
+    if rc != 0 {
+        return rc;
+    }
+    let mut rels = Vector::<String>::new();
+    walk_files("tests", 5, &mut rels);
+    rels.sort_by(name_cmp);
+    let mut src = String::new();
+    src.push_str("// generated by `super-c test` -- do not edit\n");
+    let mut n = 0;
+    for i in 0..rels.len() {
+        let rel = rels.at(i).as_str();
+        if !rel.ends_with(".spc") {
+            continue;
+        }
+        src.push_str("import tests::");
+        let stem = rel.slice(0, rel.len() - 4);
+        for k in 0..stem.len() {
+            if stem[k] == b'/' {
+                src.push_str("::");
+            } else {
+                src.push_byte(stem[k]);
+            }
+        }
+        src.push_str(";\n");
+        n = n + 1;
+    }
+    if n == 0 {
+        eprintln("test: no .spc files under tests/");
+        return 1;
+    }
+    src.push_str("\nfn main() i32 {\n    return 0;\n}\n");
+    mkdirs(m.out_dir.as_str());
+    let mut rootp = join2(m.out_dir.as_str(), "test_root.spc");
+    let f = stdio::fopen(rootp.as_str(), "wb");
+    if f == null {
+        eprintln("test: cannot write '{}'", rootp.as_str());
+        return 1;
+    }
+    unsafe stdio::fwrite(src.as_str().ptr(), 1, src.len(), f);
+    unsafe stdio::fclose(f);
+    // the harness compiles+runs snippets through the binary we just built ("./" so it never
+    // resolves through PATH when the bin name is bare)
+    let mut binb = String::new();
+    if m.bin.as_str().find_byte(b'/') < 0 {
+        binb.push_str("./");
+    }
+    binb.push_string(&m.bin);
+    unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
+    let mut p = loader::package_load_rooted(rootp.as_str(), ".", dirname_of(m.root.as_str()), std_dir, bootstrap_tags);
+    if !p.ok {
+        return 1;
+    }
+    let pkg = (&mut p) as *mut loader::Package;
+    let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
+    p.ceval = &mut ceval;
+    return run_package(&mut p, topts, "", target, false);
+}
+
+// `super-c bench`: build bench/main.spc under the bench profile (by default) into
+// <out-dir>/bench-bin and run it.
+pub fn manifest_bench(
+    m: &mf::Manifest,
+    profile: str,
+    no_run: bool,
+    jobs_override: u32,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    bootstrap_tags: bool,
+) i32 {
+    let probe = stdio::fopen("bench/main.spc", "rb");
+    if probe == null {
+        eprintln("bench: no bench/main.spc next to src/");
+        return 1;
+    }
+    unsafe stdio::fclose(probe);
+    let rootp = "bench/main.spc";
+    let prof_name = if profile.len() != 0 {
+        profile;
+    } else {
+        "bench";
+    };
+    let mut sub = join2("bench", prof_name);
+    let mut bin = join2(m.out_dir.as_str(), "bench-bin");
+    // rooted at the project root (like tests), so `import bench::x;` works for lint AND build
+    let rc = engine_build(
+        m,
+        prof_name,
+        rootp,
+        ".",
+        dirname_of(m.root.as_str()),
+        sub.as_str(),
+        bin.as_str(),
+        jobs_override,
+        std_dir,
+        ce_steps,
+        ce_mem,
+        target,
+        bootstrap_tags,
+        false,
+    );
+    if rc != 0 || no_run {
+        return rc;
+    }
+    let mut cmd = String::new();
+    push_quoted(&mut cmd, bin.as_str());
+    return shell(cmd.as_str());
 }
 
 // `super-c run <name>`: run a manifest command, building first when it asks for it.
@@ -490,6 +691,11 @@ pub fn manifest_run(
             return rc;
         }
     }
+    // Nested `super-c` invocations inside the lines skip command overrides (SC_CMD) and inherit
+    // the profile this command was invoked with (SC_PROFILE) unless they pass --profile themselves.
+    let mut prof = String::from_str(resolve_profile(m, profile));
+    unsafe shim::sc_setenv("SC_CMD".ptr() as *const char, "1".ptr() as *const char);
+    unsafe shim::sc_setenv("SC_PROFILE".ptr() as *const char, prof.cstr());
     for i in 0..c.run.len() {
         let mut cmd = String::new();
         for e in 0..c.env_k.len() {
@@ -507,19 +713,23 @@ pub fn manifest_run(
     return 0;
 }
 
-// `super-c clean`: drop the manifest's outputs (out-dir + the emitted <root_dir>/build tree).
+// A [command.NAME] entry shadows the built-in NAME subcommand -- unless we are already inside a
+// command's lines (SC_CMD), which is how the override's own nested `super-c build` reaches the
+// real engine.
+pub fn command_overrides(m: &mf::Manifest, name: str) bool {
+    if stdlib::getenv("SC_CMD") != null {
+        return false;
+    }
+    return m.command_index(name) >= 0;
+}
+
+// `super-c clean`: drop the manifest's outputs -- out-dir plus every emitted build tree
+// (<src>/build, bench/build from `super-c bench`, ./build from the synthesized test root).
 pub fn manifest_clean(m: &mf::Manifest) i32 {
     rm_rf(m.out_dir.as_str());
-    let r = m.root.as_str();
-    let mut k = r.len();
-    while k > 0 && r[k - 1] != b'/' {
-        k = k - 1;
-    }
-    let mut b = String::new();
-    if k > 0 {
-        b.push_str(r.slice(0, k));
-    }
-    b.push_str("build");
+    let mut b = join2(dirname_of(m.root.as_str()), "build");
     rm_rf(b.as_str());
+    rm_rf("bench/build");
+    rm_rf("build");
     return 0;
 }

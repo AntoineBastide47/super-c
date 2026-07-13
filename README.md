@@ -21,14 +21,16 @@ Super-C source (.spc)
 
 ## Quick start
 
+Grab a `super-c` binary from the GitHub Releases (it ships with `std/` and `ffi/`), then:
+
 ```sh
-# build the compiler -> ./super-c
-make release
-# emit C into  path/to/build/
-./super-c path/to/app.spc
-# compile the generated C (no -I needed; includes are relative)
-cc path/to/build/**/*.c -o app
+# build an app straight to a native binary
+./super-c build path/to/app.spc -o app
 ./app
+
+# or emit the readable C into path/to/build/ and compile it yourself
+./super-c path/to/app.spc
+cc path/to/build/**/*.c -o app
 ```
 
 The `std/` prelude (`String`, `str`, `Option`, `Result`, `Vector`, `Map`, ...) is
@@ -627,11 +629,20 @@ examples/       sample programs
 ## Building and testing
 
 ```sh
-make             # dev build (ASan/UBSan) -> ./super-c
-make release     # optimized build (-O3 -flto)
-make test        # run the full test suite
-make bench       # run the benchmarks
+./super-c build                     # two-stage dev self-build (ASan/UBSan) -> ./super-c
+./super-c build --profile=release   # optimized build (-O3 -flto)
+./super-c test                      # run the full test suite (tests/ by convention)
+./super-c bench                     # run the benchmarks (bench/ by convention)
+./super-c clean                     # drop build outputs
 ```
+
+The build is driven by `build.toml` and works for any project, not just the compiler: declare
+`bin` and `root`, and `super-c build` gives you profiles (`debug`/`dev`/`release`/`bench`, plus your
+own), incremental parallel C compilation with dependency tracking, and the `tests/` + `bench/`
+conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `-o`. Custom `[command.NAME]`
+entries run via `super-c run NAME` and may shadow the built-in `build`/`test`/`bench`/`clean` (this
+repo's `build` is overridden to the two-stage self-hosting bootstrap). `super-c fmt` (canonical
+formatter) and `super-c lint [--fix]` (default-on lints) round out the toolchain.
 
 ## Status and roadmap
 
@@ -672,8 +683,22 @@ prelude (containers,
 iterators/algorithms, pluggable allocators), `extern "C"` FFI (custom header includes, variadics in
 both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
 
-Planned / not yet implemented:
+The compiler is **fully self-hosted**: it is written in Super-C, compiles itself through a two-stage
+bootstrap to a byte-identical fixpoint, and ships with its own toolchain — the `build.toml` build
+system (profiles, incremental parallel C compilation, `test`/`bench` conventions), a canonical
+formatter (`super-c fmt`), and machine-fixable lints (`super-c lint --fix`).
 
-* closures inside generic functions
-* `dyn` extensions: generic interfaces (`dyn Iterator<i32>`), superinterface dispatch, downcasting,
-  custom-allocator `Box<dyn I>`.
+Roadmap, in priority order:
+
+1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
+   embarrassingly parallel per module.
+2. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
+   (file/console IO is currently FFI-only; this subsumes it). Unblocked, and the largest item.
+3. **Threading** — a proper kernel/user threading API: today atomics and threads are C shims via
+   FFI, with no std types and no `Send`/`Sync` markers (the borrow checker is single-threaded).
+4. **Coroutines** — `launch f(args)`: uncolored spawn on stackful coroutines with `Chan<T>`, staged
+   from a single-threaded scheduler to M:N work stealing.
+5. **Tooling** — an LSP server, then syntax highlighting.
+
+Known language gaps: closures inside generic functions; `dyn` extensions (generic interfaces like
+`dyn Iterator<i32>`, superinterface dispatch, downcasting, custom-allocator `Box<dyn I>`).

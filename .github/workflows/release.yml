@@ -66,7 +66,7 @@ jobs:
           path: |
             ~/Library/Caches/Homebrew
             ~/Library/Caches/Homebrew/downloads
-          key: cc-brew-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          key: cc-brew-${{ runner.os }}-${{ hashFiles('build.toml') }}
           restore-keys: cc-brew-${{ runner.os }}-
 
       - name: Cache apt archives (Linux)
@@ -74,7 +74,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: cc-apt-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          key: cc-apt-${{ runner.os }}-${{ hashFiles('build.toml') }}
           restore-keys: cc-apt-${{ runner.os }}-
 
       - name: Set up C compiler + ccache (macOS)
@@ -116,12 +116,9 @@ jobs:
       # land in the caches above. The default build needs only the preinstalled `cc`.
       # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
       # mingw-clean: realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call.
-      - name: Set up mingw-w64 + make (Windows)
+      - name: Set up mingw-w64 (Windows)
         if: runner.os == 'Windows'
         run: |
-          if ! command -v make >/dev/null 2>&1; then
-            choco install -y --no-progress make
-          fi
           find_mingw_bin() {
             { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
               while read -r dir; do
@@ -144,7 +141,7 @@ jobs:
 
       # --- Clean outputs only ---------------------------------------------------------------------------
       - name: Clean release outputs
-        run: make clean && rm -rf bootstrap
+        run: rm -rf build src/build bootstrap stage0-super-c stage1-super-c
 
       # --- Bootstrap ------------------------------------------------------------------------------------
       - name: Fetch bootstrap super-c from the latest release
@@ -177,15 +174,26 @@ jobs:
           fi
 
       - name: Build release binary
-        # Use the Makefile release target. mingw hides POSIX prototypes under -std=c11's __STRICT_ANSI__,
-        # so the Windows leg uses gnu11.
+        # build.toml flow: the bootstrap binary builds stage 0 from current source via the legacy
+        # `build <root> -o` path (works even when the bootstrap predates the build system), then
+        # stage 0 rebuilds itself with the release profile. mingw hides POSIX prototypes under
+        # -std=c11's __STRICT_ANSI__, so the Windows leg overrides --cstd with gnu11.
         run: |
           set -eu
+          bin="super-c${BINEXT:-}"
           if [ "${{ runner.os }}" = Windows ]; then
-            make release BIN="super-c${BINEXT:-}" SUPERC="./bootstrap/super-c.exe" CSTD="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
+            # mingw needs gnu11; the legacy in-process cc path hardcodes c11, so stage 0 is
+            # emit + one explicit gcc invocation here in bash.
+            cstd="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
+            ./bootstrap/super-c.exe --bootstrap-tags src/main.spc
+            # shellcheck disable=SC2046
+            "${CC:-gcc}" $cstd -O1 $(find src/build -name '*.c') -o "stage0-$bin" $(cat src/build/__ldflags 2>/dev/null)
+            SC_CMD=1 "./stage0-$bin" build --profile=release "--cstd=$cstd" -o "$bin"
           else
-            make release BIN="super-c${BINEXT:-}" SUPERC="./super-c${BINEXT:-}"
+            "./super-c${BINEXT:-}" build --bootstrap-tags -o "stage0-$bin" src/main.spc
+            SC_CMD=1 "./stage0-$bin" build --profile=release -o "$bin"
           fi
+          rm -f "stage0-$bin"
 
       - name: Check binary
         run: |

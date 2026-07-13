@@ -662,6 +662,20 @@ fn test_runner_main() *const char {
     return r#"static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
 }
+/* Core count without feature-test-macro landmines: macOS hides _SC_NPROCESSORS_ONLN under strict
+   _POSIX_C_SOURCE, so use the stable sysctl entry point there. */
+static int sc_runner_ncpu(void) {
+#if defined(__APPLE__)
+  extern int sysctlbyname(const char *, void *, size_t *, void *, size_t);
+  int v = 0;
+  size_t l = sizeof v;
+  if (sysctlbyname("hw.ncpu", &v, &l, NULL, 0) != 0 || v < 1) return 1;
+  return v;
+#else
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n > 0 ? (int)n : 1;
+#endif
+}
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0); /* forked children must not inherit (and re-flush) buffered lines */
   int jobs = 0, no_fork = 0;
@@ -671,7 +685,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
   }
-  if (jobs < 1) { long n = sysconf(_SC_NPROCESSORS_ONLN); jobs = n > 0 ? (int)n : 1; }
+  if (jobs < 1) jobs = sc_runner_ncpu();
   int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];
   int nsel = 0;
   for (int i = 0; i < SC_NTESTS; i++)
@@ -878,11 +892,11 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
     let mut cmd = String::new();
     cmd.push_str(str::from_cstr(cc));
     if out_bin.len() != 0 {
-        cmd.push_str(" -std=c11 -o '");
+        cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L -o '");
         cmd.push_str(out_bin);
         cmd.push_str("'");
     } else {
-        cmd.push_str(" -std=c11 -o '");
+        cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L -o '");
         cmd.push_str(root);
         cmd.push_str("/build/__tests'");
     }
