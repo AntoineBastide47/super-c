@@ -142,7 +142,7 @@ fn count_gap_newlines(b: &Builder, from: u32, to: u32) i32 {
 // Emit the gap between two vertical elements (statements/items/fields/arms): trailing comments stay
 // on the previous line, then a hard/blank separation, then leading comments/attrs each on their own
 // line. Pushes onto `parts`; the caller emits the next element right after.
-fn emit_gap_vertical(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::DocId>, first: bool) {
+fn emit_gap_vertical(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::DocId>, _first: bool) {
     let mut segs = Vector::<TriviaSeg>::new();
     scan_gap(b, from, to, &mut segs);
     let mut i: usize = 0;

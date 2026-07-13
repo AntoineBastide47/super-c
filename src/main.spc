@@ -31,6 +31,7 @@ fn run_file(
     out_bin: str,
     target: i32,
     bootstrap_tags: bool,
+    lint: bool,
 ) i32 {
     let mut p = loader::package_load(path, std_dir, bootstrap_tags);
     let mut rc: i32 = 1;
@@ -38,7 +39,7 @@ fn run_file(
         let pkg = (&mut p) as *mut loader::Package;
         let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
         p.ceval = &mut ceval;
-        rc = run_package(&mut p, topts, out_bin, target);
+        rc = run_package(&mut p, topts, out_bin, target, lint);
         ceval.free();
     }
     p.free();
@@ -312,6 +313,7 @@ fn main(argv: Vector<str>) i32 {
     let mut ce_mem: u64 = 0;
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
+    let mut lint = false; // --lint: warn on unused vars/params, unnecessary casts and unsafe
     let mut build_mode = false;
     let mut fmt_mode = false;
     let mut fmt_write = false;
@@ -359,6 +361,8 @@ fn main(argv: Vector<str>) i32 {
             if topts.jobs < 1 {
                 bad = true;
             }
+        } else if arg == "--lint" {
+            lint = true;
         } else if arg == "--test-no-fork" {
             topts.no_fork = true;
         } else if arg.starts_with("--test-filter=") {
@@ -430,7 +434,17 @@ fn main(argv: Vector<str>) i32 {
         "super-c".ptr() as *const char;
     };
     let std_dir = exe_std_dir(arg0);
-    let rc = run_file(file, std_dir, ce_steps, ce_mem, (&topts) as *const TestOpts, out_bin, target, bootstrap_tags);
+    let rc = run_file(
+        file,
+        std_dir,
+        ce_steps,
+        ce_mem,
+        (&topts) as *const TestOpts,
+        out_bin,
+        target,
+        bootstrap_tags,
+        lint,
+    );
     if std_dir != null {
         unsafe stdlib::free(std_dir);
     }
