@@ -319,6 +319,9 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
             if first == b's' && memeq(lexeme, "struct") {
                 return TokenType::Struct;
             }
+            if first == b's' && memeq(lexeme, "static") {
+                return TokenType::Static;
+            }
             if first == b's' && memeq(lexeme, "switch") {
                 return TokenType::Switch;
             }
@@ -327,6 +330,12 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
             }
             if first == b'u' && memeq(lexeme, "unsafe") {
                 return TokenType::Unsafe;
+            }
+            if first == b'v' && memeq(lexeme, "va_arg") {
+                return TokenType::VaArg;
+            }
+            if first == b'v' && memeq(lexeme, "va_end") {
+                return TokenType::VaEnd;
             }
         },
         7 => {
@@ -338,10 +347,18 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
             if memeq(lexeme, "continue") {
                 return TokenType::Continue;
             }
+            if memeq(lexeme, "va_start") {
+                return TokenType::VaStart;
+            }
         },
         9 => {
             if memeq(lexeme, "interface") {
                 return TokenType::Interface;
+            }
+        },
+        13 => {
+            if memeq(lexeme, "static_assert") {
+                return TokenType::StaticAssert;
             }
         },
         _ => {},
@@ -358,8 +375,12 @@ fn identifier(l: &mut Lexer) {
     }
     l.current = i;
     let identifier_len = i - l.start;
+    if identifier_len == 1 && l.bytes.byte_at(l.start) == b'_' {
+        add_token(l, TokenType::Underscore);
+        return;
+    }
     let mut kind = TokenType::Identifier;
-    if 2 <= identifier_len && identifier_len <= 9 {
+    if 2 <= identifier_len && identifier_len <= 13 {
         kind = keywords(unsafe (l.bytes.ptr() + l.start), identifier_len);
     }
     add_token(l, kind);
@@ -1000,11 +1021,7 @@ fn scan_token(l: &mut Lexer) {
             return;
         },
         '>' => {
-            if match_byte(l, b'>') {
-                add_match(l, b'=', TokenType::RightShiftEqual, TokenType::RightShift);
-                return;
-            }
-            add_match(l, b'=', TokenType::GreaterThanEqual, TokenType::GreaterThan);
+            add_token(l, TokenType::GreaterThan);
             return;
         },
         '&' => {

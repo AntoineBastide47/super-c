@@ -191,9 +191,9 @@ fn precedence() {
     }
 }
 
-// `Vec<Vec<i32>>` requires splitting the `>>` token into two closing `>`s.
+// Every `>` is already an individual token, so nested generic closers need no parser state.
 @test
-fn generic_shift_split() {
+fn nested_generic_closers() {
     let mut c = h::parse_ast("type Nested = Vec<Vec<i32>>;\n");
     assert(c.errors == 0, "generic >> split parses");
     let outer_id = item(&c.ast, 0).as_data.type_alias.ty;
@@ -206,13 +206,38 @@ fn generic_shift_split() {
     let inner_id = unsafe args[0];
     assert(
         c.ast.at_const(inner_id).kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(inner_id).as_data.type_path.args.len == 1,
-        "inner Vec<i32> parsed (>> was split)",
+        "inner Vec<i32> parsed from individual '>' tokens",
     );
 }
 
-// The struct-initializer flag: `Foo {}` is a value, but in a condition the `{` opens the block.
 @test
-fn struct_initializer_flag() {
+fn rebuilt_greater_operators() {
+    let mut c = h::parse_ast(
+        "fn f(a: i32, b: i32, c: i32) { let ge = a > = b; let shr = a > > b; a > > = b; let x = a > b >> c; let y = a >> b > c; a | b >>= c; }\n",
+    );
+    assert(c.errors == 0, "left-factored greater-than operators parse");
+    let ge = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 0);
+    let shr = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 1);
+    let assign = h::nth_kind(&c.ast, NodeKind::NODE_ASSIGNMENT, 0);
+    assert(c.ast.at_const(ge).as_data.binary.op == TokenType::GreaterThanEqual, "'>=' is rebuilt");
+    assert(c.ast.at_const(shr).as_data.binary.op == TokenType::RightShift, "'>>' is rebuilt");
+    assert(c.ast.at_const(assign).as_data.binary.op == TokenType::RightShiftEqual, "'>>=' is rebuilt");
+    let gt_shift = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 3);
+    let shift_gt = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 5);
+    assert(c.ast.at_const(gt_shift).as_data.binary.op == TokenType::GreaterThan, "shift binds inside relational RHS");
+    assert(c.ast.at_const(shift_gt).as_data.binary.op == TokenType::GreaterThan, "shift binds inside relational LHS");
+    let compound = h::nth_kind(&c.ast, NodeKind::NODE_ASSIGNMENT, 1);
+    let compound_left = c.ast.at_const(compound).as_data.binary.left;
+    assert(
+        c.ast.at_const(compound_left).as_data.binary.op == TokenType::Pipe,
+        "binary expression folds before shift assignment",
+    );
+}
+
+// The condition-expression grammar excludes a bare struct initializer, while delimited child
+// expressions use the full expression grammar.
+@test
+fn condition_expression_grammar() {
     {
         let mut c = h::parse_ast("struct Foo { x: i32, }\nfn f() { let p: Foo = Foo { x: 1, }; }\n");
         assert(c.errors == 0, "struct init value parses");
@@ -229,6 +254,32 @@ fn struct_initializer_flag() {
         assert(c.ast.at_const(cond_id).kind == NodeKind::NODE_IDENTIFIER, "`if cond {}` keeps cond as the value");
         assert(c.ast.at_const(then_id).kind == NodeKind::NODE_BLOCK, "the `{}` is the then-branch");
     }
+    assert(
+        !h::parse_has_error(
+            "struct Foo { x: i32 }\nfn pred(x: Foo) bool { return true; }\nfn g() { if pred(Foo { x: 1 }) { } }\n",
+        ),
+        "a delimited call argument in a condition accepts a struct initializer",
+    );
+    assert(
+        !h::parse_has_error("struct Foo { x: i32 }\nfn g() { if (Foo { x: 1 }) { } }\n"),
+        "a parenthesized condition accepts a struct initializer",
+    );
+    assert(
+        !h::parse_has_error(
+            "struct Foo { x: i32 }\nfn values(x: Foo) [Foo; 1] { return [x]; }\nfn g() { for x in values(Foo { x: 1 }) { } }\n",
+        ),
+        "a delimited call argument in a for iterable accepts a struct initializer",
+    );
+}
+
+@test
+fn soft_keyword_names() {
+    let mut c = h::parse_ast(
+        "struct static { va_arg: i32 }\nfn static_assert() {}\nfn f(static_assert: i32) i32 { let va_arg = static_assert; return va_arg; }\n",
+    );
+    assert(c.errors == 0, "soft keywords remain valid in unambiguous name positions");
+    assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "soft-keyword struct name parses");
+    assert(item(&c.ast, 1).kind == NodeKind::NODE_FUNCTION, "soft-keyword function name parses");
 }
 
 @test
@@ -573,6 +624,14 @@ fn attributes() {
     assert(h::parse_has_error("@c.align\nstruct S { x: i32 }\n"), "align without an argument rejected");
     assert(h::parse_has_error("@c.gnu.attribute(\"hot\")\nfn m() {}\n"), "target-specific namespace rejected");
     assert(h::parse_has_error("@c.inline(3)\nfn m() {}\n"), "no-arg attribute given an argument rejected");
+    {
+        let mut recovered = h::parse_ast("@unknown(foo(bar))\nfn m() {}\n");
+        assert(recovered.errors != 0, "unknown generic attribute rejected");
+        assert(
+            recovered.ast.at_const(recovered.ast.root).as_data.program.items.len == 1,
+            "balanced unknown attribute arguments do not consume the following item",
+        );
+    }
 }
 
 // Regressions for parser bugs from the cross-stage hunt.

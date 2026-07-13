@@ -36,6 +36,7 @@ fn arithmetic() {
         "fn main() i32 { let a: i32 = 6 & 3; let b: i32 = 6 | 1; let c: i32 = 1 << 4; unsafe exit(a + b + c); }\n",
         25,
     );
+    run_exit("right shift", "fn main() i32 { let mut x: i32 = 32; x >>= 2; unsafe exit(x + (16 >> 2)); }\n", 12);
     run_exit("unary neg", "fn main() i32 { let y: i32 = -5; unsafe exit(0 - y); }\n", 5);
     run_exit("unary not", "fn main() i32 { unsafe exit(switch !false { true => 7, _ => 0, }); }\n", 7);
 }

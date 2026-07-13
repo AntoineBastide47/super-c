@@ -13,13 +13,30 @@ pub enum RangeContext {
     RANGE_EXPR,
 }
 
+enum ExpressionGrammar {
+    EXPR_FULL,
+    EXPR_CONDITION,
+}
+
+struct AttrSyntax {
+    pub namespace: Token,
+    pub name: Token,
+    pub parts: u32,
+    pub has_args: bool,
+    pub arg_start: usize,
+    pub arg_end: usize,
+}
+
+struct BinaryParse {
+    pub expression: NodeId,
+    pub shift_assignment: bool,
+}
+
 pub struct Parser {
     pub source: str,
     pub tokens: Vector<Token>,
     pub current: usize,
-    pub pending_gt: u32,
     pub depth: u32,
-    pub allow_struct_initializer: bool,
     pub ast: Ast,
     pub file: str,
     pub errors: diag::Errors,
@@ -33,9 +50,7 @@ extend Parser {
             source: source,
             tokens: tokens,
             current: 0,
-            pending_gt: 0,
             depth: 0,
-            allow_struct_initializer: true,
             ast: Ast::new(token_count),
             file: file,
             errors: diag::Errors::new(),
@@ -45,22 +60,6 @@ extend Parser {
 
     pub fn set_bootstrap_tags(self: &mut Self, v: bool) {
         self.bootstrap_tags = v;
-    }
-
-    // Consume a balanced `(...)` if the attribute has an argument list -- lets the parser skip past the
-    // args of an attribute whose shape it does not recognize (generic/unknown-tag handling).
-    fn skip_attr_args(self: &mut Self) {
-        if self.match(TokenType::LeftParen) {
-            let mut depth = 1;
-            while depth > 0 && !self.at_end() {
-                if self.check(TokenType::LeftParen) {
-                    depth = depth + 1;
-                } else if self.check(TokenType::RightParen) {
-                    depth = depth - 1;
-                }
-                self.advance();
-            }
-        }
     }
 
     pub fn take_ast(self: &mut Self) Ast {
@@ -74,9 +73,6 @@ extend Parser {
     }
 
     pub fn peek_type(self: &Self) TokenType {
-        if self.pending_gt != 0 {
-            return TokenType::GreaterThan;
-        }
         return self.raw_peek().kind();
     }
 
@@ -85,11 +81,6 @@ extend Parser {
     }
 
     pub fn advance(self: &mut Self) Token {
-        if self.pending_gt != 0 {
-            self.pending_gt = self.pending_gt - 1;
-            let source = self.tokens[self.current - 1];
-            return Token::new(TokenType::GreaterThan, source.end() - 1, 1);
-        }
         let t = self.raw_peek();
         if t.kind() != TokenType::Eof {
             self.current = self.current + 1;
@@ -110,14 +101,6 @@ extend Parser {
         ) == 0;
     }
 
-    pub fn peek_ident_is(self: &Self, kw: str) bool {
-        let t = self.raw_peek();
-        if t.kind() != TokenType::Identifier {
-            return false;
-        }
-        return self.text_is(t, kw);
-    }
-
     pub fn match(self: &mut Self, kind: TokenType) bool {
         if !self.check(kind) {
             return false;
@@ -127,9 +110,6 @@ extend Parser {
     }
 
     pub fn previous_end(self: &Self) u32 {
-        if self.pending_gt != 0 {
-            return self.tokens[self.current - 1].end() - self.pending_gt;
-        }
         if self.current != 0 {
             return self.tokens[self.current - 1].end();
         }
@@ -164,23 +144,19 @@ extend Parser {
     }
 
     pub fn consume_type_gt(self: &mut Self) bool {
-        if self.match(TokenType::GreaterThan) {
-            return true;
-        }
-        if self.pending_gt == 0 && self.check(TokenType::RightShift) {
-            self.advance();
-            self.pending_gt = 1;
-            return true;
-        }
         return self.expect(TokenType::GreaterThan, "'>'");
     }
 
     pub fn is_type_start(kind: TokenType) bool {
-        return kind == TokenType::Identifier || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::LeftBracket || kind == TokenType::Fn;
+        return Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::LeftBracket || kind == TokenType::Fn;
+    }
+
+    pub fn is_identifier_token(kind: TokenType) bool {
+        return kind == TokenType::Identifier || kind == TokenType::Underscore || kind == TokenType::Static || kind == TokenType::StaticAssert || kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd;
     }
 
     pub fn identifier(self: &mut Self) NodeId {
-        if !self.check(TokenType::Identifier) && !self.check(TokenType::SelfUpper) {
+        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             self.error_here("expected identifier");
             if !self.at_end() {
                 self.advance();
@@ -198,7 +174,9 @@ extend Parser {
     }
 
     pub fn callable_name(self: &mut Self) NodeId {
-        if !self.check(TokenType::Identifier) && !self.check(TokenType::SelfUpper) && !self.check(TokenType::New) {
+        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) && !self.check(
+            TokenType::New,
+        ) {
             self.error_here("expected identifier");
             if !self.at_end() {
                 self.advance();
@@ -241,7 +219,7 @@ extend Parser {
     pub fn parse_type_args(self: &mut Self) NodeList {
         self.expect(TokenType::LessThan, "'<'");
         let mark = self.ast.mark();
-        while !self.check(TokenType::GreaterThan) && !self.check(TokenType::RightShift) && !self.at_end() {
+        while !self.check(TokenType::GreaterThan) && !self.at_end() {
             // A bare integer literal in argument position is a const-generic value (e.g. `Buff<i32, 4>`).
             let arg = if self.check(TokenType::IntegerLiteral) {
                 self.literal();
@@ -286,7 +264,7 @@ extend Parser {
     }
 
     pub fn parse_cast_type(self: &mut Self) NodeId {
-        if !self.check(TokenType::Identifier) && !self.check(TokenType::SelfUpper) {
+        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.parse_type();
         }
         let start = self.raw_peek().start();
@@ -447,7 +425,7 @@ extend Parser {
                 },
             );
         }
-        if self.check(TokenType::Identifier) || self.check(TokenType::SelfUpper) {
+        if Parser::is_identifier_token(self.peek_type()) || self.check(TokenType::SelfUpper) {
             return self.parse_type_path();
         }
         self.error_here("expected type");
@@ -493,7 +471,7 @@ extend Parser {
             return NodeList { start: 0, len: 0 };
         }
         let mark = self.ast.mark();
-        while !self.check(TokenType::GreaterThan) && !self.check(TokenType::RightShift) && !self.at_end() {
+        while !self.check(TokenType::GreaterThan) && !self.at_end() {
             let start = self.raw_peek().start();
             let is_const = self.match(TokenType::Const);
             let name = self.identifier();
@@ -632,7 +610,7 @@ extend Parser {
             return self.ast.commit(mark);
         }
         while !self.check(TokenType::RightParen) && !self.at_end() {
-            if self.check(TokenType::Identifier) {
+            if Parser::is_identifier_token(self.peek_type()) {
                 let start = self.raw_peek().start();
                 let head = self.identifier();
                 if self.match(TokenType::Colon) {
@@ -1162,12 +1140,12 @@ extend Parser {
 
     pub fn parse_item(self: &mut Self) NodeId {
         let mut attrs = self.parse_attributes(16);
-        if self.peek_ident_is("static_assert") {
+        if self.check(TokenType::StaticAssert) {
             let id = self.parse_static_assert();
             return id;
         }
         let is_public = self.match(TokenType::Pub);
-        if self.peek_ident_is("static") {
+        if self.check(TokenType::Static) {
             let sid = self.parse_static();
             if sid != NODE_NONE {
                 self.ast.at(sid).as_data.const_def.is_public = is_public;
@@ -1304,10 +1282,7 @@ extend Parser {
     pub fn parse_switch(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
-        let old = self.allow_struct_initializer;
-        self.allow_struct_initializer = false;
-        let value = self.parse_expression();
-        self.allow_struct_initializer = old;
+        let value = self.parse_condition_expression();
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
         while !self.check(TokenType::RightBrace) && !self.at_end() {
@@ -1404,7 +1379,11 @@ extend Parser {
                 },
             );
         }
-        if self.check(TokenType::Mut) || self.check(TokenType::Identifier) {
+        if self.check(TokenType::Underscore) {
+            let token = self.advance();
+            return self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: token.span() });
+        }
+        if self.check(TokenType::Mut) || Parser::is_identifier_token(self.peek_type()) {
             let is_mut = self.match(TokenType::Mut);
             let name = self.identifier();
             if name == NODE_NONE {
@@ -1412,10 +1391,6 @@ extend Parser {
             }
             if is_mut {
                 self.ast.at(name).as_data.name.is_mutable = true;
-            }
-            let text = self.ast.at_const(name).as_data.name.text;
-            if text.end - text.start == 1 && self.source[text.start as usize] == b'_' {
-                return self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: self.node_span(name) });
             }
             if self.match(TokenType::LeftParen) {
                 let mark = self.ast.mark();
@@ -1543,8 +1518,7 @@ extend Parser {
             );
         }
         let p = self.parse_postfix_after(group);
-        let b = self.parse_binary_after(p, 1);
-        return self.parse_expression_after(b);
+        return self.parse_expression_from_mode(p, ExpressionGrammar::EXPR_FULL);
     }
 
     pub fn parse_array_literal(self: &mut Self) NodeId {
@@ -1568,7 +1542,9 @@ extend Parser {
         );
     }
 
-    pub fn parse_primary(self: &mut Self) NodeId {
+    // Expression and ConditionExpression share their implementation; delimited children always
+    // select the full Expression grammar.
+    fn parse_primary_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
         let start = self.raw_peek().start();
         let kind = self.peek_type();
         if Parser::is_literal_token(kind) {
@@ -1584,46 +1560,47 @@ extend Parser {
                 },
             );
         }
-        if kind == TokenType::Identifier {
-            let t = self.raw_peek();
-            let may_va = t.len() >= 6 && t.len() <= 8 && self.source[t.start() as usize] == b'v';
-            let va = if may_va && self.text_is(t, "va_start") {
-                VA_START as i32;
-            } else if may_va && self.text_is(t, "va_arg") {
-                VA_ARG as i32;
-            } else if may_va && self.text_is(t, "va_end") {
-                VA_END as i32;
+        if kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd {
+            let va = if kind == TokenType::VaStart {
+                VA_START;
+            } else if kind == TokenType::VaArg {
+                VA_ARG;
             } else {
-                -1;
+                VA_END;
             };
             let value = self.identifier();
-            if va >= 0 && self.match(TokenType::LeftParen) {
-                let ap = self.parse_expression();
-                let mut extra = NODE_NONE;
-                if va == VA_ARG as i32 {
-                    self.expect(TokenType::Comma, "','");
-                    extra = self.parse_type();
-                } else if va == VA_START as i32 {
-                    self.expect(TokenType::Comma, "','");
-                    extra = self.parse_expression();
+            if !self.match(TokenType::LeftParen) {
+                if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
+                    return self.parse_struct_initializer_after(value, start);
                 }
-                self.expect(TokenType::RightParen, "')'");
-                return self.ast.add(
-                    Node {
-                        kind: NodeKind::NODE_VA_EXPR,
-                        span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { va_op: VaOpData { op: va as u8, ap: ap, extra: extra } },
-                    },
-                );
+                return value;
             }
-            if self.allow_struct_initializer && self.check(TokenType::LeftBrace) {
+            let ap = self.parse_expression();
+            let mut extra = NODE_NONE;
+            if va == VA_ARG {
+                self.expect(TokenType::Comma, "','");
+                extra = self.parse_type();
+            } else if va == VA_START {
+                self.expect(TokenType::Comma, "','");
+                extra = self.parse_expression();
+            }
+            self.expect(TokenType::RightParen, "')'");
+            return self.ast.add(
+                Node {
+                    kind: NodeKind::NODE_VA_EXPR,
+                    span: Span::new(start, self.previous_end()),
+                    as_data: NodeAs { va_op: VaOpData { op: va, ap: ap, extra: extra } },
+                },
+            );
+        }
+        if Parser::is_identifier_token(kind) {
+            let value = self.identifier();
+            if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
                 return self.parse_struct_initializer_after(value, start);
             }
             return value;
         }
         if self.match(TokenType::LeftParen) {
-            let old = self.allow_struct_initializer;
-            self.allow_struct_initializer = true;
             let value = self.parse_expression();
             if self.check(TokenType::Comma) {
                 let mark = self.ast.mark();
@@ -1632,7 +1609,6 @@ extend Parser {
                     self.ast.push(self.parse_expression());
                 }
                 let elems = self.ast.commit(mark);
-                self.allow_struct_initializer = old;
                 self.expect(TokenType::RightParen, "')'");
                 return self.ast.add(
                     Node {
@@ -1642,7 +1618,6 @@ extend Parser {
                     },
                 );
             }
-            self.allow_struct_initializer = old;
             self.expect(TokenType::RightParen, "')'");
             return value;
         }
@@ -1802,6 +1777,10 @@ extend Parser {
         return NODE_NONE;
     }
 
+    pub fn parse_primary(self: &mut Self) NodeId {
+        return self.parse_primary_mode(ExpressionGrammar::EXPR_FULL);
+    }
+
     pub fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
         let mut segs: [NodeId; 16] = [
             0u32,
@@ -1854,7 +1833,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_postfix_after(self: &mut Self, mut expr: NodeId) NodeId {
+    fn parse_postfix_after_mode(self: &mut Self, mut expr: NodeId, grammar: ExpressionGrammar) NodeId {
         while true {
             let start = self.node_span(expr).start;
             if self.match(TokenType::LeftParen) {
@@ -1918,7 +1897,7 @@ extend Parser {
                             as_data: NodeAs { specialization: SpecializationData { expression: inner, types: types } },
                         },
                     );
-                    if self.allow_struct_initializer && self.check(TokenType::LeftBrace) {
+                    if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
                         let mut tp: NodeId;
                         if self.ast.at_const(inner).kind == NodeKind::NODE_MEMBER {
                             tp = self.path_chain_to_type_path(inner, start);
@@ -1952,7 +1931,7 @@ extend Parser {
                             },
                         },
                     );
-                    if self.allow_struct_initializer && self.check(TokenType::LeftBrace) {
+                    if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
                         let tp = self.path_chain_to_type_path(expr, start);
                         return self.parse_struct_initializer_after(tp, start);
                     }
@@ -1978,18 +1957,26 @@ extend Parser {
         return expr;
     }
 
-    pub fn parse_postfix(self: &mut Self) NodeId {
-        return self.parse_postfix_after(self.parse_primary());
+    pub fn parse_postfix_after(self: &mut Self, expr: NodeId) NodeId {
+        return self.parse_postfix_after_mode(expr, ExpressionGrammar::EXPR_FULL);
     }
 
-    pub fn parse_unary(self: &mut Self) NodeId {
+    fn parse_postfix_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
+        return self.parse_postfix_after_mode(self.parse_primary_mode(grammar), grammar);
+    }
+
+    pub fn parse_postfix(self: &mut Self) NodeId {
+        return self.parse_postfix_mode(ExpressionGrammar::EXPR_FULL);
+    }
+
+    fn parse_unary_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
         if self.depth >= PARSE_MAX_DEPTH {
             self.error_here("expression nested too deeply");
             return NODE_NONE;
         }
         self.depth = self.depth + 1;
         let result = if !Parser::unary_operator(self.peek_type()) {
-            self.parse_postfix();
+            self.parse_postfix_mode(grammar);
         } else {
             let op = self.advance();
             let qualifier = if op.kind() == TokenType::Ampersand && self.match(TokenType::Mut) {
@@ -2000,7 +1987,7 @@ extend Parser {
             let operand = if op.kind() == TokenType::Unsafe && self.check(TokenType::LeftBrace) {
                 self.parse_block();
             } else {
-                self.parse_unary();
+                self.parse_unary_mode(grammar);
             };
             self.ast.add(
                 Node {
@@ -2014,36 +2001,23 @@ extend Parser {
         return result;
     }
 
-    pub fn parse_binary_after(self: &mut Self, mut left: NodeId, minimum: i32) NodeId {
-        let mut chain: u32 = 0;
-        while true {
-            let op = self.peek_type();
-            let prec = Parser::precedence(op);
-            if prec < minimum {
-                break;
-            }
-            chain = chain + 1;
-            if chain > 4096 {
-                self.error_here("expression nested too deeply");
-                return left;
-            }
-            self.advance();
-            let right = self.parse_binary(prec + 1);
-            left = self.ast.add(
-                Node {
-                    kind: NodeKind::NODE_BINARY,
-                    span: Span::new(self.node_span(left).start, self.node_span(right).end),
-                    as_data: NodeAs { binary: BinaryData { op: op, left: left, right: right } },
-                },
-            );
-        }
-        return left;
+    pub fn parse_unary(self: &mut Self) NodeId {
+        return self.parse_unary_mode(ExpressionGrammar::EXPR_FULL);
+    }
+
+    fn add_binary(self: &mut Self, left: NodeId, op: TokenType, right: NodeId) NodeId {
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_BINARY,
+                span: Span::new(self.node_span(left).start, self.node_span(right).end),
+                as_data: NodeAs { binary: BinaryData { op: op, left: left, right: right } },
+            },
+        );
     }
 
     // `as` binds looser than every prefix operator (`*x as T` is `(*x) as T`) and tighter than
     // any binary operator; left-associative chains (`x as A as B`) stay flat here.
-    pub fn parse_cast(self: &mut Self) NodeId {
-        let mut expr = self.parse_unary();
+    fn parse_cast_after(self: &mut Self, mut expr: NodeId) NodeId {
         while self.match(TokenType::As) {
             let cast_type = self.parse_cast_type();
             expr = self.ast.add(
@@ -2057,15 +2031,133 @@ extend Parser {
         return expr;
     }
 
-    pub fn parse_binary(self: &mut Self, minimum: i32) NodeId {
-        return self.parse_binary_after(self.parse_cast(), minimum);
+    fn parse_cast_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
+        return self.parse_cast_after(self.parse_unary_mode(grammar));
     }
 
-    pub fn parse_expression_after(self: &mut Self, left: NodeId) NodeId {
-        if self.check(TokenType::Range) || self.check(TokenType::RangeInclusive) {
-            return self.parse_range_value(left);
+    pub fn parse_cast(self: &mut Self) NodeId {
+        return self.parse_cast_mode(ExpressionGrammar::EXPR_FULL);
+    }
+
+    // Shift and relational operators share a leading `>` token. Parsing both precedence levels
+    // together lets each production consume that token before selecting its tail with one lookahead.
+    fn parse_shift_relational_from_mode(self: &mut Self, left: NodeId, grammar: ExpressionGrammar) BinaryParse {
+        let mut expression = self.parse_binary_level_from_mode(left, 10, grammar).expression;
+        let mut relation_left = NODE_NONE;
+        let mut relation_op = TokenType::Eof;
+        let mut chain: u32 = 0;
+        while true {
+            let mut op = self.peek_type();
+            let mut shift = op == TokenType::LeftShift;
+            if op != TokenType::GreaterThan && !shift && op != TokenType::LessThan && op != TokenType::LessThanEqual {
+                break;
+            }
+            chain = chain + 1;
+            if chain > 4096 {
+                self.error_here("expression nested too deeply");
+                break;
+            }
+            if op == TokenType::GreaterThan {
+                self.advance();
+                if self.match(TokenType::GreaterThan) {
+                    if self.match(TokenType::Equal) {
+                        if relation_left != NODE_NONE {
+                            expression = self.add_binary(relation_left, relation_op, expression);
+                        }
+                        return BinaryParse { expression: expression, shift_assignment: true };
+                    }
+                    op = TokenType::RightShift;
+                    shift = true;
+                } else {
+                    op = if self.match(TokenType::Equal) {
+                        TokenType::GreaterThanEqual;
+                    } else {
+                        TokenType::GreaterThan;
+                    };
+                }
+            } else {
+                self.advance();
+            }
+            if shift {
+                let right = self.parse_binary_level_mode(10, grammar).expression;
+                expression = self.add_binary(expression, op, right);
+            } else {
+                if relation_left != NODE_NONE {
+                    expression = self.add_binary(relation_left, relation_op, expression);
+                }
+                relation_left = expression;
+                relation_op = op;
+                expression = self.parse_binary_level_mode(10, grammar).expression;
+            }
         }
-        if !Parser::assignment_operator(self.peek_type()) {
+        if relation_left != NODE_NONE {
+            expression = self.add_binary(relation_left, relation_op, expression);
+        }
+        return BinaryParse { expression: expression, shift_assignment: false };
+    }
+
+    fn parse_binary_level_from_mode(self: &mut Self, left: NodeId, level: i32, grammar: ExpressionGrammar) BinaryParse {
+        if level > 11 {
+            return BinaryParse { expression: left, shift_assignment: false };
+        }
+        if level == 8 {
+            return self.parse_shift_relational_from_mode(left, grammar);
+        }
+        let next = if level == 7 {
+            8;
+        } else {
+            level + 1;
+        };
+        let mut parsed = self.parse_binary_level_from_mode(left, next, grammar);
+        if parsed.shift_assignment {
+            return parsed;
+        }
+        let mut chain: u32 = 0;
+        while Parser::precedence(self.peek_type()) == level {
+            chain = chain + 1;
+            if chain > 4096 {
+                self.error_here("expression nested too deeply");
+                break;
+            }
+            let op = self.advance().kind();
+            let right = self.parse_binary_level_mode(next, grammar);
+            parsed.expression = self.add_binary(parsed.expression, op, right.expression);
+            if right.shift_assignment {
+                parsed.shift_assignment = true;
+                break;
+            }
+        }
+        return parsed;
+    }
+
+    fn parse_binary_level_mode(self: &mut Self, level: i32, grammar: ExpressionGrammar) BinaryParse {
+        return self.parse_binary_level_from_mode(self.parse_cast_mode(grammar), level, grammar);
+    }
+
+    fn parse_binary_from_mode(self: &mut Self, left: NodeId, grammar: ExpressionGrammar) BinaryParse {
+        return self.parse_binary_level_from_mode(left, 1, grammar);
+    }
+
+    fn parse_binary_mode(self: &mut Self, grammar: ExpressionGrammar) BinaryParse {
+        return self.parse_binary_level_mode(1, grammar);
+    }
+
+    pub fn parse_binary(self: &mut Self) NodeId {
+        return self.parse_binary_mode(ExpressionGrammar::EXPR_FULL).expression;
+    }
+
+    fn parse_expression_from_mode(self: &mut Self, first: NodeId, grammar: ExpressionGrammar) NodeId {
+        let parsed = self.parse_binary_from_mode(first, grammar);
+        let left = parsed.expression;
+        if self.check(TokenType::Range) || self.check(TokenType::RangeInclusive) {
+            return self.parse_range_value_mode(left, grammar);
+        }
+        let op = if parsed.shift_assignment {
+            TokenType::RightShiftEqual;
+        } else {
+            self.peek_type();
+        };
+        if !Parser::assignment_operator(op) {
             return left;
         }
         if self.depth >= PARSE_MAX_DEPTH {
@@ -2073,8 +2165,10 @@ extend Parser {
             return left;
         }
         self.depth = self.depth + 1;
-        let op = self.advance().kind();
-        let right = self.parse_expression();
+        if !parsed.shift_assignment {
+            self.advance();
+        }
+        let right = self.parse_expression_mode(grammar);
         self.depth = self.depth - 1;
         return self.ast.add(
             Node {
@@ -2085,36 +2179,44 @@ extend Parser {
         );
     }
 
-    pub fn parse_expression(self: &mut Self) NodeId {
+    fn parse_expression_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
         if self.check(TokenType::Range) || self.check(TokenType::RangeInclusive) {
-            return self.parse_range_value(NODE_NONE);
+            return self.parse_range_value_mode(NODE_NONE, grammar);
         }
-        return self.parse_expression_after(self.parse_binary(1));
+        return self.parse_expression_from_mode(self.parse_cast_mode(grammar), grammar);
     }
 
-    pub fn parse_range_bound(self: &mut Self, context: RangeContext) NodeId {
+    pub fn parse_expression(self: &mut Self) NodeId {
+        return self.parse_expression_mode(ExpressionGrammar::EXPR_FULL);
+    }
+
+    pub fn parse_condition_expression(self: &mut Self) NodeId {
+        return self.parse_expression_mode(ExpressionGrammar::EXPR_CONDITION);
+    }
+
+    fn parse_range_bound_mode(self: &mut Self, context: RangeContext, grammar: ExpressionGrammar) NodeId {
         if context == RangeContext::RANGE_PATTERN {
             return self.parse_pattern_atom();
         }
-        return self.parse_expression();
+        return self.parse_expression_mode(grammar);
     }
 
     pub fn starts_range_bound(self: &Self, context: RangeContext) bool {
         let t = self.peek_type();
         if context == RangeContext::RANGE_PATTERN {
-            return Parser::is_literal_token(t) || t == TokenType::Identifier || t == TokenType::LeftParen || t == TokenType::Minus;
+            return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::Minus;
         }
-        return Parser::is_literal_token(t) || t == TokenType::Identifier || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::New || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || Parser::unary_operator(
+        return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::New || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || Parser::unary_operator(
             t,
         );
     }
 
-    pub fn parse_range(self: &mut Self, context: RangeContext) NodeId {
+    fn parse_range_mode(self: &mut Self, context: RangeContext, grammar: ExpressionGrammar) NodeId {
         let open_start = self.check(TokenType::Range) || self.check(TokenType::RangeInclusive);
         let start_node = if open_start {
             NODE_NONE;
         } else {
-            self.parse_range_bound(context);
+            self.parse_range_bound_mode(context, grammar);
         };
         if !self.check(TokenType::Range) && !self.check(TokenType::RangeInclusive) {
             return start_node;
@@ -2122,7 +2224,7 @@ extend Parser {
         let op_start = self.raw_peek().start();
         let inclusive = self.advance().kind() == TokenType::RangeInclusive;
         let end = if self.starts_range_bound(context) {
-            self.parse_range_bound(context);
+            self.parse_range_bound_mode(context, grammar);
         } else {
             NODE_NONE;
         };
@@ -2156,11 +2258,15 @@ extend Parser {
         );
     }
 
-    pub fn parse_range_value(self: &mut Self, start_node: NodeId) NodeId {
+    pub fn parse_range(self: &mut Self, context: RangeContext) NodeId {
+        return self.parse_range_mode(context, ExpressionGrammar::EXPR_FULL);
+    }
+
+    fn parse_range_value_mode(self: &mut Self, start_node: NodeId, grammar: ExpressionGrammar) NodeId {
         let op_start = self.raw_peek().start();
         let inclusive = self.advance().kind() == TokenType::RangeInclusive;
         let end = if self.starts_range_bound(RangeContext::RANGE_EXPR) {
-            self.parse_binary(1);
+            self.parse_binary_mode(grammar).expression;
         } else {
             NODE_NONE;
         };
@@ -2188,6 +2294,10 @@ extend Parser {
                 },
             },
         );
+    }
+
+    pub fn parse_range_value(self: &mut Self, start_node: NodeId) NodeId {
+        return self.parse_range_value_mode(start_node, ExpressionGrammar::EXPR_FULL);
     }
 
     pub fn parse_let(self: &mut Self) NodeId {
@@ -2293,10 +2403,7 @@ extend Parser {
             self.advance();
             let pattern = self.parse_pattern_alts(start);
             self.expect(TokenType::Equal, "'='");
-            let old = self.allow_struct_initializer;
-            self.allow_struct_initializer = false;
-            let value = self.parse_expression();
-            self.allow_struct_initializer = old;
+            let value = self.parse_condition_expression();
             let then_branch = self.parse_block();
             let mut else_branch = NODE_NONE;
             if self.match(TokenType::Else) {
@@ -2308,10 +2415,7 @@ extend Parser {
             }
             return self.desugar_let_match(start, pattern, value, then_branch, else_branch);
         }
-        let old = self.allow_struct_initializer;
-        self.allow_struct_initializer = false;
-        let condition = self.parse_expression();
-        self.allow_struct_initializer = old;
+        let condition = self.parse_condition_expression();
         let then_branch = self.parse_block();
         let mut else_branch = NODE_NONE;
         if self.match(TokenType::Else) {
@@ -2350,10 +2454,7 @@ extend Parser {
                     self.advance();
                     let pattern = self.parse_pattern_alts(start);
                     self.expect(TokenType::Equal, "'='");
-                    let old = self.allow_struct_initializer;
-                    self.allow_struct_initializer = false;
-                    let value = self.parse_expression();
-                    self.allow_struct_initializer = old;
+                    let value = self.parse_condition_expression();
                     let body = self.parse_block();
                     let end = self.previous_end();
                     let brk = self.ast.add(Node { kind: NodeKind::NODE_BREAK, span: Span::new(end, end) });
@@ -2393,10 +2494,7 @@ extend Parser {
                         },
                     );
                 } else {
-                    let old = self.allow_struct_initializer;
-                    self.allow_struct_initializer = false;
-                    let condition = self.parse_expression();
-                    self.allow_struct_initializer = old;
+                    let condition = self.parse_condition_expression();
                     let body = self.parse_block();
                     result = self.ast.add(
                         Node {
@@ -2413,10 +2511,7 @@ extend Parser {
                 self.advance();
                 let body = self.parse_block();
                 self.expect(TokenType::While, "'while'");
-                let old = self.allow_struct_initializer;
-                self.allow_struct_initializer = false;
                 let condition = self.parse_expression();
-                self.allow_struct_initializer = old;
                 self.expect(TokenType::Semicolon, "';'");
                 result = self.ast.add(
                     Node {
@@ -2432,10 +2527,7 @@ extend Parser {
                 self.advance();
                 let binding = self.identifier();
                 self.expect(TokenType::In, "'in'");
-                let old = self.allow_struct_initializer;
-                self.allow_struct_initializer = false;
-                let iterable = self.parse_range(RangeContext::RANGE_FOR);
-                self.allow_struct_initializer = old;
+                let iterable = self.parse_range_mode(RangeContext::RANGE_FOR, ExpressionGrammar::EXPR_CONDITION);
                 let body = self.parse_block();
                 result = self.ast.add(
                     Node {
@@ -2480,7 +2572,7 @@ extend Parser {
 
     pub fn parse_statement_inner(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
-        if self.peek_ident_is("static_assert") {
+        if self.check(TokenType::StaticAssert) {
             return self.parse_static_assert();
         }
         let mut result = NODE_NONE;
@@ -2543,12 +2635,13 @@ extend Parser {
             },
             Defer => {
                 self.advance();
-                let value = if self.check(TokenType::LeftBrace) {
+                let is_block = self.check(TokenType::LeftBrace);
+                let value = if is_block {
                     self.parse_block();
                 } else {
                     self.parse_expression();
                 };
-                if self.ast.at_const(value).kind != NodeKind::NODE_BLOCK {
+                if !is_block {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 result = self.ast.add(
@@ -2590,12 +2683,29 @@ extend Parser {
                 result = self.parse_loop_stmt(start, Span::empty());
             },
             Unsafe => {
-                let expression = self.parse_expression();
-                let node = self.ast.at_const(expression);
-                let block = node.kind == NodeKind::NODE_UNARY && node.as_data.unary.op == TokenType::Unsafe && self.ast.at_const(
-                    node.as_data.unary.operand,
-                ).kind == NodeKind::NODE_BLOCK;
-                if !block {
+                let op = self.advance();
+                let is_block = self.check(TokenType::LeftBrace);
+                let operand = if is_block {
+                    self.parse_block();
+                } else {
+                    self.parse_unary();
+                };
+                let unary = self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_UNARY,
+                        span: Span::new(start, self.node_span(operand).end),
+                        as_data: NodeAs {
+                            unary: UnaryData {
+                                op: op.kind(),
+                                operand: operand,
+                                qualifier: TypeQualifier::TYPE_QUAL_NONE,
+                            },
+                        },
+                    },
+                );
+                let cast = self.parse_cast_after(unary);
+                let expression = self.parse_expression_from_mode(cast, ExpressionGrammar::EXPR_FULL);
+                if !is_block || expression != unary {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 result = self.ast.add(
@@ -2693,25 +2803,196 @@ extend Parser {
         return -1;
     }
 
-    pub fn parse_attribute(self: &mut Self, out: &mut Attr) bool {
+    fn parse_attribute_syntax(self: &mut Self) AttrSyntax {
         self.advance();
-        if !self.check(TokenType::Identifier) {
+        let empty = Token::new(TokenType::Eof, self.previous_end(), 0);
+        if !Parser::is_identifier_token(self.peek_type()) {
             self.error_here("expected an attribute path after '@'");
+            return AttrSyntax {
+                namespace: empty,
+                name: empty,
+                parts: 0,
+                has_args: false,
+                arg_start: self.current,
+                arg_end: self.current,
+            };
+        }
+        let namespace = self.advance();
+        let mut name = namespace;
+        let mut parts: u32 = 1;
+        while self.match(TokenType::Dot) {
+            if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::Import) {
+                self.error_here("expected an attribute name after '.'");
+                break;
+            }
+            name = self.advance();
+            parts = parts + 1;
+        }
+        let has_args = self.match(TokenType::LeftParen);
+        let arg_start = self.current;
+        if has_args {
+            let mut depth: u32 = 1;
+            while depth > 0 && !self.at_end() {
+                if self.check(TokenType::LeftParen) {
+                    depth = depth + 1;
+                } else if self.check(TokenType::RightParen) {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                self.advance();
+            }
+        }
+        let arg_end = self.current;
+        if has_args {
+            self.expect(TokenType::RightParen, "')'");
+        }
+        return AttrSyntax {
+            namespace: namespace,
+            name: name,
+            parts: parts,
+            has_args: has_args,
+            arg_start: arg_start,
+            arg_end: arg_end,
+        };
+    }
+
+    fn attr_arg(self: &Self, syntax: &AttrSyntax, offset: usize) Token {
+        return self.tokens[syntax.arg_start + offset];
+    }
+
+    fn attr_arg_count(syntax: &AttrSyntax) usize {
+        return syntax.arg_end - syntax.arg_start;
+    }
+
+    fn parse_attr_int(self: &Self, lit: Token) u32 {
+        let mut buf: [char; 24] = [
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+            0 as char,
+        ];
+        let mut k: usize = 0;
+        let mut i = lit.start();
+        while i < lit.end() && k + 1 < sizeof([char; 24]) {
+            let ch = self.source[i as usize];
+            if ch != b'_' {
+                buf[k] = ch as char;
+                k = k + 1;
+            }
+            i = i + 1;
+        }
+        buf[k] = 0 as char;
+        return (unsafe stdlib::strtoul(&buf[0], null, 0)) as u32;
+    }
+
+    fn parse_platform_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr) {
+        if !syntax.has_args {
+            self.errors.emit(
+                syntax.namespace.start(),
+                syntax.namespace.len(),
+                String::from_str(
+                    "attribute '@platform' requires a platform list, e.g. '@platform(windows)' or '@platform(linux | macos)'",
+                ),
+            );
+            return;
+        }
+        let count = Parser::attr_arg_count(syntax);
+        let mut i: usize = 0;
+        let mut mask: u32 = 0;
+        let mut valid = count != 0;
+        while valid && i < count {
+            let neg = self.attr_arg(syntax, i).kind() == TokenType::Bang;
+            if neg {
+                i = i + 1;
+            }
+            if i >= count || self.attr_arg(syntax, i).kind() != TokenType::Identifier {
+                valid = false;
+                break;
+            }
+            let p = self.attr_arg(syntax, i);
+            let bit = if self.text_is(p, "windows") {
+                1u32;
+            } else if self.text_is(p, "macos") {
+                2u32;
+            } else if self.text_is(p, "linux") {
+                4u32;
+            } else {
+                0u32;
+            };
+            if bit == 0 {
+                self.errors.emit(
+                    p.start(),
+                    p.len(),
+                    format(
+                        "unknown platform '{}'; expected windows, macos, or linux",
+                        diag::span_str(self.source, p.start(), p.end()),
+                    ),
+                );
+                return;
+            }
+            mask = mask | if neg {
+                bit ^ 7u32;
+            } else {
+                bit;
+            };
+            i = i + 1;
+            if i < count {
+                if self.attr_arg(syntax, i).kind() != TokenType::Pipe {
+                    valid = false;
+                    break;
+                }
+                i = i + 1;
+            }
+        }
+        if !valid {
+            let t = if i < count {
+                self.attr_arg(syntax, i);
+            } else {
+                syntax.name;
+            };
+            self.errors.emit(t.start(), t.len(), format("expected a platform name: windows, macos, or linux"));
+            return;
+        }
+        out.arg = mask;
+    }
+
+    pub fn parse_attribute(self: &mut Self, out: &mut Attr) bool {
+        let syntax = self.parse_attribute_syntax();
+        if syntax.parts == 0 {
             return false;
         }
-        let ns = self.advance();
-        if self.text_is(ns, "emit_macro") && !self.check(TokenType::Dot) {
+        let ns = syntax.namespace;
+        let argc = Parser::attr_arg_count(&syntax);
+        if syntax.parts == 1 && self.text_is(ns, "emit_macro") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_EMIT_MACRO as u8, arg: 0, str_span: Span::empty() };
-            if self.match(TokenType::LeftParen) {
+            if syntax.has_args {
                 self.errors.emit(ns.start(), ns.len(), format("attribute '@emit_macro' takes no arguments"));
-                while !self.check(TokenType::RightParen) && !self.at_end() {
-                    self.advance();
-                }
-                self.match(TokenType::RightParen);
             }
             return true;
         }
-        let tk = if self.text_is(ns, "test") {
+        let test_kind = if self.text_is(ns, "test") {
             AttrKind::ATTR_TEST as i32;
         } else if self.text_is(ns, "test_init") {
             AttrKind::ATTR_TEST_INIT as i32;
@@ -2720,134 +3001,53 @@ extend Parser {
         } else {
             -1;
         };
-        if tk >= 0 && !self.check(TokenType::Dot) {
-            *out = Attr { owner: NODE_NONE, kind: tk as u8, arg: 0, str_span: Span::empty() };
-            if self.match(TokenType::LeftParen) {
-                let a = self.raw_peek();
-                let ok = self.check(TokenType::Identifier) && if tk == AttrKind::ATTR_TEST as i32 {
-                    self.text_is(a, "should_panic");
+        if syntax.parts == 1 && test_kind >= 0 {
+            *out = Attr { owner: NODE_NONE, kind: test_kind as u8, arg: 0, str_span: Span::empty() };
+            if syntax.has_args {
+                let valid = argc == 1 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && if test_kind == AttrKind::ATTR_TEST as i32 {
+                    self.text_is(self.attr_arg(&syntax, 0), "should_panic");
                 } else {
-                    self.text_is(a, "global");
+                    self.text_is(self.attr_arg(&syntax, 0), "global");
                 };
-                if ok {
+                if valid {
                     out.arg = 1;
-                    self.advance();
                 } else {
                     self.errors.emit(
-                        a.start(),
-                        if a.len() != 0 {
-                            a.len();
-                        } else {
-                            1u32;
-                        },
+                        ns.start(),
+                        ns.len(),
                         String::from_str(
-                            if tk == AttrKind::ATTR_TEST as i32 {
+                            if test_kind == AttrKind::ATTR_TEST as i32 {
                                 "attribute '@test' accepts only '(should_panic)'";
                             } else {
                                 "'@test_init' / '@test_free' accept only '(global)'";
                             },
                         ),
                     );
-                    while !self.check(TokenType::RightParen) && !self.at_end() {
-                        self.advance();
-                    }
                 }
-                self.expect(TokenType::RightParen, "')'");
             }
             return true;
         }
-        if self.text_is(ns, "platform") && !self.check(TokenType::Dot) {
+        if syntax.parts == 1 && self.text_is(ns, "platform") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
-            if !self.match(TokenType::LeftParen) {
-                self.errors.emit(
-                    ns.start(),
-                    ns.len(),
-                    format(
-                        "attribute '@platform' requires a platform list, e.g. '@platform(windows)' or '@platform(linux | macos)'",
-                    ),
-                );
-                return true;
-            }
-            let mut mask: u32 = 0;
-            let mut ok = true;
-            loop {
-                let neg = self.match(TokenType::Bang);
-                if !self.check(TokenType::Identifier) {
-                    self.error_here("expected a platform name: windows, macos, or linux");
-                    ok = false;
-                    break;
-                }
-                let p = self.advance();
-                let bit = if self.text_is(p, "windows") {
-                    1u32;
-                } else if self.text_is(p, "macos") {
-                    2u32;
-                } else if self.text_is(p, "linux") {
-                    4u32;
-                } else {
-                    0u32;
-                };
-                if bit == 0 {
-                    self.errors.emit(
-                        p.start(),
-                        p.len(),
-                        format(
-                            "unknown platform '{}'; expected windows, macos, or linux",
-                            diag::span_str(self.source, p.start(), p.end()),
-                        ),
-                    );
-                    ok = false;
-                    break;
-                }
-                let term = if neg {
-                    bit ^ 7u32;
-                } else {
-                    bit;
-                };
-                mask = mask | term;
-                if !self.match(TokenType::Pipe) {
-                    break;
-                }
-            }
-            if !ok {
-                while !self.check(TokenType::RightParen) && !self.at_end() {
-                    self.advance();
-                }
-            }
-            self.expect(TokenType::RightParen, "')'");
-            out.arg = mask;
+            self.parse_platform_attr(&syntax, out);
             return true;
         }
-        if self.text_is(ns, "fmt") && self.check(TokenType::Dot) {
-            self.advance();
-            if self.check(TokenType::Identifier) && self.text_is(self.raw_peek(), "skip") {
-                self.advance();
+        if self.text_is(ns, "fmt") {
+            if syntax.parts == 2 && self.text_is(syntax.name, "skip") {
                 *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_FMT_SKIP as u8, arg: 0, str_span: Span::empty() };
-                if self.match(TokenType::LeftParen) {
+                if syntax.has_args {
                     self.errors.emit(ns.start(), ns.len(), format("attribute '@fmt.skip' takes no arguments"));
-                    while !self.check(TokenType::RightParen) && !self.at_end() {
-                        self.advance();
-                    }
-                    self.match(TokenType::RightParen);
                 }
                 return true;
             }
-            self.error_here("unknown attribute; the 'fmt' namespace supports only '@fmt.skip'");
-            self.skip_attr_args();
+            self.errors.emit(
+                syntax.name.start(),
+                syntax.name.len(),
+                format("unknown attribute; the 'fmt' namespace supports only '@fmt.skip'"),
+            );
             return false;
         }
         if !self.text_is(ns, "c") {
-            // Unknown attribute: the parser always accepts @path(args) generically; recognition is a
-            // semantic concern. Skip any .subpath and a balanced arg list. Unknown is an error unless
-            // --bootstrap-tags (which lets an older compiler build source that uses a tag it ignores).
-            while self.match(TokenType::Dot) {
-                if self.check(TokenType::Identifier) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.skip_attr_args();
             if !self.bootstrap_tags {
                 self.errors.emit(
                     ns.start(),
@@ -2860,29 +3060,31 @@ extend Parser {
             }
             return false;
         }
-        self.expect(TokenType::Dot, "'.'");
-        if self.at_end() || self.check(TokenType::LeftParen) || self.check(TokenType::RightParen) || self.check(
-            TokenType::Semicolon,
-        ) || self.check(TokenType::Dot) {
-            self.error_here("expected an attribute name after '@c.'");
+        if syntax.parts != 2 {
+            self.errors.emit(
+                syntax.name.start(),
+                syntax.name.len(),
+                String::from_str(
+                    if syntax.parts < 2 {
+                        "expected an attribute name after '@c.'";
+                    } else {
+                        "target-specific attribute namespaces (e.g. '@c.gnu.*') are not supported";
+                    },
+                ),
+            );
             return false;
-        }
-        let name = self.advance();
-        if self.check(TokenType::Dot) {
-            self.error_here("target-specific attribute namespaces (e.g. '@c.gnu.*') are not supported");
         }
         let mut wants_str = false;
         let mut wants_int = false;
-        let kind = self.attr_kind_of(name, &mut wants_str, &mut wants_int);
+        let kind = self.attr_kind_of(syntax.name, &mut wants_str, &mut wants_int);
         if kind < 0 {
-            self.skip_attr_args(); // accept the tag generically; recognition is semantic
             if !self.bootstrap_tags {
                 self.errors.emit(
-                    name.start(),
-                    name.len(),
+                    syntax.name.start(),
+                    syntax.name.len(),
                     format(
                         "unknown attribute '@c.{}'; pass --bootstrap-tags to accept unknown attributes",
-                        diag::span_str(self.source, name.start(), name.end()),
+                        diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
                     ),
                 );
                 self.errors.note(
@@ -2894,84 +3096,53 @@ extend Parser {
             return false;
         }
         *out = Attr { owner: NODE_NONE, kind: kind as u8, arg: 0, str_span: Span::empty() };
-        let has_args = self.match(TokenType::LeftParen);
         if wants_str || wants_int {
-            if !has_args {
+            if !syntax.has_args {
                 self.errors.emit(
-                    name.start(),
-                    name.len(),
+                    syntax.name.start(),
+                    syntax.name.len(),
                     format(
                         "attribute '@c.{}' requires an argument",
-                        diag::span_str(self.source, name.start(), name.end()),
+                        diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
                     ),
                 );
-                return true;
-            }
-            if wants_int {
-                if !self.check(TokenType::IntegerLiteral) {
-                    self.error_here("expected an integer argument");
+            } else if argc != 1 || wants_int && self.attr_arg(&syntax, 0).kind() != TokenType::IntegerLiteral || wants_str && self.attr_arg(
+                &syntax,
+                0,
+            ).kind() != TokenType::StringLiteral {
+                let t = if argc != 0 {
+                    self.attr_arg(&syntax, 0);
                 } else {
-                    let lit = self.raw_peek();
-                    let mut buf: [char; 24] = [
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                        0 as char,
-                    ];
-                    let mut k: usize = 0;
-                    let mut i = lit.start();
-                    while i < lit.end() && k + 1 < sizeof([char; 24]) {
-                        let ch = self.source[i as usize];
-                        if ch != b'_' {
-                            buf[k] = ch as char;
-                            k = k + 1;
-                        }
-                        i = i + 1;
-                    }
-                    buf[k] = 0 as char;
-                    out.arg = (unsafe stdlib::strtoul(&buf[0], null, 0)) as u32;
-                }
-                self.advance();
+                    syntax.name;
+                };
+                self.errors.emit(
+                    t.start(),
+                    t.len(),
+                    String::from_str(
+                        if wants_int {
+                            "expected an integer argument";
+                        } else {
+                            "expected a string argument";
+                        },
+                    ),
+                );
             } else {
-                if !self.check(TokenType::StringLiteral) {
-                    self.error_here("expected a string argument");
+                let arg = self.attr_arg(&syntax, 0);
+                if wants_int {
+                    out.arg = self.parse_attr_int(arg);
                 } else {
-                    let lit = self.raw_peek();
-                    out.str_span = Span::new(lit.start() + 1, lit.end() - 1);
+                    out.str_span = Span::new(arg.start() + 1, arg.end() - 1);
                 }
-                self.advance();
             }
-            self.expect(TokenType::RightParen, "')'");
-        } else if has_args {
+        } else if syntax.has_args {
             self.errors.emit(
-                name.start(),
-                name.len(),
-                format("attribute '@c.{}' takes no arguments", diag::span_str(self.source, name.start(), name.end())),
+                syntax.name.start(),
+                syntax.name.len(),
+                format(
+                    "attribute '@c.{}' takes no arguments",
+                    diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
+                ),
             );
-            while !self.check(TokenType::RightParen) && !self.at_end() {
-                self.advance();
-            }
-            self.match(TokenType::RightParen);
         }
         return true;
     }

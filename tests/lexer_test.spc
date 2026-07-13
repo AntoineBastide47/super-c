@@ -32,7 +32,7 @@ fn expect_error(src: str) {
 @test
 fn keywords() {
     expect_tokens(
-        "as break case const continue defer do else enum extern false fn for if in let move mut new null return self Self struct true type unsafe where while switch interface extend match protocol augment name _ i32",
+        "as break case const continue defer do else enum extern false fn for if in let move mut new null return self Self struct static static_assert true type unsafe where while switch interface extend va_start va_arg va_end match protocol augment name _ i32",
         [
             TokenType::As,
             TokenType::Break,
@@ -58,6 +58,8 @@ fn keywords() {
             TokenType::SelfLower,
             TokenType::SelfUpper,
             TokenType::Struct,
+            TokenType::Static,
+            TokenType::StaticAssert,
             TokenType::True,
             TokenType::Type,
             TokenType::Unsafe,
@@ -66,11 +68,14 @@ fn keywords() {
             TokenType::Switch,
             TokenType::Interface,
             TokenType::Extend,
+            TokenType::VaStart,
+            TokenType::VaArg,
+            TokenType::VaEnd,
             TokenType::Identifier,
             TokenType::Identifier,
             TokenType::Identifier,
             TokenType::Identifier,
-            TokenType::Identifier,
+            TokenType::Underscore,
             TokenType::Identifier,
             TokenType::Eof,
         ],
@@ -89,6 +94,26 @@ fn dot_digit() {
             TokenType::Identifier,
             TokenType::Dot,
             TokenType::FloatLiteral,
+            TokenType::Eof,
+        ],
+    );
+}
+
+@test
+fn greater_than_tokens() {
+    expect_tokens(
+        "> >> >= >>= > >",
+        [
+            TokenType::GreaterThan,
+            TokenType::GreaterThan,
+            TokenType::GreaterThan,
+            TokenType::GreaterThan,
+            TokenType::Equal,
+            TokenType::GreaterThan,
+            TokenType::GreaterThan,
+            TokenType::Equal,
+            TokenType::GreaterThan,
+            TokenType::GreaterThan,
             TokenType::Eof,
         ],
     );
