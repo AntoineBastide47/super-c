@@ -1081,7 +1081,7 @@ fn module_errors() {
 fn extensionless_appends() {
     let mut p = cli::proj_new();
     p.mkfile("noext", "fn main() i32 { }\n");
-    let mut r = p.compile("noext");
+    let mut _r = p.compile("noext"); // result held for RAII only
     assert(p.gen_exists("noext.c"), "an extensionless input still produces build/<stem>.c");
 }
 

@@ -212,7 +212,7 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
-    r.lint = lint && !p.modules[i].prelude;
+    r.lint = lint;
     p.override_mod = i as ModuleId;
     p.override_ast = (&mut r.ast) as *mut Ast;
     r.resolve();
@@ -222,6 +222,7 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     if had || r.errors.has_warnings() {
         r.log_errors();
     }
+    p.lint_warnings = p.lint_warnings + r.errors.warns.len() as u32;
     let back = r.take_ast();
     r.free();
     p.modules[i].ast = back;
@@ -236,7 +237,7 @@ fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     let a = m.ast;
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    t.lint = lint && !p.modules[i].prelude;
+    t.lint = lint;
     p.override_mod = i as ModuleId;
     p.override_ast = (&mut t.ast) as *mut Ast;
     t.check();
@@ -246,6 +247,7 @@ fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool) bool {
     if had || t.errors.has_warnings() {
         t.log_errors();
     }
+    p.lint_warnings = p.lint_warnings + t.errors.warns.len() as u32;
     let back = t.take_ast();
     p.modules[i].ast = back;
     return !had;
@@ -310,22 +312,196 @@ fn platform_filter(p: &mut loader::Package, target: i32) void {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// --lint: unused non-pub functions/structs. Referenced-based v1: an item is live if any resolution in a
+// non-prelude module points at it (self-references from a function's own body do not count). `pub` is the
+// spc-consumer export layer and @c.export/@c.used/extern the C-consumer layer -- all exempt. Methods in
+// `extend X as Iface` blocks are conformance obligations, also exempt.
+fn item_has_attr(a: *const Ast, owner: NodeId, kind: AttrKind) bool {
+    for i in 0..unsafe (*a).attrs.len() {
+        let at = unsafe (*a).attrs.at(i);
+        if at.owner == owner && at.kind == kind as u8 {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn lint_mark_used(p: &loader::Package, used: &mut Vector<bool>, starts: &Vector<usize>) void {
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        for i in 0..unsafe (*a).resolutions.len() {
+            let d = unsafe (*a).resolutions[i];
+            if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
+                continue;
+            }
+            // a reference from inside the target function's own body is recursion, not usage
+            if d.module as usize == m {
+                let dn = unsafe (*a).at_const(d.node);
+                if dn.kind == NodeKind::NODE_FUNCTION {
+                    let usp = unsafe (*a).at_const(i as NodeId).span;
+                    if usp.start >= dn.span.start && usp.end <= dn.span.end {
+                        continue;
+                    }
+                }
+            }
+            let slot = starts[d.module as usize] + d.node as usize;
+            if slot < used.len() {
+                used.set(slot, true);
+            }
+        }
+    }
+}
+
+fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool) bool {
+    let it = unsafe (*a).at_const(iid);
+    if it.kind == NodeKind::NODE_FUNCTION {
+        let f = it.as_data.function;
+        if f.is_public || f.is_extern || f.body == NODE_NONE || in_iface_extend {
+            return false;
+        }
+        return !(item_has_attr(a, iid, AttrKind::ATTR_EXPORT) || item_has_attr(a, iid, AttrKind::ATTR_USED) || item_has_attr(
+            a,
+            iid,
+            AttrKind::ATTR_TEST,
+        ) || item_has_attr(a, iid, AttrKind::ATTR_TEST_INIT) || item_has_attr(a, iid, AttrKind::ATTR_TEST_FREE));
+    }
+    if it.kind == NodeKind::NODE_STRUCT {
+        return !it.as_data.aggregate.is_public && !item_has_attr(a, iid, AttrKind::ATTR_EXPORT) && !item_has_attr(
+            a,
+            iid,
+            AttrKind::ATTR_USED,
+        );
+    }
+    return false;
+}
+
+fn lint_report_item(
+    p: &loader::Package,
+    errs: &mut diag::Errors,
+    a: *const Ast,
+    m: ModuleId,
+    iid: NodeId,
+    root_mod: bool,
+) void {
+    let it = unsafe (*a).at_const(iid);
+    let src = p.modules[m as usize].source.as_str();
+    if it.kind == NodeKind::NODE_FUNCTION {
+        let nsp = unsafe (*a).at_const(it.as_data.function.name).as_data.name.text;
+        if root_mod && diag::span_str(src, nsp.start, nsp.end) == "main" {
+            return;
+        }
+        errs.warn(
+            nsp.start,
+            nsp.end - nsp.start,
+            format("unused function '{}'", diag::span_str(src, nsp.start, nsp.end)),
+        );
+    } else {
+        let nsp = unsafe (*a).at_const(it.as_data.aggregate.name).as_data.name.text;
+        errs.warn(nsp.start, nsp.end - nsp.start, format("unused struct '{}'", diag::span_str(src, nsp.start, nsp.end)));
+    }
+}
+
+fn lint_unused_items(p: &mut loader::Package, only_mod: i32) void {
+    // one flat used-bitset over all modules' node ids
+    let mut starts = Vector::<usize>::new();
+    let mut total: usize = 0;
+    for m in 0..p.modules.len() {
+        starts.push(total);
+        if p.modules[m].has_ast {
+            total = total + p.modules[m].ast.nodes.len();
+        }
+    }
+    let mut used = Vector::<bool>::new();
+    used.reserve(total);
+    for i in 0..total {
+        used.push(false);
+    }
+    lint_mark_used(p, &mut used, &starts);
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        let mut errs = diag::Errors::new();
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe (*a).list(items)[i as usize];
+            let it = unsafe (*a).at_const(iid);
+            if it.kind == NodeKind::NODE_EXTEND {
+                let in_iface = it.as_data.extend_def.interface_type != NODE_NONE;
+                let ms = it.as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid = unsafe (*a).list(ms)[j as usize];
+                    if lint_item_candidate(a, mid, in_iface) && !used[starts[m] + mid as usize] {
+                        lint_report_item(p, &mut errs, a, m as ModuleId, mid, m == 0);
+                    }
+                }
+            } else if lint_item_candidate(a, iid, false) && !used[starts[m] + iid as usize] {
+                lint_report_item(p, &mut errs, a, m as ModuleId, iid, m == 0);
+            }
+        }
+        if errs.has_warnings() {
+            p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
+            errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+            errs.log();
+        }
+        errs.free();
+    }
+    used.free();
+    starts.free();
+}
+
+// `super-c lint <root>`: resolve + typecheck the root's module closure with lints enabled for the
+// ROOT module only (each listed path is its own invocation, so shared imports don't warn twice),
+// then the unused-items pass restricted to the root. No code is emitted. Errors exit 1; warnings
+// alone exit 0 (compiler-warning semantics).
+pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize) i32 {
+    platform_filter(p, target);
+    let n = p.modules.len();
+    for i in 0..n {
+        let ok = resolve_module(p, i, i == lint_mod);
+        p.ok = ok && p.ok;
+    }
+    if !p.ok {
+        return 1;
+    }
+    for i in 0..n {
+        let ok = typecheck_module(p, i, i == lint_mod);
+        p.ok = ok && p.ok;
+    }
+    if !p.ok {
+        return 1;
+    }
+    lint_unused_items(p, lint_mod as i32);
+    if p.lint_warnings != 0 {
+        return 1;
+    }
+    return 0;
+}
+
 pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32, lint: bool) i32 {
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
-        let ok = resolve_module(p, i, lint);
+        let ok = resolve_module(p, i, lint && !p.modules[i].prelude);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
     }
     for i in 0..n {
-        let ok = typecheck_module(p, i, lint);
+        let ok = typecheck_module(p, i, lint && !p.modules[i].prelude);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
+    }
+    if lint {
+        lint_unused_items(p, -1);
     }
     // static_asserts undecidable in module order re-evaluate now that every module is fully typed.
     let ceptr = p.ceval as *mut ce::ConstEval;

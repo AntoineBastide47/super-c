@@ -189,25 +189,112 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
     return rc;
 }
 
-// `super-c fmt`: canonical formatting. Prints to stdout by default; -w rewrites the file in place
-// (only when it changed); --check writes nothing, prints the path, and exits 1 when the file is not
-// already formatted. `-` reads stdin and formats to stdout. A directory recurses over its .spc files
-// (requires -w or --check). A file the compiler cannot lex or parse is never rewritten: diagnostics
-// are printed and the exit code is 1.
-fn run_fmt(path: str, write: bool, check: bool) i32 {
-    let is_stdin = path[0] == '-' && path[1] == 0;
-    if is_stdin && write {
-        eprintln("fmt: -w cannot be used with stdin");
+// `super-c lint <path> [<path2> ...]`: load each path as its own root (its import closure + prelude),
+// resolve + typecheck with lints on for that root module, and print warnings. Lints files that are not
+// part of any binary's import closure. A directory recurses over its .spc files.
+fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32) i32 {
+    // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
+    // loading it as a root would invent errors. Load an empty root -- the prelude comes along as
+    // always -- and if the requested file IS one of those modules, lint it in place.
+    let mut pathc = String::from_str(path);
+    let mut p = loader::package_from_source("".ptr() as *const char, 0, std_dir);
+    let mut lint_mod = p.modules.len(); // the appended empty root; replaced below
+    let mut found = false;
+    for m in 0..p.modules.len() {
+        if p.modules[m].has_ast && unsafe shim::sc_same_file(pathc.cstr(), p.modules[m].file.cstr()) == 1 {
+            lint_mod = m;
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        p.free();
+        p = if root.len() != 0 {
+            loader::package_load_rooted(path, root, std_dir, false);
+        } else {
+            loader::package_load(path, std_dir, false);
+        };
+        lint_mod = 0;
+    }
+    pathc.free();
+    if !p.ok {
+        p.free();
         return 1;
     }
-    if !is_stdin && unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
-        if !write && !check {
-            eprintln("fmt: '{}' is a directory; use -w or --check", path);
-            return 1;
-        }
-        return fmt_dir(path, write, check);
+    let pkg = (&mut p) as *mut loader::Package;
+    let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
+    p.ceval = &mut ceval;
+    let rc = lint_package(&mut p, target, lint_mod);
+    ceval.free();
+    p.free();
+    return rc;
+}
+
+fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32) i32 {
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    if dh == null {
+        eprintln("lint: cannot read directory '{}'", dir);
+        d.free();
+        return 1;
     }
-    return fmt_one(path, is_stdin, write, check);
+    let mut names = Vector::<String>::new();
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = unsafe shim::sc_dirent_name(e);
+        if unsafe nm[0] == '.' as char {
+            continue;
+        }
+        names.push(String::from_cstr(nm));
+    }
+    unsafe shim::sc_closedir(dh);
+    names.sort_by(fmt_name_cmp);
+    let mut rc = 0;
+    for i in 0..names.len() {
+        let mut p = String::from_str(dir);
+        p.push_byte(b'/');
+        p.push_string(names.at(i));
+        let isdir = unsafe shim::sc_stat_isdir(p.cstr());
+        if isdir == 1 {
+            if lint_dir(p.as_str(), root, std_dir, ce_steps, ce_mem, target) != 0 {
+                rc = 1;
+            }
+        } else if names.at(i).as_str().ends_with(".spc") {
+            if lint_one(p.as_str(), root, std_dir, ce_steps, ce_mem, target) != 0 {
+                rc = 1;
+            }
+        }
+        p.free();
+    }
+    names.free();
+    d.free();
+    return rc;
+}
+
+fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32) i32 {
+    if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
+        // every file under the directory resolves imports against the directory itself
+        return lint_dir(path, path, std_dir, ce_steps, ce_mem, target);
+    }
+    return lint_one(path, "", std_dir, ce_steps, ce_mem, target);
+}
+
+// `super-c fmt`: canonical formatting. Rewrites files in place by default (only when they changed);
+// --check writes nothing, prints the path, and exits 1 when a file is not already formatted. `-`
+// reads stdin and formats to stdout. A directory recurses over its .spc files. A file the compiler
+// cannot lex or parse is never rewritten: diagnostics are printed and the exit code is 1.
+fn run_fmt(path: str, check: bool) i32 {
+    let is_stdin = path == "-";
+    if is_stdin {
+        return fmt_one(path, true, false, check);
+    }
+    if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
+        return fmt_dir(path, !check, check);
+    }
+    return fmt_one(path, false, !check, check);
 }
 
 fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
@@ -313,13 +400,14 @@ fn main(argv: Vector<str>) i32 {
     let mut ce_mem: u64 = 0;
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
-    let mut lint = false; // --lint: warn on unused vars/params, unnecessary casts and unsafe
+    let mut lint = true; // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
     let mut build_mode = false;
     let mut fmt_mode = false;
-    let mut fmt_write = false;
     let mut fmt_check = false;
 
     let mut fmt_extra = Vector::<usize>::new(); // argv indices of extra `fmt` paths
+    let mut lint_mode = false; // `super-c lint <path> [<path2> ...]`
+    let mut lint_extra = Vector::<usize>::new(); // argv indices of extra `lint` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
     let mut bad = false;
     let mut target: i32 = unsafe shim::sc_host_platform(); // @platform gate target; --target= overrides
@@ -329,10 +417,10 @@ fn main(argv: Vector<str>) i32 {
         let arg = argv[i];
         if !build_mode && file.len() == 0 && arg == "build" {
             build_mode = true; // `super-c build <root.spc> [-o out]`: emit + link a program
-        } else if !build_mode && !fmt_mode && file.len() == 0 && arg == "fmt" {
-            fmt_mode = true; // `super-c fmt [-w | --check] <file | ->`
-        } else if fmt_mode && arg == "-w" {
-            fmt_write = true;
+        } else if !build_mode && !fmt_mode && !lint_mode && file.len() == 0 && arg == "fmt" {
+            fmt_mode = true; // `super-c fmt [--check] <path...| ->`
+        } else if !build_mode && !fmt_mode && !lint_mode && file.len() == 0 && arg == "lint" {
+            lint_mode = true;
         } else if fmt_mode && arg == "--check" {
             fmt_check = true;
         } else if arg == "-o" {
@@ -361,8 +449,8 @@ fn main(argv: Vector<str>) i32 {
             if topts.jobs < 1 {
                 bad = true;
             }
-        } else if arg == "--lint" {
-            lint = true;
+        } else if arg == "--no-lint" {
+            lint = false;
         } else if arg == "--test-no-fork" {
             topts.no_fork = true;
         } else if arg.starts_with("--test-filter=") {
@@ -380,12 +468,14 @@ fn main(argv: Vector<str>) i32 {
             }
         } else if arg == "--bootstrap-tags" {
             bootstrap_tags = true;
-        } else if arg[0] == '-' && arg[1] == '-' {
+        } else if arg.starts_with("--") {
             bad = true;
         } else if file.len() == 0 {
             file = arg;
         } else if fmt_mode {
             fmt_extra.push(i); // `fmt` accepts any number of paths
+        } else if lint_mode {
+            lint_extra.push(i); // `lint` accepts any number of paths
         } else {
             file = "";
         }
@@ -403,9 +493,6 @@ fn main(argv: Vector<str>) i32 {
     if fmt_mode && (build_mode || topts.enabled) {
         bad = true;
     }
-    if fmt_write && fmt_check {
-        bad = true;
-    }
     // -w and --check are mutually exclusive
     if build_mode && out_bin.len() == 0 {
         out_bin = "a.out";
@@ -418,9 +505,9 @@ fn main(argv: Vector<str>) i32 {
         return 1;
     }
     if fmt_mode {
-        let mut rc = run_fmt(file, fmt_write, fmt_check);
+        let mut rc = run_fmt(file, fmt_check);
         for k in 0..fmt_extra.len() {
-            if run_fmt(argv[*fmt_extra.at(k)], fmt_write, fmt_check) != 0 {
+            if run_fmt(argv[*fmt_extra.at(k)], fmt_check) != 0 {
                 rc = 1;
             }
         }
@@ -434,6 +521,20 @@ fn main(argv: Vector<str>) i32 {
         "super-c".ptr() as *const char;
     };
     let std_dir = exe_std_dir(arg0);
+    if lint_mode {
+        let mut rc = run_lint(file, std_dir as *const char, ce_steps, ce_mem, target);
+        for k in 0..lint_extra.len() {
+            if run_lint(argv[*lint_extra.at(k)], std_dir as *const char, ce_steps, ce_mem, target) != 0 {
+                rc = 1;
+            }
+        }
+        lint_extra.free();
+        if std_dir != null {
+            unsafe stdlib::free(std_dir);
+        }
+        return rc;
+    }
+    lint_extra.free();
     let rc = run_file(
         file,
         std_dir,

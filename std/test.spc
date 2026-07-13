@@ -19,10 +19,10 @@ pub fn assert(condition: bool, ...) {
     }
 }
 
-pub fn assert_eq(condition: bool, ...) {
+pub fn assert_eq(_condition: bool, ...) {
     unsafe abort(); // placeholder body (calls never reach it; see the header comment)
 }
 
-pub fn assert_ne(condition: bool, ...) {
+pub fn assert_ne(_condition: bool, ...) {
     unsafe abort(); // placeholder body (calls never reach it; see the header comment)
 }

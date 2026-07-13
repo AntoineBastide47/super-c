@@ -43,7 +43,7 @@ pub struct Timing {
 
 // Deferred-assert sink: a clean self-transpile produces none, so this is never actually called; it just
 // satisfies flush_asserts' callback signature.
-fn ignore_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) void {}
+fn ignore_assert(_ctx: *mut void, _m: ModuleId, _cond: NodeId, _msg: *const char) void {}
 
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
 fn resolve_one(p: &mut loader::Package, i: usize) void {

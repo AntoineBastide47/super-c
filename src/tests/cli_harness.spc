@@ -102,10 +102,10 @@ pub fn run_shell(cmd: *const char) i32 {
 pub type Proj = Array<char, 256>;
 
 pub fn proj_new() Proj {
-    unsafe C_SEQ = unsafe C_SEQ + 1;
+    C_SEQ = C_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut p = Proj {};
-    unsafe stdio::snprintf(&mut p[0], 256, "/tmp/sccli_%d_%llu".ptr() as *const char, pid, unsafe C_SEQ);
+    unsafe stdio::snprintf(&mut p[0], 256, "/tmp/sccli_%d_%llu".ptr() as *const char, pid, C_SEQ);
     let _ = unsafe shim::sc_mkdir(&p[0]);
     return p;
 }

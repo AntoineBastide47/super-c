@@ -27,7 +27,7 @@ fn expect_error(src: str) {
     let mut lx = Lexer::new(&mut s, "");
     lx.scan_tokens();
     assert(lx.has_errors(), "expected a lexer error");
-    let mut toks = lx.take_tokens();
+    let mut _toks = lx.take_tokens(); // drained so RAII frees the tokens
     lx.free();
 }
 

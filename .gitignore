@@ -31,7 +31,6 @@
 
 # Editors / Project
 .vscode/
-.tokensave/
 **/.DS_Store
 build
 super-c
@@ -41,3 +40,4 @@ profile.json.gz
 src/.gen-stage1/
 src/.gen-stage2/
 .obj/
+release.sh
