@@ -19,4 +19,8 @@ extern "C" "driver_shim.h" {
     pub fn sc_opendir(path: *const char) *mut void;
     pub fn sc_readdir(dir: *mut void) *mut void;
     pub fn sc_closedir(dir: *mut void) i32;
+    pub fn sc_mtime(path: *const char) i64;
+    pub fn sc_ncpu() i32;
+    pub fn sc_popen(cmd: *const char) *mut void;
+    pub fn sc_pclose(f: *mut void) i32;
 }

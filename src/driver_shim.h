@@ -22,4 +22,9 @@ void *sc_opendir(const char *path);
 void *sc_readdir(void *dir);      /* the next struct dirent *, or NULL */
 int sc_closedir(void *dir);
 
+long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
+int sc_ncpu(void);                    /* online core count; >= 1 */
+void *sc_popen(const char *cmd);      /* popen(cmd, "r") */
+int sc_pclose(void *f);               /* waits; returns the exit code */
+
 #endif

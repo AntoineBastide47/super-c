@@ -20,6 +20,7 @@ import tests::cli_test;
 import tests::ast_fprint_test;
 import tests::fmt_test;
 import tests::doc_test;
+import tests::toml_test;
 
 fn main() i32 {
     return 0;
