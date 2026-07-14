@@ -14,7 +14,7 @@ pub struct Map<K, V, A = Global> {
     vals: *mut V,
     used: *mut u8, // 0 = empty, 1 = occupied
     len: usize, // occupied slots
-    cap: usize, // total slots (a power of two is not required; probing wraps with %)
+    cap: usize, // total slots; ALWAYS a power of two (grow doubles from 8) so slot() can mask
     alloc: A, // the allocator the arrays were obtained through (private; zero-sized for Global)
 }
 
@@ -33,8 +33,10 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     }
 
     // The slot a key occupies, or the first empty slot on its probe sequence. Requires cap > 0.
+    // cap is always a power of two (grow doubles from 8), so the bucket modulo is a bit-mask --
+    // same slot for every hash as `% cap`, without the 64-bit division.
     fn slot(self: &Map<K, V, A>, key: &K) usize {
-        let mut i = key.hash() as usize % self.cap;
+        let mut i = key.hash() as usize & self.cap - 1;
         while unsafe self.used[i] != 0 {
             if unsafe self.keys[i] == *key {
                 return i;

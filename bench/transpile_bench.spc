@@ -107,7 +107,10 @@ pub struct Timing {
     pub parse: f64,
     pub resolve: f64,
     pub typecheck: f64,
+    pub propagate: f64,
     pub codegen: f64,
+    pub cg_header: f64,
+    pub cg_source: f64,
     pub src_bytes: usize,
     pub src_lines: usize,
     pub out_bytes: usize,
@@ -119,11 +122,13 @@ pub struct Timing {
     pub cyc_parse: i64,
     pub cyc_resolve: i64,
     pub cyc_typecheck: i64,
+    pub cyc_propagate: i64,
     pub cyc_codegen: i64,
     pub alc_lex: i64,
     pub alc_parse: i64,
     pub alc_resolve: i64,
     pub alc_typecheck: i64,
+    pub alc_propagate: i64,
     pub alc_codegen: i64,
     pub heap_bytes: i64,
 }
@@ -175,7 +180,10 @@ fn transpile_once(use_mem: bool) Timing {
         parse: 0.0,
         resolve: 0.0,
         typecheck: 0.0,
+        propagate: 0.0,
         codegen: 0.0,
+        cg_header: 0.0,
+        cg_source: 0.0,
         src_bytes: 0,
         src_lines: 0,
         out_bytes: 0,
@@ -187,11 +195,13 @@ fn transpile_once(use_mem: bool) Timing {
         cyc_parse: 0,
         cyc_resolve: 0,
         cyc_typecheck: 0,
+        cyc_propagate: 0,
         cyc_codegen: 0,
         alc_lex: 0,
         alc_parse: 0,
         alc_resolve: 0,
         alc_typecheck: 0,
+        alc_propagate: 0,
         alc_codegen: 0,
         heap_bytes: 0,
     };
@@ -242,6 +252,10 @@ fn transpile_once(use_mem: bool) Timing {
     let h3 = unsafe shim::sc_alloc_count();
 
     loader::package_propagate_instances(&mut p);
+    let a3p = time::cpu_seconds();
+    let c3p = unsafe shim::sc_cpu_cycles();
+    let h3p = unsafe shim::sc_alloc_count();
+
     let f = sink_open(use_mem);
     i = 0;
     while i < n {
@@ -251,8 +265,12 @@ fn transpile_once(use_mem: bool) Timing {
         let pkg2 = (&mut p) as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
         let mut c = cg::Codegen::new(ma, str::from_raw(src as *const u8, slen), pkg2);
         c.set_multifile(true);
+        let th0 = time::cpu_seconds();
         c.codegen_emit_header(f);
+        let th1 = time::cpu_seconds();
         c.codegen_emit(f);
+        r.cg_header = r.cg_header + (th1 - th0);
+        r.cg_source = r.cg_source + (time::cpu_seconds() - th1);
         i = i + 1;
     }
     r.out_bytes = sink_close(f, use_mem);
@@ -296,15 +314,18 @@ fn transpile_once(use_mem: bool) Timing {
     r.parse = a1 - a0;
     r.resolve = a2 - a1;
     r.typecheck = a3 - a2;
-    r.codegen = a4 - a3;
+    r.propagate = a3p - a3;
+    r.codegen = a4 - a3p;
     r.cyc_parse = c1 - c0;
     r.cyc_resolve = c2 - c1;
     r.cyc_typecheck = c3 - c2;
-    r.cyc_codegen = c4 - c3;
+    r.cyc_propagate = c3p - c3;
+    r.cyc_codegen = c4 - c3p;
     r.alc_parse = h1 - h0;
     r.alc_resolve = h2 - h1;
     r.alc_typecheck = h3 - h2;
-    r.alc_codegen = h4 - h3;
+    r.alc_propagate = h3p - h3;
+    r.alc_codegen = h4 - h3p;
     r.heap_bytes = y4 - y0;
     return r;
 }
@@ -398,18 +419,23 @@ pub fn run() i32 {
     let mut sr: f64 = 0.0;
     let mut st: f64 = 0.0;
     let mut sl: f64 = 0.0;
+    let mut sg: f64 = 0.0;
     let mut sc_m: f64 = 0.0;
     let mut sc_f: f64 = 0.0;
+    let mut sch: f64 = 0.0;
+    let mut scs: f64 = 0.0;
     let mut scy_l: i64 = 0;
     let mut scy_p: i64 = 0;
     let mut scy_r: i64 = 0;
     let mut scy_t: i64 = 0;
+    let mut scy_g: i64 = 0;
     let mut scy_cm: i64 = 0;
     let mut scy_cf: i64 = 0;
     let mut sal_l: i64 = 0;
     let mut sal_p: i64 = 0;
     let mut sal_r: i64 = 0;
     let mut sal_t: i64 = 0;
+    let mut sal_g: i64 = 0;
     let mut sal_cm: i64 = 0;
     let mut sal_cf: i64 = 0;
     let mut sheap: i64 = 0;
@@ -423,16 +449,19 @@ pub fn run() i32 {
         sr = sr + t.resolve;
         st = st + t.typecheck;
         sl = sl + t.lex;
+        sg = sg + t.propagate;
         scy_l = scy_l + t.cyc_lex;
         scy_p = scy_p + t.cyc_parse;
         scy_r = scy_r + t.cyc_resolve;
         scy_t = scy_t + t.cyc_typecheck;
+        scy_g = scy_g + t.cyc_propagate;
         sal_l = sal_l + t.alc_lex;
         sal_p = sal_p + t.alc_parse;
         sal_r = sal_r + t.alc_resolve;
         sal_t = sal_t + t.alc_typecheck;
+        sal_g = sal_g + t.alc_propagate;
         sheap = sheap + t.heap_bytes;
-        let total = t.parse + t.resolve + t.typecheck + t.codegen;
+        let total = t.parse + t.resolve + t.typecheck + t.propagate + t.codegen;
         if use_mem {
             sc_m = sc_m + t.codegen;
             scy_cm = scy_cm + t.cyc_codegen;
@@ -443,6 +472,11 @@ pub fn run() i32 {
             scy_cf = scy_cf + t.cyc_codegen;
             sal_cf = sal_cf + t.alc_codegen;
             totals_f.push(total);
+        }
+        // header/source split tracks the primary lane (mem when it exists, file otherwise)
+        if use_mem || !has_mem_sink() {
+            sch = sch + t.cg_header;
+            scs = scs + t.cg_source;
         }
         k = k + 1;
     }
@@ -462,7 +496,15 @@ pub fn run() i32 {
     let ar = sr / fi * 1000.0;
     let at = st / fi * 1000.0;
     let al = sl / fi * 1000.0;
-    let avg_total = ap + ar + at + ac;
+    let ag = sg / fi * 1000.0;
+    let avg_total = ap + ar + at + ag + ac;
+    // primary-lane count for the header/source split accumulators
+    let mut cp = cf;
+    if cm > 0 {
+        cp = cm;
+    }
+    let ach = sch / cp as f64 * 1000.0;
+    let acs = scs / cp as f64 * 1000.0;
     let srcf = warm.src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
     let linesf = warm.src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
     // Per-phase CPU cycles at the same boundaries as the ms timings (codegen = primary lane);
@@ -472,26 +514,28 @@ pub fn run() i32 {
     let mp = scy_p as f64 / fi / 1e6;
     let mr = scy_r as f64 / fi / 1e6;
     let mt = scy_t as f64 / fi / 1e6;
+    let mg = scy_g as f64 / fi / 1e6;
     let mut mc: f64 = 0.0;
     if cm > 0 {
         mc = scy_cm as f64 / cm as f64 / 1e6;
     } else if cf > 0 {
         mc = scy_cf as f64 / cf as f64 / 1e6;
     }
-    let mtot = mp + mr + mt + mc;
+    let mtot = mp + mr + mt + mg + mc;
     // Heap allocations (malloc/calloc/realloc calls by the compiler's own code) per iteration, in
     // thousands; codegen = primary lane. All-zero when the shim has no counting on this platform.
     let kal = sal_l as f64 / fi / 1e3;
     let kap = sal_p as f64 / fi / 1e3;
     let kar = sal_r as f64 / fi / 1e3;
     let kat = sal_t as f64 / fi / 1e3;
+    let kag = sal_g as f64 / fi / 1e3;
     let mut kac: f64 = 0.0;
     if cm > 0 {
         kac = sal_cm as f64 / cm as f64 / 1e3;
     } else if cf > 0 {
         kac = sal_cf as f64 / cf as f64 / 1e3;
     }
-    let katot = kap + kar + kat + kac;
+    let katot = kap + kar + kat + kag + kac;
 
     unsafe stdio::printf(
         "  %-11s %9s %9s %9s %9s %9s %8s\n".ptr() as *const char,
@@ -544,6 +588,16 @@ pub fn run() i32 {
     );
     unsafe stdio::printf(
         "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "propagate".ptr() as *const char,
+        ag,
+        srcf / ag / 1000.0,
+        linesf / ag,
+        mg,
+        kag,
+        ag / avg_total * 100.0,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
         "codegen".ptr() as *const char,
         ac,
         srcf / ac / 1000.0,
@@ -571,6 +625,11 @@ pub fn run() i32 {
             (acf - ac) / ac * 100.0,
         );
     }
+    unsafe stdio::printf(
+        "  codegen split: headers %.2f ms + sources %.2f ms  (primary lane)\n".ptr() as *const char,
+        ach,
+        acs,
+    );
     dist_line("total (mem sink)", &mut totals_m);
     dist_line("total (file sink)", &mut totals_f);
     // dist_line sorts its lane, so each vector's front is now that lane's minimum.

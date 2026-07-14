@@ -566,8 +566,16 @@ extend Package {
             self.method_used.push(Vector::<bool>::new());
         }
         let inner = &mut self.method_used[m];
-        while inner.len() <= d.node as usize {
-            inner.push(false);
+        if inner.len() <= d.node as usize {
+            // Size once to the module's node count so later marks are pure set()s.
+            let mut n = unsafe (*self.module_ast_ptr(d.module)).nodes.len();
+            if n <= d.node as usize {
+                n = d.node as usize + 1;
+            }
+            inner.reserve(n - inner.len());
+            while inner.len() < n {
+                inner.push(false);
+            }
         }
         inner.set(d.node as usize, true);
     }

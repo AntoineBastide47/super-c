@@ -225,6 +225,15 @@ pub struct CgInst {
     pub n: u8,
     pub args: [TypeId; 4],
 }
+// A conditional-move candidate recorded during the (single) move walk, replayed after the walk
+// completes so the "already unconditionally moved" suppression sees the FULL moved[] set, exactly
+// as the old second pass did. flags: bit0 = push a cond_site, bit1 = closure capture (site is the
+// closure node, pushed once per closure on its first surviving capture).
+pub struct CgPendMove {
+    pub decl: NodeId,
+    pub site: NodeId,
+    pub flags: u32,
+}
 pub struct CgCbInst {
     pub func: DefId,
     pub param: NodeId,
@@ -334,6 +343,32 @@ pub struct Codegen {
     pub modpfx_off: [u16; 64],
     pub modpfx_len: [u16; 64],
     pub modpfx_buf: [char; 4096],
+    // CG-15: record_inst dedup index -- FNV key of (func, args) -> inst slot. Exact compare on a
+    // hit; a key collision falls back to the full scan; first-key-wins, so key absence proves no
+    // equal inst was ever appended. Cleared with ninsts in collect_insts.
+    pub inst_idx: Map<u64, u32>,
+    // CG-16: per-module attr chain index keyed by (module<<32|owner), same scheme and bitmask
+    // fallback as CG-4 (modules >= 64 use the full attr-table scan).
+    pub attr_head: Map<u64, u32>,
+    pub attr_next: Map<u64, u32>,
+    pub attr_built: u64,
+    // CG-17: NODE_CLOSURE ids in ascending (= emission) order, collected by collect_insts'
+    // arena sweep so emit_closures does not re-sweep the whole arena in both proto and body passes.
+    pub clos_list: Vector<NodeId>,
+    // CG-18: precomputed cb_specialized_away verdicts (private fns fully replaced by callback
+    // specializations); rebuilt by collect_callbacks, empty before it runs (= all-false, as today).
+    pub cb_away: Map<u32, u8>,
+    // CG-14: cg_type_is_free memo keyed by the RESOLVED TypeId (1 = not Free / 2 = Free); CG-5's
+    // validity rules (home pool only, concrete only, owner swaps bypass); never reset.
+    pub free_memo: Map<u64, u64>,
+    // CG-19/CG-20: mangled-name memos (mangle_type by TypeId, inst_name by TyInstance value).
+    // Guarded home-pool + no-subst + non-macro + concrete. Values are SERVED BY COPY (copy_sym)
+    // and never handed out as pointers: a Map rehash memcpy-moves the Strings and SSO bytes.
+    pub mangle_memo: Map<u64, String>,
+    pub instname_memo: Map<TyInstance, String>,
+    // CG-21: conditional-move events from the fused single move walk (cleared per body; the heap
+    // storage is reused across functions).
+    pub pend_moves: Vector<CgPendMove>,
     pub depth: u32,
     pub tmp: u32,
     pub current_ret: [char; 128],
@@ -402,6 +437,15 @@ extend Codegen as Free {
         self.ext_next.free();
         self.sat_memo.free();
         self.ifm_set.free();
+        self.inst_idx.free();
+        self.attr_head.free();
+        self.attr_next.free();
+        self.clos_list.free();
+        self.cb_away.free();
+        self.free_memo.free();
+        self.mangle_memo.free();
+        self.instname_memo.free();
+        self.pend_moves.free();
         self.call_list.free();
         if self.moved_stamp != null {
             unsafe stdlib::free(self.moved_stamp);
@@ -445,6 +489,15 @@ extend Codegen {
             ext_next: Map::<u64, u32>::new(),
             sat_memo: Map::<u64, u64>::new(),
             ifm_set: Map::<u64, u64>::new(),
+            inst_idx: Map::<u64, u32>::new(),
+            attr_head: Map::<u64, u32>::new(),
+            attr_next: Map::<u64, u32>::new(),
+            clos_list: Vector::<NodeId>::new(),
+            cb_away: Map::<u32, u8>::new(),
+            free_memo: Map::<u64, u64>::new(),
+            mangle_memo: Map::<u64, String>::new(),
+            instname_memo: Map::<TyInstance, String>::new(),
+            pend_moves: Vector::<CgPendMove>::new(),
             home_ast: ast_u as *mut Ast,
             call_list: Vector::<NodeId>::new(),
             genty: Vector::<u8>::new(),
@@ -870,8 +923,26 @@ extend Codegen {
     }
     // ---- type mangling ----
     fn mangle_type(self: &Self, t: TypeId, out: *mut char, cap: usize) {
+        // CG-19: name memo; with no live subst and a concrete home-pool id, the render is a pure
+        // function of the pool, and the inner subst_resolve calls are identity. Served by copy.
+        let cacheable = self.ast == self.home_ast && self.nsubst == 0 && !self.macro_mode && self.type_is_concrete(t);
+        if cacheable {
+            switch self.mangle_memo.get(&(t as u64)) {
+                Some(s) => {
+                    self.copy_sym(s, out, cap);
+                    return;
+                },
+                None => {},
+            };
+        }
         let sym = self.mangle_type_s(t);
         self.copy_sym(&sym, out, cap);
+        if cacheable {
+            let mp = (self as *const Codegen) as *mut Codegen;
+            unsafe {
+                (*mp).mangle_memo.insert(t as u64, sym);
+            }
+        }
     }
     fn dyn_stem(self: &Self, m: ModuleId, decl: NodeId, out: *mut char, cap: usize) {
         let sym = self.dyn_stem_s(m, decl);
@@ -1049,8 +1120,35 @@ extend Codegen {
         return true;
     }
     fn inst_name(self: &Self, it: &TyInstance, out: *mut char, cap: usize) {
+        // CG-20: instance-name memo keyed by the TyInstance VALUE (args are home-pool TypeIds,
+        // hence the home-ast guard); same purity argument and copy-out discipline as CG-19.
+        let mut cacheable = self.ast == self.home_ast && self.nsubst == 0 && !self.macro_mode && !self.is_self_instance(
+            it,
+        );
+        if cacheable {
+            for i in 0..it.n {
+                if !self.type_is_concrete(it.args[i as usize]) {
+                    cacheable = false;
+                }
+            }
+        }
+        if cacheable {
+            switch self.instname_memo.get(it) {
+                Some(s) => {
+                    self.copy_sym(s, out, cap);
+                    return;
+                },
+                None => {},
+            };
+        }
         let sym = self.inst_name_s(it);
         self.copy_sym(&sym, out, cap);
+        if cacheable {
+            let mp = (self as *const Codegen) as *mut Codegen;
+            unsafe {
+                (*mp).instname_memo.insert(*it, sym);
+            }
+        }
     }
 
     // ---- monomorphization substitution ----
@@ -1183,16 +1281,40 @@ extend Codegen {
         return fn2;
     }
     fn record_inst(self: &mut Self, fn2: DefId, args: *const TypeId, n: i32, site: NodeId) {
-        for i in 0..self.ninsts {
-            if self.insts[i as usize].func.module == fn2.module && self.insts[i as usize].func.node == fn2.node && self.insts[i as usize].n as i32 == n {
-                let mut same = true;
-                for j in 0..n {
-                    if self.insts[i as usize].args[j as usize] != unsafe args[j as usize] {
-                        same = false;
+        // CG-15: hash probe instead of the O(ninsts) dedup scan; the scan survives only as the
+        // key-collision fallback, so the "exists" verdict and the append order are unchanged.
+        let key = cg_inst_key(fn2, args, n);
+        let mut collide = false;
+        switch self.inst_idx.get(&key) {
+            Some(ix) => {
+                let i = (*ix) as usize;
+                if self.insts[i].func.module == fn2.module && self.insts[i].func.node == fn2.node && self.insts[i].n as i32 == n {
+                    let mut same = true;
+                    for j in 0..n {
+                        if self.insts[i].args[j as usize] != unsafe args[j as usize] {
+                            same = false;
+                        }
+                    }
+                    if same {
+                        return;
                     }
                 }
-                if same {
-                    return;
+                collide = true;
+            },
+            None => {},
+        };
+        if collide {
+            for i in 0..self.ninsts {
+                if self.insts[i as usize].func.module == fn2.module && self.insts[i as usize].func.node == fn2.node && self.insts[i as usize].n as i32 == n {
+                    let mut same = true;
+                    for j in 0..n {
+                        if self.insts[i as usize].args[j as usize] != unsafe args[j as usize] {
+                            same = false;
+                        }
+                    }
+                    if same {
+                        return;
+                    }
                 }
             }
         }
@@ -1215,6 +1337,9 @@ extend Codegen {
             self.insts[k as usize].args[j as usize] = unsafe args[j as usize];
         }
         self.ninsts = k + 1;
+        if !collide {
+            self.inst_idx.insert(key, k as u32);
+        }
     }
     // Does pool type `t` transitively mention a TYPE_GENERIC? Memoized in genty (0 unknown /
     // 1 no / 2 yes), valid per genty_ast.
@@ -1257,8 +1382,14 @@ extend Codegen {
         }
         self.insts_ast = self.ast;
         self.ninsts = 0;
+        self.inst_idx.free();
+        self.inst_idx = Map::<u64, u32>::new();
+        self.clos_list.clear();
         let mut i: u32 = 1;
         while i as usize < unsafe (*self.cur_ast()).nodes.len() {
+            if unsafe (*self.cur_ast()).at_const(i).kind == NodeKind::NODE_CLOSURE {
+                self.clos_list.push(i);
+            }
             if unsafe (*self.cur_ast()).at_const(i).kind == NodeKind::NODE_CALL {
                 let mut args = TyArgs8 {};
                 let mut n: i32 = 0;
@@ -2117,7 +2248,30 @@ extend Codegen {
         return false;
     }
     fn cg_type_is_free(self: &mut Self, ty0: TypeId) bool {
-        let y = *self.type_at(self.subst_resolve(ty0));
+        let rt = self.subst_resolve(ty0);
+        // CG-14: memo on the resolved id; home pool + concrete only (CG-5's rules), so the
+        // verdict is a pure function of frozen decls and never needs resetting.
+        let cacheable = self.ast == self.home_ast && !self.cg_mentions_generic(rt, 0);
+        if cacheable {
+            switch self.free_memo.get(&(rt as u64)) {
+                Some(v) => {
+                    return *v == 2;
+                },
+                None => {},
+            };
+        }
+        let res = self.cg_type_is_free_uncached(rt);
+        if cacheable {
+            let mut enc: u64 = 1;
+            if res {
+                enc = 2;
+            }
+            self.free_memo.insert(rt as u64, enc);
+        }
+        return res;
+    }
+    fn cg_type_is_free_uncached(self: &mut Self, rt: TypeId) bool {
+        let y = *self.type_at(rt);
         if y.kind == TypeKind::TYPE_FUNCTION {
             return self.cg_fn_owns(&y);
         }
@@ -2473,6 +2627,17 @@ extend Codegen {
 }
 
 // ---- free helpers ----
+// CG-15: FNV-1a key of a generic instantiation (func identity + arg TypeIds).
+fn cg_inst_key(fn2: DefId, args: *const TypeId, n: i32) u64 {
+    let mut h: u64 = 14695981039346656037;
+    h = (h ^ fn2.module as u64) * 1099511628211;
+    h = (h ^ fn2.node as u64) * 1099511628211;
+    h = (h ^ n as u64) * 1099511628211;
+    for j in 0..n {
+        h = (h ^ (unsafe args[j as usize]) as u64) * 1099511628211;
+    }
+    return h;
+}
 const fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
     if c {
         return a;
@@ -5437,7 +5602,7 @@ extend Codegen {
         }
         self.emit_cstr(&nm[0]);
     }
-    fn cg_mark_move(self: &mut Self, expr0: NodeId, cond: bool, pass: i32, site: bool) {
+    fn cg_mark_move(self: &mut Self, expr0: NodeId, cond: bool, site: bool) {
         if expr0 == NODE_NONE {
             return;
         }
@@ -5456,7 +5621,7 @@ extend Codegen {
             let is_path = unsafe (*self.cur_ast()).at_const(expr).as_data.member.path;
             let obj = unsafe (*self.cur_ast()).at_const(expr).as_data.member.object;
             if !is_path && self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(expr)) {
-                self.cg_mark_move(obj, cond, pass, false);
+                self.cg_mark_move(obj, cond, false);
                 return;
             }
         }
@@ -5484,8 +5649,10 @@ extend Codegen {
         if !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(expr)) {
             return;
         }
-        if pass == 0 {
-            if (!cond || dk == NodeKind::NODE_PATTERN_NAME) && self.nmoved < 512 {
+        // CG-21: unconditional moves are recorded inline (the old pass 0); conditional candidates
+        // become replay events so the moved[]-suppression sees the complete set (the old pass 1).
+        if !cond || dk == NodeKind::NODE_PATTERN_NAME {
+            if self.nmoved < 512 {
                 self.moved[self.nmoved as usize] = d.node;
                 self.nmoved = self.nmoved + 1;
                 if d.node as usize < self.stamp_cap {
@@ -5494,25 +5661,13 @@ extend Codegen {
             }
             return;
         }
-        if dk == NodeKind::NODE_PATTERN_NAME {
-            return;
+        let mut fl: u32 = 0;
+        if site {
+            fl = 1;
         }
-        if !cond || self.cg_is_moved(d.node) {
-            return;
-        }
-        if !self.cg_is_cond_moved(d.node) && self.ncond_moved < 256 {
-            self.cond_moved[self.ncond_moved as usize] = d.node;
-            self.ncond_moved = self.ncond_moved + 1;
-            if d.node as usize < self.stamp_cap {
-                unsafe self.cond_stamp[d.node as usize] = self.move_epoch;
-            }
-        }
-        if site && self.ncond_sites < 256 {
-            self.cond_sites[self.ncond_sites as usize] = expr;
-            self.ncond_sites = self.ncond_sites + 1;
-        }
+        self.pend_moves.push(CgPendMove { decl: d.node, site: expr, flags: fl });
     }
-    fn cg_mark_move_tail(self: &mut Self, e: NodeId, cond: bool, pass: i32) {
+    fn cg_mark_move_tail(self: &mut Self, e: NodeId, cond: bool) {
         if e == NODE_NONE {
             return;
         }
@@ -5522,13 +5677,13 @@ extend Codegen {
             let ids = unsafe (*self.cur_ast()).list(arms);
             for i in 0..arms.len {
                 let body = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.match_arm.body;
-                self.cg_mark_move_tail(body, true, pass);
+                self.cg_mark_move_tail(body, true);
             }
         } else if nk == NodeKind::NODE_IF {
             let tb = unsafe (*self.cur_ast()).at_const(e).as_data.if_stmt.then_branch;
             let eb = unsafe (*self.cur_ast()).at_const(e).as_data.if_stmt.else_branch;
-            self.cg_mark_move_tail(tb, true, pass);
-            self.cg_mark_move_tail(eb, true, pass);
+            self.cg_mark_move_tail(tb, true);
+            self.cg_mark_move_tail(eb, true);
         } else if nk == NodeKind::NODE_BLOCK {
             let ss = unsafe (*self.cur_ast()).at_const(e).as_data.block.statements;
             if ss.len != 0 {
@@ -5537,15 +5692,15 @@ extend Codegen {
                 if lastk == NodeKind::NODE_EXPRESSION_STATEMENT {
                     let lv = unsafe (*self.cur_ast()).at_const(lastid).as_data.single.value;
                     if unsafe (*self.cur_ast()).at_const(lv).kind != NodeKind::NODE_ASSIGNMENT {
-                        self.cg_mark_move_tail(lv, cond, pass);
+                        self.cg_mark_move_tail(lv, cond);
                     }
                 }
             }
         } else {
-            self.cg_mark_move(e, cond, pass, true);
+            self.cg_mark_move(e, cond, true);
         }
     }
-    fn cg_scan_moves(self: &mut Self, id: NodeId, cond: bool, pass: i32) {
+    fn cg_scan_moves(self: &mut Self, id: NodeId, cond: bool) {
         if id == NODE_NONE {
             return;
         }
@@ -5554,66 +5709,66 @@ extend Codegen {
             let ss = unsafe (*self.cur_ast()).at_const(id).as_data.block.statements;
             let ids = unsafe (*self.cur_ast()).list(ss);
             for i in 0..ss.len {
-                self.cg_scan_moves(unsafe ids[i as usize], cond, pass);
+                self.cg_scan_moves(unsafe ids[i as usize], cond);
             }
         } else if nk == NodeKind::NODE_LET {
             let v = unsafe (*self.cur_ast()).at_const(id).as_data.let_stmt.value;
-            self.cg_mark_move_tail(v, cond, pass);
-            self.cg_scan_moves(v, cond, pass);
+            self.cg_mark_move_tail(v, cond);
+            self.cg_scan_moves(v, cond);
         } else if nk == NodeKind::NODE_RETURN {
             let vs = unsafe (*self.cur_ast()).at_const(id).as_data.return_stmt.values;
             let ids = unsafe (*self.cur_ast()).list(vs);
             for i in 0..vs.len {
                 let vid = unsafe ids[i as usize];
-                self.cg_mark_move_tail(vid, cond, pass);
-                self.cg_scan_moves(vid, cond, pass);
+                self.cg_mark_move_tail(vid, cond);
+                self.cg_scan_moves(vid, cond);
             }
         } else if nk == NodeKind::NODE_ASSIGNMENT {
             let l = unsafe (*self.cur_ast()).at_const(id).as_data.binary.left;
             let r = unsafe (*self.cur_ast()).at_const(id).as_data.binary.right;
-            self.cg_mark_move_tail(r, cond, pass);
-            self.cg_scan_moves(l, cond, pass);
-            self.cg_scan_moves(r, cond, pass);
+            self.cg_mark_move_tail(r, cond);
+            self.cg_scan_moves(l, cond);
+            self.cg_scan_moves(r, cond);
         } else if nk == NodeKind::NODE_STRUCT_INITIALIZER {
             let fs = unsafe (*self.cur_ast()).at_const(id).as_data.struct_initializer.fields;
             let ids = unsafe (*self.cur_ast()).list(fs);
             for i in 0..fs.len {
                 let v = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.field_initializer.value;
-                self.cg_mark_move_tail(v, cond, pass);
-                self.cg_scan_moves(v, cond, pass);
+                self.cg_mark_move_tail(v, cond);
+                self.cg_scan_moves(v, cond);
             }
         } else if nk == NodeKind::NODE_IF {
             let cnd = unsafe (*self.cur_ast()).at_const(id).as_data.if_stmt.condition;
             let tb = unsafe (*self.cur_ast()).at_const(id).as_data.if_stmt.then_branch;
             let eb = unsafe (*self.cur_ast()).at_const(id).as_data.if_stmt.else_branch;
-            self.cg_scan_moves(cnd, cond, pass);
-            self.cg_scan_moves(tb, true, pass);
-            self.cg_scan_moves(eb, true, pass);
+            self.cg_scan_moves(cnd, cond);
+            self.cg_scan_moves(tb, true);
+            self.cg_scan_moves(eb, true);
         } else if nk == NodeKind::NODE_WHILE {
             let cnd = unsafe (*self.cur_ast()).at_const(id).as_data.while_stmt.condition;
             let b = unsafe (*self.cur_ast()).at_const(id).as_data.while_stmt.body;
-            self.cg_scan_moves(cnd, cond, pass);
-            self.cg_scan_moves(b, true, pass);
+            self.cg_scan_moves(cnd, cond);
+            self.cg_scan_moves(b, true);
         } else if nk == NodeKind::NODE_FOR {
             let it = unsafe (*self.cur_ast()).at_const(id).as_data.for_stmt.iterable;
             let b = unsafe (*self.cur_ast()).at_const(id).as_data.for_stmt.body;
-            self.cg_scan_moves(it, cond, pass);
-            self.cg_scan_moves(b, true, pass);
+            self.cg_scan_moves(it, cond);
+            self.cg_scan_moves(b, true);
         } else if nk == NodeKind::NODE_MATCH {
             let val = unsafe (*self.cur_ast()).at_const(id).as_data.match_expr.value;
-            self.cg_mark_move(val, cond, pass, true);
-            self.cg_scan_moves(val, cond, pass);
+            self.cg_mark_move(val, cond, true);
+            self.cg_scan_moves(val, cond);
             let arms = unsafe (*self.cur_ast()).at_const(id).as_data.match_expr.arms;
             let ids = unsafe (*self.cur_ast()).list(arms);
             for i in 0..arms.len {
                 let body = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.match_arm.body;
-                self.cg_scan_moves(body, true, pass);
+                self.cg_scan_moves(body, true);
             }
         } else if nk == NodeKind::NODE_EXPRESSION_STATEMENT || nk == NodeKind::NODE_DEFER {
-            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.single.value, cond, pass);
+            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.single.value, cond);
         } else if nk == NodeKind::NODE_CALL {
             let callee_id = unsafe (*self.cur_ast()).at_const(id).as_data.call.callee;
-            self.cg_scan_moves(callee_id, cond, pass);
+            self.cg_scan_moves(callee_id, cond);
             let ck = unsafe (*self.cur_ast()).at_const(callee_id).kind;
             if ck == NodeKind::NODE_MEMBER {
                 let cpath = unsafe (*self.cur_ast()).at_const(callee_id).as_data.member.path;
@@ -5626,7 +5781,7 @@ extend Codegen {
                 ) {
                     let rk = unsafe (*self.cur_ast()).type_at(unsafe (*self.cur_ast()).type_of(cobj)).kind;
                     if rk != TypeKind::TYPE_POINTER && rk != TypeKind::TYPE_REFERENCE {
-                        self.cg_mark_move(cobj, cond, pass, false);
+                        self.cg_mark_move(cobj, cond, false);
                     }
                 } else if !cpath {
                     let md = unsafe (*self.cur_ast()).resolution_def(cmember);
@@ -5642,7 +5797,7 @@ extend Codegen {
                                 NodeKind::NODE_NONE_KIND;
                             };
                             if ptk != NodeKind::NODE_POINTER_TYPE && ptk != NodeKind::NODE_REFERENCE_TYPE {
-                                self.cg_mark_move(cobj, cond, pass, true);
+                                self.cg_mark_move(cobj, cond, true);
                             }
                         }
                     }
@@ -5652,14 +5807,13 @@ extend Codegen {
             let ids = unsafe (*self.cur_ast()).list(args);
             for i in 0..args.len {
                 let aid = unsafe ids[i as usize];
-                self.cg_mark_move(aid, cond, pass, true);
-                self.cg_scan_moves(aid, cond, pass);
+                self.cg_mark_move(aid, cond, true);
+                self.cg_scan_moves(aid, cond);
             }
         } else if nk == NodeKind::NODE_CLOSURE {
             let caps = unsafe (*self.cur_ast()).at_const(id).as_data.closure.captures;
             let mut_caps = (unsafe (*self.cur_ast()).at_const(id).as_data.closure.mut_caps) as u64;
             let cids = unsafe (*self.cur_ast()).list(caps);
-            let mut site_pushed = false;
             for i in 0..caps.len {
                 let decl = unsafe cids[i as usize];
                 if (mut_caps >> i as u64 & 1 as u64) != 0 as u64 || !self.cg_type_is_free(
@@ -5668,8 +5822,10 @@ extend Codegen {
                     continue;
                 }
                 let patb = unsafe (*self.cur_ast()).at_const(decl).kind == NodeKind::NODE_PATTERN_NAME;
-                if pass == 0 {
-                    if (!cond || patb) && self.nmoved < 512 {
+                // CG-21: same split as cg_mark_move -- unconditional inline, conditional as an
+                // event (flag bit1 = closure; replay pushes the closure site once per group).
+                if !cond || patb {
+                    if self.nmoved < 512 {
                         self.moved[self.nmoved as usize] = decl;
                         self.nmoved = self.nmoved + 1;
                         if decl as usize < self.stamp_cap {
@@ -5678,39 +5834,73 @@ extend Codegen {
                     }
                     continue;
                 }
-                if patb || !cond || self.cg_is_moved(decl) {
-                    continue;
-                }
-                if !self.cg_is_cond_moved(decl) && self.ncond_moved < 256 {
-                    self.cond_moved[self.ncond_moved as usize] = decl;
-                    self.ncond_moved = self.ncond_moved + 1;
-                    if decl as usize < self.stamp_cap {
-                        unsafe self.cond_stamp[decl as usize] = self.move_epoch;
-                    }
-                }
-                if !site_pushed && self.ncond_sites < 256 {
-                    self.cond_sites[self.ncond_sites as usize] = id;
-                    self.ncond_sites = self.ncond_sites + 1;
-                    site_pushed = true;
-                }
+                self.pend_moves.push(CgPendMove { decl: decl, site: id, flags: 2 });
             }
         } else if nk == NodeKind::NODE_BINARY {
             let l = unsafe (*self.cur_ast()).at_const(id).as_data.binary.left;
             let r = unsafe (*self.cur_ast()).at_const(id).as_data.binary.right;
             let op = unsafe (*self.cur_ast()).at_const(id).as_data.binary.op;
-            self.cg_scan_moves(l, cond, pass);
-            self.cg_scan_moves(r, cond || op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe, pass);
+            self.cg_scan_moves(l, cond);
+            self.cg_scan_moves(r, cond || op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe);
         } else if nk == NodeKind::NODE_UNARY {
-            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.unary.operand, cond, pass);
+            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.unary.operand, cond);
         } else if nk == NodeKind::NODE_MEMBER {
-            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.member.object, cond, pass);
+            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.member.object, cond);
         } else if nk == NodeKind::NODE_INDEX {
             let o = unsafe (*self.cur_ast()).at_const(id).as_data.index.object;
             let ix = unsafe (*self.cur_ast()).at_const(id).as_data.index.index;
-            self.cg_scan_moves(o, cond, pass);
-            self.cg_scan_moves(ix, cond, pass);
+            self.cg_scan_moves(o, cond);
+            self.cg_scan_moves(ix, cond);
         } else if nk == NodeKind::NODE_CAST {
-            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.cast.expression, cond, pass);
+            self.cg_scan_moves(unsafe (*self.cur_ast()).at_const(id).as_data.cast.expression, cond);
+        }
+    }
+    // CG-21: replay the conditional-move events in traversal order against the now-complete
+    // moved[] set -- exactly the old pass 1's view. Closure events for one closure are contiguous
+    // (the closure arm never recurses between captures), so a site is pushed once per closure on
+    // its first surviving capture, matching the old site_pushed flag.
+    fn cg_replay_cond_moves(self: &mut Self) {
+        let mut last_clos = NODE_NONE;
+        let mut clos_pushed = false;
+        for i in 0..self.pend_moves.len() {
+            let ev = *self.pend_moves.at(i);
+            if (ev.flags & 2) != 0 {
+                if ev.site != last_clos {
+                    last_clos = ev.site;
+                    clos_pushed = false;
+                }
+                if self.cg_is_moved(ev.decl) {
+                    continue;
+                }
+                if !self.cg_is_cond_moved(ev.decl) && self.ncond_moved < 256 {
+                    self.cond_moved[self.ncond_moved as usize] = ev.decl;
+                    self.ncond_moved = self.ncond_moved + 1;
+                    if ev.decl as usize < self.stamp_cap {
+                        unsafe self.cond_stamp[ev.decl as usize] = self.move_epoch;
+                    }
+                }
+                if !clos_pushed && self.ncond_sites < 256 {
+                    self.cond_sites[self.ncond_sites as usize] = ev.site;
+                    self.ncond_sites = self.ncond_sites + 1;
+                    clos_pushed = true;
+                }
+                continue;
+            }
+            last_clos = NODE_NONE;
+            if self.cg_is_moved(ev.decl) {
+                continue;
+            }
+            if !self.cg_is_cond_moved(ev.decl) && self.ncond_moved < 256 {
+                self.cond_moved[self.ncond_moved as usize] = ev.decl;
+                self.ncond_moved = self.ncond_moved + 1;
+                if ev.decl as usize < self.stamp_cap {
+                    unsafe self.cond_stamp[ev.decl as usize] = self.move_epoch;
+                }
+            }
+            if (ev.flags & 1) != 0 && self.ncond_sites < 256 {
+                self.cond_sites[self.ncond_sites as usize] = ev.site;
+                self.ncond_sites = self.ncond_sites + 1;
+            }
         }
     }
     fn emit_arith_overload(self: &mut Self, id: NodeId) bool {
@@ -6202,13 +6392,61 @@ extend Codegen {
         unsafe *out = v;
         return true;
     }
+    // CG-16: lazily build module m's (owner -> attr positions) chain, mirroring CG-4's scheme:
+    // reverse insertion makes attr_head the FIRST table position per owner and attr_next walk
+    // positions in table order, so chain queries see attrs exactly as the full scan did.
+    fn cg_attr_index(self: &Self, m: ModuleId) {
+        let bit = 1u64 << m as u64;
+        if (self.attr_built & bit) != 0 {
+            return;
+        }
+        let mp = (self as *const Codegen) as *mut Codegen;
+        let a = self.mod_ast(m);
+        let mut i = (unsafe (*a).attrs.len()) as i32 - 1;
+        while i >= 0 {
+            let key = m as u64 << 32 | (unsafe (*a).attrs.at(i as usize).owner) as u64;
+            switch self.attr_head.get(&key) {
+                Some(h) => {
+                    unsafe {
+                        (*mp).attr_next.insert(m as u64 << 32 | i as u64, *h);
+                    }
+                },
+                _ => {},
+            };
+            unsafe {
+                (*mp).attr_head.insert(key, i as u32);
+            }
+            i -= 1;
+        }
+        unsafe {
+            (*mp).attr_built = self.attr_built | bit;
+        }
+    }
     fn cg_attr(self: &Self, m: ModuleId, owner: NodeId, kind: AttrKind) *const Attr {
         let a = self.mod_ast(m);
-        for i in 0..unsafe (*a).attrs.len() {
-            let at = unsafe (*a).attrs.at(i);
-            if at.owner == owner && at.kind == kind as u8 {
+        if m as u32 >= 64 {
+            for i in 0..unsafe (*a).attrs.len() {
+                let at = unsafe (*a).attrs.at(i);
+                if at.owner == owner && at.kind == kind as u8 {
+                    return at as *const Attr;
+                }
+            }
+            return null;
+        }
+        self.cg_attr_index(m);
+        let mut pos = switch self.attr_head.get(&(m as u64 << 32 | owner as u64)) {
+            Some(h) => (*h) as i32,
+            None => -1,
+        };
+        while pos >= 0 {
+            let at = unsafe (*a).attrs.at(pos as usize);
+            if at.kind == kind as u8 {
                 return at as *const Attr;
             }
+            pos = (switch self.attr_next.get(&(m as u64 << 32 | pos as u64)) {
+                Some(h) => (*h) as i32,
+                None => -1,
+            });
         }
         return null;
     }
@@ -8360,6 +8598,14 @@ fn bappend(out: *mut char, cap: usize, at: usize, text: *const char) usize {
     return bappend_bytes(out, cap, at, text, unsafe cstring::strlen(text));
 }
 
+// Length-carrying keyword compare: a str literal knows its length, so candidates are rejected
+// on one immediate compare instead of a strlen per probe (span_is strlens its C-string literal).
+fn ckw(src: str, s: tok::Span, lit: str) bool {
+    if (s.end - s.start) as usize != lit.len() {
+        return false;
+    }
+    return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), lit.len()) == 0;
+}
 fn is_c_keyword(src: str, s: tok::Span) bool {
     let n = (s.end - s.start) as usize;
     if n == 0 {
@@ -8367,95 +8613,63 @@ fn is_c_keyword(src: str, s: tok::Span) bool {
     }
     let c0 = src[s.start as usize];
     if c0 == b'N' {
-        return span_is(src, s, "NULL".ptr() as *const char);
+        return ckw(src, s, "NULL");
     }
     if c0 == b'_' {
-        return span_is(src, s, "_Bool".ptr() as *const char) || span_is(src, s, "_Complex".ptr() as *const char) || span_is(
+        return ckw(src, s, "_Bool") || ckw(src, s, "_Complex") || ckw(src, s, "_Atomic") || ckw(src, s, "_Noreturn") || ckw(
             src,
             s,
-            "_Atomic".ptr() as *const char,
-        ) || span_is(src, s, "_Noreturn".ptr() as *const char) || span_is(src, s, "_Generic".ptr() as *const char) || span_is(
-            src,
-            s,
-            "_Static_assert".ptr() as *const char,
-        ) || span_is(src, s, "_Thread_local".ptr() as *const char);
+            "_Generic",
+        ) || ckw(src, s, "_Static_assert") || ckw(src, s, "_Thread_local");
     }
     if c0 == b'a' {
-        return span_is(src, s, "auto".ptr() as *const char);
+        return ckw(src, s, "auto");
     }
     if c0 == b'b' {
-        return span_is(src, s, "break".ptr() as *const char) || span_is(src, s, "bool".ptr() as *const char);
+        return ckw(src, s, "break") || ckw(src, s, "bool");
     }
     if c0 == b'c' {
-        return span_is(src, s, "case".ptr() as *const char) || span_is(src, s, "char".ptr() as *const char) || span_is(
-            src,
-            s,
-            "const".ptr() as *const char,
-        ) || span_is(src, s, "continue".ptr() as *const char);
+        return ckw(src, s, "case") || ckw(src, s, "char") || ckw(src, s, "const") || ckw(src, s, "continue");
     }
     if c0 == b'd' {
-        return span_is(src, s, "default".ptr() as *const char) || span_is(src, s, "do".ptr() as *const char) || span_is(
-            src,
-            s,
-            "double".ptr() as *const char,
-        );
+        return ckw(src, s, "default") || ckw(src, s, "do") || ckw(src, s, "double");
     }
     if c0 == b'e' {
-        return span_is(src, s, "else".ptr() as *const char) || span_is(src, s, "enum".ptr() as *const char) || span_is(
-            src,
-            s,
-            "extern".ptr() as *const char,
-        );
+        return ckw(src, s, "else") || ckw(src, s, "enum") || ckw(src, s, "extern");
     }
     if c0 == b'f' {
-        return span_is(src, s, "float".ptr() as *const char) || span_is(src, s, "for".ptr() as *const char) || span_is(
-            src,
-            s,
-            "false".ptr() as *const char,
-        );
+        return ckw(src, s, "float") || ckw(src, s, "for") || ckw(src, s, "false");
     }
     if c0 == b'g' {
-        return span_is(src, s, "goto".ptr() as *const char);
+        return ckw(src, s, "goto");
     }
     if c0 == b'i' {
-        return span_is(src, s, "if".ptr() as *const char) || span_is(src, s, "inline".ptr() as *const char) || span_is(
-            src,
-            s,
-            "int".ptr() as *const char,
-        );
+        return ckw(src, s, "if") || ckw(src, s, "inline") || ckw(src, s, "int");
     }
     if c0 == b'l' {
-        return span_is(src, s, "long".ptr() as *const char);
+        return ckw(src, s, "long");
     }
     if c0 == b'r' {
-        return span_is(src, s, "register".ptr() as *const char) || span_is(src, s, "restrict".ptr() as *const char) || span_is(
-            src,
-            s,
-            "return".ptr() as *const char,
-        );
+        return ckw(src, s, "register") || ckw(src, s, "restrict") || ckw(src, s, "return");
     }
     if c0 == b's' {
-        return span_is(src, s, "short".ptr() as *const char) || span_is(src, s, "signed".ptr() as *const char) || span_is(
+        return ckw(src, s, "short") || ckw(src, s, "signed") || ckw(src, s, "sizeof") || ckw(src, s, "static") || ckw(
             src,
             s,
-            "sizeof".ptr() as *const char,
-        ) || span_is(src, s, "static".ptr() as *const char) || span_is(src, s, "struct".ptr() as *const char) || span_is(
-            src,
-            s,
-            "switch".ptr() as *const char,
-        );
+            "struct",
+        ) || ckw(src, s, "switch");
     }
     if c0 == b't' {
-        return span_is(src, s, "typedef".ptr() as *const char) || span_is(src, s, "true".ptr() as *const char);
+        return ckw(src, s, "typedef") || ckw(src, s, "true");
     }
     if c0 == b'u' {
-        return span_is(src, s, "union".ptr() as *const char) || span_is(src, s, "unsigned".ptr() as *const char);
+        return ckw(src, s, "union") || ckw(src, s, "unsigned");
     }
     if c0 == b'v' {
-        return span_is(src, s, "void".ptr() as *const char) || span_is(src, s, "volatile".ptr() as *const char);
+        return ckw(src, s, "void") || ckw(src, s, "volatile");
     }
     if c0 == b'w' {
-        return span_is(src, s, "while".ptr() as *const char);
+        return ckw(src, s, "while");
     }
     return false;
 }
@@ -9107,8 +9321,9 @@ extend Codegen {
             self.ncond_moved = 0;
             self.ncond_sites = 0;
             self.cg_move_stamps_reset();
-            self.cg_scan_moves(f.body, false, 0);
-            self.cg_scan_moves(f.body, false, 1);
+            self.pend_moves.clear();
+            self.cg_scan_moves(f.body, false);
+            self.cg_replay_cond_moves();
             let pids = unsafe (*self.cur_ast()).list(f.params);
             self.nparam_flags = 0;
             self.nunused_params = 0;
@@ -10585,43 +10800,27 @@ extend Codegen {
         self.env_clos = saved_env;
     }
     fn emit_closures(self: &mut Self, with_body: bool) {
-        for i in 0..unsafe (*self.cur_ast()).nodes.len() {
-            if unsafe (*self.cur_ast()).at_const(i as NodeId).kind == NodeKind::NODE_CLOSURE {
-                // A @platform-gated-away item is never typechecked; skip its orphaned, untyped closures.
-                if unsafe (*self.cur_ast()).type_of(i as NodeId) == TYPE_NONE {
-                    continue;
-                }
-                self.emit_closure_fn(i as NodeId, with_body);
+        // CG-17: iterate the ids collected by collect_insts' sweep (ascending = old scan order)
+        // instead of re-sweeping the whole node arena in both the proto and body passes.
+        for i in 0..self.clos_list.len() {
+            let cid = *self.clos_list.at(i);
+            // A @platform-gated-away item is never typechecked; skip its orphaned, untyped closures.
+            if unsafe (*self.cur_ast()).type_of(cid) == TYPE_NONE {
+                continue;
             }
+            self.emit_closure_fn(cid, with_body);
         }
     }
     fn cb_specialized_away(self: &Self, fnId: NodeId) bool {
-        let fk = unsafe (*self.cur_ast()).at_const(fnId).kind;
-        let fpub = unsafe (*self.cur_ast()).at_const(fnId).as_data.function.is_public;
-        if fk != NodeKind::NODE_FUNCTION || fpub {
-            return false;
-        }
-        let mut any = false;
-        let mut i: i32 = 0;
-        while i < self.n_cb_insts && !any {
-            if self.cb_insts[i as usize].func.node == fnId && self.cb_insts[i as usize].func.module == self.cur_module() {
-                any = true;
-            }
-            i = i + 1;
-        }
-        if !any {
-            return false;
-        }
-        for j in 0..self.n_cb_keep {
-            if self.cb_keep_fns[j as usize] == fnId {
-                return false;
-            }
-        }
-        return true;
+        // CG-18: verdicts precomputed by collect_callbacks (cb_insts/cb_keep_fns are final once
+        // it returns); an empty map = all-false, matching the pre-collect state.
+        return self.cb_away.contains_key(&fnId);
     }
     fn collect_callbacks(self: &mut Self) {
         self.n_cb_insts = 0;
         self.n_cb_keep = 0;
+        self.cb_away.free();
+        self.cb_away = Map::<u32, u8>::new();
         let nn = unsafe (*self.cur_ast()).nodes.len();
         let mut i: u32 = 0;
         while i as usize < nn {
@@ -10677,6 +10876,29 @@ extend Codegen {
             }
             i = i + 1;
         }
+        // CG-18: bake the cb_specialized_away verdicts (old logic verbatim: a private local
+        // function with at least one recorded specialization and no keep-marker).
+        let mut ci: i32 = 0;
+        while ci < self.n_cb_insts {
+            let fnId = self.cb_insts[ci as usize].func.node;
+            ci = ci + 1;
+            if self.cb_insts[(ci - 1) as usize].func.module != self.cur_module() || self.cb_away.contains_key(&fnId) {
+                continue;
+            }
+            let fk = unsafe (*self.cur_ast()).at_const(fnId).kind;
+            if fk != NodeKind::NODE_FUNCTION || unsafe (*self.cur_ast()).at_const(fnId).as_data.function.is_public {
+                continue;
+            }
+            let mut kept = false;
+            for j in 0..self.n_cb_keep {
+                if self.cb_keep_fns[j as usize] == fnId {
+                    kept = true;
+                }
+            }
+            if !kept {
+                self.cb_away.insert(fnId, 1);
+            }
+        }
     }
     fn emit_callback_specializations(self: &mut Self, with_body: bool) {
         for i in 0..self.n_cb_insts {
@@ -10694,23 +10916,19 @@ extend Codegen {
         }
     }
     fn emit_dyn_typedefs(self: &mut Self) {
+        // Exact-identity seen set ((module,inst) IS the old scan's equality) replaces the
+        // O(pool^2) earlier-entries rescan.
+        let mut dyn_seen = Map::<u64, u8>::new();
         for i in 0..unsafe (*self.cur_ast()).type_pool.len() {
             let dy = *unsafe (*self.cur_ast()).type_at(i as TypeId);
             if dy.kind != TypeKind::TYPE_DYN {
                 continue;
             }
-            let mut seen = false;
-            let mut j: usize = 0;
-            while j < i && !seen {
-                let pj = *unsafe (*self.cur_ast()).type_at(j as TypeId);
-                if pj.kind == TypeKind::TYPE_DYN && pj.module == dy.module && pj.as_data.inst == dy.as_data.inst {
-                    seen = true;
-                }
-                j = j + 1;
-            }
-            if seen {
+            let dkey = dy.module as u64 << 32 | dy.as_data.inst as u64;
+            if dyn_seen.contains_key(&dkey) {
                 continue;
             }
+            dyn_seen.insert(dkey, 1);
             let mut stem = Buf176 {};
             self.dyn_stem_dy(&dy, &mut stem[0], 176);
             let sp = (&stem[0]) as *const char;
@@ -10833,6 +11051,7 @@ extend Codegen {
                 diag::cstr(sp),
             );
         }
+        dyn_seen.free();
     }
     fn emit_dynfn_table(self: &mut Self, src: TypeId, dy: Ty) {
         let sy = *unsafe (*self.cur_ast()).type_at(src);
@@ -10949,6 +11168,10 @@ extend Codegen {
     }
     fn emit_dyn_tables(self: &mut Self) {
         let n = unsafe (*self.cur_ast()).dyn_uses.len();
+        // Content-keyed ((src, rendered stem)) seen map replacing the O(uses^2) rescan: a hash
+        // hit is verified by re-rendering the stored first use's stem; a failed verify (a true
+        // 64-bit collision) falls back to the authoritative old j<i scan.
+        let mut tbl_seen = Map::<u64, u32>::new();
         for i in 0..n {
             let dui = unsafe (*self.cur_ast()).dyn_uses[i];
             if dui.src == TYPE_NONE {
@@ -10957,25 +11180,45 @@ extend Codegen {
             let dy = *unsafe (*self.cur_ast()).type_at(dui.dyn_ty);
             let mut istem = Buf176 {};
             self.dyn_stem_dy(&dy, &mut istem[0], 176);
+            let ilen = unsafe cstring::strlen(&istem[0]);
+            let ikey = str::from_raw(((&istem[0]) as *const char) as *const u8, ilen).hash() * 1099511628211 ^ dui.src as u64;
             let mut seen = false;
-            let mut j: usize = 0;
-            while j < i && !seen {
-                let duj = unsafe (*self.cur_ast()).dyn_uses[j];
-                if duj.src != dui.src {
-                    j = j + 1;
-                    continue;
-                }
-                let pj = *unsafe (*self.cur_ast()).type_at(duj.dyn_ty);
-                if pj.module == dy.module && pj.as_data.inst == dy.as_data.inst {
-                    seen = true;
-                } else {
+            let mut miss = true;
+            switch tbl_seen.get(&ikey) {
+                Some(fi) => {
+                    miss = false;
+                    let duj = unsafe (*self.cur_ast()).dyn_uses[(*fi) as usize];
+                    let pj = *unsafe (*self.cur_ast()).type_at(duj.dyn_ty);
                     let mut jstem = Buf176 {};
                     self.dyn_stem_dy(&pj, &mut jstem[0], 176);
-                    if unsafe cstring::strcmp(&istem[0], &jstem[0]) == 0 {
+                    if duj.src == dui.src && unsafe cstring::strcmp(&istem[0], &jstem[0]) == 0 {
                         seen = true;
+                    } else {
+                        let mut j: usize = 0;
+                        while j < i && !seen {
+                            let du2 = unsafe (*self.cur_ast()).dyn_uses[j];
+                            if du2.src != dui.src {
+                                j = j + 1;
+                                continue;
+                            }
+                            let p2 = *unsafe (*self.cur_ast()).type_at(du2.dyn_ty);
+                            if p2.module == dy.module && p2.as_data.inst == dy.as_data.inst {
+                                seen = true;
+                            } else {
+                                let mut jstem2 = Buf176 {};
+                                self.dyn_stem_dy(&p2, &mut jstem2[0], 176);
+                                if unsafe cstring::strcmp(&istem[0], &jstem2[0]) == 0 {
+                                    seen = true;
+                                }
+                            }
+                            j = j + 1;
+                        }
                     }
-                }
-                j = j + 1;
+                },
+                None => {},
+            };
+            if miss {
+                tbl_seen.insert(ikey, i as u32);
             }
             if seen {
                 continue;
@@ -11150,6 +11393,7 @@ extend Codegen {
             self.emit_str(" };\n");
             self.nsubst = saved_subst2;
         }
+        tbl_seen.free();
         if unsafe (*self.cur_ast()).dyn_uses.len() != 0 {
             self.emit_str("\n");
         }

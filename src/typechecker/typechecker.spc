@@ -76,6 +76,32 @@ pub struct FlowState {
     pub nborrows: u32,
 }
 
+// TC-11: method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
+// querying module's source, or the caller's literal), so span- and cstr-form queries for the same
+// name share one entry. Exact-keyed (Hash + full Eq), so collisions cannot alias.
+pub struct MQKey {
+    pub m: ModuleId,
+    pub decl: NodeId,
+    pub kind: u8,
+    pub name: str,
+}
+
+extend MQKey as Hash {
+    pub fn hash(self: &Self) u64 {
+        let mut h: u64 = 1469598103934665603u64;
+        h = (h ^ self.m as u64) * 1099511628211u64;
+        h = (h ^ self.decl as u64) * 1099511628211u64;
+        h = (h ^ self.kind as u64) * 1099511628211u64;
+        return (h ^ self.name.hash()) * 1099511628211u64;
+    }
+}
+
+extend MQKey as Eq {
+    pub fn eq(self: &Self, other: &Self) bool {
+        return self.m == other.m && self.decl == other.decl && self.kind == other.kind && self.name == other.name;
+    }
+}
+
 pub struct TypeChecker {
     pub ast: Ast,
     pub source: str,
@@ -146,6 +172,21 @@ pub struct TypeChecker {
     pub dynfn_scan: TypeId,
     // TC-9: format helpers are marked used once per module, not once per print call.
     pub fmt_marked: bool,
+    // TC-11: (target, name-content, query kind) -> packed DefId (module<<32|node), misses included
+    // (node == NODE_NONE). Valid for the whole check: the ext scope, ASTs and self.ast.module (the
+    // privacy filter input) are all fixed per checker. mark_method_used is re-fired on method hits
+    // (idempotent set), so used-lint marking is unchanged.
+    pub method_memo: Map<MQKey, u64>,
+    // TC-12: tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
+    // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
+    pub peel_memo: Map<u64, u64>,
+    // TC-13: foreign generic-instance lowering memo, (module<<32|node) -> current-pool TypeId,
+    // HEAVY NODES ONLY (type paths with generic args; anything cheaper loses to the hash probe).
+    // Foreign lowering is context-free (resolution_def/builtin_of_decl/consteval only; Self and
+    // generic params lower to identity types, substitution happens in callers). DIAGNOSTICS GATE:
+    // entries are inserted only when the lowering emitted no new errors and the result is not
+    // TYPE_ERROR, so error-carrying programs re-emit their diagnostics exactly as before.
+    pub lower_memo: Map<u64, TypeId>,
     // TC-10: prelude lookup hits resolved once at construction (prelude_lookup is a linear scan).
     pub ph_str: loader::LookupHit,
     pub ph_slice: loader::LookupHit,
@@ -413,6 +454,9 @@ extend TypeChecker {
             dynfn_list: Vector::<TypeId>::new(),
             dynfn_scan: 1,
             fmt_marked: false,
+            method_memo: Map::<MQKey, u64>::new(),
+            peel_memo: Map::<u64, u64>::new(),
+            lower_memo: Map::<u64, TypeId>::new(),
             ph_str: ph_lookup(pkg, "str"),
             ph_slice: ph_lookup(pkg, "Slice"),
             ph_slicemut: ph_lookup(pkg, "SliceMut"),
@@ -1687,6 +1731,29 @@ extend TypeChecker {
         if id == NODE_NONE {
             return TYPE_NONE;
         }
+        // TC-13: memoized foreign lowering with the diagnostics gate. Only generic-instance
+        // paths take the memo: they re-lower every argument and probe the instance maps, so a
+        // hash probe wins; plain paths/builtins are CHEAPER than the probe itself (measured:
+        // an unconditional memo made typechecking 32% slower).
+        let hn = unsafe (*self.mod_ast(m)).at_const(id);
+        if hn.kind != NodeKind::NODE_TYPE_PATH || hn.as_data.type_path.args.len == 0 {
+            return self.lower_foreign_type(m, id);
+        }
+        let lk = m as u64 << 32 | id as u64;
+        switch self.lower_memo.get(&lk) {
+            Some(t) => {
+                return *t;
+            },
+            None => {},
+        };
+        let ne = self.errors.errors.len();
+        let r = self.lower_foreign_type(m, id);
+        if r != TYPE_ERROR && self.errors.errors.len() == ne {
+            self.lower_memo.insert(lk, r);
+        }
+        return r;
+    }
+    fn lower_foreign_type(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
         let a = self.mod_ast(m);
         let nk = unsafe (*a).at_const(id).kind;
         if nk == NodeKind::NODE_TYPE_PATH {
@@ -2422,6 +2489,20 @@ extend TypeChecker {
         if tg.node == NODE_NONE {
             return tg;
         }
+        // TC-12: peel is a pure function of frozen decls; the uncached path's named_type_of
+        // interning happens on the first peel, so pool order is unchanged.
+        let pk = tg.module as u64 << 32 | tg.node as u64;
+        switch self.peel_memo.get(&pk) {
+            Some(v) => {
+                return DefId { module: (*v >> 32) as ModuleId, node: (*v) as NodeId };
+            },
+            None => {},
+        };
+        let r = self.tc_peel_target_uncached(tg);
+        self.peel_memo.insert(pk, r.module as u64 << 32 | r.node as u64);
+        return r;
+    }
+    fn tc_peel_target_uncached(self: &mut Self, tg: DefId) DefId {
         let dn = *unsafe (*self.mod_ast(tg.module)).at_const(tg.node);
         if dn.kind != NodeKind::NODE_TYPE_ALIAS || dn.as_data.type_alias.ty == NODE_NONE || dn.as_data.type_alias.generics.len != 0 {
             return tg;
@@ -2555,6 +2636,29 @@ extend TypeChecker {
     // Find a method named `name`/`lit` in an extend of (m,decl); marks it used. Searches the type's home
     // module, then the current module + imports.
     fn find_method_impl(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str) DefId {
+        // TC-11: memoized by (target, name content), misses included; a hit re-fires the
+        // idempotent mark_method_used exactly as the scan's hit path did. Only span-form queries
+        // are memoized: a span slices self.source (stable for the checker's life), while a caller's
+        // `lit` may view a stack buffer (e.g. dyn_coerce_alloc) that dies before the next lookup.
+        if lit.len() != 0 {
+            return self.find_method_scan(m, decl, name, lit);
+        }
+        let mq = MQKey { m: m, decl: decl, kind: 0, name: self.source.slice(name.start as usize, name.end as usize) };
+        switch self.method_memo.get(&mq) {
+            Some(v) => {
+                let d = DefId { module: (*v >> 32) as ModuleId, node: (*v) as NodeId };
+                if d.node != NODE_NONE {
+                    unsafe (*self.package).mark_method_used(d);
+                }
+                return d;
+            },
+            None => {},
+        };
+        let r = self.find_method_scan(m, decl, name, lit);
+        self.method_memo.insert(mq, r.module as u64 << 32 | r.node as u64);
+        return r;
+    }
+    fn find_method_scan(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str) DefId {
         let ni = self.ext_scopes();
         let mut s: i32 = -1;
         while s < ni {
@@ -2609,6 +2713,19 @@ extend TypeChecker {
     }
 
     fn find_assoc_const(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span) DefId {
+        // TC-11 (kind 1): same memo, no used-marking on this query family.
+        let mq = MQKey { m: m, decl: decl, kind: 1, name: self.source.slice(name.start as usize, name.end as usize) };
+        switch self.method_memo.get(&mq) {
+            Some(v) => {
+                return DefId { module: (*v >> 32) as ModuleId, node: (*v) as NodeId };
+            },
+            None => {},
+        };
+        let r = self.find_assoc_const_scan(m, decl, name);
+        self.method_memo.insert(mq, r.module as u64 << 32 | r.node as u64);
+        return r;
+    }
+    fn find_assoc_const_scan(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span) DefId {
         let ni = self.ext_scopes();
         let mut s: i32 = -1;
         while s < ni {
@@ -2721,6 +2838,24 @@ extend TypeChecker {
     }
 
     fn find_default_method(self: &mut Self, tmod: ModuleId, tdecl: NodeId, name: tok::Span) DefId {
+        // TC-11 (kind 2): same memo; find_interface_method reads only frozen interface bodies.
+        let mq = MQKey {
+            m: tmod,
+            decl: tdecl,
+            kind: 2,
+            name: self.source.slice(name.start as usize, name.end as usize),
+        };
+        switch self.method_memo.get(&mq) {
+            Some(v) => {
+                return DefId { module: (*v >> 32) as ModuleId, node: (*v) as NodeId };
+            },
+            None => {},
+        };
+        let r = self.find_default_method_scan(tmod, tdecl, name);
+        self.method_memo.insert(mq, r.module as u64 << 32 | r.node as u64);
+        return r;
+    }
+    fn find_default_method_scan(self: &mut Self, tmod: ModuleId, tdecl: NodeId, name: tok::Span) DefId {
         let ni = self.ext_scopes();
         let mut s: i32 = -1;
         while s < ni {
@@ -9239,6 +9374,135 @@ extend TypeChecker {
         }
     }
 
+    // The three statement kinds carrying FlowState snapshots (2,832 B each, up to two) live in
+    // their own frames: inlined into check_stmt they put a ~5.7 KB frame + unconditional stack
+    // probe on EVERY recursive statement check. @c.noinline keeps LTO from folding them back.
+    @c.noinline
+    fn tc_check_defer(self: &mut Self, id: NodeId) {
+        let a = self.cur_ast();
+        let mut pre: FlowState;
+        self.tc_flow_save(&mut pre);
+        let bm = self.borrow_mark();
+        let dv = unsafe (*a).at_const(id).as_data.single.value;
+        self.check_expr(dv);
+        self.borrow_release_to(bm);
+        self.tc_flow_set(&pre);
+        if self.ndefers < 256 {
+            let k = self.ndefers;
+            self.defer_stack[k as usize] = dv;
+            self.defer_depth[k as usize] = self.scope_depth;
+            self.ndefers = k + 1;
+        } else {
+            let sp = unsafe (*a).at_const(id).span;
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("too many pending 'defer' statements in one function (analysis limit)"),
+            );
+        }
+    }
+    @c.noinline
+    fn tc_check_while(self: &mut Self, id: NodeId) {
+        let a = self.cur_ast();
+        self.loop_depth = self.loop_depth + 1;
+        let le = self.tc_loop_push(unsafe (*a).at_const(id).as_data.while_stmt.label, id, false);
+        let bm = self.borrow_mark();
+        let c = self.check_expr(unsafe (*a).at_const(id).as_data.while_stmt.condition);
+        if c != TYPE_NONE && !self.is_bool(c) {
+            let sp = unsafe (*a).at_const(unsafe (*a).at_const(id).as_data.while_stmt.condition).span;
+            let mut ty = Buf96 {};
+            self.render_type(c, &mut ty[0], 96);
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("while condition must be 'bool', found '{}'", diag::cstr(&ty[0])),
+            );
+        }
+        self.borrow_release_to(bm);
+        let body = unsafe (*a).at_const(id).as_data.while_stmt.body;
+        if unsafe (*a).at_const(id).as_data.while_stmt.is_do || unsafe (*a).at_const(id).as_data.while_stmt.condition == NODE_NONE {
+            self.check_loop_body(body);
+        } else {
+            let mut pre: FlowState;
+            self.tc_flow_save(&mut pre);
+            self.check_loop_body(body);
+            let mut acc: FlowState;
+            self.tc_flow_clear(&mut acc);
+            let mut ovf = self.tc_flow_collect((&mut acc) as *mut FlowState);
+            self.tc_flow_set(&pre);
+            if self.tc_flow_collect((&mut acc) as *mut FlowState) {
+                ovf = true;
+            }
+            self.tc_flow_set(&acc);
+            if ovf {
+                self.tc_flow_overflow(unsafe (*self.cur_ast()).at_const(id).as_data.while_stmt.condition);
+            }
+        }
+        if le >= 0 {
+            self.tc_loop_pop(le, unsafe (*self.cur_ast()).at_const(id).span);
+        }
+        self.loop_depth = self.loop_depth - 1;
+    }
+    @c.noinline
+    fn tc_check_for(self: &mut Self, id: NodeId) {
+        let a = self.cur_ast();
+        self.loop_depth = self.loop_depth + 1;
+        let le = self.tc_loop_push(unsafe (*a).at_const(id).as_data.for_stmt.label, id, false);
+        let bm = self.borrow_mark();
+        let iter = unsafe (*a).at_const(id).as_data.for_stmt.iterable;
+        let mut elem = TYPE_NONE;
+        if unsafe (*a).at_const(iter).kind == NodeKind::NODE_RANGE {
+            let s = self.check_expr(unsafe (*a).at_const(iter).as_data.pattern_range.start);
+            let e = self.check_expr(unsafe (*a).at_const(iter).as_data.pattern_range.end);
+            elem = self.range_type(iter, s, e);
+            unsafe (*self.cur_ast()).set_type(iter, elem);
+        } else {
+            let it = self.check_expr(iter);
+            let ity = *self.type_at(it);
+            let mut selem: TypeId = TYPE_NONE;
+            if ity.kind == TypeKind::TYPE_ARRAY {
+                elem = ity.as_data.elem;
+            } else if self.slice_kind(it, (&mut selem) as *mut TypeId) != 0 {
+                elem = selem;
+            } else {
+                elem = self.range_instance_elem(it);
+            }
+            if elem == TYPE_NONE && it != TYPE_NONE {
+                elem = self.iter_elem_type(it);
+            }
+            if elem == TYPE_NONE && it != TYPE_NONE {
+                let sp = unsafe (*self.cur_ast()).at_const(iter).span;
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("cannot iterate over this value (need an array, slice, range, or an Iterator)"),
+                );
+            }
+        }
+        unsafe (*self.cur_ast()).set_type(id, elem);
+        if id != NODE_NONE {
+            self.binding_depth.insert(id, self.scope_depth + 1);
+        }
+        self.borrow_release_to(bm);
+        let mut pre: FlowState;
+        self.tc_flow_save(&mut pre);
+        self.check_loop_body(unsafe (*self.cur_ast()).at_const(id).as_data.for_stmt.body);
+        let mut acc: FlowState;
+        self.tc_flow_clear(&mut acc);
+        let mut ovf = self.tc_flow_collect((&mut acc) as *mut FlowState);
+        self.tc_flow_set(&pre);
+        if self.tc_flow_collect((&mut acc) as *mut FlowState) {
+            ovf = true;
+        }
+        self.tc_flow_set(&acc);
+        if ovf {
+            self.tc_flow_overflow(iter);
+        }
+        if le >= 0 {
+            self.tc_loop_pop(le, unsafe (*self.cur_ast()).at_const(id).span);
+        }
+        self.loop_depth = self.loop_depth - 1;
+    }
     fn check_stmt(self: &mut Self, id: NodeId) {
         if id == NODE_NONE {
             return;
@@ -9252,9 +9516,12 @@ extend TypeChecker {
             NODE_BLOCK => {
                 let stmts = unsafe (*a).at_const(id).as_data.block.statements;
                 self.tc_scope_enter();
+                // Stable across the recursion: children storage is append-only and nothing commits
+                // AST nodes during checking (interning goes to the separate type/instance pools).
+                let sp = unsafe (*a).list(stmts);
                 for i in 0..stmts.len {
-                    self.check_stmt(unsafe (*a).list(stmts)[i as usize]);
-                    self.borrow_nll_drop(id, unsafe (*a).list(stmts), i);
+                    self.check_stmt(unsafe sp[i as usize]);
+                    self.borrow_nll_drop(id, sp, i);
                 }
                 while self.ndefers != 0 && self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
                     self.ndefers = self.ndefers - 1;
@@ -9359,127 +9626,16 @@ extend TypeChecker {
                 self.borrow_release_to(bm);
             },
             NODE_DEFER => {
-                let mut pre: FlowState;
-                self.tc_flow_save(&mut pre);
-                let bm = self.borrow_mark();
-                let dv = unsafe (*a).at_const(id).as_data.single.value;
-                self.check_expr(dv);
-                self.borrow_release_to(bm);
-                self.tc_flow_set(&pre);
-                if self.ndefers < 256 {
-                    let k = self.ndefers;
-                    self.defer_stack[k as usize] = dv;
-                    self.defer_depth[k as usize] = self.scope_depth;
-                    self.ndefers = k + 1;
-                } else {
-                    let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format("too many pending 'defer' statements in one function (analysis limit)"),
-                    );
-                }
+                self.tc_check_defer(id);
             },
             NODE_IF => {
                 self.check_if_stmt(id);
             },
             NODE_WHILE => {
-                self.loop_depth = self.loop_depth + 1;
-                let le = self.tc_loop_push(unsafe (*a).at_const(id).as_data.while_stmt.label, id, false);
-                let bm = self.borrow_mark();
-                let c = self.check_expr(unsafe (*a).at_const(id).as_data.while_stmt.condition);
-                if c != TYPE_NONE && !self.is_bool(c) {
-                    let sp = unsafe (*a).at_const(unsafe (*a).at_const(id).as_data.while_stmt.condition).span;
-                    let mut ty = Buf96 {};
-                    self.render_type(c, &mut ty[0], 96);
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format("while condition must be 'bool', found '{}'", diag::cstr(&ty[0])),
-                    );
-                }
-                self.borrow_release_to(bm);
-                let body = unsafe (*a).at_const(id).as_data.while_stmt.body;
-                if unsafe (*a).at_const(id).as_data.while_stmt.is_do || unsafe (*a).at_const(id).as_data.while_stmt.condition == NODE_NONE {
-                    self.check_loop_body(body);
-                } else {
-                    let mut pre: FlowState;
-                    self.tc_flow_save(&mut pre);
-                    self.check_loop_body(body);
-                    let mut acc: FlowState;
-                    self.tc_flow_clear(&mut acc);
-                    let mut ovf = self.tc_flow_collect((&mut acc) as *mut FlowState);
-                    self.tc_flow_set(&pre);
-                    if self.tc_flow_collect((&mut acc) as *mut FlowState) {
-                        ovf = true;
-                    }
-                    self.tc_flow_set(&acc);
-                    if ovf {
-                        self.tc_flow_overflow(unsafe (*self.cur_ast()).at_const(id).as_data.while_stmt.condition);
-                    }
-                }
-                if le >= 0 {
-                    self.tc_loop_pop(le, unsafe (*self.cur_ast()).at_const(id).span);
-                }
-                self.loop_depth = self.loop_depth - 1;
+                self.tc_check_while(id);
             },
             NODE_FOR => {
-                self.loop_depth = self.loop_depth + 1;
-                let le = self.tc_loop_push(unsafe (*a).at_const(id).as_data.for_stmt.label, id, false);
-                let bm = self.borrow_mark();
-                let iter = unsafe (*a).at_const(id).as_data.for_stmt.iterable;
-                let mut elem = TYPE_NONE;
-                if unsafe (*a).at_const(iter).kind == NodeKind::NODE_RANGE {
-                    let s = self.check_expr(unsafe (*a).at_const(iter).as_data.pattern_range.start);
-                    let e = self.check_expr(unsafe (*a).at_const(iter).as_data.pattern_range.end);
-                    elem = self.range_type(iter, s, e);
-                    unsafe (*self.cur_ast()).set_type(iter, elem);
-                } else {
-                    let it = self.check_expr(iter);
-                    let ity = *self.type_at(it);
-                    let mut selem: TypeId = TYPE_NONE;
-                    if ity.kind == TypeKind::TYPE_ARRAY {
-                        elem = ity.as_data.elem;
-                    } else if self.slice_kind(it, (&mut selem) as *mut TypeId) != 0 {
-                        elem = selem;
-                    } else {
-                        elem = self.range_instance_elem(it);
-                    }
-                    if elem == TYPE_NONE && it != TYPE_NONE {
-                        elem = self.iter_elem_type(it);
-                    }
-                    if elem == TYPE_NONE && it != TYPE_NONE {
-                        let sp = unsafe (*self.cur_ast()).at_const(iter).span;
-                        self.errors.emit(
-                            sp.start,
-                            sp.end - sp.start,
-                            format("cannot iterate over this value (need an array, slice, range, or an Iterator)"),
-                        );
-                    }
-                }
-                unsafe (*self.cur_ast()).set_type(id, elem);
-                if id != NODE_NONE {
-                    self.binding_depth.insert(id, self.scope_depth + 1);
-                }
-                self.borrow_release_to(bm);
-                let mut pre: FlowState;
-                self.tc_flow_save(&mut pre);
-                self.check_loop_body(unsafe (*self.cur_ast()).at_const(id).as_data.for_stmt.body);
-                let mut acc: FlowState;
-                self.tc_flow_clear(&mut acc);
-                let mut ovf = self.tc_flow_collect((&mut acc) as *mut FlowState);
-                self.tc_flow_set(&pre);
-                if self.tc_flow_collect((&mut acc) as *mut FlowState) {
-                    ovf = true;
-                }
-                self.tc_flow_set(&acc);
-                if ovf {
-                    self.tc_flow_overflow(iter);
-                }
-                if le >= 0 {
-                    self.tc_loop_pop(le, unsafe (*self.cur_ast()).at_const(id).span);
-                }
-                self.loop_depth = self.loop_depth - 1;
+                self.tc_check_for(id);
             },
             NODE_EXPRESSION_STATEMENT => {
                 let bm = self.borrow_mark();
@@ -10164,6 +10320,9 @@ extend TypeChecker as Free {
         self.free_ext_memo.free();
         self.encl_ext_memo.free();
         self.encl_trait_memo.free();
+        self.method_memo.free();
+        self.peel_memo.free();
+        self.lower_memo.free();
         self.dynfn_list.free();
         self.errors.free();
         self.ast.free();
