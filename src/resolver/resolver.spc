@@ -52,6 +52,8 @@ pub struct Resolver {
     pub glob_mids: Vector<ModuleId>, // module ids of `import P as *;` imports, import order
     pub errors: diag::Errors,
     pub lint: bool,
+    pub lint_decls: Vector<NodeId>, // lets/params declared during resolution (lint only): the unused
+    // pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive
 }
 
 // A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
@@ -165,6 +167,7 @@ extend Resolver {
             glob_mids: Vector::<ModuleId>::new(),
             errors: diag::Errors::new(),
             lint: false,
+            lint_decls: Vector::<NodeId>::new(),
         };
     }
 
@@ -248,6 +251,12 @@ extend Resolver {
         self.symbols.push(Symbol { hash: hash, decl: decl | ns as u32 << 31, name: name });
         self.symbol_previous.push(head);
         self.symbol_index.insert(key, self.symbols.len() as u32);
+        if self.lint {
+            let dk = self.ast.at_const(decl).kind;
+            if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER {
+                self.lint_decls.push(decl);
+            }
+        }
     }
 
     // Symbol-stack lookup. `idx` is the matched symbol's 1-based stack position (0 = not found), used to
@@ -1512,11 +1521,24 @@ extend Resolver {
                 }
             }
         }
+        // Only decls the resolver actually declared: @platform-dropped items stay in the node pool but
+        // are never resolved, and must not be reported as blanket-unused.
+        let mut seen = Vector::<bool>::new();
+        seen.reserve(n);
+        for i in 0..n {
+            seen.push(false);
+        }
+        for i in 0..self.lint_decls.len() {
+            let d = self.lint_decls[i] as usize;
+            if d < n {
+                seen.set(d, true);
+            }
+        }
         let mut i: u32 = 1;
         while i as usize < n {
             let nd = *self.ast.at_const(i);
             if nd.kind == NodeKind::NODE_LET {
-                if !used[i as usize] && nd.as_data.let_stmt.name != NODE_NONE {
+                if seen[i as usize] && !used[i as usize] && nd.as_data.let_stmt.name != NODE_NONE {
                     self.lint_warn_unused("variable", nd.as_data.let_stmt.name);
                 }
             } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE || nd.kind == NodeKind::NODE_CLOSURE {
@@ -1528,7 +1550,7 @@ extend Resolver {
                 for k in 0..params.len {
                     let pid = unsafe self.ast.list(params)[k as usize];
                     let pk = self.ast.at_const(pid).kind;
-                    if !used[pid as usize] && pk == NodeKind::NODE_PARAMETER {
+                    if seen[pid as usize] && !used[pid as usize] && pk == NodeKind::NODE_PARAMETER {
                         let pname = self.ast.at_const(pid).as_data.parameter.name;
                         self.lint_warn_unused("parameter", pname);
                     }
@@ -1536,6 +1558,7 @@ extend Resolver {
             }
             i = i + 1;
         }
+        seen.free();
         used.free();
     }
 }
@@ -1551,5 +1574,6 @@ extend Resolver as Free {
         self.mod_names.free();
         self.glob_mids.free();
         self.errors.free();
+        self.lint_decls.free();
     }
 }

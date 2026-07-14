@@ -10,12 +10,14 @@ if ! files=$(./super-c fmt src std ffi tests bench --check); then
     exit 1
 fi
 
-# 2) Full lint; any warning fails the check.
-printf 'check: lint\n'
-if ! ./super-c lint src std ffi tests bench; then
-    printf 'check: FAILED -- lint warnings above must be fixed (or try: ./super-c lint --fix <file>)\n' >&2
-    exit 1
-fi
+# 2) Full lint, once per supported target (@platform gates differ); any warning fails the check.
+for target in macos linux windows; do
+    printf 'check: lint (--target=%s)\n' "$target"
+    if ! ./super-c lint src std ffi tests bench --target="$target"; then
+        printf 'check: FAILED -- lint warnings above (--target=%s) must be fixed (or try: ./super-c lint --fix <file>)\n' "$target" >&2
+        exit 1
+    fi
+done
 
 # 3) Full test suite with the current compiler (built first if stale).
 printf 'check: tests\n'
