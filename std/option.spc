@@ -10,22 +10,22 @@ pub enum Option<T> {
 }
 
 extend<T> Option<T> {
-    pub fn some(value: T) Option<T> {
+    pub const fn some(value: T) Option<T> {
         return Option::<T>::Some(value);
     }
 
-    pub fn none() Option<T> {
+    pub const fn none() Option<T> {
         return Option::<T>::None;
     }
 
-    pub fn is_some(self: &Option<T>) bool {
+    pub const fn is_some(self: &Option<T>) bool {
         return switch self {
             Some(_) => true,
             None => false,
         };
     }
 
-    pub fn is_none(self: &Option<T>) bool {
+    pub const fn is_none(self: &Option<T>) bool {
         return switch self {
             Some(_) => false,
             None => true,
@@ -33,7 +33,7 @@ extend<T> Option<T> {
     }
 
     // The contained value; panics on `None`. Consumes `self`.
-    pub fn unwrap(self: Option<T>) T {
+    pub const fn unwrap(self: Option<T>) T {
         return switch self {
             Some(v) => v,
             None => panic("Option::unwrap on None"),
@@ -41,7 +41,7 @@ extend<T> Option<T> {
     }
 
     // The contained value; panics with `msg` on `None`. Consumes `self`.
-    pub fn expect(self: Option<T>, msg: str) T {
+    pub const fn expect(self: Option<T>, msg: str) T {
         return switch self {
             Some(v) => v,
             None => panic(msg),
@@ -50,7 +50,7 @@ extend<T> Option<T> {
 
     // The contained value, or `default` when empty. Consumes `self` (matching the owned value moves the
     // payload out); the unused alternative is freed by scope-exit auto-`Free`.
-    pub fn unwrap_or(self: Option<T>, default: T) T {
+    pub const fn unwrap_or(self: Option<T>, default: T) T {
         return switch self {
             Some(v) => v,
             None => default,
@@ -58,7 +58,7 @@ extend<T> Option<T> {
     }
 
     // The contained value, or `f()` computed lazily when empty. Consumes `self`.
-    pub fn unwrap_or_else(self: Option<T>, f: fn() T) T {
+    pub const fn unwrap_or_else(self: Option<T>, f: fn() T) T {
         return switch self {
             Some(v) => v,
             None => f(),
@@ -66,21 +66,21 @@ extend<T> Option<T> {
     }
 
     // Replace the value in place (returns the previous Option). The old payload travels out in `old`.
-    pub fn replace(self: &mut Option<T>, value: T) Option<T> {
+    pub const fn replace(self: &mut Option<T>, value: T) Option<T> {
         let old = *self;
         *self = Option::<T>::Some(value);
         return old;
     }
 
     // Take the value out in place, leaving `None` behind (returns the previous Option).
-    pub fn take(self: &mut Option<T>) Option<T> {
+    pub const fn take(self: &mut Option<T>) Option<T> {
         let old = *self;
         *self = Option::<T>::None;
         return old;
     }
 
     // Map the contained value through `f`, producing `Option<U>` (`None` stays `None`). Consumes `self`.
-    pub fn map<U, F: fn(T) U>(self: Option<T>, f: F) Option<U> {
+    pub const fn map<U, F: fn(T) U>(self: Option<T>, f: F) Option<U> {
         return switch self {
             Some(v) => Option::<U>::Some(f(v)),
             None => Option::<U>::None,
@@ -89,7 +89,7 @@ extend<T> Option<T> {
 
     // Map the contained value, or return `default` when empty. Consumes `self`; frees the unused `default`
     // on the `Some` path (a no-op for non-`Free` types).
-    pub fn map_or<U, F: fn(T) U>(self: Option<T>, default: U, f: F) U {
+    pub const fn map_or<U, F: fn(T) U>(self: Option<T>, default: U, f: F) U {
         return switch self {
             Some(v) => f(v),
             None => default,
@@ -97,7 +97,7 @@ extend<T> Option<T> {
     }
 
     // Chain a fallible step: `f` itself returns an `Option<U>` (flat-map / "bind"). Consumes `self`.
-    pub fn and_then<U, F: fn(T) Option<U>>(self: Option<T>, f: F) Option<U> {
+    pub const fn and_then<U, F: fn(T) Option<U>>(self: Option<T>, f: F) Option<U> {
         return switch self {
             Some(v) => f(v),
             None => Option::<U>::None,
@@ -109,7 +109,7 @@ extend<T> Option<T> {
     // NOTE: `pred` takes `T` by value, so for a Free element type this copies (and the copy is freed),
     // double-freeing the payload `self` still owns. A `fn(&T)` predicate is the right fix but currently
     // hits two compiler gaps (over-const borrow of an embedded pointer payload; no `&mut`->`&` coercion).
-    pub fn filter<F: fn(T) bool>(self: Option<T>, pred: F) Option<T> {
+    pub const fn filter<F: fn(T) bool>(self: Option<T>, pred: F) Option<T> {
         let keep = switch &self {
             Some(v) => pred(*v),
             None => false,
@@ -122,7 +122,7 @@ extend<T> Option<T> {
 
     // `self` when it holds a value, otherwise `other`. Consumes both; the unused alternative is freed by
     // scope-exit auto-`Free`.
-    pub fn or(self: Option<T>, other: Option<T>) Option<T> {
+    pub const fn or(self: Option<T>, other: Option<T>) Option<T> {
         return switch self {
             Some(v) => Option::<T>::Some(v),
             None => other,
@@ -131,7 +131,7 @@ extend<T> Option<T> {
 
     // `None` when `self` is empty, otherwise `other`. Consumes both: on `Some` the discarded `self` payload
     // is freed and `other` is returned; on `None` the unused `other` param is freed by auto-`Free`.
-    pub fn and<U>(self: Option<T>, other: Option<U>) Option<U> {
+    pub const fn and<U>(self: Option<T>, other: Option<U>) Option<U> {
         return switch self {
             Some(v) => {
                 other;
@@ -143,7 +143,7 @@ extend<T> Option<T> {
 
 // The default Option is the empty one.
 extend<T> Option<T> as Default {
-    pub fn default() Option<T> {
+    pub const fn default() Option<T> {
         return Option::<T>::none();
     }
 }
@@ -162,7 +162,7 @@ extend<T: Free> Option<T> as Free {
 // Conditional conformances: an Option is Clone/Eq/Hash exactly when its payload is. Each binds the payload
 // by reference (`&self` match) and dispatches to the payload's own bound method.
 extend<T: Clone> Option<T> as Clone {
-    pub fn clone(self: &Option<T>) Option<T> {
+    pub const fn clone(self: &Option<T>) Option<T> {
         return switch self {
             Some(v) => Option::<T>::Some(v.clone()),
             None => Option::<T>::None,
@@ -171,7 +171,7 @@ extend<T: Clone> Option<T> as Clone {
 }
 
 extend<T: Eq> Option<T> as Eq {
-    pub fn eq(self: &Option<T>, other: &Option<T>) bool {
+    pub const fn eq(self: &Option<T>, other: &Option<T>) bool {
         return switch self {
             Some(a) => switch other {
                 Some(b) => *a == *b,
@@ -183,7 +183,7 @@ extend<T: Eq> Option<T> as Eq {
 }
 
 extend<T: Hash> Option<T> as Hash {
-    pub fn hash(self: &Option<T>) u64 {
+    pub const fn hash(self: &Option<T>) u64 {
         return switch self {
             Some(v) => v.hash() * 0x100000001b3 + 1,
             None => 0 as u64,

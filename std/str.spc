@@ -23,13 +23,13 @@ pub struct str {
 extend str {
     // Construct a view over `len` bytes at `ptr`. The building block for the rest of std and for callers
     // bridging from a raw C buffer -- the fields are private, so this is the only way to make a `str`.
-    pub fn from_raw(ptr: *const u8, len: usize) str {
+    pub const fn from_raw(ptr: *const u8, len: usize) str {
         return str { ptr: ptr, len: len };
     }
 
     // View a NUL-terminated C string as a `str` (length found by scanning to the NUL). Zero-copy:
     // the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
-    pub fn from_cstr(s: *const char) str {
+    pub const fn from_cstr(s: *const char) str {
         let mut n: usize = 0;
         while unsafe s[n] != 0 as char {
             n += 1;
@@ -40,33 +40,33 @@ extend str {
     // --- length & raw access -------------------------------------------------------------------
 
     // Number of bytes in the view. `s.len()` is the accessor for the private `len` field.
-    pub fn len(self: &str) usize {
+    pub const fn len(self: &str) usize {
         return self.len;
     }
 
-    pub fn is_empty(self: &str) bool {
+    pub const fn is_empty(self: &str) bool {
         return self.len == 0;
     }
 
     // A read-only pointer to the first byte (the view's backing storage; not NUL-terminated).
-    pub fn ptr(self: &str) *const u8 {
+    pub const fn ptr(self: &str) *const u8 {
         return self.ptr;
     }
 
     // The byte at `index` (0 <= index < len). No bounds check -- the caller owns the index.
-    pub fn byte_at(self: &str, index: usize) u8 {
+    pub const fn byte_at(self: &str, index: usize) u8 {
         return unsafe self.ptr[index];
     }
 
     // The sub-view of bytes [start, end) -- allocation-free, it borrows `self`'s bytes. The caller
     // keeps `start`/`end` on UTF-8 boundaries (and within bounds).
-    pub fn slice(self: &str, start: usize, end: usize) str {
+    pub const fn slice(self: &str, start: usize, end: usize) str {
         return str { ptr: unsafe (self.ptr + start), len: end - start };
     }
 
     // --- search --------------------------------------------------------------------------------
 
-    pub fn starts_with(self: &str, prefix: str) bool {
+    pub const fn starts_with(self: &str, prefix: str) bool {
         if prefix.len > self.len {
             return false;
         }
@@ -76,7 +76,7 @@ extend str {
         return unsafe memcmp(self.ptr as *const void, prefix.ptr as *const void, prefix.len) == 0;
     }
 
-    pub fn ends_with(self: &str, suffix: str) bool {
+    pub const fn ends_with(self: &str, suffix: str) bool {
         if suffix.len > self.len {
             return false;
         }
@@ -91,7 +91,7 @@ extend str {
     }
 
     // First index of byte `byte`, or -1 if absent.
-    pub fn find_byte(self: &str, byte: u8) isize {
+    pub const fn find_byte(self: &str, byte: u8) isize {
         for i in 0..self.len {
             if unsafe self.ptr[i] == byte {
                 return i as isize;
@@ -101,7 +101,7 @@ extend str {
     }
 
     // First byte index where `needle` occurs, or -1 if absent (naive O(n*m) window scan).
-    pub fn find(self: &str, needle: str) isize {
+    pub const fn find(self: &str, needle: str) isize {
         if needle.len == 0 {
             return 0;
         }
@@ -117,14 +117,14 @@ extend str {
         return -1;
     }
 
-    pub fn contains(self: &str, needle: str) bool {
+    pub const fn contains(self: &str, needle: str) bool {
         return self.find(needle) >= 0;
     }
 
     // --- trim (returns sub-views; no allocation) -----------------------------------------------
 
     // The view with leading ASCII whitespace (space, tab, newline, carriage return) removed.
-    pub fn trim_start(self: &str) str {
+    pub const fn trim_start(self: &str) str {
         let mut start: usize = 0;
         while start < self.len {
             let b = unsafe self.ptr[start];
@@ -137,7 +137,7 @@ extend str {
     }
 
     // The view with trailing ASCII whitespace removed.
-    pub fn trim_end(self: &str) str {
+    pub const fn trim_end(self: &str) str {
         let mut end = self.len;
         while end > 0 {
             let b = unsafe self.ptr[end - 1];
@@ -150,7 +150,7 @@ extend str {
     }
 
     // The view with ASCII whitespace removed from both ends.
-    pub fn trim(self: &str) str {
+    pub const fn trim(self: &str) str {
         let t = self.trim_start();
         return t.trim_end();
     }
@@ -159,7 +159,7 @@ extend str {
 
     // Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.
     // (Assumes valid UTF-8; pair with `is_valid_utf8` if the source is untrusted.)
-    pub fn char_count(self: &str) usize {
+    pub const fn char_count(self: &str) usize {
         let mut count: usize = 0;
         for i in 0..self.len {
             if (unsafe self.ptr[i] & 0xC0) != 0x80 {
@@ -172,7 +172,7 @@ extend str {
     // True if the bytes are structurally well-formed UTF-8: every leading byte announces a 1-4 byte
     // sequence that fits and whose tail bytes are all 0b10xxxxxx continuations. (Structural only --
     // it does not reject overlong encodings or surrogate-range scalars.)
-    pub fn is_valid_utf8(self: &str) bool {
+    pub const fn is_valid_utf8(self: &str) bool {
         let mut i: usize = 0;
         while i < self.len {
             let b = unsafe self.ptr[i];
@@ -212,7 +212,7 @@ extend str {
 // Standard-interface conformances. `eq`/`cmp` take `other: &str` (the `&Self` convention), so `str` works
 // behind `T: Eq`/`T: Ord` bounds and the `==`/`<` operators dispatch to it.
 extend str as Eq {
-    pub fn eq(self: &str, other: &str) bool {
+    pub const fn eq(self: &str, other: &str) bool {
         if self.len != other.len {
             return false;
         }
@@ -226,7 +226,7 @@ extend str as Eq {
 extend str as Ord {
     // Lexicographic byte comparison: <0 if self < other, 0 if equal, >0 if self > other. Shorter strings
     // sort before longer ones sharing their prefix.
-    pub fn cmp(self: &str, other: &str) i32 {
+    pub const fn cmp(self: &str, other: &str) i32 {
         let mut n = self.len;
         if other.len < n {
             n = other.len;
@@ -249,7 +249,7 @@ extend str as Ord {
 
 extend str as Hash {
     // 64-bit FNV-1a over the bytes (matching String::hash, so a `str` and an equal `String` hash alike).
-    pub fn hash(self: &str) u64 {
+    pub const fn hash(self: &str) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..self.len {
             h = (h ^ (unsafe self.ptr[i]) as u64) * 0x100000001b3;
@@ -260,7 +260,7 @@ extend str as Hash {
 
 extend str as Default {
     // The empty view (a null, zero-length `str`).
-    pub fn default() str {
+    pub const fn default() str {
         return str { ptr: null, len: 0 };
     }
 }
@@ -270,13 +270,13 @@ extend str as Default {
 // the caller keeps the bounds within `len` and on UTF-8 boundaries, exactly like `byte_at`/`slice`.
 // No IndexMut: a `str` is a read-only view.
 extend str as Index<u8, str> {
-    pub fn index(self: &str, i: usize) &u8 {
+    pub const fn index(self: &str, i: usize) &u8 {
         if i >= self.len() {
             panic("str[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
-    pub fn index_range(self: &str, r: Range<usize>) str {
+    pub const fn index_range(self: &str, r: Range<usize>) str {
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -316,25 +316,25 @@ pub struct Lines {
 
 extend str {
     // Iterate the raw bytes (`u8`).
-    pub fn bytes(self: &str) Bytes {
+    pub const fn bytes(self: &str) Bytes {
         return Bytes { s: self.slice(0, self.len), i: 0 };
     }
 
     // Iterate Unicode scalar values (`u32` code points), decoding UTF-8. Assumes valid UTF-8; a
     // malformed leading byte yields U+FFFD and advances one byte.
-    pub fn chars(self: &str) Chars {
+    pub const fn chars(self: &str) Chars {
         return Chars { s: self.slice(0, self.len), i: 0 };
     }
 
     // Iterate the sub-views separated by `sep`. An empty `sep` yields the whole view once; adjacent or
     // edge separators produce empty views.
-    pub fn split(self: &str, sep: str) Split {
+    pub const fn split(self: &str, sep: str) Split {
         return Split { s: self.slice(0, self.len), i: 0, sep: sep };
     }
 
     // Iterate lines split on '\n', dropping a trailing '\r' (so "\r\n" works). A final newline does not
     // yield a trailing empty line.
-    pub fn lines(self: &str) Lines {
+    pub const fn lines(self: &str) Lines {
         return Lines { s: self.slice(0, self.len), i: 0 };
     }
 
@@ -343,7 +343,7 @@ extend str {
     // first). Radix forms accept 2..=36 with case-insensitive digits. Empty input, a stray sign,
     // an invalid digit, or overflow all yield `None`.
 
-    pub fn parse_u64_radix(self: &str, radix: u32) Option<u64> {
+    pub const fn parse_u64_radix(self: &str, radix: u32) Option<u64> {
         let mut start: usize = 0;
         if self.len > 0 && self.byte_at(0) == b'+' {
             start = 1;
@@ -351,7 +351,7 @@ extend str {
         return __str_digits_u64(self, radix, start);
     }
 
-    pub fn parse_i64_radix(self: &str, radix: u32) Option<i64> {
+    pub const fn parse_i64_radix(self: &str, radix: u32) Option<i64> {
         if self.len == 0 {
             return Option::<i64>::None;
         }
@@ -377,25 +377,25 @@ extend str {
         };
     }
 
-    pub fn parse_u64(self: &str) Option<u64> {
+    pub const fn parse_u64(self: &str) Option<u64> {
         return self.parse_u64_radix(10);
     }
-    pub fn parse_i64(self: &str) Option<i64> {
+    pub const fn parse_i64(self: &str) Option<i64> {
         return self.parse_i64_radix(10);
     }
-    pub fn parse_usize(self: &str) Option<usize> {
+    pub const fn parse_usize(self: &str) Option<usize> {
         return switch self.parse_u64() {
             Some(v) => Option::<usize>::Some(v as usize),
             None => Option::<usize>::None,
         };
     }
-    pub fn parse_isize(self: &str) Option<isize> {
+    pub const fn parse_isize(self: &str) Option<isize> {
         return switch self.parse_i64() {
             Some(v) => Option::<isize>::Some(v as isize),
             None => Option::<isize>::None,
         };
     }
-    pub fn parse_u32(self: &str) Option<u32> {
+    pub const fn parse_u32(self: &str) Option<u32> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 0xFFFF_FFFFu64 {
                 true => Option::<u32>::Some(v as u32),
@@ -404,7 +404,7 @@ extend str {
             None => Option::<u32>::None,
         };
     }
-    pub fn parse_u16(self: &str) Option<u16> {
+    pub const fn parse_u16(self: &str) Option<u16> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 65535 {
                 true => Option::<u16>::Some(v as u16),
@@ -413,7 +413,7 @@ extend str {
             None => Option::<u16>::None,
         };
     }
-    pub fn parse_u8(self: &str) Option<u8> {
+    pub const fn parse_u8(self: &str) Option<u8> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 255 {
                 true => Option::<u8>::Some(v as u8),
@@ -422,7 +422,7 @@ extend str {
             None => Option::<u8>::None,
         };
     }
-    pub fn parse_i32(self: &str) Option<i32> {
+    pub const fn parse_i32(self: &str) Option<i32> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -2_147_483_648 && v <= 2_147_483_647 {
                 true => Option::<i32>::Some(v as i32),
@@ -431,7 +431,7 @@ extend str {
             None => Option::<i32>::None,
         };
     }
-    pub fn parse_i16(self: &str) Option<i16> {
+    pub const fn parse_i16(self: &str) Option<i16> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -32_768 && v <= 32_767 {
                 true => Option::<i16>::Some(v as i16),
@@ -440,7 +440,7 @@ extend str {
             None => Option::<i16>::None,
         };
     }
-    pub fn parse_i8(self: &str) Option<i8> {
+    pub const fn parse_i8(self: &str) Option<i8> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -128 && v <= 127 {
                 true => Option::<i8>::Some(v as i8),
@@ -453,7 +453,7 @@ extend str {
     // Decimal float: `[+|-] digits [. digits] [(e|E) [+|-] digits]`. Computed as an integer mantissa
     // scaled by a power of ten -- exact for the common cases; the last ulp is not guaranteed for
     // extreme magnitudes.
-    pub fn parse_f64(self: &str) Option<f64> {
+    pub const fn parse_f64(self: &str) Option<f64> {
         let n = self.len;
         if n == 0 {
             return Option::<f64>::None;
@@ -545,7 +545,7 @@ extend str {
         return Option::<f64>::Some(v);
     }
 
-    pub fn parse_f32(self: &str) Option<f32> {
+    pub const fn parse_f32(self: &str) Option<f32> {
         return switch self.parse_f64() {
             Some(v) => Option::<f32>::Some(v as f32),
             None => Option::<f32>::None,
@@ -586,7 +586,7 @@ fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
 }
 
 extend Bytes as Iterator<u8> {
-    pub fn next(self: &mut Bytes) Option<u8> {
+    pub const fn next(self: &mut Bytes) Option<u8> {
         if self.i >= self.s.len() {
             return Option::<u8>::None;
         }
@@ -597,7 +597,7 @@ extend Bytes as Iterator<u8> {
 }
 
 extend Chars as Iterator<u32> {
-    pub fn next(self: &mut Chars) Option<u32> {
+    pub const fn next(self: &mut Chars) Option<u32> {
         if self.i >= self.s.len() {
             return Option::<u32>::None;
         }
@@ -641,7 +641,7 @@ extend Chars as Iterator<u32> {
 }
 
 extend Split as Iterator<str> {
-    pub fn next(self: &mut Split) Option<str> {
+    pub const fn next(self: &mut Split) Option<str> {
         if self.i > self.s.len() {
             return Option::<str>::None;
         }
@@ -665,7 +665,7 @@ extend Split as Iterator<str> {
 }
 
 extend Lines as Iterator<str> {
-    pub fn next(self: &mut Lines) Option<str> {
+    pub const fn next(self: &mut Lines) Option<str> {
         if self.i >= self.s.len() {
             return Option::<str>::None;
         }

@@ -191,7 +191,7 @@ pub struct RecvSubst {
 }
 
 // --- span helpers -------------------------------------------------------------------------------
-fn span_is(src: str, s: tok::Span, lit: str) bool {
+const fn span_is(src: str, s: tok::Span, lit: str) bool {
     let n = lit.len();
     if (s.end - s.start) as usize != n {
         return false;
@@ -199,7 +199,7 @@ fn span_is(src: str, s: tok::Span, lit: str) bool {
     return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), n) == 0;
 }
 
-fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
+const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
     let la = a.end - a.start;
     if la != b.end - b.start {
         return false;
@@ -207,7 +207,7 @@ fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
     return unsafe cstring::memcmp(sa.ptr() + a.start as usize, sb.ptr() + b.start as usize, la as usize) == 0;
 }
 
-fn builtin_name(b: BuiltinType) str {
+const fn builtin_name(b: BuiltinType) str {
     if b == BuiltinType::BT_BOOL {
         return "bool";
     }
@@ -262,7 +262,7 @@ fn builtin_name(b: BuiltinType) str {
     return "void";
 }
 
-fn builtin_of(src: str, s: tok::Span) i32 {
+const fn builtin_of(src: str, s: tok::Span) i32 {
     for i in 0..BuiltinType::BT_COUNT as i32 {
         if span_is(src, s, builtin_name(i as BuiltinType)) {
             return i;
@@ -271,17 +271,17 @@ fn builtin_of(src: str, s: tok::Span) i32 {
     return -1;
 }
 
-fn bt_is_int(b: BuiltinType) bool {
+const fn bt_is_int(b: BuiltinType) bool {
     return b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8;
 }
-fn bt_is_float(b: BuiltinType) bool {
+const fn bt_is_float(b: BuiltinType) bool {
     return b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
 }
-fn bt_is_complex(b: BuiltinType) bool {
+const fn bt_is_complex(b: BuiltinType) bool {
     return b == BuiltinType::BT_C32 || b == BuiltinType::BT_C64;
 }
 
-fn bt_int_max(b: BuiltinType) u64 {
+const fn bt_int_max(b: BuiltinType) u64 {
     if b == BuiltinType::BT_I8 {
         return 127u64;
     }
@@ -306,7 +306,7 @@ fn bt_int_max(b: BuiltinType) u64 {
     return 0u64; // u64/usize
 }
 
-fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool) bool {
+const fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool) bool {
     let mx = bt_int_max(b);
     if neg {
         let sgn = b == BuiltinType::BT_I8 || b == BuiltinType::BT_I16 || b == BuiltinType::BT_I32 || b == BuiltinType::BT_I64 || b == BuiltinType::BT_ISIZE;
@@ -316,7 +316,7 @@ fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool) bool {
 }
 
 // Implicit lossless numeric widening.
-fn bt_widens(from: BuiltinType, to: BuiltinType) bool {
+const fn bt_widens(from: BuiltinType, to: BuiltinType) bool {
     if from == BuiltinType::BT_F32 && to == BuiltinType::BT_F64 {
         return true;
     }
@@ -342,7 +342,7 @@ fn bt_widens(from: BuiltinType, to: BuiltinType) bool {
 }
 
 // Shared integer-literal base-prefix detection: returns (base, prefix chars consumed).
-fn lit_base_prefix(p: *const u8, len: usize) (u64, usize) {
+const fn lit_base_prefix(p: *const u8, len: usize) (u64, usize) {
     if len >= 2 && unsafe p[0] == b'0' {
         let c1 = unsafe p[1] | 0x20u8;
         if c1 == b'x' {
@@ -1149,7 +1149,7 @@ extend TypeChecker {
     }
 }
 
-fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
+const fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
     if c {
         return a;
     }
@@ -10176,7 +10176,7 @@ fn if_bool(c: bool, a: bool, b: bool) bool {
     }
     return b;
 }
-fn if_u32(c: bool, a: u32, b: u32) u32 {
+const fn if_u32(c: bool, a: u32, b: u32) u32 {
     if c {
         return a;
     }

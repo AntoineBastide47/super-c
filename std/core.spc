@@ -92,12 +92,12 @@ pub fn panic(msg: str) {
 }
 
 extend i8 as Eq {
-    pub fn eq(self: &i8, other: &i8) bool {
+    pub const fn eq(self: &i8, other: &i8) bool {
         return *self == *other;
     }
 }
 extend i8 as Ord {
-    pub fn cmp(self: &i8, other: &i8) i32 {
+    pub const fn cmp(self: &i8, other: &i8) i32 {
         if *self < *other {
             return -1;
         }
@@ -108,17 +108,17 @@ extend i8 as Ord {
     }
 }
 extend i8 as Hash {
-    pub fn hash(self: &i8) u64 {
+    pub const fn hash(self: &i8) u64 {
         return (*self) as u64;
     }
 }
 extend i8 as Clone {
-    pub fn clone(self: &i8) i8 {
+    pub const fn clone(self: &i8) i8 {
         return *self;
     }
 }
 extend i8 as Default {
-    pub fn default() i8 {
+    pub const fn default() i8 {
         return 0;
     }
 }
@@ -128,12 +128,12 @@ extend i8 as Free {
 extend i8 as Copy {}
 
 extend i16 as Eq {
-    pub fn eq(self: &i16, other: &i16) bool {
+    pub const fn eq(self: &i16, other: &i16) bool {
         return *self == *other;
     }
 }
 extend i16 as Ord {
-    pub fn cmp(self: &i16, other: &i16) i32 {
+    pub const fn cmp(self: &i16, other: &i16) i32 {
         if *self < *other {
             return -1;
         }
@@ -144,17 +144,17 @@ extend i16 as Ord {
     }
 }
 extend i16 as Hash {
-    pub fn hash(self: &i16) u64 {
+    pub const fn hash(self: &i16) u64 {
         return (*self) as u64;
     }
 }
 extend i16 as Clone {
-    pub fn clone(self: &i16) i16 {
+    pub const fn clone(self: &i16) i16 {
         return *self;
     }
 }
 extend i16 as Default {
-    pub fn default() i16 {
+    pub const fn default() i16 {
         return 0;
     }
 }
@@ -164,12 +164,12 @@ extend i16 as Free {
 extend i16 as Copy {}
 
 extend i32 as Eq {
-    pub fn eq(self: &i32, other: &i32) bool {
+    pub const fn eq(self: &i32, other: &i32) bool {
         return *self == *other;
     }
 }
 extend i32 as Ord {
-    pub fn cmp(self: &i32, other: &i32) i32 {
+    pub const fn cmp(self: &i32, other: &i32) i32 {
         if *self < *other {
             return -1;
         }
@@ -180,17 +180,17 @@ extend i32 as Ord {
     }
 }
 extend i32 as Hash {
-    pub fn hash(self: &i32) u64 {
+    pub const fn hash(self: &i32) u64 {
         return (*self) as u64;
     }
 }
 extend i32 as Clone {
-    pub fn clone(self: &i32) i32 {
+    pub const fn clone(self: &i32) i32 {
         return *self;
     }
 }
 extend i32 as Default {
-    pub fn default() i32 {
+    pub const fn default() i32 {
         return 0;
     }
 }
@@ -200,12 +200,12 @@ extend i32 as Free {
 extend i32 as Copy {}
 
 extend i64 as Eq {
-    pub fn eq(self: &i64, other: &i64) bool {
+    pub const fn eq(self: &i64, other: &i64) bool {
         return *self == *other;
     }
 }
 extend i64 as Ord {
-    pub fn cmp(self: &i64, other: &i64) i32 {
+    pub const fn cmp(self: &i64, other: &i64) i32 {
         if *self < *other {
             return -1;
         }
@@ -216,17 +216,17 @@ extend i64 as Ord {
     }
 }
 extend i64 as Hash {
-    pub fn hash(self: &i64) u64 {
+    pub const fn hash(self: &i64) u64 {
         return (*self) as u64;
     }
 }
 extend i64 as Clone {
-    pub fn clone(self: &i64) i64 {
+    pub const fn clone(self: &i64) i64 {
         return *self;
     }
 }
 extend i64 as Default {
-    pub fn default() i64 {
+    pub const fn default() i64 {
         return 0;
     }
 }
@@ -236,12 +236,12 @@ extend i64 as Free {
 extend i64 as Copy {}
 
 extend isize as Eq {
-    pub fn eq(self: &isize, other: &isize) bool {
+    pub const fn eq(self: &isize, other: &isize) bool {
         return *self == *other;
     }
 }
 extend isize as Ord {
-    pub fn cmp(self: &isize, other: &isize) i32 {
+    pub const fn cmp(self: &isize, other: &isize) i32 {
         if *self < *other {
             return -1;
         }
@@ -252,17 +252,17 @@ extend isize as Ord {
     }
 }
 extend isize as Hash {
-    pub fn hash(self: &isize) u64 {
+    pub const fn hash(self: &isize) u64 {
         return (*self) as u64;
     }
 }
 extend isize as Clone {
-    pub fn clone(self: &isize) isize {
+    pub const fn clone(self: &isize) isize {
         return *self;
     }
 }
 extend isize as Default {
-    pub fn default() isize {
+    pub const fn default() isize {
         return 0;
     }
 }
@@ -272,12 +272,12 @@ extend isize as Free {
 extend isize as Copy {}
 
 extend u8 as Eq {
-    pub fn eq(self: &u8, other: &u8) bool {
+    pub const fn eq(self: &u8, other: &u8) bool {
         return *self == *other;
     }
 }
 extend u8 as Ord {
-    pub fn cmp(self: &u8, other: &u8) i32 {
+    pub const fn cmp(self: &u8, other: &u8) i32 {
         if *self < *other {
             return -1;
         }
@@ -288,17 +288,17 @@ extend u8 as Ord {
     }
 }
 extend u8 as Hash {
-    pub fn hash(self: &u8) u64 {
+    pub const fn hash(self: &u8) u64 {
         return (*self) as u64;
     }
 }
 extend u8 as Clone {
-    pub fn clone(self: &u8) u8 {
+    pub const fn clone(self: &u8) u8 {
         return *self;
     }
 }
 extend u8 as Default {
-    pub fn default() u8 {
+    pub const fn default() u8 {
         return 0;
     }
 }
@@ -308,12 +308,12 @@ extend u8 as Free {
 extend u8 as Copy {}
 
 extend u16 as Eq {
-    pub fn eq(self: &u16, other: &u16) bool {
+    pub const fn eq(self: &u16, other: &u16) bool {
         return *self == *other;
     }
 }
 extend u16 as Ord {
-    pub fn cmp(self: &u16, other: &u16) i32 {
+    pub const fn cmp(self: &u16, other: &u16) i32 {
         if *self < *other {
             return -1;
         }
@@ -324,17 +324,17 @@ extend u16 as Ord {
     }
 }
 extend u16 as Hash {
-    pub fn hash(self: &u16) u64 {
+    pub const fn hash(self: &u16) u64 {
         return (*self) as u64;
     }
 }
 extend u16 as Clone {
-    pub fn clone(self: &u16) u16 {
+    pub const fn clone(self: &u16) u16 {
         return *self;
     }
 }
 extend u16 as Default {
-    pub fn default() u16 {
+    pub const fn default() u16 {
         return 0;
     }
 }
@@ -344,12 +344,12 @@ extend u16 as Free {
 extend u16 as Copy {}
 
 extend u32 as Eq {
-    pub fn eq(self: &u32, other: &u32) bool {
+    pub const fn eq(self: &u32, other: &u32) bool {
         return *self == *other;
     }
 }
 extend u32 as Ord {
-    pub fn cmp(self: &u32, other: &u32) i32 {
+    pub const fn cmp(self: &u32, other: &u32) i32 {
         if *self < *other {
             return -1;
         }
@@ -360,17 +360,17 @@ extend u32 as Ord {
     }
 }
 extend u32 as Hash {
-    pub fn hash(self: &u32) u64 {
+    pub const fn hash(self: &u32) u64 {
         return (*self) as u64;
     }
 }
 extend u32 as Clone {
-    pub fn clone(self: &u32) u32 {
+    pub const fn clone(self: &u32) u32 {
         return *self;
     }
 }
 extend u32 as Default {
-    pub fn default() u32 {
+    pub const fn default() u32 {
         return 0;
     }
 }
@@ -380,12 +380,12 @@ extend u32 as Free {
 extend u32 as Copy {}
 
 extend u64 as Eq {
-    pub fn eq(self: &u64, other: &u64) bool {
+    pub const fn eq(self: &u64, other: &u64) bool {
         return *self == *other;
     }
 }
 extend u64 as Ord {
-    pub fn cmp(self: &u64, other: &u64) i32 {
+    pub const fn cmp(self: &u64, other: &u64) i32 {
         if *self < *other {
             return -1;
         }
@@ -396,17 +396,17 @@ extend u64 as Ord {
     }
 }
 extend u64 as Hash {
-    pub fn hash(self: &u64) u64 {
+    pub const fn hash(self: &u64) u64 {
         return *self;
     }
 }
 extend u64 as Clone {
-    pub fn clone(self: &u64) u64 {
+    pub const fn clone(self: &u64) u64 {
         return *self;
     }
 }
 extend u64 as Default {
-    pub fn default() u64 {
+    pub const fn default() u64 {
         return 0;
     }
 }
@@ -416,12 +416,12 @@ extend u64 as Free {
 extend u64 as Copy {}
 
 extend usize as Eq {
-    pub fn eq(self: &usize, other: &usize) bool {
+    pub const fn eq(self: &usize, other: &usize) bool {
         return *self == *other;
     }
 }
 extend usize as Ord {
-    pub fn cmp(self: &usize, other: &usize) i32 {
+    pub const fn cmp(self: &usize, other: &usize) i32 {
         if *self < *other {
             return -1;
         }
@@ -432,17 +432,17 @@ extend usize as Ord {
     }
 }
 extend usize as Hash {
-    pub fn hash(self: &usize) u64 {
+    pub const fn hash(self: &usize) u64 {
         return (*self) as u64;
     }
 }
 extend usize as Clone {
-    pub fn clone(self: &usize) usize {
+    pub const fn clone(self: &usize) usize {
         return *self;
     }
 }
 extend usize as Default {
-    pub fn default() usize {
+    pub const fn default() usize {
         return 0;
     }
 }
@@ -452,12 +452,12 @@ extend usize as Free {
 extend usize as Copy {}
 
 extend char as Eq {
-    pub fn eq(self: &char, other: &char) bool {
+    pub const fn eq(self: &char, other: &char) bool {
         return *self == *other;
     }
 }
 extend char as Ord {
-    pub fn cmp(self: &char, other: &char) i32 {
+    pub const fn cmp(self: &char, other: &char) i32 {
         if *self < *other {
             return -1;
         }
@@ -468,17 +468,17 @@ extend char as Ord {
     }
 }
 extend char as Hash {
-    pub fn hash(self: &char) u64 {
+    pub const fn hash(self: &char) u64 {
         return (*self) as u64;
     }
 }
 extend char as Clone {
-    pub fn clone(self: &char) char {
+    pub const fn clone(self: &char) char {
         return *self;
     }
 }
 extend char as Default {
-    pub fn default() char {
+    pub const fn default() char {
         return 0 as char;
     }
 }
@@ -488,12 +488,12 @@ extend char as Free {
 extend char as Copy {}
 
 extend bool as Eq {
-    pub fn eq(self: &bool, other: &bool) bool {
+    pub const fn eq(self: &bool, other: &bool) bool {
         return *self == *other;
     }
 }
 extend bool as Ord {
-    pub fn cmp(self: &bool, other: &bool) i32 {
+    pub const fn cmp(self: &bool, other: &bool) i32 {
         if *self < *other {
             return -1;
         }
@@ -504,17 +504,17 @@ extend bool as Ord {
     }
 }
 extend bool as Hash {
-    pub fn hash(self: &bool) u64 {
+    pub const fn hash(self: &bool) u64 {
         return (*self) as u64;
     }
 }
 extend bool as Clone {
-    pub fn clone(self: &bool) bool {
+    pub const fn clone(self: &bool) bool {
         return *self;
     }
 }
 extend bool as Default {
-    pub fn default() bool {
+    pub const fn default() bool {
         return false;
     }
 }
@@ -552,12 +552,12 @@ fn f64_total_key(x: f64) u64 {
 }
 
 extend f32 as Eq {
-    pub fn eq(self: &f32, other: &f32) bool {
+    pub const fn eq(self: &f32, other: &f32) bool {
         return f32_total_key(*self) == f32_total_key(*other);
     }
 }
 extend f32 as Ord {
-    pub fn cmp(self: &f32, other: &f32) i32 {
+    pub const fn cmp(self: &f32, other: &f32) i32 {
         let a = f32_total_key(*self);
         let b = f32_total_key(*other);
         if a < b {
@@ -570,17 +570,17 @@ extend f32 as Ord {
     }
 }
 extend f32 as Hash {
-    pub fn hash(self: &f32) u64 {
+    pub const fn hash(self: &f32) u64 {
         return f32_total_key(*self) as u64;
     }
 }
 extend f32 as Clone {
-    pub fn clone(self: &f32) f32 {
+    pub const fn clone(self: &f32) f32 {
         return *self;
     }
 }
 extend f32 as Default {
-    pub fn default() f32 {
+    pub const fn default() f32 {
         return 0.0;
     }
 }
@@ -590,12 +590,12 @@ extend f32 as Free {
 extend f32 as Copy {}
 
 extend f64 as Eq {
-    pub fn eq(self: &f64, other: &f64) bool {
+    pub const fn eq(self: &f64, other: &f64) bool {
         return f64_total_key(*self) == f64_total_key(*other);
     }
 }
 extend f64 as Ord {
-    pub fn cmp(self: &f64, other: &f64) i32 {
+    pub const fn cmp(self: &f64, other: &f64) i32 {
         let a = f64_total_key(*self);
         let b = f64_total_key(*other);
         if a < b {
@@ -608,17 +608,17 @@ extend f64 as Ord {
     }
 }
 extend f64 as Hash {
-    pub fn hash(self: &f64) u64 {
+    pub const fn hash(self: &f64) u64 {
         return f64_total_key(*self);
     }
 }
 extend f64 as Clone {
-    pub fn clone(self: &f64) f64 {
+    pub const fn clone(self: &f64) f64 {
         return *self;
     }
 }
 extend f64 as Default {
-    pub fn default() f64 {
+    pub const fn default() f64 {
         return 0.0;
     }
 }
@@ -628,12 +628,12 @@ extend f64 as Free {
 extend f64 as Copy {}
 
 extend c32 as Clone {
-    pub fn clone(self: &c32) c32 {
+    pub const fn clone(self: &c32) c32 {
         return *self;
     }
 }
 extend c32 as Default {
-    pub fn default() c32 {
+    pub const fn default() c32 {
         return 0.0 as c32;
     }
 }
@@ -643,12 +643,12 @@ extend c32 as Free {
 extend c32 as Copy {}
 
 extend c64 as Clone {
-    pub fn clone(self: &c64) c64 {
+    pub const fn clone(self: &c64) c64 {
         return *self;
     }
 }
 extend c64 as Default {
-    pub fn default() c64 {
+    pub const fn default() c64 {
         return 0.0 as c64;
     }
 }
@@ -658,13 +658,13 @@ extend c64 as Free {
 extend c64 as Copy {}
 
 extend i8 {
-    pub fn abs(self: i8) i8 {
+    pub const fn abs(self: i8) i8 {
         if self < 0 {
             return (0 - self as u8) as i8;
         }
         return self;
     } // unsigned negate: no MIN overflow
-    pub fn signum(self: i8) i8 {
+    pub const fn signum(self: i8) i8 {
         if self < 0 {
             return -1;
         }
@@ -673,25 +673,25 @@ extend i8 {
         }
         return 0;
     }
-    pub fn is_positive(self: i8) bool {
+    pub const fn is_positive(self: i8) bool {
         return self > 0;
     }
-    pub fn is_negative(self: i8) bool {
+    pub const fn is_negative(self: i8) bool {
         return self < 0;
     }
-    pub fn min(self: i8, other: i8) i8 {
+    pub const fn min(self: i8, other: i8) i8 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: i8, other: i8) i8 {
+    pub const fn max(self: i8, other: i8) i8 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: i8, min: i8, max: i8) i8 {
+    pub const fn clamp(self: i8, min: i8, max: i8) i8 {
         if self < min {
             return min;
         }
@@ -703,13 +703,13 @@ extend i8 {
 }
 
 extend i16 {
-    pub fn abs(self: i16) i16 {
+    pub const fn abs(self: i16) i16 {
         if self < 0 {
             return (0 - self as u16) as i16;
         }
         return self;
     } // unsigned negate: no MIN overflow
-    pub fn signum(self: i16) i16 {
+    pub const fn signum(self: i16) i16 {
         if self < 0 {
             return -1;
         }
@@ -718,25 +718,25 @@ extend i16 {
         }
         return 0;
     }
-    pub fn is_positive(self: i16) bool {
+    pub const fn is_positive(self: i16) bool {
         return self > 0;
     }
-    pub fn is_negative(self: i16) bool {
+    pub const fn is_negative(self: i16) bool {
         return self < 0;
     }
-    pub fn min(self: i16, other: i16) i16 {
+    pub const fn min(self: i16, other: i16) i16 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: i16, other: i16) i16 {
+    pub const fn max(self: i16, other: i16) i16 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: i16, min: i16, max: i16) i16 {
+    pub const fn clamp(self: i16, min: i16, max: i16) i16 {
         if self < min {
             return min;
         }
@@ -748,13 +748,13 @@ extend i16 {
 }
 
 extend i32 {
-    pub fn abs(self: i32) i32 {
+    pub const fn abs(self: i32) i32 {
         if self < 0 {
             return (0 - self as u32) as i32;
         }
         return self;
     } // unsigned negate: no MIN overflow
-    pub fn signum(self: i32) i32 {
+    pub const fn signum(self: i32) i32 {
         if self < 0 {
             return -1;
         }
@@ -763,25 +763,25 @@ extend i32 {
         }
         return 0;
     }
-    pub fn is_positive(self: i32) bool {
+    pub const fn is_positive(self: i32) bool {
         return self > 0;
     }
-    pub fn is_negative(self: i32) bool {
+    pub const fn is_negative(self: i32) bool {
         return self < 0;
     }
-    pub fn min(self: i32, other: i32) i32 {
+    pub const fn min(self: i32, other: i32) i32 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: i32, other: i32) i32 {
+    pub const fn max(self: i32, other: i32) i32 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: i32, min: i32, max: i32) i32 {
+    pub const fn clamp(self: i32, min: i32, max: i32) i32 {
         if self < min {
             return min;
         }
@@ -793,13 +793,13 @@ extend i32 {
 }
 
 extend i64 {
-    pub fn abs(self: i64) i64 {
+    pub const fn abs(self: i64) i64 {
         if self < 0 {
             return (0 - self as u64) as i64;
         }
         return self;
     } // unsigned negate: no MIN overflow
-    pub fn signum(self: i64) i64 {
+    pub const fn signum(self: i64) i64 {
         if self < 0 {
             return -1;
         }
@@ -808,25 +808,25 @@ extend i64 {
         }
         return 0;
     }
-    pub fn is_positive(self: i64) bool {
+    pub const fn is_positive(self: i64) bool {
         return self > 0;
     }
-    pub fn is_negative(self: i64) bool {
+    pub const fn is_negative(self: i64) bool {
         return self < 0;
     }
-    pub fn min(self: i64, other: i64) i64 {
+    pub const fn min(self: i64, other: i64) i64 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: i64, other: i64) i64 {
+    pub const fn max(self: i64, other: i64) i64 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: i64, min: i64, max: i64) i64 {
+    pub const fn clamp(self: i64, min: i64, max: i64) i64 {
         if self < min {
             return min;
         }
@@ -838,13 +838,13 @@ extend i64 {
 }
 
 extend isize {
-    pub fn abs(self: isize) isize {
+    pub const fn abs(self: isize) isize {
         if self < 0 {
             return (0 - self as usize) as isize;
         }
         return self;
     } // unsigned negate: no MIN overflow
-    pub fn signum(self: isize) isize {
+    pub const fn signum(self: isize) isize {
         if self < 0 {
             return -1;
         }
@@ -853,25 +853,25 @@ extend isize {
         }
         return 0;
     }
-    pub fn is_positive(self: isize) bool {
+    pub const fn is_positive(self: isize) bool {
         return self > 0;
     }
-    pub fn is_negative(self: isize) bool {
+    pub const fn is_negative(self: isize) bool {
         return self < 0;
     }
-    pub fn min(self: isize, other: isize) isize {
+    pub const fn min(self: isize, other: isize) isize {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: isize, other: isize) isize {
+    pub const fn max(self: isize, other: isize) isize {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: isize, min: isize, max: isize) isize {
+    pub const fn clamp(self: isize, min: isize, max: isize) isize {
         if self < min {
             return min;
         }
@@ -883,22 +883,22 @@ extend isize {
 }
 
 extend u8 {
-    pub fn is_power_of_two(self: u8) bool {
+    pub const fn is_power_of_two(self: u8) bool {
         return self != 0 && (self & self - 1) == 0;
     }
-    pub fn min(self: u8, other: u8) u8 {
+    pub const fn min(self: u8, other: u8) u8 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: u8, other: u8) u8 {
+    pub const fn max(self: u8, other: u8) u8 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: u8, min: u8, max: u8) u8 {
+    pub const fn clamp(self: u8, min: u8, max: u8) u8 {
         if self < min {
             return min;
         }
@@ -910,22 +910,22 @@ extend u8 {
 }
 
 extend u16 {
-    pub fn is_power_of_two(self: u16) bool {
+    pub const fn is_power_of_two(self: u16) bool {
         return self != 0 && (self & self - 1) == 0;
     }
-    pub fn min(self: u16, other: u16) u16 {
+    pub const fn min(self: u16, other: u16) u16 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: u16, other: u16) u16 {
+    pub const fn max(self: u16, other: u16) u16 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: u16, min: u16, max: u16) u16 {
+    pub const fn clamp(self: u16, min: u16, max: u16) u16 {
         if self < min {
             return min;
         }
@@ -937,22 +937,22 @@ extend u16 {
 }
 
 extend u32 {
-    pub fn is_power_of_two(self: u32) bool {
+    pub const fn is_power_of_two(self: u32) bool {
         return self != 0 && (self & self - 1) == 0;
     }
-    pub fn min(self: u32, other: u32) u32 {
+    pub const fn min(self: u32, other: u32) u32 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: u32, other: u32) u32 {
+    pub const fn max(self: u32, other: u32) u32 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: u32, min: u32, max: u32) u32 {
+    pub const fn clamp(self: u32, min: u32, max: u32) u32 {
         if self < min {
             return min;
         }
@@ -964,22 +964,22 @@ extend u32 {
 }
 
 extend u64 {
-    pub fn is_power_of_two(self: u64) bool {
+    pub const fn is_power_of_two(self: u64) bool {
         return self != 0 && (self & self - 1) == 0;
     }
-    pub fn min(self: u64, other: u64) u64 {
+    pub const fn min(self: u64, other: u64) u64 {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: u64, other: u64) u64 {
+    pub const fn max(self: u64, other: u64) u64 {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: u64, min: u64, max: u64) u64 {
+    pub const fn clamp(self: u64, min: u64, max: u64) u64 {
         if self < min {
             return min;
         }
@@ -991,22 +991,22 @@ extend u64 {
 }
 
 extend usize {
-    pub fn is_power_of_two(self: usize) bool {
+    pub const fn is_power_of_two(self: usize) bool {
         return self != 0 && (self & self - 1) == 0;
     }
-    pub fn min(self: usize, other: usize) usize {
+    pub const fn min(self: usize, other: usize) usize {
         if self < other {
             return self;
         }
         return other;
     }
-    pub fn max(self: usize, other: usize) usize {
+    pub const fn max(self: usize, other: usize) usize {
         if self > other {
             return self;
         }
         return other;
     }
-    pub fn clamp(self: usize, min: usize, max: usize) usize {
+    pub const fn clamp(self: usize, min: usize, max: usize) usize {
         if self < min {
             return min;
         }
@@ -1018,40 +1018,40 @@ extend usize {
 }
 
 extend f32 {
-    pub fn is_nan(self: f32) bool {
+    pub const fn is_nan(self: f32) bool {
         return self != self;
     }
-    pub fn is_infinite(self: f32) bool {
+    pub const fn is_infinite(self: f32) bool {
         return !self.is_nan() && self == 1.0 / 0.0 || self == -1.0 / 0.0;
     }
-    pub fn is_finite(self: f32) bool {
+    pub const fn is_finite(self: f32) bool {
         return !self.is_nan() && !self.is_infinite();
     }
-    pub fn is_sign_positive(self: f32) bool {
+    pub const fn is_sign_positive(self: f32) bool {
         return unsafe copysignf(1.0, self) > 0.0;
     }
-    pub fn is_sign_negative(self: f32) bool {
+    pub const fn is_sign_negative(self: f32) bool {
         return unsafe copysignf(1.0, self) < 0.0;
     }
-    pub fn abs(self: f32) f32 {
+    pub const fn abs(self: f32) f32 {
         return unsafe fabsf(self);
     }
-    pub fn signum(self: f32) f32 {
+    pub const fn signum(self: f32) f32 {
         if self.is_nan() {
             return self;
         }
         return unsafe copysignf(1.0, self);
     }
-    pub fn copysign(self: f32, sign: f32) f32 {
+    pub const fn copysign(self: f32, sign: f32) f32 {
         return unsafe copysignf(self, sign);
     }
-    pub fn min(self: f32, other: f32) f32 {
+    pub const fn min(self: f32, other: f32) f32 {
         return unsafe fminf(self, other);
     }
-    pub fn max(self: f32, other: f32) f32 {
+    pub const fn max(self: f32, other: f32) f32 {
         return unsafe fmaxf(self, other);
     }
-    pub fn clamp(self: f32, min: f32, max: f32) f32 {
+    pub const fn clamp(self: f32, min: f32, max: f32) f32 {
         if self < min {
             return min;
         }
@@ -1060,155 +1060,155 @@ extend f32 {
         }
         return self;
     }
-    pub fn floor(self: f32) f32 {
+    pub const fn floor(self: f32) f32 {
         return unsafe floorf(self);
     }
-    pub fn ceil(self: f32) f32 {
+    pub const fn ceil(self: f32) f32 {
         return unsafe ceilf(self);
     }
-    pub fn round(self: f32) f32 {
+    pub const fn round(self: f32) f32 {
         return unsafe roundf(self);
     }
-    pub fn trunc(self: f32) f32 {
+    pub const fn trunc(self: f32) f32 {
         return unsafe truncf(self);
     }
-    pub fn fract(self: f32) f32 {
+    pub const fn fract(self: f32) f32 {
         return self - unsafe truncf(self);
     }
-    pub fn recip(self: f32) f32 {
+    pub const fn recip(self: f32) f32 {
         return 1.0 / self;
     }
-    pub fn sqrt(self: f32) f32 {
+    pub const fn sqrt(self: f32) f32 {
         return unsafe sqrtf(self);
     }
-    pub fn cbrt(self: f32) f32 {
+    pub const fn cbrt(self: f32) f32 {
         return unsafe cbrtf(self);
     }
-    pub fn powf(self: f32, n: f32) f32 {
+    pub const fn powf(self: f32, n: f32) f32 {
         return unsafe powf(self, n);
     }
-    pub fn powi(self: f32, n: i32) f32 {
+    pub const fn powi(self: f32, n: i32) f32 {
         return unsafe powf(self, n as f32);
     }
-    pub fn exp(self: f32) f32 {
+    pub const fn exp(self: f32) f32 {
         return unsafe expf(self);
     }
-    pub fn exp2(self: f32) f32 {
+    pub const fn exp2(self: f32) f32 {
         return unsafe exp2f(self);
     }
-    pub fn exp_m1(self: f32) f32 {
+    pub const fn exp_m1(self: f32) f32 {
         return unsafe expm1f(self);
     }
-    pub fn ln(self: f32) f32 {
+    pub const fn ln(self: f32) f32 {
         return unsafe logf(self);
     }
-    pub fn log(self: f32, base: f32) f32 {
+    pub const fn log(self: f32, base: f32) f32 {
         return unsafe logf(self) / unsafe logf(base);
     }
-    pub fn log2(self: f32) f32 {
+    pub const fn log2(self: f32) f32 {
         return unsafe log2f(self);
     }
-    pub fn log10(self: f32) f32 {
+    pub const fn log10(self: f32) f32 {
         return unsafe log10f(self);
     }
-    pub fn ln_1p(self: f32) f32 {
+    pub const fn ln_1p(self: f32) f32 {
         return unsafe log1pf(self);
     }
-    pub fn hypot(self: f32, other: f32) f32 {
+    pub const fn hypot(self: f32, other: f32) f32 {
         return unsafe hypotf(self, other);
     }
-    pub fn sin(self: f32) f32 {
+    pub const fn sin(self: f32) f32 {
         return unsafe sinf(self);
     }
-    pub fn cos(self: f32) f32 {
+    pub const fn cos(self: f32) f32 {
         return unsafe cosf(self);
     }
-    pub fn tan(self: f32) f32 {
+    pub const fn tan(self: f32) f32 {
         return unsafe tanf(self);
     }
-    pub fn asin(self: f32) f32 {
+    pub const fn asin(self: f32) f32 {
         return unsafe asinf(self);
     }
-    pub fn acos(self: f32) f32 {
+    pub const fn acos(self: f32) f32 {
         return unsafe acosf(self);
     }
-    pub fn atan(self: f32) f32 {
+    pub const fn atan(self: f32) f32 {
         return unsafe atanf(self);
     }
-    pub fn atan2(self: f32, other: f32) f32 {
+    pub const fn atan2(self: f32, other: f32) f32 {
         return unsafe atan2f(self, other);
     }
-    pub fn sin_cos(self: f32) (f32, f32) {
+    pub const fn sin_cos(self: f32) (f32, f32) {
         return unsafe sinf(self), unsafe cosf(self);
     }
-    pub fn sinh(self: f32) f32 {
+    pub const fn sinh(self: f32) f32 {
         return unsafe sinhf(self);
     }
-    pub fn cosh(self: f32) f32 {
+    pub const fn cosh(self: f32) f32 {
         return unsafe coshf(self);
     }
-    pub fn tanh(self: f32) f32 {
+    pub const fn tanh(self: f32) f32 {
         return unsafe tanhf(self);
     }
-    pub fn asinh(self: f32) f32 {
+    pub const fn asinh(self: f32) f32 {
         return unsafe asinhf(self);
     }
-    pub fn acosh(self: f32) f32 {
+    pub const fn acosh(self: f32) f32 {
         return unsafe acoshf(self);
     }
-    pub fn atanh(self: f32) f32 {
+    pub const fn atanh(self: f32) f32 {
         return unsafe atanhf(self);
     }
-    pub fn mul_add(self: f32, a: f32, b: f32) f32 {
+    pub const fn mul_add(self: f32, a: f32, b: f32) f32 {
         return unsafe fmaf(self, a, b);
     }
     // IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
-    pub fn total_cmp(self: f32, other: f32) i32 {
+    pub const fn total_cmp(self: f32, other: f32) i32 {
         return self.cmp(&other);
     }
-    pub fn to_degrees(self: f32) f32 {
+    pub const fn to_degrees(self: f32) f32 {
         return self * 57.29577951308232;
     }
-    pub fn to_radians(self: f32) f32 {
+    pub const fn to_radians(self: f32) f32 {
         return self * 0.017453292519943295;
     }
 }
 
 extend f64 {
-    pub fn is_nan(self: f64) bool {
+    pub const fn is_nan(self: f64) bool {
         return self != self;
     }
-    pub fn is_infinite(self: f64) bool {
+    pub const fn is_infinite(self: f64) bool {
         return !self.is_nan() && self == 1.0 as f64 / 0.0 as f64 || self == (-1.0) as f64 / 0.0 as f64;
     }
-    pub fn is_finite(self: f64) bool {
+    pub const fn is_finite(self: f64) bool {
         return !self.is_nan() && !self.is_infinite();
     }
-    pub fn is_sign_positive(self: f64) bool {
+    pub const fn is_sign_positive(self: f64) bool {
         return unsafe copysign(1.0, self) > 0.0;
     }
-    pub fn is_sign_negative(self: f64) bool {
+    pub const fn is_sign_negative(self: f64) bool {
         return unsafe copysign(1.0, self) < 0.0;
     }
-    pub fn abs(self: f64) f64 {
+    pub const fn abs(self: f64) f64 {
         return unsafe fabs(self);
     }
-    pub fn signum(self: f64) f64 {
+    pub const fn signum(self: f64) f64 {
         if self.is_nan() {
             return self;
         }
         return unsafe copysign(1.0, self);
     }
-    pub fn copysign(self: f64, sign: f64) f64 {
+    pub const fn copysign(self: f64, sign: f64) f64 {
         return unsafe copysign(self, sign);
     }
-    pub fn min(self: f64, other: f64) f64 {
+    pub const fn min(self: f64, other: f64) f64 {
         return unsafe fmin(self, other);
     }
-    pub fn max(self: f64, other: f64) f64 {
+    pub const fn max(self: f64, other: f64) f64 {
         return unsafe fmax(self, other);
     }
-    pub fn clamp(self: f64, min: f64, max: f64) f64 {
+    pub const fn clamp(self: f64, min: f64, max: f64) f64 {
         if self < min {
             return min;
         }
@@ -1217,116 +1217,116 @@ extend f64 {
         }
         return self;
     }
-    pub fn floor(self: f64) f64 {
+    pub const fn floor(self: f64) f64 {
         return unsafe floor(self);
     }
-    pub fn ceil(self: f64) f64 {
+    pub const fn ceil(self: f64) f64 {
         return unsafe ceil(self);
     }
-    pub fn round(self: f64) f64 {
+    pub const fn round(self: f64) f64 {
         return unsafe round(self);
     }
-    pub fn trunc(self: f64) f64 {
+    pub const fn trunc(self: f64) f64 {
         return unsafe trunc(self);
     }
-    pub fn fract(self: f64) f64 {
+    pub const fn fract(self: f64) f64 {
         return self - unsafe trunc(self);
     }
-    pub fn recip(self: f64) f64 {
+    pub const fn recip(self: f64) f64 {
         return 1.0 / self;
     }
-    pub fn sqrt(self: f64) f64 {
+    pub const fn sqrt(self: f64) f64 {
         return unsafe sqrt(self);
     }
-    pub fn cbrt(self: f64) f64 {
+    pub const fn cbrt(self: f64) f64 {
         return unsafe cbrt(self);
     }
-    pub fn powf(self: f64, n: f64) f64 {
+    pub const fn powf(self: f64, n: f64) f64 {
         return unsafe pow(self, n);
     }
-    pub fn powi(self: f64, n: i32) f64 {
+    pub const fn powi(self: f64, n: i32) f64 {
         return unsafe pow(self, n as f64);
     }
-    pub fn exp(self: f64) f64 {
+    pub const fn exp(self: f64) f64 {
         return unsafe exp(self);
     }
-    pub fn exp2(self: f64) f64 {
+    pub const fn exp2(self: f64) f64 {
         return unsafe exp2(self);
     }
-    pub fn exp_m1(self: f64) f64 {
+    pub const fn exp_m1(self: f64) f64 {
         return unsafe expm1(self);
     }
-    pub fn ln(self: f64) f64 {
+    pub const fn ln(self: f64) f64 {
         return unsafe log(self);
     }
-    pub fn log(self: f64, base: f64) f64 {
+    pub const fn log(self: f64, base: f64) f64 {
         return unsafe log(self) / unsafe log(base);
     }
-    pub fn log2(self: f64) f64 {
+    pub const fn log2(self: f64) f64 {
         return unsafe log2(self);
     }
-    pub fn log10(self: f64) f64 {
+    pub const fn log10(self: f64) f64 {
         return unsafe log10(self);
     }
-    pub fn ln_1p(self: f64) f64 {
+    pub const fn ln_1p(self: f64) f64 {
         return unsafe log1p(self);
     }
-    pub fn hypot(self: f64, other: f64) f64 {
+    pub const fn hypot(self: f64, other: f64) f64 {
         return unsafe hypot(self, other);
     }
-    pub fn sin(self: f64) f64 {
+    pub const fn sin(self: f64) f64 {
         return unsafe sin(self);
     }
-    pub fn cos(self: f64) f64 {
+    pub const fn cos(self: f64) f64 {
         return unsafe cos(self);
     }
-    pub fn tan(self: f64) f64 {
+    pub const fn tan(self: f64) f64 {
         return unsafe tan(self);
     }
-    pub fn asin(self: f64) f64 {
+    pub const fn asin(self: f64) f64 {
         return unsafe asin(self);
     }
-    pub fn acos(self: f64) f64 {
+    pub const fn acos(self: f64) f64 {
         return unsafe acos(self);
     }
-    pub fn atan(self: f64) f64 {
+    pub const fn atan(self: f64) f64 {
         return unsafe atan(self);
     }
-    pub fn atan2(self: f64, other: f64) f64 {
+    pub const fn atan2(self: f64, other: f64) f64 {
         return unsafe atan2(self, other);
     }
-    pub fn sin_cos(self: f64) (f64, f64) {
+    pub const fn sin_cos(self: f64) (f64, f64) {
         return unsafe sin(self), unsafe cos(self);
     }
     // IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
-    pub fn total_cmp(self: f64, other: f64) i32 {
+    pub const fn total_cmp(self: f64, other: f64) i32 {
         return self.cmp(&other);
     }
-    pub fn sinh(self: f64) f64 {
+    pub const fn sinh(self: f64) f64 {
         return unsafe sinh(self);
     }
-    pub fn cosh(self: f64) f64 {
+    pub const fn cosh(self: f64) f64 {
         return unsafe cosh(self);
     }
-    pub fn tanh(self: f64) f64 {
+    pub const fn tanh(self: f64) f64 {
         return unsafe tanh(self);
     }
-    pub fn asinh(self: f64) f64 {
+    pub const fn asinh(self: f64) f64 {
         return unsafe asinh(self);
     }
-    pub fn acosh(self: f64) f64 {
+    pub const fn acosh(self: f64) f64 {
         return unsafe acosh(self);
     }
-    pub fn atanh(self: f64) f64 {
+    pub const fn atanh(self: f64) f64 {
         return unsafe atanh(self);
     }
-    pub fn mul_add(self: f64, a: f64, b: f64) f64 {
+    pub const fn mul_add(self: f64, a: f64, b: f64) f64 {
         return unsafe fma(self, a, b);
     }
-    pub fn to_degrees(self: f64) f64 {
+    pub const fn to_degrees(self: f64) f64 {
         return self * 57.29577951308232;
     }
-    pub fn to_radians(self: f64) f64 {
+    pub const fn to_radians(self: f64) f64 {
         return self * 0.017453292519943295;
     }
 }

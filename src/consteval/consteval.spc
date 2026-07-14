@@ -71,7 +71,7 @@ pub const FX_MAYBE: u8 = 2;
 pub const FX_NO: u8 = 3;
 pub const FX_ONSTACK: u8 = 4;
 
-fn fx_meet(a: u8, b: u8) u8 {
+const fn fx_meet(a: u8, b: u8) u8 {
     if a == FX_NO || b == FX_NO {
         return FX_NO;
     }
@@ -198,7 +198,7 @@ pub struct CeRecv {
     pub at: [TypeId; 4],
 }
 
-fn ce_recv_zero() CeRecv {
+const fn ce_recv_zero() CeRecv {
     return CeRecv { dn: NODE_NONE, b: BuiltinType::BT_COUNT };
 }
 
@@ -376,13 +376,13 @@ pub struct OvfRes {
 
 // --- scalar helpers (no ce state) ---------------------------------------------------------------
 
-fn bt_signed(b: BuiltinType) bool {
+const fn bt_signed(b: BuiltinType) bool {
     return b == BuiltinType::BT_I8 || b == BuiltinType::BT_I16 || b == BuiltinType::BT_I32 || b == BuiltinType::BT_I64 || b == BuiltinType::BT_ISIZE;
 }
-fn bt_unsigned(b: BuiltinType) bool {
+const fn bt_unsigned(b: BuiltinType) bool {
     return b == BuiltinType::BT_U8 || b == BuiltinType::BT_U16 || b == BuiltinType::BT_U32 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_USIZE || b == BuiltinType::BT_CHAR;
 }
-fn bt_bits(b: BuiltinType) i32 {
+const fn bt_bits(b: BuiltinType) i32 {
     if b == BuiltinType::BT_BOOL || b == BuiltinType::BT_CHAR || b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 {
         return 8;
     }
@@ -395,7 +395,7 @@ fn bt_bits(b: BuiltinType) i32 {
     return 64;
 }
 
-fn wrap_to(b: BuiltinType, v: i64) i64 {
+const fn wrap_to(b: BuiltinType, v: i64) i64 {
     let bits = bt_bits(b);
     if bits == 64 {
         return v;
@@ -408,24 +408,24 @@ fn wrap_to(b: BuiltinType, v: i64) i64 {
     return u as i64;
 }
 
-fn fits(b: BuiltinType, v: i64) bool {
+const fn fits(b: BuiltinType, v: i64) bool {
     return wrap_to(b, v) == v;
 }
 
-fn ce_isfinite(x: f64) bool {
+const fn ce_isfinite(x: f64) bool {
     return unsafe math::fabs(x) <= F64_MAX;
 }
 
 // non-trapping (u64-wrapping) checked signed arithmetic; ovf=true means the result overflows i64
-fn add_ovf(a: i64, b: i64) OvfRes {
+const fn add_ovf(a: i64, b: i64) OvfRes {
     let s = (a as u64 + b as u64) as i64;
     return OvfRes { ovf: ((a ^ s) & (b ^ s)) < 0, v: s };
 }
-fn sub_ovf(a: i64, b: i64) OvfRes {
+const fn sub_ovf(a: i64, b: i64) OvfRes {
     let d = (a as u64 - b as u64) as i64;
     return OvfRes { ovf: ((a ^ b) & (a ^ d)) < 0, v: d };
 }
-fn mul_ovf(a: i64, b: i64) OvfRes {
+const fn mul_ovf(a: i64, b: i64) OvfRes {
     let p = (a as u64 * b as u64) as i64;
     let mut ovf = false;
     if a > 0 {
@@ -608,13 +608,13 @@ extend ConstEval {
     }
 }
 
-fn if_default_steps(s: u32) u32 {
+const fn if_default_steps(s: u32) u32 {
     if s != 0 {
         return s;
     }
     return CE_DEFAULT_STEPS;
 }
-fn if_default_slots(b: u64) u64 {
+const fn if_default_slots(b: u64) u64 {
     if b != 0 {
         let s = b / sizeof(CeVal) as u64;
         if s != 0 {
@@ -636,14 +636,14 @@ fn type_builtin(a: *const Ast, t: TypeId) BuiltinType {
     return BuiltinType::BT_COUNT;
 }
 
-fn round_up(v: u64, a: u64) u64 {
+const fn round_up(v: u64, a: u64) u64 {
     if a != 0 {
         return (v + a - 1) / a * a;
     }
     return v;
 }
 
-fn hexval(ch: u8) i32 {
+const fn hexval(ch: u8) i32 {
     if ch >= b'0' && ch <= b'9' {
         return (ch - b'0') as i32;
     }
@@ -2131,7 +2131,7 @@ fn cv_scalar_of(v: ConstValue, m: ModuleId) CeVal {
 }
 
 // C's usual arithmetic conversions for two integer operands.
-fn ce_arith_common(a: BuiltinType, b: BuiltinType) BuiltinType {
+const fn ce_arith_common(a: BuiltinType, b: BuiltinType) BuiltinType {
     if a == BuiltinType::BT_COUNT || b == BuiltinType::BT_COUNT {
         if a == BuiltinType::BT_COUNT {
             return b;
@@ -3289,7 +3289,7 @@ extend ConstEval {
     }
 }
 
-fn if_i64(c: bool, a: i64, b: i64) i64 {
+const fn if_i64(c: bool, a: i64, b: i64) i64 {
     if c {
         return a;
     }
@@ -4497,13 +4497,13 @@ extend ConstEval {
     }
 }
 
-fn if_i32(c: bool, a: i32, b: i32) i32 {
+const fn if_i32(c: bool, a: i32, b: i32) i32 {
     if c {
         return a;
     }
     return b;
 }
-fn if_bool(c: bool, a: bool, b: bool) bool {
+const fn if_bool(c: bool, a: bool, b: bool) bool {
     if c {
         return a;
     }
@@ -4516,7 +4516,7 @@ fn xfail(f: *mut CeFrame) Flow {
     return Flow::Bail;
 }
 
-fn compound_op(op: TokenType) TokenType {
+const fn compound_op(op: TokenType) TokenType {
     if op == TokenType::PlusEqual {
         return TokenType::Plus;
     }
@@ -4566,7 +4566,7 @@ fn cv_pub(v: CeVal) ConstValue {
     return ce_none();
 }
 
-fn cv_is_scalar(v: CeVal) bool {
+const fn cv_is_scalar(v: CeVal) bool {
     return v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT;
 }
 
@@ -6682,7 +6682,7 @@ extend ConstEval {
     }
 }
 
-fn if_u8(c: bool, a: u8, b: u8) u8 {
+const fn if_u8(c: bool, a: u8, b: u8) u8 {
     if c {
         return a;
     }
@@ -6705,7 +6705,7 @@ extend ConstEval as Free {
     }
 }
 
-fn libm1(name: str, x: f64) DblRes {
+const fn libm1(name: str, x: f64) DblRes {
     if name == "sqrt" {
         return DblRes { ok: true, v: unsafe math::sqrt(x) };
     }
@@ -6787,7 +6787,7 @@ fn libm1(name: str, x: f64) DblRes {
     return DblRes { ok: false, v: 0.0 };
 }
 
-fn libm2(name: str, x: f64, y: f64) DblRes {
+const fn libm2(name: str, x: f64, y: f64) DblRes {
     if name == "pow" {
         return DblRes { ok: true, v: unsafe math::pow(x, y) };
     }
