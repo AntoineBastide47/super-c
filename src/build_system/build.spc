@@ -404,7 +404,6 @@ fn engine_build(
                 }
                 let mut dir = String::from_str(full.slice(0, k - 1));
                 mkdirs(dir.as_str());
-                print("  CC    {}\n", rel);
                 let mut log = opath.clone();
                 log.push_str(".log");
                 let mut cmd = cc.clone();
@@ -454,7 +453,6 @@ fn engine_build(
                 }
             }
             if need {
-                print("  LINK  {}\n", bin);
                 let mut tmp = String::from_str(bin);
                 tmp.push_str(".tmp");
                 let mut cmd = cc.clone();
