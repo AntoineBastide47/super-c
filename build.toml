@@ -17,3 +17,9 @@ run = [
     "./super-c bench --no-run",
     "samply record --rate 1000 build/bench-bin",
 ]
+
+# The bench profile mirrors the shipped compiler's LTO: without it, cross-TU accessor calls
+# (Ast::at_const, Vector::len, str helpers) stay out-of-line and inflate their cost ~37%.
+[profile.bench]
+cflags = ["-O2", "-g", "-fno-omit-frame-pointer", "-flto=auto"]
+ldflags = ["-flto=auto"]
