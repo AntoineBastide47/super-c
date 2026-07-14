@@ -8,42 +8,42 @@ pub struct Set<T, A = Global> {
 
 extend<T: Hash + Eq, A: Allocator> Set<T, A> {
     // Empty set backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
-    pub fn new_in(alloc: A) Set<T, A> {
+    pub const fn new_in(alloc: A) Set<T, A> {
         return Set::<T, A> { m: Map::<T, bool, A>::new_in(alloc) };
     }
 
-    pub fn len(self: &Set<T, A>) usize {
+    pub const fn len(self: &Set<T, A>) usize {
         return self.m.len();
     }
 
-    pub fn is_empty(self: &Set<T, A>) bool {
+    pub const fn is_empty(self: &Set<T, A>) bool {
         return self.m.is_empty();
     }
 
     // Insert `value`. A duplicate (per Eq) is freed by Map::insert, and the stored element is kept.
-    pub fn insert(self: &mut Set<T, A>, value: T) {
+    pub const fn insert(self: &mut Set<T, A>, value: T) {
         self.m.insert(value, true);
     }
 
-    pub fn contains(self: &Set<T, A>, value: &T) bool {
+    pub const fn contains(self: &Set<T, A>, value: &T) bool {
         return self.m.contains_key(value);
     }
 
     // Remove `value`, freeing the stored element; reports whether it was present.
-    pub fn remove(self: &mut Set<T, A>, value: &T) bool {
+    pub const fn remove(self: &mut Set<T, A>, value: &T) bool {
         let removed = self.m.remove(value);
         return removed.is_some();
     }
 
     // A borrowing cursor over the elements (`&T`); `for x in s.iter() { .. }`. Arbitrary order.
-    pub fn iter(self: &Set<T, A>) MapKeys<T> {
+    pub const fn iter(self: &Set<T, A>) MapKeys<T> {
         return self.m.keys();
     }
 }
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T: Hash + Eq, A: Allocator + Default> Set<T, A> {
-    pub fn new() Set<T, A> {
+    pub const fn new() Set<T, A> {
         return Set::<T, A>::new_in(A::default());
     }
 }
@@ -56,7 +56,7 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> as Free {
 }
 
 extend<T: Hash + Eq + Default, A: Allocator + Default> Set<T, A> as Default {
-    pub fn default() Set<T, A> {
+    pub const fn default() Set<T, A> {
         return Set::<T, A>::new();
     }
 }

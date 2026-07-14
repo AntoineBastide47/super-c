@@ -20,15 +20,15 @@ pub struct Map<K, V, A = Global> {
 
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     // Empty map backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
-    pub fn new_in(alloc: A) Map<K, V, A> {
+    pub const fn new_in(alloc: A) Map<K, V, A> {
         return Map::<K, V, A> { keys: null, vals: null, used: null, len: 0, cap: 0, alloc: alloc };
     }
 
-    pub fn len(self: &Map<K, V, A>) usize {
+    pub const fn len(self: &Map<K, V, A>) usize {
         return self.len;
     }
 
-    pub fn is_empty(self: &Map<K, V, A>) bool {
+    pub const fn is_empty(self: &Map<K, V, A>) bool {
         return self.len == 0;
     }
 
@@ -81,7 +81,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
 
     // Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
     // replaced value are freed (no-ops for non-Free types). Takes ownership of `key` and `value`.
-    pub fn insert(self: &mut Map<K, V, A>, key: K, value: V) {
+    pub const fn insert(self: &mut Map<K, V, A>, key: K, value: V) {
         if self.cap == 0 || (self.len + 1) * 4 >= self.cap * 3 {
             // grow past a 0.75 load factor
             self.grow();
@@ -99,7 +99,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     }
 
     // A borrow of the value for `key`, or `None`. Borrowing (`&V`) keeps the Map the sole owner.
-    pub fn get(self: &Map<K, V, A>, key: &K) Option<&V> {
+    pub const fn get(self: &Map<K, V, A>, key: &K) Option<&V> {
         if self.cap == 0 {
             return Option::<&V>::None;
         }
@@ -110,13 +110,13 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         return Option::<&V>::Some(&unsafe self.vals[i]);
     }
 
-    pub fn contains_key(self: &Map<K, V, A>, key: &K) bool {
+    pub const fn contains_key(self: &Map<K, V, A>, key: &K) bool {
         return self.get(key).is_some();
     }
 
     // Remove `key`, returning its value (`None` if absent). Re-inserts the rest of the probe cluster so no
     // lookup is cut short (backward-shift deletion -- no tombstones).
-    pub fn remove(self: &mut Map<K, V, A>, key: &K) Option<V> {
+    pub const fn remove(self: &mut Map<K, V, A>, key: &K) Option<V> {
         if self.cap == 0 {
             return Option::<V>::None;
         }
@@ -148,7 +148,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<K: Hash + Eq, V, A: Allocator + Default> Map<K, V, A> {
-    pub fn new() Map<K, V, A> {
+    pub const fn new() Map<K, V, A> {
         return Map::<K, V, A>::new_in(A::default());
     }
 }
@@ -176,7 +176,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
 }
 
 extend<K: Hash + Eq + Default, V: Default, A: Allocator + Default> Map<K, V, A> as Default {
-    pub fn default() Map<K, V, A> {
+    pub const fn default() Map<K, V, A> {
         return Map::<K, V, A>::new();
     }
 }
@@ -199,18 +199,18 @@ pub struct MapValues<V> {
 
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     // A cursor over the keys (`&K`).
-    pub fn keys(self: &Map<K, V, A>) MapKeys<K> {
+    pub const fn keys(self: &Map<K, V, A>) MapKeys<K> {
         return MapKeys::<K> { keys: self.keys as *const K, used: self.used as *const u8, idx: 0, cap: self.cap };
     }
 
     // A cursor over the values (`&V`).
-    pub fn values(self: &Map<K, V, A>) MapValues<V> {
+    pub const fn values(self: &Map<K, V, A>) MapValues<V> {
         return MapValues::<V> { vals: self.vals as *const V, used: self.used as *const u8, idx: 0, cap: self.cap };
     }
 }
 
 extend<K> MapKeys<K> as Iterator<&K> {
-    pub fn next(self: &mut MapKeys<K>) Option<&K> {
+    pub const fn next(self: &mut MapKeys<K>) Option<&K> {
         while self.idx < self.cap {
             let i = self.idx;
             self.idx = self.idx + 1;
@@ -223,7 +223,7 @@ extend<K> MapKeys<K> as Iterator<&K> {
 }
 
 extend<V> MapValues<V> as Iterator<&V> {
-    pub fn next(self: &mut MapValues<V>) Option<&V> {
+    pub const fn next(self: &mut MapValues<V>) Option<&V> {
         while self.idx < self.cap {
             let i = self.idx;
             self.idx = self.idx + 1;

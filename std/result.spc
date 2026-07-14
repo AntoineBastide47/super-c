@@ -10,22 +10,22 @@ pub enum Result<T, E> {
 }
 
 extend<T, E> Result<T, E> {
-    pub fn ok(value: T) Result<T, E> {
+    pub const fn ok(value: T) Result<T, E> {
         return Result::<T, E>::Ok(value);
     }
 
-    pub fn err(error: E) Result<T, E> {
+    pub const fn err(error: E) Result<T, E> {
         return Result::<T, E>::Err(error);
     }
 
-    pub fn is_ok(self: &Result<T, E>) bool {
+    pub const fn is_ok(self: &Result<T, E>) bool {
         return switch self {
             Ok(_) => true,
             Err(_) => false,
         };
     }
 
-    pub fn is_err(self: &Result<T, E>) bool {
+    pub const fn is_err(self: &Result<T, E>) bool {
         return switch self {
             Ok(_) => false,
             Err(_) => true,
@@ -34,7 +34,7 @@ extend<T, E> Result<T, E> {
 
     // The success value; panics on `Err`. Consumes `self`. A panic aborts the process with no
     // unwinding, so the discarded payload is never cleaned up.
-    pub fn unwrap(self: Result<T, E>) T {
+    pub const fn unwrap(self: Result<T, E>) T {
         return switch self {
             Ok(v) => v,
             Err(_) => panic("Result::unwrap on Err"),
@@ -42,7 +42,7 @@ extend<T, E> Result<T, E> {
     }
 
     // The success value; panics with `msg` on `Err`. Consumes `self`.
-    pub fn expect(self: Result<T, E>, msg: str) T {
+    pub const fn expect(self: Result<T, E>, msg: str) T {
         return switch self {
             Ok(v) => v,
             Err(_) => panic(msg),
@@ -50,7 +50,7 @@ extend<T, E> Result<T, E> {
     }
 
     // The error value; panics on `Ok`. Consumes `self`.
-    pub fn unwrap_err(self: Result<T, E>) E {
+    pub const fn unwrap_err(self: Result<T, E>) E {
         return switch self {
             Ok(_) => panic("Result::unwrap_err on Ok"),
             Err(e) => e,
@@ -59,7 +59,7 @@ extend<T, E> Result<T, E> {
 
     // The success value, or `default` on `Err`. Consumes `self`; the discarded `Err` payload is freed and
     // the unused `default` (on the `Ok` path) is freed by auto-`Free`.
-    pub fn unwrap_or(self: Result<T, E>, default: T) T {
+    pub const fn unwrap_or(self: Result<T, E>, default: T) T {
         return switch self {
             Ok(v) => v,
             Err(e) => {
@@ -69,7 +69,7 @@ extend<T, E> Result<T, E> {
     }
 
     // The error value, or `default` on `Ok`. Consumes `self`; the discarded `Ok` payload is freed.
-    pub fn err_or(self: Result<T, E>, default: E) E {
+    pub const fn err_or(self: Result<T, E>, default: E) E {
         return switch self {
             Ok(v) => {
                 default;
@@ -79,7 +79,7 @@ extend<T, E> Result<T, E> {
     }
 
     // The success value, or `f(error)` computed lazily on the error case. Consumes `self`.
-    pub fn unwrap_or_else(self: Result<T, E>, f: fn(E) T) T {
+    pub const fn unwrap_or_else(self: Result<T, E>, f: fn(E) T) T {
         return switch self {
             Ok(v) => v,
             Err(e) => f(e),
@@ -87,7 +87,7 @@ extend<T, E> Result<T, E> {
     }
 
     // Map the success value through `f`, leaving an error untouched. Consumes `self`.
-    pub fn map<U, F: fn(T) U>(self: Result<T, E>, f: F) Result<U, E> {
+    pub const fn map<U, F: fn(T) U>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
             Ok(v) => Result::<U, E>::Ok(f(v)),
             Err(e) => Result::<U, E>::Err(e),
@@ -95,7 +95,7 @@ extend<T, E> Result<T, E> {
     }
 
     // Map the error value through `f`, leaving a success untouched. Consumes `self`.
-    pub fn map_err<F, M: fn(E) F>(self: Result<T, E>, f: M) Result<T, F> {
+    pub const fn map_err<F, M: fn(E) F>(self: Result<T, E>, f: M) Result<T, F> {
         return switch self {
             Ok(v) => Result::<T, F>::Ok(v),
             Err(e) => Result::<T, F>::Err(f(e)),
@@ -103,7 +103,7 @@ extend<T, E> Result<T, E> {
     }
 
     // Chain a fallible step on the success value; `f` returns its own `Result` (flat-map). Consumes `self`.
-    pub fn and_then<U, F: fn(T) Result<U, E>>(self: Result<T, E>, f: F) Result<U, E> {
+    pub const fn and_then<U, F: fn(T) Result<U, E>>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
             Ok(v) => f(v),
             Err(e) => Result::<U, E>::Err(e),
@@ -112,7 +112,7 @@ extend<T, E> Result<T, E> {
 
     // `self` when it is `Ok`, otherwise `other`. Consumes both; the discarded `Err` payload is freed and
     // the unused `other` (on the `Ok` path) is freed by auto-`Free`.
-    pub fn or(self: Result<T, E>, other: Result<T, E>) Result<T, E> {
+    pub const fn or(self: Result<T, E>, other: Result<T, E>) Result<T, E> {
         return switch self {
             Ok(v) => Result::<T, E>::Ok(v),
             Err(e) => {
@@ -123,7 +123,7 @@ extend<T, E> Result<T, E> {
 
     // The success value as an `Option` (`Err` becomes `None`). Consumes `self`; the discarded `Err` payload
     // is freed.
-    pub fn get_ok(self: Result<T, E>) Option<T> {
+    pub const fn get_ok(self: Result<T, E>) Option<T> {
         return switch self {
             Ok(v) => Option::<T>::Some(v),
             Err(e) => {
@@ -134,7 +134,7 @@ extend<T, E> Result<T, E> {
 
     // The error value as an `Option` (`Ok` becomes `None`). Consumes `self`; the discarded `Ok` payload is
     // freed.
-    pub fn get_err(self: Result<T, E>) Option<E> {
+    pub const fn get_err(self: Result<T, E>) Option<E> {
         return switch self {
             Ok(v) => {
                 Option::<E>::None;
@@ -158,7 +158,7 @@ extend<T: Free, E> Result<T, E> as Free {
 
 // Conditional conformances: a Result is Clone/Eq exactly when both its arms are (read-only, ref-binding).
 extend<T: Clone, E: Clone> Result<T, E> as Clone {
-    pub fn clone(self: &Result<T, E>) Result<T, E> {
+    pub const fn clone(self: &Result<T, E>) Result<T, E> {
         return switch self {
             Ok(v) => Result::<T, E>::Ok(v.clone()),
             Err(e) => Result::<T, E>::Err(e.clone()),
@@ -167,7 +167,7 @@ extend<T: Clone, E: Clone> Result<T, E> as Clone {
 }
 
 extend<T: Eq, E: Eq> Result<T, E> as Eq {
-    pub fn eq(self: &Result<T, E>, other: &Result<T, E>) bool {
+    pub const fn eq(self: &Result<T, E>, other: &Result<T, E>) bool {
         return switch self {
             Ok(a) => switch other {
                 Ok(b) => *a == *b,

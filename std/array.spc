@@ -15,48 +15,48 @@ extern "C" {
 }
 
 extend<T, const N: usize> Array<T, N> {
-    pub fn len(self: &Array<T, N>) usize {
+    pub const fn len(self: &Array<T, N>) usize {
         return N;
     }
 
-    pub fn capacity(self: &Array<T, N>) usize {
+    pub const fn capacity(self: &Array<T, N>) usize {
         return N;
     }
 
-    pub fn is_empty(self: &Array<T, N>) bool {
+    pub const fn is_empty(self: &Array<T, N>) bool {
         return N == 0;
     }
 
     // Unchecked element access (caller guarantees `index < N`). Borrows the element in place.
-    pub fn at(self: &Array<T, N>, index: usize) &T {
+    pub const fn at(self: &Array<T, N>, index: usize) &T {
         return &self.data[index];
     }
 
     // Bounds-checked element access -- borrows the element (`&T`) so the Array keeps sole ownership.
-    pub fn get(self: &Array<T, N>, index: usize) Option<&T> {
+    pub const fn get(self: &Array<T, N>, index: usize) Option<&T> {
         if index >= N {
             return Option::<&T>::None;
         }
         return Option::<&T>::Some(&self.data[index]);
     }
 
-    pub fn set(self: &mut Array<T, N>, index: usize, value: T) {
+    pub const fn set(self: &mut Array<T, N>, index: usize, value: T) {
         unsafe self.data[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
         unsafe self.data[index] = value;
     }
 
-    pub fn first(self: &Array<T, N>) Option<&T> {
+    pub const fn first(self: &Array<T, N>) Option<&T> {
         return self.get(0);
     }
 
-    pub fn last(self: &Array<T, N>) Option<&T> {
+    pub const fn last(self: &Array<T, N>) Option<&T> {
         if N == 0 {
             return Option::<&T>::None;
         }
         return Option::<&T>::Some(&self.data[N - 1]);
     }
 
-    pub fn as_ptr(self: &Array<T, N>) *const T {
+    pub const fn as_ptr(self: &Array<T, N>) *const T {
         return (&self.data[0]) as *const T;
     }
 
@@ -68,7 +68,7 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     // Exchange the elements at `i` and `j` (both must be in range).
-    pub fn swap(self: &mut Array<T, N>, i: usize, j: usize) {
+    pub const fn swap(self: &mut Array<T, N>, i: usize, j: usize) {
         let p = (&mut self.data[0]) as *mut T;
         let tmp = unsafe p[i];
         unsafe p[i] = unsafe p[j];
@@ -76,7 +76,7 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     // Reverse the elements in place.
-    pub fn reverse(self: &mut Array<T, N>) {
+    pub const fn reverse(self: &mut Array<T, N>) {
         if N == 0 {
             return;
         }
@@ -92,7 +92,7 @@ extend<T, const N: usize> Array<T, N> {
     // A new Array with `f` applied to every element. `f` BORROWS each element (`&T`): this map reads
     // `self` and leaves it owning its elements, so it must not consume them (passing a Free element by
     // value would free the Array's still-owned copy).
-    pub fn map<U, F: fn(&T) U>(self: &Array<T, N>, f: F) Array<U, N> {
+    pub const fn map<U, F: fn(&T) U>(self: &Array<T, N>, f: F) Array<U, N> {
         let mut out = Array::<U, N> {};
         let p = (&mut out.data[0]) as *mut U;
         for i in 0..N {
@@ -102,7 +102,7 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     // A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
-    pub fn find<F: fn(&T) bool>(self: &Array<T, N>, pred: F) Option<&T> {
+    pub const fn find<F: fn(&T) bool>(self: &Array<T, N>, pred: F) Option<&T> {
         for i in 0..N {
             if pred(self.at(i)) {
                 return Option::<&T>::Some(&self.data[i]);
@@ -111,7 +111,7 @@ extend<T, const N: usize> Array<T, N> {
         return Option::<&T>::None;
     }
 
-    pub fn iter(self: &Array<T, N>) VecIter<T> {
+    pub const fn iter(self: &Array<T, N>) VecIter<T> {
         return VecIter::<T> { data: self.as_ptr(), idx: 0, stop: N };
     }
 }
@@ -119,7 +119,7 @@ extend<T, const N: usize> Array<T, N> {
 // Constructors. Fields are private, so these are the public way in: `new()` default-constructs every
 // slot; `filled(&x)` clones `x` into every slot.
 extend<T: Default, const N: usize> Array<T, N> {
-    pub fn new() Array<T, N> {
+    pub const fn new() Array<T, N> {
         let mut a = Array::<T, N> {};
         let p = (&mut a.data[0]) as *mut T;
         for i in 0..N {
@@ -130,7 +130,7 @@ extend<T: Default, const N: usize> Array<T, N> {
 }
 
 extend<T: Clone, const N: usize> Array<T, N> {
-    pub fn filled(x: &T) Array<T, N> {
+    pub const fn filled(x: &T) Array<T, N> {
         let mut a = Array::<T, N> {};
         let p = (&mut a.data[0]) as *mut T;
         for i in 0..N {
@@ -153,7 +153,7 @@ extend<T: Free, const N: usize> Array<T, N> as Free {
 
 // Standard-interface conformances.
 extend<T: Default, const N: usize> Array<T, N> as Default {
-    pub fn default() Array<T, N> {
+    pub const fn default() Array<T, N> {
         return Array::<T, N>::new();
     }
 }
@@ -161,7 +161,7 @@ extend<T: Default, const N: usize> Array<T, N> as Default {
 // Equality-based algorithms (available when the element type is `Eq`).
 extend<T: Eq, const N: usize> Array<T, N> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
-    pub fn contains(self: &Array<T, N>, x: &T) bool {
+    pub const fn contains(self: &Array<T, N>, x: &T) bool {
         for i in 0..N {
             if self.data[i] == *x {
                 return true;
@@ -171,7 +171,7 @@ extend<T: Eq, const N: usize> Array<T, N> {
     }
 
     // Index of the first element equal to `x`, or `None`.
-    pub fn position(self: &Array<T, N>, x: &T) Option<usize> {
+    pub const fn position(self: &Array<T, N>, x: &T) Option<usize> {
         for i in 0..N {
             if self.data[i] == *x {
                 return Option::<usize>::Some(i);
@@ -184,7 +184,7 @@ extend<T: Eq, const N: usize> Array<T, N> {
 // Order-based algorithms (available when the element type is `Ord`).
 extend<T: Ord, const N: usize> Array<T, N> {
     // True if the elements are in non-decreasing order (per `Ord`).
-    pub fn is_sorted(self: &Array<T, N>) bool {
+    pub const fn is_sorted(self: &Array<T, N>) bool {
         if N < 2 {
             return true;
         }
@@ -200,7 +200,7 @@ extend<T: Ord, const N: usize> Array<T, N> {
 
     // Binary search of a sorted array: `Ok(i)` where an equal element lives, or `Err(i)` the index a
     // missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
-    pub fn binary_search(self: &Array<T, N>, x: &T) Result<usize, usize> {
+    pub const fn binary_search(self: &Array<T, N>, x: &T) Result<usize, usize> {
         let mut lo: usize = 0;
         let mut hi: usize = N;
         while lo < hi {
@@ -234,7 +234,7 @@ extend<T: Ord, const N: usize> Array<T, N> {
     }
 
     // Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
-    pub fn sort(self: &mut Array<T, N>) {
+    pub const fn sort(self: &mut Array<T, N>) {
         if N < 2 {
             return;
         }
@@ -257,7 +257,7 @@ extend<T, const N: usize> Array<T, N> {
     // Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
     // The sift is inlined for the same reason as Vector::sort_by: a generic method calling another
     // generic method with its own F is not transitively instantiated yet.
-    pub fn sort_by<F: fn(&T, &T) i32>(self: &mut Array<T, N>, cmp: F) {
+    pub const fn sort_by<F: fn(&T, &T) i32>(self: &mut Array<T, N>, cmp: F) {
         if N < 2 {
             return;
         }
@@ -300,7 +300,7 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     // Sort in place by a derived `Ord` key (`a.sort_by_key(|p: &P| p.age)`).
-    pub fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Array<T, N>, key: F) {
+    pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Array<T, N>, key: F) {
         if N < 2 {
             return;
         }
@@ -325,13 +325,13 @@ extend<T, const N: usize> Array<T, N> {
 // range form, `..=` including the end, an open end meaning `N` -- is a borrowed `[]T` view of the
 // elements. Views alias the inline buffer, so they are invalidated when the Array is moved.
 extend<T, const N: usize> Array<T, N> as Index<T, []T> {
-    pub fn index(self: &Array<T, N>, i: usize) &T {
+    pub const fn index(self: &Array<T, N>, i: usize) &T {
         if i >= N {
             panic("Array<T, N>[i]: index out of bounds");
         }
         return &self.data[i];
     }
-    pub fn index_range(self: &Array<T, N>, r: Range<usize>) []T {
+    pub const fn index_range(self: &Array<T, N>, r: Range<usize>) []T {
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -348,13 +348,13 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
 // Free element frees the replaced value first, compiler-inserted -- same semantics as `set`);
 // `index_range_mut` is an in-place writable view.
 extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
-    pub fn index_mut(self: &mut Array<T, N>, i: usize) &mut T {
+    pub const fn index_mut(self: &mut Array<T, N>, i: usize) &mut T {
         if i >= N {
             panic("Array<T, N>[i]: index out of bounds");
         }
         return &mut self.data[i];
     }
-    pub fn index_range_mut(self: &mut Array<T, N>, r: Range<usize>) []mut T {
+    pub const fn index_range_mut(self: &mut Array<T, N>, r: Range<usize>) []mut T {
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -372,7 +372,7 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
 // the element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash()`), monomorphized per element type.
 extend<T: Clone, const N: usize> Array<T, N> as Clone {
     // A deep copy whose elements are independent clones.
-    pub fn clone(self: &Array<T, N>) Array<T, N> {
+    pub const fn clone(self: &Array<T, N>) Array<T, N> {
         let mut out = Array::<T, N> {};
         let p = (&mut out.data[0]) as *mut T;
         for i in 0..N {
@@ -384,7 +384,7 @@ extend<T: Clone, const N: usize> Array<T, N> as Clone {
 }
 
 extend<T: Eq, const N: usize> Array<T, N> as Eq {
-    pub fn eq(self: &Array<T, N>, other: &Array<T, N>) bool {
+    pub const fn eq(self: &Array<T, N>, other: &Array<T, N>) bool {
         for i in 0..N {
             let a = self.at(i);
             let b = other.at(i);
@@ -398,7 +398,7 @@ extend<T: Eq, const N: usize> Array<T, N> as Eq {
 
 extend<T: Hash, const N: usize> Array<T, N> as Hash {
     // FNV-1a over the elements' own hashes.
-    pub fn hash(self: &Array<T, N>) u64 {
+    pub const fn hash(self: &Array<T, N>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..N {
             let e = self.at(i);

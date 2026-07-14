@@ -152,7 +152,7 @@ static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n)
 }
 
 // Builtin names (for matching unresolved type paths) and their C spellings, indexed by BuiltinType.
-fn builtin_c(b: BuiltinType) *const char {
+const fn builtin_c(b: BuiltinType) *const char {
     let i = b as i32;
     if i == 0 {
         return "bool".ptr() as *const char;
@@ -2473,7 +2473,7 @@ extend Codegen {
 }
 
 // ---- free helpers ----
-fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
+const fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
     if c {
         return a;
     }
@@ -2484,7 +2484,7 @@ pub type ScopeArr = Array<ModuleId, 3>;
 fn cg_move_flag(out: *mut char, cap: usize, decl: NodeId) {
     unsafe stdio::snprintf(out, cap, "__mv%u".ptr() as *const char, decl);
 }
-fn ref_derefs(d0: i32) *const char {
+const fn ref_derefs(d0: i32) *const char {
     let mut d = d0;
     if d < 1 {
         d = 1;
@@ -2494,7 +2494,7 @@ fn ref_derefs(d0: i32) *const char {
     // C: `s + sizeof s - d` over "*******" (sizeof 8, incl NUL) -> (d-1) asterisks; ref_derefs(1) == "".
     return (unsafe ("*******".ptr() + (8 - d) as usize)) as *const char;
 }
-fn c_op(t: TokenType) *const char {
+const fn c_op(t: TokenType) *const char {
     if t == TokenType::Plus {
         return "+".ptr() as *const char;
     }
@@ -2590,7 +2590,7 @@ fn c_op(t: TokenType) *const char {
     }
     return "?".ptr() as *const char;
 }
-fn cg_arith_op_method(op: TokenType) *const char {
+const fn cg_arith_op_method(op: TokenType) *const char {
     if op == TokenType::Plus {
         return "add".ptr() as *const char;
     }
@@ -2608,7 +2608,7 @@ fn cg_arith_op_method(op: TokenType) *const char {
     }
     return null;
 }
-fn hex_val(ch: u8) i32 {
+const fn hex_val(ch: u8) i32 {
     if ch >= b'0' && ch <= b'9' {
         return (ch - b'0') as i32;
     }
@@ -2642,7 +2642,7 @@ fn utf8_encode(cp: u32, out: *mut u8) i32 {
     unsafe out[3] = (0x80u32 | cp & 0x3Fu32) as u8;
     return 4;
 }
-fn raw_string_content(src: str, s: tok::Span) tok::Span {
+const fn raw_string_content(src: str, s: tok::Span) tok::Span {
     let mut i = s.start + 1;
     let mut h: u32 = 0;
     while src[i as usize] == b'#' {
@@ -8216,7 +8216,7 @@ extend Codegen {
         }
     }
 }
-fn sep(decl: *const char) *const char {
+const fn sep(decl: *const char) *const char {
     if unsafe decl[0] != 0 as char {
         return " ".ptr() as *const char;
     }

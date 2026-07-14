@@ -15,11 +15,11 @@ pub struct Vector<T, A = Global> {
 
 extend<T, A: Allocator> Vector<T, A> {
     // Empty vector backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
-    pub fn new_in(alloc: A) Vector<T, A> {
+    pub const fn new_in(alloc: A) Vector<T, A> {
         return Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc };
     }
 
-    pub fn with_capacity_in(alloc: A, cap: usize) Vector<T, A> {
+    pub const fn with_capacity_in(alloc: A, cap: usize) Vector<T, A> {
         let mut v = Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc };
         if cap > 0 {
             v.ptr = v.alloc.alloc(cap * sizeof(T), alignof(T)) as *mut T;
@@ -28,19 +28,19 @@ extend<T, A: Allocator> Vector<T, A> {
         return v;
     }
 
-    pub fn len(self: &Vector<T, A>) usize {
+    pub const fn len(self: &Vector<T, A>) usize {
         return self.len;
     }
 
-    pub fn capacity(self: &Vector<T, A>) usize {
+    pub const fn capacity(self: &Vector<T, A>) usize {
         return self.cap;
     }
 
-    pub fn is_empty(self: &Vector<T, A>) bool {
+    pub const fn is_empty(self: &Vector<T, A>) bool {
         return self.len == 0;
     }
 
-    pub fn reserve(self: &mut Vector<T, A>, additional: usize) {
+    pub const fn reserve(self: &mut Vector<T, A>, additional: usize) {
         let needed = self.len + additional;
         if needed <= self.cap {
             return;
@@ -57,13 +57,13 @@ extend<T, A: Allocator> Vector<T, A> {
         self.cap = new_cap;
     }
 
-    pub fn push(self: &mut Vector<T, A>, value: T) {
+    pub const fn push(self: &mut Vector<T, A>, value: T) {
         self.reserve(1);
         unsafe self.ptr[self.len] = value;
         self.len = self.len + 1;
     }
 
-    pub fn pop(self: &mut Vector<T, A>) Option<T> {
+    pub const fn pop(self: &mut Vector<T, A>) Option<T> {
         if self.len == 0 {
             return Option::<T>::None;
         }
@@ -72,41 +72,41 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     // Unchecked element access (caller guarantees `index < len`). Borrows the element in place.
-    pub fn at(self: &Vector<T, A>, index: usize) &T {
+    pub const fn at(self: &Vector<T, A>, index: usize) &T {
         return &unsafe self.ptr[index];
     }
 
     // Bounds-checked element access -- borrows the element (`&T`) so the Vector keeps sole ownership.
-    pub fn get(self: &Vector<T, A>, index: usize) Option<&T> {
+    pub const fn get(self: &Vector<T, A>, index: usize) Option<&T> {
         if index >= self.len {
             return Option::<&T>::None;
         }
         return Option::<&T>::Some(&unsafe self.ptr[index]);
     }
 
-    pub fn set(self: &mut Vector<T, A>, index: usize, value: T) {
+    pub const fn set(self: &mut Vector<T, A>, index: usize, value: T) {
         unsafe self.ptr[index] = value;
     }
 
-    pub fn first(self: &Vector<T, A>) Option<&T> {
+    pub const fn first(self: &Vector<T, A>) Option<&T> {
         return self.get(0);
     }
 
-    pub fn last(self: &Vector<T, A>) Option<&T> {
+    pub const fn last(self: &Vector<T, A>) Option<&T> {
         if self.len == 0 {
             return Option::<&T>::None;
         }
         return Option::<&T>::Some(&unsafe self.ptr[self.len - 1]);
     }
 
-    pub fn clear(self: &mut Vector<T, A>) {
+    pub const fn clear(self: &mut Vector<T, A>) {
         for i in 0..self.len {
             unsafe self.ptr[i].free();
         }
         self.len = 0;
     }
 
-    pub fn truncate(self: &mut Vector<T, A>, new_len: usize) {
+    pub const fn truncate(self: &mut Vector<T, A>, new_len: usize) {
         if new_len < self.len {
             let mut i = new_len;
             while i < self.len {
@@ -117,12 +117,12 @@ extend<T, A: Allocator> Vector<T, A> {
         }
     }
 
-    pub fn as_ptr(self: &Vector<T, A>) *const T {
+    pub const fn as_ptr(self: &Vector<T, A>) *const T {
         return self.ptr;
     }
 
     // Insert `value` at `index`, shifting later elements right. `index` must be <= len.
-    pub fn insert(self: &mut Vector<T, A>, index: usize, value: T) {
+    pub const fn insert(self: &mut Vector<T, A>, index: usize, value: T) {
         self.reserve(1);
         let mut i = self.len;
         while i > index {
@@ -134,7 +134,7 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     // Remove and return the element at `index`, shifting later elements left (`None` if out of range).
-    pub fn remove(self: &mut Vector<T, A>, index: usize) Option<T> {
+    pub const fn remove(self: &mut Vector<T, A>, index: usize) Option<T> {
         if index >= self.len {
             return Option::<T>::None;
         }
@@ -149,14 +149,14 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     // Exchange the elements at `i` and `j` (both must be in range).
-    pub fn swap(self: &mut Vector<T, A>, i: usize, j: usize) {
+    pub const fn swap(self: &mut Vector<T, A>, i: usize, j: usize) {
         let tmp = unsafe self.ptr[i];
         unsafe self.ptr[i] = unsafe self.ptr[j];
         unsafe self.ptr[j] = tmp;
     }
 
     // Remove the element at `index` by swapping in the last one (O(1), reorders; `None` if out of range).
-    pub fn swap_remove(self: &mut Vector<T, A>, index: usize) Option<T> {
+    pub const fn swap_remove(self: &mut Vector<T, A>, index: usize) Option<T> {
         if index >= self.len {
             return Option::<T>::None;
         }
@@ -167,7 +167,7 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     // Reverse the elements in place.
-    pub fn reverse(self: &mut Vector<T, A>) {
+    pub const fn reverse(self: &mut Vector<T, A>) {
         if self.len == 0 {
             return;
         }
@@ -185,7 +185,7 @@ extend<T, A: Allocator> Vector<T, A> {
     // A new vector (same allocator) with `f` applied to every element. `f` BORROWS each element (`&T`): this
     // map reads `self` and leaves it owning its elements, so it must not consume them (passing a Free element
     // by value would free the Vector's still-owned copy).
-    pub fn map<U, F: fn(&T) U>(self: &Vector<T, A>, f: F) Vector<U, A> {
+    pub const fn map<U, F: fn(&T) U>(self: &Vector<T, A>, f: F) Vector<U, A> {
         let mut out = Vector::<U, A>::with_capacity_in(self.alloc, self.len);
         for i in 0..self.len {
             out.push(f(self.at(i)));
@@ -194,7 +194,7 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     // A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
-    pub fn find<F: fn(&T) bool>(self: &Vector<T, A>, pred: F) Option<&T> {
+    pub const fn find<F: fn(&T) bool>(self: &Vector<T, A>, pred: F) Option<&T> {
         for i in 0..self.len {
             if pred(self.at(i)) {
                 return Option::<&T>::Some(&unsafe self.ptr[i]);
@@ -205,7 +205,7 @@ extend<T, A: Allocator> Vector<T, A> {
 
     // Keep only the elements matching `pred` (in place, preserving order). `pred` borrows (`&T`); rejected
     // elements are freed (no-op when T isn't Free) so nothing leaks.
-    pub fn retain<F: fn(&T) bool>(self: &mut Vector<T, A>, pred: F) {
+    pub const fn retain<F: fn(&T) bool>(self: &mut Vector<T, A>, pred: F) {
         let mut w: usize = 0;
         for i in 0..self.len {
             if pred(&unsafe self.ptr[i]) {
@@ -223,10 +223,10 @@ extend<T, A: Allocator> Vector<T, A> {
 
 // Convenience constructors for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T, A: Allocator + Default> Vector<T, A> {
-    pub fn new() Vector<T, A> {
+    pub const fn new() Vector<T, A> {
         return Vector::<T, A>::new_in(A::default());
     }
-    pub fn with_capacity(cap: usize) Vector<T, A> {
+    pub const fn with_capacity(cap: usize) Vector<T, A> {
         return Vector::<T, A>::with_capacity_in(A::default(), cap);
     }
 }
@@ -246,7 +246,7 @@ extend<T, A: Allocator> Vector<T, A> as Free {
 
 // Standard-interface conformances.
 extend<T, A: Allocator + Default> Vector<T, A> as Default {
-    pub fn default() Vector<T, A> {
+    pub const fn default() Vector<T, A> {
         return Vector::<T, A>::new();
     }
 }
@@ -254,7 +254,7 @@ extend<T, A: Allocator + Default> Vector<T, A> as Default {
 // Equality-based algorithms (available when the element type is `Eq`).
 extend<T: Eq, A: Allocator> Vector<T, A> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
-    pub fn contains(self: &Vector<T, A>, x: &T) bool {
+    pub const fn contains(self: &Vector<T, A>, x: &T) bool {
         for i in 0..self.len {
             if unsafe self.ptr[i] == *x {
                 return true;
@@ -264,7 +264,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     }
 
     // Index of the first element equal to `x`, or `None`.
-    pub fn position(self: &Vector<T, A>, x: &T) Option<usize> {
+    pub const fn position(self: &Vector<T, A>, x: &T) Option<usize> {
         for i in 0..self.len {
             if unsafe self.ptr[i] == *x {
                 return Option::<usize>::Some(i);
@@ -275,7 +275,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
 
     // Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
     // are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
-    pub fn dedup(self: &mut Vector<T, A>) {
+    pub const fn dedup(self: &mut Vector<T, A>) {
         if self.len < 2 {
             return;
         }
@@ -295,7 +295,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
 // Order-based algorithms (available when the element type is `Ord`).
 extend<T: Ord, A: Allocator> Vector<T, A> {
     // True if the elements are in non-decreasing order (per `Ord`).
-    pub fn is_sorted(self: &Vector<T, A>) bool {
+    pub const fn is_sorted(self: &Vector<T, A>) bool {
         if self.len < 2 {
             return true;
         }
@@ -311,7 +311,7 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
 
     // Binary search of a sorted vector: `Ok(i)` where an equal element lives, or `Err(i)` the index a
     // missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
-    pub fn binary_search(self: &Vector<T, A>, x: &T) Result<usize, usize> {
+    pub const fn binary_search(self: &Vector<T, A>, x: &T) Result<usize, usize> {
         let mut lo: usize = 0;
         let mut hi: usize = self.len;
         while lo < hi {
@@ -345,7 +345,7 @@ extend<T: Ord, A: Allocator> Vector<T, A> {
     }
 
     // Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
-    pub fn sort(self: &mut Vector<T, A>) {
+    pub const fn sort(self: &mut Vector<T, A>) {
         let n = self.len;
         if n < 2 {
             return;
@@ -369,7 +369,7 @@ extend<T, A: Allocator> Vector<T, A> {
     // Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
     // The sift is inlined: a generic method calling another generic method with its own F is not
     // transitively instantiated yet, so the helper stays inside the one specialization.
-    pub fn sort_by<F: fn(&T, &T) i32>(self: &mut Vector<T, A>, cmp: F) {
+    pub const fn sort_by<F: fn(&T, &T) i32>(self: &mut Vector<T, A>, cmp: F) {
         let n = self.len;
         if n < 2 {
             return;
@@ -413,7 +413,7 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     // Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`).
-    pub fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
+    pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
         let n = self.len;
         if n < 2 {
             return;
@@ -443,13 +443,13 @@ pub struct VecIter<T> {
 }
 
 extend<T, A: Allocator> Vector<T, A> {
-    pub fn iter(self: &Vector<T, A>) VecIter<T> {
+    pub const fn iter(self: &Vector<T, A>) VecIter<T> {
         return VecIter::<T> { data: self.as_ptr(), idx: 0, stop: self.len() };
     }
 }
 
 extend<T> VecIter<T> as Iterator<&T> {
-    pub fn next(self: &mut VecIter<T>) Option<&T> {
+    pub const fn next(self: &mut VecIter<T>) Option<&T> {
         if self.idx >= self.stop {
             return Option::<&T>::none();
         }
@@ -464,13 +464,13 @@ extend<T> VecIter<T> as Iterator<&T> {
 // vector's `len()` -- is a borrowed `[]T` view of the elements. Views alias the buffer, so they are
 // invalidated by any reallocating mutation (push/reserve).
 extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
-    pub fn index(self: &Vector<T, A>, i: usize) &T {
+    pub const fn index(self: &Vector<T, A>, i: usize) &T {
         if i >= self.len {
             panic("Vector<T, A>[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
-    pub fn index_range(self: &Vector<T, A>, r: Range<usize>) []T {
+    pub const fn index_range(self: &Vector<T, A>, r: Range<usize>) []T {
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -487,13 +487,13 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
 // Free element frees the replaced value first, compiler-inserted -- same semantics as `set`);
 // `index_range_mut` is an in-place writable view.
 extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
-    pub fn index_mut(self: &mut Vector<T, A>, i: usize) &mut T {
+    pub const fn index_mut(self: &mut Vector<T, A>, i: usize) &mut T {
         if i >= self.len {
             panic("Vector<T, A>[i]: index out of bounds");
         }
         return &mut unsafe self.ptr[i];
     }
-    pub fn index_range_mut(self: &mut Vector<T, A>, r: Range<usize>) []mut T {
+    pub const fn index_range_mut(self: &mut Vector<T, A>, r: Range<usize>) []mut T {
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -510,7 +510,7 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
 // element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash()`), monomorphized per element type.
 extend<T: Clone, A: Allocator> Vector<T, A> as Clone {
     // A deep copy: a fresh backing store (same allocator) whose elements are independent clones.
-    pub fn clone(self: &Vector<T, A>) Vector<T, A> {
+    pub const fn clone(self: &Vector<T, A>) Vector<T, A> {
         let mut out = Vector::<T, A>::with_capacity_in(self.alloc, self.len());
         for i in 0..self.len() {
             let e = self.at(i);
@@ -521,7 +521,7 @@ extend<T: Clone, A: Allocator> Vector<T, A> as Clone {
 }
 
 extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
-    pub fn eq(self: &Vector<T, A>, other: &Vector<T, A>) bool {
+    pub const fn eq(self: &Vector<T, A>, other: &Vector<T, A>) bool {
         if self.len() != other.len() {
             return false;
         }
@@ -539,7 +539,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
 
 extend<T: Hash, A: Allocator> Vector<T, A> as Hash {
     // FNV-1a over the elements' own hashes.
-    pub fn hash(self: &Vector<T, A>) u64 {
+    pub const fn hash(self: &Vector<T, A>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..self.len() {
             let e = self.at(i);
