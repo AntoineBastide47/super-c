@@ -1313,6 +1313,12 @@ fn evens(n: u32) Vector<u32> {
     for i in 0..n { v.push(i * 2); }
     return v;
 }
+fn evens_arr() Array<u32, 5> {
+    let src = evens(5);
+    let mut a = Array::<u32, 5>::new();
+    for i in 0..a.len() { a.set(i, *src.at(i)); }
+    return a;
+}
 fn greet() str { return "hello"; }
 fn ring() Pair {
     let a = unsafe stdlib::malloc(sizeof(Node)) as *mut Node;
@@ -1324,7 +1330,7 @@ fn ring() Pair {
     return Pair { a: a, b: b };
 }
 const M: Pt = mid(Pt { x: 2, y: 10 }, Pt { x: 6, y: 30 });
-const V: Vector<u32> = evens(5);
+const V: Array<u32, 5> = evens_arr();
 const S: str = greet();
 const P: Pair = ring();
 fn main() i32 {
@@ -1335,6 +1341,8 @@ fn main() i32 {
         if (*(*P.a).next).v != 2 { return 4; }
         if (*(*P.b).next).v != 1 { return 5; }
     }
+    let lv = evens(3); // a LOCAL owning value is fine: real scope exit, real ownership
+    if lv.len() != 3 { return 6; }
     return 0;
 }
 "#,
@@ -1346,6 +1354,22 @@ fn main() i32 {
     let mut cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
+
+    // an owning (Free) type is unrepresentable as a global const: its data would be static,
+    // but any by-value copy would free()/mutate it
+    let mut p2 = cli::proj_new();
+    p2.mkfile(
+        "own.spc",
+        r#"fn evens(n: u32) Vector<u32> {
+    let mut v = Vector::<u32>::new();
+    for i in 0..n { v.push(i * 2); }
+    return v;
+}
+const V: Vector<u32> = evens(5);
+fn main() i32 { return 0; }
+"#,
+    );
+    p2.expect_fail("own.spc", "a constant cannot hold an owning (Free) type");
 }
 
 // Differential: a const fn produces the same value at compile time (const initializer) and at

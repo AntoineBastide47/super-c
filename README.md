@@ -606,14 +606,16 @@ one; `const fn` calls and const initializers are held to a stricter standard, be
 ```superc
 const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }
 
-fn evens(n: u32) Vector<u32> {                 // plain functions work too
+fn evens() Array<u32, 5> {                     // plain functions work too (Vectors, loops, ...)
     let mut v = Vector::<u32>::new();
-    for i in 0..n { v.push(i * 2); }
-    return v;
+    for i in 0..5u32 { v.push(i * 2); }
+    let mut a = Array::<u32, 5>::new();
+    for i in 0..a.len() { a.set(i, *v.at(i)); }
+    return a;
 }
 
 const N: usize = table_size(8);                // mandatory: must evaluate, or compile error
-const V: Vector<u32> = evens(5);               // materialized as static C data (relocations included)
+const V: Array<u32, 5> = evens();              // materialized as static C data (relocations included)
 ```
 
 `const fn` marks a function as compile-time evaluable and is validated at the definition: a
@@ -631,10 +633,15 @@ The strictness rules:
   an error carrying the trap reason and CTFE call stack. Call-free initializers keep best-effort
   folding (they are already valid C constant expressions). Local consts inside generic functions
   are exempt until instantiation.
-* Aggregate results materialize: structs, arrays, strings, `Vector`s, shared and even cyclic
-  pointer graphs built at compile time are emitted as deterministic `static const` C data, with
-  auxiliary objects (`NAME__ct0`, ...) and pointer relocations. A const that points at freed
-  compile-time memory is rejected.
+* Aggregate results materialize: structs, arrays, strings, shared and even cyclic pointer graphs
+  built at compile time are emitted as deterministic `static const` C data, with auxiliary
+  objects (`NAME__ct0`, ...) and pointer relocations. A const that points at freed compile-time
+  memory is rejected.
+* Owning (`Free`) types are unrepresentable as global consts: `const V: Vector<u32> = ...` is a
+  compile error — the data would live in immutable static storage, but the type's contract lets
+  any by-value copy `free()` or grow it. Use a value type (`[T; N]`, `Array<T, N>`) instead;
+  local consts of owning types stay legal (they are runtime values with real scope exits).
+  Owning containers remain fully usable *inside* compile-time evaluation.
 
 ## Generated output
 
