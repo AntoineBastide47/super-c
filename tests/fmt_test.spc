@@ -119,3 +119,12 @@ fn emitted_c_identical() {
         "emitted C differs between ugly and formatted variants",
     );
 }
+
+@test
+fn golden_const_fn() {
+    expect_fmt("pub   const   fn sq(a:i32)i32{return a*a;}", "pub const fn sq(a: i32) i32 {\n    return a * a;\n}\n");
+    expect_fmt(
+        "extend Pt{const fn zero()Pt{return Pt{x:0,y:0};}}\nstruct Pt{x:i32,y:i32}",
+        "extend Pt {\n    const fn zero() Pt {\n        return Pt { x: 0, y: 0 };\n    }\n}\nstruct Pt {\n    x: i32,\n    y: i32,\n}\n",
+    );
+}

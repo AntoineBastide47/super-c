@@ -680,6 +680,7 @@ extend Parser {
                         is_public: false,
                         is_extern: false,
                         is_variadic: is_variadic,
+                        is_const: false,
                     },
                 },
             },
@@ -868,6 +869,26 @@ extend Parser {
     pub fn parse_const(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
+        if self.check(TokenType::Fn) {
+            self.error_here("'const fn' is only allowed at item scope");
+        }
+        return self.parse_const_after(start);
+    }
+
+    // `const` already consumed: a single-token branch decides const fn vs const declaration (LL(1)).
+    pub fn parse_const_or_fn(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        self.advance();
+        if self.check(TokenType::Fn) {
+            let f = self.parse_function(true);
+            self.ast.at(f).as_data.function.is_const = true;
+            self.ast.at(f).span.start = start;
+            return f;
+        }
+        return self.parse_const_after(start);
+    }
+
+    fn parse_const_after(self: &mut Self, start: u32) NodeId {
         let name = self.identifier();
         self.expect(TokenType::Colon, "':'");
         let ty = self.parse_type();
@@ -965,6 +986,20 @@ extend Parser {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 self.ast.push(f);
+            } else if self.check(TokenType::Const) {
+                let cstart = self.raw_peek().start();
+                self.advance();
+                if !self.check(TokenType::Fn) {
+                    self.error_here("expected 'fn' after 'const' in an interface");
+                } else {
+                    let f = self.parse_function(false);
+                    self.ast.at(f).as_data.function.is_const = true;
+                    self.ast.at(f).span.start = cstart;
+                    if self.ast.at_const(f).as_data.function.body == NODE_NONE {
+                        self.expect(TokenType::Semicolon, "';'");
+                    }
+                    self.ast.push(f);
+                }
             } else if self.check(TokenType::Type) {
                 let ta = self.parse_type_alias(true);
                 self.ast.push(ta);
@@ -1016,8 +1051,13 @@ extend Parser {
                 let ta = self.parse_type_alias(false);
                 self.ast.push(ta);
             } else if self.check(TokenType::Const) {
-                let cn = self.parse_const();
-                self.ast.at(cn).as_data.const_def.is_public = is_public;
+                let cn = self.parse_const_or_fn();
+                if self.ast.at_const(cn).kind == NodeKind::NODE_FUNCTION {
+                    self.ast.at(cn).as_data.function.is_public = is_public;
+                    self.add_attrs_to(&mut attrs, cn);
+                } else {
+                    self.ast.at(cn).as_data.const_def.is_public = is_public;
+                }
                 self.ast.push(cn);
             } else {
                 self.error_here(
@@ -1091,6 +1131,9 @@ extend Parser {
             } else if self.check(TokenType::Const) {
                 let cstart = self.raw_peek().start();
                 self.advance();
+                if self.check(TokenType::Fn) {
+                    self.error_here("an extern function cannot be 'const'");
+                }
                 let cname = self.identifier();
                 self.expect(TokenType::Colon, "':'");
                 let ctype = self.parse_type();
@@ -1191,8 +1234,12 @@ extend Parser {
                 self.ast.at(id).as_data.type_alias.is_public = is_public;
             },
             Const => {
-                id = self.parse_const();
-                self.ast.at(id).as_data.const_def.is_public = is_public;
+                id = self.parse_const_or_fn();
+                if self.ast.at_const(id).kind == NodeKind::NODE_FUNCTION {
+                    self.ast.at(id).as_data.function.is_public = is_public;
+                } else {
+                    self.ast.at(id).as_data.const_def.is_public = is_public;
+                }
             },
             Extern => {
                 id = self.parse_extern();
