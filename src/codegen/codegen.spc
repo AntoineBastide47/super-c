@@ -313,6 +313,12 @@ pub struct Codegen {
     // per instance; this replaces the full node-arena sweep per instance).
     pub call_list: Vector<NodeId>,
     pub call_ast: *mut Ast,
+    // Memoized "type mentions a TYPE_GENERIC" bits (0 unknown / 1 no / 2 yes) for the instance
+    // seeding sweep: concrete types (virtually the whole pool) are skipped without a walk.
+    pub genty: Vector<u8>,
+    pub genty_ast: *mut Ast,
+    // collect_insts runs for the header AND the body of the same module: the second run is a no-op.
+    pub insts_ast: *mut Ast,
     // CG-12: O(1) move-set membership. Epoch-tagged stamps (indexed by decl NodeId) mirror
     // moved[]/cond_moved[] appends EXACTLY -- caps included -- so answers match the linear
     // scans; the arrays stay authoritative and stamps are just an accelerator. stamp_cap == 0
@@ -389,6 +395,7 @@ extend Codegen as Free {
     // The Ast is borrowed (not owned); free only what codegen allocated itself.
     pub fn free(self: &mut Self) {
         self.buf.free();
+        self.genty.free();
         self.enum_of_variant.free();
         self.free_ext_cache.free();
         self.ext_head.free();
@@ -440,6 +447,9 @@ extend Codegen {
             ifm_set: Map::<u64, u64>::new(),
             home_ast: ast_u as *mut Ast,
             call_list: Vector::<NodeId>::new(),
+            genty: Vector::<u8>::new(),
+            genty_ast: null,
+            insts_ast: null,
             package: package,
             mangle: mangle,
             multifile: mangle,
@@ -1206,7 +1216,46 @@ extend Codegen {
         }
         self.ninsts = k + 1;
     }
+    // Does pool type `t` transitively mention a TYPE_GENERIC? Memoized in genty (0 unknown /
+    // 1 no / 2 yes), valid per genty_ast.
+    fn cg_mentions_generic(self: &mut Self, t: TypeId, depth: u32) bool {
+        if t == TYPE_NONE || depth > 64 {
+            return false;
+        }
+        while self.genty.len() <= t as usize {
+            self.genty.push(0);
+        }
+        let memo = self.genty[t as usize];
+        if memo != 0 {
+            return memo == 2;
+        }
+        let y = *self.type_at(t);
+        let mut r = false;
+        if y.kind == TypeKind::TYPE_GENERIC {
+            r = true;
+        } else if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            r = self.cg_mentions_generic(y.as_data.elem, depth + 1);
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            for i in 0..it.n {
+                if self.cg_mentions_generic(it.args[i as usize], depth + 1) {
+                    r = true;
+                }
+            }
+        }
+        if r {
+            self.genty.set(t as usize, 2);
+        } else {
+            self.genty.set(t as usize, 1);
+        }
+        return r;
+    }
+
     fn collect_insts(self: &mut Self) {
+        if self.insts_ast == self.ast {
+            return; // header pass already collected for this module
+        }
+        self.insts_ast = self.ast;
         self.ninsts = 0;
         let mut i: u32 = 1;
         while i as usize < unsafe (*self.cur_ast()).nodes.len() {
@@ -1306,6 +1355,27 @@ extend Codegen {
                 }
                 if concrete {
                     self.record_inst(g2, (&args[0]) as *const TypeId, n, nid);
+                }
+            }
+            // Seed the aggregate instances this fn's types name (e.g. a `W<T, N> {}` literal in
+            // the body): the body is emitted with this subst map active, so every substitution
+            // result must exist as a pool instance BEFORE phase_types defines the C structs.
+            // Nested fn insts are handled by the call walk above; foreign insts are truncated
+            // below and re-homed by instance propagation instead. Only generic-mentioning types
+            // can substitute, so the memoized prefilter skips virtually the whole pool; the
+            // bound is pinned because mid-sweep interns are substitution results (concrete).
+            if !foreign {
+                if self.genty_ast != self.ast {
+                    self.genty_ast = self.ast;
+                    self.genty.clear();
+                }
+                let np = unsafe (*self.cur_ast()).type_pool.len();
+                let mut ti: usize = 1;
+                while ti < np {
+                    if self.cg_mentions_generic(ti as TypeId, 0) {
+                        let _ = self.subst_resolve(ti as TypeId);
+                    }
+                    ti = ti + 1;
                 }
             }
             self.nsubst = 0;
@@ -12287,6 +12357,7 @@ extend Codegen {
             unsafe (*self.ceval()).all_typed = true;
         }
         self.build_enum_index();
+        self.collect_insts(); // phase_types below must see body-substituted aggregate instances
         let mut guard = Buf160 {};
         let np = (&mut guard[0]) as *mut char;
         let mut at = bappend(np, 160, 0, "SUPER_".ptr() as *const char);
