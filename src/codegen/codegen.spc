@@ -12402,7 +12402,7 @@ extend Codegen {
                         sp.start,
                         sp.end - sp.start,
                         format(
-                            "call to a 'const fn' cannot be evaluated at compile time: {}",
+                            "this 'const fn' call has compile-time-known arguments but failed to evaluate: {}",
                             diag::cstr(unsafe &(*ceptr).fold_errs.at(i).detail[0]),
                         ),
                     );

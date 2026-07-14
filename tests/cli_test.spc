@@ -1198,7 +1198,7 @@ fn main() i32 { return 0; }
 fn main() i32 { let x = spin(100000000u64); if x == 0 { return 1; } return 0; }
 "#,
     );
-    p3.expect_fail("budget.spc", "call to a 'const fn' cannot be evaluated at compile time");
+    p3.expect_fail("budget.spc", "'const fn' call has compile-time-known arguments but failed to evaluate");
 
     // identical body without `const`: silent fallback to a runtime call
     let mut p4 = cli::proj_new();

@@ -316,6 +316,7 @@ pub struct ConstEval {
     pub record_pause: u32, // >0 while codegen emits a short-circuit-guarded subexpression (&&/|| RHS)
     pub trap_in_constfn: bool, // a failed evaluation involved a `const fn` frame: always promotable
     pub all_typed: bool, // every module is typechecked: silent failures are no longer module-order artifacts
+    pub invoke_ran: bool, // the innermost invoke bound its arguments and began executing the body
     pub fold_errs: Vector<CeFoldErr>,
     pub pending: Vector<CePending>,
     pub pending_consts: Vector<CePending>, // const decls undecidable in module order (cond = NODE_CONST)
@@ -461,6 +462,7 @@ extend ConstEval {
             record_pause: 0,
             trap_in_constfn: false,
             all_typed: false,
+            invoke_ran: false,
             fold_errs: Vector::<CeFoldErr>::new(),
             pending: Vector::<CePending>::new(),
             pending_consts: Vector::<CePending>::new(),
@@ -1078,6 +1080,9 @@ extend ConstEval {
         }
         if a.kind == TypeKind::TYPE_BUILTIN {
             return a.as_data.builtin == b.as_data.builtin;
+        }
+        if a.kind == TypeKind::TYPE_CONST {
+            return a.as_data.value == b.as_data.value;
         }
         if a.kind == TypeKind::TYPE_POINTER || a.kind == TypeKind::TYPE_REFERENCE {
             return a.qualifier == b.qualifier && self.ce_teq(ma, a.as_data.elem, mb, b.as_data.elem);
@@ -2645,6 +2650,29 @@ extend ConstEval {
                 }
             }
             let dk = unsafe (*self.ast_ptr(d.module)).at_const(d.node).kind;
+            if dk == NodeKind::NODE_GENERIC_PARAM {
+                // a const-generic parameter (e.g. the N of Array<T, N>): its bound TYPE_CONST value
+                if f != null {
+                    for i in 0..unsafe (*f).ng {
+                        if unsafe (*f).pmod == d.module && unsafe (*f).params_g[i as usize] == d.node {
+                            let at2 = unsafe (*f).at[i as usize];
+                            if at2 != TYPE_NONE {
+                                let y = unsafe (*self.ast_ptr(unsafe (*f).am[i as usize])).type_at(at2);
+                                if y.kind == TypeKind::TYPE_CONST {
+                                    return CeVal {
+                                        kind: CV_INT,
+                                        tm: m,
+                                        ty: rt,
+                                        as_data: CeValAs { i: y.as_data.value },
+                                    };
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                return cv_nil();
+            }
             if dk == NodeKind::NODE_FUNCTION {
                 return CeVal {
                     kind: CV_FN,
@@ -2959,12 +2987,20 @@ extend ConstEval {
         let n = unsafe (*a).at_const(id);
         let expr = n.as_data.cast.expression;
         let rt = self.ce_type(m, id);
-        let o = self.ev_rval(f, m, expr);
-        if o.kind == CV_NIL_K {
-            return cv_nil();
-        }
         let r2 = self.ce_rtype(f, m, rt);
         if !r2.ok {
+            return cv_nil();
+        }
+        // A pointer-targeted cast keeps the operand's place value (`(&mut x) as *mut T` must not
+        // auto-deref the fresh reference); everything else reads through references as usual.
+        let tk = unsafe (*self.ast_ptr(r2.m)).type_at(r2.t).kind;
+        let mut o = cv_nil();
+        if tk == TypeKind::TYPE_POINTER {
+            o = self.ev_in(f, m, expr);
+        } else {
+            o = self.ev_rval(f, m, expr);
+        }
+        if o.kind == CV_NIL_K {
             return cv_nil();
         }
         let y = *unsafe (*self.ast_ptr(r2.m)).type_at(r2.t);
@@ -3388,6 +3424,70 @@ extend ConstEval {
         return lr.v;
     }
 
+    // A substitution-only frame (no env) from a receiver's concrete generic args, so decl-side
+    // type nodes can be resolved against the instance (incl. const-generic values).
+    fn ce_recv_frame(self: &Self, r: &CeRecv) CeFrame {
+        let mut g = ce_frame_zero();
+        if r.dn == NODE_NONE || r.n == 0 {
+            return g;
+        }
+        let da = self.ast_ptr(r.dm);
+        let gens = unsafe (*da).at_const(r.dn).as_data.aggregate.generics;
+        let gids = unsafe (*da).list(gens);
+        g.pmod = r.dm;
+        let mut i: u32 = 0;
+        while i < gens.len && i < r.n as u32 && g.ng as u32 < 8 {
+            let ng = g.ng;
+            g.params_g[ng as usize] = unsafe gids[i as usize];
+            g.am[ng as usize] = r.am[i as usize];
+            g.at[ng as usize] = r.at[i as usize];
+            g.ng = ng + 1;
+            i = i + 1;
+        }
+        return g;
+    }
+
+    // Zero value for a field TYPE NODE under a substitution frame. Resolves a symbolic
+    // const-generic array length ([T; N]) from the node's length expression, since the interned
+    // TYPE_ARRAY of a generic decl carries len 0.
+    fn ce_zero_node(self: &mut Self, f: *mut CeFrame, m: ModuleId, tyNode: NodeId, depth: i32) CeVal {
+        if tyNode == NODE_NONE || depth > CE_MAX_DEPTH {
+            return cv_nil();
+        }
+        let t = self.ce_type(m, tyNode);
+        if t == TYPE_NONE {
+            return cv_nil();
+        }
+        let a = self.ast_ptr(m);
+        if unsafe (*a).at_const(tyNode).kind == NodeKind::NODE_ARRAY_TYPE {
+            let y = unsafe (*a).type_at(t);
+            if y.kind == TypeKind::TYPE_ARRAY && y.as_data.arr.len == 0 {
+                let lenNode = unsafe (*a).at_const(tyNode).as_data.array_type.length;
+                let elemNode = unsafe (*a).at_const(tyNode).as_data.array_type.element;
+                let lv = self.ev_in(f, m, lenNode);
+                if lv.kind != CV_INT || lv.as_data.i <= 0 || lv.as_data.i > 0xFFFFFFFFi64 {
+                    return cv_nil();
+                }
+                let e = self.ce_subst_deep(f, m, self.ce_type(m, elemNode), depth + 1);
+                if e == TYPE_NONE {
+                    return cv_nil();
+                }
+                let nt = unsafe (*self.mut_ast_ptr(m)).intern_type(
+                    Ty {
+                        kind: TypeKind::TYPE_ARRAY,
+                        as_data: TyAs { arr: TyArr { elem: e, len: lv.as_data.i as u32 } },
+                    },
+                );
+                return self.ce_zero(m, nt, depth);
+            }
+        }
+        let ct = self.ce_subst_deep(f, m, t, depth);
+        if ct == TYPE_NONE {
+            return cv_nil();
+        }
+        return self.ce_zero(m, ct, depth);
+    }
+
     fn ev_struct_init(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
         let tn = unsafe (*a).at_const(id).as_data.struct_initializer.ty;
@@ -3518,7 +3618,9 @@ extend ConstEval {
             }
             unsafe (*self.obj_ptr(o)).slots.set(fi.idx as usize, cloned);
         }
-        // remaining fields need decl-side defaults
+        // remaining fields: decl-side default, else zero-initialized (a partial struct literal
+        // zero-fills in C; the zero is built from the field's TYPE NODE so const-generic array
+        // lengths resolve through the receiver's args)
         let ms = unsafe (*da).at_const(rr.r.dn).as_data.aggregate.members;
         let mut idx: i32 = 0;
         for k in 0..ms.len {
@@ -3527,14 +3629,25 @@ extend ConstEval {
                 if unsafe (*self.obj_ptr(o)).slots[idx as usize].kind == CV_NIL_K {
                     let fval = unsafe (*da).at_const(fd).as_data.field.value;
                     if fval == NODE_NONE {
-                        return cv_nil();
+                        let mut g = self.ce_recv_frame(&rr.r);
+                        let z = self.ce_zero_node(
+                            (&mut g) as *mut CeFrame,
+                            rr.r.dm,
+                            unsafe (*da).at_const(fd).as_data.field.ty,
+                            0,
+                        );
+                        if z.kind == CV_NIL_K {
+                            return cv_nil();
+                        }
+                        unsafe (*self.obj_ptr(o)).slots.set(idx as usize, z);
+                    } else {
+                        let v = self.ev_in(null, rr.r.dm, fval);
+                        if v.kind == CV_NIL_K {
+                            return cv_nil();
+                        }
+                        let cloned = self.ce_clone(v, 0);
+                        unsafe (*self.obj_ptr(o)).slots.set(idx as usize, cloned);
                     }
-                    let v = self.ev_in(null, rr.r.dm, fval);
-                    if v.kind == CV_NIL_K {
-                        return cv_nil();
-                    }
-                    let cloned = self.ce_clone(v, 0);
-                    unsafe (*self.obj_ptr(o)).slots.set(idx as usize, cloned);
                 }
                 idx = idx + 1;
             }
@@ -4808,12 +4921,23 @@ extend ConstEval {
                 }
             } else {
                 let at2 = self.ce_type(xm, aid);
-                if at2 == TYPE_NONE || !self.ce_teq(
-                    xm,
-                    at2,
-                    unsafe (*recv).am[i as usize],
-                    unsafe (*recv).at[i as usize],
-                ) {
+                if at2 == TYPE_NONE {
+                    return false;
+                }
+                // a target arg typed as one of the extend's own params (e.g. the N of `W<T, N>`,
+                // whose node may carry no generic-param resolution) binds like the resolved case
+                let y2 = *unsafe (*self.ast_ptr(xm)).type_at(at2);
+                if y2.kind == TypeKind::TYPE_GENERIC {
+                    if !self.ce_subst_add(
+                        g,
+                        y2.module,
+                        y2.as_data.decl,
+                        unsafe (*recv).am[i as usize],
+                        unsafe (*recv).at[i as usize],
+                    ) {
+                        return false;
+                    }
+                } else if !self.ce_teq(xm, at2, unsafe (*recv).am[i as usize], unsafe (*recv).at[i as usize]) {
                     return false;
                 }
             }
@@ -4840,11 +4964,11 @@ extend ConstEval {
             fm,
             nm,
             "memset",
-        ) || self.ce_span_is(fm, nm, "abort") || self.ce_span_is(fm, nm, "__sc_panic_str") || self.ce_span_is(
+        ) || self.ce_span_is(fm, nm, "memcmp") || self.ce_span_is(fm, nm, "abort") || self.ce_span_is(
             fm,
             nm,
-            "__sc_panic",
-        ) {
+            "__sc_panic_str",
+        ) || self.ce_span_is(fm, nm, "__sc_panic") {
             return true;
         }
         let ln = (nm.end - nm.start) as usize;
@@ -5026,6 +5150,51 @@ extend ConstEval {
             out.ok = true;
             return out;
         }
+        if self.ce_span_is(fm, nm, "memcmp") {
+            if nargs != 3 || unsafe args[0].kind != CV_PTR || unsafe args[1].kind != CV_PTR || unsafe args[2].kind != CV_INT || unsafe args[2].as_data.i < 0 {
+                return out;
+            }
+            let n = (unsafe args[2].as_data.i) as u64;
+            if n == 0 {
+                out.vals[0] = CeVal { kind: CV_INT, tm: m, ty: rt, as_data: CeValAs { i: 0 } };
+                out.n = 1;
+                out.ok = true;
+                return out;
+            }
+            let b1 = self.obj_ptr(unsafe args[0].as_data.p.obj);
+            let b2 = self.obj_ptr(unsafe args[1].as_data.p.obj);
+            if b1 == null || b2 == null || unsafe (*b1).heap == 0 || unsafe (*b2).heap == 0 || unsafe (*b1).esz != 1 || unsafe (*b2).esz != 1 {
+                return out; // byte-exact comparison is only modeled for 1-byte-element blocks
+            }
+            if unsafe (*b1).dead != 0 || unsafe (*b2).dead != 0 {
+                self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
+                return out;
+            }
+            let o1 = (unsafe args[0].as_data.p.off) as u64;
+            let o2 = (unsafe args[1].as_data.p.off) as u64;
+            if o1 + n > (unsafe (*b1).slots.len()) as u64 || o2 + n > (unsafe (*b2).slots.len()) as u64 {
+                self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
+                return out;
+            }
+            let mut r: i64 = 0;
+            for i in 0..n {
+                let s1 = unsafe (*b1).slots[(o1 + i) as usize];
+                let s2 = unsafe (*b2).slots[(o2 + i) as usize];
+                if s1.kind != CV_INT || s2.kind != CV_INT {
+                    return out; // uninitialized bytes: not comparable
+                }
+                let va = s1.as_data.i & 0xff;
+                let vb = s2.as_data.i & 0xff;
+                if va != vb {
+                    r = if_i64(va < vb, -1, 1);
+                    break;
+                }
+            }
+            out.vals[0] = CeVal { kind: CV_INT, tm: m, ty: rt, as_data: CeValAs { i: r } };
+            out.n = 1;
+            out.ok = true;
+            return out;
+        }
         if self.ce_span_is(fm, nm, "abort") {
             self.ce_trap(CE_TRAP_PANIC, "abort reached at compile time");
             return out;
@@ -5104,6 +5273,8 @@ extend ConstEval {
         self_am: ModuleId,
         self_at: TypeId,
     ) Rets {
+        let saved_ran = self.invoke_ran;
+        self.invoke_ran = false;
         let r = self.ce_invoke_inner(
             fm,
             fnode,
@@ -5119,17 +5290,24 @@ extend ConstEval {
             self_am,
             self_at,
         );
-        if !r.ok {
+        // The const-fn guarantee covers invocations whose bindings resolved and whose body ran
+        // (invoke_ran); failing to bind receiver/generics/args means the call site's inputs were
+        // not compile-time known — that is not a broken `const fn`.
+        if !r.ok && (self.invoke_ran || self.trap.len() != 0) {
             let fa = self.ast_ptr(fm);
             if unsafe (*fa).at_const(fnode).kind == NodeKind::NODE_FUNCTION && unsafe (*fa).at_const(fnode).as_data.function.is_const {
                 // a silent failure before the whole package is typed may just be module order:
                 // only synthesize the definite trap once all_typed (flush/codegen phases)
                 if self.trap.len() == 0 && self.all_typed {
-                    self.ce_trap(CE_TRAP_UNSUPPORTED, "const function cannot be evaluated at compile time");
+                    self.ce_trap(
+                        CE_TRAP_UNSUPPORTED,
+                        "a 'const fn' hit an operation the compile-time evaluator does not support",
+                    );
                 }
                 self.trap_in_constfn = true;
             }
         }
+        self.invoke_ran = saved_ran;
         return r;
     }
 
@@ -5274,6 +5452,7 @@ extend ConstEval {
                 return out;
             }
         }
+        self.invoke_ran = true;
         self.fstack[self.nframes as usize] = CvFn { m: fm, fn_id: fnode };
         self.nframes = self.nframes + 1;
         let saved = self.depth;
@@ -5837,9 +6016,9 @@ extend ConstEval {
         if top {
             self.ce_objs_reset();
         }
-        if top && self.record_folds && self.record_pause == 0 && pub_v.kind == CONST_NONE && (ce_trap_is_ub(
-            self.trap_kind,
-        ) || self.trap_in_constfn) {
+        // record only genuine failures: a successful aggregate/fn/pointer result also publishes
+        // CONST_NONE (the scalar memo covers scalars only) but is not a failed fold
+        if top && self.record_folds && self.record_pause == 0 && v.kind == CV_NIL_K && (ce_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
             self.record_fold_err(m, id);
         }
         // success stores the value; failure restores CONST_NONE (clears the sentinel)
@@ -6155,7 +6334,7 @@ extend ConstEval {
         if v.kind != CV_AGG {
             self.ce_objs_reset();
             if pub_v.kind == CONST_NONE {
-                if self.record_folds && self.record_pause == 0 && (ce_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+                if self.record_folds && self.record_pause == 0 && v.kind == CV_NIL_K && (ce_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
                     self.record_fold_err(m, id);
                 }
                 if self.trap.len() != 0 {
