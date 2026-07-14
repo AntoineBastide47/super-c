@@ -2291,6 +2291,26 @@ extend Codegen {
         }
         return false;
     }
+    // Probe-root gate: emit-time folding can only USE scalar results (emit_scalar_folded), so
+    // evaluating an expression whose static type is an aggregate is pure waste — the interpreter
+    // would run the whole body and the CONST_NONE publication discards it. Applies at probe roots
+    // only (a scalar call may take aggregate-typed constant arguments).
+    fn cg_fold_worthwhile(self: &Self, id: NodeId) bool {
+        let t = unsafe (*self.cur_ast()).type_of(id);
+        if t == TYPE_NONE {
+            return false;
+        }
+        let y = self.type_at(self.subst_resolve(t));
+        if y.kind == TypeKind::TYPE_ENUM {
+            return true; // payload-less tags fold to their integer value
+        }
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return false;
+        }
+        let b = y.as_data.builtin;
+        return b != BuiltinType::BT_VOID && b != BuiltinType::BT_VALIST && b != BuiltinType::BT_C32 && b != BuiltinType::BT_C64;
+    }
+
     fn cg_maybe_const(self: &Self, id: NodeId) bool {
         if id == NODE_NONE {
             return true;
@@ -6203,7 +6223,7 @@ extend Codegen {
             v = n.as_data.unary.operand;
             n = *unsafe (*self.cur_ast()).at_const(v);
         }
-        if self.ceval() != null && n.kind == NodeKind::NODE_CALL && self.cg_maybe_const(v) && unsafe (*self.ceval()).eval(
+        if self.ceval() != null && n.kind == NodeKind::NODE_CALL && self.cg_fold_worthwhile(v) && self.cg_maybe_const(v) && unsafe (*self.ceval()).eval(
             self.cur_module(),
             v,
         ).kind != ce::CONST_NONE {
@@ -7286,7 +7306,10 @@ extend Codegen {
     }
     fn emits_own_parens(self: &mut Self, id: NodeId) bool {
         let n = *unsafe (*self.cur_ast()).at_const(id);
-        if self.ceval() != null && self.cg_maybe_const(id) && unsafe (*self.ceval()).eval(self.cur_module(), id).kind != ce::CONST_NONE {
+        if self.ceval() != null && self.cg_fold_worthwhile(id) && self.cg_maybe_const(id) && unsafe (*self.ceval()).eval(
+            self.cur_module(),
+            id,
+        ).kind != ce::CONST_NONE {
             return false;
         }
         if n.kind == NodeKind::NODE_BINARY || n.kind == NodeKind::NODE_CAST {
@@ -7745,9 +7768,9 @@ extend Codegen {
         }
         let n = *unsafe (*self.cur_ast()).at_const(id);
         let nk = n.kind;
-        if self.ceval() != null && (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_CAST || nk == NodeKind::NODE_CALL || nk == NodeKind::NODE_SIZEOF || nk == NodeKind::NODE_ALIGNOF) && self.cg_maybe_const(
+        if self.ceval() != null && (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_CAST || nk == NodeKind::NODE_CALL || nk == NodeKind::NODE_SIZEOF || nk == NodeKind::NODE_ALIGNOF) && self.cg_fold_worthwhile(
             id,
-        ) {
+        ) && self.cg_maybe_const(id) {
             let v = unsafe (*self.ceval()).eval(self.cur_module(), id);
             if self.emit_scalar_folded(v) {
                 return;
@@ -12402,7 +12425,7 @@ extend Codegen {
                         sp.start,
                         sp.end - sp.start,
                         format(
-                            "call to a 'const fn' cannot be evaluated at compile time: {}",
+                            "this 'const fn' call has compile-time-known arguments but failed to evaluate: {}",
                             diag::cstr(unsafe &(*ceptr).fold_errs.at(i).detail[0]),
                         ),
                     );
