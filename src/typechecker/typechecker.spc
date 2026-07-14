@@ -10001,12 +10001,33 @@ extend TypeChecker {
             NODE_CONST => {
                 let declared = self.resolve_type(unsafe (*a).at_const(id).as_data.const_def.ty);
                 let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
+                // An owning (Free) type is unrepresentable as a global const: its data would be
+                // immutable compile-time storage, but the type's contract lets any by-value copy
+                // run free()/push on it. Value types carry no such contract. (Local consts are
+                // runtime values with real scope exits, so they stay allowed.)
+                let dtk = self.type_at(declared).kind;
+                let owning = !cd.is_extern && !cd.is_static_mut && dtk != TypeKind::TYPE_BUILTIN && self.tc_type_is_free(
+                    declared,
+                );
+                if owning {
+                    let sp = unsafe (*self.cur_ast()).at_const(id).span;
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format("a constant cannot hold an owning (Free) type"),
+                    );
+                    self.errors.note(
+                        format(
+                            "the value would live in immutable static storage that copies must not free; use a value type ([T; N], Array<T, N>) or build it at runtime",
+                        ),
+                    );
+                }
                 if cd.value != NODE_NONE {
                     self.check_expr(cd.value);
                     if !self.compatible(declared, cd.value) {
                         self.err_mismatch(cd.value, declared);
                     }
-                    if !cd.is_extern && !cd.is_static_mut {
+                    if !cd.is_extern && !cd.is_static_mut && !owning {
                         self.tc_mandatory_const(id, cd.value);
                     }
                 }
