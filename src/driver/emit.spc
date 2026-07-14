@@ -281,6 +281,19 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     unsafe (*p).ok = false;
 }
 
+// A deferred call-bearing const initializer that still cannot be evaluated once the package is typed.
+fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) {
+    let p = ctx as *mut loader::Package;
+    let sp = unsafe (*p).modules[m as usize].ast.at_const(decl).span;
+    let src = unsafe (*p).modules[m as usize].source.as_str();
+    let file = unsafe (*p).modules[m as usize].file.as_str();
+    let mut errs = diag::Errors::new();
+    errs.emit(sp.start, sp.end - sp.start, format("constant cannot be evaluated at compile time: {}", diag::cstr(msg)));
+    errs.finalize(src, file);
+    errs.log();
+    unsafe (*p).ok = false;
+}
+
 type TCases = Array<cg::CgTestCase, 512>;
 
 // ---------------------------------------------------------------------------------------------------------
@@ -703,7 +716,9 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     let ceptr = p.ceval as *mut ce::ConstEval;
     if ceptr != null {
         let pv = p as *mut loader::Package;
+        unsafe (*ceptr).all_typed = true;
         unsafe (*ceptr).flush_asserts(flush_assert_err, pv);
+        unsafe (*ceptr).flush_consts(flush_const_err, pv);
     }
     if !p.ok {
         return 1;

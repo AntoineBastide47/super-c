@@ -146,6 +146,7 @@ pub struct FunctionData {
     pub is_public: bool,
     pub is_extern: bool,
     pub is_variadic: bool,
+    pub is_const: bool, // `const fn`: must evaluate at compile time when its arguments are known
 }
 pub struct ParameterData {
     pub name: NodeId,

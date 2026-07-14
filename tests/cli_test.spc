@@ -1108,3 +1108,274 @@ fn error_exit_code() {
     assert(r.out_has("mismatched types"), "the diagnostic is reported");
     assert(r.exit != 0, "CLI exits nonzero on a compile error");
 }
+
+// CTFE hardening: const-dependency cycles are diagnosed (not budget-burned), proven UB in an
+// emitted expression fails the build with call-stack detail, a short-circuited RHS never
+// false-positives, an unfoldable array length is a hard error, and a provable panic in a plain
+// function keeps its defined runtime behavior.
+@test
+fn ctfe_hardening() {
+    let mut p = cli::proj_new();
+    p.mkfile("cyc.spc", r#"const A: i32 = B;
+const B: i32 = A;
+static_assert(A == 0);
+fn main() i32 { return 0; }
+"#);
+    p.expect_fail("cyc.spc", "cyclic constant dependency");
+
+    let mut p2 = cli::proj_new();
+    p2.mkfile(
+        "ub.spc",
+        r#"const Z: i32 = 0;
+fn scale(x: i32) i32 { return x * 2 / Z; }
+fn main() i32 { return scale(4); }
+"#,
+    );
+    p2.expect_fail("ub.spc", "undefined behavior");
+
+    let mut p3 = cli::proj_new();
+    p3.mkfile("sc.spc", r#"const Z: i32 = 0;
+fn main() i32 { if Z != 0 && 10 / Z > 1 { return 1; } return 0; }
+"#);
+    let mut r3 = p3.compile("sc.spc");
+    assert_eq(r3.exit, 0);
+    let mut cc3 = p3.cc_build("");
+    assert_eq(cc3.exit, 0);
+    assert_eq(p3.run_bin(), 0);
+
+    let mut p4 = cli::proj_new();
+    p4.mkfile("len.spc", r#"fn main() i32 { let n = 4; let a: [i32; n] = [1, 2, 3, 4]; return a[0] - 1; }
+"#);
+    p4.expect_fail("len.spc", "array length must be a constant expression");
+
+    // a provable panic in a NON-const fn stays runtime behavior (build ok, binary aborts)
+    let mut p5 = cli::proj_new();
+    p5.mkfile("pan.spc", r#"fn boom() i32 { panic("boom"); }
+fn main() i32 { return boom(); }
+"#);
+    let mut r5 = p5.compile("pan.spc");
+    assert_eq(r5.exit, 0);
+    let mut cc5 = p5.cc_build("");
+    assert_eq(cc5.exit, 0);
+    assert(p5.run_bin() != 0, "the panic still aborts at runtime");
+}
+
+// const fn: definition-site validation (direct and transitive disqualifiers), the hard use-site
+// guarantee (any failed fold of a const fn call is an error; the same body without `const` falls
+// back to runtime), and legal recursion between const fns.
+@test
+fn const_fn_semantics() {
+    let mut p = cli::proj_new();
+    p.mkfile(
+        "bad.spc",
+        r#"import stdlib;
+const fn bad() i32 { return unsafe stdlib::rand(); }
+fn main() i32 { return 0; }
+"#,
+    );
+    p.expect_fail("bad.spc", "declared 'const fn' but calls an extern function");
+
+    let mut p2 = cli::proj_new();
+    p2.mkfile(
+        "trans.spc",
+        r#"import stdlib;
+fn helper() i32 { return unsafe stdlib::rand(); }
+const fn outer() i32 { return helper(); }
+fn main() i32 { return 0; }
+"#,
+    );
+    p2.expect_fail("trans.spc", "calls a function that cannot be evaluated at compile time");
+
+    let mut p3 = cli::proj_new();
+    p3.mkfile(
+        "budget.spc",
+        r#"const fn spin(n: u64) u64 {
+    let mut s: u64 = 0;
+    let mut i: u64 = 0;
+    while i < n { s = s + i; i = i + 1; }
+    return s;
+}
+fn main() i32 { let x = spin(100000000u64); if x == 0 { return 1; } return 0; }
+"#,
+    );
+    p3.expect_fail("budget.spc", "call to a 'const fn' cannot be evaluated at compile time");
+
+    // identical body without `const`: silent fallback to a runtime call
+    let mut p4 = cli::proj_new();
+    p4.mkfile(
+        "runtime.spc",
+        r#"fn spin(n: u64) u64 {
+    let mut s: u64 = 0;
+    let mut i: u64 = 0;
+    while i < n { s = s + i; i = i + 1; }
+    return s;
+}
+fn main() i32 { let x = spin(1000u64); if x != 499500u64 { return 1; } return 0; }
+"#,
+    );
+    let mut r4 = p4.compile("runtime.spc");
+    assert_eq(r4.exit, 0);
+    let mut cc4 = p4.cc_build("");
+    assert_eq(cc4.exit, 0);
+    assert_eq(p4.run_bin(), 0);
+
+    // mutually recursive const fns are legal; const fn also runs as a normal function at runtime
+    let mut p5 = cli::proj_new();
+    p5.mkfile(
+        "rec.spc",
+        r#"const fn is_even(n: u32) bool { if n == 0 { return true; } return is_odd(n - 1); }
+const fn is_odd(n: u32) bool { if n == 0 { return false; } return is_even(n - 1); }
+static_assert(is_even(10));
+fn main(argv: Vector<str>) i32 { if is_even(argv.len() as u32 * 2) { return 0; } return 1; }
+"#,
+    );
+    let mut r5 = p5.compile("rec.spc");
+    assert_eq(r5.exit, 0);
+    let mut cc5 = p5.cc_build("");
+    assert_eq(cc5.exit, 0);
+    assert_eq(p5.run_bin(), 0);
+}
+
+// Mandatory evaluation of call-bearing const initializers: a non-evaluable initializer is a hard
+// error (even when the failure is silent, via the flush pass), a trapping one carries the trap,
+// and cross-module const-fn initializers work.
+@test
+fn mandatory_consts() {
+    let mut p = cli::proj_new();
+    p.mkfile(
+        "silent.spc",
+        r#"import stdlib;
+fn noisy() i32 { return unsafe stdlib::rand(); }
+const X: i32 = noisy() + 1;
+fn main() i32 { return X * 0; }
+"#,
+    );
+    p.expect_fail("silent.spc", "constant cannot be evaluated at compile time");
+
+    let mut p2 = cli::proj_new();
+    p2.mkfile(
+        "trap.spc",
+        r#"fn div(a: i32, b: i32) i32 { return a / b; }
+const D: i32 = div(1, 0);
+fn main() i32 { return D; }
+"#,
+    );
+    p2.expect_fail("trap.spc", "division by zero");
+
+    let mut p3 = cli::proj_new();
+    p3.mkfile("lib/cf.spc", "pub const fn triple(x: i32) i32 { return x * 3; }\n");
+    p3.mkfile(
+        "use.spc",
+        r#"import lib::cf;
+const T: i32 = lib::cf::triple(9);
+static_assert(T == 27);
+fn main() i32 { return T - 27; }
+"#,
+    );
+    let mut r3 = p3.compile("use.spc");
+    assert_eq(r3.exit, 0);
+    let mut cc3 = p3.cc_build("");
+    assert_eq(cc3.exit, 0);
+    assert_eq(p3.run_bin(), 0);
+
+    // a const pointing at freed compile-time memory is rejected
+    let mut p4 = cli::proj_new();
+    p4.mkfile(
+        "dang.spc",
+        r#"import stdlib;
+pub struct Holder { pub p: *mut i32 }
+fn mk() Holder {
+    let q = unsafe stdlib::malloc(4) as *mut i32;
+    unsafe stdlib::free(q as *mut void);
+    return Holder { p: q };
+}
+const H: Holder = mk();
+fn main() i32 { return 0; }
+"#,
+    );
+    p4.expect_fail("dang.spc", "freed compile-time memory");
+}
+
+// Aggregate materialization: compile-time-computed structs, Vectors, strings, shared pointers, and
+// cyclic heap graphs land as deterministic static C data (with relocations) and behave at runtime.
+@test
+fn materialized_consts() {
+    let mut p = cli::proj_new();
+    p.mkfile(
+        "mat.spc",
+        r#"import stdlib;
+pub struct Pt { pub x: i32, pub y: i32 }
+pub struct Node { pub v: i32, pub next: *mut Node }
+pub struct Pair { pub a: *mut Node, pub b: *mut Node }
+fn mid(a: Pt, b: Pt) Pt { return Pt { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
+fn evens(n: u32) Vector<u32> {
+    let mut v = Vector::<u32>::new();
+    for i in 0..n { v.push(i * 2); }
+    return v;
+}
+fn greet() str { return "hello"; }
+fn ring() Pair {
+    let a = unsafe stdlib::malloc(sizeof(Node)) as *mut Node;
+    let b = unsafe stdlib::malloc(sizeof(Node)) as *mut Node;
+    unsafe {
+        *a = Node { v: 1, next: b };
+        *b = Node { v: 2, next: a };
+    }
+    return Pair { a: a, b: b };
+}
+const M: Pt = mid(Pt { x: 2, y: 10 }, Pt { x: 6, y: 30 });
+const V: Vector<u32> = evens(5);
+const S: str = greet();
+const P: Pair = ring();
+fn main() i32 {
+    if M.x != 4 || M.y != 20 { return 1; }
+    if V.len() != 5 || *V.at(4) != 8u32 { return 2; }
+    if S.len() != 5 { return 3; }
+    unsafe {
+        if (*(*P.a).next).v != 2 { return 4; }
+        if (*(*P.b).next).v != 1 { return 5; }
+    }
+    return 0;
+}
+"#,
+    );
+    let mut r = p.compile("mat.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("mat.c", "__ct0"), "auxiliary statics are emitted");
+    assert(p.gen_has("mat.c", ".next = (void *)"), "pointer relocations are emitted");
+    let mut cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
+// Differential: a const fn produces the same value at compile time (const initializer) and at
+// runtime (plain call), for arithmetic- and branch-heavy bodies.
+@test
+fn ctfe_differential() {
+    let mut p = cli::proj_new();
+    p.mkfile(
+        "diff.spc",
+        r#"const fn mix(n: u32) u64 {
+    let mut h: u64 = 1469598103934665603u64;
+    let mut i: u32 = 0;
+    while i < n {
+        h = (h ^ i as u64) * 1099511628211u64;
+        if (h & 1u64) == 0u64 { h = h >> 1; } else { h = h * 3u64 + 1u64; }
+        i = i + 1;
+    }
+    return h;
+}
+const CT: u64 = mix(500);
+fn main(argv: Vector<str>) i32 {
+    let rt = mix(499 + argv.len() as u32);
+    if rt == CT { return 0; }
+    return 1;
+}
+"#,
+    );
+    let mut r = p.compile("diff.spc");
+    assert_eq(r.exit, 0);
+    let mut cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}

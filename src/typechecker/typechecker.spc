@@ -118,6 +118,7 @@ pub struct TypeChecker {
     pub mret_total: u32,
     pub unsafe_depth: u32,
     pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
+    pub len_reported: Vector<u64>, // array-length nodes already diagnosed ((module<<32)|node; resolve_type revisits)
     pub lint: bool,
     pub loop_stack: [LoopEntry; 32],
     pub nloops: u32,
@@ -398,6 +399,7 @@ extend TypeChecker {
             mret_total: 0,
             unsafe_depth: 0,
             unsafe_used: 0,
+            len_reported: Vector::<u64>::new(),
             lint: false,
             nloops: 0,
             loop_floor: 0,
@@ -1578,7 +1580,15 @@ extend TypeChecker {
             }
         }
         let sp = unsafe (*self.mod_ast(m)).at_const(aid).span;
-        self.errors.emit(sp.start, sp.end - sp.start, format("const generic argument must be a constant integer"));
+        if ceptr != null && unsafe (*ceptr).ce_trap_get().len() != 0 {
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("const generic argument must be a constant integer: {}", unsafe (*ceptr).ce_trap_detail()),
+            );
+        } else {
+            self.errors.emit(sp.start, sp.end - sp.start, format("const generic argument must be a constant integer"));
+        }
         return TYPE_ERROR;
     }
 
@@ -1591,7 +1601,82 @@ extend TypeChecker {
         if lv.kind == ce::CONST_INT && lv.as_data.i > 0 && lv.as_data.i <= 0xFFFFFFFFi64 {
             return lv.as_data.i as u32;
         }
+        // diagnose once per node; unsubstituted generic contexts stay silent (re-lowered at instantiation)
+        let key = m as u64 << 32 | lenNode as u64;
+        for i in 0..self.len_reported.len() {
+            if self.len_reported[i] == key {
+                return 0;
+            }
+        }
+        let sp = unsafe (*self.mod_ast(m)).at_const(lenNode).span;
+        if unsafe (*ceptr).ce_trap_get().len() != 0 {
+            self.len_reported.push(key);
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("array length cannot be evaluated: {}", unsafe (*ceptr).ce_trap_detail()),
+            );
+        } else if lv.kind != ce::CONST_NONE {
+            self.len_reported.push(key);
+            self.errors.emit(sp.start, sp.end - sp.start, format("array length must be a positive constant expression"));
+        } else if !self.tc_mentions_generic(m, lenNode, 0) {
+            self.len_reported.push(key);
+            self.errors.emit(sp.start, sp.end - sp.start, format("array length must be a constant expression"));
+        }
         return 0;
+    }
+
+    // Does the expression mention a generic parameter or a sizeof/alignof (possibly generic-typed)?
+    // Such lengths legitimately fail pre-instantiation and must not be diagnosed.
+    fn tc_mentions_generic(self: &Self, m: ModuleId, id: NodeId, depth: u32) bool {
+        if id == NODE_NONE || depth > 32 {
+            return true;
+        }
+        let a = self.mod_ast(m);
+        let n = unsafe (*a).at_const(id);
+        switch n.kind {
+            NODE_SIZEOF | NODE_ALIGNOF => {
+                return true;
+            },
+            NODE_IDENTIFIER => {
+                let d = unsafe (*a).resolution_def(id);
+                return d.node != NODE_NONE && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM;
+            },
+            NODE_MEMBER => {
+                if !n.as_data.member.path {
+                    return self.tc_mentions_generic(m, n.as_data.member.object, depth + 1);
+                }
+                let d = unsafe (*a).resolution_def(id);
+                return d.node != NODE_NONE && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM;
+            },
+            NODE_UNARY => {
+                return self.tc_mentions_generic(m, n.as_data.unary.operand, depth + 1);
+            },
+            NODE_BINARY => {
+                return self.tc_mentions_generic(m, n.as_data.binary.left, depth + 1) || self.tc_mentions_generic(
+                    m,
+                    n.as_data.binary.right,
+                    depth + 1,
+                );
+            },
+            NODE_CAST => {
+                return self.tc_mentions_generic(m, n.as_data.cast.expression, depth + 1);
+            },
+            NODE_CALL => {
+                let args = n.as_data.call.args;
+                for i in 0..args.len {
+                    if self.tc_mentions_generic(m, unsafe (*a).list(args)[i as usize], depth + 1) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            NODE_LITERAL => {
+                return false;
+            },
+            _ => {},
+        };
+        return true; // unknown shapes: assume generic-dependent (stay silent)
     }
 
     // Lower a type node in module `m` to an interned TypeId in the current pool.
@@ -8708,11 +8793,22 @@ extend TypeChecker {
                         let ceptr = self.ceval();
                         if ceptr != null && unsafe (*ceptr).eval(self.ast.module, el.as_data.field_initializer.name).kind == ce::CONST_NONE {
                             let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span;
-                            self.errors.emit(
-                                sp.start,
-                                sp.end - sp.start,
-                                format("array designator index must be a constant expression"),
-                            );
+                            if unsafe (*ceptr).ce_trap_get().len() != 0 {
+                                self.errors.emit(
+                                    sp.start,
+                                    sp.end - sp.start,
+                                    format(
+                                        "array designator index must be a constant expression: {}",
+                                        unsafe (*ceptr).ce_trap_detail(),
+                                    ),
+                                );
+                            } else {
+                                self.errors.emit(
+                                    sp.start,
+                                    sp.end - sp.start,
+                                    format("array designator index must be a constant expression"),
+                                );
+                            }
                         }
                     }
                 }
@@ -9005,6 +9101,108 @@ extend TypeChecker {
         }
     }
 
+    // Does the expression contain a call? A call-bearing const initializer requires execution to
+    // have a value, so it MUST fold at compile time; call-free initializers stay best-effort
+    // (they are already valid C constant expressions).
+    fn expr_has_call(self: &Self, id: NodeId, depth: u32) bool {
+        if id == NODE_NONE || depth > 64 {
+            return depth > 64;
+        }
+        let a = self.cur_ast();
+        let n = unsafe (*a).at_const(id);
+        switch n.kind {
+            NODE_CALL => {
+                return true;
+            },
+            NODE_UNARY => {
+                return self.expr_has_call(n.as_data.unary.operand, depth + 1);
+            },
+            NODE_BINARY | NODE_ASSIGNMENT => {
+                return self.expr_has_call(n.as_data.binary.left, depth + 1) || self.expr_has_call(
+                    n.as_data.binary.right,
+                    depth + 1,
+                );
+            },
+            NODE_CAST => {
+                return self.expr_has_call(n.as_data.cast.expression, depth + 1);
+            },
+            NODE_MEMBER => {
+                if n.as_data.member.path {
+                    return false;
+                }
+                return self.expr_has_call(n.as_data.member.object, depth + 1);
+            },
+            NODE_INDEX => {
+                return self.expr_has_call(n.as_data.index.object, depth + 1) || self.expr_has_call(
+                    n.as_data.index.index,
+                    depth + 1,
+                );
+            },
+            NODE_STRUCT_INITIALIZER => {
+                let fields = n.as_data.struct_initializer.fields;
+                for i in 0..fields.len {
+                    let fid = unsafe (*a).list(fields)[i as usize];
+                    if unsafe (*a).at_const(fid).kind == NodeKind::NODE_FIELD_INITIALIZER && self.expr_has_call(
+                        unsafe (*a).at_const(fid).as_data.field_initializer.value,
+                        depth + 1,
+                    ) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            NODE_ARRAY_LITERAL | NODE_TUPLE => {
+                let elements = n.as_data.array_literal.elements;
+                for i in 0..elements.len {
+                    if self.expr_has_call(unsafe (*a).list(elements)[i as usize], depth + 1) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            NODE_IF | NODE_MATCH | NODE_BLOCK => {
+                return true; // requires execution just like a call
+            },
+            _ => {},
+        };
+        return false;
+    }
+
+    // Mandatory evaluation of a call-bearing const initializer: failure with a trap is an error,
+    // undecidable-in-module-order defers to flush_consts (mirrors check_static_assert).
+    fn tc_mandatory_const(self: &mut Self, id: NodeId, value: NodeId) {
+        if !self.expr_has_call(value, 0) {
+            return;
+        }
+        let ceptr = self.ceval();
+        if ceptr == null {
+            return;
+        }
+        let m = self.ast.module;
+        let v = unsafe (*ceptr).eval(m, value);
+        if v.kind != ce::CONST_NONE {
+            return;
+        }
+        if unsafe (*ceptr).ce_trap_get().len() == 0 && unsafe (*ceptr).eval_static(m, value).ok {
+            return;
+        }
+        if unsafe (*ceptr).ce_trap_get().len() != 0 {
+            let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
+            let sp = self.name_span(cd.name);
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format(
+                    "constant '{}' cannot be evaluated at compile time: {}",
+                    diag::span_str(self.source, sp.start, sp.end),
+                    unsafe (*ceptr).ce_trap_detail(),
+                ),
+            );
+        } else {
+            unsafe (*ceptr).defer_const(m, id);
+        }
+    }
+
     fn check_static_assert(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let left = unsafe (*a).at_const(id).as_data.binary.left;
@@ -9030,7 +9228,11 @@ extend TypeChecker {
         } else if v.kind == ce::CONST_NONE {
             let trap = unsafe (*ceptr).ce_trap_get();
             if trap.len() != 0 {
-                self.errors.emit(sp.start, sp.end - sp.start, format("static assertion cannot be evaluated: {}", trap));
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("static assertion cannot be evaluated: {}", unsafe (*ceptr).ce_trap_detail()),
+                );
             } else {
                 unsafe (*ceptr).defer_assert(self.ast.module, left);
             }
@@ -9146,6 +9348,7 @@ extend TypeChecker {
                     if !self.compatible(declared, value) {
                         self.err_mismatch(value, declared);
                     }
+                    self.tc_mandatory_const(id, value);
                 }
                 unsafe (*self.cur_ast()).set_type(id, declared);
                 self.borrow_release_to(bm);
@@ -9680,6 +9883,32 @@ extend TypeChecker {
                         );
                     }
                 }
+                if fnd.is_const && fnd.body != NODE_NONE && !fnd.is_extern {
+                    let ceptr = self.ceval();
+                    if ceptr != null && unsafe (*ceptr).ce_fn_eligible(self.ast.module, id) == ce::FX_NO {
+                        let sp = self.name_span(fnd.name);
+                        let mut why: str = "cannot be evaluated at compile time";
+                        let r = unsafe (*ceptr).fx_no_reason(self.ast.module, id);
+                        if r != null {
+                            why = unsafe (*r).why;
+                        }
+                        self.errors.emit(
+                            sp.start,
+                            sp.end - sp.start,
+                            format(
+                                "function '{}' is declared 'const fn' but {}",
+                                diag::span_str(self.source, sp.start, sp.end),
+                                why,
+                            ),
+                        );
+                        if r != null && unsafe (*r).site != NODE_NONE {
+                            let ss = unsafe (*self.cur_ast()).at_const(unsafe (*r).site).span;
+                            self.errors.note(
+                                format("disqualified at '{}'", diag::span_str(self.source, ss.start, ss.end)),
+                            );
+                        }
+                    }
+                }
                 let saved = self.current_returns;
                 let savedfn = self.current_fn;
                 self.current_returns = fnd.returns;
@@ -9776,6 +10005,9 @@ extend TypeChecker {
                     self.check_expr(cd.value);
                     if !self.compatible(declared, cd.value) {
                         self.err_mismatch(cd.value, declared);
+                    }
+                    if !cd.is_extern && !cd.is_static_mut {
+                        self.tc_mandatory_const(id, cd.value);
                     }
                 }
                 if cd.is_static_mut && self.tc_type_is_free(declared) {
@@ -9903,6 +10135,7 @@ extend TypeChecker as Free {
     pub fn free(self: &mut Self) {
         self.ext_scope.free();
         self.ext_items.free();
+        self.len_reported.free();
         self.ext_items_built.free();
         self.binding_depth.free();
         self.last_use.free();

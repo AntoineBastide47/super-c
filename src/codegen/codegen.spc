@@ -7673,6 +7673,66 @@ extend Codegen {
         self.emit_str(" }");
     }
 
+    // Render a folded scalar as a C literal (typed suffixes, the INT64_MIN special case, %.17g
+    // floats). False when the value is not a foldable scalar.
+    fn emit_scalar_folded(self: &mut Self, v: ce::ConstValue) bool {
+        if v.kind == ce::CONST_BOOL {
+            if v.as_data.i != 0 {
+                self.emit_str("true");
+            } else {
+                self.emit_str("false");
+            }
+            return true;
+        }
+        if v.kind == ce::CONST_INT {
+            let mut vb = BuiltinType::BT_COUNT;
+            if v.ty != TYPE_NONE && self.type_at(v.ty).kind == TypeKind::TYPE_BUILTIN {
+                vb = self.type_at(v.ty).as_data.builtin;
+            }
+            let uns = vb == BuiltinType::BT_U8 || vb == BuiltinType::BT_U16 || vb == BuiltinType::BT_U32 || vb == BuiltinType::BT_U64 || vb == BuiltinType::BT_USIZE;
+            if uns {
+                if vb == BuiltinType::BT_U64 || vb == BuiltinType::BT_USIZE {
+                    self.buf.format_into("{}ULL", v.as_data.i as u64);
+                } else {
+                    self.buf.format_into("{}U", v.as_data.i as u64);
+                }
+            } else if v.as_data.i == -9223372036854775807i64 - 1 {
+                self.emit_str("(-9223372036854775807ll - 1)");
+            } else if vb == BuiltinType::BT_I64 || vb == BuiltinType::BT_ISIZE {
+                self.buf.format_into("{}LL", v.as_data.i);
+            } else if v.as_data.i > 0x7FFFFFFFi64 || v.as_data.i < -0x80000000i64 {
+                self.buf.format_into("{}ll", v.as_data.i);
+            } else {
+                self.buf.format_into("{}", v.as_data.i);
+            }
+            return true;
+        }
+        if v.kind == ce::CONST_FLOAT {
+            let mut f32t = false;
+            if v.ty != TYPE_NONE && self.type_at(v.ty).kind == TypeKind::TYPE_BUILTIN && self.type_at(v.ty).as_data.builtin == BuiltinType::BT_F32 {
+                f32t = true;
+            }
+            let mut fb = Buf64 {};
+            unsafe stdio::snprintf(&mut fb[0], 48, "%.17g".ptr() as *const char, v.as_data.f);
+            let fl = unsafe cstring::strlen(&fb[0]);
+            let has = unsafe cstring::memchr(&fb[0], '.' as i32, fl) != null || unsafe cstring::memchr(
+                &fb[0],
+                'e' as i32,
+                fl,
+            ) != null || unsafe cstring::memchr(&fb[0], 'E' as i32, fl) != null;
+            if !has {
+                bappend(&mut fb[0], 48, fl, ".0".ptr() as *const char);
+            }
+            if f32t {
+                self.buf.format_into("{}f", diag::cstr(&fb[0]));
+            } else {
+                self.emit_cstr(&fb[0]);
+            }
+            return true;
+        }
+        return false;
+    }
+
     fn emit_expr(self: &mut Self, id: NodeId) {
         if id == NODE_NONE {
             return;
@@ -7689,58 +7749,7 @@ extend Codegen {
             id,
         ) {
             let v = unsafe (*self.ceval()).eval(self.cur_module(), id);
-            if v.kind == ce::CONST_BOOL {
-                if v.as_data.i != 0 {
-                    self.emit_str("true");
-                } else {
-                    self.emit_str("false");
-                }
-                return;
-            }
-            if v.kind == ce::CONST_INT {
-                let mut vb = BuiltinType::BT_COUNT;
-                if v.ty != TYPE_NONE && self.type_at(v.ty).kind == TypeKind::TYPE_BUILTIN {
-                    vb = self.type_at(v.ty).as_data.builtin;
-                }
-                let uns = vb == BuiltinType::BT_U8 || vb == BuiltinType::BT_U16 || vb == BuiltinType::BT_U32 || vb == BuiltinType::BT_U64 || vb == BuiltinType::BT_USIZE;
-                if uns {
-                    if vb == BuiltinType::BT_U64 || vb == BuiltinType::BT_USIZE {
-                        self.buf.format_into("{}ULL", v.as_data.i as u64);
-                    } else {
-                        self.buf.format_into("{}U", v.as_data.i as u64);
-                    }
-                } else if v.as_data.i == -9223372036854775807i64 - 1 {
-                    self.emit_str("(-9223372036854775807ll - 1)");
-                } else if vb == BuiltinType::BT_I64 || vb == BuiltinType::BT_ISIZE {
-                    self.buf.format_into("{}LL", v.as_data.i);
-                } else if v.as_data.i > 0x7FFFFFFFi64 || v.as_data.i < -0x80000000i64 {
-                    self.buf.format_into("{}ll", v.as_data.i);
-                } else {
-                    self.buf.format_into("{}", v.as_data.i);
-                }
-                return;
-            }
-            if v.kind == ce::CONST_FLOAT {
-                let mut f32t = false;
-                if v.ty != TYPE_NONE && self.type_at(v.ty).kind == TypeKind::TYPE_BUILTIN && self.type_at(v.ty).as_data.builtin == BuiltinType::BT_F32 {
-                    f32t = true;
-                }
-                let mut fb = Buf64 {};
-                unsafe stdio::snprintf(&mut fb[0], 48, "%.17g".ptr() as *const char, v.as_data.f);
-                let fl = unsafe cstring::strlen(&fb[0]);
-                let has = unsafe cstring::memchr(&fb[0], '.' as i32, fl) != null || unsafe cstring::memchr(
-                    &fb[0],
-                    'e' as i32,
-                    fl,
-                ) != null || unsafe cstring::memchr(&fb[0], 'E' as i32, fl) != null;
-                if !has {
-                    bappend(&mut fb[0], 48, fl, ".0".ptr() as *const char);
-                }
-                if f32t {
-                    self.buf.format_into("{}f", diag::cstr(&fb[0]));
-                } else {
-                    self.emit_cstr(&fb[0]);
-                }
+            if self.emit_scalar_folded(v) {
                 return;
             }
         }
@@ -7818,7 +7827,19 @@ extend Codegen {
                 self.emit_str("(");
                 self.emit_expr(bd.left);
                 self.buf.format_into(" {} ", diag::cstr(c_op(bd.op)));
+                // The RHS of a short-circuit op only conditionally executes: a proven-UB fold
+                // failure inside it must not be promoted to an error.
+                let sc = bd.op == TokenType::AmpersandAmpersand || bd.op == TokenType::PipePipe;
+                let scce = self.ceval();
+                if sc && scce != null {
+                    let rp = unsafe (*scce).record_pause;
+                    unsafe (*scce).record_pause = rp + 1;
+                }
                 self.emit_expr(bd.right);
+                if sc && scce != null {
+                    let rp = unsafe (*scce).record_pause;
+                    unsafe (*scce).record_pause = rp - 1;
+                }
                 self.emit_str(")");
             },
             NODE_ASSIGNMENT => {
@@ -11117,6 +11138,487 @@ extend Codegen {
             self.emit_str("\n");
         }
     }
+    // --- materialized consts: CTFE object graphs rendered as static C data with relocations ----
+
+    // True when today's syntactic emission cannot yield a C constant expression (the initializer
+    // requires execution); only these attempt materialization, keeping all other output unchanged.
+    fn cg_init_needs_ctfe(self: &Self, id: NodeId) bool {
+        let a = self.cur_ast();
+        let n = unsafe (*a).at_const(id);
+        switch n.kind {
+            NODE_CALL | NODE_INDEX | NODE_IF | NODE_MATCH | NODE_BLOCK | NODE_CLOSURE => {
+                return true;
+            },
+            NODE_UNARY => {
+                return self.cg_init_needs_ctfe(n.as_data.unary.operand);
+            },
+            NODE_BINARY | NODE_ASSIGNMENT => {
+                return self.cg_init_needs_ctfe(n.as_data.binary.left) || self.cg_init_needs_ctfe(n.as_data.binary.right);
+            },
+            NODE_CAST => {
+                return self.cg_init_needs_ctfe(n.as_data.cast.expression);
+            },
+            NODE_MEMBER => {
+                if n.as_data.member.path {
+                    return false;
+                }
+                return self.cg_init_needs_ctfe(n.as_data.member.object);
+            },
+            NODE_STRUCT_INITIALIZER => {
+                let fields = n.as_data.struct_initializer.fields;
+                for i in 0..fields.len {
+                    let fid = unsafe (*a).list(fields)[i as usize];
+                    if unsafe (*a).at_const(fid).kind == NodeKind::NODE_FIELD_INITIALIZER && self.cg_init_needs_ctfe(
+                        unsafe (*a).at_const(fid).as_data.field_initializer.value,
+                    ) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            NODE_ARRAY_LITERAL | NODE_TUPLE => {
+                let elements = n.as_data.array_literal.elements;
+                for i in 0..elements.len {
+                    if self.cg_init_needs_ctfe(unsafe (*a).list(elements)[i as usize]) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            _ => {},
+        };
+        return false;
+    }
+
+    // C type (in the current pool) of a standalone static; TYPE_NONE when underivable.
+    fn cg_static_type(self: &mut Self, gi: u32) TypeId {
+        let ce = self.ceval();
+        let g = unsafe (*ce).static_at(gi);
+        let shape = unsafe (*g).shape;
+        if shape == ce::SS_HEAP || shape == ce::SS_ARRAY {
+            let em = unsafe (*g).etm;
+            let mut e = unsafe (*g).ety;
+            if em != self.cur_module() {
+                e = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(em), e);
+            }
+            if e == TYPE_NONE {
+                return TYPE_NONE;
+            }
+            let mut len = unsafe (*g).n;
+            if len == 0 {
+                len = 1;
+            }
+            return unsafe (*self.cur_ast()).intern_type(
+                Ty {
+                    kind: TypeKind::TYPE_ARRAY,
+                    module: self.cur_module(),
+                    as_data: TyAs { arr: TyArr { elem: e, len: len } },
+                },
+            );
+        }
+        if shape == ce::SS_ENUM {
+            return unsafe (*self.cur_ast()).intern_type(
+                Ty { kind: TypeKind::TYPE_ENUM, module: unsafe (*g).dm, as_data: TyAs { decl: unsafe (*g).dn } },
+            );
+        }
+        if shape == ce::SS_STRUCT {
+            if unsafe (*g).nargs == 0 {
+                return unsafe (*self.cur_ast()).intern_type(
+                    Ty { kind: TypeKind::TYPE_STRUCT, module: unsafe (*g).dm, as_data: TyAs { decl: unsafe (*g).dn } },
+                );
+            }
+            let mut args: [TypeId; 4] = [TYPE_NONE, TYPE_NONE, TYPE_NONE, TYPE_NONE];
+            for ci in 0..unsafe (*g).nargs {
+                let am = unsafe (*g).am[ci as usize];
+                let mut at2 = unsafe (*g).at[ci as usize];
+                if am != self.cur_module() {
+                    at2 = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(am), at2);
+                }
+                if at2 == TYPE_NONE {
+                    return TYPE_NONE;
+                }
+                args[ci as usize] = at2;
+            }
+            return unsafe (*self.cur_ast()).intern_instance(
+                unsafe (*g).dm,
+                unsafe (*g).dn,
+                (&args[0]) as *const TypeId,
+                unsafe (*g).nargs,
+            );
+        }
+        // SS_CELL
+        let em = unsafe (*g).etm;
+        let mut e = unsafe (*g).ety;
+        if em != self.cur_module() {
+            e = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(em), e);
+        }
+        return e;
+    }
+
+    // Emission preflight: every standalone must be typable, and function relocations must resolve
+    // to symbols visible where this const lands (headers see only public prototypes).
+    fn cg_static_group_ok(self: &mut Self, root: u32, is_public: bool) bool {
+        let ce = self.ceval();
+        let groupn = unsafe (*(*ce).static_at(root)).groupn;
+        for gi in root..root + groupn {
+            let g = unsafe (*ce).static_at(gi);
+            if unsafe (*g).parent == ce::S_NO_PARENT && gi != root && self.cg_static_type(gi) == TYPE_NONE {
+                return false;
+            }
+            for ri in 0..unsafe (*g).rels.len() {
+                let r = unsafe (*g).rels.at(ri);
+                if r.kind != ce::SREL_FN {
+                    continue;
+                }
+                let pubfn = unsafe (*self.mod_ast(r.fm)).at_const(r.fnode).as_data.function.is_public;
+                if !pubfn && (is_public || r.fm != self.cur_module()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    fn emit_static_field(self: &mut Self, dm: ModuleId, dn: NodeId, idx: u32) {
+        let a = self.mod_ast(dm);
+        if unsafe (*a).at_const(dn).as_data.aggregate.is_tuple {
+            self.buf.format_into("._{}", idx);
+            return;
+        }
+        let ms = unsafe (*a).at_const(dn).as_data.aggregate.members;
+        let mut fi: u32 = 0;
+        for i in 0..ms.len {
+            let fid = unsafe (*a).list(ms)[i as usize];
+            if unsafe (*a).at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            if fi == idx {
+                let mut fb = Buf128 {};
+                render_ident_src(
+                    self.mod_src(dm),
+                    self.name_span_in(dm, unsafe (*a).at_const(fid).as_data.field.name),
+                    &mut fb[0],
+                    128,
+                );
+                self.buf.format_into(".{}", diag::cstr(&fb[0]));
+                return;
+            }
+            fi = fi + 1;
+        }
+        self.buf.format_into("._{}", idx); // unreachable fallback
+    }
+
+    // The C lvalue path of static gi, rooted at its owner's name.
+    fn emit_static_path(self: &mut Self, name: *const char, gi: u32) {
+        let ce = self.ceval();
+        let g = unsafe (*ce).static_at(gi);
+        if unsafe (*g).parent == ce::S_NO_PARENT {
+            if unsafe (*g).ord == 0 {
+                self.emit_cstr(name);
+            } else {
+                self.buf.format_into("{}__ct{}", diag::cstr(name), unsafe (*g).ord - 1);
+            }
+            return;
+        }
+        let pi = unsafe (*g).parent;
+        self.emit_static_path(name, pi);
+        let p = unsafe (*ce).static_at(pi);
+        let pshape = unsafe (*p).shape;
+        let pslot = unsafe (*g).pslot;
+        if pshape == ce::SS_ARRAY || pshape == ce::SS_HEAP {
+            self.buf.format_into("[{}]", pslot);
+        } else if pshape == ce::SS_STRUCT {
+            self.emit_static_field(unsafe (*p).dm, unsafe (*p).dn, pslot);
+        } else if pshape == ce::SS_ENUM {
+            let a = self.mod_ast(unsafe (*p).dm);
+            let ms = unsafe (*a).at_const(unsafe (*p).dn).as_data.aggregate.members;
+            let tag = (unsafe (*p).slots.at(0).i) as u32;
+            let vid = unsafe (*a).list(ms)[tag as usize];
+            let mut vb = Buf128 {};
+            render_ident_src(
+                self.mod_src(unsafe (*p).dm),
+                self.name_span_in(unsafe (*p).dm, unsafe (*a).at_const(vid).as_data.variant.name),
+                &mut vb[0],
+                128,
+            );
+            self.buf.format_into(".payload.{}", diag::cstr(&vb[0]));
+            let vdat = unsafe (*a).at_const(vid).as_data.variant;
+            if vdat.struct_payload {
+                let pfid = unsafe (*a).list(vdat.payload)[(pslot - 1) as usize];
+                let mut fb = Buf128 {};
+                render_ident_src(
+                    self.mod_src(unsafe (*p).dm),
+                    self.name_span_in(unsafe (*p).dm, unsafe (*a).at_const(pfid).as_data.field.name),
+                    &mut fb[0],
+                    128,
+                );
+                self.buf.format_into(".{}", diag::cstr(&fb[0]));
+            } else {
+                self.buf.format_into("._{}", pslot - 1);
+            }
+        }
+        // SS_CELL parent: the cell IS the value; no path component
+    }
+
+    fn emit_static_rel(self: &mut Self, name: *const char, r: &ce::SRel) {
+        if r.kind == ce::SREL_FN {
+            let mut ov = Buf160 {};
+            if self.cg_symbol_override(r.fm, r.fnode, &mut ov[0], 160) {
+                self.emit_cstr(&ov[0]);
+                return;
+            }
+            let mut fb = Buf160 {};
+            self.render_qualified(
+                r.fm,
+                unsafe (*self.mod_ast(r.fm)).at_const(r.fnode).as_data.function.name,
+                &mut fb[0],
+                160,
+            );
+            self.emit_cstr(&fb[0]);
+            return;
+        }
+        let ce = self.ceval();
+        let tshape = unsafe (*(*ce).static_at(r.target)).shape;
+        if tshape == ce::SS_ARRAY || tshape == ce::SS_HEAP {
+            if r.toff == 0 {
+                self.emit_str("(void *)");
+                self.emit_static_path(name, r.target);
+            } else {
+                self.emit_str("(void *)&");
+                self.emit_static_path(name, r.target);
+                self.buf.format_into("[{}]", r.toff);
+            }
+            return;
+        }
+        self.emit_str("(void *)&");
+        self.emit_static_path(name, r.target);
+        if tshape == ce::SS_STRUCT && r.toff != 0 {
+            self.emit_static_field(
+                unsafe (*(*ce).static_at(r.target)).dm,
+                unsafe (*(*ce).static_at(r.target)).dn,
+                r.toff,
+            );
+        }
+    }
+
+    fn emit_static_slot(self: &mut Self, name: *const char, gi: u32, k: u32) {
+        let ce = self.ceval();
+        let g = unsafe (*ce).static_at(gi);
+        let s = *unsafe (*g).slots.at(k as usize);
+        if s.kind == ce::SK_ZERO {
+            self.emit_str("{0}");
+            return;
+        }
+        if s.kind == ce::SK_NULL {
+            self.emit_str("NULL");
+            return;
+        }
+        if s.kind == ce::SK_AGG {
+            self.emit_static_init(name, s.child);
+            return;
+        }
+        if s.kind == ce::SK_REL {
+            for ri in 0..unsafe (*g).rels.len() {
+                let r = unsafe (*g).rels.at(ri);
+                if r.slot == k {
+                    self.emit_static_rel(name, r);
+                    return;
+                }
+            }
+            self.emit_str("NULL"); // unreachable
+            return;
+        }
+        let mut ty = s.ty;
+        if ty != TYPE_NONE && s.tm != self.cur_module() {
+            ty = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(s.tm), ty);
+        }
+        let mut kind = ce::CONST_INT;
+        if s.kind == ce::SK_BOOL {
+            kind = ce::CONST_BOOL;
+        } else if s.kind == ce::SK_FLOAT {
+            kind = ce::CONST_FLOAT;
+        }
+        let mut v = ce::ConstValue { kind: kind, ty: ty, as_data: ce::ConstValueAs { i: s.i } };
+        if s.kind == ce::SK_FLOAT {
+            v.as_data.f = s.f;
+        }
+        self.emit_scalar_folded(v);
+    }
+
+    fn emit_static_init(self: &mut Self, name: *const char, gi: u32) {
+        let ce = self.ceval();
+        let g = unsafe (*ce).static_at(gi);
+        let shape = unsafe (*g).shape;
+        let nslots = (unsafe (*g).slots.len()) as u32;
+        if shape == ce::SS_CELL {
+            self.emit_static_slot(name, gi, 0);
+            return;
+        }
+        if shape == ce::SS_ARRAY || shape == ce::SS_HEAP {
+            let mut allzero = true;
+            for k in 0..nslots {
+                if unsafe (*g).slots.at(k as usize).kind != ce::SK_ZERO {
+                    allzero = false;
+                    break;
+                }
+            }
+            if allzero {
+                self.emit_str("{0}");
+                return;
+            }
+            // zero elements render per element-type shape: bare 0 for scalars, {0} for aggregates
+            let em = unsafe (*g).etm;
+            let mut et = unsafe (*g).ety;
+            if em != self.cur_module() {
+                et = unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(em), et);
+            }
+            let ek = self.type_at(et).kind;
+            let escalar = ek == TypeKind::TYPE_BUILTIN || ek == TypeKind::TYPE_POINTER || ek == TypeKind::TYPE_REFERENCE || ek == TypeKind::TYPE_FUNCTION;
+            self.emit_str("{ ");
+            for k in 0..nslots {
+                if k != 0 {
+                    self.emit_str(", ");
+                }
+                if unsafe (*g).slots.at(k as usize).kind == ce::SK_ZERO && escalar {
+                    self.emit_str("0");
+                } else {
+                    self.emit_static_slot(name, gi, k);
+                }
+            }
+            self.emit_str(" }");
+            return;
+        }
+        if shape == ce::SS_ENUM {
+            let dm = unsafe (*g).dm;
+            let dn = unsafe (*g).dn;
+            let a = self.mod_ast(dm);
+            let ms = unsafe (*a).at_const(dn).as_data.aggregate.members;
+            let tag = (unsafe (*g).slots.at(0).i) as u32;
+            if tag >= ms.len {
+                self.emit_str("{0}");
+                return;
+            }
+            let vid = unsafe (*a).list(ms)[tag as usize];
+            self.emit_str("{ .tag = ");
+            self.emit_tag_mod(dm, dn, vid);
+            let mut haspay = false;
+            for k in 1..nslots {
+                if unsafe (*g).slots.at(k as usize).kind != ce::SK_ZERO {
+                    haspay = true;
+                }
+            }
+            if haspay {
+                let vdat = unsafe (*a).at_const(vid).as_data.variant;
+                let mut vb = Buf128 {};
+                render_ident_src(self.mod_src(dm), self.name_span_in(dm, vdat.name), &mut vb[0], 128);
+                self.buf.format_into(", .payload.{} = ", diag::cstr(&vb[0]));
+                self.emit_str("{ ");
+                let mut first = true;
+                for k in 1..nslots {
+                    if unsafe (*g).slots.at(k as usize).kind == ce::SK_ZERO {
+                        continue;
+                    }
+                    if !first {
+                        self.emit_str(", ");
+                    }
+                    first = false;
+                    if vdat.struct_payload {
+                        let pfid = unsafe (*a).list(vdat.payload)[(k - 1) as usize];
+                        let mut fb = Buf128 {};
+                        render_ident_src(
+                            self.mod_src(dm),
+                            self.name_span_in(dm, unsafe (*a).at_const(pfid).as_data.field.name),
+                            &mut fb[0],
+                            128,
+                        );
+                        self.buf.format_into(".{} = ", diag::cstr(&fb[0]));
+                    } else {
+                        self.buf.format_into("._{} = ", k - 1);
+                    }
+                    self.emit_static_slot(name, gi, k);
+                }
+                self.emit_str(" }");
+            }
+            self.emit_str(" }");
+            return;
+        }
+        // SS_STRUCT
+        if nslots == 0 {
+            self.emit_str("{}");
+            return;
+        }
+        self.emit_str("{ ");
+        for k in 0..nslots {
+            if k != 0 {
+                self.emit_str(", ");
+            }
+            self.emit_static_field(unsafe (*g).dm, unsafe (*g).dn, k);
+            self.emit_str(" = ");
+            self.emit_static_slot(name, gi, k);
+        }
+        self.emit_str(" }");
+    }
+
+    fn emit_static_group(self: &mut Self, name: *const char, root: u32) {
+        let ce = self.ceval();
+        let groupn = unsafe (*(*ce).static_at(root)).groupn;
+        if groupn <= 1 {
+            return;
+        }
+        // tentative forward declarations first: back-references and cycles resolve against them
+        for gi in root + 1..root + groupn {
+            if unsafe (*(*ce).static_at(gi)).parent != ce::S_NO_PARENT {
+                continue;
+            }
+            let t = self.cg_static_type(gi);
+            let og = unsafe (*(*ce).static_at(gi)).ord;
+            let mut aux = Buf256 {};
+            unsafe stdio::snprintf(&mut aux[0], 256, "%s__ct%u".ptr() as *const char, name, og - 1);
+            let mut d = Buf512 {};
+            self.render_type_id(t, &aux[0], &mut d[0], 512);
+            self.emit_str("static const ");
+            self.emit_cstr(&d[0]);
+            self.emit_str(";\n");
+        }
+        for gi in root + 1..root + groupn {
+            if unsafe (*(*ce).static_at(gi)).parent != ce::S_NO_PARENT {
+                continue;
+            }
+            let t = self.cg_static_type(gi);
+            let og = unsafe (*(*ce).static_at(gi)).ord;
+            let mut aux = Buf256 {};
+            unsafe stdio::snprintf(&mut aux[0], 256, "%s__ct%u".ptr() as *const char, name, og - 1);
+            let mut d = Buf512 {};
+            self.render_type_id(t, &aux[0], &mut d[0], 512);
+            self.emit_str("__attribute__((unused)) static const ");
+            self.emit_cstr(&d[0]);
+            self.emit_str(" = ");
+            self.emit_static_init(name, gi);
+            self.emit_str(";\n");
+        }
+    }
+
+    // Materialize a call-bearing const initializer as static data; false = use the syntactic path.
+    fn emit_const_materialized(self: &mut Self, name: *const char, decl: *const char, value: NodeId, is_public: bool) bool {
+        if value == NODE_NONE || self.ceval() == null || !self.cg_init_needs_ctfe(value) {
+            return false;
+        }
+        let sr = unsafe (*self.ceval()).eval_static(self.cur_module(), value);
+        if !sr.ok {
+            return false;
+        }
+        if !self.cg_static_group_ok(sr.root, is_public) {
+            return false;
+        }
+        self.emit_static_group(name, sr.root);
+        self.emit_str("__attribute__((unused)) static const ");
+        self.emit_cstr(decl);
+        self.emit_str(" = ");
+        self.emit_static_init(name, sr.root);
+        self.emit_str(";\n");
+        return true;
+    }
+
     fn emit_toplevel_const(self: &mut Self, id: NodeId) {
         let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
         let mut nm = Buf160 {};
@@ -11131,6 +11633,9 @@ extend Codegen {
             self.emit_str(" = ");
             self.emit_initializer(cd.ty, cd.value);
             self.emit_str(";\n");
+            return;
+        }
+        if self.emit_const_materialized(&nm[0], &decl[0], cd.value, cd.is_public) {
             return;
         }
         if self.ceval() != null {
@@ -11187,6 +11692,9 @@ extend Codegen {
                 self.render_ident(csp, unsafe (np + k), 256 - k);
                 let mut decl = Buf320 {};
                 self.render_type_node(cd.ty, np as *const char, &mut decl[0], 320);
+                if self.emit_const_materialized(np as *const char, &decl[0], cd.value, cd.is_public) {
+                    continue;
+                }
                 if self.ceval() != null {
                     self.emit_str("__attribute__((unused)) ");
                 }
@@ -11751,6 +12259,10 @@ extend Codegen {
         }
     }
     pub fn codegen_emit_header(self: &mut Self, out: *mut stdio::FILE) {
+        if self.ceval() != null {
+            unsafe (*self.ceval()).record_folds = true;
+            unsafe (*self.ceval()).all_typed = true;
+        }
         self.build_enum_index();
         let mut guard = Buf160 {};
         let np = (&mut guard[0]) as *mut char;
@@ -11804,6 +12316,10 @@ extend Codegen {
         self.buf.clear();
     }
     pub fn codegen_emit(self: &mut Self, out: *mut stdio::FILE) {
+        if self.ceval() != null {
+            unsafe (*self.ceval()).record_folds = true;
+            unsafe (*self.ceval()).all_typed = true;
+        }
         self.build_enum_index();
         self.collect_insts();
         self.collect_callbacks();
@@ -11845,6 +12361,53 @@ extend Codegen {
                     "internal: a rendered C declaration exceeded its buffer (type too deeply nested); the emitted C would be invalid",
                 ),
             );
+        }
+        // Promoted fold failures (proven UB) recorded by the evaluator for this module become
+        // errors; only the outermost record of nested failing subexpressions is reported.
+        let ceptr = self.ceval();
+        if ceptr != null {
+            let nerr = unsafe (*ceptr).fold_errs.len();
+            for i in 0..nerr {
+                if unsafe (*ceptr).fold_errs.at(i).m != self.cur_module() {
+                    continue;
+                }
+                let rid = unsafe (*ceptr).fold_errs.at(i).id;
+                let sp = unsafe (*self.cur_ast()).at_const(rid).span;
+                let mut inner = false;
+                for j in 0..nerr {
+                    if j == i || unsafe (*ceptr).fold_errs.at(j).m != self.cur_module() {
+                        continue;
+                    }
+                    let sp2 = unsafe (*self.cur_ast()).at_const(unsafe (*ceptr).fold_errs.at(j).id).span;
+                    if sp2.start <= sp.start && sp.end <= sp2.end && (sp2.start < sp.start || sp.end < sp2.end) {
+                        inner = true;
+                        break;
+                    }
+                }
+                if inner {
+                    continue;
+                }
+                let rkind = unsafe (*ceptr).fold_errs.at(i).kind;
+                if ce::ce_trap_is_ub(rkind) {
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "expression has undefined behavior when evaluated: {}",
+                            diag::cstr(unsafe &(*ceptr).fold_errs.at(i).detail[0]),
+                        ),
+                    );
+                } else {
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "call to a 'const fn' cannot be evaluated at compile time: {}",
+                            diag::cstr(unsafe &(*ceptr).fold_errs.at(i).detail[0]),
+                        ),
+                    );
+                }
+            }
         }
         self.errors.finalize(src, file);
         if self.buf.len() != 0 {

@@ -565,7 +565,8 @@ the C compiler evaluates it.
 
 Always on. A constant evaluator, a layout engine (64-bit C data model), and a CTFE interpreter run
 as part of every compile; two flags bound how much work a single compile-time evaluation may do
-(exhausting a budget is never an error -- the expression simply stays a runtime one):
+(exhausting a budget is never an error for plain functions -- the expression simply stays a runtime
+one; `const fn` calls and const initializers are held to a stricter standard, below):
 
 ```sh
 ./super-c app.spc                                          # defaults: ~2M steps, ~96 MiB
@@ -577,7 +578,9 @@ as part of every compile; two flags bound how much work a single compile-time ev
   conditions (e.g. involving opaque `extern "C"` types or `va_list`) still lower to C
   `_Static_assert` as before.
 * Array designator indices may be any constant expression (`[K] = v`, `[K + 1] = v`); non-constant
-  indices become a Super-C error instead of invalid C.
+  indices become a Super-C error instead of invalid C. An array length that cannot be evaluated is
+  likewise a named error ("array length must be a constant expression") instead of silently
+  becoming length 0.
 * Array lengths become part of the type — `[i32; 4]` and `[i32; 8]` are distinct — which makes
   fixed-size arrays legal as generic type arguments (`Wrap<[i32; 4]>` embeds the array by value).
   Passing bare arrays through the std containers is not supported; wrap them in a struct.
@@ -587,10 +590,51 @@ as part of every compile; two flags bound how much work a single compile-time ev
 * Implicit CTFE: a call whose arguments are compile-time constants is RUN
   by an interpreter — loops, recursion, structs, arrays, payload enums, generic methods, floats
   (including the libm externs), and even heap code (`malloc`/`realloc`/`free` are intercepted into
-  an abstract compile-time heap, so a `Vector`-building function folds to its result). Anything
-  unmodeled, or over budget, stays a runtime call. A `static_assert` may call functions defined
-  anywhere (undecidable asserts are re-checked once the whole package has type-checked), and one
-  that would trap reports the reason (`division by zero`, `use after free`, ...).
+  an abstract compile-time heap, so a `Vector`-building function folds to its result). For a plain
+  function anything unmodeled, or over budget, stays a runtime call. A `static_assert` may call
+  functions defined anywhere (undecidable asserts are re-checked once the whole package has
+  type-checked), and one that would trap reports the reason (`division by zero`, `use after
+  free`, ...) together with the CTFE call stack and steps consumed.
+* Diagnosed misuse: a constant-dependency cycle (`const A = B; const B = A;`) is reported as
+  `cyclic constant dependency` instead of burning the step budget, and an emitted expression whose
+  evaluation *proves* undefined behavior (division by zero, out-of-bounds access, use after free)
+  fails the build even where folding is otherwise optional — a short-circuited `&&`/`||` operand
+  that never executes is exempt.
+
+### `const fn` and mandatory evaluation
+
+```superc
+const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }
+
+fn evens(n: u32) Vector<u32> {                 // plain functions work too
+    let mut v = Vector::<u32>::new();
+    for i in 0..n { v.push(i * 2); }
+    return v;
+}
+
+const N: usize = table_size(8);                // mandatory: must evaluate, or compile error
+const V: Vector<u32> = evens(5);               // materialized as static C data (relocations included)
+```
+
+`const fn` marks a function as compile-time evaluable and is validated at the definition: a
+`const fn` that certainly cannot evaluate (calls a non-intercepted extern, touches a `static mut`,
+is variadic — directly or transitively) is a compile error naming the disqualifier. Calls through
+function values, dyn, or generic bounds are permitted at the definition and enforced where they are
+used. A `const fn` is still a normal C function at runtime.
+
+The strictness rules:
+
+* A call to a `const fn` whose arguments are compile-time known MUST evaluate — any failure
+  (unsupported operation, budget exhaustion, trap) is a compile error, in every context. Only
+  plain (non-`const`) functions keep the silent runtime fallback.
+* A const declaration whose initializer contains a call must evaluate at compile time; failure is
+  an error carrying the trap reason and CTFE call stack. Call-free initializers keep best-effort
+  folding (they are already valid C constant expressions). Local consts inside generic functions
+  are exempt until instantiation.
+* Aggregate results materialize: structs, arrays, strings, `Vector`s, shared and even cyclic
+  pointer graphs built at compile time are emitted as deterministic `static const` C data, with
+  auxiliary objects (`NAME__ct0`, ...) and pointer relocations. A const that points at freed
+  compile-time memory is rejected.
 
 ## Generated output
 
@@ -651,7 +695,9 @@ structs/methods/visibility, enums with payloads and pattern matching (including 
 guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
 cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
 (`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), first-class tuples, the `?` early-return
-operator, compile-time evaluation (constant folding, layout, and full CTFE with an abstract heap), `panic` /
+operator, compile-time evaluation (constant folding, layout, and full CTFE with an abstract heap; `const fn`
+with definition-site validation, mandatory evaluation of call-bearing const initializers, aggregate consts
+materialized as static C data with relocations, cycle detection, and proven-UB fold errors), `panic` /
 `unwrap` / `expect` with a `never` type for diverging calls, RAII-style
 automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
 use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with

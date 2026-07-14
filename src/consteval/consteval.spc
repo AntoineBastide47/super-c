@@ -26,6 +26,7 @@ pub const CONST_NONE: u8 = 0;
 pub const CONST_INT: u8 = 1;
 pub const CONST_BOOL: u8 = 2;
 pub const CONST_FLOAT: u8 = 3;
+pub const CONST_EVALUATING: u8 = 4; // in-flight memo sentinel (cycle detection); never escapes eval
 
 pub const CV_NIL_K: u8 = 0;
 pub const CV_INT: u8 = 1;
@@ -34,6 +35,48 @@ pub const CV_FLOAT: u8 = 3;
 pub const CV_PTR: u8 = 4;
 pub const CV_AGG: u8 = 5;
 pub const CV_FN: u8 = 6;
+
+// Trap kinds partition into "cannot evaluate" (BUDGET_*/CYCLE/TOO_LARGE/UNSUPPORTED), "definite
+// outcome if this code runs" (PANIC, UB_*); UB kinds stay contiguous so ce_trap_is_ub is a range check.
+pub const CE_TRAP_NONE: u8 = 0;
+pub const CE_TRAP_BUDGET_STEPS: u8 = 1;
+pub const CE_TRAP_BUDGET_MEMORY: u8 = 2;
+pub const CE_TRAP_BUDGET_DEPTH: u8 = 3;
+pub const CE_TRAP_CYCLE: u8 = 4;
+pub const CE_TRAP_TOO_LARGE: u8 = 5;
+pub const CE_TRAP_UNSUPPORTED: u8 = 6;
+pub const CE_TRAP_PANIC: u8 = 7;
+pub const CE_TRAP_UB_DIV_ZERO: u8 = 8;
+pub const CE_TRAP_UB_OVERFLOW: u8 = 9;
+pub const CE_TRAP_UB_SHIFT: u8 = 10;
+pub const CE_TRAP_UB_NULL_DEREF: u8 = 11;
+pub const CE_TRAP_UB_USE_AFTER_FREE: u8 = 12;
+pub const CE_TRAP_UB_DOUBLE_FREE: u8 = 13;
+pub const CE_TRAP_UB_OOB: u8 = 14;
+
+pub fn ce_trap_is_ub(k: u8) bool {
+    return k >= CE_TRAP_UB_DIV_ZERO;
+}
+
+// Effect-summary verdicts: NO = evaluation is certain to fail (a hard disqualifier on the
+// unconditionally-executed spine); MAYBE = unknown (dispatch, conditionals, fn values); YES =
+// everything reachable on the spine is evaluable. Consumers only distinguish NO vs not-NO, so
+// gray (ONSTACK) edges in recursive scans are neutral and full SCC machinery is unnecessary.
+pub const FX_UNKNOWN: u8 = 0;
+pub const FX_YES: u8 = 1;
+pub const FX_MAYBE: u8 = 2;
+pub const FX_NO: u8 = 3;
+pub const FX_ONSTACK: u8 = 4;
+
+fn fx_meet(a: u8, b: u8) u8 {
+    if a == FX_NO || b == FX_NO {
+        return FX_NO;
+    }
+    if a == FX_MAYBE || b == FX_MAYBE {
+        return FX_MAYBE;
+    }
+    return FX_YES;
+}
 
 // statement outcomes
 pub enum Flow {
@@ -97,6 +140,7 @@ pub struct CePending {
 // Fixed-buffer wrappers: a struct field zero-inits its array (Super-C has no `[v; N]` repeat-init).
 pub type Buf64 = Array<char, 64>;
 pub type Buf24 = Array<char, 24>;
+pub type Buf512 = Array<char, 512>;
 pub type Buf4096 = Array<u8, 4096>;
 
 // --- layout engine structs ----------------------------------------------------------------------
@@ -232,6 +276,24 @@ pub struct UFree {
     pub user: bool,
 }
 
+// Why a function's effect verdict is FX_NO: the first disqualifying site found on its spine.
+pub struct FxNo {
+    pub m: ModuleId,
+    pub fn_id: NodeId,
+    pub site: NodeId,
+    pub why: str,
+}
+
+// A fold failure codegen must surface as an error: proven UB (and, once `const fn` lands, any
+// failed const-fn fold). detail is rendered eagerly — trap state is reused by later evals.
+pub struct CeFoldErr {
+    pub m: ModuleId,
+    pub id: NodeId,
+    pub kind: u8,
+    pub constfn: bool, // the failure happened at or below a `const fn` frame
+    pub detail: Buf512,
+}
+
 pub struct ConstEval {
     pub pkg: *mut loader::Package,
     pub vals: Vector<Vector<ConstValue>>, // [module][node] memo tables
@@ -244,9 +306,26 @@ pub struct ConstEval {
     pub objs: Vector<CeObj>,
     pub live_slots: u64,
     pub trap: str,
+    pub trap_kind: u8,
+    pub trap_steps: u32,
+    pub trap_nframes: u8,
+    pub trap_stack: [CvFn; 48], // fstack snapshot at first trap (CE_MAX_FRAMES entries)
+    pub fstack: [CvFn; 48], // live CTFE call stack, indexed by nframes
+    pub dbuf: Buf512, // trap-detail render buffer (ce_trap_detail)
+    pub record_folds: bool, // armed during codegen emission: failed folds with promotable traps are recorded
+    pub record_pause: u32, // >0 while codegen emits a short-circuit-guarded subexpression (&&/|| RHS)
+    pub trap_in_constfn: bool, // a failed evaluation involved a `const fn` frame: always promotable
+    pub all_typed: bool, // every module is typechecked: silent failures are no longer module-order artifacts
+    pub fold_errs: Vector<CeFoldErr>,
     pub pending: Vector<CePending>,
+    pub pending_consts: Vector<CePending>, // const decls undecidable in module order (cond = NODE_CONST)
     pub calls: Map<CeCallKey, CeCallHit>,
     pub ufree: Vector<UFree>,
+    pub fx: Vector<Vector<u8>>, // [module][fn node] effect verdicts (FX_*)
+    pub fx_no: Vector<FxNo>,
+    pub fx_depth: u32,
+    pub statics: Vector<StaticObj>, // materialized const object graphs (grouped per root)
+    pub sref: Vector<Vector<i64>>, // [module][node] eval_static memo: 0 unattempted, -1 failed, else root+1
 }
 
 // --- small result structs (replace C out-params) ------------------------------------------------
@@ -378,12 +457,25 @@ extend ConstEval {
             objs: Vector::<CeObj>::new(),
             live_slots: 0,
             trap: "",
+            record_folds: false,
+            record_pause: 0,
+            trap_in_constfn: false,
+            all_typed: false,
+            fold_errs: Vector::<CeFoldErr>::new(),
             pending: Vector::<CePending>::new(),
+            pending_consts: Vector::<CePending>::new(),
             calls: Map::<CeCallKey, CeCallHit>::new(),
             ufree: Vector::<UFree>::new(),
+            fx: Vector::<Vector<u8>>::new(),
+            fx_no: Vector::<FxNo>::new(),
+            fx_depth: 0,
+            statics: Vector::<StaticObj>::new(),
+            sref: Vector::<Vector<i64>>::new(),
         };
         for _ in 0..count {
             ce.vals.push(Vector::<ConstValue>::new());
+            ce.fx.push(Vector::<u8>::new());
+            ce.sref.push(Vector::<i64>::new());
         }
         return ce;
     }
@@ -426,15 +518,39 @@ extend ConstEval {
     }
 
     @c.cold
-    fn ce_trap(self: &mut Self, msg: str) {
+    fn ce_trap(self: &mut Self, kind: u8, msg: str) {
         if self.trap.len() == 0 {
             self.trap = msg;
+            self.trap_kind = kind;
+            self.trap_steps = self.steps;
+            let mut n = self.nframes;
+            if n > CE_MAX_FRAMES {
+                n = CE_MAX_FRAMES;
+            }
+            self.trap_nframes = n as u8;
+            for i in 0..n {
+                self.trap_stack[i as usize] = self.fstack[i as usize];
+            }
         }
     }
+    // Speculative-probe guard: an evaluation that does not imply runtime execution must not leave a
+    // trap behind. First-write-wins makes discard O(1): the probe can only have written if empty before.
+    fn trap_mark(self: &Self) bool {
+        return self.trap.len() != 0;
+    }
+    fn trap_discard(self: &mut Self, was: bool) {
+        if !was && self.trap.len() != 0 {
+            self.trap = "";
+            self.trap_kind = CE_TRAP_NONE;
+            self.trap_nframes = 0;
+            self.trap_in_constfn = false;
+        }
+    }
+
     fn ce_tick(self: &mut Self) bool {
         self.steps = self.steps + 1;
         if self.steps > self.max_steps {
-            self.ce_trap("const-eval step budget exceeded");
+            self.ce_trap(CE_TRAP_BUDGET_STEPS, "const-eval step budget exceeded");
             return false;
         }
         return true;
@@ -1397,7 +1513,7 @@ extend ConstEval {
 
     fn ce_obj_new(self: &mut Self, len: u32) u32 {
         if self.objs.len() as u32 >= CE_MAX_OBJS || self.live_slots + len as u64 > self.max_slots {
-            self.ce_trap("const-eval memory budget exceeded");
+            self.ce_trap(CE_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return 0;
         }
         let mut slots = Vector::<CeVal>::new();
@@ -1415,7 +1531,7 @@ extend ConstEval {
     fn ce_obj_resize(self: &mut Self, id: u32, len: u32) bool {
         let cur = (unsafe (*self.obj_ptr(id)).slots.len()) as u32;
         if len > cur && self.live_slots + (len - cur) as u64 > self.max_slots {
-            self.ce_trap("const-eval memory budget exceeded");
+            self.ce_trap(CE_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return false;
         }
         let o = self.obj_ptr(id);
@@ -1522,7 +1638,7 @@ extend ConstEval {
             return ValRes { ok: false };
         }
         if p.as_data.p.obj == 0 {
-            self.ce_trap("null dereference");
+            self.ce_trap(CE_TRAP_UB_NULL_DEREF, "null dereference");
             return ValRes { ok: false };
         }
         let o = self.obj_ptr(p.as_data.p.obj);
@@ -1530,11 +1646,11 @@ extend ConstEval {
             return ValRes { ok: false };
         }
         if unsafe (*o).dead != 0 {
-            self.ce_trap("use after free");
+            self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
             return ValRes { ok: false };
         }
         if p.as_data.p.off as usize >= unsafe (*o).slots.len() {
-            self.ce_trap("out-of-bounds access");
+            self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
             return ValRes { ok: false };
         }
         let out = unsafe (*o).slots[p.as_data.p.off as usize];
@@ -1546,7 +1662,7 @@ extend ConstEval {
             return false;
         }
         if p.as_data.p.obj == 0 {
-            self.ce_trap("null dereference");
+            self.ce_trap(CE_TRAP_UB_NULL_DEREF, "null dereference");
             return false;
         }
         let cv = self.ce_clone(v, 0);
@@ -1558,11 +1674,11 @@ extend ConstEval {
             return false;
         }
         if unsafe (*o).dead != 0 {
-            self.ce_trap("use after free");
+            self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
             return false;
         }
         if p.as_data.p.off as usize >= unsafe (*o).slots.len() {
-            self.ce_trap("out-of-bounds access");
+            self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
         unsafe (*o).slots.set(p.as_data.p.off as usize, cv);
@@ -1675,14 +1791,14 @@ extend ConstEval {
                 },
                 Slash => {
                     if ur == 0 {
-                        self.ce_trap("division by zero");
+                        self.ce_trap(CE_TRAP_UB_DIV_ZERO, "division by zero");
                         return cv_nil();
                     }
                     u = ul / ur;
                 },
                 Percent => {
                     if ur == 0 {
-                        self.ce_trap("division by zero");
+                        self.ce_trap(CE_TRAP_UB_DIV_ZERO, "division by zero");
                         return cv_nil();
                     }
                     u = ul % ur;
@@ -1698,14 +1814,14 @@ extend ConstEval {
                 },
                 LeftShift => {
                     if r.as_data.i < 0 || r.as_data.i >= bits as i64 {
-                        self.ce_trap("shift out of range");
+                        self.ce_trap(CE_TRAP_UB_SHIFT, "shift out of range");
                         return cv_nil();
                     }
                     u = ul << r.as_data.i as u64;
                 },
                 RightShift => {
                     if r.as_data.i < 0 || r.as_data.i >= bits as i64 {
-                        self.ce_trap("shift out of range");
+                        self.ce_trap(CE_TRAP_UB_SHIFT, "shift out of range");
                         return cv_nil();
                     }
                     u = ul >> r.as_data.i as u64;
@@ -1727,7 +1843,7 @@ extend ConstEval {
             Plus => {
                 let o = add_ovf(li, ri);
                 if o.ovf {
-                    self.ce_trap("arithmetic overflow");
+                    self.ce_trap(CE_TRAP_UB_OVERFLOW, "arithmetic overflow");
                     return cv_nil();
                 }
                 v = o.v;
@@ -1735,7 +1851,7 @@ extend ConstEval {
             Minus => {
                 let o = sub_ovf(li, ri);
                 if o.ovf {
-                    self.ce_trap("arithmetic overflow");
+                    self.ce_trap(CE_TRAP_UB_OVERFLOW, "arithmetic overflow");
                     return cv_nil();
                 }
                 v = o.v;
@@ -1743,29 +1859,29 @@ extend ConstEval {
             Star => {
                 let o = mul_ovf(li, ri);
                 if o.ovf {
-                    self.ce_trap("arithmetic overflow");
+                    self.ce_trap(CE_TRAP_UB_OVERFLOW, "arithmetic overflow");
                     return cv_nil();
                 }
                 v = o.v;
             },
             Slash => {
                 if ri == 0 {
-                    self.ce_trap("division by zero");
+                    self.ce_trap(CE_TRAP_UB_DIV_ZERO, "division by zero");
                     return cv_nil();
                 }
                 if ri == -1 && li == type_min {
-                    self.ce_trap("arithmetic overflow");
+                    self.ce_trap(CE_TRAP_UB_OVERFLOW, "arithmetic overflow");
                     return cv_nil();
                 }
                 v = li / ri;
             },
             Percent => {
                 if ri == 0 {
-                    self.ce_trap("division by zero");
+                    self.ce_trap(CE_TRAP_UB_DIV_ZERO, "division by zero");
                     return cv_nil();
                 }
                 if ri == -1 && li == type_min {
-                    self.ce_trap("arithmetic overflow");
+                    self.ce_trap(CE_TRAP_UB_OVERFLOW, "arithmetic overflow");
                     return cv_nil();
                 }
                 v = li % ri;
@@ -1781,14 +1897,14 @@ extend ConstEval {
             },
             LeftShift => {
                 if ri < 0 || ri >= bits as i64 {
-                    self.ce_trap("shift out of range");
+                    self.ce_trap(CE_TRAP_UB_SHIFT, "shift out of range");
                     return cv_nil();
                 }
                 v = wrap_to(ob, (li as u64 << ri as u64) as i64);
             },
             RightShift => {
                 if ri < 0 || ri >= bits as i64 {
-                    self.ce_trap("shift out of range");
+                    self.ce_trap(CE_TRAP_UB_SHIFT, "shift out of range");
                     return cv_nil();
                 }
                 v = li >> ri;
@@ -1799,7 +1915,7 @@ extend ConstEval {
         };
         if b != BuiltinType::BT_COUNT && !fits(b, v) {
             if bt_signed(b) {
-                self.ce_trap("arithmetic overflow");
+                self.ce_trap(CE_TRAP_UB_OVERFLOW, "arithmetic overflow");
             }
             return cv_nil();
         }
@@ -2092,12 +2208,16 @@ extend ConstEval {
         if !self.ce_range_decl((&mut dm) as *mut ModuleId, (&mut dn) as *mut NodeId) {
             return cv_nil();
         }
+        let was_s = self.trap_mark();
         let mut sv = self.ev_in(f, m, start_n);
         if sv.kind == CV_NIL_K {
+            self.trap_discard(was_s);
             sv = self.ev_in(null, m, start_n);
         }
+        let was_e = self.trap_mark();
         let mut e = self.ev_in(f, m, end_n);
         if e.kind == CV_NIL_K {
+            self.trap_discard(was_e);
             e = self.ev_in(null, m, end_n);
         }
         if sv.kind == CV_PTR {
@@ -2391,7 +2511,7 @@ extend ConstEval {
                 }
                 let olen = (unsafe (*self.obj_ptr(br.obj)).slots.len()) as u64;
                 if iv.as_data.i < 0 || iv.as_data.i as u64 >= olen {
-                    self.ce_trap("out-of-bounds access");
+                    self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
                     return ValRes { ok: false };
                 }
                 return ValRes {
@@ -2445,6 +2565,19 @@ extend ConstEval {
             return ValRes { ok: false };
         }
         return ValRes { ok: false };
+    }
+
+    // A const's initializer evaluated under the memo sentinel, so dependency cycles trap as CYCLE
+    // instead of burning the depth/step budget.
+    fn ev_const_init(self: &mut Self, dm: ModuleId, dval: NodeId) CeVal {
+        if self.slot_get(dm, dval).kind == CONST_EVALUATING {
+            self.ce_trap(CE_TRAP_CYCLE, "cyclic constant dependency");
+            return cv_nil();
+        }
+        self.slot_set(dm, dval, ConstValue { kind: CONST_EVALUATING });
+        let v = self.ev_in(null, dm, dval);
+        self.slot_set(dm, dval, ce_none());
+        return v;
     }
 
     fn ev(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
@@ -2525,7 +2658,7 @@ extend ConstEval {
             if dk != NodeKind::NODE_CONST || dval == NODE_NONE || is_static_mut {
                 return cv_nil();
             }
-            let mut v = self.ev_in(null, d.module, dval);
+            let mut v = self.ev_const_init(d.module, dval);
             if v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT {
                 v.tm = m;
                 v.ty = rt;
@@ -2546,7 +2679,7 @@ extend ConstEval {
                     let dval = unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.value;
                     let is_sm = unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut;
                     if dval != NODE_NONE && !is_sm {
-                        let mut v = self.ev_in(null, d.module, dval);
+                        let mut v = self.ev_const_init(d.module, dval);
                         if v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT {
                             v.tm = m;
                             v.ty = rt;
@@ -2712,6 +2845,7 @@ extend ConstEval {
             return self.ev_in(f, m, operand);
         }
         if op == TokenType::Ampersand {
+            let was = self.trap_mark();
             let pr = self.ev_place(f, m, operand);
             if pr.ok {
                 let mut p = pr.v;
@@ -2719,6 +2853,7 @@ extend ConstEval {
                 p.ty = rt;
                 return p;
             }
+            self.trap_discard(was);
             let v = self.ev_in(f, m, operand);
             if v.kind == CV_NIL_K {
                 return cv_nil();
@@ -2956,10 +3091,12 @@ extend ConstEval {
                         return cv_nil();
                     }
                     let mut lhs = cv_nil();
+                    let was_lp = self.trap_mark();
                     let lp = self.ev_place(f, m, left);
                     if lp.ok {
                         lhs = lp.v;
                     } else {
+                        self.trap_discard(was_lp);
                         let lv = self.ev_in(f, m, left);
                         let tr = self.ce_temp_place(lv);
                         if lv.kind == CV_NIL_K || !tr.ok {
@@ -2968,10 +3105,12 @@ extend ConstEval {
                         lhs = tr.v;
                     }
                     let mut rhs = cv_nil();
+                    let was_rp = self.trap_mark();
                     let rp = self.ev_place(f, m, right);
                     if rp.ok {
                         rhs = rp.v;
                     } else {
+                        self.trap_discard(was_rp);
                         let rv = self.ev_rval(f, m, right);
                         let tr = self.ce_temp_place(rv);
                         if rv.kind == CV_NIL_K || !tr.ok {
@@ -3032,7 +3171,14 @@ extend ConstEval {
         if l.kind == CV_NIL_K {
             return cv_nil();
         }
+        // A short-circuited RHS never executes at runtime: still evaluated (fold result unchanged),
+        // but any trap it leaves is speculative and gets scrubbed.
+        let dead_rhs = l.kind == CV_BOOL && (op == TokenType::AmpersandAmpersand && l.as_data.i == 0 || op == TokenType::PipePipe && l.as_data.i != 0);
+        let was = self.trap_mark();
         let r = self.ev_rval(f, m, right);
+        if dead_rhs {
+            self.trap_discard(was);
+        }
         if r.kind == CV_NIL_K {
             return cv_nil();
         }
@@ -3178,10 +3324,12 @@ extend ConstEval {
                 return cv_nil();
             }
             let mut recv = cv_nil();
+            let was_rp = self.trap_mark();
             let rp = self.ev_place(f, m, obj_n);
             if rp.ok {
                 recv = rp.v;
             } else {
+                self.trap_discard(was_rp);
                 let rv = self.ev_in(f, m, obj_n);
                 let tr = self.ce_temp_place(rv);
                 if rv.kind == CV_NIL_K || !tr.ok {
@@ -3602,10 +3750,12 @@ extend ConstEval {
             let children = unsafe (*a).at_const(pid).as_data.pattern.children;
             for i in 0..children.len {
                 let cid = unsafe (*a).list(children)[i as usize];
+                let was = self.trap_mark();
                 let r = self.pat_match(f, m, cid, v, uns, refobj);
                 if r != 0 {
                     return r;
                 }
+                self.trap_discard(was);
             }
             return 0;
         }
@@ -3767,11 +3917,13 @@ extend ConstEval {
             let pattern = unsafe (*a).at_const(aid).as_data.match_arm.pattern;
             let guard_n = unsafe (*a).at_const(aid).as_data.match_arm.guard;
             let body = unsafe (*a).at_const(aid).as_data.match_arm.body;
+            let was = self.trap_mark();
             let hit = self.pat_match(f, m, pattern, v, uns, refobj);
             if hit < 0 {
                 return Flow::Bail;
             }
             if hit == 0 {
+                self.trap_discard(was);
                 continue;
             }
             if guard_n != NODE_NONE {
@@ -3854,6 +4006,15 @@ extend ConstEval {
             id = unsafe (*a).at_const(id).as_data.unary.operand;
         }
         let k = unsafe (*a).at_const(id).kind;
+        if k == NodeKind::NODE_UNARY {
+            // a statement-position `unsafe { ... }`/`move { ... }` block: execute it as statements
+            // (ev_block would skip a trailing assignment and yield no value)
+            let op = unsafe (*a).at_const(id).as_data.unary.op;
+            let operand = unsafe (*a).at_const(id).as_data.unary.operand;
+            if (op == TokenType::Move || op == TokenType::Unsafe) && unsafe (*a).at_const(operand).kind == NodeKind::NODE_BLOCK {
+                return self.exec_stmt(f, m, operand);
+            }
+        }
         if k == NodeKind::NODE_ASSIGNMENT {
             return self.exec_assign(f, m, id);
         }
@@ -4292,6 +4453,309 @@ fn cv_is_scalar(v: CeVal) bool {
     return v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT;
 }
 
+// --- effect summary (fx) --------------------------------------------------------------------------
+// Lazy, memoized, per-function CTFE-eligibility verdicts. FX_NO is kept tight: it must imply the
+// interpreter would fail anyway (so consulting it never changes a fold result). The scan covers the
+// body's leading straight-line statements only and stops at the first control-flow statement;
+// within an expression everything is spine because the interpreter evaluates eagerly (only
+// if/match/closures defer their subtrees).
+
+extend ConstEval {
+    fn fx_slot(self: &Self, m: ModuleId, id: NodeId) u8 {
+        if m as usize >= self.fx.len() {
+            return FX_UNKNOWN;
+        }
+        let inner = self.fx.at(m as usize);
+        if id as usize >= inner.len() {
+            return FX_UNKNOWN;
+        }
+        return inner[id as usize];
+    }
+    fn fx_set(self: &mut Self, m: ModuleId, id: NodeId, v: u8) {
+        if m as usize >= self.fx.len() {
+            return;
+        }
+        let inner = &mut self.fx[m as usize];
+        while inner.len() <= id as usize {
+            inner.push(FX_UNKNOWN);
+        }
+        inner.set(id as usize, v);
+    }
+
+    @c.cold
+    fn fx_disq(self: &mut Self, m: ModuleId, owner: NodeId, site: NodeId, why: str) u8 {
+        self.fx_no.push(FxNo { m: m, fn_id: owner, site: site, why: why });
+        return FX_NO;
+    }
+
+    pub fn fx_get(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+        if m as usize >= self.nmods || !self.has_ast(m) {
+            return FX_MAYBE;
+        }
+        let cur = self.fx_slot(m, fn_id);
+        if cur != FX_UNKNOWN {
+            return cur;
+        }
+        if self.fx_depth >= 128 {
+            return FX_MAYBE; // not memoized: a cap-dependent verdict must not stick
+        }
+        self.fx_set(m, fn_id, FX_ONSTACK);
+        self.fx_depth = self.fx_depth + 1;
+        let v = self.fx_scan_fn(m, fn_id);
+        self.fx_depth = self.fx_depth - 1;
+        self.fx_set(m, fn_id, v);
+        return v;
+    }
+
+    // Part C's `const fn` validation surface: the verdict, and the recorded disqualifier for NO.
+    pub fn ce_fn_eligible(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+        return self.fx_get(m, fn_id);
+    }
+    pub fn fx_no_reason(self: &Self, m: ModuleId, fn_id: NodeId) *const FxNo {
+        for i in 0..self.fx_no.len() {
+            let r = self.fx_no.at(i);
+            if r.m == m && r.fn_id == fn_id {
+                return r as *const FxNo;
+            }
+        }
+        return null;
+    }
+
+    fn fx_scan_fn(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+        let a = self.ast_ptr(m);
+        if unsafe (*a).nodes.len() == 0 || unsafe (*a).at_const(fn_id).kind != NodeKind::NODE_FUNCTION {
+            return FX_MAYBE;
+        }
+        let fd = unsafe (*a).at_const(fn_id).as_data.function;
+        if fd.is_extern || fd.body == NODE_NONE {
+            return FX_MAYBE; // externs are classified at their call sites; bodyless may re-dispatch
+        }
+        if fd.is_variadic {
+            return self.fx_disq(m, fn_id, fn_id, "is variadic");
+        }
+        return self.fx_scan_stmts(m, fn_id, fd.body, 0);
+    }
+
+    // Leading straight-line statements of a block; stops at the first control-flow statement.
+    fn fx_scan_stmts(self: &mut Self, m: ModuleId, owner: NodeId, block: NodeId, depth: u32) u8 {
+        let a = self.ast_ptr(m);
+        if depth > 64 || unsafe (*a).at_const(block).kind != NodeKind::NODE_BLOCK {
+            return FX_MAYBE;
+        }
+        let stmts = unsafe (*a).at_const(block).as_data.block.statements;
+        let mut acc = FX_YES;
+        for i in 0..stmts.len {
+            let sid = unsafe (*a).list(stmts)[i as usize];
+            let k = unsafe (*a).at_const(sid).kind;
+            let mut s = FX_YES;
+            if k == NodeKind::NODE_EXPRESSION_STATEMENT {
+                s = self.fx_scan_expr(m, owner, unsafe (*a).at_const(sid).as_data.single.value, depth + 1);
+            } else if k == NodeKind::NODE_LET {
+                let v = unsafe (*a).at_const(sid).as_data.let_stmt.value;
+                if v != NODE_NONE {
+                    s = self.fx_scan_expr(m, owner, v, depth + 1);
+                }
+            } else if k == NodeKind::NODE_RETURN {
+                let values = unsafe (*a).at_const(sid).as_data.return_stmt.values;
+                for j in 0..values.len {
+                    s = fx_meet(s, self.fx_scan_expr(m, owner, unsafe (*a).list(values)[j as usize], depth + 1));
+                }
+                return fx_meet(acc, s); // nothing executes after a spine return
+            } else if k == NodeKind::NODE_BLOCK {
+                s = self.fx_scan_stmts(m, owner, sid, depth + 1);
+            } else if k == NodeKind::NODE_STATIC_ASSERT {
+                continue;
+            } else {
+                return fx_meet(acc, FX_MAYBE); // control flow: the spine ends here
+            }
+            acc = fx_meet(acc, s);
+            if acc == FX_NO {
+                return FX_NO;
+            }
+        }
+        return acc;
+    }
+
+    fn fx_scan_expr(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
+        if id == NODE_NONE {
+            return FX_YES;
+        }
+        if depth > 64 {
+            return FX_MAYBE;
+        }
+        let a = self.ast_ptr(m);
+        let n = unsafe (*a).at_const(id);
+        switch n.kind {
+            NODE_LITERAL | NODE_SIZEOF | NODE_ALIGNOF => {
+                return FX_YES;
+            },
+            NODE_IDENTIFIER => {
+                let d = unsafe (*a).resolution_def(id);
+                if d.node != NODE_NONE && d.module as usize < self.nmods && unsafe (*self.ast_ptr(d.module)).at_const(
+                    d.node,
+                ).kind == NodeKind::NODE_CONST && unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut {
+                    return self.fx_disq(m, owner, id, "accesses a 'static mut'");
+                }
+                return FX_YES;
+            },
+            NODE_MEMBER => {
+                if n.as_data.member.path {
+                    let d = unsafe (*a).resolution_def(id);
+                    if d.node != NODE_NONE && d.module as usize < self.nmods && unsafe (*self.ast_ptr(d.module)).at_const(
+                        d.node,
+                    ).kind == NodeKind::NODE_CONST && unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut {
+                        return self.fx_disq(m, owner, id, "accesses a 'static mut'");
+                    }
+                    return FX_YES;
+                }
+                return self.fx_scan_expr(m, owner, n.as_data.member.object, depth + 1);
+            },
+            NODE_UNARY => {
+                let operand = n.as_data.unary.operand;
+                if unsafe (*a).at_const(operand).kind == NodeKind::NODE_BLOCK {
+                    return self.fx_scan_stmts(m, owner, operand, depth + 1);
+                }
+                return self.fx_scan_expr(m, owner, operand, depth + 1);
+            },
+            NODE_BINARY | NODE_ASSIGNMENT => {
+                let l = self.fx_scan_expr(m, owner, n.as_data.binary.left, depth + 1);
+                if l == FX_NO {
+                    return FX_NO;
+                }
+                return fx_meet(l, self.fx_scan_expr(m, owner, n.as_data.binary.right, depth + 1));
+            },
+            NODE_CAST => {
+                return self.fx_scan_expr(m, owner, n.as_data.cast.expression, depth + 1);
+            },
+            NODE_INDEX => {
+                let o = self.fx_scan_expr(m, owner, n.as_data.index.object, depth + 1);
+                if o == FX_NO {
+                    return FX_NO;
+                }
+                return fx_meet(o, self.fx_scan_expr(m, owner, n.as_data.index.index, depth + 1));
+            },
+            NODE_STRUCT_INITIALIZER => {
+                let fields = n.as_data.struct_initializer.fields;
+                let mut acc = FX_YES;
+                for i in 0..fields.len {
+                    let fid = unsafe (*a).list(fields)[i as usize];
+                    if unsafe (*a).at_const(fid).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                        acc = fx_meet(
+                            acc,
+                            self.fx_scan_expr(
+                                m,
+                                owner,
+                                unsafe (*a).at_const(fid).as_data.field_initializer.value,
+                                depth + 1,
+                            ),
+                        );
+                    }
+                    if acc == FX_NO {
+                        return FX_NO;
+                    }
+                }
+                return acc;
+            },
+            NODE_ARRAY_LITERAL | NODE_TUPLE => {
+                let elements = n.as_data.array_literal.elements;
+                let mut acc = FX_YES;
+                for i in 0..elements.len {
+                    acc = fx_meet(acc, self.fx_scan_expr(m, owner, unsafe (*a).list(elements)[i as usize], depth + 1));
+                    if acc == FX_NO {
+                        return FX_NO;
+                    }
+                }
+                return acc;
+            },
+            NODE_RANGE => {
+                let s = self.fx_scan_expr(m, owner, n.as_data.pattern_range.start, depth + 1);
+                if s == FX_NO {
+                    return FX_NO;
+                }
+                return fx_meet(s, self.fx_scan_expr(m, owner, n.as_data.pattern_range.end, depth + 1));
+            },
+            NODE_BLOCK => {
+                return self.fx_scan_stmts(m, owner, id, depth + 1);
+            },
+            NODE_CALL => {
+                return self.fx_scan_call(m, owner, id, depth);
+            },
+            _ => {},
+        };
+        return FX_MAYBE; // if/match/closures and anything unmodeled: conditional or unknown
+    }
+
+    fn fx_scan_call(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
+        let a = self.ast_ptr(m);
+        let mut callee = unsafe (*a).at_const(id).as_data.call.callee;
+        if unsafe (*a).at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            callee = unsafe (*a).at_const(callee).as_data.specialization.expression;
+        }
+        let ck = unsafe (*a).at_const(callee).kind;
+        let call_args = unsafe (*a).at_const(id).as_data.call.args;
+        let mut acc = FX_YES;
+        for i in 0..call_args.len {
+            acc = fx_meet(acc, self.fx_scan_expr(m, owner, unsafe (*a).list(call_args)[i as usize], depth + 1));
+            if acc == FX_NO {
+                return FX_NO;
+            }
+        }
+        let mut is_path = ck == NodeKind::NODE_IDENTIFIER;
+        if ck == NodeKind::NODE_MEMBER && unsafe (*a).at_const(callee).as_data.member.path {
+            is_path = true;
+        }
+        if !is_path {
+            if ck == NodeKind::NODE_MEMBER {
+                let o = self.fx_scan_expr(m, owner, unsafe (*a).at_const(callee).as_data.member.object, depth + 1);
+                if o == FX_NO {
+                    return FX_NO;
+                }
+            }
+            return FX_MAYBE; // method dispatch / fn values: unresolvable statically
+        }
+        let mut fd = unsafe (*a).resolution_def(callee);
+        if fd.node == NODE_NONE && ck == NodeKind::NODE_MEMBER {
+            fd = unsafe (*a).resolution_def(unsafe (*a).at_const(callee).as_data.member.member);
+        }
+        if fd.node == NODE_NONE && ck == NodeKind::NODE_IDENTIFIER {
+            fd = DefId { module: m, node: unsafe (*a).resolution(callee) };
+        }
+        if fd.node == NODE_NONE || fd.module as usize >= self.nmods || !self.has_ast(fd.module) {
+            return FX_MAYBE;
+        }
+        let fa = self.ast_ptr(fd.module);
+        let dk = unsafe (*fa).at_const(fd.node).kind;
+        if dk == NodeKind::NODE_VARIANT {
+            return acc; // enum constructor: args already scanned
+        }
+        if dk != NodeKind::NODE_FUNCTION {
+            return FX_MAYBE; // fn value bound to a const/local
+        }
+        let cfd = unsafe (*fa).at_const(fd.node).as_data.function;
+        if cfd.is_extern {
+            let nm = self.name_text(fd.module, cfd.name);
+            if self.ce_intercept_name(fd.module, nm) {
+                return acc;
+            }
+            return self.fx_disq(m, owner, id, "calls an extern function");
+        }
+        if cfd.is_variadic {
+            return self.fx_disq(m, owner, id, "calls a variadic function");
+        }
+        if cfd.body == NODE_NONE {
+            return FX_MAYBE; // interface requirement: dispatch may substitute a concrete method
+        }
+        let cv = self.fx_get(fd.module, fd.node);
+        if cv == FX_NO {
+            return self.fx_disq(m, owner, id, "calls a function that cannot be evaluated at compile time");
+        }
+        if cv == FX_ONSTACK {
+            return acc; // gray edge: neutral (recursion is legal)
+        }
+        return fx_meet(acc, cv);
+    }
+}
+
 // --- calls --------------------------------------------------------------------------------------
 
 extend ConstEval {
@@ -4369,6 +4833,39 @@ extend ConstEval {
         return true;
     }
 
+    // Does ce_intercept model this extern name? Heap/trap names are listed here (keep in sync with
+    // ce_intercept below); libm names route through libm1/libm2 so those lists cannot drift.
+    fn ce_intercept_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
+        if self.ce_span_is(fm, nm, "malloc") || self.ce_span_is(fm, nm, "realloc") || self.ce_span_is(fm, nm, "free") || self.ce_span_is(
+            fm,
+            nm,
+            "memset",
+        ) || self.ce_span_is(fm, nm, "abort") || self.ce_span_is(fm, nm, "__sc_panic_str") || self.ce_span_is(
+            fm,
+            nm,
+            "__sc_panic",
+        ) {
+            return true;
+        }
+        let ln = (nm.end - nm.start) as usize;
+        if ln == 0 || ln >= 24 {
+            return false;
+        }
+        let mut name = Buf24 {};
+        for ci in 0..ln {
+            name[ci] = (unsafe self.ce_src(fm)[nm.start as usize + ci]) as char;
+        }
+        name[ln] = 0 as char;
+        if ln > 1 && name[ln - 1] == 'f' as char {
+            name[ln - 1] = 0 as char;
+        }
+        let nv = diag::cstr(&name[0]);
+        if nv == "fma" {
+            return true;
+        }
+        return libm1(nv, 0.0).ok || libm2(nv, 0.0, 0.0).ok;
+    }
+
     // Intercepted extern calls: the C heap, the trap runtime, and libm.
     fn ce_intercept(
         self: &mut Self,
@@ -4422,7 +4919,7 @@ extend ConstEval {
                 return out;
             }
             if unsafe (*b).dead != 0 {
-                self.ce_trap("use after free");
+                self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
                 return out;
             }
             if unsafe (*b).et != TYPE_NONE {
@@ -4458,7 +4955,7 @@ extend ConstEval {
                 return out;
             }
             if unsafe (*b).dead != 0 {
-                self.ce_trap("double free");
+                self.ce_trap(CE_TRAP_UB_DOUBLE_FREE, "double free");
                 return out;
             }
             unsafe (*b).dead = 1;
@@ -4479,7 +4976,7 @@ extend ConstEval {
                 return out;
             }
             if unsafe (*b).dead != 0 {
-                self.ce_trap("use after free");
+                self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
                 return out;
             }
             if unsafe (*b).et == TYPE_NONE && unsafe args[0].as_data.p.off == 0 {
@@ -4500,7 +4997,7 @@ extend ConstEval {
             let count = n / esz;
             let off = (unsafe args[0].as_data.p.off) as u64;
             if off + count > (unsafe (*bb).slots.len()) as u64 {
-                self.ce_trap("out-of-bounds access");
+                self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
                 return out;
             }
             let mut fill = cv_nil();
@@ -4530,11 +5027,11 @@ extend ConstEval {
             return out;
         }
         if self.ce_span_is(fm, nm, "abort") {
-            self.ce_trap("abort reached at compile time");
+            self.ce_trap(CE_TRAP_PANIC, "abort reached at compile time");
             return out;
         }
         if self.ce_span_is(fm, nm, "__sc_panic_str") || self.ce_span_is(fm, nm, "__sc_panic") {
-            self.ce_trap("panic reached at compile time");
+            self.ce_trap(CE_TRAP_PANIC, "panic reached at compile time");
             return out;
         }
         // libm
@@ -4588,8 +5085,55 @@ extend ConstEval {
         return out;
     }
 
-    // Run a resolved concrete function/closure body in a fresh frame.
+    // Run a resolved concrete function/closure body in a fresh frame. A failed invoke of a
+    // `const fn` is always promotable (the annotation is a guarantee): flag it, synthesizing an
+    // UNSUPPORTED trap when the failure was silent.
     fn ce_invoke(
+        self: &mut Self,
+        fm: ModuleId,
+        fnode: NodeId,
+        extend_node: NodeId,
+        recv: *const CeRecv,
+        monom: *const ModuleId,
+        monot: *const TypeId,
+        nmono: u8,
+        args: *const CeVal,
+        nargs: u32,
+        self_pm: ModuleId,
+        self_decl: NodeId,
+        self_am: ModuleId,
+        self_at: TypeId,
+    ) Rets {
+        let r = self.ce_invoke_inner(
+            fm,
+            fnode,
+            extend_node,
+            recv,
+            monom,
+            monot,
+            nmono,
+            args,
+            nargs,
+            self_pm,
+            self_decl,
+            self_am,
+            self_at,
+        );
+        if !r.ok {
+            let fa = self.ast_ptr(fm);
+            if unsafe (*fa).at_const(fnode).kind == NodeKind::NODE_FUNCTION && unsafe (*fa).at_const(fnode).as_data.function.is_const {
+                // a silent failure before the whole package is typed may just be module order:
+                // only synthesize the definite trap once all_typed (flush/codegen phases)
+                if self.trap.len() == 0 && self.all_typed {
+                    self.ce_trap(CE_TRAP_UNSUPPORTED, "const function cannot be evaluated at compile time");
+                }
+                self.trap_in_constfn = true;
+            }
+        }
+        return r;
+    }
+
+    fn ce_invoke_inner(
         self: &mut Self,
         fm: ModuleId,
         fnode: NodeId,
@@ -4626,8 +5170,12 @@ extend ConstEval {
         if !closure && unsafe (*fa).at_const(fnode).as_data.function.is_variadic {
             return out;
         }
+        // Prefilter: FX_NO means evaluation is certain to fail, so skip interpreting the body.
+        if !closure && self.fx_get(fm, fnode) == FX_NO {
+            return out;
+        }
         if self.nframes >= CE_MAX_FRAMES {
-            self.ce_trap("const-eval call depth exceeded");
+            self.ce_trap(CE_TRAP_BUDGET_DEPTH, "const-eval call depth exceeded");
             return out;
         }
         let mut g = ce_frame_zero();
@@ -4726,6 +5274,7 @@ extend ConstEval {
                 return out;
             }
         }
+        self.fstack[self.nframes as usize] = CvFn { m: fm, fn_id: fnode };
         self.nframes = self.nframes + 1;
         let saved = self.depth;
         self.depth = 0;
@@ -4902,10 +5451,12 @@ extend ConstEval {
                         return out;
                     }
                     let mut recv = cv_nil();
+                    let was_pr = self.trap_mark();
                     let pr = self.ev_place(f, m, recv_expr);
                     if pr.ok {
                         recv = pr.v;
                     } else {
+                        self.trap_discard(was_pr);
                         let rv = self.ev_in(f, m, recv_expr);
                         if rv.kind == CV_PTR {
                             recv = rv;
@@ -5132,10 +5683,12 @@ extend ConstEval {
                         return out;
                     }
                 } else {
+                    let was_pr = self.trap_mark();
                     let pr = self.ev_place(f, m, recv_expr);
                     if pr.ok {
                         argv[na as usize] = pr.v;
                     } else {
+                        self.trap_discard(was_pr);
                         let rv = self.ev_in(f, m, recv_expr);
                         let tr = self.ce_temp_place(rv);
                         if rv.kind == CV_NIL_K || !tr.ok {
@@ -5257,6 +5810,10 @@ extend ConstEval {
             return ce_none();
         }
         let memo = self.slot_get(m, id);
+        if memo.kind == CONST_EVALUATING {
+            self.ce_trap(CE_TRAP_CYCLE, "cyclic constant dependency");
+            return ce_none();
+        }
         if memo.kind != CONST_NONE {
             return memo;
         }
@@ -5267,8 +5824,12 @@ extend ConstEval {
         if top {
             self.steps = 0;
             self.trap = "";
+            self.trap_kind = CE_TRAP_NONE;
+            self.trap_nframes = 0;
+            self.trap_in_constfn = false;
             self.ce_objs_reset();
         }
+        self.slot_set(m, id, ConstValue { kind: CONST_EVALUATING });
         self.depth = self.depth + 1;
         let v = self.ev(null, m, id);
         self.depth = self.depth - 1;
@@ -5276,9 +5837,13 @@ extend ConstEval {
         if top {
             self.ce_objs_reset();
         }
-        if pub_v.kind != CONST_NONE {
-            self.slot_set(m, id, pub_v);
+        if top && self.record_folds && self.record_pause == 0 && pub_v.kind == CONST_NONE && (ce_trap_is_ub(
+            self.trap_kind,
+        ) || self.trap_in_constfn) {
+            self.record_fold_err(m, id);
         }
+        // success stores the value; failure restores CONST_NONE (clears the sentinel)
+        self.slot_set(m, id, pub_v);
         return pub_v;
     }
 
@@ -5286,8 +5851,158 @@ extend ConstEval {
         return self.trap;
     }
 
+    @c.cold
+    fn record_fold_err(self: &mut Self, m: ModuleId, id: NodeId) {
+        // dedupe: emits_own_parens + emit_expr probe the same failing id twice
+        for i in 0..self.fold_errs.len() {
+            let r = self.fold_errs.at(i);
+            if r.m == m && r.id == id {
+                return;
+            }
+        }
+        let detail = self.ce_trap_detail();
+        let mut rec = CeFoldErr { m: m, id: id, kind: self.trap_kind, constfn: self.trap_in_constfn };
+        let mut i: usize = 0;
+        while i < detail.len() && i + 1 < 512 {
+            rec.detail[i] = detail[i] as char;
+            i = i + 1;
+        }
+        rec.detail[i] = 0 as char;
+        self.fold_errs.push(rec);
+    }
+
+    pub fn ce_trap_kind_get(self: &Self) u8 {
+        return self.trap_kind;
+    }
+
+    // ---- trap detail rendering (allocation-free, into dbuf) ----
+    fn db_push(self: &mut Self, pos: usize, s: str) usize {
+        let mut p = pos;
+        let mut i: usize = 0;
+        while i < s.len() && p + 1 < 512 {
+            self.dbuf[p] = s[i] as char;
+            p = p + 1;
+            i = i + 1;
+        }
+        return p;
+    }
+    fn db_push_u32(self: &mut Self, pos: usize, v0: u32) usize {
+        let mut tmp = Buf24 {};
+        let mut n: usize = 0;
+        let mut v = v0;
+        do {
+            tmp[n] = (b'0' + (v % 10) as u8) as char;
+            v = v / 10;
+            n = n + 1;
+        } while v != 0;
+        let mut p = pos;
+        while n > 0 && p + 1 < 512 {
+            n = n - 1;
+            self.dbuf[p] = tmp[n];
+            p = p + 1;
+        }
+        return p;
+    }
+    fn db_push_span(self: &mut Self, pos: usize, m: ModuleId, sp: tok::Span) usize {
+        let src = self.ce_src(m);
+        let mut p = pos;
+        let mut i = sp.start;
+        while i < sp.end && p + 1 < 512 {
+            self.dbuf[p] = src[i as usize] as char;
+            p = p + 1;
+            i = i + 1;
+        }
+        return p;
+    }
+
+    // "<msg> (call stack: outer -> ... -> inner; steps: N/limit)"; sections omitted when empty.
+    pub fn ce_trap_detail(self: &mut Self) str {
+        let t = self.trap;
+        let mut p = self.db_push(0, t);
+        let nf = self.trap_nframes as u32;
+        if nf != 0 {
+            p = self.db_push(p, " (call stack: ");
+            let mut show = nf;
+            if show > 8 {
+                show = 8;
+                p = self.db_push(p, "... -> ");
+            }
+            let mut i = nf - show;
+            while i < nf {
+                if i != nf - show {
+                    p = self.db_push(p, " -> ");
+                }
+                let fv = self.trap_stack[i as usize];
+                let a = self.ast_ptr(fv.m);
+                if unsafe (*a).at_const(fv.fn_id).kind == NodeKind::NODE_FUNCTION {
+                    let nm = self.name_text(fv.m, unsafe (*a).at_const(fv.fn_id).as_data.function.name);
+                    p = self.db_push_span(p, fv.m, nm);
+                } else {
+                    p = self.db_push(p, "<closure>");
+                }
+                i = i + 1;
+            }
+            p = self.db_push(p, "; steps: ");
+            p = self.db_push_u32(p, self.trap_steps);
+            p = self.db_push(p, "/");
+            p = self.db_push_u32(p, self.max_steps);
+            p = self.db_push(p, ")");
+        } else if self.trap_kind == CE_TRAP_BUDGET_STEPS || self.trap_kind == CE_TRAP_BUDGET_MEMORY {
+            p = self.db_push(p, " (steps: ");
+            p = self.db_push_u32(p, self.trap_steps);
+            p = self.db_push(p, "/");
+            p = self.db_push_u32(p, self.max_steps);
+            p = self.db_push(p, "; see --const-eval-steps/--const-eval-memory)");
+        }
+        self.dbuf[p] = 0 as char;
+        return diag::cstr(&self.dbuf[0]);
+    }
+
     pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId) {
         self.pending.push(CePending { m: m, cond: cond });
+    }
+
+    // A call-bearing const initializer undecidable in module order: re-checked by flush_consts.
+    pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId) {
+        self.pending_consts.push(CePending { m: m, cond: decl });
+    }
+
+    pub fn flush_consts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
+        for i in 0..self.pending_consts.len() {
+            let p = self.pending_consts[i];
+            let value = unsafe (*self.ast_ptr(p.m)).at_const(p.cond).as_data.const_def.value;
+            let v = self.eval(p.m, value);
+            if v.kind != CONST_NONE {
+                continue;
+            }
+            if self.trap.len() == 0 && self.eval_static(p.m, value).ok {
+                continue;
+            }
+            if self.trap.len() != 0 {
+                err(ctx, p.m, p.cond, self.ce_trap_detail().ptr() as *const char);
+            } else if self.ce_const_is_item(p.m, p.cond) {
+                // every module is typed now, so a top-level const has no legitimate silent failure
+                // left (only unsubstituted generics do, and those are local)
+                err(
+                    ctx,
+                    p.m,
+                    p.cond,
+                    "the initializer requires execution but could not be evaluated".ptr() as *const char,
+                );
+            }
+        }
+        self.pending_consts.clear();
+    }
+
+    fn ce_const_is_item(self: &Self, m: ModuleId, id: NodeId) bool {
+        let a = self.ast_ptr(m);
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            if unsafe (*a).list(items)[i as usize] == id {
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn flush_asserts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
@@ -5297,20 +6012,504 @@ extend ConstEval {
             if v.kind == CONST_BOOL && v.as_data.i == 0 {
                 err(ctx, p.m, p.cond, null);
             } else if v.kind == CONST_NONE && self.trap.len() != 0 {
-                err(ctx, p.m, p.cond, self.trap.ptr() as *const char);
+                err(ctx, p.m, p.cond, self.ce_trap_detail().ptr() as *const char);
             }
         }
         self.pending.clear();
     }
 }
 
+// --- static materialization -----------------------------------------------------------------------
+// eval_static evaluates a const initializer like eval(), then serializes the resulting object graph
+// into eval-lifetime-independent StaticObj records that codegen renders as static C data with
+// relocations. Object identity is preserved (same CeObj -> same static), so shared and cyclic
+// pointer graphs survive; deep-clone-on-store guarantees each object is embedded by value in at
+// most one parent slot, so only pointers can multi-reference.
+
+pub const CE_STATIC_MAX_SLOTS: u64 = 1048576u64; // 1<<20 serialized slots per constant
+
+pub const SS_STRUCT: u8 = 0;
+pub const SS_ENUM: u8 = 1;
+pub const SS_ARRAY: u8 = 2;
+pub const SS_HEAP: u8 = 3;
+pub const SS_CELL: u8 = 4;
+
+pub const SK_ZERO: u8 = 0;
+pub const SK_INT: u8 = 1;
+pub const SK_BOOL: u8 = 2;
+pub const SK_FLOAT: u8 = 3;
+pub const SK_NULL: u8 = 4;
+pub const SK_AGG: u8 = 5;
+pub const SK_REL: u8 = 6;
+
+pub const SREL_STATIC: u8 = 0;
+pub const SREL_INTERIOR: u8 = 1;
+pub const SREL_FN: u8 = 2;
+
+pub const S_NO_PARENT: u32 = 0xFFFFFFFFu32;
+
+pub struct SRel {
+    pub slot: u32,
+    pub kind: u8,
+    pub target: u32, // absolute statics index (SREL_STATIC/INTERIOR)
+    pub toff: u32, // slot index inside the target (SREL_INTERIOR)
+    pub fm: ModuleId, // SREL_FN
+    pub fnode: NodeId,
+}
+
+pub struct SSlot {
+    pub kind: u8,
+    pub tm: ModuleId, // scalar value type for C literal suffixing
+    pub ty: TypeId,
+    pub i: i64,
+    pub f: f64,
+    pub child: u32, // SK_AGG: absolute statics index of the embedded child
+}
+
+pub struct StaticObj {
+    pub shape: u8,
+    pub dm: ModuleId, // SS_STRUCT/SS_ENUM decl identity
+    pub dn: NodeId,
+    pub nargs: u8, // SS_STRUCT generic instance args
+    pub am: [ModuleId; 4],
+    pub at: [TypeId; 4],
+    pub etm: ModuleId, // HEAP/ARRAY element type; CELL value type
+    pub ety: TypeId,
+    pub n: u32, // HEAP/ARRAY element count
+    pub parent: u32, // embedding parent (statics index); S_NO_PARENT = standalone
+    pub pslot: u32,
+    pub owner: u32, // nearest standalone ancestor (self when standalone)
+    pub ord: u32, // ordinal among the group's standalones: 0 = root, k>0 -> "<name>__ct{k-1}"
+    pub groupn: u32, // root only: number of statics entries in this group
+    pub slots: Vector<SSlot>,
+    pub rels: Vector<SRel>,
+}
+
+extend StaticObj as Free {
+    pub fn free(self: &mut Self) {
+        self.slots.free();
+        self.rels.free();
+    }
+}
+
+pub struct StaticRes {
+    pub ok: bool,
+    pub root: u32,
+}
+
+extend ConstEval {
+    fn sref_get(self: &Self, m: ModuleId, id: NodeId) i64 {
+        if m as usize >= self.sref.len() {
+            return 0;
+        }
+        let inner = self.sref.at(m as usize);
+        if id as usize >= inner.len() {
+            return 0;
+        }
+        return inner[id as usize];
+    }
+    fn sref_set(self: &mut Self, m: ModuleId, id: NodeId, v: i64) {
+        if m as usize >= self.sref.len() {
+            return;
+        }
+        let inner = &mut self.sref[m as usize];
+        while inner.len() <= id as usize {
+            inner.push(0);
+        }
+        inner.set(id as usize, v);
+    }
+
+    pub fn static_at(self: &Self, i: u32) *const StaticObj {
+        return unsafe (self.statics.as_ptr() + i as usize);
+    }
+
+    // Evaluate a const initializer and capture an aggregate result as static data. Scalars return
+    // not-ok (the folded-literal path covers them); failures leave trap/trap_kind describing why.
+    pub fn eval_static(self: &mut Self, m: ModuleId, id: NodeId) StaticRes {
+        let bad = StaticRes { ok: false, root: 0 };
+        if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {
+            return bad;
+        }
+        let memo = self.sref_get(m, id);
+        if memo < 0 {
+            return bad;
+        }
+        if memo > 0 {
+            return StaticRes { ok: true, root: (memo - 1) as u32 };
+        }
+        if self.slot_get(m, id).kind != CONST_NONE {
+            return bad; // scalar memo hit (or in-flight): not an aggregate
+        }
+        self.steps = 0;
+        self.trap = "";
+        self.trap_kind = CE_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.trap_in_constfn = false;
+        self.ce_objs_reset();
+        self.slot_set(m, id, ConstValue { kind: CONST_EVALUATING });
+        self.depth = 1;
+        let v = self.ev(null, m, id);
+        self.depth = 0;
+        let pub_v = cv_pub(v);
+        self.slot_set(m, id, pub_v);
+        if v.kind != CV_AGG {
+            self.ce_objs_reset();
+            if pub_v.kind == CONST_NONE {
+                if self.record_folds && self.record_pause == 0 && (ce_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+                    self.record_fold_err(m, id);
+                }
+                if self.trap.len() != 0 {
+                    self.sref_set(m, id, -1); // definite failure; undecidable stays retryable
+                }
+            }
+            return bad;
+        }
+        let r = self.ce_capture(v);
+        self.ce_objs_reset();
+        if !r.ok {
+            self.sref_set(m, id, -1);
+            return bad;
+        }
+        self.sref_set(m, id, r.root as i64 + 1);
+        return r;
+    }
+
+    @c.cold
+    fn cap_fail(self: &mut Self, base: u32, kind: u8, msg: str) StaticRes {
+        self.statics.truncate(base as usize);
+        self.ce_trap(kind, msg);
+        return StaticRes { ok: false, root: 0 };
+    }
+
+    fn ce_capture(self: &mut Self, rootv: CeVal) StaticRes {
+        let bad = StaticRes { ok: false, root: 0 };
+        let base = self.statics.len() as u32;
+        let nobj = self.objs.len();
+        let rid = rootv.as_data.p.obj;
+        if rid == 0 || rid as usize > nobj {
+            return bad;
+        }
+        // per-CeObj side tables (ids are 1-based)
+        let mut map = Vector::<u32>::new(); // statics index + 1; 0 = unvisited
+        let mut embp = Vector::<u32>::new(); // embedding parent CeObj id
+        let mut embs = Vector::<u32>::new(); // slot in the embedding parent
+        let mut hintm = Vector::<ModuleId>::new(); // value-type hint from the referencing CeVal
+        let mut hintt = Vector::<TypeId>::new();
+        map.reserve(nobj + 1);
+        for _ in 0..nobj + 1 {
+            map.push(0);
+            embp.push(0);
+            embs.push(0);
+            hintm.push(0);
+            hintt.push(TYPE_NONE);
+        }
+        hintm.set(rid as usize, rootv.tm);
+        hintt.set(rid as usize, rootv.ty);
+        // pass A: pre-order discovery; children pushed in reverse so pop order equals slot order
+        let mut order = Vector::<u32>::new();
+        let mut stack = Vector::<u32>::new();
+        stack.push(rid);
+        let mut total: u64 = 0;
+        while stack.len() != 0 {
+            let oid = stack[stack.len() - 1];
+            stack.truncate(stack.len() - 1);
+            if map[oid as usize] != 0 {
+                continue;
+            }
+            let op = self.obj_ptr(oid);
+            if op == null {
+                return self.cap_fail(base, CE_TRAP_UNSUPPORTED, "constant value cannot be materialized as static data");
+            }
+            if unsafe (*op).dead != 0 {
+                return self.cap_fail(base, CE_TRAP_UB_USE_AFTER_FREE, "constant points at freed compile-time memory");
+            }
+            let sl = (unsafe (*op).slots.len()) as u32;
+            total = total + sl as u64;
+            if total > CE_STATIC_MAX_SLOTS {
+                return self.cap_fail(base, CE_TRAP_TOO_LARGE, "constant is too large to materialize as static data");
+            }
+            map.set(oid as usize, base + order.len() as u32 + 1);
+            order.push(oid);
+            let mut k = sl;
+            while k > 0 {
+                k = k - 1;
+                let sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
+                if sv.kind == CV_AGG {
+                    let c = sv.as_data.p.obj;
+                    if c == 0 || c as usize > nobj {
+                        return self.cap_fail(
+                            base,
+                            CE_TRAP_UNSUPPORTED,
+                            "constant value cannot be materialized as static data",
+                        );
+                    }
+                    embp.set(c as usize, oid);
+                    embs.set(c as usize, k);
+                    if sv.ty != TYPE_NONE {
+                        hintm.set(c as usize, sv.tm);
+                        hintt.set(c as usize, sv.ty);
+                    }
+                    stack.push(c);
+                } else if sv.kind == CV_PTR && sv.as_data.p.obj != 0 {
+                    let c = sv.as_data.p.obj;
+                    if c as usize > nobj {
+                        return self.cap_fail(
+                            base,
+                            CE_TRAP_UNSUPPORTED,
+                            "constant value cannot be materialized as static data",
+                        );
+                    }
+                    if sv.ty != TYPE_NONE && hintt[c as usize] == TYPE_NONE {
+                        let y = unsafe (*self.ast_ptr(sv.tm)).type_at(sv.ty);
+                        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+                            hintm.set(c as usize, sv.tm);
+                            hintt.set(c as usize, y.as_data.elem);
+                        }
+                    }
+                    stack.push(c);
+                }
+            }
+        }
+        // pass B: shape every discovered object
+        let count = order.len();
+        for idx in 0..count {
+            let oid = order[idx];
+            let sl = (unsafe (*self.obj_ptr(oid)).slots.len()) as u32;
+            let standalone = embp[oid as usize] == 0;
+            let mut g = StaticObj {
+                shape: SS_CELL,
+                parent: S_NO_PARENT,
+                owner: 0,
+                slots: Vector::<SSlot>::new(),
+                rels: Vector::<SRel>::new(),
+            };
+            if !standalone {
+                g.parent = map[embp[oid as usize] as usize] - 1;
+                g.pslot = embs[oid as usize];
+            }
+            let op = self.obj_ptr(oid);
+            if unsafe (*op).heap != 0 {
+                g.shape = SS_HEAP;
+                g.etm = unsafe (*op).em;
+                g.ety = unsafe (*op).et;
+                g.n = sl;
+                if g.ety == TYPE_NONE {
+                    self.statics.push(g);
+                    return self.cap_fail(
+                        base,
+                        CE_TRAP_UNSUPPORTED,
+                        "constant points at an untyped compile-time heap block",
+                    );
+                }
+            } else if unsafe (*op).is_enum != 0 {
+                g.shape = SS_ENUM;
+                g.dm = unsafe (*op).dm;
+                g.dn = unsafe (*op).dn;
+                let gens = unsafe (*self.ast_ptr(g.dm)).at_const(g.dn).as_data.aggregate.generics.len;
+                if standalone && gens != 0 {
+                    self.statics.push(g);
+                    return self.cap_fail(
+                        base,
+                        CE_TRAP_UNSUPPORTED,
+                        "constant value cannot be materialized as static data",
+                    );
+                }
+            } else if unsafe (*op).dn != NODE_NONE {
+                g.shape = SS_STRUCT;
+                g.dm = unsafe (*op).dm;
+                g.dn = unsafe (*op).dn;
+                g.nargs = unsafe (*op).nargs;
+                for ci in 0..4 {
+                    g.am[ci] = unsafe (*op).am[ci];
+                    g.at[ci] = unsafe (*op).at[ci];
+                }
+                let gens = unsafe (*self.ast_ptr(g.dm)).at_const(g.dn).as_data.aggregate.generics.len;
+                if standalone && gens != 0 && g.nargs == 0 {
+                    self.statics.push(g);
+                    return self.cap_fail(
+                        base,
+                        CE_TRAP_UNSUPPORTED,
+                        "constant value cannot be materialized as static data",
+                    );
+                }
+            } else {
+                let hm = hintm[oid as usize];
+                let ht = hintt[oid as usize];
+                let mut isarr = false;
+                if ht != TYPE_NONE {
+                    let y = unsafe (*self.ast_ptr(hm)).type_at(ht);
+                    if y.kind == TypeKind::TYPE_ARRAY {
+                        isarr = true;
+                        g.shape = SS_ARRAY;
+                        g.etm = hm;
+                        g.ety = y.as_data.arr.elem;
+                        g.n = sl;
+                    }
+                }
+                if !isarr {
+                    if sl != 1 || ht == TYPE_NONE {
+                        self.statics.push(g);
+                        return self.cap_fail(
+                            base,
+                            CE_TRAP_UNSUPPORTED,
+                            "constant value cannot be materialized as static data",
+                        );
+                    }
+                    g.shape = SS_CELL;
+                    g.etm = hm;
+                    g.ety = ht;
+                }
+            }
+            self.statics.push(g);
+        }
+        // ordinals + owners
+        let mut nstand: u32 = 0;
+        for idx in 0..count {
+            let gi = base as usize + idx;
+            if self.statics[gi].parent == S_NO_PARENT {
+                self.statics[gi].ord = nstand;
+                nstand = nstand + 1;
+            }
+        }
+        for idx in 0..count {
+            let gi = base as usize + idx;
+            let mut cur = gi as u32;
+            let mut guard: usize = 0;
+            while self.statics[cur as usize].parent != S_NO_PARENT && guard <= count {
+                cur = self.statics[cur as usize].parent;
+                guard = guard + 1;
+            }
+            self.statics[gi].owner = cur;
+        }
+        self.statics[base as usize].groupn = count as u32;
+        // pass C: serialize slots + relocations
+        for idx in 0..count {
+            let oid = order[idx];
+            let gi = base as usize + idx;
+            let shape = self.statics[gi].shape;
+            let sl = (unsafe (*self.obj_ptr(oid)).slots.len()) as u32;
+            let mut sslots = Vector::<SSlot>::new();
+            let mut srels = Vector::<SRel>::new();
+            for k in 0..sl {
+                let sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
+                let mut s = SSlot { kind: SK_ZERO, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0, child: 0 };
+                if sv.kind == CV_INT || sv.kind == CV_BOOL {
+                    s.kind = if_u8(sv.kind == CV_INT, SK_INT, SK_BOOL);
+                    s.tm = sv.tm;
+                    s.ty = sv.ty;
+                    s.i = sv.as_data.i;
+                } else if sv.kind == CV_FLOAT {
+                    if !ce_isfinite(sv.as_data.f) {
+                        return self.cap_fail(base, CE_TRAP_UNSUPPORTED, "constant contains a non-finite float");
+                    }
+                    s.kind = SK_FLOAT;
+                    s.tm = sv.tm;
+                    s.ty = sv.ty;
+                    s.f = sv.as_data.f;
+                } else if sv.kind == CV_NIL_K {
+                    if shape == SS_STRUCT || shape == SS_CELL {
+                        return self.cap_fail(
+                            base,
+                            CE_TRAP_UNSUPPORTED,
+                            "constant value cannot be materialized as static data",
+                        );
+                    }
+                } else if sv.kind == CV_PTR {
+                    if sv.as_data.p.obj == 0 {
+                        s.kind = SK_NULL;
+                    } else {
+                        let tgt = map[sv.as_data.p.obj as usize];
+                        if tgt == 0 {
+                            return self.cap_fail(
+                                base,
+                                CE_TRAP_UNSUPPORTED,
+                                "constant value cannot be materialized as static data",
+                            );
+                        }
+                        let ti = tgt - 1;
+                        let toff = sv.as_data.p.off;
+                        let tshape = self.statics[ti as usize].shape;
+                        let tlen = (unsafe (*self.obj_ptr(order[(ti - base) as usize])).slots.len()) as u32;
+                        let past_end = toff == tlen && (tshape == SS_HEAP || tshape == SS_ARRAY);
+                        if toff > tlen || toff == tlen && !past_end || toff != 0 && (tshape == SS_ENUM || tshape == SS_CELL) {
+                            return self.cap_fail(
+                                base,
+                                CE_TRAP_UNSUPPORTED,
+                                "constant value cannot be materialized as static data",
+                            );
+                        }
+                        s.kind = SK_REL;
+                        srels.push(
+                            SRel {
+                                slot: k,
+                                kind: if_u8(toff == 0, SREL_STATIC, SREL_INTERIOR),
+                                target: ti,
+                                toff: toff,
+                                fm: 0,
+                                fnode: NODE_NONE,
+                            },
+                        );
+                    }
+                } else if sv.kind == CV_FN {
+                    let fm2 = sv.as_data.fnv.m;
+                    let fnid = sv.as_data.fnv.fn_id;
+                    let mut fn_ok = self.has_ast(fm2);
+                    if fn_ok {
+                        let fa = self.ast_ptr(fm2);
+                        fn_ok = unsafe (*fa).at_const(fnid).kind == NodeKind::NODE_FUNCTION;
+                        if fn_ok {
+                            let fd = unsafe (*fa).at_const(fnid).as_data.function;
+                            fn_ok = fd.generics.len == 0 && (fd.body != NODE_NONE || fd.is_extern);
+                        }
+                    }
+                    if !fn_ok {
+                        return self.cap_fail(
+                            base,
+                            CE_TRAP_UNSUPPORTED,
+                            "constant contains a function value with no C symbol",
+                        );
+                    }
+                    s.kind = SK_REL;
+                    srels.push(SRel { slot: k, kind: SREL_FN, target: 0, toff: 0, fm: fm2, fnode: fnid });
+                } else if sv.kind == CV_AGG {
+                    s.kind = SK_AGG;
+                    s.child = map[sv.as_data.p.obj as usize] - 1;
+                } else {
+                    return self.cap_fail(
+                        base,
+                        CE_TRAP_UNSUPPORTED,
+                        "constant value cannot be materialized as static data",
+                    );
+                }
+                sslots.push(s);
+            }
+            self.statics[gi].slots = sslots;
+            self.statics[gi].rels = srels;
+        }
+        return StaticRes { ok: true, root: base };
+    }
+}
+
+fn if_u8(c: bool, a: u8, b: u8) u8 {
+    if c {
+        return a;
+    }
+    return b;
+}
+
 extend ConstEval as Free {
     pub fn free(self: &mut Self) {
         self.vals.free();
         self.objs.free();
+        self.fold_errs.free();
         self.pending.free();
+        self.pending_consts.free();
         self.calls.free();
         self.ufree.free();
+        self.fx.free();
+        self.fx_no.free();
+        self.statics.free();
+        self.sref.free();
     }
 }
 
