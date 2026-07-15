@@ -147,6 +147,7 @@ pub struct FunctionData {
     pub is_extern: bool,
     pub is_variadic: bool,
     pub is_const: bool, // `const fn`: must evaluate at compile time when its arguments are known
+    pub is_unsafe: bool, // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
 }
 pub struct ParameterData {
     pub name: NodeId,

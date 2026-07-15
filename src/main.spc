@@ -413,175 +413,318 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     return rc;
 }
 
+// CLI mode: `super-c <subcommand> <flags|args...>` -- the subcommand is always the first argument;
+// a non-keyword first argument means MODE_DEFAULT (compile + run a script).
+enum Mode {
+    MODE_DEFAULT, // `super-c <root.spc>`: compile + run
+    MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
+    MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
+    MODE_FMT, // `super-c fmt [--check] <path...| ->`
+    MODE_LINT, // `super-c lint [--fix] <path> [<path2> ...]`
+    MODE_RUN, // `super-c run <command>`: build.toml command
+    MODE_CLEAN, // `super-c clean`: drop build.toml outputs
+    MODE_TEST, // `super-c test`: tests/ by convention
+    MODE_BENCH, // `super-c bench`: bench/main.spc by convention
+    MODE_LSP, // `super-c lsp`: language server over stdio
+}
+
+// NOTE: an if-chain until a RELEASE ships the string-pattern switch lowering (the bootstrap binary
+// must be able to emit this file); convert back to `switch arg { "build" => .. }` after that release.
+fn subcommand(arg: str) Mode {
+    if arg == "build" {
+        return Mode::MODE_BUILD;
+    }
+    if arg == "fmt" {
+        return Mode::MODE_FMT;
+    }
+    if arg == "lint" {
+        return Mode::MODE_LINT;
+    }
+    if arg == "run" {
+        return Mode::MODE_RUN;
+    }
+    if arg == "clean" {
+        return Mode::MODE_CLEAN;
+    }
+    if arg == "test" {
+        return Mode::MODE_TEST;
+    }
+    if arg == "bench" {
+        return Mode::MODE_BENCH;
+    }
+    if arg == "lsp" {
+        return Mode::MODE_LSP;
+    }
+    return Mode::MODE_DEFAULT;
+}
+
+// Flags accepted by every compiling mode.
+struct CommonOpts {
+    pub ce_steps: u32, // --const-eval-steps=N
+    pub ce_mem: u64, // --const-eval-memory=BYTES[K|M|G]
+    pub target: i32, // --target=windows|macos|linux: @platform gate (default: host)
+    pub bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes (build across a new tag)
+    pub lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
+    pub bad: bool, // malformed argument list: print usage and exit 1
+}
+
+fn common_flag(o: &mut CommonOpts, arg: str) bool {
+    if arg.starts_with("--const-eval-steps=") {
+        let v = parse_size((&arg[19]) as *const char);
+        if v == 0 || v > 4294967295u64 {
+            o.bad = true;
+        } else {
+            o.ce_steps = v as u32;
+        }
+    } else if arg.starts_with("--const-eval-memory=") {
+        o.ce_mem = parse_size((&arg[20]) as *const char);
+        if o.ce_mem == 0 {
+            o.bad = true;
+        }
+    } else if arg.starts_with("--target=") {
+        let t = arg[9..];
+        if t == "windows" {
+            o.target = 0;
+        } else if t == "macos" {
+            o.target = 1;
+        } else if t == "linux" {
+            o.target = 2;
+        } else {
+            o.bad = true;
+        }
+    } else if arg == "--bootstrap-tags" {
+        o.bootstrap_tags = true;
+    } else if arg == "--no-lint" {
+        o.lint = false;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// build.toml engine flags, shared by build/run/test/bench (`clean` takes only --out-dir).
+struct BuildOpts {
+    pub profile: str, // --profile=NAME (default: manifest default-profile)
+    pub out_dir: str, // --out-dir=PATH: override the manifest's out-dir
+    pub cstd: str, // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
+    pub jobs: u32, // --jobs=N (0 = manifest / core count)
+}
+
+fn build_flag(o: &mut BuildOpts, co: &mut CommonOpts, arg: str) bool {
+    if arg.starts_with("--profile=") {
+        o.profile = arg[10..];
+    } else if arg.starts_with("--out-dir=") {
+        o.out_dir = arg[10..];
+    } else if arg.starts_with("--cstd=") {
+        o.cstd = arg[7..];
+    } else if arg.starts_with("--jobs=") {
+        let v = unsafe stdlib::atoi((&arg[7]) as *const char);
+        if v < 1 {
+            co.bad = true;
+        } else {
+            o.jobs = v as u32;
+        }
+    } else {
+        return false;
+    }
+    return true;
+}
+
 fn main(argv: Vector<str>) i32 {
     let argc = argv.len();
-    let mut ce_steps: u32 = 0;
-    let mut ce_mem: u64 = 0;
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
 
-    let mut fmt_mode = false;
-    let mut fmt_check = false;
-    let mut fmt_extra = Vector::<usize>::new(); // argv indices of extra `fmt` paths
-
-    let mut lint = true; // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
-    let mut lint_mode = false; // `super-c lint [--fix] <path> [<path2> ...]`
+    let mode = if argc > 1 {
+        subcommand(argv[1]);
+    } else {
+        Mode::MODE_DEFAULT;
+    };
+    let mut fmt_check = false; // fmt --check: report unformatted files, write nothing
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
-
-    let mut build_mode = false;
-    let mut run_mode = false; // `super-c run <command>`: run a build.toml command
-    let mut clean_mode = false; // `super-c clean`: remove build.toml outputs
-    let mut test_mode = false; // `super-c test`: build + run tests/ by convention
-    let mut bench_mode = false; // `super-c bench`: build + run bench/main.spc by convention
     let mut bench_norun = false; // bench --no-run: build the bench binary only
-    let mut lsp_mode = false; // `super-c lsp`: LSP server over stdio
-
-    let mut profile = ""; // --profile=NAME for build/run (default: manifest default-profile)
-    let mut out_dir = ""; // --out-dir=PATH: override the manifest's out-dir
-    let mut cstd = ""; // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
-    let mut jobs: u32 = 0; // --jobs=N for build/run (0 = manifest / core count)
-    let mut lint_extra = Vector::<usize>::new(); // argv indices of extra `lint` paths
+    let mut extra = Vector::<usize>::new(); // argv indices of extra `fmt`/`lint` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
-    let mut bad = false;
-    let mut target: i32 = unsafe shim::sc_host_platform(); // @platform gate target; --target= overrides
-    let mut bootstrap_tags = false; // --bootstrap-tags: accept unknown @attributes (build across a new tag)
+    let mut co = CommonOpts {
+        ce_steps: 0,
+        ce_mem: 0,
+        target: unsafe shim::sc_host_platform(),
+        bootstrap_tags: false,
+        lint: true,
+        bad: false,
+    };
+    let mut bo = BuildOpts { profile: "", out_dir: "", cstd: "", jobs: 0 };
 
-    let mut i: usize = 1;
-    while i < argc {
-        let arg = argv[i];
-        if !build_mode && file.len() == 0 && arg == "build" {
-            build_mode = true; // `super-c build <root.spc> [-o out]`: emit + link a program
-        } else if !build_mode && !fmt_mode && !lint_mode && file.len() == 0 && arg == "fmt" {
-            fmt_mode = true; // `super-c fmt [--check] <path...| ->`
-        } else if !build_mode && !fmt_mode && !lint_mode && file.len() == 0 && arg == "lint" {
-            lint_mode = true;
-        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && file.len() == 0 && arg == "run" {
-            run_mode = true; // `super-c run <command>`: build.toml command
-        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && file.len() == 0 && arg == "clean" {
-            clean_mode = true; // `super-c clean`: drop build.toml outputs
-        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && !test_mode && !bench_mode && file.len() == 0 && arg == "test" {
-            test_mode = true; // `super-c test`: tests/ by convention
-        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && !test_mode && !bench_mode && file.len() == 0 && arg == "bench" {
-            bench_mode = true; // `super-c bench`: bench/main.spc by convention
-        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && !test_mode && !bench_mode && !lsp_mode && file.len() == 0 && arg == "lsp" {
-            lsp_mode = true; // `super-c lsp`: language server over stdio
-        } else if bench_mode && arg == "--no-run" {
-            bench_norun = true;
-        } else if fmt_mode && arg == "--check" {
-            fmt_check = true;
-        } else if arg == "-o" {
-            if i + 1 < argc {
+    let mut i: usize = if mode == Mode::MODE_DEFAULT {
+        1usize;
+    } else {
+        2usize;
+    };
+    switch mode {
+        MODE_DEFAULT => {
+            while i < argc {
+                let arg = argv[i];
+                if common_flag(&mut co, arg) {} else if arg == "--test" {
+                    topts.enabled = true;
+                } else if arg.starts_with("--test-jobs=") {
+                    topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
+                    if topts.jobs < 1 {
+                        co.bad = true;
+                    }
+                } else if arg == "--test-no-fork" {
+                    topts.no_fork = true;
+                } else if arg.starts_with("--test-filter=") {
+                    topts.filter = (&arg[14]) as *const char;
+                } else if arg.starts_with("--") {
+                    co.bad = true;
+                } else if file.len() == 0 {
+                    file = arg;
+                } else {
+                    co.bad = true;
+                }
                 i = i + 1;
-                out_bin = argv[i];
-            } else {
-                bad = true;
             }
-        } else if arg.starts_with("--const-eval-steps=") {
-            let v = parse_size((&arg[19]) as *const char);
-            if v == 0 || v > 4294967295u64 {
-                bad = true;
-            } else {
-                ce_steps = v as u32;
+        },
+        MODE_BUILD | MODE_RELEASE => {
+            while i < argc {
+                let arg = argv[i];
+                let common = common_flag(&mut co, arg);
+                if common || build_flag(&mut bo, &mut co, arg) {} else if arg == "-o" {
+                    if i + 1 < argc {
+                        i = i + 1;
+                        out_bin = argv[i];
+                    } else {
+                        co.bad = true;
+                    }
+                } else if arg.starts_with("--") {
+                    co.bad = true;
+                } else if file.len() == 0 {
+                    file = arg;
+                } else {
+                    co.bad = true;
+                }
+                i = i + 1;
             }
-        } else if arg.starts_with("--const-eval-memory=") {
-            ce_mem = parse_size((&arg[20]) as *const char);
-            if ce_mem == 0 {
-                bad = true;
+            if file.len() != 0 && out_bin.len() == 0 {
+                out_bin = "a.out";
             }
-        } else if arg == "--test" {
-            topts.enabled = true;
-        } else if arg.starts_with("--test-jobs=") {
-            topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
-            if topts.jobs < 1 {
-                bad = true;
+            if mode == Mode::MODE_RELEASE {
+                bo.profile = "release";
             }
-        } else if arg == "--no-lint" {
-            lint = false;
-        } else if arg == "--test-no-fork" {
-            topts.no_fork = true;
-        } else if arg.starts_with("--test-filter=") {
-            topts.filter = (&arg[14]) as *const char;
-        } else if arg.starts_with("--target=") {
-            let t = arg[9..];
-            if t == "windows" {
-                target = 0;
-            } else if t == "macos" {
-                target = 1;
-            } else if t == "linux" {
-                target = 2;
-            } else {
-                bad = true;
+        },
+        MODE_FMT => {
+            while i < argc {
+                let arg = argv[i];
+                if arg == "--check" {
+                    fmt_check = true;
+                } else if arg.starts_with("--") {
+                    co.bad = true;
+                } else if file.len() == 0 {
+                    file = arg;
+                } else {
+                    extra.push(i); // any number of paths
+                }
+                i = i + 1;
             }
-        } else if arg == "--bootstrap-tags" {
-            bootstrap_tags = true;
-        } else if lint_mode && arg == "--fix" {
-            lint_fix = true;
-        } else if (build_mode || run_mode || test_mode || bench_mode) && arg.starts_with("--profile=") {
-            profile = arg[10..];
-        } else if (build_mode || run_mode || clean_mode || test_mode || bench_mode) && arg.starts_with("--out-dir=") {
-            out_dir = arg[10..];
-        } else if (build_mode || run_mode || test_mode || bench_mode) && arg.starts_with("--cstd=") {
-            cstd = arg[7..];
-        } else if (build_mode || run_mode || test_mode || bench_mode) && arg.starts_with("--jobs=") {
-            let v = unsafe stdlib::atoi((&arg[7]) as *const char);
-            if v < 1 {
-                bad = true;
-            } else {
-                jobs = v as u32;
+        },
+        MODE_LINT => {
+            while i < argc {
+                let arg = argv[i];
+                if common_flag(&mut co, arg) {} else if arg == "--fix" {
+                    lint_fix = true;
+                } else if arg.starts_with("--") {
+                    co.bad = true;
+                } else if file.len() == 0 {
+                    file = arg;
+                } else {
+                    extra.push(i); // any number of paths
+                }
+                i = i + 1;
             }
-        } else if arg.starts_with("--") {
-            bad = true;
-        } else if file.len() == 0 {
-            file = arg;
-        } else if fmt_mode {
-            fmt_extra.push(i); // `fmt` accepts any number of paths
-        } else if lint_mode {
-            lint_extra.push(i); // `lint` accepts any number of paths
-        } else {
-            file = "";
-        }
-        i = i + 1;
-    }
+        },
+        MODE_RUN => {
+            while i < argc {
+                let arg = argv[i];
+                let common = common_flag(&mut co, arg);
+                if common || build_flag(&mut bo, &mut co, arg) {} else if file.len() == 0 && !arg.starts_with("--") {
+                    file = arg; // the build.toml command name
+                } else {
+                    co.bad = true;
+                }
+                i = i + 1;
+            }
+            if file.len() == 0 {
+                co.bad = true; // `run` needs a command name
+            }
+        },
+        MODE_CLEAN => {
+            while i < argc {
+                if argv[i].starts_with("--out-dir=") {
+                    bo.out_dir = argv[i][10..];
+                } else {
+                    co.bad = true;
+                }
+                i = i + 1;
+            }
+        },
+        MODE_TEST => {
+            while i < argc {
+                let arg = argv[i];
+                let common = common_flag(&mut co, arg);
+                if !common && !build_flag(&mut bo, &mut co, arg) {
+                    co.bad = true;
+                }
+                i = i + 1;
+            }
+        },
+        MODE_BENCH => {
+            while i < argc {
+                let arg = argv[i];
+                if arg == "--no-run" {
+                    bench_norun = true;
+                } else {
+                    let common = common_flag(&mut co, arg);
+                    if !common && !build_flag(&mut bo, &mut co, arg) {
+                        co.bad = true;
+                    }
+                }
+                i = i + 1;
+            }
+        },
+        MODE_LSP => {
+            while i < argc {
+                if !common_flag(&mut co, argv[i]) {
+                    co.bad = true;
+                }
+                i = i + 1;
+            }
+        },
+    };
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null) {
-        bad = true;
-    }
-    if out_bin.len() != 0 && !build_mode {
-        bad = true;
-    } // -o is only meaningful for `build`
-    if build_mode && topts.enabled {
-        bad = true;
-    } // `build` and `--test` are mutually exclusive
-    if fmt_mode && (build_mode || topts.enabled) {
-        bad = true;
-    }
-    if (run_mode || clean_mode || test_mode || bench_mode) && (topts.enabled || out_bin.len() != 0) {
-        bad = true;
-    }
-    if lsp_mode && (build_mode || fmt_mode || lint_mode || run_mode || clean_mode || test_mode || bench_mode || topts.enabled || file.len() != 0 || out_bin.len() != 0) {
-        bad = true; // `lsp` takes no paths and combines with nothing
+        co.bad = true;
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
-    let manifest_mode = build_mode && file.len() == 0 || run_mode || clean_mode || test_mode || bench_mode;
-    if build_mode && file.len() != 0 && out_bin.len() == 0 {
-        out_bin = "a.out";
-    }
-    if run_mode && file.len() == 0 {
-        bad = true; // `run` needs a command name
-    }
-    if (clean_mode || test_mode || bench_mode) && file.len() != 0 {
-        bad = true;
-    }
-    if bad || file.len() == 0 && !manifest_mode && !lsp_mode {
+    let manifest_mode = mode == Mode::MODE_BUILD && file.len() == 0 || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
+    if co.bad || file.len() == 0 && !manifest_mode && mode != Mode::MODE_LSP {
         unsafe stdio::fputs(
             "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D] [--cstd=F]\n       super-c test | super-c bench [--no-run] | super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | -> | super-c lsp\n".ptr() as *const char,
             stdio::stderr(),
         );
         return 1;
     }
-    if fmt_mode {
+    let ce_steps = co.ce_steps;
+    let ce_mem = co.ce_mem;
+    let target = co.target;
+    let bootstrap_tags = co.bootstrap_tags;
+    let lint = co.lint;
+    let profile = bo.profile;
+    let out_dir = bo.out_dir;
+    let cstd = bo.cstd;
+    let jobs = bo.jobs;
+    if mode == Mode::MODE_FMT {
         let mut rc = run_fmt(file, fmt_check);
-        for k in 0..fmt_extra.len() {
-            if run_fmt(argv[*fmt_extra.at(k)], fmt_check) != 0 {
+        for k in 0..extra.len() {
+            if run_fmt(argv[*extra.at(k)], fmt_check) != 0 {
                 rc = 1;
             }
         }
@@ -593,10 +736,10 @@ fn main(argv: Vector<str>) i32 {
         "super-c".ptr() as *const char;
     };
     let std_dir = exe_std_dir(arg0);
-    if lint_mode {
+    if mode == Mode::MODE_LINT {
         let mut rc = run_lint(file, std_dir, ce_steps, ce_mem, target, lint_fix);
-        for k in 0..lint_extra.len() {
-            if run_lint(argv[*lint_extra.at(k)], std_dir, ce_steps, ce_mem, target, lint_fix) != 0 {
+        for k in 0..extra.len() {
+            if run_lint(argv[*extra.at(k)], std_dir, ce_steps, ce_mem, target, lint_fix) != 0 {
                 rc = 1;
             }
         }
@@ -605,7 +748,7 @@ fn main(argv: Vector<str>) i32 {
         }
         return rc;
     }
-    if lsp_mode {
+    if mode == Mode::MODE_LSP {
         let rc = lsp_srv::run(std_dir, target);
         if std_dir != null {
             unsafe stdlib::free(std_dir);
@@ -623,7 +766,7 @@ fn main(argv: Vector<str>) i32 {
             if cstd.len() != 0 {
                 man.cstd = String::from_str(cstd);
             }
-            if clean_mode {
+            if mode == Mode::MODE_CLEAN {
                 rc = if bsys::command_overrides(&man, "clean") {
                     bsys::manifest_run(
                         &man,
@@ -640,7 +783,7 @@ fn main(argv: Vector<str>) i32 {
                 } else {
                     bsys::manifest_clean(&man);
                 };
-            } else if test_mode {
+            } else if mode == Mode::MODE_TEST {
                 if bsys::command_overrides(&man, "test") {
                     rc = bsys::manifest_run(
                         &man,
@@ -668,7 +811,7 @@ fn main(argv: Vector<str>) i32 {
                         bootstrap_tags,
                     );
                 }
-            } else if bench_mode {
+            } else if mode == Mode::MODE_BENCH {
                 rc = if bsys::command_overrides(&man, "bench") {
                     bsys::manifest_run(
                         &man,
@@ -695,7 +838,7 @@ fn main(argv: Vector<str>) i32 {
                         bootstrap_tags,
                     );
                 };
-            } else if run_mode {
+            } else if mode == Mode::MODE_RUN {
                 rc = bsys::manifest_run(
                     &man,
                     file,

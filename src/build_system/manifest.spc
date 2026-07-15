@@ -162,7 +162,8 @@ fn add_builtin_profiles(m: &mut Manifest) {
     }
     if m.profile_index("bench") < 0 {
         let mut p = Profile::new("bench");
-        push_flags(&mut p.cflags, "-O2 -g -fno-omit-frame-pointer");
+        push_flags(&mut p.cflags, "-O2 -g -fno-omit-frame-pointer -flto=auto");
+        push_flags(&mut p.ldflags, "-flto=auto");
         m.profiles.push(p);
     }
 }

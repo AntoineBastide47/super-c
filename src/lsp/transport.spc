@@ -43,7 +43,7 @@ pub fn read_message(f: *mut stdio::FILE) Option<String> {
         if is_content_length(l) {
             clen = (switch l.slice(15, l.len()).trim().parse_i64() {
                 Some(n) => n,
-                None => (-1) as i64,
+                None => -1i64, // suffixed: the release bootstrap binary predates branch-literal adaptation
             });
         }
     }

@@ -31,6 +31,14 @@ fn expect_fmt(src: str, want: str) {
 }
 
 @test
+fn golden_unsafe_fn() {
+    expect_fmt(
+        "pub unsafe fn f(p:*const i32)i32{return unsafe *p;}",
+        "pub unsafe fn f(p: *const i32) i32 {\n    return unsafe *p;\n}\n",
+    );
+}
+
+@test
 fn golden_basic() {
     // Fully canonical: single-line input becomes the one true form.
     expect_fmt("fn add(a:i32,b:i32)i32{return a+b;}", "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n");
