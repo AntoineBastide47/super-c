@@ -28,7 +28,7 @@ import driver::util as *;
 fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) {
     let mut slash: *mut char = null;
     if file != null {
-        slash = unsafe cstring::strrchr(file, '/' as i32);
+        slash = unsafe cstring::strrchr(file, '/');
     }
     if slash != null {
         let dlen = (slash as usize - file as usize) as i32;
@@ -53,7 +53,7 @@ fn ext_c_wrap(
         }
     }
     seen.push(String::from_cstr(rsl));
-    let mut basep = (unsafe cstring::strrchr(rsl, '/' as i32)) as *const char;
+    let mut basep = (unsafe cstring::strrchr(rsl, '/')) as *const char;
     if basep != null {
         basep = unsafe (basep + 1);
     } else {
@@ -151,7 +151,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
                     continue;
                 }
             }
-            ext_c_wrap(root, keep, &mut seen, (&mut nsrc) as *mut u32, &rsl[0], err);
+            ext_c_wrap(root, keep, &mut seen, &mut nsrc, &rsl[0], err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
         let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
@@ -179,7 +179,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             if unsafe shim::sc_realpath(&rel[0], &mut habs[0]) == null {
                 continue;
             }
-            let dot = unsafe cstring::strrchr(&rel[0], '.' as i32);
+            let dot = unsafe cstring::strrchr(&rel[0], '.');
             if dot == null {
                 continue;
             }
@@ -194,7 +194,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             }
             let mut cabs = PathBuf {};
             if unsafe shim::sc_realpath(&rel[0], &mut cabs[0]) != null {
-                ext_c_wrap(root, keep, &mut seen, (&mut nsrc) as *mut u32, &cabs[0], err);
+                ext_c_wrap(root, keep, &mut seen, &mut nsrc, &cabs[0], err);
             }
         }
     }

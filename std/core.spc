@@ -289,7 +289,7 @@ extend u8 as Ord {
 }
 extend u8 as Hash {
     pub const fn hash(self: &u8) u64 {
-        return (*self) as u64;
+        return *self;
     }
 }
 extend u8 as Clone {
@@ -325,7 +325,7 @@ extend u16 as Ord {
 }
 extend u16 as Hash {
     pub const fn hash(self: &u16) u64 {
-        return (*self) as u64;
+        return *self;
     }
 }
 extend u16 as Clone {
@@ -361,7 +361,7 @@ extend u32 as Ord {
 }
 extend u32 as Hash {
     pub const fn hash(self: &u32) u64 {
-        return (*self) as u64;
+        return *self;
     }
 }
 extend u32 as Clone {
@@ -571,7 +571,7 @@ extend f32 as Ord {
 }
 extend f32 as Hash {
     pub const fn hash(self: &f32) u64 {
-        return f32_total_key(*self) as u64;
+        return f32_total_key(*self);
     }
 }
 extend f32 as Clone {
@@ -634,7 +634,7 @@ extend c32 as Clone {
 }
 extend c32 as Default {
     pub const fn default() c32 {
-        return 0.0 as c32;
+        return 0.0;
     }
 }
 extend c32 as Free {
@@ -649,7 +649,7 @@ extend c64 as Clone {
 }
 extend c64 as Default {
     pub const fn default() c64 {
-        return 0.0 as c64;
+        return 0.0;
     }
 }
 extend c64 as Free {

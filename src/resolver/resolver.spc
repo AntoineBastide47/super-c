@@ -394,7 +394,7 @@ extend Resolver {
             // `alias::Type`
             let nm = self.name_is_module(self.name_span(unsafe ids[0]));
             if nm.found {
-                return ModQual { mid: nm.mid as i32, type_node: unsafe ids[1] };
+                return ModQual { mid: nm.mid, type_node: unsafe ids[1] };
             }
         }
         return ModQual { mid: -1, type_node: NODE_NONE };
@@ -490,7 +490,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         // Join the LONGEST candidate module prefix once; every shorter prefix is a byte prefix of it, so
         // the probe loop just shrinks the viewed length instead of re-joining (and re-allocating) per try.
-        let buf = self.join_segs((&seg[0]) as *const NodeId, nn - 1);
+        let buf = self.join_segs(&seg[0], nn - 1);
         let mut lens: [usize; 32] = [[0] = 0usize];
         let mut plen: usize = 0;
         i = 0;

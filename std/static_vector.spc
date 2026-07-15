@@ -102,7 +102,7 @@ extend<T, const N: usize> StaticVector<T, N> {
     }
 
     pub const fn as_ptr(self: &StaticVector<T, N>) *const T {
-        return (&self.data[0]) as *const T;
+        return &self.data[0];
     }
 
     // Insert `value` at `index`, shifting later elements right. `index` must be <= len; panics when full.

@@ -52,7 +52,7 @@ extend<T, A: Allocator> Vector<T, A> {
         if new_cap < needed {
             new_cap = needed;
         }
-        let p = self.alloc.realloc(self.ptr as *mut void, self.cap * sizeof(T), new_cap * sizeof(T), alignof(T)) as *mut T;
+        let p = self.alloc.realloc(self.ptr, self.cap * sizeof(T), new_cap * sizeof(T), alignof(T)) as *mut T;
         self.ptr = p;
         self.cap = new_cap;
     }
@@ -238,7 +238,7 @@ extend<T, A: Allocator + Default> Vector<T, A> {
 extend<T, A: Allocator> Vector<T, A> as Free {
     pub fn free(self: &mut Vector<T, A>) {
         self.clear();
-        self.alloc.dealloc(self.ptr as *mut void, self.cap * sizeof(T), alignof(T));
+        self.alloc.dealloc(self.ptr, self.cap * sizeof(T), alignof(T));
         self.ptr = null;
         self.cap = 0;
     }

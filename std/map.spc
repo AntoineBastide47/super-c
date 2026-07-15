@@ -62,7 +62,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         self.keys = self.alloc.alloc(newcap * sizeof(K), alignof(K)) as *mut K;
         self.vals = self.alloc.alloc(newcap * sizeof(V), alignof(V)) as *mut V;
         self.used = self.alloc.alloc(newcap, alignof(u8)) as *mut u8;
-        unsafe memset(self.used as *mut void, 0, newcap); // mark every slot empty
+        unsafe memset(self.used, 0, newcap); // mark every slot empty
         self.cap = newcap;
         self.len = 0;
         for i in 0..oldcap {
@@ -75,9 +75,9 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             }
         }
         if oldcap > 0 {
-            self.alloc.dealloc(oldkeys as *mut void, oldcap * sizeof(K), alignof(K));
-            self.alloc.dealloc(oldvals as *mut void, oldcap * sizeof(V), alignof(V));
-            self.alloc.dealloc(oldused as *mut void, oldcap, alignof(u8));
+            self.alloc.dealloc(oldkeys, oldcap * sizeof(K), alignof(K));
+            self.alloc.dealloc(oldvals, oldcap * sizeof(V), alignof(V));
+            self.alloc.dealloc(oldused, oldcap, alignof(u8));
         }
     }
 
@@ -166,9 +166,9 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
                 unsafe self.vals[i].free(); // no-op if V isn't Free
             }
         }
-        self.alloc.dealloc(self.keys as *mut void, self.cap * sizeof(K), alignof(K));
-        self.alloc.dealloc(self.vals as *mut void, self.cap * sizeof(V), alignof(V));
-        self.alloc.dealloc(self.used as *mut void, self.cap, alignof(u8));
+        self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
+        self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
+        self.alloc.dealloc(self.used, self.cap, alignof(u8));
         self.keys = null;
         self.vals = null;
         self.used = null;
@@ -202,12 +202,12 @@ pub struct MapValues<V> {
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     // A cursor over the keys (`&K`).
     pub const fn keys(self: &Map<K, V, A>) MapKeys<K> {
-        return MapKeys::<K> { keys: self.keys as *const K, used: self.used as *const u8, idx: 0, cap: self.cap };
+        return MapKeys::<K> { keys: self.keys, used: self.used, idx: 0, cap: self.cap };
     }
 
     // A cursor over the values (`&V`).
     pub const fn values(self: &Map<K, V, A>) MapValues<V> {
-        return MapValues::<V> { vals: self.vals as *const V, used: self.used as *const u8, idx: 0, cap: self.cap };
+        return MapValues::<V> { vals: self.vals, used: self.used, idx: 0, cap: self.cap };
     }
 }
 

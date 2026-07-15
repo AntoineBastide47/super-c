@@ -166,6 +166,13 @@ int sc_host_platform(void) {
 #endif
 }
 
+int sc_chdir(const char *path) {
+#if defined(_WIN32)
+  return _chdir(path);
+#else
+  return chdir(path);
+#endif
+}
 int sc_mkdir(const char *path) {
 #if defined(_WIN32)
   return _mkdir(path);

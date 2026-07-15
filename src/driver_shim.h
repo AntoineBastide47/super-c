@@ -15,6 +15,7 @@ int sc_exe_path(char *buf, unsigned size);           /* absolute path of the run
 int sc_getpid(void);                                 /* getpid(); for unique temp paths */
 int sc_host_platform(void);                          /* build target: 0 windows, 1 macos, 2 linux */
 
+int sc_chdir(const char *path);   /* chdir / _chdir; 0 on success */
 int sc_mkdir(const char *path);   /* mkdir(path, 0775); ignores EEXIST at the caller */
 int sc_rmdir(const char *path);   /* rmdir(path) */
 int sc_unlink(const char *path);  /* unlink(path) */

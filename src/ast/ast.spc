@@ -221,6 +221,76 @@ pub struct WherePredicateData {
     pub ty: NodeId,
     pub bounds: NodeList,
 }
+// The builtin types' surface names. BuiltinType is declared in this module, so the shared name
+// table lives here too: the typechecker's renderer/lookup delegates to it, and consteval uses it to
+// fold builtin-targeted casts demanded before their module is typechecked.
+pub const fn bt_name(b: BuiltinType) str {
+    if b == BuiltinType::BT_BOOL {
+        return "bool";
+    }
+    if b == BuiltinType::BT_CHAR {
+        return "char";
+    }
+    if b == BuiltinType::BT_I8 {
+        return "i8";
+    }
+    if b == BuiltinType::BT_I16 {
+        return "i16";
+    }
+    if b == BuiltinType::BT_I32 {
+        return "i32";
+    }
+    if b == BuiltinType::BT_I64 {
+        return "i64";
+    }
+    if b == BuiltinType::BT_ISIZE {
+        return "isize";
+    }
+    if b == BuiltinType::BT_U8 {
+        return "u8";
+    }
+    if b == BuiltinType::BT_U16 {
+        return "u16";
+    }
+    if b == BuiltinType::BT_U32 {
+        return "u32";
+    }
+    if b == BuiltinType::BT_U64 {
+        return "u64";
+    }
+    if b == BuiltinType::BT_USIZE {
+        return "usize";
+    }
+    if b == BuiltinType::BT_F32 {
+        return "f32";
+    }
+    if b == BuiltinType::BT_F64 {
+        return "f64";
+    }
+    if b == BuiltinType::BT_C32 {
+        return "c32";
+    }
+    if b == BuiltinType::BT_C64 {
+        return "c64";
+    }
+    if b == BuiltinType::BT_VALIST {
+        return "va_list";
+    }
+    return "void";
+}
+
+// The BuiltinType whose name the span spells, -1 if none.
+pub const fn bt_of_name(src: str, s: tok::Span) i32 {
+    let n = (s.end - s.start) as usize;
+    for i in 0..BuiltinType::BT_COUNT as i32 {
+        let lit = bt_name(i as BuiltinType);
+        if lit.len() == n && unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), n) == 0 {
+            return i;
+        }
+    }
+    return -1;
+}
+
 pub struct TypePathData {
     pub parts: NodeList,
     pub args: NodeList,
@@ -850,7 +920,7 @@ extend Ast {
         if idx == 0 {
             return null;
         }
-        return self.mono.at((idx - 1) as usize) as *const MonoUse;
+        return self.mono.at((idx - 1) as usize);
     }
 
     pub fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) {
@@ -870,7 +940,7 @@ extend Ast {
         if idx == 0 {
             return null;
         }
-        return self.dyn_uses.at((idx - 1) as usize) as *const DynUse;
+        return self.dyn_uses.at((idx - 1) as usize);
     }
 
     pub fn add_deref_use(self: &mut Self, du: &DerefUse) {
@@ -887,7 +957,7 @@ extend Ast {
         if idx == 0 {
             return null;
         }
-        return self.deref_uses.at((idx - 1) as usize) as *const DerefUse;
+        return self.deref_uses.at((idx - 1) as usize);
     }
 
     pub fn at(self: &mut Self, id: NodeId) &mut Node {

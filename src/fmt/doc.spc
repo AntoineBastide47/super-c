@@ -236,7 +236,7 @@ fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool)
 
 // Render `root` into `out` at the given width. The result always ends with exactly one newline.
 pub fn render(p: &DocPool, root: DocId, width: i32, out: &mut String) {
-    let mut r = Renderer { col: 0, width: width, out: out as *mut String };
+    let mut r = Renderer { col: 0, width: width, out: out };
     render_doc(p, &mut r, root, 0, false);
     // Normalize the tail: strip trailing blank lines/spaces, end with one '\n'.
     while out.len() > 0 {

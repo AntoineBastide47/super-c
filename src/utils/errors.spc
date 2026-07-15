@@ -4,11 +4,13 @@ import string;
 pub const ERRORS_MAX: usize = 256;
 
 // A machine-applicable fix for a lint warning: kind 0 deletes [start, end); kind 1 inserts '_'
-// before `start` (unused-binding rename). Collected alongside `warn` and applied by `lint --fix`.
+// before `start` (unused-binding rename). Collected alongside `warn` and applied by `lint --fix`;
+// `warn` indexes the warning it repairs (the LSP turns these into quick fixes).
 pub struct LintFix {
     pub start: u32,
     pub end: u32,
     pub kind: u8,
+    pub warn: u32, // index into `warns`; 0xFFFFFFFF = unattached
 }
 
 pub struct Errors {
@@ -71,10 +73,15 @@ extend Errors {
         self.warn_lens.push(len);
     }
 
-    // Attach a machine-applicable fix to the warning being emitted.
+    // Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
+    // past the ERRORS_MAX cap the index degrades to the last kept warning).
     @c.cold
     pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) {
-        self.fixes.push(LintFix { start: start, end: end, kind: kind });
+        let mut w: u32 = 0xFFFFFFFF;
+        if self.warns.len() != 0 {
+            w = (self.warns.len() - 1) as u32;
+        }
+        self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: w });
     }
 
     // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
@@ -155,8 +162,11 @@ extend Errors {
         }
 
         // Order-preserving dedup of identical rendered blocks (the same error can be emitted from more
-        // than one pass). Cold path: clone survivors into a fresh vector, drop the rest.
+        // than one pass). Cold path: clone survivors into a fresh vector, drop the rest. starts/lens are
+        // compacted in parallel so each surviving block keeps its span (the LSP reads them post-finalize).
         let mut uniq = Vector::<String>::new();
+        let mut ustarts = Vector::<u32>::new();
+        let mut ulens = Vector::<u32>::new();
         for k in 0..self.errors.len() {
             let mut seen = false;
             for j in 0..uniq.len() {
@@ -166,10 +176,16 @@ extend Errors {
             }
             if !seen {
                 uniq.push(self.errors[k].clone());
+                ustarts.push(self.starts[k]);
+                ulens.push(self.lens[k]);
             }
         }
         self.errors.free();
         self.errors = uniq;
+        self.starts.free();
+        self.starts = ustarts;
+        self.lens.free();
+        self.lens = ulens;
     }
 
     @c.cold

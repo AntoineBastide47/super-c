@@ -106,7 +106,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     let uidx = n - 1; // the user module is loaded last, after the prelude
     // Resolve every module (prelude first, user last); snapshot the user module's diagnostics.
     for i in 0..n {
-        h_resolve(&mut p, i, uidx, (&mut r) as *mut Compiled);
+        h_resolve(&mut p, i, uidx, &mut r);
     }
     if r.errors != 0 || stop == STAGE_RESOLVE {
         if r.errors != 0 {
@@ -116,7 +116,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     }
     // Typecheck every module; snapshot the user module's diagnostics.
     for i in 0..n {
-        h_typecheck(&mut p, i, uidx, (&mut r) as *mut Compiled);
+        h_typecheck(&mut p, i, uidx, &mut r);
     }
     if r.errors != 0 {
         r.stage = STAGE_TYPECHECK;
@@ -189,11 +189,11 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
     let uidx = n - 1;
     let mut rr = Compiled {};
     for i in 0..n {
-        h_resolve(&mut p, i, uidx, (&mut rr) as *mut Compiled);
+        h_resolve(&mut p, i, uidx, &mut rr);
     }
     if rr.errors == 0 && stop != STAGE_RESOLVE {
         for i in 0..n {
-            h_typecheck(&mut p, i, uidx, (&mut rr) as *mut Compiled);
+            h_typecheck(&mut p, i, uidx, &mut rr);
         }
     }
     out.errors = rr.errors;
@@ -270,7 +270,7 @@ extend CompiledC {
         if self.code == null {
             return false;
         }
-        return unsafe cstring::strstr(self.code as *const char, needle.ptr() as *const char) != null;
+        return unsafe cstring::strstr(self.code, needle.ptr() as *const char) != null;
     }
 }
 extend CompiledC as Free {
@@ -298,11 +298,11 @@ pub fn compile_c(src: str) CompiledC {
     let uidx = n - 1;
     let mut rr = Compiled {};
     for i in 0..n {
-        h_resolve(&mut p, i, uidx, (&mut rr) as *mut Compiled);
+        h_resolve(&mut p, i, uidx, &mut rr);
     }
     if rr.errors == 0 {
         for i in 0..n {
-            h_typecheck(&mut p, i, uidx, (&mut rr) as *mut Compiled);
+            h_typecheck(&mut p, i, uidx, &mut rr);
         }
     }
     if rr.errors != 0 {
@@ -515,9 +515,9 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
     m.ast = Ast::new(0);
     let mut rr = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut rr.ast) as *mut Ast;
+    p.override_ast = &mut rr.ast;
     rr.resolve();
-    p.override_mod = 0xFFFF as ModuleId;
+    p.override_mod = 0xFFFF;
     p.override_ast = null;
     if i == cap {
         let c = rr.errors.errors.len();
@@ -540,9 +540,9 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut t.ast) as *mut Ast;
+    p.override_ast = &mut t.ast;
     t.check();
-    p.override_mod = 0xFFFF as ModuleId;
+    p.override_mod = 0xFFFF;
     p.override_ast = null;
     if i == cap {
         let c = t.errors.errors.len();

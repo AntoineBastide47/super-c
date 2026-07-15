@@ -26,10 +26,10 @@ pub type Buf128 = Array<char, 128>;
 // Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
 // ---------------------------------------------------------------------------------------------------------
 pub fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
-    return (&p.modules[m as usize].ast) as *const Ast;
+    return &p.modules[m as usize].ast;
 }
 pub fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
-    return (&mut p.modules[m as usize].ast) as *mut Ast;
+    return &mut p.modules[m as usize].ast;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -42,6 +42,53 @@ pub fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
 // ---------------------------------------------------------------------------------------------------------
 
 // "<root>/build/<mod path, '::' -> '/'><ext>" (heap-allocated; caller owns). Generated includes are relative.
+// Lex (trivia kept for the comment count), parse and canonically format `src` into `out` at `width`
+// columns -- the shared core of `super-c fmt` and LSP textDocument/formatting. 0 = ok (`out` filled);
+// 1 = lex/parse error (diagnostics printed against `path`); 2 = the dropped-comment safety check
+// tripped. `out` must not be used unless 0.
+pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 {
+    // Reject sources that do not parse -- never rewrite something the compiler cannot read.
+    // Lexed with trivia so the doc pipeline can count comments; the parser gets a filtered stream.
+    let mut vsrc = src.clone();
+    let mut lx = lex::Lexer::new(&mut vsrc, path);
+    lx.keep_trivia = true;
+    lx.scan_tokens();
+    if lx.has_errors() {
+        lx.log_errors();
+        return 1;
+    }
+    let mut toks = lx.take_tokens();
+    let mut ncomments: usize = 0;
+    let mut sig = Vector::<tok::Token>::new();
+    for i in 0..toks.len() {
+        let t = *toks.at(i);
+        let k = t.kind();
+        if k == ltt::TokenType::LineComment || k == ltt::TokenType::BlockComment || k == ltt::TokenType::DocLineComment || k == ltt::TokenType::DocBlockComment {
+            ncomments = ncomments + 1;
+        } else {
+            sig.push(t);
+        }
+    }
+    let mut ps = par::Parser::new(sig, vsrc.as_str(), path);
+    ps.build_ast();
+    if ps.has_errors() {
+        ps.errors.log();
+        return 1;
+    }
+    let ast = ps.take_ast();
+    let emitted = fbld::format_program(&ast, src.as_str(), width, out);
+    if emitted != ncomments {
+        eprintln(
+            "fmt: internal error: {} of {} comments would be dropped in '{}'; refusing",
+            ncomments - emitted,
+            ncomments,
+            path,
+        );
+        return 2;
+    }
+    return 0;
+}
+
 pub fn build_out_path(root_dir: str, mod_path: str, ext: str) String {
     let mut out = String::from_str(root_dir);
     out.push_str("/build/");

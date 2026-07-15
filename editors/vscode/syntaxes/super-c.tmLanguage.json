@@ -1,0 +1,153 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Super-C",
+  "scopeName": "source.super-c",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#declarations" },
+    { "include": "#functions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.super-c",
+          "begin": "/\\*\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.block.super-c",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.line.documentation.super-c",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.super-c",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.super-c",
+          "match": "@[A-Za-z_][A-Za-z0-9_.]*",
+          "captures": {
+            "0": { "name": "entity.other.attribute-name.super-c" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.other.raw.super-c",
+          "begin": "r(#*)\"",
+          "end": "\"\\1"
+        },
+        {
+          "name": "string.quoted.double.super-c",
+          "begin": "b?\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.super-c",
+              "match": "\\\\(x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|.)"
+            }
+          ]
+        }
+      ]
+    },
+    "chars": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.super-c",
+          "match": "b?'(\\\\(x[0-9A-Fa-f]{2}|.)|[^'\\\\])'"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.super-c",
+          "match": "\\b0[xX][0-9A-Fa-f_]+(\\.[0-9A-Fa-f_]+)?([pP][+-]?[0-9]+)?(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.binary.super-c",
+          "match": "\\b0[bB][01_]+(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize)?\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.super-c",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.super-c",
+          "match": "\\b(if|else|while|for|do|loop|switch|case|break|continue|return|defer|in|where)\\b"
+        },
+        {
+          "name": "keyword.other.super-c",
+          "match": "\\b(fn|let|mut|pub|const|static|struct|enum|union|interface|extend|extern|import|type|unsafe|move|new|dyn|as|sizeof|alignof|static_assert|va_arg|va_end|va_start)\\b"
+        },
+        {
+          "name": "constant.language.super-c",
+          "match": "\\b(true|false|null)\\b"
+        },
+        {
+          "name": "variable.language.super-c",
+          "match": "\\b(self|Self|_)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.builtin.super-c",
+          "match": "\\b(bool|char|i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64|c32|c64|va_list|void|never|str)\\b"
+        },
+        {
+          "name": "entity.name.type.super-c",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(struct|enum|union|interface|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.super-c" },
+            "2": { "name": "entity.name.type.super-c" }
+          }
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.super-c" },
+            "2": { "name": "entity.name.function.super-c" }
+          }
+        },
+        {
+          "name": "entity.name.function.call.super-c",
+          "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    }
+  }
+}

@@ -77,7 +77,7 @@ extend File {
 
     // Append `text`'s bytes to the file; returns the number of bytes written.
     pub fn write_str(self: &mut File, text: &String) usize {
-        return unsafe fwrite(text.as_ptr() as *const void, 1, text.len(), self.handle);
+        return unsafe fwrite(text.as_ptr(), 1, text.len(), self.handle);
     }
 
     // Read the entire remaining contents into a new owned string.
@@ -113,7 +113,7 @@ extend File as Free {
 
 extend File as Writer {
     fn write(self: &mut File, bytes: []u8) usize {
-        return unsafe fwrite(bytes.as_ptr() as *const void, 1, bytes.len(), self.handle);
+        return unsafe fwrite(bytes.as_ptr(), 1, bytes.len(), self.handle);
     }
 }
 

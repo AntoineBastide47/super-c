@@ -98,7 +98,7 @@ extend Path as Free {
     pub fn free(self: &mut Path) {
         if self.inner as *mut void != null {
             unsafe self.inner.free();
-            unsafe free(self.inner as *mut void);
+            unsafe free(self.inner);
             self.inner = null;
         }
     }

@@ -77,6 +77,12 @@ pub struct Package {
     // old path_exists even under case-insensitive filesystems).
     pub dir_cache: DirCache,
     pub lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
+    // In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
+    // overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
+    // (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
+    // disk yet. Empty outside the LSP.
+    pub overlay_files: Vector<String>,
+    pub overlay_texts: Vector<String>,
 }
 
 // Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
@@ -399,7 +405,7 @@ extend Package {
             core_seeded: false,
             method_used: Vector::<Vector<bool>>::new(),
             ceval: null,
-            override_mod: 0xFFFF as ModuleId,
+            override_mod: 0xFFFF,
             override_ast: null,
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,
@@ -407,6 +413,8 @@ extend Package {
             lk_index: Vector::<Map<u64, LkEnt>>::new(),
             lk_built: Vector::<bool>::new(),
             dir_cache: DirCache::new(),
+            overlay_files: Vector::<String>::new(),
+            overlay_texts: Vector::<String>::new(),
         };
     }
 
@@ -415,9 +423,9 @@ extend Package {
     // during resolve/typecheck must go through this so the current module resolves against the real Ast.
     fn module_ast_ptr(self: &Self, mid: ModuleId) *const Ast {
         if mid == self.override_mod && self.override_ast != null {
-            return self.override_ast as *const Ast;
+            return self.override_ast;
         }
-        return (&self.modules[mid as usize].ast) as *const Ast;
+        return &self.modules[mid as usize].ast;
     }
 
     // Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
@@ -437,6 +445,33 @@ extend Package {
         return id;
     }
 
+    // Overlay slot naming the same file as `path`: load paths are root-relative, overlay keys canonical
+    // absolute, so `path` is realpath'd when possible (raw compare stays as the fallback for files not on
+    // disk). -1 = none.
+    fn overlay_index(self: &Self, path: str) i32 {
+        if self.overlay_files.len() == 0 {
+            return -1;
+        }
+        let mut key = path;
+        let mut pb = RealBuf {};
+        let mut rb = RealBuf {};
+        let pl = path.len();
+        if pl < 4096 {
+            unsafe cstring::memcpy(&mut pb.b[0], path.ptr(), pl);
+            unsafe pb.b[pl] = 0 as char;
+            if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) != null {
+                key = str::from_cstr(&rb.b[0]);
+            }
+        }
+        for i in 0..self.overlay_files.len() {
+            let f = self.overlay_files.at(i).as_str();
+            if f == key || f == path {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
     // DFS load: takes ownership of `mod_path` and `file_path`. Returns the module's id (or -1 if unreadable).
     // A module already loaded (an import cycle) simply resolves to its id: modules are parsed whole before
     // any resolution, so mutual imports need no special handling.
@@ -447,23 +482,33 @@ extend Package {
         }
 
         let mut source = String::new();
-        switch read_file(file_path) {
-            Some(s) => {
-                source = s;
-            },
-            None => {
-                unsafe stdio::fprintf(
-                    stdio::stderr(),
-                    "error: cannot open module '%.*s' (%.*s)\n".ptr() as *const char,
-                    mod_path.len() as i32,
-                    mod_path.ptr(),
-                    file_path.len() as i32,
-                    file_path.ptr(),
-                );
-                self.ok = false;
-                return -1;
-            },
-        };
+        let ovi = self.overlay_index(file_path);
+        if ovi >= 0 {
+            // clone + pad exactly like read_file (the lexer relies on the read-ahead NUL sentinel)
+            let t = self.overlay_texts.at(ovi as usize);
+            let mut s = String::with_capacity(t.len() + lexer::SOURCE_PAD);
+            s.push_str(t.as_str());
+            s.pad_nul(lexer::SOURCE_PAD);
+            source = s;
+        } else {
+            switch read_file(file_path) {
+                Some(s) => {
+                    source = s;
+                },
+                None => {
+                    unsafe stdio::fprintf(
+                        stdio::stderr(),
+                        "error: cannot open module '%.*s' (%.*s)\n".ptr() as *const char,
+                        mod_path.len() as i32,
+                        mod_path.ptr(),
+                        file_path.len() as i32,
+                        file_path.ptr(),
+                    );
+                    self.ok = false;
+                    return -1;
+                },
+            };
+        }
 
         let parsed = parse_source(&mut source, file_path, bootstrap_tags);
         let ok = parsed.ok;
@@ -995,19 +1040,19 @@ extend Package {
             return self.type_user_home(am, y.as_data.elem);
         }
         if y.kind == TypeKind::TYPE_SLICE {
-            return 0xFFFF as ModuleId;
+            return 0xFFFF;
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_FUNCTION {
             if self.module_is_user(y.module) {
                 return y.module;
             }
-            return 0xFFFF as ModuleId;
+            return 0xFFFF;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *self.modules[am as usize].ast.instance(y.as_data.inst);
             return self.instance_home_in(am, &it);
         }
-        return 0xFFFF as ModuleId;
+        return 0xFFFF;
     }
 
     // The module a concrete instance must be emitted in (re-homed to a by-value user-type arg, else the owner).
@@ -1042,6 +1087,8 @@ extend Package as Free {
         self.lk_index.free();
         self.lk_built.free();
         self.dir_cache.free();
+        self.overlay_files.free();
+        self.overlay_texts.free();
     }
 }
 
@@ -1052,10 +1099,10 @@ extend Package as Free {
 // ---------------------------------------------------------------------------------------------------------
 
 fn pkg_ast_m(p: &mut Package, m: ModuleId) *mut Ast {
-    return (&mut p.modules[m as usize].ast) as *mut Ast;
+    return &mut p.modules[m as usize].ast;
 }
 fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
-    return (&p.modules[m as usize].ast) as *const Ast;
+    return &p.modules[m as usize].ast;
 }
 
 // True when `t` mentions a function VALUE type anywhere (a TYPE_FUNCTION, possibly nested): its C symbol
@@ -1673,8 +1720,32 @@ pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) 
 // Like package_load, but imports resolve against an explicit package root instead of the root
 // file's own directory (`super-c lint <dir>` lints nested package files in their true package).
 pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir: *const char, bootstrap_tags: bool) Package {
+    return package_load_overlaid(
+        root_file,
+        root_dir,
+        alt_dir,
+        std_dir,
+        bootstrap_tags,
+        Vector::<String>::new(),
+        Vector::<String>::new(),
+    );
+}
+
+// Like package_load_rooted, with in-memory source overlays (see Package.overlay_files). Takes ownership
+// of both parallel vectors.
+pub fn package_load_overlaid(
+    root_file: str,
+    root_dir: str,
+    alt_dir: str,
+    std_dir: *const char,
+    bootstrap_tags: bool,
+    overlay_files: Vector<String>,
+    overlay_texts: Vector<String>,
+) Package {
     let mut p = Package::new();
     p.ok = true;
+    p.overlay_files = overlay_files;
+    p.overlay_texts = overlay_texts;
     p.root_dir = String::from_str(root_dir);
     p.alt_root = String::from_str(alt_dir);
     if std_dir != null {

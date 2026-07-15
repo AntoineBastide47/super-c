@@ -57,7 +57,7 @@ fn sink_close(f: *mut stdio::FILE, use_mem: bool) usize {
     if use_mem {
         unsafe stdio::fclose(f); // final flush updates MEM_SIZE
         let sz = MEM_SIZE;
-        unsafe stdlib::free(MEM_BUF as *mut void);
+        unsafe stdlib::free(MEM_BUF);
         MEM_BUF = null;
         return sz;
     }
@@ -81,7 +81,7 @@ fn sink_path(buf: *mut char, cap: usize) *const char {
         dir = ".".ptr() as *const char;
     }
     unsafe stdio::snprintf(buf, cap, "%s\\sc_bench_sink.tmp".ptr() as *const char, dir);
-    return buf as *const char;
+    return buf;
 }
 @platform(windows)
 fn sink_open(_use_mem: bool) *mut stdio::FILE {
@@ -147,9 +147,9 @@ fn resolve_one(p: &mut loader::Package, i: usize) {
     m.ast = Ast::new(0);
     let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut r.ast) as *mut Ast;
+    p.override_ast = &mut r.ast;
     r.resolve();
-    p.override_mod = 0xFFFF as ModuleId;
+    p.override_mod = 0xFFFF;
     p.override_ast = null;
     let back = r.take_ast();
     p.modules[i].ast = back;
@@ -165,9 +165,9 @@ fn typecheck_one(p: &mut loader::Package, i: usize) {
     m.ast = Ast::new(0);
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut t.ast) as *mut Ast;
+    p.override_ast = &mut t.ast;
     t.check();
-    p.override_mod = 0xFFFF as ModuleId;
+    p.override_mod = 0xFFFF;
     p.override_ast = null;
     let back = t.take_ast();
     p.modules[i].ast = back;

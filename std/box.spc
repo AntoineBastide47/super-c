@@ -71,7 +71,7 @@ extend<T, A: Allocator> Box<T, A> as DerefMut<T> {
 extend<T, A: Allocator> Box<T, A> as Free {
     pub fn free(self: &mut Box<T, A>) {
         unsafe self.ptr.free(); // free the boxed value (no-op if T isn't Free)
-        self.alloc.dealloc(self.ptr as *mut void, sizeof(T), alignof(T));
+        self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));
         self.ptr = null;
     }
 }
