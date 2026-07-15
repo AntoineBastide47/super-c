@@ -186,7 +186,7 @@ extend<T: Hash> Option<T> as Hash {
     pub const fn hash(self: &Option<T>) u64 {
         return switch self {
             Some(v) => v.hash() * 0x100000001b3 + 1,
-            None => 0u64, // suffixed: the release bootstrap binary predates branch-literal adaptation
+            None => 0,
         };
     }
 }

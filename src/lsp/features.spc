@@ -541,6 +541,11 @@ extend CompItem as Free {
 }
 
 fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) {
+    if label.len() == 0 {
+        let mut d = detail;
+        d.free();
+        return;
+    }
     for k in 0..out.len() {
         if out.at(k).label.as_str() == label {
             let mut d = detail;
@@ -551,10 +556,24 @@ fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) 
     out.push(CompItem { label: String::from_str(label), kind: kind, detail: detail });
 }
 
+// A name node's text; "" when the node is not a name-bearing kind or its span is malformed.
+// NodeAs is an untagged union: reading `name.text` of any other kind reinterprets a different
+// payload as a Span -- the negative-length slice that once made completion malloc 16 EB.
 fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
+    if name_node == NODE_NONE {
+        return "";
+    }
     let a = mod_ast(p, m);
+    let k = unsafe (*a).at_const(name_node).kind;
+    if k != NodeKind::NODE_IDENTIFIER && k != NodeKind::NODE_PATTERN_NAME {
+        return "";
+    }
     let sp = unsafe (*a).at_const(name_node).as_data.name.text;
-    return p.modules.at(m).source.as_str().slice(sp.start as usize, sp.end as usize);
+    let src = p.modules.at(m).source.as_str();
+    if sp.start > sp.end || sp.end as usize > src.len() {
+        return "";
+    }
+    return src.slice(sp.start as usize, sp.end as usize);
 }
 
 // Fields and methods of the aggregate decl (dm, dn): fields from its member list, methods from every

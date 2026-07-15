@@ -428,6 +428,69 @@ fn lsp_code_actions() {
     );
 }
 
+// Regression: completion on a mid-edit buffer whose probe build contains switch-arm PATTERN nodes
+// (Some/None) once read a pattern node's bytes as a name Span (untagged NodeAs union) -- a negative
+// length that made the server malloc 16 EB and abort. The probe splice lands at the broken cast's
+// end, exactly the crashing session.
+const MAIN_SWITCH: str = "fn pick(v: i64) i64 {\n    let r = (switch v > 0 {\n        true => v,\n        false => -1,\n    });\n    let w = r as i6\n    return w;\n}\n\nfn main() i64 {\n    return pick(1) - 1;\n}\n";
+
+@test
+fn lsp_completion_survives_pattern_nodes() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_SWITCH);
+    let root = str::from_cstr(p.rootp());
+
+    let mut ses = String::new();
+    let mut b = String::from_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("\"}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/src/main.spc\",\"languageId\":\"super-c\",\"version\":1,\"text\":");
+    json::dump_escaped(MAIN_SWITCH, &mut b);
+    b.push_str("}}}");
+    frame(&mut ses, &b);
+    // completion at the end of the dangling `r as i6` (line 5, char 19): general path via probe
+    b.clear();
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/src/main.spc\"},\"position\":{\"line\":5,\"character\":19}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\",\"params\":null}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+    frame(&mut ses, &b);
+    p.mkfile("session.bin", ses.as_str());
+
+    let mut cmd = String::new();
+    cmd.push_str(superc_path());
+    cmd.push_str(" lsp < '");
+    cmd.push_str(root);
+    cmd.push_str("/session.bin' > '");
+    cmd.push_str(root);
+    cmd.push_str("/out.txt' 2> /dev/null");
+    let rc = cli::run_shell(cmd.cstr());
+    assert_eq(rc, 0); // the server must not crash
+
+    let mut op = String::from_str(root);
+    op.push_str("/out.txt");
+    let out = loader::read_file(op.as_str()).unwrap();
+    let o = out.as_str();
+    assert(o.contains("{\"label\":\"r\"")); // locals still complete through the probe build
+    assert(o.contains("{\"label\":\"i64\"")); // builtin type names present
+}
+
 // The compiler regression the server depends on: embedding loader::Package by value from another
 // module demands its `[NodeId; BT_COUNT_N]` field's length (an enum-cast const) before the loader
 // module is typechecked. Compile a two-module project with the same shape end-to-end.
