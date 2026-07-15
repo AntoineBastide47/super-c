@@ -431,31 +431,38 @@ enum Mode {
 // NOTE: an if-chain until a RELEASE ships the string-pattern switch lowering (the bootstrap binary
 // must be able to emit this file); convert back to `switch arg { "build" => .. }` after that release.
 fn subcommand(arg: str) Mode {
-    if arg == "build" {
-        return Mode::MODE_BUILD;
-    }
-    if arg == "fmt" {
-        return Mode::MODE_FMT;
-    }
-    if arg == "lint" {
-        return Mode::MODE_LINT;
-    }
-    if arg == "run" {
-        return Mode::MODE_RUN;
-    }
-    if arg == "clean" {
-        return Mode::MODE_CLEAN;
-    }
-    if arg == "test" {
-        return Mode::MODE_TEST;
-    }
-    if arg == "bench" {
-        return Mode::MODE_BENCH;
-    }
-    if arg == "lsp" {
-        return Mode::MODE_LSP;
-    }
-    return Mode::MODE_DEFAULT;
+    return switch arg {
+        "build" => {
+            Mode::MODE_BUILD;
+        },
+        "release" => {
+            Mode::MODE_RELEASE;
+        },
+        "fmt" => {
+            Mode::MODE_FMT;
+        },
+        "lint" => {
+            Mode::MODE_LINT;
+        },
+        "run" => {
+            Mode::MODE_RUN;
+        },
+        "clean" => {
+            Mode::MODE_CLEAN;
+        },
+        "test" => {
+            Mode::MODE_TEST;
+        },
+        "bench" => {
+            Mode::MODE_BENCH;
+        },
+        "lsp" => {
+            Mode::MODE_LSP;
+        },
+        _ => {
+            Mode::MODE_DEFAULT;
+        },
+    };
 }
 
 // Flags accepted by every compiling mode.
@@ -704,10 +711,10 @@ fn main(argv: Vector<str>) i32 {
         co.bad = true;
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
-    let manifest_mode = mode == Mode::MODE_BUILD && file.len() == 0 || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
+    let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
     if co.bad || file.len() == 0 && !manifest_mode && mode != Mode::MODE_LSP {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D] [--cstd=F]\n       super-c test | super-c bench [--no-run] | super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | -> | super-c lsp\n".ptr() as *const char,
+            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build|release [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D] [--cstd=F]\n       super-c test | super-c bench [--no-run] | super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | -> | super-c lsp\n".ptr() as *const char,
             stdio::stderr(),
         );
         return 1;

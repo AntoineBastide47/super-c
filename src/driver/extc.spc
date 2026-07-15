@@ -95,7 +95,7 @@ fn ext_c_wrap(
 }
 
 pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool) {
-    let root = p.root_dir.as_str();
+    let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();
     let mut seen = Vector::<String>::new();
     let mut nsrc: u32 = 0;

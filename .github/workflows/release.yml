@@ -187,7 +187,7 @@ jobs:
             cstd="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
             ./bootstrap/super-c.exe --bootstrap-tags src/main.spc
             # shellcheck disable=SC2046
-            "${CC:-gcc}" $cstd -O1 $(find src/build -name '*.c') -o "stage0-$bin" $(cat src/build/__ldflags 2>/dev/null)
+            "${CC:-gcc}" $cstd -O1 $(find src/build -name '*.c') -o "stage0-$bin" $(cat src/build/__ldflags src/build/raw/__ldflags 2>/dev/null)
             SC_CMD=1 "./stage0-$bin" build --profile=release "--cstd=$cstd" -o "$bin"
           else
             "./super-c${BINEXT:-}" build --bootstrap-tags -o "stage0-$bin" src/main.spc

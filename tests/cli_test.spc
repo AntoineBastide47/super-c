@@ -599,7 +599,7 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
     unsafe stdio::snprintf(
         &mut cc2.b[0],
         2048,
-        "cc -std=c11 -Wall -Wextra -Werror -I'%s/build' '%s/cuser.c' -o '%s/cbin' 2>/dev/null".ptr() as *const char,
+        "cc -std=c11 -Wall -Wextra -Werror -I'%s/build/raw' '%s/cuser.c' -o '%s/cbin' 2>/dev/null".ptr() as *const char,
         p.rootp(),
         p.rootp(),
         p.rootp(),

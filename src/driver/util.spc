@@ -89,9 +89,9 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 
     return 0;
 }
 
-pub fn build_out_path(root_dir: str, mod_path: str, ext: str) String {
-    let mut out = String::from_str(root_dir);
-    out.push_str("/build/");
+pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
+    let mut out = String::from_str(gen_dir);
+    out.push_byte(b'/');
     let n = mod_path.len();
     let mut i: usize = 0;
     while i < n {
@@ -196,8 +196,8 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
 }
 
 // The runtime header shared by every generated module: the C standard library includes.
-pub fn write_super_rt(root_dir: str) {
-    let path = build_out_path(root_dir, "super_rt", ".h");
+pub fn write_super_rt(gen_dir: str) {
+    let path = build_out_path(gen_dir, "super_rt", ".h");
     let f = open_out(path.as_str());
     if f != null {
         unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr() as *const char, f);

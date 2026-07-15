@@ -734,8 +734,13 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
         }
     }
 
-    write_super_rt(p.root_dir.as_str());
-    let root = p.root_dir.as_str();
+    // Manifest builds point gen_root into their out-dir; bare invocations default next to the sources.
+    if p.gen_root.len() == 0 {
+        p.gen_root = String::from_str(p.root_dir.as_str());
+        p.gen_root.push_str("/build/raw");
+    }
+    write_super_rt(p.gen_root.as_str());
+    let root = p.gen_root.as_str();
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
     let mut err = false;
@@ -844,7 +849,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     let bn = unsafe stdio::snprintf(
         &mut broot[0],
         4096,
-        "%.*s/build".ptr() as *const char,
+        "%.*s".ptr() as *const char,
         root.len() as i32,
         root.ptr() as *const char,
     );
