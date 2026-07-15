@@ -1,4 +1,4 @@
-// build.toml engine: transpile the root's module closure, content-sync the emitted C into
+// build.toml engine: transpile the root's module closure into <out-dir>/raw, content-sync it into
 // <out-dir>/<profile>/gen (unchanged files keep their mtime), compile stale objects in parallel with
 // -MMD dep tracking into <out-dir>/<profile>/obj, link, then optionally strip. This is the Makefile's
 // sync-generated.sh + compile-generated.mk moved in-process; `super-c run <cmd>` and `super-c clean`
@@ -324,7 +324,8 @@ pub fn resolve_profile(m: &mf::Manifest, cli: str) str {
     return m.default_profile.as_str();
 }
 
-// Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`.
+// Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
+// the transpiled C lands in <out-dir>/<raw> first.
 fn engine_build(
     m: &mf::Manifest,
     prof_name: str,
@@ -332,6 +333,7 @@ fn engine_build(
     root_dir: str,
     alt: str,
     sub: str,
+    raw: str,
     bin: str,
     jobs_override: u32,
     std_dir: *const char,
@@ -348,11 +350,13 @@ fn engine_build(
     }
     let prof = m.profiles.at(pi as usize);
 
-    // 1) transpile the closure to <root_dir>/build
+    // 1) transpile the closure to <out-dir>/<raw>
     let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags);
     if !p.ok {
         return 1;
     }
+    let mut srcgen = join2(m.out_dir.as_str(), raw);
+    p.gen_root = srcgen.clone();
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
@@ -366,7 +370,6 @@ fn engine_build(
     let mut pdir = join2(m.out_dir.as_str(), sub);
     let mut gen = join2(pdir.as_str(), "gen");
     let mut obj = join2(pdir.as_str(), "obj");
-    let mut srcgen = join2(root_dir, "build");
     mkdirs(gen.as_str());
     mkdirs(obj.as_str());
     let mut ret = sync_tree(srcgen.as_str(), gen.as_str());
@@ -525,6 +528,7 @@ pub fn manifest_build(
         dirname_of(m.root.as_str()),
         "",
         prof_name,
+        "raw",
         bin,
         jobs_override,
         std_dir,
@@ -606,6 +610,7 @@ pub fn manifest_test(
     if !p.ok {
         return 1;
     }
+    p.gen_root = join2(m.out_dir.as_str(), "raw-test");
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
@@ -647,6 +652,7 @@ pub fn manifest_bench(
         ".",
         dirname_of(m.root.as_str()),
         sub.as_str(),
+        "raw-bench",
         bin.as_str(),
         jobs_override,
         std_dir,
@@ -721,8 +727,8 @@ pub fn command_overrides(m: &mf::Manifest, name: str) bool {
     return m.command_index(name) >= 0;
 }
 
-// `super-c clean`: drop the manifest's outputs -- out-dir plus every emitted build tree
-// (<src>/build, bench/build from `super-c bench`, ./build from the synthesized test root).
+// `super-c clean`: drop the manifest's outputs -- out-dir (raw*/ + per-profile gen/obj) plus the
+// trees bare `super-c <root.spc>` invocations and pre-raw layouts left next to the sources.
 pub fn manifest_clean(m: &mf::Manifest) i32 {
     rm_rf(m.out_dir.as_str());
     let mut b = join2(dirname_of(m.root.as_str()), "build");

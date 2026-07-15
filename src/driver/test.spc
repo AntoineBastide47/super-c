@@ -804,7 +804,7 @@ int main(int argc, char **argv) {
 // `module::Type::method`), the global-env hooks (stubs when absent), and the fixed runner. Returns the
 // path (ownership to the caller / keep-list), or null.
 pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
-    let mut path = build_out_path(p.root_dir.as_str(), "__test_main", ".c");
+    let mut path = build_out_path(p.gen_root.as_str(), "__test_main", ".c");
     let f = open_out(path.as_str());
     if f == null {
         unsafe stdio::perror(path.cstr());
@@ -881,14 +881,14 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
 }
 
 // Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
-// linked to that path and we return; otherwise it links `<root>/build/__tests` and runs it as the test
+// linked to that path and we return; otherwise it links `<gen_root>/__tests` and runs it as the test
 // runner, forwarding `topts`' options.
 pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: str) i32 {
     let mut cc = stdlib::getenv("CC");
     if cc == null || unsafe *cc == 0 as char {
         cc = "cc".ptr() as *const char;
     }
-    let root = p.root_dir.as_str();
+    let root = p.gen_root.as_str();
     let mut cmd = String::new();
     cmd.push_str(str::from_cstr(cc));
     if out_bin.len() != 0 {
@@ -898,7 +898,7 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
     } else {
         cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L -o '");
         cmd.push_str(root);
-        cmd.push_str("/build/__tests'");
+        cmd.push_str("/__tests'");
     }
     for i in 0..keep.len() {
         let cf = keep[i].as_str();
@@ -940,7 +940,7 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
     let mut run = String::new();
     run.push_str("'");
     run.push_str(root);
-    run.push_str("/build/__tests'");
+    run.push_str("/__tests'");
     if unsafe (*topts).jobs > 0 {
         let mut jb = Buf64 {};
         unsafe stdio::snprintf(&mut jb[0], 64, " --jobs=%d".ptr() as *const char, unsafe (*topts).jobs);

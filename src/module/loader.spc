@@ -39,6 +39,7 @@ extend Module as Free {
 pub struct Package {
     pub modules: Vector<Module>,
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
+    pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
     pub std_root: String, // second import search root (parent of std/); empty = none
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
@@ -398,6 +399,7 @@ extend Package {
         return Package {
             modules: Vector::<Module>::new(),
             root_dir: String::new(),
+            gen_root: String::new(),
             std_root: String::new(),
             alt_root: String::new(),
             ok: true,
@@ -1081,6 +1083,7 @@ extend Package as Free {
     pub fn free(self: &mut Self) {
         self.modules.free();
         self.root_dir.free();
+        self.gen_root.free();
         self.std_root.free();
         self.method_used.free();
         self.mod_refs.free();

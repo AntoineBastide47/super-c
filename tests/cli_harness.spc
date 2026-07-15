@@ -173,7 +173,7 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut base[0],
             8192,
-            "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build' -name '*.c') %s $(cat '%s/build/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
+            "cc -std=c11 -Wall -Wextra -Werror $(find '%s/build/raw' -name '*.c') %s $(cat '%s/build/raw/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
             self.rootp(),
             extra.ptr() as *const char,
             self.rootp(),
@@ -191,7 +191,7 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut base[0],
             8192,
-            "cc -std=c11 $(find '%s/build' -name '*.c') %s $(cat '%s/build/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
+            "cc -std=c11 $(find '%s/build/raw' -name '*.c') %s $(cat '%s/build/raw/__ldflags' 2>/dev/null) -o '%s/bin'".ptr() as *const char,
             self.rootp(),
             extra.ptr() as *const char,
             self.rootp(),
@@ -219,7 +219,7 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut path[0],
             512,
-            "%s/build/%s".ptr() as *const char,
+            "%s/build/raw/%s".ptr() as *const char,
             self.rootp(),
             rel.ptr() as *const char,
         );
@@ -238,7 +238,7 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut path[0],
             512,
-            "%s/build/%s".ptr() as *const char,
+            "%s/build/raw/%s".ptr() as *const char,
             self.rootp(),
             rel.ptr() as *const char,
         );

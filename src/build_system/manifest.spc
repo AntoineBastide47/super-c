@@ -139,6 +139,7 @@ fn add_builtin_profiles(m: &mut Manifest) {
             &mut p.cflags,
             "-g -O0  -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
         );
+        push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
         m.profiles.push(p);
     }
     if m.profile_index("dev") < 0 {
