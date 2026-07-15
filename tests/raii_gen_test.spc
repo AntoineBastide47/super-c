@@ -442,7 +442,7 @@ fn callarg(op: i32) *const char {
 fn enum_shapes(g: &mut Gen, sh: *mut char, at: i32, max_depth: i32, alphabet: *const char, op: i32) {
     if at > 0 {
         unsafe sh[at as usize] = 0 as char;
-        g.scenario(sh as *const char, op);
+        g.scenario(sh, op);
     }
     if at == max_depth {
         return;

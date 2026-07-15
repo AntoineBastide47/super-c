@@ -1184,5 +1184,134 @@ fn dyn_t() {
     );
 }
 
+@test
+fn array_literal_arity() {
+    h::expect_ok("exact length", "fn main() i32 { let a: [u32; 3] = [1u32, 2u32, 3u32]; return a[0] as i32; }\n");
+    h::expect_err_msg(
+        "too many elements",
+        "fn main() i32 { let a: [u32; 3] = [1u32, 2u32, 3u32, 4u32]; return a[0] as i32; }\n",
+        "array literal has 4 elements but the expected type has length 3",
+    );
+    h::expect_err_msg(
+        "too few elements",
+        "fn main() i32 { let a: [u32; 3] = [1u32, 2u32]; return a[0] as i32; }\n",
+        "array literal has 2 elements but the expected type has length 3",
+    );
+    h::expect_ok(
+        "designated literal may underfill (sparse zero-fill)",
+        "fn main() i32 { let a: [usize; 32] = [[0] = 7usize]; return a[0] as i32; }\n",
+    );
+    h::expect_err_msg(
+        "designated literal must not exceed",
+        "fn main() i32 { let a: [usize; 4] = [[7] = 1usize]; return a[0] as i32; }\n",
+        "array literal has 8 elements but the expected type has length 4",
+    );
+    h::expect_ok(
+        "struct field literal exact",
+        "struct T { pub a: [u32; 2], }\nfn main() i32 { let t: T = T { a: [1u32, 2u32] }; return t.a[0] as i32; }\n",
+    );
+    h::expect_err_msg(
+        "struct field literal excess",
+        "struct T { pub a: [u32; 2], }\nfn main() i32 { let t: T = T { a: [1u32, 2u32, 3u32] }; return t.a[0] as i32; }\n",
+        "array literal has 3 elements but the expected type has length 2",
+    );
+}
+
+@test
+fn ref_pointer_coalescing() {
+    // implicit reference -> pointer, the five legal forms
+    h::expect_ok(
+        "&mut T -> *mut T",
+        "fn f(p: *mut i32) i32 { return unsafe *p; }\nfn main() i32 { let mut x = 1; return f(&mut x); }\n",
+    );
+    h::expect_ok("&T -> *T", "fn f(p: *i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return f(&x); }\n");
+    h::expect_ok(
+        "&T -> *const T",
+        "fn f(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return f(&x); }\n",
+    );
+    h::expect_ok(
+        "&mut T -> *T",
+        "fn f(p: *i32) i32 { return unsafe *p; }\nfn main() i32 { let mut x = 1; return f(&mut x); }\n",
+    );
+    h::expect_ok(
+        "&mut T -> *const T",
+        "fn f(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let mut x = 1; return f(&mut x); }\n",
+    );
+    // a shared reference never coalesces to a mutable pointer
+    h::expect_err_msg(
+        "&T -> *mut T rejected",
+        "fn f(p: *mut i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return f(&x); }\n",
+        "mismatched types",
+    );
+    // pointer -> reference is never implicit
+    h::expect_err_msg(
+        "*const T -> &T rejected",
+        "fn f(r: &i32) i32 { return *r; }\nfn main() i32 { let x = 1; let p: *const i32 = &x; return f(p); }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "*mut T -> &mut T rejected",
+        "fn f(r: &mut i32) i32 { return *r; }\nfn main() i32 { let mut x = 1; let p: *mut i32 = &mut x; return f(p); }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "*T -> &T rejected",
+        "fn f(r: &i32) i32 { return *r; }\nfn main() i32 { let mut x = 1; let p: *i32 = &mut x; return f(p); }\n",
+        "mismatched types",
+    );
+    // pointer -> reference casts demand an unsafe context
+    h::expect_err_msg(
+        "ptr as ref outside unsafe",
+        "fn f(r: &i32) i32 { return *r; }\nfn main() i32 { let x = 1; let p: *const i32 = &x; return f(p as &i32); }\n",
+        "casting a raw pointer to a reference requires 'unsafe'",
+    );
+    h::expect_ok(
+        "ptr as ref inside unsafe",
+        "fn f(r: &i32) i32 { return *r; }\nfn main() i32 { let x = 1; let p: *const i32 = &x; return f(unsafe (p as &i32)); }\n",
+    );
+    h::expect_ok(
+        "*mut as &mut inside unsafe",
+        "fn f(r: &mut i32) i32 { return *r; }\nfn main() i32 { let mut x = 1; let p: *mut i32 = &mut x; return f(unsafe (p as &mut i32)); }\n",
+    );
+}
+
+@test
+fn int_widening_matrix() {
+    // The full 8x8 whole-number implicit-widening table, typed variables (literals adapt separately):
+    // unsigned widens to any STRICTLY wider type of either signedness; signed widens only to strictly
+    // wider signed; nothing narrows, nothing crosses signed -> unsigned, usize/isize never implicit.
+    // All 18 allowed pairs in one program:
+    h::expect_ok(
+        "implicit integer widenings",
+        "fn s0(v: i16) i16 { return v; }\nfn s1(v: i32) i32 { return v; }\nfn s2(v: i64) i64 { return v; }\nfn s3(v: i16) i16 { return v; }\nfn s4(v: u16) u16 { return v; }\nfn s5(v: i32) i32 { return v; }\nfn s6(v: u32) u32 { return v; }\nfn s7(v: i64) i64 { return v; }\nfn s8(v: u64) u64 { return v; }\nfn s9(v: i32) i32 { return v; }\nfn s10(v: i64) i64 { return v; }\nfn s11(v: i32) i32 { return v; }\nfn s12(v: u32) u32 { return v; }\nfn s13(v: i64) i64 { return v; }\nfn s14(v: u64) u64 { return v; }\nfn s15(v: i64) i64 { return v; }\nfn s16(v: i64) i64 { return v; }\nfn s17(v: u64) u64 { return v; }\nfn main() i32 {\n    let x0: i8 = 1;\n    let r0 = s0(x0);\n    let x1: i8 = 1;\n    let r1 = s1(x1);\n    let x2: i8 = 1;\n    let r2 = s2(x2);\n    let x3: u8 = 1;\n    let r3 = s3(x3);\n    let x4: u8 = 1;\n    let r4 = s4(x4);\n    let x5: u8 = 1;\n    let r5 = s5(x5);\n    let x6: u8 = 1;\n    let r6 = s6(x6);\n    let x7: u8 = 1;\n    let r7 = s7(x7);\n    let x8: u8 = 1;\n    let r8 = s8(x8);\n    let x9: i16 = 1;\n    let r9 = s9(x9);\n    let x10: i16 = 1;\n    let r10 = s10(x10);\n    let x11: u16 = 1;\n    let r11 = s11(x11);\n    let x12: u16 = 1;\n    let r12 = s12(x12);\n    let x13: u16 = 1;\n    let r13 = s13(x13);\n    let x14: u16 = 1;\n    let r14 = s14(x14);\n    let x15: i32 = 1;\n    let r15 = s15(x15);\n    let x16: u32 = 1;\n    let r16 = s16(x16);\n    let x17: u32 = 1;\n    let r17 = s17(x17);\n    return 0;\n}\n",
+    );
+    // and all 38 forbidden pairs, one mismatch diagnostic each:
+    let c = h::compile(
+        "fn s0(v: u8) u8 { return v; }\nfn s1(v: u16) u16 { return v; }\nfn s2(v: u32) u32 { return v; }\nfn s3(v: u64) u64 { return v; }\nfn s4(v: i8) i8 { return v; }\nfn s5(v: i8) i8 { return v; }\nfn s6(v: u8) u8 { return v; }\nfn s7(v: u16) u16 { return v; }\nfn s8(v: u32) u32 { return v; }\nfn s9(v: u64) u64 { return v; }\nfn s10(v: i8) i8 { return v; }\nfn s11(v: u8) u8 { return v; }\nfn s12(v: i16) i16 { return v; }\nfn s13(v: i8) i8 { return v; }\nfn s14(v: u8) u8 { return v; }\nfn s15(v: i16) i16 { return v; }\nfn s16(v: u16) u16 { return v; }\nfn s17(v: u32) u32 { return v; }\nfn s18(v: u64) u64 { return v; }\nfn s19(v: i8) i8 { return v; }\nfn s20(v: u8) u8 { return v; }\nfn s21(v: i16) i16 { return v; }\nfn s22(v: u16) u16 { return v; }\nfn s23(v: i32) i32 { return v; }\nfn s24(v: i8) i8 { return v; }\nfn s25(v: u8) u8 { return v; }\nfn s26(v: i16) i16 { return v; }\nfn s27(v: u16) u16 { return v; }\nfn s28(v: i32) i32 { return v; }\nfn s29(v: u32) u32 { return v; }\nfn s30(v: u64) u64 { return v; }\nfn s31(v: i8) i8 { return v; }\nfn s32(v: u8) u8 { return v; }\nfn s33(v: i16) i16 { return v; }\nfn s34(v: u16) u16 { return v; }\nfn s35(v: i32) i32 { return v; }\nfn s36(v: u32) u32 { return v; }\nfn s37(v: i64) i64 { return v; }\nfn main() i32 {\n    let x0: i8 = 1;\n    let r0 = s0(x0);\n    let x1: i8 = 1;\n    let r1 = s1(x1);\n    let x2: i8 = 1;\n    let r2 = s2(x2);\n    let x3: i8 = 1;\n    let r3 = s3(x3);\n    let x4: u8 = 1;\n    let r4 = s4(x4);\n    let x5: i16 = 1;\n    let r5 = s5(x5);\n    let x6: i16 = 1;\n    let r6 = s6(x6);\n    let x7: i16 = 1;\n    let r7 = s7(x7);\n    let x8: i16 = 1;\n    let r8 = s8(x8);\n    let x9: i16 = 1;\n    let r9 = s9(x9);\n    let x10: u16 = 1;\n    let r10 = s10(x10);\n    let x11: u16 = 1;\n    let r11 = s11(x11);\n    let x12: u16 = 1;\n    let r12 = s12(x12);\n    let x13: i32 = 1;\n    let r13 = s13(x13);\n    let x14: i32 = 1;\n    let r14 = s14(x14);\n    let x15: i32 = 1;\n    let r15 = s15(x15);\n    let x16: i32 = 1;\n    let r16 = s16(x16);\n    let x17: i32 = 1;\n    let r17 = s17(x17);\n    let x18: i32 = 1;\n    let r18 = s18(x18);\n    let x19: u32 = 1;\n    let r19 = s19(x19);\n    let x20: u32 = 1;\n    let r20 = s20(x20);\n    let x21: u32 = 1;\n    let r21 = s21(x21);\n    let x22: u32 = 1;\n    let r22 = s22(x22);\n    let x23: u32 = 1;\n    let r23 = s23(x23);\n    let x24: i64 = 1;\n    let r24 = s24(x24);\n    let x25: i64 = 1;\n    let r25 = s25(x25);\n    let x26: i64 = 1;\n    let r26 = s26(x26);\n    let x27: i64 = 1;\n    let r27 = s27(x27);\n    let x28: i64 = 1;\n    let r28 = s28(x28);\n    let x29: i64 = 1;\n    let r29 = s29(x29);\n    let x30: i64 = 1;\n    let r30 = s30(x30);\n    let x31: u64 = 1;\n    let r31 = s31(x31);\n    let x32: u64 = 1;\n    let r32 = s32(x32);\n    let x33: u64 = 1;\n    let r33 = s33(x33);\n    let x34: u64 = 1;\n    let r34 = s34(x34);\n    let x35: u64 = 1;\n    let r35 = s35(x35);\n    let x36: u64 = 1;\n    let r36 = s36(x36);\n    let x37: u64 = 1;\n    let r37 = s37(x37);\n    return 0;\n}\n",
+        h::STAGE_TYPECHECK,
+    );
+    assert_eq(c.errors, 38 as usize);
+}
+
+@test
+fn void_pointer_coalescing() {
+    // the six implicit forms, one program
+    h::expect_ok(
+        "implicit void-pointer coalescing",
+        "fn mv(p: *mut void) i32 { return 1; }\nfn cv(p: *const void) i32 { return 1; }\nfn main() i32 {\n    let mut x = 1;\n    let pm: *mut i32 = &mut x;\n    let pc: *const i32 = &x;\n    let a = mv(&mut x);\n    let b = cv(&mut x);\n    let c = cv(&x);\n    let d = mv(pm);\n    let e = cv(pm);\n    let f = cv(pc);\n    return a + b + c + d + e + f - 6;\n}\n",
+    );
+    // write-access gains and void -> typed reversals are never implicit (5 rejections)
+    let c = h::compile(
+        "fn mv(p: *mut void) i32 { return 1; }\nfn mt(p: *mut i32) i32 { return 1; }\nfn ct(p: *const i32) i32 { return 1; }\nfn main() i32 {\n    let mut x = 1;\n    let pc: *const i32 = &x;\n    let vm: *mut void = &mut x;\n    let vc: *const void = &x;\n    let a = mv(&x);\n    let b = mv(pc);\n    let c = mt(vm);\n    let d = ct(vc);\n    let e = ct(vm);\n    return a + b + c + d + e - 5;\n}\n",
+        h::STAGE_TYPECHECK,
+    );
+    assert_eq(c.errors, 5 as usize);
+    // the reversals work as explicit casts (no unsafe needed for pointer -> pointer)
+    h::expect_ok(
+        "explicit void -> typed pointer casts",
+        "fn mt(p: *mut i32) i32 { return unsafe *p; }\nfn ct(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 {\n    let mut x = 1;\n    let vm: *mut void = &mut x;\n    let vc: *const void = &x;\n    return mt(vm as *mut i32) + ct(vc as *const i32) - 2;\n}\n",
+    );
+}
+
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,
 // computed_reference_type, literal_types, inferred_let_types, str_member_types

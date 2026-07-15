@@ -23,6 +23,7 @@ import driver::test as *;
 import driver::emit as *;
 import build_system::manifest as bman;
 import build_system::build as bsys;
+import lsp::server as lsp_srv;
 
 fn run_file(
     path: str,
@@ -38,8 +39,7 @@ fn run_file(
     let mut p = loader::package_load(path, std_dir, bootstrap_tags);
     let mut rc: i32 = 1;
     if p.ok {
-        let pkg = (&mut p) as *mut loader::Package;
-        let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
+        let mut ceval = ce::ConstEval::new(&mut p, ce_steps, ce_mem);
         p.ceval = &mut ceval;
         rc = run_package(&mut p, topts, out_bin, target, lint);
     }
@@ -80,8 +80,8 @@ fn exe_std_dir(argv0: *const char) *mut char {
         path = &buf[0];
     }
     // Last path separator, '/' or '\\' (Windows), whichever occurs later -- branch-free, no platform detection.
-    let s1 = unsafe cstring::strrchr(path, '/' as i32);
-    let s2 = unsafe cstring::strrchr(path, '\\' as i32);
+    let s1 = unsafe cstring::strrchr(path, '/');
+    let s2 = unsafe cstring::strrchr(path, '\\');
     let slash = if s2 as usize > s1 as usize {
         s2;
     } else {
@@ -117,7 +117,7 @@ fn read_stdin() Option<String> {
     loop {
         let n = unsafe stdio::fread(buf, 1, cap, sin);
         if n > 0 {
-            s.push_bytes(buf as *const u8, n);
+            s.push_bytes(buf, n);
         }
         if n < cap {
             break;
@@ -270,7 +270,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
             return rc;
         }
         let mut fixes = Vector::<diag::LintFix>::new();
-        lint_package(&mut p, target, lint_mod, (&mut fixes) as *mut Vector<diag::LintFix>);
+        lint_package(&mut p, target, lint_mod, &mut fixes);
         let errors = !p.ok;
         let mut applied = false;
         let mut werr = false;
@@ -384,48 +384,8 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     }
     let mut src = src_opt.unwrap();
 
-    // Reject sources that do not parse -- never rewrite something the compiler cannot read.
-    // Lexed with trivia so the doc pipeline can count comments; the parser gets a filtered stream.
-    let mut vsrc = src.clone();
-    let mut lx = lex::Lexer::new(&mut vsrc, path);
-    lx.keep_trivia = true;
-    lx.scan_tokens();
-    if lx.has_errors() {
-        lx.log_errors();
-        return 1;
-    }
-    let mut toks = lx.take_tokens();
-    let mut ncomments: usize = 0;
-    let mut sig = Vector::<tok::Token>::new();
-    for i in 0..toks.len() {
-        let t = *toks.at(i);
-        let k = t.kind();
-        if k == ltt::TokenType::LineComment || k == ltt::TokenType::BlockComment || k == ltt::TokenType::DocLineComment || k == ltt::TokenType::DocBlockComment {
-            ncomments = ncomments + 1;
-        } else {
-            sig.push(t);
-        }
-    }
-    let mut ps = par::Parser::new(sig, vsrc.as_str(), path);
-    ps.build_ast();
-    let perr = ps.has_errors();
-    if perr {
-        ps.errors.log();
-    }
-    if perr {
-        return 1;
-    }
-
     let mut out = String::new();
-    let ast = ps.take_ast();
-    let emitted = fbld::format_program((&ast) as *const Ast, src.as_str(), 120, &mut out);
-    if emitted != ncomments {
-        eprintln(
-            "fmt: internal error: {} of {} comments would be dropped in '{}'; refusing",
-            ncomments - emitted,
-            ncomments,
-            path,
-        );
+    if format_source(&src, path, 120, &mut out) != 0 {
         return 1;
     }
     let src_view = src.as_str();
@@ -459,19 +419,23 @@ fn main(argv: Vector<str>) i32 {
     let mut ce_mem: u64 = 0;
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
-    let mut lint = true; // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
-    let mut build_mode = false;
+
     let mut fmt_mode = false;
     let mut fmt_check = false;
-
     let mut fmt_extra = Vector::<usize>::new(); // argv indices of extra `fmt` paths
+
+    let mut lint = true; // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
     let mut lint_mode = false; // `super-c lint [--fix] <path> [<path2> ...]`
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
+
+    let mut build_mode = false;
     let mut run_mode = false; // `super-c run <command>`: run a build.toml command
     let mut clean_mode = false; // `super-c clean`: remove build.toml outputs
     let mut test_mode = false; // `super-c test`: build + run tests/ by convention
     let mut bench_mode = false; // `super-c bench`: build + run bench/main.spc by convention
     let mut bench_norun = false; // bench --no-run: build the bench binary only
+    let mut lsp_mode = false; // `super-c lsp`: LSP server over stdio
+
     let mut profile = ""; // --profile=NAME for build/run (default: manifest default-profile)
     let mut out_dir = ""; // --out-dir=PATH: override the manifest's out-dir
     let mut cstd = ""; // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
@@ -481,6 +445,7 @@ fn main(argv: Vector<str>) i32 {
     let mut bad = false;
     let mut target: i32 = unsafe shim::sc_host_platform(); // @platform gate target; --target= overrides
     let mut bootstrap_tags = false; // --bootstrap-tags: accept unknown @attributes (build across a new tag)
+
     let mut i: usize = 1;
     while i < argc {
         let arg = argv[i];
@@ -498,6 +463,8 @@ fn main(argv: Vector<str>) i32 {
             test_mode = true; // `super-c test`: tests/ by convention
         } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && !test_mode && !bench_mode && file.len() == 0 && arg == "bench" {
             bench_mode = true; // `super-c bench`: bench/main.spc by convention
+        } else if !build_mode && !fmt_mode && !lint_mode && !run_mode && !clean_mode && !test_mode && !bench_mode && !lsp_mode && file.len() == 0 && arg == "lsp" {
+            lsp_mode = true; // `super-c lsp`: language server over stdio
         } else if bench_mode && arg == "--no-run" {
             bench_norun = true;
         } else if fmt_mode && arg == "--check" {
@@ -590,6 +557,9 @@ fn main(argv: Vector<str>) i32 {
     if (run_mode || clean_mode || test_mode || bench_mode) && (topts.enabled || out_bin.len() != 0) {
         bad = true;
     }
+    if lsp_mode && (build_mode || fmt_mode || lint_mode || run_mode || clean_mode || test_mode || bench_mode || topts.enabled || file.len() != 0 || out_bin.len() != 0) {
+        bad = true; // `lsp` takes no paths and combines with nothing
+    }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
     let manifest_mode = build_mode && file.len() == 0 || run_mode || clean_mode || test_mode || bench_mode;
     if build_mode && file.len() != 0 && out_bin.len() == 0 {
@@ -601,9 +571,9 @@ fn main(argv: Vector<str>) i32 {
     if (clean_mode || test_mode || bench_mode) && file.len() != 0 {
         bad = true;
     }
-    if bad || file.len() == 0 && !manifest_mode {
+    if bad || file.len() == 0 && !manifest_mode && !lsp_mode {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D] [--cstd=F]\n       super-c test | super-c bench [--no-run] | super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | ->\n".ptr() as *const char,
+            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D] [--cstd=F]\n       super-c test | super-c bench [--no-run] | super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | -> | super-c lsp\n".ptr() as *const char,
             stdio::stderr(),
         );
         return 1;
@@ -624,12 +594,19 @@ fn main(argv: Vector<str>) i32 {
     };
     let std_dir = exe_std_dir(arg0);
     if lint_mode {
-        let mut rc = run_lint(file, std_dir as *const char, ce_steps, ce_mem, target, lint_fix);
+        let mut rc = run_lint(file, std_dir, ce_steps, ce_mem, target, lint_fix);
         for k in 0..lint_extra.len() {
-            if run_lint(argv[*lint_extra.at(k)], std_dir as *const char, ce_steps, ce_mem, target, lint_fix) != 0 {
+            if run_lint(argv[*lint_extra.at(k)], std_dir, ce_steps, ce_mem, target, lint_fix) != 0 {
                 rc = 1;
             }
         }
+        if std_dir != null {
+            unsafe stdlib::free(std_dir);
+        }
+        return rc;
+    }
+    if lsp_mode {
+        let rc = lsp_srv::run(std_dir, target);
         if std_dir != null {
             unsafe stdlib::free(std_dir);
         }
@@ -653,7 +630,7 @@ fn main(argv: Vector<str>) i32 {
                         "clean",
                         profile,
                         jobs,
-                        std_dir as *const char,
+                        std_dir,
                         ce_steps,
                         ce_mem,
                         target,
@@ -670,7 +647,7 @@ fn main(argv: Vector<str>) i32 {
                         "test",
                         profile,
                         jobs,
-                        std_dir as *const char,
+                        std_dir,
                         ce_steps,
                         ce_mem,
                         target,
@@ -684,7 +661,7 @@ fn main(argv: Vector<str>) i32 {
                         profile,
                         jobs,
                         &topts,
-                        std_dir as *const char,
+                        std_dir,
                         ce_steps,
                         ce_mem,
                         target,
@@ -698,7 +675,7 @@ fn main(argv: Vector<str>) i32 {
                         "bench",
                         profile,
                         jobs,
-                        std_dir as *const char,
+                        std_dir,
                         ce_steps,
                         ce_mem,
                         target,
@@ -711,7 +688,7 @@ fn main(argv: Vector<str>) i32 {
                         profile,
                         bench_norun,
                         jobs,
-                        std_dir as *const char,
+                        std_dir,
                         ce_steps,
                         ce_mem,
                         target,
@@ -724,7 +701,7 @@ fn main(argv: Vector<str>) i32 {
                     file,
                     profile,
                     jobs,
-                    std_dir as *const char,
+                    std_dir,
                     ce_steps,
                     ce_mem,
                     target,
@@ -737,7 +714,7 @@ fn main(argv: Vector<str>) i32 {
                     "build",
                     profile,
                     jobs,
-                    std_dir as *const char,
+                    std_dir,
                     ce_steps,
                     ce_mem,
                     target,
@@ -750,7 +727,7 @@ fn main(argv: Vector<str>) i32 {
                     profile,
                     out_bin,
                     jobs,
-                    std_dir as *const char,
+                    std_dir,
                     ce_steps,
                     ce_mem,
                     target,
@@ -764,17 +741,7 @@ fn main(argv: Vector<str>) i32 {
         }
         return rc;
     }
-    let rc = run_file(
-        file,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        (&topts) as *const TestOpts,
-        out_bin,
-        target,
-        bootstrap_tags,
-        lint,
-    );
+    let rc = run_file(file, std_dir, ce_steps, ce_mem, &topts, out_bin, target, bootstrap_tags, lint);
     if std_dir != null {
         unsafe stdlib::free(std_dir);
     }

@@ -11,7 +11,7 @@ fn fmt_of(src: str, width: i32) String {
     let mut pa = h::parse_ast(src);
     assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
-    fbld::format_program((&pa.ast) as *const Ast, src, width, &mut out);
+    fbld::format_program(&pa.ast, src, width, &mut out);
     return out;
 }
 
@@ -114,10 +114,7 @@ fn emitted_c_identical() {
     let mut c2 = h::compile_c(f.as_str());
     assert(c1.ok(), "ugly variant does not compile");
     assert(c2.ok(), "formatted variant does not compile");
-    assert(
-        unsafe cstring::strcmp(c1.code as *const char, c2.code as *const char) == 0,
-        "emitted C differs between ugly and formatted variants",
-    );
+    assert(unsafe cstring::strcmp(c1.code, c2.code) == 0, "emitted C differs between ugly and formatted variants");
 }
 
 @test

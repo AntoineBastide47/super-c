@@ -57,14 +57,14 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     pub const fn as_ptr(self: &Array<T, N>) *const T {
-        return (&self.data[0]) as *const T;
+        return &self.data[0];
     }
 
     // Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Caller guarantees
     // `n <= N * sizeof(T)` and that the bytes form valid `T`s; overwritten elements are NOT
     // freed (raw overwrite, unlike `set`).
     pub fn copy_from(self: &mut Array<T, N>, src: *const void, n: usize) {
-        unsafe memcpy((&mut self.data[0]) as *mut void, src, n);
+        unsafe memcpy(&mut self.data[0], src, n);
     }
 
     // Exchange the elements at `i` and `j` (both must be in range).

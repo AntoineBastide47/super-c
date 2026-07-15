@@ -38,7 +38,7 @@ extend Error as Free {
     pub fn free(self: &mut Error) {
         if self.message as *mut void != null {
             unsafe self.message.free();
-            unsafe free(self.message as *mut void);
+            unsafe free(self.message);
             self.message = null;
         }
     }
@@ -53,7 +53,7 @@ extend Error as Clone {
 extend Error as Format {
     pub fn fmt(self: &Error) String {
         let mut out = String::from_str("Error(");
-        out.push_i64(self.code as i64);
+        out.push_i64(self.code);
         out.push_str(": ");
         out.push_string(unsafe &self.message[0]);
         out.push_str(")");

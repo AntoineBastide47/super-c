@@ -55,11 +55,11 @@ fn cat_file(path: str) {
     }
     let mut buf = Array::<char, 4096>::new();
     loop {
-        let n = unsafe stdio::fread((&mut buf[0]) as *mut void, 1, 4096, f);
+        let n = unsafe stdio::fread(&mut buf[0], 1, 4096, f);
         if n == 0 {
             break;
         }
-        unsafe stdio::fwrite((&buf[0]) as *const void, 1, n, stdio::stderr());
+        unsafe stdio::fwrite(&buf[0], 1, n, stdio::stderr());
     }
     unsafe stdio::fclose(f);
 }

@@ -135,7 +135,10 @@ fn push_flags(dst: &mut Vector<String>, flags: str) {
 fn add_builtin_profiles(m: &mut Manifest) {
     if m.profile_index("debug") < 0 {
         let mut p = Profile::new("debug");
-        push_flags(&mut p.cflags, "-g -O0 -fno-omit-frame-pointer");
+        push_flags(
+            &mut p.cflags,
+            "-g -O0  -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
+        );
         m.profiles.push(p);
     }
     if m.profile_index("dev") < 0 {

@@ -75,7 +75,7 @@ fn nearest_shadow() {
     let outer_let = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0); // created first
     let inner_let = h::nth_kind(&c.ast, NodeKind::NODE_LET, 1);
     let mut uses: [NodeId; 4] = [0 as NodeId, 0 as NodeId, 0 as NodeId, 0 as NodeId];
-    let n = value_uses(&c.ast, src.ptr() as *const char, "x".ptr() as *const char, (&mut uses[0]) as *mut NodeId, 4);
+    let n = value_uses(&c.ast, src.ptr() as *const char, "x".ptr() as *const char, &mut uses[0], 4);
     assert_eq(n, 2);
     assert(c.ast.resolution(uses[0]) == inner_let, "inner g(x) binds to the inner let");
     assert(c.ast.resolution(uses[1]) == outer_let, "outer g(x) binds to the outer let");
@@ -91,7 +91,7 @@ fn namespace_separation() {
     let struct_decl = h::nth_kind(&c.ast, NodeKind::NODE_STRUCT, 0);
     let const_decl = h::nth_kind(&c.ast, NodeKind::NODE_CONST, 0);
     let mut uses: [NodeId; 4] = [0 as NodeId, 0 as NodeId, 0 as NodeId, 0 as NodeId];
-    let n = value_uses(&c.ast, src.ptr() as *const char, "Foo".ptr() as *const char, (&mut uses[0]) as *mut NodeId, 4);
+    let n = value_uses(&c.ast, src.ptr() as *const char, "Foo".ptr() as *const char, &mut uses[0], 4);
     assert_eq(n, 1); // the value use is the let initializer
     assert(c.ast.resolution(uses[0]) == const_decl, "value Foo binds to the const, not the struct");
     // The type use is the `: Foo` annotation, resolved on the NODE_TYPE_PATH.
@@ -127,27 +127,23 @@ fn closures() {
     // Params / module-level items are not captures.
     let mut n = closure_captures(
         "const K: i32 = 3;\nfn helper(n: i32) i32 { return n; }\nfn main() i32 { let f = |x: i32| helper(x) + K; return f(1); }\n",
-        (&mut caps[0]) as *mut u32,
+        &mut caps[0],
         4,
     );
     assert(n == 1 && caps[0] == 0, "params/module items are not captures");
     // Referencing an outer local is a capture (deduped: `base` twice is one).
     n = closure_captures(
         "fn main() i32 { let base = 10; let f = |x: i32| x + base + base; return f(1); }\n",
-        (&mut caps[0]) as *mut u32,
+        &mut caps[0],
         4,
     );
     assert(n == 1 && caps[0] == 1, "one deduped capture expected");
-    n = closure_captures(
-        "fn add(b: i32, c: i32) i32 { let f = |x: i32| x + b + c; return f(1); }\n",
-        (&mut caps[0]) as *mut u32,
-        4,
-    );
+    n = closure_captures("fn add(b: i32, c: i32) i32 { let f = |x: i32| x + b + c; return f(1); }\n", &mut caps[0], 4);
     assert(n == 1 && caps[0] == 2, "two captures expected");
     // A nested closure captures through the outer one: both collect it.
     n = closure_captures(
         "fn main() i32 {\n  let base = 10;\n  let outer = fn(x: i32) i32 { let inner = |y: i32| y + base; return inner(x); };\n  return outer(1);\n}\n",
-        (&mut caps[0]) as *mut u32,
+        &mut caps[0],
         4,
     );
     assert(n == 2 && caps[0] == 1 && caps[1] == 1, "both closures capture 'base'");

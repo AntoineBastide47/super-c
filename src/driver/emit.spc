@@ -216,9 +216,9 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut r.ast) as *mut Ast;
+    p.override_ast = &mut r.ast;
     r.resolve();
-    p.override_mod = 0xFFFF as ModuleId;
+    p.override_mod = 0xFFFF;
     p.override_ast = null;
     let had = r.has_errors();
     if had || fixes == null && r.errors.has_warnings() {
@@ -245,9 +245,9 @@ fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut V
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     p.override_mod = i as ModuleId;
-    p.override_ast = (&mut t.ast) as *mut Ast;
+    p.override_ast = &mut t.ast;
     t.check();
-    p.override_mod = 0xFFFF as ModuleId;
+    p.override_mod = 0xFFFF;
     p.override_ast = null;
     let had = t.has_errors();
     if had || fixes == null && t.errors.has_warnings() {
@@ -302,7 +302,7 @@ type TCases = Array<cg::CgTestCase, 512>;
 // Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
 // parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
 // target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
-fn platform_filter(p: &mut loader::Package, target: i32) {
+pub fn platform_filter(p: &mut loader::Package, target: i32) {
     let n = p.modules.len();
     for mi in 0..n {
         let m = &mut p.modules[mi];
@@ -740,7 +740,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     keep.push(build_out_path(root, "super_rt", ".h"));
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
-    ext_c_collect(p, &mut keep, (&mut err) as *mut bool);
+    ext_c_collect(p, &mut keep, &mut err);
     let live = compute_emit_live(p);
     let osz = if n != 0 {
         n;
@@ -798,7 +798,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
             };
             let ti = cg::CgTestInfo {
                 enabled: true,
-                cases: (&tcases[0]) as *const cg::CgTestCase,
+                cases: &tcases[0],
                 ncases: nt,
                 fx_init: plan.fx_init[mi as usize],
                 fx_free: plan.fx_free[mi as usize],
@@ -809,7 +809,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
                 genv_type: plan.genv_type,
                 genv_is_enum: plan.genv_is_enum,
             };
-            c.set_test_info((&ti) as *const cg::CgTestInfo);
+            c.set_test_info(&ti);
         }
         let hpath = build_out_path(root, mpath, ".h");
         let hout = open_out(hpath.as_str());

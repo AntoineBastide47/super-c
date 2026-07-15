@@ -21,29 +21,29 @@ extern "C" {
 
 // Ergonomic byte-oriented wrappers.
 pub fn is_alpha(b: u8) bool {
-    return unsafe isalpha(b as i32) != 0;
+    return unsafe isalpha(b) != 0;
 }
 pub fn is_digit(b: u8) bool {
-    return unsafe isdigit(b as i32) != 0;
+    return unsafe isdigit(b) != 0;
 }
 pub fn is_alnum(b: u8) bool {
-    return unsafe isalnum(b as i32) != 0;
+    return unsafe isalnum(b) != 0;
 }
 pub fn is_space(b: u8) bool {
-    return unsafe isspace(b as i32) != 0;
+    return unsafe isspace(b) != 0;
 }
 pub fn is_upper(b: u8) bool {
-    return unsafe isupper(b as i32) != 0;
+    return unsafe isupper(b) != 0;
 }
 pub fn is_lower(b: u8) bool {
-    return unsafe islower(b as i32) != 0;
+    return unsafe islower(b) != 0;
 }
 pub fn is_xdigit(b: u8) bool {
-    return unsafe isxdigit(b as i32) != 0;
+    return unsafe isxdigit(b) != 0;
 }
 pub fn to_upper(b: u8) u8 {
-    return (unsafe toupper(b as i32)) as u8;
+    return (unsafe toupper(b)) as u8;
 }
 pub fn to_lower(b: u8) u8 {
-    return (unsafe tolower(b as i32)) as u8;
+    return (unsafe tolower(b)) as u8;
 }

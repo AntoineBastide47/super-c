@@ -40,3 +40,4 @@ profile.json.gz
 stage*-super-c
 .obj/
 release.sh
+editors/vscode/node_modules/

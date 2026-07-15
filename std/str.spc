@@ -73,7 +73,7 @@ extend str {
         if prefix.len == 0 {
             return true;
         }
-        return unsafe memcmp(self.ptr as *const void, prefix.ptr as *const void, prefix.len) == 0;
+        return unsafe memcmp(self.ptr, prefix.ptr, prefix.len) == 0;
     }
 
     pub const fn ends_with(self: &str, suffix: str) bool {
@@ -83,11 +83,7 @@ extend str {
         if suffix.len == 0 {
             return true;
         }
-        return unsafe memcmp(
-            (unsafe (self.ptr + (self.len - suffix.len))) as *const void,
-            suffix.ptr as *const void,
-            suffix.len,
-        ) == 0;
+        return unsafe memcmp(unsafe (self.ptr + (self.len - suffix.len)), suffix.ptr, suffix.len) == 0;
     }
 
     // First index of byte `byte`, or -1 if absent.
@@ -110,7 +106,7 @@ extend str {
         }
         let last = self.len - needle.len;
         for i in 0..=last {
-            if unsafe memcmp((unsafe (self.ptr + i)) as *const void, needle.ptr as *const void, needle.len) == 0 {
+            if unsafe memcmp(unsafe (self.ptr + i), needle.ptr, needle.len) == 0 {
                 return i as isize;
             }
         }
@@ -219,7 +215,7 @@ extend str as Eq {
         if self.len == 0 {
             return true;
         }
-        return unsafe memcmp(self.ptr as *const void, other.ptr as *const void, self.len) == 0;
+        return unsafe memcmp(self.ptr, other.ptr, self.len) == 0;
     }
 }
 
@@ -232,7 +228,7 @@ extend str as Ord {
             n = other.len;
         }
         if n > 0 {
-            let c = unsafe memcmp(self.ptr as *const void, other.ptr as *const void, n);
+            let c = unsafe memcmp(self.ptr, other.ptr, n);
             if c != 0 {
                 return c;
             }
@@ -566,7 +562,7 @@ fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
         let b = s.byte_at(i);
         let mut d: u32 = 99;
         if b >= b'0' && b <= b'9' {
-            d = (b - b'0') as u32;
+            d = b - b'0';
         } else if b >= b'a' && b <= b'z' {
             d = (b - b'a') as u32 + 10;
         } else if b >= b'A' && b <= b'Z' {
@@ -605,16 +601,16 @@ extend Chars as Iterator<u32> {
         let mut cp: u32 = 0;
         let mut n: usize = 1;
         if b0 < 0x80 {
-            cp = b0 as u32;
+            cp = b0;
             n = 1;
         } else if (b0 & 0xE0) == 0xC0 {
-            cp = (b0 & 0x1F) as u32;
+            cp = b0 & 0x1F;
             n = 2;
         } else if (b0 & 0xF0) == 0xE0 {
-            cp = (b0 & 0x0F) as u32;
+            cp = b0 & 0x0F;
             n = 3;
         } else if (b0 & 0xF8) == 0xF0 {
-            cp = (b0 & 0x07) as u32;
+            cp = b0 & 0x07;
             n = 4;
         } else {
             self.i = self.i + 1;

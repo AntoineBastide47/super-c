@@ -110,12 +110,12 @@ fn is_bin(b: u8) bool {
 
 fn hex_value(b: u8) i32 {
     if b <= b'9' {
-        return (b - b'0') as i32;
+        return b - b'0';
     }
     if b <= b'F' {
-        return (b - b'A' + 10) as i32;
+        return b - b'A' + 10;
     }
-    return (b - b'a' + 10) as i32;
+    return b - b'a' + 10;
 }
 
 fn add_token(l: &mut Lexer, token_type: TokenType) {
@@ -175,11 +175,11 @@ fn decode_at_b(l: &Lexer, b: u8, current: usize, size: &mut usize) u32 {
     }
     let mut cp: u32 = 0;
     if b >= 0xC2u8 && b <= 0xDFu8 {
-        cp = (b & 0x1Fu8) as u32;
+        cp = b & 0x1Fu8;
     } else if b >= 0xE0u8 && b <= 0xEFu8 {
-        cp = (b & 0x0Fu8) as u32;
+        cp = b & 0x0Fu8;
     } else if b >= 0xF0u8 && b <= 0xF4u8 {
-        cp = (b & 0x07u8) as u32;
+        cp = b & 0x07u8;
     } else {
         *size = 0;
         return 0;
@@ -476,13 +476,13 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
         return 9;
     }
     if escaped == b'\\' {
-        return '\\' as u32;
+        return '\\';
     }
     if escaped == b'\'' {
-        return '\'' as u32;
+        return '\'';
     }
     if escaped == b'"' && !byte_character {
-        return '"' as u32;
+        return '"';
     }
     if escaped == b'0' {
         return 0;

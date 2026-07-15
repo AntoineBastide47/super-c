@@ -1,0 +1,63 @@
+{
+  "name": "super-c",
+  "displayName": "Super-C",
+  "description": "Super-C language support: diagnostics, hover, go-to-definition, references, rename, completion, formatting and semantic highlighting via `super-c lsp`.",
+  "version": "0.1.0",
+  "publisher": "super-c",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:super-c"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "super-c",
+        "aliases": [
+          "Super-C",
+          "superc"
+        ],
+        "extensions": [
+          ".spc"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "super-c",
+        "scopeName": "source.super-c",
+        "path": "./syntaxes/super-c.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Super-C",
+      "properties": {
+        "superc.serverPath": {
+          "type": "string",
+          "default": "super-c",
+          "description": "Path to the super-c binary (the language server runs as `super-c lsp`)."
+        },
+        "superc.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the communication with the Super-C language server."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
