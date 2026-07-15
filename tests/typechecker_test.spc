@@ -1313,5 +1313,78 @@ fn void_pointer_coalescing() {
     );
 }
 
+@test
+fn unsafe_functions() {
+    // declaring and calling with a marker, in every position
+    h::expect_ok(
+        "unsafe fn called with prefix",
+        "unsafe fn raw(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return unsafe raw(&x) - 1; }\n",
+    );
+    h::expect_ok(
+        "pub unsafe fn",
+        "pub unsafe fn raw(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return unsafe raw(&x) - 1; }\n",
+    );
+    h::expect_ok(
+        "unsafe method in extend",
+        "struct T { pub v: i32, }\nextend T { pub unsafe fn peek(self: &T, p: *const i32) i32 { return unsafe *p + self.v; } }\nfn main() i32 { let x = 1; let t = T { v: 1 }; return unsafe t.peek(&x) - 2; }\n",
+    );
+    // calls without a marker are rejected, direct and through a method
+    h::expect_err_msg(
+        "unmarked call rejected",
+        "unsafe fn raw(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return raw(&x) - 1; }\n",
+        "calling an unsafe function requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "unmarked method call rejected",
+        "struct T { pub v: i32, }\nextend T { pub unsafe fn peek(self: &T, p: *const i32) i32 { return unsafe *p + self.v; } }\nfn main() i32 { let x = 1; let t = T { v: 1 }; return t.peek(&x) - 2; }\n",
+        "calling an unsafe function requires an 'unsafe' block",
+    );
+    // the body of an unsafe fn is NOT implicitly unsafe: inner operations still need their markers
+    h::expect_err_msg(
+        "unsafe fn body still needs markers",
+        "unsafe fn raw(p: *const i32) i32 { return *p; }\nfn main() i32 { let x = 1; return unsafe raw(&x) - 1; }\n",
+        "requires an 'unsafe' block",
+    );
+    // `unsafe` at item scope only introduces a function
+    h::expect_err_msg(
+        "unsafe struct rejected",
+        "unsafe struct T { pub v: i32, }\nfn main() i32 { return 0; }\n",
+        "expected 'fn' after 'unsafe' at item scope",
+    );
+}
+
+@test
+fn expected_type_reaches_branches() {
+    // literals in if/switch value branches adapt to the context type (no suffixes, no casts)
+    h::expect_ok(
+        "if-value literals adapt",
+        "fn main() i32 { let f = true; let i: usize = if f { 1; } else { 2; }; return i as i32 - 1; }\n",
+    );
+    h::expect_ok(
+        "else-if chain adapts",
+        "fn main() i32 { let f = true; let k: u16 = if f { 10; } else if !f { 20; } else { 30; }; return k as i32 - 10; }\n",
+    );
+    h::expect_ok(
+        "switch arms adapt (incl. negatives)",
+        "fn main() i32 { let f = true; let j: i64 = switch f { true => -1, false => 7, }; return (j + 1) as i32; }\n",
+    );
+    h::expect_ok(
+        "string literal branches reach *const char",
+        "fn main() i32 { let f = true; let p: *const char = if f { \"a\"; } else { \"b\"; }; return (p as usize * 0) as i32; }\n",
+    );
+    // range checking still applies at the adapted literal
+    h::expect_err_msg(
+        "branch literal out of range",
+        "fn main() i32 { let f = true; let x: u8 = if f { 300; } else { 1; }; return x as i32; }\n",
+        "integer literal is out of range for 'u8'",
+    );
+    // pinned (suffixed) literals never adapt
+    h::expect_err_msg(
+        "pinned branch literal stays pinned",
+        "fn main() i32 { let f = true; let i: usize = if f { 1i32; } else { 2i32; }; return i as i32; }\n",
+        "mismatched types",
+    );
+}
+
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,
 // computed_reference_type, literal_types, inferred_let_types, str_member_types

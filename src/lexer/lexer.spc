@@ -138,11 +138,11 @@ fn peek_byte(l: &Lexer) u8 {
     return l.bytes.byte_at(l.current);
 }
 
-fn peek_byte_n(l: &Lexer, n: usize) u8 {
-    if l.current + n >= l.bytes.len() {
+fn peek_next(l: &Lexer) u8 {
+    if l.current + 1 >= l.bytes.len() {
         return EOF_CH;
     }
-    return l.bytes.byte_at(l.current + n);
+    return l.bytes.byte_at(l.current + 1);
 }
 
 fn match_byte(l: &mut Lexer, expected: u8) bool {
@@ -798,7 +798,7 @@ fn number(l: &mut Lexer) {
                 error = "radix prefix must be followed by at least one digit";
             }
             let mut hex_float = false;
-            if radix == 16 && error_at == USIZE_MAX && peek_byte(l) == b'.' && is_hex(peek_byte_n(l, 1)) {
+            if radix == 16 && error_at == USIZE_MAX && peek_byte(l) == b'.' && is_hex(peek_next(l)) {
                 hex_float = true;
                 l.current = l.current + 1;
                 while is_hex(peek_byte(l)) {
@@ -867,7 +867,7 @@ fn number(l: &mut Lexer) {
     if error_at != USIZE_MAX {
         error = "invalid numeric separator";
     }
-    if peek_byte(l) == b'.' && peek_byte_n(l, 1) != b'.' {
+    if peek_byte(l) == b'.' && peek_next(l) != b'.' {
         is_float = true;
         l.current = l.current + 1;
         let fraction_start = l.current;

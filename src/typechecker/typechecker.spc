@@ -6513,6 +6513,8 @@ extend TypeChecker {
         let named = fk == NodeKind::NODE_FUNCTION;
         if named && unsafe (*fa).at_const(fdecl).as_data.function.is_extern && self.tc_needs_unsafe() {
             self.err_unsafe(sp, "calling an extern \"C\" function");
+        } else if named && unsafe (*fa).at_const(fdecl).as_data.function.is_unsafe && self.tc_needs_unsafe() {
+            self.err_unsafe(sp, "calling an unsafe function");
         }
         let clos = fk == NodeKind::NODE_CLOSURE;
         let mut params = NodeList { start: 0, len: 0 };
@@ -8386,7 +8388,7 @@ extend TypeChecker {
         return result;
     }
 
-    fn check_match_expr(self: &mut Self, id: NodeId) TypeId {
+    fn check_match_expr(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let bm = self.borrow_mark();
         let scrut = self.check_expr(unsafe (*a).at_const(id).as_data.match_expr.value);
@@ -8421,12 +8423,29 @@ extend TypeChecker {
                 let sp = unsafe (*a).at_const(arm.guard).span;
                 self.errors.emit(sp.start, sp.end - sp.start, format("match guard must be 'bool'"));
             }
-            let body = self.check_expr(arm.body);
+            self.expected = expected;
+            let mut body = self.check_expr(arm.body);
+            if expected != TYPE_NONE {
+                self.tc_tail_adapt(expected, arm.body);
+                body = unsafe (*self.cur_ast()).type_of(arm.body);
+            }
             if self.tc_flow_collect(&mut acc) {
                 ovf = true;
             }
             let body_never = body != TYPE_NONE && self.type_at(body).kind == TypeKind::TYPE_NEVER;
-            if first {
+            if expected != TYPE_NONE {
+                // a context type is known: each arm coerces to IT (widening, adaptation, the works)
+                // instead of having to equal the first arm exactly
+                if body != TYPE_NONE && !body_never && !self.compatible(expected, arm.body) {
+                    self.err_mismatch(arm.body, expected);
+                }
+                if first {
+                    result = body;
+                    first = false;
+                } else if !body_never {
+                    result = expected;
+                }
+            } else if first {
                 result = body;
                 first = false;
             } else if result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_NEVER {
@@ -8700,7 +8719,7 @@ extend TypeChecker {
                 }
             },
             NODE_MATCH => {
-                result = self.check_match_expr(id);
+                result = self.check_match_expr(id, expected);
             },
             NODE_NEW => {
                 let declared = self.resolve_type(unsafe (*a).at_const(id).as_data.new_expr.ty);
@@ -8729,7 +8748,7 @@ extend TypeChecker {
                 result = self.check_struct_init(id);
             },
             NODE_BLOCK => {
-                result = self.check_block_value(id);
+                result = self.check_block_value(id, expected);
             },
             NODE_WHILE => {
                 self.loop_depth = self.loop_depth + 1;
@@ -8745,7 +8764,7 @@ extend TypeChecker {
                 self.loop_depth = self.loop_depth - 1;
             },
             NODE_IF => {
-                result = self.check_if_value(id);
+                result = self.check_if_value(id, expected);
             },
             NODE_TUPLE => {
                 result = self.check_tuple_value(id, expected);
@@ -8962,12 +8981,40 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    fn check_block_value(self: &mut Self, id: NodeId) TypeId {
+    // Adapt a branch/arm/block-tail LITERAL to the expected type. Literal adaptation is the one
+    // implicit conversion that is position-sensitive -- it must run ON the literal node -- so the
+    // expected type is pushed into value-position branches and applied here; every other conversion
+    // keeps working on the merged value at the outer coercion site, unchanged.
+    fn tc_tail_adapt(self: &mut Self, expected: TypeId, lv: NodeId) {
+        if expected == TYPE_NONE || lv == NODE_NONE {
+            return;
+        }
+        let a = self.cur_ast();
+        let mut vid = lv;
+        let v0 = unsafe (*a).at_const(lv);
+        if v0.kind == NodeKind::NODE_UNARY && v0.as_data.unary.op == TokenType::Minus {
+            vid = v0.as_data.unary.operand;
+        }
+        if unsafe (*a).at_const(vid).kind != NodeKind::NODE_LITERAL {
+            // a non-literal tail needs no adaptation, but a cast tail that now matches the context
+            // type exactly is the redundant-cast lint's business (arms/tails see expected now)
+            if self.lint && lv as usize < unsafe (*a).types.len() && unsafe (*a).type_of(lv) == expected {
+                self.tc_lint_redundant_coalesce(expected, lv);
+            }
+            return;
+        }
+        let _ = self.compatible(expected, lv); // the literal path adapts + range-checks in place
+    }
+
+    fn check_block_value(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let stmts = unsafe (*a).at_const(id).as_data.block.statements;
         self.tc_scope_enter();
         for i in 0..stmts.len {
             let sid = unsafe (*a).list(stmts)[i as usize];
+            if expected != TYPE_NONE && i == stmts.len - 1 && unsafe (*a).at_const(sid).kind == NodeKind::NODE_EXPRESSION_STATEMENT {
+                self.expected = expected; // the tail is this block's value: let it see the context type
+            }
             self.check_stmt(sid);
             self.borrow_nll_drop(id, unsafe (*a).list(stmts), i);
         }
@@ -8984,6 +9031,7 @@ extend TypeChecker {
             let last = unsafe (*a).at_const(lastid);
             let lv = if_node(last.kind == NodeKind::NODE_EXPRESSION_STATEMENT, last.as_data.single.value, NODE_NONE);
             if lv != NODE_NONE && unsafe (*a).at_const(lv).kind != NodeKind::NODE_ASSIGNMENT {
+                self.tc_tail_adapt(expected, lv);
                 return unsafe (*a).type_of(lv);
             }
             return Ast::builtin(BuiltinType::BT_VOID);
@@ -8991,7 +9039,7 @@ extend TypeChecker {
         return Ast::builtin(BuiltinType::BT_VOID);
     }
 
-    fn check_if_value(self: &mut Self, id: NodeId) TypeId {
+    fn check_if_value(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let ifd = unsafe (*a).at_const(id).as_data.if_stmt;
         let bm = self.borrow_mark();
@@ -9009,6 +9057,7 @@ extend TypeChecker {
         self.borrow_release_to(bm);
         let mut ifpre: FlowState;
         self.tc_flow_save(&mut ifpre);
+        self.expected = expected;
         let then_ty = self.check_expr(ifd.then_branch);
         if ifd.else_branch == NODE_NONE {
             let sp = unsafe (*a).at_const(id).span;
@@ -9019,6 +9068,7 @@ extend TypeChecker {
         self.tc_flow_clear(&mut acc);
         let mut ovf = self.tc_flow_collect(&mut acc);
         self.tc_flow_set(&ifpre);
+        self.expected = expected;
         let else_ty = self.check_expr(ifd.else_branch);
         if self.tc_flow_collect(&mut acc) {
             ovf = true;
@@ -9031,6 +9081,17 @@ extend TypeChecker {
         let else_never = else_ty != TYPE_NONE && self.type_at(else_ty).kind == TypeKind::TYPE_NEVER;
         if then_never || else_never {
             return if_ty(then_never, else_ty, then_ty);
+        }
+        if expected != TYPE_NONE {
+            // a context type is known: each branch coerces to IT (widening, adaptation, the works)
+            // instead of having to equal the other branch exactly
+            if then_ty != TYPE_NONE && !self.compatible(expected, ifd.then_branch) {
+                self.err_mismatch(ifd.then_branch, expected);
+            }
+            if else_ty != TYPE_NONE && !self.compatible(expected, ifd.else_branch) {
+                self.err_mismatch(ifd.else_branch, expected);
+            }
+            return expected;
         }
         if then_ty != else_ty && then_ty != TYPE_NONE && else_ty != TYPE_NONE {
             self.err_mismatch(ifd.else_branch, then_ty);

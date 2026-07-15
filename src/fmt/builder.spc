@@ -1319,6 +1319,9 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
                 v.push(b.p.txt("pub "));
             }
             if f.is_extern && f.body == NODE_NONE {}
+            if f.is_unsafe {
+                v.push(b.p.txt("unsafe "));
+            }
             if f.is_const {
                 v.push(b.p.txt("const "));
             }

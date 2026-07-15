@@ -28,6 +28,28 @@ fn run_exit(label: str, body: str, code: i32) {
 }
 
 @test
+fn operator_overload_lowering() {
+    // compound assignment on an operator-overloaded struct lowers through the method (C cannot += structs)
+    run_exit(
+        "struct compound assignment",
+        "struct P { pub x: i32, }\nextend P { pub fn add(self: &P, o: &P) P { return P { x: self.x + o.x }; } pub fn mul(self: &P, o: &P) P { return P { x: self.x * o.x }; } }\nfn main() i32 { let mut a = P { x: 2 }; let b = P { x: 3 }; a += b; a *= b; unsafe exit(a.x); }\n",
+        15,
+    );
+    // string patterns in switch compare through str's eq, incl. inside an enum payload
+    run_exit(
+        "string switch patterns",
+        "fn pick(s: str) i32 { return switch s { \"build\" => 1, \"fmt\" => 2, _ => 3, }; }\nfn pay(o: Option<str>) i32 { return switch o { Some(\"x\") => 10, Some(_) => 20, None => 30, }; }\nfn main() i32 { unsafe exit(pick(\"build\") + pick(\"fmt\") * 2 + pick(\"?\") * 3 + pay(Option::<str>::Some(\"x\")) + pay(Option::<str>::Some(\"y\")) + pay(Option::<str>::None)); }\n",
+        74,
+    );
+    // string range patterns test through str's cmp (lexicographic buckets)
+    run_exit(
+        "string range patterns",
+        "fn bucket(s: str) i32 { return switch s { \"a\"..\"m\" => 1, \"m\"..\"z\" => 2, _ => 3, }; }\nfn main() i32 { unsafe exit(bucket(\"apple\") + bucket(\"pear\") * 2 + bucket(\"~t\") * 3); }\n",
+        14,
+    );
+}
+
+@test
 fn arithmetic() {
     run_exit("precedence", "fn main() i32 { unsafe exit(1 + 2 * 3 - 4 / 2); }\n", 5);
     run_exit("mixed precedence", "fn main() i32 { unsafe exit(17 % 5 + 100 / 7 + 6 & 3); }\n", 2);

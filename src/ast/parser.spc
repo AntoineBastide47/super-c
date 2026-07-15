@@ -681,6 +681,7 @@ extend Parser {
                         is_extern: false,
                         is_variadic: is_variadic,
                         is_const: false,
+                        is_unsafe: false,
                     },
                 },
             },
@@ -875,6 +876,21 @@ extend Parser {
         return self.parse_const_after(start);
     }
 
+    // `unsafe` peeked at item scope: only `unsafe fn` follows -- an unsafe function, whose calls
+    // require an unsafe context (the same contract as extern "C" fns). LL(1): one token decides.
+    pub fn parse_unsafe_fn(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        self.advance();
+        if !self.check(TokenType::Fn) {
+            self.error_here("expected 'fn' after 'unsafe' at item scope");
+            return NODE_NONE;
+        }
+        let f = self.parse_function(true);
+        self.ast.at(f).as_data.function.is_unsafe = true;
+        self.ast.at(f).span.start = start;
+        return f;
+    }
+
     // `const` already consumed: a single-token branch decides const fn vs const declaration (LL(1)).
     pub fn parse_const_or_fn(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
@@ -1047,6 +1063,13 @@ extend Parser {
                 self.ast.at(f).as_data.function.is_public = is_public;
                 self.add_attrs_to(&mut attrs, f);
                 self.ast.push(f);
+            } else if self.check(TokenType::Unsafe) {
+                let f = self.parse_unsafe_fn();
+                if f != NODE_NONE {
+                    self.ast.at(f).as_data.function.is_public = is_public;
+                    self.add_attrs_to(&mut attrs, f);
+                    self.ast.push(f);
+                }
             } else if self.check(TokenType::Type) && !is_public {
                 let ta = self.parse_type_alias(false);
                 self.ast.push(ta);
@@ -1198,7 +1221,9 @@ extend Parser {
         }
         if is_public && !self.check(TokenType::Fn) && !self.check(TokenType::Struct) && !self.check(TokenType::Union) && !self.check(
             TokenType::Enum,
-        ) && !self.check(TokenType::Const) && !self.check(TokenType::Type) && !self.check(TokenType::Interface) {
+        ) && !self.check(TokenType::Const) && !self.check(TokenType::Type) && !self.check(TokenType::Interface) && !self.check(
+            TokenType::Unsafe,
+        ) {
             self.error_here(
                 "'pub' may only be applied to a struct, union, enum, function, const, static, interface, or type",
             );
@@ -1208,6 +1233,12 @@ extend Parser {
             Fn => {
                 id = self.parse_function(true);
                 self.ast.at(id).as_data.function.is_public = is_public;
+            },
+            Unsafe => {
+                id = self.parse_unsafe_fn();
+                if id != NODE_NONE {
+                    self.ast.at(id).as_data.function.is_public = is_public;
+                }
             },
             Struct => {
                 id = self.parse_struct();

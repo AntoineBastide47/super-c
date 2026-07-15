@@ -2755,6 +2755,27 @@ const fn c_op(t: TokenType) *const char {
     }
     return "?".ptr() as *const char;
 }
+// Compound-assignment token -> arithmetic overload method ("+=" -> add); null = not overloadable
+// (bitwise/shift compounds are integer-gated by the typechecker and never reach a struct).
+const fn cg_compound_method(op: TokenType) *const char {
+    if op == TokenType::PlusEqual {
+        return "add".ptr() as *const char;
+    }
+    if op == TokenType::MinusEqual {
+        return "sub".ptr() as *const char;
+    }
+    if op == TokenType::StarEqual {
+        return "mul".ptr() as *const char;
+    }
+    if op == TokenType::SlashEqual {
+        return "div".ptr() as *const char;
+    }
+    if op == TokenType::PercentEqual {
+        return "rem".ptr() as *const char;
+    }
+    return null;
+}
+
 const fn cg_arith_op_method(op: TokenType) *const char {
     if op == TokenType::Plus {
         return "add".ptr() as *const char;
@@ -6583,6 +6604,47 @@ extend Codegen {
             self.emit_str("))");
             return;
         }
+        // a compound assignment on an operator-overloaded struct lowers to `L = L.op(R)` with L's
+        // place evaluated once -- C cannot `+=` structs
+        if bd.op != TokenType::Equal && ltr != TYPE_NONE {
+            let y = *self.type_at(ltr);
+            if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE {
+                let mut om = y.module;
+                let mut od = y.as_data.decl;
+                if y.kind == TypeKind::TYPE_INSTANCE {
+                    let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+                    om = it.module;
+                    od = it.decl;
+                }
+                let mm = cg_compound_method(bd.op);
+                if mm != null {
+                    let m = self.cg_find_method_cstr(om, od, mm);
+                    if m.node != NODE_NONE {
+                        let rt0 = unsafe (*self.cur_ast()).type_of(bd.right);
+                        let mut dr: i32 = 0;
+                        if rt0 != TYPE_NONE {
+                            dr = self.cg_ref_depth(self.subst_resolve(rt0));
+                        }
+                        let mut lp = Buf32 {};
+                        let mut rr = Buf32 {};
+                        self.fresh(&mut lp[0], 32);
+                        self.fresh(&mut rr[0], 32);
+                        self.buf.format_into("({{ __auto_type {} = &(", diag::cstr(&lp[0]));
+                        self.emit_expr(bd.left);
+                        self.buf.format_into("); __auto_type {} = ", diag::cstr(&rr[0]));
+                        self.emit_expr(bd.right);
+                        self.buf.format_into("; *{} = ", diag::cstr(&lp[0]));
+                        self.emit_op_method(y, om, od, m);
+                        let mut rp = "&".ptr() as *const char;
+                        if dr != 0 {
+                            rp = ref_derefs(dr);
+                        }
+                        self.buf.format_into("({}, {}{}); }})", diag::cstr(&lp[0]), diag::cstr(rp), diag::cstr(&rr[0]));
+                        return;
+                    }
+                }
+            }
+        }
         let mut lhsId = bd.left;
         let mut lhs = *unsafe (*self.cur_ast()).at_const(lhsId);
         while lhs.kind == NodeKind::NODE_UNARY && (lhs.as_data.unary.op == TokenType::Move || lhs.as_data.unary.op == TokenType::Unsafe) {
@@ -6745,6 +6807,111 @@ extend Codegen {
         }
         return p.kind == NodeKind::NODE_PATTERN_WILDCARD || p.kind == NodeKind::NODE_IDENTIFIER;
     }
+    // The overloaded-comparison home of a literal pattern's value: its recorded type when the
+    // typechecker left one, else string literals map to the prelude `str` struct (pattern values are
+    // not expression-checked, so they usually carry no type). false = not an overload candidate.
+    fn cg_pattern_overload_target(self: &mut Self, val: NodeId, bt: *mut Ty, om: *mut ModuleId, od: *mut NodeId) bool {
+        let vt0 = unsafe (*self.cur_ast()).type_of(val);
+        if vt0 != TYPE_NONE {
+            let vt = self.strip_ref_only(self.subst_resolve(vt0));
+            if vt == TYPE_NONE {
+                return false;
+            }
+            let y = *self.type_at(vt);
+            if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_INSTANCE {
+                return false;
+            }
+            unsafe *bt = y;
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+                unsafe *om = it.module;
+                unsafe *od = it.decl;
+            } else {
+                unsafe *om = y.module;
+                unsafe *od = y.as_data.decl;
+            }
+            return true;
+        }
+        let vn = unsafe (*self.cur_ast()).at_const(val);
+        if vn.kind != NodeKind::NODE_LITERAL || self.package == null {
+            return false;
+        }
+        let tt = vn.as_data.literal.token_type;
+        if tt != TokenType::StringLiteral && tt != TokenType::RawStringLiteral {
+            return false;
+        }
+        let h = unsafe (*self.package).prelude_lookup("str", true);
+        if h.node == NODE_NONE {
+            return false;
+        }
+        unsafe *om = h.mid;
+        unsafe *od = h.node;
+        unsafe *bt = Ty { kind: TypeKind::TYPE_STRUCT, module: h.mid, as_data: TyAs { decl: h.node } };
+        return true;
+    }
+
+    // A struct-typed literal pattern (a string pattern in a `switch` over `str`) compares through the
+    // type's `eq` overload -- C cannot `==` structs. Mirrors emit_cmp_overload's lowering; false = no
+    // overload applies (scalar patterns keep the plain `==`).
+    fn emit_pattern_eq_overload(self: &mut Self, pid: NodeId, scrut: *const char) bool {
+        let val = unsafe (*self.cur_ast()).at_const(pid).as_data.single.value;
+        let mut bt = Ty { kind: TypeKind::TYPE_ERROR };
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if !self.cg_pattern_overload_target(val, &mut bt, &mut om, &mut od) {
+            return false;
+        }
+        let m = self.cg_find_method_cstr(om, od, "eq".ptr() as *const char);
+        if m.node == NODE_NONE {
+            return false;
+        }
+        let mut lb = Buf32 {};
+        let mut rb = Buf32 {};
+        self.fresh(&mut lb[0], 32);
+        self.fresh(&mut rb[0], 32);
+        self.buf.format_into(
+            "(({{ __auto_type {} = {}; __auto_type {} = ",
+            diag::cstr(&lb[0]),
+            diag::cstr(scrut),
+            diag::cstr(&rb[0]),
+        );
+        self.emit_expr(val);
+        self.emit_str("; ");
+        self.emit_op_method(bt, om, od, m);
+        self.buf.format_into("(&{}, &{}); }}))", diag::cstr(&lb[0]), diag::cstr(&rb[0]));
+        return true;
+    }
+
+    // A range pattern over an overloaded type (string ranges) tests through `cmp`; `rel` is the C
+    // relation the bound uses (">=", "<", "<="). false = scalar range, keep the plain operators.
+    fn emit_pattern_cmp_overload(self: &mut Self, bound: NodeId, scrut: *const char, rel: *const char) bool {
+        let mut bt = Ty { kind: TypeKind::TYPE_ERROR };
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if !self.cg_pattern_overload_target(bound, &mut bt, &mut om, &mut od) {
+            return false;
+        }
+        let m = self.cg_find_method_cstr(om, od, "cmp".ptr() as *const char);
+        if m.node == NODE_NONE {
+            return false;
+        }
+        let mut lb = Buf32 {};
+        let mut rb = Buf32 {};
+        self.fresh(&mut lb[0], 32);
+        self.fresh(&mut rb[0], 32);
+        self.buf.format_into(
+            "(({{ __auto_type {} = {}; __auto_type {} = ",
+            diag::cstr(&lb[0]),
+            diag::cstr(scrut),
+            diag::cstr(&rb[0]),
+        );
+        self.emit_expr(bound);
+        self.emit_str("; ");
+        self.emit_op_method(bt, om, od, m);
+        self.buf.format_into("(&{}, &{}) {} 0; }}))", diag::cstr(&lb[0]), diag::cstr(&rb[0]), diag::cstr(rel));
+        return true;
+    }
+
     fn emit_pattern_test(self: &mut Self, pid: NodeId, scrut: *const char) {
         let p = *unsafe (*self.cur_ast()).at_const(pid);
         let pk = p.kind;
@@ -6771,15 +6938,20 @@ extend Codegen {
         } else if pk == NodeKind::NODE_PATTERN_WILDCARD || pk == NodeKind::NODE_IDENTIFIER {
             self.emit_str("1");
         } else if pk == NodeKind::NODE_PATTERN_LITERAL {
-            self.buf.format_into("{} == ", diag::cstr(scrut));
-            self.emit_expr(p.as_data.single.value);
+            if !self.emit_pattern_eq_overload(pid, scrut) {
+                self.buf.format_into("{} == ", diag::cstr(scrut));
+                self.emit_expr(p.as_data.single.value);
+            }
         } else if pk == NodeKind::NODE_PATTERN_RANGE {
             let lo = p.as_data.pattern_range.start;
             let hi = p.as_data.pattern_range.end;
             if lo != NODE_NONE {
                 let lon = unsafe (*self.cur_ast()).at_const(lo);
-                self.buf.format_into("{} >= ", diag::cstr(scrut));
-                self.emit_expr(if_node(lon.kind == NodeKind::NODE_PATTERN_LITERAL, lon.as_data.single.value, lo));
+                let lov = if_node(lon.kind == NodeKind::NODE_PATTERN_LITERAL, lon.as_data.single.value, lo);
+                if !self.emit_pattern_cmp_overload(lov, scrut, ">=".ptr() as *const char) {
+                    self.buf.format_into("{} >= ", diag::cstr(scrut));
+                    self.emit_expr(lov);
+                }
             }
             if hi != NODE_NONE {
                 let hin = unsafe (*self.cur_ast()).at_const(hi);
@@ -6791,8 +6963,12 @@ extend Codegen {
                 if p.as_data.pattern_range.inclusive {
                     cmp = "<=".ptr() as *const char;
                 }
-                self.buf.format_into("{}{} {} ", diag::cstr(andp), diag::cstr(scrut), diag::cstr(cmp));
-                self.emit_expr(if_node(hin.kind == NodeKind::NODE_PATTERN_LITERAL, hin.as_data.single.value, hi));
+                let hiv = if_node(hin.kind == NodeKind::NODE_PATTERN_LITERAL, hin.as_data.single.value, hi);
+                self.buf.format_into("{}", diag::cstr(andp));
+                if !self.emit_pattern_cmp_overload(hiv, scrut, cmp) {
+                    self.buf.format_into("{} {} ", diag::cstr(scrut), diag::cstr(cmp));
+                    self.emit_expr(hiv);
+                }
             }
         } else if pk == NodeKind::NODE_PATTERN_TUPLE {
             let mut vd = DefId { module: 0, node: NODE_NONE };
