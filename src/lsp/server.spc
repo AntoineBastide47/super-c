@@ -64,6 +64,7 @@ pub struct Server {
     pub std_dir: *const char,
     pub target: i32,
     pub published: Vector<String>, // URIs whose last publish was non-empty (for clearing)
+    pub ws_root: String, // canonical workspace root ("" before initialize); rename edits stay inside it
     pub shutdown_seen: bool,
 }
 
@@ -72,6 +73,7 @@ extend Server as Free {
         self.docs.free();
         self.roots.free();
         self.published.free();
+        self.ws_root.free();
     }
 }
 
@@ -426,6 +428,8 @@ fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
     };
     if ws.len() != 0 {
         let _ = unsafe shim::sc_chdir(ws.cstr());
+        sv.ws_root.free();
+        sv.ws_root = canon(ws.as_str());
     }
     switch bman::load("build.toml") {
         Some(man) => {
@@ -733,6 +737,11 @@ fn valid_ident(nm: str) bool {
     return toks.len() == 2 && toks.at(0).kind() == ltt::TokenType::Identifier;
 }
 
+// Canonical file path of module `m` in root `r`.
+fn self_def_file(sv: &Server, r: usize, m: usize) str {
+    return sv.roots.at(r).files.at(m).as_str();
+}
+
 fn on_rename(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
     let nullv = json::JSON::default();
     let h = sv.locate(req);
@@ -757,8 +766,14 @@ fn on_rename(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
         respond(f, req.at_key("id"), &nullv);
         return;
     }
-    if pkg.modules.at(dm as usize).prelude || pkg.modules.at(dm as usize).file.as_str().contains("/ffi/") {
-        send_error(f, req.at_key("id"), -32803, "cannot rename a std/ffi symbol");
+    // a rename may only touch files inside the workspace: in a normal project the installed std/ffi
+    // live next to the compiler binary (outside) and stay protected; in a workspace that contains its
+    // own std -- the compiler repo itself -- renaming std symbols is legitimate first-party work
+    let def_file = self_def_file(sv, h.r, dm as usize);
+    let wr = sv.ws_root.as_str();
+    let inside = wr.len() != 0 && def_file.len() > wr.len() + 1 && def_file.starts_with(wr) && def_file[wr.len()] == b'/';
+    if !inside {
+        send_error(f, req.at_key("id"), -32803, "cannot rename: the definition is outside the workspace (std/ffi)");
         return;
     }
     let locs = feat::references(pkg, h.m, h.off, true);
@@ -1114,6 +1129,7 @@ pub fn run(std_dir: *const char, target: i32) i32 {
         std_dir: std_dir,
         target: target,
         published: Vector::<String>::new(),
+        ws_root: String::new(),
         shutdown_seen: false,
     };
     let fin = stdio::stdin();

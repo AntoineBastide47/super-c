@@ -41,6 +41,10 @@ pub struct Parser {
     pub file: str,
     pub errors: diag::Errors,
     pub bootstrap_tags: bool, // accept unknown @attributes without error (bootstrap across a new tag)
+    // Named-return context of the function body being parsed (the signature's NODE_PARAMETER return
+    // entries): a bare `return;` inside it desugars to returning these bindings. Cleared for closure
+    // bodies (closures have their own return list and no named-return support).
+    pub nrets: Vector<NodeId>,
 }
 
 extend Parser {
@@ -55,6 +59,7 @@ extend Parser {
             file: file,
             errors: diag::Errors::new(),
             bootstrap_tags: false,
+            nrets: Vector::<NodeId>::new(),
         };
     }
 
@@ -652,12 +657,36 @@ extend Parser {
         let params = self.parse_parameters(&mut is_variadic);
         let returns = self.parse_function_returns();
         let where_clause = self.parse_where_clause();
+        // Go-style named returns: `(ret: bool)` binds `ret` in the body as an implicitly declared
+        // `let mut ret: bool;` (definite assignment enforced by the usual uninitialized tracking),
+        // and a bare `return;` returns the named bindings. All-or-none named.
+        let mut nnamed: u32 = 0;
+        for i in 0..returns.len {
+            if self.ast.at_const(unsafe self.ast.list(returns)[i as usize]).kind == NodeKind::NODE_PARAMETER {
+                nnamed += 1;
+            }
+        }
+        if nnamed != 0 && nnamed != returns.len {
+            self.error_here("either all return values are named or none");
+        }
+        let outer_nrets = self.nrets;
+        self.nrets = Vector::<NodeId>::new();
+        if nnamed != 0 && nnamed == returns.len {
+            for i in 0..returns.len {
+                self.nrets.push(unsafe self.ast.list(returns)[i as usize]);
+            }
+        }
         let mut body = NODE_NONE;
         if self.check(TokenType::LeftBrace) {
             body = self.parse_block();
         } else if require_body {
             self.error_here("expected function body");
         }
+        if self.nrets.len() != 0 && body != NODE_NONE {
+            self.bind_named_returns(body);
+        }
+        self.nrets.free();
+        self.nrets = outer_nrets;
         return self.ast.add(
             Node {
                 kind: NodeKind::NODE_FUNCTION,
@@ -686,6 +715,44 @@ extend Parser {
                 },
             },
         );
+    }
+
+    // Prepend one synthetic `let mut <name>: <ty>;` per named return to `body`'s statements. The
+    // let/name spans are the SIGNATURE spans (before the block starts): downstream stages treat them
+    // as ordinary uninitialized bindings, and the formatter skips pre-block statements when printing.
+    fn bind_named_returns(self: &mut Self, body: NodeId) {
+        let stmts = self.ast.at_const(body).as_data.block.statements;
+        let mark = self.ast.mark();
+        for i in 0..self.nrets.len() {
+            let r = *self.nrets.at(i);
+            let pd = self.ast.at_const(r).as_data.parameter;
+            let ntext = self.ast.at_const(pd.name).as_data.name.text;
+            let nspan = self.ast.at_const(pd.name).span;
+            let nm = self.ast.add(
+                Node {
+                    kind: NodeKind::NODE_IDENTIFIER,
+                    span: nspan,
+                    as_data: NodeAs { name: NameData { text: ntext, is_mutable: false } },
+                },
+            );
+            let rspan = self.ast.at_const(r).span;
+            self.ast.push(
+                self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_LET,
+                        span: rspan,
+                        as_data: NodeAs {
+                            let_stmt: LetData { name: nm, ty: pd.ty, value: NODE_NONE, is_mutable: true },
+                        },
+                    },
+                ),
+            );
+        }
+        for i in 0..stmts.len {
+            self.ast.push(unsafe self.ast.list(stmts)[i as usize]);
+        }
+        let ns = self.ast.commit(mark);
+        self.ast.at(body).as_data.block.statements = ns;
     }
 
     pub fn parse_field(self: &mut Self) NodeId {
@@ -1786,7 +1853,11 @@ extend Parser {
                 self.error_here("anonymous functions cannot be variadic");
             }
             let returns = self.parse_function_returns();
+            let outer_nrets = self.nrets;
+            self.nrets = Vector::<NodeId>::new();
             let body = self.parse_block();
+            self.nrets.free();
+            self.nrets = outer_nrets;
             return self.ast.add(
                 Node {
                     kind: NodeKind::NODE_CLOSURE,
@@ -1835,7 +1906,11 @@ extend Parser {
             }
             let params = self.ast.commit(mark);
             if self.check(TokenType::LeftBrace) {
+                let outer_nrets = self.nrets;
+                self.nrets = Vector::<NodeId>::new();
                 let block = self.parse_block();
+                self.nrets.free();
+                self.nrets = outer_nrets;
                 return self.ast.add(
                     Node {
                         kind: NodeKind::NODE_CLOSURE,
@@ -2696,6 +2771,24 @@ extend Parser {
                         if !self.match(TokenType::Comma) {
                             break;
                         }
+                    }
+                } else if self.nrets.len() != 0 {
+                    // bare `return;` in a named-return fn: return the named bindings (the synthetic
+                    // identifiers keep the signature spans, so the formatter prints `return;` back)
+                    for i in 0..self.nrets.len() {
+                        let r = *self.nrets.at(i);
+                        let pd = self.ast.at_const(r).as_data.parameter;
+                        let ntext = self.ast.at_const(pd.name).as_data.name.text;
+                        let nspan = self.ast.at_const(pd.name).span;
+                        self.ast.push(
+                            self.ast.add(
+                                Node {
+                                    kind: NodeKind::NODE_IDENTIFIER,
+                                    span: nspan,
+                                    as_data: NodeAs { name: NameData { text: ntext, is_mutable: false } },
+                                },
+                            ),
+                        );
                     }
                 }
                 let values = self.ast.commit(mark);
