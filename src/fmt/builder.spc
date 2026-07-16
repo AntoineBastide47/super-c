@@ -441,7 +441,8 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
 // Return types: one type bare, several as "(A, B)".
 fn b_returns(b: &mut Builder, rets: NodeList) d::DocId {
     let __h = list_at(b, rets, 0);
-    if rets.len == 1 {
+    // a single NAMED return keeps its parens (`(ret: bool)`); a single unnamed one never has them
+    if rets.len == 1 && nd(b, __h).kind != NodeKind::NODE_PARAMETER {
         return b_type(b, __h);
     }
     let mut ts = Vector::<d::DocId>::new();
@@ -1049,7 +1050,13 @@ fn b_stmt(b: &mut Builder, id: NodeId) d::DocId {
         },
         NODE_RETURN => {
             let vals = n.as_data.return_stmt.values;
-            if vals.len == 0 {
+            // a bare `return;` in a named-return fn carries parser-synthesized identifiers whose
+            // spans point back INTO the signature: print the bare form the user wrote
+            let mut synthetic = vals.len > 0;
+            if synthetic {
+                synthetic = nd(b, list_at(b, vals, 0)).span.start < n.span.start;
+            }
+            if vals.len == 0 || synthetic {
                 v.push(b.p.txt("return;"));
             } else {
                 v.push(b.p.txt("return "));
@@ -1248,19 +1255,24 @@ fn b_block(b: &mut Builder, id: NodeId) d::DocId {
     v.push(b.p.txt("{"));
     let mut body = Vector::<d::DocId>::new();
     let mut prev_end = n.span.start + 1;
+    let mut first = true;
     for i in 0..stmts.len {
         let sid = list_at(b, stmts, i);
         let ssp = nd(b, sid).span;
-        if i == 0 {
+        if ssp.start < n.span.start {
+            continue; // parser-synthesized (named-return bindings): not in the source text
+        }
+        if first {
             body.push(b.p.hardline());
             emit_lead_list(b, prev_end, ssp.start, &mut body);
+            first = false;
         } else {
             emit_gap_vertical(b, prev_end, ssp.start, &mut body, false);
         }
         body.push(b_stmt(b, sid));
         prev_end = ssp.end;
     }
-    if stmts.len > 0 {
+    if !first {
         emit_tail_list(b, prev_end, n.span.end - 1, &mut body);
         let ic = b.p.concat(&body);
         v.push(b.p.indent(ic));

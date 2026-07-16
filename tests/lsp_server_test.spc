@@ -4,7 +4,9 @@
 // regression behind the server itself: a struct embedding loader::Package by value compiles (its
 // builtin_decls array length is an enum-cast const evaluated pre-typecheck).
 import tests::cli_harness as cli;
+import stdio;
 import stdlib;
+import driver_shim as shim;
 import module::loader as loader;
 import lsp::json as json;
 
@@ -489,6 +491,106 @@ fn lsp_completion_survives_pattern_nodes() {
     let o = out.as_str();
     assert(o.contains("{\"label\":\"r\"")); // locals still complete through the probe build
     assert(o.contains("{\"label\":\"i64\"")); // builtin type names present
+}
+
+// Rename is workspace-relative: a definition outside the workspace (the installed std next to the
+// binary) refuses; a workspace that contains its own std -- this repo -- may rename std symbols.
+const MAIN_VEC: str = "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    return v.len() as i32 - 1;\n}\n";
+
+fn rename_session(root: str, doc_uri_prefix: str, ses: &mut String) {
+    let mut b = String::from_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("\"}}");
+    frame(ses, &b);
+    b.clear();
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(doc_uri_prefix);
+    b.push_str("/src/main.spc\",\"languageId\":\"super-c\",\"version\":1,\"text\":");
+    json::dump_escaped(MAIN_VEC, &mut b);
+    b.push_str("}}}");
+    frame(ses, &b);
+    // rename Vector::push at its call site (line 2, char 7) -> "shove"
+    b.clear();
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(doc_uri_prefix);
+    b.push_str("/src/main.spc\"},\"position\":{\"line\":2,\"character\":7},\"newName\":\"shove\"}}");
+    frame(ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\",\"params\":null}");
+    frame(ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+    frame(ses, &b);
+}
+
+fn run_lsp_session(root: str, ses: &String) String {
+    let mut sp = String::from_str(root);
+    sp.push_str("/session.bin");
+    let f = stdio::fopen(sp.as_str(), "wb");
+    unsafe stdio::fwrite(ses.as_str().ptr(), 1, ses.len(), f);
+    unsafe stdio::fclose(f);
+    let mut cmd = String::new();
+    cmd.push_str(superc_path());
+    cmd.push_str(" lsp < '");
+    cmd.push_str(root);
+    cmd.push_str("/session.bin' > '");
+    cmd.push_str(root);
+    cmd.push_str("/out.txt' 2> /dev/null");
+    let rc = cli::run_shell(cmd.cstr());
+    assert_eq(rc, 0);
+    let mut op = String::from_str(root);
+    op.push_str("/out.txt");
+    return loader::read_file(op.as_str()).unwrap();
+}
+
+@test
+fn lsp_rename_workspace_relative() {
+    // outside: a temp workspace does not contain the installed std -> refused
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_VEC);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    rename_session(root, root, &mut ses);
+    let out = run_lsp_session(root, &ses);
+    assert(out.as_str().contains("cannot rename: the definition is outside the workspace"));
+
+    // inside: this repo's workspace contains std/ -- renaming Vector::push answers with edits that
+    // reach std/vector.spc (nothing is written: rename only RETURNS a WorkspaceEdit)
+    let mut rb = Array::<char, 4096>::new();
+    let mut dot = String::from_str(".");
+    assert(unsafe shim::sc_realpath(dot.cstr(), &mut rb[0]) != null);
+    let repo = str::from_cstr(&rb[0]);
+    let p2 = cli::proj_new(); // scratch dir for the session/out files only
+    let root2 = str::from_cstr(p2.rootp());
+    let mut ses2 = String::new();
+    rename_session(repo, repo, &mut ses2);
+    let mut sp = String::from_str(root2);
+    sp.push_str("/session.bin");
+    let f = stdio::fopen(sp.as_str(), "wb");
+    unsafe stdio::fwrite(ses2.as_str().ptr(), 1, ses2.len(), f);
+    unsafe stdio::fclose(f);
+    let mut cmd = String::new();
+    cmd.push_str(superc_path());
+    cmd.push_str(" lsp < '");
+    cmd.push_str(root2);
+    cmd.push_str("/session.bin' > '");
+    cmd.push_str(root2);
+    cmd.push_str("/out.txt' 2> /dev/null");
+    let rc = cli::run_shell(cmd.cstr());
+    assert_eq(rc, 0);
+    let mut op = String::from_str(root2);
+    op.push_str("/out.txt");
+    let out2 = loader::read_file(op.as_str()).unwrap();
+    assert(out2.as_str().contains("std/vector.spc"));
+    assert(out2.as_str().contains("\"newText\":\"shove\""));
+    assert(!out2.as_str().contains("cannot rename"));
 }
 
 // The compiler regression the server depends on: embedding loader::Package by value from another
