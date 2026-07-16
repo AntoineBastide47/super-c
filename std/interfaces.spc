@@ -44,11 +44,6 @@ pub interface Clone {
     fn clone(self: &Self) Self;
 }
 
-// A marker interface: the value is safe to duplicate with a plain bitwise copy (no owned heap, so no
-// aliasing hazard). The move checker treats a `Copy` binding as still usable after it is passed or
-// assigned. It carries no methods -- implementing it is purely a promise about the type's representation.
-pub interface Copy {}
-
 // Smart-pointer dereference: a wrapper that transparently exposes its pointee. A method not found on the
 // wrapper itself is looked up through `deref` (up to 8 hops, cycle-checked; the wrapper's own methods
 // always win); calling a `&mut self` method through the chain instead goes through `deref_mut` at every
@@ -74,6 +69,10 @@ pub interface Into<T> {
 // Equality. `eq` must be reflexive, symmetric and transitive.
 pub interface Eq {
     fn eq(self: &Self, other: &Self) bool;
+
+    fn ne(self: &Self, other: &Self) bool {
+        return !self.eq(other);
+    }
 }
 
 // Total ordering. `cmp` returns a negative value when `self < other`, zero when equal, positive when
