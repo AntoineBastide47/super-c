@@ -35,10 +35,13 @@ fn ok() {
         "int literal initializes a float",
         "fn main() i32 { let f: f64 = 0; let g: f32 = 5; let h: f64 = -3; }\n",
     );
-    h::expect_ok("builtin Copy bound", "fn id<T: Copy>(x: T) T { return x; }\nfn main() i32 { return id::<i32>(0); }\n");
     h::expect_ok(
-        "complex Clone Default Copy bounds",
-        "fn id<T: Copy>(x: T) T { return x; }\nfn clone_of<T: Clone>(x: &T) T { return x.clone(); }\nfn zero<T: Default>() T { return T::default(); }\nfn main() i32 { let z: c64 = 1.0; let a = id::<c64>(z); let b = clone_of::<c64>(&a); let c = zero::<c64>(); return 0; }\n",
+        "builtin marker bound",
+        "fn id<T: Clone>(x: T) T { return x; }\nfn main() i32 { return id::<i32>(0); }\n",
+    );
+    h::expect_ok(
+        "complex Clone Default bounds",
+        "fn clone_of<T: Clone>(x: &T) T { return x.clone(); }\nfn zero<T: Default>() T { return T::default(); }\nfn main() i32 { let z: c64 = 1.0; let b = clone_of::<c64>(&z); let c = zero::<c64>(); return 0; }\n",
     );
     h::expect_ok(
         "builtin inherent scalar methods",

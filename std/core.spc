@@ -125,7 +125,6 @@ extend i8 as Default {
 extend i8 as Free {
     pub fn free(self: &mut i8) {}
 }
-extend i8 as Copy {}
 
 extend i16 as Eq {
     pub const fn eq(self: &i16, other: &i16) bool {
@@ -161,7 +160,6 @@ extend i16 as Default {
 extend i16 as Free {
     pub fn free(self: &mut i16) {}
 }
-extend i16 as Copy {}
 
 extend i32 as Eq {
     pub const fn eq(self: &i32, other: &i32) bool {
@@ -197,7 +195,6 @@ extend i32 as Default {
 extend i32 as Free {
     pub fn free(self: &mut i32) {}
 }
-extend i32 as Copy {}
 
 extend i64 as Eq {
     pub const fn eq(self: &i64, other: &i64) bool {
@@ -233,7 +230,6 @@ extend i64 as Default {
 extend i64 as Free {
     pub fn free(self: &mut i64) {}
 }
-extend i64 as Copy {}
 
 extend isize as Eq {
     pub const fn eq(self: &isize, other: &isize) bool {
@@ -269,7 +265,6 @@ extend isize as Default {
 extend isize as Free {
     pub fn free(self: &mut isize) {}
 }
-extend isize as Copy {}
 
 extend u8 as Eq {
     pub const fn eq(self: &u8, other: &u8) bool {
@@ -305,7 +300,6 @@ extend u8 as Default {
 extend u8 as Free {
     pub fn free(self: &mut u8) {}
 }
-extend u8 as Copy {}
 
 extend u16 as Eq {
     pub const fn eq(self: &u16, other: &u16) bool {
@@ -341,7 +335,6 @@ extend u16 as Default {
 extend u16 as Free {
     pub fn free(self: &mut u16) {}
 }
-extend u16 as Copy {}
 
 extend u32 as Eq {
     pub const fn eq(self: &u32, other: &u32) bool {
@@ -377,7 +370,6 @@ extend u32 as Default {
 extend u32 as Free {
     pub fn free(self: &mut u32) {}
 }
-extend u32 as Copy {}
 
 extend u64 as Eq {
     pub const fn eq(self: &u64, other: &u64) bool {
@@ -413,7 +405,6 @@ extend u64 as Default {
 extend u64 as Free {
     pub fn free(self: &mut u64) {}
 }
-extend u64 as Copy {}
 
 extend usize as Eq {
     pub const fn eq(self: &usize, other: &usize) bool {
@@ -449,7 +440,6 @@ extend usize as Default {
 extend usize as Free {
     pub fn free(self: &mut usize) {}
 }
-extend usize as Copy {}
 
 extend char as Eq {
     pub const fn eq(self: &char, other: &char) bool {
@@ -485,7 +475,6 @@ extend char as Default {
 extend char as Free {
     pub fn free(self: &mut char) {}
 }
-extend char as Copy {}
 
 extend bool as Eq {
     pub const fn eq(self: &bool, other: &bool) bool {
@@ -521,7 +510,6 @@ extend bool as Default {
 extend bool as Free {
     pub fn free(self: &mut bool) {}
 }
-extend bool as Copy {}
 
 // IEEE-754 totalOrder bit trick: flipping ALL bits of a negative float and only the sign bit of a
 // non-negative one yields unsigned integers that order exactly like totalOrder -- the basis for the
@@ -587,7 +575,6 @@ extend f32 as Default {
 extend f32 as Free {
     pub fn free(self: &mut f32) {}
 }
-extend f32 as Copy {}
 
 extend f64 as Eq {
     pub const fn eq(self: &f64, other: &f64) bool {
@@ -625,7 +612,6 @@ extend f64 as Default {
 extend f64 as Free {
     pub fn free(self: &mut f64) {}
 }
-extend f64 as Copy {}
 
 extend c32 as Clone {
     pub const fn clone(self: &c32) c32 {
@@ -640,7 +626,6 @@ extend c32 as Default {
 extend c32 as Free {
     pub fn free(self: &mut c32) {}
 }
-extend c32 as Copy {}
 
 extend c64 as Clone {
     pub const fn clone(self: &c64) c64 {
@@ -655,7 +640,6 @@ extend c64 as Default {
 extend c64 as Free {
     pub fn free(self: &mut c64) {}
 }
-extend c64 as Copy {}
 
 extend i8 {
     pub const fn abs(self: i8) i8 {
