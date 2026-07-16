@@ -876,28 +876,47 @@ extend Parser {
         return self.parse_const_after(start);
     }
 
-    // `unsafe` peeked at item scope: only `unsafe fn` follows -- an unsafe function, whose calls
-    // require an unsafe context (the same contract as extern "C" fns). LL(1): one token decides.
+    // `unsafe` peeked at item scope: `unsafe fn` or `unsafe const fn` follows -- an unsafe function,
+    // whose calls require an unsafe context (the same contract as extern "C" fns). LL(1): each step
+    // decides on one token (`fn` | `const`, then `fn`). `const unsafe fn` parses too, via
+    // parse_const_or_fn; the formatter prints the canonical `unsafe const` order.
     pub fn parse_unsafe_fn(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
+        let is_const = self.match(TokenType::Const);
         if !self.check(TokenType::Fn) {
-            self.error_here("expected 'fn' after 'unsafe' at item scope");
+            self.error_here("expected 'fn' or 'const fn' after 'unsafe' at item scope");
             return NODE_NONE;
         }
         let f = self.parse_function(true);
         self.ast.at(f).as_data.function.is_unsafe = true;
+        if is_const {
+            self.ast.at(f).as_data.function.is_const = true;
+        }
         self.ast.at(f).span.start = start;
         return f;
     }
 
-    // `const` already consumed: a single-token branch decides const fn vs const declaration (LL(1)).
+    // `const` already consumed: a single-token branch decides const fn / const unsafe fn / const
+    // declaration (LL(1): `fn` | `unsafe` | identifier, then `unsafe` commits to `fn`).
     pub fn parse_const_or_fn(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         if self.check(TokenType::Fn) {
             let f = self.parse_function(true);
             self.ast.at(f).as_data.function.is_const = true;
+            self.ast.at(f).span.start = start;
+            return f;
+        }
+        if self.check(TokenType::Unsafe) {
+            self.advance();
+            if !self.check(TokenType::Fn) {
+                self.error_here("expected 'fn' after 'const unsafe'");
+                return NODE_NONE;
+            }
+            let f = self.parse_function(true);
+            self.ast.at(f).as_data.function.is_const = true;
+            self.ast.at(f).as_data.function.is_unsafe = true;
             self.ast.at(f).span.start = start;
             return f;
         }
@@ -1075,13 +1094,15 @@ extend Parser {
                 self.ast.push(ta);
             } else if self.check(TokenType::Const) {
                 let cn = self.parse_const_or_fn();
-                if self.ast.at_const(cn).kind == NodeKind::NODE_FUNCTION {
-                    self.ast.at(cn).as_data.function.is_public = is_public;
-                    self.add_attrs_to(&mut attrs, cn);
-                } else {
-                    self.ast.at(cn).as_data.const_def.is_public = is_public;
+                if cn != NODE_NONE {
+                    if self.ast.at_const(cn).kind == NodeKind::NODE_FUNCTION {
+                        self.ast.at(cn).as_data.function.is_public = is_public;
+                        self.add_attrs_to(&mut attrs, cn);
+                    } else {
+                        self.ast.at(cn).as_data.const_def.is_public = is_public;
+                    }
+                    self.ast.push(cn);
                 }
-                self.ast.push(cn);
             } else {
                 self.error_here(
                     if is_public {
@@ -1266,10 +1287,12 @@ extend Parser {
             },
             Const => {
                 id = self.parse_const_or_fn();
-                if self.ast.at_const(id).kind == NodeKind::NODE_FUNCTION {
-                    self.ast.at(id).as_data.function.is_public = is_public;
-                } else {
-                    self.ast.at(id).as_data.const_def.is_public = is_public;
+                if id != NODE_NONE {
+                    if self.ast.at_const(id).kind == NodeKind::NODE_FUNCTION {
+                        self.ast.at(id).as_data.function.is_public = is_public;
+                    } else {
+                        self.ast.at(id).as_data.const_def.is_public = is_public;
+                    }
                 }
             },
             Extern => {
