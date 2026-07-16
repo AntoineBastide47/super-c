@@ -1339,17 +1339,16 @@ fn unsafe_functions() {
         "struct T { pub v: i32, }\nextend T { pub unsafe fn peek(self: &T, p: *const i32) i32 { return unsafe *p + self.v; } }\nfn main() i32 { let x = 1; let t = T { v: 1 }; return t.peek(&x) - 2; }\n",
         "calling an unsafe function requires an 'unsafe' block",
     );
-    // the body of an unsafe fn is NOT implicitly unsafe: inner operations still need their markers
-    h::expect_err_msg(
-        "unsafe fn body still needs markers",
+    // the body of an unsafe fn IS one unsafe context: inner operations need no markers
+    h::expect_ok(
+        "unsafe fn body is an unsafe context",
         "unsafe fn raw(p: *const i32) i32 { return *p; }\nfn main() i32 { let x = 1; return unsafe raw(&x) - 1; }\n",
-        "requires an 'unsafe' block",
     );
     // `unsafe` at item scope only introduces a function
     h::expect_err_msg(
         "unsafe struct rejected",
         "unsafe struct T { pub v: i32, }\nfn main() i32 { return 0; }\n",
-        "expected 'fn' after 'unsafe' at item scope",
+        "expected 'fn' or 'const fn' after 'unsafe' at item scope",
     );
 }
 
@@ -1383,6 +1382,50 @@ fn expected_type_reaches_branches() {
         "pinned branch literal stays pinned",
         "fn main() i32 { let f = true; let i: usize = if f { 1i32; } else { 2i32; }; return i as i32; }\n",
         "mismatched types",
+    );
+}
+
+@test
+fn unsafe_const_fn() {
+    // both modifier orders parse (LL(1) chains); calls need `unsafe`, const folding still applies
+    h::expect_ok(
+        "unsafe const fn, both orders, folds at compile time",
+        "pub unsafe const fn double(x: i32) i32 {\n    return x * 2;\n}\n\npub const unsafe fn bump(x: i32) i32 {\n    return x + 1;\n}\n\nconst D: i32 = unsafe double(21);\n\nstatic_assert(unsafe bump(41) == 42);\n\nfn main() i32 {\n    return (unsafe double(2)) + (unsafe bump(3)) - 8 + D - 42;\n}\n",
+    );
+    h::expect_err_msg(
+        "unsafe const fn call requires an unsafe context",
+        "unsafe const fn f(x: i32) i32 {\n    return x;\n}\n\nfn main() i32 {\n    return f(1) - 1;\n}\n",
+        "calling an unsafe function",
+    );
+    h::expect_err_msg(
+        "unsafe at item scope must introduce a fn",
+        "unsafe struct S {\n    pub x: i32,\n}\n",
+        "expected 'fn' or 'const fn' after 'unsafe'",
+    );
+    h::expect_err_msg(
+        "const unsafe must introduce a fn",
+        "const unsafe X: i32 = 1;\n",
+        "expected 'fn' after 'const unsafe'",
+    );
+}
+
+@test
+fn unsafe_fn_body_is_unsafe_context() {
+    // inside an `unsafe fn`, raw-pointer work needs no per-statement markers...
+    h::expect_ok(
+        "unsafe fn body needs no inner markers",
+        "unsafe fn read(p: *const i32) i32 {\n    return *p + p[0];\n}\n\nfn main() i32 {\n    let x = 21;\n    return (unsafe read(&x)) - 42;\n}\n",
+    );
+    // ...and calling other unsafe/extern fns inside one is marker-free too
+    h::expect_ok(
+        "unsafe fn may call unsafe fns bare",
+        "unsafe fn a(p: *const i32) i32 {\n    return *p;\n}\n\nunsafe fn b(p: *const i32) i32 {\n    return a(p);\n}\n\nfn main() i32 {\n    let x = 1;\n    return (unsafe b(&x)) - 1;\n}\n",
+    );
+    // a normal fn still requires the markers
+    h::expect_err_msg(
+        "safe fn still needs unsafe for raw deref",
+        "fn read(p: *const i32) i32 {\n    return *p;\n}\n\nfn main() i32 {\n    let x = 1;\n    return read(&x) - 1;\n}\n",
+        "unsafe",
     );
 }
 

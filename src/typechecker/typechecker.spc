@@ -10123,7 +10123,15 @@ extend TypeChecker {
                 self.loop_depth = 0;
                 self.ndefers = 0;
                 if fnd.body != NODE_NONE {
+                    // an `unsafe fn` body is one big unsafe context: raw-pointer work inside needs
+                    // no per-statement markers -- the safety obligation moved to the call sites
+                    if fnd.is_unsafe {
+                        self.unsafe_depth = self.unsafe_depth + 1;
+                    }
                     self.check_stmt(fnd.body);
+                    if fnd.is_unsafe {
+                        self.unsafe_depth = self.unsafe_depth - 1;
+                    }
                 }
                 for mi in 0..self.nmoved {
                     self.ms_bit_clear(self.moved[mi as usize]);
