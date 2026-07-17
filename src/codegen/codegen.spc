@@ -8000,6 +8000,27 @@ extend Codegen {
         }
         self.emit_ident_mod(mth.module, unsafe (*self.mod_ast(mth.module)).at_const(mth.node).as_data.function.name);
     }
+    // Emit `node` for a by-value comparison: reference levels are peeled with `*` so the pointees are
+    // compared. Pointers (ref depth 0) are left as-is (address comparison).
+    fn emit_cmp_value(self: &mut Self, node: NodeId) {
+        let t = unsafe (*self.cur_ast()).type_of(node);
+        let d = if t != TYPE_NONE {
+            self.cg_ref_depth(self.subst_resolve(t));
+        } else {
+            0;
+        };
+        if d <= 0 {
+            self.emit_expr(node);
+            return;
+        }
+        self.emit_str("(");
+        for _ in 0..d {
+            self.emit_str("*");
+        }
+        self.emit_expr(node);
+        self.emit_str(")");
+    }
+
     fn emit_cmp_overload(self: &mut Self, id: NodeId) bool {
         let bd = unsafe (*self.cur_ast()).at_const(id).as_data.binary;
         let op = bd.op;
@@ -8329,8 +8350,16 @@ extend Codegen {
                 if self.emit_cg_checked_arith(id) {
                     return;
                 }
+                // References compare by value: a `&T` operand of a comparison is dereferenced so the
+                // scalar values are compared, matching the struct `eq`/`cmp` path. Raw pointers keep
+                // TYPE_POINTER (ref depth 0), so `*const T == *const T` stays an address comparison.
+                let cmpop = bd.op == TokenType::EqualEqual || bd.op == TokenType::BangEqual || bd.op == TokenType::LessThan || bd.op == TokenType::LessThanEqual || bd.op == TokenType::GreaterThan || bd.op == TokenType::GreaterThanEqual;
                 self.emit_str("(");
-                self.emit_expr(bd.left);
+                if cmpop {
+                    self.emit_cmp_value(bd.left);
+                } else {
+                    self.emit_expr(bd.left);
+                }
                 self.buf.format_into(" {} ", diag::cstr(c_op(bd.op)));
                 // The RHS of a short-circuit op only conditionally executes: a proven-UB fold
                 // failure inside it must not be promoted to an error.
@@ -8340,7 +8369,11 @@ extend Codegen {
                     let rp = unsafe (*scce).record_pause;
                     unsafe (*scce).record_pause = rp + 1;
                 }
-                self.emit_expr(bd.right);
+                if cmpop {
+                    self.emit_cmp_value(bd.right);
+                } else {
+                    self.emit_expr(bd.right);
+                }
                 if sc && scce != null {
                     let rp = unsafe (*scce).record_pause;
                     unsafe (*scce).record_pause = rp - 1;

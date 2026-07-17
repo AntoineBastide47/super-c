@@ -5880,8 +5880,15 @@ extend TypeChecker {
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
-        if l != TYPE_NONE && r != TYPE_NONE && l != r && !self.compatible(l, rn) && !self.compatible(r, ln) {
-            self.err_mismatch(rn, l);
+        // scalar comparison: references compare by value, so validate the reference-STRIPPED types
+        // (`&i32 == &i32`, `&i32 == i32`, `i32 == &i32` are all i32-value comparisons). Raw pointers
+        // were handled by the pointer branch above.
+        let mut rs = r;
+        while rs != TYPE_NONE && self.type_at(rs).kind == TypeKind::TYPE_REFERENCE {
+            rs = self.type_at(rs).as_data.elem;
+        }
+        if ls != TYPE_NONE && rs != TYPE_NONE && ls != rs && !self.compatible(ls, rn) && !self.compatible(rs, ln) {
+            self.err_mismatch(rn, ls);
         }
         return Ast::builtin(BuiltinType::BT_BOOL);
     }
