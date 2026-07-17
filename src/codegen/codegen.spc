@@ -6405,7 +6405,7 @@ extend Codegen {
         }
         let mut endp: *mut char = null;
         let v = unsafe strtoll(&buf[0], &mut endp, 0);
-        if endp == &mut buf[0] {
+        if endp == (&mut buf[0]) as *mut char {
             return false;
         }
         unsafe *out = v;

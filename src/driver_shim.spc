@@ -22,8 +22,9 @@ extern "C" "driver_shim.h" {
     pub fn sc_closedir(dir: *mut void) i32;
     pub fn sc_mtime(path: *const char) i64;
     pub fn sc_ncpu() i32;
-    pub fn sc_popen(cmd: *const char) *mut void;
-    pub fn sc_pclose(f: *mut void) i32;
+    pub fn sc_ticks_ms() i64;
+    pub fn sc_spawn(cmd: *const char) i64;
+    pub fn sc_wait_any(pids: *const i64, n: i32, code: *mut i32) i32;
     pub fn sc_rename(from: *const char, to: *const char) i32;
     pub fn sc_setenv(name: *const char, value: *const char) i32;
 }

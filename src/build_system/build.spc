@@ -286,19 +286,85 @@ fn push_all(cmd: &mut String, flags: &Vector<String>) {
     }
 }
 
-// One in-flight compile job: its popen handle plus what to report/cleanup on completion.
-struct Job {
-    pub h: *mut void,
-    pub log: String,
+fn write_file(path: str, body: str) i32 {
+    let f = stdio::fopen(path, "wb");
+    if f == null {
+        return 1;
+    }
+    unsafe stdio::fwrite(body.ptr(), 1, body.len(), f);
+    unsafe stdio::fclose(f);
+    return 0;
 }
 
-fn drain_job(j: &mut Job) i32 {
-    let rc = unsafe shim::sc_pclose(j.h);
-    if rc != 0 {
+// First line of `<cc> --version`: part of every command fingerprint so a toolchain upgrade
+// invalidates objects whose sources and flags did not change.
+fn cc_version(cc: &String, dir: str) String {
+    let mut vf = join2(dir, ".ccver");
+    let mut cmd = cc.clone();
+    cmd.push_str(" --version >");
+    push_quoted(&mut cmd, vf.as_str());
+    cmd.push_str(
+        if unsafe shim::sc_host_platform() == 0 {
+            " 2>nul";
+        } else {
+            " 2>/dev/null";
+        },
+    );
+    shell(cmd.as_str());
+    let mut out = String::new();
+    let v = loader::read_file(vf.as_str());
+    unsafe shim::sc_unlink(vf.cstr());
+    if !v.is_none() {
+        let mut body = v.unwrap();
+        let s = body.as_str();
+        let mut e: usize = 0;
+        while e < s.len() && s[e] != b'\n' && s[e] != b'\r' {
+            e = e + 1;
+        }
+        out.push_str(s.slice(0, e));
+    }
+    return out;
+}
+
+// A stale translation unit waiting for a worker slot.
+struct Pend {
+    pub cmd: String, // full compile command, log redirection included
+    pub fp: String, // fingerprint: cc version + the command driving the object
+    pub log: String,
+    pub cmdpath: String, // <obj>.cmd: fingerprint + last duration
+    pub prev_ms: i64, // last recorded duration; longest-first scheduling shrinks the tail
+}
+
+// Longest previous compile first, so the slowest unit never starts last.
+fn pend_cmp(a: &Pend, b: &Pend) i32 {
+    return if b.prev_ms > a.prev_ms {
+        1;
+    } else if b.prev_ms < a.prev_ms {
+        -1;
+    } else {
+        0;
+    };
+}
+
+// One in-flight compile job: its child pid plus what to record/cleanup on completion.
+struct Job {
+    pub pid: i64,
+    pub fp: String,
+    pub log: String,
+    pub cmdpath: String,
+    pub start: i64,
+}
+
+// On success, persist fingerprint + duration; on failure, surface the captured compiler output.
+fn finish_job(j: &mut Job, code: i32) i32 {
+    if code != 0 {
         cat_file(j.log.as_str());
+    } else {
+        let mut rec = format("{}\n{}", j.fp.as_str(), unsafe shim::sc_ticks_ms() - j.start);
+        write_file(j.cmdpath.as_str(), rec.as_str());
     }
     unsafe shim::sc_unlink(j.log.cstr());
-    return rc;
+    return code;
 }
 
 fn dirname_of(p: str) str {
@@ -349,6 +415,7 @@ fn engine_build(
         return 1;
     }
     let prof = m.profiles.at(pi as usize);
+    let t0 = unsafe shim::sc_ticks_ms();
 
     // 1) transpile the closure to <out-dir>/<raw>
     let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags);
@@ -364,6 +431,7 @@ fn engine_build(
     if rc != 0 {
         return rc;
     }
+    let t_transpile = unsafe shim::sc_ticks_ms();
 
     // 2) content-sync into <out-dir>/<sub>/gen (unchanged files keep their mtime -- the
     // staleness anchor); objects mirror it under <out-dir>/<sub>/obj.
@@ -373,13 +441,21 @@ fn engine_build(
     mkdirs(gen.as_str());
     mkdirs(obj.as_str());
     let mut ret = sync_tree(srcgen.as_str(), gen.as_str());
+    let t_sync = unsafe shim::sc_ticks_ms();
+    let mut t_compile = t_sync;
+    let mut t_link = t_sync;
+    let mut total_c: usize = 0;
+    let mut stale_n: usize = 0;
+    let mut jobs: u32 = 0;
+    let mut linked = false;
 
     if ret == 0 {
-        // 3) compile stale objects, window-parallel
+        // 3) compile stale objects: longest-first, wait-any worker pool
         let mut rels = Vector::<String>::new();
         walk_files(gen.as_str(), gen.len(), &mut rels);
         let cc = resolve_cc(m);
-        let jobs = if jobs_override != 0 {
+        let ccver = cc_version(&cc, pdir.as_str());
+        jobs = if jobs_override != 0 {
             jobs_override;
         } else if m.jobs != 0 {
             m.jobs;
@@ -387,19 +463,54 @@ fn engine_build(
             (unsafe shim::sc_ncpu()) as u32;
         };
         let mut objs = Vector::<String>::new();
-        let mut window = Vector::<Job>::new();
-        let mut compiled = false;
+        let mut pend = Vector::<Pend>::new();
         for i in 0..rels.len() {
             let rel = rels.at(i).as_str();
             if !rel.ends_with(".c") {
                 continue;
             }
+            total_c = total_c + 1;
             let mut cpath = join2(gen.as_str(), rel);
             let mut opath = join2(obj.as_str(), rel.slice(0, rel.len() - 2));
             opath.push_str(".o");
-            let mut dpath = String::from_str(opath.as_str().slice(0, opath.len() - 2));
+            let stem = opath.as_str().slice(0, opath.len() - 2);
+            let mut dpath = String::from_str(stem);
             dpath.push_str(".d");
-            if obj_stale(&mut cpath, &mut opath, dpath.as_str()) {
+            let mut cmdpath = String::from_str(stem);
+            cmdpath.push_str(".cmd");
+            let mut cmd = cc.clone();
+            cmd.push_byte(b' ');
+            cmd.push_string(&m.cstd);
+            push_all(&mut cmd, &m.cflags);
+            push_all(&mut cmd, &prof.cflags);
+            cmd.push_str(" -MMD -c");
+            push_quoted(&mut cmd, cpath.as_str());
+            cmd.push_str(" -o");
+            push_quoted(&mut cmd, opath.as_str());
+            let mut fp = ccver.clone();
+            fp.push_str(" | ");
+            fp.push_string(&cmd);
+            // an object is stale when a dependency is newer OR the command that produced it
+            // (compiler version, flags, paths) is not the one we are about to run
+            let mut fp_ok = false;
+            let mut prev_ms: i64 = 0;
+            let old = loader::read_file(cmdpath.as_str());
+            if !old.is_none() {
+                let mut ob = old.unwrap();
+                let s = ob.as_str();
+                let mut e: usize = 0;
+                while e < s.len() && s[e] != b'\n' {
+                    e = e + 1;
+                }
+                fp_ok = s.slice(0, e) == fp.as_str();
+                if e < s.len() {
+                    let ms = s.slice(e + 1, s.len()).parse_i64();
+                    if !ms.is_none() {
+                        prev_ms = ms.unwrap();
+                    }
+                }
+            }
+            if !fp_ok || obj_stale(&mut cpath, &mut opath, dpath.as_str()) {
                 let full = opath.as_str();
                 let mut k = full.len();
                 while k > 0 && full[k - 1] != b'/' {
@@ -409,96 +520,167 @@ fn engine_build(
                 mkdirs(dir.as_str());
                 let mut log = opath.clone();
                 log.push_str(".log");
-                let mut cmd = cc.clone();
-                cmd.push_byte(b' ');
-                cmd.push_string(&m.cstd);
-                push_all(&mut cmd, &m.cflags);
-                push_all(&mut cmd, &prof.cflags);
-                cmd.push_str(" -MMD -c");
-                push_quoted(&mut cmd, cpath.as_str());
-                cmd.push_str(" -o");
-                push_quoted(&mut cmd, opath.as_str());
                 cmd.push_str(" > \"");
                 cmd.push_str(log.as_str());
                 cmd.push_str("\" 2>&1");
-                if window.len() as u32 >= jobs {
-                    let mut j0 = window.remove(0).unwrap();
-                    if drain_job(&mut j0) != 0 {
-                        ret = 1;
-                    }
-                }
-                let h = unsafe shim::sc_popen(cmd.cstr());
-                if h == null {
-                    eprintln("build: cannot spawn compiler");
-                    ret = 1;
-                } else {
-                    window.push(Job { h: h, log: log });
-                }
-                compiled = true;
+                pend.push(Pend { cmd: cmd, fp: fp, log: log, cmdpath: cmdpath, prev_ms: prev_ms });
             }
             objs.push(opath.clone());
         }
-        while window.len() != 0 {
-            let mut j0 = window.remove(0).unwrap();
-            if drain_job(&mut j0) != 0 {
+        pend.sort_by(pend_cmp);
+        stale_n = pend.len();
+        let compiled = stale_n != 0;
+        let mut window = Vector::<Job>::new();
+        while pend.len() != 0 || window.len() != 0 {
+            while pend.len() != 0 && window.len() as u32 < jobs {
+                let mut w = pend.remove(0).unwrap();
+                let pid = unsafe shim::sc_spawn(w.cmd.cstr());
+                if pid < 0 {
+                    eprintln("build: cannot spawn compiler");
+                    ret = 1;
+                    unsafe shim::sc_unlink(w.log.cstr());
+                } else {
+                    window.push(
+                        Job {
+                            pid: pid,
+                            fp: w.fp.clone(),
+                            log: w.log.clone(),
+                            cmdpath: w.cmdpath.clone(),
+                            start: unsafe shim::sc_ticks_ms(),
+                        },
+                    );
+                }
+            }
+            if window.len() == 0 {
+                break;
+            }
+            let mut pids = Vector::<i64>::new();
+            for i in 0..window.len() {
+                pids.push(window.at(i).pid);
+            }
+            let mut code: i32 = 0;
+            let idx = unsafe shim::sc_wait_any(&pids[0], window.len() as i32, &mut code);
+            if idx < 0 {
+                eprintln("build: wait failed");
+                ret = 1;
+                break;
+            }
+            let mut j = window.remove(idx as usize).unwrap();
+            if finish_job(&mut j, code) != 0 {
                 ret = 1;
             }
         }
+        t_compile = unsafe shim::sc_ticks_ms();
+        t_link = t_compile;
 
-        // 4) link when anything changed (or the binary is missing/older than its objects)
+        // 4) link when anything changed: a fresh object, a missing/out-of-date binary, or a link
+        // command (flags, libs, __ldflags, linker version) differing from the recorded one
         if ret == 0 {
             let mut binb = String::from_str(bin);
             let bmt = unsafe shim::sc_mtime(binb.cstr());
+            let mut tmp = String::from_str(bin);
+            tmp.push_str(".tmp");
+            let mut cmd = cc.clone();
+            cmd.push_str(" -o");
+            push_quoted(&mut cmd, tmp.as_str());
+            for i in 0..objs.len() {
+                push_quoted(&mut cmd, objs.at(i).as_str());
+            }
+            push_all(&mut cmd, &m.ldflags);
+            push_all(&mut cmd, &prof.ldflags);
+            // @c.link flags recorded by the emitter
+            let mut lfp = join2(gen.as_str(), "__ldflags");
+            let lf = loader::read_file(lfp.as_str());
+            if !lf.is_none() {
+                let mut body = lf.unwrap();
+                let s = body.as_str();
+                let mut a: usize = 0;
+                for b in 0..s.len() {
+                    if s[b] == b'\n' {
+                        if b > a {
+                            cmd.push_byte(b' ');
+                            cmd.push_str(s.slice(a, b));
+                        }
+                        a = b + 1;
+                    }
+                }
+            }
+            push_all(&mut cmd, &m.ldlibs);
+            let mut fp = ccver.clone();
+            fp.push_str(" | ");
+            fp.push_string(&cmd);
+            if prof.strip {
+                fp.push_str(" +strip");
+            }
+            // the fingerprint is per-binary and profile-agnostic (out-dir root): profiles share
+            // bin paths, so a dev binary left behind by a release link must read as out of date
+            let mut fpname = String::from_str("__link-");
+            for i in 0..bin.len() {
+                fpname.push_byte(
+                    if bin[i] == b'/' {
+                        b'_';
+                    } else {
+                        bin[i];
+                    },
+                );
+            }
+            fpname.push_str(".cmd");
+            let mut fppath = join2(m.out_dir.as_str(), fpname.as_str());
             let mut need = compiled || bmt == 0;
             for i in 0..objs.len() {
                 if !need && unsafe shim::sc_mtime((&mut objs[i]).cstr()) > bmt {
                     need = true;
                 }
             }
+            if !need {
+                let old = loader::read_file(fppath.as_str());
+                need = if old.is_none() {
+                    true;
+                } else {
+                    let mut ob = old.unwrap();
+                    ob.as_str() != fp.as_str();
+                };
+            }
             if need {
-                let mut tmp = String::from_str(bin);
-                tmp.push_str(".tmp");
-                let mut cmd = cc.clone();
-                cmd.push_str(" -o");
-                push_quoted(&mut cmd, tmp.as_str());
-                for i in 0..objs.len() {
-                    push_quoted(&mut cmd, objs.at(i).as_str());
-                }
-                push_all(&mut cmd, &m.ldflags);
-                push_all(&mut cmd, &prof.ldflags);
-                // @c.link flags recorded by the emitter
-                let mut lfp = join2(gen.as_str(), "__ldflags");
-                let lf = loader::read_file(lfp.as_str());
-                if !lf.is_none() {
-                    let mut body = lf.unwrap();
-                    let s = body.as_str();
-                    let mut a: usize = 0;
-                    for b in 0..s.len() {
-                        if s[b] == b'\n' {
-                            if b > a {
-                                cmd.push_byte(b' ');
-                                cmd.push_str(s.slice(a, b));
-                            }
-                            a = b + 1;
-                        }
-                    }
-                }
-                push_all(&mut cmd, &m.ldlibs);
+                linked = true;
                 if shell(cmd.as_str()) != 0 {
                     ret = 1;
                 } else {
-                    let mut binb = String::from_str(bin);
                     if unsafe shim::sc_rename(tmp.cstr(), binb.cstr()) != 0 {
                         eprintln("build: cannot move '{}' into place", bin);
                         ret = 1;
-                    } else if prof.strip {
-                        let mut st = String::from_str("strip");
-                        push_quoted(&mut st, bin);
-                        shell(st.as_str());
+                    } else {
+                        if prof.strip {
+                            let mut st = String::from_str("strip");
+                            push_quoted(&mut st, bin);
+                            shell(st.as_str());
+                        }
+                        write_file(fppath.as_str(), fp.as_str());
                     }
                 }
             }
+            t_link = unsafe shim::sc_ticks_ms();
         }
+    }
+    if stdlib::getenv("SC_TIMINGS") != null {
+        eprintln(
+            "timings[{}->{}]: transpile {}ms | sync {}ms | compile {}ms ({}/{} stale, jobs={}) | link {}ms ({}) | total {}ms",
+            prof_name,
+            bin,
+            t_transpile - t0,
+            t_sync - t_transpile,
+            t_compile - t_sync,
+            stale_n,
+            total_c,
+            jobs,
+            t_link - t_compile,
+            if linked {
+                "relinked";
+            } else {
+                "cached";
+            },
+            t_link - t0,
+        );
     }
     return ret;
 }

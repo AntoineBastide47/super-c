@@ -5799,7 +5799,30 @@ extend TypeChecker {
         while ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_REFERENCE {
             ls = self.type_at(ls).as_data.elem;
         }
-        if ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_POINTER {
+        let mut rstrip = r;
+        while rstrip != TYPE_NONE && self.type_at(rstrip).kind == TypeKind::TYPE_REFERENCE {
+            rstrip = self.type_at(rstrip).as_data.elem;
+        }
+        // a raw pointer compares by ADDRESS, a reference by VALUE: one of each in a comparison has
+        // no consistent meaning, so it is rejected instead of silently picking a side
+        let lptr = ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_POINTER;
+        let rptr = rstrip != TYPE_NONE && self.type_at(rstrip).kind == TypeKind::TYPE_POINTER;
+        if lptr != rptr && (lptr && r != rstrip || rptr && l != ls) {
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format(
+                    "cannot compare a raw pointer with a reference (pointers compare by address, references by value)",
+                ),
+            );
+            self.errors.note(
+                format(
+                    "cast the reference with 'as' to compare addresses, or dereference the pointer to compare values",
+                ),
+            );
+            return Ast::builtin(BuiltinType::BT_BOOL);
+        }
+        if lptr {
             if l != TYPE_NONE && r != TYPE_NONE && l != r && !self.compatible(l, rn) && !self.compatible(r, ln) {
                 self.err_mismatch(rn, l);
             }
@@ -5883,11 +5906,10 @@ extend TypeChecker {
         // scalar comparison: references compare by value, so validate the reference-STRIPPED types
         // (`&i32 == &i32`, `&i32 == i32`, `i32 == &i32` are all i32-value comparisons). Raw pointers
         // were handled by the pointer branch above.
-        let mut rs = r;
-        while rs != TYPE_NONE && self.type_at(rs).kind == TypeKind::TYPE_REFERENCE {
-            rs = self.type_at(rs).as_data.elem;
-        }
-        if ls != TYPE_NONE && rs != TYPE_NONE && ls != rs && !self.compatible(ls, rn) && !self.compatible(rs, ln) {
+        if ls != TYPE_NONE && rstrip != TYPE_NONE && ls != rstrip && !self.compatible(ls, rn) && !self.compatible(
+            rstrip,
+            ln,
+        ) {
             self.err_mismatch(rn, ls);
         }
         return Ast::builtin(BuiltinType::BT_BOOL);
