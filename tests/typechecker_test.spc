@@ -1432,5 +1432,22 @@ fn unsafe_fn_body_is_unsafe_context() {
     );
 }
 
+@test
+fn reference_comparison_by_value() {
+    // references compare by VALUE (deref), raw pointers by ADDRESS
+    h::expect_ok(
+        "scalar refs compare by value, pointers by address",
+        "fn main() i32 {\n    let a: i32 = 5;\n    let b: i32 = 5;\n    let mut r = 0;\n    if &a == &b { r = r + 1; }\n    if &a < &b { r = r + 100; }\n    let pa: *const i32 = &a;\n    let pb: *const i32 = &b;\n    if pa == pb { r = r + 1000; }\n    if r != 1 { return 1; }\n    return 0;\n}\n",
+    );
+    h::expect_ok(
+        "struct refs still compare by value via Eq",
+        "struct P { pub x: i32, }\nextend P as Eq { pub fn eq(self: &P, other: &P) bool { return self.x == other.x; } }\nfn main() i32 {\n    let p1 = P { x: 7 };\n    let p2 = P { x: 7 };\n    if &p1 == &p2 { return 0; }\n    return 1;\n}\n",
+    );
+    h::expect_ok(
+        "byte via str index compares by value",
+        "fn main() i32 {\n    let s: str = \"ab\";\n    if s[0] == b\'a\' { return 0; }\n    return 1;\n}\n",
+    );
+}
+
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,
 // computed_reference_type, literal_types, inferred_let_types, str_member_types
