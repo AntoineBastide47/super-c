@@ -11,8 +11,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
+#  include <spawn.h>
+#endif
 #if defined(_WIN32)
 #  include <direct.h>  /* _mkdir, _rmdir */
 #  include <io.h>      /* _access, _unlink */
@@ -236,24 +241,79 @@ int sc_ncpu(void) {
 #endif
 }
 
-/* Spawn a shell command with its output already redirected by the caller; the handle is only
-   used to wait for completion (sc_pclose returns the exit CODE, not the raw wait status). */
-void *sc_popen(const char *cmd) {
+/* Monotonic milliseconds for build-phase timing. */
+long long sc_ticks_ms(void) {
 #if defined(_WIN32)
-  return (void *)_popen(cmd, "r");
+  return (long long)GetTickCount64();
 #else
-  return (void *)popen(cmd, "r");
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
 }
 
-int sc_pclose(void *f) {
+/* Start `cmd` through the shell without waiting (redirections live inside the string); the returned
+   pid/handle is claimed by sc_wait_any. -1 on spawn failure. */
+long long sc_spawn(const char *cmd) {
 #if defined(_WIN32)
-  return _pclose((FILE *)f);
+  const char *sh = getenv("COMSPEC");
+  if (!sh)
+    sh = "cmd.exe";
+  size_t n = strlen(sh) + strlen(cmd) + 5;
+  char *line = malloc(n);
+  if (!line)
+    return -1;
+  snprintf(line, n, "%s /c %s", sh, cmd);
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof si);
+  si.cb = sizeof si;
+  BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+  free(line);
+  if (!ok)
+    return -1;
+  CloseHandle(pi.hThread);
+  return (long long)(intptr_t)pi.hProcess;
 #else
-  int st = pclose((FILE *)f);
-  if (WIFEXITED(st))
-    return WEXITSTATUS(st);
-  return st == 0 ? 0 : 1;
+  extern char **environ;
+  pid_t pid;
+  char *argv[] = {"sh", "-c", (char *)cmd, NULL};
+  if (posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ) != 0)
+    return -1;
+  return (long long)pid;
+#endif
+}
+
+/* Wait until ANY of the n spawned children exits: returns its index and stores its exit code, so the
+   scheduler refills the freed slot immediately instead of draining in FIFO order. -1 on error. */
+int sc_wait_any(const int64_t *pids, int n, int *code) {
+#if defined(_WIN32)
+  HANDLE hs[MAXIMUM_WAIT_OBJECTS];
+  if (n > MAXIMUM_WAIT_OBJECTS)
+    n = MAXIMUM_WAIT_OBJECTS;
+  for (int i = 0; i < n; i++)
+    hs[i] = (HANDLE)(intptr_t)pids[i];
+  DWORD w = WaitForMultipleObjects((DWORD)n, hs, FALSE, INFINITE);
+  if (w >= (DWORD)n)
+    return -1;
+  DWORD ec = 1;
+  GetExitCodeProcess(hs[w], &ec);
+  CloseHandle(hs[w]);
+  *code = (int)ec;
+  return (int)w;
+#else
+  for (;;) {
+    int st = 0;
+    pid_t p = waitpid(-1, &st, 0);
+    if (p < 0)
+      return -1;
+    for (int i = 0; i < n; i++)
+      if ((int64_t)p == (int64_t)pids[i]) {
+        *code = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+        return i;
+      }
+    /* an unrelated child (none are expected during the compile phase): keep waiting */
+  }
 #endif
 }
 

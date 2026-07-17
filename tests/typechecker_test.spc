@@ -1447,6 +1447,21 @@ fn reference_comparison_by_value() {
         "byte via str index compares by value",
         "fn main() i32 {\n    let s: str = \"ab\";\n    if s[0] == b\'a\' { return 0; }\n    return 1;\n}\n",
     );
+    // one side by address, the other by value: rejected instead of silently picking a side
+    h::expect_err_msg(
+        "raw pointer vs reference comparison is rejected",
+        "fn main() i32 {\n    let mut a: i32 = 5;\n    let p: *mut i32 = &mut a;\n    if p == &mut a { return 1; }\n    return 0;\n}\n",
+        "cannot compare a raw pointer with a reference",
+    );
+    h::expect_err_msg(
+        "reference vs raw pointer comparison is rejected",
+        "fn main() i32 {\n    let mut a: i32 = 5;\n    let p: *mut i32 = &mut a;\n    if &mut a == p { return 1; }\n    return 0;\n}\n",
+        "cannot compare a raw pointer with a reference",
+    );
+    h::expect_ok(
+        "casting the reference restores the address comparison",
+        "fn main() i32 {\n    let mut a: i32 = 5;\n    let p: *mut i32 = &mut a;\n    if p == (&mut a) as *mut i32 { return 0; }\n    return 1;\n}\n",
+    );
 }
 
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,

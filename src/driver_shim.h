@@ -23,10 +23,13 @@ void *sc_opendir(const char *path);
 void *sc_readdir(void *dir);      /* the next struct dirent *, or NULL */
 int sc_closedir(void *dir);
 
+#include <stdint.h>
+
 long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
 int sc_ncpu(void);                    /* online core count; >= 1 */
-void *sc_popen(const char *cmd);      /* popen(cmd, "r") */
-int sc_pclose(void *f);               /* waits; returns the exit code */
+long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
+long long sc_spawn(const char *cmd);  /* start cmd via the shell, no wait; pid/handle or -1 */
+int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */
 int sc_rename(const char *from, const char *to); /* rename(2); replaces an existing target on Windows too */
 int sc_setenv(const char *name, const char *value); /* setenv(3) overwrite / _putenv_s */
 
