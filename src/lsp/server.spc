@@ -32,13 +32,15 @@ extend Doc as Free {
     }
 }
 
-// One compiled unit: the manifest root (build.toml's entry), or a per-file root for an open doc outside
-// the manifest closure (mirrors `super-c lint <file>` rooting).
+// One compiled unit: the manifest root (build.toml's entry), a per-file root for an open doc outside
+// the manifest closure, or a workspace-sweep root for a closed .spc no package owns (both mirror the
+// `super-c lint <file>` rooting).
 pub struct Root {
     pub root_file: String,
     pub root_dir: String,
     pub alt_dir: String,
-    pub origin: String, // "" for the manifest root; the doc path that spawned a per-file root
+    pub origin: String, // "" for the manifest root; the file path that spawned a per-file/sweep root
+    pub sweep: bool, // workspace-sweep root: kept while its file exists, rebuilt only while open
     pub pkg: loader::Package,
     pub files: Vector<String>, // canonical module file paths, index-aligned with pkg.modules
     pub diags: Vector<analysis::DiagRec>, // last build's records (codeAction reads the fixes)
@@ -65,6 +67,7 @@ pub struct Server {
     pub target: i32,
     pub published: Vector<String>, // URIs whose last publish was non-empty (for clearing)
     pub ws_root: String, // canonical workspace root ("" before initialize); rename edits stay inside it
+    pub out_skip: String, // the manifest's out-dir name (the workspace sweep skips it)
     pub shutdown_seen: bool,
 }
 
@@ -74,6 +77,7 @@ extend Server as Free {
         self.roots.free();
         self.published.free();
         self.ws_root.free();
+        self.out_skip.free();
     }
 }
 
@@ -163,6 +167,7 @@ extend Server {
                     root_dir: dir_of(path),
                     alt_dir: String::from_str(alt),
                     origin: String::from_str(path),
+                    sweep: false,
                     pkg: loader::Package::new(),
                     files: Vector::<String>::new(),
                     diags: Vector::<analysis::DiagRec>::new(),
@@ -170,13 +175,115 @@ extend Server {
                 },
             );
         }
+        self.ensure_sweep_roots();
     }
 
-    // Drop per-file roots whose doc closed (their diagnostics clear via the published-set diff).
+    // The workspace sweep: every .spc under the build.toml folder that no built package owns gets its
+    // own per-file root, so the LSP lints and checks the whole project tree (the `super-c lint <dir>`
+    // recipe), not only the manifest closure plus open docs. Hidden entries and the manifest out-dir
+    // are skipped. Sweep roots build once, then rebuild only while their file is open (rebuild_all);
+    // closed files keep republishing their cached diagnostics.
+    fn ensure_sweep_roots(self: &mut Self) {
+        if !self.has_manifest {
+            return;
+        }
+        let mut alt = "";
+        if is_dir("src") {
+            alt = "src";
+        }
+        self.sweep_dir(".", alt);
+    }
+
+    fn sweep_dir(self: &mut Self, dir: str, alt: str) {
+        let mut db = String::from_str(dir);
+        let dh = unsafe shim::sc_opendir(db.cstr());
+        if dh == null {
+            return;
+        }
+        let mut names = Vector::<String>::new();
+        loop {
+            let e = unsafe shim::sc_readdir(dh);
+            if e == null {
+                break;
+            }
+            let nm = unsafe shim::sc_dirent_name(e);
+            if unsafe nm[0] == '.' as char {
+                continue;
+            }
+            names.push(String::from_cstr(nm));
+        }
+        unsafe shim::sc_closedir(dh);
+        for i in 0..names.len() {
+            let mut p = String::new();
+            if dir != "." {
+                p.push_str(dir);
+                p.push_byte(b'/');
+            }
+            p.push_string(names.at(i));
+            if dir == "." && p.as_str() == self.out_skip.as_str() {
+                continue;
+            }
+            if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
+                self.sweep_dir(p.as_str(), alt);
+            } else if p.as_str().ends_with(".spc") {
+                self.sweep_file(p.as_str(), alt);
+            }
+        }
+    }
+
+    fn sweep_file(self: &mut Self, rel: str, alt: str) {
+        let cp = canon(rel);
+        let mut have = self.owning_root(cp.as_str()) >= 0;
+        for r in 0..self.roots.len() {
+            if self.roots.at(r).origin.as_str() == cp.as_str() {
+                have = true;
+            }
+        }
+        if have {
+            return;
+        }
+        let rd = if alt.len() != 0 {
+            String::from_str("."); // mirror `super-c lint`: imports resolve against the project root
+        } else {
+            dir_of(rel);
+        };
+        self.roots.push(
+            Root {
+                root_file: String::from_str(rel),
+                root_dir: rd,
+                alt_dir: String::from_str(alt),
+                origin: cp,
+                sweep: true,
+                pkg: loader::Package::new(),
+                files: Vector::<String>::new(),
+                diags: Vector::<analysis::DiagRec>::new(),
+                built: false,
+            },
+        );
+    }
+
+    fn doc_open(self: &Self, path: str) bool {
+        for i in 0..self.docs.len() {
+            if self.docs.at(i).path.as_str() == path {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Drop per-file roots whose doc closed, sweep roots whose file vanished, and sweep roots the
+    // manifest package has since absorbed (their diagnostics clear via the published-set diff).
     fn drop_orphan_roots(self: &mut Self) {
         let mut r: usize = 0;
         while r < self.roots.len() {
             let mut keep = self.roots.at(r).origin.len() == 0;
+            if !keep && self.roots.at(r).sweep {
+                let mut ob = self.roots.at(r).origin.clone();
+                keep = unsafe shim::sc_mtime(ob.cstr()) != 0;
+                if keep && self.has_manifest && r != 0 && self.roots.at(0).built && self.root_module(0, ob.as_str()) >= 0 {
+                    keep = false;
+                }
+            }
             if !keep {
                 for i in 0..self.docs.len() {
                     if self.docs.at(i).path.as_str() == self.roots.at(r).origin.as_str() {
@@ -308,6 +415,13 @@ extend Server {
         let rf = self.roots.at(r).root_file.clone();
         let rd = self.roots.at(r).root_dir.clone();
         let ad = self.roots.at(r).alt_dir.clone();
+        // the manifest root lints every workspace file it owns (incl. an in-repo std/); other roots
+        // lint only their own root file, so each file's lint warnings come from exactly one root
+        let ld = if r == 0 && self.has_manifest {
+            self.ws_root.clone();
+        } else {
+            String::new();
+        };
         let pkg = analysis::compile(
             rf.as_str(),
             rd.as_str(),
@@ -316,6 +430,7 @@ extend Server {
             self.target,
             ovf,
             ovt,
+            ld.as_str(),
             &mut diags,
         );
         // swap the fresh package in (drop the previous build wholesale)
@@ -328,13 +443,27 @@ extend Server {
             self.roots[r].files.push(canon(fp));
         }
         self.roots[r].built = true;
-        // convert this root's diagnostics (module ids are per-package)
+        // retain the records: publishing + codeAction read from them until the next rebuild
+        self.roots[r].diags.free();
+        self.roots[r].diags = diags;
+        self.publish_root_diags(r, ps);
+    }
+
+    // Convert root `r`'s retained diagnostics into per-URI publish entries (module ids are
+    // per-package). Also used to republish a cached sweep root without rebuilding it.
+    fn publish_root_diags(self: &Self, r: usize, ps: &mut PubSet) {
+        // files the manifest package owns publish from it alone -- a per-file/sweep root's closure
+        // reaches std and friends, and republishing its (possibly stale) copies would duplicate them
+        let dedup = r != 0 && self.has_manifest && self.roots.len() != 0 && self.roots.at(0).built;
         let mut last_mod: i64 = -1;
         let mut ls = Vector::<u32>::new();
-        for k in 0..diags.len() {
-            let d = diags.at(k);
+        for k in 0..self.roots.at(r).diags.len() {
+            let d = self.roots.at(r).diags.at(k);
             let m = d.module as usize;
             if m >= self.roots.at(r).pkg.modules.len() {
+                continue;
+            }
+            if dedup && self.root_module(0, self.roots.at(r).files.at(m).as_str()) >= 0 {
                 continue;
             }
             let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
@@ -351,9 +480,6 @@ extend Server {
             let uri = text::path_to_uri(self.roots.at(r).files.at(m).as_str());
             ps.push(uri, dj);
         }
-        // retain the records: codeAction answers from them until the next rebuild
-        self.roots[r].diags.free();
-        self.roots[r].diags = diags;
     }
 
     // Rebuild everything and republish: every URI with diagnostics gets its list, every URI published
@@ -369,7 +495,13 @@ extend Server {
         self.ensure_roots();
         let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
         for r in 0..self.roots.len() {
-            self.build_root(r, &mut ps);
+            // a built sweep root for a closed file republishes its cached diagnostics: rebuilding
+            // every workspace file on each keystroke would be unusable
+            if self.roots.at(r).sweep && self.roots.at(r).built && !self.doc_open(self.roots.at(r).origin.as_str()) {
+                self.publish_root_diags(r, &mut ps);
+            } else {
+                self.build_root(r, &mut ps);
+            }
         }
         // publish
         for i in 0..ps.uris.len() {
@@ -442,12 +574,15 @@ fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
                     root_dir: dir_of(rf),
                     alt_dir: String::new(),
                     origin: String::new(),
+                    sweep: false,
                     pkg: loader::Package::new(),
                     files: Vector::<String>::new(),
                     diags: Vector::<analysis::DiagRec>::new(),
                     built: false,
                 },
             );
+            sv.out_skip.free();
+            sv.out_skip = String::from_str(man.out_dir.as_str());
             let mut m = man;
             m.free();
         },
@@ -958,7 +1093,17 @@ fn complete_via_probe(sv: &Server, path: str, txt: str, off: u32, member: bool) 
             ad = sv.roots.at(r as usize).alt_dir.clone();
         }
         let mut diags = Vector::<analysis::DiagRec>::new();
-        let pkg = analysis::compile(rf.as_str(), rd.as_str(), ad.as_str(), sv.std_dir, sv.target, ovf, ovt, &mut diags);
+        let pkg = analysis::compile(
+            rf.as_str(),
+            rd.as_str(),
+            ad.as_str(),
+            sv.std_dir,
+            sv.target,
+            ovf,
+            ovt,
+            "",
+            &mut diags,
+        );
         let mut parsed = false;
         for m in 0..pkg.modules.len() {
             let c = canon(pkg.modules.at(m).file.as_str());
@@ -1130,6 +1275,7 @@ pub fn run(std_dir: *const char, target: i32) i32 {
         target: target,
         published: Vector::<String>::new(),
         ws_root: String::new(),
+        out_skip: String::new(),
         shutdown_seen: false,
     };
     let fin = stdio::stdin();
@@ -1161,7 +1307,9 @@ pub fn run(std_dir: *const char, target: i32) i32 {
         if method == "initialize" {
             on_initialize(&mut sv, &req, fout);
         } else if method == "initialized" {
-            // no-op
+            // first full round: the manifest build + workspace sweep publish diagnostics for the
+            // whole build.toml folder before any document opens
+            sv.rebuild_all(fout);
         } else if method == "shutdown" {
             sv.shutdown_seen = true;
             let nullv = json::JSON::default();

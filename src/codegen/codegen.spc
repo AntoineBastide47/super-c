@@ -2841,7 +2841,7 @@ const fn raw_string_content(src: str, s: tok::Span) tok::Span {
 extend Codegen {
     fn emit_number(self: &mut Self, s: tok::Span, tt: TokenType, rb: BuiltinType) {
         let mut sfx = s.end;
-        let sb = unsafe ast_numeric_suffix(self.source, s.start, s.end, &mut sfx);
+        let sb = ast_numeric_suffix(self.source, s.start, s.end, &mut sfx);
         let mut eb = sb;
         if sb == BuiltinType::BT_COUNT {
             if tt == TokenType::IntegerLiteral {
@@ -9478,7 +9478,7 @@ extend Codegen {
         }
 
         let rets = f.returns;
-        unsafe self.current_ret[0] = 0 as char;
+        self.current_ret[0] = 0 as char;
         self.current_fn_ret_node = NODE_NONE;
         if target.node == NODE_NONE && !extern_q && span_is(
             self.source,
@@ -10195,7 +10195,7 @@ extend Codegen {
         let oninst = unsafe (*owner).instances.len();
         let mut oit = *it;
         for k in 0..it.n {
-            unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
+            oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
         }
         self.source = osrc;
         self.borrowed = true;
@@ -10609,7 +10609,7 @@ extend Codegen {
             let oninst = unsafe (*owner).instances.len();
             let mut oit = it;
             for k in 0..it.n {
-                unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
+                oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
             }
             self.source = osrc;
             self.borrowed = true;
@@ -10660,7 +10660,7 @@ extend Codegen {
             let oninst = unsafe (*owner).instances.len();
             let mut oit = it;
             for k2 in 0..it.n {
-                unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k2 as usize]);
+                oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k2 as usize]);
             }
             self.source = osrc;
             self.borrowed = true;
@@ -10940,7 +10940,7 @@ extend Codegen {
             self.emit_str(";\n");
             return;
         }
-        unsafe self.current_ret[0] = 0 as char;
+        self.current_ret[0] = 0 as char;
         let saved_env = self.env_clos;
         self.env_clos = if caps {
             id;

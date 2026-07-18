@@ -45,6 +45,18 @@ fn golden_basic() {
 }
 
 @test
+fn golden_param_groups() {
+    // A `a, b: T` group (shared ty node) round-trips as written; separately-typed params never merge,
+    // even when the types read the same -- the formatter preserves the author's form both ways.
+    expect_fmt(
+        "fn f(a,b:*const void,n:usize)i32{return 0;}",
+        "fn f(a, b: *const void, n: usize) i32 {\n    return 0;\n}\n",
+    );
+    expect_fmt("fn g(x:i32,a,mut b,c:f32,y:f32){}", "fn g(x: i32, a, mut b, c: f32, y: f32) {}\n");
+    expect_fmt("fn h(a:f32,b:f32){}", "fn h(a: f32, b: f32) {}\n");
+}
+
+@test
 fn golden_spacing() {
     expect_fmt(
         "fn t(){let v:Vector<i32> =Vector::<i32>::new();}",

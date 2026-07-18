@@ -3,6 +3,7 @@
 // record instead of printing it. Mirrors driver::emit's lint_package recipe exactly -- including its
 // phase gate (no typechecking while any module has a resolve error), so the LSP shows the same error
 // sets as the CLI.
+import driver_shim as shim;
 import module::loader as loader;
 import ast::ast as *;
 import ast::parser as par;
@@ -126,6 +127,37 @@ fn harvest_parse_errors(p: &loader::Package, i: usize, diags: &mut Vector<DiagRe
     drain_errors(&ps.errors, i as u32, diags);
 }
 
+type CanonBuf = Array<char, 4096>;
+
+fn canon_path(path: str) String {
+    let mut pb = String::from_str(path);
+    let mut rb = CanonBuf {};
+    if unsafe shim::sc_realpath(pb.cstr(), &mut rb[0]) != null {
+        return String::from_cstr(&rb[0]);
+    }
+    return pb;
+}
+
+// Lints run for non-prelude modules (like `super-c build`), for the package's root file when it IS a
+// prelude module (the `super-c lint <std file>` recipe), and -- when `lint_dir` is non-empty (the
+// manifest root's build passes the canonical workspace root) -- for every prelude module under that
+// directory, so a repo carrying its own std/ lints it like `super-c lint std`. Gating on the root
+// file rather than "any open doc" keeps each file's lint warnings owned by exactly one root.
+fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: str) bool {
+    if !p.modules[i].prelude {
+        return true;
+    }
+    let mut rf = String::from_str(root_file);
+    if unsafe shim::sc_same_file(p.modules[i].file.cstr(), rf.cstr()) == 1 {
+        return true;
+    }
+    if lint_dir.len() == 0 {
+        return false;
+    }
+    let cf = canon_path(p.modules[i].file.as_str());
+    return cf.len() > lint_dir.len() && cf.as_str().slice(0, lint_dir.len()) == lint_dir && cf.as_str()[lint_dir.len()] == b'/';
+}
+
 // emit::resolve_module with the diagnostics drained instead of logged.
 fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut Vector<DiagRec>) bool {
     let pkg = p as *const loader::Package;
@@ -172,8 +204,8 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
 
 // Load + resolve + typecheck (NO codegen), harvesting all diagnostics into `diags`. Takes ownership of
 // the overlay vectors. The returned Package keeps every module's typed Ast -- the positional features
-// (hover/definition/references) query it until the next rebuild. Lints run for non-prelude modules,
-// like `super-c build`.
+// (hover/definition/references) query it until the next rebuild. Lint gating: see lsp_lint_wanted;
+// `lint_dir` is the canonical workspace root when this build is the manifest root's, else "".
 pub fn compile(
     root_file: str,
     root_dir: str,
@@ -182,6 +214,7 @@ pub fn compile(
     target: i32,
     ov_files: Vector<String>,
     ov_texts: Vector<String>,
+    lint_dir: str,
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
     let mut p = loader::package_load_overlaid(root_file, root_dir, alt_dir, std_dir, false, ov_files, ov_texts);
@@ -197,12 +230,14 @@ pub fn compile(
     let n = p.modules.len();
     let mut resolved = true;
     for i in 0..n {
-        let ok = lsp_resolve_module(&mut p, i, !p.modules[i].prelude, diags);
+        let lw = lsp_lint_wanted(&mut p, i, root_file, lint_dir);
+        let ok = lsp_resolve_module(&mut p, i, lw, diags);
         resolved = ok && resolved;
     }
     if resolved {
         for i in 0..n {
-            lsp_typecheck_module(&mut p, i, !p.modules[i].prelude, diags);
+            let lw = lsp_lint_wanted(&mut p, i, root_file, lint_dir);
+            lsp_typecheck_module(&mut p, i, lw, diags);
         }
     }
     p.ceval = null; // the stack ConstEval dies here; the Package outlives it

@@ -279,7 +279,7 @@ extend DirCache {
         let dl = dir.len();
         if dl < 4096 {
             unsafe cstring::memcpy(&mut db.b[0], dir.ptr(), dl);
-            unsafe db.b[dl] = 0 as char;
+            db.b[dl] = 0 as char;
             let d = unsafe shim::sc_opendir(&db.b[0]);
             if d != null {
                 dok = true;
@@ -460,7 +460,7 @@ extend Package {
         let pl = path.len();
         if pl < 4096 {
             unsafe cstring::memcpy(&mut pb.b[0], path.ptr(), pl);
-            unsafe pb.b[pl] = 0 as char;
+            pb.b[pl] = 0 as char;
             if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) != null {
                 key = str::from_cstr(&rb.b[0]);
             }
@@ -1119,7 +1119,7 @@ fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
         return type_mentions_fnval(p, mid, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = unsafe *pkg_ast_c(p, mid).instance(y.as_data.inst);
+        let it = *pkg_ast_c(p, mid).instance(y.as_data.inst);
         for i in 0..it.n {
             if type_mentions_fnval(p, mid, it.args[i as usize]) {
                 return true;
@@ -1162,7 +1162,7 @@ fn subst_reintern_type(
         return unsafe (*d).intern_type(nt);
     }
     if ty.kind == TypeKind::TYPE_INSTANCE {
-        let inst = unsafe *pkg_ast_c(p, om).instance(ty.as_data.inst);
+        let inst = *pkg_ast_c(p, om).instance(ty.as_data.inst);
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         let m = if inst.n < 4 {
             inst.n;
@@ -1206,7 +1206,7 @@ fn reintern_nested_type(
     if y.kind != TypeKind::TYPE_INSTANCE {
         return;
     }
-    let it = unsafe *pkg_ast_c(p, dm).instance(y.as_data.inst);
+    let it = *pkg_ast_c(p, dm).instance(y.as_data.inst);
     let mut concrete = true;
     for i in 0..it.n {
         if !unsafe (*pkg_ast_c(p, dm)).type_concrete(it.args[i as usize]) {

@@ -43,7 +43,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
         return ast_type_mentions_builtin(p, am, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = unsafe *mod_ast_c(p, am).instance(y.as_data.inst);
+        let it = *mod_ast_c(p, am).instance(y.as_data.inst);
         for i in 0..it.n {
             if ast_type_mentions_builtin(p, am, it.args[i as usize]) {
                 return true;
@@ -71,7 +71,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
             }
         }
     } else if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = unsafe *mod_ast_c(p, am).instance(y.as_data.inst);
+        let it = *mod_ast_c(p, am).instance(y.as_data.inst);
         let np = p.modules.len();
         if it.module as usize < np {
             if mark_live(live, np, it.module) {
