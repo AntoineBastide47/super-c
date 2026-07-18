@@ -640,7 +640,7 @@ extend TypeChecker {
         if tt != TokenType::IntegerLiteral && tt != TokenType::FloatLiteral {
             return false;
         }
-        return unsafe ast_numeric_suffix(self.source, n.as_data.literal.raw.start, n.as_data.literal.raw.end, null) != BuiltinType::BT_COUNT;
+        return ast_numeric_suffix(self.source, n.as_data.literal.raw.start, n.as_data.literal.raw.end, null) != BuiltinType::BT_COUNT;
     }
     fn is_integer_literal_node(self: &Self, id: NodeId) bool {
         if id == NODE_NONE {
@@ -659,7 +659,7 @@ extend TypeChecker {
         let n = unsafe (*self.cur_ast()).at_const(id);
         let lr = n.as_data.literal.raw;
         let mut endd = lr.end;
-        unsafe ast_numeric_suffix(self.source, lr.start, lr.end, &mut endd);
+        ast_numeric_suffix(self.source, lr.start, lr.end, &mut endd);
         let mut p = unsafe (self.source.ptr() + lr.start as usize);
         let mut len = (endd - lr.start) as usize;
         let (base, skip) = lit_base_prefix(p, len);
@@ -3519,10 +3519,17 @@ extend TypeChecker {
     @c.cold
     fn tc_lint_redundant_coalesce(self: &mut Self, expected: TypeId, node: NodeId) {
         let a = self.cur_ast();
-        if unsafe (*a).at_const(node).kind != NodeKind::NODE_CAST {
+        // peel `move`/`unsafe` wrappers: `unsafe (E as P)` is as redundant as the bare cast
+        let mut nid = node;
+        while unsafe (*a).at_const(nid).kind == NodeKind::NODE_UNARY && (unsafe (*a).at_const(nid).as_data.unary.op == TokenType::Move || unsafe (*a).at_const(
+            nid,
+        ).as_data.unary.op == TokenType::Unsafe) {
+            nid = unsafe (*a).at_const(nid).as_data.unary.operand;
+        }
+        if unsafe (*a).at_const(nid).kind != NodeKind::NODE_CAST {
             return;
         }
-        let opn = unsafe (*a).at_const(node).as_data.cast.expression;
+        let opn = unsafe (*a).at_const(nid).as_data.cast.expression;
         if opn as usize >= unsafe (*a).types.len() {
             return;
         }
@@ -3533,7 +3540,7 @@ extend TypeChecker {
         if !self.compatible_in(expected, opn, true) {
             return;
         }
-        let key = self.ast.module as u64 << 32 | node as u64;
+        let key = self.ast.module as u64 << 32 | nid as u64;
         for i in 0..self.len_reported.len() {
             if self.len_reported[i] == key {
                 return;
@@ -3548,13 +3555,13 @@ extend TypeChecker {
         }
         let mut d = Buf96 {};
         self.render_type(expected, &mut d[0], 96);
-        let sp = unsafe (*a).at_const(node).span;
+        let sp = unsafe (*a).at_const(nid).span;
         self.errors.warn(
             sp.start,
             sp.end - sp.start,
             format("unnecessary cast: '{}' converts to '{}' implicitly here", diag::cstr(&f[0]), diag::cstr(&d[0])),
         );
-        self.tc_cast_drop_fix(node);
+        self.tc_cast_drop_fix(nid);
     }
 
     fn compatible(self: &mut Self, expected: TypeId, node: NodeId) bool {
@@ -7320,7 +7327,9 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: bmod, node: fhit });
                 if unsafe (*self.mod_ast(bmod)).at_const(fhit).kind == NodeKind::NODE_FIELD {
                     self.check_field_visibility(bmod, fhit, bdecl, name);
-                    if self.tc_needs_unsafe() && self.through_raw_pointer(obj) {
+                    // raw-pointer gate FIRST: tc_needs_unsafe() counts a use for the unnecessary-'unsafe'
+                    // lint, and a field access through a reference/value must not consume the marker
+                    if self.through_raw_pointer(obj) && self.tc_needs_unsafe() {
                         self.err_unsafe(unsafe (*a).at_const(id).span, "accessing a field through a raw pointer");
                     }
                 }
@@ -8821,7 +8830,7 @@ extend TypeChecker {
         let lr = unsafe (*a).at_const(id).as_data.literal.raw;
         if tt == TokenType::IntegerLiteral {
             let mut sfx = lr.end;
-            let sb = unsafe ast_numeric_suffix(self.source, lr.start, lr.end, &mut sfx);
+            let sb = ast_numeric_suffix(self.source, lr.start, lr.end, &mut sfx);
             let mut result = Ast::builtin(BuiltinType::BT_I32);
             if sb != BuiltinType::BT_COUNT {
                 result = Ast::builtin(sb);
@@ -8870,7 +8879,7 @@ extend TypeChecker {
             return result;
         }
         if tt == TokenType::FloatLiteral {
-            let sb = unsafe ast_numeric_suffix(self.source, lr.start, lr.end, null);
+            let sb = ast_numeric_suffix(self.source, lr.start, lr.end, null);
             if sb == BuiltinType::BT_F64 {
                 return Ast::builtin(BuiltinType::BT_F64);
             }

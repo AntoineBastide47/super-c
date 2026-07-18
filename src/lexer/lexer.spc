@@ -1181,9 +1181,9 @@ fn scan_token(l: &mut Lexer) {
 extend Lexer {
     pub fn scan_tokens(self: &mut Self) {
         self.tokens.reserve(self.bytes.len() / 5);
-        if self.current == 0 && self.bytes.len() >= 3 && unsafe self.bytes.byte_at(0) == 0xEFu8 && unsafe self.bytes.byte_at(
-            1,
-        ) == 0xBBu8 && unsafe self.bytes.byte_at(2) == 0xBFu8 {
+        if self.current == 0 && self.bytes.len() >= 3 && self.bytes.byte_at(0) == 0xEFu8 && self.bytes.byte_at(1) == 0xBBu8 && self.bytes.byte_at(
+            2,
+        ) == 0xBFu8 {
             self.current = 3;
         }
         while self.current < self.bytes.len() {

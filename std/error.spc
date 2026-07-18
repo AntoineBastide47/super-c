@@ -37,7 +37,7 @@ extend Error {
 extend Error as Free {
     pub fn free(self: &mut Error) {
         if self.message as *mut void != null {
-            unsafe self.message.free();
+            self.message.free();
             unsafe free(self.message);
             self.message = null;
         }

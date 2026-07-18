@@ -41,8 +41,8 @@ extend<T, const N: usize> Array<T, N> {
     }
 
     pub const fn set(self: &mut Array<T, N>, index: usize, value: T) {
-        unsafe self.data[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
-        unsafe self.data[index] = value;
+        self.data[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
+        self.data[index] = value;
     }
 
     pub const fn first(self: &Array<T, N>) Option<&T> {
@@ -146,7 +146,7 @@ extend<T: Clone, const N: usize> Array<T, N> {
 extend<T: Free, const N: usize> Array<T, N> as Free {
     pub fn free(self: &mut Array<T, N>) {
         for i in 0..N {
-            unsafe self.data[i].free();
+            self.data[i].free();
         }
     }
 }

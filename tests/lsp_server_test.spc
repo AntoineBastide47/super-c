@@ -104,8 +104,9 @@ fn lsp_diagnostics_lifecycle() {
     let o = out.as_str();
     assert(o.contains("\"hoverProvider\":true"));
     assert(o.contains("\"serverInfo\":{\"name\":\"super-c lsp\""));
-    // the broken revision publishes the type error once; the fixed revision must not re-publish it
-    assert_eq(count(o, "mismatched types: expected 'i32', found 'str'"), 1 as usize);
+    // the on-disk revision publishes the type error at `initialized` (whole-workspace round), the
+    // identical opened revision once more; the fixed revision must not re-publish it
+    assert_eq(count(o, "mismatched types: expected 'i32', found 'str'"), 2 as usize);
     assert(count(o, "textDocument/publishDiagnostics") >= 2);
     assert(o.contains("\"severity\":1"));
     assert(o.contains("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}"));

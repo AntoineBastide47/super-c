@@ -324,6 +324,10 @@ fn b_comma_list(b: &mut Builder, open: str, elems: &Vector<d::DocId>, close: str
 
 // Lower each node of `l` with `what`: 0 = expr, 1 = type, 2 = pattern, 3 = parameter, 4 = generic param.
 fn b_each(b: &mut Builder, l: NodeList, what: i32, out: &mut Vector<d::DocId>) {
+    if what == 3 {
+        b_params(b, l, out);
+        return;
+    }
     for i in 0..l.len {
         let id = list_at(b, l, i);
         if what == 0 {
@@ -332,11 +336,49 @@ fn b_each(b: &mut Builder, l: NodeList, what: i32, out: &mut Vector<d::DocId>) {
             out.push(b_type(b, id));
         } else if what == 2 {
             out.push(b_pattern(b, id));
-        } else if what == 3 {
-            out.push(b_param(b, id));
         } else {
             out.push(b_generic_param(b, id));
         }
+    }
+}
+
+// Parameters. A `a, b: T` group parses into consecutive NODE_PARAMETERs SHARING one `ty` node id
+// (separately written params each parse their own type), so the written form is recoverable: a
+// shared-type run prints back as one `a, b: T` group instead of being desugared per name.
+fn b_params(b: &mut Builder, l: NodeList, out: &mut Vector<d::DocId>) {
+    let mut i: u32 = 0;
+    while i < l.len {
+        let id = list_at(b, l, i);
+        let n = nd(b, id);
+        let named = n.kind == NodeKind::NODE_PARAMETER && n.as_data.parameter.name != NODE_NONE && n.as_data.parameter.ty != NODE_NONE;
+        let mut j = i + 1;
+        while named && j < l.len {
+            let m = nd(b, list_at(b, l, j));
+            if m.kind != NodeKind::NODE_PARAMETER || m.as_data.parameter.name == NODE_NONE || m.as_data.parameter.ty != n.as_data.parameter.ty {
+                break;
+            }
+            j += 1;
+        }
+        if j == i + 1 {
+            out.push(b_param(b, id));
+            i = j;
+            continue;
+        }
+        let mut v = Vector::<d::DocId>::new();
+        for k in i..j {
+            let p = nd(b, list_at(b, l, k));
+            if k > i {
+                v.push(b.p.txt(", "));
+            }
+            if p.as_data.parameter.is_mutable {
+                v.push(b.p.txt("mut "));
+            }
+            v.push(node_text(b, p.as_data.parameter.name));
+        }
+        v.push(b.p.txt(": "));
+        v.push(b_type(b, n.as_data.parameter.ty));
+        out.push(b.p.concat(&v));
+        i = j;
     }
 }
 

@@ -85,7 +85,7 @@ extend<T, const N: usize> StaticVector<T, N> {
 
     pub const fn clear(self: &mut StaticVector<T, N>) {
         for i in 0..self.len {
-            unsafe self.data[i].free();
+            self.data[i].free();
         }
         self.len = 0;
     }
@@ -94,7 +94,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         if new_len < self.len {
             let mut i = new_len;
             while i < self.len {
-                unsafe self.data[i].free();
+                self.data[i].free();
                 i = i + 1;
             }
             self.len = new_len;
@@ -196,13 +196,13 @@ extend<T, const N: usize> StaticVector<T, N> {
     pub const fn retain<F: fn(&T) bool>(self: &mut StaticVector<T, N>, pred: F) {
         let mut w: usize = 0;
         for i in 0..self.len {
-            if pred(&unsafe self.data[i]) {
+            if pred(&self.data[i]) {
                 if w != i {
-                    unsafe self.data[w] = unsafe self.data[i];
+                    self.data[w] = self.data[i];
                 }
                 w = w + 1;
             } else {
-                unsafe self.data[i].free();
+                self.data[i].free();
             }
         }
         self.len = w;
@@ -219,7 +219,7 @@ extend<T, const N: usize> StaticVector<T, N> {
 extend<T: Free, const N: usize> StaticVector<T, N> as Free {
     pub fn free(self: &mut StaticVector<T, N>) {
         for i in 0..self.len {
-            unsafe self.data[i].free();
+            self.data[i].free();
         }
         self.len = 0;
     }
@@ -263,10 +263,10 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
         let mut w: usize = 1;
         let mut r: usize = 1;
         while r < self.len {
-            if unsafe self.data[r] == unsafe self.data[w - 1] {
-                unsafe self.data[r].free();
+            if self.data[r] == self.data[w - 1] {
+                self.data[r].free();
             } else {
-                unsafe self.data[w] = unsafe self.data[r];
+                self.data[w] = self.data[r];
                 w = w + 1;
             }
             r = r + 1;

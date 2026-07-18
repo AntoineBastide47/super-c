@@ -664,7 +664,7 @@ extend ConstEval {
         let src = self.ce_src(m);
         let sp = unsafe (*a).at_const(id).as_data.literal.raw;
         let mut endd = sp.end;
-        unsafe ast_numeric_suffix(src, sp.start, sp.end, &mut endd);
+        ast_numeric_suffix(src, sp.start, sp.end, &mut endd);
         let mut v: u64 = 0;
         let mut i = sp.start;
         let mut base: u64 = 10;
@@ -2458,7 +2458,7 @@ extend ConstEval {
             if o == null || unsafe (*o).dead != 0 {
                 return ValRes { ok: false };
             }
-            let c0 = unsafe self.ce_src(m)[mname.start as usize];
+            let c0 = self.ce_src(m)[mname.start as usize];
             let mut idx: u32 = 0;
             if c0 >= b'0' && c0 <= b'9' {
                 idx = c0 - b'0';
@@ -5054,7 +5054,7 @@ extend ConstEval {
         }
         let mut name = Buf24 {};
         for ci in 0..ln {
-            name[ci] = (unsafe self.ce_src(fm)[nm.start as usize + ci]) as char;
+            name[ci] = self.ce_src(fm)[nm.start as usize + ci] as char;
         }
         name[ln] = 0 as char;
         if ln > 1 && name[ln - 1] == 'f' as char {
@@ -5287,7 +5287,7 @@ extend ConstEval {
         }
         let mut name = Buf24 {};
         for ci in 0..ln {
-            name[ci] = (unsafe self.ce_src(fm)[nm.start as usize + ci]) as char;
+            name[ci] = self.ce_src(fm)[nm.start as usize + ci] as char;
         }
         name[ln] = 0 as char;
         let mut f32suf = false;
