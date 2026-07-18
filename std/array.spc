@@ -27,8 +27,17 @@ extend<T, const N: usize> Array<T, N> {
         return N == 0;
     }
 
-    // Unchecked element access (caller guarantees `index < N`). Borrows the element in place.
+    // Bounds-checked element access: panics when `index >= N`. Borrows the element in place.
     pub const fn at(self: &Array<T, N>, index: usize) &T {
+        if index >= N {
+            panic("Array::at: index out of bounds");
+        }
+        return &unsafe self.data[index];
+    }
+
+    // Unchecked element access -- the caller PROVES `index < N` (hot loops with an established
+    // bound). Out of range is undefined behavior, hence `unsafe`.
+    pub unsafe const fn get_unsafe(self: &Array<T, N>, index: usize) &T {
         return &self.data[index];
     }
 
@@ -37,12 +46,15 @@ extend<T, const N: usize> Array<T, N> {
         if index >= N {
             return Option::<&T>::None;
         }
-        return Option::<&T>::Some(&self.data[index]);
+        return Option::<&T>::Some(&unsafe self.data[index]);
     }
 
     pub const fn set(self: &mut Array<T, N>, index: usize, value: T) {
-        self.data[index].free(); // free the replaced element (no-op if T isn't Free), like Vector::set
-        self.data[index] = value;
+        if index >= N {
+            panic("Array::set: index out of bounds");
+        }
+        unsafe self.data[index].free();
+        unsafe self.data[index] = value;
     }
 
     pub const fn first(self: &Array<T, N>) Option<&T> {
@@ -53,11 +65,11 @@ extend<T, const N: usize> Array<T, N> {
         if N == 0 {
             return Option::<&T>::None;
         }
-        return Option::<&T>::Some(&self.data[N - 1]);
+        return Option::<&T>::Some(&unsafe self.data[N - 1]);
     }
 
     pub const fn as_ptr(self: &Array<T, N>) *const T {
-        return &self.data[0];
+        return &unsafe self.data[0];
     }
 
     // Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Caller guarantees
@@ -69,7 +81,7 @@ extend<T, const N: usize> Array<T, N> {
 
     // Exchange the elements at `i` and `j` (both must be in range).
     pub const fn swap(self: &mut Array<T, N>, i: usize, j: usize) {
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         let tmp = unsafe p[i];
         unsafe p[i] = unsafe p[j];
         unsafe p[j] = tmp;
@@ -94,7 +106,7 @@ extend<T, const N: usize> Array<T, N> {
     // value would free the Array's still-owned copy).
     pub const fn map<U, F: fn(&T) U>(self: &Array<T, N>, f: F) Array<U, N> {
         let mut out = Array::<U, N> {};
-        let p = (&mut out.data[0]) as *mut U;
+        let p = (&mut unsafe out.data[0]) as *mut U;
         for i in 0..N {
             unsafe p[i] = f(self.at(i));
         }
@@ -105,7 +117,7 @@ extend<T, const N: usize> Array<T, N> {
     pub const fn find<F: fn(&T) bool>(self: &Array<T, N>, pred: F) Option<&T> {
         for i in 0..N {
             if pred(self.at(i)) {
-                return Option::<&T>::Some(&self.data[i]);
+                return Option::<&T>::Some(&unsafe self.data[i]);
             }
         }
         return Option::<&T>::None;
@@ -121,7 +133,7 @@ extend<T, const N: usize> Array<T, N> {
 extend<T: Default, const N: usize> Array<T, N> {
     pub const fn new() Array<T, N> {
         let mut a = Array::<T, N> {};
-        let p = (&mut a.data[0]) as *mut T;
+        let p = (&mut unsafe a.data[0]) as *mut T;
         for i in 0..N {
             unsafe p[i] = T::default();
         }
@@ -132,7 +144,7 @@ extend<T: Default, const N: usize> Array<T, N> {
 extend<T: Clone, const N: usize> Array<T, N> {
     pub const fn filled(x: &T) Array<T, N> {
         let mut a = Array::<T, N> {};
-        let p = (&mut a.data[0]) as *mut T;
+        let p = (&mut unsafe a.data[0]) as *mut T;
         for i in 0..N {
             unsafe p[i] = x.clone();
         }
@@ -146,7 +158,7 @@ extend<T: Clone, const N: usize> Array<T, N> {
 extend<T: Free, const N: usize> Array<T, N> as Free {
     pub fn free(self: &mut Array<T, N>) {
         for i in 0..N {
-            self.data[i].free();
+            unsafe self.data[i].free();
         }
     }
 }
@@ -163,7 +175,7 @@ extend<T: Eq, const N: usize> Array<T, N> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub const fn contains(self: &Array<T, N>, x: &T) bool {
         for i in 0..N {
-            if self.data[i] == *x {
+            if unsafe self.data[i] == *x {
                 return true;
             }
         }
@@ -173,7 +185,7 @@ extend<T: Eq, const N: usize> Array<T, N> {
     // Index of the first element equal to `x`, or `None`.
     pub const fn position(self: &Array<T, N>, x: &T) Option<usize> {
         for i in 0..N {
-            if self.data[i] == *x {
+            if unsafe self.data[i] == *x {
                 return Option::<usize>::Some(i);
             }
         }
@@ -190,7 +202,7 @@ extend<T: Ord, const N: usize> Array<T, N> {
         }
         let mut i: usize = 0;
         while i + 1 < N {
-            if self.data[i] > self.data[i + 1] {
+            if unsafe self.data[i] > unsafe self.data[i + 1] {
                 return false;
             }
             i = i + 1;
@@ -205,9 +217,9 @@ extend<T: Ord, const N: usize> Array<T, N> {
         let mut hi: usize = N;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.data[mid] == x {
+            if unsafe self.data[mid] == x {
                 return Result::<usize, usize>::Ok(mid);
-            } else if self.data[mid] < x {
+            } else if unsafe self.data[mid] < x {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -221,10 +233,10 @@ extend<T: Ord, const N: usize> Array<T, N> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && self.data[child] < self.data[child + 1] {
+            if child + 1 < end && unsafe self.data[child] < unsafe self.data[child + 1] {
                 child = child + 1;
             }
-            if self.data[r] >= self.data[child] {
+            if unsafe self.data[r] >= unsafe self.data[child] {
                 return;
             }
             self.swap(r, child);
@@ -286,10 +298,10 @@ extend<T, const N: usize> Array<T, N> {
             }
             let mut child = 2 * r + 1;
             while child < lim {
-                if child + 1 < lim && cmp(&self.data[child], &self.data[child + 1]) < 0 {
+                if child + 1 < lim && cmp(&unsafe self.data[child], &unsafe self.data[child + 1]) < 0 {
                     child = child + 1;
                 }
-                if cmp(&self.data[r], &self.data[child]) >= 0 {
+                if cmp(&unsafe self.data[r], &unsafe self.data[child]) >= 0 {
                     break;
                 }
                 self.swap(r, child);
@@ -308,8 +320,8 @@ extend<T, const N: usize> Array<T, N> {
         while i < N {
             let mut j = i;
             while j > 0 {
-                let prev = key(&self.data[j - 1]);
-                let cur = key(&self.data[j]);
+                let prev = key(&unsafe self.data[j - 1]);
+                let cur = key(&unsafe self.data[j]);
                 if prev <= cur {
                     break;
                 }
@@ -329,7 +341,7 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
         if i >= N {
             panic("Array<T, N>[i]: index out of bounds");
         }
-        return &self.data[i];
+        return &unsafe self.data[i];
     }
     pub const fn index_range(self: &Array<T, N>, r: Range<usize>) []T {
         let hi = if r.inclusive {
@@ -352,7 +364,7 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
         if i >= N {
             panic("Array<T, N>[i]: index out of bounds");
         }
-        return &mut self.data[i];
+        return &mut unsafe self.data[i];
     }
     pub const fn index_range_mut(self: &mut Array<T, N>, r: Range<usize>) []mut T {
         let hi = if r.inclusive {
@@ -360,7 +372,7 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
         } else {
             r.end;
         };
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         if r.start > hi || hi > N {
             panic("Array<T, N>[a..b]: range out of bounds");
         }
@@ -374,7 +386,7 @@ extend<T: Clone, const N: usize> Array<T, N> as Clone {
     // A deep copy whose elements are independent clones.
     pub const fn clone(self: &Array<T, N>) Array<T, N> {
         let mut out = Array::<T, N> {};
-        let p = (&mut out.data[0]) as *mut T;
+        let p = (&mut unsafe out.data[0]) as *mut T;
         for i in 0..N {
             let e = self.at(i);
             unsafe p[i] = e.clone();

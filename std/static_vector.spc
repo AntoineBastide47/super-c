@@ -40,7 +40,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         if self.len == N {
             panic("StaticVector::push on a full vector");
         }
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         unsafe p[self.len] = value;
         self.len = self.len + 1;
     }
@@ -50,12 +50,21 @@ extend<T, const N: usize> StaticVector<T, N> {
             return Option::<T>::None;
         }
         self.len = self.len - 1;
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         return Option::<T>::Some(unsafe p[self.len]);
     }
 
-    // Unchecked element access (caller guarantees `index < len`). Borrows the element in place.
+    // Bounds-checked element access: panics when `index >= len`. Borrows the element in place.
     pub const fn at(self: &StaticVector<T, N>, index: usize) &T {
+        if index >= self.len {
+            panic("StaticVector::at: index out of bounds");
+        }
+        return &unsafe self.data[index];
+    }
+
+    // Unchecked element access -- the caller PROVES `index < len` (hot loops with an established
+    // bound). Out of range is undefined behavior, hence `unsafe`.
+    pub unsafe const fn get_unsafe(self: &StaticVector<T, N>, index: usize) &T {
         return &self.data[index];
     }
 
@@ -64,11 +73,14 @@ extend<T, const N: usize> StaticVector<T, N> {
         if index >= self.len {
             return Option::<&T>::None;
         }
-        return Option::<&T>::Some(&self.data[index]);
+        return Option::<&T>::Some(&unsafe self.data[index]);
     }
 
     pub const fn set(self: &mut StaticVector<T, N>, index: usize, value: T) {
-        let p = (&mut self.data[0]) as *mut T;
+        if index >= self.len {
+            panic("StaticVector::set: index out of bounds");
+        }
+        let p = (&mut unsafe self.data[0]) as *mut T;
         unsafe p[index] = value;
     }
 
@@ -80,12 +92,12 @@ extend<T, const N: usize> StaticVector<T, N> {
         if self.len == 0 {
             return Option::<&T>::None;
         }
-        return Option::<&T>::Some(&self.data[self.len - 1]);
+        return Option::<&T>::Some(&unsafe self.data[self.len - 1]);
     }
 
     pub const fn clear(self: &mut StaticVector<T, N>) {
         for i in 0..self.len {
-            self.data[i].free();
+            unsafe self.data[i].free();
         }
         self.len = 0;
     }
@@ -94,7 +106,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         if new_len < self.len {
             let mut i = new_len;
             while i < self.len {
-                self.data[i].free();
+                unsafe self.data[i].free();
                 i = i + 1;
             }
             self.len = new_len;
@@ -102,7 +114,7 @@ extend<T, const N: usize> StaticVector<T, N> {
     }
 
     pub const fn as_ptr(self: &StaticVector<T, N>) *const T {
-        return &self.data[0];
+        return &unsafe self.data[0];
     }
 
     // Insert `value` at `index`, shifting later elements right. `index` must be <= len; panics when full.
@@ -110,7 +122,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         if self.len == N {
             panic("StaticVector::insert on a full vector");
         }
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         let mut i = self.len;
         while i > index {
             unsafe p[i] = unsafe p[i - 1];
@@ -125,7 +137,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         if index >= self.len {
             return Option::<T>::None;
         }
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         let removed = unsafe p[index];
         let mut i = index;
         while i + 1 < self.len {
@@ -138,7 +150,7 @@ extend<T, const N: usize> StaticVector<T, N> {
 
     // Exchange the elements at `i` and `j` (both must be in range).
     pub const fn swap(self: &mut StaticVector<T, N>, i: usize, j: usize) {
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         let tmp = unsafe p[i];
         unsafe p[i] = unsafe p[j];
         unsafe p[j] = tmp;
@@ -149,7 +161,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         if index >= self.len {
             return Option::<T>::None;
         }
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         let removed = unsafe p[index];
         self.len = self.len - 1;
         unsafe p[index] = unsafe p[self.len];
@@ -185,7 +197,7 @@ extend<T, const N: usize> StaticVector<T, N> {
     pub const fn find<F: fn(&T) bool>(self: &StaticVector<T, N>, pred: F) Option<&T> {
         for i in 0..self.len {
             if pred(self.at(i)) {
-                return Option::<&T>::Some(&self.data[i]);
+                return Option::<&T>::Some(&unsafe self.data[i]);
             }
         }
         return Option::<&T>::None;
@@ -196,13 +208,13 @@ extend<T, const N: usize> StaticVector<T, N> {
     pub const fn retain<F: fn(&T) bool>(self: &mut StaticVector<T, N>, pred: F) {
         let mut w: usize = 0;
         for i in 0..self.len {
-            if pred(&self.data[i]) {
+            if pred(&unsafe self.data[i]) {
                 if w != i {
-                    self.data[w] = self.data[i];
+                    unsafe self.data[w] = unsafe self.data[i];
                 }
                 w = w + 1;
             } else {
-                self.data[i].free();
+                unsafe self.data[i].free();
             }
         }
         self.len = w;
@@ -219,7 +231,7 @@ extend<T, const N: usize> StaticVector<T, N> {
 extend<T: Free, const N: usize> StaticVector<T, N> as Free {
     pub fn free(self: &mut StaticVector<T, N>) {
         for i in 0..self.len {
-            self.data[i].free();
+            unsafe self.data[i].free();
         }
         self.len = 0;
     }
@@ -237,7 +249,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     // True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub const fn contains(self: &StaticVector<T, N>, x: &T) bool {
         for i in 0..self.len {
-            if self.data[i] == *x {
+            if unsafe self.data[i] == *x {
                 return true;
             }
         }
@@ -247,7 +259,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     // Index of the first element equal to `x`, or `None`.
     pub const fn position(self: &StaticVector<T, N>, x: &T) Option<usize> {
         for i in 0..self.len {
-            if self.data[i] == *x {
+            if unsafe self.data[i] == *x {
                 return Option::<usize>::Some(i);
             }
         }
@@ -263,10 +275,10 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
         let mut w: usize = 1;
         let mut r: usize = 1;
         while r < self.len {
-            if self.data[r] == self.data[w - 1] {
-                self.data[r].free();
+            if unsafe self.data[r] == unsafe self.data[w - 1] {
+                unsafe self.data[r].free();
             } else {
-                self.data[w] = self.data[r];
+                unsafe self.data[w] = unsafe self.data[r];
                 w = w + 1;
             }
             r = r + 1;
@@ -284,7 +296,7 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         }
         let mut i: usize = 0;
         while i + 1 < self.len {
-            if self.data[i] > self.data[i + 1] {
+            if unsafe self.data[i] > unsafe self.data[i + 1] {
                 return false;
             }
             i = i + 1;
@@ -299,9 +311,9 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         let mut hi: usize = self.len;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.data[mid] == x {
+            if unsafe self.data[mid] == x {
                 return Result::<usize, usize>::Ok(mid);
-            } else if self.data[mid] < x {
+            } else if unsafe self.data[mid] < x {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -315,10 +327,10 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {
-            if child + 1 < end && self.data[child] < self.data[child + 1] {
+            if child + 1 < end && unsafe self.data[child] < unsafe self.data[child + 1] {
                 child = child + 1;
             }
-            if self.data[r] >= self.data[child] {
+            if unsafe self.data[r] >= unsafe self.data[child] {
                 return;
             }
             self.swap(r, child);
@@ -382,10 +394,10 @@ extend<T, const N: usize> StaticVector<T, N> {
             }
             let mut child = 2 * r + 1;
             while child < lim {
-                if child + 1 < lim && cmp(&self.data[child], &self.data[child + 1]) < 0 {
+                if child + 1 < lim && cmp(&unsafe self.data[child], &unsafe self.data[child + 1]) < 0 {
                     child = child + 1;
                 }
-                if cmp(&self.data[r], &self.data[child]) >= 0 {
+                if cmp(&unsafe self.data[r], &unsafe self.data[child]) >= 0 {
                     break;
                 }
                 self.swap(r, child);
@@ -405,8 +417,8 @@ extend<T, const N: usize> StaticVector<T, N> {
         while i < n {
             let mut j = i;
             while j > 0 {
-                let prev = key(&self.data[j - 1]);
-                let cur = key(&self.data[j]);
+                let prev = key(&unsafe self.data[j - 1]);
+                let cur = key(&unsafe self.data[j]);
                 if prev <= cur {
                     break;
                 }
@@ -427,7 +439,7 @@ extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
         if i >= self.len {
             panic("StaticVector<T, N>[i]: index out of bounds");
         }
-        return &self.data[i];
+        return &unsafe self.data[i];
     }
     pub const fn index_range(self: &StaticVector<T, N>, r: Range<usize>) []T {
         let hi = if r.inclusive {
@@ -450,7 +462,7 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
         if i >= self.len {
             panic("StaticVector<T, N>[i]: index out of bounds");
         }
-        return &mut self.data[i];
+        return &mut unsafe self.data[i];
     }
     pub const fn index_range_mut(self: &mut StaticVector<T, N>, r: Range<usize>) []mut T {
         let hi = if r.inclusive {
@@ -458,7 +470,7 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
         } else {
             r.end;
         };
-        let p = (&mut self.data[0]) as *mut T;
+        let p = (&mut unsafe self.data[0]) as *mut T;
         if r.start > hi || hi > self.len {
             panic("StaticVector<T, N>[a..b]: range out of bounds");
         }

@@ -606,7 +606,7 @@ extend TyInstance as Hash {
         h = (h ^ self.decl as u64) * 1099511628211u64;
         h = (h ^ self.n as u64) * 1099511628211u64;
         for i in 0..self.n {
-            h = (h ^ self.args[i] as u64) * 1099511628211u64;
+            h = (h ^ (unsafe self.args[i]) as u64) * 1099511628211u64;
         }
         return h;
     }
@@ -617,7 +617,7 @@ extend TyInstance as Eq {
             return false;
         }
         for i in 0..self.n {
-            if self.args[i] != other.args[i] {
+            if unsafe self.args[i] != unsafe other.args[i] {
                 return false;
             }
         }
@@ -631,7 +631,7 @@ extend MethodInst as Hash {
         h = (h ^ self.method as u64) * 1099511628211u64;
         h = (h ^ self.n as u64) * 1099511628211u64;
         for i in 0..self.n {
-            h = (h ^ self.targs[i] as u64) * 1099511628211u64;
+            h = (h ^ (unsafe self.targs[i]) as u64) * 1099511628211u64;
         }
         return h;
     }
@@ -642,7 +642,7 @@ extend MethodInst as Eq {
             return false;
         }
         for i in 0..self.n {
-            if self.targs[i] != other.targs[i] {
+            if unsafe self.targs[i] != unsafe other.targs[i] {
                 return false;
             }
         }
@@ -773,7 +773,7 @@ extend Ast {
         }
         let mut it = TyInstance { module: module, decl: decl, n: m };
         for j in 0..m {
-            it.args[j] = unsafe args[j];
+            unsafe it.args[j] = unsafe args[j];
         }
         let hinted = switch self.instance_index.get(&it) {
             Some(id) => *id,
@@ -826,7 +826,7 @@ extend Ast {
         }
         let mut mi = MethodInst { instance: instance, method: method, n: m };
         for j in 0..m {
-            mi.targs[j] = unsafe targs[j];
+            unsafe mi.targs[j] = unsafe targs[j];
         }
         let hinted = switch self.method_inst_index.get(&mi) {
             Some(id) => *id,
@@ -853,7 +853,7 @@ extend Ast {
             TYPE_INSTANCE => {
                 let it = self.instance(ty.as_data.inst);
                 for i in 0..it.n {
-                    if !self.type_concrete(it.args[i]) {
+                    if !self.type_concrete(unsafe it.args[i]) {
                         return false;
                     }
                 }
@@ -878,7 +878,7 @@ extend Ast {
                 let inst = *src.instance(ty.as_data.inst);
                 let mut na: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
                 for i in 0..inst.n {
-                    na[i] = self.reintern(src, inst.args[i]);
+                    unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
                 }
                 self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
             },
@@ -888,7 +888,7 @@ extend Ast {
                 let inst = *src.instance(ty.as_data.inst);
                 let mut na: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
                 for i in 0..inst.n {
-                    na[i] = self.reintern(src, inst.args[i]);
+                    unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
                 }
                 let ii = self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
                 let mut nd = ty;
@@ -906,7 +906,7 @@ extend Ast {
         }
         let mut u = MonoUse { node: node, n: m };
         for i in 0..m {
-            u.args[i] = unsafe args[i];
+            unsafe u.args[i] = unsafe args[i];
         }
         self.mono.push(u);
         ensure_u32_len(&mut self.mono_at, self.nodes.len(), node as usize + 1);

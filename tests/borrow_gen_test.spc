@@ -731,7 +731,7 @@ fn composition() {
     let mut nv: i32 = 0;
     for i in 0..16 {
         if snippet_ok(i) {
-            av.b[nv as usize] = i;
+            unsafe av.b[nv as usize] = i;
             nv = nv + 1;
         }
     }
@@ -743,10 +743,10 @@ fn composition() {
             let mut idx = IdxBuf {};
             let mut k: i32 = 0;
             for t in 0..nv {
-                idx.b[k as usize] = av.b[t as usize];
+                unsafe idx.b[k as usize] = unsafe av.b[t as usize];
                 k = k + 1;
             }
-            idx.b[k as usize] = j;
+            unsafe idx.b[k as usize] = j;
             k = k + 1;
             let mut lbuf = Buf2048 {};
             unsafe stdio::snprintf(&mut lbuf.b[0], 2048, "bundle: valids + invalid #%d".ptr() as *const char, j);

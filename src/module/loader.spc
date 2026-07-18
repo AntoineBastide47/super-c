@@ -279,7 +279,7 @@ extend DirCache {
         let dl = dir.len();
         if dl < 4096 {
             unsafe cstring::memcpy(&mut db.b[0], dir.ptr(), dl);
-            db.b[dl] = 0 as char;
+            unsafe db.b[dl] = 0 as char;
             let d = unsafe shim::sc_opendir(&db.b[0]);
             if d != null {
                 dok = true;
@@ -460,7 +460,7 @@ extend Package {
         let pl = path.len();
         if pl < 4096 {
             unsafe cstring::memcpy(&mut pb.b[0], path.ptr(), pl);
-            pb.b[pl] = 0 as char;
+            unsafe pb.b[pl] = 0 as char;
             if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) != null {
                 key = str::from_cstr(&rb.b[0]);
             }
@@ -573,7 +573,7 @@ extend Package {
                             as_data: NodeAs { aggregate: AggregateData { name: NODE_NONE, is_public: true } },
                         },
                     );
-                    self.builtin_decls[b] = id;
+                    unsafe self.builtin_decls[b] = id;
                 }
                 self.core_module = i as ModuleId;
                 self.core_seeded = true;
@@ -585,7 +585,7 @@ extend Package {
     // The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins weren't seeded.
     pub fn builtin_decl(self: &Self, b: BuiltinType) NodeId {
         if self.core_seeded && b as usize < BT_COUNT_N {
-            return self.builtin_decls[b as usize];
+            return unsafe self.builtin_decls[b as usize];
         }
         return NODE_NONE;
     }
@@ -596,7 +596,7 @@ extend Package {
             return -1;
         }
         for b in 0..BT_COUNT_N {
-            if self.builtin_decls[b] == node {
+            if unsafe self.builtin_decls[b] == node {
                 return b as i32;
             }
         }
@@ -1060,7 +1060,7 @@ extend Package {
     // The module a concrete instance must be emitted in (re-homed to a by-value user-type arg, else the owner).
     fn instance_home_in(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
         for i in 0..it.n {
-            let h = self.type_user_home(am, it.args[i as usize]);
+            let h = self.type_user_home(am, unsafe it.args[i as usize]);
             if h != 0xFFFF as ModuleId && (self.module_is_user(h) || self.module_imports(h, it.module)) {
                 return h;
             }
@@ -1121,7 +1121,7 @@ fn type_mentions_fnval(p: &Package, mid: ModuleId, t: TypeId) bool {
     if y.kind == TypeKind::TYPE_INSTANCE {
         let it = *pkg_ast_c(p, mid).instance(y.as_data.inst);
         for i in 0..it.n {
-            if type_mentions_fnval(p, mid, it.args[i as usize]) {
+            if type_mentions_fnval(p, mid, unsafe it.args[i as usize]) {
                 return true;
             }
         }
@@ -1170,7 +1170,16 @@ fn subst_reintern_type(
             4 as u8;
         };
         for i in 0..m {
-            na[i as usize] = subst_reintern_type(p, dm, om, inst.args[i as usize], gmod, gids, args, nargs);
+            unsafe na[i as usize] = subst_reintern_type(
+                p,
+                dm,
+                om,
+                unsafe inst.args[i as usize],
+                gmod,
+                gids,
+                args,
+                nargs,
+            );
         }
         let d = pkg_ast_m(p, dm);
         return unsafe (*d).intern_instance(inst.module, inst.decl, &na[0], m);
@@ -1238,7 +1247,7 @@ fn reintern_nested_type(
         for k in 0..m {
             let h = pkg_ast_m(p, hm);
             let d = pkg_ast_c(p, dm);
-            na[k as usize] = unsafe (*h).reintern(&*d, it.args[k as usize]);
+            unsafe na[k as usize] = unsafe (*h).reintern(&*d, it.args[k as usize]);
         }
         let h = pkg_ast_m(p, hm);
         let _ = unsafe (*h).intern_instance(it.module, it.decl, &na[0], m);
@@ -1409,10 +1418,10 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         for k2 in 0..m {
             if dm == sm {
-                na[k2 as usize] = it.args[k2 as usize];
+                unsafe na[k2 as usize] = unsafe it.args[k2 as usize];
             } else {
                 let d = pkg_ast_m(p, dm);
-                na[k2 as usize] = unsafe (*d).reintern(&*s, it.args[k2 as usize]);
+                unsafe na[k2 as usize] = unsafe (*d).reintern(&*s, it.args[k2 as usize]);
             }
         }
         if dm != sm {
@@ -1525,10 +1534,10 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
         let mut targs: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         for t in 0..mtn {
             if dm == sm {
-                targs[t as usize] = unsafe (*mu).args[t as usize];
+                unsafe targs[t as usize] = unsafe (*mu).args[t as usize];
             } else {
                 let d = pkg_ast_m(p, dm);
-                targs[t as usize] = unsafe (*d).reintern(&*s, (*mu).args[t as usize]);
+                unsafe targs[t as usize] = unsafe (*d).reintern(&*s, (*mu).args[t as usize]);
             }
         }
         let d = pkg_ast_m(p, dm);

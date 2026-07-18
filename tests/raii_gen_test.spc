@@ -189,7 +189,7 @@ fn multiset_eq(a: *const char, b: *const char) bool {
             break;
         }
         let k = (ch as u8) as usize;
-        ca.c[k] = ca.c[k] + 1;
+        unsafe ca.c[k] = unsafe ca.c[k] + 1;
         i = i + 1;
     }
     i = 0;
@@ -199,11 +199,11 @@ fn multiset_eq(a: *const char, b: *const char) bool {
             break;
         }
         let k = (ch as u8) as usize;
-        cb.c[k] = cb.c[k] + 1;
+        unsafe cb.c[k] = unsafe cb.c[k] + 1;
         i = i + 1;
     }
     for j in 0..256 {
-        if ca.c[j] != cb.c[j] {
+        if unsafe ca.c[j] != unsafe cb.c[j] {
             return false;
         }
     }
@@ -234,9 +234,9 @@ fn new_gen() Gen {
 extend Gen {
     // Record one id byte into the expected-free multiset.
     fn push_id(self: &mut Gen, id: i32) {
-        self.exp[self.eat as usize] = id as char;
+        unsafe self.exp[self.eat as usize] = id as char;
         self.eat = self.eat + 1;
-        self.exp[self.eat as usize] = 0 as char;
+        unsafe self.exp[self.eat as usize] = 0 as char;
     }
 
     // Emit one scenario for shape `sh` and operation `op`; flush first if the id budget would overflow.

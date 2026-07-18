@@ -559,7 +559,7 @@ extend TypeChecker {
             return -1;
         }
         let n = self.nloops;
-        self.loop_stack[n as usize] = LoopEntry {
+        unsafe self.loop_stack[n as usize] = LoopEntry {
             label: label,
             node: node,
             break_ty: TYPE_NONE,
@@ -574,7 +574,7 @@ extend TypeChecker {
         if le < 0 {
             return;
         }
-        if self.loop_stack[le as usize].saw_value && self.loop_stack[le as usize].saw_bare {
+        if unsafe self.loop_stack[le as usize].saw_value && unsafe self.loop_stack[le as usize].saw_bare {
             self.errors.emit(
                 sp.start,
                 sp.end - sp.start,
@@ -590,7 +590,7 @@ extend TypeChecker {
             if label.end == label.start {
                 return i as i32;
             }
-            let ls = self.loop_stack[i as usize].label;
+            let ls = unsafe self.loop_stack[i as usize].label;
             if ls.end - ls.start == label.end - label.start && unsafe cstring::memcmp(
                 self.source.ptr() + ls.start as usize,
                 self.source.ptr() + label.start as usize,
@@ -730,6 +730,21 @@ extend TypeChecker {
     fn tc_needs_unsafe(self: &mut Self) bool {
         self.unsafe_used = self.unsafe_used + 1;
         return self.unsafe_depth == 0;
+    }
+
+    // Const-fold `nid` to an integer via the always-on interpreter. False when it isn't a
+    // compile-time constant (locals, calls the fx summary rejects, ...) -- never an error.
+    fn tc_fold_int(self: &mut Self, nid: NodeId, out: *mut i64) bool {
+        let ceptr = self.ceval();
+        if ceptr == null {
+            return false;
+        }
+        let v = unsafe (*ceptr).eval(self.ast.module, nid);
+        if v.kind != ce::CONST_INT {
+            return false;
+        }
+        unsafe *out = v.as_data.i;
+        return true;
     }
 
     // ---- error / misc ----
@@ -954,9 +969,9 @@ extend TypeChecker {
             return;
         }
         for f in 0..self.nclos {
-            let idx = self.tc_capture_index(self.clos_stack[f as usize], d.node);
+            let idx = self.tc_capture_index(unsafe self.clos_stack[f as usize], d.node);
             if idx >= 0 {
-                let cs = self.clos_stack[f as usize];
+                let cs = unsafe self.clos_stack[f as usize];
                 let old = (unsafe (*self.cur_ast()).at(cs).as_data.closure.mut_caps) as u64;
                 unsafe (*self.cur_ast()).at(cs).as_data.closure.mut_caps = (old | 1u64 << idx as u64) as u32;
             }
@@ -1136,7 +1151,7 @@ pub fn render_type_into(
         let mut i: u8 = 0;
         while i < it.n && at < cap {
             let mut argb = Buf96 {};
-            render_type_into(pkg, a, cur_src, it.args[i as usize], &mut argb[0], 64);
+            render_type_into(pkg, a, cur_src, unsafe it.args[i as usize], &mut argb[0], 64);
             let mut sep = "".ptr() as *const char;
             if i != 0 {
                 sep = ", ".ptr() as *const char;
@@ -1217,7 +1232,7 @@ extend TypeChecker {
             while i < gens.len && i as u8 < it.n && nn < 8 {
                 let gid = unsafe (*da).list(gens)[i as usize];
                 unsafe params[nn as usize] = DefId { module: it.module, node: gid };
-                unsafe args[nn as usize] = it.args[i as usize];
+                unsafe args[nn as usize] = unsafe it.args[i as usize];
                 nn = nn + 1;
                 i = i + 1;
             }
@@ -1254,8 +1269,8 @@ extend TypeChecker {
             let mut na = Tys8 {};
             let mut changed = false;
             for i in 0..src.n {
-                na[i as usize] = self.subst_type(src.args[i as usize], params, args, n);
-                if na[i as usize] != src.args[i as usize] {
+                na[i as usize] = self.subst_type(unsafe src.args[i as usize], params, args, n);
+                if na[i as usize] != unsafe src.args[i as usize] {
                     changed = true;
                 }
             }
@@ -1291,7 +1306,7 @@ extend TypeChecker {
             let ai = *unsafe (*self.cur_ast()).instance(aT.as_data.inst);
             if pi.decl == ai.decl && pi.module == ai.module && pi.n == ai.n {
                 for i in 0..pi.n {
-                    self.unify_infer(pi.args[i as usize], ai.args[i as usize], params, bound, n);
+                    self.unify_infer(unsafe pi.args[i as usize], unsafe ai.args[i as usize], params, bound, n);
                 }
             }
         } else if p.kind == TypeKind::TYPE_FUNCTION && aT.kind == TypeKind::TYPE_FUNCTION {
@@ -1450,7 +1465,7 @@ extend TypeChecker {
         }
         let mut i: i32 = 0;
         while i < it.n as i32 && i < maxn {
-            unsafe out[i as usize] = it.args[i as usize];
+            unsafe out[i as usize] = unsafe it.args[i as usize];
             i = i + 1;
         }
         return it.n;
@@ -2865,7 +2880,7 @@ extend TypeChecker {
                     let aids = unsafe (*a).at_const(bid).as_data.type_path.args;
                     let mut k: u32 = 0;
                     while k < aids.len && b.n < 8 {
-                        b.args[b.n as usize] = self.lower_type_in(m, unsafe (*a).list(aids)[k as usize]);
+                        unsafe b.args[b.n as usize] = self.lower_type_in(m, unsafe (*a).list(aids)[k as usize]);
                         b.n = b.n + 1;
                         k = k + 1;
                     }
@@ -2940,7 +2955,7 @@ extend TypeChecker {
                 while g < gens.len && g as u8 < ifaces[i as usize].n && n < cap {
                     let gid = unsafe (*ia).list(gens)[g as usize];
                     unsafe outp[n as usize] = DefId { module: ifaces[i as usize].iface.module, node: gid };
-                    unsafe outa[n as usize] = ifaces[i as usize].args[g as usize];
+                    unsafe outa[n as usize] = unsafe ifaces[i as usize].args[g as usize];
                     n = n + 1;
                     g = g + 1;
                 }
@@ -3043,7 +3058,7 @@ extend TypeChecker {
             tdecl = inst.decl;
             let mut k: u8 = 0;
             while k < inst.n && in2 < 8 {
-                iargs[in2 as usize] = inst.args[k as usize];
+                iargs[in2 as usize] = unsafe inst.args[k as usize];
                 in2 = in2 + 1;
                 k = k + 1;
             }
@@ -4105,7 +4120,7 @@ extend TypeChecker {
         }
         let d = unsafe (*a).resolution_def(expr);
         if d.module != self.ast.module || d.node == NODE_NONE || self.tc_capture_index(
-            self.clos_stack[(self.nclos - 1) as usize],
+            unsafe self.clos_stack[(self.nclos - 1) as usize],
             d.node,
         ) < 0 || !self.tc_type_is_free(unsafe (*a).type_of(expr)) {
             return false;
@@ -4179,8 +4194,8 @@ extend TypeChecker {
             return;
         }
         for i in 0..self.nborrows {
-            if self.borrows[i as usize].root == d.node && self.borrows[i as usize].kind == BORROW_SHARED {
-                if self.borrow_dead_after(self.borrows[i as usize], expr) {
+            if unsafe self.borrows[i as usize].root == d.node && unsafe self.borrows[i as usize].kind == BORROW_SHARED {
+                if self.borrow_dead_after(unsafe self.borrows[i as usize], expr) {
                     self.borrow_tombstone_at(i);
                 } else {
                     let sp = unsafe (*a).at_const(expr).span;
@@ -4194,7 +4209,7 @@ extend TypeChecker {
         }
         if self.nmoved < 1024 {
             let k = self.nmoved;
-            self.moved[k as usize] = d.node;
+            unsafe self.moved[k as usize] = d.node;
             self.nmoved = k + 1;
             self.ms_bit_set(d.node);
         } else {
@@ -4209,7 +4224,7 @@ extend TypeChecker {
 
     fn tc_is_uninit(self: &Self, decl: NodeId) bool {
         for i in 0..self.nuninit {
-            if self.uninit[i as usize] == decl {
+            if unsafe self.uninit[i as usize] == decl {
                 return true;
             }
         }
@@ -4221,7 +4236,7 @@ extend TypeChecker {
         }
         if self.nuninit < 256 {
             let k = self.nuninit;
-            self.uninit[k as usize] = decl;
+            unsafe self.uninit[k as usize] = decl;
             self.nuninit = k + 1;
         } else {
             let sp = unsafe (*self.cur_ast()).at_const(decl).span;
@@ -4235,9 +4250,9 @@ extend TypeChecker {
     fn tc_init(self: &mut Self, decl: NodeId) {
         let mut i: u32 = 0;
         while i < self.nuninit {
-            if self.uninit[i as usize] == decl {
+            if unsafe self.uninit[i as usize] == decl {
                 self.nuninit = self.nuninit - 1;
-                self.uninit[i as usize] = self.uninit[self.nuninit as usize];
+                unsafe self.uninit[i as usize] = unsafe self.uninit[self.nuninit as usize];
                 return;
             }
             i = i + 1;
@@ -4246,9 +4261,9 @@ extend TypeChecker {
     fn tc_unmark_move(self: &mut Self, decl: NodeId) {
         let mut i: u32 = 0;
         while i < self.nmoved {
-            if self.moved[i as usize] == decl {
+            if unsafe self.moved[i as usize] == decl {
                 self.nmoved = self.nmoved - 1;
-                self.moved[i as usize] = self.moved[self.nmoved as usize];
+                unsafe self.moved[i as usize] = unsafe self.moved[self.nmoved as usize];
                 break;
             }
             i = i + 1;
@@ -4258,7 +4273,7 @@ extend TypeChecker {
         let mut still = false;
         i = 0;
         while i < self.nmoved {
-            if self.moved[i as usize] == decl {
+            if unsafe self.moved[i as usize] == decl {
                 still = true;
                 break;
             }
@@ -4269,9 +4284,9 @@ extend TypeChecker {
         }
         i = 0;
         while i < self.nfreed {
-            if self.freed[i as usize] == decl {
+            if unsafe self.freed[i as usize] == decl {
                 self.nfreed = self.nfreed - 1;
-                self.freed[i as usize] = self.freed[self.nfreed as usize];
+                unsafe self.freed[i as usize] = unsafe self.freed[self.nfreed as usize];
                 break;
             }
             i = i + 1;
@@ -4284,41 +4299,41 @@ extend TypeChecker {
     fn tc_flow_save(self: &Self, s: &mut FlowState) {
         s.nmoved = self.nmoved;
         for i in 0..self.nmoved {
-            s.moved[i as usize] = self.moved[i as usize];
+            unsafe s.moved[i as usize] = unsafe self.moved[i as usize];
         }
         s.nuninit = self.nuninit;
         for i in 0..self.nuninit {
-            s.uninit[i as usize] = self.uninit[i as usize];
+            unsafe s.uninit[i as usize] = unsafe self.uninit[i as usize];
         }
         s.nfreed = self.nfreed;
         for i in 0..self.nfreed {
-            s.freed[i as usize] = self.freed[i as usize];
+            unsafe s.freed[i as usize] = unsafe self.freed[i as usize];
         }
         s.nborrows = self.nborrows;
         for i in 0..self.nborrows {
-            s.borrows[i as usize] = self.borrows[i as usize];
+            unsafe s.borrows[i as usize] = unsafe self.borrows[i as usize];
         }
     }
     fn tc_flow_set(self: &mut Self, s: &FlowState) {
         for i in 0..self.nmoved {
-            self.ms_bit_clear(self.moved[i as usize]);
+            self.ms_bit_clear(unsafe self.moved[i as usize]);
         }
         self.nmoved = s.nmoved;
         for i in 0..s.nmoved {
-            self.moved[i as usize] = s.moved[i as usize];
-            self.ms_bit_set(s.moved[i as usize]);
+            unsafe self.moved[i as usize] = unsafe s.moved[i as usize];
+            self.ms_bit_set(unsafe s.moved[i as usize]);
         }
         self.nuninit = s.nuninit;
         for i in 0..s.nuninit {
-            self.uninit[i as usize] = s.uninit[i as usize];
+            unsafe self.uninit[i as usize] = unsafe s.uninit[i as usize];
         }
         self.nfreed = s.nfreed;
         for i in 0..s.nfreed {
-            self.freed[i as usize] = s.freed[i as usize];
+            unsafe self.freed[i as usize] = unsafe s.freed[i as usize];
         }
         self.nborrows = s.nborrows;
         for i in 0..s.nborrows {
-            self.borrows[i as usize] = s.borrows[i as usize];
+            unsafe self.borrows[i as usize] = unsafe s.borrows[i as usize];
         }
     }
     fn tc_flow_clear(self: &Self, s: &mut FlowState) {
@@ -4335,14 +4350,14 @@ extend TypeChecker {
         for i in 0..self.nmoved {
             let mut seen = false;
             for j in 0..unsafe (*acc).nmoved {
-                if unsafe (*acc).moved[j as usize] == self.moved[i as usize] {
+                if unsafe (*acc).moved[j as usize] == unsafe self.moved[i as usize] {
                     seen = true;
                 }
             }
             if !seen {
                 if unsafe (*acc).nmoved < 256 {
                     let k = unsafe (*acc).nmoved;
-                    unsafe (*acc).moved[k as usize] = self.moved[i as usize];
+                    unsafe (*acc).moved[k as usize] = unsafe self.moved[i as usize];
                     unsafe (*acc).nmoved = k + 1;
                 } else {
                     overflow = true;
@@ -4352,14 +4367,14 @@ extend TypeChecker {
         for i in 0..self.nuninit {
             let mut seen = false;
             for j in 0..unsafe (*acc).nuninit {
-                if unsafe (*acc).uninit[j as usize] == self.uninit[i as usize] {
+                if unsafe (*acc).uninit[j as usize] == unsafe self.uninit[i as usize] {
                     seen = true;
                 }
             }
             if !seen {
                 if unsafe (*acc).nuninit < 64 {
                     let k = unsafe (*acc).nuninit;
-                    unsafe (*acc).uninit[k as usize] = self.uninit[i as usize];
+                    unsafe (*acc).uninit[k as usize] = unsafe self.uninit[i as usize];
                     unsafe (*acc).nuninit = k + 1;
                 } else {
                     overflow = true;
@@ -4369,14 +4384,14 @@ extend TypeChecker {
         for i in 0..self.nfreed {
             let mut seen = false;
             for j in 0..unsafe (*acc).nfreed {
-                if unsafe (*acc).freed[j as usize] == self.freed[i as usize] {
+                if unsafe (*acc).freed[j as usize] == unsafe self.freed[i as usize] {
                     seen = true;
                 }
             }
             if !seen {
                 if unsafe (*acc).nfreed < 64 {
                     let k = unsafe (*acc).nfreed;
-                    unsafe (*acc).freed[k as usize] = self.freed[i as usize];
+                    unsafe (*acc).freed[k as usize] = unsafe self.freed[i as usize];
                     unsafe (*acc).nfreed = k + 1;
                 } else {
                     overflow = true;
@@ -4386,14 +4401,14 @@ extend TypeChecker {
         for i in 0..self.nborrows {
             let mut seen = false;
             for j in 0..unsafe (*acc).nborrows {
-                if self.borrow_same(unsafe (*acc).borrows[j as usize], self.borrows[i as usize]) {
+                if self.borrow_same(unsafe (*acc).borrows[j as usize], unsafe self.borrows[i as usize]) {
                     seen = true;
                 }
             }
             if !seen {
                 if unsafe (*acc).nborrows < 64 {
                     let k = unsafe (*acc).nborrows;
-                    unsafe (*acc).borrows[k as usize] = self.borrows[i as usize];
+                    unsafe (*acc).borrows[k as usize] = unsafe self.borrows[i as usize];
                     unsafe (*acc).nborrows = k + 1;
                 } else {
                     overflow = true;
@@ -4443,7 +4458,7 @@ extend TypeChecker {
         let d = self.scope_depth;
         let mut w: u32 = 0;
         for i in 0..self.nborrows {
-            let b = self.borrows[i as usize];
+            let b = unsafe self.borrows[i as usize];
             if b.region as u32 >= d {
                 continue;
             }
@@ -4458,7 +4473,7 @@ extend TypeChecker {
                 );
                 continue;
             }
-            self.borrows[w as usize] = self.borrows[i as usize];
+            unsafe self.borrows[w as usize] = unsafe self.borrows[i as usize];
             w = w + 1;
         }
         self.nborrows = w;
@@ -4700,8 +4715,8 @@ extend TypeChecker {
         let mut w = mark;
         let mut i = mark;
         while i < self.nborrows {
-            if self.borrows[i as usize].binding != NODE_NONE {
-                self.borrows[w as usize] = self.borrows[i as usize];
+            if unsafe self.borrows[i as usize].binding != NODE_NONE {
+                unsafe self.borrows[w as usize] = unsafe self.borrows[i as usize];
                 w = w + 1;
             }
             i = i + 1;
@@ -4709,8 +4724,8 @@ extend TypeChecker {
         self.nborrows = w;
     }
     fn borrow_tombstone_at(self: &mut Self, i: u32) {
-        self.borrows[i as usize].root = NODE_NONE;
-        self.borrows[i as usize].binding = NODE_NONE;
+        unsafe self.borrows[i as usize].root = NODE_NONE;
+        unsafe self.borrows[i as usize].binding = NODE_NONE;
     }
 
     // TC-3: one pass over the resolution table records, per local decl, the LAST node that
@@ -4750,8 +4765,8 @@ extend TypeChecker {
             return false;
         }
         for i in 0..self.nborrows {
-            if self.borrows[i as usize].binding != b.binding && self.place_through_binding(
-                self.borrows[i as usize].place,
+            if unsafe self.borrows[i as usize].binding != b.binding && self.place_through_binding(
+                unsafe self.borrows[i as usize].place,
             ) == b.binding {
                 return false;
             }
@@ -4771,7 +4786,7 @@ extend TypeChecker {
             return false;
         }
         for i in 0..self.nborrows {
-            let b = self.borrows[i as usize];
+            let b = unsafe self.borrows[i as usize];
             if b.root != root || kind == BORROW_SHARED && b.kind == BORROW_SHARED || !self.places_overlap(
                 place,
                 b.place,
@@ -4812,7 +4827,7 @@ extend TypeChecker {
     fn borrow_push(self: &mut Self, root: NodeId, kind: u8, place: NodeId, origin: NodeId) {
         if self.nborrows < 256 {
             let k = self.nborrows;
-            self.borrows[k as usize] = Borrow {
+            unsafe self.borrows[k as usize] = Borrow {
                 root: root,
                 place: place,
                 kind: kind,
@@ -4845,7 +4860,7 @@ extend TypeChecker {
             return false;
         }
         for i in 0..self.nborrows {
-            let b = self.borrows[i as usize];
+            let b = unsafe self.borrows[i as usize];
             if b.root != root || b.kind != BORROW_MUT || !self.places_overlap(place, b.place) {
                 continue;
             }
@@ -4863,7 +4878,7 @@ extend TypeChecker {
             return false;
         }
         for i in 0..self.nborrows {
-            let b = self.borrows[i as usize];
+            let b = unsafe self.borrows[i as usize];
             if b.root != root || b.kind != BORROW_SHARED || b.binding == NODE_NONE || !self.places_overlap(
                 place,
                 b.place,
@@ -4900,23 +4915,23 @@ extend TypeChecker {
         let region = self.tc_binding_depth(binding) as u16;
         let mut moved = false;
         for i in 0..n0 {
-            if self.borrows[i as usize].binding == rd.node {
-                if self.borrows[i as usize].kind == BORROW_MUT {
-                    self.borrows[i as usize].binding = binding;
-                    self.borrows[i as usize].region = region;
+            if unsafe self.borrows[i as usize].binding == rd.node {
+                if unsafe self.borrows[i as usize].kind == BORROW_MUT {
+                    unsafe self.borrows[i as usize].binding = binding;
+                    unsafe self.borrows[i as usize].region = region;
                     moved = true;
                 } else if self.nborrows < 256 {
                     let k = self.nborrows;
-                    self.borrows[k as usize] = self.borrows[i as usize];
-                    self.borrows[k as usize].region = region;
-                    self.borrows[k as usize].binding = binding;
+                    unsafe self.borrows[k as usize] = unsafe self.borrows[i as usize];
+                    unsafe self.borrows[k as usize].region = region;
+                    unsafe self.borrows[k as usize].binding = binding;
                     self.nborrows = k + 1;
                 }
             }
         }
         if moved && !self.is_moved(rd.node) && self.nmoved < 1024 {
             let k = self.nmoved;
-            self.moved[k as usize] = rd.node;
+            unsafe self.moved[k as usize] = rd.node;
             self.nmoved = k + 1;
             self.ms_bit_set(rd.node);
         }
@@ -4937,7 +4952,7 @@ extend TypeChecker {
         let mut keep = Keep256 {};
         for k in 0..self.nborrows {
             keep[k as usize] = true;
-            let b = self.borrows[k as usize];
+            let b = unsafe self.borrows[k as usize];
             if b.binding != NODE_NONE && b.region == self.scope_depth as u16 {
                 let bn = unsafe (*self.cur_ast()).at_const(b.binding);
                 let tuple = bn.kind == NodeKind::NODE_LET && unsafe (*self.cur_ast()).at_const(bn.as_data.let_stmt.name).kind == NodeKind::NODE_PATTERN_TUPLE;
@@ -4955,10 +4970,10 @@ extend TypeChecker {
         let mut kk = self.nborrows as i32 - 1;
         while kk >= 0 {
             if keep[kk as usize] {
-                let thru = self.place_through_binding(self.borrows[kk as usize].place);
+                let thru = self.place_through_binding(unsafe self.borrows[kk as usize].place);
                 if thru != NODE_NONE {
                     for j in 0..self.nborrows {
-                        if self.borrows[j as usize].binding == thru {
+                        if unsafe self.borrows[j as usize].binding == thru {
                             keep[j as usize] = true;
                         }
                     }
@@ -4969,7 +4984,7 @@ extend TypeChecker {
         let mut w: u32 = 0;
         for k in 0..self.nborrows {
             if keep[k as usize] {
-                self.borrows[w as usize] = self.borrows[k as usize];
+                unsafe self.borrows[w as usize] = unsafe self.borrows[k as usize];
                 w = w + 1;
             }
         }
@@ -5007,8 +5022,8 @@ extend TypeChecker {
         }
         let mut esc: i32 = 0;
         for i in 0..self.nborrows {
-            if self.borrows[i as usize].binding == binding {
-                let e = self.place_escape(self.borrows[i as usize].place, depth);
+            if unsafe self.borrows[i as usize].binding == binding {
+                let e = self.place_escape(unsafe self.borrows[i as usize].place, depth);
                 if e == 1 {
                     return 1;
                 }
@@ -5253,7 +5268,7 @@ extend TypeChecker {
                         module: dinst.module,
                         node: unsafe (*self.mod_ast(dinst.module)).list(ig)[gi as usize],
                     };
-                    unsafe rsuba[nrsub as usize] = dinst.args[gi as usize];
+                    unsafe rsuba[nrsub as usize] = unsafe dinst.args[gi as usize];
                     nrsub = nrsub + 1;
                     gi = gi + 1;
                 }
@@ -5437,7 +5452,7 @@ extend TypeChecker {
                 if !self.is_place(operand) {
                     let mut i = bm;
                     while i < self.nborrows {
-                        if self.borrows[i as usize].binding == NODE_NONE && self.borrows[i as usize].kind == BORROW_SHARED {
+                        if unsafe self.borrows[i as usize].binding == NODE_NONE && unsafe self.borrows[i as usize].kind == BORROW_SHARED {
                             self.borrow_tombstone_at(i);
                         }
                         i = i + 1;
@@ -6274,7 +6289,13 @@ extend TypeChecker {
                                                 unsafe (*ia).list(iargs)[kk as usize],
                                             );
                                             let subst = self.subst_type(lowered, &egp[0], &ega[0], egn);
-                                            self.unify_infer(bs[b as usize].args[kk as usize], subst, gparams, bound, g);
+                                            self.unify_infer(
+                                                unsafe bs[b as usize].args[kk as usize],
+                                                subst,
+                                                gparams,
+                                                bound,
+                                                g,
+                                            );
                                             kk = kk + 1;
                                         }
                                     }
@@ -6630,7 +6651,7 @@ extend TypeChecker {
             let mut through_owner = false;
             let mut i: u32 = 0;
             while thru != NODE_NONE && i < self.nborrows && !through_owner {
-                let b = self.borrows[i as usize];
+                let b = unsafe self.borrows[i as usize];
                 if b.binding == thru && b.root != NODE_NONE {
                     let rk = unsafe (*a).at_const(b.root).kind;
                     if rk == NodeKind::NODE_LET || rk == NodeKind::NODE_PATTERN_NAME || rk == NodeKind::NODE_IDENTIFIER || rk == NodeKind::NODE_FOR {
@@ -6654,7 +6675,7 @@ extend TypeChecker {
                     if rd.module == self.ast.module && rd.node != NODE_NONE {
                         if self.nfreed < 256 {
                             let k = self.nfreed;
-                            self.freed[k as usize] = rd.node;
+                            unsafe self.freed[k as usize] = rd.node;
                             self.nfreed = k + 1;
                         }
                     }
@@ -6774,7 +6795,7 @@ extend TypeChecker {
                                 module: dinst.module,
                                 node: unsafe (*self.mod_ast(dinst.module)).list(dig)[gi as usize],
                             };
-                            rsuba[nrsub as usize] = dinst.args[gi as usize];
+                            rsuba[nrsub as usize] = unsafe dinst.args[gi as usize];
                             nrsub = nrsub + 1;
                             gi = gi + 1;
                         }
@@ -7106,7 +7127,7 @@ extend TypeChecker {
                         fmod,
                         if_node(mrn.kind == NodeKind::NODE_PARAMETER, mrn.as_data.parameter.ty, mrid),
                     );
-                    self.mret_types[i as usize] = self.subst_type(
+                    unsafe self.mret_types[i as usize] = self.subst_type(
                         self.subst_type(mrt, &gparams[0], &gargs[0], gn),
                         &rsubp[0],
                         &rsuba[0],
@@ -7447,8 +7468,8 @@ extend TypeChecker {
                     );
                     return TYPE_NONE;
                 }
-                du.recv[du.n as usize] = cur;
-                du.method[du.n as usize] = dm;
+                unsafe du.recv[du.n as usize] = cur;
+                unsafe du.method[du.n as usize] = dm;
                 du.n = du.n + 1;
                 seen[nseen as usize] = target;
                 nseen = nseen + 1;
@@ -7498,7 +7519,7 @@ extend TypeChecker {
                             let mut hga = Tys8 {};
                             let mut hgn: i32 = 0;
                             self.aggregate_of(
-                                du.recv[hi as usize],
+                                unsafe du.recv[hi as usize],
                                 &mut hm,
                                 &mut hd,
                                 (&hgp[0]) as *mut DefId,
@@ -7508,7 +7529,7 @@ extend TypeChecker {
                             let dmm = self.find_method_cstr(hm, hd, "deref_mut");
                             if dmm.node == NODE_NONE {
                                 let mut tn = Buf96 {};
-                                self.render_type(du.recv[hi as usize], &mut tn[0], 96);
+                                self.render_type(unsafe du.recv[hi as usize], &mut tn[0], 96);
                                 self.errors.emit(
                                     name.start,
                                     name.end - name.start,
@@ -7519,7 +7540,7 @@ extend TypeChecker {
                                 );
                                 return TYPE_NONE;
                             }
-                            du.method[hi as usize] = dmm;
+                            unsafe du.method[hi as usize] = dmm;
                         }
                     }
                     du.target = target;
@@ -8096,7 +8117,7 @@ extend TypeChecker {
         let ref_rebind = lt != TYPE_NONE && self.type_at(lt).kind == TypeKind::TYPE_REFERENCE;
         if ref_rebind {
             for i in 0..self.nborrows {
-                if self.borrows[i as usize].binding == ld.node {
+                if unsafe self.borrows[i as usize].binding == ld.node {
                     self.borrow_tombstone_at(i);
                 }
             }
@@ -8112,8 +8133,8 @@ extend TypeChecker {
                 let region = self.tc_binding_depth(ld.node) as u16;
                 let mut k = bm;
                 while k < self.nborrows {
-                    self.borrows[k as usize].binding = ld.node;
-                    self.borrows[k as usize].region = region;
+                    unsafe self.borrows[k as usize].binding = ld.node;
+                    unsafe self.borrows[k as usize].region = region;
                     k = k + 1;
                 }
             } else {
@@ -8173,7 +8194,7 @@ extend TypeChecker {
             return TYPE_NONE;
         }
         let cn = self.nclos;
-        self.clos_stack[cn as usize] = id;
+        unsafe self.clos_stack[cn as usize] = id;
         self.nclos = cn + 1;
         let saved_lf = self.loop_floor;
         self.loop_floor = self.nloops;
@@ -8216,7 +8237,7 @@ extend TypeChecker {
                 );
             }
             for f in 0..self.nclos {
-                if self.tc_capture_index(self.clos_stack[f as usize], cid) >= 0 {
+                if self.tc_capture_index(unsafe self.clos_stack[f as usize], cid) >= 0 {
                     let sp = unsafe (*a).at_const(id).span;
                     self.errors.emit(
                         sp.start,
@@ -8227,8 +8248,8 @@ extend TypeChecker {
                 }
             }
             for b in 0..self.nborrows {
-                if self.borrows[b as usize].root == cid {
-                    if self.borrow_dead_after(self.borrows[b as usize], id) {
+                if unsafe self.borrows[b as usize].root == cid {
+                    if self.borrow_dead_after(unsafe self.borrows[b as usize], id) {
                         self.borrow_tombstone_at(b);
                     } else {
                         let sp = unsafe (*a).at_const(id).span;
@@ -8243,7 +8264,7 @@ extend TypeChecker {
             }
             if self.nmoved < 1024 {
                 let k = self.nmoved;
-                self.moved[k as usize] = cid;
+                unsafe self.moved[k as usize] = cid;
                 self.nmoved = k + 1;
                 self.ms_bit_set(cid);
             }
@@ -8355,6 +8376,35 @@ extend TypeChecker {
                     self.errors.emit(sp.start, sp.end - sp.start, format("range bound must be an integer"));
                 }
             }
+            // Slicing a raw `[T; N]` follows the raw-array indexing rule: every written bound must
+            // const-fold with 0 <= start <= end <= N (a missing bound is 0 / N), else the view is
+            // unproven and needs 'unsafe'. A provably out-of-range constant bound is a hard error.
+            if ot.kind == TypeKind::TYPE_ARRAY {
+                let n = ot.as_data.arr.len as i64;
+                let inclusive = unsafe (*a).at_const(index_n).as_data.pattern_range.inclusive;
+                let mut lo: i64 = 0;
+                let mut hi: i64 = n;
+                let mut proven = n != 0;
+                if proven && bstart != NODE_NONE {
+                    proven = self.tc_fold_int(bstart, &mut lo);
+                }
+                if proven && bend != NODE_NONE {
+                    proven = self.tc_fold_int(bend, &mut hi);
+                    if proven && inclusive {
+                        hi = hi + 1;
+                    }
+                }
+                let sp = unsafe (*a).at_const(id).span;
+                if proven && (lo < 0 || lo > hi || hi > n) {
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format("range [{}, {}) is out of bounds for an array of length {}", lo, hi, n),
+                    );
+                } else if !proven && self.tc_needs_unsafe() {
+                    self.err_unsafe(sp, "slicing an array with a non-constant range");
+                }
+            }
             if user_result != TYPE_NONE {
                 return user_result;
             }
@@ -8371,6 +8421,25 @@ extend TypeChecker {
             if ot.kind == TypeKind::TYPE_ARRAY || ot.kind == TypeKind::TYPE_POINTER {
                 if ot.kind == TypeKind::TYPE_POINTER && self.tc_needs_unsafe() {
                     self.err_unsafe(unsafe (*a).at_const(obj_n).span, "indexing a raw pointer");
+                }
+                // Raw `[T; N]` indexing is unsafe-gated like raw pointers UNLESS the index
+                // const-folds in bounds; a constant provably out of bounds is a hard error (never
+                // unsafe-able). Safe dynamic indexing lives in the std views (Array/Slice/Vector).
+                if ot.kind == TypeKind::TYPE_ARRAY {
+                    let n = ot.as_data.arr.len as i64;
+                    let mut v: i64 = 0;
+                    if n != 0 && self.tc_fold_int(index_n, &mut v) {
+                        if v < 0 || v >= n {
+                            let sp = unsafe (*a).at_const(id).span;
+                            self.errors.emit(
+                                sp.start,
+                                sp.end - sp.start,
+                                format("index {} is out of bounds for an array of length {}", v, n),
+                            );
+                        }
+                    } else if self.tc_needs_unsafe() {
+                        self.err_unsafe(unsafe (*a).at_const(obj_n).span, "indexing an array with a non-constant index");
+                    }
                 }
                 result = ot.as_data.elem;
             } else if self.slice_kind(obj, &mut selem) != 0 {
@@ -8531,7 +8600,7 @@ extend TypeChecker {
                     if self.is_moved(d.node) {
                         let mut freed = false;
                         for k in 0..self.nfreed {
-                            if self.freed[k as usize] == d.node {
+                            if unsafe self.freed[k as usize] == d.node {
                                 freed = true;
                             }
                         }
@@ -8793,7 +8862,7 @@ extend TypeChecker {
                 let le = self.tc_loop_push(tok::Span { start: 0, end: 0 }, id, true);
                 self.check_loop_body(unsafe (*a).at_const(id).as_data.while_stmt.body);
                 if le >= 0 {
-                    result = self.loop_stack[le as usize].break_ty;
+                    result = unsafe self.loop_stack[le as usize].break_ty;
                     self.tc_loop_pop(le, unsafe (*a).at_const(id).span);
                 }
                 if result == TYPE_NONE {
@@ -9056,9 +9125,9 @@ extend TypeChecker {
             self.check_stmt(sid);
             self.borrow_nll_drop(id, unsafe (*a).list(stmts), i);
         }
-        while self.ndefers != 0 && self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
+        while self.ndefers != 0 && unsafe self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
             self.ndefers = self.ndefers - 1;
-            let dv = self.defer_stack[self.ndefers as usize];
+            let dv = unsafe self.defer_stack[self.ndefers as usize];
             let dbm = self.borrow_mark();
             self.check_expr(dv);
             self.borrow_release_to(dbm);
@@ -9256,7 +9325,7 @@ extend TypeChecker {
         for i in 0..names.len {
             let mut et = TYPE_NONE;
             if stashed && i < self.mret_n as u32 {
-                et = self.mret_types[i as usize];
+                et = unsafe self.mret_types[i as usize];
             } else if tn >= 0 {
                 et = if_ty(i < tn as u32, targs[i as usize], TYPE_NONE);
             } else if i < returns.len {
@@ -9480,8 +9549,8 @@ extend TypeChecker {
         self.tc_flow_set(&pre);
         if self.ndefers < 256 {
             let k = self.ndefers;
-            self.defer_stack[k as usize] = dv;
-            self.defer_depth[k as usize] = self.scope_depth;
+            unsafe self.defer_stack[k as usize] = dv;
+            unsafe self.defer_depth[k as usize] = self.scope_depth;
             self.ndefers = k + 1;
         } else {
             let sp = unsafe (*a).at_const(id).span;
@@ -9614,9 +9683,9 @@ extend TypeChecker {
                     self.check_stmt(unsafe sp[i as usize]);
                     self.borrow_nll_drop(id, sp, i);
                 }
-                while self.ndefers != 0 && self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
+                while self.ndefers != 0 && unsafe self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
                     self.ndefers = self.ndefers - 1;
-                    let dv = self.defer_stack[self.ndefers as usize];
+                    let dv = unsafe self.defer_stack[self.ndefers as usize];
                     let dbm = self.borrow_mark();
                     self.check_expr(dv);
                     self.borrow_release_to(dbm);
@@ -9635,8 +9704,8 @@ extend TypeChecker {
                     self.tc_record_binding_depth(id);
                     if self.tuple_binds_reference(nm) && self.nborrows > bm {
                         for j in bm..self.nborrows {
-                            self.borrows[j as usize].binding = id;
-                            self.borrows[j as usize].region = self.scope_depth as u16;
+                            unsafe self.borrows[j as usize].binding = id;
+                            unsafe self.borrows[j as usize].region = self.scope_depth as u16;
                         }
                     } else {
                         self.borrow_release_to(bm);
@@ -9663,6 +9732,25 @@ extend TypeChecker {
                     binding = declared;
                 } else if valued {
                     binding = unsafe (*self.cur_ast()).type_of(value);
+                    // An array literal types with len 0 (unknown -- `compatible`'s extent sugar needs
+                    // that), so an INFERRED binding would lose its length and every index on it would
+                    // look unprovable to the raw-array unsafe gate: pin the literal's real extent here.
+                    if binding != TYPE_NONE && self.type_at(binding).kind == TypeKind::TYPE_ARRAY && self.type_at(
+                        binding,
+                    ).as_data.arr.len == 0 && unsafe (*a).at_const(value).kind == NodeKind::NODE_ARRAY_LITERAL {
+                        let mut sparse = false;
+                        let ext = self.tc_array_lit_extent(value, &mut sparse);
+                        if ext > 0 {
+                            let elem = self.type_at(binding).as_data.arr.elem;
+                            binding = unsafe (*self.cur_ast()).intern_type(
+                                Ty {
+                                    kind: TypeKind::TYPE_ARRAY,
+                                    as_data: TyAs { arr: TyArr { elem: elem, len: ext as u32 } },
+                                },
+                            );
+                            unsafe (*self.cur_ast()).set_type(value, binding);
+                        }
+                    }
                 } else {
                     let sp = self.name_span(nm);
                     self.errors.emit(
@@ -9687,8 +9775,8 @@ extend TypeChecker {
                 let binding_is_ref = binding != TYPE_NONE && self.type_at(binding).kind == TypeKind::TYPE_REFERENCE;
                 if binding_is_ref && self.nborrows > bm {
                     for k in bm..self.nborrows {
-                        self.borrows[k as usize].binding = id;
-                        self.borrows[k as usize].region = self.scope_depth as u16;
+                        unsafe self.borrows[k as usize].binding = id;
+                        unsafe self.borrows[k as usize].region = self.scope_depth as u16;
                     }
                 } else {
                     self.borrow_release_to(bm);
@@ -9758,30 +9846,30 @@ extend TypeChecker {
                     return;
                 }
                 unsafe (*self.cur_ast()).set_resolution(id, self.loop_stack[le as usize].node);
-                self.tc_note_resolution(id, self.loop_stack[le as usize].node);
+                self.tc_note_resolution(id, unsafe self.loop_stack[le as usize].node);
                 if nk != NodeKind::NODE_BREAK {
                     return;
                 }
                 let fv = unsafe (*self.cur_ast()).at_const(id).as_data.flow.value;
                 if fv == NODE_NONE {
-                    self.loop_stack[le as usize].saw_bare = true;
+                    unsafe self.loop_stack[le as usize].saw_bare = true;
                     return;
                 }
-                self.expected = self.loop_stack[le as usize].break_ty;
+                self.expected = unsafe self.loop_stack[le as usize].break_ty;
                 let vt = self.check_expr(fv);
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
-                if !self.loop_stack[le as usize].value_loop {
+                if !unsafe self.loop_stack[le as usize].value_loop {
                     self.errors.emit(
                         sp.start,
                         sp.end - sp.start,
                         format("'break' can only carry a value inside a 'loop' expression"),
                     );
-                } else if self.loop_stack[le as usize].break_ty == TYPE_NONE {
-                    self.loop_stack[le as usize].break_ty = vt;
-                } else if !self.compatible(self.loop_stack[le as usize].break_ty, fv) {
-                    self.err_mismatch(fv, self.loop_stack[le as usize].break_ty);
+                } else if unsafe self.loop_stack[le as usize].break_ty == TYPE_NONE {
+                    unsafe self.loop_stack[le as usize].break_ty = vt;
+                } else if !self.compatible(unsafe self.loop_stack[le as usize].break_ty, fv) {
+                    self.err_mismatch(fv, unsafe self.loop_stack[le as usize].break_ty);
                 }
-                self.loop_stack[le as usize].saw_value = true;
+                unsafe self.loop_stack[le as usize].saw_value = true;
                 self.tc_mark_move(fv);
             },
             _ => {},
@@ -10151,7 +10239,7 @@ extend TypeChecker {
                 self.current_returns = fnd.returns;
                 self.current_fn = id;
                 for mi in 0..self.nmoved {
-                    self.ms_bit_clear(self.moved[mi as usize]);
+                    self.ms_bit_clear(unsafe self.moved[mi as usize]);
                 }
                 self.nmoved = 0;
                 self.nuninit = 0;
@@ -10172,7 +10260,7 @@ extend TypeChecker {
                     }
                 }
                 for mi in 0..self.nmoved {
-                    self.ms_bit_clear(self.moved[mi as usize]);
+                    self.ms_bit_clear(unsafe self.moved[mi as usize]);
                 }
                 self.nmoved = 0;
                 self.nuninit = 0;
@@ -10334,7 +10422,7 @@ extend TypeChecker {
                     let mut g: u32 = 0;
                     while g < gens.len && g as u8 < it.n && ipn < 8 {
                         ip[ipn as usize] = DefId { module: it.module, node: unsafe (*ma).list(gens)[g as usize] };
-                        ia[ipn as usize] = it.args[g as usize];
+                        ia[ipn as usize] = unsafe it.args[g as usize];
                         ipn = ipn + 1;
                         g = g + 1;
                     }

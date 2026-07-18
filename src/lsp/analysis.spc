@@ -239,6 +239,19 @@ pub fn compile(
             let lw = lsp_lint_wanted(&mut p, i, root_file, lint_dir);
             lsp_typecheck_module(&mut p, i, lw, diags);
         }
+        // driver-parity post-typecheck phase: the always-panics check (an error) interprets
+        // cross-module `const fn` bodies, so it only runs once every module is typed
+        ceval.all_typed = true;
+        for i in 0..n {
+            if lsp_lint_wanted(&mut p, i, root_file, lint_dir) {
+                let mut errs = diag::Errors::new();
+                emit::check_always_panics_module(&mut p, i, &mut errs);
+                if errs.errors.len() != 0 {
+                    errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
+                    drain_errors(&errs, i as u32, diags);
+                }
+            }
+        }
     }
     p.ceval = null; // the stack ConstEval dies here; the Package outlives it
     return p;
