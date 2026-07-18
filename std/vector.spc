@@ -71,9 +71,18 @@ extend<T, A: Allocator> Vector<T, A> {
         return Option::<T>::Some(unsafe self.ptr[self.len]);
     }
 
-    // Unchecked element access (caller guarantees `index < len`). Borrows the element in place.
+    // Bounds-checked element access: panics when `index >= len`. Borrows the element in place.
     pub const fn at(self: &Vector<T, A>, index: usize) &T {
+        if index >= self.len {
+            panic("Vector::at: index out of bounds");
+        }
         return &unsafe self.ptr[index];
+    }
+
+    // Unchecked element access -- the caller PROVES `index < len` (hot loops with an established
+    // bound). Out of range is undefined behavior, hence `unsafe`.
+    pub unsafe const fn get_unsafe(self: &Vector<T, A>, index: usize) &T {
+        return &self.ptr[index];
     }
 
     // Bounds-checked element access -- borrows the element (`&T`) so the Vector keeps sole ownership.
@@ -85,6 +94,9 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 
     pub const fn set(self: &mut Vector<T, A>, index: usize, value: T) {
+        if index >= self.len {
+            panic("Vector::set: index out of bounds");
+        }
         unsafe self.ptr[index] = value;
     }
 

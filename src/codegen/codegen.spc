@@ -667,9 +667,9 @@ extend Codegen {
                 }
             }
             if (self.modpfx_set & bit) != 0 {
-                let ln = self.modpfx_len[m as usize] as usize;
+                let ln = (unsafe self.modpfx_len[m as usize]) as usize;
                 if ln + 1 <= cap {
-                    let off = self.modpfx_off[m as usize] as usize;
+                    let off = (unsafe self.modpfx_off[m as usize]) as usize;
                     unsafe cstring::memcpy(buf, &self.modpfx_buf[off], ln);
                     unsafe buf[ln] = 0 as char;
                     return ln;
@@ -911,11 +911,11 @@ extend Codegen {
                     o.push_byte(CG_PASTE as u8);
                 }
                 let mut e = Buf256 {};
-                self.macro_arg_token(it.args[i as usize], &mut e[0], 176);
+                self.macro_arg_token(unsafe it.args[i as usize], &mut e[0], 176);
                 o.push_str(str::from_cstr(&e[0]));
             } else {
                 o.push_str("__");
-                let e = self.mangle_type_s(self.subst_resolve(it.args[i as usize]));
+                let e = self.mangle_type_s(self.subst_resolve(unsafe it.args[i as usize]));
                 o.push_string(&e);
             }
         }
@@ -963,8 +963,8 @@ extend Codegen {
         self.nsubst = 0;
         let mut i: u32 = 0;
         while i < ig.len && i < inst.n as u32 && self.nsubst < 16 {
-            self.subst[self.nsubst as usize].param = DefId { module: inst.module, node: unsafe gids[i as usize] };
-            self.subst[self.nsubst as usize].concrete = inst.args[i as usize];
+            unsafe self.subst[self.nsubst as usize].param = DefId { module: inst.module, node: unsafe gids[i as usize] };
+            unsafe self.subst[self.nsubst as usize].concrete = unsafe inst.args[i as usize];
             self.nsubst = self.nsubst + 1;
             i = i + 1;
         }
@@ -1028,7 +1028,7 @@ extend Codegen {
         let inst = *unsafe (*self.cur_ast()).instance(dy.as_data.inst);
         let mut o = self.dyn_stem_s(inst.module, inst.decl);
         for i in 0..inst.n {
-            let e = self.mangle_type_s(inst.args[i as usize]);
+            let e = self.mangle_type_s(unsafe inst.args[i as usize]);
             o.push_str("__");
             o.push_string(&e);
         }
@@ -1112,7 +1112,7 @@ extend Codegen {
         }
         for i in 0..it.n {
             let gid = unsafe (*sa).list(gens)[i as usize];
-            let y = self.type_at(it.args[i as usize]);
+            let y = self.type_at(unsafe it.args[i as usize]);
             if y.kind != TypeKind::TYPE_GENERIC || y.as_data.decl != gid || y.module != self.macro_self_mod {
                 return false;
             }
@@ -1127,7 +1127,7 @@ extend Codegen {
         );
         if cacheable {
             for i in 0..it.n {
-                if !self.type_is_concrete(it.args[i as usize]) {
+                if !self.type_is_concrete(unsafe it.args[i as usize]) {
                     cacheable = false;
                 }
             }
@@ -1154,8 +1154,8 @@ extend Codegen {
     // ---- monomorphization substitution ----
     fn subst_lookup(self: &Self, m: ModuleId, decl: NodeId) TypeId {
         for i in 0..self.nsubst {
-            if self.subst[i as usize].param.module == m && self.subst[i as usize].param.node == decl {
-                return self.subst[i as usize].concrete;
+            if unsafe self.subst[i as usize].param.module == m && unsafe self.subst[i as usize].param.node == decl {
+                return unsafe self.subst[i as usize].concrete;
             }
         }
         return TYPE_NONE;
@@ -1186,8 +1186,8 @@ extend Codegen {
             let mut na = TyArgs8 {};
             let mut changed = false;
             for i in 0..src.n {
-                na[i as usize] = self.subst_resolve(src.args[i as usize]);
-                if na[i as usize] != src.args[i as usize] {
+                na[i as usize] = self.subst_resolve(unsafe src.args[i as usize]);
+                if na[i as usize] != unsafe src.args[i as usize] {
                     changed = true;
                 }
             }
@@ -1236,7 +1236,7 @@ extend Codegen {
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
             for i in 0..it.n {
-                if !self.type_is_concrete(it.args[i as usize]) {
+                if !self.type_is_concrete(unsafe it.args[i as usize]) {
                     return false;
                 }
             }
@@ -1288,10 +1288,10 @@ extend Codegen {
         switch self.inst_idx.get(&key) {
             Some(ix) => {
                 let i = (*ix) as usize;
-                if self.insts[i].func.module == fn2.module && self.insts[i].func.node == fn2.node && self.insts[i].n as i32 == n {
+                if unsafe self.insts[i].func.module == fn2.module && unsafe self.insts[i].func.node == fn2.node && (unsafe self.insts[i].n) as i32 == n {
                     let mut same = true;
                     for j in 0..n {
-                        if self.insts[i].args[j as usize] != unsafe args[j as usize] {
+                        if unsafe self.insts[i].args[j as usize] != unsafe args[j as usize] {
                             same = false;
                         }
                     }
@@ -1305,10 +1305,10 @@ extend Codegen {
         };
         if collide {
             for i in 0..self.ninsts {
-                if self.insts[i as usize].func.module == fn2.module && self.insts[i as usize].func.node == fn2.node && self.insts[i as usize].n as i32 == n {
+                if unsafe self.insts[i as usize].func.module == fn2.module && unsafe self.insts[i as usize].func.node == fn2.node && (unsafe self.insts[i as usize].n) as i32 == n {
                     let mut same = true;
                     for j in 0..n {
-                        if self.insts[i as usize].args[j as usize] != unsafe args[j as usize] {
+                        if unsafe self.insts[i as usize].args[j as usize] != unsafe args[j as usize] {
                             same = false;
                         }
                     }
@@ -1331,10 +1331,10 @@ extend Codegen {
             return;
         }
         let k = self.ninsts;
-        self.insts[k as usize].func = fn2;
-        self.insts[k as usize].n = n as u8;
+        unsafe self.insts[k as usize].func = fn2;
+        unsafe self.insts[k as usize].n = n as u8;
         for j in 0..n {
-            self.insts[k as usize].args[j as usize] = unsafe args[j as usize];
+            unsafe self.insts[k as usize].args[j as usize] = unsafe args[j as usize];
         }
         self.ninsts = k + 1;
         if !collide {
@@ -1363,7 +1363,7 @@ extend Codegen {
         } else if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
             for i in 0..it.n {
-                if self.cg_mentions_generic(it.args[i as usize], depth + 1) {
+                if self.cg_mentions_generic(unsafe it.args[i as usize], depth + 1) {
                     r = true;
                 }
             }
@@ -1410,11 +1410,11 @@ extend Codegen {
         while i < self.ninsts {
             let cur = i as usize;
             i += 1;
-            let fn2 = self.insts[cur].func;
-            let fn_n = self.insts[cur].n;
+            let fn2 = unsafe self.insts[cur].func;
+            let fn_n = unsafe self.insts[cur].n;
             let mut fargs = TyArgs8 {};
             for k in 0..fn_n {
-                fargs[k as usize] = self.insts[cur].args[k as usize];
+                fargs[k as usize] = unsafe self.insts[cur].args[k as usize];
             }
             let foreign = fn2.module != self.cur_module();
             if foreign && (self.package == null || fn2.module as usize >= self.pkg_count()) {
@@ -1441,8 +1441,8 @@ extend Codegen {
             while g < gens.len && g < fn_n as u32 && self.nsubst < 16 {
                 let gid = unsafe (*self.cur_ast()).list(gens)[g as usize];
                 let ns = self.nsubst;
-                self.subst[ns as usize].param = DefId { module: fn2.module, node: gid };
-                self.subst[ns as usize].concrete = fargs[g as usize];
+                unsafe self.subst[ns as usize].param = DefId { module: fn2.module, node: gid };
+                unsafe self.subst[ns as usize].concrete = fargs[g as usize];
                 self.nsubst = ns + 1;
                 g = g + 1;
             }
@@ -2294,7 +2294,7 @@ extend Codegen {
         let mut i: u32 = 0;
         while i < gens.len && i as u8 < ii.n {
             let gid = unsafe (*ia).list(gens)[i as usize];
-            if self.cg_param_has_free_bound(ext.module, gid) && !self.cg_type_is_free(ii.args[i as usize]) {
+            if self.cg_param_has_free_bound(ext.module, gid) && !self.cg_type_is_free(unsafe ii.args[i as usize]) {
                 return false;
             }
             i = i + 1;
@@ -2306,7 +2306,7 @@ extend Codegen {
             return unsafe self.moved_stamp[decl as usize] == self.move_epoch;
         }
         for i in 0..self.nmoved {
-            if self.moved[i as usize] == decl {
+            if unsafe self.moved[i as usize] == decl {
                 return true;
             }
         }
@@ -2317,7 +2317,7 @@ extend Codegen {
             return unsafe self.cond_stamp[decl as usize] == self.move_epoch;
         }
         for i in 0..self.ncond_moved {
-            if self.cond_moved[i as usize] == decl {
+            if unsafe self.cond_moved[i as usize] == decl {
                 return true;
             }
         }
@@ -2354,7 +2354,7 @@ extend Codegen {
     }
     fn cg_is_cond_site(self: &Self, expr: NodeId) bool {
         for i in 0..self.ncond_sites {
-            if self.cond_sites[i as usize] == expr {
+            if unsafe self.cond_sites[i as usize] == expr {
                 return true;
             }
         }
@@ -3485,7 +3485,7 @@ extend Codegen {
     }
     fn cb_record(self: &mut Self, fn2: DefId, param: NodeId, cbidx: u32, callee: DefId, is_closure: bool) {
         for i in 0..self.n_cb_insts {
-            let ci = self.cb_insts[i as usize];
+            let ci = unsafe self.cb_insts[i as usize];
             if ci.func.node == fn2.node && ci.func.module == fn2.module && ci.callee.node == callee.node && ci.callee.module == callee.module && ci.callee_closure == is_closure {
                 return;
             }
@@ -3493,21 +3493,21 @@ extend Codegen {
         if self.n_cb_insts >= 256 {
             return;
         }
-        self.cb_insts[self.n_cb_insts as usize].func = fn2;
-        self.cb_insts[self.n_cb_insts as usize].param = param;
-        self.cb_insts[self.n_cb_insts as usize].cbidx = cbidx;
-        self.cb_insts[self.n_cb_insts as usize].callee = callee;
-        self.cb_insts[self.n_cb_insts as usize].callee_closure = is_closure;
+        unsafe self.cb_insts[self.n_cb_insts as usize].func = fn2;
+        unsafe self.cb_insts[self.n_cb_insts as usize].param = param;
+        unsafe self.cb_insts[self.n_cb_insts as usize].cbidx = cbidx;
+        unsafe self.cb_insts[self.n_cb_insts as usize].callee = callee;
+        unsafe self.cb_insts[self.n_cb_insts as usize].callee_closure = is_closure;
         self.n_cb_insts = self.n_cb_insts + 1;
     }
     fn cb_keep(self: &mut Self, fn2: NodeId) {
         for i in 0..self.n_cb_keep {
-            if self.cb_keep_fns[i as usize] == fn2 {
+            if unsafe self.cb_keep_fns[i as usize] == fn2 {
                 return;
             }
         }
         if self.n_cb_keep < 128 {
-            self.cb_keep_fns[self.n_cb_keep as usize] = fn2;
+            unsafe self.cb_keep_fns[self.n_cb_keep as usize] = fn2;
             self.n_cb_keep = self.n_cb_keep + 1;
         }
     }
@@ -4125,8 +4125,8 @@ extend Codegen {
         if callee.kind == NodeKind::NODE_IDENTIFIER {
             let fn2 = unsafe (*self.cur_ast()).resolution_def(callee_id);
             for k in 0..self.n_cb_insts {
-                if self.cb_insts[k as usize].func.node == fn2.node && self.cb_insts[k as usize].func.module == fn2.module {
-                    let cbidx = self.cb_insts[k as usize].cbidx;
+                if unsafe self.cb_insts[k as usize].func.node == fn2.node && unsafe self.cb_insts[k as usize].func.module == fn2.module {
+                    let cbidx = unsafe self.cb_insts[k as usize].cbidx;
                     let mut ac = DefId { module: 0, node: NODE_NONE };
                     let mut acclo = false;
                     let mut known = false;
@@ -4137,7 +4137,7 @@ extend Codegen {
                             &mut acclo,
                         );
                     }
-                    if known && ac.node == self.cb_insts[k as usize].callee.node && ac.module == self.cb_insts[k as usize].callee.module {
+                    if known && ac.node == unsafe self.cb_insts[k as usize].callee.node && ac.module == unsafe self.cb_insts[k as usize].callee.module {
                         let mut nm = Buf256 {};
                         self.cb_spec_name(fn2, ac, acclo, &mut nm[0], 260);
                         self.emit_cstr(&nm[0]);
@@ -4686,7 +4686,7 @@ extend Codegen {
                 let top = le < 0 || le as u32 == self.nloops - 1;
                 let mut dbase = self.loop_defer_base;
                 if le >= 0 {
-                    dbase = self.loop_stack[le as usize].defer_base;
+                    dbase = unsafe self.loop_stack[le as usize].defer_base;
                 }
                 let mut value = NODE_NONE;
                 if is_brk {
@@ -4713,9 +4713,9 @@ extend Codegen {
                 }
                 self.emit_str("{\n");
                 self.depth = self.depth + 1;
-                if value != NODE_NONE && le >= 0 && self.loop_stack[le as usize].is_expr {
+                if value != NODE_NONE && le >= 0 && unsafe self.loop_stack[le as usize].is_expr {
                     self.emit_indent();
-                    self.buf.format_into("__lv{} = ", self.loop_stack[le as usize].seq);
+                    self.buf.format_into("__lv{} = ", unsafe self.loop_stack[le as usize].seq);
                     self.emit_expr(value);
                     self.emit_str(";\n");
                 }
@@ -4724,11 +4724,11 @@ extend Codegen {
                 if top {
                     self.buf.format_into("{};\n", diag::cstr(kw));
                 } else if is_brk {
-                    self.loop_stack[le as usize].used_brk = true;
-                    self.buf.format_into("goto __brk{};\n", self.loop_stack[le as usize].seq);
+                    unsafe self.loop_stack[le as usize].used_brk = true;
+                    self.buf.format_into("goto __brk{};\n", unsafe self.loop_stack[le as usize].seq);
                 } else {
-                    self.loop_stack[le as usize].used_cnt = true;
-                    self.buf.format_into("goto __cnt{};\n", self.loop_stack[le as usize].seq);
+                    unsafe self.loop_stack[le as usize].used_cnt = true;
+                    self.buf.format_into("goto __cnt{};\n", unsafe self.loop_stack[le as usize].seq);
                 }
                 self.depth = self.depth - 1;
                 self.emit_indent();
@@ -4743,8 +4743,8 @@ extend Codegen {
                     );
                 } else {
                     let t = self.defer_top;
-                    self.defer_kind[t as usize] = 0;
-                    self.defer_stack[t as usize] = n.as_data.single.value;
+                    unsafe self.defer_kind[t as usize] = 0;
+                    unsafe self.defer_stack[t as usize] = n.as_data.single.value;
                     self.defer_top = t + 1;
                 }
             },
@@ -4974,9 +4974,9 @@ extend Codegen {
     fn cg_loop_body_tail(self: &mut Self, dbase: u32, le: i32) {
         self.emit_defers_to(dbase);
         self.defer_top = dbase;
-        if le >= 0 && self.loop_stack[le as usize].used_cnt {
+        if le >= 0 && unsafe self.loop_stack[le as usize].used_cnt {
             self.emit_indent();
-            self.buf.format_into("__cnt{}:;\n", self.loop_stack[le as usize].seq);
+            self.buf.format_into("__cnt{}:;\n", unsafe self.loop_stack[le as usize].seq);
         }
     }
     fn emit_for_range(self: &mut Self, id: NodeId) {
@@ -5592,8 +5592,8 @@ extend Codegen {
             return;
         }
         let t = self.defer_top;
-        self.defer_stack[t as usize] = id;
-        self.defer_kind[t as usize] = 1;
+        unsafe self.defer_stack[t as usize] = id;
+        unsafe self.defer_kind[t as usize] = 1;
         self.defer_top = t + 1;
     }
     fn emit_capture_init(self: &mut Self, clos: NodeId, idx: u32) {
@@ -5672,7 +5672,7 @@ extend Codegen {
         // become replay events so the moved[]-suppression sees the complete set (the old pass 1).
         if !cond || dk == NodeKind::NODE_PATTERN_NAME {
             if self.nmoved < 512 {
-                self.moved[self.nmoved as usize] = d.node;
+                unsafe self.moved[self.nmoved as usize] = d.node;
                 self.nmoved = self.nmoved + 1;
                 if d.node as usize < self.stamp_cap {
                     unsafe self.moved_stamp[d.node as usize] = self.move_epoch;
@@ -5845,7 +5845,7 @@ extend Codegen {
                 // event (flag bit1 = closure; replay pushes the closure site once per group).
                 if !cond || patb {
                     if self.nmoved < 512 {
-                        self.moved[self.nmoved as usize] = decl;
+                        unsafe self.moved[self.nmoved as usize] = decl;
                         self.nmoved = self.nmoved + 1;
                         if decl as usize < self.stamp_cap {
                             unsafe self.moved_stamp[decl as usize] = self.move_epoch;
@@ -5892,14 +5892,14 @@ extend Codegen {
                     continue;
                 }
                 if !self.cg_is_cond_moved(ev.decl) && self.ncond_moved < 256 {
-                    self.cond_moved[self.ncond_moved as usize] = ev.decl;
+                    unsafe self.cond_moved[self.ncond_moved as usize] = ev.decl;
                     self.ncond_moved = self.ncond_moved + 1;
                     if ev.decl as usize < self.stamp_cap {
                         unsafe self.cond_stamp[ev.decl as usize] = self.move_epoch;
                     }
                 }
                 if !clos_pushed && self.ncond_sites < 256 {
-                    self.cond_sites[self.ncond_sites as usize] = ev.site;
+                    unsafe self.cond_sites[self.ncond_sites as usize] = ev.site;
                     self.ncond_sites = self.ncond_sites + 1;
                     clos_pushed = true;
                 }
@@ -5910,14 +5910,14 @@ extend Codegen {
                 continue;
             }
             if !self.cg_is_cond_moved(ev.decl) && self.ncond_moved < 256 {
-                self.cond_moved[self.ncond_moved as usize] = ev.decl;
+                unsafe self.cond_moved[self.ncond_moved as usize] = ev.decl;
                 self.ncond_moved = self.ncond_moved + 1;
                 if ev.decl as usize < self.stamp_cap {
                     unsafe self.cond_stamp[ev.decl as usize] = self.move_epoch;
                 }
             }
             if (ev.flags & 1) != 0 && self.ncond_sites < 256 {
-                self.cond_sites[self.ncond_sites as usize] = ev.site;
+                unsafe self.cond_sites[self.ncond_sites as usize] = ev.site;
                 self.ncond_sites = self.ncond_sites + 1;
             }
         }
@@ -7655,11 +7655,11 @@ extend Codegen {
         self.emit_str("for (;;) ");
         self.pending_cnt = (le + 1) as u32;
         self.emit_block(n.as_data.while_stmt.body);
-        if le >= 0 && self.loop_stack[le as usize].used_brk {
-            self.buf.format_into(" __brk{}:;", self.loop_stack[le as usize].seq);
+        if le >= 0 && unsafe self.loop_stack[le as usize].used_brk {
+            self.buf.format_into(" __brk{}:;", unsafe self.loop_stack[le as usize].seq);
         }
         if has_val && le >= 0 {
-            self.buf.format_into(" __lv{}; }})", self.loop_stack[le as usize].seq);
+            self.buf.format_into(" __lv{}; }})", unsafe self.loop_stack[le as usize].seq);
         } else {
             self.emit_str(" })");
         }
@@ -7687,7 +7687,7 @@ extend Codegen {
             return -1;
         }
         let k = self.nloops;
-        self.loop_stack[k as usize] = CgLoop {
+        unsafe self.loop_stack[k as usize] = CgLoop {
             node: node,
             defer_base: self.defer_top,
             seq: self.label_seq,
@@ -7707,7 +7707,7 @@ extend Codegen {
     fn cg_loop_find(self: &Self, node: NodeId) i32 {
         let mut i = self.nloops;
         while i > 0 {
-            if self.loop_stack[(i - 1) as usize].node == node {
+            if unsafe self.loop_stack[(i - 1) as usize].node == node {
                 return (i - 1) as i32;
             }
             i = i - 1;
@@ -7715,9 +7715,9 @@ extend Codegen {
         return -1;
     }
     fn cg_loop_brk_label(self: &mut Self, le: i32) {
-        if le >= 0 && self.loop_stack[le as usize].used_brk {
+        if le >= 0 && unsafe self.loop_stack[le as usize].used_brk {
             self.emit_indent();
-            self.buf.format_into("__brk{}:;\n", self.loop_stack[le as usize].seq);
+            self.buf.format_into("__brk{}:;\n", unsafe self.loop_stack[le as usize].seq);
         }
     }
     fn emit_defers_to(self: &mut Self, base: u32) {
@@ -7725,10 +7725,10 @@ extend Codegen {
         while i > base {
             i = i - 1;
             self.emit_indent();
-            if self.defer_kind[i as usize] == 1 {
-                self.emit_auto_free(self.defer_stack[i as usize]);
+            if unsafe self.defer_kind[i as usize] == 1 {
+                self.emit_auto_free(unsafe self.defer_stack[i as usize]);
             } else {
-                self.emit_expr_stmt(self.defer_stack[i as usize]);
+                self.emit_expr_stmt(unsafe self.defer_stack[i as usize]);
             }
         }
     }
@@ -7741,7 +7741,7 @@ extend Codegen {
         let mut i: u32 = 0;
         while i < self.nparam_flags {
             let mut fl = Buf32 {};
-            cg_move_flag(&mut fl[0], 32, self.param_flags[i as usize]);
+            cg_move_flag(&mut fl[0], 32, unsafe self.param_flags[i as usize]);
             self.emit_indent();
             self.buf.format_into("bool {} = false;\n", diag::cstr(&fl[0]));
             i = i + 1;
@@ -7778,9 +7778,9 @@ extend Codegen {
             self.emit_defers_to(dbase);
         }
         self.defer_top = dbase;
-        if cnt_hook != 0 && self.loop_stack[(cnt_hook - 1) as usize].used_cnt {
+        if cnt_hook != 0 && unsafe self.loop_stack[(cnt_hook - 1) as usize].used_cnt {
             self.emit_indent();
-            self.buf.format_into("__cnt{}:;\n", self.loop_stack[(cnt_hook - 1) as usize].seq);
+            self.buf.format_into("__cnt{}:;\n", unsafe self.loop_stack[(cnt_hook - 1) as usize].seq);
         }
         self.depth = self.depth - 1;
         self.emit_indent();
@@ -9550,11 +9550,11 @@ extend Codegen {
                 if self.cg_will_auto_free(pid) {
                     self.cg_register_auto_free(pid);
                     if self.cg_is_cond_moved(pid) && self.nparam_flags < 32 {
-                        self.param_flags[self.nparam_flags as usize] = pid;
+                        unsafe self.param_flags[self.nparam_flags as usize] = pid;
                         self.nparam_flags = self.nparam_flags + 1;
                     }
                 } else if !pused && self.nunused_params < 32 {
-                    self.unused_params[self.nunused_params as usize] = pid;
+                    unsafe self.unused_params[self.nunused_params as usize] = pid;
                     self.nunused_params = self.nunused_params + 1;
                 }
             }
@@ -9610,7 +9610,7 @@ extend Codegen {
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
             for i in 0..it.n {
-                if self.cg_type_mentions_fnval(it.args[i as usize]) {
+                if self.cg_type_mentions_fnval(unsafe it.args[i as usize]) {
                     return true;
                 }
             }
@@ -9620,7 +9620,7 @@ extend Codegen {
     }
     fn inst_mentions_fnval(self: &Self, it: &TyInstance) bool {
         for i in 0..it.n {
-            if self.cg_type_mentions_fnval(it.args[i as usize]) {
+            if self.cg_type_mentions_fnval(unsafe it.args[i as usize]) {
                 return true;
             }
         }
@@ -9820,8 +9820,8 @@ extend Codegen {
         self.nsubst = 0;
         let mut i: u32 = 0;
         while i < ag.generics.len && i < it.n as u32 && self.nsubst < 16 {
-            self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[i as usize] };
-            self.subst[self.nsubst as usize].concrete = it.args[i as usize];
+            unsafe self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[i as usize] };
+            unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[i as usize];
             self.nsubst = self.nsubst + 1;
             i = i + 1;
         }
@@ -9866,8 +9866,8 @@ extend Codegen {
         self.nsubst = 0;
         let mut i: u32 = 0;
         while i < ag.generics.len && i < it.n as u32 && self.nsubst < 16 {
-            self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[i as usize] };
-            self.subst[self.nsubst as usize].concrete = it.args[i as usize];
+            unsafe self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[i as usize] };
+            unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[i as usize];
             self.nsubst = self.nsubst + 1;
             i = i + 1;
         }
@@ -9889,7 +9889,7 @@ extend Codegen {
             }
             let mut concrete = true;
             for k in 0..it.n {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -9989,7 +9989,7 @@ extend Codegen {
         let it = *unsafe (*self.cur_ast()).instance(idx);
         let mut concrete = true;
         for k in 0..it.n {
-            if !self.type_is_concrete(it.args[k as usize]) {
+            if !self.type_is_concrete(unsafe it.args[k as usize]) {
                 concrete = false;
             }
         }
@@ -10006,8 +10006,8 @@ extend Codegen {
         self.nsubst = 0;
         let mut g: u32 = 0;
         while g < ag.generics.len && g < it.n as u32 && self.nsubst < 16 {
-            self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[g as usize] };
-            self.subst[self.nsubst as usize].concrete = it.args[g as usize];
+            unsafe self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[g as usize] };
+            unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[g as usize];
             self.nsubst = self.nsubst + 1;
             g = g + 1;
         }
@@ -10089,7 +10089,7 @@ extend Codegen {
             let it = *unsafe (*self.cur_ast()).instance(i as u32);
             let mut concrete = true;
             for k in 0..it.n {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -10143,7 +10143,7 @@ extend Codegen {
             return false;
         }
         for k in 0..it.n {
-            if !self.type_is_concrete(it.args[k as usize]) {
+            if !self.type_is_concrete(unsafe it.args[k as usize]) {
                 return false;
             }
         }
@@ -10160,7 +10160,7 @@ extend Codegen {
             let mut i: u32 = 0;
             while i < gens.len && i < it.n as u32 {
                 if ty.module == it.module && ty.as_data.decl == unsafe gids[i as usize] {
-                    return it.args[i as usize];
+                    return unsafe it.args[i as usize];
                 }
                 i = i + 1;
             }
@@ -10181,7 +10181,7 @@ extend Codegen {
                 4 as u8;
             };
             for i in 0..nn {
-                na[i as usize] = self.rehome_subst_type(owner_mod, it, inst.args[i as usize]);
+                na[i as usize] = self.rehome_subst_type(owner_mod, it, unsafe inst.args[i as usize]);
             }
             return unsafe (*self.cur_ast()).intern_instance(inst.module, inst.decl, &na[0], nn);
         }
@@ -10195,7 +10195,7 @@ extend Codegen {
         let oninst = unsafe (*owner).instances.len();
         let mut oit = *it;
         for k in 0..it.n {
-            oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
+            unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
         }
         self.source = osrc;
         self.borrowed = true;
@@ -10350,7 +10350,7 @@ extend Codegen {
                 let it = *unsafe (*self.cur_ast()).instance(i as u32);
                 let mut concrete = true;
                 for k in 0..it.n {
-                    if !self.type_is_concrete(it.args[k as usize]) {
+                    if !self.type_is_concrete(unsafe it.args[k as usize]) {
                         concrete = false;
                     }
                 }
@@ -10469,11 +10469,11 @@ extend Codegen {
                 self.nsubst = 0;
                 let mut g: u32 = 0;
                 while g < gens.len && g < it.n as u32 && self.nsubst < 16 {
-                    self.subst[self.nsubst as usize].param = DefId {
+                    unsafe self.subst[self.nsubst as usize].param = DefId {
                         module: self.cur_module(),
                         node: unsafe gids[g as usize],
                     };
-                    self.subst[self.nsubst as usize].concrete = it.args[g as usize];
+                    unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[g as usize];
                     self.nsubst = self.nsubst + 1;
                     g = g + 1;
                 }
@@ -10517,15 +10517,15 @@ extend Codegen {
                     let mut mgi: u32 = 0;
                     while mgi < mg.len && mgi < minst.n as u32 && self.nsubst < 16 {
                         let ta = if mi_src == self.cur_ast() {
-                            minst.targs[mgi as usize];
+                            unsafe minst.targs[mgi as usize];
                         } else {
                             unsafe (*self.cur_ast()).reintern(unsafe &*mi_src, minst.targs[mgi as usize]);
                         };
-                        self.subst[self.nsubst as usize].param = DefId {
+                        unsafe self.subst[self.nsubst as usize].param = DefId {
                             module: self.cur_module(),
                             node: unsafe mgids[mgi as usize],
                         };
-                        self.subst[self.nsubst as usize].concrete = ta;
+                        unsafe self.subst[self.nsubst as usize].concrete = ta;
                         if self.cg_type_mentions_fnval(ta) {
                             fnval = true;
                         }
@@ -10546,7 +10546,7 @@ extend Codegen {
                     for gg in 0..minst.n {
                         a2 = bappend(&mut snm[0], 400, a2, "__".ptr() as *const char);
                         let tg = if mi_src == self.cur_ast() {
-                            minst.targs[gg as usize];
+                            unsafe minst.targs[gg as usize];
                         } else {
                             unsafe (*self.cur_ast()).reintern(unsafe &*mi_src, minst.targs[gg as usize]);
                         };
@@ -10578,7 +10578,7 @@ extend Codegen {
             }
             let mut concrete = true;
             for k in 0..it.n {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -10609,7 +10609,7 @@ extend Codegen {
             let oninst = unsafe (*owner).instances.len();
             let mut oit = it;
             for k in 0..it.n {
-                oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
+                unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
             }
             self.source = osrc;
             self.borrowed = true;
@@ -10636,7 +10636,7 @@ extend Codegen {
             }
             let mut concrete = true;
             for k in 0..it.n {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -10660,7 +10660,7 @@ extend Codegen {
             let oninst = unsafe (*owner).instances.len();
             let mut oit = it;
             for k2 in 0..it.n {
-                oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k2 as usize]);
+                unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k2 as usize]);
             }
             self.source = osrc;
             self.borrowed = true;
@@ -10677,11 +10677,11 @@ extend Codegen {
     }
     fn emit_specializations(self: &mut Self, with_body: bool) {
         for i in 0..self.ninsts {
-            let inst = self.insts[i as usize];
+            let inst = unsafe self.insts[i as usize];
             let fn2 = inst.func;
             let mut concrete = true;
             for k in 0..inst.n {
-                if !self.type_is_concrete(inst.args[k as usize]) {
+                if !self.type_is_concrete(unsafe inst.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -10694,8 +10694,11 @@ extend Codegen {
                 self.nsubst = 0;
                 let mut g: u32 = 0;
                 while g < gens.len && g < inst.n as u32 && self.nsubst < 16 {
-                    self.subst[self.nsubst as usize].param = DefId { module: fn2.module, node: unsafe gids[g as usize] };
-                    self.subst[self.nsubst as usize].concrete = inst.args[g as usize];
+                    unsafe self.subst[self.nsubst as usize].param = DefId {
+                        module: fn2.module,
+                        node: unsafe gids[g as usize],
+                    };
+                    unsafe self.subst[self.nsubst as usize].concrete = unsafe inst.args[g as usize];
                     self.nsubst = self.nsubst + 1;
                     g = g + 1;
                 }
@@ -10728,8 +10731,11 @@ extend Codegen {
             self.nsubst = 0;
             let mut g: u32 = 0;
             while g < gens.len && g < inst.n as u32 && self.nsubst < 16 {
-                self.subst[self.nsubst as usize].param = DefId { module: fn2.module, node: unsafe gids[g as usize] };
-                self.subst[self.nsubst as usize].concrete = oargs[g as usize];
+                unsafe self.subst[self.nsubst as usize].param = DefId {
+                    module: fn2.module,
+                    node: unsafe gids[g as usize],
+                };
+                unsafe self.subst[self.nsubst as usize].concrete = oargs[g as usize];
                 self.nsubst = self.nsubst + 1;
                 g = g + 1;
             }
@@ -11049,9 +11055,11 @@ extend Codegen {
         // function with at least one recorded specialization and no keep-marker).
         let mut ci: i32 = 0;
         while ci < self.n_cb_insts {
-            let fnId = self.cb_insts[ci as usize].func.node;
+            let fnId = unsafe self.cb_insts[ci as usize].func.node;
             ci = ci + 1;
-            if self.cb_insts[(ci - 1) as usize].func.module != self.cur_module() || self.cb_away.contains_key(&fnId) {
+            if unsafe self.cb_insts[(ci - 1) as usize].func.module != self.cur_module() || self.cb_away.contains_key(
+                &fnId,
+            ) {
                 continue;
             }
             let fk = unsafe (*self.cur_ast()).at_const(fnId).kind;
@@ -11060,7 +11068,7 @@ extend Codegen {
             }
             let mut kept = false;
             for j in 0..self.n_cb_keep {
-                if self.cb_keep_fns[j as usize] == fnId {
+                if unsafe self.cb_keep_fns[j as usize] == fnId {
                     kept = true;
                 }
             }
@@ -11071,7 +11079,7 @@ extend Codegen {
     }
     fn emit_callback_specializations(self: &mut Self, with_body: bool) {
         for i in 0..self.n_cb_insts {
-            let ci = self.cb_insts[i as usize];
+            let ci = unsafe self.cb_insts[i as usize];
             if ci.func.module != self.cur_module() {
                 continue;
             }
@@ -11606,7 +11614,7 @@ extend Codegen {
             }
             let mut concrete = true;
             for k in 0..it.n {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -11733,7 +11741,7 @@ extend Codegen {
                 if at2 == TYPE_NONE {
                     return TYPE_NONE;
                 }
-                args[ci as usize] = at2;
+                unsafe args[ci as usize] = at2;
             }
             return unsafe (*self.cur_ast()).intern_instance(unsafe (*g).dm, unsafe (*g).dn, &args[0], unsafe (*g).nargs);
         }
@@ -12230,13 +12238,18 @@ extend Codegen {
         for i in 0..np {
             let t = *unsafe (*self.cur_ast()).type_at(i as TypeId);
             if t.kind == TypeKind::TYPE_INSTANCE {
+                // owner-swap emission truncate()s `instances` back but interned pool Tys referencing
+                // the temporary slots remain: a stale id past the table is dead, not an error
+                if t.as_data.inst as usize >= unsafe (*self.cur_ast()).instances.len() {
+                    continue;
+                }
                 let it = *unsafe (*self.cur_ast()).instance(t.as_data.inst);
                 if it.module == cur || it.module as usize >= self.pkg_count() {
                     continue;
                 }
                 let mut concrete = true;
                 for k in 0..it.n {
-                    if !self.type_is_concrete(it.args[k as usize]) {
+                    if !self.type_is_concrete(unsafe it.args[k as usize]) {
                         concrete = false;
                     }
                 }
@@ -12353,7 +12366,7 @@ extend Codegen {
             let mut concrete = it.module as usize < nmod || it.module == cur;
             let mut k: u8 = 0;
             while k < it.n && concrete {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
                 k = k + 1;
@@ -12377,14 +12390,14 @@ extend Codegen {
                 let mut concrete = it.module as usize < nmod || it.module == cur;
                 let mut k: u8 = 0;
                 while k < it.n && concrete {
-                    if !self.type_is_concrete(it.args[k as usize]) {
+                    if !self.type_is_concrete(unsafe it.args[k as usize]) {
                         concrete = false;
                     }
                     k = k + 1;
                 }
                 let mut k2: u8 = 0;
                 while k2 < it.n && concrete && !need_core {
-                    if self.type_mentions_builtin(it.args[k2 as usize]) {
+                    if self.type_mentions_builtin(unsafe it.args[k2 as usize]) {
                         need_core = true;
                     }
                     k2 = k2 + 1;
@@ -12394,8 +12407,8 @@ extend Codegen {
             let mut ni: i32 = 0;
             while ni < self.ninsts && !need_core {
                 let mut k: u8 = 0;
-                while k < self.insts[ni as usize].n && !need_core {
-                    if self.type_mentions_builtin(self.insts[ni as usize].args[k as usize]) {
+                while k < unsafe self.insts[ni as usize].n && !need_core {
+                    if self.type_mentions_builtin(unsafe self.insts[ni as usize].args[k as usize]) {
                         need_core = true;
                     }
                     k = k + 1;
@@ -12465,7 +12478,7 @@ extend Codegen {
             let mut concrete = it.module as usize < nmod || it.module == cur;
             let mut k: u8 = 0;
             while k < it.n && concrete {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
                 k = k + 1;
@@ -12483,8 +12496,11 @@ extend Codegen {
                 self.nsubst = 0;
                 let mut g: u32 = 0;
                 while g < ag.generics.len && g < it.n as u32 && self.nsubst < 16 {
-                    self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[g as usize] };
-                    self.subst[self.nsubst as usize].concrete = it.args[g as usize];
+                    unsafe self.subst[self.nsubst as usize].param = DefId {
+                        module: it.module,
+                        node: unsafe gids[g as usize],
+                    };
+                    unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[g as usize];
                     self.nsubst = self.nsubst + 1;
                     g = g + 1;
                 }
@@ -12495,7 +12511,7 @@ extend Codegen {
                     unsafe want[it.module as usize] = true;
                 }
                 for k2 in 0..it.n {
-                    self.mark_layout_module(it.args[k2 as usize], want, nmod);
+                    self.mark_layout_module(unsafe it.args[k2 as usize], want, nmod);
                 }
             }
         }
@@ -13177,7 +13193,7 @@ extend Codegen {
             tdecl = it.decl;
             let mut k: u8 = 0;
             while k < it.n && in_ < 8 {
-                iargs[in_ as usize] = it.args[k as usize];
+                iargs[in_ as usize] = unsafe it.args[k as usize];
                 in_ = in_ + 1;
                 k = k + 1;
             }
@@ -13279,7 +13295,7 @@ extend Codegen {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
             let mut concrete = true;
             for i in 0..it.n {
-                if !self.type_is_concrete(it.args[i as usize]) {
+                if !self.type_is_concrete(unsafe it.args[i as usize]) {
                     concrete = false;
                 }
             }
@@ -13290,7 +13306,7 @@ extend Codegen {
                     changed = true;
                 }
                 for j in 0..it.n {
-                    if self.seed_type_instances_from_type(it.args[j as usize]) {
+                    if self.seed_type_instances_from_type(unsafe it.args[j as usize]) {
                         changed = true;
                     }
                 }
@@ -13348,7 +13364,7 @@ extend Codegen {
             }
             let mut concrete = true;
             for k in 0..it.n {
-                if !self.type_is_concrete(it.args[k as usize]) {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -13396,11 +13412,11 @@ extend Codegen {
                 self.nsubst = 0;
                 let mut g: u32 = 0;
                 while g < gens.len && g < it.n as u32 && self.nsubst < 16 {
-                    self.subst[self.nsubst as usize].param = DefId {
+                    unsafe self.subst[self.nsubst as usize].param = DefId {
                         module: self.cur_module(),
                         node: unsafe gids[g as usize],
                     };
-                    self.subst[self.nsubst as usize].concrete = it.args[g as usize];
+                    unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[g as usize];
                     self.nsubst = self.nsubst + 1;
                     g = g + 1;
                 }
@@ -13474,7 +13490,7 @@ extend Codegen {
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
             for i in 0..it.n {
-                if self.type_mentions_builtin(it.args[i as usize]) {
+                if self.type_mentions_builtin(unsafe it.args[i as usize]) {
                     return true;
                 }
             }

@@ -45,7 +45,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
     if y.kind == TypeKind::TYPE_INSTANCE {
         let it = *mod_ast_c(p, am).instance(y.as_data.inst);
         for i in 0..it.n {
-            if ast_type_mentions_builtin(p, am, it.args[i as usize]) {
+            if ast_type_mentions_builtin(p, am, unsafe it.args[i as usize]) {
                 return true;
             }
         }
@@ -85,10 +85,10 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
             }
         }
         for i in 0..it.n {
-            if mark_type_modules(p, am, it.args[i as usize], live) {
+            if mark_type_modules(p, am, unsafe it.args[i as usize], live) {
                 changed = true;
             }
-            if p.core_seeded && ast_type_mentions_builtin(p, am, it.args[i as usize]) {
+            if p.core_seeded && ast_type_mentions_builtin(p, am, unsafe it.args[i as usize]) {
                 if mark_live(live, np, p.core_module) {
                     changed = true;
                 }
@@ -155,10 +155,10 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
                     }
                 }
                 for k in 0..it.n {
-                    if mark_type_modules(p, m as ModuleId, it.args[k as usize], live) {
+                    if mark_type_modules(p, m as ModuleId, unsafe it.args[k as usize], live) {
                         changed = true;
                     }
-                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, it.args[k as usize]) {
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe it.args[k as usize]) {
                         if mark_live(live, n, p.core_module) {
                             changed = true;
                         }
@@ -169,10 +169,10 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             for moi in 0..nmo {
                 let mu = unsafe (*a).mono[moi];
                 for k in 0..mu.n {
-                    if mark_type_modules(p, m as ModuleId, mu.args[k as usize], live) {
+                    if mark_type_modules(p, m as ModuleId, unsafe mu.args[k as usize], live) {
                         changed = true;
                     }
-                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, mu.args[k as usize]) {
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe mu.args[k as usize]) {
                         if mark_live(live, n, p.core_module) {
                             changed = true;
                         }
@@ -186,10 +186,10 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
                     changed = true;
                 }
                 for k in 0..miu.n {
-                    if mark_type_modules(p, m as ModuleId, miu.targs[k as usize], live) {
+                    if mark_type_modules(p, m as ModuleId, unsafe miu.targs[k as usize], live) {
                         changed = true;
                     }
-                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, miu.targs[k as usize]) {
+                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe miu.targs[k as usize]) {
                         if mark_live(live, n, p.core_module) {
                             changed = true;
                         }
@@ -651,6 +651,80 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
     }
 }
 
+fn ap_is_test_fn(a: *const Ast, fnode: NodeId) bool {
+    for i in 0..unsafe (*a).attrs.len() {
+        let at = unsafe (*a).attrs.at(i);
+        if at.owner == fnode && (at.kind == AttrKind::ATTR_TEST as u8 || at.kind == AttrKind::ATTR_TEST_INIT as u8 || at.kind == AttrKind::ATTR_TEST_FREE as u8) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn ap_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId) {
+    if unsafe (*a).at_const(fnode).kind != NodeKind::NODE_FUNCTION || ap_is_test_fn(a, fnode) {
+        return;
+    }
+    let cev = p.ceval as *mut ce::ConstEval;
+    let hit = unsafe (*cev).ce_lint_body(m as ModuleId, fnode);
+    if hit != NODE_NONE {
+        let sp = unsafe (*a).at_const(hit).span;
+        if ce::ce_trap_is_ub(unsafe (*cev).ce_trap_kind_get()) {
+            errs.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("this statement is undefined behavior when executed: {}", unsafe (*cev).ce_trap_detail()),
+            );
+        } else {
+            errs.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("this statement always panics at runtime: {}", unsafe (*cev).ce_trap_detail()),
+            );
+        }
+    }
+}
+
+// Always-panics check (the `unconditional_panic` analog, an ERROR like the raw-array provable-OOB
+// gate -- the same proof one tier up). A DRIVER phase, after every module has typechecked: the
+// sweep interprets cross-module `const fn` bodies, whose types only exist once their module is
+// typed -- an inline per-module pass would silently fold nothing (module order). @test fns are
+// exempt (panicking on purpose is a feature there), as are explicit `panic(..)` calls (only a
+// panic reached THROUGH a `const fn` frame classifies -- see ce_lint_body).
+pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut diag::Errors) {
+    if p.ceval == null || !p.modules[m].has_ast {
+        return;
+    }
+    let a = mod_ast_c(p, m as ModuleId);
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+    for i in 0..items.len {
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
+            let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+            for j in 0..ms.len {
+                ap_check_fn(p, errs, a, m, unsafe (*a).list(ms)[j as usize]);
+            }
+        } else {
+            ap_check_fn(p, errs, a, m, iid);
+        }
+    }
+}
+
+fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
+            continue;
+        }
+        let mut errs = diag::Errors::new();
+        check_always_panics_module(p, m, &mut errs);
+        if errs.errors.len() != 0 {
+            p.ok = false;
+            errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+            errs.log();
+        }
+    }
+}
+
 // `super-c lint <root>`: resolve + typecheck the root's module closure with lints enabled for the
 // ROOT module only (each listed path is its own invocation, so shared imports don't warn twice),
 // then the unused-items pass restricted to the root. No code is emitted. Errors exit 1; warnings
@@ -682,11 +756,16 @@ pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize, fixes
     if !p.ok {
         return 1;
     }
-    // Report-only pass: skipped while `--fix` iterates (it yields no fixes and would print duplicates).
+    // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print duplicates).
     if fixes == null {
         lint_unused_items(p, lint_mod as i32);
+        let ceptr = p.ceval as *mut ce::ConstEval;
+        if ceptr != null {
+            unsafe (*ceptr).all_typed = true;
+        }
+        check_always_panics(p, lint_mod as i32);
     }
-    if p.lint_warnings != 0 {
+    if !p.ok || p.lint_warnings != 0 {
         return 1;
     }
     return 0;
@@ -717,6 +796,9 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     if ceptr != null {
         let pv = p as *mut loader::Package;
         unsafe (*ceptr).all_typed = true;
+        // an ERROR, not a lint: it runs on every build (user modules; std is gated by check.sh's
+        // explicit std lint invocations)
+        check_always_panics(p, -1);
         unsafe (*ceptr).flush_asserts(flush_assert_err, pv);
         unsafe (*ceptr).flush_consts(flush_const_err, pv);
     }

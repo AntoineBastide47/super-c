@@ -718,6 +718,56 @@ fn unsafe_enforcement() {
     h::expect_ok("pointer comparison stays safe", "fn f(a: *i32, b: *i32) bool { return a == b; }\n");
 }
 
+// Raw `[T; N]` indexing follows the raw-pointer rule: a runtime index is unsafe-gated, a
+// const-provable in-bounds index is safe, and a const-provable OOB index is a hard error.
+@test
+fn raw_array_index_gate() {
+    h::expect_err_msg(
+        "runtime index needs unsafe",
+        "fn f(i: usize) i32 { let a = [1, 2, 3]; return a[i]; }\n",
+        "indexing an array with a non-constant index requires an 'unsafe' block",
+    );
+    h::expect_ok("unsafe covers a runtime index", "fn f(i: usize) i32 { let a = [1, 2, 3]; return unsafe a[i]; }\n");
+    h::expect_ok(
+        "constant index in bounds stays safe (inferred literal binding keeps its extent)",
+        "fn f() i32 { let mut a = [1, 2, 3]; let x = &mut a[0]; *x = 4; return a[2]; }\n",
+    );
+    h::expect_err_msg(
+        "constant index out of bounds is a hard error",
+        "fn f() i32 { let a = [1, 2, 3]; return a[3]; }\n",
+        "index 3 is out of bounds for an array of length 3",
+    );
+    h::expect_err_msg(
+        "provable OOB is not unsafe-able",
+        "fn f() i32 { let a = [1, 2, 3]; return unsafe a[3]; }\n",
+        "index 3 is out of bounds for an array of length 3",
+    );
+    h::expect_err_msg(
+        "annotated binding length counts",
+        "fn f() i32 { let a: [i32; 2] = [1, 2]; return a[2]; }\n",
+        "index 2 is out of bounds for an array of length 2",
+    );
+    h::expect_err_msg(
+        "runtime range slice needs unsafe",
+        "fn f(n: usize) i32 { let a = [1, 2, 3]; let s: []i32 = a[0..n]; return s.get(0); }\n",
+        "slicing an array with a non-constant range requires an 'unsafe' block",
+    );
+    h::expect_ok(
+        "constant range slice in bounds stays safe",
+        "fn f() i32 { let a = [1, 2, 3]; let s: []i32 = a[0..2]; return s.get(1); }\n",
+    );
+    h::expect_err_msg(
+        "constant range out of bounds is a hard error",
+        "fn f() i32 { let a = [1, 2, 3]; let s: []i32 = a[1..=3]; return s.get(0); }\n",
+        "range [1, 4) is out of bounds for an array of length 3",
+    );
+    h::expect_err_msg(
+        "symbolic const-generic length is never provable",
+        "struct B<T, const N: usize> { pub b: [T; N] }\nfn main() i32 { let x = B::<i32, 4> { b: [1, 2, 3, 4] }; return x.b[0]; }\n",
+        "indexing an array with a non-constant index requires an 'unsafe' block",
+    );
+}
+
 @test
 fn closures() {
     h::expect_ok(

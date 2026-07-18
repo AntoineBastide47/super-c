@@ -1981,13 +1981,13 @@ extend Parser {
         while true {
             let cn = self.ast.at_const(cur);
             if n < 16 {
-                segs[n] = cn.as_data.member.member;
+                unsafe segs[n] = cn.as_data.member.member;
                 n = n + 1;
             }
             let o = cn.as_data.member.object;
             if self.ast.at_const(o).kind != NodeKind::NODE_MEMBER {
                 if n < 16 {
-                    segs[n] = o;
+                    unsafe segs[n] = o;
                     n = n + 1;
                 }
                 break;
@@ -1997,7 +1997,7 @@ extend Parser {
         let mark = self.ast.mark();
         while n > 0 {
             n = n - 1;
-            self.ast.push(segs[n]);
+            self.ast.push(unsafe segs[n]);
         }
         let parts = self.ast.commit(mark);
         return self.ast.add(
@@ -3092,12 +3092,12 @@ extend Parser {
         while i < lit.end() && k + 1 < sizeof([char; 24]) {
             let ch = self.source[i as usize];
             if ch != b'_' {
-                buf[k] = ch as char;
+                unsafe buf[k] = ch as char;
                 k = k + 1;
             }
             i = i + 1;
         }
-        buf[k] = 0 as char;
+        unsafe buf[k] = 0 as char;
         return (unsafe stdlib::strtoul(&buf[0], null, 0)) as u32;
     }
 

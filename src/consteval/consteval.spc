@@ -247,8 +247,8 @@ extend CeCallKey as Hash {
         h = (h ^ self.fn_id as u64) * 1099511628211u64;
         h = (h ^ self.nargs as u64) * 1099511628211u64;
         for i in 0..8 {
-            h = (h ^ self.kinds[i] as u64) * 1099511628211u64;
-            h = (h ^ self.bits[i] as u64) * 1099511628211u64;
+            h = (h ^ (unsafe self.kinds[i]) as u64) * 1099511628211u64;
+            h = (h ^ (unsafe self.bits[i]) as u64) * 1099511628211u64;
         }
         return h;
     }
@@ -260,7 +260,7 @@ extend CeCallKey as Eq {
             return false;
         }
         for i in 0..8 {
-            if self.kinds[i] != other.kinds[i] || self.bits[i] != other.bits[i] {
+            if unsafe self.kinds[i] != unsafe other.kinds[i] || unsafe self.bits[i] != unsafe other.bits[i] {
                 return false;
             }
         }
@@ -534,7 +534,7 @@ extend ConstEval {
             }
             self.trap_nframes = n as u8;
             for i in 0..n {
-                self.trap_stack[i as usize] = self.fstack[i as usize];
+                unsafe self.trap_stack[i as usize] = unsafe self.fstack[i as usize];
             }
         }
     }
@@ -984,7 +984,7 @@ extend ConstEval {
             let mut frame = LayoutEnv { parent: env, pmod: it.module, params: unsafe (*da).list(gens), argm: m, n: 0 };
             let mut i: u32 = 0;
             while i < gens.len && i as u8 < it.n && frame.n < 8 {
-                frame.args[frame.n as usize] = it.args[i as usize];
+                unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
                 frame.n = frame.n + 1;
                 i = i + 1;
             }
@@ -1056,15 +1056,15 @@ extend ConstEval {
         ];
         let mut parent: *const LayoutEnv = null;
         for i in 0..unsafe (*f).ng {
-            envs[i as usize] = LayoutEnv {
+            unsafe envs[i as usize] = LayoutEnv {
                 parent: parent,
                 pmod: unsafe (*f).pmod,
                 params: unsafe &(*f).params_g[i as usize],
                 argm: unsafe (*f).am[i as usize],
                 n: 1,
             };
-            envs[i as usize].args[0] = unsafe (*f).at[i as usize];
-            parent = &envs[i as usize];
+            unsafe envs[i as usize].args[0] = unsafe (*f).at[i as usize];
+            parent = &unsafe envs[i as usize];
         }
         return self.layout_of(m, t, parent, 0);
     }
@@ -1103,7 +1103,7 @@ extend ConstEval {
                 return false;
             }
             for i in 0..ia.n {
-                if !self.ce_teq(ma, ia.args[i as usize], mb, ib.args[i as usize]) {
+                if !self.ce_teq(ma, unsafe ia.args[i as usize], mb, unsafe ib.args[i as usize]) {
                     return false;
                 }
             }
@@ -1175,11 +1175,11 @@ extend ConstEval {
             let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
             let mut changed = false;
             for i in 0..it.n {
-                na[i as usize] = self.ce_subst_deep(f, m, it.args[i as usize], depth + 1);
-                if na[i as usize] == TYPE_NONE {
+                unsafe na[i as usize] = self.ce_subst_deep(f, m, unsafe it.args[i as usize], depth + 1);
+                if unsafe na[i as usize] == TYPE_NONE {
                     return TYPE_NONE;
                 }
-                if na[i as usize] != it.args[i as usize] {
+                if unsafe na[i as usize] != unsafe it.args[i as usize] {
                     changed = true;
                 }
             }
@@ -1215,9 +1215,11 @@ extend ConstEval {
             out.dn = it.decl;
             out.n = it.n;
             for i in 0..it.n {
-                out.am[i as usize] = m;
-                out.at[i as usize] = self.ce_subst_deep(f, m, it.args[i as usize], 0);
-                if out.at[i as usize] == TYPE_NONE || !unsafe (*self.ast_ptr(m)).type_concrete(out.at[i as usize]) {
+                unsafe out.am[i as usize] = m;
+                unsafe out.at[i as usize] = self.ce_subst_deep(f, m, unsafe it.args[i as usize], 0);
+                if unsafe out.at[i as usize] == TYPE_NONE || !unsafe (*self.ast_ptr(m)).type_concrete(
+                    out.at[i as usize],
+                ) {
                     return RecvRes { ok: false, r: out };
                 }
             }
@@ -3520,9 +3522,9 @@ extend ConstEval {
         let mut i: u32 = 0;
         while i < gens.len && i < r.n as u32 && g.ng as u32 < 8 {
             let ng = g.ng;
-            g.params_g[ng as usize] = unsafe gids[i as usize];
-            g.am[ng as usize] = r.am[i as usize];
-            g.at[ng as usize] = r.at[i as usize];
+            unsafe g.params_g[ng as usize] = unsafe gids[i as usize];
+            unsafe g.am[ng as usize] = unsafe r.am[i as usize];
+            unsafe g.at[ng as usize] = unsafe r.at[i as usize];
             g.ng = ng + 1;
             i = i + 1;
         }
@@ -3675,8 +3677,8 @@ extend ConstEval {
         unsafe (*self.obj_ptr(o)).dn = rr.r.dn;
         unsafe (*self.obj_ptr(o)).nargs = rr.r.n;
         for ci in 0..4 {
-            unsafe (*self.obj_ptr(o)).am[ci] = rr.r.am[ci];
-            unsafe (*self.obj_ptr(o)).at[ci] = rr.r.at[ci];
+            unsafe (*self.obj_ptr(o)).am[ci] = unsafe rr.r.am[ci];
+            unsafe (*self.obj_ptr(o)).at[ci] = unsafe rr.r.at[ci];
         }
         for i in 0..fields.len {
             let fid = unsafe (*a).list(fields)[i as usize];
@@ -3828,8 +3830,8 @@ extend ConstEval {
         unsafe (*self.obj_ptr(o)).dn = rr.r.dn;
         unsafe (*self.obj_ptr(o)).nargs = rr.r.n;
         for ci in 0..4 {
-            unsafe (*self.obj_ptr(o)).am[ci] = rr.r.am[ci];
-            unsafe (*self.obj_ptr(o)).at[ci] = rr.r.at[ci];
+            unsafe (*self.obj_ptr(o)).am[ci] = unsafe rr.r.am[ci];
+            unsafe (*self.obj_ptr(o)).at[ci] = unsafe rr.r.at[ci];
         }
         for i in 0..count {
             let el = unsafe (*a).list(elements)[i as usize];
@@ -4349,7 +4351,7 @@ extend ConstEval {
                     return xfail(f);
                 }
                 for i in 0..cr.n {
-                    vals[i as usize] = cr.vals[i as usize];
+                    unsafe vals[i as usize] = unsafe cr.vals[i as usize];
                 }
                 nvals = cr.n;
             }
@@ -4368,7 +4370,7 @@ extend ConstEval {
                     return Flow::Bail;
                 }
                 for i in 0..nbind {
-                    vals[i as usize] = unsafe (*self.obj_ptr(tv.as_data.p.obj)).slots[i as usize];
+                    unsafe vals[i as usize] = unsafe (*self.obj_ptr(tv.as_data.p.obj)).slots[i as usize];
                 }
                 nvals = nbind;
             }
@@ -4377,7 +4379,7 @@ extend ConstEval {
             }
             for i in 0..nbind {
                 let cid = unsafe (*a).list(children)[i as usize];
-                if vals[i as usize].kind == CV_NIL_K || !self.ce_bind(f, cid, vals[i as usize]) {
+                if unsafe vals[i as usize].kind == CV_NIL_K || !self.ce_bind(f, cid, unsafe vals[i as usize]) {
                     return xfail(f);
                 }
             }
@@ -5300,7 +5302,7 @@ extend ConstEval {
             if unsafe args[i as usize].kind != CV_FLOAT {
                 return out;
             }
-            inv[i as usize] = unsafe args[i as usize].as_data.f;
+            unsafe inv[i as usize] = unsafe args[i as usize].as_data.f;
         }
         let nv = diag::cstr(&name[0]);
         let mut v: f64 = 0.0;
@@ -5498,14 +5500,14 @@ extend ConstEval {
         let mut ck = CeCallKey { m: fm, fn_id: fnode, nargs: nargs as u8 };
         if cacheable {
             for i in 0..nargs {
-                ck.kinds[i as usize] = unsafe args[i as usize].kind;
-                ck.bits[i as usize] = unsafe args[i as usize].as_data.i;
+                unsafe ck.kinds[i as usize] = unsafe args[i as usize].kind;
+                unsafe ck.bits[i as usize] = unsafe args[i as usize].as_data.i;
             }
             switch self.calls.get(&ck) {
                 Some(hit) => {
                     out.n = hit.nrets;
                     for j in 0..hit.nrets {
-                        out.vals[j as usize] = hit.rets[j as usize];
+                        unsafe out.vals[j as usize] = unsafe hit.rets[j as usize];
                     }
                     out.ok = true;
                     return out;
@@ -5530,7 +5532,7 @@ extend ConstEval {
             }
         }
         self.invoke_ran = true;
-        self.fstack[self.nframes as usize] = CvFn { m: fm, fn_id: fnode };
+        unsafe self.fstack[self.nframes as usize] = CvFn { m: fm, fn_id: fnode };
         self.nframes = self.nframes + 1;
         let saved = self.depth;
         self.depth = 0;
@@ -5571,19 +5573,19 @@ extend ConstEval {
         }
         out.n = unsafe (*gp).nrets;
         for j in 0..unsafe (*gp).nrets {
-            out.vals[j as usize] = unsafe (*gp).rets[j as usize];
+            unsafe out.vals[j as usize] = unsafe (*gp).rets[j as usize];
         }
         if cacheable && out.n <= 8 {
             let mut pure = true;
             let mut k: u8 = 0;
             while pure && k < out.n {
-                pure = cv_is_scalar(out.vals[k as usize]);
+                pure = cv_is_scalar(unsafe out.vals[k as usize]);
                 k = k + 1;
             }
             if pure && self.calls.len() < CE_CALLS_MAX {
                 let mut hit = CeCallHit { nrets: out.n };
                 for z in 0..out.n {
-                    hit.rets[z as usize] = out.vals[z as usize];
+                    unsafe hit.rets[z as usize] = unsafe out.vals[z as usize];
                 }
                 self.calls.insert(ck, hit);
             }
@@ -5892,8 +5894,8 @@ extend ConstEval {
         if fkind == NodeKind::NODE_FUNCTION && unsafe (*self.ast_ptr(fam)).at_const(fnode).as_data.function.is_extern {
             let mut argv: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
             for i in 0..nargs {
-                argv[i as usize] = self.ev_rval(f, m, unsafe (*a).list(call_args)[i as usize]);
-                if argv[i as usize].kind == CV_NIL_K {
+                unsafe argv[i as usize] = self.ev_rval(f, m, unsafe (*a).list(call_args)[i as usize]);
+                if unsafe argv[i as usize].kind == CV_NIL_K {
                     return out;
                 }
             }
@@ -5934,15 +5936,15 @@ extend ConstEval {
                     recv_is_ptr = sk == TypeKind::TYPE_REFERENCE || sk == TypeKind::TYPE_POINTER;
                 }
                 if recv_is_ptr {
-                    argv[na as usize] = self.ev_in(f, m, recv_expr);
-                    if argv[na as usize].kind != CV_PTR {
+                    unsafe argv[na as usize] = self.ev_in(f, m, recv_expr);
+                    if unsafe argv[na as usize].kind != CV_PTR {
                         return out;
                     }
                 } else {
                     let was_pr = self.trap_mark();
                     let pr = self.ev_place(f, m, recv_expr);
                     if pr.ok {
-                        argv[na as usize] = pr.v;
+                        unsafe argv[na as usize] = pr.v;
                     } else {
                         self.trap_discard(was_pr);
                         let rv = self.ev_in(f, m, recv_expr);
@@ -5950,12 +5952,12 @@ extend ConstEval {
                         if rv.kind == CV_NIL_K || !tr.ok {
                             return out;
                         }
-                        argv[na as usize] = tr.v;
+                        unsafe argv[na as usize] = tr.v;
                     }
                 }
             } else {
-                argv[na as usize] = self.ev_rval(f, m, recv_expr);
-                if argv[na as usize].kind == CV_NIL_K {
+                unsafe argv[na as usize] = self.ev_rval(f, m, recv_expr);
+                if unsafe argv[na as usize].kind == CV_NIL_K {
                     return out;
                 }
             }
@@ -5980,7 +5982,7 @@ extend ConstEval {
                         cv_nil(),
                         cv_nil(),
                     ];
-                    ha[0] = argv[na as usize];
+                    ha[0] = unsafe argv[na as usize];
                     let hinv = self.ce_invoke(
                         unsafe (*du).method[hi as usize].module,
                         unsafe (*du).method[hi as usize].node,
@@ -5999,14 +6001,14 @@ extend ConstEval {
                     if !hinv.ok || hinv.n != 1 || hinv.vals[0].kind != CV_PTR {
                         return out;
                     }
-                    argv[na as usize] = hinv.vals[0];
+                    unsafe argv[na as usize] = hinv.vals[0];
                 }
                 if !want_ref {
-                    let lr = self.ce_loadp(argv[na as usize]);
+                    let lr = self.ce_loadp(unsafe argv[na as usize]);
                     if !lr.ok {
                         return out;
                     }
-                    argv[na as usize] = lr.v;
+                    unsafe argv[na as usize] = lr.v;
                 }
             }
             na = na + 1;
@@ -6014,8 +6016,8 @@ extend ConstEval {
             return out;
         }
         for i in 0..nargs {
-            argv[na as usize] = self.ev_in(f, m, unsafe (*a).list(call_args)[i as usize]);
-            if argv[na as usize].kind == CV_NIL_K {
+            unsafe argv[na as usize] = self.ev_in(f, m, unsafe (*a).list(call_args)[i as usize]);
+            if unsafe argv[na as usize].kind == CV_NIL_K {
                 return out;
             }
             na = na + 1;
@@ -6029,8 +6031,8 @@ extend ConstEval {
         if mu != null {
             let mut k: u8 = 0;
             while k < unsafe (*mu).n && k < 8 {
-                monom[nmono as usize] = m;
-                monot[nmono as usize] = self.ce_subst_deep(f, m, unsafe (*mu).args[k as usize], 0);
+                unsafe monom[nmono as usize] = m;
+                unsafe monot[nmono as usize] = self.ce_subst_deep(f, m, unsafe (*mu).args[k as usize], 0);
                 nmono = nmono + 1;
                 k = k + 1;
             }
@@ -6179,6 +6181,55 @@ extend ConstEval {
         return p;
     }
 
+    // Always-panics lint sweep (the `unconditional_panic` analog): interpret a runtime fn body's
+    // top-level statements in a fresh frame -- locals bind as their initializers fold, and the sweep
+    // ENDS at the first statement the interpreter cannot complete (params, runtime calls, budgets).
+    // Returns the statement whose evaluation traps DETERMINISTICALLY -- any UB, or a panic reached
+    // through a `const fn` frame (the checked-accessor class); an explicit user `panic(..)` stays
+    // silent, the same promotion rule as failed const-fn folds -- else NODE_NONE. The verdict is
+    // "always panics IF the function runs this far": statements execute sequentially, known control
+    // flow only.
+    pub fn ce_lint_body(self: &mut Self, m: ModuleId, fn_id: NodeId) NodeId {
+        if self.depth != 0 || self.nframes != 0 || m as usize >= self.nmods {
+            return NODE_NONE;
+        }
+        let a = self.ast_ptr(m);
+        let body = unsafe (*a).at_const(fn_id).as_data.function.body;
+        if body == NODE_NONE || unsafe (*a).at_const(body).kind != NodeKind::NODE_BLOCK {
+            return NODE_NONE;
+        }
+        self.steps = 0;
+        self.trap = "";
+        self.trap_kind = CE_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.trap_in_constfn = false;
+        self.ce_objs_reset();
+        let mut f = ce_frame_zero();
+        f.env = self.ce_obj_new(0);
+        if f.env == 0 {
+            self.ce_objs_reset();
+            return NODE_NONE;
+        }
+        // depth guard: a nested eval() of a module const must not think it is a TOP evaluation
+        // (it would reset the trap state and the object heap out from under our frame)
+        self.depth = 1;
+        let stmts = unsafe (*a).at_const(body).as_data.block.statements;
+        let mut hit = NODE_NONE;
+        for i in 0..stmts.len {
+            let sid = unsafe (*a).list(stmts)[i as usize];
+            let flow = self.exec_stmt(&mut f, m, sid);
+            if flow != Flow::Ok {
+                if ce_trap_is_ub(self.trap_kind) || self.trap_kind == CE_TRAP_PANIC && self.trap_in_constfn {
+                    hit = sid;
+                }
+                break;
+            }
+        }
+        self.depth = 0;
+        self.ce_objs_reset();
+        return hit;
+    }
+
     // "<msg> (call stack: outer -> ... -> inner; steps: N/limit)"; sections omitted when empty.
     pub fn ce_trap_detail(self: &mut Self) str {
         let t = self.trap;
@@ -6196,7 +6247,7 @@ extend ConstEval {
                 if i != nf - show {
                     p = self.db_push(p, " -> ");
                 }
-                let fv = self.trap_stack[i as usize];
+                let fv = unsafe self.trap_stack[i as usize];
                 let a = self.ast_ptr(fv.m);
                 if unsafe (*a).at_const(fv.fn_id).kind == NodeKind::NODE_FUNCTION {
                     let nm = self.name_text(fv.m, unsafe (*a).at_const(fv.fn_id).as_data.function.name);
@@ -6585,8 +6636,8 @@ extend ConstEval {
                 g.dn = unsafe (*op).dn;
                 g.nargs = unsafe (*op).nargs;
                 for ci in 0..4 {
-                    g.am[ci] = unsafe (*op).am[ci];
-                    g.at[ci] = unsafe (*op).at[ci];
+                    unsafe g.am[ci] = unsafe (*op).am[ci];
+                    unsafe g.at[ci] = unsafe (*op).at[ci];
                 }
                 let gens = unsafe (*self.ast_ptr(g.dm)).at_const(g.dn).as_data.aggregate.generics.len;
                 if standalone && gens != 0 && g.nargs == 0 {

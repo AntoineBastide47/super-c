@@ -133,7 +133,7 @@ fn builtin_index(src: str, s: tok::Span) i32 {
         "void",
     ];
     for i in 0..18 {
-        if span_is(src, s, names[i]) {
+        if span_is(src, s, unsafe names[i]) {
             return i;
         }
     }
@@ -459,7 +459,7 @@ extend Resolver {
                 bail = true;
                 go = false;
             } else {
-                chain[cc as usize] = curid;
+                unsafe chain[cc as usize] = curid;
                 cc = cc + 1;
                 let o = cn.as_data.member.object;
                 let on = self.ast.at_const(o);
@@ -482,9 +482,9 @@ extend Resolver {
         seg[0] = base;
         let mut i: u32 = 1;
         while i < nn {
-            let link = chain[(nn - 1 - i) as usize];
+            let link = unsafe chain[(nn - 1 - i) as usize];
             let mem = self.ast.at_const(link).as_data.member.member;
-            seg[i as usize] = mem;
+            unsafe seg[i as usize] = mem;
             i = i + 1;
         }
         let pkg = unsafe &*self.package;
@@ -495,9 +495,9 @@ extend Resolver {
         let mut plen: usize = 0;
         i = 0;
         while i < nn - 1 {
-            let s = self.name_span(seg[i as usize]);
-            lens[i as usize] = (s.end - s.start) as usize;
-            plen = plen + lens[i as usize];
+            let s = self.name_span(unsafe seg[i as usize]);
+            unsafe lens[i as usize] = (s.end - s.start) as usize;
+            plen = plen + unsafe lens[i as usize];
             if i != 0 {
                 plen = plen + 2;
             }
@@ -513,7 +513,7 @@ extend Resolver {
                 let mid = found as ModuleId;
                 if nn - m == 1 {
                     // module::decl -- a function (preferred) or type
-                    let dn = self.name_span(seg[m as usize]);
+                    let dn = self.name_span(unsafe seg[m as usize]);
                     let dnm = (unsafe (self.source.ptr() + dn.start as usize)) as *const char;
                     let dl = (dn.end - dn.start) as usize;
                     let mut decl = pkg.lookup(mid, str::from_raw(dnm as *const u8, dl), false);
@@ -538,7 +538,7 @@ extend Resolver {
                 } else if nn - m == 2 {
                     // module::Type::method -- record the Type
                     let chain1 = chain[1];
-                    let tspan = self.name_span(seg[m as usize]);
+                    let tspan = self.name_span(unsafe seg[m as usize]);
                     self.resolve_module_decl(chain1, mid, tspan, true, "type");
                     handled = true;
                 }
@@ -547,7 +547,7 @@ extend Resolver {
             if !done {
                 m = m - 1;
                 if m >= 1 {
-                    plen = plen - lens[m as usize] - 2;
+                    plen = plen - unsafe lens[m as usize] - 2;
                 }
             }
         }

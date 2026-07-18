@@ -332,7 +332,9 @@ fn literals() {
 
 @test
 fn const_generics() {
-    let CG: str = "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 { let a = Buff::<i32, 4> { b: [1, 2, 3, 4] }; let c = Buff::<u8, 2> { b: [1u8, 2u8] }; return a.b[0] + c.b[1] as i32 + a.cap() as i32; }\n";
+    // `[T; N]` with a symbolic N is never provably in bounds (N could be 0), so even constant
+    // indices on a const-generic array field take the raw-array unsafe gate.
+    let CG: str = "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 { let a = Buff::<i32, 4> { b: [1, 2, 3, 4] }; let c = Buff::<u8, 2> { b: [1u8, 2u8] }; return unsafe a.b[0] + unsafe c.b[1] as i32 + a.cap() as i32; }\n";
     // Distinct (type-arg, const-arg) tuples monomorphize to distinct C types...
     h::expect_c("const-generic instance name (i32, 4)", CG, "Buff__i32__4");
     h::expect_c("const-generic instance name (u8, 2)", CG, "Buff__u8__2");

@@ -20,13 +20,26 @@ extend<T> Slice<T> {
         return self.len == 0;
     }
 
-    // The element at `i` (no bounds check -- the caller guarantees `i < len`).
+    // The element at `i`, by value: panics when `i >= len`.
     pub const fn get(self: &Slice<T>, i: usize) T {
+        if i >= self.len {
+            panic("Slice::get: index out of bounds");
+        }
         return unsafe self.ptr[i];
     }
 
+    // Bounds-checked borrow: panics when `i >= len`.
     pub const fn at(self: &Slice<T>, i: usize) &T {
+        if i >= self.len {
+            panic("Slice::at: index out of bounds");
+        }
         return &unsafe self.ptr[i];
+    }
+
+    // Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
+    // range is undefined behavior, hence `unsafe`.
+    pub unsafe const fn get_unsafe(self: &Slice<T>, i: usize) &T {
+        return &self.ptr[i];
     }
 
     // Bounds-checked borrow: `Some(&elem)` when `i < len`, else `None`.
@@ -38,10 +51,16 @@ extend<T> Slice<T> {
     }
 
     pub const fn first(self: &Slice<T>) T {
+        if self.len == 0 {
+            panic("Slice::first on an empty slice");
+        }
         return unsafe self.ptr[0];
     }
 
     pub const fn last(self: &Slice<T>) T {
+        if self.len == 0 {
+            panic("Slice::last on an empty slice");
+        }
         return unsafe self.ptr[self.len - 1];
     }
 
@@ -66,12 +85,26 @@ extend<T> SliceMut<T> {
         return self.len == 0;
     }
 
+    // The element at `i`, by value: panics when `i >= len`.
     pub const fn get(self: &SliceMut<T>, i: usize) T {
+        if i >= self.len {
+            panic("SliceMut::get: index out of bounds");
+        }
         return unsafe self.ptr[i];
     }
 
+    // Bounds-checked borrow: panics when `i >= len`.
     pub const fn at(self: &SliceMut<T>, i: usize) &T {
+        if i >= self.len {
+            panic("SliceMut::at: index out of bounds");
+        }
         return &unsafe self.ptr[i];
+    }
+
+    // Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
+    // range is undefined behavior, hence `unsafe`.
+    pub unsafe const fn get_unsafe(self: &SliceMut<T>, i: usize) &T {
+        return &self.ptr[i];
     }
 
     // Bounds-checked shared borrow: `Some(&elem)` when `i < len`, else `None`.
@@ -82,18 +115,27 @@ extend<T> SliceMut<T> {
         return Option::<&T>::Some(&unsafe self.ptr[i]);
     }
 
-    // Overwrite the element at `i` (no bounds check -- the caller guarantees `i < len`). Takes `&self`: a
-    // `[]mut T` view grants element mutation through its internal `*mut T` regardless of the binding's
-    // mutability, exactly like the `s[i] = v` index-assignment it mirrors.
+    // Overwrite the element at `i`: panics when `i >= len`. Takes `&self`: a `[]mut T` view grants
+    // element mutation through its internal `*mut T` regardless of the binding's mutability, exactly
+    // like the `s[i] = v` index-assignment it mirrors.
     pub const fn set(self: &SliceMut<T>, i: usize, value: T) {
+        if i >= self.len {
+            panic("SliceMut::set: index out of bounds");
+        }
         unsafe self.ptr[i] = value;
     }
 
     pub const fn first(self: &SliceMut<T>) T {
+        if self.len == 0 {
+            panic("SliceMut::first on an empty slice");
+        }
         return unsafe self.ptr[0];
     }
 
     pub const fn last(self: &SliceMut<T>) T {
+        if self.len == 0 {
+            panic("SliceMut::last on an empty slice");
+        }
         return unsafe self.ptr[self.len - 1];
     }
 
@@ -110,7 +152,7 @@ extend<T> SliceMut<T> {
 
 // Index conformances. The `[]` operator on slice VALUES keeps its inline lowering (the compiler builds
 // the `{ptr,len}` view directly), so these exist for interface bounds (`fn f<C: Index<i32, []i32>>`) and
-// direct calls. Unchecked like the rest of the surface: the caller keeps `i`/the range within `len`.
+// direct calls. Bounds-checked (panic) like the rest of the surface; `get_unsafe` is the unchecked tier.
 // `index_range` honors the written bounds: `..=` includes `r.end`; an open end arrives as `len()`.
 extend<T> Slice<T> as Index<T, []T> {
     pub const fn index(self: &Slice<T>, i: usize) &T {

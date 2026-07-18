@@ -101,7 +101,7 @@ fn line_starts_crlf() {
 fn long_line_windowing() {
     let mut buf = Buf202 {};
     for i in 0..200 {
-        buf.b[i] = 'x' as char;
+        unsafe buf.b[i] = 'x' as char;
     }
     buf.b[200] = '\n' as char;
     let mut e = diag::Errors::new();
@@ -113,7 +113,7 @@ fn long_line_windowing() {
     // 150 x's in a row would mean no windowing; the 200-char line must be trimmed below that.
     let mut needle = Buf151 {};
     for k in 0..150 {
-        needle.b[k] = 'x' as char;
+        unsafe needle.b[k] = 'x' as char;
     }
     assert(!contains(&b, str::from_raw((&needle.b[0]) as *const u8, 150)), "long line windowed below 150 chars");
 }
