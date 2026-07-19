@@ -79,8 +79,11 @@ extend<T, const N: usize> Array<T, N> {
         unsafe memcpy(&mut self.data[0], src, n);
     }
 
-    // Exchange the elements at `i` and `j` (both must be in range).
+    // Exchange the elements at `i` and `j`: panics when either is out of range.
     pub const fn swap(self: &mut Array<T, N>, i: usize, j: usize) {
+        if i >= N || j >= N {
+            panic("Array::swap: index out of bounds");
+        }
         let p = (&mut unsafe self.data[0]) as *mut T;
         let tmp = unsafe p[i];
         unsafe p[i] = unsafe p[j];

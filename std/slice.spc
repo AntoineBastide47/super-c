@@ -20,12 +20,13 @@ extend<T> Slice<T> {
         return self.len == 0;
     }
 
-    // The element at `i`, by value: panics when `i >= len`.
-    pub const fn get(self: &Slice<T>, i: usize) T {
+    // Bounds-checked borrow of the element at `i`: panics when `i >= len`. Returns `&T` (not `T` by
+    // value): a by-value copy would duplicate ownership of a `Free` element and double-free it.
+    pub const fn get(self: &Slice<T>, i: usize) &T {
         if i >= self.len {
             panic("Slice::get: index out of bounds");
         }
-        return unsafe self.ptr[i];
+        return &unsafe self.ptr[i];
     }
 
     // Bounds-checked borrow: panics when `i >= len`.
@@ -50,18 +51,18 @@ extend<T> Slice<T> {
         return Option::<&T>::Some(&unsafe self.ptr[i]);
     }
 
-    pub const fn first(self: &Slice<T>) T {
+    pub const fn first(self: &Slice<T>) &T {
         if self.len == 0 {
             panic("Slice::first on an empty slice");
         }
-        return unsafe self.ptr[0];
+        return &unsafe self.ptr[0];
     }
 
-    pub const fn last(self: &Slice<T>) T {
+    pub const fn last(self: &Slice<T>) &T {
         if self.len == 0 {
             panic("Slice::last on an empty slice");
         }
-        return unsafe self.ptr[self.len - 1];
+        return &unsafe self.ptr[self.len - 1];
     }
 
     // A read-only pointer to the first element (the view's backing storage).
@@ -85,12 +86,13 @@ extend<T> SliceMut<T> {
         return self.len == 0;
     }
 
-    // The element at `i`, by value: panics when `i >= len`.
-    pub const fn get(self: &SliceMut<T>, i: usize) T {
+    // Bounds-checked borrow: panics when `i >= len`. Returns `&T` (not `T` by value) so a `Free`
+    // element is never copied out into a second owner.
+    pub const fn get(self: &SliceMut<T>, i: usize) &T {
         if i >= self.len {
             panic("SliceMut::get: index out of bounds");
         }
-        return unsafe self.ptr[i];
+        return &unsafe self.ptr[i];
     }
 
     // Bounds-checked borrow: panics when `i >= len`.
@@ -125,18 +127,18 @@ extend<T> SliceMut<T> {
         unsafe self.ptr[i] = value;
     }
 
-    pub const fn first(self: &SliceMut<T>) T {
+    pub const fn first(self: &SliceMut<T>) &T {
         if self.len == 0 {
             panic("SliceMut::first on an empty slice");
         }
-        return unsafe self.ptr[0];
+        return &unsafe self.ptr[0];
     }
 
-    pub const fn last(self: &SliceMut<T>) T {
+    pub const fn last(self: &SliceMut<T>) &T {
         if self.len == 0 {
             panic("SliceMut::last on an empty slice");
         }
-        return unsafe self.ptr[self.len - 1];
+        return &unsafe self.ptr[self.len - 1];
     }
 
     pub const fn as_ptr(self: &SliceMut<T>) *const T {

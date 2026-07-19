@@ -749,16 +749,16 @@ fn raw_array_index_gate() {
     );
     h::expect_err_msg(
         "runtime range slice needs unsafe",
-        "fn f(n: usize) i32 { let a = [1, 2, 3]; let s: []i32 = a[0..n]; return s.get(0); }\n",
+        "fn f(n: usize) i32 { let a = [1, 2, 3]; let s: []i32 = a[0..n]; return *s.get(0); }\n",
         "slicing an array with a non-constant range requires an 'unsafe' block",
     );
     h::expect_ok(
         "constant range slice in bounds stays safe",
-        "fn f() i32 { let a = [1, 2, 3]; let s: []i32 = a[0..2]; return s.get(1); }\n",
+        "fn f() i32 { let a = [1, 2, 3]; let s: []i32 = a[0..2]; return *s.get(1); }\n",
     );
     h::expect_err_msg(
         "constant range out of bounds is a hard error",
-        "fn f() i32 { let a = [1, 2, 3]; let s: []i32 = a[1..=3]; return s.get(0); }\n",
+        "fn f() i32 { let a = [1, 2, 3]; let s: []i32 = a[1..=3]; return *s.get(0); }\n",
         "range [1, 4) is out of bounds for an array of length 3",
     );
     h::expect_err_msg(
@@ -1511,6 +1511,44 @@ fn reference_comparison_by_value() {
     h::expect_ok(
         "casting the reference restores the address comparison",
         "fn main() i32 {\n    let mut a: i32 = 5;\n    let p: *mut i32 = &mut a;\n    if p == (&mut a) as *mut i32 { return 0; }\n    return 1;\n}\n",
+    );
+}
+
+// Memory-safety holes closed by the five local fixes (bug3/4/5/11/12 in test.spc). Each was a
+// program that compiled with zero `unsafe` yet corrupted memory; each now fails to typecheck.
+@test
+fn safety_holes_closed() {
+    // bug5: moving a Free value out of a dereference in safe code would double-free.
+    h::expect_err_msg(
+        "deref-copy of a &Free value is rejected",
+        "fn main() i32 {\n    let b = Box::<i32>::new(7);\n    let r = &b;\n    let stolen = *r;\n    return *stolen.get() + *b.get();\n}\n",
+        "cannot move a Free value out of a dereference",
+    );
+    // bug11: reading a reference-typed union field forges a reference from bytes.
+    h::expect_err_msg(
+        "reference-typed union field read requires unsafe",
+        "union U { pub i: i64, pub r: &i32 }\nfn main() i32 {\n    let mut u = U { i: 0 };\n    u.i = 4919;\n    let p = u.r;\n    return *p;\n}\n",
+        "accessing a reference-typed field of a union requires an 'unsafe' block",
+    );
+    // a raw *pointer* union field stays free (its deref is already gated separately).
+    h::expect_ok(
+        "raw-pointer union field read stays safe",
+        "union U { pub i: i64, pub p: *const i32 }\nfn main() i32 {\n    let u = U { i: 0 };\n    let q = u.p;\n    if q == null { return 0; }\n    return 1;\n}\n",
+    );
+    // bug3: a method returning &T on a TEMPORARY receiver borrows into a value that will not
+    // outlive the borrow (today: leaked to keep it alive) -- rejected; a named receiver is fine.
+    h::expect_err_msg(
+        "borrowing into a temporary receiver is rejected",
+        "fn mk() Vector<i32> {\n    let mut v = Vector::<i32>::new();\n    v.push(9);\n    return v;\n}\nfn main() i32 {\n    let r = mk().at(0);\n    return *r;\n}\n",
+        "cannot borrow into a temporary value",
+    );
+    h::expect_ok(
+        "a value-returning method on a temporary stays fine",
+        "fn mk() Vector<i32> {\n    let mut v = Vector::<i32>::new();\n    v.push(9);\n    return v;\n}\nfn main() i32 {\n    return mk().len() as i32;\n}\n",
+    );
+    h::expect_ok(
+        "borrowing through a named binding stays fine",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(9);\n    let r = v.at(0);\n    return *r;\n}\n",
     );
 }
 

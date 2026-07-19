@@ -311,7 +311,7 @@ fn g2() i32 {
   let mut x = Vector::<i32>::with_capacity(4);
   x.push(10); x.push(20); x.push(30);
   let w = x[1..3];
-  let r = (s.len() as i32) + s.get(4) + w.get(0) + w.get(1) + (w.len() as i32);
+  let r = (s.len() as i32) + *s.get(4) + *w.get(0) + *w.get(1) + (w.len() as i32);
   return r;
 }
 static_assert(g2() == 62, "slices + range indexing");
