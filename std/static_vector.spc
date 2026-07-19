@@ -122,6 +122,9 @@ extend<T, const N: usize> StaticVector<T, N> {
         if self.len == N {
             panic("StaticVector::insert on a full vector");
         }
+        if index > self.len {
+            panic("StaticVector::insert: index out of bounds");
+        }
         let p = (&mut unsafe self.data[0]) as *mut T;
         let mut i = self.len;
         while i > index {
@@ -148,8 +151,11 @@ extend<T, const N: usize> StaticVector<T, N> {
         return Option::<T>::Some(removed);
     }
 
-    // Exchange the elements at `i` and `j` (both must be in range).
+    // Exchange the elements at `i` and `j`: panics when either is out of range.
     pub const fn swap(self: &mut StaticVector<T, N>, i: usize, j: usize) {
+        if i >= self.len || j >= self.len {
+            panic("StaticVector::swap: index out of bounds");
+        }
         let p = (&mut unsafe self.data[0]) as *mut T;
         let tmp = unsafe p[i];
         unsafe p[i] = unsafe p[j];

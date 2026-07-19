@@ -4170,7 +4170,31 @@ extend TypeChecker {
                 break;
             }
         }
-        if unsafe (*a).at_const(expr).kind != NodeKind::NODE_IDENTIFIER {
+        // Moving a `Free` value out of a dereference (`*r`, or `base[i]` with base a reference) copies
+        // it out of storage this scope does not own -- a second owner that double-frees. Forbidden in
+        // SAFE code; `unsafe` blocks may do it (Vector::pop moves an element out of `*self.ptr[len]`
+        // after shrinking, taking responsibility for the ownership transfer).
+        let xk = unsafe (*a).at_const(expr).kind;
+        if self.unsafe_depth == 0 && self.tc_type_is_free(unsafe (*a).type_of(expr0)) {
+            let mut base = NODE_NONE;
+            if xk == NodeKind::NODE_UNARY && unsafe (*a).at_const(expr).as_data.unary.op == TokenType::Star {
+                base = unsafe (*a).at_const(expr).as_data.unary.operand;
+            } else if xk == NodeKind::NODE_INDEX {
+                base = unsafe (*a).at_const(expr).as_data.index.object;
+            }
+            if base != NODE_NONE {
+                let bt = unsafe (*a).type_of(base);
+                if bt != TYPE_NONE && (self.type_at(bt).kind == TypeKind::TYPE_REFERENCE || self.type_at(bt).kind == TypeKind::TYPE_POINTER) {
+                    let sp = unsafe (*a).at_const(expr).span;
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format("cannot move a Free value out of a dereference (it would be freed twice)"),
+                    );
+                }
+            }
+        }
+        if xk != NodeKind::NODE_IDENTIFIER {
             return;
         }
         let d = unsafe (*a).resolution_def(expr);
@@ -6636,6 +6660,25 @@ extend TypeChecker {
         let a = self.cur_ast();
         let mem = unsafe (*a).at_const(callee_id).as_data.member.member;
         let recv = unsafe (*a).at_const(callee_id).as_data.member.object;
+        // A method returning a reference borrows its receiver (elision). If the receiver is a
+        // TEMPORARY (an rvalue -- a call/constructor result, not a named place), the returned
+        // reference would outlive the temporary: today the temporary is kept alive to back it but
+        // never freed (leak), and any other lowering would dangle. Reject it -- bind the receiver to
+        // a variable first. (`self`-by-value methods return an owned value, not a borrow of a temp.)
+        let rvk = self.type_at(unsafe (*a).type_of(recv)).kind;
+        let recv_is_owned_temp = !self.is_place(recv) && rvk != TypeKind::TYPE_REFERENCE && rvk != TypeKind::TYPE_POINTER;
+        if returns.len == 1 && recv_is_owned_temp {
+            let fa0 = self.mod_ast(fmod);
+            let r0 = unsafe (*fa0).list(returns)[0];
+            if unsafe (*fa0).at_const(r0).kind == NodeKind::NODE_REFERENCE_TYPE {
+                let rsp = unsafe (*a).at_const(recv).span;
+                self.errors.emit(
+                    rsp.start,
+                    rsp.end - rsp.start,
+                    format("cannot borrow into a temporary value; bind it to a variable first"),
+                );
+            }
+        }
         let is_free = span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free");
         if is_free {
             let rty = *self.type_at(unsafe (*a).type_of(recv));
@@ -7346,6 +7389,7 @@ extend TypeChecker {
             }
             if fhit != NODE_NONE {
                 unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: bmod, node: fhit });
+                let fty = self.subst_type(self.decl_type_in(bmod, fhit), &gp[0], &ga[0], gn);
                 if unsafe (*self.mod_ast(bmod)).at_const(fhit).kind == NodeKind::NODE_FIELD {
                     self.check_field_visibility(bmod, fhit, bdecl, name);
                     // raw-pointer gate FIRST: tc_needs_unsafe() counts a use for the unnecessary-'unsafe'
@@ -7353,8 +7397,17 @@ extend TypeChecker {
                     if self.through_raw_pointer(obj) && self.tc_needs_unsafe() {
                         self.err_unsafe(unsafe (*a).at_const(id).span, "accessing a field through a raw pointer");
                     }
+                    // A reference-typed field of an untagged UNION overlaps every other field, so
+                    // accessing it materializes a `&T` from arbitrary bytes -- an int->reference
+                    // transmute. Gate it behind `unsafe` (a raw *pointer* field stays free: its
+                    // deref is already gated). is_union is on the aggregate decl.
+                    let fty_is_ref = fty != TYPE_NONE && self.type_at(fty).kind == TypeKind::TYPE_REFERENCE;
+                    let owner_is_union = unsafe (*self.mod_ast(bmod)).at_const(bdecl).as_data.aggregate.is_union;
+                    if fty_is_ref && owner_is_union && self.tc_needs_unsafe() {
+                        self.err_unsafe(unsafe (*a).at_const(id).span, "accessing a reference-typed field of a union");
+                    }
                 }
-                return self.subst_type(self.decl_type_in(bmod, fhit), &gp[0], &ga[0], gn);
+                return fty;
             }
             if prefer_method {
                 let dm = self.find_default_method(bmod, bdecl, name);
