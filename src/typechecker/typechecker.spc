@@ -2603,6 +2603,78 @@ extend TypeChecker {
         return res;
     }
 
+    // Method names codegen can synthesize calls to WITHOUT a type-checked call node (assert/format
+    // templates, auto-free, operator/index/for lowering, `?` conversions). Marks on these must stay
+    // unconditional -- they can be referenced from emitted C that no tc-visible caller explains.
+    fn tc_mark_always_root(self: &Self, d: DefId) bool {
+        let a = self.mod_ast(d.module);
+        let f = unsafe (*a).at_const(d.node);
+        if f.kind != NodeKind::NODE_FUNCTION {
+            return true;
+        }
+        let nm = unsafe (*a).at_const(f.as_data.function.name).as_data.name.text;
+        let s = self.mod_src(d.module);
+        return span_is(s, nm, "free") || span_is(s, nm, "eq") || span_is(s, nm, "cmp") || span_is(s, nm, "index") || span_is(
+            s,
+            nm,
+            "index_mut",
+        ) || span_is(s, nm, "index_range") || span_is(s, nm, "index_range_mut") || span_is(s, nm, "len") || span_is(
+            s,
+            nm,
+            "next",
+        ) || span_is(s, nm, "from") || span_is(s, nm, "try_from") || span_is(s, nm, "as_str") || span_is(s, nm, "new") || span_is(
+            s,
+            nm,
+            "print",
+        ) || span_is(s, nm, "eprint") || span_is(s, nm, "pad_at") || span_is(s, nm, "push_str") || span_is(
+            s,
+            nm,
+            "push_byte",
+        ) || span_is(s, nm, "push_bin") || span_is(s, nm, "push_hex") || span_is(s, nm, "push_hex_i64") || span_is(
+            s,
+            nm,
+            "push_i64",
+        ) || span_is(s, nm, "push_u64") || span_is(s, nm, "push_f64") || span_is(s, nm, "push_f64_prec") || span_is(
+            s,
+            nm,
+            "push_padded",
+        );
+    }
+    // Route a method-used mark through its calling context. Inside a non-generic method of a plain
+    // generic extend -- exactly the shape codegen's demand-gate prunes -- the mark becomes a
+    // caller->callee edge resolved after typechecking, so callees kept alive only by never-emitted
+    // methods are pruned too. Every other context (top-level code, conformance/interface methods,
+    // generic methods, @emit_macro targets: all emitted unconditionally) marks directly, as before.
+    fn tc_mark_method_used(self: &mut Self, d: DefId) {
+        if self.package == null {
+            return;
+        }
+        // Marks repeat heavily (memoized lookups re-fire them): once the callee is already used,
+        // both the direct mark and the edge are no-ops -- skip the context classification.
+        if unsafe (*self.package).method_used_get(d) {
+            return;
+        }
+        let cf = self.current_fn;
+        if cf != NODE_NONE {
+            let m = self.ast.module;
+            let ext = self.enclosing_extend(m, cf);
+            if ext != NODE_NONE {
+                let a = self.mod_ast(m);
+                let ed = unsafe (*a).at_const(ext).as_data.extend_def;
+                if ed.generics.len != 0 && ed.interface_type == NODE_NONE && ed.target_type != NODE_NONE && unsafe (*a).at_const(
+                    cf,
+                ).as_data.function.generics.len == 0 && !self.tc_mark_always_root(d) {
+                    let tg = self.tc_peel_target(unsafe (*a).resolution_def(ed.target_type));
+                    if tg.node != NODE_NONE && self.tc_attr(tg.module, tg.node, AttrKind::ATTR_EMIT_MACRO) == null {
+                        unsafe (*self.package).record_method_edge(DefId { module: m, node: cf }, d);
+                        return;
+                    }
+                }
+            }
+        }
+        unsafe (*self.package).mark_method_used(d);
+    }
+
     // Find a method named `name`/`lit` in an extend of (m,decl); marks it used. Searches the type's home
     // module, then the current module + imports.
     fn find_method_impl(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str) DefId {
@@ -2618,7 +2690,7 @@ extend TypeChecker {
             Some(v) => {
                 let d = DefId { module: (*v >> 32) as ModuleId, node: (*v) as NodeId };
                 if d.node != NODE_NONE {
-                    unsafe (*self.package).mark_method_used(d);
+                    self.tc_mark_method_used(d);
                 }
                 return d;
             },
@@ -2663,7 +2735,7 @@ extend TypeChecker {
                                     hit = spans_eq2(self.source, name, self.mod_src(mm), mname);
                                 }
                                 if hit {
-                                    unsafe (*self.package).mark_method_used(DefId { module: mm, node: mid });
+                                    self.tc_mark_method_used(DefId { module: mm, node: mid });
                                     return DefId { module: mm, node: mid };
                                 }
                             }
@@ -3390,7 +3462,7 @@ extend TypeChecker {
                             ) {
                                 let ps = mn.as_data.function.params;
                                 if ps.len == 1 && self.decl_type_in(mm, unsafe (*a).list(ps)[0]) == src {
-                                    unsafe (*self.package).mark_method_used(DefId { module: mm, node: mid });
+                                    self.tc_mark_method_used(DefId { module: mm, node: mid });
                                     return DefId { module: mm, node: mid };
                                 }
                             }

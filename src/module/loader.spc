@@ -51,6 +51,12 @@ pub struct Package {
     // Demand-driven method emission: method_used[module][node] set for every method referenced during
     // type-checking. Ragged: outer grown to module count, each inner grown to cover the node id.
     pub method_used: Vector<Vector<bool>>,
+    // Caller->callee references fired from inside bodies of methods that are THEMSELVES gated by
+    // method_used (non-generic methods of plain generic extends): deferred as packed
+    // ((module<<24|node) caller <<32 | callee) edges and resolved by finalize_method_used once
+    // every module has typechecked, so a method kept alive only by pruned callers is pruned too.
+    pub method_edges: Vector<u64>,
+    pub edge_seen: Set<u64>,
     // The compile-time evaluator (a *mut consteval::ConstEval, kept opaque here to avoid a type cycle);
     // owned by the driver, created after load, set before type-checking. Null in library/test use.
     pub ceval: *mut void,
@@ -406,6 +412,8 @@ extend Package {
             core_module: 0,
             core_seeded: false,
             method_used: Vector::<Vector<bool>>::new(),
+            method_edges: Vector::<u64>::new(),
+            edge_seen: Set::<u64>::new(),
             ceval: null,
             override_mod: 0xFFFF,
             override_ast: null,
@@ -640,6 +648,45 @@ extend Package {
             return false;
         }
         return inner[d.node as usize];
+    }
+
+    // A method reference from inside a gated (demand-emitted) method body: deferred, so the callee
+    // is only marked used if the caller is ultimately emitted. Ids that do not fit the packed key
+    // fall back to a direct mark (conservative, never under-marks).
+    pub fn record_method_edge(self: &mut Self, c: DefId, d: DefId) {
+        if d.node == NODE_NONE {
+            return;
+        }
+        if c.node == NODE_NONE || c.module as u32 >= 256 || c.node >= 16777216 || d.module as u32 >= 256 || d.node >= 16777216 {
+            self.mark_method_used(d);
+            return;
+        }
+        if self.method_used_get(d) {
+            return;
+        }
+        let key = (c.module as u64 << 24 | c.node as u64) << 32 | d.module as u64 << 24 | d.node as u64;
+        if !self.edge_seen.contains(&key) {
+            self.edge_seen.insert(key);
+            self.method_edges.push(key);
+        }
+    }
+
+    // Fixpoint over the deferred edges: an edge's callee is used once its caller is. Must run after
+    // every module has typechecked and before codegen consults method_used_get.
+    pub fn finalize_method_used(self: &mut Self) {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in 0..self.method_edges.len() {
+                let key = self.method_edges[i];
+                let c = DefId { module: (key >> 56) as ModuleId, node: (key >> 32) as NodeId & 16777215 };
+                let d = DefId { module: (key >> 24 & 255) as ModuleId, node: key as NodeId & 16777215 };
+                if !self.method_used_get(d) && self.method_used_get(c) {
+                    self.mark_method_used(d);
+                    changed = true;
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------------------------------
@@ -1086,6 +1133,8 @@ extend Package as Free {
         self.gen_root.free();
         self.std_root.free();
         self.method_used.free();
+        self.method_edges.free();
+        self.edge_seen.free();
         self.mod_refs.free();
         self.lk_index.free();
         self.lk_built.free();
@@ -1551,6 +1600,9 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
 
 // Owners emit the generic instances used across module boundaries: iterate to a fixpoint.
 pub fn package_propagate_instances(p: &mut Package) {
+    // Typechecking is done for every module here: resolve the deferred caller->callee method-use
+    // edges before codegen starts consulting method_used_get.
+    p.finalize_method_used();
     let n = p.modules.len();
     // Resolutions are final now; build the cross-module reference bitset once so module_imports (hot inside
     // instance_home_in, called per instance-arg here and in codegen) is an O(1) query, not a linear scan.
