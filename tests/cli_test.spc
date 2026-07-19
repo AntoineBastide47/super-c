@@ -521,7 +521,7 @@ fn main() i32 {
     let mut r = p.compile("genbv.spc");
     assert_eq(r.exit, 0);
     assert(
-        p.gen_has("genbv.h", "struct opt__opt__Opt__genbv__Bar {"),
+        p.gen_has("genbv.h", "struct opt__Opt__genbv__Bar {"),
         "instance full-monomorphized in the user module's header",
     );
     let mut cc = p.cc_build("");

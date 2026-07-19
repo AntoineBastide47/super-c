@@ -276,7 +276,7 @@ fn attributes() {
     h::expect_c(
         "always_inline",
         "@c.always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { return a(0); }\n",
-        "inline __attribute__((always_inline, unused))",
+        "inline __attribute__((always_inline))",
     );
     h::expect_c(
         "section + used",
