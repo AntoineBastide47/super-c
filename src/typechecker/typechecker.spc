@@ -5261,6 +5261,66 @@ extend TypeChecker {
         return false;
     }
 
+    // Does method parameter `pdecl` share a borrow-carrying TYPE VARIABLE with the receiver?
+    // This is the Rust argument-boundary rule that makes `Vector<&'a T>::push(&mut self, value: T)`
+    // reject a too-short borrow with NO "does it store" flag: `value: T` and the container's elements
+    // are the SAME `T`, so they share `T`'s region. When `T` is instantiated to a borrow-carrying type
+    // (`&i32`), the argument passed for `value` must outlive the receiver -- by variance, whether or
+    // not push actually stores it. Returns true when pdecl's declared type is exactly a generic
+    // parameter that the receiver aggregate instantiates with a borrow-carrying type.
+    // Cheap gate for the stored-borrow region tie: does the receiver INSTANCE have a directly
+    // reference-typed generic argument (`Vector<&T>`, `Map<K, &V>`, `Box<&T>`)? A fast pre-filter so
+    // the expensive per-parameter substitution runs only for the handful of container-of-references
+    // receivers, not on every method call. Deeper nesting (a struct field that is a reference) is not
+    // matched -- conservative: it can only miss, never over-reject.
+    fn tc_instance_has_ref_arg(self: &Self, recv_ty: TypeId) bool {
+        let s = self.strip(recv_ty);
+        if s == TYPE_NONE || self.type_at(s).kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *unsafe (*self.cur_ast()).instance(self.type_at(s).as_data.inst);
+        for k in 0..it.n {
+            if self.type_at(unsafe it.args[k as usize]).kind == TypeKind::TYPE_REFERENCE {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn tc_param_shares_recv_region(self: &mut Self, md: DefId, recv_ty: TypeId, idx: i32) bool {
+        let fa = self.mod_ast(md.module);
+        let fnn = unsafe (*fa).at_const(md.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.params.len as i32 <= idx {
+            return false;
+        }
+        let pdecl = unsafe (*fa).list(fnn.as_data.function.params)[idx as usize];
+        let ptyn = unsafe (*fa).at_const(pdecl).as_data.parameter.ty;
+        if ptyn == NODE_NONE {
+            return false;
+        }
+        // The DECLARED param type must be a bare type variable (`value: T`), not `&T` or a concrete
+        // type -- that is what shares its region with the container's elements. `x: &T` (as in
+        // `contains`) reads through a fresh reference and is excluded here.
+        let pt = self.lower_type_in(md.module, ptyn);
+        if pt == TYPE_NONE || self.type_at(pt).kind != TypeKind::TYPE_GENERIC {
+            return false;
+        }
+        // Exclude the method's OWN generic params: those (`fn map<U, F>(f: F)`) are not bound to the
+        // receiver, so their region is unrelated. Only a type variable inherited from the extend/type
+        // (`extend<T, A> Vector<T, A> { fn push(value: T) }`) shares the receiver's region.
+        let gdecl = self.type_at(pt).as_data.decl;
+        let gmod = self.type_at(pt).module;
+        let own = fnn.as_data.function.generics;
+        for k in 0..own.len {
+            if unsafe (*fa).list(own)[k as usize] == gdecl && gmod == md.module {
+                return false;
+            }
+        }
+        // Receiver-inherited type variable: is it a borrow-carrying type in THIS instantiation?
+        let subst = self.tc_method_param(recv_ty, md, idx);
+        return self.tc_type_carries_borrow(subst, 0);
+    }
+
     // Region-aware return check. `addr_escape` only recognizes a reference taken DIRECTLY of a local
     // or parameter (`return &x`). It misses a borrow that reaches the caller indirectly -- e.g.
     // `return b.get()` where `b` is a local `Box` (the reference points into b's heap cell, not into
@@ -6745,6 +6805,7 @@ extend TypeChecker {
             self.check_expr(aid);
             self.tc_mark_move(aid);
         }
+        let arg_end = self.nborrows; // borrows past here belong to the receiver, not the arguments
         if callee == TYPE_NONE {
             return TYPE_NONE;
         }
@@ -6885,6 +6946,49 @@ extend TypeChecker {
                 let rty = self.strip(unsafe (*a).type_of(recv_n));
                 if !self.tc_type_carries_borrow(rty, 0) {
                     self.borrow_create(recv_n, BORROW_SHARED, recv_n);
+                }
+            }
+        }
+        // A borrow passed into a parameter that SHARES a borrow-carrying type variable with the
+        // receiver (`Vector<&T>::push(value: T)`) must outlive the receiver. Tie that argument's
+        // borrow to the receiver's binding + region; the existing scope-exit check then reports a
+        // referent that dies while the container holding it lives on (bug6). No "is stored" guess --
+        // it is the type-variable share that carries the region, exactly as in Rust.
+        if pck == NodeKind::NODE_MEMBER && skip == 1 && params.len > 1 {
+            let recv_n = unsafe (*a).at_const(callee_id).as_data.member.object;
+            let recv_ty = if_ty(recv_n != NODE_NONE, unsafe (*a).type_of(recv_n), TYPE_NONE);
+            if recv_n != NODE_NONE && self.tc_instance_has_ref_arg(recv_ty) {
+                let mut recv_root = NODE_NONE;
+                if unsafe (*a).at_const(recv_n).kind == NodeKind::NODE_IDENTIFIER {
+                    let rd = unsafe (*a).resolution_def(recv_n);
+                    if rd.module == self.ast.module && rd.node != NODE_NONE {
+                        recv_root = rd.node;
+                    }
+                } else {
+                    recv_root = self.place_through_binding(recv_n);
+                }
+                let mdef = unsafe (*a).resolution_def(unsafe (*a).at_const(callee_id).as_data.member.member);
+                if recv_root != NODE_NONE && mdef.node != NODE_NONE {
+                    let mut stores = false;
+                    for pi in 1..params.len {
+                        if self.tc_param_shares_recv_region(mdef, recv_ty, pi as i32) {
+                            stores = true;
+                        }
+                    }
+                    // A stored borrow must outlive the receiver: tie this call's transient argument
+                    // borrows to the receiver's binding + region. The whole [arg_bm, arg_end) range is
+                    // used rather than per-argument marks (which cost a watermark on every call in the
+                    // program) -- the non-reference arguments of a storing method (`insert(index,
+                    // value)`) produce no borrows, so the range is the stored borrow(s) in practice.
+                    if stores {
+                        let rregion = self.tc_binding_depth(recv_root);
+                        for bi in arg_bm..arg_end {
+                            if unsafe self.borrows[bi as usize].binding == NODE_NONE && unsafe self.borrows[bi as usize].root != NODE_NONE {
+                                unsafe self.borrows[bi as usize].binding = recv_root;
+                                unsafe self.borrows[bi as usize].region = rregion as u16;
+                            }
+                        }
+                    }
                 }
             }
         }
