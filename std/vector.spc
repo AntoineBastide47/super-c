@@ -448,7 +448,7 @@ extend<T, A: Allocator> Vector<T, A> {
 }
 
 // A borrowing cursor over a Vector's elements. `for x in v.iter()` yields a borrow `&T` of each element.
-pub struct VecIter<T> {
+pub struct VecIter<'a, T> {
     pub data: *const T,
     pub idx: usize,
     pub stop: usize,

@@ -1770,3 +1770,126 @@ fn generic_with_lifetime_and_type_param() {
         "P__i32",
     );
 }
+
+// View types (`Slice<'a, T>`, `VecIter<'a, T>`) carry a lifetime just like `str`, so a `[]T` slice or
+// an iterator borrows its container and the container cannot be reallocated while the view is live.
+// nbug2 (`v[0..2]` held across a push) dispatches index_range inline, so check_index mints the
+// receiver borrow itself; nbug4 (`v.iter()` held across a push) rides the check_call result-borrow hook.
+@test
+fn view_types_pin_their_container() {
+    h::expect_err_msg(
+        "a []T slice held across a reallocating push is rejected (nbug2)",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let s: []i32 = v[0..2];\n    for i in 0..5000 {\n        v.push(i);\n    }\n    return *s.get(1);\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    h::expect_err_msg(
+        "a VecIter held across a reallocating push is rejected (nbug4)",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let mut it = v.iter();\n    for i in 0..5000 {\n        v.push(i);\n    }\n    return switch it.next() {\n        Some(x) => *x,\n        None => -1,\n    };\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // Controls: a view used and finished before any mutation is fine (the borrow has ended).
+    h::expect_ok(
+        "using a slice, then mutating, is fine",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let n = *v[0..2].get(1);\n    v.push(n);\n    return v.len() as i32 - 3;\n}\n",
+    );
+    h::expect_ok(
+        "immutable iteration is fine",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let mut s = 0;\n    for x in v.iter() {\n        s = s + *x;\n    }\n    return s - 3;\n}\n",
+    );
+}
+
+// nbug3: a closure captures its free variables by COPY into an environment that is ERASED to `dyn fn`,
+// so the captured borrow cannot be recovered from the stored type. check_closure re-exposes each
+// captured borrow; the store site (assignment / return / container push) ties it to the destination's
+// region so a closure outliving its captured referent fails scope exit.
+@test
+fn closure_capture_regions() {
+    h::expect_err_msg(
+        "a closure capturing &local, assigned to an outer slot, is rejected",
+        "fn main() i32 {\n    let seed = 1;\n    let mut slot: Box<dyn fn() i32> = || seed;\n    {\n        let local = 271;\n        let r = &local;\n        slot = || *r;\n    }\n    return slot();\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "returning a closure capturing a &local is rejected",
+        "fn make() Box<dyn fn() i32> {\n    let local = 5;\n    let r = &local;\n    return || *r;\n}\n",
+        "returning a value borrowing from a local",
+    );
+    h::expect_err_msg(
+        "pushing a closure capturing a &local into an outer container is rejected",
+        "fn main() i32 {\n    let mut store = Vector::<Box<dyn fn() i32>>::new();\n    {\n        let local = 9;\n        let r = &local;\n        store.push(|| *r);\n    }\n    return 0;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    // Controls: closures that do not outlive their captures still compile.
+    h::expect_ok(
+        "a closure capturing a ref in the same scope is fine",
+        "fn main() i32 {\n    let a = 10;\n    let ra = &a;\n    let g: Box<dyn fn() i32> = || *ra;\n    return g() - 10;\n}\n",
+    );
+    h::expect_ok(
+        "reassigning a closure capturing a ref that outlives the slot is fine",
+        "fn main() i32 {\n    let outer = 40;\n    let ro = &outer;\n    let mut s: Box<dyn fn() i32> = || 0;\n    {\n        s = || *ro;\n    }\n    return s() - 40;\n}\n",
+    );
+    h::expect_ok(
+        "a closure capturing by value into an outer slot is fine",
+        "fn main() i32 {\n    let mut slot: Box<dyn fn() i32> = || 0;\n    {\n        let local = 30;\n        slot = || local;\n    }\n    return slot() - 30;\n}\n",
+    );
+}
+
+// Adversarial round 3. A view REBORROW (a sub-slice `s[0..2]`, a `str` sub-view `sv.trim()`) must
+// INHERIT the receiver's borrow of the real container, not drop it -- otherwise the sub-view outlives
+// the container borrow and dangles once the intermediate view's own borrow ends. Both were
+// ASan-confirmed (heap-use-after-free) before this.
+@test
+fn view_reborrow_inherits_container() {
+    h::expect_err_msg(
+        "a sub-slice held across the parent Vector's realloc is rejected",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    v.push(3);\n    let s: []i32 = v[0..3];\n    let sub: []i32 = s[0..2];\n    for i in 0..5000 {\n        v.push(i);\n    }\n    return *sub.get(1);\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    h::expect_err_msg(
+        "a str sub-view held across the backing String's mutation is rejected",
+        "fn main() i32 {\n    let mut s = String::from_str(\"long enough to be heap allocated for sure yes ok\");\n    let sv = s.as_str();\n    let t = sv.trim();\n    s.push_byte(b'z');\n    return t.len() as i32;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // Control: a sub-slice finished before the mutation is fine.
+    h::expect_ok(
+        "a sub-slice used before mutating is fine",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    v.push(3);\n    let s: []i32 = v[0..3];\n    let n = *s[0..2].get(1);\n    v.push(n);\n    return v.len() as i32 - 4;\n}\n",
+    );
+}
+
+// Adversarial round 3, Family B. A borrow passed for a bare value parameter `x: T` that another
+// parameter STORES through (`&mut T` or `&mut C<..T..>`) must outlive that storage's referent -- the
+// argument-boundary variance rule across a PLAIN FUNCTION boundary (bug6 covered only a method
+// receiver). All three were ASan-confirmed (stack-use-after-scope) before this. Sound without any
+// annotation because the two parameters share the callee type variable.
+@test
+fn stored_borrow_through_function() {
+    h::expect_err_msg(
+        "a &local stored into an outer Vector via a generic fn is rejected",
+        "fn push_into<T>(v: &mut Vector<T>, x: T) { v.push(x); }\nfn main() i32 {\n    let mut outer = Vector::<&i32>::new();\n    {\n        let local = 5;\n        push_into(&mut outer, &local);\n    }\n    return **outer.at(0);\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a &local stored into an outer struct field via a generic fn is rejected",
+        "struct Cell<T> { pub val: T }\nfn set<T>(c: &mut Cell<T>, x: T) { c.val = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut c = Cell::<&i32> { val: &anchor };\n    {\n        let inner = 9;\n        set(&mut c, &inner);\n    }\n    return *c.val;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a &local stored through a &mut T slot via a generic fn is rejected",
+        "fn stash<T>(dst: &mut T, src: T) { *dst = src; }\nfn main() i32 {\n    let anchor = 1;\n    let mut slot: &i32 = &anchor;\n    {\n        let inner = 9;\n        stash(&mut slot, &inner);\n    }\n    return *slot;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    // Controls: values that outlive the container, and reads, must still compile.
+    h::expect_ok(
+        "storing borrows that outlive the container through a generic fn is fine",
+        "fn push_into<T>(v: &mut Vector<T>, x: T) { v.push(x); }\nfn main() i32 {\n    let a = 10;\n    let b = 20;\n    let mut refs = Vector::<&i32>::new();\n    push_into(&mut refs, &a);\n    push_into(&mut refs, &b);\n    return **refs.at(0) + **refs.at(1) - 30;\n}\n",
+    );
+    h::expect_ok(
+        "a generic fn that only reads its container does not over-reject",
+        "fn firstof<T>(v: &Vector<T>) usize { return v.len(); }\nfn main() i32 {\n    let x = 5;\n    let mut v = Vector::<&i32>::new();\n    v.push(&x);\n    {\n        let y = 9;\n        let n = firstof(&v);\n    }\n    return **v.at(0) - 5;\n}\n",
+    );
+    h::expect_ok(
+        "owned values through a generic store are unconstrained",
+        "fn push_into<T>(v: &mut Vector<T>, x: T) { v.push(x); }\nfn main() i32 {\n    let mut nums = Vector::<i32>::new();\n    {\n        let x = 5;\n        push_into(&mut nums, x);\n    }\n    return *nums.at(0) - 5;\n}\n",
+    );
+}
