@@ -1619,3 +1619,27 @@ fn laundered_borrow_retained() {
         "struct H { pub p: &i32 }\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let r = *H { p: v.at(0) }.p;\n    v.push(6);\n    return r - 5;\n}\n",
     );
 }
+
+// A method whose RESULT carries a borrow (not just a bare `&T`) borrows its receiver. The declared
+// return node cannot tell us this: `Map::get` is declared `Option<T>` and is only `Option<&V>` after
+// substitution at the call site, so the check runs on the RESOLVED type.
+@test
+fn borrow_carrying_result_borrows_receiver() {
+    // bug10: a &V into the bucket array held across a rehash.
+    h::expect_err_msg(
+        "inserting while a Map value borrow is live is rejected",
+        "fn main() i32 {\n    let mut m = Map::<i32, i64>::new();\n    m.insert(1, 5);\n    let r = m.get(&1).unwrap();\n    m.insert(2, 6);\n    return *r as i32;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // the Option itself counts -- the borrow is inside the generic argument
+    h::expect_err_msg(
+        "holding Option<&V> across an insert is rejected",
+        "fn main() i32 {\n    let mut m = Map::<i32, i64>::new();\n    m.insert(1, 5);\n    let o = m.get(&1);\n    m.insert(2, 6);\n    return switch o { Some(x) => *x as i32, None => 0, };\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // a result that owns (no borrow inside) leaves the receiver free
+    h::expect_ok(
+        "an owning result does not pin the receiver",
+        "fn main() i32 {\n    let mut m = Map::<i32, i64>::new();\n    m.insert(1, 5);\n    let n = m.len();\n    m.insert(2, 6);\n    return (n + m.len()) as i32 - 3;\n}\n",
+    );
+}
