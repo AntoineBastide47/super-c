@@ -5172,6 +5172,102 @@ extend TypeChecker {
         return self.addr_escape_at(e, 0);
     }
 
+    // True if a value of this type can carry a borrow out of the scope that produced it: a reference,
+    // an aggregate that declares a lifetime param, an instance whose generic ARG is borrowing
+    // (`Vector<&i32>`), or an aggregate with a reference-typed field, transitively. Conservative --
+    // a spurious `true` only over-rejects, never under-rejects.
+    fn tc_type_carries_borrow(self: &mut Self, ty: TypeId, depth: i32) bool {
+        if ty == TYPE_NONE || depth > 4 {
+            return false;
+        }
+        if self.type_at(ty).kind == TypeKind::TYPE_REFERENCE {
+            return true;
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(
+            self.strip(ty),
+            &mut om,
+            &mut od,
+            (&gp[0]) as *mut DefId,
+            (&ga[0]) as *mut TypeId,
+            &mut gn,
+        ) {
+            return false;
+        }
+        for gi in 0..gn {
+            if self.tc_type_carries_borrow(ga[gi as usize], depth + 1) {
+                return true;
+            }
+        }
+        let ma = self.mod_ast(om);
+        if unsafe (*ma).lifetimes_of(od).len != 0 {
+            return true; // `struct S<'a>` borrows by construction
+        }
+        let members = unsafe (*ma).at_const(od).as_data.aggregate.members;
+        for i in 0..members.len {
+            let mid = unsafe (*ma).list(members)[i as usize];
+            if unsafe (*ma).at_const(mid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let fnode = unsafe (*ma).at_const(mid).as_data.field.ty;
+            if fnode == NODE_NONE {
+                continue;
+            }
+            if unsafe (*ma).at_const(fnode).kind == NodeKind::NODE_REFERENCE_TYPE {
+                return true;
+            }
+            if self.tc_type_carries_borrow(self.lower_type_in(om, fnode), depth + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Region-aware return check. `addr_escape` only recognizes a reference taken DIRECTLY of a local
+    // or parameter (`return &x`). It misses a borrow that reaches the caller indirectly -- e.g.
+    // `return b.get()` where `b` is a local `Box` (the reference points into b's heap cell, not into
+    // b's own storage, so no `&local` is ever seen, yet the cell is freed when b drops at return), or
+    // a borrow buried in a returned aggregate (`return R { p: &local }`).
+    //
+    // Rule: evaluating the returned expression may CREATE borrows; any of those still live and rooted
+    // at a binding declared inside this function dies at return, so if the returned value can carry a
+    // borrow out at all, that is a dangling return. `bm` is the watermark taken before the operands.
+    fn tc_check_return_region(self: &mut Self, vid: NodeId, bm: u32) {
+        let a = self.cur_ast();
+        let vt = unsafe (*a).type_of(vid);
+        if !self.tc_type_carries_borrow(vt, 0) {
+            return; // an owned value carries no borrow out
+        }
+        let mut i = bm;
+        while i < self.nborrows {
+            let b = unsafe self.borrows[i as usize];
+            i = i + 1;
+            if b.root == NODE_NONE {
+                continue; // tombstoned
+            }
+            // Only LOCALS die at return. A borrow rooted at a parameter may legitimately outlive the
+            // call (the caller owns the referent); addr_escape already handles by-value params.
+            if unsafe (*a).at_const(b.root).kind != NodeKind::NODE_LET {
+                continue;
+            }
+            let sp = unsafe (*a).at_const(vid).span;
+            let mut what = "a value borrowing".ptr() as *const char;
+            if self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
+                what = "a reference borrowed".ptr() as *const char;
+            }
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("returning {} from a local, which does not outlive the call", diag::cstr(what)),
+            );
+            return;
+        }
+    }
+
     // ---- extend conformance ----
     fn find_extend_item_named(self: &Self, extnode: NodeId, name: tok::Span, nmod: ModuleId) NodeId {
         let a = self.cur_ast();
@@ -9478,6 +9574,7 @@ extend TypeChecker {
             let rn = unsafe (*a).at_const(r0);
             self.expected = self.resolve_type(if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0));
         }
+        let rbm = self.borrow_mark();
         for i in 0..values.len {
             let vid = unsafe (*a).list(values)[i as usize];
             self.check_expr(vid);
@@ -9497,6 +9594,8 @@ extend TypeChecker {
                     sp.end - sp.start,
                     format("returning a pointer/reference to a {}, which does not outlive the call", diag::cstr(w)),
                 );
+            } else {
+                self.tc_check_return_region(vid, rbm);
             }
         }
         let expected = if_u32(returns_void, 0, rets.len);
@@ -9904,7 +10003,14 @@ extend TypeChecker {
                     }
                 }
                 let binding_is_ref = binding != TYPE_NONE && self.type_at(binding).kind == TypeKind::TYPE_REFERENCE;
-                if binding_is_ref && self.nborrows > bm {
+                // A binding whose TYPE carries a borrow (a reference, or an aggregate/view holding
+                // one) keeps that borrow LIVE for as long as the binding does. Releasing it here --
+                // which is what happened for every non-reference binding -- is how a borrow escaped
+                // into a struct and then went unnoticed while its referent was moved, freed, or
+                // reallocated. Retaining it means the existing scans (tc_mark_move, .free(),
+                // borrow_report_conflict, scope exit) all see the laundered borrow.
+                let binding_carries = binding != TYPE_NONE && self.tc_type_carries_borrow(binding, 0);
+                if binding_carries && self.nborrows > bm {
                     for k in bm..self.nborrows {
                         unsafe self.borrows[k as usize].binding = id;
                         unsafe self.borrows[k as usize].region = self.scope_depth as u16;
