@@ -1643,3 +1643,26 @@ fn borrow_carrying_result_borrows_receiver() {
         "fn main() i32 {\n    let mut m = Map::<i32, i64>::new();\n    m.insert(1, 5);\n    let n = m.len();\n    m.insert(2, 6);\n    return (n + m.len()) as i32 - 3;\n}\n",
     );
 }
+
+// Two-phase borrows: a method call's `&mut self` receiver does not conflict with a shared borrow
+// produced while evaluating that same call's arguments (the borrow is spent computing the arg value,
+// and the `&mut` only truly activates when the call runs). Matches Rust. The IN-LOOP forms are the
+// ones that were rejected before, because borrow liveness bails inside loops.
+@test
+fn two_phase_borrows() {
+    h::expect_ok(
+        "v.push(v.len()) is accepted",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(10);\n    v.push(v.len() as i32);\n    return *v.at(1);\n}\n",
+    );
+    h::expect_ok(
+        "the two-phase pattern is accepted inside a loop",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..3 {\n        v.push(v.len() as i32 + i);\n    }\n    return *v.at(2);\n}\n",
+    );
+    // The reservation is only for the call's OWN arguments: a borrow held across a separate later
+    // mutation still conflicts.
+    h::expect_err_msg(
+        "a borrow held across a later mutation still conflicts",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let r = v.at(0);\n    v.push(2);\n    return *r;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}
