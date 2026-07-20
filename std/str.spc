@@ -15,7 +15,7 @@ extern "C" {
 }
 
 // A borrowed view over UTF-8 bytes -- the type of a string literal. Non-owning: the bytes outlive it.
-pub struct str {
+pub struct str<'a> {
     ptr: *const u8, // start of the bytes
     len: usize, // number of bytes
 }

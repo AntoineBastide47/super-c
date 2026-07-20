@@ -1666,3 +1666,26 @@ fn two_phase_borrows() {
         "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
 }
+
+// bug7: a `str` view held across a mutation of its backing String. `str` carries a lifetime param
+// (erased before monomorphization) purely so the borrow checker knows a `str` VALUE borrows -- so
+// `s.as_str()` pins `s` and a later `push`/`push_byte` that could reallocate the buffer conflicts.
+// This was ASan-confirmed heap-use-after-free before the lifetime landed.
+@test
+fn str_view_pins_its_string() {
+    h::expect_err_msg(
+        "mutating a String while a view of it is live is rejected",
+        "fn main() i32 {\n    let mut s = String::from_str(\"long enough to be heap allocated for sure yes\");\n    let view = s.as_str();\n    s.push_byte(b'z');\n    return view.len() as i32;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // Using the view first, then mutating, is fine (the borrow has ended).
+    h::expect_ok(
+        "mutating a String after the view's last use is fine",
+        "fn main() i32 {\n    let mut s = String::from_str(\"hello\");\n    let n = s.as_str().len();\n    s.push_byte(b'z');\n    return (n + s.len()) as i32 - 11;\n}\n",
+    );
+    // A `str` reborrows: sub-viewing does not create a fresh borrow of the intermediate local.
+    h::expect_ok(
+        "str sub-views reborrow rather than borrow the local",
+        "fn takes(s: str) usize {\n    let t = s.trim();\n    return t.len();\n}\nfn main() i32 {\n    return takes(\"  hi  \") as i32 - 2;\n}\n",
+    );
+}
