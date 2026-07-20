@@ -3699,6 +3699,15 @@ extend TypeChecker {
         // is never implicit -- it needs an explicit cast inside `unsafe`.
         let mut acp = ac;
         if ac.kind == TypeKind::TYPE_REFERENCE && ex.kind == TypeKind::TYPE_POINTER {
+            // Coercing a reference into a RAW POINTER ERASES the borrow. A raw pointer carries no
+            // region, and it is precisely the boundary at which this language hands lifetime
+            // responsibility to the programmer (dereferencing it needs `unsafe`). Keeping the borrow
+            // live would pin the referent for as long as whatever stored the pointer lives -- which
+            // the checker cannot see -- and would reject correct code like
+            // `ConstEval::new(&mut p, ..)` where the parameter is `*mut Package`.
+            if !probe {
+                self.borrow_erase_origin(node);
+            }
             acp.kind = TypeKind::TYPE_POINTER;
             if acp.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
                 acp.qualifier = TypeQualifier::TYPE_QUAL_CONST as u8;
@@ -4828,6 +4837,18 @@ extend TypeChecker {
     fn borrow_tombstone_at(self: &mut Self, i: u32) {
         unsafe self.borrows[i as usize].root = NODE_NONE;
         unsafe self.borrows[i as usize].binding = NODE_NONE;
+    }
+
+    // Drop the borrow(s) produced by `origin` -- used where a reference is erased into a raw pointer.
+    fn borrow_erase_origin(self: &mut Self, origin: NodeId) {
+        if origin == NODE_NONE {
+            return;
+        }
+        for i in 0..self.nborrows {
+            if unsafe self.borrows[i as usize].origin == origin {
+                self.borrow_tombstone_at(i);
+            }
+        }
     }
 
     // TC-3: one pass over the resolution table records, per local decl, the LAST node that
@@ -6827,6 +6848,28 @@ extend TypeChecker {
             want,
             fmt_builtin,
         );
+        // A method whose RESULT carries a borrow (`Option<&V>`, a view, ...) borrows its receiver
+        // just as much as one returning a bare `&T`. check_call_receiver can only inspect the
+        // DECLARED return node, which is not enough: the borrow may sit inside a generic argument
+        // that exists only after substitution (`Map::get` is declared `Option<T>`, and is
+        // `Option<&i64>` only here). Re-check with the resolved type and persist the receiver borrow
+        // so the container cannot be mutated while the returned view is live.
+        if pck == NodeKind::NODE_MEMBER && skip == 1 && ret != TYPE_NONE && self.type_at(ret).kind != TypeKind::TYPE_REFERENCE {
+            let recv_n = unsafe (*a).at_const(callee_id).as_data.member.object;
+            if recv_n != NODE_NONE && self.tc_type_carries_borrow(ret, 0) {
+                // REBORROW vs fresh borrow -- the distinction Rust draws with named regions. If the
+                // receiver is ITSELF a view (its own type carries a region), the result INHERITS that
+                // region: `t.trim_end()` on a `str` views the same bytes `t` already views, so the
+                // borrow `t` already carries describes the result too, and minting a new borrow
+                // rooted at the local `t` would falsely make the result die when `t` does. If instead
+                // the receiver OWNS its data (`String::as_str`), the result really does borrow the
+                // receiver and must pin it.
+                let rty = self.strip(unsafe (*a).type_of(recv_n));
+                if !self.tc_type_carries_borrow(rty, 0) {
+                    self.borrow_create(recv_n, BORROW_SHARED, recv_n);
+                }
+            }
+        }
         return ret;
     }
 
