@@ -1712,3 +1712,61 @@ fn stored_borrow_outlives_container() {
         "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    {\n        let x = 5;\n        v.push(x);\n    }\n    return *v.at(0) - 5;\n}\n",
     );
 }
+
+// Uniform region propagation (adversarial round 2): the region tie was wired into a few syntactic
+// sites, so borrow-carriers reaching a scope boundary another way escaped. These three are closed at
+// the checker level -- deep (memoized) carries-borrow, carried-borrow return scan, and a place tie on
+// assignment.
+@test
+fn region_propagation_uniform() {
+    // A container whose element NESTS a reference (not a direct &T arg): the deep gate now sees it.
+    h::expect_err_msg(
+        "pushing a struct-holding-&local into an outer Vector<W> is rejected",
+        "struct W { pub r: &i32 }\nfn main() i32 {\n    let mut v = Vector::<W>::new();\n    {\n        let local = 77;\n        v.push(W { r: &local });\n    }\n    return *v.at(0).r;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    // Hoisting a return-of-borrow into a local no longer bypasses the return check.
+    h::expect_err_msg(
+        "returning a pre-bound struct holding &local is rejected",
+        "struct R { pub p: &i32 }\nfn f() R {\n    let x = 1;\n    let r = R { p: &x };\n    return r;\n}\n",
+        "returning a value borrowing from a local",
+    );
+    h::expect_err_msg(
+        "returning a pre-populated Vector<&local> is rejected",
+        "fn f() Vector<&i32> {\n    let x = 5;\n    let mut v = Vector::<&i32>::new();\n    v.push(&x);\n    return v;\n}\n",
+        "returning a value borrowing from a local",
+    );
+    // Assigning a short borrow to a reference-typed field of a longer-lived struct is rejected.
+    h::expect_err_msg(
+        "assigning &inner to an outer struct's reference field is rejected",
+        "struct S { pub r: &i32 }\nfn main() i32 {\n    let anchor = 1;\n    let mut s = S { r: &anchor };\n    {\n        let inner = 555;\n        s.r = &inner;\n    }\n    return *s.r;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    // Controls: long-lived borrows through the same paths still compile.
+    h::expect_ok(
+        "returning a struct holding a param borrow is fine",
+        "struct R { pub p: &i32 }\nfn wrap(a: &i32) R {\n    let r = R { p: a };\n    return r;\n}\nfn main() i32 {\n    let v = 9;\n    return *wrap(&v).p - 9;\n}\n",
+    );
+    h::expect_ok(
+        "assigning long-lived borrows to a field is fine",
+        "struct S { pub r: &i32 }\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut s = S { r: &a };\n    s.r = &b;\n    return *s.r - 2;\n}\n",
+    );
+}
+
+// A generic type with BOTH a lifetime param and a type param -- `P<'a, T>` -- must resolve `T` in
+// method bodies. The type-path arg loop was not skipping the erased lifetime argument, so the type
+// param bound to the lifetime slot and every `T` came out as `?`. (Found while giving view types a
+// lifetime; the same bug blocks `Slice<'a, T>`.)
+@test
+fn generic_with_lifetime_and_type_param() {
+    h::expect_ok(
+        "a <'a, T> type resolves T in its methods, fields, and returns",
+        "struct P<'a, T> { pub v: T }\nextend<'a, T> P<'a, T> {\n    pub fn get(self: &P<'a, T>) &T { return &self.v; }\n    pub fn raw(self: &P<'a, T>) *const T { return &self.v; }\n}\nfn main() i32 {\n    let x = 42;\n    let p = P::<i32> { v: x };\n    return *p.get() - 42;\n}\n",
+    );
+    // and it still monomorphizes ignoring the lifetime (erased): one symbol per (type args).
+    h::expect_c(
+        "a <'a, T> generic mangles only the type arg",
+        "struct P<'a, T> { pub v: T }\nextend<'a, T> P<'a, T> { pub fn g(self: &P<'a, T>) T { return self.v; } }\nfn main() i32 { let a = P::<i32> { v: 1 }; let b = P::<i32> { v: 2 }; return a.g() + b.g() - 3; }\n",
+        "P__i32",
+    );
+}

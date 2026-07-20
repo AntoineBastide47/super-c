@@ -192,6 +192,10 @@ pub struct TypeChecker {
     // entries are inserted only when the lowering emitted no new errors and the result is not
     // TYPE_ERROR, so error-carrying programs re-emit their diagnostics exactly as before.
     pub lower_memo: Map<u64, TypeId>,
+    // Memoized "does a value of this type carry a borrow" -- a pure function of the interned type, so
+    // caching per (module, TypeId) makes the DEEP structural check O(1) after first use (it runs on
+    // every method call and every binding/return). 1 = carries, 0 = does not.
+    pub carries_memo: Map<u64, u8>,
     // TC-10: prelude lookup hits resolved once at construction (prelude_lookup is a linear scan).
     pub ph_str: loader::LookupHit,
     pub ph_slice: loader::LookupHit,
@@ -407,6 +411,7 @@ extend TypeChecker {
             method_memo: Map::<MQKey, u64>::new(),
             peel_memo: Map::<u64, u64>::new(),
             lower_memo: Map::<u64, TypeId>::new(),
+            carries_memo: Map::<u64, u8>::new(),
             ph_str: ph_lookup(pkg, "str"),
             ph_slice: ph_lookup(pkg, "Slice"),
             ph_slicemut: ph_lookup(pkg, "SliceMut"),
@@ -1977,6 +1982,14 @@ extend TypeChecker {
                             let mut j: u32 = 0;
                             while j < args.len && tn < 8 {
                                 let aid = unsafe (*a).list(args)[j as usize];
+                                // Lifetime arguments (`P<'a, T>`) are ERASED: skip them so the
+                                // instance's args stay index-aligned with the declaration's
+                                // (lifetime-free) generic params. Without this the type param binds to
+                                // the lifetime slot and every `T` in the type resolves to `?`.
+                                if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                                    j = j + 1;
+                                    continue;
+                                }
                                 if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LITERAL {
                                     ta[tn as usize] = self.tc_const_arg(self.ast.module, aid);
                                 } else {
@@ -4791,6 +4804,39 @@ extend TypeChecker {
         return true;
     }
 
+    // The owning binding at the base of an assignable PLACE, walking field / index / deref steps
+    // down to the root identifier (`s.r.x` -> s, `arr[i]` -> arr, `*p` -> p). Unlike
+    // place_through_binding this does not require the chain to pass through a reference -- it is the
+    // root a stored borrow's region must be checked against.
+    fn tc_place_base_binding(self: &Self, place: NodeId) NodeId {
+        let a = self.cur_ast();
+        let pn = unsafe (*a).at_const(place);
+        switch pn.kind {
+            NODE_IDENTIFIER => {
+                let d = unsafe (*a).resolution_def(place);
+                return if_node(d.module == self.ast.module, d.node, NODE_NONE);
+            },
+            NODE_MEMBER => {
+                if pn.as_data.member.path {
+                    return NODE_NONE;
+                }
+                return self.tc_place_base_binding(pn.as_data.member.object);
+            },
+            NODE_INDEX => {
+                return self.tc_place_base_binding(pn.as_data.index.object);
+            },
+            NODE_UNARY => {
+                if pn.as_data.unary.op == TokenType::Star {
+                    return self.tc_place_base_binding(pn.as_data.unary.operand);
+                }
+                return NODE_NONE;
+            },
+            _ => {
+                return NODE_NONE;
+            },
+        };
+    }
+
     fn place_through_binding(self: &Self, place0: NodeId) NodeId {
         let a = self.cur_ast();
         let mut place = place0;
@@ -5210,6 +5256,24 @@ extend TypeChecker {
     // an aggregate that declares a lifetime param, an instance whose generic ARG is borrowing
     // (`Vector<&i32>`), or an aggregate with a reference-typed field, transitively. Conservative --
     // a spurious `true` only over-rejects, never under-rejects.
+    // Memoized entry: does a value of this type carry a borrow (a reference, an aggregate/instance
+    // holding one, transitively, or a type with a lifetime param)? Pure function of the interned type.
+    fn tc_carries_borrow(self: &mut Self, ty: TypeId) bool {
+        if ty == TYPE_NONE {
+            return false;
+        }
+        let key = self.ast.module as u64 << 32 | ty as u64;
+        switch self.carries_memo.get(&key) {
+            Some(v) => {
+                return *v != 0;
+            },
+            None => {},
+        };
+        let r = self.tc_type_carries_borrow(ty, 0);
+        self.carries_memo.insert(key, if_u8(r, 1, 0));
+        return r;
+    }
+
     fn tc_type_carries_borrow(self: &mut Self, ty: TypeId, depth: i32) bool {
         if ty == TYPE_NONE || depth > 4 {
             return false;
@@ -5268,25 +5332,6 @@ extend TypeChecker {
     // (`&i32`), the argument passed for `value` must outlive the receiver -- by variance, whether or
     // not push actually stores it. Returns true when pdecl's declared type is exactly a generic
     // parameter that the receiver aggregate instantiates with a borrow-carrying type.
-    // Cheap gate for the stored-borrow region tie: does the receiver INSTANCE have a directly
-    // reference-typed generic argument (`Vector<&T>`, `Map<K, &V>`, `Box<&T>`)? A fast pre-filter so
-    // the expensive per-parameter substitution runs only for the handful of container-of-references
-    // receivers, not on every method call. Deeper nesting (a struct field that is a reference) is not
-    // matched -- conservative: it can only miss, never over-reject.
-    fn tc_instance_has_ref_arg(self: &Self, recv_ty: TypeId) bool {
-        let s = self.strip(recv_ty);
-        if s == TYPE_NONE || self.type_at(s).kind != TypeKind::TYPE_INSTANCE {
-            return false;
-        }
-        let it = *unsafe (*self.cur_ast()).instance(self.type_at(s).as_data.inst);
-        for k in 0..it.n {
-            if self.type_at(unsafe it.args[k as usize]).kind == TypeKind::TYPE_REFERENCE {
-                return true;
-            }
-        }
-        return false;
-    }
-
     fn tc_param_shares_recv_region(self: &mut Self, md: DefId, recv_ty: TypeId, idx: i32) bool {
         let fa = self.mod_ast(md.module);
         let fnn = unsafe (*fa).at_const(md.node);
@@ -5318,7 +5363,7 @@ extend TypeChecker {
         }
         // Receiver-inherited type variable: is it a borrow-carrying type in THIS instantiation?
         let subst = self.tc_method_param(recv_ty, md, idx);
-        return self.tc_type_carries_borrow(subst, 0);
+        return self.tc_carries_borrow(subst);
     }
 
     // Region-aware return check. `addr_escape` only recognizes a reference taken DIRECTLY of a local
@@ -5333,15 +5378,32 @@ extend TypeChecker {
     fn tc_check_return_region(self: &mut Self, vid: NodeId, bm: u32) {
         let a = self.cur_ast();
         let vt = unsafe (*a).type_of(vid);
-        if !self.tc_type_carries_borrow(vt, 0) {
+        if !self.tc_carries_borrow(vt) {
             return; // an owned value carries no borrow out
         }
-        let mut i = bm;
+        // The returned value carries a borrow rooted at a local if EITHER the borrow was created
+        // while evaluating the return expression (indices >= bm, e.g. `return b.get()`) OR the borrow
+        // was tied earlier to the returned binding (`let r = Ref { p: &x }; return r` -- the borrow
+        // lives in the array with binding == r, created below bm). Scanning only [bm, nborrows) missed
+        // the second case, so any caught return-of-borrow was bypassable by hoisting it into a local.
+        let mut ret_binding = NODE_NONE;
+        if unsafe (*a).at_const(vid).kind == NodeKind::NODE_IDENTIFIER {
+            let rd = unsafe (*a).resolution_def(vid);
+            if rd.module == self.ast.module {
+                ret_binding = rd.node;
+            }
+        }
+        let mut i: u32 = 0;
         while i < self.nborrows {
             let b = unsafe self.borrows[i as usize];
+            let idx = i;
             i = i + 1;
             if b.root == NODE_NONE {
                 continue; // tombstoned
+            }
+            // carried by the returned value?
+            if idx < bm && (ret_binding == NODE_NONE || b.binding != ret_binding) {
+                continue;
             }
             // Only LOCALS die at return. A borrow rooted at a parameter may legitimately outlive the
             // call (the caller owns the referent); addr_escape already handles by-value params.
@@ -6935,7 +6997,7 @@ extend TypeChecker {
         // so the container cannot be mutated while the returned view is live.
         if pck == NodeKind::NODE_MEMBER && skip == 1 && ret != TYPE_NONE && self.type_at(ret).kind != TypeKind::TYPE_REFERENCE {
             let recv_n = unsafe (*a).at_const(callee_id).as_data.member.object;
-            if recv_n != NODE_NONE && self.tc_type_carries_borrow(ret, 0) {
+            if recv_n != NODE_NONE && self.tc_carries_borrow(ret) {
                 // REBORROW vs fresh borrow -- the distinction Rust draws with named regions. If the
                 // receiver is ITSELF a view (its own type carries a region), the result INHERITS that
                 // region: `t.trim_end()` on a `str` views the same bytes `t` already views, so the
@@ -6944,7 +7006,7 @@ extend TypeChecker {
                 // the receiver OWNS its data (`String::as_str`), the result really does borrow the
                 // receiver and must pin it.
                 let rty = self.strip(unsafe (*a).type_of(recv_n));
-                if !self.tc_type_carries_borrow(rty, 0) {
+                if !self.tc_carries_borrow(rty) {
                     self.borrow_create(recv_n, BORROW_SHARED, recv_n);
                 }
             }
@@ -6957,7 +7019,7 @@ extend TypeChecker {
         if pck == NodeKind::NODE_MEMBER && skip == 1 && params.len > 1 {
             let recv_n = unsafe (*a).at_const(callee_id).as_data.member.object;
             let recv_ty = if_ty(recv_n != NODE_NONE, unsafe (*a).type_of(recv_n), TYPE_NONE);
-            if recv_n != NODE_NONE && self.tc_instance_has_ref_arg(recv_ty) {
+            if recv_n != NODE_NONE && self.tc_carries_borrow(recv_ty) {
                 let mut recv_root = NODE_NONE;
                 if unsafe (*a).at_const(recv_n).kind == NodeKind::NODE_IDENTIFIER {
                     let rd = unsafe (*a).resolution_def(recv_n);
@@ -8531,6 +8593,22 @@ extend TypeChecker {
                 }
             } else {
                 self.borrow_transfer_ref(bd.right, ld.node);
+            }
+        } else if lt == TYPE_NONE && self.tc_carries_borrow(l) {
+            // Assigning a borrow-carrying value into a PLACE that is not a plain identifier
+            // (`s.r = &inner`, a reference-typed field/element of a longer-lived aggregate): tie the
+            // stored borrow to the place's root binding + region, exactly like `let`. The ref_rebind
+            // path above only fires for identifier LHS, so without this a borrow stored through a
+            // field/index escapes unchecked.
+            let proot = self.tc_place_base_binding(bd.left);
+            if proot != NODE_NONE && self.nborrows > bm {
+                let region = self.tc_binding_depth(proot) as u16;
+                for k in bm..self.nborrows {
+                    if unsafe self.borrows[k as usize].binding == NODE_NONE && unsafe self.borrows[k as usize].root != NODE_NONE {
+                        unsafe self.borrows[k as usize].binding = proot;
+                        unsafe self.borrows[k as usize].region = region;
+                    }
+                }
             }
         }
         if !self.is_assignable(bd.left) {
@@ -10174,7 +10252,7 @@ extend TypeChecker {
                 // into a struct and then went unnoticed while its referent was moved, freed, or
                 // reallocated. Retaining it means the existing scans (tc_mark_move, .free(),
                 // borrow_report_conflict, scope exit) all see the laundered borrow.
-                let binding_carries = binding != TYPE_NONE && self.tc_type_carries_borrow(binding, 0);
+                let binding_carries = binding != TYPE_NONE && self.tc_carries_borrow(binding);
                 if binding_carries && self.nborrows > bm {
                     for k in bm..self.nborrows {
                         unsafe self.borrows[k as usize].binding = id;
