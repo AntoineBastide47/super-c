@@ -1554,3 +1554,68 @@ fn safety_holes_closed() {
 
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,
 // computed_reference_type, literal_types, inferred_let_types, str_member_types
+
+// Region-aware return (lifetimes Release B). `addr_escape` only sees a reference taken DIRECTLY of a
+// local (`return &x`); these escape indirectly -- through a local's owned heap cell, or buried in an
+// aggregate -- and were ASan-confirmed dangling reads before this check existed.
+@test
+fn return_region_escapes() {
+    // bug9: the reference points into the local Box's heap cell, freed when the Box drops at return.
+    h::expect_err_msg(
+        "returning a borrow into a local Box's cell is rejected",
+        "fn f() &i32 {\n    let b = Box::<i32>::new(9);\n    return b.get();\n}\n",
+        "returning a reference borrowed from a local",
+    );
+    // bug1: the borrow is buried in a returned struct (unannotated form).
+    h::expect_err_msg(
+        "returning a struct holding &local is rejected",
+        "struct R { pub p: &i32 }\nfn f() R {\n    let x = 1;\n    return R { p: &x };\n}\n",
+        "returning a value borrowing from a local",
+    );
+    // ...and the same with an explicit lifetime param.
+    h::expect_err_msg(
+        "returning a lifetime-annotated struct holding &local is rejected",
+        "struct R<'a> { pub p: &'a i32 }\nfn f() R<'a> {\n    let x = 1;\n    return R::<'a> { p: &x };\n}\n",
+        "returning a value borrowing from a local",
+    );
+    // Borrows of PARAMETERS still return fine -- the caller owns the referent.
+    h::expect_ok(
+        "returning a borrow of a parameter stays legal",
+        "fn pass(x: &i32) &i32 {\n    return x;\n}\nstruct W { pub v: i32 }\nfn field(w: &W) &i32 {\n    return &w.v;\n}\nfn main() i32 {\n    let a = 7;\n    let w = W { v: 1 };\n    return *pass(&a) + *field(&w) - 8;\n}\n",
+    );
+    // An OWNED value computed from a local borrow is fine: nothing borrowed leaves.
+    h::expect_ok(
+        "returning an owned value read through a local borrow stays legal",
+        "fn f() i32 {\n    let b = Box::<i32>::new(9);\n    return *b.get();\n}\n",
+    );
+}
+
+// Borrows laundered through an aggregate (lifetimes Release B). Storing a borrow into a struct used
+// to DROP it from the live-borrow set (the let-store released every non-reference binding), so the
+// referent could then be moved, freed, or reallocated with the stored reference left dangling. A
+// binding whose type carries a borrow now RETAINS it, and the existing move/conflict scans catch it.
+@test
+fn laundered_borrow_retained() {
+    // bug8: &b stored in a struct field, then b moved into a fn that frees it.
+    h::expect_err_msg(
+        "moving a value borrowed through a struct field is rejected",
+        "struct K { pub r: &Box<i32> }\nfn eat(b: Box<i32>) i32 {\n    return *b.get();\n}\nfn main() i32 {\n    let b = Box::<i32>::new(5);\n    let k = K { r: &b };\n    let t = eat(b);\n    return t + *k.r.get();\n}\n",
+        "cannot move this value while it is borrowed",
+    );
+    // bug2: a Vector element borrow stored in a struct, then a push that reallocates.
+    h::expect_err_msg(
+        "mutating a container borrowed through a struct field is rejected",
+        "struct H { pub p: &i32 }\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let h = H { p: v.at(0) };\n    v.push(6);\n    return *h.p;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // A struct holding no borrow keeps the old (unrestricted) behaviour.
+    h::expect_ok(
+        "an owning struct does not retain a borrow",
+        "struct O { pub v: i32 }\nfn eat(b: Box<i32>) i32 {\n    return *b.get();\n}\nfn main() i32 {\n    let b = Box::<i32>::new(5);\n    let o = O { v: 1 };\n    return eat(b) + o.v - 6;\n}\n",
+    );
+    // The borrow ends with its holder: a fresh mutation after the holder's last use is still fine.
+    h::expect_ok(
+        "a container is mutable again once the borrowing holder is dead",
+        "struct H { pub p: &i32 }\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let r = *H { p: v.at(0) }.p;\n    v.push(6);\n    return r - 5;\n}\n",
+    );
+}
