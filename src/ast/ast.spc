@@ -39,6 +39,14 @@ pub enum AttrKind {
     ATTR_FMT_SKIP,
 }
 
+// A decl's lifetime generic params (`fn f<'a>`, `struct S<'a>`). Held in an Ast SIDE TABLE rather
+// than inline on the decl data, so `Node` keeps its tuned size: lifetimes are erased, rare, and only
+// read by the formatter and the region checker.
+pub struct LifetimeDecl {
+    pub owner: NodeId,
+    pub list: NodeList,
+}
+
 pub struct Attr {
     pub owner: NodeId,
     pub kind: u8,
@@ -118,6 +126,9 @@ pub enum NodeKind {
     NODE_RANGE,
     NODE_TUPLE,
     NODE_TUPLE_TYPE,
+    // A lifetime name: `'a` as a generic param's name, a lifetime argument, or an outlives bound.
+    // Appended at the END so an older bootstrap compiler keeps the established numeric values.
+    NODE_LIFETIME,
     NODE_KIND_COUNT,
 }
 
@@ -217,6 +228,10 @@ pub struct GenericParamData {
     pub default_type: NodeId,
     pub is_const: bool,
     pub const_type: NodeId,
+    // A LIFETIME param (`<'a>`): `bounds` holds its outlives bounds (`'a: 'b`), `const_type` and
+    // `default_type` are NODE_NONE. Lifetimes are ERASED before monomorphization -- every consumer
+    // that maps generic params onto `Ty` args must SKIP these (see non_lifetime_count).
+    pub is_lifetime: bool,
 }
 pub struct WherePredicateData {
     pub ty: NodeId,
@@ -299,6 +314,10 @@ pub struct TypePathData {
 pub struct IndirectTypeData {
     pub ty: NodeId,
     pub qualifier: TypeQualifier,
+    // The source lifetime annotation on a NODE_REFERENCE_TYPE (`&'a T`): a NODE_LIFETIME node, or
+    // NODE_NONE when elided. Never set for pointers. Erased from the interned `Ty` -- the region
+    // checker reads it from here.
+    pub lifetime: NodeId,
 }
 pub struct ArrayTypeData {
     pub element: NodeId,
@@ -672,6 +691,7 @@ pub struct Ast {
     pub deref_uses: Vector<DerefUse>,
     pub deref_at: Vector<u32>,
     pub attrs: Vector<Attr>,
+    pub lifetime_decls: Vector<LifetimeDecl>,
     pub root: NodeId,
     pub module: ModuleId,
 }
@@ -839,6 +859,23 @@ extend Ast {
         self.method_insts.push(mi);
         self.method_inst_index.insert(mi, idx);
         return true;
+    }
+
+    // Record a decl's lifetime params (no-op for the overwhelmingly common empty case).
+    pub fn set_lifetimes(self: &mut Self, owner: NodeId, list: NodeList) {
+        if list.len == 0 {
+            return;
+        }
+        self.lifetime_decls.push(LifetimeDecl { owner: owner, list: list });
+    }
+
+    pub fn lifetimes_of(self: &Self, owner: NodeId) NodeList {
+        for i in 0..self.lifetime_decls.len() {
+            if self.lifetime_decls.at(i).owner == owner {
+                return self.lifetime_decls.at(i).list;
+            }
+        }
+        return NodeList { start: 0, len: 0 };
     }
 
     pub fn add_attr(self: &mut Self, attr: Attr) {

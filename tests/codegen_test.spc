@@ -366,3 +366,20 @@ fn callback_specialization() {
     );
     h::expect_c_absent("runtime callback is not specialized", RUNTIME, "__cb_");
 }
+
+// Lifetimes are ERASED before monomorphization: they are checked, then dropped. They must never
+// reach an instance's type args, the mangled symbol, or the emitted C -- otherwise `Slice<'a,T>`
+// and `Slice<'b,T>` would become two distinct monomorphizations of the same code.
+@test
+fn lifetimes_are_erased() {
+    // A lifetime-only generic is NOT generic for codegen: `Ref<'a>` emits a plain `Ref`.
+    let LT: str = "struct Ref<'a> { pub p: &'a i32 }\nfn borrow<'a>(x: &'a i32) &'a i32 { return x; }\nfn main() i32 { let v = 5; let r = Ref::<'static> { p: &v }; return *borrow(&v) + *r.p - 10; }\n";
+    h::expect_c("lifetime-only struct emits an unmangled name", LT, "typedef struct Ref Ref;");
+    h::expect_c_absent("no lifetime in the struct symbol", LT, "Ref__");
+    h::expect_c_absent("no lifetime in the fn symbol", LT, "borrow__");
+
+    // Mixed `<'a, T>`: only the TYPE arg mangles, so two lifetimes collapse to one instance.
+    let MIX: str = "struct Pair<'a, T> { pub p: &'a T, pub n: T }\nfn main() i32 { let a = 3; let b = 4; let p1 = Pair::<i32> { p: &a, n: 1 }; let p2 = Pair::<i32> { p: &b, n: 2 }; return *p1.p + *p2.p - 7; }\n";
+    h::expect_c("mixed lifetime+type generic mangles only the type arg", MIX, "Pair__i32");
+    h::expect_c_absent("the lifetime never appears in the mangled name", MIX, "Pair__a");
+}

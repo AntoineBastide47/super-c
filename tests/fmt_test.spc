@@ -145,3 +145,17 @@ fn golden_const_fn() {
         "extend Pt {\n    const fn zero() Pt {\n        return Pt { x: 0, y: 0 };\n    }\n}\nstruct Pt {\n    x: i32,\n    y: i32,\n}\n",
     );
 }
+
+@test
+fn golden_lifetimes() {
+    // Lifetime params print merged back into the one `<...>`, lifetimes first; `&'a T` keeps its
+    // annotation and `&'a mut T` keeps lifetime-before-mut. (The formatter must round-trip this
+    // BEFORE any src/std source uses it -- otherwise fmt would silently delete annotations.)
+    expect_fmt("struct Ref<'a>{pub p:&'a i32}", "struct Ref<'a> {\n    pub p: &'a i32,\n}\n");
+    expect_fmt("fn borrow<'a>(x:&'a i32)&'a i32{return x;}", "fn borrow<'a>(x: &'a i32) &'a i32 {\n    return x;\n}\n");
+    expect_fmt("fn m<'a>(x:&'a mut i32){*x=1;}", "fn m<'a>(x: &'a mut i32) {\n    *x = 1;\n}\n");
+    expect_fmt(
+        "fn two<'a,'b:'a,T>(x:&'a T,y:&'b T)&'a T where T:'a{return x;}",
+        "fn two<'a, 'b: 'a, T>(x: &'a T, y: &'b T) &'a T where T: 'a {\n    return x;\n}\n",
+    );
+}

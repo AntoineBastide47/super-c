@@ -178,6 +178,37 @@ extend Parser {
         );
     }
 
+    // A lifetime name (`'a`). The lexer already emits `'name` as a `Label` (loop labels share the
+    // surface syntax and `label_ahead` already separates `'a` from the char literal `'a'`), so a
+    // `Label` appearing in a type / generic-param / generic-arg / bound slot IS a lifetime -- a
+    // `Label` can begin none of those otherwise, which keeps every use site single-token LL(1).
+    pub fn parse_lifetime(self: &mut Self) NodeId {
+        if !self.check(TokenType::Label) {
+            self.error_here("expected a lifetime");
+            return NODE_NONE;
+        }
+        let token = self.advance();
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_LIFETIME,
+                span: token.span(),
+                as_data: NodeAs { name: NameData { text: token.span(), is_mutable: false } },
+            },
+        );
+    }
+
+    // The outlives bounds of a LIFETIME param: `'a: 'b + 'c`. These can only ever be lifetimes, so
+    // after a `+` we parse one unconditionally -- no lookahead past the `+` is needed (a type
+    // param's mixed `T: 'a + Iface` list goes through parse_bounds/parse_bound instead).
+    pub fn parse_lifetime_bounds(self: &mut Self) NodeList {
+        let mark = self.ast.mark();
+        self.ast.push(self.parse_lifetime());
+        while self.match(TokenType::Plus) {
+            self.ast.push(self.parse_lifetime());
+        }
+        return self.ast.commit(mark);
+    }
+
     pub fn callable_name(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) && !self.check(
             TokenType::New,
@@ -225,8 +256,12 @@ extend Parser {
         self.expect(TokenType::LessThan, "'<'");
         let mark = self.ast.mark();
         while !self.check(TokenType::GreaterThan) && !self.at_end() {
-            // A bare integer literal in argument position is a const-generic value (e.g. `Buff<i32, 4>`).
-            let arg = if self.check(TokenType::IntegerLiteral) {
+            // A leading lifetime is a lifetime ARGUMENT (`Foo<'a, T>`); a bare integer literal is a
+            // const-generic value (e.g. `Buff<i32, 4>`). Both are single-token decisions. This is the
+            // shared reader for type paths AND expression turbofish, so one arm covers `Foo::<'a, T>`.
+            let arg = if self.check(TokenType::Label) {
+                self.parse_lifetime();
+            } else if self.check(TokenType::IntegerLiteral) {
                 self.literal();
             } else {
                 self.parse_type();
@@ -317,6 +352,12 @@ extend Parser {
         let start = self.raw_peek().start();
         if self.match(TokenType::Star) || self.match(TokenType::Ampersand) {
             let opener = self.tokens[self.current - 1].kind();
+            // `&'a T` / `&'a mut T`: the lifetime binds immediately after `&`, before `mut`/`dyn`.
+            // Single-token peek; pointers never carry one.
+            let mut life = NODE_NONE;
+            if opener == TokenType::Ampersand && self.check(TokenType::Label) {
+                life = self.parse_lifetime();
+            }
             let mut qualifier: TypeQualifier;
             if opener == TokenType::Star {
                 qualifier = self.parse_qualifier();
@@ -343,6 +384,7 @@ extend Parser {
                                 } else {
                                     TypeQualifier::TYPE_QUAL_CONST;
                                 },
+                                lifetime: life,
                             },
                         },
                     },
@@ -357,7 +399,7 @@ extend Parser {
                         NodeKind::NODE_REFERENCE_TYPE;
                     },
                     span: Span::new(start, self.node_span(ty).end),
-                    as_data: NodeAs { indirect_type: IndirectTypeData { ty: ty, qualifier: qualifier } },
+                    as_data: NodeAs { indirect_type: IndirectTypeData { ty: ty, qualifier: qualifier, lifetime: life } },
                 },
             );
         }
@@ -441,6 +483,10 @@ extend Parser {
     }
 
     pub fn parse_bound(self: &mut Self) NodeId {
+        // `T: 'a` -- a lifetime bound among a type param's mixed bounds. Single-token peek.
+        if self.check(TokenType::Label) {
+            return self.parse_lifetime();
+        }
         if !self.check(TokenType::Fn) {
             return self.parse_type_path();
         }
@@ -471,13 +517,54 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_generics(self: &mut Self) NodeList {
+    // Parses `<'a, 'b: 'a, T, const N: usize>`. LIFETIME params must come FIRST (as in Rust) and are
+    // returned SEPARATELY through `out_lifetimes`: keeping them out of the `generics` list is what
+    // makes lifetime erasure structural -- every consumer that pairs `generics` with instance args
+    // stays correct by construction instead of having to remember to skip lifetimes.
+    pub fn parse_generics_split(self: &mut Self, out_lifetimes: &mut NodeList) NodeList {
         if !self.match(TokenType::LessThan) {
             return NodeList { start: 0, len: 0 };
         }
+        // leading run of lifetime params -> its own contiguous list
+        let lmark = self.ast.mark();
+        while self.check(TokenType::Label) && !self.at_end() {
+            let start = self.raw_peek().start();
+            let lt = self.parse_lifetime();
+            let mut lbounds = NodeList { start: 0, len: 0 };
+            if self.match(TokenType::Colon) {
+                lbounds = self.parse_lifetime_bounds();
+            }
+            self.ast.push(
+                self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_GENERIC_PARAM,
+                        span: Span::new(start, self.previous_end()),
+                        as_data: NodeAs {
+                            generic_param: GenericParamData {
+                                name: lt,
+                                bounds: lbounds,
+                                default_type: NODE_NONE,
+                                is_const: false,
+                                const_type: NODE_NONE,
+                                is_lifetime: true,
+                            },
+                        },
+                    },
+                ),
+            );
+            if !self.match(TokenType::Comma) {
+                break;
+            }
+        }
+        *out_lifetimes = self.ast.commit(lmark);
         let mark = self.ast.mark();
         while !self.check(TokenType::GreaterThan) && !self.at_end() {
             let start = self.raw_peek().start();
+            if self.check(TokenType::Label) {
+                self.error_here("lifetime parameters must come before type parameters");
+                self.advance();
+                continue;
+            }
             let is_const = self.match(TokenType::Const);
             let name = self.identifier();
             let mut bounds = NodeList { start: 0, len: 0 };
@@ -505,6 +592,7 @@ extend Parser {
                                 default_type: default_type,
                                 is_const: is_const,
                                 const_type: const_type,
+                                is_lifetime: false,
                             },
                         },
                     },
@@ -518,6 +606,12 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
+    // Callers that have no lifetime slot to fill (they simply don't support lifetime params yet).
+    pub fn parse_generics(self: &mut Self) NodeList {
+        let mut discard = NodeList { start: 0, len: 0 };
+        return self.parse_generics_split(&mut discard);
+    }
+
     pub fn parse_where_clause(self: &mut Self) NodeList {
         if !self.match(TokenType::Where) {
             return NodeList { start: 0, len: 0 };
@@ -525,9 +619,19 @@ extend Parser {
         let mark = self.ast.mark();
         while true {
             let start = self.raw_peek().start();
-            let ty = self.parse_type();
+            // `where 'a: 'b` -- a lifetime on the LHS; bounds are then lifetimes only.
+            let lhs_is_lifetime = self.check(TokenType::Label);
+            let ty = if lhs_is_lifetime {
+                self.parse_lifetime();
+            } else {
+                self.parse_type();
+            };
             self.expect(TokenType::Colon, "':'");
-            let bounds = self.parse_bounds();
+            let bounds = if lhs_is_lifetime {
+                self.parse_lifetime_bounds();
+            } else {
+                self.parse_bounds();
+            };
             self.ast.push(
                 self.ast.add(
                     Node {
@@ -652,7 +756,8 @@ extend Parser {
         let start = self.raw_peek().start();
         self.expect(TokenType::Fn, "'fn'");
         let name = self.callable_name();
-        let generics = self.parse_generics();
+        let mut lifetimes = NodeList { start: 0, len: 0 };
+        let generics = self.parse_generics_split(&mut lifetimes);
         let mut is_variadic = false;
         let params = self.parse_parameters(&mut is_variadic);
         let returns = self.parse_function_returns();
@@ -687,7 +792,7 @@ extend Parser {
         }
         self.nrets.free();
         self.nrets = outer_nrets;
-        return self.ast.add(
+        let __decl = self.ast.add(
             Node {
                 kind: NodeKind::NODE_FUNCTION,
                 span: Span::new(
@@ -715,6 +820,8 @@ extend Parser {
                 },
             },
         );
+        self.ast.set_lifetimes(__decl, lifetimes);
+        return __decl;
     }
 
     // Prepend one synthetic `let mut <name>: <ty>;` per named return to `body`'s statements. The
@@ -785,7 +892,8 @@ extend Parser {
         let start = self.raw_peek().start();
         self.advance();
         let name = self.identifier();
-        let generics = self.parse_generics();
+        let mut lifetimes = NodeList { start: 0, len: 0 };
+        let generics = self.parse_generics_split(&mut lifetimes);
         if self.match(TokenType::Semicolon) {
             return self.ast.add(
                 Node {
@@ -828,7 +936,7 @@ extend Parser {
         self.expect(TokenType::LeftBrace, "'{'");
         let fields = self.parse_fields();
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
+        let __decl = self.ast.add(
             Node {
                 kind: NodeKind::NODE_STRUCT,
                 span: Span::new(start, self.previous_end()),
@@ -844,6 +952,8 @@ extend Parser {
                 },
             },
         );
+        self.ast.set_lifetimes(__decl, lifetimes);
+        return __decl;
     }
 
     pub fn parse_variant(self: &mut Self) NodeId {
@@ -877,7 +987,8 @@ extend Parser {
         let start = self.raw_peek().start();
         self.advance();
         let name = self.identifier();
-        let generics = self.parse_generics();
+        let mut lifetimes = NodeList { start: 0, len: 0 };
+        let generics = self.parse_generics_split(&mut lifetimes);
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
         while !self.check(TokenType::RightBrace) && !self.at_end() {
@@ -888,7 +999,7 @@ extend Parser {
         }
         let variants = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
+        let __decl = self.ast.add(
             Node {
                 kind: NodeKind::NODE_ENUM,
                 span: Span::new(start, self.previous_end()),
@@ -904,6 +1015,8 @@ extend Parser {
                 },
             },
         );
+        self.ast.set_lifetimes(__decl, lifetimes);
+        return __decl;
     }
 
     pub fn parse_type_alias(self: &mut Self, opaque: bool) NodeId {
@@ -1073,7 +1186,8 @@ extend Parser {
         let start = self.raw_peek().start();
         self.advance();
         let name = self.identifier();
-        let generics = self.parse_generics();
+        let mut lifetimes = NodeList { start: 0, len: 0 };
+        let generics = self.parse_generics_split(&mut lifetimes);
         let bounds = if self.match(TokenType::Colon) {
             self.parse_bounds();
         } else {
@@ -1112,7 +1226,7 @@ extend Parser {
         }
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
+        let __decl = self.ast.add(
             Node {
                 kind: NodeKind::NODE_INTERFACE,
                 span: Span::new(start, self.previous_end()),
@@ -1127,12 +1241,15 @@ extend Parser {
                 },
             },
         );
+        self.ast.set_lifetimes(__decl, lifetimes);
+        return __decl;
     }
 
     pub fn parse_extend(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
-        let generics = self.parse_generics();
+        let mut lifetimes = NodeList { start: 0, len: 0 };
+        let generics = self.parse_generics_split(&mut lifetimes);
         let target = self.parse_type();
         let interface_type = if self.match(TokenType::As) {
             self.parse_type();
@@ -1183,7 +1300,7 @@ extend Parser {
         }
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        return self.ast.add(
+        let __decl = self.ast.add(
             Node {
                 kind: NodeKind::NODE_EXTEND,
                 span: Span::new(start, self.previous_end()),
@@ -1197,6 +1314,8 @@ extend Parser {
                 },
             },
         );
+        self.ast.set_lifetimes(__decl, lifetimes);
+        return __decl;
     }
 
     pub fn parse_extern(self: &mut Self) NodeId {
