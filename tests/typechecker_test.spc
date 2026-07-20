@@ -1689,3 +1689,26 @@ fn str_view_pins_its_string() {
         "fn takes(s: str) usize {\n    let t = s.trim();\n    return t.len();\n}\nfn main() i32 {\n    return takes(\"  hi  \") as i32 - 2;\n}\n",
     );
 }
+
+// bug6: a borrow stored into a container that outlives its referent. The Rust argument-boundary
+// rule: `Vector<&'a T>::push(value: T)` and the container's elements are the SAME `T`, so passing a
+// too-short `&local` for `value` violates outlives -- no "does it store" flag needed. The pushed
+// borrow is tied to the container's binding; the existing scope-exit check reports the escape.
+@test
+fn stored_borrow_outlives_container() {
+    h::expect_err_msg(
+        "pushing a shorter-lived borrow into an outer Vector<&T> is rejected",
+        "fn main() i32 {\n    let mut refs = Vector::<&i32>::new();\n    {\n        let local = 91;\n        refs.push(&local);\n    }\n    let e = *refs.at(0);\n    return *e;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    // Pushing borrows that outlive the container is fine.
+    h::expect_ok(
+        "pushing borrows that outlive the Vector is accepted",
+        "fn main() i32 {\n    let a = 10;\n    let b = 20;\n    let mut refs = Vector::<&i32>::new();\n    refs.push(&a);\n    refs.push(&b);\n    return **refs.at(0) + **refs.at(1) - 30;\n}\n",
+    );
+    // A container of plain values is unaffected (the element is copied in, not borrowed).
+    h::expect_ok(
+        "a Vector of values is not region-constrained",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    {\n        let x = 5;\n        v.push(x);\n    }\n    return *v.at(0) - 5;\n}\n",
+    );
+}
