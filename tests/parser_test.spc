@@ -6,6 +6,11 @@ import lexer::token_type as *;
 import tests::harness as h;
 
 // Program item `i` (mirror of parser_test.c's `item`): the i-th node in the program's item list.
+fn item_id(a: &Ast, i: u32) NodeId {
+    let items = a.at_const(a.root).as_data.program.items;
+    return unsafe a.list(items)[i as usize];
+}
+
 fn item(a: &Ast, i: u32) &Node {
     let items = a.at_const(a.root).as_data.program.items;
     let ids = a.list(items);
@@ -685,4 +690,58 @@ fn pathological_depth() {
         s.push_str("1; }\n");
         assert(h::parse_has_error(s.as_str()), "over-deep assignment chain is rejected");
     }
+}
+
+// Lifetime syntax (`'a`). The lexer already emits `'name` as a Label (loop labels share the surface
+// form), so every slot below is a single-token `check(Label)` decision -- the grammar stays LL(1).
+// Lifetime params are parsed into a SEPARATE `lifetimes` list so `generics` stays mono-relevant only
+// (lifetimes are erased before monomorphization).
+@test
+fn lifetimes() {
+    let src = "struct Ref<'a> { pub p: &'a i32 }\nfn borrow<'a>(x: &'a i32) &'a i32 { return x; }\nfn two<'a, 'b: 'a, T>(x: &'a T, y: &'b mut T) &'a T where T: 'a { return x; }\nfn none(x: &i32) &i32 { return x; }\n";
+    let mut c = h::parse_ast(src);
+    assert(c.errors == 0, "lifetime syntax parses");
+    assert(c.ast.at_const(c.ast.root).as_data.program.items.len == 4, "lifetimes: expected 4 items");
+
+    // struct Ref<'a>: the lifetime lands in `lifetimes`, NOT in `generics`
+    let agg = item(&c.ast, 0).as_data.aggregate;
+    let agg_lts = c.ast.lifetimes_of(item_id(&c.ast, 0));
+    assert(agg_lts.len == 1, "struct lifetime param recorded");
+    assert(agg.generics.len == 0, "struct lifetime is NOT a generic param (erasure is structural)");
+    let ltp = c.ast.at_const(unsafe c.ast.list(agg_lts)[0]);
+    assert(ltp.as_data.generic_param.is_lifetime, "param flagged is_lifetime");
+
+    // the field's `&'a i32` carries the annotation on the reference type node
+    let fields = agg.members;
+    let fty = c.ast.at_const(unsafe c.ast.list(fields)[0]).as_data.field.ty;
+    assert(c.ast.at_const(fty).kind == NodeKind::NODE_REFERENCE_TYPE, "field is a reference type");
+    assert(c.ast.at_const(fty).as_data.indirect_type.lifetime != NODE_NONE, "&'a T records its lifetime");
+
+    // fn borrow<'a>(..) -> &'a i32
+    let f1 = item(&c.ast, 1).as_data.function;
+    assert(c.ast.lifetimes_of(item_id(&c.ast, 1)).len == 1, "fn lifetime param recorded");
+    assert(f1.generics.len == 0, "fn lifetime is not a generic param");
+
+    // fn two<'a, 'b: 'a, T>: two lifetimes (one with an outlives bound) + one real type param
+    let f2 = item(&c.ast, 2).as_data.function;
+    let f2_lts = c.ast.lifetimes_of(item_id(&c.ast, 2));
+    assert(f2_lts.len == 2, "two lifetime params");
+    assert(f2.generics.len == 1, "T stays the only generic param");
+    let lt_b = c.ast.at_const(unsafe c.ast.list(f2_lts)[1]);
+    assert(lt_b.as_data.generic_param.bounds.len == 1, "'b: 'a outlives bound recorded");
+    assert(f2.where_clause.len == 1, "where T: 'a recorded");
+
+    // an elided reference keeps lifetime == NODE_NONE
+    let f3 = item(&c.ast, 3).as_data.function;
+    let p0 = c.ast.at_const(unsafe c.ast.list(f3.params)[0]).as_data.parameter.ty;
+    assert(c.ast.at_const(p0).as_data.indirect_type.lifetime == NODE_NONE, "elided reference has no lifetime");
+
+    // lifetime ARGUMENTS at a use site, and lifetimes-before-types is enforced
+    assert(
+        !h::parse_has_error(
+            "struct S<'a> { pub p: &'a i32 }\nfn f() i32 { let v = 1; let s = S::<'a> { p: &v }; return *s.p; }\n",
+        ),
+        "lifetime argument parses",
+    );
+    assert(h::parse_has_error("fn f<T, 'a>(x: &'a T) {}\n"), "lifetime params must precede type params");
 }

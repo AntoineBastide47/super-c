@@ -1226,6 +1226,8 @@ extend TypeChecker {
             unsafe *mod_out = it.module;
             unsafe *decl_out = it.decl;
             let da = self.mod_ast(it.module);
+            // `generics` never contains lifetime params (the parser splits them into `lifetimes`),
+            // so it stays index-aligned with the erased-lifetime `it.args`.
             let gens = unsafe (*da).at_const(it.decl).as_data.aggregate.generics;
             let mut nn: i32 = 0;
             let mut i: u32 = 0;
@@ -1566,7 +1568,11 @@ extend TypeChecker {
         } else if dk == NodeKind::NODE_GENERIC_PARAM {
             let gp = unsafe (*a).at_const(decl).as_data.generic_param;
             // In value position a const-generic param has its declared type (e.g. usize); a type param is TYPE_GENERIC.
-            if gp.is_const {
+            // A LIFETIME param has no type at all -- lifetimes are erased before monomorphization, so it must never
+            // become a TYPE_GENERIC (that would make it a mono argument and mangle into the emitted symbol).
+            if gp.is_lifetime {
+                result = TYPE_NONE;
+            } else if gp.is_const {
                 result = self.lower_type_in(m, gp.const_type);
             } else {
                 result = self.named_type_of(m, decl);

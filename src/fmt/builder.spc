@@ -423,10 +423,14 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
             v.push(b_type(b, n.as_data.indirect_type.ty));
         },
         NODE_REFERENCE_TYPE => {
+            // `&T` / `&mut T`, with an optional lifetime binding first: `&'a T` / `&'a mut T`.
+            v.push(b.p.txt("&"));
+            if n.as_data.indirect_type.lifetime != NODE_NONE {
+                v.push(node_text(b, n.as_data.indirect_type.lifetime));
+                v.push(b.p.txt(" "));
+            }
             if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
-                v.push(b.p.txt("&mut "));
-            } else {
-                v.push(b.p.txt("&"));
+                v.push(b.p.txt("mut "));
             }
             v.push(b_type(b, n.as_data.indirect_type.ty));
         },
@@ -547,13 +551,24 @@ fn b_generic_param(b: &mut Builder, id: NodeId) d::DocId {
     return r;
 }
 
-fn b_generics(b: &mut Builder, gens: NodeList, v: &mut Vector<d::DocId>) {
-    if gens.len == 0 {
+// Lifetime params live in their own list (erasure is structural), but they are SOURCE-level part of
+// the same `<...>` and must print back merged, lifetimes first: `<'a, 'b: 'a, T>`.
+fn b_generics_lt(b: &mut Builder, lts: NodeList, gens: NodeList, v: &mut Vector<d::DocId>) {
+    if lts.len == 0 && gens.len == 0 {
         return;
     }
     let mut gs = Vector::<d::DocId>::new();
-    b_each(b, gens, 4, &mut gs);
+    if lts.len != 0 {
+        b_each(b, lts, 4, &mut gs);
+    }
+    if gens.len != 0 {
+        b_each(b, gens, 4, &mut gs);
+    }
     v.push(b_comma_list(b, "<", &gs, ">", false));
+}
+
+fn b_generics(b: &mut Builder, gens: NodeList, v: &mut Vector<d::DocId>) {
+    b_generics_lt(b, NodeList { start: 0, len: 0 }, gens, v);
 }
 
 // ---- patterns -------------------------------------------------------------------------------------
@@ -1381,7 +1396,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             }
             v.push(b.p.txt("fn "));
             v.push(node_text(b, f.name));
-            b_generics(b, f.generics, &mut v);
+            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), f.generics, &mut v);
             let mut ps = Vector::<d::DocId>::new();
             b_each(b, f.params, 3, &mut ps);
             if f.is_variadic {
@@ -1430,7 +1445,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
                 v.push(b.p.txt("struct "));
             }
             v.push(node_text(b, a.name));
-            b_generics(b, a.generics, &mut v);
+            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), a.generics, &mut v);
             if a.is_tuple {
                 let mut fz = Vector::<d::DocId>::new();
                 for i in 0..a.members.len {
@@ -1482,7 +1497,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             }
             v.push(b.p.txt("interface "));
             v.push(node_text(b, itf.name));
-            b_generics(b, itf.generics, &mut v);
+            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), itf.generics, &mut v);
             if itf.bounds.len > 0 {
                 v.push(b.p.txt(": "));
                 for i in 0..itf.bounds.len {
@@ -1500,7 +1515,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             let e = n.as_data.extend_def;
             v.push(b.p.txt("extend"));
             if e.generics.len > 0 {
-                b_generics(b, e.generics, &mut v);
+                b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), e.generics, &mut v);
             }
             v.push(b.p.txt(" "));
             v.push(b_type(b, e.target_type));
