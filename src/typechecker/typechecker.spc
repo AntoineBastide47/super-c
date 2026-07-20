@@ -4837,6 +4837,43 @@ extend TypeChecker {
         };
     }
 
+    // When a method/index result REBORROWS its receiver -- the receiver is itself a view carrying a
+    // borrow, so the result views the same underlying storage -- the result must INHERIT the borrows
+    // the receiver holds of the real container, not silently drop them. `let s = v[0..3]` retains a
+    // borrow of `v` tied to `s`; a sub-view `let sub = s[0..2]` reborrows `s`, and without inheriting
+    // `s`'s borrow of `v`, `sub` stops pinning `v` the moment `s`'s own borrow ends -> `v` reallocates
+    // and `sub` dangles. Re-expose each borrow held by the receiver as a fresh transient borrow rooted
+    // at the same container, so the enclosing `let`/store ties it to the result binding.
+    fn tc_reborrow_inherit(self: &mut Self, recv_n: NodeId, origin: NodeId) {
+        let root = self.tc_place_base_binding(recv_n);
+        if root == NODE_NONE {
+            return;
+        }
+        let n = self.nborrows;
+        for i in 0..n {
+            let b = unsafe self.borrows[i as usize];
+            if b.binding == root && b.root != NODE_NONE {
+                self.borrow_push(b.root, b.kind, b.place, origin);
+            }
+        }
+    }
+
+    // A `[..]` slice result views its source's storage: mint (source owns its data) or inherit (source
+    // is itself a view) a borrow of the source so the container cannot be reallocated while the slice
+    // is live. Shared by both range exits -- an `index_range` method result and a `prelude_slice_type`
+    // result (the latter covers a slice-of-a-slice, which `slice_kind` handles before index_range).
+    fn tc_slice_result_borrows(self: &mut Self, obj_n: NodeId, result: TypeId) {
+        if result == TYPE_NONE || !self.tc_carries_borrow(result) {
+            return;
+        }
+        let rty = self.strip(unsafe (*self.cur_ast()).type_of(obj_n));
+        if !self.tc_carries_borrow(rty) {
+            self.borrow_create(obj_n, BORROW_SHARED, obj_n);
+        } else {
+            self.tc_reborrow_inherit(obj_n, obj_n);
+        }
+    }
+
     fn place_through_binding(self: &Self, place0: NodeId) NodeId {
         let a = self.cur_ast();
         let mut place = place0;
@@ -5332,7 +5369,7 @@ extend TypeChecker {
     // (`&i32`), the argument passed for `value` must outlive the receiver -- by variance, whether or
     // not push actually stores it. Returns true when pdecl's declared type is exactly a generic
     // parameter that the receiver aggregate instantiates with a borrow-carrying type.
-    fn tc_param_shares_recv_region(self: &mut Self, md: DefId, recv_ty: TypeId, idx: i32) bool {
+    fn tc_param_shares_recv_region(self: &mut Self, md: DefId, recv_ty: TypeId, idx: i32, arg: NodeId) bool {
         let fa = self.mod_ast(md.module);
         let fnn = unsafe (*fa).at_const(md.node);
         if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.params.len as i32 <= idx {
@@ -5362,8 +5399,153 @@ extend TypeChecker {
             }
         }
         // Receiver-inherited type variable: is it a borrow-carrying type in THIS instantiation?
+        // A capturing closure argument counts even when its substituted type is `dyn fn` (which
+        // erases the captured borrow) -- the closure VALUE carries a borrow of its captured referent,
+        // and storing it as an element ties that referent to the container just as `push(&local)` does.
         let subst = self.tc_method_param(recv_ty, md, idx);
-        return self.tc_carries_borrow(subst);
+        return self.tc_carries_borrow(subst) || arg != NODE_NONE && self.tc_expr_is_closure(arg);
+    }
+
+    // The referent a `&mut <place>`/`&<place>` argument points at (its base binding), or the arg's own
+    // base binding when a place is passed directly. Used to region-tie borrows stored through it.
+    fn tc_ref_arg_referent(self: &Self, arg0: NodeId) NodeId {
+        let a = self.cur_ast();
+        let mut e = arg0;
+        loop {
+            let n = unsafe (*a).at_const(e);
+            if n.kind == NodeKind::NODE_CAST {
+                e = n.as_data.cast.expression;
+            } else if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                e = n.as_data.unary.operand;
+            } else {
+                break;
+            }
+        }
+        let n = unsafe (*a).at_const(e);
+        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Ampersand {
+            return self.tc_place_base_binding(n.as_data.unary.operand);
+        }
+        return self.tc_place_base_binding(e);
+    }
+
+    // Does the pointee `elem` of a `&mut` storage parameter mention the type variable (`vd`,`vm`)?
+    // Either it IS that variable (`&mut T`) or it is an aggregate carrying it as a generic argument
+    // (`&mut Vector<T>`, `&mut Cell<T>`). Storing a value of that variable through such a parameter
+    // stores it into `elem`'s container.
+    fn tc_ref_covers_generic(self: &mut Self, elem: TypeId, vd: NodeId, vm: ModuleId) bool {
+        if elem == TYPE_NONE {
+            return false;
+        }
+        if self.type_at(elem).kind == TypeKind::TYPE_GENERIC && self.type_at(elem).as_data.decl == vd && self.type_at(
+            elem,
+        ).module == vm {
+            return true;
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if self.aggregate_of(
+            self.strip(elem),
+            &mut om,
+            &mut od,
+            (&gp[0]) as *mut DefId,
+            (&ga[0]) as *mut TypeId,
+            &mut gn,
+        ) {
+            for gi in 0..gn {
+                let g = ga[gi as usize];
+                if self.type_at(g).kind == TypeKind::TYPE_GENERIC && self.type_at(g).as_data.decl == vd && self.type_at(
+                    g,
+                ).module == vm {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Family B: a borrow passed for a bare value parameter `x: T` that ANOTHER parameter stores through
+    // (`dst: &mut T` or `dst: &mut C<..T..>`) must outlive that storage's referent -- the Rust
+    // argument-boundary variance rule across a plain function boundary (bug6 covered only the receiver-
+    // as-container case of a method). Tie this call's argument borrows to the storage argument's
+    // referent region; the existing scope-exit check then reports a referent that dies while the
+    // container holding it lives on. Excludes the storage arg's own borrow (rooted at the container).
+    fn tc_tie_stored_borrow_args(
+        self: &mut Self,
+        fmod: ModuleId,
+        fdecl: NodeId,
+        params: NodeList,
+        args: NodeList,
+        skip: u32,
+        arg_bm: u32,
+        arg_end: u32,
+    ) {
+        if arg_end <= arg_bm {
+            return;
+        }
+        let fa = self.mod_ast(fmod);
+        if unsafe (*fa).at_const(fdecl).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        for ps in 0..params.len {
+            if ps < skip {
+                continue;
+            }
+            let sa = ps - skip;
+            if sa >= args.len {
+                continue;
+            }
+            let ps_ty = unsafe (*fa).at_const(unsafe (*fa).list(params)[ps as usize]).as_data.parameter.ty;
+            if ps_ty == NODE_NONE {
+                continue;
+            }
+            let lt = self.lower_type_in(fmod, ps_ty);
+            if lt == TYPE_NONE || self.type_at(lt).kind != TypeKind::TYPE_REFERENCE || self.type_at(lt).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
+                continue;
+            }
+            let elem = self.type_at(lt).as_data.elem;
+            let mut stores = false;
+            for pv in 0..params.len {
+                if pv == ps || pv < skip {
+                    continue;
+                }
+                let va = pv - skip;
+                if va >= args.len {
+                    continue;
+                }
+                let pv_ty = unsafe (*fa).at_const(unsafe (*fa).list(params)[pv as usize]).as_data.parameter.ty;
+                if pv_ty == NODE_NONE {
+                    continue;
+                }
+                let vt = self.lower_type_in(fmod, pv_ty);
+                if vt == TYPE_NONE || self.type_at(vt).kind != TypeKind::TYPE_GENERIC {
+                    continue;
+                }
+                let vd = self.type_at(vt).as_data.decl;
+                let vm = self.type_at(vt).module;
+                if self.tc_ref_covers_generic(elem, vd, vm) {
+                    stores = true;
+                }
+            }
+            if !stores {
+                continue;
+            }
+            let sref = self.tc_ref_arg_referent(unsafe (*self.cur_ast()).list(args)[sa as usize]);
+            if sref == NODE_NONE {
+                continue;
+            }
+            let region = self.tc_binding_depth(sref) as u16;
+            for bi in arg_bm..arg_end {
+                let b = unsafe self.borrows[bi as usize];
+                if b.binding == NODE_NONE && b.root != NODE_NONE && b.root != sref {
+                    unsafe self.borrows[bi as usize].binding = sref;
+                    unsafe self.borrows[bi as usize].region = region;
+                }
+            }
+            return;
+        }
     }
 
     // Region-aware return check. `addr_escape` only recognizes a reference taken DIRECTLY of a local
@@ -5378,7 +5560,10 @@ extend TypeChecker {
     fn tc_check_return_region(self: &mut Self, vid: NodeId, bm: u32) {
         let a = self.cur_ast();
         let vt = unsafe (*a).type_of(vid);
-        if !self.tc_carries_borrow(vt) {
+        // A returned capturing closure carries its captured borrows even though its stored type
+        // (`dyn fn`) does not advertise them -- check_closure re-exposed them as transient borrows in
+        // [bm, nborrows), so scan those too (a closure returning a `&local` capture escapes).
+        if !self.tc_carries_borrow(vt) && !self.tc_expr_is_closure(vid) {
             return; // an owned value carries no borrow out
         }
         // The returned value carries a borrow rooted at a local if EITHER the borrow was created
@@ -7008,6 +7193,8 @@ extend TypeChecker {
                 let rty = self.strip(unsafe (*a).type_of(recv_n));
                 if !self.tc_carries_borrow(rty) {
                     self.borrow_create(recv_n, BORROW_SHARED, recv_n);
+                } else {
+                    self.tc_reborrow_inherit(recv_n, recv_n);
                 }
             }
         }
@@ -7019,7 +7206,15 @@ extend TypeChecker {
         if pck == NodeKind::NODE_MEMBER && skip == 1 && params.len > 1 {
             let recv_n = unsafe (*a).at_const(callee_id).as_data.member.object;
             let recv_ty = if_ty(recv_n != NODE_NONE, unsafe (*a).type_of(recv_n), TYPE_NONE);
-            if recv_n != NODE_NONE && self.tc_carries_borrow(recv_ty) {
+            // Enter also when an argument is a capturing closure: its `dyn fn` type hides the captured
+            // borrow, so tc_carries_borrow(recv_ty) alone would skip `Vector<Box<dyn fn>>::push(clos)`.
+            let mut arg_closure = false;
+            for ci in 0..args.len {
+                if self.tc_expr_is_closure(unsafe (*a).list(args)[ci as usize]) {
+                    arg_closure = true;
+                }
+            }
+            if recv_n != NODE_NONE && (self.tc_carries_borrow(recv_ty) || arg_closure) {
                 let mut recv_root = NODE_NONE;
                 if unsafe (*a).at_const(recv_n).kind == NodeKind::NODE_IDENTIFIER {
                     let rd = unsafe (*a).resolution_def(recv_n);
@@ -7033,7 +7228,8 @@ extend TypeChecker {
                 if recv_root != NODE_NONE && mdef.node != NODE_NONE {
                     let mut stores = false;
                     for pi in 1..params.len {
-                        if self.tc_param_shares_recv_region(mdef, recv_ty, pi as i32) {
+                        let aid = if_node(pi - 1 < args.len, unsafe (*a).list(args)[(pi - 1) as usize], NODE_NONE);
+                        if self.tc_param_shares_recv_region(mdef, recv_ty, pi as i32, aid) {
                             stores = true;
                         }
                     }
@@ -7053,6 +7249,11 @@ extend TypeChecker {
                     }
                 }
             }
+        }
+        // Family B: a borrow stored through a `&mut` container/slot PARAMETER (as opposed to the method
+        // receiver handled above) -- covers plain functions like `push_into(&mut v, &local)`.
+        if named {
+            self.tc_tie_stored_borrow_args(fmod, fdecl, params, args, skip, arg_bm, arg_end);
         }
         return ret;
     }
@@ -8594,12 +8795,13 @@ extend TypeChecker {
             } else {
                 self.borrow_transfer_ref(bd.right, ld.node);
             }
-        } else if lt == TYPE_NONE && self.tc_carries_borrow(l) {
+        } else if lt == TYPE_NONE && self.tc_carries_borrow(l) || self.tc_expr_is_closure(bd.right) {
             // Assigning a borrow-carrying value into a PLACE that is not a plain identifier
             // (`s.r = &inner`, a reference-typed field/element of a longer-lived aggregate): tie the
             // stored borrow to the place's root binding + region, exactly like `let`. The ref_rebind
             // path above only fires for identifier LHS, so without this a borrow stored through a
-            // field/index escapes unchecked.
+            // field/index escapes unchecked. A capturing closure RHS is tied the same way even though
+            // its `dyn fn` LHS type carries no borrow -- check_closure re-exposed its captured borrows.
             let proot = self.tc_place_base_binding(bd.left);
             if proot != NODE_NONE && self.nborrows > bm {
                 let region = self.tc_binding_depth(proot) as u16;
@@ -8739,9 +8941,44 @@ extend TypeChecker {
                 self.ms_bit_set(cid);
             }
         }
+        // A closure captures its free variables BY COPY into its environment. When a captured value
+        // holds a borrow (a `&T` binding, or a struct/view carrying one), the environment carries
+        // that borrow -- but unlike a struct field, it is ERASED from the closure's stored type
+        // (`dyn fn` / a bare `fn` bound), so no later type-based check can recover it. Re-expose each
+        // captured borrow as a fresh transient borrow rooted at the same referent; the enclosing
+        // `let`/assignment that stores the closure then ties it to the destination's region (see
+        // tc_expr_is_closure), so a closure stored past its captured referent's scope fails scope
+        // exit exactly like a stored reference field. A closure that is merely called or passed
+        // (not stored) leaves these transient and they release with the statement.
+        let cap_bw = self.nborrows;
+        for i in 0..caps.len {
+            let cid = unsafe (*a).list(caps)[i as usize];
+            for b in 0..cap_bw {
+                let bb = unsafe self.borrows[b as usize];
+                if bb.binding == cid && bb.root != NODE_NONE {
+                    self.borrow_push(bb.root, bb.kind, bb.place, id);
+                }
+            }
+        }
         return unsafe (*self.cur_ast()).intern_type(
             Ty { kind: TypeKind::TYPE_FUNCTION, module: self.ast.module, as_data: TyAs { decl: id } },
         );
+    }
+
+    // Is `e` a closure literal (possibly wrapped in `move`/`unsafe`)? Used at store sites to decide
+    // whether the RHS may have re-exposed captured borrows (check_closure) that must be tied to the
+    // destination's region -- the closure's own stored type is `dyn fn` and cannot carry that borrow.
+    fn tc_expr_is_closure(self: &Self, e0: NodeId) bool {
+        let a = self.cur_ast();
+        let mut e = e0;
+        loop {
+            let n = unsafe (*a).at_const(e);
+            if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                e = n.as_data.unary.operand;
+            } else {
+                return n.kind == NodeKind::NODE_CLOSURE;
+            }
+        }
     }
 
     fn check_index(self: &mut Self, id: NodeId, addr_ctx: bool, place_use: bool) TypeId {
@@ -8875,13 +9112,18 @@ extend TypeChecker {
                     self.err_unsafe(sp, "slicing an array with a non-constant range");
                 }
             }
-            if user_result != TYPE_NONE {
-                return user_result;
+            // A `[..]` view borrows its source's storage, but `index_range` dispatches INLINE here
+            // rather than through check_call, so the receiver-result-borrow hook never sees it. Pin
+            // the source (or, when the source is itself a view like `s[0..2]`, inherit its container
+            // borrow -- the reborrow rule). Both the `index_range` result and the `prelude_slice_type`
+            // result (slice-of-a-slice, which `slice_kind` routes here before index_range) go through
+            // the shared hook.
+            let mut sresult = user_result;
+            if sresult == TYPE_NONE && elem != TYPE_NONE {
+                sresult = self.prelude_slice_type(elem, false);
             }
-            if elem != TYPE_NONE {
-                return self.prelude_slice_type(elem, false);
-            }
-            return TYPE_NONE;
+            self.tc_slice_result_borrows(obj_n, sresult);
+            return sresult;
         }
         let idx = self.check_expr(index_n);
         let mut overloaded = false;

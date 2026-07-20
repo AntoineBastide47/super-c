@@ -5,7 +5,7 @@
 // `s.ptr` / `s.len` are usable directly, with the methods mirroring the `str` / `Vector` surface.
 
 // A borrowed, read-only view over `len` consecutive `T` at `ptr`.
-pub struct Slice<T> {
+pub struct Slice<'a, T> {
     pub ptr: *const T, // first element
     pub len: usize, // number of elements
 }
@@ -72,7 +72,7 @@ extend<T> Slice<T> {
 }
 
 // A borrowed, writable view over `len` consecutive `T` at `ptr`.
-pub struct SliceMut<T> {
+pub struct SliceMut<'a, T> {
     pub ptr: *mut T, // first element
     pub len: usize, // number of elements
 }
