@@ -143,6 +143,11 @@ pub struct TypeChecker {
     pub mret_n: u8,
     pub mret_total: u32,
     pub unsafe_depth: u32,
+    // Two-phase-borrow watermark. While a method call's `&mut self` receiver borrow is being checked,
+    // this holds the borrow-array index at which THIS call's argument borrows begin; a reserved `&mut`
+    // does not conflict with the shared borrows its own arguments produced (`v.push(v.len())`,
+    // `self.m(self.field.as_str())`). 0xFFFFFFFF = not in a receiver check.
+    pub tc_twophase_wm: u32,
     pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
     pub len_reported: Vector<u64>, // array-length nodes already diagnosed ((module<<32)|node; resolve_type revisits)
     pub lint: bool,
@@ -383,6 +388,7 @@ extend TypeChecker {
             mret_n: 0,
             mret_total: 0,
             unsafe_depth: 0,
+            tc_twophase_wm: 0xFFFFFFFF,
             unsafe_used: 0,
             len_reported: Vector::<u64>::new(),
             lint: false,
@@ -4916,6 +4922,13 @@ extend TypeChecker {
             ) {
                 continue;
             }
+            // Two-phase borrow: a reserved receiver `&mut` does not conflict with a TRANSIENT shared
+            // borrow this same call produced while evaluating its arguments (indices >= the watermark).
+            // Those borrows were spent computing the argument values; the `&mut` only truly activates
+            // once the call runs.
+            if i >= self.tc_twophase_wm && b.kind == BORROW_SHARED && b.binding == NODE_NONE {
+                continue;
+            }
             if self.borrow_dead_after(b, origin) {
                 self.borrow_tombstone_at(i);
                 continue;
@@ -6723,6 +6736,7 @@ extend TypeChecker {
             }
         }
         let args = unsafe (*a).at_const(id).as_data.call.args;
+        let arg_bm = self.borrow_mark(); // two-phase: borrows created below are this call's own arg borrows
         for i in 0..args.len {
             let aid = unsafe (*a).list(args)[i as usize];
             if self.tc_is_iface_assoc_call(aid) || unsafe (*a).at_const(aid).kind == NodeKind::NODE_CLOSURE {
@@ -6829,9 +6843,13 @@ extend TypeChecker {
                 skip = 1;
             }
         }
-        // receiver move/borrow bookkeeping for methods
+        // receiver move/borrow bookkeeping for methods (two-phase: the receiver's reserved &mut is
+        // checked with this call's argument borrows exempted -- see tc_twophase_wm)
         if pck == NodeKind::NODE_MEMBER && skip == 1 && unsafe (*a).at_const(callee_id).as_data.member.object != NODE_NONE {
+            let saved_tp = self.tc_twophase_wm;
+            self.tc_twophase_wm = arg_bm;
             self.check_call_receiver(callee_id, fmod, params, returns);
+            self.tc_twophase_wm = saved_tp;
         }
         // generic-instance receiver substitution + generic call inference
         let ret = self.check_call_finish(
