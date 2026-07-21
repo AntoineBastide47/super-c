@@ -47,7 +47,7 @@ fn wadd(x: u32, y: u32) u32 {
 }
 
 extend DocPool {
-    pub fn new(src: *const u8) DocPool {
+    pub fn new<'a>(src: *const u8) DocPool<'a> {
         let mut p = DocPool { docs: Vector::<DocNode>::new(), kids: Vector::<DocId>::new(), src: src };
         // Index 0 is the shared Nil.
         p.docs.push(DocNode { kind: DocKind::DOC_NIL, a: 0, b: 0, w: 0, s: "" });

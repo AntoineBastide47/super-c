@@ -112,7 +112,7 @@ pub enum TokenType {
 }
 
 extend TokenType {
-    pub fn name(self: Self) str {
+    pub fn name(self: Self) str<'static> {
         return switch self {
             Identifier => "Identifier",
             Underscore => "Underscore",

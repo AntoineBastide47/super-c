@@ -447,7 +447,7 @@ const fn mul_ovf(a: i64, b: i64) OvfRes {
 // --- ConstEval methods --------------------------------------------------------------------------
 
 extend ConstEval {
-    pub fn new(pkg: *mut loader::Package, max_steps: u32, max_mem_bytes: u64) ConstEval {
+    pub fn new<'a>(pkg: *mut loader::Package, max_steps: u32, max_mem_bytes: u64) ConstEval<'a> {
         let count = unsafe (*pkg).modules.len();
         let mut ce = ConstEval {
             pkg: pkg,

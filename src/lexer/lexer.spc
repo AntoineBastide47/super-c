@@ -61,7 +61,7 @@ pub struct Lexer<'a> {
 
 extend Lexer {
     // Creates a new Lexer instance used to lex the given source file's content
-    pub fn new(source: &mut String, file: str) Lexer {
+    pub fn new<'a>(source: &'a mut String, file: str<'a>) Lexer<'a> {
         source.pad_nul(SOURCE_PAD);
         return Lexer {
             bytes: source.as_str(),

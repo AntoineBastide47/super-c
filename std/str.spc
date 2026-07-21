@@ -23,13 +23,13 @@ pub struct str<'a> {
 extend str {
     // Construct a view over `len` bytes at `ptr`. The building block for the rest of std and for callers
     // bridging from a raw C buffer -- the fields are private, so this is the only way to make a `str`.
-    pub const fn from_raw(ptr: *const u8, len: usize) str {
+    pub const fn from_raw<'a>(ptr: *const u8, len: usize) str<'a> {
         return str { ptr: ptr, len: len };
     }
 
     // View a NUL-terminated C string as a `str` (length found by scanning to the NUL). Zero-copy:
     // the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
-    pub const fn from_cstr(s: *const char) str {
+    pub const fn from_cstr<'a>(s: *const char) str<'a> {
         let mut n: usize = 0;
         while unsafe s[n] != 0 as char {
             n += 1;
@@ -256,7 +256,7 @@ extend str as Hash {
 
 extend str as Default {
     // The empty view (a null, zero-length `str`).
-    pub const fn default() str {
+    pub const fn default() str<'static> {
         return str { ptr: null, len: 0 };
     }
 }

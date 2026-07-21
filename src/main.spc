@@ -225,7 +225,7 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>) String {
 // Convention fallback for rooted loads: when a src/ directory exists (manifest layout), it serves
 // as the secondary import root so tests/ and bench/ files linted from the project root resolve
 // their compiler-module imports.
-fn lint_alt() str {
+fn lint_alt() str<'static> {
     if unsafe shim::sc_stat_isdir("src".ptr() as *const char) == 1 {
         return "src";
     }
