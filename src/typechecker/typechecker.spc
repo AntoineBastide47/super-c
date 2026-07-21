@@ -143,6 +143,11 @@ pub struct TypeChecker {
     pub mret_n: u8,
     pub mret_total: u32,
     pub unsafe_depth: u32,
+    // Index into `errors` where the CURRENT function's diagnostics begin. Region/lifetime errors are
+    // discovered after the body has been walked (the solver only knows once its constraints are
+    // solved), so they are inserted back into source order within this function's range rather than
+    // appended after every other diagnostic. See tc_region_diag / diag::Errors::emit_ordered.
+    pub err_wm: usize,
     // Two-phase-borrow watermark. While a method call's `&mut self` receiver borrow is being checked,
     // this holds the borrow-array index at which THIS call's argument borrows begin; a reserved `&mut`
     // does not conflict with the shared borrows its own arguments produced (`v.push(v.len())`,
@@ -392,6 +397,7 @@ extend TypeChecker {
             mret_n: 0,
             mret_total: 0,
             unsafe_depth: 0,
+            err_wm: 0,
             tc_twophase_wm: 0xFFFFFFFF,
             unsafe_used: 0,
             len_reported: Vector::<u64>::new(),
@@ -4594,7 +4600,7 @@ extend TypeChecker {
             }
             if b.binding != NODE_NONE && b.root != NODE_NONE && self.tc_binding_depth(b.root) >= d {
                 let sp = unsafe (*self.cur_ast()).at_const(b.origin).span;
-                self.errors.emit(
+                self.tc_region_diag(
                     sp.start,
                     sp.end - sp.start,
                     format(
@@ -5740,7 +5746,7 @@ extend TypeChecker {
             if self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
                 what = "a reference borrowed".ptr() as *const char;
             }
-            self.errors.emit(
+            self.tc_region_diag(
                 sp.start,
                 sp.end - sp.start,
                 format("returning {} from a local, which does not outlive the call", diag::cstr(what)),
@@ -7411,14 +7417,15 @@ extend TypeChecker {
                                 }
                                 if !self.tc_lifetime_outlives(self.tc_value_source_lifetime(aid), elt) {
                                     let asp = unsafe (*a).at_const(aid).span;
-                                    self.errors.emit(
+                                    let di = self.tc_region_diag(
                                         asp.start,
                                         asp.end - asp.start,
                                         format(
                                             "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",
                                         ),
                                     );
-                                    self.errors.note(
+                                    self.tc_region_note(
+                                        di,
                                         format(
                                             "tie the lifetimes with a shared parameter, e.g. `fn f<'a>(dst: &mut Vector<&'a T>, src: &'a T)`",
                                         ),
@@ -8937,6 +8944,17 @@ extend TypeChecker {
         self.errors.note(format("add a '_' arm to cover the remaining values"));
     }
 
+    // Record a region/lifetime diagnostic. These are the diagnostics the region SOLVER will produce
+    // once it lands: it only knows a borrow outlives its referent after the whole body is walked and
+    // its constraints are solved, so the message must be placed back into source order within this
+    // function's range rather than appended at the end. Returns the index, for tc_region_note.
+    fn tc_region_diag(self: &mut Self, at: u32, len: u32, msg: String) usize {
+        return self.errors.emit_ordered(self.err_wm, at, len, msg);
+    }
+    fn tc_region_note(self: &mut Self, index: usize, msg: String) {
+        self.errors.note_at(index, msg);
+    }
+
     // ---- fn_sig_regions: signature lifetime relationships + body-side elision enforcement ----
     // A lifetime is identified by its NAME (function-scoped; lifetimes are never resolved). An empty
     // span means "elided" -- a fresh, distinct lifetime that outlives nothing it is not explicitly
@@ -9231,14 +9249,15 @@ extend TypeChecker {
             return;
         }
         let sp = unsafe (*self.cur_ast()).at_const(place).span;
-        self.errors.emit(
+        let di = self.tc_region_diag(
             sp.start,
             sp.end - sp.start,
             format(
                 "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",
             ),
         );
-        self.errors.note(
+        self.tc_region_note(
+            di,
             format("tie the lifetimes with a shared parameter, e.g. `fn f<'a>(dst: &mut T<'a>, src: &'a U)`"),
         );
     }
@@ -11449,8 +11468,10 @@ extend TypeChecker {
                 }
                 let saved = self.current_returns;
                 let savedfn = self.current_fn;
+                let saved_wm = self.err_wm;
                 self.current_returns = fnd.returns;
                 self.current_fn = id;
+                self.err_wm = self.errors.errors.len();
                 for mi in 0..self.nmoved {
                     self.ms_bit_clear(unsafe self.moved[mi as usize]);
                 }
@@ -11484,6 +11505,7 @@ extend TypeChecker {
                 self.ndefers = 0;
                 self.current_returns = saved;
                 self.current_fn = savedfn;
+                self.err_wm = saved_wm;
             },
             NODE_STRUCT | NODE_ENUM => {
                 let agg = unsafe (*a).at_const(id).as_data.aggregate;

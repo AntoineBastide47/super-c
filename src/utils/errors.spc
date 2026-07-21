@@ -97,6 +97,33 @@ extend Errors {
         self.lens.push(len);
     }
 
+    // Record a diagnostic that was produced OUT of source order -- a region/lifetime error the solver
+    // only discovers after the whole function body has been walked. `from` is the index the enclosing
+    // function's diagnostics start at; the message is inserted at the first position in [from, len)
+    // whose span starts after `at`, so it lands where a reader expects it instead of after every other
+    // diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the
+    // index it landed at, for `note_at`.
+    @c.cold
+    pub fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
+        if self.errors.len() >= ERRORS_MAX {
+            return ERRORS_MAX;
+        }
+        let n = self.errors.len();
+        let mut k = if from < n {
+            from;
+        } else {
+            n;
+        };
+        while k < n && self.starts[k] <= at {
+            k = k + 1;
+        }
+        self.errors.insert(k, msg);
+        self.notes.insert(k, String::new());
+        self.starts.insert(k, at);
+        self.lens.insert(k, len);
+        return k;
+    }
+
     // Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
     @c.cold
     pub fn note(self: &mut Self, msg: String) {
@@ -106,6 +133,17 @@ extend Errors {
         }
         self.notes[n - 1].push_str("\n  = note: ");
         self.notes[n - 1].push_string(&msg);
+    }
+
+    // Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned) -- `note` always
+    // targets the last one, which is wrong once a diagnostic has been inserted out of order.
+    @c.cold
+    pub fn note_at(self: &mut Self, index: usize, msg: String) {
+        if index >= self.notes.len() {
+            return;
+        }
+        self.notes[index].push_str("\n  = note: ");
+        self.notes[index].push_string(&msg);
     }
 
     @c.cold
