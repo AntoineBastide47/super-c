@@ -450,6 +450,7 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
             v.push(b.p.txt("]"));
         },
         NODE_FUNCTION_TYPE => {
+            b_hrtb(b, id, &mut v);
             if n.as_data.function_type.is_move {
                 v.push(b.p.txt("fn move"));
             } else {
@@ -553,6 +554,19 @@ fn b_generic_param(b: &mut Builder, id: NodeId) d::DocId {
 
 // Lifetime params live in their own list (erasure is structural), but they are SOURCE-level part of
 // the same `<...>` and must print back merged, lifetimes first: `<'a, 'b: 'a, T>`.
+// `for<'a, 'b> ` -- the higher-ranked prefix of a bound, held in the lifetime side table.
+fn b_hrtb(b: &mut Builder, id: NodeId, v: &mut Vector<d::DocId>) {
+    let lts = unsafe (*b.ast).lifetimes_of(id);
+    if lts.len == 0 {
+        return;
+    }
+    let mut gs = Vector::<d::DocId>::new();
+    b_each(b, lts, 4, &mut gs);
+    v.push(b.p.txt("for"));
+    v.push(b_comma_list(b, "<", &gs, ">", false));
+    v.push(b.p.txt(" "));
+}
+
 fn b_generics_lt(b: &mut Builder, lts: NodeList, gens: NodeList, v: &mut Vector<d::DocId>) {
     if lts.len == 0 && gens.len == 0 {
         return;
@@ -565,10 +579,6 @@ fn b_generics_lt(b: &mut Builder, lts: NodeList, gens: NodeList, v: &mut Vector<
         b_each(b, gens, 4, &mut gs);
     }
     v.push(b_comma_list(b, "<", &gs, ">", false));
-}
-
-fn b_generics(b: &mut Builder, gens: NodeList, v: &mut Vector<d::DocId>) {
-    b_generics_lt(b, NodeList { start: 0, len: 0 }, gens, v);
 }
 
 // ---- patterns -------------------------------------------------------------------------------------
@@ -1533,7 +1543,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             }
             v.push(b.p.txt("type "));
             v.push(node_text(b, t.name));
-            b_generics(b, t.generics, &mut v);
+            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), t.generics, &mut v);
             if t.ty != NODE_NONE {
                 v.push(b.p.txt(" = "));
                 v.push(b_type(b, t.ty));

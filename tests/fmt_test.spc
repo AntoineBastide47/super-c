@@ -158,4 +158,11 @@ fn golden_lifetimes() {
         "fn two<'a,'b:'a,T>(x:&'a T,y:&'b T)&'a T where T:'a{return x;}",
         "fn two<'a, 'b: 'a, T>(x: &'a T, y: &'b T) &'a T where T: 'a {\n    return x;\n}\n",
     );
+    // higher-ranked bound: the `for<..>` prefix must survive, or fmt would silently drop the ranking
+    expect_fmt(
+        "fn apply<F:for<'a>fn(&'a i32)i32>(f:F,x:&i32)i32{return f(x);}",
+        "fn apply<F: for<'a> fn(&'a i32) i32>(f: F, x: &i32) i32 {\n    return f(x);\n}\n",
+    );
+    // a lifetime-parameterised associated type (GAT)
+    expect_fmt("interface Lend{type Item<'a>;}", "interface Lend {\n    type Item<'a>;\n}\n");
 }

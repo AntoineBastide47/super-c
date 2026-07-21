@@ -482,13 +482,60 @@ extend Parser {
         return NODE_NONE;
     }
 
+    // `for<'a, 'b>` -- the HIGHER-RANKED prefix of a bound. These lifetimes are bound by the BOUND
+    // rather than the enclosing item: the value must satisfy it for EVERY choice of them, which is what
+    // lets a closure bound accept a reference of any lifetime instead of one fixed at instantiation.
+    // LL(1): `for` cannot otherwise begin a bound or a type, so a single-token peek decides.
+    pub fn parse_hrtb(self: &mut Self) NodeList {
+        if !self.match(TokenType::For) {
+            return NodeList { start: 0, len: 0 };
+        }
+        self.expect(TokenType::LessThan, "'<'");
+        let mark = self.ast.mark();
+        while self.check(TokenType::Label) && !self.at_end() {
+            // Wrapped as NODE_GENERIC_PARAM, exactly as parse_generics_split produces for a declared
+            // `<'a>`, so every consumer of a lifetime list (the side table, tc_lt_name, the formatter)
+            // sees one shape. A bare NODE_LIFETIME here is read through the wrong union member.
+            let lstart = self.previous_end();
+            let lt = self.parse_lifetime();
+            self.ast.push(
+                self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_GENERIC_PARAM,
+                        span: Span::new(lstart, self.previous_end()),
+                        as_data: NodeAs {
+                            generic_param: GenericParamData {
+                                name: lt,
+                                bounds: NodeList { start: 0, len: 0 },
+                                default_type: NODE_NONE,
+                                is_const: false,
+                                const_type: NODE_NONE,
+                                is_lifetime: true,
+                            },
+                        },
+                    },
+                ),
+            );
+            if !self.match(TokenType::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenType::GreaterThan, "'>'");
+        return self.ast.commit(mark);
+    }
+
     pub fn parse_bound(self: &mut Self) NodeId {
         // `T: 'a` -- a lifetime bound among a type param's mixed bounds. Single-token peek.
         if self.check(TokenType::Label) {
             return self.parse_lifetime();
         }
+        let hr = self.parse_hrtb();
         if !self.check(TokenType::Fn) {
-            return self.parse_type_path();
+            let tp = self.parse_type_path();
+            if hr.len != 0 {
+                self.ast.set_lifetimes(tp, hr);
+            }
+            return tp;
         }
         let start = self.raw_peek().start();
         self.advance();
@@ -497,7 +544,7 @@ extend Parser {
         let params = self.parse_comma_types(TokenType::RightParen);
         self.expect(TokenType::RightParen, "')'");
         let returns = self.parse_function_returns();
-        return self.ast.add(
+        let fnty = self.ast.add(
             Node {
                 kind: NodeKind::NODE_FUNCTION_TYPE,
                 span: Span::new(start, self.previous_end()),
@@ -506,6 +553,10 @@ extend Parser {
                 },
             },
         );
+        if hr.len != 0 {
+            self.ast.set_lifetimes(fnty, hr);
+        }
+        return fnty;
     }
 
     pub fn parse_bounds(self: &mut Self) NodeList {
@@ -1023,11 +1074,14 @@ extend Parser {
         let start = self.raw_peek().start();
         self.expect(TokenType::Type, "'type'");
         let name = self.identifier();
-        let generics = if opaque {
-            NodeList { start: 0, len: 0 };
-        } else {
-            self.parse_generics();
-        };
+        // A type alias -- including an ASSOCIATED type in an interface -- may be parameterised by a
+        // lifetime (`type Item<'a>;`). That is what a lending iterator needs: each item borrows the
+        // iterator for a lifetime the impl chooses per call rather than one fixed by the interface.
+        // Parsed on BOTH paths: an interface's associated type takes the `opaque` route (no `= type`),
+        // and that is exactly where a GAT is declared. With no `<` this reads nothing, so an opaque FFI
+        // type is unaffected.
+        let mut lifetimes = NodeList { start: 0, len: 0 };
+        let generics = self.parse_generics_split(&mut lifetimes);
         let mut ty = NODE_NONE;
         if !opaque || self.match(TokenType::Equal) {
             if !opaque {
@@ -1036,7 +1090,7 @@ extend Parser {
             ty = self.parse_type();
         }
         self.expect(TokenType::Semicolon, "';'");
-        return self.ast.add(
+        let alias = self.ast.add(
             Node {
                 kind: NodeKind::NODE_TYPE_ALIAS,
                 span: Span::new(start, self.previous_end()),
@@ -1045,6 +1099,8 @@ extend Parser {
                 },
             },
         );
+        self.ast.set_lifetimes(alias, lifetimes);
+        return alias;
     }
 
     pub fn parse_const(self: &mut Self) NodeId {
