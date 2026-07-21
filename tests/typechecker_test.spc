@@ -1937,6 +1937,81 @@ fn fn_sig_region_store_escape() {
     );
 }
 
+// Re-assigning a local whose type CARRIES a borrow without being a bare reference. `let` retains such
+// a borrow and the place tie covers a field/index LHS, but a plain identifier LHS matched neither, so
+// the stored borrow was released at the end of the statement and its referent could die freely. Both
+// forms below were ASan-confirmed (stack-use-after-scope).
+//
+// Making that tie work required fixing how a borrow's ROOT is chosen: a root that is itself a
+// reference binding does not own the data, so leaving its scope destroys the reference, not the
+// referent. Without that, borrowing through a `&T` bound from caller-owned data (the pattern all over
+// the LSP JSON code) was reported as a dangling store.
+@test
+fn carrier_rebind_regions() {
+    h::expect_err_msg(
+        "assigning a struct holding a short borrow into a longer-lived local is rejected",
+        "struct Ref<'a> { pub p: &'a i32 }\nfn main() i32 {\n    let anchor = 1;\n    let mut slot = Ref::<i32> { p: &anchor };\n    {\n        let inner = 9;\n        slot = Ref::<i32> { p: &inner };\n    }\n    return *slot.p;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "assigning a borrow-carrying call result into a longer-lived local is rejected",
+        "struct Ref<'a> { pub p: &'a i32 }\nfn wrap(x: &i32) Ref<i32> { return Ref::<i32> { p: x }; }\nfn main() i32 {\n    let mut out = Ref::<i32> { p: &0 };\n    {\n        let inner = 9;\n        out = wrap(&inner);\n    }\n    return *out.p;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    // Borrowing THROUGH a reference into caller-owned data: the reference dies at the arm, the data
+    // does not. This is the shape the LSP JSON walker uses everywhere.
+    h::expect_ok(
+        "a view obtained through a reference to caller-owned data outlives that reference",
+        "struct J { pub s: String }\nextend J {\n    pub fn value_str(self: &Self, key: str) str { return self.s.as_str(); }\n    pub fn value(self: &Self, key: str) Option<&J> { return Option::<&J>::None; }\n}\nfn f(req: &J) i32 {\n    let mut uri = \"\";\n    switch req.value(\"params\") {\n        Some(td) => {\n            uri = td.value_str(\"uri\");\n        },\n        None => {},\n    };\n    return uri.len() as i32;\n}\n",
+    );
+    h::expect_ok(
+        "re-assigning with a borrow that outlives the local is fine",
+        "struct Ref<'a> { pub p: &'a i32 }\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut slot = Ref::<i32> { p: &a };\n    slot = Ref::<i32> { p: &b };\n    return *slot.p - 2;\n}\n",
+    );
+}
+
+// A store slot reached through NESTED aggregates resolves its lifetime by mapping each aggregate's
+// lifetime params through its instantiation at every hop, so `o.inner.r` with
+// `o: &mut Outer<'a>` and `struct Outer<'a> { inner: Inner<'a> }` resolves to `'a`. Only a single hop
+// resolved before, so every nested store was rejected however it was annotated.
+@test
+fn nested_slot_lifetime() {
+    h::expect_ok(
+        "a nested field chain resolves its slot lifetime through each instantiation",
+        "struct Inner<'a> { pub r: &'a i32 }\nstruct Outer<'a> { pub inner: Inner<'a> }\nfn put<'a>(o: &mut Outer<'a>, x: &'a i32) { o.inner.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut o = Outer::<i32> { inner: Inner::<i32> { r: &a } };\n    put(&mut o, &a);\n    return *o.inner.r - 1;\n}\n",
+    );
+    h::expect_err_msg(
+        "a nested store with unrelated lifetimes is still rejected",
+        "struct Inner<'a> { pub r: &'a i32 }\nstruct Outer<'a> { pub inner: Inner<'a> }\nfn put<'a, 'b>(o: &mut Outer<'a>, x: &'b i32) { o.inner.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut o = Outer::<i32> { inner: Inner::<i32> { r: &a } };\n    put(&mut o, &a);\n    return *o.inner.r - 1;\n}\n",
+        "stored into caller-visible data",
+    );
+    h::expect_err_msg(
+        "an unannotated nested store is still rejected",
+        "struct Inner { pub r: &i32 }\nstruct Outer { pub inner: Inner }\nfn put(o: &mut Outer, x: &i32) { o.inner.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut o = Outer { inner: Inner { r: &a } };\n    {\n        let s = 9;\n        put(&mut o, &s);\n    }\n    return *o.inner.r;\n}\n",
+        "stored into caller-visible data",
+    );
+}
+
+// The region solver's outlives closure. Declared outlives edges (`<'a: 'b>` bounds and `where 'a: 'b`)
+// are seeded into a constraint graph and queried TRANSITIVELY, so `'a: 'b, 'b: 'c` proves `'a: 'c`.
+// The previous one-hop scan rejected that. A signature with no edge at all must still be rejected.
+@test
+fn region_outlives_transitive() {
+    h::expect_ok(
+        "transitive outlives ('a: 'b, 'b: 'c) permits a store at 'c",
+        "struct Slot<'c> { pub r: &'c i32 }\nfn put<'a, 'b, 'c>(s: &mut Slot<'c>, x: &'a i32) where 'a: 'b, 'b: 'c { s.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut s = Slot::<i32> { r: &a };\n    put(&mut s, &a);\n    return *s.r - 1;\n}\n",
+    );
+    h::expect_ok(
+        "a direct 'a: 'c edge permits the store",
+        "struct Slot<'c> { pub r: &'c i32 }\nfn put<'a, 'c>(s: &mut Slot<'c>, x: &'a i32) where 'a: 'c { s.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut s = Slot::<i32> { r: &a };\n    put(&mut s, &a);\n    return *s.r - 1;\n}\n",
+    );
+    h::expect_err_msg(
+        "no declared relationship between the lifetimes is still rejected",
+        "struct Slot<'c> { pub r: &'c i32 }\nfn put<'a, 'c>(s: &mut Slot<'c>, x: &'a i32) { s.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut s = Slot::<i32> { r: &a };\n    put(&mut s, &a);\n    return *s.r - 1;\n}\n",
+        "stored into caller-visible data",
+    );
+}
+
 // Loop precision. `borrow_dead_after` used to bail unconditionally inside ANY loop ("never dead"),
 // which rejected a borrow that genuinely ended before a later mutation in the same iteration. Source-
 // order last-use is valid for a binding CONFINED to the loop body -- it is re-created every iteration
@@ -1984,5 +2059,21 @@ fn mut_ref_invariance() {
     h::expect_ok(
         "swapping references of the same lifetime is fine",
         "fn swap2<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let p = 1;\n    let q = 2;\n    let mut m: &i32 = &p;\n    let mut n: &i32 = &q;\n    swap2(&mut m, &mut n);\n    return *m - 2;\n}\n",
+    );
+    // Invariance is a property of `&mut` itself, not of the pointee being a bare type variable: the
+    // regions inside `Cell<T>` must match too. This was a hole (ASan stack-use-after-scope) while the
+    // check only recognised `&mut T`.
+    h::expect_err_msg(
+        "swapping &mut Cell<T> of different lifetimes is rejected",
+        "struct Cell<T> { pub v: T }\nfn swapcell<T>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let outer = 1;\n    let mut held = Cell::<&i32> { v: &outer };\n    {\n        let inner = 9;\n        let mut tmp = Cell::<&i32> { v: &inner };\n        swapcell(&mut held, &mut tmp);\n    }\n    return *held.v;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "swapping &mut Cell<T> of the same lifetime is fine",
+        "struct Cell<T> { pub v: T }\nfn swapcell<T>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let p = 1;\n    let q = 2;\n    let mut m = Cell::<&i32> { v: &p };\n    let mut n = Cell::<&i32> { v: &q };\n    swapcell(&mut m, &mut n);\n    return *m.v - 2;\n}\n",
+    );
+    h::expect_ok(
+        "swapping &mut Cell<T> of plain values is unconstrained",
+        "struct Cell<T> { pub v: T }\nfn swapcell<T>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let mut m = Cell::<i32> { v: 1 };\n    let mut n = Cell::<i32> { v: 2 };\n    swapcell(&mut m, &mut n);\n    return m.v - 2;\n}\n",
     );
 }
