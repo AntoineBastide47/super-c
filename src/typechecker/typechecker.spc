@@ -64,6 +64,10 @@ pub struct LoopEntry {
     pub value_loop: bool,
     pub saw_value: bool,
     pub saw_bare: bool,
+    // Scope depth on entry to this loop. A binding declared DEEPER than this lives inside the loop
+    // body and therefore dies at the end of each iteration -- which is what makes source-order
+    // last-use reasoning valid for it despite the back edge (see borrow_dead_after).
+    pub depth: u32,
 }
 
 // A captured snapshot of the flow-sensitive analysis state.
@@ -605,6 +609,7 @@ extend TypeChecker {
             value_loop: value_loop,
             saw_value: false,
             saw_bare: false,
+            depth: self.scope_depth,
         };
         self.nloops = n + 1;
         return n as i32;
@@ -4996,8 +5001,27 @@ extend TypeChecker {
         }
     }
 
+    // Is a binding confined to the CURRENT innermost loop's body? Such a binding is re-created every
+    // iteration and dies at the end of each one, so no use of it can execute after a given point via
+    // the back edge -- which is exactly the condition that makes source-order last-use reasoning valid
+    // inside a loop. A binding declared at or outside the loop's entry depth can be used again on the
+    // next iteration (after the point in execution order, though before it in source order).
+    fn tc_binding_in_innermost_loop(self: &Self, binding: NodeId) bool {
+        if self.nloops == 0 {
+            return false;
+        }
+        return self.tc_binding_depth(binding) > unsafe self.loop_stack[(self.nloops - 1) as usize].depth;
+    }
+
     fn borrow_dead_after(self: &mut Self, b: Borrow, after: NodeId) bool {
-        if b.binding == NODE_NONE || self.loop_depth != 0 {
+        if b.binding == NODE_NONE {
+            return false;
+        }
+        // Inside a loop, only a binding confined to that loop's body may use source-order last-use;
+        // anything longer-lived stays conservatively live across the back edge. This replaces a blanket
+        // "never dead inside any loop" bail, which rejected every borrow that ended before a later
+        // mutation in the same iteration.
+        if self.loop_depth != 0 && !self.tc_binding_in_innermost_loop(b.binding) {
             return false;
         }
         let bn = unsafe (*self.cur_ast()).at_const(b.binding);
