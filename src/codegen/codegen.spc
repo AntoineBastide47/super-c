@@ -284,9 +284,9 @@ pub type Buf160 = Array<char, 160>;
 pub type Buf256 = Array<char, 256>;
 pub type Buf512 = Array<char, 512>;
 
-pub struct Codegen {
+pub struct Codegen<'a> {
     pub ast: *mut Ast,
-    pub source: str,
+    pub source: str<'a>,
     pub buf: String,
     pub enum_of_variant: Map<u32, u32>,
     // CG-3: memoize cg_free_extend by (tmod,tdecl). A Codegen is per-module, so cur_module (the 2nd search

@@ -280,11 +280,11 @@ pub struct UFree {
 }
 
 // Why a function's effect verdict is FX_NO: the first disqualifying site found on its spine.
-pub struct FxNo {
+pub struct FxNo<'a> {
     pub m: ModuleId,
     pub fn_id: NodeId,
     pub site: NodeId,
-    pub why: str,
+    pub why: str<'a>,
 }
 
 // A fold failure codegen must surface as an error: proven UB (and, once `const fn` lands, any
@@ -297,7 +297,7 @@ pub struct CeFoldErr {
     pub detail: Buf512,
 }
 
-pub struct ConstEval {
+pub struct ConstEval<'a> {
     pub pkg: *mut loader::Package,
     pub vals: Vector<Vector<ConstValue>>, // [module][node] memo tables
     pub nmods: usize,
@@ -308,7 +308,7 @@ pub struct ConstEval {
     pub max_slots: u64,
     pub objs: Vector<CeObj>,
     pub live_slots: u64,
-    pub trap: str,
+    pub trap: str<'a>,
     pub trap_kind: u8,
     pub trap_steps: u32,
     pub trap_nframes: u8,
@@ -326,7 +326,7 @@ pub struct ConstEval {
     pub calls: Map<CeCallKey, CeCallHit>,
     pub ufree: Vector<UFree>,
     pub fx: Vector<Vector<u8>>, // [module][fn node] effect verdicts (FX_*)
-    pub fx_no: Vector<FxNo>,
+    pub fx_no: Vector<FxNo<'a>>,
     pub fx_depth: u32,
     pub statics: Vector<StaticObj>, // materialized const object graphs (grouped per root)
     pub sref: Vector<Vector<i64>>, // [module][node] eval_static memo: 0 unattempted, -1 failed, else root+1

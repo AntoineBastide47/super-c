@@ -37,9 +37,9 @@ extend ClosureScope as Free {
     }
 }
 
-pub struct Resolver {
+pub struct Resolver<'a> {
     pub ast: Ast,
-    pub source: str,
+    pub source: str<'a>,
     pub symbols: Vector<Symbol>, // flat stack of live symbols across all open scopes
     pub symbol_previous: Vector<u32>, // chain links parallel to symbols, encoded as index + 1
     pub scope_starts: Vector<u32>, // stack of symbols.len at each scope entry

@@ -5,8 +5,8 @@ import build_system::toml as toml;
 import module::loader as loader;
 import utils::errors as diag;
 
-pub struct Profile {
-    pub name: str,
+pub struct Profile<'a> {
+    pub name: str<'a>,
     pub cflags: Vector<String>,
     pub ldflags: Vector<String>,
     pub strip: bool,
@@ -19,8 +19,8 @@ extend Profile as Free {
     }
 }
 
-pub struct Command {
-    pub name: str,
+pub struct Command<'a> {
+    pub name: str<'a>,
     pub run: Vector<String>,
     pub needs_build: bool,
     pub env_k: Vector<String>,
@@ -35,7 +35,7 @@ extend Command as Free {
     }
 }
 
-pub struct Manifest {
+pub struct Manifest<'a> {
     pub toml: Vector<toml::TomlItem>,
     pub bin: String,
     pub root: String,
@@ -47,8 +47,8 @@ pub struct Manifest {
     pub ldlibs: Vector<String>,
     pub jobs: u32,
     pub default_profile: String,
-    pub profiles: Vector<Profile>,
-    pub commands: Vector<Command>,
+    pub profiles: Vector<Profile<'a>>,
+    pub commands: Vector<Command<'a>>,
 }
 
 extend Manifest as Free {

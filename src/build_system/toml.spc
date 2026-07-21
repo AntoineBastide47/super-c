@@ -69,8 +69,8 @@ extend TomlItem as Free {
     }
 }
 
-struct Parser {
-    pub src: str,
+struct Parser<'a> {
+    pub src: str<'a>,
     pub i: usize,
     pub section: String,
     pub items: Vector<TomlItem>,
