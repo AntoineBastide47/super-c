@@ -5512,17 +5512,53 @@ extend TypeChecker {
         return self.tc_place_base_binding(e);
     }
 
-    // Lifetime annotation on a reference TYPE node, read in an arbitrary module's AST.
-    fn tc_ref_typenode_lt_in(self: &Self, m: ModuleId, tyn: NodeId) tok::Span {
-        if tyn == NODE_NONE {
-            return tok::Span { start: 0, end: 0 };
+    // Every lifetime NAME a type node mentions, anywhere: the annotation on a reference, and the
+    // lifetime arguments of an aggregate (`Ref<'a>`), recursively. A value parameter shares a region
+    // with a storage parameter whenever ANY of these matches -- reading only the outermost reference's
+    // annotation missed `src: Ref<'a>`, an aggregate that borrows just as much as `&'a i32` does.
+    fn tc_typenode_lifetimes(
+        self: &Self,
+        m: ModuleId,
+        tyn: NodeId,
+        out: *mut tok::Span,
+        cap: i32,
+        n: *mut i32,
+        depth: i32,
+    ) {
+        if tyn == NODE_NONE || depth > 6 || unsafe *n >= cap {
+            return;
         }
-        let n = unsafe (*self.mod_ast(m)).at_const(tyn);
-        if n.kind != NodeKind::NODE_REFERENCE_TYPE {
-            return tok::Span { start: 0, end: 0 };
+        let node = unsafe (*self.mod_ast(m)).at_const(tyn);
+        if node.kind == NodeKind::NODE_REFERENCE_TYPE {
+            let l = self.tc_lt_name_in(m, node.as_data.indirect_type.lifetime);
+            if !self.tc_span_empty(l) && unsafe *n < cap {
+                unsafe out[(*n) as usize] = l;
+                unsafe *n = unsafe *n + 1;
+            }
+            self.tc_typenode_lifetimes(m, node.as_data.indirect_type.ty, out, cap, n, depth + 1);
+            return;
         }
-        return self.tc_lt_name_in(m, n.as_data.indirect_type.lifetime);
+        if node.kind == NodeKind::NODE_ARRAY_TYPE {
+            self.tc_typenode_lifetimes(m, node.as_data.array_type.element, out, cap, n, depth + 1);
+            return;
+        }
+        if node.kind == NodeKind::NODE_TYPE_PATH {
+            let args = node.as_data.type_path.args;
+            for i in 0..args.len {
+                let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
+                if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                    let l = self.tc_lt_name_in(m, aid);
+                    if !self.tc_span_empty(l) && unsafe *n < cap {
+                        unsafe out[(*n) as usize] = l;
+                        unsafe *n = unsafe *n + 1;
+                    }
+                } else {
+                    self.tc_typenode_lifetimes(m, aid, out, cap, n, depth + 1);
+                }
+            }
+        }
     }
+
     // Does a `&mut` storage pointee TYPE NODE mention the named lifetime `lt` (compared in module `m`)?
     // Either it is an aggregate carrying `lt` as a lifetime argument (`Slot<'a>`), or it is itself a
     // reference with that lifetime (`&mut &'a T`). Lifetime args are read off the AST node, not the
@@ -5966,12 +6002,17 @@ extend TypeChecker {
                         stores = true;
                     }
                 }
-                // (b) shared NAMED LIFETIME: value `x: &'a U` stored through `&mut C<'a,..>` -- the
-                // declared lifetime relationship the annotated API asserts. The arg for x must then
-                // outlive the arg for the container (enforced by the tie + scope exit below).
-                let vlt = self.tc_ref_typenode_lt_in(fmod, pv_ty);
-                if !self.tc_span_empty(vlt) && self.tc_typenode_covers_lt(fmod, ps_pointee, vlt) {
-                    stores = true;
+                // (b) shared NAMED LIFETIME: a value parameter mentioning `'a` anywhere -- `x: &'a U`
+                // or `src: Ref<'a>` -- stored through `&mut C<'a,..>`. That is the lifetime
+                // relationship the annotated API asserts, so the argument for the value must outlive
+                // the argument for the container (enforced by the tie + scope exit below).
+                let mut vlts = Spans8 {};
+                let mut nvlt: i32 = 0;
+                self.tc_typenode_lifetimes(fmod, pv_ty, (&vlts[0]) as *mut tok::Span, 8, &mut nvlt, 0);
+                for li in 0..nvlt {
+                    if self.tc_typenode_covers_lt(fmod, ps_pointee, vlts[li as usize]) {
+                        stores = true;
+                    }
                 }
             }
             if !stores {
@@ -5987,6 +6028,24 @@ extend TypeChecker {
                 if b.binding == NODE_NONE && b.root != NODE_NONE && b.root != sref {
                     unsafe self.borrows[bi as usize].binding = sref;
                     unsafe self.borrows[bi as usize].region = region;
+                }
+            }
+            // A value argument that is a LOCAL already HOLDS its borrows (they were bound to it at its
+            // `let`), so nothing transient appears in the range above -- `store(&mut long, s)` where
+            // `s: Ref<'a>` borrows a short-lived local is exactly that shape. Adopt the borrows each
+            // stored argument holds onto the container as well, so scope exit sees the container
+            // outliving the referent.
+            for pv in 0..params.len {
+                if pv < skip || pv == ps {
+                    continue;
+                }
+                let va = pv - skip;
+                if va >= args.len {
+                    continue;
+                }
+                let vbase = self.tc_place_base_binding(unsafe (*self.cur_ast()).list(args)[va as usize]);
+                if vbase != NODE_NONE && vbase != sref {
+                    self.tc_cross_tie(vbase, sref);
                 }
             }
             return;

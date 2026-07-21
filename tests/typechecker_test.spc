@@ -1992,6 +1992,23 @@ fn nested_slot_lifetime() {
     );
 }
 
+// A value parameter shares a region with a storage parameter whenever it mentions that lifetime
+// ANYWHERE, not just as the annotation on an outermost reference. `src: Ref<'a>` borrows exactly as
+// much as `&'a i32` does, and a local passed for it already HOLDS its borrows (bound at its `let`), so
+// the container must adopt those rather than only the call's transient ones. ASan-confirmed before.
+@test
+fn aggregate_value_arg_regions() {
+    h::expect_err_msg(
+        "storing a short-lived aggregate through a longer-lived &mut is rejected",
+        "struct Ref<'a> { pub p: &'a i32 }\nfn store<'a>(dst: &mut Ref<'a>, src: Ref<'a>) { *dst = src; }\nfn main() i32 {\n    let anchor = 1;\n    let mut long = Ref { p: &anchor };\n    {\n        let short = 9;\n        let s = Ref { p: &short };\n        store(&mut long, s);\n    }\n    return *long.p;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "storing an aggregate that outlives the destination is fine",
+        "struct Ref<'a> { pub p: &'a i32 }\nfn store<'a>(dst: &mut Ref<'a>, src: Ref<'a>) { *dst = src; }\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut long = Ref { p: &a };\n    let s = Ref { p: &b };\n    store(&mut long, s);\n    return *long.p - 2;\n}\n",
+    );
+}
+
 // `'static` is the universal region: it outlives every other, needs no signature entry, and nothing
 // else outlives it. Rust's rule, and the prerequisite for `T: 'static` bounds meaning anything.
 @test
