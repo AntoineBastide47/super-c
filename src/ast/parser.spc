@@ -32,13 +32,13 @@ struct BinaryParse {
     pub shift_assignment: bool,
 }
 
-pub struct Parser {
-    pub source: str,
+pub struct Parser<'a> {
+    pub source: str<'a>,
     pub tokens: Vector<Token>,
     pub current: usize,
     pub depth: u32,
     pub ast: Ast,
-    pub file: str,
+    pub file: str<'a>,
     pub errors: diag::Errors,
     pub bootstrap_tags: bool, // accept unknown @attributes without error (bootstrap across a new tag)
     // Named-return context of the function body being parsed (the signature's NODE_PARAMETER return

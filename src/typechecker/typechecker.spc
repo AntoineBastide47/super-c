@@ -93,11 +93,11 @@ pub struct FlowState {
 // TC-11: method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
 // querying module's source, or the caller's literal), so span- and cstr-form queries for the same
 // name share one entry. Exact-keyed (Hash + full Eq), so collisions cannot alias.
-pub struct MQKey {
+pub struct MQKey<'a> {
     pub m: ModuleId,
     pub decl: NodeId,
     pub kind: u8,
-    pub name: str,
+    pub name: str<'a>,
 }
 
 extend MQKey as Hash {
@@ -116,9 +116,9 @@ extend MQKey as Eq {
     }
 }
 
-pub struct TypeChecker {
+pub struct TypeChecker<'a> {
     pub ast: Ast,
-    pub source: str,
+    pub source: str<'a>,
     pub current_returns: NodeList,
     pub current_self: NodeId,
     pub current_extend: NodeId,
@@ -219,7 +219,7 @@ pub struct TypeChecker {
     // (node == NODE_NONE). Valid for the whole check: the ext scope, ASTs and self.ast.module (the
     // privacy filter input) are all fixed per checker. mark_method_used is re-fired on method hits
     // (idempotent set), so used-lint marking is unchanged.
-    pub method_memo: Map<MQKey, u64>,
+    pub method_memo: Map<MQKey<'a>, u64>,
     // TC-12: tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
     // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
     pub peel_memo: Map<u64, u64>,
@@ -5776,6 +5776,28 @@ extend TypeChecker {
             return;
         }
         if n.kind == NodeKind::NODE_TYPE_PATH {
+            // A field whose type is itself a BORROWING type (`str`, `Slice<T>`, any aggregate with
+            // lifetime params) must name the lifetime it borrows for, exactly as a bare reference must.
+            let dd = unsafe (*a).resolution_def(tyn);
+            if dd.node != NODE_NONE && unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len != 0 {
+                let mut named = false;
+                let args = n.as_data.type_path.args;
+                for j in 0..args.len {
+                    if unsafe (*a).at_const(unsafe (*a).list(args)[j as usize]).kind == NodeKind::NODE_LIFETIME {
+                        named = true;
+                    }
+                }
+                if !named {
+                    let sp = n.span;
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "missing lifetime specifier: this field's type borrows, so it must name the lifetime it borrows for",
+                        ),
+                    );
+                }
+            }
             let args = n.as_data.type_path.args;
             for j in 0..args.len {
                 self.tc_check_ref_lifetime_named(decl, unsafe (*a).list(args)[j as usize], depth + 1);

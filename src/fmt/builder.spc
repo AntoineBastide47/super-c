@@ -20,10 +20,10 @@ import ast::ast as *;
 import ast::parser as par;
 import fmt::doc as d;
 
-pub struct Builder {
-    pub p: d::DocPool,
+pub struct Builder<'a> {
+    pub p: d::DocPool<'a>,
     pub ast: *const Ast,
-    pub src: str,
+    pub src: str<'a>,
     pub emitted_trivia: usize, // comment segments emitted (attrs are separate and not counted)
 }
 

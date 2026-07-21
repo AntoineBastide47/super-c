@@ -468,8 +468,8 @@ fn is_ws(b: u8) bool {
     return b == b' ' || b == b'\t' || b == b'\r' || b == b'\n';
 }
 
-struct JSONParser {
-    pub src: str,
+struct JSONParser<'a> {
+    pub src: str<'a>,
     pub stack: Vector<usize>, // *mut JSON slots as usize
     pub pending_key: String, // the key waiting to be assigned
     pub candidate_key: String, // a parsed string that may become a key at the next ':'

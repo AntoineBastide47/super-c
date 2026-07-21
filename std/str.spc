@@ -292,21 +292,21 @@ extend str as Index<u8, str> {
 // the end of the construction expression -- bind it to a `let` whose scope covers the loop. They live in
 // this module (alongside `str`), so no prelude header cycle arises.
 
-pub struct Bytes {
-    pub s: str,
+pub struct Bytes<'a> {
+    pub s: str<'a>,
     pub i: usize,
 }
-pub struct Chars {
-    pub s: str,
+pub struct Chars<'a> {
+    pub s: str<'a>,
     pub i: usize,
 }
-pub struct Split {
-    pub s: str,
+pub struct Split<'a> {
+    pub s: str<'a>,
     pub i: usize,
-    pub sep: str,
+    pub sep: str<'a>,
 }
-pub struct Lines {
-    pub s: str,
+pub struct Lines<'a> {
+    pub s: str<'a>,
     pub i: usize,
 }
 

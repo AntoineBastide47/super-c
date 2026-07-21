@@ -48,11 +48,11 @@ fn build_char_class() CharClass {
     return c;
 }
 
-pub struct Lexer {
-    pub bytes: str,
+pub struct Lexer<'a> {
+    pub bytes: str<'a>,
     pub start: usize,
     pub current: usize,
-    pub file: str,
+    pub file: str<'a>,
     pub tokens: Vector<Token>,
     pub errors: diag::Errors,
     pub class: CharClass,

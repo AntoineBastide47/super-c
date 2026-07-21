@@ -510,10 +510,10 @@ fn common_flag(o: &mut CommonOpts, arg: str) bool {
 }
 
 // build.toml engine flags, shared by build/run/test/bench (`clean` takes only --out-dir).
-struct BuildOpts {
-    pub profile: str, // --profile=NAME (default: manifest default-profile)
-    pub out_dir: str, // --out-dir=PATH: override the manifest's out-dir
-    pub cstd: str, // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
+struct BuildOpts<'a> {
+    pub profile: str<'a>, // --profile=NAME (default: manifest default-profile)
+    pub out_dir: str<'a>, // --out-dir=PATH: override the manifest's out-dir
+    pub cstd: str<'a>, // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
     pub jobs: u32, // --jobs=N (0 = manifest / core count)
 }
 

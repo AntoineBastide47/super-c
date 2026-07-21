@@ -23,16 +23,16 @@ pub enum DocKind {
     DOC_IFBREAK, // s: text when the enclosing group broke, a: 1 if a space when flat else 0
 }
 
-pub struct DocNode {
+pub struct DocNode<'a> {
     pub kind: DocKind,
     pub a: u32,
     pub b: u32,
     pub w: u32, // memoized flat width
-    pub s: str,
+    pub s: str<'a>,
 }
 
-pub struct DocPool {
-    pub docs: Vector<DocNode>,
+pub struct DocPool<'a> {
+    pub docs: Vector<DocNode<'a>>,
     pub kids: Vector<DocId>,
     pub src: *const u8, // backing bytes for DOC_TEXT_SPAN
 }

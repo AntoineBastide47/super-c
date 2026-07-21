@@ -1986,9 +1986,9 @@ fn nested_slot_lifetime() {
         "stored into caller-visible data",
     );
     h::expect_err_msg(
-        "an unannotated nested store is still rejected",
-        "struct Inner<'a> { pub r: &'a i32 }\nstruct Outer { pub inner: Inner }\nfn put(o: &mut Outer, x: &i32) { o.inner.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut o = Outer { inner: Inner { r: &a } };\n    {\n        let s = 9;\n        put(&mut o, &s);\n    }\n    return *o.inner.r;\n}\n",
-        "stored into caller-visible data",
+        "a type holding a borrowing type must name its lifetime too",
+        "struct Inner<'a> { pub r: &'a i32 }\nstruct Outer { pub inner: Inner }\nfn main() i32 {\n    return 0;\n}\n",
+        "missing lifetime specifier",
     );
 }
 
@@ -2050,6 +2050,18 @@ fn field_lifetime_required() {
         "a reference nested in a generic argument also needs a lifetime",
         "struct S { pub v: Vector<&i32> }\nfn main() i32 {\n    return 0;\n}\n",
         "missing lifetime specifier",
+    );
+    // A field whose TYPE borrows (`str`, a view, any lifetime-carrying aggregate) must name the
+    // lifetime it borrows for, just as a bare reference must -- otherwise a type could hold a view of
+    // data with no declared relationship to its own lifetime.
+    h::expect_err_msg(
+        "a view-typed field with no lifetime is rejected",
+        "struct Holder { pub s: str }\nfn main() i32 {\n    return 0;\n}\n",
+        "missing lifetime specifier",
+    );
+    h::expect_ok(
+        "naming the view's lifetime is accepted",
+        "struct Holder<'a> { pub s: str<'a> }\nfn main() i32 {\n    return 0;\n}\n",
     );
 }
 
