@@ -1937,6 +1937,35 @@ fn fn_sig_region_store_escape() {
     );
 }
 
+// Loop precision. `borrow_dead_after` used to bail unconditionally inside ANY loop ("never dead"),
+// which rejected a borrow that genuinely ended before a later mutation in the same iteration. Source-
+// order last-use is valid for a binding CONFINED to the loop body -- it is re-created every iteration
+// and dies at the end of each one, so no use of it can execute after a given point via the back edge.
+// A longer-lived binding stays conservatively live, because a use earlier in the source can execute
+// after the mutation on the next iteration.
+@test
+fn loop_borrow_precision() {
+    // Confined to the loop body and dead before the mutation -> accepted (was rejected). The inner
+    // block is what keeps the borrow in play: borrow_nll_drop only drops borrows of the CURRENT scope.
+    h::expect_ok(
+        "a loop-local borrow that ends before a later mutation is accepted",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    for i in 0..3 {\n        let r = v.at(0);\n        {\n            let n = *r;\n            v.push(n);\n        }\n    }\n    return v.len() as i32 - 4;\n}\n",
+    );
+    // Still live across the mutation -> rejected.
+    h::expect_err_msg(
+        "a loop-local borrow still live across the mutation is rejected",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    for i in 0..3 {\n        let r = v.at(0);\n        {\n            v.push(2);\n            let n = *r;\n        }\n    }\n    return 0;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // Declared OUTSIDE the loop: the use executes again after the mutation via the back edge, so it
+    // must stay conservatively live even though the use precedes the mutation in source order.
+    h::expect_err_msg(
+        "a borrow declared outside the loop stays live across the back edge",
+        "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let r = v.at(0);\n    for i in 0..3 {\n        let n = *r;\n        v.push(2);\n    }\n    return 0;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}
+
 // `&mut T` is INVARIANT in T: a callee may write either referent's contents into the other (`swap`),
 // so two `&mut T` arguments for the same callee type variable must have equal lifetimes. Passing a
 // long-lived and a short-lived reference lets the long one end up holding the short one's referent
