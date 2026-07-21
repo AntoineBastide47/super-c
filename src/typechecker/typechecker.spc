@@ -18,6 +18,8 @@ pub const BORROW_SHARED: u8 = 0;
 pub const BORROW_MUT: u8 = 1;
 // The reserved RegionVid for `'static`: outlives every other region.
 pub const REGION_STATIC: u32 = 0;
+// "no region" -- a lifetime name that denotes nothing in the current signature.
+pub const REGION_NONE: u32 = 0xFFFFFFFF;
 pub const PS_FIELD: u8 = 0;
 pub const PS_INDEX: u8 = 1;
 pub const PS_DEREF: u8 = 2;
@@ -31,6 +33,12 @@ pub type BoundArr8 = Array<BoundIface, 8>;
 pub type Names14 = Array<*const char, 16>;
 pub type Steps16 = Array<PStep, 16>;
 pub type Keep256 = Array<bool, 256>;
+// Worklist/visited scratch for the outlives closure. The DECLARED outlives graph is signature-sized
+// (a handful of lifetimes), so 32 is ample; overflowing answers "cannot prove", which over-rejects.
+pub type Regions32 = Array<u32, 32>;
+// Field-chain scratch for resolving a store slot's lifetime through nested aggregates.
+pub type Nodes8 = Array<NodeId, 8>;
+pub type Spans8 = Array<tok::Span, 8>;
 pub type Cover4 = Array<u64, 4>;
 pub type Buf128 = Array<char, 128>;
 pub type NodeArr16 = Array<NodeId, 16>;
@@ -164,6 +172,10 @@ pub struct TypeChecker {
     pub arity_memo: Map<u64, u32>,
     // A declared lifetime param node -> the universal RegionVid standing for it in this function.
     pub lt_region: Map<u32, u32>,
+    // Outlives constraints for the current function, packed (sup << 32 | sub) meaning "sup: sub",
+    // i.e. sup outlives sub. Seeded from the signature (`<'a: 'b>` bounds and `where 'a: 'b`) and
+    // later from constraint generation. Cleared per function -- RegionVids are function-scoped.
+    pub outlives: Vector<u64>,
     // Index into `errors` where the CURRENT function's diagnostics begin. Region/lifetime errors are
     // discovered after the body has been walked (the solver only knows once its constraints are
     // solved), so they are inserted back into source order within this function's range rather than
@@ -423,6 +435,7 @@ extend TypeChecker {
             rv_of: Map::<u32, u64>::new(),
             arity_memo: Map::<u64, u32>::new(),
             lt_region: Map::<u32, u32>::new(),
+            outlives: Vector::<u64>::new(),
             err_wm: 0,
             tc_twophase_wm: 0xFFFFFFFF,
             unsafe_used: 0,
@@ -4222,6 +4235,15 @@ extend TypeChecker {
     }
 
     // ---- move / definite-init / free tracking ----
+    // Is this borrow root a REFERENCE binding? Such a root does not own the data it names.
+    fn tc_root_is_reference(self: &mut Self, root: NodeId) bool {
+        if root == NODE_NONE {
+            return false;
+        }
+        let t = unsafe (*self.cur_ast()).type_of(root);
+        return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_REFERENCE;
+    }
+
     fn tc_binding_depth(self: &Self, decl: NodeId) u32 {
         if decl == NODE_NONE || unsafe (*self.cur_ast()).at_const(decl).kind == NodeKind::NODE_PARAMETER {
             return 0;
@@ -4623,6 +4645,16 @@ extend TypeChecker {
         for i in 0..self.nborrows {
             let b = unsafe self.borrows[i as usize];
             if b.region as u32 >= d {
+                continue;
+            }
+            // A borrow whose ROOT is a reference-typed binding borrows that reference's REFERENT, and
+            // a reference cannot outlive what it points at -- so leaving this scope destroys the
+            // reference variable, not the data (`td: &JSON` bound from a parameter stays valid).
+            // Whenever such a reference does borrow a local, that local is the root of its OWN borrow
+            // and is still reported here, so this is not a hole.
+            if b.root != NODE_NONE && self.tc_root_is_reference(b.root) {
+                unsafe self.borrows[w as usize] = unsafe self.borrows[i as usize];
+                w = w + 1;
                 continue;
             }
             if b.binding != NODE_NONE && b.root != NODE_NONE && self.tc_binding_depth(b.root) >= d {
@@ -5563,7 +5595,50 @@ extend TypeChecker {
     }
 
     // The interned generic ELEMENT of a `&mut T` parameter (T a callee type variable), or TYPE_NONE.
-    fn tc_mut_ref_generic_elem(self: &mut Self, fmod: ModuleId, ptyn: NodeId) TypeId {
+    // Does a type mention a callee TYPE VARIABLE anywhere inside it? `T`, `Cell<T>`, `&T`, `[T; N]`
+    // all do. Used to find the `&mut` parameters whose pointee the caller instantiates.
+    fn tc_type_mentions_generic(self: &mut Self, ty: TypeId, depth: i32) bool {
+        if ty == TYPE_NONE || depth > 6 {
+            return false;
+        }
+        let k = self.type_at(ty).kind;
+        if k == TypeKind::TYPE_GENERIC {
+            return true;
+        }
+        if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_POINTER {
+            return self.tc_type_mentions_generic(self.type_at(ty).as_data.elem, depth + 1);
+        }
+        if k == TypeKind::TYPE_ARRAY {
+            return self.tc_type_mentions_generic(self.type_at(ty).as_data.arr.elem, depth + 1);
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(
+            self.strip(ty),
+            &mut om,
+            &mut od,
+            (&gp[0]) as *mut DefId,
+            (&ga[0]) as *mut TypeId,
+            &mut gn,
+        ) {
+            return false;
+        }
+        for gi in 0..gn {
+            if self.tc_type_mentions_generic(ga[gi as usize], depth + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The POINTEE of a `&mut` parameter, when that pointee mentions a callee type variable. `&mut` is
+    // invariant in its pointee unconditionally -- no per-aggregate variance needed -- so two arguments
+    // passed for the SAME pointee type must have equal regions. Covers `&mut T` and `&mut Cell<T>`
+    // alike; the latter was a hole while this only recognised a bare type variable.
+    fn tc_mut_ref_invariant_elem(self: &mut Self, fmod: ModuleId, ptyn: NodeId) TypeId {
         if ptyn == NODE_NONE {
             return TYPE_NONE;
         }
@@ -5572,7 +5647,7 @@ extend TypeChecker {
             return TYPE_NONE;
         }
         let elem = self.type_at(lt).as_data.elem;
-        if self.type_at(elem).kind != TypeKind::TYPE_GENERIC {
+        if !self.tc_type_mentions_generic(elem, 0) {
             return TYPE_NONE;
         }
         return elem;
@@ -5617,7 +5692,7 @@ extend TypeChecker {
             if ai >= args.len {
                 continue;
             }
-            let ei = self.tc_mut_ref_generic_elem(
+            let ei = self.tc_mut_ref_invariant_elem(
                 fmod,
                 unsafe (*fa).at_const(unsafe (*fa).list(params)[i as usize]).as_data.parameter.ty,
             );
@@ -5632,7 +5707,7 @@ extend TypeChecker {
                 if aj >= args.len {
                     continue;
                 }
-                let ej = self.tc_mut_ref_generic_elem(
+                let ej = self.tc_mut_ref_invariant_elem(
                     fmod,
                     unsafe (*fa).at_const(unsafe (*fa).list(params)[j as usize]).as_data.parameter.ty,
                 );
@@ -9011,12 +9086,118 @@ extend TypeChecker {
         if fnid == NODE_NONE {
             return;
         }
+        self.outlives.clear();
         let lts = unsafe (*self.cur_ast()).lifetimes_of(fnid);
         for i in 0..lts.len {
             let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
             let r = self.region_new();
             self.lt_region.insert(lp, r);
         }
+        // Seed the declared outlives edges: `<'a: 'b>` param bounds and `where 'a: 'b` predicates.
+        for i in 0..lts.len {
+            let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
+            let sup = self.tc_lt_region_of_name(self.tc_lt_name(lp));
+            let bnds = unsafe (*self.cur_ast()).at_const(lp).as_data.generic_param.bounds;
+            for b in 0..bnds.len {
+                let bid = unsafe (*self.cur_ast()).list(bnds)[b as usize];
+                self.region_add_outlives(sup, self.tc_lt_region_of_name(self.tc_lt_name(bid)));
+            }
+        }
+        let wc = unsafe (*self.cur_ast()).at_const(fnid).as_data.function.where_clause;
+        for w in 0..wc.len {
+            let wp = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(wc)[w as usize]).as_data.where_predicate;
+            if unsafe (*self.cur_ast()).at_const(wp.ty).kind != NodeKind::NODE_LIFETIME {
+                continue;
+            }
+            let sup = self.tc_lt_region_of_name(self.tc_lt_name(wp.ty));
+            for b in 0..wp.bounds.len {
+                let bid = unsafe (*self.cur_ast()).list(wp.bounds)[b as usize];
+                if unsafe (*self.cur_ast()).at_const(bid).kind == NodeKind::NODE_LIFETIME {
+                    self.region_add_outlives(sup, self.tc_lt_region_of_name(self.tc_lt_name(bid)));
+                }
+            }
+        }
+    }
+
+    // The universal RegionVid a declared lifetime NAME denotes in the current function, or REGION_NONE.
+    fn tc_lt_region_of_name(self: &Self, name: tok::Span) u32 {
+        if self.tc_span_empty(name) || self.current_fn == NODE_NONE {
+            return REGION_NONE;
+        }
+        let a = self.cur_ast();
+        let lts = unsafe (*a).lifetimes_of(self.current_fn);
+        for i in 0..lts.len {
+            let lp = unsafe (*a).list(lts)[i as usize];
+            if spans_eq2(self.source, self.tc_lt_name(lp), self.source, name) {
+                switch self.lt_region.get(&lp) {
+                    Some(v) => {
+                        return *v;
+                    },
+                    _ => {},
+                };
+            }
+        }
+        return REGION_NONE;
+    }
+
+    // Record `sup: sub` -- sup outlives sub.
+    fn region_add_outlives(self: &mut Self, sup: u32, sub: u32) {
+        if sup == REGION_NONE || sub == REGION_NONE || sup == sub {
+            return;
+        }
+        self.outlives.push(sup as u64 << 32 | sub as u64);
+    }
+
+    // Does region `a` outlive region `b`? Reflexive, `'static` outlives everything, and TRANSITIVE
+    // over the declared edges -- so `'a: 'b, 'b: 'c` proves `'a: 'c`, which a one-hop scan could not.
+    // The declared graph is tiny (signature lifetimes only), so a bounded worklist is ample; running
+    // out of room answers "cannot prove", which only ever over-rejects.
+    fn region_outlives(self: &Self, a: u32, b: u32) bool {
+        if a == REGION_NONE || b == REGION_NONE {
+            return false;
+        }
+        if a == b || a == REGION_STATIC {
+            return true;
+        }
+        let mut stack = Regions32 {};
+        let mut seen = Regions32 {};
+        let mut ns: u32 = 0;
+        let mut nseen: u32 = 0;
+        stack[0] = a;
+        ns = 1;
+        while ns > 0 {
+            ns = ns - 1;
+            let cur = stack[ns as usize];
+            if cur == b {
+                return true;
+            }
+            let mut dup = false;
+            for i in 0..nseen {
+                if seen[i as usize] == cur {
+                    dup = true;
+                }
+            }
+            if dup {
+                continue;
+            }
+            if nseen >= 32 {
+                return false;
+            }
+            seen[nseen as usize] = cur;
+            nseen = nseen + 1;
+            for i in 0..self.outlives.len() {
+                let e = self.outlives[i];
+                if (e >> 32) as u32 != cur {
+                    continue;
+                }
+                if ns >= 32 {
+                    return false;
+                }
+                stack[ns as usize] = e as u32;
+                ns = ns + 1;
+            }
+        }
+        return false;
     }
 
     // How many lifetime SLOTS does a type have? This is the length of its region vector, so it must be
@@ -9181,9 +9362,11 @@ extend TypeChecker {
         return self.tc_ref_typenode_lt(unsafe (*a).at_const(d.node).as_data.parameter.ty);
     }
     // The lifetime of the reference SLOT a store targets, in the current function's scope. `*param`
-    // stores at the parameter's own reference lifetime; `param.field` stores at the field's lifetime,
-    // mapped through the parameter aggregate's lifetime argument (`s: &mut Slot<'x>`, field `&'a i32`
-    // in `Slot<'a>` -> `'x`). Unhandled shapes return empty (conservative: the store is then rejected).
+    // stores at the parameter's own reference lifetime. `param.f1.f2...` walks the field chain,
+    // mapping each aggregate's lifetime PARAMS through its instantiation at every hop -- so in
+    // `o: &mut Outer<'a>` with `struct Outer<'a> { inner: Inner<'a> }`, the slot `o.inner.r` resolves
+    // to `'a`. A single hop was all that resolved before, which rejected every nested store.
+    // Unhandled shapes return empty (conservative: the store is then rejected).
     fn tc_place_slot_lifetime(self: &mut Self, place: NodeId, base: NodeId) tok::Span {
         let a = self.cur_ast();
         let pn = unsafe (*a).at_const(place);
@@ -9193,77 +9376,110 @@ extend TypeChecker {
         if pn.kind != NodeKind::NODE_MEMBER || pn.as_data.member.path {
             return tok::Span { start: 0, end: 0 };
         }
-        // single hop `base.field` only
-        if self.tc_place_base_binding(pn.as_data.member.object) != base {
+        // Collect the field chain base.f[0].f[1]... leaf-last.
+        let mut chain = Nodes8 {};
+        let mut n: i32 = 0;
+        let mut cur = place;
+        while n < 8 {
+            let cn = unsafe (*a).at_const(cur);
+            if cn.kind != NodeKind::NODE_MEMBER || cn.as_data.member.path {
+                break;
+            }
+            chain[n as usize] = cn.as_data.member.member;
+            n = n + 1;
+            cur = cn.as_data.member.object;
+        }
+        if n == 0 || self.tc_place_base_binding(cur) != base {
             return tok::Span { start: 0, end: 0 };
         }
-        // base's aggregate type node (strip the leading reference) and its lifetime arguments
+        // Start at the parameter's aggregate, with its lifetime ARGS as written in this function.
         let ptyn = unsafe (*a).at_const(base).as_data.parameter.ty;
         if ptyn == NODE_NONE || unsafe (*a).at_const(ptyn).kind != NodeKind::NODE_REFERENCE_TYPE {
             return tok::Span { start: 0, end: 0 };
         }
-        let aggn = unsafe (*a).at_const(ptyn).as_data.indirect_type.ty;
-        if aggn == NODE_NONE || unsafe (*a).at_const(aggn).kind != NodeKind::NODE_TYPE_PATH {
-            return tok::Span { start: 0, end: 0 };
-        }
-        let fname = self.name_span(pn.as_data.member.member);
-        let sd = unsafe (*a).resolution_def(aggn);
-        if sd.node == NODE_NONE {
-            return tok::Span { start: 0, end: 0 };
-        }
-        let sa = self.mod_ast(sd.module);
-        let members = unsafe (*sa).at_const(sd.node).as_data.aggregate.members;
-        let mut fldlt = tok::Span { start: 0, end: 0 };
-        for i in 0..members.len {
-            let mid = unsafe (*sa).list(members)[i as usize];
-            if unsafe (*sa).at_const(mid).kind != NodeKind::NODE_FIELD {
-                continue;
-            }
-            if !spans_eq2(
-                self.source,
-                fname,
-                self.mod_src(sd.module),
-                self.name_span(unsafe (*sa).at_const(mid).as_data.field.name),
-            ) {
-                continue;
-            }
-            let ftyn = unsafe (*sa).at_const(mid).as_data.field.ty;
-            if ftyn == NODE_NONE || unsafe (*sa).at_const(ftyn).kind != NodeKind::NODE_REFERENCE_TYPE {
+        let mut aggn = unsafe (*a).at_const(ptyn).as_data.indirect_type.ty;
+        let mut args = Spans8 {};
+        let mut nargs = self.tc_collect_lt_args(self.ast.module, aggn, (&args[0]) as *mut tok::Span, 8);
+        let mut m = self.ast.module;
+        // Walk the chain from the base outward (chain is leaf-last, so iterate in reverse).
+        let mut k = n - 1;
+        while k >= 0 {
+            let sd = unsafe (*self.mod_ast(m)).at_const(aggn).kind;
+            if sd != NodeKind::NODE_TYPE_PATH {
                 return tok::Span { start: 0, end: 0 };
             }
-            fldlt = self.tc_lt_name_in(sd.module, unsafe (*sa).at_const(ftyn).as_data.indirect_type.lifetime);
-            break;
-        }
-        if self.tc_span_empty(fldlt) {
-            return tok::Span { start: 0, end: 0 };
-        }
-        // map the field's struct-scope lifetime param to base's lifetime argument at the same index
-        let lts = unsafe (*sa).lifetimes_of(sd.node);
-        let mut k: i32 = -1;
-        for i in 0..lts.len {
-            let pnm = self.tc_lt_name_in(sd.module, unsafe (*sa).list(lts)[i as usize]);
-            if spans_eq2(self.mod_src(sd.module), pnm, self.mod_src(sd.module), fldlt) {
-                k = i as i32;
-                break;
+            let dd = unsafe (*self.mod_ast(m)).resolution_def(aggn);
+            if dd.node == NODE_NONE {
+                return tok::Span { start: 0, end: 0 };
             }
-        }
-        if k < 0 {
-            return tok::Span { start: 0, end: 0 };
-        }
-        let aargs = unsafe (*a).at_const(aggn).as_data.type_path.args;
-        let mut li: i32 = 0;
-        for i in 0..aargs.len {
-            let aid = unsafe (*a).list(aargs)[i as usize];
-            if unsafe (*a).at_const(aid).kind != NodeKind::NODE_LIFETIME {
-                continue;
+            let ftyn = self.tc_field_type_node(dd, self.name_span(chain[k as usize]));
+            if ftyn == NODE_NONE {
+                return tok::Span { start: 0, end: 0 };
             }
-            if li == k {
-                return self.tc_lt_name(aid);
+            if k == 0 {
+                // leaf: the slot itself must be a reference; map its lifetime out to this function
+                if unsafe (*self.mod_ast(dd.module)).at_const(ftyn).kind != NodeKind::NODE_REFERENCE_TYPE {
+                    return tok::Span { start: 0, end: 0 };
+                }
+                let fl = self.tc_lt_name_in(
+                    dd.module,
+                    unsafe (*self.mod_ast(dd.module)).at_const(ftyn).as_data.indirect_type.lifetime,
+                );
+                return self.tc_map_lt(dd, fl, &args[0], nargs);
             }
-            li = li + 1;
+            // interior hop: re-instantiate the next aggregate's lifetime args through this one
+            let mut sub = Spans8 {};
+            let ns = self.tc_collect_lt_args(dd.module, ftyn, (&sub[0]) as *mut tok::Span, 8);
+            let mut mapped = Spans8 {};
+            for i in 0..ns {
+                mapped[i as usize] = self.tc_map_lt(dd, sub[i as usize], &args[0], nargs);
+            }
+            for i in 0..ns {
+                args[i as usize] = mapped[i as usize];
+            }
+            nargs = ns;
+            aggn = ftyn;
+            m = dd.module;
+            k = k - 1;
         }
         return tok::Span { start: 0, end: 0 };
     }
+
+    // The lifetime ARGUMENTS written on a type node (`Outer<'a, T>` -> ['a]), as name spans in `m`.
+    fn tc_collect_lt_args(self: &Self, m: ModuleId, tyn: NodeId, out: *mut tok::Span, cap: i32) i32 {
+        if tyn == NODE_NONE || unsafe (*self.mod_ast(m)).at_const(tyn).kind != NodeKind::NODE_TYPE_PATH {
+            return 0;
+        }
+        let args = unsafe (*self.mod_ast(m)).at_const(tyn).as_data.type_path.args;
+        let mut n: i32 = 0;
+        for i in 0..args.len {
+            let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
+            if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME && n < cap {
+                unsafe out[n as usize] = self.tc_lt_name_in(m, aid);
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
+    // Map a lifetime NAME written inside aggregate `dd` to the argument that instantiates it.
+    fn tc_map_lt(self: &Self, dd: DefId, name: tok::Span, args: *const tok::Span, nargs: i32) tok::Span {
+        if self.tc_span_empty(name) {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let lts = unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node);
+        for i in 0..lts.len {
+            let lp = unsafe (*self.mod_ast(dd.module)).list(lts)[i as usize];
+            if spans_eq2(self.mod_src(dd.module), self.tc_lt_name_in(dd.module, lp), self.mod_src(dd.module), name) {
+                if i as i32 < nargs {
+                    return unsafe args[i as usize];
+                }
+                return tok::Span { start: 0, end: 0 };
+            }
+        }
+        return tok::Span { start: 0, end: 0 };
+    }
+
     // The lifetime of a `&mut` container parameter's borrow-carrying ELEMENT, read off the type node
     // (`&mut Vector<&'a i32>` -> `'a`; elided -> empty). Used to check a store CALL into the container.
     fn tc_container_elem_lt(self: &Self, m: ModuleId, ptyn: NodeId) tok::Span {
@@ -9310,6 +9526,28 @@ extend TypeChecker {
         }
         return d.node;
     }
+
+    // The declared type node of aggregate field `fname`, or NODE_NONE.
+    fn tc_field_type_node(self: &Self, dd: DefId, fname: tok::Span) NodeId {
+        let sa = self.mod_ast(dd.module);
+        let members = unsafe (*sa).at_const(dd.node).as_data.aggregate.members;
+        for i in 0..members.len {
+            let mid = unsafe (*sa).list(members)[i as usize];
+            if unsafe (*sa).at_const(mid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            if spans_eq2(
+                self.source,
+                fname,
+                self.mod_src(dd.module),
+                self.name_span(unsafe (*sa).at_const(mid).as_data.field.name),
+            ) {
+                return unsafe (*sa).at_const(mid).as_data.field.ty;
+            }
+        }
+        return NODE_NONE;
+    }
+
     // tc_lt_name against an arbitrary module's AST (for struct-scope lifetime names).
     fn tc_lt_name_in(self: &Self, m: ModuleId, lt: NodeId) tok::Span {
         if lt == NODE_NONE {
@@ -9321,9 +9559,9 @@ extend TypeChecker {
         }
         return n.as_data.name.text;
     }
-    // Does the source lifetime provably outlive the destination? Same lifetime (reflexive), or a
-    // one-hop `'src: 'dst` edge from a lifetime-param bound or a `where` predicate. Missing transitive
-    // edges only over-reject. Empty (elided) lifetimes outlive nothing.
+    // Does the source lifetime provably outlive the destination? Reflexive, and TRANSITIVE over the
+    // signature's declared outlives edges via the region solver -- so `'a: 'b, 'b: 'c` now proves
+    // `'a: 'c`, which the previous one-hop scan rejected. Empty (elided) lifetimes outlive nothing.
     fn tc_lifetime_outlives(self: &mut Self, src: tok::Span, dst: tok::Span) bool {
         if self.tc_span_empty(src) || self.tc_span_empty(dst) {
             return false;
@@ -9331,47 +9569,7 @@ extend TypeChecker {
         if spans_eq2(self.source, src, self.source, dst) {
             return true;
         }
-        if self.current_fn == NODE_NONE {
-            return false;
-        }
-        let a = self.cur_ast();
-        let lts = unsafe (*a).lifetimes_of(self.current_fn);
-        for i in 0..lts.len {
-            let lp = unsafe (*a).list(lts)[i as usize];
-            if !spans_eq2(self.source, self.tc_lt_name(lp), self.source, src) {
-                continue;
-            }
-            let bnds = unsafe (*a).at_const(lp).as_data.generic_param.bounds;
-            for b in 0..bnds.len {
-                if spans_eq2(self.source, self.tc_lt_name(unsafe (*a).list(bnds)[b as usize]), self.source, dst) {
-                    return true;
-                }
-            }
-        }
-        let wc = unsafe (*a).at_const(self.current_fn).as_data.function.where_clause;
-        for w in 0..wc.len {
-            let wp = unsafe (*a).at_const(unsafe (*a).list(wc)[w as usize]).as_data.where_predicate;
-            if unsafe (*a).at_const(wp.ty).kind != NodeKind::NODE_LIFETIME || !spans_eq2(
-                self.source,
-                self.tc_lt_name(wp.ty),
-                self.source,
-                src,
-            ) {
-                continue;
-            }
-            for b in 0..wp.bounds.len {
-                let bid = unsafe (*a).list(wp.bounds)[b as usize];
-                if unsafe (*a).at_const(bid).kind == NodeKind::NODE_LIFETIME && spans_eq2(
-                    self.source,
-                    self.tc_lt_name(bid),
-                    self.source,
-                    dst,
-                ) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return self.region_outlives(self.tc_lt_region_of_name(src), self.tc_lt_region_of_name(dst));
     }
     // Body-side elision check: storing a borrow into caller-visible data reachable through a `&`/`&mut`
     // PARAMETER escapes into the caller and is sound only if the stored value's lifetime is declared to
@@ -9429,7 +9627,8 @@ extend TypeChecker {
         }
         let lt = if_ty(lhs_local, self.decl_type_in(ld.module, ld.node), TYPE_NONE);
         let ref_rebind = lt != TYPE_NONE && self.type_at(lt).kind == TypeKind::TYPE_REFERENCE;
-        if ref_rebind {
+        let carrier_rebind = lt != TYPE_NONE && !ref_rebind && self.tc_carries_borrow(lt);
+        if ref_rebind || carrier_rebind {
             for i in 0..self.nborrows {
                 if unsafe self.borrows[i as usize].binding == ld.node {
                     self.borrow_tombstone_at(i);
@@ -9454,7 +9653,7 @@ extend TypeChecker {
             } else {
                 self.borrow_transfer_ref(bd.right, ld.node);
             }
-        } else if lt == TYPE_NONE && self.tc_carries_borrow(l) || self.tc_expr_is_closure(bd.right) {
+        } else if carrier_rebind || lt == TYPE_NONE && self.tc_carries_borrow(l) || self.tc_expr_is_closure(bd.right) {
             // Assigning a borrow-carrying value into a PLACE that is not a plain identifier
             // (`s.r = &inner`, a reference-typed field/element of a longer-lived aggregate): tie the
             // stored borrow to the place's root binding + region, exactly like `let`. The ref_rebind
