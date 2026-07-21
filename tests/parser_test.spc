@@ -745,3 +745,28 @@ fn lifetimes() {
     );
     assert(h::parse_has_error("fn f<T, 'a>(x: &'a T) {}\n"), "lifetime params must precede type params");
 }
+
+// The grammar batch: a higher-ranked bound `for<'a>` and a lifetime-parameterised associated type.
+// Both store their lifetimes in the same side table as a declared `<'a>`, and both wrap them in
+// NODE_GENERIC_PARAM so every consumer -- side table, checker, formatter -- sees one shape.
+@test
+fn hrtb_and_gat() {
+    let src = "fn apply<F: for<'a> fn(&'a i32) i32>(f: F) i32 { return 0; }\ninterface Lend { type Item<'a>; }\n";
+    let mut c = h::parse_ast(src);
+    assert(c.errors == 0, "for<'a> and type Item<'a> parse");
+
+    // the bound's lifetimes hang off the BOUND node, not the enclosing function
+    let fnd = item(&c.ast, 0).as_data.function;
+    let gp = c.ast.at_const(unsafe c.ast.list(fnd.generics)[0]).as_data.generic_param;
+    let bound = unsafe c.ast.list(gp.bounds)[0];
+    let hr = c.ast.lifetimes_of(bound);
+    assert(hr.len == 1, "higher-ranked lifetime recorded on the bound");
+    assert(c.ast.at_const(unsafe c.ast.list(hr)[0]).as_data.generic_param.is_lifetime, "hrtb param flagged is_lifetime");
+    assert(c.ast.lifetimes_of(item_id(&c.ast, 0)).len == 0, "the function itself declares no lifetime");
+
+    // the associated type carries its own lifetime param
+    let items = item(&c.ast, 1).as_data.interface_def.items;
+    let assoc = unsafe c.ast.list(items)[0];
+    assert(c.ast.at_const(assoc).kind == NodeKind::NODE_TYPE_ALIAS, "assoc type is a type alias");
+    assert(c.ast.lifetimes_of(assoc).len == 1, "GAT lifetime param recorded");
+}
