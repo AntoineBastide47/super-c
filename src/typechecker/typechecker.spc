@@ -16,6 +16,8 @@ pub const BORROW_ESCAPE_MAX_DEPTH: u32 = 64;
 
 pub const BORROW_SHARED: u8 = 0;
 pub const BORROW_MUT: u8 = 1;
+// The reserved RegionVid for `'static`: outlives every other region.
+pub const REGION_STATIC: u32 = 0;
 pub const PS_FIELD: u8 = 0;
 pub const PS_INDEX: u8 = 1;
 pub const PS_DEREF: u8 = 2;
@@ -143,6 +145,21 @@ pub struct TypeChecker {
     pub mret_n: u8,
     pub mret_total: u32,
     pub unsafe_depth: u32,
+    // ---- region inference state (per function) ----
+    // Next RegionVid to hand out. REGION_STATIC (0) is reserved; the current function's declared
+    // lifetimes take the ids after it (universal -- they outlive the whole body), and every other
+    // region is existential, allocated one per lifetime slot of a value's type as the body is walked.
+    pub region_next: u32,
+    // Flat storage for region VECTORS: the RegionVids filling a type's lifetime slots, in canonical
+    // structural order. `rv_of` maps a node to its slice as (start << 32 | len). A flat pool avoids a
+    // per-node allocation, and nodes whose type has no regions at all never enter the map.
+    pub rv_pool: Vector<u32>,
+    pub rv_of: Map<u32, u64>,
+    // (module << 32 | TypeId) -> number of lifetime slots in that type. Pure function of the interned
+    // type, so the memo is sound -- same idiom as carries_memo.
+    pub arity_memo: Map<u64, u32>,
+    // A declared lifetime param node -> the universal RegionVid standing for it in this function.
+    pub lt_region: Map<u32, u32>,
     // Index into `errors` where the CURRENT function's diagnostics begin. Region/lifetime errors are
     // discovered after the body has been walked (the solver only knows once its constraints are
     // solved), so they are inserted back into source order within this function's range rather than
@@ -397,6 +414,11 @@ extend TypeChecker {
             mret_n: 0,
             mret_total: 0,
             unsafe_depth: 0,
+            region_next: 1,
+            rv_pool: Vector::<u32>::new(),
+            rv_of: Map::<u32, u64>::new(),
+            arity_memo: Map::<u64, u32>::new(),
+            lt_region: Map::<u32, u32>::new(),
             err_wm: 0,
             tc_twophase_wm: 0xFFFFFFFF,
             unsafe_used: 0,
@@ -8944,6 +8966,112 @@ extend TypeChecker {
         self.errors.note(format("add a '_' arm to cover the remaining values"));
     }
 
+    // ---- region variables (phase 1: allocation + slot counting; the solver consumes these later) ----
+    //
+    // A RegionVid is an inference variable standing for a region -- ultimately a set of program points
+    // plus the universal regions it must outlive. `REGION_STATIC` outlives everything. A function's
+    // declared lifetimes are UNIVERSAL (they outlive the body, and their relationships come from the
+    // signature); every reference slot in a local's type gets a fresh EXISTENTIAL region.
+    fn region_new(self: &mut Self) u32 {
+        let r = self.region_next;
+        self.region_next = r + 1;
+        return r;
+    }
+
+    // Start a fresh region arena for `fnid` and bind its declared lifetimes to universal regions.
+    // Only the id counter resets: RegionVids are function-scoped and never compared across functions,
+    // and a node's region vector is only ever read while checking the function that owns it. Keeping
+    // the pool and maps means no stale slice can dangle into re-used pool storage.
+    fn region_reset(self: &mut Self, fnid: NodeId) {
+        self.region_next = REGION_STATIC + 1;
+        if fnid == NODE_NONE {
+            return;
+        }
+        let lts = unsafe (*self.cur_ast()).lifetimes_of(fnid);
+        for i in 0..lts.len {
+            let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
+            let r = self.region_new();
+            self.lt_region.insert(lp, r);
+        }
+    }
+
+    // How many lifetime SLOTS does a type have? This is the length of its region vector, so it must be
+    // exact and stable. Well-founded because an aggregate contributes only its DECLARED lifetime params
+    // plus the regions of its generic arguments -- never its fields, which are expressed in terms of
+    // those params. So `struct Node<'a> { next: &'a Node<'a> }` is arity 1, not infinite.
+    // Raw pointers contribute nothing: this language hands lifetime responsibility to the programmer
+    // there, and `&T -> *T` coercion already erases the borrow.
+    fn region_arity(self: &mut Self, ty: TypeId) u32 {
+        if ty == TYPE_NONE {
+            return 0;
+        }
+        let key = self.ast.module as u64 << 32 | ty as u64;
+        switch self.arity_memo.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        let r = self.region_arity_at(ty, 0);
+        self.arity_memo.insert(key, r);
+        return r;
+    }
+    fn region_arity_at(self: &mut Self, ty: TypeId, depth: i32) u32 {
+        if ty == TYPE_NONE || depth > 8 {
+            return 0;
+        }
+        let k = self.type_at(ty).kind;
+        if k == TypeKind::TYPE_REFERENCE {
+            return 1 + self.region_arity_at(self.type_at(ty).as_data.elem, depth + 1);
+        }
+        if k == TypeKind::TYPE_POINTER {
+            return 0;
+        }
+        if k == TypeKind::TYPE_ARRAY {
+            return self.region_arity_at(self.type_at(ty).as_data.arr.elem, depth + 1);
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(
+            self.strip(ty),
+            &mut om,
+            &mut od,
+            (&gp[0]) as *mut DefId,
+            (&ga[0]) as *mut TypeId,
+            &mut gn,
+        ) {
+            return 0;
+        }
+        let mut n = unsafe (*self.mod_ast(om)).lifetimes_of(od).len;
+        for gi in 0..gn {
+            n = n + self.region_arity_at(ga[gi as usize], depth + 1);
+        }
+        return n;
+    }
+
+    // Give `node` a fresh region vector for `ty` -- one existential region per lifetime slot. Types
+    // with no regions at all (the overwhelming majority in this codebase) never enter the map.
+    fn region_alloc_for(self: &mut Self, node: NodeId, ty: TypeId) {
+        if node == NODE_NONE {
+            return;
+        }
+        let n = self.region_arity(ty);
+        if n == 0 {
+            return;
+        }
+        let start = self.rv_pool.len() as u32;
+        let mut i: u32 = 0;
+        while i < n {
+            let r = self.region_new();
+            self.rv_pool.push(r);
+            i = i + 1;
+        }
+        self.rv_of.insert(node, start as u64 << 32 | n as u64);
+    }
+
     // Record a region/lifetime diagnostic. These are the diagnostics the region SOLVER will produce
     // once it lands: it only knows a borrow outlives its referent after the whole body is walked and
     // its constraints are solved, so the message must be placed back into source order within this
@@ -10985,6 +11113,9 @@ extend TypeChecker {
                     );
                 }
                 unsafe (*self.cur_ast()).set_type(id, binding);
+                // A binding whose type has lifetime slots gets a region vector; the solver will
+                // constrain these against the initializer's regions.
+                self.region_alloc_for(id, binding);
                 if annotated && !valued {
                     if self.tc_type_is_free(binding) {
                         let sp = self.name_span(nm);
@@ -11472,6 +11603,13 @@ extend TypeChecker {
                 self.current_returns = fnd.returns;
                 self.current_fn = id;
                 self.err_wm = self.errors.errors.len();
+                // Fresh region arena: the declared lifetimes become universal regions, then each
+                // reference-carrying parameter gets a region vector standing for the caller's regions.
+                self.region_reset(id);
+                for pi in 0..fnd.params.len {
+                    let pid = unsafe (*self.cur_ast()).list(fnd.params)[pi as usize];
+                    self.region_alloc_for(pid, self.decl_type(pid));
+                }
                 for mi in 0..self.nmoved {
                     self.ms_bit_clear(unsafe self.moved[mi as usize]);
                 }
