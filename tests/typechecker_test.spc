@@ -1893,3 +1893,67 @@ fn stored_borrow_through_function() {
         "fn push_into<T>(v: &mut Vector<T>, x: T) { v.push(x); }\nfn main() i32 {\n    let mut nums = Vector::<i32>::new();\n    {\n        let x = 5;\n        push_into(&mut nums, x);\n    }\n    return *nums.at(0) - 5;\n}\n",
     );
 }
+
+// fn_sig_regions / lifetime elision. A borrow stored into CALLER-VISIBLE data (reachable through a
+// `&`/`&mut` parameter) escapes the callee, so it is sound only when the signature DECLARES that the
+// stored value outlives the destination. Elision gives each unannotated reference its own independent
+// lifetime, so an unannotated cross-parameter store is unprovable and rejected (Rust's rule) -- the
+// region tie cannot catch these because a parameter does not die inside its own body. Writing the
+// shared `<'a>` makes them compile, and the call site then enforces it. All the rejected forms below
+// were ASan-confirmed (stack-use-after-scope) before this.
+@test
+fn fn_sig_region_store_escape() {
+    // Concrete store into a parameter's reference FIELD -- unannotated, so the lifetimes are unrelated.
+    h::expect_err_msg(
+        "storing a param borrow into a param struct's ref field needs a declared lifetime",
+        "struct Slot { pub r: &i32 }\nfn put(s: &mut Slot, x: &i32) { s.r = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut s = Slot { r: &anchor };\n    {\n        let inner = 9;\n        put(&mut s, &inner);\n    }\n    return *s.r;\n}\n",
+        "stored into caller-visible data",
+    );
+    // Same, through a store CALL rather than an assignment (`v.push(x)` on a parameter container).
+    h::expect_err_msg(
+        "pushing a param borrow into a param container needs a declared lifetime",
+        "fn f(v: &mut Vector<&i32>, x: &i32) { v.push(x); }\nfn main() i32 {\n    let mut vec = Vector::<&i32>::new();\n    {\n        let short = 9;\n        f(&mut vec, &short);\n    }\n    return **vec.at(0);\n}\n",
+        "stored into caller-visible data",
+    );
+    // Annotating the shared lifetime makes the definition legal ...
+    h::expect_ok(
+        "a declared shared lifetime permits the store",
+        "struct Slot<'a> { pub r: &'a i32 }\nfn put<'a>(s: &mut Slot<'a>, x: &'a i32) { s.r = x; }\nfn main() i32 {\n    let a = 5;\n    let mut sl = Slot::<i32> { r: &a };\n    let b = 7;\n    put(&mut sl, &b);\n    return *sl.r - 7;\n}\n",
+    );
+    h::expect_ok(
+        "a declared shared lifetime permits the container store",
+        "fn g<'a>(v: &mut Vector<&'a i32>, x: &'a i32) { v.push(x); }\nfn main() i32 {\n    let a = 5;\n    let b = 7;\n    let mut vec = Vector::<&i32>::new();\n    g(&mut vec, &a);\n    g(&mut vec, &b);\n    return **vec.at(0) - 5;\n}\n",
+    );
+    // ... and the CALL SITE then enforces what the signature declared: a shorter argument is rejected.
+    h::expect_err_msg(
+        "an annotated API rejects an argument shorter than the container",
+        "struct Slot<'a> { pub r: &'a i32 }\nfn put<'a>(s: &mut Slot<'a>, x: &'a i32) { s.r = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut sl = Slot::<i32> { r: &anchor };\n    {\n        let inner = 9;\n        put(&mut sl, &inner);\n    }\n    return *sl.r;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    // A reborrow of the parameter's own data has exactly the destination's lifetime -- always fine.
+    h::expect_ok(
+        "a store that only reads the container does not over-reject",
+        "fn firstof<T>(v: &Vector<T>) usize { return v.len(); }\nfn main() i32 {\n    let x = 5;\n    let mut v = Vector::<&i32>::new();\n    v.push(&x);\n    {\n        let y = 9;\n        let n = firstof(&v);\n    }\n    return **v.at(0) - 5;\n}\n",
+    );
+}
+
+// `&mut T` is INVARIANT in T: a callee may write either referent's contents into the other (`swap`),
+// so two `&mut T` arguments for the same callee type variable must have equal lifetimes. Passing a
+// long-lived and a short-lived reference lets the long one end up holding the short one's referent
+// (ASan stack-use-after-scope). The swap itself is valid and must keep compiling.
+@test
+fn mut_ref_invariance() {
+    h::expect_err_msg(
+        "swapping references of different lifetimes through &mut T is rejected",
+        "fn swap2<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let outer = 1;\n    let mut held: &i32 = &outer;\n    {\n        let inner = 9;\n        let mut tmp: &i32 = &inner;\n        swap2(&mut held, &mut tmp);\n    }\n    return *held;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_ok(
+        "swapping plain values through &mut T is fine",
+        "fn swap2<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let mut x = 1;\n    let mut y = 2;\n    swap2(&mut x, &mut y);\n    return x - 2;\n}\n",
+    );
+    h::expect_ok(
+        "swapping references of the same lifetime is fine",
+        "fn swap2<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let p = 1;\n    let q = 2;\n    let mut m: &i32 = &p;\n    let mut n: &i32 = &q;\n    swap2(&mut m, &mut n);\n    return *m - 2;\n}\n",
+    );
+}

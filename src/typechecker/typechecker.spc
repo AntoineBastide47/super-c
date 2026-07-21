@@ -5428,6 +5428,50 @@ extend TypeChecker {
         return self.tc_place_base_binding(e);
     }
 
+    // Lifetime annotation on a reference TYPE node, read in an arbitrary module's AST.
+    fn tc_ref_typenode_lt_in(self: &Self, m: ModuleId, tyn: NodeId) tok::Span {
+        if tyn == NODE_NONE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(tyn);
+        if n.kind != NodeKind::NODE_REFERENCE_TYPE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        return self.tc_lt_name_in(m, n.as_data.indirect_type.lifetime);
+    }
+    // Does a `&mut` storage pointee TYPE NODE mention the named lifetime `lt` (compared in module `m`)?
+    // Either it is an aggregate carrying `lt` as a lifetime argument (`Slot<'a>`), or it is itself a
+    // reference with that lifetime (`&mut &'a T`). Lifetime args are read off the AST node, not the
+    // interned type, since lifetimes are erased from `Ty`.
+    fn tc_typenode_covers_lt(self: &Self, m: ModuleId, node: NodeId, lt: tok::Span) bool {
+        if node == NODE_NONE || self.tc_span_empty(lt) {
+            return false;
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(node);
+        if n.kind == NodeKind::NODE_REFERENCE_TYPE {
+            let rl = self.tc_lt_name_in(m, n.as_data.indirect_type.lifetime);
+            if !self.tc_span_empty(rl) && spans_eq2(self.mod_src(m), rl, self.mod_src(m), lt) {
+                return true;
+            }
+            return self.tc_typenode_covers_lt(m, n.as_data.indirect_type.ty, lt);
+        }
+        if n.kind == NodeKind::NODE_TYPE_PATH {
+            let args = n.as_data.type_path.args;
+            for i in 0..args.len {
+                let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
+                if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME && spans_eq2(
+                    self.mod_src(m),
+                    self.tc_lt_name_in(m, aid),
+                    self.mod_src(m),
+                    lt,
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // Does the pointee `elem` of a `&mut` storage parameter mention the type variable (`vd`,`vm`)?
     // Either it IS that variable (`&mut T`) or it is an aggregate carrying it as a generic argument
     // (`&mut Vector<T>`, `&mut Cell<T>`). Storing a value of that variable through such a parameter
@@ -5464,6 +5508,94 @@ extend TypeChecker {
             }
         }
         return false;
+    }
+
+    // The interned generic ELEMENT of a `&mut T` parameter (T a callee type variable), or TYPE_NONE.
+    fn tc_mut_ref_generic_elem(self: &mut Self, fmod: ModuleId, ptyn: NodeId) TypeId {
+        if ptyn == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let lt = self.lower_type_in(fmod, ptyn);
+        if lt == TYPE_NONE || self.type_at(lt).kind != TypeKind::TYPE_REFERENCE || self.type_at(lt).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
+            return TYPE_NONE;
+        }
+        let elem = self.type_at(lt).as_data.elem;
+        if self.type_at(elem).kind != TypeKind::TYPE_GENERIC {
+            return TYPE_NONE;
+        }
+        return elem;
+    }
+    // Copy the content borrows a `&mut T` argument's referent holds onto the OTHER `&mut T` argument's
+    // referent. `&mut T` is INVARIANT in T: a function may write either referent's content into the
+    // other (`swap`), so each must outlive the other's referent lifetime. The copied borrow is bound
+    // to `to_ref` at `to_ref`'s region, so scope exit reports `to_ref` outliving `from_ref`'s content.
+    fn tc_cross_tie(self: &mut Self, from_ref: NodeId, to_ref: NodeId) {
+        let region = self.tc_binding_depth(to_ref) as u16;
+        let n = self.nborrows;
+        for b in 0..n {
+            let bb = unsafe self.borrows[b as usize];
+            if bb.binding == from_ref && bb.root != NODE_NONE && bb.root != to_ref {
+                self.borrow_push(bb.root, bb.kind, bb.place, bb.origin);
+                let k = self.nborrows - 1;
+                unsafe self.borrows[k as usize].binding = to_ref;
+                unsafe self.borrows[k as usize].region = region;
+            }
+        }
+    }
+    // `&mut T` invariance across a call: two parameters `&mut T` for the SAME callee type variable can
+    // have their contents swapped, so their arguments' referents must have equal lifetime. Cross-tie
+    // the content borrows both ways; a no-op when T is not a borrow-carrier (no content borrows exist).
+    fn tc_check_invariant_args(
+        self: &mut Self,
+        fmod: ModuleId,
+        fdecl: NodeId,
+        params: NodeList,
+        args: NodeList,
+        skip: u32,
+    ) {
+        let fa = self.mod_ast(fmod);
+        if unsafe (*fa).at_const(fdecl).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        for i in 0..params.len {
+            if i < skip {
+                continue;
+            }
+            let ai = i - skip;
+            if ai >= args.len {
+                continue;
+            }
+            let ei = self.tc_mut_ref_generic_elem(
+                fmod,
+                unsafe (*fa).at_const(unsafe (*fa).list(params)[i as usize]).as_data.parameter.ty,
+            );
+            if ei == TYPE_NONE {
+                continue;
+            }
+            for j in i + 1..params.len {
+                if j < skip {
+                    continue;
+                }
+                let aj = j - skip;
+                if aj >= args.len {
+                    continue;
+                }
+                let ej = self.tc_mut_ref_generic_elem(
+                    fmod,
+                    unsafe (*fa).at_const(unsafe (*fa).list(params)[j as usize]).as_data.parameter.ty,
+                );
+                if ej != ei {
+                    continue;
+                }
+                let ri = self.tc_ref_arg_referent(unsafe (*self.cur_ast()).list(args)[ai as usize]);
+                let rj = self.tc_ref_arg_referent(unsafe (*self.cur_ast()).list(args)[aj as usize]);
+                if ri == NODE_NONE || rj == NODE_NONE || ri == rj {
+                    continue;
+                }
+                self.tc_cross_tie(ri, rj);
+                self.tc_cross_tie(rj, ri);
+            }
+        }
     }
 
     // Family B: a borrow passed for a bare value parameter `x: T` that ANOTHER parameter stores through
@@ -5506,6 +5638,7 @@ extend TypeChecker {
                 continue;
             }
             let elem = self.type_at(lt).as_data.elem;
+            let ps_pointee = unsafe (*fa).at_const(ps_ty).as_data.indirect_type.ty;
             let mut stores = false;
             for pv in 0..params.len {
                 if pv == ps || pv < skip {
@@ -5519,13 +5652,20 @@ extend TypeChecker {
                 if pv_ty == NODE_NONE {
                     continue;
                 }
+                // (a) shared TYPE VARIABLE: bare value `x: T` stored through `&mut C<..T..>` (variance).
                 let vt = self.lower_type_in(fmod, pv_ty);
-                if vt == TYPE_NONE || self.type_at(vt).kind != TypeKind::TYPE_GENERIC {
-                    continue;
+                if vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_GENERIC {
+                    let vd = self.type_at(vt).as_data.decl;
+                    let vm = self.type_at(vt).module;
+                    if self.tc_ref_covers_generic(elem, vd, vm) {
+                        stores = true;
+                    }
                 }
-                let vd = self.type_at(vt).as_data.decl;
-                let vm = self.type_at(vt).module;
-                if self.tc_ref_covers_generic(elem, vd, vm) {
+                // (b) shared NAMED LIFETIME: value `x: &'a U` stored through `&mut C<'a,..>` -- the
+                // declared lifetime relationship the annotated API asserts. The arg for x must then
+                // outlive the arg for the container (enforced by the tie + scope exit below).
+                let vlt = self.tc_ref_typenode_lt_in(fmod, pv_ty);
+                if !self.tc_span_empty(vlt) && self.tc_typenode_covers_lt(fmod, ps_pointee, vlt) {
                     stores = true;
                 }
             }
@@ -7246,14 +7386,56 @@ extend TypeChecker {
                                 unsafe self.borrows[bi as usize].region = rregion as u16;
                             }
                         }
+                        // Body-side elision for a store CALL into a `&mut` PARAMETER container
+                        // (`v.push(x)` where both v and x are parameters): the region tie cannot catch
+                        // it (a parameter does not die in its own body, and a parameter argument mints
+                        // no borrow to tie), so require the stored parameter's lifetime to be declared
+                        // to outlive the container's element lifetime. Local arguments are left to the
+                        // tie + scope exit above.
+                        if self.tc_is_ref_param(recv_root) {
+                            let elt = self.tc_container_elem_lt(
+                                self.ast.module,
+                                unsafe (*a).at_const(recv_root).as_data.parameter.ty,
+                            );
+                            for pi in 1..params.len {
+                                let aid = if_node(
+                                    pi - 1 < args.len,
+                                    unsafe (*a).list(args)[(pi - 1) as usize],
+                                    NODE_NONE,
+                                );
+                                if aid == NODE_NONE || self.tc_ident_ref_param(aid) == NODE_NONE {
+                                    continue;
+                                }
+                                if !self.tc_param_shares_recv_region(mdef, recv_ty, pi as i32, aid) {
+                                    continue;
+                                }
+                                if !self.tc_lifetime_outlives(self.tc_value_source_lifetime(aid), elt) {
+                                    let asp = unsafe (*a).at_const(aid).span;
+                                    self.errors.emit(
+                                        asp.start,
+                                        asp.end - asp.start,
+                                        format(
+                                            "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",
+                                        ),
+                                    );
+                                    self.errors.note(
+                                        format(
+                                            "tie the lifetimes with a shared parameter, e.g. `fn f<'a>(dst: &mut Vector<&'a T>, src: &'a T)`",
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
         // Family B: a borrow stored through a `&mut` container/slot PARAMETER (as opposed to the method
-        // receiver handled above) -- covers plain functions like `push_into(&mut v, &local)`.
+        // receiver handled above) -- covers plain functions like `push_into(&mut v, &local)`. Plus the
+        // `&mut T` invariance cross-tie (`swap(&mut a, &mut b)` with differently-scoped referents).
         if named {
             self.tc_tie_stored_borrow_args(fmod, fdecl, params, args, skip, arg_bm, arg_end);
+            self.tc_check_invariant_args(fmod, fdecl, params, args, skip);
         }
         return ret;
     }
@@ -8755,6 +8937,312 @@ extend TypeChecker {
         self.errors.note(format("add a '_' arm to cover the remaining values"));
     }
 
+    // ---- fn_sig_regions: signature lifetime relationships + body-side elision enforcement ----
+    // A lifetime is identified by its NAME (function-scoped; lifetimes are never resolved). An empty
+    // span means "elided" -- a fresh, distinct lifetime that outlives nothing it is not explicitly
+    // tied to. These helpers read the annotations off signature type nodes and the outlives edges off
+    // the `where` clause and lifetime-param bounds, so a store into caller-visible data can be checked
+    // against the declared relationships (Rust's elision rules) rather than guessed at.
+    fn tc_span_empty(self: &Self, s: tok::Span) bool {
+        return s.end <= s.start;
+    }
+    // Name span of a NODE_LIFETIME (or the NODE_LIFETIME held by a lifetime NODE_GENERIC_PARAM);
+    // empty when NODE_NONE.
+    fn tc_lt_name(self: &Self, lt: NodeId) tok::Span {
+        if lt == NODE_NONE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let n = unsafe (*self.cur_ast()).at_const(lt);
+        if n.kind == NodeKind::NODE_GENERIC_PARAM {
+            return self.tc_lt_name(n.as_data.generic_param.name);
+        }
+        return n.as_data.name.text;
+    }
+    // The lifetime annotation on a reference TYPE node (`&'a T`), empty if elided or not a reference.
+    fn tc_ref_typenode_lt(self: &Self, tyn: NodeId) tok::Span {
+        if tyn == NODE_NONE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let n = unsafe (*self.cur_ast()).at_const(tyn);
+        if n.kind != NodeKind::NODE_REFERENCE_TYPE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        return self.tc_lt_name(n.as_data.indirect_type.lifetime);
+    }
+    // Is `node` a `&`/`&mut` PARAMETER of the current function?
+    fn tc_is_ref_param(self: &mut Self, node: NodeId) bool {
+        if node == NODE_NONE {
+            return false;
+        }
+        let a = self.cur_ast();
+        if unsafe (*a).at_const(node).kind != NodeKind::NODE_PARAMETER {
+            return false;
+        }
+        let tyn = unsafe (*a).at_const(node).as_data.parameter.ty;
+        if tyn == NODE_NONE {
+            return false;
+        }
+        let t = self.lower_type_in(self.ast.module, tyn);
+        return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_REFERENCE;
+    }
+    // The lifetime a value's borrow carries, in the current function's scope: for a parameter reference
+    // `x: &'a T` it is `'a`; anything else (a local, a computed borrow) is elided/empty -- i.e. does
+    // not outlive caller data.
+    fn tc_value_source_lifetime(self: &mut Self, value: NodeId) tok::Span {
+        let a = self.cur_ast();
+        let mut e = value;
+        loop {
+            let n = unsafe (*a).at_const(e);
+            if n.kind == NodeKind::NODE_CAST {
+                e = n.as_data.cast.expression;
+            } else if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                e = n.as_data.unary.operand;
+            } else {
+                break;
+            }
+        }
+        if unsafe (*a).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let d = unsafe (*a).resolution_def(e);
+        if d.module != self.ast.module || d.node == NODE_NONE || !self.tc_is_ref_param(d.node) {
+            return tok::Span { start: 0, end: 0 };
+        }
+        return self.tc_ref_typenode_lt(unsafe (*a).at_const(d.node).as_data.parameter.ty);
+    }
+    // The lifetime of the reference SLOT a store targets, in the current function's scope. `*param`
+    // stores at the parameter's own reference lifetime; `param.field` stores at the field's lifetime,
+    // mapped through the parameter aggregate's lifetime argument (`s: &mut Slot<'x>`, field `&'a i32`
+    // in `Slot<'a>` -> `'x`). Unhandled shapes return empty (conservative: the store is then rejected).
+    fn tc_place_slot_lifetime(self: &mut Self, place: NodeId, base: NodeId) tok::Span {
+        let a = self.cur_ast();
+        let pn = unsafe (*a).at_const(place);
+        if pn.kind == NodeKind::NODE_UNARY && pn.as_data.unary.op == TokenType::Star {
+            return self.tc_ref_typenode_lt(unsafe (*a).at_const(base).as_data.parameter.ty);
+        }
+        if pn.kind != NodeKind::NODE_MEMBER || pn.as_data.member.path {
+            return tok::Span { start: 0, end: 0 };
+        }
+        // single hop `base.field` only
+        if self.tc_place_base_binding(pn.as_data.member.object) != base {
+            return tok::Span { start: 0, end: 0 };
+        }
+        // base's aggregate type node (strip the leading reference) and its lifetime arguments
+        let ptyn = unsafe (*a).at_const(base).as_data.parameter.ty;
+        if ptyn == NODE_NONE || unsafe (*a).at_const(ptyn).kind != NodeKind::NODE_REFERENCE_TYPE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let aggn = unsafe (*a).at_const(ptyn).as_data.indirect_type.ty;
+        if aggn == NODE_NONE || unsafe (*a).at_const(aggn).kind != NodeKind::NODE_TYPE_PATH {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let fname = self.name_span(pn.as_data.member.member);
+        let sd = unsafe (*a).resolution_def(aggn);
+        if sd.node == NODE_NONE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let sa = self.mod_ast(sd.module);
+        let members = unsafe (*sa).at_const(sd.node).as_data.aggregate.members;
+        let mut fldlt = tok::Span { start: 0, end: 0 };
+        for i in 0..members.len {
+            let mid = unsafe (*sa).list(members)[i as usize];
+            if unsafe (*sa).at_const(mid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            if !spans_eq2(
+                self.source,
+                fname,
+                self.mod_src(sd.module),
+                self.name_span(unsafe (*sa).at_const(mid).as_data.field.name),
+            ) {
+                continue;
+            }
+            let ftyn = unsafe (*sa).at_const(mid).as_data.field.ty;
+            if ftyn == NODE_NONE || unsafe (*sa).at_const(ftyn).kind != NodeKind::NODE_REFERENCE_TYPE {
+                return tok::Span { start: 0, end: 0 };
+            }
+            fldlt = self.tc_lt_name_in(sd.module, unsafe (*sa).at_const(ftyn).as_data.indirect_type.lifetime);
+            break;
+        }
+        if self.tc_span_empty(fldlt) {
+            return tok::Span { start: 0, end: 0 };
+        }
+        // map the field's struct-scope lifetime param to base's lifetime argument at the same index
+        let lts = unsafe (*sa).lifetimes_of(sd.node);
+        let mut k: i32 = -1;
+        for i in 0..lts.len {
+            let pnm = self.tc_lt_name_in(sd.module, unsafe (*sa).list(lts)[i as usize]);
+            if spans_eq2(self.mod_src(sd.module), pnm, self.mod_src(sd.module), fldlt) {
+                k = i as i32;
+                break;
+            }
+        }
+        if k < 0 {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let aargs = unsafe (*a).at_const(aggn).as_data.type_path.args;
+        let mut li: i32 = 0;
+        for i in 0..aargs.len {
+            let aid = unsafe (*a).list(aargs)[i as usize];
+            if unsafe (*a).at_const(aid).kind != NodeKind::NODE_LIFETIME {
+                continue;
+            }
+            if li == k {
+                return self.tc_lt_name(aid);
+            }
+            li = li + 1;
+        }
+        return tok::Span { start: 0, end: 0 };
+    }
+    // The lifetime of a `&mut` container parameter's borrow-carrying ELEMENT, read off the type node
+    // (`&mut Vector<&'a i32>` -> `'a`; elided -> empty). Used to check a store CALL into the container.
+    fn tc_container_elem_lt(self: &Self, m: ModuleId, ptyn: NodeId) tok::Span {
+        if ptyn == NODE_NONE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(ptyn);
+        if n.kind == NodeKind::NODE_REFERENCE_TYPE {
+            return self.tc_container_elem_lt(m, n.as_data.indirect_type.ty);
+        }
+        if n.kind == NodeKind::NODE_TYPE_PATH {
+            let args = n.as_data.type_path.args;
+            for i in 0..args.len {
+                let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
+                if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_REFERENCE_TYPE {
+                    return self.tc_lt_name_in(m, unsafe (*self.mod_ast(m)).at_const(aid).as_data.indirect_type.lifetime);
+                }
+            }
+        }
+        return tok::Span { start: 0, end: 0 };
+    }
+    // The `&`/`&mut` PARAMETER an argument identifier resolves to (unwrapping move/unsafe/cast), else
+    // NODE_NONE. A store of such an argument into caller data is a signature-level relationship (unlike
+    // a local, which the region tie + scope exit already catch).
+    fn tc_ident_ref_param(self: &mut Self, arg0: NodeId) NodeId {
+        let a = self.cur_ast();
+        let mut e = arg0;
+        loop {
+            let n = unsafe (*a).at_const(e);
+            if n.kind == NodeKind::NODE_CAST {
+                e = n.as_data.cast.expression;
+            } else if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                e = n.as_data.unary.operand;
+            } else {
+                break;
+            }
+        }
+        if unsafe (*a).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+            return NODE_NONE;
+        }
+        let d = unsafe (*a).resolution_def(e);
+        if d.module != self.ast.module || d.node == NODE_NONE || !self.tc_is_ref_param(d.node) {
+            return NODE_NONE;
+        }
+        return d.node;
+    }
+    // tc_lt_name against an arbitrary module's AST (for struct-scope lifetime names).
+    fn tc_lt_name_in(self: &Self, m: ModuleId, lt: NodeId) tok::Span {
+        if lt == NODE_NONE {
+            return tok::Span { start: 0, end: 0 };
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(lt);
+        if n.kind == NodeKind::NODE_GENERIC_PARAM {
+            return self.tc_lt_name_in(m, n.as_data.generic_param.name);
+        }
+        return n.as_data.name.text;
+    }
+    // Does the source lifetime provably outlive the destination? Same lifetime (reflexive), or a
+    // one-hop `'src: 'dst` edge from a lifetime-param bound or a `where` predicate. Missing transitive
+    // edges only over-reject. Empty (elided) lifetimes outlive nothing.
+    fn tc_lifetime_outlives(self: &mut Self, src: tok::Span, dst: tok::Span) bool {
+        if self.tc_span_empty(src) || self.tc_span_empty(dst) {
+            return false;
+        }
+        if spans_eq2(self.source, src, self.source, dst) {
+            return true;
+        }
+        if self.current_fn == NODE_NONE {
+            return false;
+        }
+        let a = self.cur_ast();
+        let lts = unsafe (*a).lifetimes_of(self.current_fn);
+        for i in 0..lts.len {
+            let lp = unsafe (*a).list(lts)[i as usize];
+            if !spans_eq2(self.source, self.tc_lt_name(lp), self.source, src) {
+                continue;
+            }
+            let bnds = unsafe (*a).at_const(lp).as_data.generic_param.bounds;
+            for b in 0..bnds.len {
+                if spans_eq2(self.source, self.tc_lt_name(unsafe (*a).list(bnds)[b as usize]), self.source, dst) {
+                    return true;
+                }
+            }
+        }
+        let wc = unsafe (*a).at_const(self.current_fn).as_data.function.where_clause;
+        for w in 0..wc.len {
+            let wp = unsafe (*a).at_const(unsafe (*a).list(wc)[w as usize]).as_data.where_predicate;
+            if unsafe (*a).at_const(wp.ty).kind != NodeKind::NODE_LIFETIME || !spans_eq2(
+                self.source,
+                self.tc_lt_name(wp.ty),
+                self.source,
+                src,
+            ) {
+                continue;
+            }
+            for b in 0..wp.bounds.len {
+                let bid = unsafe (*a).list(wp.bounds)[b as usize];
+                if unsafe (*a).at_const(bid).kind == NodeKind::NODE_LIFETIME && spans_eq2(
+                    self.source,
+                    self.tc_lt_name(bid),
+                    self.source,
+                    dst,
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    // Body-side elision check: storing a borrow into caller-visible data reachable through a `&`/`&mut`
+    // PARAMETER escapes into the caller and is sound only if the stored value's lifetime is declared to
+    // outlive the destination's. With elided (independent) lifetimes this is unprovable, so it is
+    // rejected -- write a shared `<'a>` to express it. A reborrow of the same parameter's own data has
+    // exactly the destination's lifetime and is always fine.
+    fn tc_check_store_escape(self: &mut Self, place: NodeId, value: NodeId, place_ty: TypeId) {
+        // Only a bare `&T` reference SLOT is the direct escape vector checked here. A borrow-carrying
+        // aggregate slot (`str`/`Slice`/a view field) is a long-lived value in practice and pinning
+        // its producer is the reborrow/conflict machinery's job -- gating on it here would reject the
+        // pervasive `self.source: str = ..` assignments (the str-as-a-value explosion).
+        if place_ty == TYPE_NONE || self.type_at(place_ty).kind != TypeKind::TYPE_REFERENCE {
+            return;
+        }
+        let base = self.tc_place_base_binding(place);
+        if base == NODE_NONE || !self.tc_is_ref_param(base) {
+            return;
+        }
+        let vt = unsafe (*self.cur_ast()).type_of(value);
+        if vt == TYPE_NONE || !self.tc_carries_borrow(vt) {
+            return;
+        }
+        if self.tc_ref_arg_referent(value) == base {
+            return; // reborrow of the same parameter's own data
+        }
+        if self.tc_lifetime_outlives(self.tc_value_source_lifetime(value), self.tc_place_slot_lifetime(place, base)) {
+            return;
+        }
+        let sp = unsafe (*self.cur_ast()).at_const(place).span;
+        self.errors.emit(
+            sp.start,
+            sp.end - sp.start,
+            format(
+                "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",
+            ),
+        );
+        self.errors.note(
+            format("tie the lifetimes with a shared parameter, e.g. `fn f<'a>(dst: &mut T<'a>, src: &'a U)`"),
+        );
+    }
+
     fn check_assignment(self: &mut Self, id: NodeId) TypeId {
         let a = self.cur_ast();
         let bd = unsafe (*a).at_const(id).as_data.binary;
@@ -8812,6 +9300,9 @@ extend TypeChecker {
                     }
                 }
             }
+        }
+        if plain {
+            self.tc_check_store_escape(bd.left, bd.right, l);
         }
         if !self.is_assignable(bd.left) {
             let sp = unsafe (*a).at_const(bd.left).span;
