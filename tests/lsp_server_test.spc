@@ -18,7 +18,7 @@ fn frame(out: &mut String, body: &String) {
     out.push_string(body);
 }
 
-fn superc_path() str {
+fn superc_path() str<'static> {
     let sc = stdlib::getenv("SUPERC");
     if sc == null || unsafe *sc == 0 as char {
         return "./super-c";

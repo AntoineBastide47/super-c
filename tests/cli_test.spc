@@ -1319,7 +1319,7 @@ fn evens_arr() Array<u32, 5> {
     for i in 0..a.len() { a.set(i, *src.at(i)); }
     return a;
 }
-fn greet() str { return "hello"; }
+fn greet() str<'static> { return "hello"; }
 fn ring() Pair {
     let a = unsafe stdlib::malloc(sizeof(Node)) as *mut Node;
     let b = unsafe stdlib::malloc(sizeof(Node)) as *mut Node;

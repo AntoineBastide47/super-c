@@ -379,7 +379,7 @@ fn dirname_of(p: str) str {
 }
 
 // CLI flag beats the SC_PROFILE handed down by a running manifest command, which beats the default.
-pub fn resolve_profile(m: &mf::Manifest, cli: str) str {
+pub fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
     if cli.len() != 0 {
         return cli;
     }

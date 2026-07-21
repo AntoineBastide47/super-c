@@ -30,7 +30,7 @@ pub fn oom() {
 }
 
 // A borrowed `str` view of a NUL-terminated C string (for routing a raw C string through `format(...)`).
-pub fn cstr(p: *const char) str {
+pub fn cstr<'a>(p: *const char) str<'a> {
     return str::from_raw(p as *const u8, unsafe string::strlen(p));
 }
 

@@ -30,7 +30,7 @@ const CDEF2: str = "struct H { pub v: i32 }\nextend H { fn geti(self: &H) &i32 {
 const SINK: str = "struct Own { pub id: i32 }\nextend Own as Free { fn free(self: &mut Own) { } }\nfn sink(v: Own) i32 { return v.id; }\n";
 
 // Make a `str` view over a filled, NUL-terminated buffer.
-fn buf_str(p: *const char) str {
+fn buf_str<'a>(p: *const char) str<'a> {
     return str::from_raw(p as *const u8, unsafe cstring::strlen(p));
 }
 
@@ -311,12 +311,12 @@ fn closed_gaps() {
     );
     check_case(
         "assign arg while tuple-destructured ref live",
-        "fn split(a: &mut i32, b: &mut i32) (&i32, &i32) { return a, b; }\nfn main() i32 { let mut x = 5; let mut y = 6; let (r, s) = split(&mut x, &mut y); x = 9; return *r + *s; }\n",
+        "fn split<'a>(a: &'a mut i32, b: &'a mut i32) (&'a i32, &'a i32) { return a, b; }\nfn main() i32 { let mut x = 5; let mut y = 6; let (r, s) = split(&mut x, &mut y); x = 9; return *r + *s; }\n",
         false,
     );
     check_case(
         "tuple refs scoped, then assign arg",
-        "fn split(a: &mut i32, b: &mut i32) (&i32, &i32) { return a, b; }\nfn main() i32 { let mut x = 5; let mut y = 6; { let (r, s) = split(&mut x, &mut y); let v = *r + *s; } x = 9; return x; }\n",
+        "fn split<'a>(a: &'a mut i32, b: &'a mut i32) (&'a i32, &'a i32) { return a, b; }\nfn main() i32 { let mut x = 5; let mut y = 6; { let (r, s) = split(&mut x, &mut y); let v = *r + *s; } x = 9; return x; }\n",
         true,
     );
     check_case(
@@ -643,7 +643,7 @@ fn aliasing3() {
 
 // Self-contained scenario bodies (each a function body returning i32) with a known verdict, drawn from the
 // tricky valid cases and the closed-gap rejections. N_SNIPPET = 16.
-fn snippet_body(i: i32) str {
+fn snippet_body(i: i32) str<'static> {
     return switch i {
         0 => "let mut x = 0; let a = &x; let b = &x; return *a + *b;",
         1 => "let mut x = 0; let r = &mut x; *r = 1; let y = x; return y;",

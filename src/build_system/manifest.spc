@@ -69,7 +69,7 @@ extend Manifest as Free {
 }
 
 extend Manifest {
-    fn new() Self {
+    fn new<'a>() Manifest<'a> {
         return Manifest {
             toml: Vector::<toml::TomlItem>::new(),
             bin: String::new(),

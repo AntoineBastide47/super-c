@@ -16,7 +16,7 @@ extern "C" {
 }
 
 // The display name for a node kind (mirrors ast.c's kind_name names[]).
-fn kind_name(k: ast::NodeKind) str {
+fn kind_name(k: ast::NodeKind) str<'static> {
     return switch k {
         NODE_NONE_KIND => "None",
         NODE_PROGRAM => "Program",

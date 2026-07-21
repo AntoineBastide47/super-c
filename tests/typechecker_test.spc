@@ -269,7 +269,7 @@ fn errors() {
         "fn bad() usize { let x: i32 = 10; return ((&x) as usize); }\n",
         "does not outlive the call",
     );
-    h::expect_ok("return &global const is fine", "const G: i32 = 7;\nfn ok() &i32 { return &G; }\n");
+    h::expect_ok("return &global const is fine", "const G: i32 = 7;\nfn ok() &'static i32 { return &G; }\n");
     h::expect_ok("return a deref'd pointer param is fine", "fn ok(p: &i32) i32 { return *p; }\n");
     h::expect_ok(
         "address of a field through a reference param is fine",
@@ -529,7 +529,7 @@ fn bug_regressions() {
     );
     h::expect_err_msg(
         "escape of &local index",
-        "fn dangle() &i32 { let a: [i32; 3] = [1, 2, 3]; return &a[1]; }\nfn main() i32 { return *dangle(); }\n",
+        "fn dangle<'a>() &'a i32 { let a: [i32; 3] = [1, 2, 3]; return &a[1]; }\nfn main() i32 { return *dangle(); }\n",
         "does not outlive",
     );
     h::expect_ok(
@@ -1563,13 +1563,13 @@ fn return_region_escapes() {
     // bug9: the reference points into the local Box's heap cell, freed when the Box drops at return.
     h::expect_err_msg(
         "returning a borrow into a local Box's cell is rejected",
-        "fn f() &i32 {\n    let b = Box::<i32>::new(9);\n    return b.get();\n}\n",
+        "fn f<'a>() &'a i32 {\n    let b = Box::<i32>::new(9);\n    return b.get();\n}\n",
         "returning a reference borrowed from a local",
     );
     // bug1: the borrow is buried in a returned struct (unannotated form).
     h::expect_err_msg(
         "returning a struct holding &local is rejected",
-        "struct R<'a> { pub p: &'a i32 }\nfn f() R {\n    let x = 1;\n    return R { p: &x };\n}\n",
+        "struct R<'a> { pub p: &'a i32 }\nfn f<'a>() R<'a> {\n    let x = 1;\n    return R { p: &x };\n}\n",
         "returning a value borrowing from a local",
     );
     // ...and the same with an explicit lifetime param.
@@ -1728,12 +1728,12 @@ fn region_propagation_uniform() {
     // Hoisting a return-of-borrow into a local no longer bypasses the return check.
     h::expect_err_msg(
         "returning a pre-bound struct holding &local is rejected",
-        "struct R<'a> { pub p: &'a i32 }\nfn f() R {\n    let x = 1;\n    let r = R { p: &x };\n    return r;\n}\n",
+        "struct R<'a> { pub p: &'a i32 }\nfn f<'a>() R<'a> {\n    let x = 1;\n    let r = R { p: &x };\n    return r;\n}\n",
         "returning a value borrowing from a local",
     );
     h::expect_err_msg(
         "returning a pre-populated Vector<&local> is rejected",
-        "fn f() Vector<&i32> {\n    let x = 5;\n    let mut v = Vector::<&i32>::new();\n    v.push(&x);\n    return v;\n}\n",
+        "fn f<'a>() Vector<&'a i32> {\n    let x = 5;\n    let mut v = Vector::<&'a i32>::new();\n    v.push(&x);\n    return v;\n}\n",
         "returning a value borrowing from a local",
     );
     // Assigning a short borrow to a reference-typed field of a longer-lived struct is rejected.
@@ -2006,6 +2006,35 @@ fn aggregate_value_arg_regions() {
     h::expect_ok(
         "storing an aggregate that outlives the destination is fine",
         "struct Ref<'a> { pub p: &'a i32 }\nfn store<'a>(dst: &mut Ref<'a>, src: Ref<'a>) { *dst = src; }\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut long = Ref { p: &a };\n    let s = Ref { p: &b };\n    store(&mut long, s);\n    return *long.p - 2;\n}\n",
+    );
+}
+
+// Lifetime elision, Rust's three rules. Rule 1 is structural (every elided input position is its own
+// lifetime). Rules 2 and 3 say which lifetime an elided OUTPUT takes: with exactly one input position
+// it takes that one, and a `self` receiver wins over everything. When neither applies the output's
+// region is unconstrained -- a caller cannot tell what it borrows -- so it must be written.
+@test
+fn lifetime_elision() {
+    h::expect_err_msg(
+        "two borrowing inputs cannot determine the output lifetime",
+        "fn pick(a: &i32, b: &i32) &i32 { return a; }\nfn main() i32 {\n    return 0;\n}\n",
+        "which input it borrows from cannot be inferred",
+    );
+    h::expect_ok(
+        "rule 2: a single input lifetime is given to the output",
+        "fn first(a: &i32) &i32 { return a; }\nfn main() i32 {\n    let x = 1;\n    return *first(&x) - 1;\n}\n",
+    );
+    h::expect_ok(
+        "rule 3: a self receiver gives the output its lifetime",
+        "struct B { pub v: i32 }\nextend B { pub fn get(self: &Self, k: &i32) &i32 { return &self.v; } }\nfn main() i32 {\n    let b = B { v: 7 };\n    let k = 1;\n    return *b.get(&k) - 7;\n}\n",
+    );
+    h::expect_ok(
+        "naming the lifetime explicitly resolves the ambiguity",
+        "fn pick<'a>(a: &'a i32, b: &i32) &'a i32 { return a; }\nfn main() i32 {\n    let x = 1;\n    let y = 2;\n    return *pick(&x, &y) - 1;\n}\n",
+    );
+    h::expect_ok(
+        "a borrow of a global is 'static",
+        "const G: i32 = 7;\nfn ok() &'static i32 { return &G; }\nfn main() i32 {\n    return *ok() - 7;\n}\n",
     );
 }
 

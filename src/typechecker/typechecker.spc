@@ -295,7 +295,7 @@ const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
     return unsafe cstring::memcmp(sa.ptr() + a.start as usize, sb.ptr() + b.start as usize, la as usize) == 0;
 }
 
-const fn builtin_name(b: BuiltinType) str {
+const fn builtin_name(b: BuiltinType) str<'static> {
     return bt_name(b);
 }
 
@@ -5761,6 +5761,139 @@ extend TypeChecker {
         }
     }
 
+    // ---- lifetime elision (Rust's three rules) ----
+    // Rule 1 is structural: every elided INPUT position is its own fresh lifetime, which is why two
+    // elided parameters never share a region. Rules 2 and 3 say which lifetime an elided OUTPUT gets:
+    // with exactly one input position it takes that one; with a `&self` receiver it takes self's.
+    // When neither applies the output's region is unconstrained -- the caller cannot tell what it
+    // borrows -- so it must be written, exactly as Rust demands.
+    //
+    // Counts lifetime POSITIONS in a type: each reference, and each lifetime argument slot of a
+    // borrowing aggregate, whether written or elided.
+    fn tc_count_lt_positions(self: &mut Self, m: ModuleId, tyn: NodeId, depth: i32) i32 {
+        if tyn == NODE_NONE || depth > 6 {
+            return 0;
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(tyn);
+        if n.kind == NodeKind::NODE_REFERENCE_TYPE {
+            return 1 + self.tc_count_lt_positions(m, n.as_data.indirect_type.ty, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            return self.tc_count_lt_positions(m, n.as_data.array_type.element, depth + 1);
+        }
+        if n.kind != NodeKind::NODE_TYPE_PATH {
+            return 0;
+        }
+        let mut c: i32 = 0;
+        let dd = unsafe (*self.mod_ast(m)).resolution_def(tyn);
+        if dd.node != NODE_NONE {
+            c = (unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len) as i32;
+        }
+        let args = n.as_data.type_path.args;
+        for i in 0..args.len {
+            let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
+            if unsafe (*self.mod_ast(m)).at_const(aid).kind != NodeKind::NODE_LIFETIME {
+                c = c + self.tc_count_lt_positions(m, aid, depth + 1);
+            }
+        }
+        return c;
+    }
+
+    // Does this type have an ELIDED lifetime position -- a reference with no annotation, or a
+    // borrowing aggregate given no lifetime argument?
+    fn tc_has_elided_lt(self: &mut Self, m: ModuleId, tyn: NodeId, depth: i32) bool {
+        if tyn == NODE_NONE || depth > 6 {
+            return false;
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(tyn);
+        if n.kind == NodeKind::NODE_REFERENCE_TYPE {
+            if n.as_data.indirect_type.lifetime == NODE_NONE {
+                return true;
+            }
+            return self.tc_has_elided_lt(m, n.as_data.indirect_type.ty, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            return self.tc_has_elided_lt(m, n.as_data.array_type.element, depth + 1);
+        }
+        if n.kind != NodeKind::NODE_TYPE_PATH {
+            return false;
+        }
+        let args = n.as_data.type_path.args;
+        let mut nlt: i32 = 0;
+        for i in 0..args.len {
+            if unsafe (*self.mod_ast(m)).at_const(unsafe (*self.mod_ast(m)).list(args)[i as usize]).kind == NodeKind::NODE_LIFETIME {
+                nlt = nlt + 1;
+            }
+        }
+        let dd = unsafe (*self.mod_ast(m)).resolution_def(tyn);
+        if dd.node != NODE_NONE && (unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len) as i32 > nlt {
+            return true;
+        }
+        for i in 0..args.len {
+            let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
+            if unsafe (*self.mod_ast(m)).at_const(aid).kind != NodeKind::NODE_LIFETIME && self.tc_has_elided_lt(
+                m,
+                aid,
+                depth + 1,
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Apply rules 2 and 3 to a signature: an elided output lifetime must be determined by a `&self`
+    // receiver or by there being exactly one input position.
+    fn tc_check_elision(self: &mut Self, fnid: NodeId) {
+        let a = self.cur_ast();
+        let fnd = unsafe (*a).at_const(fnid).as_data.function;
+        if fnd.returns.len == 0 {
+            return;
+        }
+        let mut inputs: i32 = 0;
+        let mut has_self = false;
+        for i in 0..fnd.params.len {
+            let pid = unsafe (*a).list(fnd.params)[i as usize];
+            let ptyn = unsafe (*a).at_const(pid).as_data.parameter.ty;
+            let c = self.tc_count_lt_positions(self.ast.module, ptyn, 0);
+            inputs = inputs + c;
+            if i == 0 && c != 0 && span_is(
+                self.source,
+                self.name_span(unsafe (*a).at_const(pid).as_data.parameter.name),
+                "self",
+            ) {
+                has_self = true;
+            }
+        }
+        if has_self || inputs == 1 {
+            return; // rule 3, then rule 2
+        }
+        for i in 0..fnd.returns.len {
+            let r = unsafe (*a).list(fnd.returns)[i as usize];
+            let rt = if_node(
+                unsafe (*a).at_const(r).kind == NodeKind::NODE_PARAMETER,
+                unsafe (*a).at_const(r).as_data.parameter.ty,
+                r,
+            );
+            if !self.tc_has_elided_lt(self.ast.module, rt, 0) {
+                continue;
+            }
+            let sp = unsafe (*a).at_const(rt).span;
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format(
+                    "missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred",
+                ),
+            );
+            self.errors.note(
+                format(
+                    "name it, e.g. `fn f<'a>(x: &'a T, y: &U) &'a T`; elision only applies with a `self` receiver or exactly one borrowing input",
+                ),
+            );
+        }
+    }
+
     // A reference stored in an aggregate must NAME the lifetime it borrows for, and that lifetime must
     // be one the aggregate declares (or `'static`). Rust's "missing lifetime specifier": without it the
     // field's region is unrelated to anything the type says, so no caller can reason about how long the
@@ -6411,7 +6544,7 @@ extend TypeChecker {
     }
 }
 
-fn arith_method_name(op: TokenType) str {
+fn arith_method_name(op: TokenType) str<'static> {
     if op == TokenType::Plus {
         return "add";
     }
@@ -12072,6 +12205,7 @@ extend TypeChecker {
                 self.current_returns = fnd.returns;
                 self.current_fn = id;
                 self.err_wm = self.errors.errors.len();
+                self.tc_check_elision(id);
                 // Fresh region arena: the declared lifetimes become universal regions, then each
                 // reference-carrying parameter gets a region vector standing for the caller's regions.
                 self.region_reset(id);

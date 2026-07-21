@@ -48,7 +48,7 @@ pub struct Parser<'a> {
 }
 
 extend Parser {
-    pub fn new(tokens: Vector<Token>, source: str, file: str) Parser {
+    pub fn new<'a>(tokens: Vector<Token>, source: str<'a>, file: str<'a>) Parser<'a> {
         let token_count = tokens.len();
         return Parser {
             source: source,

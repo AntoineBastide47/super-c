@@ -240,7 +240,7 @@ pub struct WherePredicateData {
 // The builtin types' surface names. BuiltinType is declared in this module, so the shared name
 // table lives here too: the typechecker's renderer/lookup delegates to it, and consteval uses it to
 // fold builtin-targeted casts demanded before their module is typechecked.
-pub const fn bt_name(b: BuiltinType) str {
+pub const fn bt_name(b: BuiltinType) str<'static> {
     if b == BuiltinType::BT_BOOL {
         return "bool";
     }
