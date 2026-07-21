@@ -1527,7 +1527,7 @@ fn safety_holes_closed() {
     // bug11: reading a reference-typed union field forges a reference from bytes.
     h::expect_err_msg(
         "reference-typed union field read requires unsafe",
-        "union U { pub i: i64, pub r: &i32 }\nfn main() i32 {\n    let mut u = U { i: 0 };\n    u.i = 4919;\n    let p = u.r;\n    return *p;\n}\n",
+        "union U<'a> { pub i: i64, pub r: &'a i32 }\nfn main() i32 {\n    let mut u = U { i: 0 };\n    u.i = 4919;\n    let p = u.r;\n    return *p;\n}\n",
         "accessing a reference-typed field of a union requires an 'unsafe' block",
     );
     // a raw *pointer* union field stays free (its deref is already gated separately).
@@ -1569,7 +1569,7 @@ fn return_region_escapes() {
     // bug1: the borrow is buried in a returned struct (unannotated form).
     h::expect_err_msg(
         "returning a struct holding &local is rejected",
-        "struct R { pub p: &i32 }\nfn f() R {\n    let x = 1;\n    return R { p: &x };\n}\n",
+        "struct R<'a> { pub p: &'a i32 }\nfn f() R {\n    let x = 1;\n    return R { p: &x };\n}\n",
         "returning a value borrowing from a local",
     );
     // ...and the same with an explicit lifetime param.
@@ -1599,13 +1599,13 @@ fn laundered_borrow_retained() {
     // bug8: &b stored in a struct field, then b moved into a fn that frees it.
     h::expect_err_msg(
         "moving a value borrowed through a struct field is rejected",
-        "struct K { pub r: &Box<i32> }\nfn eat(b: Box<i32>) i32 {\n    return *b.get();\n}\nfn main() i32 {\n    let b = Box::<i32>::new(5);\n    let k = K { r: &b };\n    let t = eat(b);\n    return t + *k.r.get();\n}\n",
+        "struct K<'a> { pub r: &'a Box<i32> }\nfn eat(b: Box<i32>) i32 {\n    return *b.get();\n}\nfn main() i32 {\n    let b = Box::<i32>::new(5);\n    let k = K { r: &b };\n    let t = eat(b);\n    return t + *k.r.get();\n}\n",
         "cannot move this value while it is borrowed",
     );
     // bug2: a Vector element borrow stored in a struct, then a push that reallocates.
     h::expect_err_msg(
         "mutating a container borrowed through a struct field is rejected",
-        "struct H { pub p: &i32 }\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let h = H { p: v.at(0) };\n    v.push(6);\n    return *h.p;\n}\n",
+        "struct H<'a> { pub p: &'a i32 }\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let h = H { p: v.at(0) };\n    v.push(6);\n    return *h.p;\n}\n",
         "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
     // A struct holding no borrow keeps the old (unrestricted) behaviour.
@@ -1616,7 +1616,7 @@ fn laundered_borrow_retained() {
     // The borrow ends with its holder: a fresh mutation after the holder's last use is still fine.
     h::expect_ok(
         "a container is mutable again once the borrowing holder is dead",
-        "struct H { pub p: &i32 }\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let r = *H { p: v.at(0) }.p;\n    v.push(6);\n    return r - 5;\n}\n",
+        "struct H<'a> { pub p: &'a i32 }\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let r = *H { p: v.at(0) }.p;\n    v.push(6);\n    return r - 5;\n}\n",
     );
 }
 
@@ -1722,13 +1722,13 @@ fn region_propagation_uniform() {
     // A container whose element NESTS a reference (not a direct &T arg): the deep gate now sees it.
     h::expect_err_msg(
         "pushing a struct-holding-&local into an outer Vector<W> is rejected",
-        "struct W { pub r: &i32 }\nfn main() i32 {\n    let mut v = Vector::<W>::new();\n    {\n        let local = 77;\n        v.push(W { r: &local });\n    }\n    return *v.at(0).r;\n}\n",
+        "struct W<'a> { pub r: &'a i32 }\nfn main() i32 {\n    let mut v = Vector::<W>::new();\n    {\n        let local = 77;\n        v.push(W { r: &local });\n    }\n    return *v.at(0).r;\n}\n",
         "borrowed value does not live long enough",
     );
     // Hoisting a return-of-borrow into a local no longer bypasses the return check.
     h::expect_err_msg(
         "returning a pre-bound struct holding &local is rejected",
-        "struct R { pub p: &i32 }\nfn f() R {\n    let x = 1;\n    let r = R { p: &x };\n    return r;\n}\n",
+        "struct R<'a> { pub p: &'a i32 }\nfn f() R {\n    let x = 1;\n    let r = R { p: &x };\n    return r;\n}\n",
         "returning a value borrowing from a local",
     );
     h::expect_err_msg(
@@ -1739,17 +1739,17 @@ fn region_propagation_uniform() {
     // Assigning a short borrow to a reference-typed field of a longer-lived struct is rejected.
     h::expect_err_msg(
         "assigning &inner to an outer struct's reference field is rejected",
-        "struct S { pub r: &i32 }\nfn main() i32 {\n    let anchor = 1;\n    let mut s = S { r: &anchor };\n    {\n        let inner = 555;\n        s.r = &inner;\n    }\n    return *s.r;\n}\n",
+        "struct S<'a> { pub r: &'a i32 }\nfn main() i32 {\n    let anchor = 1;\n    let mut s = S { r: &anchor };\n    {\n        let inner = 555;\n        s.r = &inner;\n    }\n    return *s.r;\n}\n",
         "borrowed value does not live long enough",
     );
     // Controls: long-lived borrows through the same paths still compile.
     h::expect_ok(
         "returning a struct holding a param borrow is fine",
-        "struct R { pub p: &i32 }\nfn wrap(a: &i32) R {\n    let r = R { p: a };\n    return r;\n}\nfn main() i32 {\n    let v = 9;\n    return *wrap(&v).p - 9;\n}\n",
+        "struct R<'a> { pub p: &'a i32 }\nfn wrap(a: &i32) R {\n    let r = R { p: a };\n    return r;\n}\nfn main() i32 {\n    let v = 9;\n    return *wrap(&v).p - 9;\n}\n",
     );
     h::expect_ok(
         "assigning long-lived borrows to a field is fine",
-        "struct S { pub r: &i32 }\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut s = S { r: &a };\n    s.r = &b;\n    return *s.r - 2;\n}\n",
+        "struct S<'a> { pub r: &'a i32 }\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut s = S { r: &a };\n    s.r = &b;\n    return *s.r - 2;\n}\n",
     );
 }
 
@@ -1906,7 +1906,7 @@ fn fn_sig_region_store_escape() {
     // Concrete store into a parameter's reference FIELD -- unannotated, so the lifetimes are unrelated.
     h::expect_err_msg(
         "storing a param borrow into a param struct's ref field needs a declared lifetime",
-        "struct Slot { pub r: &i32 }\nfn put(s: &mut Slot, x: &i32) { s.r = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut s = Slot { r: &anchor };\n    {\n        let inner = 9;\n        put(&mut s, &inner);\n    }\n    return *s.r;\n}\n",
+        "struct Slot<'a> { pub r: &'a i32 }\nfn put(s: &mut Slot, x: &i32) { s.r = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut s = Slot { r: &anchor };\n    {\n        let inner = 9;\n        put(&mut s, &inner);\n    }\n    return *s.r;\n}\n",
         "stored into caller-visible data",
     );
     // Same, through a store CALL rather than an assignment (`v.push(x)` on a parameter container).
@@ -1987,8 +1987,69 @@ fn nested_slot_lifetime() {
     );
     h::expect_err_msg(
         "an unannotated nested store is still rejected",
-        "struct Inner { pub r: &i32 }\nstruct Outer { pub inner: Inner }\nfn put(o: &mut Outer, x: &i32) { o.inner.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut o = Outer { inner: Inner { r: &a } };\n    {\n        let s = 9;\n        put(&mut o, &s);\n    }\n    return *o.inner.r;\n}\n",
+        "struct Inner<'a> { pub r: &'a i32 }\nstruct Outer { pub inner: Inner }\nfn put(o: &mut Outer, x: &i32) { o.inner.r = x; }\nfn main() i32 {\n    let a = 1;\n    let mut o = Outer { inner: Inner { r: &a } };\n    {\n        let s = 9;\n        put(&mut o, &s);\n    }\n    return *o.inner.r;\n}\n",
         "stored into caller-visible data",
+    );
+}
+
+// `'static` is the universal region: it outlives every other, needs no signature entry, and nothing
+// else outlives it. Rust's rule, and the prerequisite for `T: 'static` bounds meaning anything.
+@test
+fn static_region() {
+    h::expect_ok(
+        "'static outlives a signature lifetime",
+        "struct Slot<'a> { pub r: &'a i32 }\nfn put<'a>(s: &mut Slot<'a>, x: &'static i32) { s.r = x; }\nfn main() i32 {\n    let a = 1;\n    let s = Slot { r: &a };\n    return *s.r - 1;\n}\n",
+    );
+    h::expect_err_msg(
+        "a signature lifetime does not outlive 'static",
+        "struct Slot { pub r: &'static i32 }\nfn put<'a>(s: &mut Slot, x: &'a i32) { s.r = x; }\nfn main() i32 {\n    let a = 1;\n    let s = Slot { r: &a };\n    return *s.r - 1;\n}\n",
+        "stored into caller-visible data",
+    );
+}
+
+// `T: 'a` bounds were parsed and IGNORED, so a callee could rely on a guarantee the caller never had
+// to meet. The checkable case is `T: 'static`: the argument's type must then carry no borrow, since
+// nothing borrowed from a local outlives the program.
+@test
+fn type_outlives_bounds() {
+    h::expect_err_msg(
+        "passing a borrow for a T declared ': 'static' is rejected (where clause)",
+        "fn keep<T>(x: T) where T: 'static { }\nfn main() i32 {\n    let a = 1;\n    keep(&a);\n    return 0;\n}\n",
+        "must satisfy 'static",
+    );
+    h::expect_err_msg(
+        "passing a borrow for a T declared ': 'static' is rejected (inline bound)",
+        "fn keep<T: 'static>(x: T) { }\nfn main() i32 {\n    let a = 1;\n    keep(&a);\n    return 0;\n}\n",
+        "must satisfy 'static",
+    );
+    h::expect_ok(
+        "an owned value satisfies 'static",
+        "fn keep<T>(x: T) where T: 'static { }\nfn main() i32 {\n    keep(5);\n    return 0;\n}\n",
+    );
+}
+
+// A reference stored in an aggregate must NAME a lifetime the aggregate declares (or `'static`) --
+// Rust's "missing lifetime specifier". Without it the field's region is unrelated to anything the type
+// says, so no caller can reason about how long the aggregate may be kept.
+@test
+fn field_lifetime_required() {
+    h::expect_err_msg(
+        "a reference field with no lifetime is rejected",
+        "struct S { pub r: &i32 }\nfn main() i32 {\n    let a = 1;\n    let s = S { r: &a };\n    return *s.r - 1;\n}\n",
+        "missing lifetime specifier",
+    );
+    h::expect_ok(
+        "naming a declared lifetime is accepted",
+        "struct S<'a> { pub r: &'a i32 }\nfn main() i32 {\n    let a = 1;\n    let s = S { r: &a };\n    return *s.r - 1;\n}\n",
+    );
+    h::expect_ok(
+        "borrowing for 'static is accepted",
+        "struct S { pub r: &'static i32 }\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    h::expect_err_msg(
+        "a reference nested in a generic argument also needs a lifetime",
+        "struct S { pub v: Vector<&i32> }\nfn main() i32 {\n    return 0;\n}\n",
+        "missing lifetime specifier",
     );
 }
 

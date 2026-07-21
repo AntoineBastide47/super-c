@@ -5725,6 +5725,162 @@ extend TypeChecker {
         }
     }
 
+    // A reference stored in an aggregate must NAME the lifetime it borrows for, and that lifetime must
+    // be one the aggregate declares (or `'static`). Rust's "missing lifetime specifier": without it the
+    // field's region is unrelated to anything the type says, so no caller can reason about how long the
+    // aggregate may be kept. Declaring `<'a>` is what makes the borrow checkable at every use site.
+    fn tc_check_field_lifetimes(self: &mut Self, decl: NodeId, members: NodeList) {
+        for i in 0..members.len {
+            let mid = unsafe (*self.cur_ast()).list(members)[i as usize];
+            if unsafe (*self.cur_ast()).at_const(mid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            self.tc_check_ref_lifetime_named(decl, unsafe (*self.cur_ast()).at_const(mid).as_data.field.ty, 0);
+        }
+    }
+    fn tc_check_ref_lifetime_named(self: &mut Self, decl: NodeId, tyn: NodeId, depth: i32) {
+        if tyn == NODE_NONE || depth > 6 {
+            return;
+        }
+        let a = self.cur_ast();
+        let n = unsafe (*a).at_const(tyn);
+        if n.kind == NodeKind::NODE_REFERENCE_TYPE {
+            let lt = self.tc_lt_name(n.as_data.indirect_type.lifetime);
+            let mut ok = span_is(self.source, lt, "'static");
+            if !ok && !self.tc_span_empty(lt) {
+                let lts = unsafe (*a).lifetimes_of(decl);
+                for k in 0..lts.len {
+                    if spans_eq2(self.source, self.tc_lt_name(unsafe (*a).list(lts)[k as usize]), self.source, lt) {
+                        ok = true;
+                    }
+                }
+            }
+            if !ok {
+                let sp = n.span;
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format(
+                        "missing lifetime specifier: a reference stored in a type must name a lifetime the type declares",
+                    ),
+                );
+                self.errors.note(
+                    format("declare one and use it, e.g. `struct S<'a> { r: &'a i32 }`, or borrow for `'static`"),
+                );
+            }
+            self.tc_check_ref_lifetime_named(decl, n.as_data.indirect_type.ty, depth + 1);
+            return;
+        }
+        if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            self.tc_check_ref_lifetime_named(decl, n.as_data.array_type.element, depth + 1);
+            return;
+        }
+        if n.kind == NodeKind::NODE_TYPE_PATH {
+            let args = n.as_data.type_path.args;
+            for j in 0..args.len {
+                self.tc_check_ref_lifetime_named(decl, unsafe (*a).list(args)[j as usize], depth + 1);
+            }
+        }
+    }
+
+    // `T: 'a` bounds, enforced at the call site. The bound promises every region inside the type
+    // substituted for `T` outlives `'a`; it was parsed and ignored, so a callee could rely on a
+    // guarantee the caller never had to meet. The checkable case here is `T: 'static` -- the argument's
+    // type must then carry no borrow at all, since nothing borrowed from a local outlives the program.
+    // A bound naming a signature lifetime is left to the argument-boundary tie, which already relates
+    // the argument's region to that lifetime's.
+    fn tc_check_type_outlives_bounds(
+        self: &mut Self,
+        fmod: ModuleId,
+        fdecl: NodeId,
+        params: NodeList,
+        args: NodeList,
+        skip: u32,
+    ) {
+        let fa = self.mod_ast(fmod);
+        if unsafe (*fa).at_const(fdecl).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        let gens = unsafe (*fa).at_const(fdecl).as_data.function.generics;
+        if gens.len == 0 {
+            return;
+        }
+        for gi in 0..gens.len {
+            let g = unsafe (*fa).list(gens)[gi as usize];
+            if !self.tc_generic_has_static_bound(fmod, fdecl, g) {
+                continue;
+            }
+            // every parameter declared as exactly this type variable must receive a borrow-free type
+            for pi in 0..params.len {
+                if pi < skip {
+                    continue;
+                }
+                let ai = pi - skip;
+                if ai >= args.len {
+                    continue;
+                }
+                let ptyn = unsafe (*fa).at_const(unsafe (*fa).list(params)[pi as usize]).as_data.parameter.ty;
+                if ptyn == NODE_NONE {
+                    continue;
+                }
+                let pt = self.lower_type_in(fmod, ptyn);
+                if pt == TYPE_NONE || self.type_at(pt).kind != TypeKind::TYPE_GENERIC || self.type_at(pt).as_data.decl != g {
+                    continue;
+                }
+                let aid = unsafe (*self.cur_ast()).list(args)[ai as usize];
+                let at = unsafe (*self.cur_ast()).type_of(aid);
+                if at == TYPE_NONE || !self.tc_carries_borrow(at) {
+                    continue;
+                }
+                let asp = unsafe (*self.cur_ast()).at_const(aid).span;
+                let di = self.tc_region_diag(
+                    asp.start,
+                    asp.end - asp.start,
+                    format("borrowed value does not live long enough: this argument must satisfy 'static"),
+                );
+                self.tc_region_note(
+                    di,
+                    format("the parameter's type variable is declared `: 'static`, so it cannot hold a borrow"),
+                );
+            }
+        }
+    }
+
+    // Does generic param `g` of `fdecl` carry a `'static` bound, written inline (`<T: 'static>`) or in
+    // the where clause (`where T: 'static`)?
+    fn tc_generic_has_static_bound(self: &mut Self, fmod: ModuleId, fdecl: NodeId, g: NodeId) bool {
+        let fa = self.mod_ast(fmod);
+        let bnds = unsafe (*fa).at_const(g).as_data.generic_param.bounds;
+        for b in 0..bnds.len {
+            let bid = unsafe (*fa).list(bnds)[b as usize];
+            if unsafe (*fa).at_const(bid).kind == NodeKind::NODE_LIFETIME && span_is(
+                self.mod_src(fmod),
+                self.tc_lt_name_in(fmod, bid),
+                "'static",
+            ) {
+                return true;
+            }
+        }
+        let wc = unsafe (*fa).at_const(fdecl).as_data.function.where_clause;
+        for w in 0..wc.len {
+            let wp = unsafe (*fa).at_const(unsafe (*fa).list(wc)[w as usize]).as_data.where_predicate;
+            if unsafe (*fa).resolution(wp.ty) != g {
+                continue;
+            }
+            for b in 0..wp.bounds.len {
+                let bid = unsafe (*fa).list(wp.bounds)[b as usize];
+                if unsafe (*fa).at_const(bid).kind == NodeKind::NODE_LIFETIME && span_is(
+                    self.mod_src(fmod),
+                    self.tc_lt_name_in(fmod, bid),
+                    "'static",
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // Family B: a borrow passed for a bare value parameter `x: T` that ANOTHER parameter stores through
     // (`dst: &mut T` or `dst: &mut C<..T..>`) must outlive that storage's referent -- the Rust
     // argument-boundary variance rule across a plain function boundary (bug6 covered only the receiver-
@@ -7563,6 +7719,7 @@ extend TypeChecker {
         // `&mut T` invariance cross-tie (`swap(&mut a, &mut b)` with differently-scoped referents).
         if named {
             self.tc_tie_stored_borrow_args(fmod, fdecl, params, args, skip, arg_bm, arg_end);
+            self.tc_check_type_outlives_bounds(fmod, fdecl, params, args, skip);
             self.tc_check_invariant_args(fmod, fdecl, params, args, skip);
         }
         return ret;
@@ -9121,7 +9278,15 @@ extend TypeChecker {
 
     // The universal RegionVid a declared lifetime NAME denotes in the current function, or REGION_NONE.
     fn tc_lt_region_of_name(self: &Self, name: tok::Span) u32 {
-        if self.tc_span_empty(name) || self.current_fn == NODE_NONE {
+        if self.tc_span_empty(name) {
+            return REGION_NONE;
+        }
+        // `'static` is not a declared parameter: it is THE universal region that outlives every other,
+        // so it needs no signature entry and is available in any function.
+        if span_is(self.source, name, "'static") {
+            return REGION_STATIC;
+        }
+        if self.current_fn == NODE_NONE {
             return REGION_NONE;
         }
         let a = self.cur_ast();
@@ -11871,6 +12036,7 @@ extend TypeChecker {
             NODE_STRUCT | NODE_ENUM => {
                 let agg = unsafe (*a).at_const(id).as_data.aggregate;
                 let members = agg.members;
+                self.tc_check_field_lifetimes(id, members);
                 if agg.is_tuple {
                     for i in 0..members.len {
                         self.resolve_type(unsafe (*self.cur_ast()).list(members)[i as usize]);
