@@ -10,6 +10,7 @@ import module::loader as loader;
 import lexer::lexer as lexer;
 import resolver::resolver as res;
 import typechecker::typechecker as tc;
+import borrowck::borrowck as bck;
 import codegen::codegen as cg;
 import consteval::consteval as ce;
 import ast::ast as *;
@@ -107,6 +108,7 @@ pub struct Timing {
     pub parse: f64,
     pub resolve: f64,
     pub typecheck: f64,
+    pub borrowck: f64,
     pub propagate: f64,
     pub codegen: f64,
     pub cg_header: f64,
@@ -122,12 +124,14 @@ pub struct Timing {
     pub cyc_parse: i64,
     pub cyc_resolve: i64,
     pub cyc_typecheck: i64,
+    pub cyc_borrowck: i64,
     pub cyc_propagate: i64,
     pub cyc_codegen: i64,
     pub alc_lex: i64,
     pub alc_parse: i64,
     pub alc_resolve: i64,
     pub alc_typecheck: i64,
+    pub alc_borrowck: i64,
     pub alc_propagate: i64,
     pub alc_codegen: i64,
     pub heap_bytes: i64,
@@ -173,6 +177,25 @@ fn typecheck_one(p: &mut loader::Package, i: usize) {
     p.modules[i].ast = back;
 }
 
+// Borrow-check module `i` in place (mirrors emit.spc's borrowck_module): the pipeline stage after
+// typechecking, over the typed AST.
+fn borrowck_one(p: &mut loader::Package, i: usize) {
+    let pkg = p as *mut loader::Package;
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let a = m.ast;
+    m.ast = Ast::new(0);
+    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    p.override_mod = i as ModuleId;
+    p.override_ast = &mut t.ast;
+    t.borrowck();
+    p.override_mod = 0xFFFF;
+    p.override_ast = null;
+    let back = t.take_ast();
+    p.modules[i].ast = back;
+}
+
 // One full transpile of the compiler, timed per phase. `use_mem` picks the codegen sink lane.
 fn transpile_once(use_mem: bool) Timing {
     let mut r = Timing {
@@ -180,6 +203,7 @@ fn transpile_once(use_mem: bool) Timing {
         parse: 0.0,
         resolve: 0.0,
         typecheck: 0.0,
+        borrowck: 0.0,
         propagate: 0.0,
         codegen: 0.0,
         cg_header: 0.0,
@@ -195,12 +219,14 @@ fn transpile_once(use_mem: bool) Timing {
         cyc_parse: 0,
         cyc_resolve: 0,
         cyc_typecheck: 0,
+        cyc_borrowck: 0,
         cyc_propagate: 0,
         cyc_codegen: 0,
         alc_lex: 0,
         alc_parse: 0,
         alc_resolve: 0,
         alc_typecheck: 0,
+        alc_borrowck: 0,
         alc_propagate: 0,
         alc_codegen: 0,
         heap_bytes: 0,
@@ -250,6 +276,15 @@ fn transpile_once(use_mem: bool) Timing {
     let a3 = time::cpu_seconds();
     let c3 = unsafe shim::sc_cpu_cycles();
     let h3 = unsafe shim::sc_alloc_count();
+
+    i = 0;
+    while i < n {
+        borrowck_one(&mut p, i);
+        i = i + 1;
+    }
+    let a3b = time::cpu_seconds();
+    let c3b = unsafe shim::sc_cpu_cycles();
+    let h3b = unsafe shim::sc_alloc_count();
 
     loader::package_propagate_instances(&mut p);
     let a3p = time::cpu_seconds();
@@ -314,17 +349,20 @@ fn transpile_once(use_mem: bool) Timing {
     r.parse = a1 - a0;
     r.resolve = a2 - a1;
     r.typecheck = a3 - a2;
-    r.propagate = a3p - a3;
+    r.borrowck = a3b - a3;
+    r.propagate = a3p - a3b;
     r.codegen = a4 - a3p;
     r.cyc_parse = c1 - c0;
     r.cyc_resolve = c2 - c1;
     r.cyc_typecheck = c3 - c2;
-    r.cyc_propagate = c3p - c3;
+    r.cyc_borrowck = c3b - c3;
+    r.cyc_propagate = c3p - c3b;
     r.cyc_codegen = c4 - c3p;
     r.alc_parse = h1 - h0;
     r.alc_resolve = h2 - h1;
     r.alc_typecheck = h3 - h2;
-    r.alc_propagate = h3p - h3;
+    r.alc_borrowck = h3b - h3;
+    r.alc_propagate = h3p - h3b;
     r.alc_codegen = h4 - h3p;
     r.heap_bytes = y4 - y0;
     return r;
@@ -438,6 +476,9 @@ pub fn run() i32 {
     let mut sal_g: i64 = 0;
     let mut sal_cm: i64 = 0;
     let mut sal_cf: i64 = 0;
+    let mut sb: f64 = 0.0;
+    let mut scy_b: i64 = 0;
+    let mut sal_b: i64 = 0;
     let mut sheap: i64 = 0;
     let mut totals_m = Vector::<f64>::with_capacity(ITERS as usize);
     let mut totals_f = Vector::<f64>::with_capacity(ITERS as usize);
@@ -448,20 +489,23 @@ pub fn run() i32 {
         sp = sp + t.parse;
         sr = sr + t.resolve;
         st = st + t.typecheck;
+        sb = sb + t.borrowck;
         sl = sl + t.lex;
         sg = sg + t.propagate;
         scy_l = scy_l + t.cyc_lex;
         scy_p = scy_p + t.cyc_parse;
         scy_r = scy_r + t.cyc_resolve;
         scy_t = scy_t + t.cyc_typecheck;
+        scy_b = scy_b + t.cyc_borrowck;
         scy_g = scy_g + t.cyc_propagate;
         sal_l = sal_l + t.alc_lex;
         sal_p = sal_p + t.alc_parse;
         sal_r = sal_r + t.alc_resolve;
         sal_t = sal_t + t.alc_typecheck;
+        sal_b = sal_b + t.alc_borrowck;
         sal_g = sal_g + t.alc_propagate;
         sheap = sheap + t.heap_bytes;
-        let total = t.parse + t.resolve + t.typecheck + t.propagate + t.codegen;
+        let total = t.parse + t.resolve + t.typecheck + t.borrowck + t.propagate + t.codegen;
         if use_mem {
             sc_m = sc_m + t.codegen;
             scy_cm = scy_cm + t.cyc_codegen;
@@ -495,9 +539,10 @@ pub fn run() i32 {
     let ap = sp / fi * 1000.0;
     let ar = sr / fi * 1000.0;
     let at = st / fi * 1000.0;
+    let ab = sb / fi * 1000.0;
     let al = sl / fi * 1000.0;
     let ag = sg / fi * 1000.0;
-    let avg_total = ap + ar + at + ag + ac;
+    let avg_total = ap + ar + at + ab + ag + ac;
     // primary-lane count for the header/source split accumulators
     let mut cp = cf;
     if cm > 0 {
@@ -514,6 +559,7 @@ pub fn run() i32 {
     let mp = scy_p as f64 / fi / 1e6;
     let mr = scy_r as f64 / fi / 1e6;
     let mt = scy_t as f64 / fi / 1e6;
+    let mb = scy_b as f64 / fi / 1e6;
     let mg = scy_g as f64 / fi / 1e6;
     let mut mc: f64 = 0.0;
     if cm > 0 {
@@ -521,13 +567,14 @@ pub fn run() i32 {
     } else if cf > 0 {
         mc = scy_cf as f64 / cf as f64 / 1e6;
     }
-    let mtot = mp + mr + mt + mg + mc;
+    let mtot = mp + mr + mt + mb + mg + mc;
     // Heap allocations (malloc/calloc/realloc calls by the compiler's own code) per iteration, in
     // thousands; codegen = primary lane. All-zero when the shim has no counting on this platform.
     let kal = sal_l as f64 / fi / 1e3;
     let kap = sal_p as f64 / fi / 1e3;
     let kar = sal_r as f64 / fi / 1e3;
     let kat = sal_t as f64 / fi / 1e3;
+    let kab = sal_b as f64 / fi / 1e3;
     let kag = sal_g as f64 / fi / 1e3;
     let mut kac: f64 = 0.0;
     if cm > 0 {
@@ -585,6 +632,16 @@ pub fn run() i32 {
         mt,
         kat,
         at / avg_total * 100.0,
+    );
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "borrowck".ptr() as *const char,
+        ab,
+        srcf / ab / 1000.0,
+        linesf / ab,
+        mb,
+        kab,
+        ab / avg_total * 100.0,
     );
     unsafe stdio::printf(
         "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,

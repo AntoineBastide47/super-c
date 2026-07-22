@@ -12,6 +12,7 @@ import driver_shim as shim;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
+import borrowck::borrowck as bck;
 import consteval::consteval as ce;
 import codegen::codegen as cg;
 import utils::errors as diag;
@@ -258,6 +259,30 @@ fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut V
         for k in 0..t.errors.fixes.len() {
             unsafe (*fixes).push(t.errors.fixes[k]);
         }
+    }
+    let back = t.take_ast();
+    p.modules[i].ast = back;
+    return !had;
+}
+
+// Borrow-check module `i`: the pipeline stage after typechecking. A fresh TypeChecker context over
+// the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses run.
+fn borrowck_module(p: &mut loader::Package, i: usize) bool {
+    let pkg = p as *mut loader::Package;
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let a = m.ast;
+    m.ast = Ast::new(0);
+    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    p.override_mod = i as ModuleId;
+    p.override_ast = &mut t.ast;
+    t.borrowck();
+    p.override_mod = 0xFFFF;
+    p.override_ast = null;
+    let had = t.has_errors();
+    if had {
+        t.log_errors();
     }
     let back = t.take_ast();
     p.modules[i].ast = back;
@@ -756,6 +781,13 @@ pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize, fixes
     if !p.ok {
         return 1;
     }
+    for i in 0..n {
+        let ok = borrowck_module(p, i);
+        p.ok = ok && p.ok;
+    }
+    if !p.ok {
+        return 1;
+    }
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print duplicates).
     if fixes == null {
         lint_unused_items(p, lint_mod as i32);
@@ -783,6 +815,13 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     }
     for i in 0..n {
         let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null);
+        p.ok = ok && p.ok;
+    }
+    if !p.ok {
+        return 1;
+    }
+    for i in 0..n {
+        let ok = borrowck_module(p, i);
         p.ok = ok && p.ok;
     }
     if !p.ok {

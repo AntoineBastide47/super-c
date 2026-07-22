@@ -692,6 +692,8 @@ pub struct Ast {
     pub deref_at: Vector<u32>,
     pub attrs: Vector<Attr>,
     pub lifetime_decls: Vector<LifetimeDecl>,
+    // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
+    pub call_info: Map<u32, u64>,
     pub root: NodeId,
     pub module: ModuleId,
 }

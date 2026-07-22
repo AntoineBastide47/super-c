@@ -13,6 +13,7 @@ import ast::ast as *;
 import ast::parser as par;
 import resolver::resolver as res;
 import typechecker::typechecker as tc;
+import borrowck::borrowck as bck;
 import codegen::codegen as cg;
 import module::loader as loader;
 import consteval::consteval as ce;
@@ -542,6 +543,9 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     p.override_mod = i as ModuleId;
     p.override_ast = &mut t.ast;
     t.check();
+    if !t.has_errors() {
+        t.borrowck();
+    }
     p.override_mod = 0xFFFF;
     p.override_ast = null;
     if i == cap {

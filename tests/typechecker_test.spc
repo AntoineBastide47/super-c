@@ -2047,7 +2047,7 @@ fn hrtb_and_gat_semantics() {
     );
     h::expect_err_msg(
         "a fn returning a borrow with no input lifetime to elide from is rejected",
-        "fn pick<F: for<'a> fn(&'a i32) &'a i32>(f: F) &i32 {\n    let local = 9;\n    return f(&local);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "const G: i32 = 7;\nfn pick<F: for<'a> fn(&'a i32) &'a i32>(f: F) &i32 {\n    return &G;\n}\nfn main() i32 {\n    return 0;\n}\n",
         "which input it borrows from cannot be inferred",
     );
     h::expect_ok(
