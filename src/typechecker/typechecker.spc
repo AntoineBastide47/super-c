@@ -91,6 +91,8 @@ pub struct LoopEntry {
 pub struct FlowState {
     pub moved: [NodeId; 256],
     pub nmoved: u32,
+    pub moved_places: [NodeId; 128],
+    pub nmoved_places: u32,
     pub uninit: [NodeId; 64],
     pub nuninit: u32,
     pub freed: [NodeId; 64],
@@ -146,6 +148,12 @@ pub struct TypeChecker<'a> {
     pub expected: TypeId,
     pub moved: [NodeId; 1024],
     pub nmoved: u32,
+    // Partial (field/index) moves: the moved sub-place NODES (`p.a`, `arr[0]`). A whole binding uses the
+    // `moved` set above; a sub-place is tracked here and tested with places_overlap so using/re-moving
+    // the same sub-place, or the whole value while a part is moved, is caught (else a Free field moved
+    // twice double-frees). Merged across branches like `moved`.
+    pub moved_places: [NodeId; 256],
+    pub nmoved_places: u32,
     pub uninit: [NodeId; 256],
     pub nuninit: u32,
     pub freed: [NodeId; 256],
@@ -436,6 +444,7 @@ extend TypeChecker {
             ext_items_built: Vector::<bool>::new(),
             expected: TYPE_NONE,
             nmoved: 0,
+            nmoved_places: 0,
             nuninit: 0,
             nfreed: 0,
             nborrows: 0,

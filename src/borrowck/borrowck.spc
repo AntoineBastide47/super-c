@@ -561,6 +561,10 @@ extend tc::TypeChecker {
         for i in 0..self.nmoved {
             unsafe s.moved[i as usize] = unsafe self.moved[i as usize];
         }
+        s.nmoved_places = self.nmoved_places;
+        for i in 0..self.nmoved_places {
+            unsafe s.moved_places[i as usize] = unsafe self.moved_places[i as usize];
+        }
         s.nuninit = self.nuninit;
         for i in 0..self.nuninit {
             unsafe s.uninit[i as usize] = unsafe self.uninit[i as usize];
@@ -584,6 +588,10 @@ extend tc::TypeChecker {
             unsafe self.moved[i as usize] = unsafe s.moved[i as usize];
             self.ms_bit_set(unsafe s.moved[i as usize]);
         }
+        self.nmoved_places = s.nmoved_places;
+        for i in 0..s.nmoved_places {
+            unsafe self.moved_places[i as usize] = unsafe s.moved_places[i as usize];
+        }
         self.nuninit = s.nuninit;
         for i in 0..s.nuninit {
             unsafe self.uninit[i as usize] = unsafe s.uninit[i as usize];
@@ -600,6 +608,7 @@ extend tc::TypeChecker {
 
     pub fn tc_flow_clear(self: &Self, s: &mut FlowState) {
         s.nmoved = 0;
+        s.nmoved_places = 0;
         s.nuninit = 0;
         s.nfreed = 0;
         s.nborrows = 0;
@@ -619,6 +628,23 @@ extend tc::TypeChecker {
                     let k = unsafe (*acc).nmoved;
                     unsafe (*acc).moved[k as usize] = unsafe self.moved[i as usize];
                     unsafe (*acc).nmoved = k + 1;
+                } else {
+                    overflow = true;
+                }
+            }
+        }
+        for i in 0..self.nmoved_places {
+            let mut seen = false;
+            for j in 0..unsafe (*acc).nmoved_places {
+                if unsafe (*acc).moved_places[j as usize] == unsafe self.moved_places[i as usize] {
+                    seen = true;
+                }
+            }
+            if !seen {
+                if unsafe (*acc).nmoved_places < 128 {
+                    let k = unsafe (*acc).nmoved_places;
+                    unsafe (*acc).moved_places[k as usize] = unsafe self.moved_places[i as usize];
+                    unsafe (*acc).nmoved_places = k + 1;
                 } else {
                     overflow = true;
                 }
@@ -687,6 +713,48 @@ extend tc::TypeChecker {
         );
     }
 
+    // Does `place` overlap a partially-moved sub-place (`p.a` after `p.a` moved; `p` whole while a part
+    // is moved; `p.a.x` while `p.a` moved)?
+    pub fn tc_place_is_moved(self: &mut Self, place: NodeId) bool {
+        for i in 0..self.nmoved_places {
+            if self.places_overlap(place, unsafe self.moved_places[i as usize]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Is any sub-place of `binding` partially moved out? (using the whole value while a part is gone.)
+    pub fn tc_binding_partially_moved(self: &mut Self, binding: NodeId) bool {
+        for i in 0..self.nmoved_places {
+            if self.tc_place_base_binding(unsafe self.moved_places[i as usize]) == binding {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn tc_mark_place_moved(self: &mut Self, place: NodeId) {
+        if self.nmoved_places < 128 {
+            let k = self.nmoved_places;
+            unsafe self.moved_places[k as usize] = place;
+            self.nmoved_places = k + 1;
+        }
+    }
+
+    // Re-initialising `place` (assigning to it or a prefix) makes it owned again: drop the overlapping
+    // partial-move records so it can be moved/used once more.
+    pub fn tc_clear_moved_place(self: &mut Self, place: NodeId) {
+        let mut w: u32 = 0;
+        for i in 0..self.nmoved_places {
+            if !self.places_overlap(place, unsafe self.moved_places[i as usize]) {
+                unsafe self.moved_places[w as usize] = unsafe self.moved_places[i as usize];
+                w = w + 1;
+            }
+        }
+        self.nmoved_places = w;
+    }
+
     pub fn tc_mark_move(self: &mut Self, expr0: NodeId) {
         if expr0 == NODE_NONE {
             return;
@@ -724,6 +792,30 @@ extend tc::TypeChecker {
                     );
                 }
             }
+        }
+        // Partial (field/index) move of a Free sub-place out of an OWNED local (`let x = p.a;`,
+        // `eat(p.a)`). Record it so a second move of the same (or an overlapping) sub-place, or of the
+        // whole value, is caught -- otherwise two owners double-free. Moves out of a dereference are
+        // already rejected above; a base reached through a `*`/reference is not an owned place here.
+        if xk == NodeKind::NODE_MEMBER && !unsafe (*a).at_const(expr).as_data.member.path || xk == NodeKind::NODE_INDEX {
+            if !self.tc_type_is_free(unsafe (*a).type_of(expr0)) {
+                return;
+            }
+            let base = self.tc_place_base_binding(expr);
+            if base == NODE_NONE {
+                return;
+            }
+            let bt = unsafe (*a).type_of(base);
+            if bt != TYPE_NONE && (self.type_at(bt).kind == TypeKind::TYPE_REFERENCE || self.type_at(bt).kind == TypeKind::TYPE_POINTER) {
+                return;
+            }
+            if self.tc_place_is_moved(expr) || self.is_moved(base) {
+                let sp = unsafe (*a).at_const(expr).span;
+                self.errors.emit(sp.start, sp.end - sp.start, format("use of moved value"));
+            } else {
+                self.tc_mark_place_moved(expr);
+            }
+            return;
         }
         if xk != NodeKind::NODE_IDENTIFIER {
             return;
@@ -2560,6 +2652,7 @@ extend tc::TypeChecker {
             self.ms_bit_clear(unsafe self.moved[mi as usize]);
         }
         self.nmoved = 0;
+        self.nmoved_places = 0;
         self.nuninit = 0;
         self.nfreed = 0;
         self.nborrows = 0;
@@ -2577,6 +2670,7 @@ extend tc::TypeChecker {
             self.ms_bit_clear(unsafe self.moved[mi as usize]);
         }
         self.nmoved = 0;
+        self.nmoved_places = 0;
         self.nuninit = 0;
         self.nfreed = 0;
         self.nborrows = 0;
@@ -2917,6 +3011,10 @@ extend tc::TypeChecker {
                         }
                         self.errors.emit(sp.start, sp.end - sp.start, format("{}", diag::cstr(msg)));
                     }
+                    if !addr_ctx && !place_use && !self.is_moved(d.node) && self.tc_binding_partially_moved(d.node) {
+                        let sp = n.span;
+                        self.errors.emit(sp.start, sp.end - sp.start, format("use of partially moved value"));
+                    }
                     if !addr_ctx && self.tc_is_uninit(d.node) {
                         let sp = n.span;
                         self.errors.emit(sp.start, sp.end - sp.start, format("use of possibly uninitialized value"));
@@ -2990,6 +3088,10 @@ extend tc::TypeChecker {
             NODE_MEMBER => {
                 if !n.as_data.member.path {
                     self.bc_expr(n.as_data.member.object, addr_ctx, true);
+                    if !addr_ctx && !place_use && self.tc_place_is_moved(id) {
+                        let sp = n.span;
+                        self.errors.emit(sp.start, sp.end - sp.start, format("use of moved value"));
+                    }
                     if !addr_ctx && !place_use && self.borrow_conflicting_read(id) {
                         let sp = n.span;
                         self.errors.emit(
@@ -3002,6 +3104,10 @@ extend tc::TypeChecker {
             },
             NODE_INDEX => {
                 self.bc_expr(n.as_data.index.object, addr_ctx, true);
+                if !addr_ctx && !place_use && self.tc_place_is_moved(id) {
+                    let sp = n.span;
+                    self.errors.emit(sp.start, sp.end - sp.start, format("use of moved value"));
+                }
                 let idxn = n.as_data.index.index;
                 if unsafe (*a).at_const(idxn).kind == NodeKind::NODE_RANGE {
                     let rn = unsafe (*a).at_const(idxn).as_data.pattern_range;
@@ -3107,6 +3213,11 @@ extend tc::TypeChecker {
         if lhs_local {
             self.tc_init(ld.node);
             self.tc_unmark_move(ld.node);
+        }
+        // Re-initialising a place makes its partial-move records stale: `p.a = v` re-owns `p.a`, and a
+        // whole `p = v` re-owns every sub-place of `p`.
+        if plain {
+            self.tc_clear_moved_place(bd.left);
         }
         let lt = if_ty(lhs_local, unsafe (*a).type_of(ld.node), TYPE_NONE);
         let ref_rebind = lt != TYPE_NONE && self.type_at(lt).kind == TypeKind::TYPE_REFERENCE;
