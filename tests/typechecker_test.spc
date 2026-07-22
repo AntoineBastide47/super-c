@@ -2009,6 +2009,52 @@ fn aggregate_value_arg_regions() {
     );
 }
 
+// Higher-ranked bounds and lifetime-parameterised associated types, semantically. An HRTB fn value
+// works for EVERY lifetime, so calls at different scopes are fine while a result borrowing a local
+// still cannot escape -- the existing region machinery composes with the ranking. An interface's
+// `type Item<'a>;` is a shape contract the impl must match in lifetime and type arity, and a
+// lifetime-parameterised type ALIAS must not launder a region.
+@test
+fn hrtb_and_gat_semantics() {
+    h::expect_ok(
+        "an HRTB fn applies at two different scopes",
+        "fn apply<F: for<'a> fn(&'a i32) i32>(f: F, x: &i32) i32 { return f(x); }\nfn double(v: &i32) i32 { return *v * 2; }\nfn main() i32 {\n    let a = 10;\n    let mut acc = apply(double, &a);\n    {\n        let b = 11;\n        acc = acc + apply(double, &b);\n    }\n    return acc - 42;\n}\n",
+    );
+    h::expect_err_msg(
+        "an HRTB identity result still cannot outlive its argument",
+        "fn ident(x: &i32) &i32 { return x; }\nfn main() i32 {\n    let mut keep: &i32 = &0;\n    {\n        let local = 9;\n        let f: fn(&i32) &i32 = ident;\n        keep = f(&local);\n    }\n    return *keep;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "a fn returning a borrow with no input lifetime to elide from is rejected",
+        "fn pick<F: for<'a> fn(&'a i32) &'a i32>(f: F) &i32 {\n    let local = 9;\n    return f(&local);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "which input it borrows from cannot be inferred",
+    );
+    h::expect_ok(
+        "an impl providing the associated type at matching arity conforms",
+        "interface Lend {\n    type Item<'a>;\n}\nstruct Holder { pub v: i32 }\nextend Holder as Lend {\n    type Item<'a> = &'a i32;\n}\nfn main() i32 {\n    let h = Holder { v: 1 };\n    return h.v - 1;\n}\n",
+    );
+    h::expect_err_msg(
+        "an impl at the wrong lifetime arity is rejected",
+        "interface Lend {\n    type Item<'a>;\n}\nstruct Holder { pub v: i32 }\nextend Holder as Lend {\n    type Item = i32;\n}\nfn main() i32 {\n    let h = Holder { v: 1 };\n    return h.v - 1;\n}\n",
+        "does not match the interface",
+    );
+    h::expect_err_msg(
+        "an impl omitting a required associated type is rejected",
+        "interface Lend {\n    type Item<'a>;\n}\nstruct Holder { pub v: i32 }\nextend Holder as Lend { }\nfn main() i32 {\n    let h = Holder { v: 1 };\n    return h.v - 1;\n}\n",
+        "missing associated type",
+    );
+    h::expect_ok(
+        "a lifetime-parameterised type alias round-trips a borrow",
+        "type IntRef<'a> = &'a i32;\nfn first<'a>(x: IntRef<'a>) IntRef<'a> { return x; }\nfn main() i32 {\n    let v = 7;\n    return *first(&v) - 7;\n}\n",
+    );
+    h::expect_err_msg(
+        "a lifetime-parameterised alias does not launder a region",
+        "type IntRef<'a> = &'a i32;\nstruct Slot<'a> { pub r: IntRef<'a> }\nfn put<'a>(s: &mut Slot<'a>, x: IntRef<'a>) { s.r = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut sl = Slot { r: &anchor };\n    {\n        let inner = 9;\n        put(&mut sl, &inner);\n    }\n    return *sl.r;\n}\n",
+        "borrowed value does not live long enough",
+    );
+}
+
 // Lifetime elision, Rust's three rules. Rule 1 is structural (every elided input position is its own
 // lifetime). Rules 2 and 3 say which lifetime an elided OUTPUT takes: with exactly one input position
 // it takes that one, and a `self` receiver wins over everything. When neither applies the output's
