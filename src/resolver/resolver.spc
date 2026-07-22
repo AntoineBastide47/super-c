@@ -45,6 +45,7 @@ pub struct Resolver<'a> {
     pub scope_starts: Vector<u32>, // stack of symbols.len at each scope entry
     pub symbol_index: Map<u64, u32>, // (namespace, name hash) -> newest matching symbol index + 1
     pub current_self: DefId, // decl 'Self' refers to inside the current interface/extension
+    pub current_self_items: NodeList, // the interface/extend items in scope, for `Self::Assoc` projection
     pub in_generic: bool, // resolving inside a generic fn/extend
     pub closures: Vector<ClosureScope>, // open closures, innermost last
     pub package: *const loader::Package, // for resolving `import`ed module-qualified names (null = none)
@@ -160,6 +161,7 @@ extend Resolver {
             scope_starts: Vector::<u32>::new(),
             symbol_index: Map::<u64, u32>::new(),
             current_self: DefId { module: 0, node: NODE_NONE },
+            current_self_items: NodeList { start: 0, len: 0 },
             in_generic: false,
             closures: Vector::<ClosureScope>::new(),
             package: package,
@@ -701,15 +703,40 @@ extend Resolver {
                 let first = self.child(tp.parts, 0);
                 let name = self.name_span(first);
                 if span_is(self.source, name, "Self") {
-                    if self.current_self.node != NODE_NONE {
-                        let cs = self.current_self;
-                        self.ast.set_resolution_def(id, cs);
-                    } else {
+                    if self.current_self.node == NODE_NONE {
                         self.errors.emit(
                             name.start,
                             name.end - name.start,
                             format("'Self' is only valid inside an interface or extension"),
                         );
+                    } else if tp.parts.len >= 2 {
+                        // `Self::Assoc` projection: resolve to the associated type alias in scope. In a
+                        // concrete extension this alias has a definition (`type Item = i32`), so the type
+                        // resolves through it; in the interface it is the abstract associated type.
+                        let assoc = self.name_span(self.child(tp.parts, 1));
+                        let mut found = NODE_NONE;
+                        for ai in 0..self.current_self_items.len {
+                            let iid = self.child(self.current_self_items, ai);
+                            if self.ast.at_const(iid).kind == NodeKind::NODE_TYPE_ALIAS && span_eq(
+                                self.source,
+                                self.name_span(self.ast.at_const(iid).as_data.type_alias.name),
+                                assoc,
+                            ) {
+                                found = iid;
+                            }
+                        }
+                        if found != NODE_NONE {
+                            self.ast.set_resolution_def(id, DefId { module: self.ast.module, node: found });
+                        } else {
+                            self.errors.emit(
+                                assoc.start,
+                                assoc.end - assoc.start,
+                                format("no associated type by this name in scope"),
+                            );
+                        }
+                    } else {
+                        let cs = self.current_self;
+                        self.ast.set_resolution_def(id, cs);
                     }
                 } else {
                     self.resolve_ref(id, first, Namespace::NS_TYPE, "type");
@@ -888,9 +915,12 @@ extend Resolver {
                 self.declare_generics(it.generics);
                 self.resolve_bounds(it.bounds);
                 let old_self = self.current_self;
+                let old_items = self.current_self_items;
                 self.current_self = DefId { module: self.ast.module, node: id };
+                self.current_self_items = it.items;
                 self.resolve_associated_items(it.items);
                 self.current_self = old_self;
+                self.current_self_items = old_items;
                 self.scope_exit();
             },
             NODE_EXTEND => {
@@ -932,7 +962,10 @@ extend Resolver {
                 }
                 let saved_generic = self.in_generic;
                 self.in_generic = saved_generic || ex.generics.len > 0; // methods inherit the extend's generics
+                let old_items = self.current_self_items;
+                self.current_self_items = ex.items;
                 self.resolve_associated_items(ex.items);
+                self.current_self_items = old_items;
                 self.in_generic = saved_generic;
                 self.current_self = old_self;
                 self.scope_exit();

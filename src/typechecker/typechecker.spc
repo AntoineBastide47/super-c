@@ -24,6 +24,15 @@ pub const PS_FIELD: u8 = 0;
 pub const PS_INDEX: u8 = 1;
 pub const PS_DEREF: u8 = 2;
 
+// Variance of a type/lifetime parameter in an aggregate, 2 bits, packed LSB-first per parameter
+// (lifetime params first, then type params). Used for subtyping: `C<'a> <: C<'b>` requires 'a and 'b
+// related per C's variance in that slot. BIVARIANT is the lattice bottom (unconstrained); INVARIANT
+// the top. Composition/join in v_transform / v_join.
+pub const V_BIVARIANT: u32 = 0;
+pub const V_COVARIANT: u32 = 1;
+pub const V_CONTRAVARIANT: u32 = 2;
+pub const V_INVARIANT: u32 = 3;
+
 // --- fixed-buffer / small-array wrappers (a struct field zero-inits its array) ------------------
 pub type Buf96 = Array<char, 96>;
 pub type Buf512 = Array<char, 512>;
@@ -170,6 +179,17 @@ pub struct TypeChecker<'a> {
     // (module << 32 | TypeId) -> number of lifetime slots in that type. Pure function of the interned
     // type, so the memo is sound -- same idiom as carries_memo.
     pub arity_memo: Map<u64, u32>,
+    // Per-aggregate variance of each lifetime-then-type parameter, 2 bits each (V_*), packed LSB-first,
+    // keyed by decl (module << 32 | node). Lazy + memoized; a recursive-type cycle resolves to the
+    // conservative all-V_INVARIANT (over-restricts only recursion). `variance_wip` marks a decl whose
+    // inference is on the stack. Consumed by the invariance check and by `relate` for subtyping.
+    pub variance_of: Map<u64, u64>,
+    pub variance_wip: Map<u64, bool>,
+    // Per-callee (module << 32 | node): is the result's lifetime fully attributable to bare-parameter
+    // returns, so the modular return check (tc_check_return_lifetime) has verified exactly what it
+    // borrows? Only then may a call site release the non-flowing arguments (relate_result_precision);
+    // a laundered return (`let z = y; return z;`) is not attributable, so the call stays conservative.
+    pub attributable_memo: Map<u64, bool>,
     // A declared lifetime param node -> the universal RegionVid standing for it in this function.
     pub lt_region: Map<u32, u32>,
     // Outlives constraints for the current function, packed (sup << 32 | sub) meaning "sup: sub",
@@ -434,6 +454,9 @@ extend TypeChecker {
             rv_pool: Vector::<u32>::new(),
             rv_of: Map::<u32, u64>::new(),
             arity_memo: Map::<u64, u32>::new(),
+            variance_of: Map::<u64, u64>::new(),
+            variance_wip: Map::<u64, bool>::new(),
+            attributable_memo: Map::<u64, bool>::new(),
             lt_region: Map::<u32, u32>::new(),
             outlives: Vector::<u64>::new(),
             err_wm: 0,
@@ -4721,10 +4744,56 @@ extend TypeChecker {
         }
         return NODE_NONE;
     }
+    // An interface type node `Self::Assoc` projected to the IMPL's concrete associated type (`type
+    // Assoc = X` in the extend), or TYPE_NONE if the node is not such a projection. This is what lets a
+    // method returning `Self::Item` conform: the interface's abstract `Self::Item` becomes the impl's i32.
+    fn tc_project_self_assoc(self: &mut Self, m: ModuleId, tynode: NodeId, ext: NodeId) TypeId {
+        if tynode == NODE_NONE || ext == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let n = unsafe (*self.mod_ast(m)).at_const(tynode);
+        if n.kind != NodeKind::NODE_TYPE_PATH || n.as_data.type_path.parts.len < 2 {
+            return TYPE_NONE;
+        }
+        let p0 = unsafe (*self.mod_ast(m)).list(n.as_data.type_path.parts)[0];
+        if !span_is(self.mod_src(m), unsafe (*self.mod_ast(m)).at_const(p0).as_data.name.text, "Self") {
+            return TYPE_NONE;
+        }
+        let assoc = unsafe (*self.mod_ast(m)).at_const(unsafe (*self.mod_ast(m)).list(n.as_data.type_path.parts)[1]).as_data.name.text;
+        let hm = self.tc_find_extend_alias(ext, assoc, m);
+        if hm == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let aliased = unsafe (*self.cur_ast()).at_const(hm).as_data.type_alias.ty;
+        if aliased == NODE_NONE {
+            return TYPE_NONE;
+        }
+        return self.lower_type_in(self.ast.module, aliased);
+    }
+
+    // The interface-side type for a conformance comparison: a `Self::Assoc` projects through the impl;
+    // otherwise it is lowered and substituted with the interface's generic arguments as before.
+    fn tc_iface_cmp_type(
+        self: &mut Self,
+        m: ModuleId,
+        tynode: NodeId,
+        ext: NodeId,
+        subp: *const DefId,
+        suba: *const TypeId,
+        nsub: i32,
+    ) TypeId {
+        let proj = self.tc_project_self_assoc(m, tynode, ext);
+        if proj != TYPE_NONE {
+            return proj;
+        }
+        return self.subst_type(self.lower_type_in(m, tynode), subp, suba, nsub);
+    }
+
     fn extend_method_signature_matches(
         self: &mut Self,
         req: DefId,
         have: NodeId,
+        ext: NodeId,
         subp: *const DefId,
         suba: *const TypeId,
         nsub: i32,
@@ -4738,8 +4807,14 @@ extend TypeChecker {
         for i in 0..rf.params.len {
             let rp = unsafe (*ra).list(rf.params)[i as usize];
             let hp = unsafe (*self.cur_ast()).list(hf.params)[i as usize];
-            let mut rt = self.lower_type_in(req.module, unsafe (*ra).at_const(rp).as_data.parameter.ty);
-            rt = self.subst_type(rt, subp, suba, nsub);
+            let rt = self.tc_iface_cmp_type(
+                req.module,
+                unsafe (*ra).at_const(rp).as_data.parameter.ty,
+                ext,
+                subp,
+                suba,
+                nsub,
+            );
             let ht = self.lower_type_in(self.ast.module, unsafe (*self.cur_ast()).at_const(hp).as_data.parameter.ty);
             if rt != ht && (i != 0 || !self.receiver_type_eq(rt, ht)) {
                 return false;
@@ -4754,11 +4829,14 @@ extend TypeChecker {
             if rf.returns.len == 1 {
                 let rr = unsafe (*ra).list(rf.returns)[0];
                 let rn = unsafe (*ra).at_const(rr);
-                rt = self.lower_type_in(
+                rt = self.tc_iface_cmp_type(
                     req.module,
                     if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, rr),
+                    ext,
+                    subp,
+                    suba,
+                    nsub,
                 );
-                rt = self.subst_type(rt, subp, suba, nsub);
             }
             if hf.returns.len == 1 {
                 let hr = unsafe (*self.cur_ast()).list(hf.returns)[0];
@@ -4775,11 +4853,14 @@ extend TypeChecker {
             let hr = unsafe (*self.cur_ast()).list(hf.returns)[k as usize];
             let rn = unsafe (*ra).at_const(rr);
             let hn = unsafe (*self.cur_ast()).at_const(hr);
-            let mut rt = self.lower_type_in(
+            let rt = self.tc_iface_cmp_type(
                 req.module,
                 if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, rr),
+                ext,
+                subp,
+                suba,
+                nsub,
             );
-            rt = self.subst_type(rt, subp, suba, nsub);
             let ht = self.lower_type_in(
                 self.ast.module,
                 if_node(hn.kind == NodeKind::NODE_PARAMETER, hn.as_data.parameter.ty, hr),
@@ -4885,7 +4966,7 @@ extend TypeChecker {
                             diag::span_str(self.mod_src(iface.module), rn.start, rn.end),
                         ),
                     );
-                } else if !self.extend_method_signature_matches(reqdef, hm, subp, suba, nsub) {
+                } else if !self.extend_method_signature_matches(reqdef, hm, extnode, subp, suba, nsub) {
                     let at = unsafe (*self.cur_ast()).at_const(hm).span;
                     self.errors.emit(
                         at.start,

@@ -1115,6 +1115,102 @@ extend tc::TypeChecker {
         }
     }
 
+    // The lifetime slots a type NODE denotes, in order: `&'l T` -> ['l]; an aggregate `S<'l, ..>` ->
+    // its lifetime args. Returns the count; fills `out` (up to `cap`). This is the structural lifetime
+    // vector of a signature type, used to relate a returned value's lifetimes to the return type's.
+    pub fn tc_collect_slot_lts(self: &mut Self, m: ModuleId, tyn: NodeId, out: *mut tok::Span, cap: i32) i32 {
+        if tyn == NODE_NONE || cap <= 0 {
+            return 0;
+        }
+        if unsafe (*self.mod_ast(m)).at_const(tyn).kind == NodeKind::NODE_REFERENCE_TYPE {
+            unsafe out[0] = self.tc_ref_typenode_lt(tyn);
+            return 1;
+        }
+        return self.tc_collect_lt_args(m, tyn, out, cap);
+    }
+
+    // The parameter type NODE a returned bare-identifier value refers to, or NODE_NONE. Only a whole
+    // parameter's lifetimes are known statically here; other returned expressions are covered by the
+    // local-escape check and the call-site relation.
+    pub fn tc_returned_param_typenode(self: &mut Self, vid: NodeId) NodeId {
+        let a = self.cur_ast();
+        let mut e = vid;
+        loop {
+            let n = unsafe (*a).at_const(e);
+            if n.kind == NodeKind::NODE_CAST {
+                e = n.as_data.cast.expression;
+            } else if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                e = n.as_data.unary.operand;
+            } else {
+                break;
+            }
+        }
+        if unsafe (*a).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+            return NODE_NONE;
+        }
+        let d = unsafe (*a).resolution_def(e);
+        if d.module != self.ast.module || d.node == NODE_NONE || unsafe (*a).at_const(d.node).kind != NodeKind::NODE_PARAMETER {
+            return NODE_NONE;
+        }
+        return unsafe (*a).at_const(d.node).as_data.parameter.ty;
+    }
+
+    // The lifetime a return TYPE node denotes overall (first slot), for call-site precision.
+    pub fn tc_return_dest_lifetime(self: &mut Self, ret_tyn: NodeId) tok::Span {
+        let mut dest = Spans8 {};
+        let n = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
+        if n > 0 {
+            return dest[0];
+        }
+        return tok::Span { start: 0, end: 0 };
+    }
+
+    // MODULAR definition-site check: each lifetime a returned value borrows for must be DECLARED to
+    // outlive the return type's lifetime in the same slot, using only the signature's outlives edges --
+    // exactly Rust's rule. `fn f<'a,'b>(x:&'a,y:&'b) &'a { return y; }` (and its aggregate form) needs
+    // `'b: 'a`; without it the body does not honour its signature, so it is wrong at the DEFINITION
+    // regardless of any caller. This is what lets call sites TRUST the signature (relate_result_precision)
+    // instead of tying the result to every argument.
+    pub fn tc_check_return_lifetime(self: &mut Self, vid: NodeId, ret_tyn: NodeId) {
+        let mut dest = Spans8 {};
+        let nd = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
+        if nd == 0 {
+            return;
+        }
+        let ptyn = self.tc_returned_param_typenode(vid);
+        if ptyn == NODE_NONE {
+            return;
+        }
+        let mut src = Spans8 {};
+        let ns = self.tc_collect_slot_lts(self.ast.module, ptyn, (&src[0]) as *mut tok::Span, 8);
+        let mut n = nd;
+        if ns < n {
+            n = ns;
+        }
+        for i in 0..n {
+            if self.tc_span_empty(src[i as usize]) || self.tc_span_empty(dest[i as usize]) {
+                continue;
+            }
+            if !self.tc_lifetime_outlives(src[i as usize], dest[i as usize]) {
+                let sp = unsafe (*self.cur_ast()).at_const(vid).span;
+                let di = self.tc_region_diag(
+                    sp.start,
+                    sp.end - sp.start,
+                    format(
+                        "lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime",
+                    ),
+                );
+                self.tc_region_note(
+                    di,
+                    format(
+                        "declare the relationship in the signature, e.g. add `'b: 'a` where the argument's lifetime must outlive the return",
+                    ),
+                );
+                return;
+            }
+        }
+    }
+
     pub fn region_new(self: &mut Self) u32 {
         let r = self.region_next;
         self.region_next = r + 1;
@@ -1320,6 +1416,263 @@ extend tc::TypeChecker {
             return true;
         }
         return self.region_outlives(self.tc_lt_region_of_name(src), self.tc_lt_region_of_name(dst));
+    }
+
+    // ---- variance inference over aggregate declarations ---------------------------------------
+    // `C<'a>` is a subtype of `C<'b>` only if 'a and 'b relate per C's variance in that slot:
+    // covariant needs 'a: 'b, contravariant 'b: 'a, invariant both directions. Inferred by rustc's
+    // algorithm over the field types -- `&T` covariant, `&mut T` invariant in the pointee, a nested
+    // aggregate composes with ITS variance, fn params contravariant. Lazy + memoized; a recursion
+    // cycle resolves to all-invariant (sound: over-restricts only recursive types).
+    pub fn v_flip(self: &Self, v: u32) u32 {
+        if v == V_COVARIANT {
+            return V_CONTRAVARIANT;
+        }
+        if v == V_CONTRAVARIANT {
+            return V_COVARIANT;
+        }
+        return v;
+    }
+
+    pub fn v_join(self: &Self, a: u32, b: u32) u32 {
+        if a == V_BIVARIANT {
+            return b;
+        }
+        if b == V_BIVARIANT {
+            return a;
+        }
+        if a == b {
+            return a;
+        }
+        return V_INVARIANT;
+    }
+
+    pub fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
+        if ctx == V_COVARIANT {
+            return v;
+        }
+        if ctx == V_CONTRAVARIANT {
+            return self.v_flip(v);
+        }
+        if ctx == V_BIVARIANT || v == V_BIVARIANT {
+            return V_BIVARIANT;
+        }
+        return V_INVARIANT;
+    }
+
+    pub fn variance_nlt(self: &Self, dd: DefId) i32 {
+        return (unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len) as i32;
+    }
+
+    pub fn variance_nparams(self: &Self, dd: DefId) i32 {
+        let sa = self.mod_ast(dd.module);
+        let nk = unsafe (*sa).at_const(dd.node).kind;
+        let mut nty: i32 = 0;
+        if nk == NodeKind::NODE_STRUCT || nk == NodeKind::NODE_ENUM {
+            nty = (unsafe (*sa).at_const(dd.node).as_data.aggregate.generics.len) as i32;
+        }
+        return self.variance_nlt(dd) + nty;
+    }
+
+    pub fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
+        if idx < 0 || idx >= 32 {
+            return packed;
+        }
+        let sh = (idx * 2) as u64;
+        let cur = (packed >> sh & 0x3u64) as u32;
+        let nv = self.v_join(cur, v);
+        return packed & ~(0x3u64 << sh) | nv as u64 << sh;
+    }
+
+    pub fn variance_all_invariant(self: &Self, dd: DefId) u64 {
+        let n = self.variance_nparams(dd);
+        let mut packed: u64 = 0;
+        let mut i: i32 = 0;
+        while i < n && i < 32 {
+            packed = packed | V_INVARIANT as u64 << (i * 2) as u64;
+            i = i + 1;
+        }
+        return packed;
+    }
+
+    pub fn variance_param(self: &mut Self, dd: DefId, idx: i32) u32 {
+        if idx < 0 || idx >= 32 {
+            return V_INVARIANT;
+        }
+        return (self.variance_infer(dd) >> (idx * 2) as u64 & 0x3u64) as u32;
+    }
+
+    // Index in the packed variance of the lifetime param named `name` in `dd`, or -1 (outer/'static).
+    pub fn variance_lt_index(self: &Self, dd: DefId, name: tok::Span) i32 {
+        if self.tc_span_empty(name) {
+            return -1;
+        }
+        let sa = self.mod_ast(dd.module);
+        let lts = unsafe (*sa).lifetimes_of(dd.node);
+        for i in 0..lts.len {
+            let lp = unsafe (*sa).list(lts)[i as usize];
+            if spans_eq2(self.mod_src(dd.module), self.tc_lt_name_in(dd.module, lp), self.mod_src(dd.module), name) {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    // Index of the type param `dd`'s field-type-path `tyn` names, or -1 if it names another aggregate.
+    pub fn variance_ty_index(self: &Self, dd: DefId, tyn: NodeId) i32 {
+        let sa = self.mod_ast(dd.module);
+        let rd = unsafe (*sa).resolution_def(tyn);
+        if rd.node == NODE_NONE || rd.module != dd.module {
+            return -1;
+        }
+        let gens = unsafe (*sa).at_const(dd.node).as_data.aggregate.generics;
+        for j in 0..gens.len {
+            if unsafe (*sa).list(gens)[j as usize] == rd.node {
+                return self.variance_nlt(dd) + j as i32;
+            }
+        }
+        return -1;
+    }
+
+    pub fn variance_infer(self: &mut Self, dd: DefId) u64 {
+        if dd.node == NODE_NONE {
+            return 0;
+        }
+        let key = dd.module as u64 << 32 | dd.node as u64;
+        switch self.variance_of.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        switch self.variance_wip.get(&key) {
+            Some(_) => {
+                return self.variance_all_invariant(dd);
+            },
+            None => {},
+        };
+        let nk = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).kind;
+        if nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM {
+            self.variance_of.insert(key, 0);
+            return 0;
+        }
+        self.variance_wip.insert(key, true);
+        let mut packed: u64 = 0;
+        let members = unsafe (*self.mod_ast(dd.module)).at_const(dd.node).as_data.aggregate.members;
+        for i in 0..members.len {
+            let mid = unsafe (*self.mod_ast(dd.module)).list(members)[i as usize];
+            let mk = unsafe (*self.mod_ast(dd.module)).at_const(mid).kind;
+            if mk == NodeKind::NODE_FIELD {
+                packed = self.variance_walk(
+                    dd,
+                    unsafe (*self.mod_ast(dd.module)).at_const(mid).as_data.field.ty,
+                    V_COVARIANT,
+                    packed,
+                    0,
+                );
+            } else if mk == NodeKind::NODE_VARIANT {
+                let pl = unsafe (*self.mod_ast(dd.module)).at_const(mid).as_data.variant.payload;
+                for p in 0..pl.len {
+                    packed = self.variance_walk(
+                        dd,
+                        unsafe (*self.mod_ast(dd.module)).list(pl)[p as usize],
+                        V_COVARIANT,
+                        packed,
+                        0,
+                    );
+                }
+            }
+        }
+        self.variance_wip.remove(&key);
+        self.variance_of.insert(key, packed);
+        return packed;
+    }
+
+    // Fold every occurrence of one of `dd`'s params in the field type node `tyn` (a node in dd.module)
+    // into `packed`, under the accumulated context variance `ctx`.
+    pub fn variance_walk(self: &mut Self, dd: DefId, tyn: NodeId, ctx: u32, packed: u64, depth: i32) u64 {
+        if tyn == NODE_NONE || depth > 8 || ctx == V_BIVARIANT {
+            return packed;
+        }
+        let sa = self.mod_ast(dd.module);
+        let n = unsafe (*sa).at_const(tyn);
+        let nk = n.kind;
+        if nk == NodeKind::NODE_LIFETIME {
+            return self.variance_pack_set(packed, self.variance_lt_index(dd, self.tc_lt_name_in(dd.module, tyn)), ctx);
+        }
+        if nk == NodeKind::NODE_REFERENCE_TYPE || nk == NodeKind::NODE_SLICE_TYPE {
+            let mut p = packed;
+            let lifen = n.as_data.indirect_type.lifetime;
+            if nk == NodeKind::NODE_REFERENCE_TYPE && lifen != NODE_NONE {
+                p = self.variance_pack_set(p, self.variance_lt_index(dd, self.tc_lt_name_in(dd.module, lifen)), ctx);
+            }
+            let mut inner = ctx;
+            if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                inner = self.v_transform(ctx, V_INVARIANT);
+            }
+            return self.variance_walk(dd, n.as_data.indirect_type.ty, inner, p, depth + 1);
+        }
+        if nk == NodeKind::NODE_POINTER_TYPE {
+            return packed; // raw pointer: regions/borrows erased -- no lifetime slot, so variance is moot
+        }
+        if nk == NodeKind::NODE_ARRAY_TYPE {
+            return self.variance_walk(dd, n.as_data.array_type.element, ctx, packed, depth + 1);
+        }
+        if nk == NodeKind::NODE_TUPLE_TYPE {
+            let mut p = packed;
+            let es = n.as_data.array_literal.elements;
+            for i in 0..es.len {
+                p = self.variance_walk(dd, unsafe (*sa).list(es)[i as usize], ctx, p, depth + 1);
+            }
+            return p;
+        }
+        if nk == NodeKind::NODE_FUNCTION_TYPE {
+            let mut p = packed;
+            let ps = n.as_data.function_type.params;
+            for i in 0..ps.len {
+                p = self.variance_walk(
+                    dd,
+                    unsafe (*sa).list(ps)[i as usize],
+                    self.v_transform(ctx, V_CONTRAVARIANT),
+                    p,
+                    depth + 1,
+                );
+            }
+            let rs = n.as_data.function_type.returns;
+            for i in 0..rs.len {
+                p = self.variance_walk(dd, unsafe (*sa).list(rs)[i as usize], ctx, p, depth + 1);
+            }
+            return p;
+        }
+        if nk == NodeKind::NODE_TYPE_PATH {
+            let tidx = self.variance_ty_index(dd, tyn);
+            if tidx >= 0 {
+                return self.variance_pack_set(packed, tidx, ctx);
+            }
+            let rd = unsafe (*sa).resolution_def(tyn);
+            let args = n.as_data.type_path.args;
+            if rd.node == NODE_NONE || args.len == 0 {
+                return packed;
+            }
+            let ncalleeLt = self.variance_nlt(rd);
+            let mut p = packed;
+            let mut lti: i32 = 0;
+            let mut tyi: i32 = 0;
+            for i in 0..args.len {
+                let aid = unsafe (*sa).list(args)[i as usize];
+                let mut cvar: u32 = V_INVARIANT;
+                if unsafe (*sa).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                    cvar = self.variance_param(rd, lti);
+                    lti = lti + 1;
+                } else {
+                    cvar = self.variance_param(rd, ncalleeLt + tyi);
+                    tyi = tyi + 1;
+                }
+                p = self.variance_walk(dd, aid, self.v_transform(ctx, cvar), p, depth + 1);
+            }
+            return p;
+        }
+        return packed;
     }
 
     pub fn tc_check_store_escape(self: &mut Self, place: NodeId, value: NodeId, place_ty: TypeId) {
@@ -1706,10 +2059,45 @@ extend tc::TypeChecker {
             return TYPE_NONE;
         }
         let elem = self.type_at(lt).as_data.elem;
-        if !self.tc_type_mentions_generic(elem, 0) {
-            return TYPE_NONE;
+        // (a) `&mut <ref/ptr mentioning a callee type variable>` -- two such args can be swapped by
+        // the callee, so a too-short borrow in one is stored into the other (the original rule).
+        if self.tc_type_mentions_generic(elem, 0) {
+            return elem;
         }
-        return elem;
+        // (b) `&mut <aggregate invariant in one of its lifetime/type params>` -- the variance
+        // generalization: an invariant param means the pointee cannot be shortened, so two such args
+        // are likewise swappable. `&'a mut i32` alone is covariant in 'a (the invariance is in the
+        // pointee), so this only fires when a lifetime reaches an invariant slot, e.g. `&'a mut &'a i32`.
+        if self.tc_aggregate_has_invariant_param(elem) {
+            return elem;
+        }
+        return TYPE_NONE;
+    }
+
+    pub fn tc_aggregate_has_invariant_param(self: &mut Self, ty: TypeId) bool {
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(
+            self.strip(ty),
+            &mut om,
+            &mut od,
+            (&gp[0]) as *mut DefId,
+            (&ga[0]) as *mut TypeId,
+            &mut gn,
+        ) {
+            return false;
+        }
+        let dd = DefId { module: om, node: od };
+        let np = self.variance_nparams(dd);
+        for i in 0..np {
+            if self.variance_param(dd, i) == V_INVARIANT {
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn tc_type_mentions_generic(self: &mut Self, ty: TypeId, depth: i32) bool {
@@ -1813,113 +2201,6 @@ extend tc::TypeChecker {
                 self.tc_cross_tie(ri, rj);
                 self.tc_cross_tie(rj, ri);
             }
-        }
-    }
-
-    pub fn tc_tie_stored_borrow_args(
-        self: &mut Self,
-        fmod: ModuleId,
-        fdecl: NodeId,
-        params: NodeList,
-        args: NodeList,
-        skip: u32,
-        arg_bm: u32,
-        arg_end: u32,
-    ) {
-        if arg_end <= arg_bm {
-            return;
-        }
-        let fa = self.mod_ast(fmod);
-        if unsafe (*fa).at_const(fdecl).kind != NodeKind::NODE_FUNCTION {
-            return;
-        }
-        for ps in 0..params.len {
-            if ps < skip {
-                continue;
-            }
-            let sa = ps - skip;
-            if sa >= args.len {
-                continue;
-            }
-            let ps_ty = unsafe (*fa).at_const(unsafe (*fa).list(params)[ps as usize]).as_data.parameter.ty;
-            if ps_ty == NODE_NONE {
-                continue;
-            }
-            let lt = self.lower_type_in(fmod, ps_ty);
-            if lt == TYPE_NONE || self.type_at(lt).kind != TypeKind::TYPE_REFERENCE || self.type_at(lt).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
-                continue;
-            }
-            let elem = self.type_at(lt).as_data.elem;
-            let ps_pointee = unsafe (*fa).at_const(ps_ty).as_data.indirect_type.ty;
-            let mut stores = false;
-            for pv in 0..params.len {
-                if pv == ps || pv < skip {
-                    continue;
-                }
-                let va = pv - skip;
-                if va >= args.len {
-                    continue;
-                }
-                let pv_ty = unsafe (*fa).at_const(unsafe (*fa).list(params)[pv as usize]).as_data.parameter.ty;
-                if pv_ty == NODE_NONE {
-                    continue;
-                }
-                // (a) shared TYPE VARIABLE: bare value `x: T` stored through `&mut C<..T..>` (variance).
-                let vt = self.lower_type_in(fmod, pv_ty);
-                if vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_GENERIC {
-                    let vd = self.type_at(vt).as_data.decl;
-                    let vm = self.type_at(vt).module;
-                    if self.tc_ref_covers_generic(elem, vd, vm) {
-                        stores = true;
-                    }
-                }
-                // (b) shared NAMED LIFETIME: a value parameter mentioning `'a` anywhere -- `x: &'a U`
-                // or `src: Ref<'a>` -- stored through `&mut C<'a,..>`. That is the lifetime
-                // relationship the annotated API asserts, so the argument for the value must outlive
-                // the argument for the container (enforced by the tie + scope exit below).
-                let mut vlts = Spans8 {};
-                let mut nvlt: i32 = 0;
-                self.tc_typenode_lifetimes(fmod, pv_ty, (&vlts[0]) as *mut tok::Span, 8, &mut nvlt, 0);
-                for li in 0..nvlt {
-                    if self.tc_typenode_covers_lt(fmod, ps_pointee, vlts[li as usize]) {
-                        stores = true;
-                    }
-                }
-            }
-            if !stores {
-                continue;
-            }
-            let sref = self.tc_ref_arg_referent(unsafe (*self.cur_ast()).list(args)[sa as usize]);
-            if sref == NODE_NONE {
-                continue;
-            }
-            let region = self.tc_binding_depth(sref) as u16;
-            for bi in arg_bm..arg_end {
-                let b = unsafe self.borrows[bi as usize];
-                if b.binding == NODE_NONE && b.root != NODE_NONE && b.root != sref {
-                    unsafe self.borrows[bi as usize].binding = sref;
-                    unsafe self.borrows[bi as usize].region = region;
-                }
-            }
-            // A value argument that is a LOCAL already HOLDS its borrows (they were bound to it at its
-            // `let`), so nothing transient appears in the range above -- `store(&mut long, s)` where
-            // `s: Ref<'a>` borrows a short-lived local is exactly that shape. Adopt the borrows each
-            // stored argument holds onto the container as well, so scope exit sees the container
-            // outliving the referent.
-            for pv in 0..params.len {
-                if pv < skip || pv == ps {
-                    continue;
-                }
-                let va = pv - skip;
-                if va >= args.len {
-                    continue;
-                }
-                let vbase = self.tc_place_base_binding(unsafe (*self.cur_ast()).list(args)[va as usize]);
-                if vbase != NODE_NONE && vbase != sref {
-                    self.tc_cross_tie(vbase, sref);
-                }
-            }
-            return;
         }
     }
 
@@ -2164,6 +2445,44 @@ extend tc::TypeChecker {
         }
     }
 
+    // Moving a whole borrow-carrying value out of one binding into another (`outer = inner`,
+    // `let x = inner`) must carry the borrows the source holds to the destination -- otherwise the
+    // destination silently outlives them. Borrows freshly minted by a struct-literal or call RHS are
+    // already retied by the [bm, nborrows) scan at the store; this covers the identifier-RHS whole-value
+    // move that scan misses (the source holds the borrows from an earlier statement, not this one).
+    pub fn bc_move_held_borrows(self: &mut Self, from_expr: NodeId, to_binding: NodeId, to_region: u16) {
+        if to_binding == NODE_NONE {
+            return;
+        }
+        let a = self.cur_ast();
+        let mut e = from_expr;
+        loop {
+            let n = unsafe (*a).at_const(e);
+            if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                e = n.as_data.unary.operand;
+            } else {
+                break;
+            }
+        }
+        if unsafe (*a).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+            return;
+        }
+        let d = unsafe (*a).resolution_def(e);
+        if d.module != self.ast.module || d.node == NODE_NONE || d.node == to_binding {
+            return;
+        }
+        let cnt = self.nborrows;
+        for i in 0..cnt {
+            let b = unsafe self.borrows[i as usize];
+            if b.binding == d.node && b.root != NODE_NONE {
+                self.borrow_push(b.root, b.kind, b.place, b.origin);
+                let k = self.nborrows - 1;
+                unsafe self.borrows[k as usize].binding = to_binding;
+                unsafe self.borrows[k as usize].region = to_region;
+            }
+        }
+    }
+
     pub fn tc_place_base_binding(self: &Self, place: NodeId) NodeId {
         let a = self.cur_ast();
         let pn = unsafe (*a).at_const(place);
@@ -2328,6 +2647,12 @@ extend tc::TypeChecker {
                         unsafe self.borrows[k as usize].binding = id;
                         unsafe self.borrows[k as usize].region = self.scope_depth as u16;
                     }
+                } else if binding_carries && !binding_is_ref && value != NODE_NONE {
+                    // Whole-value move of a borrow-carrying aggregate out of an identifier (`let x =
+                    // inner`): the RHS holds the borrows from an earlier statement, so no fresh borrow
+                    // was minted to retie -- carry them across. A bare reference stays on the
+                    // transfer-ref path below (copying a `&mut` must MOVE it, not duplicate it).
+                    self.bc_move_held_borrows(value, id, self.scope_depth as u16);
                 } else {
                     self.borrow_release_to(bm);
                     if binding_is_ref && value != NODE_NONE {
@@ -2343,10 +2668,17 @@ extend tc::TypeChecker {
             NODE_RETURN => {
                 let bm = self.borrow_mark();
                 let values = unsafe (*a).at_const(id).as_data.return_stmt.values;
+                let mut ret_list = NodeList { start: 0, len: 0 };
+                if self.current_fn != NODE_NONE {
+                    ret_list = unsafe (*a).at_const(self.current_fn).as_data.function.returns;
+                }
                 for i in 0..values.len {
                     let vid = unsafe (*a).list(values)[i as usize];
                     self.bc_expr(vid, false, false);
                     self.tc_capture_move_guard(vid);
+                    if i < ret_list.len {
+                        self.tc_check_return_lifetime(vid, unsafe (*a).list(ret_list)[i as usize]);
+                    }
                 }
                 for i in 0..values.len {
                     let vid = unsafe (*a).list(values)[i as usize];
@@ -2804,7 +3136,7 @@ extend tc::TypeChecker {
             }
         } else if carrier_rebind || lt == TYPE_NONE && self.tc_carries_borrow(l) || self.tc_expr_is_closure(bd.right) {
             let proot = self.tc_place_base_binding(bd.left);
-            if proot != NODE_NONE && self.nborrows > bm {
+            if proot != NODE_NONE {
                 let region = self.tc_binding_depth(proot) as u16;
                 for k in bm..self.nborrows {
                     if unsafe self.borrows[k as usize].binding == NODE_NONE && unsafe self.borrows[k as usize].root != NODE_NONE {
@@ -2812,6 +3144,7 @@ extend tc::TypeChecker {
                         unsafe self.borrows[k as usize].region = region;
                     }
                 }
+                self.bc_move_held_borrows(bd.right, proot, region);
             }
         }
         if plain {
@@ -2905,84 +3238,430 @@ extend tc::TypeChecker {
                 self.tc_reborrow_inherit(recv_n, recv_n);
             }
         }
-        // a borrow stored into the receiver container must outlive it
-        if recv_n != NODE_NONE && skip == 1 && params.len > 1 {
-            let recv_ty = unsafe (*a).type_of(recv_n);
-            let mut arg_closure = false;
-            for ci in 0..args.len {
-                if self.tc_expr_is_closure(unsafe (*a).list(args)[ci as usize]) {
-                    arg_closure = true;
+        // The lifetime relation across the argument boundary: a borrow flowing into storage that
+        // outlives the call is tied to (and must outlive) that storage. One uniform storage x consumer
+        // relation, so no argument shape can escape a store it flows into.
+        self.relate_call(md, params, args, skip, recv_n, arg_bm, arg_end);
+        // Call-site PRECISION: the signature is verified modularly (tc_check_return_lifetime), so the
+        // result borrows ONLY the arguments whose lifetime the return type names. Release the transient
+        // borrows of arguments that do not flow into the result, instead of conservatively tying every
+        // argument to it -- this is what makes `fn first<'a,'b>(x:&'a,y:&'b) &'a { x }` usable with a
+        // short-lived second argument.
+        if ret != TYPE_NONE && self.tc_carries_borrow(ret) && recv_n == NODE_NONE {
+            let rtn = if_node(returns.len > 0, unsafe (*fa).list(returns)[0], NODE_NONE);
+            self.relate_result_precision(md, params, args, skip, arg_bm, arg_end, rtn);
+        }
+    }
+
+    // Is `md`'s result lifetime fully attributable to bare-parameter returns? Only then has the modular
+    // return check verified exactly which parameters the result borrows, so a caller may release the
+    // non-flowing arguments. A return of a local, a call result, or a value laundered through a local
+    // is NOT attributable -- the signature may be dishonoured there, so the caller stays conservative.
+    pub fn tc_result_attributable(self: &mut Self, md: DefId) bool {
+        let key = md.module as u64 << 32 | md.node as u64;
+        switch self.attributable_memo.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        // memoize a provisional TRUE first so a recursive body cannot loop.
+        self.attributable_memo.insert(key, true);
+        let fa = self.mod_ast(md.module);
+        let body = unsafe (*fa).at_const(md.node).as_data.function.body;
+        let ok = self.tc_scan_returns_attributable(md.module, body, 0);
+        self.attributable_memo.insert(key, ok);
+        return ok;
+    }
+
+    pub fn tc_scan_returns_attributable(self: &mut Self, m: ModuleId, node: NodeId, depth: i32) bool {
+        if node == NODE_NONE || depth > 64 {
+            return true;
+        }
+        let fa = self.mod_ast(m);
+        let n = unsafe (*fa).at_const(node);
+        switch n.kind {
+            NODE_RETURN => {
+                let vals = n.as_data.return_stmt.values;
+                for i in 0..vals.len {
+                    let vid = unsafe (*fa).list(vals)[i as usize];
+                    let vt = unsafe (*fa).type_of(vid);
+                    // an owned (borrow-free) result attributes to nothing -- fine to release all args.
+                    if vt != TYPE_NONE && !self.tc_carries_borrow(vt) {
+                        continue;
+                    }
+                    // a borrow-carrying result must be a bare parameter for the modular check to have
+                    // pinned exactly which lifetimes it carries.
+                    if self.tc_returned_param_typenode_in(m, vid) == NODE_NONE {
+                        return false;
+                    }
                 }
+                return true;
+            },
+            NODE_BLOCK => {
+                let ss = n.as_data.block.statements;
+                for i in 0..ss.len {
+                    if !self.tc_scan_returns_attributable(m, unsafe (*fa).list(ss)[i as usize], depth + 1) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            NODE_IF => {
+                return self.tc_scan_returns_attributable(m, n.as_data.if_stmt.then_branch, depth + 1) && self.tc_scan_returns_attributable(
+                    m,
+                    n.as_data.if_stmt.else_branch,
+                    depth + 1,
+                );
+            },
+            NODE_WHILE => {
+                return self.tc_scan_returns_attributable(m, n.as_data.while_stmt.body, depth + 1);
+            },
+            NODE_FOR => {
+                return self.tc_scan_returns_attributable(m, n.as_data.for_stmt.body, depth + 1);
+            },
+            NODE_MATCH => {
+                let arms = n.as_data.match_expr.arms;
+                for i in 0..arms.len {
+                    if !self.tc_scan_returns_attributable(
+                        m,
+                        unsafe (*fa).at_const(unsafe (*fa).list(arms)[i as usize]).as_data.match_arm.body,
+                        depth + 1,
+                    ) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            _ => {
+                return true;
+            },
+        };
+    }
+
+    // Like tc_returned_param_typenode but for an arbitrary module `m` (the callee's), used by the
+    // attributability scan which walks a possibly cross-module body.
+    pub fn tc_returned_param_typenode_in(self: &mut Self, m: ModuleId, vid: NodeId) NodeId {
+        let fa = self.mod_ast(m);
+        let mut e = vid;
+        loop {
+            let nn = unsafe (*fa).at_const(e);
+            if nn.kind == NodeKind::NODE_CAST {
+                e = nn.as_data.cast.expression;
+            } else if nn.kind == NodeKind::NODE_UNARY && (nn.as_data.unary.op == TokenType::Move || nn.as_data.unary.op == TokenType::Unsafe) {
+                e = nn.as_data.unary.operand;
+            } else {
+                break;
             }
-            if self.tc_carries_borrow(recv_ty) || arg_closure {
-                let mut recv_root = NODE_NONE;
-                if unsafe (*a).at_const(recv_n).kind == NodeKind::NODE_IDENTIFIER {
-                    let rd = unsafe (*a).resolution_def(recv_n);
-                    if rd.module == self.ast.module && rd.node != NODE_NONE {
-                        recv_root = rd.node;
-                    }
-                } else {
-                    recv_root = self.place_through_binding(recv_n);
-                }
-                if recv_root != NODE_NONE {
-                    let mut stores = false;
-                    for pi in 1..params.len {
-                        let aid = if_node(pi - 1 < args.len, unsafe (*a).list(args)[(pi - 1) as usize], NODE_NONE);
-                        if self.tc_param_shares_recv_region(md, recv_ty, pi as i32, aid) {
-                            stores = true;
-                        }
-                    }
-                    if stores {
-                        let rregion = self.tc_binding_depth(recv_root);
-                        for bi in arg_bm..arg_end {
-                            if unsafe self.borrows[bi as usize].binding == NODE_NONE && unsafe self.borrows[bi as usize].root != NODE_NONE {
-                                unsafe self.borrows[bi as usize].binding = recv_root;
-                                unsafe self.borrows[bi as usize].region = rregion as u16;
-                            }
-                        }
-                        if self.tc_is_ref_param(recv_root) {
-                            let elt = self.tc_container_elem_lt(
-                                self.ast.module,
-                                unsafe (*a).at_const(recv_root).as_data.parameter.ty,
-                            );
-                            for pi in 1..params.len {
-                                let aid = if_node(
-                                    pi - 1 < args.len,
-                                    unsafe (*a).list(args)[(pi - 1) as usize],
-                                    NODE_NONE,
-                                );
-                                if aid == NODE_NONE || self.tc_ident_ref_param(aid) == NODE_NONE {
-                                    continue;
-                                }
-                                if !self.tc_param_shares_recv_region(md, recv_ty, pi as i32, aid) {
-                                    continue;
-                                }
-                                if !self.tc_lifetime_outlives(self.tc_value_source_lifetime(aid), elt) {
-                                    let asp = unsafe (*a).at_const(aid).span;
-                                    let di = self.tc_region_diag(
-                                        asp.start,
-                                        asp.end - asp.start,
-                                        format(
-                                            "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",
-                                        ),
-                                    );
-                                    self.tc_region_note(
-                                        di,
-                                        format(
-                                            "tie the lifetimes with a shared parameter, e.g. `fn f<'a>(dst: &mut Vector<&'a T>, src: &'a T)`",
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                    }
+        }
+        if unsafe (*fa).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+            return NODE_NONE;
+        }
+        let d = unsafe (*fa).resolution_def(e);
+        if d.node == NODE_NONE || unsafe (*self.mod_ast(d.module)).at_const(d.node).kind != NodeKind::NODE_PARAMETER {
+            return NODE_NONE;
+        }
+        return unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.parameter.ty;
+    }
+
+    // Tombstone the transient, UNSTORED borrows of arguments that do not flow into the call's result,
+    // so the enclosing let/assign ties the result to only the flowing arguments. Sound because the
+    // signature was verified: a param flows iff the return type names one of the lifetimes its type
+    // carries. Only borrows still `binding == NONE` are touched -- anything relate_call tied to a
+    // storage keeps its binding and is left alone.
+    pub fn relate_result_precision(
+        self: &mut Self,
+        md: DefId,
+        params: NodeList,
+        args: NodeList,
+        skip: u32,
+        arg_bm: u32,
+        arg_end: u32,
+        ret_tyn: NodeId,
+    ) {
+        if arg_end <= arg_bm {
+            return;
+        }
+        // Only trust the signature when the modular return check has verified exactly what the result
+        // borrows; otherwise keep every argument tied (the sound, conservative default).
+        if !self.tc_result_attributable(md) {
+            return;
+        }
+        let fa = self.mod_ast(md.module);
+        let dest = self.tc_return_dest_lifetime(ret_tyn);
+        // Elided return with exactly one input reference: that reference flows (elision rule 1).
+        let mut nref: i32 = 0;
+        let mut only_ref: i32 = -1;
+        for pi in skip..params.len {
+            let pt = unsafe (*fa).at_const(unsafe (*fa).list(params)[pi as usize]).as_data.parameter.ty;
+            if pt != NODE_NONE && unsafe (*fa).at_const(pt).kind == NodeKind::NODE_REFERENCE_TYPE {
+                nref = nref + 1;
+                only_ref = pi as i32;
+            }
+        }
+        if self.tc_span_empty(dest) && nref != 1 {
+            return; // cannot pin the flowing input -- keep the conservative all-args tie
+        }
+        // A param flows into the result if the return type names a lifetime its type carries (or it is
+        // the single elided input). Collect the flowing arguments' referents first.
+        let mut flowing = Nodes8 {};
+        let mut nflow: i32 = 0;
+        for pi in skip..params.len {
+            let ptyn = unsafe (*fa).at_const(unsafe (*fa).list(params)[pi as usize]).as_data.parameter.ty;
+            let mut flows = false;
+            if self.tc_span_empty(dest) {
+                flows = pi as i32 == only_ref;
+            } else {
+                flows = ptyn != NODE_NONE && self.tc_typenode_covers_lt(md.module, ptyn, dest);
+            }
+            if flows && nflow < 8 {
+                let ai = pi - skip;
+                if ai < args.len {
+                    flowing[nflow as usize] = self.tc_ref_arg_referent(unsafe (*self.cur_ast()).list(args)[ai as usize]);
+                    nflow = nflow + 1;
                 }
             }
         }
-        // plain-function argument-boundary rules
-        self.tc_tie_stored_borrow_args(md.module, md.node, params, args, skip, arg_bm, arg_end);
+        for pi in skip..params.len {
+            let ai = pi - skip;
+            if ai >= args.len {
+                continue;
+            }
+            let ptyn = unsafe (*fa).at_const(unsafe (*fa).list(params)[pi as usize]).as_data.parameter.ty;
+            let mut flows = false;
+            if self.tc_span_empty(dest) {
+                flows = pi as i32 == only_ref;
+            } else {
+                flows = ptyn != NODE_NONE && self.tc_typenode_covers_lt(md.module, ptyn, dest);
+            }
+            if flows {
+                continue;
+            }
+            let referent = self.tc_ref_arg_referent(unsafe (*self.cur_ast()).list(args)[ai as usize]);
+            if referent == NODE_NONE {
+                continue;
+            }
+            let mut shared = false;
+            for f in 0..nflow {
+                if flowing[f as usize] == referent {
+                    shared = true;
+                }
+            }
+            if shared {
+                continue; // same referent also flows -- do not release
+            }
+            for bi in arg_bm..arg_end {
+                if unsafe self.borrows[bi as usize].binding == NODE_NONE && unsafe self.borrows[bi as usize].root == referent {
+                    self.borrow_tombstone_at(bi);
+                }
+            }
+        }
+    }
+
+    // Unified call-boundary lifetime relation. A parameter (or the method receiver) can denote STORAGE
+    // that outlives the call -- the receiver's container, or a `&mut C<..>` referent. Any parameter
+    // sharing a type variable or named lifetime with that storage's contents has its argument flow in,
+    // so the argument's borrows are tied to (and must outlive) the storage. ONE storage x consumer
+    // enumeration replaces the two per-shape store hooks; 'static bounds and &mut invariance stay
+    // orthogonal. Correctness by construction: every storage is paired with every consumer here, so no
+    // argument shape can escape a store it flows into.
+    pub fn relate_call(
+        self: &mut Self,
+        md: DefId,
+        params: NodeList,
+        args: NodeList,
+        skip: u32,
+        recv_n: NodeId,
+        arg_bm: u32,
+        arg_end: u32,
+    ) {
+        let fa = self.mod_ast(md.module);
+        if unsafe (*fa).at_const(md.node).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
         self.tc_check_type_outlives_bounds(md.module, md.node, params, args, skip);
         self.tc_check_invariant_args(md.module, md.node, params, args, skip);
+        // storage index -1 denotes the method receiver; 0.. the parameters.
+        let mut sidx: i32 = 0;
+        if recv_n != NODE_NONE && skip == 1 {
+            sidx = -1;
+        }
+        while sidx < params.len as i32 {
+            let cur = sidx;
+            sidx = sidx + 1;
+            let mut store_root = NODE_NONE;
+            let mut is_recv = false;
+            let mut recv_ty: TypeId = TYPE_NONE;
+            let mut ps_elem: TypeId = TYPE_NONE;
+            let mut ps_pointee = NODE_NONE;
+            if cur == -1 {
+                is_recv = true;
+                recv_ty = unsafe (*self.cur_ast()).type_of(recv_n);
+                let mut arg_closure = false;
+                for ci in 0..args.len {
+                    if self.tc_expr_is_closure(unsafe (*self.cur_ast()).list(args)[ci as usize]) {
+                        arg_closure = true;
+                    }
+                }
+                if !self.tc_carries_borrow(recv_ty) && !arg_closure || params.len <= 1 {
+                    continue;
+                }
+                if unsafe (*self.cur_ast()).at_const(recv_n).kind == NodeKind::NODE_IDENTIFIER {
+                    let rd = unsafe (*self.cur_ast()).resolution_def(recv_n);
+                    if rd.module == self.ast.module && rd.node != NODE_NONE {
+                        store_root = rd.node;
+                    }
+                } else {
+                    store_root = self.place_through_binding(recv_n);
+                }
+            } else {
+                if cur as u32 < skip {
+                    continue;
+                }
+                let ps_ty = unsafe (*fa).at_const(unsafe (*fa).list(params)[cur as usize]).as_data.parameter.ty;
+                if ps_ty == NODE_NONE {
+                    continue;
+                }
+                let lt = self.lower_type_in(md.module, ps_ty);
+                if lt == TYPE_NONE || self.type_at(lt).kind != TypeKind::TYPE_REFERENCE || self.type_at(lt).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
+                    continue;
+                }
+                ps_elem = self.type_at(lt).as_data.elem;
+                ps_pointee = unsafe (*fa).at_const(ps_ty).as_data.indirect_type.ty;
+                let sa = cur as u32 - skip;
+                if sa >= args.len {
+                    continue;
+                }
+                store_root = self.tc_ref_arg_referent(unsafe (*self.cur_ast()).list(args)[sa as usize]);
+            }
+            if store_root == NODE_NONE {
+                continue;
+            }
+            self.relate_store_consumers(
+                md,
+                params,
+                args,
+                skip,
+                cur,
+                store_root,
+                is_recv,
+                recv_ty,
+                ps_elem,
+                ps_pointee,
+                arg_bm,
+                arg_end,
+            );
+        }
+    }
+
+    // Tie every consumer argument that shares the storage's region to the storage, and diagnose a
+    // borrow that is not declared to outlive it. Shared by the receiver and `&mut C` storage kinds.
+    pub fn relate_store_consumers(
+        self: &mut Self,
+        md: DefId,
+        params: NodeList,
+        args: NodeList,
+        skip: u32,
+        sidx: i32,
+        store_root: NodeId,
+        is_recv: bool,
+        recv_ty: TypeId,
+        ps_elem: TypeId,
+        ps_pointee: NodeId,
+        arg_bm: u32,
+        arg_end: u32,
+    ) {
+        let region = self.tc_binding_depth(store_root) as u16;
+        let is_ref_store = self.tc_is_ref_param(store_root);
+        let mut elem_lt = tok::Span { start: 0, end: 0 };
+        if is_ref_store {
+            elem_lt = self.tc_container_elem_lt(
+                self.ast.module,
+                unsafe (*self.cur_ast()).at_const(store_root).as_data.parameter.ty,
+            );
+        }
+        for c in 0..params.len {
+            if c as i32 == sidx || c < skip {
+                continue;
+            }
+            let ca = c - skip;
+            if ca >= args.len {
+                continue;
+            }
+            let aid = unsafe (*self.cur_ast()).list(args)[ca as usize];
+            let shares = self.relate_consumer_shares(md, c, aid, is_recv, recv_ty, ps_elem, ps_pointee);
+            if !shares {
+                continue;
+            }
+            for bi in arg_bm..arg_end {
+                if unsafe self.borrows[bi as usize].binding == NODE_NONE && unsafe self.borrows[bi as usize].root != NODE_NONE && unsafe self.borrows[bi as usize].root != store_root {
+                    unsafe self.borrows[bi as usize].binding = store_root;
+                    unsafe self.borrows[bi as usize].region = region;
+                }
+            }
+            let vbase = self.tc_place_base_binding(aid);
+            if vbase != NODE_NONE && vbase != store_root {
+                self.tc_cross_tie(vbase, store_root);
+            }
+            if is_ref_store && self.tc_ident_ref_param(aid) != NODE_NONE && !self.tc_lifetime_outlives(
+                self.tc_value_source_lifetime(aid),
+                elem_lt,
+            ) {
+                let asp = unsafe (*self.cur_ast()).at_const(aid).span;
+                let di = self.tc_region_diag(
+                    asp.start,
+                    asp.end - asp.start,
+                    format(
+                        "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",
+                    ),
+                );
+                self.tc_region_note(
+                    di,
+                    format(
+                        "tie the lifetimes with a shared parameter, e.g. `fn f<'a>(dst: &mut Vector<&'a T>, src: &'a T)`",
+                    ),
+                );
+            }
+        }
+    }
+
+    // Does consumer parameter `c` (argument `aid`) share the storage's region? The receiver storage
+    // shares through a type variable the receiver instantiates; a `&mut C` storage shares when its
+    // pointee mentions the consumer's type variable or a named lifetime the consumer also carries.
+    pub fn relate_consumer_shares(
+        self: &mut Self,
+        md: DefId,
+        c: u32,
+        aid: NodeId,
+        is_recv: bool,
+        recv_ty: TypeId,
+        ps_elem: TypeId,
+        ps_pointee: NodeId,
+    ) bool {
+        if is_recv {
+            return self.tc_param_shares_recv_region(md, recv_ty, c as i32, aid);
+        }
+        let fa = self.mod_ast(md.module);
+        let params = unsafe (*fa).at_const(md.node).as_data.function.params;
+        let pv_ty = unsafe (*fa).at_const(unsafe (*fa).list(params)[c as usize]).as_data.parameter.ty;
+        if pv_ty == NODE_NONE {
+            return false;
+        }
+        let vt = self.lower_type_in(md.module, pv_ty);
+        if vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_GENERIC {
+            if self.tc_ref_covers_generic(ps_elem, self.type_at(vt).as_data.decl, self.type_at(vt).module) {
+                return true;
+            }
+        }
+        let mut vlts = Spans8 {};
+        let mut nvlt: i32 = 0;
+        self.tc_typenode_lifetimes(md.module, pv_ty, (&vlts[0]) as *mut tok::Span, 8, &mut nvlt, 0);
+        for li in 0..nvlt {
+            if self.tc_typenode_covers_lt(md.module, ps_pointee, vlts[li as usize]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn bc_closure(self: &mut Self, id: NodeId) {
