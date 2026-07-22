@@ -3761,6 +3761,11 @@ extend Codegen {
             self.cg_conv_suffix(td, self.cg_conv_lit(self.cur_module(), self.name_span(member)), a0t, &mut sfx[0], 200);
             self.emit_cstr(&sfx[0]);
         }
+        if td.node != NODE_NONE {
+            let mut isfx = Buf256 {};
+            self.cg_iface_suffix(emd.module, emd.node, &mut isfx[0], 200);
+            self.emit_cstr(&isfx[0]);
+        }
         self.emit_method_targs(id, emd);
         self.emit_str("(");
         self.emit_call_args(args);
@@ -3997,6 +4002,9 @@ extend Codegen {
             );
         }
         self.emit_ident_mod(md.module, unsafe (*ma).at_const(md.node).as_data.function.name);
+        let mut isfx = Buf256 {};
+        self.cg_iface_suffix(md.module, md.node, &mut isfx[0], 200);
+        self.emit_cstr(&isfx[0]);
         self.emit_method_targs(id, md);
         self.emit_str("(");
         let mut wrote = false;
@@ -9105,6 +9113,130 @@ extend Codegen {
         return n;
     }
 
+    // The extend block that owns method `mnode` in module `mmod`, or NODE_NONE.
+    fn cg_owning_extend(self: &Self, mmod: ModuleId, mnode: NodeId) NodeId {
+        let a = self.mod_ast(mmod);
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe (*a).list(items)[i as usize];
+            if unsafe (*a).at_const(iid).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+            for j in 0..ms.len {
+                if unsafe (*a).list(ms)[j as usize] == mnode {
+                    return iid;
+                }
+            }
+        }
+        return NODE_NONE;
+    }
+
+    // How many extends of (tmod, tdecl) define a method named `name`? Mirrors cg_conv_count's
+    // two-module scan (the target's module and the current one) -- the established compromise for
+    // overload counting without a package-wide walk.
+    fn cg_method_overload_count(self: &Self, tmod: ModuleId, tdecl: NodeId, name: tok::Span, nmod: ModuleId) i32 {
+        let mut n: i32 = 0;
+        let cur = self.cur_module();
+        let ns = if tmod == cur {
+            1;
+        } else {
+            2;
+        };
+        for s in 0..ns {
+            let m = if s == 0 {
+                tmod;
+            } else {
+                cur;
+            };
+            let a = self.mod_ast(m);
+            let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe (*a).list(items)[i as usize];
+                let it = unsafe (*a).at_const(iid);
+                if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.target_type == NODE_NONE {
+                    continue;
+                }
+                let tg = unsafe (*a).resolution_def(it.as_data.extend_def.target_type);
+                if tg.module != tmod || tg.node != tdecl {
+                    continue;
+                }
+                let ms = it.as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid = unsafe (*a).list(ms)[j as usize];
+                    let mn = unsafe (*a).at_const(mid);
+                    if mn.kind == NodeKind::NODE_FUNCTION && spans_eq2(
+                        self.mod_src(nmod),
+                        name,
+                        self.mod_src(m),
+                        unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text,
+                    ) {
+                        n = n + 1;
+                    }
+                }
+            }
+        }
+        return n;
+    }
+
+    // One C symbol per DEFINITION when several extends of one target define the same method name
+    // through different interface instantiations (`extend X as Conv<i32>` and `as Conv<bool>` both
+    // provide `conv`): a conformance method's symbol then carries its interface name and type
+    // arguments. Collision-conditional, so existing single-conformance symbols are untouched;
+    // `from`/`try_from` keep their param-derived suffix (cg_conv_suffix), which already disambiguates
+    // them and is baked into existing symbols.
+    fn cg_iface_suffix(self: &mut Self, mmod: ModuleId, mnode: NodeId, out: *mut char, cap: usize) {
+        if cap != 0 {
+            unsafe out[0] = 0 as char;
+        }
+        let ext = self.cg_owning_extend(mmod, mnode);
+        if ext == NODE_NONE {
+            return;
+        }
+        let a = self.mod_ast(mmod);
+        let ity = unsafe (*a).at_const(ext).as_data.extend_def.interface_type;
+        if ity == NODE_NONE {
+            return;
+        }
+        let name = unsafe (*a).at_const(unsafe (*a).at_const(mnode).as_data.function.name).as_data.name.text;
+        if self.cg_conv_lit(mmod, name) != null {
+            return;
+        }
+        let tg = unsafe (*a).resolution_def(unsafe (*a).at_const(ext).as_data.extend_def.target_type);
+        if tg.node == NODE_NONE || self.cg_method_overload_count(tg.module, tg.node, name, mmod) < 2 {
+            return;
+        }
+        let tr = unsafe (*a).resolution_def(ity);
+        if tr.node == NODE_NONE {
+            return;
+        }
+        let mut at = bappend(out, cap, 0, "__".ptr() as *const char);
+        at = at + render_ident_src(
+            self.mod_src(tr.module),
+            self.name_span_in(tr.module, unsafe (*self.mod_ast(tr.module)).at_const(tr.node).as_data.interface_def.name),
+            unsafe (out + at),
+            cap - at,
+        );
+        if unsafe (*a).at_const(ity).kind != NodeKind::NODE_TYPE_PATH {
+            return;
+        }
+        let args = unsafe (*a).at_const(ity).as_data.type_path.args;
+        for i in 0..args.len {
+            let aid = unsafe (*a).list(args)[i as usize];
+            if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                continue;
+            }
+            let t = unsafe (*a).type_of(aid);
+            if t == TYPE_NONE {
+                continue;
+            }
+            at = bappend(out, cap, at, "__".ptr() as *const char);
+            let mut e = Buf176 {};
+            self.mangle_type(self.subst_resolve(t), &mut e[0], 176);
+            at = bappend(out, cap, at, &e[0]);
+        }
+    }
+
     fn cg_conv_suffix(self: &mut Self, target: DefId, lit: *const char, srcTy: TypeId, out: *mut char, cap: usize) {
         if cap != 0 {
             unsafe out[0] = 0 as char;
@@ -9203,6 +9335,8 @@ extend Codegen {
             let p0 = unsafe (*self.cur_ast()).list(params)[0];
             let p0ty = unsafe (*self.cur_ast()).type_of(unsafe (*self.cur_ast()).at_const(p0).as_data.parameter.ty);
             self.cg_conv_suffix(target, lit, p0ty, unsafe (out + k), cap - k);
+        } else if target.node != NODE_NONE {
+            self.cg_iface_suffix(self.cur_module(), fn_id, unsafe (out + k), cap - k);
         }
     }
 

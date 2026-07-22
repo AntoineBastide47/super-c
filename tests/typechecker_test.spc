@@ -2009,6 +2009,26 @@ fn aggregate_value_arg_regions() {
     );
 }
 
+// Multiple conformances of ONE generic interface at different arguments -- `extend X as Conv<i32>`
+// and `extend X as Conv<bool>` both providing `conv`. Both must genuinely work: each definition gets
+// its own C symbol (the interface instantiation is mangled in, collision-conditionally, so existing
+// single-conformance symbols are byte-identical), and the call site resolves by the EXPECTED type
+// when the first-found candidate's return does not fit. Before this, the two definitions collided as
+// one duplicate C symbol and resolution silently took whichever extend was declared first.
+@test
+fn multi_conformance_overloads() {
+    h::expect_exit(
+        "both conformances callable, selected by expected type",
+        "interface Conv<T> { fn conv(self: &Self) T; }\nstruct X { pub v: i32 }\nextend X as Conv<bool> { pub fn conv(self: &Self) bool { return self.v != 0; } }\nextend X as Conv<i32> { pub fn conv(self: &Self) i32 { return self.v; } }\nfn main() i32 {\n    let x = X { v: 3 };\n    let n: i32 = x.conv();\n    let b: bool = x.conv();\n    if b { return n - 3; }\n    return 1;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "declaration order does not decide which conformance a typed use gets",
+        "interface Conv<T> { fn conv(self: &Self) T; }\nstruct X { pub v: i32 }\nextend X as Conv<i32> { pub fn conv(self: &Self) i32 { return self.v; } }\nextend X as Conv<bool> { pub fn conv(self: &Self) bool { return self.v != 0; } }\nfn main() i32 {\n    let b: bool = x_make().conv();\n    let n: i32 = x_make().conv();\n    if b { return n - 3; }\n    return 1;\n}\nfn x_make() X { return X { v: 3 }; }\n",
+        0,
+    );
+}
+
 // Higher-ranked bounds and lifetime-parameterised associated types, semantically. An HRTB fn value
 // works for EVERY lifetime, so calls at different scopes are fine while a result borrowing a local
 // still cannot escape -- the existing region machinery composes with the ranking. An interface's

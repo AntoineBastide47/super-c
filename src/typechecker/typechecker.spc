@@ -2821,6 +2821,96 @@ extend TypeChecker {
     fn find_method(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span) DefId {
         return self.find_method_impl(m, decl, name, "");
     }
+
+    // Every method named `name` on (m, decl) across the extend scopes -- the un-memoized collector
+    // behind overload disambiguation. Only runs when a first candidate's return type did not fit the
+    // expected type, so the common single-candidate path never pays for it.
+    fn find_method_all(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, out: *mut DefId, cap: i32) i32 {
+        let ni = self.ext_scopes();
+        let mut nout: i32 = 0;
+        let mut s: i32 = -1;
+        while s < ni {
+            let mut mm = m;
+            if s >= 0 {
+                mm = self.ext_scope_at(s);
+            }
+            if s >= 0 && mm == m {
+                s = s + 1;
+                continue;
+            }
+            self.ensure_ext_items(mm);
+            let a = self.mod_ast(mm);
+            let ne = self.ext_items_len(mm);
+            for i in 0..ne {
+                let iid = self.ext_items_at(mm, i);
+                let it = unsafe (*a).at_const(iid);
+                if it.as_data.extend_def.target_type == NODE_NONE {
+                    continue;
+                }
+                let tg = self.tc_peel_target(unsafe (*a).resolution_def(it.as_data.extend_def.target_type));
+                if tg.module != m || tg.node != decl {
+                    continue;
+                }
+                let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid = unsafe (*a).list(ms)[j as usize];
+                    let mn = unsafe (*a).at_const(mid);
+                    if mn.kind != NodeKind::NODE_FUNCTION || mm != self.ast.module && !mn.as_data.function.is_public {
+                        continue;
+                    }
+                    if spans_eq2(
+                        self.source,
+                        name,
+                        self.mod_src(mm),
+                        unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text,
+                    ) && nout < cap {
+                        unsafe out[nout as usize] = DefId { module: mm, node: mid };
+                        nout = nout + 1;
+                    }
+                }
+            }
+            s = s + 1;
+        }
+        return nout;
+    }
+
+    // Several extends may define the same method name through different interface conformances
+    // (`extend X as Conv<i32>` and `as Conv<bool>` both provide `conv`). find_method is memoized by
+    // (target, name) and yields whichever is found first; when the EXPECTED type at this use is known
+    // and that first candidate's return does not produce it while another candidate's does, resolve to
+    // the one that fits. With no expected type the first candidate stands, as before.
+    fn tc_pick_method_overload(
+        self: &mut Self,
+        m: ModuleId,
+        decl: NodeId,
+        name: tok::Span,
+        first: DefId,
+        recv: TypeId,
+        want: TypeId,
+    ) DefId {
+        if first.node == NODE_NONE || want == TYPE_NONE || recv == TYPE_NONE {
+            return first;
+        }
+        if self.tc_method_ret(self.strip(recv), first) == want {
+            return first;
+        }
+        let mut cands = Defs8 {};
+        let n = self.find_method_all(m, decl, name, (&cands[0]) as *mut DefId, 8);
+        if n < 2 {
+            return first;
+        }
+        for i in 0..n {
+            let c = cands[i as usize];
+            if c.module == first.module && c.node == first.node {
+                continue;
+            }
+            if self.tc_method_ret(self.strip(recv), c) == want {
+                self.tc_mark_method_used(c);
+                return c;
+            }
+        }
+        return first;
+    }
     fn find_method_cstr(self: &mut Self, m: ModuleId, decl: NodeId, lit: str) DefId {
         return self.find_method_impl(m, decl, tok::Span::empty(), lit);
     }
@@ -8714,14 +8804,21 @@ extend TypeChecker {
                 fhit = self.find_member_cstr(bmod, bdecl, diag::cstr(&fld[0]));
             }
             if fhit == NODE_NONE && prefer_method {
-                mhit = self.find_method(bmod, bdecl, name);
+                mhit = self.tc_pick_method_overload(bmod, bdecl, name, self.find_method(bmod, bdecl, name), base, want);
                 if mhit.node == NODE_NONE {
                     fhit = self.find_member(bmod, bdecl, name);
                 }
             } else if fhit == NODE_NONE {
                 fhit = self.find_member(bmod, bdecl, name);
                 if fhit == NODE_NONE {
-                    mhit = self.find_method(bmod, bdecl, name);
+                    mhit = self.tc_pick_method_overload(
+                        bmod,
+                        bdecl,
+                        name,
+                        self.find_method(bmod, bdecl, name),
+                        base,
+                        want,
+                    );
                 }
             }
             if mhit.node != NODE_NONE {
