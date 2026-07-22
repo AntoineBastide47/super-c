@@ -6672,6 +6672,79 @@ extend TypeChecker {
                 );
             }
         }
+        // Owner (extend) generics for a static/associated call: a constructor like `Box::new(w)` calls
+        // `new`, which has NO generics of its own -- `T`/`A` belong to `extend<T, A> Box<T, A>`. The
+        // function-generic pass above therefore binds nothing, and no receiver instance supplies the
+        // owner args (nrsub == 0). Infer them from the arguments the way function-own generics are, then
+        // fill any that remain with the extend's declared defaults (e.g. `A = Global`). Result and
+        // parameter types below are substituted through rsubp/rsuba, so `T` resolves to the argument's
+        // concrete type and `Box<T>` coerces to `Box<dyn I>` at the use site -- no turbofish needed.
+        if nrsub == 0 && named && fdecl != NODE_NONE && args.len == params.len - skip {
+            let extnode = self.enclosing_extend(fmod, fdecl);
+            if extnode != NODE_NONE {
+                let ig = unsafe (*fa).at_const(extnode).as_data.extend_def.generics;
+                let mut og = ig.len as i32;
+                if og > 8 {
+                    og = 8;
+                }
+                if og > 0 {
+                    // The owner type's own generic list (`struct Box<T, A = Global>`) supplies the
+                    // DEFAULTS, which the extend's re-declared `<T, A: Allocator + Default>` does not.
+                    let target = unsafe (*fa).at_const(extnode).as_data.extend_def.target_type;
+                    let sdef = self.tc_peel_target(unsafe (*fa).resolution_def(target));
+                    let mut sgens = NodeList { start: 0, len: 0 };
+                    if sdef.node != NODE_NONE {
+                        let sdn = unsafe (*self.mod_ast(sdef.module)).at_const(sdef.node);
+                        if sdn.kind == NodeKind::NODE_STRUCT || sdn.kind == NodeKind::NODE_ENUM {
+                            sgens = sdn.as_data.aggregate.generics;
+                        }
+                    }
+                    let mut oparams = Defs8 {};
+                    let mut obound = Tys8 {};
+                    for k in 0..og {
+                        oparams[k as usize] = DefId { module: fmod, node: unsafe (*fa).list(ig)[k as usize] };
+                        obound[k as usize] = TYPE_NONE;
+                    }
+                    for i in 0..args.len {
+                        let pid = unsafe (*fa).list(params)[(i + skip) as usize];
+                        self.unify_infer(
+                            self.decl_type_in(fmod, pid),
+                            unsafe (*a).type_of(unsafe (*a).list(args)[i as usize]),
+                            &oparams[0],
+                            &mut obound[0],
+                            og,
+                        );
+                    }
+                    let mut ia = Tys8 {};
+                    let mut ic: u8 = 0;
+                    for k in 0..og {
+                        let mut b = obound[k as usize];
+                        if b == TYPE_NONE && k as u32 < sgens.len {
+                            let dft = unsafe (*self.mod_ast(sdef.module)).at_const(
+                                unsafe (*self.mod_ast(sdef.module)).list(sgens)[k as usize],
+                            ).as_data.generic_param.default_type;
+                            if dft != NODE_NONE {
+                                b = self.lower_type_in(sdef.module, dft);
+                            }
+                        }
+                        if b != TYPE_NONE && nrsub < 8 {
+                            rsubp[nrsub as usize] = oparams[k as usize];
+                            rsuba[nrsub as usize] = b;
+                            nrsub = nrsub + 1;
+                            ia[ic as usize] = b;
+                            ic = ic + 1;
+                        }
+                    }
+                    // Make the inferred owner instance visible to codegen and monomorphization: give the
+                    // callee's type object the concrete instance type (`Box<W2, Global>`), exactly as an
+                    // explicit `Box::<W2>` turbofish would, so the static method is mangled and emitted.
+                    if ic > 0 && cn_kind == NodeKind::NODE_MEMBER && cn_path && sdef.node != NODE_NONE {
+                        let inst = unsafe (*self.cur_ast()).intern_instance(sdef.module, sdef.node, &ia[0], ic);
+                        unsafe (*self.cur_ast()).set_type(unsafe (*a).at_const(callee_id).as_data.member.object, inst);
+                    }
+                }
+            }
+        }
         // arity + arg compatibility
         let variadic = named && unsafe (*fa).at_const(fdecl).as_data.function.is_variadic;
         let expected = params.len - skip;

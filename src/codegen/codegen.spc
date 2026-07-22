@@ -10192,6 +10192,13 @@ extend Codegen {
         if it.module != self.cur_module() || !concrete {
             return;
         }
+        // An instance re-homed to a user-type argument's module is emitted THERE (via
+        // emit_rehomed_struct_dfs); emitting its body here as well duplicates the struct across
+        // compilation units. This surfaces on nested instances of the SAME owner (Box<Box<T>>), where
+        // the owner module also holds the inner instance -- see instance_home_in / inst_rehomed_here.
+        if self.package != null && unsafe (*self.package).instance_home(unsafe &*self.cur_ast(), &it) != self.cur_module() {
+            return;
+        }
         unsafe state[idx as usize] = 1;
         let ag = unsafe (*self.cur_ast()).at_const(it.decl).as_data.aggregate;
         let dk = unsafe (*self.cur_ast()).at_const(it.decl).kind;
@@ -10779,6 +10786,12 @@ extend Codegen {
                 }
             }
             if !concrete {
+                continue;
+            }
+            // Skip an instance re-homed to a user-type argument's module: its methods are emitted THERE
+            // (emit_rehomed_methods), so emitting them here too would duplicate them across units. Same
+            // rule as emit_inst_dfs for the struct body; both surface on nested Box<Box<T>>.
+            if self.package != null && unsafe (*self.package).instance_home(unsafe &*self.cur_ast(), &it) != self.cur_module() {
                 continue;
             }
             let itTy = unsafe (*self.cur_ast()).intern_instance(it.module, it.decl, &it.args[0], it.n);
