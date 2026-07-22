@@ -6333,6 +6333,25 @@ extend TypeChecker {
         }
         return true;
     }
+    // A type alias named `name` among an extend's items, or NODE_NONE.
+    fn tc_find_extend_alias(self: &Self, extnode: NodeId, name: tok::Span, nmod: ModuleId) NodeId {
+        let a = self.cur_ast();
+        let have = unsafe (*a).at_const(extnode).as_data.extend_def.items;
+        for j in 0..have.len {
+            let hid = unsafe (*a).list(have)[j as usize];
+            let hm = unsafe (*a).at_const(hid);
+            if hm.kind == NodeKind::NODE_TYPE_ALIAS && spans_eq2(
+                self.mod_src(nmod),
+                name,
+                self.source,
+                unsafe (*a).at_const(hm.as_data.type_alias.name).as_data.name.text,
+            ) {
+                return hid;
+            }
+        }
+        return NODE_NONE;
+    }
+
     fn check_interface_requirements(
         self: &mut Self,
         extnode: NodeId,
@@ -6354,6 +6373,45 @@ extend TypeChecker {
         for i in 0..req.len {
             let rid = unsafe (*ia).list(req)[i as usize];
             let rm = unsafe (*ia).at_const(rid);
+            // An ASSOCIATED TYPE requirement (`type Item<'a>;` -- no definition). The impl must
+            // provide it with the same lifetime and type-generic arity: the interface's declared
+            // shape is a contract even though lifetimes are erased from the interned types.
+            if rm.kind == NodeKind::NODE_TYPE_ALIAS && rm.as_data.type_alias.ty == NODE_NONE {
+                let rn = unsafe (*ia).at_const(rm.as_data.type_alias.name).as_data.name.text;
+                let hm = self.tc_find_extend_alias(extnode, rn, iface.module);
+                let at = unsafe (*self.cur_ast()).at_const(
+                    unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type,
+                ).span;
+                if hm == NODE_NONE {
+                    self.errors.emit(
+                        at.start,
+                        at.end - at.start,
+                        format(
+                            "missing associated type '{}' required by this interface",
+                            diag::span_str(self.mod_src(iface.module), rn.start, rn.end),
+                        ),
+                    );
+                } else {
+                    let want_lt = unsafe (*ia).lifetimes_of(rid).len;
+                    let have_lt = unsafe (*self.cur_ast()).lifetimes_of(hm).len;
+                    let want_g = rm.as_data.type_alias.generics.len;
+                    let have_g = unsafe (*self.cur_ast()).at_const(hm).as_data.type_alias.generics.len;
+                    if want_lt != have_lt || want_g != have_g {
+                        let hat = unsafe (*self.cur_ast()).at_const(hm).span;
+                        self.errors.emit(
+                            hat.start,
+                            hat.end - hat.start,
+                            format(
+                                "associated type '{}' does not match the interface: it declares {} lifetime and {} type parameter(s)",
+                                diag::span_str(self.mod_src(iface.module), rn.start, rn.end),
+                                want_lt,
+                                want_g,
+                            ),
+                        );
+                    }
+                }
+                continue;
+            }
             if rm.kind == NodeKind::NODE_FUNCTION && rm.as_data.function.body == NODE_NONE {
                 let rn = unsafe (*ia).at_const(rm.as_data.function.name).as_data.name.text;
                 let hm = self.find_extend_item_named(extnode, rn, iface.module);
