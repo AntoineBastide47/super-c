@@ -95,6 +95,8 @@ pub struct Package {
     // old path_exists even under case-insensitive filesystems).
     pub dir_cache: DirCache,
     pub lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
+    pub lint_errs: u32, // total errors across the lint pipeline stages
+    pub lint_fixable: u32, // errors carrying a machine fix; `lint --fix` proceeds when lint_errs == lint_fixable
     // In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     // overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
     // (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
@@ -115,6 +117,13 @@ pub struct ParseResult {
     pub ast: Ast,
     pub ok: bool,
     pub tokens: Vector<tok::Token>, // handed back for capacity recycling (Package.tok_scratch)
+}
+
+extend ParseResult as Free {
+    pub fn free(self: &mut Self) {
+        self.ast.free();
+        self.tokens.free();
+    }
 }
 
 // The bytes of a file plus their length; `ptr == null` signals any I/O error (mirrors read_file's NULL).
@@ -540,10 +549,16 @@ extend Package {
         let mut tsc = self.tok_scratch;
         self.tok_scratch = Vector::<tok::Token>::new();
         tsc.clear();
-        let parsed = parse_source(&mut source, file_path, bootstrap_tags, tsc);
-        self.tok_scratch = parsed.tokens;
+        let mut parsed = parse_source(&mut source, file_path, bootstrap_tags, tsc);
+        self.tok_scratch = replace(&mut parsed.tokens, Vector::<tok::Token>::new());
         let ok = parsed.ok;
-        let id = self.add_module(String::from_str(mod_path), String::from_str(file_path), source, parsed.ast, ok);
+        let id = self.add_module(
+            String::from_str(mod_path),
+            String::from_str(file_path),
+            source,
+            replace(&mut parsed.ast, Ast::new(0)),
+            ok,
+        );
         if !ok {
             self.ok = false;
             return id;
@@ -1860,9 +1875,15 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     }
     load_prelude(&mut p, std_dir);
     let mut source = String::from_str(str::from_raw(src as *const u8, len));
-    let parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
+    let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
     let ok = parsed.ok;
-    let id = p.add_module(String::from_str("main"), String::from_str("<harness>"), source, parsed.ast, ok);
+    let id = p.add_module(
+        String::from_str("main"),
+        String::from_str("<harness>"),
+        source,
+        replace(&mut parsed.ast, Ast::new(0)),
+        ok,
+    );
     if ok {
         p.modules[id as usize].ast.module = id as ModuleId;
     } else {

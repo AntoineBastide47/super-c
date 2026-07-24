@@ -199,7 +199,7 @@ const fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
 // Apply machine fixes ascending: kind 0 deletes [start, end), kind 1 inserts '_' before start,
 // kind 2 inserts 'const ' before start. An overlapping fix is skipped -- the next `--fix` re-lint
 // pass records it against the patched source.
-fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>) String {
+fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<String>) String {
     fixes.sort_by(lint_fix_cmp);
     let mut out = String::new();
     out.reserve(src.len() + fixes.len());
@@ -215,6 +215,11 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>) String {
             pos = f.start as usize;
         } else if f.kind == 2 {
             out.push_str("const ");
+            pos = f.start as usize;
+        } else if f.kind == 3 {
+            if f.text as usize < texts.len() {
+                out.push_str(texts.at(f.text as usize).as_str());
+            }
             pos = f.start as usize;
         } else {
             pos = f.end as usize;
@@ -239,7 +244,9 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
     // loading it as a root would invent errors. Load an empty root -- the prelude comes along as
     // always -- and if the requested file IS one of those modules, lint it in place.
     // `--fix`: quiet fixpoint loop (re-lint after each write, capped) that REJECTS -- writes nothing --
-    // if the package has any error; a final plain pass prints what remains and sets the exit code.
+    // if the package has any error a machine fix cannot repair (when EVERY error carries a fix, e.g.
+    // the generated-Free leak fix, applying is the way out); a final plain pass prints what remains
+    // and sets the exit code.
     let mut pass = 0;
     loop {
         let mut pathc = String::from_str(path);
@@ -268,16 +275,17 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
         p.ceval = &mut ceval;
         if !fix {
-            let rc = lint_package(&mut p, target, lint_mod, null, sc);
+            let rc = lint_package(&mut p, target, lint_mod, null, null, sc);
             return rc;
         }
         let mut fixes = Vector::<diag::LintFix>::new();
-        lint_package(&mut p, target, lint_mod, &mut fixes, sc);
-        let errors = !p.ok;
+        let mut ftexts = Vector::<String>::new();
+        lint_package(&mut p, target, lint_mod, &mut fixes, &mut ftexts, sc);
+        let errors = !p.ok && !(p.lint_errs != 0 && p.lint_errs == p.lint_fixable);
         let mut applied = false;
         let mut werr = false;
         if !errors && fixes.len() != 0 && pass < 8 {
-            let out = apply_lint_fixes(p.modules[lint_mod].source.as_str(), &mut fixes);
+            let out = apply_lint_fixes(p.modules[lint_mod].source.as_str(), &mut fixes, &ftexts);
             let f = stdio::fopen(p.modules[lint_mod].file.as_str(), "wb");
             if f == null {
                 eprintln("lint: cannot write '{}'", path);

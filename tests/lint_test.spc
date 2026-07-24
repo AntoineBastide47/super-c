@@ -104,6 +104,43 @@ fn const_suggestion_lint() {
     assert(!fixed.as_str().contains("const const")); // `already` was const before the fix
 }
 
+// The leak check is ON BY DEFAULT and an ERROR: a struct with no Free conformance whose fields own
+// memory is copyable, so nothing ever frees those fields. Structs with a Free impl and structs
+// holding only borrows (pointer/reference fields) are exempt. `--fix` inserts the generated
+// `extend X as Free` impl and re-lints to a clean fixpoint.
+@test
+fn missing_free_lint() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct Leaky {\n    pub s: String,\n    pub n: i32,\n}\n\nstruct Fine {\n    pub s: String,\n}\n\nextend Fine as Free {\n    pub fn free(self: &mut Fine) {\n        self.s.free();\n    }\n}\n\nstruct View {\n    pub p: *const String,\n    pub r: usize,\n}\n\nfn main() i32 {\n    let l = Leaky { s: String::from_str(\"x\"), n: 1 };\n    let f = Fine { s: String::from_str(\"y\") };\n    let v = View { p: &f.s, r: 0 };\n    let k = l.s.len() + f.s.len() + l.n as usize + v.r + unsafe (*v.p).len();\n    return (k - 4) as i32;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut dargs = String::from_str("lint '");
+    dargs.push_str(root);
+    dargs.push_str("/main.spc'");
+    let d = p.run_raw(dargs.as_str());
+    assert(d.exit != 0); // error-level, no opt-in flag
+    assert(d.out_has("error: 'Leaky' has owning fields ('s') but no 'free'"));
+    assert(d.out_has("add an 'extend Leaky as Free'"));
+    assert(!d.out_has("'Fine' has owning fields"));
+    assert(!d.out_has("'View' has owning fields"));
+
+    // --fix inserts the generated impl; the re-lint fixpoint then passes
+    let mut fargs = String::from_str("lint --fix '");
+    fargs.push_str(root);
+    fargs.push_str("/main.spc'");
+    let fx = p.run_raw(fargs.as_str());
+    assert_eq(fx.exit, 0);
+    let mut mp = String::from_str(root);
+    mp.push_str("/main.spc");
+    let fixed = loader::read_file(mp.as_str()).unwrap();
+    assert(fixed.as_str().contains("extend Leaky as Free"));
+    assert(fixed.as_str().contains("self.s.free();"));
+    let d2 = p.run_raw(dargs.as_str());
+    assert_eq(d2.exit, 0);
+}
+
 // The local-analysis lints: unnecessary `mut`, back-to-back dead stores, unused loop labels,
 // unreachable statements after a diverging one, unreachable arms after a catch-all, and the
 // cancelling `*&` / `&*` operator pairs. `--fix` deletes `mut ` and the operator pairs; the

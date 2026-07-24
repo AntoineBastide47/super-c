@@ -202,6 +202,22 @@ extend Proj {
         return exec(&base[0], &op[0]);
     }
 
+    // Run the linked <root>/bin with `env` ("VAR=v " assignments, trailing space; a literal) prefixed,
+    // capturing its exit code and output.
+    pub fn run_bin_env(self: &Proj, env: str) CliResult {
+        let mut base = Path512 {};
+        unsafe stdio::snprintf(
+            &mut base[0],
+            512,
+            "%s'%s/bin'".ptr() as *const char,
+            env.ptr() as *const char,
+            self.rootp(),
+        );
+        let mut op = Path512 {};
+        unsafe stdio::snprintf(&mut op[0], 512, "%s/.runout".ptr() as *const char, self.rootp());
+        return exec(&base[0], &op[0]);
+    }
+
     // Run the linked <root>/bin and return its exit code.
     pub fn run_bin(self: &Proj) i32 {
         let mut base = Path512 {};

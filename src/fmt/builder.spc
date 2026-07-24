@@ -27,6 +27,12 @@ pub struct Builder<'a> {
     pub emitted_trivia: usize, // comment segments emitted (attrs are separate and not counted)
 }
 
+extend Builder as Free {
+    pub fn free(self: &mut Self) {
+        self.p.free();
+    }
+}
+
 const fn nd(b: &Builder, id: NodeId) Node {
     return *unsafe (*b.ast).at_const(id);
 }

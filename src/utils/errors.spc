@@ -3,15 +3,17 @@ import string;
 
 pub const ERRORS_MAX: usize = 256;
 
-// A machine-applicable fix for a lint warning: kind 0 deletes [start, end); kind 1 inserts '_'
+// A machine-applicable fix for a lint diagnostic: kind 0 deletes [start, end); kind 1 inserts '_'
 // before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
-// suggestion). Collected alongside `warn` and applied by `lint --fix`; `warn` indexes the warning
-// it repairs (the LSP turns these into quick fixes).
+// suggestion); kind 3 inserts `fix_texts[text]` before `start` (generated code, e.g. a Free impl).
+// Collected alongside `warn` and applied by `lint --fix`; `warn` indexes the warning it repairs
+// (the LSP turns those into quick fixes; error-attached kind-3 fixes stay CLI-only).
 pub struct LintFix {
     pub start: u32,
     pub end: u32,
     pub kind: u8,
     pub warn: u32, // index into `warns`; 0xFFFFFFFF = unattached
+    pub text: u32, // index into `fix_texts` (kind 3); 0xFFFFFFFF = none
 }
 
 pub struct Errors {
@@ -23,6 +25,8 @@ pub struct Errors {
     pub warn_starts: Vector<u32>,
     pub warn_lens: Vector<u32>,
     pub fixes: Vector<LintFix>,
+    pub fix_texts: Vector<String>, // generated insertion payloads for kind-3 fixes
+    pub fixable_errs: u32, // errors carrying a machine fix -- `lint --fix` may proceed when EVERY error is fixable
 }
 
 pub fn oom() {
@@ -52,6 +56,8 @@ extend Errors {
             warn_starts: Vector::<u32>::new(),
             warn_lens: Vector::<u32>::new(),
             fixes: Vector::<LintFix>::new(),
+            fix_texts: Vector::<String>::new(),
+            fixable_errs: 0,
         };
     }
 
@@ -82,7 +88,17 @@ extend Errors {
         if self.warns.len() != 0 {
             w = (self.warns.len() - 1) as u32;
         }
-        self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: w });
+        self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: w, text: 0xFFFFFFFF });
+    }
+
+    // Attach a generated-code insertion fix to the ERROR just emitted (kind 3): `text` is inserted
+    // before `start` by `lint --fix`. Errors with such a fix count as machine-fixable.
+    @c.cold
+    pub fn fix_insert(self: &mut Self, start: u32, text: String) {
+        let t = self.fix_texts.len() as u32;
+        self.fix_texts.push(text);
+        self.fixes.push(LintFix { start: start, end: start, kind: 3, warn: 0xFFFFFFFF, text: t });
+        self.fixable_errs = self.fixable_errs + 1;
     }
 
     // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
@@ -245,6 +261,7 @@ extend Errors as Free {
         self.warn_starts.free();
         self.warn_lens.free();
         self.fixes.free();
+        self.fix_texts.free();
     }
 }
 

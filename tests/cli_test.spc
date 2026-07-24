@@ -385,7 +385,7 @@ fn raii_drop_on_field_assign() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "struct Holder {\n    pub name: String,\n}\n\nfn take_name(h: &mut Holder) String {\n    let t = h.name;\n    h.name = String::new();\n    return t;\n}\n\nfn main() i32 {\n    let mut h = Holder { name: String::from_str(\"first\") };\n    let mut n: usize = 0;\n    for _i in 0..3 {\n        h.name = String::from_str(\"abcdefgh\");\n        n = n + h.name.len();\n    }\n    let taken = take_name(&mut h);\n    n = n + taken.len();\n    return n as i32 - 32;\n}\n",
+        "struct Holder {\n    pub name: String,\n}\n\nextend Holder as Free {\n    pub fn free(self: &mut Holder) {\n        self.name.free();\n    }\n}\n\nfn take_name(h: &mut Holder) String {\n    let t = h.name;\n    h.name = String::new();\n    return t;\n}\n\nfn main() i32 {\n    let mut h = Holder { name: String::from_str(\"first\") };\n    let mut n: usize = 0;\n    for _i in 0..3 {\n        h.name = String::from_str(\"abcdefgh\");\n        n = n + h.name.len();\n    }\n    let taken = take_name(&mut h);\n    n = n + taken.len();\n    return n as i32 - 32;\n}\n",
     );
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
@@ -394,11 +394,11 @@ fn raii_drop_on_field_assign() {
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
 
-    // a field moved out ANYWHERE in the body (even conditionally) suppresses the assign-free for
-    // that place -- suppression may only leak, never double-free the moved-out value
+    // a field moved out ANYWHERE in the body (even conditionally) guards the assign-free for that
+    // place -- the take goes through the &mut-reference gap (an owned partial move is rejected)
     p.mkfile(
         "cond.spc",
-        "struct H {\n    pub name: String,\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let mut h = H { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let mut n: usize = 0;\n    if h.name.len() > 3 {\n        let a = h.name;\n        n = n + sink(a);\n    }\n    h.name = String::from_str(\"next\");\n    n = n + h.name.len();\n    return n as i32 - 36;\n}\n",
+        "struct H {\n    pub name: String,\n}\n\nextend H as Free {\n    pub fn free(self: &mut H) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn shuffle(h: &mut H) usize {\n    let mut n: usize = 0;\n    if h.name.len() > 3 {\n        let a = h.name;\n        n = n + sink(a);\n    }\n    h.name = String::from_str(\"next\");\n    return n + h.name.len();\n}\n\nfn main() i32 {\n    let mut h = H { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let n = shuffle(&mut h);\n    return n as i32 - 36;\n}\n",
     );
     let c2 = p.compile("cond.spc");
     assert_eq(c2.exit, 0);
@@ -436,6 +436,43 @@ fn raii_free_glue_untouched_fields() {
     let cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
+}
+
+// The self-hosted leak tracker: super_rt.h interposes the emitted code's malloc/realloc/free call
+// sites over super_rt.c's registry, gated at runtime by SC_LEAK_CHECK. A survivor (here a raw
+// extern-malloc'd block nothing frees) is reported at exit with its byte count; leak-free runs and
+// disabled runs print nothing.
+@test
+fn leak_tracker() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" {\n    fn malloc(n: usize) *mut void;\n}\n\nfn main() i32 {\n    let p = unsafe malloc(64);\n    return (p == null) as i32;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_exists("super_rt.c"), "tracker runtime is written");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let lk = p.run_bin_env("SC_LEAK_CHECK=1 ");
+    assert_eq(lk.exit, 0);
+    assert(lk.out_has("super-c leaks: 1 allocation"), "survivor reported at exit");
+    let off = p.run_bin_env("SC_LEAK_CHECK=0 "); // =0 disables even when the suite itself runs traced
+    assert_eq(off.exit, 0);
+    assert(!off.out_has("super-c leaks"), "inert when disabled");
+
+    let q = cli::proj_new();
+    q.mkfile(
+        "main.spc",
+        "fn main() i32 {\n    let mut v = Vector::<String>::new();\n    v.push(String::from_str(\"owned and freed\"));\n    v.push(String::from_str(\"also freed\"));\n    return (v.len() - 2) as i32;\n}\n",
+    );
+    let r2 = q.compile("main.spc");
+    assert_eq(r2.exit, 0);
+    let cc2 = q.cc_build("");
+    assert_eq(cc2.exit, 0);
+    let ok = q.run_bin_env("SC_LEAK_CHECK=1 ");
+    assert_eq(ok.exit, 0);
+    assert(!ok.out_has("super-c leaks"), "leak-free run reports nothing");
 }
 
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
@@ -503,6 +540,9 @@ fn test_pipeline() {
     p.mkfile(
         "env.spc",
         r#"pub struct Env { pub tag: String }
+extend Env as Free {
+  pub fn free(self: &mut Env) { self.tag.free(); }
+}
 @test_init(global)
 fn suite() Env { return Env { tag: String::from_str("suite") }; }
 @test_free(global)
@@ -513,6 +553,9 @@ fn suite_down(env: &mut Env) { eprintln("teardown {}", env.tag.as_str()); }
         "main.spc",
         r#"import env;
 struct Fx { pub v: Vector<i32> }
+extend Fx as Free {
+  pub fn free(self: &mut Fx) { self.v.free(); }
+}
 @test_init
 fn setup() Fx { let mut v = Vector::<i32>::new(); v.push(1); v.push(2); return Fx { v: v }; }
 @test

@@ -224,6 +224,7 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
         r.log_errors();
     }
     p.lint_warnings = p.lint_warnings + r.errors.warns.len() as u32;
+    p.lint_errs = p.lint_errs + r.errors.errors.len() as u32;
     if fixes != null {
         for k in 0..r.errors.fixes.len() {
             unsafe (*fixes).push(r.errors.fixes[k]);
@@ -234,7 +235,13 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     return !had;
 }
 
-fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vector<diag::LintFix>) bool {
+fn typecheck_module(
+    p: &mut loader::Package,
+    i: usize,
+    lint: bool,
+    fixes: *mut Vector<diag::LintFix>,
+    ftexts: *mut Vector<String>,
+) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
@@ -253,9 +260,26 @@ fn typecheck_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut V
         t.log_errors();
     }
     p.lint_warnings = p.lint_warnings + t.errors.warns.len() as u32;
+    p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
+    p.lint_fixable = p.lint_fixable + t.errors.fixable_errs;
     if fixes != null {
+        // kind-3 fixes index into the caller's shared fix_texts pool: rebase and copy the payloads
+        let base = if ftexts != null {
+            (unsafe (*ftexts).len()) as u32;
+        } else {
+            0u32;
+        };
         for k in 0..t.errors.fixes.len() {
-            unsafe (*fixes).push(t.errors.fixes[k]);
+            let mut f = t.errors.fixes[k];
+            if f.text != 0xFFFFFFFF {
+                f.text = f.text + base;
+            }
+            unsafe (*fixes).push(f);
+        }
+        if ftexts != null {
+            for k in 0..t.errors.fix_texts.len() {
+                unsafe (*ftexts).push(t.errors.fix_texts.at(k).clone());
+            }
         }
     }
     let back = t.take_ast();
@@ -279,6 +303,7 @@ fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     p.override_mod = 0xFFFF;
     p.override_ast = null;
     let had = t.has_errors();
+    p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
     if had {
         t.log_errors();
     }
@@ -1188,6 +1213,7 @@ pub fn lint_package(
     target: i32,
     lint_mod: usize,
     fixes: *mut Vector<diag::LintFix>,
+    ftexts: *mut Vector<String>,
     suggest_const: bool,
 ) i32 {
     platform_filter(p, target);
@@ -1210,7 +1236,7 @@ pub fn lint_package(
         } else {
             null;
         };
-        let ok = typecheck_module(p, i, i == lint_mod, fx);
+        let ok = typecheck_module(p, i, i == lint_mod, fx, ftexts);
         p.ok = ok && p.ok;
     }
     if !p.ok {
@@ -1258,7 +1284,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
         return 1;
     }
     for i in 0..n {
-        let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null);
+        let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null);
         p.ok = ok && p.ok;
     }
     if !p.ok {
@@ -1308,6 +1334,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     let root = p.gen_root.as_str();
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
+    keep.push(build_out_path(root, "super_rt", ".c"));
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
     ext_c_collect(p, &mut keep, &mut err);

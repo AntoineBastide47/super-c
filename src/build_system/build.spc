@@ -335,6 +335,15 @@ struct Pend {
     pub prev_ms: i64, // last recorded duration; longest-first scheduling shrinks the tail
 }
 
+extend Pend as Free {
+    pub fn free(self: &mut Self) {
+        self.cmd.free();
+        self.fp.free();
+        self.log.free();
+        self.cmdpath.free();
+    }
+}
+
 // Longest previous compile first, so the slowest unit never starts last.
 const fn pend_cmp(a: &Pend, b: &Pend) i32 {
     return if b.prev_ms > a.prev_ms {
@@ -353,6 +362,14 @@ struct Job {
     pub log: String,
     pub cmdpath: String,
     pub start: i64,
+}
+
+extend Job as Free {
+    pub fn free(self: &mut Self) {
+        self.fp.free();
+        self.log.free();
+        self.cmdpath.free();
+    }
 }
 
 // On success, persist fingerprint + duration; on failure, surface the captured compiler output.

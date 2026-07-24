@@ -3336,6 +3336,83 @@ extend TypeChecker {
             "Free",
         );
     }
+    // Leak check (lint, error-level): a struct with no Free conformance whose fields own memory
+    // (implement Free) is copyable, so nothing ever frees those fields -- every dropped value
+    // leaks them. One error per struct, carrying a generated `extend X as Free` insertion fix.
+    // Pointer/reference fields are borrows by rule (ownership is always spelled as a wrapper type
+    // with its own free) and are exempt. Non-generic structs only: a parameterized field's
+    // ownership is instance-dependent.
+    fn tc_lint_missing_free(self: &mut Self, id: NodeId) {
+        let a = self.cur_ast();
+        let sty = unsafe (*a).intern_type(
+            Ty { kind: TypeKind::TYPE_STRUCT, module: self.ast.module, as_data: TyAs { decl: id } },
+        );
+        if self.tc_type_is_free(sty) {
+            return;
+        }
+        let agg = unsafe (*a).at_const(id).as_data.aggregate;
+        let sname = unsafe (*a).at_const(agg.name).as_data.name.text;
+        let nm = diag::span_str(self.source, sname.start, sname.end);
+        let ms = agg.members;
+        let mut fields = String::new();
+        let mut body = String::new();
+        let mut fixable = true;
+        for i in 0..ms.len {
+            let fid = unsafe (*a).list(ms)[i as usize];
+            let fnd = unsafe (*a).at_const(fid);
+            if fnd.kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let ft = self.resolve_type(fnd.as_data.field.ty);
+            if ft == TYPE_NONE {
+                continue;
+            }
+            let fk = self.type_at(ft).kind;
+            if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
+                continue;
+            }
+            if !self.tc_type_is_free(ft) {
+                continue;
+            }
+            let fsp = unsafe (*a).at_const(fnd.as_data.field.name).as_data.name.text;
+            let fname = diag::span_str(self.source, fsp.start, fsp.end);
+            if fields.len() != 0 {
+                fields.push_str("', '");
+            }
+            fields.push_str(fname);
+            let c0 = if fsp.end > fsp.start {
+                self.source[fsp.start as usize];
+            } else {
+                0u8;
+            };
+            if !(c0 == b'_' || c0 >= b'a' && c0 <= b'z' || c0 >= b'A' && c0 <= b'Z') {
+                fixable = false; // positional (tuple-struct) fields: no textual `self.<f>.free()`
+            }
+            body.push_str("        self.");
+            body.push_str(fname);
+            body.push_str(".free();\n");
+        }
+        if fields.len() == 0 {
+            return;
+        }
+        self.errors.emit(
+            sname.start,
+            sname.end - sname.start,
+            format("'{}' has owning fields ('{}') but no 'free': dropped values leak them", nm, fields.as_str()),
+        );
+        self.errors.note(format("add an 'extend {} as Free' (or run 'lint --fix' to insert one)", nm));
+        if fixable {
+            let ins = format(
+                "\n\nextend {} as Free {{\n    pub fn free(self: &mut {}) {{\n{}    }}\n}}",
+                nm,
+                nm,
+                body.as_str(),
+            );
+            self.errors.fix_insert(unsafe (*a).at_const(id).span.end, ins);
+        }
+        fields.free();
+        body.free();
+    }
     fn tc_param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
         let a = self.mod_ast(m);
         let bs = unsafe (*a).at_const(gp).as_data.generic_param.bounds;
@@ -10012,6 +10089,9 @@ extend TypeChecker {
                         format("this type embeds itself by value, so it would have infinite size"),
                     );
                     self.errors.note(format("break the cycle with a pointer ('*mut T'), a reference, or 'Box<T>'"));
+                }
+                if self.lint && agg.generics.len == 0 && !agg.is_union {
+                    self.tc_lint_missing_free(id);
                 }
             },
             NODE_INTERFACE => {

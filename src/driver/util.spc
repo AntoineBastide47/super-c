@@ -194,7 +194,8 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
     let _ = unsafe shim::sc_closedir(d);
 }
 
-// The runtime header shared by every generated module: the C standard library includes.
+// The runtime header shared by every generated module (the C standard library includes plus the
+// leak-tracker interposition), and the tracker's implementation TU the engine compiles alongside.
 pub fn write_super_rt(gen_dir: str) {
     let path = build_out_path(gen_dir, "super_rt", ".h");
     let f = open_out(path.as_str());
@@ -203,5 +204,11 @@ pub fn write_super_rt(gen_dir: str) {
         unsafe stdio::fputs(cg::super_rt_includes(), f);
         unsafe stdio::fputs("#endif\n".ptr() as *const char, f);
         unsafe stdio::fclose(f);
+    }
+    let cpath = build_out_path(gen_dir, "super_rt", ".c");
+    let cf = open_out(cpath.as_str());
+    if cf != null {
+        unsafe stdio::fputs(cg::super_rt_source(), cf);
+        unsafe stdio::fclose(cf);
     }
 }

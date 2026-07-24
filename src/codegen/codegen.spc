@@ -151,6 +151,232 @@ static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n)
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
+/* leak tracker (super_rt.c): interposes the emitted code's malloc/realloc/free call sites.
+   Inert unless the SC_LEAK_CHECK environment variable is set. */
+void *sc_lk_malloc(size_t __n);
+void *sc_lk_realloc(void *__p, size_t __n);
+void sc_lk_free(void *__p);
+#define malloc(__n) sc_lk_malloc(__n)
+#define realloc(__p, __n) sc_lk_realloc(__p, __n)
+#define free(__p) sc_lk_free(__p)
+"#.ptr() as *const char;
+}
+
+// The leak-tracker runtime backing the `super_rt.h` interposition macros, written as `super_rt.c`
+// next to the header (the build engine compiles every `.c` in the generated tree). Runtime-gated by
+// the SC_LEAK_CHECK environment variable: when unset the hooks are a branch over the real calls;
+// when set, live allocations are recorded (with call stacks where <execinfo.h> exists) and the
+// survivors are reported to stderr at process exit, grouped by allocation stack. Every libc call is
+// spelled `(malloc)(...)`-parenthesized so the same text also compiles inlined after the macros.
+pub const fn super_rt_source() *const char {
+    return r#"/* super-c runtime: leak tracker (see super_rt.h). Generated; do not edit. */
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdint.h>
+#if defined(__has_include)
+#if __has_include(<execinfo.h>)
+#include <execinfo.h>
+#define SC_LK_BT 10
+#endif
+#endif
+void *sc_lk_malloc(size_t __n);
+void *sc_lk_realloc(void *__p, size_t __n);
+void sc_lk_free(void *__p);
+typedef struct {
+  void *ptr;
+  size_t size;
+  int nbt;
+#ifdef SC_LK_BT
+  void *bt[SC_LK_BT];
+#endif
+} sc_lk_ent;
+#define SC_LK_DEAD ((void *)(uintptr_t)1)
+static sc_lk_ent *sc_lk_tab;
+static size_t sc_lk_cap;   /* power of two */
+static size_t sc_lk_used;  /* live + tombstones */
+static size_t sc_lk_live;
+static size_t sc_lk_bytes;
+static volatile int sc_lk_lock;
+static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = on */
+static void sc_lk_acquire(void) {
+  while (__sync_lock_test_and_set(&sc_lk_lock, 1)) {}
+}
+static void sc_lk_release(void) { __sync_lock_release(&sc_lk_lock); }
+static size_t sc_lk_slot(const void *p, size_t cap) {
+  return (size_t)(((uintptr_t)p >> 4) * (uintptr_t)0x9E3779B97F4A7C15ULL) & (cap - 1);
+}
+static sc_lk_ent *sc_lk_find(void *p) {
+  if (sc_lk_cap == 0) return NULL;
+  size_t i = sc_lk_slot(p, sc_lk_cap);
+  while (sc_lk_tab[i].ptr != NULL) {
+    if (sc_lk_tab[i].ptr == p) return &sc_lk_tab[i];
+    i = (i + 1) & (sc_lk_cap - 1);
+  }
+  return NULL;
+}
+static void sc_lk_put(sc_lk_ent *tab, size_t cap, const sc_lk_ent *e) {
+  size_t i = sc_lk_slot(e->ptr, cap);
+  while (tab[i].ptr != NULL && tab[i].ptr != SC_LK_DEAD) i = (i + 1) & (cap - 1);
+  tab[i] = *e;
+}
+static int sc_lk_grow(void) {
+  size_t ncap = sc_lk_cap != 0 ? sc_lk_cap * 2 : 4096;
+  sc_lk_ent *nt = (sc_lk_ent *)(calloc)(ncap, sizeof(sc_lk_ent));
+  if (nt == NULL) return 0;
+  for (size_t i = 0; i < sc_lk_cap; i++) {
+    if (sc_lk_tab[i].ptr != NULL && sc_lk_tab[i].ptr != SC_LK_DEAD) sc_lk_put(nt, ncap, &sc_lk_tab[i]);
+  }
+  (free)(sc_lk_tab);
+  sc_lk_tab = nt;
+  sc_lk_cap = ncap;
+  sc_lk_used = sc_lk_live;
+  return 1;
+}
+/* Insert under the held lock; a stale entry at `p` (freed behind the tracker's back, address
+   reused) is replaced in place. Returns 0 when bookkeeping memory ran out. */
+static int sc_lk_insert(const sc_lk_ent *e) {
+  sc_lk_ent *old = sc_lk_find(e->ptr);
+  if (old != NULL) {
+    sc_lk_bytes -= old->size;
+    sc_lk_bytes += e->size;
+    *old = *e;
+    return 1;
+  }
+  if ((sc_lk_used + 1) * 10 >= sc_lk_cap * 7 && !sc_lk_grow()) return 0;
+  sc_lk_put(sc_lk_tab, sc_lk_cap, e);
+  sc_lk_used++;
+  sc_lk_live++;
+  sc_lk_bytes += e->size;
+  return 1;
+}
+static void sc_lk_capture(sc_lk_ent *e, void *p, size_t n) {
+  e->ptr = p;
+  e->size = n;
+  e->nbt = 0;
+#ifdef SC_LK_BT
+  e->nbt = backtrace(e->bt, SC_LK_BT);
+#endif
+}
+static void sc_lk_disable(void) {
+  sc_lk_state = 1;
+  (free)(sc_lk_tab);
+  sc_lk_tab = NULL;
+  sc_lk_cap = 0;
+  sc_lk_used = 0;
+  sc_lk_live = 0;
+  sc_lk_bytes = 0;
+}
+static int sc_lk_group_cmp(const void *va, const void *vb) {
+  const sc_lk_ent *a = (const sc_lk_ent *)va;
+  const sc_lk_ent *b = (const sc_lk_ent *)vb;
+#ifdef SC_LK_BT
+  if (a->nbt != b->nbt) return a->nbt < b->nbt ? -1 : 1;
+  int c = memcmp(a->bt, b->bt, (size_t)(a->nbt < 0 ? 0 : a->nbt) * sizeof(void *));
+  if (c != 0) return c;
+#endif
+  if (a->size != b->size) return a->size < b->size ? -1 : 1;
+  return 0;
+}
+static void sc_lk_report(void) {
+  sc_lk_acquire();
+  size_t n = sc_lk_live;
+  size_t bytes = sc_lk_bytes;
+  sc_lk_ent *v = NULL;
+  if (n != 0) v = (sc_lk_ent *)(malloc)(n * sizeof(sc_lk_ent));
+  if (v != NULL) {
+    size_t k = 0;
+    for (size_t i = 0; i < sc_lk_cap && k < n; i++) {
+      if (sc_lk_tab[i].ptr != NULL && sc_lk_tab[i].ptr != SC_LK_DEAD) v[k++] = sc_lk_tab[i];
+    }
+    n = k;
+  }
+  sc_lk_state = 1; /* the report's own prints may allocate: stop tracking */
+  sc_lk_release();
+  if (n == 0 || v == NULL) {
+    (free)(v);
+    return;
+  }
+  qsort(v, n, sizeof(sc_lk_ent), sc_lk_group_cmp);
+  fprintf(stderr, "== super-c leaks: %llu allocation(s), %llu byte(s) ==\n",
+          (unsigned long long)n, (unsigned long long)bytes);
+  size_t shown = 0;
+  for (size_t i = 0; i < n;) {
+    size_t j = i;
+    size_t gbytes = 0;
+    while (j < n && sc_lk_group_cmp(&v[i], &v[j]) == 0) gbytes += v[j++].size;
+    if (shown < 64) {
+      fprintf(stderr, "leak: %llu allocation(s), %llu byte(s)\n",
+              (unsigned long long)(j - i), (unsigned long long)gbytes);
+#ifdef SC_LK_BT
+      char **syms = backtrace_symbols(v[i].bt, v[i].nbt);
+      if (syms != NULL) {
+        for (int f = 0; f < v[i].nbt; f++) {
+          if (strstr(syms[f], "sc_lk_") == NULL) fprintf(stderr, "    %s\n", syms[f]);
+        }
+        (free)(syms);
+      }
+#endif
+    }
+    shown++;
+    i = j;
+  }
+  if (shown > 64)
+    fprintf(stderr, "... (%llu more leak site(s))\n", (unsigned long long)(shown - 64));
+  (free)(v);
+}
+static int sc_lk_on(void) {
+  if (sc_lk_state == 0) {
+    const char *e = getenv("SC_LEAK_CHECK");
+    sc_lk_state = (e != NULL && e[0] != '\0' && e[0] != '0') ? 2 : 1;
+    if (sc_lk_state == 2) atexit(sc_lk_report);
+  }
+  return sc_lk_state == 2;
+}
+void *sc_lk_malloc(size_t __n) {
+  void *p = (malloc)(__n);
+  if (p != NULL && sc_lk_on()) {
+    sc_lk_ent e;
+    sc_lk_capture(&e, p, __n);
+    sc_lk_acquire();
+    if (sc_lk_state == 2 && !sc_lk_insert(&e)) sc_lk_disable();
+    sc_lk_release();
+  }
+  return p;
+}
+void *sc_lk_realloc(void *__p, size_t __n) {
+  void *q = (realloc)(__p, __n);
+  if (q != NULL && sc_lk_on()) {
+    sc_lk_ent e;
+    sc_lk_capture(&e, q, __n);
+    sc_lk_acquire();
+    if (sc_lk_state == 2) {
+      sc_lk_ent *old = __p != NULL ? sc_lk_find(__p) : NULL;
+      if (old != NULL) {
+        sc_lk_bytes -= old->size;
+        sc_lk_live--;
+        old->ptr = SC_LK_DEAD;
+      }
+      /* memory the tracker never saw (a foreign allocator) stays untracked */
+      if ((old != NULL || __p == NULL) && !sc_lk_insert(&e)) sc_lk_disable();
+    }
+    sc_lk_release();
+  }
+  return q;
+}
+void sc_lk_free(void *__p) {
+  if (__p != NULL && sc_lk_on()) {
+    sc_lk_acquire();
+    sc_lk_ent *e = sc_lk_find(__p);
+    if (e != NULL) {
+      sc_lk_bytes -= e->size;
+      sc_lk_live--;
+      e->ptr = SC_LK_DEAD;
+    }
+    sc_lk_release();
+  }
+  (free)(__p);
+}
 "#.ptr() as *const char;
 }
 
@@ -382,6 +608,12 @@ pub struct Codegen<'a> {
     // Conditional member-move SITES: each gets a `bool __mv<node> = false;` at body start, set at
     // the move site's emission, consumed (guard + reset) by overlapping assign-frees.
     pub place_flag_l: Vector<NodeId>,
+    // Moves whose site is an UNCONDITIONAL `return x` (packed decl<<32|return-node). A tail return
+    // does not dominate earlier returns, so its move must not join the function-wide moved[] set:
+    // the free is skipped only at that return's own defer flush (cur_ret), and every other exit
+    // still frees the local.
+    pub ret_moves: Vector<u64>,
+    pub cur_ret: NodeId, // the NODE_RETURN currently being emitted (NODE_NONE outside emit_return)
     pub place_flags_pending: bool,
     pub depth: u32,
     pub tmp: u32,
@@ -425,6 +657,11 @@ pub struct Codegen<'a> {
     pub test: CgTestInfo,
     pub moved: [NodeId; 512],
     pub nmoved: u32,
+    // Source position of each moved[] entry's move site, 0 = unknown/conditional-context (treat as
+    // dominating every exit -- the old behavior). Unconditional moves only occur in straight-line
+    // code (loop bodies scan as conditional), so at a RETURN whose position precedes the move the
+    // local still owns its value and must be freed -- function-wide suppression leaked it.
+    pub moved_pos: [u32; 512],
     pub cond_moved: [NodeId; 256],
     pub ncond_moved: u32,
     pub cond_sites: [NodeId; 256],
@@ -460,6 +697,7 @@ extend Codegen as Free {
         self.mangle_memo.free();
         self.instname_memo.free();
         self.pend_moves.free();
+        self.ret_moves.free();
         self.moved_place_l.free();
         self.moved_place_cond.free();
         self.place_flag_l.free();
@@ -519,6 +757,8 @@ extend Codegen {
             moved_place_l: Vector::<NodeId>::new(),
             moved_place_cond: Vector::<bool>::new(),
             place_flag_l: Vector::<NodeId>::new(),
+            ret_moves: Vector::<u64>::new(),
+            cur_ret: NODE_NONE,
             place_flags_pending: false,
             home_ast: ast_u as *mut Ast,
             call_list: Vector::<NodeId>::new(),
@@ -4962,10 +5202,30 @@ extend Codegen {
         }
     }
     fn emit_return(self: &mut Self, id: NodeId) {
+        let saved_ret = self.cur_ret;
+        self.cur_ret = id;
+        self.emit_return_body(id);
+        self.cur_ret = saved_ret;
+    }
+    // Whether any pending defer would emit code at return `ret` -- auto-free entries this very
+    // return moves out are silent, and a silent flush must not force the block+temp return form.
+    fn cg_defers_live(self: &Self, ret: NodeId) bool {
+        for i in 0..self.defer_top {
+            if unsafe self.defer_kind[i as usize] != 1 {
+                return true;
+            }
+            let bid = unsafe self.defer_stack[i as usize];
+            if !self.cg_free_silent_at(bid, ret) {
+                return true;
+            }
+        }
+        return false;
+    }
+    fn emit_return_body(self: &mut Self, id: NodeId) {
         let vals = unsafe (*self.cur_ast()).at_const(id).as_data.return_stmt.values;
         let has_ret = self.current_ret[0] != 0 as char;
         let crp = (&self.current_ret[0]) as *const char;
-        if self.defer_top > 0 {
+        if self.cg_defers_live(id) {
             self.emit_str("{\n");
             self.depth = self.depth + 1;
             if vals.len == 0 {
@@ -5672,8 +5932,10 @@ extend Codegen {
         if n.kind == NodeKind::NODE_LET && unsafe (*self.cur_ast()).at_const(n.as_data.let_stmt.name).kind == NodeKind::NODE_PATTERN_TUPLE {
             return false;
         }
+        // A straight-line (positioned) move still needs a defer entry: returns BEFORE it free the
+        // value (emit_auto_free stays silent everywhere the move already happened).
         if self.cg_is_moved(id) {
-            return false;
+            return self.cg_uncond_move_pos(id) != 0 && self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(id));
         }
         return self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(id));
     }
@@ -5771,6 +6033,11 @@ extend Codegen {
         if !cond || dk == NodeKind::NODE_PATTERN_NAME {
             if self.nmoved < 512 {
                 unsafe self.moved[self.nmoved as usize] = d.node;
+                unsafe self.moved_pos[self.nmoved as usize] = if cond {
+                    0u32;
+                } else {
+                    unsafe (*self.cur_ast()).at_const(expr).span.start;
+                };
                 self.nmoved = self.nmoved + 1;
                 if d.node as usize < self.stamp_cap {
                     unsafe self.moved_stamp[d.node as usize] = self.move_epoch;
@@ -5784,7 +6051,7 @@ extend Codegen {
         }
         self.pend_moves.push(CgPendMove { decl: d.node, site: expr, flags: fl });
     }
-    fn cg_mark_move_tail(self: &mut Self, e: NodeId, cond: bool) {
+    fn cg_mark_move_tail(self: &mut Self, e: NodeId, cond: bool, ret: NodeId) {
         if e == NODE_NONE {
             return;
         }
@@ -5794,13 +6061,13 @@ extend Codegen {
             let ids = unsafe (*self.cur_ast()).list(arms);
             for i in 0..arms.len {
                 let body = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.match_arm.body;
-                self.cg_mark_move_tail(body, true);
+                self.cg_mark_move_tail(body, true, ret);
             }
         } else if nk == NodeKind::NODE_IF {
             let tb = unsafe (*self.cur_ast()).at_const(e).as_data.if_stmt.then_branch;
             let eb = unsafe (*self.cur_ast()).at_const(e).as_data.if_stmt.else_branch;
-            self.cg_mark_move_tail(tb, true);
-            self.cg_mark_move_tail(eb, true);
+            self.cg_mark_move_tail(tb, true, ret);
+            self.cg_mark_move_tail(eb, true, ret);
         } else if nk == NodeKind::NODE_BLOCK {
             let ss = unsafe (*self.cur_ast()).at_const(e).as_data.block.statements;
             if ss.len != 0 {
@@ -5809,13 +6076,108 @@ extend Codegen {
                 if lastk == NodeKind::NODE_EXPRESSION_STATEMENT {
                     let lv = unsafe (*self.cur_ast()).at_const(lastid).as_data.single.value;
                     if unsafe (*self.cur_ast()).at_const(lv).kind != NodeKind::NODE_ASSIGNMENT {
-                        self.cg_mark_move_tail(lv, cond);
+                        self.cg_mark_move_tail(lv, cond, ret);
                     }
                 }
             }
         } else {
+            if ret != NODE_NONE && !cond && self.cg_ret_move_try(e, ret) {
+                return; // recorded per-return: other exits still free the local
+            }
             self.cg_mark_move(e, cond, true);
         }
+    }
+    // An owning LOCAL moved by an unconditional `return x`: record (decl, return) in ret_moves and
+    // keep it OUT of moved[] -- a tail return only suppresses the free at its own defer flush.
+    // Anything else (members, pattern names, non-locals) keeps the general marking.
+    fn cg_ret_move_try(self: &mut Self, e0: NodeId, ret: NodeId) bool {
+        let mut e = e0;
+        let mut go = true;
+        while go {
+            let me = unsafe (*self.cur_ast()).at_const(e);
+            if me.kind == NodeKind::NODE_UNARY && (me.as_data.unary.op == TokenType::Move || me.as_data.unary.op == TokenType::Unsafe) {
+                e = me.as_data.unary.operand;
+            } else {
+                go = false;
+            }
+        }
+        if unsafe (*self.cur_ast()).at_const(e).kind != NodeKind::NODE_IDENTIFIER {
+            return false;
+        }
+        let d = unsafe (*self.cur_ast()).resolution_def(e);
+        if d.module != self.cur_module() || d.node == NODE_NONE {
+            return false;
+        }
+        let dk = unsafe (*self.cur_ast()).at_const(d.node).kind;
+        let mut tuple_elem = false;
+        if dk == NodeKind::NODE_IDENTIFIER {
+            let letid = unsafe (*self.cur_ast()).resolution(d.node);
+            if letid != NODE_NONE && unsafe (*self.cur_ast()).at_const(letid).kind == NodeKind::NODE_LET {
+                let lname = unsafe (*self.cur_ast()).at_const(letid).as_data.let_stmt.name;
+                if unsafe (*self.cur_ast()).at_const(lname).kind == NodeKind::NODE_PATTERN_TUPLE {
+                    tuple_elem = true;
+                }
+            }
+        }
+        if dk != NodeKind::NODE_LET && dk != NodeKind::NODE_PARAMETER && !tuple_elem {
+            return false;
+        }
+        if !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(e)) {
+            return false;
+        }
+        self.ret_moves.push(d.node as u64 << 32 | ret as u64);
+        return true;
+    }
+    // The earliest source position at which `decl` is unconditionally moved (0 = a positionless
+    // entry exists: suppress everywhere, the old behavior). Only meaningful when cg_is_moved(decl).
+    fn cg_uncond_move_pos(self: &Self, decl: NodeId) u32 {
+        let mut pos: u32 = 0xFFFFFFFF;
+        for i in 0..self.nmoved {
+            if unsafe self.moved[i as usize] == decl {
+                let p = unsafe self.moved_pos[i as usize];
+                if p == 0 {
+                    return 0;
+                }
+                if p < pos {
+                    pos = p;
+                }
+            }
+        }
+        return pos;
+    }
+    // Whether the auto-free of `decl` must stay silent at return `ret` (NODE_NONE = a non-return
+    // flush): silent when this very return moves it, or when an unconditional move at or before
+    // this point already emptied it. A return that PRECEDES the (straight-line) move still owns
+    // the value and frees it.
+    fn cg_free_silent_at(self: &Self, decl: NodeId, ret: NodeId) bool {
+        if self.cg_is_ret_moved_here(decl, ret) {
+            return true;
+        }
+        if !self.cg_is_moved(decl) {
+            return false;
+        }
+        if ret == NODE_NONE {
+            return true;
+        }
+        let mp = self.cg_uncond_move_pos(decl);
+        if mp == 0 {
+            return true;
+        }
+        // span END: a move inside this return's own expression (`return Some(s)`) is this return's
+        // move, not a later one -- freeing it here would double-free the returned value
+        return unsafe (*self.cur_ast()).at_const(ret).span.end >= mp;
+    }
+    fn cg_is_ret_moved_here(self: &Self, decl: NodeId, ret: NodeId) bool {
+        if ret == NODE_NONE {
+            return false;
+        }
+        let key = decl as u64 << 32 | ret as u64;
+        for i in 0..self.ret_moves.len() {
+            if *self.ret_moves.at(i) == key {
+                return true;
+            }
+        }
+        return false;
     }
     fn cg_scan_moves(self: &mut Self, id: NodeId, cond: bool) {
         if id == NODE_NONE {
@@ -5830,20 +6192,20 @@ extend Codegen {
             }
         } else if nk == NodeKind::NODE_LET {
             let v = unsafe (*self.cur_ast()).at_const(id).as_data.let_stmt.value;
-            self.cg_mark_move_tail(v, cond);
+            self.cg_mark_move_tail(v, cond, NODE_NONE);
             self.cg_scan_moves(v, cond);
         } else if nk == NodeKind::NODE_RETURN {
             let vs = unsafe (*self.cur_ast()).at_const(id).as_data.return_stmt.values;
             let ids = unsafe (*self.cur_ast()).list(vs);
             for i in 0..vs.len {
                 let vid = unsafe ids[i as usize];
-                self.cg_mark_move_tail(vid, cond);
+                self.cg_mark_move_tail(vid, cond, id);
                 self.cg_scan_moves(vid, cond);
             }
         } else if nk == NodeKind::NODE_ASSIGNMENT {
             let l = unsafe (*self.cur_ast()).at_const(id).as_data.binary.left;
             let r = unsafe (*self.cur_ast()).at_const(id).as_data.binary.right;
-            self.cg_mark_move_tail(r, cond);
+            self.cg_mark_move_tail(r, cond, NODE_NONE);
             self.cg_scan_moves(l, cond);
             self.cg_scan_moves(r, cond);
         } else if nk == NodeKind::NODE_STRUCT_INITIALIZER {
@@ -5851,7 +6213,7 @@ extend Codegen {
             let ids = unsafe (*self.cur_ast()).list(fs);
             for i in 0..fs.len {
                 let v = unsafe (*self.cur_ast()).at_const(unsafe ids[i as usize]).as_data.field_initializer.value;
-                self.cg_mark_move_tail(v, cond);
+                self.cg_mark_move_tail(v, cond, NODE_NONE);
                 self.cg_scan_moves(v, cond);
             }
         } else if nk == NodeKind::NODE_IF {
@@ -5944,6 +6306,7 @@ extend Codegen {
                 if !cond || patb {
                     if self.nmoved < 512 {
                         unsafe self.moved[self.nmoved as usize] = decl;
+                        unsafe self.moved_pos[self.nmoved as usize] = 0;
                         self.nmoved = self.nmoved + 1;
                         if decl as usize < self.stamp_cap {
                             unsafe self.moved_stamp[decl as usize] = self.move_epoch;
@@ -5986,7 +6349,9 @@ extend Codegen {
                     last_clos = ev.site;
                     clos_pushed = false;
                 }
-                if self.cg_is_moved(ev.decl) {
+                // A POSITIONED unconditional move no longer silences every exit (returns before it
+                // free), so conditional moves of the same decl keep their runtime flag.
+                if self.cg_is_moved(ev.decl) && self.cg_uncond_move_pos(ev.decl) == 0 {
                     continue;
                 }
                 if !self.cg_is_cond_moved(ev.decl) && self.ncond_moved < 256 {
@@ -6004,7 +6369,7 @@ extend Codegen {
                 continue;
             }
             last_clos = NODE_NONE;
-            if self.cg_is_moved(ev.decl) {
+            if self.cg_is_moved(ev.decl) && self.cg_uncond_move_pos(ev.decl) == 0 {
                 continue;
             }
             if !self.cg_is_cond_moved(ev.decl) && self.ncond_moved < 256 {
@@ -6623,6 +6988,9 @@ extend Codegen {
         let bt = unsafe (*self.cur_ast()).type_of(bid);
         if !self.cg_type_is_free(bt) {
             return;
+        }
+        if self.cg_free_silent_at(bid, self.cur_ret) {
+            return; // moved out by this return, or already gone by this point
         }
         if self.cg_is_cond_moved(bid) {
             let mut fl = Buf32 {};
@@ -8041,10 +8409,18 @@ extend Codegen {
         let mut i = self.defer_top;
         while i > base {
             i = i - 1;
-            self.emit_indent();
             if unsafe self.defer_kind[i as usize] == 1 {
-                self.emit_auto_free(unsafe self.defer_stack[i as usize]);
+                let bid = unsafe self.defer_stack[i as usize];
+                if !self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(bid)) || self.cg_free_silent_at(
+                    bid,
+                    self.cur_ret,
+                ) {
+                    continue; // silent entry: no dangling indent
+                }
+                self.emit_indent();
+                self.emit_auto_free(bid);
             } else {
+                self.emit_indent();
                 self.emit_expr_stmt(unsafe self.defer_stack[i as usize]);
             }
         }
@@ -10095,6 +10471,7 @@ extend Codegen {
             self.ncond_sites = 0;
             self.cg_move_stamps_reset();
             self.pend_moves.clear();
+            self.ret_moves.clear();
             self.moved_place_l.clear();
             self.moved_place_cond.clear();
             self.place_flag_l.clear();
@@ -13436,6 +13813,7 @@ extend Codegen {
             self.emit_test_wrappers();
         } else {
             self.emit_cstr(super_rt_includes());
+            self.emit_cstr(super_rt_source());
             self.emit_extern_includes();
             self.emit_str("\n");
             self.phase_forward();

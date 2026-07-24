@@ -126,10 +126,16 @@ pub fn compile(src: str, stop: i32) Compiled {
 }
 
 // Lex + parse a source standalone (no package/prelude) and hand back the AST for shape inspection.
-// `errors` > 0 means the snippet failed to lex or parse. The AST is owned by the caller (`.free()`).
+// `errors` > 0 means the snippet failed to lex or parse. RAII frees the AST with the result.
 pub struct ParsedAst {
     pub errors: usize,
     pub ast: Ast,
+}
+
+extend ParsedAst as Free {
+    pub fn free(self: &mut ParsedAst) {
+        self.ast.free();
+    }
 }
 
 pub fn parse_ast(src: str) ParsedAst {
@@ -166,13 +172,19 @@ pub fn parse_has_error(src: str) bool {
     return e;
 }
 
-// A stage result that also hands back the user module's (resolved/typed) AST for target inspection.
-// The AST is owned by the caller (call `.free()`); span text is looked up against the caller's own
-// source literal, which outlives this call.
+// A stage result that also hands back the user module's (resolved/typed) AST for target inspection
+// (RAII frees it with the result); span text is looked up against the caller's own source literal,
+// which outlives this call.
 pub struct CompiledAst {
     pub errors: usize,
     pub stage: i32,
     pub ast: Ast,
+}
+
+extend CompiledAst as Free {
+    pub fn free(self: &mut CompiledAst) {
+        self.ast.free();
+    }
 }
 
 pub fn compile_ast(src: str, stop: i32) CompiledAst {
@@ -396,6 +408,11 @@ fn rm_dir(dir: *const char) {
 // The compiler is $SUPERC (default "./super-c", matching the CWD=repo-root that `make selfhost-test` uses).
 // Each snippet gets its own temp dir (/tmp/scr_<pid>_<seq>) so build trees never collide -- fork-per-test safe.
 pub fn compile_and_run(src: str) RunResult {
+    return compile_and_run_env(src, "");
+}
+
+// As compile_and_run, but with `env` ("VAR=v " assignments, trailing space) prefixed to the run command.
+pub fn compile_and_run_env(src: str, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
     R_SEQ = R_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
@@ -435,7 +452,15 @@ pub fn compile_and_run(src: str) RunResult {
         return r;
     } // did not build
     r.built = true;
-    unsafe stdio::snprintf(&mut cmd.b[0], 1024, "'%s/prog' > '%s/out' 2>&1".ptr() as *const char, dirp, dirp);
+    unsafe stdio::snprintf(
+        &mut cmd.b[0],
+        1024,
+        "%.*s'%s/prog' > '%s/out' 2>&1".ptr() as *const char,
+        env.len() as i32,
+        env.ptr(),
+        dirp,
+        dirp,
+    );
     let rrc = stdlib::system(str::from_cstr(&cmd.b[0]));
     if unsafe shim::sc_wifexited(rrc) != 0 {
         r.exit = unsafe shim::sc_wexitstatus(rrc);

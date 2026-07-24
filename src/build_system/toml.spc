@@ -77,6 +77,14 @@ struct Parser<'a> {
     pub errors: diag::Errors,
 }
 
+extend Parser as Free {
+    pub fn free(self: &mut Self) {
+        self.section.free();
+        self.items.free();
+        self.errors.free();
+    }
+}
+
 const fn is_key_byte(b: u8) bool {
     return b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9' || b == b'-' || b == b'_' || b == b'.';
 }
@@ -341,5 +349,5 @@ pub fn parse(src: str, file: str) Option<Vector<TomlItem>> {
         p.errors.log();
         return Option::<Vector<TomlItem>>::None;
     }
-    return Option::<Vector<TomlItem>>::Some(p.items);
+    return Option::<Vector<TomlItem>>::Some(replace(&mut p.items, Vector::<TomlItem>::new()));
 }
