@@ -82,7 +82,7 @@ pub fn compile(src: str, stop: i32) Compiled {
         }
         return r;
     }
-    let mut toks = lx.take_tokens();
+    let toks = lx.take_tokens();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
     ps.build_ast();
     if ps.has_errors() {
@@ -141,7 +141,7 @@ pub fn parse_ast(src: str) ParsedAst {
         r.errors = lx.errors.errors.len();
         return r;
     }
-    let mut toks = lx.take_tokens();
+    let toks = lx.take_tokens();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
     ps.build_ast();
     if ps.has_errors() {
@@ -159,7 +159,7 @@ pub fn parse_has_error(src: str) bool {
     if lx.has_errors() {
         return true;
     }
-    let mut toks = lx.take_tokens();
+    let toks = lx.take_tokens();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
     ps.build_ast();
     let e = ps.has_errors();
@@ -451,7 +451,7 @@ pub fn compile_and_run(src: str) RunResult {
 
 // Build+run `src` and require it to exit 0 with stdout containing `want`.
 pub fn expect_run(label: str, src: str, want: str) {
-    let mut r = compile_and_run(src);
+    let r = compile_and_run(src);
     assert(r.ok(), label);
     assert(r.out_has(want), label);
 }
@@ -459,20 +459,20 @@ pub fn expect_run(label: str, src: str, want: str) {
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
 // `sc_run_program(name, src, code, "")` -- the program signals its result via `exit(code)`).
 pub fn expect_exit(label: str, src: str, code: i32) {
-    let mut r = compile_and_run(src);
+    let r = compile_and_run(src);
     assert(r.built, label);
     assert_eq(r.exit, code);
 }
 
 // Require the snippet to compile cleanly AND its generated C to contain `needle`.
 pub fn expect_c(label: str, src: str, needle: str) {
-    let mut c = compile_c(src);
+    let c = compile_c(src);
     assert(c.ok(), label);
     assert(c.code_has(needle), label);
 }
 // Require the snippet to compile cleanly AND its generated C to NOT contain `needle`.
 pub fn expect_c_absent(label: str, src: str, needle: str) {
-    let mut c = compile_c(src);
+    let c = compile_c(src);
     assert(c.ok(), label);
     assert(!c.code_has(needle), label);
 }

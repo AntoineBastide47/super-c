@@ -18,7 +18,7 @@ fn find(items: &Vector<toml::TomlItem>, sec: str, key: str) i64 {
 
 @test
 fn toml_scalars() {
-    let mut items = parse_ok("bin = \"app\" # comment\njobs = 8\nneg = -3\nflag = true\noff = false\n");
+    let items = parse_ok("bin = \"app\" # comment\njobs = 8\nneg = -3\nflag = true\noff = false\n");
     assert_eq(items.len(), 5 as usize);
     let b = find(&items, "", "bin");
     assert(b >= 0);
@@ -38,7 +38,7 @@ fn toml_scalars() {
 
 @test
 fn toml_sections_arrays_tables() {
-    let mut items = parse_ok(
+    let items = parse_ok(
         "[profile.release]\ncflags = [\n    \"-O3\",\n    \"-DNDEBUG\",\n]\nstrip = true\n[command.test]\nenv = { SUPERC = \"./super-c\", CC = \"cc\" }\nrun = [\"a\", \"b\"]\n",
     );
     let c = find(&items, "profile.release", "cflags");
@@ -56,7 +56,7 @@ fn toml_sections_arrays_tables() {
 
 @test
 fn toml_string_escapes() {
-    let mut items = parse_ok("s = \"a\\n\\t\\\"b\\\\\"\n");
+    let items = parse_ok("s = \"a\\n\\t\\\"b\\\\\"\n");
     let s = find(&items, "", "s");
     assert(items.at(s as usize).val.s.as_str() == "a\n\t\"b\\");
 }

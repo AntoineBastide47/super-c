@@ -27,11 +27,11 @@ pub struct Builder<'a> {
     pub emitted_trivia: usize, // comment segments emitted (attrs are separate and not counted)
 }
 
-fn nd(b: &Builder, id: NodeId) Node {
+const fn nd(b: &Builder, id: NodeId) Node {
     return *unsafe (*b.ast).at_const(id);
 }
 
-fn list_at(b: &Builder, l: NodeList, i: u32) NodeId {
+const fn list_at(b: &Builder, l: NodeList, i: u32) NodeId {
     return unsafe (*b.ast).list(l)[i as usize];
 }
 
@@ -242,7 +242,7 @@ pub const PREC_UNARY: i32 = 13;
 pub const PREC_POSTFIX: i32 = 14;
 pub const PREC_PRIMARY: i32 = 20;
 
-fn expr_prec(b: &Builder, id: NodeId) i32 {
+const fn expr_prec(b: &Builder, id: NodeId) i32 {
     let n = nd(b, id);
     switch n.kind {
         NODE_BINARY => {
@@ -667,7 +667,7 @@ fn b_pattern_path(b: &mut Builder, id: NodeId) d::DocId {
 
 // ---- expressions ----------------------------------------------------------------------------------
 
-fn is_block_node(b: &Builder, id: NodeId) bool {
+const fn is_block_node(b: &Builder, id: NodeId) bool {
     return id != NODE_NONE && nd(b, id).kind == NodeKind::NODE_BLOCK;
 }
 

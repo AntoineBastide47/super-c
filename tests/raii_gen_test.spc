@@ -404,7 +404,7 @@ extend Gen {
             "  if acc == 2147483647 { unsafe putchar(33); }\n  unsafe exit(0); }\n".ptr() as *const char,
         );
         let src = str::from_raw(self.prog as *const u8, self.at as usize);
-        let mut r = h::compile_and_run(src);
+        let r = h::compile_and_run(src);
         assert(r.built, "raii-gen: batch failed to build");
         assert_eq(r.exit, 0);
         assert(multiset_eq(r.out, &self.exp[0]), "raii-gen: free multiset mismatch (leak or double-free)");

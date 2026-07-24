@@ -868,7 +868,7 @@ extend ConstEval {
                     un.align = vs.align;
                 }
             }
-            let mut ssize = round_up(4, un.align) + un.size;
+            let ssize = round_up(4, un.align) + un.size;
             let mut salign: u64 = 4;
             if un.align > salign {
                 salign = un.align;

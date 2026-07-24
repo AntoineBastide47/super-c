@@ -63,7 +63,7 @@ extend Parser {
         };
     }
 
-    pub fn set_bootstrap_tags(self: &mut Self, v: bool) {
+    pub const fn set_bootstrap_tags(self: &mut Self, v: bool) {
         self.bootstrap_tags = v;
     }
 
@@ -73,19 +73,19 @@ extend Parser {
         return out;
     }
 
-    pub fn raw_peek(self: &Self) Token {
+    pub const fn raw_peek(self: &Self) Token {
         return self.tokens[self.current];
     }
 
-    pub fn peek_type(self: &Self) TokenType {
+    pub const fn peek_type(self: &Self) TokenType {
         return self.raw_peek().kind();
     }
 
-    pub fn at_end(self: &Self) bool {
+    pub const fn at_end(self: &Self) bool {
         return self.peek_type() == TokenType::Eof;
     }
 
-    pub fn advance(self: &mut Self) Token {
+    pub const fn advance(self: &mut Self) Token {
         let t = self.raw_peek();
         if t.kind() != TokenType::Eof {
             self.current = self.current + 1;
@@ -93,11 +93,11 @@ extend Parser {
         return t;
     }
 
-    pub fn check(self: &Self, kind: TokenType) bool {
+    pub const fn check(self: &Self, kind: TokenType) bool {
         return self.peek_type() == kind;
     }
 
-    pub fn text_is(self: &Self, t: Token, s: str) bool {
+    pub const fn text_is(self: &Self, t: Token, s: str) bool {
         let sl = s.len();
         return t.len() as usize == sl && unsafe cstring::memcmp(
             unsafe (self.source.ptr() + t.start() as usize),
@@ -106,7 +106,7 @@ extend Parser {
         ) == 0;
     }
 
-    pub fn match(self: &mut Self, kind: TokenType) bool {
+    pub const fn match(self: &mut Self, kind: TokenType) bool {
         if !self.check(kind) {
             return false;
         }
@@ -114,14 +114,14 @@ extend Parser {
         return true;
     }
 
-    pub fn previous_end(self: &Self) u32 {
+    pub const fn previous_end(self: &Self) u32 {
         if self.current != 0 {
             return self.tokens[self.current - 1].end();
         }
         return 0;
     }
 
-    pub fn node_span(self: &Self, id: NodeId) Span {
+    pub const fn node_span(self: &Self, id: NodeId) Span {
         if id == NODE_NONE {
             return Span::empty();
         }
@@ -152,11 +152,11 @@ extend Parser {
         return self.expect(TokenType::GreaterThan, "'>'");
     }
 
-    pub fn is_type_start(kind: TokenType) bool {
+    pub const fn is_type_start(kind: TokenType) bool {
         return Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::LeftBracket || kind == TokenType::Fn;
     }
 
-    pub fn is_identifier_token(kind: TokenType) bool {
+    pub const fn is_identifier_token(kind: TokenType) bool {
         return kind == TokenType::Identifier || kind == TokenType::Underscore || kind == TokenType::Static || kind == TokenType::StaticAssert || kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd;
     }
 
@@ -324,7 +324,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_qualifier(self: &mut Self) TypeQualifier {
+    pub const fn parse_qualifier(self: &mut Self) TypeQualifier {
         if self.match(TokenType::Const) {
             return TypeQualifier::TYPE_QUAL_CONST;
         }
@@ -2552,7 +2552,7 @@ extend Parser {
         return self.parse_expression_mode(grammar);
     }
 
-    pub fn starts_range_bound(self: &Self, context: RangeContext) bool {
+    pub const fn starts_range_bound(self: &Self, context: RangeContext) bool {
         let t = self.peek_type();
         if context == RangeContext::RANGE_PATTERN {
             return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::Minus;
@@ -3118,7 +3118,7 @@ extend Parser {
         );
     }
 
-    pub fn attr_kind_of(self: &Self, name: Token, wants_str: &mut bool, wants_int: &mut bool) i32 {
+    pub const fn attr_kind_of(self: &Self, name: Token, wants_str: &mut bool, wants_int: &mut bool) i32 {
         *wants_str = false;
         *wants_int = false;
         if self.text_is(name, "inline") {
@@ -3227,11 +3227,11 @@ extend Parser {
         };
     }
 
-    fn attr_arg(self: &Self, syntax: &AttrSyntax, offset: usize) Token {
+    const fn attr_arg(self: &Self, syntax: &AttrSyntax, offset: usize) Token {
         return self.tokens[syntax.arg_start + offset];
     }
 
-    fn attr_arg_count(syntax: &AttrSyntax) usize {
+    const fn attr_arg_count(syntax: &AttrSyntax) usize {
         return syntax.arg_end - syntax.arg_start;
     }
 
@@ -3616,15 +3616,15 @@ extend Parser {
         );
     }
 
-    pub fn is_literal_token(kind: TokenType) bool {
+    pub const fn is_literal_token(kind: TokenType) bool {
         return kind == TokenType::IntegerLiteral || kind == TokenType::FloatLiteral || kind == TokenType::CharacterLiteral || kind == TokenType::ByteCharacterLiteral || kind == TokenType::StringLiteral || kind == TokenType::RawStringLiteral || kind == TokenType::ByteStringLiteral || kind == TokenType::True || kind == TokenType::False || kind == TokenType::Null;
     }
 
-    pub fn unary_operator(kind: TokenType) bool {
+    pub const fn unary_operator(kind: TokenType) bool {
         return kind == TokenType::Bang || kind == TokenType::Tilde || kind == TokenType::Minus || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::Move || kind == TokenType::Unsafe;
     }
 
-    pub fn precedence(kind: TokenType) i32 {
+    pub const fn precedence(kind: TokenType) i32 {
         return switch kind {
             Star | Slash | Percent => 11,
             Plus | Minus => 10,
@@ -3640,7 +3640,7 @@ extend Parser {
         };
     }
 
-    pub fn assignment_operator(kind: TokenType) bool {
+    pub const fn assignment_operator(kind: TokenType) bool {
         return kind == TokenType::Equal || kind == TokenType::PlusEqual || kind == TokenType::MinusEqual || kind == TokenType::StarEqual || kind == TokenType::SlashEqual || kind == TokenType::PercentEqual || kind == TokenType::AmpersandEqual || kind == TokenType::PipeEqual || kind == TokenType::CaretEqual || kind == TokenType::LeftShiftEqual || kind == TokenType::RightShiftEqual;
     }
 
@@ -3667,7 +3667,7 @@ extend Parser {
         self.errors.finalize(self.source, self.file);
     }
 
-    pub fn has_errors(self: &Self) bool {
+    pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     pub fn log_errors(self: &Self) {

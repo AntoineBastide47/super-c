@@ -208,7 +208,7 @@ extend Proj {
         unsafe stdio::snprintf(&mut base[0], 512, "'%s/bin'".ptr() as *const char, self.rootp());
         let mut op = Path512 {};
         unsafe stdio::snprintf(&mut op[0], 512, "%s/.runout".ptr() as *const char, self.rootp());
-        let mut r = exec(&base[0], &op[0]);
+        let r = exec(&base[0], &op[0]);
         let e = r.exit;
         return e;
     }
@@ -252,7 +252,7 @@ extend Proj {
 
     // Compile <root>/mainrel and assert a nonzero exit with a diagnostic containing `want` (expect_fail).
     pub fn expect_fail(self: &Proj, mainrel: str, want: str) {
-        let mut r = self.compile(mainrel);
+        let r = self.compile(mainrel);
         assert(r.exit != 0, "expected nonzero exit on a bad program");
         assert(r.out_has(want), "diagnostic missing expected text");
     }

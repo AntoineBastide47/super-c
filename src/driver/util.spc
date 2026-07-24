@@ -1,6 +1,5 @@
 // Driver path/FS helpers and package-Ast accessors shared by the emit/test/ext_c stages.
 import stdio;
-import stdlib;
 import string as cstring;
 import lexer::token as tok;
 import lexer::lexer as lex;
@@ -25,10 +24,10 @@ pub type Buf128 = Array<char, 128>;
 // ---------------------------------------------------------------------------------------------------------
 // Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
 // ---------------------------------------------------------------------------------------------------------
-pub fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
+pub const fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
     return &p.modules[m as usize].ast;
 }
-pub fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
+pub const fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
     return &mut p.modules[m as usize].ast;
 }
 
@@ -57,7 +56,7 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 
         lx.log_errors();
         return 1;
     }
-    let mut toks = lx.take_tokens();
+    let toks = lx.take_tokens();
     let mut ncomments: usize = 0;
     let mut sig = Vector::<tok::Token>::new();
     for i in 0..toks.len() {

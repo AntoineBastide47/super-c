@@ -20,7 +20,7 @@ fn item(a: &Ast, i: u32) &Node {
 @test
 fn items_and_types() {
     let src = "struct Pair<T> { left: T, right: T, }\nenum Result<T, E> { Ok(T), Err { error: E }, }\ntype Callback = fn(*const u8, []u8, [u8; 16]) (int, Error);\nconst LIMIT: usize = 16;\nextern \"C\" { type CFile; fn fclose(file: *mut CFile) int; }\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "items and types parses");
     let root = c.ast.root;
     assert(c.ast.at_const(root).kind == NodeKind::NODE_PROGRAM, "items and types: expected program root");
@@ -44,7 +44,7 @@ fn items_and_types() {
 @test
 fn associated_new_name() {
     let src = "struct String {}\nextend String { fn new() String { return String {}; } }\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "associated new name parses");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_EXTEND, "associated new name: item 1 should be an extension");
     let ext_items = item(&c.ast, 1).as_data.extend_def.items;
@@ -64,7 +64,7 @@ fn associated_new_name() {
 @test
 fn functions_and_expressions() {
     let src = "fn transform<T: Copy>(input: Result<Vec<T>, Error>, out: *mut T) int where T: Copy + Free {\n  let mut value: int = 1 + 2 * 3;\n  let item = input.unwrap()[0] as int;\n  if (item >= value && value != 0) { value += item; } else { value = 0; }\n  while (value > 0) { value -= 1; }\n  for entry in input { defer consume(move entry); }\n  return value;\n}\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "functions and expressions parses");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_FUNCTION, "functions and expressions: expected function");
     assert(item(&c.ast, 0).as_data.function.generics.len == 1, "functions and expressions: expected one generic");
@@ -85,7 +85,7 @@ fn functions_and_expressions() {
 @test
 fn traits_impls_match_and_new() {
     let src = "interface Factory<T> { type Output; fn make(value: T) Self::Output; }\nextend<T> Box<T> as Factory<T> {\n  type Output = Box<T>;\n  fn make(value: T) Box<T> { return new Box<T> { value: value }; }\n}\nfn classify(c: u8) int {\n  return switch c { case '0'..='9' => 1, Value(x) if x > 0 => x, _ => 0, };\n}\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "interfaces extensions switch and new parses");
     let root = c.ast.root;
     assert(
@@ -100,7 +100,7 @@ fn traits_impls_match_and_new() {
 @test
 fn grouped_parameters_and_returns() {
     let src = "fn slice(self: *mut Self, start, end, len: isize) *mut Self {}\nfn divmod(a, b: int) (int, int) { return a / b, a % b; }\nfn open(path: str) (file: File, err: IOError) {}\nfn log(message: str) {}\nfn risky(ptr: *mut int) { unsafe { consume(ptr); } unsafe consume(ptr); }\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "grouped parameters and returns parses");
     let root = c.ast.root;
     assert(c.ast.at_const(root).as_data.program.items.len == 5, "grouped parameters and returns: expected 5 functions");
@@ -159,7 +159,7 @@ fn grouped_parameters_and_returns() {
 @test
 fn precedence() {
     {
-        let mut c = h::parse_ast("fn f() i32 { return 1 + 2 * 3; }\n");
+        let c = h::parse_ast("fn f() i32 { return 1 + 2 * 3; }\n");
         assert(c.errors == 0, "precedence parses");
         let body_id = item(&c.ast, 0).as_data.function.body;
         let bstmts = c.ast.at_const(body_id).as_data.block.statements;
@@ -178,7 +178,7 @@ fn precedence() {
         assert(c.ast.at_const(left_id).kind == NodeKind::NODE_LITERAL, "left operand is the literal 1");
     }
     {
-        let mut c = h::parse_ast("fn f() i32 { return 1 - 2 - 3; }\n");
+        let c = h::parse_ast("fn f() i32 { return 1 - 2 - 3; }\n");
         assert(c.errors == 0, "associativity parses");
         let body_id = item(&c.ast, 0).as_data.function.body;
         let bstmts = c.ast.at_const(body_id).as_data.block.statements;
@@ -199,7 +199,7 @@ fn precedence() {
 // Every `>` is already an individual token, so nested generic closers need no parser state.
 @test
 fn nested_generic_closers() {
-    let mut c = h::parse_ast("type Nested = Vec<Vec<i32>>;\n");
+    let c = h::parse_ast("type Nested = Vec<Vec<i32>>;\n");
     assert(c.errors == 0, "generic >> split parses");
     let outer_id = item(&c.ast, 0).as_data.type_alias.ty;
     assert(
@@ -217,7 +217,7 @@ fn nested_generic_closers() {
 
 @test
 fn rebuilt_greater_operators() {
-    let mut c = h::parse_ast(
+    let c = h::parse_ast(
         "fn f(a: i32, b: i32, c: i32) { let ge = a > = b; let shr = a > > b; a > > = b; let x = a > b >> c; let y = a >> b > c; a | b >>= c; }\n",
     );
     assert(c.errors == 0, "left-factored greater-than operators parse");
@@ -244,14 +244,14 @@ fn rebuilt_greater_operators() {
 @test
 fn condition_expression_grammar() {
     {
-        let mut c = h::parse_ast("struct Foo { x: i32, }\nfn f() { let p: Foo = Foo { x: 1, }; }\n");
+        let c = h::parse_ast("struct Foo { x: i32, }\nfn f() { let p: Foo = Foo { x: 1, }; }\n");
         assert(c.errors == 0, "struct init value parses");
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let val_id = c.ast.at_const(let_id).as_data.let_stmt.value;
         assert(c.ast.at_const(val_id).kind == NodeKind::NODE_STRUCT_INITIALIZER, "Foo {} is a struct initializer");
     }
     {
-        let mut c = h::parse_ast("fn g() { if cond { } }\n");
+        let c = h::parse_ast("fn g() { if cond { } }\n");
         assert(c.errors == 0, "condition is not struct init parses");
         let iff_id = h::nth_kind(&c.ast, NodeKind::NODE_IF, 0);
         let cond_id = c.ast.at_const(iff_id).as_data.if_stmt.condition;
@@ -279,7 +279,7 @@ fn condition_expression_grammar() {
 
 @test
 fn soft_keyword_names() {
-    let mut c = h::parse_ast(
+    let c = h::parse_ast(
         "struct static { va_arg: i32 }\nfn static_assert() {}\nfn f(static_assert: i32) i32 { let va_arg = static_assert; return va_arg; }\n",
     );
     assert(c.errors == 0, "soft keywords remain valid in unambiguous name positions");
@@ -291,7 +291,7 @@ fn soft_keyword_names() {
 fn closures() {
     // Compact `|x: i32| expr` -> a NODE_CLOSURE with an expression body; the `|` is not bitwise-or.
     {
-        let mut c = h::parse_ast("fn f() i32 { let g = |x: i32| x + 1; return g(0); }\n");
+        let c = h::parse_ast("fn f() i32 { let g = |x: i32| x + 1; return g(0); }\n");
         assert(c.errors == 0, "compact closure parses");
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let clo_id = c.ast.at_const(let_id).as_data.let_stmt.value;
@@ -301,7 +301,7 @@ fn closures() {
     }
     // Anonymous `fn(..) Ret { .. }` -> a NODE_CLOSURE with a block body and an explicit return type.
     {
-        let mut c = h::parse_ast("fn f() i32 { let h = fn(x: i32) i32 { return x * 2; }; return h(0); }\n");
+        let c = h::parse_ast("fn f() i32 { let h = fn(x: i32) i32 { return x * 2; }; return h(0); }\n");
         assert(c.errors == 0, "anonymous fn parses");
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let clo_id = c.ast.at_const(let_id).as_data.let_stmt.value;
@@ -311,14 +311,14 @@ fn closures() {
     }
     // Infix `|` is still bitwise-or, not a closure.
     {
-        let mut c = h::parse_ast("fn f() i32 { return 1 | 2; }\n");
+        let c = h::parse_ast("fn f() i32 { return 1 | 2; }\n");
         assert(c.errors == 0, "bitwise or parses");
         assert(h::nth_kind(&c.ast, NodeKind::NODE_CLOSURE, 0) == NODE_NONE, "`a | b` is not a closure");
         assert(h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 0) != NODE_NONE, "`a | b` is a binary expression");
     }
     // `F: fn(i32) i32` -- a callable bound is a NODE_FUNCTION_TYPE in the generic param's bound list.
     {
-        let mut c = h::parse_ast("fn apply<F: fn(i32) i32 + Eq>(x: i32, f: F) i32 { return f(x); }\n");
+        let c = h::parse_ast("fn apply<F: fn(i32) i32 + Eq>(x: i32, f: F) i32 { return f(x); }\n");
         assert(c.errors == 0, "fn-type bound parses");
         let gp_id = h::nth_kind(&c.ast, NodeKind::NODE_GENERIC_PARAM, 0);
         let bounds = c.ast.at_const(gp_id).as_data.generic_param.bounds;
@@ -332,7 +332,7 @@ fn closures() {
     }
     // The same form parses in a where clause.
     {
-        let mut c = h::parse_ast("fn apply<F>(x: i32, f: F) i32 where F: fn(i32) i32 { return f(x); }\n");
+        let c = h::parse_ast("fn apply<F>(x: i32, f: F) i32 where F: fn(i32) i32 { return f(x); }\n");
         assert(c.errors == 0, "fn-type bound in where parses");
         let wp_id = h::nth_kind(&c.ast, NodeKind::NODE_WHERE_PREDICATE, 0);
         let wbounds = c.ast.at_const(wp_id).as_data.where_predicate.bounds;
@@ -346,7 +346,7 @@ fn closures() {
     }
     // `fn move(..) ..`: the ownership-marked bound.
     {
-        let mut c = h::parse_ast("fn run<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x); }\n");
+        let c = h::parse_ast("fn run<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x); }\n");
         assert(c.errors == 0, "fn move bound parses");
         let gp_id = h::nth_kind(&c.ast, NodeKind::NODE_GENERIC_PARAM, 0);
         let gbounds = c.ast.at_const(gp_id).as_data.generic_param.bounds;
@@ -359,7 +359,7 @@ fn closures() {
     }
     // `&dyn I` / `&mut dyn I` fold into ONE NODE_DYN_TYPE; the qualifier carries the flavor.
     {
-        let mut c = h::parse_ast("fn f(a: &dyn Shape, b: &mut dyn Shape, c: Box<dyn Shape>) {}\n");
+        let c = h::parse_ast("fn f(a: &dyn Shape, b: &mut dyn Shape, c: Box<dyn Shape>) {}\n");
         assert(c.errors == 0, "dyn types parses");
         let d0 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 0);
         let d1 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 1);
@@ -380,7 +380,7 @@ fn closures() {
     }
     // `&dyn fn(i32) i32`: a `dyn` over a function type (the anonymous one-method interface).
     {
-        let mut c = h::parse_ast("fn f(cb: &dyn fn(i32) i32) i32 { return cb(1); }\n");
+        let c = h::parse_ast("fn f(cb: &dyn fn(i32) i32) i32 { return cb(1); }\n");
         assert(c.errors == 0, "dyn fn type parses");
         let d0 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 0);
         let inner_ty = c.ast.at_const(d0).as_data.indirect_type.ty;
@@ -394,14 +394,14 @@ fn closures() {
 @test
 fn error_recovery() {
     // Two malformed lets produce multiple errors (>= 2), proving resync.
-    let mut c = h::parse_ast("fn f() { let x: i32 = ; let y: i32 = ; }\n");
+    let c = h::parse_ast("fn f() { let x: i32 = ; let y: i32 = ; }\n");
     assert(c.errors >= 2, "two malformed lets produce multiple errors, proving resync");
 }
 
 @test
 fn bare_conditions_and_ranges() {
     let src = "fn f() {\n  if x { }\n  while y { }\n  for i in 0..10 { }\n  for i in 1..=5 { }\n  for i in ..4 { }\n  for i in 6.. { }\n}\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "bare conditions and ranges parses");
     let body_id = item(&c.ast, 0).as_data.function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
@@ -444,7 +444,7 @@ fn bare_conditions_and_ranges() {
 // The postfix `?` early-return operator parses to a NODE_UNARY whose op is the `?` token.
 @test
 fn question_operator_parse() {
-    let mut c = h::parse_ast("fn f() { let x = g()?; }\n");
+    let c = h::parse_ast("fn f() { let x = g()?; }\n");
     assert(c.errors == 0, "question operator parses");
     let body_id = item(&c.ast, 0).as_data.function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
@@ -463,7 +463,7 @@ fn question_operator_parse() {
 @test
 fn range_value_expression() {
     let src = "fn f() {\n  let a = 1..5;\n  let b = 0..=9;\n}\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "range value expression parses");
     let body_id = item(&c.ast, 0).as_data.function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
@@ -488,7 +488,7 @@ fn range_value_expression() {
 @test
 fn switch_pattern_ranges() {
     let src = "fn f(n: i32) i32 {\n  return switch n {\n    10..20 => 1,\n    20..=30 => 2,\n    ..5 => 3,\n    99.. => 4,\n    _ => 0,\n  };\n}\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "switch pattern ranges parses");
     let body_id = item(&c.ast, 0).as_data.function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
@@ -544,7 +544,7 @@ fn switch_pattern_ranges() {
 @test
 fn pub_modifiers() {
     let src = "pub struct S { pub x: i32, y: i32, }\nextend S { pub fn shown() {} fn hidden() {} }\npub fn f() {}\nfn g() {}\npub enum E { A, B }\nenum F { C }\npub const K: i32 = 1;\nconst L: i32 = 2;\npub type Ta = i32;\ntype Tb = i32;\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "pub modifiers parses");
     assert(
         item(&c.ast, 0).kind == NodeKind::NODE_STRUCT && item(&c.ast, 0).as_data.aggregate.is_public,
@@ -596,7 +596,7 @@ fn pub_modifiers() {
 @test
 fn unions() {
     {
-        let mut c = h::parse_ast("pub union Bits { pub i: u32, bytes: [u8; 4], }\n");
+        let c = h::parse_ast("pub union Bits { pub i: u32, bytes: [u8; 4], }\n");
         assert(c.errors == 0, "union decl parses");
         assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "union parses as a NODE_STRUCT");
         assert(item(&c.ast, 0).as_data.aggregate.is_union, "union is flagged is_union");
@@ -610,7 +610,7 @@ fn unions() {
     }
     // A plain struct is not flagged is_union.
     {
-        let mut c = h::parse_ast("struct S { x: i32, }\n");
+        let c = h::parse_ast("struct S { x: i32, }\n");
         assert(c.errors == 0, "struct not union parses");
         assert(!item(&c.ast, 0).as_data.aggregate.is_union, "a struct is not is_union");
     }
@@ -619,7 +619,7 @@ fn unions() {
 // `@c.*` attributes parse into the Ast's attribute table; malformed ones are rejected.
 @test
 fn attributes() {
-    let mut c = h::parse_ast("@c.packed\nstruct H { x: u32, }\n@c.noreturn\n@c.export(\"sym\")\nfn die() {}\n");
+    let c = h::parse_ast("@c.packed\nstruct H { x: u32, }\n@c.noreturn\n@c.export(\"sym\")\nfn die() {}\n");
     assert(c.errors == 0, "attributes parses");
     assert(c.ast.attrs.len() == 3, "three attributes recorded");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "attributed struct parses");
@@ -630,7 +630,7 @@ fn attributes() {
     assert(h::parse_has_error("@c.gnu.attribute(\"hot\")\nfn m() {}\n"), "target-specific namespace rejected");
     assert(h::parse_has_error("@c.inline(3)\nfn m() {}\n"), "no-arg attribute given an argument rejected");
     {
-        let mut recovered = h::parse_ast("@unknown(foo(bar))\nfn m() {}\n");
+        let recovered = h::parse_ast("@unknown(foo(bar))\nfn m() {}\n");
         assert(recovered.errors != 0, "unknown generic attribute rejected");
         assert(
             recovered.ast.at_const(recovered.ast.root).as_data.program.items.len == 1,
@@ -699,7 +699,7 @@ fn pathological_depth() {
 @test
 fn lifetimes() {
     let src = "struct Ref<'a> { pub p: &'a i32 }\nfn borrow<'a>(x: &'a i32) &'a i32 { return x; }\nfn two<'a, 'b: 'a, T>(x: &'a T, y: &'b mut T) &'a T where T: 'a { return x; }\nfn none(x: &i32) &i32 { return x; }\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "lifetime syntax parses");
     assert(c.ast.at_const(c.ast.root).as_data.program.items.len == 4, "lifetimes: expected 4 items");
 
@@ -752,7 +752,7 @@ fn lifetimes() {
 @test
 fn hrtb_and_gat() {
     let src = "fn apply<F: for<'a> fn(&'a i32) i32>(f: F) i32 { return 0; }\ninterface Lend { type Item<'a>; }\n";
-    let mut c = h::parse_ast(src);
+    let c = h::parse_ast(src);
     assert(c.errors == 0, "for<'a> and type Item<'a> parse");
 
     // the bound's lifetimes hang off the BOUND node, not the enclosing function

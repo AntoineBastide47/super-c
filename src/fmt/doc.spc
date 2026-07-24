@@ -39,7 +39,7 @@ pub struct DocPool<'a> {
 
 pub const INDENT_WIDTH: i32 = 4;
 
-fn wadd(x: u32, y: u32) u32 {
+const fn wadd(x: u32, y: u32) u32 {
     if x == W_INF || y == W_INF {
         return W_INF;
     }
@@ -60,7 +60,7 @@ extend DocPool {
         return id;
     }
 
-    pub fn nil(self: &Self) DocId {
+    pub const fn nil(self: &Self) DocId {
         return 0;
     }
 

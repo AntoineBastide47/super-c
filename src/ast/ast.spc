@@ -734,7 +734,7 @@ extend Ast {
         return id;
     }
 
-    pub fn mark(self: &Self) u32 {
+    pub const fn mark(self: &Self) u32 {
         return self.scratch.len() as u32;
     }
     pub fn push(self: &mut Self, id: NodeId) {
@@ -828,11 +828,11 @@ extend Ast {
     }
 
     // The interface (or dyn-fn signature) node behind a TYPE_DYN payload.
-    pub fn dyn_decl_of(self: &Self, dy: &Ty) NodeId {
+    pub const fn dyn_decl_of(self: &Self, dy: &Ty) NodeId {
         return self.instance(dy.as_data.inst).decl;
     }
 
-    pub fn instance(self: &Self, index: u32) &TyInstance {
+    pub const fn instance(self: &Self, index: u32) &TyInstance {
         return self.instances.at(index as usize);
     }
 
@@ -952,7 +952,7 @@ extend Ast {
         self.mono_at[node as usize] = self.mono.len() as u32;
     }
 
-    pub fn type_args(self: &Self, node: NodeId) *const MonoUse {
+    pub const fn type_args(self: &Self, node: NodeId) *const MonoUse {
         if node as usize >= self.mono_at.len() {
             return null;
         }
@@ -972,7 +972,7 @@ extend Ast {
         self.dyn_at[node as usize] = self.dyn_uses.len() as u32;
     }
 
-    pub fn dyn_use_at(self: &Self, node: NodeId) *const DynUse {
+    pub const fn dyn_use_at(self: &Self, node: NodeId) *const DynUse {
         if node as usize >= self.dyn_at.len() {
             return null;
         }
@@ -989,7 +989,7 @@ extend Ast {
         self.deref_at[du.node as usize] = self.deref_uses.len() as u32;
     }
 
-    pub fn deref_use_at(self: &Self, node: NodeId) *const DerefUse {
+    pub const fn deref_use_at(self: &Self, node: NodeId) *const DerefUse {
         if node as usize >= self.deref_at.len() {
             return null;
         }
@@ -1000,37 +1000,37 @@ extend Ast {
         return self.deref_uses.at((idx - 1) as usize);
     }
 
-    pub fn at(self: &mut Self, id: NodeId) &mut Node {
+    pub const fn at(self: &mut Self, id: NodeId) &mut Node {
         return &mut self.nodes[id as usize];
     }
-    pub fn at_const(self: &Self, id: NodeId) &Node {
+    pub const fn at_const(self: &Self, id: NodeId) &Node {
         return self.nodes.at(id as usize);
     }
-    pub fn list(self: &Self, list: NodeList) *const NodeId {
+    pub const fn list(self: &Self, list: NodeList) *const NodeId {
         return unsafe (self.children.as_ptr() + list.start as usize);
     }
-    pub fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
+    pub const fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
         self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl };
     }
-    pub fn resolution(self: &Self, ref_id: NodeId) NodeId {
+    pub const fn resolution(self: &Self, ref_id: NodeId) NodeId {
         return self.resolutions[ref_id as usize].node;
     }
-    pub fn resolution_def(self: &Self, ref_id: NodeId) DefId {
+    pub const fn resolution_def(self: &Self, ref_id: NodeId) DefId {
         return self.resolutions[ref_id as usize];
     }
-    pub fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
+    pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
         self.resolutions[ref_id as usize] = decl;
     }
-    pub fn builtin(b: BuiltinType) TypeId {
+    pub const fn builtin(b: BuiltinType) TypeId {
         return b as TypeId + 1;
     }
-    pub fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
+    pub const fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
         self.types[n as usize] = t;
     }
-    pub fn type_of(self: &Self, n: NodeId) TypeId {
+    pub const fn type_of(self: &Self, n: NodeId) TypeId {
         return self.types[n as usize];
     }
-    pub fn type_at(self: &Self, t: TypeId) &Ty {
+    pub const fn type_at(self: &Self, t: TypeId) &Ty {
         return self.type_pool.at(t as usize);
     }
 }

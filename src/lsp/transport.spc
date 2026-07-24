@@ -2,12 +2,11 @@
 // headers, ignored) then a blank line, then exactly N body bytes. Writes flush per message -- the client
 // blocks on responses.
 import stdio;
-import string as cstring;
 
 type HdrBuf = Array<char, 512>;
 type ChunkBuf = Array<char, 4096>;
 
-fn ascii_lower(b: u8) u8 {
+const fn ascii_lower(b: u8) u8 {
     if b >= b'A' && b <= b'Z' {
         return b + 32;
     }

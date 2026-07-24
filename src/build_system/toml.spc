@@ -77,16 +77,16 @@ struct Parser<'a> {
     pub errors: diag::Errors,
 }
 
-fn is_key_byte(b: u8) bool {
+const fn is_key_byte(b: u8) bool {
     return b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9' || b == b'-' || b == b'_' || b == b'.';
 }
 
 extend Parser {
-    fn at_end(self: &Self) bool {
+    const fn at_end(self: &Self) bool {
         return self.i >= self.src.len();
     }
 
-    fn peek(self: &Self) u8 {
+    const fn peek(self: &Self) u8 {
         if self.at_end() {
             return 0;
         }

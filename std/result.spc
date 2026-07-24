@@ -183,7 +183,7 @@ extend<T: Eq, E: Eq> Result<T, E> as Eq {
 
 extend<T: Format, E: Format> Result<T, E> as Format {
     pub fn fmt(self: &Result<T, E>) String {
-        let mut inner = switch self {
+        let inner = switch self {
             Ok(v) => v.fmt(),
             Err(e) => e.fmt(),
         };

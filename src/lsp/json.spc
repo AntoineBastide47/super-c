@@ -114,43 +114,43 @@ extend JSON {
     }
 
     // Checked accessors: the C++ GetX() throw std::logic_error on a type mismatch; here they panic.
-    pub fn get_bool(self: &Self) bool {
+    pub const fn get_bool(self: &Self) bool {
         if self.kind != JT_BOOL {
             panic("JSON::get_bool called on a non-boolean type");
         }
         return self.b;
     }
 
-    pub fn get_number(self: &Self) f64 {
+    pub const fn get_number(self: &Self) f64 {
         if self.kind != JT_NUMBER {
             panic("JSON::get_number called on a non-number type");
         }
         return self.num;
     }
 
-    pub fn get_i64(self: &Self) i64 {
+    pub const fn get_i64(self: &Self) i64 {
         return self.get_number() as i64;
     }
 
-    pub fn get_string(self: &Self) &String {
+    pub const fn get_string(self: &Self) &String {
         if self.kind != JT_STRING {
             panic("JSON::get_string called on a non-string type");
         }
         return &self.s;
     }
 
-    pub fn get_str(self: &Self) str {
+    pub const fn get_str(self: &Self) str {
         return self.get_string().as_str();
     }
 
-    pub fn get_array(self: &Self) &Vector<JSON> {
+    pub const fn get_array(self: &Self) &Vector<JSON> {
         if self.kind != JT_ARRAY {
             panic("JSON::get_array called on a non-array type");
         }
         return &self.arr;
     }
 
-    pub fn get_object(self: &Self) &Vector<JSONPair> {
+    pub const fn get_object(self: &Self) &Vector<JSONPair> {
         if self.kind != JT_OBJECT {
             panic("JSON::get_object called on a non-object type");
         }
@@ -158,7 +158,7 @@ extend JSON {
     }
 
     // Element at `index`; panics out of bounds or on a non-array (JSON::At(size_t)).
-    pub fn at(self: &Self, index: usize) &JSON {
+    pub const fn at(self: &Self, index: usize) &JSON {
         if self.kind != JT_ARRAY {
             panic("JSON::at on a non array-type");
         }
@@ -210,7 +210,7 @@ extend JSON {
         };
     }
 
-    pub fn size(self: &Self) usize {
+    pub const fn size(self: &Self) usize {
         if self.kind == JT_ARRAY {
             return self.arr.len();
         }
@@ -220,7 +220,7 @@ extend JSON {
         panic("JSON::size called on non-array or non-object type");
     }
 
-    pub fn empty(self: &Self) bool {
+    pub const fn empty(self: &Self) bool {
         return self.size() == 0;
     }
 
@@ -431,7 +431,7 @@ pub fn dump_escaped(s: str, out: &mut String) {
 const SWAR_LO: u64 = 0x0101010101010101;
 const SWAR_HI: u64 = 0x8080808080808080;
 
-fn has_zero_byte(v: u64) bool {
+const fn has_zero_byte(v: u64) bool {
     return (v - SWAR_LO & ~v & SWAR_HI) != 0;
 }
 
@@ -460,11 +460,11 @@ fn find_string_stop(s: str, from: usize, to: usize) usize {
     return p;
 }
 
-fn is_number_byte(b: u8) bool {
+const fn is_number_byte(b: u8) bool {
     return b >= b'0' && b <= b'9' || b == b'e' || b == b'E' || b == b'-' || b == b'+' || b == b'.';
 }
 
-fn is_ws(b: u8) bool {
+const fn is_ws(b: u8) bool {
     return b == b' ' || b == b'\t' || b == b'\r' || b == b'\n';
 }
 
@@ -502,7 +502,7 @@ extend JSONParser {
             self.err.free();
             self.err = msg;
         } else {
-            let mut m = msg;
+            let m = msg;
             m.free();
         }
     }
@@ -535,7 +535,7 @@ extend JSONParser {
         self.fail_s(m);
     }
 
-    fn top(self: &Self) usize {
+    const fn top(self: &Self) usize {
         return *self.stack.at(self.stack.len() - 1);
     }
 
@@ -567,7 +567,7 @@ extend JSONParser {
         let t = self.top() as *mut JSON;
         if !self.comma_detected && unsafe (*t).arr.len() != 0 {
             self.fail("Missing ',' between array members");
-            let mut j = json;
+            let j = json;
             j.free();
             return;
         }

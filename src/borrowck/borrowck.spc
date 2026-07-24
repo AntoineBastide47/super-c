@@ -248,7 +248,7 @@ extend tc::TypeChecker {
         }
     }
 
-    pub fn borrow_mark(self: &Self) u32 {
+    pub const fn borrow_mark(self: &Self) u32 {
         return self.nborrows;
     }
 
@@ -300,7 +300,7 @@ extend tc::TypeChecker {
         self.nborrows = w;
     }
 
-    pub fn borrow_tombstone_at(self: &mut Self, i: u32) {
+    pub const fn borrow_tombstone_at(self: &mut Self, i: u32) {
         unsafe self.borrows[i as usize].root = NODE_NONE;
         unsafe self.borrows[i as usize].binding = NODE_NONE;
     }
@@ -552,7 +552,7 @@ extend tc::TypeChecker {
         return esc;
     }
 
-    pub fn borrow_same(self: &Self, a: Borrow, b: Borrow) bool {
+    pub const fn borrow_same(self: &Self, a: Borrow, b: Borrow) bool {
         return a.root == b.root && a.kind == b.kind && a.region == b.region && a.origin == b.origin;
     }
 
@@ -606,7 +606,7 @@ extend tc::TypeChecker {
         }
     }
 
-    pub fn tc_flow_clear(self: &Self, s: &mut FlowState) {
+    pub const fn tc_flow_clear(self: &Self, s: &mut FlowState) {
         s.nmoved = 0;
         s.nmoved_places = 0;
         s.nuninit = 0;
@@ -734,7 +734,7 @@ extend tc::TypeChecker {
         return false;
     }
 
-    pub fn tc_mark_place_moved(self: &mut Self, place: NodeId) {
+    pub const fn tc_mark_place_moved(self: &mut Self, place: NodeId) {
         if self.nmoved_places < 128 {
             let k = self.nmoved_places;
             unsafe self.moved_places[k as usize] = place;
@@ -904,7 +904,7 @@ extend tc::TypeChecker {
         }
     }
 
-    pub fn is_moved(self: &Self, decl: NodeId) bool {
+    pub const fn is_moved(self: &Self, decl: NodeId) bool {
         let idx = (decl >> 6) as usize;
         if idx >= self.moved_bits.len() {
             return false;
@@ -920,7 +920,7 @@ extend tc::TypeChecker {
         self.moved_bits.set(idx, self.moved_bits[idx] | 1u64 << (d & 63u32) as u64);
     }
 
-    pub fn ms_bit_clear(self: &mut Self, d: NodeId) {
+    pub const fn ms_bit_clear(self: &mut Self, d: NodeId) {
         let idx = (d >> 6) as usize;
         if idx < self.moved_bits.len() {
             self.moved_bits.set(idx, self.moved_bits[idx] & ~(1u64 << (d & 63u32) as u64));
@@ -995,7 +995,7 @@ extend tc::TypeChecker {
         }
     }
 
-    pub fn tc_scope_enter(self: &mut Self) {
+    pub const fn tc_scope_enter(self: &mut Self) {
         self.scope_depth = self.scope_depth + 1;
     }
 
@@ -1249,7 +1249,7 @@ extend tc::TypeChecker {
 
     // The lifetime a return TYPE node denotes overall (first slot), for call-site precision.
     pub fn tc_return_dest_lifetime(self: &mut Self, ret_tyn: NodeId) tok::Span {
-        let mut dest = Spans8 {};
+        let dest = Spans8 {};
         let n = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
         if n > 0 {
             return dest[0];
@@ -1264,7 +1264,7 @@ extend tc::TypeChecker {
     // regardless of any caller. This is what lets call sites TRUST the signature (relate_result_precision)
     // instead of tying the result to every argument.
     pub fn tc_check_return_lifetime(self: &mut Self, vid: NodeId, ret_tyn: NodeId) {
-        let mut dest = Spans8 {};
+        let dest = Spans8 {};
         let nd = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
         if nd == 0 {
             return;
@@ -1273,7 +1273,7 @@ extend tc::TypeChecker {
         if ptyn == NODE_NONE {
             return;
         }
-        let mut src = Spans8 {};
+        let src = Spans8 {};
         let ns = self.tc_collect_slot_lts(self.ast.module, ptyn, (&src[0]) as *mut tok::Span, 8);
         let mut n = nd;
         if ns < n {
@@ -1303,7 +1303,7 @@ extend tc::TypeChecker {
         }
     }
 
-    pub fn region_new(self: &mut Self) u32 {
+    pub const fn region_new(self: &mut Self) u32 {
         let r = self.region_next;
         self.region_next = r + 1;
         return r;
@@ -1379,8 +1379,8 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(
             self.strip(ty),
@@ -1516,7 +1516,7 @@ extend tc::TypeChecker {
     // algorithm over the field types -- `&T` covariant, `&mut T` invariant in the pointee, a nested
     // aggregate composes with ITS variance, fn params contravariant. Lazy + memoized; a recursion
     // cycle resolves to all-invariant (sound: over-restricts only recursive types).
-    pub fn v_flip(self: &Self, v: u32) u32 {
+    pub const fn v_flip(self: &Self, v: u32) u32 {
         if v == V_COVARIANT {
             return V_CONTRAVARIANT;
         }
@@ -1526,7 +1526,7 @@ extend tc::TypeChecker {
         return v;
     }
 
-    pub fn v_join(self: &Self, a: u32, b: u32) u32 {
+    pub const fn v_join(self: &Self, a: u32, b: u32) u32 {
         if a == V_BIVARIANT {
             return b;
         }
@@ -1539,7 +1539,7 @@ extend tc::TypeChecker {
         return V_INVARIANT;
     }
 
-    pub fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
+    pub const fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
         if ctx == V_COVARIANT {
             return v;
         }
@@ -1566,7 +1566,7 @@ extend tc::TypeChecker {
         return self.variance_nlt(dd) + nty;
     }
 
-    pub fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
+    pub const fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
         if idx < 0 || idx >= 32 {
             return packed;
         }
@@ -1887,7 +1887,7 @@ extend tc::TypeChecker {
                 return self.tc_map_lt(dd, fl, &args[0], nargs);
             }
             // interior hop: re-instantiate the next aggregate's lifetime args through this one
-            let mut sub = Spans8 {};
+            let sub = Spans8 {};
             let ns = self.tc_collect_lt_args(dd.module, ftyn, (&sub[0]) as *mut tok::Span, 8);
             let mut mapped = Spans8 {};
             for i in 0..ns {
@@ -2047,8 +2047,8 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if self.aggregate_of(
             self.strip(elem),
@@ -2169,8 +2169,8 @@ extend tc::TypeChecker {
     pub fn tc_aggregate_has_invariant_param(self: &mut Self, ty: TypeId) bool {
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(
             self.strip(ty),
@@ -2208,8 +2208,8 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(
             self.strip(ty),
@@ -2436,7 +2436,7 @@ extend tc::TypeChecker {
         }
     }
 
-    pub fn tc_root_is_reference(self: &mut Self, root: NodeId) bool {
+    pub const fn tc_root_is_reference(self: &mut Self, root: NodeId) bool {
         if root == NODE_NONE {
             return false;
         }
@@ -2469,8 +2469,8 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(
             self.strip(ty),
@@ -2634,7 +2634,7 @@ extend tc::TypeChecker {
         return n.as_data.name.text;
     }
 
-    pub fn tc_span_empty(self: &Self, s: tok::Span) bool {
+    pub const fn tc_span_empty(self: &Self, s: tok::Span) bool {
         return s.end <= s.start;
     }
 
@@ -2879,7 +2879,7 @@ extend tc::TypeChecker {
         };
     }
 
-    pub fn bc_loop_pop(self: &mut Self, le: i32) {
+    pub const fn bc_loop_pop(self: &mut Self, le: i32) {
         if le >= 0 {
             self.nloops = le as u32;
         }
@@ -3764,7 +3764,7 @@ extend tc::TypeChecker {
                 return true;
             }
         }
-        let mut vlts = Spans8 {};
+        let vlts = Spans8 {};
         let mut nvlt: i32 = 0;
         self.tc_typenode_lifetimes(md.module, pv_ty, (&vlts[0]) as *mut tok::Span, 8, &mut nvlt, 0);
         for li in 0..nvlt {

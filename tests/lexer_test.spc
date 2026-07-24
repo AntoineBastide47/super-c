@@ -9,7 +9,7 @@ fn expect_tokens(src: str, expected: []TokenType) {
     let mut lx = Lexer::new(&mut s, "");
     lx.scan_tokens();
     assert(!lx.has_errors(), "unexpected lexer error");
-    let mut toks = lx.take_tokens();
+    let toks = lx.take_tokens();
     assert_eq(toks.len(), expected.len());
     let n = if toks.len() < expected.len() {
         toks.len();

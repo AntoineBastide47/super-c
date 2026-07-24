@@ -294,7 +294,7 @@ extend Server {
             if keep {
                 r += 1;
             } else {
-                let mut dead = self.roots.remove(r).unwrap();
+                let dead = self.roots.remove(r).unwrap();
                 dead.free();
             }
         }
@@ -390,7 +390,7 @@ extend PubSet {
         for i in 0..self.uris.len() {
             if self.uris.at(i).as_str() == uri.as_str() {
                 self.arrs[i].push_back(d);
-                let mut u = uri;
+                let u = uri;
                 u.free();
                 return;
             }
@@ -583,7 +583,7 @@ fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
             );
             sv.out_skip.free();
             sv.out_skip = String::from_str(man.out_dir.as_str());
-            let mut m = man;
+            let m = man;
             m.free();
         },
         None => {},
@@ -596,7 +596,7 @@ fn on_did_open(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
         Some(params) => {
             let td = params.at_key("textDocument");
             let uri = td.value_str("uri");
-            let mut p = uri_doc_path(uri);
+            let p = uri_doc_path(uri);
             let di = sv.find_doc(uri);
             if di >= 0 {
                 sv.docs[di as usize].txt.free();
@@ -651,7 +651,7 @@ fn on_did_close(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
             let uri = params.at_key("textDocument").value_str("uri");
             let di = sv.find_doc(uri);
             if di >= 0 {
-                let mut dead = sv.docs.remove(di as usize).unwrap();
+                let dead = sv.docs.remove(di as usize).unwrap();
                 dead.free();
             }
             sv.rebuild_all(f); // overlays revert to the on-disk content
@@ -664,7 +664,7 @@ fn on_did_close(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
 fn uri_doc_path(uri: str) String {
     let raw = text::uri_to_path(uri);
     let c = canon(raw.as_str());
-    let mut r = raw;
+    let r = raw;
     r.free();
     return c;
 }
@@ -873,7 +873,7 @@ fn valid_ident(nm: str) bool {
 }
 
 // Canonical file path of module `m` in root `r`.
-fn self_def_file(sv: &Server, r: usize, m: usize) str {
+const fn self_def_file(sv: &Server, r: usize, m: usize) str {
     return sv.roots.at(r).files.at(m).as_str();
 }
 
@@ -936,7 +936,7 @@ fn on_rename(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
         }
         if idx >= 0 {
             per[idx as usize].push_back(te);
-            let mut u = uri;
+            let u = uri;
             u.free();
         } else {
             uris.push(uri);
@@ -950,7 +950,7 @@ fn on_rename(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
         let u = uris.remove(0).unwrap();
         let ed = per.remove(0).unwrap();
         changes.emplace(u.as_str(), ed);
-        let mut uu = u;
+        let uu = u;
         uu.free();
     }
     let mut we = json::JSON::object();
@@ -1108,7 +1108,7 @@ fn complete_via_probe(sv: &Server, path: str, txt: str, off: u32, member: bool) 
         for m in 0..pkg.modules.len() {
             let c = canon(pkg.modules.at(m).file.as_str());
             let hit = c.as_str() == path;
-            let mut cc = c;
+            let cc = c;
             cc.free();
             if hit {
                 parsed = pkg.modules.at(m).has_ast;
@@ -1123,7 +1123,7 @@ fn complete_via_probe(sv: &Server, path: str, txt: str, off: u32, member: bool) 
                 break;
             }
         }
-        let mut pp = pkg;
+        let pp = pkg;
         pp.free();
         if parsed {
             return out;

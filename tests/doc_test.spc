@@ -32,7 +32,7 @@ fn render_of(p: &d::DocPool, root: d::DocId, width: i32) String {
 }
 
 fn expect_render(p: &d::DocPool, root: d::DocId, width: i32, want: str) {
-    let mut got = render_of(p, root, width);
+    let got = render_of(p, root, width);
     let gs = got.as_str();
     assert(gs == want, "render mismatch");
 }

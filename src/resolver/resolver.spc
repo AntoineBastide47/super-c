@@ -94,7 +94,7 @@ fn name_hash(src: str, s: tok::Span) u32 {
     return h;
 }
 
-fn span_eq(src: str, a: tok::Span, b: tok::Span) bool {
+const fn span_eq(src: str, a: tok::Span, b: tok::Span) bool {
     let la = a.end - a.start;
     if la != b.end - b.start {
         return false;
@@ -102,7 +102,7 @@ fn span_eq(src: str, a: tok::Span, b: tok::Span) bool {
     return unsafe cstring::memcmp(src.ptr() + a.start as usize, src.ptr() + b.start as usize, la as usize) == 0;
 }
 
-fn span_is(src: str, s: tok::Span, lit: str) bool {
+const fn span_is(src: str, s: tok::Span, lit: str) bool {
     let n = lit.len();
     if (s.end - s.start) as usize != n {
         return false;
@@ -145,7 +145,7 @@ fn is_builtin_type(src: str, s: tok::Span) bool {
     return builtin_index(src, s) >= 0;
 }
 
-fn symbol_key(hash: u32, ns: u8) u64 {
+const fn symbol_key(hash: u32, ns: u8) u64 {
     return ns as u64 << 32 | hash as u64;
 }
 
@@ -181,11 +181,11 @@ extend Resolver {
 
     // The i-th element of `list` -- refetched each call so a closure-capture commit that grows ast.children
     // never leaves a dangling base pointer mid-iteration.
-    fn child(self: &Self, list: NodeList, i: u32) NodeId {
+    const fn child(self: &Self, list: NodeList, i: u32) NodeId {
         return unsafe self.ast.list(list)[i as usize];
     }
 
-    fn name_span(self: &Self, name_node: NodeId) tok::Span {
+    const fn name_span(self: &Self, name_node: NodeId) tok::Span {
         return self.ast.at_const(name_node).as_data.name.text;
     }
 
@@ -1451,7 +1451,7 @@ extend Resolver {
         }
     }
 
-    fn package_file(self: &Self) str {
+    const fn package_file(self: &Self) str {
         if self.package == null {
             return "";
         }
@@ -1476,12 +1476,14 @@ extend Resolver {
         self.scope_exit();
         if self.lint {
             self.lint_unused();
+            self.lint_dead_stores();
+            self.lint_unused_labels();
         }
         let fstr = self.package_file();
         self.errors.finalize(self.source, fstr);
     }
 
-    pub fn has_errors(self: &Self) bool {
+    pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     pub fn log_errors(self: &Self) {
@@ -1491,7 +1493,7 @@ extend Resolver {
     // ---- lint: unused local variables and parameters --------------------------------------------
     // A decl is "used" when any node's resolution points at it. Only lets, and params of fns/closures
     // that have bodies, are considered; `self` and `_`-prefixed names opt out.
-    fn lint_name_span(self: &Self, name: NodeId) tok::Span {
+    const fn lint_name_span(self: &Self, name: NodeId) tok::Span {
         return self.ast.at_const(name).as_data.name.text;
     }
     fn lint_warn_unused(self: &mut Self, what: str, name: NodeId) {
@@ -1593,6 +1595,201 @@ extend Resolver {
         }
         seen.free();
         used.free();
+    }
+
+    // ---- lint: back-to-back stores -- the first assigned value is overwritten before any read ----
+    // Scope is deliberately tight (zero false positives): the two stores must be ADJACENT statements
+    // of one block, both plain `=` to the same bare local, the second RHS must not read it, and
+    // bindings that are address-taken or closure-captured anywhere are exempt (aliased reads).
+    const fn ds_root_decl(self: &Self, id: NodeId) NodeId {
+        if self.ast.at_const(id).kind != NodeKind::NODE_IDENTIFIER {
+            return NODE_NONE;
+        }
+        let d = self.ast.resolution_def(id);
+        if d.node == NODE_NONE || d.module != self.ast.module {
+            return NODE_NONE;
+        }
+        let k = self.ast.at_const(d.node).kind;
+        if k == NodeKind::NODE_LET || k == NodeKind::NODE_PARAMETER || k == NodeKind::NODE_PATTERN_NAME {
+            return d.node;
+        }
+        return NODE_NONE;
+    }
+
+    // `sid` peeled to a plain `place = value` assignment (through statement-position move/unsafe).
+    fn ds_assign_of(self: &Self, sid: NodeId) NodeId {
+        if self.ast.at_const(sid).kind != NodeKind::NODE_EXPRESSION_STATEMENT {
+            return NODE_NONE;
+        }
+        let mut v = self.ast.at_const(sid).as_data.single.value;
+        while self.ast.at_const(v).kind == NodeKind::NODE_UNARY && (self.ast.at_const(v).as_data.unary.op == TokenType::Move || self.ast.at_const(
+            v,
+        ).as_data.unary.op == TokenType::Unsafe) {
+            v = self.ast.at_const(v).as_data.unary.operand;
+        }
+        if self.ast.at_const(v).kind == NodeKind::NODE_ASSIGNMENT && self.ast.at_const(v).as_data.binary.op == TokenType::Equal {
+            return v;
+        }
+        return NODE_NONE;
+    }
+
+    const fn ds_decl_name(self: &Self, decl: NodeId) tok::Span {
+        let dn = self.ast.at_const(decl);
+        if dn.kind == NodeKind::NODE_LET {
+            return self.lint_name_span(dn.as_data.let_stmt.name);
+        }
+        if dn.kind == NodeKind::NODE_PARAMETER {
+            return self.lint_name_span(dn.as_data.parameter.name);
+        }
+        return self.lint_name_span(dn.as_data.pattern.name);
+    }
+
+    fn lint_dead_stores(self: &mut Self) {
+        let n = self.ast.nodes.len();
+        let mut exempt = Vector::<bool>::new();
+        exempt.reserve(n);
+        for i in 0..n {
+            exempt.push(false);
+        }
+        let mut i: u32 = 1;
+        while i as usize < n {
+            let nd = *self.ast.at_const(i);
+            if nd.kind == NodeKind::NODE_UNARY && nd.as_data.unary.op == TokenType::Ampersand {
+                // the borrowed place's root binding can be read through the alias from anywhere
+                let mut o = nd.as_data.unary.operand;
+                loop {
+                    let ok = self.ast.at_const(o).kind;
+                    if ok == NodeKind::NODE_MEMBER && !self.ast.at_const(o).as_data.member.path {
+                        o = self.ast.at_const(o).as_data.member.object;
+                    } else if ok == NodeKind::NODE_INDEX {
+                        o = self.ast.at_const(o).as_data.index.object;
+                    } else if ok == NodeKind::NODE_UNARY {
+                        o = self.ast.at_const(o).as_data.unary.operand;
+                    } else {
+                        break;
+                    }
+                }
+                let d = self.ds_root_decl(o);
+                if d != NODE_NONE {
+                    exempt.set(d as usize, true);
+                }
+            } else if nd.kind == NodeKind::NODE_CLOSURE {
+                let caps = nd.as_data.closure.captures;
+                for k in 0..caps.len {
+                    let e = unsafe self.ast.list(caps)[k as usize];
+                    if e as usize < n {
+                        exempt.set(e as usize, true);
+                    }
+                    let ed = self.ast.resolution_def(e);
+                    if ed.node != NODE_NONE && ed.module == self.ast.module && ed.node as usize < n {
+                        exempt.set(ed.node as usize, true);
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        i = 1;
+        while i as usize < n {
+            if self.ast.at_const(i).kind != NodeKind::NODE_BLOCK {
+                i = i + 1;
+                continue;
+            }
+            let stmts = self.ast.at_const(i).as_data.block.statements;
+            for j in 1..stmts.len {
+                let s1 = unsafe self.ast.list(stmts)[(j - 1) as usize];
+                let s2 = unsafe self.ast.list(stmts)[j as usize];
+                let a2 = self.ds_assign_of(s2);
+                if a2 == NODE_NONE {
+                    continue;
+                }
+                let decl = self.ds_root_decl(self.ast.at_const(a2).as_data.binary.left);
+                if decl == NODE_NONE || exempt[decl as usize] {
+                    continue;
+                }
+                // first store: `let <decl> = v;` or `<decl> = v;`
+                let mut sp1 = tok::Span::empty();
+                if self.ast.at_const(s1).kind == NodeKind::NODE_LET && s1 == decl && self.ast.at_const(s1).as_data.let_stmt.value != NODE_NONE {
+                    sp1 = self.ast.at_const(s1).span;
+                } else {
+                    let a1 = self.ds_assign_of(s1);
+                    if a1 == NODE_NONE || self.ds_root_decl(self.ast.at_const(a1).as_data.binary.left) != decl {
+                        continue;
+                    }
+                    sp1 = self.ast.at_const(s1).span;
+                }
+                // the second RHS must not read the binding (`x = f(x)` is a read)
+                let rsp = self.ast.at_const(self.ast.at_const(a2).as_data.binary.right).span;
+                let mut read = false;
+                for k in 0..self.ast.resolutions.len() {
+                    let d = self.ast.resolutions[k];
+                    if d.node == decl && d.module == self.ast.module && k != decl as usize {
+                        let ksp = self.ast.at_const(k as NodeId).span;
+                        if ksp.start >= rsp.start && ksp.end <= rsp.end {
+                            read = true;
+                            break;
+                        }
+                    }
+                }
+                if read {
+                    continue;
+                }
+                let nsp = self.ds_decl_name(decl);
+                if nsp.end <= nsp.start || self.source[nsp.start as usize] == b'_' {
+                    continue;
+                }
+                self.errors.warn(
+                    sp1.start,
+                    sp1.end - sp1.start,
+                    format(
+                        "value assigned to '{}' is overwritten before it is read",
+                        diag::span_str(self.source, nsp.start, nsp.end),
+                    ),
+                );
+            }
+            i = i + 1;
+        }
+        exempt.free();
+    }
+
+    // ---- lint: loop labels never targeted by a break/continue ------------------------------------
+    fn lint_unused_labels(self: &mut Self) {
+        let n = self.ast.nodes.len();
+        let mut i: u32 = 1;
+        while i as usize < n {
+            let nd = *self.ast.at_const(i);
+            let mut lsp = tok::Span::empty();
+            if nd.kind == NodeKind::NODE_WHILE {
+                lsp = nd.as_data.while_stmt.label;
+            } else if nd.kind == NodeKind::NODE_FOR {
+                lsp = nd.as_data.for_stmt.label;
+            }
+            if lsp.end > lsp.start {
+                let lt = diag::span_str(self.source, lsp.start, lsp.end);
+                let body = nd.span;
+                let mut used = false;
+                let mut k: u32 = 1;
+                while k as usize < n {
+                    let fk = self.ast.at_const(k).kind;
+                    if fk == NodeKind::NODE_BREAK || fk == NodeKind::NODE_CONTINUE {
+                        let fl = self.ast.at_const(k).as_data.flow.label;
+                        let fsp = self.ast.at_const(k).span;
+                        if fl.end > fl.start && fsp.start >= body.start && fsp.end <= body.end && diag::span_str(
+                            self.source,
+                            fl.start,
+                            fl.end,
+                        ) == lt {
+                            used = true;
+                            break;
+                        }
+                    }
+                    k = k + 1;
+                }
+                if !used {
+                    self.errors.warn(lsp.start, lsp.end - lsp.start, format("unused label '{}'", lt));
+                }
+            }
+            i = i + 1;
+        }
     }
 }
 

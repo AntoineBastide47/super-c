@@ -185,7 +185,7 @@ extend Errors {
             );
             self.errors.set(k, block);
         }
-        let mut empty_note = String::new();
+        let empty_note = String::new();
         for k in 0..self.warns.len() {
             let block = render(
                 self.warns.at(k),

@@ -51,7 +51,7 @@ fn block_msg(block: &String) String {
     let mut out = String::from_str(s.slice(start, end));
     let mut i = end;
     while i < s.len() {
-        let mut ls = i + 1; // line start after the '\n'
+        let ls = i + 1; // line start after the '\n'
         let mut le = ls;
         while le < s.len() && s[le] != b'\n' {
             le += 1;

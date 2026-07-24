@@ -4,9 +4,7 @@
 import stdio;
 import stdlib;
 import string as cstring;
-import lexer::token as tok;
 import lexer::lexer as lex;
-import lexer::token_type as ltt;
 import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;
@@ -279,7 +277,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         let mut applied = false;
         let mut werr = false;
         if !errors && fixes.len() != 0 && pass < 8 {
-            let mut out = apply_lint_fixes(p.modules[lint_mod].source.as_str(), &mut fixes);
+            let out = apply_lint_fixes(p.modules[lint_mod].source.as_str(), &mut fixes);
             let f = stdio::fopen(p.modules[lint_mod].file.as_str(), "wb");
             if f == null {
                 eprintln("lint: cannot write '{}'", path);
@@ -386,7 +384,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
         eprintln("fmt: cannot read '{}'", path);
         return 1;
     }
-    let mut src = src_opt.unwrap();
+    let src = src_opt.unwrap();
 
     let mut out = String::new();
     if format_source(&src, path, 120, &mut out) != 0 {

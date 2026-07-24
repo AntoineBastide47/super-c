@@ -1,10 +1,8 @@
 // External C sources/libs (@c.source/@c.link) collection. Split out of main.spc.
 import stdio;
-import stdlib;
 import string as cstring;
 import lexer::token as tok;
 import lexer::lexer as lex;
-import lexer::token_type as ltt;
 import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;

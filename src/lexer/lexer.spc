@@ -83,32 +83,32 @@ extend Lexer as Free {
     }
 }
 
-fn is_eof(l: &Lexer) bool {
+const fn is_eof(l: &Lexer) bool {
     return l.current >= l.bytes.len();
 }
 
-fn is_id_start(b: u8) bool {
+const fn is_id_start(b: u8) bool {
     return b == '_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z';
 }
 
-fn is_id_part_byte(b: u8) bool {
+const fn is_id_part_byte(b: u8) bool {
     return is_id_start(b) || b >= b'0' && b <= b'9';
 }
 
-fn is_dec(b: u8) bool {
+const fn is_dec(b: u8) bool {
     return b >= b'0' && b <= b'9';
 }
-fn is_hex(b: u8) bool {
+const fn is_hex(b: u8) bool {
     return is_dec(b) || b >= b'A' && b <= b'F' || b >= b'a' && b <= b'f';
 }
-fn is_oct(b: u8) bool {
+const fn is_oct(b: u8) bool {
     return b >= b'0' && b <= b'7';
 }
-fn is_bin(b: u8) bool {
+const fn is_bin(b: u8) bool {
     return b == b'0' || b == b'1';
 }
 
-fn hex_value(b: u8) i32 {
+const fn hex_value(b: u8) i32 {
     if b <= b'9' {
         return b - b'0';
     }
@@ -131,21 +131,21 @@ fn add_match(l: &mut Lexer, expected: u8, matched: TokenType, unmatched: TokenTy
     add_token(l, kind);
 }
 
-fn peek_byte(l: &Lexer) u8 {
+const fn peek_byte(l: &Lexer) u8 {
     if is_eof(l) {
         return EOF_CH;
     }
     return l.bytes.byte_at(l.current);
 }
 
-fn peek_next(l: &Lexer) u8 {
+const fn peek_next(l: &Lexer) u8 {
     if l.current + 1 >= l.bytes.len() {
         return EOF_CH;
     }
     return l.bytes.byte_at(l.current + 1);
 }
 
-fn match_byte(l: &mut Lexer, expected: u8) bool {
+const fn match_byte(l: &mut Lexer, expected: u8) bool {
     if peek_byte(l) != expected {
         return false;
     }
@@ -204,7 +204,7 @@ fn decode_at_b(l: &Lexer, b: u8, current: usize, size: &mut usize) u32 {
     return cp;
 }
 
-fn memeq(p: *const u8, text: str) bool {
+const fn memeq(p: *const u8, text: str) bool {
     return unsafe cstring::memcmp(p, text.ptr(), text.len()) == 0;
 }
 
@@ -720,7 +720,7 @@ fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(
     l.current = i;
 }
 
-fn num_suffix_kind(p: *const u8, n: usize) i32 {
+const fn num_suffix_kind(p: *const u8, n: usize) i32 {
     if n == 3 && (memeq(p, "f32") || memeq(p, "f64")) {
         return 1;
     }
@@ -1200,7 +1200,7 @@ extend Lexer {
         return out;
     }
 
-    pub fn has_errors(self: &Self) bool {
+    pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     pub fn log_errors(self: &Self) {

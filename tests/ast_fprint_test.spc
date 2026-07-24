@@ -349,7 +349,7 @@ fn has(buf: *mut char, needle: str) bool {
 @test
 fn dump() {
     let src = "fn add(a: i32, b: i32) i32 { return a + b; }\n";
-    let mut pr = h::parse_ast(src);
+    let pr = h::parse_ast(src);
     assert(pr.errors == 0, "clean parse");
     let f = unsafe tmpfile();
     assert(f != null, "tmpfile");

@@ -1,5 +1,4 @@
 import string as cstring;
-import stdlib;
 import stdio;
 import lexer::token as tok;
 import lexer::token_type as *;
@@ -217,6 +216,7 @@ pub struct TypeChecker<'a> {
     pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
     pub len_reported: Vector<u64>, // array-length nodes already diagnosed ((module<<32)|node; resolve_type revisits)
     pub lint: bool,
+    pub mut_used: Vector<NodeId>, // bindings whose mutability was actually required (unnecessary-mut lint)
     pub loop_stack: [LoopEntry; 32],
     pub nloops: u32,
     pub loop_floor: u32,
@@ -418,7 +418,7 @@ const fn lit_base_prefix(p: *const u8, len: usize) (u64, usize) {
     return 10u64, 0;
 }
 
-fn hex_digit(c: u8) u32 {
+const fn hex_digit(c: u8) u32 {
     if c <= b'9' {
         return c - b'0';
     }
@@ -473,6 +473,7 @@ extend TypeChecker {
             unsafe_used: 0,
             len_reported: Vector::<u64>::new(),
             lint: false,
+            mut_used: Vector::<NodeId>::new(),
             nloops: 0,
             loop_floor: 0,
             errors: diag::Errors::new(),
@@ -510,66 +511,66 @@ extend TypeChecker {
     }
 
     // ---- ast / source access (raw pointers) ----
-    pub fn cur_ast(self: &Self) *mut Ast {
+    pub const fn cur_ast(self: &Self) *mut Ast {
         return (&self.ast) as *mut Ast;
     }
 
-    pub fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
+    pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != self.ast.module {
             return unsafe &mut (*self.package).modules[m as usize].ast;
         }
         return (&self.ast) as *mut Ast;
     }
-    pub fn mod_src(self: &Self, m: ModuleId) str {
+    pub const fn mod_src(self: &Self, m: ModuleId) str {
         if self.package != null && m != self.ast.module {
             return unsafe (*self.package).modules[m as usize].source.as_str();
         }
         return self.source;
     }
-    pub fn pkg_count(self: &Self) usize {
+    pub const fn pkg_count(self: &Self) usize {
         if self.package == null {
             return 0;
         }
         return unsafe (*self.package).modules.len();
     }
-    fn ceval(self: &Self) *mut ce::ConstEval {
+    const fn ceval(self: &Self) *mut ce::ConstEval {
         if self.package == null {
             return null;
         }
         return (unsafe (*self.package).ceval) as *mut ce::ConstEval;
     }
 
-    pub fn name_span(self: &Self, name_node: NodeId) tok::Span {
+    pub const fn name_span(self: &Self, name_node: NodeId) tok::Span {
         return unsafe (*self.cur_ast()).at_const(name_node).as_data.name.text;
     }
 
-    pub fn type_at(self: &Self, x: TypeId) &Ty {
+    pub const fn type_at(self: &Self, x: TypeId) &Ty {
         return unsafe (*self.cur_ast()).type_at(x);
     }
-    fn at_not_fn(self: &Self, x: TypeId) bool {
+    const fn at_not_fn(self: &Self, x: TypeId) bool {
         return self.type_at(x).kind != TypeKind::TYPE_FUNCTION;
     }
 
     // ---- simple type predicates ----
-    fn is_bool(self: &Self, x: TypeId) bool {
+    const fn is_bool(self: &Self, x: TypeId) bool {
         let y = self.type_at(x);
         return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_BOOL;
     }
-    fn is_int(self: &Self, x: TypeId) bool {
+    const fn is_int(self: &Self, x: TypeId) bool {
         let y = self.type_at(x);
         return y.kind == TypeKind::TYPE_BUILTIN && bt_is_int(y.as_data.builtin);
     }
-    fn is_numeric(self: &Self, x: TypeId) bool {
+    const fn is_numeric(self: &Self, x: TypeId) bool {
         let y = self.type_at(x);
         return y.kind == TypeKind::TYPE_BUILTIN && (bt_is_int(y.as_data.builtin) || bt_is_float(y.as_data.builtin) || bt_is_complex(
             y.as_data.builtin,
         ));
     }
-    fn is_void_type(self: &Self, x: TypeId) bool {
+    const fn is_void_type(self: &Self, x: TypeId) bool {
         let y = self.type_at(x);
         return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID;
     }
-    fn bt_of(self: &Self, x: TypeId) BuiltinType {
+    const fn bt_of(self: &Self, x: TypeId) BuiltinType {
         let y = self.type_at(x);
         if y.kind == TypeKind::TYPE_BUILTIN {
             return y.as_data.builtin;
@@ -642,7 +643,7 @@ extend TypeChecker {
     }
 
     // ---- loop stack ----
-    pub fn tc_loop_push(self: &mut Self, label: tok::Span, node: NodeId, value_loop: bool) i32 {
+    pub const fn tc_loop_push(self: &mut Self, label: tok::Span, node: NodeId, value_loop: bool) i32 {
         if self.nloops >= 32 {
             return -1;
         }
@@ -731,7 +732,7 @@ extend TypeChecker {
         }
         return ast_numeric_suffix(self.source, n.as_data.literal.raw.start, n.as_data.literal.raw.end, null) != BuiltinType::BT_COUNT;
     }
-    fn is_integer_literal_node(self: &Self, id: NodeId) bool {
+    const fn is_integer_literal_node(self: &Self, id: NodeId) bool {
         if id == NODE_NONE {
             return false;
         }
@@ -816,7 +817,7 @@ extend TypeChecker {
 
     // An operation that requires 'unsafe': counts against the innermost active marker (for the
     // unnecessary-unsafe lint) and reports whether the requirement is unmet.
-    fn tc_needs_unsafe(self: &mut Self) bool {
+    const fn tc_needs_unsafe(self: &mut Self) bool {
         self.unsafe_used = self.unsafe_used + 1;
         return self.unsafe_depth == 0;
     }
@@ -944,7 +945,7 @@ extend TypeChecker {
         return ps.len as i32;
     }
 
-    fn receiver_type_eq(self: &Self, a: TypeId, b: TypeId) bool {
+    const fn receiver_type_eq(self: &Self, a: TypeId, b: TypeId) bool {
         if a == b {
             return true;
         }
@@ -986,7 +987,7 @@ extend TypeChecker {
         return NODE_NONE;
     }
 
-    fn fn_is_capturing(self: &Self, fid: TypeId) bool {
+    const fn fn_is_capturing(self: &Self, fid: TypeId) bool {
         let fy = self.type_at(fid);
         if fy.kind != TypeKind::TYPE_FUNCTION {
             return false;
@@ -1032,7 +1033,7 @@ extend TypeChecker {
         return false;
     }
 
-    fn ret_eq(self: &Self, a: TypeId, b: TypeId) bool {
+    const fn ret_eq(self: &Self, a: TypeId, b: TypeId) bool {
         if a == b {
             return true;
         }
@@ -1095,25 +1096,25 @@ pub const fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
     }
     return b;
 }
-pub fn if_ty(c: bool, a: TypeId, b: TypeId) TypeId {
+pub const fn if_ty(c: bool, a: TypeId, b: TypeId) TypeId {
     if c {
         return a;
     }
     return b;
 }
-fn src_at(p: str, off: u32) *const char {
+const fn src_at(p: str, off: u32) *const char {
     return (unsafe (p.ptr() + off as usize)) as *const char;
 }
 
 // The Ast to read for module `m`'s decls when rendering against the in-flight ast `a` (mirrors
 // TypeChecker::mod_ast): foreign modules come from the package, the current one from `a` itself.
-fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
+const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
     if pkg != null && m != unsafe (*a).module {
         return unsafe &(*pkg).modules[m as usize].ast;
     }
     return a;
 }
-fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: ModuleId) str {
+const fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: ModuleId) str {
     if pkg != null && m != unsafe (*a).module {
         return unsafe (*pkg).modules[m as usize].source.as_str();
     }
@@ -1419,7 +1420,7 @@ extend TypeChecker {
         return TYPE_ERROR;
     }
 
-    fn agg_has_default_at(self: &Self, dmod: ModuleId, dn: NodeId, from: u32) bool {
+    const fn agg_has_default_at(self: &Self, dmod: ModuleId, dn: NodeId, from: u32) bool {
         let da = self.mod_ast(dmod);
         let gens = unsafe (*da).at_const(dn).as_data.aggregate.generics;
         if from >= gens.len {
@@ -1537,7 +1538,7 @@ extend TypeChecker {
         }
         return self.prelude_instance_args_hit(tid, self.ph_t4, out, maxn);
     }
-    fn range_instance_elem(self: &Self, tid: TypeId) TypeId {
+    const fn range_instance_elem(self: &Self, tid: TypeId) TypeId {
         if self.package == null {
             return TYPE_NONE;
         }
@@ -1552,7 +1553,7 @@ extend TypeChecker {
         return TYPE_NONE;
     }
     // 0 not a slice, 1 Slice<E>, 2 SliceMut<E>; sets *elem.
-    fn slice_kind(self: &Self, tid: TypeId, elem: *mut TypeId) i32 {
+    const fn slice_kind(self: &Self, tid: TypeId, elem: *mut TypeId) i32 {
         if self.package == null {
             return 0;
         }
@@ -1575,7 +1576,7 @@ extend TypeChecker {
         }
         return kind;
     }
-    fn tc_box_of(self: &Self, y: &Ty, inner: *mut TypeId, global_alloc: *mut bool) bool {
+    const fn tc_box_of(self: &Self, y: &Ty, inner: *mut TypeId, global_alloc: *mut bool) bool {
         if y.kind != TypeKind::TYPE_INSTANCE || self.package == null {
             return false;
         }
@@ -2261,7 +2262,7 @@ extend TypeChecker {
         return result;
     }
 
-    fn dyn_method(self: &Self, imod: ModuleId, mnode: NodeId) bool {
+    const fn dyn_method(self: &Self, imod: ModuleId, mnode: NodeId) bool {
         let ia = self.mod_ast(imod);
         let mn = unsafe (*ia).at_const(mnode);
         if mn.kind != NodeKind::NODE_FUNCTION || mn.as_data.function.params.len == 0 {
@@ -2479,7 +2480,7 @@ extend TypeChecker {
             self.ext_scope.clear();
             self.ext_scope.push(self.ast.module);
             if self.package != null {
-                let mut closure = unsafe (*self.package).import_closure(self.ast.module);
+                let closure = unsafe (*self.package).import_closure(self.ast.module);
                 for i in 0..closure.len() {
                     self.ext_scope.push(closure[i]);
                 }
@@ -2488,7 +2489,7 @@ extend TypeChecker {
         }
         return self.n_ext_scope;
     }
-    fn ext_scope_at(self: &Self, i: i32) ModuleId {
+    const fn ext_scope_at(self: &Self, i: i32) ModuleId {
         return self.ext_scope[i as usize];
     }
 
@@ -2515,10 +2516,10 @@ extend TypeChecker {
             }
         }
     }
-    fn ext_items_len(self: &Self, mm: ModuleId) usize {
+    const fn ext_items_len(self: &Self, mm: ModuleId) usize {
         return self.ext_items[mm as usize].len();
     }
-    fn ext_items_at(self: &Self, mm: ModuleId, i: usize) NodeId {
+    const fn ext_items_at(self: &Self, mm: ModuleId, i: usize) NodeId {
         return self.ext_items[mm as usize][i];
     }
 
@@ -2674,7 +2675,7 @@ extend TypeChecker {
     // Method names codegen can synthesize calls to WITHOUT a type-checked call node (assert/format
     // templates, auto-free, operator/index/for lowering, `?` conversions). Marks on these must stay
     // unconditional -- they can be referenced from emitted C that no tc-visible caller explains.
-    fn tc_mark_always_root(self: &Self, d: DefId) bool {
+    const fn tc_mark_always_root(self: &Self, d: DefId) bool {
         let a = self.mod_ast(d.module);
         let f = unsafe (*a).at_const(d.node);
         if f.kind != NodeKind::NODE_FUNCTION {
@@ -2891,7 +2892,7 @@ extend TypeChecker {
         if self.tc_method_ret(self.strip(recv), first) == want {
             return first;
         }
-        let mut cands = Defs8 {};
+        let cands = Defs8 {};
         let n = self.find_method_all(m, decl, name, (&cands[0]) as *mut DefId, 8);
         if n < 2 {
             return first;
@@ -3324,7 +3325,7 @@ extend TypeChecker {
         return true;
     }
 
-    fn is_free_iface(self: &Self, tr: DefId) bool {
+    const fn is_free_iface(self: &Self, tr: DefId) bool {
         if tr.node == NODE_NONE {
             return false;
         }
@@ -3365,8 +3366,8 @@ extend TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(
             self.strip(ty),
@@ -3463,8 +3464,8 @@ extend TypeChecker {
         }
         let mut tm: ModuleId = 0;
         let mut td = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(
             self.strip(target),
@@ -3547,8 +3548,8 @@ extend TypeChecker {
         }
         let mut m: ModuleId = 0;
         let mut decl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(
             self.strip(want),
@@ -3657,8 +3658,8 @@ extend TypeChecker {
         }
         let mut tmod: ModuleId = 0;
         let mut tdecl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(src, &mut tmod, &mut tdecl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
             if sy.kind == TypeKind::TYPE_BUILTIN && self.package != null && unsafe (*self.package).builtin_decl(
@@ -4172,7 +4173,7 @@ extend TypeChecker {
     }
 
     // ---- places / assignability ----
-    fn tc_path_static_mut(self: &Self, id: NodeId) bool {
+    const fn tc_path_static_mut(self: &Self, id: NodeId) bool {
         let n = unsafe (*self.cur_ast()).at_const(id);
         let mut d = unsafe (*self.cur_ast()).resolution_def(id);
         if d.node == NODE_NONE {
@@ -4202,20 +4203,39 @@ extend TypeChecker {
             if dn.kind == NodeKind::NODE_CONST {
                 return dn.as_data.const_def.is_static_mut;
             }
+            // every caller is a genuine mutation requirement (assignment LHS, `&mut`, `&mut self`
+            // receiver, mut-slice coercion): a positive answer through a local binding marks it for
+            // the unnecessary-mut lint
             if dn.kind == NodeKind::NODE_LET {
-                return dn.as_data.let_stmt.is_mutable;
+                if dn.as_data.let_stmt.is_mutable {
+                    self.tc_mark_mut_used(d);
+                    return true;
+                }
+                return false;
             }
             if dn.kind == NodeKind::NODE_PARAMETER {
-                return dn.as_data.parameter.is_mutable;
+                if dn.as_data.parameter.is_mutable {
+                    self.tc_mark_mut_used(d);
+                    return true;
+                }
+                return false;
             }
             if dn.kind == NodeKind::NODE_PATTERN_NAME {
-                return unsafe (*a).at_const(dn.as_data.pattern.name).as_data.name.is_mutable;
+                if unsafe (*a).at_const(dn.as_data.pattern.name).as_data.name.is_mutable {
+                    self.tc_mark_mut_used(d);
+                    return true;
+                }
+                return false;
             }
             if dn.kind == NodeKind::NODE_IDENTIFIER {
                 let letn = unsafe (*a).resolution(d);
-                return letn != NODE_NONE && unsafe (*a).at_const(letn).kind == NodeKind::NODE_LET && unsafe (*a).at_const(
+                if letn != NODE_NONE && unsafe (*a).at_const(letn).kind == NodeKind::NODE_LET && unsafe (*a).at_const(
                     letn,
-                ).as_data.let_stmt.is_mutable;
+                ).as_data.let_stmt.is_mutable {
+                    self.tc_mark_mut_used(letn);
+                    return true;
+                }
+                return false;
             }
             return false;
         }
@@ -4258,8 +4278,8 @@ extend TypeChecker {
             if nk == NodeKind::NODE_INDEX && (ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE) {
                 let mut om: ModuleId = 0;
                 let mut od = NODE_NONE;
-                let mut gp = Defs8 {};
-                let mut ga = Tys8 {};
+                let gp = Defs8 {};
+                let ga = Tys8 {};
                 let mut gn: i32 = 0;
                 if !self.aggregate_of(oty, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
                     return false;
@@ -4399,8 +4419,8 @@ extend TypeChecker {
     fn tc_type_is_union(self: &Self, ty: TypeId) bool {
         let mut m: ModuleId = 0;
         let mut d = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if ty == TYPE_NONE || !self.aggregate_of(
             ty,
@@ -4624,7 +4644,7 @@ extend TypeChecker {
             nid = nid + 1;
         }
     }
-    fn tc_note_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
+    const fn tc_note_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
         if self.last_use_built && decl as usize < self.last_use.len() && ref_id > self.last_use[decl as usize] {
             self.last_use.set(decl as usize, ref_id);
         }
@@ -5058,8 +5078,8 @@ extend TypeChecker {
         }
         let mut rmod: ModuleId = 0;
         let mut rdecl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut sn: i32 = 0;
         let agok = self.aggregate_of(
             self.strip(recv),
@@ -5149,7 +5169,7 @@ extend TypeChecker {
     }
 }
 
-fn arith_method_name(op: TokenType) str<'static> {
+const fn arith_method_name(op: TokenType) str<'static> {
     if op == TokenType::Plus {
         return "add";
     }
@@ -5221,6 +5241,19 @@ extend TypeChecker {
             return opnd;
         }
         if op == TokenType::Star {
+            // Lint: `*&x` (any mutability) yields the place/value x itself -- both tokens cancel.
+            if self.lint && unsafe (*a).at_const(operand).kind == NodeKind::NODE_UNARY && unsafe (*a).at_const(operand).as_data.unary.op == TokenType::Ampersand {
+                let usp = unsafe (*a).at_const(id).span;
+                self.errors.warn(
+                    usp.start,
+                    usp.end - usp.start,
+                    format("unnecessary '*&': the expression can be used directly"),
+                );
+                self.tc_lint_pair_fix(
+                    usp.start,
+                    unsafe (*a).at_const(unsafe (*a).at_const(operand).as_data.unary.operand).span.start,
+                );
+            }
             if opnd == TYPE_NONE {
                 return TYPE_NONE;
             }
@@ -5236,6 +5269,23 @@ extend TypeChecker {
         }
         if op == TokenType::Ampersand {
             let mut2 = qual == TypeQualifier::TYPE_QUAL_MUT;
+            // Lint: `&*r` on a shared reference re-produces r -- both tokens cancel. (`&mut *r`
+            // reborrows and `&*p` on a raw pointer materializes a reference: both meaningful.)
+            if self.lint && !mut2 && unsafe (*a).at_const(operand).kind == NodeKind::NODE_UNARY && unsafe (*a).at_const(
+                operand,
+            ).as_data.unary.op == TokenType::Star {
+                let inner = unsafe (*a).at_const(operand).as_data.unary.operand;
+                let it = unsafe (*a).type_of(inner);
+                if it != TYPE_NONE && self.type_at(it).kind == TypeKind::TYPE_REFERENCE && self.type_at(it).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
+                    let usp = unsafe (*a).at_const(id).span;
+                    self.errors.warn(
+                        usp.start,
+                        usp.end - usp.start,
+                        format("unnecessary '&*': the reference can be used directly"),
+                    );
+                    self.tc_lint_pair_fix(usp.start, unsafe (*a).at_const(inner).span.start);
+                }
+            }
             if mut2 && self.is_place(operand) && !self.is_assignable(operand) {
                 let osp = unsafe (*a).at_const(operand).span;
                 self.errors.emit(
@@ -5489,8 +5539,8 @@ extend TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         unsafe *out = ls;
         if self.aggregate_of(ls, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
@@ -5619,8 +5669,8 @@ extend TypeChecker {
         if ls != TYPE_NONE && (self.type_at(ls).kind == TypeKind::TYPE_STRUCT || self.type_at(ls).kind == TypeKind::TYPE_INSTANCE) {
             let mut om: ModuleId = 0;
             let mut od = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut gn: i32 = 0;
             if self.aggregate_of(ls, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
                 let mut mm = "eq";
@@ -5714,8 +5764,8 @@ extend TypeChecker {
         let sp = unsafe (*a).at_const(id).span;
         let mut amod: ModuleId = 0;
         let mut adecl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         let inst = self.aggregate_of(
             enum_ty,
@@ -5753,7 +5803,7 @@ extend TypeChecker {
         return enum_ty;
     }
 
-    fn tc_is_iface_assoc_call(self: &Self, e: NodeId) bool {
+    const fn tc_is_iface_assoc_call(self: &Self, e: NodeId) bool {
         let a = self.cur_ast();
         let en = unsafe (*a).at_const(e);
         if en.kind != NodeKind::NODE_CALL {
@@ -5812,8 +5862,8 @@ extend TypeChecker {
             }
             let mut rm: ModuleId = 0;
             let mut rd = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut gn: i32 = 0;
             let agok = extnode != NODE_NONE && self.aggregate_of(
                 self.strip(unsafe (*self.cur_ast()).type_of(cnn.as_data.member.object)),
@@ -5849,8 +5899,8 @@ extend TypeChecker {
     fn iter_elem_type(self: &mut Self, it: TypeId) TypeId {
         let mut im: ModuleId = 0;
         let mut idl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(it, &mut im, &mut idl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
             return TYPE_NONE;
@@ -5956,8 +6006,8 @@ extend TypeChecker {
         if !comparable && (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE || y.kind == TypeKind::TYPE_ENUM) {
             let mut om: ModuleId = 0;
             let mut od = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut gn: i32 = 0;
             if self.aggregate_of(base, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
                 comparable = self.find_method_cstr(om, od, "eq").node != NODE_NONE;
@@ -6016,8 +6066,8 @@ extend TypeChecker {
                         if bs[b as usize].n != 0 {
                             let mut tm: ModuleId = 0;
                             let mut td = NODE_NONE;
-                            let mut sp = Defs8 {};
-                            let mut sa = Tys8 {};
+                            let sp = Defs8 {};
+                            let sa = Tys8 {};
                             let mut sn: i32 = 0;
                             if self.aggregate_of(
                                 self.strip(unsafe bound[i as usize]),
@@ -6146,8 +6196,8 @@ extend TypeChecker {
                     if rty.kind == TypeKind::TYPE_STRUCT || rty.kind == TypeKind::TYPE_INSTANCE {
                         let mut om: ModuleId = 0;
                         let mut od = NODE_NONE;
-                        let mut gp = Defs8 {};
-                        let mut ga = Tys8 {};
+                        let gp = Defs8 {};
+                        let ga = Tys8 {};
                         let mut gn: i32 = 0;
                         if self.aggregate_of(
                             self.strip(rt),
@@ -6437,8 +6487,8 @@ extend TypeChecker {
             }
             let mut rmod: ModuleId = 0;
             let mut rdecl = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut sn: i32 = 0;
             let mdfn = md.node != NODE_NONE && unsafe (*self.mod_ast(md.module)).at_const(md.node).kind == NodeKind::NODE_FUNCTION;
             let agok = mdfn && self.aggregate_of(
@@ -6550,8 +6600,8 @@ extend TypeChecker {
             if ob.node != NODE_NONE && md.node != NODE_NONE && ob_kind == NodeKind::NODE_INTERFACE {
                 let mut em: ModuleId = 0;
                 let mut ed = NODE_NONE;
-                let mut egp2 = Defs8 {};
-                let mut ega2 = Tys8 {};
+                let egp2 = Defs8 {};
+                let ega2 = Tys8 {};
                 let mut egn2: i32 = 0;
                 let mut agg = false;
                 if want != TYPE_NONE {
@@ -7020,7 +7070,7 @@ extend TypeChecker {
     }
 }
 
-pub fn if_u8(c: bool, a: u8, b: u8) u8 {
+pub const fn if_u8(c: bool, a: u8, b: u8) u8 {
     if c {
         return a;
     }
@@ -7042,8 +7092,8 @@ extend TypeChecker {
         let base = self.strip(obj);
         let mut bmod: ModuleId = 0;
         let mut bdecl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if self.aggregate_of(base, &mut bmod, &mut bdecl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
             let mut mhit = DefId { module: 0, node: NODE_NONE };
@@ -7200,8 +7250,8 @@ extend TypeChecker {
                 }
                 let mut cm: ModuleId = 0;
                 let mut cd = NODE_NONE;
-                let mut cgp = Defs8 {};
-                let mut cga = Tys8 {};
+                let cgp = Defs8 {};
+                let cga = Tys8 {};
                 let mut cgn: i32 = 0;
                 if !self.aggregate_of(
                     cur,
@@ -7250,8 +7300,8 @@ extend TypeChecker {
                 nseen = nseen + 1;
                 let mut tm: ModuleId = 0;
                 let mut td = NODE_NONE;
-                let mut tgp = Defs8 {};
-                let mut tga = Tys8 {};
+                let tgp = Defs8 {};
+                let tga = Tys8 {};
                 let mut tgn: i32 = 0;
                 let mut mhit = DefId { module: 0, node: NODE_NONE };
                 let tty = *self.type_at(target);
@@ -7290,8 +7340,8 @@ extend TypeChecker {
                         for hi in 0..du.n {
                             let mut hm: ModuleId = 0;
                             let mut hd = NODE_NONE;
-                            let mut hgp = Defs8 {};
-                            let mut hga = Tys8 {};
+                            let hgp = Defs8 {};
+                            let hga = Tys8 {};
                             let mut hgn: i32 = 0;
                             self.aggregate_of(
                                 unsafe du.recv[hi as usize],
@@ -7453,8 +7503,8 @@ extend TypeChecker {
         if bdecl != NODE_NONE && bd_kind == NodeKind::NODE_INTERFACE && expected != TYPE_NONE {
             let mut emod: ModuleId = 0;
             let mut edecl = NODE_NONE;
-            let mut egp = Defs8 {};
-            let mut ega = Tys8 {};
+            let egp = Defs8 {};
+            let ega = Tys8 {};
             let mut egn: i32 = 0;
             if self.aggregate_of(
                 self.strip(expected),
@@ -7519,8 +7569,8 @@ extend TypeChecker {
         let sty = self.type_of_type_node(stn);
         let mut smod: ModuleId = 0;
         let mut decl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(sty, &mut smod, &mut decl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
             decl = NODE_NONE;
@@ -7783,8 +7833,8 @@ extend TypeChecker {
         let base = self.strip(scrut);
         let mut emod: ModuleId = 0;
         let mut edecl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
+        let gp = Defs8 {};
+        let ga = Tys8 {};
         let mut gn: i32 = 0;
         let agok = self.aggregate_of(
             base,
@@ -8084,8 +8134,8 @@ extend TypeChecker {
             } else if ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE {
                 let mut om: ModuleId = 0;
                 let mut od = NODE_NONE;
-                let mut gp = Defs8 {};
-                let mut ga = Tys8 {};
+                let gp = Defs8 {};
+                let ga = Tys8 {};
                 let mut gn: i32 = 0;
                 let sp = unsafe (*a).at_const(obj_n).span;
                 if self.aggregate_of(
@@ -8224,8 +8274,8 @@ extend TypeChecker {
                 overloaded = true;
                 let mut om: ModuleId = 0;
                 let mut od = NODE_NONE;
-                let mut gp = Defs8 {};
-                let mut ga = Tys8 {};
+                let gp = Defs8 {};
+                let ga = Tys8 {};
                 let mut gn: i32 = 0;
                 let sp = unsafe (*a).at_const(obj_n).span;
                 if self.aggregate_of(
@@ -8286,12 +8336,34 @@ extend TypeChecker {
         if bind_ref == 0 {}
         let arms = unsafe (*a).at_const(id).as_data.match_expr.arms;
         let mut first = true;
-        let mut ovf = false;
+        let ovf = false;
+        let mut caught = false;
         let mut result = TYPE_NONE;
         for i in 0..arms.len {
             let aid = unsafe (*a).list(arms)[i as usize];
             let arm = unsafe (*a).at_const(aid).as_data.match_arm;
+            // Lint: an unguarded wildcard / bare-binding arm catches everything; later arms never run.
+            if caught {
+                let psp = unsafe (*a).at_const(arm.pattern).span;
+                self.errors.warn(
+                    psp.start,
+                    psp.end - psp.start,
+                    format("unreachable arm: a previous arm matches every value"),
+                );
+                caught = false; // once per switch
+            }
             self.check_pattern(arm.pattern, scrut, bind_ref);
+            if self.lint && arm.guard == NODE_NONE && !caught {
+                let pk = unsafe (*a).at_const(arm.pattern).kind;
+                if pk == NodeKind::NODE_PATTERN_WILDCARD {
+                    caught = true;
+                } else if pk == NodeKind::NODE_PATTERN_NAME && unsafe (*a).at_const(arm.pattern).as_data.pattern.children.len == 0 {
+                    let d = unsafe (*a).resolution_def(unsafe (*a).at_const(arm.pattern).as_data.pattern.name);
+                    caught = d.node == NODE_NONE || d.module as usize < self.pkg_count() && unsafe (*self.mod_ast(
+                        d.module,
+                    )).at_const(d.node).kind != NodeKind::NODE_VARIANT;
+                }
+            }
             let g = self.check_expr(arm.guard);
             if arm.guard != NODE_NONE && g != TYPE_NONE && !self.is_bool(g) {
                 let sp = unsafe (*a).at_const(arm.guard).span;
@@ -9330,8 +9402,27 @@ extend TypeChecker {
                 // Stable across the recursion: children storage is append-only and nothing commits
                 // AST nodes during checking (interning goes to the separate type/instance pools).
                 let sp = unsafe (*a).list(stmts);
+                let mut diverged = false;
                 for i in 0..stmts.len {
-                    self.check_stmt(unsafe sp[i as usize]);
+                    let sid = unsafe sp[i as usize];
+                    let sk = unsafe (*a).at_const(sid).kind;
+                    // Lint: the first statement after a diverging one (return/break/continue, or an
+                    // expression of type `!`) never executes. static_asserts are compile-time: exempt.
+                    if diverged && sk != NodeKind::NODE_STATIC_ASSERT {
+                        let ssp = unsafe (*a).at_const(sid).span;
+                        self.errors.warn(ssp.start, ssp.end - ssp.start, format("unreachable statement"));
+                        diverged = false; // once per block
+                    }
+                    self.check_stmt(sid);
+                    if self.lint && !diverged {
+                        if sk == NodeKind::NODE_RETURN || sk == NodeKind::NODE_BREAK || sk == NodeKind::NODE_CONTINUE {
+                            diverged = true;
+                        } else if sk == NodeKind::NODE_EXPRESSION_STATEMENT {
+                            let v = unsafe (*a).at_const(sid).as_data.single.value;
+                            let vt = unsafe (*a).type_of(v);
+                            diverged = vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_NEVER;
+                        }
+                    }
                 }
                 while self.ndefers != 0 && unsafe self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
                     self.ndefers = self.ndefers - 1;
@@ -9499,8 +9590,8 @@ extend TypeChecker {
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
             let mut bmod: ModuleId = 0;
             let mut decl = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut gn: i32 = 0;
             let agok = self.aggregate_of(
                 self.strip(expected),
@@ -9529,8 +9620,8 @@ extend TypeChecker {
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
             let mut bmod: ModuleId = 0;
             let mut decl = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut gn: i32 = 0;
             let agg = self.aggregate_of(
                 base,
@@ -9605,8 +9696,8 @@ extend TypeChecker {
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
             let mut bmod: ModuleId = 0;
             let mut decl = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut gn: i32 = 0;
             let agg = self.aggregate_of(
                 base,
@@ -9646,8 +9737,8 @@ extend TypeChecker {
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
             let mut bmod: ModuleId = self.ast.module;
             let mut decl0 = NODE_NONE;
-            let mut gp = Defs8 {};
-            let mut ga = Tys8 {};
+            let gp = Defs8 {};
+            let ga = Tys8 {};
             let mut gn: i32 = 0;
             let agok = self.aggregate_of(
                 base,
@@ -10070,6 +10161,102 @@ extend TypeChecker {
         }
     }
 
+    // ---- lint: bindings declared `mut` whose mutability is never required ------------------------
+    // is_assignable marks every binding whose mutability actually answered a requirement; a `mut`
+    // binding that is referenced but never marked can drop the keyword. Unreferenced bindings are
+    // the unused-variable lint's business (and cover @platform-dropped items, which never resolve).
+    @c.cold
+    fn tc_mark_mut_used(self: &mut Self, decl: NodeId) {
+        if !self.lint {
+            return;
+        }
+        for i in 0..self.mut_used.len() {
+            if self.mut_used[i] == decl {
+                return;
+            }
+        }
+        self.mut_used.push(decl);
+    }
+
+    // Delete [from, to) when it holds no grouping parens (`*(&x)` would leave text unbalanced).
+    @c.cold
+    fn tc_lint_pair_fix(self: &mut Self, from: u32, to: u32) {
+        let mut j = from;
+        while j < to {
+            if self.source[j as usize] == b'(' || self.source[j as usize] == b')' {
+                return;
+            }
+            j = j + 1;
+        }
+        if from < to {
+            self.errors.fix(from, to, 0);
+        }
+    }
+
+    // Attach the `mut ` deletion fix: the keyword sits just before the name, across whitespace.
+    @c.cold
+    fn tc_lint_mut_fix(self: &mut Self, nsp: tok::Span) {
+        let mut i = nsp.start as usize;
+        while i > 0 && (self.source[i - 1] == b' ' || self.source[i - 1] == b'\t' || self.source[i - 1] == b'\n' || self.source[i - 1] == b'\r') {
+            i = i - 1;
+        }
+        if i >= 3 && self.source[i - 3] == b'm' && self.source[i - 2] == b'u' && self.source[i - 1] == b't' {
+            self.errors.fix((i - 3) as u32, nsp.start, 0);
+        }
+    }
+
+    fn tc_lint_unneeded_mut(self: &mut Self) {
+        let a = self.cur_ast();
+        let n = unsafe (*a).nodes.len();
+        let mut used = Vector::<bool>::new();
+        let mut marked = Vector::<bool>::new();
+        used.reserve(n);
+        marked.reserve(n);
+        for i in 0..n {
+            used.push(false);
+            marked.push(false);
+        }
+        for i in 0..unsafe (*a).resolutions.len() {
+            let d = unsafe (*a).resolutions[i];
+            if d.node != NODE_NONE && d.module == self.ast.module && d.node as usize < n && i != d.node as usize {
+                used.set(d.node as usize, true);
+            }
+        }
+        for i in 0..self.mut_used.len() {
+            if self.mut_used[i] as usize < n {
+                marked.set(self.mut_used[i] as usize, true);
+            }
+        }
+        let mut i: u32 = 1;
+        while i as usize < n {
+            let nd = *unsafe (*a).at_const(i);
+            let mut nn = NODE_NONE;
+            if nd.kind == NodeKind::NODE_LET && nd.as_data.let_stmt.is_mutable && nd.as_data.let_stmt.name != NODE_NONE {
+                nn = nd.as_data.let_stmt.name;
+            } else if nd.kind == NodeKind::NODE_PARAMETER && nd.as_data.parameter.is_mutable {
+                nn = nd.as_data.parameter.name;
+            } else if nd.kind == NodeKind::NODE_PATTERN_NAME && nd.as_data.pattern.name != NODE_NONE && unsafe (*a).at_const(
+                nd.as_data.pattern.name,
+            ).as_data.name.is_mutable {
+                nn = nd.as_data.pattern.name;
+            }
+            if nn != NODE_NONE && used[i as usize] && !marked[i as usize] {
+                let sp = unsafe (*a).at_const(nn).as_data.name.text;
+                if sp.end > sp.start && self.source[sp.start as usize] != b'_' {
+                    self.errors.warn(
+                        sp.start,
+                        sp.end - sp.start,
+                        format("'{}' does not need to be mutable", diag::span_str(self.source, sp.start, sp.end)),
+                    );
+                    self.tc_lint_mut_fix(sp);
+                }
+            }
+            i = i + 1;
+        }
+        used.free();
+        marked.free();
+    }
+
     pub fn check(self: &mut Self) {
         unsafe (*self.cur_ast()).init_types();
         let items = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).root).as_data.program.items;
@@ -10077,6 +10264,9 @@ extend TypeChecker {
             self.check_item(unsafe (*self.cur_ast()).list(items)[i as usize]);
         }
         self.close_instances();
+        if self.lint {
+            self.tc_lint_unneeded_mut();
+        }
         let mut file: str = "";
         if self.package != null && self.ast.module as usize < self.pkg_count() {
             file = unsafe (*self.package).modules[self.ast.module as usize].file.as_str();
@@ -10084,7 +10274,7 @@ extend TypeChecker {
         self.errors.finalize(self.source, file);
     }
 
-    pub fn has_errors(self: &Self) bool {
+    pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     pub fn log_errors(self: &Self) {
@@ -10097,6 +10287,7 @@ extend TypeChecker as Free {
         self.ext_scope.free();
         self.ext_items.free();
         self.len_reported.free();
+        self.mut_used.free();
         self.ext_items_built.free();
         self.binding_depth.free();
         self.last_use.free();
@@ -10113,7 +10304,7 @@ extend TypeChecker as Free {
     }
 }
 
-fn if_bool(c: bool, a: bool, b: bool) bool {
+const fn if_bool(c: bool, a: bool, b: bool) bool {
     if c {
         return a;
     }
@@ -10125,7 +10316,7 @@ const fn if_u32(c: bool, a: u32, b: u32) u32 {
     }
     return b;
 }
-fn if_nl(c: bool, a: NodeList, b: NodeList) NodeList {
+const fn if_nl(c: bool, a: NodeList, b: NodeList) NodeList {
     if c {
         return a;
     }

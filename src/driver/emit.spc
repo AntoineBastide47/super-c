@@ -1,14 +1,12 @@
 // Global-phase pipeline: live-set pruning, per-module stages, platform filter, run_package.
 import stdio;
 import stdlib;
-import string as cstring;
 import lexer::token as tok;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
 import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;
-import driver_shim as shim;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
@@ -812,6 +810,360 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
     }
 }
 
+// --lint: unused imports. An import is removable when neither its target module nor anything in the
+// target's transitive closure defines a symbol this file resolves to (own-module hits are excluded:
+// legal import cycles would otherwise self-justify). Modules whose closure carries link-time side
+// effects (@c.source/@c.link) or extends a foreign type (methods/conformances reachable without a
+// resolution edge) are exempt.
+// A module with @platform-gated items is exempt from cross-item unused lints (imports, members):
+// the dropped items' uses are invisible under the current target, so a per-target verdict would
+// contradict another target's.
+fn module_platform_gated(a: *const Ast) bool {
+    for i in 0..unsafe (*a).attrs.len() {
+        if unsafe (*a).attrs.at(i).kind == AttrKind::ATTR_PLATFORM as u8 {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
+    if mid as usize >= p.modules.len() || !p.modules[mid as usize].has_ast {
+        return true; // unknowable: keep the import
+    }
+    let a = mod_ast_c(p, mid);
+    for i in 0..unsafe (*a).attrs.len() {
+        let k = unsafe (*a).attrs.at(i).kind;
+        if k == AttrKind::ATTR_C_SOURCE as u8 || k == AttrKind::ATTR_C_LINK as u8 {
+            return true;
+        }
+    }
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+    for i in 0..items.len {
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
+            let d = unsafe (*a).resolution_def(unsafe (*a).at_const(iid).as_data.extend_def.target_type);
+            if d.node == NODE_NONE || d.module != mid {
+                return true; // extends a foreign (or unresolved) type
+            }
+        }
+    }
+    return false;
+}
+
+fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
+    let nm = p.modules.len();
+    for m in 0..nm {
+        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        if module_platform_gated(a) {
+            continue;
+        }
+        let mut usedm = Vector::<bool>::new();
+        for k in 0..nm {
+            usedm.push(false);
+        }
+        for i in 0..unsafe (*a).resolutions.len() {
+            let d = unsafe (*a).resolutions[i];
+            if d.node != NODE_NONE && d.module as usize < nm && d.module as usize != m {
+                usedm.set(d.module as usize, true);
+            }
+        }
+        let src = p.modules[m].source.as_str();
+        let mut errs = diag::Errors::new();
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe (*a).list(items)[i as usize];
+            if unsafe (*a).at_const(iid).kind != NodeKind::NODE_IMPORT {
+                continue;
+            }
+            let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");
+            let mid = p.find(path.as_str());
+            if mid < 0 || mid as usize == m {
+                continue;
+            }
+            let mut used = usedm[mid as usize] || import_side_effects(p, mid as ModuleId);
+            if !used {
+                let clo = p.import_closure(mid as ModuleId);
+                for c in 0..clo.len() {
+                    let cm = clo[c];
+                    if cm as usize != m && (usedm[cm as usize] || import_side_effects(p, cm)) {
+                        used = true;
+                        break;
+                    }
+                }
+                clo.free();
+            }
+            if !used {
+                let sp = unsafe (*a).at_const(iid).span;
+                errs.warn(sp.start, sp.end - sp.start, format("unused import '{}'", path.as_str()));
+                let mut fe = sp.end;
+                if fe as usize < src.len() && src[fe as usize] == b'\n' {
+                    fe = fe + 1;
+                }
+                errs.fix(sp.start, fe, 0);
+            }
+        }
+        usedm.free();
+        if fixes != null {
+            for k in 0..errs.fixes.len() {
+                unsafe (*fixes).push(errs.fixes[k]);
+            }
+        }
+        if errs.has_warnings() {
+            p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
+            if fixes == null {
+                errs.finalize(src, p.modules[m].file.as_str());
+                errs.log();
+            }
+        }
+    }
+}
+
+// --lint: an expression statement calling a provably pure function (deep FX_YES, value-only params,
+// non-generic) whose results are dropped computes nothing observable -- dead code. The trailing
+// statement of every block is exempt (it may be the block's value in expression position).
+fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, sid: NodeId) {
+    if unsafe (*a).at_const(sid).kind != NodeKind::NODE_EXPRESSION_STATEMENT {
+        return;
+    }
+    let mut v = unsafe (*a).at_const(sid).as_data.single.value;
+    while unsafe (*a).at_const(v).kind == NodeKind::NODE_UNARY && (unsafe (*a).at_const(v).as_data.unary.op == TokenType::Move || unsafe (*a).at_const(
+        v,
+    ).as_data.unary.op == TokenType::Unsafe) {
+        v = unsafe (*a).at_const(v).as_data.unary.operand;
+    }
+    if unsafe (*a).at_const(v).kind != NodeKind::NODE_CALL {
+        return;
+    }
+    let mut callee = unsafe (*a).at_const(v).as_data.call.callee;
+    if unsafe (*a).at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+        callee = unsafe (*a).at_const(callee).as_data.specialization.expression;
+    }
+    let ck = unsafe (*a).at_const(callee).kind;
+    if ck != NodeKind::NODE_IDENTIFIER && !(ck == NodeKind::NODE_MEMBER && unsafe (*a).at_const(callee).as_data.member.path) {
+        return;
+    }
+    let mut fd = unsafe (*a).resolution_def(callee);
+    if fd.node == NODE_NONE && ck == NodeKind::NODE_MEMBER {
+        fd = unsafe (*a).resolution_def(unsafe (*a).at_const(callee).as_data.member.member);
+    }
+    if fd.node == NODE_NONE && ck == NodeKind::NODE_IDENTIFIER {
+        fd = DefId { module: m as ModuleId, node: unsafe (*a).resolution(callee) };
+    }
+    if fd.node == NODE_NONE || fd.module as usize >= p.modules.len() || !p.modules[fd.module as usize].has_ast {
+        return;
+    }
+    let fa = mod_ast_c(p, fd.module);
+    if unsafe (*fa).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+        return;
+    }
+    let f = unsafe (*fa).at_const(fd.node).as_data.function;
+    if f.is_extern || f.body == NODE_NONE || f.returns.len == 0 || f.generics.len != 0 {
+        return;
+    }
+    for i in 0..f.params.len {
+        let pid = unsafe (*fa).list(f.params)[i as usize];
+        if unsafe (*fa).at_const(pid).kind != NodeKind::NODE_PARAMETER {
+            return;
+        }
+        let tk = unsafe (*fa).at_const(unsafe (*fa).at_const(pid).as_data.parameter.ty).kind;
+        if tk == NodeKind::NODE_POINTER_TYPE || tk == NodeKind::NODE_REFERENCE_TYPE || tk == NodeKind::NODE_SLICE_TYPE || tk == NodeKind::NODE_DYN_TYPE || tk == NodeKind::NODE_FUNCTION_TYPE {
+            return; // a reference-carrying param could observe or mutate caller state
+        }
+    }
+    let cev = p.ceval as *mut ce::ConstEval;
+    if !unsafe (*cev).ce_fn_const_suggest(fd.module, fd.node) {
+        return;
+    }
+    let csp = unsafe (*a).at_const(callee).span;
+    let src = p.modules[m].source.as_str();
+    let ssp = unsafe (*a).at_const(sid).span;
+    errs.warn(
+        ssp.start,
+        ssp.end - ssp.start,
+        format("unused result of pure function '{}': the call has no effect", diag::span_str(src, csp.start, csp.end)),
+    );
+}
+
+fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
+    if p.ceval == null {
+        return;
+    }
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        let mut errs = diag::Errors::new();
+        let n = unsafe (*a).nodes.len();
+        let mut i: u32 = 1;
+        while i as usize < n {
+            if unsafe (*a).at_const(i).kind == NodeKind::NODE_BLOCK {
+                let stmts = unsafe (*a).at_const(i).as_data.block.statements;
+                if stmts.len > 1 {
+                    for j in 0..stmts.len - 1 {
+                        dp_check_stmt(p, &mut errs, a, m, unsafe (*a).list(stmts)[j as usize]);
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        if errs.has_warnings() {
+            p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
+            errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+            errs.log();
+        }
+    }
+}
+
+// --lint: private struct fields and tagged-enum variants no resolution anywhere targets. Fields of
+// pub/attributed/union/tuple structs are exempt (FFI layout, positional access); plain enums are
+// exempt entirely (int casts materialize variants without naming them).
+fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
+    let nm = p.modules.len();
+    let mut starts = Vector::<usize>::new();
+    let mut total: usize = 0;
+    for m in 0..nm {
+        starts.push(total);
+        if p.modules[m].has_ast {
+            total = total + p.modules[m].ast.nodes.len();
+        }
+    }
+    let mut used = Vector::<bool>::new();
+    used.reserve(total);
+    for i in 0..total {
+        used.push(false);
+    }
+    let mut read = Vector::<bool>::new();
+    read.reserve(total);
+    for i in 0..total {
+        read.push(false);
+    }
+    for m in 0..nm {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        // struct-literal initializer names resolve to the field decl but only WRITE it: exclude
+        // them from the read set (fields warn on never-READ, Rust semantics)
+        let an = unsafe (*a).nodes.len();
+        let mut init_src = Vector::<bool>::new();
+        init_src.reserve(an);
+        for i in 0..an {
+            init_src.push(false);
+        }
+        let mut k: u32 = 1;
+        while k as usize < an {
+            if unsafe (*a).at_const(k).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                let fnn = unsafe (*a).at_const(k).as_data.field_initializer.name;
+                if fnn as usize < an {
+                    init_src.set(fnn as usize, true);
+                }
+            }
+            k = k + 1;
+        }
+        for i in 0..unsafe (*a).resolutions.len() {
+            let d = unsafe (*a).resolutions[i];
+            if d.node != NODE_NONE && d.module as usize < nm && p.modules[d.module as usize].has_ast && d.node as usize < p.modules[d.module as usize].ast.nodes.len() {
+                used.set(starts[d.module as usize] + d.node as usize, true);
+                if i >= an || !init_src[i] {
+                    read.set(starts[d.module as usize] + d.node as usize, true);
+                }
+            }
+        }
+        init_src.free();
+    }
+    for m in 0..nm {
+        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        if module_platform_gated(a) {
+            continue;
+        }
+        let src = p.modules[m].source.as_str();
+        let mut errs = diag::Errors::new();
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe (*a).list(items)[i as usize];
+            let it = unsafe (*a).at_const(iid);
+            if it.kind != NodeKind::NODE_STRUCT && it.kind != NodeKind::NODE_ENUM {
+                continue;
+            }
+            if it.as_data.aggregate.is_public || it.as_data.aggregate.is_union {
+                continue;
+            }
+            if item_has_attr(a, iid, AttrKind::ATTR_EXPORT) || item_has_attr(a, iid, AttrKind::ATTR_USED) || item_has_attr(
+                a,
+                iid,
+                AttrKind::ATTR_EMIT_MACRO,
+            ) || item_has_attr(a, iid, AttrKind::ATTR_PACKED) || item_has_attr(a, iid, AttrKind::ATTR_ALIGN) {
+                continue;
+            }
+            let ms = it.as_data.aggregate.members;
+            if it.kind == NodeKind::NODE_ENUM {
+                let mut tagged = false;
+                for j in 0..ms.len {
+                    if unsafe (*a).at_const(unsafe (*a).list(ms)[j as usize]).as_data.variant.payload.len > 0 {
+                        tagged = true;
+                    }
+                }
+                if !tagged {
+                    continue;
+                }
+            }
+            for j in 0..ms.len {
+                let mid2 = unsafe (*a).list(ms)[j as usize];
+                let mn = unsafe (*a).at_const(mid2);
+                let mut nsp = tok::Span::empty();
+                if it.kind == NodeKind::NODE_STRUCT {
+                    if mn.kind != NodeKind::NODE_FIELD || mn.as_data.field.is_public {
+                        continue;
+                    }
+                    nsp = unsafe (*a).at_const(mn.as_data.field.name).as_data.name.text;
+                } else {
+                    if mn.kind != NodeKind::NODE_VARIANT {
+                        continue;
+                    }
+                    nsp = unsafe (*a).at_const(mn.as_data.variant.name).as_data.name.text;
+                }
+                let hit = if it.kind == NodeKind::NODE_STRUCT {
+                    read[starts[m] + mid2 as usize];
+                } else {
+                    used[starts[m] + mid2 as usize];
+                };
+                if nsp.end <= nsp.start || src[nsp.start as usize] == b'_' || hit {
+                    continue;
+                }
+                if it.kind == NodeKind::NODE_STRUCT {
+                    errs.warn(
+                        nsp.start,
+                        nsp.end - nsp.start,
+                        format("field '{}' is never read", diag::span_str(src, nsp.start, nsp.end)),
+                    );
+                } else {
+                    errs.warn(
+                        nsp.start,
+                        nsp.end - nsp.start,
+                        format("unused variant '{}'", diag::span_str(src, nsp.start, nsp.end)),
+                    );
+                }
+            }
+        }
+        if errs.has_warnings() {
+            p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
+            errs.finalize(src, p.modules[m].file.as_str());
+            errs.log();
+        }
+    }
+    starts.free();
+    used.free();
+    read.free();
+}
+
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
@@ -882,7 +1234,10 @@ pub fn lint_package(
             unsafe (*ceptr).all_typed = true;
         }
         check_always_panics(p, lint_mod as i32);
+        lint_discarded_results(p, lint_mod as i32);
+        lint_unused_members(p, lint_mod as i32);
     }
+    lint_unused_imports(p, lint_mod as i32, fixes);
     if suggest_const {
         lint_const_suggest(p, lint_mod as i32, fixes);
     }

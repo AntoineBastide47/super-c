@@ -8,7 +8,7 @@ import string as cstring;
 
 // Parse + format at `width`. Asserts the source parses (goldens are full programs).
 fn fmt_of(src: str, width: i32) String {
-    let mut pa = h::parse_ast(src);
+    let pa = h::parse_ast(src);
     assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
     fbld::format_program(&pa.ast, src, width, &mut out);
@@ -16,12 +16,12 @@ fn fmt_of(src: str, width: i32) String {
 }
 
 fn expect_fmt_w(src: str, want: str, width: i32) {
-    let mut out = fmt_of(src, width);
+    let out = fmt_of(src, width);
     let got = out.as_str();
     assert(got == want, "formatted output mismatch");
     // Idempotence and parse preservation for every golden.
     assert(!h::parse_has_error(got), "formatted output does not parse");
-    let mut again = fmt_of(got, width);
+    let again = fmt_of(got, width);
     let got2 = again.as_str();
     assert(got2 == got, "formatting is not idempotent");
 }
@@ -129,9 +129,9 @@ fn golden_fmt_skip() {
 @test
 fn emitted_c_identical() {
     let ugly = "struct Pair{pub a:i32,pub b:i32}\nextend Pair{fn sum(self:&Self)i32{return self.a+self.b;}}\nfn main()i32{\nlet p=Pair{a:1,b:2,};\nlet mut t=0;\nfor i in 0..10{t=t+p.sum()*i;}\nreturn t&0;\n}";
-    let mut f = fmt_of(ugly, 120);
-    let mut c1 = h::compile_c(ugly);
-    let mut c2 = h::compile_c(f.as_str());
+    let f = fmt_of(ugly, 120);
+    let c1 = h::compile_c(ugly);
+    let c2 = h::compile_c(f.as_str());
     assert(c1.ok(), "ugly variant does not compile");
     assert(c2.ok(), "formatted variant does not compile");
     assert(unsafe cstring::strcmp(c1.code, c2.code) == 0, "emitted C differs between ugly and formatted variants");

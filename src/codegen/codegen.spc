@@ -17,7 +17,7 @@ extern "C" {
 // The full C standard library include block the generated runtime pulls in. Emitted verbatim into the
 // shared super_rt.h. (Faithful reconstruction pending — filled when codegen_emit is ported; only the
 // content of this constant is deferred, never a code path.)
-pub fn super_rt_includes() *const char {
+pub const fn super_rt_includes() *const char {
     return r#"#if __has_include(<assert.h>)
 #include <assert.h>
 #endif
@@ -514,55 +514,55 @@ extend Codegen {
         };
     }
 
-    pub fn take_ast(self: &mut Self) *mut Ast {
+    pub const fn take_ast(self: &mut Self) *mut Ast {
         return self.ast;
     }
 
-    pub fn has_errors(self: &Self) bool {
+    pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     pub fn log_errors(self: &Self) {
         self.errors.log();
     }
-    pub fn set_multifile(self: &mut Self, on: bool) {
+    pub const fn set_multifile(self: &mut Self, on: bool) {
         self.multifile = on;
     }
-    pub fn set_test_info(self: &mut Self, ti: *const CgTestInfo) {
+    pub const fn set_test_info(self: &mut Self, ti: *const CgTestInfo) {
         self.test = unsafe *ti;
     }
 
     // ---- module accessors ----
-    fn cur_ast(self: &Self) *mut Ast {
+    const fn cur_ast(self: &Self) *mut Ast {
         return self.ast;
     }
-    fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
+    const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != unsafe (*self.ast).module {
             return unsafe &mut (*self.package).modules[m as usize].ast;
         }
         return self.ast;
     }
-    fn mod_src(self: &Self, m: ModuleId) str {
+    const fn mod_src(self: &Self, m: ModuleId) str {
         if self.package != null && m != unsafe (*self.ast).module {
             return unsafe (*self.package).modules[m as usize].source.as_str();
         }
         return self.source;
     }
-    fn pkg_count(self: &Self) usize {
+    const fn pkg_count(self: &Self) usize {
         if self.package == null {
             return 0;
         }
         return unsafe (*self.package).modules.len();
     }
-    fn ceval(self: &Self) *mut ce::ConstEval {
+    const fn ceval(self: &Self) *mut ce::ConstEval {
         if self.package == null {
             return null;
         }
         return (unsafe (*self.package).ceval) as *mut ce::ConstEval;
     }
-    fn cur_module(self: &Self) ModuleId {
+    const fn cur_module(self: &Self) ModuleId {
         return unsafe (*self.ast).module;
     }
-    fn type_at(self: &Self, x: TypeId) &Ty {
+    const fn type_at(self: &Self, x: TypeId) &Ty {
         return unsafe (*self.cur_ast()).type_at(x);
     }
 
@@ -623,10 +623,10 @@ extend Codegen {
         self.tmp = self.tmp + 1;
     }
 
-    fn name_span(self: &Self, name_node: NodeId) tok::Span {
+    const fn name_span(self: &Self, name_node: NodeId) tok::Span {
         return unsafe (*self.ast).at_const(name_node).as_data.name.text;
     }
-    fn name_span_in(self: &Self, m: ModuleId, name_node: NodeId) tok::Span {
+    const fn name_span_in(self: &Self, m: ModuleId, name_node: NodeId) tok::Span {
         return unsafe (*self.mod_ast(m)).at_const(name_node).as_data.name.text;
     }
     fn emit_span(self: &mut Self, s: tok::Span) {
@@ -1621,7 +1621,7 @@ extend Codegen {
         }
         return false;
     }
-    fn cg_fn_is_capturing(self: &Self, fy: &Ty) bool {
+    const fn cg_fn_is_capturing(self: &Self, fy: &Ty) bool {
         if fy.kind != TypeKind::TYPE_FUNCTION {
             return false;
         }
@@ -2571,7 +2571,7 @@ extend Codegen {
     // all its operands could, and a name folds only to a fn / valid non-static-mut const (unresolved / unknown
     // kinds stay conservative TRUE). Invariant: cg_maybe_const(id)==false => eval(id)==CONST_NONE, so gating a
     // probe with `&& cg_maybe_const(id)` never suppresses a real fold -> emitted C stays byte-identical.
-    fn cg_def_const_ok(self: &Self, d: DefId) bool {
+    const fn cg_def_const_ok(self: &Self, d: DefId) bool {
         if d.node == NODE_NONE {
             return true;
         }
@@ -2879,7 +2879,7 @@ const fn hex_val(ch: u8) i32 {
     }
     return 0;
 }
-fn utf8_encode(cp: u32, out: *mut u8) i32 {
+const fn utf8_encode(cp: u32, out: *mut u8) i32 {
     if cp < 0x80 {
         unsafe out[0] = cp as u8;
         return 1;
@@ -3469,7 +3469,7 @@ extend Codegen {
         self.emit_str(" })");
         return true;
     }
-    fn cb_known_callee(self: &mut Self, arg: NodeId, out: *mut DefId, is_closure: *mut bool) bool {
+    const fn cb_known_callee(self: &mut Self, arg: NodeId, out: *mut DefId, is_closure: *mut bool) bool {
         let ak = unsafe (*self.cur_ast()).at_const(arg).kind;
         if ak == NodeKind::NODE_CLOSURE {
             unsafe *out = DefId { module: self.cur_module(), node: arg };
@@ -3576,7 +3576,7 @@ extend Codegen {
             self.n_cb_keep = self.n_cb_keep + 1;
         }
     }
-    fn cg_decl_name_node(self: &Self, m: ModuleId, decl: NodeId) NodeId {
+    const fn cg_decl_name_node(self: &Self, m: ModuleId, decl: NodeId) NodeId {
         let dn = unsafe (*self.mod_ast(m)).at_const(decl);
         if dn.kind == NodeKind::NODE_TYPE_ALIAS {
             return dn.as_data.type_alias.name;
@@ -5660,7 +5660,7 @@ extend Codegen {
         }
         return self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(id));
     }
-    fn cg_register_auto_free(self: &mut Self, id: NodeId) {
+    const fn cg_register_auto_free(self: &mut Self, id: NodeId) {
         if self.defer_top >= 256 {
             return;
         }
@@ -6399,7 +6399,7 @@ extend Codegen {
         self.buf.format_into("{}, .vt = &{}__vtbl }})", diag::cstr(tail), diag::cstr(&pair[0]));
         return true;
     }
-    fn array_length_of(self: &mut Self, iter: NodeId) NodeId {
+    const fn array_length_of(self: &mut Self, iter: NodeId) NodeId {
         if unsafe (*self.cur_ast()).at_const(iter).kind != NodeKind::NODE_IDENTIFIER {
             return NODE_NONE;
         }
@@ -6421,7 +6421,7 @@ extend Codegen {
         }
         return NODE_NONE;
     }
-    fn array_literal_count(self: &mut Self, obj: NodeId) i64 {
+    const fn array_literal_count(self: &mut Self, obj: NodeId) i64 {
         let o = *unsafe (*self.cur_ast()).at_const(obj);
         if o.kind == NodeKind::NODE_ARRAY_LITERAL {
             return o.as_data.array_literal.elements.len;
@@ -6584,7 +6584,7 @@ extend Codegen {
         }
         return -1;
     }
-    fn cg_decl_name_span(self: &Self, decl: NodeId) tok::Span {
+    const fn cg_decl_name_span(self: &Self, decl: NodeId) tok::Span {
         let n = unsafe (*self.cur_ast()).at_const(decl);
         if n.kind == NodeKind::NODE_LET {
             return self.name_span(n.as_data.let_stmt.name);
@@ -6873,7 +6873,7 @@ extend Codegen {
         self.emit_ident_mod(dm.module, unsafe (*self.mod_ast(dm.module)).at_const(dm.node).as_data.function.name);
         return true;
     }
-    fn pat_trivial(self: &Self, pid: NodeId) bool {
+    const fn pat_trivial(self: &Self, pid: NodeId) bool {
         let p = unsafe (*self.cur_ast()).at_const(pid);
         if p.kind == NodeKind::NODE_PATTERN_NAME {
             return p.as_data.pattern.children.len == 0;
@@ -7755,7 +7755,7 @@ extend Codegen {
         }
         return false;
     }
-    fn cg_loop_push(self: &mut Self, node: NodeId, is_expr: bool) i32 {
+    const fn cg_loop_push(self: &mut Self, node: NodeId, is_expr: bool) i32 {
         if self.nloops >= 32 {
             return -1;
         }
@@ -7772,7 +7772,7 @@ extend Codegen {
         self.nloops = k + 1;
         return k as i32;
     }
-    fn cg_loop_pop(self: &mut Self, le: i32) {
+    const fn cg_loop_pop(self: &mut Self, le: i32) {
         if le >= 0 {
             self.nloops = le as u32;
         }
@@ -8751,7 +8751,7 @@ fn buf_join3(out: *mut char, cap: usize, first: *const char, second: *const char
     at = bappend(out, cap, at, second);
     bappend(out, cap, at, third);
 }
-fn src_at(p: str, off: u32) *const char {
+const fn src_at(p: str, off: u32) *const char {
     return (unsafe (p.ptr() + off as usize)) as *const char;
 }
 
@@ -8762,14 +8762,14 @@ fn span_is(src: str, s: tok::Span, lit: *const char) bool {
     }
     return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit, n) == 0;
 }
-fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
+const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
     let la = a.end - a.start;
     if la != b.end - b.start {
         return false;
     }
     return unsafe cstring::memcmp(sa.ptr() + a.start as usize, sb.ptr() + b.start as usize, la as usize) == 0;
 }
-fn builtin_name(b: BuiltinType) *const char {
+const fn builtin_name(b: BuiltinType) *const char {
     if b == BuiltinType::BT_BOOL {
         return "bool".ptr() as *const char;
     }
@@ -8880,13 +8880,13 @@ fn bappend(out: *mut char, cap: usize, at: usize, text: *const char) usize {
 
 // Length-carrying keyword compare: a str literal knows its length, so candidates are rejected
 // on one immediate compare instead of a strlen per probe (span_is strlens its C-string literal).
-fn ckw(src: str, s: tok::Span, lit: str) bool {
+const fn ckw(src: str, s: tok::Span, lit: str) bool {
     if (s.end - s.start) as usize != lit.len() {
         return false;
     }
     return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), lit.len()) == 0;
 }
-fn is_c_keyword(src: str, s: tok::Span) bool {
+const fn is_c_keyword(src: str, s: tok::Span) bool {
     let n = (s.end - s.start) as usize;
     if n == 0 {
         return false;
@@ -8972,18 +8972,18 @@ pub type Buf4096 = Array<char, 4096>;
 pub type TyArgs32 = Array<TypeId, 32>;
 pub type Ids64 = Array<NodeId, 64>;
 
-fn agg_kw(n: &Node) *const char {
+const fn agg_kw(n: &Node) *const char {
     if n.kind == NodeKind::NODE_STRUCT && n.as_data.aggregate.is_union {
         return "union".ptr() as *const char;
     }
     return "struct".ptr() as *const char;
 }
 
-fn want_fn(which: i32, is_public: bool) bool {
+const fn want_fn(which: i32, is_public: bool) bool {
     return which == PROTO_ALL || which == PROTO_PUBLIC == is_public;
 }
 
-fn cg_span_eq(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
+const fn cg_span_eq(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
     let la = (a.end - a.start) as usize;
     if la != (b.end - b.start) as usize {
         return false;
@@ -8993,7 +8993,7 @@ fn cg_span_eq(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
 
 // ---- backend: declarations, function emission ----
 extend Codegen {
-    fn program_items(self: &Self) NodeList {
+    const fn program_items(self: &Self) NodeList {
         return unsafe (*self.cur_ast()).at_const((*self.cur_ast()).root).as_data.program.items;
     }
 
@@ -9009,7 +9009,7 @@ extend Codegen {
     }
 
     // The array-type node a function returns by value (`fn f() [T; N]`), else NODE_NONE.
-    fn fn_array_return(self: &Self, fn_id: NodeId) NodeId {
+    const fn fn_array_return(self: &Self, fn_id: NodeId) NodeId {
         let rets = unsafe (*self.cur_ast()).at_const(fn_id).as_data.function.returns;
         if rets.len != 1 {
             return NODE_NONE;
@@ -13461,7 +13461,7 @@ extend Codegen {
         return false;
     }
 
-    fn extend_interface(self: &Self, extend_id: NodeId) DefId {
+    const fn extend_interface(self: &Self, extend_id: NodeId) DefId {
         let it = unsafe (*self.cur_ast()).at_const(extend_id);
         if it.as_data.extend_def.interface_type == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
@@ -13887,7 +13887,7 @@ extend Codegen {
         }
         return unsafe (*self.cur_ast()).reintern(unsafe &*self.mod_ast(im), rt);
     }
-    fn cg_dyn_target(self: &Self, sy: &Ty, tm: *mut ModuleId, td: *mut NodeId) bool {
+    const fn cg_dyn_target(self: &Self, sy: &Ty, tm: *mut ModuleId, td: *mut NodeId) bool {
         if sy.kind == TypeKind::TYPE_INSTANCE {
             unsafe *tm = unsafe (*self.cur_ast()).instance(sy.as_data.inst).module;
             unsafe *td = unsafe (*self.cur_ast()).instance(sy.as_data.inst).decl;
@@ -13928,7 +13928,7 @@ extend Codegen {
     }
 }
 
-fn cg_int_range(b: BuiltinType, mn: *mut i64, mx: *mut i64) {
+const fn cg_int_range(b: BuiltinType, mn: *mut i64, mx: *mut i64) {
     if b == BuiltinType::BT_I8 {
         unsafe *mn = -128;
         unsafe *mx = 127;
@@ -14099,23 +14099,23 @@ pub struct FmtSpec {
     pub prec: i32,
 }
 
-fn bt_is_numeric(b: BuiltinType) bool {
+const fn bt_is_numeric(b: BuiltinType) bool {
     let v = b as i32;
     return v >= BuiltinType::BT_I8 as i32 && v <= BuiltinType::BT_F64 as i32;
 }
-fn bt_is_signed_int(b: BuiltinType) bool {
+const fn bt_is_signed_int(b: BuiltinType) bool {
     let v = b as i32;
     return v >= BuiltinType::BT_I8 as i32 && v <= BuiltinType::BT_ISIZE as i32;
 }
-fn bt_is_unsigned_int(b: BuiltinType) bool {
+const fn bt_is_unsigned_int(b: BuiltinType) bool {
     let v = b as i32;
     return v >= BuiltinType::BT_U8 as i32 && v <= BuiltinType::BT_USIZE as i32;
 }
-fn bt_is_binfmt(b: BuiltinType) bool {
+const fn bt_is_binfmt(b: BuiltinType) bool {
     let v = b as i32;
     return v >= BuiltinType::BT_CHAR as i32 && v <= BuiltinType::BT_USIZE as i32;
 }
-fn bt_unsigned_cast(b: BuiltinType) *const char {
+const fn bt_unsigned_cast(b: BuiltinType) *const char {
     if b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 || b == BuiltinType::BT_CHAR {
         return "uint8_t".ptr() as *const char;
     }

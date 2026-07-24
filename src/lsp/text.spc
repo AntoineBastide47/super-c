@@ -107,7 +107,7 @@ pub fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32) u32 
     return i as u32;
 }
 
-fn hex_val(b: u8) i32 {
+const fn hex_val(b: u8) i32 {
     if b >= b'0' && b <= b'9' {
         return b - b'0';
     }

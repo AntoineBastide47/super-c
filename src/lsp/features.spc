@@ -16,7 +16,7 @@ pub struct Loc {
     pub end: u32,
 }
 
-fn mod_ast(p: &loader::Package, m: usize) *const Ast {
+const fn mod_ast(p: &loader::Package, m: usize) *const Ast {
     return &p.modules.at(m).ast;
 }
 
@@ -47,7 +47,7 @@ fn node_at_or_before(a: *const Ast, off: u32) NodeId {
 
 // The declaration's NAME node (whose span is the go-to/rename target); NODE_NONE when the kind has no
 // distinct name node (callers fall back to the decl span).
-pub fn decl_name(a: *const Ast, id: NodeId) NodeId {
+pub const fn decl_name(a: *const Ast, id: NodeId) NodeId {
     let n = unsafe (*a).at_const(id);
     if n.kind == NodeKind::NODE_FUNCTION {
         return n.as_data.function.name;
@@ -138,7 +138,7 @@ fn decl_signature(p: &loader::Package, d: DefId) String {
     let da = mod_ast(p, d.module as usize);
     let src = p.modules.at(d.module as usize).source.as_str();
     let n = unsafe (*da).at_const(d.node);
-    let mut s = n.span.start;
+    let s = n.span.start;
     let mut e = n.span.end;
     if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.body != NODE_NONE {
         e = unsafe (*da).at_const(n.as_data.function.body).span.start;
@@ -289,18 +289,18 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
             out.push_string(&sig);
             out.push_str("\n```");
         }
-        let mut s = sig;
+        let s = sig;
         s.free();
         let doc = decl_doc(p, d);
         if doc.len() != 0 {
             out.push_str("\n\n");
             out.push_string(&doc);
         }
-        let mut dd = doc;
+        let dd = doc;
         dd.free();
     }
     if out.len() == 0 {
-        let mut o = out;
+        let o = out;
         o.free();
         return Option::<String>::None;
     }
@@ -324,7 +324,7 @@ pub fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
 
 // The span rename/references should touch for a resolved node: a path member or type path narrows to
 // its final NAME segment (replacing the whole `util::Point` span would eat the qualifier).
-fn ref_span(a: *const Ast, i: NodeId) tok::Span {
+const fn ref_span(a: *const Ast, i: NodeId) tok::Span {
     let n = unsafe (*a).at_const(i);
     if n.kind == NodeKind::NODE_MEMBER {
         return unsafe (*a).at_const(n.as_data.member.member).span;
@@ -404,7 +404,7 @@ pub struct Tok {
 }
 
 // A method is a function whose first parameter is named `self` (extend items always are).
-fn fn_is_method(a: *const Ast, id: NodeId) bool {
+const fn fn_is_method(a: *const Ast, id: NodeId) bool {
     let ps = unsafe (*a).at_const(id).as_data.function.params;
     if ps.len == 0 {
         return false;
@@ -419,7 +419,7 @@ fn fn_is_method(a: *const Ast, id: NodeId) bool {
 }
 
 // Legend index for a resolved declaration; -1 = unclassified (skip the token).
-fn token_type_of(p: &loader::Package, d: DefId) i32 {
+const fn token_type_of(p: &loader::Package, d: DefId) i32 {
     let da = mod_ast(p, d.module as usize);
     let n = unsafe (*da).at_const(d.node);
     if n.kind == NodeKind::NODE_FUNCTION {
@@ -518,7 +518,7 @@ pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
     return out;
 }
 
-fn tok_key(t: &Tok) u32 {
+const fn tok_key(t: &Tok) u32 {
     return t.start;
 }
 
@@ -542,13 +542,13 @@ extend CompItem as Free {
 
 fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) {
     if label.len() == 0 {
-        let mut d = detail;
+        let d = detail;
         d.free();
         return;
     }
     for k in 0..out.len() {
         if out.at(k).label.as_str() == label {
-            let mut d = detail;
+            let d = detail;
             d.free();
             return;
         }
@@ -559,7 +559,7 @@ fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) 
 // A name node's text; "" when the node is not a name-bearing kind or its span is malformed.
 // NodeAs is an untagged union: reading `name.text` of any other kind reinterprets a different
 // payload as a Span -- the negative-length slice that once made completion malloc 16 EB.
-fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
+const fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
     if name_node == NODE_NONE {
         return "";
     }

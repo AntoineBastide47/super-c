@@ -91,7 +91,7 @@ fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     unsafe shim::sc_closedir(dh);
 }
 
-fn name_cmp(a: &String, b: &String) i32 {
+const fn name_cmp(a: &String, b: &String) i32 {
     let la = a.len();
     let lb = b.len();
     let mn = if la < lb {
@@ -136,7 +136,7 @@ pub fn rm_rf(path: str) {
             }
             unsafe shim::sc_closedir(dh);
             for i in 0..names.len() {
-                let mut c = join2(path, names.at(i).as_str());
+                let c = join2(path, names.at(i).as_str());
                 rm_rf(c.as_str());
             }
         }
@@ -155,7 +155,7 @@ fn file_eq(a: str, b: &String) bool {
     if cur.is_none() {
         return false;
     }
-    let mut c = cur.unwrap();
+    let c = cur.unwrap();
     let same = c.len() == b.len() && c.as_str() == b.as_str();
     return same;
 }
@@ -165,14 +165,14 @@ fn sync_tree(srcdir: str, dstdir: str) i32 {
     walk_files(srcdir, srcdir.len(), &mut rels);
     for i in 0..rels.len() {
         let rel = rels.at(i).as_str();
-        let mut sp = join2(srcdir, rel);
-        let mut dp = join2(dstdir, rel);
+        let sp = join2(srcdir, rel);
+        let dp = join2(dstdir, rel);
         let content = loader::read_file(sp.as_str());
         if content.is_none() {
             eprintln("build: cannot read '{}'", sp.as_str());
             return 1;
         }
-        let mut body = content.unwrap();
+        let body = content.unwrap();
         if !file_eq(dp.as_str(), &body) {
             // ensure parent dirs, then write
             let full = dp.as_str();
@@ -181,7 +181,7 @@ fn sync_tree(srcdir: str, dstdir: str) i32 {
                 k = k - 1;
             }
             if k > 0 {
-                let mut dir = String::from_str(full.slice(0, k - 1));
+                let dir = String::from_str(full.slice(0, k - 1));
                 mkdirs(dir.as_str());
             }
             let f = stdio::fopen(dp.as_str(), "wb");
@@ -217,7 +217,7 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str) bool {
     if dep.is_none() {
         return unsafe shim::sc_mtime(cpath.cstr()) > omt;
     }
-    let mut d = dep.unwrap();
+    let d = dep.unwrap();
     let s = d.as_str();
     // skip "target:" then walk whitespace-separated deps, ignoring line-continuation backslashes
     let mut i: usize = 0;
@@ -315,7 +315,7 @@ fn cc_version(cc: &String, dir: str) String {
     let v = loader::read_file(vf.as_str());
     unsafe shim::sc_unlink(vf.cstr());
     if !v.is_none() {
-        let mut body = v.unwrap();
+        let body = v.unwrap();
         let s = body.as_str();
         let mut e: usize = 0;
         while e < s.len() && s[e] != b'\n' && s[e] != b'\r' {
@@ -336,7 +336,7 @@ struct Pend {
 }
 
 // Longest previous compile first, so the slowest unit never starts last.
-fn pend_cmp(a: &Pend, b: &Pend) i32 {
+const fn pend_cmp(a: &Pend, b: &Pend) i32 {
     return if b.prev_ms > a.prev_ms {
         1;
     } else if b.prev_ms < a.prev_ms {
@@ -360,7 +360,7 @@ fn finish_job(j: &mut Job, code: i32) i32 {
     if code != 0 {
         cat_file(j.log.as_str());
     } else {
-        let mut rec = format("{}\n{}", j.fp.as_str(), unsafe shim::sc_ticks_ms() - j.start);
+        let rec = format("{}\n{}", j.fp.as_str(), unsafe shim::sc_ticks_ms() - j.start);
         write_file(j.cmdpath.as_str(), rec.as_str());
     }
     unsafe shim::sc_unlink(j.log.cstr());
@@ -422,7 +422,7 @@ fn engine_build(
     if !p.ok {
         return 1;
     }
-    let mut srcgen = join2(m.out_dir.as_str(), raw);
+    let srcgen = join2(m.out_dir.as_str(), raw);
     p.gen_root = srcgen.clone();
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
@@ -435,9 +435,9 @@ fn engine_build(
 
     // 2) content-sync into <out-dir>/<sub>/gen (unchanged files keep their mtime -- the
     // staleness anchor); objects mirror it under <out-dir>/<sub>/obj.
-    let mut pdir = join2(m.out_dir.as_str(), sub);
-    let mut gen = join2(pdir.as_str(), "gen");
-    let mut obj = join2(pdir.as_str(), "obj");
+    let pdir = join2(m.out_dir.as_str(), sub);
+    let gen = join2(pdir.as_str(), "gen");
+    let obj = join2(pdir.as_str(), "obj");
     mkdirs(gen.as_str());
     mkdirs(obj.as_str());
     let mut ret = sync_tree(srcgen.as_str(), gen.as_str());
@@ -496,7 +496,7 @@ fn engine_build(
             let mut prev_ms: i64 = 0;
             let old = loader::read_file(cmdpath.as_str());
             if !old.is_none() {
-                let mut ob = old.unwrap();
+                let ob = old.unwrap();
                 let s = ob.as_str();
                 let mut e: usize = 0;
                 while e < s.len() && s[e] != b'\n' {
@@ -516,7 +516,7 @@ fn engine_build(
                 while k > 0 && full[k - 1] != b'/' {
                     k = k - 1;
                 }
-                let mut dir = String::from_str(full.slice(0, k - 1));
+                let dir = String::from_str(full.slice(0, k - 1));
                 mkdirs(dir.as_str());
                 let mut log = opath.clone();
                 log.push_str(".log");
@@ -589,10 +589,10 @@ fn engine_build(
             push_all(&mut cmd, &m.ldflags);
             push_all(&mut cmd, &prof.ldflags);
             // @c.link flags recorded by the emitter
-            let mut lfp = join2(gen.as_str(), "__ldflags");
+            let lfp = join2(gen.as_str(), "__ldflags");
             let lf = loader::read_file(lfp.as_str());
             if !lf.is_none() {
-                let mut body = lf.unwrap();
+                let body = lf.unwrap();
                 let s = body.as_str();
                 let mut a: usize = 0;
                 for b in 0..s.len() {
@@ -625,7 +625,7 @@ fn engine_build(
                 );
             }
             fpname.push_str(".cmd");
-            let mut fppath = join2(m.out_dir.as_str(), fpname.as_str());
+            let fppath = join2(m.out_dir.as_str(), fpname.as_str());
             let mut need = compiled || bmt == 0;
             for i in 0..objs.len() {
                 if !need && unsafe shim::sc_mtime((&mut objs[i]).cstr()) > bmt {
@@ -637,7 +637,7 @@ fn engine_build(
                 need = if old.is_none() {
                     true;
                 } else {
-                    let mut ob = old.unwrap();
+                    let ob = old.unwrap();
                     ob.as_str() != fp.as_str();
                 };
             }
@@ -772,7 +772,7 @@ pub fn manifest_test(
     }
     src.push_str("\nfn main() i32 {\n    return 0;\n}\n");
     mkdirs(m.out_dir.as_str());
-    let mut rootp = join2(m.out_dir.as_str(), "test_root.spc");
+    let rootp = join2(m.out_dir.as_str(), "test_root.spc");
     let f = stdio::fopen(rootp.as_str(), "wb");
     if f == null {
         eprintln("test: cannot write '{}'", rootp.as_str());
@@ -824,8 +824,8 @@ pub fn manifest_bench(
     } else {
         "bench";
     };
-    let mut sub = join2("bench", prof_name);
-    let mut bin = join2(m.out_dir.as_str(), "bench-bin");
+    let sub = join2("bench", prof_name);
+    let bin = join2(m.out_dir.as_str(), "bench-bin");
     // rooted at the project root (like tests), so `import bench::x;` works for lint AND build
     let rc = engine_build(
         m,
@@ -913,7 +913,7 @@ pub fn command_overrides(m: &mf::Manifest, name: str) bool {
 // trees bare `super-c <root.spc>` invocations and pre-raw layouts left next to the sources.
 pub fn manifest_clean(m: &mf::Manifest) i32 {
     rm_rf(m.out_dir.as_str());
-    let mut b = join2(dirname_of(m.root.as_str()), "build");
+    let b = join2(dirname_of(m.root.as_str()), "build");
     rm_rf(b.as_str());
     rm_rf("bench/build");
     rm_rf("build");

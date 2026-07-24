@@ -43,13 +43,13 @@ pub fn move_bytes(dst: []mut u8, src: []u8) usize {
     return n;
 }
 
-pub fn fill(dst: []mut u8, value: u8) {
+pub const fn fill(dst: []mut u8, value: u8) {
     if dst.len() > 0 {
         unsafe memset(dst.as_mut_ptr(), value, dst.len());
     }
 }
 
-pub fn equal(a: []u8, b: []u8) bool {
+pub const fn equal(a: []u8, b: []u8) bool {
     if a.len() != b.len() {
         return false;
     }

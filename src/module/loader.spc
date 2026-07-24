@@ -231,7 +231,7 @@ fn stem_of(path: str) String {
 }
 
 // Join an import's path parts with `sep` ("::" for a module path, "/" for a file path).
-fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
+pub fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
     let ids = ast.list(parts);
     let mut out = String::new();
     let mut i: u32 = 0;
@@ -431,7 +431,7 @@ extend Package {
     // The Ast to read for module `mid` from package-level lookups: the in-flight (moved-out) Ast when a
     // stage is holding it, else the module's own held Ast. Callers that read a module's Ast for a lookup
     // during resolve/typecheck must go through this so the current module resolves against the real Ast.
-    fn module_ast_ptr(self: &Self, mid: ModuleId) *const Ast {
+    const fn module_ast_ptr(self: &Self, mid: ModuleId) *const Ast {
         if mid == self.override_mod && self.override_ast != null {
             return self.override_ast;
         }
@@ -591,7 +591,7 @@ extend Package {
     }
 
     // The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins weren't seeded.
-    pub fn builtin_decl(self: &Self, b: BuiltinType) NodeId {
+    pub const fn builtin_decl(self: &Self, b: BuiltinType) NodeId {
         if self.core_seeded && b as usize < BT_COUNT_N {
             return unsafe self.builtin_decls[b as usize];
         }
@@ -635,7 +635,7 @@ extend Package {
         inner.set(d.node as usize, true);
     }
 
-    pub fn method_used_get(self: &Self, d: DefId) bool {
+    pub const fn method_used_get(self: &Self, d: DefId) bool {
         if d.node == NODE_NONE {
             return false;
         }
@@ -1025,7 +1025,7 @@ extend Package {
     }
 
     // Is `m` a user (non-prelude) module? The standalone test Ast lives at module == count (outside modules).
-    fn module_is_user(self: &Self, m: ModuleId) bool {
+    const fn module_is_user(self: &Self, m: ModuleId) bool {
         return m as usize >= self.modules.len() || !self.modules[m as usize].prelude;
     }
 
@@ -1150,10 +1150,10 @@ extend Package as Free {
 // never grown during propagation, so pointers into `modules[x].ast` stay valid throughout.
 // ---------------------------------------------------------------------------------------------------------
 
-fn pkg_ast_m(p: &mut Package, m: ModuleId) *mut Ast {
+const fn pkg_ast_m(p: &mut Package, m: ModuleId) *mut Ast {
     return &mut p.modules[m as usize].ast;
 }
-fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
+const fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
     return &p.modules[m as usize].ast;
 }
 
@@ -1776,7 +1776,7 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
 // Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 // `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
 pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) Package {
-    let mut d = dir_of(root_file);
+    let d = dir_of(root_file);
     let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags);
     return p;
 }
@@ -1873,7 +1873,7 @@ fn basename_of(path: str) str {
 // otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
 // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
 // Byte-lexicographic order of two names with a length tiebreak (equivalent to strcmp over NUL-free views).
-fn name_cmp(a: &String, b: &String) i32 {
+const fn name_cmp(a: &String, b: &String) i32 {
     let la = a.len();
     let lb = b.len();
     let m = if la < lb {

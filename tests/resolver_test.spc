@@ -70,7 +70,7 @@ fn value_uses(a: &Ast, src: *const char, name: *const char, out: *mut NodeId, ca
 @test
 fn nearest_shadow() {
     let src = "fn g(n: i32) {}\nfn f() {\n  let x: i32 = 1;\n  { let x: i32 = 2; g(x); }\n  g(x);\n}\n";
-    let mut c = h::compile_ast(src, h::STAGE_RESOLVE);
+    let c = h::compile_ast(src, h::STAGE_RESOLVE);
     assert(c.errors == 0, "resolves cleanly");
     let outer_let = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0); // created first
     let inner_let = h::nth_kind(&c.ast, NodeKind::NODE_LET, 1);
@@ -86,7 +86,7 @@ fn nearest_shadow() {
 @test
 fn namespace_separation() {
     let src = "struct Foo {}\nconst Foo: i32 = 5;\nfn main() i32 { let x: Foo = Foo; }\n";
-    let mut c = h::compile_ast(src, h::STAGE_RESOLVE);
+    let c = h::compile_ast(src, h::STAGE_RESOLVE);
     assert(c.errors == 0, "resolves cleanly");
     let struct_decl = h::nth_kind(&c.ast, NodeKind::NODE_STRUCT, 0);
     let const_decl = h::nth_kind(&c.ast, NodeKind::NODE_CONST, 0);
@@ -108,7 +108,7 @@ fn namespace_separation() {
 
 // The capture count of each closure, in node order (inner closures complete first).
 fn closure_captures(src: str, out: *mut u32, cap: usize) usize {
-    let mut c = h::compile_ast(src, h::STAGE_RESOLVE);
+    let c = h::compile_ast(src, h::STAGE_RESOLVE);
     let mut n: usize = 0;
     let mut id: NodeId = 1;
     while id as usize < c.ast.nodes.len() {

@@ -196,7 +196,7 @@ extend<T: Format> Option<T> as Format {
         if self.is_none() {
             return String::from_str("None");
         }
-        let mut inner = switch self {
+        let inner = switch self {
             // Some -- bind and format the payload (None arm is unreachable here)
             Some(v) => v.fmt(),
             None => String::new(),

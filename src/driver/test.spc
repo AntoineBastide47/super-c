@@ -4,7 +4,6 @@ import stdlib;
 import string as cstring;
 import lexer::token as tok;
 import lexer::lexer as lex;
-import lexer::token_type as ltt;
 import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;
@@ -112,7 +111,7 @@ fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const cha
 }
 
 // The plain struct/enum decl a type NODE names, or {0, NODE_NONE} (fixtures must be nominal + non-generic).
-fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: *mut bool) DefId {
+const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: *mut bool) DefId {
     let none = DefId { module: 0, node: NODE_NONE };
     if tnode == NODE_NONE {
         return none;
@@ -137,7 +136,7 @@ fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: *mu
 }
 
 // A function's single return type node (unwrapping a named return), or NODE_NONE.
-fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) NodeId {
+const fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) NodeId {
     let a = mod_ast_c(p, am);
     let rets = unsafe (*a).at_const(fnode).as_data.function.returns;
     if rets.len != 1 {
@@ -151,7 +150,7 @@ fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) NodeId {
     return r0;
 }
 
-fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, fnode: NodeId) bool {
+const fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, fnode: NodeId) bool {
     let a = mod_ast_c(p, am);
     let rets = unsafe (*a).at_const(fnode).as_data.function.returns;
     if rets.len == 0 {
@@ -649,7 +648,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
 // Platform-specific headers the generated test runner needs. POSIX forks + reaps (unistd/sys/wait);
 // Windows spawns one subprocess per test (process.h/_spawnv, stdint.h/intptr_t).
 @platform(!windows)
-fn test_runner_includes() *const char {
+const fn test_runner_includes() *const char {
     return "#include <unistd.h>\n#include <sys/wait.h>\n\n".ptr() as *const char;
 }
 @platform(windows)
@@ -658,7 +657,7 @@ fn test_runner_includes() *const char {
 }
 
 @platform(!windows)
-fn test_runner_main() *const char {
+const fn test_runner_main() *const char {
     return r#"static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
 }

@@ -203,14 +203,14 @@ pub fn load(path: str) Option<Manifest> {
         return Option::<Manifest>::None;
     }
 
-    let mut src = src_opt.unwrap();
+    let src = src_opt.unwrap();
     let items_opt = toml::parse(src.as_str(), path);
     if items_opt.is_none() {
         return Option::<Manifest>::None;
     }
 
     let mut m = Manifest::new();
-    let mut items = items_opt.unwrap();
+    let items = items_opt.unwrap();
     let mut errs = diag::Errors::new();
     for x in 0..items.len() {
         let it = items.at(x);
