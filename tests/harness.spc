@@ -199,9 +199,7 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
     }
     out.errors = rr.errors;
     // Detach the user module's AST so package_free leaves it alone; the caller frees it.
-    let a = p.modules[uidx].ast;
-    p.modules[uidx].ast = Ast::new(0);
-    out.ast = a;
+    out.ast = replace(&mut p.modules[uidx].ast, Ast::new(0));
     return out;
 }
 

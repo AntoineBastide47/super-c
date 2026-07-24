@@ -809,6 +809,20 @@ extend tc::TypeChecker {
             if bt != TYPE_NONE && (self.type_at(bt).kind == TypeKind::TYPE_REFERENCE || self.type_at(bt).kind == TypeKind::TYPE_POINTER) {
                 return;
             }
+            // Rust's rule: a value whose type implements Free cannot lose a field -- its free body
+            // would run on a partial value at scope exit (skipping it instead would leak the other
+            // fields and the destructor's side effects). Move the whole value, or swap first.
+            if self.tc_type_is_free(bt) {
+                let sp = unsafe (*a).at_const(expr).span;
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format(
+                        "cannot move a field out of a value implementing Free; move the whole value or swap in a replacement first",
+                    ),
+                );
+                return;
+            }
             if self.tc_place_is_moved(expr) || self.is_moved(base) {
                 let sp = unsafe (*a).at_const(expr).span;
                 self.errors.emit(sp.start, sp.end - sp.start, format("use of moved value"));

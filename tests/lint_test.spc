@@ -179,6 +179,27 @@ fn driver_lints() {
     assert(fixed.as_str().contains("import string as cstring;"));
 }
 
+// A hand-written Free impl is the WHOLE destructor: any owning Free-typed field it never touches
+// leaks on every drop. Pointer/reference fields are non-owning and exempt.
+@test
+fn free_completeness_lint() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct Pair {\n    pub a: String,\n    pub b: String,\n    pub n: i32,\n    pub peek: *const String,\n}\n\nextend Pair as Free {\n    pub fn free(self: &mut Pair) {\n        self.a.free();\n    }\n}\n\nfn main() i32 {\n    let mut p = Pair { a: String::from_str(\"x\"), b: String::from_str(\"y\"), n: 0, peek: null };\n    p.n = p.a.len() as i32 + p.b.len() as i32;\n    return p.n - 2;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::from_str("lint '");
+    args.push_str(root);
+    args.push_str("/main.spc'");
+    let r = p.run_raw(args.as_str());
+    assert(r.exit != 0);
+    assert(r.out_has("field 'b' is never freed by this type's 'free'"));
+    assert(!r.out_has("field 'a' is never"));
+    assert(!r.out_has("field 'n' is never"));
+    assert(!r.out_has("field 'peek' is never"));
+}
+
 // The always-panics check (the `unconditional_panic` analog, an ERROR): a fully const-foldable
 // statement chain that DETERMINISTICALLY traps -- UB, or a panic reached inside a `const fn` (the
 // checked-accessor class) -- fails the build; explicit user `panic(..)` calls and anything

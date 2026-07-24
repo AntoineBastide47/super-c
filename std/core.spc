@@ -1314,3 +1314,14 @@ extend f64 {
         return self * 0.017453292519943295;
     }
 }
+
+// Move the value out of `slot`, installing `value` in its place -- the ownership-safe way to take
+// a field out of a value that implements Free (a plain `let x = v.field;` is rejected there: the
+// destructor cannot run on a partial value). The raw-pointer read/write pair transfers ownership
+// without dropping either side; drop-on-assign deliberately ignores raw places.
+pub fn replace<T>(slot: &mut T, value: T) T {
+    let p = slot as *mut T;
+    let old = unsafe *p;
+    unsafe *p = value;
+    return old;
+}

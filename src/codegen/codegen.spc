@@ -373,6 +373,16 @@ pub struct Codegen<'a> {
     // CG-21: conditional-move events from the fused single move walk (cleared per body; the heap
     // storage is reused across functions).
     pub pend_moves: Vector<CgPendMove>,
+    // Every member/index PLACE moved out anywhere in the current body, with its conditionality.
+    // Drop-on-assign classification: overlap with an UNCONDITIONAL move suppresses the free
+    // statically (nothing is live); overlap with only CONDITIONAL moves guards the free with the
+    // per-site runtime flags below (exact on every path); no overlap frees plainly.
+    pub moved_place_l: Vector<NodeId>,
+    pub moved_place_cond: Vector<bool>,
+    // Conditional member-move SITES: each gets a `bool __mv<node> = false;` at body start, set at
+    // the move site's emission, consumed (guard + reset) by overlapping assign-frees.
+    pub place_flag_l: Vector<NodeId>,
+    pub place_flags_pending: bool,
     pub depth: u32,
     pub tmp: u32,
     pub current_ret: [char; 128],
@@ -380,10 +390,6 @@ pub struct Codegen<'a> {
     pub package: *mut loader::Package,
     pub mangle: bool,
     pub multifile: bool,
-    // The statement emitted just before the current one in its block (NODE_NONE at block starts):
-    // drop-on-assign consults it to suppress the free when the previous statement moved the same
-    // place out (the `let a = m.ast; m.ast = ...` owner-swap idiom).
-    pub prev_stmt: NodeId,
     pub const_ctx: bool,
     pub subst: [CgSubst; 16],
     pub nsubst: i32,
@@ -454,6 +460,9 @@ extend Codegen as Free {
         self.mangle_memo.free();
         self.instname_memo.free();
         self.pend_moves.free();
+        self.moved_place_l.free();
+        self.moved_place_cond.free();
+        self.place_flag_l.free();
         self.call_list.free();
         if self.moved_stamp != null {
             unsafe stdlib::free(self.moved_stamp);
@@ -507,6 +516,10 @@ extend Codegen {
             mangle_memo: Map::<u64, String>::new(),
             instname_memo: Map::<TyInstance, String>::new(),
             pend_moves: Vector::<CgPendMove>::new(),
+            moved_place_l: Vector::<NodeId>::new(),
+            moved_place_cond: Vector::<bool>::new(),
+            place_flag_l: Vector::<NodeId>::new(),
+            place_flags_pending: false,
             home_ast: ast_u as *mut Ast,
             call_list: Vector::<NodeId>::new(),
             genty: Vector::<u8>::new(),
@@ -515,7 +528,6 @@ extend Codegen {
             package: package,
             mangle: mangle,
             multifile: mangle,
-            prev_stmt: NODE_NONE,
             errors: diag::Errors::new(),
         };
     }
@@ -5718,7 +5730,15 @@ extend Codegen {
             let is_path = unsafe (*self.cur_ast()).at_const(expr).as_data.member.path;
             let obj = unsafe (*self.cur_ast()).at_const(expr).as_data.member.object;
             if !is_path && self.cg_type_is_free(unsafe (*self.cur_ast()).type_of(expr)) {
-                self.cg_mark_move(obj, cond, false);
+                self.moved_place_l.push(expr);
+                self.moved_place_cond.push(cond);
+                if cond && self.place_flag_l.len() < 256 {
+                    self.place_flag_l.push(expr);
+                    self.place_flags_pending = true;
+                }
+                // propagate the SITE bit: the base's move flag must be set where the field is
+                // moved, or the guarded scope-exit free of the base double-frees the moved field
+                self.cg_mark_move(obj, cond, site);
                 return;
             }
         }
@@ -6836,24 +6856,54 @@ extend Codegen {
                 }
             }
         }
-        // Drop-on-assign: `place = v` frees the old value of a Free-typed SAFE place first --
-        // unless the previous statement moved that place out (owner-swap). RHS evaluates before
-        // the free, mirroring the identifier path.
-        if bd.op == TokenType::Equal && lt != TYPE_NONE && self.cg_type_is_free(lt) && self.cg_safe_place(bd.left) && !self.cg_prev_moved_place(
-            bd.left,
-        ) {
-            let mut r = Buf32 {};
-            let mut pv = Buf32 {};
-            self.fresh(&mut r[0], 32);
-            self.fresh(&mut pv[0], 32);
-            self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&r[0]));
-            self.emit_expr(bd.right);
-            self.buf.format_into("; __auto_type {} = &(", diag::cstr(&pv[0]));
-            self.emit_place(bd.left, true);
-            self.emit_str("); ");
-            self.emit_free_target(lt);
-            self.buf.format_into("({}); (*{} = {}); }})", diag::cstr(&pv[0]), diag::cstr(&pv[0]), diag::cstr(&r[0]));
-            return;
+        // Drop-on-assign: `place = v` frees the old value of a Free-typed SAFE place first.
+        // Statically dead (unconditionally moved) places skip the free; conditionally-moved places
+        // guard it with the move-site flags and reset them -- exact on every path. RHS evaluates
+        // before the free, mirroring the identifier path.
+        if bd.op == TokenType::Equal && lt != TYPE_NONE && self.cg_type_is_free(lt) && self.cg_safe_place(bd.left) {
+            let cls = self.cg_moved_place_class(bd.left);
+            if cls != 1 {
+                let mut r = Buf32 {};
+                let mut pv = Buf32 {};
+                self.fresh(&mut r[0], 32);
+                self.fresh(&mut pv[0], 32);
+                self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&r[0]));
+                self.emit_expr(bd.right);
+                self.buf.format_into("; __auto_type {} = &(", diag::cstr(&pv[0]));
+                self.emit_place(bd.left, true);
+                self.emit_str("); ");
+                if cls == 2 {
+                    self.emit_str("if (");
+                    let mut first = true;
+                    for pi in 0..self.place_flag_l.len() {
+                        if !self.cg_place_overlap_one(self.place_flag_l[pi], bd.left) {
+                            continue;
+                        }
+                        let mut fl = Buf32 {};
+                        cg_move_flag(&mut fl[0], 32, self.place_flag_l[pi]);
+                        if !first {
+                            self.emit_str(" && ");
+                        }
+                        self.buf.format_into("!{}", diag::cstr(&fl[0]));
+                        first = false;
+                    }
+                    self.emit_str(") ");
+                }
+                self.emit_free_target(lt);
+                self.buf.format_into("({}); (*{} = {}); ", diag::cstr(&pv[0]), diag::cstr(&pv[0]), diag::cstr(&r[0]));
+                if cls == 2 {
+                    for pi in 0..self.place_flag_l.len() {
+                        if !self.cg_place_overlap_one(self.place_flag_l[pi], bd.left) {
+                            continue;
+                        }
+                        let mut fl = Buf32 {};
+                        cg_move_flag(&mut fl[0], 32, self.place_flag_l[pi]);
+                        self.buf.format_into("({} = false); ", diag::cstr(&fl[0]));
+                    }
+                }
+                self.emit_str("})");
+                return;
+            }
         }
         self.emit_str("(");
         self.emit_place(bd.left, true);
@@ -6952,24 +7002,12 @@ extend Codegen {
         }
         return true; // unmodeled place shape: maybe -> suppress
     }
-    // Did the immediately-preceding statement move this place (or a prefix of it) out via a `let`?
-    fn cg_prev_moved_place(self: &Self, lhs: NodeId) bool {
-        if self.prev_stmt == NODE_NONE {
-            return false;
-        }
-        let pn = *unsafe (*self.cur_ast()).at_const(self.prev_stmt);
-        if pn.kind != NodeKind::NODE_LET || pn.as_data.let_stmt.value == NODE_NONE {
-            return false;
-        }
-        let v0 = pn.as_data.let_stmt.value;
-        let vk = unsafe (*self.cur_ast()).at_const(v0).kind;
-        if vk != NodeKind::NODE_MEMBER && vk != NodeKind::NODE_INDEX && vk != NodeKind::NODE_IDENTIFIER && vk != NodeKind::NODE_UNARY {
-            return false;
-        }
-        // compare against lhs and every base prefix of lhs (a moved base leaves the field stale too)
+    // Does moved place `mp` overlap `lhs` (exact, prefix, or extension)? A moved base leaves its
+    // fields stale, and a moved field leaves the whole aggregate partly stale.
+    fn cg_place_overlap_one(self: &Self, mp: NodeId, lhs: NodeId) bool {
         let mut cur = lhs;
         loop {
-            if self.cg_place_similar(v0, cur) {
+            if self.cg_place_similar(mp, cur) {
                 return true;
             }
             let cn = *unsafe (*self.cur_ast()).at_const(cur);
@@ -6980,9 +7018,52 @@ extend Codegen {
             } else if cn.kind == NodeKind::NODE_UNARY {
                 cur = cn.as_data.unary.operand;
             } else {
-                return false;
+                break;
             }
         }
+        let mut mc = mp;
+        loop {
+            let mn = *unsafe (*self.cur_ast()).at_const(mc);
+            if mn.kind == NodeKind::NODE_MEMBER && !mn.as_data.member.path {
+                mc = mn.as_data.member.object;
+            } else if mn.kind == NodeKind::NODE_INDEX {
+                mc = mn.as_data.index.object;
+            } else if mn.kind == NodeKind::NODE_UNARY {
+                mc = mn.as_data.unary.operand;
+            } else {
+                break;
+            }
+            if self.cg_place_similar(mc, lhs) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Assign-free classification for `lhs`: 0 = no overlapping move (free plainly), 1 = an
+    // UNCONDITIONAL move overlaps (statically dead, no free), 2 = only conditional moves overlap
+    // (guard the free with their flags -- exact on every path). Flag-less conditional overlaps
+    // (cap overflow) degrade to 1: leak, never double-free.
+    fn cg_moved_place_class(self: &Self, lhs: NodeId) u32 {
+        let mut cls: u32 = 0;
+        for i in 0..self.moved_place_l.len() {
+            if !self.cg_place_overlap_one(self.moved_place_l[i], lhs) {
+                continue;
+            }
+            if !self.moved_place_cond[i] {
+                return 1;
+            }
+            let mut flagged = false;
+            for pi in 0..self.place_flag_l.len() {
+                if self.place_flag_l[pi] == self.moved_place_l[i] {
+                    flagged = true;
+                }
+            }
+            if !flagged {
+                return 1;
+            }
+            cls = 2;
+        }
+        return cls;
     }
     fn emit_free_target(self: &mut Self, bt: TypeId) bool {
         let y = *self.type_at(self.subst_resolve(bt));
@@ -7983,6 +8064,15 @@ extend Codegen {
             i = i + 1;
         }
         self.nparam_flags = 0;
+        if self.place_flags_pending {
+            for pi in 0..self.place_flag_l.len() {
+                let mut fl = Buf32 {};
+                cg_move_flag(&mut fl[0], 32, self.place_flag_l[pi]);
+                self.emit_indent();
+                self.buf.format_into("bool {} = false;\n", diag::cstr(&fl[0]));
+            }
+            self.place_flags_pending = false;
+        }
         i = 0;
         while i < self.nunused_params {
             let mut pn = Buf128 {};
@@ -8000,19 +8090,12 @@ extend Codegen {
         }
         self.nunused_params = 0;
         let stmts = n.as_data.block.statements;
-        let saved_prev = self.prev_stmt;
         i = 0;
         while i < stmts.len {
-            self.prev_stmt = if i == 0 {
-                NODE_NONE;
-            } else {
-                unsafe (*self.cur_ast()).list(stmts)[(i - 1) as usize];
-            };
             self.emit_indent();
             self.emit_stmt(unsafe (*self.cur_ast()).list(stmts)[i as usize]);
             i = i + 1;
         }
-        self.prev_stmt = saved_prev;
         let mut diverges = false;
         if stmts.len > 0 {
             diverges = self.cg_stmt_diverges(unsafe (*self.cur_ast()).list(stmts)[(stmts.len - 1) as usize]);
@@ -8740,7 +8823,21 @@ extend Codegen {
                 self.emit_index(id, false);
             },
             NODE_MEMBER => {
-                self.emit_member(id, false);
+                let mut is_site = false;
+                for pi in 0..self.place_flag_l.len() {
+                    if self.place_flag_l[pi] == id {
+                        is_site = true;
+                    }
+                }
+                if is_site {
+                    let mut fl = Buf32 {};
+                    cg_move_flag(&mut fl[0], 32, id);
+                    self.buf.format_into("({} = true, ", diag::cstr(&fl[0]));
+                    self.emit_member(id, false);
+                    self.emit_str(")");
+                } else {
+                    self.emit_member(id, false);
+                }
             },
             NODE_CAST => {
                 let mut t = Buf256 {};
@@ -9889,6 +9986,10 @@ extend Codegen {
             self.ncond_sites = 0;
             self.cg_move_stamps_reset();
             self.pend_moves.clear();
+            self.moved_place_l.clear();
+            self.moved_place_cond.clear();
+            self.place_flag_l.clear();
+            self.place_flags_pending = false;
             self.cg_scan_moves(f.body, false);
             self.cg_replay_cond_moves();
             let pids = unsafe (*self.cur_ast()).list(f.params);

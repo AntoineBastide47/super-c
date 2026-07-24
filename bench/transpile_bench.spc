@@ -319,9 +319,7 @@ fn transpile_once(use_mem: bool) Timing {
         let pkg2 = (&mut p) as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
         let mut c = cg::Codegen::new(ma, str::from_raw(src as *const u8, slen), pkg2);
         c.set_multifile(true);
-        let cgb = p.cg_scratch;
-        p.cg_scratch = String::new();
-        c.adopt_buf(cgb);
+        c.adopt_buf(replace(&mut p.cg_scratch, String::new()));
         let th0 = time::cpu_seconds();
         c.codegen_emit_header(f);
         let th1 = time::cpu_seconds();

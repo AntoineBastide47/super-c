@@ -393,6 +393,29 @@ fn raii_drop_on_field_assign() {
     let cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
+
+    // a field moved out ANYWHERE in the body (even conditionally) suppresses the assign-free for
+    // that place -- suppression may only leak, never double-free the moved-out value
+    p.mkfile(
+        "cond.spc",
+        "struct H {\n    pub name: String,\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let mut h = H { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let mut n: usize = 0;\n    if h.name.len() > 3 {\n        let a = h.name;\n        n = n + sink(a);\n    }\n    h.name = String::from_str(\"next\");\n    n = n + h.name.len();\n    return n as i32 - 36;\n}\n",
+    );
+    let c2 = p.compile("cond.spc");
+    assert_eq(c2.exit, 0);
+    assert(p.gen_has("cond.c", ") String__free"), "conditionally-moved field assign-free is flag-guarded");
+    let cc2 = p.cc_build("");
+    assert_eq(cc2.exit, 0);
+    assert_eq(p.run_bin(), 0);
+
+    // moving a field out of a value implementing Free is REJECTED (Rust's rule): the free body
+    // cannot run on a partial value -- `replace` is the sanctioned way
+    p.mkfile(
+        "condfree.spc",
+        "struct G {\n    pub name: String,\n}\n\nextend G as Free {\n    pub fn free(self: &mut G) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let g = G { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let mut n: usize = 0;\n    if g.name.len() > 3 {\n        let a = g.name;\n        n = n + sink(a);\n    }\n    return n as i32 - 32;\n}\n",
+    );
+    let c3 = p.compile("condfree.spc");
+    assert(c3.exit != 0, "field move out of a Free-implementing value is rejected");
+    assert(c3.out_has("cannot move a field out of a value implementing Free"));
 }
 
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
