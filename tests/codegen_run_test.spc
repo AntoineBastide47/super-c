@@ -139,7 +139,7 @@ fn structs_and_methods() {
     );
     run_exit(
         "heap struct via new",
-        "struct Box { pub v: i32, }\nfn main() i32 { let b: *Box = new Box { v: 9, }; unsafe exit(b.v); }\n",
+        "extern \"C\" { fn free(pt: *mut void) void; }\nstruct Box { pub v: i32, }\nfn main() i32 { let b: *Box = new Box { v: 9, }; let r = unsafe b.v; unsafe free(b as *mut void); unsafe exit(r); }\n",
         9,
     );
 }

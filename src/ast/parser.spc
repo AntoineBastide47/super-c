@@ -68,14 +68,12 @@ extend Parser {
     }
 
     pub fn take_tokens(self: &mut Self) Vector<Token> {
-        let t = self.tokens;
-        self.tokens = Vector::<Token>::new();
+        let t = replace(&mut self.tokens, Vector::<Token>::new());
         return t;
     }
 
     pub fn take_ast(self: &mut Self) Ast {
-        let out = self.ast;
-        self.ast = Ast::new(0);
+        let out = replace(&mut self.ast, Ast::new(0));
         return out;
     }
 
@@ -831,8 +829,7 @@ extend Parser {
         if nnamed != 0 && nnamed != returns.len {
             self.error_here("either all return values are named or none");
         }
-        let outer_nrets = self.nrets;
-        self.nrets = Vector::<NodeId>::new();
+        let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
         if nnamed != 0 && nnamed == returns.len {
             for i in 0..returns.len {
                 self.nrets.push(unsafe self.ast.list(returns)[i as usize]);
@@ -2033,8 +2030,7 @@ extend Parser {
                 self.error_here("anonymous functions cannot be variadic");
             }
             let returns = self.parse_function_returns();
-            let outer_nrets = self.nrets;
-            self.nrets = Vector::<NodeId>::new();
+            let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
             let body = self.parse_block();
             self.nrets = outer_nrets;
             return self.ast.add(
@@ -2085,8 +2081,7 @@ extend Parser {
             }
             let params = self.ast.commit(mark);
             if self.check(TokenType::LeftBrace) {
-                let outer_nrets = self.nrets;
-                self.nrets = Vector::<NodeId>::new();
+                let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
                 let block = self.parse_block();
                 self.nrets = outer_nrets;
                 return self.ast.add(

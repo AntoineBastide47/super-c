@@ -546,8 +546,7 @@ extend Package {
             };
         }
 
-        let mut tsc = self.tok_scratch;
-        self.tok_scratch = Vector::<tok::Token>::new();
+        let mut tsc = replace(&mut self.tok_scratch, Vector::<tok::Token>::new());
         tsc.clear();
         let mut parsed = parse_source(&mut source, file_path, bootstrap_tags, tsc);
         self.tok_scratch = replace(&mut parsed.tokens, Vector::<tok::Token>::new());
@@ -1637,10 +1636,133 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
 }
 
 // Owners emit the generic instances used across module boundaries: iterate to a fixpoint.
+// Body-only generic types of MONOMORPHIZED functions: a `W<T> { .. }` literal inside a generic
+// fn's body appears in no signature, so nothing else interns its concrete instance -- the emitted
+// C then names a struct that was never defined. For every fn instantiation (MonoUse) substitute
+// its args through the owner module's non-concrete pool types (only those can mention the params;
+// foreign params never match, so unrelated types pass through untouched). Runs single-threaded
+// BEFORE the propagation fixpoint -- codegen's own seeding (expand_nested_insts) is restricted to
+// same-module instantiations because foreign asts are read-only under parallel codegen.
+// True when every generic parameter `t` mentions belongs to `gids` (the target fn's own params):
+// substituting foreign params would intern partially-substituted garbage instances into the owner
+// pool, which later emit as undefined C type names.
+fn type_params_subset(p: &Package, m: ModuleId, t: TypeId, gmod: ModuleId, gids: *const NodeId, n: u32) bool {
+    if t == TYPE_NONE {
+        return true;
+    }
+    let y = *pkg_ast_c(p, m).type_at(t);
+    if y.kind == TypeKind::TYPE_GENERIC {
+        if y.module != gmod {
+            return false;
+        }
+        for i in 0..n {
+            if unsafe gids[i as usize] == y.as_data.decl {
+                return true;
+            }
+        }
+        return false;
+    }
+    if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+        return type_params_subset(p, m, y.as_data.elem, gmod, gids, n);
+    }
+    if y.kind == TypeKind::TYPE_INSTANCE {
+        let it = *pkg_ast_c(p, m).instance(y.as_data.inst);
+        for i in 0..it.n {
+            if !type_params_subset(p, m, unsafe it.args[i as usize], gmod, gids, n) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return true;
+}
+
+fn seed_mono_body_instances(p: &mut Package) {
+    let n = p.modules.len();
+    let mut changed = false;
+    for u in 0..n {
+        if !p.modules[u].has_ast {
+            continue;
+        }
+        let ua = pkg_ast_c(p, u as ModuleId);
+        let nm = unsafe (*ua).mono.len();
+        for mi in 0..nm {
+            let mu = unsafe (*ua).mono[mi];
+            if unsafe (*ua).at_const(mu.node).kind != NodeKind::NODE_CALL {
+                continue;
+            }
+            let callee_id = unsafe (*ua).at_const(mu.node).as_data.call.callee;
+            let fd = if unsafe (*ua).at_const(callee_id).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                let e = unsafe (*ua).at_const(callee_id).as_data.specialization.expression;
+                unsafe (*ua).resolution_def(e);
+            } else {
+                unsafe (*ua).resolution_def(callee_id);
+            };
+            if fd.node == NODE_NONE || fd.module as usize >= n || !p.modules[fd.module as usize].has_ast {
+                continue;
+            }
+            let fma = pkg_ast_c(p, fd.module);
+            if unsafe (*fma).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let gens = unsafe (*fma).at_const(fd.node).as_data.function.generics;
+            if gens.len == 0 || gens.len > 8 || mu.n as u32 < gens.len {
+                continue;
+            }
+            let mut concrete = true;
+            for k in 0..gens.len {
+                if !unsafe (*ua).type_concrete(mu.args[k as usize]) {
+                    concrete = false;
+                }
+            }
+            if !concrete {
+                continue;
+            }
+            let mut fargs: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+            for k in 0..gens.len {
+                unsafe fargs[k as usize] = if fd.module == u as ModuleId {
+                    unsafe mu.args[k as usize];
+                } else {
+                    let fmm = pkg_ast_m(p, fd.module);
+                    unsafe (*fmm).reintern(&*ua, mu.args[k as usize]);
+                };
+            }
+            let gids = unsafe (*pkg_ast_c(p, fd.module)).list(gens);
+            let np = unsafe (*pkg_ast_c(p, fd.module)).type_pool.len();
+            let cp = (&mut changed) as *mut bool;
+            let mut t: usize = 1;
+            while t < np {
+                if !unsafe (*pkg_ast_c(p, fd.module)).type_concrete(t as TypeId) && type_params_subset(
+                    p,
+                    fd.module,
+                    t as TypeId,
+                    fd.module,
+                    gids,
+                    gens.len,
+                ) {
+                    reintern_nested_type(
+                        p,
+                        fd.module,
+                        fd.module,
+                        t as TypeId,
+                        fd.module,
+                        gids,
+                        &fargs[0],
+                        gens.len as u8,
+                        cp,
+                    );
+                }
+                t = t + 1;
+            }
+        }
+    }
+}
+
 pub fn package_propagate_instances(p: &mut Package) {
     // Typechecking is done for every module here: resolve the deferred caller->callee method-use
     // edges before codegen starts consulting method_used_get.
     p.finalize_method_used();
+    seed_mono_body_instances(p);
     let n = p.modules.len();
     // Resolutions are final now; build the cross-module reference bitset once so module_imports (hot inside
     // instance_home_in, called per instance-arg here and in codegen) is an O(1) query, not a linear scan.

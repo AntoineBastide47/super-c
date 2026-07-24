@@ -19,9 +19,10 @@ for target in macos linux windows; do
     fi
 done
 
-# 3) Full test suite with the current compiler (built first if stale).
+# 3) Full test suite with the current compiler (built first if stale), leak-gated: every process in
+# the run (compiler, harness, spawned servers, compiled fixtures) exits nonzero on leaks/double frees.
 printf 'check: tests\n'
-if ! ./super-c test; then
+if ! SC_LEAK_CHECK=fatal ./super-c test; then
     printf 'check: FAILED -- test failures above\n' >&2
     exit 1
 fi

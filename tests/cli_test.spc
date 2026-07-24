@@ -385,7 +385,7 @@ fn raii_drop_on_field_assign() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "struct Holder {\n    pub name: String,\n}\n\nextend Holder as Free {\n    pub fn free(self: &mut Holder) {\n        self.name.free();\n    }\n}\n\nfn take_name(h: &mut Holder) String {\n    let t = h.name;\n    h.name = String::new();\n    return t;\n}\n\nfn main() i32 {\n    let mut h = Holder { name: String::from_str(\"first\") };\n    let mut n: usize = 0;\n    for _i in 0..3 {\n        h.name = String::from_str(\"abcdefgh\");\n        n = n + h.name.len();\n    }\n    let taken = take_name(&mut h);\n    n = n + taken.len();\n    return n as i32 - 32;\n}\n",
+        "struct Holder {\n    pub name: String,\n}\n\nextend Holder as Free {\n    pub fn free(self: &mut Holder) {\n        self.name.free();\n    }\n}\n\nfn take_name(h: &mut Holder) String {\n    return replace(&mut h.name, String::new());\n}\n\nfn main() i32 {\n    let mut h = Holder { name: String::from_str(\"first\") };\n    let mut n: usize = 0;\n    for _i in 0..3 {\n        h.name = String::from_str(\"abcdefgh\");\n        n = n + h.name.len();\n    }\n    let taken = take_name(&mut h);\n    n = n + taken.len();\n    return n as i32 - 32;\n}\n",
     );
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
@@ -395,10 +395,10 @@ fn raii_drop_on_field_assign() {
     assert_eq(p.run_bin(), 0);
 
     // a field moved out ANYWHERE in the body (even conditionally) guards the assign-free for that
-    // place -- the take goes through the &mut-reference gap (an owned partial move is rejected)
+    // place -- the take goes through an `unsafe` ref-take (the safe form is rejected: E0507)
     p.mkfile(
         "cond.spc",
-        "struct H {\n    pub name: String,\n}\n\nextend H as Free {\n    pub fn free(self: &mut H) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn shuffle(h: &mut H) usize {\n    let mut n: usize = 0;\n    if h.name.len() > 3 {\n        let a = h.name;\n        n = n + sink(a);\n    }\n    h.name = String::from_str(\"next\");\n    return n + h.name.len();\n}\n\nfn main() i32 {\n    let mut h = H { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let n = shuffle(&mut h);\n    return n as i32 - 36;\n}\n",
+        "struct H {\n    pub name: String,\n}\n\nextend H as Free {\n    pub fn free(self: &mut H) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn shuffle(h: &mut H) usize {\n    let mut n: usize = 0;\n    if h.name.len() > 3 {\n        let a = unsafe h.name;\n        n = n + sink(a);\n    }\n    h.name = String::from_str(\"next\");\n    return n + h.name.len();\n}\n\nfn main() i32 {\n    let mut h = H { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let n = shuffle(&mut h);\n    return n as i32 - 36;\n}\n",
     );
     let c2 = p.compile("cond.spc");
     assert_eq(c2.exit, 0);
@@ -447,7 +447,7 @@ fn leak_tracker() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "extern \"C\" {\n    fn malloc(n: usize) *mut void;\n}\n\nfn main() i32 {\n    let p = unsafe malloc(64);\n    return (p == null) as i32;\n}\n",
+        "fn main() i32 {\n    forget(String::from_str(\"deliberately abandoned, past the inline budget\"));\n    return 0;\n}\n",
     );
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
@@ -473,6 +473,66 @@ fn leak_tracker() {
     let ok = q.run_bin_env("SC_LEAK_CHECK=1 ");
     assert_eq(ok.exit, 0);
     assert(!ok.out_has("super-c leaks"), "leak-free run reports nothing");
+
+    // fatal mode: survivors turn the exit code nonzero (23), so CI can gate on leak-freedom
+    let ft = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(ft.exit, 23);
+    assert(ft.out_has("super-c leaks: 1 allocation"), "fatal mode still prints the report");
+    let ftc = q.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(ftc.exit, 0);
+
+    // double frees are detected via the freed-entry history: both stacks reported, exit 0 in
+    // report mode, abort in fatal mode
+    let d = cli::proj_new();
+    d.mkfile(
+        "main.spc",
+        "extern \"C\" {\n    fn malloc(n: usize) *mut void;\n    fn free(pt: *mut void) void;\n}\n\nfn main(args: Vector<str>) i32 {\n    let pt = unsafe malloc(64 + args.len());\n    unsafe free(pt);\n    unsafe free(pt);\n    return 0;\n}\n",
+    );
+    let rd = d.compile("main.spc");
+    assert_eq(rd.exit, 0);
+    let ccd = d.cc_build("");
+    assert_eq(ccd.exit, 0);
+    let dbl = d.run_bin_env("SC_LEAK_CHECK=1 ");
+    assert_eq(dbl.exit, 0);
+    assert(dbl.out_has("super-c double free:"), "double free detected");
+    assert(dbl.out_has("freed again at:"), "both sites reported");
+    let dblf = d.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(dblf.exit != 0, "fatal mode aborts on double free");
+}
+
+// Auto-derived Free: structs and enums whose members own memory get a SYNTHESIZED per-TU free
+// (`<T>__free__d`) -- fields, nested aggregates, enum payloads and container elements all free
+// without an impl being written; partial moves out of derived values are rejected exactly like
+// explicit Free types (replace() is the take idiom).
+@test
+fn auto_derive_free() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct Plain {\n    pub s: String,\n    pub n: i32,\n}\n\nstruct Nested {\n    pub p: Plain,\n    pub tag: String,\n}\n\nenum Ev {\n    None,\n    Named(String),\n}\n\nfn main() i32 {\n    let a = Plain { s: String::from_str(\"plain owning field, long past the sso budget\"), n: 1 };\n    let b = Nested {\n        p: Plain { s: String::from_str(\"nested owning field, long past the sso\"), n: 2 },\n        tag: String::from_str(\"nested tag string, also long past the sso\"),\n    };\n    let e = Ev::Named(String::from_str(\"enum payload string, long past the sso\"));\n    let mut v = Vector::<Plain>::new();\n    v.push(Plain { s: String::from_str(\"vector element string, long past sso\"), n: 3 });\n    let k = a.n + b.p.n + v.len() as i32;\n    let ok = switch e {\n        Named(sx) => sx.len() > 0,\n        _ => false,\n    };\n    return k + (ok as i32) - 5;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "static void Plain__free__d(Plain *const self)"), "struct free synthesized");
+    assert(p.gen_has("main.c", "Plain__free__d(&self->p);"), "nested derive composes");
+    assert(
+        p.gen_has("main.c", "if (self->tag == Ev_Named) String__free(&self->payload.Named._0);"),
+        "enum payload freed per variant",
+    );
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(lk.exit, 0);
+    assert(!lk.out_has("super-c leaks"), "derived aggregates are leak-free");
+
+    // partial moves out of a derived value are rejected (same rule as explicit Free impls)
+    p.mkfile(
+        "take.spc",
+        "struct Plain {\n    pub s: String,\n}\n\nfn main() i32 {\n    let a = Plain { s: String::from_str(\"x\") };\n    let t = a.s;\n    return (t.len() - t.len()) as i32;\n}\n",
+    );
+    let r2 = p.compile("take.spc");
+    assert(r2.exit != 0, "partial move out of a derived value is rejected");
+    assert(r2.out_has("cannot move a field out of a value implementing Free"));
 }
 
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
@@ -784,7 +844,8 @@ fn main() i32 {
   let mut c = s.clone();
   let mut f = s.fmt();
   let ok = s.eq_str("abcdefghijklmnopqrstuvwxyz0123456789") && s.cmp(&c) == 0 && s.hash() == c.hash() && f.len() == s.len();
-  if ok { unsafe exit(42); } unsafe exit(1);
+  if ok { return 42; }
+  return 1;
 }
 "#,
     );
@@ -1104,16 +1165,16 @@ fn format_conformances() {
     let p = cli::proj_new();
     p.mkfile(
         "fmt.spc",
-        r#"extern "C" { fn exit(code: i32) void; }
-fn main() i32 {
+        r#"fn main() i32 {
   let mut v = Vector::<String>::new();
   v.push(String::from_str("a")); v.push(String::from_str("b"));
-  let mut vs = v.fmt();
+  let vs = v.fmt();
   let o = Option::<String>::Some(String::from_str("x"));
-  let mut os = o.fmt();
+  let os = o.fmt();
   let r = Result::<String, String>::Ok(String::from_str("y"));
-  let mut rs = r.fmt();
-  unsafe exit(vs.len() as i32 + os.len() as i32 + rs.len() as i32); }
+  let rs = r.fmt();
+  return vs.len() as i32 + os.len() as i32 + rs.len() as i32;
+}
 "#,
     );
     let r = p.compile("fmt.spc");

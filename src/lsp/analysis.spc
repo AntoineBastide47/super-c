@@ -20,16 +20,18 @@ pub struct DiagRec {
     pub len: u32,
     pub severity: u8, // LSP DiagnosticSeverity: 1 = error, 2 = warning
     pub msg: String,
-    // machine-applicable fix (lint warnings only): -1 = none, 0 = delete [fix_start, fix_end),
-    // 1 = insert '_' before fix_start -- the LintFix kinds, surfaced as LSP quick fixes
+    // machine-applicable fix: -1 = none, else a LintFix kind (0 delete [fix_start, fix_end),
+    // 1 insert '_', 2 insert 'const ', 3 insert `fix_text`) surfaced as an LSP quick fix
     pub fix_kind: i32,
     pub fix_start: u32,
     pub fix_end: u32,
+    pub fix_text: String, // kind-3 payload (generated code); empty otherwise
 }
 
 extend DiagRec as Free {
     pub fn free(self: &mut Self) {
         self.msg.free();
+        self.fix_text.free();
     }
 }
 
@@ -70,6 +72,20 @@ fn block_msg(block: &String) String {
 // DiagRec against module `m`.
 fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
     for k in 0..e.errors.len() {
+        let mut fk: i32 = -1;
+        let mut fs: u32 = 0;
+        let mut ftx = String::new();
+        for j in 0..e.fixes.len() {
+            let f = *e.fixes.at(j);
+            if f.warn == (0x80000000 | k as u32) {
+                fk = f.kind;
+                fs = f.start;
+                if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
+                    ftx = e.fix_texts.at(f.text as usize).clone();
+                }
+                break;
+            }
+        }
         diags.push(
             DiagRec {
                 module: m,
@@ -77,9 +93,10 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
                 len: e.lens[k],
                 severity: 1,
                 msg: block_msg(e.errors.at(k)),
-                fix_kind: -1,
-                fix_start: 0,
+                fix_kind: fk,
+                fix_start: fs,
                 fix_end: 0,
+                fix_text: ftx,
             },
         );
     }
@@ -105,6 +122,7 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
                 fix_kind: fk,
                 fix_start: fs,
                 fix_end: fe,
+                fix_text: String::new(),
             },
         );
     }
@@ -164,8 +182,7 @@ fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
     p.override_mod = i as ModuleId;
@@ -186,8 +203,7 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     p.override_mod = i as ModuleId;

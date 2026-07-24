@@ -1195,8 +1195,7 @@ extend Lexer {
     }
 
     pub fn take_tokens(self: &mut Self) Vector<Token> {
-        let out = self.tokens;
-        self.tokens = Vector::<Token>::new();
+        let out = replace(&mut self.tokens, Vector::<Token>::new());
         return out;
     }
 

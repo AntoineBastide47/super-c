@@ -210,8 +210,7 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
     p.override_mod = i as ModuleId;
@@ -246,8 +245,7 @@ fn typecheck_module(
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     p.override_mod = i as ModuleId;
@@ -294,8 +292,7 @@ fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
     p.override_ast = &mut t.ast;
@@ -1364,9 +1361,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
         let pkg = p as *mut loader::Package;
         let mut c = cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg);
         c.set_multifile(true);
-        let cgb = p.cg_scratch;
-        p.cg_scratch = String::new();
-        c.adopt_buf(cgb);
+        c.adopt_buf(replace(&mut p.cg_scratch, String::new()));
         let mut tcases = TCases {}; // must outlive codegen_emit (CgTestInfo keeps a pointer into it)
         if testing {
             let mut nt: u32 = 0;

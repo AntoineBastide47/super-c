@@ -154,8 +154,7 @@ fn resolve_one(p: &mut loader::Package, i: usize) {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
     p.override_ast = &mut r.ast;
@@ -172,8 +171,7 @@ fn typecheck_one(p: &mut loader::Package, i: usize) {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
     p.override_ast = &mut t.ast;
@@ -191,8 +189,7 @@ fn borrowck_one(p: &mut loader::Package, i: usize) {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = m.ast;
-    m.ast = Ast::new(0);
+    let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
     p.override_ast = &mut t.ast;

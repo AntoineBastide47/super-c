@@ -24,6 +24,7 @@ extend<T, A: Allocator> Box<T, A> {
     }
 
     pub const fn set(self: &mut Box<T, A>, value: T) {
+        unsafe self.ptr[0].free();
         unsafe self.ptr[0] = value;
     }
 

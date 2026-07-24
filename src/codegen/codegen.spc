@@ -154,9 +154,11 @@ static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n)
 /* leak tracker (super_rt.c): interposes the emitted code's malloc/realloc/free call sites.
    Inert unless the SC_LEAK_CHECK environment variable is set. */
 void *sc_lk_malloc(size_t __n);
+void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
 #define malloc(__n) sc_lk_malloc(__n)
+#define calloc(__n, __m) sc_lk_calloc(__n, __m)
 #define realloc(__p, __n) sc_lk_realloc(__p, __n)
 #define free(__p) sc_lk_free(__p)
 "#.ptr() as *const char;
@@ -178,27 +180,34 @@ pub const fn super_rt_source() *const char {
 #if __has_include(<execinfo.h>)
 #include <execinfo.h>
 #define SC_LK_BT 10
+#define SC_LK_SYMS 1
 #endif
+#endif
+#if !defined(SC_LK_BT) && defined(_WIN32)
+unsigned short RtlCaptureStackBackTrace(unsigned long FramesToSkip, unsigned long FramesToCapture, void **BackTrace, unsigned long *BackTraceHash);
+#define SC_LK_BT 10
 #endif
 void *sc_lk_malloc(size_t __n);
+void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
 typedef struct {
   void *ptr;
   size_t size;
   int nbt;
+  unsigned char st; /* 1 = live, 2 = freed (kept until rehash for double-free detection) */
 #ifdef SC_LK_BT
   void *bt[SC_LK_BT];
 #endif
 } sc_lk_ent;
-#define SC_LK_DEAD ((void *)(uintptr_t)1)
 static sc_lk_ent *sc_lk_tab;
-static size_t sc_lk_cap;   /* power of two */
-static size_t sc_lk_used;  /* live + tombstones */
+static size_t sc_lk_cap;  /* power of two */
+static size_t sc_lk_used; /* live + freed-history */
 static size_t sc_lk_live;
 static size_t sc_lk_bytes;
+static size_t sc_lk_dbl;
 static volatile int sc_lk_lock;
-static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = on */
+static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = report, 3 = fatal */
 static void sc_lk_acquire(void) {
   while (__sync_lock_test_and_set(&sc_lk_lock, 1)) {}
 }
@@ -209,7 +218,7 @@ static size_t sc_lk_slot(const void *p, size_t cap) {
 static sc_lk_ent *sc_lk_find(void *p) {
   if (sc_lk_cap == 0) return NULL;
   size_t i = sc_lk_slot(p, sc_lk_cap);
-  while (sc_lk_tab[i].ptr != NULL) {
+  while (sc_lk_tab[i].st != 0) {
     if (sc_lk_tab[i].ptr == p) return &sc_lk_tab[i];
     i = (i + 1) & (sc_lk_cap - 1);
   }
@@ -217,46 +226,64 @@ static sc_lk_ent *sc_lk_find(void *p) {
 }
 static void sc_lk_put(sc_lk_ent *tab, size_t cap, const sc_lk_ent *e) {
   size_t i = sc_lk_slot(e->ptr, cap);
-  while (tab[i].ptr != NULL && tab[i].ptr != SC_LK_DEAD) i = (i + 1) & (cap - 1);
+  while (tab[i].st != 0) i = (i + 1) & (cap - 1);
   tab[i] = *e;
 }
 static int sc_lk_grow(void) {
   size_t ncap = sc_lk_cap != 0 ? sc_lk_cap * 2 : 4096;
   sc_lk_ent *nt = (sc_lk_ent *)(calloc)(ncap, sizeof(sc_lk_ent));
   if (nt == NULL) return 0;
+  size_t kept = 0;
   for (size_t i = 0; i < sc_lk_cap; i++) {
-    if (sc_lk_tab[i].ptr != NULL && sc_lk_tab[i].ptr != SC_LK_DEAD) sc_lk_put(nt, ncap, &sc_lk_tab[i]);
+    if (sc_lk_tab[i].st == 1) {
+      sc_lk_put(nt, ncap, &sc_lk_tab[i]);
+      kept++;
+    }
   }
   (free)(sc_lk_tab);
   sc_lk_tab = nt;
   sc_lk_cap = ncap;
-  sc_lk_used = sc_lk_live;
-  return 1;
-}
-/* Insert under the held lock; a stale entry at `p` (freed behind the tracker's back, address
-   reused) is replaced in place. Returns 0 when bookkeeping memory ran out. */
-static int sc_lk_insert(const sc_lk_ent *e) {
-  sc_lk_ent *old = sc_lk_find(e->ptr);
-  if (old != NULL) {
-    sc_lk_bytes -= old->size;
-    sc_lk_bytes += e->size;
-    *old = *e;
-    return 1;
-  }
-  if ((sc_lk_used + 1) * 10 >= sc_lk_cap * 7 && !sc_lk_grow()) return 0;
-  sc_lk_put(sc_lk_tab, sc_lk_cap, e);
-  sc_lk_used++;
-  sc_lk_live++;
-  sc_lk_bytes += e->size;
+  sc_lk_used = kept; /* freed-history entries are dropped: detection is best-effort */
   return 1;
 }
 static void sc_lk_capture(sc_lk_ent *e, void *p, size_t n) {
   e->ptr = p;
   e->size = n;
+  e->st = 1;
   e->nbt = 0;
-#ifdef SC_LK_BT
+#ifdef SC_LK_SYMS
   e->nbt = backtrace(e->bt, SC_LK_BT);
+#elif defined(SC_LK_BT)
+  e->nbt = (int)RtlCaptureStackBackTrace(0UL, (unsigned long)SC_LK_BT, e->bt, (unsigned long *)0);
 #endif
+}
+#ifdef SC_LK_BT
+static void sc_lk_bt_print(void *const *bt, int n) {
+#ifdef SC_LK_SYMS
+  char **syms = backtrace_symbols(bt, n);
+  if (syms != NULL) {
+    for (int f = 0; f < n; f++) {
+      if (strstr(syms[f], "sc_lk_") == NULL) fprintf(stderr, "    %s\n", syms[f]);
+    }
+    (free)(syms);
+    return;
+  }
+#endif
+  for (int f = 0; f < n; f++) fprintf(stderr, "    %p\n", bt[f]);
+}
+#endif
+/* `snap` holds the entry recorded when the block was FIRST freed (its stack is the freeing site). */
+static void sc_lk_double(void *p, const sc_lk_ent *snap) {
+  fprintf(stderr, "== super-c double free: %p (%llu byte(s)) ==\n", p, (unsigned long long)snap->size);
+#ifdef SC_LK_BT
+  fprintf(stderr, "previously freed at:\n");
+  sc_lk_bt_print(snap->bt, snap->nbt);
+  sc_lk_ent now;
+  sc_lk_capture(&now, p, 0);
+  fprintf(stderr, "freed again at:\n");
+  sc_lk_bt_print(now.bt, now.nbt);
+#endif
+  if (sc_lk_state == 3) abort();
 }
 static void sc_lk_disable(void) {
   sc_lk_state = 1;
@@ -287,51 +314,74 @@ static void sc_lk_report(void) {
   if (v != NULL) {
     size_t k = 0;
     for (size_t i = 0; i < sc_lk_cap && k < n; i++) {
-      if (sc_lk_tab[i].ptr != NULL && sc_lk_tab[i].ptr != SC_LK_DEAD) v[k++] = sc_lk_tab[i];
+      if (sc_lk_tab[i].st == 1) v[k++] = sc_lk_tab[i];
     }
     n = k;
+  } else {
+    n = 0;
   }
+  int fatal = sc_lk_state == 3;
+  size_t dbl = sc_lk_dbl;
   sc_lk_state = 1; /* the report's own prints may allocate: stop tracking */
   sc_lk_release();
-  if (n == 0 || v == NULL) {
-    (free)(v);
-    return;
-  }
-  qsort(v, n, sizeof(sc_lk_ent), sc_lk_group_cmp);
-  fprintf(stderr, "== super-c leaks: %llu allocation(s), %llu byte(s) ==\n",
-          (unsigned long long)n, (unsigned long long)bytes);
-  size_t shown = 0;
-  for (size_t i = 0; i < n;) {
-    size_t j = i;
-    size_t gbytes = 0;
-    while (j < n && sc_lk_group_cmp(&v[i], &v[j]) == 0) gbytes += v[j++].size;
-    if (shown < 64) {
-      fprintf(stderr, "leak: %llu allocation(s), %llu byte(s)\n",
-              (unsigned long long)(j - i), (unsigned long long)gbytes);
+  if (n != 0) {
+    qsort(v, n, sizeof(sc_lk_ent), sc_lk_group_cmp);
+    fprintf(stderr, "== super-c leaks: %llu allocation(s), %llu byte(s) ==\n",
+            (unsigned long long)n, (unsigned long long)bytes);
+    size_t shown = 0;
+    for (size_t i = 0; i < n;) {
+      size_t j = i;
+      size_t gbytes = 0;
+      while (j < n && sc_lk_group_cmp(&v[i], &v[j]) == 0) gbytes += v[j++].size;
+      if (shown < 64) {
+        fprintf(stderr, "leak: %llu allocation(s), %llu byte(s)\n",
+                (unsigned long long)(j - i), (unsigned long long)gbytes);
 #ifdef SC_LK_BT
-      char **syms = backtrace_symbols(v[i].bt, v[i].nbt);
-      if (syms != NULL) {
-        for (int f = 0; f < v[i].nbt; f++) {
-          if (strstr(syms[f], "sc_lk_") == NULL) fprintf(stderr, "    %s\n", syms[f]);
-        }
-        (free)(syms);
-      }
+        sc_lk_bt_print(v[i].bt, v[i].nbt);
 #endif
+      }
+      shown++;
+      i = j;
     }
-    shown++;
-    i = j;
+    if (shown > 64)
+      fprintf(stderr, "... (%llu more leak site(s))\n", (unsigned long long)(shown - 64));
   }
-  if (shown > 64)
-    fprintf(stderr, "... (%llu more leak site(s))\n", (unsigned long long)(shown - 64));
   (free)(v);
+  if (dbl != 0)
+    fprintf(stderr, "== super-c double frees: %llu ==\n", (unsigned long long)dbl);
+  if (fatal && (n != 0 || dbl != 0)) _Exit(23);
 }
 static int sc_lk_on(void) {
   if (sc_lk_state == 0) {
     const char *e = getenv("SC_LEAK_CHECK");
-    sc_lk_state = (e != NULL && e[0] != '\0' && e[0] != '0') ? 2 : 1;
-    if (sc_lk_state == 2) atexit(sc_lk_report);
+    int st = 1;
+    if (e != NULL && e[0] != '\0' && e[0] != '0') st = (e[0] == 'f' || e[0] == 'F') ? 3 : 2;
+    sc_lk_state = st;
+    if (st >= 2) atexit(sc_lk_report);
   }
-  return sc_lk_state == 2;
+  return sc_lk_state >= 2;
+}
+/* Insert under the held lock. An existing entry at `p` is overwritten: freed-history means the
+   address was legitimately reused; a live one means the block was freed behind the tracker's back
+   (a foreign free) and then reused. Returns 0 when bookkeeping memory ran out. */
+static int sc_lk_insert(const sc_lk_ent *e) {
+  sc_lk_ent *old = sc_lk_find(e->ptr);
+  if (old != NULL) {
+    if (old->st == 1) {
+      sc_lk_bytes -= old->size;
+      sc_lk_live--;
+    }
+    *old = *e;
+    sc_lk_live++;
+    sc_lk_bytes += e->size;
+    return 1;
+  }
+  if ((sc_lk_used + 1) * 10 >= sc_lk_cap * 7 && !sc_lk_grow()) return 0;
+  sc_lk_put(sc_lk_tab, sc_lk_cap, e);
+  sc_lk_used++;
+  sc_lk_live++;
+  sc_lk_bytes += e->size;
+  return 1;
 }
 void *sc_lk_malloc(size_t __n) {
   void *p = (malloc)(__n);
@@ -339,43 +389,101 @@ void *sc_lk_malloc(size_t __n) {
     sc_lk_ent e;
     sc_lk_capture(&e, p, __n);
     sc_lk_acquire();
-    if (sc_lk_state == 2 && !sc_lk_insert(&e)) sc_lk_disable();
+    if (sc_lk_state >= 2 && !sc_lk_insert(&e)) sc_lk_disable();
+    sc_lk_release();
+  }
+  return p;
+}
+void *sc_lk_calloc(size_t __n, size_t __m) {
+  void *p = (calloc)(__n, __m);
+  if (p != NULL && sc_lk_on()) {
+    sc_lk_ent e;
+    sc_lk_capture(&e, p, __n * __m);
+    sc_lk_acquire();
+    if (sc_lk_state >= 2 && !sc_lk_insert(&e)) sc_lk_disable();
     sc_lk_release();
   }
   return p;
 }
 void *sc_lk_realloc(void *__p, size_t __n) {
+  if (__p != NULL && sc_lk_on()) {
+    int uaf = 0;
+    sc_lk_ent snap;
+    snap.size = 0;
+    snap.nbt = 0;
+    sc_lk_acquire();
+    if (sc_lk_state >= 2) {
+      sc_lk_ent *e0 = sc_lk_find(__p);
+      if (e0 != NULL && e0->st == 2) {
+        snap = *e0;
+        uaf = 1;
+        sc_lk_dbl++;
+      }
+    }
+    sc_lk_release();
+    if (uaf) {
+      fprintf(stderr, "== super-c realloc of freed pointer: %p ==\n", __p);
+#ifdef SC_LK_BT
+      fprintf(stderr, "previously freed at:\n");
+      sc_lk_bt_print(snap.bt, snap.nbt);
+#endif
+      if (sc_lk_state == 3) abort();
+      return sc_lk_malloc(__n); /* the old block is gone: hand back fresh memory */
+    }
+  }
   void *q = (realloc)(__p, __n);
   if (q != NULL && sc_lk_on()) {
     sc_lk_ent e;
     sc_lk_capture(&e, q, __n);
     sc_lk_acquire();
-    if (sc_lk_state == 2) {
+    if (sc_lk_state >= 2) {
       sc_lk_ent *old = __p != NULL ? sc_lk_find(__p) : NULL;
-      if (old != NULL) {
+      int was_tracked = 0;
+      if (old != NULL && old->st == 1) {
         sc_lk_bytes -= old->size;
         sc_lk_live--;
-        old->ptr = SC_LK_DEAD;
+        size_t osz = old->size;
+        void *op = old->ptr;
+        sc_lk_capture(old, op, osz); /* the realloc consumed it: record this site */
+        old->st = 2;
+        was_tracked = 1;
       }
       /* memory the tracker never saw (a foreign allocator) stays untracked */
-      if ((old != NULL || __p == NULL) && !sc_lk_insert(&e)) sc_lk_disable();
+      if ((was_tracked || __p == NULL) && !sc_lk_insert(&e)) sc_lk_disable();
     }
     sc_lk_release();
   }
   return q;
 }
 void sc_lk_free(void *__p) {
+  int skip = 0;
   if (__p != NULL && sc_lk_on()) {
+    int dbl = 0;
+    sc_lk_ent snap;
+    snap.size = 0;
+    snap.nbt = 0;
     sc_lk_acquire();
-    sc_lk_ent *e = sc_lk_find(__p);
-    if (e != NULL) {
-      sc_lk_bytes -= e->size;
-      sc_lk_live--;
-      e->ptr = SC_LK_DEAD;
+    if (sc_lk_state >= 2) {
+      sc_lk_ent *e = sc_lk_find(__p);
+      if (e != NULL) {
+        if (e->st == 2) {
+          snap = *e;
+          dbl = 1;
+          skip = 1; /* the block may belong to someone else now: never free it twice */
+          sc_lk_dbl++;
+        } else {
+          sc_lk_bytes -= e->size;
+          sc_lk_live--;
+          size_t sz = e->size;
+          sc_lk_capture(e, __p, sz); /* record the freeing site for double-free reports */
+          e->st = 2;
+        }
+      }
     }
     sc_lk_release();
+    if (dbl) sc_lk_double(__p, &snap);
   }
-  (free)(__p);
+  if (!skip) (free)(__p);
 }
 "#.ptr() as *const char;
 }
@@ -613,6 +721,7 @@ pub struct Codegen<'a> {
     // the free is skipped only at that return's own defer flush (cur_ret), and every other exit
     // still frees the local.
     pub ret_moves: Vector<u64>,
+    pub derive_busy: Vector<u64>, // cg_type_derives_free recursion guard
     pub cur_ret: NodeId, // the NODE_RETURN currently being emitted (NODE_NONE outside emit_return)
     pub place_flags_pending: bool,
     pub depth: u32,
@@ -698,6 +807,7 @@ extend Codegen as Free {
         self.instname_memo.free();
         self.pend_moves.free();
         self.ret_moves.free();
+        self.derive_busy.free();
         self.moved_place_l.free();
         self.moved_place_cond.free();
         self.place_flag_l.free();
@@ -758,6 +868,7 @@ extend Codegen {
             moved_place_cond: Vector::<bool>::new(),
             place_flag_l: Vector::<NodeId>::new(),
             ret_moves: Vector::<u64>::new(),
+            derive_busy: Vector::<u64>::new(),
             cur_ret: NODE_NONE,
             place_flags_pending: false,
             home_ast: ast_u as *mut Ast,
@@ -2608,8 +2719,11 @@ extend Codegen {
         if y.kind == TypeKind::TYPE_DYN {
             return y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8;
         }
-        if y.kind == TypeKind::TYPE_STRUCT {
-            return self.cg_free_method(y.module, y.as_data.decl).node != NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            if self.cg_free_method(y.module, y.as_data.decl).node != NODE_NONE {
+                return true;
+            }
+            return self.cg_type_derives_free(rt);
         }
         if y.kind != TypeKind::TYPE_INSTANCE {
             return false;
@@ -2617,7 +2731,7 @@ extend Codegen {
         let ii = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
         let ext = self.cg_free_extend(ii.module, ii.decl);
         if ext.node == NODE_NONE {
-            return false;
+            return self.cg_type_derives_free(rt);
         }
         let ia = self.mod_ast(ext.module);
         let gens = unsafe (*ia).at_const(ext.node).as_data.extend_def.generics;
@@ -2630,6 +2744,152 @@ extend Codegen {
             i = i + 1;
         }
         return true;
+    }
+    // Auto-derive: a non-union aggregate (struct or enum, incl. generic instances) with no
+    // explicit Free conformance still owns memory when any member does -- its free is SYNTHESIZED
+    // per TU (phase_auto_frees emits `static void <sym>__free__d`). Pointer/reference members are
+    // borrows and never count. Mirrors the typechecker's tc_type_derives_free verdicts exactly.
+    fn cg_derived_member_ty(self: &mut Self, om: ModuleId, tnode: NodeId, rt: TypeId) TypeId {
+        let fa = self.mod_ast(om);
+        let t0 = unsafe (*fa).type_of(tnode);
+        if t0 == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let t1 = unsafe (*self.cur_ast()).reintern(unsafe &*fa, t0);
+        let y = *self.type_at(rt);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return t1;
+        }
+        let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+        for k in 0..it.n {
+            if !self.type_is_concrete(unsafe it.args[k as usize]) {
+                return t1; // generic instantiation: judged per concrete instance later
+            }
+        }
+        let ag = unsafe (*self.mod_ast(it.module)).at_const(it.decl).as_data.aggregate;
+        let gids = unsafe (*self.mod_ast(it.module)).list(ag.generics);
+        // derive walks run DEEP inside active substitution frames (prototype/body emission):
+        // save the caller's ENTRIES, not just the count -- overwriting them mis-renders every
+        // later generic mention in the caller's frame
+        let saved_n = self.nsubst;
+        let mut saved_fr = Array::<CgSubst, 16> {};
+        let mut si: u32 = 0;
+        while si as i32 < saved_n && si < 16 {
+            saved_fr[si as usize] = unsafe self.subst[si as usize];
+            si = si + 1;
+        }
+        self.nsubst = 0;
+        let mut g: u32 = 0;
+        while g < ag.generics.len && g < it.n as u32 && self.nsubst < 16 {
+            unsafe self.subst[self.nsubst as usize].param = DefId { module: it.module, node: unsafe gids[g as usize] };
+            unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[g as usize];
+            self.nsubst = self.nsubst + 1;
+            g = g + 1;
+        }
+        let r = self.subst_resolve(t1);
+        si = 0;
+        while si as i32 < saved_n && si < 16 {
+            unsafe self.subst[si as usize] = saved_fr[si as usize];
+            si = si + 1;
+        }
+        self.nsubst = saved_n;
+        return r;
+    }
+    fn cg_member_owns(self: &mut Self, om: ModuleId, tnode: NodeId, rt: TypeId) bool {
+        let ft = self.cg_derived_member_ty(om, tnode, rt);
+        if ft == TYPE_NONE {
+            return false;
+        }
+        let fk = self.type_at(ft).kind;
+        if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
+            return false;
+        }
+        return self.cg_type_is_free(ft);
+    }
+    fn cg_type_derives_free(self: &mut Self, rt: TypeId) bool {
+        let y = *self.type_at(rt);
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            // expand_nested_insts truncates foreign-interned instances but their TYPE rows remain:
+            // a dangling instance index can never be a derive candidate
+            if y.as_data.inst as usize >= unsafe (*self.cur_ast()).instances.len() {
+                return false;
+            }
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+        } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            om = y.module;
+            od = y.as_data.decl;
+        } else {
+            return false;
+        }
+        let dn = *unsafe (*self.mod_ast(om)).at_const(od);
+        let is_enum = dn.kind == NodeKind::NODE_ENUM;
+        if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
+            return false;
+        }
+        if !is_enum && dn.as_data.aggregate.is_union {
+            return false;
+        }
+        if self.cg_free_method(om, od).node != NODE_NONE {
+            return false; // explicit impl: the normal dispatch owns it
+        }
+        let key = om as u64 << 32 | od as u64;
+        for b in 0..self.derive_busy.len() {
+            if self.derive_busy[b] == key {
+                return false;
+            }
+        }
+        self.derive_busy.push(key);
+        let mut owns = false;
+        let ms = dn.as_data.aggregate.members;
+        let mids = unsafe (*self.mod_ast(om)).list(ms);
+        for i in 0..ms.len {
+            let mid = unsafe mids[i as usize];
+            let mn = *unsafe (*self.mod_ast(om)).at_const(mid);
+            if !is_enum && mn.kind == NodeKind::NODE_FIELD {
+                if self.cg_member_owns(om, mn.as_data.field.ty, rt) {
+                    owns = true;
+                }
+            } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
+                let pids = unsafe (*self.mod_ast(om)).list(mn.as_data.variant.payload);
+                for k in 0..mn.as_data.variant.payload.len {
+                    let pid = unsafe pids[k as usize];
+                    let pe = *unsafe (*self.mod_ast(om)).at_const(pid);
+                    let tn = if_node(pe.kind == NodeKind::NODE_FIELD, pe.as_data.field.ty, pid);
+                    if self.cg_member_owns(om, tn, rt) {
+                        owns = true;
+                    }
+                }
+            }
+        }
+        let _ = self.derive_busy.pop();
+        return owns;
+    }
+    // The synthesized free's per-TU symbol: `<type-stem>__free__d` (static, so cross-TU copies
+    // never collide).
+    fn render_free_derived_sym(self: &mut Self, rt: TypeId, out: *mut char, cap: usize) {
+        let y = *self.type_at(rt);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let mut inm = Buf256 {};
+            self.inst_name(unsafe (*self.cur_ast()).instance(y.as_data.inst), &mut inm[0], 200);
+            unsafe stdio::snprintf(out, cap, "%s__free__d".ptr() as *const char, &inm[0]);
+            return;
+        }
+        let mut pfx = Buf64 {};
+        let _ = self.render_modpfx(y.module, &mut pfx[0], 64);
+        let mut nm = Buf128 {};
+        render_ident_src(
+            self.mod_src(y.module),
+            unsafe (*self.mod_ast(y.module)).at_const(
+                unsafe (*self.mod_ast(y.module)).at_const(y.as_data.decl).as_data.aggregate.name,
+            ).as_data.name.text,
+            &mut nm[0],
+            128,
+        );
+        unsafe stdio::snprintf(out, cap, "%s%s__free__d".ptr() as *const char, &pfx[0], &nm[0]);
     }
     fn cg_is_moved(self: &Self, decl: NodeId) bool {
         if decl as usize < self.stamp_cap {
@@ -4361,7 +4621,7 @@ extend Codegen {
                 let it = *unsafe (*self.cur_ast()).instance(rt.as_data.inst);
                 om = it.module;
                 od = it.decl;
-            } else if rt.kind == TypeKind::TYPE_STRUCT {
+            } else if rt.kind == TypeKind::TYPE_STRUCT || rt.kind == TypeKind::TYPE_ENUM {
                 om = rt.module;
                 od = rt.as_data.decl;
             }
@@ -4369,8 +4629,20 @@ extend Codegen {
             if od != NODE_NONE {
                 fm = self.cg_find_method_cstr(om, od, "free".ptr() as *const char);
             }
+            let rid = self.subst_resolve(self.strip_ptr(unsafe (*self.cur_ast()).type_of(recv)));
             if fm.node != NODE_NONE {
                 self.emit_op_method(rt, om, od, fm);
+                if isref {
+                    self.emit_str("(");
+                } else {
+                    self.emit_str("(&");
+                }
+                self.emit_expr(recv);
+                self.emit_str(")");
+            } else if od != NODE_NONE && self.cg_type_derives_free(rid) {
+                let mut sym = Buf256 {};
+                self.render_free_derived_sym(rid, &mut sym[0], 256);
+                self.emit_cstr(&sym[0]);
                 if isref {
                     self.emit_str("(");
                 } else {
@@ -7121,9 +7393,19 @@ extend Codegen {
         if lhs.kind == NodeKind::NODE_IDENTIFIER {
             ld = unsafe (*self.cur_ast()).resolution_def(lhsId);
         }
-        if bd.op == TokenType::Equal && lhs.kind == NodeKind::NODE_IDENTIFIER && self.cg_type_is_free(lt) && ld.node != NODE_NONE && !self.cg_is_moved(
+        // A binding whose unconditional move sits AFTER this assignment (straight-line, positioned)
+        // still owns its value here: the assign-free must run -- suppression is only for moves that
+        // already happened (or positionless conditional-context ones).
+        let mut lmoved = bd.op == TokenType::Equal && lhs.kind == NodeKind::NODE_IDENTIFIER && ld.node != NODE_NONE && self.cg_is_moved(
             ld.node,
-        ) {
+        );
+        if lmoved {
+            let mp = self.cg_uncond_move_pos(ld.node);
+            if mp != 0 && mp > lhs.span.start {
+                lmoved = false;
+            }
+        }
+        if bd.op == TokenType::Equal && lhs.kind == NodeKind::NODE_IDENTIFIER && self.cg_type_is_free(lt) && ld.node != NODE_NONE && !lmoved {
             // A conditionally-moved binding (moved somewhere control flow may skip -- a call arg
             // inside a loop, a branch) may or may not hold a live value here: guard the
             // free-before-assign with its runtime move flag and clear the flag after (the binding
@@ -7467,6 +7749,13 @@ extend Codegen {
         }
         let dm = self.cg_free_method(om, od);
         if dm.node == NODE_NONE {
+            let rid = self.subst_resolve(bt);
+            if self.cg_type_derives_free(rid) {
+                let mut sym = Buf256 {};
+                self.render_free_derived_sym(rid, &mut sym[0], 256);
+                self.emit_cstr(&sym[0]);
+                return true;
+            }
             return false;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
@@ -8404,6 +8693,197 @@ extend Codegen {
             self.emit_indent();
             self.buf.format_into("__brk{}:;\n", unsafe self.loop_stack[le as usize].seq);
         }
+    }
+    // Synthesized frees for auto-derived types (structs/enums whose members own memory but that
+    // declare no Free impl): one static definition per TU for every derived concrete aggregate the
+    // TU's pool can reference, prototypes first so bodies and each other may call them in any
+    // order. The pool is complete before bodies (collect_insts/expand pre-substitute mono types).
+    fn cg_auto_free_key(self: &mut Self, rt: TypeId) u64 {
+        let y = *self.type_at(rt);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            return 1u64 << 62 | y.as_data.inst as u64;
+        }
+        return y.module as u64 << 32 | y.as_data.decl as u64;
+    }
+    fn phase_auto_frees(self: &mut Self) {
+        let mut list = Vector::<TypeId>::new();
+        let mut seen = Map::<u64, u64>::new();
+        let np = unsafe (*self.cur_ast()).type_pool.len();
+        let mut t: usize = 1;
+        while t < np {
+            let rt = t as TypeId;
+            let y = *self.type_at(rt);
+            let k = y.kind;
+            // expand_nested_insts truncates foreign-interned instances; their surviving TYPE rows
+            // must not be dereferenced (type_is_concrete walks instance args)
+            if k == TypeKind::TYPE_INSTANCE && y.as_data.inst as usize >= unsafe (*self.cur_ast()).instances.len() {
+                t = t + 1;
+                continue;
+            }
+            if (k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM || k == TypeKind::TYPE_INSTANCE) && self.type_is_concrete(
+                rt,
+            ) && self.cg_type_derives_free(rt) {
+                let key = self.cg_auto_free_key(rt);
+                switch seen.get(&key) {
+                    Some(_) => {},
+                    _ => {
+                        seen.insert(key, 1u64);
+                        list.push(rt);
+                    },
+                };
+            }
+            t = t + 1;
+        }
+        // transitive derived members materialized by substitution during the sweep
+        let mut i: usize = 0;
+        while i < list.len() {
+            let rt = *list.at(i);
+            i = i + 1;
+            let mut mts = Vector::<TypeId>::new();
+            let mut mnames = Vector::<u64>::new();
+            self.cg_derived_member_list(rt, &mut mts, &mut mnames);
+            for j in 0..mts.len() {
+                let ft = mts[j];
+                if self.cg_type_derives_free(ft) {
+                    let key = self.cg_auto_free_key(ft);
+                    switch seen.get(&key) {
+                        Some(_) => {},
+                        _ => {
+                            seen.insert(key, 1u64);
+                            list.push(ft);
+                        },
+                    };
+                }
+            }
+            mts.free();
+            mnames.free();
+        }
+        if list.len() == 0 {
+            list.free();
+            seen.free();
+            return;
+        }
+        self.emit_str("\n/* auto-derived frees */\n");
+        for d in 0..list.len() {
+            self.emit_auto_free_sig(list[d]);
+            self.emit_str(";\n");
+        }
+        for d in 0..list.len() {
+            self.emit_auto_free_def(list[d]);
+        }
+        list.free();
+        seen.free();
+    }
+    fn emit_auto_free_sig(self: &mut Self, rt: TypeId) {
+        let mut y2 = *self.type_at(rt);
+        y2.qualifier = TypeQualifier::TYPE_QUAL_NONE as u8;
+        let urt = unsafe (*self.cur_ast()).intern_type(y2);
+        let mut tn = Buf512 {};
+        self.render_type_id(urt, "".ptr() as *const char, &mut tn[0], 500);
+        let mut sym = Buf256 {};
+        self.render_free_derived_sym(rt, &mut sym[0], 256);
+        self.buf.format_into("static void {}({} *const self)", diag::cstr(&sym[0]), diag::cstr(&tn[0]));
+    }
+    // Owning members of a derived aggregate: parallel vectors of substituted member type + a
+    // packed locator (struct fields: field node; enum payloads: variant<<32|payload-index).
+    fn cg_derived_member_list(self: &mut Self, rt: TypeId, tys: &mut Vector<TypeId>, locs: &mut Vector<u64>) {
+        let y = *self.type_at(rt);
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+        } else {
+            om = y.module;
+            od = y.as_data.decl;
+        }
+        let dn = *unsafe (*self.mod_ast(om)).at_const(od);
+        let is_enum = dn.kind == NodeKind::NODE_ENUM;
+        let ms = dn.as_data.aggregate.members;
+        let mids = unsafe (*self.mod_ast(om)).list(ms);
+        for i in 0..ms.len {
+            let mid = unsafe mids[i as usize];
+            let mn = *unsafe (*self.mod_ast(om)).at_const(mid);
+            if !is_enum && mn.kind == NodeKind::NODE_FIELD {
+                if self.cg_member_owns(om, mn.as_data.field.ty, rt) {
+                    tys.push(self.cg_derived_member_ty(om, mn.as_data.field.ty, rt));
+                    locs.push(mid);
+                }
+            } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
+                let pids = unsafe (*self.mod_ast(om)).list(mn.as_data.variant.payload);
+                for kk in 0..mn.as_data.variant.payload.len {
+                    let pid = unsafe pids[kk as usize];
+                    let pe = *unsafe (*self.mod_ast(om)).at_const(pid);
+                    let tn = if_node(pe.kind == NodeKind::NODE_FIELD, pe.as_data.field.ty, pid);
+                    if self.cg_member_owns(om, tn, rt) {
+                        tys.push(self.cg_derived_member_ty(om, tn, rt));
+                        locs.push(mid as u64 << 32 | kk as u64);
+                    }
+                }
+            }
+        }
+    }
+    fn emit_auto_free_def(self: &mut Self, rt: TypeId) {
+        let y = *self.type_at(rt);
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+        } else {
+            om = y.module;
+            od = y.as_data.decl;
+        }
+        let is_enum = unsafe (*self.mod_ast(om)).at_const(od).kind == NodeKind::NODE_ENUM;
+        let mut mts = Vector::<TypeId>::new();
+        let mut locs = Vector::<u64>::new();
+        self.cg_derived_member_list(rt, &mut mts, &mut locs);
+        self.emit_auto_free_sig(rt);
+        self.emit_str(" {\n");
+        for i in 0..mts.len() {
+            let ft = mts[i];
+            let loc = locs[i];
+            if is_enum {
+                let vid = (loc >> 32) as NodeId;
+                let pidx = (loc & 0xFFFFFFFFu64) as u32;
+                let vn = *unsafe (*self.mod_ast(om)).at_const(vid);
+                self.emit_str("  if (self->tag == ");
+                self.emit_tag_mod(om, od, vid);
+                self.emit_str(") ");
+                let mut vnb = Buf128 {};
+                self.render_variant_name(om, vid, &mut vnb[0], 128);
+                let pids = unsafe (*self.mod_ast(om)).list(vn.as_data.variant.payload);
+                let pe = *unsafe (*self.mod_ast(om)).at_const(unsafe pids[pidx as usize]);
+                if !self.emit_free_target(ft) {
+                    self.emit_str("(void)(");
+                } else {
+                    self.emit_str("(&");
+                }
+                self.buf.format_into("self->payload.{}.", diag::cstr(&vnb[0]));
+                if pe.kind == NodeKind::NODE_FIELD {
+                    self.emit_ident_mod(om, pe.as_data.field.name);
+                } else {
+                    self.buf.format_into("_{}", pidx);
+                }
+                self.emit_str(");\n");
+            } else {
+                let fnd = *unsafe (*self.mod_ast(om)).at_const((loc & 0xFFFFFFFFu64) as NodeId);
+                self.emit_str("  ");
+                if !self.emit_free_target(ft) {
+                    self.emit_str("(void)(");
+                } else {
+                    self.emit_str("(&");
+                }
+                self.emit_str("self->");
+                self.emit_ident_mod(om, fnd.as_data.field.name);
+                self.emit_str(");\n");
+            }
+        }
+        self.emit_str("}\n");
+        mts.free();
+        locs.free();
     }
     fn emit_defers_to(self: &mut Self, base: u32) {
         let mut i = self.defer_top;
@@ -13790,8 +14270,7 @@ extend Codegen {
         self.buf.clear();
     }
     pub fn take_buf(self: &mut Self) String {
-        let b = self.buf;
-        self.buf = String::new();
+        let b = replace(&mut self.buf, String::new());
         return b;
     }
 
@@ -13808,6 +14287,7 @@ extend Codegen {
             self.emit_layout_asserts();
             self.phase_prototypes(PROTO_PRIVATE);
             self.emit_str("\n");
+            self.phase_auto_frees();
             self.emit_dyn_tables();
             self.phase_bodies();
             self.emit_test_wrappers();
@@ -13824,6 +14304,7 @@ extend Codegen {
             self.emit_layout_asserts();
             self.phase_prototypes(PROTO_ALL);
             self.emit_str("\n");
+            self.phase_auto_frees();
             self.emit_dyn_tables();
             self.phase_bodies();
             self.emit_test_wrappers();

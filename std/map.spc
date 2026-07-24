@@ -109,6 +109,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         let i = self.slot(&key);
         if unsafe self.used[i] != 0 {
             // overwrite: keep the stored key, free the duplicate + the old value
+            key.free();
+            unsafe self.vals[i].free();
             unsafe self.vals[i] = value;
             return;
         }

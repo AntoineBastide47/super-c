@@ -97,7 +97,13 @@ extend Errors {
     pub fn fix_insert(self: &mut Self, start: u32, text: String) {
         let t = self.fix_texts.len() as u32;
         self.fix_texts.push(text);
-        self.fixes.push(LintFix { start: start, end: start, kind: 3, warn: 0xFFFFFFFF, text: t });
+        // `warn` carries the owning ERROR's index with the high bit set (kind-3 fixes attach to
+        // errors, not warnings) -- the LSP surfaces them as quick fixes on the error squiggle
+        let mut w: u32 = 0xFFFFFFFF;
+        if self.errors.len() != 0 {
+            w = 0x80000000 | (self.errors.len() - 1) as u32;
+        }
+        self.fixes.push(LintFix { start: start, end: start, kind: 3, warn: w, text: t });
         self.fixable_errs = self.fixable_errs + 1;
     }
 

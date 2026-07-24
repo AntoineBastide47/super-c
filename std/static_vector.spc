@@ -81,6 +81,7 @@ extend<T, const N: usize> StaticVector<T, N> {
             panic("StaticVector::set: index out of bounds");
         }
         let p = (&mut unsafe self.data[0]) as *mut T;
+        unsafe p[index].free();
         unsafe p[index] = value;
     }
 

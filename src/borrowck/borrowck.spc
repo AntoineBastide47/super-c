@@ -761,9 +761,13 @@ extend tc::TypeChecker {
         }
         let a = self.cur_ast();
         let mut expr = expr0;
+        let mut peeled_unsafe = false;
         loop {
             let n = unsafe (*a).at_const(expr);
             if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                if n.as_data.unary.op == TokenType::Unsafe {
+                    peeled_unsafe = true;
+                }
                 expr = n.as_data.unary.operand;
             } else {
                 break;
@@ -806,7 +810,30 @@ extend tc::TypeChecker {
                 return;
             }
             let bt = unsafe (*a).type_of(base);
-            if bt != TYPE_NONE && (self.type_at(bt).kind == TypeKind::TYPE_REFERENCE || self.type_at(bt).kind == TypeKind::TYPE_POINTER) {
+            if bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_POINTER {
+                return; // raw pointers are the unsafe world's escape hatch (replace()'s own mechanism)
+            }
+            if bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_REFERENCE {
+                // pointer-typed fields are HANDLES (raw pointers are borrows by rule): copying
+                // one out of a reference escapes no ownership
+                let xt = unsafe (*a).type_of(expr0);
+                if xt != TYPE_NONE && self.type_at(xt).kind == TypeKind::TYPE_POINTER {
+                    return;
+                }
+                // Rust's E0507: moving a Free field out of borrowed content leaves the owner
+                // holding a value it will free again (or forces a leak). `replace` swaps
+                // ownership safely; `unsafe` blocks may still take responsibility themselves.
+                // `.free()` receivers are exempt: destruction nulls in place, nothing escapes.
+                if self.unsafe_depth == 0 && !peeled_unsafe && !self.bc_free_recv {
+                    let sp = unsafe (*a).at_const(expr).span;
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "cannot move a field out of a reference; use 'replace' to swap ownership out (or an 'unsafe' block to take responsibility)",
+                        ),
+                    );
+                }
                 return;
             }
             // Rust's rule: a value whose type implements Free cannot lose a field -- its free body
@@ -3087,6 +3114,12 @@ extend tc::TypeChecker {
                     }
                     return;
                 }
+                if op == TokenType::Unsafe {
+                    self.unsafe_depth = self.unsafe_depth + 1;
+                    self.bc_expr(operand, addr_ctx, place_use);
+                    self.unsafe_depth = self.unsafe_depth - 1;
+                    return;
+                }
                 self.bc_expr(operand, addr_ctx, place_use);
             },
             NODE_ASSIGNMENT => {
@@ -3295,7 +3328,9 @@ extend tc::TypeChecker {
                 let ot = unsafe (*a).type_of(obj);
                 if ot != TYPE_NONE && self.type_at(self.strip(ot)).kind == TypeKind::TYPE_DYN {
                     self.bc_expr(obj, false, true);
+                    self.bc_free_recv = true;
                     self.tc_mark_move(obj);
+                    self.bc_free_recv = false;
                     return;
                 }
             }
@@ -3922,7 +3957,9 @@ extend tc::TypeChecker {
             if !through_owner && rty.kind != TypeKind::TYPE_POINTER && rty.kind != TypeKind::TYPE_REFERENCE && self.tc_type_is_free(
                 unsafe (*a).type_of(recv),
             ) {
+                self.bc_free_recv = true;
                 self.tc_mark_move(recv);
+                self.bc_free_recv = false;
                 if unsafe (*a).at_const(recv).kind == NodeKind::NODE_IDENTIFIER {
                     let rd = unsafe (*a).resolution_def(recv);
                     if rd.module == self.ast.module && rd.node != NODE_NONE {

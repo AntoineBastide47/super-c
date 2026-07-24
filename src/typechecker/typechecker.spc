@@ -216,6 +216,9 @@ pub struct TypeChecker<'a> {
     pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
     pub len_reported: Vector<u64>, // array-length nodes already diagnosed ((module<<32)|node; resolve_type revisits)
     pub lint: bool,
+    pub free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
+    pub bc_free_recv: bool, // marking a `.free()` receiver: destruction, exempt from the ref-move rejection
+    pub derive_busy: Vector<u64>, // derive-recursion guard (value cycles are infinite-size errors anyway)
     pub mut_used: Vector<NodeId>, // bindings whose mutability was actually required (unnecessary-mut lint)
     pub loop_stack: [LoopEntry; 32],
     pub nloops: u32,
@@ -473,6 +476,9 @@ extend TypeChecker {
             unsafe_used: 0,
             len_reported: Vector::<u64>::new(),
             lint: false,
+            free_derive_memo: Map::<u64, u64>::new(),
+            bc_free_recv: false,
+            derive_busy: Vector::<u64>::new(),
             mut_used: Vector::<NodeId>::new(),
             nloops: 0,
             loop_floor: 0,
@@ -505,8 +511,7 @@ extend TypeChecker {
     }
 
     pub fn take_ast(self: &mut Self) Ast {
-        let out = self.ast;
-        self.ast = Ast::new(0);
+        let out = replace(&mut self.ast, Ast::new(0));
         return out;
     }
 
@@ -3336,12 +3341,10 @@ extend TypeChecker {
             "Free",
         );
     }
-    // Leak check (lint, error-level): a struct with no Free conformance whose fields own memory
-    // (implement Free) is copyable, so nothing ever frees those fields -- every dropped value
-    // leaks them. One error per struct, carrying a generated `extend X as Free` insertion fix.
-    // Pointer/reference fields are borrows by rule (ownership is always spelled as a wrapper type
-    // with its own free) and are exempt. Non-generic structs only: a parameterized field's
-    // ownership is instance-dependent.
+    // Leak check (lint, error-level): structs and enums DERIVE Free when their members own
+    // memory, but a UNION cannot (only the author knows the active member), so an owning union
+    // with no explicit Free conformance silently leaks -- reject it. No machine fix: a generated
+    // body freeing every overlapping member would double-free.
     fn tc_lint_missing_free(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let sty = unsafe (*a).intern_type(
@@ -3355,8 +3358,6 @@ extend TypeChecker {
         let nm = diag::span_str(self.source, sname.start, sname.end);
         let ms = agg.members;
         let mut fields = String::new();
-        let mut body = String::new();
-        let mut fixable = true;
         for i in 0..ms.len {
             let fid = unsafe (*a).list(ms)[i as usize];
             let fnd = unsafe (*a).at_const(fid);
@@ -3375,22 +3376,10 @@ extend TypeChecker {
                 continue;
             }
             let fsp = unsafe (*a).at_const(fnd.as_data.field.name).as_data.name.text;
-            let fname = diag::span_str(self.source, fsp.start, fsp.end);
             if fields.len() != 0 {
                 fields.push_str("', '");
             }
-            fields.push_str(fname);
-            let c0 = if fsp.end > fsp.start {
-                self.source[fsp.start as usize];
-            } else {
-                0u8;
-            };
-            if !(c0 == b'_' || c0 >= b'a' && c0 <= b'z' || c0 >= b'A' && c0 <= b'Z') {
-                fixable = false; // positional (tuple-struct) fields: no textual `self.<f>.free()`
-            }
-            body.push_str("        self.");
-            body.push_str(fname);
-            body.push_str(".free();\n");
+            fields.push_str(diag::span_str(self.source, fsp.start, fsp.end));
         }
         if fields.len() == 0 {
             return;
@@ -3398,20 +3387,97 @@ extend TypeChecker {
         self.errors.emit(
             sname.start,
             sname.end - sname.start,
-            format("'{}' has owning fields ('{}') but no 'free': dropped values leak them", nm, fields.as_str()),
+            format(
+                "union '{}' has owning fields ('{}') but no 'free': unions never free implicitly",
+                nm,
+                fields.as_str(),
+            ),
         );
-        self.errors.note(format("add an 'extend {} as Free' (or run 'lint --fix' to insert one)", nm));
-        if fixable {
-            let ins = format(
-                "\n\nextend {} as Free {{\n    pub fn free(self: &mut {}) {{\n{}    }}\n}}",
-                nm,
-                nm,
-                body.as_str(),
-            );
-            self.errors.fix_insert(unsafe (*a).at_const(id).span.end, ins);
-        }
+        self.errors.note(format("implement Free for '{}' and free the ACTIVE member there", nm));
         fields.free();
-        body.free();
+    }
+    fn tc_member_owns(self: &mut Self, om: ModuleId, tnode: NodeId, gp: *const DefId, ga: *const TypeId, gn: i32) bool {
+        let mut ft = self.lower_type_in(om, tnode);
+        // substitute only fully-concrete instantiations: generic args would intern novel
+        // partially-generic instances into the pool (they emit as undefined C type names);
+        // generic members fall to the TYPE_GENERIC bound-based verdict instead
+        let mut conc = true;
+        for k in 0..gn {
+            if !unsafe (*self.cur_ast()).type_concrete(unsafe ga[k as usize]) {
+                conc = false;
+            }
+        }
+        if gn > 0 && conc {
+            ft = self.subst_type(ft, gp, ga, gn);
+        }
+        if ft == TYPE_NONE {
+            return false;
+        }
+        let fk = self.type_at(ft).kind;
+        if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
+            return false;
+        }
+        return self.tc_type_is_free(ft);
+    }
+    fn tc_type_derives_free(self: &mut Self, om: ModuleId, od: NodeId, gp: *const DefId, ga: *const TypeId, gn: i32) bool {
+        let a = self.mod_ast(om);
+        let dn = *unsafe (*a).at_const(od);
+        let is_enum = dn.kind == NodeKind::NODE_ENUM;
+        if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
+            return false;
+        }
+        if !is_enum && dn.as_data.aggregate.is_union {
+            return false;
+        }
+        let key = om as u64 << 32 | od as u64;
+        if gn == 0 {
+            switch self.free_derive_memo.get(&key) {
+                Some(v) => {
+                    return *v == 2u64;
+                },
+                _ => {},
+            };
+        }
+        for b in 0..self.derive_busy.len() {
+            if self.derive_busy[b] == key {
+                return false;
+            }
+        }
+        self.derive_busy.push(key);
+        let mut owns = false;
+        let ms = dn.as_data.aggregate.members;
+        let mids = unsafe (*a).list(ms);
+        for i in 0..ms.len {
+            let mid = unsafe mids[i as usize];
+            let mn = *unsafe (*a).at_const(mid);
+            if !is_enum && mn.kind == NodeKind::NODE_FIELD {
+                if self.tc_member_owns(om, mn.as_data.field.ty, gp, ga, gn) {
+                    owns = true;
+                }
+            } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
+                let pids = unsafe (*a).list(mn.as_data.variant.payload);
+                for k in 0..mn.as_data.variant.payload.len {
+                    let pid = unsafe pids[k as usize];
+                    let pe = *unsafe (*a).at_const(pid);
+                    let tn = if_node(pe.kind == NodeKind::NODE_FIELD, pe.as_data.field.ty, pid);
+                    if self.tc_member_owns(om, tn, gp, ga, gn) {
+                        owns = true;
+                    }
+                }
+            }
+        }
+        let _ = self.derive_busy.pop();
+        if gn == 0 {
+            self.free_derive_memo.insert(
+                key,
+                if owns {
+                    2u64;
+                } else {
+                    1u64;
+                },
+            );
+        }
+        return owns;
     }
     fn tc_param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
         let a = self.mod_ast(m);
@@ -3465,7 +3531,7 @@ extend TypeChecker {
         switch self.free_ext_memo.get(&key) {
             Some(v) => {
                 if *v == 0u64 {
-                    return false;
+                    return self.tc_type_derives_free(om, od, &gp[0], &ga[0], gn);
                 }
                 fm = (*v >> 32) as ModuleId;
                 fx = (*v & 0xFFFFFFFFu64) as NodeId;
@@ -3509,7 +3575,7 @@ extend TypeChecker {
             }
             if !have {
                 self.free_ext_memo.insert(key, 0u64);
-                return false;
+                return self.tc_type_derives_free(om, od, &gp[0], &ga[0], gn);
             }
             self.free_ext_memo.insert(key, fm as u64 << 32 | fx as u64);
         }
@@ -5282,6 +5348,25 @@ extend TypeChecker {
         let opnd = self.check_expr(operand);
         if op == TokenType::Unsafe {
             self.unsafe_depth = self.unsafe_depth - 1;
+            // an `unsafe` take of a Free field through a reference is CONSUMED by the borrow
+            // checker's E0507 exemption (a later pass this lint cannot see): count it as used
+            if self.unsafe_used == 0 {
+                let mut w = operand;
+                loop {
+                    let wn = unsafe (*a).at_const(w);
+                    if wn.kind == NodeKind::NODE_UNARY && (wn.as_data.unary.op == TokenType::Move || wn.as_data.unary.op == TokenType::Unsafe) {
+                        w = wn.as_data.unary.operand;
+                    } else {
+                        break;
+                    }
+                }
+                let wk = unsafe (*a).at_const(w).kind;
+                if (wk == NodeKind::NODE_MEMBER && !unsafe (*a).at_const(w).as_data.member.path || wk == NodeKind::NODE_INDEX) && self.tc_type_is_free(
+                    opnd,
+                ) {
+                    self.unsafe_used = 1;
+                }
+            }
             if self.lint && self.unsafe_used == 0 {
                 let usp = unsafe (*a).at_const(id).span;
                 self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
@@ -10090,7 +10175,7 @@ extend TypeChecker {
                     );
                     self.errors.note(format("break the cycle with a pointer ('*mut T'), a reference, or 'Box<T>'"));
                 }
-                if self.lint && agg.generics.len == 0 && !agg.is_union {
+                if self.lint && agg.generics.len == 0 && agg.is_union {
                     self.tc_lint_missing_free(id);
                 }
             },
@@ -10367,6 +10452,8 @@ extend TypeChecker as Free {
         self.ext_scope.free();
         self.ext_items.free();
         self.len_reported.free();
+        self.free_derive_memo.free();
+        self.derive_busy.free();
         self.mut_used.free();
         self.ext_items_built.free();
         self.binding_depth.free();

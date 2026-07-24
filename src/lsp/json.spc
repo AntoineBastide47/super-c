@@ -506,8 +506,7 @@ extend JSONParser {
     }
 
     fn take_err(self: &mut Self) String {
-        let e = self.err;
-        self.err = String::new();
+        let e = replace(&mut self.err, String::new());
         return e;
     }
 
@@ -550,8 +549,7 @@ extend JSONParser {
             self.fail("Expected a key before adding an inner value");
             return 0;
         }
-        let k = self.pending_key;
-        self.pending_key = String::new();
+        let k = replace(&mut self.pending_key, String::new());
         self.candidate_key.clear();
         unsafe (*t).obj.push(JSONPair { key: k, value: json });
         self.pending_key_set = false;
@@ -895,8 +893,7 @@ extend JSONParser {
                     self.fail("Expected a string key before ':'");
                     return i;
                 }
-                self.pending_key = self.candidate_key;
-                self.candidate_key = String::new();
+                self.pending_key = replace(&mut self.candidate_key, String::new());
                 self.pending_key_set = true;
                 self.candidate_key_set = false;
                 self.found_data = true;

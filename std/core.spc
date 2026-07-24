@@ -1325,3 +1325,19 @@ pub fn replace<T>(slot: &mut T, value: T) T {
     unsafe *p = value;
     return old;
 }
+
+// The overlapping-storage cell `forget` moves its value into: unions never run destructors, so the
+// payload is deliberately abandoned. Generic so no per-type cells are needed.
+union ForgetCell<T> {
+    pub some: T,
+    pub none: u8,
+}
+
+// Take ownership of `value` and never free it -- the SANCTIONED deliberate leak (tests,
+// process-lifetime singletons, FFI handoffs that outlive the program). The leak tracker
+// (SC_LEAK_CHECK) still reports the abandoned allocations, which is the point: every intentional
+// leak stays visible and greppable instead of being laundered through raw pointers.
+pub fn forget<T>(value: T) {
+    let cell = ForgetCell::<T> { some: value };
+    let _ = (&cell) as *const ForgetCell<T>;
+}

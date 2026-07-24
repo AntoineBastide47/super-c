@@ -174,8 +174,7 @@ extend Resolver {
     }
 
     pub fn take_ast(self: &mut Self) Ast {
-        let out = self.ast;
-        self.ast = Ast::new(0);
+        let out = replace(&mut self.ast, Ast::new(0));
         return out;
     }
 

@@ -97,6 +97,7 @@ extend<T, A: Allocator> Vector<T, A> {
         if index >= self.len {
             panic("Vector::set: index out of bounds");
         }
+        unsafe self.ptr[index].free();
         unsafe self.ptr[index] = value;
     }
 
