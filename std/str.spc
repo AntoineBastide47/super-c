@@ -14,21 +14,21 @@ extern "C" {
     fn memcmp(a: *const void, b: *const void, n: usize) i32;
 }
 
-// A borrowed view over UTF-8 bytes -- the type of a string literal. Non-owning: the bytes outlive it.
+/// A borrowed view over UTF-8 bytes -- the type of a string literal. Non-owning: the bytes outlive it.
 pub struct str<'a> {
     ptr: *const u8, // start of the bytes
     len: usize, // number of bytes
 }
 
 extend str {
-    // Construct a view over `len` bytes at `ptr`. The building block for the rest of std and for callers
-    // bridging from a raw C buffer -- the fields are private, so this is the only way to make a `str`.
+    /// Construct a view over `len` bytes at `ptr`. The building block for the rest of std and for callers
+    /// bridging from a raw C buffer -- the fields are private, so this is the only way to make a `str`.
     pub const fn from_raw<'a>(ptr: *const u8, len: usize) str<'a> {
         return str { ptr: ptr, len: len };
     }
 
-    // View a NUL-terminated C string as a `str` (length found by scanning to the NUL). Zero-copy:
-    // the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
+    /// View a NUL-terminated C string as a `str` (length found by scanning to the NUL). Zero-copy:
+    /// the returned view borrows `s`. The bridge for callers holding a raw `*const char`.
     pub const fn from_cstr<'a>(s: *const char) str<'a> {
         let mut n: usize = 0;
         while unsafe s[n] != 0 as char {
@@ -39,7 +39,7 @@ extend str {
 
     // --- length & raw access -------------------------------------------------------------------
 
-    // Number of bytes in the view. `s.len()` is the accessor for the private `len` field.
+    /// Number of bytes in the view. `s.len()` is the accessor for the private `len` field.
     pub const fn len(self: &str) usize {
         return self.len;
     }
@@ -48,18 +48,18 @@ extend str {
         return self.len == 0;
     }
 
-    // A read-only pointer to the first byte (the view's backing storage; not NUL-terminated).
+    /// A read-only pointer to the first byte (the view's backing storage; not NUL-terminated).
     pub const fn ptr(self: &str) *const u8 {
         return self.ptr;
     }
 
-    // The byte at `index` (0 <= index < len). No bounds check -- the caller owns the index.
+    /// The byte at `index` (0 <= index < len). No bounds check -- the caller owns the index.
     pub const fn byte_at(self: &str, index: usize) u8 {
         return unsafe self.ptr[index];
     }
 
-    // The sub-view of bytes [start, end) -- allocation-free, it borrows `self`'s bytes. The caller
-    // keeps `start`/`end` on UTF-8 boundaries (and within bounds).
+    /// The sub-view of bytes [start, end) -- allocation-free, it borrows `self`'s bytes. The caller
+    /// keeps `start`/`end` on UTF-8 boundaries (and within bounds).
     pub const fn slice(self: &str, start: usize, end: usize) str {
         return str { ptr: unsafe (self.ptr + start), len: end - start };
     }
@@ -86,7 +86,7 @@ extend str {
         return unsafe memcmp(unsafe (self.ptr + (self.len - suffix.len)), suffix.ptr, suffix.len) == 0;
     }
 
-    // First index of byte `byte`, or -1 if absent.
+    /// First index of byte `byte`, or -1 if absent.
     pub const fn find_byte(self: &str, byte: u8) isize {
         for i in 0..self.len {
             if unsafe self.ptr[i] == byte {
@@ -96,7 +96,7 @@ extend str {
         return -1;
     }
 
-    // First byte index where `needle` occurs, or -1 if absent (naive O(n*m) window scan).
+    /// First byte index where `needle` occurs, or -1 if absent (naive O(n*m) window scan).
     pub const fn find(self: &str, needle: str) isize {
         if needle.len == 0 {
             return 0;
@@ -119,7 +119,7 @@ extend str {
 
     // --- trim (returns sub-views; no allocation) -----------------------------------------------
 
-    // The view with leading ASCII whitespace (space, tab, newline, carriage return) removed.
+    /// The view with leading ASCII whitespace (space, tab, newline, carriage return) removed.
     pub const fn trim_start(self: &str) str {
         let mut start: usize = 0;
         while start < self.len {
@@ -132,7 +132,7 @@ extend str {
         return str { ptr: unsafe (self.ptr + start), len: self.len - start };
     }
 
-    // The view with trailing ASCII whitespace removed.
+    /// The view with trailing ASCII whitespace removed.
     pub const fn trim_end(self: &str) str {
         let mut end = self.len;
         while end > 0 {
@@ -145,7 +145,7 @@ extend str {
         return str { ptr: self.ptr, len: end };
     }
 
-    // The view with ASCII whitespace removed from both ends.
+    /// The view with ASCII whitespace removed from both ends.
     pub const fn trim(self: &str) str {
         let t = self.trim_start();
         return t.trim_end();
@@ -153,8 +153,8 @@ extend str {
 
     // --- UTF-8 queries -------------------------------------------------------------------------
 
-    // Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.
-    // (Assumes valid UTF-8; pair with `is_valid_utf8` if the source is untrusted.)
+    /// Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.
+    /// (Assumes valid UTF-8; pair with `is_valid_utf8` if the source is untrusted.)
     pub const fn char_count(self: &str) usize {
         let mut count: usize = 0;
         for i in 0..self.len {
@@ -165,9 +165,9 @@ extend str {
         return count;
     }
 
-    // True if the bytes are structurally well-formed UTF-8: every leading byte announces a 1-4 byte
-    // sequence that fits and whose tail bytes are all 0b10xxxxxx continuations. (Structural only --
-    // it does not reject overlong encodings or surrogate-range scalars.)
+    /// True if the bytes are structurally well-formed UTF-8: every leading byte announces a 1-4 byte
+    /// sequence that fits and whose tail bytes are all 0b10xxxxxx continuations. (Structural only --
+    /// it does not reject overlong encodings or surrogate-range scalars.)
     pub const fn is_valid_utf8(self: &str) bool {
         let mut i: usize = 0;
         while i < self.len {
@@ -197,7 +197,7 @@ extend str {
         return true;
     }
 
-    // Allocate an owning String holding a copy of this view's bytes.
+    /// Allocate an owning String holding a copy of this view's bytes.
     pub fn to_string(self: &str) String {
         let mut out = String::with_capacity(self.len);
         out.push_bytes(self.ptr, self.len);
@@ -220,8 +220,8 @@ extend str as Eq {
 }
 
 extend str as Ord {
-    // Lexicographic byte comparison: <0 if self < other, 0 if equal, >0 if self > other. Shorter strings
-    // sort before longer ones sharing their prefix.
+    /// Lexicographic byte comparison: <0 if self < other, 0 if equal, >0 if self > other. Shorter strings
+    /// sort before longer ones sharing their prefix.
     pub const fn cmp(self: &str, other: &str) i32 {
         let mut n = self.len;
         if other.len < n {
@@ -244,7 +244,7 @@ extend str as Ord {
 }
 
 extend str as Hash {
-    // 64-bit FNV-1a over the bytes (matching String::hash, so a `str` and an equal `String` hash alike).
+    /// 64-bit FNV-1a over the bytes (matching String::hash, so a `str` and an equal `String` hash alike).
     pub const fn hash(self: &str) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..self.len {
@@ -255,7 +255,7 @@ extend str as Hash {
 }
 
 extend str as Default {
-    // The empty view (a null, zero-length `str`).
+    /// The empty view (a null, zero-length `str`).
     pub const fn default() str<'static> {
         return str { ptr: null, len: 0 };
     }
@@ -311,25 +311,25 @@ pub struct Lines<'a> {
 }
 
 extend str {
-    // Iterate the raw bytes (`u8`).
+    /// Iterate the raw bytes (`u8`).
     pub const fn bytes(self: &str) Bytes {
         return Bytes { s: self.slice(0, self.len), i: 0 };
     }
 
-    // Iterate Unicode scalar values (`u32` code points), decoding UTF-8. Assumes valid UTF-8; a
-    // malformed leading byte yields U+FFFD and advances one byte.
+    /// Iterate Unicode scalar values (`u32` code points), decoding UTF-8. Assumes valid UTF-8; a
+    /// malformed leading byte yields U+FFFD and advances one byte.
     pub const fn chars(self: &str) Chars {
         return Chars { s: self.slice(0, self.len), i: 0 };
     }
 
-    // Iterate the sub-views separated by `sep`. An empty `sep` yields the whole view once; adjacent or
-    // edge separators produce empty views.
+    /// Iterate the sub-views separated by `sep`. An empty `sep` yields the whole view once; adjacent or
+    /// edge separators produce empty views.
     pub const fn split(self: &str, sep: str) Split {
         return Split { s: self.slice(0, self.len), i: 0, sep: sep };
     }
 
-    // Iterate lines split on '\n', dropping a trailing '\r' (so "\r\n" works). A final newline does not
-    // yield a trailing empty line.
+    /// Iterate lines split on '\n', dropping a trailing '\r' (so "\r\n" works). A final newline does not
+    /// yield a trailing empty line.
     pub const fn lines(self: &str) Lines {
         return Lines { s: self.slice(0, self.len), i: 0 };
     }
@@ -446,9 +446,9 @@ extend str {
         };
     }
 
-    // Decimal float: `[+|-] digits [. digits] [(e|E) [+|-] digits]`. Computed as an integer mantissa
-    // scaled by a power of ten -- exact for the common cases; the last ulp is not guaranteed for
-    // extreme magnitudes.
+    /// Decimal float: `[+|-] digits [. digits] [(e|E) [+|-] digits]`. Computed as an integer mantissa
+    /// scaled by a power of ten -- exact for the common cases; the last ulp is not guaranteed for
+    /// extreme magnitudes.
     pub const fn parse_f64(self: &str) Option<f64> {
         let n = self.len;
         if n == 0 {

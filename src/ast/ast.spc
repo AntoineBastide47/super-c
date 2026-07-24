@@ -1,3 +1,8 @@
+// The per-module AST and type arena. Nodes live in one flat Vector indexed by NodeId (0 = NODE_NONE);
+// child lists are (start, len) windows into `children`, built through `scratch` via mark/push/commit.
+// Types are interned: TypeIds number `type_pool` in INSERTION order, so interned identity (and every
+// downstream emission) is independent of hashing. Analysis results for later passes hang off NodeIds
+// in side tables (resolutions, types, mono/dyn/deref uses, attrs, lifetime_decls, call_info).
 import string as cstring;
 import lexer::token as tok;
 import lexer::token_type as tt;
@@ -237,9 +242,9 @@ pub struct WherePredicateData {
     pub ty: NodeId,
     pub bounds: NodeList,
 }
-// The builtin types' surface names. BuiltinType is declared in this module, so the shared name
-// table lives here too: the typechecker's renderer/lookup delegates to it, and consteval uses it to
-// fold builtin-targeted casts demanded before their module is typechecked.
+/// The builtin types' surface names. BuiltinType is declared in this module, so the shared name
+/// table lives here too: the typechecker's renderer/lookup delegates to it, and consteval uses it to
+/// fold builtin-targeted casts demanded before their module is typechecked.
 pub const fn bt_name(b: BuiltinType) str<'static> {
     if b == BuiltinType::BT_BOOL {
         return "bool";
@@ -295,7 +300,7 @@ pub const fn bt_name(b: BuiltinType) str<'static> {
     return "void";
 }
 
-// The BuiltinType whose name the span spells, -1 if none.
+/// The BuiltinType whose name the span spells, -1 if none.
 pub const fn bt_of_name(src: str, s: tok::Span) i32 {
     let n = (s.end - s.start) as usize;
     for i in 0..BuiltinType::BT_COUNT as i32 {
@@ -754,6 +759,8 @@ extend Ast {
         self.scratch.push(id);
     }
 
+    /// Moves the scratch entries pushed since `mark` into `children` and returns their NodeList.
+    /// Nested lists work because an inner list commits (draining its scratch tail) first.
     pub fn commit(self: &mut Self, mark: u32) NodeList {
         let list = NodeList { start: self.children.len() as u32, len: self.scratch.len() as u32 - mark };
         for i in mark as usize..self.scratch.len() {
@@ -806,6 +813,8 @@ extend Ast {
         return pool_len;
     }
 
+    /// Interns `t`, returning the existing TypeId on a hit. Ids are dense insertion-order indices
+    /// into `type_pool`; the hash index only picks probe buckets, so identity never depends on it.
     pub fn intern_type(self: &mut Self, t: Ty) TypeId {
         if self.type_index.len() == 0 || (self.type_ix_used as usize + 1) * 4 >= self.type_index.len() * 3 {
             self.type_ix_used = Ast::ix_rebuild(&mut self.type_index, self.type_pool.len()) as u32;
@@ -839,6 +848,8 @@ extend Ast {
         }
     }
 
+    /// Interns a (module, decl, args) instantiation and returns its TYPE_INSTANCE TypeId. `n` is
+    /// clamped to 8 (the fixed args capacity). Safety: `args` must point at `n` readable TypeIds.
     pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
         if m > 8 {
@@ -883,9 +894,9 @@ extend Ast {
         return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
 
-    // Intern a `dyn` type: the payload is an instance-table index carrying the interface decl
-    // and its (possibly empty) type arguments; `module` mirrors the interface's module so
-    // existing `dy.module` reads stay valid.
+    /// Intern a `dyn` type: the payload is an instance-table index carrying the interface decl
+    /// and its (possibly empty) type arguments; `module` mirrors the interface's module so
+    /// existing `dy.module` reads stay valid.
     pub fn intern_dyn(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
         let ii = self.intern_instance(module, decl, args, n);
         let idx = self.type_at(ii).as_data.inst;
@@ -894,7 +905,7 @@ extend Ast {
         );
     }
 
-    // The interface (or dyn-fn signature) node behind a TYPE_DYN payload.
+    /// The interface (or dyn-fn signature) node behind a TYPE_DYN payload.
     pub const fn dyn_decl_of(self: &Self, dy: &Ty) NodeId {
         return self.instance(dy.as_data.inst).decl;
     }
@@ -903,11 +914,13 @@ extend Ast {
         return self.instances.at(index as usize);
     }
 
-    // A const-generic argument value, interned as a module-independent TYPE_CONST.
+    /// A const-generic argument value, interned as a module-independent TYPE_CONST.
     pub fn const_value(self: &mut Self, v: i64) TypeId {
         return self.intern_type(Ty { kind: TypeKind::TYPE_CONST, module: 0, as_data: TyAs { value: v } });
     }
 
+    /// Records a method instantiation; returns false if it was already recorded. `n` is clamped to
+    /// 8. Safety: `targs` must point at `n` readable TypeIds.
     pub fn add_method_inst(self: &mut Self, instance: TypeId, method: NodeId, targs: *const TypeId, n: u8) bool {
         let mut m = n;
         if m > 8 {
@@ -948,7 +961,7 @@ extend Ast {
         }
     }
 
-    // Record a decl's lifetime params (no-op for the overwhelmingly common empty case).
+    /// Record a decl's lifetime params (no-op for the overwhelmingly common empty case).
     pub fn set_lifetimes(self: &mut Self, owner: NodeId, list: NodeList) {
         if list.len == 0 {
             return;
@@ -987,6 +1000,8 @@ extend Ast {
         };
     }
 
+    /// Re-interns `src`'s type `t` into THIS Ast, rebuilding element and instance payloads
+    /// recursively -- TypeIds are per-Ast and never transfer directly.
     pub fn reintern(self: &mut Self, src: &Ast, t: TypeId) TypeId {
         if t == TYPE_NONE {
             return t;
@@ -1023,6 +1038,8 @@ extend Ast {
         };
     }
 
+    /// Records the concrete type args a use site instantiates with. `n` is clamped to 8. Safety:
+    /// `args` must point at `n` readable TypeIds.
     pub fn set_type_args(self: &mut Self, node: NodeId, args: *const TypeId, n: u8) {
         let mut m = n;
         if m > 8 {
@@ -1037,6 +1054,7 @@ extend Ast {
         self.mono_at[node as usize] = self.mono.len() as u32;
     }
 
+    /// The type args recorded for `node`, or null if none.
     pub const fn type_args(self: &Self, node: NodeId) *const MonoUse {
         if node as usize >= self.mono_at.len() {
             return null;
@@ -1057,6 +1075,7 @@ extend Ast {
         self.dyn_at[node as usize] = self.dyn_uses.len() as u32;
     }
 
+    /// The dyn-erasure recorded at `node`, or null if none.
     pub const fn dyn_use_at(self: &Self, node: NodeId) *const DynUse {
         if node as usize >= self.dyn_at.len() {
             return null;
@@ -1074,6 +1093,7 @@ extend Ast {
         self.deref_at[du.node as usize] = self.deref_uses.len() as u32;
     }
 
+    /// The auto-deref chain recorded at `node`, or null if none.
     pub const fn deref_use_at(self: &Self, node: NodeId) *const DerefUse {
         if node as usize >= self.deref_at.len() {
             return null;
@@ -1094,9 +1114,13 @@ extend Ast {
     pub const fn list(self: &Self, list: NodeList) *const NodeId {
         return unsafe (self.children.as_ptr() + list.start as usize);
     }
+    /// Resolves `ref_id` to a decl in THIS module (the DefId is stamped with `self.module`); use
+    /// set_resolution_def for a foreign target.
     pub const fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
         self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl };
     }
+    /// The resolved decl node with its module DROPPED -- use resolution_def when the target may
+    /// live in another module.
     pub const fn resolution(self: &Self, ref_id: NodeId) NodeId {
         return self.resolutions[ref_id as usize].node;
     }
@@ -1106,6 +1130,8 @@ extend Ast {
     pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
         self.resolutions[ref_id as usize] = decl;
     }
+    /// Builtin TypeIds are fixed by init_types' seeding: pool slot 0 is TYPE_ERROR, then the
+    /// builtins in enum order -- hence b + 1.
     pub const fn builtin(b: BuiltinType) TypeId {
         return b as TypeId + 1;
     }
@@ -1156,6 +1182,9 @@ extend Ast as Free {
     }
 }
 
+/// The builtin type a numeric literal's suffix names, or BT_COUNT if it has none. On a match,
+/// *sfx_start (when non-null) receives the suffix's start offset. In a hex literal, f32/f64 only
+/// count as a suffix after a 'p' exponent -- otherwise those bytes are hex digits.
 pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: *mut u32) BuiltinType {
     let hex = end - start > 2 && src[start as usize] == b'0' && (src[(start + 1) as usize] | 0x20u8) == b'x';
     let mut hexf = false;

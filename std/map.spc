@@ -19,7 +19,7 @@ pub struct Map<K, V, A = Global> {
 }
 
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
-    // Empty map backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
+    /// Empty map backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A) Map<K, V, A> {
         return Map::<K, V, A> { keys: null, vals: null, used: null, len: 0, cap: 0, alloc: alloc };
     }
@@ -84,8 +84,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         }
     }
 
-    // Drop every entry (deep-freeing keys and values) but KEEP the table storage for reuse: a
-    // cleared map re-fills without touching the allocator.
+    /// Drop every entry (deep-freeing keys and values) but KEEP the table storage for reuse: a
+    /// cleared map re-fills without touching the allocator.
     pub fn clear(self: &mut Map<K, V, A>) {
         for i in 0..self.cap {
             if unsafe self.used[i] != 0 {
@@ -99,8 +99,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         self.len = 0;
     }
 
-    // Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
-    // replaced value are freed (no-ops for non-Free types). Takes ownership of `key` and `value`.
+    /// Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
+    /// replaced value are freed (no-ops for non-Free types). Takes ownership of `key` and `value`.
     pub const fn insert(self: &mut Map<K, V, A>, key: K, value: V) {
         if self.cap == 0 || (self.len + 1) * 4 >= self.cap * 3 {
             // grow past a 0.75 load factor
@@ -120,7 +120,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         self.len = self.len + 1;
     }
 
-    // A borrow of the value for `key`, or `None`. Borrowing (`&V`) keeps the Map the sole owner.
+    /// A borrow of the value for `key`, or `None`. Borrowing (`&V`) keeps the Map the sole owner.
     pub const fn get(self: &Map<K, V, A>, key: &K) Option<&V> {
         if self.cap == 0 {
             return Option::<&V>::None;
@@ -136,8 +136,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         return self.get(key).is_some();
     }
 
-    // Remove `key`, returning its value (`None` if absent). Re-inserts the rest of the probe cluster so no
-    // lookup is cut short (backward-shift deletion -- no tombstones).
+    /// Remove `key`, returning its value (`None` if absent). Re-inserts the rest of the probe cluster so no
+    /// lookup is cut short (backward-shift deletion -- no tombstones).
     pub const fn remove(self: &mut Map<K, V, A>, key: &K) Option<V> {
         if self.cap == 0 {
             return Option::<V>::None;
@@ -203,8 +203,8 @@ extend<K: Hash + Eq + Default, V: Default, A: Allocator + Default> Map<K, V, A> 
     }
 }
 
-// Borrowing cursors over a Map. `for k in m.keys()` / `for v in m.values()` visit each occupied entry
-// (in arbitrary slot order). Each borrows the Map, which must outlive the iteration.
+/// Borrowing cursors over a Map. `for k in m.keys()` / `for v in m.values()` visit each occupied entry
+/// (in arbitrary slot order). Each borrows the Map, which must outlive the iteration.
 pub struct MapKeys<K> {
     pub keys: *const K,
     pub used: *const u8,
@@ -220,12 +220,12 @@ pub struct MapValues<V> {
 }
 
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
-    // A cursor over the keys (`&K`).
+    /// A cursor over the keys (`&K`).
     pub const fn keys(self: &Map<K, V, A>) MapKeys<K> {
         return MapKeys::<K> { keys: self.keys, used: self.used, idx: 0, cap: self.cap };
     }
 
-    // A cursor over the values (`&V`).
+    /// A cursor over the values (`&V`).
     pub const fn values(self: &Map<K, V, A>) MapValues<V> {
         return MapValues::<V> { vals: self.vals, used: self.used, idx: 0, cap: self.cap };
     }

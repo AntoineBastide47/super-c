@@ -32,7 +32,7 @@ extend<T> Option<T> {
         };
     }
 
-    // The contained value; panics on `None`. Consumes `self`.
+    /// The contained value; panics on `None`. Consumes `self`.
     pub const fn unwrap(self: Option<T>) T {
         return switch self {
             Some(v) => v,
@@ -40,7 +40,7 @@ extend<T> Option<T> {
         };
     }
 
-    // The contained value; panics with `msg` on `None`. Consumes `self`.
+    /// The contained value; panics with `msg` on `None`. Consumes `self`.
     pub const fn expect(self: Option<T>, msg: str) T {
         return switch self {
             Some(v) => v,
@@ -48,8 +48,8 @@ extend<T> Option<T> {
         };
     }
 
-    // The contained value, or `default` when empty. Consumes `self` (matching the owned value moves the
-    // payload out); the unused alternative is freed by scope-exit auto-`Free`.
+    /// The contained value, or `default` when empty. Consumes `self` (matching the owned value moves the
+    /// payload out); the unused alternative is freed by scope-exit auto-`Free`.
     pub const fn unwrap_or(self: Option<T>, default: T) T {
         return switch self {
             Some(v) => v,
@@ -57,7 +57,7 @@ extend<T> Option<T> {
         };
     }
 
-    // The contained value, or `f()` computed lazily when empty. Consumes `self`.
+    /// The contained value, or `f()` computed lazily when empty. Consumes `self`.
     pub const fn unwrap_or_else(self: Option<T>, f: fn() T) T {
         return switch self {
             Some(v) => v,
@@ -65,21 +65,21 @@ extend<T> Option<T> {
         };
     }
 
-    // Replace the value in place (returns the previous Option). The old payload travels out in `old`.
+    /// Replace the value in place (returns the previous Option). The old payload travels out in `old`.
     pub const fn replace(self: &mut Option<T>, value: T) Option<T> {
         let old = *self;
         *self = Option::<T>::Some(value);
         return old;
     }
 
-    // Take the value out in place, leaving `None` behind (returns the previous Option).
+    /// Take the value out in place, leaving `None` behind (returns the previous Option).
     pub const fn take(self: &mut Option<T>) Option<T> {
         let old = *self;
         *self = Option::<T>::None;
         return old;
     }
 
-    // Map the contained value through `f`, producing `Option<U>` (`None` stays `None`). Consumes `self`.
+    /// Map the contained value through `f`, producing `Option<U>` (`None` stays `None`). Consumes `self`.
     pub const fn map<U, F: fn(T) U>(self: Option<T>, f: F) Option<U> {
         return switch self {
             Some(v) => Option::<U>::Some(f(v)),
@@ -87,8 +87,8 @@ extend<T> Option<T> {
         };
     }
 
-    // Map the contained value, or return `default` when empty. Consumes `self`; frees the unused `default`
-    // on the `Some` path (a no-op for non-`Free` types).
+    /// Map the contained value, or return `default` when empty. Consumes `self`; frees the unused `default`
+    /// on the `Some` path (a no-op for non-`Free` types).
     pub const fn map_or<U, F: fn(T) U>(self: Option<T>, default: U, f: F) U {
         return switch self {
             Some(v) => f(v),
@@ -96,7 +96,7 @@ extend<T> Option<T> {
         };
     }
 
-    // Chain a fallible step: `f` itself returns an `Option<U>` (flat-map / "bind"). Consumes `self`.
+    /// Chain a fallible step: `f` itself returns an `Option<U>` (flat-map / "bind"). Consumes `self`.
     pub const fn and_then<U, F: fn(T) Option<U>>(self: Option<T>, f: F) Option<U> {
         return switch self {
             Some(v) => f(v),
@@ -104,11 +104,11 @@ extend<T> Option<T> {
         };
     }
 
-    // Keep the value only when `pred` holds, else `None`. Consumes `self`; the `&self` match lets `pred`
-    // peek the payload before `self` is moved. On rejection `self` is freed by scope-exit auto-`Free`.
-    // NOTE: `pred` takes `T` by value, so for a Free element type this copies (and the copy is freed),
-    // double-freeing the payload `self` still owns. A `fn(&T)` predicate is the right fix but currently
-    // hits two compiler gaps (over-const borrow of an embedded pointer payload; no `&mut`->`&` coercion).
+    /// Keep the value only when `pred` holds, else `None`. Consumes `self`; the `&self` match lets `pred`
+    /// peek the payload before `self` is moved. On rejection `self` is freed by scope-exit auto-`Free`.
+    /// NOTE: `pred` takes `T` by value, so for a Free element type this copies (and the copy is freed),
+    /// double-freeing the payload `self` still owns. A `fn(&T)` predicate is the right fix but currently
+    /// hits two compiler gaps (over-const borrow of an embedded pointer payload; no `&mut`->`&` coercion).
     pub const fn filter<F: fn(T) bool>(self: Option<T>, pred: F) Option<T> {
         let keep = switch &self {
             Some(v) => pred(*v),
@@ -120,8 +120,8 @@ extend<T> Option<T> {
         return Option::<T>::None;
     }
 
-    // `self` when it holds a value, otherwise `other`. Consumes both; the unused alternative is freed by
-    // scope-exit auto-`Free`.
+    /// `self` when it holds a value, otherwise `other`. Consumes both; the unused alternative is freed by
+    /// scope-exit auto-`Free`.
     pub const fn or(self: Option<T>, other: Option<T>) Option<T> {
         return switch self {
             Some(v) => Option::<T>::Some(v),
@@ -129,8 +129,8 @@ extend<T> Option<T> {
         };
     }
 
-    // `None` when `self` is empty, otherwise `other`. Consumes both: on `Some` the discarded `self` payload
-    // is freed and `other` is returned; on `None` the unused `other` param is freed by auto-`Free`.
+    /// `None` when `self` is empty, otherwise `other`. Consumes both: on `Some` the discarded `self` payload
+    /// is freed and `other` is returned; on `None` the unused `other` param is freed by auto-`Free`.
     pub const fn and<U>(self: Option<T>, other: Option<U>) Option<U> {
         return switch self {
             Some(v) => {

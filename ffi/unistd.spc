@@ -1,4 +1,4 @@
-// FFI bindings for <unistd.h>. Import with `import unistd;`.
+// FFI bindings for <unistd.h>. Import with `import unistd;`. Every call site requires `unsafe`.
 
 extern "C" {
     pub fn read(fd: i32, buf: *mut void, count: usize) isize;

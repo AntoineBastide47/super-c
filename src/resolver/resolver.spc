@@ -1,3 +1,8 @@
+// Name resolution over one module's Ast: binds every identifier/type reference to its declaring node and
+// records it in the Ast's resolution table (same-module NodeId or cross-module DefId) for the typechecker
+// and codegen to consume. Scopes are a flat symbol stack (not per-scope maps) with a hash index plus
+// per-symbol chain links, so scope exit is a truncate + relink. Also collects closure captures onto the
+// closure node and, in lint mode, runs the unused-binding / dead-store / unused-label passes.
 import string as cstring;
 import stdlib;
 import lexer::token as tok;
@@ -5,26 +10,23 @@ import ast::ast as *;
 import module::loader as loader;
 import utils::errors as diag;
 
-// A scratch buffer to NUL-terminate a module's file path (a `str` view into an owned String) before
-// handing it to the C-string diagnostic renderer.
-
-// Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
+/// Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
 pub enum Namespace {
     NS_VALUE,
     NS_TYPE,
 }
 
-// One live binding on the scope stack. 16 bytes (a power-of-2 stride for the hot linear scope scan): the
-// namespace rides in the top bit of `decl` -- NodeIds are far below 2^31 -- so no separate `ns` byte is
-// needed. Mask `decl & 0x7FFFFFFF` for the real NodeId; `decl >> 31` recovers the Namespace.
+/// One live binding on the scope stack. 16 bytes (a power-of-2 stride for the hot linear scope scan): the
+/// namespace rides in the top bit of `decl` -- NodeIds are far below 2^31 -- so no separate `ns` byte is
+/// needed. Mask `decl & 0x7FFFFFFF` for the real NodeId; `decl >> 31` recovers the Namespace.
 pub struct Symbol {
     pub hash: u32,
     pub decl: NodeId,
     pub name: tok::Span,
 }
 
-// An open closure being resolved: a value ref binding below `floor` is a CAPTURE (copied into its env by
-// codegen), collected here (deduped, discovery order) and committed to the node's `captures` at exit.
+/// An open closure being resolved: a value ref binding below `floor` is a CAPTURE (copied into its env by
+/// codegen), collected here (deduped, discovery order) and committed to the node's `captures` at exit.
 pub struct ClosureScope {
     pub node: NodeId,
     pub floor: u32,
@@ -37,6 +39,8 @@ extend ClosureScope as Free {
     }
 }
 
+/// Single-module resolver. Owns the module's Ast while running (the driver moves it out of the Package
+/// slot and points Package.override_ast here); take_ast hands the annotated Ast back.
 pub struct Resolver<'a> {
     pub ast: Ast,
     pub source: str<'a>,
@@ -57,23 +61,23 @@ pub struct Resolver<'a> {
     // pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive
 }
 
-// A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
+/// A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
 pub struct SymLookup {
     pub decl: NodeId,
     pub idx: u32,
 }
-// A module-qualified type split: module id (-1 = not qualified) and the final type-name node.
+/// A module-qualified type split: module id (-1 = not qualified) and the final type-name node.
 pub struct ModQual {
     pub mid: i32,
     pub type_node: NodeId,
 }
-// A leading-segment-as-module test result.
+/// A leading-segment-as-module test result.
 pub struct ModName {
     pub found: bool,
     pub mid: ModuleId,
 }
-// One import usable as a leading path segment (its `as` alias, or a single-segment path), resolved once
-// by scan_imports so per-reference probes never rescan the item list.
+/// One import usable as a leading path segment (its `as` alias, or a single-segment path), resolved once
+/// by scan_imports so per-reference probes never rescan the item list.
 pub struct ModEntry {
     pub name: tok::Span,
     pub mid: ModuleId,
@@ -173,6 +177,7 @@ extend Resolver {
         };
     }
 
+    /// Move the (resolution-annotated) Ast back out, leaving an empty placeholder behind.
     pub fn take_ast(self: &mut Self) Ast {
         let out = replace(&mut self.ast, Ast::new(0));
         return out;
@@ -1462,6 +1467,8 @@ extend Resolver {
         return "";
     }
 
+    /// Resolve the whole module: imports scanned once, top-level names pre-declared (visible regardless of
+    /// order), then every item; lint passes run when `lint`. Diagnostics finalize against the module's file.
     pub fn resolve(self: &mut Self) {
         let items = self.ast.at_const(self.ast.root).as_data.program.items;
         self.ast.init_resolutions();

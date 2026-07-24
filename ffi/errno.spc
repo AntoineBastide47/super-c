@@ -1,7 +1,8 @@
 // FFI bindings for <errno.h> / <string.h>'s strerror. Import with `import errno;`.
 //
 // `errno` itself is a thread-local macro on most platforms, so the compiler runtime exposes a portable
-// `__sc_errno_location()` helper returning the current thread's errno cell.
+// `__sc_errno_location()` helper returning the current thread's errno cell. Calling the raw bindings
+// requires `unsafe`; the `errno`/`set_errno`/`error_string` wrappers do not.
 
 extern "C" {
     pub fn __sc_errno_location() *mut i32;

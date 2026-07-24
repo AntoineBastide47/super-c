@@ -115,7 +115,7 @@ fn contains(v: &Vector<String>, s: str) bool {
     return false;
 }
 
-// Recursive delete (files then directories); silently ignores a missing path.
+/// Recursive delete (files then directories); silently ignores a missing path.
 pub fn rm_rf(path: str) {
     let mut p = String::from_str(path);
     let isdir = unsafe shim::sc_stat_isdir(p.cstr());
@@ -395,7 +395,8 @@ fn dirname_of(p: str) str {
     return p.slice(0, k - 1);
 }
 
-// CLI flag beats the SC_PROFILE handed down by a running manifest command, which beats the default.
+/// Profile name to build with: the CLI flag beats the SC_PROFILE handed down by a running manifest
+/// command, which beats the manifest's default-profile.
 pub fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
     if cli.len() != 0 {
         return cli;
@@ -702,6 +703,8 @@ fn engine_build(
     return ret;
 }
 
+/// `super-c build` from build.toml: run the engine on the manifest's root under the resolved profile
+/// (see `resolve_profile`), linking `bin_override` when non-empty, else the manifest's `bin`.
 pub fn manifest_build(
     m: &mf::Manifest,
     profile: str,
@@ -739,8 +742,8 @@ pub fn manifest_build(
     );
 }
 
-// `super-c test`: build the project, then discover tests/**/*.spc by convention, synthesize an
-// aggregating root, and run the @test pipeline on it (SUPERC points at the fresh binary).
+/// `super-c test`: build the project, then discover tests/**/*.spc by convention, synthesize an
+/// aggregating root, and run the @test pipeline on it (SUPERC points at the fresh binary).
 pub fn manifest_test(
     m: &mf::Manifest,
     profile: str,
@@ -816,8 +819,8 @@ pub fn manifest_test(
     return run_package(&mut p, topts, "", target, false);
 }
 
-// `super-c bench`: build bench/main.spc under the bench profile (by default) into
-// <out-dir>/bench-bin and run it.
+/// `super-c bench`: build bench/main.spc under the bench profile (by default) into
+/// <out-dir>/bench-bin and run it (skipped when `no_run`).
 pub fn manifest_bench(
     m: &mf::Manifest,
     profile: str,
@@ -869,7 +872,8 @@ pub fn manifest_bench(
     return shell(cmd.as_str());
 }
 
-// `super-c run <name>`: run a manifest command, building first when it asks for it.
+/// `super-c run <name>`: run a manifest command, building first when it asks for it. Lines run in
+/// order; the first nonzero exit stops and is returned.
 pub fn manifest_run(
     m: &mf::Manifest,
     name: str,
@@ -916,9 +920,9 @@ pub fn manifest_run(
     return 0;
 }
 
-// A [command.NAME] entry shadows the built-in NAME subcommand -- unless we are already inside a
-// command's lines (SC_CMD), which is how the override's own nested `super-c build` reaches the
-// real engine.
+/// A [command.NAME] entry shadows the built-in NAME subcommand -- unless we are already inside a
+/// command's lines (SC_CMD), which is how the override's own nested `super-c build` reaches the
+/// real engine.
 pub fn command_overrides(m: &mf::Manifest, name: str) bool {
     if stdlib::getenv("SC_CMD") != null {
         return false;
@@ -926,8 +930,8 @@ pub fn command_overrides(m: &mf::Manifest, name: str) bool {
     return m.command_index(name) >= 0;
 }
 
-// `super-c clean`: drop the manifest's outputs -- out-dir (raw*/ + per-profile gen/obj) plus the
-// trees bare `super-c <root.spc>` invocations and pre-raw layouts left next to the sources.
+/// `super-c clean`: drop the manifest's outputs -- out-dir (raw*/ + per-profile gen/obj) plus the
+/// trees bare `super-c <root.spc>` invocations and pre-raw layouts left next to the sources.
 pub fn manifest_clean(m: &mf::Manifest) i32 {
     rm_rf(m.out_dir.as_str());
     let b = join2(dirname_of(m.root.as_str()), "build");

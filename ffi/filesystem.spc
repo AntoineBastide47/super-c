@@ -1,4 +1,5 @@
-// FFI bindings for common filesystem and directory APIs. Import with `import filesystem;`.
+// FFI bindings for common filesystem and directory APIs. Import with `import filesystem;`. Every call
+// site requires `unsafe`.
 // Struct layouts such as `stat` and `dirent` vary by platform, so APIs that fill or return those structs
 // use `*mut void` / `*const void`; provide platform-specific layout glue when you need field access.
 

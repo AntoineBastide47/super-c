@@ -2,7 +2,8 @@
 // the C `string.h` module, distinct from the prelude `String` type, which stays available unqualified).
 //
 // The raw bindings are unbounded (the length or NUL terminator is the caller's responsibility). The helper
-// functions below operate over Super-C slices.
+// functions below operate over Super-C slices. Calling the raw bindings requires `unsafe`; the slice
+// helpers do not.
 
 extern "C" {
     // Raw memory (sizes in bytes). `memset`'s fill value is an `int` truncated to `unsigned char`.

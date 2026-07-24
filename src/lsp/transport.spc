@@ -27,7 +27,8 @@ fn is_content_length(line: str) bool {
     return true;
 }
 
-// Read one framed message body from `f`. None on EOF or malformed framing (missing/bad Content-Length).
+/// Read one framed message body from `f`. None on EOF or malformed framing (missing/bad
+/// Content-Length, or a declared length over the 128 MiB sanity cap).
 pub fn read_message(f: *mut stdio::FILE) Option<String> {
     let mut clen: i64 = -1;
     loop {
@@ -68,7 +69,7 @@ pub fn read_message(f: *mut stdio::FILE) Option<String> {
     return Option::<String>::Some(body);
 }
 
-// Frame and send `body`, then flush.
+/// Frame and send `body`, then flush.
 pub fn write_message(f: *mut stdio::FILE, body: str) {
     let mut hdr = String::with_capacity(40);
     hdr.format_into("Content-Length: {}\r\n\r\n", body.len());

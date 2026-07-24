@@ -118,13 +118,13 @@ extend<A: Allocator> String<A> {
 
     // --- construction --------------------------------------------------------------------------
 
-    // An empty string backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized
-    // tag) -- inline, owns no heap yet. `small.len = 0` also clears the discriminant bit.
+    /// An empty string backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized
+    /// tag) -- inline, owns no heap yet. `small.len = 0` also clears the discriminant bit.
     pub fn new_in(alloc: A) String<A> {
         return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
     }
 
-    // Pre-size for `cap` bytes through an explicit allocator. Up to 23 stay inline (no allocation).
+    /// Pre-size for `cap` bytes through an explicit allocator. Up to 23 stay inline (no allocation).
     pub fn with_capacity_in(mut alloc: A, cap: usize) String<A> {
         if cap <= 23 {
             return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
@@ -136,7 +136,7 @@ extend<A: Allocator> String<A> {
         };
     }
 
-    // A new string through an explicit allocator, holding a copy of `text`'s bytes.
+    /// A new string through an explicit allocator, holding a copy of `text`'s bytes.
     pub fn from_str_in(alloc: A, text: str) String<A> {
         let mut s = String::<A>::with_capacity_in(alloc, text.len());
         s.push_str(text);
@@ -145,8 +145,8 @@ extend<A: Allocator> String<A> {
 
     // --- capacity & length ---------------------------------------------------------------------
 
-    // Bytes currently stored. `s.len()` (this method) is the public accessor; the small/large split is
-    // internal. (A bare `s.len` would be a private member -- a compile error outside this module.)
+    /// Bytes currently stored. `s.len()` (this method) is the public accessor; the small/large split is
+    /// internal. (A bare `s.len` would be a private member -- a compile error outside this module.)
     pub fn len(self: &String<A>) usize {
         if self.is_large() {
             return self.repr.large.len;
@@ -154,7 +154,7 @@ extend<A: Allocator> String<A> {
         return self.repr.small.len as usize;
     }
 
-    // Total bytes available before the next growth: the real heap capacity, or the 23-byte inline budget.
+    /// Total bytes available before the next growth: the real heap capacity, or the 23-byte inline budget.
     pub fn capacity(self: &String<A>) usize {
         if self.is_large() {
             return self.repr.large.cap << 1 >> 1; // drop the discriminant bit
@@ -166,8 +166,8 @@ extend<A: Allocator> String<A> {
         return self.len() == 0;
     }
 
-    // Guarantee room for `additional` more bytes, growing by doubling (amortised O(1) append). Stays
-    // inline while the total fits in 23 bytes.
+    /// Guarantee room for `additional` more bytes, growing by doubling (amortised O(1) append). Stays
+    /// inline while the total fits in 23 bytes.
     pub fn reserve(self: &mut String<A>, additional: usize) {
         let needed = self.len() + additional;
         if needed <= self.capacity() {
@@ -180,7 +180,7 @@ extend<A: Allocator> String<A> {
         self.grow_to(new_cap);
     }
 
-    // Like `reserve`, but allocate exactly enough (no doubling slack).
+    /// Like `reserve`, but allocate exactly enough (no doubling slack).
     pub fn reserve_exact(self: &mut String<A>, additional: usize) {
         let needed = self.len() + additional;
         if needed > self.capacity() {
@@ -188,10 +188,10 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Read-ahead sentinel padding: guarantee at least `n` zero bytes immediately after the logical end,
-    // WITHOUT changing len. Code that establishes this may then over-read up to `n` bytes past the end
-    // safely -- e.g. a lexer whose scan loops rely on the trailing NUL to terminate (no per-byte bounds
-    // check) or that reads 8-byte words. Pre-size with with_capacity(len+n) and this never reallocates.
+    /// Read-ahead sentinel padding: guarantee at least `n` zero bytes immediately after the logical end,
+    /// WITHOUT changing len. Code that establishes this may then over-read up to `n` bytes past the end
+    /// safely -- e.g. a lexer whose scan loops rely on the trailing NUL to terminate (no per-byte bounds
+    /// check) or that reads 8-byte words. Pre-size with with_capacity(len+n) and this never reallocates.
     pub fn pad_nul(self: &mut String<A>, n: usize) {
         self.reserve_exact(n);
         let l = self.len();
@@ -205,22 +205,22 @@ extend<A: Allocator> String<A> {
 
     // --- raw tail writes: for an external writer (a C vsnprintf/memcpy) that fills the spare region ------
 
-    // Reserve room for `additional` more bytes and return a writable pointer at the current end (into the
-    // spare capacity, `capacity() - len()` bytes of it). Write up to that many bytes there, then commit them
-    // with `advance_len`. The returned pointer is invalidated by any later growth -- re-fetch after one.
+    /// Reserve room for `additional` more bytes and return a writable pointer at the current end (into the
+    /// spare capacity, `capacity() - len()` bytes of it). Write up to that many bytes there, then commit them
+    /// with `advance_len`. The returned pointer is invalidated by any later growth -- re-fetch after one.
     pub fn spare_mut(self: &mut String<A>, additional: usize) *mut u8 {
         self.reserve(additional);
         return unsafe (self.data_ptr() + self.len());
     }
 
-    // Grow the length by `n` bytes just written into the spare region via `spare_mut`. Caller guarantees
-    // `len() + n <= capacity()` and that those `n` bytes were initialised.
+    /// Grow the length by `n` bytes just written into the spare region via `spare_mut`. Caller guarantees
+    /// `len() + n <= capacity()` and that those `n` bytes were initialised.
     pub fn advance_len(self: &mut String<A>, n: usize) {
         self.set_len(self.len() + n);
     }
 
-    // Free unused capacity. A heap string short enough to fit inline moves back onto the stack and frees
-    // its buffer; otherwise it reallocs down to its length. Inline strings are already minimal.
+    /// Free unused capacity. A heap string short enough to fit inline moves back onto the stack and frees
+    /// its buffer; otherwise it reallocs down to its length. Inline strings are already minimal.
     pub fn shrink_to_fit(self: &mut String<A>) {
         if !self.is_large() {
             return;
@@ -244,12 +244,12 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Free the contents but keep any heap allocation for reuse.
+    /// Free the contents but keep any heap allocation for reuse.
     pub fn clear(self: &mut String<A>) {
         self.set_len(0);
     }
 
-    // Shorten to at most `new_len` bytes (no-op if already shorter). Caller keeps UTF-8 boundaries.
+    /// Shorten to at most `new_len` bytes (no-op if already shorter). Caller keeps UTF-8 boundaries.
     pub fn truncate(self: &mut String<A>, new_len: usize) {
         if new_len < self.len() {
             self.set_len(new_len);
@@ -258,7 +258,7 @@ extend<A: Allocator> String<A> {
 
     // --- append --------------------------------------------------------------------------------
 
-    // Append `n` raw bytes from `src` (the bulk primitive the other appenders build on).
+    /// Append `n` raw bytes from `src` (the bulk primitive the other appenders build on).
     pub fn push_bytes(self: &mut String<A>, src: *const u8, n: usize) {
         if n == 0 {
             return;
@@ -270,7 +270,7 @@ extend<A: Allocator> String<A> {
         self.set_len(len + n);
     }
 
-    // Append one raw byte.
+    /// Append one raw byte.
     pub fn push_byte(self: &mut String<A>, b: u8) {
         self.reserve(1);
         let len = self.len();
@@ -279,7 +279,7 @@ extend<A: Allocator> String<A> {
         self.set_len(len + 1);
     }
 
-    // Append one Unicode scalar value, UTF-8 encoded into 1-4 bytes.
+    /// Append one Unicode scalar value, UTF-8 encoded into 1-4 bytes.
     pub fn push(self: &mut String<A>, ch: u32) {
         if ch < 0x80 {
             self.push_byte(ch as u8);
@@ -298,17 +298,17 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Append the bytes of a `str` (e.g. a string literal).
+    /// Append the bytes of a `str` (e.g. a string literal).
     pub fn push_str(self: &mut String<A>, text: str) {
         self.push_bytes(text.ptr(), text.len());
     }
 
-    // Append another String's bytes.
+    /// Append another String's bytes.
     pub fn push_string(self: &mut String<A>, other: &String<A>) {
         self.push_bytes(other.as_ptr(), other.len());
     }
 
-    // Append the base-10 digits of an unsigned integer. Recurses on the high digits so they print first.
+    /// Append the base-10 digits of an unsigned integer. Recurses on the high digits so they print first.
     pub fn push_u64(self: &mut String<A>, value: u64) {
         if value >= 10 {
             self.push_u64(value / 10);
@@ -316,8 +316,8 @@ extend<A: Allocator> String<A> {
         self.push_byte((48 + value % 10) as u8);
     }
 
-    // Append the base-10 digits of a signed integer, with a leading '-' when negative. The magnitude is
-    // taken in u64 (`0 - value`) so i64::MIN is handled without overflow.
+    /// Append the base-10 digits of a signed integer, with a leading '-' when negative. The magnitude is
+    /// taken in u64 (`0 - value`) so i64::MIN is handled without overflow.
     pub fn push_i64(self: &mut String<A>, value: i64) {
         if value < 0 {
             self.push_byte(45);
@@ -327,8 +327,8 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Append the base-16 digits of an unsigned integer (no "0x" prefix). `upper` selects A-F vs a-f.
-    // Recurses on the high nibbles so they print first; 0 prints as a single "0".
+    /// Append the base-16 digits of an unsigned integer (no "0x" prefix). `upper` selects A-F vs a-f.
+    /// Recurses on the high nibbles so they print first; 0 prints as a single "0".
     pub fn push_hex(self: &mut String<A>, value: u64, upper: bool) {
         if value >= 16 {
             self.push_hex(value / 16, upper);
@@ -345,7 +345,7 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Append a signed integer in hex, with a leading '-' on negatives (magnitude in u64, so i64::MIN is safe).
+    /// Append a signed integer in hex, with a leading '-' on negatives (magnitude in u64, so i64::MIN is safe).
     pub fn push_hex_i64(self: &mut String<A>, value: i64, upper: bool) {
         if value < 0 {
             self.push_byte(45);
@@ -355,7 +355,7 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Append the base-2 digits of an unsigned integer ('{:b}', no "0b" prefix). 0 prints as "0".
+    /// Append the base-2 digits of an unsigned integer ('{:b}', no "0b" prefix). 0 prints as "0".
     pub fn push_bin(self: &mut String<A>, value: u64) {
         if value >= 2 {
             self.push_bin(value / 2);
@@ -363,7 +363,7 @@ extend<A: Allocator> String<A> {
         self.push_byte((48 + value % 2) as u8);
     }
 
-    // Append a floating-point value with exactly `prec` digits after the decimal point ('{:.N}').
+    /// Append a floating-point value with exactly `prec` digits after the decimal point ('{:.N}').
     pub fn push_f64_prec(self: &mut String<A>, value: f64, prec: u32) {
         let buf = self.alloc.alloc(64, 1) as *mut char;
         let n = unsafe snprintf(buf, 64, "%.*f", prec as i32, value);
@@ -377,9 +377,9 @@ extend<A: Allocator> String<A> {
         self.alloc.dealloc(buf, 64, 1);
     }
 
-    // Append `s` in a `width`-byte field padded with `fill` ('{:>8}', '{:08}', '{:^6}').
-    // `align`: 0 = left, 1 = right, 2 = center. A right-aligned zero fill is numeric-aware:
-    // a leading '-' stays in front of the zeros.
+    /// Append `s` in a `width`-byte field padded with `fill` ('{:>8}', '{:08}', '{:^6}').
+    /// `align`: 0 = left, 1 = right, 2 = center. A right-aligned zero fill is numeric-aware:
+    /// a leading '-' stays in front of the zeros.
     pub fn push_padded(self: &mut String<A>, s: str, width: usize, fill: u8, align: u8) {
         let n = s.len();
         if width <= n {
@@ -413,10 +413,10 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Pad, in place, the field appended since `from` (a prior `len()`) to `width` bytes — the
-    // no-temporary twin of `push_padded` for values formatted directly into this string: one
-    // reserve, one memmove of the field, then fill. Same rules: `align` 0 = left, 1 = right,
-    // 2 = center; a right-aligned zero fill keeps a leading '-' in front of the zeros.
+    /// Pad, in place, the field appended since `from` (a prior `len()`) to `width` bytes — the
+    /// no-temporary twin of `push_padded` for values formatted directly into this string: one
+    /// reserve, one memmove of the field, then fill. Same rules: `align` 0 = left, 1 = right,
+    /// 2 = center; a right-aligned zero fill keeps a leading '-' in front of the zeros.
     pub fn pad_at(self: &mut String<A>, from: usize, width: usize, fill: u8, align: u8) {
         let n = self.len() - from;
         if width <= n {
@@ -451,8 +451,8 @@ extend<A: Allocator> String<A> {
         self.set_len(from + width);
     }
 
-    // Append a floating-point value formatted by C's "%g" (compact, round-trip-ish). The scratch buffer is
-    // taken from the stored allocator and released back to it.
+    /// Append a floating-point value formatted by C's "%g" (compact, round-trip-ish). The scratch buffer is
+    /// taken from the stored allocator and released back to it.
     pub fn push_f64(self: &mut String<A>, value: f64) {
         let buf = self.alloc.alloc(32, 1) as *mut char;
         let n = unsafe snprintf(buf, 32, "%g", value);
@@ -462,7 +462,7 @@ extend<A: Allocator> String<A> {
         self.alloc.dealloc(buf, 32, 1);
     }
 
-    // Insert one byte at index `i` (0 <= i <= len), shifting the tail right.
+    /// Insert one byte at index `i` (0 <= i <= len), shifting the tail right.
     pub fn insert_byte(self: &mut String<A>, i: usize, b: u8) {
         self.reserve(1);
         let len = self.len();
@@ -472,7 +472,7 @@ extend<A: Allocator> String<A> {
         self.set_len(len + 1);
     }
 
-    // Insert a `str` at byte index `i` (0 <= i <= len), shifting the tail right.
+    /// Insert a `str` at byte index `i` (0 <= i <= len), shifting the tail right.
     pub fn insert_str(self: &mut String<A>, i: usize, text: str) {
         if text.len() == 0 {
             return;
@@ -487,7 +487,7 @@ extend<A: Allocator> String<A> {
 
     // --- remove --------------------------------------------------------------------------------
 
-    // Remove and return the last byte, or 0 if the string is empty.
+    /// Remove and return the last byte, or 0 if the string is empty.
     pub fn pop_byte(self: &mut String<A>) u8 {
         let len = self.len();
         if len == 0 {
@@ -498,8 +498,8 @@ extend<A: Allocator> String<A> {
         return unsafe p[len - 1];
     }
 
-    // Remove and return the last UTF-8 scalar value (walking back over continuation bytes), or 0 if
-    // empty -- the inverse of `push`.
+    /// Remove and return the last UTF-8 scalar value (walking back over continuation bytes), or 0 if
+    /// empty -- the inverse of `push`.
     pub fn pop(self: &mut String<A>) u32 {
         let len = self.len();
         if len == 0 {
@@ -525,7 +525,7 @@ extend<A: Allocator> String<A> {
         return ch;
     }
 
-    // Remove and return the byte at index `i` (i < len), shifting the tail left.
+    /// Remove and return the byte at index `i` (i < len), shifting the tail left.
     pub fn remove_byte(self: &mut String<A>, i: usize) u8 {
         let len = self.len();
         let p = self.data_ptr();
@@ -537,18 +537,18 @@ extend<A: Allocator> String<A> {
 
     // --- access --------------------------------------------------------------------------------
 
-    // The byte at `i` (0 <= i < len). No bounds check -- the caller owns the index.
+    /// The byte at `i` (0 <= i < len). No bounds check -- the caller owns the index.
     pub fn byte(self: &String<A>, i: usize) u8 {
         return unsafe self.as_ptr()[i];
     }
 
-    // Overwrite the byte at `i` (0 <= i < len).
+    /// Overwrite the byte at `i` (0 <= i < len).
     pub fn set_byte(self: &mut String<A>, i: usize, b: u8) {
         let p = self.data_ptr();
         unsafe p[i] = b;
     }
 
-    // A read-only pointer to the bytes (inline or heap). See the module-level caveat on small strings.
+    /// A read-only pointer to the bytes (inline or heap). See the module-level caveat on small strings.
     pub fn as_ptr(self: &String<A>) *const u8 {
         if self.is_large() {
             return self.repr.large.ptr;
@@ -556,12 +556,13 @@ extend<A: Allocator> String<A> {
         return &self.repr.small.data[0];
     }
 
+    /// The bytes as a borrowed `str` view: valid until the next mutation and, for a small string, until a move.
     pub fn as_str(self: &String<A>) str {
         return str::from_raw(self.as_ptr(), self.len());
     }
 
-    // Borrowed iterators over the bytes -- delegate to the `str` view: valid until the next mutation, and
-    // only while `self` is alive (bind the String to a `let`; do not iterate a temporary's iterator).
+    /// Borrowed iterators over the bytes -- delegate to the `str` view: valid until the next mutation, and
+    /// only while `self` is alive (bind the String to a `let`; do not iterate a temporary's iterator).
     pub fn bytes(self: &String<A>) Bytes {
         return self.as_str().bytes();
     }
@@ -578,9 +579,9 @@ extend<A: Allocator> String<A> {
         return self.as_str().lines();
     }
 
-    // A NUL-terminated `*const char` view of the bytes, for passing to C APIs (the FFI `.cstr()` bridge).
-    // Writes a trailing 0 just past `len` without changing the length, growing by one byte if needed. The
-    // pointer is valid until the next mutation; embedded NULs make C see a truncated string.
+    /// A NUL-terminated `*const char` view of the bytes, for passing to C APIs (the FFI `.cstr()` bridge).
+    /// Writes a trailing 0 just past `len` without changing the length, growing by one byte if needed. The
+    /// pointer is valid until the next mutation; embedded NULs make C see a truncated string.
     pub fn cstr(self: &mut String<A>) *const char {
         self.reserve(1);
         let len = self.len();
@@ -589,7 +590,7 @@ extend<A: Allocator> String<A> {
         return self.as_ptr() as *const char;
     }
 
-    // Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.
+    /// Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.
     pub fn char_count(self: &String<A>) usize {
         let n = self.len();
         let p = self.as_ptr();
@@ -602,7 +603,7 @@ extend<A: Allocator> String<A> {
         return count;
     }
 
-    // Bytes [start, end) copied into a new owned String (through a copy of this string's allocator).
+    /// Bytes [start, end) copied into a new owned String (through a copy of this string's allocator).
     pub fn substring(self: &String<A>, start: usize, end: usize) String<A> {
         let n = end - start;
         let mut s = String::<A>::with_capacity_in(self.alloc, n);
@@ -613,7 +614,7 @@ extend<A: Allocator> String<A> {
         return s;
     }
 
-    // `self` repeated `n` times in a freshly allocated String (same allocator).
+    /// `self` repeated `n` times in a freshly allocated String (same allocator).
     pub fn repeat(self: &String<A>, n: usize) String<A> {
         let len = self.len();
         let src = self.as_ptr();
@@ -653,7 +654,7 @@ extend<A: Allocator> String<A> {
         return unsafe memcmp(self.as_ptr(), text.ptr(), n) == 0;
     }
 
-    // ASCII-case-insensitive content equality (multibyte bytes must match exactly).
+    /// ASCII-case-insensitive content equality (multibyte bytes must match exactly).
     pub fn eq_ignore_ascii_case(self: &String<A>, other: &String<A>) bool {
         let n = self.len();
         if n != other.len() {
@@ -677,7 +678,7 @@ extend<A: Allocator> String<A> {
         return true;
     }
 
-    // True if every byte is ASCII (< 0x80) -- i.e. no multibyte UTF-8 sequences.
+    /// True if every byte is ASCII (< 0x80) -- i.e. no multibyte UTF-8 sequences.
     pub fn is_ascii(self: &String<A>) bool {
         let n = self.len();
         let p = self.as_ptr();
@@ -712,7 +713,7 @@ extend<A: Allocator> String<A> {
         return unsafe memcmp(unsafe (self.as_ptr() + (n - suffix.len())), suffix.ptr(), suffix.len()) == 0;
     }
 
-    // First index of byte `b`, or `len` (a past-the-end sentinel) if absent.
+    /// First index of byte `b`, or `len` (a past-the-end sentinel) if absent.
     pub fn index_of_byte(self: &String<A>, b: u8) usize {
         let n = self.len();
         let p = self.as_ptr();
@@ -724,7 +725,7 @@ extend<A: Allocator> String<A> {
         return n;
     }
 
-    // Last index of byte `b`, or `len` if absent.
+    /// Last index of byte `b`, or `len` if absent.
     pub fn last_index_of_byte(self: &String<A>, b: u8) usize {
         let n = self.len();
         let p = self.as_ptr();
@@ -742,7 +743,7 @@ extend<A: Allocator> String<A> {
         return self.index_of_byte(b) < self.len();
     }
 
-    // Count of (non-overlapping at the byte level) occurrences of byte `b`.
+    /// Count of (non-overlapping at the byte level) occurrences of byte `b`.
     pub fn count_byte(self: &String<A>, b: u8) usize {
         let len = self.len();
         let p = self.as_ptr();
@@ -755,7 +756,7 @@ extend<A: Allocator> String<A> {
         return n;
     }
 
-    // First byte index where `needle` occurs, or `len` if absent (naive O(n*m) window scan).
+    /// First byte index where `needle` occurs, or `len` if absent (naive O(n*m) window scan).
     pub fn find(self: &String<A>, needle: str) usize {
         let n = self.len();
         if needle.len() == 0 {
@@ -774,7 +775,7 @@ extend<A: Allocator> String<A> {
         return n;
     }
 
-    // Last byte index where `needle` occurs, or `len` if absent.
+    /// Last byte index where `needle` occurs, or `len` if absent.
     pub fn rfind(self: &String<A>, needle: str) usize {
         let n = self.len();
         if needle.len() == 0 {
@@ -824,7 +825,7 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Replace every byte equal to `from` with `to`, in place.
+    /// Replace every byte equal to `from` with `to`, in place.
     pub fn replace_byte(self: &mut String<A>, from: u8, to: u8) {
         let n = self.len();
         let p = self.data_ptr();
@@ -835,8 +836,8 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // A new String (same allocator) with every non-overlapping occurrence of `from` replaced by `to`.
-    // Unmatched runs are copied in bulk (memcpy via push_bytes); only the replacements interrupt the copy.
+    /// A new String (same allocator) with every non-overlapping occurrence of `from` replaced by `to`.
+    /// Unmatched runs are copied in bulk (memcpy via push_bytes); only the replacements interrupt the copy.
     pub fn replace(self: &String<A>, from: str, to: str) String<A> {
         let n = self.len();
         if from.len() == 0 || from.len() > n {
@@ -861,7 +862,7 @@ extend<A: Allocator> String<A> {
         return out;
     }
 
-    // Free leading ASCII whitespace (space, tab, newline, carriage return), shifting bytes left.
+    /// Free leading ASCII whitespace (space, tab, newline, carriage return), shifting bytes left.
     pub fn trim_start(self: &mut String<A>) {
         let len = self.len();
         let p = self.data_ptr();
@@ -879,7 +880,7 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // Free trailing ASCII whitespace.
+    /// Free trailing ASCII whitespace.
     pub fn trim_end(self: &mut String<A>) {
         let p = self.data_ptr();
         let mut len = self.len();
@@ -893,7 +894,7 @@ extend<A: Allocator> String<A> {
         self.set_len(len);
     }
 
-    // Free ASCII whitespace from both ends.
+    /// Free ASCII whitespace from both ends.
     pub fn trim(self: &mut String<A>) {
         self.trim_end();
         self.trim_start();
@@ -901,7 +902,7 @@ extend<A: Allocator> String<A> {
 
     // --- output --------------------------------------------------------------------------------
 
-    // Write the UTF-8 bytes to stdout (no trailing newline).
+    /// Write the UTF-8 bytes to stdout (no trailing newline).
     pub fn print(self: &String<A>) {
         unsafe fwrite(self.as_ptr(), 1, self.len(), unsafe __sc_stdout());
     }
@@ -911,7 +912,7 @@ extend<A: Allocator> String<A> {
         unsafe putchar(10);
     }
 
-    // Write the UTF-8 bytes to stderr (no trailing newline) -- the `eprint`/`eprintln` builtins' writer.
+    /// Write the UTF-8 bytes to stderr (no trailing newline) -- the `eprint`/`eprintln` builtins' writer.
     pub fn eprint(self: &String<A>) {
         unsafe fwrite(self.as_ptr(), 1, self.len(), unsafe __sc_stderr());
     }
@@ -923,23 +924,23 @@ extend<A: Allocator> String<A> {
 }
 
 extend<A: Allocator + Default> String<A> {
-    // An empty string (default-constructed allocator -- `Global`, or any zero-sized/reconstructible tag).
+    /// An empty string (default-constructed allocator -- `Global`, or any zero-sized/reconstructible tag).
     pub fn new() String<A> {
         return String::<A>::new_in(A::default());
     }
 
-    // Pre-size for `cap` bytes (default allocator). Up to 23 stay inline (no allocation); more allocates.
+    /// Pre-size for `cap` bytes (default allocator). Up to 23 stay inline (no allocation); more allocates.
     pub fn with_capacity(cap: usize) String<A> {
         return String::<A>::with_capacity_in(A::default(), cap);
     }
 
-    // A new string (default allocator) holding a copy of `text`'s bytes.
+    /// A new string (default allocator) holding a copy of `text`'s bytes.
     pub fn from_str(text: str) String<A> {
         return String::<A>::from_str_in(A::default(), text);
     }
 
-    // A new string copied from a NUL-terminated C string (the inverse of `cstr`), for FFI return values
-    // such as `getenv`/`strerror`. Copies up to the first NUL.
+    /// A new string copied from a NUL-terminated C string (the inverse of `cstr`), for FFI return values
+    /// such as `getenv`/`strerror`. Copies up to the first NUL.
     pub fn from_cstr(s: *const char) String<A> {
         let n = unsafe strlen(s);
         let mut out = String::<A>::with_capacity(n);
@@ -947,7 +948,7 @@ extend<A: Allocator + Default> String<A> {
         return out;
     }
 
-    // Build a fresh String (default allocator) from an unsigned / signed integer or a float.
+    /// Build a fresh String (default allocator) from an unsigned / signed integer or a float.
     pub fn from_u64(value: u64) String<A> {
         let mut s = String::<A>::new();
         s.push_u64(value);
@@ -992,7 +993,7 @@ extend<A: Allocator> String<A> as Eq {
 }
 
 extend<A: Allocator> String<A> as Hash {
-    // 64-bit FNV-1a over the bytes (matches str::hash, so an equal `str` and `String` hash alike).
+    /// 64-bit FNV-1a over the bytes (matches str::hash, so an equal `str` and `String` hash alike).
     pub fn hash(self: &String<A>) u64 {
         let n = self.len();
         let p = self.as_ptr();
@@ -1005,7 +1006,7 @@ extend<A: Allocator> String<A> as Hash {
 }
 
 extend<A: Allocator> String<A> as Ord {
-    // Lexicographic byte order; shorter is less when one is a prefix of the other.
+    /// Lexicographic byte order; shorter is less when one is a prefix of the other.
     pub fn cmp(self: &String<A>, other: &String<A>) i32 {
         let la = self.len();
         let lb = other.len();
@@ -1040,8 +1041,8 @@ extend<A: Allocator + Default> String<A> as From<str> {
 }
 
 extend<A: Allocator> String<A> as Clone {
-    // A deep copy: an independent value with the same contents, through a copy of this string's allocator
-    // (inline copies need no allocation).
+    /// A deep copy: an independent value with the same contents, through a copy of this string's allocator
+    /// (inline copies need no allocation).
     pub fn clone(self: &String<A>) String<A> {
         let n = self.len();
         let mut s = String::<A>::with_capacity_in(self.alloc, n);
@@ -1063,7 +1064,7 @@ extend<A: Allocator> String<A> as Format {
 }
 
 extend<A: Allocator> String<A> as Writer {
-    // Append the bytes, returning the number written (always the slice length -- the buffer grows on demand).
+    /// Append the bytes, returning the number written (always the slice length -- the buffer grows on demand).
     pub fn write(self: &mut String<A>, bytes: []u8) usize {
         let n = bytes.len();
         self.push_bytes(bytes.as_ptr(), n);
@@ -1095,11 +1096,11 @@ extend<A: Allocator> String<A> as Index<u8, str> {
     }
 }
 
-// Formatted output, compiler builtins. The first argument is a string literal with `{}` placeholders; the
-// trailing arguments fill them in order and are appended by their type (any integer/float, bool, char, str,
-// String, or any `Format` type). `{{`/`}}` are literal braces. `format` returns the built String; `print`
-// writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the compiler splits the
-// literal and emits the per-argument appends at each call site.)
+/// Formatted output, compiler builtins. The first argument is a string literal with `{}` placeholders; the
+/// trailing arguments fill them in order and are appended by their type (any integer/float, bool, char, str,
+/// String, or any `Format` type). `{{`/`}}` are literal braces. `format` returns the built String; `print`
+/// writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the compiler splits the
+/// literal and emits the per-argument appends at each call site.)
 pub fn format(_fmt: str, ...) String {
     return String::<Global>::new();
 }

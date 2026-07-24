@@ -14,6 +14,8 @@ import consteval::consteval as ce;
 import utils::errors as diag;
 import driver::emit as emit;
 
+/// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
+/// (the fix fields carry the machine-applicable quick fix, if any).
 pub struct DiagRec {
     pub module: u32,
     pub start: u32, // byte span into the module's source
@@ -218,10 +220,10 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     return !had;
 }
 
-// Load + resolve + typecheck (NO codegen), harvesting all diagnostics into `diags`. Takes ownership of
-// the overlay vectors. The returned Package keeps every module's typed Ast -- the positional features
-// (hover/definition/references) query it until the next rebuild. Lint gating: see lsp_lint_wanted;
-// `lint_dir` is the canonical workspace root when this build is the manifest root's, else "".
+/// Load + resolve + typecheck (NO codegen), harvesting all diagnostics into `diags`. Takes ownership of
+/// the overlay vectors. The returned Package keeps every module's typed Ast -- the positional features
+/// (hover/definition/references) query it until the next rebuild. Lint gating: see lsp_lint_wanted;
+/// `lint_dir` is the canonical workspace root when this build is the manifest root's, else "".
 pub fn compile(
     root_file: str,
     root_dir: str,

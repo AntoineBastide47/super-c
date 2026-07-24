@@ -9,7 +9,7 @@ import typechecker::typechecker as tc;
 
 type HovBuf = Array<char, 512>;
 
-// A definition/reference site: a byte span in `module`'s source.
+/// A definition/reference site: a byte span in `module`'s source.
 pub struct Loc {
     pub module: u32,
     pub start: u32,
@@ -20,8 +20,8 @@ const fn mod_ast(p: &loader::Package, m: usize) *const Ast {
     return &p.modules.at(m).ast;
 }
 
-// The innermost node whose span contains `off` (ties prefer the later, more specific node). Linear over
-// the node pool -- microseconds at compiler scale.
+/// The innermost node whose span contains `off` (ties prefer the later, more specific node). Linear over
+/// the node pool -- microseconds at compiler scale.
 pub fn node_at(a: *const Ast, off: u32) NodeId {
     let mut best: NodeId = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
@@ -45,8 +45,8 @@ fn node_at_or_before(a: *const Ast, off: u32) NodeId {
     return id;
 }
 
-// The declaration's NAME node (whose span is the go-to/rename target); NODE_NONE when the kind has no
-// distinct name node (callers fall back to the decl span).
+/// The declaration's NAME node (whose span is the go-to/rename target); NODE_NONE when the kind has no
+/// distinct name node (callers fall back to the decl span).
 pub const fn decl_name(a: *const Ast, id: NodeId) NodeId {
     let n = unsafe (*a).at_const(id);
     if n.kind == NodeKind::NODE_FUNCTION {
@@ -258,8 +258,8 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
     return out;
 }
 
-// Markdown hover for the position: the expression's rendered type, then the resolved declaration's
-// head. None when the position carries neither.
+/// Markdown hover for the position: the expression's rendered type, then the resolved declaration's
+/// head. None when the position carries neither.
 pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     let a = mod_ast(p, mi);
     let id = node_at_or_before(a, off);
@@ -307,7 +307,7 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     return Option::<String>::Some(out);
 }
 
-// The definition site for the position: the resolved decl's name span (decl span as the fallback).
+/// The definition site for the position: the resolved decl's name span (decl span as the fallback).
 pub fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let d = def_at(p, mi, off);
     if d.node == NODE_NONE {
@@ -338,8 +338,8 @@ const fn ref_span(a: *const Ast, i: NodeId) tok::Span {
     return n.span;
 }
 
-// Every reference to the definition under the position, DefId-exact across all modules (same-name
-// different-def sites never match). `include_decl` appends the declaration's name span.
+/// Every reference to the definition under the position, DefId-exact across all modules (same-name
+/// different-def sites never match). `include_decl` appends the declaration's name span.
 pub fn references(p: &loader::Package, mi: usize, off: u32, include_decl: bool) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     let d = def_at(p, mi, off);
@@ -380,8 +380,8 @@ pub fn references(p: &loader::Package, mi: usize, off: u32, include_decl: bool) 
     return out;
 }
 
-// The module owning the definition under the position (-1 if none) -- the server refuses renames whose
-// definition lives in the prelude or the ffi tree.
+/// The module owning the definition under the position (-1 if none) -- the server refuses renames whose
+/// definition lives in the prelude or the ffi tree.
 pub fn def_module(p: &loader::Package, mi: usize, off: u32) i32 {
     let d = def_at(p, mi, off);
     if d.node == NODE_NONE {
@@ -394,7 +394,7 @@ pub fn def_module(p: &loader::Package, mi: usize, off: u32) i32 {
 // Semantic tokens.
 // ---------------------------------------------------------------------------------------------------------
 
-// One classified token: a byte span + the server's legend indexes.
+/// One classified token: a byte span + the server's legend indexes.
 pub struct Tok {
     pub start: u32,
     pub end: u32,
@@ -473,8 +473,8 @@ fn tok_push(out: &mut Vector<Tok>, start: u32, end: u32, ty: i32, mods: u32) {
     out.push(Tok { start: start, end: end, ty: ty, mods: mods });
 }
 
-// Every classifiable token in module `mi`: resolved references (through their name spans) plus each
-// declaration's own name (with the `declaration` modifier). Sorted by start offset.
+/// Every classifiable token in module `mi`: resolved references (through their name spans) plus each
+/// declaration's own name (with the `declaration` modifier). Sorted by start offset.
 pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
     let a = mod_ast(p, mi);
     let mut out = Vector::<Tok>::new();
@@ -526,7 +526,7 @@ const fn tok_key(t: &Tok) u32 {
 // Completion.
 // ---------------------------------------------------------------------------------------------------------
 
-// One completion candidate; `kind` is the LSP CompletionItemKind.
+/// One completion candidate; `kind` is the LSP CompletionItemKind.
 pub struct CompItem {
     pub label: String,
     pub kind: i32,
@@ -662,10 +662,10 @@ fn comp_module_publics(p: &loader::Package, mm: usize, out: &mut Vector<CompItem
     }
 }
 
-// Member completion at `off`, which must sit inside the probe identifier the server spliced in after
-// `.`/`::` (the buffer usually does not parse mid-edit; the probe makes it parse, and the typechecker
-// still assigns the receiver's type even though the probe itself errors). Offers fields + methods for a
-// value receiver, variants + methods for an enum path, and public items for a module path.
+/// Member completion at `off`, which must sit inside the probe identifier the server spliced in after
+/// `.`/`::` (the buffer usually does not parse mid-edit; the probe makes it parse, and the typechecker
+/// still assigns the receiver's type even though the probe itself errors). Offers fields + methods for a
+/// value receiver, variants + methods for an enum path, and public items for a module path.
 pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let a = mod_ast(p, mi);
@@ -754,11 +754,8 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
     return out;
 }
 
-// General identifier completion from the last good build: keywords, builtin type names, the module's
-// own top-level declarations, import aliases, prelude publics, and locals in scope (the enclosing
-// function's parameters and earlier bindings).
-// Keywords + builtin type names alone -- the floor every general completion includes, and the
-// fallback when no build (not even a probe build) parses the buffer.
+/// Keywords + builtin type names alone -- the floor every general completion includes, and the
+/// fallback when no build (not even a probe build) parses the buffer.
 pub fn complete_keywords() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let kws = "as do fn if in dyn for let mut new pub case else enum loop move null self Self true type break const defer false union where while extend extern import return static struct switch sizeof unsafe alignof continue interface static_assert";
@@ -776,6 +773,9 @@ pub fn complete_keywords() Vector<CompItem> {
     return out;
 }
 
+/// General identifier completion from the last good build: keywords, builtin type names, the module's
+/// own top-level declarations, import aliases, prelude publics, and locals in scope (the enclosing
+/// function's parameters and earlier bindings).
 pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
     let mut out = complete_keywords();
     let a = mod_ast(p, mi);

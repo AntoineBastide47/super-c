@@ -1,3 +1,8 @@
+// Predicated LL(1) recursive-descent parser: token stream -> one Ast per module. No backtracking --
+// every fork is decided on a single peeked token, and the `_after` seams re-enter with an
+// already-parsed prefix instead of peeking further. Errors emit and recover locally (skip to a sync
+// token, yield NODE_NONE), so parsing always completes and build_ast always produces a NODE_PROGRAM
+// root. PARSE_MAX_DEPTH bounds recursion on types, statements, and expressions.
 import string as cstring;
 import stdlib;
 import lexer::token as *;
@@ -13,11 +18,15 @@ pub enum RangeContext {
     RANGE_EXPR,
 }
 
+// EXPR_CONDITION is the paren-free if/while/switch grammar: there `Ident {` is NOT a struct
+// initializer -- the '{' belongs to the body block. Delimited subexpressions re-select EXPR_FULL.
 enum ExpressionGrammar {
     EXPR_FULL,
     EXPR_CONDITION,
 }
 
+// Attribute arguments are captured as a raw token RANGE (arg_start..arg_end), never parsed here:
+// each attribute interprets its own slice, so new attr forms need no grammar changes.
 struct AttrSyntax {
     pub namespace: Token,
     pub name: Token,
@@ -27,6 +36,9 @@ struct AttrSyntax {
     pub arg_end: usize,
 }
 
+// The lexer only ever emits single '>' tokens (so nested generics can close); the parser glues
+// '>>', '>=', '>>=' back together. shift_assignment reports a '>>=' discovered deep in the binary
+// chain so the expression level can finish it as an assignment.
 struct BinaryParse {
     pub expression: NodeId,
     pub shift_assignment: bool,
@@ -307,6 +319,7 @@ extend Parser {
         return self.parse_type_path_after(head, start);
     }
 
+    // Cast targets take no generic args: '<' after 'x as T' must remain the comparison operator.
     pub fn parse_cast_type(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.parse_type();
@@ -2131,6 +2144,7 @@ extend Parser {
     }
 
     pub fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
+        // fixed 16-segment cap: a deeper member chain silently loses its leftmost segments
         let mut segs: [NodeId; 16] = [
             0u32,
             0u32,
@@ -2799,6 +2813,7 @@ extend Parser {
         switch self.peek_type() {
             While => {
                 self.advance();
+                // while-let desugars to: loop { match value { pattern => body, _ => break } }
                 if self.check(TokenType::Let) {
                     self.advance();
                     let pattern = self.parse_pattern_alts(start);
@@ -3021,6 +3036,7 @@ extend Parser {
             },
             If => {
                 let f = self.parse_if();
+                // if-let desugars to a match EXPRESSION; wrap it so it statement-positions
                 if f != NODE_NONE && self.ast.at_const(f).kind == NodeKind::NODE_MATCH {
                     result = self.ast.add(
                         Node {
@@ -3072,6 +3088,8 @@ extend Parser {
                 );
                 let cast = self.parse_cast_after(unary);
                 let expression = self.parse_expression_from_mode(cast, ExpressionGrammar::EXPR_FULL);
+                // a bare 'unsafe { ... }' statement needs no ';'; if the block turned out to be only
+                // the prefix of a larger expression, the statement does
                 if !is_block || expression != unary {
                     self.expect(TokenType::Semicolon, "';'");
                 }
@@ -3650,6 +3668,7 @@ extend Parser {
             if item != NODE_NONE {
                 self.ast.push(item);
             }
+            // progress guarantee: a failed item that consumed nothing must not loop forever
             if self.current == before && !self.at_end() {
                 self.advance();
             }

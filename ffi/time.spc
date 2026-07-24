@@ -3,7 +3,8 @@
 // C's `time_t`/`clock_t` are integer typedefs, exposed here as `i64` values; the `time_t*` out-parameter
 // of `time` is taken as `*mut void` (pass `null` to ignore it). Calendar APIs use `*mut void` for
 // `struct tm*` to avoid assuming a non-standard `tm` typedef; callers that need field access should provide
-// platform-specific layout glue. `CLOCKS_PER_SEC` is the POSIX value.
+// platform-specific layout glue. `CLOCKS_PER_SEC` is the POSIX value. Calling the raw bindings requires
+// `unsafe`; `now`/`cpu_seconds` do not.
 
 extern "C" {
     // Seconds since the Unix epoch. Pass `null` to ignore the out-parameter.

@@ -9,8 +9,12 @@ import utils::errors as diag;
 
 // Compile-time constant evaluation (always on), in two layers: a memoized scalar folder over TYPED
 // expression nodes, and a layout engine under the 64-bit C data model. Both are PARTIAL by design:
-// anything unfoldable reports "not const" (CONST_NONE / CV_NIL) and stays a runtime construct. See
-// src/consteval/consteval.c for the authoritative comments; this is a faithful Super-C port.
+// anything unfoldable reports "not const" (CONST_NONE / CV_NIL) and stays a runtime construct.
+// The interpreter runs under step/memory/depth budgets against an abstract object heap (the CeObj
+// store, pooled across top-level folds); failures classify into trap kinds -- "cannot evaluate"
+// stays silent, while proven UB and failed `const fn` folds are recorded (fold_errs) for codegen to
+// surface as errors. static_asserts and consts undecidable in module order are deferred and flushed
+// once every module is typed (all_typed).
 
 pub const CE_MAX_DEPTH: i32 = 32;
 pub const CE_DEFAULT_STEPS: u32 = 2097152u32; // 1<<21
@@ -287,8 +291,8 @@ pub struct FxNo<'a> {
     pub why: str<'a>,
 }
 
-// A fold failure codegen must surface as an error: proven UB (and, once `const fn` lands, any
-// failed const-fn fold). detail is rendered eagerly — trap state is reused by later evals.
+// A fold failure codegen must surface as an error: proven UB, or any failed `const fn` fold.
+// detail is rendered eagerly — trap state is reused by later evals.
 pub struct CeFoldErr {
     pub m: ModuleId,
     pub id: NodeId,
@@ -451,6 +455,7 @@ const fn mul_ovf(a: i64, b: i64) OvfRes {
 // --- ConstEval methods --------------------------------------------------------------------------
 
 extend ConstEval {
+    /// 0 for either budget selects the default; max_mem_bytes is converted to CeVal slots.
     pub fn new<'a>(pkg: *mut loader::Package, max_steps: u32, max_mem_bytes: u64) ConstEval<'a> {
         let count = unsafe (*pkg).modules.len();
         let mut ce = ConstEval {
@@ -1000,6 +1005,8 @@ extend ConstEval {
         return Layout { ok: false };
     }
 
+    /// Size/align of (m,t) under the 64-bit C data model; not-ok = not layoutable (opaque, unbound
+    /// generic, zero-length array).
     pub fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
         return self.layout_of(m, t, null, 0);
     }
@@ -1521,6 +1528,7 @@ extend ConstEval {
         self.live_slots = 0;
     }
 
+    // Object ids are 1-based; 0 is the abstract null pointer, and ids past objs_live are stale.
     const fn obj_ptr(self: &Self, id: u32) *mut CeObj {
         if id == 0 || id as usize > self.objs_live {
             return null;
@@ -2090,6 +2098,7 @@ extend ConstEval {
     }
 }
 
+// Backward scan: the innermost binding of a shadowed name wins.
 fn ce_local_find(f: *mut CeFrame, decl: NodeId) i32 {
     let mut i = unsafe (*f).n;
     while i > 0 {
@@ -4614,6 +4623,7 @@ const fn if_bool(c: bool, a: bool, b: bool) bool {
     }
     return b;
 }
+// A nil eval after `?` propagated an early return (frame.early) is a Return, not a failure.
 const fn xfail(f: *mut CeFrame) Flow {
     if f != null && unsafe (*f).early != 0 {
         return Flow::Return;
@@ -4724,6 +4734,7 @@ extend ConstEval {
         return FX_NO;
     }
 
+    /// Shallow effect verdict for (m,fn_id) (FX_*): NO = evaluation is certain to fail. Lazy, memoized.
     pub fn fx_get(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         return self.fx_get_in(m, fn_id, false);
     }
@@ -4747,17 +4758,19 @@ extend ConstEval {
         return v;
     }
 
-    // Part C's `const fn` validation surface: the verdict, and the recorded disqualifier for NO.
+    /// The `const fn` def-site validation surface: FX_NO fails the declaration, and fx_no_reason
+    /// carries the recorded disqualifying site.
     pub fn ce_fn_eligible(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         return self.fx_get(m, fn_id);
     }
 
-    // The const-suggestion lint's surface: deep FX_YES = every path of the body is provably
-    // CTFE-evaluable, so declaring the function `const fn` passes the def-site check AND cannot
-    // introduce structural fold failures (traps and budgets remain the caller's semantic risk).
+    /// The const-suggestion lint's surface: deep FX_YES = every path of the body is provably
+    /// CTFE-evaluable, so declaring the function `const fn` passes the def-site check AND cannot
+    /// introduce structural fold failures (traps and budgets remain the caller's semantic risk).
     pub fn ce_fn_const_suggest(self: &mut Self, m: ModuleId, fn_id: NodeId) bool {
         return self.fx_get_in(m, fn_id, true) == FX_YES;
     }
+    /// The recorded disqualifying site for a shallow FX_NO, or null (deep verdicts record no reason).
     pub fn fx_no_reason(self: &Self, m: ModuleId, fn_id: NodeId) *const FxNo {
         for i in 0..self.fx_no.len() {
             let r = self.fx_no.at(i);
@@ -5710,7 +5723,9 @@ extend ConstEval {
                 }
             }
         }
-        // memoization
+        // Memoization: monomorphic calls with all-scalar arguments only; results are cached only when
+        // every return is scalar -- an aggregate would hold ids into an object heap that resets
+        // between top-level folds.
         let mut cacheable = !closure && unsafe (*gp).ng == 0 && nargs <= 8;
         let mut ai: u32 = 0;
         while cacheable && ai < nargs {
@@ -6283,6 +6298,10 @@ extend ConstEval {
     }
 
     // --- public boundary ---
+    /// The public fold boundary: the memoized scalar value of typed expression (m,id), else
+    /// CONST_NONE. A top-level call (no live eval) resets budgets, trap state and the object heap;
+    /// after a failed fold, ce_trap_get/ce_trap_detail say why. Non-scalar successes memoize as
+    /// AGG_OK and still report CONST_NONE.
     pub fn eval(self: &mut Self, m: ModuleId, id: NodeId) ConstValue {
         if id == NODE_NONE || m as usize >= self.nmods {
             return ce_none();
@@ -6401,14 +6420,14 @@ extend ConstEval {
         return p;
     }
 
-    // Always-panics lint sweep (the `unconditional_panic` analog): interpret a runtime fn body's
-    // top-level statements in a fresh frame -- locals bind as their initializers fold, and the sweep
-    // ENDS at the first statement the interpreter cannot complete (params, runtime calls, budgets).
-    // Returns the statement whose evaluation traps DETERMINISTICALLY -- any UB, or a panic reached
-    // through a `const fn` frame (the checked-accessor class); an explicit user `panic(..)` stays
-    // silent, the same promotion rule as failed const-fn folds -- else NODE_NONE. The verdict is
-    // "always panics IF the function runs this far": statements execute sequentially, known control
-    // flow only.
+    /// Always-panics lint sweep (the `unconditional_panic` analog): interpret a runtime fn body's
+    /// top-level statements in a fresh frame -- locals bind as their initializers fold, and the sweep
+    /// ENDS at the first statement the interpreter cannot complete (params, runtime calls, budgets).
+    /// Returns the statement whose evaluation traps DETERMINISTICALLY -- any UB, or a panic reached
+    /// through a `const fn` frame (the checked-accessor class); an explicit user `panic(..)` stays
+    /// silent, the same promotion rule as failed const-fn folds -- else NODE_NONE. The verdict is
+    /// "always panics IF the function runs this far": statements execute sequentially, known control
+    /// flow only.
     pub fn ce_lint_body(self: &mut Self, m: ModuleId, fn_id: NodeId) NodeId {
         if self.depth != 0 || self.nframes != 0 || m as usize >= self.nmods {
             return NODE_NONE;
@@ -6450,7 +6469,7 @@ extend ConstEval {
         return hit;
     }
 
-    // "<msg> (call stack: outer -> ... -> inner; steps: N/limit)"; sections omitted when empty.
+    /// "<msg> (call stack: outer -> ... -> inner; steps: N/limit)"; sections omitted when empty.
     pub fn ce_trap_detail(self: &mut Self) str {
         let t = self.trap;
         let mut p = self.db_push(0, t);
@@ -6493,15 +6512,18 @@ extend ConstEval {
         return diag::cstr(&self.dbuf[0]);
     }
 
+    /// Queue a static_assert condition for flush_asserts (re-checked once every module is typed).
     pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId) {
         self.pending.push(CePending { m: m, cond: cond });
     }
 
-    // A call-bearing const initializer undecidable in module order: re-checked by flush_consts.
+    /// A call-bearing const initializer undecidable in module order: re-checked by flush_consts.
     pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId) {
         self.pending_consts.push(CePending { m: m, cond: decl });
     }
 
+    /// Re-evaluate the deferred const initializers: err() fires with trap detail for a definite
+    /// trap, and for a top-level const that still cannot be evaluated.
     pub fn flush_consts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
         for i in 0..self.pending_consts.len() {
             let p = self.pending_consts[i];
@@ -6540,6 +6562,8 @@ extend ConstEval {
         return false;
     }
 
+    /// Re-evaluate the deferred asserts: err() gets null detail for a proven-false condition, trap
+    /// detail for a definite trap; still-undecidable conditions stay silent.
     pub fn flush_asserts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
         for i in 0..self.pending.len() {
             let p = self.pending[i];
@@ -6654,12 +6678,13 @@ extend ConstEval {
         inner.set(id as usize, v);
     }
 
+    /// Unchecked: `i` must index into statics (as returned by eval_static / StaticObj links).
     pub const fn static_at(self: &Self, i: u32) *const StaticObj {
         return unsafe (self.statics.as_ptr() + i as usize);
     }
 
-    // Evaluate a const initializer and capture an aggregate result as static data. Scalars return
-    // not-ok (the folded-literal path covers them); failures leave trap/trap_kind describing why.
+    /// Evaluate a const initializer and capture an aggregate result as static data. Scalars return
+    /// not-ok (the folded-literal path covers them); failures leave trap/trap_kind describing why.
     pub fn eval_static(self: &mut Self, m: ModuleId, id: NodeId) StaticRes {
         let bad = StaticRes { ok: false, root: 0 };
         if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {

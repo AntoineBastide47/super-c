@@ -7,7 +7,7 @@ pub struct Set<T, A = Global> {
 }
 
 extend<T: Hash + Eq, A: Allocator> Set<T, A> {
-    // Empty set backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
+    /// Empty set backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A) Set<T, A> {
         return Set::<T, A> { m: Map::<T, bool, A>::new_in(alloc) };
     }
@@ -20,7 +20,7 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
         return self.m.is_empty();
     }
 
-    // Insert `value`. A duplicate (per Eq) is freed by Map::insert, and the stored element is kept.
+    /// Insert `value`. A duplicate (per Eq) is freed by Map::insert, and the stored element is kept.
     pub const fn insert(self: &mut Set<T, A>, value: T) {
         self.m.insert(value, true);
     }
@@ -29,13 +29,13 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
         return self.m.contains_key(value);
     }
 
-    // Remove `value`, freeing the stored element; reports whether it was present.
+    /// Remove `value`, freeing the stored element; reports whether it was present.
     pub const fn remove(self: &mut Set<T, A>, value: &T) bool {
         let removed = self.m.remove(value);
         return removed.is_some();
     }
 
-    // A borrowing cursor over the elements (`&T`); `for x in s.iter() { .. }`. Arbitrary order.
+    /// A borrowing cursor over the elements (`&T`); `for x in s.iter() { .. }`. Arbitrary order.
     pub const fn iter(self: &Set<T, A>) MapKeys<T> {
         return self.m.keys();
     }

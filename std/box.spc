@@ -11,7 +11,7 @@ pub struct Box<T, A = Global> {
 }
 
 extend<T, A: Allocator> Box<T, A> {
-    // Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
+    /// Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A, value: T) Box<T, A> {
         let mut b = Box::<T, A> { ptr: null, alloc: alloc };
         b.ptr = b.alloc.alloc(sizeof(T), alignof(T)) as *mut T;
@@ -23,23 +23,25 @@ extend<T, A: Allocator> Box<T, A> {
         return unsafe &self.ptr[0];
     }
 
+    /// Frees the current value, then stores `value` (the box takes ownership of it).
     pub const fn set(self: &mut Box<T, A>, value: T) {
         unsafe self.ptr[0].free();
         unsafe self.ptr[0] = value;
     }
 
-    // Overwrite the contents, returning the previous value.
+    /// Overwrite the contents, returning the previous value.
     pub const fn replace(self: &mut Box<T, A>, value: T) T {
         let old = unsafe self.ptr[0];
         unsafe self.ptr[0] = value;
         return old;
     }
 
+    /// Raw read-only pointer to the value; valid until the box is freed.
     pub const fn as_ptr(self: &Box<T, A>) *const T {
         return self.ptr;
     }
 
-    // Allocate a new box (through a copy of the same allocator) holding `f` applied to this box's value.
+    /// Allocate a new box (through a copy of the same allocator) holding `f` applied to this box's value.
     pub const fn map<U, F: fn(T) U>(self: &Box<T, A>, f: F) Box<U, A> {
         return Box::<U, A>::new_in(self.alloc, f(unsafe self.ptr[0]));
     }
@@ -79,7 +81,7 @@ extend<T, A: Allocator> Box<T, A> as Free {
 
 // Conditional conformances: a Box is Clone/Eq/Hash exactly when its contents are.
 extend<T: Clone, A: Allocator> Box<T, A> as Clone {
-    // A fresh allocation (same allocator) holding an independent clone of the value.
+    /// A fresh allocation (same allocator) holding an independent clone of the value.
     pub const fn clone(self: &Box<T, A>) Box<T, A> {
         let v = self.get();
         return Box::<T, A>::new_in(self.alloc, v.clone());

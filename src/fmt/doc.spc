@@ -64,12 +64,12 @@ extend DocPool {
         return 0;
     }
 
-    // Static text (keywords, punctuation). The str must outlive the pool (string literals do).
+    /// Static text (keywords, punctuation). The str must outlive the pool (string literals do).
     pub fn txt(self: &mut Self, s: str) DocId {
         return self.push(DocNode { kind: DocKind::DOC_TEXT_STR, a: 0, b: 0, w: s.len() as u32, s: s });
     }
 
-    // A byte range of the source (identifiers, literals, comments).
+    /// A byte range of the source (identifiers, literals, comments).
     pub fn span(self: &mut Self, start: u32, end: u32) DocId {
         return self.push(DocNode { kind: DocKind::DOC_TEXT_SPAN, a: start, b: end, w: end - start, s: "" });
     }
@@ -100,8 +100,8 @@ extend DocPool {
         return self.push(DocNode { kind: DocKind::DOC_GROUP, a: child, b: 0, w: w, s: "" });
     }
 
-    // `s` when the enclosing group broke; when flat: a space if flat_space, else nothing.
-    // (Trailing comma: ifbreak(",", false). Block-vs-flat separators compose from this + Line.)
+    /// `s` when the enclosing group broke; when flat: a space if flat_space, else nothing.
+    /// (Trailing comma: ifbreak(",", false). Block-vs-flat separators compose from this + Line.)
     pub fn ifbreak(self: &mut Self, s: str, flat_space: bool) DocId {
         let mut fw: u32 = 0;
         let mut fs: u32 = 0;
@@ -112,7 +112,7 @@ extend DocPool {
         return self.push(DocNode { kind: DocKind::DOC_IFBREAK, a: fs, b: 0, w: fw, s: s });
     }
 
-    // Concatenate `parts` (borrowed; ids are copied out). Children land contiguously in kids.
+    /// Concatenate `parts` (borrowed; ids are copied out). Children land contiguously in kids.
     pub fn concat(self: &mut Self, parts: &Vector<DocId>) DocId {
         let start = self.kids.len() as u32;
         let mut w: u32 = 0;
@@ -234,7 +234,7 @@ fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool)
     };
 }
 
-// Render `root` into `out` at the given width. The result always ends with exactly one newline.
+/// Render `root` into `out` at the given width. The result always ends with exactly one newline.
 pub fn render(p: &DocPool, root: DocId, width: i32, out: &mut String) {
     let mut r = Renderer { col: 0, width: width, out: out };
     render_doc(p, &mut r, root, 0, false);

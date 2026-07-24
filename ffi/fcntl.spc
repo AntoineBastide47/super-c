@@ -1,4 +1,4 @@
-// FFI bindings for <fcntl.h>. Import with `import fcntl;`.
+// FFI bindings for <fcntl.h>. Import with `import fcntl;`. Every call site requires `unsafe`.
 //
 // The constants are `extern` (no initializer): each binds to the real `<fcntl.h>` macro, whose value the
 // C compiler fills in from the backing header, so platform-specific numbers are never hardcoded here. They

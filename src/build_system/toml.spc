@@ -23,6 +23,8 @@ extend TomlPair as Free {
     }
 }
 
+/// A parsed value tagged by `kind` (TV_*): only the matching payload field is meaningful, the rest
+/// keep their empty defaults.
 pub struct TomlVal {
     pub kind: u8,
     pub s: String,
@@ -53,7 +55,7 @@ extend TomlVal as Free {
     }
 }
 
-// One `key = value` under its (possibly empty) section; `at` is the key's byte offset for diagnostics.
+/// One `key = value` under its (possibly empty) section; `at` is the key's byte offset for diagnostics.
 pub struct TomlItem {
     pub section: String,
     pub key: String,
@@ -328,7 +330,8 @@ extend Parser {
     }
 }
 
-// Parse `src`; diagnostics (if any) are rendered against `file` and printed. None on any error.
+/// Parse `src` into items in file order; diagnostics (if any) are rendered against `file` and printed
+/// here. None on any error (one per offending line -- the parser resyncs at newlines).
 pub fn parse(src: str, file: str) Option<Vector<TomlItem>> {
     let mut p = Parser {
         src: src,

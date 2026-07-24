@@ -1,4 +1,5 @@
 // FFI bindings for dynamic loading APIs (<dlfcn.h>). Import with `import dlfcn;`.
+// Carries `@c.link("dl")` (links libdl); every call site requires `unsafe`.
 //
 // The constants are `extern` (no initializer): each binds to the real `<dlfcn.h>` macro, so the platform's
 // own values are used rather than hardcoded numbers. They are runtime flag values (e.g.

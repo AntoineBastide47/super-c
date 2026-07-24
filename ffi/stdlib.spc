@@ -1,6 +1,7 @@
 // FFI bindings for <stdlib.h>: allocation, process control, environment, numeric parsing, randomness,
 // and sort/search. Import with `import stdlib;`. Raw `pub` bindings expose the C API directly; the safe
-// wrappers add null checks and `String`/`Option` ergonomics where they help.
+// wrappers add null checks and `String`/`Option` ergonomics where they help. Calling the raw bindings
+// requires `unsafe`; the safe wrappers do not.
 
 extern "C" {
     // Allocation. Sizes in bytes; all may return null on failure.

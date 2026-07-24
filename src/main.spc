@@ -1,6 +1,10 @@
-// The self-hosted super-c driver: parse args, load the package, run the global phases
-// (resolve all -> type-check all -> flush deferred static_asserts -> propagate instances -> emit all),
-// writing a `<root>/build/` tree (super_rt.h + one .c/.h per module). Ports src/main.c.
+// The self-hosted super-c driver. The first argument selects the mode: build/release (emit + link,
+// through build.toml when no root is given), fmt, lint, run/clean/test/bench (build.toml engine),
+// lsp, or a bare <root.spc> (compile + run, MODE_DEFAULT). Compiling modes share CommonOpts
+// (--const-eval-*, --target, --bootstrap-tags, --no-lint); manifest modes add BuildOpts
+// (--profile/--out-dir/--cstd/--jobs). A compiled root runs the global phases (resolve all ->
+// type-check all -> flush deferred static_asserts -> propagate instances -> emit all), writing a
+// `<root>/build/` tree (super_rt.h + one .c/.h per module).
 import stdio;
 import stdlib;
 import string as cstring;
@@ -438,8 +442,6 @@ enum Mode {
     MODE_LSP, // `super-c lsp`: language server over stdio
 }
 
-// NOTE: an if-chain until a RELEASE ships the string-pattern switch lowering (the bootstrap binary
-// must be able to emit this file); convert back to `switch arg { "build" => .. }` after that release.
 fn subcommand(arg: str) Mode {
     return switch arg {
         "build" => {

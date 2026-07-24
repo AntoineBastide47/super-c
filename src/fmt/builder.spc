@@ -558,8 +558,6 @@ fn b_generic_param(b: &mut Builder, id: NodeId) d::DocId {
     return r;
 }
 
-// Lifetime params live in their own list (erasure is structural), but they are SOURCE-level part of
-// the same `<...>` and must print back merged, lifetimes first: `<'a, 'b: 'a, T>`.
 // `for<'a, 'b> ` -- the higher-ranked prefix of a bound, held in the lifetime side table.
 fn b_hrtb(b: &mut Builder, id: NodeId, v: &mut Vector<d::DocId>) {
     let lts = unsafe (*b.ast).lifetimes_of(id);
@@ -573,6 +571,8 @@ fn b_hrtb(b: &mut Builder, id: NodeId, v: &mut Vector<d::DocId>) {
     v.push(b.p.txt(" "));
 }
 
+// Lifetime params live in their own list (erasure is structural), but they are SOURCE-level part of
+// the same `<...>` and must print back merged, lifetimes first: `<'a, 'b: 'a, T>`.
 fn b_generics_lt(b: &mut Builder, lts: NodeList, gens: NodeList, v: &mut Vector<d::DocId>) {
     if lts.len == 0 && gens.len == 0 {
         return;
@@ -1714,8 +1714,8 @@ fn item_gap_floor(b: &Builder, from: u32, to: u32) u32 {
 
 // ---- entry ----------------------------------------------------------------------------------------
 
-// Build and render the whole program. Returns the number of comment segments emitted (the caller
-// checks it against the lexer's comment-token count).
+/// Build and render the whole program. Returns the number of comment segments emitted (the caller
+/// checks it against the lexer's comment-token count and refuses to write on a mismatch).
 pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String) usize {
     let root = unsafe (*ast).root;
     let mut b = Builder { p: d::DocPool::new(source.ptr()), ast: ast, src: source, emitted_trivia: 0 };

@@ -4,14 +4,14 @@
 // array->slice coercion are wired separately); the two public fields make them plain fat pointers, so
 // `s.ptr` / `s.len` are usable directly, with the methods mirroring the `str` / `Vector` surface.
 
-// A borrowed, read-only view over `len` consecutive `T` at `ptr`.
+/// A borrowed, read-only view over `len` consecutive `T` at `ptr`.
 pub struct Slice<'a, T> {
     pub ptr: *const T, // first element
     pub len: usize, // number of elements
 }
 
 extend<T> Slice<T> {
-    // Number of elements (the field and this method are the same value).
+    /// Number of elements (the field and this method are the same value).
     pub const fn len(self: &Slice<T>) usize {
         return self.len;
     }
@@ -20,8 +20,8 @@ extend<T> Slice<T> {
         return self.len == 0;
     }
 
-    // Bounds-checked borrow of the element at `i`: panics when `i >= len`. Returns `&T` (not `T` by
-    // value): a by-value copy would duplicate ownership of a `Free` element and double-free it.
+    /// Bounds-checked borrow of the element at `i`: panics when `i >= len`. Returns `&T` (not `T` by
+    /// value): a by-value copy would duplicate ownership of a `Free` element and double-free it.
     pub const fn get(self: &Slice<T>, i: usize) &T {
         if i >= self.len {
             panic("Slice::get: index out of bounds");
@@ -29,7 +29,7 @@ extend<T> Slice<T> {
         return &unsafe self.ptr[i];
     }
 
-    // Bounds-checked borrow: panics when `i >= len`.
+    /// Bounds-checked borrow: panics when `i >= len`.
     pub const fn at(self: &Slice<T>, i: usize) &T {
         if i >= self.len {
             panic("Slice::at: index out of bounds");
@@ -37,13 +37,13 @@ extend<T> Slice<T> {
         return &unsafe self.ptr[i];
     }
 
-    // Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
-    // range is undefined behavior, hence `unsafe`.
+    /// Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
+    /// range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &Slice<T>, i: usize) &T {
         return &self.ptr[i];
     }
 
-    // Bounds-checked borrow: `Some(&elem)` when `i < len`, else `None`.
+    /// Bounds-checked borrow: `Some(&elem)` when `i < len`, else `None`.
     pub const fn get_checked(self: &Slice<T>, i: usize) Option<&T> {
         if i >= self.len {
             return Option::<&T>::None;
@@ -51,6 +51,7 @@ extend<T> Slice<T> {
         return Option::<&T>::Some(&unsafe self.ptr[i]);
     }
 
+    /// Borrows the first element; panics when the slice is empty.
     pub const fn first(self: &Slice<T>) &T {
         if self.len == 0 {
             panic("Slice::first on an empty slice");
@@ -58,6 +59,7 @@ extend<T> Slice<T> {
         return &unsafe self.ptr[0];
     }
 
+    /// Borrows the last element; panics when the slice is empty.
     pub const fn last(self: &Slice<T>) &T {
         if self.len == 0 {
             panic("Slice::last on an empty slice");
@@ -65,13 +67,13 @@ extend<T> Slice<T> {
         return &unsafe self.ptr[self.len - 1];
     }
 
-    // A read-only pointer to the first element (the view's backing storage).
+    /// A read-only pointer to the first element (the view's backing storage).
     pub const fn as_ptr(self: &Slice<T>) *const T {
         return self.ptr;
     }
 }
 
-// A borrowed, writable view over `len` consecutive `T` at `ptr`.
+/// A borrowed, writable view over `len` consecutive `T` at `ptr`.
 pub struct SliceMut<'a, T> {
     pub ptr: *mut T, // first element
     pub len: usize, // number of elements
@@ -86,8 +88,8 @@ extend<T> SliceMut<T> {
         return self.len == 0;
     }
 
-    // Bounds-checked borrow: panics when `i >= len`. Returns `&T` (not `T` by value) so a `Free`
-    // element is never copied out into a second owner.
+    /// Bounds-checked borrow: panics when `i >= len`. Returns `&T` (not `T` by value) so a `Free`
+    /// element is never copied out into a second owner.
     pub const fn get(self: &SliceMut<T>, i: usize) &T {
         if i >= self.len {
             panic("SliceMut::get: index out of bounds");
@@ -95,7 +97,7 @@ extend<T> SliceMut<T> {
         return &unsafe self.ptr[i];
     }
 
-    // Bounds-checked borrow: panics when `i >= len`.
+    /// Bounds-checked borrow: panics when `i >= len`.
     pub const fn at(self: &SliceMut<T>, i: usize) &T {
         if i >= self.len {
             panic("SliceMut::at: index out of bounds");
@@ -103,13 +105,13 @@ extend<T> SliceMut<T> {
         return &unsafe self.ptr[i];
     }
 
-    // Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
-    // range is undefined behavior, hence `unsafe`.
+    /// Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
+    /// range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &SliceMut<T>, i: usize) &T {
         return &self.ptr[i];
     }
 
-    // Bounds-checked shared borrow: `Some(&elem)` when `i < len`, else `None`.
+    /// Bounds-checked shared borrow: `Some(&elem)` when `i < len`, else `None`.
     pub const fn get_checked(self: &SliceMut<T>, i: usize) Option<&T> {
         if i >= self.len {
             return Option::<&T>::None;
@@ -117,9 +119,9 @@ extend<T> SliceMut<T> {
         return Option::<&T>::Some(&unsafe self.ptr[i]);
     }
 
-    // Overwrite the element at `i`: panics when `i >= len`. Takes `&self`: a `[]mut T` view grants
-    // element mutation through its internal `*mut T` regardless of the binding's mutability, exactly
-    // like the `s[i] = v` index-assignment it mirrors.
+    /// Overwrite the element at `i`: panics when `i >= len`. Takes `&self`: a `[]mut T` view grants
+    /// element mutation through its internal `*mut T` regardless of the binding's mutability, exactly
+    /// like the `s[i] = v` index-assignment it mirrors.
     pub const fn set(self: &SliceMut<T>, i: usize, value: T) {
         if i >= self.len {
             panic("SliceMut::set: index out of bounds");
@@ -128,6 +130,7 @@ extend<T> SliceMut<T> {
         unsafe self.ptr[i] = value;
     }
 
+    /// Borrows the first element; panics when the slice is empty.
     pub const fn first(self: &SliceMut<T>) &T {
         if self.len == 0 {
             panic("SliceMut::first on an empty slice");
@@ -135,6 +138,7 @@ extend<T> SliceMut<T> {
         return &unsafe self.ptr[0];
     }
 
+    /// Borrows the last element; panics when the slice is empty.
     pub const fn last(self: &SliceMut<T>) &T {
         if self.len == 0 {
             panic("SliceMut::last on an empty slice");
@@ -146,8 +150,8 @@ extend<T> SliceMut<T> {
         return self.ptr;
     }
 
-    // Takes `&self` for the same reason as `set`: the mutable view exposes its `*mut T` without needing a
-    // mutable binding, so `[]mut T` value parameters can hand the pointer to FFI without a redundant `mut`.
+    /// Takes `&self` for the same reason as `set`: the mutable view exposes its `*mut T` without needing a
+    /// mutable binding, so `[]mut T` value parameters can hand the pointer to FFI without a redundant `mut`.
     pub const fn as_mut_ptr(self: &SliceMut<T>) *mut T {
         return self.ptr;
     }

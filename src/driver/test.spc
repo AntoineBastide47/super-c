@@ -1,4 +1,7 @@
-// --test mode: plan collection, runner synthesis, build+run. Split out of main.spc.
+// The --test pipeline: collects every @test/@test_init/@test_free into a validated TestPlan (consumed by
+// codegen's per-module wrapper emission), synthesizes the fork-per-test runner TU (build/__test_main.c),
+// and compiles + runs the emitted build tree with $CC. test_build_and_run doubles as the `build`
+// subcommand's link step when `out_bin` is set.
 import stdio;
 import stdlib;
 import string as cstring;
@@ -16,17 +19,15 @@ import codegen::codegen as cg;
 import utils::errors as diag;
 import driver::util as *;
 
-// --test options (mirrors src/main.c TestOpts).
+/// --test run options, forwarded to the generated runner as `--jobs=` / `--no-fork` / `--filter=`.
 pub struct TestOpts {
     pub enabled: bool,
     pub jobs: i32,
     pub no_fork: bool,
     pub filter: *const char,
 }
-// ---------------------------------------------------------------------------------------------------------
-// --test mode: collect every @test/@test_init/@test_free into a runnable plan, then synthesize + build a
-// fork-per-test runner. Ports src/main.c's test-plan machinery.
-// ---------------------------------------------------------------------------------------------------------
+/// One runnable @test. `wants` is a bitmask of the wrapper's arguments: 1 = fixture/receiver param,
+/// 2 = global-env param. The suite fields are set only for suite-method tests taking `self`.
 pub struct TestCase {
     pub mod: ModuleId,
     pub func: NodeId,
@@ -37,6 +38,7 @@ pub struct TestCase {
     pub suite_init: NodeId,
     pub suite_free: NodeId,
 }
+/// A per-(module, extended type) suite: its '@test_init' producer and optional '@test_free' teardown.
 pub struct TestSuite {
     pub mod: ModuleId,
     pub ty: DefId,
@@ -44,6 +46,8 @@ pub struct TestSuite {
     pub init: NodeId,
     pub fre: NodeId,
 }
+/// The package-wide plan: all cases, the per-module fixture tables (indexed by ModuleId), the suites, and
+/// the at-most-one global env pair. `ok` goes false when any validation error was reported.
 pub struct TestPlan {
     pub cases: Vector<TestCase>,
     pub fx_init: Vector<NodeId>,
@@ -59,6 +63,7 @@ pub struct TestPlan {
     pub ok: bool,
 }
 extend TestPlan {
+    /// `count` is the package's module count: it sizes the per-module fixture tables (minimum 1).
     pub fn new(count: usize) TestPlan {
         let mut pl = TestPlan {
             cases: Vector::<TestCase>::new(),
@@ -249,7 +254,7 @@ fn plan_suite_of(plan: &mut TestPlan, m: ModuleId, ty: DefId, is_enum: bool, cre
     return (plan.suites.len() - 1) as i32;
 }
 
-// Collect + validate every @test/@test_init/@test_free in the package into a runnable plan.
+/// Collect + validate every @test/@test_init/@test_free in the package into a runnable plan.
 pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
     let n = p.modules.len();
     // Pass 1: fixture producers/teardowns (module, suite, and global).
@@ -643,8 +648,6 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
     plan.ok = plan.ok && pok;
 }
 
-// The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
-// pool, an in-process fallback (--no-fork), substring selection, per-test reporting, and the exit code.
 // Platform-specific headers the generated test runner needs. POSIX forks + reaps (unistd/sys/wait);
 // Windows spawns one subprocess per test (process.h/_spawnv, stdint.h/intptr_t).
 @platform(!windows)
@@ -656,6 +659,8 @@ fn test_runner_includes() *const char {
     return "#include <process.h>\n#include <stdint.h>\n\n".ptr() as *const char;
 }
 
+// The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
+// pool, an in-process fallback (--no-fork), substring selection, per-test reporting, and the exit code.
 @platform(!windows)
 const fn test_runner_main() *const char {
     return r#"static int sc_match(const char *name, const char *filter) {
@@ -799,9 +804,9 @@ int main(int argc, char **argv) {
 "#.ptr() as *const char;
 }
 
-// Write build/__test_main.c: extern wrapper prototypes, the test table (display names `module::fn` or
-// `module::Type::method`), the global-env hooks (stubs when absent), and the fixed runner. Returns the
-// path (ownership to the caller / keep-list), or null.
+/// Write build/__test_main.c: extern wrapper prototypes, the test table (display names `module::fn` or
+/// `module::Type::method`), the global-env hooks (stubs when absent), and the fixed runner. Returns the
+/// path (ownership to the caller / keep-list), or None when the file cannot be opened.
 pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> {
     let mut path = build_out_path(p.gen_root.as_str(), "__test_main", ".c");
     let f = open_out(path.as_str());
@@ -879,9 +884,9 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
     return Option::<String>::Some(path);
 }
 
-// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
-// linked to that path and we return; otherwise it links `<gen_root>/__tests` and runs it as the test
-// runner, forwarding `topts`' options.
+/// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
+/// linked to that path and we return; otherwise it links `<gen_root>/__tests` and runs it as the test
+/// runner, forwarding `topts`' options.
 pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: str) i32 {
     let mut cc = stdlib::getenv("CC");
     if cc == null || unsafe *cc == 0 as char {
@@ -962,5 +967,3 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
     }
     return 1;
 }
-
-// One module's test-plan slice, kept alive across codegen_emit (CgTestInfo holds a pointer into it).

@@ -1,4 +1,5 @@
-// FFI bindings for <signal.h>. Import with `import signal;`.
+// FFI bindings for <signal.h>. Import with `import signal;`. Every call site requires `unsafe`.
+// The SIG* values are hardcoded constants, not bindings to the platform's macros.
 
 extern "C" {
     pub fn signal(sig: i32, handler: fn(i32) void) *mut void;

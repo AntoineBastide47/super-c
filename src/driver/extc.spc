@@ -1,4 +1,6 @@
-// External C sources/libs (@c.source/@c.link) collection. Split out of main.spc.
+// External C sources/libs: turns every @c.source (and implicit extern-block backing-header .c sibling)
+// into a build/ wrapper TU on the emit keep-list, and writes the deduped @c.link flags to build/__ldflags
+// for the final link line.
 import stdio;
 import string as cstring;
 import lexer::token as tok;
@@ -92,6 +94,9 @@ fn ext_c_wrap(
     keep.push(path);
 }
 
+/// Scan every module for @c.source/@c.link and implicit backing-header `.c` siblings: wrapper TUs are
+/// written under gen_root and pushed onto `keep`; link flags go to build/__ldflags (removed when none).
+/// Sets `*err` on an unresolvable source or a write failure; already-set values are never cleared.
 pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool) {
     let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();

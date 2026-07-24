@@ -1,4 +1,8 @@
-// Global-phase pipeline: live-set pruning, per-module stages, platform filter, run_package.
+// Global-phase pipeline driver over a loaded Package: platform-filters items, runs resolve/typecheck/
+// borrowck per module (each stage moves the module's Ast out and restores it, with Package.override_*
+// bridging package lookups meanwhile), flushes deferred consteval errors, then prunes dead modules from
+// the emit set and codegens each live module into <gen_root> in dependency order. Entry points:
+// run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
 import stdio;
 import stdlib;
 import lexer::token as tok;
@@ -339,14 +343,16 @@ fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) 
     unsafe (*p).ok = false;
 }
 
+// One module's test-plan slice, kept alive across codegen_emit (CgTestInfo holds a pointer into it).
 type TCases = Array<cg::CgTestCase, 512>;
 
 // ---------------------------------------------------------------------------------------------------------
 // Global-phase compilation of a loaded package into a `<root>/build/` tree.
 // ---------------------------------------------------------------------------------------------------------
-// Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
-// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
-// target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
+
+/// Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
+/// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
+/// target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
 pub fn platform_filter(p: &mut loader::Package, target: i32) {
     let n = p.modules.len();
     for mi in 0..n {
@@ -730,12 +736,12 @@ fn ap_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     }
 }
 
-// Always-panics check (the `unconditional_panic` analog, an ERROR like the raw-array provable-OOB
-// gate -- the same proof one tier up). A DRIVER phase, after every module has typechecked: the
-// sweep interprets cross-module `const fn` bodies, whose types only exist once their module is
-// typed -- an inline per-module pass would silently fold nothing (module order). @test fns are
-// exempt (panicking on purpose is a feature there), as are explicit `panic(..)` calls (only a
-// panic reached THROUGH a `const fn` frame classifies -- see ce_lint_body).
+/// Always-panics check (the `unconditional_panic` analog, an ERROR like the raw-array provable-OOB
+/// gate -- the same proof one tier up). A DRIVER phase, after every module has typechecked: the
+/// sweep interprets cross-module `const fn` bodies, whose types only exist once their module is
+/// typed -- an inline per-module pass would silently fold nothing (module order). @test fns are
+/// exempt (panicking on purpose is a feature there), as are explicit `panic(..)` calls (only a
+/// panic reached THROUGH a `const fn` frame classifies -- see ce_lint_body).
 pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut diag::Errors) {
     if p.ceval == null || !p.modules[m].has_ast {
         return;
@@ -1201,10 +1207,10 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     }
 }
 
-// `super-c lint <root>`: resolve + typecheck the root's module closure with lints enabled for the
-// ROOT module only (each listed path is its own invocation, so shared imports don't warn twice),
-// then the unused-items pass restricted to the root. No code is emitted. Errors exit 1; warnings
-// alone exit 0 (compiler-warning semantics).
+/// `super-c lint`: resolve + typecheck + borrowck the whole closure with lints enabled for module
+/// `lint_mod` only (each listed path is its own invocation, so shared imports don't warn twice), then the
+/// report-only passes restricted to it. No code is emitted. Returns 0 only when clean -- any error or
+/// remaining warning returns 1. `fixes != null` (`lint --fix`) collects machine fixes instead of printing.
 pub fn lint_package(
     p: &mut loader::Package,
     target: i32,
@@ -1270,6 +1276,10 @@ pub fn lint_package(
     return 0;
 }
 
+/// Compile a loaded package into the <gen_root> C tree: full per-module pipeline, instance propagation,
+/// then codegen of the live modules in dependency-first order, pruning stale outputs afterwards. A
+/// non-empty `out_bin` also compiles + links the program there (`build`); `topts.enabled` synthesizes,
+/// builds and runs the test runner instead. Returns the process exit code (0 = success).
 pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32, lint: bool) i32 {
     platform_filter(p, target);
     let n = p.modules.len();

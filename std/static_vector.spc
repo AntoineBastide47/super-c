@@ -12,7 +12,7 @@ pub struct StaticVector<T, const N: usize> {
 }
 
 extend<T, const N: usize> StaticVector<T, N> {
-    // Empty vector. The unused slots hold no elements (they are never read or freed).
+    /// Empty vector. The unused slots hold no elements (they are never read or freed).
     pub const fn new() StaticVector<T, N> {
         let mut v = StaticVector::<T, N> {};
         v.len = 0;
@@ -35,7 +35,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         return self.len == N;
     }
 
-    // Append `value`. Panics when the N slots are exhausted -- the capacity is fixed.
+    /// Append `value`. Panics when the N slots are exhausted -- the capacity is fixed.
     pub const fn push(self: &mut StaticVector<T, N>, value: T) {
         if self.len == N {
             panic("StaticVector::push on a full vector");
@@ -45,6 +45,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         self.len = self.len + 1;
     }
 
+    /// Removes and returns the last element, moving ownership to the caller (`None` when empty).
     pub const fn pop(self: &mut StaticVector<T, N>) Option<T> {
         if self.len == 0 {
             return Option::<T>::None;
@@ -54,7 +55,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         return Option::<T>::Some(unsafe p[self.len]);
     }
 
-    // Bounds-checked element access: panics when `index >= len`. Borrows the element in place.
+    /// Bounds-checked element access: panics when `index >= len`. Borrows the element in place.
     pub const fn at(self: &StaticVector<T, N>, index: usize) &T {
         if index >= self.len {
             panic("StaticVector::at: index out of bounds");
@@ -62,13 +63,13 @@ extend<T, const N: usize> StaticVector<T, N> {
         return &unsafe self.data[index];
     }
 
-    // Unchecked element access -- the caller PROVES `index < len` (hot loops with an established
-    // bound). Out of range is undefined behavior, hence `unsafe`.
+    /// Unchecked element access -- the caller PROVES `index < len` (hot loops with an established
+    /// bound). Out of range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &StaticVector<T, N>, index: usize) &T {
         return &self.data[index];
     }
 
-    // Bounds-checked element access -- borrows the element (`&T`) so the vector keeps sole ownership.
+    /// Bounds-checked element access -- borrows the element (`&T`) so the vector keeps sole ownership.
     pub const fn get(self: &StaticVector<T, N>, index: usize) Option<&T> {
         if index >= self.len {
             return Option::<&T>::None;
@@ -76,6 +77,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         return Option::<&T>::Some(&unsafe self.data[index]);
     }
 
+    /// Panics when `index >= len`. Frees the replaced element, then takes ownership of `value`.
     pub const fn set(self: &mut StaticVector<T, N>, index: usize, value: T) {
         if index >= self.len {
             panic("StaticVector::set: index out of bounds");
@@ -96,6 +98,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         return Option::<&T>::Some(&unsafe self.data[self.len - 1]);
     }
 
+    /// Frees every live element (len becomes 0); the inline slots themselves have nothing to release.
     pub const fn clear(self: &mut StaticVector<T, N>) {
         for i in 0..self.len {
             unsafe self.data[i].free();
@@ -103,6 +106,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         self.len = 0;
     }
 
+    /// Shortens to `new_len` elements, freeing the dropped tail (no-op when already shorter).
     pub const fn truncate(self: &mut StaticVector<T, N>, new_len: usize) {
         if new_len < self.len {
             let mut i = new_len;
@@ -114,11 +118,12 @@ extend<T, const N: usize> StaticVector<T, N> {
         }
     }
 
+    /// Raw pointer into the inline storage; invalidated when the StaticVector is moved.
     pub const fn as_ptr(self: &StaticVector<T, N>) *const T {
         return &unsafe self.data[0];
     }
 
-    // Insert `value` at `index`, shifting later elements right. `index` must be <= len; panics when full.
+    /// Insert `value` at `index`, shifting later elements right. `index` must be <= len; panics when full.
     pub const fn insert(self: &mut StaticVector<T, N>, index: usize, value: T) {
         if self.len == N {
             panic("StaticVector::insert on a full vector");
@@ -136,7 +141,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         self.len = self.len + 1;
     }
 
-    // Remove and return the element at `index`, shifting later elements left (`None` if out of range).
+    /// Remove and return the element at `index`, shifting later elements left (`None` if out of range).
     pub const fn remove(self: &mut StaticVector<T, N>, index: usize) Option<T> {
         if index >= self.len {
             return Option::<T>::None;
@@ -152,7 +157,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         return Option::<T>::Some(removed);
     }
 
-    // Exchange the elements at `i` and `j`: panics when either is out of range.
+    /// Exchange the elements at `i` and `j`: panics when either is out of range.
     pub const fn swap(self: &mut StaticVector<T, N>, i: usize, j: usize) {
         if i >= self.len || j >= self.len {
             panic("StaticVector::swap: index out of bounds");
@@ -163,7 +168,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         unsafe p[j] = tmp;
     }
 
-    // Remove the element at `index` by swapping in the last one (O(1), reorders; `None` if out of range).
+    /// Remove the element at `index` by swapping in the last one (O(1), reorders; `None` if out of range).
     pub const fn swap_remove(self: &mut StaticVector<T, N>, index: usize) Option<T> {
         if index >= self.len {
             return Option::<T>::None;
@@ -175,7 +180,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         return Option::<T>::Some(removed);
     }
 
-    // Reverse the elements in place.
+    /// Reverse the elements in place.
     pub const fn reverse(self: &mut StaticVector<T, N>) {
         if self.len == 0 {
             return;
@@ -189,9 +194,9 @@ extend<T, const N: usize> StaticVector<T, N> {
         }
     }
 
-    // A new vector (same capacity) with `f` applied to every element. `f` BORROWS each element (`&T`):
-    // this map reads `self` and leaves it owning its elements, so it must not consume them (passing a
-    // Free element by value would free the vector's still-owned copy).
+    /// A new vector (same capacity) with `f` applied to every element. `f` BORROWS each element (`&T`):
+    /// this map reads `self` and leaves it owning its elements, so it must not consume them (passing a
+    /// Free element by value would free the vector's still-owned copy).
     pub const fn map<U, F: fn(&T) U>(self: &StaticVector<T, N>, f: F) StaticVector<U, N> {
         let mut out = StaticVector::<U, N>::new();
         for i in 0..self.len {
@@ -200,7 +205,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         return out;
     }
 
-    // A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
+    /// A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
     pub const fn find<F: fn(&T) bool>(self: &StaticVector<T, N>, pred: F) Option<&T> {
         for i in 0..self.len {
             if pred(self.at(i)) {
@@ -210,8 +215,8 @@ extend<T, const N: usize> StaticVector<T, N> {
         return Option::<&T>::None;
     }
 
-    // Keep only the elements matching `pred` (in place, preserving order). `pred` borrows (`&T`);
-    // rejected elements are freed (no-op when T isn't Free) so nothing leaks.
+    /// Keep only the elements matching `pred` (in place, preserving order). `pred` borrows (`&T`);
+    /// rejected elements are freed (no-op when T isn't Free) so nothing leaks.
     pub const fn retain<F: fn(&T) bool>(self: &mut StaticVector<T, N>, pred: F) {
         let mut w: usize = 0;
         for i in 0..self.len {
@@ -253,7 +258,7 @@ extend<T, const N: usize> StaticVector<T, N> as Default {
 
 // Equality-based algorithms (available when the element type is `Eq`).
 extend<T: Eq, const N: usize> StaticVector<T, N> {
-    // True if any element equals `x` (per `Eq`); O(n) linear scan.
+    /// True if any element equals `x` (per `Eq`); O(n) linear scan.
     pub const fn contains(self: &StaticVector<T, N>, x: &T) bool {
         for i in 0..self.len {
             if unsafe self.data[i] == *x {
@@ -263,7 +268,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
         return false;
     }
 
-    // Index of the first element equal to `x`, or `None`.
+    /// Index of the first element equal to `x`, or `None`.
     pub const fn position(self: &StaticVector<T, N>, x: &T) Option<usize> {
         for i in 0..self.len {
             if unsafe self.data[i] == *x {
@@ -273,8 +278,8 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
         return Option::<usize>::None;
     }
 
-    // Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
-    // are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
+    /// Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
+    /// are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
     pub const fn dedup(self: &mut StaticVector<T, N>) {
         if self.len < 2 {
             return;
@@ -296,7 +301,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
 
 // Order-based algorithms (available when the element type is `Ord`).
 extend<T: Ord, const N: usize> StaticVector<T, N> {
-    // True if the elements are in non-decreasing order (per `Ord`).
+    /// True if the elements are in non-decreasing order (per `Ord`).
     pub const fn is_sorted(self: &StaticVector<T, N>) bool {
         if self.len < 2 {
             return true;
@@ -311,8 +316,8 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         return true;
     }
 
-    // Binary search of a sorted vector: `Ok(i)` where an equal element lives, or `Err(i)` the index a
-    // missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
+    /// Binary search of a sorted vector: `Ok(i)` where an equal element lives, or `Err(i)` the index a
+    /// missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
     pub const fn binary_search(self: &StaticVector<T, N>, x: &T) Result<usize, usize> {
         let mut lo: usize = 0;
         let mut hi: usize = self.len;
@@ -346,7 +351,7 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
         }
     }
 
-    // Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
+    /// Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
     pub const fn sort(self: &mut StaticVector<T, N>) {
         let n = self.len;
         if n < 2 {
@@ -368,9 +373,9 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
 
 // Comparator-driven sorting (no `Ord` required: the closure decides the order).
 extend<T, const N: usize> StaticVector<T, N> {
-    // Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
-    // The sift is inlined for the same reason as Vector::sort_by: a generic method calling another
-    // generic method with its own F is not transitively instantiated yet.
+    /// Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
+    /// The sift is inlined for the same reason as Vector::sort_by: a generic method calling another
+    /// generic method with its own F is not transitively instantiated yet.
     pub const fn sort_by<F: fn(&T, &T) i32>(self: &mut StaticVector<T, N>, cmp: F) {
         let n = self.len;
         if n < 2 {
@@ -414,7 +419,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         }
     }
 
-    // Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`).
+    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`).
     pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut StaticVector<T, N>, key: F) {
         let n = self.len;
         if n < 2 {
@@ -488,7 +493,7 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
 // Conditional conformances: a StaticVector is Clone/Eq/Hash exactly when its element is. Each dispatches
 // to the element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash()`), monomorphized per element type.
 extend<T: Clone, const N: usize> StaticVector<T, N> as Clone {
-    // A deep copy whose elements are independent clones.
+    /// A deep copy whose elements are independent clones.
     pub const fn clone(self: &StaticVector<T, N>) StaticVector<T, N> {
         let mut out = StaticVector::<T, N>::new();
         for i in 0..self.len {
@@ -516,7 +521,7 @@ extend<T: Eq, const N: usize> StaticVector<T, N> as Eq {
 }
 
 extend<T: Hash, const N: usize> StaticVector<T, N> as Hash {
-    // FNV-1a over the elements' own hashes.
+    /// FNV-1a over the elements' own hashes.
     pub const fn hash(self: &StaticVector<T, N>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for i in 0..self.len {
@@ -528,7 +533,7 @@ extend<T: Hash, const N: usize> StaticVector<T, N> as Hash {
 }
 
 extend<T: Format, const N: usize> StaticVector<T, N> as Format {
-    // `[e0, e1, ...]` with each element rendered through its own `fmt`.
+    /// `[e0, e1, ...]` with each element rendered through its own `fmt`.
     pub fn fmt(self: &StaticVector<T, N>) String {
         let mut s = String::from_str("[");
         for i in 0..self.len {

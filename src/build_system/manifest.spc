@@ -5,6 +5,8 @@ import build_system::toml as toml;
 import module::loader as loader;
 import utils::errors as diag;
 
+/// One [profile.NAME]: per-profile cflags/ldflags appended after the manifest-level ones; `strip`
+/// runs strip on the freshly linked binary.
 pub struct Profile<'a> {
     pub name: str<'a>,
     pub cflags: Vector<String>,
@@ -19,11 +21,12 @@ extend Profile as Free {
     }
 }
 
+/// One [command.NAME] for `super-c run`: shell lines executed in order, stopping at the first failure.
 pub struct Command<'a> {
     pub name: str<'a>,
     pub run: Vector<String>,
-    pub needs_build: bool,
-    pub env_k: Vector<String>,
+    pub needs_build: bool, // needs-build = true: run a manifest build before the lines
+    pub env_k: Vector<String>, // parallel with env_v: KEY='VALUE' prefixes applied to every line
     pub env_v: Vector<String>,
 }
 
@@ -35,6 +38,8 @@ extend Command as Free {
     }
 }
 
+/// The validated build.toml. Ownership: `toml` keeps the parsed items alive -- Profile/Command `name`
+/// views borrow into their section strings.
 pub struct Manifest<'a> {
     pub toml: Vector<toml::TomlItem>,
     pub bin: String,
@@ -87,6 +92,7 @@ extend Manifest {
         };
     }
 
+    /// Index of the profile named `name`, or -1 when absent.
     pub fn profile_index(self: &Self, name: str) i64 {
         for i in 0..self.profiles.len() {
             if self.profiles.at(i).name == name {
@@ -96,6 +102,7 @@ extend Manifest {
         return -1;
     }
 
+    /// Index of the command named `name`, or -1 when absent.
     pub fn command_index(self: &Self, name: str) i64 {
         for i in 0..self.commands.len() {
             if self.commands.at(i).name == name {
@@ -195,7 +202,8 @@ fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
     *dst = it.val.b;
 }
 
-// Load and validate <path>. Prints its own diagnostics; None on any error.
+/// Load and validate <path>, applying defaults (out-dir "build", cstd c11+POSIX, default-profile
+/// "dev", built-in profiles). Prints its own diagnostics; None on any error.
 pub fn load(path: str) Option<Manifest> {
     let src_opt = loader::read_file(path);
     if src_opt.is_none() {

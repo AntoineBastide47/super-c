@@ -3,10 +3,12 @@
 // analysis. It extends TypeChecker rather than defining a new context so the analyses read the same
 // state and helpers the type walk built (types, resolutions, the lifetime side table, diagnostics).
 //
-// This stage currently holds the DECLARATION-LEVEL lifetime analyses: Rust's elision rules on return
-// types, and the requirement that a reference or borrowing type stored in an aggregate names the
-// lifetime it borrows for. The flow-sensitive analyses (borrows, moves, region ties) migrate here
-// next, behind the same walk.
+// Two layers: the DECLARATION-LEVEL lifetime analyses (Rust's elision rules on return types, the
+// requirement that a reference or borrowing type stored in an aggregate names the lifetime it
+// borrows for, the modular return-lifetime check), and the flow walk (bc_fn/bc_stmt/bc_expr), which
+// mirrors the typechecker's evaluation order over the typed AST and tracks moves, partial moves,
+// borrows, definite-init, frees and region ties. Callee resolution is never re-derived here: the
+// typechecker's call_info side table is the bridge (bc_call_info).
 import lexer::token as tok;
 import ast::ast as *;
 import utils::errors as diag;
@@ -14,8 +16,8 @@ import typechecker::typechecker as tc;
 import typechecker::typechecker as *;
 
 extend tc::TypeChecker {
-    // Walk the module's items and run every declaration-level analysis. Function bodies are walked
-    // by the flow analyses once they land here; until then the item surface is what this stage owns.
+    /// Entry point: run the declaration-level checks and the flow walk over every item of the
+    /// current module, then finalize its diagnostics.
     pub fn borrowck(self: &mut Self) {
         let a = self.cur_ast();
         let items = unsafe (*a).at_const((*a).root).as_data.program.items;
@@ -51,6 +53,8 @@ extend tc::TypeChecker {
         };
     }
 
+    /// Definition-site elision: a return type with an elided lifetime is an error unless rule 3 (a
+    /// `self` receiver) or rule 2 (exactly one borrowing input) pins which input it borrows from.
     pub fn tc_check_elision(self: &mut Self, fnid: NodeId) {
         let a = self.cur_ast();
         let fnd = unsafe (*a).at_const(fnid).as_data.function;
@@ -248,10 +252,13 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Watermark into borrows[]; borrow_release_to(mark) drops the transients created since.
     pub const fn borrow_mark(self: &Self) u32 {
         return self.nborrows;
     }
 
+    /// Append a borrow of `place` rooted at `root`. New borrows start TRANSIENT (binding ==
+    /// NODE_NONE) until a store ties them to a binding; the 256-entry cap overflows to a diagnostic.
     pub fn borrow_push(self: &mut Self, root: NodeId, kind: u8, place: NodeId, origin: NodeId) {
         if self.nborrows < 256 {
             let k = self.nborrows;
@@ -274,6 +281,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Conflict-check, then record: a reported conflict suppresses the new borrow.
     pub fn borrow_create(self: &mut Self, place: NodeId, kind: u8, origin: NodeId) {
         let root = self.borrow_place_root(place);
         if root == NODE_NONE {
@@ -284,6 +292,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Drop the transient (unbound) borrows at indices >= mark; bound borrows survive, compacted down.
     pub fn borrow_release_to(self: &mut Self, mark: u32) {
         if self.nborrows <= mark {
             return;
@@ -300,6 +309,7 @@ extend tc::TypeChecker {
         self.nborrows = w;
     }
 
+    /// Tombstone entry `i` (root = NODE_NONE); every scan skips tombstones.
     pub const fn borrow_tombstone_at(self: &mut Self, i: u32) {
         unsafe self.borrows[i as usize].root = NODE_NONE;
         unsafe self.borrows[i as usize].binding = NODE_NONE;
@@ -316,6 +326,8 @@ extend tc::TypeChecker {
         }
     }
 
+    /// True (with a diagnostic) when a live overlapping borrow conflicts with taking `kind` on
+    /// `place`; provably dead borrows met on the way are tombstoned instead.
     pub fn borrow_report_conflict(self: &mut Self, place: NodeId, kind: u8, origin: NodeId) bool {
         let root = self.borrow_place_root(place);
         if root == NODE_NONE {
@@ -387,6 +399,7 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// Only a live BOUND shared borrow blocks a write: transients die with their own statement.
     pub fn borrow_conflicting_write(self: &mut Self, place: NodeId, after: NodeId) bool {
         let root = self.borrow_place_root(place);
         if root == NODE_NONE {
@@ -409,6 +422,8 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// `let r2 = r1` with a reference RHS: a `&mut` borrow MOVES to the new binding (the source is
+    /// marked moved -- `&mut` is not duplicable); shared borrows are duplicated onto it.
     pub fn borrow_transfer_ref(self: &mut Self, init: NodeId, binding: NodeId) {
         let a = self.cur_ast();
         let mut e = init;
@@ -453,6 +468,8 @@ extend tc::TypeChecker {
         }
     }
 
+    /// NLL last-use: true when `b`'s binding is provably unused after `after`, so the borrow may be
+    /// tombstoned.
     pub fn borrow_dead_after(self: &mut Self, b: Borrow, after: NodeId) bool {
         if b.binding == NODE_NONE {
             return false;
@@ -484,6 +501,10 @@ extend tc::TypeChecker {
         return true;
     }
 
+    /// Per-statement NLL: after statement `si`, drop borrows bound at this scope whose binding is not
+    /// mentioned again in the block; borrows reaching a kept binding are kept too. The mention scan
+    /// walks node ids in (stmt id, block id) -- a block node is allocated after its children, so that
+    /// range is exactly the later statements' subtrees.
     pub fn borrow_nll_drop(self: &mut Self, block_id: NodeId, ids: *const NodeId, si: u32) {
         let mut keep = Keep256 {};
         for k in 0..self.nborrows {
@@ -614,6 +635,7 @@ extend tc::TypeChecker {
         s.nborrows = 0;
     }
 
+    /// Union this state's flow facts into `acc` (deduplicated); true = some accumulator overflowed.
     pub fn tc_flow_collect(self: &Self, acc: *mut FlowState) bool {
         let mut overflow = false;
         for i in 0..self.nmoved {
@@ -713,8 +735,8 @@ extend tc::TypeChecker {
         );
     }
 
-    // Does `place` overlap a partially-moved sub-place (`p.a` after `p.a` moved; `p` whole while a part
-    // is moved; `p.a.x` while `p.a` moved)?
+    /// Does `place` overlap a partially-moved sub-place (`p.a` after `p.a` moved; `p` whole while a
+    /// part is moved; `p.a.x` while `p.a` moved)?
     pub fn tc_place_is_moved(self: &mut Self, place: NodeId) bool {
         for i in 0..self.nmoved_places {
             if self.places_overlap(place, unsafe self.moved_places[i as usize]) {
@@ -724,7 +746,7 @@ extend tc::TypeChecker {
         return false;
     }
 
-    // Is any sub-place of `binding` partially moved out? (using the whole value while a part is gone.)
+    /// Is any sub-place of `binding` partially moved out? (using the whole value while a part is gone.)
     pub fn tc_binding_partially_moved(self: &mut Self, binding: NodeId) bool {
         for i in 0..self.nmoved_places {
             if self.tc_place_base_binding(unsafe self.moved_places[i as usize]) == binding {
@@ -742,8 +764,8 @@ extend tc::TypeChecker {
         }
     }
 
-    // Re-initialising `place` (assigning to it or a prefix) makes it owned again: drop the overlapping
-    // partial-move records so it can be moved/used once more.
+    /// Re-initialising `place` (assigning to it or a prefix) makes it owned again: drop the
+    /// overlapping partial-move records so it can be moved/used once more.
     pub fn tc_clear_moved_place(self: &mut Self, place: NodeId) {
         let mut w: u32 = 0;
         for i in 0..self.nmoved_places {
@@ -755,6 +777,9 @@ extend tc::TypeChecker {
         self.nmoved_places = w;
     }
 
+    /// The move machine for a consumed expression: rejects unsafe Free moves (out of a dereference,
+    /// a field out of borrowed content or a Free aggregate), moves of borrowed or captured values,
+    /// flags use-after-move, and records the whole- or partial-move fact.
     pub fn tc_mark_move(self: &mut Self, expr0: NodeId) {
         if expr0 == NODE_NONE {
             return;
@@ -945,6 +970,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// O(1) membership: moved_bits is a NodeId-indexed bitset mirroring moved[] (duplicates share one bit).
     pub const fn is_moved(self: &Self, decl: NodeId) bool {
         let idx = (decl >> 6) as usize;
         if idx >= self.moved_bits.len() {
@@ -968,6 +994,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// True (with an error) when `expr0` would move a Free value out of the innermost closure's captures.
     pub fn tc_capture_move_guard(self: &mut Self, expr0: NodeId) bool {
         if self.nclos == 0 {
             return false;
@@ -1001,6 +1028,8 @@ extend tc::TypeChecker {
         return true;
     }
 
+    /// Record that `expr0`'s base binding is mutated inside every enclosing closure that captures
+    /// it: sets the closure node's mut_caps bit, which codegen reads to lower the capture by pointer.
     pub fn tc_mark_capture_mut(self: &mut Self, expr0: NodeId) {
         if self.nclos == 0 {
             return;
@@ -1134,6 +1163,8 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Escape class of `e` used as an address/reference source: 0 = none, 1 = borrows a local,
+    /// 2 = borrows a by-value parameter.
     pub fn addr_escape(self: &mut Self, e: NodeId) i32 {
         return self.addr_escape_at(e, 0);
     }
@@ -1200,7 +1231,7 @@ extend tc::TypeChecker {
         let a = self.cur_ast();
         let vt = unsafe (*a).type_of(vid);
         // A returned capturing closure carries its captured borrows even though its stored type
-        // (`dyn fn`) does not advertise them -- check_closure re-exposed them as transient borrows in
+        // (`dyn fn`) does not advertise them -- bc_closure re-exposed them as transient borrows in
         // [bm, nborrows), so scan those too (a closure returning a `&local` capture escapes).
         if !self.tc_carries_borrow(vt) && !self.tc_expr_is_closure(vid) {
             return; // an owned value carries no borrow out
@@ -1248,9 +1279,9 @@ extend tc::TypeChecker {
         }
     }
 
-    // The lifetime slots a type NODE denotes, in order: `&'l T` -> ['l]; an aggregate `S<'l, ..>` ->
-    // its lifetime args. Returns the count; fills `out` (up to `cap`). This is the structural lifetime
-    // vector of a signature type, used to relate a returned value's lifetimes to the return type's.
+    /// The lifetime slots a type NODE denotes, in order: `&'l T` -> ['l]; an aggregate `S<'l, ..>` ->
+    /// its lifetime args. Returns the count; fills `out` (up to `cap`). This is the structural lifetime
+    /// vector of a signature type, used to relate a returned value's lifetimes to the return type's.
     pub fn tc_collect_slot_lts(self: &mut Self, m: ModuleId, tyn: NodeId, out: *mut tok::Span, cap: i32) i32 {
         if tyn == NODE_NONE || cap <= 0 {
             return 0;
@@ -1262,9 +1293,9 @@ extend tc::TypeChecker {
         return self.tc_collect_lt_args(m, tyn, out, cap);
     }
 
-    // The parameter type NODE a returned bare-identifier value refers to, or NODE_NONE. Only a whole
-    // parameter's lifetimes are known statically here; other returned expressions are covered by the
-    // local-escape check and the call-site relation.
+    /// The parameter type NODE a returned bare-identifier value refers to, or NODE_NONE. Only a whole
+    /// parameter's lifetimes are known statically here; other returned expressions are covered by the
+    /// local-escape check and the call-site relation.
     pub fn tc_returned_param_typenode(self: &mut Self, vid: NodeId) NodeId {
         let a = self.cur_ast();
         let mut e = vid;
@@ -1288,7 +1319,7 @@ extend tc::TypeChecker {
         return unsafe (*a).at_const(d.node).as_data.parameter.ty;
     }
 
-    // The lifetime a return TYPE node denotes overall (first slot), for call-site precision.
+    /// The lifetime a return TYPE node denotes overall (first slot), for call-site precision.
     pub fn tc_return_dest_lifetime(self: &mut Self, ret_tyn: NodeId) tok::Span {
         let dest = Spans8 {};
         let n = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
@@ -1298,12 +1329,12 @@ extend tc::TypeChecker {
         return tok::Span { start: 0, end: 0 };
     }
 
-    // MODULAR definition-site check: each lifetime a returned value borrows for must be DECLARED to
-    // outlive the return type's lifetime in the same slot, using only the signature's outlives edges --
-    // exactly Rust's rule. `fn f<'a,'b>(x:&'a,y:&'b) &'a { return y; }` (and its aggregate form) needs
-    // `'b: 'a`; without it the body does not honour its signature, so it is wrong at the DEFINITION
-    // regardless of any caller. This is what lets call sites TRUST the signature (relate_result_precision)
-    // instead of tying the result to every argument.
+    /// MODULAR definition-site check: each lifetime a returned value borrows for must be DECLARED to
+    /// outlive the return type's lifetime in the same slot, using only the signature's outlives edges --
+    /// exactly Rust's rule. `fn f<'a,'b>(x:&'a,y:&'b) &'a { return y; }` (and its aggregate form) needs
+    /// `'b: 'a`; without it the body does not honour its signature, so it is wrong at the DEFINITION
+    /// regardless of any caller. This is what lets call sites TRUST the signature (relate_result_precision)
+    /// instead of tying the result to every argument.
     pub fn tc_check_return_lifetime(self: &mut Self, vid: NodeId, ret_tyn: NodeId) {
         let dest = Spans8 {};
         let nd = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
@@ -1350,6 +1381,7 @@ extend tc::TypeChecker {
         return r;
     }
 
+    /// Fresh region universe for `fnid`: a region per declared lifetime plus its declared outlives edges.
     pub fn region_reset(self: &mut Self, fnid: NodeId) {
         self.region_next = REGION_STATIC + 1;
         if fnid == NODE_NONE {
@@ -1493,6 +1525,8 @@ extend tc::TypeChecker {
         self.outlives.push(sup as u64 << 32 | sub as u64);
     }
 
+    /// Reflexive-transitive over declared edges ('static outlives all); the DFS caps at 32 regions
+    /// and fails closed.
     pub fn region_outlives(self: &Self, a: u32, b: u32) bool {
         if a == REGION_NONE || b == REGION_NONE {
             return false;
@@ -1635,7 +1669,7 @@ extend tc::TypeChecker {
         return (self.variance_infer(dd) >> (idx * 2) as u64 & 0x3u64) as u32;
     }
 
-    // Index in the packed variance of the lifetime param named `name` in `dd`, or -1 (outer/'static).
+    /// Index in the packed variance of the lifetime param named `name` in `dd`, or -1 (outer/'static).
     pub fn variance_lt_index(self: &Self, dd: DefId, name: tok::Span) i32 {
         if self.tc_span_empty(name) {
             return -1;
@@ -1651,7 +1685,7 @@ extend tc::TypeChecker {
         return -1;
     }
 
-    // Index of the type param `dd`'s field-type-path `tyn` names, or -1 if it names another aggregate.
+    /// Index of the type param `dd`'s field-type-path `tyn` names, or -1 if it names another aggregate.
     pub fn variance_ty_index(self: &Self, dd: DefId, tyn: NodeId) i32 {
         let sa = self.mod_ast(dd.module);
         let rd = unsafe (*sa).resolution_def(tyn);
@@ -1721,8 +1755,8 @@ extend tc::TypeChecker {
         return packed;
     }
 
-    // Fold every occurrence of one of `dd`'s params in the field type node `tyn` (a node in dd.module)
-    // into `packed`, under the accumulated context variance `ctx`.
+    /// Fold every occurrence of one of `dd`'s params in the field type node `tyn` (a node in dd.module)
+    /// into `packed`, under the accumulated context variance `ctx`.
     pub fn variance_walk(self: &mut Self, dd: DefId, tyn: NodeId, ctx: u32, packed: u64, depth: i32) u64 {
         if tyn == NODE_NONE || depth > 8 || ctx == V_BIVARIANT {
             return packed;
@@ -2270,6 +2304,8 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// Duplicate every borrow bound to `from_ref` onto `to_ref` (with `to_ref`'s region): after a
+    /// possible cross-store, both referents must pin the same borrows.
     pub fn tc_cross_tie(self: &mut Self, from_ref: NodeId, to_ref: NodeId) {
         let region = self.tc_binding_depth(to_ref) as u16;
         let n = self.nborrows;
@@ -2464,6 +2500,9 @@ extend tc::TypeChecker {
         return self.tc_carries_borrow(subst) || arg != NODE_NONE && self.tc_expr_is_closure(arg);
     }
 
+    /// Is `e` a closure literal (possibly wrapped in `move`/`unsafe`)? Store sites use this to decide
+    /// whether the RHS may have re-exposed captured borrows (bc_closure) that must be tied to the
+    /// destination's region -- the closure's own stored type is `dyn fn` and cannot carry that borrow.
     pub fn tc_expr_is_closure(self: &Self, e0: NodeId) bool {
         let a = self.cur_ast();
         let mut e = e0;
@@ -2485,6 +2524,7 @@ extend tc::TypeChecker {
         return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_REFERENCE;
     }
 
+    /// Memoized: does `ty` transitively contain a reference or a lifetime-parameterized aggregate?
     pub fn tc_carries_borrow(self: &mut Self, ty: TypeId) bool {
         if ty == TYPE_NONE {
             return false;
@@ -2552,6 +2592,8 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// A use through `recv_n` re-exposes the borrows its base binding holds, as fresh borrows with
+    /// origin `origin` (a reborrow).
     pub fn tc_reborrow_inherit(self: &mut Self, recv_n: NodeId, origin: NodeId) {
         let root = self.tc_place_base_binding(recv_n);
         if root == NODE_NONE {
@@ -2578,11 +2620,11 @@ extend tc::TypeChecker {
         }
     }
 
-    // Moving a whole borrow-carrying value out of one binding into another (`outer = inner`,
-    // `let x = inner`) must carry the borrows the source holds to the destination -- otherwise the
-    // destination silently outlives them. Borrows freshly minted by a struct-literal or call RHS are
-    // already retied by the [bm, nborrows) scan at the store; this covers the identifier-RHS whole-value
-    // move that scan misses (the source holds the borrows from an earlier statement, not this one).
+    /// Moving a whole borrow-carrying value out of one binding into another (`outer = inner`,
+    /// `let x = inner`) must carry the borrows the source holds to the destination -- otherwise the
+    /// destination silently outlives them. Borrows freshly minted by a struct-literal or call RHS are
+    /// already retied by the [bm, nborrows) scan at the store; this covers the identifier-RHS whole-value
+    /// move that scan misses (the source holds the borrows from an earlier statement, not this one).
     pub fn bc_move_held_borrows(self: &mut Self, from_expr: NodeId, to_binding: NodeId, to_region: u16) {
         if to_binding == NODE_NONE {
             return;
@@ -2645,6 +2687,7 @@ extend tc::TypeChecker {
         };
     }
 
+    /// Region diagnostics insert in source order after err_wm (the per-function error watermark bc_fn sets).
     pub fn tc_region_diag(self: &mut Self, at: u32, len: u32, msg: String) usize {
         return self.errors.emit_ordered(self.err_wm, at, len, msg);
     }
@@ -2683,6 +2726,8 @@ extend tc::TypeChecker {
     // Mirrors the typechecker's evaluation order over an already-typed AST, firing only the
     // borrow/move/lifetime analyses. Types and resolutions are read back from the AST; nothing here
     // types anything.
+    /// Flow-check one function: reset every per-function fact (moves, uninit, freed, borrows,
+    /// scopes, regions, error watermark) and walk the body in evaluation order.
     pub fn bc_fn(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let fnd = unsafe (*a).at_const(id).as_data.function;
@@ -3028,6 +3073,10 @@ extend tc::TypeChecker {
         }
     }
 
+    /// The expression walk. addr_ctx: `id` is the operand of `&`/`&mut` -- a place being borrowed, so
+    /// the uninit and read-conflict checks are suppressed (`&mut x` may be x's initialization);
+    /// place_use: `id` is the base of a member/index access, checked at the full place instead. The
+    /// plain use-after-move check fires regardless.
     pub fn bc_expr(self: &mut Self, id: NodeId, addr_ctx: bool, place_use: bool) {
         if id == NODE_NONE {
             return;
@@ -3115,6 +3164,8 @@ extend tc::TypeChecker {
                     return;
                 }
                 if op == TokenType::Unsafe {
+                    // unsafe_depth licenses the Free-move escapes in tc_mark_move (moves out of a
+                    // deref / borrowed content)
                     self.unsafe_depth = self.unsafe_depth + 1;
                     self.bc_expr(operand, addr_ctx, place_use);
                     self.unsafe_depth = self.unsafe_depth - 1;
@@ -3413,10 +3464,10 @@ extend tc::TypeChecker {
         }
     }
 
-    // Is `md`'s result lifetime fully attributable to bare-parameter returns? Only then has the modular
-    // return check verified exactly which parameters the result borrows, so a caller may release the
-    // non-flowing arguments. A return of a local, a call result, or a value laundered through a local
-    // is NOT attributable -- the signature may be dishonoured there, so the caller stays conservative.
+    /// Is `md`'s result lifetime fully attributable to bare-parameter returns? Only then has the modular
+    /// return check verified exactly which parameters the result borrows, so a caller may release the
+    /// non-flowing arguments. A return of a local, a call result, or a value laundered through a local
+    /// is NOT attributable -- the signature may be dishonoured there, so the caller stays conservative.
     pub fn tc_result_attributable(self: &mut Self, md: DefId) bool {
         let key = md.module as u64 << 32 | md.node as u64;
         switch self.attributable_memo.get(&key) {
@@ -3499,8 +3550,8 @@ extend tc::TypeChecker {
         };
     }
 
-    // Like tc_returned_param_typenode but for an arbitrary module `m` (the callee's), used by the
-    // attributability scan which walks a possibly cross-module body.
+    /// Like tc_returned_param_typenode but for an arbitrary module `m` (the callee's), used by the
+    /// attributability scan which walks a possibly cross-module body.
     pub fn tc_returned_param_typenode_in(self: &mut Self, m: ModuleId, vid: NodeId) NodeId {
         let fa = self.mod_ast(m);
         let mut e = vid;
@@ -3524,11 +3575,11 @@ extend tc::TypeChecker {
         return unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.parameter.ty;
     }
 
-    // Tombstone the transient, UNSTORED borrows of arguments that do not flow into the call's result,
-    // so the enclosing let/assign ties the result to only the flowing arguments. Sound because the
-    // signature was verified: a param flows iff the return type names one of the lifetimes its type
-    // carries. Only borrows still `binding == NONE` are touched -- anything relate_call tied to a
-    // storage keeps its binding and is left alone.
+    /// Tombstone the transient, UNSTORED borrows of arguments that do not flow into the call's result,
+    /// so the enclosing let/assign ties the result to only the flowing arguments. Sound because the
+    /// signature was verified: a param flows iff the return type names one of the lifetimes its type
+    /// carries. Only borrows still `binding == NONE` are touched -- anything relate_call tied to a
+    /// storage keeps its binding and is left alone.
     pub fn relate_result_precision(
         self: &mut Self,
         md: DefId,
@@ -3618,13 +3669,13 @@ extend tc::TypeChecker {
         }
     }
 
-    // Unified call-boundary lifetime relation. A parameter (or the method receiver) can denote STORAGE
-    // that outlives the call -- the receiver's container, or a `&mut C<..>` referent. Any parameter
-    // sharing a type variable or named lifetime with that storage's contents has its argument flow in,
-    // so the argument's borrows are tied to (and must outlive) the storage. ONE storage x consumer
-    // enumeration replaces the two per-shape store hooks; 'static bounds and &mut invariance stay
-    // orthogonal. Correctness by construction: every storage is paired with every consumer here, so no
-    // argument shape can escape a store it flows into.
+    /// Unified call-boundary lifetime relation. A parameter (or the method receiver) can denote STORAGE
+    /// that outlives the call -- the receiver's container, or a `&mut C<..>` referent. Any parameter
+    /// sharing a type variable or named lifetime with that storage's contents has its argument flow in,
+    /// so the argument's borrows are tied to (and must outlive) the storage. ONE storage x consumer
+    /// enumeration replaces the two per-shape store hooks; 'static bounds and &mut invariance stay
+    /// orthogonal. Correctness by construction: every storage is paired with every consumer here, so no
+    /// argument shape can escape a store it flows into.
     pub fn relate_call(
         self: &mut Self,
         md: DefId,
@@ -3714,8 +3765,8 @@ extend tc::TypeChecker {
         }
     }
 
-    // Tie every consumer argument that shares the storage's region to the storage, and diagnose a
-    // borrow that is not declared to outlive it. Shared by the receiver and `&mut C` storage kinds.
+    /// Tie every consumer argument that shares the storage's region to the storage, and diagnose a
+    /// borrow that is not declared to outlive it. Shared by the receiver and `&mut C` storage kinds.
     pub fn relate_store_consumers(
         self: &mut Self,
         md: DefId,
@@ -3785,9 +3836,9 @@ extend tc::TypeChecker {
         }
     }
 
-    // Does consumer parameter `c` (argument `aid`) share the storage's region? The receiver storage
-    // shares through a type variable the receiver instantiates; a `&mut C` storage shares when its
-    // pointee mentions the consumer's type variable or a named lifetime the consumer also carries.
+    /// Does consumer parameter `c` (argument `aid`) share the storage's region? The receiver storage
+    /// shares through a type variable the receiver instantiates; a `&mut C` storage shares when its
+    /// pointee mentions the consumer's type variable or a named lifetime the consumer also carries.
     pub fn relate_consumer_shares(
         self: &mut Self,
         md: DefId,
@@ -3889,6 +3940,8 @@ extend tc::TypeChecker {
                 self.ms_bit_set(cid);
             }
         }
+        // Re-expose borrows held by the captured bindings as borrows of the closure value itself
+        // (origin = the closure node): storing or returning the closure carries them.
         let cap_bw = self.nborrows;
         for i in 0..caps.len {
             let cid = unsafe (*a).list(caps)[i as usize];
@@ -4016,6 +4069,8 @@ extend tc::TypeChecker {
         return self.tc_lt_name(n.as_data.indirect_type.lifetime);
     }
 
+    /// The typechecker's recorded callee for call `id`: fmod<<40 | fdecl<<8 | receiver-skip (the
+    /// call_info side table); 0 = no resolution recorded, and bc_call skips the call-boundary analyses.
     pub fn bc_call_info(self: &Self, id: NodeId) u64 {
         switch unsafe (*self.cur_ast()).call_info.get(&id) {
             Some(v) => {

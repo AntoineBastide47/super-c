@@ -1,5 +1,7 @@
 // FFI bindings for <locale.h>. Import with `import locale;`.
 // `struct lconv` is returned as an opaque pointer because its layout is platform-specific.
+// Every call site requires `unsafe`. The LC_* category values are hardcoded constants, not bindings to
+// the platform's macros.
 
 extern "C" {
     pub fn setlocale(category: i32, locale: *const char) *mut char;

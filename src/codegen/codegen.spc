@@ -1,3 +1,9 @@
+// C backend: lowers typechecked per-module ASTs plus their interned generic instances to C text.
+// Multifile mode emits two passes per module -- codegen_emit_header (.h: types, public prototypes,
+// public consts) then codegen_emit (.c: private prototypes, dyn vtables, derived frees, bodies);
+// !multifile emits one standalone TU with the runtime strings inlined. Monomorphization runs on the
+// subst[] frame stack; foreign instances emit via owner-AST swap (ast/source swapped, the owner's
+// instance table truncated after). Output is append-only into `buf`, flushed once per TU.
 import string as cstring;
 import stdlib;
 import stdio;
@@ -14,9 +20,9 @@ extern "C" {
     fn strtoll(s: *const char, endptr: *mut *mut char, base: i32) i64;
 }
 
-// The full C standard library include block the generated runtime pulls in. Emitted verbatim into the
-// shared super_rt.h. (Faithful reconstruction pending — filled when codegen_emit is ported; only the
-// content of this constant is deferred, never a code path.)
+/// The full C standard library include block the generated runtime pulls in, emitted verbatim into
+/// the shared super_rt.h (single-TU builds inline it instead) together with the atomic shims, the
+/// panic/bounds helpers, and the leak-tracker macros that interpose malloc/realloc/free call sites.
 pub const fn super_rt_includes() *const char {
     return r#"#if __has_include(<assert.h>)
 #include <assert.h>
@@ -164,12 +170,12 @@ void sc_lk_free(void *__p);
 "#.ptr() as *const char;
 }
 
-// The leak-tracker runtime backing the `super_rt.h` interposition macros, written as `super_rt.c`
-// next to the header (the build engine compiles every `.c` in the generated tree). Runtime-gated by
-// the SC_LEAK_CHECK environment variable: when unset the hooks are a branch over the real calls;
-// when set, live allocations are recorded (with call stacks where <execinfo.h> exists) and the
-// survivors are reported to stderr at process exit, grouped by allocation stack. Every libc call is
-// spelled `(malloc)(...)`-parenthesized so the same text also compiles inlined after the macros.
+/// The leak-tracker runtime backing the `super_rt.h` interposition macros, written as `super_rt.c`
+/// next to the header (the build engine compiles every `.c` in the generated tree). Runtime-gated by
+/// the SC_LEAK_CHECK environment variable: when unset the hooks are a branch over the real calls;
+/// when set, live allocations are recorded (with call stacks where <execinfo.h> exists) and the
+/// survivors are reported to stderr at process exit, grouped by allocation stack. Every libc call is
+/// spelled `(malloc)(...)`-parenthesized so the same text also compiles inlined after the macros.
 pub const fn super_rt_source() *const char {
     return r#"/* super-c runtime: leak tracker (see super_rt.h). Generated; do not edit. */
 #include <stdlib.h>
@@ -550,6 +556,8 @@ pub const PROTO_ALL: i32 = 0;
 pub const PROTO_PUBLIC: i32 = 1;
 pub const PROTO_PRIVATE: i32 = 2;
 
+/// In-buffer token-paste marker (byte 1), emitted only in macro_mode; macro_finish rewrites each
+/// occurrence to `##` when flushing an @emit_macro template.
 pub const CG_PASTE: char = 1 as char;
 
 // ---- nested record types ----
@@ -562,10 +570,10 @@ pub struct CgInst {
     pub n: u8,
     pub args: [TypeId; 4],
 }
-// A conditional-move candidate recorded during the (single) move walk, replayed after the walk
-// completes so the "already unconditionally moved" suppression sees the FULL moved[] set, exactly
-// as the old second pass did. flags: bit0 = push a cond_site, bit1 = closure capture (site is the
-// closure node, pushed once per closure on its first surviving capture).
+/// A conditional-move candidate recorded during the (single) move walk, replayed after the walk
+/// completes so the "already unconditionally moved" suppression sees the FULL moved[] set, exactly
+/// as the old second pass did. flags: bit0 = push a cond_site, bit1 = closure capture (site is the
+/// closure node, pushed once per closure on its first surviving capture).
 pub struct CgPendMove {
     pub decl: NodeId,
     pub site: NodeId,
@@ -594,6 +602,8 @@ pub struct CgTestCase {
     pub suite_init: NodeId,
     pub suite_free: NodeId,
 }
+/// Driver-provided --test plan (see set_test_info). Disabled: @test/@test_init/@test_free items are
+/// skipped entirely; enabled: `main` is skipped and a per-case wrapper is emitted instead.
 pub struct CgTestInfo {
     pub enabled: bool,
     pub cases: *const CgTestCase,
@@ -618,6 +628,9 @@ pub type Buf160 = Array<char, 160>;
 pub type Buf256 = Array<char, 256>;
 pub type Buf512 = Array<char, 512>;
 
+/// Per-module C emitter. `ast` swaps to a foreign owner AST during foreign/re-homed emission
+/// (`borrowed` set, the owner's instance table truncated after); every memo cache guards on
+/// `home_ast` so pool-local ids never leak across the swap.
 pub struct Codegen<'a> {
     pub ast: *mut Ast,
     pub source: str<'a>,
@@ -787,7 +800,7 @@ pub struct Codegen<'a> {
 }
 
 extend Codegen as Free {
-    // The Ast is borrowed (not owned); free only what codegen allocated itself.
+    /// The Ast is borrowed (not owned); free only what codegen allocated itself.
     pub fn free(self: &mut Self) {
         self.buf.free();
         self.genty.free();
@@ -829,6 +842,8 @@ extend Codegen as Free {
 }
 
 extend Codegen {
+    /// Ownership: borrows `ast` and `package` (free() releases only codegen-owned state). Name
+    /// mangling and multifile mode default on only when the package holds >1 non-prelude module.
     pub fn new(ast: *mut Ast, source: str, package: *mut loader::Package) Codegen {
         let mut user_mods: usize = 0;
         if package != null {
@@ -893,9 +908,11 @@ extend Codegen {
     pub fn log_errors(self: &Self) {
         self.errors.log();
     }
+    /// Selects split .h/.c emission (codegen_emit then omits the single-TU runtime preamble).
     pub const fn set_multifile(self: &mut Self, on: bool) {
         self.multifile = on;
     }
+    /// Safety: `ti` must be non-null; the struct is copied, so it need not outlive the call.
     pub const fn set_test_info(self: &mut Self, ti: *const CgTestInfo) {
         self.test = unsafe *ti;
     }
@@ -3593,7 +3610,7 @@ extend Codegen {
 
 pub type Bytes4 = Array<u8, 4>;
 
-// ---- stubs: filled in later chunks (codegen is never run by the stub main, so these keep the build green) ----
+// ---- builtin call lowering + statement/expression emission ----
 extend Codegen {
     fn emit_format_builtin(self: &mut Self, id: NodeId) bool {
         if self.package == null {
@@ -3601,7 +3618,7 @@ extend Codegen {
         }
         let callee = unsafe (*self.cur_ast()).at_const(id).as_data.call.callee;
         let ck = unsafe (*self.cur_ast()).at_const(callee).kind;
-        let mut kind: i32 = 0;
+        let mut kind: i32 = 0; // 1=format 2=print 3=println 4=eprint 5=eprintln 6=.format_into
         let mut dst_recv: NodeId = NODE_NONE;
         if ck == NodeKind::NODE_MEMBER {
             // Method form `<dst>.format_into("template", args..)`: dst is the receiver, so its &mut borrow
@@ -6029,6 +6046,8 @@ extend Codegen {
             self.cg_arm_frees(pattern, true);
         }
     }
+    // mode: 0 = statement, 1 = value (each arm assigns into `result`), 2 = return position (each
+    // arm returns); modes 1/2 append an unreachable default so C sees every path produce a value.
     fn emit_match_core(self: &mut Self, id: NodeId, mode: i32, result: *const char) {
         let n = *unsafe (*self.cur_ast()).at_const(id);
         let mut scrut = Buf32 {};
@@ -6451,6 +6470,9 @@ extend Codegen {
         }
         return false;
     }
+    // Single pre-emission move walk over a body (CG-21). `cond` = control flow may skip this point
+    // (branch, loop body, match arm, short-circuit RHS): such moves become runtime-flagged
+    // conditional candidates instead of unconditional moved[] entries.
     fn cg_scan_moves(self: &mut Self, id: NodeId, cond: bool) {
         if id == NODE_NONE {
             return;
@@ -7715,6 +7737,9 @@ extend Codegen {
         }
         return cls;
     }
+    // Emit the free callee for a value of type `bt`: closure env-free, dyn-free, the Free method's
+    // mangled symbol, or the synthesized derived free. Returns false with NOTHING emitted when the
+    // type needs no free -- callers then void-wrap or skip the call site.
     fn emit_free_target(self: &mut Self, bt: TypeId) bool {
         let y = *self.type_at(self.subst_resolve(bt));
         if y.kind == TypeKind::TYPE_FUNCTION {
@@ -9978,8 +10003,8 @@ fn render_ident_src(src: str, s: tok::Span, buf: *mut char, cap: usize) usize {
     return full;
 }
 
-// Set when any bappend hits its buffer cap; checked at finalize so a truncated C declarator is a
-// hard compile error, never silently-invalid emitted C.
+/// Set when any bappend hits its buffer cap; checked at finalize so a truncated C declarator is a
+/// hard compile error, never silently-invalid emitted C.
 pub static mut CG_TRUNCATED: bool = false;
 
 fn bappend_bytes(out: *mut char, cap: usize, at: usize, text: *const char, n: usize) usize {
@@ -10102,6 +10127,8 @@ const fn agg_kw(n: &Node) *const char {
     return "struct".ptr() as *const char;
 }
 
+// Parses as `(which == PROTO_PUBLIC) == is_public`: publics in the public pass, privates in the
+// private pass, PROTO_ALL in both.
 const fn want_fn(which: i32, is_public: bool) bool {
     return which == PROTO_ALL || which == PROTO_PUBLIC == is_public;
 }
@@ -10416,7 +10443,6 @@ extend Codegen {
         }
     }
 
-    // Build a function's C name.
     fn function_name(self: &mut Self, fn_id: NodeId, target: DefId, out: *mut char, cap: usize, prefixed: bool) {
         if self.cg_symbol_override(self.cur_module(), fn_id, out, cap) {
             return;
@@ -10685,7 +10711,6 @@ extend Codegen {
         );
     }
 
-    // Emit a function signature; with_body emits the block, otherwise a prototype `;`.
     // The owning Free-typed fields of `target` that `fn_id`'s body (the Free-conformance free of a
     // same-module, non-generic struct) never references. Untouched = no resolution into the body
     // span = provably live and unfreed when the body ends, so appending their frees can never
@@ -10754,6 +10779,7 @@ extend Codegen {
         return n;
     }
 
+    // Emit a function signature; with_body emits the block, otherwise a prototype `;`.
     fn emit_function(
         self: &mut Self,
         fn_id: NodeId,
@@ -11002,7 +11028,7 @@ extend Codegen {
     }
 }
 
-// ---- backend stubs: filled in below, kept as at-least-decls so the whole file compiles green ----
+// ---- type/instance declarations, dyn vtables, consts, includes + the per-TU emission phases ----
 extend Codegen {
     fn cg_is_format_builtin(self: &Self, m: ModuleId, node: NodeId) bool {
         if self.package == null || m as usize >= self.pkg_count() || !unsafe (*self.package).modules[m as usize].prelude {
@@ -14206,6 +14232,9 @@ extend Codegen {
             self.emit_str("}\n");
         }
     }
+    /// Emit this module's .h to `out`: include guard, runtime/dependency includes, forward decls,
+    /// type definitions, public prototypes and consts. Runs collect_insts, which the later
+    /// codegen_emit call on the same module reuses; leaves the output buffer empty for reuse.
     pub fn codegen_emit_header(self: &mut Self, out: *mut stdio::FILE) {
         if self.ceval() != null {
             unsafe (*self.ceval()).record_folds = true;
@@ -14264,16 +14293,22 @@ extend Codegen {
         }
         self.buf.clear();
     }
-    // Lend a recycled output buffer (content cleared, capacity kept) / take it back after the TU.
+    /// Adopt a recycled output buffer: content cleared, capacity kept (one buffer serves every TU
+    /// of a build). Ownership: consumes `b`; reclaim it with take_buf after the TU.
     pub fn adopt_buf(self: &mut Self, b: String) {
         self.buf = b;
         self.buf.clear();
     }
+    /// Ownership: moves the output buffer to the caller, leaving an empty one behind.
     pub fn take_buf(self: &mut Self) String {
         let b = replace(&mut self.buf, String::new());
         return b;
     }
 
+    /// Emit this module's C source to `out`. Multifile: includes, layout asserts, private
+    /// prototypes, derived frees, dyn vtables, then bodies; otherwise one standalone TU with the
+    /// runtime inlined. Declarator truncation and recorded CTFE fold failures become diagnostics
+    /// here -- check has_errors() afterwards.
     pub fn codegen_emit(self: &mut Self, out: *mut stdio::FILE) {
         if self.ceval() != null {
             unsafe (*self.ceval()).record_folds = true;
@@ -15339,7 +15374,7 @@ extend Codegen {
     }
 }
 
-// A parsed `{...}` placeholder: `{:[fill][<^>][0][width][.prec][x|X|b]}`.
+/// A parsed `{...}` placeholder: `{:[fill][<^>][0][width][.prec][x|X|b]}`.
 pub struct FmtSpec {
     pub ty: char,
     pub align: char,

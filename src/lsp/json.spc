@@ -18,7 +18,7 @@ pub const JT_OBJECT: u8 = 5;
 
 const MAX_NESTING_DEPTH: usize = 1024;
 
-// One ordered object member (the C++ JSONObject is a vector of pairs, not a map: order preserved).
+/// One ordered object member (the C++ JSONObject is a vector of pairs, not a map: order preserved).
 pub struct JSONPair {
     pub key: String,
     pub value: JSON,
@@ -31,6 +31,7 @@ extend JSONPair as Free {
     }
 }
 
+/// A JSON value tagged by `kind`; only the payload matching `kind` is meaningful, the rest stay empty.
 pub struct JSON {
     pub kind: u8,
     pub b: bool,
@@ -74,7 +75,7 @@ extend JSON {
         return j;
     }
 
-    // Takes ownership of `value` (no copy) -- the JSON(std::string&&) constructor.
+    /// Takes ownership of `value` (no copy) -- the JSON(std::string&&) constructor.
     pub fn string(value: String) JSON {
         let mut j = JSON::make(JT_STRING);
         j.s = value;
@@ -157,7 +158,7 @@ extend JSON {
         return &self.obj;
     }
 
-    // Element at `index`; panics out of bounds or on a non-array (JSON::At(size_t)).
+    /// Element at `index`; panics out of bounds or on a non-array (JSON::At(size_t)).
     pub const fn at(self: &Self, index: usize) &JSON {
         if self.kind != JT_ARRAY {
             panic("JSON::at on a non array-type");
@@ -165,7 +166,7 @@ extend JSON {
         return self.arr.at(index);
     }
 
-    // Member for `key`; panics when missing or on a non-object (JSON::At(string)).
+    /// Member for `key`; panics when missing or on a non-object (JSON::At(string)).
     pub fn at_key(self: &Self, key: str) &JSON {
         return switch self.value(key) {
             Some(v) => v,
@@ -173,7 +174,7 @@ extend JSON {
         };
     }
 
-    // Safe member lookup: None when absent or on a non-object (the JSON::Value analog, Option-shaped).
+    /// Safe member lookup: None when absent or on a non-object (the JSON::Value analog, Option-shaped).
     pub fn value(self: &Self, key: str) Option<&JSON> {
         if self.kind == JT_OBJECT {
             for i in 0..self.obj.len() {
@@ -235,7 +236,7 @@ extend JSON {
         self.kind = kind;
     }
 
-    // Append to the array; a non-array converts to one first (JSON::PushBack). Owns `value`.
+    /// Append to the array; a non-array converts to one first (JSON::PushBack). Owns `value`.
     pub fn push_back(self: &mut Self, value: JSON) {
         if self.kind != JT_ARRAY {
             self.reset_to(JT_ARRAY);
@@ -243,8 +244,8 @@ extend JSON {
         self.arr.push(value);
     }
 
-    // Set `key` to `value`, overwriting an existing member; a non-object converts to one first
-    // (JSON::Emplace). Owns `value`.
+    /// Set `key` to `value`, overwriting an existing member; a non-object converts to one first
+    /// (JSON::Emplace). Owns `value`.
     pub fn emplace(self: &mut Self, key: str, value: JSON) {
         if self.kind != JT_OBJECT {
             self.reset_to(JT_OBJECT);
@@ -258,7 +259,7 @@ extend JSON {
         self.obj.push(JSONPair { key: String::from_str(key), value: value });
     }
 
-    // Deep copy (the C++ copy constructor).
+    /// Deep copy (the C++ copy constructor).
     pub fn clone(self: &Self) JSON {
         let mut j = JSON::make(self.kind);
         j.b = self.b;
@@ -291,9 +292,9 @@ extend JSON {
         }
     }
 
-    // Serialize; `pretty` indents by two spaces per level (JSON::Dump). Unlike the C++ original this
-    // re-escapes string content (required for a valid wire format) and prints integral numbers without
-    // the ".0" suffix (LSP ids/positions are integers).
+    /// Serialize; `pretty` indents by two spaces per level (JSON::Dump). Unlike the C++ original this
+    /// re-escapes string content (required for a valid wire format) and prints integral numbers without
+    /// the ".0" suffix (LSP ids/positions are integers).
     pub fn dump(self: &Self, pretty: bool) String {
         let mut out = String::with_capacity(256);
         self.dump_into(&mut out, pretty, 0);
@@ -353,7 +354,7 @@ extend JSON {
 }
 
 extend JSON as Default {
-    // A JSON null -- the C++ default constructor.
+    /// A JSON null -- the C++ default constructor.
     pub fn default() JSON {
         return JSON::make(JT_NULL);
     }
@@ -393,7 +394,7 @@ fn dump_number(n: f64, out: &mut String) {
     out.push_f64(n);
 }
 
-// Append `s` as a JSON string literal: quote/backslash/control bytes escaped, raw UTF-8 kept.
+/// Append `s` as a JSON string literal: quote/backslash/control bytes escaped, raw UTF-8 kept.
 pub fn dump_escaped(s: str, out: &mut String) {
     out.push_byte(b'"');
     for i in 0..s.len() {
@@ -1051,8 +1052,8 @@ extend JSONParser {
     }
 }
 
-// Parse one JSON document from memory (JSONParser::Parse, string_view path). The whole input must be
-// one value plus optional trailing whitespace.
+/// Parse one JSON document from memory (JSONParser::Parse, string_view path). The whole input must be
+/// one value plus optional trailing whitespace.
 pub fn parse(src: str) Result<JSON, String> {
     let mut root = JSON::default();
     let mut p = JSONParser {

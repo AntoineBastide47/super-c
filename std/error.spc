@@ -21,10 +21,12 @@ extend Error {
         return p;
     }
 
+    /// Copies `message`'s bytes into an owned String the Error frees.
     pub fn new(code: i32, message: str) Error {
         return Error { code: code, message: Error::own_message(String::from_str(message)) };
     }
 
+    /// Takes ownership of `message` (no byte copy).
     pub fn from_string(code: i32, message: String) Error {
         return Error { code: code, message: Error::own_message(message) };
     }
@@ -35,6 +37,7 @@ extend Error {
 }
 
 extend Error as Free {
+    /// Frees the owned message; further calls are no-ops (the pointer is nulled).
     pub fn free(self: &mut Error) {
         if self.message as *mut void != null {
             self.message.free();

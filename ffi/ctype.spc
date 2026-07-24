@@ -1,6 +1,7 @@
 // FFI bindings for <ctype.h>. Character classification/conversion. The raw C functions take and return
 // `int` (a byte value or EOF); the `pub` bindings mirror that, and a thin layer of `u8`/`bool` wrappers
-// makes the common cases ergonomic. Import with `import ctype;`.
+// makes the common cases ergonomic. Import with `import ctype;`. Calling the raw bindings requires
+// `unsafe`; the wrappers below do not.
 
 extern "C" {
     pub fn isalpha(c: i32) i32;

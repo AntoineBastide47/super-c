@@ -1,6 +1,7 @@
 // Sequentially-consistent atomics backed by the compiler runtime's `__sc_atomic_*` builtins (lowered to
 // `__atomic_*`). The runtime provides i8/i16/i32/i64/isize/u8/u16/u32/u64/usize plus bool. Pointers can
-// be exchanged or compared by casting through usize.
+// be exchanged or compared by casting through usize. The `pub` wrappers contain the `unsafe` extern
+// calls internally: callers need no `unsafe` block.
 
 extern "C" {
     fn __sc_atomic_load_i8(p: *const i8) i8;

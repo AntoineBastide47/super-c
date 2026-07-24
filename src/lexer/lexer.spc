@@ -1,3 +1,7 @@
+// Byte-driven scanner: a NUL-padded source String in (see SOURCE_PAD), a Vector<Token> out. Tokens
+// carry only (kind, start, len) spans indexing the source -- no text is copied. Every error is
+// recovered from, so the scan always completes; keep_trivia additionally emits comment tokens for
+// the formatter path (the parser never sees trivia).
 import string as cstring;
 import lexer::token as *;
 import lexer::token_type as *;
@@ -60,7 +64,8 @@ pub struct Lexer<'a> {
 }
 
 extend Lexer {
-    // Creates a new Lexer instance used to lex the given source file's content
+    /// Pads `source` with trailing NULs IN PLACE (the sentinel the scan loops rely on; see
+    /// SOURCE_PAD) and borrows it for the Lexer's lifetime.
     pub fn new<'a>(source: &'a mut String, file: str<'a>) Lexer<'a> {
         source.pad_nul(SOURCE_PAD);
         return Lexer {
@@ -163,6 +168,8 @@ fn lexer_error_at(l: &mut Lexer, at: usize, len: usize, message: str) {
     l.errors.emit(at as u32, len as u32, String::from_str(message));
 }
 
+// Decodes one UTF-8 scalar starting at `current` (first byte `b`). Any malformed sequence sets
+// *size to 0 and returns 0 UNDIAGNOSED -- the caller owns the error report.
 fn decode_at_b(l: &Lexer, b: u8, current: usize, size: &mut usize) u32 {
     let mut minimum: u32 = 0x10000;
     let mut width: usize = 4;
@@ -208,6 +215,9 @@ const fn memeq(p: *const u8, text: str) bool {
     return unsafe cstring::memcmp(p, text.ptr(), text.len()) == 0;
 }
 
+// Keyword lookup bucketed by identifier length, then filtered on the first byte, so a miss costs at
+// most a few same-length memcmps. Safety: `lexeme` must point at >= `len` readable bytes; every
+// memeq compares exactly its bucket's length, never past it.
 fn keywords(lexeme: *const u8, len: usize) TokenType {
     let first = unsafe lexeme[0];
     switch len {
@@ -457,6 +467,8 @@ fn block_comment(l: &mut Lexer) {
     lexer_error_at(l, start, 2, "unterminated block comment");
 }
 
+// Scans one escape sequence (the '\' already consumed) and returns its scalar value. UINT32_MAX =
+// malformed, ALREADY diagnosed here -- callers must not double-report, only mark the literal bad.
 fn escape(l: &mut Lexer, byte_character: bool) u32 {
     if is_eof(l) {
         let current = l.current;
@@ -562,6 +574,7 @@ fn string_lit(l: &mut Lexer, kind: TokenType) {
         } else if b == b'\n' || b == b'\r' {
             l.current = i - 1;
             lexer_error(l, "unterminated string literal");
+            // resync just past the next '"' (or EOF) so the rest of the line cannot cascade errors
             while l.current < l.bytes.len() {
                 let recovery = l.bytes.byte_at(l.current);
                 l.current = l.current + 1;
@@ -581,6 +594,8 @@ fn string_lit(l: &mut Lexer, kind: TokenType) {
     lexer_error(l, "unterminated string literal");
 }
 
+// After a '\'': true when an identifier run follows WITHOUT a closing '\'' -- a label/lifetime
+// token, not a character literal ('a vs 'a'). The parser's lifetime grammar relies on this split.
 fn label_ahead(l: &Lexer) bool {
     let mut i = l.current;
     let mut b: u8 = 0;
@@ -598,8 +613,8 @@ fn label_ahead(l: &Lexer) bool {
 
 fn character(l: &mut Lexer, byte_character: bool) {
     let mut count: usize = 0;
-    let mut malformed = false;
-    let mut invalid_byte = false;
+    let mut malformed = false; // an inner error was already diagnosed; suppresses the count check at the close
+    let mut invalid_byte = false; // b'..' held a multi-byte scalar; diagnosed only at the closing quote
     while !is_eof(l) {
         let b = l.bytes.byte_at(l.current);
         l.current = l.current + 1;
@@ -700,6 +715,8 @@ fn raw_string(l: &mut Lexer, hashes: usize) {
     lexer_error(l, "unterminated raw string literal");
 }
 
+// Scans a digit run allowing '_' only BETWEEN digits; the first bad separator position latches into
+// *error_at (USIZE_MAX = none yet) while scanning continues, so the run is consumed whole.
 fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(u8) bool) {
     let mut i = l.current;
     while i < l.bytes.len() {
@@ -720,6 +737,7 @@ fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(
     l.current = i;
 }
 
+// 1 = float suffix (f32/f64), 0 = integer suffix, -1 = not a numeric suffix.
 const fn num_suffix_kind(p: *const u8, n: usize) i32 {
     if n == 3 && (memeq(p, "f32") || memeq(p, "f64")) {
         return 1;
@@ -734,9 +752,13 @@ const fn num_suffix_kind(p: *const u8, n: usize) i32 {
 }
 
 fn number(l: &mut Lexer) {
+    // First error wins: error_at/error latch once (USIZE_MAX = none), but scanning continues so the
+    // whole literal is consumed and exactly one diagnostic covers it.
     let mut error_at = USIZE_MAX;
     let mut error: str = "";
     let mut is_float = false;
+    // radix-prefixed scan (0x/0o/0b): the full id-part run is consumed so bad digits and suffixes
+    // stay inside one token
     if l.bytes.byte_at(l.start) == b'0' {
         let mut radix: u32 = 10;
         let mut digit: fn(u8) bool = is_dec;
@@ -797,6 +819,8 @@ fn number(l: &mut Lexer) {
                 error_at = component_start;
                 error = "radix prefix must be followed by at least one digit";
             }
+            // hex float: '.' commits only when a hex digit follows; the 'p' exponent is mandatory
+            // (a fraction without one is diagnosed below)
             let mut hex_float = false;
             if radix == 16 && error_at == USIZE_MAX && peek_byte(l) == b'.' && is_hex(peek_next(l)) {
                 hex_float = true;
@@ -832,6 +856,8 @@ fn number(l: &mut Lexer) {
                 error_at = l.current;
                 error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3";
             }
+            // a '.' after any other radix literal is an error, but the whole float-shaped run is
+            // still consumed so it remains a single bad token
             if !hex_float && peek_byte(l) == b'.' {
                 if error_at == USIZE_MAX {
                     error_at = l.current;
@@ -867,6 +893,7 @@ fn number(l: &mut Lexer) {
     if error_at != USIZE_MAX {
         error = "invalid numeric separator";
     }
+    // decimal fraction -- but a second '.' means '1..2' is a range, so back off
     if peek_byte(l) == b'.' && peek_next(l) != b'.' {
         is_float = true;
         l.current = l.current + 1;
@@ -891,6 +918,7 @@ fn number(l: &mut Lexer) {
             error = "invalid numeric separator";
         }
     }
+    // suffix: the whole id-part tail is consumed; f32/f64 flips the literal to float
     if is_id_part_byte(peek_byte(l)) {
         let sfx_start = l.current;
         while is_id_part_byte(peek_byte(l)) {
@@ -1021,6 +1049,8 @@ fn scan_token(l: &mut Lexer) {
             return;
         },
         '>' => {
+            // always a single '>': the parser reassembles '>>', '>=', '>>=' itself so that nested
+            // generics ('Vec<Vec<T>>') can close
             add_token(l, TokenType::GreaterThan);
             return;
         },
@@ -1179,6 +1209,9 @@ fn scan_token(l: &mut Lexer) {
 }
 
 extend Lexer {
+    /// Scans the whole source into `tokens`, ending with an Eof token spanning (len, 0). Recovers
+    /// from every error (diagnostics accumulate in `errors`; the stream is always complete). A
+    /// UTF-8 BOM is consumed only at byte 0 -- anywhere else it is diagnosed.
     pub fn scan_tokens(self: &mut Self) {
         self.tokens.reserve(self.bytes.len() / 5);
         if self.current == 0 && self.bytes.len() >= 3 && self.bytes.byte_at(0) == 0xEFu8 && self.bytes.byte_at(1) == 0xBBu8 && self.bytes.byte_at(
@@ -1194,6 +1227,7 @@ extend Lexer {
         self.errors.finalize(self.bytes, self.file);
     }
 
+    /// Moves the token vector out; the lexer is left holding an empty one.
     pub fn take_tokens(self: &mut Self) Vector<Token> {
         let out = replace(&mut self.tokens, Vector::<Token>::new());
         return out;

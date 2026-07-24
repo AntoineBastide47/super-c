@@ -1,4 +1,6 @@
-// Driver path/FS helpers and package-Ast accessors shared by the emit/test/ext_c stages.
+// Driver-shared helpers for the emit/test/ext_c stages: output paths + mkdir/open under <gen_root>, the
+// keep-list orphan pruner, the runtime-header writer, raw package-Ast accessors, and format_source (the
+// canonical-formatting core behind `super-c fmt` and LSP formatting).
 import stdio;
 import string as cstring;
 import lexer::token as tok;
@@ -15,11 +17,10 @@ import consteval::consteval as ce;
 import codegen::codegen as cg;
 import utils::errors as diag;
 
+/// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.
 pub type PathBuf = Array<char, 4096>;
 pub type Buf64 = Array<char, 64>;
 pub type Buf128 = Array<char, 128>;
-
-// A 4096-byte path scratch buffer; the omitted array field zero-fills on partial init.
 
 // ---------------------------------------------------------------------------------------------------------
 // Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
@@ -40,11 +41,10 @@ pub const fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
 // Output paths + directories.
 // ---------------------------------------------------------------------------------------------------------
 
-// "<root>/build/<mod path, '::' -> '/'><ext>" (heap-allocated; caller owns). Generated includes are relative.
-// Lex (trivia kept for the comment count), parse and canonically format `src` into `out` at `width`
-// columns -- the shared core of `super-c fmt` and LSP textDocument/formatting. 0 = ok (`out` filled);
-// 1 = lex/parse error (diagnostics printed against `path`); 2 = the dropped-comment safety check
-// tripped. `out` must not be used unless 0.
+/// Lex (trivia kept for the comment count), parse and canonically format `src` into `out` at `width`
+/// columns -- the shared core of `super-c fmt` and LSP textDocument/formatting. 0 = ok (`out` filled);
+/// 1 = lex/parse error (diagnostics printed against `path`); 2 = the dropped-comment safety check
+/// tripped. `out` must not be used unless 0.
 pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 {
     // Reject sources that do not parse -- never rewrite something the compiler cannot read.
     // Lexed with trivia so the doc pipeline can count comments; the parser gets a filtered stream.
@@ -88,6 +88,7 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 
     return 0;
 }
 
+/// "<gen_dir>/<mod path, '::' -> '/'><ext>" (heap-allocated; caller owns).
 pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
     let mut out = String::from_str(gen_dir);
     out.push_byte(b'/');
@@ -106,7 +107,7 @@ pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
     return out;
 }
 
-// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
+/// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
 pub fn mkdir_p(path: str) {
     let n = path.len();
     if n == 0 || n >= 4096 {
@@ -126,7 +127,7 @@ pub fn mkdir_p(path: str) {
     let _ = unsafe shim::sc_mkdir(base);
 }
 
-// Open `path` for writing, creating any missing parent directories first.
+/// Open `path` for writing, creating any missing parent directories first.
 pub fn open_out(path: str) *mut stdio::FILE {
     let p = path.ptr();
     let n = path.len();
@@ -142,10 +143,10 @@ pub fn open_out(path: str) *mut stdio::FILE {
     return stdio::fopen(path, "wb");
 }
 
-// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
-// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
-// program no longer produces (a removed module/instance/@test-runner/@c.source wrapper) -- a stale TU would
-// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
+/// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
+/// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
+/// program no longer produces (a removed module/instance/@test-runner/@c.source wrapper) -- a stale TU would
+/// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
 pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
     let d = unsafe shim::sc_opendir(dir);
     if d == null {
@@ -194,8 +195,8 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
     let _ = unsafe shim::sc_closedir(d);
 }
 
-// The runtime header shared by every generated module (the C standard library includes plus the
-// leak-tracker interposition), and the tracker's implementation TU the engine compiles alongside.
+/// The runtime header shared by every generated module (the C standard library includes plus the
+/// leak-tracker interposition), and the tracker's implementation TU the engine compiles alongside.
 pub fn write_super_rt(gen_dir: str) {
     let path = build_out_path(gen_dir, "super_rt", ".h");
     let f = open_out(path.as_str());

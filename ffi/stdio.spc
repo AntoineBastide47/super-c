@@ -3,7 +3,8 @@
 // `FILE` is an opaque C handle (its layout lives in <stdio.h>); the raw `pub` bindings expose the C API,
 // and the `File` struct adds a safe, owning wrapper: `open` returns `None` instead of a null handle, and
 // `Free` closes the handle automatically. The standard streams stdin/stdout/stderr are exposed through
-// helper functions.
+// helper functions. Calling the raw bindings requires `unsafe`; the `File` methods and the wrapper
+// functions do not.
 
 extern "C" {
     pub type FILE;

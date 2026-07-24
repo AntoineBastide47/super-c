@@ -1,3 +1,6 @@
+// Token kinds; the value is stored in the packed Token's 8-bit kind field. Variant ORDER is a
+// bootstrap contract: numeric values must stay what the previous-generation compiler assigned, so
+// new kinds only ever append at the end (see the in-list notes).
 pub enum TokenType {
     Identifier,
     Label,

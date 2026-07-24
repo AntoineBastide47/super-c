@@ -1,5 +1,6 @@
 // FFI bindings for common pthread APIs. Import with `import pthread;`.
 // Opaque pthread structs other than pthread_t are passed as `*mut void` to avoid baking in libc layouts.
+// Carries `@c.link("pthread")`; every call site requires `unsafe`.
 
 @c.link("pthread")
 extern "C" {

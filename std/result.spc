@@ -32,8 +32,8 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The success value; panics on `Err`. Consumes `self`. A panic aborts the process with no
-    // unwinding, so the discarded payload is never cleaned up.
+    /// The success value; panics on `Err`. Consumes `self`. A panic aborts the process with no
+    /// unwinding, so the discarded payload is never cleaned up.
     pub const fn unwrap(self: Result<T, E>) T {
         return switch self {
             Ok(v) => v,
@@ -41,7 +41,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The success value; panics with `msg` on `Err`. Consumes `self`.
+    /// The success value; panics with `msg` on `Err`. Consumes `self`.
     pub const fn expect(self: Result<T, E>, msg: str) T {
         return switch self {
             Ok(v) => v,
@@ -49,7 +49,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The error value; panics on `Ok`. Consumes `self`.
+    /// The error value; panics on `Ok`. Consumes `self`.
     pub const fn unwrap_err(self: Result<T, E>) E {
         return switch self {
             Ok(_) => panic("Result::unwrap_err on Ok"),
@@ -57,8 +57,8 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The success value, or `default` on `Err`. Consumes `self`; the discarded `Err` payload is freed and
-    // the unused `default` (on the `Ok` path) is freed by auto-`Free`.
+    /// The success value, or `default` on `Err`. Consumes `self`; the discarded `Err` payload is freed and
+    /// the unused `default` (on the `Ok` path) is freed by auto-`Free`.
     pub const fn unwrap_or(self: Result<T, E>, default: T) T {
         return switch self {
             Ok(v) => v,
@@ -68,7 +68,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The error value, or `default` on `Ok`. Consumes `self`; the discarded `Ok` payload is freed.
+    /// The error value, or `default` on `Ok`. Consumes `self`; the discarded `Ok` payload is freed.
     pub const fn err_or(self: Result<T, E>, default: E) E {
         return switch self {
             Ok(v) => {
@@ -78,7 +78,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The success value, or `f(error)` computed lazily on the error case. Consumes `self`.
+    /// The success value, or `f(error)` computed lazily on the error case. Consumes `self`.
     pub const fn unwrap_or_else(self: Result<T, E>, f: fn(E) T) T {
         return switch self {
             Ok(v) => v,
@@ -86,7 +86,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // Map the success value through `f`, leaving an error untouched. Consumes `self`.
+    /// Map the success value through `f`, leaving an error untouched. Consumes `self`.
     pub const fn map<U, F: fn(T) U>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
             Ok(v) => Result::<U, E>::Ok(f(v)),
@@ -94,7 +94,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // Map the error value through `f`, leaving a success untouched. Consumes `self`.
+    /// Map the error value through `f`, leaving a success untouched. Consumes `self`.
     pub const fn map_err<F, M: fn(E) F>(self: Result<T, E>, f: M) Result<T, F> {
         return switch self {
             Ok(v) => Result::<T, F>::Ok(v),
@@ -102,7 +102,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // Chain a fallible step on the success value; `f` returns its own `Result` (flat-map). Consumes `self`.
+    /// Chain a fallible step on the success value; `f` returns its own `Result` (flat-map). Consumes `self`.
     pub const fn and_then<U, F: fn(T) Result<U, E>>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
             Ok(v) => f(v),
@@ -110,8 +110,8 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // `self` when it is `Ok`, otherwise `other`. Consumes both; the discarded `Err` payload is freed and
-    // the unused `other` (on the `Ok` path) is freed by auto-`Free`.
+    /// `self` when it is `Ok`, otherwise `other`. Consumes both; the discarded `Err` payload is freed and
+    /// the unused `other` (on the `Ok` path) is freed by auto-`Free`.
     pub const fn or(self: Result<T, E>, other: Result<T, E>) Result<T, E> {
         return switch self {
             Ok(v) => Result::<T, E>::Ok(v),
@@ -121,8 +121,8 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The success value as an `Option` (`Err` becomes `None`). Consumes `self`; the discarded `Err` payload
-    // is freed.
+    /// The success value as an `Option` (`Err` becomes `None`). Consumes `self`; the discarded `Err` payload
+    /// is freed.
     pub const fn get_ok(self: Result<T, E>) Option<T> {
         return switch self {
             Ok(v) => Option::<T>::Some(v),
@@ -132,8 +132,8 @@ extend<T, E> Result<T, E> {
         };
     }
 
-    // The error value as an `Option` (`Ok` becomes `None`). Consumes `self`; the discarded `Ok` payload is
-    // freed.
+    /// The error value as an `Option` (`Ok` becomes `None`). Consumes `self`; the discarded `Ok` payload is
+    /// freed.
     pub const fn get_err(self: Result<T, E>) Option<E> {
         return switch self {
             Ok(v) => {

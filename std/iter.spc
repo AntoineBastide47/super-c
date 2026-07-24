@@ -11,7 +11,7 @@
 // value; a `Free`-owning (`fn move`) closure is not accepted, and `filter` cannot pass owned `Free`
 // elements through (the predicate call would consume them) -- iterate those by reference instead.
 
-// Yields `f(x)` for every `x` the source yields.
+/// Yields `f(x)` for every `x` the source yields.
 pub struct MapIter<I, T, U, F> {
     pub it: I,
     pub f: F,
@@ -30,7 +30,7 @@ extend<I: Iterator<T>, T, U, F: fn(T) U> MapIter<I, T, U, F> as Iterator<U> {
     }
 }
 
-// Yields only the elements the predicate accepts.
+/// Yields only the elements the predicate accepts.
 pub struct FilterIter<I, T, P> {
     pub it: I,
     pub p: P,
@@ -57,7 +57,7 @@ extend<I: Iterator<T>, T, P: fn(T) bool> FilterIter<I, T, P> as Iterator<T> {
     }
 }
 
-// Yields `(index, element)` pairs, counting from 0.
+/// Yields `(index, element)` pairs, counting from 0.
 pub struct EnumerateIter<I, T> {
     pub it: I,
     pub idx: usize,
@@ -81,7 +81,7 @@ extend<I: Iterator<T>, T> EnumerateIter<I, T> as Iterator<(usize, T)> {
     }
 }
 
-// Yields pairs from two sources, stopping at the shorter one.
+/// Yields pairs from two sources, stopping at the shorter one.
 pub struct ZipIter<A, B, TA, TB> {
     pub a: A,
     pub b: B,
@@ -110,7 +110,7 @@ extend<A: Iterator<TA>, B: Iterator<TB>, TA, TB> ZipIter<A, B, TA, TB> as Iterat
 
 // Drains: consume the (rest of the) pipeline.
 
-// Left fold: `acc = f(acc, x)` over every element, starting from `init`.
+/// Left fold: `acc = f(acc, x)` over every element, starting from `init`.
 pub fn fold<I: Iterator<T>, T, A, F: fn(A, T) A>(it: I, init: A, f: F) A {
     let mut i = it;
     let mut acc = init;
@@ -127,7 +127,7 @@ pub fn fold<I: Iterator<T>, T, A, F: fn(A, T) A>(it: I, init: A, f: F) A {
     return acc;
 }
 
-// Runs `f` on every element, for its effects.
+/// Runs `f` on every element, for its effects.
 pub fn for_each<I: Iterator<T>, T, F: fn(T) void>(it: I, f: F) {
     let mut i = it;
     loop {
@@ -142,7 +142,7 @@ pub fn for_each<I: Iterator<T>, T, F: fn(T) void>(it: I, f: F) {
     }
 }
 
-// The number of elements the iterator yields.
+/// The number of elements the iterator yields.
 pub fn count<I: Iterator<T>, T>(it: I) usize {
     let mut i = it;
     let mut n: usize = 0;
@@ -159,7 +159,7 @@ pub fn count<I: Iterator<T>, T>(it: I) usize {
     return n;
 }
 
-// Everything the iterator yields, in order, as a Vector.
+/// Everything the iterator yields, in order, as a Vector.
 pub fn collect<I: Iterator<T>, T>(it: I) Vector<T> {
     let mut i = it;
     let mut v = Vector::<T>::new();

@@ -16,7 +16,7 @@ import lsp::analysis as analysis;
 import lsp::features as feat;
 import driver::util as dutil;
 
-// An open editor document (the overlay source of truth while open).
+/// An open editor document (the overlay source of truth while open).
 pub struct Doc {
     pub uri: String,
     pub path: String, // canonical (realpath'd when possible) filesystem path
@@ -32,9 +32,9 @@ extend Doc as Free {
     }
 }
 
-// One compiled unit: the manifest root (build.toml's entry), a per-file root for an open doc outside
-// the manifest closure, or a workspace-sweep root for a closed .spc no package owns (both mirror the
-// `super-c lint <file>` rooting).
+/// One compiled unit: the manifest root (build.toml's entry), a per-file root for an open doc outside
+/// the manifest closure, or a workspace-sweep root for a closed .spc no package owns (both mirror the
+/// `super-c lint <file>` rooting).
 pub struct Root {
     pub root_file: String,
     pub root_dir: String,
@@ -92,9 +92,9 @@ fn dir_of(path: str) String {
     return String::from_str(".");
 }
 
-// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
 type RB = Array<char, 4096>;
 
+// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
 fn canon(path: str) String {
     let mut pb = String::from_str(path);
     let mut rb = RB {};
@@ -1263,6 +1263,8 @@ fn on_code_action(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
 // Main loop.
 // ---------------------------------------------------------------------------------------------------------
 
+/// The blocking stdio server loop; returns the process exit code: 0 for a clean shutdown-then-exit,
+/// 1 on EOF (client vanished) or an `exit` without a prior `shutdown`.
 pub fn run(std_dir: *const char, target: i32) i32 {
     let mut sv = Server {
         docs: Vector::<Doc>::new(),

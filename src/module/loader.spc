@@ -1,3 +1,8 @@
+// Package construction and module loading: reads the root module plus its transitive imports into
+// per-module Asts, auto-imports the std prelude, and seeds the nominal builtin decls. Serves the
+// package-level lookups every later stage relies on (O(1) public-decl name index, cached import
+// closures). After typechecking, propagates concrete generic instances to their home modules
+// (owner-emits, to a fixpoint) and computes the dependency-first module emit order for codegen.
 import string as cstring;
 import stdio;
 import stdlib;
@@ -9,12 +14,12 @@ import ast::parser as parser;
 
 pub const SEEK_END: i32 = 2;
 
-// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
+/// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
 pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
 
-// One loaded module: its `::`-joined module path (the mangling/lookup key), the file it came from, its
-// source text and parsed Ast. The C loader used a NULL `Ast*` to mean "failed to lex/parse"; here the Ast
-// is held by value (like Parser.ast), so `has_ast` records that validity instead.
+/// One loaded module: its `::`-joined module path (the mangling/lookup key), the file it came from, its
+/// source text and parsed Ast. The C loader used a NULL `Ast*` to mean "failed to lex/parse"; here the Ast
+/// is held by value (like Parser.ast), so `has_ast` records that validity instead.
 pub struct Module {
     pub path: String, // "std::string"; the root module is its file stem (owned)
     pub file: String, // filesystem path the source was read from (owned)
@@ -33,9 +38,9 @@ extend Module as Free {
     }
 }
 
-// The whole compilation: the root module plus every module reachable through `import`. Modules are kept as
-// separate Asts; cross-module references are DefId{module, node} into this array. (`ceval` and the codegen
-// emit-order/instance-propagation fields are added when those stages are ported.)
+/// The whole compilation: the root module plus every module reachable through `import`. Modules are kept as
+/// separate Asts; cross-module references are DefId{module, node} into this array. (`ceval` and the codegen
+/// emit-order/instance-propagation fields are added when those stages are ported.)
 pub struct Package {
     pub modules: Vector<Module>,
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
@@ -43,76 +48,76 @@ pub struct Package {
     pub std_root: String, // second import search root (parent of std/); empty = none
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
-    // Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
-    // `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
+    /// Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
+    /// `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
     pub core_module: ModuleId,
     pub core_seeded: bool,
     pub builtin_decls: [NodeId; BT_COUNT_N],
-    // Demand-driven method emission: method_used[module][node] set for every method referenced during
-    // type-checking. Ragged: outer grown to module count, each inner grown to cover the node id.
+    /// Demand-driven method emission: method_used[module][node] set for every method referenced during
+    /// type-checking. Ragged: outer grown to module count, each inner grown to cover the node id.
     pub method_used: Vector<Vector<bool>>,
-    // Caller->callee references fired from inside bodies of methods that are THEMSELVES gated by
-    // method_used (non-generic methods of plain generic extends): deferred as packed
-    // ((module<<24|node) caller <<32 | callee) edges and resolved by finalize_method_used once
-    // every module has typechecked, so a method kept alive only by pruned callers is pruned too.
+    /// Caller->callee references fired from inside bodies of methods that are THEMSELVES gated by
+    /// method_used (non-generic methods of plain generic extends): deferred as packed
+    /// ((module<<24|node) caller <<32 | callee) edges and resolved by finalize_method_used once
+    /// every module has typechecked, so a method kept alive only by pruned callers is pruned too.
     pub method_edges: Vector<u64>,
     pub edge_seen: Set<u64>,
-    // The compile-time evaluator (a *mut consteval::ConstEval, kept opaque here to avoid a type cycle);
-    // owned by the driver, created after load, set before type-checking. Null in library/test use.
+    /// The compile-time evaluator (a *mut consteval::ConstEval, kept opaque here to avoid a type cycle);
+    /// owned by the driver, created after load, set before type-checking. Null in library/test use.
     pub ceval: *mut void,
-    // While a stage (resolver/typechecker) holds a module's Ast BY VALUE (moved out of `modules[m].ast`),
-    // package-level lookups on THAT module must see the held Ast, not the empty placeholder left behind.
-    // The driver points these at the in-flight Ast for the duration of the stage. (MODULE_NONE = inactive.)
+    /// While a stage (resolver/typechecker) holds a module's Ast BY VALUE (moved out of `modules[m].ast`),
+    /// package-level lookups on THAT module must see the held Ast, not the empty placeholder left behind.
+    /// The driver points these at the in-flight Ast for the duration of the stage. (MODULE_NONE = inactive.)
     pub override_mod: ModuleId,
     pub override_ast: *mut Ast,
-    // Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
-    // has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
-    // makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
-    // (module_imports falls back to the linear scan if queried before the build).
+    /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
+    /// has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
+    /// makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
+    /// (module_imports falls back to the linear scan if queried before the build).
     pub mod_refs: Vector<u64>,
     pub mod_refs_w: usize,
     pub mod_refs_ready: bool,
-    // Per-module public-decl name index (LD-2): lk_index[mid] maps fnv_name(name)*2+is_type -> LkEnt, built
-    // lazily on first lookup into `mid` (top-level decl names are parse-final, so it stays valid for the whole
-    // pipeline). Replaces Package::lookup's linear item scan with an O(1) probe.
+    /// Per-module public-decl name index (LD-2): lk_index[mid] maps fnv_name(name)*2+is_type -> LkEnt, built
+    /// lazily on first lookup into `mid` (top-level decl names are parse-final, so it stays valid for the whole
+    /// pipeline). Replaces Package::lookup's linear item scan with an O(1) probe.
     pub lk_index: Vector<Map<u64, LkEnt>>,
     pub lk_built: Vector<bool>,
-    // Per-module transitive import closure (LD-3): clo_lists[mid] = [mid, BFS over its imports...],
-    // built lazily on first glob_lookup into `mid` (imports are load-final). Replaces glob_lookup's
-    // per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
+    /// Per-module transitive import closure (LD-3): clo_lists[mid] = [mid, BFS over its imports...],
+    /// built lazily on first glob_lookup into `mid` (imports are load-final). Replaces glob_lookup's
+    /// per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
     pub clo_lists: Vector<Vector<ModuleId>>,
     pub clo_built: Vector<bool>,
-    // Recycled token vector: each module's lexer adopts it (capacity kept), the parser hands it back.
+    /// Recycled token vector: each module's lexer adopts it (capacity kept), the parser hands it back.
     pub tok_scratch: Vector<tok::Token>,
-    // Recycled codegen output buffer, lent to each TU's Codegen through the owner-swap idiom (field
-    // assigns emit no frees, so a PRE-FIX bootstrap compiler lowers the swap correctly -- a
-    // reassigned Free LOCAL would trip the conditional-move bug older emitters carry).
+    /// Recycled codegen output buffer, lent to each TU's Codegen through the owner-swap idiom (field
+    /// assigns emit no frees, so a PRE-FIX bootstrap compiler lowers the swap correctly -- a
+    /// reassigned Free LOCAL would trip the conditional-move bug older emitters carry).
     pub cg_scratch: String,
-    // Import-resolution directory cache (Opt 1): each candidate search directory is scanned ONCE (opendir/
-    // readdir) and its entry names cached, so resolve_import_file answers "does <dir>/<file> exist?" from
-    // memory instead of an fopen probe per candidate. Scales: a directory with N modules imported M times
-    // costs 1 scan, not M*<up to 3> fopens. A listing MISS still falls back to fopen (byte-identical vs the
-    // old path_exists even under case-insensitive filesystems).
+    /// Import-resolution directory cache (Opt 1): each candidate search directory is scanned ONCE (opendir/
+    /// readdir) and its entry names cached, so resolve_import_file answers "does <dir>/<file> exist?" from
+    /// memory instead of an fopen probe per candidate. Scales: a directory with N modules imported M times
+    /// costs 1 scan, not M*<up to 3> fopens. A listing MISS still falls back to fopen (byte-identical vs the
+    /// old path_exists even under case-insensitive filesystems).
     pub dir_cache: DirCache,
     pub lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
     pub lint_errs: u32, // total errors across the lint pipeline stages
     pub lint_fixable: u32, // errors carrying a machine fix; `lint --fix` proceeds when lint_errs == lint_fixable
-    // In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
-    // overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
-    // (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
-    // disk yet. Empty outside the LSP.
+    /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
+    /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
+    /// (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
+    /// disk yet. Empty outside the LSP.
     pub overlay_files: Vector<String>,
     pub overlay_texts: Vector<String>,
 }
 
-// Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
+/// Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
 pub struct DirCache {
     pub dirs: Vector<String>,
     pub entries: Vector<Vector<String>>,
     pub ok: Vector<bool>,
 }
 
-// The parse pipeline's result: an Ast plus whether lex/parse succeeded (mirrors the C `Ast*`/NULL return).
+/// The parse pipeline's result: an Ast plus whether lex/parse succeeded (mirrors the C `Ast*`/NULL return).
 pub struct ParseResult {
     pub ast: Ast,
     pub ok: bool,
@@ -126,17 +131,15 @@ extend ParseResult as Free {
     }
 }
 
-// The bytes of a file plus their length; `ptr == null` signals any I/O error (mirrors read_file's NULL).
-
-// A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
+/// A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
 pub struct LookupHit {
     pub node: NodeId,
     pub mid: ModuleId,
 }
 
-// One entry in a module's public-decl name index (LD-2): the decl node to return plus the source span of its
-// name, kept so a lookup can VERIFY the name bytes match (guarding against the ~impossible 64-bit hash
-// collision — on a verify miss we fall back to the linear scan, so the result is always exact).
+/// One entry in a module's public-decl name index (LD-2): the decl node to return plus the source span of its
+/// name, kept so a lookup can VERIFY the name bytes match (guarding against the ~impossible 64-bit hash
+/// collision — on a verify miss we fall back to the linear scan, so the result is always exact).
 pub struct LkEnt {
     pub node: NodeId,
     pub start: u32,
@@ -168,7 +171,8 @@ fn path_exists(path: str) bool {
     return true;
 }
 
-// Read a whole file into a NUL-terminated, heap-allocated buffer; ptr==null on any I/O error.
+/// Read a whole file into a String padded with lexer::SOURCE_PAD trailing NULs past len (the lexer's
+/// read-ahead sentinel); None on any I/O error.
 pub fn read_file(path: str) Option<String> {
     let f = stdio::fopen(path, "rb");
     if f == null {
@@ -251,7 +255,7 @@ fn stem_of(path: str) String {
     return String::from_str(path.slice(bstart, end));
 }
 
-// Join an import's path parts with `sep` ("::" for a module path, "/" for a file path).
+/// Join an import's path parts with `sep` ("::" for a module path, "/" for a file path).
 pub fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
     let ids = ast.list(parts);
     let mut out = String::new();
@@ -325,9 +329,9 @@ extend DirCache {
         self.ok.push(dok);
         return self.dirs.len() - 1;
     }
-    // Does `path` (a <dir>/<file>) exist? Answered from the cached listing; a listing miss (dir present but
-    // the name not listed) falls back to fopen so the result matches path_exists exactly, incl. case-
-    // insensitive filesystems. A missing directory is authoritative (fopen would fail too), saving the probe.
+    /// Does `path` (a <dir>/<file>) exist? Answered from the cached listing; a listing miss (dir present but
+    /// the name not listed) falls back to fopen so the result matches path_exists exactly, incl. case-
+    /// insensitive filesystems. A missing directory is authoritative (fopen would fail too), saving the probe.
     pub fn exists(self: &mut Self, path: str) bool {
         let n = path.len();
         let mut slash: i64 = -1;
@@ -464,7 +468,7 @@ extend Package {
         return &self.modules[mid as usize].ast;
     }
 
-    // Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
+    /// Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
     pub fn find(self: &Self, path: str) i32 {
         for i in 0..self.modules.len() {
             if self.modules[i].path.as_str() == path {
@@ -601,9 +605,9 @@ extend Package {
         return id;
     }
 
-    // Inject one synthetic decl per builtin into the core prelude module (`__std::core`), so builtins are
-    // nominal types that `extend i32 { .. }` can target. The decls live in the node pool only. Run after
-    // loading, before resolve.
+    /// Inject one synthetic decl per builtin into the core prelude module (`__std::core`), so builtins are
+    /// nominal types that `extend i32 { .. }` can target. The decls live in the node pool only. Run after
+    /// loading, before resolve.
     pub fn seed_core(self: &mut Self) {
         self.core_seeded = false;
         for i in 0..self.modules.len() {
@@ -625,7 +629,7 @@ extend Package {
         }
     }
 
-    // The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins weren't seeded.
+    /// The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins weren't seeded.
     pub const fn builtin_decl(self: &Self, b: BuiltinType) NodeId {
         if self.core_seeded && b as usize < BT_COUNT_N {
             return unsafe self.builtin_decls[b as usize];
@@ -633,7 +637,7 @@ extend Package {
         return NODE_NONE;
     }
 
-    // If (module, node) names a builtin's synthetic core decl, its BuiltinType; else -1.
+    /// If (module, node) names a builtin's synthetic core decl, its BuiltinType; else -1.
     pub fn builtin_of_decl(self: &Self, module: ModuleId, node: NodeId) i32 {
         if !self.core_seeded || module != self.core_module || node == NODE_NONE {
             return -1;
@@ -646,7 +650,7 @@ extend Package {
         return -1;
     }
 
-    // Record / test a method DefId as referenced, for demand-driven instance-method emission.
+    /// Record a method DefId as referenced, for demand-driven instance-method emission.
     pub fn mark_method_used(self: &mut Self, d: DefId) {
         if d.node == NODE_NONE {
             return;
@@ -685,9 +689,9 @@ extend Package {
         return inner[d.node as usize];
     }
 
-    // A method reference from inside a gated (demand-emitted) method body: deferred, so the callee
-    // is only marked used if the caller is ultimately emitted. Ids that do not fit the packed key
-    // fall back to a direct mark (conservative, never under-marks).
+    /// A method reference from inside a gated (demand-emitted) method body: deferred, so the callee
+    /// is only marked used if the caller is ultimately emitted. Ids that do not fit the packed key
+    /// fall back to a direct mark (conservative, never under-marks).
     pub fn record_method_edge(self: &mut Self, c: DefId, d: DefId) {
         if d.node == NODE_NONE {
             return;
@@ -706,8 +710,8 @@ extend Package {
         }
     }
 
-    // Fixpoint over the deferred edges: an edge's callee is used once its caller is. Must run after
-    // every module has typechecked and before codegen consults method_used_get.
+    /// Fixpoint over the deferred edges: an edge's callee is used once its caller is. Must run after
+    /// every module has typechecked and before codegen consults method_used_get.
     pub fn finalize_method_used(self: &mut Self) {
         let mut changed = true;
         while changed {
@@ -728,9 +732,9 @@ extend Package {
     // Cross-module name lookup.
     // ------------------------------------------------------------------------------------------------------
 
-    // Build module `mid`'s public-decl name index on first use (idempotent). Mirrors lookup_linear's exact
-    // traversal + classification, inserting the FIRST occurrence per (name, is_type) key. Top-level decl
-    // names/spans are parse-final, so the index stays valid for the whole pipeline.
+    /// Build module `mid`'s public-decl name index on first use (idempotent). Mirrors lookup_linear's exact
+    /// traversal + classification, inserting the FIRST occurrence per (name, is_type) key. Top-level decl
+    /// names/spans are parse-final, so the index stays valid for the whole pipeline.
     pub fn ensure_lk_index(self: &mut Self, mid: ModuleId) {
         let m = mid as usize;
         while self.lk_index.len() <= m {
@@ -839,8 +843,8 @@ extend Package {
         }
     }
 
-    // Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`, otherwise
-    // a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1) via the name index.
+    /// Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`, otherwise
+    /// a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1) via the name index.
     pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
@@ -958,7 +962,7 @@ extend Package {
         return NODE_NONE;
     }
 
-    // Like lookup but across every prelude module; the hit's `mid` is the owning module.
+    /// Like lookup but across every prelude module; the hit's `mid` is the owning module.
     pub fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {
         for i in 0..self.modules.len() {
             if self.modules[i].prelude {
@@ -991,9 +995,9 @@ extend Package {
         self.clo_built.set(mid as usize, true);
     }
 
-    // lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
-    // then every module it imports breadth-first in declaration order (the cached closure list). First hit
-    // wins.
+    /// lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
+    /// then every module it imports breadth-first in declaration order (the cached closure list). First hit
+    /// wins.
     pub fn glob_lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) LookupHit {
         if mid as usize >= self.modules.len() {
             return LookupHit { node: NODE_NONE, mid: 0 };
@@ -1013,7 +1017,7 @@ extend Package {
         return LookupHit { node: NODE_NONE, mid: 0 };
     }
 
-    // The modules `mid` transitively imports (excluding `mid` itself), breadth-first in declaration order.
+    /// The modules `mid` transitively imports (excluding `mid` itself), breadth-first in declaration order.
     pub fn import_closure(self: &Self, mid: ModuleId) Vector<ModuleId> {
         let n = self.modules.len();
         let mut out = Vector::<ModuleId>::new();
@@ -1083,8 +1087,8 @@ extend Package {
         return false;
     }
 
-    // Build the cross-module reference bitset from every module's (resolve-final) resolutions. One pass over
-    // all resolutions, O(total resolutions), done once before instance propagation. Idempotent.
+    /// Build the cross-module reference bitset from every module's (resolve-final) resolutions. One pass over
+    /// all resolutions, O(total resolutions), done once before instance propagation. Idempotent.
     pub fn build_mod_refs(self: &mut Self) {
         let n = self.modules.len();
         let w = (n + 63) / 64;
@@ -1147,12 +1151,12 @@ extend Package {
         return it.module;
     }
 
-    // Public entry: `a` is the Ast currently being emitted (== self.modules[a.module].ast).
+    /// Public entry: `a` is the Ast currently being emitted (== self.modules[a.module].ast).
     pub fn instance_home(self: &Self, a: &Ast, it: &TyInstance) ModuleId {
         return self.instance_home_in(a.module, it);
     }
 
-    // Mid-based entry for the free-function propagation/emit-order ports (they hold raw `*mut Ast`).
+    /// Mid-based entry for the free-function propagation/emit-order ports (they hold raw `*mut Ast`).
     pub fn instance_home_mid(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
         return self.instance_home_in(am, it);
     }
@@ -1635,14 +1639,6 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
     return changed;
 }
 
-// Owners emit the generic instances used across module boundaries: iterate to a fixpoint.
-// Body-only generic types of MONOMORPHIZED functions: a `W<T> { .. }` literal inside a generic
-// fn's body appears in no signature, so nothing else interns its concrete instance -- the emitted
-// C then names a struct that was never defined. For every fn instantiation (MonoUse) substitute
-// its args through the owner module's non-concrete pool types (only those can mention the params;
-// foreign params never match, so unrelated types pass through untouched). Runs single-threaded
-// BEFORE the propagation fixpoint -- codegen's own seeding (expand_nested_insts) is restricted to
-// same-module instantiations because foreign asts are read-only under parallel codegen.
 // True when every generic parameter `t` mentions belongs to `gids` (the target fn's own params):
 // substituting foreign params would intern partially-substituted garbage instances into the owner
 // pool, which later emit as undefined C type names.
@@ -1677,6 +1673,13 @@ fn type_params_subset(p: &Package, m: ModuleId, t: TypeId, gmod: ModuleId, gids:
     return true;
 }
 
+// Body-only generic types of MONOMORPHIZED functions: a `W<T> { .. }` literal inside a generic
+// fn's body appears in no signature, so nothing else interns its concrete instance -- the emitted
+// C then names a struct that was never defined. For every fn instantiation (MonoUse) substitute
+// its args through the owner module's non-concrete pool types (only those can mention the params;
+// foreign params never match, so unrelated types pass through untouched). Runs single-threaded
+// BEFORE the propagation fixpoint -- codegen's own seeding (expand_nested_insts) is restricted to
+// same-module instantiations because foreign asts are read-only under parallel codegen.
 fn seed_mono_body_instances(p: &mut Package) {
     let n = p.modules.len();
     let mut changed = false;
@@ -1758,6 +1761,9 @@ fn seed_mono_body_instances(p: &mut Package) {
     }
 }
 
+/// Owner-emits generic instances used across module boundaries: re-intern every concrete instance (and
+/// generic-method specialization) into its home module's tables, iterating to a fixpoint. Must run after
+/// every module has typechecked and before codegen.
 pub fn package_propagate_instances(p: &mut Package) {
     // Typechecking is done for every module here: resolve the deferred caller->callee method-use
     // edges before codegen starts consulting method_used_get.
@@ -1796,9 +1802,9 @@ pub fn package_propagate_instances(p: &mut Package) {
     }
 }
 
-// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
-// concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
-// `order` is caller-allocated with `modules.len()` entries.
+/// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
+/// concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
+/// `order` is caller-allocated with `modules.len()` entries.
 pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
     let n = p.modules.len();
     if n == 0 {
@@ -1933,16 +1939,16 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
     unsafe stdlib::free(indeg);
 }
 
-// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
-// `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
+/// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
+/// `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
 pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) Package {
     let d = dir_of(root_file);
     let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags);
     return p;
 }
 
-// Like package_load, but imports resolve against an explicit package root instead of the root
-// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
+/// Like package_load, but imports resolve against an explicit package root instead of the root
+/// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
 pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir: *const char, bootstrap_tags: bool) Package {
     return package_load_overlaid(
         root_file,
@@ -1955,8 +1961,8 @@ pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir:
     );
 }
 
-// Like package_load_rooted, with in-memory source overlays (see Package.overlay_files). Takes ownership
-// of both parallel vectors.
+/// Like package_load_rooted, with in-memory source overlays (see Package.overlay_files). Takes ownership
+/// of both parallel vectors.
 pub fn package_load_overlaid(
     root_file: str,
     root_dir: str,
@@ -1983,11 +1989,11 @@ pub fn package_load_overlaid(
     return p;
 }
 
-// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import
-// recursion -- the analog of tests/test_harness.h's sc_compile. The prelude loads FIRST and the user
-// module is appended LAST (its module id past the prelude), matching sc_compile's layout exactly, so
-// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
-// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
+/// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import
+/// recursion -- the analog of tests/test_harness.h's sc_compile. The prelude loads FIRST and the user
+/// module is appended LAST (its module id past the prelude), matching sc_compile's layout exactly, so
+/// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
+/// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
 pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) Package {
     let mut p = Package::new();
     p.ok = true;
@@ -2034,10 +2040,6 @@ fn basename_of(path: str) str {
     return path.slice(b, n);
 }
 
-// Auto-import the prelude: every TOP-LEVEL `<std_dir>/*.spc` (not subdirectories) becomes a prelude module
-// whose public items resolve unqualified. A file already loaded (explicitly imported) is flagged in place;
-// otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
-// user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
 // Byte-lexicographic order of two names with a length tiebreak (equivalent to strcmp over NUL-free views).
 const fn name_cmp(a: &String, b: &String) i32 {
     let la = a.len();
@@ -2054,6 +2056,10 @@ const fn name_cmp(a: &String, b: &String) i32 {
     return la as i32 - lb as i32;
 }
 
+// Auto-import the prelude: every TOP-LEVEL `<std_dir>/*.spc` (not subdirectories) becomes a prelude module
+// whose public items resolve unqualified. A file already loaded (explicitly imported) is flagged in place;
+// otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
+// user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
 fn load_prelude(p: &mut Package, std_dir: *const char) {
     if std_dir == null {
         return;

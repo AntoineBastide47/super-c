@@ -83,9 +83,9 @@ extern "C" {
     fn __sc_panic_str(msg: *const u8, len: usize) void; // the runtime trap: prints `panic: <msg>`, aborts
 }
 
-// Abort the program with a message on stderr. There is no unwinding: no cleanup runs, the process
-// dies via abort(). A `@c.noreturn` call types as `never`, so a panicking switch/if arm unifies
-// with value-producing siblings (`None => panic("empty")`).
+/// Abort the program with a message on stderr. There is no unwinding: no cleanup runs, the process
+/// dies via abort(). A `@c.noreturn` call types as `never`, so a panicking switch/if arm unifies
+/// with value-producing siblings (`None => panic("empty")`).
 @c.noreturn
 pub fn panic(msg: str) {
     unsafe __sc_panic_str(msg.ptr(), msg.len());
@@ -1146,7 +1146,7 @@ extend f32 {
     pub const fn mul_add(self: f32, a: f32, b: f32) f32 {
         return unsafe fmaf(self, a, b);
     }
-    // IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
+    /// IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
     pub const fn total_cmp(self: f32, other: f32) i32 {
         return self.cmp(&other);
     }
@@ -1282,7 +1282,7 @@ extend f64 {
     pub const fn sin_cos(self: f64) (f64, f64) {
         return unsafe sin(self), unsafe cos(self);
     }
-    // IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
+    /// IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
     pub const fn total_cmp(self: f64, other: f64) i32 {
         return self.cmp(&other);
     }
@@ -1315,10 +1315,10 @@ extend f64 {
     }
 }
 
-// Move the value out of `slot`, installing `value` in its place -- the ownership-safe way to take
-// a field out of a value that implements Free (a plain `let x = v.field;` is rejected there: the
-// destructor cannot run on a partial value). The raw-pointer read/write pair transfers ownership
-// without dropping either side; drop-on-assign deliberately ignores raw places.
+/// Move the value out of `slot`, installing `value` in its place -- the ownership-safe way to take
+/// a field out of a value that implements Free (a plain `let x = v.field;` is rejected there: the
+/// destructor cannot run on a partial value). The raw-pointer read/write pair transfers ownership
+/// without dropping either side; drop-on-assign deliberately ignores raw places.
 pub fn replace<T>(slot: &mut T, value: T) T {
     let p = slot as *mut T;
     let old = unsafe *p;
@@ -1333,10 +1333,10 @@ union ForgetCell<T> {
     pub none: u8,
 }
 
-// Take ownership of `value` and never free it -- the SANCTIONED deliberate leak (tests,
-// process-lifetime singletons, FFI handoffs that outlive the program). The leak tracker
-// (SC_LEAK_CHECK) still reports the abandoned allocations, which is the point: every intentional
-// leak stays visible and greppable instead of being laundered through raw pointers.
+/// Take ownership of `value` and never free it -- the SANCTIONED deliberate leak (tests,
+/// process-lifetime singletons, FFI handoffs that outlive the program). The leak tracker
+/// (SC_LEAK_CHECK) still reports the abandoned allocations, which is the point: every intentional
+/// leak stays visible and greppable instead of being laundered through raw pointers.
 pub fn forget<T>(value: T) {
     let cell = ForgetCell::<T> { some: value };
     let _ = (&cell) as *const ForgetCell<T>;

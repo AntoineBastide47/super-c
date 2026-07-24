@@ -1,5 +1,6 @@
 // FFI bindings for <math.h>. Thin: C's math functions are already direct numeric operations, so these are
 // raw `pub` bindings. Import with `import math;` and call e.g. `math::sqrt(2.0)`.
+// Carries `@c.link("m")` (links libm); every call site requires `unsafe`.
 
 @c.link("m")
 extern "C" {

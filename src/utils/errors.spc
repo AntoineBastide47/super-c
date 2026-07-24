@@ -1,13 +1,20 @@
+// Diagnostics for every pass: fatal `errors` and non-fatal lint `warns` accumulate as (message, span)
+// rows against one source buffer; `finalize` renders each row IN PLACE into a caret-annotated block
+// (then dedups identical blocks, compacting spans alongside) and `log` prints warnings then errors.
+// LintFix rows record machine-applicable repairs for `lint --fix` (kind 3 carries generated text via
+// `fix_texts`); `fixable_errs` counts errors carrying one, so --fix may apply despite errors only
+// when EVERY error is fixable.
 import stdlib;
 import string;
 
+/// Per-category cap on recorded diagnostics; emit/warn silently drop rows past it.
 pub const ERRORS_MAX: usize = 256;
 
-// A machine-applicable fix for a lint diagnostic: kind 0 deletes [start, end); kind 1 inserts '_'
-// before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
-// suggestion); kind 3 inserts `fix_texts[text]` before `start` (generated code, e.g. a Free impl).
-// Collected alongside `warn` and applied by `lint --fix`; `warn` indexes the warning it repairs
-// (the LSP turns those into quick fixes; error-attached kind-3 fixes stay CLI-only).
+/// A machine-applicable fix for a lint diagnostic: kind 0 deletes [start, end); kind 1 inserts '_'
+/// before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
+/// suggestion); kind 3 inserts `fix_texts[text]` before `start` (generated code, e.g. a Free impl).
+/// Collected alongside `warn` and applied by `lint --fix`; `warn` indexes the warning it repairs
+/// (the LSP turns those into quick fixes; error-attached kind-3 fixes stay CLI-only).
 pub struct LintFix {
     pub start: u32,
     pub end: u32,
@@ -16,6 +23,8 @@ pub struct LintFix {
     pub text: u32, // index into `fix_texts` (kind 3); 0xFFFFFFFF = none
 }
 
+/// Diagnostic accumulator for one source buffer. Messages are raw until `finalize` rewrites them into
+/// rendered blocks; `starts`/`lens` are parallel span vectors that survive finalize (the LSP reads them).
 pub struct Errors {
     pub errors: Vector<String>,
     pub notes: Vector<String>,
@@ -29,18 +38,20 @@ pub struct Errors {
     pub fixable_errs: u32, // errors carrying a machine fix -- `lint --fix` may proceed when EVERY error is fixable
 }
 
+/// Aborts the process with an out-of-memory message; never returns.
 pub fn oom() {
     eprint("fatal: out of memory\n");
     unsafe stdlib::abort();
 }
 
-// A borrowed `str` view of a NUL-terminated C string (for routing a raw C string through `format(...)`).
+/// A borrowed `str` view of a NUL-terminated C string (for routing a raw C string through `format(...)`).
+/// Safety: `p` must be non-null and NUL-terminated; the view is only valid while the bytes live.
 pub fn cstr<'a>(p: *const char) str<'a> {
     return str::from_raw(p as *const u8, unsafe string::strlen(p));
 }
 
-// A borrowed `str` view of the source bytes in the span [start, end) -- the idiomatic replacement for the
-// old `%.*s` (width, source+start) diagnostic argument pair.
+/// A borrowed `str` view of the source bytes in the span [start, end) -- the idiomatic replacement for the
+/// old `%.*s` (width, source+start) diagnostic argument pair.
 pub const fn span_str(src: str, start: u32, end: u32) str {
     return src[start as usize..end as usize];
 }
@@ -69,7 +80,7 @@ extend Errors {
         return self.warns.len() != 0;
     }
 
-    // Record a non-fatal warning at [at, at+len). Takes ownership of `msg`.
+    /// Record a non-fatal warning at [at, at+len). Takes ownership of `msg`; drops it past ERRORS_MAX.
     @c.cold
     pub fn warn(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.warns.len() >= ERRORS_MAX {
@@ -80,8 +91,8 @@ extend Errors {
         self.warn_lens.push(len);
     }
 
-    // Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
-    // past the ERRORS_MAX cap the index degrades to the last kept warning).
+    /// Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
+    /// past the ERRORS_MAX cap the index degrades to the last kept warning).
     @c.cold
     pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) {
         let mut w: u32 = 0xFFFFFFFF;
@@ -91,8 +102,9 @@ extend Errors {
         self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: w, text: 0xFFFFFFFF });
     }
 
-    // Attach a generated-code insertion fix to the ERROR just emitted (kind 3): `text` is inserted
-    // before `start` by `lint --fix`. Errors with such a fix count as machine-fixable.
+    /// Attach a generated-code insertion fix to the ERROR just emitted (kind 3): `text` is inserted
+    /// before `start` by `lint --fix`. Errors with such a fix count as machine-fixable (`fixable_errs`).
+    /// Takes ownership of `text`.
     @c.cold
     pub fn fix_insert(self: &mut Self, start: u32, text: String) {
         let t = self.fix_texts.len() as u32;
@@ -107,8 +119,8 @@ extend Errors {
         self.fixable_errs = self.fixable_errs + 1;
     }
 
-    // Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
-    // [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
+    /// Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
+    /// [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
     @c.cold
     pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.errors.len() >= ERRORS_MAX {
@@ -120,12 +132,12 @@ extend Errors {
         self.lens.push(len);
     }
 
-    // Record a diagnostic that was produced OUT of source order -- a region/lifetime error the solver
-    // only discovers after the whole function body has been walked. `from` is the index the enclosing
-    // function's diagnostics start at; the message is inserted at the first position in [from, len)
-    // whose span starts after `at`, so it lands where a reader expects it instead of after every other
-    // diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the
-    // index it landed at, for `note_at`.
+    /// Record a diagnostic that was produced OUT of source order -- a region/lifetime error the solver
+    /// only discovers after the whole function body has been walked. `from` is the index the enclosing
+    /// function's diagnostics start at; the message is inserted at the first position in [from, len)
+    /// whose span starts after `at`, so it lands where a reader expects it instead of after every other
+    /// diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the
+    /// index it landed at, for `note_at`.
     @c.cold
     pub fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
         if self.errors.len() >= ERRORS_MAX {
@@ -147,7 +159,7 @@ extend Errors {
         return k;
     }
 
-    // Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
+    /// Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
     @c.cold
     pub fn note(self: &mut Self, msg: String) {
         let n = self.errors.len();
@@ -158,8 +170,8 @@ extend Errors {
         self.notes[n - 1].push_string(&msg);
     }
 
-    // Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned) -- `note` always
-    // targets the last one, which is wrong once a diagnostic has been inserted out of order.
+    /// Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned) -- `note` always
+    /// targets the last one, which is wrong once a diagnostic has been inserted out of order.
     @c.cold
     pub fn note_at(self: &mut Self, index: usize, msg: String) {
         if index >= self.notes.len() {
@@ -169,6 +181,8 @@ extend Errors {
         self.notes[index].push_string(&msg);
     }
 
+    /// Render every recorded message in place into a caret-annotated block against `source`/`file`,
+    /// then dedup identical error blocks (spans compacted alongside). Call once, before `log`.
     @c.cold
     pub fn finalize(self: &mut Self, source: str, file: str) {
         if self.errors.len() == 0 && self.warns.len() == 0 {
@@ -246,6 +260,7 @@ extend Errors {
         self.lens = ulens;
     }
 
+    /// Print the finalized blocks to stderr, warnings before errors.
     @c.cold
     pub fn log(self: &Self) {
         for i in 0..self.warns.len() {

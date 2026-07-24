@@ -1,3 +1,6 @@
+// Token is a packed u64, not a struct: bits 0-31 = start byte offset, 32-55 = length, 56-63 =
+// TokenType. No text is stored -- a token's span indexes the source buffer. Invariants: a lexeme is
+// < 2^24 bytes long and TokenType fits in 8 bits.
 import lexer::token_type as *;
 
 pub struct Span {
@@ -18,6 +21,8 @@ extend Span {
 pub type Token = u64;
 
 extend Token {
+    /// Packs (kind, start, len). `len` must be < 2^24: it is stored in 24 bits, and a larger value
+    /// would bleed into the kind bits (len() masks on read; new() does not).
     pub const fn new(kind: TokenType, start: u32, len: u32) Token {
         return start as u64 | len as u64 << 32 | kind as u64 << 56;
     }

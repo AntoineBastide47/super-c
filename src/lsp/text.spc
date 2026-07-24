@@ -2,12 +2,13 @@
 // are (line, character) with character counted in UTF-16 code units -- the walk below converts between
 // them (1 unit for BMP scalars, 2 for the 4-byte astral plane).
 
+/// An LSP position: 0-based line, `character` counted in UTF-16 code units (not bytes).
 pub struct Pos {
     pub line: u32,
     pub character: u32,
 }
 
-// Byte offset of each line start (line 0 starts at 0; a new line after every '\n').
+/// Byte offset of each line start (line 0 starts at 0; a new line after every '\n').
 pub fn line_starts(src: str) Vector<u32> {
     let mut ls = Vector::<u32>::new();
     ls.push(0);
@@ -19,7 +20,7 @@ pub fn line_starts(src: str) Vector<u32> {
     return ls;
 }
 
-// UTF-16 code units in src[start..end] (clamped to the source).
+/// UTF-16 code units in src[start..end] (clamped to the source).
 pub fn utf16_len(src: str, start: u32, end: u32) u32 {
     let mut e = end as usize;
     if e > src.len() {
@@ -48,7 +49,7 @@ pub fn utf16_len(src: str, start: u32, end: u32) u32 {
     return n;
 }
 
-// Byte offset -> LSP position (clamped to the source end).
+/// Byte offset -> LSP position (clamped to the source end).
 pub fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
     let mut o = off;
     if o as usize > src.len() {
@@ -68,8 +69,8 @@ pub fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
     return Pos { line: lo as u32, character: utf16_len(src, *ls.at(lo), o) };
 }
 
-// LSP position -> byte offset. Clamps: an out-of-range line maps to the last line start, an
-// out-of-range character to the line end. A character landing inside a surrogate pair stops before it.
+/// LSP position -> byte offset. Clamps: an out-of-range line maps to the last line start, an
+/// out-of-range character to the line end. A character landing inside a surrogate pair stops before it.
 pub fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32) u32 {
     let mut li = line as usize;
     if li >= ls.len() {
@@ -120,7 +121,7 @@ const fn hex_val(b: u8) i32 {
     return -1;
 }
 
-// file:// URI -> filesystem path (strips the scheme + authority, percent-decodes).
+/// file:// URI -> filesystem path (strips the scheme + authority, percent-decodes).
 pub fn uri_to_path(uri: str) String {
     let mut out = String::with_capacity(uri.len());
     let mut i: usize = 0;
@@ -148,7 +149,7 @@ pub fn uri_to_path(uri: str) String {
     return out;
 }
 
-// Absolute filesystem path -> file:// URI (unreserved bytes kept, the rest percent-encoded).
+/// Absolute filesystem path -> file:// URI (unreserved bytes kept, the rest percent-encoded).
 pub fn path_to_uri(path: str) String {
     let mut out = String::with_capacity(path.len() + 8);
     out.push_str("file://");

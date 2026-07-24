@@ -1,3 +1,9 @@
+// Type checking for one module: consumes the resolver's AST (+ the Package for imports) and types it
+// in place -- per-node/decl TypeIds, member/method resolutions, call_info, dyn uses, deref chains and
+// generic instances -- everything the borrowck pass and codegen read. Borrow/move/lifetime analysis is
+// the separate src/borrowck stage (extends TypeChecker, replays bodies after check()); the flow/borrow/
+// region fields here are its state. Invariant: TC-* memoizations must not change type-pool interning
+// order -- emitted C is byte-compared across bootstrap generations.
 import string as cstring;
 import stdio;
 import lexer::token as tok;
@@ -15,9 +21,9 @@ pub const BORROW_ESCAPE_MAX_DEPTH: u32 = 64;
 
 pub const BORROW_SHARED: u8 = 0;
 pub const BORROW_MUT: u8 = 1;
-// The reserved RegionVid for `'static`: outlives every other region.
+/// The reserved RegionVid for `'static`: outlives every other region.
 pub const REGION_STATIC: u32 = 0;
-// "no region" -- a lifetime name that denotes nothing in the current signature.
+/// "no region" -- a lifetime name that denotes nothing in the current signature.
 pub const REGION_NONE: u32 = 0xFFFFFFFF;
 pub const PS_FIELD: u8 = 0;
 pub const PS_INDEX: u8 = 1;
@@ -51,6 +57,9 @@ pub type Cover4 = Array<u64, 4>;
 pub type Buf128 = Array<char, 128>;
 pub type NodeArr16 = Array<NodeId, 16>;
 
+/// A live borrow: `root` = the borrowed place's base binding, `place` = the place node, `origin` = the
+/// expression that created it, `binding` = the binding holding it (NODE_NONE = transient, released at
+/// statement end), `region` = scope depth at creation, `kind` = BORROW_SHARED/BORROW_MUT.
 pub struct Borrow {
     pub root: NodeId,
     pub place: NodeId,
@@ -60,6 +69,8 @@ pub struct Borrow {
     pub kind: u8,
 }
 
+/// One access step of a decomposed place (see place_decompose): PS_FIELD (`name`), PS_INDEX
+/// (`index_val` valid when `index_const`), or PS_DEREF.
 pub struct PStep {
     pub kind: u8,
     pub index_const: bool,
@@ -67,6 +78,7 @@ pub struct PStep {
     pub name: tok::Span,
 }
 
+/// An interface bound plus its lowered type arguments (`n` <= 8).
 pub struct BoundIface {
     pub iface: DefId,
     pub n: u8,
@@ -86,7 +98,8 @@ pub struct LoopEntry {
     pub depth: u32,
 }
 
-// A captured snapshot of the flow-sensitive analysis state.
+/// Snapshot of the flow-sensitive state (moves, partial moves, uninit, freed, borrows), saved/merged
+/// around branches (TC-4b: filled via out-param; only the counted prefixes are touched).
 pub struct FlowState {
     pub moved: [NodeId; 256],
     pub nmoved: u32,
@@ -100,9 +113,9 @@ pub struct FlowState {
     pub nborrows: u32,
 }
 
-// TC-11: method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
-// querying module's source, or the caller's literal), so span- and cstr-form queries for the same
-// name share one entry. Exact-keyed (Hash + full Eq), so collisions cannot alias.
+/// TC-11: method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
+/// querying module's source, or the caller's literal), so span- and cstr-form queries for the same
+/// name share one entry. Exact-keyed (Hash + full Eq), so collisions cannot alias.
 pub struct MQKey<'a> {
     pub m: ModuleId,
     pub decl: NodeId,
@@ -126,6 +139,8 @@ extend MQKey as Eq {
     }
 }
 
+/// The per-module checker. Also the state substrate for the borrowck pass, which extends TypeChecker
+/// and re-walks function bodies after check() (Ast.call_info bridges the two).
 pub struct TypeChecker<'a> {
     pub ast: Ast,
     pub source: str<'a>,
@@ -429,6 +444,7 @@ const fn hex_digit(c: u8) u32 {
 }
 
 extend TypeChecker {
+    /// Ownership: consumes `ast` (reclaim it with take_ast); `package` is a borrowed raw pointer (may be null).
     pub fn new(ast: Ast, source: str, package: *mut loader::Package) TypeChecker {
         let pkg = package as usize; // read the address before the literal's `package:` field moves it
         return TypeChecker {
@@ -510,6 +526,7 @@ extend TypeChecker {
         };
     }
 
+    /// Ownership: moves the typed Ast out, leaving an empty placeholder -- the checker is done after this.
     pub fn take_ast(self: &mut Self) Ast {
         let out = replace(&mut self.ast, Ast::new(0));
         return out;
@@ -648,6 +665,7 @@ extend TypeChecker {
     }
 
     // ---- loop stack ----
+    /// Returns the loop-stack index, or -1 when 32 loops are already open (callers skip the matching pop).
     pub const fn tc_loop_push(self: &mut Self, label: tok::Span, node: NodeId, value_loop: bool) i32 {
         if self.nloops >= 32 {
             return -1;
@@ -1126,11 +1144,11 @@ const fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: Mod
     return cur_src;
 }
 
-// Render `tid` as Super-C surface syntax into `buf` (NUL-terminated, truncating at `cap`). The
-// standalone form of TypeChecker::render_type: `a` is the Ast owning the type pool (a checker's
-// in-flight ast, or a module's held ast after the build), `cur_src` that module's source, `pkg` the
-// package for cross-module decl names (null falls back to `a`/`cur_src` for everything). Also serves
-// LSP hover, which renders from a fully built package.
+/// Render `tid` as Super-C surface syntax into `buf` (NUL-terminated, truncating at `cap`). The
+/// standalone form of TypeChecker::render_type: `a` is the Ast owning the type pool (a checker's
+/// in-flight ast, or a module's held ast after the build), `cur_src` that module's source, `pkg` the
+/// package for cross-module decl names (null falls back to `a`/`cur_src` for everything). Also serves
+/// LSP hover, which renders from a fully built package.
 pub fn render_type_into(
     pkg: *const loader::Package,
     a: *const Ast,
@@ -1261,10 +1279,13 @@ pub fn render_type_into(
     }
 }
 
+/// Shares value 0 with TYPE_NONE: an errored type reads as "untyped" downstream, so one diagnostic
+/// does not cascade.
 pub const TYPE_ERROR: TypeId = 0;
 
 extend TypeChecker {
-    // Unwrap a struct/enum/instance type to its module + decl (+ instance arg substitution).
+    /// Unwrap a struct/enum/instance type to its module + decl; for an instance also copies up to 8
+    /// param->arg substitution pairs into `params`/`args`. False for any other type kind.
     pub fn aggregate_of(
         self: &Self,
         ty: TypeId,
@@ -1304,6 +1325,8 @@ extend TypeChecker {
         return false;
     }
 
+    // Structural params[i]->args[i] substitution; unmatched generics pass through, and unchanged
+    // subtrees return the original TypeId (nothing new interned).
     fn subst_type(self: &mut Self, ty: TypeId, params: *const DefId, args: *const TypeId, n: i32) TypeId {
         if ty == TYPE_NONE || n == 0 {
             return ty;
@@ -1776,7 +1799,9 @@ extend TypeChecker {
         return true; // unknown shapes: assume generic-dependent (stay silent)
     }
 
-    // Lower a type node in module `m` to an interned TypeId in the current pool.
+    /// Lower a type node of module `m` to a TypeId interned in the CURRENT module's pool: the current
+    /// module goes through resolve_type's per-node cache, foreign modules through the memoized
+    /// context-free lowering (TC-13).
     pub fn lower_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
         if self.package == null || m == self.ast.module {
             return self.resolve_type(id);
@@ -2528,7 +2553,7 @@ extend TypeChecker {
         return self.ext_items[mm as usize][i];
     }
 
-    // The type-identity an extend's target dispatches on (peeling a transparent alias).
+    /// The type-identity an extend's target dispatches on (peeling a transparent alias).
     pub fn tc_peel_target(self: &mut Self, tg: DefId) DefId {
         if tg.node == NODE_NONE {
             return tg;
@@ -3490,6 +3515,11 @@ extend TypeChecker {
         }
         return false;
     }
+    /// Does a value of `ty` own memory (i.e. is it Free)? An explicit Free extend decides first (its
+    /// per-param Free bounds re-checked against the instance args); otherwise structs/enums DERIVE Free
+    /// when any field/payload owns, transitively -- unions never derive. Owning closures (a by-copy Free
+    /// capture) and owned `Box<dyn>` count too. References/pointers peel to their referent: callers that
+    /// must treat a borrow as non-owning gate on the pointer kind first.
     pub fn tc_type_is_free(self: &mut Self, ty: TypeId) bool {
         if ty == TYPE_NONE {
             return false;
@@ -3877,7 +3907,6 @@ extend TypeChecker {
         return true;
     }
 
-    // Is the value at `node` assignable to a slot of type `expected`?
     // Attach the ` as T` deletion fix for the unnecessary-cast lints. Grouping parens are dropped
     // without re-spanning (`(x) as T` records x's span without the parens), so the deletion starts
     // after any closing parens between the expression end and the `as` keyword.
@@ -4454,6 +4483,7 @@ extend TypeChecker {
         }
         return false;
     }
+    /// Syntactic place (lvalue) test; a path member (`E::x`) counts only when it names a 'static mut'.
     pub fn is_place(self: &Self, id: NodeId) bool {
         let node = self.peel_wrappers(id);
         let n = unsafe (*self.cur_ast()).at_const(node);
@@ -4501,6 +4531,8 @@ extend TypeChecker {
     // TC-4b: save/clear fill an uninitialized caller local through an out-param and only touch the
     // counted prefixes -- a by-value `FlowState {}` zero-fills ~3KB twice per branch construct.
 
+    /// Definitely-returns test: a return, a block whose LAST statement returns, an `if` with BOTH
+    /// branches returning, or a never-typed expression statement.
     pub fn tc_stmt_returns(self: &Self, id: NodeId) bool {
         if id == NODE_NONE {
             return false;
@@ -4579,7 +4611,10 @@ extend TypeChecker {
         return dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.is_union;
     }
 
-    // Decompose a place `&x.f[i]…` into its root binding + access steps (leaf-first).
+    /// Decompose a place `x.f[i]...` into its root binding + access steps (leaf-first). Returns the
+    /// root local decl, or NODE_NONE when the chain crosses a raw pointer, indexes a non-array, or
+    /// does not end at a local binding. A union member access drops the steps below it (all members
+    /// overlap).
     pub fn place_decompose(self: &mut Self, place0: NodeId, steps: *mut PStep, nsteps: *mut i32, cap: i32) NodeId {
         unsafe *nsteps = 0;
         let a = self.cur_ast();
@@ -4677,6 +4712,9 @@ extend TypeChecker {
         }
         return NODE_NONE;
     }
+    /// Do two places alias? Conservative: same root required; differing field names or differing
+    /// constant indices prove disjoint, everything else (unknown indices, step-kind mismatch) reports
+    /// overlap. False whenever either place fails to decompose.
     pub fn places_overlap(self: &mut Self, aN: NodeId, bN: NodeId) bool {
         let mut sa = Steps16 {};
         let mut sb = Steps16 {};
@@ -4732,6 +4770,8 @@ extend TypeChecker {
     // is live. Shared by both range exits -- an `index_range` method result and a `prelude_slice_type`
     // result (the latter covers a slice-of-a-slice, which `slice_kind` handles before index_range).
 
+    /// The local binding a place reaches THROUGH a reference (`*p` -> p, `r.f` with `r: &T` -> r), or
+    /// NODE_NONE when no hop dereferences a reference binding.
     pub fn place_through_binding(self: &Self, place0: NodeId) NodeId {
         let a = self.cur_ast();
         let mut place = place0;
@@ -4765,10 +4805,10 @@ extend TypeChecker {
 
     // Drop the borrow(s) produced by `origin` -- used where a reference is erased into a raw pointer.
 
-    // TC-3: one pass over the resolution table records, per local decl, the LAST node that
-    // resolves to it. "any use after `after`" then collapses to one compare. Typechecker-added
-    // resolutions never target a value binding except break/continue -> loop node (a `for` node IS
-    // its loop binding), which tc_note_resolution folds in at the set site.
+    /// TC-3: one pass over the resolution table records, per local decl, the LAST node that
+    /// resolves to it. "any use after `after`" then collapses to one compare. Typechecker-added
+    /// resolutions never target a value binding except break/continue -> loop node (a `for` node IS
+    /// its loop binding), which tc_note_resolution folds in at the set site.
     pub fn tc_build_last_use(self: &mut Self) {
         self.last_use_built = true;
         let n = unsafe (*self.cur_ast()).nodes.len();
@@ -5253,6 +5293,8 @@ extend TypeChecker {
         }
         return nrsub;
     }
+    /// Method `md`'s single return type as seen on receiver `recv` (owner-extend / dyn-interface
+    /// generics substituted); void when none is declared, TYPE_NONE for multi-return methods.
     pub fn tc_method_ret(self: &mut Self, recv: TypeId, md: DefId) TypeId {
         let fa = self.mod_ast(md.module);
         let fnn = unsafe (*fa).at_const(md.node);
@@ -5273,6 +5315,7 @@ extend TypeChecker {
         );
         return self.subst_type(ret, &rsubp[0], &rsuba[0], nrsub);
     }
+    /// Method `md`'s parameter `idx` type on receiver `recv`, with the same substitution as tc_method_ret.
     pub fn tc_method_param(self: &mut Self, recv: TypeId, md: DefId, idx: i32) TypeId {
         let fa = self.mod_ast(md.module);
         let fnn = unsafe (*fa).at_const(md.node);
@@ -8258,10 +8301,6 @@ extend TypeChecker {
         );
     }
 
-    // Is `e` a closure literal (possibly wrapped in `move`/`unsafe`)? Used at store sites to decide
-    // whether the RHS may have re-exposed captured borrows (check_closure) that must be tied to the
-    // destination's region -- the closure's own stored type is `dyn fn` and cannot carry that borrow.
-
     fn check_index(self: &mut Self, id: NodeId, addr_ctx: bool, _place_use: bool) TypeId {
         let a = self.cur_ast();
         let obj_n = unsafe (*a).at_const(id).as_data.index.object;
@@ -10422,6 +10461,9 @@ extend TypeChecker {
         marked.free();
     }
 
+    /// Entry point: types every top-level item, closes concrete generic instances (interning their
+    /// methods' signature types), runs whole-module lints, and finalizes diagnostics. Reclaim the
+    /// typed Ast with take_ast(); the borrowck pass re-walks it from there.
     pub fn check(self: &mut Self) {
         unsafe (*self.cur_ast()).init_types();
         let items = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).root).as_data.program.items;
