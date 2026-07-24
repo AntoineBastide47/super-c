@@ -307,6 +307,9 @@ pub struct ConstEval<'a> {
     pub max_steps: u32,
     pub max_slots: u64,
     pub objs: Vector<CeObj>,
+    // Live-object cursor: reset rewinds this instead of freeing -- retained CeObjs (and their slot
+    // vectors' capacity) are reused by the next fold, so the abstract heap stops churning malloc.
+    pub objs_live: usize,
     pub live_slots: u64,
     pub trap: str<'a>,
     pub trap_kind: u8,
@@ -460,6 +463,7 @@ extend ConstEval {
             max_steps: if_default_steps(max_steps),
             max_slots: if_default_slots(max_mem_bytes),
             objs: Vector::<CeObj>::new(),
+            objs_live: 0,
             live_slots: 0,
             trap: "",
             record_folds: false,
@@ -1513,32 +1517,55 @@ extend ConstEval {
 
     // ---- object store ----
     fn ce_objs_reset(self: &mut Self) {
-        self.objs.clear();
+        self.objs_live = 0;
         self.live_slots = 0;
     }
 
     const fn obj_ptr(self: &Self, id: u32) *mut CeObj {
-        if id == 0 || id as usize > self.objs.len() {
+        if id == 0 || id as usize > self.objs_live {
             return null;
         }
         return unsafe (self.objs.as_ptr() as *mut CeObj + (id - 1) as usize);
     }
 
     fn ce_obj_new(self: &mut Self, len: u32) u32 {
-        if self.objs.len() as u32 >= CE_MAX_OBJS || self.live_slots + len as u64 > self.max_slots {
+        if self.objs_live as u32 >= CE_MAX_OBJS || self.live_slots + len as u64 > self.max_slots {
             self.ce_trap(CE_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return 0;
         }
-        let mut slots = Vector::<CeVal>::new();
-        if len != 0 {
-            slots.reserve(len as usize);
-            for _ in 0..len {
-                slots.push(cv_nil());
+        if self.objs_live < self.objs.len() {
+            // reuse a retained object: refit its slot vector, zero the metadata push{} would zero
+            let o = unsafe (self.objs.as_ptr() as *mut CeObj + self.objs_live);
+            unsafe (*o).slots.clear();
+            if len != 0 {
+                unsafe (*o).slots.reserve(len as usize);
+                for _ in 0..len {
+                    unsafe (*o).slots.push(cv_nil());
+                }
             }
+            unsafe (*o).dead = 0;
+            unsafe (*o).is_enum = 0;
+            unsafe (*o).heap = 0;
+            unsafe (*o).dm = 0;
+            unsafe (*o).dn = NODE_NONE;
+            unsafe (*o).nargs = 0;
+            unsafe (*o).bytes = 0;
+            unsafe (*o).em = 0;
+            unsafe (*o).et = TYPE_NONE;
+            unsafe (*o).esz = 0;
+        } else {
+            let mut slots = Vector::<CeVal>::new();
+            if len != 0 {
+                slots.reserve(len as usize);
+                for _ in 0..len {
+                    slots.push(cv_nil());
+                }
+            }
+            self.objs.push(CeObj { slots: slots });
         }
-        self.objs.push(CeObj { slots: slots });
+        self.objs_live = self.objs_live + 1;
         self.live_slots = self.live_slots + len as u64;
-        return self.objs.len() as u32;
+        return self.objs_live as u32;
     }
 
     fn ce_obj_resize(self: &mut Self, id: u32, len: u32) bool {
@@ -6693,7 +6720,7 @@ extend ConstEval {
     fn ce_capture(self: &mut Self, rootv: CeVal) StaticRes {
         let bad = StaticRes { ok: false, root: 0 };
         let base = self.statics.len() as u32;
-        let nobj = self.objs.len();
+        let nobj = self.objs_live;
         let rid = rootv.as_data.p.obj;
         if rid == 0 || rid as usize > nobj {
             return bad;

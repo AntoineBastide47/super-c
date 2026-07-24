@@ -82,6 +82,12 @@ pub struct Package {
     // per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
     pub clo_lists: Vector<Vector<ModuleId>>,
     pub clo_built: Vector<bool>,
+    // Recycled token vector: each module's lexer adopts it (capacity kept), the parser hands it back.
+    pub tok_scratch: Vector<tok::Token>,
+    // Recycled codegen output buffer, lent to each TU's Codegen through the owner-swap idiom (field
+    // assigns emit no frees, so a PRE-FIX bootstrap compiler lowers the swap correctly -- a
+    // reassigned Free LOCAL would trip the conditional-move bug older emitters carry).
+    pub cg_scratch: String,
     // Import-resolution directory cache (Opt 1): each candidate search directory is scanned ONCE (opendir/
     // readdir) and its entry names cached, so resolve_import_file answers "does <dir>/<file> exist?" from
     // memory instead of an fopen probe per candidate. Scales: a directory with N modules imported M times
@@ -108,6 +114,7 @@ pub struct DirCache {
 pub struct ParseResult {
     pub ast: Ast,
     pub ok: bool,
+    pub tokens: Vector<tok::Token>, // handed back for capacity recycling (Package.tok_scratch)
 }
 
 // The bytes of a file plus their length; `ptr == null` signals any I/O error (mirrors read_file's NULL).
@@ -381,12 +388,13 @@ fn resolve_import_file(dca: usize, root_dir: str, alt_root: str, std_root: str, 
 }
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
-fn parse_source(source: &mut String, file: str, bootstrap_tags: bool) ParseResult {
+fn parse_source(source: &mut String, file: str, bootstrap_tags: bool, recycled: Vector<tok::Token>) ParseResult {
     let mut lx = lexer::Lexer::new(source, file);
+    lx.tokens = recycled; // adopt the recycled capacity (caller passes it cleared)
     lx.scan_tokens();
     if lx.has_errors() {
         lx.log_errors();
-        return ParseResult { ast: Ast::new(0), ok: false };
+        return ParseResult { ast: Ast::new(0), ok: false, tokens: lx.take_tokens() };
     }
     let toks = lx.take_tokens();
     let src = source.as_str(); // padding lives past len -> invisible to the parser
@@ -395,10 +403,10 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool) ParseResul
     ps.build_ast();
     if ps.has_errors() {
         ps.log_errors();
-        return ParseResult { ast: Ast::new(0), ok: false };
+        return ParseResult { ast: Ast::new(0), ok: false, tokens: ps.take_tokens() };
     }
     let out = ps.take_ast();
-    return ParseResult { ast: out, ok: true };
+    return ParseResult { ast: out, ok: true, tokens: ps.take_tokens() };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -429,6 +437,8 @@ extend Package {
             lk_built: Vector::<bool>::new(),
             clo_lists: Vector::<Vector<ModuleId>>::new(),
             clo_built: Vector::<bool>::new(),
+            tok_scratch: Vector::<tok::Token>::new(),
+            cg_scratch: String::new(),
             dir_cache: DirCache::new(),
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
@@ -527,7 +537,11 @@ extend Package {
             };
         }
 
-        let parsed = parse_source(&mut source, file_path, bootstrap_tags);
+        let mut tsc = self.tok_scratch;
+        self.tok_scratch = Vector::<tok::Token>::new();
+        tsc.clear();
+        let parsed = parse_source(&mut source, file_path, bootstrap_tags, tsc);
+        self.tok_scratch = parsed.tokens;
         let ok = parsed.ok;
         let id = self.add_module(String::from_str(mod_path), String::from_str(file_path), source, parsed.ast, ok);
         if !ok {
@@ -1045,9 +1059,9 @@ extend Package {
             let word = self.mod_refs[from as usize * self.mod_refs_w + to as usize / 64];
             return (word & 1u64 << (to as usize % 64) as u64) != 0;
         }
-        let r = &self.modules[from as usize].ast.resolutions;
-        for i in 0..r.len() {
-            let d = r[i];
+        let ra = &self.modules[from as usize].ast;
+        for i in 0..ra.resolutions_len() {
+            let d = ra.resolution_def(i as NodeId);
             if d.node != NODE_NONE && d.module == to {
                 return true;
             }
@@ -1071,9 +1085,9 @@ extend Package {
                 continue;
             }
             let base = from * w;
-            let r = &self.modules[from].ast.resolutions;
-            for k in 0..r.len() {
-                let d = r[k];
+            let ra = &self.modules[from].ast;
+            for k in 0..ra.resolutions_len() {
+                let d = ra.resolution_def(k as NodeId);
                 let to = d.module as usize;
                 if d.node != NODE_NONE && to < n {
                     let idx = base + to / 64;
@@ -1144,6 +1158,8 @@ extend Package as Free {
         self.lk_built.free();
         self.clo_lists.free();
         self.clo_built.free();
+        self.tok_scratch.free();
+        self.cg_scratch.free();
         self.dir_cache.free();
         self.overlay_files.free();
         self.overlay_texts.free();
@@ -1843,7 +1859,7 @@ pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) P
     }
     load_prelude(&mut p, std_dir);
     let mut source = String::from_str(str::from_raw(src as *const u8, len));
-    let parsed = parse_source(&mut source, "<harness>", false);
+    let parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
     let ok = parsed.ok;
     let id = p.add_module(String::from_str("main"), String::from_str("<harness>"), source, parsed.ast, ok);
     if ok {

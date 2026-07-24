@@ -673,19 +673,27 @@ pub struct Ast {
     pub nodes: Vector<Node>,
     pub children: Vector<u32>,
     pub scratch: Vector<u32>,
+    // NOTE: a node/module parallel-array split (6 B/entry vs padded 8) was tried and reverted:
+    // resolution_def is the compiler's hottest lookup and the second cache line cost ~8 Mcyc of
+    // typecheck for a 0.78 MiB saving. Access goes through the accessors below regardless.
     pub resolutions: Vector<DefId>,
     pub type_pool: Vector<Ty>,
-    pub type_index: Map<Ty, TypeId>,
+    // Open-addressing INDEX tables over the pools (0xFFFFFFFF = empty slot): the pool entry itself is
+    // the key, so nothing is stored twice. Every hit VERIFIES the pool entry (codegen truncate()s
+    // `instances` during owner-swap emission, leaving stale ids behind — a stale or out-of-range id
+    // just probes on, self-healing). `*_ix_used` counts occupied slots (staleness included) so the
+    // load-factor rebuild can never be starved by a truncated pool.
+    pub type_index: Vector<u32>,
+    pub type_ix_used: u32,
     pub types: Vector<u32>,
     pub mono: Vector<MonoUse>,
     pub mono_at: Vector<u32>,
     pub instances: Vector<TyInstance>,
     pub method_insts: Vector<MethodInst>,
-    // O(1) dedupe HINT indices mirroring instances/method_insts (TC-2): key -> its position. A hint because
-    // codegen truncate()s `instances` during owner-swap emission, so a lookup always VERIFIES the hinted slot
-    // still holds the same value before trusting it (else falls through to a fresh push) — self-healing.
-    pub instance_index: Map<TyInstance, u32>,
-    pub method_inst_index: Map<MethodInst, u32>,
+    pub instance_index: Vector<u32>,
+    pub inst_ix_used: u32,
+    pub method_inst_index: Vector<u32>,
+    pub mi_ix_used: u32,
     pub dyn_uses: Vector<DynUse>,
     pub dyn_at: Vector<u32>,
     pub deref_uses: Vector<DerefUse>,
@@ -706,14 +714,17 @@ extend Ast {
             scratch: Vector::<u32>::new(),
             resolutions: Vector::<DefId>::new(),
             type_pool: Vector::<Ty>::new(),
-            type_index: Map::<Ty, TypeId>::new(),
+            type_index: Vector::<u32>::new(),
+            type_ix_used: 0,
             types: Vector::<u32>::new(),
             mono: Vector::<MonoUse>::new(),
             mono_at: Vector::<u32>::new(),
             instances: Vector::<TyInstance>::new(),
             method_insts: Vector::<MethodInst>::new(),
-            instance_index: Map::<TyInstance, u32>::new(),
-            method_inst_index: Map::<MethodInst, u32>::new(),
+            instance_index: Vector::<u32>::new(),
+            inst_ix_used: 0,
+            method_inst_index: Vector::<u32>::new(),
+            mi_ix_used: 0,
             dyn_uses: Vector::<DynUse>::new(),
             dyn_at: Vector::<u32>::new(),
             deref_uses: Vector::<DerefUse>::new(),
@@ -722,9 +733,9 @@ extend Ast {
             root: NODE_NONE,
             module: 0,
         };
-        // nodes/tokens sits at ~0.78 across real corpora: reserving 4/5 of the token count stays a
-        // single allocation while trimming the ~20% tail the full count over-reserves.
-        a.nodes.reserve(token_count - token_count / 5);
+        // nodes/tokens sits at ~0.78 across real corpora; 7/8 trims the over-reserve while keeping
+        // the high-ratio outlier modules from doubling past the reserve.
+        a.nodes.reserve(token_count - token_count / 8);
         a.children.reserve(token_count / 2);
         a.nodes.push(Node { kind: NodeKind::NODE_NONE_KIND });
         return a;
@@ -760,6 +771,10 @@ extend Ast {
         }
     }
 
+    pub const fn resolutions_len(self: &Self) usize {
+        return self.resolutions.len();
+    }
+
     pub fn init_types(self: &mut Self) {
         self.types.clear();
         self.types.reserve(self.nodes.len());
@@ -767,27 +782,61 @@ extend Ast {
             self.types.push(TYPE_NONE);
         }
         self.type_pool.clear();
-        self.type_index = Map::<Ty, TypeId>::new();
-        let err = Ty { kind: TypeKind::TYPE_ERROR };
-        self.type_pool.push(err);
-        self.type_index.insert(err, 0);
+        self.type_index.clear();
+        self.type_ix_used = 0;
+        // seeds go to the pool only: the first intern_type rebuild indexes the whole pool
+        self.type_pool.push(Ty { kind: TypeKind::TYPE_ERROR });
         for b in 0..BuiltinType::BT_COUNT as u8 {
-            let t = Ty { kind: TypeKind::TYPE_BUILTIN, as_data: TyAs { builtin: b as BuiltinType } };
-            self.type_pool.push(t);
-            self.type_index.insert(t, b as TypeId + 1);
+            self.type_pool.push(Ty { kind: TypeKind::TYPE_BUILTIN, as_data: TyAs { builtin: b as BuiltinType } });
         }
     }
 
+    // Rebuild an index table over `pool_len` live pool ids (wipes stale slots). `used` resets to the
+    // live count; sizing keeps the post-insert load under 0.75.
+    fn ix_rebuild(ix: &mut Vector<u32>, pool_len: usize) usize {
+        let mut cap: usize = 16;
+        while cap * 3 < (pool_len + 1) * 4 {
+            cap = cap * 2;
+        }
+        ix.clear();
+        ix.reserve(cap);
+        for _ in 0..cap {
+            ix.push(0xFFFFFFFFu32);
+        }
+        return pool_len;
+    }
+
     pub fn intern_type(self: &mut Self, t: Ty) TypeId {
-        return switch self.type_index.get(&t) {
-            Some(id) => *id,
-            None => {
+        if self.type_index.len() == 0 || (self.type_ix_used as usize + 1) * 4 >= self.type_index.len() * 3 {
+            self.type_ix_used = Ast::ix_rebuild(&mut self.type_index, self.type_pool.len()) as u32;
+            for id in 0..self.type_pool.len() {
+                let mask = self.type_index.len() - 1;
+                let mut i = self.type_pool.at(id).hash() as usize & mask;
+                while self.type_index[i] != 0xFFFFFFFFu32 {
+                    i = i + 1 & mask;
+                }
+                self.type_index.set(i, id as u32);
+            }
+        }
+        let mask = self.type_index.len() - 1;
+        let ixp = self.type_index.as_ptr();
+        let pp = self.type_pool.as_ptr();
+        let pn = self.type_pool.len();
+        let mut i = t.hash() as usize & mask;
+        loop {
+            let idx = unsafe ixp[i];
+            if idx == 0xFFFFFFFFu32 {
                 let id = self.type_pool.len() as TypeId;
                 self.type_pool.push(t);
-                self.type_index.insert(t, id);
-                id;
-            },
-        };
+                self.type_index.set(i, id);
+                self.type_ix_used = self.type_ix_used + 1;
+                return id;
+            }
+            if idx as usize < pn && unsafe pp[idx as usize] == t {
+                return idx;
+            }
+            i = i + 1 & mask;
+        }
     }
 
     pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
@@ -799,21 +848,37 @@ extend Ast {
         for j in 0..m {
             unsafe it.args[j] = unsafe args[j];
         }
-        let hinted = switch self.instance_index.get(&it) {
-            Some(id) => *id,
-            None => 0xFFFFFFFFu32,
-        };
-        let cur = self.instances.len();
-        let mut idx = cur as u32;
-        let mut valid = false;
-        if hinted != 0xFFFFFFFFu32 && hinted as usize < cur {
-            valid = self.instances[hinted as usize] == it;
+        if self.instance_index.len() == 0 || (self.inst_ix_used as usize + 1) * 4 >= self.instance_index.len() * 3 {
+            self.inst_ix_used = Ast::ix_rebuild(&mut self.instance_index, self.instances.len()) as u32;
+            for id in 0..self.instances.len() {
+                let mask = self.instance_index.len() - 1;
+                let mut i = self.instances.at(id).hash() as usize & mask;
+                while self.instance_index[i] != 0xFFFFFFFFu32 {
+                    i = i + 1 & mask;
+                }
+                self.instance_index.set(i, id as u32);
+            }
         }
-        if valid {
-            idx = hinted;
-        } else {
-            self.instances.push(it);
-            self.instance_index.insert(it, idx);
+        let mask = self.instance_index.len() - 1;
+        let ixp = self.instance_index.as_ptr();
+        let pp = self.instances.as_ptr();
+        let pn = self.instances.len();
+        let mut i = it.hash() as usize & mask;
+        let mut idx = 0xFFFFFFFFu32;
+        loop {
+            let cur = unsafe ixp[i];
+            if cur == 0xFFFFFFFFu32 {
+                idx = self.instances.len() as u32;
+                self.instances.push(it);
+                self.instance_index.set(i, idx);
+                self.inst_ix_used = self.inst_ix_used + 1;
+                break;
+            }
+            if cur as usize < pn && unsafe pp[cur as usize] == it {
+                idx = cur;
+                break;
+            }
+            i = i + 1 & mask;
         }
         return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
@@ -852,17 +917,35 @@ extend Ast {
         for j in 0..m {
             unsafe mi.targs[j] = unsafe targs[j];
         }
-        let hinted = switch self.method_inst_index.get(&mi) {
-            Some(id) => *id,
-            None => 0xFFFFFFFFu32,
-        };
-        if hinted != 0xFFFFFFFFu32 && hinted as usize < self.method_insts.len() && self.method_insts[hinted as usize] == mi {
-            return false;
+        if self.method_inst_index.len() == 0 || (self.mi_ix_used as usize + 1) * 4 >= self.method_inst_index.len() * 3 {
+            self.mi_ix_used = Ast::ix_rebuild(&mut self.method_inst_index, self.method_insts.len()) as u32;
+            for id in 0..self.method_insts.len() {
+                let mask = self.method_inst_index.len() - 1;
+                let mut i = self.method_insts.at(id).hash() as usize & mask;
+                while self.method_inst_index[i] != 0xFFFFFFFFu32 {
+                    i = i + 1 & mask;
+                }
+                self.method_inst_index.set(i, id as u32);
+            }
         }
-        let idx = self.method_insts.len() as u32;
-        self.method_insts.push(mi);
-        self.method_inst_index.insert(mi, idx);
-        return true;
+        let mask = self.method_inst_index.len() - 1;
+        let ixp = self.method_inst_index.as_ptr();
+        let pp = self.method_insts.as_ptr();
+        let pn = self.method_insts.len();
+        let mut i = mi.hash() as usize & mask;
+        loop {
+            let cur = unsafe ixp[i];
+            if cur == 0xFFFFFFFFu32 {
+                self.method_inst_index.set(i, self.method_insts.len() as u32);
+                self.mi_ix_used = self.mi_ix_used + 1;
+                self.method_insts.push(mi);
+                return true;
+            }
+            if cur as usize < pn && unsafe pp[cur as usize] == mi {
+                return false;
+            }
+            i = i + 1 & mask;
+        }
     }
 
     // Record a decl's lifetime params (no-op for the overwhelmingly common empty case).

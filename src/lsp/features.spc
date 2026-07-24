@@ -90,7 +90,7 @@ pub const fn decl_name(a: *const Ast, id: NodeId) NodeId {
 fn resolved_at(p: &loader::Package, a: *const Ast, off: u32) DefId {
     let mut best = DefId { module: 0, node: NODE_NONE };
     let mut blen: u32 = 0xFFFFFFFF;
-    let mut nn = unsafe (*a).resolutions.len();
+    let mut nn = unsafe (*a).resolutions_len();
     if unsafe (*a).nodes.len() < nn {
         nn = unsafe (*a).nodes.len();
     }
@@ -348,7 +348,7 @@ pub fn references(p: &loader::Package, mi: usize, off: u32, include_decl: bool) 
     }
     for mm in 0..p.modules.len() {
         let am = mod_ast(p, mm);
-        let mut nn = unsafe (*am).resolutions.len();
+        let mut nn = unsafe (*am).resolutions_len();
         if unsafe (*am).nodes.len() < nn {
             nn = unsafe (*am).nodes.len();
         }
@@ -478,7 +478,7 @@ fn tok_push(out: &mut Vector<Tok>, start: u32, end: u32, ty: i32, mods: u32) {
 pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
     let a = mod_ast(p, mi);
     let mut out = Vector::<Tok>::new();
-    let mut nn = unsafe (*a).resolutions.len();
+    let mut nn = unsafe (*a).resolutions_len();
     if unsafe (*a).nodes.len() < nn {
         nn = unsafe (*a).nodes.len();
     }
@@ -604,7 +604,7 @@ fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, out: &mut Vector<C
                 continue;
             }
             let tgt = unsafe (*am).at_const(iid).as_data.extend_def.target_type;
-            if tgt == NODE_NONE || tgt as usize >= unsafe (*am).resolutions.len() {
+            if tgt == NODE_NONE || tgt as usize >= unsafe (*am).resolutions_len() {
                 continue;
             }
             let td = unsafe (*am).resolution_def(tgt);
@@ -691,7 +691,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
     }
     let mo = unsafe (*a).at_const(mem).as_data.member.object;
     // a path object resolving to an enum or an import: variants / module publics
-    if mo as usize < unsafe (*a).resolutions.len() {
+    if mo as usize < unsafe (*a).resolutions_len() {
         let od = unsafe (*a).resolution_def(mo);
         if od.node != NODE_NONE && od.module as usize < p.modules.len() {
             let oa = mod_ast(p, od.module as usize);

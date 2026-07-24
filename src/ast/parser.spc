@@ -67,6 +67,12 @@ extend Parser {
         self.bootstrap_tags = v;
     }
 
+    pub fn take_tokens(self: &mut Self) Vector<Token> {
+        let t = self.tokens;
+        self.tokens = Vector::<Token>::new();
+        return t;
+    }
+
     pub fn take_ast(self: &mut Self) Ast {
         let out = self.ast;
         self.ast = Ast::new(0);

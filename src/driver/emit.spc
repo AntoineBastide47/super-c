@@ -121,9 +121,9 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
                 continue;
             }
             let a = mod_ast_c(p, m as ModuleId);
-            let nr = unsafe (*a).resolutions.len();
+            let nr = unsafe (*a).resolutions_len();
             for r in 0..nr {
-                let d = unsafe (*a).resolutions[r];
+                let d = unsafe (*a).resolution_def(r as NodeId);
                 if d.node != NODE_NONE && d.module as usize < n && d.module as usize != m && p.builtin_of_decl(
                     d.module,
                     d.node,
@@ -593,8 +593,8 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
             continue;
         }
         let a = mod_ast_c(p, m as ModuleId);
-        for i in 0..unsafe (*a).resolutions.len() {
-            let d = unsafe (*a).resolutions[i];
+        for i in 0..unsafe (*a).resolutions_len() {
+            let d = unsafe (*a).resolution_def(i as NodeId);
             if d.node == NODE_NONE || d.module as usize >= nm {
                 continue;
             }
@@ -865,8 +865,8 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
         for k in 0..nm {
             usedm.push(false);
         }
-        for i in 0..unsafe (*a).resolutions.len() {
-            let d = unsafe (*a).resolutions[i];
+        for i in 0..unsafe (*a).resolutions_len() {
+            let d = unsafe (*a).resolution_def(i as NodeId);
             if d.node != NODE_NONE && d.module as usize < nm && d.module as usize != m {
                 usedm.set(d.module as usize, true);
             }
@@ -1065,8 +1065,8 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
             }
             k = k + 1;
         }
-        for i in 0..unsafe (*a).resolutions.len() {
-            let d = unsafe (*a).resolutions[i];
+        for i in 0..unsafe (*a).resolutions_len() {
+            let d = unsafe (*a).resolution_def(i as NodeId);
             if d.node != NODE_NONE && d.module as usize < nm && p.modules[d.module as usize].has_ast && d.node as usize < p.modules[d.module as usize].ast.nodes.len() {
                 used.set(starts[d.module as usize] + d.node as usize, true);
                 if i >= an || !init_src[i] {
@@ -1337,6 +1337,9 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
         let pkg = p as *mut loader::Package;
         let mut c = cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg);
         c.set_multifile(true);
+        let cgb = p.cg_scratch;
+        p.cg_scratch = String::new();
+        c.adopt_buf(cgb);
         let mut tcases = TCases {}; // must outlive codegen_emit (CgTestInfo keeps a pointer into it)
         if testing {
             let mut nt: u32 = 0;
@@ -1402,6 +1405,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
             }
         }
         keep.push(opath);
+        p.cg_scratch = c.take_buf();
     }
     unsafe stdlib::free(order);
     if live != null {

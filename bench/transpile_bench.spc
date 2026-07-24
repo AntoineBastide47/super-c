@@ -319,12 +319,16 @@ fn transpile_once(use_mem: bool) Timing {
         let pkg2 = (&mut p) as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
         let mut c = cg::Codegen::new(ma, str::from_raw(src as *const u8, slen), pkg2);
         c.set_multifile(true);
+        let cgb = p.cg_scratch;
+        p.cg_scratch = String::new();
+        c.adopt_buf(cgb);
         let th0 = time::cpu_seconds();
         c.codegen_emit_header(f);
         let th1 = time::cpu_seconds();
         c.codegen_emit(f);
         r.cg_header = r.cg_header + (th1 - th0);
         r.cg_source = r.cg_source + (time::cpu_seconds() - th1);
+        p.cg_scratch = c.take_buf();
         i = i + 1;
     }
     r.out_bytes = sink_close(f, use_mem);

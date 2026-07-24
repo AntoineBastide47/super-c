@@ -1,17 +1,9 @@
 bin = "super-c"
 root = "src/main.spc"
 
-# Two-stage self-hosting bootstrap replacing the default single-stage build: stage 1 builds with
-# --bootstrap-tags so a pre-tag binary still parses new @attributes; stage 2 rebuilds strictly with
-# the result. At the fixpoint stage 2's C is byte-identical, so its objects are all cache hits.
-# (The nested `build` calls run the real engine: SC_CMD is set while these lines execute.)
-# Stage 1 is pinned to the dev profile: its optimization level cannot change the C it emits, and a
-# release run would otherwise pay a second full-LTO link for a throwaway binary. It is kept between
-# runs (std/ and ffi/ resolve next to the executable, so it must stay at the root) so an unchanged
-# tree skips its relink entirely.
 [command.build]
 run = [
-    "./super-c build --profile=dev --bootstrap-tags -o stage1-super-c",
+    "./super-c build --bootstrap-tags -o stage1-super-c",
     "./stage1-super-c build",
 ]
 

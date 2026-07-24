@@ -478,15 +478,16 @@ extend Codegen {
             }
         }
         let mangle = user_mods > 1;
-        let cap = source.len() * 4 + 4096;
         // *mut-to-Free values are move-tracked, so the second use of `ast` in the literal
         // (home_ast) has to go through a usize.
         let ast_u = ast as usize;
         // Fixed-array fields are omitted -> partial init zero-fills them (NODE_NONE == 0).
+        // buf starts empty: drivers lend a recycled buffer via adopt_buf (one buffer serves every
+        // TU of a build); a lone Codegen just grows it once.
         return Codegen {
             ast: ast_u as *mut Ast,
             source: source,
-            buf: String::with_capacity(cap),
+            buf: String::new(),
             enum_of_variant: Map::<u32, u32>::new(),
             free_ext_cache: Map::<u64, DefId>::new(),
             ext_head: Map::<u64, u32>::new(),
@@ -6731,17 +6732,33 @@ extend Codegen {
         if bd.op == TokenType::Equal && lhs.kind == NodeKind::NODE_IDENTIFIER && self.cg_type_is_free(lt) && ld.node != NODE_NONE && !self.cg_is_moved(
             ld.node,
         ) {
+            // A conditionally-moved binding (moved somewhere control flow may skip -- a call arg
+            // inside a loop, a branch) may or may not hold a live value here: guard the
+            // free-before-assign with its runtime move flag and clear the flag after (the binding
+            // is live again; the scope-exit free must run unless it moves anew).
+            let cond = self.cg_is_cond_moved(ld.node);
+            let mut fl = Buf32 {};
+            if cond {
+                cg_move_flag(&mut fl[0], 32, ld.node);
+            }
             let mut r = Buf32 {};
             self.fresh(&mut r[0], 32);
             self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&r[0]));
             self.emit_expr(bd.right);
             self.emit_str("; ");
+            if cond {
+                self.buf.format_into("if (!{}) ", diag::cstr(&fl[0]));
+            }
             self.emit_free_target(lt);
             self.emit_str("(&");
             self.emit_expr(bd.left);
             self.emit_str("); (");
             self.emit_expr(bd.left);
-            self.buf.format_into(" = {}); }})", diag::cstr(&r[0]));
+            self.buf.format_into(" = {}); ", diag::cstr(&r[0]));
+            if cond {
+                self.buf.format_into("({} = false); ", diag::cstr(&fl[0]));
+            }
+            self.emit_str("})");
             return;
         }
         if lhs.kind == NodeKind::NODE_INDEX && unsafe (*self.cur_ast()).at_const(lhs.as_data.index.index).kind != NodeKind::NODE_RANGE {
@@ -12540,8 +12557,8 @@ extend Codegen {
         if want == null {
             return;
         }
-        for i in 0..unsafe (*self.cur_ast()).resolutions.len() {
-            let d = unsafe (*self.cur_ast()).resolutions[i];
+        for i in 0..unsafe (*self.cur_ast()).resolutions_len() {
+            let d = unsafe (*self.cur_ast()).resolution_def(i as NodeId);
             if d.node == NODE_NONE || d.module == cur || d.module as usize >= nmod {
                 continue;
             }
@@ -12722,8 +12739,8 @@ extend Codegen {
         }
         self.nsubst = saved;
         if pub_const_expr {
-            for ri in 0..unsafe (*self.cur_ast()).resolutions.len() {
-                let d = unsafe (*self.cur_ast()).resolutions[ri];
+            for ri in 0..unsafe (*self.cur_ast()).resolutions_len() {
+                let d = unsafe (*self.cur_ast()).resolution_def(ri as NodeId);
                 if d.node != NODE_NONE && d.module != cur && d.module as usize < nmod && !self.cg_decl_is_interface_member(
                     d.module,
                     d.node,
@@ -13028,6 +13045,17 @@ extend Codegen {
         }
         self.buf.clear();
     }
+    // Lend a recycled output buffer (content cleared, capacity kept) / take it back after the TU.
+    pub fn adopt_buf(self: &mut Self, b: String) {
+        self.buf = b;
+        self.buf.clear();
+    }
+    pub fn take_buf(self: &mut Self) String {
+        let b = self.buf;
+        self.buf = String::new();
+        return b;
+    }
+
     pub fn codegen_emit(self: &mut Self, out: *mut stdio::FILE) {
         if self.ceval() != null {
             unsafe (*self.ceval()).record_folds = true;

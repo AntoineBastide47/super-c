@@ -1521,8 +1521,8 @@ extend Resolver {
         for i in 0..n {
             used.push(false);
         }
-        for i in 0..self.ast.resolutions.len() {
-            let d = self.ast.resolutions[i];
+        for i in 0..self.ast.resolutions_len() {
+            let d = self.ast.resolution_def(i as NodeId);
             if d.node != NODE_NONE && d.module == self.ast.module && d.node as usize < n && i != d.node as usize {
                 used.set(d.node as usize, true);
             }
@@ -1720,8 +1720,8 @@ extend Resolver {
                 // the second RHS must not read the binding (`x = f(x)` is a read)
                 let rsp = self.ast.at_const(self.ast.at_const(a2).as_data.binary.right).span;
                 let mut read = false;
-                for k in 0..self.ast.resolutions.len() {
-                    let d = self.ast.resolutions[k];
+                for k in 0..self.ast.resolutions_len() {
+                    let d = self.ast.resolution_def(k as NodeId);
                     if d.node == decl && d.module == self.ast.module && k != decl as usize {
                         let ksp = self.ast.at_const(k as NodeId).span;
                         if ksp.start >= rsp.start && ksp.end <= rsp.end {

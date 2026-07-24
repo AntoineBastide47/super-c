@@ -357,6 +357,25 @@ fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5(
     assert_eq(p.run_bin(), 0);
 }
 
+// RAII lowering of a reassignment to a binding whose move sits under control flow (a call argument
+// inside a loop): the free-before-assign must be guarded by the binding's runtime move flag and the
+// flag reset after -- an unguarded free double-frees the moved-out buffer (miscompile, not a
+// borrow-check error: the source is legal).
+@test
+fn raii_cond_move_reassign() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn consume(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let mut buf = String::from_str(\"seed\");\n    let mut total: usize = 0;\n    for _i in 0..3 {\n        total = total + consume(buf);\n        buf = String::from_str(\"abcd\");\n    }\n    return (total + buf.len()) as i32 - 16;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "if (!__mv"), "reassign free is flag-guarded");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
 // construction, and a local extension method on an imported type.
 @test

@@ -10216,8 +10216,8 @@ extend TypeChecker {
             used.push(false);
             marked.push(false);
         }
-        for i in 0..unsafe (*a).resolutions.len() {
-            let d = unsafe (*a).resolutions[i];
+        for i in 0..unsafe (*a).resolutions_len() {
+            let d = unsafe (*a).resolution_def(i as NodeId);
             if d.node != NODE_NONE && d.module == self.ast.module && d.node as usize < n && i != d.node as usize {
                 used.set(d.node as usize, true);
             }
