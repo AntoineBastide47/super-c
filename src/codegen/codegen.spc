@@ -380,6 +380,10 @@ pub struct Codegen<'a> {
     pub package: *mut loader::Package,
     pub mangle: bool,
     pub multifile: bool,
+    // The statement emitted just before the current one in its block (NODE_NONE at block starts):
+    // drop-on-assign consults it to suppress the free when the previous statement moved the same
+    // place out (the `let a = m.ast; m.ast = ...` owner-swap idiom).
+    pub prev_stmt: NodeId,
     pub const_ctx: bool,
     pub subst: [CgSubst; 16],
     pub nsubst: i32,
@@ -511,6 +515,7 @@ extend Codegen {
             package: package,
             mangle: mangle,
             multifile: mangle,
+            prev_stmt: NODE_NONE,
             errors: diag::Errors::new(),
         };
     }
@@ -1455,7 +1460,6 @@ extend Codegen {
         }
         self.insts_ast = self.ast;
         self.ninsts = 0;
-        self.inst_idx.free();
         self.inst_idx = Map::<u64, u32>::new();
         self.clos_list.clear();
         let mut i: u32 = 1;
@@ -6832,11 +6836,153 @@ extend Codegen {
                 }
             }
         }
+        // Drop-on-assign: `place = v` frees the old value of a Free-typed SAFE place first --
+        // unless the previous statement moved that place out (owner-swap). RHS evaluates before
+        // the free, mirroring the identifier path.
+        if bd.op == TokenType::Equal && lt != TYPE_NONE && self.cg_type_is_free(lt) && self.cg_safe_place(bd.left) && !self.cg_prev_moved_place(
+            bd.left,
+        ) {
+            let mut r = Buf32 {};
+            let mut pv = Buf32 {};
+            self.fresh(&mut r[0], 32);
+            self.fresh(&mut pv[0], 32);
+            self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&r[0]));
+            self.emit_expr(bd.right);
+            self.buf.format_into("; __auto_type {} = &(", diag::cstr(&pv[0]));
+            self.emit_place(bd.left, true);
+            self.emit_str("); ");
+            self.emit_free_target(lt);
+            self.buf.format_into("({}); (*{} = {}); }})", diag::cstr(&pv[0]), diag::cstr(&pv[0]), diag::cstr(&r[0]));
+            return;
+        }
         self.emit_str("(");
         self.emit_place(bd.left, true);
         self.buf.format_into(" {} ", diag::cstr(c_op(bd.op)));
         self.emit_expr(bd.right);
         self.emit_str(")");
+    }
+    // A SAFE place chain for drop-on-assign: identifiers bound to module-local decls, non-path
+    // members, indexes, and derefs of REFERENCES. Raw-pointer derefs, path members (statics), and
+    // cross-module bases keep the old bare-store semantics (unsafe territory manages its own frees).
+    fn cg_safe_place(self: &Self, id0: NodeId) bool {
+        let mut id = id0;
+        loop {
+            let n = *unsafe (*self.cur_ast()).at_const(id);
+            if n.kind == NodeKind::NODE_IDENTIFIER {
+                let d = unsafe (*self.cur_ast()).resolution_def(id);
+                if d.node == NODE_NONE || d.module != self.cur_module() {
+                    return false;
+                }
+                let dk = unsafe (*self.cur_ast()).at_const(d.node).kind;
+                return dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_PATTERN_NAME;
+            }
+            if n.kind == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+                id = n.as_data.member.object;
+            } else if n.kind == NodeKind::NODE_INDEX {
+                // indexing through a RAW pointer reaches memory whose slots may be uninitialized
+                // (Vector::push writes fresh elements through its data pointer): never free there
+                let ot = unsafe (*self.cur_ast()).type_of(n.as_data.index.object);
+                if ot == TYPE_NONE || self.type_at(self.subst_resolve(ot)).kind == TypeKind::TYPE_POINTER {
+                    return false;
+                }
+                id = n.as_data.index.object;
+            } else if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+                id = n.as_data.unary.operand;
+            } else if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Star {
+                let ot = unsafe (*self.cur_ast()).type_of(n.as_data.unary.operand);
+                if ot == TYPE_NONE || self.type_at(self.subst_resolve(ot)).kind != TypeKind::TYPE_REFERENCE {
+                    return false;
+                }
+                id = n.as_data.unary.operand;
+            } else {
+                return false;
+            }
+        }
+    }
+    // MAYBE-equal place comparison (conservative TOWARD equality: an unsure answer suppresses the
+    // free, which can only leak, never double-free). Identifiers compare by resolution; members by
+    // name text; indexes by identical identifier/literal or "maybe" otherwise.
+    fn cg_place_similar(self: &Self, a0: NodeId, b0: NodeId) bool {
+        let an = *unsafe (*self.cur_ast()).at_const(a0);
+        let bn = *unsafe (*self.cur_ast()).at_const(b0);
+        if an.kind == NodeKind::NODE_UNARY && (an.as_data.unary.op == TokenType::Move || an.as_data.unary.op == TokenType::Unsafe) {
+            return self.cg_place_similar(an.as_data.unary.operand, b0);
+        }
+        if bn.kind == NodeKind::NODE_UNARY && (bn.as_data.unary.op == TokenType::Move || bn.as_data.unary.op == TokenType::Unsafe) {
+            return self.cg_place_similar(a0, bn.as_data.unary.operand);
+        }
+        if an.kind != bn.kind {
+            return false;
+        }
+        if an.kind == NodeKind::NODE_IDENTIFIER {
+            let da = unsafe (*self.cur_ast()).resolution_def(a0);
+            let db = unsafe (*self.cur_ast()).resolution_def(b0);
+            return da.node == db.node && da.module == db.module && da.node != NODE_NONE;
+        }
+        if an.kind == NodeKind::NODE_MEMBER {
+            if an.as_data.member.path != bn.as_data.member.path {
+                return false;
+            }
+            let sa = unsafe (*self.cur_ast()).at_const(an.as_data.member.member).as_data.name.text;
+            let sb = unsafe (*self.cur_ast()).at_const(bn.as_data.member.member).as_data.name.text;
+            let src = self.mod_src(self.cur_module());
+            if !spans_eq2(src, sa, src, sb) {
+                return false;
+            }
+            return self.cg_place_similar(an.as_data.member.object, bn.as_data.member.object);
+        }
+        if an.kind == NodeKind::NODE_INDEX {
+            if !self.cg_place_similar(an.as_data.index.object, bn.as_data.index.object) {
+                return false;
+            }
+            let ia = *unsafe (*self.cur_ast()).at_const(an.as_data.index.index);
+            let ib = *unsafe (*self.cur_ast()).at_const(bn.as_data.index.index);
+            if ia.kind == NodeKind::NODE_IDENTIFIER && ib.kind == NodeKind::NODE_IDENTIFIER {
+                let da = unsafe (*self.cur_ast()).resolution_def(an.as_data.index.index);
+                let db = unsafe (*self.cur_ast()).resolution_def(bn.as_data.index.index);
+                return da.node == db.node && da.module == db.module;
+            }
+            return true; // complex index exprs: maybe the same -> suppress (leak-safe)
+        }
+        if an.kind == NodeKind::NODE_UNARY {
+            if an.as_data.unary.op != bn.as_data.unary.op {
+                return false;
+            }
+            return self.cg_place_similar(an.as_data.unary.operand, bn.as_data.unary.operand);
+        }
+        return true; // unmodeled place shape: maybe -> suppress
+    }
+    // Did the immediately-preceding statement move this place (or a prefix of it) out via a `let`?
+    fn cg_prev_moved_place(self: &Self, lhs: NodeId) bool {
+        if self.prev_stmt == NODE_NONE {
+            return false;
+        }
+        let pn = *unsafe (*self.cur_ast()).at_const(self.prev_stmt);
+        if pn.kind != NodeKind::NODE_LET || pn.as_data.let_stmt.value == NODE_NONE {
+            return false;
+        }
+        let v0 = pn.as_data.let_stmt.value;
+        let vk = unsafe (*self.cur_ast()).at_const(v0).kind;
+        if vk != NodeKind::NODE_MEMBER && vk != NodeKind::NODE_INDEX && vk != NodeKind::NODE_IDENTIFIER && vk != NodeKind::NODE_UNARY {
+            return false;
+        }
+        // compare against lhs and every base prefix of lhs (a moved base leaves the field stale too)
+        let mut cur = lhs;
+        loop {
+            if self.cg_place_similar(v0, cur) {
+                return true;
+            }
+            let cn = *unsafe (*self.cur_ast()).at_const(cur);
+            if cn.kind == NodeKind::NODE_MEMBER && !cn.as_data.member.path {
+                cur = cn.as_data.member.object;
+            } else if cn.kind == NodeKind::NODE_INDEX {
+                cur = cn.as_data.index.object;
+            } else if cn.kind == NodeKind::NODE_UNARY {
+                cur = cn.as_data.unary.operand;
+            } else {
+                return false;
+            }
+        }
     }
     fn emit_free_target(self: &mut Self, bt: TypeId) bool {
         let y = *self.type_at(self.subst_resolve(bt));
@@ -7854,12 +8000,19 @@ extend Codegen {
         }
         self.nunused_params = 0;
         let stmts = n.as_data.block.statements;
+        let saved_prev = self.prev_stmt;
         i = 0;
         while i < stmts.len {
+            self.prev_stmt = if i == 0 {
+                NODE_NONE;
+            } else {
+                unsafe (*self.cur_ast()).list(stmts)[(i - 1) as usize];
+            };
             self.emit_indent();
             self.emit_stmt(unsafe (*self.cur_ast()).list(stmts)[i as usize]);
             i = i + 1;
         }
+        self.prev_stmt = saved_prev;
         let mut diverges = false;
         if stmts.len > 0 {
             diverges = self.cg_stmt_diverges(unsafe (*self.cur_ast()).list(stmts)[(stmts.len - 1) as usize]);
@@ -11224,7 +11377,6 @@ extend Codegen {
     fn collect_callbacks(self: &mut Self) {
         self.n_cb_insts = 0;
         self.n_cb_keep = 0;
-        self.cb_away.free();
         self.cb_away = Map::<u32, u8>::new();
         let nn = unsafe (*self.cur_ast()).nodes.len();
         let mut i: u32 = 0;

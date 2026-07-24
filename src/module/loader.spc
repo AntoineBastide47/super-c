@@ -1150,6 +1150,7 @@ extend Package as Free {
         self.root_dir.free();
         self.gen_root.free();
         self.std_root.free();
+        self.alt_root.free();
         self.method_used.free();
         self.method_edges.free();
         self.edge_seen.free();

@@ -251,7 +251,6 @@ extend JSON {
         }
         for i in 0..self.obj.len() {
             if self.obj.at(i).key.as_str() == key {
-                self.obj[i].value.free();
                 self.obj[i].value = value;
                 return;
             }
@@ -499,7 +498,6 @@ extend JSONParser {
 
     fn fail_s(self: &mut Self, msg: String) {
         if self.err.len() == 0 {
-            self.err.free();
             self.err = msg;
         } else {
             let m = msg;
@@ -897,7 +895,6 @@ extend JSONParser {
                     self.fail("Expected a string key before ':'");
                     return i;
                 }
-                self.pending_key.free();
                 self.pending_key = self.candidate_key;
                 self.candidate_key = String::new();
                 self.pending_key_set = true;
@@ -933,7 +930,6 @@ extend JSONParser {
                                 return i;
                             }
                         } else {
-                            text.free();
                             text = String::from_str(self.src.slice(i + 1, q));
                         }
                         self.found_data = true;
@@ -941,7 +937,6 @@ extend JSONParser {
                         if unsafe (*t).kind == JT_OBJECT {
                             if !self.pending_key_set {
                                 if !self.candidate_key_set {
-                                    self.candidate_key.free();
                                     self.candidate_key = text;
                                     self.candidate_key_set = true;
                                 } else {
@@ -1033,10 +1028,8 @@ extend JSONParser {
                 }
                 let mut val = JSON::default();
                 if c == b't' {
-                    val.free();
                     val = JSON::boolean(true);
                 } else if c == b'f' {
-                    val.free();
                     val = JSON::boolean(false);
                 }
                 self.found_data = true;

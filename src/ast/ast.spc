@@ -1151,6 +1151,8 @@ extend Ast as Free {
         self.deref_uses.free();
         self.deref_at.free();
         self.attrs.free();
+        self.lifetime_decls.free();
+        self.call_info.free();
     }
 }
 

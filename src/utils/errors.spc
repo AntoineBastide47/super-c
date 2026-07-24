@@ -219,11 +219,8 @@ extend Errors {
                 ulens.push(self.lens[k]);
             }
         }
-        self.errors.free();
         self.errors = uniq;
-        self.starts.free();
         self.starts = ustarts;
-        self.lens.free();
         self.lens = ulens;
     }
 

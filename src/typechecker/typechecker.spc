@@ -10299,6 +10299,15 @@ extend TypeChecker as Free {
         self.peel_memo.free();
         self.lower_memo.free();
         self.dynfn_list.free();
+        self.rv_pool.free();
+        self.rv_of.free();
+        self.arity_memo.free();
+        self.variance_of.free();
+        self.variance_wip.free();
+        self.attributable_memo.free();
+        self.lt_region.free();
+        self.outlives.free();
+        self.carries_memo.free();
         self.errors.free();
         self.ast.free();
     }

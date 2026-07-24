@@ -847,7 +847,6 @@ extend Parser {
         if self.nrets.len() != 0 && body != NODE_NONE {
             self.bind_named_returns(body);
         }
-        self.nrets.free();
         self.nrets = outer_nrets;
         let __decl = self.ast.add(
             Node {
@@ -2037,7 +2036,6 @@ extend Parser {
             let outer_nrets = self.nrets;
             self.nrets = Vector::<NodeId>::new();
             let body = self.parse_block();
-            self.nrets.free();
             self.nrets = outer_nrets;
             return self.ast.add(
                 Node {
@@ -2090,7 +2088,6 @@ extend Parser {
                 let outer_nrets = self.nrets;
                 self.nrets = Vector::<NodeId>::new();
                 let block = self.parse_block();
-                self.nrets.free();
                 self.nrets = outer_nrets;
                 return self.ast.add(
                     Node {
@@ -3686,5 +3683,6 @@ extend Parser as Free {
         self.tokens.free();
         self.ast.free();
         self.errors.free();
+        self.nrets.free();
     }
 }

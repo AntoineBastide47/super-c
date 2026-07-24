@@ -434,9 +434,7 @@ extend Server {
             &mut diags,
         );
         // swap the fresh package in (drop the previous build wholesale)
-        self.roots[r].pkg.free();
         self.roots[r].pkg = pkg;
-        self.roots[r].files.free();
         self.roots[r].files = Vector::<String>::new();
         for m in 0..self.roots.at(r).pkg.modules.len() {
             let fp = self.roots.at(r).pkg.modules.at(m).file.as_str();
@@ -444,7 +442,6 @@ extend Server {
         }
         self.roots[r].built = true;
         // retain the records: publishing + codeAction read from them until the next rebuild
-        self.roots[r].diags.free();
         self.roots[r].diags = diags;
         self.publish_root_diags(r, ps);
     }
@@ -468,7 +465,6 @@ extend Server {
             }
             let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
             if d.module as i64 != last_mod {
-                ls.free();
                 ls = text::line_starts(src);
                 last_mod = d.module;
             }
@@ -526,7 +522,6 @@ extend Server {
                 notify(f, "textDocument/publishDiagnostics", &params);
             }
         }
-        self.published.free();
         self.published = Vector::<String>::new();
         for i in 0..ps.uris.len() {
             self.published.push(ps.uris.at(i).clone());
@@ -546,12 +541,10 @@ fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
         Some(params) => {
             let ru = params.value_str("rootUri");
             if ru.len() != 0 {
-                ws.free();
                 ws = text::uri_to_path(ru);
             } else {
                 let rp = params.value_str("rootPath");
                 if rp.len() != 0 {
-                    ws.free();
                     ws = String::from_str(rp);
                 }
             }
@@ -560,7 +553,6 @@ fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
     };
     if ws.len() != 0 {
         let _ = unsafe shim::sc_chdir(ws.cstr());
-        sv.ws_root.free();
         sv.ws_root = canon(ws.as_str());
     }
     switch bman::load("build.toml") {
@@ -581,7 +573,6 @@ fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
                     built: false,
                 },
             );
-            sv.out_skip.free();
             sv.out_skip = String::from_str(man.out_dir.as_str());
             let m = man;
             m.free();
@@ -599,7 +590,6 @@ fn on_did_open(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
             let p = uri_doc_path(uri);
             let di = sv.find_doc(uri);
             if di >= 0 {
-                sv.docs[di as usize].txt.free();
                 sv.docs[di as usize].txt = String::from_str(td.value_str("text"));
                 sv.docs[di as usize].version = td.value_i64("version", 0);
                 p.free();
@@ -632,7 +622,6 @@ fn on_did_change(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
                     if ch.is_array() && ch.size() != 0 {
                         // full sync: the last change carries the whole document
                         let last = ch.at(ch.size() - 1);
-                        sv.docs[di as usize].txt.free();
                         sv.docs[di as usize].txt = String::from_str(last.value_str("text"));
                         sv.docs[di as usize].version = params.at_key("textDocument").value_i64("version", 0);
                         sv.rebuild_all(f);
@@ -1085,11 +1074,8 @@ fn complete_via_probe(sv: &Server, path: str, txt: str, off: u32, member: bool) 
         }
         let r = sv.owning_root(path);
         if r >= 0 {
-            rf.free();
             rf = sv.roots.at(r as usize).root_file.clone();
-            rd.free();
             rd = sv.roots.at(r as usize).root_dir.clone();
-            ad.free();
             ad = sv.roots.at(r as usize).alt_dir.clone();
         }
         let mut diags = Vector::<analysis::DiagRec>::new();
@@ -1168,7 +1154,6 @@ fn on_completion(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
     let path2 = off > 1 && txt[(off - 1) as usize] == b':' && txt[(off - 2) as usize] == b':';
     let mut items = Vector::<feat::CompItem>::new();
     if dot || path2 {
-        items.free();
         items = complete_via_probe(sv, sv.docs.at(di as usize).path.as_str(), txt, off, true);
     } else {
         let r = sv.owning_root(sv.docs.at(di as usize).path.as_str());
@@ -1177,14 +1162,11 @@ fn on_completion(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
             m = sv.root_module(r as usize, sv.docs.at(di as usize).path.as_str());
         }
         if m >= 0 && sv.roots.at(r as usize).pkg.modules.at(m as usize).has_ast {
-            items.free();
             items = feat::complete_general(&sv.roots.at(r as usize).pkg, m as usize, off);
         } else {
             // broken buffer: complete from a probe build; keywords alone if even that fails to parse
-            items.free();
             items = complete_via_probe(sv, sv.docs.at(di as usize).path.as_str(), txt, off, false);
             if items.len() == 0 {
-                items.free();
                 items = feat::complete_keywords();
             }
         }
@@ -1290,7 +1272,6 @@ pub fn run(std_dir: *const char, target: i32) i32 {
         let mut bad = true;
         switch json::parse(msg.as_str()) {
             Ok(v) => {
-                req.free();
                 req = v;
                 bad = false;
             },

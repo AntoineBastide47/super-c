@@ -376,6 +376,25 @@ fn raii_cond_move_reassign() {
     assert_eq(p.run_bin(), 0);
 }
 
+// Drop-on-assign: `place = v` frees the place's old value for fields and indexes too, not just
+// locals -- overwriting a live Free field neither leaks nor needs manual glue. The owner-swap idiom
+// (`let a = s.f; s.f = fresh;`) still lowers to a bare store (the previous statement moved the
+// place out), so no double-free.
+@test
+fn raii_drop_on_field_assign() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct Holder {\n    pub name: String,\n}\n\nfn take_name(h: &mut Holder) String {\n    let t = h.name;\n    h.name = String::new();\n    return t;\n}\n\nfn main() i32 {\n    let mut h = Holder { name: String::from_str(\"first\") };\n    let mut n: usize = 0;\n    for _i in 0..3 {\n        h.name = String::from_str(\"abcdefgh\");\n        n = n + h.name.len();\n    }\n    let taken = take_name(&mut h);\n    n = n + taken.len();\n    return n as i32 - 32;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "String__free"), "field overwrite frees the old value");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
 // construction, and a local extension method on an imported type.
 @test
