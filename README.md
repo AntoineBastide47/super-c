@@ -10,11 +10,12 @@ Super-C is not a C dialect. It is its own language that uses C as a compilation 
 
 ```text
 Super-C source (.spc)
-    -> lexer        (UTF-8, packed tokens)
-    -> parser       (context-free LL(1), left-factored operators, no predicates/backtracking; flat AST arena)
-    -> resolver     (name binding, scopes, modules)
-    -> typechecker  (type inference, generics, monomorphization, borrow checking)
-    -> codegen      (readable C: build/ tree of .h/.c)
+    -> lexer          (UTF-8, packed tokens)
+    -> parser         (context-free LL(1), left-factored operators, no predicates/backtracking; flat AST arena)
+    -> resolver       (name binding, scopes, modules)
+    -> typechecker    (type inference, generics, monomorphization; always-on compile-time evaluation)
+    -> borrow checker (moves, aliasing, lifetimes -- a dedicated pass over the typed AST)
+    -> codegen        (readable C: build/ tree of .h/.c, RAII frees inserted)
     -> cc / clang / gcc
     -> native binary
 ```
@@ -311,7 +312,74 @@ guarantees stop. Pointer comparison and reference operations stay safe.
 References are borrow-checked statically: a place admits many `&` or one `&mut` (overlap is
 field-precise — `p.a` and `p.b` don't conflict), a place can't be read or moved while an overlapping
 `&mut` is live, a stored borrow ends at its last use (non-lexical), and returning a reference that
-traces to a local is rejected.
+traces to a local is rejected. Type-level lifetimes tie borrows to their owners across function
+boundaries — annotations are Rust-style and almost always elided:
+
+```superc
+fn longer<'a>(a: &'a String, b: &'a String) &'a String {
+    if a.len() > b.len() {
+        return a;
+    }
+    return b;
+}
+```
+
+Struct fields holding references carry lifetime parameters (`struct View<'a> { s: str<'a> }`), view
+types pin the container they borrow from, and higher-ranked bounds (`for<'x> fn(&'x T) &'x U`) and
+generic associated types are supported. Lifetimes are erased at codegen — they exist only to prove
+the program safe.
+
+### Ownership and destructors (RAII)
+
+Values that own memory are freed automatically, deterministically, and exactly once — without
+writing a destructor:
+
+```superc
+struct Session {
+    pub name: String,
+    pub log: Vector<String>,
+}
+
+fn main() i32 {
+    let s = Session { name: String::from_str("alice"), log: Vector::<String>::new() };
+    let n = s.name.len() as i32;
+    return n - 5;
+}   // s.log and s.name are freed here -- no impl was written
+```
+
+The `Free` interface is the destructor hook (`fn free(self: &mut Self)`), and ownership is
+**derived**: a struct or enum whose members own memory (a `String`, a container, another owning
+aggregate, an enum payload) is itself owning — the compiler synthesizes its `free`, recursively,
+per variant for enums, per instantiation for generics. Write an explicit `extend T as Free` only
+when cleanup needs custom behavior; any owning field the body does not touch is still freed by
+generated glue, so a hand-written destructor cannot silently leak a field. `union`s are the one
+exception: only the author knows the active member, so an owning union without an explicit `Free`
+impl is a compile error. Pointers and references never count as owning — a raw pointer is a borrow;
+ownership is always spelled as a type with a free (`Box<T>`, `Vector<T>`, `String`).
+
+Owning values **move** instead of copying, and the compiler enforces single ownership statically:
+
+```superc
+let a = String::from_str("owned");
+let b = a;              // ownership moves to b
+// a.len()              // error: use of moved value
+```
+
+Assignment frees the place's old value first (`s.name = fresh;` never leaks the previous string),
+moving a field out of an owning value or out of a reference is rejected (the destructor would run
+on a partial value / the owner would free it again), and the sanctioned idioms are:
+
+```superc
+fn retitle(s: &mut Session) String {
+    return replace(&mut s.name, String::from_str("bob"));  // swap ownership out, atomically
+}
+
+forget(expensive);      // the sanctioned DELIBERATE leak: never freed, still visible to the
+                        // leak tracker -- intentional leaks stay greppable, never laundered
+```
+
+An `unsafe` block may still take a field out of a reference directly, accepting responsibility for
+the ownership transfer — the same marker contract as raw-pointer code.
 
 ### Deferred cleanup
 
@@ -551,6 +619,32 @@ parameter, and follow the same lifecycle (setup → test → `@test_free` method
 host several suites (one per type), and a local extension of an imported type can define its own —
 each module's suite uses its own `@test_init`.
 
+### Finding leaks and double frees
+
+Every compiled binary carries a built-in leak sanitizer, inert until asked for (works everywhere,
+including Apple Silicon where LeakSanitizer does not exist):
+
+```sh
+SC_LEAK_CHECK=1 ./app          # report allocations that survive to exit, with call stacks
+SC_LEAK_CHECK=fatal ./app      # same report, exit code 23 on leaks -- a CI gate
+```
+
+```text
+== super-c leaks: 1 allocation(s), 46 byte(s) ==
+leak: 1 allocation(s), 46 byte(s)
+    2   app    Global__alloc + 32
+    3   app    String__from_str + 44
+    4   app    main + 64
+```
+
+The runtime (`super_rt.c`, generated into every build) interposes the emitted code's
+`malloc`/`calloc`/`realloc`/`free` call sites over a registry keyed by pointer. Freed entries are
+kept, so a **double free** is detected and reported with both stacks (the block is *not* freed a
+second time, so the report replaces the crash), and `realloc` of a freed pointer is flagged as a
+use-after-free. Off by default it costs one predictable branch per allocation; this repo's check
+script runs the whole test suite under `SC_LEAK_CHECK=fatal`, so compiler and standard library are
+leak-free by construction, not by audit.
+
 ### Compile-time assertions
 
 ```superc
@@ -565,7 +659,7 @@ the C compiler evaluates it.
 
 Always on. A constant evaluator, a layout engine (64-bit C data model), and a CTFE interpreter run
 as part of every compile; two flags bound how much work a single compile-time evaluation may do
-(exhausting a budget is never an error for plain functions -- the expression simply stays a runtime
+(exhausting a budget is never an error for plain functions — the expression simply stays a runtime
 one; `const fn` calls and const initializers are held to a stricter standard, below):
 
 ```sh
@@ -649,7 +743,8 @@ The strictness rules:
 
 ```text
 build/
-  super_rt.h        # shared runtime (C standard-library includes)
+  super_rt.h        # shared runtime (C standard-library includes + allocation interposition)
+  super_rt.c        # the leak/double-free tracker backing SC_LEAK_CHECK (inert when unset)
   app.h  app.c      # one .h/.c per module
   __std/            # the prelude modules
     string.h string.c  option.h option.c  ...
@@ -663,18 +758,24 @@ names. The output is meant to be read.
 
 ```text
 src/
-  lexer/        token scanning
-  ast/          parser + flat AST arena
-  resolver/     name resolution and scopes
-  typechecker/  type inference, generics, monomorphization
-  codegen/      C emission
-  module/       package loader / imports / prelude
-  types/        generic vector + hashmap containers
-  utils/        diagnostics (rustc-style), attributes
-std/            the auto-imported prelude
-tests/          unit + compile-and-run tests
-benchmark/      per-stage microbenchmarks
-examples/       sample programs
+  lexer/         token scanning
+  ast/           parser + flat AST arena
+  resolver/      name resolution and scopes
+  typechecker/   type inference, generics, monomorphization
+  borrowck/      moves, aliasing, lifetimes (a dedicated pass over the typed AST)
+  consteval/     the CTFE interpreter + layout engine
+  codegen/       C emission (incl. synthesized destructors and the runtime)
+  module/        package loader / imports / prelude
+  driver/        compile pipeline, lints, emission orchestration
+  build_system/  build.toml engine (profiles, incremental parallel cc)
+  fmt/           the canonical formatter
+  lsp/           the language server
+  utils/         diagnostics (rustc-style), attributes
+std/             the auto-imported prelude
+ffi/             C standard-library bindings (import stdio; ...)
+tests/           the self-hosted test suite
+bench/           the self-transpile benchmark
+editors/         VS Code extension wiring the LSP
 ```
 
 ## Building and testing
@@ -692,8 +793,16 @@ The build is driven by `build.toml` and works for any project, not just the comp
 own), incremental parallel C compilation with dependency tracking, and the `tests/` + `bench/`
 conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `-o`. Custom `[command.NAME]`
 entries run via `super-c run NAME` and may shadow the built-in `build`/`test`/`bench`/`clean` (this
-repo's `build` is overridden to the two-stage self-hosting bootstrap). `super-c fmt` (canonical
-formatter) and `super-c lint [--fix]` (default-on lints) round out the toolchain.
+repo's `build` is overridden to the two-stage self-hosting bootstrap). The rest of the toolchain:
+
+* `super-c fmt` — the canonical formatter (Wadler-style, width 120, `@fmt.skip` escape hatch).
+* `super-c lint [--fix]` — default-on lints (unused imports/members/labels, unnecessary `mut` or
+  `unsafe`, unreachable statements and arms, dead stores, discarded pure results, redundant casts,
+  owning unions without a `free`, ...); `--fix` applies the machine fixes — including generated
+  code — and re-lints to a fixpoint. `--suggest-const` flags functions the CTFE interpreter proves
+  always evaluable.
+* `super-c lsp` — a language server (diagnostics as you type, hover, go-to-definition, references,
+  rename, completion, formatting, quick fixes); `editors/vscode/` wires it up.
 
 ## Status and roadmap
 
@@ -705,10 +814,16 @@ cross-module), interfaces with enforced generic bounds and method dispatch, oper
 operator, compile-time evaluation (constant folding, layout, and full CTFE with an abstract heap; `const fn`
 with definition-site validation, mandatory evaluation of call-bearing const initializers, aggregate consts
 materialized as static C data with relocations, cycle detection, and proven-UB fold errors), `panic` /
-`unwrap` / `expect` with a `never` type for diverging calls, RAII-style
-automatic cleanup (a `Free` trait run at scope exit) with move analysis (use-after-move,
-use-after-free, and double-free prevention), a static borrow checker (`&`/`&mut` aliasing with
-field-precise overlap, use-while-borrowed, non-lexical borrow lifetimes, dangling-reference returns),
+`unwrap` / `expect` with a `never` type for diverging calls, ownership with RAII
+(destructors DERIVED for owning structs and enums, synthesized per instantiation; explicit `Free`
+impls completed by generated glue; assignment frees the old value; moves tracked with exact
+conditional-move precision; partial moves out of owning values and moves out of references
+rejected with `replace`/`unsafe` escape hatches; `forget` as the sanctioned leak), a static borrow
+checker (`&`/`&mut` aliasing with field-precise overlap, use-while-borrowed, non-lexical borrow
+lifetimes, dangling-reference returns, and Rust-style type-level lifetimes — elision, struct
+lifetime params, HRTB, GATs — erased at codegen), a built-in leak sanitizer in every emitted
+binary (`SC_LEAK_CHECK=1|fatal`: exit-time reports with call stacks, double-free and
+realloc-after-free detection),
 closures (copy / `&mut` / owning captures, monomorphized through `F: fn(..) ..` and `fn move` bounds)
 and function pointers, trait objects (`&dyn I` / `&mut dyn I` / `Box<dyn I>` with per-TU static
 vtables and drop glue, plus structural `dyn fn(..) ..` for stored closures and heterogeneous handler
@@ -739,7 +854,10 @@ both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
 The compiler is **fully self-hosted**: it is written in Super-C, compiles itself through a two-stage
 bootstrap to a byte-identical fixpoint, and ships with its own toolchain — the `build.toml` build
 system (profiles, incremental parallel C compilation, `test`/`bench` conventions), a canonical
-formatter (`super-c fmt`), and machine-fixable lints (`super-c lint --fix`).
+formatter (`super-c fmt`), machine-fixable lints (`super-c lint --fix`), and a language server
+(`super-c lsp` with a VS Code extension). Its own test suite runs under `SC_LEAK_CHECK=fatal`: the
+compiler, the standard library, and every test fixture are gated leak-free and double-free-free on
+every commit.
 
 Roadmap, in priority order:
 
@@ -751,4 +869,3 @@ Roadmap, in priority order:
    FFI, with no std types and no `Send`/`Sync` markers (the borrow checker is single-threaded).
 4. **Coroutines** — `launch f(args)`: uncolored spawn on stackful coroutines with `Chan<T>`, staged
    from a single-threaded scheduler to M:N work stealing.
-5. **Tooling** — an LSP server, then syntax highlighting.
