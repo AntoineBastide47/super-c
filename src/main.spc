@@ -128,7 +128,7 @@ fn read_stdin() Option<String> {
 }
 
 // Byte-lexicographic name order with a length tiebreak: deterministic directory walks.
-fn fmt_name_cmp(a: &String, b: &String) i32 {
+const fn fmt_name_cmp(a: &String, b: &String) i32 {
     let la = a.len();
     let lb = b.len();
     let m = if la < lb {
@@ -188,7 +188,7 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
 // `super-c lint <path> [<path2> ...]`: load each path as its own root (its import closure + prelude),
 // resolve + typecheck with lints on for that root module, and print warnings. Lints files that are not
 // part of any binary's import closure. A directory recurses over its .spc files.
-fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
+const fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
     if a.start < b.start {
         return -1;
     }
@@ -198,8 +198,9 @@ fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
     return 0;
 }
 
-// Apply machine fixes ascending: kind 0 deletes [start, end), kind 1 inserts '_' before start. An
-// overlapping fix is skipped -- the next `--fix` re-lint pass records it against the patched source.
+// Apply machine fixes ascending: kind 0 deletes [start, end), kind 1 inserts '_' before start,
+// kind 2 inserts 'const ' before start. An overlapping fix is skipped -- the next `--fix` re-lint
+// pass records it against the patched source.
 fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>) String {
     fixes.sort_by(lint_fix_cmp);
     let mut out = String::new();
@@ -213,6 +214,9 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>) String {
         out.push_str(src.slice(pos, f.start as usize));
         if f.kind == 1 {
             out.push_byte(b'_');
+            pos = f.start as usize;
+        } else if f.kind == 2 {
+            out.push_str("const ");
             pos = f.start as usize;
         } else {
             pos = f.end as usize;
@@ -232,7 +236,7 @@ fn lint_alt() str<'static> {
     return "";
 }
 
-fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool) i32 {
+fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
     // loading it as a root would invent errors. Load an empty root -- the prelude comes along as
     // always -- and if the requested file IS one of those modules, lint it in place.
@@ -266,11 +270,11 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
         p.ceval = &mut ceval;
         if !fix {
-            let rc = lint_package(&mut p, target, lint_mod, null);
+            let rc = lint_package(&mut p, target, lint_mod, null, sc);
             return rc;
         }
         let mut fixes = Vector::<diag::LintFix>::new();
-        lint_package(&mut p, target, lint_mod, &mut fixes);
+        lint_package(&mut p, target, lint_mod, &mut fixes, sc);
         let errors = !p.ok;
         let mut applied = false;
         let mut werr = false;
@@ -296,10 +300,10 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         fmt_one(path, false, true, false);
         pass = pass + 1;
     }
-    return lint_one(path, root, std_dir, ce_steps, ce_mem, target, false);
+    return lint_one(path, root, std_dir, ce_steps, ce_mem, target, false, sc);
 }
 
-fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool) i32 {
+fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     let mut d = String::from_str(dir);
     let dh = unsafe shim::sc_opendir(d.cstr());
     if dh == null {
@@ -327,11 +331,11 @@ fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u6
         p.push_string(names.at(i));
         let isdir = unsafe shim::sc_stat_isdir(p.cstr());
         if isdir == 1 {
-            if lint_dir(p.as_str(), root, std_dir, ce_steps, ce_mem, target, fix) != 0 {
+            if lint_dir(p.as_str(), root, std_dir, ce_steps, ce_mem, target, fix, sc) != 0 {
                 rc = 1;
             }
         } else if names.at(i).as_str().ends_with(".spc") {
-            if lint_one(p.as_str(), root, std_dir, ce_steps, ce_mem, target, fix) != 0 {
+            if lint_one(p.as_str(), root, std_dir, ce_steps, ce_mem, target, fix, sc) != 0 {
                 rc = 1;
             }
         }
@@ -339,7 +343,7 @@ fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u6
     return rc;
 }
 
-fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool) i32 {
+fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
         // every file under the directory resolves imports against the directory itself
         let droot = if lint_alt().len() != 0 {
@@ -347,14 +351,14 @@ fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target:
         } else {
             path;
         };
-        return lint_dir(path, droot, std_dir, ce_steps, ce_mem, target, fix);
+        return lint_dir(path, droot, std_dir, ce_steps, ce_mem, target, fix, sc);
     }
     let froot = if lint_alt().len() != 0 {
         ".";
     } else {
         "";
     };
-    return lint_one(path, froot, std_dir, ce_steps, ce_mem, target, fix);
+    return lint_one(path, froot, std_dir, ce_steps, ce_mem, target, fix, sc);
 }
 
 // `super-c fmt`: canonical formatting. Rewrites files in place by default (only when they changed);
@@ -420,7 +424,7 @@ enum Mode {
     MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
     MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
     MODE_FMT, // `super-c fmt [--check] <path...| ->`
-    MODE_LINT, // `super-c lint [--fix] <path> [<path2> ...]`
+    MODE_LINT, // `super-c lint [--fix] [--suggest-const] <path> [<path2> ...]`
     MODE_RUN, // `super-c run <command>`: build.toml command
     MODE_CLEAN, // `super-c clean`: drop build.toml outputs
     MODE_TEST, // `super-c test`: tests/ by convention
@@ -549,6 +553,7 @@ fn main(argv: Vector<str>) i32 {
     };
     let mut fmt_check = false; // fmt --check: report unformatted files, write nothing
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
+    let mut lint_sc = false; // lint --suggest-const: warn on functions the deep CTFE scan proves always evaluable
     let mut bench_norun = false; // bench --no-run: build the bench binary only
     let mut extra = Vector::<usize>::new(); // argv indices of extra `fmt`/`lint` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
@@ -639,6 +644,8 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if common_flag(&mut co, arg) {} else if arg == "--fix" {
                     lint_fix = true;
+                } else if arg == "--suggest-const" {
+                    lint_sc = true;
                 } else if arg.starts_with("--") {
                     co.bad = true;
                 } else if file.len() == 0 {
@@ -744,9 +751,9 @@ fn main(argv: Vector<str>) i32 {
     };
     let std_dir = exe_std_dir(arg0);
     if mode == Mode::MODE_LINT {
-        let mut rc = run_lint(file, std_dir, ce_steps, ce_mem, target, lint_fix);
+        let mut rc = run_lint(file, std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc);
         for k in 0..extra.len() {
-            if run_lint(argv[*extra.at(k)], std_dir, ce_steps, ce_mem, target, lint_fix) != 0 {
+            if run_lint(argv[*extra.at(k)], std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
                 rc = 1;
             }
         }

@@ -24,7 +24,7 @@ import driver::test as *;
 // ---------------------------------------------------------------------------------------------------------
 // Dead-module pruning of the emit set: a live module reaches its own decls + everything it references.
 // ---------------------------------------------------------------------------------------------------------
-fn mark_live(live: *mut bool, n: usize, m: ModuleId) bool {
+const fn mark_live(live: *mut bool, n: usize, m: ModuleId) bool {
     if m as usize >= n || unsafe live[m as usize] {
         return false;
     }
@@ -386,7 +386,7 @@ struct LintEnt {
     pub root: bool,
 }
 
-fn lint_ent_cmp(a: &LintEnt, b: &LintEnt) i32 {
+const fn lint_ent_cmp(a: &LintEnt, b: &LintEnt) i32 {
     if a.start < b.start {
         return -1;
     }
@@ -396,7 +396,7 @@ fn lint_ent_cmp(a: &LintEnt, b: &LintEnt) i32 {
     return 0;
 }
 
-fn lint_edge_cmp(a: &u64, b: &u64) i32 {
+const fn lint_edge_cmp(a: &u64, b: &u64) i32 {
     if *a < *b {
         return -1;
     }
@@ -735,6 +735,83 @@ pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut 
     }
 }
 
+// --lint: functions the deep (all-paths) CTFE scan proves always evaluable -- declaring them
+// `const fn` passes the def-site check and unlocks folding. `const fn` is a semantic contract
+// (folds with known arguments must succeed), so the fix (insert `const ` before the `fn` keyword,
+// which lands AFTER any `pub`/`unsafe` -- the canonical order) applies only under `--fix`.
+// Conformance members are skipped (the interface fixes the signature), as are @test fns and `main`.
+// Prelude modules are ALWAYS excluded, even when linted in place: constifying a prelude helper
+// promotes failed folds to errors in every downstream program, a blast radius the per-package
+// `--fix` fixpoint cannot validate -- prelude const adoption must be a deliberate manual change.
+fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, in_iface: bool) {
+    if unsafe (*a).at_const(fnode).kind != NodeKind::NODE_FUNCTION || in_iface || ap_is_test_fn(a, fnode) {
+        return;
+    }
+    let f = unsafe (*a).at_const(fnode).as_data.function;
+    if f.is_const || f.is_extern || f.body == NODE_NONE {
+        return;
+    }
+    let src = p.modules[m].source.as_str();
+    let nsp = unsafe (*a).at_const(f.name).as_data.name.text;
+    if m == 0 && diag::span_str(src, nsp.start, nsp.end) == "main" {
+        return;
+    }
+    let cev = p.ceval as *mut ce::ConstEval;
+    if unsafe (*cev).ce_fn_const_suggest(m as ModuleId, fnode) {
+        errs.warn(
+            nsp.start,
+            nsp.end - nsp.start,
+            format("function '{}' can be declared 'const fn'", diag::span_str(src, nsp.start, nsp.end)),
+        );
+        // the `fn` keyword sits just before the name, across whitespace
+        let mut i = nsp.start as usize;
+        while i > 0 && (src[i - 1] == b' ' || src[i - 1] == b'\t' || src[i - 1] == b'\n' || src[i - 1] == b'\r') {
+            i = i - 1;
+        }
+        if i >= 2 && src[i - 2] == b'f' && src[i - 1] == b'n' {
+            errs.fix((i - 2) as u32, (i - 2) as u32, 2);
+        }
+    }
+}
+
+fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
+    if p.ceval == null {
+        return;
+    }
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        let mut errs = diag::Errors::new();
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe (*a).list(items)[i as usize];
+            if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
+                let in_iface = unsafe (*a).at_const(iid).as_data.extend_def.interface_type != NODE_NONE;
+                let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+                for j in 0..ms.len {
+                    cs_check_fn(p, &mut errs, a, m, unsafe (*a).list(ms)[j as usize], in_iface);
+                }
+            } else {
+                cs_check_fn(p, &mut errs, a, m, iid, false);
+            }
+        }
+        if fixes != null {
+            for k in 0..errs.fixes.len() {
+                unsafe (*fixes).push(errs.fixes[k]);
+            }
+        }
+        if errs.has_warnings() {
+            p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
+            if fixes == null {
+                errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+                errs.log();
+            }
+        }
+    }
+}
+
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
@@ -754,7 +831,13 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
 // ROOT module only (each listed path is its own invocation, so shared imports don't warn twice),
 // then the unused-items pass restricted to the root. No code is emitted. Errors exit 1; warnings
 // alone exit 0 (compiler-warning semantics).
-pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize, fixes: *mut Vector<diag::LintFix>) i32 {
+pub fn lint_package(
+    p: &mut loader::Package,
+    target: i32,
+    lint_mod: usize,
+    fixes: *mut Vector<diag::LintFix>,
+    suggest_const: bool,
+) i32 {
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
@@ -788,7 +871,10 @@ pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize, fixes
     if !p.ok {
         return 1;
     }
-    // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print duplicates).
+    // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
+    // duplicates). The const suggestion is the exception: opt-in (`--suggest-const`, warning every
+    // eligible function at once would swamp default lints), and under `--fix` it contributes its
+    // `const `-insertion fixes instead of printing.
     if fixes == null {
         lint_unused_items(p, lint_mod as i32);
         let ceptr = p.ceval as *mut ce::ConstEval;
@@ -796,6 +882,9 @@ pub fn lint_package(p: &mut loader::Package, target: i32, lint_mod: usize, fixes
             unsafe (*ceptr).all_typed = true;
         }
         check_always_panics(p, lint_mod as i32);
+    }
+    if suggest_const {
+        lint_const_suggest(p, lint_mod as i32, fixes);
     }
     if !p.ok || p.lint_warnings != 0 {
         return 1;

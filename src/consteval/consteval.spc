@@ -57,7 +57,7 @@ pub const CE_TRAP_UB_USE_AFTER_FREE: u8 = 12;
 pub const CE_TRAP_UB_DOUBLE_FREE: u8 = 13;
 pub const CE_TRAP_UB_OOB: u8 = 14;
 
-pub fn ce_trap_is_ub(k: u8) bool {
+pub const fn ce_trap_is_ub(k: u8) bool {
     return k >= CE_TRAP_UB_DIV_ZERO;
 }
 
@@ -128,10 +128,10 @@ pub struct CeVal {
     pub as_data: CeValAs,
 }
 
-fn cv_nil() CeVal {
+const fn cv_nil() CeVal {
     return CeVal { kind: CV_NIL_K };
 }
-fn ce_none() ConstValue {
+const fn ce_none() ConstValue {
     return ConstValue { kind: CONST_NONE };
 }
 
@@ -226,7 +226,7 @@ pub struct CeFrame {
     pub ndefers: u8,
 }
 
-fn ce_frame_zero() CeFrame {
+const fn ce_frame_zero() CeFrame {
     return CeFrame { env: 0 };
 }
 
@@ -326,6 +326,7 @@ pub struct ConstEval<'a> {
     pub calls: Map<CeCallKey, CeCallHit>,
     pub ufree: Vector<UFree>,
     pub fx: Vector<Vector<u8>>, // [module][fn node] effect verdicts (FX_*)
+    pub fxd: Vector<Vector<u8>>, // deep (all-paths) verdicts: FX_YES = every path provably evaluates (const-suggestion lint)
     pub fx_no: Vector<FxNo<'a>>,
     pub fx_depth: u32,
     pub statics: Vector<StaticObj>, // materialized const object graphs (grouped per root)
@@ -472,6 +473,7 @@ extend ConstEval {
             calls: Map::<CeCallKey, CeCallHit>::new(),
             ufree: Vector::<UFree>::new(),
             fx: Vector::<Vector<u8>>::new(),
+            fxd: Vector::<Vector<u8>>::new(),
             fx_no: Vector::<FxNo>::new(),
             fx_depth: 0,
             statics: Vector::<StaticObj>::new(),
@@ -480,6 +482,7 @@ extend ConstEval {
         for _ in 0..count {
             ce.vals.push(Vector::<ConstValue>::new());
             ce.fx.push(Vector::<u8>::new());
+            ce.fxd.push(Vector::<u8>::new());
             ce.sref.push(Vector::<i64>::new());
         }
         return ce;
@@ -487,34 +490,34 @@ extend ConstEval {
 
     // ---- ast / source access (raw pointers; deref under unsafe, mirroring the C const-view) ----
 
-    fn ast_ptr(self: &Self, m: ModuleId) *const Ast {
+    const fn ast_ptr(self: &Self, m: ModuleId) *const Ast {
         // While a stage holds module `m`'s Ast (moved out of the slot), read the in-flight Ast it points at.
         if m == unsafe (*self.pkg).override_mod && unsafe (*self.pkg).override_ast != null {
             return unsafe (*self.pkg).override_ast;
         }
         return unsafe &(*self.pkg).modules[m as usize].ast;
     }
-    fn mut_ast_ptr(self: &Self, m: ModuleId) *mut Ast {
+    const fn mut_ast_ptr(self: &Self, m: ModuleId) *mut Ast {
         if m == unsafe (*self.pkg).override_mod && unsafe (*self.pkg).override_ast != null {
             return unsafe (*self.pkg).override_ast;
         }
         return unsafe &mut (*self.pkg).modules[m as usize].ast;
     }
-    fn has_ast(self: &Self, m: ModuleId) bool {
+    const fn has_ast(self: &Self, m: ModuleId) bool {
         if m as usize >= self.nmods {
             return false;
         }
         return unsafe (*self.pkg).modules[m as usize].has_ast;
     }
-    fn ce_src(self: &Self, m: ModuleId) str {
+    const fn ce_src(self: &Self, m: ModuleId) str {
         return unsafe (*self.pkg).modules[m as usize].source.as_str();
     }
-    fn is_prelude(self: &Self, m: ModuleId) bool {
+    const fn is_prelude(self: &Self, m: ModuleId) bool {
         return unsafe (*self.pkg).modules[m as usize].prelude;
     }
 
     // ast_type, safe on a module the checker hasn't reached (types table may not cover id yet).
-    fn ce_type(self: &Self, m: ModuleId, id: NodeId) TypeId {
+    const fn ce_type(self: &Self, m: ModuleId, id: NodeId) TypeId {
         let a = self.ast_ptr(m);
         if unsafe (*a).types.len() > id as usize {
             return unsafe (*a).type_of(id);
@@ -540,10 +543,10 @@ extend ConstEval {
     }
     // Speculative-probe guard: an evaluation that does not imply runtime execution must not leave a
     // trap behind. First-write-wins makes discard O(1): the probe can only have written if empty before.
-    fn trap_mark(self: &Self) bool {
+    const fn trap_mark(self: &Self) bool {
         return self.trap.len() != 0;
     }
-    fn trap_discard(self: &mut Self, was: bool) {
+    const fn trap_discard(self: &mut Self, was: bool) {
         if !was && self.trap.len() != 0 {
             self.trap = "";
             self.trap_kind = CE_TRAP_NONE;
@@ -562,7 +565,7 @@ extend ConstEval {
     }
 
     // ---- memo ----
-    fn slot_get(self: &Self, m: ModuleId, id: NodeId) ConstValue {
+    const fn slot_get(self: &Self, m: ModuleId, id: NodeId) ConstValue {
         if m as usize >= self.vals.len() {
             return ce_none();
         }
@@ -584,7 +587,7 @@ extend ConstEval {
     }
 
     // ---- spans ----
-    fn ce_spans_eq(self: &Self, ma: ModuleId, a: tok::Span, mb: ModuleId, b: tok::Span) bool {
+    const fn ce_spans_eq(self: &Self, ma: ModuleId, a: tok::Span, mb: ModuleId, b: tok::Span) bool {
         let la = a.end - a.start;
         if la != b.end - b.start {
             return false;
@@ -595,14 +598,14 @@ extend ConstEval {
             la as usize,
         ) == 0;
     }
-    fn ce_span_is(self: &Self, m: ModuleId, s: tok::Span, lit: str) bool {
+    const fn ce_span_is(self: &Self, m: ModuleId, s: tok::Span, lit: str) bool {
         let n = lit.len();
         if (s.end - s.start) as usize != n {
             return false;
         }
         return unsafe cstring::memcmp(self.ce_src(m).ptr() + s.start as usize, lit.ptr(), n) == 0;
     }
-    fn name_text(self: &Self, m: ModuleId, name_node: NodeId) tok::Span {
+    const fn name_text(self: &Self, m: ModuleId, name_node: NodeId) tok::Span {
         let a = self.ast_ptr(m);
         return unsafe (*a).at_const(name_node).as_data.name.text;
     }
@@ -625,7 +628,7 @@ const fn if_default_slots(b: u64) u64 {
     return CE_DEFAULT_SLOTS;
 }
 
-fn type_builtin(a: *const Ast, t: TypeId) BuiltinType {
+const fn type_builtin(a: *const Ast, t: TypeId) BuiltinType {
     if t == TYPE_NONE {
         return BuiltinType::BT_COUNT;
     }
@@ -1514,7 +1517,7 @@ extend ConstEval {
         self.live_slots = 0;
     }
 
-    fn obj_ptr(self: &Self, id: u32) *mut CeObj {
+    const fn obj_ptr(self: &Self, id: u32) *mut CeObj {
         if id == 0 || id as usize > self.objs.len() {
             return null;
         }
@@ -2071,7 +2074,7 @@ fn ce_local_find(f: *mut CeFrame, decl: NodeId) i32 {
     return -1;
 }
 
-fn cv_bool(tm: ModuleId, rt: TypeId, b: bool) CeVal {
+const fn cv_bool(tm: ModuleId, rt: TypeId, b: bool) CeVal {
     let mut i: i64 = 0;
     if b {
         i = 1;
@@ -2079,7 +2082,7 @@ fn cv_bool(tm: ModuleId, rt: TypeId, b: bool) CeVal {
     return CeVal { kind: CV_BOOL, tm: tm, ty: rt, as_data: CeValAs { i: i } };
 }
 
-fn ce_float_op(op: TokenType, l: CeVal, r: CeVal, tm: ModuleId, rt: TypeId, b: BuiltinType) CeVal {
+const fn ce_float_op(op: TokenType, l: CeVal, r: CeVal, tm: ModuleId, rt: TypeId, b: BuiltinType) CeVal {
     if op == TokenType::EqualEqual {
         return cv_bool(tm, rt, l.as_data.f == r.as_data.f);
     }
@@ -2122,7 +2125,7 @@ fn ce_float_op(op: TokenType, l: CeVal, r: CeVal, tm: ModuleId, rt: TypeId, b: B
     return CeVal { kind: CV_FLOAT, tm: tm, ty: rt, as_data: CeValAs { f: v } };
 }
 
-fn cv_scalar_of(v: ConstValue, m: ModuleId) CeVal {
+const fn cv_scalar_of(v: ConstValue, m: ModuleId) CeVal {
     if v.kind == CONST_INT {
         return CeVal { kind: CV_INT, tm: m, ty: v.ty, as_data: CeValAs { i: v.as_data.i } };
     }
@@ -4584,7 +4587,7 @@ const fn if_bool(c: bool, a: bool, b: bool) bool {
     }
     return b;
 }
-fn xfail(f: *mut CeFrame) Flow {
+const fn xfail(f: *mut CeFrame) Flow {
     if f != null && unsafe (*f).early != 0 {
         return Flow::Return;
     }
@@ -4625,7 +4628,7 @@ const fn compound_op(op: TokenType) TokenType {
     return TokenType::Equal;
 }
 
-fn cv_pub(v: CeVal) ConstValue {
+const fn cv_pub(v: CeVal) ConstValue {
     if v.kind == CV_INT {
         return ConstValue { kind: CONST_INT, ty: v.ty, as_data: ConstValueAs { i: v.as_data.i } };
     }
@@ -4653,55 +4656,80 @@ const fn cv_is_scalar(v: CeVal) bool {
 // if/match/closures defer their subtrees).
 
 extend ConstEval {
-    fn fx_slot(self: &Self, m: ModuleId, id: NodeId) u8 {
-        if m as usize >= self.fx.len() {
+    const fn fx_slot(self: &Self, m: ModuleId, id: NodeId, deep: bool) u8 {
+        let tbl = if deep {
+            &self.fxd;
+        } else {
+            &self.fx;
+        };
+        if m as usize >= tbl.len() {
             return FX_UNKNOWN;
         }
-        let inner = self.fx.at(m as usize);
+        let inner = tbl.at(m as usize);
         if id as usize >= inner.len() {
             return FX_UNKNOWN;
         }
         return inner[id as usize];
     }
-    fn fx_set(self: &mut Self, m: ModuleId, id: NodeId, v: u8) {
-        if m as usize >= self.fx.len() {
+    fn fx_set(self: &mut Self, m: ModuleId, id: NodeId, v: u8, deep: bool) {
+        let tbl = if deep {
+            &mut self.fxd;
+        } else {
+            &mut self.fx;
+        };
+        if m as usize >= tbl.len() {
             return;
         }
-        let inner = &mut self.fx[m as usize];
+        let inner = &mut tbl[m as usize];
         while inner.len() <= id as usize {
             inner.push(FX_UNKNOWN);
         }
         inner.set(id as usize, v);
     }
 
+    // Deep mode never records a reason: its NO is any-path (the site may be conditional), so it must
+    // not surface as a def-site 'const fn' diagnostic.
     @c.cold
-    fn fx_disq(self: &mut Self, m: ModuleId, owner: NodeId, site: NodeId, why: str) u8 {
-        self.fx_no.push(FxNo { m: m, fn_id: owner, site: site, why: why });
+    fn fx_disq(self: &mut Self, m: ModuleId, owner: NodeId, site: NodeId, why: str, deep: bool) u8 {
+        if !deep {
+            self.fx_no.push(FxNo { m: m, fn_id: owner, site: site, why: why });
+        }
         return FX_NO;
     }
 
     pub fn fx_get(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+        return self.fx_get_in(m, fn_id, false);
+    }
+
+    fn fx_get_in(self: &mut Self, m: ModuleId, fn_id: NodeId, deep: bool) u8 {
         if m as usize >= self.nmods || !self.has_ast(m) {
             return FX_MAYBE;
         }
-        let cur = self.fx_slot(m, fn_id);
+        let cur = self.fx_slot(m, fn_id, deep);
         if cur != FX_UNKNOWN {
             return cur;
         }
         if self.fx_depth >= 128 {
             return FX_MAYBE; // not memoized: a cap-dependent verdict must not stick
         }
-        self.fx_set(m, fn_id, FX_ONSTACK);
+        self.fx_set(m, fn_id, FX_ONSTACK, deep);
         self.fx_depth = self.fx_depth + 1;
-        let v = self.fx_scan_fn(m, fn_id);
+        let v = self.fx_scan_fn(m, fn_id, deep);
         self.fx_depth = self.fx_depth - 1;
-        self.fx_set(m, fn_id, v);
+        self.fx_set(m, fn_id, v, deep);
         return v;
     }
 
     // Part C's `const fn` validation surface: the verdict, and the recorded disqualifier for NO.
     pub fn ce_fn_eligible(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         return self.fx_get(m, fn_id);
+    }
+
+    // The const-suggestion lint's surface: deep FX_YES = every path of the body is provably
+    // CTFE-evaluable, so declaring the function `const fn` passes the def-site check AND cannot
+    // introduce structural fold failures (traps and budgets remain the caller's semantic risk).
+    pub fn ce_fn_const_suggest(self: &mut Self, m: ModuleId, fn_id: NodeId) bool {
+        return self.fx_get_in(m, fn_id, true) == FX_YES;
     }
     pub fn fx_no_reason(self: &Self, m: ModuleId, fn_id: NodeId) *const FxNo {
         for i in 0..self.fx_no.len() {
@@ -4713,7 +4741,7 @@ extend ConstEval {
         return null;
     }
 
-    fn fx_scan_fn(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+    fn fx_scan_fn(self: &mut Self, m: ModuleId, fn_id: NodeId, deep: bool) u8 {
         let a = self.ast_ptr(m);
         if unsafe (*a).nodes.len() == 0 || unsafe (*a).at_const(fn_id).kind != NodeKind::NODE_FUNCTION {
             return FX_MAYBE;
@@ -4723,13 +4751,15 @@ extend ConstEval {
             return FX_MAYBE; // externs are classified at their call sites; bodyless may re-dispatch
         }
         if fd.is_variadic {
-            return self.fx_disq(m, fn_id, fn_id, "is variadic");
+            return self.fx_disq(m, fn_id, fn_id, "is variadic", deep);
         }
-        return self.fx_scan_stmts(m, fn_id, fd.body, 0);
+        return self.fx_scan_stmts(m, fn_id, fd.body, 0, deep);
     }
 
     // Leading straight-line statements of a block; stops at the first control-flow statement.
-    fn fx_scan_stmts(self: &mut Self, m: ModuleId, owner: NodeId, block: NodeId, depth: u32) u8 {
+    // Deep mode instead recurses into if/match/defer (every path), so FX_YES means the whole body is
+    // provably evaluable; loops stay MAYBE (step-budget risk), as does anything unmodeled.
+    fn fx_scan_stmts(self: &mut Self, m: ModuleId, owner: NodeId, block: NodeId, depth: u32, deep: bool) u8 {
         let a = self.ast_ptr(m);
         if depth > 64 || unsafe (*a).at_const(block).kind != NodeKind::NODE_BLOCK {
             return FX_MAYBE;
@@ -4741,24 +4771,31 @@ extend ConstEval {
             let k = unsafe (*a).at_const(sid).kind;
             let mut s = FX_YES;
             if k == NodeKind::NODE_EXPRESSION_STATEMENT {
-                s = self.fx_scan_expr(m, owner, unsafe (*a).at_const(sid).as_data.single.value, depth + 1);
+                s = self.fx_scan_expr(m, owner, unsafe (*a).at_const(sid).as_data.single.value, depth + 1, deep);
             } else if k == NodeKind::NODE_LET {
                 let v = unsafe (*a).at_const(sid).as_data.let_stmt.value;
                 if v != NODE_NONE {
-                    s = self.fx_scan_expr(m, owner, v, depth + 1);
+                    s = self.fx_scan_expr(m, owner, v, depth + 1, deep);
                 }
             } else if k == NodeKind::NODE_RETURN {
                 let values = unsafe (*a).at_const(sid).as_data.return_stmt.values;
+                if deep && values.len > 8 {
+                    return fx_meet(acc, FX_MAYBE); // the interpreter caps multi-returns at 8
+                }
                 for j in 0..values.len {
-                    s = fx_meet(s, self.fx_scan_expr(m, owner, unsafe (*a).list(values)[j as usize], depth + 1));
+                    s = fx_meet(s, self.fx_scan_expr(m, owner, unsafe (*a).list(values)[j as usize], depth + 1, deep));
                 }
                 return fx_meet(acc, s); // nothing executes after a spine return
             } else if k == NodeKind::NODE_BLOCK {
-                s = self.fx_scan_stmts(m, owner, sid, depth + 1);
+                s = self.fx_scan_stmts(m, owner, sid, depth + 1, deep);
             } else if k == NodeKind::NODE_STATIC_ASSERT {
                 continue;
+            } else if deep && (k == NodeKind::NODE_IF || k == NodeKind::NODE_MATCH) {
+                s = self.fx_scan_expr(m, owner, sid, depth + 1, true);
+            } else if deep && k == NodeKind::NODE_DEFER {
+                s = self.fx_scan_body(m, owner, unsafe (*a).at_const(sid).as_data.single.value, depth + 1);
             } else {
-                return fx_meet(acc, FX_MAYBE); // control flow: the spine ends here
+                return fx_meet(acc, FX_MAYBE); // control flow: the spine ends here (deep: loops/unmodeled)
             }
             acc = fx_meet(acc, s);
             if acc == FX_NO {
@@ -4768,7 +4805,117 @@ extend ConstEval {
         return acc;
     }
 
-    fn fx_scan_expr(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
+    // Deep-only helpers: a branch/arm/defer body is a block or a bare expression.
+    fn fx_scan_body(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
+        if id == NODE_NONE {
+            return FX_YES;
+        }
+        if unsafe (*self.ast_ptr(m)).at_const(id).kind == NodeKind::NODE_BLOCK {
+            return self.fx_scan_stmts(m, owner, id, depth, true);
+        }
+        return self.fx_scan_expr(m, owner, id, depth, true);
+    }
+
+    fn fx_scan_match(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
+        let a = self.ast_ptr(m);
+        let mut acc = self.fx_scan_expr(m, owner, unsafe (*a).at_const(id).as_data.match_expr.value, depth + 1, true);
+        let arms = unsafe (*a).at_const(id).as_data.match_expr.arms;
+        for i in 0..arms.len {
+            if acc != FX_YES {
+                return acc;
+            }
+            let arm = unsafe (*a).at_const(unsafe (*a).list(arms)[i as usize]).as_data.match_arm;
+            acc = fx_meet(acc, self.fx_scan_pat(m, arm.pattern, depth + 1));
+            if arm.guard != NODE_NONE {
+                acc = fx_meet(acc, self.fx_scan_expr(m, owner, arm.guard, depth + 1, true));
+            }
+            acc = fx_meet(acc, self.fx_scan_body(m, owner, arm.body, depth + 1));
+        }
+        return acc;
+    }
+
+    // Would pat_match handle this pattern? Literals/range endpoints must be integer-classed (int,
+    // char, bool): str and float literal patterns make pat_match report a mismatch (-1).
+    fn fx_pat_lit_ok(self: &Self, m: ModuleId, vn: NodeId) bool {
+        let b = self.ce_builtin_of(null, m, self.ce_type(m, vn));
+        return b != BuiltinType::BT_COUNT && (bt_signed(b) || bt_unsigned(b) || b == BuiltinType::BT_BOOL);
+    }
+
+    fn fx_scan_pat(self: &mut Self, m: ModuleId, pid: NodeId, depth: u32) u8 {
+        if depth > 64 {
+            return FX_MAYBE;
+        }
+        let a = self.ast_ptr(m);
+        let n = unsafe (*a).at_const(pid);
+        switch n.kind {
+            NODE_PATTERN_WILDCARD => {
+                return FX_YES;
+            },
+            NODE_PATTERN_LITERAL => {
+                if self.fx_pat_lit_ok(m, n.as_data.single.value) {
+                    return FX_YES;
+                }
+            },
+            NODE_PATTERN_RANGE => {
+                let sn = n.as_data.pattern_range.start;
+                let en = n.as_data.pattern_range.end;
+                let mut ok = true;
+                if sn != NODE_NONE {
+                    ok = self.fx_scan_pat(m, sn, depth + 1) == FX_YES;
+                }
+                if ok && en != NODE_NONE {
+                    ok = self.fx_scan_pat(m, en, depth + 1) == FX_YES;
+                }
+                if ok {
+                    return FX_YES;
+                }
+            },
+            NODE_PATTERN_FIELD => {
+                let children = n.as_data.pattern.children;
+                if n.as_data.pattern.name == NODE_NONE || children.len != 1 {
+                    return FX_MAYBE;
+                }
+                let child = unsafe (*a).list(children)[0];
+                if unsafe (*a).at_const(child).kind == NodeKind::NODE_IDENTIFIER {
+                    return FX_YES; // a bare binding, not a sub-pattern
+                }
+                return self.fx_scan_pat(m, child, depth + 1);
+            },
+            NODE_PATTERN_NAME | NODE_PATTERN_OR | NODE_PATTERN_TUPLE | NODE_PATTERN_STRUCT => {
+                // tuple/struct patterns match through pat_match only as enum-variant payloads; a
+                // paren-group tuple (no name, one child) passes through
+                if n.kind == NodeKind::NODE_PATTERN_TUPLE || n.kind == NodeKind::NODE_PATTERN_STRUCT {
+                    let pname = n.as_data.pattern.name;
+                    if pname == NODE_NONE {
+                        if n.kind == NodeKind::NODE_PATTERN_STRUCT || n.as_data.pattern.children.len != 1 {
+                            return FX_MAYBE;
+                        }
+                    } else {
+                        let d = unsafe (*a).resolution_def(pname);
+                        if d.node == NODE_NONE || d.module as usize >= self.nmods || unsafe (*self.ast_ptr(d.module)).at_const(
+                            d.node,
+                        ).kind != NodeKind::NODE_VARIANT {
+                            return FX_MAYBE;
+                        }
+                        if n.kind == NodeKind::NODE_PATTERN_STRUCT && !unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.variant.struct_payload {
+                            return FX_MAYBE;
+                        }
+                    }
+                }
+                let children = n.as_data.pattern.children;
+                for i in 0..children.len {
+                    if self.fx_scan_pat(m, unsafe (*a).list(children)[i as usize], depth + 1) != FX_YES {
+                        return FX_MAYBE;
+                    }
+                }
+                return FX_YES;
+            },
+            _ => {},
+        };
+        return FX_MAYBE;
+    }
+
+    fn fx_scan_expr(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32, deep: bool) u8 {
         if id == NODE_NONE {
             return FX_YES;
         }
@@ -4786,7 +4933,7 @@ extend ConstEval {
                 if d.node != NODE_NONE && d.module as usize < self.nmods && unsafe (*self.ast_ptr(d.module)).at_const(
                     d.node,
                 ).kind == NodeKind::NODE_CONST && unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut {
-                    return self.fx_disq(m, owner, id, "accesses a 'static mut'");
+                    return self.fx_disq(m, owner, id, "accesses a 'static mut'", deep);
                 }
                 return FX_YES;
             },
@@ -4796,35 +4943,35 @@ extend ConstEval {
                     if d.node != NODE_NONE && d.module as usize < self.nmods && unsafe (*self.ast_ptr(d.module)).at_const(
                         d.node,
                     ).kind == NodeKind::NODE_CONST && unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut {
-                        return self.fx_disq(m, owner, id, "accesses a 'static mut'");
+                        return self.fx_disq(m, owner, id, "accesses a 'static mut'", deep);
                     }
                     return FX_YES;
                 }
-                return self.fx_scan_expr(m, owner, n.as_data.member.object, depth + 1);
+                return self.fx_scan_expr(m, owner, n.as_data.member.object, depth + 1, deep);
             },
             NODE_UNARY => {
                 let operand = n.as_data.unary.operand;
                 if unsafe (*a).at_const(operand).kind == NodeKind::NODE_BLOCK {
-                    return self.fx_scan_stmts(m, owner, operand, depth + 1);
+                    return self.fx_scan_stmts(m, owner, operand, depth + 1, deep);
                 }
-                return self.fx_scan_expr(m, owner, operand, depth + 1);
+                return self.fx_scan_expr(m, owner, operand, depth + 1, deep);
             },
             NODE_BINARY | NODE_ASSIGNMENT => {
-                let l = self.fx_scan_expr(m, owner, n.as_data.binary.left, depth + 1);
+                let l = self.fx_scan_expr(m, owner, n.as_data.binary.left, depth + 1, deep);
                 if l == FX_NO {
                     return FX_NO;
                 }
-                return fx_meet(l, self.fx_scan_expr(m, owner, n.as_data.binary.right, depth + 1));
+                return fx_meet(l, self.fx_scan_expr(m, owner, n.as_data.binary.right, depth + 1, deep));
             },
             NODE_CAST => {
-                return self.fx_scan_expr(m, owner, n.as_data.cast.expression, depth + 1);
+                return self.fx_scan_expr(m, owner, n.as_data.cast.expression, depth + 1, deep);
             },
             NODE_INDEX => {
-                let o = self.fx_scan_expr(m, owner, n.as_data.index.object, depth + 1);
+                let o = self.fx_scan_expr(m, owner, n.as_data.index.object, depth + 1, deep);
                 if o == FX_NO {
                     return FX_NO;
                 }
-                return fx_meet(o, self.fx_scan_expr(m, owner, n.as_data.index.index, depth + 1));
+                return fx_meet(o, self.fx_scan_expr(m, owner, n.as_data.index.index, depth + 1, deep));
             },
             NODE_STRUCT_INITIALIZER => {
                 let fields = n.as_data.struct_initializer.fields;
@@ -4839,6 +4986,7 @@ extend ConstEval {
                                 owner,
                                 unsafe (*a).at_const(fid).as_data.field_initializer.value,
                                 depth + 1,
+                                deep,
                             ),
                         );
                     }
@@ -4852,7 +5000,10 @@ extend ConstEval {
                 let elements = n.as_data.array_literal.elements;
                 let mut acc = FX_YES;
                 for i in 0..elements.len {
-                    acc = fx_meet(acc, self.fx_scan_expr(m, owner, unsafe (*a).list(elements)[i as usize], depth + 1));
+                    acc = fx_meet(
+                        acc,
+                        self.fx_scan_expr(m, owner, unsafe (*a).list(elements)[i as usize], depth + 1, deep),
+                    );
                     if acc == FX_NO {
                         return FX_NO;
                     }
@@ -4860,24 +5011,42 @@ extend ConstEval {
                 return acc;
             },
             NODE_RANGE => {
-                let s = self.fx_scan_expr(m, owner, n.as_data.pattern_range.start, depth + 1);
+                let s = self.fx_scan_expr(m, owner, n.as_data.pattern_range.start, depth + 1, deep);
                 if s == FX_NO {
                     return FX_NO;
                 }
-                return fx_meet(s, self.fx_scan_expr(m, owner, n.as_data.pattern_range.end, depth + 1));
+                return fx_meet(s, self.fx_scan_expr(m, owner, n.as_data.pattern_range.end, depth + 1, deep));
             },
             NODE_BLOCK => {
-                return self.fx_scan_stmts(m, owner, id, depth + 1);
+                return self.fx_scan_stmts(m, owner, id, depth + 1, deep);
             },
             NODE_CALL => {
-                return self.fx_scan_call(m, owner, id, depth);
+                return self.fx_scan_call(m, owner, id, depth, deep);
+            },
+            NODE_IF => {
+                if deep {
+                    let c = self.fx_scan_expr(m, owner, n.as_data.if_stmt.condition, depth + 1, true);
+                    if c == FX_NO {
+                        return FX_NO;
+                    }
+                    let t = fx_meet(c, self.fx_scan_body(m, owner, n.as_data.if_stmt.then_branch, depth + 1));
+                    if t == FX_NO {
+                        return FX_NO;
+                    }
+                    return fx_meet(t, self.fx_scan_body(m, owner, n.as_data.if_stmt.else_branch, depth + 1));
+                }
+            },
+            NODE_MATCH => {
+                if deep {
+                    return self.fx_scan_match(m, owner, id, depth);
+                }
             },
             _ => {},
         };
         return FX_MAYBE; // if/match/closures and anything unmodeled: conditional or unknown
     }
 
-    fn fx_scan_call(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
+    fn fx_scan_call(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32, deep: bool) u8 {
         let a = self.ast_ptr(m);
         let mut callee = unsafe (*a).at_const(id).as_data.call.callee;
         if unsafe (*a).at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
@@ -4887,23 +5056,31 @@ extend ConstEval {
         let call_args = unsafe (*a).at_const(id).as_data.call.args;
         let mut acc = FX_YES;
         for i in 0..call_args.len {
-            acc = fx_meet(acc, self.fx_scan_expr(m, owner, unsafe (*a).list(call_args)[i as usize], depth + 1));
+            acc = fx_meet(acc, self.fx_scan_expr(m, owner, unsafe (*a).list(call_args)[i as usize], depth + 1, deep));
             if acc == FX_NO {
                 return FX_NO;
             }
+        }
+        if deep && call_args.len > 7 {
+            acc = FX_MAYBE; // the interpreter caps calls at 8 slots (receiver + args)
         }
         let mut is_path = ck == NodeKind::NODE_IDENTIFIER;
         if ck == NodeKind::NODE_MEMBER && unsafe (*a).at_const(callee).as_data.member.path {
             is_path = true;
         }
         if !is_path {
-            if ck == NodeKind::NODE_MEMBER {
-                let o = self.fx_scan_expr(m, owner, unsafe (*a).at_const(callee).as_data.member.object, depth + 1);
-                if o == FX_NO {
-                    return FX_NO;
-                }
+            if ck != NodeKind::NODE_MEMBER {
+                return FX_MAYBE; // calling a call/index/closure expression: unresolvable statically
             }
-            return FX_MAYBE; // method dispatch / fn values: unresolvable statically
+            let o = self.fx_scan_expr(m, owner, unsafe (*a).at_const(callee).as_data.member.object, depth + 1, deep);
+            if o == FX_NO {
+                return FX_NO;
+            }
+            acc = fx_meet(acc, o);
+            if !deep {
+                return FX_MAYBE; // method dispatch: past the shallow spine
+            }
+            // deep: fall through -- the interpreter resolves the method through the same tables
         }
         let mut fd = unsafe (*a).resolution_def(callee);
         if fd.node == NODE_NONE && ck == NodeKind::NODE_MEMBER {
@@ -4918,6 +5095,16 @@ extend ConstEval {
         let fa = self.ast_ptr(fd.module);
         let dk = unsafe (*fa).at_const(fd.node).kind;
         if dk == NodeKind::NODE_VARIANT {
+            if deep {
+                // mirror ce_call's payload-constructor gates (untagged/user-Free enums bail)
+                let vp = self.ce_variant_pos(fd.module, fd.node);
+                if vp.pos < 0 || !self.ce_enum_tagged(fd.module, vp.enum_decl) || self.ce_user_free(
+                    fd.module,
+                    vp.enum_decl,
+                ) {
+                    return fx_meet(acc, FX_MAYBE);
+                }
+            }
             return acc; // enum constructor: args already scanned
         }
         if dk != NodeKind::NODE_FUNCTION {
@@ -4929,19 +5116,25 @@ extend ConstEval {
             if self.ce_intercept_name(fd.module, nm) {
                 return acc;
             }
-            return self.fx_disq(m, owner, id, "calls an extern function");
+            return self.fx_disq(m, owner, id, "calls an extern function", deep);
         }
         if cfd.is_variadic {
-            return self.fx_disq(m, owner, id, "calls a variadic function");
+            return self.fx_disq(m, owner, id, "calls a variadic function", deep);
         }
         if cfd.body == NODE_NONE {
             return FX_MAYBE; // interface requirement: dispatch may substitute a concrete method
         }
-        let cv = self.fx_get(fd.module, fd.node);
+        if deep && self.ce_container_of(fd.module, fd.node, null) == 2 {
+            return fx_meet(acc, FX_MAYBE); // interface default body: dispatch may substitute an impl
+        }
+        let cv = self.fx_get_in(fd.module, fd.node, deep);
         if cv == FX_NO {
-            return self.fx_disq(m, owner, id, "calls a function that cannot be evaluated at compile time");
+            return self.fx_disq(m, owner, id, "calls a function that cannot be evaluated at compile time", deep);
         }
         if cv == FX_ONSTACK {
+            if deep {
+                return fx_meet(acc, FX_MAYBE); // recursion: depth/step budgets make folds input-dependent
+            }
             return acc; // gray edge: neutral (recursion is legal)
         }
         return fx_meet(acc, cv);
@@ -6113,7 +6306,7 @@ extend ConstEval {
         return pub_v;
     }
 
-    pub fn ce_trap_get(self: &Self) str {
+    pub const fn ce_trap_get(self: &Self) str {
         return self.trap;
     }
 
@@ -6137,7 +6330,7 @@ extend ConstEval {
         self.fold_errs.push(rec);
     }
 
-    pub fn ce_trap_kind_get(self: &Self) u8 {
+    pub const fn ce_trap_kind_get(self: &Self) u8 {
         return self.trap_kind;
     }
 
@@ -6413,7 +6606,7 @@ pub struct StaticRes {
 }
 
 extend ConstEval {
-    fn sref_get(self: &Self, m: ModuleId, id: NodeId) i64 {
+    const fn sref_get(self: &Self, m: ModuleId, id: NodeId) i64 {
         if m as usize >= self.sref.len() {
             return 0;
         }
@@ -6434,7 +6627,7 @@ extend ConstEval {
         inner.set(id as usize, v);
     }
 
-    pub fn static_at(self: &Self, i: u32) *const StaticObj {
+    pub const fn static_at(self: &Self, i: u32) *const StaticObj {
         return unsafe (self.statics.as_ptr() + i as usize);
     }
 
@@ -6823,6 +7016,7 @@ extend ConstEval as Free {
         self.calls.free();
         self.ufree.free();
         self.fx.free();
+        self.fxd.free();
         self.fx_no.free();
         self.statics.free();
         self.sref.free();

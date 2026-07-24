@@ -4,8 +4,9 @@ import string;
 pub const ERRORS_MAX: usize = 256;
 
 // A machine-applicable fix for a lint warning: kind 0 deletes [start, end); kind 1 inserts '_'
-// before `start` (unused-binding rename). Collected alongside `warn` and applied by `lint --fix`;
-// `warn` indexes the warning it repairs (the LSP turns these into quick fixes).
+// before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
+// suggestion). Collected alongside `warn` and applied by `lint --fix`; `warn` indexes the warning
+// it repairs (the LSP turns these into quick fixes).
 pub struct LintFix {
     pub start: u32,
     pub end: u32,
@@ -36,7 +37,7 @@ pub fn cstr<'a>(p: *const char) str<'a> {
 
 // A borrowed `str` view of the source bytes in the span [start, end) -- the idiomatic replacement for the
 // old `%.*s` (width, source+start) diagnostic argument pair.
-pub fn span_str(src: str, start: u32, end: u32) str {
+pub const fn span_str(src: str, start: u32, end: u32) str {
     return src[start as usize..end as usize];
 }
 
@@ -54,11 +55,11 @@ extend Errors {
         };
     }
 
-    pub fn has_errors(self: &Self) bool {
+    pub const fn has_errors(self: &Self) bool {
         return self.errors.len() != 0;
     }
 
-    pub fn has_warnings(self: &Self) bool {
+    pub const fn has_warnings(self: &Self) bool {
         return self.warns.len() != 0;
     }
 

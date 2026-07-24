@@ -51,6 +51,59 @@ fn redundant_cast_lint_covers_all_implicits() {
     assert(!r.out_has("'&mut i32' converts to '*mut i32'")); // the unannotated-let cast is load-bearing: quiet
 }
 
+// `--suggest-const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
+// time -- through branches, matches and statically-resolved method calls -- and stays silent on
+// loops, extern calls, recursion, and declared `const fn`s. Off by default (no warning without the
+// flag).
+@test
+fn const_suggestion_lint() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import stdio;\n\nstruct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + prints(0) + rec(2) - 21;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::from_str("lint --suggest-const '");
+    args.push_str(root);
+    args.push_str("/main.spc'");
+    let r = p.run_raw(args.as_str());
+    assert(r.exit != 0); // warnings exit 1, compiler-warning semantics
+    assert(r.out_has("function 'norm' can be declared 'const fn'"));
+    assert(r.out_has("function 'branchy' can be declared 'const fn'"));
+    assert(r.out_has("function 'use_method' can be declared 'const fn'"));
+    assert(!r.out_has("'already'"));
+    assert(!r.out_has("'looping'"));
+    assert(!r.out_has("'prints'"));
+    assert(!r.out_has("'rec'"));
+    assert(!r.out_has("'main'"));
+
+    // off by default: the same file lints clean
+    let mut dargs = String::from_str("lint '");
+    dargs.push_str(root);
+    dargs.push_str("/main.spc'");
+    let d = p.run_raw(dargs.as_str());
+    assert_eq(d.exit, 0);
+    assert(!d.out_has("can be declared 'const fn'"));
+
+    // `--fix` inserts `const ` before the `fn` keyword; the re-lint fixpoint then reports nothing
+    let mut fargs = String::from_str("lint --fix --suggest-const '");
+    fargs.push_str(root);
+    fargs.push_str("/main.spc'");
+    let fx = p.run_raw(fargs.as_str());
+    assert_eq(fx.exit, 0);
+    let mut mp = String::from_str(root);
+    mp.push_str("/main.spc");
+    let fixed = loader::read_file(mp.as_str()).unwrap();
+    assert(fixed.as_str().contains("const fn branchy"));
+    assert(fixed.as_str().contains("const fn use_method"));
+    assert(fixed.as_str().contains("const fn norm")); // extend member
+    assert(!fixed.as_str().contains("const fn looping"));
+    assert(!fixed.as_str().contains("const fn prints"));
+    assert(!fixed.as_str().contains("const fn rec"));
+    assert(!fixed.as_str().contains("const fn main"));
+    assert(!fixed.as_str().contains("const const")); // `already` was const before the fix
+}
+
 // The always-panics check (the `unconditional_panic` analog, an ERROR): a fully const-foldable
 // statement chain that DETERMINISTICALLY traps -- UB, or a panic reached inside a `const fn` (the
 // checked-accessor class) -- fails the build; explicit user `panic(..)` calls and anything
