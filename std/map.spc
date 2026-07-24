@@ -49,7 +49,10 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         return i;
     }
 
-    // Reallocate to a larger table and rehash every occupied entry into it.
+    // Reallocate to a larger table and rehash every occupied entry into it. (Three separate arrays
+    // by REQUIREMENT, not oversight: the compile-time evaluator's abstract heap types each
+    // allocation by its element -- a single block carved with byte-offset interior pointers is not
+    // evaluable, and Map folds at compile time are a language feature.)
     fn grow(self: &mut Map<K, V, A>) {
         let mut newcap = self.cap * 2;
         if newcap < 8 {
@@ -79,6 +82,21 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             self.alloc.dealloc(oldvals, oldcap * sizeof(V), alignof(V));
             self.alloc.dealloc(oldused, oldcap, alignof(u8));
         }
+    }
+
+    // Drop every entry (deep-freeing keys and values) but KEEP the table storage for reuse: a
+    // cleared map re-fills without touching the allocator.
+    pub fn clear(self: &mut Map<K, V, A>) {
+        for i in 0..self.cap {
+            if unsafe self.used[i] != 0 {
+                unsafe self.keys[i].free(); // no-op if K isn't Free
+                unsafe self.vals[i].free(); // no-op if V isn't Free
+            }
+        }
+        if self.cap > 0 {
+            unsafe memset(self.used, 0, self.cap);
+        }
+        self.len = 0;
     }
 
     // Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the

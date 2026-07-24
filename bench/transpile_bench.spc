@@ -134,6 +134,13 @@ pub struct Timing {
     pub alc_borrowck: i64,
     pub alc_propagate: i64,
     pub alc_codegen: i64,
+    pub byt_lex: i64,
+    pub byt_parse: i64,
+    pub byt_resolve: i64,
+    pub byt_typecheck: i64,
+    pub byt_borrowck: i64,
+    pub byt_propagate: i64,
+    pub byt_codegen: i64,
     pub heap_bytes: i64,
 }
 
@@ -229,6 +236,13 @@ fn transpile_once(use_mem: bool) Timing {
         alc_borrowck: 0,
         alc_propagate: 0,
         alc_codegen: 0,
+        byt_lex: 0,
+        byt_parse: 0,
+        byt_resolve: 0,
+        byt_typecheck: 0,
+        byt_borrowck: 0,
+        byt_propagate: 0,
+        byt_codegen: 0,
         heap_bytes: 0,
     };
 
@@ -240,6 +254,7 @@ fn transpile_once(use_mem: bool) Timing {
     let a1 = time::cpu_seconds();
     let c1 = unsafe shim::sc_cpu_cycles();
     let h1 = unsafe shim::sc_alloc_count();
+    let y1 = unsafe shim::sc_alloc_bytes();
 
     let n = p.modules.len();
     r.modules = n;
@@ -266,6 +281,7 @@ fn transpile_once(use_mem: bool) Timing {
     let a2 = time::cpu_seconds();
     let c2 = unsafe shim::sc_cpu_cycles();
     let h2 = unsafe shim::sc_alloc_count();
+    let y2 = unsafe shim::sc_alloc_bytes();
 
     i = 0;
     while i < n {
@@ -276,6 +292,7 @@ fn transpile_once(use_mem: bool) Timing {
     let a3 = time::cpu_seconds();
     let c3 = unsafe shim::sc_cpu_cycles();
     let h3 = unsafe shim::sc_alloc_count();
+    let y3 = unsafe shim::sc_alloc_bytes();
 
     i = 0;
     while i < n {
@@ -285,11 +302,13 @@ fn transpile_once(use_mem: bool) Timing {
     let a3b = time::cpu_seconds();
     let c3b = unsafe shim::sc_cpu_cycles();
     let h3b = unsafe shim::sc_alloc_count();
+    let y3b = unsafe shim::sc_alloc_bytes();
 
     loader::package_propagate_instances(&mut p);
     let a3p = time::cpu_seconds();
     let c3p = unsafe shim::sc_cpu_cycles();
     let h3p = unsafe shim::sc_alloc_count();
+    let y3p = unsafe shim::sc_alloc_bytes();
 
     let f = sink_open(use_mem);
     i = 0;
@@ -320,6 +339,7 @@ fn transpile_once(use_mem: bool) Timing {
     let lx0 = time::cpu_seconds();
     let cl0 = unsafe shim::sc_cpu_cycles();
     let hl0 = unsafe shim::sc_alloc_count();
+    let yl0 = unsafe shim::sc_alloc_bytes();
     i = 0;
     while i < n {
         let mut lx = lexer::Lexer::new(&mut p.modules[i].source, "");
@@ -330,6 +350,7 @@ fn transpile_once(use_mem: bool) Timing {
     r.lex = time::cpu_seconds() - lx0;
     r.cyc_lex = unsafe shim::sc_cpu_cycles() - cl0;
     r.alc_lex = unsafe shim::sc_alloc_count() - hl0;
+    r.byt_lex = unsafe shim::sc_alloc_bytes() - yl0;
 
     // Count source lines (untimed -- a constant of the corpus) for a lines/sec figure.
     i = 0;
@@ -364,6 +385,12 @@ fn transpile_once(use_mem: bool) Timing {
     r.alc_borrowck = h3b - h3;
     r.alc_propagate = h3p - h3b;
     r.alc_codegen = h4 - h3p;
+    r.byt_parse = y1 - y0;
+    r.byt_resolve = y2 - y1;
+    r.byt_typecheck = y3 - y2;
+    r.byt_borrowck = y3b - y3;
+    r.byt_propagate = y3p - y3b;
+    r.byt_codegen = y4 - y3p;
     r.heap_bytes = y4 - y0;
     return r;
 }
@@ -479,6 +506,14 @@ pub fn run() i32 {
     let mut sb: f64 = 0.0;
     let mut scy_b: i64 = 0;
     let mut sal_b: i64 = 0;
+    let mut sby_l: i64 = 0;
+    let mut sby_p: i64 = 0;
+    let mut sby_r: i64 = 0;
+    let mut sby_t: i64 = 0;
+    let mut sby_b: i64 = 0;
+    let mut sby_g: i64 = 0;
+    let mut sby_cm: i64 = 0;
+    let mut sby_cf: i64 = 0;
     let mut sheap: i64 = 0;
     let mut totals_m = Vector::<f64>::with_capacity(ITERS as usize);
     let mut totals_f = Vector::<f64>::with_capacity(ITERS as usize);
@@ -504,17 +539,25 @@ pub fn run() i32 {
         sal_t = sal_t + t.alc_typecheck;
         sal_b = sal_b + t.alc_borrowck;
         sal_g = sal_g + t.alc_propagate;
+        sby_l = sby_l + t.byt_lex;
+        sby_p = sby_p + t.byt_parse;
+        sby_r = sby_r + t.byt_resolve;
+        sby_t = sby_t + t.byt_typecheck;
+        sby_b = sby_b + t.byt_borrowck;
+        sby_g = sby_g + t.byt_propagate;
         sheap = sheap + t.heap_bytes;
         let total = t.parse + t.resolve + t.typecheck + t.borrowck + t.propagate + t.codegen;
         if use_mem {
             sc_m = sc_m + t.codegen;
             scy_cm = scy_cm + t.cyc_codegen;
             sal_cm = sal_cm + t.alc_codegen;
+            sby_cm = sby_cm + t.byt_codegen;
             totals_m.push(total);
         } else {
             sc_f = sc_f + t.codegen;
             scy_cf = scy_cf + t.cyc_codegen;
             sal_cf = sal_cf + t.alc_codegen;
+            sby_cf = sby_cf + t.byt_codegen;
             totals_f.push(total);
         }
         // header/source split tracks the primary lane (mem when it exists, file otherwise)
@@ -582,95 +625,118 @@ pub fn run() i32 {
     } else if cf > 0 {
         kac = sal_cf as f64 / cf as f64 / 1e3;
     }
-    let katot = kap + kar + kat + kag + kac;
+    let katot = kap + kar + kat + kab + kag + kac;
+    // Bytes requested from the allocator per phase, per iteration, in MiB (codegen = primary lane).
+    let mbl = sby_l as f64 / fi / 1048576.0;
+    let mbp = sby_p as f64 / fi / 1048576.0;
+    let mbr = sby_r as f64 / fi / 1048576.0;
+    let mbt = sby_t as f64 / fi / 1048576.0;
+    let mbb = sby_b as f64 / fi / 1048576.0;
+    let mbg = sby_g as f64 / fi / 1048576.0;
+    let mut mbc: f64 = 0.0;
+    if cm > 0 {
+        mbc = sby_cm as f64 / cm as f64 / 1048576.0;
+    } else if cf > 0 {
+        mbc = sby_cf as f64 / cf as f64 / 1048576.0;
+    }
+    let mbtot = mbp + mbr + mbt + mbb + mbg + mbc;
 
     unsafe stdio::printf(
-        "  %-11s %9s %9s %9s %9s %9s %8s\n".ptr() as *const char,
+        "  %-11s %9s %9s %9s %9s %9s %9s %8s\n".ptr() as *const char,
         "phase".ptr() as *const char,
         "avg ms".ptr() as *const char,
         "MB/s".ptr() as *const char,
         "kloc/s".ptr() as *const char,
         "Mcyc".ptr() as *const char,
         "Kalloc".ptr() as *const char,
+        "MiB".ptr() as *const char,
         "share".ptr() as *const char,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f   (of parse)\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f   (of parse)\n".ptr() as *const char,
         "lex".ptr() as *const char,
         al,
         srcf / al / 1000.0,
         linesf / al,
         ml,
         kal,
+        mbl,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
         "parse".ptr() as *const char,
         ap,
         srcf / ap / 1000.0,
         linesf / ap,
         mp,
         kap,
+        mbp,
         ap / avg_total * 100.0,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
         "resolve".ptr() as *const char,
         ar,
         srcf / ar / 1000.0,
         linesf / ar,
         mr,
         kar,
+        mbr,
         ar / avg_total * 100.0,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
         "typecheck".ptr() as *const char,
         at,
         srcf / at / 1000.0,
         linesf / at,
         mt,
         kat,
+        mbt,
         at / avg_total * 100.0,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
         "borrowck".ptr() as *const char,
         ab,
         srcf / ab / 1000.0,
         linesf / ab,
         mb,
         kab,
+        mbb,
         ab / avg_total * 100.0,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
         "propagate".ptr() as *const char,
         ag,
         srcf / ag / 1000.0,
         linesf / ag,
         mg,
         kag,
+        mbg,
         ag / avg_total * 100.0,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %7.1f%%\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
         "codegen".ptr() as *const char,
         ac,
         srcf / ac / 1000.0,
         linesf / ac,
         mc,
         kac,
+        mbc,
         ac / avg_total * 100.0,
     );
     unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f   (%.2f GHz)\n\n".ptr() as *const char,
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f   (%.2f GHz)\n\n".ptr() as *const char,
         "total".ptr() as *const char,
         avg_total,
         srcf / avg_total / 1000.0,
         linesf / avg_total,
         mtot,
         katot,
+        mbtot,
         mtot / avg_total,
     );
 

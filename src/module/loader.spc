@@ -77,6 +77,11 @@ pub struct Package {
     // pipeline). Replaces Package::lookup's linear item scan with an O(1) probe.
     pub lk_index: Vector<Map<u64, LkEnt>>,
     pub lk_built: Vector<bool>,
+    // Per-module transitive import closure (LD-3): clo_lists[mid] = [mid, BFS over its imports...],
+    // built lazily on first glob_lookup into `mid` (imports are load-final). Replaces glob_lookup's
+    // per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
+    pub clo_lists: Vector<Vector<ModuleId>>,
+    pub clo_built: Vector<bool>,
     // Import-resolution directory cache (Opt 1): each candidate search directory is scanned ONCE (opendir/
     // readdir) and its entry names cached, so resolve_import_file answers "does <dir>/<file> exist?" from
     // memory instead of an fopen probe per candidate. Scales: a directory with N modules imported M times
@@ -422,6 +427,8 @@ extend Package {
             mod_refs_ready: false,
             lk_index: Vector::<Map<u64, LkEnt>>::new(),
             lk_built: Vector::<bool>::new(),
+            clo_lists: Vector::<Vector<ModuleId>>::new(),
+            clo_built: Vector::<bool>::new(),
             dir_cache: DirCache::new(),
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
@@ -936,49 +943,46 @@ extend Package {
         return LookupHit { node: NODE_NONE, mid: 0 };
     }
 
-    // lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
-    // then every module it imports breadth-first in declaration order. First hit wins.
-    pub fn glob_lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) LookupHit {
+    // Build (once) the cached [mid, transitive imports...] walk order for glob_lookup. Imports are
+    // load-final, so the list stays valid for the whole pipeline.
+    fn ensure_closure(self: &mut Self, mid: ModuleId) {
         let n = self.modules.len();
-        let mut result = LookupHit { node: NODE_NONE, mid: 0 };
-        if mid as usize >= n {
-            return result;
+        while self.clo_lists.len() < n {
+            self.clo_lists.push(Vector::<ModuleId>::new());
+            self.clo_built.push(false);
         }
-        let mut seen = Vector::<bool>::new();
-        for s in 0..n {
-            seen.push(false);
+        if self.clo_built[mid as usize] {
+            return;
         }
-        let mut queue = Vector::<ModuleId>::new();
-        queue.push(mid);
-        seen.set(mid as usize, true);
-        let mut head: usize = 0;
-        while head < queue.len() {
-            let mo = queue[head];
-            head = head + 1;
+        let clo = self.import_closure(mid);
+        let lst = &mut self.clo_lists[mid as usize];
+        lst.push(mid);
+        for i in 0..clo.len() {
+            lst.push(clo[i]);
+        }
+        self.clo_built.set(mid as usize, true);
+    }
+
+    // lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
+    // then every module it imports breadth-first in declaration order (the cached closure list). First hit
+    // wins.
+    pub fn glob_lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) LookupHit {
+        if mid as usize >= self.modules.len() {
+            return LookupHit { node: NODE_NONE, mid: 0 };
+        }
+        let mp = (self as *const Package) as *mut Package;
+        unsafe {
+            (*mp).ensure_closure(mid);
+        }
+        let lst = self.clo_lists.at(mid as usize);
+        for i in 0..lst.len() {
+            let mo = lst[i];
             let d = self.lookup(mo, name, want_type);
             if d != NODE_NONE {
-                result = LookupHit { node: d, mid: mo };
-                break;
-            }
-            if self.modules[mo as usize].has_ast {
-                let md = self.modules.at(mo as usize);
-                let items = md.ast.at_const(md.ast.root).as_data.program.items;
-                let ids = md.ast.list(items);
-                let src = md.source.as_str();
-                for i in 0..items.len {
-                    let it = md.ast.at_const(unsafe ids[i as usize]);
-                    if it.kind == NodeKind::NODE_IMPORT {
-                        let path = join_parts(&md.ast, src, it.as_data.import_decl.path, "::");
-                        let c = self.find(path.as_str());
-                        if c >= 0 && !seen[c as usize] {
-                            seen.set(c as usize, true);
-                            queue.push(c as ModuleId);
-                        }
-                    }
-                }
+                return LookupHit { node: d, mid: mo };
             }
         }
-        return result;
+        return LookupHit { node: NODE_NONE, mid: 0 };
     }
 
     // The modules `mid` transitively imports (excluding `mid` itself), breadth-first in declaration order.
@@ -1138,6 +1142,8 @@ extend Package as Free {
         self.mod_refs.free();
         self.lk_index.free();
         self.lk_built.free();
+        self.clo_lists.free();
+        self.clo_built.free();
         self.dir_cache.free();
         self.overlay_files.free();
         self.overlay_texts.free();
