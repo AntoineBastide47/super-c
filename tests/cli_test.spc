@@ -418,6 +418,26 @@ fn raii_drop_on_field_assign() {
     assert(c3.out_has("cannot move a field out of a value implementing Free"));
 }
 
+// Transpiler-inserted auto-free of untouched fields: a Free impl's body runs, then every owning
+// Free-typed field it never referenced is freed by generated glue (early returns covered by the
+// wrapper form). Complete impls emit without a wrapper; raw-pointer fields are borrows and exempt.
+@test
+fn raii_free_glue_untouched_fields() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct Pair {\n    pub a: String,\n    pub b: String,\n    pub n: i32,\n    pub peek: *const String,\n}\n\nextend Pair as Free {\n    pub fn free(self: &mut Pair) {\n        self.a.free();\n    }\n}\n\nstruct Whole {\n    pub s: String,\n}\n\nextend Whole as Free {\n    pub fn free(self: &mut Whole) {\n        self.s.free();\n    }\n}\n\nfn main() i32 {\n    let mut q = Pair {\n        a: String::from_str(\"abcdefghijklmnopqrstuvwxyz\"),\n        b: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\"),\n        n: 0,\n        peek: null,\n    };\n    q.n = q.a.len() as i32 + q.b.len() as i32;\n    let w = Whole { s: String::from_str(\"zz\") };\n    return q.n + w.s.len() as i32 - 60;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "Pair__free__fb("), "incomplete impl gets the wrapper");
+    assert(p.gen_has("main.c", "String__free(&self->b);"), "untouched field is glue-freed");
+    assert(!p.gen_has("main.c", "Whole__free__fb"), "complete impl emits no wrapper");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
 // construction, and a local extension method on an imported type.
 @test

@@ -10026,9 +10026,6 @@ extend TypeChecker {
                     self.check_extend_conformance(id);
                 }
                 self.check_associated(unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.items);
-                if self.lint {
-                    self.tc_lint_free_completeness(id);
-                }
                 self.current_self = saved;
                 self.current_extend = saved_impl;
             },
@@ -10258,85 +10255,6 @@ extend TypeChecker {
         }
         used.free();
         marked.free();
-    }
-
-    // ---- lint: a Free impl that never touches a Free-typed field leaks it -------------------------
-    // A hand-written `free()` is the WHOLE destructor (no generated field glue): any container field
-    // it neither frees, moves out, nor otherwise references silently leaks on every drop. Checked
-    // after the impl's bodies (their resolutions are final). Same-module, non-generic extends only.
-    fn tc_lint_free_completeness(self: &mut Self, ext: NodeId) {
-        let a = self.cur_ast();
-        let xd = unsafe (*a).at_const(ext).as_data.extend_def;
-        if xd.interface_type == NODE_NONE || xd.generics.len != 0 {
-            return;
-        }
-        if !self.is_free_iface(unsafe (*a).resolution_def(xd.interface_type)) {
-            return;
-        }
-        let td = unsafe (*a).resolution_def(xd.target_type);
-        if td.node == NODE_NONE || td.module != self.ast.module {
-            return;
-        }
-        let tn = *unsafe (*a).at_const(td.node);
-        if tn.kind != NodeKind::NODE_STRUCT || tn.as_data.aggregate.is_union || tn.as_data.aggregate.generics.len != 0 {
-            return;
-        }
-        // the impl's `free` body span
-        let mut body = NODE_NONE;
-        for i in 0..xd.items.len {
-            let mid = unsafe (*a).list(xd.items)[i as usize];
-            let mn = unsafe (*a).at_const(mid);
-            if mn.kind == NodeKind::NODE_FUNCTION && span_is(
-                self.mod_src(self.ast.module),
-                unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text,
-                "free",
-            ) {
-                body = mn.as_data.function.body;
-            }
-        }
-        if body == NODE_NONE {
-            return;
-        }
-        let bsp = unsafe (*a).at_const(body).span;
-        let ms = tn.as_data.aggregate.members;
-        for i in 0..ms.len {
-            let fid = unsafe (*a).list(ms)[i as usize];
-            let fn2 = unsafe (*a).at_const(fid);
-            if fn2.kind != NodeKind::NODE_FIELD {
-                continue;
-            }
-            let ft = self.resolve_type(fn2.as_data.field.ty);
-            if ft == TYPE_NONE || !self.tc_type_is_free(ft) {
-                continue;
-            }
-            // pointer/reference fields do not OWN their pointee: nothing for free() to release
-            let fk = self.type_at(ft).kind;
-            if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
-                continue;
-            }
-            let mut touched = false;
-            for k in 0..unsafe (*a).resolutions_len() {
-                let d = unsafe (*a).resolution_def(k as NodeId);
-                if d.node == fid && d.module == self.ast.module {
-                    let ksp = unsafe (*a).at_const(k as NodeId).span;
-                    if ksp.start >= bsp.start && ksp.end <= bsp.end {
-                        touched = true;
-                        break;
-                    }
-                }
-            }
-            if !touched {
-                let nsp = unsafe (*a).at_const(fn2.as_data.field.name).as_data.name.text;
-                self.errors.warn(
-                    nsp.start,
-                    nsp.end - nsp.start,
-                    format(
-                        "field '{}' is never freed by this type's 'free' (it leaks on every drop)",
-                        diag::span_str(self.source, nsp.start, nsp.end),
-                    ),
-                );
-            }
-        }
     }
 
     pub fn check(self: &mut Self) {

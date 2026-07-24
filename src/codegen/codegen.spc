@@ -9830,6 +9830,74 @@ extend Codegen {
     }
 
     // Emit a function signature; with_body emits the block, otherwise a prototype `;`.
+    // The owning Free-typed fields of `target` that `fn_id`'s body (the Free-conformance free of a
+    // same-module, non-generic struct) never references. Untouched = no resolution into the body
+    // span = provably live and unfreed when the body ends, so appending their frees can never
+    // double-free. Returns the count written to out_f/out_t (cap 32).
+    fn cg_free_glue_fields(self: &mut Self, fn_id: NodeId, target: DefId, out_f: *mut NodeId, out_t: *mut TypeId) u32 {
+        if target.node == NODE_NONE || target.module != self.cur_module() {
+            return 0;
+        }
+        let a = self.cur_ast();
+        let f = unsafe (*a).at_const(fn_id).as_data.function;
+        if f.body == NODE_NONE || f.params.len == 0 {
+            return 0;
+        }
+        if !span_is(self.source, self.name_span(f.name), "free".ptr() as *const char) {
+            return 0;
+        }
+        let fm = self.cg_free_method(target.module, target.node);
+        if fm.node != fn_id || fm.module != self.cur_module() {
+            return 0;
+        }
+        let ext = self.cg_free_extend(target.module, target.node);
+        if ext.node == NODE_NONE || unsafe (*self.mod_ast(ext.module)).at_const(ext.node).as_data.extend_def.generics.len != 0 {
+            return 0;
+        }
+        let tn = *unsafe (*a).at_const(target.node);
+        if tn.kind != NodeKind::NODE_STRUCT || tn.as_data.aggregate.is_union {
+            return 0;
+        }
+        let bsp = unsafe (*a).at_const(f.body).span;
+        let ms = tn.as_data.aggregate.members;
+        let mut n: u32 = 0;
+        for i in 0..ms.len {
+            let fid = unsafe (*a).list(ms)[i as usize];
+            let fnode = unsafe (*a).at_const(fid);
+            if fnode.kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let ft = unsafe (*a).type_of(fnode.as_data.field.ty);
+            if ft == TYPE_NONE {
+                continue;
+            }
+            let fk = self.type_at(ft).kind;
+            if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
+                continue; // non-owning by rule: raw pointers are borrows
+            }
+            if !self.cg_type_is_free(ft) {
+                continue;
+            }
+            let mut touched = false;
+            for r in 0..unsafe (*a).resolutions_len() {
+                let d = unsafe (*a).resolution_def(r as NodeId);
+                if d.node == fid && d.module == target.module {
+                    let ksp = unsafe (*a).at_const(r as NodeId).span;
+                    if ksp.start >= bsp.start && ksp.end <= bsp.end {
+                        touched = true;
+                        break;
+                    }
+                }
+            }
+            if !touched && n < 32 {
+                unsafe out_f[n as usize] = fid;
+                unsafe out_t[n as usize] = ft;
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
     fn emit_function(
         self: &mut Self,
         fn_id: NodeId,
@@ -9866,6 +9934,47 @@ extend Codegen {
         if f.is_variadic && unsafe cstring::strcmp(&ps[0], "void".ptr() as *const char) != 0 {
             let psl = unsafe cstring::strlen(&ps[0]);
             bappend(&mut ps[0], 1024, psl, ", ...".ptr() as *const char);
+        }
+        // Free-glue wrapper: the user body becomes an inner static fn; the public symbol calls it,
+        // then frees the untouched owning fields -- covering every early return. Complete impls
+        // (empty glue set) emit exactly as before, byte-for-byte.
+        if name_override == null && with_body && !extern_q {
+            let mut gflds: [NodeId; 32] = [[0] = NODE_NONE];
+            let mut gtys: [TypeId; 32] = [[0] = TYPE_NONE];
+            let ng = self.cg_free_glue_fields(fn_id, target, &mut gflds[0], &mut gtys[0]);
+            if ng > 0 {
+                let mut inner = Buf256 {};
+                let nl0 = bappend(&mut inner[0], 256, 0, &nm[0]);
+                bappend(&mut inner[0], 256, nl0, "__fb".ptr() as *const char);
+                self.emit_function(fn_id, target, false, true, &inner[0], true);
+                let a2 = self.cur_ast();
+                let p0 = unsafe (*a2).list(f.params)[0];
+                let mut selfnm = Buf128 {};
+                self.render_ident(self.name_span(unsafe (*a2).at_const(p0).as_data.parameter.name), &mut selfnm[0], 128);
+                if is_static {
+                    self.emit_str("static ");
+                }
+                self.buf.format_into(
+                    "void {}({}) {{\n  {}({});\n",
+                    diag::cstr(&nm[0]),
+                    diag::cstr(&ps[0]),
+                    diag::cstr(&inner[0]),
+                    diag::cstr(&selfnm[0]),
+                );
+                for gi in 0..ng {
+                    let mut fldnm = Buf128 {};
+                    self.render_ident(
+                        self.name_span(unsafe (*a2).at_const(unsafe gflds[gi as usize]).as_data.field.name),
+                        &mut fldnm[0],
+                        128,
+                    );
+                    self.emit_str("  ");
+                    self.emit_free_target(unsafe gtys[gi as usize]);
+                    self.buf.format_into("(&{}->{});\n", diag::cstr(&selfnm[0]), diag::cstr(&fldnm[0]));
+                }
+                self.emit_str("}\n\n");
+                return;
+            }
         }
         let mut decl = Buf1320 {};
         let mut at: usize = 0;
