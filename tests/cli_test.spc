@@ -95,7 +95,7 @@ fn main() i32 {
     // the retired --const-eval flag is rejected with usage
     let rt = p.compile_flags("--const-eval", "main.spc");
     assert(rt.exit != 0, "the retired --const-eval flag is rejected");
-    assert(rt.out_has("Usage:"), "and prints usage");
+    assert(rt.out_has("USAGE:"), "and prints usage");
 }
 
 // Implicit CTFE: folded-argument calls RUN at compile time (recursion, loops, switch, compound assignment),
@@ -436,6 +436,60 @@ fn raii_free_glue_untouched_fields() {
     let cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
+}
+
+// Local consts of owning types are runtime values freed at scope exit (a plain local, not a
+// `static const`); a global one is still rejected, and moving one out is rejected. A local VALUE
+// const with a `const fn` initializer folds to static data instead of emitting a bare call.
+@test
+fn local_const_lifecycle() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct P {\n    pub x: i32,\n    pub y: i32,\n}\n\nconst fn mk() P {\n    return P { x: 3, y: 4 };\n}\n\nfn build() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(5u32);\n    v.push(9u32);\n    return v;\n}\n\nfn main() i32 {\n    const A: P = mk();\n    const L: Vector<u32> = build();\n    return A.x + A.y + L.len() as i32 + *L.at(0) as i32 - 14;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "Vector__u32 L = build();"), "owning local const is a runtime local");
+    assert(p.gen_has("main.c", "Vector__u32__free(&L);"), "owning local const is freed at scope exit");
+    assert(p.gen_has("main.c", "static const P A = { .x = 3, .y = 4 };"), "value const folds to static data");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(lk.exit, 0); // runs, and the owning const is freed (no leak under the fatal gate)
+
+    // a global owning const is rejected
+    p.mkfile(
+        "g.spc",
+        "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    p.expect_fail("g.spc", "a constant cannot hold an owning (Free) type");
+    // moving an owning const out is rejected
+    p.mkfile(
+        "m.spc",
+        "fn eat(v: Vector<u32>) usize {\n    return v.len();\n}\n\nfn build() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nfn main() i32 {\n    const L: Vector<u32> = build();\n    return (eat(L) - 1) as i32;\n}\n",
+    );
+    p.expect_fail("m.spc", "cannot move a value out of a 'const' binding");
+}
+
+// A boxed `dyn fn` (an owning capturing closure moved to the heap) is allocated and freed through
+// the default Global allocator by generated glue. A module that uses no container still needs
+// `interfaces.h` for those Global references -- exercised here by a `Box<dyn fn>` returned, called,
+// and freed, with nothing else pulling the allocator in.
+@test
+fn dyn_fn_box_roundtrip() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn make_adder(k: i32) Box<dyn fn(i32) i32> {\n    return |x: i32| x + k;\n}\n\nfn main() i32 {\n    let f = make_adder(10);\n    return f(5) - 15;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "#include \"__std/interfaces.h\""), "owned dyn pulls in the Global allocator header");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(lk.exit, 0); // the boxed closure env is freed -- no leak under the fatal gate
 }
 
 // The self-hosted leak tracker: super_rt.h interposes the emitted code's malloc/realloc/free call
@@ -1280,7 +1334,7 @@ fn usage() {
     let p = cli::proj_new();
     let r = p.run_raw("a b");
     assert_eq(r.exit, 1);
-    assert(r.out_has("Usage"), "usage is printed");
+    assert(r.out_has("USAGE:"), "usage is printed");
 }
 
 // A type error: no output file is written, the diagnostic is reported, and the exit is nonzero.

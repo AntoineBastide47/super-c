@@ -1,8 +1,8 @@
 # Super-C
 
-Super-C is a small, statically-typed systems language that **compiles to readable C**. It pairs a
-modern frontend — features I liked from other languages (generics, enums with payloads, pattern matching, closures, modules)
-— with C's portability and performance model — the compiler lowers everything to ordinary C99/C11 that Clang, GCC, or MSVC then turns into a native binary.
+Super-C is a small, statically-typed systems language that **compiles to readable C**. It pairs a modern frontend of features I liked from other languages
+(RAII, memory safety, first class coroutines, compile time execution, ...), with C's portability and performance model.
+The transpiler lowers everything to ordinary C99/C11 that Clang, GCC, or MSVC then turns into a native binary.
 
 Super-C is not a C dialect. It is its own language that uses C as a compilation target.
 
@@ -26,31 +26,54 @@ Grab a `super-c` binary from the GitHub Releases (it ships with `std/` and `ffi/
 
 ```sh
 # build an app straight to a native binary
-./super-c build path/to/app.spc -o app
-./app
+./super-c run
 
 # or emit the readable C into path/to/build/ and compile it yourself
 ./super-c path/to/app.spc
 cc path/to/build/**/*.c -o app
 ```
 
-The `std/` prelude (`String`, `str`, `Option`, `Result`, `Vector`, `Map`, ...) is
-auto-imported, so those types are in scope without any `import`.
+## Building and testing
+
+```sh
+./super-c build                     # two-stage dev self-build (ASan/UBSan)
+./super-c release                   # optimized build (-O3 -flto)
+./super-c run                       # build the project, then execute its binary
+./super-c test                      # run the full test suite (tests/ by convention)
+./super-c bench                     # run the benchmarks (bench/ by convention)
+./super-c clean                     # drop build outputs
+```
+
+The build is driven by `build.toml` and works for any project, not just the compiler: declare
+`bin` and `root`, and `super-c build` gives you profiles (`debug`/`dev`/`release`/`bench`, plus your
+own), incremental parallel C compilation with dependency tracking, and the `tests/` + `bench/`
+conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `-o`. Custom `[command.NAME]`
+entries run via `super-c command NAME` and may shadow the built-in `build`/`run`/`test`/`bench`/`clean`
+(this repo's `build` is overridden to the two-stage self-hosting bootstrap). The rest of the toolchain:
+
+* `super-c fmt` — the canonical formatter (Wadler-style, width 120, `@fmt.skip` escape hatch).
+* `super-c lint [--fix]` — default-on lints (unused imports/members/labels, unnecessary `mut` or
+  `unsafe`, unreachable statements and arms, dead stores, discarded pure results, redundant casts,
+  owning unions without a `free`, ...); `--fix` applies the machine fixes — including generated
+  code — and re-lints to a fixpoint. `--suggest-const` flags functions the CTFE interpreter proves
+  always evaluable.
+* `super-c lsp` — a language server (diagnostics as you type, hover, go-to-definition, references,
+  rename, completion, formatting, quick fixes); `editors/vscode/` wires it up.
 
 ## Language tour
 
-### Bindings and functions
+### Bindings, functions, tuples and multiple return values
 
 ```superc
-fn add(a, b: i32) i32 {
-    return a + b;
+fn divmod(p: (i32, i32)) (i32, i32) {
+    return p.1 / p.0, p.1 % p.0;
 }
 
 fn main() i32 {
-    let x: i32 = 10;     // explicit type
-    let y = add(x, 20);  // inferred
-    let mut sum = 0;     // mutable binding
-    for i in 0..=y {
+    let x: i32 = 10;                   // explicit type
+    let (div, mod) = divmod((x, 20));  // inferred + destructuring
+    let mut sum = 0;                   // mutable binding
+    for i in 0..=mod {
         sum = sum + i;
     }
     return sum % 256;
@@ -58,36 +81,9 @@ fn main() i32 {
 ```
 
 Builtin scalar types: `bool`, `char`, `i8 i16 i32 i64 isize`, `u8 u16 u32 u64 usize`, `f32 f64`,
-`c32`, `c64` (C `_Complex`), `void`. (`main` must be `fn main() i32`.) `while`, `for`, and `do { .. }
-while (cond);` loops are all available.
+`c32 c64` (C `_Complex`), `void`.`while`, `for`, and `do { .. } while (cond);` loops are all available.
 
-### Multiple return values
-
-```superc
-fn divmod(a, b: i32) (i32, i32) {
-    return a / b, a % b;
-}
-
-fn main() i32 {
-    let (q, r) = divmod(17, 5);   // tuple destructuring
-    return q * 10 + r;            // 32
-}
-```
-
-### Tuples
-
-```superc
-fn swap(p: (i32, bool)) (bool, i32) {
-    return p.1, p.0;
-}
-
-fn main() i32 {
-    let t = (1, true);         // (i32, bool) — sugar for the prelude's Tuple2<i32, bool>
-    let (b, n) = swap(t);      // destructure (works on tuple values and multi-return calls)
-    let pair: (u8, u8) = (2, 3);
-    return n + (b as i32) + (pair.0 as i32) + (pair.1 as i32) - 7;  // t.0 / t.1 read elements
-}
-```
+The main function is either: `fn main() i32` or `fn main(args: Vector<str>) i32`
 
 Tuples are first-class values (2-4 elements): store them in fields, pass them to functions, put
 them in containers (`Vector<(i32, bool)>`). Nested element access needs parens: `(t.0).1`.
@@ -176,9 +172,7 @@ fn main() i32 {
 }
 ```
 
-`if let P = e { .. } else { .. }` and `while let P = e { .. }` desugar to two-arm switches, so any
-switch pattern (payloads, or-patterns, literals) works. Format placeholders accept
-`{:[fill][<^>][0][width][.precision][x|X|b]}` — `{:08.2}` zero-pads a float to width 8 with 2
+Format placeholders accept `{:[fill][<^>][0][width][.precision][x|X|b]}` — `{:08.2}` zero-pads a float to width 8 with 2
 decimals, `{:b}` prints binary — and `eprint` / `eprintln` mirror `print` / `println` onto stderr.
 
 ### Generics (monomorphized)
@@ -381,21 +375,22 @@ forget(expensive);      // the sanctioned DELIBERATE leak: never freed, still vi
 An `unsafe` block may still take a field out of a reference directly, accepting responsibility for
 the ownership transfer — the same marker contract as raw-pointer code.
 
-### Deferred cleanup
+For cleanup RAII does not cover — a raw pointer, an FFI handle — `defer` runs an arbitrary statement
+at scope exit:
 
 ```superc
 extern "C" { fn free(p: *mut void) void; }
 
 fn main() i32 {
     let p = new i32(42);
-    defer unsafe free(p as *mut void);   // runs at scope exit, even on an early return
-    return unsafe *p;                    // the value is read before the defer runs
+    defer unsafe free(p);   // runs at scope exit, even on an early return
+    return unsafe *p;       // the value is read before the defer runs
 }
 ```
 
-`defer` runs its statement when the enclosing block exits — on fall-through, `return`, `break`, or
-`continue` — in last-in-first-out order. On a `return`, the return value is evaluated first, then the
-deferred statements run.
+`defer` fires when the enclosing block exits — on fall-through, `return`, `break`, or `continue` —
+in last-in-first-out order. On a `return`, the return value is evaluated first, then the deferred
+statements run.
 
 ### Slices and arrays
 
@@ -625,6 +620,7 @@ Every compiled binary carries a built-in leak sanitizer, inert until asked for (
 including Apple Silicon where LeakSanitizer does not exist):
 
 ```sh
+./super-c lint <project>       # statically detect leaks and logs an error per leak
 SC_LEAK_CHECK=1 ./app          # report allocations that survive to exit, with call stacks
 SC_LEAK_CHECK=fatal ./app      # same report, exit code 23 on leaks -- a CI gate
 ```
@@ -645,16 +641,6 @@ use-after-free. Off by default it costs one predictable branch per allocation; t
 script runs the whole test suite under `SC_LEAK_CHECK=fatal`, so compiler and standard library are
 leak-free by construction, not by audit.
 
-### Compile-time assertions
-
-```superc
-struct Header { magic: u32, version: u16 }
-static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
-```
-
-`static_assert(cond, "msg")` is valid at item or statement scope and lowers to C `_Static_assert`, so
-the C compiler evaluates it.
-
 ### Compile-time evaluation
 
 Always on. A constant evaluator, a layout engine (64-bit C data model), and a CTFE interpreter run
@@ -667,10 +653,15 @@ one; `const fn` calls and const initializers are held to a stricter standard, be
 ./super-c --const-eval-steps=100000 --const-eval-memory=16M app.spc
 ```
 
-* `static_assert` conditions that fold are decided by Super-C itself, with source spans —
-  including `sizeof`/`alignof` over structs, enums, tuples, and generic instances. Unfoldable
-  conditions (e.g. involving opaque `extern "C"` types or `va_list`) still lower to C
-  `_Static_assert` as before.
+```superc
+struct Header { magic: u32, version: u16 }
+static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
+```
+
+* `static_assert(cond, "msg")` is valid at item or statement scope; conditions Super-C can fold are
+  decided here with source spans — including `sizeof`/`alignof` over structs, enums, tuples, and
+  generic instances — and unfoldable ones (opaque `extern "C"` types, `va_list`) lower to C
+  `_Static_assert` for the downstream C compiler to evaluate.
 * Array designator indices may be any constant expression (`[K] = v`, `[K + 1] = v`); non-constant
   indices become a Super-C error instead of invalid C. An array length that cannot be evaluated is
   likewise a named error ("array length must be a constant expression") instead of silently
@@ -695,7 +686,7 @@ one; `const fn` calls and const initializers are held to a stricter standard, be
   fails the build even where folding is otherwise optional — a short-circuited `&&`/`||` operand
   that never executes is exempt.
 
-### `const fn` and mandatory evaluation
+#### `const fn` and mandatory evaluation
 
 ```superc
 const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }
@@ -731,11 +722,15 @@ The strictness rules:
   built at compile time are emitted as deterministic `static const` C data, with auxiliary
   objects (`NAME__ct0`, ...) and pointer relocations. A const that points at freed compile-time
   memory is rejected.
-* Owning (`Free`) types are unrepresentable as global consts: `const V: Vector<u32> = ...` is a
-  compile error — the data would live in immutable static storage, but the type's contract lets
-  any by-value copy `free()` or grow it. Use a value type (`[T; N]`, `Array<T, N>`) instead;
-  local consts of owning types stay legal (they are runtime values with real scope exits).
-  Owning containers remain fully usable *inside* compile-time evaluation.
+* Owning (`Free`) types are unrepresentable as global consts: `const V: Vector<u32> = ...` at item
+  scope is a compile error — the data would live in immutable static storage, but the type's
+  contract lets any by-value copy `free()` or grow it. Use a value type (`[T; N]`, `Array<T, N>`)
+  instead. A *local* const of an owning type is legal — it lowers to a runtime value freed at scope
+  exit (like a non-`mut` `let`); moving it out is rejected (a `const` stays put), so it never
+  double-frees. Owning containers remain fully usable *inside* compile-time evaluation.
+
+Running `./super-c lint <project> --suggest-const` indicates all functions the compiler has proven to be const evaluatable.
+Running it with `--fix` makes all those functions const and saves some compilation time as the compiler won't reprove them.
 
 ## Generated output
 
@@ -752,120 +747,34 @@ build/
 
 Includes are relative, so the whole tree builds with `cc build/**/*.c` and no `-I` flags. Symbols are
 module-mangled only when more than one user module is present, so single-file programs emit plain C
-names. The output is meant to be read.
-
-## Project layout
-
-```text
-src/
-  lexer/         token scanning
-  ast/           parser + flat AST arena
-  resolver/      name resolution and scopes
-  typechecker/   type inference, generics, monomorphization
-  borrowck/      moves, aliasing, lifetimes (a dedicated pass over the typed AST)
-  consteval/     the CTFE interpreter + layout engine
-  codegen/       C emission (incl. synthesized destructors and the runtime)
-  module/        package loader / imports / prelude
-  driver/        compile pipeline, lints, emission orchestration
-  build_system/  build.toml engine (profiles, incremental parallel cc)
-  fmt/           the canonical formatter
-  lsp/           the language server
-  utils/         diagnostics (rustc-style), attributes
-std/             the auto-imported prelude
-ffi/             C standard-library bindings (import stdio; ...)
-tests/           the self-hosted test suite
-bench/           the self-transpile benchmark
-editors/         VS Code extension wiring the LSP
-```
-
-## Building and testing
-
-```sh
-./super-c build                     # two-stage dev self-build (ASan/UBSan) -> ./super-c
-./super-c build --profile=release   # optimized build (-O3 -flto)
-./super-c test                      # run the full test suite (tests/ by convention)
-./super-c bench                     # run the benchmarks (bench/ by convention)
-./super-c clean                     # drop build outputs
-```
-
-The build is driven by `build.toml` and works for any project, not just the compiler: declare
-`bin` and `root`, and `super-c build` gives you profiles (`debug`/`dev`/`release`/`bench`, plus your
-own), incremental parallel C compilation with dependency tracking, and the `tests/` + `bench/`
-conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `-o`. Custom `[command.NAME]`
-entries run via `super-c run NAME` and may shadow the built-in `build`/`test`/`bench`/`clean` (this
-repo's `build` is overridden to the two-stage self-hosting bootstrap). The rest of the toolchain:
-
-* `super-c fmt` — the canonical formatter (Wadler-style, width 120, `@fmt.skip` escape hatch).
-* `super-c lint [--fix]` — default-on lints (unused imports/members/labels, unnecessary `mut` or
-  `unsafe`, unreachable statements and arms, dead stores, discarded pure results, redundant casts,
-  owning unions without a `free`, ...); `--fix` applies the machine fixes — including generated
-  code — and re-lints to a fixpoint. `--suggest-const` flags functions the CTFE interpreter proves
-  always evaluable.
-* `super-c lsp` — a language server (diagnostics as you type, hover, go-to-definition, references,
-  rename, completion, formatting, quick fixes); `editors/vscode/` wires it up.
+names.
 
 ## Status and roadmap
 
-Implemented and working: the full lexer→parser→resolver→typechecker→codegen pipeline, type inference,
-structs/methods/visibility, enums with payloads and pattern matching (including or-patterns and
-guards), untagged `union`s, monomorphized generics (functions, structs, enums, methods — same- and
-cross-module), interfaces with enforced generic bounds and method dispatch, operator overloading
-(`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`), first-class tuples, the `?` early-return
-operator, compile-time evaluation (constant folding, layout, and full CTFE with an abstract heap; `const fn`
-with definition-site validation, mandatory evaluation of call-bearing const initializers, aggregate consts
-materialized as static C data with relocations, cycle detection, and proven-UB fold errors), `panic` /
-`unwrap` / `expect` with a `never` type for diverging calls, ownership with RAII
-(destructors DERIVED for owning structs and enums, synthesized per instantiation; explicit `Free`
-impls completed by generated glue; assignment frees the old value; moves tracked with exact
-conditional-move precision; partial moves out of owning values and moves out of references
-rejected with `replace`/`unsafe` escape hatches; `forget` as the sanctioned leak), a static borrow
-checker (`&`/`&mut` aliasing with field-precise overlap, use-while-borrowed, non-lexical borrow
-lifetimes, dangling-reference returns, and Rust-style type-level lifetimes — elision, struct
-lifetime params, HRTB, GATs — erased at codegen), a built-in leak sanitizer in every emitted
-binary (`SC_LEAK_CHECK=1|fatal`: exit-time reports with call stacks, double-free and
-realloc-after-free detection),
-closures (copy / `&mut` / owning captures, monomorphized through `F: fn(..) ..` and `fn move` bounds)
-and function pointers, trait objects (`&dyn I` / `&mut dyn I` / `Box<dyn I>` with per-TU static
-vtables and drop glue, plus structural `dyn fn(..) ..` for stored closures and heterogeneous handler
-lists), references/pointers/`new`, slices and arrays (including
-designated initializers), first-class ranges and slicing (`a[lo..hi]`), `for` over user iterators (an
-`Iterator` interface), multi-return + tuple destructuring, `while` / `for` / `do`-`while` / `loop`
-(a value-yielding expression via `break <expr>`), labeled loops with labeled `break` / `continue`
-(`'outer: for .. { break 'outer; }`, defer-correct unwinding), `if let` / `while let`, `defer`,
-raw strings (`r"…"` / `r#"…"#`), hex floats (`0x1.8p3`) and byte strings (`b"…"` → `[]u8`), numeric
-literal suffixes (`1u8`, `0xFFu64`, `1.0f32`) with implicit
-lossless widening (`i32 → i64`, `u8 → i32`, `f32 → f64`), module-level mutable globals (`static mut`),
-`?` error conversion through `From` conformances, `_` discard bindings, `sizeof`/`alignof` on values, unit and tuple structs (`struct S;`,
-`struct Pair(i32, str);` with `p.0` access and `Pair(1, "a")` construction), associated constants
-(`extend T { const N: i32 = ..; }` → `T::N`), `x @ pat` bindings and rest patterns (`V(a, ..)`,
-`S { f, .. }`), `Deref`/`DerefMut` auto-deref for method calls (`box_of_string.len()`; up to 8 hops,
-cycle-checked, wrapper methods shadow the pointee's, `&mut self` targets need `deref_mut` and a `mut`
-binding), float `Eq`/`Ord`/`Hash` via the IEEE-754 total order (`total_cmp`; floats sort and
-key Maps), `Vector::sort_by`/`sort_by_key`, string→number parsing (`"ff".parse_u64_radix(16)`,
-`"3.5".parse_f64()`), formatted printing with width / alignment / fill / zero-pad / precision / hex /
-binary specifiers (`{:>8}`, `{:08.2}`, `{:b}`) plus `eprint` / `eprintln` to stderr, a test pipeline
-(`--test` with `@test` / `@test(should_panic)` / `@test_init` / `@test_free` fixtures incl. a global
-suite env, fork-isolated parallel execution, and assert builtins that report expression text, values,
-and `file:line`), `static_assert`, `@c.*` attributes, the module system with an auto-imported `std`
-prelude (containers,
-iterators/algorithms, pluggable allocators), `extern "C"` FFI (custom header includes, variadics in
-both directions via `va_list`, `_Complex`), and `sizeof` / `alignof`.
-
-The compiler is **fully self-hosted**: it is written in Super-C, compiles itself through a two-stage
-bootstrap to a byte-identical fixpoint, and ships with its own toolchain — the `build.toml` build
-system (profiles, incremental parallel C compilation, `test`/`bench` conventions), a canonical
-formatter (`super-c fmt`), machine-fixable lints (`super-c lint --fix`), and a language server
-(`super-c lsp` with a VS Code extension). Its own test suite runs under `SC_LEAK_CHECK=fatal`: the
-compiler, the standard library, and every test fixture are gated leak-free and double-free-free on
-every commit.
+Everything in the tour above is implemented and working. Beyond it, Super-C also has:
+* operator overloading (`+ - * / %`, `==`, `<`, indexing, `into` / `try_into`)
+* untagged `union`s
+* the `?` early-return operator with `From`-based error conversion
+* module-level `static mut` globals
+* `_` discard bindings
+* unit and tuple structs (`struct S;`, `struct Pair(i32, str)` with `p.0` and `Pair(1, "a")`)
+* associated constants (`T::N`)
+* `x @ pat` and rest patterns (`V(a, ..)`
+* `S { f, .. }`), `Deref` / `DerefMut` auto-deref (up to 8 hops, cycle-checked)
+* float `Eq` / `Ord` / `Hash` via the IEEE-754 total order (`total_cmp`, so floats sort and key `Map`s) plus
+`Vector::sort_by` / `sort_by_key`, 
+* raw strings (`r#"…"#`)
+* hex floats (`0x1.8p3`)
+* byte strings (`b"…"` → `[]u8`),
+* numeric literal suffixes (`1u8`, `1.0f32`) with lossless widening (`i32 → i64`, `f32 → f64`).
 
 Roadmap, in priority order:
 
-1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
-   embarrassingly parallel per module.
-2. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
-   (file/console IO is currently FFI-only; this subsumes it). Unblocked, and the largest item.
-3. **Threading** — a proper kernel/user threading API: today atomics and threads are C shims via
+1. **Threading** — a proper kernel/user threading API: today atomics and threads are C shims via
    FFI, with no std types and no `Send`/`Sync` markers (the borrow checker is single-threaded).
-4. **Coroutines** — `launch f(args)`: uncolored spawn on stackful coroutines with `Chan<T>`, staged
+2. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
+   embarrassingly parallel per module.
+3. **Coroutines** — `launch f(args)`: uncolored spawn on stackful coroutines with `Chan<T>`, staged
    from a single-threaded scheduler to M:N work stealing.
+4. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
+   (file/console IO is currently FFI-only; this subsumes it).

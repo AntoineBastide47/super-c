@@ -1,5 +1,5 @@
 // The self-hosted super-c driver. The first argument selects the mode: build/release (emit + link,
-// through build.toml when no root is given), fmt, lint, run/clean/test/bench (build.toml engine),
+// through build.toml when no root is given), fmt, lint, run/command/clean/test/bench (build.toml engine),
 // lsp, or a bare <root.spc> (compile + run, MODE_DEFAULT). Compiling modes share CommonOpts
 // (--const-eval-*, --target, --bootstrap-tags, --no-lint); manifest modes add BuildOpts
 // (--profile/--out-dir/--cstd/--jobs). A compiled root runs the global phases (resolve all ->
@@ -435,7 +435,8 @@ enum Mode {
     MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
     MODE_FMT, // `super-c fmt [--check] <path...| ->`
     MODE_LINT, // `super-c lint [--fix] [--suggest-const] <path> [<path2> ...]`
-    MODE_RUN, // `super-c run <command>`: build.toml command
+    MODE_COMMAND, // `super-c command <name>`: run a build.toml [command.NAME]
+    MODE_RUN, // `super-c run [--profile=P]`: build the project, then execute its binary (cargo run)
     MODE_CLEAN, // `super-c clean`: drop build.toml outputs
     MODE_TEST, // `super-c test`: tests/ by convention
     MODE_BENCH, // `super-c bench`: bench/main.spc by convention
@@ -458,6 +459,9 @@ fn subcommand(arg: str) Mode {
         },
         "run" => {
             Mode::MODE_RUN;
+        },
+        "command" => {
+            Mode::MODE_COMMAND;
         },
         "clean" => {
             Mode::MODE_CLEAN;
@@ -664,7 +668,7 @@ fn main(argv: Vector<str>) i32 {
                 i = i + 1;
             }
         },
-        MODE_RUN => {
+        MODE_COMMAND => {
             while i < argc {
                 let arg = argv[i];
                 let common = common_flag(&mut co, arg);
@@ -676,7 +680,17 @@ fn main(argv: Vector<str>) i32 {
                 i = i + 1;
             }
             if file.len() == 0 {
-                co.bad = true; // `run` needs a command name
+                co.bad = true; // `command` needs a command name
+            }
+        },
+        MODE_RUN => {
+            while i < argc {
+                let arg = argv[i];
+                let common = common_flag(&mut co, arg);
+                if common || build_flag(&mut bo, &mut co, arg) {} else {
+                    co.bad = true; // `run` takes only build flags; the binary is the manifest's `bin`
+                }
+                i = i + 1;
             }
         },
         MODE_CLEAN => {
@@ -726,10 +740,46 @@ fn main(argv: Vector<str>) i32 {
         co.bad = true;
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
-    let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
+    let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_COMMAND || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
     if co.bad || file.len() == 0 && !manifest_mode && mode != Mode::MODE_LSP {
         unsafe stdio::fputs(
-            "Usage: super-c [--const-eval-steps=N] [--const-eval-memory=BYTES[K|M|G]] [--target=windows|macos|linux] [--bootstrap-tags]\n       [--test [--test-jobs=N] [--test-no-fork] [--test-filter=S]] <path/to/script>\n       super-c build|release [<path/to/script>] [-o <out>] [--profile=P] [--jobs=N] [--out-dir=D] [--cstd=F]\n       super-c test | super-c bench [--no-run] | super-c run <command> [--profile=P] | super-c clean\n       super-c fmt [-w | --check] <path/to/script | -> | super-c lsp\n".ptr() as *const char,
+            r#"super-c — a systems language that compiles to readable C
+
+USAGE:
+    super-c <file.spc> [options]      compile and run a script
+    super-c <command> [options]
+
+COMMANDS:
+    build   [<dir/file>]   emit C and link a binary (uses build.toml if no file)
+    release [<dir/file>]   like build, with the release profile (-O3 -flto)
+    run                    build the project and run its binary
+    test                   build and run the test suite (tests/ by convention)
+    bench                  build and run the benchmarks (bench/ by convention)
+    command <name>         run a [command.NAME] from build.toml
+    clean                  remove build outputs
+    fmt  <path>...         format source in place (or verify with --check)
+    lint <path>...         report lint warnings (apply fixes with --fix)
+    lsp                    run the language server over stdio
+
+OPTIONS:
+    -o <path>              output binary path (build/release with a file)
+    --profile=P            build profile: debug|dev|release|bench, or a custom one
+    --out-dir=D            output directory (default: build)
+    --jobs=N               parallel C compile jobs (default: one per core)
+    --cstd=F               C standard passed to the C compiler
+    --target=T             cross-compilation target: windows|macos|linux
+    --const-eval-steps=N   compile-time evaluation step budget
+    --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
+    --no-lint              disable the on-by-default lints during a build
+    --check                fmt: report unformatted files, write nothing
+    --fix                  lint: apply machine-applicable fixes and re-lint
+    --suggest-const        lint: also flag functions that could be 'const fn'
+    --no-run               bench: build the bench binary but do not run it
+    --test                 script: collect @test functions, build, and run
+    --test-filter=S        run only tests whose name contains S
+    --test-jobs=N          bound the test process pool (default: one per core)
+    --test-no-fork         run tests in-process (for a debugger)
+"#.ptr() as *const char,
             stdio::stderr(),
         );
         return 1;
@@ -782,6 +832,21 @@ fn main(argv: Vector<str>) i32 {
         let mut rc = 1;
         if !mo.is_none() {
             let mut man = mo.unwrap();
+            // CLI --const-eval-* wins; else the manifest's value; else (0) the engine default.
+            // Capture the CLI values under fresh names -- shadowing `ce_steps` with an initializer
+            // that reads `ce_steps` would resolve to the new (uninitialized) binding.
+            let cli_steps = ce_steps;
+            let cli_mem = ce_mem;
+            let ce_steps = if cli_steps != 0 {
+                cli_steps;
+            } else {
+                man.ce_steps;
+            };
+            let ce_mem = if cli_mem != 0 {
+                cli_mem;
+            } else {
+                man.ce_mem;
+            };
             if out_dir.len() != 0 {
                 man.out_dir = String::from_str(out_dir);
             }
@@ -860,7 +925,7 @@ fn main(argv: Vector<str>) i32 {
                         bootstrap_tags,
                     );
                 };
-            } else if mode == Mode::MODE_RUN {
+            } else if mode == Mode::MODE_COMMAND {
                 rc = bsys::manifest_run(
                     &man,
                     file,
@@ -873,6 +938,35 @@ fn main(argv: Vector<str>) i32 {
                     bootstrap_tags,
                     lint,
                 );
+            } else if mode == Mode::MODE_RUN {
+                // cargo run: a [command.run] override wins; otherwise build the manifest binary and exec it.
+                rc = if bsys::command_overrides(&man, "run") {
+                    bsys::manifest_run(
+                        &man,
+                        "run",
+                        profile,
+                        jobs,
+                        std_dir,
+                        ce_steps,
+                        ce_mem,
+                        target,
+                        bootstrap_tags,
+                        lint,
+                    );
+                } else {
+                    bsys::manifest_run_bin(
+                        &man,
+                        profile,
+                        out_bin,
+                        jobs,
+                        std_dir,
+                        ce_steps,
+                        ce_mem,
+                        target,
+                        bootstrap_tags,
+                        lint,
+                    );
+                };
             } else if bsys::command_overrides(&man, "build") {
                 rc = bsys::manifest_run(
                     &man,

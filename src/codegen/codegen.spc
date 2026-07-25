@@ -5245,16 +5245,36 @@ extend Codegen {
                 self.render_ident(self.name_span(n.as_data.const_def.name), &mut nm[0], 128);
                 let mut decl = Buf256 {};
                 self.render_type_node(n.as_data.const_def.ty, &nm[0], &mut decl[0], 256);
-                self.emit_str("static const ");
-                self.emit_cstr(&decl[0]);
-                if n.as_data.const_def.value != NODE_NONE {
-                    self.emit_str(" = ");
-                    let sc = self.const_ctx;
-                    self.const_ctx = true;
-                    self.emit_initializer(n.as_data.const_def.ty, n.as_data.const_def.value);
-                    self.const_ctx = sc;
+                let cty = self.subst_resolve(unsafe (*self.cur_ast()).type_of(id));
+                if cty != TYPE_NONE && self.cg_type_is_free(cty) {
+                    // A local const of an owning type is a runtime value freed at scope exit (like a
+                    // non-mut `let`): emit a plain local -- no `static const`, since free needs a
+                    // non-const pointer and the initializer is a runtime call -- then register the
+                    // scope-exit free. Move-out is rejected by the borrow checker, so it never
+                    // guards.
+                    self.emit_cstr(&decl[0]);
+                    if n.as_data.const_def.value != NODE_NONE {
+                        self.emit_str(" = ");
+                        self.emit_initializer(n.as_data.const_def.ty, n.as_data.const_def.value);
+                    }
+                    self.emit_str(";\n");
+                    self.cg_register_auto_free(id);
+                } else if self.emit_const_materialized(&nm[0], &decl[0], n.as_data.const_def.value, false) {
+                    // A call-bearing initializer (`const A = mk()`) is CTFE-folded to static data --
+                    // the same path a top-level const takes -- so it is a valid C constant, not a
+                    // runtime call in a `static const` initializer (which the C compiler rejects).
+                } else {
+                    self.emit_str("static const ");
+                    self.emit_cstr(&decl[0]);
+                    if n.as_data.const_def.value != NODE_NONE {
+                        self.emit_str(" = ");
+                        let sc = self.const_ctx;
+                        self.const_ctx = true;
+                        self.emit_initializer(n.as_data.const_def.ty, n.as_data.const_def.value);
+                        self.const_ctx = sc;
+                    }
+                    self.emit_str(";\n");
                 }
-                self.emit_str(";\n");
             },
             NODE_RETURN => {
                 self.emit_return(id);
@@ -7296,6 +7316,8 @@ extend Codegen {
         let mut nameNode = ln.as_data.let_stmt.name;
         if ln.kind == NodeKind::NODE_PARAMETER {
             nameNode = ln.as_data.parameter.name;
+        } else if ln.kind == NodeKind::NODE_CONST {
+            nameNode = ln.as_data.const_def.name;
         } else if ln.kind == NodeKind::NODE_IDENTIFIER {
             nameNode = bid;
         }
@@ -13847,6 +13869,24 @@ extend Codegen {
             }
             if home != cur && home as usize < nmod {
                 unsafe want[home as usize] = true;
+            }
+        }
+        // An OWNED `dyn` value (a boxed `dyn fn` or `Box<dyn I>`) is heap-allocated and freed by
+        // generated glue through the default `Global` allocator -- a reference that appears in no
+        // source resolution, so its defining module must be pulled in explicitly here.
+        let mut has_owned_dyn = false;
+        let mut di: usize = 0;
+        while di < unsafe (*self.cur_ast()).type_pool.len() && !has_owned_dyn {
+            let dt = *unsafe (*self.cur_ast()).type_at(di as TypeId);
+            if dt.kind == TypeKind::TYPE_DYN && dt.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
+                has_owned_dyn = true;
+            }
+            di = di + 1;
+        }
+        if has_owned_dyn {
+            let gh = unsafe (*self.package).prelude_lookup("Global", true);
+            if gh.node != NODE_NONE && gh.mid != cur && gh.mid as usize < nmod {
+                unsafe want[gh.mid as usize] = true;
             }
         }
         if unsafe (*self.package).core_seeded && unsafe (*self.package).core_module != cur && (unsafe (*self.package).core_module) as usize < nmod {

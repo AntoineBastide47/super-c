@@ -891,6 +891,20 @@ extend tc::TypeChecker {
             return;
         }
         let dk = unsafe (*a).at_const(d.node).kind;
+        // An owning `const` local is a runtime value freed at scope exit: moving it out would leave
+        // that free to double-free. A `const` stays put -- read it or borrow it, never move it.
+        if dk == NodeKind::NODE_CONST {
+            let cd = unsafe (*a).at_const(d.node).as_data.const_def;
+            if !cd.is_static_mut && !cd.is_extern && self.tc_type_is_free(unsafe (*a).type_of(expr)) {
+                let sp = unsafe (*a).at_const(expr).span;
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("cannot move a value out of a 'const' binding (it is freed at scope exit)"),
+                );
+            }
+            return;
+        }
         if dk != NodeKind::NODE_LET && dk != NodeKind::NODE_PARAMETER || !self.tc_type_is_free(
             unsafe (*a).type_of(expr),
         ) {
@@ -3951,6 +3965,26 @@ extend tc::TypeChecker {
                     self.borrow_push(bb.root, bb.kind, bb.place, id);
                 }
             }
+        }
+        // A MUTATED capture of a plain local (`mut_caps` bit set, not a reference/pointer binding)
+        // is an implicit `&mut` of that local -- the env holds a pointer to it. Give the closure
+        // value a mutable borrow rooted at the local so storing or returning it past the local's
+        // scope is caught exactly like an explicit `&local` capture; a synchronously-consumed
+        // closure never ties the borrow to an outer place, so it stays fine.
+        for i in 0..caps.len {
+            if (mut_caps >> i as u64 & 1u64) == 0 {
+                continue;
+            }
+            let cid = unsafe (*a).list(caps)[i as usize];
+            let cty = unsafe (*a).type_of(cid);
+            if cty == TYPE_NONE {
+                continue;
+            }
+            let ck = self.type_at(cty).kind;
+            if ck == TypeKind::TYPE_REFERENCE || ck == TypeKind::TYPE_POINTER {
+                continue; // a reference/pointer binding's own borrow is re-exposed above
+            }
+            self.borrow_push(cid, BORROW_MUT, cid, id);
         }
     }
 

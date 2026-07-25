@@ -51,6 +51,8 @@ pub struct Manifest<'a> {
     pub ldflags: Vector<String>,
     pub ldlibs: Vector<String>,
     pub jobs: u32,
+    pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M). CLI --const-eval-steps overrides.
+    pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default. CLI --const-eval-memory overrides.
     pub default_profile: String,
     pub profiles: Vector<Profile<'a>>,
     pub commands: Vector<Command<'a>>,
@@ -86,6 +88,8 @@ extend Manifest {
             ldflags: Vector::<String>::new(),
             ldlibs: Vector::<String>::new(),
             jobs: 0,
+            ce_steps: 0,
+            ce_mem: 0,
             default_profile: String::new(),
             profiles: Vector::<Profile>::new(),
             commands: Vector::<Command>::new(),
@@ -246,6 +250,24 @@ pub fn load(path: str) Option<Manifest> {
                     errs.emit(it.at, 4, format("'jobs' expects a non-negative integer"));
                 } else {
                     m.jobs = it.val.i as u32;
+                }
+            } else if key == "const-eval-steps" {
+                // 0 = engine default; a `--const-eval-steps` CLI flag overrides this at build time.
+                if it.val.kind != toml::TV_INT || it.val.i < 0 || it.val.i > 4294967295 {
+                    errs.emit(it.at, key.len() as u32, format("'const-eval-steps' expects a non-negative integer"));
+                } else {
+                    m.ce_steps = it.val.i as u32;
+                }
+            } else if key == "const-eval-memory" {
+                // bytes; 0 = engine default; a `--const-eval-memory` CLI flag overrides this.
+                if it.val.kind != toml::TV_INT || it.val.i < 0 {
+                    errs.emit(
+                        it.at,
+                        key.len() as u32,
+                        format("'const-eval-memory' expects a non-negative integer (bytes)"),
+                    );
+                } else {
+                    m.ce_mem = it.val.i as u64;
                 }
             } else if key == "default-profile" {
                 set_str(it, &mut errs, &mut m.default_profile);

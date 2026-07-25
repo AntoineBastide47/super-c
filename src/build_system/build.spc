@@ -742,6 +742,57 @@ pub fn manifest_build(
     );
 }
 
+/// `super-c run`: build the manifest binary (like `manifest_build`), then execute it (cargo run).
+/// Returns the build's failure code, or the binary's exit code. The binary is `bin_override` if
+/// given, else the manifest's `bin`; a bare name is run cwd-relative (`./bin`), never through PATH.
+pub fn manifest_run_bin(
+    m: &mf::Manifest,
+    profile: str,
+    bin_override: str,
+    jobs_override: u32,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    bootstrap_tags: bool,
+    lint: bool,
+) i32 {
+    let prof_name = resolve_profile(m, profile);
+    let bin = if bin_override.len() != 0 {
+        bin_override;
+    } else {
+        m.bin.as_str();
+    };
+    let rc = engine_build(
+        m,
+        prof_name,
+        m.root.as_str(),
+        dirname_of(m.root.as_str()),
+        "",
+        prof_name,
+        "raw",
+        bin,
+        jobs_override,
+        std_dir,
+        ce_steps,
+        ce_mem,
+        target,
+        bootstrap_tags,
+        lint,
+    );
+    if rc != 0 {
+        return rc;
+    }
+    let mut path = String::new();
+    if bin.find_byte(b'/') < 0 {
+        path.push_str("./");
+    }
+    path.push_str(bin);
+    let mut cmd = String::new();
+    push_quoted(&mut cmd, path.as_str());
+    return shell(cmd.as_str());
+}
+
 /// `super-c test`: build the project, then discover tests/**/*.spc by convention, synthesize an
 /// aggregating root, and run the @test pipeline on it (SUPERC points at the fresh binary).
 pub fn manifest_test(

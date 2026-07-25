@@ -1832,6 +1832,23 @@ fn closure_capture_regions() {
         "a closure capturing by value into an outer slot is fine",
         "fn main() i32 {\n    let mut slot: Box<dyn fn() i32> = || 0;\n    {\n        let local = 30;\n        slot = || local;\n    }\n    return slot() - 30;\n}\n",
     );
+    // A MUTATED capture (implicit &mut of a local) that escapes is rejected like an explicit &local:
+    // the env holds a pointer to the local, which dies at the end of the block.
+    h::expect_err_msg(
+        "a closure mutating a local, pushed into an outer container, is rejected",
+        "fn main() i32 {\n    let mut store = Vector::<Box<dyn fn() i32>>::new();\n    {\n        let mut n = 9;\n        store.push(fn() i32 { n += 1; return n; });\n    }\n    return 0;\n}\n",
+        "borrowed value does not live long enough",
+    );
+    h::expect_err_msg(
+        "returning a closure that mutates a local is rejected",
+        "fn make() Box<dyn fn(i32) i32> {\n    let mut n = 0;\n    return fn(d: i32) i32 { n += d; return n; };\n}\nfn main() i32 { return 0; }\n",
+        "returning a value borrowing from a local",
+    );
+    // Control: a mutated capture consumed in the same scope (never stored) is fine.
+    h::expect_ok(
+        "a closure mutating a local, consumed in place, is fine",
+        "fn call<F: fn() i32>(f: F) i32 { return f(); }\nfn main() i32 {\n    let mut n = 5;\n    let r = call(fn() i32 { n += 1; return n; });\n    return r - 6;\n}\n",
+    );
 }
 
 // Adversarial round 3. A view REBORROW (a sub-slice `s[0..2]`, a `str` sub-view `sv.trim()`) must

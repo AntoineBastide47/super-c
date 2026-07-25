@@ -5,6 +5,7 @@ root = "src/main.spc"
 run = [
     "./super-c build --bootstrap-tags -o stage1-super-c",
     "./stage1-super-c build",
+    "rm -rf stage1-super-c",
 ]
 
 [command.profile]

@@ -1,8 +1,12 @@
-// Predicated LL(1) recursive-descent parser: token stream -> one Ast per module. No backtracking --
-// every fork is decided on a single peeked token, and the `_after` seams re-enter with an
-// already-parsed prefix instead of peeking further. Errors emit and recover locally (skip to a sync
-// token, yield NODE_NONE), so parsing always completes and build_ast always produces a NODE_PROGRAM
-// root. PARSE_MAX_DEPTH bounds recursion on types, statements, and expressions.
+// Context-free LL(1) recursive-descent parser: token stream -> one Ast per module. Every fork is
+// decided on a single peeked token, no backtracking; the `_after` seams re-enter with an
+// already-parsed prefix instead of peeking further (left-factoring, not lookahead). Paren-free
+// if/while/switch conditions use a cover grammar -- the ExpressionGrammar argument selects the
+// EXPR_CONDITION family, where `Ident {` is a body block not a struct literal -- threaded purely
+// structurally (reset to EXPR_FULL inside every delimiter), so it expands to a context-free grammar
+// and consults no semantic state. Errors emit and recover locally (skip to a sync token, yield
+// NODE_NONE), so parsing always completes and build_ast always produces a NODE_PROGRAM root.
+// PARSE_MAX_DEPTH bounds recursion on types, statements, and expressions.
 import string as cstring;
 import stdlib;
 import lexer::token as *;
