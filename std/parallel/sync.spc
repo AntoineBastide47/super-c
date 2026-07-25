@@ -4,6 +4,7 @@
 import pthread;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
+import std::parallel::runtime as runtime;
 
 /// A mutual-exclusion lock guarding a `T`. Only the thread holding the lock can reach the value, through
 /// the RAII `MutexGuard` returned by `lock` -- the lock is released when the guard is dropped. Put one in an
@@ -245,8 +246,19 @@ extend<T> RwLockWriteGuard<T> as Free {
 /// A condition variable. Threads `wait` on it while holding a `MutexGuard` (the wait atomically releases
 /// the mutex and re-acquires it before returning); other threads `notify_one`/`notify_all` to wake them.
 /// Always re-check the condition in a loop after `wait` -- wakeups may be spurious.
+// The coroutine waiters parked on a condvar (intrusive via `Coroutine.next`); guarded by the paired mutex,
+// so it is heap-boxed and reached through a raw pointer (mutated under that lock, never structurally).
+struct CondQ {
+    pub head: *mut runtime::Coroutine,
+    pub tail: *mut runtime::Coroutine,
+}
+
+/// A condition variable. A coroutine that `wait`s PARKS (its worker runs other tasks); a plain OS thread
+/// blocks. `notify_one`/`notify_all` wake whichever kind is waiting. Always re-check the condition in a loop
+/// after `wait` -- wakeups may be spurious.
 pub struct Condvar {
-    handle: *mut void, // heap pthread_cond_t (sc_cond_new)
+    handle: *mut void, // heap pthread_cond_t (sc_cond_new), for OS-thread waiters
+    wq: *mut CondQ, // parked-coroutine queue, guarded by the paired mutex
 }
 
 extend Condvar as Send {}
@@ -256,19 +268,56 @@ extend Condvar as Sync {}
 extend Condvar {
     /// A new condition variable.
     pub fn new() Condvar {
-        return Condvar { handle: unsafe pthread::sc_cond_new() };
+        let mut g = Global {};
+        let q = g.alloc(sizeof(CondQ), alignof(CondQ)) as *mut CondQ;
+        unsafe q[0] = CondQ { head: null, tail: null };
+        return Condvar { handle: unsafe pthread::sc_cond_new(), wq: q };
     }
     /// Atomically release `guard`'s mutex and block until notified, then re-acquire it before returning.
-    /// Always re-check your condition in a loop afterwards -- wakeups may be spurious.
+    /// A coroutine parks (freeing its worker); a non-coroutine thread blocks. Re-check in a loop -- wakeups
+    /// may be spurious.
     pub fn wait<T>(self: &Condvar, guard: &MutexGuard<T>) {
-        let _ = unsafe pthread::pthread_cond_wait(self.handle, guard.lock_handle());
+        let co = runtime::current();
+        if co != null {
+            // Enqueue self under the held mutex, then park; the runtime releases the mutex once our context
+            // is saved. On resume, re-acquire it -- exactly the pthread_cond_wait contract.
+            unsafe (*co).next = null;
+            if unsafe (*self.wq).tail == null {
+                unsafe (*self.wq).head = co;
+            } else {
+                unsafe (*(*self.wq).tail).next = co;
+            }
+            unsafe (*self.wq).tail = co;
+            runtime::park_current(guard.lock_handle());
+            let _ = unsafe pthread::pthread_mutex_lock(guard.lock_handle());
+        } else {
+            let _ = unsafe pthread::pthread_cond_wait(self.handle, guard.lock_handle());
+        }
     }
-    /// Wake one waiting thread.
+    /// Wake one waiter (a parked coroutine if any, and one blocked OS thread). Call under the paired mutex.
     pub fn notify_one(self: &Condvar) {
+        let co = unsafe (*self.wq).head;
+        if co != null {
+            unsafe (*self.wq).head = unsafe (*co).next;
+            if unsafe (*self.wq).head == null {
+                unsafe (*self.wq).tail = null;
+            }
+            unsafe (*co).next = null;
+            runtime::wake(co);
+        }
         let _ = unsafe pthread::pthread_cond_signal(self.handle);
     }
-    /// Wake all waiting threads.
+    /// Wake every waiter (all parked coroutines and all blocked OS threads). Call under the paired mutex.
     pub fn notify_all(self: &Condvar) {
+        let mut co = unsafe (*self.wq).head;
+        unsafe (*self.wq).head = null;
+        unsafe (*self.wq).tail = null;
+        while co != null {
+            let nx = unsafe (*co).next;
+            unsafe (*co).next = null;
+            runtime::wake(co);
+            co = nx;
+        }
         let _ = unsafe pthread::pthread_cond_broadcast(self.handle);
     }
 }
@@ -277,6 +326,9 @@ extend Condvar as Free {
     pub fn free(self: &mut Condvar) {
         unsafe pthread::sc_cond_free(self.handle);
         self.handle = null;
+        let mut g = Global {};
+        g.dealloc(self.wq, sizeof(CondQ), alignof(CondQ));
+        self.wq = null;
     }
 }
 

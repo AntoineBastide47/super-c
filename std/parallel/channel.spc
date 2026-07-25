@@ -192,11 +192,10 @@ extend<T> Sender<T> {
     /// Close the channel: no further sends succeed; buffered items stay readable until drained.
     pub fn close(self: &Sender<T>) {
         let inner = self.inner.get();
-        {
-            let mut g = inner.state.lock();
-            let s = g.get_mut();
-            s.closed = true;
-        }
+        // notify UNDER the lock: the dual-mode condvar's wait queue is guarded by this mutex.
+        let mut g = inner.state.lock();
+        let s = g.get_mut();
+        s.closed = true;
         inner.not_empty.notify_all();
         inner.not_full.notify_all();
     }
@@ -205,16 +204,15 @@ extend<T> Sender<T> {
 extend<T> Sender<T> as Free {
     pub fn free(self: &mut Sender<T>) {
         let inner = self.inner.get();
-        let mut last = false;
         {
             let mut g = inner.state.lock();
             let s = g.get_mut();
             s.senders = s.senders - 1;
-            last = s.senders == 0;
-        }
-        if last {
-            // No producers left: wake blocked receivers so they observe the closed-and-draining channel.
-            inner.not_empty.notify_all();
+            if s.senders == 0 {
+                // No producers left: wake blocked receivers (under the lock -- it guards the wait queue) so
+                // they observe the closed-and-draining channel.
+                inner.not_empty.notify_all();
+            }
         }
         self.inner.free();
     }
@@ -283,16 +281,15 @@ extend<T> Receiver<T> {
 extend<T> Receiver<T> as Free {
     pub fn free(self: &mut Receiver<T>) {
         let inner = self.inner.get();
-        let mut last = false;
         {
             let mut g = inner.state.lock();
             let s = g.get_mut();
             s.receivers = s.receivers - 1;
-            last = s.receivers == 0;
-        }
-        if last {
-            // No consumers left: wake blocked senders so they observe the closed channel and give up.
-            inner.not_full.notify_all();
+            if s.receivers == 0 {
+                // No consumers left: wake blocked senders (under the lock -- it guards the wait queue) so
+                // they observe the closed channel and give up.
+                inner.not_full.notify_all();
+            }
         }
         self.inner.free();
     }

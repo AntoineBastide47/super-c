@@ -175,6 +175,11 @@ void *sc_lk_malloc(size_t __n);
 void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
+/* Suspend/resume per-thread backtrace capture: a coroutine runtime brackets a task's execution with these
+   so the tracker never unwinds a makecontext/fiber stack (which has no clean base frame). Leak DETECTION is
+   unaffected -- only the per-allocation call stack is skipped while paused. Balanced; safe to nest. */
+void sc_lk_bt_pause(void);
+void sc_lk_bt_resume(void);
 #define malloc(__n) sc_lk_malloc(__n)
 #define calloc(__n, __m) sc_lk_calloc(__n, __m)
 #define realloc(__p, __n) sc_lk_realloc(__p, __n)
@@ -264,16 +269,23 @@ static int sc_lk_grow(void) {
   sc_lk_used = kept; /* freed-history entries are dropped: detection is best-effort */
   return 1;
 }
+/* Per-thread backtrace-suppression depth: nonzero while this thread runs on a coroutine/fiber stack, whose
+   frame chain has no clean terminator for backtrace() to stop at. */
+static _Thread_local int sc_lk_bt_off = 0;
+void sc_lk_bt_pause(void) { sc_lk_bt_off++; }
+void sc_lk_bt_resume(void) { sc_lk_bt_off--; }
 static void sc_lk_capture(sc_lk_ent *e, void *p, size_t n) {
   e->ptr = p;
   e->size = n;
   e->st = 1;
   e->nbt = 0;
+  if (sc_lk_bt_off == 0) {
 #ifdef SC_LK_SYMS
-  e->nbt = backtrace(e->bt, SC_LK_BT);
+    e->nbt = backtrace(e->bt, SC_LK_BT);
 #elif defined(SC_LK_BT)
-  e->nbt = (int)RtlCaptureStackBackTrace(0UL, (unsigned long)SC_LK_BT, e->bt, (unsigned long *)0);
+    e->nbt = (int)RtlCaptureStackBackTrace(0UL, (unsigned long)SC_LK_BT, e->bt, (unsigned long *)0);
 #endif
+  }
 }
 #ifdef SC_LK_BT
 static void sc_lk_bt_print(void *const *bt, int n) {

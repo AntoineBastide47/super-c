@@ -1218,6 +1218,84 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// Task-aware parking: 50 coroutines (30 producers + 20 consumers) share a bounded(2) channel -- MORE
+// coroutines than worker threads. When a coroutine blocks on send/recv it PARKS (via the dual-mode
+// `Condvar`), freeing its worker to run others; under the old block-the-OS-thread model this would deadlock
+// (every worker stuck inside a blocked coroutine, none left to make progress). All 300 items are delivered
+// exactly once. Every handle is created before any coroutine launches, so no send is rejected for want of a
+// receiver. Leak-checked.
+@test
+fn channel_parking_oversubscribed() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::channel as chan;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let ch = chan::Channel::<i64>::bounded(2);
+    let cnt = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(50);
+    let mut senders = Vector::<chan::Sender<i64>>::new();
+    for _p in 0..30 {
+        senders.push(ch.sender());
+    }
+    let mut recvs = Vector::<chan::Receiver<i64>>::new();
+    for _c in 0..20 {
+        recvs.push(ch.receiver());
+    }
+    while senders.len() > 0 {
+        let s = senders.pop().unwrap();
+        let w = wg.clone();
+        launch fn() {
+            for _i in 0..10 {
+                let _ = s.send(7);
+            }
+            w.done();
+        };
+    }
+    while recvs.len() > 0 {
+        let r = recvs.pop().unwrap();
+        let ct = cnt.clone();
+        let w = wg.clone();
+        launch fn() {
+            loop {
+                switch r.recv() {
+                    Some(_) => {
+                        let _ = ct.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+                    },
+                    None => {
+                        break;
+                    },
+                };
+            }
+            w.done();
+        };
+    }
+    senders.free();
+    recvs.free();
+    ch.free();
+    wg.wait();
+    let n = cnt.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    cnt.free();
+    rt::shutdown();
+    return (n - 300) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
 // shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
 // contents are stored non-`const` and mutated soundly -- exercised here by an `UnsafeCell<i32>` in an
