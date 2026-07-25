@@ -1033,6 +1033,72 @@ fn interior_mutability_via_unsafe_cell() {
     assert_eq(ok.run_bin(), 0);
 }
 
+// Blocking sync primitives (std/parallel/sync, backed by pthread through the auto-discovered pthread_ext.c
+// shim): a shared Arc<Mutex<i64>> counter with RAII guards, a WaitGroup barrier for completion, and an
+// RwLock -- all leak-checked. Exercises the cross-module include scan (Arc's atomic/Global deps pulled into
+// the sync TU) and the C-shim backing-.c discovery.
+@test
+fn sync_primitives() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::thread as thread;
+import std::parallel::arc as arc;
+import std::parallel::sync as sync;
+
+fn main() i32 {
+    let counter = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(4);
+    let mut hs = Vector::<thread::JoinHandle<i32>>::new();
+    for _t in 0..4 {
+        let c = counter.clone();
+        let w = wg.clone();
+        hs.push(thread::spawn(fn() i32 {
+            for _i in 0..2000 {
+                let mut g = c.get().lock();
+                let v = g.get_mut();
+                *v = *v + 1;
+            }
+            w.done();
+            return 0;
+        }));
+    }
+    wg.wait();
+    while hs.len() > 0 {
+        let _ = hs.pop().unwrap().join();
+    }
+    hs.free();
+    let rw = sync::RwLock::<i64>::new(0);
+    {
+        let mut wr = rw.write();
+        let v = wr.get_mut();
+        *v = 7;
+    }
+    let mut r: i64 = 0;
+    {
+        let rd = rw.read();
+        r = *rd.get();
+    }
+    rw.free();
+    let mut total: i64 = 0;
+    {
+        let g = counter.get().lock();
+        total = *g.get();
+    }
+    counter.free();
+    return (total - 8000) as i32 + (r - 7) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
 @test
 fn prelude_output_is_demand_driven() {

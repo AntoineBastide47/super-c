@@ -1731,6 +1731,21 @@ extend Codegen {
         let mut fn2 = DefId { module: 0, node: NODE_NONE };
         if callee.kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
             fn2 = unsafe (*a).resolution_def(callee.as_data.specialization.expression);
+        } else if callee.kind == NodeKind::NODE_MEMBER && !callee.as_data.member.path {
+            // A generic METHOD on a NON-generic struct/enum is a generic fn keyed on its own type args: the
+            // instance-method path only handles methods of generic aggregates (keyed on the struct instance),
+            // so collect these here like a free generic fn. A generic-aggregate receiver is left to that path.
+            let obj = callee.as_data.member.object;
+            let mut oty = self.subst_resolve(unsafe (*a).type_of(obj));
+            let mut oy = *self.type_at(oty);
+            while oy.kind == TypeKind::TYPE_REFERENCE || oy.kind == TypeKind::TYPE_POINTER {
+                oty = oy.as_data.elem;
+                oy = *self.type_at(oty);
+            }
+            if oy.kind != TypeKind::TYPE_STRUCT && oy.kind != TypeKind::TYPE_ENUM {
+                return DefId { module: 0, node: NODE_NONE };
+            }
+            fn2 = unsafe (*a).resolution_def(callee.as_data.member.member);
         } else {
             fn2 = unsafe (*a).resolution_def(call.as_data.call.callee);
         }
@@ -4998,6 +5013,35 @@ extend Codegen {
             self.spec_name(g, &ga[0], gn, &mut nm[0], 256);
             self.emit_cstr(&nm[0]);
             self.emit_str("(");
+            // A generic METHOD instance (`spec_name` above named it without a struct prefix, matching the
+            // definition emitted by emit_specializations) still needs its receiver passed as the leading
+            // `self` argument: `&obj` for a by-ref self on a value receiver, else the receiver as-is.
+            let mut had_recv = false;
+            if callee.kind == NodeKind::NODE_MEMBER && !callee.as_data.member.path {
+                let obj = callee.as_data.member.object;
+                let gfn = unsafe (*self.mod_ast(g.module)).at_const(g.node);
+                let gparams = gfn.as_data.function.params;
+                let mut self_is_ref = false;
+                if gparams.len > 0 {
+                    let p0 = unsafe (*self.mod_ast(g.module)).list(gparams)[0];
+                    let ptn = unsafe (*self.mod_ast(g.module)).at_const(p0).as_data.parameter.ty;
+                    if ptn != NODE_NONE {
+                        let ptk = unsafe (*self.mod_ast(g.module)).at_const(ptn).kind;
+                        self_is_ref = ptk == NodeKind::NODE_REFERENCE_TYPE || ptk == NodeKind::NODE_POINTER_TYPE;
+                    }
+                }
+                let otk = self.type_at(unsafe (*self.cur_ast()).type_of(obj)).kind;
+                if self_is_ref && otk != TypeKind::TYPE_REFERENCE && otk != TypeKind::TYPE_POINTER {
+                    self.emit_str("&");
+                    self.emit_expr(obj);
+                } else {
+                    self.emit_expr(obj);
+                }
+                had_recv = true;
+            }
+            if had_recv && args.len != 0 {
+                self.emit_str(", ");
+            }
             self.emit_call_args(args);
             self.emit_str(")");
             return;
@@ -12657,6 +12701,22 @@ extend Codegen {
             self.emit_str(" ");
             self.defer_top = 0;
             self.loop_defer_base = 0;
+            // A closure body has its own scope-exit auto-frees, so it needs its own move scan -- otherwise an
+            // explicit `x.free()` inside the closure is not recorded as a move and the auto-free fires too,
+            // double-freeing. Mirrors emit_function's setup (closures emit in a separate phase, never nested
+            // inside another body, so a plain reset is safe).
+            self.nmoved = 0;
+            self.ncond_moved = 0;
+            self.ncond_sites = 0;
+            self.cg_move_stamps_reset();
+            self.pend_moves.clear();
+            self.ret_moves.clear();
+            self.moved_place_l.clear();
+            self.moved_place_cond.clear();
+            self.place_flag_l.clear();
+            self.place_flags_pending = false;
+            self.cg_scan_moves(body, false);
+            self.cg_replay_cond_moves();
             self.emit_block(body);
             self.emit_str("\n\n");
         }
@@ -14000,28 +14060,6 @@ extend Codegen {
             }
         }
     }
-    // Does module `m` reference the prelude `Global` allocator anywhere in its type pool? Used to decide
-    // whether a re-homed instance owned by `m` drags Global's header into the hosting TU.
-    fn module_refs_global(self: &mut Self, m: ModuleId) bool {
-        if self.package == null {
-            return false;
-        }
-        let gh = unsafe (*self.package).prelude_lookup("Global", true);
-        if gh.node == NODE_NONE {
-            return false;
-        }
-        let a = self.mod_ast(m);
-        let np = unsafe (*a).type_pool.len();
-        let mut i: usize = 1;
-        while i < np {
-            let y = *unsafe (*a).type_at(i as TypeId);
-            if y.kind == TypeKind::TYPE_STRUCT && y.module == gh.mid && y.as_data.decl == gh.node {
-                return true;
-            }
-            i = i + 1;
-        }
-        return false;
-    }
     fn emit_referenced_includes(self: &mut Self) {
         let nmod = self.pkg_count();
         let cur = self.cur_module();
@@ -14062,7 +14100,14 @@ extend Codegen {
             }
             unsafe want[t.module as usize] = true;
         }
-        let mut hosts_rehomed = false;
+        let scanned = (unsafe stdlib::calloc(
+            if nmod != 0 {
+                nmod;
+            } else {
+                1 as usize;
+            },
+            1,
+        )) as *mut bool;
         for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
             let mut concrete = it.module as usize < nmod || it.module == cur;
@@ -14083,16 +14128,30 @@ extend Codegen {
             if home != cur && home as usize < nmod {
                 unsafe want[home as usize] = true;
             }
-            // An instance re-homed INTO this TU (owner elsewhere) is emitted here with the owner's method
-            // bodies, which may allocate through the default `Global` allocator -- a reference in no
-            // resolution of THIS module. Pull Global in (like the owned-dyn case) only when the owner module
-            // actually references Global, else a trivial re-home (e.g. Outer<Bar>) would #include a header
-            // that demand-driven emission never wrote.
-            if home == cur && it.module != cur && it.module as usize < nmod && !hosts_rehomed && self.module_refs_global(
-                it.module,
-            ) {
-                hosts_rehomed = true;
+            // An instance re-homed INTO this TU (owner elsewhere) is emitted here with the OWNER's method
+            // bodies, which reference the owner's own dependency modules (allocators, atomics, ...) that
+            // appear in no resolution of THIS module. Union the owner's referenced modules into want[] --
+            // once per owner -- so their headers are pulled in. A trivial re-home (Outer<Bar>) references
+            // nothing and pulls nothing.
+            if home == cur && it.module != cur && it.module as usize < nmod && scanned != null && !unsafe scanned[it.module as usize] {
+                unsafe scanned[it.module as usize] = true;
+                let oa = self.mod_ast(it.module);
+                let orl = unsafe (*oa).resolutions_len();
+                let mut ri: usize = 0;
+                while ri < orl {
+                    let od = unsafe (*oa).resolution_def(ri as NodeId);
+                    if od.node != NODE_NONE && od.module != cur && od.module as usize < nmod && !self.cg_decl_is_interface_member(
+                        od.module,
+                        od.node,
+                    ) && unsafe (*self.package).builtin_of_decl(od.module, od.node) < 0 {
+                        unsafe want[od.module as usize] = true;
+                    }
+                    ri = ri + 1;
+                }
             }
+        }
+        if scanned != null {
+            unsafe stdlib::free(scanned);
         }
         // An OWNED `dyn` value (a boxed `dyn fn` or `Box<dyn I>`) is heap-allocated and freed by
         // generated glue through the default `Global` allocator -- a reference that appears in no
@@ -14106,7 +14165,7 @@ extend Codegen {
             }
             di = di + 1;
         }
-        if has_owned_dyn || hosts_rehomed {
+        if has_owned_dyn {
             let gh = unsafe (*self.package).prelude_lookup("Global", true);
             if gh.node != NODE_NONE && gh.mid != cur && gh.mid as usize < nmod {
                 unsafe want[gh.mid as usize] = true;
@@ -14821,7 +14880,10 @@ extend Codegen {
                 for j in 0..ed.items.len {
                     let mid = unsafe mids[j as usize];
                     let mk_kind = unsafe (*self.cur_ast()).at_const(mid).kind;
-                    if mk_kind == NodeKind::NODE_FUNCTION {
+                    // A generic method (its own type params) is emitted per-instantiation via
+                    // emit_specializations, not here -- emitting it uninstantiated would render its generic
+                    // parameters as `void`.
+                    if mk_kind == NodeKind::NODE_FUNCTION && unsafe (*self.cur_ast()).at_const(mid).as_data.function.generics.len == 0 {
                         let mpub = unsafe (*self.cur_ast()).at_const(mid).as_data.function.is_public;
                         if want_fn(which, mpub) && !self.cg_test_skip(mid, true) {
                             self.emit_function(mid, target, false, false, null, false);
@@ -14883,7 +14945,7 @@ extend Codegen {
                     for j in 0..ed.items.len {
                         let mid = unsafe mids[j as usize];
                         let mk_kind = unsafe (*self.cur_ast()).at_const(mid).kind;
-                        if mk_kind == NodeKind::NODE_FUNCTION {
+                        if mk_kind == NodeKind::NODE_FUNCTION && unsafe (*self.cur_ast()).at_const(mid).as_data.function.generics.len == 0 {
                             let mbody = unsafe (*self.cur_ast()).at_const(mid).as_data.function.body;
                             if mbody != NODE_NONE && !self.cg_test_skip(mid, true) {
                                 self.emit_function(mid, target, false, true, null, false);

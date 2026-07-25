@@ -1,6 +1,7 @@
 // FFI bindings for common pthread APIs. Import with `import pthread;`.
-// Opaque pthread structs other than pthread_t are passed as `*mut void` to avoid baking in libc layouts.
-// Carries `@c.link("pthread")`; every call site requires `unsafe`.
+// Opaque pthread structs other than pthread_t are passed as `*mut void` to avoid baking in libc layouts;
+// the sized handles for mutex/cond/rwlock are allocated + initialised by the `sc_*_new` shim below (their
+// C sizes are platform-dependent). Carries `@c.link("pthread")`; every call site requires `unsafe`.
 
 @c.link("pthread")
 extern "C" {
@@ -13,8 +14,34 @@ extern "C" {
     pub fn pthread_detach(thread: pthread_t) i32;
     pub fn pthread_exit(retval: *mut void) void;
 
+    // Mutex. `pthread_mutex_trylock` returns 0 on success, EBUSY if already held.
     pub fn pthread_mutex_init(mutex: *mut void, attr: *const void) i32;
     pub fn pthread_mutex_destroy(mutex: *mut void) i32;
     pub fn pthread_mutex_lock(mutex: *mut void) i32;
+    pub fn pthread_mutex_trylock(mutex: *mut void) i32;
     pub fn pthread_mutex_unlock(mutex: *mut void) i32;
+
+    // Condition variable. `wait` atomically releases `mutex` and blocks, re-acquiring it before returning.
+    pub fn pthread_cond_wait(cond: *mut void, mutex: *mut void) i32;
+    pub fn pthread_cond_signal(cond: *mut void) i32;
+    pub fn pthread_cond_broadcast(cond: *mut void) i32;
+
+    // Read/write lock. `try*` return 0 on success, EBUSY if the lock could not be taken.
+    pub fn pthread_rwlock_rdlock(rwlock: *mut void) i32;
+    pub fn pthread_rwlock_tryrdlock(rwlock: *mut void) i32;
+    pub fn pthread_rwlock_wrlock(rwlock: *mut void) i32;
+    pub fn pthread_rwlock_trywrlock(rwlock: *mut void) i32;
+    pub fn pthread_rwlock_unlock(rwlock: *mut void) i32;
+}
+
+// Sizing shim (ffi/pthread_ext.c, auto-discovered from the "pthread_ext.h" header): allocate + initialise
+// and destroy + free a correctly-sized OS handle, so Super-C never needs `sizeof(pthread_mutex_t)`. Each
+// `*_new` returns null on allocation failure.
+extern "C" "pthread_ext.h" {
+    pub fn sc_mutex_new() *mut void;
+    pub fn sc_mutex_free(m: *mut void) void;
+    pub fn sc_cond_new() *mut void;
+    pub fn sc_cond_free(c: *mut void) void;
+    pub fn sc_rwlock_new() *mut void;
+    pub fn sc_rwlock_free(r: *mut void) void;
 }
