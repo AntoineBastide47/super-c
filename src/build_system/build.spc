@@ -395,15 +395,10 @@ fn dirname_of(p: str) str {
     return p.slice(0, k - 1);
 }
 
-/// Profile name to build with: the CLI flag beats the SC_PROFILE handed down by a running manifest
-/// command, which beats the manifest's default-profile.
+/// Profile name to build with: the CLI `--profile` flag, else the manifest's default-profile.
 pub fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
     if cli.len() != 0 {
         return cli;
-    }
-    let env = stdlib::getenv("SC_PROFILE");
-    if env != null && unsafe *env != 0 as char {
-        return str::from_cstr(env);
     }
     return m.default_profile.as_str();
 }
@@ -949,11 +944,8 @@ pub fn manifest_run(
             return rc;
         }
     }
-    // Nested `super-c` invocations inside the lines skip command overrides (SC_CMD) and inherit
-    // the profile this command was invoked with (SC_PROFILE) unless they pass --profile themselves.
-    let mut prof = String::from_str(resolve_profile(m, profile));
+    // Nested `super-c` invocations inside the lines skip command overrides (SC_CMD).
     unsafe shim::sc_setenv("SC_CMD".ptr() as *const char, "1".ptr() as *const char);
-    unsafe shim::sc_setenv("SC_PROFILE".ptr() as *const char, prof.cstr());
     for i in 0..c.run.len() {
         let mut cmd = String::new();
         for e in 0..c.env_k.len() {
