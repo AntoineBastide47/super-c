@@ -1165,6 +1165,59 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// A bounded MPMC channel (std/parallel/channel): four producer tasks each push 25 items into a bounded(8)
+// channel -- forcing the ring buffer to block and drain -- while the main thread receives until the channel
+// closes (every producer's Sender dropped). The receiver is taken before launching, so no early send is
+// rejected; the exact item count and sum verify nothing is lost or duplicated. Leak-checked, so the slot
+// array, every buffered payload, and all Arc handles are accounted for. Also exercises the cross-module
+// generic-method monomorphization fix (`Condvar::wait<ChannelState<i64>>`).
+@test
+fn channel_mpmc() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::channel as chan;
+
+fn main() i32 {
+    let ch = chan::Channel::<i64>::bounded(8);
+    let rx = ch.receiver();
+    for _p in 0..4 {
+        let s = ch.sender();
+        launch fn() {
+            for i in 0..25 {
+                let _ = s.send(i);
+            }
+        };
+    }
+    ch.free();
+    let mut total: i64 = 0;
+    let mut n = 0;
+    loop {
+        switch rx.recv() {
+            Some(v) => {
+                total = total + v;
+                n = n + 1;
+            },
+            None => {
+                break;
+            },
+        };
+    }
+    rx.free();
+    rt::shutdown();
+    return (n - 100) + (total - 1200) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
 // shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
 // contents are stored non-`const` and mutated soundly -- exercised here by an `UnsafeCell<i32>` in an
