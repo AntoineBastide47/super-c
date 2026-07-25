@@ -5629,7 +5629,11 @@ extend Codegen {
             self.emit_cstr(&nm[0]);
             return;
         }
-        if is_const && (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE) {
+        // A (non-capturing) function pointer, like a data pointer, must carry `const` inside the declarator
+        // (`RET (*const x)(..)`); prefixing `const ` would bind it to the return type instead.
+        let fty = *self.type_at(t);
+        let is_fnptr = k == TypeKind::TYPE_FUNCTION && !self.cg_fn_is_capturing(&fty);
+        if is_const && (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || is_fnptr) {
             let mut cn = Buf256 {};
             buf_join3(&mut cn[0], 200, "const ".ptr() as *const char, "".ptr() as *const char, &nm[0]);
             let mut decl = Buf512 {};

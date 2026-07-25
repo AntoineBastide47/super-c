@@ -1122,6 +1122,49 @@ fn main() i32 {
     assert(!p.gen_has("__ldflags", "scrt_win_only_lib"), "windows @c.link is filtered out on the host");
 }
 
+// The task runtime (std/parallel/runtime): a lazily-started worker pool runs detached tasks submitted with
+// `launch`. One hundred owning closures each move in a clone of a shared Arc<Atomic> and a WaitGroup, run on
+// the pool, increment the counter and signal done; the main thread awaits them, reads the exact total, then
+// shuts the pool down (draining, joining, freeing). Leak-checked end to end.
+@test
+fn launch_runtime() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let counter = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(100);
+    for _i in 0..100 {
+        let c = counter.clone();
+        let w = wg.clone();
+        rt::launch(fn() {
+            let _ = c.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+            w.done();
+        });
+    }
+    wg.wait();
+    let total = counter.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    counter.free();
+    rt::shutdown();
+    return (total - 100) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
 // shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
 // contents are stored non-`const` and mutated soundly -- exercised here by an `UnsafeCell<i32>` in an

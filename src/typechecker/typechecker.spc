@@ -10346,7 +10346,12 @@ extend TypeChecker {
                         self.tc_mandatory_const(id, cd.value);
                     }
                 }
-                if cd.is_static_mut && self.tc_type_is_free(declared) {
+                // A raw pointer / reference never owns its pointee (`tc_type_is_free` peels them via
+                // `strip`, so it would wrongly report `*mut FreeStruct` as owning) -- a `static mut` holding
+                // one is fine, which is how a heap-managed global singleton is expressed.
+                if cd.is_static_mut && dtk != TypeKind::TYPE_POINTER && dtk != TypeKind::TYPE_REFERENCE && self.tc_type_is_free(
+                    declared,
+                ) {
                     let sp = unsafe (*self.cur_ast()).at_const(id).span;
                     self.errors.emit(
                         sp.start,
