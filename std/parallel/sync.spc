@@ -302,18 +302,18 @@ extend Once {
     }
     /// Has the initialiser already run?
     pub fn is_completed(self: &Once) bool {
-        return self.done.load() == 1;
+        return self.done.load(atomics::MemoryOrder::Acquire) == 1;
     }
     /// Run `f` if it has not run yet; otherwise return at once. Exactly one caller across all threads ever
     /// runs `f`. A relaxed atomic fast-path skips the lock once initialisation has completed.
     pub fn call_once<F: fn move()>(self: &Once, f: F) {
-        if self.done.load() == 1 {
+        if self.done.load(atomics::MemoryOrder::Acquire) == 1 {
             return;
         }
         let _g = self.gate.lock(); // held for the duration; unlocks at scope exit
-        if self.done.load() == 0 {
+        if self.done.load(atomics::MemoryOrder::Relaxed) == 0 {
             f();
-            self.done.store(1);
+            self.done.store(1, atomics::MemoryOrder::Release);
         }
     }
 }

@@ -960,7 +960,7 @@ fn main() i32 {
         let c = counter.clone();
         handles.push(thread::spawn(fn() i32 {
             for _i in 0..1000 {
-                let _ = c.get().fetch_add(1);
+                let _ = c.get().fetch_add(1, atom::MemoryOrder::Relaxed);
             }
             return 0;
         }));
@@ -971,7 +971,7 @@ fn main() i32 {
     handles.free();
 
     let n = owned.join();
-    let total = counter.get().load();
+    let total = counter.get().load(atom::MemoryOrder::SeqCst);
     counter.free();
     return (n as i32 - 7) + (total - 4000) as i32;
 }
@@ -1004,6 +1004,122 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.exit != 0, "capturing a raw pointer into a spawned thread is rejected");
     assert(r.out_has("Send"), "the rejection cites the Send bound");
+}
+
+// The concurrency platform substrate (ffi/sc_rt.c via std/parallel): CPU count and monotonic clock, a
+// guard-paged stack driving a stackful ucontext/fiber context switch (the coroutine runs, writes a marker,
+// and switches back), and cross-thread address parking (a spawned thread publishes a word and unparks the
+// main thread, which was parked on it). Leak-checked.
+@test
+fn platform_substrate() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import sc_runtime;
+import std::parallel::platform as platform;
+import std::parallel::thread as thread;
+import atomic;
+import std::parallel::atomics as atom;
+
+struct CoState {
+    pub root: *mut void,
+    pub me: *mut void,
+    pub hit: i32,
+}
+
+fn co_entry(arg: *mut void) {
+    let s = arg as *mut CoState;
+    unsafe (*s).hit = 42;
+    unsafe sc_runtime::sc_rt_ctx_switch((*s).me, (*s).root);
+}
+
+fn main() i32 {
+    let n = platform::ncpu();
+    let a = platform::now_ns();
+    let b = platform::now_ns();
+    if n < 1 || b < a {
+        return 1;
+    }
+    let root = unsafe sc_runtime::sc_rt_ctx_alloc();
+    let co = unsafe sc_runtime::sc_rt_ctx_alloc();
+    let sz: usize = 65536;
+    let stk = unsafe sc_runtime::sc_rt_stack_alloc(sz);
+    let mut st = CoState { root: root, me: co, hit: 0 };
+    unsafe sc_runtime::sc_rt_ctx_init(co, stk, sz, co_entry, &mut st as *mut void);
+    unsafe sc_runtime::sc_rt_ctx_switch(root, co);
+    unsafe sc_runtime::sc_rt_stack_free(stk, sz);
+    unsafe sc_runtime::sc_rt_ctx_free(co);
+    unsafe sc_runtime::sc_rt_ctx_free(root);
+    if st.hit != 42 {
+        return 2;
+    }
+    let mut g = Global {};
+    let wp = g.alloc(4, 4) as *mut i32;
+    unsafe wp[0] = 0;
+    let waddr = wp as usize;
+    let h = thread::spawn(fn() i32 {
+        let w = waddr as *mut i32;
+        for _i in 0..200000 {}
+        unsafe atomic::store_i32(w, 1, atom::MemoryOrder::SeqCst as i32);
+        unsafe sc_runtime::sc_rt_unpark_all(w);
+        return 0;
+    });
+    let mut spins = 0;
+    while unsafe atomic::load_i32(wp, atom::MemoryOrder::Acquire as i32) == 0 {
+        unsafe sc_runtime::sc_rt_park(wp, 0, 1000000);
+        spins = spins + 1;
+        if spins > 100000 {
+            break;
+        }
+    }
+    let _ = h.join();
+    let fin = unsafe wp[0];
+    g.dealloc(wp, 4, 4);
+    if fin != 1 {
+        return 3;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
+// contribute its wrapper TU or -l flag on a non-windows build -- else every target links every OS's runtime
+// C. Regression guard for the extc gating fix (M2 prerequisite).
+@test
+fn platform_gates_ext_c() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"@platform(windows)
+@c.link("scrt_win_only_lib")
+extern "C" "scrt_no_such_header.h" {
+    pub fn scrt_win_only() i32;
+}
+
+@c.link("m")
+extern "C" {
+    fn scrt_needs_m() f64;
+}
+
+fn main() i32 {
+    return 0;
+}
+"#,
+    );
+    // Builds on the host even though the windows block names a header that does not exist: it is gated out.
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    // The always-on link is present; the windows-only one is not.
+    assert(p.gen_has("__ldflags", "-lm"), "ungated @c.link lands in __ldflags");
+    assert(!p.gen_has("__ldflags", "scrt_win_only_lib"), "windows @c.link is filtered out on the host");
 }
 
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the

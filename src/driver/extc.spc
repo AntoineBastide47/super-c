@@ -110,12 +110,30 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
         let file = p.modules[m].file.cstr();
         let src = p.modules[m].source.as_str().ptr() as *const char;
         let ap = mod_ast_c(p, m as ModuleId);
+        // Live top-level items, after `platform_filter` compacted `program.items`: a `@platform`-gated-out
+        // `@c.source`/`@c.link` leaves its attr in the table, so skip attrs whose owning item is gone (else
+        // every OS would pull in every other OS's runtime C and `-l` flags).
+        let rootn = unsafe (*ap).root;
+        let live = unsafe (*ap).at_const(rootn).as_data.program.items;
+        let live_ids = unsafe (*ap).list(live);
         for ai in 0..unsafe (*ap).attrs.len() {
             let at = unsafe (*ap).attrs[ai];
             let is_src = at.kind == AttrKind::ATTR_C_SOURCE as u8;
             let is_link = at.kind == AttrKind::ATTR_C_LINK as u8;
             if !is_src && !is_link || at.str_span.end <= at.str_span.start {
                 continue;
+            }
+            if at.owner != rootn {
+                let mut owner_live = false;
+                for li in 0..live.len {
+                    if unsafe live_ids[li as usize] == at.owner {
+                        owner_live = true;
+                        break;
+                    }
+                }
+                if !owner_live {
+                    continue;
+                }
             }
             let vl = (at.str_span.end - at.str_span.start) as i32;
             let v = unsafe (src + at.str_span.start);

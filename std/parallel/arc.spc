@@ -7,6 +7,7 @@
 // (`Arc<Atomic<i64>>`, later `Arc<Mutex<T>>`).
 
 import atomic;
+import std::parallel::atomics as atomics;
 
 // The shared heap block: the strong count sits beside the value so one allocation holds both.
 struct ArcInner<T> {
@@ -30,7 +31,8 @@ extend<T> Arc<T> {
     }
     /// Another owning handle to the same value (atomic increment of the strong count).
     pub fn clone(self: &Arc<T>) Arc<T> {
-        let _ = unsafe atomic::add_usize(&mut (*self.ptr).strong, 1);
+        // Relaxed: a new handle only requires the count be atomic, not ordered against other memory.
+        let _ = unsafe atomic::add_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::Relaxed as i32);
         return Arc::<T> { ptr: self.ptr };
     }
     /// Borrow the shared value. Valid while this handle is alive.
@@ -39,7 +41,7 @@ extend<T> Arc<T> {
     }
     /// The current strong count (a snapshot; other threads may change it immediately).
     pub fn strong_count(self: &Arc<T>) usize {
-        return unsafe atomic::load_usize(&(*self.ptr).strong);
+        return unsafe atomic::load_usize(&(*self.ptr).strong, atomics::MemoryOrder::Relaxed as i32);
     }
 }
 
@@ -55,8 +57,12 @@ extend<T: Send + Sync> Arc<T> as Sync {}
 // owns the teardown -- it deep-frees the value and releases the block.
 extend<T> Arc<T> as Free {
     pub fn free(self: &mut Arc<T>) {
-        let prev = unsafe atomic::sub_usize(&mut (*self.ptr).strong, 1);
+        // Release: earlier writes through this handle must be visible to the thread that tears down.
+        let prev = unsafe atomic::sub_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::Release as i32);
         if prev == 1 {
+            // Acquire fence pairs with the Release decrements above so every prior handle's writes are
+            // visible before we drop the value.
+            atomics::fence(atomics::MemoryOrder::Acquire);
             // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free -- freeing the
             // place directly would be a conditional move out of a dereference.
             let vp = (&mut unsafe (*self.ptr).value) as *mut T;
