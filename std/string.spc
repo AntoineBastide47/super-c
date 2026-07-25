@@ -71,6 +71,12 @@ pub struct String<A = Global> {
     alloc: A, // the allocator the heap buffer (if any) was obtained through (private; zero-sized for Global)
 }
 
+// A String owns its bytes, so it is safe to send to / share with another thread when its allocator is
+// (the raw buffer pointer would otherwise make it structurally neither).
+extend<A: Send> String<A> as Send {}
+
+extend<A: Sync> String<A> as Sync {}
+
 extend<A: Allocator> String<A> {
     // --- representation helpers (private) ------------------------------------------------------
 

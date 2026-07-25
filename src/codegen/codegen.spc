@@ -13927,6 +13927,28 @@ extend Codegen {
             }
         }
     }
+    // Does module `m` reference the prelude `Global` allocator anywhere in its type pool? Used to decide
+    // whether a re-homed instance owned by `m` drags Global's header into the hosting TU.
+    fn module_refs_global(self: &mut Self, m: ModuleId) bool {
+        if self.package == null {
+            return false;
+        }
+        let gh = unsafe (*self.package).prelude_lookup("Global", true);
+        if gh.node == NODE_NONE {
+            return false;
+        }
+        let a = self.mod_ast(m);
+        let np = unsafe (*a).type_pool.len();
+        let mut i: usize = 1;
+        while i < np {
+            let y = *unsafe (*a).type_at(i as TypeId);
+            if y.kind == TypeKind::TYPE_STRUCT && y.module == gh.mid && y.as_data.decl == gh.node {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
     fn emit_referenced_includes(self: &mut Self) {
         let nmod = self.pkg_count();
         let cur = self.cur_module();
@@ -13967,6 +13989,7 @@ extend Codegen {
             }
             unsafe want[t.module as usize] = true;
         }
+        let mut hosts_rehomed = false;
         for ii in 0..unsafe (*self.cur_ast()).instances.len() {
             let it = *unsafe (*self.cur_ast()).instance(ii as u32);
             let mut concrete = it.module as usize < nmod || it.module == cur;
@@ -13987,6 +14010,16 @@ extend Codegen {
             if home != cur && home as usize < nmod {
                 unsafe want[home as usize] = true;
             }
+            // An instance re-homed INTO this TU (owner elsewhere) is emitted here with the owner's method
+            // bodies, which may allocate through the default `Global` allocator -- a reference in no
+            // resolution of THIS module. Pull Global in (like the owned-dyn case) only when the owner module
+            // actually references Global, else a trivial re-home (e.g. Outer<Bar>) would #include a header
+            // that demand-driven emission never wrote.
+            if home == cur && it.module != cur && it.module as usize < nmod && !hosts_rehomed && self.module_refs_global(
+                it.module,
+            ) {
+                hosts_rehomed = true;
+            }
         }
         // An OWNED `dyn` value (a boxed `dyn fn` or `Box<dyn I>`) is heap-allocated and freed by
         // generated glue through the default `Global` allocator -- a reference that appears in no
@@ -14000,7 +14033,7 @@ extend Codegen {
             }
             di = di + 1;
         }
-        if has_owned_dyn {
+        if has_owned_dyn || hosts_rehomed {
             let gh = unsafe (*self.package).prelude_lookup("Global", true);
             if gh.node != NODE_NONE && gh.mid != cur && gh.mid as usize < nmod {
                 unsafe want[gh.mid as usize] = true;

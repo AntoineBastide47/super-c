@@ -11,6 +11,16 @@ pub interface Free {
     fn free(self: &mut Self);
 }
 
+/// Marker: a `Send` type may have its OWNERSHIP moved to another thread. Conformance is STRUCTURAL and
+/// automatic -- a type is `Send` when every part of it is (scalars and `str` are; a raw pointer is not, so
+/// nothing transitively holding one is either). Write an explicit `extend T as Send {}` only to override
+/// that for a type whose raw pointer is in fact safe to transfer (e.g. `Arc`) -- an unchecked assertion.
+pub interface Send {}
+
+/// Marker: a `Sync` type may be SHARED between threads by reference (`&T` crosses thread boundaries).
+/// Structural and automatic on the same rules as `Send`; override with an explicit `extend T as Sync {}`.
+pub interface Sync {}
+
 /// Arithmetic operator overloading: `a + b` dispatches to `a.add(&b)`, and likewise `-`/`*`/`/`/`%` to
 /// sub/mul/div/rem. The result is whatever the method returns (typically Self). A type need not name these
 /// interfaces -- a bare method of the right name is enough -- but conforming documents the intent.

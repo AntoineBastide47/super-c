@@ -155,28 +155,32 @@ extend<T: AtomicOps> Atomic<T> {
     pub fn new(v: T) Atomic<T> {
         return Atomic::<T> { value: v };
     }
+    // Every operation takes `&self`: atomics ARE the interior-mutability primitive, so a shared reference
+    // (e.g. through an `Arc`) is enough to mutate the cell. The const is cast away only to reach the
+    // `*mut` runtime builtin; the access itself is indivisible.
+
     /// Atomically read the current value.
     pub fn load(self: &Atomic<T>) T {
         return T::atomic_load(&self.value);
     }
     /// Atomically overwrite the value.
-    pub fn store(self: &mut Atomic<T>, v: T) {
-        T::atomic_store(&mut self.value, v);
+    pub fn store(self: &Atomic<T>, v: T) {
+        T::atomic_store((&self.value) as *mut T, v);
     }
     /// Atomically overwrite the value, returning the previous one.
-    pub fn swap(self: &mut Atomic<T>, v: T) T {
-        return T::atomic_swap(&mut self.value, v);
+    pub fn swap(self: &Atomic<T>, v: T) T {
+        return T::atomic_swap((&self.value) as *mut T, v);
     }
     /// Atomically add `v`, returning the previous value.
-    pub fn fetch_add(self: &mut Atomic<T>, v: T) T {
-        return T::atomic_add(&mut self.value, v);
+    pub fn fetch_add(self: &Atomic<T>, v: T) T {
+        return T::atomic_add((&self.value) as *mut T, v);
     }
     /// Atomically subtract `v`, returning the previous value.
-    pub fn fetch_sub(self: &mut Atomic<T>, v: T) T {
-        return T::atomic_sub(&mut self.value, v);
+    pub fn fetch_sub(self: &Atomic<T>, v: T) T {
+        return T::atomic_sub((&self.value) as *mut T, v);
     }
     /// If the value equals `expected`, replace it with `desired`; returns whether the swap happened.
-    pub fn compare_exchange(self: &mut Atomic<T>, expected: T, desired: T) bool {
-        return T::atomic_cas(&mut self.value, expected, desired);
+    pub fn compare_exchange(self: &Atomic<T>, expected: T, desired: T) bool {
+        return T::atomic_cas((&self.value) as *mut T, expected, desired);
     }
 }

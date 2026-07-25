@@ -14,6 +14,12 @@ pub struct Vector<T, A = Global> {
     alloc: A, // the allocator the buffer was obtained through (private; zero-sized for Global)
 }
 
+// A Vector owns its elements, so it is Send / Sync when its elements and allocator are (the owned buffer
+// pointer would otherwise make it structurally neither).
+extend<T: Send, A: Send> Vector<T, A> as Send {}
+
+extend<T: Sync, A: Sync> Vector<T, A> as Sync {}
+
 extend<T, A: Allocator> Vector<T, A> {
     /// Empty vector backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A) Vector<T, A> {

@@ -18,6 +18,11 @@ pub struct Map<K, V, A = Global> {
     alloc: A, // the allocator the arrays were obtained through (private; zero-sized for Global)
 }
 
+// A Map owns its keys and values, so it is Send / Sync when they and its allocator are.
+extend<K: Send, V: Send, A: Send> Map<K, V, A> as Send {}
+
+extend<K: Sync, V: Sync, A: Sync> Map<K, V, A> as Sync {}
+
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     /// Empty map backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A) Map<K, V, A> {

@@ -3306,6 +3306,15 @@ extend TypeChecker {
             }
             return false;
         }
+        // Send / Sync are STRUCTURAL markers: no explicit `extend` is required (an explicit one is honored
+        // below as an unsafe override). Answer them from the type's shape -- this handles pointers /
+        // references / closures / slices that the aggregate path below cannot even name.
+        if self.is_send_iface(iface) {
+            return self.tc_thread_marker(ty, false, depth);
+        }
+        if self.is_sync_iface(iface) {
+            return self.tc_thread_marker(ty, true, depth);
+        }
         let mut tmod: ModuleId = 0;
         let mut tdecl = NODE_NONE;
         let mut iargs = Tys8 {};
@@ -3365,6 +3374,174 @@ extend TypeChecker {
             unsafe (*self.mod_ast(tr.module)).at_const(trn.as_data.interface_def.name).as_data.name.text,
             "Free",
         );
+    }
+    const fn iface_named(self: &Self, tr: DefId, name: str) bool {
+        if tr.node == NODE_NONE {
+            return false;
+        }
+        let trn = unsafe (*self.mod_ast(tr.module)).at_const(tr.node);
+        return trn.kind == NodeKind::NODE_INTERFACE && span_is(
+            self.mod_src(tr.module),
+            unsafe (*self.mod_ast(tr.module)).at_const(trn.as_data.interface_def.name).as_data.name.text,
+            name,
+        );
+    }
+    const fn is_send_iface(self: &Self, tr: DefId) bool {
+        return self.iface_named(tr, "Send");
+    }
+    const fn is_sync_iface(self: &Self, tr: DefId) bool {
+        return self.iface_named(tr, "Sync");
+    }
+    // Structural `Send`/`Sync`: is `ty` safe to transfer to (`sync=false`) or share with (`sync=true`)
+    // another thread? Scalars/str yes; a raw pointer no (so is anything transitively holding one); a
+    // reference reduces to `Sync` of its pointee; a closure to all its captures; an aggregate to all its
+    // fields -- but an explicit `extend T as Send/Sync {}` overrides the field walk (the unsafe escape
+    // hatch, e.g. Arc). Mirrors tc_type_is_free's decomposition; the depth cap breaks reference cycles.
+    fn tc_thread_marker(self: &mut Self, ty: TypeId, sync: bool, depth: i32) bool {
+        if ty == TYPE_NONE || depth > BOUND_MAX_DEPTH {
+            return true;
+        }
+        let y = *self.type_at(ty);
+        let k = y.kind;
+        if k == TypeKind::TYPE_GENERIC {
+            return true; // a generic param -- enforced where it is instantiated
+        }
+        if k == TypeKind::TYPE_POINTER {
+            return false; // raw pointer: neither Send nor Sync
+        }
+        if k == TypeKind::TYPE_REFERENCE {
+            return self.tc_thread_marker(y.as_data.elem, true, depth + 1); // &T needs T: Sync
+        }
+        if k == TypeKind::TYPE_SLICE || k == TypeKind::TYPE_ARRAY {
+            return self.tc_thread_marker(y.as_data.elem, sync, depth + 1);
+        }
+        if k == TypeKind::TYPE_BUILTIN {
+            return true; // scalars, bool, char, str view
+        }
+        if k == TypeKind::TYPE_DYN {
+            return false; // a trait object does not advertise Send/Sync -- conservative
+        }
+        if k == TypeKind::TYPE_FUNCTION {
+            let fa = self.mod_ast(y.module);
+            let fnn = unsafe (*fa).at_const(y.as_data.decl);
+            if fnn.kind != NodeKind::NODE_CLOSURE {
+                return true; // a bare fn pointer captures nothing
+            }
+            let caps = fnn.as_data.closure.captures;
+            for i in 0..caps.len {
+                let cid = unsafe (*fa).list(caps)[i as usize];
+                let cty = unsafe (*self.cur_ast()).reintern(unsafe &*fa, unsafe (*fa).type_of(cid));
+                let ci = self.marker_iface(sync);
+                if ci.node != NODE_NONE && !self.type_satisfies(cty, ci, depth + 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        // Aggregate: an explicit conformance is an unsafe override; otherwise every field must qualify.
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let gp = Defs8 {};
+        let ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(
+            self.strip(ty),
+            &mut om,
+            &mut od,
+            (&gp[0]) as *mut DefId,
+            (&ga[0]) as *mut TypeId,
+            &mut gn,
+        ) {
+            return false;
+        }
+        let ci = self.marker_iface(sync);
+        if ci.node != NODE_NONE {
+            let mut imod: ModuleId = 0;
+            let extnode = self.find_extend_as(om, od, ci, &mut imod);
+            if extnode != NODE_NONE {
+                // Explicit `extend T as Send/Sync {}` -- an unsafe override, but its own bounds still hold
+                // (e.g. `extend<T: Send + Sync> Arc<T> as Send` is Send only for a Send + Sync payload).
+                let ia = self.mod_ast(imod);
+                let gens = unsafe (*ia).at_const(extnode).as_data.extend_def.generics;
+                let mut g: u32 = 0;
+                while g < gens.len && g as i32 < gn {
+                    let gid = unsafe (*ia).list(gens)[g as usize];
+                    let gb = unsafe (*ia).at_const(gid).as_data.generic_param.bounds;
+                    for b in 0..gb.len {
+                        let gbi = unsafe (*ia).resolution_def(unsafe (*ia).list(gb)[b as usize]);
+                        if gbi.node != NODE_NONE && !self.type_satisfies(ga[g as usize], gbi, depth + 1) {
+                            return false;
+                        }
+                    }
+                    g = g + 1;
+                }
+                return true;
+            }
+        }
+        let dn = *unsafe (*self.mod_ast(om)).at_const(od);
+        let is_enum = dn.kind == NodeKind::NODE_ENUM;
+        if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
+            return false;
+        }
+        let a = self.mod_ast(om);
+        let ms = dn.as_data.aggregate.members;
+        let mids = unsafe (*a).list(ms);
+        for i in 0..ms.len {
+            let mn = *unsafe (*a).at_const(unsafe mids[i as usize]);
+            if !is_enum && mn.kind == NodeKind::NODE_FIELD {
+                if !self.tc_member_marker(om, mn.as_data.field.ty, &gp[0], &ga[0], gn, sync, depth) {
+                    return false;
+                }
+            } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
+                let pids = unsafe (*a).list(mn.as_data.variant.payload);
+                for p in 0..mn.as_data.variant.payload.len {
+                    let pe = *unsafe (*a).at_const(unsafe pids[p as usize]);
+                    let tn = if_node(pe.kind == NodeKind::NODE_FIELD, pe.as_data.field.ty, unsafe pids[p as usize]);
+                    if !self.tc_member_marker(om, tn, &gp[0], &ga[0], gn, sync, depth) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    fn marker_iface(self: &mut Self, sync: bool) DefId {
+        if self.package == null {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let nm = if sync {
+            "Sync";
+        } else {
+            "Send";
+        };
+        let h = unsafe (*self.package).prelude_lookup(nm, true);
+        return DefId { module: h.mid, node: h.node };
+    }
+    fn tc_member_marker(
+        self: &mut Self,
+        om: ModuleId,
+        tnode: NodeId,
+        gp: *const DefId,
+        ga: *const TypeId,
+        gn: i32,
+        sync: bool,
+        depth: i32,
+    ) bool {
+        let mut ft = self.lower_type_in(om, tnode);
+        let mut conc = true;
+        for k in 0..gn {
+            if !unsafe (*self.cur_ast()).type_concrete(unsafe ga[k as usize]) {
+                conc = false;
+            }
+        }
+        if gn > 0 && conc {
+            ft = self.subst_type(ft, gp, ga, gn);
+        }
+        let ci = self.marker_iface(sync);
+        if ci.node == NODE_NONE {
+            return true;
+        }
+        return self.type_satisfies(ft, ci, depth + 1);
     }
     // Leak check (lint, error-level): structs and enums DERIVE Free when their members own
     // memory, but a UNION cannot (only the author knows the active member), so an owning union

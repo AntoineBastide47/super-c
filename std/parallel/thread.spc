@@ -75,8 +75,10 @@ extend<T> JoinHandle<T> {
 }
 
 /// Spawn a new OS thread running `f`, returning a handle to await its result. `f` is an owning closure:
-/// values it uses are moved in and freed on the thread; it may not borrow the caller's locals.
-pub fn spawn<F: fn move() T, T>(f: F) JoinHandle<T> {
+/// values it uses are moved in and freed on the thread; it may not borrow the caller's locals. `F: Send`
+/// makes that safe -- every captured value must itself be `Send`, so a raw pointer (or anything holding
+/// one) cannot cross the boundary; share through `Arc` and mutate through an atomic or a lock instead.
+pub fn spawn<F: fn move() T + Send, T>(f: F) JoinHandle<T> {
     let mut g = Global {};
     let slot = g.alloc(sizeof(T), alignof(T)) as *mut T;
     let env = heap_alloc::<ThreadPayload<F, T>>(ThreadPayload::<F, T>::make(f, slot)) as *mut void;
