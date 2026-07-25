@@ -1545,8 +1545,85 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
         let cp = (&mut changed) as *mut bool;
         reintern_nested_instance_deps(p, dm, &it, &na[0], m, cp);
         reintern_method_signature_deps(p, dm, &it, &na[0], m, cp);
+        if dm == sm {
+            // The sweep of an instance's HOME module reaches every distinct concrete instance
+            // exactly once (propagation interns each into its home), so body deps are seeded here.
+            reintern_method_body_deps(p, sm, &it, cp);
+        }
     }
     return changed;
+}
+
+// Body-only generic types of a generic aggregate's METHODS: a `W<T> {..}` literal inside
+// `extend<T> P<T>` names no field or signature type, so neither deps walk above interns its
+// concrete instance for a given `P<args>` -- the emitted C then references an undefined struct.
+// (seed_mono_body_instances is the fn-body analog; codegen's own method-body seeding covers only
+// same-module instantiations.) Substitute the instance's args through the owner module's
+// non-concrete pool types restricted to each matching extend's own params, exactly like
+// seed_mono_body_instances; reintern_nested_type re-homes any concrete result.
+fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, changed: *mut bool) {
+    let np = p.modules.len();
+    let om = it.module;
+    if om as usize >= np || !p.modules[om as usize].has_ast {
+        return;
+    }
+    let itdecl = it.decl;
+    let root = unsafe (*pkg_ast_c(p, om)).root;
+    let items = unsafe (*pkg_ast_c(p, om)).at_const(root).as_data.program.items;
+    let ids = unsafe (*pkg_ast_c(p, om)).list(items);
+    let m = if it.n < 4 {
+        it.n;
+    } else {
+        4 as u8;
+    };
+    let mut fargs: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
+    let mut have_args = false;
+    for i in 0..items.len {
+        let eid = unsafe ids[i as usize];
+        if unsafe (*pkg_ast_c(p, om)).at_const(eid).kind != NodeKind::NODE_EXTEND {
+            continue;
+        }
+        let egen = unsafe (*pkg_ast_c(p, om)).at_const(eid).as_data.extend_def.generics;
+        if egen.len == 0 {
+            continue;
+        }
+        let etgt = unsafe (*pkg_ast_c(p, om)).at_const(eid).as_data.extend_def.target_type;
+        if unsafe (*pkg_ast_c(p, om)).resolution(etgt) != itdecl {
+            continue;
+        }
+        if !have_args {
+            have_args = true;
+            for k in 0..m {
+                unsafe fargs[k as usize] = if om == hm {
+                    unsafe it.args[k as usize];
+                } else {
+                    let o = pkg_ast_m(p, om);
+                    unsafe (*o).reintern(&*pkg_ast_c(p, hm), it.args[k as usize]);
+                };
+            }
+        }
+        let gids = unsafe (*pkg_ast_c(p, om)).list(egen);
+        let ng = if egen.len < m as u32 {
+            egen.len as u8;
+        } else {
+            m;
+        };
+        let npool = unsafe (*pkg_ast_c(p, om)).type_pool.len();
+        let mut t: usize = 1;
+        while t < npool {
+            if !unsafe (*pkg_ast_c(p, om)).type_concrete(t as TypeId) && type_params_subset(
+                p,
+                om,
+                t as TypeId,
+                om,
+                gids,
+                ng,
+            ) {
+                reintern_nested_type(p, om, om, t as TypeId, om, gids, &fargs[0], ng, changed);
+            }
+            t = t + 1;
+        }
+    }
 }
 
 // Record `src`'s generic-method calls into the method's OWNING module (or the receiver instance's home),

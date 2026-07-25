@@ -694,6 +694,10 @@ pub struct Codegen<'a> {
     pub genty_ast: *mut Ast,
     // collect_insts runs for the header AND the body of the same module: the second run is a no-op.
     pub insts_ast: *mut Ast,
+    // Worklist cursors for collect_insts' fixpoint: fn instances already expanded
+    // (expand_nested_insts) and aggregate instances already scanned (collect_method_insts).
+    pub nexp: i32,
+    pub nscan: usize,
     // CG-12: O(1) move-set membership. Epoch-tagged stamps (indexed by decl NodeId) mirror
     // moved[]/cond_moved[] appends EXACTLY -- caps included -- so answers match the linear
     // scans; the arrays stay authoritative and stamps are just an accelerator. stamp_cap == 0
@@ -1937,13 +1941,25 @@ extend Codegen {
             }
             i = i + 1;
         }
-        self.expand_nested_insts();
+        // Fixpoint between the two collectors: expanding a fn instance can seed aggregate
+        // instances whose methods must be scanned, and scanning a method body can record fn
+        // instances that must be expanded.
+        self.nexp = 0;
+        self.nscan = 0;
+        loop {
+            self.expand_nested_insts();
+            self.collect_method_insts();
+            if self.nexp >= self.ninsts && self.nscan >= unsafe (*self.cur_ast()).instances.len() {
+                break;
+            }
+        }
     }
     fn expand_nested_insts(self: &mut Self) {
         // Worklist: record_inst appends while we iterate, and each new entry must itself be
         // expanded (transitive f<i32> -> g<i32> -> h<i32>), so the bound is re-read each pass
-        // -- a `for` range would pin it at entry.
-        let mut i: i32 = 0;
+        // -- a `for` range would pin it at entry. The cursor persists in `nexp` so the
+        // collect_insts fixpoint resumes at the first unexpanded instance.
+        let mut i: i32 = self.nexp;
         while i < self.ninsts {
             let cur = i as usize;
             i += 1;
@@ -1971,7 +1987,6 @@ extend Codegen {
                 }
             }
             let fnn = unsafe (*self.cur_ast()).at_const(fn2.node);
-            let fsp = fnn.span;
             let gens = fnn.as_data.function.generics;
             self.nsubst = 0;
             let mut g: u32 = 0;
@@ -1983,84 +1998,7 @@ extend Codegen {
                 self.nsubst = ns + 1;
                 g = g + 1;
             }
-            // CG-10: visit only NODE_CALLs (same nid order as the full arena sweep). The list is
-            // cached per ast -- expand swaps to the owner ast for foreign insts, and a rebuild
-            // costs the one node sweep it replaces.
-            if self.call_ast != self.ast {
-                self.call_ast = self.ast;
-                self.call_list.clear();
-                self.spec_list.clear();
-                let mut cn: u32 = 1;
-                while cn as usize < unsafe (*self.cur_ast()).nodes.len() {
-                    let ck = unsafe (*self.cur_ast()).at_const(cn).kind;
-                    if ck == NodeKind::NODE_CALL {
-                        self.call_list.push(cn);
-                    } else if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
-                        self.spec_list.push(cn);
-                    }
-                    cn = cn + 1;
-                }
-            }
-            let mut ci: usize = 0;
-            while ci < self.call_list.len() {
-                let nid = *self.call_list.at(ci);
-                ci += 1;
-                let nn = unsafe (*self.cur_ast()).at_const(nid);
-                if nn.span.start < fsp.start || nn.span.end > fsp.end {
-                    continue;
-                }
-                let mut args = TyArgs8 {};
-                let mut n: i32 = 0;
-                let g2 = self.generic_call_target(nid, &mut args[0], &mut n);
-                if g2.node == NODE_NONE {
-                    continue;
-                }
-                let mut concrete = true;
-                for kk in 0..n {
-                    args[kk as usize] = self.subst_resolve(args[kk as usize]);
-                    if !self.type_is_concrete(args[kk as usize]) {
-                        concrete = false;
-                    }
-                    if foreign {
-                        args[kk as usize] = unsafe (*home).reintern(unsafe &*self.cur_ast(), args[kk as usize]);
-                    }
-                }
-                if concrete {
-                    self.record_inst(g2, &args[0], n, nid);
-                }
-            }
-            // A generic fn used as a VALUE (turbofished `f::<..>` fn pointer) inside this instance's
-            // body: monomorphize it too, mirroring the call walk (subst-resolve the turbofish args to
-            // concrete, reintern for a foreign owner). Without this the referenced instance is never
-            // emitted and the C link fails on the bare generic name.
-            let mut si: usize = 0;
-            while si < self.spec_list.len() {
-                let sid = *self.spec_list.at(si);
-                si += 1;
-                let sn2 = unsafe (*self.cur_ast()).at_const(sid);
-                if sn2.span.start < fsp.start || sn2.span.end > fsp.end {
-                    continue;
-                }
-                let mut sargs = TyArgs8 {};
-                let mut smn: i32 = 0;
-                let sg = self.generic_value_target(sid, &mut sargs[0], &mut smn);
-                if sg.node == NODE_NONE {
-                    continue;
-                }
-                let mut sconcrete = true;
-                for kk in 0..smn {
-                    sargs[kk as usize] = self.subst_resolve(sargs[kk as usize]);
-                    if !self.type_is_concrete(sargs[kk as usize]) {
-                        sconcrete = false;
-                    }
-                    if foreign {
-                        sargs[kk as usize] = unsafe (*home).reintern(unsafe &*self.cur_ast(), sargs[kk as usize]);
-                    }
-                }
-                if sconcrete {
-                    self.record_inst(sg, &sargs[0], smn, sid);
-                }
-            }
+            self.scan_body_calls(fn2.node, foreign, home);
             // Seed the aggregate instances this fn's types name (e.g. a `W<T, N> {}` literal in
             // the body): the body is emitted with this subst map active, so every substitution
             // result must exist as a pool instance BEFORE phase_types defines the C structs.
@@ -2089,6 +2027,300 @@ extend Codegen {
                 self.ast = home;
                 self.source = hsrc;
             }
+        }
+        self.nexp = i;
+    }
+    // One body's nested-instantiation walk (the span of fn/method `owner_id`), shared by
+    // expand_nested_insts and scan_inst_methods: resolve each generic call's type args through
+    // the active subst frame and record the concrete results; args are reinterned into `home`'s
+    // pool when the walk runs on a foreign owner's ast.
+    fn scan_body_calls(self: &mut Self, owner_id: NodeId, foreign: bool, home: *mut Ast) {
+        let fsp = unsafe (*self.cur_ast()).at_const(owner_id).span;
+        // CG-10: visit only NODE_CALLs (same nid order as the full arena sweep). The list is
+        // cached per ast -- the callers swap to the owner ast for foreign work, and a rebuild
+        // costs the one node sweep it replaces.
+        if self.call_ast != self.ast {
+            self.call_ast = self.ast;
+            self.call_list.clear();
+            self.spec_list.clear();
+            let mut cn: u32 = 1;
+            while cn as usize < unsafe (*self.cur_ast()).nodes.len() {
+                let ck = unsafe (*self.cur_ast()).at_const(cn).kind;
+                if ck == NodeKind::NODE_CALL {
+                    self.call_list.push(cn);
+                } else if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                    self.spec_list.push(cn);
+                }
+                cn = cn + 1;
+            }
+        }
+        let mut ci: usize = 0;
+        while ci < self.call_list.len() {
+            let nid = *self.call_list.at(ci);
+            ci += 1;
+            let nn = unsafe (*self.cur_ast()).at_const(nid);
+            if nn.span.start < fsp.start || nn.span.end > fsp.end {
+                continue;
+            }
+            let mut args = TyArgs8 {};
+            let mut n: i32 = 0;
+            let g2 = self.generic_call_target(nid, &mut args[0], &mut n);
+            if g2.node == NODE_NONE {
+                continue;
+            }
+            let mut concrete = true;
+            for kk in 0..n {
+                args[kk as usize] = self.subst_resolve(args[kk as usize]);
+                if !self.type_is_concrete(args[kk as usize]) {
+                    concrete = false;
+                }
+                if foreign {
+                    args[kk as usize] = unsafe (*home).reintern(unsafe &*self.cur_ast(), args[kk as usize]);
+                }
+            }
+            if concrete {
+                self.record_inst(g2, &args[0], n, nid);
+            }
+        }
+        // A generic fn used as a VALUE (turbofished `f::<..>` fn pointer) inside this body:
+        // monomorphize it too, mirroring the call walk (subst-resolve the turbofish args to
+        // concrete, reintern for a foreign owner). Without this the referenced instance is never
+        // emitted and the C link fails on the bare generic name.
+        let mut si: usize = 0;
+        while si < self.spec_list.len() {
+            let sid = *self.spec_list.at(si);
+            si += 1;
+            let sn2 = unsafe (*self.cur_ast()).at_const(sid);
+            if sn2.span.start < fsp.start || sn2.span.end > fsp.end {
+                continue;
+            }
+            let mut sargs = TyArgs8 {};
+            let mut smn: i32 = 0;
+            let sg = self.generic_value_target(sid, &mut sargs[0], &mut smn);
+            if sg.node == NODE_NONE {
+                continue;
+            }
+            let mut sconcrete = true;
+            for kk in 0..smn {
+                sargs[kk as usize] = self.subst_resolve(sargs[kk as usize]);
+                if !self.type_is_concrete(sargs[kk as usize]) {
+                    sconcrete = false;
+                }
+                if foreign {
+                    sargs[kk as usize] = unsafe (*home).reintern(unsafe &*self.cur_ast(), sargs[kk as usize]);
+                }
+            }
+            if sconcrete {
+                self.record_inst(sg, &sargs[0], smn, sid);
+            }
+        }
+    }
+    // Methods of a generic struct/enum INSTANCE are emitted with the struct's substitution frame
+    // (emit_inst_methods) but have no fn instance of their own (their T is the struct's), so the
+    // fn-inst worklist above never scans their bodies: a generic fn called with the struct's T
+    // (`samehelp(&self.val)` inside `Box2<T>::run`) was emitted concretely yet never collected --
+    // the C referenced an undeclared function. Worklist over this module's concrete aggregate
+    // instances, mirroring the three emission paths (emit_method_specializations /
+    // emit_rehomed_methods / emit_local_method_insts) so exactly the bodies emitted in this TU
+    // are scanned.
+    fn collect_method_insts(self: &mut Self) {
+        let home = self.ast;
+        let home_mod = self.cur_module();
+        let hsrc = self.source;
+        while self.nscan < unsafe (*home).instances.len() {
+            if self.nscan >= 16384 {
+                if !self.insts_overflow {
+                    self.insts_overflow = true;
+                    self.errors.emit(
+                        0,
+                        0,
+                        format("codegen: too many generic aggregate instances in one module (max {})", 16384),
+                    );
+                }
+                return;
+            }
+            let it = *unsafe (*home).instance(self.nscan as u32);
+            self.nscan += 1;
+            let mut concrete = true;
+            for k in 0..it.n {
+                if !self.type_is_concrete(unsafe it.args[k as usize]) {
+                    concrete = false;
+                }
+            }
+            if !concrete {
+                continue;
+            }
+            let foreign = it.module != home_mod;
+            let mut minst_only = false;
+            if foreign {
+                if self.package == null || it.module as usize >= self.pkg_count() {
+                    continue;
+                }
+                minst_only = !self.inst_rehomed_here(&it);
+            } else if self.package != null && unsafe (*self.package).instance_home(unsafe &*home, &it) != home_mod {
+                continue;
+            }
+            let itTy = unsafe (*home).intern_instance(it.module, it.decl, &it.args[0], it.n);
+            if minst_only {
+                // Only methods with their OWN generics are emitted locally for a foreign,
+                // non-rehomed instance (emit_local_method_insts); skip instances without any.
+                let mut any = false;
+                let mut mk: usize = 0;
+                while mk < unsafe (*home).method_insts.len() && !any {
+                    if unsafe (*home).method_insts[mk].instance == itTy {
+                        any = true;
+                    }
+                    mk = mk + 1;
+                }
+                if !any {
+                    continue;
+                }
+            }
+            if !foreign {
+                self.scan_inst_methods(&it, home, itTy, false, false);
+                continue;
+            }
+            let owner = self.mod_ast(it.module);
+            self.source = self.mod_src(it.module);
+            self.borrowed = true;
+            let oninst = unsafe (*owner).instances.len();
+            self.ast = owner;
+            let mut oit = it;
+            for k2 in 0..it.n {
+                unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k2 as usize]);
+            }
+            self.scan_inst_methods(&oit, home, itTy, true, minst_only);
+            unsafe (*self.cur_ast()).instances.truncate(oninst);
+            self.borrowed = false;
+            self.ast = home;
+            self.source = hsrc;
+        }
+    }
+    // Per-instance body scan: mirrors emit_inst_methods' extend/method/method-inst walk, subst
+    // setup and method_used pruning, but records nested generic-fn instantiations
+    // (scan_body_calls) instead of emitting. `mi_src`/`mi_inst` key the method_insts lookup in
+    // the HOME ast exactly as emission does.
+    fn scan_inst_methods(
+        self: &mut Self,
+        it: &TyInstance,
+        mi_src: *mut Ast,
+        mi_inst: TypeId,
+        foreign: bool,
+        minst_only: bool,
+    ) {
+        let items = self.program_items();
+        let iids = unsafe (*self.cur_ast()).list(items);
+        // CG-4: only extends whose target resolves to it.decl can match this instance.
+        let mut ch = ExtChain {};
+        let nchain = self.cg_ext_chain(self.cur_module(), it.decl, &mut ch[0], 64);
+        let total = if nchain >= 0 {
+            nchain;
+        } else {
+            items.len as i32;
+        };
+        for x in 0..total {
+            let i = if nchain >= 0 {
+                ch[x as usize];
+            } else {
+                x;
+            };
+            let nid = unsafe iids[i as usize];
+            let ed = unsafe (*self.cur_ast()).at_const(nid).as_data.extend_def;
+            if unsafe (*self.cur_ast()).at_const(nid).kind != NodeKind::NODE_EXTEND || ed.generics.len == 0 {
+                continue;
+            }
+            if unsafe (*self.cur_ast()).resolution(ed.target_type) != it.decl {
+                continue;
+            }
+            let itrait = self.extend_interface(nid);
+            if itrait.node != NODE_NONE {
+                let itty = unsafe (*self.cur_ast()).intern_instance(it.module, it.decl, &it.args[0], it.n);
+                if !self.cg_type_satisfies(itty, itrait, 0) {
+                    continue;
+                }
+            }
+            if !self.cg_extend_bounds_hold(nid, &it.args[0], it.n) {
+                continue;
+            }
+            let gens = ed.generics;
+            let gids = unsafe (*self.cur_ast()).list(gens);
+            self.nsubst = 0;
+            let mut g: u32 = 0;
+            while g < gens.len && g < it.n as u32 && self.nsubst < 16 {
+                unsafe self.subst[self.nsubst as usize].param = DefId {
+                    module: self.cur_module(),
+                    node: unsafe gids[g as usize],
+                };
+                unsafe self.subst[self.nsubst as usize].concrete = unsafe it.args[g as usize];
+                self.nsubst = self.nsubst + 1;
+                g = g + 1;
+            }
+            // Seed the aggregate instances this extend's bodies name under the frame (the
+            // fn-inst sweep in expand_nested_insts, same rules: local only -- foreign bodies
+            // re-home through instance propagation instead).
+            if !foreign {
+                if self.genty_ast != self.ast {
+                    self.genty_ast = self.ast;
+                    self.genty.clear();
+                }
+                let np = unsafe (*self.cur_ast()).type_pool.len();
+                let mut ti: usize = 1;
+                while ti < np {
+                    if self.cg_mentions_generic(ti as TypeId, 0) {
+                        let _ = self.subst_resolve(ti as TypeId);
+                    }
+                    ti = ti + 1;
+                }
+            }
+            let nimpl = self.nsubst;
+            let ms = ed.items;
+            let mids = unsafe (*self.cur_ast()).list(ms);
+            for j in 0..ms.len {
+                let mid = unsafe mids[j as usize];
+                let mf = unsafe (*self.cur_ast()).at_const(mid).as_data.function;
+                if unsafe (*self.cur_ast()).at_const(mid).kind != NodeKind::NODE_FUNCTION || mf.body == NODE_NONE {
+                    continue;
+                }
+                if mf.generics.len == 0 {
+                    let mdef = DefId { module: self.cur_module(), node: mid };
+                    if minst_only || self.multifile && itrait.node == NODE_NONE && self.cg_attr(
+                        self.cur_module(),
+                        it.decl,
+                        AttrKind::ATTR_EMIT_MACRO,
+                    ) == null && !unsafe (*self.package).method_used_get(mdef) {
+                        continue;
+                    }
+                    self.nsubst = nimpl;
+                    self.scan_body_calls(mid, foreign, mi_src);
+                    continue;
+                }
+                let mg = mf.generics;
+                let mgids = unsafe (*self.cur_ast()).list(mg);
+                for mk in 0..unsafe (*mi_src).method_insts.len() {
+                    let minst = unsafe (*mi_src).method_insts[mk];
+                    if minst.method != mid || minst.instance != mi_inst {
+                        continue;
+                    }
+                    self.nsubst = nimpl;
+                    let mut mgi: u32 = 0;
+                    while mgi < mg.len && mgi < minst.n as u32 && self.nsubst < 16 {
+                        let ta = if mi_src == self.cur_ast() {
+                            unsafe minst.targs[mgi as usize];
+                        } else {
+                            unsafe (*self.cur_ast()).reintern(unsafe &*mi_src, minst.targs[mgi as usize]);
+                        };
+                        unsafe self.subst[self.nsubst as usize].param = DefId {
+                            module: self.cur_module(),
+                            node: unsafe mgids[mgi as usize],
+                        };
+                        unsafe self.subst[self.nsubst as usize].concrete = ta;
+                        self.nsubst = self.nsubst + 1;
+                        mgi = mgi + 1;
+                    }
+                    self.scan_body_calls(mid, foreign, mi_src);
+                }
+            }
+            self.nsubst = 0;
         }
     }
 }
