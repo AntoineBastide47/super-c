@@ -937,6 +937,51 @@ fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(
     assert_eq(p.run_bin(), 42);
 }
 
+// OS threads (std/parallel): an owning closure moved onto a pthread returns its value through the
+// JoinHandle, and several threads share one Atomic<i64> by raw pointer -- fetch_add is indivisible, so the
+// total is exact. Leak-checked, so the moved-in String and every heap payload/slot are accounted for.
+@test
+fn threads_and_atomics() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::thread as thread;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let msg = String::from_str("payload");
+    let owned = thread::spawn(fn() usize { return msg.len(); });
+
+    let mut counter = atom::Atomic::<i64>::new(0);
+    let shared = &mut counter as *mut atom::Atomic<i64>;
+    let mut handles = Vector::<thread::JoinHandle<i32>>::new();
+    for _t in 0..4 {
+        handles.push(thread::spawn(fn() i32 {
+            for _i in 0..1000 {
+                let _ = unsafe { shared[0].fetch_add(1); };
+            }
+            return 0;
+        }));
+    }
+    while handles.len() > 0 {
+        let _ = handles.pop().unwrap().join();
+    }
+    handles.free();
+
+    let n = owned.join();
+    let total = counter.load();
+    return (n as i32 - 7) + (total - 4000) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
 @test
 fn prelude_output_is_demand_driven() {

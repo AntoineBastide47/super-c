@@ -8806,6 +8806,25 @@ extend TypeChecker {
                     self.apply_default_args(d.module, d.node, &mut ta[0], &mut tn);
                     result = unsafe (*self.cur_ast()).intern_instance(d.module, d.node, &ta[0], tn);
                 } else {
+                    // A turbofished generic fn used as a VALUE (`f::<T>` fn pointer): record the explicit
+                    // type args on this node so codegen names and emits the monomorphized instance, exactly
+                    // as a call callee's MonoUse does. Without this the fn-pointer value emits the bare
+                    // generic name and the C link fails.
+                    if d.node != NODE_NONE && types.len > 0 {
+                        let dn = unsafe (*self.mod_ast(d.module)).at_const(d.node);
+                        if dn.kind == NodeKind::NODE_FUNCTION && dn.as_data.function.generics.len > 0 {
+                            let mut ta = Tys8 {};
+                            let mut tn: u8 = 0;
+                            let mut j: u32 = 0;
+                            while j < types.len && tn < 8 {
+                                let tj = unsafe (*a).list(types)[j as usize];
+                                ta[tn as usize] = self.resolve_type(tj);
+                                tn = tn + 1;
+                                j = j + 1;
+                            }
+                            unsafe (*self.cur_ast()).set_type_args(id, &ta[0], tn);
+                        }
+                    }
                     result = self.check_expr(inner);
                 }
             },

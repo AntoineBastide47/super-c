@@ -105,6 +105,9 @@ pub const fn super_rt_includes() *const char {
 #if __has_include(<threads.h>)
 #include <threads.h>
 #endif
+#if __has_include(<pthread.h>)
+#include <pthread.h>
+#endif
 #if __has_include(<time.h>)
 #include <time.h>
 #endif
@@ -672,6 +675,9 @@ pub struct Codegen<'a> {
     // CG-10: NODE_CALL nids of call_ast in ascending order (expand_nested_insts scans calls
     // per instance; this replaces the full node-arena sweep per instance).
     pub call_list: Vector<NodeId>,
+    // NODE_GENERIC_SPECIALIZATION nids of call_ast (a generic fn used as a value / fn pointer);
+    // rebuilt together with call_list under the same call_ast cache guard.
+    pub spec_list: Vector<NodeId>,
     pub call_ast: *mut Ast,
     // Memoized "type mentions a TYPE_GENERIC" bits (0 unknown / 1 no / 2 yes) for the instance
     // seeding sweep: concrete types (virtually the whole pool) are skipped without a walk.
@@ -825,6 +831,7 @@ extend Codegen as Free {
         self.moved_place_cond.free();
         self.place_flag_l.free();
         self.call_list.free();
+        self.spec_list.free();
         if self.moved_stamp != null {
             unsafe stdlib::free(self.moved_stamp);
         }
@@ -888,6 +895,7 @@ extend Codegen {
             place_flags_pending: false,
             home_ast: ast_u as *mut Ast,
             call_list: Vector::<NodeId>::new(),
+            spec_list: Vector::<NodeId>::new(),
             genty: Vector::<u8>::new(),
             genty_ast: null,
             insts_ast: null,
@@ -1702,6 +1710,14 @@ extend Codegen {
         }
         return true;
     }
+    fn tyargs_concrete(self: &Self, args: *const TypeId, n: i32) bool {
+        for k in 0..n {
+            if !self.type_is_concrete(unsafe args[k as usize]) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     // ---- generic instantiation collection ----
     fn generic_call_target(self: &Self, callId: NodeId, args: *mut TypeId, n: *mut i32) DefId {
@@ -1726,6 +1742,38 @@ extend Codegen {
             return DefId { module: 0, node: NODE_NONE };
         }
         let mu = unsafe (*a).type_args(callId);
+        if mu == null {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let mut i: u8 = 0;
+        while i < unsafe (*mu).n && unsafe *n < 8 {
+            let k = unsafe *n;
+            unsafe args[k as usize] = unsafe (*mu).args[i as usize];
+            unsafe *n = k + 1;
+            i = i + 1;
+        }
+        return fn2;
+    }
+    // A generic function used as a VALUE (a turbofished `f::<T>` fn pointer, not the callee of a call):
+    // `specId` is the NODE_GENERIC_SPECIALIZATION. Returns the generic fn DefId and its explicit type
+    // args, so the monomorphized instance is collected and named exactly like a call site. NODE_NONE for
+    // anything that is not a turbofished generic-fn value.
+    fn generic_value_target(self: &Self, specId: NodeId, args: *mut TypeId, n: *mut i32) DefId {
+        unsafe *n = 0;
+        let a = self.cur_ast();
+        let sp = unsafe (*a).at_const(specId);
+        if sp.kind != NodeKind::NODE_GENERIC_SPECIALIZATION {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let fn2 = unsafe (*a).resolution_def(sp.as_data.specialization.expression);
+        if fn2.node == NODE_NONE {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let fnnode = unsafe (*self.mod_ast(fn2.module)).at_const(fn2.node);
+        if fnnode.kind != NodeKind::NODE_FUNCTION || fnnode.as_data.function.generics.len == 0 {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let mu = unsafe (*a).type_args(specId);
         if mu == null {
             return DefId { module: 0, node: NODE_NONE };
         }
@@ -1855,6 +1903,14 @@ extend Codegen {
                     self.record_inst(fn2, &args[0], n, i);
                 }
             }
+            if unsafe (*self.cur_ast()).at_const(i).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                let mut sargs = TyArgs8 {};
+                let mut sn: i32 = 0;
+                let sfn = self.generic_value_target(i, &mut sargs[0], &mut sn);
+                if sfn.node != NODE_NONE && self.tyargs_concrete(&sargs[0], sn) {
+                    self.record_inst(sfn, &sargs[0], sn, i);
+                }
+            }
             i = i + 1;
         }
         self.expand_nested_insts();
@@ -1909,10 +1965,14 @@ extend Codegen {
             if self.call_ast != self.ast {
                 self.call_ast = self.ast;
                 self.call_list.clear();
+                self.spec_list.clear();
                 let mut cn: u32 = 1;
                 while cn as usize < unsafe (*self.cur_ast()).nodes.len() {
-                    if unsafe (*self.cur_ast()).at_const(cn).kind == NodeKind::NODE_CALL {
+                    let ck = unsafe (*self.cur_ast()).at_const(cn).kind;
+                    if ck == NodeKind::NODE_CALL {
                         self.call_list.push(cn);
+                    } else if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                        self.spec_list.push(cn);
                     }
                     cn = cn + 1;
                 }
@@ -1943,6 +2003,38 @@ extend Codegen {
                 }
                 if concrete {
                     self.record_inst(g2, &args[0], n, nid);
+                }
+            }
+            // A generic fn used as a VALUE (turbofished `f::<..>` fn pointer) inside this instance's
+            // body: monomorphize it too, mirroring the call walk (subst-resolve the turbofish args to
+            // concrete, reintern for a foreign owner). Without this the referenced instance is never
+            // emitted and the C link fails on the bare generic name.
+            let mut si: usize = 0;
+            while si < self.spec_list.len() {
+                let sid = *self.spec_list.at(si);
+                si += 1;
+                let sn2 = unsafe (*self.cur_ast()).at_const(sid);
+                if sn2.span.start < fsp.start || sn2.span.end > fsp.end {
+                    continue;
+                }
+                let mut sargs = TyArgs8 {};
+                let mut smn: i32 = 0;
+                let sg = self.generic_value_target(sid, &mut sargs[0], &mut smn);
+                if sg.node == NODE_NONE {
+                    continue;
+                }
+                let mut sconcrete = true;
+                for kk in 0..smn {
+                    sargs[kk as usize] = self.subst_resolve(sargs[kk as usize]);
+                    if !self.type_is_concrete(sargs[kk as usize]) {
+                        sconcrete = false;
+                    }
+                    if foreign {
+                        sargs[kk as usize] = unsafe (*home).reintern(unsafe &*self.cur_ast(), sargs[kk as usize]);
+                    }
+                }
+                if sconcrete {
+                    self.record_inst(sg, &sargs[0], smn, sid);
                 }
             }
             // Seed the aggregate instances this fn's types name (e.g. a `W<T, N> {}` literal in
@@ -8767,6 +8859,17 @@ extend Codegen {
                 t = t + 1;
                 continue;
             }
+            // An instance re-homed to another module (e.g. one whose args name a foreign closure/user
+            // type) has its struct defined and methods emitted THERE (phase_types / emit_inst_dfs both
+            // gate on instance_home); its auto-free must land in the same TU, or this TU emits a free__d
+            // over an incomplete struct with undeclared member frees.
+            if k == TypeKind::TYPE_INSTANCE && self.package != null {
+                let hit = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+                if unsafe (*self.package).instance_home(unsafe &*self.cur_ast(), &hit) != self.cur_module() {
+                    t = t + 1;
+                    continue;
+                }
+            }
             if (k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM || k == TypeKind::TYPE_INSTANCE) && self.type_is_concrete(
                 rt,
             ) && self.cg_type_derives_free(rt) {
@@ -9750,7 +9853,21 @@ extend Codegen {
                 self.emit_str(")");
             },
             NODE_GENERIC_SPECIALIZATION => {
-                self.emit_expr(n.as_data.specialization.expression);
+                // A generic fn used as a value (`f::<T>` fn pointer): emit the monomorphized instance
+                // name, mirroring a call callee. Any other turbofished value falls through unchanged.
+                let mut vargs = TyArgs8 {};
+                let mut vn: i32 = 0;
+                let vfn = self.generic_value_target(id, &mut vargs[0], &mut vn);
+                if vfn.node != NODE_NONE {
+                    for kk in 0..vn {
+                        vargs[kk as usize] = self.subst_resolve(vargs[kk as usize]);
+                    }
+                    let mut nm = Buf256 {};
+                    self.spec_name(vfn, &vargs[0], vn, &mut nm[0], 256);
+                    self.emit_cstr(&nm[0]);
+                } else {
+                    self.emit_expr(n.as_data.specialization.expression);
+                }
             },
             NODE_SIZEOF | NODE_ALIGNOF => {
                 self.emit_sizeof(id);
@@ -12371,7 +12488,7 @@ extend Codegen {
             let fnty = Ty { kind: TypeKind::TYPE_FUNCTION, module: self.cur_module(), as_data: TyAs { decl: id } };
             if self.cg_fn_owns(&fnty) {
                 self.buf.format_into(
-                    "static {}_env_free({}_env *const __e) {{ ",
+                    "static void {}_env_free({}_env *const __e) {{ ",
                     diag::cstr(&nm[0]),
                     diag::cstr(&nm[0]),
                 );
