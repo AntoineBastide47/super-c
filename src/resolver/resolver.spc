@@ -8,6 +8,7 @@ import stdlib;
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
+import desugar::desugar as desugar;
 import utils::errors as diag;
 
 /// Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
@@ -1063,6 +1064,15 @@ extend Resolver {
                 let v = self.ast.at_const(id).as_data.single.value;
                 self.resolve_expr(v);
             },
+            NODE_LAUNCH => {
+                // Sugar marker wrapping a call: resolve the call's operand(s). The placeholder callee is
+                // seeded by the desugar pass, so it is deliberately not resolved here.
+                let inner = self.ast.at_const(id).as_data.single.value;
+                let args = self.ast.at_const(inner).as_data.call.args;
+                for i in 0..args.len {
+                    self.resolve_expr(self.child(args, i));
+                }
+            },
             NODE_IF => {
                 self.resolve_if(id);
             },
@@ -1480,6 +1490,8 @@ extend Resolver {
             self.resolve_item(cid);
         }
         self.scope_exit();
+        // Lower sugar-keyword markers (e.g. `launch`) to core nodes before anything downstream runs.
+        desugar::desugar_ast(&mut self.ast, self.package);
         if self.lint {
             self.lint_unused();
             self.lint_dead_stores();

@@ -1143,10 +1143,10 @@ fn main() i32 {
     for _i in 0..100 {
         let c = counter.clone();
         let w = wg.clone();
-        rt::launch(fn() {
+        launch fn() {
             let _ = c.get().fetch_add(1, atom::MemoryOrder::Relaxed);
             w.done();
-        });
+        };
     }
     wg.wait();
     let total = counter.get().load(atom::MemoryOrder::SeqCst);

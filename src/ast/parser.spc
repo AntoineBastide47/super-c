@@ -3038,6 +3038,40 @@ extend Parser {
                     },
                 );
             },
+            Launch => {
+                // Sugar keyword: `launch <closure>;`. Built as an expression-statement marker wrapping a call
+                // to a placeholder callee (its name is never read). The desugar pass seeds the callee's
+                // resolution to the runtime shim and flips NODE_LAUNCH to NODE_EXPRESSION_STATEMENT before
+                // typecheck, so downstream it is an ordinary `submit(<closure>);` statement.
+                let kwspan = self.raw_peek().span();
+                self.advance();
+                let operand = self.parse_expression();
+                self.expect(TokenType::Semicolon, "';'");
+                let callee = self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_IDENTIFIER,
+                        span: kwspan,
+                        as_data: NodeAs { name: NameData { text: kwspan, is_mutable: false } },
+                    },
+                );
+                let mark = self.ast.mark();
+                self.ast.push(operand);
+                let args = self.ast.commit(mark);
+                let inner = self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_CALL,
+                        span: Span::new(start, self.previous_end()),
+                        as_data: NodeAs { call: CallData { callee: callee, args: args } },
+                    },
+                );
+                result = self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_LAUNCH,
+                        span: Span::new(start, self.previous_end()),
+                        as_data: NodeAs { single: SingleData { value: inner } },
+                    },
+                );
+            },
             If => {
                 let f = self.parse_if();
                 // if-let desugars to a match EXPRESSION; wrap it so it statement-positions

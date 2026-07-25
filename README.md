@@ -13,6 +13,7 @@ Super-C source (.spc)
     -> lexer          (UTF-8, packed tokens)
     -> parser         (context-free LL(1), left-factored operators, no predicates/backtracking; flat AST arena)
     -> resolver       (name binding, scopes, modules)
+    -> desugar        (lowers sugar keywords like `launch` to core nodes; no other pass sees them)
     -> typechecker    (type inference, generics, monomorphization; always-on compile-time evaluation)
     -> borrow checker (moves, aliasing, lifetimes -- a dedicated pass over the typed AST)
     -> codegen        (readable C: build/ tree of .h/.c, RAII frees inserted)
@@ -732,6 +733,27 @@ The strictness rules:
 Running `./super-c lint <project> --suggest-const` indicates all functions the compiler has proven to be const evaluatable.
 Running it with `--fix` makes all those functions const and saves some compilation time as the compiler won't reprove them.
 
+## Concurrency
+
+The `std::parallel` modules build a real concurrency stack on OS threads:
+
+* **Atomics** — `Atomic<T>` over the integer builtins, every operation taking an explicit `MemoryOrder`
+  (`Relaxed` … `SeqCst`); load/store/swap, the fetch-`add`/`sub`/`and`/`or`/`xor` family, and strong/weak
+  `compare_exchange`.
+* **Threads and shared ownership** — `thread::spawn` → `JoinHandle<T>`, and `Arc<T>` for atomically
+  reference-counted sharing.
+* **`Send` / `Sync`** — marker interfaces with structural auto-conformance (modelled on the `Free` query);
+  a raw pointer is neither, so it cannot cross a thread boundary, and the bound is enforced at every spawn
+  and `launch`. Share through `Arc`, mutate through an atomic or a lock.
+* **Synchronization** — `Mutex<T>`, `RwLock<T>`, `Condvar`, `Once`, `WaitGroup`, `Barrier`, `Semaphore`,
+  with RAII lock guards that release on scope exit.
+* **`launch`** — a statement keyword for detached tasks: `launch || { … };` moves an owning `Send` closure
+  onto a lazily-started worker pool (one thread per CPU). The escape rule (a launched closure may not borrow
+  a caller local) and `Send` fall out of the closure's `fn move() + Send` bound; `runtime::shutdown()` drains
+  and joins the pool. `launch` is a *sugar keyword*: the parser emits a marker that a dedicated desugar pass
+  lowers to a `runtime::submit(…)` call before the type checker, so the rest of the compiler never sees it —
+  the same mechanism future sugar keywords (e.g. `select`) reuse.
+
 ## Generated output
 
 `./super-c app.spc` writes a `build/` tree next to the source that mirrors the module paths:
@@ -759,8 +781,8 @@ Everything in the tour above is implemented and working. Beyond it, Super-C also
 * `_` discard bindings
 * unit and tuple structs (`struct S;`, `struct Pair(i32, str)` with `p.0` and `Pair(1, "a")`)
 * associated constants (`T::N`)
-* `x @ pat` and rest patterns (`V(a, ..)`
-* `S { f, .. }`), `Deref` / `DerefMut` auto-deref (up to 8 hops, cycle-checked)
+* `x @ pat` and rest patterns (`V(a, ..)`, `S { f, .. }`)
+* `Deref` / `DerefMut` auto-deref (up to 8 hops, cycle-checked)
 * float `Eq` / `Ord` / `Hash` via the IEEE-754 total order (`total_cmp`, so floats sort and key `Map`s) plus
 `Vector::sort_by` / `sort_by_key`, 
 * raw strings (`r#"…"#`)
@@ -770,11 +792,10 @@ Everything in the tour above is implemented and working. Beyond it, Super-C also
 
 Roadmap, in priority order:
 
-1. **Threading** — a proper kernel/user threading API: today atomics and threads are C shims via
-   FFI, with no std types and no `Send`/`Sync` markers (the borrow checker is single-threaded).
-2. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
+1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
    embarrassingly parallel per module.
-3. **Coroutines** — `launch f(args)`: uncolored spawn on stackful coroutines with `Chan<T>`, staged
-   from a single-threaded scheduler to M:N work stealing.
-4. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
+2. **Stackful coroutines and channels** — a task that blocks currently blocks its worker thread; the next
+   step parks the coroutine instead (the context-switch substrate already exists) and adds `Channel<T>` and
+   the data-parallel `parallel::*` API, staged toward M:N work stealing.
+3. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
    (file/console IO is currently FFI-only; this subsumes it).

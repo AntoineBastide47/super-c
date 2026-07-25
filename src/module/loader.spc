@@ -598,6 +598,25 @@ extend Package {
                     }
                 }
             }
+            // Sugar-keyword dependency: the `launch` statement lowers to std::parallel::runtime::submit, so
+            // pull that module in (transitively) ONLY when the keyword is actually used -- a program that
+            // never launches never loads the runtime. load_module dedups, so a duplicate push is harmless.
+            if std_root.len() != 0 {
+                let mut has_launch = false;
+                let nn = m.ast.nodes.len();
+                for ni in 0..nn {
+                    if m.ast.at_const(ni as NodeId).kind == NodeKind::NODE_LAUNCH {
+                        has_launch = true;
+                        break;
+                    }
+                }
+                if has_launch {
+                    let mut rf = String::from_str(std_root);
+                    rf.push_str("/std/parallel/runtime.spc");
+                    child_paths.push(String::from_str("std::parallel::runtime"));
+                    child_files.push(rf);
+                }
+            }
         }
         for k in 0..child_paths.len() {
             self.load_module(child_paths[k].as_str(), child_files[k].as_str(), bootstrap_tags);

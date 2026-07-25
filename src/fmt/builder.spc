@@ -1165,6 +1165,13 @@ fn b_stmt(b: &mut Builder, id: NodeId) d::DocId {
             v.push(b_expr(b, n.as_data.single.value));
             v.push(b.p.txt(";"));
         },
+        NODE_LAUNCH => {
+            // Sugar marker (pre-desugar): SingleData wraps the placeholder call; print its sole operand.
+            let inner = n.as_data.single.value;
+            v.push(b.p.txt("launch "));
+            v.push(b_expr(b, list_at(b, nd(b, inner).as_data.call.args, 0)));
+            v.push(b.p.txt(";"));
+        },
         NODE_IF => {
             v.push(b_if(b, id));
         },

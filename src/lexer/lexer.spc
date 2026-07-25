@@ -323,6 +323,9 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
             if first == b'i' && memeq(lexeme, "import") {
                 return TokenType::Import;
             }
+            if first == b'l' && memeq(lexeme, "launch") {
+                return TokenType::Launch;
+            }
             if first == b'r' && memeq(lexeme, "return") {
                 return TokenType::Return;
             }

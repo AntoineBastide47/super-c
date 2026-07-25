@@ -134,6 +134,11 @@ pub enum NodeKind {
     // A lifetime name: `'a` as a generic param's name, a lifetime argument, or an outlives bound.
     // Appended at the END so an older bootstrap compiler keeps the established numeric values.
     NODE_LIFETIME,
+    // Sugar-keyword marker: produced by the parser, printed by the formatter, and lowered to a core node by
+    // the desugar pass (src/desugar) before typecheck -- no other pass sees it. NODE_LAUNCH carries CallData
+    // (a placeholder callee + the operand as the sole arg); desugar seeds the callee's resolution to the
+    // runtime shim and flips the kind to NODE_CALL.
+    NODE_LAUNCH,
     NODE_KIND_COUNT,
 }
 

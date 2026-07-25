@@ -109,8 +109,8 @@ pub fn job_entry<F: fn move()>(env: *mut void) {
 }
 
 /// Submit `f` to run on the pool as a detached task. Starts the pool on first use. `f` owns its captures and
-/// must be `Send`; it is moved onto the heap and freed after it runs.
-pub fn launch<F: fn move() + Send>(f: F) {
+/// must be `Send`; it is moved onto the heap and freed after it runs. The `launch` statement lowers to this.
+pub fn submit<F: fn move() + Send>(f: F) {
     let s = ensure_started();
     let mut g = Global {};
     let slot = g.alloc(sizeof(F), alignof(F)) as *mut F;

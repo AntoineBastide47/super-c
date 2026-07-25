@@ -112,6 +112,7 @@ pub enum TokenType {
     VaStart,
     VaArg,
     VaEnd,
+    Launch,
 }
 
 extend TokenType {
@@ -164,6 +165,7 @@ extend TokenType {
             VaStart => "VaStart",
             VaArg => "VaArg",
             VaEnd => "VaEnd",
+            Launch => "Launch",
             IntegerLiteral => "IntegerLiteral",
             FloatLiteral => "FloatLiteral",
             CharacterLiteral => "CharacterLiteral",
