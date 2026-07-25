@@ -144,43 +144,41 @@ extend isize as AtomicOps {
     }
 }
 
-/// An atomic integer cell. Every operation is sequentially consistent. The cell holds `T` unwrapped, so its
-/// address can be handed to other threads (through a raw pointer or an `Arc`) and mutated concurrently.
+/// An atomic integer cell. Every operation is sequentially consistent and takes `&self`: atomics ARE the
+/// interior-mutability primitive, so a shared reference (e.g. through an `Arc`) is enough to mutate the
+/// cell. That interior mutability lives in an `UnsafeCell`, the one place a `*mut` may be formed from a
+/// shared borrow; the value is stored unwrapped inside it, so its address can be shared across threads.
 pub struct Atomic<T: AtomicOps> {
-    value: T,
+    cell: UnsafeCell<T>,
 }
 
 extend<T: AtomicOps> Atomic<T> {
     /// A cell initialised to `v`.
     pub fn new(v: T) Atomic<T> {
-        return Atomic::<T> { value: v };
+        return Atomic::<T> { cell: UnsafeCell::<T>::new(v) };
     }
-    // Every operation takes `&self`: atomics ARE the interior-mutability primitive, so a shared reference
-    // (e.g. through an `Arc`) is enough to mutate the cell. The const is cast away only to reach the
-    // `*mut` runtime builtin; the access itself is indivisible.
-
     /// Atomically read the current value.
     pub fn load(self: &Atomic<T>) T {
-        return T::atomic_load(&self.value);
+        return T::atomic_load(self.cell.get());
     }
     /// Atomically overwrite the value.
     pub fn store(self: &Atomic<T>, v: T) {
-        T::atomic_store((&self.value) as *mut T, v);
+        T::atomic_store(self.cell.get(), v);
     }
     /// Atomically overwrite the value, returning the previous one.
     pub fn swap(self: &Atomic<T>, v: T) T {
-        return T::atomic_swap((&self.value) as *mut T, v);
+        return T::atomic_swap(self.cell.get(), v);
     }
     /// Atomically add `v`, returning the previous value.
     pub fn fetch_add(self: &Atomic<T>, v: T) T {
-        return T::atomic_add((&self.value) as *mut T, v);
+        return T::atomic_add(self.cell.get(), v);
     }
     /// Atomically subtract `v`, returning the previous value.
     pub fn fetch_sub(self: &Atomic<T>, v: T) T {
-        return T::atomic_sub((&self.value) as *mut T, v);
+        return T::atomic_sub(self.cell.get(), v);
     }
     /// If the value equals `expected`, replace it with `desired`; returns whether the swap happened.
     pub fn compare_exchange(self: &Atomic<T>, expected: T, desired: T) bool {
-        return T::atomic_cas((&self.value) as *mut T, expected, desired);
+        return T::atomic_cas(self.cell.get(), expected, desired);
     }
 }

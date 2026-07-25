@@ -116,12 +116,12 @@ pub fn mkdir_p(path: str) {
     let mut buf = Array::<char, 4096>::new();
     buf.copy_from(path.ptr(), n);
     buf[n] = 0 as char;
-    let base = (&buf[0]) as *mut char;
+    let base = (&buf[0]) as *const char; // read-only C string view; the buffer is edited in place below
     for i in 1..n {
-        if unsafe base[i] == '/' as char {
-            unsafe base[i] = 0 as char;
+        if buf[i] == '/' as char {
+            buf[i] = 0 as char;
             let _ = unsafe shim::sc_mkdir(base);
-            unsafe base[i] = '/' as char;
+            buf[i] = '/' as char;
         }
     }
     let _ = unsafe shim::sc_mkdir(base);

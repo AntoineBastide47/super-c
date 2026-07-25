@@ -2915,6 +2915,79 @@ extend Codegen {
         }
         return self.cg_type_is_free(ft);
     }
+    // Does `ty` contain a prelude `UnsafeCell` (directly or in a field/element)? Such a binding must NOT be
+    // emitted `const`: the interior mutability writes through the cell would otherwise touch a const-defined
+    // object (undefined behaviour). Mirrors cg_type_derives_free's member walk but checks every field, not
+    // just the Free-deriving ones (an UnsafeCell<i32> is not Free).
+    fn cg_type_has_unsafe_cell(self: &mut Self, ty0: TypeId) bool {
+        let rt = self.subst_resolve(ty0);
+        let y = *self.type_at(rt);
+        let k = y.kind;
+        if k == TypeKind::TYPE_ARRAY || k == TypeKind::TYPE_SLICE {
+            return self.cg_type_has_unsafe_cell(y.as_data.elem);
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if k == TypeKind::TYPE_INSTANCE {
+            if y.as_data.inst as usize >= unsafe (*self.cur_ast()).instances.len() {
+                return false;
+            }
+            let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+            if self.package != null {
+                let uh = unsafe (*self.package).prelude_lookup("UnsafeCell", true);
+                if uh.node != NODE_NONE && om == uh.mid && od == uh.node {
+                    return true;
+                }
+            }
+        } else if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM {
+            om = y.module;
+            od = y.as_data.decl;
+        } else {
+            return false;
+        }
+        let dn = *unsafe (*self.mod_ast(om)).at_const(od);
+        let is_enum = dn.kind == NodeKind::NODE_ENUM;
+        if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
+            return false;
+        }
+        let key = om as u64 << 32 | od as u64;
+        for b in 0..self.derive_busy.len() {
+            if self.derive_busy[b] == key {
+                return false;
+            }
+        }
+        self.derive_busy.push(key);
+        let mut found = false;
+        let ms = dn.as_data.aggregate.members;
+        let mids = unsafe (*self.mod_ast(om)).list(ms);
+        for i in 0..ms.len {
+            let mn = *unsafe (*self.mod_ast(om)).at_const(unsafe mids[i as usize]);
+            if !is_enum && mn.kind == NodeKind::NODE_FIELD {
+                let ft = self.cg_derived_member_ty(om, mn.as_data.field.ty, rt);
+                if ft != TYPE_NONE && self.cg_type_has_unsafe_cell(ft) {
+                    found = true;
+                }
+            } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
+                let pids = unsafe (*self.mod_ast(om)).list(mn.as_data.variant.payload);
+                for p in 0..mn.as_data.variant.payload.len {
+                    let pe = *unsafe (*self.mod_ast(om)).at_const(unsafe pids[p as usize]);
+                    let tn = if pe.kind == NodeKind::NODE_FIELD {
+                        pe.as_data.field.ty;
+                    } else {
+                        unsafe pids[p as usize];
+                    };
+                    let ft = self.cg_derived_member_ty(om, tn, rt);
+                    if ft != TYPE_NONE && self.cg_type_has_unsafe_cell(ft) {
+                        found = true;
+                    }
+                }
+            }
+        }
+        let _ = self.derive_busy.pop();
+        return found;
+    }
     fn cg_type_derives_free(self: &mut Self, rt: TypeId) bool {
         let y = *self.type_at(rt);
         let mut om: ModuleId = 0;
@@ -5279,7 +5352,7 @@ extend Codegen {
                 let autofree = self.cg_will_auto_free(id);
                 let is_const = !n.as_data.let_stmt.is_mutable && !self.cg_type_is_free(
                     unsafe (*self.cur_ast()).type_of(id),
-                );
+                ) && !self.cg_type_has_unsafe_cell(unsafe (*self.cur_ast()).type_of(id));
                 let lbt = unsafe (*self.cur_ast()).type_of(id);
                 let lval = n.as_data.let_stmt.value;
                 if lval != NODE_NONE && lbt != TYPE_NONE && self.type_at(lbt).kind == TypeKind::TYPE_ARRAY && unsafe (*self.cur_ast()).at_const(
@@ -5587,7 +5660,7 @@ extend Codegen {
             self.emit_indent();
             let element_const = !n.as_data.let_stmt.is_mutable && !self.cg_type_is_free(
                 unsafe (*self.cur_ast()).type_of(nid),
-            );
+            ) && !self.cg_type_has_unsafe_cell(unsafe (*self.cur_ast()).type_of(nid));
             let mut ecq = "".ptr() as *const char;
             if element_const {
                 ecq = "const ".ptr() as *const char;

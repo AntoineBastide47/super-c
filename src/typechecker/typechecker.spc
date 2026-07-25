@@ -142,7 +142,7 @@ extend MQKey as Eq {
 /// The per-module checker. Also the state substrate for the borrowck pass, which extends TypeChecker
 /// and re-walks function bodies after check() (Ast.call_info bridges the two).
 pub struct TypeChecker<'a> {
-    pub ast: Ast,
+    pub ast: UnsafeCell<Ast>,
     pub source: str<'a>,
     pub current_returns: NodeList,
     pub current_self: NodeId,
@@ -262,7 +262,7 @@ pub struct TypeChecker<'a> {
     // TC-9: format helpers are marked used once per module, not once per print call.
     pub fmt_marked: bool,
     // TC-11: (target, name-content, query kind) -> packed DefId (module<<32|node), misses included
-    // (node == NODE_NONE). Valid for the whole check: the ext scope, ASTs and self.ast.module (the
+    // (node == NODE_NONE). Valid for the whole check: the ext scope, ASTs and self.cur_module() (the
     // privacy filter input) are all fixed per checker. mark_method_used is re-fired on method hits
     // (idempotent set), so used-lint marking is unchanged.
     pub method_memo: Map<MQKey<'a>, u64>,
@@ -448,7 +448,7 @@ extend TypeChecker {
     pub fn new(ast: Ast, source: str, package: *mut loader::Package) TypeChecker {
         let pkg = package as usize; // read the address before the literal's `package:` field moves it
         return TypeChecker {
-            ast: ast,
+            ast: UnsafeCell::<Ast>::new(ast),
             source: source,
             current_returns: NodeList { start: 0, len: 0 },
             current_self: NODE_NONE,
@@ -528,23 +528,28 @@ extend TypeChecker {
 
     /// Ownership: moves the typed Ast out, leaving an empty placeholder -- the checker is done after this.
     pub fn take_ast(self: &mut Self) Ast {
-        let out = replace(&mut self.ast, Ast::new(0));
+        let out = replace(&mut self.ast, UnsafeCell::<Ast>::new(Ast::new(0))).into_inner();
         return out;
     }
 
     // ---- ast / source access (raw pointers) ----
     pub const fn cur_ast(self: &Self) *mut Ast {
-        return (&self.ast) as *mut Ast;
+        return self.ast.get();
+    }
+    // The module id of the AST under check. A by-value read (no lingering borrow of `self`), so it composes
+    // inside expressions that also take `&mut self` -- which a reference through `ast.get_ref()` would not.
+    pub const fn cur_module(self: &Self) ModuleId {
+        return unsafe (*self.cur_ast()).module;
     }
 
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
-        if self.package != null && m != self.ast.module {
+        if self.package != null && m != self.cur_module() {
             return unsafe &mut (*self.package).modules[m as usize].ast;
         }
-        return (&self.ast) as *mut Ast;
+        return self.ast.get();
     }
     pub const fn mod_src(self: &Self, m: ModuleId) str {
-        if self.package != null && m != self.ast.module {
+        if self.package != null && m != self.cur_module() {
             return unsafe (*self.package).modules[m as usize].source.as_str();
         }
         return self.source;
@@ -727,7 +732,7 @@ extend TypeChecker {
         return false;
     }
     fn tc_in_test_fn(self: &Self) bool {
-        return self.current_fn != NODE_NONE && self.tc_is_test_fn(self.ast.module, self.current_fn);
+        return self.current_fn != NODE_NONE && self.tc_is_test_fn(self.cur_module(), self.current_fn);
     }
     fn tc_check_test_ref(self: &mut Self, d: DefId, sp: tok::Span) {
         if d.node == NODE_NONE || !self.tc_is_test_fn(d.module, d.node) || self.tc_in_test_fn() {
@@ -852,7 +857,7 @@ extend TypeChecker {
         if ceptr == null {
             return false;
         }
-        let v = unsafe (*ceptr).eval(self.ast.module, nid);
+        let v = unsafe (*ceptr).eval(self.cur_module(), nid);
         if v.kind != ce::CONST_INT {
             return false;
         }
@@ -992,7 +997,7 @@ extend TypeChecker {
                 return bid;
             }
         }
-        if self.current_fn != NODE_NONE && (self.package == null || m == self.ast.module) {
+        if self.current_fn != NODE_NONE && (self.package == null || m == self.cur_module()) {
             let wc = unsafe (*self.cur_ast()).at_const(self.current_fn).as_data.function.where_clause;
             for w in 0..wc.len {
                 let wid = unsafe (*self.cur_ast()).list(wc)[w as usize];
@@ -1289,37 +1294,37 @@ extend TypeChecker {
     pub fn aggregate_of(
         self: &Self,
         ty: TypeId,
-        mod_out: *mut ModuleId,
-        decl_out: *mut NodeId,
-        params: *mut DefId,
-        args: *mut TypeId,
-        n_out: *mut i32,
+        mod_out: &mut ModuleId,
+        decl_out: &mut NodeId,
+        params: &mut Defs8,
+        args: &mut Tys8,
+        n_out: &mut i32,
     ) bool {
-        unsafe *n_out = 0;
+        *n_out = 0;
         let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
-            unsafe *mod_out = y.module;
-            unsafe *decl_out = y.as_data.decl;
+            *mod_out = y.module;
+            *decl_out = y.as_data.decl;
             return true;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
-            unsafe *mod_out = it.module;
-            unsafe *decl_out = it.decl;
+            *mod_out = it.module;
+            *decl_out = it.decl;
             let da = self.mod_ast(it.module);
             // `generics` never contains lifetime params (the parser splits them into `lifetimes`),
             // so it stays index-aligned with the erased-lifetime `it.args`.
             let gens = unsafe (*da).at_const(it.decl).as_data.aggregate.generics;
             let mut nn: i32 = 0;
             let mut i: u32 = 0;
-            while i < gens.len && i as u8 < it.n && nn < 8 {
+            while i < gens.len && i as u8 < it.n && nn as usize < params.len() {
                 let gid = unsafe (*da).list(gens)[i as usize];
-                unsafe params[nn as usize] = DefId { module: it.module, node: gid };
-                unsafe args[nn as usize] = unsafe it.args[i as usize];
+                params[nn as usize] = DefId { module: it.module, node: gid };
+                args[nn as usize] = unsafe it.args[i as usize];
                 nn = nn + 1;
                 i = i + 1;
             }
-            unsafe *n_out = nn;
+            *n_out = nn;
             return true;
         }
         return false;
@@ -1626,7 +1631,7 @@ extend TypeChecker {
         if decl == NODE_NONE {
             return TYPE_NONE;
         }
-        let local = self.package == null || m == self.ast.module;
+        let local = self.package == null || m == self.cur_module();
         if local {
             let cached = unsafe (*self.cur_ast()).type_of(decl);
             if cached != TYPE_NONE {
@@ -1669,7 +1674,7 @@ extend TypeChecker {
         return result;
     }
     fn decl_type(self: &mut Self, decl: NodeId) TypeId {
-        return self.decl_type_in(self.ast.module, decl);
+        return self.decl_type_in(self.cur_module(), decl);
     }
 
     fn type_of_type_node(self: &mut Self, id: NodeId) TypeId {
@@ -1803,7 +1808,7 @@ extend TypeChecker {
     /// module goes through resolve_type's per-node cache, foreign modules through the memoized
     /// context-free lowering (TC-13).
     pub fn lower_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
-        if self.package == null || m == self.ast.module {
+        if self.package == null || m == self.cur_module() {
             return self.resolve_type(id);
         }
         if id == NODE_NONE {
@@ -2035,7 +2040,7 @@ extend TypeChecker {
                         let generic_agg = (dnk == NodeKind::NODE_STRUCT || dnk == NodeKind::NODE_ENUM) && unsafe (*self.mod_ast(
                             d.module,
                         )).at_const(d.node).as_data.aggregate.generics.len > 0;
-                        if generic_agg && args.len == 0 && self.current_extend != NODE_NONE && d.module == self.ast.module && d.node == self.current_self {
+                        if generic_agg && args.len == 0 && self.current_extend != NODE_NONE && d.module == self.cur_module() && d.node == self.current_self {
                             let target = unsafe (*a).at_const(self.current_extend).as_data.extend_def.target_type;
                             if target != id {
                                 result = self.resolve_type(target);
@@ -2065,7 +2070,7 @@ extend TypeChecker {
                                     continue;
                                 }
                                 if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LITERAL {
-                                    ta[tn as usize] = self.tc_const_arg(self.ast.module, aid);
+                                    ta[tn as usize] = self.tc_const_arg(self.cur_module(), aid);
                                 } else {
                                     ta[tn as usize] = self.resolve_type(aid);
                                     if ta[tn as usize] != TYPE_NONE && self.type_at(ta[tn as usize]).kind == TypeKind::TYPE_ARRAY && self.type_at(
@@ -2105,7 +2110,7 @@ extend TypeChecker {
                                     ),
                                 );
                             }
-                            if d.module == self.ast.module {
+                            if d.module == self.cur_module() {
                                 for k in 1..parts.len {
                                     let pid = unsafe (*a).list(parts)[k as usize];
                                     let member = self.find_member(d.module, d.node, self.name_span(pid));
@@ -2155,7 +2160,7 @@ extend TypeChecker {
             NODE_ARRAY_TYPE => {
                 let at = unsafe (*a).at_const(id).as_data.array_type;
                 self.check_expr(at.length);
-                let alen = self.ce_array_len(self.ast.module, at.length);
+                let alen = self.ce_array_len(self.cur_module(), at.length);
                 result = unsafe (*self.cur_ast()).intern_type(
                     Ty {
                         kind: TypeKind::TYPE_ARRAY,
@@ -2165,7 +2170,7 @@ extend TypeChecker {
             },
             NODE_FUNCTION_TYPE => {
                 result = unsafe (*self.cur_ast()).intern_type(
-                    Ty { kind: TypeKind::TYPE_FUNCTION, module: self.ast.module, as_data: TyAs { decl: id } },
+                    Ty { kind: TypeKind::TYPE_FUNCTION, module: self.cur_module(), as_data: TyAs { decl: id } },
                 );
             },
             NODE_DYN_TYPE => {
@@ -2247,7 +2252,7 @@ extend TypeChecker {
                 i = i + 1;
             }
             if concrete {
-                result = self.tc_intern_dynfn(self.ast.module, inner, qual);
+                result = self.tc_intern_dynfn(self.cur_module(), inner, qual);
             } else if qual != TypeQualifier::TYPE_QUAL_MUT {
                 self.errors.emit(
                     sp.start,
@@ -2508,9 +2513,9 @@ extend TypeChecker {
     fn ext_scopes(self: &mut Self) i32 {
         if self.n_ext_scope < 0 {
             self.ext_scope.clear();
-            self.ext_scope.push(self.ast.module);
+            self.ext_scope.push(self.cur_module());
             if self.package != null {
-                let closure = unsafe (*self.package).import_closure(self.ast.module);
+                let closure = unsafe (*self.package).import_closure(self.cur_module());
                 for i in 0..closure.len() {
                     self.ext_scope.push(closure[i]);
                 }
@@ -2755,7 +2760,7 @@ extend TypeChecker {
         }
         let cf = self.current_fn;
         if cf != NODE_NONE {
-            let m = self.ast.module;
+            let m = self.cur_module();
             let ext = self.enclosing_extend(m, cf);
             if ext != NODE_NONE {
                 let a = self.mod_ast(m);
@@ -2825,7 +2830,7 @@ extend TypeChecker {
                             let mid = unsafe (*a).list(ms)[j as usize];
                             let mn = unsafe (*a).at_const(mid);
                             // Privacy: a method from another module must be `pub` (mirrors find_assoc_const).
-                            if mn.kind == NodeKind::NODE_FUNCTION && !(mm != self.ast.module && !mn.as_data.function.is_public) {
+                            if mn.kind == NodeKind::NODE_FUNCTION && !(mm != self.cur_module() && !mn.as_data.function.is_public) {
                                 let mname = unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text;
                                 let mut hit = false;
                                 if lit.len() != 0 {
@@ -2853,7 +2858,7 @@ extend TypeChecker {
     // Every method named `name` on (m, decl) across the extend scopes -- the un-memoized collector
     // behind overload disambiguation. Only runs when a first candidate's return type did not fit the
     // expected type, so the common single-candidate path never pays for it.
-    fn find_method_all(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, out: *mut DefId, cap: i32) i32 {
+    fn find_method_all(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, out: &mut Defs8) i32 {
         let ni = self.ext_scopes();
         let mut nout: i32 = 0;
         let mut s: i32 = -1;
@@ -2883,7 +2888,7 @@ extend TypeChecker {
                 for j in 0..ms.len {
                     let mid = unsafe (*a).list(ms)[j as usize];
                     let mn = unsafe (*a).at_const(mid);
-                    if mn.kind != NodeKind::NODE_FUNCTION || mm != self.ast.module && !mn.as_data.function.is_public {
+                    if mn.kind != NodeKind::NODE_FUNCTION || mm != self.cur_module() && !mn.as_data.function.is_public {
                         continue;
                     }
                     if spans_eq2(
@@ -2891,8 +2896,8 @@ extend TypeChecker {
                         name,
                         self.mod_src(mm),
                         unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text,
-                    ) && nout < cap {
-                        unsafe out[nout as usize] = DefId { module: mm, node: mid };
+                    ) && nout as usize < out.len() {
+                        out[nout as usize] = DefId { module: mm, node: mid };
                         nout = nout + 1;
                     }
                 }
@@ -2922,8 +2927,8 @@ extend TypeChecker {
         if self.tc_method_ret(self.strip(recv), first) == want {
             return first;
         }
-        let cands = Defs8 {};
-        let n = self.find_method_all(m, decl, name, (&cands[0]) as *mut DefId, 8);
+        let mut cands = Defs8 {};
+        let n = self.find_method_all(m, decl, name, &mut cands);
         if n < 2 {
             return first;
         }
@@ -2981,7 +2986,7 @@ extend TypeChecker {
                         for j in 0..ms.len {
                             let cid = unsafe (*a).list(ms)[j as usize];
                             let cn = unsafe (*a).at_const(cid);
-                            if cn.kind == NodeKind::NODE_CONST && !(sm != self.ast.module && !cn.as_data.const_def.is_public) {
+                            if cn.kind == NodeKind::NODE_CONST && !(sm != self.cur_module() && !cn.as_data.const_def.is_public) {
                                 if spans_eq2(
                                     self.source,
                                     name,
@@ -3157,13 +3162,13 @@ extend TypeChecker {
         let mut n: i32 = 0;
         let pa = self.mod_ast(pmod);
         self.add_bound_ifaces_full(pmod, unsafe (*pa).at_const(pdecl).as_data.generic_param.bounds, out, &mut n, cap);
-        if pmod == self.ast.module && self.current_fn != NODE_NONE {
+        if pmod == self.cur_module() && self.current_fn != NODE_NONE {
             let wc = unsafe (*self.cur_ast()).at_const(self.current_fn).as_data.function.where_clause;
             for w in 0..wc.len {
                 let wid = unsafe (*self.cur_ast()).list(wc)[w as usize];
                 let wp = unsafe (*self.cur_ast()).at_const(wid).as_data.where_predicate;
                 if unsafe (*self.cur_ast()).resolution(wp.ty) == pdecl {
-                    self.add_bound_ifaces_full(self.ast.module, wp.bounds, out, &mut n, cap);
+                    self.add_bound_ifaces_full(self.cur_module(), wp.bounds, out, &mut n, cap);
                 }
             }
         }
@@ -3389,6 +3394,15 @@ extend TypeChecker {
     const fn is_send_iface(self: &Self, tr: DefId) bool {
         return self.iface_named(tr, "Send");
     }
+    // True while checking a method of the prelude `UnsafeCell` -- the one place `&T as *mut T` is allowed
+    // (its `get` is the sanctioned interior-mutability hole).
+    fn in_unsafe_cell(self: &Self) bool {
+        if self.package == null || self.current_self == NODE_NONE {
+            return false;
+        }
+        let hit = unsafe (*self.package).prelude_lookup("UnsafeCell", true);
+        return hit.node != NODE_NONE && unsafe (*self.cur_ast()).module == hit.mid && self.current_self == hit.node;
+    }
     const fn is_sync_iface(self: &Self, tr: DefId) bool {
         return self.iface_named(tr, "Sync");
     }
@@ -3441,17 +3455,10 @@ extend TypeChecker {
         // Aggregate: an explicit conformance is an unsafe override; otherwise every field must qualify.
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(ty),
-            &mut om,
-            &mut od,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
         let ci = self.marker_iface(sync);
@@ -3550,7 +3557,7 @@ extend TypeChecker {
     fn tc_lint_missing_free(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let sty = unsafe (*a).intern_type(
-            Ty { kind: TypeKind::TYPE_STRUCT, module: self.ast.module, as_data: TyAs { decl: id } },
+            Ty { kind: TypeKind::TYPE_STRUCT, module: self.cur_module(), as_data: TyAs { decl: id } },
         );
         if self.tc_type_is_free(sty) {
             return;
@@ -3716,17 +3723,10 @@ extend TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(ty),
-            &mut om,
-            &mut od,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
         // TC-6: the (first) Free extend of a (module, decl) is a parse-time fact -- memoize it and
@@ -3814,17 +3814,10 @@ extend TypeChecker {
         }
         let mut tm: ModuleId = 0;
         let mut td = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(target),
-            &mut tm,
-            &mut td,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(target), &mut tm, &mut td, &mut gp, &mut ga, &mut gn) {
             return true;
         }
         for g in 0..gens.len {
@@ -3898,31 +3891,17 @@ extend TypeChecker {
         }
         let mut m: ModuleId = 0;
         let mut decl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(want),
-            &mut m,
-            &mut decl,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(want), &mut m, &mut decl, &mut gp, &mut ga, &mut gn) {
             return DefId { module: 0, node: NODE_NONE };
         }
         if is_try {
             if gn < 1 {
                 return DefId { module: 0, node: NODE_NONE };
             }
-            if !self.aggregate_of(
-                self.strip(ga[0]),
-                &mut m,
-                &mut decl,
-                (&gp[0]) as *mut DefId,
-                (&ga[0]) as *mut TypeId,
-                &mut gn,
-            ) {
+            if !self.aggregate_of(self.strip(ga[0]), &mut m, &mut decl, &mut gp, &mut ga, &mut gn) {
                 return DefId { module: 0, node: NODE_NONE };
             }
         }
@@ -4008,10 +3987,10 @@ extend TypeChecker {
         }
         let mut tmod: ModuleId = 0;
         let mut tdecl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(src, &mut tmod, &mut tdecl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+        if !self.aggregate_of(src, &mut tmod, &mut tdecl, &mut gp, &mut ga, &mut gn) {
             if sy.kind == TypeKind::TYPE_BUILTIN && self.package != null && unsafe (*self.package).builtin_decl(
                 sy.as_data.builtin,
             ) != NODE_NONE {
@@ -4135,7 +4114,7 @@ extend TypeChecker {
         if !self.compatible_in(expected, opn, true) {
             return;
         }
-        let key = self.ast.module as u64 << 32 | nid as u64;
+        let key = self.cur_module() as u64 << 32 | nid as u64;
         for i in 0..self.len_reported.len() {
             if self.len_reported[i] == key {
                 return;
@@ -4540,7 +4519,7 @@ extend TypeChecker {
         let nk = unsafe (*a).at_const(node).kind;
         if nk == NodeKind::NODE_IDENTIFIER {
             let dd = unsafe (*a).resolution_def(node);
-            if dd.node != NODE_NONE && dd.module != self.ast.module {
+            if dd.node != NODE_NONE && dd.module != self.cur_module() {
                 let fdn = unsafe (*self.mod_ast(dd.module)).at_const(dd.node);
                 return fdn.kind == NodeKind::NODE_CONST && fdn.as_data.const_def.is_static_mut;
             }
@@ -4627,10 +4606,10 @@ extend TypeChecker {
             if nk == NodeKind::NODE_INDEX && (ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE) {
                 let mut om: ModuleId = 0;
                 let mut od = NODE_NONE;
-                let gp = Defs8 {};
-                let ga = Tys8 {};
+                let mut gp = Defs8 {};
+                let mut ga = Tys8 {};
                 let mut gn: i32 = 0;
-                if !self.aggregate_of(oty, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+                if !self.aggregate_of(oty, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
                     return false;
                 }
                 let im = self.find_method_cstr(om, od, "index_mut");
@@ -4771,17 +4750,10 @@ extend TypeChecker {
     fn tc_type_is_union(self: &Self, ty: TypeId) bool {
         let mut m: ModuleId = 0;
         let mut d = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if ty == TYPE_NONE || !self.aggregate_of(
-            ty,
-            &mut m,
-            &mut d,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if ty == TYPE_NONE || !self.aggregate_of(ty, &mut m, &mut d, &mut gp, &mut ga, &mut gn) {
             return false;
         }
         let dn = unsafe (*self.mod_ast(m)).at_const(d);
@@ -4880,7 +4852,7 @@ extend TypeChecker {
             return NODE_NONE;
         }
         let d = unsafe (*a).resolution_def(place);
-        if d.node == NODE_NONE || d.module != self.ast.module {
+        if d.node == NODE_NONE || d.module != self.cur_module() {
             return NODE_NONE;
         }
         let dk = unsafe (*a).at_const(d.node).kind;
@@ -4971,7 +4943,7 @@ extend TypeChecker {
             }
             if (pn.kind == NodeKind::NODE_UNARY || is_ref) && unsafe (*a).at_const(base).kind == NodeKind::NODE_IDENTIFIER {
                 let d = unsafe (*a).resolution_def(base);
-                if d.node != NODE_NONE && d.module == self.ast.module {
+                if d.node != NODE_NONE && d.module == self.cur_module() {
                     return d.node;
                 }
                 return NODE_NONE;
@@ -4998,7 +4970,7 @@ extend TypeChecker {
         let mut nid: NodeId = 0;
         while nid as usize < n {
             let rd = unsafe (*self.cur_ast()).resolution_def(nid);
-            if rd.node != NODE_NONE && rd.module == self.ast.module && rd.node as usize < n {
+            if rd.node != NODE_NONE && rd.module == self.cur_module() && rd.node as usize < n {
                 self.last_use.set(rd.node as usize, nid);
             }
             nid = nid + 1;
@@ -5157,7 +5129,7 @@ extend TypeChecker {
         if aliased == NODE_NONE {
             return TYPE_NONE;
         }
-        return self.lower_type_in(self.ast.module, aliased);
+        return self.lower_type_in(self.cur_module(), aliased);
     }
 
     // The interface-side type for a conformance comparison: a `Self::Assoc` projects through the impl;
@@ -5204,7 +5176,7 @@ extend TypeChecker {
                 suba,
                 nsub,
             );
-            let ht = self.lower_type_in(self.ast.module, unsafe (*self.cur_ast()).at_const(hp).as_data.parameter.ty);
+            let ht = self.lower_type_in(self.cur_module(), unsafe (*self.cur_ast()).at_const(hp).as_data.parameter.ty);
             if rt != ht && (i != 0 || !self.receiver_type_eq(rt, ht)) {
                 return false;
             }
@@ -5231,7 +5203,7 @@ extend TypeChecker {
                 let hr = unsafe (*self.cur_ast()).list(hf.returns)[0];
                 let hn = unsafe (*self.cur_ast()).at_const(hr);
                 ht = self.lower_type_in(
-                    self.ast.module,
+                    self.cur_module(),
                     if_node(hn.kind == NodeKind::NODE_PARAMETER, hn.as_data.parameter.ty, hr),
                 );
             }
@@ -5251,7 +5223,7 @@ extend TypeChecker {
                 nsub,
             );
             let ht = self.lower_type_in(
-                self.ast.module,
+                self.cur_module(),
                 if_node(hn.kind == NodeKind::NODE_PARAMETER, hn.as_data.parameter.ty, hr),
             );
             if !self.ret_eq(rt, ht) {
@@ -5438,17 +5410,10 @@ extend TypeChecker {
         }
         let mut rmod: ModuleId = 0;
         let mut rdecl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut sn: i32 = 0;
-        let agok = self.aggregate_of(
-            self.strip(recv),
-            &mut rmod,
-            &mut rdecl,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut sn,
-        );
+        let agok = self.aggregate_of(self.strip(recv), &mut rmod, &mut rdecl, &mut gp, &mut ga, &mut sn);
         if agok && sn > 0 {
             let extnode = self.enclosing_extend(md.module, md.node);
             if extnode != NODE_NONE {
@@ -5689,7 +5654,7 @@ extend TypeChecker {
             let onk = unsafe (*a).at_const(opw).kind;
             if mut2 && onk == NodeKind::NODE_IDENTIFIER {
                 let od = unsafe (*a).resolution_def(opw);
-                if od.module == self.ast.module && od.node != NODE_NONE {}
+                if od.module == self.cur_module() && od.node != NODE_NONE {}
             }
             if !self.is_place(opw) && opnd != TYPE_NONE && self.type_at(opnd).kind != TypeKind::TYPE_BUILTIN && (onk == NodeKind::NODE_CALL || onk == NodeKind::NODE_IF || onk == NodeKind::NODE_MATCH || onk == NodeKind::NODE_BLOCK || onk == NodeKind::NODE_BINARY || onk == NodeKind::NODE_ASSIGNMENT || onk == NodeKind::NODE_CAST) {
                 let osp = unsafe (*a).at_const(opw).span;
@@ -5921,11 +5886,11 @@ extend TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
         unsafe *out = ls;
-        if self.aggregate_of(ls, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+        if self.aggregate_of(ls, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             let md = self.find_method_cstr(om, od, m);
             if md.node == NODE_NONE {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
@@ -6051,10 +6016,10 @@ extend TypeChecker {
         if ls != TYPE_NONE && (self.type_at(ls).kind == TypeKind::TYPE_STRUCT || self.type_at(ls).kind == TypeKind::TYPE_INSTANCE) {
             let mut om: ModuleId = 0;
             let mut od = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut gn: i32 = 0;
-            if self.aggregate_of(ls, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+            if self.aggregate_of(ls, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
                 let mut mm = "eq";
                 if ord {
                     mm = "cmp";
@@ -6146,17 +6111,10 @@ extend TypeChecker {
         let sp = unsafe (*a).at_const(id).span;
         let mut amod: ModuleId = 0;
         let mut adecl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        let inst = self.aggregate_of(
-            enum_ty,
-            &mut amod,
-            &mut adecl,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        );
+        let inst = self.aggregate_of(enum_ty, &mut amod, &mut adecl, &mut gp, &mut ga, &mut gn);
         if args.len != payload.len {
             let mut s2 = "s".ptr() as *const char;
             if payload.len == 1 {
@@ -6196,7 +6154,7 @@ extend TypeChecker {
             return false;
         }
         let ob = unsafe (*a).resolution_def(cn.as_data.member.object);
-        return ob.node != NODE_NONE && (ob.module == self.ast.module || self.package != null && ob.module as usize < self.pkg_count()) && unsafe (*self.mod_ast(
+        return ob.node != NODE_NONE && (ob.module == self.cur_module() || self.package != null && ob.module as usize < self.pkg_count()) && unsafe (*self.mod_ast(
             ob.module,
         )).at_const(ob.node).kind == NodeKind::NODE_INTERFACE;
     }
@@ -6244,15 +6202,15 @@ extend TypeChecker {
             }
             let mut rm: ModuleId = 0;
             let mut rd = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut gn: i32 = 0;
             let agok = extnode != NODE_NONE && self.aggregate_of(
                 self.strip(unsafe (*self.cur_ast()).type_of(cnn.as_data.member.object)),
                 &mut rm,
                 &mut rd,
-                (&gp[0]) as *mut DefId,
-                (&ga[0]) as *mut TypeId,
+                &mut gp,
+                &mut ga,
                 &mut gn,
             );
             if agok && gn > 0 {
@@ -6281,10 +6239,10 @@ extend TypeChecker {
     fn iter_elem_type(self: &mut Self, it: TypeId) TypeId {
         let mut im: ModuleId = 0;
         let mut idl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(it, &mut im, &mut idl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+        if !self.aggregate_of(it, &mut im, &mut idl, &mut gp, &mut ga, &mut gn) {
             return TYPE_NONE;
         }
         let nx = self.find_method_cstr(im, idl, "next");
@@ -6388,10 +6346,10 @@ extend TypeChecker {
         if !comparable && (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE || y.kind == TypeKind::TYPE_ENUM) {
             let mut om: ModuleId = 0;
             let mut od = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut gn: i32 = 0;
-            if self.aggregate_of(base, &mut om, &mut od, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+            if self.aggregate_of(base, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
                 comparable = self.find_method_cstr(om, od, "eq").node != NODE_NONE;
                 if !comparable && self.is_plain_enum(base) {
                     comparable = true;
@@ -6448,15 +6406,15 @@ extend TypeChecker {
                         if bs[b as usize].n != 0 {
                             let mut tm: ModuleId = 0;
                             let mut td = NODE_NONE;
-                            let sp = Defs8 {};
-                            let sa = Tys8 {};
+                            let mut sp = Defs8 {};
+                            let mut sa = Tys8 {};
                             let mut sn: i32 = 0;
                             if self.aggregate_of(
                                 self.strip(unsafe bound[i as usize]),
                                 &mut tm,
                                 &mut td,
-                                (&sp[0]) as *mut DefId,
-                                (&sa[0]) as *mut TypeId,
+                                &mut sp,
+                                &mut sa,
                                 &mut sn,
                             ) {
                                 let mut imod: ModuleId = 0;
@@ -6548,7 +6506,7 @@ extend TypeChecker {
 
     fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, owner: NodeId, at: tok::Span) {
         let f = unsafe (*self.mod_ast(m)).at_const(field);
-        let inside_owner = (self.package == null || m == self.ast.module) && owner == self.current_self;
+        let inside_owner = (self.package == null || m == self.cur_module()) && owner == self.current_self;
         if f.kind == NodeKind::NODE_FIELD && !f.as_data.field.is_public && !inside_owner {
             self.errors.emit(
                 at.start,
@@ -6568,7 +6526,7 @@ extend TypeChecker {
             id,
         ).as_data.call.args.len == 0 {
             let mem = unsafe (*a).at_const(callee_id).as_data.member.member;
-            if span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free") {
+            if span_is(self.mod_src(self.cur_module()), unsafe (*a).at_const(mem).as_data.name.text, "free") {
                 let obj = unsafe (*a).at_const(callee_id).as_data.member.object;
                 let rt = self.check_expr(obj);
                 let fname = self.name_span(mem);
@@ -6578,17 +6536,10 @@ extend TypeChecker {
                     if rty.kind == TypeKind::TYPE_STRUCT || rty.kind == TypeKind::TYPE_INSTANCE {
                         let mut om: ModuleId = 0;
                         let mut od = NODE_NONE;
-                        let gp = Defs8 {};
-                        let ga = Tys8 {};
+                        let mut gp = Defs8 {};
+                        let mut ga = Tys8 {};
                         let mut gn: i32 = 0;
-                        if self.aggregate_of(
-                            self.strip(rt),
-                            &mut om,
-                            &mut od,
-                            (&gp[0]) as *mut DefId,
-                            (&ga[0]) as *mut TypeId,
-                            &mut gn,
-                        ) {
+                        if self.aggregate_of(self.strip(rt), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
                             resolvable = self.find_method_cstr(om, od, "free").node != NODE_NONE;
                         }
                     } else if rty.kind == TypeKind::TYPE_GENERIC {
@@ -6614,7 +6565,7 @@ extend TypeChecker {
             self.expected = want;
             callee = self.check_member(callee_id, true);
             let fd = unsafe (*a).resolution_def(unsafe (*a).at_const(callee_id).as_data.member.member);
-            if fd.node != NODE_NONE && (fd.module == self.ast.module || self.package != null && fd.module as usize < self.pkg_count()) && unsafe (*self.mod_ast(
+            if fd.node != NODE_NONE && (fd.module == self.cur_module() || self.package != null && fd.module as usize < self.pkg_count()) && unsafe (*self.mod_ast(
                 fd.module,
             )).at_const(fd.node).kind == NodeKind::NODE_FIELD {
                 unsafe (*self.cur_ast()).set_type(callee_id, callee);
@@ -6624,7 +6575,7 @@ extend TypeChecker {
         }
         if pck == NodeKind::NODE_MEMBER {
             let md = unsafe (*a).resolution_def(unsafe (*a).at_const(callee_id).as_data.member.member);
-            let addressable = md.module == self.ast.module || self.package != null && md.module as usize < self.pkg_count();
+            let addressable = md.module == self.cur_module() || self.package != null && md.module as usize < self.pkg_count();
             if md.node != NODE_NONE && addressable && unsafe (*self.mod_ast(md.module)).at_const(md.node).kind == NodeKind::NODE_FUNCTION {
                 self.tc_check_test_ref(md, unsafe (*a).at_const(id).span);
             }
@@ -6869,18 +6820,11 @@ extend TypeChecker {
             }
             let mut rmod: ModuleId = 0;
             let mut rdecl = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut sn: i32 = 0;
             let mdfn = md.node != NODE_NONE && unsafe (*self.mod_ast(md.module)).at_const(md.node).kind == NodeKind::NODE_FUNCTION;
-            let agok = mdfn && self.aggregate_of(
-                recvbase,
-                &mut rmod,
-                &mut rdecl,
-                (&gp[0]) as *mut DefId,
-                (&ga[0]) as *mut TypeId,
-                &mut sn,
-            );
+            let agok = mdfn && self.aggregate_of(recvbase, &mut rmod, &mut rdecl, &mut gp, &mut ga, &mut sn);
             if agok && sn > 0 {
                 let extnode = self.enclosing_extend(md.module, md.node);
                 if extnode != NODE_NONE {
@@ -6982,20 +6926,13 @@ extend TypeChecker {
             if ob.node != NODE_NONE && md.node != NODE_NONE && ob_kind == NodeKind::NODE_INTERFACE {
                 let mut em: ModuleId = 0;
                 let mut ed = NODE_NONE;
-                let egp2 = Defs8 {};
-                let ega2 = Tys8 {};
+                let mut egp2 = Defs8 {};
+                let mut ega2 = Tys8 {};
                 let mut egn2: i32 = 0;
                 let mut agg = false;
                 if want != TYPE_NONE {
                     let sw = self.strip(want);
-                    agg = self.aggregate_of(
-                        sw,
-                        &mut em,
-                        &mut ed,
-                        (&egp2[0]) as *mut DefId,
-                        (&ega2[0]) as *mut TypeId,
-                        &mut egn2,
-                    );
+                    agg = self.aggregate_of(sw, &mut em, &mut ed, &mut egp2, &mut ega2, &mut egn2);
                 }
                 if agg && egn2 > 0 {
                     let ext = self.enclosing_extend(md.module, md.node);
@@ -7283,7 +7220,7 @@ extend TypeChecker {
                     }
                 } else {
                     let consuming_free = rvt.kind != TypeKind::TYPE_REFERENCE && rvt.kind != TypeKind::TYPE_POINTER && span_is(
-                        self.mod_src(self.ast.module),
+                        self.mod_src(self.cur_module()),
                         unsafe (*a).at_const(unsafe (*a).at_const(callee_id).as_data.member.member).as_data.name.text,
                         "free",
                     );
@@ -7474,10 +7411,10 @@ extend TypeChecker {
         let base = self.strip(obj);
         let mut bmod: ModuleId = 0;
         let mut bdecl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if self.aggregate_of(base, &mut bmod, &mut bdecl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+        if self.aggregate_of(base, &mut bmod, &mut bdecl, &mut gp, &mut ga, &mut gn) {
             let mut mhit = DefId { module: 0, node: NODE_NONE };
             let mut fhit = NODE_NONE;
             let mut digits = name.end > name.start && name.end - name.start <= 2;
@@ -7632,17 +7569,10 @@ extend TypeChecker {
                 }
                 let mut cm: ModuleId = 0;
                 let mut cd = NODE_NONE;
-                let cgp = Defs8 {};
-                let cga = Tys8 {};
+                let mut cgp = Defs8 {};
+                let mut cga = Tys8 {};
                 let mut cgn: i32 = 0;
-                if !self.aggregate_of(
-                    cur,
-                    &mut cm,
-                    &mut cd,
-                    (&cgp[0]) as *mut DefId,
-                    (&cga[0]) as *mut TypeId,
-                    &mut cgn,
-                ) {
+                if !self.aggregate_of(cur, &mut cm, &mut cd, &mut cgp, &mut cga, &mut cgn) {
                     break;
                 }
                 let dm = self.find_method_cstr(cm, cd, "deref");
@@ -7682,19 +7612,12 @@ extend TypeChecker {
                 nseen = nseen + 1;
                 let mut tm: ModuleId = 0;
                 let mut td = NODE_NONE;
-                let tgp = Defs8 {};
-                let tga = Tys8 {};
+                let mut tgp = Defs8 {};
+                let mut tga = Tys8 {};
                 let mut tgn: i32 = 0;
                 let mut mhit = DefId { module: 0, node: NODE_NONE };
                 let tty = *self.type_at(target);
-                if self.aggregate_of(
-                    target,
-                    &mut tm,
-                    &mut td,
-                    (&tgp[0]) as *mut DefId,
-                    (&tga[0]) as *mut TypeId,
-                    &mut tgn,
-                ) {
+                if self.aggregate_of(target, &mut tm, &mut td, &mut tgp, &mut tga, &mut tgn) {
                     mhit = self.find_method(tm, td, name);
                     if mhit.node == NODE_NONE {
                         mhit = self.find_default_method(tm, td, name);
@@ -7722,15 +7645,15 @@ extend TypeChecker {
                         for hi in 0..du.n {
                             let mut hm: ModuleId = 0;
                             let mut hd = NODE_NONE;
-                            let hgp = Defs8 {};
-                            let hga = Tys8 {};
+                            let mut hgp = Defs8 {};
+                            let mut hga = Tys8 {};
                             let mut hgn: i32 = 0;
                             self.aggregate_of(
                                 unsafe du.recv[hi as usize],
                                 &mut hm,
                                 &mut hd,
-                                (&hgp[0]) as *mut DefId,
-                                (&hga[0]) as *mut TypeId,
+                                &mut hgp,
+                                &mut hga,
                                 &mut hgn,
                             );
                             let dmm = self.find_method_cstr(hm, hd, "deref_mut");
@@ -7885,17 +7808,10 @@ extend TypeChecker {
         if bdecl != NODE_NONE && bd_kind == NodeKind::NODE_INTERFACE && expected != TYPE_NONE {
             let mut emod: ModuleId = 0;
             let mut edecl = NODE_NONE;
-            let egp = Defs8 {};
-            let ega = Tys8 {};
+            let mut egp = Defs8 {};
+            let mut ega = Tys8 {};
             let mut egn: i32 = 0;
-            if self.aggregate_of(
-                self.strip(expected),
-                &mut emod,
-                &mut edecl,
-                (&egp[0]) as *mut DefId,
-                (&ega[0]) as *mut TypeId,
-                &mut egn,
-            ) {
+            if self.aggregate_of(self.strip(expected), &mut emod, &mut edecl, &mut egp, &mut ega, &mut egn) {
                 let m = self.find_method(emod, edecl, mname);
                 if m.node != NODE_NONE {
                     unsafe (*self.cur_ast()).set_resolution_def(mem, m);
@@ -7951,10 +7867,10 @@ extend TypeChecker {
         let sty = self.type_of_type_node(stn);
         let mut smod: ModuleId = 0;
         let mut decl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(sty, &mut smod, &mut decl, (&gp[0]) as *mut DefId, (&ga[0]) as *mut TypeId, &mut gn) {
+        if !self.aggregate_of(sty, &mut smod, &mut decl, &mut gp, &mut ga, &mut gn) {
             decl = NODE_NONE;
         }
         let mut variant = NODE_NONE;
@@ -8215,17 +8131,10 @@ extend TypeChecker {
         let base = self.strip(scrut);
         let mut emod: ModuleId = 0;
         let mut edecl = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        let agok = self.aggregate_of(
-            base,
-            &mut emod,
-            &mut edecl,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        );
+        let agok = self.aggregate_of(base, &mut emod, &mut edecl, &mut gp, &mut ga, &mut gn);
         let is_enum = agok && unsafe (*self.mod_ast(emod)).at_const(edecl).kind == NodeKind::NODE_ENUM;
         let mut variants = NodeList { start: 0, len: 0 };
         if is_enum {
@@ -8474,7 +8383,7 @@ extend TypeChecker {
             }
         }
         return unsafe (*self.cur_ast()).intern_type(
-            Ty { kind: TypeKind::TYPE_FUNCTION, module: self.ast.module, as_data: TyAs { decl: id } },
+            Ty { kind: TypeKind::TYPE_FUNCTION, module: self.cur_module(), as_data: TyAs { decl: id } },
         );
     }
 
@@ -8512,18 +8421,11 @@ extend TypeChecker {
             } else if ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE {
                 let mut om: ModuleId = 0;
                 let mut od = NODE_NONE;
-                let gp = Defs8 {};
-                let ga = Tys8 {};
+                let mut gp = Defs8 {};
+                let mut ga = Tys8 {};
                 let mut gn: i32 = 0;
                 let sp = unsafe (*a).at_const(obj_n).span;
-                if self.aggregate_of(
-                    self.strip(obj),
-                    &mut om,
-                    &mut od,
-                    (&gp[0]) as *mut DefId,
-                    (&ga[0]) as *mut TypeId,
-                    &mut gn,
-                ) {
+                if self.aggregate_of(self.strip(obj), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
                     let md = self.find_method_cstr(om, od, "index_range");
                     if md.node == NODE_NONE {
                         let mut ty = Buf96 {};
@@ -8652,18 +8554,11 @@ extend TypeChecker {
                 overloaded = true;
                 let mut om: ModuleId = 0;
                 let mut od = NODE_NONE;
-                let gp = Defs8 {};
-                let ga = Tys8 {};
+                let mut gp = Defs8 {};
+                let mut ga = Tys8 {};
                 let mut gn: i32 = 0;
                 let sp = unsafe (*a).at_const(obj_n).span;
-                if self.aggregate_of(
-                    self.strip(obj),
-                    &mut om,
-                    &mut od,
-                    (&gp[0]) as *mut DefId,
-                    (&ga[0]) as *mut TypeId,
-                    &mut gn,
-                ) {
+                if self.aggregate_of(self.strip(obj), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
                     let md = self.find_method_cstr(om, od, "index");
                     if md.node == NODE_NONE {
                         let mut ty = Buf96 {};
@@ -8862,6 +8757,23 @@ extend TypeChecker {
                         );
                     }
                 }
+                // Forming a MUTABLE raw pointer from an IMMUTABLE reference launders the shared-borrow
+                // guarantee into mutation (interior mutability). Rejected everywhere except UnsafeCell::get,
+                // the one sanctioned hole -- use `&mut`, or wrap the value in an `UnsafeCell`.
+                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_REFERENCE && self.type_at(
+                    src,
+                ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
+                    dst,
+                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() {
+                    let sp = unsafe (*a).at_const(id).span;
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "cannot cast an immutable reference to a '*mut' pointer; use '&mut', or 'UnsafeCell' for interior mutability",
+                        ),
+                    );
+                }
                 if src != TYPE_NONE && dst != TYPE_NONE && src != dst {
                     let sk = self.type_at(src).kind;
                     let dk = self.type_at(dst).kind;
@@ -8891,7 +8803,7 @@ extend TypeChecker {
                 let v = unsafe (*a).at_const(id).as_data.single.value;
                 let d = unsafe (*a).resolution_def(v);
                 let mut dk = NodeKind::NODE_NONE_KIND;
-                if d.node != NODE_NONE && d.module == self.ast.module {
+                if d.node != NODE_NONE && d.module == self.cur_module() {
                     dk = unsafe (*a).at_const(d.node).kind;
                 }
                 if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_CONST {
@@ -8914,7 +8826,7 @@ extend TypeChecker {
                 let vo = unsafe (*a).at_const(id).as_data.va_op;
                 if vo.op == VA_START && unsafe (*a).at_const(vo.ap).kind == NodeKind::NODE_IDENTIFIER {
                     let d = unsafe (*a).resolution_def(vo.ap);
-                    if d.module == self.ast.module && d.node != NODE_NONE {}
+                    if d.module == self.cur_module() && d.node != NODE_NONE {}
                 }
                 let apt = self.check_expr(vo.ap);
                 if apt != TYPE_NONE {
@@ -8947,7 +8859,7 @@ extend TypeChecker {
                 for i in 0..types.len {
                     let tid = unsafe (*a).list(types)[i as usize];
                     if unsafe (*a).at_const(tid).kind == NodeKind::NODE_LITERAL {
-                        unsafe (*self.cur_ast()).set_type(tid, self.tc_const_arg(self.ast.module, tid));
+                        unsafe (*self.cur_ast()).set_type(tid, self.tc_const_arg(self.cur_module(), tid));
                     } else {
                         self.resolve_type(tid);
                     }
@@ -9180,7 +9092,7 @@ extend TypeChecker {
                 if ceptr == null {
                     return -1;
                 }
-                let lv = unsafe (*ceptr).eval(self.ast.module, el.as_data.field_initializer.name);
+                let lv = unsafe (*ceptr).eval(self.cur_module(), el.as_data.field_initializer.name);
                 if lv.kind != ce::CONST_INT || lv.as_data.i < 0 {
                     return -1;
                 }
@@ -9224,7 +9136,7 @@ extend TypeChecker {
                         );
                     } else {
                         let ceptr = self.ceval();
-                        if ceptr != null && unsafe (*ceptr).eval(self.ast.module, el.as_data.field_initializer.name).kind == ce::CONST_NONE {
+                        if ceptr != null && unsafe (*ceptr).eval(self.cur_module(), el.as_data.field_initializer.name).kind == ce::CONST_NONE {
                             let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span;
                             if unsafe (*ceptr).ce_trap_get().len() != 0 {
                                 self.errors.emit(
@@ -9438,7 +9350,7 @@ extend TypeChecker {
                 let cn = unsafe (*a).at_const(calleeId);
                 if cn.kind == NodeKind::NODE_MEMBER {
                     let md = unsafe (*a).resolution_def(cn.as_data.member.member);
-                    if md.node != NODE_NONE && md.module == self.ast.module && unsafe (*self.mod_ast(md.module)).at_const(
+                    if md.node != NODE_NONE && md.module == self.cur_module() && unsafe (*self.mod_ast(md.module)).at_const(
                         md.node,
                     ).kind == NodeKind::NODE_FUNCTION {
                         returns = unsafe (*self.mod_ast(md.module)).at_const(md.node).as_data.function.returns;
@@ -9629,7 +9541,7 @@ extend TypeChecker {
         if ceptr == null {
             return;
         }
-        let m = self.ast.module;
+        let m = self.cur_module();
         let v = unsafe (*ceptr).eval(m, value);
         if v.kind != ce::CONST_NONE {
             return;
@@ -9673,7 +9585,7 @@ extend TypeChecker {
         if ceptr == null {
             return;
         }
-        let v = unsafe (*ceptr).eval(self.ast.module, left);
+        let v = unsafe (*ceptr).eval(self.cur_module(), left);
         if v.kind == ce::CONST_BOOL && v.as_data.i == 0 {
             self.errors.emit(sp.start, sp.end - sp.start, format("static assertion failed"));
         } else if v.kind == ce::CONST_NONE {
@@ -9685,7 +9597,7 @@ extend TypeChecker {
                     format("static assertion cannot be evaluated: {}", unsafe (*ceptr).ce_trap_detail()),
                 );
             } else {
-                unsafe (*ceptr).defer_assert(self.ast.module, left);
+                unsafe (*ceptr).defer_assert(self.cur_module(), left);
             }
         }
     }
@@ -9987,17 +9899,10 @@ extend TypeChecker {
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
             let mut bmod: ModuleId = 0;
             let mut decl = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut gn: i32 = 0;
-            let agok = self.aggregate_of(
-                self.strip(expected),
-                &mut bmod,
-                &mut decl,
-                (&gp[0]) as *mut DefId,
-                (&ga[0]) as *mut TypeId,
-                &mut gn,
-            );
+            let agok = self.aggregate_of(self.strip(expected), &mut bmod, &mut decl, &mut gp, &mut ga, &mut gn);
             if agok && unsafe (*self.mod_ast(bmod)).at_const(decl).kind == NodeKind::NODE_ENUM {
                 let v = self.find_member(bmod, decl, self.name_span(nameId));
                 if v != NODE_NONE && unsafe (*self.mod_ast(bmod)).at_const(v).kind == NodeKind::NODE_VARIANT && unsafe (*self.mod_ast(
@@ -10017,17 +9922,10 @@ extend TypeChecker {
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
             let mut bmod: ModuleId = 0;
             let mut decl = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut gn: i32 = 0;
-            let agg = self.aggregate_of(
-                base,
-                &mut bmod,
-                &mut decl,
-                (&gp[0]) as *mut DefId,
-                (&ga[0]) as *mut TypeId,
-                &mut gn,
-            );
+            let agg = self.aggregate_of(base, &mut bmod, &mut decl, &mut gp, &mut ga, &mut gn);
             let mut variant = NODE_NONE;
             if agg && nameId != NODE_NONE && unsafe (*self.mod_ast(bmod)).at_const(decl).kind == NodeKind::NODE_ENUM {
                 let v = self.find_member(bmod, decl, self.name_span(nameId));
@@ -10093,17 +9991,10 @@ extend TypeChecker {
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
             let mut bmod: ModuleId = 0;
             let mut decl = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut gn: i32 = 0;
-            let agg = self.aggregate_of(
-                base,
-                &mut bmod,
-                &mut decl,
-                (&gp[0]) as *mut DefId,
-                (&ga[0]) as *mut TypeId,
-                &mut gn,
-            );
+            let agg = self.aggregate_of(base, &mut bmod, &mut decl, &mut gp, &mut ga, &mut gn);
             let mut field_type = TYPE_NONE;
             if agg && nameId != NODE_NONE {
                 let fname = self.name_span(nameId);
@@ -10132,19 +10023,12 @@ extend TypeChecker {
         } else if nk == NodeKind::NODE_PATTERN_TUPLE {
             let base = self.strip(expected);
             let nameId = unsafe (*a).at_const(id).as_data.pattern.name;
-            let mut bmod: ModuleId = self.ast.module;
+            let mut bmod: ModuleId = self.cur_module();
             let mut decl0 = NODE_NONE;
-            let gp = Defs8 {};
-            let ga = Tys8 {};
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
             let mut gn: i32 = 0;
-            let agok = self.aggregate_of(
-                base,
-                &mut bmod,
-                &mut decl0,
-                (&gp[0]) as *mut DefId,
-                (&ga[0]) as *mut TypeId,
-                &mut gn,
-            );
+            let agok = self.aggregate_of(base, &mut bmod, &mut decl0, &mut gp, &mut ga, &mut gn);
             let agg = agok && unsafe (*self.mod_ast(bmod)).at_const(decl0).kind == NodeKind::NODE_ENUM;
             let decl = if_node(agg, decl0, NODE_NONE);
             let mut variant = NODE_NONE;
@@ -10307,10 +10191,10 @@ extend TypeChecker {
                 }
                 if fnd.is_const && fnd.body != NODE_NONE && !fnd.is_extern {
                     let ceptr = self.ceval();
-                    if ceptr != null && unsafe (*ceptr).ce_fn_eligible(self.ast.module, id) == ce::FX_NO {
+                    if ceptr != null && unsafe (*ceptr).ce_fn_eligible(self.cur_module(), id) == ce::FX_NO {
                         let sp = self.name_span(fnd.name);
                         let mut why: str = "cannot be evaluated at compile time";
-                        let r = unsafe (*ceptr).fx_no_reason(self.ast.module, id);
+                        let r = unsafe (*ceptr).fx_no_reason(self.cur_module(), id);
                         if r != null {
                             why = unsafe (*r).why;
                         }
@@ -10401,7 +10285,7 @@ extend TypeChecker {
                         }
                     }
                 }
-                if agg.generics.len == 0 && self.tc_embeds_by_value(self.ast.module, id, self.ast.module, id, 0) {
+                if agg.generics.len == 0 && self.tc_embeds_by_value(self.cur_module(), id, self.cur_module(), id, 0) {
                     let sp = unsafe (*self.cur_ast()).at_const(id).span;
                     self.errors.emit(
                         sp.start,
@@ -10618,7 +10502,7 @@ extend TypeChecker {
         }
         for i in 0..unsafe (*a).resolutions_len() {
             let d = unsafe (*a).resolution_def(i as NodeId);
-            if d.node != NODE_NONE && d.module == self.ast.module && d.node as usize < n && i != d.node as usize {
+            if d.node != NODE_NONE && d.module == self.cur_module() && d.node as usize < n && i != d.node as usize {
                 used.set(d.node as usize, true);
             }
         }
@@ -10671,8 +10555,8 @@ extend TypeChecker {
             self.tc_lint_unneeded_mut();
         }
         let mut file: str = "";
-        if self.package != null && self.ast.module as usize < self.pkg_count() {
-            file = unsafe (*self.package).modules[self.ast.module as usize].file.as_str();
+        if self.package != null && self.cur_module() as usize < self.pkg_count() {
+            file = unsafe (*self.package).modules[self.cur_module() as usize].file.as_str();
         }
         self.errors.finalize(self.source, file);
     }
@@ -10714,7 +10598,9 @@ extend TypeChecker as Free {
         self.outlives.free();
         self.carries_memo.free();
         self.errors.free();
-        self.ast.free();
+        // Free the AST through the cell's raw pointer (like Box::free frees its pointee) rather than
+        // invoking UnsafeCell's own drop glue, which a cross-module instance would not have emitted here.
+        self.ast.get().free();
     }
 }
 

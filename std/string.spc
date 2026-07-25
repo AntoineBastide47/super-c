@@ -90,7 +90,7 @@ extend<A: Allocator> String<A> {
         if self.is_large() {
             return self.repr.large.ptr;
         }
-        return (&self.repr.small.data[0]) as *mut u8;
+        return &mut self.repr.small.data[0];
     }
 
     // Set the byte length in whichever representation is active (caller keeps a small length <= 23).
@@ -237,7 +237,7 @@ extend<A: Allocator> String<A> {
         if n <= 23 {
             // move back inline, then free the heap buffer
             if n > 0 {
-                unsafe memcpy((&self.repr.small.data[0]) as *mut void, p, n);
+                unsafe memcpy(&mut self.repr.small.data[0], p, n);
             }
             self.alloc.dealloc(p, cap, 1);
             self.repr.small.len = n as u8; // clears the discriminant (n <= 23)

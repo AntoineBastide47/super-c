@@ -562,7 +562,7 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = &mut t.ast;
+    p.override_ast = t.ast.get();
     t.check();
     if !t.has_errors() {
         t.borrowck();

@@ -253,7 +253,7 @@ fn typecheck_module(
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     p.override_mod = i as ModuleId;
-    p.override_ast = &mut t.ast;
+    p.override_ast = t.ast.get();
     t.check();
     p.override_mod = 0xFFFF;
     p.override_ast = null;
@@ -299,7 +299,7 @@ fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     p.override_mod = i as ModuleId;
-    p.override_ast = &mut t.ast;
+    p.override_ast = t.ast.get();
     t.borrowck();
     p.override_mod = 0xFFFF;
     p.override_ast = null;

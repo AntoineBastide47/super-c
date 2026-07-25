@@ -1006,6 +1006,33 @@ fn main() i32 {
     assert(r.out_has("Send"), "the rejection cites the Send bound");
 }
 
+// Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
+// shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
+// contents are stored non-`const` and mutated soundly -- exercised here by an `UnsafeCell<i32>` in an
+// IMMUTABLE binding whose value is still changed through `get()`.
+@test
+fn interior_mutability_via_unsafe_cell() {
+    let bad = cli::proj_new();
+    bad.mkfile(
+        "main.spc",
+        "fn main() i32 {\n    let x: i32 = 5;\n    let q = (&x) as *mut i32;\n    return unsafe {\n        q[0];\n    };\n}\n",
+    );
+    let rb = bad.compile("main.spc");
+    assert(rb.exit != 0, "casting an immutable &T to *mut T is rejected");
+    assert(rb.out_has("immutable reference"), "the diagnostic names the laundering");
+
+    let ok = cli::proj_new();
+    ok.mkfile(
+        "main.spc",
+        "fn main() i32 {\n    let cell = UnsafeCell::<i32>::new(7);\n    unsafe {\n        cell.get()[0] = 42;\n    }\n    return unsafe {\n        cell.get()[0];\n    } - 42;\n}\n",
+    );
+    let ro = ok.compile("main.spc");
+    assert_eq(ro.exit, 0);
+    let cc = ok.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(ok.run_bin(), 0);
+}
+
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
 @test
 fn prelude_output_is_demand_driven() {

@@ -1326,6 +1326,36 @@ pub fn replace<T>(slot: &mut T, value: T) T {
     return old;
 }
 
+/// The interior-mutability primitive. `get` is the ONE sanctioned place an immutable borrow becomes a
+/// mutable pointer: everywhere else `&T as *mut T` is a hard error, so mutation through a shared `&` must
+/// go through an `UnsafeCell`. Its storage is never emitted `const`, so writing through that pointer is
+/// sound even when the cell lives in an immutable binding. Atomics and the type checker's in-place AST are
+/// built on it. Sharing an `UnsafeCell` across threads without external synchronisation is still a data
+/// race -- it makes interior mutability *expressible*, not automatically safe.
+pub struct UnsafeCell<T> {
+    value: T,
+}
+
+extend<T> UnsafeCell<T> {
+    /// Wrap `value` in a cell.
+    pub const fn new(value: T) UnsafeCell<T> {
+        return UnsafeCell::<T> { value: value };
+    }
+    /// A raw mutable pointer to the contained value, valid while the cell is alive. The caller is
+    /// responsible for avoiding conflicting concurrent access.
+    pub const fn get(self: &UnsafeCell<T>) *mut T {
+        return (&self.value) as *mut T;
+    }
+    /// A shared borrow of the contained value.
+    pub const fn get_ref(self: &UnsafeCell<T>) &T {
+        return &self.value;
+    }
+    /// Consume the cell and return the contained value.
+    pub const fn into_inner(self: UnsafeCell<T>) T {
+        return self.value;
+    }
+}
+
 // The overlapping-storage cell `forget` moves its value into: unions never run destructors, so the
 // payload is deliberately abandoned. Generic so no per-type cells are needed.
 union ForgetCell<T> {

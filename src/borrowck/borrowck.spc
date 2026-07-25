@@ -26,8 +26,8 @@ extend tc::TypeChecker {
             self.bc_item(id);
         }
         let mut file: str = "";
-        if self.package != null && self.ast.module as usize < self.pkg_count() {
-            file = unsafe (*self.package).modules[self.ast.module as usize].file.as_str();
+        if self.package != null && self.cur_module() as usize < self.pkg_count() {
+            file = unsafe (*self.package).modules[self.cur_module() as usize].file.as_str();
         }
         self.errors.finalize(self.source, file);
     }
@@ -66,7 +66,7 @@ extend tc::TypeChecker {
         for i in 0..fnd.params.len {
             let pid = unsafe (*a).list(fnd.params)[i as usize];
             let ptyn = unsafe (*a).at_const(pid).as_data.parameter.ty;
-            let c = self.tc_count_lt_positions(self.ast.module, ptyn, 0);
+            let c = self.tc_count_lt_positions(self.cur_module(), ptyn, 0);
             inputs = inputs + c;
             if i == 0 && c != 0 && span_is(
                 self.source,
@@ -86,7 +86,7 @@ extend tc::TypeChecker {
                 unsafe (*a).at_const(r).as_data.parameter.ty,
                 r,
             );
-            if !self.tc_has_elided_lt(self.ast.module, rt, 0) {
+            if !self.tc_has_elided_lt(self.cur_module(), rt, 0) {
                 continue;
             }
             let sp = unsafe (*a).at_const(rt).span;
@@ -439,7 +439,7 @@ extend tc::TypeChecker {
             return;
         }
         let rd = unsafe (*a).resolution_def(e);
-        if rd.node == NODE_NONE || rd.module != self.ast.module {
+        if rd.node == NODE_NONE || rd.module != self.cur_module() {
             return;
         }
         let n0 = self.nborrows;
@@ -518,7 +518,7 @@ extend tc::TypeChecker {
                     let mut nid = unsafe ids[si as usize] + 1;
                     while nid < block_id && !keep[k as usize] {
                         let rd = unsafe (*self.cur_ast()).resolution_def(nid);
-                        keep[k as usize] = rd.node == b.binding && rd.module == self.ast.module;
+                        keep[k as usize] = rd.node == b.binding && rd.module == self.cur_module();
                         nid = nid + 1;
                     }
                 }
@@ -887,7 +887,7 @@ extend tc::TypeChecker {
             return;
         }
         let d = unsafe (*a).resolution_def(expr);
-        if d.module != self.ast.module || d.node == NODE_NONE {
+        if d.module != self.cur_module() || d.node == NODE_NONE {
             return;
         }
         let dk = unsafe (*a).at_const(d.node).kind;
@@ -1027,7 +1027,7 @@ extend tc::TypeChecker {
             return false;
         }
         let d = unsafe (*a).resolution_def(expr);
-        if d.module != self.ast.module || d.node == NODE_NONE || self.tc_capture_index(
+        if d.module != self.cur_module() || d.node == NODE_NONE || self.tc_capture_index(
             unsafe self.clos_stack[(self.nclos - 1) as usize],
             d.node,
         ) < 0 || !self.tc_type_is_free(unsafe (*a).type_of(expr)) {
@@ -1066,7 +1066,7 @@ extend tc::TypeChecker {
             return;
         }
         let d = unsafe (*a).resolution_def(expr);
-        if d.module != self.ast.module || d.node == NODE_NONE {
+        if d.module != self.cur_module() || d.node == NODE_NONE {
             return;
         }
         for f in 0..self.nclos {
@@ -1202,7 +1202,7 @@ extend tc::TypeChecker {
         }
         if n.kind == NodeKind::NODE_IDENTIFIER && depth < BORROW_ESCAPE_MAX_DEPTH {
             let d = unsafe (*a).resolution_def(e);
-            if d.module == self.ast.module && d.node != NODE_NONE {
+            if d.module == self.cur_module() && d.node != NODE_NONE {
                 let dn = unsafe (*a).at_const(d.node);
                 let dt = unsafe (*a).type_of(d.node);
                 if dt != TYPE_NONE && self.type_at(dt).kind == TypeKind::TYPE_REFERENCE {
@@ -1258,7 +1258,7 @@ extend tc::TypeChecker {
         let mut ret_binding = NODE_NONE;
         if unsafe (*a).at_const(vid).kind == NodeKind::NODE_IDENTIFIER {
             let rd = unsafe (*a).resolution_def(vid);
-            if rd.module == self.ast.module {
+            if rd.module == self.cur_module() {
                 ret_binding = rd.node;
             }
         }
@@ -1296,15 +1296,15 @@ extend tc::TypeChecker {
     /// The lifetime slots a type NODE denotes, in order: `&'l T` -> ['l]; an aggregate `S<'l, ..>` ->
     /// its lifetime args. Returns the count; fills `out` (up to `cap`). This is the structural lifetime
     /// vector of a signature type, used to relate a returned value's lifetimes to the return type's.
-    pub fn tc_collect_slot_lts(self: &mut Self, m: ModuleId, tyn: NodeId, out: *mut tok::Span, cap: i32) i32 {
-        if tyn == NODE_NONE || cap <= 0 {
+    pub fn tc_collect_slot_lts(self: &mut Self, m: ModuleId, tyn: NodeId, out: &mut Spans8) i32 {
+        if tyn == NODE_NONE {
             return 0;
         }
         if unsafe (*self.mod_ast(m)).at_const(tyn).kind == NodeKind::NODE_REFERENCE_TYPE {
-            unsafe out[0] = self.tc_ref_typenode_lt(tyn);
+            out[0] = self.tc_ref_typenode_lt(tyn);
             return 1;
         }
-        return self.tc_collect_lt_args(m, tyn, out, cap);
+        return self.tc_collect_lt_args(m, tyn, out);
     }
 
     /// The parameter type NODE a returned bare-identifier value refers to, or NODE_NONE. Only a whole
@@ -1327,7 +1327,7 @@ extend tc::TypeChecker {
             return NODE_NONE;
         }
         let d = unsafe (*a).resolution_def(e);
-        if d.module != self.ast.module || d.node == NODE_NONE || unsafe (*a).at_const(d.node).kind != NodeKind::NODE_PARAMETER {
+        if d.module != self.cur_module() || d.node == NODE_NONE || unsafe (*a).at_const(d.node).kind != NodeKind::NODE_PARAMETER {
             return NODE_NONE;
         }
         return unsafe (*a).at_const(d.node).as_data.parameter.ty;
@@ -1335,8 +1335,8 @@ extend tc::TypeChecker {
 
     /// The lifetime a return TYPE node denotes overall (first slot), for call-site precision.
     pub fn tc_return_dest_lifetime(self: &mut Self, ret_tyn: NodeId) tok::Span {
-        let dest = Spans8 {};
-        let n = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
+        let mut dest = Spans8 {};
+        let n = self.tc_collect_slot_lts(self.cur_module(), ret_tyn, &mut dest);
         if n > 0 {
             return dest[0];
         }
@@ -1350,8 +1350,8 @@ extend tc::TypeChecker {
     /// regardless of any caller. This is what lets call sites TRUST the signature (relate_result_precision)
     /// instead of tying the result to every argument.
     pub fn tc_check_return_lifetime(self: &mut Self, vid: NodeId, ret_tyn: NodeId) {
-        let dest = Spans8 {};
-        let nd = self.tc_collect_slot_lts(self.ast.module, ret_tyn, (&dest[0]) as *mut tok::Span, 8);
+        let mut dest = Spans8 {};
+        let nd = self.tc_collect_slot_lts(self.cur_module(), ret_tyn, &mut dest);
         if nd == 0 {
             return;
         }
@@ -1359,8 +1359,8 @@ extend tc::TypeChecker {
         if ptyn == NODE_NONE {
             return;
         }
-        let src = Spans8 {};
-        let ns = self.tc_collect_slot_lts(self.ast.module, ptyn, (&src[0]) as *mut tok::Span, 8);
+        let mut src = Spans8 {};
+        let ns = self.tc_collect_slot_lts(self.cur_module(), ptyn, &mut src);
         let mut n = nd;
         if ns < n {
             n = ns;
@@ -1438,7 +1438,7 @@ extend tc::TypeChecker {
         if ty == TYPE_NONE {
             return 0;
         }
-        let key = self.ast.module as u64 << 32 | ty as u64;
+        let key = self.cur_module() as u64 << 32 | ty as u64;
         switch self.arity_memo.get(&key) {
             Some(v) => {
                 return *v;
@@ -1466,17 +1466,10 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(ty),
-            &mut om,
-            &mut od,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return 0;
         }
         let mut n = unsafe (*self.mod_ast(om)).lifetimes_of(od).len;
@@ -1909,7 +1902,7 @@ extend tc::TypeChecker {
             return tok::Span { start: 0, end: 0 };
         }
         let d = unsafe (*a).resolution_def(e);
-        if d.module != self.ast.module || d.node == NODE_NONE || !self.tc_is_ref_param(d.node) {
+        if d.module != self.cur_module() || d.node == NODE_NONE || !self.tc_is_ref_param(d.node) {
             return tok::Span { start: 0, end: 0 };
         }
         return self.tc_ref_typenode_lt(unsafe (*a).at_const(d.node).as_data.parameter.ty);
@@ -1947,8 +1940,8 @@ extend tc::TypeChecker {
         }
         let mut aggn = unsafe (*a).at_const(ptyn).as_data.indirect_type.ty;
         let mut args = Spans8 {};
-        let mut nargs = self.tc_collect_lt_args(self.ast.module, aggn, (&args[0]) as *mut tok::Span, 8);
-        let mut m = self.ast.module;
+        let mut nargs = self.tc_collect_lt_args(self.cur_module(), aggn, &mut args);
+        let mut m = self.cur_module();
         // Walk the chain from the base outward (chain is leaf-last, so iterate in reverse).
         let mut k = n - 1;
         while k >= 0 {
@@ -1976,8 +1969,8 @@ extend tc::TypeChecker {
                 return self.tc_map_lt(dd, fl, &args[0], nargs);
             }
             // interior hop: re-instantiate the next aggregate's lifetime args through this one
-            let sub = Spans8 {};
-            let ns = self.tc_collect_lt_args(dd.module, ftyn, (&sub[0]) as *mut tok::Span, 8);
+            let mut sub = Spans8 {};
+            let ns = self.tc_collect_lt_args(dd.module, ftyn, &mut sub);
             let mut mapped = Spans8 {};
             for i in 0..ns {
                 mapped[i as usize] = self.tc_map_lt(dd, sub[i as usize], &args[0], nargs);
@@ -1993,7 +1986,7 @@ extend tc::TypeChecker {
         return tok::Span { start: 0, end: 0 };
     }
 
-    pub fn tc_collect_lt_args(self: &Self, m: ModuleId, tyn: NodeId, out: *mut tok::Span, cap: i32) i32 {
+    pub fn tc_collect_lt_args(self: &Self, m: ModuleId, tyn: NodeId, out: &mut Spans8) i32 {
         if tyn == NODE_NONE || unsafe (*self.mod_ast(m)).at_const(tyn).kind != NodeKind::NODE_TYPE_PATH {
             return 0;
         }
@@ -2001,8 +1994,8 @@ extend tc::TypeChecker {
         let mut n: i32 = 0;
         for i in 0..args.len {
             let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
-            if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME && n < cap {
-                unsafe out[n as usize] = self.tc_lt_name_in(m, aid);
+            if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME && n as usize < out.len() {
+                out[n as usize] = self.tc_lt_name_in(m, aid);
                 n = n + 1;
             }
         }
@@ -2083,7 +2076,7 @@ extend tc::TypeChecker {
             return NODE_NONE;
         }
         let d = unsafe (*a).resolution_def(e);
-        if d.module != self.ast.module || d.node == NODE_NONE || !self.tc_is_ref_param(d.node) {
+        if d.module != self.cur_module() || d.node == NODE_NONE || !self.tc_is_ref_param(d.node) {
             return NODE_NONE;
         }
         return d.node;
@@ -2101,7 +2094,7 @@ extend tc::TypeChecker {
         if tyn == NODE_NONE {
             return false;
         }
-        let t = self.lower_type_in(self.ast.module, tyn);
+        let t = self.lower_type_in(self.cur_module(), tyn);
         return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_REFERENCE;
     }
 
@@ -2136,17 +2129,10 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if self.aggregate_of(
-            self.strip(elem),
-            &mut om,
-            &mut od,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if self.aggregate_of(self.strip(elem), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             for gi in 0..gn {
                 let g = ga[gi as usize];
                 if self.type_at(g).kind == TypeKind::TYPE_GENERIC && self.type_at(g).as_data.decl == vd && self.type_at(
@@ -2159,30 +2145,22 @@ extend tc::TypeChecker {
         return false;
     }
 
-    pub fn tc_typenode_lifetimes(
-        self: &Self,
-        m: ModuleId,
-        tyn: NodeId,
-        out: *mut tok::Span,
-        cap: i32,
-        n: *mut i32,
-        depth: i32,
-    ) {
-        if tyn == NODE_NONE || depth > 6 || unsafe *n >= cap {
+    pub fn tc_typenode_lifetimes(self: &Self, m: ModuleId, tyn: NodeId, out: &mut Spans8, n: &mut i32, depth: i32) {
+        if tyn == NODE_NONE || depth > 6 || (*n) as usize >= out.len() {
             return;
         }
         let node = unsafe (*self.mod_ast(m)).at_const(tyn);
         if node.kind == NodeKind::NODE_REFERENCE_TYPE {
             let l = self.tc_lt_name_in(m, node.as_data.indirect_type.lifetime);
-            if !self.tc_span_empty(l) && unsafe *n < cap {
-                unsafe out[(*n) as usize] = l;
-                unsafe *n = unsafe *n + 1;
+            if !self.tc_span_empty(l) && (*n) as usize < out.len() {
+                out[(*n) as usize] = l;
+                *n = *n + 1;
             }
-            self.tc_typenode_lifetimes(m, node.as_data.indirect_type.ty, out, cap, n, depth + 1);
+            self.tc_typenode_lifetimes(m, node.as_data.indirect_type.ty, out, n, depth + 1);
             return;
         }
         if node.kind == NodeKind::NODE_ARRAY_TYPE {
-            self.tc_typenode_lifetimes(m, node.as_data.array_type.element, out, cap, n, depth + 1);
+            self.tc_typenode_lifetimes(m, node.as_data.array_type.element, out, n, depth + 1);
             return;
         }
         if node.kind == NodeKind::NODE_TYPE_PATH {
@@ -2191,12 +2169,12 @@ extend tc::TypeChecker {
                 let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
                 if unsafe (*self.mod_ast(m)).at_const(aid).kind == NodeKind::NODE_LIFETIME {
                     let l = self.tc_lt_name_in(m, aid);
-                    if !self.tc_span_empty(l) && unsafe *n < cap {
-                        unsafe out[(*n) as usize] = l;
-                        unsafe *n = unsafe *n + 1;
+                    if !self.tc_span_empty(l) && (*n) as usize < out.len() {
+                        out[(*n) as usize] = l;
+                        *n = *n + 1;
                     }
                 } else {
-                    self.tc_typenode_lifetimes(m, aid, out, cap, n, depth + 1);
+                    self.tc_typenode_lifetimes(m, aid, out, n, depth + 1);
                 }
             }
         }
@@ -2258,17 +2236,10 @@ extend tc::TypeChecker {
     pub fn tc_aggregate_has_invariant_param(self: &mut Self, ty: TypeId) bool {
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(ty),
-            &mut om,
-            &mut od,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
         let dd = DefId { module: om, node: od };
@@ -2297,17 +2268,10 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(ty),
-            &mut om,
-            &mut od,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
         for gi in 0..gn {
@@ -2543,7 +2507,7 @@ extend tc::TypeChecker {
         if ty == TYPE_NONE {
             return false;
         }
-        let key = self.ast.module as u64 << 32 | ty as u64;
+        let key = self.cur_module() as u64 << 32 | ty as u64;
         switch self.carries_memo.get(&key) {
             Some(v) => {
                 return *v != 0;
@@ -2564,17 +2528,10 @@ extend tc::TypeChecker {
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
-        let gp = Defs8 {};
-        let ga = Tys8 {};
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(
-            self.strip(ty),
-            &mut om,
-            &mut od,
-            (&gp[0]) as *mut DefId,
-            (&ga[0]) as *mut TypeId,
-            &mut gn,
-        ) {
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
         for gi in 0..gn {
@@ -2657,7 +2614,7 @@ extend tc::TypeChecker {
             return;
         }
         let d = unsafe (*a).resolution_def(e);
-        if d.module != self.ast.module || d.node == NODE_NONE || d.node == to_binding {
+        if d.module != self.cur_module() || d.node == NODE_NONE || d.node == to_binding {
             return;
         }
         let cnt = self.nborrows;
@@ -2678,7 +2635,7 @@ extend tc::TypeChecker {
         switch pn.kind {
             NODE_IDENTIFIER => {
                 let d = unsafe (*a).resolution_def(place);
-                return if_node(d.module == self.ast.module, d.node, NODE_NONE);
+                return if_node(d.module == self.cur_module(), d.node, NODE_NONE);
             },
             NODE_MEMBER => {
                 if pn.as_data.member.path {
@@ -3100,7 +3057,7 @@ extend tc::TypeChecker {
         switch n.kind {
             NODE_IDENTIFIER => {
                 let d = unsafe (*a).resolution_def(id);
-                if d.module == self.ast.module && d.node != NODE_NONE {
+                if d.module == self.cur_module() && d.node != NODE_NONE {
                     if self.is_moved(d.node) {
                         let mut freed = false;
                         for k in 0..self.nfreed {
@@ -3153,7 +3110,7 @@ extend tc::TypeChecker {
                     }
                     if mut2 && unsafe (*a).at_const(opw).kind == NodeKind::NODE_IDENTIFIER {
                         let od = unsafe (*a).resolution_def(opw);
-                        if od.module == self.ast.module && od.node != NODE_NONE {
+                        if od.module == self.cur_module() && od.node != NODE_NONE {
                             self.tc_init(od.node);
                         }
                     }
@@ -3321,7 +3278,7 @@ extend tc::TypeChecker {
         if plain && unsafe (*a).at_const(bd.left).kind == NodeKind::NODE_IDENTIFIER {
             ld = unsafe (*a).resolution_def(bd.left);
         }
-        let lhs_local = ld.node != NODE_NONE && ld.module == self.ast.module;
+        let lhs_local = ld.node != NODE_NONE && ld.module == self.cur_module();
         if lhs_local {
             self.tc_init(ld.node);
             self.tc_unmark_move(ld.node);
@@ -3388,7 +3345,7 @@ extend tc::TypeChecker {
         // to route through check_call_receiver's free handling).
         if pck == NodeKind::NODE_MEMBER && !unsafe (*a).at_const(callee_id).as_data.member.path && args.len == 0 {
             let mem = unsafe (*a).at_const(callee_id).as_data.member.member;
-            if span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free") {
+            if span_is(self.mod_src(self.cur_module()), unsafe (*a).at_const(mem).as_data.name.text, "free") {
                 let obj = unsafe (*a).at_const(callee_id).as_data.member.object;
                 let ot = unsafe (*a).type_of(obj);
                 if ot != TYPE_NONE && self.type_at(self.strip(ot)).kind == TypeKind::TYPE_DYN {
@@ -3733,7 +3690,7 @@ extend tc::TypeChecker {
                 }
                 if unsafe (*self.cur_ast()).at_const(recv_n).kind == NodeKind::NODE_IDENTIFIER {
                     let rd = unsafe (*self.cur_ast()).resolution_def(recv_n);
-                    if rd.module == self.ast.module && rd.node != NODE_NONE {
+                    if rd.module == self.cur_module() && rd.node != NODE_NONE {
                         store_root = rd.node;
                     }
                 } else {
@@ -3801,7 +3758,7 @@ extend tc::TypeChecker {
         let mut elem_lt = tok::Span { start: 0, end: 0 };
         if is_ref_store {
             elem_lt = self.tc_container_elem_lt(
-                self.ast.module,
+                self.cur_module(),
                 unsafe (*self.cur_ast()).at_const(store_root).as_data.parameter.ty,
             );
         }
@@ -3878,9 +3835,9 @@ extend tc::TypeChecker {
                 return true;
             }
         }
-        let vlts = Spans8 {};
+        let mut vlts = Spans8 {};
         let mut nvlt: i32 = 0;
-        self.tc_typenode_lifetimes(md.module, pv_ty, (&vlts[0]) as *mut tok::Span, 8, &mut nvlt, 0);
+        self.tc_typenode_lifetimes(md.module, pv_ty, &mut vlts, &mut nvlt, 0);
         for li in 0..nvlt {
             if self.tc_typenode_covers_lt(md.module, ps_pointee, vlts[li as usize]) {
                 return true;
@@ -4011,13 +3968,13 @@ extend tc::TypeChecker {
                 );
             }
         }
-        let is_free = span_is(self.mod_src(self.ast.module), unsafe (*a).at_const(mem).as_data.name.text, "free");
+        let is_free = span_is(self.mod_src(self.cur_module()), unsafe (*a).at_const(mem).as_data.name.text, "free");
         if is_free {
             let rty = *self.type_at(unsafe (*a).type_of(recv));
             let mut thru = NODE_NONE;
             if rty.kind == TypeKind::TYPE_REFERENCE && unsafe (*a).at_const(recv).kind == NodeKind::NODE_IDENTIFIER {
                 let rd = unsafe (*a).resolution_def(recv);
-                if rd.module == self.ast.module {
+                if rd.module == self.cur_module() {
                     thru = rd.node;
                 }
             } else if rty.kind != TypeKind::TYPE_POINTER {
@@ -4049,7 +4006,7 @@ extend tc::TypeChecker {
                 self.bc_free_recv = false;
                 if unsafe (*a).at_const(recv).kind == NodeKind::NODE_IDENTIFIER {
                     let rd = unsafe (*a).resolution_def(recv);
-                    if rd.module == self.ast.module && rd.node != NODE_NONE {
+                    if rd.module == self.cur_module() && rd.node != NODE_NONE {
                         if self.nfreed < 256 {
                             let k = self.nfreed;
                             unsafe self.freed[k as usize] = rd.node;

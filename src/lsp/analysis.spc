@@ -209,7 +209,7 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     p.override_mod = i as ModuleId;
-    p.override_ast = &mut t.ast;
+    p.override_ast = t.ast.get();
     t.check();
     p.override_mod = 0xFFFF;
     p.override_ast = null;
