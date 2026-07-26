@@ -616,6 +616,22 @@ extend Package {
                     child_paths.push(String::from_str("std::parallel::runtime"));
                     child_files.push(rf);
                 }
+                // Same bargain for `@blocking`: a call to one of those functions is emitted as a wrapper
+                // that hands the work to the blocking pool, so that module has to be linked in -- but only
+                // for a program that actually declares one.
+                let mut has_blocking = false;
+                for ai in 0..m.ast.attrs.len() {
+                    if m.ast.attrs[ai].kind == AttrKind::ATTR_BLOCKING as u8 {
+                        has_blocking = true;
+                        break;
+                    }
+                }
+                if has_blocking {
+                    let mut bf = String::from_str(std_root);
+                    bf.push_str("/std/parallel/blocking.spc");
+                    child_paths.push(String::from_str("std::parallel::blocking"));
+                    child_files.push(bf);
+                }
             }
         }
         for k in 0..child_paths.len() {

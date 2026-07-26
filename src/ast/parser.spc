@@ -3450,6 +3450,13 @@ extend Parser {
             }
             return true;
         }
+        if syntax.parts == 1 && self.text_is(ns, "blocking") {
+            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_BLOCKING as u8, arg: 0, str_span: Span::empty() };
+            if syntax.has_args {
+                self.errors.emit(ns.start(), ns.len(), format("attribute '@blocking' takes no arguments"));
+            }
+            return true;
+        }
         if syntax.parts == 1 && self.text_is(ns, "platform") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
             self.parse_platform_attr(&syntax, out);

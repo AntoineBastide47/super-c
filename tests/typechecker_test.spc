@@ -2220,6 +2220,25 @@ fn region_outlives_transitive() {
 // and dies at the end of each one, so no use of it can execute after a given point via the back edge.
 // A longer-lived binding stays conservatively live, because a use earlier in the source can execute
 // after the mutation on the next iteration.
+// A pattern binding is bound afresh every time its arm is entered, so a move recorded on a PREVIOUS binding
+// says nothing about this one. The loop-body walk runs twice on purpose (to catch conflicts that only show
+// up across the back edge), and without that reset the second pass saw the first pass's move and rejected
+// the arm's own use -- while the identical code outside a loop, or with a `let` binding, was accepted.
+@test
+fn arm_binding_rebinds_each_iteration() {
+    h::expect_ok(
+        "an arm binding moved into a closure is fine on the next iteration",
+        "fn apply<F: fn move() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n    let mut total: i64 = 0;\n    for _i in 0..3 {\n        let mut v = Vector::<i64>::new();\n        v.push(7);\n        switch Option::<Vector<i64>>::Some(v) {\n            Some(got) => { total = total + apply(fn() i64 { return *got.at(0); }); },\n            None => {},\n        };\n    }\n    return (total - 21) as i32;\n}\n",
+    );
+    // The reset is per BINDING, not a licence to use one twice: a second capture in the same arm is still
+    // a use after move.
+    h::expect_err_msg(
+        "capturing the same arm binding twice is still rejected",
+        "fn apply<F: fn move() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n    let mut total: i64 = 0;\n    for _i in 0..2 {\n        let mut v = Vector::<i64>::new();\n        v.push(1);\n        switch Option::<Vector<i64>>::Some(v) {\n            Some(got) => {\n                total = total + apply(fn() i64 { return *got.at(0); });\n                total = total + apply(fn() i64 { return *got.at(0); });\n            },\n            None => {},\n        };\n    }\n    return total as i32;\n}\n",
+        "use of moved value",
+    );
+}
+
 @test
 fn loop_borrow_precision() {
     // Confined to the loop body and dead before the mutation -> accepted (was rejected). The inner

@@ -14,6 +14,7 @@
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::time as time;
+import std::parallel::runtime as runtime;
 
 /// The outcome of a `send`: `Sent`, or `Rejected(value)` when the channel is closed or has no receivers --
 /// the value is handed back so ownership is never dropped on the floor (and is auto-freed if discarded).
@@ -212,6 +213,9 @@ extend<T> Sender<T> {
             if ready {
                 break;
             }
+            if runtime::tracing() {
+                runtime::trace("channel: send blocks (full)", runtime::current_id());
+            }
             if deadline != 0 {
                 if time::remaining_ns(deadline) == 0 {
                     return SendResult::<T>::Rejected(value);
@@ -316,6 +320,9 @@ extend<T> Receiver<T> {
             }
             if done {
                 return Option::<T>::None;
+            }
+            if runtime::tracing() {
+                runtime::trace("channel: recv blocks (empty)", runtime::current_id());
             }
             if deadline != 0 {
                 if time::remaining_ns(deadline) == 0 {

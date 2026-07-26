@@ -14,6 +14,7 @@
 
 import pthread;
 import atomic;
+import stdlib;
 import sc_runtime;
 import std::parallel::platform as platform;
 
@@ -98,6 +99,27 @@ static mut G_NWORKERS: usize = 0; // 0 = one worker per CPU
 static mut G_NEXT_ID: u64 = 0; // atomic: task-id source
 static mut G_SPAWNED: usize = 0; // atomic: tasks ever created
 static mut G_DONE: usize = 0; // atomic: tasks that ran to completion
+
+static mut G_TRACE: i32 = 0; // 0 unknown / 1 off / 2 on
+
+/// Is task tracing on? `SC_TASK_TRACE=1` turns it on for the life of the process; the answer is read from
+/// the environment once and then costs a load and a compare, so a traced build and an untraced one are the
+/// same binary. `pub` because the channel traces through it too.
+pub fn tracing() bool {
+    if G_TRACE == 0 {
+        G_TRACE = if stdlib::getenv("SC_TASK_TRACE") == null {
+            1;
+        } else {
+            2;
+        };
+    }
+    return G_TRACE == 2;
+}
+
+/// One trace line: what happened, and to which task. Check `tracing()` first on a hot path.
+pub fn trace(event: str, id: u64) {
+    eprintln("[task {}] {}", id, event);
+}
 
 // The commit hand-off for a park with nothing to release (e.g. `sleep`).
 fn commit_nop(_p: *mut void) {}
@@ -338,6 +360,9 @@ fn steal_any(s: *mut Scheduler, me: usize) *mut Coroutine {
         }
         let co = dq_steal(unsafe ((*s).deques + v));
         if co != null {
+            if tracing() {
+                trace("stolen", unsafe (*co).id);
+            }
             return co;
         }
     }
@@ -482,6 +507,9 @@ fn worker_main(arg: *mut void) *mut void {
         unsafe __sc_set_task_id(0);
         unsafe sc_runtime::sc_rt_tls_set(null);
         if unsafe (*co).done != 0 {
+            if tracing() {
+                trace("complete", unsafe (*co).id);
+            }
             free_coroutine(co);
             let _ = atomic::add_usize(&mut G_DONE, 1, 0);
         } else if unsafe (*co).commit_requeue != 0 {
@@ -604,6 +632,9 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
         tm_token: 0,
         tnext: null,
     };
+    if tracing() {
+        trace("spawn coroutine", unsafe (*co).id);
+    }
     enqueue_runnable(s, co);
 }
 
@@ -635,6 +666,9 @@ pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
         tm_token: 0,
         tnext: null,
     };
+    if tracing() {
+        trace("spawn job", unsafe (*co).id);
+    }
     enqueue_runnable(s, co);
 }
 
@@ -693,6 +727,16 @@ pub fn park_begin(co: *mut Coroutine) u32 {
 /// `cancel_timer` if the wait was timed, unlink its node, and re-check its condition.
 pub fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *mut void) {
     let co = current();
+    if tracing() {
+        trace(
+            if deadline != 0 {
+                "park (timed)";
+            } else {
+                "park";
+            },
+            unsafe (*co).id,
+        );
+    }
     unsafe (*co).commit_fn = commit;
     unsafe (*co).commit_arg = arg;
     unsafe (*co).deadline = deadline;
@@ -713,6 +757,9 @@ pub fn park_current(commit: fn(*mut void) void, arg: *mut void) {
 pub fn wake(co: *mut Coroutine, token: u32) bool {
     if !claim(co, token) {
         return false;
+    }
+    if tracing() {
+        trace("wake", unsafe (*co).id);
     }
     enqueue_runnable(G_SCHED, co);
     return true;

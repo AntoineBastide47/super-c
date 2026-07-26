@@ -186,6 +186,43 @@ pub fn entry<F: fn move() T + Send, T>(env: *mut void) {
     complete(pay.done);
 }
 
+/// Run `run(env)` on the blocking pool and park the caller until it returns. The non-generic core of
+/// `call`, and what a `@blocking` extern function's generated wrapper hands its work to -- hence the pinned
+/// C symbol, which is the name codegen emits.
+@c.export("__sc_blocking_run")
+pub fn run_blocking(run: fn(*mut void) void, env: *mut void) {
+    let mut done = Done { state: sync::Mutex::<i32>::new(0), cv: sync::Condvar::new() };
+    let mut g = Global {};
+    let box = g.alloc(sizeof(RawJob), alignof(RawJob)) as *mut RawJob;
+    unsafe box[0] = RawJob { run: run, env: env, done: &mut done };
+    submit(raw_entry, box);
+    {
+        let gd = done.state.lock();
+        while *gd.get() == 0 {
+            done.cv.wait(&gd);
+        }
+    }
+}
+
+// The payload behind `run_blocking`: an already-type-erased job plus who to wake.
+struct RawJob {
+    pub run: fn(*mut void) void,
+    pub env: *mut void,
+    pub done: *mut Done,
+}
+
+// Runs one `run_blocking` job on a pool thread. `pub` for linkage.
+pub fn raw_entry(p: *mut void) {
+    let j = p as *mut RawJob;
+    let run = unsafe (*j).run;
+    let env = unsafe (*j).env;
+    let d = unsafe (*j).done;
+    let mut g = Global {};
+    g.dealloc(j, sizeof(RawJob), alignof(RawJob));
+    run(env);
+    complete(d);
+}
+
 /// Run `f` on the blocking pool and return its value. The calling coroutine PARKS while it runs, so the
 /// worker thread stays available; any other caller simply blocks. This is how a coroutine calls something
 /// that would otherwise hold a worker hostage -- a blocking `read`, a legacy library, a slow syscall.

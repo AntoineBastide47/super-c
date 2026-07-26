@@ -162,6 +162,19 @@ fn mut_match_binding() {
     );
 }
 
+// An array-typed FIELD coerces to a slice like any other array. It did not: the coercion needs the element
+// count, which is read from the declaration the expression names -- and that lookup only understood a plain
+// identifier, so `f(x.buf)` type-checked and then emitted a raw C array where a slice was expected. Covers
+// both directions and a write THROUGH the mutable slice, so the view really is the field's storage.
+@test
+fn array_field_coerces_to_slice() {
+    run_exit(
+        "array-typed struct field passed as []T and []mut T",
+        "struct B { pub b: [u8; 4], pub n: [i32; 3] }\nfn ro(s: []u8) usize { return s.len(); }\nfn rw(s: []mut u8) usize { s.set(0, 9u8); return s.len(); }\nfn sum(s: []i32) i32 { let mut t = 0; for i in 0..s.len() { t = t + *s.get(i); } return t; }\nfn main() i32 {\n  let mut x = B {};\n  x.n[0] = 40;\n  x.n[1] = 2;\n  let a: [u8; 4] = [1u8, 2u8, 3u8, 4u8];\n  let total = ro(a) + ro(x.b) + rw(x.b) + sum(x.n) as usize;\n  if x.b[0] != 9u8 { unsafe exit(1); }\n  unsafe exit(total as i32 - 12);\n}\n",
+        42,
+    );
+}
+
 @test
 fn closure_captures_every_binding_kind() {
     // A closure environment must name EVERY kind of binding it can capture, not only `let`s and parameters:

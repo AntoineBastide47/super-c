@@ -42,6 +42,7 @@ pub enum AttrKind {
     ATTR_COLD,
     ATTR_PLATFORM,
     ATTR_FMT_SKIP,
+    ATTR_BLOCKING,
 }
 
 // A decl's lifetime generic params (`fn f<'a>`, `struct S<'a>`). Held in an Ast SIDE TABLE rather

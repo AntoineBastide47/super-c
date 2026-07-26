@@ -756,10 +756,13 @@ The `std::parallel` modules build a real concurrency stack on OS threads:
 * **Preemption** — a task that never blocks cannot hold its worker: the compiler emits a safepoint at
   every loop backedge (only in programs that use `launch`, so nothing else pays for it) and the scheduler
   yields there when other work is waiting.
-* **Blocking calls and diagnostics** — `blocking::call` runs something that blocks its OS thread on a
-  separate pool while the calling coroutine parks; every task has an id that panics report
-  (`panic: [task 7] …`), and `runtime::live_tasks()` plus a shutdown report account for tasks that never
-  finished.
+* **Async I/O** — a reactor (kqueue / epoll) turns descriptor readiness into a wake, so `net::TcpStream`'s
+  `accept` / `read` / `write` / `connect` park the coroutine: a hundred connections are a hundred parked
+  tasks and one poller thread, not a hundred threads. POSIX only.
+* **Blocking calls and diagnostics** — `blocking::call` (or `@blocking` on an extern function) runs
+  something that blocks its OS thread on a separate pool while the calling coroutine parks; every task has
+  an id that panics report (`panic: [task 7] …`), `SC_TASK_TRACE=1` traces the scheduler, and
+  `runtime::live_tasks()` plus a shutdown report account for tasks that never finished.
 * **Data parallelism** — `parallel::range` / `each` / `each_mut` / `chunks_mut` / `reduce` / `sections`
   split work into chunked, stackless jobs on the same pool and return when all of it is done, under static
   or dynamic scheduling. The body's `fn(..) + Send + Sync` bound is what makes it safe: a closure that owns
@@ -815,8 +818,8 @@ Roadmap, in priority order:
 
 1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
    embarrassingly parallel per module.
-2. **Async I/O** — `blocking::call` moves a blocking call off the pool onto a thread that may block, but
-   that is a thread per concurrent operation. Next is a real reactor (epoll / io_uring / kqueue / IOCP) so
-   a socket read parks the coroutine instead.
+2. **Benchmarking to the state of the art** — the concurrency stack is correct but unmeasured; the next
+   pass benchmarks it against Go, Rust and C and closes the gaps it finds (a real assembly context switch,
+   smaller task stacks, fewer allocations per task).
 3. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
    (file/console IO is currently FFI-only; this subsumes it).

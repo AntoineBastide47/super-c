@@ -3043,6 +3043,11 @@ extend tc::TypeChecker {
         let n = unsafe (*a).at_const(pat);
         if n.kind == NodeKind::NODE_PATTERN_NAME {
             self.tc_record_binding_depth(pat);
+            // Entering the arm BINDS this name afresh from the scrutinee, exactly as a `let` with a value
+            // does -- so any move recorded for it is from a previous binding and no longer applies. Without
+            // this, the second pass `bc_loop_body` makes over a loop sees a binding the first pass moved
+            // (captured into an owning closure, say) and reports the arm's own use as a use-after-move.
+            self.tc_unmark_move(pat);
             return;
         }
         if n.kind == NodeKind::NODE_PATTERN_TUPLE || n.kind == NodeKind::NODE_PATTERN_STRUCT {

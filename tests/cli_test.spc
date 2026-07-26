@@ -1441,6 +1441,288 @@ fn main() i32 {
     let run2 = q.run_bin_env("");
     assert(run2.exit != 0, "the panic takes the process down");
     assert(run2.out_has("[task "), "the panic names the task it happened in");
+
+    // Tracing is off unless asked for, and then reports the scheduler's events.
+    let quiet = p.run_bin_env("");
+    assert(!quiet.out_has("[task "), "no trace output without SC_TASK_TRACE");
+    let traced = p.run_bin_env("SC_TASK_TRACE=1 ");
+    assert(traced.out_has("spawn coroutine"), "SC_TASK_TRACE reports spawns");
+    assert(traced.out_has("complete"), "SC_TASK_TRACE reports completions");
+}
+
+// The reactor (M6/Phase 10, std/parallel/io + net): a coroutine parks on a SOCKET instead of a thread. A
+// server task accepts and echoes while a client task connects, writes and reads back -- every one of those
+// operations parking on kqueue/epoll rather than blocking a worker. POSIX only, like the reactor itself.
+@test
+fn reactor_tcp_echo() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::net as net;
+import std::parallel::io as io;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    let port = l.port();
+    if port <= 0 {
+        return 1;
+    }
+    let got = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+
+    let gs = got.clone();
+    let ws = wg.clone();
+    launch fn() {
+        switch l.accept() {
+            Some(s) => {
+                let mut buf = Vector::<u8>::new();
+                for _k in 0..64 {
+                    buf.push(0u8);
+                }
+                let cap: usize = 64;
+                let n = s.read(buf.index_range_mut(0..cap));
+                if n > 0 {
+                    let _ = gs.get().fetch_add(n as i64, atom::MemoryOrder::Relaxed);
+                    let _ = s.write(buf[0..n as usize]);
+                }
+                buf.free();
+                s.free();
+            },
+            None => {},
+        };
+        ws.done();
+    };
+
+    let gc = got.clone();
+    let wc = wg.clone();
+    launch fn() {
+        switch net::TcpStream::connect("127.0.0.1", port) {
+            Some(c) => {
+                let msg: [u8; 5] = [104u8, 101u8, 108u8, 108u8, 111u8];
+                let _ = c.write(msg);
+                let mut back = Vector::<u8>::new();
+                for _k in 0..64 {
+                    back.push(0u8);
+                }
+                let cap: usize = 64;
+                let n = c.read(back.index_range_mut(0..cap));
+                if n == 5 && *back.at(0) == 104u8 {
+                    let _ = gc.get().fetch_add(1000, atom::MemoryOrder::Relaxed);
+                }
+                back.free();
+                c.free();
+            },
+            None => {},
+        };
+        wc.done();
+    };
+
+    wg.wait();
+    let total = got.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    got.free();
+    io::shutdown();
+    rt::shutdown();
+    if total != 1005 {
+        return 2;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// What the reactor is FOR: a hundred simultaneous connections served by two workers and one poller thread,
+// each connection its own task. `blocking::call` would need a hundred threads for the same shape; here they
+// are a hundred parked coroutines and a registration each. Exact counts on both ends, leak-checked.
+@test
+fn reactor_many_connections() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::net as net;
+import std::parallel::io as io;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+
+const CONNS: i64 = 100;
+
+fn main() i32 {
+    rt::set_worker_count(2); // 200 connections on two workers and one reactor thread
+    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    let port = l.port();
+    let served = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let echoed = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+
+    let ls = served.clone();
+    let lw = wg.clone();
+    launch fn() {
+        // One acceptor task; every connection gets its own task, all parked on the reactor.
+        let inner = sync::WaitGroup::new();
+        for _i in 0..CONNS {
+            switch l.accept() {
+                Some(s) => {
+                    let cs = ls.clone();
+                    let iw = inner.clone();
+                    inner.add(1);
+                    launch fn() {
+                        let mut buf = Vector::<u8>::new();
+                        for _k in 0..8 {
+                            buf.push(0u8);
+                        }
+                        let cap: usize = 8;
+                        let n = s.read(buf.index_range_mut(0..cap));
+                        if n > 0 {
+                            let _ = s.write(buf[0..n as usize]);
+                            let _ = cs.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+                        }
+                        buf.free();
+                        iw.done();
+                    };
+                },
+                None => {},
+            };
+        }
+        inner.wait();
+        inner.free();
+        lw.done();
+    };
+
+    let cwg = sync::WaitGroup::new();
+    cwg.add(CONNS);
+    for _c in 0..CONNS {
+        let ce = echoed.clone();
+        let cw = cwg.clone();
+        launch fn() {
+            switch net::TcpStream::connect("127.0.0.1", port) {
+                Some(c) => {
+                    let msg: [u8; 4] = [112u8, 105u8, 110u8, 103u8];
+                    let _ = c.write(msg);
+                    let mut back = Vector::<u8>::new();
+                    for _k in 0..8 {
+                        back.push(0u8);
+                    }
+                    let cap: usize = 8;
+                    let n = c.read(back.index_range_mut(0..cap));
+                    if n == 4 && *back.at(3) == 103u8 {
+                        let _ = ce.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+                    }
+                    back.free();
+                    c.free();
+                },
+                None => {},
+            };
+            cw.done();
+        };
+    }
+    cwg.wait();
+    wg.wait();
+    let s = served.get().load(atom::MemoryOrder::SeqCst);
+    let e = echoed.get().load(atom::MemoryOrder::SeqCst);
+    cwg.free();
+    wg.free();
+    served.free();
+    echoed.free();
+    io::shutdown();
+    rt::shutdown();
+    if s != CONNS || e != CONNS {
+        return 1;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// `@blocking` (M6/Phase 10): the attribute makes a call to an extern function go through a generated
+// wrapper that hands it to the blocking pool, so the call site is unchanged but the coroutine parks instead
+// of holding its worker. Two one-second blocking sleeps on ONE worker: serialized they would take two
+// seconds, so finishing under 1.8s is the proof they overlapped -- plus the emitted C is checked for the
+// wrapper, since a missing one would still pass a looser timing bound.
+@test
+fn blocking_attribute() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::blocking as blocking;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+import std::parallel::platform as platform;
+
+extern "C" "unistd.h" {
+    @blocking
+    pub fn sleep(seconds: u32) u32;
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let done = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(3);
+    let t0 = platform::now_ns();
+    for _i in 0..2 {
+        let d = done.clone();
+        let w = wg.clone();
+        launch fn() {
+            let _ = unsafe sleep(1); // a blocking syscall: must not hold the only worker
+            let _ = d.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+            w.done();
+        };
+    }
+    let d2 = done.clone();
+    let w2 = wg.clone();
+    launch fn() {
+        let _ = d2.get().fetch_add(100, atom::MemoryOrder::Relaxed);
+        w2.done();
+    };
+    let ok = wg.wait_timeout(time::Duration::from_secs(20));
+    let dt = platform::now_ns() - t0;
+    let n = done.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    done.free();
+    blocking::shutdown();
+    rt::shutdown();
+    if !ok || n != 102 {
+        return 1;
+    }
+    if dt > 1800000000 {
+        return 2; // two 1s blocking calls serialized would take 2s
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "__sc_blk_sleep("), "the call goes through the generated wrapper");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
 }
 
 // Work stealing (std/parallel/runtime): each worker owns a Chase-Lev deque and pushes to it without a lock,

@@ -5187,6 +5187,25 @@ extend Codegen {
                 }
             }
         }
+        // `@blocking`: the call goes to the generated wrapper, which hands the work to the blocking pool
+        // and parks this coroutine rather than letting it hold a worker thread.
+        let blk = self.cg_blocking_callee(callee_id);
+        if blk.node != NODE_NONE {
+            let mut bn = Buf128 {};
+            render_ident_src(
+                self.mod_src(blk.module),
+                self.name_span_in(
+                    blk.module,
+                    unsafe (*self.mod_ast(blk.module)).at_const(blk.node).as_data.function.name,
+                ),
+                &mut bn[0],
+                128,
+            );
+            self.buf.format_into("__sc_blk_{}(", diag::cstr(&bn[0]));
+            self.emit_call_args(args);
+            self.emit_str(")");
+            return;
+        }
         // callback specialization: call to elided cb param
         if self.cb_param != NODE_NONE && callee.kind == NodeKind::NODE_IDENTIFIER {
             let d = unsafe (*self.cur_ast()).resolution_def(callee_id);
@@ -7518,10 +7537,14 @@ extend Codegen {
         let n = *unsafe (*self.cur_ast()).at_const(id);
         let is_lit = n.kind == NodeKind::NODE_ARRAY_LITERAL;
         let mut lenN = NODE_NONE;
+        let mut lenv: u32 = 0;
         if !is_lit {
             lenN = self.array_length_of(id);
+            if lenN == NODE_NONE {
+                lenv = self.array_len_of(id);
+            }
         }
-        if !is_lit && lenN == NODE_NONE {
+        if !is_lit && lenN == NODE_NONE && lenv == 0 {
             return false;
         }
         let mut styp = Buf256 {};
@@ -7539,7 +7562,11 @@ extend Codegen {
         self.emit_expr(id);
         self.slice_raw = NODE_NONE;
         self.emit_str(", .len = ");
-        self.emit_expr(lenN);
+        if lenN != NODE_NONE {
+            self.emit_expr(lenN);
+        } else {
+            self.buf.format_into("{}", lenv);
+        }
         self.emit_str(" }");
         return true;
     }
@@ -7647,6 +7674,52 @@ extend Codegen {
         }
         self.buf.format_into("{}, .vt = &{}__vtbl }})", diag::cstr(tail), diag::cstr(&pair[0]));
         return true;
+    }
+    // The element count behind a slice coercion, read from the DECLARATION the expression names -- the
+    // node's own type has been rewritten to the slice by then, so the length is no longer on it. Covers a
+    // member access (`x.buf`), whose length expression lives in the field's own module and so cannot be
+    // emitted as an expression the way `array_length_of` does for a local. 0 = unknown.
+    fn array_len_of(self: &mut Self, iter: NodeId) u32 {
+        let n = *unsafe (*self.cur_ast()).at_const(iter);
+        let mut dm = self.cur_module();
+        let mut dn = NODE_NONE;
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            dn = unsafe (*self.cur_ast()).resolution(iter);
+        } else if n.kind == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+            // A member's resolution hangs off its NAME node, not the member node.
+            let d = unsafe (*self.cur_ast()).resolution_def(n.as_data.member.member);
+            dm = d.module;
+            dn = d.node;
+        }
+        if dn == NODE_NONE || dm as usize >= self.pkg_count() {
+            return 0;
+        }
+        // A declaration carries its type on its TYPE NODE, not on itself.
+        let da = self.mod_ast(dm);
+        let dnode = *unsafe (*da).at_const(dn);
+        let mut tnode = NODE_NONE;
+        if dnode.kind == NodeKind::NODE_FIELD {
+            tnode = dnode.as_data.field.ty;
+        } else if dnode.kind == NodeKind::NODE_PARAMETER {
+            tnode = dnode.as_data.parameter.ty;
+        } else if dnode.kind == NodeKind::NODE_LET {
+            tnode = dnode.as_data.let_stmt.ty;
+        }
+        let mut t = TYPE_NONE;
+        if tnode != NODE_NONE {
+            t = unsafe (*da).type_of(tnode);
+        }
+        if t == TYPE_NONE {
+            t = unsafe (*da).type_of(dn);
+        }
+        if t == TYPE_NONE {
+            return 0;
+        }
+        let y = *unsafe (*da).type_at(t);
+        if y.kind != TypeKind::TYPE_ARRAY {
+            return 0;
+        }
+        return y.as_data.arr.len;
     }
     const fn array_length_of(self: &mut Self, iter: NodeId) NodeId {
         if unsafe (*self.cur_ast()).at_const(iter).kind != NodeKind::NODE_IDENTIFIER {
@@ -13117,6 +13190,163 @@ extend Codegen {
         }
         self.env_clos = saved_env;
     }
+    // Every `@blocking` function this TU calls gets a wrapper: it packs the arguments into a frame, hands
+    // the call to the blocking pool (which PARKS the calling coroutine rather than holding its worker), and
+    // unpacks the result. Emitted per TU as statics, so each caller is self-contained, and only for
+    // functions actually called here.
+    fn emit_blocking_wrappers(self: &mut Self) {
+        let nn = unsafe (*self.cur_ast()).nodes.len();
+        let mut seen = Map::<u64, u8>::new();
+        let mut any = false;
+        let mut i: u32 = 0;
+        while i as usize < nn {
+            if unsafe (*self.cur_ast()).at_const(i).kind != NodeKind::NODE_CALL {
+                i = i + 1;
+                continue;
+            }
+            let d = self.cg_blocking_callee(unsafe (*self.cur_ast()).at_const(i).as_data.call.callee);
+            if d.node == NODE_NONE {
+                i = i + 1;
+                continue;
+            }
+            let key = d.module as u64 << 32 | d.node as u64;
+            if seen.contains_key(&key) {
+                i = i + 1;
+                continue;
+            }
+            seen.insert(key, 1);
+            if !any {
+                any = true;
+                // The pool's C-callable entry point (std::parallel::blocking::run_blocking, symbol pinned
+                // with @c.export). The loader links that module in whenever a `@blocking` attr exists.
+                self.emit_str("void __sc_blocking_run(void (*__r)(void *), void *__e);\n");
+            }
+            self.emit_blocking_wrapper(d);
+            i = i + 1;
+        }
+        if any {
+            self.emit_str("\n");
+        }
+        seen.free();
+    }
+    // The `@blocking` function a callee expression names, or a null DefId. Variadic ones are skipped: their
+    // arguments cannot be packed into a frame.
+    fn cg_blocking_callee(self: &Self, callee: NodeId) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
+        if callee == NODE_NONE {
+            return none;
+        }
+        let d = unsafe (*self.cur_ast()).resolution_def(callee);
+        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() {
+            return none;
+        }
+        let fa = self.mod_ast(d.module);
+        if unsafe (*fa).at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return none;
+        }
+        if self.cg_attr(d.module, d.node, AttrKind::ATTR_BLOCKING) == null {
+            return none;
+        }
+        if unsafe (*fa).at_const(d.node).as_data.function.is_variadic {
+            return none;
+        }
+        return d;
+    }
+    fn emit_blocking_wrapper(self: &mut Self, d: DefId) {
+        let fa = self.mod_ast(d.module);
+        let f = unsafe (*fa).at_const(d.node).as_data.function;
+        let mut nm = Buf128 {};
+        render_ident_src(self.mod_src(d.module), self.name_span_in(d.module, f.name), &mut nm[0], 128);
+        let pids = unsafe (*fa).list(f.params);
+        let np = f.params.len;
+        // The return type, in this module's pool.
+        let mut rt = TYPE_NONE;
+        if f.returns.len == 1 {
+            let r0 = unsafe (*fa).type_of(unsafe (*fa).list(f.returns)[0]);
+            if r0 != TYPE_NONE {
+                rt = unsafe (*self.cur_ast()).reintern(unsafe &*fa, r0);
+            }
+        }
+        let is_void = rt == TYPE_NONE || self.type_at(rt).kind == TypeKind::TYPE_BUILTIN && self.type_at(rt).as_data.builtin == BuiltinType::BT_VOID;
+        // typedef struct { <args>; <ret> } __sc_blk_<name>_env;
+        self.emit_str("typedef struct { ");
+        for k in 0..np {
+            let pt = self.cg_blocking_param_ty(d.module, unsafe pids[k as usize]);
+            let mut an = Buf32 {};
+            unsafe stdio::snprintf(&mut an[0], 32, "a%u".ptr() as *const char, k);
+            let mut decl = Buf300 {};
+            self.render_type_id(pt, &an[0], &mut decl[0], 300);
+            self.buf.format_into("{}; ", diag::cstr(&decl[0]));
+        }
+        if !is_void {
+            let mut decl = Buf300 {};
+            self.render_type_id(rt, "r".ptr() as *const char, &mut decl[0], 300);
+            self.buf.format_into("{}; ", diag::cstr(&decl[0]));
+        }
+        self.buf.format_into("}} __sc_blk_{}_env;\n", diag::cstr(&nm[0]));
+        // the trampoline the pool thread runs
+        self.buf.format_into(
+            "static void __sc_blk_{}_run(void *__e) {{ __sc_blk_{}_env *__v = (__sc_blk_{}_env *)__e; ",
+            diag::cstr(&nm[0]),
+            diag::cstr(&nm[0]),
+            diag::cstr(&nm[0]),
+        );
+        if !is_void {
+            self.emit_str("__v->r = ");
+        }
+        self.buf.format_into("{}(", diag::cstr(&nm[0]));
+        for k in 0..np {
+            if k != 0 {
+                self.emit_str(", ");
+            }
+            self.buf.format_into("__v->a{}", k);
+        }
+        self.emit_str("); }\n");
+        // the wrapper the call sites use
+        let mut rdecl = Buf300 {};
+        if is_void {
+            unsafe stdio::snprintf(&mut rdecl[0], 300, "%s".ptr() as *const char, "void".ptr() as *const char);
+        } else {
+            self.render_type_id(rt, "".ptr() as *const char, &mut rdecl[0], 300);
+        }
+        self.buf.format_into("static {} __sc_blk_{}(", diag::cstr(&rdecl[0]), diag::cstr(&nm[0]));
+        if np == 0 {
+            self.emit_str("void");
+        }
+        for k in 0..np {
+            if k != 0 {
+                self.emit_str(", ");
+            }
+            let pt = self.cg_blocking_param_ty(d.module, unsafe pids[k as usize]);
+            let mut an = Buf32 {};
+            unsafe stdio::snprintf(&mut an[0], 32, "a%u".ptr() as *const char, k);
+            let mut decl = Buf300 {};
+            self.render_type_id(pt, &an[0], &mut decl[0], 300);
+            self.emit_cstr(&decl[0]);
+        }
+        self.buf.format_into(") {{ __sc_blk_{}_env __v; ", diag::cstr(&nm[0]));
+        for k in 0..np {
+            self.buf.format_into("__v.a{} = a{}; ", k, k);
+        }
+        self.buf.format_into("__sc_blocking_run(__sc_blk_{}_run, &__v); ", diag::cstr(&nm[0]));
+        if !is_void {
+            self.emit_str("return __v.r; ");
+        }
+        self.emit_str("}\n");
+    }
+    // A parameter's type, brought into this module's pool.
+    fn cg_blocking_param_ty(self: &mut Self, m: ModuleId, pid: NodeId) TypeId {
+        let fa = self.mod_ast(m);
+        let tn = unsafe (*fa).at_const(pid).as_data.parameter.ty;
+        if tn == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let t0 = unsafe (*fa).type_of(tn);
+        if t0 == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        return unsafe (*self.cur_ast()).reintern(unsafe &*fa, t0);
+    }
     fn emit_closures(self: &mut Self, with_body: bool) {
         // CG-17: iterate the ids collected by collect_insts' sweep (ascending = old scan order)
         // instead of re-sweeping the whole node arena in both the proto and body passes.
@@ -15039,6 +15269,7 @@ extend Codegen {
             self.emit_layout_asserts();
             self.phase_prototypes(PROTO_PRIVATE);
             self.emit_str("\n");
+            self.emit_blocking_wrappers();
             self.phase_auto_frees();
             self.emit_dyn_tables();
             self.phase_bodies();
