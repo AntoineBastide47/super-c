@@ -1296,6 +1296,356 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// `sleep` and the scheduler's timer list: a sleeping coroutine parks on its deadline instead of holding its
+// worker. Proven structurally, not by timing -- with exactly ONE worker, a task that sleeps 50ms and a task
+// that sleeps not at all race to claim an atomic; only a parking sleep lets the second one win. The elapsed
+// time then confirms the sleep really slept, and the plain-thread path (no coroutine) sleeps outright.
+@test
+fn coroutine_sleep_and_timers() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::time as time;
+import std::parallel::platform as platform;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    rt::set_worker_count(1); // one worker: a blocking sleep would serialize the two tasks below
+
+    let t0 = platform::now_ns();
+    time::sleep(time::Duration::from_millis(5)); // off a coroutine: sleeps the thread
+    if platform::now_ns() - t0 < 4000000 {
+        return 1;
+    }
+
+    let order = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let oa = order.clone();
+    let wa = wg.clone();
+    launch fn() {
+        time::sleep(time::Duration::from_millis(50));
+        let _ = oa.get().compare_exchange(0, 1, atom::MemoryOrder::SeqCst, atom::MemoryOrder::Relaxed);
+        wa.done();
+    };
+    let ob = order.clone();
+    let wb = wg.clone();
+    launch fn() {
+        let _ = ob.get().compare_exchange(0, 2, atom::MemoryOrder::SeqCst, atom::MemoryOrder::Relaxed);
+        wb.done();
+    };
+    let t1 = platform::now_ns();
+    wg.wait();
+    let waited = platform::now_ns() - t1;
+    let first = order.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    order.free();
+    rt::shutdown();
+    if first != 2 {
+        return 2; // the sleeper kept the only worker: sleep did not park
+    }
+    if waited < 40000000 {
+        return 3; // the sleep did not actually wait
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// Task-aware `Mutex` / `RwLock` acquisition. On ONE worker: task A takes the mutex and then blocks on a
+// semaphore (parking while HOLDING the lock), task B tries to take that mutex (it must park, not sit on the
+// worker), and task C sleeps, releases the semaphore and lets both finish. Under an OS-blocking acquire, B
+// would occupy the only worker and C could never run -- the run deadlocks instead of returning. Also covers
+// read/write guards taken from coroutines and a timed acquire that expires and then succeeds. Leak-checked.
+@test
+fn task_aware_locks() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::time as time;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+    let rw = arc::Arc::<sync::RwLock<i64>>::new(sync::RwLock::<i64>::new(0));
+    let sem = sync::Semaphore::new(0);
+    let wg = sync::WaitGroup::new();
+    wg.add(3);
+
+    let ma = m.clone();
+    let sa = sem.clone();
+    let wa = wg.clone();
+    launch fn() {
+        let mut g = ma.get().lock();
+        sa.acquire(); // parks while holding the lock
+        let v = g.get_mut();
+        *v = *v + 1;
+        wa.done();
+    };
+    let mb = m.clone();
+    let rb = rw.clone();
+    let wb = wg.clone();
+    launch fn() {
+        let mut g = mb.get().lock(); // contended: must park
+        let v = g.get_mut();
+        *v = *v + 10;
+        let mut w = rb.get().write();
+        let n = w.get_mut();
+        *n = *n + 5;
+        wb.done();
+    };
+    let sc = sem.clone();
+    let rc = rw.clone();
+    let wc = wg.clone();
+    launch fn() {
+        {
+            let g = rc.get().read();
+            let _ = *g.get();
+        }
+        time::sleep(time::Duration::from_millis(10));
+        sc.release();
+        wc.done();
+    };
+    wg.wait();
+
+    let lg = m.get().lock();
+    let total = *lg.get();
+    lg.free();
+    let rg = rw.get().read();
+    let written = *rg.get();
+    rg.free();
+
+    // A timed acquire on an exhausted semaphore expires; once a permit is back it succeeds.
+    let flags = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg2 = sync::WaitGroup::new();
+    wg2.add(1);
+    let s2 = sem.clone();
+    let fl = flags.clone();
+    let w2 = wg2.clone();
+    launch fn() {
+        if !s2.acquire_timeout(time::Duration::from_millis(10)) {
+            let _ = fl.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+        }
+        s2.release();
+        if s2.acquire_timeout(time::Duration::from_millis(2000)) {
+            let _ = fl.get().fetch_add(10, atom::MemoryOrder::Relaxed);
+        }
+        w2.done();
+    };
+    wg2.wait();
+    let f = flags.get().load(atom::MemoryOrder::SeqCst);
+
+    wg2.free();
+    flags.free();
+    wg.free();
+    sem.free();
+    rw.free();
+    m.free();
+    rt::shutdown();
+    if total != 11 {
+        return 1;
+    }
+    if written != 5 {
+        return 2;
+    }
+    if f != 11 {
+        return 3;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// Unbounded channels and channel timeouts: 100 sends with nobody draining must all be accepted (the ring
+// grows, no sender ever waits), a timed `recv` on an empty channel expires after its deadline and then takes
+// a value that arrives, and a timed `send` into a full bounded(1) channel hands the value back instead of
+// waiting forever. Leak-checked, so the grown slot array and every payload are accounted for.
+@test
+fn channel_unbounded_and_timeouts() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::channel as chan;
+import std::parallel::time as time;
+import std::parallel::platform as platform;
+
+fn main() i32 {
+    let ch = chan::Channel::<i64>::unbounded();
+    let rx = ch.receiver();
+    let tx = ch.sender();
+    ch.free();
+    let mut sum: i64 = 0;
+    for i in 0..100 {
+        switch tx.send(i) {
+            Sent => {},
+            Rejected(_) => {
+                return 1;
+            },
+        };
+    }
+    for _i in 0..100 {
+        switch rx.recv() {
+            Some(v) => {
+                sum = sum + v;
+            },
+            None => {
+                return 2;
+            },
+        };
+    }
+
+    let t0 = platform::now_ns();
+    switch rx.recv_timeout(time::Duration::from_millis(10)) {
+        Some(_) => {
+            return 3;
+        },
+        None => {},
+    };
+    if platform::now_ns() - t0 < 9000000 {
+        return 4;
+    }
+    let _ = tx.send(41);
+    switch rx.recv_timeout(time::Duration::from_millis(2000)) {
+        Some(v) => {
+            sum = sum + v;
+        },
+        None => {
+            return 5;
+        },
+    };
+
+    let b = chan::Channel::<i64>::bounded(1);
+    let brx = b.receiver();
+    let btx = b.sender();
+    b.free();
+    let _ = btx.send(1);
+    switch btx.send_timeout(2, time::Duration::from_millis(10)) {
+        Sent => {
+            return 6;
+        },
+        Rejected(v) => {
+            sum = sum + v;
+        },
+    };
+    btx.free();
+    brx.free();
+    tx.free();
+    rx.free();
+    rt::shutdown();
+    return (sum - 4993) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// Every timed wait racing its own deadline, on purpose: with one-nanosecond timeouts the timer fires while
+// the parking worker is still handing the coroutine off, so a wakeup must be claimed by exactly ONE waker
+// (notify or deadline) and the hand-off must not read fields the resumed coroutine has already reused. Both
+// were real bugs -- a stale wait node resuming a later park, and a double release through a cleared commit
+// argument (`pthread_mutex_unlock(NULL)`). 40 tasks x 25 rounds over a semaphore, a bounded channel, sleeps,
+// yields and a shared mutex; the exact counter proves no wakeup was lost or double-spent. Leak-checked.
+@test
+fn timed_wait_deadline_races() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::channel as chan;
+import std::parallel::time as time;
+import std::parallel::arc as arc;
+
+fn main() i32 {
+    let sem = sync::Semaphore::new(0);
+    let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    let ch = chan::Channel::<i64>::bounded(1);
+    let rxs = ch.receiver();
+    let txs = ch.sender();
+    wg.add(40);
+    for _i in 0..40 {
+        let s = sem.clone();
+        let w = wg.clone();
+        let mm = m.clone();
+        let tx = txs.clone();
+        let rx = rxs.clone();
+        launch fn() {
+            for _k in 0..25 {
+                let _ = s.acquire_timeout(time::Duration::from_nanos(1));
+                let _ = rx.recv_timeout(time::Duration::from_nanos(1));
+                let _ = tx.send_timeout(1, time::Duration::from_nanos(1));
+                time::sleep(time::Duration::from_nanos(1));
+                rt::yield_now();
+                {
+                    let mut g = mm.get().lock();
+                    let v = g.get_mut();
+                    *v = *v + 1;
+                }
+            }
+            w.done();
+        };
+    }
+    if !wg.wait_timeout(time::Duration::from_secs(120)) {
+        return 9;
+    }
+    let lg = m.get().lock();
+    let locked = *lg.get();
+    lg.free();
+    loop {
+        switch rxs.try_recv() {
+            Some(_) => {},
+            None => {
+                break;
+            },
+        };
+    }
+    txs.free();
+    rxs.free();
+    ch.free();
+    wg.free();
+    sem.free();
+    m.free();
+    rt::shutdown();
+    return (locked - 1000) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
 // shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
 // contents are stored non-`const` and mutated soundly -- exercised here by an `UnsafeCell<i32>` in an

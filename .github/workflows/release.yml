@@ -188,10 +188,10 @@ jobs:
             ./bootstrap/super-c.exe --bootstrap-tags src/main.spc
             # shellcheck disable=SC2046
             "${CC:-gcc}" $cstd -O1 $(find src/build -name '*.c') -o "stage0-$bin" $(cat src/build/__ldflags src/build/raw/__ldflags 2>/dev/null)
-            SC_CMD=1 "./stage0-$bin" build --profile=release "--cstd=$cstd" -o "$bin"
+            SC_CMD=1 SC_LEAK_CHECK=fatal "./stage0-$bin" release "--cstd=$cstd" -o "$bin"
           else
             "./super-c${BINEXT:-}" build --bootstrap-tags -o "stage0-$bin" src/main.spc
-            SC_CMD=1 "./stage0-$bin" build --profile=release -o "$bin"
+            SC_CMD=1 SC_LEAK_CHECK=fatal "./stage0-$bin" release -o "$bin"
           fi
           rm -f "stage0-$bin"
 

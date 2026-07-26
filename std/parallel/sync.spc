@@ -1,16 +1,150 @@
-// Blocking synchronisation primitives for OS threads, backed by pthread. Import with
-// `import std::parallel::sync;`.
+// Task-aware synchronisation primitives. Import with `import std::parallel::sync;`.
+//
+// Every wait here is task-aware: a *coroutine* (anything running under `launch`) that cannot proceed PARKS
+// -- it saves its context and hands its worker thread back to the scheduler, which runs other tasks -- and
+// any other thread blocks on the platform parking lot. Nothing ever occupies a worker while waiting, so
+// more tasks than workers can contend for a lock without deadlocking. `RawMutex` below is the one place
+// that touches an OS mutex, and only for the few instructions that mutate its own fields.
 
 import pthread;
+import sc_runtime;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::runtime as runtime;
+import std::parallel::time as time;
 
-/// A mutual-exclusion lock guarding a `T`. Only the thread holding the lock can reach the value, through
-/// the RAII `MutexGuard` returned by `lock` -- the lock is released when the guard is dropped. Put one in an
-/// `Arc` to share it: `Arc<Mutex<T>>`.
+// -----------------------------------------------------------------------------------------------------
+// RawMutex: the task-aware lock behind Mutex<T>, and the wait primitive the rest of the module reuses.
+// -----------------------------------------------------------------------------------------------------
+
+/// One entry in a wait queue: a parked coroutine plus the wake token of the park it is waiting out. It
+/// lives on that coroutine's own stack, so waiting costs no allocation, and the waiter unlinks it before
+/// returning. The token is what makes a wakeup park-specific: an entry a timed wait left behind is inert.
+pub struct Waiter {
+    pub co: *mut runtime::Coroutine,
+    pub token: u32,
+    pub next: *mut Waiter,
+}
+
+/// Lock ownership is the `locked` flag; `inner` is an OS mutex held only for the handful of instructions
+/// that touch this struct -- never across user code, and never across a park. A coroutine that finds the
+/// lock held parks on `head`/`tail`; any other thread parks on the `locked` word itself. `pub` for linkage:
+/// `Mutex<T>`'s methods are monomorphized in the caller's module. Not a user-facing type.
+pub struct RawMutex {
+    pub inner: *mut void, // OS mutex guarding this struct (sc_mutex_new)
+    pub locked: i32, // 0 free / 1 held; also the park word for OS-thread waiters
+    pub os_waiters: i32, // OS threads parked on `locked`, so an unlock knows whether to unpark
+    pub head: *mut Waiter, // parked coroutine waiters, FIFO
+    pub tail: *mut Waiter,
+}
+
+/// A new, unlocked raw lock. `pub` for linkage.
+pub fn raw_mutex_new() *mut RawMutex {
+    let mut g = Global {};
+    let m = g.alloc(sizeof(RawMutex), alignof(RawMutex)) as *mut RawMutex;
+    unsafe m[0] = RawMutex { inner: unsafe pthread::sc_mutex_new(), locked: 0, os_waiters: 0, head: null, tail: null };
+    return m;
+}
+
+/// Destroy and release a raw lock. `pub` for linkage.
+pub fn raw_mutex_free(m: *mut RawMutex) {
+    unsafe pthread::sc_mutex_free((*m).inner);
+    let mut g = Global {};
+    g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
+}
+
+// The address OS-thread waiters park on: they sleep while it reads 1, and an unlock publishes 0 before
+// unparking them, so a wakeup can never be missed.
+fn park_word(m: *mut RawMutex) *mut i32 {
+    return &mut unsafe (*m).locked;
+}
+
+// The park hand-off used inside `raw_mutex_lock`: release only the internal OS mutex, since the coroutine
+// never held the lock itself.
+fn commit_os_unlock(p: *mut void) {
+    let _ = unsafe pthread::pthread_mutex_unlock(p);
+}
+
+/// The park hand-off used by `Condvar::wait`: release the whole lock, so another task can take it while the
+/// waiter sleeps. `pub` for linkage.
+pub fn commit_raw_unlock(p: *mut void) {
+    raw_mutex_unlock(p as *mut RawMutex);
+}
+
+/// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
+pub fn raw_mutex_lock(m: *mut RawMutex) {
+    let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+    while unsafe (*m).locked != 0 {
+        let co = runtime::current();
+        if co != null {
+            // Queue up, then park: the runtime releases `inner` once our context is saved, so the unlock
+            // that pops us can never resume a coroutine that is still switching out. The node lives in this
+            // frame and is always popped by the unlock that wakes us.
+            let mut w = Waiter { co: co, token: runtime::park_begin(co), next: null };
+            let wp = &mut w;
+            if unsafe (*m).tail == null {
+                unsafe (*m).head = wp;
+            } else {
+                unsafe (*(*m).tail).next = wp;
+            }
+            unsafe (*m).tail = wp;
+            runtime::park_current(commit_os_unlock, unsafe (*m).inner);
+            let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+        } else {
+            let w = park_word(m);
+            unsafe (*m).os_waiters = unsafe (*m).os_waiters + 1;
+            let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+            unsafe sc_runtime::sc_rt_park(w, 1, -1);
+            let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+            unsafe (*m).os_waiters = unsafe (*m).os_waiters - 1;
+        }
+    }
+    unsafe (*m).locked = 1;
+    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+}
+
+/// Acquire the lock only if it is free; reports whether it was taken. Never waits.
+pub fn raw_mutex_try_lock(m: *mut RawMutex) bool {
+    let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+    let free = unsafe (*m).locked == 0;
+    if free {
+        unsafe (*m).locked = 1;
+    }
+    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+    return free;
+}
+
+/// Release the lock and hand it on: wake the first queued coroutine whose wake claim we win, and unpark any
+/// OS threads waiting on it. `pub` for linkage.
+pub fn raw_mutex_unlock(m: *mut RawMutex) {
+    let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+    unsafe (*m).locked = 0;
+    let mut woke = false;
+    while !woke {
+        let wp = unsafe (*m).head;
+        if wp == null {
+            break;
+        }
+        unsafe (*m).head = unsafe (*wp).next;
+        if unsafe (*m).head == null {
+            unsafe (*m).tail = null;
+        }
+        unsafe (*wp).next = null;
+        woke = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
+    }
+    let unpark = unsafe (*m).os_waiters > 0;
+    let w = park_word(m);
+    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+    if unpark {
+        unsafe sc_runtime::sc_rt_unpark_all(w);
+    }
+}
+
+/// A mutual-exclusion lock guarding a `T`. Only the holder can reach the value, through the RAII
+/// `MutexGuard` returned by `lock` -- the lock is released when the guard is dropped. A contended `lock`
+/// parks a coroutine instead of blocking its worker. Put one in an `Arc` to share it: `Arc<Mutex<T>>`.
 pub struct Mutex<T> {
-    handle: *mut void, // heap pthread_mutex_t (sc_mutex_new)
+    raw: *mut RawMutex,
     data: UnsafeCell<T>,
 }
 
@@ -29,16 +163,16 @@ extend<T: Send> Mutex<T> as Sync {}
 extend<T> Mutex<T> {
     /// A new unlocked mutex owning `value`.
     pub fn new(value: T) Mutex<T> {
-        return Mutex::<T> { handle: unsafe pthread::sc_mutex_new(), data: UnsafeCell::<T>::new(value) };
+        return Mutex::<T> { raw: raw_mutex_new(), data: UnsafeCell::<T>::new(value) };
     }
-    /// Block until the lock is acquired, then return the guard.
+    /// Wait until the lock is acquired, then return the guard. A coroutine parks while it is held.
     pub fn lock(self: &Mutex<T>) MutexGuard<T> {
-        let _ = unsafe pthread::pthread_mutex_lock(self.handle);
+        raw_mutex_lock(self.raw);
         return MutexGuard::<T>::hold(self);
     }
-    /// Try to acquire without blocking; `None` if another thread holds it.
+    /// Try to acquire without waiting; `None` if it is already held.
     pub fn try_lock(self: &Mutex<T>) Option<MutexGuard<T>> {
-        if unsafe pthread::pthread_mutex_trylock(self.handle) == 0 {
+        if raw_mutex_try_lock(self.raw) {
             return Option::<MutexGuard<T>>::Some(MutexGuard::<T>::hold(self));
         }
         return Option::<MutexGuard<T>>::None;
@@ -49,10 +183,10 @@ extend<T> Mutex<T> {
     }
     // --- guard-facing helpers (same module) ---------------------------------------------------
     fn unlock_raw(self: &Mutex<T>) {
-        let _ = unsafe pthread::pthread_mutex_unlock(self.handle);
+        raw_mutex_unlock(self.raw);
     }
-    fn raw_handle(self: &Mutex<T>) *mut void {
-        return self.handle;
+    fn raw_handle(self: &Mutex<T>) *mut RawMutex {
+        return self.raw;
     }
     fn data_ref(self: &Mutex<T>) &T {
         return self.data.get_ref();
@@ -65,8 +199,8 @@ extend<T> Mutex<T> {
 extend<T> Mutex<T> as Free {
     pub fn free(self: &mut Mutex<T>) {
         self.data.get().free(); // deep-free the guarded value (no-op if T isn't Free)
-        unsafe pthread::sc_mutex_free(self.handle);
-        self.handle = null;
+        raw_mutex_free(self.raw);
+        self.raw = null;
     }
 }
 
@@ -75,8 +209,8 @@ extend<T> MutexGuard<T> {
     pub fn hold(mutex: &Mutex<T>) MutexGuard<T> {
         return MutexGuard::<T> { mutex: mutex };
     }
-    // The underlying OS mutex, for Condvar::wait to release+reacquire. Not user-facing.
-    pub fn lock_handle(self: &MutexGuard<T>) *mut void {
+    // The underlying lock, for Condvar::wait to release and re-acquire. Not user-facing.
+    pub fn lock_handle(self: &MutexGuard<T>) *mut RawMutex {
         return self.mutex.raw_handle();
     }
     /// Borrow the guarded value.
@@ -111,10 +245,20 @@ extend<T> MutexGuard<T> as Free {
 // RwLock: many readers OR one writer.
 // -----------------------------------------------------------------------------------------------------
 
+// Who holds the lock right now. `waiting_writers` gives writers priority: a new reader yields to a writer
+// that is already queued, so a steady stream of readers cannot starve it.
+struct RwState {
+    pub readers: i64,
+    pub writer: bool,
+    pub waiting_writers: i64,
+}
+
 /// A reader-writer lock guarding a `T`: any number of concurrent readers (`read`) or a single exclusive
-/// writer (`write`), each returning an RAII guard. Share it as `Arc<RwLock<T>>`.
+/// writer (`write`), each returning an RAII guard. Waiting parks a coroutine rather than its worker. Share
+/// it as `Arc<RwLock<T>>`.
 pub struct RwLock<T> {
-    handle: *mut void, // heap pthread_rwlock_t (sc_rwlock_new)
+    state: Mutex<RwState>, // held only while acquiring/releasing, never while the lock is held
+    cv: Condvar, // signalled whenever the lock becomes free
     data: UnsafeCell<T>,
 }
 
@@ -136,38 +280,108 @@ extend<T: Send + Sync> RwLock<T> as Sync {}
 extend<T> RwLock<T> {
     /// A new unlocked lock owning `value`.
     pub fn new(value: T) RwLock<T> {
-        return RwLock::<T> { handle: unsafe pthread::sc_rwlock_new(), data: UnsafeCell::<T>::new(value) };
+        return RwLock::<T> {
+            state: Mutex::<RwState>::new(RwState { readers: 0, writer: false, waiting_writers: 0 }),
+            cv: Condvar::new(),
+            data: UnsafeCell::<T>::new(value),
+        };
     }
-    /// Block for shared read access.
+    /// Wait for shared read access.
     pub fn read(self: &RwLock<T>) RwLockReadGuard<T> {
-        let _ = unsafe pthread::pthread_rwlock_rdlock(self.handle);
+        let mut g = self.state.lock();
+        loop {
+            let mut ready = false;
+            {
+                let s = g.get();
+                ready = !s.writer && s.waiting_writers == 0;
+            }
+            if ready {
+                break;
+            }
+            self.cv.wait(&g);
+        }
+        let s = g.get_mut();
+        s.readers = s.readers + 1;
         return RwLockReadGuard::<T>::hold(self);
     }
-    /// Block for exclusive write access.
+    /// Wait for exclusive write access.
     pub fn write(self: &RwLock<T>) RwLockWriteGuard<T> {
-        let _ = unsafe pthread::pthread_rwlock_wrlock(self.handle);
+        let mut g = self.state.lock();
+        {
+            let s = g.get_mut();
+            s.waiting_writers = s.waiting_writers + 1;
+        }
+        loop {
+            let mut ready = false;
+            {
+                let s = g.get();
+                ready = !s.writer && s.readers == 0;
+            }
+            if ready {
+                break;
+            }
+            self.cv.wait(&g);
+        }
+        let s = g.get_mut();
+        s.waiting_writers = s.waiting_writers - 1;
+        s.writer = true;
         return RwLockWriteGuard::<T>::hold(self);
     }
-    /// Non-blocking shared read; `None` if a writer holds the lock.
+    /// Take shared read access only if it is free right now; `None` if a writer holds or wants the lock.
     pub fn try_read(self: &RwLock<T>) Option<RwLockReadGuard<T>> {
-        if unsafe pthread::pthread_rwlock_tryrdlock(self.handle) == 0 {
-            return Option::<RwLockReadGuard<T>>::Some(RwLockReadGuard::<T>::hold(self));
+        let mut g = self.state.lock();
+        let mut ready = false;
+        {
+            let s = g.get();
+            ready = !s.writer && s.waiting_writers == 0;
         }
-        return Option::<RwLockReadGuard<T>>::None;
+        if !ready {
+            return Option::<RwLockReadGuard<T>>::None;
+        }
+        let s = g.get_mut();
+        s.readers = s.readers + 1;
+        return Option::<RwLockReadGuard<T>>::Some(RwLockReadGuard::<T>::hold(self));
     }
-    /// Non-blocking exclusive write; `None` if the lock is held.
+    /// Take exclusive write access only if the lock is completely free; `None` otherwise.
     pub fn try_write(self: &RwLock<T>) Option<RwLockWriteGuard<T>> {
-        if unsafe pthread::pthread_rwlock_trywrlock(self.handle) == 0 {
-            return Option::<RwLockWriteGuard<T>>::Some(RwLockWriteGuard::<T>::hold(self));
+        let mut g = self.state.lock();
+        let mut ready = false;
+        {
+            let s = g.get();
+            ready = !s.writer && s.readers == 0;
         }
-        return Option::<RwLockWriteGuard<T>>::None;
+        if !ready {
+            return Option::<RwLockWriteGuard<T>>::None;
+        }
+        let s = g.get_mut();
+        s.writer = true;
+        return Option::<RwLockWriteGuard<T>>::Some(RwLockWriteGuard::<T>::hold(self));
     }
     /// Direct `&mut` when owned uniquely (`&mut self`) -- no locking.
     pub fn get_mut(self: &mut RwLock<T>) &mut T {
         return &mut unsafe self.data.get()[0];
     }
-    fn unlock_raw(self: &RwLock<T>) {
-        let _ = unsafe pthread::pthread_rwlock_unlock(self.handle);
+    // Release shared access; the last reader out lets a waiting writer in.
+    fn unlock_read(self: &RwLock<T>) {
+        let mut g = self.state.lock();
+        let mut last = false;
+        {
+            let s = g.get_mut();
+            s.readers = s.readers - 1;
+            last = s.readers == 0;
+        }
+        if last {
+            self.cv.notify_all(); // under the paired lock: it guards the wait queue
+        }
+    }
+    // Release exclusive access.
+    fn unlock_write(self: &RwLock<T>) {
+        let mut g = self.state.lock();
+        {
+            let s = g.get_mut();
+            s.writer = false;
+        }
+        self.cv.notify_all();
     }
     fn data_ref(self: &RwLock<T>) &T {
         return self.data.get_ref();
@@ -180,8 +394,8 @@ extend<T> RwLock<T> {
 extend<T> RwLock<T> as Free {
     pub fn free(self: &mut RwLock<T>) {
         self.data.get().free();
-        unsafe pthread::sc_rwlock_free(self.handle);
-        self.handle = null;
+        self.state.free();
+        self.cv.free();
     }
 }
 
@@ -203,7 +417,7 @@ extend<T> RwLockReadGuard<T> as Deref<T> {
 
 extend<T> RwLockReadGuard<T> as Free {
     pub fn free(self: &mut RwLockReadGuard<T>) {
-        self.lock.unlock_raw();
+        self.lock.unlock_read();
     }
 }
 
@@ -235,7 +449,7 @@ extend<T> RwLockWriteGuard<T> as DerefMut<T> {
 
 extend<T> RwLockWriteGuard<T> as Free {
     pub fn free(self: &mut RwLockWriteGuard<T>) {
-        self.lock.unlock_raw();
+        self.lock.unlock_write();
     }
 }
 
@@ -243,22 +457,22 @@ extend<T> RwLockWriteGuard<T> as Free {
 // Condvar: block until another thread signals, paired with a Mutex.
 // -----------------------------------------------------------------------------------------------------
 
-/// A condition variable. Threads `wait` on it while holding a `MutexGuard` (the wait atomically releases
-/// the mutex and re-acquires it before returning); other threads `notify_one`/`notify_all` to wake them.
-/// Always re-check the condition in a loop after `wait` -- wakeups may be spurious.
-// The coroutine waiters parked on a condvar (intrusive via `Coroutine.next`); guarded by the paired mutex,
-// so it is heap-boxed and reached through a raw pointer (mutated under that lock, never structurally).
+// The waiter set, guarded by the paired mutex -- so it is heap-boxed and reached through a raw pointer
+// (mutated under that lock, never structurally). Coroutines queue their own `Waiter` nodes on `head`/`tail`;
+// other threads park on `gen`, which every notify bumps, and `os_waiters` counts them so a notify with no
+// thread waiting costs nothing.
 struct CondQ {
-    pub head: *mut runtime::Coroutine,
-    pub tail: *mut runtime::Coroutine,
+    pub head: *mut Waiter,
+    pub tail: *mut Waiter,
+    pub gen: i32,
+    pub os_waiters: i32,
 }
 
-/// A condition variable. A coroutine that `wait`s PARKS (its worker runs other tasks); a plain OS thread
-/// blocks. `notify_one`/`notify_all` wake whichever kind is waiting. Always re-check the condition in a loop
-/// after `wait` -- wakeups may be spurious.
+/// A condition variable. A coroutine that `wait`s PARKS (its worker runs other tasks); any other thread
+/// blocks. `notify_one`/`notify_all` wake whichever kind is waiting, and must be called while holding the
+/// paired mutex. Always re-check the condition in a loop after `wait` -- wakeups may be spurious.
 pub struct Condvar {
-    handle: *mut void, // heap pthread_cond_t (sc_cond_new), for OS-thread waiters
-    wq: *mut CondQ, // parked-coroutine queue, guarded by the paired mutex
+    wq: *mut CondQ, // waiter set, guarded by the paired mutex
 }
 
 extend Condvar as Send {}
@@ -270,62 +484,128 @@ extend Condvar {
     pub fn new() Condvar {
         let mut g = Global {};
         let q = g.alloc(sizeof(CondQ), alignof(CondQ)) as *mut CondQ;
-        unsafe q[0] = CondQ { head: null, tail: null };
-        return Condvar { handle: unsafe pthread::sc_cond_new(), wq: q };
+        unsafe q[0] = CondQ { head: null, tail: null, gen: 0, os_waiters: 0 };
+        return Condvar { wq: q };
     }
-    /// Atomically release `guard`'s mutex and block until notified, then re-acquire it before returning.
-    /// A coroutine parks (freeing its worker); a non-coroutine thread blocks. Re-check in a loop -- wakeups
-    /// may be spurious.
+    /// Atomically release `guard`'s lock and wait until notified, then take it again before returning.
+    /// A coroutine parks (freeing its worker); any other thread blocks. Re-check the condition in a loop --
+    /// wakeups may be spurious.
     pub fn wait<T>(self: &Condvar, guard: &MutexGuard<T>) {
+        self.wait_raw(guard.lock_handle(), 0);
+    }
+    /// `wait`, but also returning once the monotonic `deadline` (a `time::deadline_in` value) has passed.
+    /// It reports nothing: as with `wait`, re-check the condition -- and the deadline -- in a loop.
+    pub fn wait_until<T>(self: &Condvar, guard: &MutexGuard<T>, deadline: u64) {
+        self.wait_raw(guard.lock_handle(), deadline);
+    }
+    // The whole wait, minus the generic guard: `wait` and `wait_until` differ only in the deadline, so this
+    // is monomorphized once instead of per `T`. `pub` for linkage.
+    pub fn wait_raw(self: &Condvar, m: *mut RawMutex, deadline: u64) {
         let co = runtime::current();
         if co != null {
-            // Enqueue self under the held mutex, then park; the runtime releases the mutex once our context
-            // is saved. On resume, re-acquire it -- exactly the pthread_cond_wait contract.
-            unsafe (*co).next = null;
+            // Queue up under the held lock, then park; the runtime releases the lock once our context is
+            // saved. On resume, take it again -- exactly the pthread_cond_wait contract. Re-taking the lock
+            // may park us a second time while this node is still queued (when a deadline, not a notify, woke
+            // us): harmless, because the node's token is spent and no notify can act on it.
+            let token = runtime::park_begin(co);
+            let mut w = Waiter { co: co, token: token, next: null };
+            let wp = &mut w;
             if unsafe (*self.wq).tail == null {
-                unsafe (*self.wq).head = co;
+                unsafe (*self.wq).head = wp;
             } else {
-                unsafe (*(*self.wq).tail).next = co;
+                unsafe (*(*self.wq).tail).next = wp;
             }
-            unsafe (*self.wq).tail = co;
-            runtime::park_current(guard.lock_handle());
-            let _ = unsafe pthread::pthread_mutex_lock(guard.lock_handle());
+            unsafe (*self.wq).tail = wp;
+            runtime::park_timed(token, deadline, commit_raw_unlock, m);
+            raw_mutex_lock(m);
+            if deadline != 0 {
+                runtime::cancel_timer(co); // drop the timer if a notify got here first
+            }
+            self.unlink(wp); // still queued if the deadline is what woke us
         } else {
-            let _ = unsafe pthread::pthread_cond_wait(self.handle, guard.lock_handle());
+            // No coroutine to park: publish that we are waiting, drop the lock and sleep on `gen`, which
+            // every notify bumps before unparking -- so a notify in that window cannot be missed.
+            let g = unsafe (*self.wq).gen;
+            let w = &mut unsafe (*self.wq).gen;
+            unsafe (*self.wq).os_waiters = unsafe (*self.wq).os_waiters + 1;
+            raw_mutex_unlock(m);
+            let rel = if deadline == 0 {
+                -1i64;
+            } else {
+                time::remaining_ns(deadline) as i64;
+            };
+            unsafe sc_runtime::sc_rt_park(w, g, rel);
+            raw_mutex_lock(m);
+            unsafe (*self.wq).os_waiters = unsafe (*self.wq).os_waiters - 1;
         }
     }
-    /// Wake one waiter (a parked coroutine if any, and one blocked OS thread). Call under the paired mutex.
+    // Take a wait node off the queue if it is still on it (a notify pops its own). Caller holds the paired
+    // lock. Mandatory before the waiter returns: the node lives in that frame.
+    fn unlink(self: &Condvar, wp: *mut Waiter) {
+        let mut prev: *mut Waiter = null;
+        let mut cur = unsafe (*self.wq).head;
+        while cur != null && cur != wp {
+            prev = cur;
+            cur = unsafe (*cur).next;
+        }
+        if cur != wp {
+            return;
+        }
+        if prev == null {
+            unsafe (*self.wq).head = unsafe (*wp).next;
+        } else {
+            unsafe (*prev).next = unsafe (*wp).next;
+        }
+        if unsafe (*self.wq).tail == wp {
+            unsafe (*self.wq).tail = prev;
+        }
+        unsafe (*wp).next = null;
+    }
+    // Publish a new generation and unpark the OS-thread waiters. Caller holds the paired lock.
+    fn bump_gen(self: &Condvar) {
+        if unsafe (*self.wq).os_waiters == 0 {
+            return;
+        }
+        let w = &mut unsafe (*self.wq).gen;
+        unsafe (*self.wq).gen = unsafe (*self.wq).gen + 1;
+        unsafe sc_runtime::sc_rt_unpark_all(w);
+    }
+    /// Wake one waiter. Call under the paired mutex. (OS-thread waiters share one park address, so they all
+    /// wake and re-check -- a spurious wakeup, which the contract allows.)
     pub fn notify_one(self: &Condvar) {
-        let co = unsafe (*self.wq).head;
-        if co != null {
-            unsafe (*self.wq).head = unsafe (*co).next;
+        let mut woke = false;
+        while !woke {
+            let wp = unsafe (*self.wq).head;
+            if wp == null {
+                break;
+            }
+            unsafe (*self.wq).head = unsafe (*wp).next;
             if unsafe (*self.wq).head == null {
                 unsafe (*self.wq).tail = null;
             }
-            unsafe (*co).next = null;
-            runtime::wake(co);
+            unsafe (*wp).next = null;
+            // false if that park is already over (its deadline claimed it): spend the wakeup on the next.
+            woke = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
         }
-        let _ = unsafe pthread::pthread_cond_signal(self.handle);
+        self.bump_gen();
     }
-    /// Wake every waiter (all parked coroutines and all blocked OS threads). Call under the paired mutex.
+    /// Wake every waiter. Call under the paired mutex.
     pub fn notify_all(self: &Condvar) {
-        let mut co = unsafe (*self.wq).head;
+        let mut wp = unsafe (*self.wq).head;
         unsafe (*self.wq).head = null;
         unsafe (*self.wq).tail = null;
-        while co != null {
-            let nx = unsafe (*co).next;
-            unsafe (*co).next = null;
-            runtime::wake(co);
-            co = nx;
+        while wp != null {
+            let nx = unsafe (*wp).next;
+            unsafe (*wp).next = null;
+            let _ = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
+            wp = nx;
         }
-        let _ = unsafe pthread::pthread_cond_broadcast(self.handle);
+        self.bump_gen();
     }
 }
 
 extend Condvar as Free {
     pub fn free(self: &mut Condvar) {
-        unsafe pthread::sc_cond_free(self.handle);
-        self.handle = null;
         let mut g = Global {};
         g.dealloc(self.wq, sizeof(CondQ), alignof(CondQ));
         self.wq = null;
@@ -422,13 +702,26 @@ extend WaitGroup {
             inner.cv.notify_all();
         }
     }
-    /// Block until the outstanding count reaches zero.
+    /// Wait until the outstanding count reaches zero.
     pub fn wait(self: &WaitGroup) {
         let inner = self.inner.get();
         let g = inner.count.lock();
         while *g.get() > 0 {
             inner.cv.wait(&g);
         }
+    }
+    /// Wait for the count to reach zero, giving up after `d`; reports whether it reached zero.
+    pub fn wait_timeout(self: &WaitGroup, d: time::Duration) bool {
+        let inner = self.inner.get();
+        let deadline = time::deadline_in(d);
+        let g = inner.count.lock();
+        while *g.get() > 0 {
+            if time::remaining_ns(deadline) == 0 {
+                return false;
+            }
+            inner.cv.wait_until(&g, deadline);
+        }
+        return true;
     }
 }
 
@@ -544,7 +837,22 @@ extend Semaphore {
         let c = g.get_mut();
         *c = *c - 1;
     }
-    /// Try to take a permit without blocking; returns whether one was taken.
+    /// Take a permit, giving up after `d`; reports whether one was taken.
+    pub fn acquire_timeout(self: &Semaphore, d: time::Duration) bool {
+        let inner = self.inner.get();
+        let deadline = time::deadline_in(d);
+        let mut g = inner.permits.lock();
+        while *g.get() <= 0 {
+            if time::remaining_ns(deadline) == 0 {
+                return false;
+            }
+            inner.cv.wait_until(&g, deadline);
+        }
+        let c = g.get_mut();
+        *c = *c - 1;
+        return true;
+    }
+    /// Try to take a permit without waiting; returns whether one was taken.
     pub fn try_acquire(self: &Semaphore) bool {
         let inner = self.inner.get();
         let mut g = inner.permits.lock();

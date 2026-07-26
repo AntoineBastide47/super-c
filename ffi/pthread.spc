@@ -42,6 +42,9 @@ extern "C" "pthread_ext.h" {
     pub fn sc_mutex_free(m: *mut void) void;
     pub fn sc_cond_new() *mut void;
     pub fn sc_cond_free(c: *mut void) void;
+    // Wait at most `rel_ns` nanoseconds (< 0 waits forever); 0 if signalled, nonzero on timeout. The caller
+    // holds `m`, which is released while waiting and held again on return, and must re-check its condition.
+    pub fn sc_cond_timedwait_ns(c: *mut void, m: *mut void, rel_ns: i64) i32;
     pub fn sc_rwlock_new() *mut void;
     pub fn sc_rwlock_free(r: *mut void) void;
 }

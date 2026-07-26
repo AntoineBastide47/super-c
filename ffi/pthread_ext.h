@@ -9,6 +9,9 @@ void *sc_mutex_new(void);
 void sc_mutex_free(void *m);
 void *sc_cond_new(void);
 void sc_cond_free(void *c);
+/* Wait on `c` under held mutex `m` for at most `rel_ns` nanoseconds (relative). Returns 0 if signalled,
+ * nonzero on timeout/spurious wake -- the caller must re-check its condition. */
+int sc_cond_timedwait_ns(void *c, void *m, long long rel_ns);
 void *sc_rwlock_new(void);
 void sc_rwlock_free(void *r);
 

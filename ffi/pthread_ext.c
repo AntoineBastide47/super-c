@@ -1,6 +1,7 @@
 #include "pthread_ext.h"
 #include <pthread.h>
 #include <stdlib.h>
+#include <time.h>
 
 void *sc_mutex_new(void) {
     pthread_mutex_t *m = (pthread_mutex_t *)malloc(sizeof *m);
@@ -20,6 +21,19 @@ void *sc_cond_new(void) {
 void sc_cond_free(void *p) {
     pthread_cond_t *c = (pthread_cond_t *)p;
     if (c) { pthread_cond_destroy(c); free(c); }
+}
+
+int sc_cond_timedwait_ns(void *cp, void *mp, long long rel_ns) {
+    pthread_cond_t *c = (pthread_cond_t *)cp;
+    pthread_mutex_t *m = (pthread_mutex_t *)mp;
+    if (rel_ns < 0) return pthread_cond_wait(c, m);
+    /* pthread_cond_timedwait takes an ABSOLUTE deadline on the cond's clock (realtime by default). */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long long ns = (long long)ts.tv_nsec + rel_ns % 1000000000ll;
+    ts.tv_sec += (time_t)(rel_ns / 1000000000ll + ns / 1000000000ll);
+    ts.tv_nsec = (long)(ns % 1000000000ll);
+    return pthread_cond_timedwait(c, m, &ts);
 }
 
 void *sc_rwlock_new(void) {

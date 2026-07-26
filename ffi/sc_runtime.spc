@@ -18,6 +18,10 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_unpark_one(word: *mut i32) void;
     pub fn sc_rt_unpark_all(word: *mut i32) void;
 
+    // Sleep the calling OS thread. Only for a non-coroutine thread -- a coroutine must park on the
+    // scheduler's timer list instead, or it would take its worker down with it.
+    pub fn sc_rt_sleep_ns(ns: i64) void;
+
     // A guard-paged stack: the usable low end, or null on failure. Free with the same size.
     pub fn sc_rt_stack_alloc(size: usize) *mut void;
     pub fn sc_rt_stack_free(usable: *mut void, size: usize) void;

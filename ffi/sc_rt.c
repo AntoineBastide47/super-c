@@ -37,6 +37,11 @@ size_t sc_rt_ncpu(void) {
   return si.dwNumberOfProcessors ? (size_t)si.dwNumberOfProcessors : 1;
 }
 
+void sc_rt_sleep_ns(int64_t ns) {
+  if (ns <= 0) return;
+  Sleep((DWORD)(ns / 1000000)); /* millisecond granularity is all Sleep offers */
+}
+
 /* WaitOnAddress-based parking (Win8+, in kernel32 via API set; no extra -l with MinGW's default libs). */
 void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
   int32_t cmp = expected;
@@ -106,6 +111,7 @@ void sc_rt_ctx_free(void *ctx) {
 
 #else
 /* ================================ POSIX ============================================================ */
+#include <errno.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -126,6 +132,15 @@ uint64_t sc_rt_now_ns(void) {
 size_t sc_rt_ncpu(void) {
   long n = sysconf(_SC_NPROCESSORS_ONLN);
   return n > 0 ? (size_t)n : 1;
+}
+
+void sc_rt_sleep_ns(int64_t ns) {
+  if (ns <= 0) return;
+  struct timespec ts;
+  ts.tv_sec = (time_t)(ns / 1000000000ll);
+  ts.tv_nsec = (long)(ns % 1000000000ll);
+  while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+  } /* resume the remaining time after a signal */
 }
 
 /* Parking lot: a fixed set of (mutex, cond) buckets keyed by address hash. Broadcasting on unpark wakes

@@ -7754,6 +7754,11 @@ extend Codegen {
         }
         return -1;
     }
+    // The C identifier a value binding is emitted as. Must cover every declaration kind a closure can
+    // capture (see the resolver's resolve_ref_hit): besides `let` and parameters, a `for` loop names its
+    // induction variable on the loop node, a pattern binding (`if let Some(x)`, a switch arm) on the
+    // pattern's name node, and a struct-pattern shorthand is the identifier itself. An empty span here
+    // emits a nameless env field.
     const fn cg_decl_name_span(self: &Self, decl: NodeId) tok::Span {
         let n = unsafe (*self.cur_ast()).at_const(decl);
         if n.kind == NodeKind::NODE_LET {
@@ -7761,6 +7766,15 @@ extend Codegen {
         }
         if n.kind == NodeKind::NODE_PARAMETER {
             return self.name_span(n.as_data.parameter.name);
+        }
+        if n.kind == NodeKind::NODE_FOR {
+            return self.name_span(n.as_data.for_stmt.binding);
+        }
+        if n.kind == NodeKind::NODE_PATTERN_NAME {
+            return self.name_span(n.as_data.pattern.name);
+        }
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            return n.as_data.name.text;
         }
         return tok::Span { start: 0, end: 0 };
     }

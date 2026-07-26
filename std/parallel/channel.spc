@@ -1,16 +1,19 @@
-// A bounded multi-producer / multi-consumer channel: a fixed-capacity ring buffer guarded by a mutex, with
-// blocking `send`/`recv` (and non-blocking `try_*`). Import with `import std::parallel::channel;`.
+// A multi-producer / multi-consumer channel: a ring buffer guarded by a mutex, with waiting `send`/`recv`,
+// deadline variants, and non-blocking `try_*`. Import with `import std::parallel::channel;`.
 //
 // A `Channel<T>` vends cloneable `Sender<T>` and `Receiver<T>` handles; move them into tasks (`launch`) or
-// threads. `send` blocks while the buffer is full, `recv` while it is empty. The channel closes -- `recv`
-// then drains the buffer and returns `None`, and further `send`s return the value back -- when its last
-// `Sender` is dropped, when its last `Receiver` is dropped, or on an explicit `close()`. `T` must be `Send`.
+// threads. A `bounded(n)` channel makes `send` wait while the buffer is full -- that backpressure is the
+// point -- while an `unbounded()` one grows instead and never makes a sender wait. `recv` waits while the
+// buffer is empty. The channel closes -- `recv` then drains the buffer and returns `None`, and further
+// `send`s hand the value back -- when its last `Sender` is dropped, when its last `Receiver` is dropped, or
+// on an explicit `close()`. `T` must be `Send`.
 //
-// Blocking here parks the OS worker thread (as the `sync` locks do); when the scheduler grows stackful
-// coroutines, the same `Mutex`/`Condvar` waits will park the task instead, with no change to this code.
+// Every wait is task-aware, because it goes through `sync::Condvar`: a coroutine parks and its worker moves
+// on to another task, so a program may have far more blocked senders and receivers than worker threads.
 
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
+import std::parallel::time as time;
 
 /// The outcome of a `send`: `Sent`, or `Rejected(value)` when the channel is closed or has no receivers --
 /// the value is handed back so ownership is never dropped on the floor (and is auto-freed if discarded).
@@ -28,6 +31,28 @@ struct ChannelState<T> {
     pub senders: i64,
     pub receivers: i64,
     pub closed: bool,
+    pub unbounded: bool, // grow the ring instead of making a sender wait
+}
+
+extend<T> ChannelState<T> {
+    // Double the ring and rewind it to index 0. Only for an unbounded channel, only when full, and only
+    // under the state lock. `pub` for linkage (the generic methods that call it are monomorphized in the
+    // caller's module).
+    pub fn grow(self: &mut ChannelState<T>) {
+        let ncap = self.cap * 2;
+        let mut g = Global {};
+        let ns = g.alloc(ncap * sizeof(T), alignof(T)) as *mut T;
+        for i in 0..self.count {
+            let idx = (self.head + i) % self.cap;
+            unsafe ns[i] = unsafe {
+                self.slots[idx];
+            };
+        }
+        g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
+        self.slots = ns;
+        self.head = 0;
+        self.cap = ncap;
+    }
 }
 
 extend<T> ChannelState<T> as Free {
@@ -88,7 +113,7 @@ extend<T: Send> Receiver<T> as Send {}
 extend<T: Send> Receiver<T> as Sync {}
 
 extend<T> Channel<T> {
-    /// A new channel buffering up to `capacity` items (at least one).
+    /// A new channel buffering up to `capacity` items (at least one). A `send` into a full buffer waits.
     pub fn bounded(capacity: usize) Channel<T> {
         let cap = if capacity == 0 {
             1usize;
@@ -105,6 +130,7 @@ extend<T> Channel<T> {
             senders: 0,
             receivers: 0,
             closed: false,
+            unbounded: false,
         };
         let inner = ChannelInner::<T> {
             state: sync::Mutex::<ChannelState<T>>::new(st),
@@ -112,6 +138,19 @@ extend<T> Channel<T> {
             not_empty: sync::Condvar::new(),
         };
         return Channel::<T> { inner: arc::Arc::<ChannelInner<T>>::new(inner) };
+    }
+    /// A new channel with no capacity limit: the ring grows as needed, so `send` never waits. Use it only
+    /// when the producers are known to outpace the consumers by a bounded amount -- `bounded` is what keeps
+    /// a runaway producer from exhausting memory.
+    pub fn unbounded() Channel<T> {
+        let ch = Channel::<T>::bounded(8);
+        {
+            let inner = ch.inner.get();
+            let mut g = inner.state.lock();
+            let s = g.get_mut();
+            s.unbounded = true;
+        }
+        return ch;
     }
     /// A new sending handle.
     pub fn sender(self: &Channel<T>) Sender<T> {
@@ -146,9 +185,19 @@ extend<T> Sender<T> {
         s.senders = s.senders + 1;
         return Sender::<T> { inner: self.inner.clone() };
     }
-    /// Block until there is room, then send `value`. Returns `Rejected(value)` if the channel is closed or has no
-    /// receivers left (the value is handed back so the caller keeps ownership).
+    /// Wait until there is room, then send `value`. Returns `Rejected(value)` if the channel is closed or has
+    /// no receivers left (the value is handed back so the caller keeps ownership).
     pub fn send(self: &Sender<T>, value: T) SendResult<T> {
+        return self.send_deadline(value, 0);
+    }
+    /// `send`, giving up after `d`. A timeout also returns `Rejected(value)`, so the value is never lost.
+    pub fn send_timeout(self: &Sender<T>, value: T, d: time::Duration) SendResult<T> {
+        return self.send_deadline(value, time::deadline_in(d));
+    }
+    /// `send` with an explicit monotonic `deadline` (a `time::deadline_in` value; `0` waits forever). The
+    /// body of `send`/`send_timeout`; also `pub` because a deadline computed once and reused across several
+    /// operations is the honest way to bound a whole sequence.
+    pub fn send_deadline(self: &Sender<T>, value: T, deadline: u64) SendResult<T> {
         let inner = self.inner.get();
         let mut g = inner.state.lock();
         loop {
@@ -158,31 +207,44 @@ extend<T> Sender<T> {
                 if s.closed || s.receivers == 0 {
                     return SendResult::<T>::Rejected(value);
                 }
-                ready = s.count < s.cap;
+                ready = s.count < s.cap || s.unbounded;
             }
             if ready {
                 break;
             }
-            inner.not_full.wait(&g);
+            if deadline != 0 {
+                if time::remaining_ns(deadline) == 0 {
+                    return SendResult::<T>::Rejected(value);
+                }
+                inner.not_full.wait_until(&g, deadline);
+            } else {
+                inner.not_full.wait(&g);
+            }
         }
         let sm = g.get_mut();
+        if sm.count == sm.cap {
+            sm.grow(); // unbounded only: the wait above is what a bounded channel does instead
+        }
         let idx = (sm.head + sm.count) % sm.cap;
         unsafe sm.slots[idx] = value;
         sm.count = sm.count + 1;
         inner.not_empty.notify_one();
         return SendResult::<T>::Sent;
     }
-    /// Send without blocking. Returns `Rejected(value)` if the buffer is full or the channel is closed.
+    /// Send without waiting. Returns `Rejected(value)` if the buffer is full or the channel is closed.
     pub fn try_send(self: &Sender<T>, value: T) SendResult<T> {
         let inner = self.inner.get();
         let mut g = inner.state.lock();
         {
             let s = g.get();
-            if s.closed || s.receivers == 0 || s.count >= s.cap {
+            if s.closed || s.receivers == 0 || s.count >= s.cap && !s.unbounded {
                 return SendResult::<T>::Rejected(value);
             }
         }
         let sm = g.get_mut();
+        if sm.count == sm.cap {
+            sm.grow();
+        }
         let idx = (sm.head + sm.count) % sm.cap;
         unsafe sm.slots[idx] = value;
         sm.count = sm.count + 1;
@@ -227,9 +289,18 @@ extend<T> Receiver<T> {
         s.receivers = s.receivers + 1;
         return Receiver::<T> { inner: self.inner.clone() };
     }
-    /// Block until an item is available and take it, or return `None` once the channel is closed (or has no
-    /// senders left) and the buffer is drained.
+    /// Wait for an item and take it, or return `None` once the channel is closed (or has no senders left)
+    /// and the buffer is drained.
     pub fn recv(self: &Receiver<T>) Option<T> {
+        return self.recv_deadline(0);
+    }
+    /// `recv`, giving up after `d`. `None` means "timed out", "closed and drained" -- or both.
+    pub fn recv_timeout(self: &Receiver<T>, d: time::Duration) Option<T> {
+        return self.recv_deadline(time::deadline_in(d));
+    }
+    /// `recv` with an explicit monotonic `deadline` (a `time::deadline_in` value; `0` waits forever). The
+    /// body of `recv`/`recv_timeout`; also `pub` so one deadline can bound a whole sequence of operations.
+    pub fn recv_deadline(self: &Receiver<T>, deadline: u64) Option<T> {
         let inner = self.inner.get();
         let mut g = inner.state.lock();
         loop {
@@ -246,7 +317,14 @@ extend<T> Receiver<T> {
             if done {
                 return Option::<T>::None;
             }
-            inner.not_empty.wait(&g);
+            if deadline != 0 {
+                if time::remaining_ns(deadline) == 0 {
+                    return Option::<T>::None;
+                }
+                inner.not_empty.wait_until(&g, deadline);
+            } else {
+                inner.not_empty.wait(&g);
+            }
         }
         let sm = g.get_mut();
         let v = unsafe {

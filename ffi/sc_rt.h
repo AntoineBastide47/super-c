@@ -25,6 +25,10 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns);
 void sc_rt_unpark_one(int32_t *word);
 void sc_rt_unpark_all(int32_t *word);
 
+/* Sleep the calling OS thread for `ns` nanoseconds (the off-worker path for `parallel::sleep`; a coroutine
+   parks on the scheduler's timer list instead). Negative/zero returns immediately. */
+void sc_rt_sleep_ns(int64_t ns);
+
 /* A guard-paged stack: an inaccessible page sits just below the returned usable low end, so an overflow
    faults instead of corrupting memory. Returns the usable low end (the stack grows down from low+size), or
    NULL on failure. Free with the same `size`. */

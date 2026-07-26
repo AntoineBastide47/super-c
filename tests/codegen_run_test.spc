@@ -161,3 +161,16 @@ fn mut_match_binding() {
         8,
     );
 }
+
+@test
+fn closure_captures_every_binding_kind() {
+    // A closure environment must name EVERY kind of binding it can capture, not only `let`s and parameters:
+    // a `for` induction variable, an iterator-`for` binding, an `if let` / switch-arm payload and a
+    // struct-pattern shorthand each used to emit a nameless env field (`struct { int32_t; }`), which does
+    // not compile. All five kinds are captured here, so the emitted C proves each field is named.
+    run_exit(
+        "closure captures for / iterator / if-let / switch-arm / struct-shorthand bindings",
+        "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nstruct P { pub a: i64, pub b: i64 }\nenum E { N, V(i64), }\nfn main() i32 {\n  let mut t: i64 = 0;\n  for i in 0..3 { t = t + apply(fn() i64 { return i; }); }\n  let mut v = Vector::<i64>::new();\n  v.push(4);\n  v.push(5);\n  for x in v.iter() { t = t + apply(fn() i64 { return *x; }); }\n  v.free();\n  let e = E::V(10);\n  if let V(n) = e { t = t + apply(fn() i64 { return n; }); }\n  switch e { V(n2) => { t = t + apply(fn() i64 { return n2; }); }, N => {}, };\n  let p = P { a: 6, b: 7 };\n  switch p { P { a, b } => { t = t + apply(fn() i64 { return a + b; }); }, };\n  unsafe exit(t as i32);\n}\n",
+        45,
+    );
+}
