@@ -1,6 +1,9 @@
 // FFI bindings for <unistd.h>. Import with `import unistd;`. Every call site requires `unsafe`.
+// The block names its backing header, which is what gets `<unistd.h>` included in the emitted C: it is not
+// one of the standard headers the runtime prologue carries, so without this the declarations are missing
+// and every call compiles as an implicit declaration (an error under C99 and later).
 
-extern "C" {
+extern "C" "unistd.h" {
     pub fn read(fd: i32, buf: *mut void, count: usize) isize;
     pub fn write(fd: i32, buf: *const void, count: usize) isize;
     pub fn close(fd: i32) i32;

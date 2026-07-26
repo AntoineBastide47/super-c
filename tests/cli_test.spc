@@ -1212,6 +1212,237 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// Preemption (M6/Phase 9): the scheduler is cooperative, so a task that never blocks would own its worker
+// forever. Codegen emits a `__sc_safepoint()` at every loop backedge -- but ONLY in a program that uses the
+// coroutine runtime -- and the scheduler installs a hook that yields when the worker has other work queued.
+// Proven here with one worker and a task that spins on a flag only a SECOND task can set: without
+// preemption the first task never yields, the second never runs, and the flag never flips.
+@test
+fn preemption_yields_a_spinning_task() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let flag = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let fa = flag.clone();
+    let wa = wg.clone();
+    launch fn() {
+        // A pure compute loop: it blocks on nothing, so only a safepoint can take the worker back.
+        let mut spins: i64 = 0;
+        while fa.get().load(atom::MemoryOrder::Relaxed) == 0 {
+            spins = spins + 1;
+        }
+        wa.done();
+    };
+    let fb = flag.clone();
+    let wb = wg.clone();
+    launch fn() {
+        fb.get().store(1, atom::MemoryOrder::Relaxed);
+        wb.done();
+    };
+    let ok = wg.wait_timeout(time::Duration::from_secs(30));
+    wg.free();
+    flag.free();
+    rt::shutdown();
+    if !ok {
+        return 1;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("main.c", "__sc_safepoint();"), "a loop in a launching program gets a safepoint");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+
+    // ... and a program that never launches pays nothing: no safepoint is emitted at all.
+    let q = cli::proj_new();
+    q.mkfile(
+        "main.spc",
+        r#"fn main() i32 {
+    let mut t: i64 = 0;
+    for i in 0..10 {
+        t = t + i as i64;
+    }
+    return (t - 45) as i32;
+}
+"#,
+    );
+    let r2 = q.compile("main.spc");
+    assert_eq(r2.exit, 0);
+    assert(!q.gen_has("main.c", "__sc_safepoint();"), "a program that never launches gets no safepoints");
+}
+
+// Blocking FFI (M6/Phase 10): a worker thread belongs to the scheduler, so a call that blocks it -- a
+// legacy library, a slow syscall -- must move off the pool. `blocking::call` runs the closure on a separate
+// pool of plain threads and PARKS the calling coroutine until it returns. Proven by ORDER rather than by the
+// clock, which is what makes it reliable under a loaded machine: with ONE worker, four tasks each make a
+// 50ms blocking call and a fifth does no blocking at all. If the calls held the worker, that fifth task
+// could only run after all of them; because they park, it goes first. Leak-checked, so both pools tear down
+// clean.
+@test
+fn blocking_call_frees_the_worker() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::blocking as blocking;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let order = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let plain_at = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(-1));
+    let sum = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(5);
+    for _i in 0..4 {
+        let w = wg.clone();
+        let o = order.clone();
+        let s = sum.clone();
+        launch fn() {
+            let got = blocking::call(fn() i64 {
+                time::sleep(time::Duration::from_millis(50)); // off a coroutine: blocks this thread
+                return 7;
+            });
+            let _ = s.get().fetch_add(got, atom::MemoryOrder::Relaxed);
+            let _ = o.get().fetch_add(1, atom::MemoryOrder::SeqCst);
+            w.done();
+        };
+    }
+    let w2 = wg.clone();
+    let o2 = order.clone();
+    let p2 = plain_at.clone();
+    launch fn() {
+        // Whatever this reads is how many blocking calls had already finished when it ran.
+        p2.get().store(o2.get().load(atom::MemoryOrder::SeqCst), atom::MemoryOrder::SeqCst);
+        w2.done();
+    };
+    let ok = wg.wait_timeout(time::Duration::from_secs(60));
+    let n = sum.get().load(atom::MemoryOrder::SeqCst);
+    let at = plain_at.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    order.free();
+    plain_at.free();
+    sum.free();
+    blocking::shutdown();
+    rt::shutdown();
+    if !ok || n != 28 {
+        return 1;
+    }
+    if at != 0 {
+        return 2; // the worker was held: the non-blocking task had to queue behind the blocking ones
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// Diagnostics (M6/Phase 11): every task carries a process-unique id, the runtime accounts for tasks created
+// versus finished, and a panic inside a task names it instead of just saying the process died.
+@test
+fn task_diagnostics() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    if rt::current_id() != 0 {
+        return 1; // the main thread is not a task
+    }
+    let ids = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(3);
+    for _i in 0..3 {
+        let w = wg.clone();
+        let d = ids.clone();
+        launch fn() {
+            if rt::current_id() != 0 {
+                let _ = d.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+            }
+            w.done();
+        };
+    }
+    wg.wait();
+    let named = ids.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    ids.free();
+    if rt::spawned_tasks() < 3 || named != 3 {
+        return 2;
+    }
+    rt::shutdown();
+    if rt::live_tasks() != 0 {
+        return 3; // every task was awaited, so none may be left parked
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+
+    // A panic inside a coroutine is attributed to it.
+    let q = cli::proj_new();
+    q.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+
+fn main() i32 {
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch fn() {
+        w.done();
+        panic("from inside a task");
+    };
+    wg.wait();
+    wg.free();
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r2 = q.compile("main.spc");
+    assert_eq(r2.exit, 0);
+    let cc2 = q.cc_build("");
+    assert_eq(cc2.exit, 0);
+    let run2 = q.run_bin_env("");
+    assert(run2.exit != 0, "the panic takes the process down");
+    assert(run2.out_has("[task "), "the panic names the task it happened in");
+}
+
 // Work stealing (std/parallel/runtime): each worker owns a Chase-Lev deque and pushes to it without a lock,
 // so a task submitted from a worker never touches the shared queue. Both halves here are deliberately
 // pathological for that layout: ONE task spawns 400 others onto its own deque, which only completes if the
@@ -2205,6 +2436,63 @@ fn main() i32 {
     let cc = p.cc_build("-lm");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 13);
+}
+
+// The POSIX bindings (unistd, fcntl, filesystem) declare a BACKING HEADER, and this is what proves they
+// need to: none of `<unistd.h>`, `<sys/stat.h>` or `<dirent.h>` is among the standard headers the runtime
+// prologue carries, so an unnamed extern block leaves every one of these calls an implicit declaration --
+// an error under C99, which is exactly how `unistd` and `filesystem` shipped unusable. Compiled -Werror and
+// actually run: create a directory, open + write + close a file in it, walk it with opendir/readdir, then
+// unlink and rmdir.
+@test
+fn ffi_posix_bindings() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import unistd;
+import fcntl;
+import filesystem;
+
+fn main() i32 {
+    let mut dir = String::from_str("sc_ffi_probe_dir");
+    let _ = unsafe filesystem::mkdir(dir.cstr(), 493);
+    let mut file = String::from_str("sc_ffi_probe_dir/f");
+    let fd = unsafe fcntl::open(file.cstr(), fcntl::O_WRONLY | fcntl::O_CREAT | fcntl::O_TRUNC, 420);
+    if fd < 0 {
+        return 1;
+    }
+    let mut msg = String::from_str("hello");
+    let n = unsafe unistd::write(fd, msg.cstr(), 5);
+    let _ = unsafe unistd::close(fd);
+    let d = unsafe filesystem::opendir(dir.cstr());
+    if d == null {
+        return 2;
+    }
+    let mut entries = 0;
+    while unsafe filesystem::readdir(d) != null {
+        entries = entries + 1;
+    }
+    let _ = unsafe filesystem::closedir(d);
+    let _ = unsafe filesystem::unlink(file.cstr());
+    let _ = unsafe filesystem::rmdir(dir.cstr());
+    msg.free();
+    file.free();
+    dir.free();
+    if n != 5 || entries < 3 || unsafe unistd::getpid() <= 0 {
+        return 3;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    assert(p.gen_has("unistd.h", "#include <unistd.h>"), "the unistd block pulls in its header");
+    assert(p.gen_has("filesystem.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
 }
 
 // Import forms + mangling: an alias import, a glob import, two modules with a same-named public function

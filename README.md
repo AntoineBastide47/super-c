@@ -753,6 +753,13 @@ The `std::parallel` modules build a real concurrency stack on OS threads:
 * **Channels** — `Channel<T>::bounded(n)` for backpressure or `unbounded()`, vending cloneable
   `Sender<T>` / `Receiver<T>` handles, with waiting, timed and non-blocking send/recv and
   close-on-last-handle-drop.
+* **Preemption** — a task that never blocks cannot hold its worker: the compiler emits a safepoint at
+  every loop backedge (only in programs that use `launch`, so nothing else pays for it) and the scheduler
+  yields there when other work is waiting.
+* **Blocking calls and diagnostics** — `blocking::call` runs something that blocks its OS thread on a
+  separate pool while the calling coroutine parks; every task has an id that panics report
+  (`panic: [task 7] …`), and `runtime::live_tasks()` plus a shutdown report account for tasks that never
+  finished.
 * **Data parallelism** — `parallel::range` / `each` / `each_mut` / `chunks_mut` / `reduce` / `sections`
   split work into chunked, stackless jobs on the same pool and return when all of it is done, under static
   or dynamic scheduling. The body's `fn(..) + Send + Sync` bound is what makes it safe: a closure that owns
@@ -808,8 +815,8 @@ Roadmap, in priority order:
 
 1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
    embarrassingly parallel per module.
-2. **Preemption and async I/O** — the scheduler is cooperative: a task that never blocks holds its worker
-   until it returns, and a blocking FFI call blocks that worker. Next are compiler-emitted safepoints and a
-   blocking pool / epoll-kqueue-IOCP reactor.
+2. **Async I/O** — `blocking::call` moves a blocking call off the pool onto a thread that may block, but
+   that is a thread per concurrent operation. Next is a real reactor (epoll / io_uring / kqueue / IOCP) so
+   a socket read parks the coroutine instead.
 3. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
    (file/console IO is currently FFI-only; this subsumes it).

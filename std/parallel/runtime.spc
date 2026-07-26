@@ -22,6 +22,11 @@ import std::parallel::platform as platform;
 extern "C" {
     fn sc_lk_bt_pause() void;
     fn sc_lk_bt_resume() void;
+    // Preemption safepoint hook (super_rt.c): codegen emits a `__sc_safepoint()` at every loop backedge of a
+    // program that uses `launch`, and this is what those safepoints call.
+    fn __sc_set_preempt_hook(f: fn() void) void;
+    // Task attribution (super_rt.c): a panic inside a coroutine names the task it happened in.
+    fn __sc_set_task_id(id: u64) void;
 }
 
 const STACK_SIZE: usize = 262144; // 256 KiB guard-paged stack per coroutine
@@ -35,6 +40,7 @@ const STACK_SIZE: usize = 262144; // 256 KiB guard-paged stack per coroutine
 /// instead (see `park_begin`), and `tnext` is the timer-list link. `pub` only so task-aware primitives can
 /// hold `*mut Coroutine` and wake one -- not a user-facing type.
 pub struct Coroutine {
+    pub id: u64, // 1-based, unique for the process: what a panic and any diagnostic name it by
     pub ctx: *mut void, // sc_rt saved context (null for a job)
     pub stack: *mut void, // guard-paged stack, usable low end (null for a job)
     pub is_job: i32, // run-to-completion on the worker's own stack; never parks
@@ -65,6 +71,7 @@ pub struct Worker {
     pub top: usize, // atomic: next slot a thief takes
     pub bottom: usize, // atomic: next free slot for the owner
     pub rng: u64, // xorshift state for victim selection
+    pub tick: u32, // dequeue counter: every so often the injection queue is polled first (fairness)
     pub idx: usize, // this worker's index, so a thread can be started from its slot alone
     pub sched: *mut Scheduler,
 }
@@ -75,6 +82,7 @@ pub struct Scheduler {
     pub nw: usize,
     pub inj_head: *mut Coroutine, // injection queue: submissions from off-pool threads, and deque spill
     pub inj_tail: *mut Coroutine,
+    pub inj_len: i32, // atomic: injected-and-not-yet-taken, so a safepoint can ask "is anyone waiting?"
     pub timer_head: *mut Coroutine, // sleeping coroutines, earliest deadline first
     pub lock: *mut void, // guards the injection queue, the timer list and shutting_down
     pub cv: *mut void, // workers wait here when they can find no work anywhere
@@ -87,9 +95,18 @@ pub struct Scheduler {
 static mut G_STATE: i32 = 0;
 static mut G_SCHED: *mut Scheduler = null;
 static mut G_NWORKERS: usize = 0; // 0 = one worker per CPU
+static mut G_NEXT_ID: u64 = 0; // atomic: task-id source
+static mut G_SPAWNED: usize = 0; // atomic: tasks ever created
+static mut G_DONE: usize = 0; // atomic: tasks that ran to completion
 
 // The commit hand-off for a park with nothing to release (e.g. `sleep`).
 fn commit_nop(_p: *mut void) {}
+
+// A fresh task id, and one more task accounted for. Two relaxed increments per task.
+fn next_task_id() u64 {
+    let _ = atomic::add_usize(&mut G_SPAWNED, 1, 0);
+    return atomic::add_u64(&mut G_NEXT_ID, 1, 0) + 1;
+}
 
 // Claim the right to resume the park identified by `token`: succeeds once, for one waker, and only while
 // that exact park is still current. A registration left behind by an expired timed wait therefore cannot
@@ -180,6 +197,7 @@ fn dq_empty(w: *mut Worker) bool {
 // Append `co` to the injection queue. Caller holds `(*s).lock`.
 fn push_injection(s: *mut Scheduler, co: *mut Coroutine) {
     unsafe (*co).next = null;
+    let _ = atomic::add_i32(&mut unsafe (*s).inj_len, 1, 2);
     if unsafe (*s).inj_tail == null {
         unsafe (*s).inj_head = co;
     } else {
@@ -199,6 +217,7 @@ fn pop_injection(s: *mut Scheduler) *mut Coroutine {
         unsafe (*s).inj_tail = null;
     }
     unsafe (*co).next = null;
+    let _ = atomic::sub_i32(&mut unsafe (*s).inj_len, 1, 2);
     return co;
 }
 
@@ -211,6 +230,15 @@ fn signal_work(s: *mut Scheduler) {
         return;
     }
     unsafe pthread::pthread_mutex_lock((*s).lock);
+    unsafe pthread::pthread_cond_signal((*s).cv);
+    unsafe pthread::pthread_mutex_unlock((*s).lock);
+}
+
+// Put `co` on the shared queue even when called from a worker. A yield means "let somebody else go
+// first", and the local deque is LIFO: pushed there, a yielding task is the very next one popped.
+fn enqueue_global(s: *mut Scheduler, co: *mut Coroutine) {
+    unsafe pthread::pthread_mutex_lock((*s).lock);
+    push_injection(s, co);
     unsafe pthread::pthread_cond_signal((*s).cv);
     unsafe pthread::pthread_mutex_unlock((*s).lock);
 }
@@ -331,6 +359,18 @@ fn all_deques_empty(s: *mut Scheduler) bool {
 fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
     let w = unsafe ((*s).deques + me);
     loop {
+        // Every so often, look at the shared queue FIRST: a worker that keeps spawning local work would
+        // otherwise never come back for anything submitted from off the pool.
+        let t = unsafe (*w).tick + 1;
+        unsafe (*w).tick = t;
+        if t % 61 == 0 && atomic::load_i32(&mut unsafe (*s).inj_len, 1) > 0 {
+            unsafe pthread::pthread_mutex_lock((*s).lock);
+            let shared = pop_injection(s);
+            unsafe pthread::pthread_mutex_unlock((*s).lock);
+            if shared != null {
+                return shared;
+            }
+        }
         let local = dq_pop(w);
         if local != null {
             return local; // the hot path takes no lock at all
@@ -418,10 +458,13 @@ fn worker_main(arg: *mut void) *mut void {
             // `current()` reports null so anything it waits on blocks this thread instead of parking.
             let je = unsafe (*co).entry;
             unsafe sc_runtime::sc_rt_tls_set(co);
+            unsafe __sc_set_task_id((*co).id);
             je(unsafe (*co).env);
+            unsafe __sc_set_task_id(0);
             unsafe sc_runtime::sc_rt_tls_set(null);
             let mut gj = Global {};
             gj.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+            let _ = atomic::add_usize(&mut G_DONE, 1, 0);
             continue;
         }
         unsafe (*co).sched_ctx = sched_ctx;
@@ -432,15 +475,18 @@ fn worker_main(arg: *mut void) *mut void {
             unsafe (*co).inited = 1;
         }
         unsafe sc_runtime::sc_rt_tls_set(co);
+        unsafe __sc_set_task_id((*co).id);
         unsafe sc_lk_bt_pause(); // the leak tracker must not unwind the coroutine's stack
         unsafe sc_runtime::sc_rt_ctx_switch(sched_ctx, (*co).ctx);
         unsafe sc_lk_bt_resume();
+        unsafe __sc_set_task_id(0);
         unsafe sc_runtime::sc_rt_tls_set(null);
         if unsafe (*co).done != 0 {
             free_coroutine(co);
+            let _ = atomic::add_usize(&mut G_DONE, 1, 0);
         } else if unsafe (*co).commit_requeue != 0 {
             unsafe (*co).commit_requeue = 0;
-            enqueue_runnable(s, co);
+            enqueue_global(s, co); // a yield goes to the back of the shared queue, not our own deque
         } else {
             // Parked. Take the hand-off FIRST: arming the timer already publishes this coroutine, and a
             // deadline that has already passed lets another worker resume it -- and park it again, rewriting
@@ -479,6 +525,7 @@ fn build_scheduler() *mut Scheduler {
         nw: nw,
         inj_head: null,
         inj_tail: null,
+        inj_len: 0,
         timer_head: null,
         lock: lk,
         cv: cvh,
@@ -490,8 +537,10 @@ fn build_scheduler() *mut Scheduler {
         let buf = g.alloc(DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine)) as *mut *mut Coroutine;
         // Seed each victim-choice generator differently and never with zero, or xorshift stays at zero.
         let seed = 0x9e3779b97f4a7c15 + (i as u64 + 1) * 0x632be59bd9b4e019;
-        unsafe deques[i] = Worker { buf: buf, top: 0, bottom: 0, rng: seed, idx: i, sched: s };
+        unsafe deques[i] = Worker { buf: buf, top: 0, bottom: 0, rng: seed, tick: 0, idx: i, sched: s };
     }
+    // Before any worker exists, so every safepoint's read of the hook happens-after this write.
+    unsafe __sc_set_preempt_hook(preempt_yield);
     for i in 0..nw {
         let mut h: pthread::pthread_t;
         unsafe pthread::pthread_create(&mut h, null, worker_main, unsafe (deques + i));
@@ -536,6 +585,7 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
     let stk = unsafe sc_runtime::sc_rt_stack_alloc(STACK_SIZE);
     let ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
     unsafe co[0] = Coroutine {
+        id: next_task_id(),
         ctx: ctx,
         stack: stk,
         is_job: 0,
@@ -566,6 +616,7 @@ pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
     let mut g = Global {};
     let co = g.alloc(sizeof(Coroutine), alignof(Coroutine)) as *mut Coroutine;
     unsafe co[0] = Coroutine {
+        id: next_task_id(),
         ctx: null,
         stack: null,
         is_job: 1,
@@ -696,6 +747,32 @@ pub fn sleep_ns(ns: i64) {
     cancel_timer(co);
 }
 
+/// The id of the task running on this thread, or 0 on a plain thread. Ids are unique for the process and
+/// are what a panic inside a coroutine reports, so a diagnostic can name the task rather than the process.
+pub fn current_id() u64 {
+    let t = (unsafe sc_runtime::sc_rt_tls_get()) as *mut Coroutine;
+    if t == null {
+        return 0;
+    }
+    return unsafe (*t).id;
+}
+
+/// Tasks created so far (coroutines and data-parallel jobs alike).
+pub fn spawned_tasks() usize {
+    return atomic::load_usize(&mut G_SPAWNED, 1);
+}
+
+/// Tasks that have run to completion.
+pub fn completed_tasks() usize {
+    return atomic::load_usize(&mut G_DONE, 1);
+}
+
+/// Tasks created but not finished: still runnable, running, or parked. Zero after every launched task has
+/// been awaited -- which is the precondition `shutdown` documents, and what it checks.
+pub fn live_tasks() usize {
+    return spawned_tasks() - completed_tasks();
+}
+
 /// Fix the pool's worker-thread count. Must be called before the first `launch` (the pool is built on
 /// demand and never resized); `0` restores the default of one worker per CPU. Setting it to 1 makes
 /// scheduling deterministic, which is what concurrency tests want.
@@ -710,6 +787,28 @@ pub fn worker_count() usize {
         return G_NWORKERS;
     }
     return platform::ncpu();
+}
+
+// What a compiler-emitted safepoint calls. The scheduler cannot take a worker back from a task that never
+// blocks, so a compute-bound coroutine would otherwise starve everything queued behind it. Yielding is only
+// worth its context switch when there IS something else to run, and both checks are lock-free: this runs on
+// every loop backedge (once per `__sc_pre_tick` of them).
+fn preempt_yield() {
+    let co = current();
+    if co == null {
+        return; // a plain thread, or a job: neither can park
+    }
+    let s = G_SCHED;
+    if s == null {
+        return;
+    }
+    let wi = unsafe sc_runtime::sc_rt_widx_get();
+    if wi < 0 || wi as usize >= unsafe (*s).nw {
+        return;
+    }
+    if !dq_empty(unsafe ((*s).deques + wi as usize)) || atomic::load_i32(&mut unsafe (*s).inj_len, 1) > 0 {
+        yield_now();
+    }
 }
 
 /// Cooperatively yield: reschedule the current coroutine behind the others. A no-op off a worker thread.
@@ -752,4 +851,10 @@ pub fn shutdown() {
     g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
     atomic::store_i32(sp, 0, 2);
     G_SCHED = null;
+    // Anything still unfinished here is parked on something nothing will ever signal -- a deadlock the
+    // program has already lost. Report it: the stacks it leaks are otherwise the only visible symptom.
+    let stuck = live_tasks();
+    if stuck > 0 {
+        eprintln("super-c: {} task(s) still parked at shutdown (nothing will wake them)", stuck);
+    }
 }

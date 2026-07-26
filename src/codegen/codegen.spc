@@ -156,11 +156,19 @@ static inline __attribute__((unused)) FILE* __sc_stdin(void){return stdin;}
 static inline __attribute__((unused)) FILE* __sc_stdout(void){return stdout;}
 static inline __attribute__((unused)) FILE* __sc_stderr(void){return stderr;}
 static inline __attribute__((unused)) int* __sc_errno_location(void){return &errno;}
+/* Task attribution: a coroutine runtime stores the running task's id here, so a panic names the task it
+   happened in rather than just the process. Zero on a plain thread. */
+extern _Thread_local uint64_t __sc_task_id;
+void __sc_set_task_id(uint64_t __id);
 static _Noreturn __attribute__((unused)) void __sc_panic(const char *__m) {
-  fprintf(stderr, "super-c: %s\n", __m); abort();
+  if (__sc_task_id) fprintf(stderr, "super-c: [task %llu] %s\n", (unsigned long long)__sc_task_id, __m);
+  else fprintf(stderr, "super-c: %s\n", __m);
+  abort();
 }
 static _Noreturn __attribute__((unused)) void __sc_panic_str(const uint8_t *__p, size_t __n) {
-  fprintf(stderr, "panic: %.*s\n", (int)__n, (const char *)__p); abort();
+  if (__sc_task_id) fprintf(stderr, "panic: [task %llu] %.*s\n", (unsigned long long)__sc_task_id, (int)__n, (const char *)__p);
+  else fprintf(stderr, "panic: %.*s\n", (int)__n, (const char *)__p);
+  abort();
 }
 static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n) {
   if (__i >= __n) __sc_panic("index out of bounds");
@@ -169,6 +177,18 @@ static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n)
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
+/* Preemption safepoint. Emitted at loop backedges ONLY when the program uses the coroutine runtime, so
+   one that never `launch`es pays nothing at all -- and when it is emitted the cost is a thread-local
+   decrement and a not-taken branch, not a call. The hook is installed by the scheduler BEFORE it starts
+   any worker, so every read of it happens-after that write and no synchronization is needed here. */
+extern _Thread_local int32_t __sc_pre_tick;
+extern void (*__sc_pre_hook)(void);
+void __sc_set_preempt_hook(void (*__f)(void));
+static inline __attribute__((unused)) void __sc_safepoint(void) {
+  if (--__sc_pre_tick > 0) return;
+  __sc_pre_tick = 2048;
+  if (__sc_pre_hook) __sc_pre_hook();
+}
 /* leak tracker (super_rt.c): interposes the emitted code's malloc/realloc/free call sites.
    Inert unless the SC_LEAK_CHECK environment variable is set. */
 void *sc_lk_malloc(size_t __n);
@@ -198,6 +218,17 @@ pub const fn super_rt_source() *const char {
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
+
+/* Task id of the coroutine running on this thread (see super_rt.h); 0 = none. */
+_Thread_local uint64_t __sc_task_id = 0;
+void __sc_set_task_id(uint64_t __id) { __sc_task_id = __id; }
+
+/* Preemption safepoint state (see super_rt.h). Inert until a scheduler installs the hook. */
+_Thread_local int32_t __sc_pre_tick = 2048;
+void (*__sc_pre_hook)(void) = 0;
+/* Installed by a scheduler before it starts any worker, so every safepoint's read happens-after it. */
+void __sc_set_preempt_hook(void (*__f)(void)) { __sc_pre_hook = __f; }
 #include <stdint.h>
 #if defined(__has_include)
 #if __has_include(<execinfo.h>)
@@ -810,6 +841,8 @@ pub struct Codegen<'a> {
     pub nloops: u32,
     pub label_seq: u32,
     pub pending_cnt: u32,
+    pub loop_safepoint: bool, // emit a preemption safepoint at the top of the next block (a loop body)
+    pub uses_tasks: i8, // 0 unknown / 1 no / 2 yes: does this program link the coroutine runtime?
     pub test: CgTestInfo,
     pub moved: [NodeId; 512],
     pub nmoved: u32,
@@ -5755,6 +5788,7 @@ extend Codegen {
                 if n.as_data.while_stmt.is_do {
                     self.emit_str("do ");
                     self.pending_cnt = (le + 1) as u32;
+                    self.loop_safepoint = self.cg_safepoint_here();
                     self.emit_block(n.as_data.while_stmt.body);
                     self.emit_str(" while ");
                     self.emit_condition(n.as_data.while_stmt.condition);
@@ -5768,6 +5802,7 @@ extend Codegen {
                         self.emit_str(" ");
                     }
                     self.pending_cnt = (le + 1) as u32;
+                    self.loop_safepoint = self.cg_safepoint_here();
                     self.emit_block(n.as_data.while_stmt.body);
                     self.emit_str("\n");
                 }
@@ -5860,6 +5895,43 @@ extend Codegen {
     }
     fn emit_block(self: &mut Self, id: NodeId) {
         self.emit_block_from(id, self.defer_top);
+    }
+    // Does this program use the coroutine runtime? `launch` is what pulls `std::parallel::runtime` into the
+    // package (the loader adds it only for a module that uses the keyword), so its presence is exactly the
+    // condition under which preemption safepoints are worth emitting -- and a program that never launches
+    // gets none of them, which is the whole point: a check on every loop backedge is not free.
+    fn cg_uses_tasks(self: &mut Self) bool {
+        if self.uses_tasks == 0 {
+            self.uses_tasks = 1;
+            if self.package != null && unsafe (*self.package).find("std::parallel::runtime") >= 0 {
+                self.uses_tasks = 2;
+            }
+        }
+        return self.uses_tasks == 2;
+    }
+    // ...but never inside the runtime itself. Its loops hold internal OS locks across iterations, and a task
+    // that yielded there would leave every worker blocked on a lock only that task can release -- a deadlock
+    // this cost a hung test to find. They are also short and bounded, so there is nothing to preempt. The
+    // module asked about is the OWNER of the code being emitted, which is what a re-homed generic instance
+    // reports too.
+    fn cg_safepoint_here(self: &mut Self) bool {
+        if !self.cg_uses_tasks() {
+            return false;
+        }
+        let m = self.cur_module() as usize;
+        if m >= self.pkg_count() {
+            return true;
+        }
+        return !unsafe (*self.package).modules[m].path.as_str().starts_with("std::parallel");
+    }
+    // A safepoint at the top of a loop body: the scheduler cannot take a worker back from a task that never
+    // blocks, so a compute loop yields here instead of starving every other task on that worker.
+    fn emit_safepoint(self: &mut Self) {
+        if !self.cg_safepoint_here() {
+            return;
+        }
+        self.emit_indent();
+        self.emit_str("__sc_safepoint();\n");
     }
     fn emit_binding(self: &mut Self, t: TypeId, name: tok::Span, is_const: bool) {
         let mut nm = Buf128 {};
@@ -6150,6 +6222,7 @@ extend Codegen {
         }
         self.buf.format_into("; {}++) ", diag::cstr(&nm[0]));
         self.pending_cnt = (self.cg_loop_find(id) + 1) as u32;
+        self.loop_safepoint = self.cg_safepoint_here();
         self.emit_block(fs.body);
         self.emit_str("\n");
     }
@@ -6185,6 +6258,7 @@ extend Codegen {
             self.emit_expr(fs.iterable);
             self.buf.format_into(")[{}];\n", diag::cstr(&idx[0]));
             let dbase = self.defer_top;
+            self.emit_safepoint();
             for i in 0..stmts.len {
                 self.emit_indent();
                 self.emit_stmt(unsafe (*self.cur_ast()).list(stmts)[i as usize]);
@@ -6221,6 +6295,7 @@ extend Codegen {
             self.emit_binding(selem, self.name_span(fs.binding), true);
             self.buf.format_into(" = {}.ptr[{}];\n", diag::cstr(&s[0]), diag::cstr(&idx[0]));
             let dbase = self.defer_top;
+            self.emit_safepoint();
             for i in 0..stmts.len {
                 self.emit_indent();
                 self.emit_stmt(unsafe (*self.cur_ast()).list(stmts)[i as usize]);
@@ -6264,6 +6339,7 @@ extend Codegen {
             );
             self.depth = self.depth + 1;
             let dbase = self.defer_top;
+            self.emit_safepoint();
             for i in 0..stmts.len {
                 self.emit_indent();
                 self.emit_stmt(unsafe (*self.cur_ast()).list(stmts)[i as usize]);
@@ -9209,6 +9285,7 @@ extend Codegen {
         }
         self.emit_str("for (;;) ");
         self.pending_cnt = (le + 1) as u32;
+        self.loop_safepoint = self.cg_safepoint_here();
         self.emit_block(n.as_data.while_stmt.body);
         if le >= 0 && unsafe self.loop_stack[le as usize].used_brk {
             self.buf.format_into(" __brk{}:;", unsafe self.loop_stack[le as usize].seq);
@@ -9503,6 +9580,11 @@ extend Codegen {
         self.pending_cnt = 0;
         self.emit_str("{\n");
         self.depth = self.depth + 1;
+        if self.loop_safepoint {
+            self.loop_safepoint = false;
+            self.emit_indent();
+            self.emit_str("__sc_safepoint();\n");
+        }
         let mut i: u32 = 0;
         while i < self.nparam_flags {
             let mut fl = Buf32 {};
