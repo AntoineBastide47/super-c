@@ -12,6 +12,10 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_tls_set(p: *mut void) void;
     pub fn sc_rt_tls_get() *mut void;
 
+    // Which pool worker this thread is (-1 off the pool): how a push finds its own run deque.
+    pub fn sc_rt_widx_set(i: i32) void;
+    pub fn sc_rt_widx_get() i32;
+
     // Park while `*word == expected` until unparked or (timeout_ns >= 0) the deadline; < 0 waits forever.
     // Wakeups may be spurious; the unparker publishes the new state to `*word` before unparking.
     pub fn sc_rt_park(word: *mut i32, expected: i32, timeout_ns: i64) void;

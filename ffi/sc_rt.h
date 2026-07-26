@@ -25,6 +25,12 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns);
 void sc_rt_unpark_one(int32_t *word);
 void sc_rt_unpark_all(int32_t *word);
 
+/* Per-thread scheduler slot: the index of the worker thread running on this thread, or -1 off the pool.
+   Separate from the coroutine slot above so a worker can find its own run deque while a coroutine is
+   switched onto it. */
+void sc_rt_widx_set(int32_t i);
+int32_t sc_rt_widx_get(void);
+
 /* Sleep the calling OS thread for `ns` nanoseconds (the off-worker path for `parallel::sleep`; a coroutine
    parks on the scheduler's timer list instead). Negative/zero returns immediately. */
 void sc_rt_sleep_ns(int64_t ns);

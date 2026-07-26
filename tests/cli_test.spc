@@ -1006,6 +1006,53 @@ fn main() i32 {
     assert(r.out_has("Send"), "the rejection cites the Send bound");
 }
 
+// A detached task may outlive the call that launched it, so it may not borrow the launcher's frame -- the
+// escape rule of the design. `Send` does not catch this (a `&T` IS Send when `T` is Sync), so `launch` and
+// `thread::spawn` require `F: 'static`, and that bound looks THROUGH the closure at its captures, which its
+// type erases. Both spellings of a borrowed capture are rejected: an explicit `&local`, and a mutated
+// capture (which the capture analysis turns into an implicit `&mut` into the launcher's frame).
+@test
+fn launch_rejects_borrowed_capture() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let counter = atom::Atomic::<i64>::new(0);
+    let cp = &counter;
+    launch fn() {
+        let _ = cp.fetch_add(1, atom::MemoryOrder::Relaxed);
+    };
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.exit != 0, "launching a closure that captures a borrow is rejected");
+    assert(r.out_has("'static"), "the rejection cites the 'static bound");
+
+    let q = cli::proj_new();
+    q.mkfile(
+        "main.spc",
+        r#"import std::parallel::thread as thread;
+
+fn main() i32 {
+    let mut total: i64 = 0;
+    let h = thread::spawn(fn() i64 {
+        total = total + 1; // a mutated capture is an implicit `&mut` into this frame
+        return total;
+    });
+    return h.join() as i32;
+}
+"#,
+    );
+    let r2 = q.compile("main.spc");
+    assert(r2.exit != 0, "spawning a closure that mutates a capture is rejected");
+}
+
 // The concurrency platform substrate (ffi/sc_rt.c via std/parallel): CPU count and monotonic clock, a
 // guard-paged stack driving a stackful ucontext/fiber context switch (the coroutine runs, writes a marker,
 // and switches back), and cross-thread address parking (a spawned thread publishes a word and unparks the
@@ -1154,6 +1201,77 @@ fn main() i32 {
     counter.free();
     rt::shutdown();
     return (total - 100) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// Work stealing (std/parallel/runtime): each worker owns a Chase-Lev deque and pushes to it without a lock,
+// so a task submitted from a worker never touches the shared queue. Both halves here are deliberately
+// pathological for that layout: ONE task spawns 400 others onto its own deque, which only completes if the
+// other workers steal from it; then 1000 spawns from one worker overflow the 256-slot deque and must spill
+// into the injection queue instead of being dropped. Exact counts, leak-checked.
+@test
+fn work_stealing_imbalance() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+fn spawn_many(n: i64, counter: arc::Arc<atom::Atomic<i64>>, group: sync::WaitGroup) i64 {
+    let g0 = group.clone();
+    let c0 = counter.clone();
+    let gs = group.clone();
+    group.add(1);
+    launch fn() {
+        for _i in 0..n {
+            let c = c0.clone();
+            let w = gs.clone();
+            gs.add(1);
+            launch fn() {
+                let _ = c.get().fetch_add(1, atom::MemoryOrder::Relaxed);
+                w.done();
+            };
+        }
+        g0.done();
+    };
+    if !group.wait_timeout(time::Duration::from_secs(120)) {
+        return -1;
+    }
+    return counter.get().load(atom::MemoryOrder::SeqCst);
+}
+
+fn main() i32 {
+    // Everything is spawned from one worker's deque: the others have to steal it.
+    let c1 = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg1 = sync::WaitGroup::new();
+    let a = spawn_many(400, c1.clone(), wg1.clone());
+    wg1.free();
+    c1.free();
+    if a != 400 {
+        return 1;
+    }
+    // More pushes than the deque holds, so the overflow has to spill to the injection queue.
+    let c2 = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg2 = sync::WaitGroup::new();
+    let b = spawn_many(1000, c2.clone(), wg2.clone());
+    wg2.free();
+    c2.free();
+    rt::shutdown();
+    if b != 1000 {
+        return 2;
+    }
+    return 0;
 }
 "#,
     );
@@ -1775,13 +1893,14 @@ fn data_parallel_nesting() {
         r#"import std::parallel::runtime as rt;
 import std::parallel::data as parallel;
 import std::parallel::sync as sync;
+import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
 import std::parallel::time as time;
 
 fn main() i32 {
     let n: usize = 200;
     let hits = atom::Atomic::<i64>::new(0);
-    let hp = &hits;
+    let hp = &hits; // a scoped parallel call may borrow a local: it returns only once every chunk is done
     parallel::range(0..n, fn(_i: usize) {
         parallel::range(0..3usize, fn(_k: usize) {
             let _ = hp.fetch_add(1, atom::MemoryOrder::Relaxed);
@@ -1791,15 +1910,18 @@ fn main() i32 {
         return 1;
     }
 
-    let inner = atom::Atomic::<i64>::new(0);
-    let ip = &inner;
+    // A DETACHED task may not borrow this frame, so the counter is shared by `Arc` and the borrow the
+    // parallel body needs is taken inside the coroutine, from the clone it owns.
+    let inner = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
     let wg = sync::WaitGroup::new();
     wg.add(4);
     for _t in 0..4 {
         let w = wg.clone();
+        let c = inner.clone();
         launch fn() {
+            let a = c.get();
             parallel::range(0..50usize, fn(_i: usize) {
-                let _ = ip.fetch_add(1, atom::MemoryOrder::Relaxed);
+                let _ = a.fetch_add(1, atom::MemoryOrder::Relaxed);
             });
             time::sleep(time::Duration::from_millis(1));
             w.done();
@@ -1807,7 +1929,9 @@ fn main() i32 {
     }
     wg.wait();
     wg.free();
-    if inner.load(atom::MemoryOrder::SeqCst) != 200 {
+    let got = inner.get().load(atom::MemoryOrder::SeqCst);
+    inner.free();
+    if got != 200 {
         return 2;
     }
     rt::shutdown();

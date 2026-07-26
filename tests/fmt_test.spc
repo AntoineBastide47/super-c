@@ -118,6 +118,31 @@ fn golden_comments() {
     expect_fmt("fn f(){let a=1;\n\n\n\nlet b=2;}", "fn f() {\n    let a = 1;\n\n    let b = 2;\n}\n");
 }
 
+// A comment inside an EXPRESSION list (struct literal, call arguments, array, tuple) has only one shape
+// that works: the list broken, one element per line -- printed flat, a line comment would swallow the rest
+// of the line including the closing delimiter. Before this, such comments had nowhere to go and the
+// whole-file comment count refused to write the file at all. A list with no comment must still print flat.
+@test
+fn golden_comments_in_expression_lists() {
+    expect_fmt(
+        "struct W{pub a:i32,pub b:i32}\nfn f()W{return W{a:1,// why\nb:2};}",
+        "struct W {\n    pub a: i32,\n    pub b: i32,\n}\nfn f() W {\n    return W {\n        a: 1, // why\n        b: 2,\n    };\n}\n",
+    );
+    expect_fmt(
+        "fn g(a:i32,b:i32)i32{return a;}\nfn f()i32{return g(1,\n// lead\n2);}",
+        "fn g(a: i32, b: i32) i32 {\n    return a;\n}\nfn f() i32 {\n    return g(\n        1,\n        // lead\n        2,\n    );\n}\n",
+    );
+    expect_fmt(
+        "fn f()i32{let a=[1,2,// tail\n];return a[0];}",
+        "fn f() i32 {\n    let a = [\n        1,\n        2, // tail\n    ];\n    return a[0];\n}\n",
+    );
+    // no comment: the flat shape is unchanged
+    expect_fmt(
+        "struct W{pub a:i32}\nfn f()W{return W{a:1};}",
+        "struct W {\n    pub a: i32,\n}\nfn f() W {\n    return W { a: 1 };\n}\n",
+    );
+}
+
 @test
 fn golden_fmt_skip() {
     expect_fmt(

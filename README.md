@@ -760,8 +760,10 @@ The `std::parallel` modules build a real concurrency stack on OS threads:
 * **`launch`** — a statement keyword for detached tasks: `launch || { … };` moves an owning `Send` closure
   onto a lazily-started worker pool (one thread per CPU, or `runtime::set_worker_count(n)`). Each task is a
   **stackful coroutine** on its own guard-paged stack, so blocking inside one parks the coroutine rather
-  than its worker. The escape rule (a launched closure may not borrow a caller local) and `Send` fall out of
-  the closure's `fn move() + Send` bound; `runtime::shutdown()` drains and joins the pool. `launch` is a
+  than its worker, and each worker owns a lock-free Chase–Lev deque that idle workers steal from. The bound
+  `fn move() + Send + 'static` is the safety rule: `Send` keeps un-sendable values out, and `'static` — which
+  looks through the closure at its captures — stops a detached task from borrowing the launcher's frame.
+  `runtime::shutdown()` drains and joins the pool. `launch` is a
   *sugar keyword*: the parser emits a marker that a dedicated desugar pass lowers to a `runtime::submit(…)`
   call before the type checker, so the rest of the compiler never sees it — the same mechanism future sugar
   keywords (e.g. `select`) reuse.
@@ -806,7 +808,8 @@ Roadmap, in priority order:
 
 1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
    embarrassingly parallel per module.
-2. **Work stealing** — coroutines, task-aware waits, channels and the data-parallel API are in; what is
-   left is replacing the single shared run queue with per-worker deques and victim selection.
+2. **Preemption and async I/O** — the scheduler is cooperative: a task that never blocks holds its worker
+   until it returns, and a blocking FFI call blocks that worker. Next are compiler-emitted safepoints and a
+   blocking pool / epoll-kqueue-IOCP reactor.
 3. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
    (file/console IO is currently FFI-only; this subsumes it).

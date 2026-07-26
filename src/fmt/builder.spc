@@ -297,6 +297,115 @@ fn b_expr_prec(b: &mut Builder, id: NodeId, min_prec: i32) d::DocId {
 
 // ---- shared list shapes ---------------------------------------------------------------------------
 
+// Does src[from..to) hold a comment or attribute? Decides up front whether a list must print broken.
+fn gap_has_trivia(b: &Builder, from: u32, to: u32) bool {
+    let mut segs = Vector::<TriviaSeg>::new();
+    scan_gap(b, from, to, &mut segs);
+    return segs.len() != 0;
+}
+
+// Push the segments of one inter-element gap, splitting them around the element separator: a segment that
+// began before the gap's first newline trails the PREVIOUS element (`a, // note`), the rest lead the next
+// one, each on its own line. `sep` is emitted between the two halves.
+fn push_gap_inline(b: &mut Builder, from: u32, to: u32, sep: d::DocId, out: &mut Vector<d::DocId>) {
+    let mut segs = Vector::<TriviaSeg>::new();
+    scan_gap(b, from, to, &mut segs);
+    let mut i: usize = 0;
+    while i < segs.len() && (*segs.at(i)).trailing {
+        let sg = *segs.at(i);
+        out.push(b.p.txt(" "));
+        out.push(b.p.span(sg.start, sg.end));
+        if !sg.is_attr {
+            b.emitted_trivia = b.emitted_trivia + 1;
+        }
+        i = i + 1;
+    }
+    out.push(sep);
+    while i < segs.len() {
+        let sg = *segs.at(i);
+        out.push(b.p.span(sg.start, sg.end));
+        if !sg.is_attr {
+            b.emitted_trivia = b.emitted_trivia + 1;
+        }
+        out.push(b.p.hardline());
+        i = i + 1;
+    }
+}
+
+// `b_comma_list`, plus the comments living in the gaps between elements. `ids` are the source nodes the
+// element docs came from (index-aligned), `open_end` the byte just past the opening delimiter and
+// `close_pos` the closing one, so every gap is scanned exactly once and by exactly one list.
+//
+// Any comment forces the list to print BROKEN -- a line comment printed flat would swallow the rest of the
+// line, closing delimiter included -- which the `hardline` separators do by making the group's width
+// infinite. Without this, a comment inside an expression list is simply dropped, and the whole-file
+// comment-preservation check then refuses to write the file.
+fn b_comma_list_tr(
+    b: &mut Builder,
+    open: str,
+    elems: &Vector<d::DocId>,
+    ids: NodeList,
+    open_end: u32,
+    close_pos: u32,
+    close: str,
+    trailing_comma: bool,
+) d::DocId {
+    // One pass to decide the shape: a comment in ANY gap breaks the whole list.
+    let mut hard = false;
+    let mut prev = open_end;
+    for i in 0..elems.len() {
+        let sp = nd(b, list_at(b, ids, i as u32)).span;
+        if gap_has_trivia(b, prev, sp.start) {
+            hard = true;
+        }
+        prev = sp.end;
+    }
+    if gap_has_trivia(b, prev, close_pos) {
+        hard = true;
+    }
+    if !hard {
+        return b_comma_list(b, open, elems, close, trailing_comma);
+    }
+    let mut inner = Vector::<d::DocId>::new();
+    prev = open_end;
+    for i in 0..elems.len() {
+        let sp = nd(b, list_at(b, ids, i as u32)).span;
+        if i > 0 {
+            inner.push(b.p.txt(","));
+        }
+        let sep = b.p.hardline();
+        push_gap_inline(b, prev, sp.start, sep, &mut inner);
+        inner.push(*elems.at(i));
+        prev = sp.end;
+    }
+    if trailing_comma && elems.len() != 0 {
+        inner.push(b.p.txt(","));
+    }
+    // Anything left before the closing delimiter: a trailing comment stays on the last element's line.
+    let mut tsegs = Vector::<TriviaSeg>::new();
+    scan_gap(b, prev, close_pos, &mut tsegs);
+    for k in 0..tsegs.len() {
+        let sg = *tsegs.at(k);
+        if sg.trailing {
+            inner.push(b.p.txt(" "));
+        } else {
+            inner.push(b.p.hardline());
+        }
+        inner.push(b.p.span(sg.start, sg.end));
+        if !sg.is_attr {
+            b.emitted_trivia = b.emitted_trivia + 1;
+        }
+    }
+    let ic = b.p.concat(&inner);
+    let mut parts = Vector::<d::DocId>::new();
+    parts.push(b.p.txt(open));
+    parts.push(b.p.indent(ic));
+    parts.push(b.p.hardline());
+    parts.push(b.p.txt(close));
+    let body = b.p.concat(&parts);
+    return b.p.group(body);
+}
+
 // group( open indent(softline join(", "-line, elems)) ifbreak(",") softline close )
 fn b_comma_list(b: &mut Builder, open: str, elems: &Vector<d::DocId>, close: str, trailing_comma: bool) d::DocId {
     if elems.len() == 0 {
@@ -757,7 +866,18 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
             v.push(b_expr_prec(b, n.as_data.call.callee, PREC_POSTFIX));
             let mut az = Vector::<d::DocId>::new();
             b_each(b, n.as_data.call.args, 0, &mut az);
-            v.push(b_comma_list(b, "(", &az, ")", true));
+            v.push(
+                b_comma_list_tr(
+                    b,
+                    "(",
+                    &az,
+                    n.as_data.call.args,
+                    nd(b, n.as_data.call.callee).span.end,
+                    n.span.end,
+                    ")",
+                    true,
+                ),
+            );
         },
         NODE_INDEX => {
             v.push(b_expr_prec(b, n.as_data.index.object, PREC_POSTFIX));
@@ -831,7 +951,14 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
                 let init = nd(b, n.as_data.new_expr.initializer);
                 if init.kind == NodeKind::NODE_STRUCT_INITIALIZER {
                     v.push(b.p.txt(" "));
-                    v.push(b_struct_init_fields(b, init.as_data.struct_initializer.fields));
+                    v.push(
+                        b_struct_init_fields(
+                            b,
+                            init.as_data.struct_initializer.fields,
+                            nd(b, init.as_data.struct_initializer.ty).span.end,
+                            init.span.end,
+                        ),
+                    );
                 } else {
                     v.push(b.p.txt(" ("));
                     v.push(b_expr(b, n.as_data.new_expr.initializer));
@@ -888,17 +1015,25 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
                     az.push(b_expr(b, e));
                 }
             }
-            v.push(b_comma_list(b, "[", &az, "]", true));
+            v.push(b_comma_list_tr(b, "[", &az, elems, n.span.start + 1, n.span.end, "]", true));
         },
         NODE_TUPLE => {
             let mut az = Vector::<d::DocId>::new();
-            b_each(b, n.as_data.array_literal.elements, 0, &mut az);
-            v.push(b_comma_list(b, "(", &az, ")", false));
+            let tel = n.as_data.array_literal.elements;
+            b_each(b, tel, 0, &mut az);
+            v.push(b_comma_list_tr(b, "(", &az, tel, n.span.start + 1, n.span.end, ")", false));
         },
         NODE_STRUCT_INITIALIZER => {
             v.push(b_expr_type_path(b, n.as_data.struct_initializer.ty));
             v.push(b.p.txt(" "));
-            v.push(b_struct_init_fields(b, n.as_data.struct_initializer.fields));
+            v.push(
+                b_struct_init_fields(
+                    b,
+                    n.as_data.struct_initializer.fields,
+                    nd(b, n.as_data.struct_initializer.ty).span.end,
+                    n.span.end,
+                ),
+            );
         },
         NODE_FIELD_INITIALIZER => {
             v.push(node_text(b, n.as_data.field_initializer.name));
@@ -959,12 +1094,30 @@ fn b_sizeof_arg(b: &mut Builder, id: NodeId) d::DocId {
     return b_type(b, id);
 }
 
-fn b_struct_init_fields(b: &mut Builder, fields: NodeList) d::DocId {
-    if fields.len == 0 {
-        return b.p.txt("{}");
-    }
+fn b_struct_init_fields(b: &mut Builder, fields: NodeList, open_end: u32, close_pos: u32) d::DocId {
     let mut fz = Vector::<d::DocId>::new();
+    if fields.len == 0 {
+        if !gap_has_trivia(b, open_end, close_pos) {
+            return b.p.txt("{}");
+        }
+        return b_comma_list_tr(b, "{", &fz, fields, open_end, close_pos, "}", false);
+    }
     b_each(b, fields, 0, &mut fz);
+    // A comment between the fields only fits the broken shape, which is what the trivia-aware list builds;
+    // without one, keep the flat `{ a: 1 }` form below byte for byte.
+    let mut has = gap_has_trivia(b, open_end, nd(b, list_at(b, fields, 0)).span.start);
+    for i in 1..fields.len {
+        let pe = nd(b, list_at(b, fields, i - 1)).span.end;
+        if gap_has_trivia(b, pe, nd(b, list_at(b, fields, i)).span.start) {
+            has = true;
+        }
+    }
+    if gap_has_trivia(b, nd(b, list_at(b, fields, fields.len - 1)).span.end, close_pos) {
+        has = true;
+    }
+    if has {
+        return b_comma_list_tr(b, "{", &fz, fields, open_end, close_pos, "}", true);
+    }
     // struct literals: `{ a: 1, b: 2 }` flat / broken one per line with trailing comma
     let mut inner = Vector::<d::DocId>::new();
     inner.push(b.p.line());

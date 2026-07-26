@@ -18,6 +18,11 @@ static _Thread_local void *sc_rt_tls_slot = 0;
 void sc_rt_tls_set(void *p) { sc_rt_tls_slot = p; }
 void *sc_rt_tls_get(void) { return sc_rt_tls_slot; }
 
+/* ---- current worker index: -1 on any thread that is not a pool worker ------------------------------ */
+static _Thread_local int32_t sc_rt_widx_slot = -1;
+void sc_rt_widx_set(int32_t i) { sc_rt_widx_slot = i; }
+int32_t sc_rt_widx_get(void) { return sc_rt_widx_slot; }
+
 #ifdef _WIN32
 /* ================================ Windows ========================================================== */
 #include <windows.h>

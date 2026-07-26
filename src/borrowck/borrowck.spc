@@ -2404,6 +2404,14 @@ extend tc::TypeChecker {
                     di,
                     format("the parameter's type variable is declared `: 'static`, so it cannot hold a borrow"),
                 );
+                if self.type_at(at).kind == TypeKind::TYPE_FUNCTION {
+                    self.tc_region_note(
+                        di,
+                        format(
+                            "this closure captures a borrow (or mutates a capture, which captures `&mut`); move the value in instead, or share it through an `Arc`",
+                        ),
+                    );
+                }
             }
         }
     }
@@ -2525,6 +2533,32 @@ extend tc::TypeChecker {
         }
         if self.type_at(ty).kind == TypeKind::TYPE_REFERENCE {
             return true;
+        }
+        // A closure's ENVIRONMENT is where its borrows live, and none of it shows in its type: `fn(..)`
+        // erases the captures. So look at them directly -- a captured `&T` (or a value the capture
+        // analysis turned into an implicit `&mut`, i.e. a mutated capture) is a borrow of the enclosing
+        // frame, and a closure holding one is not `'static` no matter what its signature says.
+        if self.type_at(ty).kind == TypeKind::TYPE_FUNCTION {
+            let fmod = self.type_at(ty).module;
+            if fmod != self.cur_module() {
+                return false; // a foreign closure cannot have captured one of our locals
+            }
+            let fdecl = self.type_at(ty).as_data.decl;
+            if fdecl == NODE_NONE || unsafe (*self.cur_ast()).at_const(fdecl).kind != NodeKind::NODE_CLOSURE {
+                return false; // a plain function pointer captures nothing
+            }
+            let cl = unsafe (*self.cur_ast()).at_const(fdecl).as_data.closure;
+            if cl.mut_caps != 0 {
+                return true;
+            }
+            let cids = unsafe (*self.cur_ast()).list(cl.captures);
+            for ci in 0..cl.captures.len {
+                let cty = unsafe (*self.cur_ast()).type_of(unsafe cids[ci as usize]);
+                if self.tc_type_carries_borrow(cty, depth + 1) {
+                    return true;
+                }
+            }
+            return false;
         }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
