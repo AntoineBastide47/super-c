@@ -20,6 +20,8 @@ extern "C" "sc_io.h" {
     pub fn sc_io_close(fd: i32) i32;
     // Did the last call fail only for want of readiness? Check it immediately after a -1 return.
     pub fn sc_io_would_block() i32;
+    // The raw errno of the last failing call, so a failure can say which one it was.
+    pub fn sc_io_errno() i32;
     pub fn sc_io_read(fd: i32, buf: *mut void, n: usize) isize;
     pub fn sc_io_write(fd: i32, buf: *const void, n: usize) isize;
 
@@ -28,4 +30,8 @@ extern "C" "sc_io.h" {
     pub fn sc_tcp_accept(lfd: i32) i32;
     pub fn sc_tcp_connect(host: *const char, port: i32) i32;
     pub fn sc_tcp_connect_result(fd: i32) i32;
+
+    pub fn sc_udp_bind(host: *const char, port: i32) i32;
+    pub fn sc_udp_send_to(fd: i32, buf: *const void, n: usize, host: *const char, port: i32) isize;
+    pub fn sc_udp_recv(fd: i32, buf: *mut void, n: usize) isize;
 }

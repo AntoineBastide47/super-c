@@ -477,7 +477,7 @@ extend Parser {
                 Node {
                     kind: NodeKind::NODE_TUPLE_TYPE,
                     span: Span::new(start, self.previous_end()),
-                    as_data: NodeAs { array_literal: ArrayLiteralData { elements: elems } },
+                    as_data: NodeAs { array_literal: ArrayLiteralData { elements: elems, repeat: false } },
                 },
             );
         }
@@ -1887,8 +1887,16 @@ extend Parser {
         let start = self.raw_peek().start();
         self.advance();
         let mark = self.ast.mark();
+        let mut repeat = false;
         while !self.check(TokenType::RightBracket) && !self.at_end() {
             self.ast.push(self.parse_array_element());
+            // `[v; N]` -- N copies of one value. LL(1): the `;` is what distinguishes it, and it can only
+            // appear after the first element.
+            if self.ast.mark() == mark + 1 && self.match(TokenType::Semicolon) {
+                self.ast.push(self.parse_expression());
+                repeat = true;
+                break;
+            }
             if !self.match(TokenType::Comma) {
                 break;
             }
@@ -1899,7 +1907,7 @@ extend Parser {
             Node {
                 kind: NodeKind::NODE_ARRAY_LITERAL,
                 span: Span::new(start, self.previous_end()),
-                as_data: NodeAs { array_literal: ArrayLiteralData { elements: elements } },
+                as_data: NodeAs { array_literal: ArrayLiteralData { elements: elements, repeat: repeat } },
             },
         );
     }
@@ -1976,7 +1984,7 @@ extend Parser {
                     Node {
                         kind: NodeKind::NODE_TUPLE,
                         span: Span::new(start, self.previous_end()),
-                        as_data: NodeAs { array_literal: ArrayLiteralData { elements: elems } },
+                        as_data: NodeAs { array_literal: ArrayLiteralData { elements: elems, repeat: false } },
                     },
                 );
             }

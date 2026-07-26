@@ -43,6 +43,8 @@ int sc_io_set_nonblocking(int fd) {
 
 int sc_io_close(int fd) { return close(fd); }
 
+int sc_io_errno(void) { return errno; }
+
 int sc_io_would_block(void) {
   return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS || errno == EINTR;
 }
@@ -180,7 +182,7 @@ static int sc_tcp_addr(const char *host, int port, struct addrinfo **out) {
   struct addrinfo hints;
   char svc[16];
   memset(&hints, 0, sizeof hints);
-  hints.ai_family = AF_INET; /* IPv4 only: enough for the API's promise, and one code path */
+  hints.ai_family = AF_UNSPEC; /* IPv4 or IPv6, whichever the name resolves to */
   hints.ai_socktype = SOCK_STREAM;
   if (!host || !*host) hints.ai_flags = AI_PASSIVE;
   snprintf(svc, sizeof svc, "%d", port);
@@ -238,6 +240,46 @@ int sc_tcp_connect(const char *host, int port) {
   close(fd);
   return -1;
 }
+
+/* ---- UDP ------------------------------------------------------------------------------------------- */
+
+int sc_udp_bind(const char *host, int port) {
+  struct addrinfo *ai = 0, hints;
+  char svc[16];
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  if (!host || !*host) hints.ai_flags = AI_PASSIVE;
+  snprintf(svc, sizeof svc, "%d", port);
+  if (getaddrinfo((host && *host) ? host : 0, svc, &hints, &ai) != 0 || !ai) return -1;
+  int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  if (fd < 0) { freeaddrinfo(ai); return -1; }
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  if (bind(fd, ai->ai_addr, ai->ai_addrlen) != 0) { freeaddrinfo(ai); close(fd); return -1; }
+  freeaddrinfo(ai);
+  if (sc_io_set_nonblocking(fd) != 0) { close(fd); return -1; }
+  return fd;
+}
+
+/* Send one datagram to host:port. The address is resolved per call, which keeps the Super-C side free of
+   any sockaddr; a sender in a tight loop should hold a connected socket instead. */
+long sc_udp_send_to(int fd, const void *buf, size_t n, const char *host, int port) {
+  struct addrinfo *ai = 0, hints;
+  char svc[16];
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  snprintf(svc, sizeof svc, "%d", port);
+  if (getaddrinfo(host, svc, &hints, &ai) != 0 || !ai) return -1;
+  long r = (long)sendto(fd, buf, n, 0, ai->ai_addr, ai->ai_addrlen);
+  freeaddrinfo(ai);
+  return r;
+}
+
+/* Receive one datagram; the sender's address is discarded (there is nowhere platform-independent to put
+   it yet). -1 with sc_io_would_block() means "nothing waiting". */
+long sc_udp_recv(int fd, void *buf, size_t n) { return (long)recvfrom(fd, buf, n, 0, 0, 0); }
 
 int sc_tcp_connect_result(int fd) {
   int err = 0;

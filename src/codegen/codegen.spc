@@ -841,7 +841,7 @@ pub struct Codegen<'a> {
     pub nloops: u32,
     pub label_seq: u32,
     pub pending_cnt: u32,
-    pub loop_safepoint: bool, // emit a preemption safepoint at the top of the next block (a loop body)
+    pub pending_safepoint: bool, // emit a preemption safepoint at the top of the next block emitted
     pub uses_tasks: i8, // 0 unknown / 1 no / 2 yes: does this program link the coroutine runtime?
     pub test: CgTestInfo,
     pub moved: [NodeId; 512],
@@ -5807,7 +5807,7 @@ extend Codegen {
                 if n.as_data.while_stmt.is_do {
                     self.emit_str("do ");
                     self.pending_cnt = (le + 1) as u32;
-                    self.loop_safepoint = self.cg_safepoint_here();
+                    self.pending_safepoint = self.cg_safepoint_here();
                     self.emit_block(n.as_data.while_stmt.body);
                     self.emit_str(" while ");
                     self.emit_condition(n.as_data.while_stmt.condition);
@@ -5821,7 +5821,7 @@ extend Codegen {
                         self.emit_str(" ");
                     }
                     self.pending_cnt = (le + 1) as u32;
-                    self.loop_safepoint = self.cg_safepoint_here();
+                    self.pending_safepoint = self.cg_safepoint_here();
                     self.emit_block(n.as_data.while_stmt.body);
                     self.emit_str("\n");
                 }
@@ -6241,7 +6241,7 @@ extend Codegen {
         }
         self.buf.format_into("; {}++) ", diag::cstr(&nm[0]));
         self.pending_cnt = (self.cg_loop_find(id) + 1) as u32;
-        self.loop_safepoint = self.cg_safepoint_here();
+        self.pending_safepoint = self.cg_safepoint_here();
         self.emit_block(fs.body);
         self.emit_str("\n");
     }
@@ -9358,7 +9358,7 @@ extend Codegen {
         }
         self.emit_str("for (;;) ");
         self.pending_cnt = (le + 1) as u32;
-        self.loop_safepoint = self.cg_safepoint_here();
+        self.pending_safepoint = self.cg_safepoint_here();
         self.emit_block(n.as_data.while_stmt.body);
         if le >= 0 && unsafe self.loop_stack[le as usize].used_brk {
             self.buf.format_into(" __brk{}:;", unsafe self.loop_stack[le as usize].seq);
@@ -9653,8 +9653,8 @@ extend Codegen {
         self.pending_cnt = 0;
         self.emit_str("{\n");
         self.depth = self.depth + 1;
-        if self.loop_safepoint {
-            self.loop_safepoint = false;
+        if self.pending_safepoint {
+            self.pending_safepoint = false;
             self.emit_indent();
             self.emit_str("__sc_safepoint();\n");
         }
@@ -10074,8 +10074,42 @@ extend Codegen {
         self.emit_ident(nt);
     }
 
+    // `[v; N]`. A zero fill is `{0}` -- C zero-fills the rest, so the size of the emitted text does not grow
+    // with N; anything else is written out N times, which is why a repeat of a non-constant value is the
+    // one shape worth keeping small.
+    fn emit_array_repeat(self: &mut Self, id: NodeId, elements: NodeList) {
+        let vid = unsafe (*self.cur_ast()).list(elements)[0];
+        let ty = unsafe (*self.cur_ast()).type_of(id);
+        let mut n: u32 = 0;
+        if ty != TYPE_NONE && self.type_at(ty).kind == TypeKind::TYPE_ARRAY {
+            n = self.type_at(ty).as_data.arr.len;
+        }
+        if self.ceval() != null {
+            let v = unsafe (*self.ceval()).eval(self.cur_module(), vid);
+            if v.kind == ce::CONST_INT && v.as_data.i == 0 {
+                self.emit_str("{0}");
+                return;
+            }
+        }
+        if n == 0 {
+            self.emit_str("{0}");
+            return;
+        }
+        self.emit_str("{ ");
+        for i in 0..n {
+            if i != 0 {
+                self.emit_str(", ");
+            }
+            self.emit_expr(vid);
+        }
+        self.emit_str(" }");
+    }
     fn emit_array_braces(self: &mut Self, id: NodeId) {
         let elements = unsafe (*self.cur_ast()).at_const(id).as_data.array_literal.elements;
+        if unsafe (*self.cur_ast()).at_const(id).as_data.array_literal.repeat {
+            self.emit_array_repeat(id, elements);
+            return;
+        }
         self.emit_str("{ ");
         for i in 0..elements.len {
             if i != 0 {

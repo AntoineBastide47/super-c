@@ -281,6 +281,21 @@ fn module_file_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String 
     return out;
 }
 
+// The directory-index form of the same import: `std::parallel` -> `<root>/std/parallel/parallel.spc`. A
+// directory of modules can then name itself, so `import std::parallel;` works alongside the explicit
+// `import std::parallel::data as parallel;` instead of the alias being the only spelling.
+fn module_index_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String {
+    let rel = join_parts(ast, src, parts, "/");
+    let last = join_parts(ast, src, NodeList { start: parts.start + parts.len - 1, len: 1 }, "/");
+    let mut out = String::from_str(root_dir);
+    out.push_str("/");
+    out.push_str(rel.as_str());
+    out.push_str("/");
+    out.push_str(last.as_str());
+    out.push_str(".spc");
+    return out;
+}
+
 // Heap "<a>/<b>".
 fn join2(a: str, b: str) String {
     let mut out = String::from_str(a);
@@ -377,6 +392,10 @@ fn resolve_import_file(dca: usize, root_dir: str, alt_root: str, std_root: str, 
     if unsafe (*dc).exists(root_rel.as_str()) {
         return root_rel;
     }
+    let root_idx = module_index_path(root_dir, ast, src, parts);
+    if unsafe (*dc).exists(root_idx.as_str()) {
+        return root_idx;
+    }
     // Manifest convention fallback: tests/ and bench/ live beside src/, so a project-root-rooted
     // load still resolves the compiler's own modules (and vice versa) through the src/ alt root.
     if !alt_root.is_empty() {
@@ -391,6 +410,10 @@ fn resolve_import_file(dca: usize, root_dir: str, alt_root: str, std_root: str, 
     let std_rel = module_file_path(std_root, ast, src, parts);
     if unsafe (*dc).exists(std_rel.as_str()) {
         return std_rel;
+    }
+    let std_idx = module_index_path(std_root, ast, src, parts);
+    if unsafe (*dc).exists(std_idx.as_str()) {
+        return std_idx;
     }
     let ffi_base = join2(std_root, "ffi");
     let ffi_rel = module_file_path(ffi_base.as_str(), ast, src, parts);

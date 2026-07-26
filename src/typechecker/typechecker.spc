@@ -9109,6 +9109,9 @@ extend TypeChecker {
     fn check_array_literal(self: &mut Self, id: NodeId) TypeId {
         let a = self.cur_ast();
         let elements = unsafe (*a).at_const(id).as_data.array_literal.elements;
+        if unsafe (*a).at_const(id).as_data.array_literal.repeat {
+            return self.check_array_repeat(elements);
+        }
         if elements.len == 0 {
             let sp = unsafe (*a).at_const(id).span;
             self.errors.emit(
@@ -9178,6 +9181,52 @@ extend TypeChecker {
             );
         }
         return TYPE_NONE;
+    }
+
+    // `[v; N]`: one value and a count. The count must be a constant -- the length is part of the type -- so
+    // it is folded here, with the same const-eval every other array length goes through.
+    fn check_array_repeat(self: &mut Self, elements: NodeList) TypeId {
+        let a = self.cur_ast();
+        let vid = unsafe (*a).list(elements)[0];
+        let nid = unsafe (*a).list(elements)[1];
+        let elem = self.check_expr(vid);
+        let cnt = self.check_expr(nid);
+        let sp = unsafe (*a).at_const(nid).span;
+        if cnt != TYPE_NONE {
+            let cy = *self.type_at(cnt);
+            if !(cy.kind == TypeKind::TYPE_BUILTIN && bt_is_int(cy.as_data.builtin)) {
+                self.errors.emit(sp.start, sp.end - sp.start, format("an array repeat count must be an integer"));
+                return TYPE_NONE;
+            }
+        }
+        let ceptr = self.ceval();
+        let mut n: i64 = -1;
+        if ceptr != null {
+            let cv = unsafe (*ceptr).eval(self.cur_module(), nid);
+            if cv.kind == ce::CONST_INT {
+                n = cv.as_data.i;
+            }
+        }
+        if n < 0 {
+            self.errors.emit(sp.start, sp.end - sp.start, format("an array repeat count must be a constant expression"));
+            return TYPE_NONE;
+        }
+        if elem == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        // Every slot holds its own copy, and a `Free` value cannot be copied into more than one owner.
+        if n > 1 && self.tc_type_is_free(elem) {
+            let vsp = unsafe (*a).at_const(vid).span;
+            self.errors.emit(
+                vsp.start,
+                vsp.end - vsp.start,
+                format("an array repeat needs a value that can be copied; this one owns resources"),
+            );
+            return TYPE_NONE;
+        }
+        return unsafe (*self.cur_ast()).intern_type(
+            Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: n as u32 } } },
+        );
     }
 
     // Adapt a branch/arm/block-tail LITERAL to the expected type. Literal adaptation is the one

@@ -332,6 +332,56 @@ fn push_gap_inline(b: &mut Builder, from: u32, to: u32, sep: d::DocId, out: &mut
     }
 }
 
+// The byte offset of the delimiter closing a list, scanning from `from` (the last element's end) and
+// skipping comments. Only trivia and a separator can sit between the last element and its closer, so no
+// nesting has to be tracked. `to` bounds the search; on failure it returns `from`, which makes the tail gap
+// empty and the list simply keeps its old shape.
+fn find_close(b: &Builder, from: u32, to: u32, close: u8) u32 {
+    let src = b.src;
+    let mut i = from as usize;
+    let hi = if to as usize > src.len() {
+        src.len();
+    } else {
+        to as usize;
+    };
+    while i < hi {
+        let c = src.byte_at(i);
+        if c == b'/' && i + 1 < hi && src.byte_at(i + 1) == b'/' {
+            while i < hi && src.byte_at(i) != b'\n' {
+                i = i + 1;
+            }
+            continue;
+        }
+        if c == b'/' && i + 1 < hi && src.byte_at(i + 1) == b'*' {
+            i = i + 2;
+            while i + 1 < hi && !(src.byte_at(i) == b'*' && src.byte_at(i + 1) == b'/') {
+                i = i + 1;
+            }
+            i = i + 2;
+            continue;
+        }
+        if c == close {
+            return i as u32;
+        }
+        i = i + 1;
+    }
+    return from;
+}
+
+// Does any gap in `ids` (between `open_end` and `close_pos`) hold trivia? What decides whether a list needs
+// the trivia-aware shape at all -- every list keeps its existing output byte for byte when it does not.
+fn list_has_trivia(b: &Builder, ids: NodeList, open_end: u32, close_pos: u32) bool {
+    let mut prev = open_end;
+    for i in 0..ids.len {
+        let sp = nd(b, list_at(b, ids, i)).span;
+        if gap_has_trivia(b, prev, sp.start) {
+            return true;
+        }
+        prev = sp.end;
+    }
+    return gap_has_trivia(b, prev, close_pos);
+}
+
 // `b_comma_list`, plus the comments living in the gaps between elements. `ids` are the source nodes the
 // element docs came from (index-aligned), `open_end` the byte just past the opening delimiter and
 // `close_pos` the closing one, so every gap is scanned exactly once and by exactly one list.
@@ -999,6 +1049,14 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
         NODE_ARRAY_LITERAL => {
             let mut az = Vector::<d::DocId>::new();
             let elems = n.as_data.array_literal.elements;
+            if n.as_data.array_literal.repeat && elems.len == 2 {
+                v.push(b.p.txt("["));
+                v.push(b_expr(b, list_at(b, elems, 0)));
+                v.push(b.p.txt("; "));
+                v.push(b_expr(b, list_at(b, elems, 1)));
+                v.push(b.p.txt("]"));
+                return b.p.concat(&v);
+            }
             for i in 0..elems.len {
                 let e = list_at(b, elems, i);
                 if nd(b, e).kind == NodeKind::NODE_FIELD_INITIALIZER {
@@ -1578,7 +1636,28 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             if f.is_variadic {
                 ps.push(b.p.txt("..."));
             }
-            v.push(b_comma_list(b, "(", &ps, ")", true));
+            // Parameters normally GROUP (`a, b: i32`), which is not index-aligned with the node list -- so a
+            // list carrying comments is built one parameter per doc instead. Grouping is a flat-form
+            // nicety, and a comment forces the broken form anyway.
+            let popen = if f.generics.len != 0 {
+                nd(b, list_at(b, f.generics, f.generics.len - 1)).span.end;
+            } else {
+                nd(b, f.name).span.end;
+            };
+            let pclose = if f.params.len != 0 {
+                find_close(b, nd(b, list_at(b, f.params, f.params.len - 1)).span.end, n.span.end, b')');
+            } else {
+                popen;
+            };
+            if f.params.len != 0 && list_has_trivia(b, f.params, popen, pclose) {
+                let mut pu = Vector::<d::DocId>::new();
+                for pi in 0..f.params.len {
+                    pu.push(b_param(b, list_at(b, f.params, pi)));
+                }
+                v.push(b_comma_list_tr(b, "(", &pu, f.params, popen, pclose, ")", true));
+            } else {
+                v.push(b_comma_list(b, "(", &ps, ")", true));
+            }
             if f.returns.len > 0 {
                 v.push(b.p.txt(" "));
                 v.push(b_returns(b, f.returns));

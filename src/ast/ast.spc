@@ -437,6 +437,10 @@ pub struct NewData {
 }
 pub struct ArrayLiteralData {
     pub elements: NodeList,
+    // `[v; N]`: `elements` holds exactly the value and the count, rather than the elements themselves.
+    // A flag rather than a node kind of its own, so every pass that just walks `elements` (the resolver,
+    // const-eval) keeps working on both forms unchanged.
+    pub repeat: bool,
 }
 pub struct StructInitializerData {
     pub ty: NodeId,

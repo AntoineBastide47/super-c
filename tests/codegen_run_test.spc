@@ -162,6 +162,33 @@ fn mut_match_binding() {
     );
 }
 
+// `[v; N]` -- N copies of one value. The count is part of the type, so it must be constant, and a value
+// that owns resources cannot be copied into more than one slot; both are rejected rather than emitted. A
+// zero fill emits `{0}` so the C does not grow with N.
+@test
+fn array_repeat_literal() {
+    run_exit(
+        "repeat literal as a binding, a field and a slice argument",
+        "struct Buf { pub b: [u8; 8] }\nfn sum(s: []u8) i32 { let mut t = 0; for i in 0..s.len() { t = t + *s.get(i) as i32; } return t; }\nconst N: usize = 4;\nfn main() i32 {\n  let zeros: [u8; 8] = [0u8; 8];\n  let ones: [i32; 3] = [1; 3];\n  let sized: [u8; 4] = [2u8; N];\n  let b = Buf { b: [9u8; 8] };\n  unsafe exit(sum(zeros) + ones[0] + ones[2] + sum(sized) + sum(b.b) - 40);\n}\n",
+        42,
+    );
+}
+
+// A closure's DECLARED return type has to be resolved like any other type annotation. It was not, so it
+// lowered to no type at all for anything that is not a builtin -- and a builtin needs no resolution, which
+// is exactly why it went unnoticed: `fn() u8` behaved and `fn() SomeStruct` silently had no return type, so
+// every signature check against such a closure (a `F: fn() T` bound, above all) compared against nothing
+// and rejected it. Covered here through a generic method on a generic struct AND a free generic function,
+// which are the two shapes that check the bound.
+@test
+fn closure_declared_return_type_resolves() {
+    run_exit(
+        "closure returning a struct satisfies a fn-typed bound",
+        "struct Pt { pub x: i32 }\nstruct Holder<T> { pub n: usize }\nextend<T> Holder<T> {\n  pub fn fill<F: fn move() T>(self: &mut Holder<T>, make: F) T { return make(); }\n}\nfn free_mk<T, F: fn move() T>(make: F) T { return make(); }\nfn main() i32 {\n  let mut h = Holder::<Pt> { n: 0 };\n  let a = h.fill(fn() Pt { return Pt { x: 20 }; });\n  let b = free_mk(fn() Pt { return Pt { x: 22 }; });\n  unsafe exit(a.x + b.x);\n}\n",
+        42,
+    );
+}
+
 // An array-typed FIELD coerces to a slice like any other array. It did not: the coercion needs the element
 // count, which is read from the declaration the expression names -- and that lookup only understood a plain
 // identifier, so `f(x.buf)` type-checked and then emitted a raw C array where a slice was expected. Covers

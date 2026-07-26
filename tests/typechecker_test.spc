@@ -2224,6 +2224,26 @@ fn region_outlives_transitive() {
 // says nothing about this one. The loop-body walk runs twice on purpose (to catch conflicts that only show
 // up across the back edge), and without that reset the second pass saw the first pass's move and rejected
 // the arm's own use -- while the identical code outside a loop, or with a `let` binding, was accepted.
+// The repeat count is part of the type, so it has to be constant; and every slot holds its own copy, which
+// a value that owns resources cannot provide.
+@test
+fn array_repeat_requirements() {
+    h::expect_ok(
+        "a const-foldable count is accepted",
+        "const N: usize = 4;\nfn main() i32 {\n    let a: [u8; 4] = [7u8; N];\n    return a[0] as i32 - 7;\n}\n",
+    );
+    h::expect_err_msg(
+        "a runtime count is rejected",
+        "extern \"C\" { fn rand() i32; }\nfn main() i32 {\n    let n = unsafe rand() as usize;\n    let a = [1u8; n];\n    return a[0] as i32;\n}\n",
+        "must be a constant expression",
+    );
+    h::expect_err_msg(
+        "repeating a value that owns resources is rejected",
+        "fn main() i32 {\n    let a = [String::from_str(\"x\"); 2];\n    return a[0].len() as i32;\n}\n",
+        "owns resources",
+    );
+}
+
 @test
 fn arm_binding_rebinds_each_iteration() {
     h::expect_ok(

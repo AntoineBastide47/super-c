@@ -42,6 +42,8 @@ int sc_io_set_nonblocking(int fd);
 int sc_io_close(int fd);
 /* Did the last call fail only because it would have blocked (EAGAIN/EWOULDBLOCK/EINPROGRESS)? */
 int sc_io_would_block(void);
+/* The raw errno of the last failing call, for reporting WHICH failure it was. */
+int sc_io_errno(void);
 long sc_io_read(int fd, void *buf, size_t n);
 long sc_io_write(int fd, const void *buf, size_t n);
 
@@ -55,5 +57,10 @@ int sc_tcp_accept(int lfd);
 int sc_tcp_connect(const char *host, int port);
 /* 0 if a connect that was in progress succeeded, else its error code. */
 int sc_tcp_connect_result(int fd);
+
+/* UDP. `bind` with port 0 lets the OS choose (ask sc_tcp_port). Both transfers are non-blocking. */
+int sc_udp_bind(const char *host, int port);
+long sc_udp_send_to(int fd, const void *buf, size_t n, const char *host, int port);
+long sc_udp_recv(int fd, void *buf, size_t n);
 
 #endif

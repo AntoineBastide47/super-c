@@ -758,7 +758,8 @@ The `std::parallel` modules build a real concurrency stack on OS threads:
   yields there when other work is waiting.
 * **Async I/O** — a reactor (kqueue / epoll) turns descriptor readiness into a wake, so `net::TcpStream`'s
   `accept` / `read` / `write` / `connect` park the coroutine: a hundred connections are a hundred parked
-  tasks and one poller thread, not a hundred threads. POSIX only.
+  tasks and one poller thread, not a hundred threads. `UdpSocket` too, IPv4 or IPv6, with every failure a
+  `Result<T, IoError>` carrying a kind and the errno. POSIX only.
 * **Blocking calls and diagnostics** — `blocking::call` (or `@blocking` on an extern function) runs
   something that blocks its OS thread on a separate pool while the calling coroutine parks; every task has
   an id that panics report (`panic: [task 7] …`), `SC_TASK_TRACE=1` traces the scheduler, and

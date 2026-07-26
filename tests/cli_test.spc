@@ -1479,7 +1479,7 @@ fn main() i32 {
     let ws = wg.clone();
     launch fn() {
         switch l.accept() {
-            Some(s) => {
+            Ok(s) => {
                 let mut buf = Vector::<u8>::new();
                 for _k in 0..64 {
                     buf.push(0u8);
@@ -1493,7 +1493,7 @@ fn main() i32 {
                 buf.free();
                 s.free();
             },
-            None => {},
+            Err(_) => {},
         };
         ws.done();
     };
@@ -1502,7 +1502,7 @@ fn main() i32 {
     let wc = wg.clone();
     launch fn() {
         switch net::TcpStream::connect("127.0.0.1", port) {
-            Some(c) => {
+            Ok(c) => {
                 let msg: [u8; 5] = [104u8, 101u8, 108u8, 108u8, 111u8];
                 let _ = c.write(msg);
                 let mut back = Vector::<u8>::new();
@@ -1517,7 +1517,7 @@ fn main() i32 {
                 back.free();
                 c.free();
             },
-            None => {},
+            Err(_) => {},
         };
         wc.done();
     };
@@ -1541,6 +1541,148 @@ fn main() i32 {
     assert_eq(cc.exit, 0);
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert_eq(run.exit, 0);
+}
+
+// UDP and typed failures. Every operation that can fail returns `Result<T, IoError>`, so the caller can
+// say WHICH failure it was: a connect to a dead port is `Refused`, a second bind of the same port is
+// `AddressInUse`, and the raw errno is kept alongside the kind. The datagram half is exercised end to end,
+// both sides parking on the reactor.
+@test
+fn reactor_udp_and_typed_errors() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::net;
+import std::parallel::io;
+import std::parallel::sync;
+import std::parallel::arc;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let server = net::UdpSocket::bind("127.0.0.1", 0).unwrap();
+    let port = server.port();
+    let got = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+
+    let gs = got.clone();
+    let ws = wg.clone();
+    launch fn() {
+        let mut buf = Vector::<u8>::new();
+        buf.resize_default(32);
+        let cap: usize = 32;
+        switch server.recv(buf.index_range_mut(0..cap)) {
+            Ok(n) => {
+                let _ = gs.get().fetch_add(n as i64, atom::MemoryOrder::Relaxed);
+            },
+            Err(_) => {},
+        };
+        buf.free();
+        ws.done();
+    };
+
+    let gc = got.clone();
+    let wc = wg.clone();
+    launch fn() {
+        switch net::UdpSocket::bind("127.0.0.1", 0) {
+            Ok(c) => {
+                let msg: [u8; 5] = [1u8; 5];
+                switch c.send_to(msg, "127.0.0.1", port) {
+                    Ok(n) => {
+                        let _ = gc.get().fetch_add(100 * n as i64, atom::MemoryOrder::Relaxed);
+                    },
+                    Err(_) => {},
+                };
+                c.free();
+            },
+            Err(_) => {},
+        };
+        wc.done();
+    };
+
+    wg.wait();
+    let total = got.get().load(atom::MemoryOrder::SeqCst);
+    wg.free();
+    got.free();
+    io::shutdown();
+    rt::shutdown();
+    return (total - 505) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+
+    let q = cli::proj_new();
+    q.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::net;
+import std::parallel::io;
+
+fn main() i32 {
+    // Nothing is listening on this port: the failure should say so, not just fail.
+    let mut score = 0;
+    switch net::TcpStream::connect("127.0.0.1", 9) {
+        Ok(c) => {
+            c.free();
+        },
+        Err(e) => {
+            switch e.kind() {
+                Refused => {
+                    score = score + 1;
+                },
+                Unreachable => {
+                    score = score + 1;
+                },
+                Reset => {},
+                AddressInUse => {},
+                Closed => {},
+                Other => {},
+            };
+            if e.code == 0 {
+                score = score - 10;
+            }
+        },
+    };
+    // Binding a port twice: the second one is in use.
+    let a = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    let p = a.port();
+    switch net::TcpListener::bind("127.0.0.1", p) {
+        Ok(b) => {
+            b.free();
+        },
+        Err(e) => {
+            switch e.kind() {
+                AddressInUse => {
+                    score = score + 1;
+                },
+                Refused => {},
+                Unreachable => {},
+                Reset => {},
+                Closed => {},
+                Other => {},
+            };
+        },
+    };
+    a.free();
+    io::shutdown();
+    rt::shutdown();
+    return score - 2;
+}
+"#,
+    );
+    let r2 = q.compile("main.spc");
+    assert_eq(r2.exit, 0);
+    let cc2 = q.cc_build("");
+    assert_eq(cc2.exit, 0);
+    let run2 = q.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run2.exit, 0);
 }
 
 // What the reactor is FOR: a hundred simultaneous connections served by two workers and one poller thread,
@@ -1576,7 +1718,7 @@ fn main() i32 {
         let inner = sync::WaitGroup::new();
         for _i in 0..CONNS {
             switch l.accept() {
-                Some(s) => {
+                Ok(s) => {
                     let cs = ls.clone();
                     let iw = inner.clone();
                     inner.add(1);
@@ -1595,7 +1737,7 @@ fn main() i32 {
                         iw.done();
                     };
                 },
-                None => {},
+                Err(_) => {},
             };
         }
         inner.wait();
@@ -1610,7 +1752,7 @@ fn main() i32 {
         let cw = cwg.clone();
         launch fn() {
             switch net::TcpStream::connect("127.0.0.1", port) {
-                Some(c) => {
+                Ok(c) => {
                     let msg: [u8; 4] = [112u8, 105u8, 110u8, 103u8];
                     let _ = c.write(msg);
                     let mut back = Vector::<u8>::new();
@@ -1625,7 +1767,7 @@ fn main() i32 {
                     back.free();
                     c.free();
                 },
-                None => {},
+                Err(_) => {},
             };
             cw.done();
         };

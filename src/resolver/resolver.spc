@@ -366,12 +366,18 @@ extend Resolver {
             let mut nm = NODE_NONE;
             if alias != NODE_NONE {
                 nm = alias;
-            } else if parts.len == 1 {
-                nm = self.child(parts, 0);
+            } else {
+                // The LAST segment is the default qualifier, for one segment or many: `import std::parallel
+                // ::sync;` binds `sync::`, which is what an alias was otherwise needed for. An explicit
+                // alias still wins, and a name already bound by an earlier import keeps it -- two modules
+                // whose last segment matches need an alias to tell apart, exactly as before.
+                nm = self.child(parts, parts.len - 1);
             }
             if nm != NODE_NONE {
                 let nsp = self.name_span(nm);
-                self.mod_names.push(ModEntry { name: nsp, mid: m as ModuleId });
+                if !self.name_is_module(nsp).found {
+                    self.mod_names.push(ModEntry { name: nsp, mid: m as ModuleId });
+                }
             }
         }
     }
@@ -1369,6 +1375,20 @@ extend Resolver {
             let param = self.ast.at_const(pid).as_data.parameter;
             self.declare(param.name, pid, Namespace::NS_VALUE);
             self.resolve_type(param.ty);
+        }
+        // The DECLARED return type needs resolving too. Unresolved, it lowers to no type at all for
+        // anything that is not a builtin -- and a builtin needs no resolution, which is exactly why this
+        // went unnoticed: `fn() u8` worked and `fn() SomeStruct` silently had no return type, so every
+        // signature check against it (a `F: fn() T` bound, say) compared against nothing.
+        for i in 0..cl.returns.len {
+            let rid = self.child(cl.returns, i);
+            let rkind = self.ast.at_const(rid).kind;
+            let tid = if rkind == NodeKind::NODE_PARAMETER {
+                self.ast.at_const(rid).as_data.parameter.ty;
+            } else {
+                rid;
+            };
+            self.resolve_type(tid);
         }
         if cl.expr_body {
             self.resolve_expr(cl.body);
