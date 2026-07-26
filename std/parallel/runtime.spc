@@ -12,7 +12,6 @@
 // wait queues (owned by each primitive) are locked. The pool starts on the first `launch` and is torn down
 // by `shutdown()` (call it once, from the main thread, after all launched work has been awaited).
 
-import pthread;
 import atomic;
 import stdlib;
 import sc_runtime;
@@ -88,7 +87,7 @@ pub struct Scheduler {
     pub lock: *mut void, // guards the injection queue, the timer list and shutting_down
     pub cv: *mut void, // workers wait here when they can find no work anywhere
     pub sleeping: i32, // atomic: workers parked on `cv`, so a push knows whether to signal
-    pub workers: Vector<pthread::pthread_t>,
+    pub workers: Vector<*mut void>,
     pub shutting_down: i32,
 }
 
@@ -251,18 +250,18 @@ fn signal_work(s: *mut Scheduler) {
     if atomic::load_i32(&mut unsafe (*s).sleeping, 4) <= 0 {
         return;
     }
-    unsafe pthread::pthread_mutex_lock((*s).lock);
-    unsafe pthread::pthread_cond_signal((*s).cv);
-    unsafe pthread::pthread_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
 }
 
 // Put `co` on the shared queue even when called from a worker. A yield means "let somebody else go
 // first", and the local deque is LIFO: pushed there, a yielding task is the very next one popped.
 fn enqueue_global(s: *mut Scheduler, co: *mut Coroutine) {
-    unsafe pthread::pthread_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
     push_injection(s, co);
-    unsafe pthread::pthread_cond_signal((*s).cv);
-    unsafe pthread::pthread_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
 }
 
 // Make `co` runnable. From a worker thread it goes on that worker's own deque -- no lock, and the task stays
@@ -276,10 +275,10 @@ fn enqueue_runnable(s: *mut Scheduler, co: *mut Coroutine) {
             return;
         }
     }
-    unsafe pthread::pthread_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
     push_injection(s, co);
-    unsafe pthread::pthread_cond_signal((*s).cv);
-    unsafe pthread::pthread_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
 }
 
 // Link `co` into the deadline-sorted timer list. Caller holds `(*s).lock` and passes the deadline it read
@@ -299,7 +298,7 @@ fn arm_timer(s: *mut Scheduler, co: *mut Coroutine, dl: u64) {
     }
     unsafe (*co).timed = 1;
     // A nearer deadline shortens the wait of whichever worker is idle, so it has to re-evaluate.
-    unsafe pthread::pthread_cond_signal((*s).cv);
+    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
 }
 
 // Unlink `co` from the timer list if it is still on it. Caller holds `(*s).lock`.
@@ -389,9 +388,9 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
         let t = unsafe (*w).tick + 1;
         unsafe (*w).tick = t;
         if t % 61 == 0 && atomic::load_i32(&mut unsafe (*s).inj_len, 1) > 0 {
-            unsafe pthread::pthread_mutex_lock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
             let shared = pop_injection(s);
-            unsafe pthread::pthread_mutex_unlock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
             if shared != null {
                 return shared;
             }
@@ -400,21 +399,21 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
         if local != null {
             return local; // the hot path takes no lock at all
         }
-        unsafe pthread::pthread_mutex_lock((*s).lock);
+        unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
         promote_expired(s);
         let mut co = pop_injection(s);
         if co == null {
             co = steal_any(s, me);
         }
         if co != null {
-            unsafe pthread::pthread_mutex_unlock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
             return co;
         }
         // Shutting down drains: workers keep going until every deque, the injection queue AND every pending
         // timer is empty, so no submitted or sleeping task is silently dropped (one still parked on a wait
         // queue is, since nothing will ever wake it).
         if unsafe (*s).shutting_down != 0 && unsafe (*s).timer_head == null && all_deques_empty(s) {
-            unsafe pthread::pthread_mutex_unlock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
             return null;
         }
         // Register as sleeping, THEN look again. `signal_work` reads `sleeping` after its push, so if it read
@@ -429,7 +428,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
         }
         if late != null {
             let _ = atomic::sub_i32(sp, 1, 4);
-            unsafe pthread::pthread_mutex_unlock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
             return late;
         }
         if unsafe (*s).timer_head != null {
@@ -440,12 +439,12 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
             } else {
                 0i64;
             };
-            let _ = unsafe pthread::sc_cond_timedwait_ns((*s).cv, (*s).lock, rel);
+            let _ = unsafe sc_runtime::sc_rt_cond_timedwait_ns((*s).cv, (*s).lock, rel);
         } else {
-            let _ = unsafe pthread::pthread_cond_wait((*s).cv, (*s).lock);
+            unsafe sc_runtime::sc_rt_cond_wait((*s).cv, (*s).lock);
         }
         let _ = atomic::sub_i32(sp, 1, 4);
-        unsafe pthread::pthread_mutex_unlock((*s).lock);
+        unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
     }
 }
 
@@ -525,9 +524,9 @@ fn worker_main(arg: *mut void) *mut void {
             // Then arm its timer (if the wait was timed) and only last release the lock that kept its waker
             // out: by now its context is fully saved, so any waker may resume it.
             if dl != 0 {
-                unsafe pthread::pthread_mutex_lock((*s).lock);
+                unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
                 arm_timer(s, co, dl);
-                unsafe pthread::pthread_mutex_unlock((*s).lock);
+                unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
             }
             commit(arg);
         }
@@ -540,8 +539,8 @@ fn worker_main(arg: *mut void) *mut void {
 fn build_scheduler() *mut Scheduler {
     let mut g = Global {};
     let s = g.alloc(sizeof(Scheduler), alignof(Scheduler)) as *mut Scheduler;
-    let lk = unsafe pthread::sc_mutex_new();
-    let cvh = unsafe pthread::sc_cond_new();
+    let lk = unsafe sc_runtime::sc_rt_mutex_new();
+    let cvh = unsafe sc_runtime::sc_rt_cond_new();
     let nw = if G_NWORKERS > 0 {
         G_NWORKERS;
     } else {
@@ -558,7 +557,7 @@ fn build_scheduler() *mut Scheduler {
         lock: lk,
         cv: cvh,
         sleeping: 0,
-        workers: Vector::<pthread::pthread_t>::new(),
+        workers: Vector::<*mut void>::new(),
         shutting_down: 0,
     };
     for i in 0..nw {
@@ -570,8 +569,8 @@ fn build_scheduler() *mut Scheduler {
     // Before any worker exists, so every safepoint's read of the hook happens-after this write.
     unsafe __sc_set_preempt_hook(preempt_yield);
     for i in 0..nw {
-        let mut h: pthread::pthread_t;
-        unsafe pthread::pthread_create(&mut h, null, worker_main, unsafe (deques + i));
+        let mut h: *mut void = null;
+        let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, worker_main, unsafe (deques + i));
         unsafe (*s).workers.push(h);
     }
     return s;
@@ -773,9 +772,9 @@ pub fn cancel_timer(co: *mut Coroutine) {
     if s == null {
         return;
     }
-    unsafe pthread::pthread_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
     disarm_timer(s, co);
-    unsafe pthread::pthread_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
 }
 
 /// Suspend for `ns` nanoseconds. A coroutine parks on the scheduler's timer list, so its worker keeps
@@ -878,14 +877,14 @@ pub fn shutdown() {
         return;
     }
     let s = G_SCHED;
-    unsafe pthread::pthread_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
     unsafe (*s).shutting_down = 1;
-    unsafe pthread::pthread_cond_broadcast((*s).cv);
-    unsafe pthread::pthread_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_cond_broadcast((*s).cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
     let nw = unsafe (*s).workers.len();
     for i in 0..nw {
         let h = unsafe (*s).workers[i];
-        unsafe pthread::pthread_join(h, null);
+        let _ = unsafe sc_runtime::sc_rt_thread_join(h);
     }
     unsafe (*s).workers.free();
     let mut g = Global {};
@@ -893,8 +892,8 @@ pub fn shutdown() {
         g.dealloc(unsafe (*unsafe ((*s).deques + i)).buf, DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine));
     }
     g.dealloc(unsafe (*s).deques, unsafe (*s).nw * sizeof(Worker), alignof(Worker));
-    unsafe pthread::sc_mutex_free((*s).lock);
-    unsafe pthread::sc_cond_free((*s).cv);
+    unsafe sc_runtime::sc_rt_mutex_free((*s).lock);
+    unsafe sc_runtime::sc_rt_cond_free((*s).cv);
     g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
     atomic::store_i32(sp, 0, 2);
     G_SCHED = null;

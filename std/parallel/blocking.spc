@@ -15,8 +15,8 @@
 // `Send + 'static` for the same reason a launched task must -- it runs on another thread, and it may still
 // be running when the call that submitted it is gone (if the caller panics, say).
 
-import pthread;
 import atomic;
+import sc_runtime;
 import std::parallel::sync as sync;
 
 const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real programs, bounded for safety
@@ -37,7 +37,7 @@ struct Pool {
     pub idle: usize, // threads currently waiting for work
     pub live: usize, // threads started
     pub shutting: i32,
-    pub threads: Vector<pthread::pthread_t>,
+    pub threads: Vector<*mut void>,
 }
 
 static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready
@@ -66,11 +66,11 @@ pub fn complete(d: *mut Done) {
 fn pool_main(arg: *mut void) *mut void {
     let p = arg as *mut Pool;
     loop {
-        unsafe pthread::pthread_mutex_lock((*p).lock);
+        unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
         let mut expired = false;
         while unsafe (*p).head == null && unsafe (*p).shutting == 0 && !expired {
             unsafe (*p).idle = unsafe (*p).idle + 1;
-            let rc = unsafe pthread::sc_cond_timedwait_ns((*p).cv, (*p).lock, IDLE_NS);
+            let rc = unsafe sc_runtime::sc_rt_cond_timedwait_ns((*p).cv, (*p).lock, IDLE_NS);
             unsafe (*p).idle = unsafe (*p).idle - 1;
             // Timed out with still nothing to do: a burst of blocking calls should not cost threads for
             // the rest of the process. `submit` starts another the moment one is needed again.
@@ -79,14 +79,14 @@ fn pool_main(arg: *mut void) *mut void {
         let j = unsafe (*p).head;
         if j == null {
             unsafe (*p).live = unsafe (*p).live - 1;
-            unsafe pthread::pthread_mutex_unlock((*p).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
             break; // shutting down and drained, or idle for too long
         }
         unsafe (*p).head = unsafe (*j).next;
         if unsafe (*p).head == null {
             unsafe (*p).tail = null;
         }
-        unsafe pthread::pthread_mutex_unlock((*p).lock);
+        unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
         let run = unsafe (*j).run;
         let env = unsafe (*j).env;
         let mut g = Global {};
@@ -100,14 +100,14 @@ fn build_pool() *mut Pool {
     let mut g = Global {};
     let p = g.alloc(sizeof(Pool), alignof(Pool)) as *mut Pool;
     unsafe p[0] = Pool {
-        lock: unsafe pthread::sc_mutex_new(),
-        cv: unsafe pthread::sc_cond_new(),
+        lock: unsafe sc_runtime::sc_rt_mutex_new(),
+        cv: unsafe sc_runtime::sc_rt_cond_new(),
         head: null,
         tail: null,
         idle: 0,
         live: 0,
         shutting: 0,
-        threads: Vector::<pthread::pthread_t>::new(),
+        threads: Vector::<*mut void>::new(),
     };
     return p;
 }
@@ -148,7 +148,7 @@ pub fn submit(run: fn(*mut void) void, env: *mut void) {
     let mut g = Global {};
     let j = g.alloc(sizeof(BJob), alignof(BJob)) as *mut BJob;
     unsafe j[0] = BJob { run: run, env: env, next: null };
-    unsafe pthread::pthread_mutex_lock((*p).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
     if unsafe (*p).tail == null {
         unsafe (*p).head = j;
     } else {
@@ -160,14 +160,14 @@ pub fn submit(run: fn(*mut void) void, env: *mut void) {
     if need {
         unsafe (*p).live = unsafe (*p).live + 1;
     }
-    unsafe pthread::pthread_cond_signal((*p).cv);
-    unsafe pthread::pthread_mutex_unlock((*p).lock);
+    unsafe sc_runtime::sc_rt_cond_signal((*p).cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
     if need {
-        let mut h: pthread::pthread_t;
-        unsafe pthread::pthread_create(&mut h, null, pool_main, p);
-        unsafe pthread::pthread_mutex_lock((*p).lock);
+        let mut h: *mut void = null;
+        let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, pool_main, p);
+        unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
         unsafe (*p).threads.push(h);
-        unsafe pthread::pthread_mutex_unlock((*p).lock);
+        unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
     }
 }
 
@@ -256,18 +256,18 @@ pub fn shutdown() {
         return;
     }
     let p = G_POOL;
-    unsafe pthread::pthread_mutex_lock((*p).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
     unsafe (*p).shutting = 1;
-    unsafe pthread::pthread_cond_broadcast((*p).cv);
-    unsafe pthread::pthread_mutex_unlock((*p).lock);
+    unsafe sc_runtime::sc_rt_cond_broadcast((*p).cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
     let n = unsafe (*p).threads.len();
     for i in 0..n {
         let h = unsafe (*p).threads[i];
-        unsafe pthread::pthread_join(h, null);
+        let _ = unsafe sc_runtime::sc_rt_thread_join(h);
     }
     unsafe (*p).threads.free();
-    unsafe pthread::sc_mutex_free((*p).lock);
-    unsafe pthread::sc_cond_free((*p).cv);
+    unsafe sc_runtime::sc_rt_mutex_free((*p).lock);
+    unsafe sc_runtime::sc_rt_cond_free((*p).cv);
     let mut g = Global {};
     g.dealloc(p, sizeof(Pool), alignof(Pool));
     atomic_store(sp, 0);

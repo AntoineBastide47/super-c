@@ -46,4 +46,23 @@ extern "C" "driver_shim.h" {
     pub fn sc_rename(from: *const char, to: *const char) i32;
     /// Set `name`=`value` in this process's environment, overwriting any existing value.
     pub fn sc_setenv(name: *const char, value: *const char) i32;
+
+    /// Run `cmd` to completion and return its exit code (-1 if it could not start). The portable stand-in
+    /// for `system()` plus shell redirection -- the test harnesses use it so their command strings hold no
+    /// shell syntax, which is what makes the suite run on Windows as well.
+    /// `in_path` null reads nothing; `out_path` null discards stdout; `err_path` null merges stderr into
+    /// stdout; `env` is space-separated `NAME=VALUE` applied to the child only.
+    pub fn sc_run(
+        cmd: *const char,
+        in_path: *const char,
+        out_path: *const char,
+        err_path: *const char,
+        env: *const char,
+    ) i32;
+    /// `mkdir -p`: create every missing component of `path`. 0 on success.
+    pub fn sc_mkdir_p(path: *const char) i32;
+    /// `rm -rf`: delete `path` and anything under it. 0 once it is gone.
+    pub fn sc_rm_rf(path: *const char) i32;
+    /// The system temp directory, without a trailing separator.
+    pub fn sc_tmpdir() *const char;
 }

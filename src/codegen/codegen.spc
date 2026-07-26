@@ -5747,7 +5747,11 @@ extend Codegen {
                 }
                 if n.as_data.let_stmt.value != NODE_NONE {
                     self.emit_str(" = ");
-                    self.emit_initializer(n.as_data.let_stmt.ty, n.as_data.let_stmt.value);
+                    self.emit_initializer_ty(
+                        n.as_data.let_stmt.ty,
+                        n.as_data.let_stmt.value,
+                        unsafe (*self.cur_ast()).type_of(id),
+                    );
                 }
                 self.emit_str(";\n");
                 if autofree && self.cg_is_cond_moved(id) {
@@ -5974,7 +5978,11 @@ extend Codegen {
         // (`RET (*const x)(..)`); prefixing `const ` would bind it to the return type instead.
         let fty = *self.type_at(t);
         let is_fnptr = k == TypeKind::TYPE_FUNCTION && !self.cg_fn_is_capturing(&fty);
-        if is_const && (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || is_fnptr) {
+        // Same for an ARRAY of them: `const T (*x[N])(..)` would const the return type (and
+        // `const T *x[N]` the pointee) -- the binding is what is const, so it belongs on the element.
+        if is_const && (k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || is_fnptr || self.cg_array_of_pointers(
+            t,
+        )) {
             let mut cn = Buf256 {};
             buf_join3(&mut cn[0], 200, "const ".ptr() as *const char, "".ptr() as *const char, &nm[0]);
             let mut decl = Buf512 {};
@@ -5989,6 +5997,26 @@ extend Codegen {
             self.emit_cstr(&decl[0]);
         }
     }
+    // Is `t` an array (of arrays...) whose ultimate element is a pointer, reference or plain function
+    // pointer? Those are the element types whose `const` has to sit inside the declarator.
+    fn cg_array_of_pointers(self: &mut Self, t: TypeId) bool {
+        let mut cur = t;
+        let mut depth: u32 = 0;
+        while self.type_at(cur).kind == TypeKind::TYPE_ARRAY && depth < 8 {
+            cur = self.type_at(cur).as_data.elem;
+            depth = depth + 1;
+        }
+        if depth == 0 {
+            return false;
+        }
+        let ek = self.type_at(cur).kind;
+        if ek == TypeKind::TYPE_POINTER || ek == TypeKind::TYPE_REFERENCE {
+            return true;
+        }
+        let ety = *self.type_at(cur);
+        return ek == TypeKind::TYPE_FUNCTION && !self.cg_fn_is_capturing(&ety);
+    }
+
     fn render_binding_node(self: &mut Self, tn: NodeId, name: *const char, is_const: bool, out: *mut char, cap: usize) {
         if is_const {
             let mut cn = Buf256 {};
@@ -6487,14 +6515,24 @@ extend Codegen {
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         self.errors.emit(sp.start, sp.end - sp.start, format("codegen: cannot iterate over a non-array/slice value"));
     }
-    fn emit_initializer(self: &mut Self, tn: NodeId, val: NodeId) {
-        if unsafe (*self.cur_ast()).at_const(val).kind == NodeKind::NODE_ARRAY_LITERAL && tn != NODE_NONE && unsafe (*self.cur_ast()).at_const(
-            tn,
-        ).kind == NodeKind::NODE_ARRAY_TYPE {
-            self.emit_array_braces(val);
-        } else {
-            self.emit_expr(val);
+    // An array literal initializing an ARRAY binding is emitted braced, never as a compound literal: C
+    // cannot initialize an array from an array value, so `const T x[N] = (T[N]){..}` is rejected outright
+    // (and was, for every array binding whose type was inferred rather than written out). `bt` is the
+    // binding's resolved type, which is what says "array" when there is no annotation to read.
+    fn emit_initializer_ty(self: &mut Self, tn: NodeId, val: NodeId, bt: TypeId) {
+        if unsafe (*self.cur_ast()).at_const(val).kind == NodeKind::NODE_ARRAY_LITERAL {
+            let annotated = tn != NODE_NONE && unsafe (*self.cur_ast()).at_const(tn).kind == NodeKind::NODE_ARRAY_TYPE;
+            let inferred = bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_ARRAY;
+            if annotated || inferred {
+                self.emit_array_braces(val);
+                return;
+            }
         }
+        self.emit_expr(val);
+    }
+
+    fn emit_initializer(self: &mut Self, tn: NodeId, val: NodeId) {
+        self.emit_initializer_ty(tn, val, TYPE_NONE);
     }
     fn render_binding_id(self: &mut Self, t: TypeId, name: *const char, is_const: bool, out: *mut char, cap: usize) {
         let k = self.type_at(t).kind;
@@ -10518,15 +10556,27 @@ extend Codegen {
                 self.emit_new(id);
             },
             NODE_ARRAY_LITERAL => {
+                // The cast is `(<element> <name-less declarator>)`, and `[N]` belongs INSIDE that
+                // declarator, not appended to the element's spelling: an array of function pointers is
+                // `T (*[N])(..)`, and `T (*)(..)[N]` -- what concatenation produces -- is a function
+                // returning an array, which is not a type. Rendering the element type with `[N]` as its
+                // declarator puts it where C wants it, for every element type at once.
                 let at = unsafe (*self.cur_ast()).type_of(id);
                 let mut et = Buf256 {};
+                let mut lenb = Buf32 {};
+                unsafe stdio::snprintf(
+                    &mut lenb[0],
+                    16,
+                    "[%u]".ptr() as *const char,
+                    n.as_data.array_literal.elements.len,
+                );
                 if at != TYPE_NONE {
                     let ae = self.type_at(at).as_data.elem;
-                    self.render_type_id(ae, "".ptr() as *const char, &mut et[0], 256);
+                    self.render_type_id(ae, &lenb[0], &mut et[0], 256);
                 } else {
-                    unsafe stdio::snprintf(&mut et[0], 256, "%s".ptr() as *const char, "int".ptr() as *const char);
+                    unsafe stdio::snprintf(&mut et[0], 256, "int %s".ptr() as *const char, &lenb[0]);
                 }
-                self.buf.format_into("({}[{}])", diag::cstr(&et[0]), n.as_data.array_literal.elements.len);
+                self.buf.format_into("({})", diag::cstr(&et[0]));
                 self.emit_array_braces(id);
             },
             NODE_MATCH => {
@@ -10641,6 +10691,11 @@ extend Codegen {
     }
 }
 const fn sep(decl: *const char) *const char {
+    // A nameless ARRAY declarator (the `[N]` of a type name like `int32_t[3]`) reads as one token and is
+    // conventionally written closed up; every other declarator takes the space.
+    if unsafe decl[0] == '[' as char {
+        return "".ptr() as *const char;
+    }
     if unsafe decl[0] != 0 as char {
         return " ".ptr() as *const char;
     }

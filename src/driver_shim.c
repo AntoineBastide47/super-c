@@ -8,6 +8,7 @@
 #include "driver_shim.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -334,3 +335,215 @@ int sc_setenv(const char *name, const char *value) {
   return setenv(name, value, 1);
 #endif
 }
+
+/* ---- portable process + filesystem helpers for the test harnesses ---------------------------------- */
+/* strdup is POSIX, not C11, and the Windows spelling differs; one copy here keeps both legs identical. */
+static char *sc_strdup_local(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *p = (char *)malloc(n);
+  if (p)
+    memcpy(p, s, n);
+  return p;
+}
+
+/* These exist so tests/cli_harness.spc and tests/harness.spc need no shell at all: every construct they
+   used to write in POSIX sh -- redirection, `mkdir -p`, `rm -rf`, an env prefix -- is a parameter here.
+   That is what makes the suite run on Windows, where cmd.exe speaks none of it. */
+
+/* One NAME=VALUE assignment applied around a child: the value is set before the spawn and the previous
+   one (or its absence) restored afterwards, so the parent's environment is unchanged. */
+typedef struct {
+  char name[64];
+  char *old;
+  int had;
+} sc_env_save;
+
+static int sc_env_apply(const char *env, sc_env_save *saves, int max) {
+  int n = 0;
+  const char *p = env;
+  while (p && *p && n < max) {
+    while (*p == ' ' || *p == '\t')
+      p++;
+    const char *eq = strchr(p, '=');
+    if (!eq)
+      break;
+    const char *end = eq;
+    while (*end && *end != ' ' && *end != '\t')
+      end++;
+    size_t nl = (size_t)(eq - p);
+    if (nl == 0 || nl >= sizeof saves[0].name)
+      break;
+    memcpy(saves[n].name, p, nl);
+    saves[n].name[nl] = 0;
+    const char *prev = getenv(saves[n].name);
+    saves[n].had = prev != 0;
+    saves[n].old = prev ? sc_strdup_local(prev) : 0;
+    size_t vl = (size_t)(end - eq - 1);
+    char *val = (char *)malloc(vl + 1);
+    if (!val)
+      break;
+    memcpy(val, eq + 1, vl);
+    val[vl] = 0;
+    sc_setenv(saves[n].name, val);
+    free(val);
+    n++;
+    p = end;
+  }
+  return n;
+}
+
+static void sc_env_restore(sc_env_save *saves, int n) {
+  for (int i = 0; i < n; i++) {
+    if (saves[i].had && saves[i].old)
+      sc_setenv(saves[i].name, saves[i].old);
+    else
+      sc_setenv(saves[i].name, "");
+    free(saves[i].old);
+  }
+}
+
+int sc_mkdir_p(const char *path) {
+  char buf[4096];
+  size_t n = strlen(path);
+  if (n == 0 || n >= sizeof buf)
+    return -1;
+  memcpy(buf, path, n + 1);
+  for (size_t i = 1; i < n; i++) {
+    if (buf[i] == '/' || buf[i] == '\\') {
+      const char sep = buf[i];
+      buf[i] = 0;
+      if (sc_stat_isdir(buf) != 1)
+        sc_mkdir(buf);
+      buf[i] = sep;
+    }
+  }
+  if (sc_stat_isdir(buf) == 1)
+    return 0;
+  sc_mkdir(buf);
+  return sc_stat_isdir(buf) == 1 ? 0 : -1;
+}
+
+int sc_rm_rf(const char *path) {
+  if (sc_stat_isdir(path) == 1) {
+    void *d = sc_opendir(path);
+    if (d) {
+      void *e;
+      while ((e = sc_readdir(d)) != 0) {
+        const char *nm = sc_dirent_name(e);
+        if (!strcmp(nm, ".") || !strcmp(nm, ".."))
+          continue;
+        char child[4096];
+        snprintf(child, sizeof child, "%s/%s", path, nm);
+        sc_rm_rf(child);
+      }
+      sc_closedir(d);
+    }
+    sc_rmdir(path);
+  } else {
+    sc_unlink(path);
+  }
+  return sc_stat_isdir(path) == 1 ? -1 : 0;
+}
+
+const char *sc_tmpdir(void) {
+  static char buf[4096];
+  if (buf[0])
+    return buf;
+#if defined(_WIN32)
+  DWORD n = GetTempPathA((DWORD)sizeof buf, buf);
+  if (n == 0 || n >= sizeof buf) {
+    snprintf(buf, sizeof buf, "%s", ".");
+    return buf;
+  }
+  while (n > 1 && (buf[n - 1] == '\\' || buf[n - 1] == '/'))
+    buf[--n] = 0; /* no trailing separator: callers join with '/' */
+#else
+  const char *t = getenv("TMPDIR");
+  if (!t || !*t)
+    t = "/tmp";
+  snprintf(buf, sizeof buf, "%s", t);
+  size_t n = strlen(buf);
+  while (n > 1 && buf[n - 1] == '/')
+    buf[--n] = 0;
+#endif
+  return buf;
+}
+
+#if defined(_WIN32)
+static HANDLE sc_open_for_child(const char *path, int write) {
+  SECURITY_ATTRIBUTES sa;
+  memset(&sa, 0, sizeof sa);
+  sa.nLength = sizeof sa;
+  sa.bInheritHandle = TRUE;
+  const char *name = path ? path : "NUL";
+  return CreateFileA(name, write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                     write ? CREATE_ALWAYS : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+}
+
+int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env) {
+  sc_env_save saves[8];
+  const int nenv = env ? sc_env_apply(env, saves, 8) : 0;
+  HANDLE hin = sc_open_for_child(in_path, 0);
+  HANDLE hout = sc_open_for_child(out_path, 1);
+  HANDLE herr = err_path ? sc_open_for_child(err_path, 1) : INVALID_HANDLE_VALUE;
+  if (herr == INVALID_HANDLE_VALUE && !err_path) /* merge stderr into stdout */
+    DuplicateHandle(GetCurrentProcess(), hout, GetCurrentProcess(), &herr, 0, TRUE, DUPLICATE_SAME_ACCESS);
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof si);
+  si.cb = sizeof si;
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = hin;
+  si.hStdOutput = hout;
+  si.hStdError = herr;
+  size_t n = strlen(cmd) + 1;
+  char *line = (char *)malloc(n);
+  int rc = -1;
+  if (line) {
+    memcpy(line, cmd, n);
+    if (CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+      WaitForSingleObject(pi.hProcess, INFINITE);
+      DWORD code = 1;
+      GetExitCodeProcess(pi.hProcess, &code);
+      rc = (int)code;
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+    }
+    free(line);
+  }
+  if (hin != INVALID_HANDLE_VALUE)
+    CloseHandle(hin);
+  if (hout != INVALID_HANDLE_VALUE)
+    CloseHandle(hout);
+  if (herr != INVALID_HANDLE_VALUE)
+    CloseHandle(herr);
+  sc_env_restore(saves, nenv);
+  return rc;
+}
+#else
+int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env) {
+  extern char **environ;
+  sc_env_save saves[8];
+  const int nenv = env ? sc_env_apply(env, saves, 8) : 0;
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_addopen(&fa, 0, in_path ? in_path : "/dev/null", O_RDONLY, 0);
+  posix_spawn_file_actions_addopen(&fa, 1, out_path ? out_path : "/dev/null", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (err_path)
+    posix_spawn_file_actions_addopen(&fa, 2, err_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  else
+    posix_spawn_file_actions_adddup2(&fa, 1, 2); /* 2>&1 */
+  char *argv[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};
+  pid_t pid;
+  int rc = -1;
+  if (posix_spawn(&pid, "/bin/sh", &fa, NULL, argv, environ) == 0) {
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) {
+    }
+    rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+  }
+  posix_spawn_file_actions_destroy(&fa);
+  sc_env_restore(saves, nenv);
+  return rc;
+}
+#endif

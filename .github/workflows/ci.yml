@@ -1,0 +1,219 @@
+name: CI
+
+# Build the compiler on every supported platform and run the tests there with the binary that platform just
+# produced. Deliberately shaped like release.yml (same matrix, same toolchain setup, same bootstrap flow) so
+# a green CI means the release build will work too -- the only difference is what happens after the build:
+# release packages the binary, this runs it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: macos
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    # Run every step in bash so the shared steps behave identically on the Windows runner (Git Bash).
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Toolchain cache -------------------------------------------------------------------------------
+      # Only the toolchain INSTALLATION is cached; build outputs never are (see the Clean step), so every
+      # run compiles the current source from scratch.
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-ci-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: ccache-ci-${{ matrix.target }}-
+
+      - name: Configure ccache dir
+        run: |
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+
+      - name: Cache Homebrew downloads (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Caches/Homebrew/downloads
+          key: cc-brew-${{ runner.os }}-${{ hashFiles('build.toml') }}
+          restore-keys: cc-brew-${{ runner.os }}-
+
+      - name: Cache apt archives (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: cc-apt-${{ runner.os }}-${{ hashFiles('build.toml') }}
+          restore-keys: cc-apt-${{ runner.os }}-
+
+      - name: Set up C compiler + ccache (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v cc >/dev/null 2>&1; then
+            brew install llvm
+            echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+            echo "CC=clang" >> "$GITHUB_ENV"
+          fi
+          command -v ccache >/dev/null 2>&1 || brew install ccache
+
+      - name: Set up C compiler + ccache (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v cc >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential
+          fi
+          if ! command -v ccache >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ccache
+          fi
+
+      - name: Cache mingw-w64 install (Windows)
+        if: runner.os == 'Windows'
+        id: cache-mingw
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib\mingw
+            C:\ProgramData\chocolatey\lib\ccache
+            C:\ProgramData\mingw64
+            C:\tools\mingw64
+          key: mingw-w64-${{ runner.os }}-choco-v2
+          restore-keys: mingw-w64-${{ runner.os }}-
+
+      # Windows ships no Unix C toolchain; pull in mingw-w64 gcc. The compiler source is mingw-clean
+      # (realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call), and the concurrency
+      # runtime uses Win32 directly there -- threads, locks and fibers, no pthread emulation.
+      - name: Set up mingw-w64 (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          find_mingw_bin() {
+            { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
+              while read -r dir; do
+                if [ -x "$dir/gcc.exe" ] || [ -x "$dir/gcc" ]; then
+                  echo "$dir"
+                  break
+                fi
+              done
+          }
+          mingw_bin="$(find_mingw_bin)"
+          if [ -z "$mingw_bin" ]; then
+            choco install -y --no-progress mingw
+            mingw_bin="$(find_mingw_bin)"
+          fi
+          test -n "$mingw_bin"
+          cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "BINEXT=.exe" >> "$GITHUB_ENV"
+          command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
+
+      # --- Clean outputs only ---------------------------------------------------------------------------
+      - name: Clean build outputs
+        run: rm -rf build src/build ci/build bootstrap stage0-super-c stage1-super-c
+
+      # --- Bootstrap ------------------------------------------------------------------------------------
+      - name: Fetch bootstrap super-c from the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          arch="$(uname -m)"
+          name="super-c-${{ matrix.target }}-${arch}"
+          if [ "${{ matrix.target }}" = windows ]; then
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
+            7z x -y "${name}.zip" >/dev/null
+            mkdir -p bootstrap
+            if [ -f "${name}/super-c.exe" ]; then
+              cp "${name}/super-c.exe" bootstrap/super-c.exe
+            else
+              cp "${name}.exe" bootstrap/super-c.exe
+            fi
+            cp -R std ffi bootstrap/
+            test -f bootstrap/std/string.spc
+          else
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
+            tar xzf "${name}.tar.gz"
+            if [ -f "${name}/super-c" ]; then
+              mv "${name}/super-c" super-c
+            else
+              mv "${name}" super-c
+            fi
+            chmod +x super-c
+          fi
+
+      # Two generations from current source, exactly as release.yml does it: the fetched binary builds
+      # stage 0 through the legacy `build <root> -o` path (so a bootstrap predating the build system still
+      # works), then stage 0 rebuilds the compiler through the engine. That second binary is what the tests
+      # below run, so a test failure is a failure of the code in this commit, not of the bootstrap.
+      - name: Build the compiler
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          if [ "${{ runner.os }}" = Windows ]; then
+            # mingw hides POSIX prototypes under -std=c11's __STRICT_ANSI__, so the Windows leg overrides
+            # --cstd with gnu11. The legacy in-process cc path hardcodes c11, so stage 0 is emit + one
+            # explicit gcc invocation here in bash.
+            echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L" >> "$GITHUB_ENV"
+            cstd="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
+            ./bootstrap/super-c.exe --bootstrap-tags src/main.spc
+            # shellcheck disable=SC2046
+            "${CC:-gcc}" $cstd -O1 $(find src/build -name '*.c') -o "stage0-$bin" $(cat src/build/__ldflags src/build/raw/__ldflags 2>/dev/null)
+            SC_LEAK_CHECK=fatal "./stage0-$bin" build "--cstd=$cstd" -o "$bin"
+          else
+            "./super-c" build --bootstrap-tags -o "stage0-$bin" src/main.spc
+            SC_LEAK_CHECK=fatal "./stage0-$bin" build -o "$bin"
+          fi
+          rm -f "stage0-$bin"
+          test -x "./$bin"
+
+      # --- Tests ----------------------------------------------------------------------------------------
+      # The same suite on every platform. The harnesses drive subprocesses through the runner in
+      # src/driver_shim.c (redirection, `mkdir -p`, `rm -rf` and the child environment are all parameters,
+      # not shell syntax), so the Windows leg runs the cli/lsp/codegen-run tests too rather than skipping
+      # them. Leak-gated: every process in the run -- compiler, harness, spawned fixtures -- exits nonzero
+      # if it leaks, double-frees or uses freed memory.
+      - name: Run the test suite
+        run: |
+          set -eu
+          if [ "${{ runner.os }}" = Windows ]; then
+            SC_LEAK_CHECK=fatal ./super-c.exe test "--cstd=$SC_CSTD"
+          else
+            SC_LEAK_CHECK=fatal ./super-c test
+          fi
+
+      # The concurrency runtime, on every platform, with the binary just built: OS threads, an Arc'd mutex
+      # and atomics across them, coroutines on the worker pool, channels, `select`, the data-parallel API
+      # and the timer list. This is what makes the Windows leg meaningful -- it is the one test that
+      # exercises the Win32 threading layer (threads, SRWLOCK, condition variables, fibers) end to end.
+      - name: Run the concurrency smoke test
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          smoke="smoke${BINEXT:-}"
+          if [ "${{ runner.os }}" = Windows ]; then
+            "./$bin" build ci/parallel_smoke.spc "--cstd=$SC_CSTD" -o "$smoke"
+          else
+            "./$bin" build ci/parallel_smoke.spc -o "$smoke"
+          fi
+          SC_LEAK_CHECK=fatal "./$smoke"

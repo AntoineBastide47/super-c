@@ -6,7 +6,6 @@
 // more tasks than workers can contend for a lock without deadlocking. `RawMutex` below is the one place
 // that touches an OS mutex, and only for the few instructions that mutate its own fields.
 
-import pthread;
 import sc_runtime;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
@@ -37,7 +36,7 @@ pub struct Waiter {
 /// lock held parks on `head`/`tail`; any other thread parks on the `locked` word itself. `pub` for linkage:
 /// `Mutex<T>`'s methods are monomorphized in the caller's module. Not a user-facing type.
 pub struct RawMutex {
-    pub inner: *mut void, // OS mutex guarding this struct (sc_mutex_new)
+    pub inner: *mut void, // OS mutex guarding this struct (sc_rt_mutex_new)
     pub locked: i32, // 0 free / 1 held; also the park word for OS-thread waiters
     pub os_waiters: i32, // OS threads parked on `locked`, so an unlock knows whether to unpark
     pub head: *mut Waiter, // parked coroutine waiters, FIFO
@@ -48,13 +47,19 @@ pub struct RawMutex {
 pub fn raw_mutex_new() *mut RawMutex {
     let mut g = Global {};
     let m = g.alloc(sizeof(RawMutex), alignof(RawMutex)) as *mut RawMutex;
-    unsafe m[0] = RawMutex { inner: unsafe pthread::sc_mutex_new(), locked: 0, os_waiters: 0, head: null, tail: null };
+    unsafe m[0] = RawMutex {
+        inner: unsafe sc_runtime::sc_rt_mutex_new(),
+        locked: 0,
+        os_waiters: 0,
+        head: null,
+        tail: null,
+    };
     return m;
 }
 
 /// Destroy and release a raw lock. `pub` for linkage.
 pub fn raw_mutex_free(m: *mut RawMutex) {
-    unsafe pthread::sc_mutex_free((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_free((*m).inner);
     let mut g = Global {};
     g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
 }
@@ -68,7 +73,7 @@ fn park_word(m: *mut RawMutex) *mut i32 {
 // The park hand-off used inside `raw_mutex_lock`: release only the internal OS mutex, since the coroutine
 // never held the lock itself.
 fn commit_os_unlock(p: *mut void) {
-    let _ = unsafe pthread::pthread_mutex_unlock(p);
+    unsafe sc_runtime::sc_rt_mutex_unlock(p);
 }
 
 /// The park hand-off used by `Condvar::wait`: release the whole lock, so another task can take it while the
@@ -79,7 +84,7 @@ pub fn commit_raw_unlock(p: *mut void) {
 
 /// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
 pub fn raw_mutex_lock(m: *mut RawMutex) {
-    let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
     while unsafe (*m).locked != 0 {
         let co = runtime::current();
         if co != null {
@@ -95,35 +100,35 @@ pub fn raw_mutex_lock(m: *mut RawMutex) {
             }
             unsafe (*m).tail = wp;
             runtime::park_current(commit_os_unlock, unsafe (*m).inner);
-            let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+            unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
         } else {
             let w = park_word(m);
             unsafe (*m).os_waiters = unsafe (*m).os_waiters + 1;
-            let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+            unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
             unsafe sc_runtime::sc_rt_park(w, 1, -1);
-            let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+            unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
             unsafe (*m).os_waiters = unsafe (*m).os_waiters - 1;
         }
     }
     unsafe (*m).locked = 1;
-    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
 }
 
 /// Acquire the lock only if it is free; reports whether it was taken. Never waits.
 pub fn raw_mutex_try_lock(m: *mut RawMutex) bool {
-    let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
     let free = unsafe (*m).locked == 0;
     if free {
         unsafe (*m).locked = 1;
     }
-    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
     return free;
 }
 
 /// Release the lock and hand it on: wake the first queued coroutine whose wake claim we win, and unpark any
 /// OS threads waiting on it. `pub` for linkage.
 pub fn raw_mutex_unlock(m: *mut RawMutex) {
-    let _ = unsafe pthread::pthread_mutex_lock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
     unsafe (*m).locked = 0;
     let mut woke = false;
     while !woke {
@@ -144,7 +149,7 @@ pub fn raw_mutex_unlock(m: *mut RawMutex) {
     if unsafe (*m).os_waiters > 0 {
         unsafe sc_runtime::sc_rt_unpark_all(park_word(m));
     }
-    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
 }
 
 /// A mutual-exclusion lock guarding a `T`. Only the holder can reach the value, through the RAII

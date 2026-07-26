@@ -174,6 +174,22 @@ fn array_repeat_literal() {
     );
 }
 
+// An array whose element is a POINTER or a FUNCTION POINTER, and an array binding whose type is inferred.
+// Three separate defects met here. C cannot initialize an array from an array value, so the compound
+// literal every inferred array binding was emitted with (`const T x[N] = (T[N]){..}`) was rejected outright
+// -- `let v = [1, 2];` did not compile at all. The cast for an array of function pointers was built by
+// appending `[N]` to the element's spelling, producing `T (*)(..)[N]` -- a function returning an array,
+// which is not a type. And an immutable binding took its `const` as a prefix, which for these element types
+// binds to the POINTEE (or the return type), not to the binding: writing through such a pointer then fails.
+@test
+fn array_of_pointers_and_functions() {
+    run_exit(
+        "inferred array bindings, an array of fn pointers, and writing through an array of pointers",
+        "fn one() i32 { return 1; }\nfn two() i32 { return 2; }\nfn main() i32 {\n  let inferred = [10, 20];\n  let fs = [one, two];\n  let mut a = 3;\n  let mut b = 4;\n  let ps = [&mut a, &mut b];\n  unsafe { *ps[0] = 5; }\n  unsafe { *ps[1] = 6; }\n  let mut t = 0;\n  for i in 0..2 { let f = unsafe fs[i]; t = t + f(); }\n  unsafe exit(unsafe inferred[0] + unsafe inferred[1] + t + a + b);\n}\n",
+        44,
+    );
+}
+
 // A closure's DECLARED return type has to be resolved like any other type annotation. It was not, so it
 // lowered to no type at all for anything that is not a builtin -- and a builtin needs no resolution, which
 // is exactly why it went unnoticed: `fn() u8` behaved and `fn() SomeStruct` silently had no return type, so

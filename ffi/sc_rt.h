@@ -37,9 +37,38 @@ void sc_rt_sleep_ns(int64_t ns);
 
 /* A guard-paged stack: an inaccessible page sits just below the returned usable low end, so an overflow
    faults instead of corrupting memory. Returns the usable low end (the stack grows down from low+size), or
-   NULL on failure. Free with the same `size`. */
+   NULL on failure. Free with the same `size`. On Windows the region is RESERVED but never committed and
+   never written: fibers allocate and guard their own stacks there, so committing this one would cost a
+   quarter megabyte per coroutine for nothing. */
 void *sc_rt_stack_alloc(size_t size);
 void sc_rt_stack_free(void *usable, size_t size);
+
+/* OS threads and the two locks the scheduler builds on. The Super-C side never names a `pthread_t` or a
+   Windows HANDLE: every handle here is an opaque `void *` this layer allocates and releases, so one set of
+   call sites serves both platforms. POSIX maps to pthreads; Windows to `_beginthreadex`, SRWLOCK and
+   CONDITION_VARIABLE (no pthread emulation is linked in).
+
+   `sc_rt_thread_create` returns 0 on success and fills `*out` with the handle `sc_rt_thread_join` consumes
+   (joining releases it; a handle that is never joined leaks the OS thread's bookkeeping). The mutex is NOT
+   recursive and must be released by the thread that took it. */
+int sc_rt_thread_create(void **out, void *(*entry)(void *), void *arg);
+int sc_rt_thread_join(void *handle);
+
+void *sc_rt_mutex_new(void);
+void sc_rt_mutex_free(void *m);
+void sc_rt_mutex_lock(void *m);
+void sc_rt_mutex_unlock(void *m);
+
+/* Condition variable paired with an `sc_rt_mutex_*` lock the caller holds. `wait` releases it, blocks, and
+   re-takes it before returning; `timedwait_ns` does the same but also returns once `rel_ns` nanoseconds have
+   passed (negative waits forever), reporting nonzero exactly when the deadline is what woke it. Wakeups may
+   be spurious -- re-check the condition in a loop. */
+void *sc_rt_cond_new(void);
+void sc_rt_cond_free(void *c);
+void sc_rt_cond_wait(void *c, void *m);
+int sc_rt_cond_timedwait_ns(void *c, void *m, int64_t rel_ns);
+void sc_rt_cond_signal(void *c);
+void sc_rt_cond_broadcast(void *c);
 
 /* Stackful context switch (ucontext on POSIX, fibers on Windows). `sc_rt_ctx_alloc` makes an empty context
    for the current thread's root (its state is captured on the first switch away). `sc_rt_ctx_init` arms a

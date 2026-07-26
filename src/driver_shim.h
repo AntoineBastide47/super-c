@@ -33,4 +33,20 @@ int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first ch
 int sc_rename(const char *from, const char *to); /* rename(2); replaces an existing target on Windows too */
 int sc_setenv(const char *name, const char *value); /* setenv(3) overwrite / _putenv_s */
 
+/* Run `cmd` to completion and return its exit code (-1 if it could not be started or did not exit
+   normally). This is the portable stand-in for `system()` plus shell redirection: the test harnesses use
+   it so their commands contain no shell syntax at all, which is what lets them run on Windows.
+     in_path   NULL: no stdin (the null device)            else: read stdin from this file
+     out_path  NULL: discard stdout                        else: truncate + write stdout to this file
+     err_path  NULL: merge stderr into stdout ("2>&1")     else: truncate + write stderr to this file
+     env       NULL/"": inherit                            else: space-separated NAME=VALUE for the child
+   POSIX runs `cmd` through /bin/sh (word splitting and quoting are the shell's); Windows hands the same
+   line to CreateProcess, which applies its own quoting rules -- so a command must use double quotes and no
+   operators to mean the same thing on both. */
+int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env);
+
+int sc_mkdir_p(const char *path); /* mkdir -p: creates every missing component; 0 on success */
+int sc_rm_rf(const char *path);   /* rm -rf: recursive delete, 0 if the path is gone afterwards */
+const char *sc_tmpdir(void);      /* the system temp directory, no trailing separator */
+
 #endif

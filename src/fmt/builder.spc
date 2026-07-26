@@ -972,6 +972,23 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
             let c = n.as_data.closure;
             let mut ps = Vector::<d::DocId>::new();
             b_each(b, c.params, 3, &mut ps);
+            // `|..|` has no return-type slot -- only the `fn(..) T { .. }` spelling does. Both parse to this
+            // node, so a closure that DECLARES a return type has to print in that form: normalising it to
+            // `||` would drop the type from the source, which is how this arm used to corrupt a file.
+            if c.returns.len != 0 {
+                v.push(b.p.txt("fn"));
+                v.push(b_comma_list(b, "(", &ps, ")", true));
+                v.push(b.p.txt(" "));
+                v.push(b_returns(b, c.returns));
+                v.push(b.p.txt(" "));
+                if c.expr_body {
+                    v.push(b_expr(b, c.body));
+                } else {
+                    v.push(b_block(b, c.body));
+                }
+                let rc = b.p.concat(&v);
+                return rc;
+            }
             if ps.len() == 0 {
                 v.push(b.p.txt("||"));
             } else {

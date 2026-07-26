@@ -5,7 +5,6 @@
 // builtin_decls array length is an enum-cast const evaluated pre-typecheck).
 import tests::cli_harness as cli;
 import stdio;
-import stdlib;
 import driver_shim as shim;
 import module::loader as loader;
 import lsp::json as json;
@@ -18,12 +17,31 @@ fn frame(out: &mut String, body: &String) {
     out.push_string(body);
 }
 
+// The compiler under test, as the harness resolves it: an absolute, `.exe`-suffixed path, because the
+// process runner hands the command line straight to CreateProcess on Windows.
 fn superc_path() str<'static> {
-    let sc = stdlib::getenv("SUPERC");
-    if sc == null || unsafe *sc == 0 as char {
-        return "./super-c";
-    }
-    return str::from_cstr(sc);
+    return cli::superc_path();
+}
+
+// Run `super-c lsp` over the session written to <root>/session.bin, capturing stdout and stderr into
+// <root>/out.txt and <root>/err.txt. No shell: the runner binds the three files itself.
+fn lsp_run(root: str) i32 {
+    let mut cmd = String::new();
+    cmd.push_str("\"");
+    cmd.push_str(superc_path());
+    cmd.push_str("\" lsp");
+    let mut inp = String::from_str(root);
+    inp.push_str("/session.bin");
+    let mut outp = String::from_str(root);
+    outp.push_str("/out.txt");
+    let mut errp = String::from_str(root);
+    errp.push_str("/err.txt");
+    let rc = cli::run_io(cmd.cstr(), inp.cstr(), outp.cstr(), errp.cstr());
+    inp.free();
+    outp.free();
+    errp.free();
+    cmd.free();
+    return rc;
 }
 
 // Count non-overlapping occurrences of `needle` in `hay`.
@@ -84,16 +102,7 @@ fn lsp_diagnostics_lifecycle() {
     frame(&mut ses, &b);
     p.mkfile("session.bin", ses.as_str());
 
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root);
-    cmd.push_str("/out.txt' 2> '");
-    cmd.push_str(root);
-    cmd.push_str("/err.txt'");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root);
     assert_eq(rc, 0); // exit after shutdown = success
 
     let mut op = String::from_str(root);
@@ -137,14 +146,7 @@ fn lsp_unknown_method_and_bad_json() {
     frame(&mut ses, &b);
     p.mkfile("session.bin", ses.as_str());
 
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root);
-    cmd.push_str("/out.txt' 2> /dev/null");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
@@ -247,14 +249,7 @@ fn lsp_positional_features() {
     frame(&mut ses, &b);
     p.mkfile("session.bin", ses.as_str());
 
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root);
-    cmd.push_str("/out.txt' 2> /dev/null");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
@@ -344,14 +339,7 @@ fn lsp_completion_formatting_tokens() {
     frame(&mut ses, &b);
     p.mkfile("session.bin", ses.as_str());
 
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root);
-    cmd.push_str("/out.txt' 2> /dev/null");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
@@ -407,14 +395,7 @@ fn lsp_code_actions() {
     frame(&mut ses, &b);
     p.mkfile("session.bin", ses.as_str());
 
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root);
-    cmd.push_str("/out.txt' 2> /dev/null");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
@@ -476,14 +457,7 @@ fn lsp_completion_survives_pattern_nodes() {
     frame(&mut ses, &b);
     p.mkfile("session.bin", ses.as_str());
 
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root);
-    cmd.push_str("/out.txt' 2> /dev/null");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root);
     assert_eq(rc, 0); // the server must not crash
 
     let mut op = String::from_str(root);
@@ -536,14 +510,7 @@ fn run_lsp_session(root: str, ses: &String) String {
     let f = stdio::fopen(sp.as_str(), "wb");
     unsafe stdio::fwrite(ses.as_str().ptr(), 1, ses.len(), f);
     unsafe stdio::fclose(f);
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root);
-    cmd.push_str("/out.txt' 2> /dev/null");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root);
     assert_eq(rc, 0);
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
@@ -577,14 +544,7 @@ fn lsp_rename_workspace_relative() {
     let f = stdio::fopen(sp.as_str(), "wb");
     unsafe stdio::fwrite(ses2.as_str().ptr(), 1, ses2.len(), f);
     unsafe stdio::fclose(f);
-    let mut cmd = String::new();
-    cmd.push_str(superc_path());
-    cmd.push_str(" lsp < '");
-    cmd.push_str(root2);
-    cmd.push_str("/session.bin' > '");
-    cmd.push_str(root2);
-    cmd.push_str("/out.txt' 2> /dev/null");
-    let rc = cli::run_shell(cmd.cstr());
+    let rc = lsp_run(root2);
     assert_eq(rc, 0);
     let mut op = String::from_str(root2);
     op.push_str("/out.txt");

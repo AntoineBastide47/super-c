@@ -33,18 +33,3 @@ extern "C" {
     pub fn pthread_rwlock_trywrlock(rwlock: *mut void) i32;
     pub fn pthread_rwlock_unlock(rwlock: *mut void) i32;
 }
-
-// Sizing shim (ffi/pthread_ext.c, auto-discovered from the "pthread_ext.h" header): allocate + initialise
-// and destroy + free a correctly-sized OS handle, so Super-C never needs `sizeof(pthread_mutex_t)`. Each
-// `*_new` returns null on allocation failure.
-extern "C" "pthread_ext.h" {
-    pub fn sc_mutex_new() *mut void;
-    pub fn sc_mutex_free(m: *mut void) void;
-    pub fn sc_cond_new() *mut void;
-    pub fn sc_cond_free(c: *mut void) void;
-    // Wait at most `rel_ns` nanoseconds (< 0 waits forever); 0 if signalled, nonzero on timeout. The caller
-    // holds `m`, which is released while waiting and held again on return, and must re-check its condition.
-    pub fn sc_cond_timedwait_ns(c: *mut void, m: *mut void, rel_ns: i64) i32;
-    pub fn sc_rwlock_new() *mut void;
-    pub fn sc_rwlock_free(r: *mut void) void;
-}

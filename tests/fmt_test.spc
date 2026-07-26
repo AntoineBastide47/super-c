@@ -158,6 +158,23 @@ fn golden_select() {
     );
 }
 
+// A closure spells its params either way (`fn(x: i32) {}` / `|x: i32| {}`) but only the `fn` form has a
+// return-type slot, so normalising everything to `||` DELETED a declared return type -- the formatter
+// rewrote working source into source that no longer compiles. A closure that declares one keeps the `fn`
+// spelling; one that does not still normalises.
+@test
+fn golden_closure_return_type() {
+    expect_fmt(
+        "fn f()i64{let g=fn()i64{return 7;};return g();}",
+        "fn f() i64 {\n    let g = fn() i64 {\n        return 7;\n    };\n    return g();\n}\n",
+    );
+    expect_fmt(
+        "fn f(){let g=fn(x:i64,y:i64)i64{return x+y;};g(1,2);}",
+        "fn f() {\n    let g = fn(x: i64, y: i64) i64 {\n        return x + y;\n    };\n    g(1, 2);\n}\n",
+    );
+    expect_fmt("fn f(){let g=fn(x:i64){};g(1);}", "fn f() {\n    let g = |x: i64| {};\n    g(1);\n}\n");
+}
+
 @test
 fn golden_fmt_skip() {
     expect_fmt(

@@ -1,12 +1,15 @@
-// OS threads. `spawn` moves an owning closure onto the heap and runs it on a fresh pthread; the returned
+// OS threads. `spawn` moves an owning closure onto the heap and runs it on a fresh OS thread; the returned
 // `JoinHandle<T>` hands back the closure's value from `join`. Import with `import std::parallel::thread;`.
+//
+// The thread itself comes from the platform substrate (`ffi/sc_rt.c`): pthreads on POSIX, `_beginthreadex`
+// on Windows, one opaque handle either way -- nothing here names a `pthread_t`.
 //
 // The closure must OWN everything it touches (an owning `fn move` closure): a detached thread outlives the
 // launching call, so it may copy scalars and MOVE owned values (`String`, `Vector`, `Box`, `Arc`) in, but
 // may not borrow a local -- the borrow checker's escape rule rejects that at the call site. Cross-thread
 // sharing goes through `Arc`; cross-thread mutation through an atomic or a lock.
 
-import pthread;
+import sc_runtime;
 
 // A closure body paired with the heap slot its return value lands in. Bundled into one heap block so the
 // single `void*` pthread argument carries both; released by the trampoline once the body has run.
@@ -35,8 +38,9 @@ fn heap_alloc<T>(value: T) *mut T {
 }
 
 // The C-ABI thread entry point: reconstruct the payload, run the body into its result slot, release the
-// payload block. Monomorphized per (F, T); its address is handed to `pthread_create`. The value travels
-// back through the `result` slot the `JoinHandle` already holds, not through pthread's return channel.
+// payload block. Monomorphized per (F, T); its address is handed to `sc_rt_thread_create`. The value
+// travels back through the `result` slot the `JoinHandle` already holds, not through the thread's own
+// return channel.
 fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
     let pp = arg as *mut ThreadPayload<F, T>;
     let payload = unsafe {
@@ -51,20 +55,19 @@ fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
 /// A handle to a running thread. `join` blocks until the thread finishes and returns its value; the handle
 /// is consumed. Dropping a handle without joining detaches the thread (its value is never collected).
 pub struct JoinHandle<T> {
-    handle: pthread::pthread_t,
+    handle: *mut void, // the substrate's opaque thread handle; `join` consumes it
     result: *mut T, // heap slot the thread writes into; join reads then frees it
 }
 
 extend<T> JoinHandle<T> {
     // `pub` for external linkage: `spawn` is monomorphized in the CALLER's module, so its call to this
     // constructor must reach a non-static symbol. Not part of the intended surface -- use `spawn`.
-    pub fn from_parts(handle: pthread::pthread_t, result: *mut T) JoinHandle<T> {
+    pub fn from_parts(handle: *mut void, result: *mut T) JoinHandle<T> {
         return JoinHandle::<T> { handle: handle, result: result };
     }
     /// Block until the thread finishes and take its return value. Consumes the handle.
     pub fn join(self: JoinHandle<T>) T {
-        let mut ret: *mut void = null;
-        unsafe pthread::pthread_join(self.handle, &mut ret);
+        let _ = unsafe sc_runtime::sc_rt_thread_join(self.handle);
         let v = unsafe {
             self.result[0];
         };
@@ -83,7 +86,7 @@ pub fn spawn<F: fn move() T + Send + 'static, T>(f: F) JoinHandle<T> {
     let mut g = Global {};
     let slot = g.alloc(sizeof(T), alignof(T)) as *mut T;
     let env = heap_alloc::<ThreadPayload<F, T>>(ThreadPayload::<F, T>::make(f, slot)) as *mut void;
-    let mut h: pthread::pthread_t;
-    unsafe pthread::pthread_create(&mut h, null, thread_entry::<F, T>, env);
+    let mut h: *mut void = null;
+    let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, thread_entry::<F, T>, env);
     return JoinHandle::<T>::from_parts(h, slot);
 }

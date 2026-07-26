@@ -837,15 +837,17 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
     unsafe stdio::snprintf(
         &mut cc2.b[0],
         2048,
-        "cc -std=c11 -Wall -Wextra -Werror -I'%s/build/raw' '%s/cuser.c' -o '%s/cbin' 2>/dev/null".ptr() as *const char,
+        "%s -std=c11 -Wall -Wextra -Werror -I\"%s/build/raw\" \"%s/cuser.c\" -o \"%s/cbin%s\"".ptr() as *const char,
+        cli::cc_name(),
         p.rootp(),
         p.rootp(),
         p.rootp(),
+        cli::binext(),
     );
-    assert_eq(cli::run_shell(&cc2.b[0]), 0);
+    assert_eq(cli::run_quiet(&cc2.b[0]), 0);
     let mut cr = Cmd {};
-    unsafe stdio::snprintf(&mut cr.b[0], 2048, "'%s/cbin'".ptr() as *const char, p.rootp());
-    assert_eq(cli::run_shell(&cr.b[0]), 0);
+    unsafe stdio::snprintf(&mut cr.b[0], 2048, "\"%s/cbin%s\"".ptr() as *const char, p.rootp(), cli::binext());
+    assert_eq(cli::run_quiet(&cr.b[0]), 0);
 
     // the attribute is rejected on a non-generic type
     p.mkfile("bad.spc", "@emit_macro\npub struct Plain { pub a: i32 }\nfn main() i32 { return 0; }\n");
@@ -3601,15 +3603,8 @@ fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
     let r2 = p.compile("main.spc");
     assert_eq(r2.exit, 0);
-    let mut prune = Cmd {};
-    unsafe stdio::snprintf(
-        &mut prune.b[0],
-        2048,
-        "test $(find '%s/build' -name '__ext*' | wc -l) -eq 0 && test ! -e '%s/build/__ldflags'".ptr() as *const char,
-        p.rootp(),
-        p.rootp(),
-    );
-    assert_eq(cli::run_shell(&prune.b[0]), 0);
+    assert_eq(p.gen_count("__ext"), 0);
+    assert(!p.gen_exists("__ldflags"), "the link-flag file is removed when no extern block is left");
 
     // a missing source file is a hard error
     p.mkfile(

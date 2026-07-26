@@ -18,6 +18,7 @@ import codegen::codegen as cg;
 import module::loader as loader;
 import consteval::consteval as ce;
 import driver_shim as shim;
+import tests::cli_harness as cli;
 
 import stdio;
 import stdlib;
@@ -399,14 +400,14 @@ fn slurp(path: *const char) *mut char {
 }
 
 fn rm_dir(dir: *const char) {
-    let mut cmd = Path512 {};
-    unsafe stdio::snprintf(&mut cmd.b[0], 512, "rm -rf '%s'".ptr() as *const char, dir);
-    let _ = stdlib::system(str::from_cstr(&cmd.b[0]));
+    let _ = unsafe shim::sc_rm_rf(dir);
 }
 
 // Build `src` into a standalone program via `super-c build`, run it, and capture stdout+stderr + exit code.
 // The compiler is $SUPERC (default "./super-c", matching the CWD=repo-root that `make selfhost-test` uses).
-// Each snippet gets its own temp dir (/tmp/scr_<pid>_<seq>) so build trees never collide -- fork-per-test safe.
+// Each snippet gets its own temp dir (<tmp>/scr_<pid>_<seq>) so build trees never collide -- fork-per-test
+// safe. No shell is involved: the process runner binds the output file and applies `env` itself, which is
+// what lets these tests run on Windows.
 pub fn compile_and_run(src: str) RunResult {
     return compile_and_run_env(src, "");
 }
@@ -417,9 +418,16 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     R_SEQ = R_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut dir = Path256 {};
-    unsafe stdio::snprintf(&mut dir.b[0], 256, "/tmp/scr_%d_%llu".ptr() as *const char, pid, R_SEQ);
+    unsafe stdio::snprintf(
+        &mut dir.b[0],
+        256,
+        "%s/scr_%d_%llu".ptr() as *const char,
+        unsafe shim::sc_tmpdir(),
+        pid,
+        R_SEQ,
+    );
     let dirp = (&dir.b[0]) as *const char;
-    if unsafe shim::sc_mkdir(dirp) != 0 {
+    if unsafe shim::sc_mkdir_p(dirp) != 0 {
         return r;
     }
     let mut spc = Path512 {};
@@ -433,38 +441,27 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
         let _ = unsafe stdio::fwrite(src.ptr(), 1, src.len(), wf);
     }
     unsafe stdio::fclose(wf);
-    let mut sc = stdlib::getenv("SUPERC");
-    if sc == null || unsafe *sc == 0 as char {
-        sc = "./super-c".ptr() as *const char;
-    }
     let mut cmd = Path1024 {};
     unsafe stdio::snprintf(
         &mut cmd.b[0],
         1024,
-        "%s build '%s/main.spc' -o '%s/prog' >/dev/null 2>&1".ptr() as *const char,
-        sc,
+        "\"%s\" build --cstd=%s \"%s/main.spc\" -o \"%s/prog%s\"".ptr() as *const char,
+        cli::superc_path().ptr() as *const char,
+        cli::cstd(),
         dirp,
         dirp,
+        cli::binext(),
     );
-    let brc = stdlib::system(str::from_cstr(&cmd.b[0]));
+    let brc = unsafe shim::sc_run(&cmd.b[0], null, null, null, null);
     if brc != 0 {
         rm_dir(dirp);
         return r;
     } // did not build
     r.built = true;
-    unsafe stdio::snprintf(
-        &mut cmd.b[0],
-        1024,
-        "%.*s'%s/prog' > '%s/out' 2>&1".ptr() as *const char,
-        env.len() as i32,
-        env.ptr(),
-        dirp,
-        dirp,
-    );
-    let rrc = stdlib::system(str::from_cstr(&cmd.b[0]));
-    if unsafe shim::sc_wifexited(rrc) != 0 {
-        r.exit = unsafe shim::sc_wexitstatus(rrc);
-    }
+    unsafe stdio::snprintf(&mut cmd.b[0], 1024, "\"%s/prog%s\"".ptr() as *const char, dirp, cli::binext());
+    let mut outp = Path512 {};
+    unsafe stdio::snprintf(&mut outp.b[0], 512, "%s/out".ptr() as *const char, dirp);
+    r.exit = unsafe shim::sc_run(&cmd.b[0], null, &outp.b[0], null, env.ptr() as *const char);
     let mut op = Path512 {};
     unsafe stdio::snprintf(&mut op.b[0], 512, "%s/out".ptr() as *const char, dirp);
     r.out = slurp(&op.b[0]);
