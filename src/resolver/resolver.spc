@@ -1095,6 +1095,23 @@ extend Resolver {
                     self.resolve_expr(self.child(args, i));
                 }
             },
+            NODE_SELECT => {
+                // Sugar marker. Each arm's operation is already taken apart (a channel, a duration, or
+                // nothing), so there is nothing here but ordinary expressions -- plus the value-less `let`
+                // the parser built for a binding arm, declared in a scope of its own so the body can use
+                // the name and the next arm cannot.
+                let arms = self.ast.at_const(id).as_data.block.statements;
+                for i in 0..arms.len {
+                    let a = self.child(arms, i);
+                    let ad = self.ast.at_const(a).as_data.select_arm;
+                    self.resolve_expr(ad.op);
+                    self.resolve_expr(ad.value);
+                    self.scope_enter();
+                    self.resolve_stmt(ad.binding);
+                    self.resolve_stmt(ad.body);
+                    self.scope_exit();
+                }
+            },
             NODE_IF => {
                 self.resolve_if(id);
             },

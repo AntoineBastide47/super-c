@@ -329,6 +329,9 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
             if first == b'r' && memeq(lexeme, "return") {
                 return TokenType::Return;
             }
+            if first == b's' && memeq(lexeme, "select") {
+                return TokenType::Select;
+            }
             if first == b's' && memeq(lexeme, "struct") {
                 return TokenType::Struct;
             }

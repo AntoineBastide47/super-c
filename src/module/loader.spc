@@ -626,10 +626,16 @@ extend Package {
             // never launches never loads the runtime. load_module dedups, so a duplicate push is harmless.
             if std_root.len() != 0 {
                 let mut has_launch = false;
+                let mut has_select = false;
                 let nn = m.ast.nodes.len();
                 for ni in 0..nn {
-                    if m.ast.at_const(ni as NodeId).kind == NodeKind::NODE_LAUNCH {
+                    let k = m.ast.at_const(ni as NodeId).kind;
+                    if k == NodeKind::NODE_LAUNCH {
                         has_launch = true;
+                    } else if k == NodeKind::NODE_SELECT {
+                        has_select = true;
+                    }
+                    if has_launch && has_select {
                         break;
                     }
                 }
@@ -638,6 +644,13 @@ extend Package {
                     rf.push_str("/std/parallel/runtime.spc");
                     child_paths.push(String::from_str("std::parallel::runtime"));
                     child_files.push(rf);
+                }
+                // Same for `select`, which lowers to std::parallel::selector's `sugar_*` shims.
+                if has_select {
+                    let mut sf = String::from_str(std_root);
+                    sf.push_str("/std/parallel/selector.spc");
+                    child_paths.push(String::from_str("std::parallel::selector"));
+                    child_files.push(sf);
                 }
                 // Same bargain for `@blocking`: a call to one of those functions is emitted as a wrapper
                 // that hands the work to the blocking pool, so that module has to be linked in -- but only

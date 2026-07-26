@@ -95,7 +95,7 @@
       "patterns": [
         {
           "name": "keyword.control.super-c",
-          "match": "\\b(if|else|while|for|do|loop|switch|case|break|continue|return|defer|in|where)\\b"
+          "match": "\\b(if|else|while|for|do|loop|switch|case|break|continue|return|defer|launch|select|in|where)\\b"
         },
         {
           "name": "keyword.other.super-c",

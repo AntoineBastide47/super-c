@@ -2478,6 +2478,566 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// Multi-way waiting (std/parallel/select): one consumer coroutine waits on TWO channels at once while two
+// producers feed them 100 items each through single-slot buffers. It parks on both queues under one wake
+// token, so every wake comes from whichever channel moved first; the exact total proves no item was lost
+// and no wakeup was double-spent. The second half checks that a selector really parks rather than spinning:
+// the value arrives 60ms late, and the wait must have taken at least that long. Leak-checked.
+@test
+fn select_waits_on_several_channels() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::channel as chan;
+import std::parallel::selector as selector;
+import std::parallel::sync as sync;
+import std::parallel::time as time;
+import std::parallel::platform as platform;
+import std::parallel::arc as arc;
+
+fn main() i32 {
+    let a = chan::Channel::<i64>::bounded(1);
+    let arx = a.receiver();
+    let atx = a.sender();
+    a.free();
+    let b = chan::Channel::<i64>::bounded(1);
+    let brx = b.receiver();
+    let btx = b.sender();
+    b.free();
+    let total = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+
+    wg.add(1);
+    {
+        let rx1 = arx.clone();
+        let rx2 = brx.clone();
+        let w = wg.clone();
+        let acc = total.clone();
+        launch fn() {
+            let mut s = selector::Selector::new();
+            let i1 = s.arm_recv(&rx1);
+            let _ = s.arm_recv(&rx2);
+            let mut sum: i64 = 0;
+            let mut n = 0;
+            while n < 200 {
+                switch s.wait_timeout(time::Duration::from_secs(60)) {
+                    Ready(i) => {
+                        let v = if i == i1 {
+                            rx1.try_recv();
+                        } else {
+                            rx2.try_recv();
+                        };
+                        switch v {
+                            Some(x) => {
+                                sum = sum + x;
+                                n = n + 1;
+                            },
+                            None => {},
+                        };
+                    },
+                    TimedOut => {
+                        n = 1000; // give up: the wait must not time out
+                    },
+                };
+            }
+            {
+                let mut g = acc.get().lock();
+                let p = g.get_mut();
+                *p = sum;
+            }
+            w.done();
+        };
+    }
+    wg.add(2);
+    {
+        let tx = atx.clone();
+        let w = wg.clone();
+        launch fn() {
+            for i in 0..100 {
+                let _ = tx.send(i);
+            }
+            w.done();
+        };
+    }
+    {
+        let tx = btx.clone();
+        let w = wg.clone();
+        launch fn() {
+            for i in 0..100 {
+                let _ = tx.send(1000 + i);
+            }
+            w.done();
+        };
+    }
+    if !wg.wait_timeout(time::Duration::from_secs(120)) {
+        return 1;
+    }
+    let mut sum: i64 = 0;
+    {
+        let g = total.get().lock();
+        sum = *g.get();
+    }
+    if sum != 109900 {
+        return 2; // 2 x (0+..+99) + 100 x 1000
+    }
+
+    // A selector inside a coroutine must PARK, not spin: nothing is ready for 60ms.
+    let res = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(-1));
+    wg.add(1);
+    {
+        let rx1 = arx.clone();
+        let rx2 = brx.clone();
+        let w = wg.clone();
+        let out = res.clone();
+        launch fn() {
+            let mut s = selector::Selector::new();
+            let _ = s.arm_recv(&rx1);
+            let i2 = s.arm_recv(&rx2);
+            let t0 = platform::now_ns();
+            let mut r: i64 = -2;
+            switch s.wait_timeout(time::Duration::from_secs(60)) {
+                Ready(i) => {
+                    if i == i2 && platform::now_ns() - t0 >= 50000000 {
+                        r = rx2.try_recv().unwrap_or(-3);
+                    } else {
+                        r = -4;
+                    }
+                },
+                TimedOut => {
+                    r = -5;
+                },
+            };
+            {
+                let mut g = out.get().lock();
+                let p = g.get_mut();
+                *p = r;
+            }
+            w.done();
+        };
+    }
+    time::sleep(time::Duration::from_millis(60));
+    let _ = btx.send(42);
+    if !wg.wait_timeout(time::Duration::from_secs(120)) {
+        return 3;
+    }
+    let mut got: i64 = 0;
+    {
+        let g = res.get().lock();
+        got = *g.get();
+    }
+    atx.free();
+    arx.free();
+    btx.free();
+    brx.free();
+    wg.free();
+    total.free();
+    res.free();
+    rt::shutdown();
+    if got != 42 {
+        return 4;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// The rest of the selector's surface. A send arm on a FULL channel is not ready until a drainer makes room
+// 60ms later, and the wait must have blocked for it. A closed, drained receive arm is ready at once (its
+// `try_recv` reports `None`), which is what stops a select from hanging on a dead channel. And with two
+// arms permanently ready, 200 waits must pick BOTH -- the uniform pick among ready arms is what keeps a
+// busy channel from starving a quiet one (declaration order would return arm 0 every time). Leak-checked.
+@test
+fn select_arms_and_fairness() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::channel as chan;
+import std::parallel::selector as selector;
+import std::parallel::sync as sync;
+import std::parallel::time as time;
+import std::parallel::platform as platform;
+
+fn main() i32 {
+    let a = chan::Channel::<i64>::bounded(1);
+    let arx = a.receiver();
+    let atx = a.sender();
+    a.free();
+    let _ = atx.send(1); // full: the send arm cannot proceed
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    {
+        let rx = arx.clone();
+        let w = wg.clone();
+        launch fn() {
+            time::sleep(time::Duration::from_millis(60));
+            let _ = rx.try_recv();
+            w.done();
+        };
+    }
+    let mut s = selector::Selector::new();
+    let si = s.arm_send(&atx);
+    let t0 = platform::now_ns();
+    switch s.wait_timeout(time::Duration::from_secs(60)) {
+        Ready(i) => {
+            if i != si {
+                return 1;
+            }
+        },
+        TimedOut => {
+            return 2;
+        },
+    };
+    if platform::now_ns() - t0 < 50000000 {
+        return 3; // it must have waited for the drain
+    }
+    if !wg.wait_timeout(time::Duration::from_secs(120)) {
+        return 4;
+    }
+
+    let c = chan::Channel::<i64>::bounded(1);
+    let crx = c.receiver();
+    let ctx = c.sender();
+    c.free();
+    ctx.close();
+    let mut s2 = selector::Selector::new();
+    let _ = s2.arm_recv(&crx);
+    switch s2.wait_timeout(time::Duration::from_millis(10)) {
+        Ready(_) => {
+            switch crx.try_recv() {
+                Some(_) => {
+                    return 5;
+                },
+                None => {},
+            };
+        },
+        TimedOut => {
+            return 6; // a closed channel is ready, not a timeout
+        },
+    };
+
+    let d = chan::Channel::<i64>::unbounded();
+    let drx = d.receiver();
+    let dtx = d.sender();
+    d.free();
+    let e = chan::Channel::<i64>::unbounded();
+    let erx = e.receiver();
+    let etx = e.sender();
+    e.free();
+    for _i in 0..200 {
+        let _ = dtx.send(1);
+        let _ = etx.send(2);
+    }
+    let mut s3 = selector::Selector::new();
+    let di = s3.arm_recv(&drx);
+    let ei = s3.arm_recv(&erx);
+    let mut hits_d = 0;
+    let mut hits_e = 0;
+    for _i in 0..200 {
+        switch s3.poll() {
+            Ready(i) => {
+                if i == di {
+                    hits_d = hits_d + 1;
+                    let _ = drx.try_recv();
+                } else if i == ei {
+                    hits_e = hits_e + 1;
+                    let _ = erx.try_recv();
+                }
+            },
+            TimedOut => {
+                return 7;
+            },
+        };
+    }
+    if hits_d == 0 || hits_e == 0 {
+        return 8; // one arm never won: the pick is not fair
+    }
+    loop {
+        switch drx.try_recv() {
+            Some(_) => {},
+            None => {
+                break;
+            },
+        };
+    }
+    loop {
+        switch erx.try_recv() {
+            Some(_) => {},
+            None => {
+                break;
+            },
+        };
+    }
+    dtx.free();
+    drx.free();
+    etx.free();
+    erx.free();
+    ctx.free();
+    crx.free();
+    atx.free();
+    arx.free();
+    wg.free();
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// The `select` keyword end to end: it lowers (src/desugar) to the same `Selector` the test above drives by
+// hand, so what is checked here is the LOWERING -- an arm binds exactly what its operation returns, only the
+// winning arm's body runs, a `timeout` arm bounds the wait, a `default` arm makes it never wait at all, the
+// sent value is evaluated only in the branch that won, and a select nested inside an arm body works (the
+// desugar lowers inner markers first). Also covers a field-path channel and a select that PARKS inside a
+// coroutine. Leak-checked.
+@test
+fn select_keyword() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::channel as chan;
+import std::parallel::sync as sync;
+import std::parallel::time as time;
+import std::parallel::arc as arc;
+import std::parallel::platform as platform;
+
+struct Pair {
+    pub rx: chan::Receiver<i64>,
+    pub tx: chan::Sender<i64>,
+}
+
+fn main() i32 {
+    let a = chan::Channel::<i64>::bounded(4);
+    let pair = Pair { rx: a.receiver(), tx: a.sender() };
+    a.free();
+    let b = chan::Channel::<i64>::bounded(1);
+    let brx = b.receiver();
+    let btx = b.sender();
+    b.free();
+    let c = chan::Channel::<i64>::bounded(4);
+    let crx = c.receiver();
+    let ctx = c.sender();
+    c.free();
+    let _ = btx.send(1); // b is now FULL: its send arm cannot proceed, its recv arm can
+
+    // Exactly one arm is ever ready, so the winner is not a coin flip: `c` stays empty throughout.
+    let _ = pair.tx.send(7);
+    let mut got: i64 = -1;
+    select {
+        v = pair.rx.recv() => {
+            got = v.unwrap_or(-2);
+            // a select nested in an arm body: the desugar lowers the inner marker first
+            select {
+                w = brx.recv() => {
+                    got = got + 10 * w.unwrap_or(0);
+                }
+                timeout(time::Duration::from_secs(60)) => {
+                    got = -3;
+                }
+            }
+        }
+        crx.recv() => {
+            got = -4;
+        }
+        timeout(time::Duration::from_secs(60)) => {
+            got = -5;
+        }
+    }
+    if got != 17 {
+        return 1;
+    }
+
+    // A send arm: the nested recv above drained `b`, so there is room and the send wins.
+    select {
+        crx.recv() => {
+            got = -6;
+        }
+        r = btx.send(9) => {
+            got = switch r {
+                Sent => 42i64,
+                Rejected(_) => -7i64,
+            };
+        }
+    }
+    if got != 42 {
+        return 2;
+    }
+    switch brx.try_recv() {
+        Some(x) => {
+            if x != 9 {
+                return 3;
+            }
+        },
+        None => {
+            return 4;
+        },
+    };
+
+    // A `default` arm: nothing is ready, so it fires at once instead of waiting.
+    let t0 = platform::now_ns();
+    select {
+        crx.recv() => {
+            got = -8;
+        }
+        default => {
+            got = 99;
+        }
+    }
+    if got != 99 || platform::now_ns() - t0 > 500000000 {
+        return 5;
+    }
+
+    // A select that PARKS: nothing arrives for 60ms.
+    let out = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(-1));
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    {
+        let rx = pair.rx.clone();
+        let rx2 = crx.clone();
+        let w = wg.clone();
+        let o = out.clone();
+        launch fn() {
+            let mut r: i64 = -9;
+            select {
+                v = rx.recv() => {
+                    r = v.unwrap_or(-10);
+                }
+                v = rx2.recv() => {
+                    r = 1000 + v.unwrap_or(0);
+                }
+                timeout(time::Duration::from_secs(60)) => {
+                    r = -11;
+                }
+            }
+            {
+                let mut g = o.get().lock();
+                let p = g.get_mut();
+                *p = r;
+            }
+            w.done();
+        };
+    }
+    time::sleep(time::Duration::from_millis(60));
+    let _ = pair.tx.send(77);
+    if !wg.wait_timeout(time::Duration::from_secs(120)) {
+        return 6;
+    }
+    let mut parked: i64 = 0;
+    {
+        let g = out.get().lock();
+        parked = *g.get();
+    }
+    pair.free();
+    btx.free();
+    brx.free();
+    ctx.free();
+    crx.free();
+    wg.free();
+    out.free();
+    rt::shutdown();
+    if parked != 77 {
+        return 7;
+    }
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// A `select` whose arms are malformed. Each one is reported on its own -- a bad arm still consumes its
+// `=> { .. }`, so one mistake does not cascade into the rest of the function -- and the whole-statement
+// rules (at least one channel arm; `timeout` and `default` are mutually exclusive) are checked too.
+@test
+fn select_keyword_diagnostics() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::channel as chan;
+
+fn make() chan::Receiver<i64> {
+    let a = chan::Channel::<i64>::bounded(1);
+    let r = a.receiver();
+    a.free();
+    return r;
+}
+
+fn main() i32 {
+    let rx = make();
+    select {
+        v = rx.poll() => {}
+        v = rx.recv() => {}
+    }
+    select {
+        timeout(1) => {}
+    }
+    select {
+        v = make().recv() => {}
+    }
+    select {
+        v = rx.recv() => {}
+        timeout(1) => {}
+        default => {}
+    }
+    rx.free();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.exit != 0, "a malformed select is an error");
+    assert(r.out_has("a 'select' arm operation is"), "the bad operation is named");
+    assert(r.out_has("needs at least one"), "a select with no channel arm is rejected");
+    assert(r.out_has("must be a name or a field path"), "a computed channel is rejected");
+    assert(r.out_has("cannot have both a 'timeout' and a 'default'"), "the conflicting arms are rejected");
+}
+
+// A module whose functions are only PARTLY used. Codegen expands nested instantiations by borrowing the
+// defining module's ast and truncating the instances it added back off it -- but the types interned during
+// that pass survive, so a leftover type can name an instance that is gone. Reading it crashed the compiler
+// (`Vector::at: index out of bounds`) rather than emitting anything. `std::parallel::selector` reaches that
+// shape whenever a program touches only part of it, which a plain `Selector::new()` does.
+@test
+fn partial_module_use_after_foreign_expansion() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::selector as selector;
+
+fn main() i32 {
+    let s = selector::Selector::new();
+    return s.len() as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("");
+    assert_eq(run.exit, 0);
+}
+
 // The data-parallel API (std/parallel/data): the whole surface over 5000 elements -- `each` reading every
 // element, `each_mut` mutating disjoint partitions in place, `chunks_mut` handing out whole `[]mut T`
 // windows, `reduce` folding per-chunk accumulators and combining them, `range_with` under Dynamic

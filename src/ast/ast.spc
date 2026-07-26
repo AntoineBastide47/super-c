@@ -66,6 +66,15 @@ pub enum TypeQualifier {
     TYPE_QUAL_MUT,
 }
 
+/// Which operation a `select` arm waits on. Classified by the parser from the arm's expression shape, so
+/// no later pass has to re-read the source text.
+pub enum SelectArmKind {
+    SELECT_RECV, // `ch.recv()`
+    SELECT_SEND, // `ch.send(v)`
+    SELECT_TIMEOUT, // `timeout(d)`
+    SELECT_DEFAULT, // `default`
+}
+
 pub enum NodeKind {
     NODE_NONE_KIND,
     NODE_PROGRAM,
@@ -140,6 +149,11 @@ pub enum NodeKind {
     // (a placeholder callee + the operand as the sole arg); desugar seeds the callee's resolution to the
     // runtime shim and flips the kind to NODE_CALL.
     NODE_LAUNCH,
+    // `select { .. }`: a NODE_SELECT holding NODE_SELECT_ARM children (BlockData). Desugar rewrites the
+    // whole thing into a block that builds a `std::parallel::selector::Selector`, arms it, waits, and runs
+    // the winning arm's body -- see src/desugar.
+    NODE_SELECT,
+    NODE_SELECT_ARM,
     NODE_KIND_COUNT,
 }
 
@@ -431,6 +445,18 @@ pub struct MatchArmData {
     pub guard: NodeId,
     pub body: NodeId,
 }
+// One `select` arm, pre-desugar. `binding` is a value-less NODE_LET the parser builds for `v = ch.recv()`
+// (NODE_NONE when the arm binds nothing) -- it exists at RESOLVE time so the body's uses of `v` bind to it,
+// and desugar fills in its value. The operation is stored TAKEN APART (the `.recv()`/`.send()`/`timeout()`
+// call node is dropped at parse time), so no pass has to re-derive it and no synthetic callee ever reaches
+// the resolver; the formatter reprints the surface syntax from the pieces.
+pub struct SelectArmData {
+    pub binding: NodeId,
+    pub op: NodeId, // the channel (recv/send), the duration (timeout), NODE_NONE (default)
+    pub value: NodeId, // the sent expression (send), else NODE_NONE
+    pub body: NodeId,
+    pub kind: SelectArmKind,
+}
 pub struct NewData {
     pub ty: NodeId,
     pub initializer: NodeId,
@@ -500,6 +526,7 @@ pub union NodeAs {
     pub specialization: SpecializationData,
     pub match_expr: MatchData,
     pub match_arm: MatchArmData,
+    pub select_arm: SelectArmData,
     pub new_expr: NewData,
     pub array_literal: ArrayLiteralData,
     pub struct_initializer: StructInitializerData,
@@ -790,6 +817,27 @@ extend Ast {
 
     pub const fn resolutions_len(self: &Self) usize {
         return self.resolutions.len();
+    }
+
+    /// Extend the resolution table to cover nodes added since `init_resolutions`. The desugar pass builds
+    /// nodes after resolve and seeds their resolutions by hand, so it grows the table as it goes.
+    pub fn grow_resolutions(self: &mut Self) {
+        while self.resolutions.len() < self.nodes.len() {
+            self.resolutions.push(DefId { module: 0, node: NODE_NONE });
+        }
+    }
+
+    /// Roll a BORROWED module's type arena back to a watermark taken before the borrow. Codegen swaps to
+    /// another module's ast to expand its generics; everything interned there is scratch, because the
+    /// results it keeps are reinterned into its own pool and the instances are re-homed by propagation.
+    /// Instances and types must roll back TOGETHER: a truncated instance list under a pool that kept
+    /// growing leaves types naming instances that no longer exist, and the next pass to read one either
+    /// runs off the end of the list or, once it has refilled, silently reads a different instance.
+    /// Sound because the intern index tolerates entries past the pool (see `intern_type`) and codegen
+    /// never writes the type side table, so nothing outside the borrow can name what is dropped.
+    pub fn restore_arena(self: &mut Self, ntypes: usize, ninstances: usize) {
+        self.instances.truncate(ninstances);
+        self.type_pool.truncate(ntypes);
     }
 
     pub fn init_types(self: &mut Self) {

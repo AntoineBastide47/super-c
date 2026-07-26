@@ -2024,11 +2024,13 @@ extend Codegen {
             let home = self.ast;
             let hsrc = self.source;
             let mut oninst: usize = 0;
+            let mut optypes: usize = 0;
             if foreign {
                 let owner = self.mod_ast(fn2.module);
                 self.source = self.mod_src(fn2.module);
                 self.borrowed = true;
                 oninst = unsafe (*owner).instances.len();
+                optypes = unsafe (*owner).type_pool.len();
                 self.ast = owner;
                 for kk in 0..fn_n {
                     fargs[kk as usize] = unsafe (*self.cur_ast()).reintern(unsafe &*home, fargs[kk as usize]);
@@ -2070,7 +2072,7 @@ extend Codegen {
             }
             self.nsubst = 0;
             if foreign {
-                unsafe (*self.cur_ast()).instances.truncate(oninst);
+                unsafe (*self.cur_ast()).restore_arena(optypes, oninst);
                 self.borrowed = false;
                 self.ast = home;
                 self.source = hsrc;
@@ -2232,13 +2234,14 @@ extend Codegen {
             self.source = self.mod_src(it.module);
             self.borrowed = true;
             let oninst = unsafe (*owner).instances.len();
+            let optypes = unsafe (*owner).type_pool.len();
             self.ast = owner;
             let mut oit = it;
             for k2 in 0..it.n {
                 unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k2 as usize]);
             }
             self.scan_inst_methods(&oit, home, itTy, true, minst_only);
-            unsafe (*self.cur_ast()).instances.truncate(oninst);
+            unsafe (*self.cur_ast()).restore_arena(optypes, oninst);
             self.borrowed = false;
             self.ast = home;
             self.source = hsrc;
@@ -12414,6 +12417,7 @@ extend Codegen {
         let owner = self.mod_ast(it.module);
         let osrc = self.mod_src(it.module);
         let oninst = unsafe (*owner).instances.len();
+        let optypes = unsafe (*owner).type_pool.len();
         let mut oit = *it;
         for k in 0..it.n {
             unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
@@ -12427,7 +12431,7 @@ extend Codegen {
         } else if dk == NodeKind::NODE_ENUM {
             self.emit_enum_inst(&oit, with_body);
         }
-        unsafe (*self.cur_ast()).instances.truncate(oninst);
+        unsafe (*self.cur_ast()).restore_arena(optypes, oninst);
         self.borrowed = false;
         self.ast = home;
         self.source = hsrc;
@@ -12834,6 +12838,7 @@ extend Codegen {
             let owner = self.mod_ast(it.module);
             let osrc = self.mod_src(it.module);
             let oninst = unsafe (*owner).instances.len();
+            let optypes = unsafe (*owner).type_pool.len();
             let mut oit = it;
             for k in 0..it.n {
                 unsafe oit.args[k as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k as usize]);
@@ -12842,7 +12847,7 @@ extend Codegen {
             self.borrowed = true;
             self.ast = self.mod_ast(it.module);
             self.emit_inst_methods(&oit, self.mod_ast(home_mod), itTy, which, with_body);
-            unsafe (*self.cur_ast()).instances.truncate(oninst);
+            unsafe (*self.cur_ast()).restore_arena(optypes, oninst);
             self.borrowed = false;
             self.ast = home;
             self.source = hsrc;
@@ -12885,6 +12890,7 @@ extend Codegen {
             let owner = self.mod_ast(it.module);
             let osrc = self.mod_src(it.module);
             let oninst = unsafe (*owner).instances.len();
+            let optypes = unsafe (*owner).type_pool.len();
             let mut oit = it;
             for k2 in 0..it.n {
                 unsafe oit.args[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, it.args[k2 as usize]);
@@ -12895,7 +12901,7 @@ extend Codegen {
             self.ast = self.mod_ast(it.module);
             self.emit_inst_methods(&oit, self.mod_ast(home_mod), itTy, which, with_body);
             self.minst_only = false;
-            unsafe (*self.cur_ast()).instances.truncate(oninst);
+            unsafe (*self.cur_ast()).restore_arena(optypes, oninst);
             self.borrowed = false;
             self.ast = home;
             self.source = hsrc;
@@ -12946,6 +12952,7 @@ extend Codegen {
             let owner = self.mod_ast(fn2.module);
             let osrc = self.mod_src(fn2.module);
             let oninst = unsafe (*owner).instances.len();
+            let optypes = unsafe (*owner).type_pool.len();
             let mut oargs = TyArgs8 {};
             for k2 in 0..inst.n {
                 oargs[k2 as usize] = unsafe (*owner).reintern(unsafe &*home, inst.args[k2 as usize]);
@@ -12973,7 +12980,7 @@ extend Codegen {
             }
             self.emit_function(fn2.node, DefId { module: 0, node: NODE_NONE }, false, with_body, &nm[0], true);
             self.nsubst = 0;
-            unsafe (*self.cur_ast()).instances.truncate(oninst);
+            unsafe (*self.cur_ast()).restore_arena(optypes, oninst);
             self.borrowed = false;
             self.ast = home;
             self.source = hsrc;
@@ -13044,6 +13051,7 @@ extend Codegen {
                 let home = self.cur_ast();
                 let hsrc = self.source;
                 let mut oninst: usize = 0;
+                let mut optypes: usize = 0;
                 if foreign {
                     self.source = self.mod_src(iface.module);
                     self.ast = self.mod_ast(iface.module);
@@ -13051,6 +13059,7 @@ extend Codegen {
                     self.dflt_home = unsafe (*home).module;
                     self.dflt_home_set = true;
                     oninst = unsafe (*self.cur_ast()).instances.len();
+                    optypes = unsafe (*self.cur_ast()).type_pool.len();
                 }
                 self.nsubst = 1;
                 self.subst[0].param = iface;
@@ -13064,7 +13073,7 @@ extend Codegen {
                 self.emit_function(rid, target, false, with_body, &dnm[0], stat);
                 self.nsubst = 0;
                 if foreign {
-                    unsafe (*self.cur_ast()).instances.truncate(oninst);
+                    unsafe (*self.cur_ast()).restore_arena(optypes, oninst);
                     self.borrowed = false;
                     self.dflt_home_set = false;
                     self.ast = home;

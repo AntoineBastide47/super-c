@@ -143,6 +143,21 @@ fn golden_comments_in_expression_lists() {
     );
 }
 
+// `select` prints from the pieces the parser kept, not from the source text: the `.recv()`/`.send(v)`/
+// `timeout(d)` call is taken apart at parse time, so the formatter has to put it back. Arms are one per
+// line with no separator (unlike `switch`), and a comment between them lands where it was written.
+@test
+fn golden_select() {
+    expect_fmt(
+        "fn f(rx:i32,tx:i32){select{v=rx.recv()=>{}\n// why\ntx.send(1)=>{}\ndefault=>{}}}",
+        "fn f(rx: i32, tx: i32) {\n    select {\n        v = rx.recv() => {}\n        // why\n        tx.send(1) => {}\n        default => {}\n    }\n}\n",
+    );
+    expect_fmt(
+        "fn f(rx:i32){select{  v = rx . recv ( )   => { let a=1; }\n  timeout( 5 )=>{} }}",
+        "fn f(rx: i32) {\n    select {\n        v = rx.recv() => {\n            let a = 1;\n        }\n        timeout(5) => {}\n    }\n}\n",
+    );
+}
+
 @test
 fn golden_fmt_skip() {
     expect_fmt(

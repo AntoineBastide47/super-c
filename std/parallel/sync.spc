@@ -20,10 +20,16 @@ import std::parallel::time as time;
 /// One entry in a wait queue: a parked coroutine plus the wake token of the park it is waiting out. It
 /// lives on that coroutine's own stack, so waiting costs no allocation, and the waiter unlinks it before
 /// returning. The token is what makes a wakeup park-specific: an entry a timed wait left behind is inert.
+///
+/// `claim`/`arm` serve a waiter queued on SEVERAL queues at once (a `select`): the notify that wins the
+/// wake records which queue it came from, so the woken task retries that operation first. Null `claim` for
+/// an ordinary single-queue wait, which already knows what woke it.
 pub struct Waiter {
     pub co: *mut runtime::Coroutine,
     pub token: u32,
+    pub arm: i32, // index to publish through `claim` (fills this struct's padding)
     pub next: *mut Waiter,
+    pub claim: *mut i32,
 }
 
 /// Lock ownership is the `locked` flag; `inner` is an OS mutex held only for the handful of instructions
@@ -80,7 +86,7 @@ pub fn raw_mutex_lock(m: *mut RawMutex) {
             // Queue up, then park: the runtime releases `inner` once our context is saved, so the unlock
             // that pops us can never resume a coroutine that is still switching out. The node lives in this
             // frame and is always popped by the unlock that wakes us.
-            let mut w = Waiter { co: co, token: runtime::park_begin(co), next: null };
+            let mut w = Waiter { co: co, token: runtime::park_begin(co), arm: 0, next: null, claim: null };
             let wp = &mut w;
             if unsafe (*m).tail == null {
                 unsafe (*m).head = wp;
@@ -182,12 +188,19 @@ extend<T> Mutex<T> {
     pub fn get_mut(self: &mut Mutex<T>) &mut T {
         return &mut unsafe self.data.get()[0];
     }
+    /// The underlying lock, to take and release by hand. For a wait that must hold several locks at once
+    /// (`select`); everything else should use `lock`. `pub` for linkage; not user-facing.
+    pub fn raw_handle(self: &Mutex<T>) *mut RawMutex {
+        return self.raw;
+    }
+    /// The guarded value WITHOUT locking. Sound only while the caller holds `raw_handle` -- the escape hatch
+    /// for code that took the raw lock itself. `pub` for linkage; not user-facing.
+    pub fn locked_ref(self: &Mutex<T>) &T {
+        return self.data.get_ref();
+    }
     // --- guard-facing helpers (same module) ---------------------------------------------------
     fn unlock_raw(self: &Mutex<T>) {
         raw_mutex_unlock(self.raw);
-    }
-    fn raw_handle(self: &Mutex<T>) *mut RawMutex {
-        return self.raw;
     }
     fn data_ref(self: &Mutex<T>) &T {
         return self.data.get_ref();
@@ -469,6 +482,17 @@ struct CondQ {
     pub os_waiters: i32,
 }
 
+// Tell a multi-queue waiter (a `select`) which queue this notify came from, before waking it. Written under
+// the queue's own mutex, which the waiter re-takes to unlink the node before it reads the value -- so the
+// write always lands while the node is still alive. It is a HINT: a notify that goes on to LOSE the wake
+// race also writes, so the reader must re-check the arm it names.
+fn publish_arm(wp: *mut Waiter) {
+    let c = unsafe (*wp).claim;
+    if c != null {
+        unsafe *c = unsafe (*wp).arm;
+    }
+}
+
 /// A condition variable. A coroutine that `wait`s PARKS (its worker runs other tasks); any other thread
 /// blocks. `notify_one`/`notify_all` wake whichever kind is waiting, and must be called while holding the
 /// paired mutex. Always re-check the condition in a loop after `wait` -- wakeups may be spurious.
@@ -509,7 +533,7 @@ extend Condvar {
             // may park us a second time while this node is still queued (when a deadline, not a notify, woke
             // us): harmless, because the node's token is spent and no notify can act on it.
             let token = runtime::park_begin(co);
-            let mut w = Waiter { co: co, token: token, next: null };
+            let mut w = Waiter { co: co, token: token, arm: 0, next: null, claim: null };
             let wp = &mut w;
             if unsafe (*self.wq).tail == null {
                 unsafe (*self.wq).head = wp;
@@ -539,6 +563,23 @@ extend Condvar {
             raw_mutex_lock(m);
             unsafe (*self.wq).os_waiters = unsafe (*self.wq).os_waiters - 1;
         }
+    }
+    /// Queue an externally-owned wait node. For a waiter that must sit on several queues at once (`select`);
+    /// an ordinary `wait` builds its own node. Caller holds the paired mutex, and MUST `unregister` the node
+    /// before it dies. `pub` for `select`; not user-facing.
+    pub fn register(self: &Condvar, wp: *mut Waiter) {
+        unsafe (*wp).next = null;
+        if unsafe (*self.wq).tail == null {
+            unsafe (*self.wq).head = wp;
+        } else {
+            unsafe (*(*self.wq).tail).next = wp;
+        }
+        unsafe (*self.wq).tail = wp;
+    }
+    /// Take a `register`ed node back off the queue (a no-op if a notify already popped it). Caller holds the
+    /// paired mutex. `pub` for `select`; not user-facing.
+    pub fn unregister(self: &Condvar, wp: *mut Waiter) {
+        self.unlink(wp);
     }
     // Take a wait node off the queue if it is still on it (a notify pops its own). Caller holds the paired
     // lock. Mandatory before the waiter returns: the node lives in that frame.
@@ -585,6 +626,7 @@ extend Condvar {
                 unsafe (*self.wq).tail = null;
             }
             unsafe (*wp).next = null;
+            publish_arm(wp);
             // false if that park is already over (its deadline claimed it): spend the wakeup on the next.
             woke = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
         }
@@ -598,6 +640,7 @@ extend Condvar {
         while wp != null {
             let nx = unsafe (*wp).next;
             unsafe (*wp).next = null;
+            publish_arm(wp);
             let _ = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
             wp = nx;
         }

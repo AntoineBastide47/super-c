@@ -1383,6 +1383,9 @@ fn b_stmt(b: &mut Builder, id: NodeId) d::DocId {
             v.push(b_expr(b, list_at(b, nd(b, inner).as_data.call.args, 0)));
             v.push(b.p.txt(";"));
         },
+        NODE_SELECT => {
+            v.push(b_select(b, id));
+        },
         NODE_IF => {
             v.push(b_if(b, id));
         },
@@ -1514,6 +1517,73 @@ fn b_match(b: &mut Builder, id: NodeId) d::DocId {
         v.push(b.p.hardline());
     }
     v.push(b.p.txt("}"));
+    let r = b.p.concat(&v);
+    return r;
+}
+
+// `select { .. }` (sugar marker, pre-desugar). Laid out like `switch`, but its arms carry no separator and
+// the operation is REBUILT from the pieces the parser kept: `ch.recv()` survives as just `ch`.
+fn b_select(b: &mut Builder, id: NodeId) d::DocId {
+    let n = nd(b, id);
+    let arms = n.as_data.block.statements;
+    let mut v = Vector::<d::DocId>::new();
+    v.push(b.p.txt("select {"));
+    let mut body = Vector::<d::DocId>::new();
+    let mut prev_end = 0u32;
+    for i in 0..arms.len {
+        let arm = list_at(b, arms, i);
+        let asp = nd(b, arm).span;
+        if i == 0 {
+            body.push(b.p.hardline());
+            let floor = item_gap_floor(b, n.span.start, asp.start);
+            emit_lead_list(b, floor, asp.start, &mut body);
+        } else {
+            emit_gap_vertical(b, prev_end, asp.start, &mut body, false);
+        }
+        body.push(b_select_arm(b, arm));
+        prev_end = asp.end;
+    }
+    if arms.len > 0 {
+        emit_tail_list(b, prev_end, n.span.end - 1, &mut body);
+        let ic = b.p.concat(&body);
+        v.push(b.p.indent(ic));
+        v.push(b.p.hardline());
+    }
+    v.push(b.p.txt("}"));
+    let r = b.p.concat(&v);
+    return r;
+}
+
+fn b_select_arm(b: &mut Builder, id: NodeId) d::DocId {
+    let n = nd(b, id);
+    let a = n.as_data.select_arm;
+    let mut v = Vector::<d::DocId>::new();
+    if a.binding != NODE_NONE {
+        v.push(b_expr(b, nd(b, a.binding).as_data.let_stmt.name));
+        v.push(b.p.txt(" = "));
+    }
+    switch a.kind {
+        SELECT_RECV => {
+            v.push(b_expr(b, a.op));
+            v.push(b.p.txt(".recv()"));
+        },
+        SELECT_SEND => {
+            v.push(b_expr(b, a.op));
+            v.push(b.p.txt(".send("));
+            v.push(b_expr(b, a.value));
+            v.push(b.p.txt(")"));
+        },
+        SELECT_TIMEOUT => {
+            v.push(b.p.txt("timeout("));
+            v.push(b_expr(b, a.op));
+            v.push(b.p.txt(")"));
+        },
+        SELECT_DEFAULT => {
+            v.push(b.p.txt("default"));
+        },
+    };
+    v.push(b.p.txt(" => "));
+    v.push(b_block(b, a.body));
     let r = b.p.concat(&v);
     return r;
 }

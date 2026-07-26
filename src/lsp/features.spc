@@ -758,7 +758,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
 /// fallback when no build (not even a probe build) parses the buffer.
 pub fn complete_keywords() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
-    let kws = "as do fn if in dyn for let mut new pub case else enum loop move null self Self true type break const defer false union where while extend extern import return static struct switch sizeof unsafe alignof continue interface static_assert";
+    let kws = "as do fn if in dyn for let mut new pub case else enum loop move null self Self true type break const defer false union where while extend extern import launch return select static struct switch sizeof unsafe alignof continue interface static_assert";
     let mut it = kws.split(" ");
     loop {
         let w = it.next();

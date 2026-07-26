@@ -3080,6 +3080,9 @@ extend Parser {
                     },
                 );
             },
+            Select => {
+                result = self.parse_select();
+            },
             If => {
                 let f = self.parse_if();
                 // if-let desugars to a match EXPRESSION; wrap it so it statement-positions
@@ -3160,6 +3163,189 @@ extend Parser {
             },
         };
         return result;
+    }
+
+    // `select { <arm>* }` -- wait on several channel operations at once. Each arm is
+    //     [<name> '='] <operation> '=>' <block>
+    // with <operation> one of `ch.recv()`, `ch.send(v)`, `timeout(d)` or `default`. Single-token LL(1): the
+    // arm's expression is parsed by the ordinary expression grammar (which already folds `name = ..` into an
+    // assignment), and the binding falls out of that node rather than out of lookahead.
+    fn parse_select(self: &mut Self) NodeId {
+        let kw = self.raw_peek().span();
+        self.advance();
+        self.expect(TokenType::LeftBrace, "'{'");
+        let mark = self.ast.mark();
+        let mut timeouts = 0;
+        let mut defaults = 0;
+        let mut channels = 0;
+        while !self.check(TokenType::RightBrace) && !self.at_end() {
+            let before = self.current;
+            let arm = self.parse_select_arm();
+            if arm != NODE_NONE {
+                let k = self.ast.at_const(arm).as_data.select_arm.kind;
+                if k == SelectArmKind::SELECT_TIMEOUT {
+                    timeouts = timeouts + 1;
+                } else if k == SelectArmKind::SELECT_DEFAULT {
+                    defaults = defaults + 1;
+                } else {
+                    channels = channels + 1;
+                }
+                self.ast.push(arm);
+            }
+            if self.current == before {
+                self.advance(); // progress guarantee: a failed arm that consumed nothing must not loop
+            }
+        }
+        let arms = self.ast.commit(mark);
+        self.expect(TokenType::RightBrace, "'}'");
+        if channels == 0 {
+            self.errors.emit(
+                kw.start,
+                kw.end - kw.start,
+                String::from_str("'select' needs at least one 'ch.recv()' or 'ch.send(v)' arm"),
+            );
+        }
+        if timeouts > 1 || defaults > 1 {
+            self.errors.emit(
+                kw.start,
+                kw.end - kw.start,
+                String::from_str("'select' allows at most one 'timeout' and one 'default' arm"),
+            );
+        }
+        if timeouts != 0 && defaults != 0 {
+            // `default` means "never wait", which makes any deadline unreachable.
+            self.errors.emit(
+                kw.start,
+                kw.end - kw.start,
+                String::from_str("'select' cannot have both a 'timeout' and a 'default' arm"),
+            );
+        }
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_SELECT,
+                span: Span::new(kw.start, self.previous_end()),
+                as_data: NodeAs { block: BlockData { statements: arms } },
+            },
+        );
+    }
+
+    // One `select` arm. The operation call is taken APART here -- `ch.recv()` keeps only `ch` -- so the
+    // resolver never meets the `recv`/`send`/`timeout` names, which are syntax, not values.
+    fn parse_select_arm(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        let mut expr = self.parse_expression();
+        let mut binding = NODE_NONE;
+        let mut bad = false;
+        if expr != NODE_NONE && self.ast.at_const(expr).kind == NodeKind::NODE_ASSIGNMENT && self.ast.at_const(expr).as_data.binary.op == TokenType::Equal {
+            let name = self.ast.at_const(expr).as_data.binary.left;
+            if self.ast.at_const(name).kind != NodeKind::NODE_IDENTIFIER {
+                self.error_here("a 'select' arm binds a plain name");
+                bad = true;
+            } else {
+                // A value-less `let`: the resolver declares it (so the body can use the name) and the
+                // desugar fills in the operation as its initializer.
+                binding = self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_LET,
+                        span: self.node_span(name),
+                        as_data: NodeAs {
+                            let_stmt: LetData { name: name, ty: NODE_NONE, value: NODE_NONE, is_mutable: false },
+                        },
+                    },
+                );
+            }
+            expr = self.ast.at_const(expr).as_data.binary.right;
+        }
+        let mut kind = SelectArmKind::SELECT_DEFAULT;
+        let mut op = NODE_NONE;
+        let mut value = NODE_NONE;
+        let ek = if expr == NODE_NONE {
+            NodeKind::NODE_NONE_KIND;
+        } else {
+            self.ast.at_const(expr).kind;
+        };
+        if ek == NodeKind::NODE_IDENTIFIER && self.span_text_is(self.ast.at_const(expr).as_data.name.text, "default") {
+            kind = SelectArmKind::SELECT_DEFAULT;
+        } else if ek == NodeKind::NODE_CALL {
+            let cd = self.ast.at_const(expr).as_data.call;
+            let ck = self.ast.at_const(cd.callee).kind;
+            let cn = if ck == NodeKind::NODE_IDENTIFIER {
+                self.ast.at_const(cd.callee).as_data.name.text;
+            } else {
+                Span::empty();
+            };
+            if ck == NodeKind::NODE_IDENTIFIER && self.span_text_is(cn, "timeout") {
+                kind = SelectArmKind::SELECT_TIMEOUT;
+                if cd.args.len != 1 {
+                    self.error_here("'timeout' takes one duration");
+                    bad = true;
+                } else {
+                    op = unsafe self.ast.list(cd.args)[0];
+                }
+            } else if ck == NodeKind::NODE_MEMBER {
+                let md = self.ast.at_const(cd.callee).as_data.member;
+                let mname = self.ast.at_const(md.member).as_data.name.text;
+                if self.span_text_is(mname, "recv") && cd.args.len == 0 {
+                    kind = SelectArmKind::SELECT_RECV;
+                    op = md.object;
+                } else if self.span_text_is(mname, "send") && cd.args.len == 1 {
+                    kind = SelectArmKind::SELECT_SEND;
+                    op = md.object;
+                    value = unsafe self.ast.list(cd.args)[0];
+                } else {
+                    self.error_here("a 'select' arm operation is 'ch.recv()', 'ch.send(v)', 'timeout(d)' or 'default'");
+                    bad = true;
+                }
+            } else {
+                self.error_here("a 'select' arm operation is 'ch.recv()', 'ch.send(v)', 'timeout(d)' or 'default'");
+                bad = true;
+            }
+        } else {
+            self.error_here("a 'select' arm operation is 'ch.recv()', 'ch.send(v)', 'timeout(d)' or 'default'");
+            bad = true;
+        }
+        if !bad && binding != NODE_NONE && (kind == SelectArmKind::SELECT_TIMEOUT || kind == SelectArmKind::SELECT_DEFAULT) {
+            self.error_here("a 'timeout' or 'default' arm binds nothing");
+            bad = true;
+        }
+        // The channel is named twice by the lowering (arm it, then take from it), so it has to be a place
+        // whose evaluation means the same both times. Anything else: bind it to a local first.
+        if !bad && (kind == SelectArmKind::SELECT_RECV || kind == SelectArmKind::SELECT_SEND) && !self.is_select_place(
+            op,
+        ) {
+            self.error_here("a 'select' arm's channel must be a name or a field path");
+            bad = true;
+        }
+        // Consume the rest of the arm even after an error, so the next arm still parses.
+        self.expect(TokenType::FatArrow, "'=>'");
+        let body = self.parse_block();
+        if bad {
+            return NODE_NONE;
+        }
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_SELECT_ARM,
+                span: Span::new(start, self.previous_end()),
+                as_data: NodeAs {
+                    select_arm: SelectArmData { binding: binding, op: op, value: value, body: body, kind: kind },
+                },
+            },
+        );
+    }
+
+    const fn is_select_place(self: &Self, id: NodeId) bool {
+        let k = self.ast.at_const(id).kind;
+        if k == NodeKind::NODE_IDENTIFIER {
+            return true;
+        }
+        if k == NodeKind::NODE_MEMBER {
+            return self.is_select_place(self.ast.at_const(id).as_data.member.object);
+        }
+        return false;
+    }
+
+    const fn span_text_is(self: &Self, sp: Span, s: str) bool {
+        return self.text_is(Token::new(TokenType::Identifier, sp.start, sp.end - sp.start), s);
     }
 
     pub fn parse_block(self: &mut Self) NodeId {
