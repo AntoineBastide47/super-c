@@ -150,21 +150,14 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     };
     let co = runtime::current();
     if co == null {
-        // Not a coroutine: no context to park, so wait on this one descriptor with a poller of its own.
-        let solo = unsafe sc_io::sc_io_new();
-        if solo == null {
-            return false;
-        }
-        let mut evs = EvBuf {};
+        // Not a coroutine: nothing to park, so just wait on the one descriptor. A poll(2) rather than a
+        // poller of its own -- that meant building and tearing down a kqueue per call.
         let ms = if deadline == 0 {
             -1;
         } else {
             (time::remaining_ns(deadline) / 1000000) as i32 + 1;
         };
-        let _ = unsafe sc_io::sc_io_arm(solo, fd, w, &mut evs.e[0]);
-        let n = unsafe sc_io::sc_io_wait(solo, &mut evs.e[0], 1, ms);
-        unsafe sc_io::sc_io_free(solo);
-        return n > 0;
+        return unsafe sc_io::sc_io_wait_fd(fd, w, ms) > 0;
     }
     let mut g = Global {};
     let it = g.alloc(sizeof(Interest), alignof(Interest)) as *mut Interest;

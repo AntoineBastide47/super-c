@@ -13,6 +13,8 @@ extern "C" "sc_io.h" {
     pub fn sc_io_disarm(p: *mut void, fd: i32, write: i32) i32;
     pub fn sc_io_wait(p: *mut void, out: *mut *mut void, max: i32, timeout_ms: i32) i32;
     pub fn sc_io_wake(p: *mut void) void;
+    // One descriptor, no poller object: what a plain thread waits on. >0 ready, 0 timed out, -1 error.
+    pub fn sc_io_wait_fd(fd: i32, write: i32, timeout_ms: i32) i32;
 
     pub fn sc_io_set_nonblocking(fd: i32) i32;
     pub fn sc_io_close(fd: i32) i32;

@@ -10162,6 +10162,19 @@ extend TypeChecker {
                     self.decl_type(unsafe (*a).list(params)[i as usize]);
                 }
                 let fnd = unsafe (*self.cur_ast()).at_const(id).as_data.function;
+                // `@blocking` is implemented by packing the call's arguments into a frame the pool thread
+                // runs from, and a variadic call has no fixed shape to pack -- so say so here rather than
+                // let codegen quietly emit an ordinary (worker-blocking) call.
+                if fnd.is_variadic && self.tc_attr(self.cur_module(), id, AttrKind::ATTR_BLOCKING) != null {
+                    let sp = self.name_span(fnd.name);
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "'@blocking' cannot apply to a variadic function: its arguments cannot be forwarded to the blocking pool",
+                        ),
+                    );
+                }
                 if fnd.is_variadic && !fnd.is_extern && params.len == 0 {
                     let sp = self.name_span(fnd.name);
                     self.errors.emit(

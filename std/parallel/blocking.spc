@@ -20,6 +20,7 @@ import atomic;
 import std::parallel::sync as sync;
 
 const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real programs, bounded for safety
+const IDLE_NS: i64 = 10000000000; // a thread with nothing to do for ten seconds goes away again
 
 // One submitted piece of work: a type-erased trampoline plus its heap payload.
 struct BJob {
@@ -66,15 +67,20 @@ fn pool_main(arg: *mut void) *mut void {
     let p = arg as *mut Pool;
     loop {
         unsafe pthread::pthread_mutex_lock((*p).lock);
-        while unsafe (*p).head == null && unsafe (*p).shutting == 0 {
+        let mut expired = false;
+        while unsafe (*p).head == null && unsafe (*p).shutting == 0 && !expired {
             unsafe (*p).idle = unsafe (*p).idle + 1;
-            let _ = unsafe pthread::pthread_cond_wait((*p).cv, (*p).lock);
+            let rc = unsafe pthread::sc_cond_timedwait_ns((*p).cv, (*p).lock, IDLE_NS);
             unsafe (*p).idle = unsafe (*p).idle - 1;
+            // Timed out with still nothing to do: a burst of blocking calls should not cost threads for
+            // the rest of the process. `submit` starts another the moment one is needed again.
+            expired = rc != 0 && unsafe (*p).head == null;
         }
         let j = unsafe (*p).head;
         if j == null {
+            unsafe (*p).live = unsafe (*p).live - 1;
             unsafe pthread::pthread_mutex_unlock((*p).lock);
-            break; // shutting down and drained
+            break; // shutting down and drained, or idle for too long
         }
         unsafe (*p).head = unsafe (*j).next;
         if unsafe (*p).head == null {

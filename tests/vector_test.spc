@@ -3,6 +3,20 @@
 // that: push/pop LIFO + len, at/get/set bounds, first/last, insert/remove/swap/swap_remove/reverse,
 // clear/truncate, capacity growth, and a non-i32 element type.
 
+// `resize_default` is bounded on `Default` rather than taking a value to copy: a `Free` element cannot be
+// duplicated into the new slots, so the element type has to be able to produce a fresh one.
+@test
+fn resize_default_grows_and_truncates() {
+    let mut v = Vector::<u8>::new();
+    v.resize_default(4);
+    assert_eq(v.len(), 4);
+    assert_eq(*v.at(3), 0u8);
+    v.push(9u8);
+    v.resize_default(2); // shrinking frees the tail
+    assert_eq(v.len(), 2);
+    v.free();
+}
+
 @test
 fn push_pop_len() {
     let mut v = Vector::<i32>::new();

@@ -44,12 +44,13 @@ const CHUNKS_PER_WORKER: usize = 4;
 pub enum Schedule {
     Static, // equal contiguous chunks, decided up front: lowest overhead, for uniform per-index cost
     Dynamic, // workers claim `grain_size` indices at a time: absorbs wildly uneven per-index cost
+    Guided, // claims start large and shrink towards `grain_size`: Dynamic's balance, fewer claims
 }
 
 /// Tuning for the `*_with` forms.
 pub struct Options {
     pub schedule: Schedule,
-    pub grain_size: usize, // Dynamic: indices claimed per step; 0 picks a default from the work size
+    pub grain_size: usize, // Dynamic: indices per claim. Guided: the floor. 0 picks a default from the size
 }
 
 extend Options {
@@ -80,7 +81,8 @@ pub struct Batch {
     pub cursor: atomics::Atomic<usize>, // Dynamic: next unclaimed index
     pub end: usize,
     pub grain: usize,
-    pub dynamic: bool,
+    pub mode: i32, // 0 Static / 1 Dynamic / 2 Guided
+    pub nw: usize, // workers, which is what Guided divides the remaining work by
 }
 
 /// A single chunk: its pre-assigned range (Static) and its ordinal, which `reduce` uses to pick a slot.
@@ -93,10 +95,10 @@ pub struct ChunkEnv {
 
 /// The next index range for this chunk, `[lo, hi)`; `false` once it has no more work. Static hands over the
 /// chunk's own range once; Dynamic claims `grain` indices at a time from the shared cursor, so a chunk that
-/// draws cheap indices comes back for more.
+/// draws cheap indices comes back for more; Guided claims a share of what remains, shrinking to `grain`.
 pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
     let b = unsafe (*ce).batch;
-    if !unsafe (*b).dynamic {
+    if unsafe (*b).mode == 0 {
         if unsafe (*ce).lo >= unsafe (*ce).hi {
             return false;
         }
@@ -107,18 +109,42 @@ pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
     }
     let cur = &unsafe (*b).cursor;
     let grain = unsafe (*b).grain;
-    let start = cur.fetch_add(grain, atomics::MemoryOrder::Relaxed);
     let end = unsafe (*b).end;
-    if start >= end {
-        return false;
+    if unsafe (*b).mode == 1 {
+        let start = cur.fetch_add(grain, atomics::MemoryOrder::Relaxed);
+        if start >= end {
+            return false;
+        }
+        let mut stop = start + grain;
+        if stop > end {
+            stop = end;
+        }
+        *lo = start;
+        *hi = stop;
+        return true;
     }
-    let mut stop = start + grain;
-    if stop > end {
-        stop = end;
+    // Guided: take a share of what is LEFT rather than a fixed slice, so early claims are big (few trips to
+    // the cursor) and late ones are small (nobody is left holding a long tail). `grain_size` is the floor.
+    // A CAS loop, not fetch_add: the size depends on the cursor value we are claiming from.
+    loop {
+        let start = cur.load(atomics::MemoryOrder::Relaxed);
+        if start >= end {
+            return false;
+        }
+        let left = end - start;
+        let mut take = left / (unsafe (*b).nw * 2);
+        if take < grain {
+            take = grain;
+        }
+        if take > left {
+            take = left;
+        }
+        if cur.compare_exchange(start, start + take, atomics::MemoryOrder::Relaxed, atomics::MemoryOrder::Relaxed) {
+            *lo = start;
+            *hi = start + take;
+            return true;
+        }
     }
-    *lo = start;
-    *hi = stop;
-    return true;
 }
 
 /// Report this chunk finished; the last one out wakes the caller.
@@ -171,12 +197,15 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
     if nchunks == 0 {
         return;
     }
-    let dynamic = switch opts.schedule {
+    let mode = switch opts.schedule {
         Static => {
-            false;
+            0;
         },
         Dynamic => {
-            true;
+            1;
+        },
+        Guided => {
+            2;
         },
     };
     if nchunks == 1 {
@@ -186,7 +215,8 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
             cursor: atomics::Atomic::<usize>::new(0),
             end: total,
             grain: total,
-            dynamic: false,
+            mode: 0,
+            nw: 1,
         };
         let mut ce = ChunkEnv { batch: &mut b, lo: 0, hi: total, idx: 0 };
         entry(&mut ce);
@@ -206,7 +236,8 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
         cursor: atomics::Atomic::<usize>::new(0),
         end: total,
         grain: grain,
-        dynamic: dynamic,
+        mode: mode,
+        nw: runtime::worker_count(),
     };
     let bp = (&mut b) as *mut Batch;
     // One allocation for every chunk slot; each job holds a pointer into it, and the caller outlives them.

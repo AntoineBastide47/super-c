@@ -263,6 +263,23 @@ extend<T, A: Allocator + Default> Vector<T, A> {
 // exit. Sound because the peek accessors (`at`/`get`/`first`/`last`/`find`/`iter`) borrow (`&T`) rather than
 // hand out sharing copies, and the removers (`pop`/`remove`/`swap_remove`) move the element out -- so the
 // buffer is the only owner of each live element. Each element `.free()` is a no-op when `T` isn't a Free type.
+// Resizing needs a value for the slots it adds, and a `Free` element cannot be copied into them (filling
+// ten slots from one `String` would hand ten owners the same buffer) -- so it is available exactly for the
+// element types that can produce a fresh value on demand.
+extend<T: Default, A: Allocator> Vector<T, A> {
+    /// Resize to exactly `n` elements: the tail beyond `n` is freed, and any new slot is `T::default()`.
+    pub fn resize_default(self: &mut Vector<T, A>, n: usize) {
+        if n < self.len {
+            self.truncate(n);
+            return;
+        }
+        self.reserve(n - self.len);
+        while self.len < n {
+            self.push(T::default());
+        }
+    }
+}
+
 extend<T, A: Allocator> Vector<T, A> as Free {
     pub fn free(self: &mut Vector<T, A>) {
         self.clear();

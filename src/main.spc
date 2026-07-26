@@ -704,11 +704,25 @@ fn main(argv: Vector<str>) i32 {
             }
         },
         MODE_TEST => {
+            topts.enabled = true; // `super-c test` IS the test mode, which is what makes its flags legal
             while i < argc {
                 let arg = argv[i];
-                let common = common_flag(&mut co, arg);
-                if !common && !build_flag(&mut bo, &mut co, arg) {
-                    co.bad = true;
+                // The test flags belong here as much as in script mode (`file.spc --test`): `super-c test`
+                // is how the suite is normally run, so it is where filtering one test out of it matters.
+                if arg.starts_with("--test-jobs=") {
+                    topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
+                    if topts.jobs < 1 {
+                        co.bad = true;
+                    }
+                } else if arg == "--test-no-fork" {
+                    topts.no_fork = true;
+                } else if arg.starts_with("--test-filter=") {
+                    topts.filter = (&arg[14]) as *const char;
+                } else {
+                    let common = common_flag(&mut co, arg);
+                    if !common && !build_flag(&mut bo, &mut co, arg) {
+                        co.bad = true;
+                    }
                 }
                 i = i + 1;
             }

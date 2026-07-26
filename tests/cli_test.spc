@@ -1725,6 +1725,65 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// Guided scheduling: each claim takes a share of what REMAINS rather than a fixed grain, so early claims
+// are large (few trips to the shared cursor) and late ones small (no worker left holding a long tail).
+// Over a deliberately uneven per-index cost, every index must still be visited exactly once.
+@test
+fn data_parallel_guided_schedule() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::data as parallel;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let n: usize = 4000;
+    let hits = atom::Atomic::<i64>::new(0);
+    let hp = &hits;
+    parallel::range_with(0..n, parallel::Options { schedule: parallel::Schedule::Guided, grain_size: 8 }, fn(i: usize) {
+        let mut acc: i64 = 0;
+        for k in 0..(i % 23) {
+            acc = acc + k as i64;
+        }
+        let _ = hp.fetch_add(1 + acc * 0, atom::MemoryOrder::Relaxed);
+    });
+    let got = hits.load(atom::MemoryOrder::SeqCst);
+    rt::shutdown();
+    return (got - n as i64) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// `@blocking` packs a call's arguments into a frame for the pool thread to run from, which a variadic call
+// has no fixed shape for. Saying so beats codegen quietly emitting an ordinary worker-blocking call.
+@test
+fn blocking_attribute_rejects_variadic() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"extern "C" "fcntl.h" {
+    @blocking
+    pub fn open(path: *const char, flags: i32, ...) i32;
+}
+
+fn main() i32 {
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.exit != 0, "@blocking on a variadic is rejected");
+    assert(r.out_has("variadic"), "the message says why");
+}
+
 // Work stealing (std/parallel/runtime): each worker owns a Chase-Lev deque and pushes to it without a lock,
 // so a task submitted from a worker never touches the shared queue. Both halves here are deliberately
 // pathological for that layout: ONE task spawns 400 others onto its own deque, which only completes if the

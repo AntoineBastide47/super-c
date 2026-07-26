@@ -16,6 +16,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,6 +124,16 @@ void sc_io_wake(void *ptr) {
   char b = 1;
   ssize_t r = write(p->wake[1], &b, 1);
   (void)r;
+}
+
+int sc_io_wait_fd(int fd, int write, int timeout_ms) {
+  struct pollfd p;
+  p.fd = fd;
+  p.events = (short)(write ? POLLOUT : POLLIN);
+  p.revents = 0;
+  int r = poll(&p, 1, timeout_ms);
+  if (r < 0 && errno == EINTR) return 0;
+  return r;
 }
 
 int sc_io_wait(void *ptr, void **out, int max, int timeout_ms) {

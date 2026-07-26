@@ -32,6 +32,10 @@ int sc_io_wait(void *p, void **out, int max, int timeout_ms);
 /* Make a blocked sc_io_wait return promptly (shutdown). */
 void sc_io_wake(void *p);
 
+/* Wait on ONE descriptor without a poller object -- what a plain thread (no coroutine to park) needs.
+   >0 ready, 0 timed out, -1 error; `timeout_ms` < 0 waits forever. */
+int sc_io_wait_fd(int fd, int write, int timeout_ms);
+
 /* ---- descriptors and sockets ------------------------------------------------------------------------ */
 
 int sc_io_set_nonblocking(int fd);
