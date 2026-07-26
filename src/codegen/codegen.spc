@@ -589,10 +589,13 @@ pub struct CgSubst {
     pub param: DefId,
     pub concrete: TypeId,
 }
+/// One monomorphized function instance: the template plus its concrete type arguments, held inline. The
+/// arity ceiling is `resolver::MAX_TYPE_PARAMS`, enforced at the declaration -- keep them in step, or a
+/// generic with more parameters writes past `args`.
 pub struct CgInst {
     pub func: DefId,
     pub n: u8,
-    pub args: [TypeId; 4],
+    pub args: [TypeId; 8],
 }
 /// A conditional-move candidate recorded during the (single) move walk, replayed after the walk
 /// completes so the "already unconditionally moved" suppression sees the FULL moved[] set, exactly
@@ -7754,6 +7757,57 @@ extend Codegen {
         }
         return -1;
     }
+    // Which parameters a body never mentions. C warns on an unused parameter and `_`-prefixed ones are
+    // deliberate, so each gets a `(void)p;`. `emit_function` runs this inline over its own params; closures
+    // call it because their bodies are emitted in a separate phase.
+    fn cg_collect_unused_params(self: &mut Self, params: NodeList, body: NodeId) {
+        self.nunused_params = 0;
+        if params.len == 0 || body == NODE_NONE {
+            return;
+        }
+        let pids = unsafe (*self.cur_ast()).list(params);
+        let mut upids = Ids64 {};
+        let mut uarr = Bools64 {};
+        let mut np: i32 = 0;
+        while np < 64 && np as u32 < params.len {
+            upids[np as usize] = unsafe pids[np as usize];
+            np += 1;
+        }
+        let mut uleft = np;
+        self.cg_subtree_uses_multi(body, &upids[0], np, &mut uarr[0], &mut uleft);
+        for i in 0..params.len {
+            let pid = unsafe pids[i as usize];
+            let pused = if i < 64 {
+                uarr[i as usize];
+            } else {
+                self.cg_subtree_uses(body, pid);
+            };
+            if !pused && self.nunused_params < 32 {
+                unsafe self.unused_params[self.nunused_params as usize] = pid;
+                self.nunused_params = self.nunused_params + 1;
+            }
+        }
+    }
+    // Emit the `(void)p;` line for each parameter `cg_collect_unused_params` (or emit_function) recorded, and
+    // clear the list.
+    fn emit_unused_params(self: &mut Self) {
+        let mut i: u32 = 0;
+        while i < self.nunused_params {
+            let mut pn = Buf128 {};
+            self.render_ident(
+                self.name_span(unsafe (*self.cur_ast()).at_const(self.unused_params[i as usize]).as_data.parameter.name),
+                &mut pn[0],
+                128,
+            );
+            if pn[0] == '_' as char && pn[1] == 0 as char {
+                unsafe stdio::snprintf(&mut pn[0], 128, "__sc_u%u".ptr() as *const char, self.unused_params[i as usize]);
+            }
+            self.emit_indent();
+            self.buf.format_into("(void){};\n", diag::cstr(&pn[0]));
+            i = i + 1;
+        }
+        self.nunused_params = 0;
+    }
     // The C identifier a value binding is emitted as. Must cover every declaration kind a closure can
     // capture (see the resolver's resolve_ref_hit): besides `let` and parameters, a `for` loop names its
     // induction variable on the loop node, a pattern binding (`if let Some(x)`, a switch arm) on the
@@ -9467,22 +9521,7 @@ extend Codegen {
             }
             self.place_flags_pending = false;
         }
-        i = 0;
-        while i < self.nunused_params {
-            let mut pn = Buf128 {};
-            self.render_ident(
-                self.name_span(unsafe (*self.cur_ast()).at_const(self.unused_params[i as usize]).as_data.parameter.name),
-                &mut pn[0],
-                128,
-            );
-            if pn[0] == '_' as char && pn[1] == 0 as char {
-                unsafe stdio::snprintf(&mut pn[0], 128, "__sc_u%u".ptr() as *const char, self.unused_params[i as usize]);
-            }
-            self.emit_indent();
-            self.buf.format_into("(void){};\n", diag::cstr(&pn[0]));
-            i = i + 1;
-        }
-        self.nunused_params = 0;
+        self.emit_unused_params();
         let stmts = n.as_data.block.statements;
         i = 0;
         while i < stmts.len {
@@ -12960,6 +12999,8 @@ extend Codegen {
             }
             self.emit_str(" {\n");
             self.depth = self.depth + 1;
+            self.cg_collect_unused_params(cl.params, body);
+            self.emit_unused_params();
             self.emit_indent();
             if !is_void {
                 self.emit_str("return ");
@@ -12988,6 +13029,7 @@ extend Codegen {
             self.place_flags_pending = false;
             self.cg_scan_moves(body, false);
             self.cg_replay_cond_moves();
+            self.cg_collect_unused_params(cl.params, body);
             self.emit_block(body);
             self.emit_str("\n\n");
         }

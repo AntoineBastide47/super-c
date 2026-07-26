@@ -11,6 +11,10 @@ import module::loader as loader;
 import desugar::desugar as desugar;
 import utils::errors as diag;
 
+/// Most type parameters one generic item may declare. Monomorphization stores an instance's type arguments
+/// inline (`codegen::CgInst.args`, `codegen::TyArgs8`), so this must not exceed those arrays.
+pub const MAX_TYPE_PARAMS: u32 = 8;
+
 /// Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
 pub enum Namespace {
     NS_VALUE,
@@ -651,6 +655,18 @@ extend Resolver {
     }
 
     fn declare_generics(self: &mut Self, generics: NodeList) {
+        // Monomorphization carries an instance's type arguments in fixed-size arrays (`CgInst.args` /
+        // `TyArgs8` in codegen), so the arity has a hard ceiling. Rejecting it here -- the one place every
+        // generic item declares its parameters -- is what keeps those arrays from being written past.
+        if generics.len > MAX_TYPE_PARAMS {
+            let over = self.child(generics, MAX_TYPE_PARAMS);
+            let sp = self.ast.at_const(over).span;
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("a generic item may declare at most {} type parameters", MAX_TYPE_PARAMS),
+            );
+        }
         let mut i: u32 = 0;
         while i < generics.len {
             let gid = self.child(generics, i);

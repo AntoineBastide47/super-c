@@ -1646,6 +1646,210 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// The data-parallel API (std/parallel/data): the whole surface over 5000 elements -- `each` reading every
+// element, `each_mut` mutating disjoint partitions in place, `chunks_mut` handing out whole `[]mut T`
+// windows, `reduce` folding per-chunk accumulators and combining them, `range_with` under Dynamic
+// scheduling, and `sections` running unrelated one-shot tasks. Chunks run as stackless jobs, so no
+// per-chunk stack is allocated. Exact totals prove every index is visited exactly once; empty inputs are
+// no-ops. Leak-checked.
+@test
+fn data_parallel_api() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::data as parallel;
+import std::parallel::atomics as atom;
+
+fn main() i32 {
+    let n: usize = 5000;
+    let mut v = Vector::<i64>::new();
+    for i in 0..n {
+        v.push(i as i64);
+    }
+
+    let sum = atom::Atomic::<i64>::new(0);
+    let sp = &sum; // captures are by copy, so shared state is reached through a borrow
+    parallel::each(v[0..n], fn(x: &i64) {
+        let _ = sp.fetch_add(*x, atom::MemoryOrder::Relaxed);
+    });
+    if sum.load(atom::MemoryOrder::SeqCst) != 12497500 {
+        return 1;
+    }
+
+    parallel::each_mut(v.index_range_mut(0..n), fn(x: &mut i64) {
+        *x = *x + 1;
+    });
+    if *v.at(0) != 1 || *v.at(n - 1) != n as i64 {
+        return 2;
+    }
+
+    let seen = atom::Atomic::<i64>::new(0);
+    let cp = &seen;
+    parallel::chunks_mut(v.index_range_mut(0..n), 64, fn(c: []mut i64) {
+        let _ = cp.fetch_add(c.len() as i64, atom::MemoryOrder::Relaxed);
+        for i in 0..c.len() {
+            c.set(i, *c.get(i) + 1);
+        }
+    });
+    if seen.load(atom::MemoryOrder::SeqCst) != n as i64 || *v.at(0) != 2 {
+        return 3;
+    }
+
+    let total = parallel::reduce(v[0..n], fn() i64 {
+        return 0;
+    }, fn(a: i64, x: &i64) i64 {
+        return a + *x;
+    }, fn(a: i64, b: i64) i64 {
+        return a + b;
+    });
+    if total != 12497500 + 2 * n as i64 {
+        return 4;
+    }
+
+    let hits = atom::Atomic::<i64>::new(0);
+    let hp = &hits;
+    parallel::range_with(0..n, parallel::Options { schedule: parallel::Schedule::Dynamic, grain_size: 32 }, fn(i: usize) {
+        let mut acc: i64 = 0;
+        for k in 0..(i % 17) {
+            acc = acc + k as i64;
+        }
+        let _ = hp.fetch_add(1 + acc * 0, atom::MemoryOrder::Relaxed);
+    });
+    if hits.load(atom::MemoryOrder::SeqCst) != n as i64 {
+        return 5;
+    }
+
+    let marks = atom::Atomic::<i64>::new(0);
+    let mp = &marks;
+    parallel::sections(fn(s: &mut parallel::Sections) {
+        s.add(fn() {
+            let _ = mp.fetch_add(1, atom::MemoryOrder::Relaxed);
+        });
+        s.add(fn() {
+            let _ = mp.fetch_add(10, atom::MemoryOrder::Relaxed);
+        });
+        s.add(fn() {
+            let _ = mp.fetch_add(100, atom::MemoryOrder::Relaxed);
+        });
+    });
+    if marks.load(atom::MemoryOrder::SeqCst) != 111 {
+        return 6;
+    }
+
+    parallel::range(0..0usize, fn(_i: usize) {});
+    let empty = parallel::reduce(v[0..0], fn() i64 {
+        return 7;
+    }, fn(a: i64, x: &i64) i64 {
+        return a + *x;
+    }, fn(a: i64, b: i64) i64 {
+        return a + b;
+    });
+    if empty != 7 {
+        return 7;
+    }
+
+    v.free();
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// The data-parallel API composes with the rest of the runtime: a parallel call NESTED inside a parallel body
+// runs its chunks inline (a job has no context, so it cannot park and must not submit-and-wait), and a call
+// made from inside a `launch`ed coroutine parks that coroutine while its chunks run on the other workers.
+// Exact counts prove no chunk is dropped either way. Leak-checked.
+@test
+fn data_parallel_nesting() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::data as parallel;
+import std::parallel::sync as sync;
+import std::parallel::atomics as atom;
+import std::parallel::time as time;
+
+fn main() i32 {
+    let n: usize = 200;
+    let hits = atom::Atomic::<i64>::new(0);
+    let hp = &hits;
+    parallel::range(0..n, fn(_i: usize) {
+        parallel::range(0..3usize, fn(_k: usize) {
+            let _ = hp.fetch_add(1, atom::MemoryOrder::Relaxed);
+        });
+    });
+    if hits.load(atom::MemoryOrder::SeqCst) != (n * 3) as i64 {
+        return 1;
+    }
+
+    let inner = atom::Atomic::<i64>::new(0);
+    let ip = &inner;
+    let wg = sync::WaitGroup::new();
+    wg.add(4);
+    for _t in 0..4 {
+        let w = wg.clone();
+        launch fn() {
+            parallel::range(0..50usize, fn(_i: usize) {
+                let _ = ip.fetch_add(1, atom::MemoryOrder::Relaxed);
+            });
+            time::sleep(time::Duration::from_millis(1));
+            w.done();
+        };
+    }
+    wg.wait();
+    wg.free();
+    if inner.load(atom::MemoryOrder::SeqCst) != 200 {
+        return 2;
+    }
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
+// A parallel body is copied to every worker and run from several at once, so it may neither own a capture nor
+// mutate one. Both are `fn move` closures, which do not satisfy the `fn(..) + Send + Sync` bound -- so the
+// classic data race (`|i| values.set(i, ..)`, a `&mut` capture shared across workers) is a compile error
+// rather than a documented hazard.
+@test
+fn data_parallel_rejects_mutating_body() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::data as parallel;
+
+fn main() i32 {
+    let mut v = Vector::<i64>::new();
+    v.push(0);
+    parallel::range(0..1usize, fn(i: usize) {
+        v.set(i, 1);
+    });
+    v.free();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.exit != 0, "a body that mutates a capture is rejected");
+    assert(r.out_has("fn(usize)"), "the rejection cites the plain-fn bound");
+}
+
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
 // shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
 // contents are stored non-`const` and mutated soundly -- exercised here by an `UnsafeCell<i32>` in an

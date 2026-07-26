@@ -746,13 +746,25 @@ The `std::parallel` modules build a real concurrency stack on OS threads:
   a raw pointer is neither, so it cannot cross a thread boundary, and the bound is enforced at every spawn
   and `launch`. Share through `Arc`, mutate through an atomic or a lock.
 * **Synchronization** — `Mutex<T>`, `RwLock<T>`, `Condvar`, `Once`, `WaitGroup`, `Barrier`, `Semaphore`,
-  with RAII lock guards that release on scope exit.
+  with RAII lock guards that release on scope exit. Every wait is *task-aware*: a coroutine that cannot
+  proceed parks and its worker thread runs something else, so far more tasks than workers can contend for
+  the same lock. Timed forms (`acquire_timeout`, `wait_timeout`, `Condvar::wait_until`) and
+  `time::sleep` park on the scheduler's timer list.
+* **Channels** — `Channel<T>::bounded(n)` for backpressure or `unbounded()`, vending cloneable
+  `Sender<T>` / `Receiver<T>` handles, with waiting, timed and non-blocking send/recv and
+  close-on-last-handle-drop.
+* **Data parallelism** — `parallel::range` / `each` / `each_mut` / `chunks_mut` / `reduce` / `sections`
+  split work into chunked, stackless jobs on the same pool and return when all of it is done, under static
+  or dynamic scheduling. The body's `fn(..) + Send + Sync` bound is what makes it safe: a closure that owns
+  or mutates a capture is `fn move`, so the classic parallel data race does not compile.
 * **`launch`** — a statement keyword for detached tasks: `launch || { … };` moves an owning `Send` closure
-  onto a lazily-started worker pool (one thread per CPU). The escape rule (a launched closure may not borrow
-  a caller local) and `Send` fall out of the closure's `fn move() + Send` bound; `runtime::shutdown()` drains
-  and joins the pool. `launch` is a *sugar keyword*: the parser emits a marker that a dedicated desugar pass
-  lowers to a `runtime::submit(…)` call before the type checker, so the rest of the compiler never sees it —
-  the same mechanism future sugar keywords (e.g. `select`) reuse.
+  onto a lazily-started worker pool (one thread per CPU, or `runtime::set_worker_count(n)`). Each task is a
+  **stackful coroutine** on its own guard-paged stack, so blocking inside one parks the coroutine rather
+  than its worker. The escape rule (a launched closure may not borrow a caller local) and `Send` fall out of
+  the closure's `fn move() + Send` bound; `runtime::shutdown()` drains and joins the pool. `launch` is a
+  *sugar keyword*: the parser emits a marker that a dedicated desugar pass lowers to a `runtime::submit(…)`
+  call before the type checker, so the rest of the compiler never sees it — the same mechanism future sugar
+  keywords (e.g. `select`) reuse.
 
 ## Generated output
 
@@ -794,8 +806,7 @@ Roadmap, in priority order:
 
 1. **Parallel transpilation** — the emit pipeline is single-threaded today; the phases are
    embarrassingly parallel per module.
-2. **Stackful coroutines and channels** — a task that blocks currently blocks its worker thread; the next
-   step parks the coroutine instead (the context-switch substrate already exists) and adds `Channel<T>` and
-   the data-parallel `parallel::*` API, staged toward M:N work stealing.
+2. **Work stealing** — coroutines, task-aware waits, channels and the data-parallel API are in; what is
+   left is replacing the single shared run queue with per-worker deques and victim selection.
 3. **Self-contained std** — port the breadth of a Go/Odin/Rust-style standard library to Super-C
    (file/console IO is currently FFI-only; this subsumes it).

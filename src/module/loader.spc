@@ -1769,48 +1769,100 @@ fn type_params_subset(p: &Package, m: ModuleId, t: TypeId, gmod: ModuleId, gids:
     return true;
 }
 
+// One monomorphized function instantiation to seed body-only types for: the template plus the concrete
+// arguments, expressed in the template's OWN module (where its parameters and pool live).
+struct MonoSeed {
+    pub fd: DefId,
+    pub n: u8,
+    pub args: [TypeId; 8],
+}
+
+// The generic function a MonoUse call site targets, or a null DefId.
+fn mono_callee(p: &Package, m: ModuleId, node: NodeId) DefId {
+    let a = pkg_ast_c(p, m);
+    if unsafe (*a).at_const(node).kind != NodeKind::NODE_CALL {
+        return DefId { module: 0, node: NODE_NONE };
+    }
+    let callee_id = unsafe (*a).at_const(node).as_data.call.callee;
+    if unsafe (*a).at_const(callee_id).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+        let e = unsafe (*a).at_const(callee_id).as_data.specialization.expression;
+        return unsafe (*a).resolution_def(e);
+    }
+    return unsafe (*a).resolution_def(callee_id);
+}
+
+// Generic-parameter count of `fd`, or 0 when it is not a generic function.
+fn mono_generics(p: &Package, fd: DefId) NodeList {
+    let n = p.modules.len();
+    if fd.node == NODE_NONE || fd.module as usize >= n || !p.modules[fd.module as usize].has_ast {
+        return NodeList { start: 0, len: 0 };
+    }
+    let a = pkg_ast_c(p, fd.module);
+    if unsafe (*a).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+        return NodeList { start: 0, len: 0 };
+    }
+    return unsafe (*a).at_const(fd.node).as_data.function.generics;
+}
+
+// Record a seed unless an identical one is already queued. Returns whether it was added.
+fn seed_push(seeds: &mut Vector<MonoSeed>, s: MonoSeed) bool {
+    for i in 0..seeds.len() {
+        let e = seeds[i];
+        if e.fd.module != s.fd.module || e.fd.node != s.fd.node || e.n != s.n {
+            continue;
+        }
+        let mut same = true;
+        for k in 0..s.n {
+            if unsafe e.args[k as usize] != unsafe s.args[k as usize] {
+                same = false;
+            }
+        }
+        if same {
+            return false;
+        }
+    }
+    if seeds.len() >= 4096 {
+        return false; // backstop: a generic that instantiates itself at ever-growing types
+    }
+    seeds.push(s);
+    return true;
+}
+
 // Body-only generic types of MONOMORPHIZED functions: a `W<T> { .. }` literal inside a generic
 // fn's body appears in no signature, so nothing else interns its concrete instance -- the emitted
-// C then names a struct that was never defined. For every fn instantiation (MonoUse) substitute
-// its args through the owner module's non-concrete pool types (only those can mention the params;
-// foreign params never match, so unrelated types pass through untouched). Runs single-threaded
-// BEFORE the propagation fixpoint -- codegen's own seeding (expand_nested_insts) is restricted to
-// same-module instantiations because foreign asts are read-only under parallel codegen.
+// C then names a struct that was never defined. For every fn instantiation substitute its args
+// through the owner module's non-concrete pool types (only those can mention the params; foreign
+// params never match, so unrelated types pass through untouched).
+//
+// Instantiations come from two sources, and the second is why this is a worklist. A call site records a
+// MonoUse with CONCRETE arguments, which seeds the chain; but a generic function calling another generic
+// function records a MonoUse whose arguments are its own parameters -- abstract, so nothing concretizes
+// them. Substituting the caller's frame into such an entry yields the callee's real instantiation, which in
+// turn may build literals of its own, so seeds are followed to a fixpoint. Without that, only the first
+// level of a `outer<F>` -> `inner<F>` -> `W<F> { .. }` chain gets its struct defined.
+//
+// Runs single-threaded BEFORE the propagation fixpoint -- codegen's own seeding (expand_nested_insts) is
+// restricted to same-module instantiations because foreign asts are read-only under parallel codegen.
 fn seed_mono_body_instances(p: &mut Package) {
     let n = p.modules.len();
     let mut changed = false;
+    let mut seeds = Vector::<MonoSeed>::new();
+    // Every instantiation a call site pinned down with concrete arguments.
     for u in 0..n {
         if !p.modules[u].has_ast {
             continue;
         }
-        let ua = pkg_ast_c(p, u as ModuleId);
-        let nm = unsafe (*ua).mono.len();
+        let nm = unsafe (*pkg_ast_c(p, u as ModuleId)).mono.len();
         for mi in 0..nm {
-            let mu = unsafe (*ua).mono[mi];
-            if unsafe (*ua).at_const(mu.node).kind != NodeKind::NODE_CALL {
-                continue;
-            }
-            let callee_id = unsafe (*ua).at_const(mu.node).as_data.call.callee;
-            let fd = if unsafe (*ua).at_const(callee_id).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
-                let e = unsafe (*ua).at_const(callee_id).as_data.specialization.expression;
-                unsafe (*ua).resolution_def(e);
-            } else {
-                unsafe (*ua).resolution_def(callee_id);
-            };
-            if fd.node == NODE_NONE || fd.module as usize >= n || !p.modules[fd.module as usize].has_ast {
-                continue;
-            }
-            let fma = pkg_ast_c(p, fd.module);
-            if unsafe (*fma).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
-                continue;
-            }
-            let gens = unsafe (*fma).at_const(fd.node).as_data.function.generics;
+            let mu = unsafe (*pkg_ast_c(p, u as ModuleId)).mono[mi];
+            let fd = mono_callee(p, u as ModuleId, mu.node);
+            let gens = mono_generics(p, fd);
             if gens.len == 0 || gens.len > 8 || mu.n as u32 < gens.len {
                 continue;
             }
             let mut concrete = true;
             for k in 0..gens.len {
-                if !unsafe (*ua).type_concrete(mu.args[k as usize]) {
+                if !unsafe (*pkg_ast_c(p, u as ModuleId)).type_concrete(mu.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -1822,39 +1874,90 @@ fn seed_mono_body_instances(p: &mut Package) {
                 unsafe fargs[k as usize] = if fd.module == u as ModuleId {
                     unsafe mu.args[k as usize];
                 } else {
+                    let ua = pkg_ast_c(p, u as ModuleId);
                     let fmm = pkg_ast_m(p, fd.module);
                     unsafe (*fmm).reintern(&*ua, mu.args[k as usize]);
                 };
             }
-            let gids = unsafe (*pkg_ast_c(p, fd.module)).list(gens);
-            let np = unsafe (*pkg_ast_c(p, fd.module)).type_pool.len();
-            let cp = (&mut changed) as *mut bool;
-            let mut t: usize = 1;
-            while t < np {
-                if !unsafe (*pkg_ast_c(p, fd.module)).type_concrete(t as TypeId) && type_params_subset(
+            let _ = seed_push(&mut seeds, MonoSeed { fd: fd, n: gens.len as u8, args: fargs });
+        }
+    }
+    // Re-home each seed's body-only types, then follow the generic calls its body makes.
+    let mut head: usize = 0;
+    while head < seeds.len() {
+        let s = seeds[head];
+        head = head + 1;
+        let gens = mono_generics(p, s.fd);
+        if gens.len == 0 {
+            continue;
+        }
+        let gids = unsafe (*pkg_ast_c(p, s.fd.module)).list(gens);
+        let np = unsafe (*pkg_ast_c(p, s.fd.module)).type_pool.len();
+        let cp = (&mut changed) as *mut bool;
+        let mut t: usize = 1;
+        while t < np {
+            if !unsafe (*pkg_ast_c(p, s.fd.module)).type_concrete(t as TypeId) && type_params_subset(
+                p,
+                s.fd.module,
+                t as TypeId,
+                s.fd.module,
+                gids,
+                gens.len,
+            ) {
+                reintern_nested_type(p, s.fd.module, s.fd.module, t as TypeId, s.fd.module, gids, &s.args[0], s.n, cp);
+            }
+            t = t + 1;
+        }
+        // A MonoUse in this module whose arguments mention only THIS function's parameters is a generic
+        // call from inside its body: substituting this seed's frame makes those arguments concrete.
+        let sm = s.fd.module;
+        let nm2 = unsafe (*pkg_ast_c(p, sm)).mono.len();
+        for mj in 0..nm2 {
+            let mu2 = unsafe (*pkg_ast_c(p, sm)).mono[mj];
+            let fd2 = mono_callee(p, sm, mu2.node);
+            let g2 = mono_generics(p, fd2);
+            if g2.len == 0 || g2.len > 8 || mu2.n as u32 < g2.len {
+                continue;
+            }
+            let mut inframe = false;
+            for k in 0..g2.len {
+                if !unsafe (*pkg_ast_c(p, sm)).type_concrete(mu2.args[k as usize]) && type_params_subset(
                     p,
-                    fd.module,
-                    t as TypeId,
-                    fd.module,
+                    sm,
+                    unsafe mu2.args[k as usize],
+                    sm,
                     gids,
                     gens.len,
                 ) {
-                    reintern_nested_type(
-                        p,
-                        fd.module,
-                        fd.module,
-                        t as TypeId,
-                        fd.module,
-                        gids,
-                        &fargs[0],
-                        gens.len as u8,
-                        cp,
-                    );
+                    inframe = true; // at least one argument is one of our parameters
                 }
-                t = t + 1;
             }
+            if !inframe {
+                continue; // already concrete (seeded directly), or belongs to another function's frame
+            }
+            let mut cargs: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+            let mut ok = true;
+            for k in 0..g2.len {
+                let st = subst_reintern_type(p, sm, sm, unsafe mu2.args[k as usize], sm, gids, &s.args[0], s.n);
+                if !unsafe (*pkg_ast_c(p, sm)).type_concrete(st) {
+                    ok = false;
+                }
+                unsafe cargs[k as usize] = st;
+            }
+            if !ok {
+                continue;
+            }
+            if fd2.module != sm {
+                for k in 0..g2.len {
+                    let sa = pkg_ast_c(p, sm);
+                    let da = pkg_ast_m(p, fd2.module);
+                    unsafe cargs[k as usize] = unsafe (*da).reintern(&*sa, cargs[k as usize]);
+                }
+            }
+            let _ = seed_push(&mut seeds, MonoSeed { fd: fd2, n: g2.len as u8, args: cargs });
         }
     }
+    seeds.free();
 }
 
 /// Owner-emits generic instances used across module boundaries: re-intern every concrete instance (and

@@ -132,12 +132,13 @@ pub fn raw_mutex_unlock(m: *mut RawMutex) {
         unsafe (*wp).next = null;
         woke = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
     }
-    let unpark = unsafe (*m).os_waiters > 0;
-    let w = park_word(m);
-    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
-    if unpark {
-        unsafe sc_runtime::sc_rt_unpark_all(w);
+    // Unpark BEFORE releasing `inner`, so releasing the lock is the very last thing this unlock does to the
+    // RawMutex: a `Mutex` freed as soon as its final unlock is observed (a lock that lives no longer than the
+    // work it guards, e.g. the data-parallel latch) would otherwise be freed under us.
+    if unsafe (*m).os_waiters > 0 {
+        unsafe sc_runtime::sc_rt_unpark_all(park_word(m));
     }
+    let _ = unsafe pthread::pthread_mutex_unlock((*m).inner);
 }
 
 /// A mutual-exclusion lock guarding a `T`. Only the holder can reach the value, through the RAII

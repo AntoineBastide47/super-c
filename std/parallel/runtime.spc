@@ -26,12 +26,18 @@ extern "C" {
 
 const STACK_SIZE: usize = 262144; // 256 KiB guard-paged stack per coroutine
 
-/// A stackful task. `next` links it into the scheduler's run queue; a primitive's wait queue holds a
-/// separate per-wait node instead (see `park_begin`), and `tnext` is the timer-list link. `pub` only so
-/// task-aware primitives can hold `*mut Coroutine` and wake one -- not a user-facing type.
+/// A schedulable task: either a stackful coroutine, or (`is_job`) a run-to-completion JOB that the worker
+/// simply calls on its own stack -- no stack allocation, no context switch, and no ability to park. Jobs are
+/// what the data-parallel API chunks work into, so a million-iteration loop costs a handful of tasks rather
+/// than a million stacks.
+///
+/// `next` links it into the scheduler's run queue; a primitive's wait queue holds a separate per-wait node
+/// instead (see `park_begin`), and `tnext` is the timer-list link. `pub` only so task-aware primitives can
+/// hold `*mut Coroutine` and wake one -- not a user-facing type.
 pub struct Coroutine {
-    pub ctx: *mut void, // sc_rt saved context
-    pub stack: *mut void, // guard-paged stack (usable low end)
+    pub ctx: *mut void, // sc_rt saved context (null for a job)
+    pub stack: *mut void, // guard-paged stack, usable low end (null for a job)
+    pub is_job: i32, // run-to-completion on the worker's own stack; never parks
     pub entry: fn(*mut void) void, // per-F closure trampoline (job_entry::<F>)
     pub env: *mut void, // heap-boxed closure
     pub done: i32, // set by the coroutine when its body returns
@@ -215,6 +221,17 @@ fn worker_main(arg: *mut void) *mut void {
         if co == null {
             break;
         }
+        if unsafe (*co).is_job != 0 {
+            // A job runs to completion right here, on the worker's own stack: no context, no switch, and
+            // `current()` reports null so anything it waits on blocks this thread instead of parking.
+            let je = unsafe (*co).entry;
+            unsafe sc_runtime::sc_rt_tls_set(co);
+            je(unsafe (*co).env);
+            unsafe sc_runtime::sc_rt_tls_set(null);
+            let mut gj = Global {};
+            gj.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+            continue;
+        }
         unsafe (*co).sched_ctx = sched_ctx;
         if unsafe (*co).inited == 0 {
             // Set the context up on the worker that first runs it -- macOS ucontext is not reliably
@@ -318,6 +335,37 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
     unsafe co[0] = Coroutine {
         ctx: ctx,
         stack: stk,
+        is_job: 0,
+        entry: entry,
+        env: env,
+        done: 0,
+        sched_ctx: null,
+        next: null,
+        commit_fn: commit_nop,
+        commit_arg: null,
+        commit_requeue: 0,
+        inited: 0,
+        park_state: 0,
+        timed: 0,
+        deadline: 0,
+        tm_token: 0,
+        tnext: null,
+    };
+    enqueue_runnable(s, co);
+}
+
+/// Spawn a run-to-completion JOB: `entry(env)` runs on a worker's own stack, with no stack allocation and
+/// no context switch. A job must never block on a task-aware primitive -- it cannot park, so it would hold
+/// its worker -- which is why `current()` reports null inside one. This is how the data-parallel API
+/// (`std::parallel::data`) submits chunks. `pub` for linkage.
+pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
+    let s = ensure_started();
+    let mut g = Global {};
+    let co = g.alloc(sizeof(Coroutine), alignof(Coroutine)) as *mut Coroutine;
+    unsafe co[0] = Coroutine {
+        ctx: null,
+        stack: null,
+        is_job: 1,
         entry: entry,
         env: env,
         done: 0,
@@ -345,10 +393,22 @@ pub fn submit<F: fn move() + Send>(f: F) {
     spawn_coroutine(job_entry::<F>, slot);
 }
 
-/// The coroutine currently running on this worker, or null on a non-worker (e.g. the main) thread. A
-/// task-aware primitive checks this to decide between parking a coroutine and blocking an OS thread.
+/// The coroutine currently running on this worker, or null on a non-worker (e.g. the main) thread -- and
+/// also null inside a job, which has no context to park. A task-aware primitive checks this to decide
+/// between parking a coroutine and blocking an OS thread.
 pub fn current() *mut Coroutine {
-    return (unsafe sc_runtime::sc_rt_tls_get()) as *mut Coroutine;
+    let t = (unsafe sc_runtime::sc_rt_tls_get()) as *mut Coroutine;
+    if t != null && unsafe (*t).is_job != 0 {
+        return null;
+    }
+    return t;
+}
+
+/// Is this thread running a data-parallel job? Such a task cannot park, so a nested parallel call has to run
+/// its chunks inline rather than submit and wait for them.
+pub fn in_job() bool {
+    let t = (unsafe sc_runtime::sc_rt_tls_get()) as *mut Coroutine;
+    return t != null && unsafe (*t).is_job != 0;
 }
 
 /// Open a new park and return its wake token. Call it (from inside the coroutine, under the lock guarding
@@ -432,6 +492,15 @@ pub fn sleep_ns(ns: i64) {
 /// scheduling deterministic, which is what concurrency tests want.
 pub fn set_worker_count(n: usize) {
     G_NWORKERS = n;
+}
+
+/// How many worker threads the pool has (or will have): the configured count, else one per CPU. What the
+/// data-parallel API divides its work by.
+pub fn worker_count() usize {
+    if G_NWORKERS > 0 {
+        return G_NWORKERS;
+    }
+    return platform::ncpu();
 }
 
 /// Cooperatively yield: reschedule the current coroutine behind the others. A no-op off a worker thread.
