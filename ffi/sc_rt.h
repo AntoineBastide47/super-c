@@ -43,6 +43,16 @@ void sc_rt_sleep_ns(int64_t ns);
 void *sc_rt_stack_alloc(size_t size);
 void sc_rt_stack_free(void *usable, size_t size);
 
+/* Turn a coroutine stack overflow into a message instead of a bare SIGSEGV/SIGBUS. `install` arms the
+   calling thread: a signal stack of its own (the faulting stack is by definition exhausted, so the handler
+   cannot run on it) and, once per process, the handler itself. `bounds_set` tells that handler which stack
+   cannot run on it) and, once per process, the handler itself. The handler decides from the faulting stack
+   pointer, so nothing is tracked per switch; `note_size` only supplies the number quoted in the message.
+   Anything not near the stack is left to the default handler -- a wild pointer must still look like the
+   crash it is. Both are no-ops where the mechanism does not exist (Windows, for now). */
+void sc_rt_stack_guard_install(void);
+void sc_rt_stack_note_size(size_t bytes);
+
 /* OS threads and the two locks the scheduler builds on. The Super-C side never names a `pthread_t` or a
    Windows HANDLE: every handle here is an opaque `void *` this layer allocates and releases, so one set of
    call sites serves both platforms. POSIX maps to pthreads; Windows to `_beginthreadex`, SRWLOCK and

@@ -5,6 +5,13 @@
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE 1
 #endif
+/* glibc hides the machine context behind this. Without it every member of `mcontext_t` is spelled with a
+   leading double underscore (`sp` is `__sp`, `gregs` is `__gregs`) and the `REG_*` register indices are not
+   declared at all, so the stack-overflow reporter below fails to compile -- and since this file backs the
+   whole runtime, that took down every program using `launch` on Linux while macOS stayed green. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
@@ -57,21 +64,60 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
 void sc_rt_unpark_one(int32_t *word) { WakeByAddressSingle(word); }
 void sc_rt_unpark_all(int32_t *word) { WakeByAddressAll(word); }
 
-/* A real stack, guarded like the POSIX one: reserve size + a page, commit the usable part read/write, and
-   leave the low page PAGE_NOACCESS so an overflow faults instead of walking into whatever is below. It used
-   to be reserved and never committed, because fibers brought their own stacks -- the x86-64 switch runs
-   coroutines on THIS memory, so it has to be memory. Committed pages are still faulted in lazily, so the
-   cost of a task that never touches its stack is unchanged. */
+#if defined(__x86_64__)
+/* How much of a coroutine stack is committed up front. Windows charges commit against RAM + pagefile the
+   moment you ask for it, whatever you touch -- unlike POSIX, where an untouched page costs nothing -- so
+   committing a whole 256 KiB per task would charge 2.5 GB for ten thousand mostly-shallow tasks. This is
+   comfortably more than a typical task's high-water mark (~16 KiB measured), so the growth path below is
+   reached only by genuinely deep ones. */
+#define SC_STK_INIT (32u * 1024u)
+
+/* The TEB fields the stack machinery lives in. Read through gs because DeallocationStack (0x1478) is past
+   the end of the NT_TIB the headers declare. */
+static uintptr_t sc_teb_read(unsigned off) {
+  uintptr_t v;
+  __asm__ volatile("movq %%gs:(%1), %0" : "=r"(v) : "r"((uintptr_t)off));
+  return v;
+}
+static void sc_teb_write(unsigned off, uintptr_t v) {
+  __asm__ volatile("movq %0, %%gs:(%1)" : : "r"(v), "r"((uintptr_t)off) : "memory");
+}
+#define SC_TEB_STACK_BASE 0x08
+#define SC_TEB_STACK_LIMIT 0x10
+#define SC_TEB_DEALLOC 0x1478
+
+/* Where a stack's committed region starts, given the usable low end and its size. */
+static char *sc_stk_initial_limit(char *base, size_t size, size_t pg) {
+  size_t init = SC_STK_INIT < size ? SC_STK_INIT : size;
+  uintptr_t lim = ((uintptr_t)base + size - init) & ~(uintptr_t)(pg - 1);
+  return (char *)lim;
+}
+#endif
+
+/* A real stack, guarded like the POSIX one: the low page is reserved and never committed, so an overflow
+   faults instead of walking into whatever is below. It used to be committed whole, because fibers brought
+   their own stacks and this memory went untouched -- the x86-64 switch runs coroutines on THIS memory, so
+   only the top is committed now and the rest arrives as the task grows into it (see sc_rt_stack_grow). */
 void *sc_rt_stack_alloc(size_t size) {
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   size_t pg = si.dwPageSize;
   char *m = (char *)VirtualAlloc(0, size + pg, MEM_RESERVE, PAGE_NOACCESS);
   if (!m) return 0;
-  if (!VirtualAlloc(m + pg, size, MEM_COMMIT, PAGE_READWRITE)) {
+#if defined(__x86_64__)
+  char *lim = sc_stk_initial_limit(m + pg, size, pg);
+  /* the live part, plus one PAGE_GUARD page under it whose first touch asks for more */
+  if (!VirtualAlloc(lim, (size_t)(m + pg + size - lim), MEM_COMMIT, PAGE_READWRITE) ||
+      (lim - pg >= m + pg && !VirtualAlloc(lim - pg, pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD))) {
     VirtualFree(m, 0, MEM_RELEASE);
     return 0;
   }
+#else
+  if (!VirtualAlloc(m + pg, size, MEM_COMMIT, PAGE_READWRITE)) { /* fibers: no growth path of ours */
+    VirtualFree(m, 0, MEM_RELEASE);
+    return 0;
+  }
+#endif
   return m + pg;
 }
 void sc_rt_stack_free(void *usable, size_t size) {
@@ -80,6 +126,99 @@ void sc_rt_stack_free(void *usable, size_t size) {
   (void)size;
   VirtualFree((char *)usable - si.dwPageSize, 0, MEM_RELEASE);
 }
+
+static size_t sc_rt_stk_size = 0;
+void sc_rt_stack_note_size(size_t bytes) { sc_rt_stk_size = bytes; }
+
+#if defined(__x86_64__)
+/* The thread's OWN stack, recorded when the thread arms itself. A fault on it is the OS's business: ntdll
+   grows thread stacks itself, and stepping in front of that would replace working behaviour with ours. */
+static _Thread_local uintptr_t sc_rt_thread_stack_base = 0;
+static size_t sc_rt_pagesz = 4096; /* cached at install: the handler should query nothing it can avoid */
+
+static void sc_rt_say(const char *s) {
+  DWORD w = 0;
+  size_t n = 0;
+  while (s[n]) n++;
+  WriteFile(GetStdHandle(STD_ERROR_HANDLE), s, (DWORD)n, &w, 0);
+}
+
+static void sc_rt_say_u64(uint64_t v) {
+  char b[24];
+  int i = (int)sizeof b;
+  b[--i] = 0;
+  if (!v) b[--i] = '0';
+  while (v) {
+    b[--i] = (char)('0' + (v % 10));
+    v /= 10;
+  }
+  sc_rt_say(b + i);
+}
+
+/* The task cannot continue and neither can the process: say which, and go. */
+static void sc_rt_report_overflow(void) {
+  sc_rt_say("\nsuper-c: stack overflow");
+  if (sc_rt_stk_size) {
+    sc_rt_say(" (");
+    sc_rt_say_u64((uint64_t)sc_rt_stk_size);
+    sc_rt_say(" byte task stack exhausted; raise it with runtime::set_stack_size)");
+  }
+  sc_rt_say("\n");
+  ExitProcess(134);
+}
+
+/* Grow the running coroutine stack into its reservation, or report that there is nothing left to grow into.
+   Touching the PAGE_GUARD page raises STATUS_GUARD_PAGE_VIOLATION exactly once and clears the guard bit, so
+   the page the fault happened on is already usable by the time we get here -- all that is left is to commit
+   further down and re-arm a guard below the new floor. */
+static LONG CALLBACK sc_rt_stack_veh(EXCEPTION_POINTERS *ep) {
+  const DWORD code = ep->ExceptionRecord->ExceptionCode;
+  if (code != STATUS_GUARD_PAGE_VIOLATION && code != EXCEPTION_ACCESS_VIOLATION &&
+      code != EXCEPTION_STACK_OVERFLOW)
+    return EXCEPTION_CONTINUE_SEARCH;
+  const uintptr_t sb = sc_teb_read(SC_TEB_STACK_BASE);
+  if (sb == sc_rt_thread_stack_base || sc_rt_thread_stack_base == 0)
+    return EXCEPTION_CONTINUE_SEARCH; /* the thread's own stack: leave it to the system */
+
+  /* Windows grows a stack itself for as long as the TEB describes one -- and the context switch puts the
+     coroutine's StackBase/StackLimit/DeallocationStack there, so the kernel treats it as the thread stack
+     and extends it without dispatching anything to the growth path below. What it will not do is grow past
+     DeallocationStack: that it reports as STATUS_STACK_OVERFLOW, with NO address attached, which is why
+     this has to come before every test that reads one. Letting it fall through those tests is what made an
+     exhausted task die silently instead of saying so. On a coroutine stack the code means one thing. */
+  if (code == EXCEPTION_STACK_OVERFLOW) sc_rt_report_overflow();
+
+  if (ep->ExceptionRecord->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+
+  const size_t pg = sc_rt_pagesz;
+  const uintptr_t addr = (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1];
+  const uintptr_t limit = sc_teb_read(SC_TEB_STACK_LIMIT);
+  const uintptr_t dealloc = sc_teb_read(SC_TEB_DEALLOC);
+  if (addr >= limit || addr < dealloc) return EXCEPTION_CONTINUE_SEARCH; /* not this stack's growth region */
+
+  /* One page above the reservation stays permanently uncommitted: that is the hard floor. */
+  const uintptr_t floor = dealloc + pg;
+  uintptr_t want = addr & ~(uintptr_t)(pg - 1);
+  if (want > pg) want -= pg; /* a page of headroom, so the next frame does not fault immediately */
+  if (want < floor) sc_rt_report_overflow();
+  if (!VirtualAlloc((void *)want, (size_t)(limit - want), MEM_COMMIT, PAGE_READWRITE))
+    return EXCEPTION_CONTINUE_SEARCH;
+  if (want - pg >= floor) VirtualAlloc((void *)(want - pg), pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD);
+  sc_teb_write(SC_TEB_STACK_LIMIT, want); /* the switch saves this, so the growth travels with the task */
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void sc_rt_stack_guard_install(void) {
+  static LONG once = 0;
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  sc_rt_pagesz = si.dwPageSize;
+  sc_rt_thread_stack_base = sc_teb_read(SC_TEB_STACK_BASE);
+  if (InterlockedCompareExchange(&once, 1, 0) == 0) AddVectoredExceptionHandler(1, sc_rt_stack_veh);
+}
+#else
+void sc_rt_stack_guard_install(void) {} /* fibers own their stacks; growth is the OS's business */
+#endif
 
 /* Threads. `_beginthreadex` rather than CreateThread: the runtime allocates on worker threads, and this is
    the entry point that sets up (and tears down) the CRT's per-thread state. The pthread-shaped entry
@@ -290,7 +429,7 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
   f[24] = (void *)entry;        /* r12 */
   f[25] = arg;                  /* r13 */
   f[28] = (void *)top;          /* StackBase: the high end this coroutine runs on */
-  f[29] = (void *)base;         /* StackLimit: its lowest committed byte */
+  f[29] = sc_stk_initial_limit((char *)base, size, si.dwPageSize); /* StackLimit: lowest COMMITTED byte */
   f[30] = (void *)(base - si.dwPageSize); /* DeallocationStack: the reservation, guard page included */
   f[33] = (void *)sc_ctx_entry; /* the return address the trailing `ret` jumps to */
   ((sc_rt_ctx_asm *)ctx)->sp = f;
@@ -348,7 +487,10 @@ void sc_rt_ctx_free(void *ctx) {
 /* ================================ POSIX ============================================================ */
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
+#include <stddef.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -424,6 +566,106 @@ void *sc_rt_stack_alloc(size_t size) {
 void sc_rt_stack_free(void *usable, size_t size) {
   long pg = sysconf(_SC_PAGESIZE);
   munmap((char *)usable - pg, size + (size_t)pg);
+}
+
+/* ---- stack-overflow reporting ---------------------------------------------------------------------- */
+
+/* The stack size the runtime hands out, for the message only. A plain global, written once before the pool
+   starts: keeping this off the switch path matters more than precision, because the alternative -- tracking
+   the live stack in thread-local storage -- cost 15ns per switch on macOS, where every _Thread_local access
+   goes through tlv_get_addr. */
+static size_t sc_rt_stk_size = 0;
+static size_t sc_rt_pagesz = 4096; /* cached: sysconf is not async-signal-safe */
+
+void sc_rt_stack_note_size(size_t bytes) { sc_rt_stk_size = bytes; }
+
+static void sc_rt_say(const char *s) {
+  size_t n = 0;
+  while (s[n]) n++;
+  ssize_t w = write(2, s, n); /* write() is async-signal-safe; printf is not */
+  (void)w;
+}
+
+static void sc_rt_say_u64(uint64_t v) {
+  char b[24];
+  int i = (int)sizeof b;
+  b[--i] = 0;
+  if (!v) b[--i] = '0';
+  while (v) {
+    b[--i] = (char)('0' + (v % 10));
+    v /= 10;
+  }
+  sc_rt_say(b + i);
+}
+
+/* The stack pointer at the moment of the fault, straight out of the signal context. */
+static uintptr_t sc_rt_fault_sp(void *uc) {
+  ucontext_t *c = (ucontext_t *)uc;
+#if defined(__APPLE__) && defined(__aarch64__)
+  return (uintptr_t)c->uc_mcontext->__ss.__sp;
+#elif defined(__APPLE__) && defined(__x86_64__)
+  return (uintptr_t)c->uc_mcontext->__ss.__rsp;
+#elif defined(__linux__) && defined(__aarch64__)
+  return (uintptr_t)c->uc_mcontext.sp;
+#elif defined(__linux__) && defined(__x86_64__)
+  return (uintptr_t)c->uc_mcontext.gregs[REG_RSP];
+#else
+  (void)c;
+  return 0; /* unknown layout: fall through to the default handler rather than guess */
+#endif
+}
+
+/* A fault NEAR the stack pointer is a stack that ran out; a fault anywhere else is a bug in the program and
+   must still look like one. No registry of live stacks is needed for that, and no per-switch bookkeeping --
+   which is the point: the diagnosis costs nothing until something actually crashes. */
+static void sc_rt_overflow(int sig, siginfo_t *si, void *uc) {
+  uintptr_t sp = sc_rt_fault_sp(uc);
+  uintptr_t a = (uintptr_t)si->si_addr;
+  uintptr_t d = a > sp ? a - sp : sp - a;
+  /* Generous either way: a frame larger than the guard page steps clean over it, landing the fault BELOW
+     the guard with sp already past it. 128 KiB is far wider than any single frame yet far narrower than the
+     distance a wild pointer lands from the stack. */
+  if (sp != 0 && d < 128 * 1024) {
+    sc_rt_say("\nsuper-c: stack overflow");
+    if (sc_rt_stk_size) {
+      sc_rt_say(" (");
+      sc_rt_say_u64((uint64_t)sc_rt_stk_size);
+      sc_rt_say(" byte task stack exhausted; raise it with runtime::set_stack_size)");
+    }
+    sc_rt_say("\n");
+    _exit(134);
+  }
+  /* Not a stack fault: put the default back and take it for real. */
+  struct sigaction d2;
+  memset(&d2, 0, sizeof d2);
+  d2.sa_handler = SIG_DFL;
+  sigaction(sig, &d2, 0);
+  raise(sig);
+}
+
+void sc_rt_stack_guard_install(void) {
+  static int32_t once = 0;
+  sc_rt_pagesz = (size_t)sysconf(_SC_PAGESIZE);
+  (void)sc_rt_pagesz;
+  /* A signal stack of this thread's own: the handler runs when a stack is exhausted, so it cannot run on
+     that stack. mmap rather than malloc, so the leak tracker sees no permanent allocation. */
+  size_t sz = (size_t)SIGSTKSZ < 32768 ? 32768 : (size_t)SIGSTKSZ;
+  void *m = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (m != MAP_FAILED) {
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_sp = m;
+    ss.ss_size = sz;
+    sigaltstack(&ss, 0);
+  }
+  if (__sync_val_compare_and_swap(&once, 0, 1) != 0) return; /* the handler itself is process-wide */
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_sigaction = sc_rt_overflow;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, 0);
+  sigaction(SIGBUS, &sa, 0); /* macOS reports a guard-page hit as SIGBUS, Linux as SIGSEGV */
 }
 
 /* Threads and their locks. The handle is a heap `pthread_t` rather than a cast: `pthread_t` is opaque and

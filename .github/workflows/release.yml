@@ -2,12 +2,20 @@ name: Release
 
 # Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes
 # a GitHub Release with one archive per platform.
+#
+# `commit` is what keeps a run of untagged commits from being all-or-nothing. Left empty the tag lands on the
+# head of whatever branch this was dispatched from, so a single broken commit at the tip drags every good one
+# behind it into the same release; naming an earlier commit builds, tests and tags exactly that one instead.
 on:
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag to create/publish (e.g. v0.1.0)"
         required: true
+        type: string
+      commit:
+        description: "Commit to build, test and tag (SHA, branch or tag; default: the dispatched branch head)"
+        required: false
         type: string
 
 permissions:
@@ -18,8 +26,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  # Settle what "this release is" exactly once, in one place. Whatever `commit` was given -- a short SHA, a
+  # branch, a tag, or nothing at all -- becomes one full SHA that every job below checks out and that the
+  # release is finally tagged on. Resolving it per job instead would reopen the hole this input exists to
+  # close: a branch that moves mid-run would leave the tag on a commit the suite never built.
+  resolve:
     # Only the repository owner may run this.
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # every commit, so an input naming an older one resolves
+
+      - id: pick
+        # Through the environment, not string interpolation: the input is a shell word here, and pasting it
+        # into the script would let one carry its own quoting.
+        env:
+          WANT: ${{ github.event.inputs.commit }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          sha="$(git rev-parse --verify "${WANT:-$HEAD_SHA}^{commit}")"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Releasing $sha ($(git log -1 --format=%s "$sha"))"
+
+  build:
+    needs: resolve
     if: github.actor == github.repository_owner
     strategy:
       fail-fast: false
@@ -39,6 +74,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       # --- Toolchain cache -------------------------------------------------------------------------------
       # Cache the package-manager download areas so re-runs never re-fetch the C toolchain / any deps.
@@ -51,7 +88,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-${{ matrix.target }}-${{ github.sha }}
+          key: ccache-${{ matrix.target }}-${{ needs.resolve.outputs.sha }}
           restore-keys: ccache-${{ matrix.target }}-
 
       - name: Configure ccache dir
@@ -255,7 +292,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [resolve, build]
     if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
     steps:
@@ -269,9 +306,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # The SHA the matrix actually built and tested, never a branch name: a tag is only worth anything
+          # if it names the commit the suite passed on.
           gh release create "${{ github.event.inputs.tag }}" \
             --repo "${{ github.repository }}" \
-            --target "${{ github.sha }}" \
+            --target "${{ needs.resolve.outputs.sha }}" \
             --title "${{ github.event.inputs.tag }}" \
             --generate-notes \
             dist/*

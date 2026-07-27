@@ -29,7 +29,11 @@ extern "C" {
     fn __sc_set_task_id(id: u64) void;
 }
 
-const STACK_SIZE: usize = 262144; // 256 KiB guard-paged stack per coroutine
+// Per-coroutine stack. RESERVED, not consumed: the pages behind it are faulted in as the task actually
+// uses them, so a shallow task costs a handful of pages however large this is (measured: ~16 KiB per parked
+// task at the 256 KiB default). Raising it therefore buys depth, not memory -- see `set_stack_size`.
+const STACK_SIZE_DEFAULT: usize = 262144;
+static mut G_STACK_SIZE: usize = 262144;
 
 /// A schedulable task: either a stackful coroutine, or (`is_job`) a run-to-completion JOB that the worker
 /// simply calls on its own stack -- no stack allocation, no context switch, and no ability to park. Jobs are
@@ -458,7 +462,7 @@ fn coroutine_start(arg: *mut void) {
 }
 
 fn free_coroutine(co: *mut Coroutine) {
-    unsafe sc_runtime::sc_rt_stack_free(co.stack, STACK_SIZE);
+    unsafe sc_runtime::sc_rt_stack_free(co.stack, G_STACK_SIZE);
     unsafe sc_runtime::sc_rt_ctx_free(co.ctx);
     let mut g = Global {};
     g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
@@ -471,6 +475,8 @@ fn worker_main(arg: *mut void) *mut void {
     let s = unsafe w.sched;
     let me = unsafe w.idx;
     unsafe sc_runtime::sc_rt_widx_set(me as i32); // a push from this thread lands on this deque
+    unsafe sc_runtime::sc_rt_stack_guard_install(); // report an overflow rather than dying on a bare fault
+    unsafe sc_runtime::sc_rt_stack_note_size(G_STACK_SIZE);
     let sched_ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
     loop {
         let co = dequeue_runnable(s, me);
@@ -496,7 +502,7 @@ fn worker_main(arg: *mut void) *mut void {
             // Arm the context on the worker that first runs it, not at spawn: arming writes the initial
             // frame to the coroutine's own stack, so a task that is queued but never reached never faults
             // a page of it in.
-            unsafe sc_runtime::sc_rt_ctx_init(co.ctx, co.stack, STACK_SIZE, coroutine_start, co);
+            unsafe sc_runtime::sc_rt_ctx_init(co.ctx, co.stack, G_STACK_SIZE, coroutine_start, co);
             unsafe co.inited = 1;
         }
         unsafe sc_runtime::sc_rt_tls_set(co);
@@ -610,7 +616,7 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
     let s = ensure_started();
     let mut g = Global {};
     let co = g.alloc(sizeof(Coroutine), alignof(Coroutine)) as *mut Coroutine;
-    let stk = unsafe sc_runtime::sc_rt_stack_alloc(STACK_SIZE);
+    let stk = unsafe sc_runtime::sc_rt_stack_alloc(G_STACK_SIZE);
     let ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
     unsafe co[0] = Coroutine {
         id: next_task_id(),
@@ -823,6 +829,22 @@ pub fn live_tasks() usize {
 /// Fix the pool's worker-thread count. Must be called before the first `launch` (the pool is built on
 /// demand and never resized); `0` restores the default of one worker per CPU. Setting it to 1 makes
 /// scheduling deterministic, which is what concurrency tests want.
+/// Set the per-coroutine stack size, in bytes, before the pool starts (a later call is ignored, like
+/// `set_worker_count`). The stack is RESERVED, not consumed -- pages arrive as the task uses them -- so this
+/// buys depth for deeply recursive tasks rather than costing memory for shallow ones. Rounded up to 64 KiB;
+/// 0 restores the default.
+pub fn set_stack_size(bytes: usize) {
+    if atomic::load_i32((&mut G_STATE) as *mut i32, 1) == 2 {
+        return; // the running pool's stacks are already allocated
+    }
+    if bytes == 0 {
+        G_STACK_SIZE = STACK_SIZE_DEFAULT;
+        return;
+    }
+    let unit: usize = 65536;
+    G_STACK_SIZE = (bytes + unit - 1) / unit * unit;
+}
+
 pub fn set_worker_count(n: usize) {
     G_NWORKERS = n;
 }

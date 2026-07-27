@@ -67,6 +67,10 @@ extern "C" "sc_rt.h" {
     // A guard-paged stack: the usable low end, or null on failure. Free with the same size.
     pub fn sc_rt_stack_alloc(size: usize) *mut void;
     pub fn sc_rt_stack_free(usable: *mut void, size: usize) void;
+    /// Arm this thread to report a stack overflow instead of dying on a bare fault; `note_size` supplies
+    /// the size the message quotes. No-ops on Windows for now.
+    pub fn sc_rt_stack_guard_install() void;
+    pub fn sc_rt_stack_note_size(bytes: usize) void;
 
     // Stackful context switch. `alloc` makes an empty (root) context; `init` arms one to run `entry(arg)` on
     // `stack`; `switch` saves the running context into `from` and resumes `to`.

@@ -1371,6 +1371,124 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// A coroutine stack that runs out must SAY so. The guard page turns an overflow into a fault, and without
+// a handler that is a bare SIGSEGV/SIGBUS with no message -- the failure mode this test exists to prevent.
+// The other half matters just as much: a wild pointer is NOT a stack overflow and must still crash as one,
+// or the diagnosis would be a lie that hides real bugs. `set_stack_size` is what makes the first program
+// pass rather than die, so all three are checked against the same recursion.
+@test
+fn stack_overflow_is_reported() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::platform as platform;
+
+fn deep(n: i64) i64 {
+    let mut pad = Array::<i64, 512>::new(); // 4 KiB per frame
+    pad[0] = n;
+    if n <= 0 {
+        return pad[0];
+    }
+    return deep(n - 1) + pad[0];
+}
+
+fn main() i32 {
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch fn() {
+        let depth = 190 + platform::ncpu() as i64; // ~800 KiB of frames, and not const-foldable
+        let _ = deep(depth);
+        w.done();
+    };
+    wg.wait();
+    wg.free();
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let over = p.run_bin();
+    assert(over != 0, "a 256 KiB stack cannot hold 800 KiB of frames");
+    assert(p.run_bin_env("").out_has("stack overflow"), "and it says so instead of dying silently");
+
+    // The same recursion fits once the task is given room for it.
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::platform as platform;
+
+fn deep(n: i64) i64 {
+    let mut pad = Array::<i64, 512>::new();
+    pad[0] = n;
+    if n <= 0 {
+        return pad[0];
+    }
+    return deep(n - 1) + pad[0];
+}
+
+fn main() i32 {
+    rt::set_stack_size(4194304); // 4 MiB, and the pages behind it still arrive only as they are used
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch fn() {
+        let depth = 190 + platform::ncpu() as i64;
+        let _ = deep(depth);
+        w.done();
+    };
+    wg.wait();
+    wg.free();
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r2 = p.compile("main.spc");
+    assert_eq(r2.exit, 0);
+    let cc2 = p.cc_build("");
+    assert_eq(cc2.exit, 0);
+    assert_eq(p.run_bin(), 0); // 4 MiB is enough
+
+    // A wild pointer is a crash, not a stack overflow: the message must not appear.
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::platform as platform;
+
+fn main() i32 {
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch fn() {
+        let bad = (4096 + platform::ncpu()) as *mut i64;
+        unsafe *bad = 1;
+        w.done();
+    };
+    wg.wait();
+    wg.free();
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r3 = p.compile("main.spc");
+    assert_eq(r3.exit, 0);
+    let cc3 = p.cc_build("");
+    assert_eq(cc3.exit, 0);
+    let wild = p.run_bin_env("");
+    assert(wild.exit != 0, "a wild write still crashes");
+    assert(!wild.out_has("stack overflow"), "and is NOT reported as a stack overflow");
+}
+
 // Diagnostics (M6/Phase 11): every task carries a process-unique id, the runtime accounts for tasks created
 // versus finished, and a panic inside a task names it instead of just saying the process died.
 @test

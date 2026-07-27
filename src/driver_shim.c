@@ -4,6 +4,13 @@
 #ifndef _POSIX_C_SOURCE
 #  define _POSIX_C_SOURCE 200809L
 #endif
+/* And this on top of it, because _POSIX_C_SOURCE is not enough for all of them: glibc 2.41 guards realpath
+   with __USE_MISC/__USE_XOPEN_EXTENDED, neither of which POSIX.1-2008 alone sets. Older glibc did declare
+   it, so this compiles today and stops compiling the moment the CI image moves -- with an implicit
+   declaration truncating the returned pointer to int, which is the crash the note above warns about. */
+#ifndef _DEFAULT_SOURCE
+#  define _DEFAULT_SOURCE 1
+#endif
 
 #include "driver_shim.h"
 
