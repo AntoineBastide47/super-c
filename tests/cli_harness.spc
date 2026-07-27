@@ -28,7 +28,7 @@ extend CliResult {
         if self.out == null {
             return false;
         }
-        return unsafe cstring::strstr(self.out, needle.ptr() as *const char) != null;
+        return contains_str(self.out, needle);
     }
 }
 extend CliResult as Free {
@@ -38,6 +38,18 @@ extend CliResult as Free {
             self.out = null;
         }
     }
+}
+
+// Does the NUL-terminated `hay` contain `needle`? `needle` is a `str` -- a VIEW with no terminator -- so it
+// is copied before it reaches C. Passing `needle.ptr()` to a C string function reads past its end until it
+// finds a zero byte, which is exactly the kind of bug that only shows up on one platform.
+pub fn contains_str(hay: *const char, needle: str) bool {
+    if hay == null {
+        return false;
+    }
+    let mut nb = Cmd8192 {};
+    unsafe stdio::snprintf(&mut nb[0], 8192, "%.*s".ptr() as *const char, needle.len() as i32, needle.ptr());
+    return unsafe cstring::strstr(hay, &nb[0]) != null;
 }
 
 // True on Windows: the executable suffix, the default C compiler and a few path habits differ there.
@@ -95,9 +107,19 @@ pub fn cc_name() *const char {
 // `__STRICT_ANSI__` under a strict `-std=c11`, so the Windows leg asks for the GNU dialect instead.
 pub fn cstd() *const char {
     if on_windows() {
-        return "-std=gnu11".ptr() as *const char;
+        return "-std=gnu11 -D_POSIX_C_SOURCE=200809L".ptr() as *const char;
     }
-    return "-std=c11".ptr() as *const char;
+    return "-std=c11 -D_POSIX_C_SOURCE=200809L".ptr() as *const char;
+}
+
+// The same, as a `--cstd=` flag for a nested `super-c build` -- EMPTY on POSIX, where the manifest default
+// is already this exact string. Passing a partial override (`-std=c11` without the POSIX define) is worse
+// than passing nothing: glibc then hides the prototypes the emitted C needs, which Darwin never does.
+pub fn cstd_flag() *const char {
+    if on_windows() {
+        return "\"--cstd=-std=gnu11 -D_POSIX_C_SOURCE=200809L\"".ptr() as *const char;
+    }
+    return "".ptr() as *const char;
 }
 
 // The executable suffix a linked test binary gets ("" or ".exe"). mingw's gcc appends `.exe` to an output
@@ -192,7 +214,14 @@ extend Proj {
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
     pub fn mkfile(self: &Proj, rel: str, content: str) {
         let mut dir = Path512 {};
-        unsafe stdio::snprintf(&mut dir[0], 512, "%s/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
+        unsafe stdio::snprintf(
+            &mut dir[0],
+            512,
+            "%s/%.*s".ptr() as *const char,
+            self.rootp(),
+            rel.len() as i32,
+            rel.ptr(),
+        );
         // everything up to the last separator is the directory to create
         let mut cut: i32 = -1;
         let mut i: i32 = 0;
@@ -207,7 +236,14 @@ extend Proj {
             let _ = unsafe shim::sc_mkdir_p(&dir[0]);
         }
         let mut path = Path512 {};
-        unsafe stdio::snprintf(&mut path[0], 512, "%s/%s".ptr() as *const char, self.rootp(), rel.ptr() as *const char);
+        unsafe stdio::snprintf(
+            &mut path[0],
+            512,
+            "%s/%.*s".ptr() as *const char,
+            self.rootp(),
+            rel.len() as i32,
+            rel.ptr(),
+        );
         let f = stdio::fopen(str::from_cstr(&path[0]), "wb"); // binary: no Windows CRLF in emitted test files
         if f != null {
             if content.len() > 0 {
@@ -223,11 +259,13 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut base[0],
             8192,
-            "\"%s\" %s \"%s/%s\"".ptr() as *const char,
+            "\"%s\" %.*s \"%s/%.*s\"".ptr() as *const char,
             superc(),
-            flags.ptr() as *const char,
+            flags.len() as i32,
+            flags.ptr(),
             self.rootp(),
-            mainrel.ptr() as *const char,
+            mainrel.len() as i32,
+            mainrel.ptr(),
         );
         let mut op = Path512 {};
         unsafe stdio::snprintf(&mut op[0], 512, "%s/.out".ptr() as *const char, self.rootp());
@@ -244,9 +282,10 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut base[0],
             8192,
-            "\"%s\" %s".ptr() as *const char,
+            "\"%s\" %.*s".ptr() as *const char,
             superc(),
-            args.ptr() as *const char,
+            args.len() as i32,
+            args.ptr(),
         );
         let mut op = Path512 {};
         unsafe stdio::snprintf(&mut op[0], 512, "%s/.out".ptr() as *const char, self.rootp());
@@ -332,7 +371,7 @@ extend Proj {
         self.append_c_files(&raw[0], &mut base[0], 8192);
         let used = unsafe cstring::strlen(&base[0]);
         let tail = (&mut base[0]) as *mut char;
-        unsafe stdio::snprintf(tail + used, 8192 - used, " %s".ptr() as *const char, extra.ptr() as *const char);
+        unsafe stdio::snprintf(tail + used, 8192 - used, " %.*s".ptr() as *const char, extra.len() as i32, extra.ptr());
         self.append_ldflags(&mut base[0], 8192);
         let used2 = unsafe cstring::strlen(&base[0]);
         unsafe stdio::snprintf(
@@ -362,7 +401,10 @@ extend Proj {
         unsafe stdio::snprintf(&mut base[0], 512, "\"%s/bin%s\"".ptr() as *const char, self.rootp(), binext());
         let mut op = Path512 {};
         unsafe stdio::snprintf(&mut op[0], 512, "%s/.runout".ptr() as *const char, self.rootp());
-        return exec_env(&base[0], &op[0], env.ptr() as *const char);
+        // `env` is a view too: copy it NUL-terminated before it crosses into C.
+        let mut envb = Path512 {};
+        unsafe stdio::snprintf(&mut envb[0], 512, "%.*s".ptr() as *const char, env.len() as i32, env.ptr());
+        return exec_env(&base[0], &op[0], &envb[0]);
     }
 
     // Run the linked <root>/bin and return its exit code.
@@ -382,15 +424,16 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut path[0],
             512,
-            "%s/build/raw/%s".ptr() as *const char,
+            "%s/build/raw/%.*s".ptr() as *const char,
             self.rootp(),
-            rel.ptr() as *const char,
+            rel.len() as i32,
+            rel.ptr(),
         );
         let buf = slurp(&path[0]);
         if buf == null {
             return false;
         }
-        let found = unsafe cstring::strstr(buf, needle.ptr() as *const char) != null;
+        let found = contains_str(buf, needle);
         unsafe stdlib::free(buf);
         return found;
     }
@@ -426,9 +469,10 @@ extend Proj {
         unsafe stdio::snprintf(
             &mut path[0],
             512,
-            "%s/build/raw/%s".ptr() as *const char,
+            "%s/build/raw/%.*s".ptr() as *const char,
             self.rootp(),
-            rel.ptr() as *const char,
+            rel.len() as i32,
+            rel.ptr(),
         );
         let f = stdio::fopen(str::from_cstr(&path[0]), "rb");
         if f == null {

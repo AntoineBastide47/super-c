@@ -1,5 +1,6 @@
 // External C sources/libs: turns every @c.source (and implicit extern-block backing-header .c sibling)
-// into a build/ wrapper TU on the emit keep-list, and writes the deduped @c.link flags to build/__ldflags
+// into a build/ wrapper TU on the emit keep-list, and writes the deduped @c.link flags (plus the runtime's
+// own libm on POSIX) to build/__ldflags
 // for the final link line.
 import stdio;
 import string as cstring;
@@ -97,9 +98,18 @@ fn ext_c_wrap(
 /// Scan every module for @c.source/@c.link and implicit backing-header `.c` siblings: wrapper TUs are
 /// written under gen_root and pushed onto `keep`; link flags go to build/__ldflags (removed when none).
 /// Sets `*err` on an unresolvable source or a write failure; already-set values are never cleared.
-pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool) {
+pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool, target: i32) {
     let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();
+    // libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into
+    // every program whether or not it calls them, and glibc keeps those out of libc -- so the link fails
+    // without it, which macOS hides because libSystem has them. It is seeded here rather than as a
+    // `@c.link` on the prelude's extern block because that block DECLARES the functions for every target,
+    // Windows included: gating it to carry the flag would take the declarations away from Windows, whose
+    // CRT provides the functions and has no libm to name.
+    if target != 0 {
+        ld.push(String::from_str("-lm"));
+    }
     let mut seen = Vector::<String>::new();
     let mut nsrc: u32 = 0;
     let n = p.modules.len();

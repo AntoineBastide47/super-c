@@ -492,13 +492,16 @@ void *sc_lk_realloc(void *__p, size_t __n) {
       return sc_lk_malloc(__n); /* the old block is gone: hand back fresh memory */
     }
   }
+  /* The registry key is an ADDRESS, and an address survives the realloc that invalidates the pointer
+     holding it: reading `__p` again after this call is undefined (and GCC's -Wuse-after-free says so). */
+  const uintptr_t __pa = (uintptr_t)__p;
   void *q = (realloc)(__p, __n);
   if (q != NULL && sc_lk_on()) {
     sc_lk_ent e;
     sc_lk_capture(&e, q, __n);
     sc_lk_acquire();
     if (sc_lk_state >= 2) {
-      sc_lk_ent *old = __p != NULL ? sc_lk_find(__p) : NULL;
+      sc_lk_ent *old = __pa != 0 ? sc_lk_find((void *)__pa) : NULL;
       int was_tracked = 0;
       if (old != NULL && old->st == 1) {
         sc_lk_bytes -= old->size;
@@ -510,7 +513,7 @@ void *sc_lk_realloc(void *__p, size_t __n) {
         was_tracked = 1;
       }
       /* memory the tracker never saw (a foreign allocator) stays untracked */
-      if ((was_tracked || __p == NULL) && !sc_lk_insert(&e)) sc_lk_disable();
+      if ((was_tracked || __pa == 0) && !sc_lk_insert(&e)) sc_lk_disable();
     }
     sc_lk_release();
   }

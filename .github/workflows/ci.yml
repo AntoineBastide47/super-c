@@ -179,7 +179,9 @@ jobs:
             ./bootstrap/super-c.exe --bootstrap-tags src/main.spc
             # shellcheck disable=SC2046
             "${CC:-gcc}" $cstd -O1 $(find src/build -name '*.c') -o "stage0-$bin" $(cat src/build/__ldflags src/build/raw/__ldflags 2>/dev/null)
-            SC_LEAK_CHECK=fatal "./stage0-$bin" build "--cstd=$cstd" -o "$bin"
+            # `release`, not the default `dev` profile: dev links -fsanitize=address,undefined and mingw
+            # ships no libasan/libubsan, so a dev build cannot link on Windows at all.
+            SC_LEAK_CHECK=fatal "./stage0-$bin" release "--cstd=$cstd" -o "$bin"
           else
             "./super-c" build --bootstrap-tags -o "stage0-$bin" src/main.spc
             SC_LEAK_CHECK=fatal "./stage0-$bin" build -o "$bin"

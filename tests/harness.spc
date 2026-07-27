@@ -48,7 +48,7 @@ extend Compiled {
     }
     // Whether the first error message contains `needle` (matched as a substring).
     pub fn msg_has(self: &Self, needle: str) bool {
-        return unsafe cstring::strstr(&self.first[0], needle.ptr() as *const char) != null;
+        return cli::contains_str(&self.first[0], needle);
     }
 }
 
@@ -282,7 +282,7 @@ extend CompiledC {
         if self.code == null {
             return false;
         }
-        return unsafe cstring::strstr(self.code, needle.ptr() as *const char) != null;
+        return cli::contains_str(self.code, needle);
     }
 }
 extend CompiledC as Free {
@@ -376,7 +376,7 @@ extend RunResult {
         if self.out == null {
             return false;
         }
-        return unsafe cstring::strstr(self.out, needle.ptr() as *const char) != null;
+        return cli::contains_str(self.out, needle);
     }
 }
 extend RunResult as Free {
@@ -445,9 +445,9 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     unsafe stdio::snprintf(
         &mut cmd.b[0],
         1024,
-        "\"%s\" build --cstd=%s \"%s/main.spc\" -o \"%s/prog%s\"".ptr() as *const char,
+        "\"%s\" build %s \"%s/main.spc\" -o \"%s/prog%s\"".ptr() as *const char,
         cli::superc_path().ptr() as *const char,
-        cli::cstd(),
+        cli::cstd_flag(),
         dirp,
         dirp,
         cli::binext(),
@@ -461,7 +461,10 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     unsafe stdio::snprintf(&mut cmd.b[0], 1024, "\"%s/prog%s\"".ptr() as *const char, dirp, cli::binext());
     let mut outp = Path512 {};
     unsafe stdio::snprintf(&mut outp.b[0], 512, "%s/out".ptr() as *const char, dirp);
-    r.exit = unsafe shim::sc_run(&cmd.b[0], null, &outp.b[0], null, env.ptr() as *const char);
+    // `env` is a view with no terminator: copy it before it crosses into C.
+    let mut envb = Path512 {};
+    unsafe stdio::snprintf(&mut envb.b[0], 512, "%.*s".ptr() as *const char, env.len() as i32, env.ptr());
+    r.exit = unsafe shim::sc_run(&cmd.b[0], null, &outp.b[0], null, &envb.b[0]);
     let mut op = Path512 {};
     unsafe stdio::snprintf(&mut op.b[0], 512, "%s/out".ptr() as *const char, dirp);
     r.out = slurp(&op.b[0]);

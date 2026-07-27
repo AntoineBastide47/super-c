@@ -1344,7 +1344,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     keep.push(build_out_path(root, "super_rt", ".c"));
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
-    ext_c_collect(p, &mut keep, &mut err);
+    ext_c_collect(p, &mut keep, &mut err, target);
     let live = compute_emit_live(p);
     let osz = if n != 0 {
         n;

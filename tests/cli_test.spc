@@ -837,8 +837,12 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
     unsafe stdio::snprintf(
         &mut cc2.b[0],
         2048,
-        "%s -std=c11 -Wall -Wextra -Werror -I\"%s/build/raw\" \"%s/cuser.c\" -o \"%s/cbin%s\"".ptr() as *const char,
+        // super_rt.c comes too: the header's panic path references the runtime's thread-local task id, and
+        // a C consumer of an emitted module links that TU exactly as a Super-C one does. (clang drops the
+        // unused reference at -O0 and gcc keeps it, so leaving it out only ever worked by luck.)
+        "%s -std=c11 -Wall -Wextra -Werror -I\"%s/build/raw\" \"%s/cuser.c\" \"%s/build/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
         cli::cc_name(),
+        p.rootp(),
         p.rootp(),
         p.rootp(),
         p.rootp(),
@@ -3584,7 +3588,7 @@ fn external_c_sources() {
   fn helper_add(a: i32, b: i32) i32;
 }
 @c.source("impl_extra.c")
-@c.link("m")
+@c.link("c")
 extern "C" "extra.h" {
   fn extra_mul(a: i32, b: i32) i32;
 }
@@ -3594,17 +3598,19 @@ fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
     );
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
-    assert(p.gen_has("__ldflags", "-lm"), "@c.link lands in build/__ldflags");
+    assert(p.gen_has("__ldflags", "-lc"), "@c.link lands in build/__ldflags");
     let cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 48);
 
-    // drop the extern blocks: the wrapper TUs and __ldflags must disappear
+    // drop the extern blocks: the wrapper TUs go, and so does the flag they contributed. `-lm` stays --
+    // the prelude's float methods are emitted into every program, so libm is on every POSIX link line.
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
     let r2 = p.compile("main.spc");
     assert_eq(r2.exit, 0);
     assert_eq(p.gen_count("__ext"), 0);
-    assert(!p.gen_exists("__ldflags"), "the link-flag file is removed when no extern block is left");
+    assert(!p.gen_has("__ldflags", "-lc"), "a dropped extern block takes its link flag with it");
+    assert(p.gen_has("__ldflags", "-lm"), "the prelude's own libm flag stays: every program emits float methods");
 
     // a missing source file is a hard error
     p.mkfile(
