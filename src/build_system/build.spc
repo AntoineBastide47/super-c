@@ -418,12 +418,25 @@ const fn base_name(p: str) str {
     return p.slice(k, p.len());
 }
 
+/// The name a linked binary must actually have on `target`: Windows executables carry `.exe`, and nothing
+/// supplies it for us -- the engine links to `<bin>.tmp` and renames, so the C compiler never sees a name
+/// without an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
+/// `.exe` to a name that has none and then fails to find it. `pub` because the driver names binaries too.
+pub fn exe_name(base: str, target: i32) String {
+    let mut s = String::from_str(base);
+    if target == 0 && !base.ends_with(".exe") {
+        s.push_str(".exe");
+    }
+    return s;
+}
+
 // Where a profile keeps its own copy of the manifest's binary: <out-dir>/<profile>/<name>. Each profile
 // links its own, so a `dev` build can never end up standing in for the release artifact -- the manifest's
 // `bin` is a copy INSTALLED from here, and only by the commands whose job is to produce it.
-fn profile_bin(m: &mf::Manifest, prof_name: str) String {
+fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
     let dir = join2(m.out_dir.as_str(), prof_name);
-    return join2(dir.as_str(), base_name(m.bin.as_str()));
+    let leaf = exe_name(base_name(m.bin.as_str()), target);
+    return join2(dir.as_str(), leaf.as_str());
 }
 
 // Copy the profile's binary to `to`, the path the manifest calls the project's binary. A copy rather than a
@@ -792,6 +805,7 @@ pub fn manifest_build(
     let prof_name = resolve_profile(m, profile);
     if bin_override.len() != 0 {
         // `-o` names an exact path: link straight there, no profile copy and nothing installed.
+        let ob = exe_name(bin_override, target);
         return engine_build(
             m,
             prof_name,
@@ -800,7 +814,7 @@ pub fn manifest_build(
             "",
             prof_name,
             "raw",
-            bin_override,
+            ob.as_str(),
             jobs_override,
             std_dir,
             ce_steps,
@@ -826,7 +840,8 @@ pub fn manifest_build(
     if rc != 0 {
         return rc;
     }
-    return install_bin(path.as_str(), m.bin.as_str());
+    let dest = exe_name(m.bin.as_str(), target);
+    return install_bin(path.as_str(), dest.as_str());
 }
 
 // Build the manifest's binary for `prof_name` into that profile's own directory; `out` receives its path.
@@ -845,7 +860,7 @@ fn build_into_profile(
     lint: bool,
     out: &mut String,
 ) i32 {
-    let path = profile_bin(m, prof_name);
+    let path = profile_bin(m, prof_name, target);
     let rc = engine_build(
         m,
         prof_name,
@@ -885,7 +900,7 @@ pub fn manifest_run_bin(
     let prof_name = resolve_profile(m, profile);
     let mut built = String::new();
     let rc = if bin_override.len() != 0 {
-        built = String::from_str(bin_override);
+        built = exe_name(bin_override, target);
         engine_build(
             m,
             prof_name,
@@ -894,7 +909,7 @@ pub fn manifest_run_bin(
             "",
             prof_name,
             "raw",
-            bin_override,
+            built.as_str(),
             jobs_override,
             std_dir,
             ce_steps,
@@ -1049,7 +1064,7 @@ pub fn manifest_bench(
         "bench";
     };
     let sub = join2("bench", prof_name);
-    let bin = join2(m.out_dir.as_str(), "bench-bin");
+    let bin = join2(m.out_dir.as_str(), exe_name("bench-bin", target).as_str());
     // rooted at the project root (like tests), so `import bench::x;` works for lint AND build
     let rc = engine_build(
         m,

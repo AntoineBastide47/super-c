@@ -188,6 +188,11 @@ jobs:
           boot="./super-c-boot${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           SC_CMD=1 SC_LEAK_CHECK=fatal "$boot" build --bootstrap-tags ${cstd:+"$cstd"}
+          # Compatibility with a bootstrap older than the `.exe` naming fix: it links the manifest's `bin`
+          # verbatim, so on Windows it produces an extensionless PE that nothing can launch. Every step
+          # after this one is built by the compiler we just made, which names it correctly. Drop this once
+          # a release has shipped with the fix.
+          [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
       # The full suite, on every platform, with the binary this commit just produced -- so a failure is a
