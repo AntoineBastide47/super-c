@@ -319,11 +319,36 @@ int sc_wait_any(const int64_t *pids, int n, int *code) {
 }
 
 /* Atomic-ish rename for the build system's link-then-swap; Windows rename() refuses to replace. */
+int sc_chmod_exec(const char *path) {
+#if defined(_WIN32)
+  (void)path; /* no exec bit: Windows decides by extension */
+  return 0;
+#else
+  return chmod(path, 0755);
+#endif
+}
+
 int sc_rename(const char *from, const char *to) {
 #if defined(_WIN32)
-  _unlink(to);
-#endif
+  char side[4096];
+  if (MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING))
+    return 0;
+  /* `to` may be a RUNNING image -- the compiler replacing itself. Windows refuses to delete or overwrite
+     one, but it does allow RENAMING one, because the mapped section holds the file object rather than the
+     path. So park the old image beside itself and move the new file into the name it vacated. The parked
+     file cannot be deleted while anything is still executing it; the next build sweeps it. */
+  if ((size_t)snprintf(side, sizeof side, "%s.old", to) >= sizeof side)
+    return -1;
+  _unlink(side); /* an image parked by an earlier self-replace, now that nothing is running it */
+  if (!MoveFileExA(to, side, MOVEFILE_REPLACE_EXISTING))
+    return -1;
+  if (MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING))
+    return 0;
+  MoveFileExA(side, to, MOVEFILE_REPLACE_EXISTING); /* put it back rather than leave the name empty */
+  return -1;
+#else
   return rename(from, to);
+#endif
 }
 
 /* Environment write for the build system (SUPERC for the test harness, SC_CMD for nested manifest-command

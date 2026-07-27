@@ -42,8 +42,11 @@ extern "C" "driver_shim.h" {
     /// Block until any of the `n` children exits: returns its index into `pids` and stores its exit
     /// code in `code`; -1 on wait error.
     pub fn sc_wait_any(pids: *const i64, n: i32, code: *mut i32) i32;
-    /// rename() that also replaces an existing destination on Windows (unlinks `to` first).
+    /// rename() that also replaces an existing destination on Windows -- including one that is a RUNNING
+    /// executable, which Windows will not delete but will let us rename aside (parked as `<to>.old`).
     pub fn sc_rename(from: *const char, to: *const char) i32;
+    /// Make `path` executable (0755); a no-op on Windows, which goes by extension.
+    pub fn sc_chmod_exec(path: *const char) i32;
     /// Set `name`=`value` in this process's environment, overwriting any existing value.
     pub fn sc_setenv(name: *const char, value: *const char) i32;
 

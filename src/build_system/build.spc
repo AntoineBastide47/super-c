@@ -409,6 +409,69 @@ fn dirname_of(p: str) str {
     return p.slice(0, k - 1);
 }
 
+// The last path component of `p`.
+const fn base_name(p: str) str {
+    let mut k = p.len();
+    while k > 0 && p[k - 1] != b'/' {
+        k = k - 1;
+    }
+    return p.slice(k, p.len());
+}
+
+// Where a profile keeps its own copy of the manifest's binary: <out-dir>/<profile>/<name>. Each profile
+// links its own, so a `dev` build can never end up standing in for the release artifact -- the manifest's
+// `bin` is a copy INSTALLED from here, and only by the commands whose job is to produce it.
+fn profile_bin(m: &mf::Manifest, prof_name: str) String {
+    let dir = join2(m.out_dir.as_str(), prof_name);
+    return join2(dir.as_str(), base_name(m.bin.as_str()));
+}
+
+// Copy the profile's binary to `to`, the path the manifest calls the project's binary. A copy rather than a
+// move, so the profile keeps the file its next build compares against. Written beside the target and
+// renamed onto it, never written over it: truncating an executable that is currently running corrupts the
+// image the OS is still paging from, and sc_rename knows how to displace a running one on Windows.
+fn install_bin(from: str, to: str) i32 {
+    let src = stdio::fopen(from, "rb");
+    if src == null {
+        eprintln("build: cannot read '{}'", from);
+        return 1;
+    }
+    let mut tmp = String::from_str(to);
+    tmp.push_str(".tmp");
+    let dst = stdio::fopen(tmp.as_str(), "wb");
+    if dst == null {
+        unsafe stdio::fclose(src);
+        eprintln("build: cannot write '{}'", tmp.as_str());
+        return 1;
+    }
+    let mut buf = Array::<char, 8192>::new();
+    let mut ok = true;
+    loop {
+        let n = unsafe stdio::fread(&mut buf[0], 1, 8192, src);
+        if n == 0 {
+            break;
+        }
+        if unsafe stdio::fwrite(&buf[0], 1, n, dst) != n {
+            ok = false;
+            break;
+        }
+    }
+    unsafe stdio::fclose(src);
+    unsafe stdio::fclose(dst);
+    let mut tob = String::from_str(to);
+    if !ok {
+        let _ = unsafe shim::sc_unlink(tmp.cstr());
+        eprintln("build: cannot write '{}'", to);
+        return 1;
+    }
+    let _ = unsafe shim::sc_chmod_exec(tmp.cstr());
+    if unsafe shim::sc_rename(tmp.cstr(), tob.cstr()) != 0 {
+        eprintln("build: cannot replace '{}'", to);
+        return 1;
+    }
+    return 0;
+}
+
 /// Profile name to build with: the CLI `--profile` flag, else the manifest's default-profile.
 pub fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
     if cli.len() != 0 {
@@ -727,12 +790,63 @@ pub fn manifest_build(
     lint: bool,
 ) i32 {
     let prof_name = resolve_profile(m, profile);
-    let bin = if bin_override.len() != 0 {
-        bin_override;
-    } else {
-        m.bin.as_str();
-    };
-    return engine_build(
+    if bin_override.len() != 0 {
+        // `-o` names an exact path: link straight there, no profile copy and nothing installed.
+        return engine_build(
+            m,
+            prof_name,
+            m.root.as_str(),
+            dirname_of(m.root.as_str()),
+            "",
+            prof_name,
+            "raw",
+            bin_override,
+            jobs_override,
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            bootstrap_tags,
+            lint,
+        );
+    }
+    let mut path = String::new();
+    let rc = build_into_profile(
+        m,
+        prof_name,
+        jobs_override,
+        std_dir,
+        ce_steps,
+        ce_mem,
+        target,
+        bootstrap_tags,
+        lint,
+        &mut path,
+    );
+    if rc != 0 {
+        return rc;
+    }
+    return install_bin(path.as_str(), m.bin.as_str());
+}
+
+// Build the manifest's binary for `prof_name` into that profile's own directory; `out` receives its path.
+// Nothing is installed: the commands whose job is to PRODUCE the project binary (build, release) copy it
+// into place afterwards, and the ones that merely need to run it (test, run) use it where it lies -- which
+// is what keeps a `test` run from quietly leaving a dev binary where a release one was.
+fn build_into_profile(
+    m: &mf::Manifest,
+    prof_name: str,
+    jobs_override: u32,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    bootstrap_tags: bool,
+    lint: bool,
+    out: &mut String,
+) i32 {
+    let path = profile_bin(m, prof_name);
+    let rc = engine_build(
         m,
         prof_name,
         m.root.as_str(),
@@ -740,7 +854,7 @@ pub fn manifest_build(
         "",
         prof_name,
         "raw",
-        bin,
+        path.as_str(),
         jobs_override,
         std_dir,
         ce_steps,
@@ -749,6 +863,8 @@ pub fn manifest_build(
         bootstrap_tags,
         lint,
     );
+    *out = path;
+    return rc;
 }
 
 /// `super-c run`: build the manifest binary (like `manifest_build`), then execute it (cargo run).
@@ -767,36 +883,49 @@ pub fn manifest_run_bin(
     lint: bool,
 ) i32 {
     let prof_name = resolve_profile(m, profile);
-    let bin = if bin_override.len() != 0 {
-        bin_override;
+    let mut built = String::new();
+    let rc = if bin_override.len() != 0 {
+        built = String::from_str(bin_override);
+        engine_build(
+            m,
+            prof_name,
+            m.root.as_str(),
+            dirname_of(m.root.as_str()),
+            "",
+            prof_name,
+            "raw",
+            bin_override,
+            jobs_override,
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            bootstrap_tags,
+            lint,
+        );
     } else {
-        m.bin.as_str();
+        // Run the profile's own binary where it was linked; `run` builds to run, it does not install.
+        build_into_profile(
+            m,
+            prof_name,
+            jobs_override,
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            bootstrap_tags,
+            lint,
+            &mut built,
+        );
     };
-    let rc = engine_build(
-        m,
-        prof_name,
-        m.root.as_str(),
-        dirname_of(m.root.as_str()),
-        "",
-        prof_name,
-        "raw",
-        bin,
-        jobs_override,
-        std_dir,
-        ce_steps,
-        ce_mem,
-        target,
-        bootstrap_tags,
-        lint,
-    );
     if rc != 0 {
         return rc;
     }
     let mut path = String::new();
-    if bin.find_byte(b'/') < 0 {
+    if built.as_str().find_byte(b'/') < 0 {
         path.push_str("./");
     }
-    path.push_str(bin);
+    path.push_string(&built);
     let mut cmd = String::new();
     push_quoted(&mut cmd, path.as_str());
     return unsafe shim::sc_exec(cmd.cstr()); // a built binary: never through a shell (see sc_exec)
@@ -819,7 +948,22 @@ pub fn manifest_test(
         eprintln("test: no tests/ directory next to src/");
         return 1;
     }
-    let rc = manifest_build(m, profile, "", jobs_override, std_dir, ce_steps, ce_mem, target, bootstrap_tags, false);
+    // The profile's own binary, left where it was linked: `test` must not stand in for `build`, or a run of
+    // the suite would replace whatever the manifest's binary currently is (a release artifact, say).
+    let prof_name = resolve_profile(m, profile);
+    let mut binp = String::new();
+    let rc = build_into_profile(
+        m,
+        prof_name,
+        jobs_override,
+        std_dir,
+        ce_steps,
+        ce_mem,
+        target,
+        bootstrap_tags,
+        false,
+        &mut binp,
+    );
     if rc != 0 {
         return rc;
     }
@@ -863,10 +1007,10 @@ pub fn manifest_test(
     // the harness compiles+runs snippets through the binary we just built ("./" so it never
     // resolves through PATH when the bin name is bare)
     let mut binb = String::new();
-    if m.bin.as_str().find_byte(b'/') < 0 {
+    if binp.as_str().find_byte(b'/') < 0 {
         binb.push_str("./");
     }
-    binb.push_string(&m.bin);
+    binb.push_string(&binp);
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
     let mut p = loader::package_load_rooted(rootp.as_str(), ".", dirname_of(m.root.as_str()), std_dir, bootstrap_tags);
     if !p.ok {

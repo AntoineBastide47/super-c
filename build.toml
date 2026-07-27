@@ -13,13 +13,3 @@ run = [
     "./super-c bench --no-run",
     "samply record --rate 1000 build/bench-bin",
 ]
-
-# Kick off .github/workflows/ci.yml for the CURRENT branch: build the compiler on Linux, macOS and Windows
-# and run the full suite on each with the binary that platform just built. `super-c command ci`.
-# Needs `gh auth login`, and the workflow must already be pushed -- GitHub only dispatches a workflow it
-# can see on the DEFAULT branch.
-[command.ci]
-run = [
-    "gh workflow run ci.yml --ref $(git rev-parse --abbrev-ref HEAD)",
-    "gh run list --workflow=ci.yml --limit 3",
-]

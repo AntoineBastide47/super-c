@@ -141,9 +141,13 @@ jobs:
 
       # --- Clean outputs only ---------------------------------------------------------------------------
       - name: Clean release outputs
-        run: rm -rf build src/build bootstrap stage0-super-c stage1-super-c
+        run: rm -rf build src/build ci/build super-c super-c.exe* super-c-boot* smoke*
 
       # --- Bootstrap ------------------------------------------------------------------------------------
+      # The fetched binary lands beside the checkout under its own name, never as `super-c`: it resolves
+      # std/ffi relative to its OWN executable, so at the repo root it picks up the current std/ffi (which
+      # is the point of --bootstrap-tags), and a distinct name keeps it intact instead of having the first
+      # build replace the very binary that is producing it.
       - name: Fetch bootstrap super-c from the latest release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,56 +155,73 @@ jobs:
           set -eu
           arch="$(uname -m)"
           name="super-c-${{ matrix.target }}-${arch}"
+          boot="super-c-boot${BINEXT:-}"
           if [ "${{ matrix.target }}" = windows ]; then
             gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
             7z x -y "${name}.zip" >/dev/null
-            mkdir -p bootstrap
-            if [ -f "${name}/super-c.exe" ]; then
-              cp "${name}/super-c.exe" bootstrap/super-c.exe
-            else
-              cp "${name}.exe" bootstrap/super-c.exe
-            fi
-            cp -R std ffi bootstrap/
-            test -f bootstrap/std/string.spc
+            if [ -f "${name}/super-c.exe" ]; then cp "${name}/super-c.exe" "$boot"; else cp "${name}.exe" "$boot"; fi
           else
             gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
             tar xzf "${name}.tar.gz"
-            if [ -f "${name}/super-c" ]; then
-              mv "${name}/super-c" super-c
-            else
-              mv "${name}" super-c
-            fi
-            chmod +x super-c
+            if [ -f "${name}/super-c" ]; then cp "${name}/super-c" "$boot"; else cp "${name}" "$boot"; fi
+            chmod +x "$boot"
           fi
-
-      - name: Build release binary
-        # build.toml flow: the bootstrap binary builds stage 0 from current source via the legacy
-        # `build <root> -o` path (works even when the bootstrap predates the build system), then
-        # stage 0 rebuilds itself with the release profile. mingw hides POSIX prototypes under
-        # -std=c11's __STRICT_ANSI__, so the Windows leg overrides --cstd with gnu11.
-        run: |
-          set -eu
-          bin="super-c${BINEXT:-}"
+          test -x "./$boot"
+          # mingw hides the POSIX prototypes under -std=c11's __STRICT_ANSI__, so the Windows leg overrides
+          # the manifest's base C flags. Empty elsewhere, which leaves the manifest's own value alone.
           if [ "${{ runner.os }}" = Windows ]; then
-            # mingw needs gnu11; the legacy in-process cc path hardcodes c11, so stage 0 is
-            # emit + one explicit gcc invocation here in bash.
-            cstd="-std=gnu11 -D_POSIX_C_SOURCE=200809L"
-            ./bootstrap/super-c.exe --bootstrap-tags src/main.spc
-            # shellcheck disable=SC2046
-            "${CC:-gcc}" $cstd -O1 $(find src/build -name '*.c') -o "stage0-$bin" $(cat src/build/__ldflags src/build/raw/__ldflags 2>/dev/null)
-            SC_CMD=1 SC_LEAK_CHECK=fatal "./stage0-$bin" release "--cstd=$cstd" -o "$bin"
-          else
-            "./super-c${BINEXT:-}" build --bootstrap-tags -o "stage0-$bin" src/main.spc
-            SC_CMD=1 SC_LEAK_CHECK=fatal "./stage0-$bin" release -o "$bin"
+            echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L" >> "$GITHUB_ENV"
           fi
-          rm -f "stage0-$bin"
 
-      - name: Check binary
+      # --- Build: debug from the bootstrap, then the suite, then release over the same binary ------------
+      # Every step goes through the build engine (parallel compile + ccache) on every platform -- no
+      # hand-written compiler invocation, which is what used to make the Windows leg three times slower.
+      # `build` and `release` also INSTALL their result as `super-c`, over the binary running the build:
+      # each profile links its own copy under <out-dir>/<profile>/ and the install renames a fresh file onto
+      # the name (sc_rename parks a running Windows image aside; Windows forbids deleting a live image but
+      # permits renaming one). `test` deliberately does not install -- it runs the profile's copy where it
+      # lies, so a run of the suite can never leave a dev binary where the release artifact was.
+      - name: Build the compiler
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
+          boot="./super-c-boot${BINEXT:-}"
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          SC_CMD=1 SC_LEAK_CHECK=fatal "$boot" build --bootstrap-tags ${cstd:+"$cstd"}
+          test -x "./$bin"
+
+      # The full suite, on every platform, with the binary this commit just produced -- so a failure is a
+      # failure of this code, not of the bootstrap. Leak-gated: every process in the run exits nonzero if it
+      # leaks, double-frees or uses freed memory. `test` rebuilds the project first and so relinks `super-c`
+      # while `super-c` is the process running: see sc_rename for why that is allowed even on Windows.
+      - name: Run the test suite
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          SC_LEAK_CHECK=fatal "./$bin" test ${cstd:+"$cstd"}
+
+      - name: Build the release binary
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          # 2) release build, by the binary step 1 produced, over itself
+          SC_CMD=1 SC_LEAK_CHECK=fatal "./$bin" release ${cstd:+"$cstd"}
           test -x "./$bin"
           if [ "${{ runner.os }}" != Windows ]; then file "./$bin"; fi
+
+      # The concurrency runtime end to end -- OS threads, an Arc'd mutex and atomics across them, coroutines
+      # on the worker pool, channels, `select`, the data-parallel API and the timer list -- built and run by
+      # the release binary, so the artifact that ships is the one that was exercised.
+      - name: Run the concurrency smoke test
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          smoke="smoke${BINEXT:-}"
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          "./$bin" build ci/parallel_smoke.spc -o "$smoke" ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$smoke"
 
       # --- Package one archive per platform -------------------------------------------------------------
       - name: Package
@@ -208,7 +229,7 @@ jobs:
           set -eu
           arch="$(uname -m)"
           name="super-c-${{ matrix.target }}-${arch}"
-          bin="super-c${BINEXT:-}"
+          bin="super-c${BINEXT:-}" # the release build -- the one the suite and the smoke test just ran
           mkdir -p "dist/${name}"
           if [ "${{ matrix.target }}" = windows ]; then
             cp "$bin" "dist/${name}/super-c.exe"

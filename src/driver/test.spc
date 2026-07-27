@@ -648,12 +648,13 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
     plan.ok = plan.ok && pok;
 }
 
-// Headers the generated test runner needs: POSIX forks + reaps (unistd/sys/wait), Windows spawns one
-// subprocess per test (process.h/_spawnv, stdint.h/intptr_t). Chosen by the C preprocessor rather than by
-// `@platform`, because this text is compiled for the TARGET -- which is not necessarily the platform this
-// compiler is running on. It also keeps both runners in every build, so neither can rot unnoticed.
+// Headers the generated test runner needs: POSIX forks + reaps (unistd/sys/wait), Windows spawns a pool of
+// subprocesses (process.h/_spawnv, stdint.h/intptr_t, windows.h to wait on their handles). Chosen by the C
+// preprocessor rather than by `@platform`, because this text is compiled for the TARGET -- which is not
+// necessarily the platform this compiler is running on. It also keeps both runners in every build, so
+// neither can rot unnoticed.
 const fn test_runner_includes() *const char {
-    return "#ifdef _WIN32\n#include <process.h>\n#include <stdint.h>\n#else\n#include <unistd.h>\n#include <sys/wait.h>\n#endif\n\n".ptr() as *const char;
+    return "#ifdef _WIN32\n#include <process.h>\n#include <stdint.h>\n#include <windows.h>\n#else\n#include <unistd.h>\n#include <sys/wait.h>\n#endif\n\n".ptr() as *const char;
 }
 
 // The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
@@ -760,16 +761,24 @@ static const char *sc_self(const char *fallback) {
   char *p = NULL;
   return (_get_pgmptr(&p) == 0 && p && *p) ? p : fallback;
 }
+static int sc_runner_ncpu(void) {
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+}
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   const char *filter = NULL;
-  int run_one = -1, no_fork = 0;
+  int run_one = -1, no_fork = 0, jobs = 0;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--run-one=", 10)) run_one = atoi(argv[i] + 10);
+    else if (!strncmp(argv[i], "--jobs=", 7)) jobs = atoi(argv[i] + 7);
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
-    /* --jobs accepted for CLI parity; Windows always runs its subprocesses serially */
   }
+  if (jobs < 1) jobs = sc_runner_ncpu();
+  /* WaitForMultipleObjects cannot watch more than this many handles at once. */
+  if (jobs > MAXIMUM_WAIT_OBJECTS) jobs = MAXIMUM_WAIT_OBJECTS;
   if (run_one >= 0) { /* child: run exactly one test in-process, exit status reports crash/panic */
     void *genv = sc_genv_init();
     SC_TESTS[run_one].fn(genv);
@@ -797,22 +806,50 @@ int main(int argc, char **argv) {
     }
     if (genv) sc_genv_free(genv);
   } else {
-    for (int k = 0; k < nsel; k++) {
-      const int i = sel[k];
-      char idbuf[24];
-      snprintf(idbuf, sizeof idbuf, "--run-one=%d", i);
-      const char *self = sc_self(argv[0]);
-      const char *const args[] = { self, idbuf, NULL };
-      const intptr_t rc = _spawnv(_P_WAIT, self, args);
-      const int crashed = (rc != 0);
-      if (crashed == SC_TESTS[i].should_panic) {
-        printf("test %s ... ok%s\n", SC_TESTS[i].name, SC_TESTS[i].should_panic ? " (panicked as expected)" : "");
+    /* A pool of subprocesses, `jobs` at a time -- the same shape as the POSIX fork pool: _P_NOWAIT hands
+       back a process handle instead of blocking, and WaitForMultipleObjects reaps whichever finishes
+       first. Serial spawning was what made this runner several times slower than its POSIX siblings. */
+    HANDLE running[MAXIMUM_WAIT_OBJECTS];
+    int running_test[MAXIMUM_WAIT_OBJECTS];
+    int active = 0, next = 0;
+    while (next < nsel || active > 0) {
+      while (active < jobs && next < nsel) {
+        const int i = sel[next++];
+        char idbuf[24];
+        snprintf(idbuf, sizeof idbuf, "--run-one=%d", i);
+        const char *self = sc_self(argv[0]);
+        const char *const args[] = { self, idbuf, NULL };
+        const intptr_t ph = _spawnv(_P_NOWAIT, self, args);
+        if (ph == -1) {
+          printf("test %s ... FAILED (could not start)\n", SC_TESTS[i].name);
+          failed++;
+          fflush(stdout);
+          continue;
+        }
+        running[active] = (HANDLE)ph;
+        running_test[active] = i;
+        active++;
+      }
+      if (active == 0) continue;
+      const DWORD w = WaitForMultipleObjects((DWORD)active, running, FALSE, INFINITE);
+      const DWORD slot = w - WAIT_OBJECT_0;
+      if (w == WAIT_FAILED || slot >= (DWORD)active) break;
+      DWORD code = 1;
+      GetExitCodeProcess(running[slot], &code);
+      CloseHandle(running[slot]);
+      const int ti = running_test[slot];
+      running[slot] = running[active - 1]; /* the pool is unordered: backfill from the end */
+      running_test[slot] = running_test[active - 1];
+      active--;
+      const int crashed = (code != 0);
+      if (crashed == SC_TESTS[ti].should_panic) {
+        printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
         passed++;
-      } else if (SC_TESTS[i].should_panic) {
-        printf("test %s ... FAILED (expected a panic)\n", SC_TESTS[i].name);
+      } else if (SC_TESTS[ti].should_panic) {
+        printf("test %s ... FAILED (expected a panic)\n", SC_TESTS[ti].name);
         failed++;
       } else {
-        printf("test %s ... FAILED\n", SC_TESTS[i].name);
+        printf("test %s ... FAILED\n", SC_TESTS[ti].name);
         failed++;
       }
       fflush(stdout);

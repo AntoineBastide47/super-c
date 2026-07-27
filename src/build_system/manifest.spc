@@ -38,8 +38,11 @@ extend Command as Free {
     }
 }
 
-/// The validated build.toml. Ownership: `toml` keeps the parsed items alive -- Profile/Command `name`
-/// views borrow into their section strings.
+/// The validated build.toml. `bin` is where the project's binary is INSTALLED: each profile links its own
+/// copy under `<out_dir>/<profile>/`, and only `build`/`release` (never `test` or `run`) copy one onto that
+/// name -- so a profile can never quietly stand in for another's artifact.
+/// Ownership: `toml` keeps the parsed items alive -- Profile/Command `name` views borrow into their
+/// section strings.
 pub struct Manifest<'a> {
     pub toml: Vector<toml::TomlItem>,
     pub bin: String,

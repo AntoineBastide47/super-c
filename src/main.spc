@@ -103,6 +103,25 @@ fn exe_std_dir(argv0: *const char) *mut char {
     } else {
         unsafe out[0] = '.' as char;
     }
+    // std lives beside the compiler -- but not always DIRECTLY beside it: a profile build sits two levels
+    // down in <out-dir>/<profile>/, so try the parents before giving up. First 'std' directory wins.
+    let mut cut = dirlen;
+    for _up in 0..3 {
+        unsafe cstring::memcpy(out + cut, "/std".ptr(), 4);
+        unsafe out[cut + 4] = 0 as char;
+        if unsafe shim::sc_stat_isdir(out) == 1 {
+            return out;
+        }
+        let mut k = cut;
+        while k > 0 && unsafe out[k - 1] != '/' as char {
+            k = k - 1;
+        }
+        if k <= 1 {
+            break;
+        }
+        cut = k - 1;
+    }
+    // Nothing found: answer with the one next to the binary, so a failure names the obvious place.
     unsafe cstring::memcpy(out + dirlen, "/std".ptr(), 4);
     unsafe out[dirlen + 4] = 0 as char;
     return out;

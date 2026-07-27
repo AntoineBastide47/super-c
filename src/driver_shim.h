@@ -30,6 +30,12 @@ int sc_ncpu(void);                    /* online core count; >= 1 */
 long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
 long long sc_spawn(const char *cmd);  /* start cmd via the shell, no wait; pid/handle or -1 */
 int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */
+/* Make `path` executable (0755). No-op on Windows, which goes by extension. 0 on success. */
+int sc_chmod_exec(const char *path);
+
+/* rename() that also replaces an existing destination on Windows -- including a destination that is a
+   RUNNING executable, which is how the compiler replaces itself. That case parks the old image as
+   "<to>.old" (Windows cannot delete a live one) and the next call sweeps it. */
 int sc_rename(const char *from, const char *to); /* rename(2); replaces an existing target on Windows too */
 int sc_setenv(const char *name, const char *value); /* setenv(3) overwrite / _putenv_s */
 
