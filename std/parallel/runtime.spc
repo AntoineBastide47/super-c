@@ -493,8 +493,9 @@ fn worker_main(arg: *mut void) *mut void {
         }
         unsafe co.sched_ctx = sched_ctx;
         if unsafe co.inited == 0 {
-            // Set the context up on the worker that first runs it -- macOS ucontext is not reliably
-            // cross-thread if created on the submitting thread.
+            // Arm the context on the worker that first runs it, not at spawn: arming writes the initial
+            // frame to the coroutine's own stack, so a task that is queued but never reached never faults
+            // a page of it in.
             unsafe sc_runtime::sc_rt_ctx_init(co.ctx, co.stack, STACK_SIZE, coroutine_start, co);
             unsafe co.inited = 1;
         }

@@ -1,7 +1,8 @@
 /* Platform substrate for the Super-C concurrency runtime (see parallel.md M2). One portable C file
    (`sc_rt.c`, auto-discovered from this header) backs it, branching on the OS internally: POSIX uses
-   pthread + ucontext + mmap; Windows uses CONDITION_VARIABLE + fibers + VirtualAlloc. Everything here is
-   the raw, unsafe layer the Super-C scheduler is built on -- not a user-facing API. */
+   pthread + mmap + a hand-written context switch (ucontext remains the fallback on any ABI other than
+   x86-64 and AArch64); Windows uses CONDITION_VARIABLE + fibers + VirtualAlloc. Everything here is the raw,
+   unsafe layer the Super-C scheduler is built on -- not a user-facing API. */
 #ifndef SC_RT_H
 #define SC_RT_H
 #include <stdint.h>
@@ -37,9 +38,8 @@ void sc_rt_sleep_ns(int64_t ns);
 
 /* A guard-paged stack: an inaccessible page sits just below the returned usable low end, so an overflow
    faults instead of corrupting memory. Returns the usable low end (the stack grows down from low+size), or
-   NULL on failure. Free with the same `size`. On Windows the region is RESERVED but never committed and
-   never written: fibers allocate and guard their own stacks there, so committing this one would cost a
-   quarter megabyte per coroutine for nothing. */
+   NULL on failure. Free with the same `size`. Committed on every platform -- coroutines run on this memory
+   -- but pages are only faulted in as the stack is used, so a task that never goes deep never pays. */
 void *sc_rt_stack_alloc(size_t size);
 void sc_rt_stack_free(void *usable, size_t size);
 
@@ -70,10 +70,11 @@ int sc_rt_cond_timedwait_ns(void *c, void *m, int64_t rel_ns);
 void sc_rt_cond_signal(void *c);
 void sc_rt_cond_broadcast(void *c);
 
-/* Stackful context switch (ucontext on POSIX, fibers on Windows). `sc_rt_ctx_alloc` makes an empty context
-   for the current thread's root (its state is captured on the first switch away). `sc_rt_ctx_init` arms a
-   context to run `entry(arg)` on `stack` (size bytes; ignored on Windows, which owns fiber stacks).
-   `sc_rt_ctx_switch` saves the running context into `from` and resumes `to`. */
+/* Stackful context switch (hand-written assembly on POSIX, fibers on Windows). `sc_rt_ctx_alloc` makes an
+   empty context for the current thread's root (its state is captured on the first switch away).
+   `sc_rt_ctx_init` arms a context to run `entry(arg)` on `stack` (size bytes; ignored on Windows, which owns
+   fiber stacks). `sc_rt_ctx_switch` saves the running context into `from` and resumes `to`. An `entry` that
+   returns is a bug the switch traps on -- a coroutine hands control back with a switch, never a return. */
 void *sc_rt_ctx_alloc(void);
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg);
 void sc_rt_ctx_switch(void *from, void *to);
