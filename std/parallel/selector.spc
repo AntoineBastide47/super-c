@@ -80,12 +80,12 @@ fn no_arm(_p: *const void) bool {
 // The type-erasing trampolines: one instantiation per element type, reached through `Arm.ready`.
 fn recv_ready<T>(p: *const void) bool {
     let rx = p as *const channel::Receiver<T>;
-    return unsafe (*rx).select_ready();
+    return rx.select_ready();
 }
 
 fn send_ready<T>(p: *const void) bool {
     let tx = p as *const channel::Sender<T>;
-    return unsafe (*tx).select_ready();
+    return tx.select_ready();
 }
 
 // The park hand-off: the worker runs it once the selector's context is saved, which is what stops a notify
@@ -239,7 +239,7 @@ extend Selector {
             unsafe self.arms[i].w = sync::Waiter { co: co, token: token, arm: i as i32, next: null, claim: claim };
             let cv = unsafe self.arms[i].cv;
             let wp = &mut unsafe self.arms[i].w;
-            unsafe (*cv).register(wp);
+            cv.register(wp);
         }
         runtime::park_timed(token, deadline, commit_unlock_all, self);
         if deadline != 0 {
@@ -251,7 +251,7 @@ extend Selector {
             let raw = unsafe self.arms[i].raw;
             sync::raw_mutex_lock(raw);
             let wp = &mut unsafe self.arms[i].w;
-            unsafe (*cv).unregister(wp);
+            cv.unregister(wp);
             sync::raw_mutex_unlock(raw);
         }
     }

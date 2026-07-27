@@ -52,13 +52,13 @@ pub struct Done {
 
 /// Mark a call finished and wake its caller. `pub` for linkage (the per-`F` trampolines call it).
 pub fn complete(d: *mut Done) {
-    let m = &unsafe (*d).state;
+    let m = &unsafe d.state;
     let mut g = m.lock();
     {
         let v = g.get_mut();
         *v = 1;
     }
-    let cv = &unsafe (*d).cv;
+    let cv = &unsafe d.cv;
     cv.notify_all(); // under the paired lock: it guards the wait queue
 }
 
@@ -66,29 +66,29 @@ pub fn complete(d: *mut Done) {
 fn pool_main(arg: *mut void) *mut void {
     let p = arg as *mut Pool;
     loop {
-        unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
+        unsafe sc_runtime::sc_rt_mutex_lock(p.lock);
         let mut expired = false;
-        while unsafe (*p).head == null && unsafe (*p).shutting == 0 && !expired {
-            unsafe (*p).idle = unsafe (*p).idle + 1;
-            let rc = unsafe sc_runtime::sc_rt_cond_timedwait_ns((*p).cv, (*p).lock, IDLE_NS);
-            unsafe (*p).idle = unsafe (*p).idle - 1;
+        while unsafe p.head == null && unsafe p.shutting == 0 && !expired {
+            unsafe p.idle = unsafe p.idle + 1;
+            let rc = unsafe sc_runtime::sc_rt_cond_timedwait_ns(p.cv, p.lock, IDLE_NS);
+            unsafe p.idle = unsafe p.idle - 1;
             // Timed out with still nothing to do: a burst of blocking calls should not cost threads for
             // the rest of the process. `submit` starts another the moment one is needed again.
-            expired = rc != 0 && unsafe (*p).head == null;
+            expired = rc != 0 && unsafe p.head == null;
         }
-        let j = unsafe (*p).head;
+        let j = unsafe p.head;
         if j == null {
-            unsafe (*p).live = unsafe (*p).live - 1;
-            unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
+            unsafe p.live = unsafe p.live - 1;
+            unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
             break; // shutting down and drained, or idle for too long
         }
-        unsafe (*p).head = unsafe (*j).next;
-        if unsafe (*p).head == null {
-            unsafe (*p).tail = null;
+        unsafe p.head = unsafe j.next;
+        if unsafe p.head == null {
+            unsafe p.tail = null;
         }
-        unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
-        let run = unsafe (*j).run;
-        let env = unsafe (*j).env;
+        unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
+        let run = unsafe j.run;
+        let env = unsafe j.env;
         let mut g = Global {};
         g.dealloc(j, sizeof(BJob), alignof(BJob));
         run(env); // outside the lock: this is the part that is allowed to block
@@ -148,26 +148,26 @@ pub fn submit(run: fn(*mut void) void, env: *mut void) {
     let mut g = Global {};
     let j = g.alloc(sizeof(BJob), alignof(BJob)) as *mut BJob;
     unsafe j[0] = BJob { run: run, env: env, next: null };
-    unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
-    if unsafe (*p).tail == null {
-        unsafe (*p).head = j;
+    unsafe sc_runtime::sc_rt_mutex_lock(p.lock);
+    if unsafe p.tail == null {
+        unsafe p.head = j;
     } else {
-        unsafe (*(*p).tail).next = j;
+        unsafe p.tail.next = j;
     }
-    unsafe (*p).tail = j;
+    unsafe p.tail = j;
     // Grow only when nobody is free to take it: blocking calls are supposed to be rare and long.
-    let need = unsafe (*p).idle == 0 && unsafe (*p).live < MAX_THREADS;
+    let need = unsafe p.idle == 0 && unsafe p.live < MAX_THREADS;
     if need {
-        unsafe (*p).live = unsafe (*p).live + 1;
+        unsafe p.live = unsafe p.live + 1;
     }
-    unsafe sc_runtime::sc_rt_cond_signal((*p).cv);
-    unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
+    unsafe sc_runtime::sc_rt_cond_signal(p.cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
     if need {
         let mut h: *mut void = null;
         let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, pool_main, p);
-        unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
-        unsafe (*p).threads.push(h);
-        unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
+        unsafe sc_runtime::sc_rt_mutex_lock(p.lock);
+        unsafe p.threads.push(h);
+        unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
     }
 }
 
@@ -220,9 +220,9 @@ struct RawJob {
 // Runs one `run_blocking` job on a pool thread. `pub` for linkage.
 pub fn raw_entry(p: *mut void) {
     let j = p as *mut RawJob;
-    let run = unsafe (*j).run;
-    let env = unsafe (*j).env;
-    let d = unsafe (*j).done;
+    let run = unsafe j.run;
+    let env = unsafe j.env;
+    let d = unsafe j.done;
     let mut g = Global {};
     g.dealloc(j, sizeof(RawJob), alignof(RawJob));
     run(env);
@@ -256,18 +256,18 @@ pub fn shutdown() {
         return;
     }
     let p = G_POOL;
-    unsafe sc_runtime::sc_rt_mutex_lock((*p).lock);
-    unsafe (*p).shutting = 1;
-    unsafe sc_runtime::sc_rt_cond_broadcast((*p).cv);
-    unsafe sc_runtime::sc_rt_mutex_unlock((*p).lock);
-    let n = unsafe (*p).threads.len();
+    unsafe sc_runtime::sc_rt_mutex_lock(p.lock);
+    unsafe p.shutting = 1;
+    unsafe sc_runtime::sc_rt_cond_broadcast(p.cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
+    let n = unsafe p.threads.len();
     for i in 0..n {
-        let h = unsafe (*p).threads[i];
+        let h = unsafe p.threads[i];
         let _ = unsafe sc_runtime::sc_rt_thread_join(h);
     }
-    unsafe (*p).threads.free();
-    unsafe sc_runtime::sc_rt_mutex_free((*p).lock);
-    unsafe sc_runtime::sc_rt_cond_free((*p).cv);
+    unsafe p.threads.free();
+    unsafe sc_runtime::sc_rt_mutex_free(p.lock);
+    unsafe sc_runtime::sc_rt_cond_free(p.cv);
     let mut g = Global {};
     g.dealloc(p, sizeof(Pool), alignof(Pool));
     atomic_store(sp, 0);

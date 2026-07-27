@@ -1207,7 +1207,7 @@ fn on_code_action(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
         if d.start > h.end || dend < h.off {
             continue; // no overlap with the requested range
         }
-        if d.fix_kind > 3 {
+        if d.fix_kind > 4 {
             continue; // unknown fix kind: never guess an edit
         }
         let mut title = String::from_str("Remove unused code");
@@ -1220,6 +1220,9 @@ fn on_code_action(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
         } else if d.fix_kind == 3 {
             title.clear();
             title.push_str("Insert generated code");
+        } else if d.fix_kind == 4 {
+            title.clear();
+            title.push_str("Apply fix");
         }
         let mut te = json::JSON::object();
         if d.fix_kind == 1 {
@@ -1230,6 +1233,9 @@ fn on_code_action(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
             te.emplace("newText", json::JSON::str("const "));
         } else if d.fix_kind == 3 {
             te.emplace("range", range_json(src, &ls, d.fix_start, 0));
+            te.emplace("newText", json::JSON::str(d.fix_text.as_str()));
+        } else if d.fix_kind == 4 {
+            te.emplace("range", range_json(src, &ls, d.fix_start, d.fix_end - d.fix_start));
             te.emplace("newText", json::JSON::str(d.fix_text.as_str()));
         } else {
             te.emplace("range", range_json(src, &ls, d.fix_start, d.fix_end - d.fix_start));

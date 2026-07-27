@@ -23,11 +23,12 @@ pub struct DiagRec {
     pub severity: u8, // LSP DiagnosticSeverity: 1 = error, 2 = warning
     pub msg: String,
     // machine-applicable fix: -1 = none, else a LintFix kind (0 delete [fix_start, fix_end),
-    // 1 insert '_', 2 insert 'const ', 3 insert `fix_text`) surfaced as an LSP quick fix
+    // 1 insert '_', 2 insert 'const ', 3 insert `fix_text`, 4 replace [fix_start, fix_end) with
+    // `fix_text`) surfaced as an LSP quick fix
     pub fix_kind: i32,
     pub fix_start: u32,
     pub fix_end: u32,
-    pub fix_text: String, // kind-3 payload (generated code); empty otherwise
+    pub fix_text: String, // kind-3/4 payload (generated / replacement text); empty otherwise
 }
 
 extend DiagRec as Free {
@@ -106,11 +107,16 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
         let mut fk: i32 = -1;
         let mut fs: u32 = 0;
         let mut fe: u32 = 0;
+        let mut ftx = String::new();
         for j in 0..e.fixes.len() {
-            if e.fixes.at(j).warn == k as u32 {
-                fk = e.fixes.at(j).kind;
-                fs = e.fixes.at(j).start;
-                fe = e.fixes.at(j).end;
+            let f = *e.fixes.at(j);
+            if f.warn == k as u32 {
+                fk = f.kind;
+                fs = f.start;
+                fe = f.end;
+                if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
+                    ftx = e.fix_texts.at(f.text as usize).clone();
+                }
                 break; // one quick fix per warning
             }
         }
@@ -124,7 +130,7 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
                 fix_kind: fk,
                 fix_start: fs,
                 fix_end: fe,
-                fix_text: String::new(),
+                fix_text: ftx,
             },
         );
     }

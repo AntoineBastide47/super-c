@@ -123,11 +123,11 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
         // Live top-level items, after `platform_filter` compacted `program.items`: a `@platform`-gated-out
         // `@c.source`/`@c.link` leaves its attr in the table, so skip attrs whose owning item is gone (else
         // every OS would pull in every other OS's runtime C and `-l` flags).
-        let rootn = unsafe (*ap).root;
-        let live = unsafe (*ap).at_const(rootn).as_data.program.items;
-        let live_ids = unsafe (*ap).list(live);
-        for ai in 0..unsafe (*ap).attrs.len() {
-            let at = unsafe (*ap).attrs[ai];
+        let rootn = unsafe ap.root;
+        let live = ap.at_const(rootn).as_data.program.items;
+        let live_ids = ap.list(live);
+        for ai in 0..unsafe ap.attrs.len() {
+            let at = unsafe ap.attrs[ai];
             let is_src = at.kind == AttrKind::ATTR_C_SOURCE as u8;
             let is_link = at.kind == AttrKind::ATTR_C_LINK as u8;
             if !is_src && !is_link || at.str_span.end <= at.str_span.start {
@@ -185,20 +185,20 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             ext_c_wrap(root, keep, &mut seen, &mut nsrc, &rsl[0], err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
-        let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
-        let ids = unsafe (*ap).list(items);
+        let items = unsafe ap.at_const(ap.root).as_data.program.items;
+        let ids = ap.list(items);
         for i in 0..items.len {
             let nid = unsafe ids[i as usize];
-            let nk = unsafe (*ap).at_const(nid).kind;
+            let nk = ap.at_const(nid).kind;
             let hdr = if nk == NodeKind::NODE_EXTERN_BLOCK {
-                unsafe (*ap).at_const(nid).as_data.extern_block.header;
+                ap.at_const(nid).as_data.extern_block.header;
             } else {
                 NODE_NONE;
             };
             if hdr == NODE_NONE {
                 continue;
             }
-            let hs = unsafe (*ap).at_const(hdr).span;
+            let hs = ap.at_const(hdr).span;
             let hl = (hs.end - hs.start) as i32 - 2;
             if hl <= 2 {
                 continue;

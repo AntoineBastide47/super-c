@@ -220,8 +220,9 @@ const fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
 }
 
 // Apply machine fixes ascending: kind 0 deletes [start, end), kind 1 inserts '_' before start,
-// kind 2 inserts 'const ' before start. An overlapping fix is skipped -- the next `--fix` re-lint
-// pass records it against the patched source.
+// kind 2 inserts 'const ' before start, kind 3 inserts fix_texts[text] before start, kind 4 replaces
+// [start, end) with fix_texts[text]. An overlapping fix is skipped -- the next `--fix` re-lint pass
+// records it against the patched source.
 fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<String>) String {
     fixes.sort_by(lint_fix_cmp);
     let mut out = String::new();
@@ -244,6 +245,11 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<
                 out.push_str(texts.at(f.text as usize).as_str());
             }
             pos = f.start as usize;
+        } else if f.kind == 4 {
+            if f.text as usize < texts.len() {
+                out.push_str(texts.at(f.text as usize).as_str());
+            }
+            pos = f.end as usize;
         } else {
             pos = f.end as usize;
         }

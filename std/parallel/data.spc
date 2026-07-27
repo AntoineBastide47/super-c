@@ -97,20 +97,20 @@ pub struct ChunkEnv {
 /// chunk's own range once; Dynamic claims `grain` indices at a time from the shared cursor, so a chunk that
 /// draws cheap indices comes back for more; Guided claims a share of what remains, shrinking to `grain`.
 pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
-    let b = unsafe (*ce).batch;
-    if unsafe (*b).mode == 0 {
-        if unsafe (*ce).lo >= unsafe (*ce).hi {
+    let b = unsafe ce.batch;
+    if unsafe b.mode == 0 {
+        if unsafe ce.lo >= unsafe ce.hi {
             return false;
         }
-        *lo = unsafe (*ce).lo;
-        *hi = unsafe (*ce).hi;
-        unsafe (*ce).lo = unsafe (*ce).hi; // one-shot
+        *lo = unsafe ce.lo;
+        *hi = unsafe ce.hi;
+        unsafe ce.lo = unsafe ce.hi; // one-shot
         return true;
     }
-    let cur = &unsafe (*b).cursor;
-    let grain = unsafe (*b).grain;
-    let end = unsafe (*b).end;
-    if unsafe (*b).mode == 1 {
+    let cur = &unsafe b.cursor;
+    let grain = unsafe b.grain;
+    let end = unsafe b.end;
+    if unsafe b.mode == 1 {
         let start = cur.fetch_add(grain, atomics::MemoryOrder::Relaxed);
         if start >= end {
             return false;
@@ -132,7 +132,7 @@ pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
             return false;
         }
         let left = end - start;
-        let mut take = left / (unsafe (*b).nw * 2);
+        let mut take = left / (unsafe b.nw * 2);
         if take < grain {
             take = grain;
         }
@@ -149,11 +149,11 @@ pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
 
 /// Report this chunk finished; the last one out wakes the caller.
 pub fn finish(ce: *mut ChunkEnv) {
-    let l = unsafe (*(*ce).batch).latch;
+    let l = unsafe ce.batch.latch;
     if l == null {
         return; // ran inline: the caller is this thread
     }
-    let lref = &unsafe (*l).left;
+    let lref = &unsafe l.left;
     let mut g = lref.lock();
     let mut zero = false;
     {
@@ -163,7 +163,7 @@ pub fn finish(ce: *mut ChunkEnv) {
     }
     if zero {
         // Under the paired lock: it guards the condvar's wait queue.
-        let cvref = &unsafe (*l).cv;
+        let cvref = &unsafe l.cv;
         cvref.notify_all();
     }
 }
@@ -280,9 +280,9 @@ pub struct RangeShared<F> {
 /// The `range` chunk trampoline. `pub` for linkage.
 pub fn range_chunk<F: fn(usize) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
-    let sh = (unsafe (*(*ce).batch).shared) as *mut RangeShared<F>;
-    let b = unsafe (*sh).body; // shallow copy: a `fn(..)` body owns nothing, so copies cost and free nothing
-    let base = unsafe (*sh).start;
+    let sh = (unsafe ce.batch.shared) as *mut RangeShared<F>;
+    let b = unsafe sh.body; // shallow copy: a `fn(..)` body owns nothing, so copies cost and free nothing
+    let base = unsafe sh.start;
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {
@@ -326,9 +326,9 @@ pub struct EachShared<T, F> {
 /// The `each` chunk trampoline. `pub` for linkage.
 pub fn each_chunk<T, F: fn(&T) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
-    let sh = (unsafe (*(*ce).batch).shared) as *mut EachShared<T, F>;
-    let b = unsafe (*sh).body;
-    let items = unsafe (*sh).items;
+    let sh = (unsafe ce.batch.shared) as *mut EachShared<T, F>;
+    let b = unsafe sh.body;
+    let items = unsafe sh.items;
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {
@@ -367,9 +367,9 @@ pub struct EachMutShared<T, F> {
 /// The `each_mut` chunk trampoline. `pub` for linkage.
 pub fn each_mut_chunk<T, F: fn(&mut T) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
-    let sh = (unsafe (*(*ce).batch).shared) as *mut EachMutShared<T, F>;
-    let b = unsafe (*sh).body;
-    let items = unsafe (*sh).items;
+    let sh = (unsafe ce.batch.shared) as *mut EachMutShared<T, F>;
+    let b = unsafe sh.body;
+    let items = unsafe sh.items;
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {
@@ -413,11 +413,11 @@ pub struct ChunksShared<T, F> {
 /// The `chunks_mut` trampoline: the dispatched unit is a chunk index, not an element. `pub` for linkage.
 pub fn chunks_mut_chunk<T, F: fn([]mut T) + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
-    let sh = (unsafe (*(*ce).batch).shared) as *mut ChunksShared<T, F>;
-    let b = unsafe (*sh).body;
-    let items = unsafe (*sh).items;
-    let total = unsafe (*sh).total;
-    let size = unsafe (*sh).size;
+    let sh = (unsafe ce.batch.shared) as *mut ChunksShared<T, F>;
+    let b = unsafe sh.body;
+    let items = unsafe sh.items;
+    let total = unsafe sh.total;
+    let size = unsafe sh.size;
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {
@@ -471,10 +471,10 @@ pub struct ReduceShared<T, A, MK, FOLD> {
 /// The `reduce` chunk trampoline: fold this chunk's elements into its own accumulator. `pub` for linkage.
 pub fn reduce_chunk<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sync>(e: *mut void) {
     let ce = e as *mut ChunkEnv;
-    let sh = (unsafe (*(*ce).batch).shared) as *mut ReduceShared<T, A, MK, FOLD>;
-    let mk = unsafe (*sh).make;
-    let fd = unsafe (*sh).fold;
-    let items = unsafe (*sh).items;
+    let sh = (unsafe ce.batch.shared) as *mut ReduceShared<T, A, MK, FOLD>;
+    let mk = unsafe sh.make;
+    let fd = unsafe sh.fold;
+    let items = unsafe sh.items;
     let mut acc = mk();
     let mut lo: usize = 0;
     let mut hi: usize = 0;
@@ -483,7 +483,7 @@ pub fn reduce_chunk<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + S
             acc = fd(acc, &unsafe items[i]);
         }
     }
-    unsafe (*sh).out[unsafe (*ce).idx] = acc; // this chunk's slot, written once
+    unsafe sh.out[unsafe ce.idx] = acc; // this chunk's slot, written once
     finish(ce);
 }
 
@@ -583,8 +583,8 @@ pub struct SectionsShared {
 /// The `sections` chunk trampoline -- non-generic, since the sections are already type-erased.
 pub fn sections_chunk(e: *mut void) {
     let ce = e as *mut ChunkEnv;
-    let sh = (unsafe (*(*ce).batch).shared) as *mut SectionsShared;
-    let jobs = unsafe (*sh).jobs;
+    let sh = (unsafe ce.batch.shared) as *mut SectionsShared;
+    let jobs = unsafe sh.jobs;
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {

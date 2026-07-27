@@ -542,7 +542,7 @@ extend JSONParser {
     // this object until the child closes.
     fn set_object_value(self: &mut Self, json: JSON) usize {
         let t = self.top() as *mut JSON;
-        if !self.comma_detected && unsafe (*t).obj.len() != 0 {
+        if !self.comma_detected && unsafe t.obj.len() != 0 {
             self.fail("Missing ',' between object members");
             return 0;
         }
@@ -552,23 +552,23 @@ extend JSONParser {
         }
         let k = replace(&mut self.pending_key, String::new());
         self.candidate_key.clear();
-        unsafe (*t).obj.push(JSONPair { key: k, value: json });
+        unsafe t.obj.push(JSONPair { key: k, value: json });
         self.pending_key_set = false;
         self.comma_detected = false;
-        let idx = unsafe (*t).obj.len() - 1;
-        return ((&mut unsafe (*t).obj[idx].value) as *mut JSON) as usize;
+        let idx = unsafe t.obj.len() - 1;
+        return ((&mut unsafe t.obj[idx].value) as *mut JSON) as usize;
     }
 
     // Append `json` to the open array; frees it on a comma error.
     fn set_array_value(self: &mut Self, json: JSON) {
         let t = self.top() as *mut JSON;
-        if !self.comma_detected && unsafe (*t).arr.len() != 0 {
+        if !self.comma_detected && unsafe t.arr.len() != 0 {
             self.fail("Missing ',' between array members");
             let j = json;
             j.free();
             return;
         }
-        unsafe (*t).arr.push(json);
+        unsafe t.arr.push(json);
         self.comma_detected = false;
     }
 
@@ -784,7 +784,7 @@ extend JSONParser {
                     return i;
                 }
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).kind == JT_OBJECT {
+                if unsafe t.kind == JT_OBJECT {
                     let mut child = JSON::object();
                     child.reserve(8);
                     let slot = self.set_object_value(child);
@@ -792,28 +792,28 @@ extend JSONParser {
                         return i;
                     }
                     self.stack.push(slot);
-                } else if unsafe (*t).kind == JT_ARRAY {
+                } else if unsafe t.kind == JT_ARRAY {
                     let mut child = JSON::object();
                     child.reserve(8);
                     self.set_array_value(child);
                     if self.err.len() != 0 {
                         return i;
                     }
-                    let last = unsafe (*t).arr.len() - 1;
-                    self.stack.push(((&mut unsafe (*t).arr[last]) as *mut JSON) as usize);
+                    let last = unsafe t.arr.len() - 1;
+                    self.stack.push(((&mut unsafe t.arr[last]) as *mut JSON) as usize);
                 } else if self.stack.len() == 1 {
-                    unsafe (*t).reset_to(JT_OBJECT);
-                    unsafe (*t).obj.reserve(8);
+                    t.reset_to(JT_OBJECT);
+                    unsafe t.obj.reserve(8);
                 }
                 self.found_data = true;
             } else if c == b'}' {
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).kind == JT_OBJECT {
+                if unsafe t.kind == JT_OBJECT {
                     if self.pending_key_set {
                         self.fail_s(format("Missing value for key '{}' in object", self.pending_key.as_str()));
                         return i;
                     }
-                    if self.comma_detected && unsafe (*t).obj.len() != 0 {
+                    if self.comma_detected && unsafe t.obj.len() != 0 {
                         self.fail("Trailing ',' before closing '}'");
                         return i;
                     }
@@ -822,7 +822,7 @@ extend JSONParser {
                     if self.stack.len() == 0 {
                         return i + 1;
                     }
-                } else if unsafe (*t).kind == JT_ARRAY {
+                } else if unsafe t.kind == JT_ARRAY {
                     self.fail("Expected ']' but found '}'");
                     return i;
                 } else {
@@ -837,7 +837,7 @@ extend JSONParser {
                     return i;
                 }
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).kind == JT_OBJECT {
+                if unsafe t.kind == JT_OBJECT {
                     let mut child = JSON::array();
                     child.reserve(8);
                     let slot = self.set_object_value(child);
@@ -845,29 +845,29 @@ extend JSONParser {
                         return i;
                     }
                     self.stack.push(slot);
-                } else if unsafe (*t).kind == JT_ARRAY {
+                } else if unsafe t.kind == JT_ARRAY {
                     let mut child = JSON::array();
                     child.reserve(8);
                     self.set_array_value(child);
                     if self.err.len() != 0 {
                         return i;
                     }
-                    let last = unsafe (*t).arr.len() - 1;
-                    self.stack.push(((&mut unsafe (*t).arr[last]) as *mut JSON) as usize);
+                    let last = unsafe t.arr.len() - 1;
+                    self.stack.push(((&mut unsafe t.arr[last]) as *mut JSON) as usize);
                 } else if self.stack.len() == 1 {
                     // root arrays reserve by input size (max(16, n/512)) like the original
                     let mut cap: usize = 16;
                     if n / 512 > cap {
                         cap = n / 512;
                     }
-                    unsafe (*t).reset_to(JT_ARRAY);
-                    unsafe (*t).arr.reserve(cap);
+                    t.reset_to(JT_ARRAY);
+                    unsafe t.arr.reserve(cap);
                 }
                 self.found_data = true;
             } else if c == b']' {
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).kind == JT_ARRAY {
-                    if self.comma_detected && unsafe (*t).arr.len() != 0 {
+                if unsafe t.kind == JT_ARRAY {
+                    if self.comma_detected && unsafe t.arr.len() != 0 {
                         self.fail("Trailing ',' before closing ']'");
                         return i;
                     }
@@ -876,7 +876,7 @@ extend JSONParser {
                     if self.stack.len() == 0 {
                         return i + 1;
                     }
-                } else if unsafe (*t).kind == JT_OBJECT {
+                } else if unsafe t.kind == JT_OBJECT {
                     self.fail("Expected '}' but found ']'");
                     return i;
                 } else {
@@ -886,7 +886,7 @@ extend JSONParser {
                 self.found_data = true;
             } else if c == b':' {
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).kind == JT_ARRAY {
+                if unsafe t.kind == JT_ARRAY {
                     self.fail("Unexpected ':' in an array, did you mean ','?");
                     return i;
                 }
@@ -932,7 +932,7 @@ extend JSONParser {
                         }
                         self.found_data = true;
                         let t = self.top() as *mut JSON;
-                        if unsafe (*t).kind == JT_OBJECT {
+                        if unsafe t.kind == JT_OBJECT {
                             if !self.pending_key_set {
                                 if !self.candidate_key_set {
                                     self.candidate_key = text;
@@ -945,7 +945,7 @@ extend JSONParser {
                             } else {
                                 self.set_object_value(JSON::string(text));
                             }
-                        } else if unsafe (*t).kind == JT_ARRAY {
+                        } else if unsafe t.kind == JT_ARRAY {
                             self.set_array_value(JSON::string(text));
                         } else if self.stack.len() == 1 {
                             unsafe *t = JSON::string(text);
@@ -979,7 +979,7 @@ extend JSONParser {
                 }
             } else if c == b'-' || c >= b'0' && c <= b'9' {
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).kind == JT_OBJECT && !self.pending_key_set {
+                if unsafe t.kind == JT_OBJECT && !self.pending_key_set {
                     self.fail("Expected a key before adding a number");
                     return i;
                 }
@@ -992,9 +992,9 @@ extend JSONParser {
                     return i;
                 }
                 self.found_data = true;
-                if unsafe (*t).kind == JT_OBJECT {
+                if unsafe t.kind == JT_OBJECT {
                     self.set_object_value(JSON::number(num));
-                } else if unsafe (*t).kind == JT_ARRAY {
+                } else if unsafe t.kind == JT_ARRAY {
                     self.set_array_value(JSON::number(num));
                 } else if self.stack.len() == 1 {
                     unsafe *t = JSON::number(num);
@@ -1004,7 +1004,7 @@ extend JSONParser {
                 i = q - 1;
             } else if c == b't' || c == b'f' || c == b'n' {
                 let t = self.top() as *mut JSON;
-                if unsafe (*t).kind == JT_OBJECT && !self.pending_key_set {
+                if unsafe t.kind == JT_OBJECT && !self.pending_key_set {
                     self.fail("Expected a key before adding a boolean or null value");
                     return i;
                 }
@@ -1031,9 +1031,9 @@ extend JSONParser {
                     val = JSON::boolean(false);
                 }
                 self.found_data = true;
-                if unsafe (*t).kind == JT_OBJECT {
+                if unsafe t.kind == JT_OBJECT {
                     self.set_object_value(val);
-                } else if unsafe (*t).kind == JT_ARRAY {
+                } else if unsafe t.kind == JT_ARRAY {
                     self.set_array_value(val);
                 } else if self.stack.len() == 1 {
                     unsafe *t = val;
@@ -1080,11 +1080,11 @@ pub fn parse(src: str) Result<JSON, String> {
     }
     if p.stack.len() != 0 {
         let t = p.top() as *mut JSON;
-        if unsafe (*t).kind == JT_OBJECT {
+        if unsafe t.kind == JT_OBJECT {
             root.free();
             return Result::<JSON, String>::Err(String::from_str("Missing closing '}' for object"));
         }
-        if unsafe (*t).kind == JT_ARRAY {
+        if unsafe t.kind == JT_ARRAY {
             root.free();
             return Result::<JSON, String>::Err(String::from_str("Missing closing ']' for array"));
         }

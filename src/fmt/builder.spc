@@ -34,11 +34,11 @@ extend Builder as Free {
 }
 
 const fn nd(b: &Builder, id: NodeId) Node {
-    return *unsafe (*b.ast).at_const(id);
+    return *b.ast.at_const(id);
 }
 
 const fn list_at(b: &Builder, l: NodeList, i: u32) NodeId {
-    return unsafe (*b.ast).list(l)[i as usize];
+    return unsafe b.ast.list(l)[i as usize];
 }
 
 fn span_doc(b: &mut Builder, s: tok::Span) d::DocId {
@@ -152,7 +152,7 @@ fn emit_gap_vertical(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::
     let mut segs = Vector::<TriviaSeg>::new();
     scan_gap(b, from, to, &mut segs);
     let mut i: usize = 0;
-    while i < segs.len() && (*segs.at(i)).trailing {
+    while i < segs.len() && segs.at(i).trailing {
         let sg = *segs.at(i);
         parts.push(b.p.txt(" "));
         parts.push(b.p.span(sg.start, sg.end));
@@ -164,7 +164,7 @@ fn emit_gap_vertical(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::
     // separation after the previous element (before the first leading seg or the next element)
     let mut blank = false;
     if i < segs.len() {
-        blank = (*segs.at(i)).blank_before;
+        blank = segs.at(i).blank_before;
     } else {
         blank = count_gap_newlines(b, from, to) >= 2;
     }
@@ -181,7 +181,7 @@ fn emit_gap_vertical(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::
         }
         let mut nb = false;
         if i + 1 < segs.len() {
-            nb = (*segs.at(i + 1)).blank_before;
+            nb = segs.at(i + 1).blank_before;
         } else {
             nb = count_gap_newlines(b, sg.end, to) >= 2;
         }
@@ -207,7 +207,7 @@ fn emit_lead_list(b: &mut Builder, from: u32, to: u32, parts: &mut Vector<d::Doc
         }
         let mut nb = false;
         if k + 1 < segs.len() {
-            nb = (*segs.at(k + 1)).blank_before;
+            nb = segs.at(k + 1).blank_before;
         } else {
             nb = count_gap_newlines(b, sg.end, to) >= 2;
         }
@@ -311,7 +311,7 @@ fn push_gap_inline(b: &mut Builder, from: u32, to: u32, sep: d::DocId, out: &mut
     let mut segs = Vector::<TriviaSeg>::new();
     scan_gap(b, from, to, &mut segs);
     let mut i: usize = 0;
-    while i < segs.len() && (*segs.at(i)).trailing {
+    while i < segs.len() && segs.at(i).trailing {
         let sg = *segs.at(i);
         out.push(b.p.txt(" "));
         out.push(b.p.span(sg.start, sg.end));
@@ -719,7 +719,7 @@ fn b_generic_param(b: &mut Builder, id: NodeId) d::DocId {
 
 // `for<'a, 'b> ` -- the higher-ranked prefix of a bound, held in the lifetime side table.
 fn b_hrtb(b: &mut Builder, id: NodeId, v: &mut Vector<d::DocId>) {
-    let lts = unsafe (*b.ast).lifetimes_of(id);
+    let lts = b.ast.lifetimes_of(id);
     if lts.len == 0 {
         return;
     }
@@ -1686,9 +1686,9 @@ fn b_block(b: &mut Builder, id: NodeId) d::DocId {
 
 // True when the item carries @fmt.skip: it is then emitted verbatim from its source span.
 fn fmt_skipped(b: &Builder, id: NodeId) bool {
-    let na = unsafe (*b.ast).attrs.len();
+    let na = unsafe b.ast.attrs.len();
     for i in 0..na {
-        let a = *unsafe (*b.ast).attrs.at(i);
+        let a = *unsafe b.ast.attrs.at(i);
         if a.owner == id && a.kind == AttrKind::ATTR_FMT_SKIP as u8 {
             return true;
         }
@@ -1717,7 +1717,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             }
             v.push(b.p.txt("fn "));
             v.push(node_text(b, f.name));
-            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), f.generics, &mut v);
+            b_generics_lt(b, b.ast.lifetimes_of(id), f.generics, &mut v);
             let mut ps = Vector::<d::DocId>::new();
             b_each(b, f.params, 3, &mut ps);
             if f.is_variadic {
@@ -1787,7 +1787,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
                 v.push(b.p.txt("struct "));
             }
             v.push(node_text(b, a.name));
-            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), a.generics, &mut v);
+            b_generics_lt(b, b.ast.lifetimes_of(id), a.generics, &mut v);
             if a.is_tuple {
                 let mut fz = Vector::<d::DocId>::new();
                 for i in 0..a.members.len {
@@ -1839,7 +1839,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             }
             v.push(b.p.txt("interface "));
             v.push(node_text(b, itf.name));
-            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), itf.generics, &mut v);
+            b_generics_lt(b, b.ast.lifetimes_of(id), itf.generics, &mut v);
             if itf.bounds.len > 0 {
                 v.push(b.p.txt(": "));
                 for i in 0..itf.bounds.len {
@@ -1857,7 +1857,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             let e = n.as_data.extend_def;
             v.push(b.p.txt("extend"));
             if e.generics.len > 0 {
-                b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), e.generics, &mut v);
+                b_generics_lt(b, b.ast.lifetimes_of(id), e.generics, &mut v);
             }
             v.push(b.p.txt(" "));
             v.push(b_type(b, e.target_type));
@@ -1875,7 +1875,7 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             }
             v.push(b.p.txt("type "));
             v.push(node_text(b, t.name));
-            b_generics_lt(b, unsafe (*b.ast).lifetimes_of(id), t.generics, &mut v);
+            b_generics_lt(b, b.ast.lifetimes_of(id), t.generics, &mut v);
             if t.ty != NODE_NONE {
                 v.push(b.p.txt(" = "));
                 v.push(b_type(b, t.ty));
@@ -2043,7 +2043,7 @@ fn item_gap_floor(b: &Builder, from: u32, to: u32) u32 {
 /// Build and render the whole program. Returns the number of comment segments emitted (the caller
 /// checks it against the lexer's comment-token count and refuses to write on a mismatch).
 pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String) usize {
-    let root = unsafe (*ast).root;
+    let root = unsafe ast.root;
     let mut b = Builder { p: d::DocPool::new(source.ptr()), ast: ast, src: source, emitted_trivia: 0 };
     let items = nd(&b, root).as_data.program.items;
     let mut parts = Vector::<d::DocId>::new();

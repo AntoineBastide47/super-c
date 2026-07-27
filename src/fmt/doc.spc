@@ -91,12 +91,12 @@ extend DocPool {
     }
 
     pub fn indent(self: &mut Self, child: DocId) DocId {
-        let w = (*self.docs.at(child as usize)).w;
+        let w = self.docs.at(child as usize).w;
         return self.push(DocNode { kind: DocKind::DOC_INDENT, a: child, b: 0, w: w, s: "" });
     }
 
     pub fn group(self: &mut Self, child: DocId) DocId {
-        let w = (*self.docs.at(child as usize)).w;
+        let w = self.docs.at(child as usize).w;
         return self.push(DocNode { kind: DocKind::DOC_GROUP, a: child, b: 0, w: w, s: "" });
     }
 
@@ -119,7 +119,7 @@ extend DocPool {
         for i in 0..parts.len() {
             let c = *parts.at(i);
             self.kids.push(c);
-            w = wadd(w, (*self.docs.at(c as usize)).w);
+            w = wadd(w, self.docs.at(c as usize).w);
         }
         return self.push(DocNode { kind: DocKind::DOC_CONCAT, a: start, b: parts.len() as u32, w: w, s: "" });
     }
@@ -174,16 +174,16 @@ fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool)
         DOC_NIL => {},
         DOC_TEXT_SPAN => {
             let len = (n.b - n.a) as usize;
-            unsafe (*r.out).push_bytes(unsafe (p.src + n.a as usize), len);
+            r.out.push_bytes(unsafe (p.src + n.a as usize), len);
             r.col = r.col + len as i32;
         },
         DOC_TEXT_STR => {
-            unsafe (*r.out).push_str(n.s);
+            r.out.push_str(n.s);
             r.col = r.col + n.s.len() as i32;
         },
         DOC_LINE => {
             if flat {
-                unsafe (*r.out).push_byte(b' ');
+                r.out.push_byte(b' ');
                 r.col = r.col + 1;
             } else {
                 newline_into(r, indent, false);
@@ -223,11 +223,11 @@ fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool)
         DOC_IFBREAK => {
             if flat {
                 if n.a == 1 {
-                    unsafe (*r.out).push_byte(b' ');
+                    r.out.push_byte(b' ');
                     r.col = r.col + 1;
                 }
             } else {
-                unsafe (*r.out).push_str(n.s);
+                r.out.push_str(n.s);
                 r.col = r.col + n.s.len() as i32;
             }
         },

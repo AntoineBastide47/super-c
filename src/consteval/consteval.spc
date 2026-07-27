@@ -457,7 +457,7 @@ const fn mul_ovf(a: i64, b: i64) OvfRes {
 extend ConstEval {
     /// 0 for either budget selects the default; max_mem_bytes is converted to CeVal slots.
     pub fn new<'a>(pkg: *mut loader::Package, max_steps: u32, max_mem_bytes: u64) ConstEval<'a> {
-        let count = unsafe (*pkg).modules.len();
+        let count = unsafe pkg.modules.len();
         let mut ce = ConstEval {
             pkg: pkg,
             vals: Vector::<Vector<ConstValue>>::new(),
@@ -501,35 +501,35 @@ extend ConstEval {
 
     const fn ast_ptr(self: &Self, m: ModuleId) *const Ast {
         // While a stage holds module `m`'s Ast (moved out of the slot), read the in-flight Ast it points at.
-        if m == unsafe (*self.pkg).override_mod && unsafe (*self.pkg).override_ast != null {
-            return unsafe (*self.pkg).override_ast;
+        if m == unsafe self.pkg.override_mod && unsafe self.pkg.override_ast != null {
+            return unsafe self.pkg.override_ast;
         }
-        return unsafe &(*self.pkg).modules[m as usize].ast;
+        return unsafe &self.pkg.modules[m as usize].ast;
     }
     const fn mut_ast_ptr(self: &Self, m: ModuleId) *mut Ast {
-        if m == unsafe (*self.pkg).override_mod && unsafe (*self.pkg).override_ast != null {
-            return unsafe (*self.pkg).override_ast;
+        if m == unsafe self.pkg.override_mod && unsafe self.pkg.override_ast != null {
+            return unsafe self.pkg.override_ast;
         }
-        return unsafe &mut (*self.pkg).modules[m as usize].ast;
+        return unsafe &mut self.pkg.modules[m as usize].ast;
     }
     const fn has_ast(self: &Self, m: ModuleId) bool {
         if m as usize >= self.nmods {
             return false;
         }
-        return unsafe (*self.pkg).modules[m as usize].has_ast;
+        return unsafe self.pkg.modules[m as usize].has_ast;
     }
     const fn ce_src(self: &Self, m: ModuleId) str {
-        return unsafe (*self.pkg).modules[m as usize].source.as_str();
+        return unsafe self.pkg.modules[m as usize].source.as_str();
     }
     const fn is_prelude(self: &Self, m: ModuleId) bool {
-        return unsafe (*self.pkg).modules[m as usize].prelude;
+        return unsafe self.pkg.modules[m as usize].prelude;
     }
 
     // ast_type, safe on a module the checker hasn't reached (types table may not cover id yet).
     const fn ce_type(self: &Self, m: ModuleId, id: NodeId) TypeId {
         let a = self.ast_ptr(m);
-        if unsafe (*a).types.len() > id as usize {
-            return unsafe (*a).type_of(id);
+        if unsafe a.types.len() > id as usize {
+            return a.type_of(id);
         }
         return TYPE_NONE;
     }
@@ -616,7 +616,7 @@ extend ConstEval {
     }
     const fn name_text(self: &Self, m: ModuleId, name_node: NodeId) tok::Span {
         let a = self.ast_ptr(m);
-        return unsafe (*a).at_const(name_node).as_data.name.text;
+        return a.at_const(name_node).as_data.name.text;
     }
 }
 
@@ -641,7 +641,7 @@ const fn type_builtin(a: *const Ast, t: TypeId) BuiltinType {
     if t == TYPE_NONE {
         return BuiltinType::BT_COUNT;
     }
-    let y = unsafe (*a).type_at(t);
+    let y = a.type_at(t);
     if y.kind == TypeKind::TYPE_BUILTIN {
         return y.as_data.builtin;
     }
@@ -674,7 +674,7 @@ extend ConstEval {
     fn eval_int_literal(self: &Self, m: ModuleId, id: NodeId) ConstValue {
         let a = self.ast_ptr(m);
         let src = self.ce_src(m);
-        let sp = unsafe (*a).at_const(id).as_data.literal.raw;
+        let sp = a.at_const(id).as_data.literal.raw;
         let mut endd = sp.end;
         ast_numeric_suffix(src, sp.start, sp.end, &mut endd);
         let mut v: u64 = 0;
@@ -720,7 +720,7 @@ extend ConstEval {
     fn eval_char_literal(self: &Self, m: ModuleId, id: NodeId) ConstValue {
         let a = self.ast_ptr(m);
         let src = self.ce_src(m);
-        let sp = unsafe (*a).at_const(id).as_data.literal.raw;
+        let sp = a.at_const(id).as_data.literal.raw;
         let mut i = sp.start + 1;
         if src[sp.start as usize] == b'b' {
             i = i + 1;
@@ -778,7 +778,7 @@ extend ConstEval {
     fn eval_float_literal(self: &Self, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
         let src = self.ce_src(m);
-        let sp = unsafe (*a).at_const(id).as_data.literal.raw;
+        let sp = a.at_const(id).as_data.literal.raw;
         let mut buf = Buf64 {};
         let mut k: usize = 0;
         let mut i = sp.start;
@@ -803,8 +803,8 @@ extend ConstEval {
     // ---- layout engine ----
     fn ce_attr(self: &Self, m: ModuleId, owner: NodeId, kind: AttrKind) *const Attr {
         let a = self.ast_ptr(m);
-        for i in 0..unsafe (*a).attrs.len() {
-            let at = unsafe (*a).attrs.at(i);
+        for i in 0..unsafe a.attrs.len() {
+            let at = unsafe a.attrs.at(i);
             if at.owner == owner && at.kind == kind as u8 {
                 return at;
             }
@@ -819,31 +819,31 @@ extend ConstEval {
             return false;
         }
         let mut fa = fl.align;
-        if unsafe (*acc).packed {
+        if unsafe acc.packed {
             fa = 1;
         }
-        if unsafe (*acc).is_union {
-            if fl.size > unsafe (*acc).size {
-                unsafe (*acc).size = fl.size;
+        if unsafe acc.is_union {
+            if fl.size > unsafe acc.size {
+                unsafe acc.size = fl.size;
             }
         } else {
-            unsafe (*acc).size = round_up(unsafe (*acc).size, fa) + fl.size;
+            unsafe acc.size = round_up(unsafe acc.size, fa) + fl.size;
         }
-        if fa > unsafe (*acc).align {
-            unsafe (*acc).align = fa;
+        if fa > unsafe acc.align {
+            unsafe acc.align = fa;
         }
         return true;
     }
 
     fn aggregate_layout(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, depth: i32) Layout {
         let a = self.ast_ptr(dm);
-        let dkind = unsafe (*a).at_const(dn).kind;
+        let dkind = a.at_const(dn).kind;
         if dkind == NodeKind::NODE_ENUM {
-            let ms = unsafe (*a).at_const(dn).as_data.aggregate.members;
+            let ms = a.at_const(dn).as_data.aggregate.members;
             let mut payload = false;
             for i in 0..ms.len {
-                let mid = unsafe (*a).list(ms)[i as usize];
-                if unsafe (*a).at_const(mid).as_data.variant.payload.len > 0 {
+                let mid = unsafe a.list(ms)[i as usize];
+                if a.at_const(mid).as_data.variant.payload.len > 0 {
                     payload = true;
                 }
             }
@@ -852,18 +852,18 @@ extend ConstEval {
             }
             let mut un = LayoutAcc { is_union: true };
             for i in 0..ms.len {
-                let mid = unsafe (*a).list(ms)[i as usize];
-                let pl = unsafe (*a).at_const(mid).as_data.variant.payload;
+                let mid = unsafe a.list(ms)[i as usize];
+                let pl = a.at_const(mid).as_data.variant.payload;
                 if pl.len == 0 {
                     continue;
                 }
-                let struct_payload = unsafe (*a).at_const(mid).as_data.variant.struct_payload;
+                let struct_payload = a.at_const(mid).as_data.variant.struct_payload;
                 let mut vs = LayoutAcc {};
                 for k in 0..pl.len {
-                    let pid = unsafe (*a).list(pl)[k as usize];
+                    let pid = unsafe a.list(pl)[k as usize];
                     let mut tn = pid;
                     if struct_payload {
-                        tn = unsafe (*a).at_const(pid).as_data.field.ty;
+                        tn = a.at_const(pid).as_data.field.ty;
                     }
                     if !self.acc_field(&mut vs, dm, self.ce_type(dm, tn), env, depth) {
                         return Layout { ok: false };
@@ -887,20 +887,20 @@ extend ConstEval {
         if dkind != NodeKind::NODE_STRUCT {
             return Layout { ok: false };
         }
-        let is_union = unsafe (*a).at_const(dn).as_data.aggregate.is_union;
-        let is_tuple = unsafe (*a).at_const(dn).as_data.aggregate.is_tuple;
+        let is_union = a.at_const(dn).as_data.aggregate.is_union;
+        let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
         let mut acc = LayoutAcc { is_union: is_union };
         acc.packed = self.ce_attr(dm, dn, AttrKind::ATTR_PACKED) != null;
-        let fs = unsafe (*a).at_const(dn).as_data.aggregate.members;
+        let fs = a.at_const(dn).as_data.aggregate.members;
         for i in 0..fs.len {
-            let fid = unsafe (*a).list(fs)[i as usize];
-            let fkind = unsafe (*a).at_const(fid).kind;
+            let fid = unsafe a.list(fs)[i as usize];
+            let fkind = a.at_const(fid).kind;
             if !is_tuple && fkind != NodeKind::NODE_FIELD {
                 continue;
             }
             let mut ftn = fid;
             if !is_tuple {
-                ftn = unsafe (*a).at_const(fid).as_data.field.ty;
+                ftn = a.at_const(fid).as_data.field.ty;
             }
             let ft = self.ce_type(dm, ftn);
             if ft == TYPE_NONE {
@@ -911,9 +911,9 @@ extend ConstEval {
             }
         }
         let al = self.ce_attr(dm, dn, AttrKind::ATTR_ALIGN);
-        if al != null && unsafe (*al).arg != 0 {
-            if (unsafe (*al).arg) as u64 > acc.align {
-                acc.align = unsafe (*al).arg;
+        if al != null && unsafe al.arg != 0 {
+            if (unsafe al.arg) as u64 > acc.align {
+                acc.align = unsafe al.arg;
             }
         }
         if acc.align == 0 {
@@ -930,7 +930,7 @@ extend ConstEval {
             return Layout { ok: false };
         }
         let a = self.ast_ptr(m);
-        let y = *unsafe (*a).type_at(t);
+        let y = *a.type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
             let b = y.as_data.builtin;
             if b == BuiltinType::BT_BOOL || b == BuiltinType::BT_CHAR || b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 {
@@ -969,17 +969,12 @@ extend ConstEval {
         if y.kind == TypeKind::TYPE_GENERIC {
             let mut e = env;
             while e != null {
-                for i in 0..unsafe (*e).n {
-                    if unsafe (*e).pmod == y.module && unsafe (*e).params[i as usize] == y.as_data.decl {
-                        return self.layout_of(
-                            unsafe (*e).argm,
-                            unsafe (*e).args[i as usize],
-                            unsafe (*e).parent,
-                            depth + 1,
-                        );
+                for i in 0..unsafe e.n {
+                    if unsafe e.pmod == y.module && unsafe e.params[i as usize] == y.as_data.decl {
+                        return self.layout_of(unsafe e.argm, unsafe e.args[i as usize], unsafe e.parent, depth + 1);
                     }
                 }
-                e = unsafe (*e).parent;
+                e = unsafe e.parent;
             }
             return Layout { ok: false };
         }
@@ -987,13 +982,13 @@ extend ConstEval {
             return self.aggregate_layout(y.module, y.as_data.decl, null, depth + 1);
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *unsafe (*a).instance(y.as_data.inst);
+            let it = *a.instance(y.as_data.inst);
             if !self.has_ast(it.module) {
                 return Layout { ok: false };
             }
             let da = self.ast_ptr(it.module);
-            let gens = unsafe (*da).at_const(it.decl).as_data.aggregate.generics;
-            let mut frame = LayoutEnv { parent: env, pmod: it.module, params: unsafe (*da).list(gens), argm: m, n: 0 };
+            let gens = da.at_const(it.decl).as_data.aggregate.generics;
+            let mut frame = LayoutEnv { parent: env, pmod: it.module, params: da.list(gens), argm: m, n: 0 };
             let mut i: u32 = 0;
             while i < gens.len && i as u8 < it.n && frame.n < 8 {
                 unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
@@ -1021,7 +1016,7 @@ extend ConstEval {
             if t == TYPE_NONE {
                 return RType { ok: false };
             }
-            let y = unsafe (*self.ast_ptr(m)).type_at(t);
+            let y = self.ast_ptr(m).type_at(t);
             if y.kind != TypeKind::TYPE_GENERIC {
                 return RType { ok: true, m: m, t: t };
             }
@@ -1031,10 +1026,10 @@ extend ConstEval {
             let ymod = y.module;
             let ydecl = y.as_data.decl;
             let mut found = false;
-            for i in 0..unsafe (*f).ng {
-                if unsafe (*f).pmod == ymod && unsafe (*f).params_g[i as usize] == ydecl {
-                    m = unsafe (*f).am[i as usize];
-                    t = unsafe (*f).at[i as usize];
+            for i in 0..unsafe f.ng {
+                if unsafe f.pmod == ymod && unsafe f.params_g[i as usize] == ydecl {
+                    m = unsafe f.am[i as usize];
+                    t = unsafe f.at[i as usize];
                     found = true;
                     break;
                 }
@@ -1069,15 +1064,15 @@ extend ConstEval {
             LayoutEnv { pmod: 0 },
         ];
         let mut parent: *const LayoutEnv = null;
-        for i in 0..unsafe (*f).ng {
+        for i in 0..unsafe f.ng {
             unsafe envs[i as usize] = LayoutEnv {
                 parent: parent,
-                pmod: unsafe (*f).pmod,
-                params: unsafe &(*f).params_g[i as usize],
-                argm: unsafe (*f).am[i as usize],
+                pmod: unsafe f.pmod,
+                params: unsafe &f.params_g[i as usize],
+                argm: unsafe f.am[i as usize],
                 n: 1,
             };
-            unsafe envs[i as usize].args[0] = unsafe (*f).at[i as usize];
+            unsafe envs[i as usize].args[0] = unsafe f.at[i as usize];
             parent = &unsafe envs[i as usize];
         }
         return self.layout_of(m, t, parent, 0);
@@ -1090,8 +1085,8 @@ extend ConstEval {
         }
         let aa = self.ast_ptr(ma);
         let ab = self.ast_ptr(mb);
-        let a = *unsafe (*aa).type_at(ta);
-        let b = *unsafe (*ab).type_at(tb);
+        let a = *aa.type_at(ta);
+        let b = *ab.type_at(tb);
         if a.kind != b.kind {
             return false;
         }
@@ -1111,8 +1106,8 @@ extend ConstEval {
             return a.module == b.module && a.as_data.decl == b.as_data.decl;
         }
         if a.kind == TypeKind::TYPE_INSTANCE {
-            let ia = *unsafe (*aa).instance(a.as_data.inst);
-            let ib = *unsafe (*ab).instance(b.as_data.inst);
+            let ia = *aa.instance(a.as_data.inst);
+            let ib = *ab.instance(b.as_data.inst);
             if ia.module != ib.module || ia.decl != ib.decl || ia.n != ib.n {
                 return false;
             }
@@ -1136,7 +1131,7 @@ extend ConstEval {
             }
             m = r.m;
             t = r.t;
-            let y = unsafe (*self.ast_ptr(m)).type_at(t);
+            let y = self.ast_ptr(m).type_at(t);
             if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
                 return RType { ok: true, m: m, t: t };
             }
@@ -1151,19 +1146,19 @@ extend ConstEval {
             return TYPE_NONE;
         }
         let am = self.mut_ast_ptr(m);
-        let y = *unsafe (*am).type_at(t);
+        let y = *am.type_at(t);
         if y.kind == TypeKind::TYPE_GENERIC {
             if f == null {
                 return TYPE_NONE;
             }
-            for i in 0..unsafe (*f).ng {
-                if unsafe (*f).pmod == y.module && unsafe (*f).params_g[i as usize] == y.as_data.decl {
-                    let fam = unsafe (*f).am[i as usize];
-                    let fat = unsafe (*f).at[i as usize];
+            for i in 0..unsafe f.ng {
+                if unsafe f.pmod == y.module && unsafe f.params_g[i as usize] == y.as_data.decl {
+                    let fam = unsafe f.am[i as usize];
+                    let fat = unsafe f.at[i as usize];
                     if fam == m {
                         return fat;
                     }
-                    return unsafe (*am).reintern(unsafe &*self.ast_ptr(fam), fat);
+                    return am.reintern(unsafe &*self.ast_ptr(fam), fat);
                 }
             }
             return TYPE_NONE;
@@ -1182,10 +1177,10 @@ extend ConstEval {
             } else {
                 ny.as_data.elem = e;
             }
-            return unsafe (*self.mut_ast_ptr(m)).intern_type(ny);
+            return self.mut_ast_ptr(m).intern_type(ny);
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *unsafe (*am).instance(y.as_data.inst);
+            let it = *am.instance(y.as_data.inst);
             let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
             let mut changed = false;
             for i in 0..it.n {
@@ -1200,7 +1195,7 @@ extend ConstEval {
             if !changed {
                 return t;
             }
-            return unsafe (*self.mut_ast_ptr(m)).intern_instance(it.module, it.decl, &na[0], it.n);
+            return self.mut_ast_ptr(m).intern_instance(it.module, it.decl, &na[0], it.n);
         }
         return t;
     }
@@ -1212,7 +1207,7 @@ extend ConstEval {
             return RecvRes { ok: false, r: out };
         }
         let m = r.m;
-        let y = *unsafe (*self.ast_ptr(m)).type_at(r.t);
+        let y = *self.ast_ptr(m).type_at(r.t);
         if y.kind == TypeKind::TYPE_BUILTIN {
             out.dn = NODE_NONE;
             out.b = y.as_data.builtin;
@@ -1224,16 +1219,14 @@ extend ConstEval {
             return RecvRes { ok: true, r: out };
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *unsafe (*self.ast_ptr(m)).instance(y.as_data.inst);
+            let it = *self.ast_ptr(m).instance(y.as_data.inst);
             out.dm = it.module;
             out.dn = it.decl;
             out.n = it.n;
             for i in 0..it.n {
                 unsafe out.am[i as usize] = m;
                 unsafe out.at[i as usize] = self.ce_subst_deep(f, m, unsafe it.args[i as usize], 0);
-                if unsafe out.at[i as usize] == TYPE_NONE || !unsafe (*self.ast_ptr(m)).type_concrete(
-                    out.at[i as usize],
-                ) {
+                if unsafe out.at[i as usize] == TYPE_NONE || !unsafe self.ast_ptr(m).type_concrete(out.at[i as usize]) {
                     return RecvRes { ok: false, r: out };
                 }
             }
@@ -1246,11 +1239,11 @@ extend ConstEval {
 
     fn ce_field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = self.ast_ptr(dm);
-        let ms = unsafe (*a).at_const(dn).as_data.aggregate.members;
+        let ms = a.at_const(dn).as_data.aggregate.members;
         let mut n: u32 = 0;
         for i in 0..ms.len {
-            let mid = unsafe (*a).list(ms)[i as usize];
-            if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FIELD {
+            let mid = unsafe a.list(ms)[i as usize];
+            if a.at_const(mid).kind == NodeKind::NODE_FIELD {
                 n = n + 1;
             }
         }
@@ -1259,12 +1252,12 @@ extend ConstEval {
 
     fn ce_field_index(self: &Self, dm: ModuleId, dn: NodeId, nm: ModuleId, name: tok::Span) FieldIdx {
         let a = self.ast_ptr(dm);
-        let ms = unsafe (*a).at_const(dn).as_data.aggregate.members;
+        let ms = a.at_const(dn).as_data.aggregate.members;
         let mut idx: i32 = 0;
         for i in 0..ms.len {
-            let fid = unsafe (*a).list(ms)[i as usize];
-            if unsafe (*a).at_const(fid).kind == NodeKind::NODE_FIELD {
-                let fname = self.name_text(dm, unsafe (*a).at_const(fid).as_data.field.name);
+            let fid = unsafe a.list(ms)[i as usize];
+            if a.at_const(fid).kind == NodeKind::NODE_FIELD {
+                let fname = self.name_text(dm, a.at_const(fid).as_data.field.name);
                 if self.ce_spans_eq(dm, fname, nm, name) {
                     return FieldIdx { idx: idx, field: fid };
                 }
@@ -1276,10 +1269,10 @@ extend ConstEval {
 
     fn ce_enum_tagged(self: &Self, dm: ModuleId, dn: NodeId) bool {
         let a = self.ast_ptr(dm);
-        let ms = unsafe (*a).at_const(dn).as_data.aggregate.members;
+        let ms = a.at_const(dn).as_data.aggregate.members;
         for i in 0..ms.len {
-            let mid = unsafe (*a).list(ms)[i as usize];
-            if unsafe (*a).at_const(mid).as_data.variant.payload.len > 0 {
+            let mid = unsafe a.list(ms)[i as usize];
+            if a.at_const(mid).as_data.variant.payload.len > 0 {
                 return true;
             }
         }
@@ -1288,13 +1281,13 @@ extend ConstEval {
 
     fn ce_variant_pos(self: &Self, vm: ModuleId, vd: NodeId) VarPos {
         let a = self.ast_ptr(vm);
-        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe (*a).list(items)[i as usize];
-            if unsafe (*a).at_const(iid).kind == NodeKind::NODE_ENUM {
-                let ms = unsafe (*a).at_const(iid).as_data.aggregate.members;
+            let iid = unsafe a.list(items)[i as usize];
+            if a.at_const(iid).kind == NodeKind::NODE_ENUM {
+                let ms = a.at_const(iid).as_data.aggregate.members;
                 for k in 0..ms.len {
-                    let mid = unsafe (*a).list(ms)[k as usize];
+                    let mid = unsafe a.list(ms)[k as usize];
                     if mid == vd {
                         return VarPos { pos: k as i32, enum_decl: iid };
                     }
@@ -1306,10 +1299,10 @@ extend ConstEval {
 
     fn ce_variant_named(self: &Self, dm: ModuleId, dn: NodeId, lit: str) i32 {
         let a = self.ast_ptr(dm);
-        let ms = unsafe (*a).at_const(dn).as_data.aggregate.members;
+        let ms = a.at_const(dn).as_data.aggregate.members;
         for i in 0..ms.len {
-            let mid = unsafe (*a).list(ms)[i as usize];
-            let vname = self.name_text(dm, unsafe (*a).at_const(mid).as_data.variant.name);
+            let mid = unsafe a.list(ms)[i as usize];
+            let vname = self.name_text(dm, a.at_const(mid).as_data.variant.name);
             if self.ce_span_is(dm, vname, lit) {
                 return i as i32;
             }
@@ -1321,8 +1314,8 @@ extend ConstEval {
     fn ce_pool_find_type(self: &Self, dm: ModuleId, dn: NodeId) TypeId {
         let a = self.ast_ptr(dm);
         let mut t: TypeId = 1;
-        while t as usize < unsafe (*a).type_pool.len() {
-            let y = unsafe (*a).type_at(t);
+        while t as usize < unsafe a.type_pool.len() {
+            let y = a.type_at(t);
             if (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM) && y.module == dm && y.as_data.decl == dn {
                 return t;
             }
@@ -1334,22 +1327,22 @@ extend ConstEval {
     // Item containing method (fm,fn): 0 = free fn, 1 = extnode, 2 = interface. out = the item node.
     fn ce_container_of(self: &Self, fm: ModuleId, fnode: NodeId, out: *mut NodeId) i32 {
         let a = self.ast_ptr(fm);
-        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe (*a).list(items)[i as usize];
-            let ik = unsafe (*a).at_const(iid).kind;
+            let iid = unsafe a.list(items)[i as usize];
+            let ik = a.at_const(iid).kind;
             let mut ms = NodeList { start: 0, len: 0 };
             let mut is_ext = false;
             if ik == NodeKind::NODE_EXTEND {
-                ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+                ms = a.at_const(iid).as_data.extend_def.items;
                 is_ext = true;
             } else if ik == NodeKind::NODE_INTERFACE {
-                ms = unsafe (*a).at_const(iid).as_data.interface_def.items;
+                ms = a.at_const(iid).as_data.interface_def.items;
             } else {
                 continue;
             }
             for k in 0..ms.len {
-                let mid = unsafe (*a).list(ms)[k as usize];
+                let mid = unsafe a.list(ms)[k as usize];
                 if mid == fnode {
                     if out != null {
                         unsafe *out = iid;
@@ -1396,31 +1389,31 @@ extend ConstEval {
                 continue;
             }
             let a = self.ast_ptr(mm);
-            if unsafe (*a).nodes.len() == 0 {
+            if unsafe a.nodes.len() == 0 {
                 continue;
             }
-            let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+            let items = unsafe a.at_const(a.root).as_data.program.items;
             for i in 0..items.len {
-                let iid = unsafe (*a).list(items)[i as usize];
-                let target = unsafe (*a).at_const(iid).as_data.extend_def.target_type;
-                if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND && target != NODE_NONE {
+                let iid = unsafe a.list(items)[i as usize];
+                let target = a.at_const(iid).as_data.extend_def.target_type;
+                if a.at_const(iid).kind == NodeKind::NODE_EXTEND && target != NODE_NONE {
                     let mut match_recv = false;
                     if r.dn != NODE_NONE {
-                        let tg = unsafe (*a).resolution_def(target);
+                        let tg = a.resolution_def(target);
                         match_recv = tg.module == r.dm && tg.node == r.dn;
                     } else {
                         let tt = self.ce_type(mm, target);
                         if tt != TYPE_NONE {
-                            let ty = unsafe (*self.ast_ptr(mm)).type_at(tt);
+                            let ty = self.ast_ptr(mm).type_at(tt);
                             match_recv = ty.kind == TypeKind::TYPE_BUILTIN && ty.as_data.builtin == r.b;
                         }
                     }
                     if match_recv {
-                        let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+                        let ms = a.at_const(iid).as_data.extend_def.items;
                         for k in 0..ms.len {
-                            let mid = unsafe (*a).list(ms)[k as usize];
-                            if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FUNCTION {
-                                let mname = self.name_text(mm, unsafe (*a).at_const(mid).as_data.function.name);
+                            let mid = unsafe a.list(ms)[k as usize];
+                            if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
+                                let mname = self.name_text(mm, a.at_const(mid).as_data.function.name);
                                 let mut hit = false;
                                 if lit.len() != 0 {
                                     hit = self.ce_span_is(mm, mname, lit);
@@ -1455,22 +1448,22 @@ extend ConstEval {
         while mm < self.nmods && !user {
             if !self.is_prelude(mm as ModuleId) && self.has_ast(mm as ModuleId) {
                 let a = self.ast_ptr(mm as ModuleId);
-                if unsafe (*a).nodes.len() != 0 {
-                    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+                if unsafe a.nodes.len() != 0 {
+                    let items = unsafe a.at_const(a.root).as_data.program.items;
                     let mut ii: u32 = 0;
                     while ii < items.len && !user {
-                        let iid = unsafe (*a).list(items)[ii as usize];
-                        let target = unsafe (*a).at_const(iid).as_data.extend_def.target_type;
-                        if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND && target != NODE_NONE {
-                            let tg = unsafe (*a).resolution_def(target);
+                        let iid = unsafe a.list(items)[ii as usize];
+                        let target = a.at_const(iid).as_data.extend_def.target_type;
+                        if a.at_const(iid).kind == NodeKind::NODE_EXTEND && target != NODE_NONE {
+                            let tg = a.resolution_def(target);
                             if tg.module == dm && tg.node == dn {
-                                let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+                                let ms = a.at_const(iid).as_data.extend_def.items;
                                 for k in 0..ms.len {
-                                    let mid = unsafe (*a).list(ms)[k as usize];
-                                    if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FUNCTION {
+                                    let mid = unsafe a.list(ms)[k as usize];
+                                    if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
                                         let mname = self.name_text(
                                             mm as ModuleId,
-                                            unsafe (*a).at_const(mid).as_data.function.name,
+                                            a.at_const(mid).as_data.function.name,
                                         );
                                         if self.ce_span_is(mm as ModuleId, mname, "free") {
                                             user = true;
@@ -1493,18 +1486,18 @@ extend ConstEval {
     // The discriminant of payload-less enum variant (vm,vd): explicit `= <int>` else previous+1.
     fn variant_value(self: &mut Self, vm: ModuleId, vd: NodeId) ConstValue {
         let a = self.ast_ptr(vm);
-        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe (*a).list(items)[i as usize];
-            if unsafe (*a).at_const(iid).kind == NodeKind::NODE_ENUM {
-                let ms = unsafe (*a).at_const(iid).as_data.aggregate.members;
+            let iid = unsafe a.list(items)[i as usize];
+            if a.at_const(iid).kind == NodeKind::NODE_ENUM {
+                let ms = a.at_const(iid).as_data.aggregate.members;
                 let mut next: i64 = 0;
                 for k in 0..ms.len {
-                    let mid = unsafe (*a).list(ms)[k as usize];
-                    if unsafe (*a).at_const(mid).as_data.variant.payload.len > 0 {
+                    let mid = unsafe a.list(ms)[k as usize];
+                    if a.at_const(mid).as_data.variant.payload.len > 0 {
                         return ce_none();
                     }
-                    let vval = unsafe (*a).at_const(mid).as_data.variant.value;
+                    let vval = a.at_const(mid).as_data.variant.value;
                     if vval != NODE_NONE {
                         let e = self.eval(vm, vval);
                         if e.kind != CONST_INT {
@@ -1544,23 +1537,23 @@ extend ConstEval {
         if self.objs_live < self.objs.len() {
             // reuse a retained object: refit its slot vector, zero the metadata push{} would zero
             let o = unsafe (self.objs.as_ptr() as *mut CeObj + self.objs_live);
-            unsafe (*o).slots.clear();
+            unsafe o.slots.clear();
             if len != 0 {
-                unsafe (*o).slots.reserve(len as usize);
+                unsafe o.slots.reserve(len as usize);
                 for _ in 0..len {
-                    unsafe (*o).slots.push(cv_nil());
+                    unsafe o.slots.push(cv_nil());
                 }
             }
-            unsafe (*o).dead = 0;
-            unsafe (*o).is_enum = 0;
-            unsafe (*o).heap = 0;
-            unsafe (*o).dm = 0;
-            unsafe (*o).dn = NODE_NONE;
-            unsafe (*o).nargs = 0;
-            unsafe (*o).bytes = 0;
-            unsafe (*o).em = 0;
-            unsafe (*o).et = TYPE_NONE;
-            unsafe (*o).esz = 0;
+            unsafe o.dead = 0;
+            unsafe o.is_enum = 0;
+            unsafe o.heap = 0;
+            unsafe o.dm = 0;
+            unsafe o.dn = NODE_NONE;
+            unsafe o.nargs = 0;
+            unsafe o.bytes = 0;
+            unsafe o.em = 0;
+            unsafe o.et = TYPE_NONE;
+            unsafe o.esz = 0;
         } else {
             let mut slots = Vector::<CeVal>::new();
             if len != 0 {
@@ -1577,7 +1570,7 @@ extend ConstEval {
     }
 
     fn ce_obj_resize(self: &mut Self, id: u32, len: u32) bool {
-        let cur = (unsafe (*self.obj_ptr(id)).slots.len()) as u32;
+        let cur = (unsafe self.obj_ptr(id).slots.len()) as u32;
         if len > cur && self.live_slots + (len - cur) as u64 > self.max_slots {
             self.ce_trap(CE_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return false;
@@ -1586,12 +1579,12 @@ extend ConstEval {
         if len > cur {
             let mut i = cur;
             while i < len {
-                unsafe (*o).slots.push(cv_nil());
+                unsafe o.slots.push(cv_nil());
                 i = i + 1;
             }
             self.live_slots = self.live_slots + (len - cur) as u64;
         } else if len < cur {
-            unsafe (*o).slots.truncate(len as usize);
+            unsafe o.slots.truncate(len as usize);
         }
         return true;
     }
@@ -1599,28 +1592,28 @@ extend ConstEval {
     // ---- frames and values ----
     fn ce_bind_slot(self: &mut Self, f: *mut CeFrame, decl: NodeId) *mut CeVal {
         let i = ce_local_find(f, decl);
-        let envid = unsafe (*f).env;
+        let envid = unsafe f.env;
         if self.obj_ptr(envid) == null {
             return null;
         }
         if i >= 0 {
-            let slotidx = unsafe (*f).locals[i as usize].slot;
+            let slotidx = unsafe f.locals[i as usize].slot;
             let o = self.obj_ptr(envid);
-            return unsafe ((*o).slots.as_ptr() as *mut CeVal + slotidx as usize);
+            return unsafe (o.slots.as_ptr() as *mut CeVal + slotidx as usize);
         }
-        if unsafe (*f).n >= CE_MAX_LOCALS {
+        if unsafe f.n >= CE_MAX_LOCALS {
             return null;
         }
-        let curlen = (unsafe (*self.obj_ptr(envid)).slots.len()) as u32;
+        let curlen = (unsafe self.obj_ptr(envid).slots.len()) as u32;
         if !self.ce_obj_resize(envid, curlen + 1) {
             return null;
         }
-        let n = unsafe (*f).n;
-        unsafe (*f).locals[n as usize].decl = decl;
-        unsafe (*f).locals[n as usize].slot = curlen;
-        unsafe (*f).n = n + 1;
+        let n = unsafe f.n;
+        unsafe f.locals[n as usize].decl = decl;
+        unsafe f.locals[n as usize].slot = curlen;
+        unsafe f.n = n + 1;
         let o = self.obj_ptr(envid);
-        return unsafe ((*o).slots.as_ptr() as *mut CeVal + curlen as usize);
+        return unsafe (o.slots.as_ptr() as *mut CeVal + curlen as usize);
     }
 
     fn ce_bind(self: &mut Self, f: *mut CeFrame, decl: NodeId, v: CeVal) bool {
@@ -1630,7 +1623,7 @@ extend ConstEval {
         }
         let cv = self.ce_clone(v, 0);
         unsafe *s = cv;
-        return v.kind == CV_NIL_K || unsafe (*s).kind != CV_NIL_K;
+        return v.kind == CV_NIL_K || unsafe s.kind != CV_NIL_K;
     }
 
     // Deep copy: aggregates get fresh objects (pointer members stay shared); scalars copy by value.
@@ -1642,10 +1635,10 @@ extend ConstEval {
             return v;
         }
         let srcp = self.obj_ptr(v.as_data.p.obj);
-        if srcp == null || unsafe (*srcp).dead != 0 {
+        if srcp == null || unsafe srcp.dead != 0 {
             return cv_nil();
         }
-        let srclen = (unsafe (*srcp).slots.len()) as u32;
+        let srclen = (unsafe srcp.slots.len()) as u32;
         let id = self.ce_obj_new(srclen);
         if id == 0 {
             return cv_nil();
@@ -1653,28 +1646,28 @@ extend ConstEval {
         let src = self.obj_ptr(v.as_data.p.obj);
         let dst = self.obj_ptr(id);
         unsafe {
-            (*dst).dead = (*src).dead;
-            (*dst).is_enum = (*src).is_enum;
-            (*dst).heap = (*src).heap;
-            (*dst).dm = (*src).dm;
-            (*dst).dn = (*src).dn;
-            (*dst).nargs = (*src).nargs;
-            (*dst).bytes = (*src).bytes;
-            (*dst).em = (*src).em;
-            (*dst).et = (*src).et;
-            (*dst).esz = (*src).esz;
+            dst.dead = src.dead;
+            dst.is_enum = src.is_enum;
+            dst.heap = src.heap;
+            dst.dm = src.dm;
+            dst.dn = src.dn;
+            dst.nargs = src.nargs;
+            dst.bytes = src.bytes;
+            dst.em = src.em;
+            dst.et = src.et;
+            dst.esz = src.esz;
             for j in 0..4 {
-                (*dst).am[j] = (*src).am[j];
-                (*dst).at[j] = (*src).at[j];
+                dst.am[j] = src.am[j];
+                dst.at[j] = src.at[j];
             }
         }
         for i in 0..srclen {
-            let sv = unsafe (*self.obj_ptr(v.as_data.p.obj)).slots[i as usize];
+            let sv = unsafe self.obj_ptr(v.as_data.p.obj).slots[i as usize];
             let cloned = self.ce_clone(sv, depth + 1);
             if sv.kind != CV_NIL_K && cloned.kind == CV_NIL_K {
                 return cv_nil();
             }
-            unsafe (*self.obj_ptr(id)).slots.set(i as usize, cloned);
+            unsafe self.obj_ptr(id).slots.set(i as usize, cloned);
         }
         let mut out = v;
         out.as_data.p.obj = id;
@@ -1693,15 +1686,15 @@ extend ConstEval {
         if o == null {
             return ValRes { ok: false };
         }
-        if unsafe (*o).dead != 0 {
+        if unsafe o.dead != 0 {
             self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
             return ValRes { ok: false };
         }
-        if p.as_data.p.off as usize >= unsafe (*o).slots.len() {
+        if p.as_data.p.off as usize >= unsafe o.slots.len() {
             self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
             return ValRes { ok: false };
         }
-        let out = unsafe (*o).slots[p.as_data.p.off as usize];
+        let out = unsafe o.slots[p.as_data.p.off as usize];
         return ValRes { ok: out.kind != CV_NIL_K, v: out };
     }
 
@@ -1721,15 +1714,15 @@ extend ConstEval {
         if o == null {
             return false;
         }
-        if unsafe (*o).dead != 0 {
+        if unsafe o.dead != 0 {
             self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
             return false;
         }
-        if p.as_data.p.off as usize >= unsafe (*o).slots.len() {
+        if p.as_data.p.off as usize >= unsafe o.slots.len() {
             self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
-        unsafe (*o).slots.set(p.as_data.p.off as usize, cv);
+        unsafe o.slots.set(p.as_data.p.off as usize, cv);
         return true;
     }
 
@@ -1738,7 +1731,7 @@ extend ConstEval {
         if id == 0 || v.kind == CV_NIL_K {
             return ValRes { ok: false };
         }
-        unsafe (*self.obj_ptr(id)).slots.set(0, v);
+        unsafe self.obj_ptr(id).slots.set(0, v);
         return ValRes {
             ok: true,
             v: CeVal { kind: CV_PTR, tm: 0, ty: TYPE_NONE, as_data: CeValAs { p: CvPtr { obj: id, off: 0 } } },
@@ -1749,7 +1742,7 @@ extend ConstEval {
         if depth > CE_MAX_DEPTH || t == TYPE_NONE {
             return cv_nil();
         }
-        let y = *unsafe (*self.ast_ptr(m)).type_at(t);
+        let y = *self.ast_ptr(m).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
             let b = y.as_data.builtin;
             if b == BuiltinType::BT_BOOL {
@@ -1778,10 +1771,10 @@ extend ConstEval {
             if ez.kind == CV_NIL_K {
                 return cv_nil();
             }
-            let alen = (unsafe (*self.obj_ptr(id)).slots.len()) as u32;
+            let alen = (unsafe self.obj_ptr(id).slots.len()) as u32;
             for i in 0..alen {
                 let cloned = self.ce_clone(ez, depth + 1);
-                unsafe (*self.obj_ptr(id)).slots.set(i as usize, cloned);
+                unsafe self.obj_ptr(id).slots.set(i as usize, cloned);
             }
             return CeVal { kind: CV_AGG, tm: m, ty: t, as_data: CeValAs { p: CvPtr { obj: id, off: 0 } } };
         }
@@ -1973,8 +1966,8 @@ extend ConstEval {
     fn eval_str_literal(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
         let src = self.ce_src(m);
-        let sp = unsafe (*a).at_const(id).as_data.literal.raw;
-        let raw = unsafe (*a).at_const(id).as_data.literal.token_type == TokenType::RawStringLiteral;
+        let sp = a.at_const(id).as_data.literal.raw;
+        let raw = a.at_const(id).as_data.literal.token_type == TokenType::RawStringLiteral;
         let mut i = sp.start;
         let mut hashes: u32 = 0;
         while i < sp.end && src[i as usize] != b'"' {
@@ -2042,13 +2035,13 @@ extend ConstEval {
         }
         if nb != 0 {
             let bo = self.obj_ptr(block);
-            unsafe (*bo).heap = 1;
-            unsafe (*bo).bytes = nb;
-            unsafe (*bo).em = 0;
-            unsafe (*bo).et = Ast::builtin(BuiltinType::BT_U8);
-            unsafe (*bo).esz = 1;
+            unsafe bo.heap = 1;
+            unsafe bo.bytes = nb;
+            unsafe bo.em = 0;
+            unsafe bo.et = Ast::builtin(BuiltinType::BT_U8);
+            unsafe bo.esz = 1;
             for k in 0..nb {
-                unsafe (*self.obj_ptr(block)).slots.set(
+                unsafe self.obj_ptr(block).slots.set(
                     k as usize,
                     CeVal {
                         kind: CV_INT,
@@ -2063,18 +2056,18 @@ extend ConstEval {
         if so == 0 {
             return cv_nil();
         }
-        unsafe (*self.obj_ptr(so)).dm = rr.r.dm;
-        unsafe (*self.obj_ptr(so)).dn = rr.r.dn;
+        unsafe self.obj_ptr(so).dm = rr.r.dm;
+        unsafe self.obj_ptr(so).dn = rr.r.dn;
         // locate ptr/len fields by name
         let da = self.ast_ptr(rr.r.dm);
-        let dms = unsafe (*da).at_const(rr.r.dn).as_data.aggregate.members;
+        let dms = da.at_const(rr.r.dn).as_data.aggregate.members;
         let mut ptr_i: i32 = -1;
         let mut len_i: i32 = -1;
         let mut idx: i32 = 0;
         for kk in 0..dms.len {
-            let fid = unsafe (*da).list(dms)[kk as usize];
-            if unsafe (*da).at_const(fid).kind == NodeKind::NODE_FIELD {
-                let fn2 = self.name_text(rr.r.dm, unsafe (*da).at_const(fid).as_data.field.name);
+            let fid = unsafe da.list(dms)[kk as usize];
+            if da.at_const(fid).kind == NodeKind::NODE_FIELD {
+                let fn2 = self.name_text(rr.r.dm, da.at_const(fid).as_data.field.name);
                 if self.ce_span_is(rr.r.dm, fn2, "ptr") {
                     ptr_i = idx;
                 } else if self.ce_span_is(rr.r.dm, fn2, "len") {
@@ -2086,11 +2079,11 @@ extend ConstEval {
         if ptr_i < 0 || len_i < 0 {
             return cv_nil();
         }
-        unsafe (*self.obj_ptr(so)).slots.set(
+        unsafe self.obj_ptr(so).slots.set(
             ptr_i as usize,
             CeVal { kind: CV_PTR, tm: 0, ty: TYPE_NONE, as_data: CeValAs { p: CvPtr { obj: block, off: 0 } } },
         );
-        unsafe (*self.obj_ptr(so)).slots.set(
+        unsafe self.obj_ptr(so).slots.set(
             len_i as usize,
             CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: nb } },
         );
@@ -2100,10 +2093,10 @@ extend ConstEval {
 
 // Backward scan: the innermost binding of a shadowed name wins.
 fn ce_local_find(f: *mut CeFrame, decl: NodeId) i32 {
-    let mut i = unsafe (*f).n;
+    let mut i = unsafe f.n;
     while i > 0 {
         i = i - 1;
-        if unsafe (*f).locals[i as usize].decl == decl {
+        if unsafe f.locals[i as usize].decl == decl {
             return i as i32;
         }
     }
@@ -2224,12 +2217,12 @@ extend ConstEval {
         while mm as usize < self.nmods {
             if self.has_ast(mm) {
                 let a = self.ast_ptr(mm);
-                if unsafe (*a).nodes.len() != 0 {
-                    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+                if unsafe a.nodes.len() != 0 {
+                    let items = unsafe a.at_const(a.root).as_data.program.items;
                     for i in 0..items.len {
-                        let iid = unsafe (*a).list(items)[i as usize];
-                        if unsafe (*a).at_const(iid).kind == NodeKind::NODE_STRUCT && !unsafe (*a).at_const(iid).as_data.aggregate.is_union {
-                            let nm = self.name_text(mm, unsafe (*a).at_const(iid).as_data.aggregate.name);
+                        let iid = unsafe a.list(items)[i as usize];
+                        if a.at_const(iid).kind == NodeKind::NODE_STRUCT && !a.at_const(iid).as_data.aggregate.is_union {
+                            let nm = self.name_text(mm, a.at_const(iid).as_data.aggregate.name);
                             if self.ce_span_is(mm, nm, "Range") {
                                 unsafe *dm = mm;
                                 unsafe *dn = iid;
@@ -2246,9 +2239,9 @@ extend ConstEval {
 
     fn ce_range_obj(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let start_n = unsafe (*a).at_const(id).as_data.pattern_range.start;
-        let end_n = unsafe (*a).at_const(id).as_data.pattern_range.end;
-        let inclusive = unsafe (*a).at_const(id).as_data.pattern_range.inclusive;
+        let start_n = a.at_const(id).as_data.pattern_range.start;
+        let end_n = a.at_const(id).as_data.pattern_range.end;
+        let inclusive = a.at_const(id).as_data.pattern_range.inclusive;
         if start_n == NODE_NONE || end_n == NODE_NONE {
             return cv_nil();
         }
@@ -2290,16 +2283,16 @@ extend ConstEval {
         if o == 0 {
             return cv_nil();
         }
-        unsafe (*self.obj_ptr(o)).dm = dm;
-        unsafe (*self.obj_ptr(o)).dn = dn;
-        unsafe (*self.obj_ptr(o)).nargs = 1;
-        unsafe (*self.obj_ptr(o)).at[0] = Ast::builtin(BuiltinType::BT_USIZE);
-        if unsafe (*self.obj_ptr(o)).slots.len() < 3 {
+        unsafe self.obj_ptr(o).dm = dm;
+        unsafe self.obj_ptr(o).dn = dn;
+        unsafe self.obj_ptr(o).nargs = 1;
+        unsafe self.obj_ptr(o).at[0] = Ast::builtin(BuiltinType::BT_USIZE);
+        if unsafe self.obj_ptr(o).slots.len() < 3 {
             return cv_nil();
         }
-        unsafe (*self.obj_ptr(o)).slots.set(0, sv);
-        unsafe (*self.obj_ptr(o)).slots.set(1, e);
-        unsafe (*self.obj_ptr(o)).slots.set(2, cv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), inclusive));
+        unsafe self.obj_ptr(o).slots.set(0, sv);
+        unsafe self.obj_ptr(o).slots.set(1, e);
+        unsafe self.obj_ptr(o).slots.set(2, cv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), inclusive));
         return CeVal { kind: CV_AGG, tm: m, ty: self.ce_type(m, id), as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
     }
 
@@ -2329,7 +2322,7 @@ extend ConstEval {
             }
             tm = r.m;
             t = r.t;
-            let y = unsafe (*self.ast_ptr(tm)).type_at(t);
+            let y = self.ast_ptr(tm).type_at(t);
             if y.kind != TypeKind::TYPE_REFERENCE {
                 return v;
             }
@@ -2353,7 +2346,7 @@ extend ConstEval {
         if wt == TYPE_NONE {
             return v;
         }
-        let y = *unsafe (*self.ast_ptr(wm)).type_at(wt);
+        let y = *self.ast_ptr(wm).type_at(wt);
         if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_FUNCTION {
             if v.kind == CV_PTR || v.kind == CV_FN {
                 return v;
@@ -2367,26 +2360,26 @@ extend ConstEval {
             }
             return self.ce_coerce(lr.v, wm, wt);
         }
-        if y.kind == TypeKind::TYPE_INSTANCE && v.kind == CV_AGG && v.ty != TYPE_NONE && unsafe (*self.ast_ptr(v.tm)).type_at(
+        if y.kind == TypeKind::TYPE_INSTANCE && v.kind == CV_AGG && v.ty != TYPE_NONE && self.ast_ptr(v.tm).type_at(
             v.ty,
         ).kind == TypeKind::TYPE_ARRAY {
-            let it = *unsafe (*self.ast_ptr(wm)).instance(y.as_data.inst);
+            let it = *self.ast_ptr(wm).instance(y.as_data.inst);
             let da = self.ast_ptr(it.module);
-            let dn = self.name_text(it.module, unsafe (*da).at_const(it.decl).as_data.aggregate.name);
+            let dn = self.name_text(it.module, da.at_const(it.decl).as_data.aggregate.name);
             if !self.ce_span_is(it.module, dn, "Slice") && !self.ce_span_is(it.module, dn, "SliceMut") {
                 return cv_nil();
             }
             if self.obj_ptr(v.as_data.p.obj) == null {
                 return cv_nil();
             }
-            let arrlen = (unsafe (*self.obj_ptr(v.as_data.p.obj)).slots.len()) as i64;
+            let arrlen = (unsafe self.obj_ptr(v.as_data.p.obj).slots.len()) as i64;
             let so = self.ce_obj_new(2);
             if so == 0 {
                 return cv_nil();
             }
-            unsafe (*self.obj_ptr(so)).dm = it.module;
-            unsafe (*self.obj_ptr(so)).dn = it.decl;
-            unsafe (*self.obj_ptr(so)).slots.set(
+            unsafe self.obj_ptr(so).dm = it.module;
+            unsafe self.obj_ptr(so).dn = it.decl;
+            unsafe self.obj_ptr(so).slots.set(
                 0,
                 CeVal {
                     kind: CV_PTR,
@@ -2395,7 +2388,7 @@ extend ConstEval {
                     as_data: CeValAs { p: CvPtr { obj: v.as_data.p.obj, off: 0 } },
                 },
             );
-            unsafe (*self.obj_ptr(so)).slots.set(
+            unsafe self.obj_ptr(so).slots.set(
                 1,
                 CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: arrlen } },
             );
@@ -2403,8 +2396,8 @@ extend ConstEval {
         }
         if y.kind == TypeKind::TYPE_ARRAY && v.kind == CV_AGG && y.as_data.arr.len != 0 {
             let o = self.obj_ptr(v.as_data.p.obj);
-            if o != null && (unsafe (*o).slots.len()) as u32 < y.as_data.arr.len {
-                let from = (unsafe (*o).slots.len()) as u32;
+            if o != null && (unsafe o.slots.len()) as u32 < y.as_data.arr.len {
+                let from = (unsafe o.slots.len()) as u32;
                 let er = self.ce_rtype(null, wm, y.as_data.arr.elem);
                 if !er.ok {
                     return cv_nil();
@@ -2413,11 +2406,11 @@ extend ConstEval {
                 if z.kind == CV_NIL_K || !self.ce_obj_resize(v.as_data.p.obj, y.as_data.arr.len) {
                     return cv_nil();
                 }
-                let newlen = (unsafe (*self.obj_ptr(v.as_data.p.obj)).slots.len()) as u32;
+                let newlen = (unsafe self.obj_ptr(v.as_data.p.obj).slots.len()) as u32;
                 let mut i = from;
                 while i < newlen {
                     let cloned = self.ce_clone(z, 0);
-                    unsafe (*self.obj_ptr(v.as_data.p.obj)).slots.set(i as usize, cloned);
+                    unsafe self.obj_ptr(v.as_data.p.obj).slots.set(i as usize, cloned);
                     i = i + 1;
                 }
             }
@@ -2447,24 +2440,24 @@ extend ConstEval {
         let a = self.ast_ptr(m);
         let mut id = id0;
         loop {
-            let k = unsafe (*a).at_const(id).kind;
+            let k = a.at_const(id).kind;
             if k == NodeKind::NODE_UNARY {
-                let op = unsafe (*a).at_const(id).as_data.unary.op;
+                let op = a.at_const(id).as_data.unary.op;
                 if op == TokenType::Move || op == TokenType::Unsafe {
-                    id = unsafe (*a).at_const(id).as_data.unary.operand;
+                    id = a.at_const(id).as_data.unary.operand;
                     continue;
                 }
             }
             break;
         }
-        let n_kind = unsafe (*a).at_const(id).kind;
+        let n_kind = a.at_const(id).kind;
         if n_kind == NodeKind::NODE_IDENTIFIER {
             if f == null {
                 return ValRes { ok: false };
             }
-            let mut d = unsafe (*a).resolution_def(id);
+            let mut d = a.resolution_def(id);
             if d.node == NODE_NONE {
-                d = DefId { module: m, node: unsafe (*a).resolution(id) };
+                d = DefId { module: m, node: a.resolution(id) };
             }
             if d.module != m {
                 return ValRes { ok: false };
@@ -2473,30 +2466,30 @@ extend ConstEval {
             if i < 0 {
                 return ValRes { ok: false };
             }
-            let slot = unsafe (*f).locals[i as usize].slot;
+            let slot = unsafe f.locals[i as usize].slot;
             return ValRes {
                 ok: true,
                 v: CeVal {
                     kind: CV_PTR,
                     tm: 0,
                     ty: TYPE_NONE,
-                    as_data: CeValAs { p: CvPtr { obj: unsafe (*f).env, off: slot } },
+                    as_data: CeValAs { p: CvPtr { obj: unsafe f.env, off: slot } },
                 },
             };
         }
         if n_kind == NodeKind::NODE_MEMBER {
-            if unsafe (*a).at_const(id).as_data.member.path {
+            if a.at_const(id).as_data.member.path {
                 return ValRes { ok: false };
             }
-            let mem = unsafe (*a).at_const(id).as_data.member.member;
-            let obj_n = unsafe (*a).at_const(id).as_data.member.object;
+            let mem = a.at_const(id).as_data.member.member;
+            let obj_n = a.at_const(id).as_data.member.object;
             let mname = self.name_text(m, mem);
             let br = self.ce_base_obj(f, m, obj_n);
             if !br.ok {
                 return ValRes { ok: false };
             }
             let o = self.obj_ptr(br.obj);
-            if o == null || unsafe (*o).dead != 0 {
+            if o == null || unsafe o.dead != 0 {
                 return ValRes { ok: false };
             }
             let c0 = self.ce_src(m)[mname.start as usize];
@@ -2504,16 +2497,16 @@ extend ConstEval {
             if c0 >= b'0' && c0 <= b'9' {
                 idx = c0 - b'0';
             } else {
-                if unsafe (*o).dn == NODE_NONE {
+                if unsafe o.dn == NODE_NONE {
                     return ValRes { ok: false };
                 }
-                let fi = self.ce_field_index(unsafe (*o).dm, unsafe (*o).dn, m, mname);
+                let fi = self.ce_field_index(unsafe o.dm, unsafe o.dn, m, mname);
                 if fi.idx < 0 {
                     return ValRes { ok: false };
                 }
                 idx = fi.idx as u32;
             }
-            if idx >= (unsafe (*self.obj_ptr(br.obj)).slots.len()) as u32 {
+            if idx >= (unsafe self.obj_ptr(br.obj).slots.len()) as u32 {
                 return ValRes { ok: false };
             }
             return ValRes {
@@ -2522,8 +2515,8 @@ extend ConstEval {
             };
         }
         if n_kind == NodeKind::NODE_INDEX {
-            let obj_n = unsafe (*a).at_const(id).as_data.index.object;
-            let index_n = unsafe (*a).at_const(id).as_data.index.index;
+            let obj_n = a.at_const(id).as_data.index.object;
+            let index_n = a.at_const(id).as_data.index.index;
             let mut bm = m;
             let mut bt = self.ce_type(m, obj_n);
             for _ in 0..4 {
@@ -2533,13 +2526,13 @@ extend ConstEval {
                 }
                 bm = r.m;
                 bt = r.t;
-                let y = unsafe (*self.ast_ptr(bm)).type_at(bt);
+                let y = self.ast_ptr(bm).type_at(bt);
                 if y.kind != TypeKind::TYPE_REFERENCE {
                     break;
                 }
                 bt = y.as_data.elem;
             }
-            let yk = unsafe (*self.ast_ptr(bm)).type_at(bt).kind;
+            let yk = self.ast_ptr(bm).type_at(bt).kind;
             let iv = self.ev_rval(f, m, index_n);
             if iv.kind != CV_INT {
                 return ValRes { ok: false };
@@ -2558,7 +2551,7 @@ extend ConstEval {
                 if !br.ok {
                     return ValRes { ok: false };
                 }
-                let olen = (unsafe (*self.obj_ptr(br.obj)).slots.len()) as u64;
+                let olen = (unsafe self.obj_ptr(br.obj).slots.len()) as u64;
                 if iv.as_data.i < 0 || iv.as_data.i as u64 >= olen {
                     self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
                     return ValRes { ok: false };
@@ -2603,9 +2596,9 @@ extend ConstEval {
             return ValRes { ok: false };
         }
         if n_kind == NodeKind::NODE_UNARY {
-            let op = unsafe (*a).at_const(id).as_data.unary.op;
+            let op = a.at_const(id).as_data.unary.op;
             if op == TokenType::Star {
-                let p = self.ev_in(f, m, unsafe (*a).at_const(id).as_data.unary.operand);
+                let p = self.ev_in(f, m, a.at_const(id).as_data.unary.operand);
                 if p.kind != CV_PTR {
                     return ValRes { ok: false };
                 }
@@ -2635,7 +2628,7 @@ extend ConstEval {
             return cv_nil();
         }
         let a = self.ast_ptr(m);
-        let n = unsafe (*a).at_const(id);
+        let n = a.at_const(id);
         let ntt = n.as_data.literal.token_type; // valid only when kind==NODE_LITERAL
         if f != null && self.ce_type(m, id) == TYPE_NONE && !(n.kind == NodeKind::NODE_LITERAL && ntt == TokenType::Null) {
             return cv_nil();
@@ -2667,9 +2660,9 @@ extend ConstEval {
             return cv_nil();
         }
         if n.kind == NodeKind::NODE_IDENTIFIER {
-            let mut d = unsafe (*a).resolution_def(id);
+            let mut d = a.resolution_def(id);
             if d.node == NODE_NONE {
-                d = DefId { module: m, node: unsafe (*a).resolution(id) };
+                d = DefId { module: m, node: a.resolution(id) };
             }
             if d.node == NODE_NONE || d.module as usize >= self.nmods {
                 return cv_nil();
@@ -2677,13 +2670,13 @@ extend ConstEval {
             if f != null && d.module == m {
                 let i = ce_local_find(f, d.node);
                 if i >= 0 {
-                    let slot = unsafe (*f).locals[i as usize].slot;
-                    let env = unsafe (*f).env;
+                    let slot = unsafe f.locals[i as usize].slot;
+                    let env = unsafe f.env;
                     let eo = self.obj_ptr(env);
-                    if eo == null || slot as usize >= unsafe (*eo).slots.len() {
+                    if eo == null || slot as usize >= unsafe eo.slots.len() {
                         return cv_nil();
                     }
-                    let mut v = unsafe (*eo).slots[slot as usize];
+                    let mut v = unsafe eo.slots[slot as usize];
                     if v.kind == CV_NIL_K {
                         return cv_nil();
                     }
@@ -2694,15 +2687,15 @@ extend ConstEval {
                     return v;
                 }
             }
-            let dk = unsafe (*self.ast_ptr(d.module)).at_const(d.node).kind;
+            let dk = self.ast_ptr(d.module).at_const(d.node).kind;
             if dk == NodeKind::NODE_GENERIC_PARAM {
                 // a const-generic parameter (e.g. the N of Array<T, N>): its bound TYPE_CONST value
                 if f != null {
-                    for i in 0..unsafe (*f).ng {
-                        if unsafe (*f).pmod == d.module && unsafe (*f).params_g[i as usize] == d.node {
-                            let at2 = unsafe (*f).at[i as usize];
+                    for i in 0..unsafe f.ng {
+                        if unsafe f.pmod == d.module && unsafe f.params_g[i as usize] == d.node {
+                            let at2 = unsafe f.at[i as usize];
                             if at2 != TYPE_NONE {
-                                let y = unsafe (*self.ast_ptr(unsafe (*f).am[i as usize])).type_at(at2);
+                                let y = self.ast_ptr(unsafe f.am[i as usize]).type_at(at2);
                                 if y.kind == TypeKind::TYPE_CONST {
                                     return CeVal {
                                         kind: CV_INT,
@@ -2726,8 +2719,8 @@ extend ConstEval {
                     as_data: CeValAs { fnv: CvFn { m: d.module, fn_id: d.node } },
                 };
             }
-            let dval = unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.value;
-            let is_static_mut = unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut;
+            let dval = self.ast_ptr(d.module).at_const(d.node).as_data.const_def.value;
+            let is_static_mut = self.ast_ptr(d.module).at_const(d.node).as_data.const_def.is_static_mut;
             if dk != NodeKind::NODE_CONST || dval == NODE_NONE || is_static_mut {
                 return cv_nil();
             }
@@ -2740,25 +2733,25 @@ extend ConstEval {
         }
         if n.kind == NodeKind::NODE_MEMBER {
             if n.as_data.member.path {
-                let mut d = unsafe (*a).resolution_def(id);
+                let mut d = a.resolution_def(id);
                 if d.node == NODE_NONE {
-                    d = unsafe (*a).resolution_def(n.as_data.member.member);
+                    d = a.resolution_def(n.as_data.member.member);
                 }
                 if d.node == NODE_NONE {
                     // Pre-typecheck (a cross-module const init demanded before its module is checked):
                     // path-member resolutions are recorded by the TYPECHECKER, so ENUM::VARIANT binds
                     // structurally here instead -- the enum name has a resolver resolution and the
                     // variant matches by name (the same DefId the typechecker records later).
-                    let od = unsafe (*a).resolution_def(n.as_data.member.object);
+                    let od = a.resolution_def(n.as_data.member.object);
                     if od.node != NODE_NONE && od.module as usize < self.nmods {
                         let oa = self.ast_ptr(od.module);
-                        if unsafe (*oa).at_const(od.node).kind == NodeKind::NODE_ENUM {
+                        if oa.at_const(od.node).kind == NodeKind::NODE_ENUM {
                             let msp = self.name_text(m, n.as_data.member.member);
                             let lit = diag::span_str(self.ce_src(m), msp.start, msp.end);
                             let vi = self.ce_variant_named(od.module, od.node, lit);
                             if vi >= 0 {
-                                let ms = unsafe (*oa).at_const(od.node).as_data.aggregate.members;
-                                d = DefId { module: od.module, node: unsafe (*oa).list(ms)[vi as usize] };
+                                let ms = oa.at_const(od.node).as_data.aggregate.members;
+                                d = DefId { module: od.module, node: unsafe oa.list(ms)[vi as usize] };
                             }
                         }
                     }
@@ -2766,10 +2759,10 @@ extend ConstEval {
                 if d.node == NODE_NONE || d.module as usize >= self.nmods {
                     return cv_nil();
                 }
-                let dk = unsafe (*self.ast_ptr(d.module)).at_const(d.node).kind;
+                let dk = self.ast_ptr(d.module).at_const(d.node).kind;
                 if dk == NodeKind::NODE_CONST {
-                    let dval = unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.value;
-                    let is_sm = unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut;
+                    let dval = self.ast_ptr(d.module).at_const(d.node).as_data.const_def.value;
+                    let is_sm = self.ast_ptr(d.module).at_const(d.node).as_data.const_def.is_static_mut;
                     if dval != NODE_NONE && !is_sm {
                         let mut v = self.ev_const_init(d.module, dval);
                         if v.kind == CV_INT || v.kind == CV_BOOL || v.kind == CV_FLOAT {
@@ -2799,7 +2792,7 @@ extend ConstEval {
                     v.ty = rt;
                     return v;
                 }
-                if unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.variant.payload.len > 0 {
+                if self.ast_ptr(d.module).at_const(d.node).as_data.variant.payload.len > 0 {
                     return cv_nil();
                 }
                 if self.ce_user_free(d.module, vp.enum_decl) {
@@ -2809,10 +2802,10 @@ extend ConstEval {
                 if o == 0 {
                     return cv_nil();
                 }
-                unsafe (*self.obj_ptr(o)).is_enum = 1;
-                unsafe (*self.obj_ptr(o)).dm = d.module;
-                unsafe (*self.obj_ptr(o)).dn = vp.enum_decl;
-                unsafe (*self.obj_ptr(o)).slots.set(
+                unsafe self.obj_ptr(o).is_enum = 1;
+                unsafe self.obj_ptr(o).dm = d.module;
+                unsafe self.obj_ptr(o).dn = vp.enum_decl;
+                unsafe self.obj_ptr(o).slots.set(
                     0,
                     CeVal { kind: CV_INT, tm: 0, ty: TYPE_NONE, as_data: CeValAs { i: vp.pos } },
                 );
@@ -2824,7 +2817,7 @@ extend ConstEval {
                 return cv_nil();
             }
             let o = self.obj_ptr(br.obj);
-            if o == null || unsafe (*o).dead != 0 {
+            if o == null || unsafe o.dead != 0 {
                 return cv_nil();
             }
             let c0 = src[mname.start as usize];
@@ -2832,20 +2825,20 @@ extend ConstEval {
             if c0 >= b'0' && c0 <= b'9' {
                 idx = c0 - b'0';
             } else {
-                if unsafe (*o).dn == NODE_NONE {
+                if unsafe o.dn == NODE_NONE {
                     return cv_nil();
                 }
-                let fi = self.ce_field_index(unsafe (*o).dm, unsafe (*o).dn, m, mname);
+                let fi = self.ce_field_index(unsafe o.dm, unsafe o.dn, m, mname);
                 if fi.idx < 0 {
                     return cv_nil();
                 }
                 idx = fi.idx as u32;
             }
             let oo = self.obj_ptr(br.obj);
-            if idx >= (unsafe (*oo).slots.len()) as u32 {
+            if idx >= (unsafe oo.slots.len()) as u32 {
                 return cv_nil();
             }
-            let sv = unsafe (*oo).slots[idx as usize];
+            let sv = unsafe oo.slots[idx as usize];
             if sv.kind == CV_NIL_K {
                 return cv_nil();
             }
@@ -2929,7 +2922,7 @@ extend ConstEval {
 
     fn ev_unary(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let n = unsafe (*a).at_const(id);
+        let n = a.at_const(id);
         let op = n.as_data.unary.op;
         let operand = n.as_data.unary.operand;
         let rt = self.ce_type(m, id);
@@ -2979,11 +2972,11 @@ extend ConstEval {
                 return cv_nil();
             }
             let o = self.obj_ptr(v.as_data.p.obj);
-            if o == null || unsafe (*o).is_enum == 0 {
+            if o == null || unsafe o.is_enum == 0 {
                 return cv_nil();
             }
-            let odm = unsafe (*o).dm;
-            let odn = unsafe (*o).dn;
+            let odm = unsafe o.dm;
+            let odn = unsafe o.dn;
             let mut okv = self.ce_variant_named(odm, odn, "Some");
             if okv < 0 {
                 okv = self.ce_variant_named(odm, odn, "Ok");
@@ -2992,17 +2985,17 @@ extend ConstEval {
                 return cv_nil();
             }
             let o2 = self.obj_ptr(v.as_data.p.obj);
-            let tag = unsafe (*o2).slots[0].as_data.i;
+            let tag = unsafe o2.slots[0].as_data.i;
             if tag == okv as i64 {
-                if unsafe (*o2).slots.len() < 2 || unsafe (*o2).slots[1].kind == CV_NIL_K {
+                if unsafe o2.slots.len() < 2 || unsafe o2.slots[1].kind == CV_NIL_K {
                     return cv_nil();
                 }
-                return unsafe (*o2).slots[1];
+                return unsafe o2.slots[1];
             }
-            unsafe (*f).rets[0] = v;
-            unsafe (*f).nrets = 1;
-            unsafe (*f).returned = 1;
-            unsafe (*f).early = 1;
+            unsafe f.rets[0] = v;
+            unsafe f.nrets = 1;
+            unsafe f.returned = 1;
+            unsafe f.early = 1;
             return cv_nil();
         }
         let o = self.ev_rval(f, m, operand);
@@ -3054,17 +3047,17 @@ extend ConstEval {
     // by name at lower time). BT_COUNT = not a builtin cast.
     fn ce_cast_builtin(self: &Self, m: ModuleId, id: NodeId) BuiltinType {
         let a = self.ast_ptr(m);
-        let tyn = unsafe (*a).at_const(id).as_data.cast.ty;
+        let tyn = a.at_const(id).as_data.cast.ty;
         if tyn == NODE_NONE {
             return BuiltinType::BT_COUNT;
         }
-        let nk = unsafe (*a).at_const(tyn).kind;
+        let nk = a.at_const(tyn).kind;
         if nk != NodeKind::NODE_TYPE_PATH && nk != NodeKind::NODE_IDENTIFIER {
             return BuiltinType::BT_COUNT;
         }
-        let d = unsafe (*a).resolution_def(tyn);
+        let d = a.resolution_def(tyn);
         if d.node != NODE_NONE {
-            let bb = unsafe (*self.pkg).builtin_of_decl(d.module, d.node);
+            let bb = self.pkg.builtin_of_decl(d.module, d.node);
             if bb >= 0 {
                 return bb as BuiltinType;
             }
@@ -3072,13 +3065,13 @@ extend ConstEval {
         }
         let mut nm = tok::Span::new(0, 0);
         if nk == NodeKind::NODE_IDENTIFIER {
-            nm = unsafe (*a).at_const(tyn).as_data.name.text;
+            nm = a.at_const(tyn).as_data.name.text;
         } else {
-            let parts = unsafe (*a).at_const(tyn).as_data.type_path.parts;
+            let parts = a.at_const(tyn).as_data.type_path.parts;
             if parts.len != 1 {
                 return BuiltinType::BT_COUNT;
             }
-            nm = unsafe (*a).at_const(unsafe (*a).list(parts)[0]).as_data.name.text;
+            nm = a.at_const(unsafe a.list(parts)[0]).as_data.name.text;
         }
         let b2 = bt_of_name(self.ce_src(m), nm);
         if b2 >= 0 {
@@ -3104,7 +3097,7 @@ extend ConstEval {
 
     fn ev_cast(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let n = unsafe (*a).at_const(id);
+        let n = a.at_const(id);
         let expr = n.as_data.cast.expression;
         let rt = self.ce_type(m, id);
         if rt == TYPE_NONE {
@@ -3116,7 +3109,7 @@ extend ConstEval {
         }
         // A pointer-targeted cast keeps the operand's place value (`(&mut x) as *mut T` must not
         // auto-deref the fresh reference); everything else reads through references as usual.
-        let tk = unsafe (*self.ast_ptr(r2.m)).type_at(r2.t).kind;
+        let tk = self.ast_ptr(r2.m).type_at(r2.t).kind;
         let mut o = cv_nil();
         if tk == TypeKind::TYPE_POINTER {
             o = self.ev_in(f, m, expr);
@@ -3126,7 +3119,7 @@ extend ConstEval {
         if o.kind == CV_NIL_K {
             return cv_nil();
         }
-        let y = *unsafe (*self.ast_ptr(r2.m)).type_at(r2.t);
+        let y = *self.ast_ptr(r2.m).type_at(r2.t);
         if y.kind == TypeKind::TYPE_POINTER {
             if o.kind != CV_PTR {
                 return cv_nil();
@@ -3145,12 +3138,12 @@ extend ConstEval {
             if blk == null {
                 return v;
             }
-            if unsafe (*blk).heap != 0 && unsafe (*blk).et == TYPE_NONE && o.as_data.p.off == 0 {
+            if unsafe blk.heap != 0 && unsafe blk.et == TYPE_NONE && o.as_data.p.off == 0 {
                 let lay = self.ce_layout_f(f, er.m, er.t);
                 if !lay.ok || lay.size == 0 {
                     return cv_nil();
                 }
-                let bytes = unsafe (*blk).bytes;
+                let bytes = unsafe blk.bytes;
                 if bytes % lay.size != 0 {
                     return cv_nil();
                 }
@@ -3158,12 +3151,12 @@ extend ConstEval {
                     return cv_nil();
                 }
                 let blk2 = self.obj_ptr(o.as_data.p.obj);
-                unsafe (*blk2).em = er.m;
-                unsafe (*blk2).et = er.t;
-                unsafe (*blk2).esz = lay.size;
+                unsafe blk2.em = er.m;
+                unsafe blk2.et = er.t;
+                unsafe blk2.esz = lay.size;
                 return v;
             }
-            if unsafe (*blk).et != TYPE_NONE && !self.ce_teq(unsafe (*blk).em, unsafe (*blk).et, er.m, er.t) {
+            if unsafe blk.et != TYPE_NONE && !self.ce_teq(unsafe blk.em, unsafe blk.et, er.m, er.t) {
                 return cv_nil();
             }
             return v;
@@ -3219,14 +3212,14 @@ extend ConstEval {
 
     fn ev_binary(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let n = unsafe (*a).at_const(id);
+        let n = a.at_const(id);
         let op = n.as_data.binary.op;
         let left = n.as_data.binary.left;
         let right = n.as_data.binary.right;
         let rt = self.ce_type(m, id);
         let sr = self.ce_strip_refptr(f, m, self.ce_type(m, left));
         if sr.ok {
-            let lyk = unsafe (*self.ast_ptr(sr.m)).type_at(sr.t).kind;
+            let lyk = self.ast_ptr(sr.m).type_at(sr.t).kind;
             if lyk == TypeKind::TYPE_STRUCT || lyk == TypeKind::TYPE_INSTANCE {
                 let mut mn: str = "";
                 if op == TokenType::Plus {
@@ -3418,31 +3411,31 @@ const fn if_i64(c: bool, a: i64, b: i64) i64 {
 extend ConstEval {
     fn ev_block(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let stmts = unsafe (*a).at_const(id).as_data.block.statements;
+        let stmts = a.at_const(id).as_data.block.statements;
         if f == null || stmts.len == 0 {
             return cv_nil();
         }
-        let dbase = unsafe (*f).ndefers;
+        let dbase = unsafe f.ndefers;
         let mut out = cv_nil();
         let mut ok = true;
         let mut i: u32 = 0;
         while ok && i + 1 < stmts.len {
-            let sid = unsafe (*a).list(stmts)[i as usize];
+            let sid = unsafe a.list(stmts)[i as usize];
             ok = self.exec_stmt(f, m, sid) == Flow::Ok;
             i = i + 1;
         }
         if ok {
-            let lastid = unsafe (*a).list(stmts)[(stmts.len - 1) as usize];
-            let last = unsafe (*a).at_const(lastid);
-            if last.kind == NodeKind::NODE_EXPRESSION_STATEMENT && unsafe (*a).at_const(last.as_data.single.value).kind != NodeKind::NODE_ASSIGNMENT {
+            let lastid = unsafe a.list(stmts)[(stmts.len - 1) as usize];
+            let last = a.at_const(lastid);
+            if last.kind == NodeKind::NODE_EXPRESSION_STATEMENT && a.at_const(last.as_data.single.value).kind != NodeKind::NODE_ASSIGNMENT {
                 out = self.ev_in(f, m, last.as_data.single.value);
             }
         }
-        let mut j = unsafe (*f).ndefers;
+        let mut j = unsafe f.ndefers;
         while j > dbase {
             j = j - 1;
-            let dv = unsafe (*f).defers[j as usize];
-            let dk = unsafe (*a).at_const(dv).kind;
+            let dv = unsafe f.defers[j as usize];
+            let dk = a.at_const(dv).kind;
             let mut ds = Flow::Ok;
             if dk == NodeKind::NODE_BLOCK {
                 ds = self.exec_stmt(f, m, dv);
@@ -3453,14 +3446,14 @@ extend ConstEval {
                 out = cv_nil();
             }
         }
-        unsafe (*f).ndefers = dbase;
+        unsafe f.ndefers = dbase;
         return out;
     }
 
     fn ev_index(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let obj_n = unsafe (*a).at_const(id).as_data.index.object;
-        let index_n = unsafe (*a).at_const(id).as_data.index.index;
+        let obj_n = a.at_const(id).as_data.index.object;
+        let index_n = a.at_const(id).as_data.index.index;
         let mut bm = m;
         let mut bt = self.ce_type(m, obj_n);
         for _ in 0..4 {
@@ -3470,13 +3463,13 @@ extend ConstEval {
             }
             bm = r.m;
             bt = r.t;
-            let y = unsafe (*self.ast_ptr(bm)).type_at(bt);
+            let y = self.ast_ptr(bm).type_at(bt);
             if y.kind != TypeKind::TYPE_REFERENCE {
                 break;
             }
             bt = y.as_data.elem;
         }
-        let yk = unsafe (*self.ast_ptr(bm)).type_at(bt).kind;
+        let yk = self.ast_ptr(bm).type_at(bt).kind;
         if yk == TypeKind::TYPE_STRUCT || yk == TypeKind::TYPE_INSTANCE {
             let rr = self.ce_recv_of(f, bm, bt);
             if !rr.ok {
@@ -3496,7 +3489,7 @@ extend ConstEval {
                 }
                 recv = tr.v;
             }
-            if unsafe (*a).at_const(index_n).kind == NodeKind::NODE_RANGE {
+            if a.at_const(index_n).kind == NodeKind::NODE_RANGE {
                 let iv = self.ce_range_obj(f, m, index_n);
                 if iv.kind != CV_AGG {
                     return cv_nil();
@@ -3555,8 +3548,8 @@ extend ConstEval {
             return g;
         }
         let da = self.ast_ptr(r.dm);
-        let gens = unsafe (*da).at_const(r.dn).as_data.aggregate.generics;
-        let gids = unsafe (*da).list(gens);
+        let gens = da.at_const(r.dn).as_data.aggregate.generics;
+        let gids = da.list(gens);
         g.pmod = r.dm;
         let mut i: u32 = 0;
         while i < gens.len && i < r.n as u32 && g.ng as u32 < 8 {
@@ -3582,11 +3575,11 @@ extend ConstEval {
             return cv_nil();
         }
         let a = self.ast_ptr(m);
-        if unsafe (*a).at_const(tyNode).kind == NodeKind::NODE_ARRAY_TYPE {
-            let y = unsafe (*a).type_at(t);
+        if a.at_const(tyNode).kind == NodeKind::NODE_ARRAY_TYPE {
+            let y = a.type_at(t);
             if y.kind == TypeKind::TYPE_ARRAY && y.as_data.arr.len == 0 {
-                let lenNode = unsafe (*a).at_const(tyNode).as_data.array_type.length;
-                let elemNode = unsafe (*a).at_const(tyNode).as_data.array_type.element;
+                let lenNode = a.at_const(tyNode).as_data.array_type.length;
+                let elemNode = a.at_const(tyNode).as_data.array_type.element;
                 let lv = self.ev_in(f, m, lenNode);
                 if lv.kind != CV_INT || lv.as_data.i <= 0 || lv.as_data.i > 0xFFFFFFFFi64 {
                     return cv_nil();
@@ -3595,7 +3588,7 @@ extend ConstEval {
                 if e == TYPE_NONE {
                     return cv_nil();
                 }
-                let nt = unsafe (*self.mut_ast_ptr(m)).intern_type(
+                let nt = self.mut_ast_ptr(m).intern_type(
                     Ty {
                         kind: TypeKind::TYPE_ARRAY,
                         as_data: TyAs { arr: TyArr { elem: e, len: lv.as_data.i as u32 } },
@@ -3613,28 +3606,26 @@ extend ConstEval {
 
     fn ev_struct_init(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let tn = unsafe (*a).at_const(id).as_data.struct_initializer.ty;
-        let fields = unsafe (*a).at_const(id).as_data.struct_initializer.fields;
+        let tn = a.at_const(id).as_data.struct_initializer.ty;
+        let fields = a.at_const(id).as_data.struct_initializer.fields;
         let rt = self.ce_type(m, id);
         // enum struct-payload variant: `Variant { .. }`
-        let mut vd = unsafe (*a).resolution_def(tn);
+        let mut vd = a.resolution_def(tn);
         if vd.node == NODE_NONE {
-            vd = DefId { module: m, node: unsafe (*a).resolution(tn) };
+            vd = DefId { module: m, node: a.resolution(tn) };
         }
-        if vd.node != NODE_NONE && vd.module as usize < self.nmods && unsafe (*self.ast_ptr(vd.module)).at_const(
-            vd.node,
-        ).kind == NodeKind::NODE_ENUM && unsafe (*a).at_const(tn).kind == NodeKind::NODE_TYPE_PATH && unsafe (*a).at_const(
+        if vd.node != NODE_NONE && vd.module as usize < self.nmods && self.ast_ptr(vd.module).at_const(vd.node).kind == NodeKind::NODE_ENUM && a.at_const(
             tn,
-        ).as_data.type_path.parts.len >= 2 {
-            let parts = unsafe (*a).at_const(tn).as_data.type_path.parts;
-            let last = unsafe (*a).list(parts)[(parts.len - 1) as usize];
+        ).kind == NodeKind::NODE_TYPE_PATH && a.at_const(tn).as_data.type_path.parts.len >= 2 {
+            let parts = a.at_const(tn).as_data.type_path.parts;
+            let last = unsafe a.list(parts)[(parts.len - 1) as usize];
             let vn = self.name_text(m, last);
             let ea = self.ast_ptr(vd.module);
-            let ms = unsafe (*ea).at_const(vd.node).as_data.aggregate.members;
+            let ms = ea.at_const(vd.node).as_data.aggregate.members;
             let mut hit = NODE_NONE;
             for k in 0..ms.len {
-                let mid = unsafe (*ea).list(ms)[k as usize];
-                let vname = self.name_text(vd.module, unsafe (*ea).at_const(mid).as_data.variant.name);
+                let mid = unsafe ea.list(ms)[k as usize];
+                let vname = self.name_text(vd.module, ea.at_const(mid).as_data.variant.name);
                 if self.ce_spans_eq(vd.module, vname, m, vn) {
                     hit = mid;
                     break;
@@ -3644,12 +3635,10 @@ extend ConstEval {
                 vd.node = hit;
             }
         }
-        if vd.node != NODE_NONE && vd.module as usize < self.nmods && unsafe (*self.ast_ptr(vd.module)).at_const(
-            vd.node,
-        ).kind == NodeKind::NODE_VARIANT {
+        if vd.node != NODE_NONE && vd.module as usize < self.nmods && self.ast_ptr(vd.module).at_const(vd.node).kind == NodeKind::NODE_VARIANT {
             let vp = self.ce_variant_pos(vd.module, vd.node);
-            let payload = unsafe (*self.ast_ptr(vd.module)).at_const(vd.node).as_data.variant.payload;
-            let struct_payload = unsafe (*self.ast_ptr(vd.module)).at_const(vd.node).as_data.variant.struct_payload;
+            let payload = self.ast_ptr(vd.module).at_const(vd.node).as_data.variant.payload;
+            let struct_payload = self.ast_ptr(vd.module).at_const(vd.node).as_data.variant.struct_payload;
             if vp.pos < 0 || !struct_payload || self.ce_user_free(vd.module, vp.enum_decl) {
                 return cv_nil();
             }
@@ -3657,33 +3646,33 @@ extend ConstEval {
             if o == 0 {
                 return cv_nil();
             }
-            unsafe (*self.obj_ptr(o)).is_enum = 1;
-            unsafe (*self.obj_ptr(o)).dm = vd.module;
-            unsafe (*self.obj_ptr(o)).dn = vp.enum_decl;
-            unsafe (*self.obj_ptr(o)).slots.set(
+            unsafe self.obj_ptr(o).is_enum = 1;
+            unsafe self.obj_ptr(o).dm = vd.module;
+            unsafe self.obj_ptr(o).dn = vp.enum_decl;
+            unsafe self.obj_ptr(o).slots.set(
                 0,
                 CeVal { kind: CV_INT, tm: 0, ty: TYPE_NONE, as_data: CeValAs { i: vp.pos } },
             );
             let da = self.ast_ptr(vd.module);
             for i in 0..fields.len {
-                let fid = unsafe (*a).list(fields)[i as usize];
-                let fkind = unsafe (*a).at_const(fid).kind;
-                let fname_node = unsafe (*a).at_const(fid).as_data.field_initializer.name;
+                let fid = unsafe a.list(fields)[i as usize];
+                let fkind = a.at_const(fid).kind;
+                let fname_node = a.at_const(fid).as_data.field_initializer.name;
                 if fkind != NodeKind::NODE_FIELD_INITIALIZER || fname_node == NODE_NONE {
                     return cv_nil();
                 }
                 let mut slot: i32 = -1;
                 for j in 0..payload.len {
-                    let pfid = unsafe (*da).list(payload)[j as usize];
-                    if unsafe (*da).at_const(pfid).kind == NodeKind::NODE_FIELD {
-                        let pfname = self.name_text(vd.module, unsafe (*da).at_const(pfid).as_data.field.name);
+                    let pfid = unsafe da.list(payload)[j as usize];
+                    if da.at_const(pfid).kind == NodeKind::NODE_FIELD {
+                        let pfname = self.name_text(vd.module, da.at_const(pfid).as_data.field.name);
                         if self.ce_spans_eq(vd.module, pfname, m, self.name_text(m, fname_node)) {
                             slot = j as i32;
                             break;
                         }
                     }
                 }
-                let v = self.ev_rval(f, m, unsafe (*a).at_const(fid).as_data.field_initializer.value);
+                let v = self.ev_rval(f, m, a.at_const(fid).as_data.field_initializer.value);
                 if slot < 0 || v.kind == CV_NIL_K {
                     return cv_nil();
                 }
@@ -3691,7 +3680,7 @@ extend ConstEval {
                 if cloned.kind == CV_NIL_K {
                     return cv_nil();
                 }
-                unsafe (*self.obj_ptr(o)).slots.set((1 + slot) as usize, cloned);
+                unsafe self.obj_ptr(o).slots.set((1 + slot) as usize, cloned);
             }
             return CeVal { kind: CV_AGG, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
         }
@@ -3700,8 +3689,8 @@ extend ConstEval {
             return cv_nil();
         }
         let da = self.ast_ptr(rr.r.dm);
-        let dkind = unsafe (*da).at_const(rr.r.dn).kind;
-        let is_union = unsafe (*da).at_const(rr.r.dn).as_data.aggregate.is_union;
+        let dkind = da.at_const(rr.r.dn).kind;
+        let is_union = da.at_const(rr.r.dn).as_data.aggregate.is_union;
         if dkind != NodeKind::NODE_STRUCT || is_union {
             return cv_nil();
         }
@@ -3712,17 +3701,17 @@ extend ConstEval {
         if o == 0 {
             return cv_nil();
         }
-        unsafe (*self.obj_ptr(o)).dm = rr.r.dm;
-        unsafe (*self.obj_ptr(o)).dn = rr.r.dn;
-        unsafe (*self.obj_ptr(o)).nargs = rr.r.n;
+        unsafe self.obj_ptr(o).dm = rr.r.dm;
+        unsafe self.obj_ptr(o).dn = rr.r.dn;
+        unsafe self.obj_ptr(o).nargs = rr.r.n;
         for ci in 0..4 {
-            unsafe (*self.obj_ptr(o)).am[ci] = unsafe rr.r.am[ci];
-            unsafe (*self.obj_ptr(o)).at[ci] = unsafe rr.r.at[ci];
+            unsafe self.obj_ptr(o).am[ci] = unsafe rr.r.am[ci];
+            unsafe self.obj_ptr(o).at[ci] = unsafe rr.r.at[ci];
         }
         for i in 0..fields.len {
-            let fid = unsafe (*a).list(fields)[i as usize];
-            let fkind = unsafe (*a).at_const(fid).kind;
-            let fname_node = unsafe (*a).at_const(fid).as_data.field_initializer.name;
+            let fid = unsafe a.list(fields)[i as usize];
+            let fkind = a.at_const(fid).kind;
+            let fname_node = a.at_const(fid).as_data.field_initializer.name;
             if fkind != NodeKind::NODE_FIELD_INITIALIZER || fname_node == NODE_NONE {
                 return cv_nil();
             }
@@ -3731,7 +3720,7 @@ extend ConstEval {
             if fi.idx < 0 {
                 return cv_nil();
             }
-            let v = self.ev_rval(f, m, unsafe (*a).at_const(fid).as_data.field_initializer.value);
+            let v = self.ev_rval(f, m, a.at_const(fid).as_data.field_initializer.value);
             if v.kind == CV_NIL_K {
                 return cv_nil();
             }
@@ -3739,32 +3728,32 @@ extend ConstEval {
             if cloned.kind == CV_NIL_K {
                 return cv_nil();
             }
-            unsafe (*self.obj_ptr(o)).slots.set(fi.idx as usize, cloned);
+            unsafe self.obj_ptr(o).slots.set(fi.idx as usize, cloned);
         }
         // remaining fields: decl-side default, else zero-initialized (a partial struct literal
         // zero-fills in C; the zero is built from the field's TYPE NODE so const-generic array
         // lengths resolve through the receiver's args)
-        let ms = unsafe (*da).at_const(rr.r.dn).as_data.aggregate.members;
+        let ms = da.at_const(rr.r.dn).as_data.aggregate.members;
         let mut idx: i32 = 0;
         for k in 0..ms.len {
-            let fd = unsafe (*da).list(ms)[k as usize];
-            if unsafe (*da).at_const(fd).kind == NodeKind::NODE_FIELD {
-                if unsafe (*self.obj_ptr(o)).slots[idx as usize].kind == CV_NIL_K {
-                    let fval = unsafe (*da).at_const(fd).as_data.field.value;
+            let fd = unsafe da.list(ms)[k as usize];
+            if da.at_const(fd).kind == NodeKind::NODE_FIELD {
+                if unsafe self.obj_ptr(o).slots[idx as usize].kind == CV_NIL_K {
+                    let fval = da.at_const(fd).as_data.field.value;
                     if fval == NODE_NONE {
                         let mut g = self.ce_recv_frame(&rr.r);
-                        let z = self.ce_zero_node(&mut g, rr.r.dm, unsafe (*da).at_const(fd).as_data.field.ty, 0);
+                        let z = self.ce_zero_node(&mut g, rr.r.dm, da.at_const(fd).as_data.field.ty, 0);
                         if z.kind == CV_NIL_K {
                             return cv_nil();
                         }
-                        unsafe (*self.obj_ptr(o)).slots.set(idx as usize, z);
+                        unsafe self.obj_ptr(o).slots.set(idx as usize, z);
                     } else {
                         let v = self.ev_in(null, rr.r.dm, fval);
                         if v.kind == CV_NIL_K {
                             return cv_nil();
                         }
                         let cloned = self.ce_clone(v, 0);
-                        unsafe (*self.obj_ptr(o)).slots.set(idx as usize, cloned);
+                        unsafe self.obj_ptr(o).slots.set(idx as usize, cloned);
                     }
                 }
                 idx = idx + 1;
@@ -3775,13 +3764,13 @@ extend ConstEval {
 
     fn ev_array_lit(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let elements = unsafe (*a).at_const(id).as_data.array_literal.elements;
+        let elements = a.at_const(id).as_data.array_literal.elements;
         let rt = self.ce_type(m, id);
         let r2 = self.ce_rtype(f, m, rt);
         if !r2.ok {
             return cv_nil();
         }
-        let y = *unsafe (*self.ast_ptr(r2.m)).type_at(r2.t);
+        let y = *self.ast_ptr(r2.m).type_at(r2.t);
         if y.kind != TypeKind::TYPE_ARRAY {
             return cv_nil();
         }
@@ -3791,9 +3780,9 @@ extend ConstEval {
             len = count;
             let mut cur: u32 = 0;
             for i in 0..count {
-                let el = unsafe (*a).list(elements)[i as usize];
-                if unsafe (*a).at_const(el).kind == NodeKind::NODE_FIELD_INITIALIZER {
-                    let iv = self.ev_in(null, m, unsafe (*a).at_const(el).as_data.field_initializer.name);
+                let el = unsafe a.list(elements)[i as usize];
+                if a.at_const(el).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                    let iv = self.ev_in(null, m, a.at_const(el).as_data.field_initializer.name);
                     if iv.kind != CV_INT || iv.as_data.i < 0 {
                         return cv_nil();
                     }
@@ -3820,20 +3809,20 @@ extend ConstEval {
             }
             for i in 0..len {
                 let cloned = self.ce_clone(z, 0);
-                unsafe (*self.obj_ptr(o)).slots.set(i as usize, cloned);
+                unsafe self.obj_ptr(o).slots.set(i as usize, cloned);
             }
         }
         let mut cursor: u32 = 0;
         for i in 0..count {
-            let el = unsafe (*a).list(elements)[i as usize];
+            let el = unsafe a.list(elements)[i as usize];
             let mut value = el;
-            if unsafe (*a).at_const(el).kind == NodeKind::NODE_FIELD_INITIALIZER {
-                let iv = self.ev_in(null, m, unsafe (*a).at_const(el).as_data.field_initializer.name);
+            if a.at_const(el).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                let iv = self.ev_in(null, m, a.at_const(el).as_data.field_initializer.name);
                 if iv.kind != CV_INT || iv.as_data.i < 0 {
                     return cv_nil();
                 }
                 cursor = iv.as_data.i as u32;
-                value = unsafe (*a).at_const(el).as_data.field_initializer.value;
+                value = a.at_const(el).as_data.field_initializer.value;
             }
             if cursor >= len {
                 return cv_nil();
@@ -3846,7 +3835,7 @@ extend ConstEval {
             if cloned.kind == CV_NIL_K {
                 return cv_nil();
             }
-            unsafe (*self.obj_ptr(o)).slots.set(cursor as usize, cloned);
+            unsafe self.obj_ptr(o).slots.set(cursor as usize, cloned);
             cursor = cursor + 1;
         }
         return CeVal { kind: CV_AGG, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
@@ -3854,7 +3843,7 @@ extend ConstEval {
 
     fn ev_tuple(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
         let a = self.ast_ptr(m);
-        let elements = unsafe (*a).at_const(id).as_data.array_literal.elements;
+        let elements = a.at_const(id).as_data.array_literal.elements;
         let rt = self.ce_type(m, id);
         let rr = self.ce_recv_of(f, m, rt);
         if !rr.ok || rr.r.dn == NODE_NONE {
@@ -3865,15 +3854,15 @@ extend ConstEval {
         if o == 0 {
             return cv_nil();
         }
-        unsafe (*self.obj_ptr(o)).dm = rr.r.dm;
-        unsafe (*self.obj_ptr(o)).dn = rr.r.dn;
-        unsafe (*self.obj_ptr(o)).nargs = rr.r.n;
+        unsafe self.obj_ptr(o).dm = rr.r.dm;
+        unsafe self.obj_ptr(o).dn = rr.r.dn;
+        unsafe self.obj_ptr(o).nargs = rr.r.n;
         for ci in 0..4 {
-            unsafe (*self.obj_ptr(o)).am[ci] = unsafe rr.r.am[ci];
-            unsafe (*self.obj_ptr(o)).at[ci] = unsafe rr.r.at[ci];
+            unsafe self.obj_ptr(o).am[ci] = unsafe rr.r.am[ci];
+            unsafe self.obj_ptr(o).at[ci] = unsafe rr.r.at[ci];
         }
         for i in 0..count {
-            let el = unsafe (*a).list(elements)[i as usize];
+            let el = unsafe a.list(elements)[i as usize];
             let v = self.ev_rval(f, m, el);
             if v.kind == CV_NIL_K {
                 return cv_nil();
@@ -3882,7 +3871,7 @@ extend ConstEval {
             if cloned.kind == CV_NIL_K {
                 return cv_nil();
             }
-            unsafe (*self.obj_ptr(o)).slots.set(i as usize, cloned);
+            unsafe self.obj_ptr(o).slots.set(i as usize, cloned);
         }
         return CeVal { kind: CV_AGG, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
     }
@@ -3891,16 +3880,14 @@ extend ConstEval {
     // Returns 1 = match (bindings applied), 0 = no match, -1 = unfoldable.
     fn pat_match(self: &mut Self, f: *mut CeFrame, m: ModuleId, pid: NodeId, v: CeVal, uns: bool, refobj: u32) i32 {
         let a = self.ast_ptr(m);
-        let pk = unsafe (*a).at_const(pid).kind;
+        let pk = a.at_const(pid).kind;
         if pk == NodeKind::NODE_PATTERN_WILDCARD {
             return 1;
         }
         if pk == NodeKind::NODE_PATTERN_NAME {
-            let name_node = unsafe (*a).at_const(pid).as_data.pattern.name;
-            let d = unsafe (*a).resolution_def(name_node);
-            if d.node != NODE_NONE && d.module as usize < self.nmods && unsafe (*self.ast_ptr(d.module)).at_const(
-                d.node,
-            ).kind == NodeKind::NODE_VARIANT {
+            let name_node = a.at_const(pid).as_data.pattern.name;
+            let d = a.resolution_def(name_node);
+            if d.node != NODE_NONE && d.module as usize < self.nmods && self.ast_ptr(d.module).at_const(d.node).kind == NodeKind::NODE_VARIANT {
                 if v.kind == CV_INT || v.kind == CV_BOOL {
                     let tv = self.variant_value(d.module, d.node);
                     if tv.kind == CONST_INT {
@@ -3911,8 +3898,8 @@ extend ConstEval {
                 if v.kind == CV_AGG {
                     let o = self.obj_ptr(v.as_data.p.obj);
                     let vp = self.ce_variant_pos(d.module, d.node);
-                    if o != null && unsafe (*o).is_enum != 0 && vp.pos >= 0 {
-                        return if_i32(unsafe (*o).slots[0].as_data.i == vp.pos as i64, 1, 0);
+                    if o != null && unsafe o.is_enum != 0 && vp.pos >= 0 {
+                        return if_i32(unsafe o.slots[0].as_data.i == vp.pos as i64, 1, 0);
                     }
                     return -1;
                 }
@@ -3921,15 +3908,15 @@ extend ConstEval {
             if !(f != null && self.ce_bind(f, pid, v)) {
                 return -1;
             }
-            let children = unsafe (*a).at_const(pid).as_data.pattern.children;
+            let children = a.at_const(pid).as_data.pattern.children;
             if children.len != 0 {
-                let sub = unsafe (*a).list(children)[0];
+                let sub = unsafe a.list(children)[0];
                 return self.pat_match(f, m, sub, v, uns, refobj);
             }
             return 1;
         }
         if pk == NodeKind::NODE_PATTERN_LITERAL {
-            let lv = self.ev_in(null, m, unsafe (*a).at_const(pid).as_data.single.value);
+            let lv = self.ev_in(null, m, a.at_const(pid).as_data.single.value);
             if lv.kind != CV_INT && lv.kind != CV_BOOL {
                 return -1;
             }
@@ -3939,13 +3926,13 @@ extend ConstEval {
             if v.kind != CV_INT {
                 return -1;
             }
-            let start_n = unsafe (*a).at_const(pid).as_data.pattern_range.start;
-            let end_n = unsafe (*a).at_const(pid).as_data.pattern_range.end;
-            let inclusive = unsafe (*a).at_const(pid).as_data.pattern_range.inclusive;
+            let start_n = a.at_const(pid).as_data.pattern_range.start;
+            let end_n = a.at_const(pid).as_data.pattern_range.end;
+            let inclusive = a.at_const(pid).as_data.pattern_range.inclusive;
             if start_n != NODE_NONE {
                 let mut sn = start_n;
-                if unsafe (*a).at_const(start_n).kind == NodeKind::NODE_PATTERN_LITERAL {
-                    sn = unsafe (*a).at_const(start_n).as_data.single.value;
+                if a.at_const(start_n).kind == NodeKind::NODE_PATTERN_LITERAL {
+                    sn = a.at_const(start_n).as_data.single.value;
                 }
                 let s = self.ev_in(null, m, sn);
                 if s.kind != CV_INT {
@@ -3958,8 +3945,8 @@ extend ConstEval {
             }
             if end_n != NODE_NONE {
                 let mut en = end_n;
-                if unsafe (*a).at_const(end_n).kind == NodeKind::NODE_PATTERN_LITERAL {
-                    en = unsafe (*a).at_const(end_n).as_data.single.value;
+                if a.at_const(end_n).kind == NodeKind::NODE_PATTERN_LITERAL {
+                    en = a.at_const(end_n).as_data.single.value;
                 }
                 let e = self.ev_in(null, m, en);
                 if e.kind != CV_INT {
@@ -3978,9 +3965,9 @@ extend ConstEval {
             return 1;
         }
         if pk == NodeKind::NODE_PATTERN_OR {
-            let children = unsafe (*a).at_const(pid).as_data.pattern.children;
+            let children = a.at_const(pid).as_data.pattern.children;
             for i in 0..children.len {
-                let cid = unsafe (*a).list(children)[i as usize];
+                let cid = unsafe a.list(children)[i as usize];
                 let was = self.trap_mark();
                 let r = self.pat_match(f, m, cid, v, uns, refobj);
                 if r != 0 {
@@ -3991,36 +3978,36 @@ extend ConstEval {
             return 0;
         }
         if pk == NodeKind::NODE_PATTERN_TUPLE {
-            let pname = unsafe (*a).at_const(pid).as_data.pattern.name;
-            let children = unsafe (*a).at_const(pid).as_data.pattern.children;
+            let pname = a.at_const(pid).as_data.pattern.name;
+            let children = a.at_const(pid).as_data.pattern.children;
             if pname == NODE_NONE {
                 if children.len == 1 {
-                    return self.pat_match(f, m, unsafe (*a).list(children)[0], v, uns, refobj);
+                    return self.pat_match(f, m, unsafe a.list(children)[0], v, uns, refobj);
                 }
                 return -1;
             }
             if v.kind != CV_AGG {
                 return -1;
             }
-            let d = unsafe (*a).resolution_def(pname);
-            if d.node == NODE_NONE || unsafe (*self.ast_ptr(d.module)).at_const(d.node).kind != NodeKind::NODE_VARIANT {
+            let d = a.resolution_def(pname);
+            if d.node == NODE_NONE || self.ast_ptr(d.module).at_const(d.node).kind != NodeKind::NODE_VARIANT {
                 return -1;
             }
             let o = self.obj_ptr(v.as_data.p.obj);
             let vp = self.ce_variant_pos(d.module, d.node);
-            if o == null || unsafe (*o).is_enum == 0 || vp.pos < 0 {
+            if o == null || unsafe o.is_enum == 0 || vp.pos < 0 {
                 return -1;
             }
-            if unsafe (*o).slots[0].as_data.i != vp.pos as i64 {
+            if unsafe o.slots[0].as_data.i != vp.pos as i64 {
                 return 0;
             }
             for k in 0..children.len {
-                let cid = unsafe (*a).list(children)[k as usize];
-                if 1 + k >= (unsafe (*self.obj_ptr(v.as_data.p.obj)).slots.len()) as u32 {
+                let cid = unsafe a.list(children)[k as usize];
+                if 1 + k >= (unsafe self.obj_ptr(v.as_data.p.obj).slots.len()) as u32 {
                     return -1;
                 }
-                if refobj != 0 && unsafe (*a).at_const(cid).kind == NodeKind::NODE_PATTERN_NAME && unsafe (*a).resolution_def(
-                    unsafe (*a).at_const(cid).as_data.pattern.name,
+                if refobj != 0 && a.at_const(cid).kind == NodeKind::NODE_PATTERN_NAME && a.resolution_def(
+                    a.at_const(cid).as_data.pattern.name,
                 ).node == NODE_NONE {
                     let pv = CeVal {
                         kind: CV_PTR,
@@ -4033,7 +4020,7 @@ extend ConstEval {
                     }
                     continue;
                 }
-                let sv = unsafe (*self.obj_ptr(v.as_data.p.obj)).slots[(1 + k) as usize];
+                let sv = unsafe self.obj_ptr(v.as_data.p.obj).slots[(1 + k) as usize];
                 if sv.kind == CV_NIL_K {
                     return -1;
                 }
@@ -4045,50 +4032,50 @@ extend ConstEval {
             return 1;
         }
         if pk == NodeKind::NODE_PATTERN_STRUCT {
-            let pname = unsafe (*a).at_const(pid).as_data.pattern.name;
+            let pname = a.at_const(pid).as_data.pattern.name;
             if v.kind != CV_AGG || pname == NODE_NONE {
                 return -1;
             }
-            let d = unsafe (*a).resolution_def(pname);
-            if d.node == NODE_NONE || unsafe (*self.ast_ptr(d.module)).at_const(d.node).kind != NodeKind::NODE_VARIANT {
+            let d = a.resolution_def(pname);
+            if d.node == NODE_NONE || self.ast_ptr(d.module).at_const(d.node).kind != NodeKind::NODE_VARIANT {
                 return -1;
             }
             let o = self.obj_ptr(v.as_data.p.obj);
             let vp = self.ce_variant_pos(d.module, d.node);
-            if o == null || unsafe (*o).is_enum == 0 || vp.pos < 0 {
+            if o == null || unsafe o.is_enum == 0 || vp.pos < 0 {
                 return -1;
             }
-            if unsafe (*o).slots[0].as_data.i != vp.pos as i64 {
+            if unsafe o.slots[0].as_data.i != vp.pos as i64 {
                 return 0;
             }
             let da = self.ast_ptr(d.module);
-            let vpayload = unsafe (*da).at_const(d.node).as_data.variant.payload;
-            if !unsafe (*da).at_const(d.node).as_data.variant.struct_payload {
+            let vpayload = da.at_const(d.node).as_data.variant.payload;
+            if !da.at_const(d.node).as_data.variant.struct_payload {
                 return -1;
             }
-            let children = unsafe (*a).at_const(pid).as_data.pattern.children;
+            let children = a.at_const(pid).as_data.pattern.children;
             for k in 0..children.len {
-                let cid = unsafe (*a).list(children)[k as usize];
-                let pfname = unsafe (*a).at_const(cid).as_data.pattern.name;
-                if unsafe (*a).at_const(cid).kind != NodeKind::NODE_PATTERN_FIELD || pfname == NODE_NONE {
+                let cid = unsafe a.list(children)[k as usize];
+                let pfname = a.at_const(cid).as_data.pattern.name;
+                if a.at_const(cid).kind != NodeKind::NODE_PATTERN_FIELD || pfname == NODE_NONE {
                     return -1;
                 }
                 let mut slot: i32 = -1;
                 for j in 0..vpayload.len {
-                    let pfid = unsafe (*da).list(vpayload)[j as usize];
-                    if unsafe (*da).at_const(pfid).kind == NodeKind::NODE_FIELD {
-                        let fn2 = self.name_text(d.module, unsafe (*da).at_const(pfid).as_data.field.name);
+                    let pfid = unsafe da.list(vpayload)[j as usize];
+                    if da.at_const(pfid).kind == NodeKind::NODE_FIELD {
+                        let fn2 = self.name_text(d.module, da.at_const(pfid).as_data.field.name);
                         if self.ce_spans_eq(d.module, fn2, m, self.name_text(m, pfname)) {
                             slot = j as i32;
                             break;
                         }
                     }
                 }
-                if slot < 0 || 1 + slot as u32 >= (unsafe (*self.obj_ptr(v.as_data.p.obj)).slots.len()) as u32 {
+                if slot < 0 || 1 + slot as u32 >= (unsafe self.obj_ptr(v.as_data.p.obj).slots.len()) as u32 {
                     return -1;
                 }
-                let child = unsafe (*a).list(unsafe (*a).at_const(cid).as_data.pattern.children)[0];
-                if refobj != 0 && unsafe (*a).at_const(child).kind == NodeKind::NODE_IDENTIFIER {
+                let child = unsafe a.list(a.at_const(cid).as_data.pattern.children)[0];
+                if refobj != 0 && a.at_const(child).kind == NodeKind::NODE_IDENTIFIER {
                     let pv = CeVal {
                         kind: CV_PTR,
                         tm: 0,
@@ -4100,11 +4087,11 @@ extend ConstEval {
                     }
                     continue;
                 }
-                let sv = unsafe (*self.obj_ptr(v.as_data.p.obj)).slots[(1 + slot) as usize];
+                let sv = unsafe self.obj_ptr(v.as_data.p.obj).slots[(1 + slot) as usize];
                 if sv.kind == CV_NIL_K {
                     return -1;
                 }
-                if unsafe (*a).at_const(child).kind == NodeKind::NODE_IDENTIFIER {
+                if a.at_const(child).kind == NodeKind::NODE_IDENTIFIER {
                     if f == null || !self.ce_bind(f, child, sv) {
                         return -1;
                     }
@@ -4122,8 +4109,8 @@ extend ConstEval {
 
     fn exec_match(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId, out: *mut CeVal) Flow {
         let a = self.ast_ptr(m);
-        let value_n = unsafe (*a).at_const(id).as_data.match_expr.value;
-        let arms = unsafe (*a).at_const(id).as_data.match_expr.arms;
+        let value_n = a.at_const(id).as_data.match_expr.value;
+        let arms = a.at_const(id).as_data.match_expr.arms;
         let mut v = self.ev_in(f, m, value_n);
         let mut refobj: u32 = 0;
         let mut guard = 0;
@@ -4144,10 +4131,10 @@ extend ConstEval {
         let sb = self.ce_builtin_of(f, m, self.ce_type(m, value_n));
         let uns = sb != BuiltinType::BT_COUNT && bt_unsigned(sb);
         for i in 0..arms.len {
-            let aid = unsafe (*a).list(arms)[i as usize];
-            let pattern = unsafe (*a).at_const(aid).as_data.match_arm.pattern;
-            let guard_n = unsafe (*a).at_const(aid).as_data.match_arm.guard;
-            let body = unsafe (*a).at_const(aid).as_data.match_arm.body;
+            let aid = unsafe a.list(arms)[i as usize];
+            let pattern = a.at_const(aid).as_data.match_arm.pattern;
+            let guard_n = a.at_const(aid).as_data.match_arm.guard;
+            let body = a.at_const(aid).as_data.match_arm.body;
             let was = self.trap_mark();
             let hit = self.pat_match(f, m, pattern, v, uns, refobj);
             if hit < 0 {
@@ -4168,12 +4155,12 @@ extend ConstEval {
             }
             if out != null {
                 unsafe *out = self.ev_in(f, m, body);
-                if unsafe (*out).kind != CV_NIL_K {
+                if unsafe out.kind != CV_NIL_K {
                     return Flow::Ok;
                 }
                 return xfail(f);
             }
-            if unsafe (*a).at_const(body).kind == NodeKind::NODE_BLOCK {
+            if a.at_const(body).kind == NodeKind::NODE_BLOCK {
                 return self.exec_stmt(f, m, body);
             }
             return self.exec_expr_stmt(f, m, body);
@@ -4184,9 +4171,9 @@ extend ConstEval {
     // --- statements ---
     fn exec_assign(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Flow {
         let a = self.ast_ptr(m);
-        let left = unsafe (*a).at_const(id).as_data.binary.left;
-        let right = unsafe (*a).at_const(id).as_data.binary.right;
-        let op = unsafe (*a).at_const(id).as_data.binary.op;
+        let left = a.at_const(id).as_data.binary.left;
+        let right = a.at_const(id).as_data.binary.right;
+        let op = a.at_const(id).as_data.binary.op;
         let pr = self.ev_place(f, m, left);
         if !pr.ok {
             return xfail(f);
@@ -4224,25 +4211,23 @@ extend ConstEval {
         let a = self.ast_ptr(m);
         let mut id = id0;
         loop {
-            let k = unsafe (*a).at_const(id).kind;
+            let k = a.at_const(id).kind;
             if k != NodeKind::NODE_UNARY {
                 break;
             }
-            let op = unsafe (*a).at_const(id).as_data.unary.op;
-            if op != TokenType::Move && op != TokenType::Unsafe || unsafe (*a).at_const(
-                unsafe (*a).at_const(id).as_data.unary.operand,
-            ).kind == NodeKind::NODE_BLOCK {
+            let op = a.at_const(id).as_data.unary.op;
+            if op != TokenType::Move && op != TokenType::Unsafe || a.at_const(a.at_const(id).as_data.unary.operand).kind == NodeKind::NODE_BLOCK {
                 break;
             }
-            id = unsafe (*a).at_const(id).as_data.unary.operand;
+            id = a.at_const(id).as_data.unary.operand;
         }
-        let k = unsafe (*a).at_const(id).kind;
+        let k = a.at_const(id).kind;
         if k == NodeKind::NODE_UNARY {
             // a statement-position `unsafe { ... }`/`move { ... }` block: execute it as statements
             // (ev_block would skip a trailing assignment and yield no value)
-            let op = unsafe (*a).at_const(id).as_data.unary.op;
-            let operand = unsafe (*a).at_const(id).as_data.unary.operand;
-            if (op == TokenType::Move || op == TokenType::Unsafe) && unsafe (*a).at_const(operand).kind == NodeKind::NODE_BLOCK {
+            let op = a.at_const(id).as_data.unary.op;
+            let operand = a.at_const(id).as_data.unary.operand;
+            if (op == TokenType::Move || op == TokenType::Unsafe) && a.at_const(operand).kind == NodeKind::NODE_BLOCK {
                 return self.exec_stmt(f, m, operand);
             }
         }
@@ -4270,23 +4255,23 @@ extend ConstEval {
             return Flow::Bail;
         }
         let a = self.ast_ptr(m);
-        let k = unsafe (*a).at_const(id).kind;
+        let k = a.at_const(id).kind;
         switch k {
             NODE_BLOCK => {
-                let stmts = unsafe (*a).at_const(id).as_data.block.statements;
-                let dbase = unsafe (*f).ndefers;
+                let stmts = a.at_const(id).as_data.block.statements;
+                let dbase = unsafe f.ndefers;
                 let mut st = Flow::Ok;
                 let mut i: u32 = 0;
                 while st == Flow::Ok && i < stmts.len {
-                    st = self.exec_stmt(f, m, unsafe (*a).list(stmts)[i as usize]);
+                    st = self.exec_stmt(f, m, unsafe a.list(stmts)[i as usize]);
                     i = i + 1;
                 }
-                let mut j = unsafe (*f).ndefers;
+                let mut j = unsafe f.ndefers;
                 while j > dbase {
                     j = j - 1;
-                    let dv = unsafe (*f).defers[j as usize];
+                    let dv = unsafe f.defers[j as usize];
                     let mut ds = Flow::Ok;
-                    if unsafe (*a).at_const(dv).kind == NodeKind::NODE_BLOCK {
+                    if a.at_const(dv).kind == NodeKind::NODE_BLOCK {
                         ds = self.exec_stmt(f, m, dv);
                     } else {
                         ds = self.exec_expr_stmt(f, m, dv);
@@ -4295,21 +4280,21 @@ extend ConstEval {
                         st = Flow::Bail;
                     }
                 }
-                unsafe (*f).ndefers = dbase;
+                unsafe f.ndefers = dbase;
                 return st;
             },
             NODE_LET => {
                 return self.exec_let(f, m, id);
             },
             NODE_IF => {
-                let c = self.ev_rval(f, m, unsafe (*a).at_const(id).as_data.if_stmt.condition);
+                let c = self.ev_rval(f, m, a.at_const(id).as_data.if_stmt.condition);
                 if c.kind != CV_BOOL {
                     return xfail(f);
                 }
                 if c.as_data.i != 0 {
-                    return self.exec_stmt(f, m, unsafe (*a).at_const(id).as_data.if_stmt.then_branch);
+                    return self.exec_stmt(f, m, a.at_const(id).as_data.if_stmt.then_branch);
                 }
-                let eb = unsafe (*a).at_const(id).as_data.if_stmt.else_branch;
+                let eb = a.at_const(id).as_data.if_stmt.else_branch;
                 if eb == NODE_NONE {
                     return Flow::Ok;
                 }
@@ -4322,48 +4307,48 @@ extend ConstEval {
                 return self.exec_for(f, m, id);
             },
             NODE_RETURN => {
-                let values = unsafe (*a).at_const(id).as_data.return_stmt.values;
+                let values = a.at_const(id).as_data.return_stmt.values;
                 if values.len > 8 {
                     return Flow::Bail;
                 }
-                unsafe (*f).nrets = 0;
+                unsafe f.nrets = 0;
                 for i in 0..values.len {
-                    let v = self.ev_in(f, m, unsafe (*a).list(values)[i as usize]);
+                    let v = self.ev_in(f, m, unsafe a.list(values)[i as usize]);
                     if v.kind == CV_NIL_K {
                         return xfail(f);
                     }
-                    let nr = unsafe (*f).nrets;
-                    unsafe (*f).rets[nr as usize] = v;
-                    unsafe (*f).nrets = nr + 1;
+                    let nr = unsafe f.nrets;
+                    unsafe f.rets[nr as usize] = v;
+                    unsafe f.nrets = nr + 1;
                 }
-                unsafe (*f).returned = 1;
+                unsafe f.returned = 1;
                 return Flow::Return;
             },
             NODE_BREAK => {
-                let lbl = unsafe (*a).at_const(id).as_data.flow.label;
-                if lbl.end > lbl.start || unsafe (*a).at_const(id).as_data.flow.value != NODE_NONE {
+                let lbl = a.at_const(id).as_data.flow.label;
+                if lbl.end > lbl.start || a.at_const(id).as_data.flow.value != NODE_NONE {
                     return Flow::Bail;
                 }
                 return Flow::Break;
             },
             NODE_CONTINUE => {
-                let lbl = unsafe (*a).at_const(id).as_data.flow.label;
+                let lbl = a.at_const(id).as_data.flow.label;
                 if lbl.end > lbl.start {
                     return Flow::Bail;
                 }
                 return Flow::Continue;
             },
             NODE_DEFER => {
-                if unsafe (*f).ndefers >= CE_MAX_DEFERS {
+                if unsafe f.ndefers >= CE_MAX_DEFERS {
                     return Flow::Bail;
                 }
-                let nd = unsafe (*f).ndefers;
-                unsafe (*f).defers[nd as usize] = unsafe (*a).at_const(id).as_data.single.value;
-                unsafe (*f).ndefers = nd + 1;
+                let nd = unsafe f.ndefers;
+                unsafe f.defers[nd as usize] = a.at_const(id).as_data.single.value;
+                unsafe f.ndefers = nd + 1;
                 return Flow::Ok;
             },
             NODE_EXPRESSION_STATEMENT => {
-                return self.exec_expr_stmt(f, m, unsafe (*a).at_const(id).as_data.single.value);
+                return self.exec_expr_stmt(f, m, a.at_const(id).as_data.single.value);
             },
             _ => {},
         };
@@ -4372,19 +4357,19 @@ extend ConstEval {
 
     fn exec_let(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Flow {
         let a = self.ast_ptr(m);
-        let name_n = unsafe (*a).at_const(id).as_data.let_stmt.name;
-        let value_n = unsafe (*a).at_const(id).as_data.let_stmt.value;
-        let type_n = unsafe (*a).at_const(id).as_data.let_stmt.ty;
-        let nmk = unsafe (*a).at_const(name_n).kind;
+        let name_n = a.at_const(id).as_data.let_stmt.name;
+        let value_n = a.at_const(id).as_data.let_stmt.value;
+        let type_n = a.at_const(id).as_data.let_stmt.ty;
+        let nmk = a.at_const(name_n).kind;
         if nmk == NodeKind::NODE_PATTERN_TUPLE {
-            let children = unsafe (*a).at_const(name_n).as_data.pattern.children;
+            let children = a.at_const(name_n).as_data.pattern.children;
             let nbind = children.len;
             if value_n == NODE_NONE {
                 return Flow::Bail;
             }
             let mut vals: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
             let mut nvals: u32 = 0;
-            if unsafe (*a).at_const(value_n).kind == NodeKind::NODE_CALL {
+            if a.at_const(value_n).kind == NodeKind::NODE_CALL {
                 let cr = self.ce_call(f, m, value_n);
                 if !cr.ok {
                     return xfail(f);
@@ -4405,11 +4390,11 @@ extend ConstEval {
                     return xfail(f);
                 }
                 let o = self.obj_ptr(tv.as_data.p.obj);
-                if o == null || (unsafe (*o).slots.len()) as u32 < nbind {
+                if o == null || (unsafe o.slots.len()) as u32 < nbind {
                     return Flow::Bail;
                 }
                 for i in 0..nbind {
-                    unsafe vals[i as usize] = unsafe (*self.obj_ptr(tv.as_data.p.obj)).slots[i as usize];
+                    unsafe vals[i as usize] = unsafe self.obj_ptr(tv.as_data.p.obj).slots[i as usize];
                 }
                 nvals = nbind;
             }
@@ -4417,7 +4402,7 @@ extend ConstEval {
                 return Flow::Bail;
             }
             for i in 0..nbind {
-                let cid = unsafe (*a).list(children)[i as usize];
+                let cid = unsafe a.list(children)[i as usize];
                 if unsafe vals[i as usize].kind == CV_NIL_K || !self.ce_bind(f, cid, unsafe vals[i as usize]) {
                     return xfail(f);
                 }
@@ -4451,9 +4436,9 @@ extend ConstEval {
 
     fn exec_while(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Flow {
         let a = self.ast_ptr(m);
-        let cond = unsafe (*a).at_const(id).as_data.while_stmt.condition;
-        let body = unsafe (*a).at_const(id).as_data.while_stmt.body;
-        let mut first = unsafe (*a).at_const(id).as_data.while_stmt.is_do;
+        let cond = a.at_const(id).as_data.while_stmt.condition;
+        let body = a.at_const(id).as_data.while_stmt.body;
+        let mut first = a.at_const(id).as_data.while_stmt.is_do;
         loop {
             if !first && cond != NODE_NONE {
                 let c = self.ev_rval(f, m, cond);
@@ -4480,12 +4465,12 @@ extend ConstEval {
 
     fn exec_for(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Flow {
         let a = self.ast_ptr(m);
-        let iter_n = unsafe (*a).at_const(id).as_data.for_stmt.iterable;
-        let body = unsafe (*a).at_const(id).as_data.for_stmt.body;
-        if unsafe (*a).at_const(iter_n).kind == NodeKind::NODE_RANGE {
-            let start_n = unsafe (*a).at_const(iter_n).as_data.pattern_range.start;
-            let end_n = unsafe (*a).at_const(iter_n).as_data.pattern_range.end;
-            let inc = unsafe (*a).at_const(iter_n).as_data.pattern_range.inclusive;
+        let iter_n = a.at_const(id).as_data.for_stmt.iterable;
+        let body = a.at_const(id).as_data.for_stmt.body;
+        if a.at_const(iter_n).kind == NodeKind::NODE_RANGE {
+            let start_n = a.at_const(iter_n).as_data.pattern_range.start;
+            let end_n = a.at_const(iter_n).as_data.pattern_range.end;
+            let inc = a.at_const(iter_n).as_data.pattern_range.inclusive;
             if start_n == NODE_NONE || end_n == NODE_NONE {
                 return Flow::Bail;
             }
@@ -4537,14 +4522,14 @@ extend ConstEval {
         if !ir.ok {
             return Flow::Bail;
         }
-        if unsafe (*self.ast_ptr(ir.m)).type_at(ir.t).kind == TypeKind::TYPE_ARRAY {
+        if self.ast_ptr(ir.m).type_at(ir.t).kind == TypeKind::TYPE_ARRAY {
             let br = self.ce_base_obj(f, m, iter_n);
             if !br.ok {
                 return Flow::Bail;
             }
-            let len = (unsafe (*self.obj_ptr(br.obj)).slots.len()) as u32;
+            let len = (unsafe self.obj_ptr(br.obj).slots.len()) as u32;
             for i in 0..len {
-                let sv = unsafe (*self.obj_ptr(br.obj)).slots[i as usize];
+                let sv = unsafe self.obj_ptr(br.obj).slots[i as usize];
                 if sv.kind == CV_NIL_K || !self.ce_bind(f, id, sv) {
                     return Flow::Bail;
                 }
@@ -4583,17 +4568,17 @@ extend ConstEval {
                 return Flow::Bail;
             }
             let oo = self.obj_ptr(dr.v.as_data.p.obj);
-            if oo == null || unsafe (*oo).is_enum == 0 {
+            if oo == null || unsafe oo.is_enum == 0 {
                 return Flow::Bail;
             }
-            let olen = unsafe (*oo).slots.len();
-            if olen < 2 || unsafe (*oo).slots[1].kind == CV_NIL_K {
+            let olen = unsafe oo.slots.len();
+            if olen < 2 || unsafe oo.slots[1].kind == CV_NIL_K {
                 if olen >= 2 {
                     return Flow::Bail;
                 }
                 return Flow::Ok;
             }
-            let payload = unsafe (*oo).slots[1];
+            let payload = unsafe oo.slots[1];
             if !self.ce_bind(f, id, payload) {
                 return Flow::Bail;
             }
@@ -4625,7 +4610,7 @@ const fn if_bool(c: bool, a: bool, b: bool) bool {
 }
 // A nil eval after `?` propagated an early return (frame.early) is a Return, not a failure.
 const fn xfail(f: *mut CeFrame) Flow {
-    if f != null && unsafe (*f).early != 0 {
+    if f != null && unsafe f.early != 0 {
         return Flow::Return;
     }
     return Flow::Bail;
@@ -4783,10 +4768,10 @@ extend ConstEval {
 
     fn fx_scan_fn(self: &mut Self, m: ModuleId, fn_id: NodeId, deep: bool) u8 {
         let a = self.ast_ptr(m);
-        if unsafe (*a).nodes.len() == 0 || unsafe (*a).at_const(fn_id).kind != NodeKind::NODE_FUNCTION {
+        if unsafe a.nodes.len() == 0 || a.at_const(fn_id).kind != NodeKind::NODE_FUNCTION {
             return FX_MAYBE;
         }
-        let fd = unsafe (*a).at_const(fn_id).as_data.function;
+        let fd = a.at_const(fn_id).as_data.function;
         if fd.is_extern || fd.body == NODE_NONE {
             return FX_MAYBE; // externs are classified at their call sites; bodyless may re-dispatch
         }
@@ -4801,29 +4786,29 @@ extend ConstEval {
     // provably evaluable; loops stay MAYBE (step-budget risk), as does anything unmodeled.
     fn fx_scan_stmts(self: &mut Self, m: ModuleId, owner: NodeId, block: NodeId, depth: u32, deep: bool) u8 {
         let a = self.ast_ptr(m);
-        if depth > 64 || unsafe (*a).at_const(block).kind != NodeKind::NODE_BLOCK {
+        if depth > 64 || a.at_const(block).kind != NodeKind::NODE_BLOCK {
             return FX_MAYBE;
         }
-        let stmts = unsafe (*a).at_const(block).as_data.block.statements;
+        let stmts = a.at_const(block).as_data.block.statements;
         let mut acc = FX_YES;
         for i in 0..stmts.len {
-            let sid = unsafe (*a).list(stmts)[i as usize];
-            let k = unsafe (*a).at_const(sid).kind;
+            let sid = unsafe a.list(stmts)[i as usize];
+            let k = a.at_const(sid).kind;
             let mut s = FX_YES;
             if k == NodeKind::NODE_EXPRESSION_STATEMENT {
-                s = self.fx_scan_expr(m, owner, unsafe (*a).at_const(sid).as_data.single.value, depth + 1, deep);
+                s = self.fx_scan_expr(m, owner, a.at_const(sid).as_data.single.value, depth + 1, deep);
             } else if k == NodeKind::NODE_LET {
-                let v = unsafe (*a).at_const(sid).as_data.let_stmt.value;
+                let v = a.at_const(sid).as_data.let_stmt.value;
                 if v != NODE_NONE {
                     s = self.fx_scan_expr(m, owner, v, depth + 1, deep);
                 }
             } else if k == NodeKind::NODE_RETURN {
-                let values = unsafe (*a).at_const(sid).as_data.return_stmt.values;
+                let values = a.at_const(sid).as_data.return_stmt.values;
                 if deep && values.len > 8 {
                     return fx_meet(acc, FX_MAYBE); // the interpreter caps multi-returns at 8
                 }
                 for j in 0..values.len {
-                    s = fx_meet(s, self.fx_scan_expr(m, owner, unsafe (*a).list(values)[j as usize], depth + 1, deep));
+                    s = fx_meet(s, self.fx_scan_expr(m, owner, unsafe a.list(values)[j as usize], depth + 1, deep));
                 }
                 return fx_meet(acc, s); // nothing executes after a spine return
             } else if k == NodeKind::NODE_BLOCK {
@@ -4833,7 +4818,7 @@ extend ConstEval {
             } else if deep && (k == NodeKind::NODE_IF || k == NodeKind::NODE_MATCH) {
                 s = self.fx_scan_expr(m, owner, sid, depth + 1, true);
             } else if deep && k == NodeKind::NODE_DEFER {
-                s = self.fx_scan_body(m, owner, unsafe (*a).at_const(sid).as_data.single.value, depth + 1);
+                s = self.fx_scan_body(m, owner, a.at_const(sid).as_data.single.value, depth + 1);
             } else {
                 return fx_meet(acc, FX_MAYBE); // control flow: the spine ends here (deep: loops/unmodeled)
             }
@@ -4850,7 +4835,7 @@ extend ConstEval {
         if id == NODE_NONE {
             return FX_YES;
         }
-        if unsafe (*self.ast_ptr(m)).at_const(id).kind == NodeKind::NODE_BLOCK {
+        if self.ast_ptr(m).at_const(id).kind == NodeKind::NODE_BLOCK {
             return self.fx_scan_stmts(m, owner, id, depth, true);
         }
         return self.fx_scan_expr(m, owner, id, depth, true);
@@ -4858,13 +4843,13 @@ extend ConstEval {
 
     fn fx_scan_match(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
         let a = self.ast_ptr(m);
-        let mut acc = self.fx_scan_expr(m, owner, unsafe (*a).at_const(id).as_data.match_expr.value, depth + 1, true);
-        let arms = unsafe (*a).at_const(id).as_data.match_expr.arms;
+        let mut acc = self.fx_scan_expr(m, owner, a.at_const(id).as_data.match_expr.value, depth + 1, true);
+        let arms = a.at_const(id).as_data.match_expr.arms;
         for i in 0..arms.len {
             if acc != FX_YES {
                 return acc;
             }
-            let arm = unsafe (*a).at_const(unsafe (*a).list(arms)[i as usize]).as_data.match_arm;
+            let arm = a.at_const(unsafe a.list(arms)[i as usize]).as_data.match_arm;
             acc = fx_meet(acc, self.fx_scan_pat(m, arm.pattern, depth + 1));
             if arm.guard != NODE_NONE {
                 acc = fx_meet(acc, self.fx_scan_expr(m, owner, arm.guard, depth + 1, true));
@@ -4886,7 +4871,7 @@ extend ConstEval {
             return FX_MAYBE;
         }
         let a = self.ast_ptr(m);
-        let n = unsafe (*a).at_const(pid);
+        let n = a.at_const(pid);
         switch n.kind {
             NODE_PATTERN_WILDCARD => {
                 return FX_YES;
@@ -4915,8 +4900,8 @@ extend ConstEval {
                 if n.as_data.pattern.name == NODE_NONE || children.len != 1 {
                     return FX_MAYBE;
                 }
-                let child = unsafe (*a).list(children)[0];
-                if unsafe (*a).at_const(child).kind == NodeKind::NODE_IDENTIFIER {
+                let child = unsafe a.list(children)[0];
+                if a.at_const(child).kind == NodeKind::NODE_IDENTIFIER {
                     return FX_YES; // a bare binding, not a sub-pattern
                 }
                 return self.fx_scan_pat(m, child, depth + 1);
@@ -4931,20 +4916,20 @@ extend ConstEval {
                             return FX_MAYBE;
                         }
                     } else {
-                        let d = unsafe (*a).resolution_def(pname);
-                        if d.node == NODE_NONE || d.module as usize >= self.nmods || unsafe (*self.ast_ptr(d.module)).at_const(
+                        let d = a.resolution_def(pname);
+                        if d.node == NODE_NONE || d.module as usize >= self.nmods || self.ast_ptr(d.module).at_const(
                             d.node,
                         ).kind != NodeKind::NODE_VARIANT {
                             return FX_MAYBE;
                         }
-                        if n.kind == NodeKind::NODE_PATTERN_STRUCT && !unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.variant.struct_payload {
+                        if n.kind == NodeKind::NODE_PATTERN_STRUCT && !self.ast_ptr(d.module).at_const(d.node).as_data.variant.struct_payload {
                             return FX_MAYBE;
                         }
                     }
                 }
                 let children = n.as_data.pattern.children;
                 for i in 0..children.len {
-                    if self.fx_scan_pat(m, unsafe (*a).list(children)[i as usize], depth + 1) != FX_YES {
+                    if self.fx_scan_pat(m, unsafe a.list(children)[i as usize], depth + 1) != FX_YES {
                         return FX_MAYBE;
                     }
                 }
@@ -4963,26 +4948,26 @@ extend ConstEval {
             return FX_MAYBE;
         }
         let a = self.ast_ptr(m);
-        let n = unsafe (*a).at_const(id);
+        let n = a.at_const(id);
         switch n.kind {
             NODE_LITERAL | NODE_SIZEOF | NODE_ALIGNOF => {
                 return FX_YES;
             },
             NODE_IDENTIFIER => {
-                let d = unsafe (*a).resolution_def(id);
-                if d.node != NODE_NONE && d.module as usize < self.nmods && unsafe (*self.ast_ptr(d.module)).at_const(
-                    d.node,
-                ).kind == NodeKind::NODE_CONST && unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut {
+                let d = a.resolution_def(id);
+                if d.node != NODE_NONE && d.module as usize < self.nmods && self.ast_ptr(d.module).at_const(d.node).kind == NodeKind::NODE_CONST && self.ast_ptr(
+                    d.module,
+                ).at_const(d.node).as_data.const_def.is_static_mut {
                     return self.fx_disq(m, owner, id, "accesses a 'static mut'", deep);
                 }
                 return FX_YES;
             },
             NODE_MEMBER => {
                 if n.as_data.member.path {
-                    let d = unsafe (*a).resolution_def(id);
-                    if d.node != NODE_NONE && d.module as usize < self.nmods && unsafe (*self.ast_ptr(d.module)).at_const(
-                        d.node,
-                    ).kind == NodeKind::NODE_CONST && unsafe (*self.ast_ptr(d.module)).at_const(d.node).as_data.const_def.is_static_mut {
+                    let d = a.resolution_def(id);
+                    if d.node != NODE_NONE && d.module as usize < self.nmods && self.ast_ptr(d.module).at_const(d.node).kind == NodeKind::NODE_CONST && self.ast_ptr(
+                        d.module,
+                    ).at_const(d.node).as_data.const_def.is_static_mut {
                         return self.fx_disq(m, owner, id, "accesses a 'static mut'", deep);
                     }
                     return FX_YES;
@@ -4991,7 +4976,7 @@ extend ConstEval {
             },
             NODE_UNARY => {
                 let operand = n.as_data.unary.operand;
-                if unsafe (*a).at_const(operand).kind == NodeKind::NODE_BLOCK {
+                if a.at_const(operand).kind == NodeKind::NODE_BLOCK {
                     return self.fx_scan_stmts(m, owner, operand, depth + 1, deep);
                 }
                 return self.fx_scan_expr(m, owner, operand, depth + 1, deep);
@@ -5017,14 +5002,14 @@ extend ConstEval {
                 let fields = n.as_data.struct_initializer.fields;
                 let mut acc = FX_YES;
                 for i in 0..fields.len {
-                    let fid = unsafe (*a).list(fields)[i as usize];
-                    if unsafe (*a).at_const(fid).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                    let fid = unsafe a.list(fields)[i as usize];
+                    if a.at_const(fid).kind == NodeKind::NODE_FIELD_INITIALIZER {
                         acc = fx_meet(
                             acc,
                             self.fx_scan_expr(
                                 m,
                                 owner,
-                                unsafe (*a).at_const(fid).as_data.field_initializer.value,
+                                a.at_const(fid).as_data.field_initializer.value,
                                 depth + 1,
                                 deep,
                             ),
@@ -5042,7 +5027,7 @@ extend ConstEval {
                 for i in 0..elements.len {
                     acc = fx_meet(
                         acc,
-                        self.fx_scan_expr(m, owner, unsafe (*a).list(elements)[i as usize], depth + 1, deep),
+                        self.fx_scan_expr(m, owner, unsafe a.list(elements)[i as usize], depth + 1, deep),
                     );
                     if acc == FX_NO {
                         return FX_NO;
@@ -5088,15 +5073,15 @@ extend ConstEval {
 
     fn fx_scan_call(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32, deep: bool) u8 {
         let a = self.ast_ptr(m);
-        let mut callee = unsafe (*a).at_const(id).as_data.call.callee;
-        if unsafe (*a).at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
-            callee = unsafe (*a).at_const(callee).as_data.specialization.expression;
+        let mut callee = a.at_const(id).as_data.call.callee;
+        if a.at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            callee = a.at_const(callee).as_data.specialization.expression;
         }
-        let ck = unsafe (*a).at_const(callee).kind;
-        let call_args = unsafe (*a).at_const(id).as_data.call.args;
+        let ck = a.at_const(callee).kind;
+        let call_args = a.at_const(id).as_data.call.args;
         let mut acc = FX_YES;
         for i in 0..call_args.len {
-            acc = fx_meet(acc, self.fx_scan_expr(m, owner, unsafe (*a).list(call_args)[i as usize], depth + 1, deep));
+            acc = fx_meet(acc, self.fx_scan_expr(m, owner, unsafe a.list(call_args)[i as usize], depth + 1, deep));
             if acc == FX_NO {
                 return FX_NO;
             }
@@ -5105,14 +5090,14 @@ extend ConstEval {
             acc = FX_MAYBE; // the interpreter caps calls at 8 slots (receiver + args)
         }
         let mut is_path = ck == NodeKind::NODE_IDENTIFIER;
-        if ck == NodeKind::NODE_MEMBER && unsafe (*a).at_const(callee).as_data.member.path {
+        if ck == NodeKind::NODE_MEMBER && a.at_const(callee).as_data.member.path {
             is_path = true;
         }
         if !is_path {
             if ck != NodeKind::NODE_MEMBER {
                 return FX_MAYBE; // calling a call/index/closure expression: unresolvable statically
             }
-            let o = self.fx_scan_expr(m, owner, unsafe (*a).at_const(callee).as_data.member.object, depth + 1, deep);
+            let o = self.fx_scan_expr(m, owner, a.at_const(callee).as_data.member.object, depth + 1, deep);
             if o == FX_NO {
                 return FX_NO;
             }
@@ -5122,18 +5107,18 @@ extend ConstEval {
             }
             // deep: fall through -- the interpreter resolves the method through the same tables
         }
-        let mut fd = unsafe (*a).resolution_def(callee);
+        let mut fd = a.resolution_def(callee);
         if fd.node == NODE_NONE && ck == NodeKind::NODE_MEMBER {
-            fd = unsafe (*a).resolution_def(unsafe (*a).at_const(callee).as_data.member.member);
+            fd = a.resolution_def(a.at_const(callee).as_data.member.member);
         }
         if fd.node == NODE_NONE && ck == NodeKind::NODE_IDENTIFIER {
-            fd = DefId { module: m, node: unsafe (*a).resolution(callee) };
+            fd = DefId { module: m, node: a.resolution(callee) };
         }
         if fd.node == NODE_NONE || fd.module as usize >= self.nmods || !self.has_ast(fd.module) {
             return FX_MAYBE;
         }
         let fa = self.ast_ptr(fd.module);
-        let dk = unsafe (*fa).at_const(fd.node).kind;
+        let dk = fa.at_const(fd.node).kind;
         if dk == NodeKind::NODE_VARIANT {
             if deep {
                 // mirror ce_call's payload-constructor gates (untagged/user-Free enums bail)
@@ -5150,7 +5135,7 @@ extend ConstEval {
         if dk != NodeKind::NODE_FUNCTION {
             return FX_MAYBE; // fn value bound to a const/local
         }
-        let cfd = unsafe (*fa).at_const(fd.node).as_data.function;
+        let cfd = fa.at_const(fd.node).as_data.function;
         if cfd.is_extern {
             let nm = self.name_text(fd.module, cfd.name);
             if self.ce_intercept_name(fd.module, nm) {
@@ -5185,50 +5170,42 @@ extend ConstEval {
 
 extend ConstEval {
     fn ce_subst_add(self: &Self, g: *mut CeFrame, pmod: ModuleId, param: NodeId, am: ModuleId, at: TypeId) bool {
-        for i in 0..unsafe (*g).ng {
-            if unsafe (*g).pmod == pmod && unsafe (*g).params_g[i as usize] == param {
-                return self.ce_teq(unsafe (*g).am[i as usize], unsafe (*g).at[i as usize], am, at);
+        for i in 0..unsafe g.ng {
+            if unsafe g.pmod == pmod && unsafe g.params_g[i as usize] == param {
+                return self.ce_teq(unsafe g.am[i as usize], unsafe g.at[i as usize], am, at);
             }
         }
-        if unsafe (*g).ng >= 8 || unsafe (*g).ng != 0 && unsafe (*g).pmod != pmod {
+        if unsafe g.ng >= 8 || unsafe g.ng != 0 && unsafe g.pmod != pmod {
             return false;
         }
-        unsafe (*g).pmod = pmod;
-        let ng = unsafe (*g).ng;
-        unsafe (*g).params_g[ng as usize] = param;
-        unsafe (*g).am[ng as usize] = am;
-        unsafe (*g).at[ng as usize] = at;
-        unsafe (*g).ng = ng + 1;
+        unsafe g.pmod = pmod;
+        let ng = unsafe g.ng;
+        unsafe g.params_g[ng as usize] = param;
+        unsafe g.am[ng as usize] = am;
+        unsafe g.at[ng as usize] = at;
+        unsafe g.ng = ng + 1;
         return true;
     }
 
     fn ce_bind_extend(self: &Self, g: *mut CeFrame, xm: ModuleId, extnode: NodeId, recv: *const CeRecv) bool {
         let xa = self.ast_ptr(xm);
-        let gens = unsafe (*xa).at_const(extnode).as_data.extend_def.generics;
+        let gens = xa.at_const(extnode).as_data.extend_def.generics;
         if gens.len == 0 {
             return true;
         }
-        if recv == null || unsafe (*recv).dn == NODE_NONE {
+        if recv == null || unsafe recv.dn == NODE_NONE {
             return false;
         }
-        let target = unsafe (*xa).at_const(extnode).as_data.extend_def.target_type;
-        if unsafe (*xa).at_const(target).kind != NodeKind::NODE_TYPE_PATH || unsafe (*xa).at_const(target).as_data.type_path.args.len != (unsafe (*recv).n) as u32 {
+        let target = xa.at_const(extnode).as_data.extend_def.target_type;
+        if xa.at_const(target).kind != NodeKind::NODE_TYPE_PATH || xa.at_const(target).as_data.type_path.args.len != (unsafe recv.n) as u32 {
             return false;
         }
-        let targs = unsafe (*xa).at_const(target).as_data.type_path.args;
-        for i in 0..unsafe (*recv).n {
-            let aid = unsafe (*xa).list(targs)[i as usize];
-            let ad = unsafe (*xa).resolution_def(aid);
-            if ad.node != NODE_NONE && ad.module as usize < self.nmods && unsafe (*self.ast_ptr(ad.module)).at_const(
-                ad.node,
-            ).kind == NodeKind::NODE_GENERIC_PARAM {
-                if !self.ce_subst_add(
-                    g,
-                    ad.module,
-                    ad.node,
-                    unsafe (*recv).am[i as usize],
-                    unsafe (*recv).at[i as usize],
-                ) {
+        let targs = xa.at_const(target).as_data.type_path.args;
+        for i in 0..unsafe recv.n {
+            let aid = unsafe xa.list(targs)[i as usize];
+            let ad = xa.resolution_def(aid);
+            if ad.node != NODE_NONE && ad.module as usize < self.nmods && self.ast_ptr(ad.module).at_const(ad.node).kind == NodeKind::NODE_GENERIC_PARAM {
+                if !self.ce_subst_add(g, ad.module, ad.node, unsafe recv.am[i as usize], unsafe recv.at[i as usize]) {
                     return false;
                 }
             } else {
@@ -5238,27 +5215,27 @@ extend ConstEval {
                 }
                 // a target arg typed as one of the extend's own params (e.g. the N of `W<T, N>`,
                 // whose node may carry no generic-param resolution) binds like the resolved case
-                let y2 = *unsafe (*self.ast_ptr(xm)).type_at(at2);
+                let y2 = *self.ast_ptr(xm).type_at(at2);
                 if y2.kind == TypeKind::TYPE_GENERIC {
                     if !self.ce_subst_add(
                         g,
                         y2.module,
                         y2.as_data.decl,
-                        unsafe (*recv).am[i as usize],
-                        unsafe (*recv).at[i as usize],
+                        unsafe recv.am[i as usize],
+                        unsafe recv.at[i as usize],
                     ) {
                         return false;
                     }
-                } else if !self.ce_teq(xm, at2, unsafe (*recv).am[i as usize], unsafe (*recv).at[i as usize]) {
+                } else if !self.ce_teq(xm, at2, unsafe recv.am[i as usize], unsafe recv.at[i as usize]) {
                     return false;
                 }
             }
         }
-        let gids = unsafe (*xa).list(gens);
+        let gids = xa.list(gens);
         for j in 0..gens.len {
             let mut bound = false;
-            for k in 0..unsafe (*g).ng {
-                if unsafe (*g).pmod == xm && unsafe (*g).params_g[k as usize] == unsafe gids[j as usize] {
+            for k in 0..unsafe g.ng {
+                if unsafe g.pmod == xm && unsafe g.params_g[k as usize] == unsafe gids[j as usize] {
                     bound = true;
                 }
             }
@@ -5313,7 +5290,7 @@ extend ConstEval {
         callId: NodeId,
     ) Rets {
         let fa = self.ast_ptr(fm);
-        let nm = self.name_text(fm, unsafe (*fa).at_const(fnode).as_data.function.name);
+        let nm = self.name_text(fm, fa.at_const(fnode).as_data.function.name);
         let rt = self.ce_type(m, callId);
         let mut out = Rets { ok: false, n: 0 };
         if self.ce_span_is(fm, nm, "malloc") {
@@ -5324,9 +5301,9 @@ extend ConstEval {
             if o == 0 {
                 return out;
             }
-            unsafe (*self.obj_ptr(o)).heap = 1;
-            unsafe (*self.obj_ptr(o)).bytes = (unsafe args[0].as_data.i) as u64;
-            unsafe (*self.obj_ptr(o)).et = TYPE_NONE;
+            unsafe self.obj_ptr(o).heap = 1;
+            unsafe self.obj_ptr(o).bytes = (unsafe args[0].as_data.i) as u64;
+            unsafe self.obj_ptr(o).et = TYPE_NONE;
             out.vals[0] = CeVal { kind: CV_PTR, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
             out.n = 1;
             out.ok = true;
@@ -5342,24 +5319,24 @@ extend ConstEval {
                 if o == 0 {
                     return out;
                 }
-                unsafe (*self.obj_ptr(o)).heap = 1;
-                unsafe (*self.obj_ptr(o)).bytes = nbytes;
-                unsafe (*self.obj_ptr(o)).et = TYPE_NONE;
+                unsafe self.obj_ptr(o).heap = 1;
+                unsafe self.obj_ptr(o).bytes = nbytes;
+                unsafe self.obj_ptr(o).et = TYPE_NONE;
                 out.vals[0] = CeVal { kind: CV_PTR, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
                 out.n = 1;
                 out.ok = true;
                 return out;
             }
             let b = self.obj_ptr(unsafe args[0].as_data.p.obj);
-            if b == null || unsafe (*b).heap == 0 || unsafe args[0].as_data.p.off != 0 {
+            if b == null || unsafe b.heap == 0 || unsafe args[0].as_data.p.off != 0 {
                 return out;
             }
-            if unsafe (*b).dead != 0 {
+            if unsafe b.dead != 0 {
                 self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
                 return out;
             }
-            if unsafe (*b).et != TYPE_NONE {
-                let esz = unsafe (*b).esz;
+            if unsafe b.et != TYPE_NONE {
+                let esz = unsafe b.esz;
                 if esz == 0 || nbytes % esz != 0 {
                     return out;
                 }
@@ -5367,7 +5344,7 @@ extend ConstEval {
                     return out;
                 }
             }
-            unsafe (*self.obj_ptr(unsafe args[0].as_data.p.obj)).bytes = nbytes;
+            unsafe self.obj_ptr(unsafe args[0].as_data.p.obj).bytes = nbytes;
             out.vals[0] = CeVal {
                 kind: CV_PTR,
                 tm: m,
@@ -5387,14 +5364,14 @@ extend ConstEval {
                 return out;
             }
             let b = self.obj_ptr(unsafe args[0].as_data.p.obj);
-            if b == null || unsafe (*b).heap == 0 || unsafe args[0].as_data.p.off != 0 {
+            if b == null || unsafe b.heap == 0 || unsafe args[0].as_data.p.off != 0 {
                 return out;
             }
-            if unsafe (*b).dead != 0 {
+            if unsafe b.dead != 0 {
                 self.ce_trap(CE_TRAP_UB_DOUBLE_FREE, "double free");
                 return out;
             }
-            unsafe (*b).dead = 1;
+            unsafe b.dead = 1;
             out.ok = true;
             return out;
         }
@@ -5408,31 +5385,31 @@ extend ConstEval {
                 return out;
             }
             let b = self.obj_ptr(unsafe args[0].as_data.p.obj);
-            if b == null || unsafe (*b).heap == 0 {
+            if b == null || unsafe b.heap == 0 {
                 return out;
             }
-            if unsafe (*b).dead != 0 {
+            if unsafe b.dead != 0 {
                 self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
                 return out;
             }
-            if unsafe (*b).et == TYPE_NONE && unsafe args[0].as_data.p.off == 0 {
-                let bytes = unsafe (*b).bytes;
+            if unsafe b.et == TYPE_NONE && unsafe args[0].as_data.p.off == 0 {
+                let bytes = unsafe b.bytes;
                 if !self.ce_obj_resize(unsafe args[0].as_data.p.obj, bytes as u32) {
                     return out;
                 }
                 let b2 = self.obj_ptr(unsafe args[0].as_data.p.obj);
-                unsafe (*b2).em = 0;
-                unsafe (*b2).et = Ast::builtin(BuiltinType::BT_U8);
-                unsafe (*b2).esz = 1;
+                unsafe b2.em = 0;
+                unsafe b2.et = Ast::builtin(BuiltinType::BT_U8);
+                unsafe b2.esz = 1;
             }
             let bb = self.obj_ptr(unsafe args[0].as_data.p.obj);
-            let esz = unsafe (*bb).esz;
+            let esz = unsafe bb.esz;
             if esz == 0 || n % esz != 0 {
                 return out;
             }
             let count = n / esz;
             let off = (unsafe args[0].as_data.p.off) as u64;
-            if off + count > (unsafe (*bb).slots.len()) as u64 {
+            if off + count > (unsafe bb.slots.len()) as u64 {
                 self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
                 return out;
             }
@@ -5448,14 +5425,14 @@ extend ConstEval {
                 if unsafe args[1].as_data.i != 0 {
                     return out;
                 }
-                fill = self.ce_zero(unsafe (*bb).em, unsafe (*bb).et, 0);
+                fill = self.ce_zero(unsafe bb.em, unsafe bb.et, 0);
                 if fill.kind == CV_NIL_K {
                     return out;
                 }
             }
             for i in 0..count {
                 let cloned = self.ce_clone(fill, 0);
-                unsafe (*self.obj_ptr(unsafe args[0].as_data.p.obj)).slots.set((off + i) as usize, cloned);
+                unsafe self.obj_ptr(unsafe args[0].as_data.p.obj).slots.set((off + i) as usize, cloned);
             }
             out.vals[0] = unsafe args[0];
             out.n = 1;
@@ -5475,23 +5452,23 @@ extend ConstEval {
             }
             let b1 = self.obj_ptr(unsafe args[0].as_data.p.obj);
             let b2 = self.obj_ptr(unsafe args[1].as_data.p.obj);
-            if b1 == null || b2 == null || unsafe (*b1).heap == 0 || unsafe (*b2).heap == 0 || unsafe (*b1).esz != 1 || unsafe (*b2).esz != 1 {
+            if b1 == null || b2 == null || unsafe b1.heap == 0 || unsafe b2.heap == 0 || unsafe b1.esz != 1 || unsafe b2.esz != 1 {
                 return out; // byte-exact comparison is only modeled for 1-byte-element blocks
             }
-            if unsafe (*b1).dead != 0 || unsafe (*b2).dead != 0 {
+            if unsafe b1.dead != 0 || unsafe b2.dead != 0 {
                 self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
                 return out;
             }
             let o1 = (unsafe args[0].as_data.p.off) as u64;
             let o2 = (unsafe args[1].as_data.p.off) as u64;
-            if o1 + n > (unsafe (*b1).slots.len()) as u64 || o2 + n > (unsafe (*b2).slots.len()) as u64 {
+            if o1 + n > (unsafe b1.slots.len()) as u64 || o2 + n > (unsafe b2.slots.len()) as u64 {
                 self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
                 return out;
             }
             let mut r: i64 = 0;
             for i in 0..n {
-                let s1 = unsafe (*b1).slots[(o1 + i) as usize];
-                let s2 = unsafe (*b2).slots[(o2 + i) as usize];
+                let s1 = unsafe b1.slots[(o1 + i) as usize];
+                let s2 = unsafe b2.slots[(o2 + i) as usize];
                 if s1.kind != CV_INT || s2.kind != CV_INT {
                     return out; // uninitialized bytes: not comparable
                 }
@@ -5607,7 +5584,7 @@ extend ConstEval {
         // not compile-time known — that is not a broken `const fn`.
         if !r.ok && (self.invoke_ran || self.trap.len() != 0) {
             let fa = self.ast_ptr(fm);
-            if unsafe (*fa).at_const(fnode).kind == NodeKind::NODE_FUNCTION && unsafe (*fa).at_const(fnode).as_data.function.is_const {
+            if fa.at_const(fnode).kind == NodeKind::NODE_FUNCTION && fa.at_const(fnode).as_data.function.is_const {
                 // a silent failure before the whole package is typed may just be module order:
                 // only synthesize the definite trap once all_typed (flush/codegen phases)
                 if self.trap.len() == 0 && self.all_typed {
@@ -5641,23 +5618,23 @@ extend ConstEval {
     ) Rets {
         let mut out = Rets { ok: false, n: 0 };
         let fa = self.ast_ptr(fm);
-        let closure = unsafe (*fa).at_const(fnode).kind == NodeKind::NODE_CLOSURE;
-        if !closure && unsafe (*fa).at_const(fnode).kind != NodeKind::NODE_FUNCTION {
+        let closure = fa.at_const(fnode).kind == NodeKind::NODE_CLOSURE;
+        if !closure && fa.at_const(fnode).kind != NodeKind::NODE_FUNCTION {
             return out;
         }
         let mut params = NodeList { start: 0, len: 0 };
         let mut body = NODE_NONE;
         if closure {
-            params = unsafe (*fa).at_const(fnode).as_data.closure.params;
-            body = unsafe (*fa).at_const(fnode).as_data.closure.body;
+            params = fa.at_const(fnode).as_data.closure.params;
+            body = fa.at_const(fnode).as_data.closure.body;
         } else {
-            params = unsafe (*fa).at_const(fnode).as_data.function.params;
-            body = unsafe (*fa).at_const(fnode).as_data.function.body;
+            params = fa.at_const(fnode).as_data.function.params;
+            body = fa.at_const(fnode).as_data.function.body;
         }
         if body == NODE_NONE || params.len != nargs {
             return out;
         }
-        if !closure && unsafe (*fa).at_const(fnode).as_data.function.is_variadic {
+        if !closure && fa.at_const(fnode).as_data.function.is_variadic {
             return out;
         }
         // Prefilter: FX_NO means evaluation is certain to fail, so skip interpreting the body.
@@ -5674,18 +5651,18 @@ extend ConstEval {
             return out;
         }
         if extend_node != NODE_NONE {
-            let xg = unsafe (*fa).at_const(extend_node).as_data.extend_def.generics;
+            let xg = fa.at_const(extend_node).as_data.extend_def.generics;
             let mut bound = xg.len == 0;
-            if !bound && recv != null && unsafe (*recv).dn != NODE_NONE && unsafe (*recv).n != 0 {
+            if !bound && recv != null && unsafe recv.dn != NODE_NONE && unsafe recv.n != 0 {
                 bound = self.ce_bind_extend(gp, fm, extend_node, recv);
             }
             if !bound {
                 if nmono as u32 < xg.len {
                     return out;
                 }
-                let gids = unsafe (*fa).list(xg);
+                let gids = fa.list(xg);
                 for i in 0..xg.len {
-                    if unsafe monot[i as usize] == TYPE_NONE || !unsafe (*self.ast_ptr(unsafe monom[i as usize])).type_concrete(
+                    if unsafe monot[i as usize] == TYPE_NONE || !self.ast_ptr(unsafe monom[i as usize]).type_concrete(
                         unsafe monot[i as usize],
                     ) {
                         return out;
@@ -5703,16 +5680,16 @@ extend ConstEval {
             }
         }
         if !closure {
-            let fg = unsafe (*fa).at_const(fnode).as_data.function.generics;
+            let fg = fa.at_const(fnode).as_data.function.generics;
             if fg.len != 0 {
                 if nmono as u32 < fg.len {
                     return out;
                 }
                 let skip = nmono as u32 - fg.len;
-                let gids = unsafe (*fa).list(fg);
+                let gids = fa.list(fg);
                 for i in 0..fg.len {
                     let idx = (skip + i) as usize;
-                    if unsafe monot[idx] == TYPE_NONE || !unsafe (*self.ast_ptr(unsafe monom[idx])).type_concrete(
+                    if unsafe monot[idx] == TYPE_NONE || !self.ast_ptr(unsafe monom[idx]).type_concrete(
                         unsafe monot[idx],
                     ) {
                         return out;
@@ -5726,7 +5703,7 @@ extend ConstEval {
         // Memoization: monomorphic calls with all-scalar arguments only; results are cached only when
         // every return is scalar -- an aggregate would hold ids into an object heap that resets
         // between top-level folds.
-        let mut cacheable = !closure && unsafe (*gp).ng == 0 && nargs <= 8;
+        let mut cacheable = !closure && unsafe gp.ng == 0 && nargs <= 8;
         let mut ai: u32 = 0;
         while cacheable && ai < nargs {
             cacheable = cv_is_scalar(unsafe args[ai as usize]);
@@ -5750,13 +5727,13 @@ extend ConstEval {
                 _ => {},
             };
         }
-        unsafe (*gp).env = self.ce_obj_new(0);
-        if unsafe (*gp).env == 0 {
+        unsafe gp.env = self.ce_obj_new(0);
+        if unsafe gp.env == 0 {
             return out;
         }
-        let pids = unsafe (*fa).list(params);
+        let pids = fa.list(params);
         for i in 0..nargs {
-            let pt0 = self.ce_type(fm, unsafe (*fa).at_const(unsafe pids[i as usize]).as_data.parameter.ty);
+            let pt0 = self.ce_type(fm, fa.at_const(unsafe pids[i as usize]).as_data.parameter.ty);
             let mut v = unsafe args[i as usize];
             let rr = self.ce_rtype(gp, fm, pt0);
             if rr.ok {
@@ -5772,16 +5749,16 @@ extend ConstEval {
         let saved = self.depth;
         self.depth = 0;
         let mut st = Flow::Ok;
-        if closure && unsafe (*fa).at_const(fnode).as_data.closure.expr_body {
+        if closure && fa.at_const(fnode).as_data.closure.expr_body {
             let v = self.ev_in(gp, fm, body);
             if v.kind == CV_NIL_K {
                 st = Flow::Bail;
             } else {
                 st = Flow::Return;
             }
-            unsafe (*gp).rets[0] = v;
-            unsafe (*gp).nrets = 1;
-            unsafe (*gp).returned = 1;
+            unsafe gp.rets[0] = v;
+            unsafe gp.nrets = 1;
+            unsafe gp.returned = 1;
         } else {
             st = self.exec_stmt(gp, fm, body);
         }
@@ -5792,23 +5769,23 @@ extend ConstEval {
         }
         let mut wantret: u32 = 1;
         if !closure {
-            wantret = unsafe (*fa).at_const(fnode).as_data.function.returns.len;
+            wantret = fa.at_const(fnode).as_data.function.returns.len;
             if wantret == 1 {
-                let r0 = unsafe (*fa).list(unsafe (*fa).at_const(fnode).as_data.function.returns)[0];
+                let r0 = unsafe fa.list(fa.at_const(fnode).as_data.function.returns)[0];
                 if type_builtin(fa, self.ce_type(fm, r0)) == BuiltinType::BT_VOID {
                     wantret = 0;
                 }
             }
         }
-        if unsafe (*gp).returned == 0 {
+        if unsafe gp.returned == 0 {
             if wantret > 0 && st != Flow::Return {
                 return out;
             }
-            unsafe (*gp).nrets = 0;
+            unsafe gp.nrets = 0;
         }
-        out.n = unsafe (*gp).nrets;
-        for j in 0..unsafe (*gp).nrets {
-            unsafe out.vals[j as usize] = unsafe (*gp).rets[j as usize];
+        out.n = unsafe gp.nrets;
+        for j in 0..unsafe gp.nrets {
+            unsafe out.vals[j as usize] = unsafe gp.rets[j as usize];
         }
         if cacheable && out.n <= 8 {
             let mut pure = true;
@@ -5862,13 +5839,13 @@ extend ConstEval {
 
     fn ce_call(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Rets {
         let a = self.ast_ptr(m);
-        let mut callee = unsafe (*a).at_const(id).as_data.call.callee;
-        let mut ck = unsafe (*a).at_const(callee).kind;
+        let mut callee = a.at_const(id).as_data.call.callee;
+        let mut ck = a.at_const(callee).kind;
         if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
-            callee = unsafe (*a).at_const(callee).as_data.specialization.expression;
-            ck = unsafe (*a).at_const(callee).kind;
+            callee = a.at_const(callee).as_data.specialization.expression;
+            ck = a.at_const(callee).kind;
         }
-        let call_args = unsafe (*a).at_const(id).as_data.call.args;
+        let call_args = a.at_const(id).as_data.call.args;
         let nargs = call_args.len;
         let mut out = Rets { ok: false, n: 0 };
         if nargs + 1 > 8 {
@@ -5883,13 +5860,11 @@ extend ConstEval {
         let mut rtm: ModuleId = 0;
         let mut rtt = TYPE_NONE;
         if ck == NodeKind::NODE_IDENTIFIER {
-            fd = unsafe (*a).resolution_def(callee);
+            fd = a.resolution_def(callee);
             if fd.node == NODE_NONE {
-                fd = DefId { module: m, node: unsafe (*a).resolution(callee) };
+                fd = DefId { module: m, node: a.resolution(callee) };
             }
-            if fd.node != NODE_NONE && fd.module as usize < self.nmods && unsafe (*self.ast_ptr(fd.module)).at_const(
-                fd.node,
-            ).kind != NodeKind::NODE_FUNCTION {
+            if fd.node != NODE_NONE && fd.module as usize < self.nmods && self.ast_ptr(fd.module).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
                 let v = self.ev_rval(f, m, callee);
                 if v.kind != CV_FN {
                     return out;
@@ -5897,21 +5872,21 @@ extend ConstEval {
                 fd = DefId { module: v.as_data.fnv.m, node: v.as_data.fnv.fn_id };
             }
         } else if ck == NodeKind::NODE_MEMBER {
-            fd = unsafe (*a).resolution_def(callee);
+            fd = a.resolution_def(callee);
             if fd.node == NODE_NONE {
-                fd = unsafe (*a).resolution_def(unsafe (*a).at_const(callee).as_data.member.member);
+                fd = a.resolution_def(a.at_const(callee).as_data.member.member);
             }
-            let is_path = unsafe (*a).at_const(callee).as_data.member.path;
-            let obj_n = unsafe (*a).at_const(callee).as_data.member.object;
+            let is_path = a.at_const(callee).as_data.member.path;
+            let obj_n = a.at_const(callee).as_data.member.object;
             if is_path {
                 if obj_n != NODE_NONE && self.ce_type(m, obj_n) != TYPE_NONE {
                     have_recv_type = true;
                     rtm = m;
                     rtt = self.ce_type(m, obj_n);
                 } else if obj_n != NODE_NONE {
-                    recv_syn = unsafe (*a).resolution_def(obj_n);
+                    recv_syn = a.resolution_def(obj_n);
                     if recv_syn.node == NODE_NONE {
-                        recv_syn = DefId { module: m, node: unsafe (*a).resolution(obj_n) };
+                        recv_syn = DefId { module: m, node: a.resolution(obj_n) };
                     }
                 }
             } else {
@@ -5919,9 +5894,9 @@ extend ConstEval {
                 have_recv_type = true;
                 rtm = m;
                 rtt = self.ce_type(m, recv_expr);
-                du = unsafe (*a).deref_use_at(unsafe (*a).at_const(callee).as_data.member.member);
+                du = a.deref_use_at(a.at_const(callee).as_data.member.member);
                 if fd.node == NODE_NONE {
-                    let mname = self.name_text(m, unsafe (*a).at_const(callee).as_data.member.member);
+                    let mname = self.name_text(m, a.at_const(callee).as_data.member.member);
                     if !self.ce_span_is(m, mname, "free") || nargs != 0 {
                         return out;
                     }
@@ -5997,14 +5972,14 @@ extend ConstEval {
         }
         let mut fam = fd.module;
         let mut fnode = fd.node;
-        let mut fkind = unsafe (*self.ast_ptr(fam)).at_const(fnode).kind;
+        let mut fkind = self.ast_ptr(fam).at_const(fnode).kind;
 
         if fkind == NodeKind::NODE_VARIANT {
             let vp = self.ce_variant_pos(fd.module, fd.node);
             if vp.pos < 0 || !self.ce_enum_tagged(fd.module, vp.enum_decl) {
                 return out;
             }
-            let vpayload = unsafe (*self.ast_ptr(fd.module)).at_const(fd.node).as_data.variant.payload;
+            let vpayload = self.ast_ptr(fd.module).at_const(fd.node).as_data.variant.payload;
             if vpayload.len != nargs || self.ce_user_free(fd.module, vp.enum_decl) {
                 return out;
             }
@@ -6012,15 +5987,15 @@ extend ConstEval {
             if o == 0 {
                 return out;
             }
-            unsafe (*self.obj_ptr(o)).is_enum = 1;
-            unsafe (*self.obj_ptr(o)).dm = fd.module;
-            unsafe (*self.obj_ptr(o)).dn = vp.enum_decl;
-            unsafe (*self.obj_ptr(o)).slots.set(
+            unsafe self.obj_ptr(o).is_enum = 1;
+            unsafe self.obj_ptr(o).dm = fd.module;
+            unsafe self.obj_ptr(o).dn = vp.enum_decl;
+            unsafe self.obj_ptr(o).slots.set(
                 0,
                 CeVal { kind: CV_INT, tm: 0, ty: TYPE_NONE, as_data: CeValAs { i: vp.pos } },
             );
             for i in 0..nargs {
-                let v = self.ev_in(f, m, unsafe (*a).list(call_args)[i as usize]);
+                let v = self.ev_in(f, m, unsafe a.list(call_args)[i as usize]);
                 if v.kind == CV_NIL_K {
                     return out;
                 }
@@ -6028,7 +6003,7 @@ extend ConstEval {
                 if cloned.kind == CV_NIL_K {
                     return out;
                 }
-                unsafe (*self.obj_ptr(o)).slots.set((1 + i) as usize, cloned);
+                unsafe self.obj_ptr(o).slots.set((1 + i) as usize, cloned);
             }
             out.vals[0] = CeVal {
                 kind: CV_AGG,
@@ -6049,7 +6024,7 @@ extend ConstEval {
         if have_recv_type {
             let mut dt = rtt;
             if du != null {
-                dt = unsafe (*du).target;
+                dt = unsafe du.target;
             }
             let sr = self.ce_strip_refptr(f, rtm, dt);
             if sr.ok {
@@ -6060,11 +6035,11 @@ extend ConstEval {
                 }
             }
         } else if recv_syn.node != NODE_NONE && recv_syn.module as usize < self.nmods {
-            let odk = unsafe (*self.ast_ptr(recv_syn.module)).at_const(recv_syn.node).kind;
+            let odk = self.ast_ptr(recv_syn.module).at_const(recv_syn.node).kind;
             if odk == NodeKind::NODE_GENERIC_PARAM && f != null {
-                for i in 0..unsafe (*f).ng {
-                    if unsafe (*f).pmod == recv_syn.module && unsafe (*f).params_g[i as usize] == recv_syn.node {
-                        let rr = self.ce_recv_of(null, unsafe (*f).am[i as usize], unsafe (*f).at[i as usize]);
+                for i in 0..unsafe f.ng {
+                    if unsafe f.pmod == recv_syn.module && unsafe f.params_g[i as usize] == recv_syn.node {
+                        let rr = self.ce_recv_of(null, unsafe f.am[i as usize], unsafe f.at[i as usize]);
                         have_recv_id = rr.ok;
                         if rr.ok {
                             recv_id = rr.r;
@@ -6092,17 +6067,17 @@ extend ConstEval {
             if !have_recv_id {
                 return out;
             }
-            let mname = self.name_text(fam, unsafe (*self.ast_ptr(fam)).at_const(fnode).as_data.function.name);
+            let mname = self.name_text(fam, self.ast_ptr(fam).at_const(fnode).as_data.function.name);
             let mut extnode = NODE_NONE;
             let md = self.ce_find_method(recv_id, m, fd.module, mname, "", &mut extnode);
             if md.node != NODE_NONE {
                 fd = md;
                 fam = fd.module;
                 fnode = fd.node;
-                fkind = unsafe (*self.ast_ptr(fam)).at_const(fnode).kind;
+                fkind = self.ast_ptr(fam).at_const(fnode).kind;
                 container = extnode;
                 ckind = 1;
-            } else if unsafe (*self.ast_ptr(fam)).at_const(fnode).as_data.function.body != NODE_NONE {
+            } else if self.ast_ptr(fam).at_const(fnode).as_data.function.body != NODE_NONE {
                 if recv_id.dn == NODE_NONE {
                     self_at = Ast::builtin(recv_id.b);
                 } else if recv_id.n == 0 {
@@ -6126,10 +6101,10 @@ extend ConstEval {
         }
 
         // extern
-        if fkind == NodeKind::NODE_FUNCTION && unsafe (*self.ast_ptr(fam)).at_const(fnode).as_data.function.is_extern {
+        if fkind == NodeKind::NODE_FUNCTION && self.ast_ptr(fam).at_const(fnode).as_data.function.is_extern {
             let mut argv: [CeVal; 8] = [cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil(), cv_nil()];
             for i in 0..nargs {
-                unsafe argv[i as usize] = self.ev_rval(f, m, unsafe (*a).list(call_args)[i as usize]);
+                unsafe argv[i as usize] = self.ev_rval(f, m, unsafe a.list(call_args)[i as usize]);
                 if unsafe argv[i as usize].kind == CV_NIL_K {
                     return out;
                 }
@@ -6152,22 +6127,22 @@ extend ConstEval {
         let mut na: u32 = 0;
         let mut params = NodeList { start: 0, len: 0 };
         if fkind == NodeKind::NODE_CLOSURE {
-            params = unsafe (*self.ast_ptr(fam)).at_const(fnode).as_data.closure.params;
+            params = self.ast_ptr(fam).at_const(fnode).as_data.closure.params;
         } else {
-            params = unsafe (*self.ast_ptr(fam)).at_const(fnode).as_data.function.params;
+            params = self.ast_ptr(fam).at_const(fnode).as_data.function.params;
         }
         if recv_expr != NODE_NONE {
             if params.len != nargs + 1 {
                 return out;
             }
-            let p0 = unsafe (*self.ast_ptr(fam)).list(params)[0];
-            let p0t = self.ce_type(fam, unsafe (*self.ast_ptr(fam)).at_const(p0).as_data.parameter.ty);
-            let want_ref = p0t != TYPE_NONE && unsafe (*self.ast_ptr(fam)).type_at(p0t).kind == TypeKind::TYPE_REFERENCE;
+            let p0 = unsafe self.ast_ptr(fam).list(params)[0];
+            let p0t = self.ce_type(fam, self.ast_ptr(fam).at_const(p0).as_data.parameter.ty);
+            let want_ref = p0t != TYPE_NONE && self.ast_ptr(fam).type_at(p0t).kind == TypeKind::TYPE_REFERENCE;
             if want_ref || du != null {
                 let sr = self.ce_rtype(f, m, rtt);
                 let mut recv_is_ptr = false;
                 if sr.ok {
-                    let sk = unsafe (*self.ast_ptr(sr.m)).type_at(sr.t).kind;
+                    let sk = self.ast_ptr(sr.m).type_at(sr.t).kind;
                     recv_is_ptr = sk == TypeKind::TYPE_REFERENCE || sk == TypeKind::TYPE_POINTER;
                 }
                 if recv_is_ptr {
@@ -6197,12 +6172,12 @@ extend ConstEval {
                 }
             }
             if du != null {
-                for hi in 0..unsafe (*du).n {
-                    let hrr = self.ce_recv_of(f, m, unsafe (*du).recv[hi as usize]);
+                for hi in 0..unsafe du.n {
+                    let hrr = self.ce_recv_of(f, m, unsafe du.recv[hi as usize]);
                     let mut hext = NODE_NONE;
                     if !hrr.ok || self.ce_container_of(
-                        unsafe (*du).method[hi as usize].module,
-                        unsafe (*du).method[hi as usize].node,
+                        unsafe du.method[hi as usize].module,
+                        unsafe du.method[hi as usize].node,
                         &mut hext,
                     ) != 1 {
                         return out;
@@ -6219,8 +6194,8 @@ extend ConstEval {
                     ];
                     ha[0] = unsafe argv[na as usize];
                     let hinv = self.ce_invoke(
-                        unsafe (*du).method[hi as usize].module,
-                        unsafe (*du).method[hi as usize].node,
+                        unsafe du.method[hi as usize].module,
+                        unsafe du.method[hi as usize].node,
                         hext,
                         &hrr.r,
                         null,
@@ -6251,7 +6226,7 @@ extend ConstEval {
             return out;
         }
         for i in 0..nargs {
-            unsafe argv[na as usize] = self.ev_in(f, m, unsafe (*a).list(call_args)[i as usize]);
+            unsafe argv[na as usize] = self.ev_in(f, m, unsafe a.list(call_args)[i as usize]);
             if unsafe argv[na as usize].kind == CV_NIL_K {
                 return out;
             }
@@ -6262,12 +6237,12 @@ extend ConstEval {
         let mut monom: [ModuleId; 4] = [0u16, 0u16, 0u16, 0u16];
         let mut monot: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         let mut nmono: u8 = 0;
-        let mu = unsafe (*a).type_args(id);
+        let mu = a.type_args(id);
         if mu != null {
             let mut k: u8 = 0;
-            while k < unsafe (*mu).n && k < 8 {
+            while k < unsafe mu.n && k < 8 {
                 unsafe monom[nmono as usize] = m;
-                unsafe monot[nmono as usize] = self.ce_subst_deep(f, m, unsafe (*mu).args[k as usize], 0);
+                unsafe monot[nmono as usize] = self.ce_subst_deep(f, m, unsafe mu.args[k as usize], 0);
                 nmono = nmono + 1;
                 k = k + 1;
             }
@@ -6433,8 +6408,8 @@ extend ConstEval {
             return NODE_NONE;
         }
         let a = self.ast_ptr(m);
-        let body = unsafe (*a).at_const(fn_id).as_data.function.body;
-        if body == NODE_NONE || unsafe (*a).at_const(body).kind != NodeKind::NODE_BLOCK {
+        let body = a.at_const(fn_id).as_data.function.body;
+        if body == NODE_NONE || a.at_const(body).kind != NodeKind::NODE_BLOCK {
             return NODE_NONE;
         }
         self.steps = 0;
@@ -6452,10 +6427,10 @@ extend ConstEval {
         // depth guard: a nested eval() of a module const must not think it is a TOP evaluation
         // (it would reset the trap state and the object heap out from under our frame)
         self.depth = 1;
-        let stmts = unsafe (*a).at_const(body).as_data.block.statements;
+        let stmts = a.at_const(body).as_data.block.statements;
         let mut hit = NODE_NONE;
         for i in 0..stmts.len {
-            let sid = unsafe (*a).list(stmts)[i as usize];
+            let sid = unsafe a.list(stmts)[i as usize];
             let flow = self.exec_stmt(&mut f, m, sid);
             if flow != Flow::Ok {
                 if ce_trap_is_ub(self.trap_kind) || self.trap_kind == CE_TRAP_PANIC && self.trap_in_constfn {
@@ -6488,8 +6463,8 @@ extend ConstEval {
                 }
                 let fv = unsafe self.trap_stack[i as usize];
                 let a = self.ast_ptr(fv.m);
-                if unsafe (*a).at_const(fv.fn_id).kind == NodeKind::NODE_FUNCTION {
-                    let nm = self.name_text(fv.m, unsafe (*a).at_const(fv.fn_id).as_data.function.name);
+                if a.at_const(fv.fn_id).kind == NodeKind::NODE_FUNCTION {
+                    let nm = self.name_text(fv.m, a.at_const(fv.fn_id).as_data.function.name);
                     p = self.db_push_span(p, fv.m, nm);
                 } else {
                     p = self.db_push(p, "<closure>");
@@ -6527,7 +6502,7 @@ extend ConstEval {
     pub fn flush_consts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
         for i in 0..self.pending_consts.len() {
             let p = self.pending_consts[i];
-            let value = unsafe (*self.ast_ptr(p.m)).at_const(p.cond).as_data.const_def.value;
+            let value = self.ast_ptr(p.m).at_const(p.cond).as_data.const_def.value;
             let v = self.eval(p.m, value);
             if v.kind != CONST_NONE {
                 continue;
@@ -6553,9 +6528,9 @@ extend ConstEval {
 
     fn ce_const_is_item(self: &Self, m: ModuleId, id: NodeId) bool {
         let a = self.ast_ptr(m);
-        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+        let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
-            if unsafe (*a).list(items)[i as usize] == id {
+            if unsafe a.list(items)[i as usize] == id {
                 return true;
             }
         }
@@ -6781,10 +6756,10 @@ extend ConstEval {
             if op == null {
                 return self.cap_fail(base, CE_TRAP_UNSUPPORTED, "constant value cannot be materialized as static data");
             }
-            if unsafe (*op).dead != 0 {
+            if unsafe op.dead != 0 {
                 return self.cap_fail(base, CE_TRAP_UB_USE_AFTER_FREE, "constant points at freed compile-time memory");
             }
-            let sl = (unsafe (*op).slots.len()) as u32;
+            let sl = (unsafe op.slots.len()) as u32;
             total = total + sl as u64;
             if total > CE_STATIC_MAX_SLOTS {
                 return self.cap_fail(base, CE_TRAP_TOO_LARGE, "constant is too large to materialize as static data");
@@ -6794,7 +6769,7 @@ extend ConstEval {
             let mut k = sl;
             while k > 0 {
                 k = k - 1;
-                let sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
+                let sv = unsafe self.obj_ptr(oid).slots[k as usize];
                 if sv.kind == CV_AGG {
                     let c = sv.as_data.p.obj;
                     if c == 0 || c as usize > nobj {
@@ -6821,7 +6796,7 @@ extend ConstEval {
                         );
                     }
                     if sv.ty != TYPE_NONE && hintt[c as usize] == TYPE_NONE {
-                        let y = unsafe (*self.ast_ptr(sv.tm)).type_at(sv.ty);
+                        let y = self.ast_ptr(sv.tm).type_at(sv.ty);
                         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
                             hintm.set(c as usize, sv.tm);
                             hintt.set(c as usize, y.as_data.elem);
@@ -6835,7 +6810,7 @@ extend ConstEval {
         let count = order.len();
         for idx in 0..count {
             let oid = order[idx];
-            let sl = (unsafe (*self.obj_ptr(oid)).slots.len()) as u32;
+            let sl = (unsafe self.obj_ptr(oid).slots.len()) as u32;
             let standalone = embp[oid as usize] == 0;
             let mut g = StaticObj {
                 shape: SS_CELL,
@@ -6849,10 +6824,10 @@ extend ConstEval {
                 g.pslot = embs[oid as usize];
             }
             let op = self.obj_ptr(oid);
-            if unsafe (*op).heap != 0 {
+            if unsafe op.heap != 0 {
                 g.shape = SS_HEAP;
-                g.etm = unsafe (*op).em;
-                g.ety = unsafe (*op).et;
+                g.etm = unsafe op.em;
+                g.ety = unsafe op.et;
                 g.n = sl;
                 if g.ety == TYPE_NONE {
                     self.statics.push(g);
@@ -6862,11 +6837,11 @@ extend ConstEval {
                         "constant points at an untyped compile-time heap block",
                     );
                 }
-            } else if unsafe (*op).is_enum != 0 {
+            } else if unsafe op.is_enum != 0 {
                 g.shape = SS_ENUM;
-                g.dm = unsafe (*op).dm;
-                g.dn = unsafe (*op).dn;
-                let gens = unsafe (*self.ast_ptr(g.dm)).at_const(g.dn).as_data.aggregate.generics.len;
+                g.dm = unsafe op.dm;
+                g.dn = unsafe op.dn;
+                let gens = self.ast_ptr(g.dm).at_const(g.dn).as_data.aggregate.generics.len;
                 if standalone && gens != 0 {
                     self.statics.push(g);
                     return self.cap_fail(
@@ -6875,16 +6850,16 @@ extend ConstEval {
                         "constant value cannot be materialized as static data",
                     );
                 }
-            } else if unsafe (*op).dn != NODE_NONE {
+            } else if unsafe op.dn != NODE_NONE {
                 g.shape = SS_STRUCT;
-                g.dm = unsafe (*op).dm;
-                g.dn = unsafe (*op).dn;
-                g.nargs = unsafe (*op).nargs;
+                g.dm = unsafe op.dm;
+                g.dn = unsafe op.dn;
+                g.nargs = unsafe op.nargs;
                 for ci in 0..4 {
-                    unsafe g.am[ci] = unsafe (*op).am[ci];
-                    unsafe g.at[ci] = unsafe (*op).at[ci];
+                    unsafe g.am[ci] = unsafe op.am[ci];
+                    unsafe g.at[ci] = unsafe op.at[ci];
                 }
-                let gens = unsafe (*self.ast_ptr(g.dm)).at_const(g.dn).as_data.aggregate.generics.len;
+                let gens = self.ast_ptr(g.dm).at_const(g.dn).as_data.aggregate.generics.len;
                 if standalone && gens != 0 && g.nargs == 0 {
                     self.statics.push(g);
                     return self.cap_fail(
@@ -6898,7 +6873,7 @@ extend ConstEval {
                 let ht = hintt[oid as usize];
                 let mut isarr = false;
                 if ht != TYPE_NONE {
-                    let y = unsafe (*self.ast_ptr(hm)).type_at(ht);
+                    let y = self.ast_ptr(hm).type_at(ht);
                     if y.kind == TypeKind::TYPE_ARRAY {
                         isarr = true;
                         g.shape = SS_ARRAY;
@@ -6948,11 +6923,11 @@ extend ConstEval {
             let oid = order[idx];
             let gi = base as usize + idx;
             let shape = self.statics[gi].shape;
-            let sl = (unsafe (*self.obj_ptr(oid)).slots.len()) as u32;
+            let sl = (unsafe self.obj_ptr(oid).slots.len()) as u32;
             let mut sslots = Vector::<SSlot>::new();
             let mut srels = Vector::<SRel>::new();
             for k in 0..sl {
-                let sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
+                let sv = unsafe self.obj_ptr(oid).slots[k as usize];
                 let mut s = SSlot { kind: SK_ZERO, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0, child: 0 };
                 if sv.kind == CV_INT || sv.kind == CV_BOOL {
                     s.kind = if_u8(sv.kind == CV_INT, SK_INT, SK_BOOL);
@@ -6990,7 +6965,7 @@ extend ConstEval {
                         let ti = tgt - 1;
                         let toff = sv.as_data.p.off;
                         let tshape = self.statics[ti as usize].shape;
-                        let tlen = (unsafe (*self.obj_ptr(order[(ti - base) as usize])).slots.len()) as u32;
+                        let tlen = (unsafe self.obj_ptr(order[(ti - base) as usize]).slots.len()) as u32;
                         let past_end = toff == tlen && (tshape == SS_HEAP || tshape == SS_ARRAY);
                         if toff > tlen || toff == tlen && !past_end || toff != 0 && (tshape == SS_ENUM || tshape == SS_CELL) {
                             return self.cap_fail(
@@ -7017,9 +6992,9 @@ extend ConstEval {
                     let mut fn_ok = self.has_ast(fm2);
                     if fn_ok {
                         let fa = self.ast_ptr(fm2);
-                        fn_ok = unsafe (*fa).at_const(fnid).kind == NodeKind::NODE_FUNCTION;
+                        fn_ok = fa.at_const(fnid).kind == NodeKind::NODE_FUNCTION;
                         if fn_ok {
-                            let fd = unsafe (*fa).at_const(fnid).as_data.function;
+                            let fd = fa.at_const(fnid).as_data.function;
                             fn_ok = fd.generics.len == 0 && (fd.body != NODE_NONE || fd.is_extern);
                         }
                     }

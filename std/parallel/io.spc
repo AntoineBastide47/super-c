@@ -62,8 +62,8 @@ fn free_interest(it: *mut Interest) {
 fn reactor_main(arg: *mut void) *mut void {
     let r = arg as *mut Reactor;
     let mut evs = EvBuf {};
-    while atomic::load_i32(&mut unsafe (*r).running, 1) != 0 {
-        let n = unsafe sc_io::sc_io_wait((*r).poller, &mut evs.e[0], 64, -1);
+    while atomic::load_i32(&mut unsafe r.running, 1) != 0 {
+        let n = unsafe sc_io::sc_io_wait(r.poller, &mut evs.e[0], 64, -1);
         if n < 0 {
             break;
         }
@@ -74,10 +74,10 @@ fn reactor_main(arg: *mut void) *mut void {
             }
             // Claim it. Losing means a timed-out waiter already took it and freed it -- so this event is
             // stale and nothing here may touch the node again.
-            if !atomic::cas_i32(&mut unsafe (*it).state, 0, 1, false, 4, 0) {
+            if !atomic::cas_i32(&mut unsafe it.state, 0, 1, false, 4, 0) {
                 continue;
             }
-            let _ = runtime::wake(unsafe (*it).co, unsafe (*it).token);
+            let _ = runtime::wake(unsafe it.co, unsafe it.token);
         }
     }
     return null;
@@ -86,11 +86,11 @@ fn reactor_main(arg: *mut void) *mut void {
 fn build_reactor() *mut Reactor {
     let mut g = Global {};
     let r = g.alloc(sizeof(Reactor), alignof(Reactor)) as *mut Reactor;
-    unsafe (*r).poller = unsafe sc_io::sc_io_new();
-    unsafe (*r).running = 1;
+    unsafe r.poller = unsafe sc_io::sc_io_new();
+    unsafe r.running = 1;
     let mut h: *mut void = null;
     let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, reactor_main, r);
-    unsafe (*r).thread = h;
+    unsafe r.thread = h;
     return r;
 }
 
@@ -116,13 +116,13 @@ pub fn ensure_reactor() *mut Reactor {
 fn commit_arm(p: *mut void) {
     let it = p as *mut Interest;
     let r = G_REACTOR;
-    if unsafe sc_io::sc_io_arm((*r).poller, (*it).fd, (*it).write, p) == 0 {
+    if unsafe sc_io::sc_io_arm(r.poller, it.fd, it.write, p) == 0 {
         return;
     }
     // Arming failed (a closed or invalid descriptor): wake the waiter straight back up rather than leave it
     // parked forever. It re-checks the descriptor and gets the real error from the syscall.
-    if atomic::cas_i32(&mut unsafe (*it).state, 0, 1, false, 4, 0) {
-        let _ = runtime::wake(unsafe (*it).co, unsafe (*it).token);
+    if atomic::cas_i32(&mut unsafe it.state, 0, 1, false, 4, 0) {
+        let _ = runtime::wake(unsafe it.co, unsafe it.token);
     }
 }
 
@@ -159,8 +159,8 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     if deadline != 0 {
         runtime::cancel_timer(co);
     }
-    let _ = unsafe sc_io::sc_io_disarm((*r).poller, fd, w);
-    if atomic::cas_i32(&mut unsafe (*it).state, 0, 2, false, 4, 0) {
+    let _ = unsafe sc_io::sc_io_disarm(r.poller, fd, w);
+    if atomic::cas_i32(&mut unsafe it.state, 0, 2, false, 4, 0) {
         free_interest(it); // still armed: the deadline is what woke us, and the reactor will not touch it
         return false;
     }
@@ -222,10 +222,10 @@ pub fn shutdown() {
         return;
     }
     let r = G_REACTOR;
-    atomic::store_i32(&mut unsafe (*r).running, 0, 2);
-    unsafe sc_io::sc_io_wake((*r).poller);
-    let _ = unsafe sc_runtime::sc_rt_thread_join((*r).thread);
-    unsafe sc_io::sc_io_free((*r).poller);
+    atomic::store_i32(&mut unsafe r.running, 0, 2);
+    unsafe sc_io::sc_io_wake(r.poller);
+    let _ = unsafe sc_runtime::sc_rt_thread_join(r.thread);
+    unsafe sc_io::sc_io_free(r.poller);
     let mut g = Global {};
     g.dealloc(r, sizeof(Reactor), alignof(Reactor));
     atomic::store_i32(sp, 0, 2);

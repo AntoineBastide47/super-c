@@ -389,18 +389,18 @@ extend DirCache as Free {
 fn resolve_import_file(dca: usize, root_dir: str, alt_root: str, std_root: str, ast: &Ast, src: str, parts: NodeList) String {
     let dc = dca as *mut DirCache;
     let root_rel = module_file_path(root_dir, ast, src, parts);
-    if unsafe (*dc).exists(root_rel.as_str()) {
+    if dc.exists(root_rel.as_str()) {
         return root_rel;
     }
     let root_idx = module_index_path(root_dir, ast, src, parts);
-    if unsafe (*dc).exists(root_idx.as_str()) {
+    if dc.exists(root_idx.as_str()) {
         return root_idx;
     }
     // Manifest convention fallback: tests/ and bench/ live beside src/, so a project-root-rooted
     // load still resolves the compiler's own modules (and vice versa) through the src/ alt root.
     if !alt_root.is_empty() {
         let alt_rel = module_file_path(alt_root, ast, src, parts);
-        if unsafe (*dc).exists(alt_rel.as_str()) {
+        if dc.exists(alt_rel.as_str()) {
             return alt_rel;
         }
     }
@@ -408,16 +408,16 @@ fn resolve_import_file(dca: usize, root_dir: str, alt_root: str, std_root: str, 
         return root_rel;
     }
     let std_rel = module_file_path(std_root, ast, src, parts);
-    if unsafe (*dc).exists(std_rel.as_str()) {
+    if dc.exists(std_rel.as_str()) {
         return std_rel;
     }
     let std_idx = module_index_path(std_root, ast, src, parts);
-    if unsafe (*dc).exists(std_idx.as_str()) {
+    if dc.exists(std_idx.as_str()) {
         return std_idx;
     }
     let ffi_base = join2(std_root, "ffi");
     let ffi_rel = module_file_path(ffi_base.as_str(), ast, src, parts);
-    if unsafe (*dc).exists(ffi_rel.as_str()) {
+    if dc.exists(ffi_rel.as_str()) {
         return ffi_rel;
     }
     return root_rel;
@@ -733,7 +733,7 @@ extend Package {
         let inner = &mut self.method_used[m];
         if inner.len() <= d.node as usize {
             // Size once to the module's node count so later marks are pure set()s.
-            let mut n = unsafe (*self.module_ast_ptr(d.module)).nodes.len();
+            let mut n = unsafe self.module_ast_ptr(d.module).nodes.len();
             if n <= d.node as usize {
                 n = d.node as usize + 1;
             }
@@ -921,9 +921,7 @@ extend Package {
             return NODE_NONE;
         }
         let mp = (self as *const Package) as *mut Package;
-        unsafe {
-            (*mp).ensure_lk_index(mid);
-        }
+        mp.ensure_lk_index(mid);
         let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
         let key = fnv_name(name) * 2u64 + if want_type {
             1u64;
@@ -1074,9 +1072,7 @@ extend Package {
             return LookupHit { node: NODE_NONE, mid: 0 };
         }
         let mp = (self as *const Package) as *mut Package;
-        unsafe {
-            (*mp).ensure_closure(mid);
-        }
+        mp.ensure_closure(mid);
         let lst = self.clo_lists.at(mid as usize);
         for i in 0..lst.len() {
             let mo = lst[i];
@@ -1314,13 +1310,13 @@ fn subst_reintern_type(
         }
         let d = pkg_ast_m(p, dm);
         let o = pkg_ast_c(p, om);
-        return unsafe (*d).reintern(&*o, t);
+        return unsafe d.reintern(&*o, t);
     }
     if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE || ty.kind == TypeKind::TYPE_SLICE || ty.kind == TypeKind::TYPE_ARRAY {
         let mut nt = ty;
         nt.as_data.elem = subst_reintern_type(p, dm, om, ty.as_data.elem, gmod, gids, args, nargs);
         let d = pkg_ast_m(p, dm);
-        return unsafe (*d).intern_type(nt);
+        return d.intern_type(nt);
     }
     if ty.kind == TypeKind::TYPE_INSTANCE {
         let inst = *pkg_ast_c(p, om).instance(ty.as_data.inst);
@@ -1343,11 +1339,11 @@ fn subst_reintern_type(
             );
         }
         let d = pkg_ast_m(p, dm);
-        return unsafe (*d).intern_instance(inst.module, inst.decl, &na[0], m);
+        return d.intern_instance(inst.module, inst.decl, &na[0], m);
     }
     let d = pkg_ast_m(p, dm);
     let o = pkg_ast_c(p, om);
-    return unsafe (*d).reintern(&*o, t);
+    return unsafe d.reintern(&*o, t);
 }
 
 // Reintern one member/param/return type after substitution; if it lands on a concrete instance whose home
@@ -1366,7 +1362,7 @@ fn reintern_nested_type(
     if t == TYPE_NONE {
         return;
     }
-    let before = unsafe (*pkg_ast_c(p, dm)).instances.len();
+    let before = unsafe pkg_ast_c(p, dm).instances.len();
     let mut st = subst_reintern_type(p, dm, om, t, gmod, gids, args, nargs);
     let mut y = *pkg_ast_c(p, dm).type_at(st);
     while y.kind == TypeKind::TYPE_ARRAY {
@@ -1379,7 +1375,7 @@ fn reintern_nested_type(
     let it = *pkg_ast_c(p, dm).instance(y.as_data.inst);
     let mut concrete = true;
     for i in 0..it.n {
-        if !unsafe (*pkg_ast_c(p, dm)).type_concrete(it.args[i as usize]) {
+        if !unsafe pkg_ast_c(p, dm).type_concrete(it.args[i as usize]) {
             concrete = false;
         }
     }
@@ -1404,20 +1400,20 @@ fn reintern_nested_type(
             4 as u8;
         };
         let mut na: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
-        let hbefore = unsafe (*pkg_ast_c(p, hm)).instances.len();
+        let hbefore = unsafe pkg_ast_c(p, hm).instances.len();
         for k in 0..m {
             let h = pkg_ast_m(p, hm);
             let d = pkg_ast_c(p, dm);
-            unsafe na[k as usize] = unsafe (*h).reintern(&*d, it.args[k as usize]);
+            unsafe na[k as usize] = unsafe h.reintern(&*d, it.args[k as usize]);
         }
         let h = pkg_ast_m(p, hm);
-        let _ = unsafe (*h).intern_instance(it.module, it.decl, &na[0], m);
-        let hafter = unsafe (*pkg_ast_c(p, hm)).instances.len();
+        let _ = h.intern_instance(it.module, it.decl, &na[0], m);
+        let hafter = unsafe pkg_ast_c(p, hm).instances.len();
         if hafter != hbefore {
             unsafe *changed = true;
         }
     }
-    let after = unsafe (*pkg_ast_c(p, dm)).instances.len();
+    let after = unsafe pkg_ast_c(p, dm).instances.len();
     if after != before {
         unsafe *changed = true;
     }
@@ -1438,33 +1434,33 @@ fn reintern_nested_instance_deps(
         return;
     }
     let decl = it.decl;
-    let dn_kind = unsafe (*pkg_ast_c(p, itmod)).at_const(decl).kind;
-    let generics = unsafe (*pkg_ast_c(p, itmod)).at_const(decl).as_data.aggregate.generics;
+    let dn_kind = pkg_ast_c(p, itmod).at_const(decl).kind;
+    let generics = pkg_ast_c(p, itmod).at_const(decl).as_data.aggregate.generics;
     if dn_kind != NodeKind::NODE_STRUCT && dn_kind != NodeKind::NODE_ENUM || generics.len == 0 {
         return;
     }
-    let members = unsafe (*pkg_ast_c(p, itmod)).at_const(decl).as_data.aggregate.members;
-    let gids = unsafe (*pkg_ast_c(p, itmod)).list(generics);
-    let mids = unsafe (*pkg_ast_c(p, itmod)).list(members);
+    let members = pkg_ast_c(p, itmod).at_const(decl).as_data.aggregate.members;
+    let gids = pkg_ast_c(p, itmod).list(generics);
+    let mids = pkg_ast_c(p, itmod).list(members);
     for m in 0..members.len {
         let mid = unsafe mids[m as usize];
-        let mnk = unsafe (*pkg_ast_c(p, itmod)).at_const(mid).kind;
+        let mnk = pkg_ast_c(p, itmod).at_const(mid).kind;
         if dn_kind == NodeKind::NODE_STRUCT && mnk == NodeKind::NODE_FIELD {
-            let fty = unsafe (*pkg_ast_c(p, itmod)).at_const(mid).as_data.field.ty;
-            let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(fty);
+            let fty = pkg_ast_c(p, itmod).at_const(mid).as_data.field.ty;
+            let tt = pkg_ast_c(p, itmod).type_of(fty);
             reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
         } else if dn_kind == NodeKind::NODE_ENUM && mnk == NodeKind::NODE_VARIANT {
-            let payload = unsafe (*pkg_ast_c(p, itmod)).at_const(mid).as_data.variant.payload;
-            let pids = unsafe (*pkg_ast_c(p, itmod)).list(payload);
+            let payload = pkg_ast_c(p, itmod).at_const(mid).as_data.variant.payload;
+            let pids = pkg_ast_c(p, itmod).list(payload);
             for k in 0..payload.len {
                 let pfid = unsafe pids[k as usize];
-                let pfk = unsafe (*pkg_ast_c(p, itmod)).at_const(pfid).kind;
+                let pfk = pkg_ast_c(p, itmod).at_const(pfid).kind;
                 let tn = if pfk == NodeKind::NODE_FIELD {
-                    unsafe (*pkg_ast_c(p, itmod)).at_const(pfid).as_data.field.ty;
+                    pkg_ast_c(p, itmod).at_const(pfid).as_data.field.ty;
                 } else {
                     pfid;
                 };
-                let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(tn);
+                let tt = pkg_ast_c(p, itmod).type_of(tn);
                 reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
             }
         }
@@ -1486,58 +1482,58 @@ fn reintern_method_signature_deps(
         return;
     }
     let itdecl = it.decl;
-    let root = unsafe (*pkg_ast_c(p, itmod)).root;
-    let items = unsafe (*pkg_ast_c(p, itmod)).at_const(root).as_data.program.items;
-    let ids = unsafe (*pkg_ast_c(p, itmod)).list(items);
+    let root = unsafe pkg_ast_c(p, itmod).root;
+    let items = pkg_ast_c(p, itmod).at_const(root).as_data.program.items;
+    let ids = pkg_ast_c(p, itmod).list(items);
     for i in 0..items.len {
         let eid = unsafe ids[i as usize];
-        let ek = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).kind;
+        let ek = pkg_ast_c(p, itmod).at_const(eid).kind;
         if ek != NodeKind::NODE_EXTEND {
             continue;
         }
-        let egen = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).as_data.extend_def.generics;
+        let egen = pkg_ast_c(p, itmod).at_const(eid).as_data.extend_def.generics;
         if egen.len == 0 {
             continue;
         }
-        let etgt = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).as_data.extend_def.target_type;
-        if unsafe (*pkg_ast_c(p, itmod)).resolution(etgt) != itdecl {
+        let etgt = pkg_ast_c(p, itmod).at_const(eid).as_data.extend_def.target_type;
+        if pkg_ast_c(p, itmod).resolution(etgt) != itdecl {
             continue;
         }
-        let gids = unsafe (*pkg_ast_c(p, itmod)).list(egen);
-        let eitems = unsafe (*pkg_ast_c(p, itmod)).at_const(eid).as_data.extend_def.items;
-        let emids = unsafe (*pkg_ast_c(p, itmod)).list(eitems);
+        let gids = pkg_ast_c(p, itmod).list(egen);
+        let eitems = pkg_ast_c(p, itmod).at_const(eid).as_data.extend_def.items;
+        let emids = pkg_ast_c(p, itmod).list(eitems);
         for mm in 0..eitems.len {
             let fnid = unsafe emids[mm as usize];
-            let fnk = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).kind;
+            let fnk = pkg_ast_c(p, itmod).at_const(fnid).kind;
             if fnk != NodeKind::NODE_FUNCTION {
                 continue;
             }
-            let fgen = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).as_data.function.generics;
-            let frets = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).as_data.function.returns;
+            let fgen = pkg_ast_c(p, itmod).at_const(fnid).as_data.function.generics;
+            let frets = pkg_ast_c(p, itmod).at_const(fnid).as_data.function.returns;
             if fgen.len != 0 || frets.len > 1 {
                 continue;
             }
-            let fparams = unsafe (*pkg_ast_c(p, itmod)).at_const(fnid).as_data.function.params;
-            let pids = unsafe (*pkg_ast_c(p, itmod)).list(fparams);
+            let fparams = pkg_ast_c(p, itmod).at_const(fnid).as_data.function.params;
+            let pids = pkg_ast_c(p, itmod).list(fparams);
             let mut k: u32 = 0;
             while k < fparams.len {
                 let pid = unsafe pids[k as usize];
-                let pty = unsafe (*pkg_ast_c(p, itmod)).at_const(pid).as_data.parameter.ty;
-                let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(pty);
+                let pty = pkg_ast_c(p, itmod).at_const(pid).as_data.parameter.ty;
+                let tt = pkg_ast_c(p, itmod).type_of(pty);
                 reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
                 k = k + 1;
             }
-            let rids = unsafe (*pkg_ast_c(p, itmod)).list(frets);
+            let rids = pkg_ast_c(p, itmod).list(frets);
             k = 0;
             while k < frets.len {
                 let rid = unsafe rids[k as usize];
-                let rk = unsafe (*pkg_ast_c(p, itmod)).at_const(rid).kind;
+                let rk = pkg_ast_c(p, itmod).at_const(rid).kind;
                 let tn = if rk == NodeKind::NODE_PARAMETER {
-                    unsafe (*pkg_ast_c(p, itmod)).at_const(rid).as_data.parameter.ty;
+                    pkg_ast_c(p, itmod).at_const(rid).as_data.parameter.ty;
                 } else {
                     rid;
                 };
-                let tt = unsafe (*pkg_ast_c(p, itmod)).type_of(tn);
+                let tt = pkg_ast_c(p, itmod).type_of(tn);
                 reintern_nested_type(p, dm, itmod, tt, itmod, gids, args, nargs, changed);
                 k = k + 1;
             }
@@ -1553,13 +1549,13 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
     // for the whole call. Cache it once: interleaved pkg_ast_m writes stop the C compiler from proving the
     // reload invariant, so re-deriving it per use cost a bounds-check + offset every time.
     let s = pkg_ast_c(p, sm);
-    let n = unsafe (*s).instances.len();
+    let n = unsafe s.instances.len();
     let np = p.modules.len();
     for i in start..n {
         let it = *s.instance(i as u32);
         let mut concrete = true;
         for k in 0..it.n {
-            if !unsafe (*s).type_concrete(it.args[k as usize]) {
+            if !unsafe s.type_concrete(it.args[k as usize]) {
                 concrete = false;
             }
         }
@@ -1582,14 +1578,14 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
                 unsafe na[k2 as usize] = unsafe it.args[k2 as usize];
             } else {
                 let d = pkg_ast_m(p, dm);
-                unsafe na[k2 as usize] = unsafe (*d).reintern(&*s, it.args[k2 as usize]);
+                unsafe na[k2 as usize] = unsafe d.reintern(&*s, it.args[k2 as usize]);
             }
         }
         if dm != sm {
-            let before = unsafe (*pkg_ast_c(p, dm)).instances.len();
+            let before = unsafe pkg_ast_c(p, dm).instances.len();
             let d = pkg_ast_m(p, dm);
-            let _ = unsafe (*d).intern_instance(it.module, it.decl, &na[0], m);
-            let after = unsafe (*pkg_ast_c(p, dm)).instances.len();
+            let _ = d.intern_instance(it.module, it.decl, &na[0], m);
+            let after = unsafe pkg_ast_c(p, dm).instances.len();
             if after != before {
                 changed = true;
             }
@@ -1620,9 +1616,9 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
         return;
     }
     let itdecl = it.decl;
-    let root = unsafe (*pkg_ast_c(p, om)).root;
-    let items = unsafe (*pkg_ast_c(p, om)).at_const(root).as_data.program.items;
-    let ids = unsafe (*pkg_ast_c(p, om)).list(items);
+    let root = unsafe pkg_ast_c(p, om).root;
+    let items = pkg_ast_c(p, om).at_const(root).as_data.program.items;
+    let ids = pkg_ast_c(p, om).list(items);
     let m = if it.n < 4 {
         it.n;
     } else {
@@ -1632,15 +1628,15 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
     let mut have_args = false;
     for i in 0..items.len {
         let eid = unsafe ids[i as usize];
-        if unsafe (*pkg_ast_c(p, om)).at_const(eid).kind != NodeKind::NODE_EXTEND {
+        if pkg_ast_c(p, om).at_const(eid).kind != NodeKind::NODE_EXTEND {
             continue;
         }
-        let egen = unsafe (*pkg_ast_c(p, om)).at_const(eid).as_data.extend_def.generics;
+        let egen = pkg_ast_c(p, om).at_const(eid).as_data.extend_def.generics;
         if egen.len == 0 {
             continue;
         }
-        let etgt = unsafe (*pkg_ast_c(p, om)).at_const(eid).as_data.extend_def.target_type;
-        if unsafe (*pkg_ast_c(p, om)).resolution(etgt) != itdecl {
+        let etgt = pkg_ast_c(p, om).at_const(eid).as_data.extend_def.target_type;
+        if pkg_ast_c(p, om).resolution(etgt) != itdecl {
             continue;
         }
         if !have_args {
@@ -1650,27 +1646,20 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
                     unsafe it.args[k as usize];
                 } else {
                     let o = pkg_ast_m(p, om);
-                    unsafe (*o).reintern(&*pkg_ast_c(p, hm), it.args[k as usize]);
+                    unsafe o.reintern(&*pkg_ast_c(p, hm), it.args[k as usize]);
                 };
             }
         }
-        let gids = unsafe (*pkg_ast_c(p, om)).list(egen);
+        let gids = pkg_ast_c(p, om).list(egen);
         let ng = if egen.len < m as u32 {
             egen.len as u8;
         } else {
             m;
         };
-        let npool = unsafe (*pkg_ast_c(p, om)).type_pool.len();
+        let npool = unsafe pkg_ast_c(p, om).type_pool.len();
         let mut t: usize = 1;
         while t < npool {
-            if !unsafe (*pkg_ast_c(p, om)).type_concrete(t as TypeId) && type_params_subset(
-                p,
-                om,
-                t as TypeId,
-                om,
-                gids,
-                ng,
-            ) {
+            if !pkg_ast_c(p, om).type_concrete(t as TypeId) && type_params_subset(p, om, t as TypeId, om, gids, ng) {
                 reintern_nested_type(p, om, om, t as TypeId, om, gids, &fargs[0], ng, changed);
             }
             t = t + 1;
@@ -1683,23 +1672,23 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
 fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
     let mut changed = false;
     let s = pkg_ast_c(p, sm); // stable for the call (see reintern_cross_module); avoids re-deriving per node
-    let n = unsafe (*s).nodes.len();
+    let n = unsafe s.nodes.len();
     let np = p.modules.len();
     let mut i: NodeId = 0;
     while i as usize < n {
-        let ck = unsafe (*s).at_const(i).kind;
+        let ck = s.at_const(i).kind;
         if ck != NodeKind::NODE_CALL {
             i = i + 1;
             continue;
         }
-        let callee_id = unsafe (*s).at_const(i).as_data.call.callee;
-        let cek = unsafe (*s).at_const(callee_id).kind;
+        let callee_id = s.at_const(i).as_data.call.callee;
+        let cek = s.at_const(callee_id).kind;
         if cek != NodeKind::NODE_MEMBER {
             i = i + 1;
             continue;
         }
-        let member_id = unsafe (*s).at_const(callee_id).as_data.member.member;
-        let md = unsafe (*s).resolution_def(member_id);
+        let member_id = s.at_const(callee_id).as_data.member.member;
+        let md = s.resolution_def(member_id);
         if md.node == NODE_NONE {
             i = i + 1;
             continue;
@@ -1709,40 +1698,40 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             continue;
         }
         let om = md.module;
-        let mnk = unsafe (*pkg_ast_c(p, om)).at_const(md.node).kind;
-        let mgen = unsafe (*pkg_ast_c(p, om)).at_const(md.node).as_data.function.generics;
+        let mnk = pkg_ast_c(p, om).at_const(md.node).kind;
+        let mgen = pkg_ast_c(p, om).at_const(md.node).as_data.function.generics;
         if mnk != NodeKind::NODE_FUNCTION || mgen.len == 0 {
             i = i + 1;
             continue;
         }
-        let mu = unsafe (*s).type_args(i);
-        if mu == null || unsafe (*mu).n == 0 {
+        let mu = s.type_args(i);
+        if mu == null || unsafe mu.n == 0 {
             i = i + 1;
             continue;
         }
-        let object_id = unsafe (*s).at_const(callee_id).as_data.member.object;
-        let mut rty = unsafe (*s).type_of(object_id);
-        let du = unsafe (*s).deref_use_at(member_id);
+        let object_id = s.at_const(callee_id).as_data.member.object;
+        let mut rty = s.type_of(object_id);
+        let du = s.deref_use_at(member_id);
         if du != null {
-            rty = unsafe (*du).target;
+            rty = unsafe du.target;
         }
-        let mut yk = unsafe (*s).type_at(rty).kind;
+        let mut yk = s.type_at(rty).kind;
         while yk == TypeKind::TYPE_POINTER || yk == TypeKind::TYPE_REFERENCE {
-            rty = unsafe (*s).type_at(rty).as_data.elem;
-            yk = unsafe (*s).type_at(rty).kind;
+            rty = s.type_at(rty).as_data.elem;
+            yk = s.type_at(rty).kind;
         }
-        if unsafe (*s).type_at(rty).kind != TypeKind::TYPE_INSTANCE || !unsafe (*s).type_concrete(rty) {
+        if s.type_at(rty).kind != TypeKind::TYPE_INSTANCE || !s.type_concrete(rty) {
             i = i + 1;
             continue;
         }
-        let mtn = if unsafe (*mu).n < 4 {
-            unsafe (*mu).n;
+        let mtn = if unsafe mu.n < 4 {
+            unsafe mu.n;
         } else {
             4 as u8;
         };
         let mut concrete = true;
         for k in 0..mtn {
-            if !unsafe (*s).type_concrete((*mu).args[k as usize]) {
+            if !unsafe s.type_concrete(mu.args[k as usize]) {
                 concrete = false;
             }
         }
@@ -1750,7 +1739,7 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             i = i + 1;
             continue;
         }
-        let recv_inst = unsafe (*s).type_at(rty).as_data.inst;
+        let recv_inst = s.type_at(rty).as_data.inst;
         let recv = *s.instance(recv_inst);
         let home = p.instance_home_mid(sm, &recv);
         let mut dm = om;
@@ -1758,7 +1747,7 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             dm = home;
         }
         for kk in 0..mtn {
-            if type_mentions_fnval(p, sm, unsafe (*mu).args[kk as usize]) {
+            if type_mentions_fnval(p, sm, unsafe mu.args[kk as usize]) {
                 dm = sm;
                 break;
             }
@@ -1767,19 +1756,19 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             rty;
         } else {
             let d = pkg_ast_m(p, dm);
-            unsafe (*d).reintern(&*s, rty);
+            unsafe d.reintern(&*s, rty);
         };
         let mut targs: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
         for t in 0..mtn {
             if dm == sm {
-                unsafe targs[t as usize] = unsafe (*mu).args[t as usize];
+                unsafe targs[t as usize] = unsafe mu.args[t as usize];
             } else {
                 let d = pkg_ast_m(p, dm);
-                unsafe targs[t as usize] = unsafe (*d).reintern(&*s, (*mu).args[t as usize]);
+                unsafe targs[t as usize] = unsafe d.reintern(&*s, mu.args[t as usize]);
             }
         }
         let d = pkg_ast_m(p, dm);
-        if unsafe (*d).add_method_inst(rinst, md.node, &targs[0], mtn) {
+        if d.add_method_inst(rinst, md.node, &targs[0], mtn) {
             changed = true;
         }
         i = i + 1;
@@ -1832,15 +1821,15 @@ struct MonoSeed {
 // The generic function a MonoUse call site targets, or a null DefId.
 fn mono_callee(p: &Package, m: ModuleId, node: NodeId) DefId {
     let a = pkg_ast_c(p, m);
-    if unsafe (*a).at_const(node).kind != NodeKind::NODE_CALL {
+    if a.at_const(node).kind != NodeKind::NODE_CALL {
         return DefId { module: 0, node: NODE_NONE };
     }
-    let callee_id = unsafe (*a).at_const(node).as_data.call.callee;
-    if unsafe (*a).at_const(callee_id).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
-        let e = unsafe (*a).at_const(callee_id).as_data.specialization.expression;
-        return unsafe (*a).resolution_def(e);
+    let callee_id = a.at_const(node).as_data.call.callee;
+    if a.at_const(callee_id).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+        let e = a.at_const(callee_id).as_data.specialization.expression;
+        return a.resolution_def(e);
     }
-    return unsafe (*a).resolution_def(callee_id);
+    return a.resolution_def(callee_id);
 }
 
 // Generic-parameter count of `fd`, or 0 when it is not a generic function.
@@ -1850,10 +1839,10 @@ fn mono_generics(p: &Package, fd: DefId) NodeList {
         return NodeList { start: 0, len: 0 };
     }
     let a = pkg_ast_c(p, fd.module);
-    if unsafe (*a).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+    if a.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
         return NodeList { start: 0, len: 0 };
     }
-    return unsafe (*a).at_const(fd.node).as_data.function.generics;
+    return a.at_const(fd.node).as_data.function.generics;
 }
 
 // Record a seed unless an identical one is already queued. Returns whether it was added.
@@ -1904,9 +1893,9 @@ fn seed_mono_body_instances(p: &mut Package) {
         if !p.modules[u].has_ast {
             continue;
         }
-        let nm = unsafe (*pkg_ast_c(p, u as ModuleId)).mono.len();
+        let nm = unsafe pkg_ast_c(p, u as ModuleId).mono.len();
         for mi in 0..nm {
-            let mu = unsafe (*pkg_ast_c(p, u as ModuleId)).mono[mi];
+            let mu = unsafe pkg_ast_c(p, u as ModuleId).mono[mi];
             let fd = mono_callee(p, u as ModuleId, mu.node);
             let gens = mono_generics(p, fd);
             if gens.len == 0 || gens.len > 8 || mu.n as u32 < gens.len {
@@ -1914,7 +1903,7 @@ fn seed_mono_body_instances(p: &mut Package) {
             }
             let mut concrete = true;
             for k in 0..gens.len {
-                if !unsafe (*pkg_ast_c(p, u as ModuleId)).type_concrete(mu.args[k as usize]) {
+                if !unsafe pkg_ast_c(p, u as ModuleId).type_concrete(mu.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -1928,7 +1917,7 @@ fn seed_mono_body_instances(p: &mut Package) {
                 } else {
                     let ua = pkg_ast_c(p, u as ModuleId);
                     let fmm = pkg_ast_m(p, fd.module);
-                    unsafe (*fmm).reintern(&*ua, mu.args[k as usize]);
+                    unsafe fmm.reintern(&*ua, mu.args[k as usize]);
                 };
             }
             let _ = seed_push(&mut seeds, MonoSeed { fd: fd, n: gens.len as u8, args: fargs });
@@ -1943,12 +1932,12 @@ fn seed_mono_body_instances(p: &mut Package) {
         if gens.len == 0 {
             continue;
         }
-        let gids = unsafe (*pkg_ast_c(p, s.fd.module)).list(gens);
-        let np = unsafe (*pkg_ast_c(p, s.fd.module)).type_pool.len();
+        let gids = pkg_ast_c(p, s.fd.module).list(gens);
+        let np = unsafe pkg_ast_c(p, s.fd.module).type_pool.len();
         let cp = (&mut changed) as *mut bool;
         let mut t: usize = 1;
         while t < np {
-            if !unsafe (*pkg_ast_c(p, s.fd.module)).type_concrete(t as TypeId) && type_params_subset(
+            if !pkg_ast_c(p, s.fd.module).type_concrete(t as TypeId) && type_params_subset(
                 p,
                 s.fd.module,
                 t as TypeId,
@@ -1963,9 +1952,9 @@ fn seed_mono_body_instances(p: &mut Package) {
         // A MonoUse in this module whose arguments mention only THIS function's parameters is a generic
         // call from inside its body: substituting this seed's frame makes those arguments concrete.
         let sm = s.fd.module;
-        let nm2 = unsafe (*pkg_ast_c(p, sm)).mono.len();
+        let nm2 = unsafe pkg_ast_c(p, sm).mono.len();
         for mj in 0..nm2 {
-            let mu2 = unsafe (*pkg_ast_c(p, sm)).mono[mj];
+            let mu2 = unsafe pkg_ast_c(p, sm).mono[mj];
             let fd2 = mono_callee(p, sm, mu2.node);
             let g2 = mono_generics(p, fd2);
             if g2.len == 0 || g2.len > 8 || mu2.n as u32 < g2.len {
@@ -1973,7 +1962,7 @@ fn seed_mono_body_instances(p: &mut Package) {
             }
             let mut inframe = false;
             for k in 0..g2.len {
-                if !unsafe (*pkg_ast_c(p, sm)).type_concrete(mu2.args[k as usize]) && type_params_subset(
+                if !unsafe pkg_ast_c(p, sm).type_concrete(mu2.args[k as usize]) && type_params_subset(
                     p,
                     sm,
                     unsafe mu2.args[k as usize],
@@ -1991,7 +1980,7 @@ fn seed_mono_body_instances(p: &mut Package) {
             let mut ok = true;
             for k in 0..g2.len {
                 let st = subst_reintern_type(p, sm, sm, unsafe mu2.args[k as usize], sm, gids, &s.args[0], s.n);
-                if !unsafe (*pkg_ast_c(p, sm)).type_concrete(st) {
+                if !pkg_ast_c(p, sm).type_concrete(st) {
                     ok = false;
                 }
                 unsafe cargs[k as usize] = st;
@@ -2003,7 +1992,7 @@ fn seed_mono_body_instances(p: &mut Package) {
                 for k in 0..g2.len {
                     let sa = pkg_ast_c(p, sm);
                     let da = pkg_ast_m(p, fd2.module);
-                    unsafe cargs[k as usize] = unsafe (*da).reintern(&*sa, cargs[k as usize]);
+                    unsafe cargs[k as usize] = unsafe da.reintern(&*sa, cargs[k as usize]);
                 }
             }
             let _ = seed_push(&mut seeds, MonoSeed { fd: fd2, n: g2.len as u8, args: cargs });
@@ -2038,7 +2027,7 @@ pub fn package_propagate_instances(p: &mut Package) {
         for u in 0..n {
             if p.modules[u].has_ast {
                 let start = proc_inst[u];
-                let ni = unsafe (*pkg_ast_c(p, u as ModuleId)).instances.len();
+                let ni = unsafe pkg_ast_c(p, u as ModuleId).instances.len();
                 if start < ni {
                     if reintern_cross_module(p, u as ModuleId, start) {
                         changed = true;
@@ -2079,8 +2068,8 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
         }
         let aa = pkg_ast_c(p, a as ModuleId);
         let mut i: usize = 0;
-        while i < unsafe (*aa).instances.len() {
-            let it = unsafe *(*aa).instance(i as u32);
+        while i < unsafe aa.instances.len() {
+            let it = *aa.instance(i as u32);
             let bi = it.module as usize;
             if bi >= n || bi == a || unsafe dep[a * n + bi] {
                 i = i + 1;
@@ -2088,7 +2077,7 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
             }
             let mut concrete = true;
             for k in 0..it.n {
-                if !unsafe (*aa).type_concrete(it.args[k as usize]) {
+                if !unsafe aa.type_concrete(it.args[k as usize]) {
                     concrete = false;
                 }
             }
@@ -2101,14 +2090,14 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
             i = i + 1;
         }
         i = 0;
-        while i < unsafe (*aa).method_insts.len() {
-            let miinst = unsafe (*aa).method_insts[i].instance;
-            let y = unsafe *(*aa).type_at(miinst);
+        while i < unsafe aa.method_insts.len() {
+            let miinst = unsafe aa.method_insts[i].instance;
+            let y = *aa.type_at(miinst);
             if y.kind != TypeKind::TYPE_INSTANCE {
                 i = i + 1;
                 continue;
             }
-            let bi = (unsafe (*aa).instance(y.as_data.inst).module) as usize;
+            let bi = aa.instance(y.as_data.inst).module as usize;
             if bi >= n || bi == a || unsafe dep[a * n + bi] {
                 i = i + 1;
                 continue;
@@ -2120,19 +2109,19 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
             i = i + 1;
         }
         i = 0;
-        while i < unsafe (*aa).mono.len() {
-            let mnode = unsafe (*aa).mono[i].node;
-            if unsafe (*aa).at_const(mnode).kind != NodeKind::NODE_CALL {
+        while i < unsafe aa.mono.len() {
+            let mnode = unsafe aa.mono[i].node;
+            if aa.at_const(mnode).kind != NodeKind::NODE_CALL {
                 i = i + 1;
                 continue;
             }
-            let callee_id = unsafe (*aa).at_const(mnode).as_data.call.callee;
-            let ck = unsafe (*aa).at_const(callee_id).kind;
+            let callee_id = aa.at_const(mnode).as_data.call.callee;
+            let ck = aa.at_const(callee_id).kind;
             let fd = if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
-                let e = unsafe (*aa).at_const(callee_id).as_data.specialization.expression;
-                unsafe (*aa).resolution_def(e);
+                let e = aa.at_const(callee_id).as_data.specialization.expression;
+                aa.resolution_def(e);
             } else {
-                unsafe (*aa).resolution_def(callee_id);
+                aa.resolution_def(callee_id);
             };
             let bi = fd.module as usize;
             if fd.node == NODE_NONE || bi >= n || bi == a || unsafe dep[a * n + bi] {
@@ -2144,7 +2133,7 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
                 continue;
             }
             let bast = pkg_ast_c(p, fd.module);
-            if unsafe (*bast).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+            if bast.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
                 i = i + 1;
                 continue;
             }

@@ -59,7 +59,7 @@ pub fn raw_mutex_new() *mut RawMutex {
 
 /// Destroy and release a raw lock. `pub` for linkage.
 pub fn raw_mutex_free(m: *mut RawMutex) {
-    unsafe sc_runtime::sc_rt_mutex_free((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_free(m.inner);
     let mut g = Global {};
     g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
 }
@@ -67,7 +67,7 @@ pub fn raw_mutex_free(m: *mut RawMutex) {
 // The address OS-thread waiters park on: they sleep while it reads 1, and an unlock publishes 0 before
 // unparking them, so a wakeup can never be missed.
 fn park_word(m: *mut RawMutex) *mut i32 {
-    return &mut unsafe (*m).locked;
+    return &mut unsafe m.locked;
 }
 
 // The park hand-off used inside `raw_mutex_lock`: release only the internal OS mutex, since the coroutine
@@ -84,8 +84,8 @@ pub fn commit_raw_unlock(p: *mut void) {
 
 /// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
 pub fn raw_mutex_lock(m: *mut RawMutex) {
-    unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
-    while unsafe (*m).locked != 0 {
+    unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
+    while unsafe m.locked != 0 {
         let co = runtime::current();
         if co != null {
             // Queue up, then park: the runtime releases `inner` once our context is saved, so the unlock
@@ -93,63 +93,63 @@ pub fn raw_mutex_lock(m: *mut RawMutex) {
             // frame and is always popped by the unlock that wakes us.
             let mut w = Waiter { co: co, token: runtime::park_begin(co), arm: 0, next: null, claim: null };
             let wp = &mut w;
-            if unsafe (*m).tail == null {
-                unsafe (*m).head = wp;
+            if unsafe m.tail == null {
+                unsafe m.head = wp;
             } else {
-                unsafe (*(*m).tail).next = wp;
+                unsafe m.tail.next = wp;
             }
-            unsafe (*m).tail = wp;
-            runtime::park_current(commit_os_unlock, unsafe (*m).inner);
-            unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
+            unsafe m.tail = wp;
+            runtime::park_current(commit_os_unlock, unsafe m.inner);
+            unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
         } else {
             let w = park_word(m);
-            unsafe (*m).os_waiters = unsafe (*m).os_waiters + 1;
-            unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
+            unsafe m.os_waiters = unsafe m.os_waiters + 1;
+            unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
             unsafe sc_runtime::sc_rt_park(w, 1, -1);
-            unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
-            unsafe (*m).os_waiters = unsafe (*m).os_waiters - 1;
+            unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
+            unsafe m.os_waiters = unsafe m.os_waiters - 1;
         }
     }
-    unsafe (*m).locked = 1;
-    unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
+    unsafe m.locked = 1;
+    unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
 }
 
 /// Acquire the lock only if it is free; reports whether it was taken. Never waits.
 pub fn raw_mutex_try_lock(m: *mut RawMutex) bool {
-    unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
-    let free = unsafe (*m).locked == 0;
+    unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
+    let free = unsafe m.locked == 0;
     if free {
-        unsafe (*m).locked = 1;
+        unsafe m.locked = 1;
     }
-    unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
     return free;
 }
 
 /// Release the lock and hand it on: wake the first queued coroutine whose wake claim we win, and unpark any
 /// OS threads waiting on it. `pub` for linkage.
 pub fn raw_mutex_unlock(m: *mut RawMutex) {
-    unsafe sc_runtime::sc_rt_mutex_lock((*m).inner);
-    unsafe (*m).locked = 0;
+    unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
+    unsafe m.locked = 0;
     let mut woke = false;
     while !woke {
-        let wp = unsafe (*m).head;
+        let wp = unsafe m.head;
         if wp == null {
             break;
         }
-        unsafe (*m).head = unsafe (*wp).next;
-        if unsafe (*m).head == null {
-            unsafe (*m).tail = null;
+        unsafe m.head = unsafe wp.next;
+        if unsafe m.head == null {
+            unsafe m.tail = null;
         }
-        unsafe (*wp).next = null;
-        woke = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
+        unsafe wp.next = null;
+        woke = runtime::wake(unsafe wp.co, unsafe wp.token);
     }
     // Unpark BEFORE releasing `inner`, so releasing the lock is the very last thing this unlock does to the
     // RawMutex: a `Mutex` freed as soon as its final unlock is observed (a lock that lives no longer than the
     // work it guards, e.g. the data-parallel latch) would otherwise be freed under us.
-    if unsafe (*m).os_waiters > 0 {
+    if unsafe m.os_waiters > 0 {
         unsafe sc_runtime::sc_rt_unpark_all(park_word(m));
     }
-    unsafe sc_runtime::sc_rt_mutex_unlock((*m).inner);
+    unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
 }
 
 /// A mutual-exclusion lock guarding a `T`. Only the holder can reach the value, through the RAII
@@ -492,9 +492,9 @@ struct CondQ {
 // write always lands while the node is still alive. It is a HINT: a notify that goes on to LOSE the wake
 // race also writes, so the reader must re-check the arm it names.
 fn publish_arm(wp: *mut Waiter) {
-    let c = unsafe (*wp).claim;
+    let c = unsafe wp.claim;
     if c != null {
-        unsafe *c = unsafe (*wp).arm;
+        unsafe *c = unsafe wp.arm;
     }
 }
 
@@ -540,12 +540,12 @@ extend Condvar {
             let token = runtime::park_begin(co);
             let mut w = Waiter { co: co, token: token, arm: 0, next: null, claim: null };
             let wp = &mut w;
-            if unsafe (*self.wq).tail == null {
-                unsafe (*self.wq).head = wp;
+            if unsafe self.wq.tail == null {
+                unsafe self.wq.head = wp;
             } else {
-                unsafe (*(*self.wq).tail).next = wp;
+                unsafe self.wq.tail.next = wp;
             }
-            unsafe (*self.wq).tail = wp;
+            unsafe self.wq.tail = wp;
             runtime::park_timed(token, deadline, commit_raw_unlock, m);
             raw_mutex_lock(m);
             if deadline != 0 {
@@ -555,9 +555,9 @@ extend Condvar {
         } else {
             // No coroutine to park: publish that we are waiting, drop the lock and sleep on `gen`, which
             // every notify bumps before unparking -- so a notify in that window cannot be missed.
-            let g = unsafe (*self.wq).gen;
-            let w = &mut unsafe (*self.wq).gen;
-            unsafe (*self.wq).os_waiters = unsafe (*self.wq).os_waiters + 1;
+            let g = unsafe self.wq.gen;
+            let w = &mut unsafe self.wq.gen;
+            unsafe self.wq.os_waiters = unsafe self.wq.os_waiters + 1;
             raw_mutex_unlock(m);
             let rel = if deadline == 0 {
                 -1i64;
@@ -566,20 +566,20 @@ extend Condvar {
             };
             unsafe sc_runtime::sc_rt_park(w, g, rel);
             raw_mutex_lock(m);
-            unsafe (*self.wq).os_waiters = unsafe (*self.wq).os_waiters - 1;
+            unsafe self.wq.os_waiters = unsafe self.wq.os_waiters - 1;
         }
     }
     /// Queue an externally-owned wait node. For a waiter that must sit on several queues at once (`select`);
     /// an ordinary `wait` builds its own node. Caller holds the paired mutex, and MUST `unregister` the node
     /// before it dies. `pub` for `select`; not user-facing.
     pub fn register(self: &Condvar, wp: *mut Waiter) {
-        unsafe (*wp).next = null;
-        if unsafe (*self.wq).tail == null {
-            unsafe (*self.wq).head = wp;
+        unsafe wp.next = null;
+        if unsafe self.wq.tail == null {
+            unsafe self.wq.head = wp;
         } else {
-            unsafe (*(*self.wq).tail).next = wp;
+            unsafe self.wq.tail.next = wp;
         }
-        unsafe (*self.wq).tail = wp;
+        unsafe self.wq.tail = wp;
     }
     /// Take a `register`ed node back off the queue (a no-op if a notify already popped it). Caller holds the
     /// paired mutex. `pub` for `select`; not user-facing.
@@ -590,31 +590,31 @@ extend Condvar {
     // lock. Mandatory before the waiter returns: the node lives in that frame.
     fn unlink(self: &Condvar, wp: *mut Waiter) {
         let mut prev: *mut Waiter = null;
-        let mut cur = unsafe (*self.wq).head;
+        let mut cur = unsafe self.wq.head;
         while cur != null && cur != wp {
             prev = cur;
-            cur = unsafe (*cur).next;
+            cur = unsafe cur.next;
         }
         if cur != wp {
             return;
         }
         if prev == null {
-            unsafe (*self.wq).head = unsafe (*wp).next;
+            unsafe self.wq.head = unsafe wp.next;
         } else {
-            unsafe (*prev).next = unsafe (*wp).next;
+            unsafe prev.next = unsafe wp.next;
         }
-        if unsafe (*self.wq).tail == wp {
-            unsafe (*self.wq).tail = prev;
+        if unsafe self.wq.tail == wp {
+            unsafe self.wq.tail = prev;
         }
-        unsafe (*wp).next = null;
+        unsafe wp.next = null;
     }
     // Publish a new generation and unpark the OS-thread waiters. Caller holds the paired lock.
     fn bump_gen(self: &Condvar) {
-        if unsafe (*self.wq).os_waiters == 0 {
+        if unsafe self.wq.os_waiters == 0 {
             return;
         }
-        let w = &mut unsafe (*self.wq).gen;
-        unsafe (*self.wq).gen = unsafe (*self.wq).gen + 1;
+        let w = &mut unsafe self.wq.gen;
+        unsafe self.wq.gen = unsafe self.wq.gen + 1;
         unsafe sc_runtime::sc_rt_unpark_all(w);
     }
     /// Wake one waiter. Call under the paired mutex. (OS-thread waiters share one park address, so they all
@@ -622,31 +622,31 @@ extend Condvar {
     pub fn notify_one(self: &Condvar) {
         let mut woke = false;
         while !woke {
-            let wp = unsafe (*self.wq).head;
+            let wp = unsafe self.wq.head;
             if wp == null {
                 break;
             }
-            unsafe (*self.wq).head = unsafe (*wp).next;
-            if unsafe (*self.wq).head == null {
-                unsafe (*self.wq).tail = null;
+            unsafe self.wq.head = unsafe wp.next;
+            if unsafe self.wq.head == null {
+                unsafe self.wq.tail = null;
             }
-            unsafe (*wp).next = null;
+            unsafe wp.next = null;
             publish_arm(wp);
             // false if that park is already over (its deadline claimed it): spend the wakeup on the next.
-            woke = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
+            woke = runtime::wake(unsafe wp.co, unsafe wp.token);
         }
         self.bump_gen();
     }
     /// Wake every waiter. Call under the paired mutex.
     pub fn notify_all(self: &Condvar) {
-        let mut wp = unsafe (*self.wq).head;
-        unsafe (*self.wq).head = null;
-        unsafe (*self.wq).tail = null;
+        let mut wp = unsafe self.wq.head;
+        unsafe self.wq.head = null;
+        unsafe self.wq.tail = null;
         while wp != null {
-            let nx = unsafe (*wp).next;
-            unsafe (*wp).next = null;
+            let nx = unsafe wp.next;
+            unsafe wp.next = null;
             publish_arm(wp);
-            let _ = runtime::wake(unsafe (*wp).co, unsafe (*wp).token);
+            let _ = runtime::wake(unsafe wp.co, unsafe wp.token);
             wp = nx;
         }
         self.bump_gen();

@@ -32,16 +32,16 @@ extend<T> Arc<T> {
     /// Another owning handle to the same value (atomic increment of the strong count).
     pub fn clone(self: &Arc<T>) Arc<T> {
         // Relaxed: a new handle only requires the count be atomic, not ordered against other memory.
-        let _ = unsafe atomic::add_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::Relaxed as i32);
+        let _ = unsafe atomic::add_usize(&mut self.ptr.strong, 1, atomics::MemoryOrder::Relaxed as i32);
         return Arc::<T> { ptr: self.ptr };
     }
     /// Borrow the shared value. Valid while this handle is alive.
     pub fn get(self: &Arc<T>) &T {
-        return unsafe &(*self.ptr).value;
+        return unsafe &self.ptr.value;
     }
     /// The current strong count (a snapshot; other threads may change it immediately).
     pub fn strong_count(self: &Arc<T>) usize {
-        return unsafe atomic::load_usize(&(*self.ptr).strong, atomics::MemoryOrder::Relaxed as i32);
+        return unsafe atomic::load_usize(&self.ptr.strong, atomics::MemoryOrder::Relaxed as i32);
     }
 }
 
@@ -58,14 +58,14 @@ extend<T: Send + Sync> Arc<T> as Sync {}
 extend<T> Arc<T> as Free {
     pub fn free(self: &mut Arc<T>) {
         // Release: earlier writes through this handle must be visible to the thread that tears down.
-        let prev = unsafe atomic::sub_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::Release as i32);
+        let prev = unsafe atomic::sub_usize(&mut self.ptr.strong, 1, atomics::MemoryOrder::Release as i32);
         if prev == 1 {
             // Acquire fence pairs with the Release decrements above so every prior handle's writes are
             // visible before we drop the value.
             atomics::fence(atomics::MemoryOrder::Acquire);
             // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free -- freeing the
             // place directly would be a conditional move out of a dereference.
-            let vp = (&mut unsafe (*self.ptr).value) as *mut T;
+            let vp = (&mut unsafe self.ptr.value) as *mut T;
             vp.free();
             let mut g = Global {};
             g.dealloc(self.ptr, sizeof(ArcInner<T>), alignof(ArcInner<T>));

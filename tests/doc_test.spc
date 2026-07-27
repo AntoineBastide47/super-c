@@ -110,8 +110,8 @@ fn flat_width_memo() {
     parts.push(l);
     parts.push(t); // shared DocId: DAG reuse is legal
     let cc = p.concat(&parts);
-    assert_eq((*p.docs.at(cc as usize)).w, 9u32); // 4 + 1 + 4
+    assert_eq(p.docs.at(cc as usize).w, 9u32); // 4 + 1 + 4
     let h = p.hardline();
     let ph = p.pair(cc, h);
-    assert_eq((*p.docs.at(ph as usize)).w, d::W_INF);
+    assert_eq(p.docs.at(ph as usize).w, d::W_INF);
 }

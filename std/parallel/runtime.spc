@@ -133,7 +133,7 @@ fn next_task_id() u64 {
 // that exact park is still current. A registration left behind by an expired timed wait therefore cannot
 // resume a LATER park -- which would run a coroutine that never actually acquired what it waited for.
 fn claim(co: *mut Coroutine, token: u32) bool {
-    let p = &mut unsafe (*co).park_state;
+    let p = &mut unsafe co.park_state;
     return atomic::cas_u32(p, token, token + 1, false, 4, 0); // SeqCst on success, Relaxed on failure
 }
 
@@ -146,11 +146,11 @@ fn claim(co: *mut Coroutine, token: u32) bool {
 // collide -- a deque holding exactly one task.
 
 fn dq_top(w: *mut Worker) *mut usize {
-    return &mut unsafe (*w).top;
+    return &mut unsafe w.top;
 }
 
 fn dq_bottom(w: *mut Worker) *mut usize {
-    return &mut unsafe (*w).bottom;
+    return &mut unsafe w.bottom;
 }
 
 // Owner: append to the bottom. False when the deque is full (the caller spills to the injection queue).
@@ -160,7 +160,7 @@ fn dq_push(w: *mut Worker, co: *mut Coroutine) bool {
     if b - t >= DEQUE_CAP {
         return false;
     }
-    unsafe (*w).buf[b % DEQUE_CAP] = co;
+    unsafe w.buf[b % DEQUE_CAP] = co;
     atomic::store_usize(dq_bottom(w), b + 1, 2); // Release: publishes the slot
     return true;
 }
@@ -181,7 +181,7 @@ fn dq_pop(w: *mut Worker) *mut Coroutine {
         atomic::store_usize(dq_bottom(w), b + 1, 0); // a thief took it; restore
         return null;
     }
-    let co = unsafe (*w).buf[b % DEQUE_CAP];
+    let co = unsafe w.buf[b % DEQUE_CAP];
     if t == b {
         // Last task: a thief may be claiming this very slot, so settle it with the CAS.
         let won = atomic::cas_usize(dq_top(w), t, t + 1, false, 4, 0);
@@ -202,7 +202,7 @@ fn dq_steal(w: *mut Worker) *mut Coroutine {
     if t >= b {
         return null;
     }
-    let co = unsafe (*w).buf[t % DEQUE_CAP];
+    let co = unsafe w.buf[t % DEQUE_CAP];
     if !atomic::cas_usize(dq_top(w), t, t + 1, false, 4, 0) {
         return null; // lost to the owner or another thief; the caller moves on to the next victim
     }
@@ -217,28 +217,28 @@ fn dq_empty(w: *mut Worker) bool {
 
 // Append `co` to the injection queue. Caller holds `(*s).lock`.
 fn push_injection(s: *mut Scheduler, co: *mut Coroutine) {
-    unsafe (*co).next = null;
-    let _ = atomic::add_i32(&mut unsafe (*s).inj_len, 1, 2);
-    if unsafe (*s).inj_tail == null {
-        unsafe (*s).inj_head = co;
+    unsafe co.next = null;
+    let _ = atomic::add_i32(&mut unsafe s.inj_len, 1, 2);
+    if unsafe s.inj_tail == null {
+        unsafe s.inj_head = co;
     } else {
-        unsafe (*(*s).inj_tail).next = co;
+        unsafe s.inj_tail.next = co;
     }
-    unsafe (*s).inj_tail = co;
+    unsafe s.inj_tail = co;
 }
 
 // Take the oldest injected task. Caller holds `(*s).lock`.
 fn pop_injection(s: *mut Scheduler) *mut Coroutine {
-    let co = unsafe (*s).inj_head;
+    let co = unsafe s.inj_head;
     if co == null {
         return null;
     }
-    unsafe (*s).inj_head = unsafe (*co).next;
-    if unsafe (*s).inj_head == null {
-        unsafe (*s).inj_tail = null;
+    unsafe s.inj_head = unsafe co.next;
+    if unsafe s.inj_head == null {
+        unsafe s.inj_tail = null;
     }
-    unsafe (*co).next = null;
-    let _ = atomic::sub_i32(&mut unsafe (*s).inj_len, 1, 2);
+    unsafe co.next = null;
+    let _ = atomic::sub_i32(&mut unsafe s.inj_len, 1, 2);
     return co;
 }
 
@@ -247,92 +247,92 @@ fn pop_injection(s: *mut Scheduler) *mut Coroutine {
 // and this read re-scans and finds the task itself.
 fn signal_work(s: *mut Scheduler) {
     atomic::fence(4);
-    if atomic::load_i32(&mut unsafe (*s).sleeping, 4) <= 0 {
+    if atomic::load_i32(&mut unsafe s.sleeping, 4) <= 0 {
         return;
     }
-    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
-    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
-    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
+    unsafe sc_runtime::sc_rt_cond_signal(s.cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
 }
 
 // Put `co` on the shared queue even when called from a worker. A yield means "let somebody else go
 // first", and the local deque is LIFO: pushed there, a yielding task is the very next one popped.
 fn enqueue_global(s: *mut Scheduler, co: *mut Coroutine) {
-    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
     push_injection(s, co);
-    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
-    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_cond_signal(s.cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
 }
 
 // Make `co` runnable. From a worker thread it goes on that worker's own deque -- no lock, and the task stays
 // where its data is warm; from anywhere else (or a full deque) it goes to the injection queue.
 fn enqueue_runnable(s: *mut Scheduler, co: *mut Coroutine) {
     let wi = unsafe sc_runtime::sc_rt_widx_get();
-    if wi >= 0 && wi as usize < unsafe (*s).nw {
-        let w = unsafe ((*s).deques + wi as usize);
+    if wi >= 0 && wi as usize < unsafe s.nw {
+        let w = unsafe (s.deques + wi as usize);
         if dq_push(w, co) {
             signal_work(s);
             return;
         }
     }
-    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
     push_injection(s, co);
-    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
-    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_cond_signal(s.cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
 }
 
 // Link `co` into the deadline-sorted timer list. Caller holds `(*s).lock` and passes the deadline it read
 // before this coroutine became visible to any waker (`co.deadline` is the coroutine's to overwrite).
 fn arm_timer(s: *mut Scheduler, co: *mut Coroutine, dl: u64) {
     let mut prev: *mut Coroutine = null;
-    let mut cur = unsafe (*s).timer_head;
-    while cur != null && unsafe (*cur).deadline <= dl {
+    let mut cur = unsafe s.timer_head;
+    while cur != null && unsafe cur.deadline <= dl {
         prev = cur;
-        cur = unsafe (*cur).tnext;
+        cur = unsafe cur.tnext;
     }
-    unsafe (*co).tnext = cur;
+    unsafe co.tnext = cur;
     if prev == null {
-        unsafe (*s).timer_head = co;
+        unsafe s.timer_head = co;
     } else {
-        unsafe (*prev).tnext = co;
+        unsafe prev.tnext = co;
     }
-    unsafe (*co).timed = 1;
+    unsafe co.timed = 1;
     // A nearer deadline shortens the wait of whichever worker is idle, so it has to re-evaluate.
-    unsafe sc_runtime::sc_rt_cond_signal((*s).cv);
+    unsafe sc_runtime::sc_rt_cond_signal(s.cv);
 }
 
 // Unlink `co` from the timer list if it is still on it. Caller holds `(*s).lock`.
 fn disarm_timer(s: *mut Scheduler, co: *mut Coroutine) {
-    if unsafe (*co).timed == 0 {
+    if unsafe co.timed == 0 {
         return;
     }
     let mut prev: *mut Coroutine = null;
-    let mut cur = unsafe (*s).timer_head;
+    let mut cur = unsafe s.timer_head;
     while cur != null && cur != co {
         prev = cur;
-        cur = unsafe (*cur).tnext;
+        cur = unsafe cur.tnext;
     }
     if cur == co {
         if prev == null {
-            unsafe (*s).timer_head = unsafe (*co).tnext;
+            unsafe s.timer_head = unsafe co.tnext;
         } else {
-            unsafe (*prev).tnext = unsafe (*co).tnext;
+            unsafe prev.tnext = unsafe co.tnext;
         }
     }
-    unsafe (*co).tnext = null;
-    unsafe (*co).timed = 0;
+    unsafe co.tnext = null;
+    unsafe co.timed = 0;
 }
 
 // Make every coroutine whose deadline has passed runnable. Caller holds `(*s).lock`. A coroutine already
 // claimed (notified just before its deadline) is only unlinked -- its waker is resuming it.
 fn promote_expired(s: *mut Scheduler) {
     let now = platform::now_ns();
-    while unsafe (*s).timer_head != null && unsafe (*(*s).timer_head).deadline <= now {
-        let co = unsafe (*s).timer_head;
-        unsafe (*s).timer_head = unsafe (*co).tnext;
-        unsafe (*co).tnext = null;
-        unsafe (*co).timed = 0;
-        if claim(co, unsafe (*co).tm_token) {
+    while unsafe s.timer_head != null && unsafe s.timer_head.deadline <= now {
+        let co = unsafe s.timer_head;
+        unsafe s.timer_head = unsafe co.tnext;
+        unsafe co.tnext = null;
+        unsafe co.timed = 0;
+        if claim(co, unsafe co.tm_token) {
             push_injection(s, co); // any worker may take it; the caller already holds the lock
         }
     }
@@ -341,26 +341,26 @@ fn promote_expired(s: *mut Scheduler) {
 // Pick a victim at random and try every deque once. Random start, not round-robin: with several idle
 // workers a fixed order makes them all converge on the same victim.
 fn steal_any(s: *mut Scheduler, me: usize) *mut Coroutine {
-    let nw = unsafe (*s).nw;
+    let nw = unsafe s.nw;
     if nw < 2 {
         return null;
     }
-    let w = unsafe ((*s).deques + me);
-    let mut r = unsafe (*w).rng; // xorshift64
+    let w = unsafe (s.deques + me);
+    let mut r = unsafe w.rng; // xorshift64
     r = r ^ r << 13;
     r = r ^ r >> 7;
     r = r ^ r << 17;
-    unsafe (*w).rng = r;
+    unsafe w.rng = r;
     let start = (r % nw as u64) as usize;
     for k in 0..nw {
         let v = (start + k) % nw;
         if v == me {
             continue;
         }
-        let co = dq_steal(unsafe ((*s).deques + v));
+        let co = dq_steal(unsafe (s.deques + v));
         if co != null {
             if tracing() {
-                trace("stolen", unsafe (*co).id);
+                trace("stolen", unsafe co.id);
             }
             return co;
         }
@@ -369,8 +369,8 @@ fn steal_any(s: *mut Scheduler, me: usize) *mut Coroutine {
 }
 
 fn all_deques_empty(s: *mut Scheduler) bool {
-    for i in 0..unsafe (*s).nw {
-        if !dq_empty(unsafe ((*s).deques + i)) {
+    for i in 0..unsafe s.nw {
+        if !dq_empty(unsafe (s.deques + i)) {
             return false;
         }
     }
@@ -381,16 +381,16 @@ fn all_deques_empty(s: *mut Scheduler) bool {
 // then a steal from a random victim; failing all three it parks. Null once shut down and every source is
 // drained.
 fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
-    let w = unsafe ((*s).deques + me);
+    let w = unsafe (s.deques + me);
     loop {
         // Every so often, look at the shared queue FIRST: a worker that keeps spawning local work would
         // otherwise never come back for anything submitted from off the pool.
-        let t = unsafe (*w).tick + 1;
-        unsafe (*w).tick = t;
-        if t % 61 == 0 && atomic::load_i32(&mut unsafe (*s).inj_len, 1) > 0 {
-            unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
+        let t = unsafe w.tick + 1;
+        unsafe w.tick = t;
+        if t % 61 == 0 && atomic::load_i32(&mut unsafe s.inj_len, 1) > 0 {
+            unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
             let shared = pop_injection(s);
-            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             if shared != null {
                 return shared;
             }
@@ -399,26 +399,26 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
         if local != null {
             return local; // the hot path takes no lock at all
         }
-        unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
+        unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
         promote_expired(s);
         let mut co = pop_injection(s);
         if co == null {
             co = steal_any(s, me);
         }
         if co != null {
-            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             return co;
         }
         // Shutting down drains: workers keep going until every deque, the injection queue AND every pending
         // timer is empty, so no submitted or sleeping task is silently dropped (one still parked on a wait
         // queue is, since nothing will ever wake it).
-        if unsafe (*s).shutting_down != 0 && unsafe (*s).timer_head == null && all_deques_empty(s) {
-            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+        if unsafe s.shutting_down != 0 && unsafe s.timer_head == null && all_deques_empty(s) {
+            unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             return null;
         }
         // Register as sleeping, THEN look again. `signal_work` reads `sleeping` after its push, so if it read
         // zero its task is already visible to this second scan -- one of the two always sees the other.
-        let sp = &mut unsafe (*s).sleeping;
+        let sp = &mut unsafe s.sleeping;
         let _ = atomic::add_i32(sp, 1, 4);
         atomic::fence(4);
         promote_expired(s);
@@ -428,38 +428,38 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
         }
         if late != null {
             let _ = atomic::sub_i32(sp, 1, 4);
-            unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+            unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             return late;
         }
-        if unsafe (*s).timer_head != null {
+        if unsafe s.timer_head != null {
             let now = platform::now_ns();
-            let dl = unsafe (*(*s).timer_head).deadline;
+            let dl = unsafe s.timer_head.deadline;
             let rel = if dl > now {
                 (dl - now) as i64;
             } else {
                 0i64;
             };
-            let _ = unsafe sc_runtime::sc_rt_cond_timedwait_ns((*s).cv, (*s).lock, rel);
+            let _ = unsafe sc_runtime::sc_rt_cond_timedwait_ns(s.cv, s.lock, rel);
         } else {
-            unsafe sc_runtime::sc_rt_cond_wait((*s).cv, (*s).lock);
+            unsafe sc_runtime::sc_rt_cond_wait(s.cv, s.lock);
         }
         let _ = atomic::sub_i32(sp, 1, 4);
-        unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+        unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
     }
 }
 
 // The coroutine body trampoline: run the closure (which frees its own box), mark done, return to scheduler.
 fn coroutine_start(arg: *mut void) {
     let co = arg as *mut Coroutine;
-    let e = unsafe (*co).entry;
-    e(unsafe (*co).env);
-    unsafe (*co).done = 1;
-    unsafe sc_runtime::sc_rt_ctx_switch((*co).ctx, (*co).sched_ctx);
+    let e = unsafe co.entry;
+    e(unsafe co.env);
+    unsafe co.done = 1;
+    unsafe sc_runtime::sc_rt_ctx_switch(co.ctx, co.sched_ctx);
 }
 
 fn free_coroutine(co: *mut Coroutine) {
-    unsafe sc_runtime::sc_rt_stack_free((*co).stack, STACK_SIZE);
-    unsafe sc_runtime::sc_rt_ctx_free((*co).ctx);
+    unsafe sc_runtime::sc_rt_stack_free(co.stack, STACK_SIZE);
+    unsafe sc_runtime::sc_rt_ctx_free(co.ctx);
     let mut g = Global {};
     g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
 }
@@ -468,8 +468,8 @@ fn free_coroutine(co: *mut Coroutine) {
 // AFTER its context has been fully saved -- so a woken coroutine can never be resumed while still switching.
 fn worker_main(arg: *mut void) *mut void {
     let w = arg as *mut Worker;
-    let s = unsafe (*w).sched;
-    let me = unsafe (*w).idx;
+    let s = unsafe w.sched;
+    let me = unsafe w.idx;
     unsafe sc_runtime::sc_rt_widx_set(me as i32); // a push from this thread lands on this deque
     let sched_ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
     loop {
@@ -477,13 +477,13 @@ fn worker_main(arg: *mut void) *mut void {
         if co == null {
             break;
         }
-        if unsafe (*co).is_job != 0 {
+        if unsafe co.is_job != 0 {
             // A job runs to completion right here, on the worker's own stack: no context, no switch, and
             // `current()` reports null so anything it waits on blocks this thread instead of parking.
-            let je = unsafe (*co).entry;
+            let je = unsafe co.entry;
             unsafe sc_runtime::sc_rt_tls_set(co);
-            unsafe __sc_set_task_id((*co).id);
-            je(unsafe (*co).env);
+            unsafe __sc_set_task_id(co.id);
+            je(unsafe co.env);
             unsafe __sc_set_task_id(0);
             unsafe sc_runtime::sc_rt_tls_set(null);
             let mut gj = Global {};
@@ -491,42 +491,42 @@ fn worker_main(arg: *mut void) *mut void {
             let _ = atomic::add_usize(&mut G_DONE, 1, 0);
             continue;
         }
-        unsafe (*co).sched_ctx = sched_ctx;
-        if unsafe (*co).inited == 0 {
+        unsafe co.sched_ctx = sched_ctx;
+        if unsafe co.inited == 0 {
             // Set the context up on the worker that first runs it -- macOS ucontext is not reliably
             // cross-thread if created on the submitting thread.
-            unsafe sc_runtime::sc_rt_ctx_init((*co).ctx, (*co).stack, STACK_SIZE, coroutine_start, co);
-            unsafe (*co).inited = 1;
+            unsafe sc_runtime::sc_rt_ctx_init(co.ctx, co.stack, STACK_SIZE, coroutine_start, co);
+            unsafe co.inited = 1;
         }
         unsafe sc_runtime::sc_rt_tls_set(co);
-        unsafe __sc_set_task_id((*co).id);
+        unsafe __sc_set_task_id(co.id);
         unsafe sc_lk_bt_pause(); // the leak tracker must not unwind the coroutine's stack
-        unsafe sc_runtime::sc_rt_ctx_switch(sched_ctx, (*co).ctx);
+        unsafe sc_runtime::sc_rt_ctx_switch(sched_ctx, co.ctx);
         unsafe sc_lk_bt_resume();
         unsafe __sc_set_task_id(0);
         unsafe sc_runtime::sc_rt_tls_set(null);
-        if unsafe (*co).done != 0 {
+        if unsafe co.done != 0 {
             if tracing() {
-                trace("complete", unsafe (*co).id);
+                trace("complete", unsafe co.id);
             }
             free_coroutine(co);
             let _ = atomic::add_usize(&mut G_DONE, 1, 0);
-        } else if unsafe (*co).commit_requeue != 0 {
-            unsafe (*co).commit_requeue = 0;
+        } else if unsafe co.commit_requeue != 0 {
+            unsafe co.commit_requeue = 0;
             enqueue_global(s, co); // a yield goes to the back of the shared queue, not our own deque
         } else {
             // Parked. Take the hand-off FIRST: arming the timer already publishes this coroutine, and a
             // deadline that has already passed lets another worker resume it -- and park it again, rewriting
             // these very fields -- before we get to them.
-            let commit = unsafe (*co).commit_fn;
-            let arg = unsafe (*co).commit_arg;
-            let dl = unsafe (*co).deadline;
+            let commit = unsafe co.commit_fn;
+            let arg = unsafe co.commit_arg;
+            let dl = unsafe co.deadline;
             // Then arm its timer (if the wait was timed) and only last release the lock that kept its waker
             // out: by now its context is fully saved, so any waker may resume it.
             if dl != 0 {
-                unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
+                unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
                 arm_timer(s, co, dl);
-                unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+                unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             }
             commit(arg);
         }
@@ -571,7 +571,7 @@ fn build_scheduler() *mut Scheduler {
     for i in 0..nw {
         let mut h: *mut void = null;
         let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, worker_main, unsafe (deques + i));
-        unsafe (*s).workers.push(h);
+        unsafe s.workers.push(h);
     }
     return s;
 }
@@ -632,7 +632,7 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
         tnext: null,
     };
     if tracing() {
-        trace("spawn coroutine", unsafe (*co).id);
+        trace("spawn coroutine", unsafe co.id);
     }
     enqueue_runnable(s, co);
 }
@@ -666,7 +666,7 @@ pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
         tnext: null,
     };
     if tracing() {
-        trace("spawn job", unsafe (*co).id);
+        trace("spawn job", unsafe co.id);
     }
     enqueue_runnable(s, co);
 }
@@ -691,7 +691,7 @@ pub fn submit<F: fn move() + Send + 'static>(f: F) {
 /// between parking a coroutine and blocking an OS thread.
 pub fn current() *mut Coroutine {
     let t = (unsafe sc_runtime::sc_rt_tls_get()) as *mut Coroutine;
-    if t != null && unsafe (*t).is_job != 0 {
+    if t != null && unsafe t.is_job != 0 {
         return null;
     }
     return t;
@@ -701,7 +701,7 @@ pub fn current() *mut Coroutine {
 /// its chunks inline rather than submit and wait for them.
 pub fn in_job() bool {
     let t = (unsafe sc_runtime::sc_rt_tls_get()) as *mut Coroutine;
-    return t != null && unsafe (*t).is_job != 0;
+    return t != null && unsafe t.is_job != 0;
 }
 
 /// Open a new park and return its wake token. Call it (from inside the coroutine, under the lock guarding
@@ -710,7 +710,7 @@ pub fn in_job() bool {
 /// token and is therefore inert -- which is why a waiter may re-park (to re-take the lock) before it has
 /// managed to unlink itself.
 pub fn park_begin(co: *mut Coroutine) u32 {
-    let p = &mut unsafe (*co).park_state;
+    let p = &mut unsafe co.park_state;
     let t = ((atomic::load_u32(p, 0) >> 1) + 1) * 2; // next generation, claim bit clear; wraps at width
     atomic::store_u32(p, t, 0);
     return t;
@@ -733,14 +733,14 @@ pub fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *m
             } else {
                 "park";
             },
-            unsafe (*co).id,
+            unsafe co.id,
         );
     }
-    unsafe (*co).commit_fn = commit;
-    unsafe (*co).commit_arg = arg;
-    unsafe (*co).deadline = deadline;
-    unsafe (*co).tm_token = token;
-    unsafe sc_runtime::sc_rt_ctx_switch((*co).ctx, (*co).sched_ctx);
+    unsafe co.commit_fn = commit;
+    unsafe co.commit_arg = arg;
+    unsafe co.deadline = deadline;
+    unsafe co.tm_token = token;
+    unsafe sc_runtime::sc_rt_ctx_switch(co.ctx, co.sched_ctx);
 }
 
 /// `park_timed` with no deadline: park until woken.
@@ -758,7 +758,7 @@ pub fn wake(co: *mut Coroutine, token: u32) bool {
         return false;
     }
     if tracing() {
-        trace("wake", unsafe (*co).id);
+        trace("wake", unsafe co.id);
     }
     enqueue_runnable(G_SCHED, co);
     return true;
@@ -772,9 +772,9 @@ pub fn cancel_timer(co: *mut Coroutine) {
     if s == null {
         return;
     }
-    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
     disarm_timer(s, co);
-    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
+    unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
 }
 
 /// Suspend for `ns` nanoseconds. A coroutine parks on the scheduler's timer list, so its worker keeps
@@ -800,7 +800,7 @@ pub fn current_id() u64 {
     if t == null {
         return 0;
     }
-    return unsafe (*t).id;
+    return unsafe t.id;
 }
 
 /// Tasks created so far (coroutines and data-parallel jobs alike).
@@ -849,10 +849,10 @@ fn preempt_yield() {
         return;
     }
     let wi = unsafe sc_runtime::sc_rt_widx_get();
-    if wi < 0 || wi as usize >= unsafe (*s).nw {
+    if wi < 0 || wi as usize >= unsafe s.nw {
         return;
     }
-    if !dq_empty(unsafe ((*s).deques + wi as usize)) || atomic::load_i32(&mut unsafe (*s).inj_len, 1) > 0 {
+    if !dq_empty(unsafe (s.deques + wi as usize)) || atomic::load_i32(&mut unsafe s.inj_len, 1) > 0 {
         yield_now();
     }
 }
@@ -864,8 +864,8 @@ pub fn yield_now() {
         return;
     }
     let _ = park_begin(co); // retire the current token: nothing may wake a coroutine the worker requeues
-    unsafe (*co).commit_requeue = 1;
-    unsafe sc_runtime::sc_rt_ctx_switch((*co).ctx, (*co).sched_ctx);
+    unsafe co.commit_requeue = 1;
+    unsafe sc_runtime::sc_rt_ctx_switch(co.ctx, co.sched_ctx);
 }
 
 /// Drain the run queue and every pending timer, stop and join all workers, and free the pool. Idempotent;
@@ -877,23 +877,23 @@ pub fn shutdown() {
         return;
     }
     let s = G_SCHED;
-    unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
-    unsafe (*s).shutting_down = 1;
-    unsafe sc_runtime::sc_rt_cond_broadcast((*s).cv);
-    unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
-    let nw = unsafe (*s).workers.len();
+    unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
+    unsafe s.shutting_down = 1;
+    unsafe sc_runtime::sc_rt_cond_broadcast(s.cv);
+    unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
+    let nw = unsafe s.workers.len();
     for i in 0..nw {
-        let h = unsafe (*s).workers[i];
+        let h = unsafe s.workers[i];
         let _ = unsafe sc_runtime::sc_rt_thread_join(h);
     }
-    unsafe (*s).workers.free();
+    unsafe s.workers.free();
     let mut g = Global {};
-    for i in 0..unsafe (*s).nw {
-        g.dealloc(unsafe (*unsafe ((*s).deques + i)).buf, DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine));
+    for i in 0..unsafe s.nw {
+        g.dealloc(unsafe (s.deques + i).buf, DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine));
     }
-    g.dealloc(unsafe (*s).deques, unsafe (*s).nw * sizeof(Worker), alignof(Worker));
-    unsafe sc_runtime::sc_rt_mutex_free((*s).lock);
-    unsafe sc_runtime::sc_rt_cond_free((*s).cv);
+    g.dealloc(unsafe s.deques, unsafe s.nw * sizeof(Worker), alignof(Worker));
+    unsafe sc_runtime::sc_rt_mutex_free(s.lock);
+    unsafe sc_runtime::sc_rt_cond_free(s.cv);
     g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
     atomic::store_i32(sp, 0, 2);
     G_SCHED = null;

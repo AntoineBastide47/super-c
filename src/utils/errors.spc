@@ -12,9 +12,10 @@ pub const ERRORS_MAX: usize = 256;
 
 /// A machine-applicable fix for a lint diagnostic: kind 0 deletes [start, end); kind 1 inserts '_'
 /// before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
-/// suggestion); kind 3 inserts `fix_texts[text]` before `start` (generated code, e.g. a Free impl).
-/// Collected alongside `warn` and applied by `lint --fix`; `warn` indexes the warning it repairs
-/// (the LSP turns those into quick fixes; error-attached kind-3 fixes stay CLI-only).
+/// suggestion); kind 3 inserts `fix_texts[text]` before `start` (generated code, e.g. a Free impl);
+/// kind 4 replaces [start, end) with `fix_texts[text]` (an edit no delete/insert pair expresses, e.g.
+/// unwrapping `(*e)` to `e`). Collected alongside `warn` and applied by `lint --fix`; `warn` indexes
+/// the warning it repairs (the LSP turns those into quick fixes; error-attached kind-3 fixes stay CLI-only).
 pub struct LintFix {
     pub start: u32,
     pub end: u32,
@@ -100,6 +101,21 @@ extend Errors {
             w = (self.warns.len() - 1) as u32;
         }
         self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: w, text: 0xFFFFFFFF });
+    }
+
+    /// Attach a replace fix to the WARNING just emitted (kind 4): `lint --fix` deletes [start, end) and
+    /// inserts `text` in its place. A single fix expresses an edit that no delete/insert pair can (e.g.
+    /// unwrapping `(*e)` to `e`, where the kept text sits between the two deletions). Takes ownership of
+    /// `text` (fix() always follows its warn(); past the cap the index degrades to the last kept warning).
+    @c.cold
+    pub fn fix_replace(self: &mut Self, start: u32, end: u32, text: String) {
+        let t = self.fix_texts.len() as u32;
+        self.fix_texts.push(text);
+        let mut w: u32 = 0xFFFFFFFF;
+        if self.warns.len() != 0 {
+            w = (self.warns.len() - 1) as u32;
+        }
+        self.fixes.push(LintFix { start: start, end: end, kind: 4, warn: w, text: t });
     }
 
     /// Attach a generated-code insertion fix to the ERROR just emitted (kind 3): `text` is inserted
@@ -365,11 +381,28 @@ fn render(
     out.push_u64(line_no as u64);
     out.push_byte(58);
     out.push_u64((real_col + 1) as u64);
-    out.push_str("\n |\n");
+    // The gutter width is the line number's digit count: the numbered source line reads "<line_no> | ",
+    // so the blank and caret lines must pad that many spaces before " | " or the caret run lands one
+    // column left of its span for every digit in the line number.
+    let mut nd: usize = 1;
+    let mut t = line_no;
+    while t >= 10 {
+        t = t / 10;
+        nd = nd + 1;
+    }
+    out.push_byte(10); // '\n'
+    for _ in 0..nd {
+        out.push_byte(32);
+    }
+    out.push_str(" |\n");
     out.push_u64(line_no as u64);
     out.push_str(" | ");
     out.push_str(source[disp_start..disp_end]);
-    out.push_str("\n | ");
+    out.push_byte(10); // '\n'
+    for _ in 0..nd {
+        out.push_byte(32);
+    }
+    out.push_str(" | ");
     for _ in 0..caret_col {
         out.push_byte(32);
     } // ' '
