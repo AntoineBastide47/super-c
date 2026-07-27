@@ -121,15 +121,24 @@ const fn hex_val(b: u8) i32 {
     return -1;
 }
 
-/// file:// URI -> filesystem path (strips the scheme + authority, percent-decodes).
+const fn is_drive_letter(b: u8) bool {
+    return b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z';
+}
+
+/// file:// URI -> filesystem path (strips the scheme + authority, percent-decodes). Both Windows drive
+/// spellings are accepted: the well-formed `file:///C:/x` (and its `file:///C%3A/x` encoding, which is
+/// what editors send) and the `file://C:/x` shape, whose drive letter sits where the authority goes.
 pub fn uri_to_path(uri: str) String {
     let mut out = String::with_capacity(uri.len());
     let mut i: usize = 0;
     if uri.starts_with("file://") {
         i = 7;
-        // skip the (usually empty) authority up to the path's leading '/'
-        while i < uri.len() && uri[i] != b'/' {
-            i += 1;
+        // skip the (usually empty) authority up to the path's leading '/' -- but a drive letter there is
+        // part of the path, not a host, so consuming it would silently strip the drive
+        if !(i + 1 < uri.len() && is_drive_letter(uri[i]) && uri[i + 1] == b':') {
+            while i < uri.len() && uri[i] != b'/' {
+                i += 1;
+            }
         }
     }
     while i < uri.len() {
@@ -146,6 +155,17 @@ pub fn uri_to_path(uri: str) String {
         out.push_byte(b);
         i += 1;
     }
+    // "/C:/x": the slash ahead of a drive letter is the URI's path root, not part of the file name.
+    let mut drive = false;
+    {
+        let s = out.as_str();
+        drive = s.len() >= 3 && s[0] == b'/' && is_drive_letter(s[1]) && s[2] == b':';
+    }
+    if drive {
+        let trimmed = String::from_str(out.as_str().slice(1, out.len()));
+        out.free();
+        return trimmed;
+    }
     return out;
 }
 
@@ -153,6 +173,9 @@ pub fn uri_to_path(uri: str) String {
 pub fn path_to_uri(path: str) String {
     let mut out = String::with_capacity(path.len() + 8);
     out.push_str("file://");
+    if path.len() != 0 && path[0] != b'/' {
+        out.push_byte(b'/'); // a drive path is still an absolute URI path: C:/x -> file:///C%3A/x
+    }
     for i in 0..path.len() {
         let b = path[i];
         let keep = b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9' || b == b'/' || b == b'-' || b == b'.' || b == b'_' || b == b'~';

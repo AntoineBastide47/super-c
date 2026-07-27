@@ -6,8 +6,8 @@
 //
 // `blocking::call` makes a blocking call SAFE by moving it to a thread that is allowed to block, which
 // costs a thread per concurrent operation. This costs a registration instead: one reactor thread runs the
-// platform poller (kqueue or epoll) and turns readiness into a wake, so ten thousand tasks waiting on ten
-// thousand descriptors are ten thousand parked coroutines and one thread.
+// platform poller (kqueue, epoll or select) and turns readiness into a wake, so ten thousand tasks waiting
+// on ten thousand descriptors are ten thousand parked coroutines and one thread.
 //
 // Two things make it safe. The registration is armed by the park hand-off -- AFTER the coroutine's context
 // is saved -- so an event can never be delivered to a task that is still switching out. And the
@@ -15,10 +15,11 @@
 // the winner decides what happens, and the loser touches nothing. Without that, an event already in flight
 // when a timed wait gives up would write into a stack frame that no longer exists.
 //
-// POSIX only (readiness-based). A Windows target compiles none of this: IOCP is a completion model and
-// needs an interface of its own.
+// Readiness-based on every platform. Windows watches SOCKETS ONLY -- a socket is not a CRT file descriptor
+// there -- and its select() backend caps the simultaneously parked descriptors at FD_SETSIZE; arming past
+// that fails loudly rather than silently. IOCP would lift both, at the cost of a completion-model interface.
 
-import pthread;
+import sc_runtime;
 import atomic;
 import sc_io;
 import std::parallel::runtime as runtime;
@@ -27,7 +28,6 @@ import std::parallel::time as time;
 // A pending registration. Heap-owned rather than living in the waiting frame, because an event can still be
 // in flight when a timed wait gives up. `state` is that race: 0 armed, 1 claimed by the reactor, 2 cancelled
 // by the waiter. Whoever wins the CAS owns what happens next, and exactly one of them frees it.
-@platform(macos | linux)
 struct Interest {
     pub co: *mut runtime::Coroutine,
     pub token: u32,
@@ -38,25 +38,20 @@ struct Interest {
 
 // A batch of ready cookies. Wrapped in a struct so it is zero-initialized: reading an uninitialized array
 // is (rightly) rejected, and the poller fills only the first `n` slots.
-@platform(macos | linux)
 struct EvBuf {
     pub e: [*mut void; 64],
 }
 
-@platform(macos | linux)
 struct Reactor {
     pub poller: *mut void,
-    pub thread: pthread::pthread_t,
+    pub thread: *mut void,
     pub running: i32,
 }
 
-@platform(macos | linux)
 static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready
 
-@platform(macos | linux)
 static mut G_REACTOR: *mut Reactor = null;
 
-@platform(macos | linux)
 fn free_interest(it: *mut Interest) {
     let mut g = Global {};
     g.dealloc(it, sizeof(Interest), alignof(Interest));
@@ -64,7 +59,6 @@ fn free_interest(it: *mut Interest) {
 
 // The reactor thread: block in the poller, turn every ready registration back into a wake. One thread for
 // every descriptor in the program.
-@platform(macos | linux)
 fn reactor_main(arg: *mut void) *mut void {
     let r = arg as *mut Reactor;
     let mut evs = EvBuf {};
@@ -89,20 +83,18 @@ fn reactor_main(arg: *mut void) *mut void {
     return null;
 }
 
-@platform(macos | linux)
 fn build_reactor() *mut Reactor {
     let mut g = Global {};
     let r = g.alloc(sizeof(Reactor), alignof(Reactor)) as *mut Reactor;
     unsafe (*r).poller = unsafe sc_io::sc_io_new();
     unsafe (*r).running = 1;
-    let mut h: pthread::pthread_t;
-    unsafe pthread::pthread_create(&mut h, null, reactor_main, r);
+    let mut h: *mut void = null;
+    let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, reactor_main, r);
     unsafe (*r).thread = h;
     return r;
 }
 
 /// Start the reactor if it is not running and return it. `pub` for linkage.
-@platform(macos | linux)
 pub fn ensure_reactor() *mut Reactor {
     let sp = (&mut G_STATE) as *mut i32; // order codes: 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
     if atomic::load_i32(sp, 1) == 2 {
@@ -121,7 +113,6 @@ pub fn ensure_reactor() *mut Reactor {
 // The park hand-off: arm the registration once the coroutine's context is saved. Doing it here rather than
 // before the park is the whole trick -- the reactor cannot deliver an event to a coroutine it does not know
 // about yet, and it does not know about this one until its context is safely stored.
-@platform(macos | linux)
 fn commit_arm(p: *mut void) {
     let it = p as *mut Interest;
     let r = G_REACTOR;
@@ -140,7 +131,6 @@ fn commit_arm(p: *mut void) {
 ///
 /// From a coroutine this PARKS, freeing the worker. From any other thread it blocks that thread, which is
 /// what it would have done anyway.
-@platform(macos | linux)
 pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     let r = ensure_reactor();
     let w = if write {
@@ -179,20 +169,17 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
 }
 
 /// Wait until `fd` can be read without blocking.
-@platform(macos | linux)
 pub fn wait_readable(fd: i32) {
     let _ = wait_until(fd, false, 0);
 }
 
 /// Wait until `fd` can be written without blocking.
-@platform(macos | linux)
 pub fn wait_writable(fd: i32) {
     let _ = wait_until(fd, true, 0);
 }
 
 /// Read from `fd`, parking whenever it is not ready. Returns what the read returned: the byte count, `0` at
 /// end of file, or negative for a real error (one that is not "would block").
-@platform(macos | linux)
 pub fn read(fd: i32, buf: []mut u8) isize {
     loop {
         let n = unsafe sc_io::sc_io_read(fd, buf.ptr, buf.len());
@@ -208,7 +195,6 @@ pub fn read(fd: i32, buf: []mut u8) isize {
 
 /// Write all of `buf` to `fd`, parking whenever it is not ready. Returns the number of bytes written, or
 /// negative on a real error.
-@platform(macos | linux)
 pub fn write(fd: i32, buf: []u8) isize {
     let mut at: usize = 0;
     while at < buf.len() {
@@ -230,7 +216,6 @@ pub fn write(fd: i32, buf: []u8) isize {
 
 /// Stop the reactor thread and release its poller. Idempotent; a no-op if it never started. Call it once,
 /// from the main thread, after every task that could still be waiting on a descriptor has finished.
-@platform(macos | linux)
 pub fn shutdown() {
     let sp = (&mut G_STATE) as *mut i32;
     if atomic::load_i32(sp, 1) != 2 {
@@ -239,7 +224,7 @@ pub fn shutdown() {
     let r = G_REACTOR;
     atomic::store_i32(&mut unsafe (*r).running, 0, 2);
     unsafe sc_io::sc_io_wake((*r).poller);
-    unsafe pthread::pthread_join((*r).thread, null);
+    let _ = unsafe sc_runtime::sc_rt_thread_join((*r).thread);
     unsafe sc_io::sc_io_free((*r).poller);
     let mut g = Global {};
     g.dealloc(r, sizeof(Reactor), alignof(Reactor));

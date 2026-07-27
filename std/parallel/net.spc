@@ -19,21 +19,19 @@
 // Anything that can fail returns `Result<T, IoError>`, so `?` propagates it and the caller can say WHICH
 // failure it was rather than just that there was one.
 //
-// POSIX only, like the reactor.
+// Every platform, like the reactor -- on Windows over its select() backend.
 
 import sc_io;
 import std::parallel::io as io;
 
 /// Why an operation failed. `code` is the platform errno, kept so a caller can report or match on the exact
 /// failure; the kind is what most code actually branches on.
-@platform(macos | linux)
 pub struct IoError {
     pub kind: IoErrorKind,
     pub code: i32,
 }
 
 /// The failure kinds worth telling apart without reading an errno.
-@platform(macos | linux)
 pub enum IoErrorKind {
     Refused, // nothing is listening
     Unreachable, // no route, or the name does not resolve
@@ -43,23 +41,22 @@ pub enum IoErrorKind {
     Other,
 }
 
-@platform(macos | linux)
 extend IoError {
     /// Classify the current errno. `pub` for linkage.
     pub fn last() IoError {
         let e = unsafe sc_io::sc_io_errno();
         // The numbers differ between platforms, so they are read from the C side rather than written here;
         // these are the ones POSIX pins down well enough to branch on.
-        let k = if e == 61 || e == 111 {
-            IoErrorKind::Refused; // ECONNREFUSED: macOS 61, Linux 111
-        } else if e == 54 || e == 104 {
+        let k = if e == 61 || e == 111 || e == 10061 {
+            IoErrorKind::Refused; // ECONNREFUSED: macOS 61, Linux 111, WSAECONNREFUSED 10061
+        } else if e == 54 || e == 104 || e == 10054 {
             IoErrorKind::Reset; // ECONNRESET
-        } else if e == 48 || e == 98 {
+        } else if e == 48 || e == 98 || e == 10048 {
             IoErrorKind::AddressInUse; // EADDRINUSE
-        } else if e == 51 || e == 65 || e == 101 || e == 113 {
+        } else if e == 51 || e == 65 || e == 101 || e == 113 || e == 10051 || e == 10065 {
             IoErrorKind::Unreachable; // ENETUNREACH / EHOSTUNREACH
-        } else if e == 32 || e == 141 {
-            IoErrorKind::Closed; // EPIPE
+        } else if e == 32 || e == 141 || e == 10053 || e == 10058 {
+            IoErrorKind::Closed; // EPIPE, and its two Winsock spellings (CONNABORTED / SHUTDOWN)
         } else {
             IoErrorKind::Other;
         };
@@ -72,25 +69,20 @@ extend IoError {
 }
 
 /// A listening socket. Dropping it closes the descriptor.
-@platform(macos | linux)
 pub struct TcpListener {
     pub fd: i32,
 }
 
 /// One connection. Dropping it closes the descriptor.
-@platform(macos | linux)
 pub struct TcpStream {
     pub fd: i32,
 }
 
 // Both are just a descriptor, so they move between tasks freely.
-@platform(macos | linux)
 extend TcpListener as Send {}
 
-@platform(macos | linux)
 extend TcpStream as Send {}
 
-@platform(macos | linux)
 extend TcpListener {
     /// Bind and listen on `host:port`; `port` 0 lets the OS choose one (ask `port()` which it picked).
     /// `None` if the address cannot be bound.
@@ -139,7 +131,6 @@ extend TcpListener {
     }
 }
 
-@platform(macos | linux)
 extend TcpListener as Free {
     pub fn free(self: &mut TcpListener) {
         if self.fd >= 0 {
@@ -149,7 +140,6 @@ extend TcpListener as Free {
     }
 }
 
-@platform(macos | linux)
 extend TcpStream {
     /// Connect to `host:port`, parking until the connection resolves. `None` if it fails.
     pub fn connect(host: str, port: i32) Result<TcpStream, IoError> {
@@ -165,9 +155,9 @@ extend TcpStream {
         let err = unsafe sc_io::sc_tcp_connect_result(fd);
         if err != 0 {
             let _ = unsafe sc_io::sc_io_close(fd);
-            let kind = if err == 61 || err == 111 {
+            let kind = if err == 61 || err == 111 || err == 10061 {
                 IoErrorKind::Refused;
-            } else if err == 51 || err == 65 || err == 101 || err == 113 {
+            } else if err == 51 || err == 65 || err == 101 || err == 113 || err == 10051 || err == 10065 {
                 IoErrorKind::Unreachable;
             } else {
                 IoErrorKind::Other;
@@ -195,7 +185,6 @@ extend TcpStream {
     }
 }
 
-@platform(macos | linux)
 extend TcpStream as Free {
     pub fn free(self: &mut TcpStream) {
         self.close();
@@ -204,15 +193,12 @@ extend TcpStream as Free {
 
 /// A UDP socket. Datagrams, so there is no connection to accept or close -- just a bound port that sends
 /// and receives. Dropping it closes the descriptor.
-@platform(macos | linux)
 pub struct UdpSocket {
     pub fd: i32,
 }
 
-@platform(macos | linux)
 extend UdpSocket as Send {}
 
-@platform(macos | linux)
 extend UdpSocket {
     /// Bind to `host:port`; port 0 lets the OS choose (ask `port()` which).
     pub fn bind(host: str, port: i32) Result<UdpSocket, IoError> {
@@ -261,7 +247,6 @@ extend UdpSocket {
     }
 }
 
-@platform(macos | linux)
 extend UdpSocket as Free {
     pub fn free(self: &mut UdpSocket) {
         if self.fd >= 0 {

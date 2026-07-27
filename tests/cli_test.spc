@@ -1170,9 +1170,13 @@ fn main() i32 {
     // Builds on the host even though the windows block names a header that does not exist: it is gated out.
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
-    // The always-on link is present; the windows-only one is not.
+    // The always-on link is present; the windows-only one only when windows is what we are building for.
     assert(p.gen_has("__ldflags", "-lm"), "ungated @c.link lands in __ldflags");
-    assert(!p.gen_has("__ldflags", "scrt_win_only_lib"), "windows @c.link is filtered out on the host");
+    if cli::on_windows() {
+        assert(p.gen_has("__ldflags", "scrt_win_only_lib"), "the windows @c.link is kept on windows");
+    } else {
+        assert(!p.gen_has("__ldflags", "scrt_win_only_lib"), "windows @c.link is filtered out on the host");
+    }
 }
 
 // The task runtime (std/parallel/runtime): a lazily-started worker pool runs detached tasks submitted with
@@ -3582,23 +3586,27 @@ fn external_c_sources() {
     p.mkfile("helper.c", "#include \"helper.h\"\nint helper_add(int a, int b) { return a + b; }\n");
     p.mkfile("extra.h", "int extra_mul(int a, int b);\n");
     p.mkfile("impl_extra.c", "#include \"extra.h\"\nint extra_mul(int a, int b) { return a * b; }\n");
-    p.mkfile(
-        "main.spc",
-        r#"extern "C" "helper.h" {
-  fn helper_add(a: i32, b: i32) i32;
-}
-@c.source("impl_extra.c")
-@c.link("c")
-extern "C" "extra.h" {
-  fn extra_mul(a: i32, b: i32) i32;
-}
-extern "C" { fn exit(code: i32) void; }
-fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
-"#,
+    // The block's library has to exist on this platform (mingw ships no libc.a) AND differ from what the
+    // driver seeds by itself, or phase two below cannot tell the block's flag from the prelude's: libm is
+    // seeded on POSIX only, libc exists on POSIX only, so the two swap roles by target.
+    let lib = if cli::on_windows() {
+        "m";
+    } else {
+        "c";
+    };
+    let mut src = String::from_str(
+        "extern \"C\" \"helper.h\" {\n  fn helper_add(a: i32, b: i32) i32;\n}\n@c.source(\"impl_extra.c\")\n@c.link(\"",
     );
+    src.push_str(lib);
+    src.push_str(
+        "\")\nextern \"C\" \"extra.h\" {\n  fn extra_mul(a: i32, b: i32) i32;\n}\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }\n",
+    );
+    p.mkfile("main.spc", src.as_str());
+    let mut flag = String::from_str("-l");
+    flag.push_str(lib);
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
-    assert(p.gen_has("__ldflags", "-lc"), "@c.link lands in build/__ldflags");
+    assert(p.gen_has("__ldflags", flag.as_str()), "@c.link lands in build/__ldflags");
     let cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 48);
@@ -3609,8 +3617,10 @@ fn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); }
     let r2 = p.compile("main.spc");
     assert_eq(r2.exit, 0);
     assert_eq(p.gen_count("__ext"), 0);
-    assert(!p.gen_has("__ldflags", "-lc"), "a dropped extern block takes its link flag with it");
-    assert(p.gen_has("__ldflags", "-lm"), "the prelude's own libm flag stays: every program emits float methods");
+    assert(!p.gen_has("__ldflags", flag.as_str()), "a dropped extern block takes its link flag with it");
+    if !cli::on_windows() {
+        assert(p.gen_has("__ldflags", "-lm"), "the prelude's own libm flag stays: every program emits float methods");
+    }
 
     // a missing source file is a hard error
     p.mkfile(

@@ -648,21 +648,17 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
     plan.ok = plan.ok && pok;
 }
 
-// Platform-specific headers the generated test runner needs. POSIX forks + reaps (unistd/sys/wait);
-// Windows spawns one subprocess per test (process.h/_spawnv, stdint.h/intptr_t).
-@platform(!windows)
+// Headers the generated test runner needs: POSIX forks + reaps (unistd/sys/wait), Windows spawns one
+// subprocess per test (process.h/_spawnv, stdint.h/intptr_t). Chosen by the C preprocessor rather than by
+// `@platform`, because this text is compiled for the TARGET -- which is not necessarily the platform this
+// compiler is running on. It also keeps both runners in every build, so neither can rot unnoticed.
 const fn test_runner_includes() *const char {
-    return "#include <unistd.h>\n#include <sys/wait.h>\n\n".ptr() as *const char;
-}
-@platform(windows)
-fn test_runner_includes() *const char {
-    return "#include <process.h>\n#include <stdint.h>\n\n".ptr() as *const char;
+    return "#ifdef _WIN32\n#include <process.h>\n#include <stdint.h>\n#else\n#include <unistd.h>\n#include <sys/wait.h>\n#endif\n\n".ptr() as *const char;
 }
 
 // The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
 // pool, an in-process fallback (--no-fork), substring selection, per-test reporting, and the exit code.
-@platform(!windows)
-const fn test_runner_main() *const char {
+const fn test_runner_main_posix() *const char {
     return r#"static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
 }
@@ -753,19 +749,26 @@ int main(int argc, char **argv) {
 // Windows has no fork(); isolate each test in its own subprocess (`self --run-one=<i>`) so should_panic
 // and crashing tests are caught via the child's exit code. Serial (no job pool); @test_init(global) reruns
 // per test (fresh process) rather than once — same isolation, minor repeated setup.
-@platform(windows)
-fn test_runner_main() *const char {
+const fn test_runner_main_win() *const char {
     return r#"static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
+}
+/* Path to re-spawn: argv[0] is whatever the caller typed and need not name a file the loader can open
+   (`./__tests` from a shell has no .exe), so ask the CRT for this image's real path and fall back only
+   if it refuses. */
+static const char *sc_self(const char *fallback) {
+  char *p = NULL;
+  return (_get_pgmptr(&p) == 0 && p && *p) ? p : fallback;
 }
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   const char *filter = NULL;
-  int run_one = -1;
+  int run_one = -1, no_fork = 0;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--run-one=", 10)) run_one = atoi(argv[i] + 10);
+    else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
-    /* --jobs / --no-fork accepted for CLI parity; Windows always runs serial subprocesses */
+    /* --jobs accepted for CLI parity; Windows always runs its subprocesses serially */
   }
   if (run_one >= 0) { /* child: run exactly one test in-process, exit status reports crash/panic */
     void *genv = sc_genv_init();
@@ -778,27 +781,47 @@ int main(int argc, char **argv) {
   for (int i = 0; i < SC_NTESTS; i++)
     if (sc_match(SC_TESTS[i].name, filter)) sel[nsel++] = i;
   printf("running %d test%s\n", nsel, nsel == 1 ? "" : "s");
-  int passed = 0, failed = 0;
-  for (int k = 0; k < nsel; k++) {
-    const int i = sel[k];
-    char idbuf[24];
-    snprintf(idbuf, sizeof idbuf, "--run-one=%d", i);
-    const char *const args[] = { argv[0], idbuf, NULL };
-    const intptr_t rc = _spawnv(_P_WAIT, argv[0], args);
-    const int crashed = (rc != 0);
-    if (crashed == SC_TESTS[i].should_panic) {
-      printf("test %s ... ok%s\n", SC_TESTS[i].name, SC_TESTS[i].should_panic ? " (panicked as expected)" : "");
+  int passed = 0, failed = 0, skipped = 0;
+  if (no_fork) { /* in-process, same meaning as POSIX: no isolation, so no panic can be caught */
+    void *genv = nsel > 0 ? sc_genv_init() : NULL;
+    for (int k = 0; k < nsel; k++) {
+      const int i = sel[k];
+      if (SC_TESTS[i].should_panic) {
+        printf("test %s ... skipped (should_panic needs fork)\n", SC_TESTS[i].name);
+        skipped++;
+        continue;
+      }
+      SC_TESTS[i].fn(genv);
+      printf("test %s ... ok\n", SC_TESTS[i].name);
       passed++;
-    } else if (SC_TESTS[i].should_panic) {
-      printf("test %s ... FAILED (expected a panic)\n", SC_TESTS[i].name);
-      failed++;
-    } else {
-      printf("test %s ... FAILED\n", SC_TESTS[i].name);
-      failed++;
     }
-    fflush(stdout);
+    if (genv) sc_genv_free(genv);
+  } else {
+    for (int k = 0; k < nsel; k++) {
+      const int i = sel[k];
+      char idbuf[24];
+      snprintf(idbuf, sizeof idbuf, "--run-one=%d", i);
+      const char *self = sc_self(argv[0]);
+      const char *const args[] = { self, idbuf, NULL };
+      const intptr_t rc = _spawnv(_P_WAIT, self, args);
+      const int crashed = (rc != 0);
+      if (crashed == SC_TESTS[i].should_panic) {
+        printf("test %s ... ok%s\n", SC_TESTS[i].name, SC_TESTS[i].should_panic ? " (panicked as expected)" : "");
+        passed++;
+      } else if (SC_TESTS[i].should_panic) {
+        printf("test %s ... FAILED (expected a panic)\n", SC_TESTS[i].name);
+        failed++;
+      } else {
+        printf("test %s ... FAILED\n", SC_TESTS[i].name);
+        failed++;
+      }
+      fflush(stdout);
+    }
   }
-  printf("\n%d passed, %d failed\n", passed, failed);
+  if (skipped)
+    printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped);
+  else
+    printf("\n%d passed, %d failed\n", passed, failed);
   return failed > 100 ? 100 : failed;
 }
 "#.ptr() as *const char;
@@ -879,7 +902,11 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
             f,
         );
     }
-    unsafe stdio::fputs(test_runner_main(), f);
+    unsafe stdio::fputs("#ifdef _WIN32\n".ptr() as *const char, f);
+    unsafe stdio::fputs(test_runner_main_win(), f);
+    unsafe stdio::fputs("#else\n".ptr() as *const char, f);
+    unsafe stdio::fputs(test_runner_main_posix(), f);
+    unsafe stdio::fputs("#endif\n".ptr() as *const char, f);
     unsafe stdio::fclose(f);
     return Option::<String>::Some(path);
 }
@@ -893,23 +920,31 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
         cc = "cc".ptr() as *const char;
     }
     let root = p.gen_root.as_str();
+    // Every path is DOUBLE-quoted: these lines reach cmd.exe on Windows, which passes single quotes
+    // through as ordinary characters. The runner is named with an explicit `.exe` there so running it
+    // below never depends on the shell filling the extension in.
+    let exe = if unsafe shim::sc_host_platform() == 0 {
+        ".exe";
+    } else {
+        "";
+    };
     let mut cmd = String::new();
     cmd.push_str(str::from_cstr(cc));
+    cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L -o \"");
     if out_bin.len() != 0 {
-        cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L -o '");
         cmd.push_str(out_bin);
-        cmd.push_str("'");
     } else {
-        cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L -o '");
         cmd.push_str(root);
-        cmd.push_str("/__tests'");
+        cmd.push_str("/__tests");
+        cmd.push_str(exe);
     }
+    cmd.push_str("\"");
     for i in 0..keep.len() {
         let cf = keep[i].as_str();
         if cf.len() > 2 && cf.ends_with(".c") {
-            cmd.push_str(" '");
+            cmd.push_str(" \"");
             cmd.push_str(cf);
-            cmd.push_str("'");
+            cmd.push_str("\"");
         }
     }
     // @c.link flags (one per line in build/__ldflags)
@@ -929,7 +964,7 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
         }
         unsafe stdio::fclose(lf);
     }
-    let brc = stdlib::system(cmd.as_str());
+    let brc = unsafe shim::sc_exec(cmd.cstr());
     if brc != 0 {
         let mut what = "test build".ptr() as *const char;
         if out_bin.len() != 0 {
@@ -942,9 +977,11 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
         return 0;
     } // the `build` subcommand: linked the program, nothing to run
     let mut run = String::new();
-    run.push_str("'");
+    run.push_str("\"");
     run.push_str(root);
-    run.push_str("/__tests'");
+    run.push_str("/__tests");
+    run.push_str(exe);
+    run.push_str("\"");
     if unsafe (*topts).jobs > 0 {
         let mut jb = Buf64 {};
         unsafe stdio::snprintf(&mut jb[0], 64, " --jobs=%d".ptr() as *const char, unsafe (*topts).jobs);
@@ -954,16 +991,13 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
         run.push_str(" --no-fork");
     }
     if unsafe (*topts).filter != null {
-        run.push_str(" '--filter=");
+        run.push_str(" \"--filter=");
         run.push_str(str::from_cstr(unsafe (*topts).filter));
-        run.push_str("'");
+        run.push_str("\"");
     }
-    let rrc = stdlib::system(run.as_str());
+    let rrc = unsafe shim::sc_exec(run.cstr());
     if rrc < 0 {
         return 1;
     }
-    if unsafe shim::sc_wifexited(rrc) != 0 {
-        return unsafe shim::sc_wexitstatus(rrc);
-    }
-    return 1;
+    return rrc;
 }

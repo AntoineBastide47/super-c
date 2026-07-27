@@ -45,6 +45,14 @@ int sc_setenv(const char *name, const char *value); /* setenv(3) overwrite / _pu
    operators to mean the same thing on both. */
 int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env);
 
+/* `sc_run` for a program whose output belongs on OUR stdout/stderr: same command-line rules, but the child
+   inherits this process's standard handles instead of redirecting them. Returns its exit code, or -1 if it
+   could not be started. Use this rather than `system()` to run a program at a path we just built: on
+   Windows `system()` is cmd.exe, which strips the outer quotes off its `/c` line and then splits the
+   program name at the first '/', so "build/raw-test/__tests.exe" comes back as `'build' is not
+   recognized`. */
+int sc_exec(const char *cmd);
+
 int sc_mkdir_p(const char *path); /* mkdir -p: creates every missing component; 0 on success */
 int sc_rm_rf(const char *path);   /* rm -rf: recursive delete, 0 if the path is gone afterwards */
 const char *sc_tmpdir(void);      /* the system temp directory, no trailing separator */

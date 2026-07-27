@@ -286,6 +286,20 @@ fn push_all(cmd: &mut String, flags: &Vector<String>) {
     }
 }
 
+// Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
+// dev/debug profiles' `-fsanitize*` would fail the link on Windows -- there they are dropped instead
+// (SC_LEAK_CHECK, being self-hosted, still covers leaks, double-frees and use-after-free there).
+fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32) {
+    for i in 0..flags.len() {
+        let f = flags.at(i).as_str();
+        if target == 0 && f.starts_with("-fsanitize") {
+            continue;
+        }
+        cmd.push_byte(b' ');
+        cmd.push_str(f);
+    }
+}
+
 fn write_file(path: str, body: str) i32 {
     let f = stdio::fopen(path, "wb");
     if f == null {
@@ -495,7 +509,7 @@ fn engine_build(
             cmd.push_byte(b' ');
             cmd.push_string(&m.cstd);
             push_all(&mut cmd, &m.cflags);
-            push_all(&mut cmd, &prof.cflags);
+            push_profile(&mut cmd, &prof.cflags, target);
             cmd.push_str(" -MMD -c");
             push_quoted(&mut cmd, cpath.as_str());
             cmd.push_str(" -o");
@@ -600,7 +614,7 @@ fn engine_build(
                 push_quoted(&mut cmd, objs.at(i).as_str());
             }
             push_all(&mut cmd, &m.ldflags);
-            push_all(&mut cmd, &prof.ldflags);
+            push_profile(&mut cmd, &prof.ldflags, target);
             // @c.link flags recorded by the emitter
             let lfp = join2(gen.as_str(), "__ldflags");
             let lf = loader::read_file(lfp.as_str());
@@ -785,7 +799,7 @@ pub fn manifest_run_bin(
     path.push_str(bin);
     let mut cmd = String::new();
     push_quoted(&mut cmd, path.as_str());
-    return shell(cmd.as_str());
+    return unsafe shim::sc_exec(cmd.cstr()); // a built binary: never through a shell (see sc_exec)
 }
 
 /// `super-c test`: build the project, then discover tests/**/*.spc by convention, synthesize an
@@ -915,7 +929,7 @@ pub fn manifest_bench(
     }
     let mut cmd = String::new();
     push_quoted(&mut cmd, bin.as_str());
-    return shell(cmd.as_str());
+    return unsafe shim::sc_exec(cmd.cstr()); // a built binary: never through a shell (see sc_exec)
 }
 
 /// `super-c run <name>`: run a manifest command, building first when it asks for it. Lines run in

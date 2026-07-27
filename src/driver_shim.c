@@ -457,6 +457,12 @@ const char *sc_tmpdir(void) {
   }
   while (n > 1 && (buf[n - 1] == '\\' || buf[n - 1] == '/'))
     buf[--n] = 0; /* no trailing separator: callers join with '/' */
+  /* Forward slashes, like sc_realpath: Win32 accepts them everywhere, and a path that reaches a JSON
+     string or a C string literal must not carry backslashes -- "C:\Users\..." is an invalid escape in
+     both, which is how a temp path silently corrupts an LSP request. */
+  for (DWORD i = 0; i < n; i++)
+    if (buf[i] == '\\')
+      buf[i] = '/';
 #else
   const char *t = getenv("TMPDIR");
   if (!t || !*t)
@@ -520,6 +526,29 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
   sc_env_restore(saves, nenv);
   return rc;
 }
+
+int sc_exec(const char *cmd) {
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof si);
+  si.cb = sizeof si; /* no STARTF_USESTDHANDLES: the child writes to our console */
+  size_t n = strlen(cmd) + 1;
+  char *line = (char *)malloc(n);
+  if (!line)
+    return -1;
+  memcpy(line, cmd, n);
+  int rc = -1;
+  if (CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    rc = (int)code;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  }
+  free(line);
+  return rc;
+}
 #else
 int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env) {
   extern char **environ;
@@ -545,5 +574,17 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
   posix_spawn_file_actions_destroy(&fa);
   sc_env_restore(saves, nenv);
   return rc;
+}
+
+int sc_exec(const char *cmd) {
+  extern char **environ;
+  char *argv[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};
+  pid_t pid;
+  if (posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ) != 0)
+    return -1;
+  int st = 0;
+  while (waitpid(pid, &st, 0) < 0) {
+  }
+  return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 #endif

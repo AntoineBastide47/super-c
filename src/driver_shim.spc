@@ -59,6 +59,11 @@ extern "C" "driver_shim.h" {
         err_path: *const char,
         env: *const char,
     ) i32;
+    /// `sc_run` for a program whose output belongs on our own stdout/stderr (it inherits them instead of
+    /// being redirected); returns its exit code, or -1 if it could not start. Always use this, never
+    /// `system()`, to run a binary at a path we built: on Windows `system()` is cmd.exe, which drops the
+    /// outer quotes of its `/c` line and then splits the program name at the first '/'.
+    pub fn sc_exec(cmd: *const char) i32;
     /// `mkdir -p`: create every missing component of `path`. 0 on success.
     pub fn sc_mkdir_p(path: *const char) i32;
     /// `rm -rf`: delete `path` and anything under it. 0 once it is gone.

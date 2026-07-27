@@ -8,6 +8,36 @@ import stdio;
 import driver_shim as shim;
 import module::loader as loader;
 import lsp::json as json;
+import lsp::text as text;
+
+// URI <-> path, the mapping every request is keyed on. A Windows drive letter is the trap: it sits exactly
+// where a URI's authority goes, so parsing `file://C:/x` as scheme+authority+path silently drops the drive
+// and every document lookup then misses. All four spellings a client may send must land on the same path,
+// and the round trip must be lossless on this platform's own absolute paths.
+// The owner is always bound to a local: a `str` taken from a temporary String is read after the temporary
+// is freed (`f().as_str()` in a larger expression yields a dangling view), so never phrase it that way.
+fn uri_path_is(uri: str, want: str) {
+    let got = text::uri_to_path(uri);
+    assert_eq(got.as_str(), want);
+}
+
+@test
+fn uri_path_roundtrip() {
+    uri_path_is("file:///home/u/a.spc", "/home/u/a.spc");
+    uri_path_is("file://C:/w/a.spc", "C:/w/a.spc");
+    uri_path_is("file:///C:/w/a.spc", "C:/w/a.spc");
+    uri_path_is("file:///c%3A/w/a.spc", "c:/w/a.spc");
+    uri_path_is("file:///home/u/a%20b.spc", "/home/u/a b.spc");
+    // a path this platform could actually hand us survives the round trip
+    let p = if cli::on_windows() {
+        "C:/w/a b.spc";
+    } else {
+        "/home/u/a b.spc";
+    };
+    let uri = text::path_to_uri(p);
+    uri_path_is(uri.as_str(), p);
+    assert(uri.as_str().starts_with("file:///"), "the authority is empty and the path is absolute");
+}
 
 const MAIN_ERR: str = "fn main() i32 {\n    let x: i32 = \"hello\";\n    return x;\n}\n";
 const MAIN_OK: str = "fn main() i32 {\n    let x: i32 = 42;\n    return x;\n}\n";
