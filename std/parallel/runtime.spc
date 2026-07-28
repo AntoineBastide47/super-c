@@ -67,7 +67,14 @@ pub struct Coroutine {
 const DEQUE_CAP: usize = 256; // power of two; an overflowing push spills to the injection queue
 const BATCH_MAX: usize = 16; // injected tasks moved to a deque per lock -- see `take_injection`
 const Y_MAX: i32 = 32; // yields a worker keeps to itself before spilling -- see `yq_push`
-const POOL_MAX: i32 = 256; // recycled task blocks kept alive -- see `pool_put`
+// Recycled task blocks the SHARED pool keeps. It has to exceed the number of tasks a program runs
+// concurrently, or every spawn past it pays a fresh stack mmap plus a guard mprotect and a munmap on the way
+// out -- at 256, a 1000-task fan-out re-allocated three quarters of its stacks on every iteration and the
+// profile went allocation-bound. A block is 256 KiB RESERVED and roughly 16 KiB resident, so this bounds the
+// idle cache at a few MiB rather than a few hundred.
+const POOL_MAX: i32 = 1024;
+const STASH_MAX: i32 = 16; // blocks a worker keeps to itself -- see the task-block pool
+const STASH_BATCH: i32 = 16; // blocks moved between a stash and the shared pool per lock
 const SPIN_MAX: i32 = 2048; // the spinner's look-again budget before it parks -- see `dequeue_runnable`
 // A non-spinner's budget. Spinning costs a core and saves a wake-up syscall, so this is a real trade: at 64
 // a cheap-task fan-out spent most of its time waking threads, and at 4096 the spinners stole cores from
@@ -92,12 +99,14 @@ pub struct Worker {
     pub yhead: *mut Coroutine, // yielded here, oldest first: taken only once the deque is empty
     pub ytail: *mut Coroutine,
     pub ylen: i32, // beyond Y_MAX a yield spills to the injection queue -- see `yq_push`
+    pub bhead: *mut Coroutine, // this worker's private stash of recycled task blocks
+    pub blen: i32, // how many; beyond STASH_MAX the stash is handed to the shared pool in one go
     // Padding to a whole cache line. Workers live in one array, so without it two of them share a line:
     // every push moves `bottom` and every steal moves `top`, and a store to either invalidates the
     // neighbour's copy of both. Worth ~25% on a yield-heavy fan-out across fourteen workers, which is the
     // shape that moves these two fields hardest. 128 bytes because that is the line on Apple silicon; on a
     // 64-byte machine it is simply two lines per worker.
-    pub pad: Array<u64, 6>,
+    pub pad: Array<u64, 4>,
 }
 
 /// Where one worker sleeps: its own mutex and condvar, so waking it is an UNCONTENDED lock plus one signal.
@@ -738,6 +747,14 @@ fn coroutine_start(arg: *mut void) {
 //
 // Bounded, because these are the runtime's largest allocations: past `POOL_MAX` a block is really freed.
 // `shutdown` drains what is left, so an unused pool costs nothing once the program stops launching tasks.
+//
+// The pool is TWO tiers, and the split is the whole point. One shared free list behind one lock made
+// spawning serialise on it: a spawn takes a block and a completion gives one back, so at fourteen workers
+// that single lock's cache line was the most contended thing in the runtime -- far more than the lock's own
+// instructions (an atomic on a line thirteen threads are hammering measures ~127ns against ~2.5ns
+// uncontended). So each worker keeps a private STASH it alone touches, and trades with the shared pool
+// `STASH_BATCH` blocks at a time, amortising the lock over sixteen tasks. Measured: spawning from inside
+// coroutines went from 3041ns to 372ns per task at fourteen workers.
 
 fn pool_take(s: *mut Scheduler) *mut Coroutine {
     if atomic::load_i32(&mut unsafe s.free_len, 1) <= 0 {
@@ -784,11 +801,114 @@ fn pool_drain(s: *mut Scheduler) {
     unsafe s.free_len = 0;
 }
 
-fn free_coroutine(s: *mut Scheduler, co: *mut Coroutine) {
-    if pool_put(s, co) {
+// Take up to `n` blocks off the shared pool as one chain, for one lock acquisition. `got` reports how many.
+fn pool_take_chain(s: *mut Scheduler, n: i32, got: &mut i32) *mut Coroutine {
+    *got = 0;
+    if atomic::load_i32(&mut unsafe s.free_len, 1) <= 0 {
+        return null;
+    }
+    unsafe sc_runtime::sc_rt_spin_lock(&mut s.free_spin);
+    let mut head: *mut Coroutine = null;
+    let mut k: i32 = 0;
+    while k < n && unsafe s.free_head != null {
+        let co = unsafe s.free_head;
+        unsafe s.free_head = unsafe co.next;
+        unsafe co.next = head;
+        head = co;
+        k = k + 1;
+    }
+    let _ = atomic::sub_i32(&mut unsafe s.free_len, k, 0);
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut s.free_spin);
+    *got = k;
+    return head;
+}
+
+// Hand a whole chain back in one lock acquisition. Whatever the pool has no room for is really freed, and
+// deliberately outside the lock: a munmap is far too slow to hold a contended spinlock across.
+fn pool_put_chain(s: *mut Scheduler, head: *mut Coroutine) {
+    if head == null {
         return;
     }
-    release_block(co);
+    let mut co = head;
+    unsafe sc_runtime::sc_rt_spin_lock(&mut s.free_spin);
+    let mut k: i32 = 0;
+    while co != null && unsafe s.free_len + k < POOL_MAX {
+        let nxt = unsafe co.next;
+        unsafe co.next = unsafe s.free_head;
+        unsafe s.free_head = co;
+        k = k + 1;
+        co = nxt;
+    }
+    let _ = atomic::add_i32(&mut unsafe s.free_len, k, 0);
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut s.free_spin);
+    while co != null {
+        let nxt = unsafe co.next;
+        release_block(co);
+        co = nxt;
+    }
+}
+
+// This thread's worker, or null off the pool. The stash is owner-only, so everything below needs this first.
+fn my_worker(s: *mut Scheduler) *mut Worker {
+    let wi = unsafe sc_runtime::sc_rt_widx_get();
+    if wi < 0 || wi as usize >= unsafe s.nw {
+        return null;
+    }
+    return unsafe (s.deques + wi as usize);
+}
+
+// A recycled block, from this worker's stash if it has one. Null when nothing is cached anywhere and the
+// caller has to build one.
+fn take_block(s: *mut Scheduler) *mut Coroutine {
+    let w = my_worker(s);
+    if w == null {
+        return pool_take(s); // an off-pool submitter has no stash of its own
+    }
+    let co = unsafe w.bhead;
+    if co != null {
+        unsafe w.bhead = unsafe co.next;
+        unsafe w.blen = unsafe w.blen - 1;
+        unsafe co.next = null;
+        return co;
+    }
+    // Empty: refill the stash and keep the head, so the next STASH_BATCH spawns take no lock at all.
+    let mut got: i32 = 0;
+    let chain = pool_take_chain(s, STASH_BATCH, &mut got);
+    if chain == null {
+        return null;
+    }
+    unsafe w.bhead = unsafe chain.next;
+    unsafe w.blen = got - 1;
+    unsafe chain.next = null;
+    return chain;
+}
+
+// Give a finished block back: to this worker's stash if there is room, else hand the whole stash on at once.
+fn free_coroutine(s: *mut Scheduler, co: *mut Coroutine) {
+    let w = my_worker(s);
+    if w == null {
+        if !pool_put(s, co) {
+            release_block(co);
+        }
+        return;
+    }
+    if unsafe w.blen >= STASH_MAX {
+        let full = unsafe w.bhead;
+        unsafe w.bhead = null;
+        unsafe w.blen = 0;
+        pool_put_chain(s, full);
+    }
+    unsafe co.next = unsafe w.bhead;
+    unsafe w.bhead = co;
+    unsafe w.blen = unsafe w.blen + 1;
+}
+
+// A worker's stash dies with it: hand it back before the thread leaves, or `shutdown` would never see it.
+fn stash_flush(s: *mut Scheduler, w: *mut Worker) {
+    let head = unsafe w.bhead;
+    unsafe w.bhead = null;
+    unsafe w.blen = 0;
+    pool_put_chain(s, head);
 }
 
 // The C-ABI worker: run/resume coroutines, honouring each one's park (unlock) or yield (requeue) hand-off
@@ -863,6 +983,7 @@ fn worker_main(arg: *mut void) *mut void {
             commit(arg);
         }
     }
+    stash_flush(s, w); // before widx goes: `free_coroutine` keys off it
     unsafe sc_runtime::sc_rt_ctx_free(sched_ctx);
     unsafe sc_runtime::sc_rt_widx_set(-1);
     return null;
@@ -927,7 +1048,9 @@ fn build_scheduler() *mut Scheduler {
             yhead: null,
             ytail: null,
             ylen: 0,
-            pad: Array::<u64, 6>::new(),
+            bhead: null,
+            blen: 0,
+            pad: Array::<u64, 4>::new(),
         };
     }
     // Before any worker exists, so every safepoint's read of the hook happens-after this write.
@@ -974,7 +1097,7 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
     // A recycled block brings its stack and context with it; only a cold spawn pays for an mmap. Its park
     // generation comes with it too, and deliberately does not restart: a token left over from the block's
     // previous life must stay behind the current one, or it could claim the task now using the block.
-    let mut co = pool_take(s);
+    let mut co = take_block(s);
     let mut stk: *mut void = null;
     let mut ctx: *mut void = null;
     let mut pst: u32 = 0;
