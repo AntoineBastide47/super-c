@@ -43,6 +43,9 @@ pub enum AttrKind {
     ATTR_PLATFORM,
     ATTR_FMT_SKIP,
     ATTR_BLOCKING,
+    // Appended, never inserted: attribute kinds are mirrored by position elsewhere, so adding one in
+    // the middle silently renumbers the rest.
+    ATTR_BENCH,
 }
 
 // A decl's lifetime generic params (`fn f<'a>`, `struct S<'a>`). Held in an Ast SIDE TABLE rather

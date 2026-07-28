@@ -3,8 +3,9 @@
 // transitively imports (the entire lexer/ast/parser/resolver/typechecker/consteval/codegen/loader stack,
 // plus the std prelude + ffi bindings it uses). Each iteration runs the real transpile pipeline in process
 // -- parse (lex+parse every module, via the loader) -> resolve-all -> typecheck-all (+ deferred asserts)
-// -> propagate instances -> codegen-all (emit every module's header + .c to a null sink) -- and times each
-// phase with CPU time. It mirrors main.spc's run_package (minus file I/O / the C link step). The benchmark
+// -> propagate instances -> codegen-all (emit every module's header + .c to a real file) -- and times each
+// phase with CPU time. It mirrors main.spc's run_package (minus the C link step). Codegen writes through a
+// FILE exactly as a build does, so what is reported is what codegen costs. The benchmark
 // binary IS the self-hosted compiler, so `make bench` measures the compiler transpiling its own source.
 import module::loader as loader;
 import lexer::lexer as lexer;
@@ -15,6 +16,7 @@ import codegen::codegen as cg;
 import consteval::consteval as ce;
 import ast::ast as *;
 import bench::bench_shim as shim;
+import std::testing::bench as bench;
 import driver_shim as dshim;
 import math;
 import stdio;
@@ -34,35 +36,18 @@ const STD_DIR: str = "std";
 const WARMUP: i32 = 1;
 const ITERS: i32 = 100;
 
-// open_memstream state: the buf/size pointers handed to sc_memstream_open must stay at stable
-// addresses for the stream's whole lifetime (flush/close write back through them) -- statics, not
-// locals in a struct that would move.
-static mut MEM_BUF: *mut char = null;
-static mut MEM_SIZE: usize = 0;
-
-// Codegen sink, two lanes: in-memory (pure lowering, zero I/O) vs a real file (keeps FILE writes in
-// the measurement). run() alternates lanes so codegen is reported with and without I/O. Windows has
-// no open_memstream, so only the file lane exists there.
+// The codegen sink: a real file, on every platform. Codegen writes through a FILE, and this benchmark
+// exists to report what codegen costs -- so the sink is the one codegen actually uses in a build rather
+// than an in-memory stream that would measure lowering with the writes taken out. POSIX gets an anonymous
+// auto-removed stream; mingw's tmpfile() lands in the drive root and fails unprivileged, so Windows names
+// a file under %TEMP% and removes it itself.
 @platform(!windows)
-fn has_mem_sink() bool {
-    return true;
-}
-@platform(!windows)
-fn sink_open(use_mem: bool) *mut stdio::FILE {
-    if use_mem {
-        return (unsafe shim::sc_memstream_open(&mut MEM_BUF, &mut MEM_SIZE)) as *mut stdio::FILE;
-    }
+fn sink_open() *mut stdio::FILE {
     return unsafe tmpfile();
 }
+
 @platform(!windows)
-fn sink_close(f: *mut stdio::FILE, use_mem: bool) usize {
-    if use_mem {
-        unsafe stdio::fclose(f); // final flush updates MEM_SIZE
-        let sz = MEM_SIZE;
-        unsafe stdlib::free(MEM_BUF);
-        MEM_BUF = null;
-        return sz;
-    }
+fn sink_close(f: *mut stdio::FILE) usize {
     unsafe stdio::fflush(f);
     let t = unsafe stdio::ftell(f);
     unsafe stdio::fclose(f);
@@ -73,10 +58,6 @@ fn sink_close(f: *mut stdio::FILE, use_mem: bool) usize {
 }
 
 @platform(windows)
-fn has_mem_sink() bool {
-    return false;
-}
-@platform(windows)
 fn sink_path(buf: *mut char, cap: usize) *const char {
     let mut dir = stdlib::getenv("TEMP");
     if dir == null {
@@ -85,14 +66,16 @@ fn sink_path(buf: *mut char, cap: usize) *const char {
     unsafe stdio::snprintf(buf, cap, "%s\\sc_bench_sink.tmp".ptr() as *const char, dir);
     return buf;
 }
+
 @platform(windows)
-fn sink_open(_use_mem: bool) *mut stdio::FILE {
+fn sink_open() *mut stdio::FILE {
     let mut buf = Array::<char, 4096>::new();
     let p = sink_path(&mut buf[0], 4096);
     return stdio::fopen(str::from_raw(p as *const u8, unsafe cstring::strlen(p)), "wb");
 }
+
 @platform(windows)
-fn sink_close(f: *mut stdio::FILE, _use_mem: bool) usize {
+fn sink_close(f: *mut stdio::FILE) usize {
     unsafe stdio::fflush(f);
     let t = unsafe stdio::ftell(f);
     unsafe stdio::fclose(f);
@@ -201,8 +184,8 @@ fn borrowck_one(p: &mut loader::Package, i: usize) {
     p.modules[i].ast = back;
 }
 
-// One full transpile of the compiler, timed per phase. `use_mem` picks the codegen sink lane.
-fn transpile_once(use_mem: bool) Timing {
+// One full transpile of the compiler, timed per phase.
+fn transpile_once() Timing {
     let mut r = Timing {
         lex: 0.0,
         parse: 0.0,
@@ -308,7 +291,7 @@ fn transpile_once(use_mem: bool) Timing {
     let h3p = unsafe shim::sc_alloc_count();
     let y3p = unsafe shim::sc_alloc_bytes();
 
-    let f = sink_open(use_mem);
+    let f = sink_open();
     i = 0;
     while i < n {
         let ma = (&mut p.modules[i].ast) as *mut Ast;
@@ -327,7 +310,7 @@ fn transpile_once(use_mem: bool) Timing {
         p.cg_scratch = c.take_buf();
         i = i + 1;
     }
-    r.out_bytes = sink_close(f, use_mem);
+    r.out_bytes = sink_close(f);
     let a4 = time::cpu_seconds();
     let c4 = unsafe shim::sc_cpu_cycles();
     let h4 = unsafe shim::sc_alloc_count();
@@ -395,62 +378,21 @@ fn transpile_once(use_mem: bool) Timing {
     return r;
 }
 
-fn sort_f64(v: &mut Vector<f64>) {
-    let mut i: usize = 1;
-    while i < v.len() {
-        let x = v[i];
-        let mut j = i;
-        while j > 0 && v[j - 1] > x {
-            v[j] = v[j - 1];
-            j = j - 1;
-        }
-        v[j] = x;
-        i = i + 1;
+// This one keeps its own report: a per-phase table (lex/parse/resolve/typecheck/codegen with MB/s and
+// allocations) is the point of it, and no generic timing loop can produce that -- so it opts out of the
+// runner's one-line summary, which would only restate a single round's wall time. It still runs under the
+// Bencher, so it appears in the same listing as every other benchmark.
+@bench(log_results = false)
+pub fn self_transpile(b: &mut bench::Bencher) {
+    b.set_rounds(1);
+    b.set_warmup(0);
+    while b.running() {
+        let _ = run_report();
     }
 }
 
-// Sorted-vector distribution line: min/median/mean/p95/stddev in ms. No-op on an empty lane
-// (the mem lane on Windows).
-fn dist_line(name: str, v: &mut Vector<f64>) {
-    let nn = v.len();
-    if nn == 0 {
-        return;
-    }
-    sort_f64(v);
-    let mut med = v[nn / 2];
-    if nn % 2 == 0 {
-        med = (v[nn / 2 - 1] + v[nn / 2]) / 2.0;
-    }
-    let p95 = v[(nn * 95 + 99) / 100 - 1];
-    let mut sum: f64 = 0.0;
-    let mut q: usize = 0;
-    while q < nn {
-        sum = sum + v[q];
-        q = q + 1;
-    }
-    let mean = sum / nn as f64;
-    let mut var: f64 = 0.0;
-    q = 0;
-    while q < nn {
-        let d = v[q] - mean;
-        var = var + d * d;
-        q = q + 1;
-    }
-    let sd = unsafe math::sqrt(var / nn as f64);
-    unsafe stdio::printf(
-        "  %-18s min %.2f | median %.2f | mean %.2f | p95 %.2f | stddev %.2f ms   (%zu runs)\n".ptr() as *const char,
-        name.ptr() as *const char,
-        v[0] * 1000.0,
-        med * 1000.0,
-        mean * 1000.0,
-        p95 * 1000.0,
-        sd * 1000.0,
-        nn,
-    );
-}
-
-pub fn run() i32 {
-    let warm = transpile_once(has_mem_sink()); // warm caches + report corpus size
+fn run_report() i32 {
+    let warm = transpile_once(); // warm caches + report corpus size
     if warm.modules == 0 || warm.out_bytes == 0 {
         unsafe stdio::fprintf(
             stdio::stderr(),
@@ -485,7 +427,6 @@ pub fn run() i32 {
     let mut st: f64 = 0.0;
     let mut sl: f64 = 0.0;
     let mut sg: f64 = 0.0;
-    let mut sc_m: f64 = 0.0;
     let mut sc_f: f64 = 0.0;
     let mut sch: f64 = 0.0;
     let mut scs: f64 = 0.0;
@@ -494,14 +435,12 @@ pub fn run() i32 {
     let mut scy_r: i64 = 0;
     let mut scy_t: i64 = 0;
     let mut scy_g: i64 = 0;
-    let mut scy_cm: i64 = 0;
     let mut scy_cf: i64 = 0;
     let mut sal_l: i64 = 0;
     let mut sal_p: i64 = 0;
     let mut sal_r: i64 = 0;
     let mut sal_t: i64 = 0;
     let mut sal_g: i64 = 0;
-    let mut sal_cm: i64 = 0;
     let mut sal_cf: i64 = 0;
     let mut sb: f64 = 0.0;
     let mut scy_b: i64 = 0;
@@ -512,15 +451,12 @@ pub fn run() i32 {
     let mut sby_t: i64 = 0;
     let mut sby_b: i64 = 0;
     let mut sby_g: i64 = 0;
-    let mut sby_cm: i64 = 0;
     let mut sby_cf: i64 = 0;
     let mut sheap: i64 = 0;
-    let mut totals_m = Vector::<f64>::with_capacity(ITERS as usize);
-    let mut totals_f = Vector::<f64>::with_capacity(ITERS as usize);
+    let mut totals = Vector::<f64>::with_capacity(ITERS as usize);
     let mut k: i32 = 0;
     while k < ITERS {
-        let use_mem = has_mem_sink() && k % 2 == 0;
-        let t = transpile_once(use_mem);
+        let t = transpile_once();
         sp = sp + t.parse;
         sr = sr + t.resolve;
         st = st + t.typecheck;
@@ -547,38 +483,17 @@ pub fn run() i32 {
         sby_g = sby_g + t.byt_propagate;
         sheap = sheap + t.heap_bytes;
         let total = t.parse + t.resolve + t.typecheck + t.borrowck + t.propagate + t.codegen;
-        if use_mem {
-            sc_m = sc_m + t.codegen;
-            scy_cm = scy_cm + t.cyc_codegen;
-            sal_cm = sal_cm + t.alc_codegen;
-            sby_cm = sby_cm + t.byt_codegen;
-            totals_m.push(total);
-        } else {
-            sc_f = sc_f + t.codegen;
-            scy_cf = scy_cf + t.cyc_codegen;
-            sal_cf = sal_cf + t.alc_codegen;
-            sby_cf = sby_cf + t.byt_codegen;
-            totals_f.push(total);
-        }
-        // header/source split tracks the primary lane (mem when it exists, file otherwise)
-        if use_mem || !has_mem_sink() {
-            sch = sch + t.cg_header;
-            scs = scs + t.cg_source;
-        }
+        sc_f = sc_f + t.codegen;
+        scy_cf = scy_cf + t.cyc_codegen;
+        sal_cf = sal_cf + t.alc_codegen;
+        sby_cf = sby_cf + t.byt_codegen;
+        totals.push(total);
+        sch = sch + t.cg_header;
+        scs = scs + t.cg_source;
         k = k + 1;
     }
     let fi = ITERS as f64;
-    let cm = totals_m.len();
-    let cf = totals_f.len();
-    // Primary codegen figure = the pure-lowering (mem) lane when it exists; the file lane otherwise.
-    let mut acf: f64 = 0.0;
-    if cf > 0 {
-        acf = sc_f / cf as f64 * 1000.0;
-    }
-    let mut ac = acf;
-    if cm > 0 {
-        ac = sc_m / cm as f64 * 1000.0;
-    }
+    let ac = sc_f / fi * 1000.0;
     let ap = sp / fi * 1000.0;
     let ar = sr / fi * 1000.0;
     let at = st / fi * 1000.0;
@@ -586,16 +501,11 @@ pub fn run() i32 {
     let al = sl / fi * 1000.0;
     let ag = sg / fi * 1000.0;
     let avg_total = ap + ar + at + ab + ag + ac;
-    // primary-lane count for the header/source split accumulators
-    let mut cp = cf;
-    if cm > 0 {
-        cp = cm;
-    }
-    let ach = sch / cp as f64 * 1000.0;
-    let acs = scs / cp as f64 * 1000.0;
+    let ach = sch / fi * 1000.0;
+    let acs = scs / fi * 1000.0;
     let srcf = warm.src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
     let linesf = warm.src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
-    // Per-phase CPU cycles at the same boundaries as the ms timings (codegen = primary lane);
+    // Per-phase CPU cycles at the same boundaries as the ms timings;
     // all-zero when this box has no cycle source. Effective clock: Mcyc/ms == GHz (counted only
     // while on-core, so P/E scheduling shows up here).
     let ml = scy_l as f64 / fi / 1e6;
@@ -604,41 +514,26 @@ pub fn run() i32 {
     let mt = scy_t as f64 / fi / 1e6;
     let mb = scy_b as f64 / fi / 1e6;
     let mg = scy_g as f64 / fi / 1e6;
-    let mut mc: f64 = 0.0;
-    if cm > 0 {
-        mc = scy_cm as f64 / cm as f64 / 1e6;
-    } else if cf > 0 {
-        mc = scy_cf as f64 / cf as f64 / 1e6;
-    }
+    let mc = scy_cf as f64 / fi / 1e6;
     let mtot = mp + mr + mt + mb + mg + mc;
     // Heap allocations (malloc/calloc/realloc calls by the compiler's own code) per iteration, in
-    // thousands; codegen = primary lane. All-zero when the shim has no counting on this platform.
+    // thousands. All-zero when the shim has no counting on this platform.
     let kal = sal_l as f64 / fi / 1e3;
     let kap = sal_p as f64 / fi / 1e3;
     let kar = sal_r as f64 / fi / 1e3;
     let kat = sal_t as f64 / fi / 1e3;
     let kab = sal_b as f64 / fi / 1e3;
     let kag = sal_g as f64 / fi / 1e3;
-    let mut kac: f64 = 0.0;
-    if cm > 0 {
-        kac = sal_cm as f64 / cm as f64 / 1e3;
-    } else if cf > 0 {
-        kac = sal_cf as f64 / cf as f64 / 1e3;
-    }
+    let kac = sal_cf as f64 / fi / 1e3;
     let katot = kap + kar + kat + kab + kag + kac;
-    // Bytes requested from the allocator per phase, per iteration, in MiB (codegen = primary lane).
+    // Bytes requested from the allocator per phase, per iteration, in MiB.
     let mbl = sby_l as f64 / fi / 1048576.0;
     let mbp = sby_p as f64 / fi / 1048576.0;
     let mbr = sby_r as f64 / fi / 1048576.0;
     let mbt = sby_t as f64 / fi / 1048576.0;
     let mbb = sby_b as f64 / fi / 1048576.0;
     let mbg = sby_g as f64 / fi / 1048576.0;
-    let mut mbc: f64 = 0.0;
-    if cm > 0 {
-        mbc = sby_cm as f64 / cm as f64 / 1048576.0;
-    } else if cf > 0 {
-        mbc = sby_cf as f64 / cf as f64 / 1048576.0;
-    }
+    let mbc = sby_cf as f64 / fi / 1048576.0;
     let mbtot = mbp + mbr + mbt + mbb + mbg + mbc;
 
     unsafe stdio::printf(
@@ -740,47 +635,19 @@ pub fn run() i32 {
         mtot / avg_total,
     );
 
-    if cm > 0 && cf > 0 {
-        unsafe stdio::printf(
-            "  codegen sink: in-memory %.2f ms vs file %.2f ms  (file I/O overhead %+.1f%%)\n".ptr() as *const char,
-            ac,
-            acf,
-            (acf - ac) / ac * 100.0,
-        );
+    unsafe stdio::printf("  codegen split: headers %.2f ms + sources %.2f ms\n".ptr() as *const char, ach, acs);
+    // The best end-to-end run, scanned rather than indexed: nothing sorts `totals`.
+    let mut best = totals[0];
+    for i in 1..totals.len() {
+        if totals[i] < best {
+            best = totals[i];
+        }
     }
-    unsafe stdio::printf(
-        "  codegen split: headers %.2f ms + sources %.2f ms  (primary lane)\n".ptr() as *const char,
-        ach,
-        acs,
-    );
-    dist_line("total (mem sink)", &mut totals_m);
-    dist_line("total (file sink)", &mut totals_f);
-    // dist_line sorts its lane, so each vector's front is now that lane's minimum.
-    let mut best: f64 = 0.0;
-    if cm > 0 {
-        best = totals_m[0];
-    } else {
-        best = totals_f[0];
-    }
-    let tokf = warm.tokens as f64;
-    unsafe stdio::printf(
-        "  token throughput: lex %.1f Mtok/s, parse %.1f Mtok/s\n".ptr() as *const char,
-        tokf / al / 1000.0,
-        tokf / ap / 1000.0,
-    );
     unsafe stdio::printf(
         "  codegen emits %.1f KiB C at %.1f MB/s;  best end-to-end %.2f MB/s source\n".ptr() as *const char,
         warm.out_bytes as f64 / 1024.0,
         warm.out_bytes as f64 / ac / 1000.0,
         srcf / best / 1e6,
-    );
-    unsafe stdio::printf(
-        "%s".ptr() as *const char,
-        "  * per-phase MB/s & kloc/s are that stage ALONE (whole corpus / its own time). Phases run\n".ptr() as *const char,
-    );
-    unsafe stdio::printf(
-        "%s".ptr() as *const char,
-        "    in series, so total time = sum of phases and total rate is below EVERY stage's rate.\n".ptr() as *const char,
     );
     let rss = unsafe shim::sc_peak_rss();
     unsafe stdio::printf(

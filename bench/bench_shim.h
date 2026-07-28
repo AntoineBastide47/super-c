@@ -11,6 +11,5 @@ long long sc_cpu_cycles(void);                     /* cumulative process CPU cyc
 long long sc_alloc_count(void);                    /* cumulative malloc/calloc/realloc calls by this binary's code */
 long long sc_alloc_bytes(void);                    /* cumulative bytes requested by those calls */
 int sc_cpu_model(char *buf, size_t cap);           /* nul-terminated CPU brand string; 0 ok, -1 unknown */
-void *sc_memstream_open(char **buf, size_t *size); /* open_memstream(3) as FILE*; NULL on Windows */
 
 #endif

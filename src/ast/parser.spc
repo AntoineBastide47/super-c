@@ -3609,6 +3609,32 @@ extend Parser {
             }
             return true;
         }
+        if syntax.parts == 1 && self.text_is(ns, "bench") {
+            // `arg` is 1 when the benchmark reports for itself: `@bench(log_results = false)` suppresses the
+            // line the runner would otherwise print, for a benchmark whose output IS its own table.
+            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_BENCH as u8, arg: 0, str_span: Span::empty() };
+            if syntax.has_args {
+                let named = argc == 3 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && self.text_is(
+                    self.attr_arg(&syntax, 0),
+                    "log_results",
+                ) && self.attr_arg(&syntax, 1).kind() == TokenType::Equal;
+                let val = self.attr_arg(&syntax, 2).kind();
+                if named && (val == TokenType::True || val == TokenType::False) {
+                    out.arg = if val == TokenType::False {
+                        1;
+                    } else {
+                        0;
+                    };
+                } else {
+                    self.errors.emit(
+                        ns.start(),
+                        ns.len(),
+                        format("attribute '@bench' accepts only '(log_results = true)' or '(log_results = false)'"),
+                    );
+                }
+            }
+            return true;
+        }
         let test_kind = if self.text_is(ns, "test") {
             AttrKind::ATTR_TEST as i32;
         } else if self.text_is(ns, "test_init") {
@@ -3805,6 +3831,13 @@ extend Parser {
                 sp = d.span;
                 valid_test = d.kind == NodeKind::NODE_FUNCTION && d.as_data.function.generics.len == 0;
                 generic_aggregate = (d.kind == NodeKind::NODE_STRUCT || d.kind == NodeKind::NODE_ENUM) && d.as_data.aggregate.generics.len != 0;
+            }
+            if attr.kind == AttrKind::ATTR_BENCH as u8 && !valid_test {
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("'@bench' may only be applied to a non-generic function"),
+                );
             }
             if (attr.kind == AttrKind::ATTR_TEST as u8 || attr.kind == AttrKind::ATTR_TEST_INIT as u8 || attr.kind == AttrKind::ATTR_TEST_FREE as u8) && !valid_test {
                 self.errors.emit(

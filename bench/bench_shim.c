@@ -39,11 +39,6 @@ int sc_cpu_model(char *buf, size_t cap) {
   return 0;
 }
 
-void *sc_memstream_open(char **buf, size_t *size) {
-  (void)buf;
-  (void)size;
-  return NULL; /* no open_memstream on Windows; callers are @platform-gated away */
-}
 
 /* No malloc shadowing on Windows: there is no safe "real malloc" to forward to across CRTs. */
 long long sc_alloc_count(void) { return 0; }
@@ -185,8 +180,5 @@ int sc_cpu_model(char *buf, size_t cap) {
 }
 #endif
 
-void *sc_memstream_open(char **buf, size_t *size) {
-  return open_memstream(buf, size);
-}
 
 #endif

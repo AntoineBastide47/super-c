@@ -23,6 +23,7 @@ import std::parallel::sync as sync;
 import std::parallel::blocking as blocking;
 import std::parallel::platform as platform;
 import bench::bench_shim as shim;
+import std::testing::bench as bench;
 
 import fcntl;
 import unistd;
@@ -30,12 +31,6 @@ import unistd;
 const TASKS: i64 = 1000; // concurrent tasks per iteration, as in the comparison benchmark
 const ITERS: i32 = 20; // iterations per lane (the comparison runs 1000; 20 keeps `bench` interactive)
 const YIELDS: i64 = 10; // how many times a compute task hands the worker back
-
-/// One lane's timing sample, in seconds.
-pub struct Sample {
-    pub secs: f64,
-    pub allocs: i64,
-}
 
 // A compute task: touch some memory and yield, so the scheduler actually has to move it around rather than
 // running it to completion the moment it starts.
@@ -75,18 +70,6 @@ fn io_task() i64 {
     );
 }
 
-// The workload is the comparison set's, and /dev/urandom is POSIX: there is nothing on Windows to hold the
-// same number against, so the lane is skipped rather than measured against a different thing.
-@platform(macos | linux)
-fn io_available() bool {
-    return true;
-}
-
-@platform(windows)
-fn io_available() bool {
-    return false;
-}
-
 // One iteration of a lane: spawn TASKS tasks, wait for all of them. `io_share` out of every 4 tasks do I/O,
 // so 0 = no-io, 4 = io-only, 2 = mixed.
 fn one_iteration(io_share: i64) f64 {
@@ -111,96 +94,42 @@ fn one_iteration(io_share: i64) f64 {
     return dt;
 }
 
-fn run_lane(name: str, io_share: i64, out: &mut Vector<f64>) {
+// One lane, driven by the Bencher: it owns the warm-up, the repetition and the statistics, so a lane here
+// is just "what one round does" plus the two facts the timings alone would not carry -- how many tasks a
+// round runs, and how many allocations each one cost.
+fn run_lane(b: &mut bench::Bencher, io_share: i64) {
+    b.each(TASKS);
+    b.unit("task");
+    b.set_rounds(ITERS);
     let a0 = unsafe shim::sc_alloc_count();
-    let _ = one_iteration(io_share); // warm: the pool starts, the first stacks are faulted in
-    for _i in 0..ITERS {
-        out.push(one_iteration(io_share));
+    let mut rounds: i64 = 0;
+    while b.running() {
+        let _ = one_iteration(io_share);
+        rounds = rounds + 1;
     }
-    let allocs = (unsafe shim::sc_alloc_count() - a0) / ((ITERS as i64 + 1) * TASKS);
-    dist_line(name, out, allocs);
+    let allocs = (unsafe shim::sc_alloc_count() - a0) / (rounds * TASKS);
+    let mut note = String::new();
+    note.push_i64(allocs);
+    note.push_str(" alloc/task");
+    b.note(note.as_str());
+    note.free();
 }
 
-fn sort_f64(v: &mut Vector<f64>) {
-    let n = v.len();
-    let mut i: usize = 1;
-    while i < n {
-        let x = v[i];
-        let mut j = i;
-        while j > 0 && v[j - 1] > x {
-            v[j] = v[j - 1];
-            j = j - 1;
-        }
-        v[j] = x;
-        i = i + 1;
-    }
+@bench
+pub fn no_io(b: &mut bench::Bencher) {
+    run_lane(b, 0);
 }
 
-// min/median/p95/stddev in ms, plus per-task cost and allocations per task -- the two numbers a task runtime
-// is actually judged on.
-fn dist_line(name: str, v: &mut Vector<f64>, allocs: i64) {
-    let nn = v.len();
-    if nn == 0 {
-        return;
-    }
-    sort_f64(v);
-    let mut med = v[nn / 2];
-    if nn % 2 == 0 {
-        med = (v[nn / 2 - 1] + v[nn / 2]) / 2.0;
-    }
-    let p95 = v[(nn * 95 + 99) / 100 - 1];
-    let mut sum: f64 = 0.0;
-    for q in 0..nn {
-        sum = sum + v[q];
-    }
-    let mean = sum / nn as f64;
-    let mut var: f64 = 0.0;
-    for q in 0..nn {
-        let d = v[q] - mean;
-        var = var + d * d;
-    }
-    let sd = unsafe math::sqrt(var / nn as f64);
-    unsafe stdio::printf(
-        "  %-10s min %7.2f | median %7.2f | p95 %7.2f | sd %6.2f ms  |  %7.0f ns/task  | %lld alloc/task\n".ptr() as *const char,
-        name.ptr() as *const char,
-        v[0] * 1000.0,
-        med * 1000.0,
-        p95 * 1000.0,
-        sd * 1000.0,
-        med * 1000000000.0 / TASKS as f64,
-        allocs,
-    );
+// The workload is the comparison set's, and /dev/urandom is POSIX: there is nothing on Windows to hold the
+// same number against, so these two lanes measure nothing there rather than measuring a different thing.
+@platform(macos | linux)
+@bench
+pub fn io_only(b: &mut bench::Bencher) {
+    run_lane(b, 4);
 }
 
-pub fn run() i32 {
-    let mut cpu = Array::<char, 256>::new();
-    if unsafe shim::sc_cpu_model(&mut cpu[0], 256) != 0 {
-        unsafe stdio::snprintf(&mut cpu[0], 256, "%s".ptr() as *const char, "unknown CPU".ptr() as *const char);
-    }
-    unsafe stdio::printf(
-        "\nconcurrency: %lld tasks x %d iterations, %zu workers;  %s\n".ptr() as *const char,
-        TASKS,
-        ITERS,
-        platform::ncpu(),
-        (&cpu[0]) as *const char,
-    );
-
-    let mut no_io = Vector::<f64>::new();
-    run_lane("no-io", 0, &mut no_io);
-    no_io.free();
-
-    if io_available() {
-        let mut io_only = Vector::<f64>::new();
-        run_lane("io-only", 4, &mut io_only);
-        io_only.free();
-        let mut mixed = Vector::<f64>::new();
-        run_lane("mixed", 2, &mut mixed);
-        mixed.free();
-    } else {
-        unsafe stdio::printf("  io-only    skipped (the comparison workload is /dev/urandom)\n".ptr() as *const char);
-    }
-
-    unsafe stdio::printf("  peak RSS %.1f MiB\n".ptr() as *const char, (unsafe shim::sc_peak_rss()) as f64 / 1048576.0);
-    rt::shutdown();
-    return 0;
+@platform(macos | linux)
+@bench
+pub fn mixed(b: &mut bench::Bencher) {
+    run_lane(b, 2);
 }
