@@ -37,13 +37,14 @@ fn run_file(
     target: i32,
     bootstrap_tags: bool,
     lint: bool,
+    cflags: str,
 ) i32 {
     let mut p = loader::package_load(path, std_dir, bootstrap_tags, target);
     let mut rc: i32 = 1;
     if p.ok {
         let mut ceval = ce::ConstEval::new(&mut p, ce_steps, ce_mem);
         p.ceval = &mut ceval;
-        rc = run_package(&mut p, topts, out_bin, target, lint);
+        rc = run_package(&mut p, topts, out_bin, target, lint, cflags);
     }
     return rc;
 }
@@ -1039,7 +1040,10 @@ OPTIONS:
         }
         return rc;
     }
-    let rc = run_file(file, std_dir, ce_steps, ce_mem, &topts, out_bin, target, bootstrap_tags, lint);
+    // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins -- without
+    // this a `super-c release foo.spc` linked with no -O at all while reporting success.
+    let pflags = bsys::profile_flags(profile, target);
+    let rc = run_file(file, std_dir, ce_steps, ce_mem, &topts, out_bin, target, bootstrap_tags, lint, pflags.as_str());
     if std_dir != null {
         unsafe stdlib::free(std_dir);
     }

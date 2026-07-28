@@ -31,6 +31,42 @@ static _Thread_local void *sc_rt_tls_slot = 0;
 __attribute__((noinline)) void sc_rt_tls_set(void *p) { sc_rt_tls_slot = p; }
 __attribute__((noinline)) void *sc_rt_tls_get(void) { return sc_rt_tls_slot; }
 
+/* ---- spin hint --------------------------------------------------------------------------------------
+   What a worker executes between look-again attempts before it gives up and parks on the condvar. The
+   instruction tells the core that this is a spin loop: on x86 it stops the pipeline speculating past the
+   loop (and so avoids the memory-order machine clear when the value finally changes), on arm it yields the
+   SMT slot. Neither is a scheduler yield -- the whole point is to still be running when work arrives. */
+void sc_rt_cpu_relax(void) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+  __asm__ __volatile__("pause" ::: "memory");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  __asm__ __volatile__("isb" ::: "memory"); /* what every arm64 spin loop uses: `yield` is a no-op here */
+#else
+  __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+/* ---- spinlock ---------------------------------------------------------------------------------------
+   For critical sections of a few dozen instructions that every thread in the pool crosses. A pthread mutex
+   is the wrong tool there: on macOS it has no adaptive spin, so a contended lock/unlock pair is two syscalls
+   -- measured at over 2us against ~100ns for a cache-line handoff, and it was most of what submitting a task
+   cost. The backoff to a scheduler yield is what keeps it honest if a holder is ever descheduled. */
+void sc_rt_spin_lock(int32_t *w) {
+  for (;;) {
+    if (!__atomic_exchange_n(w, 1, __ATOMIC_ACQUIRE)) return;
+    /* Read-only until it looks free again: hammering the exchange would bounce the line between spinners. */
+    for (int n = 0; __atomic_load_n(w, __ATOMIC_RELAXED); n++) {
+      if (n == 4096) {
+        n = 0;
+        sc_rt_thread_yield();
+      }
+      sc_rt_cpu_relax();
+    }
+  }
+}
+
+void sc_rt_spin_unlock(int32_t *w) { __atomic_store_n(w, 0, __ATOMIC_RELEASE); }
+
 /* ---- current worker index: -1 on any thread that is not a pool worker ------------------------------ */
 static _Thread_local int32_t sc_rt_widx_slot = -1;
 __attribute__((noinline)) void sc_rt_widx_set(int32_t i) { sc_rt_widx_slot = i; }
@@ -59,6 +95,8 @@ void sc_rt_sleep_ns(int64_t ns) {
   if (ns <= 0) return;
   Sleep((DWORD)(ns / 1000000)); /* millisecond granularity is all Sleep offers */
 }
+
+void sc_rt_thread_yield(void) { SwitchToThread(); }
 
 /* WaitOnAddress-based parking (Win8+). It lives in the synchronization API set, not kernel32's import
    library, so the Windows build links -lsynchronization (see ffi/sc_runtime.spc). */
@@ -524,6 +562,8 @@ void sc_rt_sleep_ns(int64_t ns) {
   while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
   } /* resume the remaining time after a signal */
 }
+
+void sc_rt_thread_yield(void) { sched_yield(); }
 
 /* Parking lot: a fixed set of (mutex, cond) buckets keyed by address hash. Broadcasting on unpark wakes
    every waiter in the bucket; each re-checks its own word and re-parks if it was not the target. This is

@@ -951,7 +951,7 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
 /// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
 /// linked to that path and we return; otherwise it links `<gen_root>/__tests` and runs it as the test
 /// runner, forwarding `topts`' options.
-pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: str) i32 {
+pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: str, cflags: str) i32 {
     let mut cc = stdlib::getenv("CC");
     if cc == null || unsafe *cc == 0 as char {
         cc = "cc".ptr() as *const char;
@@ -967,7 +967,9 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
     };
     let mut cmd = String::new();
     cmd.push_str(str::from_cstr(cc));
-    cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L -o \"");
+    cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L");
+    cmd.push_str(cflags); // the requested profile, if any: a bare build passes none and compiles unoptimised
+    cmd.push_str(" -o \"");
     if out_bin.len() != 0 {
         cmd.push_str(out_bin);
     } else {

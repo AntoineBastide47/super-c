@@ -160,14 +160,18 @@ static inline __attribute__((unused)) int* __sc_errno_location(void){return &err
    happened in rather than just the process. Zero on a plain thread. */
 extern _Thread_local uint64_t __sc_task_id;
 void __sc_set_task_id(uint64_t __id);
+/* abort() does not flush, and stderr is only guaranteed unbuffered when it is a terminal -- captured into
+   a pipe it is block-buffered, and the diagnostic these print is exactly what is then lost. Flush first. */
 static _Noreturn __attribute__((unused)) void __sc_panic(const char *__m) {
   if (__sc_task_id) fprintf(stderr, "super-c: [task %llu] %s\n", (unsigned long long)__sc_task_id, __m);
   else fprintf(stderr, "super-c: %s\n", __m);
+  fflush(stderr);
   abort();
 }
 static _Noreturn __attribute__((unused)) void __sc_panic_str(const uint8_t *__p, size_t __n) {
   if (__sc_task_id) fprintf(stderr, "panic: [task %llu] %.*s\n", (unsigned long long)__sc_task_id, (int)__n, (const char *)__p);
   else fprintf(stderr, "panic: %.*s\n", (int)__n, (const char *)__p);
+  fflush(stderr);
   abort();
 }
 static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n) {
@@ -4355,7 +4359,7 @@ extend Codegen {
             if args.len == 2 {
                 self.emit_str(", (int)__scm.len, (const char *)__scm.ptr");
             }
-            self.emit_str("); abort(); } })");
+            self.emit_str("); fflush(stderr); abort(); } })");
             return true;
         }
         let a0 = unsafe aids[0 as usize];
@@ -4446,6 +4450,8 @@ extend Codegen {
         self.emit_str("fprintf(stderr, \"  at ");
         self.emit_pct_escaped(file as *const u8, unsafe cstring::strlen(file));
         self.buf.format_into(":{}\\n\");\n", line);
+        self.emit_indent();
+        self.emit_str("fflush(stderr);\n");
         self.emit_indent();
         self.emit_str("abort();\n");
         self.depth = self.depth - 1;
@@ -10212,7 +10218,17 @@ extend Codegen {
                     self.emit_ident_ref(id);
                     self.emit_str(")");
                 } else {
-                    self.emit_ident_ref(id);
+                    // A `const` is a compile-time value here, but it emits as a C `const` VARIABLE -- and C
+                    // does not accept one of those as an integer constant expression. So inside a constant
+                    // context (`static_assert`) the value has to go out as a literal instead of a name.
+                    // clang folds it regardless; gcc is right to refuse, which is what made a `static_assert`
+                    // mentioning a const build on macOS and fail on every gcc target.
+                    let folded = self.const_ctx && self.ceval() != null && self.emit_scalar_folded(
+                        self.ceval().eval(self.cur_module(), id),
+                    );
+                    if !folded {
+                        self.emit_ident_ref(id);
+                    }
                 }
             },
             NODE_UNARY => {

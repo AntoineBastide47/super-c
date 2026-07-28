@@ -709,8 +709,15 @@ extend Once as Free {
 // WaitGroup: wait for a set of tasks to finish. Cheaply cloned; every clone shares one counter.
 // -----------------------------------------------------------------------------------------------------
 
+// The count is an ATOMIC, not the mutex's payload, and that is the whole design. `done` runs once per task
+// in a fan-out, so putting it behind a task-aware lock made every task in the group queue through one
+// mutex -- and a task-aware lock parks the coroutine when it is contended, so the loser paid a context
+// switch as well. Here all but the last `done` is a single atomic decrement that touches nothing shared
+// but one cache line; the mutex is left holding nothing at all, and exists only so the last decrement and
+// a waiter about to sleep cannot slip past each other.
 struct WaitGroupInner {
-    pub count: Mutex<i64>,
+    pub count: atomics::Atomic<i64>,
+    pub gate: Mutex<i32>, // guards no data: it is the handshake between the final `done` and `wait`
     pub cv: Condvar,
 }
 
@@ -724,7 +731,9 @@ extend WaitGroup {
     /// A new group with a zero count.
     pub fn new() WaitGroup {
         return WaitGroup {
-            inner: arc::Arc::<WaitGroupInner>::new(WaitGroupInner { count: Mutex::<i64>::new(0), cv: Condvar::new() }),
+            inner: arc::Arc::<WaitGroupInner>::new(
+                WaitGroupInner { count: atomics::Atomic::<i64>::new(0), gate: Mutex::<i32>::new(0), cv: Condvar::new() },
+            ),
         };
     }
     /// Another handle to the same group.
@@ -734,28 +743,30 @@ extend WaitGroup {
     /// Add `n` to the outstanding count (before spawning that many tasks).
     pub fn add(self: &WaitGroup, n: i64) {
         let inner = self.inner.get();
-        let mut g = inner.count.lock();
-        let c = g.get_mut();
-        *c = *c + n;
+        let _ = inner.count.fetch_add(n, atomics::MemoryOrder::Relaxed);
     }
     /// Mark one task finished; wakes waiters when the count reaches zero.
     pub fn done(self: &WaitGroup) {
         let inner = self.inner.get();
-        let mut g = inner.count.lock();
-        {
-            let c = g.get_mut();
-            *c = *c - 1;
+        // Release: everything this task did happens-before the waiter's Acquire read of zero.
+        let left = inner.count.fetch_sub(1, atomics::MemoryOrder::AcqRel) - 1;
+        if left > 0 {
+            return; // the common case, and it costs one atomic: no lock, no wake, no park
         }
-        let zero = *g.get() <= 0;
-        if zero {
-            inner.cv.notify_all();
-        }
+        // Last one out. Take the gate before notifying: a waiter that has read a non-zero count but is not
+        // yet inside `wait` holds it, so this cannot notify into the gap and leave that waiter asleep.
+        let g = inner.gate.lock();
+        inner.cv.notify_all();
+        g.free();
     }
     /// Wait until the outstanding count reaches zero.
     pub fn wait(self: &WaitGroup) {
         let inner = self.inner.get();
-        let g = inner.count.lock();
-        while *g.get() > 0 {
+        if inner.count.load(atomics::MemoryOrder::Acquire) <= 0 {
+            return; // already finished: never touch the lock at all
+        }
+        let g = inner.gate.lock();
+        while inner.count.load(atomics::MemoryOrder::Acquire) > 0 {
             inner.cv.wait(&g);
         }
     }
@@ -763,8 +774,11 @@ extend WaitGroup {
     pub fn wait_timeout(self: &WaitGroup, d: time::Duration) bool {
         let inner = self.inner.get();
         let deadline = time::deadline_in(d);
-        let g = inner.count.lock();
-        while *g.get() > 0 {
+        if inner.count.load(atomics::MemoryOrder::Acquire) <= 0 {
+            return true;
+        }
+        let g = inner.gate.lock();
+        while inner.count.load(atomics::MemoryOrder::Acquire) > 0 {
             if time::remaining_ns(deadline) == 0 {
                 return false;
             }

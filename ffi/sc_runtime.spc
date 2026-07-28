@@ -39,6 +39,14 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_widx_set(i: i32) void;
     pub fn sc_rt_widx_get() i32;
 
+    // One spin hint: what a worker runs between look-again attempts before it parks. It stays runnable.
+    pub fn sc_rt_cpu_relax() void;
+
+    // A spinlock over a plain i32 (0 free, 1 held), for critical sections too short to be worth a mutex --
+    // a contended pthread mutex is two syscalls, this is a cache-line handoff. Never block while holding it.
+    pub fn sc_rt_spin_lock(word: *mut i32) void;
+    pub fn sc_rt_spin_unlock(word: *mut i32) void;
+
     // Sleep the calling OS thread. Only for a non-coroutine thread -- a coroutine must park on the
     // scheduler's timer list instead, or it would take its worker down with it.
     pub fn sc_rt_sleep_ns(ns: i64) void;

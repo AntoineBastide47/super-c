@@ -32,6 +32,19 @@ void sc_rt_unpark_all(int32_t *word);
 void sc_rt_widx_set(int32_t i);
 int32_t sc_rt_widx_get(void);
 
+/* One iteration's worth of spin hint: what a worker executes between look-again attempts before it gives up
+   and parks. Not a scheduler yield -- it stays runnable, which is the point. */
+void sc_rt_cpu_relax(void);
+
+/* Hand the core to whatever else is runnable. The backstop inside a spin loop, for the case where the thread
+   being waited on has been descheduled and no amount of spinning will help. */
+void sc_rt_thread_yield(void);
+
+/* A spinlock over a plain int32 (0 free, 1 held), for critical sections short enough that going to the
+   kernel costs more than waiting. Not recursive, and not for anything that can block while holding it. */
+void sc_rt_spin_lock(int32_t *word);
+void sc_rt_spin_unlock(int32_t *word);
+
 /* Sleep the calling OS thread for `ns` nanoseconds (the off-worker path for `parallel::sleep`; a coroutine
    parks on the scheduler's timer list instead). Negative/zero returns immediately. */
 void sc_rt_sleep_ns(int64_t ns);

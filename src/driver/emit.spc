@@ -1280,7 +1280,7 @@ pub fn lint_package(
 /// then codegen of the live modules in dependency-first order, pruning stale outputs afterwards. A
 /// non-empty `out_bin` also compiles + links the program there (`build`); `topts.enabled` synthesizes,
 /// builds and runs the test runner instead. Returns the process exit code (0 = success).
-pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32, lint: bool) i32 {
+pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32, lint: bool, cflags: str) i32 {
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
@@ -1464,7 +1464,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     };
     if out_bin.len() != 0 {
         if !err {
-            rc = test_build_and_run(p, null, &keep, out_bin);
+            rc = test_build_and_run(p, null, &keep, out_bin, cflags);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
@@ -1474,7 +1474,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
             switch write_test_main(p, &plan) {
                 Some(runner) => {
                     keep.push(runner);
-                    rc = test_build_and_run(p, topts, &keep, "");
+                    rc = test_build_and_run(p, topts, &keep, "", cflags);
                 },
                 None => {
                     rc = 1;

@@ -144,6 +144,15 @@ fn push_flags(dst: &mut Vector<String>, flags: str) {
     }
 }
 
+/// A manifest holding nothing but the built-in profiles, for a build with no `build.toml` to read them
+/// from -- `super-c release foo.spc` compiles and links in one command and still has to honour the profile
+/// it was asked for. Free it like any other manifest.
+pub fn builtins_only<'a>() Manifest<'a> {
+    let mut m = Manifest::new();
+    add_builtin_profiles(&mut m);
+    return m;
+}
+
 // The Makefile's profiles, available out of the box; a [profile.NAME] section with the same name
 // starts from empty flags instead (full override, no merging surprises).
 fn add_builtin_profiles(m: &mut Manifest) {

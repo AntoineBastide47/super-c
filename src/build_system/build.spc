@@ -300,6 +300,26 @@ fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32) {
     }
 }
 
+/// The built-in flags for profile `name`, as one command-line fragment (cflags then ldflags), for a build
+/// with no manifest to read them from -- `super-c release foo.spc`, which compiles and links in one command.
+/// Empty for an unknown name, so an unrecognised `--profile=` degrades to the plain build rather than
+/// failing. `target` drops what that target cannot honour, exactly as a manifest build does.
+pub fn profile_flags(name: str, target: i32) String {
+    let mut out = String::new();
+    if name.len() == 0 {
+        return out;
+    }
+    let m = mf::builtins_only();
+    let pi = m.profile_index(name);
+    if pi >= 0 {
+        let prof = m.profiles.at(pi as usize);
+        push_profile(&mut out, &prof.cflags, target);
+        push_profile(&mut out, &prof.ldflags, target);
+    }
+    m.free();
+    return out;
+}
+
 fn write_file(path: str, body: str) i32 {
     let f = stdio::fopen(path, "wb");
     if f == null {
@@ -530,7 +550,7 @@ fn engine_build(
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
-    let rc = run_package(&mut p, null, "", target, lint);
+    let rc = run_package(&mut p, null, "", target, lint, "");
     if rc != 0 {
         return rc;
     }
@@ -1042,7 +1062,7 @@ pub fn manifest_test(
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
-    return run_package(&mut p, topts, "", target, false);
+    return run_package(&mut p, topts, "", target, false, "");
 }
 
 /// `super-c bench`: build bench/main.spc under the bench profile (by default) into
