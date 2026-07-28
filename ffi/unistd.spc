@@ -7,6 +7,9 @@ extern "C" "unistd.h" {
     pub fn read(fd: i32, buf: *mut void, count: usize) isize;
     pub fn write(fd: i32, buf: *const void, count: usize) isize;
     pub fn close(fd: i32) i32;
+    /// Flush this file's writes all the way to the device and wait for it. The blocking syscall that
+    /// actually blocks: a page-cache write returns immediately, this does not.
+    pub fn fsync(fd: i32) i32;
     pub fn pipe(fds: *mut i32) i32;
     pub fn dup(fd: i32) i32;
     pub fn dup2(oldfd: i32, newfd: i32) i32;

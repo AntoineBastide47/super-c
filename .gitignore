@@ -40,3 +40,5 @@ profile.json.gz
 stage*-super-c
 release.sh
 editors/vscode/node_modules/
+bench/compare/rust/target/
+bench/compare/go/sccompare

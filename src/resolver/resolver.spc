@@ -401,18 +401,18 @@ extend Resolver {
         }
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
+        // `alias::Type` -- this module's own binding wins over a package-wide path of the same one word.
+        if parts.len == 2 {
+            let nm = self.name_is_module(self.name_span(unsafe ids[0]));
+            if nm.found {
+                return ModQual { mid: nm.mid, type_node: unsafe ids[1] };
+            }
+        }
         let buf = self.join_segs(ids, parts.len - 1); // module = every segment but the last
         let m = pkg.find(str::from_raw(buf as *const u8, unsafe cstring::strlen(buf)));
         unsafe stdlib::free(buf);
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize] };
-        }
-        if parts.len == 2 {
-            // `alias::Type`
-            let nm = self.name_is_module(self.name_span(unsafe ids[0]));
-            if nm.found {
-                return ModQual { mid: nm.mid, type_node: unsafe ids[1] };
-            }
         }
         return ModQual { mid: -1, type_node: NODE_NONE };
     }
@@ -524,7 +524,22 @@ extend Resolver {
         let mut done = false;
         let mut m = nn - 1; // longest module prefix leaving >=1 trailing segment
         while m >= 1 && !done {
-            let found = pkg.find(str::from_raw(buf as *const u8, plen));
+            // A ONE-segment prefix is this module's own import binding before it is a package path. The
+            // other order lets any module anywhere hijack a local alias just by importing a module whose
+            // path is that one word: `import time;` (ffi) in one file made every `time::` elsewhere resolve
+            // to it, including inside std, where the alias plainly says std::parallel::time.
+            let mut found: i32 = -1;
+            let mut aliased = false;
+            if m == 1 {
+                let al = self.name_is_module(self.name_span(seg[0]));
+                if al.found {
+                    found = al.mid;
+                    aliased = true;
+                }
+            }
+            if !aliased {
+                found = pkg.find(str::from_raw(buf as *const u8, plen));
+            }
             if found >= 0 {
                 unsafe buf[plen] = 0 as char; // NUL-terminate the matched prefix for diagnostics
                 let mid = found as ModuleId;

@@ -3832,13 +3832,6 @@ extend Parser {
                     format("write it before a declaration like 'struct Box<T> {{ ... }}' or 'enum Option<T> {{ ... }}'"),
                 );
             }
-            if attr.kind == AttrKind::ATTR_PLATFORM as u8 && owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_IMPORT {
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
-                    format("'@platform' cannot gate an 'import'; gate the declarations instead"),
-                );
-            }
         }
     }
 

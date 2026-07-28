@@ -366,7 +366,7 @@ pub fn platform_filter(p: &mut loader::Package, target: i32) {
         for j in 0..items.len {
             let id = m.ast.children[(items.start + j) as usize];
             let mut keep = true;
-            if m.ast.at_const(id).kind != NodeKind::NODE_IMPORT {
+            {
                 for k in 0..m.ast.attrs.len() {
                     let at = m.ast.attrs.at(k);
                     if at.owner == id && at.kind == AttrKind::ATTR_PLATFORM as u8 {

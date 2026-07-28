@@ -21,14 +21,20 @@
 #include <string.h>
 
 /* ---- current-coroutine TLS: one C11 thread-local void* per OS thread ------------------------------- */
+/* NOINLINE is load-bearing, not tidiness. A compiler may treat a thread-local's ADDRESS as fixed for the
+   duration of a function, which is true for a thread and false for a coroutine: it parks, and resumes on
+   whichever worker picks it up. Inlined into the scheduler under LTO, the address is computed once and the
+   task then reads the slot of the thread it used to be on. That is why the runtime works at -O0 and -O2 and
+   corrupts at -O2 -flto, where cross-TU inlining first becomes possible. Keeping the accessor opaque forces
+   the address to be recomputed on the thread actually running. */
 static _Thread_local void *sc_rt_tls_slot = 0;
-void sc_rt_tls_set(void *p) { sc_rt_tls_slot = p; }
-void *sc_rt_tls_get(void) { return sc_rt_tls_slot; }
+__attribute__((noinline)) void sc_rt_tls_set(void *p) { sc_rt_tls_slot = p; }
+__attribute__((noinline)) void *sc_rt_tls_get(void) { return sc_rt_tls_slot; }
 
 /* ---- current worker index: -1 on any thread that is not a pool worker ------------------------------ */
 static _Thread_local int32_t sc_rt_widx_slot = -1;
-void sc_rt_widx_set(int32_t i) { sc_rt_widx_slot = i; }
-int32_t sc_rt_widx_get(void) { return sc_rt_widx_slot; }
+__attribute__((noinline)) void sc_rt_widx_set(int32_t i) { sc_rt_widx_slot = i; }
+__attribute__((noinline)) int32_t sc_rt_widx_get(void) { return sc_rt_widx_slot; }
 
 #ifdef _WIN32
 /* ================================ Windows ========================================================== */
@@ -432,6 +438,11 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
   f[29] = sc_stk_initial_limit((char *)base, size, si.dwPageSize); /* StackLimit: lowest COMMITTED byte */
   f[30] = (void *)(base - si.dwPageSize); /* DeallocationStack: the reservation, guard page included */
   f[33] = (void *)sc_ctx_entry; /* the return address the trailing `ret` jumps to */
+  /* The ONLY reader of this frame is the assembly above, which the compiler cannot see. Under LTO it has
+     the whole program and concludes nothing reads these stores, so it deletes them -- the coroutine then
+     resumes into a frame of zeros. This barrier is what makes the writes observable; without it the switch
+     works at -O0 and -O2 and corrupts at -O2 -flto. */
+  __asm__ volatile("" : : "r"(f) : "memory");
   ((sc_rt_ctx_asm *)ctx)->sp = f;
 }
 
@@ -916,6 +927,11 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
   f[1] = arg;                   /* x20 */
   f[11] = (void *)sc_ctx_entry; /* x30, so the trailing `ret` lands on the trampoline */
 #endif
+  /* The ONLY reader of this frame is the assembly above, which the compiler cannot see. Under LTO it has
+     the whole program and concludes nothing reads these stores, so it deletes them -- the coroutine then
+     resumes into a frame of zeros. This barrier is what makes the writes observable; without it the switch
+     works at -O0 and -O2 and corrupts at -O2 -flto. */
+  __asm__ volatile("" : : "r"(f) : "memory");
   ((sc_rt_ctx_asm *)ctx)->sp = f;
 }
 

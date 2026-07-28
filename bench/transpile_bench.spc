@@ -15,6 +15,7 @@ import codegen::codegen as cg;
 import consteval::consteval as ce;
 import ast::ast as *;
 import bench::bench_shim as shim;
+import driver_shim as dshim;
 import math;
 import stdio;
 import stdlib;
@@ -247,7 +248,7 @@ fn transpile_once(use_mem: bool) Timing {
     let c0 = unsafe shim::sc_cpu_cycles();
     let h0 = unsafe shim::sc_alloc_count();
     let y0 = unsafe shim::sc_alloc_bytes();
-    let mut p = loader::package_load(ROOT, STD_DIR.ptr() as *const char, false);
+    let mut p = loader::package_load(ROOT, STD_DIR.ptr() as *const char, false, unsafe dshim::sc_host_platform());
     let a1 = time::cpu_seconds();
     let c1 = unsafe shim::sc_cpu_cycles();
     let h1 = unsafe shim::sc_alloc_count();

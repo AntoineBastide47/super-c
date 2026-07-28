@@ -241,7 +241,16 @@ pub fn compile(
     lint_dir: str,
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
-    let mut p = loader::package_load_overlaid(root_file, root_dir, alt_dir, std_dir, false, ov_files, ov_texts);
+    let mut p = loader::package_load_overlaid(
+        root_file,
+        root_dir,
+        alt_dir,
+        std_dir,
+        false,
+        unsafe shim::sc_host_platform(),
+        ov_files,
+        ov_texts,
+    );
     for i in 0..p.modules.len() {
         if !p.modules[i].has_ast {
             harvest_parse_errors(&p, i, diags);

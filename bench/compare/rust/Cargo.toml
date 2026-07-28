@@ -1,0 +1,23 @@
+[package]
+name = "sc-compare"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[[bin]]
+name = "threads"
+path = "src/bin/threads.rs"
+
+[[bin]]
+name = "tokio_spawn_blocking"
+path = "src/bin/tokio_spawn_blocking.rs"
+
+[[bin]]
+name = "tokio_block_in_place"
+path = "src/bin/tokio_block_in_place.rs"

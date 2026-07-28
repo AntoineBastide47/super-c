@@ -538,7 +538,7 @@ extend Package {
     // DFS load: takes ownership of `mod_path` and `file_path`. Returns the module's id (or -1 if unreadable).
     // A module already loaded (an import cycle) simply resolves to its id: modules are parsed whole before
     // any resolution, so mutual imports need no special handling.
-    fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool) i32 {
+    fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
         let existing = self.find(mod_path);
         if existing >= 0 {
             return existing;
@@ -610,6 +610,20 @@ extend Package {
             for i in 0..items.len {
                 let n = m.ast.at_const(unsafe ids[i as usize]);
                 if n.kind == NodeKind::NODE_IMPORT {
+                    // `@platform`-gated OUT for this target: the module is not loaded at all, so its file
+                    // need not exist here and nothing in it has to compile for a platform it disclaims.
+                    let mut gated_out = false;
+                    for k in 0..m.ast.attrs.len() {
+                        let at = m.ast.attrs.at(k);
+                        if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_PLATFORM as u8 {
+                            if (at.arg >> target as u32 & 1u32) == 0 {
+                                gated_out = true;
+                            }
+                        }
+                    }
+                    if gated_out {
+                        continue;
+                    }
                     let parts = n.as_data.import_decl.path;
                     let cp = join_parts(&m.ast, src, parts, "::");
                     // Skip already-loaded modules here: resolve_import_file probes the filesystem (up to 3
@@ -671,7 +685,7 @@ extend Package {
             }
         }
         for k in 0..child_paths.len() {
-            self.load_module(child_paths[k].as_str(), child_files[k].as_str(), bootstrap_tags);
+            self.load_module(child_paths[k].as_str(), child_files[k].as_str(), bootstrap_tags, target);
         }
         return id;
     }
@@ -2181,21 +2195,29 @@ pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
 
 /// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 /// `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
-pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool) Package {
+pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool, target: i32) Package {
     let d = dir_of(root_file);
-    let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags);
+    let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags, target);
     return p;
 }
 
 /// Like package_load, but imports resolve against an explicit package root instead of the root
 /// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
-pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir: *const char, bootstrap_tags: bool) Package {
+pub fn package_load_rooted(
+    root_file: str,
+    root_dir: str,
+    alt_dir: str,
+    std_dir: *const char,
+    bootstrap_tags: bool,
+    target: i32,
+) Package {
     return package_load_overlaid(
         root_file,
         root_dir,
         alt_dir,
         std_dir,
         bootstrap_tags,
+        target,
         Vector::<String>::new(),
         Vector::<String>::new(),
     );
@@ -2209,6 +2231,7 @@ pub fn package_load_overlaid(
     alt_dir: str,
     std_dir: *const char,
     bootstrap_tags: bool,
+    target: i32,
     overlay_files: Vector<String>,
     overlay_texts: Vector<String>,
 ) Package {
@@ -2223,8 +2246,8 @@ pub fn package_load_overlaid(
     }
     let rp = stem_of(root_file);
     let rf = String::from_str(root_file);
-    p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags);
-    load_prelude(&mut p, std_dir);
+    p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
+    load_prelude(&mut p, std_dir, target);
     p.seed_core();
     return p;
 }
@@ -2234,14 +2257,14 @@ pub fn package_load_overlaid(
 /// module is appended LAST (its module id past the prelude), matching sc_compile's layout exactly, so
 /// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
 /// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
-pub fn package_from_source(src: *const char, len: usize, std_dir: *const char) Package {
+pub fn package_from_source(src: *const char, len: usize, std_dir: *const char, target: i32) Package {
     let mut p = Package::new();
     p.ok = true;
     p.root_dir = String::from_str(".");
     if std_dir != null {
         p.std_root = dir_of(str::from_cstr(std_dir));
     }
-    load_prelude(&mut p, std_dir);
+    load_prelude(&mut p, std_dir, target);
     let mut source = String::from_str(str::from_raw(src as *const u8, len));
     let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
     let ok = parsed.ok;
@@ -2300,7 +2323,7 @@ const fn name_cmp(a: &String, b: &String) i32 {
 // whose public items resolve unqualified. A file already loaded (explicitly imported) is flagged in place;
 // otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
 // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
-fn load_prelude(p: &mut Package, std_dir: *const char) {
+fn load_prelude(p: &mut Package, std_dir: *const char, target: i32) {
     if std_dir == null {
         return;
     }
@@ -2363,7 +2386,7 @@ fn load_prelude(p: &mut Package, std_dir: *const char) {
             let stem = stem_of(names[k].as_str());
             let mut modpath = String::from_str("__std::");
             modpath.push_str(stem.as_str());
-            let id = p.load_module(modpath.as_str(), file.as_str(), false);
+            let id = p.load_module(modpath.as_str(), file.as_str(), false, target);
             if id >= 0 {
                 p.modules[id as usize].prelude = true;
             }

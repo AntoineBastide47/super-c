@@ -38,7 +38,7 @@ fn run_file(
     bootstrap_tags: bool,
     lint: bool,
 ) i32 {
-    let mut p = loader::package_load(path, std_dir, bootstrap_tags);
+    let mut p = loader::package_load(path, std_dir, bootstrap_tags, target);
     let mut rc: i32 = 1;
     if p.ok {
         let mut ceval = ce::ConstEval::new(&mut p, ce_steps, ce_mem);
@@ -279,7 +279,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
     let mut pass = 0;
     loop {
         let mut pathc = String::from_str(path);
-        let mut p = loader::package_from_source("".ptr() as *const char, 0, std_dir);
+        let mut p = loader::package_from_source("".ptr() as *const char, 0, std_dir, target);
         let mut lint_mod = p.modules.len(); // the appended empty root; replaced below
         let mut found = false;
         for m in 0..p.modules.len() {
@@ -291,9 +291,9 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         }
         if !found {
             p = if root.len() != 0 {
-                loader::package_load_rooted(path, root, lint_alt(), std_dir, false);
+                loader::package_load_rooted(path, root, lint_alt(), std_dir, false, target);
             } else {
-                loader::package_load(path, std_dir, false);
+                loader::package_load(path, std_dir, false, target);
             };
             lint_mod = 0;
         }

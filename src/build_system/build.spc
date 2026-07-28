@@ -521,7 +521,7 @@ fn engine_build(
     let t0 = unsafe shim::sc_ticks_ms();
 
     // 1) transpile the closure to <out-dir>/<raw>
-    let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags);
+    let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
     if !p.ok {
         return 1;
     }
@@ -1027,7 +1027,14 @@ pub fn manifest_test(
     }
     binb.push_string(&binp);
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
-    let mut p = loader::package_load_rooted(rootp.as_str(), ".", dirname_of(m.root.as_str()), std_dir, bootstrap_tags);
+    let mut p = loader::package_load_rooted(
+        rootp.as_str(),
+        ".",
+        dirname_of(m.root.as_str()),
+        std_dir,
+        bootstrap_tags,
+        target,
+    );
     if !p.ok {
         return 1;
     }
@@ -1064,7 +1071,10 @@ pub fn manifest_bench(
         "bench";
     };
     let sub = join2("bench", prof_name);
-    let bin = join2(m.out_dir.as_str(), exe_name("bench-bin", target).as_str());
+    // Bound, not inlined: a `str` taken from a TEMPORARY String dangles the moment the statement ends, and
+    // a short name lives inside the String itself, so the borrow points at a dead stack slot.
+    let leaf = exe_name("bench-bin", target);
+    let bin = join2(m.out_dir.as_str(), leaf.as_str());
     // rooted at the project root (like tests), so `import bench::x;` works for lint AND build
     let rc = engine_build(
         m,
