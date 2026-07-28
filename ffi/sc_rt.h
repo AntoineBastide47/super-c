@@ -45,6 +45,12 @@ void sc_rt_thread_yield(void);
 void sc_rt_spin_lock(int32_t *word);
 void sc_rt_spin_unlock(int32_t *word);
 
+/* One 64-byte bucket of the static mutex parking lot, keyed by the lock's address: {int32 spinlock, int32
+   pad, void *head, void *tail, padding}. STATIC storage on purpose -- a waker may touch a bucket after the
+   mutex whose waiters it queues has been freed, so the queues must live somewhere that outlives every lock.
+   The queue layout and discipline belong to std/parallel/sync.spc; this only hands out the slot. */
+void *sc_rt_lot_bucket(void *addr);
+
 /* Sleep the calling OS thread for `ns` nanoseconds (the off-worker path for `parallel::sleep`; a coroutine
    parks on the scheduler's timer list instead). Negative/zero returns immediately. */
 void sc_rt_sleep_ns(int64_t ns);

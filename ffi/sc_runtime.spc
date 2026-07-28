@@ -47,6 +47,10 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_spin_lock(word: *mut i32) void;
     pub fn sc_rt_spin_unlock(word: *mut i32) void;
 
+    // One 64-byte static bucket of the mutex parking lot, keyed by the lock's address. Static so a waker
+    // may touch it after the mutex itself was freed; the queue discipline lives in std/parallel/sync.spc.
+    pub fn sc_rt_lot_bucket(addr: *mut void) *mut void;
+
     // Sleep the calling OS thread. Only for a non-coroutine thread -- a coroutine must park on the
     // scheduler's timer list instead, or it would take its worker down with it.
     pub fn sc_rt_sleep_ns(ns: i64) void;

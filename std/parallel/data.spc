@@ -263,8 +263,9 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
     }
     g.dealloc(envs, nchunks * sizeof(ChunkEnv), alignof(ChunkEnv));
     // `latch` is auto-freed at scope exit (its mutex and condvar with it), which is safe only because no
-    // chunk touches it after the count reached zero -- and `raw_mutex_unlock` finishes with the lock before
-    // releasing it.
+    // chunk touches it after the count reached zero -- and once `raw_mutex_unlock` publishes the release it
+    // touches only memory that outlives the mutex (see `RawMutex`), so the last chunk's unlock cannot race
+    // this free.
 }
 
 // -----------------------------------------------------------------------------------------------------

@@ -3,9 +3,10 @@
 // Every wait here is task-aware: a *coroutine* (anything running under `launch`) that cannot proceed PARKS
 // -- it saves its context and hands its worker thread back to the scheduler, which runs other tasks -- and
 // any other thread blocks on the platform parking lot. Nothing ever occupies a worker while waiting, so
-// more tasks than workers can contend for a lock without deadlocking. `RawMutex` below is the one place
-// that touches an OS mutex, and only for the few instructions that mutate its own fields.
+// more tasks than workers can contend for a lock without deadlocking. `RawMutex` below is a one-word
+// lock: uncontended acquire and release are one CAS each, and a contender spins briefly before parking.
 
+import atomic;
 import sc_runtime;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
@@ -31,49 +32,110 @@ pub struct Waiter {
     pub claim: *mut i32,
 }
 
-/// Lock ownership is the `locked` flag; `inner` is an OS mutex held only for the handful of instructions
-/// that touch this struct -- never across user code, and never across a park. A coroutine that finds the
-/// lock held parks on `head`/`tail`; any other thread parks on the `locked` word itself. `pub` for linkage:
-/// `Mutex<T>`'s methods are monomorphized in the caller's module. Not a user-facing type.
+/// The whole lock is the `locked` word: bit 0 is HELD, bit 1 says a waiter is (or is about to be) parked.
+/// An uncontended acquire and release are one CAS each; a contender spins briefly (the critical sections
+/// this guards are tens of nanoseconds) and only then parks -- a coroutine through the scheduler, any other
+/// thread futex-style on a word in its own frame. `pub` for linkage: `Mutex<T>`'s methods are monomorphized
+/// in the caller's module. Not a user-facing type.
+///
+/// Parked waiters queue in a STATIC bucket table (`sc_rt_lot_bucket`), keyed by the lock's address, not in
+/// the lock itself -- and that placement is load-bearing. A `Mutex` may be freed the moment its final unlock
+/// is observed (a lock that lives no longer than the work it guards, e.g. the data-parallel latch), so once
+/// an unlock has published the release it may touch only memory that outlives the mutex: the static buckets
+/// and the popped waiter's own frame, which cannot die before its wake. It never touches the lock again.
 pub struct RawMutex {
-    pub inner: *mut void, // OS mutex guarding this struct (sc_rt_mutex_new)
-    pub locked: i32, // 0 free / 1 held; also the park word for OS-thread waiters
-    pub os_waiters: i32, // OS threads parked on `locked`, so an unlock knows whether to unpark
-    pub head: *mut Waiter, // parked coroutine waiters, FIFO
-    pub tail: *mut Waiter,
+    pub locked: i32,
+}
+
+// One parked lock waiter, living on that waiter's stack. A coroutine parks through the scheduler
+// (`co`/`token`); any other thread parks on `oswake` in its own frame -- the waker names this node, never
+// the (possibly already freed) mutex.
+struct LotNode {
+    pub co: *mut runtime::Coroutine, // null for an OS-thread waiter
+    pub token: u32,
+    pub oswake: i32, // 0 while parked; the waker publishes 1 before unparking this address (OS threads)
+    pub addr: *mut void, // which lock: one bucket queues waiters of many locks
+    pub next: *mut LotNode,
+}
+
+// The Super-C view of one static bucket (a 64-byte slot in sc_rt.c): a spinlock over a FIFO of nodes.
+struct LotBucket {
+    pub lock: i32,
+    pub pad: i32,
+    pub head: *mut LotNode,
+    pub tail: *mut LotNode,
+}
+
+// Spins before a contender parks. The trade: spinning occupies a worker that could run other tasks, but a
+// park costs microseconds (a context switch out and back, plus a wake) against a critical section of tens
+// of nanoseconds -- so a bounded spin is cheaper for the SYSTEM, not just for this task. Sized to cover a
+// typical holder's critical section a few times over, and nowhere near the cost of the park it avoids.
+const MUTEX_SPIN: i32 = 256;
+
+fn lot_bucket(m: *mut RawMutex) *mut LotBucket {
+    return (unsafe sc_runtime::sc_rt_lot_bucket(m)) as *mut LotBucket;
+}
+
+// Append; caller holds the bucket lock.
+fn lot_push(b: *mut LotBucket, n: *mut LotNode) {
+    unsafe n.next = null;
+    if unsafe b.tail == null {
+        unsafe b.head = n;
+    } else {
+        unsafe b.tail.next = n;
+    }
+    unsafe b.tail = n;
+}
+
+// Unlink and return the first node waiting on `addr`; `more` reports whether another remains behind it.
+// Caller holds the bucket lock.
+fn lot_pop(b: *mut LotBucket, addr: *mut void, more: &mut bool) *mut LotNode {
+    *more = false;
+    let mut prev: *mut LotNode = null;
+    let mut cur = unsafe b.head;
+    let mut found: *mut LotNode = null;
+    while cur != null {
+        let nx = unsafe cur.next;
+        if unsafe cur.addr == addr {
+            if found != null {
+                *more = true;
+                break;
+            }
+            found = cur;
+            if prev == null {
+                unsafe b.head = nx;
+            } else {
+                unsafe prev.next = nx;
+            }
+            if unsafe b.tail == cur {
+                unsafe b.tail = prev;
+            }
+            unsafe cur.next = null;
+        } else {
+            prev = cur;
+        }
+        cur = nx;
+    }
+    return found;
 }
 
 /// A new, unlocked raw lock. `pub` for linkage.
 pub fn raw_mutex_new() *mut RawMutex {
     let mut g = Global {};
     let m = g.alloc(sizeof(RawMutex), alignof(RawMutex)) as *mut RawMutex;
-    unsafe m[0] = RawMutex {
-        inner: unsafe sc_runtime::sc_rt_mutex_new(),
-        locked: 0,
-        os_waiters: 0,
-        head: null,
-        tail: null,
-    };
+    unsafe m[0] = RawMutex { locked: 0 };
     return m;
 }
 
 /// Destroy and release a raw lock. `pub` for linkage.
 pub fn raw_mutex_free(m: *mut RawMutex) {
-    unsafe sc_runtime::sc_rt_mutex_free(m.inner);
     let mut g = Global {};
     g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
 }
 
-// The address OS-thread waiters park on: they sleep while it reads 1, and an unlock publishes 0 before
-// unparking them, so a wakeup can never be missed.
-fn park_word(m: *mut RawMutex) *mut i32 {
-    return &mut unsafe m.locked;
-}
-
-// The park hand-off used inside `raw_mutex_lock`: release only the internal OS mutex, since the coroutine
-// never held the lock itself.
-fn commit_os_unlock(p: *mut void) {
-    unsafe sc_runtime::sc_rt_mutex_unlock(p);
+// The park hand-off used inside the lock slow path: a parking contender holds only the bucket lock.
+fn commit_lot_unlock(p: *mut void) {
+    unsafe sc_runtime::sc_rt_spin_unlock(p as *mut i32);
 }
 
 /// The park hand-off used by `Condvar::wait`: release the whole lock, so another task can take it while the
@@ -84,72 +146,111 @@ pub fn commit_raw_unlock(p: *mut void) {
 
 /// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
 pub fn raw_mutex_lock(m: *mut RawMutex) {
-    unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
-    while unsafe m.locked != 0 {
+    if atomic::cas_i32(&mut unsafe m.locked, 0, 1, false, 1, 0) {
+        return; // uncontended: one CAS
+    }
+    raw_mutex_lock_slow(m);
+}
+
+fn raw_mutex_lock_slow(m: *mut RawMutex) {
+    let w = &mut unsafe m.locked;
+    let mut spins: i32 = 0;
+    loop {
+        let c = atomic::load_i32(w, 0);
+        if (c & 1) == 0 {
+            // Free: take it, PRESERVING the parked bit -- waiters may remain, and clearing it would let
+            // the next unlock take its fast path straight past them.
+            if atomic::cas_i32(w, c, c | 1, false, 1, 0) {
+                return;
+            }
+            continue;
+        }
+        if spins < MUTEX_SPIN {
+            spins = spins + 1;
+            unsafe sc_runtime::sc_rt_cpu_relax();
+            continue;
+        }
+        if c != 3 && !atomic::cas_i32(w, 1, 3, false, 0, 0) {
+            continue; // the word moved under us: re-read and decide again
+        }
+        // The word reads held-with-waiters, so the next unlock takes its slow path. Enqueue while it STILL
+        // reads that, validated under the bucket lock -- the unlock pops (or records a survivor) under the
+        // same lock, so between the two an enqueued waiter is either woken or left counted, never lost.
+        let b = lot_bucket(m);
+        unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
+        if atomic::load_i32(w, 0) != 3 {
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+            continue; // released since we looked: try to take it instead of sleeping through it
+        }
         let co = runtime::current();
         if co != null {
-            // Queue up, then park: the runtime releases `inner` once our context is saved, so the unlock
-            // that pops us can never resume a coroutine that is still switching out. The node lives in this
-            // frame and is always popped by the unlock that wakes us.
-            let mut w = Waiter { co: co, token: runtime::park_begin(co), arm: 0, next: null, claim: null };
-            let wp = &mut w;
-            if unsafe m.tail == null {
-                unsafe m.head = wp;
-            } else {
-                unsafe m.tail.next = wp;
-            }
-            unsafe m.tail = wp;
-            runtime::park_current(commit_os_unlock, unsafe m.inner);
-            unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
+            // The node lives in this frame and is popped by the unlock that wakes us; the runtime releases
+            // the bucket lock once our context is saved, so that unlock can never resume a coroutine that
+            // is still switching out.
+            let mut n = LotNode { co: co, token: runtime::park_begin(co), oswake: 0, addr: m, next: null };
+            lot_push(b, &mut n);
+            runtime::park_current(commit_lot_unlock, &mut unsafe b.lock);
         } else {
-            let w = park_word(m);
-            unsafe m.os_waiters = unsafe m.os_waiters + 1;
-            unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
-            unsafe sc_runtime::sc_rt_park(w, 1, -1);
-            unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
-            unsafe m.os_waiters = unsafe m.os_waiters - 1;
+            let mut n = LotNode { co: null, token: 0, oswake: 0, addr: m, next: null };
+            lot_push(b, &mut n);
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+            while atomic::load_i32(&mut n.oswake, 1) == 0 {
+                unsafe sc_runtime::sc_rt_park(&mut n.oswake, 0, -1);
+            }
         }
+        spins = 0; // woken because the lock was just free: a fresh spin is worth it again
     }
-    unsafe m.locked = 1;
-    unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
 }
 
 /// Acquire the lock only if it is free; reports whether it was taken. Never waits.
 pub fn raw_mutex_try_lock(m: *mut RawMutex) bool {
-    unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
-    let free = unsafe m.locked == 0;
-    if free {
-        unsafe m.locked = 1;
+    let w = &mut unsafe m.locked;
+    loop {
+        let c = atomic::load_i32(w, 0);
+        if (c & 1) != 0 {
+            return false;
+        }
+        if atomic::cas_i32(w, c, c | 1, false, 1, 0) {
+            return true;
+        }
     }
-    unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
-    return free;
 }
 
-/// Release the lock and hand it on: wake the first queued coroutine whose wake claim we win, and unpark any
-/// OS threads waiting on it. `pub` for linkage.
+/// Release the lock and wake the longest-parked waiter, if any. `pub` for linkage.
 pub fn raw_mutex_unlock(m: *mut RawMutex) {
-    unsafe sc_runtime::sc_rt_mutex_lock(m.inner);
-    unsafe m.locked = 0;
-    let mut woke = false;
-    while !woke {
-        let wp = unsafe m.head;
-        if wp == null {
-            break;
-        }
-        unsafe m.head = unsafe wp.next;
-        if unsafe m.head == null {
-            unsafe m.tail = null;
-        }
-        unsafe wp.next = null;
-        woke = runtime::wake(unsafe wp.co, unsafe wp.token);
+    if atomic::cas_i32(&mut unsafe m.locked, 1, 0, false, 2, 0) {
+        return; // nobody parked: one CAS, and the lock is never touched again
     }
-    // Unpark BEFORE releasing `inner`, so releasing the lock is the very last thing this unlock does to the
-    // RawMutex: a `Mutex` freed as soon as its final unlock is observed (a lock that lives no longer than the
-    // work it guards, e.g. the data-parallel latch) would otherwise be freed under us.
-    if unsafe m.os_waiters > 0 {
-        unsafe sc_runtime::sc_rt_unpark_all(park_word(m));
+    raw_mutex_unlock_slow(m);
+}
+
+fn raw_mutex_unlock_slow(m: *mut RawMutex) {
+    let b = lot_bucket(m);
+    unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
+    let mut more = false;
+    let n = lot_pop(b, m, &mut more);
+    // The release store, and the LAST touch of the lock (see `RawMutex`): whoever acquires from here on may
+    // legitimately free it. Everything below touches only the static bucket and the popped waiter's frame.
+    let next_word = if more {
+        2;
+    } else {
+        0;
+    };
+    atomic::store_i32(&mut unsafe m.locked, next_word, 2);
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+    if n == null {
+        return; // a waiter set the bit but has not enqueued yet: it revalidates and sees the release
     }
-    unsafe sc_runtime::sc_rt_mutex_unlock(m.inner);
+    if unsafe n.co != null {
+        // Cannot fail: a lock park is untimed, so nothing else can claim its token. The wakee RE-CONTENDS
+        // rather than being handed the lock: with a ~2.3us wake latency, a hand-off serializes every
+        // acquisition behind a wake (measured 781ns/lock on the contended-hammer lane against 296ns for
+        // barging, and it tripled the batched pipeline floor), so losing to a spinner is throughput, not loss.
+        let _ = runtime::wake(unsafe n.co, unsafe n.token);
+    } else {
+        atomic::store_i32(&mut unsafe n.oswake, 1, 2);
+        unsafe sc_runtime::sc_rt_unpark_one(&mut n.oswake);
+    }
 }
 
 /// A mutual-exclusion lock guarding a `T`. Only the holder can reach the value, through the RAII

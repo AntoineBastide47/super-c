@@ -67,6 +67,23 @@ void sc_rt_spin_lock(int32_t *w) {
 
 void sc_rt_spin_unlock(int32_t *w) { __atomic_store_n(w, 0, __ATOMIC_RELEASE); }
 
+/* ---- mutex parking-lot buckets ----------------------------------------------------------------------
+   Static storage for the task-aware mutex's waiter queues (see sc_rt.h): 64 line-sized slots, picked by a
+   Fibonacci hash of the lock's address. Zero-initialized is exactly the empty state, so there is nothing
+   to set up and nothing to tear down. */
+#define SC_RT_MLOT 64
+static struct {
+  int32_t lock;
+  int32_t pad;
+  void *head;
+  void *tail;
+  char pad2[40];
+} __attribute__((aligned(64))) sc_rt_mlot[SC_RT_MLOT];
+
+void *sc_rt_lot_bucket(void *addr) {
+  return &sc_rt_mlot[(size_t)((((uintptr_t)addr >> 4) * 0x9E3779B97F4A7C15ull) >> 58)];
+}
+
 /* ---- current worker index: -1 on any thread that is not a pool worker ------------------------------ */
 static _Thread_local int32_t sc_rt_widx_slot = -1;
 __attribute__((noinline)) void sc_rt_widx_set(int32_t i) { sc_rt_widx_slot = i; }
