@@ -151,6 +151,15 @@ fn const_generics() {
         "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<i32, 8> { b: [0, 0, 0, 0, 0, 0, 0, 9] };\n  unsafe exit(a.b[0] + a.b[3] + c.b[7] + a.cap() as i32 + c.cap() as i32);\n}\n",
         26,
     ); // 1 + 4 + 9 + a.cap()=4 + c.cap()=8
+    // A NAMED const as the argument, not just a literal. The grammar parses every non-literal argument as a
+    // type, so this only works if the resolver notices the name is a value and the typechecker then folds
+    // it -- in a field type and in a turbofish alike, which are separate paths. The `[i64]` elements also
+    // pin the contextual typing of an array literal: written as bare integers, they are i32 on their own.
+    run_exit(
+        "a named const as a const-generic argument",
+        "const N: usize = 4;\nstruct Holder { pub cells: Buff<i64, N> }\nstruct Buff<T, const M: usize> { pub b: [T; M] }\nextend<T, const M: usize> Buff<T, M> { fn cap(self: &Self) usize { return M; } }\nfn main() i32 {\n  let h = Holder { cells: Buff::<i64, N> { b: [3, 0, 0, 7] } };\n  unsafe exit(h.cells.b[0] as i32 + h.cells.b[3] as i32 + h.cells.cap() as i32);\n}\n",
+        14,
+    ); // 3 + 7 + cap()=4
 }
 
 @test

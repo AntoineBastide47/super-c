@@ -66,6 +66,7 @@ pub struct Coroutine {
 
 const DEQUE_CAP: usize = 256; // power of two; an overflowing push spills to the injection queue
 const BATCH_MAX: usize = 16; // injected tasks moved to a deque per lock -- see `take_injection`
+const STEAL_MAX: usize = 32; // most tasks taken in one steal -- see `dq_steal`
 const Y_MAX: i32 = 32; // yields a worker keeps to itself before spilling -- see `yq_push`
 // Recycled task blocks the SHARED pool keeps. It has to exceed the number of tasks a program runs
 // concurrently, or every spawn past it pays a fresh stack mmap plus a guard mprotect and a munmap on the way
@@ -90,15 +91,12 @@ static_assert(sizeof(Worker) == LINE, "Worker must be exactly one cache line: ad
 /// growing the buffer under the thieves' feet.
 pub struct Worker {
     pub buf: *mut *mut Coroutine, // DEQUE_CAP slots, indexed modulo the capacity
-    pub top: usize, // atomic: next slot a thief takes
-    pub bottom: usize, // atomic: next free slot for the owner
+    pub head: usize, // atomic: next slot to run; CAS'd by the owner and by thieves alike
+    pub tail: usize, // atomic: one past the last slot pushed (only the owner writes it)
     pub rng: u64, // xorshift state for victim selection
     pub tick: u32, // dequeue counter: every so often the injection queue is polled first (fairness)
     pub idx: usize, // this worker's index, so a thread can be started from its slot alone
     pub sched: *mut Scheduler,
-    pub yhead: *mut Coroutine, // yielded here, oldest first: taken only once the deque is empty
-    pub ytail: *mut Coroutine,
-    pub ylen: i32, // beyond Y_MAX a yield spills to the injection queue -- see `yq_push`
     pub bhead: *mut Coroutine, // this worker's private stash of recycled task blocks
     pub blen: i32, // how many; beyond STASH_MAX the stash is handed to the shared pool in one go
     // Padding to a whole cache line. Workers live in one array, so without it two of them share a line:
@@ -106,6 +104,9 @@ pub struct Worker {
     // neighbour's copy of both. Worth ~25% on a yield-heavy fan-out across fourteen workers, which is the
     // shape that moves these two fields hardest. 128 bytes because that is the line on Apple silicon; on a
     // 64-byte machine it is simply two lines per worker.
+    pub yhead: *mut Coroutine, // yielded here, oldest first: taken only once the ring is empty
+    pub ytail: *mut Coroutine,
+    pub ylen: i32, // beyond Y_MAX a yield spills to the injection queue -- see `yq_push`
     pub pad: Array<u64, 4>,
 }
 
@@ -191,95 +192,111 @@ fn claim(co: *mut Coroutine, token: u32) bool {
 
 // Memory-order codes for the atomic builtins: 0 Relaxed, 1 Acquire, 2 Release, 3 AcqRel, 4 SeqCst.
 
-// --- Chase-Lev deque -----------------------------------------------------------------------------------
-// Only the owning worker calls push/pop; any thread may call steal. The orders below are the published
-// algorithm's: the owner's Release store of `bottom` publishes the slot it just wrote, a thief's Acquire
-// load of `bottom` reads it, and the SeqCst fences plus the CAS on `top` settle the one case they can
-// collide -- a deque holding exactly one task.
+// --- the run queue --------------------------------------------------------------------------------------
+// A fixed ring per worker. The owner appends at `tail`; EVERY take -- a thief's and the owner's own --
+// claims its slot with a CAS on `head`.
+//
+// That CAS on the owner's own path is a real cost, and it buys BATCH STEALING. Chase-Lev's cheaper trick,
+// where the owner pops the far end with no synchronisation at all, cannot support it: a thief claiming two
+// slots races an owner draining down into them, and the owner only CASes on the very last element -- so with
+// two tasks queued both would run the same one. Go's run queue makes exactly this trade for exactly this
+// reason. Taking half a victim's queue per steal, rather than one task per CAS, is what stops a fan-out from
+// serialising on the victim's head line.
+//
+// The cost is that the owner now takes in FIFO order, so the freshest task no longer runs first. The yield
+// queue below is unaffected -- it is still drained after this one.
 
-fn dq_top(w: *mut Worker) *mut usize {
-    return &mut unsafe w.top;
+fn dq_head(w: *mut Worker) *mut usize {
+    return &mut unsafe w.head;
 }
 
-fn dq_bottom(w: *mut Worker) *mut usize {
-    return &mut unsafe w.bottom;
+fn dq_tail(w: *mut Worker) *mut usize {
+    return &mut unsafe w.tail;
 }
 
-// Owner: append to the bottom. False when the deque is full (the caller spills to the injection queue).
+// Owner: append. False when the ring is full (the caller spills to the injection queue).
 fn dq_push(w: *mut Worker, co: *mut Coroutine) bool {
-    let b = atomic::load_usize(dq_bottom(w), 0);
-    let t = atomic::load_usize(dq_top(w), 1);
-    if b - t >= DEQUE_CAP {
+    let t = atomic::load_usize(dq_tail(w), 0); // only this worker writes it
+    let h = atomic::load_usize(dq_head(w), 1);
+    if t - h >= DEQUE_CAP {
         return false;
     }
-    unsafe w.buf[b % DEQUE_CAP] = co;
-    atomic::store_usize(dq_bottom(w), b + 1, 2); // Release: publishes the slot
+    unsafe w.buf[t % DEQUE_CAP] = co;
+    atomic::store_usize(dq_tail(w), t + 1, 2); // Release: publishes the slot
     return true;
 }
 
-// Owner: take from the bottom (LIFO, so the freshest task keeps its cache warm). Null when empty, or when
-// a thief won the race for the last task.
+// Owner: take the oldest. Null when empty, or when a thief won the race for the slot.
 fn dq_pop(w: *mut Worker) *mut Coroutine {
-    let b0 = atomic::load_usize(dq_bottom(w), 0);
-    let t0 = atomic::load_usize(dq_top(w), 1);
-    if b0 == t0 {
-        return null;
-    }
-    let b = b0 - 1;
-    atomic::store_usize(dq_bottom(w), b, 0);
-    atomic::fence(4); // SeqCst: order our claim against a concurrent steal
-    let t = atomic::load_usize(dq_top(w), 0);
-    if t > b {
-        atomic::store_usize(dq_bottom(w), b + 1, 0); // a thief took it; restore
-        return null;
-    }
-    let co = unsafe w.buf[b % DEQUE_CAP];
-    if t == b {
-        // Last task: a thief may be claiming this very slot, so settle it with the CAS.
-        let won = atomic::cas_usize(dq_top(w), t, t + 1, false, 4, 0);
-        atomic::store_usize(dq_bottom(w), b + 1, 0);
-        if !won {
+    loop {
+        let h = atomic::load_usize(dq_head(w), 1);
+        let t = atomic::load_usize(dq_tail(w), 1);
+        if h == t {
             return null;
         }
+        let co = unsafe w.buf[h % DEQUE_CAP];
+        if atomic::cas_usize(dq_head(w), h, h + 1, false, 4, 0) {
+            return co;
+        }
     }
-    return co;
 }
 
-// Any thread: take from the top (FIFO, so a thief gets the OLDEST task -- the one least likely to be hot in
-// the victim's cache, and most likely to have its own work to spawn).
-fn dq_steal(w: *mut Worker) *mut Coroutine {
-    // Probe first, unfenced: an idle worker asks every deque in the pool whether it has anything, over and
-    // over, and almost always the answer is no. Paying a full barrier for that answer costs more than the
-    // answer is worth -- and a spuriously empty reading is a steal that fails, which callers already handle.
-    if atomic::load_usize(dq_top(w), 0) >= atomic::load_usize(dq_bottom(w), 0) {
-        return null;
+// Any worker: take HALF of `victim`'s queue, keeping one to run and putting the rest on the thief's own
+// ring. Reading the slots before the CAS is sound because they can only be reused after `head` advances
+// past them, and `head` advancing is exactly what makes our CAS fail.
+fn dq_steal(victim: *mut Worker, thief: *mut Worker) *mut Coroutine {
+    loop {
+        let h = atomic::load_usize(dq_head(victim), 1);
+        let t = atomic::load_usize(dq_tail(victim), 1);
+        if t == h {
+            return null; // empty; a spuriously empty reading is a steal that fails, which callers handle
+        }
+        let avail = t - h;
+        let mut n = avail - avail / 2; // half, rounded up, so a single task is still worth taking
+        if n > STEAL_MAX {
+            n = STEAL_MAX;
+        }
+        // Never take more than we can carry: the surplus would have to go back, and putting it back is a
+        // second race we do not need.
+        let th = atomic::load_usize(dq_head(thief), 1);
+        let tt = atomic::load_usize(dq_tail(thief), 0);
+        let room = DEQUE_CAP - (tt - th) + 1; // +1: the one we return to the caller is not stored
+        if n > room {
+            n = room;
+        }
+        if n == 0 {
+            return null;
+        }
+        // Copy straight into our own ring, at slots past our tail: nobody can see them until we publish
+        // that tail, so a failed CAS below simply leaves scribbles on memory we own and we try again.
+        let first = unsafe victim.buf[h % DEQUE_CAP];
+        for i in 1..n {
+            unsafe thief.buf[(tt + i - 1) % DEQUE_CAP] = unsafe victim.buf[(h + i) % DEQUE_CAP];
+        }
+        if !atomic::cas_usize(dq_head(victim), h, h + n, false, 4, 0) {
+            continue; // somebody else moved the head; re-read and try again
+        }
+        if n > 1 {
+            atomic::store_usize(dq_tail(thief), tt + n - 1, 2); // Release: publishes what we just wrote
+        }
+        return first;
     }
-    let t = atomic::load_usize(dq_top(w), 1);
-    atomic::fence(4);
-    let b = atomic::load_usize(dq_bottom(w), 1);
-    if t >= b {
-        return null;
-    }
-    let co = unsafe w.buf[t % DEQUE_CAP];
-    if !atomic::cas_usize(dq_top(w), t, t + 1, false, 4, 0) {
-        return null; // lost to the owner or another thief; the caller moves on to the next victim
-    }
-    return co;
 }
 
 fn dq_empty(w: *mut Worker) bool {
-    return atomic::load_usize(dq_bottom(w), 1) == atomic::load_usize(dq_top(w), 1);
+    return atomic::load_usize(dq_tail(w), 1) == atomic::load_usize(dq_head(w), 1);
 }
 
 // --- the owner's yield queue ---------------------------------------------------------------------------
-// A yield means "let somebody else go first", and the local deque is LIFO -- pushed there, the yielder is
-// the very next task popped. It used to go to the shared queue instead, which is correct but costs a mutex
-// and a condvar signal on EVERY yield; at fourteen workers that lock was most of what a yield cost. This
-// queue is the somebody-else-first order kept locally: only the owning worker touches it, so it needs no
-// synchronisation at all, and `dequeue_runnable` drains it once the deque is empty.
+// A yield means "let somebody else go first". The ring above is FIFO for its owner, so appending a yielded
+// task would put it behind everything already queued -- the right ORDER -- and deleting this queue in favour
+// of that was measured and was 34% WORSE on a fourteen-worker fan-out. A yielded task goes back on the same
+// worker almost immediately, and routing it through the shared ring means a CAS on the head to take it back
+// plus the chance a thief drags it to a cold core in between. Keeping it private costs no synchronisation at
+// all, and `find_work` drains it once the ring is empty.
 //
 // The one thing a private queue cannot do is let an idle worker steal from it, so it is bounded: past
-// `Y_MAX` a yield goes back to the shared queue, where anyone can take it.
+// `Y_MAX` a yield goes to the injection queue, where anyone can take it.
 
 fn yq_push(w: *mut Worker, co: *mut Coroutine) bool {
     if unsafe w.ylen >= Y_MAX {
@@ -554,7 +571,7 @@ fn steal_any(s: *mut Scheduler, me: usize) *mut Coroutine {
         if v == me {
             continue;
         }
-        let co = dq_steal(unsafe (s.deques + v));
+        let co = dq_steal(unsafe (s.deques + v), w);
         if co != null {
             if tracing() {
                 trace("stolen", unsafe co.id);
@@ -598,7 +615,7 @@ fn find_work(s: *mut Scheduler, w: *mut Worker, me: usize, shared: bool) *mut Co
     if local != null {
         return local; // the hot path takes no lock at all
     }
-    let yielded = yq_pop(w); // after the deque: a task that yielded asked to go behind fresh work
+    let yielded = yq_pop(w); // after the ring: a task that yielded asked to go behind fresh work
     if yielded != null {
         return yielded;
     }
@@ -1039,17 +1056,17 @@ fn build_scheduler() *mut Scheduler {
         let seed = 0x9e3779b97f4a7c15 + (i as u64 + 1) * 0x632be59bd9b4e019;
         unsafe deques[i] = Worker {
             buf: buf,
-            top: 0,
-            bottom: 0,
+            head: 0,
+            tail: 0,
             rng: seed,
             tick: 0,
             idx: i,
             sched: s,
+            bhead: null,
+            blen: 0,
             yhead: null,
             ytail: null,
             ylen: 0,
-            bhead: null,
-            blen: 0,
             pad: Array::<u64, 4>::new(),
         };
     }

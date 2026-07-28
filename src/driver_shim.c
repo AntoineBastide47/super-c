@@ -508,14 +508,26 @@ const char *sc_tmpdir(void) {
 }
 
 #if defined(_WIN32)
+/* An output handle is APPEND-ONLY, and that is not a detail. The command being run may itself spawn
+   processes that inherit this handle -- the test runner spawns one per test -- so several processes write
+   to it at once. Plain GENERIC_WRITE makes every write land at the shared file pointer, which is correct
+   only for as long as every writer agrees on where that is; FILE_APPEND_DATA makes each write go to the end
+   of the file atomically, whatever any writer thinks the position is. Creation still truncates, so a
+   capture never picks up a previous run: that needs write access, hence the two calls. */
 static HANDLE sc_open_for_child(const char *path, int write) {
   SECURITY_ATTRIBUTES sa;
   memset(&sa, 0, sizeof sa);
   sa.nLength = sizeof sa;
   sa.bInheritHandle = TRUE;
   const char *name = path ? path : "NUL";
-  return CreateFileA(name, write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                     write ? CREATE_ALWAYS : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (!write)
+    return CreateFileA(name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+  HANDLE trunc = CreateFileA(name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+  if (trunc != INVALID_HANDLE_VALUE) CloseHandle(trunc);
+  return CreateFileA(name, FILE_APPEND_DATA | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 }
 
 int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env) {
@@ -589,9 +601,13 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_init(&fa);
   posix_spawn_file_actions_addopen(&fa, 0, in_path ? in_path : "/dev/null", O_RDONLY, 0);
-  posix_spawn_file_actions_addopen(&fa, 1, out_path ? out_path : "/dev/null", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  /* O_APPEND for the same reason as the Windows branch above: the command may spawn processes of its own
+     that inherit this descriptor, and appending is what keeps their writes from depending on a shared
+     offset. O_TRUNC still clears the file at open, so a capture never includes a previous run. */
+  posix_spawn_file_actions_addopen(&fa, 1, out_path ? out_path : "/dev/null",
+                                   O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
   if (err_path)
-    posix_spawn_file_actions_addopen(&fa, 2, err_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_addopen(&fa, 2, err_path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
   else
     posix_spawn_file_actions_adddup2(&fa, 1, 2); /* 2>&1 */
   char *argv[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};

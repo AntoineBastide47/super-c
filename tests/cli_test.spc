@@ -706,9 +706,9 @@ fn main() i32 { return 0; }
     assert(r.out_has("test main::Counter::bumps ... ok"), "method suite: fixture-as-self + global env");
     assert(r.out_has("test main::boom ... ok (panicked as expected)"), "should_panic recognized");
     assert(r.out_has("test main::fails ... FAILED"), "failing test reported");
-    assert(r.out_has("assertion failed: `2 * 3 == 7`"), "assert message carries the expression");
-    assert(r.out_has("left:  6"), "assert shows left value");
-    assert(r.out_has("right: 7"), "assert shows right value");
+    assert(r.out_shows("assertion failed: `2 * 3 == 7`"), "assert message carries the expression");
+    assert(r.out_shows("left:  6"), "assert shows left value");
+    assert(r.out_shows("right: 7"), "assert shows right value");
     assert(r.out_has("teardown suite"), "global @test_free ran");
     assert(r.out_has("3 passed, 1 failed"), "final tally");
     // --test-filter narrows selection; a fully passing selection exits 0

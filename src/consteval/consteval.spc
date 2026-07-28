@@ -2659,7 +2659,16 @@ extend ConstEval {
             }
             return cv_nil();
         }
-        if n.kind == NodeKind::NODE_IDENTIFIER {
+        // A one-part type path with a resolution is a const-generic ARGUMENT that named a value: the grammar
+        // parses every non-literal argument as a type (see `parse_type_args`), and the resolver binds it to
+        // the const it actually names (see `resolve_generic_arg`). From here it evaluates like an identifier,
+        // because everything below reads only the node's resolution.
+        let mut ident_like = n.kind == NodeKind::NODE_IDENTIFIER;
+        if !ident_like && n.kind == NodeKind::NODE_TYPE_PATH {
+            let tp = n.as_data.type_path;
+            ident_like = tp.parts.len == 1 && tp.args.len == 0 && a.resolution_def(id).node != NODE_NONE;
+        }
+        if ident_like {
             let mut d = a.resolution_def(id);
             if d.node == NODE_NONE {
                 d = DefId { module: m, node: a.resolution(id) };

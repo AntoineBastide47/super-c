@@ -1693,6 +1693,30 @@ extend TypeChecker {
         return TYPE_ERROR;
     }
 
+    // Is this generic argument a const VALUE rather than a type? A bare integer literal always is; that is
+    // the only form `parse_type_args` recognises, so everything else arrives as a type node and the deciding
+    // fact is what the resolver bound it to. A one-part path bound to a `const` is a named constant standing
+    // where a literal used to be required. A const-generic PARAMETER is deliberately not included: it is
+    // declared in both namespaces and keeps flowing through the type path, which already substitutes it.
+    fn tc_arg_is_const(self: &mut Self, m: ModuleId, aid: NodeId) bool {
+        let k = self.mod_ast(m).at_const(aid).kind;
+        if k == NodeKind::NODE_LITERAL {
+            return true;
+        }
+        if k != NodeKind::NODE_TYPE_PATH {
+            return false;
+        }
+        let tp = self.mod_ast(m).at_const(aid).as_data.type_path;
+        if tp.parts.len != 1 || tp.args.len != 0 {
+            return false;
+        }
+        let d = self.mod_ast(m).resolution_def(aid);
+        if d.node == NODE_NONE {
+            return false;
+        }
+        return self.mod_ast(d.module).at_const(d.node).kind == NodeKind::NODE_CONST;
+    }
+
     // Fold a const-generic argument expression (e.g. the `4` in `Buff<i32, 4>`) to an interned TYPE_CONST value.
     fn tc_const_arg(self: &mut Self, m: ModuleId, aid: NodeId) TypeId {
         let ceptr = self.ceval();
@@ -1875,7 +1899,7 @@ extend TypeChecker {
                     let mut i: u32 = 0;
                     while i < args.len && tn < 8 {
                         let aid = unsafe a.list(args)[i as usize];
-                        if a.at_const(aid).kind == NodeKind::NODE_LITERAL {
+                        if self.tc_arg_is_const(m, aid) {
                             ta[tn as usize] = self.tc_const_arg(m, aid);
                             tn = tn + 1;
                             i = i + 1;
@@ -2067,7 +2091,7 @@ extend TypeChecker {
                                     j = j + 1;
                                     continue;
                                 }
-                                if a.at_const(aid).kind == NodeKind::NODE_LITERAL {
+                                if self.tc_arg_is_const(self.cur_module(), aid) {
                                     ta[tn as usize] = self.tc_const_arg(self.cur_module(), aid);
                                 } else {
                                     ta[tn as usize] = self.resolve_type(aid);
@@ -7841,7 +7865,12 @@ extend TypeChecker {
             let fnn = a.at_const(fid).as_data.field_initializer.name;
             let fval = a.at_const(fid).as_data.field_initializer.value;
             let fname = self.name_span(fnn);
-            if variant == NODE_NONE && decl != NODE_NONE && self.tc_is_iface_assoc_call(fval) {
+            // A field's own type is the expected type for its initializer -- the same contextual type a
+            // `let` with an annotation gives. Without it an array literal in field position has nothing to
+            // widen towards, so `Plain { b: [3, 0, 0, 7] }` typed itself `[i32]` and was rejected against a
+            // `[i64; 4]` field. This used to be done only for an interface assoc call; the reason applies to
+            // every initializer.
+            if variant == NODE_NONE && decl != NODE_NONE {
                 let field = self.find_member(smod, decl, fname);
                 let ft = if_ty(
                     field != NODE_NONE,
@@ -8802,11 +8831,11 @@ extend TypeChecker {
             NODE_GENERIC_SPECIALIZATION => {
                 let inner = a.at_const(id).as_data.specialization.expression;
                 let types = a.at_const(id).as_data.specialization.types;
-                // A literal arg is a const-generic value: cache its TYPE_CONST so both the
-                // aggregate instance below and fn-turbofish binding (type_of) see it.
+                // A const-generic value arg: cache its TYPE_CONST so both the aggregate instance below and
+                // fn-turbofish binding (type_of) see it.
                 for i in 0..types.len {
                     let tid = unsafe a.list(types)[i as usize];
-                    if a.at_const(tid).kind == NodeKind::NODE_LITERAL {
+                    if self.tc_arg_is_const(self.cur_module(), tid) {
                         self.cur_ast().set_type(tid, self.tc_const_arg(self.cur_module(), tid));
                     } else {
                         self.resolve_type(tid);
@@ -8832,7 +8861,7 @@ extend TypeChecker {
                     let mut j: u32 = 0;
                     while j < types.len && tn < 8 {
                         let tj = unsafe a.list(types)[j as usize];
-                        ta[tn as usize] = if a.at_const(tj).kind == NodeKind::NODE_LITERAL {
+                        ta[tn as usize] = if self.tc_arg_is_const(self.cur_module(), tj) {
                             a.type_of(tj);
                         } else {
                             self.resolve_type(tj);
@@ -8889,7 +8918,7 @@ extend TypeChecker {
                 );
             },
             NODE_ARRAY_LITERAL => {
-                result = self.check_array_literal(id);
+                result = self.check_array_literal(id, expected);
             },
             NODE_STRUCT_INITIALIZER => {
                 result = self.check_struct_init(id);
@@ -9054,11 +9083,42 @@ extend TypeChecker {
         return extent;
     }
 
-    fn check_array_literal(self: &mut Self, id: NodeId) TypeId {
+    // The element type the surrounding context asked for, or TYPE_NONE. Only arrays: a slice is a prelude
+    // instance by the time it gets here, and an array literal coerces to one after this.
+    fn wanted_elem(self: &mut Self, expected: TypeId) TypeId {
+        if expected == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let ex = *self.type_at(expected);
+        if ex.kind != TypeKind::TYPE_ARRAY {
+            return TYPE_NONE;
+        }
+        return ex.as_data.arr.elem;
+    }
+
+    // Would every element convert cleanly to `we`? Probing, so nothing is recorded and nothing is reported
+    // for the elements that would not -- the caller keeps its own inferred type and diagnoses from there.
+    fn elements_fit(self: &mut Self, elements: NodeList, we: TypeId) bool {
+        for i in 0..elements.len {
+            let eid = unsafe self.cur_ast().list(elements)[i as usize];
+            let el = self.cur_ast().at_const(eid);
+            let vid = if el.kind == NodeKind::NODE_FIELD_INITIALIZER {
+                el.as_data.field_initializer.value;
+            } else {
+                eid;
+            };
+            if !self.compatible_in(we, vid, true) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn check_array_literal(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let elements = a.at_const(id).as_data.array_literal.elements;
         if a.at_const(id).as_data.array_literal.repeat {
-            return self.check_array_repeat(elements);
+            return self.check_array_repeat(elements, expected);
         }
         if elements.len == 0 {
             let sp = a.at_const(id).span;
@@ -9124,6 +9184,15 @@ extend TypeChecker {
             }
         }
         if elem != TYPE_NONE {
+            // The context may want a WIDER element than the elements gave themselves. An integer literal is
+            // i32 on its own, so `let a: [i64; 4] = [3, 0, 0, 7]` was rejected over a difference the same
+            // lossless widening already smooths away for a scalar `let x: i64 = 3`. Adopt the wanted element
+            // type when every element converts to it cleanly, and otherwise leave the inferred one so the
+            // mismatch is reported against what was actually written.
+            let we = self.wanted_elem(expected);
+            if we != TYPE_NONE && we != elem && self.elements_fit(elements, we) {
+                elem = we;
+            }
             return self.cur_ast().intern_type(
                 Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: 0 } } },
             );
@@ -9133,11 +9202,15 @@ extend TypeChecker {
 
     // `[v; N]`: one value and a count. The count must be a constant -- the length is part of the type -- so
     // it is folded here, with the same const-eval every other array length goes through.
-    fn check_array_repeat(self: &mut Self, elements: NodeList) TypeId {
+    fn check_array_repeat(self: &mut Self, elements: NodeList, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let vid = unsafe a.list(elements)[0];
         let nid = unsafe a.list(elements)[1];
-        let elem = self.check_expr(vid);
+        let mut elem = self.check_expr(vid);
+        let we = self.wanted_elem(expected); // same widening as the element-list form above
+        if we != TYPE_NONE && we != elem && elem != TYPE_NONE && self.compatible_in(we, vid, true) {
+            elem = we;
+        }
         let cnt = self.check_expr(nid);
         let sp = a.at_const(nid).span;
         if cnt != TYPE_NONE {

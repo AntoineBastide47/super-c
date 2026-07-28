@@ -30,6 +30,24 @@ extend CliResult {
         }
         return contains_str(self.out, needle);
     }
+    /// `out_has`, but it DUMPS what was captured when the answer is no. A remote CI failure that says only
+    /// "expected `right: 7`" cannot be diagnosed: it does not say whether the line was absent, truncated, or
+    /// interleaved with a concurrent test's output. Use this wherever a missed expectation would otherwise
+    /// have to be investigated by guessing.
+    pub fn out_shows(self: &CliResult, needle: str) bool {
+        if self.out_has(needle) {
+            return true;
+        }
+        eprintln("--- expected to find: {}", needle);
+        eprintln("--- captured output (exit {}) follows ---", self.exit);
+        if self.out == null {
+            eprintln("(nothing captured)");
+        } else {
+            unsafe stdio::fputs(self.out, stdio::stderr());
+        }
+        eprintln("--- end of captured output ---");
+        return false;
+    }
 }
 extend CliResult as Free {
     pub fn free(self: &mut Self) {

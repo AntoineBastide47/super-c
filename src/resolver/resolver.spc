@@ -653,6 +653,53 @@ extend Resolver {
         self.errors.note(format("check spelling, imports, and whether the item is declared before this use"));
     }
 
+    // Does this name resolve in `ns`, without committing to it or reporting if it does not? The one caller
+    // is the generic-argument list, where `Foo<Bar>` is structurally ambiguous -- `Bar` may name a type or a
+    // const -- so both readings have to be tried before either is blamed.
+    fn name_resolves(self: &Self, name: tok::Span, ns: Namespace) bool {
+        if self.sym_lookup(name, ns).decl != NODE_NONE {
+            return true;
+        }
+        let want_type = ns == Namespace::NS_TYPE;
+        if want_type && is_builtin_type(self.source, name) {
+            return true;
+        }
+        if self.package != null {
+            let pkg = unsafe &*self.package;
+            let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
+            let nl = (name.end - name.start) as usize;
+            let s = str::from_raw(nm as *const u8, nl);
+            if pkg.prelude_lookup(s, want_type).node != NODE_NONE {
+                return true;
+            }
+            if self.glob_lookup(name, want_type).node != NODE_NONE {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // One generic argument, which the grammar cannot tell apart from a type. `parse_type_args` only takes a
+    // bare integer literal as a const value; every other argument is parsed as a type, so `Array<i64, N>`
+    // arrives here as a one-part type path whether `N` names a type or a const. Prefer the type reading, and
+    // take the value reading only when the name is not a type but IS a value -- which is what lets a named
+    // const stand where previously only a literal could. A name that is neither falls through to
+    // `resolve_type`, so the diagnostic still blames a missing type.
+    fn resolve_generic_arg(self: &mut Self, a: NodeId) {
+        if self.ast.at_const(a).kind == NodeKind::NODE_TYPE_PATH {
+            let tp = self.ast.at_const(a).as_data.type_path;
+            if tp.parts.len == 1 && tp.args.len == 0 {
+                let first = self.child(tp.parts, 0);
+                let nm = self.name_span(first);
+                if !self.name_resolves(nm, Namespace::NS_TYPE) && self.name_resolves(nm, Namespace::NS_VALUE) {
+                    self.resolve_ref(a, first, Namespace::NS_VALUE, "value");
+                    return;
+                }
+            }
+        }
+        self.resolve_type(a);
+    }
+
     fn resolve_ref(self: &mut Self, refn: NodeId, name_node: NodeId, ns: Namespace, kind: str) {
         if name_node == NODE_NONE {
             return;
@@ -736,8 +783,7 @@ extend Resolver {
                 let tspan = self.name_span(mq.type_node);
                 self.resolve_module_decl(id, mq.mid as ModuleId, tspan, true, "type");
                 for i in 0..tp.args.len {
-                    let a = self.child(tp.args, i);
-                    self.resolve_type(a);
+                    self.resolve_generic_arg(self.child(tp.args, i));
                 }
                 return;
             }
@@ -785,8 +831,7 @@ extend Resolver {
                 }
             }
             for i in 0..tp.args.len {
-                let a = self.child(tp.args, i);
-                self.resolve_type(a);
+                self.resolve_generic_arg(self.child(tp.args, i));
             }
             return;
         }
@@ -1245,8 +1290,7 @@ extend Resolver {
                     self.resolve_expr(sp.expression);
                 }
                 for i in 0..sp.types.len {
-                    let t = self.child(sp.types, i);
-                    self.resolve_type(t);
+                    self.resolve_generic_arg(self.child(sp.types, i));
                 }
             },
             NODE_MATCH => {
