@@ -2178,6 +2178,87 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// Batched channel traffic (`send_batch` / `recv_batch`): 100 items through a bounded(8) ring, so the batch
+// send fills the buffer, blocks, and resumes mid-batch several times while the batched receiver drains it --
+// the interleaving the per-item path never exercises. Three properties are checked: every item arrives
+// exactly once (count and sum), a batch the channel refuses outright leaves its items in the caller's vector
+// IN THE ORIGINAL ORDER (the method reverses internally to pop in O(1), and must reverse back), and nothing
+// leaks -- neither the un-sent remainder nor the payloads still buffered when the channel is freed.
+@test
+fn channel_batch_send_recv() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::channel as chan;
+
+fn main() i32 {
+    let ch = chan::Channel::<i64>::bounded(8);
+    let rx = ch.receiver();
+    let tx = ch.sender();
+    launch fn() {
+        let mut v = Vector::<i64>::new();
+        for i in 0..100 {
+            v.push(i);
+        }
+        // A short send leaves items in `v`, and the count and sum below both fall short of the total.
+        let _ = tx.send_batch(&mut v);
+        v.free();
+        tx.close();
+    };
+    ch.free();
+    let mut got = Vector::<i64>::new();
+    let mut total: i64 = 0;
+    let mut n: i64 = 0;
+    loop {
+        let k = rx.recv_batch(&mut got, 16);
+        if k == 0 {
+            break;
+        }
+        n = n + k as i64;
+        for i in 0..got.len() {
+            total = total + got[i];
+        }
+        got.clear();
+    }
+    got.free();
+    rx.free();
+
+    // A closed channel sends nothing and hands the whole batch back, unreordered.
+    let c2 = chan::Channel::<i64>::bounded(4);
+    let r2 = c2.receiver();
+    let t2 = c2.sender();
+    t2.close();
+    let mut rest = Vector::<i64>::new();
+    for i in 0..5 {
+        rest.push(i);
+    }
+    let kept = t2.send_batch(&mut rest);
+    let mut ordered = 0;
+    for i in 0..rest.len() {
+        if rest[i] != i as i64 {
+            ordered = 1;
+        }
+    }
+    let bad = kept as i32 + (rest.len() - 5) as i32 + ordered;
+    rest.free();
+    t2.free();
+    r2.free();
+    c2.free();
+
+    rt::shutdown();
+    return (n - 100) as i32 + (total - 4950) as i32 + bad;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(run.exit, 0);
+}
+
 // Task-aware parking: 50 coroutines (30 producers + 20 consumers) share a bounded(2) channel -- MORE
 // coroutines than worker threads. When a coroutine blocks on send/recv it PARKS (via the dual-mode
 // `Condvar`), freeing its worker to run others; under the old block-the-OS-thread model this would deadlock

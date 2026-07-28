@@ -257,6 +257,64 @@ pub fn channel_cap1024(b: &mut bench::Bencher) {
     channel_lane(b, 1024);
 }
 
+/// The same traffic as `channel_cap64` -- same message count, same capacity -- moved with `send_batch` /
+/// `recv_batch` instead of one `send`/`recv` per item. Directly comparable to that lane, and the difference
+/// between the two is what one lock, one unlock and one wake per item cost.
+@bench
+pub fn channel_batch64(b: &mut bench::Bencher) {
+    b.each(MSGS);
+    b.unit("msg");
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    while b.running() {
+        let ch = chan::Channel::<i64>::bounded(64);
+        let rx = ch.receiver();
+        let tx = ch.sender(); // before the consumer starts -- see the note in `channel_lane`
+        let wg = sync::WaitGroup::new();
+        wg.add(1);
+        let w = wg.clone();
+        let c = seen.clone();
+        launch || {
+            let mut got = Vector::<i64>::new();
+            let mut n: i64 = 0;
+            loop {
+                let k = rx.recv_batch(&mut got, 64);
+                if k == 0 {
+                    break; // closed and drained
+                }
+                n = n + k as i64;
+                got.clear();
+            }
+            got.free();
+            let _ = c.get().fetch_add(n, atomics::MemoryOrder::Relaxed);
+            w.done();
+        };
+        let mut out = Vector::<i64>::new();
+        let mut i: i64 = 0;
+        while i < MSGS {
+            // The last batch is short whenever MSGS is not a multiple of 64: the message COUNT has to match
+            // `channel_cap64`'s exactly, or the two per-message figures are not comparable.
+            let take = if MSGS - i < 64 {
+                MSGS - i;
+            } else {
+                64i64;
+            };
+            for j in 0..take {
+                out.push(i + j);
+            }
+            let _ = tx.send_batch(&mut out);
+            i = i + take;
+        }
+        out.free();
+        tx.close();
+        wg.wait();
+        wg.free();
+        let cc = ch;
+        cc.free();
+    }
+    let s = seen;
+    s.free();
+}
+
 // --- fan-in -----------------------------------------------------------------------------------------
 
 /// `WaitGroup` fan-in: `done` itself, plus the wake the last one owes the waiter.

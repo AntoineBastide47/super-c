@@ -255,6 +255,67 @@ extend<T> Sender<T> {
         inner.not_empty.notify_one();
         return SendResult::<T>::Sent;
     }
+    /// Send every item in `items`, in order, taking the lock once per run of free slots instead of once per
+    /// item; returns how many were sent. `items` is left EMPTY when they all went; when the channel closes or
+    /// loses its last receiver part-way, the ones not sent stay in it, in order, so ownership is never lost.
+    ///
+    /// A `send` costs a lock, an unlock and a wake regardless of how big the payload is, so a producer that
+    /// already has several items in hand pays that three times over for nothing. Filling the ring under one
+    /// acquisition is the entire point of this method; with a batch of 64 it is what a single `send` costs.
+    pub fn send_batch(self: &Sender<T>, items: &mut Vector<T>) usize {
+        // Reversed, so the next item to send is a `pop` -- O(1) -- rather than a front removal that shifts
+        // everything after it. Reversed back before returning, so a caller left holding a partial batch finds
+        // its remainder in the order it passed in.
+        items.reverse();
+        let inner = self.inner.get();
+        let mut sent: usize = 0;
+        let mut open = true;
+        while open && !items.is_empty() {
+            let mut g = inner.state.lock();
+            loop {
+                let mut ready = false;
+                {
+                    let s = g.get();
+                    open = !s.closed && s.receivers != 0;
+                    ready = s.count < s.cap || s.unbounded;
+                }
+                if ready || !open {
+                    break;
+                }
+                if runtime::tracing() {
+                    runtime::trace("channel: send_batch blocks (full)", runtime::current_id());
+                }
+                inner.not_full.wait(&g);
+            }
+            if open {
+                let sm = g.get_mut();
+                let mut n: usize = 0;
+                while !items.is_empty() && (sm.count < sm.cap || sm.unbounded) {
+                    switch items.pop() {
+                        Some(v) => {
+                            if sm.count == sm.cap {
+                                sm.grow(); // unbounded only, exactly as in `send`
+                            }
+                            let idx = (sm.head + sm.count) % sm.cap;
+                            unsafe sm.slots[idx] = v;
+                            sm.count = sm.count + 1;
+                            n = n + 1;
+                        },
+                        None => {},
+                    };
+                }
+                sent = sent + n;
+                // One item can wake at most one receiver; a run of them can wake as many as it delivered.
+                if n == 1 {
+                    inner.not_empty.notify_one();
+                } else {
+                    inner.not_empty.notify_all();
+                }
+            }
+        }
+        items.reverse();
+        return sent;
+    }
     // --- select hooks -------------------------------------------------------------------------
     // The three pieces `std::parallel::selector` needs to wait on this endpoint alongside others without
     // knowing `T`: the lock to take by hand, the queue to sit on, and the readiness predicate. `pub` for
@@ -393,6 +454,62 @@ extend<T> Receiver<T> {
         sm.count = sm.count - 1;
         inner.not_full.notify_one();
         return Option::<T>::Some(v);
+    }
+    /// Take up to `max` buffered items in ONE lock acquisition, appending them to `out` in order; returns how
+    /// many were taken. Waits like `recv` until at least one is there, and returns 0 once the channel is
+    /// closed and drained (so a `while recv_batch(..) > 0` loop terminates). `max` of 0 takes nothing and
+    /// never waits.
+    ///
+    /// The consumer half of `send_batch`, and the same argument: `recv` in a loop pays a lock, an unlock and
+    /// a wake for every single item, while draining a run of them pays that once. Use it wherever the
+    /// consumer can work on several items at a time; `recv` remains right for one-at-a-time hand-off.
+    pub fn recv_batch(self: &Receiver<T>, out: &mut Vector<T>, max: usize) usize {
+        if max == 0 {
+            return 0;
+        }
+        let inner = self.inner.get();
+        let mut g = inner.state.lock();
+        loop {
+            let mut ready = false;
+            let mut done = false;
+            {
+                let s = g.get();
+                ready = s.count > 0;
+                done = !ready && (s.closed || s.senders == 0);
+            }
+            if ready {
+                break;
+            }
+            if done {
+                return 0;
+            }
+            if runtime::tracing() {
+                runtime::trace("channel: recv_batch blocks (empty)", runtime::current_id());
+            }
+            inner.not_empty.wait(&g);
+        }
+        let sm = g.get_mut();
+        let n = if max < sm.count {
+            max;
+        } else {
+            sm.count;
+        };
+        out.reserve(n); // one growth for the batch, while the lock is held for as few instructions as possible
+        for _i in 0..n {
+            let v = unsafe {
+                sm.slots[sm.head];
+            };
+            sm.head = (sm.head + 1) % sm.cap;
+            sm.count = sm.count - 1;
+            out.push(v);
+        }
+        // Every slot freed can admit one blocked sender, so a run of them wakes as many as it freed.
+        if n == 1 {
+            inner.not_full.notify_one();
+        } else {
+            inner.not_full.notify_all();
+        }
+        return n;
     }
 }
 
