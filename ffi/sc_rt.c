@@ -17,6 +17,7 @@
 #endif
 
 #include "sc_rt.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -107,6 +108,98 @@ static struct {
   void *tail;
   char pad2[40];
 } __attribute__((aligned(64))) sc_rt_mlot[SC_RT_MLOT];
+
+/* ---- lock-order tracking (SC_LOCK_ORDER=1, or =fatal to abort) --------------------------------------
+   A deadlock is reported the first time two locks are taken in OPPOSITE orders, not the first time the
+   program actually hangs. That difference is the whole point: an inversion that deadlocks one run in a
+   thousand is found on the run that merely takes both locks, and no thread has to block for it.
+
+   The order graph is a set of edges "a was held when b was taken". Taking `b` while holding `a` reports if
+   the reverse edge was ever recorded. Edges are keyed by ADDRESS, so `forget` drops a lock's edges when it
+   is destroyed -- otherwise a reused address inherits a dead lock's history and reports a phantom cycle.
+
+   The held set is per THREAD. A coroutine that parks while holding a lock and resumes on another worker is
+   therefore not followed: `release` of a lock this thread does not hold is ignored rather than guessed at.
+   That costs recall on migrating tasks and never invents a report, which is the right way round for a tool
+   whose output is a hard error. */
+#define SC_LO_HELD 32
+#define SC_LO_EDGES 4096
+static _Thread_local void *sc_lo_held[SC_LO_HELD];
+static _Thread_local int sc_lo_nheld;
+static struct {
+  void *a;
+  void *b;
+} sc_lo_edge[SC_LO_EDGES];
+static int sc_lo_nedge;
+static int32_t sc_lo_lock;
+static int sc_lo_state; /* 0 unknown, 1 off, 2 report, 3 abort */
+
+static int sc_lo_on(void) {
+  if (sc_lo_state == 0) {
+    const char *e = getenv("SC_LOCK_ORDER");
+    int st = 1;
+    if (e != NULL && e[0] != '\0' && e[0] != '0') st = (e[0] == 'f' || e[0] == 'F') ? 3 : 2;
+    sc_lo_state = st;
+  }
+  return sc_lo_state >= 2;
+}
+
+void sc_rt_lockdep_acquire(void *lock) {
+  if (!sc_lo_on()) return;
+  int n = sc_lo_nheld;
+  if (n > 0) {
+    sc_rt_spin_lock(&sc_lo_lock);
+    for (int i = 0; i < n; i++) {
+      void *h = sc_lo_held[i];
+      if (h == lock) continue; /* recursive take: not an inversion, and not this tool's business */
+      int seen = 0;
+      for (int k = 0; k < sc_lo_nedge; k++) {
+        if (sc_lo_edge[k].a == lock && sc_lo_edge[k].b == h) {
+          fputs("lock order inversion: this pair has already been taken the other way round\n", stderr);
+          seen = 1;
+          break;
+        }
+        if (sc_lo_edge[k].a == h && sc_lo_edge[k].b == lock) {
+          seen = 2; /* already recorded */
+          break;
+        }
+      }
+      if (seen == 0 && sc_lo_nedge < SC_LO_EDGES) {
+        sc_lo_edge[sc_lo_nedge].a = h;
+        sc_lo_edge[sc_lo_nedge].b = lock;
+        sc_lo_nedge++;
+      }
+      if (seen == 1 && sc_lo_state >= 3) {
+        sc_rt_spin_unlock(&sc_lo_lock);
+        abort();
+      }
+    }
+    sc_rt_spin_unlock(&sc_lo_lock);
+  }
+  if (sc_lo_nheld < SC_LO_HELD) sc_lo_held[sc_lo_nheld++] = lock;
+}
+
+void sc_rt_lockdep_release(void *lock) {
+  if (!sc_lo_on()) return;
+  for (int i = sc_lo_nheld - 1; i >= 0; i--) {
+    if (sc_lo_held[i] == lock) {
+      for (int k = i; k + 1 < sc_lo_nheld; k++) sc_lo_held[k] = sc_lo_held[k + 1];
+      sc_lo_nheld--;
+      return;
+    }
+  }
+}
+
+void sc_rt_lockdep_forget(void *lock) {
+  if (!sc_lo_on()) return;
+  sc_rt_spin_lock(&sc_lo_lock);
+  int w = 0;
+  for (int k = 0; k < sc_lo_nedge; k++) {
+    if (sc_lo_edge[k].a != lock && sc_lo_edge[k].b != lock) sc_lo_edge[w++] = sc_lo_edge[k];
+  }
+  sc_lo_nedge = w;
+  sc_rt_spin_unlock(&sc_lo_lock);
+}
 
 void *sc_rt_lot_bucket(void *addr) {
   return &sc_rt_mlot[(size_t)((((uintptr_t)addr >> 4) * 0x9E3779B97F4A7C15ull) >> 58)];

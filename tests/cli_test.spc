@@ -2178,6 +2178,50 @@ fn main() i32 {
     assert_eq(run.exit, 0);
 }
 
+// Lock-order tracking (`SC_LOCK_ORDER`): a deadlock is reported the first time two locks are taken in
+// OPPOSITE orders, not the first time the program hangs. That is what makes it testable at all -- this
+// program takes A then B, releases both, then takes B then A, and never blocks for a moment. Off by
+// default (silent, exit 0), reporting at `=1`, aborting at `=fatal`.
+@test
+fn lock_order_inversion() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::sync as sync;
+
+fn main() i32 {
+    let a = sync::Mutex::<i64>::new(0);
+    let b = sync::Mutex::<i64>::new(0);
+    {
+        let ga = a.lock();
+        let gb = b.lock();
+        gb.free();
+        ga.free();
+    }
+    {
+        let gb = b.lock();
+        let ga = a.lock();
+        ga.free();
+        gb.free();
+    }
+    a.free();
+    b.free();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    // Off by default: an inversion costs nothing and says nothing.
+    let quiet = p.run_bin();
+    assert_eq(quiet, 0);
+    let on = p.run_bin_env("SC_LOCK_ORDER=1 ");
+    assert_eq(on.exit, 0);
+    assert(on.out_has("lock order inversion"), "expected the inversion to be reported");
+}
+
 // Batched channel traffic (`send_batch` / `recv_batch`): 100 items through a bounded(8) ring, so the batch
 // send fills the buffer, blocks, and resumes mid-batch several times while the batched receiver drains it --
 // the interleaving the per-item path never exercises. Three properties are checked: every item arrives

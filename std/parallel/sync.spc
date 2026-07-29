@@ -129,6 +129,7 @@ pub unsafe fn raw_mutex_new() *mut RawMutex {
 
 /// Destroy and release a raw lock. `pub` for linkage.
 pub unsafe fn raw_mutex_free(m: *mut RawMutex) {
+    unsafe sc_runtime::sc_rt_lockdep_forget(m);
     let mut g = Global {};
     g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
 }
@@ -147,9 +148,11 @@ pub unsafe fn commit_raw_unlock(p: *mut void) {
 /// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
 pub unsafe fn raw_mutex_lock(m: *mut RawMutex) {
     if atomic::cas_i32(&mut unsafe m.locked, 0, 1, false, 1, 0) {
+        unsafe sc_runtime::sc_rt_lockdep_acquire(m);
         return; // uncontended: one CAS
     }
     raw_mutex_lock_slow(m);
+    unsafe sc_runtime::sc_rt_lockdep_acquire(m);
 }
 
 fn raw_mutex_lock_slow(m: *mut RawMutex) {
@@ -218,6 +221,8 @@ pub unsafe fn raw_mutex_try_lock(m: *mut RawMutex) bool {
 
 /// Release the lock and wake the longest-parked waiter, if any. `pub` for linkage.
 pub unsafe fn raw_mutex_unlock(m: *mut RawMutex) {
+    // BEFORE the release: once published, another thread may take and even free this lock.
+    unsafe sc_runtime::sc_rt_lockdep_release(m);
     if atomic::cas_i32(&mut unsafe m.locked, 1, 0, false, 2, 0) {
         return; // nobody parked: one CAS, and the lock is never touched again
     }

@@ -51,6 +51,12 @@ void sc_rt_spin_unlock(int32_t *word);
    The queue layout and discipline belong to std/parallel/sync.spc; this only hands out the slot. */
 void *sc_rt_lot_bucket(void *addr);
 
+/* Lock-order tracking, off unless SC_LOCK_ORDER is set (=fatal aborts on the first inversion). `acquire`
+   after a lock is taken, `release` before it is given up, `forget` when it is destroyed. See sc_rt.c. */
+void sc_rt_lockdep_acquire(void *lock);
+void sc_rt_lockdep_release(void *lock);
+void sc_rt_lockdep_forget(void *lock);
+
 /* Sleep the calling OS thread for `ns` nanoseconds (the off-worker path for `parallel::sleep`; a coroutine
    parks on the scheduler's timer list instead). Negative/zero returns immediately. */
 void sc_rt_sleep_ns(int64_t ns);
