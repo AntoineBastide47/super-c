@@ -77,15 +77,11 @@ fn no_arm(_p: *const void) bool {
     return false;
 }
 
-// The type-erasing trampolines: one instantiation per element type, reached through `Arm.ready`.
-fn recv_ready<T>(p: *const void) bool {
-    let rx = p as *const channel::Receiver<T>;
-    return rx.select_ready();
-}
-
-fn send_ready<T>(p: *const void) bool {
-    let tx = p as *const channel::Sender<T>;
-    return tx.select_ready();
+// The type-erasing trampoline, one instantiation per selectable type, reached through `Arm.ready`. An arm
+// stores its endpoint as `*const void`, so this is where the type comes back.
+fn iface_ready<S: sync::Selectable>(p: *const void) bool {
+    let s = p as *const S;
+    return s.select_ready();
 }
 
 // The park hand-off: the worker runs it once the selector's context is saved, which is what stops a notify
@@ -117,15 +113,21 @@ extend Selector {
             cursor: 0,
         };
     }
+    /// Wait on ANY `Selectable` -- a channel endpoint, or a type of your own that conforms. Returns the arm
+    /// index a `Ready` result will carry. This is the whole extension point: `select` knows nothing about
+    /// channels beyond this interface.
+    pub fn arm<S: sync::Selectable>(self: &mut Selector, s: &S) usize {
+        return self.push(s, iface_ready::<S>, s.select_lock(), s.select_queue());
+    }
     /// Wait for `rx` to have a value (or to be closed and drained, which `try_recv` reports as `None`).
     /// Returns the arm index a `Ready` result will carry.
     pub fn arm_recv<T>(self: &mut Selector, rx: &channel::Receiver<T>) usize {
-        return self.push(rx, recv_ready::<T>, rx.select_lock(), rx.select_queue());
+        return self.arm(rx);
     }
     /// Wait for `tx` to have room (or to be closed, which `try_send` reports by handing the value back).
     /// Returns the arm index a `Ready` result will carry.
     pub fn arm_send<T>(self: &mut Selector, tx: &channel::Sender<T>) usize {
-        return self.push(tx, send_ready::<T>, tx.select_lock(), tx.select_queue());
+        return self.arm(tx);
     }
     /// How many operations are armed.
     pub fn len(self: &Selector) usize {
@@ -196,9 +198,9 @@ extend Selector {
     fn arm_ready(self: &Selector, i: usize) bool {
         let f = unsafe self.arms[i].ready;
         let raw = unsafe self.arms[i].raw;
-        sync::raw_mutex_lock(raw);
+        unsafe sync::raw_mutex_lock(raw); // `select_ready` is called WITH the lock held, per `Selectable`
         let r = f(unsafe self.arms[i].obj);
-        sync::raw_mutex_unlock(raw);
+        unsafe sync::raw_mutex_unlock(raw);
         return r;
     }
     // Park until some arm moves. Takes every channel lock, re-checks readiness under them (a value that
@@ -239,7 +241,7 @@ extend Selector {
             unsafe self.arms[i].w = sync::Waiter { co: co, token: token, arm: i as i32, next: null, claim: claim };
             let cv = unsafe self.arms[i].cv;
             let wp = &mut unsafe self.arms[i].w;
-            cv.register(wp);
+            unsafe cv.register(wp); // every arm's lock is held: see `lock_all`
         }
         runtime::park_timed(token, deadline, commit_unlock_all, self);
         if deadline != 0 {
@@ -249,10 +251,10 @@ extend Selector {
         for i in 0..self.n {
             let cv = unsafe self.arms[i].cv;
             let raw = unsafe self.arms[i].raw;
-            sync::raw_mutex_lock(raw);
+            unsafe sync::raw_mutex_lock(raw);
             let wp = &mut unsafe self.arms[i].w;
-            cv.unregister(wp);
-            sync::raw_mutex_unlock(raw);
+            unsafe cv.unregister(wp); // unlinked before this frame dies, which is what the node's owner owes
+            unsafe sync::raw_mutex_unlock(raw);
         }
     }
     // Take every armed channel's lock, in address order. Two selectors sharing channels therefore take the
@@ -271,7 +273,7 @@ extend Selector {
             if k > 0 && unsafe self.arms[i].raw == unsafe self.arms[self.order[k - 1]].raw {
                 continue;
             }
-            sync::raw_mutex_lock(unsafe self.arms[i].raw);
+            unsafe sync::raw_mutex_lock(unsafe self.arms[i].raw);
         }
     }
     // Release every lock `lock_all` took, skipping the duplicates it skipped. `pub` for linkage: the park
@@ -282,7 +284,7 @@ extend Selector {
             if k > 0 && unsafe self.arms[i].raw == unsafe self.arms[self.order[k - 1]].raw {
                 continue; // one channel armed twice (send and recv): one lock, taken once
             }
-            sync::raw_mutex_unlock(unsafe self.arms[i].raw);
+            unsafe sync::raw_mutex_unlock(unsafe self.arms[i].raw);
         }
     }
     // Record one type-erased arm. `pub` for linkage: `arm_recv`/`arm_send` are generic, so they are

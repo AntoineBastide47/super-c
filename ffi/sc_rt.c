@@ -20,6 +20,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ---- ThreadSanitizer fibers -------------------------------------------------------------------------
+   TSan models happens-before per THREAD, and a stackful coroutine breaks that model: it parks on one worker
+   and resumes on another, so every stack slot it touches looks like two threads racing on the same address.
+   The whole runtime would report as one enormous false race.
+
+   TSan's fiber API is the sanctioned answer -- it lets a program say "execution continues on this other
+   stack now", so the tool tracks the coroutine rather than the OS thread carrying it. One fiber per
+   coroutine context, announced before every switch.
+
+   Compiled ONLY under -fsanitize=thread (the `race` profile). Every reference below is inside this guard,
+   so a release build has no fiber field, no calls, and no dependency on the sanitizer runtime. */
+#if defined(__SANITIZE_THREAD__)
+#define SC_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define SC_TSAN 1
+#endif
+#endif
+
+#ifdef SC_TSAN
+void *__tsan_get_current_fiber(void);
+void *__tsan_create_fiber(unsigned flags);
+void __tsan_destroy_fiber(void *fiber);
+void __tsan_switch_to_fiber(void *fiber, unsigned flags);
+#endif
+
 /* ---- current-coroutine TLS: one C11 thread-local void* per OS thread ------------------------------- */
 /* NOINLINE is load-bearing, not tidiness. A compiler may treat a thread-local's ADDRESS as fixed for the
    duration of a function, which is true for a thread and false for a coroutine: it parks, and resumes on
@@ -189,7 +215,10 @@ void sc_rt_stack_free(void *usable, size_t size) {
 }
 
 static size_t sc_rt_stk_size = 0;
-void sc_rt_stack_note_size(size_t bytes) { sc_rt_stk_size = bytes; }
+/* Every worker writes the SAME value here, but "same value" is not a synchronisation argument -- a plain
+   write racing a plain read is undefined however benign it looks, and the reader is a signal handler. The
+   relaxed pair costs nothing and makes it defined. */
+void sc_rt_stack_note_size(size_t bytes) { __atomic_store_n(&sc_rt_stk_size, bytes, __ATOMIC_RELAXED); }
 
 #if defined(__x86_64__)
 /* The thread's OWN stack, recorded when the thread arms itself. A fault on it is the OS's business: ntdll
@@ -219,9 +248,9 @@ static void sc_rt_say_u64(uint64_t v) {
 /* The task cannot continue and neither can the process: say which, and go. */
 static void sc_rt_report_overflow(void) {
   sc_rt_say("\nsuper-c: stack overflow");
-  if (sc_rt_stk_size) {
+  if (__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED)) {
     sc_rt_say(" (");
-    sc_rt_say_u64((uint64_t)sc_rt_stk_size);
+    sc_rt_say_u64((uint64_t)__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED));
     sc_rt_say(" byte task stack exhausted; raise it with runtime::set_stack_size)");
   }
   sc_rt_say("\n");
@@ -251,7 +280,7 @@ static LONG CALLBACK sc_rt_stack_veh(EXCEPTION_POINTERS *ep) {
 
   if (ep->ExceptionRecord->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
 
-  const size_t pg = sc_rt_pagesz;
+  const size_t pg = __atomic_load_n(&sc_rt_pagesz, __ATOMIC_RELAXED);
   const uintptr_t addr = (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1];
   const uintptr_t limit = sc_teb_read(SC_TEB_STACK_LIMIT);
   const uintptr_t dealloc = sc_teb_read(SC_TEB_DEALLOC);
@@ -645,7 +674,10 @@ void sc_rt_stack_free(void *usable, size_t size) {
 static size_t sc_rt_stk_size = 0;
 static size_t sc_rt_pagesz = 4096; /* cached: sysconf is not async-signal-safe */
 
-void sc_rt_stack_note_size(size_t bytes) { sc_rt_stk_size = bytes; }
+/* Every worker writes the SAME value here, but "same value" is not a synchronisation argument -- a plain
+   write racing a plain read is undefined however benign it looks, and the reader is a signal handler. The
+   relaxed pair costs nothing and makes it defined. */
+void sc_rt_stack_note_size(size_t bytes) { __atomic_store_n(&sc_rt_stk_size, bytes, __ATOMIC_RELAXED); }
 
 static void sc_rt_say(const char *s) {
   size_t n = 0;
@@ -695,9 +727,9 @@ static void sc_rt_overflow(int sig, siginfo_t *si, void *uc) {
      distance a wild pointer lands from the stack. */
   if (sp != 0 && d < 128 * 1024) {
     sc_rt_say("\nsuper-c: stack overflow");
-    if (sc_rt_stk_size) {
+    if (__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED)) {
       sc_rt_say(" (");
-      sc_rt_say_u64((uint64_t)sc_rt_stk_size);
+      sc_rt_say_u64((uint64_t)__atomic_load_n(&sc_rt_stk_size, __ATOMIC_RELAXED));
       sc_rt_say(" byte task stack exhausted; raise it with runtime::set_stack_size)");
     }
     sc_rt_say("\n");
@@ -713,8 +745,9 @@ static void sc_rt_overflow(int sig, siginfo_t *si, void *uc) {
 
 void sc_rt_stack_guard_install(void) {
   static int32_t once = 0;
-  sc_rt_pagesz = (size_t)sysconf(_SC_PAGESIZE);
-  (void)sc_rt_pagesz;
+  /* Every worker installs its own guard and caches the same page size here. Same value or not, a plain
+     write racing the handler's read is undefined; relaxed makes it defined and costs nothing. */
+  __atomic_store_n(&sc_rt_pagesz, (size_t)sysconf(_SC_PAGESIZE), __ATOMIC_RELAXED);
   /* A signal stack of this thread's own: the handler runs when a stack is exhausted, so it cannot run on
      that stack. mmap rather than malloc, so the leak tracker sees no permanent allocation. */
   size_t sz = (size_t)SIGSTKSZ < 32768 ? 32768 : (size_t)SIGSTKSZ;
@@ -942,6 +975,9 @@ extern void sc_ctx_entry(void);
 
 typedef struct {
   void *sp; /* NULL until the first switch away from this context fills it in */
+#ifdef SC_TSAN
+  void *fiber; /* this context's TSan fiber; NULL on a worker's own context until its first switch away */
+#endif
 } sc_rt_ctx_asm;
 
 /* A forged frame must carry a LEGAL FP control word. Zero is not one: on x86-64 it unmasks every SSE
@@ -966,6 +1002,11 @@ static void sc_ctx_save_fpctl(void *slot) {
 void *sc_rt_ctx_alloc(void) { return calloc(1, sizeof(sc_rt_ctx_asm)); }
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
+#ifdef SC_TSAN
+  /* Only a COROUTINE context is armed here, so this is where its fiber belongs. A worker's own context is
+     never `init`ed -- it takes the fiber it is already running on, at its first switch away. */
+  ((sc_rt_ctx_asm *)ctx)->fiber = __tsan_create_fiber(0);
+#endif
   /* Forge the frame the first swap-in will pop, slot for slot in the order sc_ctx_swap stores them. The
      coroutine body and its argument ride in callee-saved registers because they survive that pop unchanged;
      the frame pointer slot stays zero so a backtrace stops at the coroutine boundary instead of walking off
@@ -994,10 +1035,27 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
 
 void sc_rt_ctx_switch(void *from, void *to) {
   sc_rt_ctx_asm *f = (sc_rt_ctx_asm *)from;
+#ifdef SC_TSAN
+  /* Announce the move BEFORE the stack changes: from here on TSan attributes accesses to the target's
+     fiber, so a coroutine keeps one identity across every worker that ever runs it. The switcher announces;
+     the resumed side does not, or the two would disagree about who is running. */
+  sc_rt_ctx_asm *t = (sc_rt_ctx_asm *)to;
+  if (!f->fiber) f->fiber = __tsan_get_current_fiber();
+  __tsan_switch_to_fiber(t->fiber, 0);
+  sc_ctx_swap(&f->sp, t->sp);
+#else
   sc_ctx_swap(&f->sp, ((sc_rt_ctx_asm *)to)->sp);
+#endif
 }
 
-void sc_rt_ctx_free(void *ctx) { free(ctx); }
+void sc_rt_ctx_free(void *ctx) {
+#ifdef SC_TSAN
+  void *fb = ((sc_rt_ctx_asm *)ctx)->fiber;
+  /* A worker's own context borrowed its fiber from the thread; only a created one is ours to destroy. */
+  if (fb && fb != __tsan_get_current_fiber()) __tsan_destroy_fiber(fb);
+#endif
+  free(ctx);
+}
 
 #else
 /* Fallback for any other ABI: ucontext. makecontext passes only int args, so the ctx pointer is split into

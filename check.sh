@@ -27,6 +27,26 @@ if ! SC_LEAK_CHECK=fatal ./super-c test; then
     exit 1
 fi
 
+# 3b) ThreadSanitizer over the concurrency substrate. The `race` profile is the ONLY thing that builds with
+# -fsanitize=thread (release never does) and it is what turns on the coroutine fiber annotations, without
+# which a migrating coroutine reports as a race against itself. A report here is a real happens-before hole
+# in the runtime, so any output at all fails the check.
+printf 'check: thread sanitizer (race profile)\n'
+racelog=$(mktemp)
+if ! ./super-c build ci/parallel_smoke.spc -o ./tsan-smoke --profile=race >/dev/null 2>&1; then
+    rm -f "$racelog" ./tsan-smoke
+    printf 'check: FAILED -- could not build ci/parallel_smoke.spc under the race profile\n' >&2
+    exit 1
+fi
+TSAN_OPTIONS="halt_on_error=0" ./tsan-smoke >/dev/null 2>"$racelog"
+if grep -q 'ThreadSanitizer' "$racelog"; then
+    printf 'check: FAILED -- ThreadSanitizer reported a data race:\n' >&2
+    cat "$racelog" >&2
+    rm -f "$racelog" ./tsan-smoke
+    exit 1
+fi
+rm -f "$racelog" ./tsan-smoke
+
 # 4) Bootstrap from the latest release binary; any failure fails the check.
 # Stage 0: the release binary builds current source via the legacy `build <root> -o` path (works
 # even for a pre-build-system release). Stage 0 then rebuilds itself through the engine (SC_CMD=1

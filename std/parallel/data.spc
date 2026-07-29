@@ -322,6 +322,7 @@ pub fn range_with<F: fn(usize) + Send + Sync>(r: Range<usize>, opts: Options, bo
 pub struct EachShared<T, F> {
     pub body: F,
     pub items: *const T,
+    pub len: usize, // carried so a chunk can CHECK its range instead of trusting it -- see `each_chunk`
 }
 
 /// The `each` chunk trampoline. `pub` for linkage.
@@ -330,9 +331,14 @@ pub fn each_chunk<T, F: fn(&T) + Send + Sync>(e: *mut void) {
     let sh = (unsafe ce.batch.shared) as *mut EachShared<T, F>;
     let b = unsafe sh.body;
     let items = unsafe sh.items;
+    let len = unsafe sh.len;
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {
+        // ONE check per range, not per element: the index below is a raw offset, so a `next_range` that ever
+        // handed back a range past the end would read off the array with nothing to stop it. The distributor
+        // is supposed to make that impossible; this is what turns "supposed to" into a trap.
+        assert(hi <= len, "parallel::each: chunk range past the end of the slice");
         for i in lo..hi {
             b(&unsafe items[i]);
         }
@@ -351,7 +357,7 @@ pub fn each_with<T, F: fn(&T) + Send + Sync>(items: []T, opts: Options, body: F)
     if n == 0 {
         return;
     }
-    let mut sh = EachShared::<T, F> { body: body, items: items.as_ptr() };
+    let mut sh = EachShared::<T, F> { body: body, items: items.as_ptr(), len: n };
     dispatch(n, opts, each_chunk::<T, F>, &mut sh);
 }
 
@@ -363,6 +369,7 @@ pub fn each_with<T, F: fn(&T) + Send + Sync>(items: []T, opts: Options, body: F)
 pub struct EachMutShared<T, F> {
     pub body: F,
     pub items: *mut T,
+    pub len: usize, // carried so a chunk can CHECK its range instead of trusting it -- see `each_mut_chunk`
 }
 
 /// The `each_mut` chunk trampoline. `pub` for linkage.
@@ -371,9 +378,12 @@ pub fn each_mut_chunk<T, F: fn(&mut T) + Send + Sync>(e: *mut void) {
     let sh = (unsafe ce.batch.shared) as *mut EachMutShared<T, F>;
     let b = unsafe sh.body;
     let items = unsafe sh.items;
+    let len = unsafe sh.len;
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {
+        // ONE check per range, not per element -- see `each_chunk`.
+        assert(hi <= len, "parallel::each_mut: chunk range past the end of the slice");
         for i in lo..hi {
             // Sound because index ranges never overlap: every element is handed to exactly one chunk.
             b(&mut unsafe items[i]);
@@ -395,7 +405,7 @@ pub fn each_mut_with<T, F: fn(&mut T) + Send + Sync>(items: []mut T, opts: Optio
     if n == 0 {
         return;
     }
-    let mut sh = EachMutShared::<T, F> { body: body, items: items.ptr };
+    let mut sh = EachMutShared::<T, F> { body: body, items: items.ptr, len: n };
     dispatch(n, opts, each_mut_chunk::<T, F>, &mut sh);
 }
 

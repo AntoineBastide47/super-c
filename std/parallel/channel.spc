@@ -316,24 +316,6 @@ extend<T> Sender<T> {
         items.reverse();
         return sent;
     }
-    // --- select hooks -------------------------------------------------------------------------
-    // The three pieces `std::parallel::selector` needs to wait on this endpoint alongside others without
-    // knowing `T`: the lock to take by hand, the queue to sit on, and the readiness predicate. `pub` for
-    // linkage (they are monomorphized in the selector's module); not user-facing.
-    /// The channel's state lock.
-    pub fn select_lock(self: &Sender<T>) *mut sync::RawMutex {
-        return self.inner.get().state.raw_handle();
-    }
-    /// The queue a blocked `send` waits on.
-    pub fn select_queue(self: &Sender<T>) *const sync::Condvar {
-        return &self.inner.get().not_full;
-    }
-    /// Would `try_send` do something other than wait? Caller holds `select_lock`. A closed or receiver-less
-    /// channel counts as ready: `try_send` hands the value straight back rather than blocking.
-    pub fn select_ready(self: &Sender<T>) bool {
-        let s = self.inner.get().state.locked_ref();
-        return s.count < s.cap || s.unbounded || s.closed || s.receivers == 0;
-    }
     /// Close the channel: no further sends succeed; buffered items stay readable until drained.
     pub fn close(self: &Sender<T>) {
         let inner = self.inner.get();
@@ -420,21 +402,6 @@ extend<T> Receiver<T> {
         sm.count = sm.count - 1;
         inner.not_full.notify_one();
         return Option::<T>::Some(v);
-    }
-    // --- select hooks (see `Sender`'s) ----------------------------------------------------------
-    /// The channel's state lock.
-    pub fn select_lock(self: &Receiver<T>) *mut sync::RawMutex {
-        return self.inner.get().state.raw_handle();
-    }
-    /// The queue a blocked `recv` waits on.
-    pub fn select_queue(self: &Receiver<T>) *const sync::Condvar {
-        return &self.inner.get().not_empty;
-    }
-    /// Would `try_recv` do something other than wait? Caller holds `select_lock`. A drained channel with no
-    /// senders left counts as ready: `recv` returns `None` at once rather than blocking.
-    pub fn select_ready(self: &Receiver<T>) bool {
-        let s = self.inner.get().state.locked_ref();
-        return s.count > 0 || s.closed || s.senders == 0;
     }
     /// Take an item without blocking, or `None` if the buffer is empty (also `None` if closed and empty).
     pub fn try_recv(self: &Receiver<T>) Option<T> {
@@ -527,5 +494,43 @@ extend<T> Receiver<T> as Free {
             }
         }
         self.inner.free();
+    }
+}
+
+// A channel endpoint is selectable: `select` waits on it through this and nothing else. Both halves point at
+// the SAME state lock and differ only in the queue they sit on and what counts as ready.
+extend<T> Sender<T> as sync::Selectable {
+    /// The channel's state lock.
+    pub fn select_lock(self: &Sender<T>) *mut sync::RawMutex {
+        return unsafe self.inner.get().state.raw_handle();
+    }
+    /// The queue a blocked `send` waits on.
+    pub fn select_queue(self: &Sender<T>) *const sync::Condvar {
+        return &self.inner.get().not_full;
+    }
+    /// Would `try_send` do something other than wait? A closed or receiver-less channel counts as ready:
+    /// `try_send` hands the value straight back rather than blocking.
+    pub fn select_ready(self: &Sender<T>) bool {
+        // The selector holds `select_lock` across this call -- that is what makes the unlocked read sound.
+        let s = unsafe self.inner.get().state.locked_ref();
+        return s.count < s.cap || s.unbounded || s.closed || s.receivers == 0;
+    }
+}
+
+extend<T> Receiver<T> as sync::Selectable {
+    /// The channel's state lock.
+    pub fn select_lock(self: &Receiver<T>) *mut sync::RawMutex {
+        return unsafe self.inner.get().state.raw_handle();
+    }
+    /// The queue a blocked `recv` waits on.
+    pub fn select_queue(self: &Receiver<T>) *const sync::Condvar {
+        return &self.inner.get().not_empty;
+    }
+    /// Would `try_recv` do something other than wait? A drained channel with no senders left counts as
+    /// ready: `recv` returns `None` at once rather than blocking.
+    pub fn select_ready(self: &Receiver<T>) bool {
+        // See `Sender::select_ready`: the selector holds the lock across this call.
+        let s = unsafe self.inner.get().state.locked_ref();
+        return s.count > 0 || s.closed || s.senders == 0;
     }
 }

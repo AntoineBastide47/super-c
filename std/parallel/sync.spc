@@ -120,7 +120,7 @@ fn lot_pop(b: *mut LotBucket, addr: *mut void, more: &mut bool) *mut LotNode {
 }
 
 /// A new, unlocked raw lock. `pub` for linkage.
-pub fn raw_mutex_new() *mut RawMutex {
+pub unsafe fn raw_mutex_new() *mut RawMutex {
     let mut g = Global {};
     let m = g.alloc(sizeof(RawMutex), alignof(RawMutex)) as *mut RawMutex;
     unsafe m[0] = RawMutex { locked: 0 };
@@ -128,7 +128,7 @@ pub fn raw_mutex_new() *mut RawMutex {
 }
 
 /// Destroy and release a raw lock. `pub` for linkage.
-pub fn raw_mutex_free(m: *mut RawMutex) {
+pub unsafe fn raw_mutex_free(m: *mut RawMutex) {
     let mut g = Global {};
     g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
 }
@@ -140,12 +140,12 @@ fn commit_lot_unlock(p: *mut void) {
 
 /// The park hand-off used by `Condvar::wait`: release the whole lock, so another task can take it while the
 /// waiter sleeps. `pub` for linkage.
-pub fn commit_raw_unlock(p: *mut void) {
+pub unsafe fn commit_raw_unlock(p: *mut void) {
     raw_mutex_unlock(p as *mut RawMutex);
 }
 
 /// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
-pub fn raw_mutex_lock(m: *mut RawMutex) {
+pub unsafe fn raw_mutex_lock(m: *mut RawMutex) {
     if atomic::cas_i32(&mut unsafe m.locked, 0, 1, false, 1, 0) {
         return; // uncontended: one CAS
     }
@@ -203,7 +203,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex) {
 }
 
 /// Acquire the lock only if it is free; reports whether it was taken. Never waits.
-pub fn raw_mutex_try_lock(m: *mut RawMutex) bool {
+pub unsafe fn raw_mutex_try_lock(m: *mut RawMutex) bool {
     let w = &mut unsafe m.locked;
     loop {
         let c = atomic::load_i32(w, 0);
@@ -217,7 +217,7 @@ pub fn raw_mutex_try_lock(m: *mut RawMutex) bool {
 }
 
 /// Release the lock and wake the longest-parked waiter, if any. `pub` for linkage.
-pub fn raw_mutex_unlock(m: *mut RawMutex) {
+pub unsafe fn raw_mutex_unlock(m: *mut RawMutex) {
     if atomic::cas_i32(&mut unsafe m.locked, 1, 0, false, 2, 0) {
         return; // nobody parked: one CAS, and the lock is never touched again
     }
@@ -276,16 +276,18 @@ unsafe extend<T: Send> Mutex<T> as Sync {}
 extend<T> Mutex<T> {
     /// A new unlocked mutex owning `value`.
     pub fn new(value: T) Mutex<T> {
-        return Mutex::<T> { raw: raw_mutex_new(), data: UnsafeCell::<T>::new(value) };
+        // Safe here by construction: this is the only handle to a lock nobody can have taken yet.
+        return Mutex::<T> { raw: unsafe raw_mutex_new(), data: UnsafeCell::<T>::new(value) };
     }
     /// Wait until the lock is acquired, then return the guard. A coroutine parks while it is held.
     pub fn lock(self: &Mutex<T>) MutexGuard<T> {
-        raw_mutex_lock(self.raw);
+        // The guard is what keeps the promise: it holds the lock for exactly its own lifetime.
+        unsafe raw_mutex_lock(self.raw);
         return MutexGuard::<T>::hold(self);
     }
     /// Try to acquire without waiting; `None` if it is already held.
     pub fn try_lock(self: &Mutex<T>) Option<MutexGuard<T>> {
-        if raw_mutex_try_lock(self.raw) {
+        if unsafe raw_mutex_try_lock(self.raw) {
             return Option::<MutexGuard<T>>::Some(MutexGuard::<T>::hold(self));
         }
         return Option::<MutexGuard<T>>::None;
@@ -296,17 +298,17 @@ extend<T> Mutex<T> {
     }
     /// The underlying lock, to take and release by hand. For a wait that must hold several locks at once
     /// (`select`); everything else should use `lock`. `pub` for linkage; not user-facing.
-    pub fn raw_handle(self: &Mutex<T>) *mut RawMutex {
+    pub unsafe fn raw_handle(self: &Mutex<T>) *mut RawMutex {
         return self.raw;
     }
     /// The guarded value WITHOUT locking. Sound only while the caller holds `raw_handle` -- the escape hatch
     /// for code that took the raw lock itself. `pub` for linkage; not user-facing.
-    pub fn locked_ref(self: &Mutex<T>) &T {
+    pub unsafe fn locked_ref(self: &Mutex<T>) &T {
         return self.data.get_ref();
     }
     // --- guard-facing helpers (same module) ---------------------------------------------------
     fn unlock_raw(self: &Mutex<T>) {
-        raw_mutex_unlock(self.raw);
+        unsafe raw_mutex_unlock(self.raw); // paired with the `lock` that produced the guard being dropped
     }
     fn data_ref(self: &Mutex<T>) &T {
         return self.data.get_ref();
@@ -319,7 +321,7 @@ extend<T> Mutex<T> {
 extend<T> Mutex<T> as Free {
     pub fn free(self: &mut Mutex<T>) {
         self.data.get().free(); // deep-free the guarded value (no-op if T isn't Free)
-        raw_mutex_free(self.raw);
+        unsafe raw_mutex_free(self.raw); // `&mut self`: no guard can be outstanding
         self.raw = null;
     }
 }
@@ -331,7 +333,7 @@ extend<T> MutexGuard<T> {
     }
     // The underlying lock, for Condvar::wait to release and re-acquire. Not user-facing.
     pub fn lock_handle(self: &MutexGuard<T>) *mut RawMutex {
-        return self.mutex.raw_handle();
+        return unsafe self.mutex.raw_handle(); // the guard proves the lock is held
     }
     /// Borrow the guarded value.
     pub fn get(self: &MutexGuard<T>) &T {
@@ -622,16 +624,16 @@ extend Condvar {
     /// A coroutine parks (freeing its worker); any other thread blocks. Re-check the condition in a loop --
     /// wakeups may be spurious.
     pub fn wait<T>(self: &Condvar, guard: &MutexGuard<T>) {
-        self.wait_raw(guard.lock_handle(), 0);
+        unsafe self.wait_raw(guard.lock_handle(), 0); // the guard proves the paired lock is held
     }
     /// `wait`, but also returning once the monotonic `deadline` (a `time::deadline_in` value) has passed.
     /// It reports nothing: as with `wait`, re-check the condition -- and the deadline -- in a loop.
     pub fn wait_until<T>(self: &Condvar, guard: &MutexGuard<T>, deadline: u64) {
-        self.wait_raw(guard.lock_handle(), deadline);
+        unsafe self.wait_raw(guard.lock_handle(), deadline); // the guard proves the paired lock is held
     }
     // The whole wait, minus the generic guard: `wait` and `wait_until` differ only in the deadline, so this
     // is monomorphized once instead of per `T`. `pub` for linkage.
-    pub fn wait_raw(self: &Condvar, m: *mut RawMutex, deadline: u64) {
+    pub unsafe fn wait_raw(self: &Condvar, m: *mut RawMutex, deadline: u64) {
         let co = runtime::current();
         if co != null {
             // Queue up under the held lock, then park; the runtime releases the lock once our context is
@@ -673,7 +675,7 @@ extend Condvar {
     /// Queue an externally-owned wait node. For a waiter that must sit on several queues at once (`select`);
     /// an ordinary `wait` builds its own node. Caller holds the paired mutex, and MUST `unregister` the node
     /// before it dies. `pub` for `select`; not user-facing.
-    pub fn register(self: &Condvar, wp: *mut Waiter) {
+    pub unsafe fn register(self: &Condvar, wp: *mut Waiter) {
         unsafe wp.next = null;
         if unsafe self.wq.tail == null {
             unsafe self.wq.head = wp;
@@ -684,7 +686,7 @@ extend Condvar {
     }
     /// Take a `register`ed node back off the queue (a no-op if a notify already popped it). Caller holds the
     /// paired mutex. `pub` for `select`; not user-facing.
-    pub fn unregister(self: &Condvar, wp: *mut Waiter) {
+    pub unsafe fn unregister(self: &Condvar, wp: *mut Waiter) {
         self.unlink(wp);
     }
     // Take a wait node off the queue if it is still on it (a notify pops its own). Caller holds the paired
@@ -714,8 +716,11 @@ extend Condvar {
         if unsafe self.wq.os_waiters == 0 {
             return;
         }
+        // ATOMIC, because the reader is not under this lock: `sc_rt_park` loads this word itself to re-check
+        // the generation before it sleeps. A plain write against that atomic load is a data race whatever the
+        // lock says, and it is the exact shape TSan reports first.
         let w = &mut unsafe self.wq.gen;
-        unsafe self.wq.gen = unsafe self.wq.gen + 1;
+        atomic::store_i32(w, unsafe self.wq.gen + 1, 2);
         unsafe sc_runtime::sc_rt_unpark_all(w);
     }
     /// Wake one waiter. Call under the paired mutex. (OS-thread waiters share one park address, so they all
@@ -760,6 +765,28 @@ extend Condvar as Free {
         g.dealloc(self.wq, sizeof(CondQ), alignof(CondQ));
         self.wq = null;
     }
+}
+
+// -----------------------------------------------------------------------------------------------------
+// Selectable: what `select` needs from an endpoint to wait on it beside others.
+// -----------------------------------------------------------------------------------------------------
+
+/// The three things `std::parallel::selector` needs in order to wait on an endpoint without knowing what it
+/// carries: the lock to take by hand, the queue to sit on, and whether the operation would proceed. Conform
+/// to it and your own type works in a `select` exactly as a channel does.
+///
+/// The contract the compiler cannot state, because an interface cannot declare an `unsafe fn`:
+///
+///  * `select_lock` and `select_queue` return raw pointers into your value. They must stay valid for as long
+///    as the selector holds the arm, and they must be the SAME pair every call -- the selector locks every
+///    arm at once and orders them by address to avoid a deadlock.
+///  * `select_ready` is called WITH `select_lock` held, and must not take it again.
+///  * A ready answer must be honest: `select` will go on to perform the operation, and an arm that says it
+///    is ready and then blocks parks a task nothing will wake.
+pub interface Selectable {
+    fn select_lock(self: &Self) *mut RawMutex;
+    fn select_queue(self: &Self) *const Condvar;
+    fn select_ready(self: &Self) bool;
 }
 
 // -----------------------------------------------------------------------------------------------------

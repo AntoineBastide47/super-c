@@ -190,6 +190,23 @@ fn add_builtin_profiles(m: &mut Manifest) {
         push_flags(&mut p.ldflags, "-flto=auto");
         m.profiles.push(p);
     }
+    // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several
+    // times the memory, and it needs its runtime linked in. No LTO -- it defeats the instrumentation the
+    // tool relies on. This is also what turns on the coroutine fiber annotations in `ffi/sc_rt.c`, without
+    // which every coroutine that migrates between workers reports as a race against itself.
+    //
+    // `-fno-inline` is not tidiness, it is what makes a report TRUE. At plain -O1 this reports one race per
+    // run, on a closure's exit path, and the SAME source is clean at -O0 and clean at `-O1 -fno-inline` --
+    // across five runs each. Inlining changes no memory operation and no lock, so a report that appears and
+    // disappears with it is attribution, not a race: the allocation it blames is inlined into `worker_main`
+    // from a callee, and the write it blames is inlined into a wrapper from the closure body. Losing the
+    // inlining is the price of a report worth acting on.
+    if m.profile_index("race") < 0 {
+        let mut p = Profile::new("race");
+        push_flags(&mut p.cflags, "-O1 -fno-inline -g -fsanitize=thread -fno-omit-frame-pointer");
+        push_flags(&mut p.ldflags, "-fsanitize=thread");
+        m.profiles.push(p);
+    }
 }
 
 fn take_arr(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut Vector<String>) {

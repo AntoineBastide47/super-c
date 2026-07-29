@@ -1113,6 +1113,65 @@ fn static_mut() {
     );
 }
 
+// An interface whose contract the compiler cannot check -- a raw pointer that must outlive the call, a lock
+// the caller must already hold -- has nowhere to say so unless the REQUIREMENT itself can be `unsafe`. The
+// mark then rides through the bound: a generic caller has to make the same promise the concrete one does.
+@test
+fn unsafe_interface_methods() {
+    h::expect_ok(
+        "an unsafe requirement, implemented and called with the mark",
+        "pub interface Raw { unsafe fn peek(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as Raw { pub unsafe fn peek(self: &S) i32 { return self.v; } }\nfn main() i32 { let s = S { v: 0 }; return unsafe s.peek(); }\n",
+    );
+    h::expect_err_msg(
+        "calling it unmarked is rejected",
+        "pub interface Raw { unsafe fn peek(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as Raw { pub unsafe fn peek(self: &S) i32 { return self.v; } }\nfn main() i32 { let s = S { v: 0 }; return s.peek(); }\n",
+        "calling an unsafe function requires an 'unsafe' block",
+    );
+    // The point of putting it on the REQUIREMENT: dispatch through a bound carries it too.
+    h::expect_err_msg(
+        "dispatch through a bound carries the requirement",
+        "pub interface Raw { unsafe fn peek(self: &Self) i32; }\nfn through<T: Raw>(t: &T) i32 { return t.peek(); }\nfn main() i32 { return 0; }\n",
+        "calling an unsafe function requires an 'unsafe' block",
+    );
+    h::expect_ok(
+        "unsafe const fn is accepted in an interface",
+        "pub interface Raw { unsafe const fn tag() i32; }\nstruct S { pub v: i32 }\nextend S as Raw { pub unsafe const fn tag() i32 { return 0; } }\nfn main() i32 { return unsafe S::tag(); }\n",
+    );
+    h::expect_err_msg(
+        "unsafe must still introduce a fn in an interface",
+        "pub interface Raw { unsafe type X; }\nfn main() i32 { return 0; }\n",
+        "expected 'fn' or 'const fn' after 'unsafe' in an interface",
+    );
+}
+
+// An interface method's `const`/`unsafe` are part of the requirement. The direction that matters is an
+// implementation MORE unsafe than its declaration: a caller through the bound sees the safe declaration,
+// promises nothing, and lands in an unsafe body -- the mark laundered away by the interface.
+@test
+fn interface_method_qualifiers() {
+    h::expect_err_msg(
+        "a safe requirement cannot launder an unsafe implementation",
+        "pub interface Get { fn get(self: &Self) i32; }\nstruct Ptr { pub p: *mut i32 }\nextend Ptr as Get { pub unsafe fn get(self: &Ptr) i32 { return unsafe self.p[0]; } }\nfn main() i32 { return 0; }\n",
+        "is not declared 'unsafe fn' by this interface",
+    );
+    h::expect_err_msg(
+        "an unsafe requirement is not met by a safe implementation",
+        "pub interface Raw { unsafe fn peek(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as Raw { pub fn peek(self: &S) i32 { return self.v; } }\nfn main() i32 { return 0; }\n",
+        "is declared 'unsafe fn' by this interface",
+    );
+    h::expect_err_msg(
+        "a const requirement is not met by a non-const implementation",
+        "pub interface Zero { const fn zero() Self; }\nstruct P { pub v: i32 }\nextend P as Zero { pub fn zero() P { return P { v: 0 }; } }\nfn main() i32 { return 0; }\n",
+        "is declared 'const fn' by this interface",
+    );
+    // `const` only has to be strong ENOUGH: `std` leans on this everywhere (`Array as Default` is const
+    // where `Default` is not), so a more capable implementation must stay legal.
+    h::expect_ok(
+        "a const implementation of a plain requirement stays legal",
+        "pub interface Zero { fn zero() Self; }\nstruct P { pub v: i32 }\nextend P as Zero { pub const fn zero() P { return P { v: 0 }; } }\nfn main() i32 { return P::zero().v; }\n",
+    );
+}
+
 // `Send` and `Sync` are the only two conformances nothing verifies: every other interface is checked against
 // its requirements, while these are DERIVED from the fields and a hand-written one overrides that derivation.
 // So the assertion carries `unsafe`, which puts every override in the tree one grep from an audit.

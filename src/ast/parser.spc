@@ -1286,6 +1286,28 @@ extend Parser {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 self.ast.push(f);
+            } else if self.check(TokenType::Unsafe) {
+                // `unsafe fn` / `unsafe const fn` in an interface: the REQUIREMENT is unsafe, so every implementation
+                // must be too (`check_method_qualifiers`), and so is every call through the bound. An interface whose contract the
+                // compiler cannot check (a raw pointer that must stay valid, a lock the caller must already
+                // hold) has nowhere else to say so. LL(1): one token after `unsafe`, then one after `const`.
+                let ustart = self.raw_peek().start();
+                self.advance();
+                let uconst = self.match(TokenType::Const);
+                if !self.check(TokenType::Fn) {
+                    self.error_here("expected 'fn' or 'const fn' after 'unsafe' in an interface");
+                } else {
+                    let f = self.parse_function(false);
+                    self.ast.at(f).as_data.function.is_unsafe = true;
+                    if uconst {
+                        self.ast.at(f).as_data.function.is_const = true;
+                    }
+                    self.ast.at(f).span.start = ustart;
+                    if self.ast.at_const(f).as_data.function.body == NODE_NONE {
+                        self.expect(TokenType::Semicolon, "';'");
+                    }
+                    self.ast.push(f);
+                }
             } else if self.check(TokenType::Const) {
                 let cstart = self.raw_peek().start();
                 self.advance();
