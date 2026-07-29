@@ -122,6 +122,11 @@ static struct {
    therefore not followed: `release` of a lock this thread does not hold is ignored rather than guessed at.
    That costs recall on migrating tasks and never invents a report, which is the right way round for a tool
    whose output is a hard error. */
+/* Compiled in only under -DSC_LOCKDEP (the `race` profile). The hooks sit on `raw_mutex_lock`/`unlock`,
+   whose fast path is ONE CAS at ~4ns -- a cross-TU call that merely checks an env flag tripled that. Empty
+   bodies let LTO delete the call entirely, and a build without LTO pays a no-op call rather than an atomic
+   load and a branch. */
+#ifdef SC_LOCKDEP
 #define SC_LO_HELD 32
 #define SC_LO_EDGES 4096
 static _Thread_local void *sc_lo_held[SC_LO_HELD];
@@ -204,6 +209,11 @@ void sc_rt_lockdep_forget(void *lock) {
   sc_lo_nedge = w;
   sc_rt_spin_unlock(&sc_lo_lock);
 }
+#else
+void sc_rt_lockdep_acquire(void *lock) { (void)lock; }
+void sc_rt_lockdep_release(void *lock) { (void)lock; }
+void sc_rt_lockdep_forget(void *lock) { (void)lock; }
+#endif
 
 void *sc_rt_lot_bucket(void *addr) {
   return &sc_rt_mlot[(size_t)((((uintptr_t)addr >> 4) * 0x9E3779B97F4A7C15ull) >> 58)];

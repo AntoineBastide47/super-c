@@ -162,9 +162,7 @@ pub fn uri_to_path(uri: str) String {
         drive = s.len() >= 3 && s[0] == b'/' && is_drive_letter(s[1]) && s[2] == b':';
     }
     if drive {
-        let trimmed = String::from_str(out.as_str().slice(1, out.len()));
-        out.free();
-        return trimmed;
+        return String::from_str(out.as_str().slice(1, out.len()));
     }
     return out;
 }

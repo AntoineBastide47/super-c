@@ -45,7 +45,6 @@ fn check_threads() i32 {
         let h = handles.pop().unwrap();
         total = total + h.join();
     }
-    handles.free();
     // sum over n in 0..3 of n * (0+..+999) = 6 * 499500
     if total != 2997000 {
         return 1;
@@ -81,15 +80,12 @@ fn check_shared_state() i32 {
         let h = handles.pop().unwrap();
         let _ = h.join();
     }
-    handles.free();
     let mut locked: i64 = 0;
     {
         let lk = guarded.get().lock();
         locked = *lk.get();
     }
     let atomic = counter.get().load(atomics::MemoryOrder::SeqCst);
-    guarded.free();
-    counter.free();
     if locked != 4000 {
         return 2;
     }
@@ -105,7 +101,6 @@ fn check_coroutines() i32 {
     let ch = chan::Channel::<i64>::bounded(8);
     let rx = ch.receiver();
     let tx = ch.sender();
-    ch.free();
     let wg = sync::WaitGroup::new();
     wg.add(32);
     for i in 0..NTASKS {
@@ -133,9 +128,6 @@ fn check_coroutines() i32 {
         };
     }
     let joined = wg.wait_timeout(time::Duration::from_secs(120));
-    tx.free();
-    rx.free();
-    wg.free();
     if !joined {
         return 4;
     }
@@ -153,11 +145,9 @@ fn check_select() i32 {
     let a = chan::Channel::<i64>::bounded(4);
     let arx = a.receiver();
     let atx = a.sender();
-    a.free();
     let b = chan::Channel::<i64>::bounded(4);
     let brx = b.receiver();
     let btx = b.sender();
-    b.free();
 
     let _ = btx.send(7);
     let mut s = selector::Selector::new();
@@ -200,11 +190,6 @@ fn check_select() i32 {
         }
     }
     let joined = wg.wait_timeout(time::Duration::from_secs(120));
-    atx.free();
-    arx.free();
-    btx.free();
-    brx.free();
-    wg.free();
     if rc != 0 {
         return rc;
     }
@@ -243,7 +228,6 @@ fn check_data_parallel() i32 {
             return a + b;
         },
     );
-    v.free();
     // 2 * (0 + .. + 4999)
     if total != 24995000 {
         return 10;

@@ -126,7 +126,6 @@ extend<T> SliceMut<T> {
         if i >= self.len {
             panic("SliceMut::set: index out of bounds");
         }
-        unsafe self.ptr[i].free();
         unsafe self.ptr[i] = value;
     }
 

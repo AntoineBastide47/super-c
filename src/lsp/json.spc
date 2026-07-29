@@ -225,11 +225,9 @@ extend JSON {
         return self.size() == 0;
     }
 
-    // Free any held payload and become an empty value of `kind` (the variant reassignment in C++).
+    // Become an empty value of `kind` (the variant reassignment in C++). Assigning over a field frees what
+    // it held, so the three stores below are the release as well as the reset.
     fn reset_to(self: &mut Self, kind: u8) {
-        self.s.free();
-        self.arr.free();
-        self.obj.free();
         self.s = String::new();
         self.arr = Vector::<JSON>::new();
         self.obj = Vector::<JSONPair>::new();
@@ -500,9 +498,6 @@ extend JSONParser {
     fn fail_s(self: &mut Self, msg: String) {
         if self.err.len() == 0 {
             self.err = msg;
-        } else {
-            let m = msg;
-            m.free();
         }
     }
 
@@ -564,8 +559,6 @@ extend JSONParser {
         let t = self.top() as *mut JSON;
         if !self.comma_detected && unsafe t.arr.len() != 0 {
             self.fail("Missing ',' between array members");
-            let j = json;
-            j.free();
             return;
         }
         unsafe t.arr.push(json);
@@ -924,7 +917,6 @@ extend JSONParser {
                         if needs_decode {
                             text = self.parse_raw_string(i + 1, q);
                             if self.err.len() != 0 {
-                                text.free();
                                 return i;
                             }
                         } else {
@@ -938,7 +930,6 @@ extend JSONParser {
                                     self.candidate_key = text;
                                     self.candidate_key_set = true;
                                 } else {
-                                    text.free();
                                     self.fail("Missing a colon after a key");
                                     return i;
                                 }
@@ -951,9 +942,8 @@ extend JSONParser {
                             unsafe *t = JSON::string(text);
                             self.stack.pop();
                             return q + 1;
-                        } else {
-                            text.free();
                         }
+
                         i = q;
                         done = true;
                         break;
@@ -1038,8 +1028,6 @@ extend JSONParser {
                 } else if self.stack.len() == 1 {
                     unsafe *t = val;
                     return i + lit.len();
-                } else {
-                    val.free();
                 }
                 i += lit.len() - 1;
             } else {
@@ -1071,21 +1059,17 @@ pub fn parse(src: str) Result<JSON, String> {
     p.stack.push(((&mut root) as *mut JSON) as usize);
     let consumed = p.parse_buffer();
     if p.err.len() != 0 {
-        root.free();
         return Result::<JSON, String>::Err(p.take_err());
     }
     if !p.found_data {
-        root.free();
         return Result::<JSON, String>::Err(String::from_str("Empty input is not valid JSON"));
     }
     if p.stack.len() != 0 {
         let t = p.top() as *mut JSON;
         if unsafe t.kind == JT_OBJECT {
-            root.free();
             return Result::<JSON, String>::Err(String::from_str("Missing closing '}' for object"));
         }
         if unsafe t.kind == JT_ARRAY {
-            root.free();
             return Result::<JSON, String>::Err(String::from_str("Missing closing ']' for array"));
         }
     }
@@ -1095,7 +1079,6 @@ pub fn parse(src: str) Result<JSON, String> {
     }
     if tail < src.len() {
         p.eof_junk(src[tail]);
-        root.free();
         return Result::<JSON, String>::Err(p.take_err());
     }
     return Result::<JSON, String>::Ok(root);

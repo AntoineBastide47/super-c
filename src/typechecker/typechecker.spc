@@ -3631,7 +3631,6 @@ extend TypeChecker {
             ),
         );
         self.errors.note(format("implement Free for '{}' and free the ACTIVE member there", nm));
-        fields.free();
     }
     fn tc_member_owns(self: &mut Self, om: ModuleId, tnode: NodeId, gp: *const DefId, ga: *const TypeId, gn: i32) bool {
         let mut ft = self.lower_type_in(om, tnode);
@@ -10820,8 +10819,6 @@ extend TypeChecker {
             }
             i = i + 1;
         }
-        used.free();
-        marked.free();
     }
 
     /// Entry point: types every top-level item, closes concrete generic instances (interning their

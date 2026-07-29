@@ -83,7 +83,6 @@ extend<T, const N: usize> StaticVector<T, N> {
             panic("StaticVector::set: index out of bounds");
         }
         let p = (&mut unsafe self.data[0]) as *mut T;
-        unsafe p[index].free();
         unsafe p[index] = value;
     }
 
@@ -109,10 +108,8 @@ extend<T, const N: usize> StaticVector<T, N> {
     /// Shortens to `new_len` elements, freeing the dropped tail (no-op when already shorter).
     pub const fn truncate(self: &mut StaticVector<T, N>, new_len: usize) {
         if new_len < self.len {
-            let mut i = new_len;
-            while i < self.len {
+            for i in new_len..self.len {
                 unsafe self.data[i].free();
-                i = i + 1;
             }
             self.len = new_len;
         }

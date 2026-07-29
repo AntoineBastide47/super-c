@@ -316,7 +316,6 @@ pub fn profile_flags(name: str, target: i32) String {
         push_profile(&mut out, &prof.cflags, target);
         push_profile(&mut out, &prof.ldflags, target);
     }
-    m.free();
     return out;
 }
 
@@ -1083,7 +1082,6 @@ fn bench_import_root(out: &mut String) usize {
         out.push_str(";\n");
         n = n + 1;
     }
-    rels.free();
     return n;
 }
 
@@ -1189,7 +1187,7 @@ fn bench_run_root(found: &Vector<String>, out: &mut String) {
         out.push_str(modpath);
         out.push_str(";\n");
     }
-    seen.free();
+
     out.push_str("import std::testing::bench as __bench;\n\nfn main() i32 {\n    __bench::begin();\n");
     for i in 0..found.len() {
         let raw = found.at(i).as_str();
@@ -1261,12 +1259,10 @@ pub fn manifest_bench(
     }
     if found.len() == 0 {
         eprintln("bench: no '@bench' functions under bench/");
-        found.free();
         return 1;
     }
     let mut rootsrc = String::new();
     bench_run_root(&found, &mut rootsrc);
-    found.free();
     let genp = join2(m.out_dir.as_str(), "bench_root.spc");
     if write_file(genp.as_str(), rootsrc.as_str()) != 0 {
         eprintln("bench: cannot write '{}'", genp.as_str());

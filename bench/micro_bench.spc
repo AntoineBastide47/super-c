@@ -52,7 +52,6 @@ pub fn spawn_to_completion(b: &mut bench::Bencher) {
             };
         }
         wg.wait();
-        wg.free();
     }
 }
 
@@ -73,7 +72,6 @@ pub fn spawn_latency(b: &mut bench::Bencher) {
                 w.done();
             };
             wg.wait();
-            wg.free();
         }
     }
 }
@@ -121,11 +119,6 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
         }
         tx.close();
         wg.wait();
-        wg.free();
-        let t = there;
-        let bk = back;
-        t.free();
-        bk.free();
     }
 }
 
@@ -172,9 +165,6 @@ pub fn mutex_contended(b: &mut bench::Bencher) {
             };
         }
         wg.wait();
-        wg.free();
-        let s = shared;
-        s.free();
     }
 }
 
@@ -228,18 +218,13 @@ fn channel_lane(b: &mut bench::Bencher, cap: usize) {
         }
         tx.close();
         wg.wait();
-        wg.free();
         if sent != MSGS {
             short = short + 1;
         }
-        let cc = ch;
-        cc.free();
     }
     if short != 0 {
         b.note("SHORT: some rounds failed to send every message");
     }
-    let s = seen;
-    s.free();
 }
 
 @bench
@@ -284,7 +269,6 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
                 n = n + k as i64;
                 got.clear();
             }
-            got.free();
             let _ = c.get().fetch_add(n, atomics::MemoryOrder::Relaxed);
             w.done();
         };
@@ -304,15 +288,9 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
             let _ = tx.send_batch(&mut out);
             i = i + take;
         }
-        out.free();
         tx.close();
         wg.wait();
-        wg.free();
-        let cc = ch;
-        cc.free();
     }
-    let s = seen;
-    s.free();
 }
 
 // --- fan-in -----------------------------------------------------------------------------------------
@@ -341,7 +319,6 @@ pub fn waitgroup_fanin(b: &mut bench::Bencher) {
             };
         }
         wg.wait();
-        wg.free();
     }
 }
 

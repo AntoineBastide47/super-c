@@ -9506,12 +9506,8 @@ extend Codegen {
                     };
                 }
             }
-            mts.free();
-            mnames.free();
         }
         if list.len() == 0 {
-            list.free();
-            seen.free();
             return;
         }
         self.emit_str("\n/* auto-derived frees */\n");
@@ -9522,9 +9518,8 @@ extend Codegen {
         for d in 0..list.len() {
             self.emit_auto_free_def(list[d]);
         }
-        list.free();
-        seen.free();
     }
+
     fn emit_auto_free_sig(self: &mut Self, rt: TypeId) {
         let mut y2 = *self.type_at(rt);
         y2.qualifier = TypeQualifier::TYPE_QUAL_NONE as u8;
@@ -9633,8 +9628,6 @@ extend Codegen {
             }
         }
         self.emit_str("}\n");
-        mts.free();
-        locs.free();
     }
     fn emit_defers_to(self: &mut Self, base: u32) {
         let mut i = self.defer_top;
@@ -13316,7 +13309,6 @@ extend Codegen {
         if any {
             self.emit_str("\n");
         }
-        seen.free();
     }
     // The `@blocking` function a callee expression names, or a null DefId. Variadic ones are skipped: their
     // arguments cannot be packed into a frame.
@@ -13694,7 +13686,6 @@ extend Codegen {
                 diag::cstr(sp),
             );
         }
-        dyn_seen.free();
     }
     fn emit_dynfn_table(self: &mut Self, src: TypeId, dy: Ty) {
         let sy = *self.cur_ast().type_at(src);
@@ -14027,7 +14018,7 @@ extend Codegen {
             self.emit_str(" };\n");
             self.nsubst = saved_subst2;
         }
-        tbl_seen.free();
+
         if unsafe self.cur_ast().dyn_uses.len() != 0 {
             self.emit_str("\n");
         }

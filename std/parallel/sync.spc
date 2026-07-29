@@ -908,9 +908,11 @@ extend WaitGroup {
         }
         // Last one out. Take the gate before notifying: a waiter that has read a non-zero count but is not
         // yet inside `wait` holds it, so this cannot notify into the gap and leave that waiter asleep.
-        let g = inner.gate.lock();
+        // A waiter that saw the zero may already be dropping its handle, so from here down the gate and cv
+        // are held up by `self`'s own handle alone -- safe because Arc's AcqRel teardown orders every
+        // handle's last touch (these included) before the free.
+        let _g = inner.gate.lock(); // held for the duration; unlocks at scope exit, as in `call_once`
         inner.cv.notify_all();
-        g.free();
     }
     /// Wait until the outstanding count reaches zero.
     pub fn wait(self: &WaitGroup) {

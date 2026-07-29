@@ -89,7 +89,6 @@ extend TcpListener {
     pub fn bind(host: str, port: i32) Result<TcpListener, IoError> {
         let mut h = String::from_str(host);
         let fd = unsafe sc_io::sc_tcp_listen(h.cstr(), port, 128);
-        h.free();
         if fd < 0 {
             return Result::<TcpListener, IoError>::Err(IoError::last());
         }
@@ -145,7 +144,6 @@ extend TcpStream {
     pub fn connect(host: str, port: i32) Result<TcpStream, IoError> {
         let mut h = String::from_str(host);
         let fd = unsafe sc_io::sc_tcp_connect(h.cstr(), port);
-        h.free();
         if fd < 0 {
             return Result::<TcpStream, IoError>::Err(IoError::last());
         }
@@ -204,7 +202,6 @@ extend UdpSocket {
     pub fn bind(host: str, port: i32) Result<UdpSocket, IoError> {
         let mut h = String::from_str(host);
         let fd = unsafe sc_io::sc_udp_bind(h.cstr(), port);
-        h.free();
         if fd < 0 {
             return Result::<UdpSocket, IoError>::Err(IoError::last());
         }
@@ -220,12 +217,10 @@ extend UdpSocket {
         loop {
             let n = unsafe sc_io::sc_udp_send_to(self.fd, buf.ptr, buf.len(), h.cstr(), port);
             if n >= 0 {
-                h.free();
                 return Result::<usize, IoError>::Ok(n as usize);
             }
             if unsafe sc_io::sc_io_would_block() == 0 {
                 let e = IoError::last();
-                h.free();
                 return Result::<usize, IoError>::Err(e);
             }
             io::wait_writable(self.fd);

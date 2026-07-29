@@ -103,7 +103,6 @@ fn main() i32 {
             };
         }
         wg.wait();
-        wg.free();
     }
     let dt = (platform::now_ns() - t0) as f64;
     unsafe stdio::printf("%.1f %.0f\n".ptr() as *const char, dt / 1000000.0 / iters as f64, dt / (iters * tasks) as f64);

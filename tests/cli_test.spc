@@ -2212,9 +2212,11 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
-    let cc = p.cc_build("");
+    // -DSC_LOCKDEP is what compiles the hooks in at all: they sit on a lock fast path of one CAS, so an
+    // ungated call to check an env flag tripled `mutex_uncontended`. The `race` profile defines it.
+    let cc = p.cc_build("-DSC_LOCKDEP");
     assert_eq(cc.exit, 0);
-    // Off by default: an inversion costs nothing and says nothing.
+    // Compiled in but not switched on: an inversion costs nothing and says nothing.
     let quiet = p.run_bin();
     assert_eq(quiet, 0);
     let on = p.run_bin_env("SC_LOCK_ORDER=1 ");

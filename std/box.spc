@@ -31,7 +31,6 @@ extend<T, A: Allocator> Box<T, A> {
 
     /// Frees the current value, then stores `value` (the box takes ownership of it).
     pub const fn set(self: &mut Box<T, A>, value: T) {
-        unsafe self.ptr[0].free();
         unsafe self.ptr[0] = value;
     }
 

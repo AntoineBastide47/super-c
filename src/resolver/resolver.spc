@@ -1723,8 +1723,6 @@ extend Resolver {
             }
             i = i + 1;
         }
-        seen.free();
-        used.free();
     }
 
     // ---- lint: back-to-back stores -- the first assigned value is overwritten before any read ----
@@ -1878,7 +1876,6 @@ extend Resolver {
             }
             i = i + 1;
         }
-        exempt.free();
     }
 
     // ---- lint: loop labels never targeted by a break/continue ------------------------------------

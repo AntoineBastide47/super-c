@@ -2012,7 +2012,6 @@ fn seed_mono_body_instances(p: &mut Package) {
             let _ = seed_push(&mut seeds, MonoSeed { fd: fd2, n: g2.len as u8, args: cargs });
         }
     }
-    seeds.free();
 }
 
 /// Owner-emits generic instances used across module boundaries: re-intern every concrete instance (and

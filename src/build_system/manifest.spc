@@ -203,7 +203,7 @@ fn add_builtin_profiles(m: &mut Manifest) {
     // inlining is the price of a report worth acting on.
     if m.profile_index("race") < 0 {
         let mut p = Profile::new("race");
-        push_flags(&mut p.cflags, "-O1 -fno-inline -g -fsanitize=thread -fno-omit-frame-pointer");
+        push_flags(&mut p.cflags, "-O1 -fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
         push_flags(&mut p.ldflags, "-fsanitize=thread");
         m.profiles.push(p);
     }

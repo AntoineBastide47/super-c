@@ -57,12 +57,12 @@ unsafe extend<T: Send + Sync> Arc<T> as Sync {}
 // owns the teardown -- it deep-frees the value and releases the block.
 extend<T> Arc<T> as Free {
     pub fn free(self: &mut Arc<T>) {
-        // Release: earlier writes through this handle must be visible to the thread that tears down.
-        let prev = unsafe atomic::sub_usize(&mut self.ptr.strong, 1, atomics::MemoryOrder::Release as i32);
+        // AcqRel, not Release + an Acquire fence on the zero path: the decrement chain is what orders every
+        // handle's LAST payload access before the teardown (a `WaitGroup` doner is still inside the gate
+        // after publishing zero, and only this drop orders that use before a free) -- and a standalone fence
+        // is outside TSan's memory model, so the race gate could never check the fence form.
+        let prev = unsafe atomic::sub_usize(&mut self.ptr.strong, 1, atomics::MemoryOrder::AcqRel as i32);
         if prev == 1 {
-            // Acquire fence pairs with the Release decrements above so every prior handle's writes are
-            // visible before we drop the value.
-            atomics::fence(atomics::MemoryOrder::Acquire);
             // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free -- freeing the
             // place directly would be a conditional move out of a dereference.
             let vp = (&mut unsafe self.ptr.value) as *mut T;

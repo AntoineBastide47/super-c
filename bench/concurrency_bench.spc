@@ -90,7 +90,6 @@ fn one_iteration(io_share: i64) f64 {
     }
     wg.wait();
     let dt = (platform::now_ns() - t0) as f64 / 1000000000.0;
-    wg.free();
     return dt;
 }
 
@@ -112,7 +111,6 @@ fn run_lane(b: &mut bench::Bencher, io_share: i64) {
     note.push_i64(allocs);
     note.push_str(" alloc/task");
     b.note(note.as_str());
-    note.free();
 }
 
 @bench

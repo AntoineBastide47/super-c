@@ -54,7 +54,6 @@ extend<T, const N: usize> Array<T, N> {
         if index >= N {
             panic("Array::set: index out of bounds");
         }
-        unsafe self.data[index].free();
         unsafe self.data[index] = value;
     }
 

@@ -289,19 +289,13 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
             out.push_string(&sig);
             out.push_str("\n```");
         }
-        let s = sig;
-        s.free();
         let doc = decl_doc(p, d);
         if doc.len() != 0 {
             out.push_str("\n\n");
             out.push_string(&doc);
         }
-        let dd = doc;
-        dd.free();
     }
     if out.len() == 0 {
-        let o = out;
-        o.free();
         return Option::<String>::None;
     }
     return Option::<String>::Some(out);
@@ -542,14 +536,10 @@ extend CompItem as Free {
 
 fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) {
     if label.len() == 0 {
-        let d = detail;
-        d.free();
         return;
     }
     for k in 0..out.len() {
         if out.at(k).label.as_str() == label {
-            let d = detail;
-            d.free();
             return;
         }
     }

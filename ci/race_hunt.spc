@@ -51,12 +51,8 @@ fn hunt_rwlock() i64 {
         };
     }
     wg.wait();
-    wg.free();
     let g = l.get().read();
     let out = *g.get();
-    g.free();
-    let x = l;
-    x.free();
     return out;
 }
 
@@ -77,9 +73,6 @@ fn hunt_semaphore() {
         };
     }
     wg.wait();
-    wg.free();
-    let x = s;
-    x.free();
 }
 
 // 3. Barrier: reused across rounds, so the generation counter is what is really under test.
@@ -98,9 +91,6 @@ fn hunt_barrier() {
         };
     }
     wg.wait();
-    wg.free();
-    let x = b;
-    x.free();
 }
 
 // 4. Once: every task races to be the one initialiser, and all must see the result.
@@ -123,9 +113,6 @@ fn hunt_once() i64 {
         };
     }
     wg.wait();
-    wg.free();
-    let x = o;
-    x.free();
     return unsafe ONCE_VAL;
 }
 
@@ -183,10 +170,7 @@ fn hunt_blocking() i64 {
         };
     }
     wg.wait();
-    wg.free();
     let out = hits.get().load(atomics::MemoryOrder::Relaxed);
-    let x = hits;
-    x.free();
     return out;
 }
 
@@ -195,7 +179,6 @@ fn hunt_batch() i64 {
     let ch = chan::Channel::<i64>::bounded(32);
     let rx = ch.receiver();
     let tx = ch.sender();
-    ch.free();
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
@@ -205,7 +188,6 @@ fn hunt_batch() i64 {
             out.push(i);
         }
         let _ = tx.send_batch(&mut out);
-        out.free();
         tx.close();
         w.done();
     };
@@ -219,10 +201,7 @@ fn hunt_batch() i64 {
         n = n + k as i64;
         got.clear();
     }
-    got.free();
-    rx.free();
     wg.wait();
-    wg.free();
     return n;
 }
 
@@ -234,7 +213,6 @@ fn hunt_timers() i64 {
     let ch = chan::Channel::<i64>::bounded(1);
     let rx = ch.receiver();
     let tx = ch.sender();
-    ch.free();
     let wg = sync::WaitGroup::new();
     wg.add(T2);
     let got = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
@@ -264,11 +242,7 @@ fn hunt_timers() i64 {
     }
     tx.close();
     wg.wait();
-    wg.free();
-    rx.free();
     let out = got.get().load(atomics::MemoryOrder::Relaxed);
-    let x = got;
-    x.free();
     return out;
 }
 
@@ -281,8 +255,6 @@ fn hunt_select_contention() i64 {
     let brx = b.receiver();
     let atx = a.sender();
     let btx = b.sender();
-    a.free();
-    b.free();
     let hits = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
     let wg = sync::WaitGroup::new();
     wg.add(T2);
@@ -314,14 +286,7 @@ fn hunt_select_contention() i64 {
     atx.close();
     btx.close();
     wg.wait();
-    wg.free();
-    arx.free();
-    brx.free();
-    atx.free();
-    btx.free();
     let out = hits.get().load(atomics::MemoryOrder::Relaxed);
-    let x = hits;
-    x.free();
     return out;
 }
 
@@ -330,7 +295,6 @@ fn hunt_close_race() i64 {
     let ch = chan::Channel::<i64>::bounded(4);
     let rx = ch.receiver();
     let tx = ch.sender();
-    ch.free();
     let wg = sync::WaitGroup::new();
     wg.add(T2);
     for t in 0..T2 {
@@ -352,9 +316,6 @@ fn hunt_close_race() i64 {
         };
     }
     wg.wait();
-    wg.free();
-    tx.free();
-    rx.free();
     return 0;
 }
 
@@ -395,14 +356,9 @@ fn hunt_mixed_threads() i64 {
     for i in 0..hs.len() {
         let _ = hs[i].join();
     }
-    hs.free();
     wg.wait();
-    wg.free();
     let g = m.get().lock();
     let out = *g.get();
-    g.free();
-    let x = m;
-    x.free();
     return out;
 }
 

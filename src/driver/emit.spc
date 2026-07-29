@@ -922,7 +922,6 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
                         break;
                     }
                 }
-                clo.free();
             }
             if !used {
                 let sp = a.at_const(iid).span;
@@ -934,7 +933,7 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
                 errs.fix(sp.start, fe, 0);
             }
         }
-        usedm.free();
+
         if fixes != null {
             for k in 0..errs.fixes.len() {
                 fixes.push(errs.fixes[k]);
@@ -1102,7 +1101,6 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
                 }
             }
         }
-        init_src.free();
     }
     for m in 0..nm {
         if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
@@ -1187,9 +1185,6 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
             errs.log();
         }
     }
-    starts.free();
-    used.free();
-    read.free();
 }
 
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {

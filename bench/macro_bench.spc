@@ -145,14 +145,8 @@ fn pipeline_once() {
     }
     tx.close();
     wg.wait(); // every stage has finished, so no sender remains on `output`
-    wg.free();
     output.sender().close();
     drain.wait();
-    drain.free();
-    let a = input;
-    let b = output;
-    a.free();
-    b.free();
 }
 
 @bench(log_results = false)
@@ -193,7 +187,6 @@ fn pipeline_batched_once() {
                 let _ = fwd.send_batch(&mut buf); // leaves `buf` empty, ready for the next batch
                 buf.clear();
             }
-            buf.free();
             w.done();
         };
     }
@@ -208,7 +201,6 @@ fn pipeline_batched_once() {
             }
             buf.clear();
         }
-        buf.free();
         d.done();
     };
     let mut out = Vector::<i64>::new();
@@ -226,17 +218,10 @@ fn pipeline_batched_once() {
         let _ = tx.send_batch(&mut out);
         i = i + take;
     }
-    out.free();
     tx.close();
     wg.wait();
-    wg.free();
     output.sender().close();
     drain.wait();
-    drain.free();
-    let a = input;
-    let b = output;
-    a.free();
-    b.free();
 }
 
 @bench(log_results = false)
@@ -349,7 +334,6 @@ fn tree_once() {
         };
     }
     wg.wait();
-    wg.free();
 }
 
 @bench(log_results = false)
@@ -403,14 +387,8 @@ fn mixed_once() {
         };
     }
     wg.wait();
-    wg.free();
     tx.close();
     drain.wait();
-    drain.free();
-    let c = ch;
-    c.free();
-    let cn = counter;
-    cn.free();
 }
 
 @bench(log_results = false)
