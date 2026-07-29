@@ -78,8 +78,9 @@ pub fn on_windows() bool {
 // $SUPERC, or the built compiler beside the CWD when unset (gen1 for the self-hosted check). Resolved to an
 // ABSOLUTE path: Windows' CreateProcess does not take a `./`-relative program the way a POSIX shell does.
 fn superc() *const char {
-    if SUPERC_RESOLVED[0] != 0 as char {
-        return &SUPERC_RESOLVED[0];
+    // Process-local: the runner forks one process per test, so this resolve-once cache is never shared.
+    if unsafe SUPERC_RESOLVED[0] != 0 as char {
+        return &unsafe SUPERC_RESOLVED[0];
     }
     let sc = stdlib::getenv("SUPERC");
     let mut want = Path512 {};
@@ -97,7 +98,7 @@ fn superc() *const char {
     } else {
         unsafe stdio::snprintf(&mut want[0], 512, "%s".ptr() as *const char, sc);
     }
-    let slot = ((&mut SUPERC_RESOLVED) as *mut Path512) as *mut char;
+    let slot = ((&mut unsafe SUPERC_RESOLVED) as *mut Path512) as *mut char;
     if unsafe shim::sc_realpath(&want[0], slot) == null {
         unsafe stdio::snprintf(slot, 512, "%s".ptr() as *const char, &want[0]);
     }
@@ -209,7 +210,7 @@ pub fn run_io(cmd: *const char, in_path: *const char, out_path: *const char, err
 pub type Proj = Array<char, 256>;
 
 pub fn proj_new() Proj {
-    C_SEQ = C_SEQ + 1;
+    unsafe C_SEQ = unsafe C_SEQ + 1; // process-local: one forked process per test, and the name carries the pid
     let pid = unsafe shim::sc_getpid();
     let mut p = Proj {};
     unsafe stdio::snprintf(
@@ -218,7 +219,7 @@ pub fn proj_new() Proj {
         "%s/sccli_%d_%llu".ptr() as *const char,
         unsafe shim::sc_tmpdir(),
         pid,
-        C_SEQ,
+        unsafe C_SEQ,
     );
     let _ = unsafe shim::sc_mkdir_p(&p[0]);
     return p;

@@ -3418,6 +3418,14 @@ extend TypeChecker {
     const fn is_sync_iface(self: &Self, tr: DefId) bool {
         return self.iface_named(tr, "Sync");
     }
+    // Is this aggregate the prelude `UnsafeCell`? See the `Sync` rule in `tc_thread_marker`.
+    fn is_unsafe_cell_decl(self: &Self, om: ModuleId, od: NodeId) bool {
+        if self.package == null {
+            return false;
+        }
+        let hit = self.package.prelude_lookup("UnsafeCell", true);
+        return hit.node != NODE_NONE && hit.mid == om && hit.node == od;
+    }
     // Structural `Send`/`Sync`: is `ty` safe to transfer to (`sync=false`) or share with (`sync=true`)
     // another thread? Scalars/str yes; a raw pointer no (so is anything transitively holding one); a
     // reference reduces to `Sync` of its pointee; a closure to all its captures; an aggregate to all its
@@ -3471,6 +3479,14 @@ extend TypeChecker {
         let mut ga = Tys8 {};
         let mut gn: i32 = 0;
         if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            return false;
+        }
+        // `UnsafeCell<T>` is never `Sync`. It hands out a `*mut T` from a SHARED borrow, so two threads
+        // holding `&UnsafeCell<T>` can write the same value at once -- and the field walk below would read
+        // straight through the cell to its payload and grant `Sync` for free, which is the whole hole
+        // interior mutability is supposed to be gated by. Anything built on one (`Atomic`, `Mutex`,
+        // `RwLock`) is shareable only by ASSERTING `Sync`, which is where its discipline is written down.
+        if sync && self.is_unsafe_cell_decl(om, od) {
             return false;
         }
         let ci = self.marker_iface(sync);
@@ -4510,6 +4526,26 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
+    // Every read and write of a `static mut` is an unsafe operation, on the same footing as dereferencing a
+    // raw pointer. A `static mut` is unsynchronised shared mutable state reachable from any task without
+    // being captured, so it slips past the `Send`/`Sync` check on a `launch` -- there is nothing to capture
+    // and so nothing to check. Nothing in the type system can prove such an access is free of a data race,
+    // so the compiler stops guessing and makes the author say so: the marker is the audit trail.
+    //
+    // Use an `Atomic`, or a `Mutex`, or keep the state in the task. `unsafe` here is a claim that the
+    // accesses are ordered by something the compiler cannot see.
+    fn tc_static_mut_use(self: &mut Self, id: NodeId, d: DefId) {
+        if d.node == NODE_NONE {
+            return;
+        }
+        let dn = self.mod_ast(d.module).at_const(d.node);
+        if dn.kind != NodeKind::NODE_CONST || !dn.as_data.const_def.is_static_mut {
+            return;
+        }
+        if self.tc_needs_unsafe() {
+            self.err_unsafe(self.cur_ast().at_const(id).span, "accessing a 'static mut'");
+        }
+    }
     // ---- places / assignability ----
     const fn tc_path_static_mut(self: &Self, id: NodeId) bool {
         let n = self.cur_ast().at_const(id);
@@ -7687,6 +7723,7 @@ extend TypeChecker {
             let dnk = self.mod_ast(direct.module).at_const(direct.node).kind;
             if dnk == NodeKind::NODE_FUNCTION || dnk == NodeKind::NODE_CONST || dnk == NodeKind::NODE_LET {
                 self.cur_ast().set_resolution_def(mem, direct);
+                self.tc_static_mut_use(id, direct); // `mod::G` reaches the same shared state as a bare `G`
                 return self.decl_type_in(direct.module, direct.node);
             }
             return self.named_type_of(direct.module, direct.node);
@@ -8679,6 +8716,7 @@ extend TypeChecker {
                 if d.node != NODE_NONE && self.mod_ast(d.module).at_const(d.node).kind == NodeKind::NODE_FUNCTION {
                     self.tc_check_test_ref(d, a.at_const(id).span);
                 }
+                self.tc_static_mut_use(id, d);
             },
             NODE_UNARY => {
                 result = self.check_unary(id);

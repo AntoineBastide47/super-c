@@ -225,6 +225,9 @@ pub struct ExtendData {
     pub interface_type: NodeId,
     pub target_type: NodeId,
     pub items: NodeList,
+    // `unsafe extend T as I {}`: the conformance asserts something the compiler cannot check, so the author
+    // carries the obligation. Parsed and preserved; nothing requires it yet.
+    pub is_unsafe: bool,
 }
 pub struct TypeAliasData {
     pub name: NodeId,

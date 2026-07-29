@@ -1855,6 +1855,9 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
         },
         NODE_EXTEND => {
             let e = n.as_data.extend_def;
+            if e.is_unsafe {
+                v.push(b.p.txt("unsafe "));
+            }
             v.push(b.p.txt("extend"));
             if e.generics.len > 0 {
                 b_generics_lt(b, b.ast.lifetimes_of(id), e.generics, &mut v);

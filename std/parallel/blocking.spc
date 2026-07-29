@@ -114,18 +114,23 @@ fn build_pool() *mut Pool {
 
 // The pool, started on first use. Same init state machine as the scheduler's.
 fn ensure_pool() *mut Pool {
-    let sp = (&mut G_STATE) as *mut i32; // 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
-    if atomic_load(sp) == 2 {
+    // `G_POOL` is ordered by `G_STATE`, which the compiler cannot see: the CAS winner publishes the pointer
+    // and THEN releases state 2, and every reader acquires state 2 first, so the write happens-before every
+    // read. That handshake is what this `unsafe` asserts.
+    unsafe {
+        let sp = (&mut G_STATE) as *mut i32; // 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
+        if atomic_load(sp) == 2 {
+            return G_POOL;
+        }
+        if atomic_cas(sp, 0, 1) {
+            let p = build_pool();
+            G_POOL = p;
+            atomic_store(sp, 2);
+            return p;
+        }
+        while atomic_load(sp) != 2 {}
         return G_POOL;
     }
-    if atomic_cas(sp, 0, 1) {
-        let p = build_pool();
-        G_POOL = p;
-        atomic_store(sp, 2);
-        return p;
-    }
-    while atomic_load(sp) != 2 {}
-    return G_POOL;
 }
 
 // Thin wrappers so the init machinery reads the same as the scheduler's without importing ffi here.
@@ -251,11 +256,11 @@ pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
 /// Stop the blocking pool and join its threads. Idempotent; a no-op if it never started. Call it once, from
 /// the main thread, after every `call` has returned -- alongside `runtime::shutdown()`.
 pub fn shutdown() {
-    let sp = (&mut G_STATE) as *mut i32;
+    let sp = (&mut unsafe G_STATE) as *mut i32;
     if atomic_load(sp) != 2 {
         return;
     }
-    let p = G_POOL;
+    let p = unsafe G_POOL;
     unsafe sc_runtime::sc_rt_mutex_lock(p.lock);
     unsafe p.shutting = 1;
     unsafe sc_runtime::sc_rt_cond_broadcast(p.cv);
@@ -271,5 +276,5 @@ pub fn shutdown() {
     let mut g = Global {};
     g.dealloc(p, sizeof(Pool), alignof(Pool));
     atomic_store(sp, 0);
-    G_POOL = null;
+    unsafe G_POOL = null;
 }

@@ -1081,8 +1081,20 @@ fn question_error_conversion() {
 @test
 fn static_mut() {
     h::expect_ok(
-        "static mut is assignable and borrowable",
-        "static mut counter: i32 = 10;\nfn bump() { counter += 5; }\nfn main() i32 { counter = counter + 1; bump(); let r = &mut counter; *r += 1; return counter; }\n",
+        "static mut is assignable and borrowable inside unsafe",
+        "static mut counter: i32 = 10;\nfn bump() { unsafe counter += 5; }\nfn main() i32 { unsafe { counter = counter + 1; bump(); let r = &mut counter; *r += 1; return counter; } }\n",
+    );
+    // Unsynchronised shared mutable state that no `launch` has to capture, so the `Send`/`Sync` check on a
+    // task never sees it: the only defence is making every access say so.
+    h::expect_err_msg(
+        "reading a static mut requires unsafe",
+        "static mut counter: i32 = 10;\nfn main() i32 { return counter; }\n",
+        "accessing a 'static mut' requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "writing a static mut requires unsafe",
+        "static mut counter: i32 = 10;\nfn main() i32 { counter = 1; return 0; }\n",
+        "accessing a 'static mut' requires an 'unsafe' block",
     );
     h::expect_err_msg(
         "a const is not assignable",
@@ -1098,6 +1110,23 @@ fn static_mut() {
         "static mut rejects owning types",
         "static mut v: Vector<i32> = Vector::<i32>::new();\nfn main() i32 { return 0; }\n",
         "cannot hold an owning",
+    );
+}
+
+// `UnsafeCell` hands out a `*mut T` from a SHARED borrow, so sharing one across threads is the definition of
+// a data race. The structural walk used to read through the cell to its payload and grant `Sync` for free,
+// which made every interior-mutable type shareable by accident -- including ones with no synchronisation at
+// all. Now the cell stops the walk, and a type built on one has to say what makes it safe.
+@test
+fn unsafe_cell_is_not_sync() {
+    h::expect_err_msg(
+        "a struct holding an UnsafeCell is not Sync",
+        "struct Cell { pub c: UnsafeCell<i32> }\nfn shared<T: Sync>(_v: &T) {}\nfn main() i32 { let c = Cell { c: UnsafeCell::<i32>::new(0) }; shared(&c); return 0; }\n",
+        "does not satisfy bound 'Sync'",
+    );
+    h::expect_ok(
+        "asserting Sync over the cell is what makes it shareable",
+        "struct Cell { pub c: UnsafeCell<i32> }\nextend Cell as Sync {}\nfn shared<T: Sync>(_v: &T) {}\nfn main() i32 { let c = Cell { c: UnsafeCell::<i32>::new(0) }; shared(&c); return 0; }\n",
     );
 }
 
@@ -1397,11 +1426,11 @@ fn unsafe_functions() {
         "unsafe fn body is an unsafe context",
         "unsafe fn raw(p: *const i32) i32 { return *p; }\nfn main() i32 { let x = 1; return unsafe raw(&x) - 1; }\n",
     );
-    // `unsafe` at item scope only introduces a function
+    // `unsafe` at item scope introduces a function or an extend, nothing else
     h::expect_err_msg(
         "unsafe struct rejected",
         "unsafe struct T { pub v: i32, }\nfn main() i32 { return 0; }\n",
-        "expected 'fn' or 'const fn' after 'unsafe' at item scope",
+        "expected 'fn', 'const fn' or 'extend' after 'unsafe' at item scope",
     );
 }
 
@@ -1451,9 +1480,9 @@ fn unsafe_const_fn() {
         "calling an unsafe function",
     );
     h::expect_err_msg(
-        "unsafe at item scope must introduce a fn",
+        "unsafe at item scope must introduce a fn or an extend",
         "unsafe struct S {\n    pub x: i32,\n}\n",
-        "expected 'fn' or 'const fn' after 'unsafe'",
+        "expected 'fn', 'const fn' or 'extend' after 'unsafe'",
     );
     h::expect_err_msg(
         "const unsafe must introduce a fn",

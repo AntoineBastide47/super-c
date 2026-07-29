@@ -430,7 +430,7 @@ pub fn compile_and_run(src: str) RunResult {
 // As compile_and_run, but with `env` ("VAR=v " assignments, trailing space) prefixed to the run command.
 pub fn compile_and_run_env(src: str, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
-    R_SEQ = R_SEQ + 1;
+    unsafe R_SEQ = unsafe R_SEQ + 1; // process-local: one forked process per test, and the name carries the pid
     let pid = unsafe shim::sc_getpid();
     let mut dir = Path256 {};
     unsafe stdio::snprintf(
@@ -439,7 +439,7 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
         "%s/scr_%d_%llu".ptr() as *const char,
         unsafe shim::sc_tmpdir(),
         pid,
-        R_SEQ,
+        unsafe R_SEQ,
     );
     let dirp = (&dir.b[0]) as *const char;
     if unsafe shim::sc_mkdir_p(dirp) != 0 {

@@ -96,18 +96,23 @@ fn build_reactor() *mut Reactor {
 
 /// Start the reactor if it is not running and return it. `pub` for linkage.
 pub fn ensure_reactor() *mut Reactor {
-    let sp = (&mut G_STATE) as *mut i32; // order codes: 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
-    if atomic::load_i32(sp, 1) == 2 {
+    // `G_REACTOR` is ordered by `G_STATE`, which the compiler cannot see: the CAS winner publishes the
+    // pointer and THEN releases state 2, and every reader acquires state 2 first, so the write
+    // happens-before every read. That handshake is what this `unsafe` asserts.
+    unsafe {
+        let sp = (&mut G_STATE) as *mut i32; // order codes: 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
+        if atomic::load_i32(sp, 1) == 2 {
+            return G_REACTOR;
+        }
+        if atomic::cas_i32(sp, 0, 1, false, 4, 0) {
+            let r = build_reactor();
+            G_REACTOR = r;
+            atomic::store_i32(sp, 2, 2);
+            return r;
+        }
+        while atomic::load_i32(sp, 1) != 2 {}
         return G_REACTOR;
     }
-    if atomic::cas_i32(sp, 0, 1, false, 4, 0) {
-        let r = build_reactor();
-        G_REACTOR = r;
-        atomic::store_i32(sp, 2, 2);
-        return r;
-    }
-    while atomic::load_i32(sp, 1) != 2 {}
-    return G_REACTOR;
 }
 
 // The park hand-off: arm the registration once the coroutine's context is saved. Doing it here rather than
@@ -115,7 +120,7 @@ pub fn ensure_reactor() *mut Reactor {
 // about yet, and it does not know about this one until its context is safely stored.
 fn commit_arm(p: *mut void) {
     let it = p as *mut Interest;
-    let r = G_REACTOR;
+    let r = unsafe G_REACTOR;
     if unsafe sc_io::sc_io_arm(r.poller, it.fd, it.write, p) == 0 {
         return;
     }
@@ -217,11 +222,11 @@ pub fn write(fd: i32, buf: []u8) isize {
 /// Stop the reactor thread and release its poller. Idempotent; a no-op if it never started. Call it once,
 /// from the main thread, after every task that could still be waiting on a descriptor has finished.
 pub fn shutdown() {
-    let sp = (&mut G_STATE) as *mut i32;
+    let sp = (&mut unsafe G_STATE) as *mut i32;
     if atomic::load_i32(sp, 1) != 2 {
         return;
     }
-    let r = G_REACTOR;
+    let r = unsafe G_REACTOR;
     atomic::store_i32(&mut unsafe r.running, 0, 2);
     unsafe sc_io::sc_io_wake(r.poller);
     let _ = unsafe sc_runtime::sc_rt_thread_join(r.thread);
@@ -229,5 +234,5 @@ pub fn shutdown() {
     let mut g = Global {};
     g.dealloc(r, sizeof(Reactor), alignof(Reactor));
     atomic::store_i32(sp, 0, 2);
-    G_REACTOR = null;
+    unsafe G_REACTOR = null;
 }

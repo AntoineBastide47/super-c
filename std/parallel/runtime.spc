@@ -158,14 +158,18 @@ static mut G_TRACE: i32 = 0; // 0 unknown / 1 off / 2 on
 /// the environment once and then costs a load and a compare, so a traced build and an untraced one are the
 /// same binary. `pub` because the channel traces through it too.
 pub fn tracing() bool {
-    if G_TRACE == 0 {
-        G_TRACE = if stdlib::getenv("SC_TASK_TRACE") == null {
-            1;
-        } else {
-            2;
-        };
+    // Benign by construction rather than by ordering: every writer computes the SAME value from the same
+    // environment, so a racing pair of first calls can only write 1 over 1 or 2 over 2.
+    unsafe {
+        if G_TRACE == 0 {
+            G_TRACE = if stdlib::getenv("SC_TASK_TRACE") == null {
+                1;
+            } else {
+                2;
+            };
+        }
+        return G_TRACE == 2;
     }
-    return G_TRACE == 2;
 }
 
 /// One trace line: what happened, and to which task. Check `tracing()` first on a hot path.
@@ -179,7 +183,7 @@ fn commit_nop(_p: *mut void) {}
 // A fresh task id. Ids are handed out in order and never reused, so the counter is also the number of tasks
 // ever created -- one contended increment per task rather than two for the same pair of facts.
 fn next_task_id() u64 {
-    return atomic::add_u64(&mut G_NEXT_ID, 1, 0) + 1;
+    return atomic::add_u64(&mut unsafe G_NEXT_ID, 1, 0) + 1;
 }
 
 // Claim the right to resume the park identified by `token`: succeeds once, for one waker, and only while
@@ -954,7 +958,7 @@ fn worker_main(arg: *mut void) *mut void {
             unsafe sc_runtime::sc_rt_tls_set(null);
             let mut gj = Global {};
             gj.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
-            let _ = atomic::add_usize(&mut G_DONE, 1, 0);
+            let _ = atomic::add_usize(&mut unsafe G_DONE, 1, 0);
             continue;
         }
         unsafe co.sched_ctx = sched_ctx;
@@ -977,7 +981,7 @@ fn worker_main(arg: *mut void) *mut void {
                 trace("complete", unsafe co.id);
             }
             free_coroutine(s, co);
-            let _ = atomic::add_usize(&mut G_DONE, 1, 0);
+            let _ = atomic::add_usize(&mut unsafe G_DONE, 1, 0);
         } else if unsafe co.commit_requeue != 0 {
             unsafe co.commit_requeue = 0;
             if !yq_push(w, co) {
@@ -1010,8 +1014,8 @@ fn build_scheduler() *mut Scheduler {
     let mut g = Global {};
     let s = g.alloc(sizeof(Scheduler), alignof(Scheduler)) as *mut Scheduler;
     let lk = unsafe sc_runtime::sc_rt_mutex_new();
-    let nw = if G_NWORKERS > 0 {
-        G_NWORKERS;
+    let nw = if unsafe G_NWORKERS > 0 {
+        unsafe G_NWORKERS;
     } else {
         platform::ncpu();
     };
@@ -1082,18 +1086,23 @@ fn build_scheduler() *mut Scheduler {
 
 /// Start the pool if it is not running yet and return it. Thread-safe; `pub` for linkage.
 pub fn ensure_started() *mut Scheduler {
-    let sp = (&mut G_STATE) as *mut i32; // order codes: 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
-    if atomic::load_i32(sp, 1) == 2 {
+    // `G_SCHED` is ordered by `G_STATE`, which the compiler cannot see: the winner of the CAS publishes the
+    // pointer and THEN releases state 2, and every reader acquires state 2 before reading the pointer -- so
+    // the write happens-before every read of it. That handshake is what the `unsafe` here asserts.
+    unsafe {
+        let sp = (&mut G_STATE) as *mut i32; // order codes: 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
+        if atomic::load_i32(sp, 1) == 2 {
+            return G_SCHED;
+        }
+        if atomic::cas_i32(sp, 0, 1, false, 4, 0) {
+            let s = build_scheduler();
+            G_SCHED = s;
+            atomic::store_i32(sp, 2, 2);
+            return s;
+        }
+        while atomic::load_i32(sp, 1) != 2 {}
         return G_SCHED;
     }
-    if atomic::cas_i32(sp, 0, 1, false, 4, 0) {
-        let s = build_scheduler();
-        G_SCHED = s;
-        atomic::store_i32(sp, 2, 2);
-        return s;
-    }
-    while atomic::load_i32(sp, 1) != 2 {}
-    return G_SCHED;
 }
 
 /// The per-`F` trampoline: move the closure out of its heap box, free the box, and run it. `pub` for linkage.
@@ -1277,7 +1286,7 @@ pub fn wake(co: *mut Coroutine, token: u32) bool {
     if tracing() {
         trace("wake", unsafe co.id);
     }
-    enqueue_runnable(G_SCHED, co);
+    enqueue_runnable(unsafe G_SCHED, co);
     return true;
 }
 
@@ -1285,7 +1294,7 @@ pub fn wake(co: *mut Coroutine, token: u32) bool {
 /// `park_until` with a deadline, before the coroutine can park again -- a stale timer entry would otherwise
 /// resume a running coroutine.
 pub fn cancel_timer(co: *mut Coroutine) {
-    let s = G_SCHED;
+    let s = unsafe G_SCHED;
     if s == null {
         return;
     }
@@ -1322,12 +1331,12 @@ pub fn current_id() u64 {
 
 /// Tasks created so far (coroutines and data-parallel jobs alike).
 pub fn spawned_tasks() usize {
-    return atomic::load_u64(&mut G_NEXT_ID, 1) as usize;
+    return atomic::load_u64(&mut unsafe G_NEXT_ID, 1) as usize;
 }
 
 /// Tasks that have run to completion.
 pub fn completed_tasks() usize {
-    return atomic::load_usize(&mut G_DONE, 1);
+    return atomic::load_usize(&mut unsafe G_DONE, 1);
 }
 
 /// Tasks created but not finished: still runnable, running, or parked. Zero after every launched task has
@@ -1344,26 +1353,26 @@ pub fn live_tasks() usize {
 /// buys depth for deeply recursive tasks rather than costing memory for shallow ones. Rounded up to 64 KiB;
 /// 0 restores the default.
 pub fn set_stack_size(bytes: usize) {
-    if atomic::load_i32((&mut G_STATE) as *mut i32, 1) == 2 {
+    if atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) == 2 {
         return; // the running pool's stacks are already allocated
     }
     if bytes == 0 {
-        G_STACK_SIZE = STACK_SIZE_DEFAULT;
+        unsafe G_STACK_SIZE = STACK_SIZE_DEFAULT;
         return;
     }
     let unit: usize = 65536;
-    G_STACK_SIZE = (bytes + unit - 1) / unit * unit;
+    unsafe G_STACK_SIZE = (bytes + unit - 1) / unit * unit;
 }
 
 pub fn set_worker_count(n: usize) {
-    G_NWORKERS = n;
+    unsafe G_NWORKERS = n;
 }
 
 /// How many worker threads the pool has (or will have): the configured count, else one per CPU. What the
 /// data-parallel API divides its work by.
 pub fn worker_count() usize {
-    if G_NWORKERS > 0 {
-        return G_NWORKERS;
+    if unsafe G_NWORKERS > 0 {
+        return unsafe G_NWORKERS;
     }
     return platform::ncpu();
 }
@@ -1377,7 +1386,7 @@ fn preempt_yield() {
     if co == null {
         return; // a plain thread, or a job: neither can park
     }
-    let s = G_SCHED;
+    let s = unsafe G_SCHED;
     if s == null {
         return;
     }
@@ -1405,11 +1414,11 @@ pub fn yield_now() {
 /// a no-op if never started. Call once from the main thread after all launched work has completed: a
 /// coroutine still parked on a lock, a channel or a `WaitGroup` will never be woken, so its stack leaks.
 pub fn shutdown() {
-    let sp = (&mut G_STATE) as *mut i32;
+    let sp = (&mut unsafe G_STATE) as *mut i32;
     if atomic::load_i32(sp, 1) != 2 {
         return;
     }
-    let s = G_SCHED;
+    let s = unsafe G_SCHED;
     unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
     unsafe s.shutting_down = 1;
     unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
@@ -1440,7 +1449,7 @@ pub fn shutdown() {
     unsafe sc_runtime::sc_rt_mutex_free(s.lock);
     g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
     atomic::store_i32(sp, 0, 2);
-    G_SCHED = null;
+    unsafe G_SCHED = null;
     // Anything still unfinished here is parked on something nothing will ever signal -- a deadlock the
     // program has already lost. Report it: the stacks it leaks are otherwise the only visible symptom.
     let stuck = live_tasks();

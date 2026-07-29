@@ -38,6 +38,14 @@ fn golden_unsafe_fn() {
     );
 }
 
+// `unsafe extend`: the CONFORMANCE is what is unsafe, so the marker sits on the extend rather than on any
+// item inside it. Printing it back is what keeps a marked conformance from being silently laundered into an
+// unmarked one by a format pass.
+@test
+fn golden_unsafe_extend() {
+    expect_fmt("unsafe extend<T>Box<T>as Sync{}", "unsafe extend<T> Box<T> as Sync {}\n");
+}
+
 @test
 fn golden_basic() {
     // Fully canonical: single-line input becomes the one true form.

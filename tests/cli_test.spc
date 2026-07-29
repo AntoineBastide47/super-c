@@ -626,7 +626,7 @@ fn main() i32 {
 fn cross_module_static_mut() {
     let p = cli::proj_new();
     p.mkfile("state.spc", r#"pub static mut hits: i64 = 0;
-pub fn record() { hits += 1; }
+pub fn record() { unsafe hits += 1; }
 "#);
     p.mkfile(
         "main.spc",
@@ -634,8 +634,8 @@ pub fn record() { hits += 1; }
 fn main() i32 {
   state::record();
   state::record();
-  state::hits += 3;
-  return (state::hits - 5) as i32;
+  unsafe state::hits += 3;
+  return (unsafe state::hits - 5) as i32;
 }
 "#,
     );

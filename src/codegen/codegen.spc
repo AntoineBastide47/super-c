@@ -10758,6 +10758,11 @@ fn render_ident_src(src: str, s: tok::Span, buf: *mut char, cap: usize) usize {
 
 /// Set when any bappend hits its buffer cap; checked at finalize so a truncated C declarator is a
 /// hard compile error, never silently-invalid emitted C.
+///
+/// PROCESS-GLOBAL, and the one piece of mutable global state the compiler has: two `Codegen`s emitting in
+/// the same process would share (and clear) each other's flag. Tolerable only because the flag is set on a
+/// path that already ends the build, and because every driver runs one codegen per process. It belongs in
+/// `Codegen`, which means threading it through the `bappend*` free functions.
 pub static mut CG_TRUNCATED: bool = false;
 
 fn bappend_bytes(out: *mut char, cap: usize, at: usize, text: *const char, n: usize) usize {
@@ -10766,12 +10771,12 @@ fn bappend_bytes(out: *mut char, cap: usize, at: usize, text: *const char, n: us
         let mut copied = n;
         if copied > room {
             copied = room;
-            CG_TRUNCATED = true;
+            unsafe CG_TRUNCATED = true;
         }
         unsafe cstring::memcpy(out + at, text, copied);
         unsafe out[at + copied] = 0 as char;
     } else {
-        CG_TRUNCATED = true;
+        unsafe CG_TRUNCATED = true;
     }
     return at + n;
 }
@@ -15326,8 +15331,8 @@ extend Codegen {
         if self.package != null && self.cur_module() as usize < self.pkg_count() {
             file = unsafe self.package.modules[self.cur_module() as usize].file.as_str();
         }
-        if CG_TRUNCATED {
-            CG_TRUNCATED = false;
+        if unsafe CG_TRUNCATED {
+            unsafe CG_TRUNCATED = false;
             self.errors.emit(
                 0,
                 0,

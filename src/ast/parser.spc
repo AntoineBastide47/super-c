@@ -1131,16 +1131,25 @@ extend Parser {
         return self.parse_const_after(start);
     }
 
-    // `unsafe` peeked at item scope: `unsafe fn` or `unsafe const fn` follows -- an unsafe function,
-    // whose calls require an unsafe context (the same contract as extern "C" fns). LL(1): each step
-    // decides on one token (`fn` | `const`, then `fn`). `const unsafe fn` parses too, via
-    // parse_const_or_fn; the formatter prints the canonical `unsafe const` order.
+    // `unsafe` peeked at item scope: `unsafe fn`, `unsafe const fn`, or `unsafe extend`. A function's calls
+    // then require an unsafe context (the same contract as extern "C" fns); an extend's CONFORMANCE is the
+    // unsafe part -- it asserts a property the compiler cannot derive, so the author carries the proof.
+    // LL(1): each step decides on one token (`fn` | `const` | `extend`, then `fn`). `const unsafe fn` parses
+    // too, via parse_const_or_fn; the formatter prints the canonical `unsafe const` order.
     pub fn parse_unsafe_fn(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
+        if self.check(TokenType::Extend) {
+            let e = self.parse_extend();
+            if e != NODE_NONE {
+                self.ast.at(e).as_data.extend_def.is_unsafe = true;
+                self.ast.at(e).span.start = start;
+            }
+            return e;
+        }
         let is_const = self.match(TokenType::Const);
         if !self.check(TokenType::Fn) {
-            self.error_here("expected 'fn' or 'const fn' after 'unsafe' at item scope");
+            self.error_here("expected 'fn', 'const fn' or 'extend' after 'unsafe' at item scope");
             return NODE_NONE;
         }
         let f = self.parse_function(true);
@@ -1385,6 +1394,7 @@ extend Parser {
                         interface_type: interface_type,
                         target_type: target,
                         items: items,
+                        is_unsafe: false, // set by parse_unsafe_fn when an `unsafe` preceded this
                     },
                 },
             },

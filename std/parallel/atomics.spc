@@ -226,6 +226,14 @@ pub struct Atomic<T: AtomicOps> {
     cell: UnsafeCell<T>,
 }
 
+// Shareable across threads BECAUSE every access is an atomic instruction -- an `Atomic` is the one thing
+// entitled to make that claim over an `UnsafeCell`, since the synchronisation is the operation itself. The
+// assertion is explicit rather than structural: the field walk stops at `UnsafeCell`, which is never `Sync`
+// on its own, so a type wrapping one has to say what makes it safe.
+extend<T: AtomicOps + Send> Atomic<T> as Send {}
+
+extend<T: AtomicOps + Send> Atomic<T> as Sync {}
+
 extend<T: AtomicOps> Atomic<T> {
     /// A cell initialised to `v`.
     pub fn new(v: T) Atomic<T> {

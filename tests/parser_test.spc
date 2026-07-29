@@ -97,6 +97,22 @@ fn traits_impls_match_and_new() {
     assert(item(&c.ast, 2).kind == NodeKind::NODE_FUNCTION, "expected function");
 }
 
+// `unsafe extend`: an item-scope `unsafe` that commits to an extend rather than a function, on the one
+// token after it (LL(1)). The flag rides the extend, not the items inside it -- what is being asserted is
+// the conformance. Nothing requires the marker yet; this pins that it parses and survives.
+@test
+fn unsafe_extend() {
+    let src = "unsafe extend<T> Box<T> as Sync {}\nextend Vector<i32> as Sync {}\nunsafe fn f() {}\n";
+    let c = h::parse_ast(src);
+    assert(c.errors == 0, "unsafe extend parses");
+    assert(item(&c.ast, 0).kind == NodeKind::NODE_EXTEND, "expected an extend");
+    assert(item(&c.ast, 0).as_data.extend_def.is_unsafe, "expected the extend to be marked unsafe");
+    assert(!item(&c.ast, 1).as_data.extend_def.is_unsafe, "a plain extend stays unmarked");
+    assert(item(&c.ast, 2).as_data.function.is_unsafe, "unsafe fn still parses after the new branch");
+    let bad = h::parse_ast("unsafe struct S {}\n");
+    assert(bad.errors > 0, "unsafe on a non-fn, non-extend item is rejected");
+}
+
 @test
 fn grouped_parameters_and_returns() {
     let src = "fn slice(self: *mut Self, start, end, len: isize) *mut Self {}\nfn divmod(a, b: int) (int, int) { return a / b, a % b; }\nfn open(path: str) (file: File, err: IOError) {}\nfn log(message: str) {}\nfn risky(ptr: *mut int) { unsafe { consume(ptr); } unsafe consume(ptr); }\n";
