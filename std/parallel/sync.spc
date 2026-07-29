@@ -650,10 +650,15 @@ extend Condvar {
             }
             unsafe self.wq.tail = wp;
             runtime::park_timed(token, deadline, commit_raw_unlock, m);
-            raw_mutex_lock(m);
+            // Disarm BEFORE re-taking the lock, not after. Re-taking it may park us a second time, and a
+            // park rewrites this coroutine's `deadline` and `tm_token` -- while a stale timer entry still
+            // points at us, and a worker walking that list under the scheduler lock is reading the very
+            // fields being rewritten. TSan reports it; the damage is a timer acting on a coroutine that has
+            // since parked on something else.
             if deadline != 0 {
-                runtime::cancel_timer(co); // drop the timer if a notify got here first
+                runtime::cancel_timer(co);
             }
+            raw_mutex_lock(m);
             self.unlink(wp); // still queued if the deadline is what woke us
         } else {
             // No coroutine to park: publish that we are waiting, drop the lock and sleep on `gen`, which

@@ -44,6 +44,8 @@ void *__tsan_get_current_fiber(void);
 void *__tsan_create_fiber(unsigned flags);
 void __tsan_destroy_fiber(void *fiber);
 void __tsan_switch_to_fiber(void *fiber, unsigned flags);
+void __tsan_acquire(void *addr);
+void __tsan_release(void *addr);
 #endif
 
 /* ---- current-coroutine TLS: one C11 thread-local void* per OS thread ------------------------------- */
@@ -1038,11 +1040,20 @@ void sc_rt_ctx_switch(void *from, void *to) {
 #ifdef SC_TSAN
   /* Announce the move BEFORE the stack changes: from here on TSan attributes accesses to the target's
      fiber, so a coroutine keeps one identity across every worker that ever runs it. The switcher announces;
-     the resumed side does not, or the two would disagree about who is running. */
+     the resumed side does not, or the two would disagree about who is running.
+     Switching a fiber only REATTRIBUTES execution -- it creates no happens-before edge. But the switch IS
+     one: everything this context did is visible to whoever resumes it next, and we in turn must see what
+     the target published when it last left. The pair below says so, keyed on the context being ENTERED:
+     the leaver releases on `to`, and the side that wakes up inside its own swap acquires on itself. Keying
+     both on the leaver's own context pairs nothing -- the two sides then name different addresses. Without
+     it every field the two sides share (a `Coroutine`'s deadline and commit hand-off, written by the task
+     and read by its worker) reports as a race, because the edge is hand-written assembly TSan cannot see. */
   sc_rt_ctx_asm *t = (sc_rt_ctx_asm *)to;
   if (!f->fiber) f->fiber = __tsan_get_current_fiber();
+  __tsan_release(t);  /* publish to whoever runs on `to` next -- keyed on the context being entered */
   __tsan_switch_to_fiber(t->fiber, 0);
   sc_ctx_swap(&f->sp, t->sp);
+  __tsan_acquire(f);  /* resumed: consume what our switcher released, which it keyed on THIS context */
 #else
   sc_ctx_swap(&f->sp, ((sc_rt_ctx_asm *)to)->sp);
 #endif
