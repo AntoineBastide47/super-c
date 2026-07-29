@@ -775,7 +775,7 @@ extend Condvar as Free {
 /// carries: the lock to take by hand, the queue to sit on, and whether the operation would proceed. Conform
 /// to it and your own type works in a `select` exactly as a channel does.
 ///
-/// The contract the compiler cannot state, because an interface cannot declare an `unsafe fn`:
+/// The contract, which is why every method is `unsafe`:
 ///
 ///  * `select_lock` and `select_queue` return raw pointers into your value. They must stay valid for as long
 ///    as the selector holds the arm, and they must be the SAME pair every call -- the selector locks every
@@ -784,9 +784,9 @@ extend Condvar as Free {
 ///  * A ready answer must be honest: `select` will go on to perform the operation, and an arm that says it
 ///    is ready and then blocks parks a task nothing will wake.
 pub interface Selectable {
-    fn select_lock(self: &Self) *mut RawMutex;
-    fn select_queue(self: &Self) *const Condvar;
-    fn select_ready(self: &Self) bool;
+    unsafe fn select_lock(self: &Self) *mut RawMutex;
+    unsafe fn select_queue(self: &Self) *const Condvar;
+    unsafe fn select_ready(self: &Self) bool;
 }
 
 // -----------------------------------------------------------------------------------------------------

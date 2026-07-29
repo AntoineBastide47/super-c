@@ -81,7 +81,8 @@ fn no_arm(_p: *const void) bool {
 // stores its endpoint as `*const void`, so this is where the type comes back.
 fn iface_ready<S: sync::Selectable>(p: *const void) bool {
     let s = p as *const S;
-    return s.select_ready();
+    // `arm_ready` and `lock_all` are the only callers, and both hold this arm's lock across the call.
+    return unsafe s.select_ready();
 }
 
 // The park hand-off: the worker runs it once the selector's context is saved, which is what stops a notify
@@ -117,7 +118,8 @@ extend Selector {
     /// index a `Ready` result will carry. This is the whole extension point: `select` knows nothing about
     /// channels beyond this interface.
     pub fn arm<S: sync::Selectable>(self: &mut Selector, s: &S) usize {
-        return self.push(s, iface_ready::<S>, s.select_lock(), s.select_queue());
+        // Recorded once and reused for the life of the arm, which is what `Selectable` requires of them.
+        return self.push(s, iface_ready::<S>, unsafe s.select_lock(), unsafe s.select_queue());
     }
     /// Wait for `rx` to have a value (or to be closed and drained, which `try_recv` reports as `None`).
     /// Returns the arm index a `Ready` result will carry.
