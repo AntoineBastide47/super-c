@@ -12,9 +12,9 @@ pub struct Box<T, A = Global> {
 
 // A Box owns its value, so it is Send / Sync when the value and allocator are (the owned pointer would
 // otherwise make it structurally neither).
-extend<T: Send, A: Send> Box<T, A> as Send {}
+unsafe extend<T: Send, A: Send> Box<T, A> as Send {}
 
-extend<T: Sync, A: Sync> Box<T, A> as Sync {}
+unsafe extend<T: Sync, A: Sync> Box<T, A> as Sync {}
 
 extend<T, A: Allocator> Box<T, A> {
     /// Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).

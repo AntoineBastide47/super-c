@@ -269,9 +269,9 @@ pub struct MutexGuard<'a, T> {
 }
 
 // A Mutex makes its contents shareable across threads, so `Mutex<T>` is Send + Sync whenever `T` is Send.
-extend<T: Send> Mutex<T> as Send {}
+unsafe extend<T: Send> Mutex<T> as Send {}
 
-extend<T: Send> Mutex<T> as Sync {}
+unsafe extend<T: Send> Mutex<T> as Sync {}
 
 extend<T> Mutex<T> {
     /// A new unlocked mutex owning `value`.
@@ -393,9 +393,9 @@ pub struct RwLockWriteGuard<'a, T> {
 }
 
 // Send when `T` is; Sync additionally needs `T: Sync`, since concurrent readers alias `&T` across threads.
-extend<T: Send> RwLock<T> as Send {}
+unsafe extend<T: Send> RwLock<T> as Send {}
 
-extend<T: Send + Sync> RwLock<T> as Sync {}
+unsafe extend<T: Send + Sync> RwLock<T> as Sync {}
 
 extend<T> RwLock<T> {
     /// A new unlocked lock owning `value`.
@@ -606,9 +606,9 @@ pub struct Condvar {
     wq: *mut CondQ, // waiter set, guarded by the paired mutex
 }
 
-extend Condvar as Send {}
+unsafe extend Condvar as Send {}
 
-extend Condvar as Sync {}
+unsafe extend Condvar as Sync {}
 
 extend Condvar {
     /// A new condition variable.
@@ -773,9 +773,9 @@ pub struct Once {
     gate: Mutex<i32>,
 }
 
-extend Once as Send {}
+unsafe extend Once as Send {}
 
-extend Once as Sync {}
+unsafe extend Once as Sync {}
 
 extend Once {
     /// A fresh, not-yet-run `Once`.

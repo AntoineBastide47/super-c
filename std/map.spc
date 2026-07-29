@@ -19,9 +19,9 @@ pub struct Map<K, V, A = Global> {
 }
 
 // A Map owns its keys and values, so it is Send / Sync when they and its allocator are.
-extend<K: Send, V: Send, A: Send> Map<K, V, A> as Send {}
+unsafe extend<K: Send, V: Send, A: Send> Map<K, V, A> as Send {}
 
-extend<K: Sync, V: Sync, A: Sync> Map<K, V, A> as Sync {}
+unsafe extend<K: Sync, V: Sync, A: Sync> Map<K, V, A> as Sync {}
 
 extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     /// Empty map backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).

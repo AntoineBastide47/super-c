@@ -1113,6 +1113,32 @@ fn static_mut() {
     );
 }
 
+// `Send` and `Sync` are the only two conformances nothing verifies: every other interface is checked against
+// its requirements, while these are DERIVED from the fields and a hand-written one overrides that derivation.
+// So the assertion carries `unsafe`, which puts every override in the tree one grep from an audit.
+@test
+fn marker_conformance_requires_unsafe() {
+    h::expect_err_msg(
+        "asserting Send needs unsafe extend",
+        "struct S { pub p: *mut i32 }\nextend S as Send {}\nfn main() i32 { return 0; }\n",
+        "asserting 'Send' requires 'unsafe extend'",
+    );
+    h::expect_err_msg(
+        "asserting Sync needs unsafe extend",
+        "struct S { pub p: *mut i32 }\nextend S as Sync {}\nfn main() i32 { return 0; }\n",
+        "asserting 'Sync' requires 'unsafe extend'",
+    );
+    h::expect_ok(
+        "a marked assertion is accepted, and takes effect",
+        "struct S { pub p: *mut i32 }\nunsafe extend S as Send {}\nfn takes<T: Send>(_v: &T) {}\nfn main() i32 { let s = S { p: null }; takes(&s); return 0; }\n",
+    );
+    // Only the two markers: an ordinary conformance is checked, so it needs no vouching.
+    h::expect_ok(
+        "an ordinary conformance is unaffected",
+        "interface Greet { fn hi(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as Greet { fn hi(self: &S) i32 { return self.v; } }\nfn main() i32 { let s = S { v: 0 }; return s.hi(); }\n",
+    );
+}
+
 // `UnsafeCell` hands out a `*mut T` from a SHARED borrow, so sharing one across threads is the definition of
 // a data race. The structural walk used to read through the cell to its payload and grant `Sync` for free,
 // which made every interior-mutable type shareable by accident -- including ones with no synchronisation at
@@ -1126,7 +1152,7 @@ fn unsafe_cell_is_not_sync() {
     );
     h::expect_ok(
         "asserting Sync over the cell is what makes it shareable",
-        "struct Cell { pub c: UnsafeCell<i32> }\nextend Cell as Sync {}\nfn shared<T: Sync>(_v: &T) {}\nfn main() i32 { let c = Cell { c: UnsafeCell::<i32>::new(0) }; shared(&c); return 0; }\n",
+        "struct Cell { pub c: UnsafeCell<i32> }\nunsafe extend Cell as Sync {}\nfn shared<T: Sync>(_v: &T) {}\nfn main() i32 { let c = Cell { c: UnsafeCell::<i32>::new(0) }; shared(&c); return 0; }\n",
     );
 }
 

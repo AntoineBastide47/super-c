@@ -79,9 +79,9 @@ pub struct TcpStream {
 }
 
 // Both are just a descriptor, so they move between tasks freely.
-extend TcpListener as Send {}
+unsafe extend TcpListener as Send {}
 
-extend TcpStream as Send {}
+unsafe extend TcpStream as Send {}
 
 extend TcpListener {
     /// Bind and listen on `host:port`; `port` 0 lets the OS choose one (ask `port()` which it picked).
@@ -197,7 +197,7 @@ pub struct UdpSocket {
     pub fd: i32,
 }
 
-extend UdpSocket as Send {}
+unsafe extend UdpSocket as Send {}
 
 extend UdpSocket {
     /// Bind to `host:port`; port 0 lets the OS choose (ask `port()` which).

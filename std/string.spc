@@ -73,9 +73,9 @@ pub struct String<A = Global> {
 
 // A String owns its bytes, so it is safe to send to / share with another thread when its allocator is
 // (the raw buffer pointer would otherwise make it structurally neither).
-extend<A: Send> String<A> as Send {}
+unsafe extend<A: Send> String<A> as Send {}
 
-extend<A: Sync> String<A> as Sync {}
+unsafe extend<A: Sync> String<A> as Sync {}
 
 extend<A: Allocator> String<A> {
     // --- representation helpers (private) ------------------------------------------------------

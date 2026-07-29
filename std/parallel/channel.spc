@@ -101,17 +101,17 @@ pub struct Receiver<T> {
 // The endpoints move a `Send` payload between threads, so they are Send + Sync when `T` is Send. Explicit
 // (unsafe) assertions -- the `Arc<ChannelInner>` holds a raw slot pointer that would otherwise disqualify
 // them structurally; the mutex makes every access race-free.
-extend<T: Send> Channel<T> as Send {}
+unsafe extend<T: Send> Channel<T> as Send {}
 
-extend<T: Send> Channel<T> as Sync {}
+unsafe extend<T: Send> Channel<T> as Sync {}
 
-extend<T: Send> Sender<T> as Send {}
+unsafe extend<T: Send> Sender<T> as Send {}
 
-extend<T: Send> Sender<T> as Sync {}
+unsafe extend<T: Send> Sender<T> as Sync {}
 
-extend<T: Send> Receiver<T> as Send {}
+unsafe extend<T: Send> Receiver<T> as Send {}
 
-extend<T: Send> Receiver<T> as Sync {}
+unsafe extend<T: Send> Receiver<T> as Sync {}
 
 extend<T> Channel<T> {
     /// A new channel buffering up to `capacity` items (at least one). A `send` into a full buffer waits.

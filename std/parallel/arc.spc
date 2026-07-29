@@ -49,9 +49,9 @@ extend<T> Arc<T> {
 // share -- `T: Send + Sync`. The conformances are explicit (unsafe) assertions: the raw pointer inside would
 // otherwise make `Arc` structurally neither. The atomic strong count makes the reference counting itself
 // race-free.
-extend<T: Send + Sync> Arc<T> as Send {}
+unsafe extend<T: Send + Sync> Arc<T> as Send {}
 
-extend<T: Send + Sync> Arc<T> as Sync {}
+unsafe extend<T: Send + Sync> Arc<T> as Sync {}
 
 // Dropping a handle atomically decrements the strong count; the thread that observes the count fall to zero
 // owns the teardown -- it deep-frees the value and releases the block.

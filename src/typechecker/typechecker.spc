@@ -5382,11 +5382,41 @@ extend TypeChecker {
             }
         }
     }
+    // `Send` and `Sync` are the two conformances the compiler cannot verify. Every other interface is checked
+    // against its requirements; these two are DERIVED structurally, and writing one by hand overrides that
+    // derivation -- it asserts a synchronisation discipline living outside the type system (an `Arc`'s
+    // refcount, a `Mutex`'s lock, an atomic instruction). Nothing checks the claim, so the claim is marked:
+    // `unsafe extend` puts every such assertion one grep away from an audit.
+    fn check_marker_is_unsafe(self: &mut Self, id: NodeId, iface: DefId) {
+        let send = self.is_send_iface(iface);
+        if !send && !self.is_sync_iface(iface) {
+            return;
+        }
+        if self.cur_ast().at_const(id).as_data.extend_def.is_unsafe {
+            return;
+        }
+        let itype = self.cur_ast().at_const(id).as_data.extend_def.interface_type;
+        let sp = self.cur_ast().at_const(itype).span;
+        let name = if send {
+            "Send";
+        } else {
+            "Sync";
+        };
+        self.errors.emit(sp.start, sp.end - sp.start, format("asserting '{}' requires 'unsafe extend'", name));
+        self.errors.note(
+            format(
+                "{}",
+                "nothing verifies this: write 'unsafe extend' to take responsibility for it, or let the compiler derive the marker from the fields",
+            ),
+        );
+    }
+
     fn check_extend_conformance(self: &mut Self, id: NodeId) {
         let iface = self.cur_ast().resolution_def(self.cur_ast().at_const(id).as_data.extend_def.interface_type);
         if iface.node == NODE_NONE {
             return;
         }
+        self.check_marker_is_unsafe(id, iface);
         let target = self.cur_ast().at_const(id).as_data.extend_def.target_type;
         let self_ty = self.resolve_type(target);
         let mut subp = Defs8 {};
