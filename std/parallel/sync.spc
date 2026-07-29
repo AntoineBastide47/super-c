@@ -266,6 +266,11 @@ pub struct Mutex<T> {
 /// the `Mutex` it borrows.
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
+    // A guard means THIS thread holds the lock, so it must not cross to another: the unlock would run
+    // where the lock never ran, and a task-aware lock queues its waiters against the acquiring
+    // coroutine. A raw pointer is neither `Send` nor `Sync` structurally, and nothing transitively
+    // holding one is either -- so this dead field is what denies the guard both. It is never read.
+    _pin: *const void,
 }
 
 // A Mutex makes its contents shareable across threads, so `Mutex<T>` is Send + Sync whenever `T` is Send.
@@ -329,7 +334,7 @@ extend<T> Mutex<T> as Free {
 extend<T> MutexGuard<T> {
     // `pub` for external linkage: Mutex::lock is monomorphized in the caller's module. Not user-facing.
     pub fn hold(mutex: &Mutex<T>) MutexGuard<T> {
-        return MutexGuard::<T> { mutex: mutex };
+        return MutexGuard::<T> { mutex: mutex, _pin: null };
     }
     // The underlying lock, for Condvar::wait to release and re-acquire. Not user-facing.
     pub fn lock_handle(self: &MutexGuard<T>) *mut RawMutex {
@@ -387,11 +392,21 @@ pub struct RwLock<T> {
 /// Shared read access; releases the read lock when dropped.
 pub struct RwLockReadGuard<'a, T> {
     lock: &'a RwLock<T>,
+    // A guard means THIS thread holds the lock, so it must not cross to another: the unlock would run
+    // where the lock never ran, and a task-aware lock queues its waiters against the acquiring
+    // coroutine. A raw pointer is neither `Send` nor `Sync` structurally, and nothing transitively
+    // holding one is either -- so this dead field is what denies the guard both. It is never read.
+    _pin: *const void,
 }
 
 /// Exclusive write access; releases the write lock when dropped.
 pub struct RwLockWriteGuard<'a, T> {
     lock: &'a RwLock<T>,
+    // A guard means THIS thread holds the lock, so it must not cross to another: the unlock would run
+    // where the lock never ran, and a task-aware lock queues its waiters against the acquiring
+    // coroutine. A raw pointer is neither `Send` nor `Sync` structurally, and nothing transitively
+    // holding one is either -- so this dead field is what denies the guard both. It is never read.
+    _pin: *const void,
 }
 
 // Send when `T` is; Sync additionally needs `T: Sync`, since concurrent readers alias `&T` across threads.
@@ -523,7 +538,7 @@ extend<T> RwLock<T> as Free {
 
 extend<T> RwLockReadGuard<T> {
     pub fn hold(lock: &RwLock<T>) RwLockReadGuard<T> {
-        return RwLockReadGuard::<T> { lock: lock };
+        return RwLockReadGuard::<T> { lock: lock, _pin: null };
     }
     /// Borrow the guarded value.
     pub fn get(self: &RwLockReadGuard<T>) &T {
@@ -545,7 +560,7 @@ extend<T> RwLockReadGuard<T> as Free {
 
 extend<T> RwLockWriteGuard<T> {
     pub fn hold(lock: &RwLock<T>) RwLockWriteGuard<T> {
-        return RwLockWriteGuard::<T> { lock: lock };
+        return RwLockWriteGuard::<T> { lock: lock, _pin: null };
     }
     /// Borrow the guarded value.
     pub fn get(self: &RwLockWriteGuard<T>) &T {
