@@ -32,7 +32,7 @@ extend<F: fn move() T, T> ThreadPayload<F, T> {
 // Move `value` onto the heap through the global allocator, returning the owning raw pointer.
 fn heap_alloc<T>(value: T) *mut T {
     let mut g = Global {};
-    let p = g.alloc(sizeof(T), alignof(T)) as *mut T;
+    let p = (unsafe g.alloc(sizeof(T), alignof(T))) as *mut T;
     unsafe p[0] = value;
     return p;
 }
@@ -47,7 +47,7 @@ fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
         pp[0];
     };
     let mut g = Global {};
-    g.dealloc(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
+    unsafe g.dealloc(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
     payload.run();
     return null;
 }
@@ -72,7 +72,7 @@ extend<T> JoinHandle<T> {
             self.result[0];
         };
         let mut g = Global {};
-        g.dealloc(self.result, sizeof(T), alignof(T));
+        unsafe g.dealloc(self.result, sizeof(T), alignof(T));
         return v;
     }
 }
@@ -84,7 +84,7 @@ extend<T> JoinHandle<T> {
 /// `F: 'static` is what forbids capturing a borrow of a caller local: the thread may outlive this call.
 pub fn spawn<F: fn move() T + Send + 'static, T>(f: F) JoinHandle<T> {
     let mut g = Global {};
-    let slot = g.alloc(sizeof(T), alignof(T)) as *mut T;
+    let slot = (unsafe g.alloc(sizeof(T), alignof(T))) as *mut T;
     let env = heap_alloc::<ThreadPayload<F, T>>(ThreadPayload::<F, T>::make(f, slot)) as *mut void;
     let mut h: *mut void = null;
     let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, thread_entry::<F, T>, env);

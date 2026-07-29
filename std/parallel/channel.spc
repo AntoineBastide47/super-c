@@ -42,14 +42,14 @@ extend<T> ChannelState<T> {
     pub fn grow(self: &mut ChannelState<T>) {
         let ncap = self.cap * 2;
         let mut g = Global {};
-        let ns = g.alloc(ncap * sizeof(T), alignof(T)) as *mut T;
+        let ns = (unsafe g.alloc(ncap * sizeof(T), alignof(T))) as *mut T;
         for i in 0..self.count {
             let idx = (self.head + i) % self.cap;
             unsafe ns[i] = unsafe {
                 self.slots[idx];
             };
         }
-        g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
+        unsafe g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
         self.slots = ns;
         self.head = 0;
         self.cap = ncap;
@@ -66,7 +66,7 @@ extend<T> ChannelState<T> as Free {
         }
         if self.slots != null {
             let mut g = Global {};
-            g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
+            unsafe g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
             self.slots = null;
         }
     }
@@ -122,7 +122,7 @@ extend<T> Channel<T> {
             capacity;
         };
         let mut g = Global {};
-        let slots = g.alloc(cap * sizeof(T), alignof(T)) as *mut T;
+        let slots = (unsafe g.alloc(cap * sizeof(T), alignof(T))) as *mut T;
         let st = ChannelState::<T> {
             slots: slots,
             cap: cap,

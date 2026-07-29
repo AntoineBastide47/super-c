@@ -67,9 +67,9 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         let oldvals = self.vals;
         let oldused = self.used;
         let oldcap = self.cap;
-        self.keys = self.alloc.alloc(newcap * sizeof(K), alignof(K)) as *mut K;
-        self.vals = self.alloc.alloc(newcap * sizeof(V), alignof(V)) as *mut V;
-        self.used = self.alloc.alloc(newcap, alignof(u8)) as *mut u8;
+        self.keys = (unsafe self.alloc.alloc(newcap * sizeof(K), alignof(K))) as *mut K;
+        self.vals = (unsafe self.alloc.alloc(newcap * sizeof(V), alignof(V))) as *mut V;
+        self.used = (unsafe self.alloc.alloc(newcap, alignof(u8))) as *mut u8;
         unsafe memset(self.used, 0, newcap); // mark every slot empty
         self.cap = newcap;
         self.len = 0;
@@ -83,9 +83,9 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             }
         }
         if oldcap > 0 {
-            self.alloc.dealloc(oldkeys, oldcap * sizeof(K), alignof(K));
-            self.alloc.dealloc(oldvals, oldcap * sizeof(V), alignof(V));
-            self.alloc.dealloc(oldused, oldcap, alignof(u8));
+            unsafe self.alloc.dealloc(oldkeys, oldcap * sizeof(K), alignof(K));
+            unsafe self.alloc.dealloc(oldvals, oldcap * sizeof(V), alignof(V));
+            unsafe self.alloc.dealloc(oldused, oldcap, alignof(u8));
         }
     }
 
@@ -191,9 +191,9 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
                 unsafe self.vals[i].free(); // no-op if V isn't Free
             }
         }
-        self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
-        self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
-        self.alloc.dealloc(self.used, self.cap, alignof(u8));
+        unsafe self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
+        unsafe self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
+        unsafe self.alloc.dealloc(self.used, self.cap, alignof(u8));
         self.keys = null;
         self.vals = null;
         self.used = null;

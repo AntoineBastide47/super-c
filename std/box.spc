@@ -20,7 +20,7 @@ extend<T, A: Allocator> Box<T, A> {
     /// Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A, value: T) Box<T, A> {
         let mut b = Box::<T, A> { ptr: null, alloc: alloc };
-        b.ptr = b.alloc.alloc(sizeof(T), alignof(T)) as *mut T;
+        b.ptr = (unsafe b.alloc.alloc(sizeof(T), alignof(T))) as *mut T;
         unsafe b.ptr[0] = value;
         return b;
     }
@@ -80,7 +80,7 @@ extend<T, A: Allocator> Box<T, A> as DerefMut<T> {
 extend<T, A: Allocator> Box<T, A> as Free {
     pub fn free(self: &mut Box<T, A>) {
         self.ptr.free(); // free the boxed value (no-op if T isn't Free)
-        self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));
+        unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));
         self.ptr = null;
     }
 }

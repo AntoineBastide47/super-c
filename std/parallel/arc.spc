@@ -25,7 +25,7 @@ extend<T> Arc<T> {
     /// Allocate `value` on the heap with a strong count of one.
     pub fn new(value: T) Arc<T> {
         let mut g = Global {};
-        let p = g.alloc(sizeof(ArcInner<T>), alignof(ArcInner<T>)) as *mut ArcInner<T>;
+        let p = (unsafe g.alloc(sizeof(ArcInner<T>), alignof(ArcInner<T>))) as *mut ArcInner<T>;
         unsafe p[0] = ArcInner::<T> { strong: 1, value: value };
         return Arc::<T> { ptr: p };
     }
@@ -68,7 +68,7 @@ extend<T> Arc<T> as Free {
             let vp = (&mut unsafe self.ptr.value) as *mut T;
             vp.free();
             let mut g = Global {};
-            g.dealloc(self.ptr, sizeof(ArcInner<T>), alignof(ArcInner<T>));
+            unsafe g.dealloc(self.ptr, sizeof(ArcInner<T>), alignof(ArcInner<T>));
         }
         self.ptr = null;
     }

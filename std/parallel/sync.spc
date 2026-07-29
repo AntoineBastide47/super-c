@@ -122,7 +122,7 @@ fn lot_pop(b: *mut LotBucket, addr: *mut void, more: &mut bool) *mut LotNode {
 /// A new, unlocked raw lock. `pub` for linkage.
 pub unsafe fn raw_mutex_new() *mut RawMutex {
     let mut g = Global {};
-    let m = g.alloc(sizeof(RawMutex), alignof(RawMutex)) as *mut RawMutex;
+    let m = (unsafe g.alloc(sizeof(RawMutex), alignof(RawMutex))) as *mut RawMutex;
     unsafe m[0] = RawMutex { locked: 0 };
     return m;
 }
@@ -131,7 +131,7 @@ pub unsafe fn raw_mutex_new() *mut RawMutex {
 pub unsafe fn raw_mutex_free(m: *mut RawMutex) {
     unsafe sc_runtime::sc_rt_lockdep_forget(m);
     let mut g = Global {};
-    g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
+    unsafe g.dealloc(m, sizeof(RawMutex), alignof(RawMutex));
 }
 
 // The park hand-off used inside the lock slow path: a parking contender holds only the bucket lock.
@@ -636,7 +636,7 @@ extend Condvar {
     /// A new condition variable.
     pub fn new() Condvar {
         let mut g = Global {};
-        let q = g.alloc(sizeof(CondQ), alignof(CondQ)) as *mut CondQ;
+        let q = (unsafe g.alloc(sizeof(CondQ), alignof(CondQ))) as *mut CondQ;
         unsafe q[0] = CondQ { head: null, tail: null, gen: 0, os_waiters: 0 };
         return Condvar { wq: q };
     }
@@ -787,7 +787,7 @@ extend Condvar {
 extend Condvar as Free {
     pub fn free(self: &mut Condvar) {
         let mut g = Global {};
-        g.dealloc(self.wq, sizeof(CondQ), alignof(CondQ));
+        unsafe g.dealloc(self.wq, sizeof(CondQ), alignof(CondQ));
         self.wq = null;
     }
 }

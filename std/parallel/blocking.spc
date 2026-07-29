@@ -90,7 +90,7 @@ fn pool_main(arg: *mut void) *mut void {
         let run = unsafe j.run;
         let env = unsafe j.env;
         let mut g = Global {};
-        g.dealloc(j, sizeof(BJob), alignof(BJob));
+        unsafe g.dealloc(j, sizeof(BJob), alignof(BJob));
         run(env); // outside the lock: this is the part that is allowed to block
     }
     return null;
@@ -98,7 +98,7 @@ fn pool_main(arg: *mut void) *mut void {
 
 fn build_pool() *mut Pool {
     let mut g = Global {};
-    let p = g.alloc(sizeof(Pool), alignof(Pool)) as *mut Pool;
+    let p = (unsafe g.alloc(sizeof(Pool), alignof(Pool))) as *mut Pool;
     unsafe p[0] = Pool {
         lock: unsafe sc_runtime::sc_rt_mutex_new(),
         cv: unsafe sc_runtime::sc_rt_cond_new(),
@@ -151,7 +151,7 @@ fn atomic_cas(p: *mut i32, from: i32, to: i32) bool {
 pub fn submit(run: fn(*mut void) void, env: *mut void) {
     let p = ensure_pool();
     let mut g = Global {};
-    let j = g.alloc(sizeof(BJob), alignof(BJob)) as *mut BJob;
+    let j = (unsafe g.alloc(sizeof(BJob), alignof(BJob))) as *mut BJob;
     unsafe j[0] = BJob { run: run, env: env, next: null };
     unsafe sc_runtime::sc_rt_mutex_lock(p.lock);
     if unsafe p.tail == null {
@@ -191,7 +191,7 @@ pub fn entry<F: fn move() T + Send, T>(env: *mut void) {
         pp[0];
     };
     let mut g = Global {};
-    g.dealloc(env, sizeof(Payload<F, T>), alignof(Payload<F, T>));
+    unsafe g.dealloc(env, sizeof(Payload<F, T>), alignof(Payload<F, T>));
     let f = pay.body;
     unsafe pay.slot[0] = f();
     complete(pay.done);
@@ -204,7 +204,7 @@ pub fn entry<F: fn move() T + Send, T>(env: *mut void) {
 pub fn run_blocking(run: fn(*mut void) void, env: *mut void) {
     let mut done = Done { state: sync::Mutex::<i32>::new(0), cv: sync::Condvar::new() };
     let mut g = Global {};
-    let box = g.alloc(sizeof(RawJob), alignof(RawJob)) as *mut RawJob;
+    let box = (unsafe g.alloc(sizeof(RawJob), alignof(RawJob))) as *mut RawJob;
     unsafe box[0] = RawJob { run: run, env: env, done: &mut done };
     submit(raw_entry, box);
     {
@@ -229,7 +229,7 @@ pub fn raw_entry(p: *mut void) {
     let env = unsafe j.env;
     let d = unsafe j.done;
     let mut g = Global {};
-    g.dealloc(j, sizeof(RawJob), alignof(RawJob));
+    unsafe g.dealloc(j, sizeof(RawJob), alignof(RawJob));
     run(env);
     complete(d);
 }
@@ -241,7 +241,7 @@ pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     let mut slot: T;
     let mut done = Done { state: sync::Mutex::<i32>::new(0), cv: sync::Condvar::new() };
     let mut g = Global {};
-    let env = g.alloc(sizeof(Payload<F, T>), alignof(Payload<F, T>)) as *mut Payload<F, T>;
+    let env = (unsafe g.alloc(sizeof(Payload<F, T>), alignof(Payload<F, T>))) as *mut Payload<F, T>;
     unsafe env[0] = Payload::<F, T> { body: f, slot: &mut slot, done: &mut done };
     submit(entry::<F, T>, env);
     {
@@ -274,7 +274,7 @@ pub fn shutdown() {
     unsafe sc_runtime::sc_rt_mutex_free(p.lock);
     unsafe sc_runtime::sc_rt_cond_free(p.cv);
     let mut g = Global {};
-    g.dealloc(p, sizeof(Pool), alignof(Pool));
+    unsafe g.dealloc(p, sizeof(Pool), alignof(Pool));
     atomic_store(sp, 0);
     unsafe G_POOL = null;
 }

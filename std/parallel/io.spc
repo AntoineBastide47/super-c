@@ -54,7 +54,7 @@ static mut G_REACTOR: *mut Reactor = null;
 
 fn free_interest(it: *mut Interest) {
     let mut g = Global {};
-    g.dealloc(it, sizeof(Interest), alignof(Interest));
+    unsafe g.dealloc(it, sizeof(Interest), alignof(Interest));
 }
 
 // The reactor thread: block in the poller, turn every ready registration back into a wake. One thread for
@@ -85,7 +85,7 @@ fn reactor_main(arg: *mut void) *mut void {
 
 fn build_reactor() *mut Reactor {
     let mut g = Global {};
-    let r = g.alloc(sizeof(Reactor), alignof(Reactor)) as *mut Reactor;
+    let r = (unsafe g.alloc(sizeof(Reactor), alignof(Reactor))) as *mut Reactor;
     unsafe r.poller = unsafe sc_io::sc_io_new();
     unsafe r.running = 1;
     let mut h: *mut void = null;
@@ -155,7 +155,7 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
         return unsafe sc_io::sc_io_wait_fd(fd, w, ms) > 0;
     }
     let mut g = Global {};
-    let it = g.alloc(sizeof(Interest), alignof(Interest)) as *mut Interest;
+    let it = (unsafe g.alloc(sizeof(Interest), alignof(Interest))) as *mut Interest;
     let token = runtime::park_begin(co);
     unsafe it[0] = Interest { co: co, token: token, fd: fd, write: w, state: 0 };
     runtime::park_timed(token, deadline, commit_arm, it);
@@ -232,7 +232,7 @@ pub fn shutdown() {
     let _ = unsafe sc_runtime::sc_rt_thread_join(r.thread);
     unsafe sc_io::sc_io_free(r.poller);
     let mut g = Global {};
-    g.dealloc(r, sizeof(Reactor), alignof(Reactor));
+    unsafe g.dealloc(r, sizeof(Reactor), alignof(Reactor));
     atomic::store_i32(sp, 0, 2);
     unsafe G_REACTOR = null;
 }

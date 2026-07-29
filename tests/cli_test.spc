@@ -893,9 +893,9 @@ fn string_non_default_allocator() {
         r#"extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
 struct RawAlloc {}
 extend RawAlloc as Allocator {
-  fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe malloc(n); }
-  fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe realloc(p, n); }
-  fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) { unsafe free(p); }
+  unsafe fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe malloc(n); }
+  unsafe fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe realloc(p, n); }
+  unsafe fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) { unsafe free(p); }
 }
 fn main() i32 {
   let a = RawAlloc {};
@@ -1107,7 +1107,7 @@ fn main() i32 {
         return 2;
     }
     let mut g = Global {};
-    let wp = g.alloc(4, 4) as *mut i32;
+    let wp = unsafe g.alloc(4, 4) as *mut i32;
     unsafe wp[0] = 0;
     let waddr = wp as usize;
     let h = thread::spawn(fn() i32 {
@@ -1127,7 +1127,7 @@ fn main() i32 {
     }
     let _ = h.join();
     let fin = unsafe wp[0];
-    g.dealloc(wp, 4, 4);
+    unsafe g.dealloc(wp, 4, 4);
     if fin != 1 {
         return 3;
     }

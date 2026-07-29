@@ -114,10 +114,14 @@ extern "C" {
 /// `malloc`-backed one may ignore. `alloc`/`realloc` return a usable, suitably-aligned block (never null --
 /// they handle OOM themselves). Allocators own nothing themselves (the memory they hand out is owned by the
 /// container), so they are not `Free` and are freely copied when a container is cloned.
+/// Every method is `unsafe`, and the bookkeeping arguments are why. `dealloc` and `realloc` are TOLD the
+/// block's `size` and `align`, and an allocator that trusts them -- a bump or arena one must -- corrupts its
+/// own free list when they are wrong. Nothing checks that the numbers describe the block `ptr` came from, or
+/// that `ptr` came from this allocator at all, so the caller says so.
 pub interface Allocator {
-    fn alloc(self: &mut Self, size: usize, align: usize) *mut void;
-    fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void;
-    fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) void;
+    unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void;
+    unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void;
+    unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) void;
 }
 
 /// The default allocator: the C heap (`malloc`/`realloc`/`free`), aborting on out-of-memory. A zero-sized
@@ -126,21 +130,21 @@ pub interface Allocator {
 pub struct Global {}
 
 extend Global as Allocator {
-    pub const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
+    pub unsafe const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
         let p = unsafe malloc(size);
         if p == null {
             unsafe abort();
         }
         return p;
     }
-    pub const fn realloc(self: &mut Global, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
+    pub unsafe const fn realloc(self: &mut Global, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
         let p = unsafe realloc(ptr, new_size);
         if p == null {
             unsafe abort();
         }
         return p;
     }
-    pub const fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) {
+    pub unsafe const fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) {
         unsafe free(ptr);
     }
 }

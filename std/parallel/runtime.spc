@@ -807,7 +807,7 @@ fn release_block(co: *mut Coroutine) {
     unsafe sc_runtime::sc_rt_stack_free(co.stack, G_STACK_SIZE);
     unsafe sc_runtime::sc_rt_ctx_free(co.ctx);
     let mut g = Global {};
-    g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+    unsafe g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
 }
 
 // Everything the pool is holding. Called from `shutdown`, after the workers have been joined.
@@ -957,7 +957,7 @@ fn worker_main(arg: *mut void) *mut void {
             unsafe __sc_set_task_id(0);
             unsafe sc_runtime::sc_rt_tls_set(null);
             let mut gj = Global {};
-            gj.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+            unsafe gj.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
             let _ = atomic::add_usize(&mut unsafe G_DONE, 1, 0);
             continue;
         }
@@ -1012,17 +1012,17 @@ fn worker_main(arg: *mut void) *mut void {
 
 fn build_scheduler() *mut Scheduler {
     let mut g = Global {};
-    let s = g.alloc(sizeof(Scheduler), alignof(Scheduler)) as *mut Scheduler;
+    let s = (unsafe g.alloc(sizeof(Scheduler), alignof(Scheduler))) as *mut Scheduler;
     let lk = unsafe sc_runtime::sc_rt_mutex_new();
     let nw = if unsafe G_NWORKERS > 0 {
         unsafe G_NWORKERS;
     } else {
         platform::ncpu();
     };
-    let deques = g.alloc(nw * sizeof(Worker), LINE) as *mut Worker; // line-aligned: see Worker.pad
-    let parkers = g.alloc(nw * sizeof(Parker), LINE) as *mut Parker;
+    let deques = (unsafe g.alloc(nw * sizeof(Worker), LINE)) as *mut Worker; // line-aligned: see Worker.pad
+    let parkers = (unsafe g.alloc(nw * sizeof(Parker), LINE)) as *mut Parker;
     let words = (nw + 63) / 64;
-    let idle = g.alloc(words * sizeof(u64), alignof(u64)) as *mut u64;
+    let idle = (unsafe g.alloc(words * sizeof(u64), alignof(u64))) as *mut u64;
     for i in 0..words {
         unsafe idle[i] = 0;
     }
@@ -1055,7 +1055,7 @@ fn build_scheduler() *mut Scheduler {
         free_spin: 0,
     };
     for i in 0..nw {
-        let buf = g.alloc(DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine)) as *mut *mut Coroutine;
+        let buf = (unsafe g.alloc(DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine))) as *mut *mut Coroutine;
         // Seed each victim-choice generator differently and never with zero, or xorshift stays at zero.
         let seed = 0x9e3779b97f4a7c15 + (i as u64 + 1) * 0x632be59bd9b4e019;
         unsafe deques[i] = Worker {
@@ -1112,7 +1112,7 @@ pub fn job_entry<F: fn move()>(env: *mut void) {
         pp[0];
     };
     let mut g = Global {};
-    g.dealloc(env, sizeof(F), alignof(F));
+    unsafe g.dealloc(env, sizeof(F), alignof(F));
     f();
 }
 
@@ -1129,7 +1129,7 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
     let mut pst: u32 = 0;
     if co == null {
         let mut g = Global {};
-        co = g.alloc(sizeof(Coroutine), alignof(Coroutine)) as *mut Coroutine;
+        co = (unsafe g.alloc(sizeof(Coroutine), alignof(Coroutine))) as *mut Coroutine;
         stk = unsafe sc_runtime::sc_rt_stack_alloc(G_STACK_SIZE);
         ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
     } else {
@@ -1170,7 +1170,7 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
 pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
     let s = ensure_started();
     let mut g = Global {};
-    let co = g.alloc(sizeof(Coroutine), alignof(Coroutine)) as *mut Coroutine;
+    let co = (unsafe g.alloc(sizeof(Coroutine), alignof(Coroutine))) as *mut Coroutine;
     unsafe co[0] = Coroutine {
         id: next_task_id(),
         ctx: null,
@@ -1207,7 +1207,7 @@ pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
 /// them through an `Arc`.
 pub fn submit<F: fn move() + Send + 'static>(f: F) {
     let mut g = Global {};
-    let slot = g.alloc(sizeof(F), alignof(F)) as *mut F;
+    let slot = (unsafe g.alloc(sizeof(F), alignof(F))) as *mut F;
     unsafe slot[0] = f;
     spawn_coroutine(job_entry::<F>, slot);
 }
@@ -1436,18 +1436,18 @@ pub fn shutdown() {
     pool_drain(s); // every recycled block, now that no worker can ask for one
     let mut g = Global {};
     for i in 0..unsafe s.nw {
-        g.dealloc(unsafe (s.deques + i).buf, DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine));
+        unsafe g.dealloc(unsafe (s.deques + i).buf, DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine));
     }
-    g.dealloc(unsafe s.deques, unsafe s.nw * sizeof(Worker), LINE);
+    unsafe g.dealloc(unsafe s.deques, unsafe s.nw * sizeof(Worker), LINE);
     for i in 0..unsafe s.nw {
         let pk = unsafe (s.parkers + i);
         unsafe sc_runtime::sc_rt_mutex_free(pk.mtx);
         unsafe sc_runtime::sc_rt_cond_free(pk.cv);
     }
-    g.dealloc(unsafe s.parkers, unsafe s.nw * sizeof(Parker), LINE);
-    g.dealloc(unsafe s.idle, unsafe s.idle_words * sizeof(u64), alignof(u64));
+    unsafe g.dealloc(unsafe s.parkers, unsafe s.nw * sizeof(Parker), LINE);
+    unsafe g.dealloc(unsafe s.idle, unsafe s.idle_words * sizeof(u64), alignof(u64));
     unsafe sc_runtime::sc_rt_mutex_free(s.lock);
-    g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
+    unsafe g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
     atomic::store_i32(sp, 0, 2);
     unsafe G_SCHED = null;
     // Anything still unfinished here is parked on something nothing will ever signal -- a deadlock the

@@ -242,7 +242,7 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
     let bp = (&mut b) as *mut Batch;
     // One allocation for every chunk slot; each job holds a pointer into it, and the caller outlives them.
     let mut g = Global {};
-    let envs = g.alloc(nchunks * sizeof(ChunkEnv), alignof(ChunkEnv)) as *mut ChunkEnv;
+    let envs = (unsafe g.alloc(nchunks * sizeof(ChunkEnv), alignof(ChunkEnv))) as *mut ChunkEnv;
     let base = total / nchunks;
     let extra = total % nchunks;
     let mut at: usize = 0;
@@ -261,7 +261,7 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
             latch.cv.wait(&g2);
         }
     }
-    g.dealloc(envs, nchunks * sizeof(ChunkEnv), alignof(ChunkEnv));
+    unsafe g.dealloc(envs, nchunks * sizeof(ChunkEnv), alignof(ChunkEnv));
     // `latch` is auto-freed at scope exit (its mutex and condvar with it), which is safe only because no
     // chunk touches it after the count reached zero -- and once `raw_mutex_unlock` publishes the release it
     // touches only memory that outlives the mutex (see `RawMutex`), so the last chunk's unlock cannot race
@@ -528,7 +528,7 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
         return make(); // nothing to fold
     }
     let mut g = Global {};
-    let out = g.alloc(nslots * sizeof(A), alignof(A)) as *mut A;
+    let out = (unsafe g.alloc(nslots * sizeof(A), alignof(A))) as *mut A;
     let mut sh = ReduceShared::<T, A, MK, FOLD> { make: make, fold: fold, items: items.as_ptr(), out: out };
     dispatch(n, opts, reduce_chunk::<T, A, MK, FOLD>, &mut sh);
     // Every chunk wrote its slot (a chunk that drew no work wrote the identity), so all `nslots` are live.
@@ -541,7 +541,7 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
         };
         acc = combine(acc, part);
     }
-    g.dealloc(out, nslots * sizeof(A), alignof(A));
+    unsafe g.dealloc(out, nslots * sizeof(A), alignof(A));
     return acc;
 }
 
@@ -567,7 +567,7 @@ pub fn section_entry<F: fn() + Send + Sync>(env: *mut void) {
         pp[0];
     };
     let mut g = Global {};
-    g.dealloc(env, sizeof(F), alignof(F));
+    unsafe g.dealloc(env, sizeof(F), alignof(F));
     f();
 }
 
@@ -576,7 +576,7 @@ extend Sections {
     /// so the sections need not be uniform.
     pub fn add<F: fn() + Send + Sync>(self: &mut Sections, f: F) {
         let mut g = Global {};
-        let slot = g.alloc(sizeof(F), alignof(F)) as *mut F;
+        let slot = (unsafe g.alloc(sizeof(F), alignof(F))) as *mut F;
         unsafe slot[0] = f;
         self.entries.push(SectionJob { entry: section_entry::<F>, env: slot });
     }

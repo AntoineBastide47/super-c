@@ -107,13 +107,13 @@ extend<A: Allocator> String<A> {
     // STORED allocator (a String buffer is a byte array, so the alignment is always 1).
     fn grow_to(self: &mut String<A>, new_cap: usize) {
         if self.is_large() {
-            let p = self.alloc.realloc(self.repr.large.ptr, self.capacity(), new_cap, 1) as *mut u8;
+            let p = (unsafe self.alloc.realloc(self.repr.large.ptr, self.capacity(), new_cap, 1)) as *mut u8;
             self.repr.large.ptr = p;
             self.repr.large.cap = new_cap | 1 as usize << 63;
             return;
         }
         let cur = self.repr.small.len as usize;
-        let p = self.alloc.alloc(new_cap, 1) as *mut u8;
+        let p = (unsafe self.alloc.alloc(new_cap, 1)) as *mut u8;
         if cur > 0 {
             unsafe memcpy(p, &self.repr.small.data[0], cur);
         }
@@ -135,7 +135,7 @@ extend<A: Allocator> String<A> {
         if cap <= 23 {
             return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
         }
-        let p = alloc.alloc(cap, 1) as *mut u8;
+        let p = (unsafe alloc.alloc(cap, 1)) as *mut u8;
         return String::<A> {
             repr: StringRepr { large: StringLarge { ptr: p, len: 0, cap: cap | 1 as usize << 63 } },
             alloc: alloc,
@@ -239,12 +239,12 @@ extend<A: Allocator> String<A> {
             if n > 0 {
                 unsafe memcpy(&mut self.repr.small.data[0], p, n);
             }
-            self.alloc.dealloc(p, cap, 1);
+            unsafe self.alloc.dealloc(p, cap, 1);
             self.repr.small.len = n as u8; // clears the discriminant (n <= 23)
             return;
         }
         if self.capacity() != n {
-            let np = self.alloc.realloc(p, self.capacity(), n, 1) as *mut u8;
+            let np = (unsafe self.alloc.realloc(p, self.capacity(), n, 1)) as *mut u8;
             self.repr.large.ptr = np;
             self.repr.large.cap = n | 1 as usize << 63;
         }
@@ -371,7 +371,7 @@ extend<A: Allocator> String<A> {
 
     /// Append a floating-point value with exactly `prec` digits after the decimal point ('{:.N}').
     pub fn push_f64_prec(self: &mut String<A>, value: f64, prec: u32) {
-        let buf = self.alloc.alloc(64, 1) as *mut char;
+        let buf = (unsafe self.alloc.alloc(64, 1)) as *mut char;
         let n = unsafe snprintf(buf, 64, "%.*f", prec as i32, value);
         if n > 0 {
             let mut m = n as usize;
@@ -380,7 +380,7 @@ extend<A: Allocator> String<A> {
             }
             self.push_bytes(buf as *const u8, m);
         }
-        self.alloc.dealloc(buf, 64, 1);
+        unsafe self.alloc.dealloc(buf, 64, 1);
     }
 
     /// Append `s` in a `width`-byte field padded with `fill` ('{:>8}', '{:08}', '{:^6}').
@@ -460,12 +460,12 @@ extend<A: Allocator> String<A> {
     /// Append a floating-point value formatted by C's "%g" (compact, round-trip-ish). The scratch buffer is
     /// taken from the stored allocator and released back to it.
     pub fn push_f64(self: &mut String<A>, value: f64) {
-        let buf = self.alloc.alloc(32, 1) as *mut char;
+        let buf = (unsafe self.alloc.alloc(32, 1)) as *mut char;
         let n = unsafe snprintf(buf, 32, "%g", value);
         if n > 0 {
             self.push_bytes(buf as *const u8, n as usize);
         }
-        self.alloc.dealloc(buf, 32, 1);
+        unsafe self.alloc.dealloc(buf, 32, 1);
     }
 
     /// Insert one byte at index `i` (0 <= i <= len), shifting the tail right.
@@ -984,7 +984,7 @@ extend<A: Allocator + Default> String<A> {
 extend<A: Allocator> String<A> as Free {
     pub fn free(self: &mut String<A>) {
         if self.is_large() {
-            self.alloc.dealloc(self.repr.large.ptr, self.capacity(), 1);
+            unsafe self.alloc.dealloc(self.repr.large.ptr, self.capacity(), 1);
         }
         self.repr.small.len = 0; // back to inline, empty (clears the discriminant)
     }
