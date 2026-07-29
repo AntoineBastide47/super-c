@@ -134,14 +134,18 @@ static int sc_lo_nedge;
 static int32_t sc_lo_lock;
 static int sc_lo_state; /* 0 unknown, 1 off, 2 report, 3 abort */
 
+/* Every thread resolves this on its first lock, so the store races unless it is atomic -- and it raced even
+   with the feature OFF, which is the worst kind: a tool that adds a race to the program it is checking. Each
+   racer computes the same value from the same environment, so relaxed is enough. */
 static int sc_lo_on(void) {
-  if (sc_lo_state == 0) {
+  int st = __atomic_load_n(&sc_lo_state, __ATOMIC_RELAXED);
+  if (st == 0) {
     const char *e = getenv("SC_LOCK_ORDER");
-    int st = 1;
+    st = 1;
     if (e != NULL && e[0] != '\0' && e[0] != '0') st = (e[0] == 'f' || e[0] == 'F') ? 3 : 2;
-    sc_lo_state = st;
+    __atomic_store_n(&sc_lo_state, st, __ATOMIC_RELAXED);
   }
-  return sc_lo_state >= 2;
+  return st >= 2;
 }
 
 void sc_rt_lockdep_acquire(void *lock) {
@@ -169,7 +173,7 @@ void sc_rt_lockdep_acquire(void *lock) {
         sc_lo_edge[sc_lo_nedge].b = lock;
         sc_lo_nedge++;
       }
-      if (seen == 1 && sc_lo_state >= 3) {
+      if (seen == 1 && __atomic_load_n(&sc_lo_state, __ATOMIC_RELAXED) >= 3) {
         sc_rt_spin_unlock(&sc_lo_lock);
         abort();
       }
