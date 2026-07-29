@@ -4805,9 +4805,9 @@ extend TypeChecker {
     }
 
     /// Decompose a place `x.f[i]...` into its root binding + access steps (leaf-first). Returns the
-    /// root local decl, or NODE_NONE when the chain crosses a raw pointer, indexes a non-array, or
-    /// does not end at a local binding. A union member access drops the steps below it (all members
-    /// overlap).
+    /// root local decl, or NODE_NONE when the chain crosses a raw pointer, indexes through a
+    /// reference, or does not end at a local binding. A union member access drops the steps below it
+    /// (all members overlap).
     pub fn place_decompose(self: &mut Self, place0: NodeId, steps: *mut PStep, nsteps: *mut i32, cap: i32) NodeId {
         unsafe *nsteps = 0;
         let a = self.cur_ast();
@@ -4883,7 +4883,10 @@ extend TypeChecker {
                 return NODE_NONE;
             }
             if pn.kind == NodeKind::NODE_INDEX && btk.kind != TypeKind::TYPE_ARRAY {
-                return NODE_NONE;
+                // An overloaded Index result views the container it was called on, so `v[i]` is a
+                // sub-place of `v`; unlike a real array, distinct constant indices prove nothing
+                // about distinct storage, so they must keep overlapping.
+                step.index_const = false;
             }
             if !base_union && unsafe *nsteps < cap {
                 let k = unsafe *nsteps;

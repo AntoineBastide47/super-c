@@ -1108,7 +1108,7 @@ fn bench_collect(
     target: i32,
     out: &mut Vector<String>,
 ) bool {
-    let mut p = loader::package_load_rooted(rootp, ".", src_dir, std_dir, bootstrap_tags, target);
+    let p = loader::package_load_rooted(rootp, ".", src_dir, std_dir, bootstrap_tags, target);
     if !p.ok {
         return false;
     }
@@ -1123,7 +1123,7 @@ fn bench_collect(
             continue; // the generated root itself, and anything it pulled in from elsewhere
         }
         let src = p.modules[m].source.as_str();
-        let a = mod_ast_c(&mut p, mid);
+        let a = mod_ast_c(&p, mid);
         let nattr = unsafe a.attrs.len();
         for ai in 0..nattr {
             let at = unsafe a.attrs[ai];

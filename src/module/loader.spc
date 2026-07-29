@@ -744,19 +744,19 @@ extend Package {
         while self.method_used.len() <= m {
             self.method_used.push(Vector::<bool>::new());
         }
-        let inner = &mut self.method_used[m];
-        if inner.len() <= d.node as usize {
+        if self.method_used[m].len() <= d.node as usize {
             // Size once to the module's node count so later marks are pure set()s.
             let mut n = unsafe self.module_ast_ptr(d.module).nodes.len();
             if n <= d.node as usize {
                 n = d.node as usize + 1;
             }
+            let inner = &mut self.method_used[m];
             inner.reserve(n - inner.len());
             while inner.len() < n {
                 inner.push(false);
             }
         }
-        inner.set(d.node as usize, true);
+        self.method_used[m].set(d.node as usize, true);
     }
 
     pub const fn method_used_get(self: &Self, d: DefId) bool {
@@ -2373,10 +2373,10 @@ fn load_prelude(p: &mut Package, std_dir: *const char, target: i32) {
         let mut file = join2(str::from_cstr(std_dir), names[k].as_str());
         let mut dup = false;
         for i2 in 0..m0 {
-            if basename_of(p.modules[i2].file.as_str()) == names[k].as_str() && unsafe shim::sc_same_file(
-                file.cstr(),
-                p.modules[i2].file.cstr(),
-            ) == 1 {
+            if basename_of(p.modules[i2].file.as_str()) != names[k].as_str() {
+                continue;
+            }
+            if unsafe shim::sc_same_file(file.cstr(), p.modules[i2].file.cstr()) == 1 {
                 p.modules[i2].prelude = true;
                 dup = true;
                 break;

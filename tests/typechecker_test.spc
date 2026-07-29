@@ -1758,6 +1758,28 @@ fn borrow_carrying_result_borrows_receiver() {
     );
 }
 
+// A borrow taken through an `Index` conformance is a borrow OF the container: `v[i]` is a sub-place
+// of `v` (place_decompose no longer bails on a non-array indexed base), so `&v[i]` pins `v` exactly
+// like the `v.at(i)` method form.
+@test
+fn index_conformance_borrows_container() {
+    h::expect_err_msg(
+        "&v[0] pins the Vector against &mut",
+        "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    v.push(1);\n    let r = &v[0];\n    let m = &mut v;\n    m.push(2);\n    return *r as i32;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    h::expect_err_msg(
+        "&a[0] pins an Array against &mut",
+        "fn main() i32 {\n    let mut a = Array::<i64, 4>::filled(&1i64);\n    let r = &a[0];\n    let m = &mut a;\n    m[1] = 9;\n    return *r as i32;\n}\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    // a plain copy out of the element leaves the container free
+    h::expect_ok(
+        "v[0] read by value does not pin the Vector",
+        "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    v.push(1);\n    let x = v[0];\n    v.push(2);\n    return (x + v[1]) as i32 - 3;\n}\n",
+    );
+}
+
 // Two-phase borrows: a method call's `&mut self` receiver does not conflict with a shared borrow
 // produced while evaluating that same call's arguments (the borrow is spent computing the arg value,
 // and the `&mut` only truly activates when the call runs). Matches Rust. The IN-LOOP forms are the

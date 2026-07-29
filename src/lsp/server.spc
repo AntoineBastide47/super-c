@@ -436,9 +436,10 @@ extend Server {
         // swap the fresh package in (drop the previous build wholesale)
         self.roots[r].pkg = pkg;
         self.roots[r].files = Vector::<String>::new();
-        for m in 0..self.roots.at(r).pkg.modules.len() {
-            let fp = self.roots.at(r).pkg.modules.at(m).file.as_str();
-            self.roots[r].files.push(canon(fp));
+        let nmods = self.roots.at(r).pkg.modules.len();
+        for m in 0..nmods {
+            let fp = canon(self.roots.at(r).pkg.modules.at(m).file.as_str());
+            self.roots[r].files.push(fp);
         }
         self.roots[r].built = true;
         // retain the records: publishing + codeAction read from them until the next rebuild

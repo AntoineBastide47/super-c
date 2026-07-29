@@ -1265,6 +1265,24 @@ extend tc::TypeChecker {
             if a.at_const(b.root).kind != NodeKind::NODE_LET {
                 continue;
             }
+            // A place reaching its root THROUGH a reference lives wherever the reference points, not
+            // in the local's storage: skip when the reference's own binding borrows nothing local
+            // (e.g. it was minted from a raw pointer). A place that does not decompose (a closure's
+            // re-exposed capture) stays conservative.
+            let mut psteps = Steps16 {};
+            let mut pns: i32 = 0;
+            let proot = self.place_decompose(b.place, &mut psteps[0], &mut pns, PLACE_MAX_STEPS);
+            if proot != NODE_NONE {
+                let mut thru = false;
+                for si in 0..pns {
+                    if psteps[si as usize].kind == PS_DEREF {
+                        thru = true;
+                    }
+                }
+                if thru && self.borrow_escape_of_binding(proot, 1) == 0 {
+                    continue;
+                }
+            }
             let sp = a.at_const(vid).span;
             let mut what = "a value borrowing".ptr() as *const char;
             if self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
