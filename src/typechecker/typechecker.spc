@@ -5370,6 +5370,8 @@ extend TypeChecker {
                             diag::span_str(self.mod_src(iface.module), rn.start, rn.end),
                         ),
                     );
+                } else {
+                    self.check_method_qualifiers(reqdef, hm, rn);
                 }
             }
         }
@@ -5409,6 +5411,40 @@ extend TypeChecker {
                 "nothing verifies this: write 'unsafe extend' to take responsibility for it, or let the compiler derive the marker from the fields",
             ),
         );
+    }
+
+    // An interface method's `const` and `unsafe` are part of the REQUIREMENT, not decoration on it.
+    //
+    // `unsafe` must match exactly, and the direction that matters is an implementation MORE unsafe than its
+    // declaration: a caller reaching it through the bound sees the safe declaration, promises nothing, and
+    // lands in an unsafe body -- the mark laundered away by the interface. The other direction is only
+    // confusing (a direct call needs no mark while a call through the bound does), so both are errors and
+    // the two signatures simply agree.
+    //
+    // `const` only has to be strong ENOUGH. An implementation may be `const fn` where the interface asks for
+    // a plain one -- it is more capable, and `std` leans on this throughout (`Array as Default` is const
+    // where `Default` is not). It may not be plain where the interface asks for `const`, or a `const fn`
+    // calling through the bound would fail at the fold, far from the implementation that caused it.
+    fn check_method_qualifiers(self: &mut Self, req: DefId, hm: NodeId, rn: tok::Span) {
+        let rf = self.mod_ast(req.module).at_const(req.node).as_data.function;
+        let hf = self.cur_ast().at_const(hm).as_data.function;
+        let at = self.cur_ast().at_const(hm).span;
+        let name = diag::span_str(self.mod_src(req.module), rn.start, rn.end);
+        if rf.is_unsafe != hf.is_unsafe {
+            let what = if rf.is_unsafe {
+                "is declared 'unsafe fn' by this interface";
+            } else {
+                "is not declared 'unsafe fn' by this interface, so a caller through the bound makes no promise";
+            };
+            self.errors.emit(at.start, at.end - at.start, format("method '{}' {}", name, what));
+        }
+        if rf.is_const && !hf.is_const {
+            self.errors.emit(
+                at.start,
+                at.end - at.start,
+                format("method '{}' is declared 'const fn' by this interface", name),
+            );
+        }
     }
 
     fn check_extend_conformance(self: &mut Self, id: NodeId) {
