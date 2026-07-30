@@ -726,6 +726,11 @@ pub struct Ast {
     // typecheck for a 0.78 MiB saving. Access goes through the accessors below regardless.
     pub resolutions: Vector<DefId>,
     pub type_pool: Vector<Ty>,
+    // Concreteness, decided once per interned type and kept in lockstep with `type_pool`. A type's
+    // meaning never changes while it exists (interning is bottom-up and `restore_arena` rolls types and
+    // instances back together), so the answer cannot go stale -- and asking was the compiler's single
+    // hottest operation, because every caller re-walked the whole nested structure.
+    pub tc_pool: Vector<bool>,
     // Open-addressing INDEX tables over the pools (0xFFFFFFFF = empty slot): the pool entry itself is
     // the key, so nothing is stored twice. Every hit VERIFIES the pool entry (codegen truncate()s
     // `instances` during owner-swap emission, leaving stale ids behind — a stale or out-of-range id
@@ -762,6 +767,7 @@ extend Ast {
             scratch: Vector::<u32>::new(),
             resolutions: Vector::<DefId>::new(),
             type_pool: Vector::<Ty>::new(),
+            tc_pool: Vector::<bool>::new(),
             type_index: Vector::<u32>::new(),
             type_ix_used: 0,
             types: Vector::<u32>::new(),
@@ -844,6 +850,7 @@ extend Ast {
     pub fn restore_arena(self: &mut Self, ntypes: usize, ninstances: usize) {
         self.instances.truncate(ninstances);
         self.type_pool.truncate(ntypes);
+        self.tc_pool.truncate(ntypes);
     }
 
     pub fn init_types(self: &mut Self) {
@@ -853,12 +860,15 @@ extend Ast {
             self.types.push(TYPE_NONE);
         }
         self.type_pool.clear();
+        self.tc_pool.clear();
         self.type_index.clear();
         self.type_ix_used = 0;
         // seeds go to the pool only: the first intern_type rebuild indexes the whole pool
         self.type_pool.push(Ty { kind: TypeKind::TYPE_ERROR });
+        self.tc_pool.push(true);
         for b in 0..BuiltinType::BT_COUNT as u8 {
             self.type_pool.push(Ty { kind: TypeKind::TYPE_BUILTIN, as_data: TyAs { builtin: b as BuiltinType } });
+            self.tc_pool.push(true);
         }
     }
 
@@ -900,7 +910,9 @@ extend Ast {
             let idx = unsafe ixp[i];
             if idx == 0xFFFFFFFFu32 {
                 let id = self.type_pool.len() as TypeId;
+                let tc = self.tc_decide(t);
                 self.type_pool.push(t);
+                self.tc_pool.push(tc);
                 self.type_index.set(i, id);
                 self.type_ix_used = self.type_ix_used + 1;
                 return id;
@@ -1046,8 +1058,15 @@ extend Ast {
         self.attrs.push(attr);
     }
 
-    pub fn type_concrete(self: &Self, t: TypeId) bool {
-        let ty = self.type_at(t);
+    pub const fn type_concrete(self: &Self, t: TypeId) bool {
+        if t as usize < self.tc_pool.len() {
+            return self.tc_pool[t as usize];
+        }
+        return self.tc_walk(t); // a type not yet in lockstep: answer the slow way rather than guess
+    }
+    // One level, reading the recorded answer for the children -- which are interned before their parent, so
+    // their entries already exist. This is what `intern_type` records.
+    fn tc_decide(self: &Self, ty: Ty) bool {
         return switch ty.kind {
             TYPE_GENERIC => false,
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => self.type_concrete(ty.as_data.elem),
@@ -1062,6 +1081,9 @@ extend Ast {
             },
             _ => true,
         };
+    }
+    fn tc_walk(self: &Self, t: TypeId) bool {
+        return self.tc_decide(*self.type_at(t));
     }
 
     /// Re-interns `src`'s type `t` into THIS Ast, rebuilding element and instance payloads

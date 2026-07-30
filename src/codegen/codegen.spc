@@ -1758,24 +1758,10 @@ extend Codegen {
         }
         return -1;
     }
+    // The Ast records this at intern time (`Ast.tc_pool`), so asking costs one load. This used to re-walk
+    // the whole nested type on every call, and it is called per instance argument per collection pass.
     fn type_is_concrete(self: &Self, t: TypeId) bool {
-        let y = self.type_at(t);
-        if y.kind == TypeKind::TYPE_GENERIC {
-            return false;
-        }
-        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
-            return self.type_is_concrete(y.as_data.elem);
-        }
-        if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *self.cur_ast().instance(y.as_data.inst);
-            for i in 0..it.n {
-                if !self.type_is_concrete(unsafe it.args[i as usize]) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        return true;
+        return self.cur_ast().type_concrete(t);
     }
     fn tyargs_concrete(self: &Self, args: *const TypeId, n: i32) bool {
         for k in 0..n {

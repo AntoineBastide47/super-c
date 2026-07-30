@@ -1683,44 +1683,54 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
 
 // Record `src`'s generic-method calls into the method's OWNING module (or the receiver instance's home),
 // so that module emits the matching `Inst__method__targs` specialization. Returns true on growth.
-fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
+// Every filter below reads a table that is final once typechecking is: node kinds, resolutions, generic
+// parameter lists, call type arguments, and whether a type is concrete. The only input that MOVES between
+// sweeps is the receiver instance's home, which `reintern_cross_module` re-homes -- and that is read after
+// the last filter. So the set of nodes worth visiting is fixed: `sites` collects it on the first sweep and
+// every later sweep visits those alone, instead of walking every node in the module again to find the
+// thirty-odd that qualify.
+fn reintern_method_insts(p: &mut Package, sm: ModuleId, sites: &mut Vector<NodeId>, first: bool) bool {
     let mut changed = false;
     let s = pkg_ast_c(p, sm); // stable for the call (see reintern_cross_module); avoids re-deriving per node
-    let n = unsafe s.nodes.len();
     let np = p.modules.len();
-    let mut i: NodeId = 0;
-    while i as usize < n {
+    let total = if first {
+        unsafe s.nodes.len();
+    } else {
+        sites.len();
+    };
+    let mut x: usize = 0;
+    while x < total {
+        let i = if first {
+            x as NodeId;
+        } else {
+            sites[x];
+        };
+        x = x + 1;
         let ck = s.at_const(i).kind;
         if ck != NodeKind::NODE_CALL {
-            i = i + 1;
             continue;
         }
         let callee_id = s.at_const(i).as_data.call.callee;
         let cek = s.at_const(callee_id).kind;
         if cek != NodeKind::NODE_MEMBER {
-            i = i + 1;
             continue;
         }
         let member_id = s.at_const(callee_id).as_data.member.member;
         let md = s.resolution_def(member_id);
         if md.node == NODE_NONE {
-            i = i + 1;
             continue;
         }
         if md.module as usize >= np || !p.modules[md.module as usize].has_ast {
-            i = i + 1;
             continue;
         }
         let om = md.module;
         let mnk = pkg_ast_c(p, om).at_const(md.node).kind;
         let mgen = pkg_ast_c(p, om).at_const(md.node).as_data.function.generics;
         if mnk != NodeKind::NODE_FUNCTION || mgen.len == 0 {
-            i = i + 1;
             continue;
         }
         let mu = s.type_args(i);
         if mu == null || unsafe mu.n == 0 {
-            i = i + 1;
             continue;
         }
         let object_id = s.at_const(callee_id).as_data.member.object;
@@ -1735,7 +1745,6 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             yk = s.type_at(rty).kind;
         }
         if s.type_at(rty).kind != TypeKind::TYPE_INSTANCE || !s.type_concrete(rty) {
-            i = i + 1;
             continue;
         }
         let mtn = if unsafe mu.n < 4 {
@@ -1750,7 +1759,6 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
             }
         }
         if !concrete {
-            i = i + 1;
             continue;
         }
         let recv_inst = s.type_at(rty).as_data.inst;
@@ -1781,11 +1789,13 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId) bool {
                 unsafe targs[t as usize] = unsafe d.reintern(&*s, mu.args[t as usize]);
             }
         }
+        if first {
+            sites.push(i);
+        }
         let d = pkg_ast_m(p, dm);
         if d.add_method_inst(rinst, md.node, &targs[0], mtn) {
             changed = true;
         }
-        i = i + 1;
     }
     return changed;
 }
@@ -2031,10 +2041,15 @@ pub fn package_propagate_instances(p: &mut Package) {
     // each module's instance table has been consumed and re-scan only the newly-appended tail per sweep -- the
     // confirming sweep then touches just the handful the productive sweep added, not every instance again.
     let mut proc_inst = Vector::<usize>::new();
+    // `reintern_method_insts` gets the same treatment from the other side: its candidate nodes cannot change,
+    // so the first sweep records them per module and no later sweep walks the AST again.
+    let mut sites = Vector::<Vector<NodeId>>::new();
     for u in 0..n {
         proc_inst.push(0);
+        sites.push(Vector::<NodeId>::new());
     }
     let mut changed = true;
+    let mut first = true;
     while changed {
         changed = false;
         for u in 0..n {
@@ -2047,11 +2062,12 @@ pub fn package_propagate_instances(p: &mut Package) {
                     }
                     proc_inst[u] = ni;
                 }
-                if reintern_method_insts(p, u as ModuleId) {
+                if reintern_method_insts(p, u as ModuleId, &mut sites[u], first) {
                     changed = true;
                 }
             }
         }
+        first = false;
     }
 }
 
