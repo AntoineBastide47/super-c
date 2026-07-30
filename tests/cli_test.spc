@@ -974,11 +974,9 @@ fn main() i32 {
     while handles.len() > 0 {
         let _ = handles.pop().unwrap().join();
     }
-    handles.free();
 
     let n = owned.join();
     let total = counter.get().load(atom::MemoryOrder::SeqCst);
-    counter.free();
     return (n as i32 - 7) + (total - 4000) as i32;
 }
 "#,
@@ -1207,8 +1205,6 @@ fn main() i32 {
     }
     wg.wait();
     let total = counter.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    counter.free();
     rt::shutdown();
     return (total - 100) as i32;
 }
@@ -1260,8 +1256,6 @@ fn main() i32 {
         wb.done();
     };
     let ok = wg.wait_timeout(time::Duration::from_secs(30));
-    wg.free();
-    flag.free();
     rt::shutdown();
     if !ok {
         return 1;
@@ -1347,10 +1341,6 @@ fn main() i32 {
     let ok = wg.wait_timeout(time::Duration::from_secs(60));
     let n = sum.get().load(atom::MemoryOrder::SeqCst);
     let at = plain_at.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    order.free();
-    plain_at.free();
-    sum.free();
     blocking::shutdown();
     rt::shutdown();
     if !ok || n != 28 {
@@ -1404,7 +1394,6 @@ fn main() i32 {
         w.done();
     };
     wg.wait();
-    wg.free();
     rt::shutdown();
     return 0;
 }
@@ -1445,7 +1434,6 @@ fn main() i32 {
         w.done();
     };
     wg.wait();
-    wg.free();
     rt::shutdown();
     return 0;
 }
@@ -1474,7 +1462,6 @@ fn main() i32 {
         w.done();
     };
     wg.wait();
-    wg.free();
     rt::shutdown();
     return 0;
 }
@@ -1520,8 +1507,6 @@ fn main() i32 {
     }
     wg.wait();
     let named = ids.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    ids.free();
     if rt::spawned_tasks() < 3 || named != 3 {
         return 2;
     }
@@ -1556,7 +1541,6 @@ fn main() i32 {
         panic("from inside a task");
     };
     wg.wait();
-    wg.free();
     rt::shutdown();
     return 0;
 }
@@ -1618,8 +1602,6 @@ fn main() i32 {
                     let _ = gs.get().fetch_add(n as i64, atom::MemoryOrder::Relaxed);
                     let _ = s.write(buf[0..n as usize]);
                 }
-                buf.free();
-                s.free();
             },
             Err(_) => {},
         };
@@ -1642,8 +1624,6 @@ fn main() i32 {
                 if n == 5 && *back.at(0) == 104u8 {
                     let _ = gc.get().fetch_add(1000, atom::MemoryOrder::Relaxed);
                 }
-                back.free();
-                c.free();
             },
             Err(_) => {},
         };
@@ -1652,8 +1632,6 @@ fn main() i32 {
 
     wg.wait();
     let total = got.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    got.free();
     io::shutdown();
     rt::shutdown();
     if total != 1005 {
@@ -1706,7 +1684,6 @@ fn main() i32 {
             },
             Err(_) => {},
         };
-        buf.free();
         ws.done();
     };
 
@@ -1722,7 +1699,6 @@ fn main() i32 {
                     },
                     Err(_) => {},
                 };
-                c.free();
             },
             Err(_) => {},
         };
@@ -1731,8 +1707,6 @@ fn main() i32 {
 
     wg.wait();
     let total = got.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    got.free();
     io::shutdown();
     rt::shutdown();
     return (total - 505) as i32;
@@ -1861,7 +1835,6 @@ fn main() i32 {
                             let _ = s.write(buf[0..n as usize]);
                             let _ = cs.get().fetch_add(1, atom::MemoryOrder::Relaxed);
                         }
-                        buf.free();
                         iw.done();
                     };
                 },
@@ -1869,7 +1842,6 @@ fn main() i32 {
             };
         }
         inner.wait();
-        inner.free();
         lw.done();
     };
 
@@ -1892,8 +1864,6 @@ fn main() i32 {
                     if n == 4 && *back.at(3) == 103u8 {
                         let _ = ce.get().fetch_add(1, atom::MemoryOrder::Relaxed);
                     }
-                    back.free();
-                    c.free();
                 },
                 Err(_) => {},
             };
@@ -1904,10 +1874,6 @@ fn main() i32 {
     wg.wait();
     let s = served.get().load(atom::MemoryOrder::SeqCst);
     let e = echoed.get().load(atom::MemoryOrder::SeqCst);
-    cwg.free();
-    wg.free();
-    served.free();
-    echoed.free();
     io::shutdown();
     rt::shutdown();
     if s != CONNS || e != CONNS {
@@ -1972,8 +1938,6 @@ fn main() i32 {
     let ok = wg.wait_timeout(time::Duration::from_secs(20));
     let dt = platform::now_ns() - t0;
     let n = done.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    done.free();
     blocking::shutdown();
     rt::shutdown();
     if !ok || n != 102 {
@@ -2098,8 +2062,6 @@ fn main() i32 {
     let c1 = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
     let wg1 = sync::WaitGroup::new();
     let a = spawn_many(400, c1.clone(), wg1.clone());
-    wg1.free();
-    c1.free();
     if a != 400 {
         return 1;
     }
@@ -2107,8 +2069,6 @@ fn main() i32 {
     let c2 = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
     let wg2 = sync::WaitGroup::new();
     let b = spawn_many(1000, c2.clone(), wg2.clone());
-    wg2.free();
-    c2.free();
     rt::shutdown();
     if b != 1000 {
         return 2;
@@ -2123,6 +2083,70 @@ fn main() i32 {
     assert_eq(cc.exit, 0);
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert_eq(run.exit, 0);
+}
+
+// Deterministic replay (std/parallel/runtime): `SC_SCHED_SEED` pins the pool to one worker and hands every
+// preemption decision to the seed, so the SAME binary run twice with the same seed takes the same
+// interleaving. Proven by the interleaving itself, not by a summary: four tasks compete for one mutex and
+// each append their id, so the logged order IS the schedule. Two runs at one seed must match byte for byte,
+// and the same must hold at a second seed -- one matching pair could be a program with only one possible
+// order. Not asserted: that two DIFFERENT seeds disagree; nothing promises a given seed pair diverges.
+@test
+fn deterministic_replay() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import std::parallel::arc as arc;
+
+fn main() i32 {
+    let log = arc::Arc::<sync::Mutex<String>>::new(sync::Mutex::<String>::new(String::new()));
+    let wg = sync::WaitGroup::new();
+    wg.add(4);
+    for t in 0..4 {
+        let l = log.clone();
+        let w = wg.clone();
+        launch fn() {
+            for _r in 0..15 {
+                // Real backedges, because a safepoint is what gives the seed somewhere to preempt.
+                let mut spin: i64 = 0;
+                for k in 0..20000 {
+                    spin = spin + k;
+                }
+                let mut g = l.get().lock();
+                g.get_mut().push_i64(t + spin - spin);
+            }
+            w.done();
+        };
+    }
+    wg.wait();
+    let g = log.get().lock();
+    println("order={}", g.get().as_str());
+    rt::shutdown();
+    return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    for s in 0..2 {
+        let env = if s == 0 {
+            "SC_SCHED_SEED=7 ";
+        } else {
+            "SC_SCHED_SEED=1234567 ";
+        };
+        let a = p.run_bin_env(env);
+        assert_eq(a.exit, 0);
+        let b = p.run_bin_env(env);
+        assert_eq(b.exit, 0);
+        let sa = str::from_cstr(a.out);
+        let sb = str::from_cstr(b.out);
+        assert(sa.len() > 60, "the fixture logged an order");
+        assert(sa == sb, "the same seed replays the same interleaving");
+    }
 }
 
 // A bounded MPMC channel (std/parallel/channel): four producer tasks each push 25 items into a bounded(8)
@@ -2150,7 +2174,6 @@ fn main() i32 {
             }
         };
     }
-    ch.free();
     let mut total: i64 = 0;
     let mut n = 0;
     loop {
@@ -2164,7 +2187,6 @@ fn main() i32 {
             },
         };
     }
-    rx.free();
     rt::shutdown();
     return (n - 100) + (total - 1200) as i32;
 }
@@ -2195,17 +2217,11 @@ fn main() i32 {
     {
         let ga = a.lock();
         let gb = b.lock();
-        gb.free();
-        ga.free();
     }
     {
         let gb = b.lock();
         let ga = a.lock();
-        ga.free();
-        gb.free();
     }
-    a.free();
-    b.free();
     return 0;
 }
 "#,
@@ -2249,10 +2265,8 @@ fn main() i32 {
         }
         // A short send leaves items in `v`, and the count and sum below both fall short of the total.
         let _ = tx.send_batch(&mut v);
-        v.free();
         tx.close();
     };
-    ch.free();
     let mut got = Vector::<i64>::new();
     let mut total: i64 = 0;
     let mut n: i64 = 0;
@@ -2267,8 +2281,6 @@ fn main() i32 {
         }
         got.clear();
     }
-    got.free();
-    rx.free();
 
     // A closed channel sends nothing and hands the whole batch back, unreordered.
     let c2 = chan::Channel::<i64>::bounded(4);
@@ -2287,10 +2299,6 @@ fn main() i32 {
         }
     }
     let bad = kept as i32 + (rest.len() - 5) as i32 + ordered;
-    rest.free();
-    t2.free();
-    r2.free();
-    c2.free();
 
     rt::shutdown();
     return (n - 100) as i32 + (total - 4950) as i32 + bad;
@@ -2363,13 +2371,8 @@ fn main() i32 {
             w.done();
         };
     }
-    senders.free();
-    recvs.free();
-    ch.free();
     wg.wait();
     let n = cnt.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    cnt.free();
     rt::shutdown();
     return (n - 300) as i32;
 }
@@ -2428,8 +2431,6 @@ fn main() i32 {
     wg.wait();
     let waited = platform::now_ns() - t1;
     let first = order.get().load(atom::MemoryOrder::SeqCst);
-    wg.free();
-    order.free();
     rt::shutdown();
     if first != 2 {
         return 2; // the sleeper kept the only worker: sleep did not park
@@ -2536,12 +2537,6 @@ fn main() i32 {
     wg2.wait();
     let f = flags.get().load(atom::MemoryOrder::SeqCst);
 
-    wg2.free();
-    flags.free();
-    wg.free();
-    sem.free();
-    rw.free();
-    m.free();
     rt::shutdown();
     if total != 11 {
         return 1;
@@ -2582,7 +2577,6 @@ fn main() i32 {
     let ch = chan::Channel::<i64>::unbounded();
     let rx = ch.receiver();
     let tx = ch.sender();
-    ch.free();
     let mut sum: i64 = 0;
     for i in 0..100 {
         switch tx.send(i) {
@@ -2626,7 +2620,6 @@ fn main() i32 {
     let b = chan::Channel::<i64>::bounded(1);
     let brx = b.receiver();
     let btx = b.sender();
-    b.free();
     let _ = btx.send(1);
     switch btx.send_timeout(2, time::Duration::from_millis(10)) {
         Sent => {
@@ -2636,10 +2629,6 @@ fn main() i32 {
             sum = sum + v;
         },
     };
-    btx.free();
-    brx.free();
-    tx.free();
-    rx.free();
     rt::shutdown();
     return (sum - 4993) as i32;
 }
@@ -2714,12 +2703,6 @@ fn main() i32 {
             },
         };
     }
-    txs.free();
-    rxs.free();
-    ch.free();
-    wg.free();
-    sem.free();
-    m.free();
     rt::shutdown();
     return (locked - 1000) as i32;
 }
@@ -2755,11 +2738,9 @@ fn main() i32 {
     let a = chan::Channel::<i64>::bounded(1);
     let arx = a.receiver();
     let atx = a.sender();
-    a.free();
     let b = chan::Channel::<i64>::bounded(1);
     let brx = b.receiver();
     let btx = b.sender();
-    b.free();
     let total = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
     let wg = sync::WaitGroup::new();
 
@@ -2881,13 +2862,6 @@ fn main() i32 {
         let g = res.get().lock();
         got = *g.get();
     }
-    atx.free();
-    arx.free();
-    btx.free();
-    brx.free();
-    wg.free();
-    total.free();
-    res.free();
     rt::shutdown();
     if got != 42 {
         return 4;
@@ -2925,7 +2899,6 @@ fn main() i32 {
     let a = chan::Channel::<i64>::bounded(1);
     let arx = a.receiver();
     let atx = a.sender();
-    a.free();
     let _ = atx.send(1); // full: the send arm cannot proceed
     let wg = sync::WaitGroup::new();
     wg.add(1);
@@ -2961,7 +2934,6 @@ fn main() i32 {
     let c = chan::Channel::<i64>::bounded(1);
     let crx = c.receiver();
     let ctx = c.sender();
-    c.free();
     ctx.close();
     let mut s2 = selector::Selector::new();
     let _ = s2.arm_recv(&crx);
@@ -2982,11 +2954,9 @@ fn main() i32 {
     let d = chan::Channel::<i64>::unbounded();
     let drx = d.receiver();
     let dtx = d.sender();
-    d.free();
     let e = chan::Channel::<i64>::unbounded();
     let erx = e.receiver();
     let etx = e.sender();
-    e.free();
     for _i in 0..200 {
         let _ = dtx.send(1);
         let _ = etx.send(2);
@@ -3031,15 +3001,6 @@ fn main() i32 {
             },
         };
     }
-    dtx.free();
-    drx.free();
-    etx.free();
-    erx.free();
-    ctx.free();
-    crx.free();
-    atx.free();
-    arx.free();
-    wg.free();
     rt::shutdown();
     return 0;
 }
@@ -3079,15 +3040,12 @@ struct Pair {
 fn main() i32 {
     let a = chan::Channel::<i64>::bounded(4);
     let pair = Pair { rx: a.receiver(), tx: a.sender() };
-    a.free();
     let b = chan::Channel::<i64>::bounded(1);
     let brx = b.receiver();
     let btx = b.sender();
-    b.free();
     let c = chan::Channel::<i64>::bounded(4);
     let crx = c.receiver();
     let ctx = c.sender();
-    c.free();
     let _ = btx.send(1); // b is now FULL: its send arm cannot proceed, its recv arm can
 
     // Exactly one arm is ever ready, so the winner is not a coin flip: `c` stays empty throughout.
@@ -3197,13 +3155,6 @@ fn main() i32 {
         let g = out.get().lock();
         parked = *g.get();
     }
-    pair.free();
-    btx.free();
-    brx.free();
-    ctx.free();
-    crx.free();
-    wg.free();
-    out.free();
     rt::shutdown();
     if parked != 77 {
         return 7;
@@ -3233,7 +3184,6 @@ fn select_keyword_diagnostics() {
 fn make() chan::Receiver<i64> {
     let a = chan::Channel::<i64>::bounded(1);
     let r = a.receiver();
-    a.free();
     return r;
 }
 
@@ -3254,7 +3204,6 @@ fn main() i32 {
         timeout(1) => {}
         default => {}
     }
-    rx.free();
     return 0;
 }
 "#,
@@ -3396,7 +3345,6 @@ fn main() i32 {
         return 7;
     }
 
-    v.free();
     rt::shutdown();
     return 0;
 }
@@ -3457,9 +3405,7 @@ fn main() i32 {
         };
     }
     wg.wait();
-    wg.free();
     let got = inner.get().load(atom::MemoryOrder::SeqCst);
-    inner.free();
     if got != 200 {
         return 2;
     }
@@ -3493,7 +3439,6 @@ fn main() i32 {
     parallel::range(0..1usize, fn(i: usize) {
         v.set(i, 1);
     });
-    v.free();
     return 0;
 }
 "#,
@@ -3565,7 +3510,6 @@ fn main() i32 {
     while hs.len() > 0 {
         let _ = hs.pop().unwrap().join();
     }
-    hs.free();
     let rw = sync::RwLock::<i64>::new(0);
     {
         let mut wr = rw.write();
@@ -3577,13 +3521,11 @@ fn main() i32 {
         let rd = rw.read();
         r = *rd.get();
     }
-    rw.free();
     let mut total: i64 = 0;
     {
         let g = counter.get().lock();
         total = *g.get();
     }
-    counter.free();
     return (total - 8000) as i32 + (r - 7) as i32;
 }
 "#,
@@ -3773,9 +3715,6 @@ fn main() i32 {
     let _ = unsafe filesystem::closedir(d);
     let _ = unsafe filesystem::unlink(file.cstr());
     let _ = unsafe filesystem::rmdir(dir.cstr());
-    msg.free();
-    file.free();
-    dir.free();
     if n != 5 || entries < 3 || unsafe unistd::getpid() <= 0 {
         return 3;
     }

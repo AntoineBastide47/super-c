@@ -197,6 +197,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex) {
             let mut n = LotNode { co: null, token: 0, oswake: 0, addr: m, next: null };
             lot_push(b, &mut n);
             unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+            runtime::replay_release(); // about to block: in replay mode the pool runs while we do not
             while atomic::load_i32(&mut n.oswake, 1) == 0 {
                 unsafe sc_runtime::sc_rt_park(&mut n.oswake, 0, -1);
             }
@@ -692,6 +693,7 @@ extend Condvar {
             } else {
                 time::remaining_ns(deadline) as i64;
             };
+            runtime::replay_release(); // about to block: in replay mode the pool runs while we do not
             unsafe sc_runtime::sc_rt_park(w, g, rel);
             raw_mutex_lock(m);
             unsafe self.wq.os_waiters = unsafe self.wq.os_waiters - 1;
