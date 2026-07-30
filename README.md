@@ -621,7 +621,7 @@ Every compiled binary carries a built-in leak sanitizer, inert until asked for (
 including Apple Silicon where LeakSanitizer does not exist):
 
 ```sh
-./super-c lint <project>       # statically detect leaks and logs an error per leak
+./super-c lint                 # statically detect leaks and logs an error per leak
 SC_LEAK_CHECK=1 ./app          # report allocations that survive to exit, with call stacks
 SC_LEAK_CHECK=fatal ./app      # same report, exit code 23 on leaks -- a CI gate
 ```
@@ -730,7 +730,7 @@ The strictness rules:
   exit (like a non-`mut` `let`); moving it out is rejected (a `const` stays put), so it never
   double-frees. Owning containers remain fully usable *inside* compile-time evaluation.
 
-Running `./super-c lint <project> --suggest-const` indicates all functions the compiler has proven to be const evaluatable.
+Running `./super-c lint --suggest-const` indicates all functions the compiler has proven to be const evaluatable.
 Running it with `--fix` makes all those functions const and saves some compilation time as the compiler won't reprove them.
 
 ## Concurrency

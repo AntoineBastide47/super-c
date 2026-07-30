@@ -165,14 +165,13 @@ const fn fmt_name_cmp(a: &String, b: &String) i32 {
     return la as i32 - lb as i32;
 }
 
-// Recursively format every .spc under `dir` (sorted; dot-entries skipped). Returns 1 if any file
-// failed or (--check) needs formatting, else 0.
-fn fmt_dir(dir: str, write: bool, check: bool) i32 {
+// The entries of `dir` in name order, without the dot-entries (".", "..", hidden); None when the
+// directory cannot be read.
+fn dir_entries(dir: str) Option<Vector<String>> {
     let mut d = String::from_str(dir);
     let dh = unsafe shim::sc_opendir(d.cstr());
     if dh == null {
-        eprintln("fmt: cannot read directory '{}'", dir);
-        return 1;
+        return Option::<Vector<String>>::None;
     }
     let mut names = Vector::<String>::new();
     loop {
@@ -183,11 +182,60 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
         let nm = unsafe shim::sc_dirent_name(e);
         if unsafe nm[0] == '.' as char {
             continue;
-        } // ".", "..", hidden entries
+        }
         names.push(String::from_cstr(nm));
     }
     unsafe shim::sc_closedir(dh);
     names.sort_by(fmt_name_cmp);
+    return Option::<Vector<String>>::Some(names);
+}
+
+// `fmt`/`lint` with no path: every top-level entry of the project, minus the build output -- it
+// holds the generated .spc roots of `test`/`bench`, which are not project source.
+fn project_paths() Vector<String> {
+    let mut out = Vector::<String>::new();
+    let eo = dir_entries(".");
+    if eo.is_none() {
+        eprintln("cannot read the current directory");
+        return out;
+    }
+    let names = eo.unwrap();
+    let mut skip = String::from_str("build");
+    for i in 0..names.len() {
+        if names.at(i).as_str() == "build.toml" {
+            let mo = bman::load("build.toml");
+            if !mo.is_none() {
+                let man = mo.unwrap();
+                skip.clear();
+                skip.push_string(&man.out_dir);
+            }
+            break;
+        }
+    }
+    let mut probe = String::new();
+    for i in 0..names.len() {
+        let n = names.at(i).as_str();
+        if n == skip.as_str() {
+            continue;
+        }
+        probe.clear();
+        probe.push_str(n);
+        if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 || n.ends_with(".spc") {
+            out.push(String::from_str(n));
+        }
+    }
+    return out;
+}
+
+// Recursively format every .spc under `dir` (sorted; dot-entries skipped). Returns 1 if any file
+// failed or (--check) needs formatting, else 0.
+fn fmt_dir(dir: str, write: bool, check: bool) i32 {
+    let eo = dir_entries(dir);
+    if eo.is_none() {
+        eprintln("fmt: cannot read directory '{}'", dir);
+        return 1;
+    }
+    let names = eo.unwrap();
     let mut rc = 0;
     for i in 0..names.len() {
         let mut p = String::from_str(dir);
@@ -207,7 +255,7 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
     return rc;
 }
 
-// `super-c lint <path> [<path2> ...]`: load each path as its own root (its import closure + prelude),
+// `super-c lint [<path>...]`: load each path as its own root (its import closure + prelude),
 // resolve + typecheck with lints on for that root module, and print warnings. Lints files that are not
 // part of any binary's import closure. A directory recurses over its .spc files.
 const fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
@@ -340,26 +388,12 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
 }
 
 fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
+    let eo = dir_entries(dir);
+    if eo.is_none() {
         eprintln("lint: cannot read directory '{}'", dir);
         return 1;
     }
-    let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe shim::sc_dirent_name(e);
-        if unsafe nm[0] == '.' as char {
-            continue;
-        }
-        names.push(String::from_cstr(nm));
-    }
-    unsafe shim::sc_closedir(dh);
-    names.sort_by(fmt_name_cmp);
+    let names = eo.unwrap();
     let mut rc = 0;
     for i in 0..names.len() {
         let mut p = String::from_str(dir);
@@ -397,9 +431,9 @@ fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target:
     return lint_one(path, froot, std_dir, ce_steps, ce_mem, target, fix, sc);
 }
 
-// `super-c fmt`: canonical formatting. Rewrites files in place by default (only when they changed);
-// --check writes nothing, prints the path, and exits 1 when a file is not already formatted. `-`
-// reads stdin and formats to stdout. A directory recurses over its .spc files. A file the compiler
+// `super-c fmt [<path>...]`: canonical formatting. Rewrites files in place by default (only when they
+// changed); --check writes nothing, prints the path, and exits 1 when a file is not already formatted.
+// `-` reads stdin and formats to stdout. A directory recurses over its .spc files. A file the compiler
 // cannot lex or parse is never rewritten: diagnostics are printed and the exit code is 1.
 fn run_fmt(path: str, check: bool) i32 {
     let is_stdin = path == "-";
@@ -459,8 +493,8 @@ enum Mode {
     MODE_DEFAULT, // `super-c <root.spc>`: compile + run
     MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
     MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
-    MODE_FMT, // `super-c fmt [--check] <path...| ->`
-    MODE_LINT, // `super-c lint [--fix] [--suggest-const] <path> [<path2> ...]`
+    MODE_FMT, // `super-c fmt [--check] [<path>...| -]` (no path: the whole project)
+    MODE_LINT, // `super-c lint [--fix] [--suggest-const] [<path>...]` (no path: the whole project)
     MODE_COMMAND, // `super-c command <name>`: run a build.toml [command.NAME]
     MODE_RUN, // `super-c run [--profile=P]`: build the project, then execute its binary (cargo run)
     MODE_CLEAN, // `super-c clean`: drop build.toml outputs
@@ -781,7 +815,9 @@ fn main(argv: Vector<str>) i32 {
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
     let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_COMMAND || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
-    if co.bad || file.len() == 0 && !manifest_mode && mode != Mode::MODE_LSP {
+    // Only a script needs a path of its own: every other mode either reads build.toml, needs no
+    // input at all (lsp), or discovers the project itself (fmt/lint).
+    if co.bad || file.len() == 0 && mode == Mode::MODE_DEFAULT {
         unsafe stdio::fputs(
             r#"super-c — a systems language that compiles to readable C
 
@@ -797,8 +833,8 @@ COMMANDS:
     bench                  build and run the benchmarks (bench/ by convention)
     command <name>         run a [command.NAME] from build.toml
     clean                  remove build outputs
-    fmt  <path>...         format source in place (or verify with --check)
-    lint <path>...         report lint warnings (apply fixes with --fix)
+    fmt  [<path>...]       format source in place (or verify with --check)
+    lint [<path>...]       report lint warnings (apply fixes with --fix)
     lsp                    run the language server over stdio
 
 OPTIONS:
@@ -833,10 +869,22 @@ OPTIONS:
     let out_dir = bo.out_dir;
     let cstd = bo.cstd;
     let jobs = bo.jobs;
+    // fmt/lint take any number of paths; with none, the project discovers itself.
+    let mut paths = Vector::<String>::new();
+    if mode == Mode::MODE_FMT || mode == Mode::MODE_LINT {
+        if file.len() == 0 {
+            paths = project_paths();
+        } else {
+            paths.push(String::from_str(file));
+            for k in 0..extra.len() {
+                paths.push(String::from_str(argv[*extra.at(k)]));
+            }
+        }
+    }
     if mode == Mode::MODE_FMT {
-        let mut rc = run_fmt(file, fmt_check);
-        for k in 0..extra.len() {
-            if run_fmt(argv[*extra.at(k)], fmt_check) != 0 {
+        let mut rc = 0;
+        for k in 0..paths.len() {
+            if run_fmt(paths.at(k).as_str(), fmt_check) != 0 {
                 rc = 1;
             }
         }
@@ -849,9 +897,9 @@ OPTIONS:
     };
     let std_dir = exe_std_dir(arg0);
     if mode == Mode::MODE_LINT {
-        let mut rc = run_lint(file, std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc);
-        for k in 0..extra.len() {
-            if run_lint(argv[*extra.at(k)], std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
+        let mut rc = 0;
+        for k in 0..paths.len() {
+            if run_lint(paths.at(k).as_str(), std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
                 rc = 1;
             }
         }
