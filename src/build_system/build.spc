@@ -1188,7 +1188,12 @@ fn bench_run_root(found: &Vector<String>, out: &mut String) {
         out.push_str(";\n");
     }
 
-    out.push_str("import std::testing::bench as __bench;\n\nfn main() i32 {\n    __bench::begin();\n");
+    out.push_str("import std::testing::bench as __bench;\n");
+    // Unconditional, because a benchmark that launches anything leaves the scheduler and its pooled stacks
+    // behind and the runner is what owns the exit. Both are no-ops when nothing ever started them, so the
+    // cost of naming them here is a link edge, not work at run time.
+    out.push_str("import std::parallel::runtime as __rt;\n");
+    out.push_str("import std::parallel::blocking as __blk;\n\nfn main() i32 {\n    __bench::begin();\n");
     for i in 0..found.len() {
         let raw = found.at(i).as_str();
         let quiet = raw[0] == b'-';
@@ -1214,7 +1219,8 @@ fn bench_run_root(found: &Vector<String>, out: &mut String) {
         }
         out.push_str("        b.free();\n    }\n");
     }
-    out.push_str("    return __bench::end(");
+    // The blocking pool has threads of its own that `__rt::shutdown` does not join, so it goes first.
+    out.push_str("    __blk::shutdown();\n    __rt::shutdown();\n    return __bench::end(");
     out.push_i64(found.len() as i64);
     out.push_str(");\n}\n");
 }

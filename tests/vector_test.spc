@@ -14,7 +14,6 @@ fn resize_default_grows_and_truncates() {
     v.push(9u8);
     v.resize_default(2); // shrinking frees the tail
     assert_eq(v.len(), 2);
-    v.free();
 }
 
 @test

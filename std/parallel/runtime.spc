@@ -154,6 +154,18 @@ static mut G_DONE: usize = 0; // atomic: tasks that ran to completion
 
 static mut G_TRACE: i32 = 0; // 0 unknown / 1 off / 2 on
 
+// Deterministic-replay mode: 0 = off, anything else is the seed. Resolved once, before the first worker
+// exists, and never written again -- so no reader needs to synchronize with it. `G_DET` is the generator the
+// safepoint draws from; only the single deterministic worker ever touches it (see `preempt_yield`).
+static mut G_SEED: u64 = 0;
+static mut G_DET: u64 = 0;
+// Replay mode only. `G_GATE` is a GENERATION, not a flag: a plain thread bumps it when it blocks, and the
+// worker runs exactly until it has consumed that release. A flag loses a release that arrives while the
+// worker is still draining the previous one; a generation cannot. `G_SEEN` belongs to the single worker.
+static mut G_GATE: i32 = 0; // atomic
+static mut G_SEEN: i32 = 0;
+static mut G_ACTIVE: i32 = 0; // is the worker inside a release right now?
+
 /// Is task tracing on? `SC_TASK_TRACE=1` turns it on for the life of the process; the answer is read from
 /// the environment once and then costs a load and a compare, so a traced build and an untraced one are the
 /// same binary. `pub` because the channel traces through it too.
@@ -645,6 +657,14 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
     let mut spins: i32 = 0; // a fresh budget per call: a worker that just ran something expects more
     let mut spinning = false; // do we hold `s.spinning`?
     loop {
+        // Replay mode: a release admits the worker for a whole DRAIN, not for one task. The admission is
+        // taken here, before the spin -- a worker that spins while the launcher is still submitting picks
+        // tasks up one at a time, and then the interleaving is a race with thread start-up rather than a
+        // function of the seed. It is given back below, where the drain runs dry.
+        if unsafe G_SEED != 0 && unsafe G_ACTIVE == 0 {
+            det_gate_wait(s, me);
+            unsafe G_ACTIVE = 1;
+        }
         // The shared queue is worth a look on the first try of every call (this worker has just finished
         // something, so it is the natural next taker) and for as long as we are the spinner. Not otherwise.
         let co = find_work(s, w, me, spinning || spins == 0);
@@ -699,6 +719,13 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
                 return null;
             }
         }
+        if unsafe G_SEED != 0 {
+            // The drain ran dry: give the admission back and go round, which waits for the next release.
+            unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
+            unsafe G_ACTIVE = 0;
+            spins = 0;
+            continue;
+        }
         // The nearest deadline, read while we still hold the timer lock, decides whether this is a timed
         // park; then the scheduler mutex is dropped entirely. Parking happens on this worker's OWN mutex, so
         // a submitter waking us never has to queue behind the rest of the pool.
@@ -747,6 +774,47 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
         unsafe sc_runtime::sc_rt_mutex_unlock(pk.mtx);
         spins = 0; // woken means work: earn the spin budget back rather than parking straight away
     }
+}
+
+// Replay mode: block the worker until a plain thread hands it the CPU. Without this the pool starts running
+// tasks while the launcher is still submitting them, and how many are queued by then is a race with thread
+// start-up -- so the first run of a binary interleaves differently from the second, seed or no seed.
+//
+// Two conditions besides the gate end the wait, and both are there to make a missed hand-off cost latency
+// rather than a hang: work that arrived after the gate shut, and shutdown. The timed park is the third.
+fn det_gate_wait(s: *mut Scheduler, me: usize) {
+    let pk = unsafe (s.parkers + me);
+    let start = platform::now_ns();
+    unsafe sc_runtime::sc_rt_mutex_lock(pk.mtx);
+    loop {
+        let g = atomic::load_i32(&mut unsafe G_GATE, 1);
+        if g != unsafe G_SEEN || unsafe s.shutting_down != 0 {
+            unsafe G_SEEN = g;
+            break;
+        }
+        // Work queued, but no plain thread has blocked to release the pool: an OS thread fed it and kept
+        // running, which is outside what this mode models. Run rather than hang -- determinism was already
+        // lost to that thread, and a hang would only hide which program lost it.
+        if atomic::load_i32(&mut unsafe s.inj_len, 1) > 0 && platform::now_ns() - start > 20000000 {
+            break;
+        }
+        let _ = unsafe sc_runtime::sc_rt_cond_timedwait_ns(pk.cv, pk.mtx, 5000000i64);
+    }
+    unsafe sc_runtime::sc_rt_mutex_unlock(pk.mtx);
+}
+
+/// Replay mode only, and a no-op otherwise: give the pool the CPU because this thread is about to block.
+/// `pub` because the two places a non-coroutine thread blocks are in `std::parallel::sync`, not here.
+pub fn replay_release() {
+    if unsafe G_SEED == 0 {
+        return;
+    }
+    let s = unsafe G_SCHED;
+    if s == null {
+        return;
+    }
+    let _ = atomic::add_i32(&mut unsafe G_GATE, 1, 2);
+    wake_parked(s, 0);
 }
 
 // The coroutine body trampoline: run the closure (which frees its own box), mark done, return to scheduler.
@@ -1014,6 +1082,13 @@ fn build_scheduler() *mut Scheduler {
     let mut g = Global {};
     let s = (unsafe g.alloc(sizeof(Scheduler), alignof(Scheduler))) as *mut Scheduler;
     let lk = unsafe sc_runtime::sc_rt_mutex_new();
+    // Resolved here, before any worker exists, so every later read of `G_SEED` happens-after this write.
+    // Replay needs ONE worker: with a second one, stealing decides who runs next and the seed cannot.
+    unsafe G_SEED = resolve_seed();
+    unsafe G_DET = unsafe G_SEED;
+    if unsafe G_SEED != 0 {
+        unsafe G_NWORKERS = 1;
+    }
     let nw = if unsafe G_NWORKERS > 0 {
         unsafe G_NWORKERS;
     } else {
@@ -1368,6 +1443,43 @@ pub fn set_worker_count(n: usize) {
     unsafe G_NWORKERS = n;
 }
 
+/// Turn on deterministic replay: one worker, and every preemption point decided by `seed` alone. Two runs of
+/// the same binary with the same seed take the same interleaving, so a race caught once can be re-run instead
+/// of chased; a different seed takes a different one, so seeds are also how the interleaving space is swept.
+/// A seed of 0 turns the mode off. Must be called before the pool starts, and it overrides
+/// `set_worker_count`.
+///
+/// What it does NOT make deterministic: the wall clock (`sleep`, timed waits), the reactor's I/O readiness,
+/// the `@blocking` pool, and OS threads from `thread::spawn`. Those are concurrent with the worker rather
+/// than scheduled by it, so a program that depends on them replays only as far as they agree.
+pub fn set_deterministic(seed: u64) {
+    if atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) == 2 {
+        return; // the pool is already running with whatever it resolved at build time
+    }
+    unsafe G_SEED = seed;
+}
+
+/// The replay seed in force, or 0 when the scheduler is running normally.
+pub fn deterministic_seed() u64 {
+    return unsafe G_SEED;
+}
+
+// The seed the pool will run with. `SC_SCHED_SEED` is read only when the program set none itself, which is
+// what lets a race found in a shipped binary be replayed without rebuilding it.
+fn resolve_seed() u64 {
+    if unsafe G_SEED != 0 {
+        return unsafe G_SEED;
+    }
+    let p = stdlib::getenv("SC_SCHED_SEED");
+    if p == null {
+        return 0;
+    }
+    return switch str::from_cstr(p).parse_u64() {
+        Some(v) => v,
+        None => 0u64,
+    };
+}
+
 /// How many worker threads the pool has (or will have): the configured count, else one per CPU. What the
 /// data-parallel API divides its work by.
 pub fn worker_count() usize {
@@ -1394,9 +1506,27 @@ fn preempt_yield() {
     if wi < 0 || wi as usize >= unsafe s.nw {
         return;
     }
-    if !dq_empty(unsafe (s.deques + wi as usize)) || atomic::load_i32(&mut unsafe s.inj_len, 1) > 0 {
-        yield_now();
+    // The yield queue counts as runnable work. Leaving it out stops preemption dead once every task on this
+    // worker has yielded once -- they all sit there, the ring reads empty, and the task holding the CPU is
+    // never asked to give it up again.
+    let wp = unsafe (s.deques + wi as usize);
+    if dq_empty(wp) && unsafe wp.ylen == 0 && atomic::load_i32(&mut unsafe s.inj_len, 1) == 0 {
+        return;
     }
+    // Replay mode: the seed, not the timing, says whether this safepoint switches. The generator is plain
+    // (not atomic) because deterministic mode runs exactly one worker and only that worker reaches here --
+    // a plain thread and a `@blocking` job both left above, having no coroutine to park.
+    if unsafe G_SEED != 0 {
+        let mut x = unsafe G_DET;
+        x = x ^ x << 13;
+        x = x ^ x >> 7;
+        x = x ^ x << 17;
+        unsafe G_DET = x;
+        if (x >> 33 & 3) == 0 {
+            return; // this seed leaves the task running here
+        }
+    }
+    yield_now();
 }
 
 /// Cooperatively yield: reschedule the current coroutine behind the others. A no-op off a worker thread.

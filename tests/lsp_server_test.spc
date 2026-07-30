@@ -66,12 +66,7 @@ fn lsp_run(root: str) i32 {
     outp.push_str("/out.txt");
     let mut errp = String::from_str(root);
     errp.push_str("/err.txt");
-    let rc = cli::run_io(cmd.cstr(), inp.cstr(), outp.cstr(), errp.cstr());
-    inp.free();
-    outp.free();
-    errp.free();
-    cmd.free();
-    return rc;
+    return cli::run_io(cmd.cstr(), inp.cstr(), outp.cstr(), errp.cstr());
 }
 
 // Count non-overlapping occurrences of `needle` in `hay`.
