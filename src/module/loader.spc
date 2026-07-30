@@ -65,11 +65,13 @@ pub struct Package {
     /// The compile-time evaluator (a *mut consteval::ConstEval, kept opaque here to avoid a type cycle);
     /// owned by the driver, created after load, set before type-checking. Null in library/test use.
     pub ceval: *mut void,
-    /// While a stage (resolver/typechecker) holds a module's Ast BY VALUE (moved out of `modules[m].ast`),
-    /// package-level lookups on THAT module must see the held Ast, not the empty placeholder left behind.
-    /// The driver points these at the in-flight Ast for the duration of the stage. (MODULE_NONE = inactive.)
-    pub override_mod: ModuleId,
-    pub override_ast: *mut Ast,
+    /// While a stage (resolver/typechecker/borrowck) holds a module's Ast BY VALUE (moved out of
+    /// `modules[m].ast`), package-level lookups on THAT module must see the held Ast, not the empty
+    /// placeholder left behind. One slot PER MODULE, in lockstep with `modules`: several modules are in
+    /// flight at once when a stage runs in parallel, and each worker writes only its own module's slot --
+    /// disjoint addresses, so publishing needs no lock. Held as `usize` (0 = inactive) because a raw
+    /// pointer to a `Free` pointee is move-tracked and would be moved out of the slot on assignment.
+    pub override_asts: Vector<usize>,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
     /// has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
     /// makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
@@ -464,8 +466,7 @@ extend Package {
             method_edges: Vector::<u64>::new(),
             edge_seen: Set::<u64>::new(),
             ceval: null,
-            override_mod: 0xFFFF,
-            override_ast: null,
+            override_asts: Vector::<usize>::new(),
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,
             mod_refs_ready: false,
@@ -485,8 +486,8 @@ extend Package {
     // stage is holding it, else the module's own held Ast. Callers that read a module's Ast for a lookup
     // during resolve/typecheck must go through this so the current module resolves against the real Ast.
     const fn module_ast_ptr(self: &Self, mid: ModuleId) *const Ast {
-        if mid == self.override_mod && self.override_ast != null {
-            return self.override_ast;
+        if mid as usize < self.override_asts.len() && self.override_asts[mid as usize] != 0 {
+            return self.override_asts[mid as usize] as *const Ast;
         }
         return &self.modules[mid as usize].ast;
     }
@@ -505,7 +506,32 @@ extend Package {
     fn add_module(self: &mut Self, path: String, file: String, source: String, ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
         self.modules.push(Module { path: path, file: file, source: source, ast: ast, has_ast: has_ast, prelude: false });
+        self.override_asts.push(0); // lockstep with `modules`, so a slot always exists to publish into
         return id;
+    }
+
+    /// Publish the in-flight Ast a stage is holding for module `mid`, so package-level lookups into `mid`
+    /// read it instead of the placeholder left in the module table. Paired with `clear_override`.
+    pub fn set_override(self: &mut Self, mid: ModuleId, a: *mut Ast) {
+        while self.override_asts.len() <= mid as usize {
+            self.override_asts.push(0);
+        }
+        self.override_asts[mid as usize] = a as usize;
+    }
+
+    /// The published in-flight Ast for `mid` as a raw address, or 0 when no stage holds it. `pub` because
+    /// the const-evaluator reaches modules through the package too.
+    pub const fn override_at(self: &Self, mid: ModuleId) usize {
+        if mid as usize >= self.override_asts.len() {
+            return 0;
+        }
+        return self.override_asts[mid as usize];
+    }
+
+    pub fn clear_override(self: &mut Self, mid: ModuleId) {
+        if mid as usize < self.override_asts.len() {
+            self.override_asts[mid as usize] = 0;
+        }
     }
 
     // Overlay slot naming the same file as `path`: load paths are root-relative, overlay keys canonical
@@ -538,6 +564,133 @@ extend Package {
     // DFS load: takes ownership of `mod_path` and `file_path`. Returns the module's id (or -1 if unreadable).
     // A module already loaded (an import cycle) simply resolves to its id: modules are parsed whole before
     // any resolution, so mutual imports need no special handling.
+    // Load everything module `id` imports, depth-first, and return `id`.
+    fn walk_children(self: &mut Self, id: i32, bootstrap_tags: bool, target: i32) i32 {
+        // Collected BEFORE recursing: recursion pushes to self.modules, which may realloc and move this
+        // module's by-value Ast, invalidating a live borrow. The dir-cache address is taken first for the same
+        // reason -- the cast releases the &mut immediately, and dir_cache is disjoint from modules.
+        let dca = ((&mut self.dir_cache) as *mut DirCache) as usize;
+        let mut child_paths = Vector::<String>::new();
+        let mut child_files = Vector::<String>::new();
+        {
+            let ap = (&self.modules.at(id as usize).ast) as *const Ast;
+            let src = self.modules.at(id as usize).source.as_str();
+            let mut all_paths = Vector::<String>::new();
+            let mut all_files = Vector::<String>::new();
+            self.collect_imports(unsafe &*ap, src, dca, target, &mut all_paths, &mut all_files);
+            // The dedupe belongs here and not in the collector: skipping an already-loaded module saves
+            // resolve_import_file its filesystem probes, and a hot std/ffi module imported by many others
+            // would otherwise be probed once per importer.
+            for k in 0..all_paths.len() {
+                if self.find(all_paths[k].as_str()) < 0 {
+                    child_paths.push(String::from_str(all_paths[k].as_str()));
+                    child_files.push(String::from_str(all_files[k].as_str()));
+                }
+            }
+        }
+        for k in 0..child_paths.len() {
+            self.load_module(child_paths[k].as_str(), child_files[k].as_str(), bootstrap_tags, target);
+        }
+        return id;
+    }
+
+    // Every module `a` imports, as (module path, file path) pairs, plus the dependencies a sugar keyword
+    // pulls in (`launch` -> the runtime, `select` -> the selector, `@blocking` -> the pool). NO dedupe against
+    // what is already loaded: `load_module` applies that itself, because skipping an already-loaded module is
+    // what saves `resolve_import_file` its filesystem probes.
+    //
+    // `a`/`src` come in as raw views because the caller holds them inside `self.modules` and cannot lend them
+    // across a `&mut self` call; `dca` is the dir cache's address for the same reason (see `load_module`).
+    fn collect_imports(
+        self: &Self,
+        a: &Ast,
+        src: str,
+        dca: usize,
+        target: i32,
+        child_paths: &mut Vector<String>,
+        child_files: &mut Vector<String>,
+    ) {
+        let root_dir = self.root_dir.as_str();
+        let alt_root = self.alt_root.as_str();
+        let std_root = self.std_root.as_str();
+        let items = a.at_const(a.root).as_data.program.items;
+        let ids = a.list(items);
+        for i in 0..items.len {
+            let n = a.at_const(unsafe ids[i as usize]);
+            if n.kind == NodeKind::NODE_IMPORT {
+                // `@platform`-gated OUT for this target: the module is not loaded at all, so its file
+                // need not exist here and nothing in it has to compile for a platform it disclaims.
+                let mut gated_out = false;
+                for k in 0..a.attrs.len() {
+                    let at = a.attrs.at(k);
+                    if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_PLATFORM as u8 {
+                        if (at.arg >> target as u32 & 1u32) == 0 {
+                            gated_out = true;
+                        }
+                    }
+                }
+                if gated_out {
+                    continue;
+                }
+                let parts = n.as_data.import_decl.path;
+                let cp = join_parts(a, src, parts, "::");
+                // Skip already-loaded modules here: resolve_import_file probes the filesystem (up to 3
+                // path_exists per edge) only for load_module's own dedup to discard the result. A hot std/
+                // ffi module imported by many modules would otherwise be re-probed once per importer.
+                child_paths.push(cp);
+                child_files.push(resolve_import_file(dca, root_dir, alt_root, std_root, a, src, parts));
+            }
+        }
+        // Sugar-keyword dependency: the `launch` statement lowers to std::parallel::runtime::submit, so
+        // pull that module in (transitively) ONLY when the keyword is actually used -- a program that
+        // never launches never loads the runtime. load_module dedups, so a duplicate push is harmless.
+        if std_root.len() != 0 {
+            let mut has_launch = false;
+            let mut has_select = false;
+            let nn = a.nodes.len();
+            for ni in 0..nn {
+                let k = a.at_const(ni as NodeId).kind;
+                if k == NodeKind::NODE_LAUNCH {
+                    has_launch = true;
+                } else if k == NodeKind::NODE_SELECT {
+                    has_select = true;
+                }
+                if has_launch && has_select {
+                    break;
+                }
+            }
+            if has_launch {
+                let mut rf = String::from_str(std_root);
+                rf.push_str("/std/parallel/runtime.spc");
+                child_paths.push(String::from_str("std::parallel::runtime"));
+                child_files.push(rf);
+            }
+            // Same for `select`, which lowers to std::parallel::selector's `sugar_*` shims.
+            if has_select {
+                let mut sf = String::from_str(std_root);
+                sf.push_str("/std/parallel/selector.spc");
+                child_paths.push(String::from_str("std::parallel::selector"));
+                child_files.push(sf);
+            }
+            // Same bargain for `@blocking`: a call to one of those functions is emitted as a wrapper
+            // that hands the work to the blocking pool, so that module has to be linked in -- but only
+            // for a program that actually declares one.
+            let mut has_blocking = false;
+            for ai in 0..a.attrs.len() {
+                if a.attrs[ai].kind == AttrKind::ATTR_BLOCKING as u8 {
+                    has_blocking = true;
+                    break;
+                }
+            }
+            if has_blocking {
+                let mut bf = String::from_str(std_root);
+                bf.push_str("/std/parallel/blocking.spc");
+                child_paths.push(String::from_str("std::parallel::blocking"));
+                child_files.push(bf);
+            }
+        }
+    }
+
     fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
         let existing = self.find(mod_path);
         if existing >= 0 {
@@ -591,103 +744,7 @@ extend Package {
         }
         self.modules[id as usize].ast.module = id as ModuleId;
 
-        // Collect this module's import (path, file) pairs BEFORE recursing: recursion pushes to
-        // self.modules, which may realloc and move this module's by-value Ast, invalidating a live borrow.
-        let root_dir = self.root_dir.as_str();
-        let alt_root = self.alt_root.as_str();
-        let std_root = self.std_root.as_str();
-        // Address of the dir_cache field, taken BEFORE borrowing self.modules below (the cast releases the
-        // &mut immediately; dir_cache is a disjoint field so mutating it doesn't alias the `m` borrow). Passed
-        // as a usize because `*mut DirCache` is move-tracked (Free pointee) and would move out of the loop.
-        let dca = ((&mut self.dir_cache) as *mut DirCache) as usize;
-        let mut child_paths = Vector::<String>::new();
-        let mut child_files = Vector::<String>::new();
-        {
-            let m = self.modules.at(id as usize);
-            let items = m.ast.at_const(m.ast.root).as_data.program.items;
-            let ids = m.ast.list(items);
-            let src = m.source.as_str();
-            for i in 0..items.len {
-                let n = m.ast.at_const(unsafe ids[i as usize]);
-                if n.kind == NodeKind::NODE_IMPORT {
-                    // `@platform`-gated OUT for this target: the module is not loaded at all, so its file
-                    // need not exist here and nothing in it has to compile for a platform it disclaims.
-                    let mut gated_out = false;
-                    for k in 0..m.ast.attrs.len() {
-                        let at = m.ast.attrs.at(k);
-                        if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_PLATFORM as u8 {
-                            if (at.arg >> target as u32 & 1u32) == 0 {
-                                gated_out = true;
-                            }
-                        }
-                    }
-                    if gated_out {
-                        continue;
-                    }
-                    let parts = n.as_data.import_decl.path;
-                    let cp = join_parts(&m.ast, src, parts, "::");
-                    // Skip already-loaded modules here: resolve_import_file probes the filesystem (up to 3
-                    // path_exists per edge) only for load_module's own dedup to discard the result. A hot std/
-                    // ffi module imported by many modules would otherwise be re-probed once per importer.
-                    if self.find(cp.as_str()) < 0 {
-                        child_paths.push(cp);
-                        child_files.push(resolve_import_file(dca, root_dir, alt_root, std_root, &m.ast, src, parts));
-                    }
-                }
-            }
-            // Sugar-keyword dependency: the `launch` statement lowers to std::parallel::runtime::submit, so
-            // pull that module in (transitively) ONLY when the keyword is actually used -- a program that
-            // never launches never loads the runtime. load_module dedups, so a duplicate push is harmless.
-            if std_root.len() != 0 {
-                let mut has_launch = false;
-                let mut has_select = false;
-                let nn = m.ast.nodes.len();
-                for ni in 0..nn {
-                    let k = m.ast.at_const(ni as NodeId).kind;
-                    if k == NodeKind::NODE_LAUNCH {
-                        has_launch = true;
-                    } else if k == NodeKind::NODE_SELECT {
-                        has_select = true;
-                    }
-                    if has_launch && has_select {
-                        break;
-                    }
-                }
-                if has_launch {
-                    let mut rf = String::from_str(std_root);
-                    rf.push_str("/std/parallel/runtime.spc");
-                    child_paths.push(String::from_str("std::parallel::runtime"));
-                    child_files.push(rf);
-                }
-                // Same for `select`, which lowers to std::parallel::selector's `sugar_*` shims.
-                if has_select {
-                    let mut sf = String::from_str(std_root);
-                    sf.push_str("/std/parallel/selector.spc");
-                    child_paths.push(String::from_str("std::parallel::selector"));
-                    child_files.push(sf);
-                }
-                // Same bargain for `@blocking`: a call to one of those functions is emitted as a wrapper
-                // that hands the work to the blocking pool, so that module has to be linked in -- but only
-                // for a program that actually declares one.
-                let mut has_blocking = false;
-                for ai in 0..m.ast.attrs.len() {
-                    if m.ast.attrs[ai].kind == AttrKind::ATTR_BLOCKING as u8 {
-                        has_blocking = true;
-                        break;
-                    }
-                }
-                if has_blocking {
-                    let mut bf = String::from_str(std_root);
-                    bf.push_str("/std/parallel/blocking.spc");
-                    child_paths.push(String::from_str("std::parallel::blocking"));
-                    child_files.push(bf);
-                }
-            }
-        }
-        for k in 0..child_paths.len() {
-            self.load_module(child_paths[k].as_str(), child_files[k].as_str(), bootstrap_tags, target);
-        }
-        return id;
+        return self.walk_children(id, bootstrap_tags, target);
     }
 
     /// Inject one synthetic decl per builtin into the core prelude module (`__std::core`), so builtins are

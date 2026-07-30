@@ -656,13 +656,17 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
     let w = unsafe (s.deques + me);
     let mut spins: i32 = 0; // a fresh budget per call: a worker that just ran something expects more
     let mut spinning = false; // do we hold `s.spinning`?
+    // Replay mode: the nearest armed timer deadline as of this worker's last look, so the gate wait can end on
+    // it and not only on a release. Zero means nothing is armed -- always true on the first pass, because
+    // nothing has run yet to arm one.
+    let mut replay_deadline: u64 = 0;
     loop {
         // Replay mode: a release admits the worker for a whole DRAIN, not for one task. The admission is
         // taken here, before the spin -- a worker that spins while the launcher is still submitting picks
         // tasks up one at a time, and then the interleaving is a race with thread start-up rather than a
         // function of the seed. It is given back below, where the drain runs dry.
         if unsafe G_SEED != 0 && unsafe G_ACTIVE == 0 {
-            det_gate_wait(s, me);
+            replay_gate_wait(s, me, replay_deadline);
             unsafe G_ACTIVE = 1;
         }
         // The shared queue is worth a look on the first try of every call (this worker has just finished
@@ -720,7 +724,14 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
             }
         }
         if unsafe G_SEED != 0 {
-            // The drain ran dry: give the admission back and go round, which waits for the next release.
+            // The drain ran dry: give the admission back and go round, which waits for the next release -- or
+            // for the nearest armed deadline, read here because this is the one place holding the lock that
+            // guards the timer list.
+            replay_deadline = if unsafe s.timer_head != null {
+                unsafe s.timer_head.deadline;
+            } else {
+                0u64;
+            };
             unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             unsafe G_ACTIVE = 0;
             spins = 0;
@@ -782,7 +793,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Coroutine {
 //
 // Two conditions besides the gate end the wait, and both are there to make a missed hand-off cost latency
 // rather than a hang: work that arrived after the gate shut, and shutdown. The timed park is the third.
-fn det_gate_wait(s: *mut Scheduler, me: usize) {
+fn replay_gate_wait(s: *mut Scheduler, me: usize, nearest_deadline: u64) {
     let pk = unsafe (s.parkers + me);
     let start = platform::now_ns();
     unsafe sc_runtime::sc_rt_mutex_lock(pk.mtx);
@@ -790,6 +801,14 @@ fn det_gate_wait(s: *mut Scheduler, me: usize) {
         let g = atomic::load_i32(&mut unsafe G_GATE, 1);
         if g != unsafe G_SEEN || unsafe s.shutting_down != 0 {
             unsafe G_SEEN = g;
+            break;
+        }
+        // A deadline that has come due ends the wait, exactly as it ends an ordinary park. It has to: the
+        // coroutine behind a timed wait sits on the TIMER LIST, not on any run queue, and only a worker past
+        // this gate promotes it -- so waiting for a release instead would strand it for as long as the program
+        // had no plain thread left to block, which for a program whose remaining tasks are ALL on timed waits
+        // is forever. `nearest_deadline` is read by the caller, which holds the lock the timer list is under.
+        if nearest_deadline != 0 && nearest_deadline <= platform::now_ns() {
             break;
         }
         // Work queued, but no plain thread has blocked to release the pool: an OS thread fed it and kept
@@ -1386,6 +1405,11 @@ pub fn sleep_ns(ns: i64) {
     }
     let co = current();
     if co == null {
+        // A plain thread about to stop making progress is exactly when replay mode must hand the pool the
+        // CPU. Not a nicety: `select` on a plain thread waits by POLLING through here rather than on a
+        // condvar, so without this the gate stays shut, whatever the select is waiting for never runs, and
+        // the wait times out -- a program that behaves differently under replay, which defeats the point.
+        replay_release();
         unsafe sc_runtime::sc_rt_sleep_ns(ns);
         return;
     }

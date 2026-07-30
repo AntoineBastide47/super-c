@@ -144,6 +144,9 @@ extend MQKey as Eq {
 pub struct TypeChecker<'a> {
     pub ast: UnsafeCell<Ast>,
     pub source: str<'a>,
+    // Private const-evaluator for the parallel borrow-check stage (address of a ce::ConstEval, held
+    // as usize so the checker never owns it): the shared Package.ceval single-threads cycle marks and
+    // memo writes, which concurrent workers may not share. 0 = use the shared one.
     pub current_returns: NodeList,
     pub current_self: NodeId,
     pub current_extend: NodeId,
@@ -544,6 +547,13 @@ extend TypeChecker {
 
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != self.cur_module() {
+            // A stage holding module `m`'s Ast left an empty placeholder in the table. That used to matter
+            // for one module at a time; a stage that checks its modules in parallel has ALL of them in
+            // flight, so a foreign lookup that skipped the override would read an empty Ast.
+            let ov = self.package.override_at(m);
+            if ov != 0 {
+                return ov as *mut Ast;
+            }
             return unsafe &mut self.package.modules[m as usize].ast;
         }
         return self.ast.get();
@@ -1138,6 +1148,10 @@ const fn src_at(p: str, off: u32) *const char {
 // TypeChecker::mod_ast): foreign modules come from the package, the current one from `a` itself.
 const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
     if pkg != null && m != unsafe a.module {
+        let ov = pkg.override_at(m); // in-flight Ast when a stage holds it -- see TypeChecker::mod_ast
+        if ov != 0 {
+            return ov as *const Ast;
+        }
         return unsafe &pkg.modules[m as usize].ast;
     }
     return a;

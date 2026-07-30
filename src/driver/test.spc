@@ -768,6 +768,7 @@ static int sc_runner_ncpu(void) {
 }
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
+  setvbuf(stderr, NULL, _IOFBF, BUFSIZ); /* keep each child's flushed diagnostic in one append */
   const char *filter = NULL;
   int run_one = -1, no_fork = 0, jobs = 0;
   for (int i = 1; i < argc; i++) {

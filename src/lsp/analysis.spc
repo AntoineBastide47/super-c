@@ -193,11 +193,9 @@ fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut
     let a = replace(&mut m.ast, Ast::new(0));
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
-    p.override_mod = i as ModuleId;
-    p.override_ast = &mut r.ast;
+    p.set_override(i as ModuleId, &mut r.ast);
     r.resolve();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     let had = r.has_errors();
     drain_errors(&r.errors, i as u32, diags);
     let back = r.take_ast();
@@ -214,11 +212,9 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
-    p.override_mod = i as ModuleId;
-    p.override_ast = t.ast.get();
+    p.set_override(i as ModuleId, t.ast.get());
     t.check();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     let had = t.has_errors();
     drain_errors(&t.errors, i as u32, diags);
     let back = t.take_ast();

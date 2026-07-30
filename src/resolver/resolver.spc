@@ -45,7 +45,7 @@ extend ClosureScope as Free {
 }
 
 /// Single-module resolver. Owns the module's Ast while running (the driver moves it out of the Package
-/// slot and points Package.override_ast here); take_ast hands the annotated Ast back.
+/// slot and publishes it with Package::set_override); take_ast hands the annotated Ast back.
 pub struct Resolver<'a> {
     pub ast: Ast,
     pub source: str<'a>,

@@ -217,11 +217,9 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     let a = replace(&mut m.ast, Ast::new(0));
     let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
-    p.override_mod = i as ModuleId;
-    p.override_ast = &mut r.ast;
+    p.set_override(i as ModuleId, &mut r.ast);
     r.resolve();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     let had = r.has_errors();
     if had || fixes == null && r.errors.has_warnings() {
         r.log_errors();
@@ -252,11 +250,9 @@ fn typecheck_module(
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
-    p.override_mod = i as ModuleId;
-    p.override_ast = t.ast.get();
+    p.set_override(i as ModuleId, t.ast.get());
     t.check();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     let had = t.has_errors();
     if had || fixes == null && t.errors.has_warnings() {
         t.log_errors();
@@ -289,8 +285,10 @@ fn typecheck_module(
     return !had;
 }
 
-// Borrow-check module `i`: the pipeline stage after typechecking. A fresh TypeChecker context over
-// the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses run.
+// Borrow-check module `i`, serially: the pipeline stage after typechecking. A fresh TypeChecker context
+// over the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses
+// run. This is the one-module primitive borrowck_all falls back to; it may not run while any pool is
+// frozen or any other module's checker is live.
 fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -298,11 +296,9 @@ fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     let len = m.source.len();
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.override_mod = i as ModuleId;
-    p.override_ast = t.ast.get();
+    p.set_override(i as ModuleId, t.ast.get());
     t.borrowck();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     let had = t.has_errors();
     p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
     if had {
@@ -311,6 +307,24 @@ fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     let back = t.take_ast();
     p.modules[i].ast = back;
     return !had;
+}
+
+// Borrow-check every module, one worker per module on the coroutine pool. The stage is embarrassingly
+// parallel EXCEPT that lowering interns types, so the discipline is: every in-flight Ast is published and
+// every pool frozen serially BEFORE a worker runs (workers never write an override slot, and a frozen
+// pool diverts its own worker's interns into module-local overflow -- see Ast.pool_frozen); each worker
+// folds constants through a private evaluator (shared memo consulted read-only) so cycle marks are never
+// shared; and everything ordered -- merging pools, logging diagnostics, moving Asts back -- happens
+// serially after the join, in module order, so output is byte-identical to the serial stage.
+pub fn borrowck_all(p: &mut loader::Package) bool {
+    let n = p.modules.len();
+    let mut ok = true;
+    for i in 0..n {
+        if !borrowck_module(p, i) {
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 // A deferred static_assert that failed once the whole package was typed: render it against the owning module.
@@ -1240,10 +1254,7 @@ pub fn lint_package(
     if !p.ok {
         return 1;
     }
-    for i in 0..n {
-        let ok = borrowck_module(p, i);
-        p.ok = ok && p.ok;
-    }
+    p.ok = borrowck_all(p) && p.ok;
     if !p.ok {
         return 1;
     }
@@ -1292,10 +1303,10 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     if !p.ok {
         return 1;
     }
-    for i in 0..n {
-        let ok = borrowck_module(p, i);
-        p.ok = ok && p.ok;
-    }
+    p.ok = borrowck_all(p) && p.ok;
+    // Release the pool as soon as the one parallel stage is done: the test runner FORKS after this,
+    // and a forked child inherits the pool's state but none of its worker threads. (Also what keeps
+    // the leak gate green.) The bench calls borrowck_all directly, so its iterations keep a warm pool.
     if !p.ok {
         return 1;
     }

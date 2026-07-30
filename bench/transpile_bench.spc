@@ -14,6 +14,7 @@ import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import codegen::codegen as cg;
 import consteval::consteval as ce;
+import driver::emit as demit;
 import ast::ast as *;
 import bench::bench_shim as shim;
 import std::testing::bench as bench;
@@ -140,11 +141,9 @@ fn resolve_one(p: &mut loader::Package, i: usize) {
     let len = m.source.len();
     let a = replace(&mut m.ast, Ast::new(0));
     let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.override_mod = i as ModuleId;
-    p.override_ast = &mut r.ast;
+    p.set_override(i as ModuleId, &mut r.ast);
     r.resolve();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     let back = r.take_ast();
     p.modules[i].ast = back;
 }
@@ -157,29 +156,9 @@ fn typecheck_one(p: &mut loader::Package, i: usize) {
     let len = m.source.len();
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.override_mod = i as ModuleId;
-    p.override_ast = t.ast.get();
+    p.set_override(i as ModuleId, t.ast.get());
     t.check();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
-    let back = t.take_ast();
-    p.modules[i].ast = back;
-}
-
-// Borrow-check module `i` in place (mirrors emit.spc's borrowck_module): the pipeline stage after
-// typechecking, over the typed AST.
-fn borrowck_one(p: &mut loader::Package, i: usize) {
-    let pkg = p as *mut loader::Package;
-    let m = &mut p.modules[i];
-    let src = m.source.as_str().ptr() as *const char;
-    let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.override_mod = i as ModuleId;
-    p.override_ast = t.ast.get();
-    t.borrowck();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     let back = t.take_ast();
     p.modules[i].ast = back;
 }
@@ -275,11 +254,7 @@ fn transpile_once() Timing {
     let h3 = unsafe shim::sc_alloc_count();
     let y3 = unsafe shim::sc_alloc_bytes();
 
-    i = 0;
-    while i < n {
-        borrowck_one(&mut p, i);
-        i = i + 1;
-    }
+    let _ = demit::borrowck_all(&mut p); // the real stage, so the lane measures what ships
     let a3b = time::cpu_seconds();
     let c3b = unsafe shim::sc_cpu_cycles();
     let h3b = unsafe shim::sc_alloc_count();

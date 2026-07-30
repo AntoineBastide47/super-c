@@ -552,11 +552,9 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
     let len = m.source.len();
     let a = replace(&mut m.ast, Ast::new(0));
     let mut rr = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.override_mod = i as ModuleId;
-    p.override_ast = &mut rr.ast;
+    p.set_override(i as ModuleId, &mut rr.ast);
     rr.resolve();
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     if i == cap {
         let c = rr.errors.errors.len();
         if c > 0 {
@@ -576,14 +574,12 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     let len = m.source.len();
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.override_mod = i as ModuleId;
-    p.override_ast = t.ast.get();
+    p.set_override(i as ModuleId, t.ast.get());
     t.check();
     if !t.has_errors() {
         t.borrowck();
     }
-    p.override_mod = 0xFFFF;
-    p.override_ast = null;
+    p.clear_override(i as ModuleId);
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {

@@ -501,14 +501,16 @@ extend ConstEval {
 
     const fn ast_ptr(self: &Self, m: ModuleId) *const Ast {
         // While a stage holds module `m`'s Ast (moved out of the slot), read the in-flight Ast it points at.
-        if m == unsafe self.pkg.override_mod && unsafe self.pkg.override_ast != null {
-            return unsafe self.pkg.override_ast;
+        let ov = self.pkg.override_at(m);
+        if ov != 0 {
+            return ov as *const Ast;
         }
         return unsafe &self.pkg.modules[m as usize].ast;
     }
     const fn mut_ast_ptr(self: &Self, m: ModuleId) *mut Ast {
-        if m == unsafe self.pkg.override_mod && unsafe self.pkg.override_ast != null {
-            return unsafe self.pkg.override_ast;
+        let ov = self.pkg.override_at(m);
+        if ov != 0 {
+            return ov as *mut Ast;
         }
         return unsafe &mut self.pkg.modules[m as usize].ast;
     }
@@ -1200,6 +1202,10 @@ extend ConstEval {
         return t;
     }
 
+    // While the parallel borrow-check stage keeps every pool frozen, interning is only safe into the
+    // worker's own module: every other pool has its own worker appending to it. Bail deterministically
+    // (callers treat it as an unevaluable type) and flag it; the driver redoes the module serially, so
+    // the bail can never surface as a diagnostic.
     fn ce_recv_of(self: &mut Self, f: *mut CeFrame, m0: ModuleId, t0: TypeId) RecvRes {
         let mut out = ce_recv_zero();
         let r = self.ce_rtype(f, m0, t0);

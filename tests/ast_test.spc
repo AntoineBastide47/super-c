@@ -41,6 +41,7 @@ fn interner() {
     let mut a = Ast::new(8);
     let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
     a.init_types();
+    assert_eq(sizeof(Ty), 16); // the concreteness cache occupies padding, not a larger Ty
     assert(a.type_at(TYPE_NONE).kind == TypeKind::TYPE_ERROR, "slot 0 is TYPE_ERROR");
     assert_eq(Ast::builtin(BuiltinType::BT_I32), BuiltinType::BT_I32 as TypeId + 1);
     assert(a.type_at(Ast::builtin(BuiltinType::BT_I32)).kind == TypeKind::TYPE_BUILTIN, "builtin slot kind");
@@ -59,6 +60,9 @@ fn interner() {
     let a1 = a.intern_type(pc);
     let a2 = a.intern_type(pc);
     let b1 = a.intern_type(pm);
+    let g = a.intern_type(Ty { kind: TypeKind::TYPE_GENERIC, module: 0, as_data: TyAs { decl: 1 } });
+    let pg = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: g } });
     assert(a1 == a2, "identical Ty interns to one id");
     assert(a1 != b1, "differing qualifier interns distinctly");
+    assert(a.type_concrete(a1) && !a.type_concrete(g) && !a.type_concrete(pg), "concreteness is cached recursively");
 }
