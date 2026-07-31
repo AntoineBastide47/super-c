@@ -13,6 +13,7 @@ import sc_runtime;
 
 // A closure body paired with the heap slot its return value lands in. Bundled into one heap block so the
 // single `void*` pthread argument carries both; released by the trampoline once the body has run.
+@no_const
 struct ThreadPayload<F, T> {
     body: F,
     result: *mut T,
@@ -30,7 +31,7 @@ extend<F: fn move() T, T> ThreadPayload<F, T> {
 }
 
 // Move `value` onto the heap through the global allocator, returning the owning raw pointer.
-fn heap_alloc<T>(value: T) *mut T {
+const fn heap_alloc<T>(value: T) *mut T {
     let mut g = Global {};
     let p = (unsafe g.alloc(sizeof(T), alignof(T))) as *mut T;
     unsafe p[0] = value;
@@ -54,6 +55,7 @@ fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
 
 /// A handle to a running thread. `join` blocks until the thread finishes and returns its value; the handle
 /// is consumed. Dropping a handle without joining detaches the thread (its value is never collected).
+@no_const
 pub struct JoinHandle<T> {
     handle: *mut void, // the substrate's opaque thread handle; `join` consumes it
     result: *mut T, // heap slot the thread writes into; join reads then frees it

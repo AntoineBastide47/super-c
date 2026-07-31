@@ -891,6 +891,34 @@ extend TypeChecker {
         }
         return null;
     }
+    /// Whether `t` mentions a '@no_const' declaration anywhere (through pointers, references,
+    /// slices, arrays and instance arguments). Used by the `const fn` def-site check: no value of
+    /// such a type can exist at compile time, so the signature cannot be part of a const contract.
+    fn tc_ty_no_const(self: &Self, t: TypeId, depth: u32) bool {
+        if t == TYPE_NONE || depth > 16 {
+            return false;
+        }
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            return self.tc_ty_no_const(y.as_data.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return self.tc_attr(y.module, y.as_data.decl, AttrKind::ATTR_NO_CONST) != null;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.cur_ast().instance(y.as_data.inst);
+            if self.tc_attr(it.module, it.decl, AttrKind::ATTR_NO_CONST) != null {
+                return true;
+            }
+            for i in 0..it.n {
+                if self.tc_ty_no_const(unsafe it.args[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     fn peel_wrappers(self: &Self, id0: NodeId) NodeId {
         let a = self.cur_ast();
         let mut id = id0;
@@ -1712,7 +1740,7 @@ extend TypeChecker {
     // fact is what the resolver bound it to. A one-part path bound to a `const` is a named constant standing
     // where a literal used to be required. A const-generic PARAMETER is deliberately not included: it is
     // declared in both namespaces and keeps flowing through the type path, which already substitutes it.
-    fn tc_arg_is_const(self: &mut Self, m: ModuleId, aid: NodeId) bool {
+    const fn tc_arg_is_const(self: &mut Self, m: ModuleId, aid: NodeId) bool {
         let k = self.mod_ast(m).at_const(aid).kind;
         if k == NodeKind::NODE_LITERAL {
             return true;
@@ -9205,7 +9233,7 @@ extend TypeChecker {
 
     // The element type the surrounding context asked for, or TYPE_NONE. Only arrays: a slice is a prelude
     // instance by the time it gets here, and an array literal coerces to one after this.
-    fn wanted_elem(self: &mut Self, expected: TypeId) TypeId {
+    const fn wanted_elem(self: &mut Self, expected: TypeId) TypeId {
         if expected == TYPE_NONE {
             return TYPE_NONE;
         }
@@ -10392,30 +10420,36 @@ extend TypeChecker {
                         );
                     }
                 }
-                if fnd.is_const && fnd.body != NODE_NONE && !fnd.is_extern {
-                    let ceptr = self.ceval();
-                    if ceptr != null && ceptr.ce_fn_eligible(self.cur_module(), id) == ce::FX_NO {
-                        let sp = self.name_span(fnd.name);
-                        let mut why: str = "cannot be evaluated at compile time";
-                        let r = ceptr.fx_no_reason(self.cur_module(), id);
-                        if r != null {
-                            why = unsafe r.why;
+                if fnd.is_const {
+                    // '@no_const' in the signature disqualifies the const contract outright: no such
+                    // value can exist at compile time, so the shallow body scan need not prove it.
+                    let mut ncsite = NODE_NONE;
+                    for i in 0..params.len {
+                        let pid = unsafe self.cur_ast().list(params)[i as usize];
+                        let pn = *self.cur_ast().at_const(pid);
+                        let tnode = if_node(pn.kind == NodeKind::NODE_PARAMETER, pn.as_data.parameter.ty, pid);
+                        if self.tc_ty_no_const(self.resolve_type(tnode), 0) {
+                            ncsite = pid;
                         }
+                    }
+                    let rets = fnd.returns;
+                    for i in 0..rets.len {
+                        let rid = unsafe self.cur_ast().list(rets)[i as usize];
+                        let rn = *self.cur_ast().at_const(rid);
+                        let tnode = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, rid);
+                        if self.tc_ty_no_const(self.resolve_type(tnode), 0) {
+                            ncsite = rid;
+                        }
+                    }
+                    if ncsite != NODE_NONE {
+                        let sp = self.cur_ast().at_const(ncsite).span;
                         self.errors.emit(
                             sp.start,
                             sp.end - sp.start,
                             format(
-                                "function '{}' is declared 'const fn' but {}",
-                                diag::span_str(self.source, sp.start, sp.end),
-                                why,
+                                "a 'const fn' signature cannot use a '@no_const' type: no such value can exist at compile time",
                             ),
                         );
-                        if r != null && unsafe r.site != NODE_NONE {
-                            let ss = self.cur_ast().at_const(unsafe r.site).span;
-                            self.errors.note(
-                                format("disqualified at '{}'", diag::span_str(self.source, ss.start, ss.end)),
-                            );
-                        }
                     }
                 }
                 let saved = self.current_returns;
@@ -10440,6 +10474,63 @@ extend TypeChecker {
                     self.check_stmt(fnd.body);
                     if fnd.is_unsafe {
                         self.unsafe_depth = self.unsafe_depth - 1;
+                    }
+                }
+                // Def-site `const fn` validation, AFTER the body walk: type-based disqualifiers
+                // ('@no_const' mentions) only exist once the body is typed, so a pre-body verdict
+                // would be blind to them (ce_fn_recheck also overwrites any blind memoized verdict).
+                if fnd.is_const && fnd.body != NODE_NONE && !fnd.is_extern {
+                    let ceptr = self.ceval();
+                    if ceptr != null && ceptr.ce_fn_recheck(self.cur_module(), id) == ce::FX_NO {
+                        let sp = self.name_span(fnd.name);
+                        // the actionable token is the `const` keyword itself: [pub] [unsafe] const fn
+                        // is the canonical order, so scan back from the name across `fn`
+                        let mut cstart = sp.start;
+                        let mut cend = sp.end;
+                        let mut i = sp.start as usize;
+                        while i > 0 && (self.source[i - 1] == b' ' || self.source[i - 1] == b'\t' || self.source[i - 1] == b'\n' || self.source[i - 1] == b'\r') {
+                            i = i - 1;
+                        }
+                        if i >= 2 && self.source[i - 2] == b'f' && self.source[i - 1] == b'n' {
+                            let mut j = i - 2;
+                            while j > 0 && (self.source[j - 1] == b' ' || self.source[j - 1] == b'\t' || self.source[j - 1] == b'\n' || self.source[j - 1] == b'\r') {
+                                j = j - 1;
+                            }
+                            if j >= 5 && diag::span_str(self.source, (j - 5) as u32, j as u32) == "const" {
+                                cstart = (j - 5) as u32;
+                                cend = j as u32;
+                            }
+                        }
+                        let mut why: str = "cannot be evaluated at compile time";
+                        let r = ceptr.fx_no_reason(self.cur_module(), id);
+                        if r != null {
+                            why = unsafe r.why;
+                        }
+                        self.errors.emit(
+                            cstart,
+                            cend - cstart,
+                            format(
+                                "function '{}' is declared 'const fn' but {}",
+                                diag::span_str(self.source, sp.start, sp.end),
+                                why,
+                            ),
+                        );
+                        if r != null && unsafe r.site != NODE_NONE {
+                            let ss = self.cur_ast().at_const(unsafe r.site).span;
+                            let mut line: u32 = 1;
+                            for k in 0..ss.start as usize {
+                                if self.source[k] == b'\n' {
+                                    line = line + 1;
+                                }
+                            }
+                            self.errors.note(
+                                format(
+                                    "disqualified at '{}' (line {})",
+                                    diag::span_str(self.source, ss.start, ss.end),
+                                    line,
+                                ),
+                            );
+                        }
                     }
                 }
                 for mi in 0..self.nmoved {}

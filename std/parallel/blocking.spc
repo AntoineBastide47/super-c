@@ -23,12 +23,14 @@ const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real prog
 const IDLE_NS: i64 = 10000000000; // a thread with nothing to do for ten seconds goes away again
 
 // One submitted piece of work: a type-erased trampoline plus its heap payload.
+@no_const
 struct BJob {
     pub run: fn(*mut void) void,
     pub env: *mut void,
     pub next: *mut BJob,
 }
 
+@no_const
 struct Pool {
     pub lock: *mut void, // guards the queue, the counters and `shutting`
     pub cv: *mut void, // idle threads wait here
@@ -45,6 +47,7 @@ static mut G_POOL: *mut Pool = null;
 
 /// The latch one `call` waits on: `done` flips when the blocking thread has stored the result. It lives in
 /// the caller's frame, which is sound because the caller does not return until it flips. `pub` for linkage.
+@no_const
 pub struct Done {
     pub state: sync::Mutex<i32>,
     pub cv: sync::Condvar,
@@ -177,6 +180,7 @@ pub fn submit(run: fn(*mut void) void, env: *mut void) {
 }
 
 // What one `call` hands to the pool: the closure, where to put its value, and who to wake.
+@no_const
 struct Payload<F, T> {
     pub body: F,
     pub slot: *mut T,
@@ -216,6 +220,7 @@ pub fn run_blocking(run: fn(*mut void) void, env: *mut void) {
 }
 
 // The payload behind `run_blocking`: an already-type-erased job plus who to wake.
+@no_const
 struct RawJob {
     pub run: fn(*mut void) void,
     pub env: *mut void,

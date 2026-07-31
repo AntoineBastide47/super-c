@@ -6,12 +6,12 @@ import lexer::token_type as *;
 import tests::harness as h;
 
 // Program item `i` (mirror of parser_test.c's `item`): the i-th node in the program's item list.
-fn item_id(a: &Ast, i: u32) NodeId {
+const fn item_id(a: &Ast, i: u32) NodeId {
     let items = a.at_const(a.root).as_data.program.items;
     return unsafe a.list(items)[i as usize];
 }
 
-fn item(a: &Ast, i: u32) &Node {
+const fn item(a: &Ast, i: u32) &Node {
     let items = a.at_const(a.root).as_data.program.items;
     let ids = a.list(items);
     return a.at_const(unsafe ids[i as usize]);

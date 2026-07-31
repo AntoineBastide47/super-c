@@ -43,6 +43,7 @@ static mut G_STACK_SIZE: usize = 262144;
 /// `next` links it into the scheduler's run queue; a primitive's wait queue holds a separate per-wait node
 /// instead (see `park_begin`), and `tnext` is the timer-list link. `pub` only so task-aware primitives can
 /// hold `*mut Coroutine` and wake one -- not a user-facing type.
+@no_const
 pub struct Coroutine {
     pub id: u64, // 1-based, unique for the process: what a panic and any diagnostic name it by
     pub ctx: *mut void, // sc_rt saved context (null for a job)
@@ -89,6 +90,7 @@ static_assert(sizeof(Worker) == LINE, "Worker must be exactly one cache line: ad
 /// two only contend over the last element -- so the common case takes no lock at all. Fixed capacity, which
 /// is what keeps it simple: a push that would overflow spills into the shared injection queue instead of
 /// growing the buffer under the thieves' feet.
+@no_const
 pub struct Worker {
     pub buf: *mut *mut Coroutine, // DEQUE_CAP slots, indexed modulo the capacity
     pub head: usize, // atomic: next slot to run; CAS'd by the owner and by thieves alike
@@ -116,6 +118,7 @@ pub struct Worker {
 /// was most of what submitting a task cost at fourteen workers. `notified` is the predicate, so a signal
 /// that lands before the wait is not lost. Line-padded: a worker being woken must not invalidate the
 /// neighbour's line.
+@no_const
 pub struct Parker {
     pub mtx: *mut void,
     pub cv: *mut void,
@@ -124,6 +127,7 @@ pub struct Parker {
 }
 
 /// The shared pool. Fields are `pub` only for the caller-monomorphized `launch` / task-aware primitives.
+@no_const
 pub struct Scheduler {
     pub deques: *mut Worker, // one per worker thread
     pub nw: usize,
@@ -190,7 +194,7 @@ pub fn trace(event: str, id: u64) {
 }
 
 // The commit hand-off for a park with nothing to release (e.g. `sleep`).
-fn commit_nop(_p: *mut void) {}
+const fn commit_nop(_p: *mut void) {}
 
 // A fresh task id. Ids are handed out in order and never reused, so the counter is also the number of tasks
 // ever created -- one contended increment per task rather than two for the same pair of facts.

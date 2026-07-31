@@ -52,6 +52,7 @@ pub enum Selected {
 // One armed operation, type-erased. `ready` is `recv_ready::<T>`/`send_ready::<T>`, monomorphized where the
 // arm was added, so the selector can ask "would this proceed?" without knowing the element type. `raw`
 // guards both the channel state and `cv`'s queue; `w` is this selector's node on that queue.
+@no_const
 struct Arm {
     pub obj: *const void,
     pub ready: fn(*const void) bool,
@@ -62,6 +63,7 @@ struct Arm {
 
 /// A set of channel operations to wait on. Build it with `new`, add operations with `arm_recv`/`arm_send`,
 /// then `wait`. Reusable: the arms stay armed, so a `loop { switch s.wait() { .. } }` costs one setup.
+@no_const
 pub struct Selector {
     arms: [Arm; MAX_ARMS],
     order: [usize; MAX_ARMS], // arm indices sorted by lock address -- the deadlock-free lock-all order
@@ -73,7 +75,7 @@ pub struct Selector {
 }
 
 // A never-ready predicate, so an empty `Arm` slot holds a callable rather than a null function pointer.
-fn no_arm(_p: *const void) bool {
+const fn no_arm(_p: *const void) bool {
     return false;
 }
 

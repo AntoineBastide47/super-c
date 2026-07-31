@@ -24,6 +24,7 @@ import std::parallel::time as time;
 /// `claim`/`arm` serve a waiter queued on SEVERAL queues at once (a `select`): the notify that wins the
 /// wake records which queue it came from, so the woken task retries that operation first. Null `claim` for
 /// an ordinary single-queue wait, which already knows what woke it.
+@no_const
 pub struct Waiter {
     pub co: *mut runtime::Coroutine,
     pub token: u32,
@@ -43,6 +44,7 @@ pub struct Waiter {
 /// is observed (a lock that lives no longer than the work it guards, e.g. the data-parallel latch), so once
 /// an unlock has published the release it may touch only memory that outlives the mutex: the static buckets
 /// and the popped waiter's own frame, which cannot die before its wake. It never touches the lock again.
+@no_const
 pub struct RawMutex {
     pub locked: i32,
 }
@@ -50,6 +52,7 @@ pub struct RawMutex {
 // One parked lock waiter, living on that waiter's stack. A coroutine parks through the scheduler
 // (`co`/`token`); any other thread parks on `oswake` in its own frame -- the waker names this node, never
 // the (possibly already freed) mutex.
+@no_const
 struct LotNode {
     pub co: *mut runtime::Coroutine, // null for an OS-thread waiter
     pub token: u32,
@@ -59,6 +62,7 @@ struct LotNode {
 }
 
 // The Super-C view of one static bucket (a 64-byte slot in sc_rt.c): a spinlock over a FIFO of nodes.
+@no_const
 struct LotBucket {
     pub lock: i32,
     pub pad: i32,
@@ -262,6 +266,7 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
 /// A mutual-exclusion lock guarding a `T`. Only the holder can reach the value, through the RAII
 /// `MutexGuard` returned by `lock` -- the lock is released when the guard is dropped. A contended `lock`
 /// parks a coroutine instead of blocking its worker. Put one in an `Arc` to share it: `Arc<Mutex<T>>`.
+@no_const
 pub struct Mutex<T> {
     raw: *mut RawMutex,
     data: UnsafeCell<T>,
@@ -270,6 +275,7 @@ pub struct Mutex<T> {
 /// The RAII lock token. Reach the guarded value with `guard.get()` / `guard.get_mut()`, or call methods on
 /// it directly (`guard.push(..)` auto-derefs); the mutex unlocks when the guard is dropped. Cannot outlive
 /// the `Mutex` it borrows.
+@no_const
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
     // A guard means THIS thread holds the lock, so it must not cross to another: the unlock would run
@@ -380,6 +386,7 @@ extend<T> MutexGuard<T> as Free {
 
 // Who holds the lock right now. `waiting_writers` gives writers priority: a new reader yields to a writer
 // that is already queued, so a steady stream of readers cannot starve it.
+@no_const
 struct RwState {
     pub readers: i64,
     pub writer: bool,
@@ -389,6 +396,7 @@ struct RwState {
 /// A reader-writer lock guarding a `T`: any number of concurrent readers (`read`) or a single exclusive
 /// writer (`write`), each returning an RAII guard. Waiting parks a coroutine rather than its worker. Share
 /// it as `Arc<RwLock<T>>`.
+@no_const
 pub struct RwLock<T> {
     state: Mutex<RwState>, // held only while acquiring/releasing, never while the lock is held
     cv: Condvar, // signalled whenever the lock becomes free
@@ -396,6 +404,7 @@ pub struct RwLock<T> {
 }
 
 /// Shared read access; releases the read lock when dropped.
+@no_const
 pub struct RwLockReadGuard<'a, T> {
     lock: &'a RwLock<T>,
     // A guard means THIS thread holds the lock, so it must not cross to another: the unlock would run
@@ -406,6 +415,7 @@ pub struct RwLockReadGuard<'a, T> {
 }
 
 /// Exclusive write access; releases the write lock when dropped.
+@no_const
 pub struct RwLockWriteGuard<'a, T> {
     lock: &'a RwLock<T>,
     // A guard means THIS thread holds the lock, so it must not cross to another: the unlock would run
@@ -604,6 +614,7 @@ extend<T> RwLockWriteGuard<T> as Free {
 // (mutated under that lock, never structurally). Coroutines queue their own `Waiter` nodes on `head`/`tail`;
 // other threads park on `gen`, which every notify bumps, and `os_waiters` counts them so a notify with no
 // thread waiting costs nothing.
+@no_const
 struct CondQ {
     pub head: *mut Waiter,
     pub tail: *mut Waiter,
@@ -625,6 +636,7 @@ fn publish_arm(wp: *mut Waiter) {
 /// A condition variable. A coroutine that `wait`s PARKS (its worker runs other tasks); any other thread
 /// blocks. `notify_one`/`notify_all` wake whichever kind is waiting, and must be called while holding the
 /// paired mutex. Always re-check the condition in a loop after `wait` -- wakeups may be spurious.
+@no_const
 pub struct Condvar {
     wq: *mut CondQ, // waiter set, guarded by the paired mutex
 }
@@ -822,6 +834,7 @@ pub interface Selectable {
 
 /// Runs a closure a single time, no matter how many threads call `call_once`; later calls return
 /// immediately. A relaxed atomic fast-path skips the lock once initialisation has completed.
+@no_const
 pub struct Once {
     done: atomics::Atomic<i32>,
     gate: Mutex<i32>,
@@ -870,6 +883,7 @@ extend Once as Free {
 // switch as well. Here all but the last `done` is a single atomic decrement that touches nothing shared
 // but one cache line; the mutex is left holding nothing at all, and exists only so the last decrement and
 // a waiter about to sleep cannot slip past each other.
+@no_const
 struct WaitGroupInner {
     pub count: atomics::Atomic<i64>,
     pub gate: Mutex<i32>, // guards no data: it is the handshake between the final `done` and `wait`
@@ -878,6 +892,7 @@ struct WaitGroupInner {
 
 /// Tracks a count of outstanding tasks. `add` before spawning, `done` as each finishes, `wait` blocks until
 /// the count reaches zero. Clone one into each worker; all clones share the same counter.
+@no_const
 pub struct WaitGroup {
     inner: arc::Arc<WaitGroupInner>,
 }
@@ -955,11 +970,13 @@ extend WaitGroup as Free {
 // Barrier: release a fixed number of threads together.
 // -----------------------------------------------------------------------------------------------------
 
+@no_const
 struct BarrierState {
     pub arrived: i64,
     pub generation: i64,
 }
 
+@no_const
 struct BarrierInner {
     pub state: Mutex<BarrierState>,
     pub cv: Condvar,
@@ -968,6 +985,7 @@ struct BarrierInner {
 
 /// A synchronisation point for a fixed number of threads: each `wait` blocks until `n` threads have
 /// arrived, then all are released together. Reusable -- it resets for the next round. Clone one per thread.
+@no_const
 pub struct Barrier {
     inner: arc::Arc<BarrierInner>,
 }
@@ -1023,6 +1041,7 @@ extend Barrier as Free {
 // Semaphore: a counted set of permits.
 // -----------------------------------------------------------------------------------------------------
 
+@no_const
 struct SemaphoreInner {
     pub permits: Mutex<i64>,
     pub cv: Condvar,
@@ -1030,6 +1049,7 @@ struct SemaphoreInner {
 
 /// A counting semaphore: `acquire` takes a permit (blocking until one is free), `release` returns one.
 /// Bound concurrency with it (e.g. a connection pool). Clone one per user; all clones share the count.
+@no_const
 pub struct Semaphore {
     inner: arc::Arc<SemaphoreInner>,
 }

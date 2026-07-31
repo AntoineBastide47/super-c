@@ -15,31 +15,31 @@ pub struct Duration {
 
 extend Duration {
     /// A duration of `n` nanoseconds.
-    pub fn from_nanos(n: u64) Duration {
+    pub const fn from_nanos(n: u64) Duration {
         return Duration { ns: n };
     }
     /// A duration of `n` microseconds.
-    pub fn from_micros(n: u64) Duration {
+    pub const fn from_micros(n: u64) Duration {
         return Duration { ns: n * 1000 };
     }
     /// A duration of `n` milliseconds.
-    pub fn from_millis(n: u64) Duration {
+    pub const fn from_millis(n: u64) Duration {
         return Duration { ns: n * 1000000 };
     }
     /// A duration of `n` seconds.
-    pub fn from_secs(n: u64) Duration {
+    pub const fn from_secs(n: u64) Duration {
         return Duration { ns: n * 1000000000 };
     }
     /// The duration in whole nanoseconds.
-    pub fn as_nanos(self: &Duration) u64 {
+    pub const fn as_nanos(self: &Duration) u64 {
         return self.ns;
     }
     /// The duration truncated to whole milliseconds.
-    pub fn as_millis(self: &Duration) u64 {
+    pub const fn as_millis(self: &Duration) u64 {
         return self.ns / 1000000;
     }
     /// The duration truncated to whole seconds.
-    pub fn as_secs(self: &Duration) u64 {
+    pub const fn as_secs(self: &Duration) u64 {
         return self.ns / 1000000000;
     }
 }

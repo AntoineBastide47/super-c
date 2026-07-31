@@ -814,6 +814,34 @@ extend ConstEval {
         return null;
     }
 
+    /// Whether `t` mentions a '@no_const' declaration anywhere (through pointers, references,
+    /// slices, arrays and instance arguments). Such a value can never exist at compile time, so any
+    /// expression it types disqualifies const evaluation.
+    fn ce_ty_no_const(self: &Self, m: ModuleId, t: TypeId, depth: u32) bool {
+        if t == TYPE_NONE || depth > 16 {
+            return false;
+        }
+        let y = *self.ast_ptr(m).type_at(t);
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            return self.ce_ty_no_const(m, y.as_data.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return self.ce_attr(y.module, y.as_data.decl, AttrKind::ATTR_NO_CONST) != null;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_ptr(m).instance(y.as_data.inst);
+            if self.ce_attr(it.module, it.decl, AttrKind::ATTR_NO_CONST) != null {
+                return true;
+            }
+            for i in 0..it.n {
+                if self.ce_ty_no_const(m, unsafe it.args[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // Accumulate one field into `acc`; false = unfoldable.
     fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, ft: TypeId, env: *const LayoutEnv, depth: i32) bool {
         let fl = self.layout_of(m, ft, env, depth);
@@ -1522,7 +1550,7 @@ extend ConstEval {
     }
 
     // ---- object store ----
-    fn ce_objs_reset(self: &mut Self) {
+    const fn ce_objs_reset(self: &mut Self) {
         self.objs_live = 0;
         self.live_slots = 0;
     }
@@ -3624,6 +3652,11 @@ extend ConstEval {
         let tn = a.at_const(id).as_data.struct_initializer.ty;
         let fields = a.at_const(id).as_data.struct_initializer.fields;
         let rt = self.ce_type(m, id);
+        // A '@no_const' value can never exist at compile time; refusing construction here is the
+        // evaluator-side backstop behind the fx-scan disqualification.
+        if self.ce_ty_no_const(m, rt, 0) {
+            return cv_nil();
+        }
         // enum struct-payload variant: `Variant { .. }`
         let mut vd = a.resolution_def(tn);
         if vd.node == NODE_NONE {
@@ -4764,6 +4797,22 @@ extend ConstEval {
         return self.fx_get(m, fn_id);
     }
 
+    /// Like ce_fn_eligible, but re-scans instead of trusting the memo. The def-site check runs this
+    /// AFTER the body has typechecked: type-based disqualifiers ('@no_const' mentions) are invisible
+    /// before the body's types exist, and an earlier caller's fold prefilter may have memoized that
+    /// blind verdict. The fresh verdict overwrites the memo so later folds agree with it.
+    pub fn ce_fn_recheck(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+        if m as usize >= self.nmods || !self.has_ast(m) {
+            return FX_MAYBE;
+        }
+        self.fx_set(m, fn_id, FX_ONSTACK, false);
+        self.fx_depth = self.fx_depth + 1;
+        let v = self.fx_scan_fn(m, fn_id, false);
+        self.fx_depth = self.fx_depth - 1;
+        self.fx_set(m, fn_id, v, false);
+        return v;
+    }
+
     /// The const-suggestion lint's surface: deep FX_YES = every path of the body is provably
     /// CTFE-evaluable, so declaring the function `const fn` passes the def-site check AND cannot
     /// introduce structural fold failures (traps and budgets remain the caller's semantic risk).
@@ -4962,6 +5011,9 @@ extend ConstEval {
         if depth > 64 {
             return FX_MAYBE;
         }
+        if self.ce_ty_no_const(m, self.ce_type(m, id), 0) {
+            return self.fx_disq(m, owner, id, "uses a '@no_const' type", deep);
+        }
         let a = self.ast_ptr(m);
         let n = a.at_const(id);
         switch n.kind {
@@ -5014,6 +5066,20 @@ extend ConstEval {
                 return fx_meet(o, self.fx_scan_expr(m, owner, n.as_data.index.index, depth + 1, deep));
             },
             NODE_STRUCT_INITIALIZER => {
+                // Resolution-based (types may not exist yet at the def-site check): constructing a
+                // '@no_const' type is certain failure on every path that reaches it.
+                let tn = n.as_data.struct_initializer.ty;
+                let mut vd = a.resolution_def(tn);
+                if vd.node == NODE_NONE {
+                    vd = DefId { module: m, node: a.resolution(tn) };
+                }
+                if vd.node != NODE_NONE && vd.module as usize < self.nmods && self.ce_attr(
+                    vd.module,
+                    vd.node,
+                    AttrKind::ATTR_NO_CONST,
+                ) != null {
+                    return self.fx_disq(m, owner, id, "constructs a '@no_const' value", deep);
+                }
                 let fields = n.as_data.struct_initializer.fields;
                 let mut acc = FX_YES;
                 for i in 0..fields.len {
@@ -5679,7 +5745,9 @@ extend ConstEval {
                 for i in 0..xg.len {
                     if unsafe monot[i as usize] == TYPE_NONE || !self.ast_ptr(unsafe monom[i as usize]).type_concrete(
                         unsafe monot[i as usize],
-                    ) {
+                    ) || self.ce_ty_no_const(unsafe monom[i as usize], unsafe monot[i as usize], 0) {
+                        // a '@no_const' type argument puts the instantiation outside the const
+                        // contract: skip the fold silently (invoke_ran stays false -> no promotion)
                         return out;
                     }
                     if !self.ce_subst_add(
@@ -5706,7 +5774,8 @@ extend ConstEval {
                     let idx = (skip + i) as usize;
                     if unsafe monot[idx] == TYPE_NONE || !self.ast_ptr(unsafe monom[idx]).type_concrete(
                         unsafe monot[idx],
-                    ) {
+                    ) || self.ce_ty_no_const(unsafe monom[idx], unsafe monot[idx], 0) {
+                        // same rule as extend generics: '@no_const' type arguments never fold
                         return out;
                     }
                     if !self.ce_subst_add(gp, fm, unsafe gids[i as usize], unsafe monom[idx], unsafe monot[idx]) {

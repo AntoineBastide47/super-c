@@ -222,6 +222,7 @@ extend isize as AtomicOps {
 /// a shared reference (e.g. through an `Arc`) is enough to mutate the cell. That interior mutability lives in
 /// an `UnsafeCell`, the one place a `*mut` may be formed from a shared borrow; the value is stored unwrapped
 /// inside it, so its address can be shared across threads.
+@no_const
 pub struct Atomic<T: AtomicOps> {
     cell: UnsafeCell<T>,
 }

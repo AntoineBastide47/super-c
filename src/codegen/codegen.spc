@@ -1760,7 +1760,7 @@ extend Codegen {
     }
     // The Ast records this at intern time (`Ast.tc_pool`), so asking costs one load. This used to re-walk
     // the whole nested type on every call, and it is called per instance argument per collection pass.
-    fn type_is_concrete(self: &Self, t: TypeId) bool {
+    const fn type_is_concrete(self: &Self, t: TypeId) bool {
         return self.cur_ast().type_concrete(t);
     }
     fn tyargs_concrete(self: &Self, args: *const TypeId, n: i32) bool {
@@ -7682,7 +7682,7 @@ extend Codegen {
     // node's own type has been rewritten to the slice by then, so the length is no longer on it. Covers a
     // member access (`x.buf`), whose length expression lives in the field's own module and so cannot be
     // emitted as an expression the way `array_length_of` does for a local. 0 = unknown.
-    fn array_len_of(self: &mut Self, iter: NodeId) u32 {
+    const fn array_len_of(self: &mut Self, iter: NodeId) u32 {
         let n = *self.cur_ast().at_const(iter);
         let mut dm = self.cur_module();
         let mut dn = NODE_NONE;
@@ -9424,7 +9424,7 @@ extend Codegen {
     // declare no Free impl): one static definition per TU for every derived concrete aggregate the
     // TU's pool can reference, prototypes first so bodies and each other may call them in any
     // order. The pool is complete before bodies (collect_insts/expand pre-substitute mono types).
-    fn cg_auto_free_key(self: &mut Self, rt: TypeId) u64 {
+    const fn cg_auto_free_key(self: &mut Self, rt: TypeId) u64 {
         let y = *self.type_at(rt);
         if y.kind == TypeKind::TYPE_INSTANCE {
             return 1u64 << 62 | y.as_data.inst as u64;
@@ -15313,7 +15313,7 @@ extend Codegen {
     }
     /// Adopt a recycled output buffer: content cleared, capacity kept (one buffer serves every TU
     /// of a build). Ownership: consumes `b`; reclaim it with take_buf after the TU.
-    pub fn adopt_buf(self: &mut Self, b: String) {
+    pub const fn adopt_buf(self: &mut Self, b: String) {
         self.buf = b;
         self.buf.clear();
     }

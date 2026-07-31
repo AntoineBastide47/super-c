@@ -226,7 +226,7 @@ pub fn proj_new() Proj {
 }
 
 extend Proj {
-    pub fn rootp(self: &Proj) *const char {
+    pub const fn rootp(self: &Proj) *const char {
         return &self[0];
     }
 

@@ -28,6 +28,7 @@ import std::parallel::time as time;
 // A pending registration. Heap-owned rather than living in the waiting frame, because an event can still be
 // in flight when a timed wait gives up. `state` is that race: 0 armed, 1 claimed by the reactor, 2 cancelled
 // by the waiter. Whoever wins the CAS owns what happens next, and exactly one of them frees it.
+@no_const
 struct Interest {
     pub co: *mut runtime::Coroutine,
     pub token: u32,
@@ -38,10 +39,12 @@ struct Interest {
 
 // A batch of ready cookies. Wrapped in a struct so it is zero-initialized: reading an uninitialized array
 // is (rightly) rejected, and the poller fills only the first `n` slots.
+@no_const
 struct EvBuf {
     pub e: [*mut void; 64],
 }
 
+@no_const
 struct Reactor {
     pub poller: *mut void,
     pub thread: *mut void,

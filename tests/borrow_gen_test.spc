@@ -35,7 +35,7 @@ fn buf_str<'a>(p: *const char) str<'a> {
 }
 
 // Two borrow-place overlap rules: whole `p` (index 0) overlaps everything; `p.a` (1) and `p.b` (2) are disjoint.
-fn overlap(i: i32, j: i32) bool {
+const fn overlap(i: i32, j: i32) bool {
     return i == j || i == 0 || j == 0;
 }
 

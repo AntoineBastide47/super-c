@@ -63,17 +63,19 @@ extend IoError {
         return IoError { kind: k, code: e };
     }
     /// The kind, for a caller that does not care about the number.
-    pub fn kind(self: &IoError) IoErrorKind {
+    pub const fn kind(self: &IoError) IoErrorKind {
         return self.kind;
     }
 }
 
 /// A listening socket. Dropping it closes the descriptor.
+@no_const
 pub struct TcpListener {
     pub fd: i32,
 }
 
 /// One connection. Dropping it closes the descriptor.
+@no_const
 pub struct TcpStream {
     pub fd: i32,
 }
@@ -191,6 +193,7 @@ extend TcpStream as Free {
 
 /// A UDP socket. Datagrams, so there is no connection to accept or close -- just a bound port that sends
 /// and receives. Dropping it closes the descriptor.
+@no_const
 pub struct UdpSocket {
     pub fd: i32,
 }

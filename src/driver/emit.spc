@@ -473,7 +473,7 @@ fn lint_owner(ents: &Vector<LintEnt>, pos: u32) i64 {
 
 // Whether module `m` is in this lint run's reported set: the batch mask when present (multi-file
 // `lint` sharing one package), else `only_mod` (single-file lint), else every non-prelude module.
-fn lint_reported(p: &loader::Package, m: usize, only_mod: i32) bool {
+const fn lint_reported(p: &loader::Package, m: usize, only_mod: i32) bool {
     if p.lint_set.len() != 0 {
         return p.lint_set[m];
     }
@@ -485,7 +485,7 @@ fn lint_reported(p: &loader::Package, m: usize, only_mod: i32) bool {
 
 // Every batch-linted module is a lint root of its own (per-file parity: lint_one loads each file as
 // module 0), so its `main` keeps the entry-point exemption there too.
-fn lint_root_mod(p: &loader::Package, m: usize) bool {
+const fn lint_root_mod(p: &loader::Package, m: usize) bool {
     return m == 0 || p.lint_set.len() != 0 && p.lint_set[m];
 }
 

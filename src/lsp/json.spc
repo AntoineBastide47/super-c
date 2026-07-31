@@ -495,7 +495,7 @@ extend JSONParser {
         }
     }
 
-    fn fail_s(self: &mut Self, msg: String) {
+    const fn fail_s(self: &mut Self, msg: String) {
         if self.err.len() == 0 {
             self.err = msg;
         }

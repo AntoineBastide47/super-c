@@ -55,7 +55,7 @@ pub struct Options {
 
 extend Options {
     /// Static scheduling with an automatic grain -- what the plain `range`/`each`/... forms use.
-    pub fn default() Options {
+    pub const fn default() Options {
         return Options { schedule: Schedule::Static, grain_size: 0 };
     }
 }
@@ -69,12 +69,14 @@ extend Options {
 /// The outstanding-chunk counter the caller waits on. Task-aware through `Condvar`: a calling coroutine
 /// parks, any other thread blocks. It lives in the caller's frame, which is sound because the caller does
 /// not return until the count reaches zero.
+@no_const
 pub struct Latch {
     pub left: sync::Mutex<i64>,
     pub cv: sync::Condvar,
 }
 
 /// One parallel call: where the work is, how it is claimed, and who to tell when a chunk ends.
+@no_const
 pub struct Batch {
     pub latch: *mut Latch, // null: running inline on the calling thread, nothing to notify
     pub shared: *mut void, // the call's typed payload (the body closure)
@@ -86,6 +88,7 @@ pub struct Batch {
 }
 
 /// A single chunk: its pre-assigned range (Static) and its ordinal, which `reduce` uses to pick a slot.
+@no_const
 pub struct ChunkEnv {
     pub batch: *mut Batch,
     pub lo: usize,
@@ -273,6 +276,7 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
 // -----------------------------------------------------------------------------------------------------
 
 /// The body, held once and copied per chunk. `pub` for linkage.
+@no_const
 pub struct RangeShared<F> {
     pub body: F,
     pub start: usize,
@@ -319,6 +323,7 @@ pub fn range_with<F: fn(usize) + Send + Sync>(r: Range<usize>, opts: Options, bo
 // -----------------------------------------------------------------------------------------------------
 
 /// `pub` for linkage.
+@no_const
 pub struct EachShared<T, F> {
     pub body: F,
     pub items: *const T,
@@ -366,6 +371,7 @@ pub fn each_with<T, F: fn(&T) + Send + Sync>(items: []T, opts: Options, body: F)
 // -----------------------------------------------------------------------------------------------------
 
 /// `pub` for linkage.
+@no_const
 pub struct EachMutShared<T, F> {
     pub body: F,
     pub items: *mut T,
@@ -414,6 +420,7 @@ pub fn each_mut_with<T, F: fn(&mut T) + Send + Sync>(items: []mut T, opts: Optio
 // -----------------------------------------------------------------------------------------------------
 
 /// `pub` for linkage.
+@no_const
 pub struct ChunksShared<T, F> {
     pub body: F,
     pub items: *mut T,
@@ -472,6 +479,7 @@ pub fn chunks_mut_with<T, F: fn([]mut T) + Send + Sync>(items: []mut T, size: us
 // -----------------------------------------------------------------------------------------------------
 
 /// `pub` for linkage.
+@no_const
 pub struct ReduceShared<T, A, MK, FOLD> {
     pub make: MK,
     pub fold: FOLD,
@@ -550,12 +558,14 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
 // -----------------------------------------------------------------------------------------------------
 
 /// One registered section: a type-erased closure box and the trampoline that runs it. `pub` for linkage.
+@no_const
 pub struct SectionJob {
     pub entry: fn(*mut void) void,
     pub env: *mut void,
 }
 
 /// The builder `sections` hands to its closure: call `add` once per independent piece of work.
+@no_const
 pub struct Sections {
     pub entries: Vector<SectionJob>, // `pub` for linkage: `add` and `sections` monomorphize at the call site
 }
@@ -587,6 +597,7 @@ extend Sections {
 }
 
 /// `pub` for linkage.
+@no_const
 pub struct SectionsShared {
     pub jobs: *const SectionJob, // read-only: a section's closure box is reached through its own pointer
 }

@@ -3709,6 +3709,13 @@ extend Parser {
             }
             return true;
         }
+        if syntax.parts == 1 && self.text_is(ns, "no_const") {
+            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_NO_CONST as u8, arg: 0, str_span: Span::empty() };
+            if syntax.has_args {
+                self.errors.emit(ns.start(), ns.len(), format("attribute '@no_const' takes no arguments"));
+            }
+            return true;
+        }
         if syntax.parts == 1 && self.text_is(ns, "platform") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
             self.parse_platform_attr(&syntax, out);
@@ -3885,6 +3892,15 @@ extend Parser {
                     sp.start,
                     sp.end - sp.start,
                     format("'@c.source' / '@c.link' may only be applied to an 'extern \"C\"' block"),
+                );
+            }
+            if attr.kind == AttrKind::ATTR_NO_CONST as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_STRUCT && self.ast.at_const(
+                owner,
+            ).kind != NodeKind::NODE_ENUM) {
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("'@no_const' may only be applied to a struct, union, or enum declaration"),
                 );
             }
             if attr.kind == AttrKind::ATTR_EMIT_MACRO as u8 && !generic_aggregate {

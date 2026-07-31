@@ -10,6 +10,7 @@ import atomic;
 import std::parallel::atomics as atomics;
 
 // The shared heap block: the strong count sits beside the value so one allocation holds both.
+@no_const
 struct ArcInner<T> {
     pub strong: usize,
     pub value: T,
@@ -17,6 +18,7 @@ struct ArcInner<T> {
 
 /// A shared, atomically reference-counted handle to a `T`. Cloning is cheap and hands back another owner;
 /// the value is freed exactly once, when the final handle is dropped.
+@no_const
 pub struct Arc<T> {
     ptr: *mut ArcInner<T>,
 }

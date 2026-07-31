@@ -214,7 +214,7 @@ fn add_node(ast: &mut Ast, n: Node) NodeId {
     return id;
 }
 
-fn ident_node(span: tok::Span) Node {
+const fn ident_node(span: tok::Span) Node {
     return Node {
         kind: NodeKind::NODE_IDENTIFIER,
         span: span,

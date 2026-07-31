@@ -43,7 +43,7 @@ pub struct Compiled {
 }
 
 extend Compiled {
-    pub fn ok(self: &Self) bool {
+    pub const fn ok(self: &Self) bool {
         return self.errors == 0;
     }
     // Whether the first error message contains `needle` (matched as a substring).
@@ -285,7 +285,7 @@ pub struct CompiledC {
 }
 
 extend CompiledC {
-    pub fn ok(self: &Self) bool {
+    pub const fn ok(self: &Self) bool {
         return self.errors == 0;
     }
     pub fn code_has(self: &Self, needle: str) bool {
@@ -384,7 +384,7 @@ pub struct RunResult {
 }
 
 extend RunResult {
-    pub fn ok(self: &Self) bool {
+    pub const fn ok(self: &Self) bool {
         return self.built && self.exit == 0;
     }
     pub fn out_has(self: &Self, needle: str) bool {

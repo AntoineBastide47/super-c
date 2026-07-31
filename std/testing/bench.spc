@@ -37,6 +37,7 @@ const DEFAULT_WARMUP: i32 = 1; // rounds run and discarded first
 
 /// One benchmark's driver: the loop condition, the clock, and the samples it collects. The runner makes one
 /// per `@bench` function; a benchmark only ever calls the methods below.
+@no_const
 pub struct Bencher {
     name: String,
     units: i64, // work units per round (`each`); 0 reports per round only
@@ -212,7 +213,7 @@ fn sort_secs(v: &mut Vector<f64>) {
     }
 }
 
-fn median_of(v: &Vector<f64>) f64 {
+const fn median_of(v: &Vector<f64>) f64 {
     let n = v.len();
     if n % 2 == 0 {
         return (v[n / 2 - 1] + v[n / 2]) / 2.0;

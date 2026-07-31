@@ -532,7 +532,7 @@ extend Package {
         return self.override_asts[mid as usize];
     }
 
-    pub fn clear_override(self: &mut Self, mid: ModuleId) {
+    pub const fn clear_override(self: &mut Self, mid: ModuleId) {
         if mid as usize < self.override_asts.len() {
             self.override_asts[mid as usize] = 0;
         }
@@ -1905,7 +1905,7 @@ struct MonoSeed {
 }
 
 // The generic function a MonoUse call site targets, or a null DefId.
-fn mono_callee(p: &Package, m: ModuleId, node: NodeId) DefId {
+const fn mono_callee(p: &Package, m: ModuleId, node: NodeId) DefId {
     let a = pkg_ast_c(p, m);
     if a.at_const(node).kind != NodeKind::NODE_CALL {
         return DefId { module: 0, node: NODE_NONE };
@@ -1919,7 +1919,7 @@ fn mono_callee(p: &Package, m: ModuleId, node: NodeId) DefId {
 }
 
 // Generic-parameter count of `fd`, or 0 when it is not a generic function.
-fn mono_generics(p: &Package, fd: DefId) NodeList {
+const fn mono_generics(p: &Package, fd: DefId) NodeList {
     let n = p.modules.len();
     if fd.node == NODE_NONE || fd.module as usize >= n || !p.modules[fd.module as usize].has_ast {
         return NodeList { start: 0, len: 0 };

@@ -505,7 +505,7 @@ fn install_bin(from: str, to: str) i32 {
 }
 
 /// Profile name to build with: the CLI `--profile` flag, else the manifest's default-profile.
-pub fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
+pub const fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
     if cli.len() != 0 {
         return cli;
     }

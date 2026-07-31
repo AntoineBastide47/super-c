@@ -24,6 +24,7 @@ pub enum SendResult<T> {
 }
 
 // The mutex-guarded state: a ring buffer of `cap` slots plus the live-handle counts and the closed flag.
+@no_const
 struct ChannelState<T> {
     pub slots: *mut T,
     pub cap: usize,
@@ -74,6 +75,7 @@ extend<T> ChannelState<T> as Free {
 
 // The shared channel: one mutex over the state, plus a condvar for "space freed" and one for "item ready".
 // Holds no raw pointer itself, so its `Free` is auto-derived (freeing the mutex frees the state above).
+@no_const
 struct ChannelInner<T> {
     pub state: sync::Mutex<ChannelState<T>>,
     pub not_full: sync::Condvar,
@@ -82,18 +84,21 @@ struct ChannelInner<T> {
 
 /// A bounded MPMC channel. Create it with `Channel::<T>::bounded(n)`, then hand out `sender()` / `receiver()`
 /// handles. The `Channel` value is only a factory: dropping it does not close the channel (its handles do).
+@no_const
 pub struct Channel<T> {
     pub inner: arc::Arc<ChannelInner<T>>,
 }
 
 /// A sending endpoint. Cloneable (each clone is another producer); the channel closes for receiving once the
 /// last one is dropped.
+@no_const
 pub struct Sender<T> {
     pub inner: arc::Arc<ChannelInner<T>>,
 }
 
 /// A receiving endpoint. Cloneable (each clone is another consumer); the channel closes for sending once the
 /// last one is dropped.
+@no_const
 pub struct Receiver<T> {
     pub inner: arc::Arc<ChannelInner<T>>,
 }

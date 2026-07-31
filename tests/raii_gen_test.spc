@@ -77,7 +77,7 @@ fn ap(b: *mut char, at: i32, cap: i32, s: *const char) i32 {
     return end;
 }
 
-fn id_need(op: i32) i32 {
+const fn id_need(op: i32) i32 {
     if op == OP_REASSIGN || op == OP_VPOP {
         return 2;
     }
@@ -233,7 +233,7 @@ fn new_gen() Gen {
 
 extend Gen {
     // Record one id byte into the expected-free multiset.
-    fn push_id(self: &mut Gen, id: i32) {
+    const fn push_id(self: &mut Gen, id: i32) {
         unsafe self.exp[self.eat as usize] = id as char;
         self.eat = self.eat + 1;
         unsafe self.exp[self.eat as usize] = 0 as char;
@@ -428,7 +428,7 @@ extend Gen {
 }
 
 // The argument list a scenario call takes: COND variants pass a bool flag; everything else is nullary.
-fn callarg(op: i32) *const char {
+const fn callarg(op: i32) *const char {
     if op == OP_COND_T {
         return "true".ptr() as *const char;
     }
