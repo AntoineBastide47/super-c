@@ -707,6 +707,7 @@ struct BuildOpts<'a> {
     pub profile: str<'a>, // --profile=NAME (default: manifest default-profile)
     pub out_dir: str<'a>, // --out-dir=PATH: override the manifest's out-dir
     pub cstd: str<'a>, // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
+    pub cc: str<'a>, // --cc=BIN: override the C compiler (else manifest `cc`, else $CC, else cc)
     pub jobs: u32, // --jobs=N (0 = manifest / core count)
 }
 
@@ -717,6 +718,8 @@ fn build_flag(o: &mut BuildOpts, co: &mut CommonOpts, arg: str) bool {
         o.out_dir = arg[10..];
     } else if arg.starts_with("--cstd=") {
         o.cstd = arg[7..];
+    } else if arg.starts_with("--cc=") {
+        o.cc = arg[5..];
     } else if arg.starts_with("--jobs=") {
         let v = unsafe stdlib::atoi((&arg[7]) as *const char);
         if v < 1 {
@@ -754,7 +757,7 @@ fn main(argv: Vector<str>) i32 {
         lint: true,
         bad: false,
     };
-    let mut bo = BuildOpts { profile: "", out_dir: "", cstd: "", jobs: 0 };
+    let mut bo = BuildOpts { profile: "", out_dir: "", cstd: "", cc: "", jobs: 0 };
 
     let mut i: usize = if mode == Mode::MODE_DEFAULT {
         1usize;
@@ -960,6 +963,7 @@ OPTIONS:
     --out-dir=D            output directory (default: build)
     --jobs=N               parallel C compile jobs (default: one per core)
     --cstd=F               C standard passed to the C compiler
+    --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
     --target=T             cross-compilation target: windows|macos|linux
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
@@ -1077,78 +1081,26 @@ OPTIONS:
             if cstd.len() != 0 {
                 man.cstd = String::from_str(cstd);
             }
+            if bo.cc.len() != 0 {
+                man.cc = String::from_str(bo.cc);
+            }
             if mode == Mode::MODE_CLEAN {
-                rc = if bsys::command_overrides(&man, "clean") {
-                    bsys::manifest_run(
-                        &man,
-                        "clean",
-                        profile,
-                        jobs,
-                        std_dir,
-                        ce_steps,
-                        ce_mem,
-                        target,
-                        bootstrap_tags,
-                        lint,
-                    );
-                } else {
-                    bsys::manifest_clean(&man);
-                };
+                rc = bsys::manifest_clean(&man);
             } else if mode == Mode::MODE_TEST {
-                if bsys::command_overrides(&man, "test") {
-                    rc = bsys::manifest_run(
-                        &man,
-                        "test",
-                        profile,
-                        jobs,
-                        std_dir,
-                        ce_steps,
-                        ce_mem,
-                        target,
-                        bootstrap_tags,
-                        lint,
-                    );
-                } else {
-                    topts.enabled = true;
-                    rc = bsys::manifest_test(
-                        &man,
-                        profile,
-                        jobs,
-                        &topts,
-                        std_dir,
-                        ce_steps,
-                        ce_mem,
-                        target,
-                        bootstrap_tags,
-                    );
-                }
+                topts.enabled = true;
+                rc = bsys::manifest_test(&man, profile, jobs, &topts, std_dir, ce_steps, ce_mem, target, bootstrap_tags);
             } else if mode == Mode::MODE_BENCH {
-                rc = if bsys::command_overrides(&man, "bench") {
-                    bsys::manifest_run(
-                        &man,
-                        "bench",
-                        profile,
-                        jobs,
-                        std_dir,
-                        ce_steps,
-                        ce_mem,
-                        target,
-                        bootstrap_tags,
-                        lint,
-                    );
-                } else {
-                    bsys::manifest_bench(
-                        &man,
-                        profile,
-                        bench_norun,
-                        jobs,
-                        std_dir,
-                        ce_steps,
-                        ce_mem,
-                        target,
-                        bootstrap_tags,
-                    );
-                };
+                rc = bsys::manifest_bench(
+                    &man,
+                    profile,
+                    bench_norun,
+                    jobs,
+                    std_dir,
+                    ce_steps,
+                    ce_mem,
+                    target,
+                    bootstrap_tags,
+                );
             } else if mode == Mode::MODE_COMMAND {
                 rc = bsys::manifest_run(
                     &man,
@@ -1163,39 +1115,11 @@ OPTIONS:
                     lint,
                 );
             } else if mode == Mode::MODE_RUN {
-                // cargo run: a [command.run] override wins; otherwise build the manifest binary and exec it.
-                rc = if bsys::command_overrides(&man, "run") {
-                    bsys::manifest_run(
-                        &man,
-                        "run",
-                        profile,
-                        jobs,
-                        std_dir,
-                        ce_steps,
-                        ce_mem,
-                        target,
-                        bootstrap_tags,
-                        lint,
-                    );
-                } else {
-                    bsys::manifest_run_bin(
-                        &man,
-                        profile,
-                        out_bin,
-                        jobs,
-                        std_dir,
-                        ce_steps,
-                        ce_mem,
-                        target,
-                        bootstrap_tags,
-                        lint,
-                    );
-                };
-            } else if bsys::command_overrides(&man, "build") {
-                rc = bsys::manifest_run(
+                // cargo run: build the manifest binary and exec it
+                rc = bsys::manifest_run_bin(
                     &man,
-                    "build",
                     profile,
+                    out_bin,
                     jobs,
                     std_dir,
                     ce_steps,

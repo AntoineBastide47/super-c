@@ -21,7 +21,8 @@ extend Profile as Free {
     }
 }
 
-/// One [command.NAME] for `super-c run`: shell lines executed in order, stopping at the first failure.
+/// One [command.NAME] for `super-c command <name>`: shell lines executed in order, stopping at the
+/// first failure. Built-in subcommand names are reserved -- a command can never shadow one.
 pub struct Command<'a> {
     pub name: str<'a>,
     pub run: Vector<String>,
@@ -48,6 +49,8 @@ pub struct Manifest<'a> {
     pub bin: String,
     pub root: String,
     pub out_dir: String,
+    pub test_dir: String, // where `super-c test` discovers the suite (default "tests")
+    pub bench_dir: String, // where `super-c bench` discovers '@bench' functions (default "bench")
     pub cc: String,
     pub cstd: String,
     pub cflags: Vector<String>,
@@ -67,6 +70,8 @@ extend Manifest as Free {
         self.bin.free();
         self.root.free();
         self.out_dir.free();
+        self.test_dir.free();
+        self.bench_dir.free();
         self.cc.free();
         self.cstd.free();
         self.cflags.free();
@@ -85,6 +90,8 @@ extend Manifest {
             bin: String::new(),
             root: String::new(),
             out_dir: String::new(),
+            test_dir: String::new(),
+            bench_dir: String::new(),
             cc: String::new(),
             cstd: String::new(),
             cflags: Vector::<String>::new(),
@@ -219,6 +226,33 @@ fn take_arr(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut Vector<Strin
     }
 }
 
+// A convention directory (`test-dir` / `bench-dir`) becomes a module-path prefix of the generated
+// roots, so it must stay a plain workspace-relative path: strip a trailing '/', reject absolute
+// paths and '..' segments.
+fn norm_conv_dir(dir: &mut String, key: str, errs: &mut diag::Errors) {
+    while dir.len() > 1 && dir.as_str()[dir.len() - 1] == b'/' {
+        dir.truncate(dir.len() - 1);
+    }
+    let s = dir.as_str();
+    let mut bad = s.len() == 0 || s[0] == b'/';
+    for i in 0..s.len() {
+        if s[i] == b'.' && i + 1 < s.len() && s[i + 1] == b'.' {
+            bad = true;
+        }
+        if s[i] == b'\\' {
+            bad = true;
+        }
+    }
+    if bad {
+        errs.emit(0, 1, format("'{}' must be a plain workspace-relative directory, got '{}'", key, s));
+    }
+}
+
+// The `super-c` subcommand names: reserved, so a `[command.NAME]` can never shadow one.
+fn is_builtin_command(name: str) bool {
+    return name == "build" || name == "release" || name == "fmt" || name == "lint" || name == "run" || name == "command" || name == "clean" || name == "test" || name == "bench" || name == "lsp";
+}
+
 fn set_str(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut String) {
     if it.val.kind != toml::TV_STR {
         errs.emit(it.at, it.key.len() as u32, format("'{}' expects a string", it.key.as_str()));
@@ -253,6 +287,7 @@ pub fn load(path: str) Option<Manifest> {
     let mut m = Manifest::new();
     let items = items_opt.unwrap();
     let mut errs = diag::Errors::new();
+    let mut rejected = Vector::<String>::new(); // [command.<builtin>] sections already reported
     for x in 0..items.len() {
         let it = items.at(x);
         let sec = it.section.as_str();
@@ -264,6 +299,10 @@ pub fn load(path: str) Option<Manifest> {
                 set_str(it, &mut errs, &mut m.root);
             } else if key == "out-dir" {
                 set_str(it, &mut errs, &mut m.out_dir);
+            } else if key == "test-dir" {
+                set_str(it, &mut errs, &mut m.test_dir);
+            } else if key == "bench-dir" {
+                set_str(it, &mut errs, &mut m.bench_dir);
             } else if key == "cc" {
                 set_str(it, &mut errs, &mut m.cc);
             } else if key == "cstd" {
@@ -322,6 +361,28 @@ pub fn load(path: str) Option<Manifest> {
             }
         } else if sec.starts_with("command.") && sec.len() > 8 {
             let name = sec.slice(8, sec.len());
+            // A built-in subcommand cannot be overridden: a `[command.build]` that shadows `build`
+            // makes every invocation mean something else per project. Custom names only.
+            if is_builtin_command(name) {
+                let mut seen = false;
+                for r in 0..rejected.len() {
+                    if rejected.at(r).as_str() == name {
+                        seen = true;
+                    }
+                }
+                if !seen {
+                    rejected.push(String::from_str(name));
+                    errs.emit(
+                        it.at,
+                        sec.len() as u32,
+                        format(
+                            "'{}' is a built-in subcommand and cannot be overridden; pick another command name",
+                            name,
+                        ),
+                    );
+                }
+                continue;
+            }
             let mut ci = m.command_index(name);
             if ci < 0 {
                 m.commands.push(
@@ -362,6 +423,14 @@ pub fn load(path: str) Option<Manifest> {
     if m.out_dir.len() == 0 {
         m.out_dir.push_str("build");
     }
+    if m.test_dir.len() == 0 {
+        m.test_dir.push_str("tests");
+    }
+    if m.bench_dir.len() == 0 {
+        m.bench_dir.push_str("bench");
+    }
+    norm_conv_dir(&mut m.test_dir, "test-dir", &mut errs);
+    norm_conv_dir(&mut m.bench_dir, "bench-dir", &mut errs);
     if m.cstd.len() == 0 {
         m.cstd.push_str("-std=c11 -D_POSIX_C_SOURCE=200809L");
     }

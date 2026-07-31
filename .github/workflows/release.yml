@@ -224,7 +224,7 @@ jobs:
           bin="super-c${BINEXT:-}"
           boot="./super-c-boot${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_CMD=1 SC_LEAK_CHECK=fatal "$boot" build --bootstrap-tags ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "$boot" build --bootstrap-tags ${cstd:+"$cstd"}
           # Compatibility with a bootstrap older than the `.exe` naming fix: it links the manifest's `bin`
           # verbatim, so on Windows it produces an extensionless PE that nothing can launch. Every step
           # after this one is built by the compiler we just made, which names it correctly. Drop this once
@@ -249,7 +249,7 @@ jobs:
           bin="super-c${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           # 2) release build, by the binary step 1 produced, over itself
-          SC_CMD=1 SC_LEAK_CHECK=fatal "./$bin" release ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" release ${cstd:+"$cstd"}
           test -x "./$bin"
           if [ "${{ runner.os }}" != Windows ]; then file "./$bin"; fi
 

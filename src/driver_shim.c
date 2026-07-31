@@ -358,8 +358,7 @@ int sc_rename(const char *from, const char *to) {
 #endif
 }
 
-/* Environment write for the build system (SUPERC for the test harness, SC_CMD for nested manifest-command
-   invocations). */
+/* Environment write for the build system (SUPERC points the test harness at the freshly built compiler). */
 int sc_setenv(const char *name, const char *value) {
 #if defined(_WIN32)
   return _putenv_s(name, value);

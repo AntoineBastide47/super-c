@@ -51,8 +51,7 @@ rm -f "$racelog" ./tsan-smoke
 
 # 4) Bootstrap from the latest release binary; any failure fails the check.
 # Stage 0: the release binary builds current source via the legacy `build <root> -o` path (works
-# even for a pre-build-system release). Stage 0 then rebuilds itself through the engine (SC_CMD=1
-# bypasses the [command.build] bootstrap override, whose lines would point at the wrong binary) --
+# even for a pre-build-system release). Stage 0 then rebuilds itself through the engine --
 # two generations from current source, the same guarantee the Makefile's SELF-BUILD gave.
 printf 'check: bootstrap rebuild from the latest release\n'
 tmp=$(mktemp -d)
@@ -68,7 +67,7 @@ if ! ./super-c build --bootstrap-tags -o stage0-super-c src/main.spc; then
     printf 'check: FAILED -- the release binary cannot build the current source\n' >&2
     exit 1
 fi
-if ! SC_CMD=1 SC_LEAK_CHECK=fatal ./stage0-super-c build; then
+if ! SC_LEAK_CHECK=fatal ./stage0-super-c build; then
     rm -f stage0-super-c
     printf 'check: FAILED -- two-stage rebuild from the release bootstrap broke (see build output above)\n' >&2
     exit 1
