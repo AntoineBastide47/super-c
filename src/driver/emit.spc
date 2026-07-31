@@ -228,7 +228,9 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     p.lint_errs = p.lint_errs + r.errors.errors.len() as u32;
     if fixes != null {
         for k in 0..r.errors.fixes.len() {
-            fixes.push(r.errors.fixes[k]);
+            let mut f = r.errors.fixes[k];
+            f.module = i as u32;
+            fixes.push(f);
         }
     }
     let back = r.take_ast();
@@ -272,6 +274,7 @@ fn typecheck_module(
             if f.text != 0xFFFFFFFF {
                 f.text = f.text + base;
             }
+            f.module = i as u32;
             fixes.push(f);
         }
         if ftexts != null {
@@ -468,14 +471,28 @@ fn lint_owner(ents: &Vector<LintEnt>, pos: u32) i64 {
     return -1;
 }
 
+// Whether module `m` is in this lint run's reported set: the batch mask when present (multi-file
+// `lint` sharing one package), else `only_mod` (single-file lint), else every non-prelude module.
+fn lint_reported(p: &loader::Package, m: usize, only_mod: i32) bool {
+    if p.lint_set.len() != 0 {
+        return p.lint_set[m];
+    }
+    if only_mod >= 0 {
+        return m == only_mod as usize;
+    }
+    return !p.modules[m].prelude;
+}
+
+// Every batch-linted module is a lint root of its own (per-file parity: lint_one loads each file as
+// module 0), so its `main` keeps the entry-point exemption there too.
+fn lint_root_mod(p: &loader::Package, m: usize) bool {
+    return m == 0 || p.lint_set.len() != 0 && p.lint_set[m];
+}
+
 fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut Vector<LintEnt>) {
     let a = mod_ast_c(p, m as ModuleId);
     // items of a module reported this run are candidates; everything else roots the graph
-    let reported = if only_mod >= 0 {
-        m == only_mod as usize;
-    } else {
-        !p.modules[m].prelude;
-    };
+    let reported = lint_reported(p, m, only_mod);
     let src = p.modules[m].source.as_str();
     let items = unsafe a.at_const(a.root).as_data.program.items;
     for i in 0..items.len {
@@ -503,7 +520,7 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
         }
         let mut root = !(reported && lint_item_candidate(a, iid, false));
         // `main` in the root module is the program entry: never reported, always a root
-        if !root && m == 0 && it.kind == NodeKind::NODE_FUNCTION {
+        if !root && lint_root_mod(p, m) && it.kind == NodeKind::NODE_FUNCTION {
             let nsp = a.at_const(it.as_data.function.name).as_data.name.text;
             if diag::span_str(src, nsp.start, nsp.end) == "main" {
                 root = true;
@@ -605,9 +622,18 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
     for i in 0..total {
         used.push(false);
     }
-    // Prelude modules only participate when the linted module IS prelude (std lint invocation): the
+    // Prelude modules only participate when a linted module IS prelude (std lint invocation): the
     // prelude never references user code, and std cross-references must count when linting std itself.
-    let inc_prelude = only_mod >= 0 && p.modules[only_mod as usize].prelude;
+    let mut inc_prelude = false;
+    if p.lint_set.len() != 0 {
+        for m in 0..nm {
+            if p.lint_set[m] && p.modules[m].prelude {
+                inc_prelude = true;
+            }
+        }
+    } else {
+        inc_prelude = only_mod >= 0 && p.modules[only_mod as usize].prelude;
+    }
     let mut ents = Vector::<Vector<LintEnt>>::new();
     for m in 0..nm {
         let mut e = Vector::<LintEnt>::new();
@@ -686,7 +712,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         }
     }
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
+        if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
             continue;
         }
         let a = mod_ast_c(p, m as ModuleId);
@@ -701,11 +727,11 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
                 for j in 0..ms.len {
                     let mid = unsafe a.list(ms)[j as usize];
                     if lint_item_candidate(a, mid, in_iface) && !used[starts[m] + mid as usize] {
-                        lint_report_item(p, &mut errs, a, m as ModuleId, mid, m == 0);
+                        lint_report_item(p, &mut errs, a, m as ModuleId, mid, lint_root_mod(p, m));
                     }
                 }
             } else if lint_item_candidate(a, iid, false) && !used[starts[m] + iid as usize] {
-                lint_report_item(p, &mut errs, a, m as ModuleId, iid, m == 0);
+                lint_report_item(p, &mut errs, a, m as ModuleId, iid, lint_root_mod(p, m));
             }
         }
         if errs.has_warnings() {
@@ -793,7 +819,7 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     }
     let src = p.modules[m].source.as_str();
     let nsp = a.at_const(f.name).as_data.name.text;
-    if m == 0 && diag::span_str(src, nsp.start, nsp.end) == "main" {
+    if lint_root_mod(p, m) && diag::span_str(src, nsp.start, nsp.end) == "main" {
         return;
     }
     let cev = p.ceval as *mut ce::ConstEval;
@@ -819,7 +845,7 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
         return;
     }
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+        if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
         let a = mod_ast_c(p, m as ModuleId);
@@ -839,7 +865,9 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
         }
         if fixes != null {
             for k in 0..errs.fixes.len() {
-                fixes.push(errs.fixes[k]);
+                let mut f = errs.fixes[k];
+                f.module = m as u32;
+                fixes.push(f);
             }
         }
         if errs.has_warnings() {
@@ -896,7 +924,7 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
 fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
     let nm = p.modules.len();
     for m in 0..nm {
-        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+        if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
         let a = mod_ast_c(p, m as ModuleId);
@@ -950,7 +978,9 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 
         if fixes != null {
             for k in 0..errs.fixes.len() {
-                fixes.push(errs.fixes[k]);
+                let mut f = errs.fixes[k];
+                f.module = m as u32;
+                fixes.push(f);
             }
         }
         if errs.has_warnings() {
@@ -1034,7 +1064,7 @@ fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
         return;
     }
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+        if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
         let a = mod_ast_c(p, m as ModuleId);
@@ -1117,7 +1147,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
         }
     }
     for m in 0..nm {
-        if !p.modules[m].has_ast || p.modules[m].prelude || only_mod >= 0 && m != only_mod as usize {
+        if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
         let a = mod_ast_c(p, m as ModuleId);
@@ -1203,7 +1233,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
 
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast || only_mod >= 0 && m != only_mod as usize || only_mod < 0 && p.modules[m].prelude {
+        if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
             continue;
         }
         let mut errs = diag::Errors::new();
@@ -1217,9 +1247,11 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
 }
 
 /// `super-c lint`: resolve + typecheck + borrowck the whole closure with lints enabled for module
-/// `lint_mod` only (each listed path is its own invocation, so shared imports don't warn twice), then the
-/// report-only passes restricted to it. No code is emitted. Returns 0 only when clean -- any error or
-/// remaining warning returns 1. `fixes != null` (`lint --fix`) collects machine fixes instead of printing.
+/// `lint_mod` only -- or, when `p.lint_set` is non-empty, for every module in that mask (the batch
+/// driver loads all listed files into ONE package; each module still warns exactly once) -- then the
+/// report-only passes restricted to the same set. No code is emitted. Returns 0 only when clean -- any
+/// error or remaining warning returns 1. `fixes != null` (`lint --fix`) collects machine fixes instead
+/// of printing.
 pub fn lint_package(
     p: &mut loader::Package,
     target: i32,
@@ -1231,24 +1263,26 @@ pub fn lint_package(
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
-        let fx = if i == lint_mod {
+        let sel = lint_reported(p, i, lint_mod as i32);
+        let fx = if sel {
             fixes;
         } else {
             null;
         };
-        let ok = resolve_module(p, i, i == lint_mod, fx);
+        let ok = resolve_module(p, i, sel, fx);
         p.ok = ok && p.ok;
     }
     if !p.ok {
         return 1;
     }
     for i in 0..n {
-        let fx = if i == lint_mod {
+        let sel = lint_reported(p, i, lint_mod as i32);
+        let fx = if sel {
             fixes;
         } else {
             null;
         };
-        let ok = typecheck_module(p, i, i == lint_mod, fx, ftexts);
+        let ok = typecheck_module(p, i, sel, fx, ftexts);
         p.ok = ok && p.ok;
     }
     if !p.ok {

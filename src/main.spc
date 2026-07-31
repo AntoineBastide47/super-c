@@ -387,7 +387,8 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
     return lint_one(path, root, std_dir, ce_steps, ce_mem, target, false, sc);
 }
 
-fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
+// Collect every .spc under `dir` recursively (dir_entries order, matching lint_dir's walk).
+fn lint_collect(dir: str, files: &mut Vector<String>) i32 {
     let eo = dir_entries(dir);
     if eo.is_none() {
         eprintln("lint: cannot read directory '{}'", dir);
@@ -399,18 +400,167 @@ fn lint_dir(dir: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u6
         let mut p = String::from_str(dir);
         p.push_byte(b'/');
         p.push_string(names.at(i));
-        let isdir = unsafe shim::sc_stat_isdir(p.cstr());
-        if isdir == 1 {
-            if lint_dir(p.as_str(), root, std_dir, ce_steps, ce_mem, target, fix, sc) != 0 {
+        if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
+            if lint_collect(p.as_str(), files) != 0 {
                 rc = 1;
             }
         } else if names.at(i).as_str().ends_with(".spc") {
-            if lint_one(p.as_str(), root, std_dir, ce_steps, ce_mem, target, fix, sc) != 0 {
-                rc = 1;
-            }
+            files.push(p);
         }
     }
     return rc;
+}
+
+// A listed file's canonical module path: relative to the alt root when under it (the spelling manifest
+// imports must use -- the alt root has no index form), else to the package root, `/` -> `::`. A
+// root-level index file (<root>/x/x.spc with no <root>/x.spc beside it) collapses to `x`, mirroring
+// module_index_path, so imports of it dedup against the listed copy.
+fn lint_mod_path(file: str, root: str, alt: str) String {
+    let mut rel = file;
+    if rel.len() > 2 && rel.byte_at(0) == b'.' && rel.byte_at(1) == b'/' {
+        rel = rel.slice(2, rel.len());
+    }
+    if alt.len() != 0 && rel.len() > alt.len() && rel.starts_with(alt) && rel.byte_at(alt.len()) == b'/' {
+        rel = rel.slice(alt.len() + 1, rel.len());
+    } else if root.len() > 1 && rel.len() > root.len() && rel.starts_with(root) && rel.byte_at(root.len()) == b'/' {
+        rel = rel.slice(root.len() + 1, rel.len());
+    }
+    let mut end = rel.len();
+    if rel.ends_with(".spc") {
+        end = end - 4;
+    }
+    let mut ls: i64 = -1;
+    let mut pv: i64 = -1;
+    for i in 0..end {
+        if rel.byte_at(i) == b'/' {
+            pv = ls;
+            ls = i as i64;
+        }
+    }
+    if ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice(pv as usize + 1, ls as usize) {
+        let mut sib = String::from_str(file.slice(0, file.len() - rel.len() + ls as usize));
+        sib.push_str(".spc");
+        let sf = stdio::fopen(sib.as_str(), "rb");
+        if sf == null {
+            end = ls as usize;
+        } else {
+            unsafe stdio::fclose(sf);
+        }
+    }
+    let mut out = String::new();
+    for i in 0..end {
+        if rel.byte_at(i) == b'/' {
+            out.push_str("::");
+        } else {
+            out.push_byte(rel.byte_at(i));
+        }
+    }
+    return out;
+}
+
+// One-package load for the batch: prelude first (so std/ffi files keep their prelude identity), then
+// each listed file joins the closure once, marked in lint_set.
+fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: *const char, target: i32) loader::Package {
+    let mut p = loader::package_load_prelude(root, alt, std_dir, target);
+    let mut mids = Vector::<i32>::new();
+    for k in 0..files.len() {
+        let mut fc = String::from_str(files.at(k).as_str());
+        // already present? (a prelude module, or pulled in by an earlier file's imports)
+        let mut mid: i32 = -1;
+        for m in 0..p.modules.len() {
+            if p.modules[m].has_ast && unsafe shim::sc_same_file(fc.cstr(), p.modules[m].file.cstr()) == 1 {
+                mid = m as i32;
+                break;
+            }
+        }
+        if mid < 0 {
+            let mp = lint_mod_path(files.at(k).as_str(), root, alt);
+            mid = p.load_module(mp.as_str(), files.at(k).as_str(), false, target);
+        }
+        mids.push(mid);
+    }
+    let mut set = Vector::<bool>::new();
+    for m in 0..p.modules.len() {
+        set.push(false);
+    }
+    for k in 0..mids.len() {
+        if mids[k] >= 0 {
+            set.set(mids[k] as usize, true);
+        }
+    }
+    p.lint_set = set;
+    return p;
+}
+
+// Batch lint: ONE package shared by every listed file, and the pipeline runs once with the listed
+// modules masked in lint_set. Replaces the per-file full-closure reload, which was quadratic in project
+// size. `--fix` runs the same quiet fixpoint as lint_one -- one package per round, every module's fixes
+// applied together (LintFix.module groups them) -- with the same reject rule: nothing is written while
+// the package has an error a machine fix cannot repair.
+fn lint_batch(
+    files: &Vector<String>,
+    root: str,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    fix: bool,
+    sc: bool,
+) i32 {
+    let alt = lint_alt();
+    let mut pass = 0;
+    loop {
+        let mut p = lint_load_batch(files, root, alt, std_dir, target);
+        if !p.ok {
+            return 1;
+        }
+        let pkg = (&mut p) as *mut loader::Package;
+        let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
+        p.ceval = &mut ceval;
+        if !fix {
+            return lint_package(&mut p, target, 0, null, null, sc);
+        }
+        let mut fixes = Vector::<diag::LintFix>::new();
+        let mut ftexts = Vector::<String>::new();
+        lint_package(&mut p, target, 0, &mut fixes, &mut ftexts, sc);
+        let errors = !p.ok && !(p.lint_errs != 0 && p.lint_errs == p.lint_fixable);
+        let mut applied = false;
+        let mut werr = false;
+        if !errors && fixes.len() != 0 && pass < 8 {
+            for m in 0..p.modules.len() {
+                let mut mf = Vector::<diag::LintFix>::new();
+                for k in 0..fixes.len() {
+                    if fixes[k].module as usize == m {
+                        mf.push(fixes[k]);
+                    }
+                }
+                if mf.len() == 0 {
+                    continue;
+                }
+                let out = apply_lint_fixes(p.modules[m].source.as_str(), &mut mf, &ftexts);
+                let f = stdio::fopen(p.modules[m].file.as_str(), "wb");
+                if f == null {
+                    eprintln("lint: cannot write '{}'", p.modules[m].file.as_str());
+                    werr = true;
+                } else {
+                    unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), f);
+                    unsafe stdio::fclose(f);
+                    // reformat before re-linting: canonicalization can unlock paren-guarded fixes
+                    fmt_one(p.modules[m].file.as_str(), false, true, false);
+                    applied = true;
+                }
+            }
+        }
+        if errors || werr {
+            return 1;
+        }
+        if !applied {
+            break;
+        }
+        pass = pass + 1;
+    }
+    // a final plain pass prints what remains and sets the exit code
+    return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc);
 }
 
 fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
@@ -421,7 +571,14 @@ fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target:
         } else {
             path;
         };
-        return lint_dir(path, droot, std_dir, ce_steps, ce_mem, target, fix, sc);
+        let mut files = Vector::<String>::new();
+        let crc = lint_collect(path, &mut files);
+        let brc = lint_batch(&files, droot, std_dir, ce_steps, ce_mem, target, fix, sc);
+        return if crc != 0 || brc != 0 {
+            1;
+        } else {
+            0;
+        };
     }
     let froot = if lint_alt().len() != 0 {
         ".";
@@ -898,9 +1055,28 @@ OPTIONS:
     let std_dir = exe_std_dir(arg0);
     if mode == Mode::MODE_LINT {
         let mut rc = 0;
-        for k in 0..paths.len() {
-            if run_lint(paths.at(k).as_str(), std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
+        if lint_alt().len() != 0 {
+            // Manifest layout: every path resolves against the project root, so ALL listed paths share
+            // one closure -- collect them into a single package and run the pipeline once.
+            let mut files = Vector::<String>::new();
+            for k in 0..paths.len() {
+                let pa = paths.at(k).as_str();
+                if unsafe shim::sc_stat_isdir(pa.ptr() as *const char) == 1 {
+                    if lint_collect(pa, &mut files) != 0 {
+                        rc = 1;
+                    }
+                } else {
+                    files.push(String::from_str(pa));
+                }
+            }
+            if files.len() != 0 && lint_batch(&files, ".", std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
                 rc = 1;
+            }
+        } else {
+            for k in 0..paths.len() {
+                if run_lint(paths.at(k).as_str(), std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
+                    rc = 1;
+                }
             }
         }
         if std_dir != null {

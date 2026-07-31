@@ -104,6 +104,9 @@ pub struct Package {
     pub lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
     pub lint_errs: u32, // total errors across the lint pipeline stages
     pub lint_fixable: u32, // errors carrying a machine fix; `lint --fix` proceeds when lint_errs == lint_fixable
+    /// Batch-lint module mask (`super-c lint` over many files sharing ONE package): when non-empty,
+    /// the lint passes report exactly the modules set here instead of the only_mod/prelude filter.
+    pub lint_set: Vector<bool>,
     /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
     /// (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
@@ -477,6 +480,7 @@ extend Package {
             tok_scratch: Vector::<tok::Token>::new(),
             cg_scratch: String::new(),
             dir_cache: DirCache::new(),
+            lint_set: Vector::<bool>::new(),
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
         };
@@ -691,7 +695,7 @@ extend Package {
         }
     }
 
-    fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
+    pub fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
         let existing = self.find(mod_path);
         if existing >= 0 {
             return existing;
@@ -1318,6 +1322,7 @@ extend Package as Free {
         self.tok_scratch.free();
         self.cg_scratch.free();
         self.dir_cache.free();
+        self.lint_set.free();
         self.overlay_files.free();
         self.overlay_texts.free();
     }
@@ -2319,6 +2324,21 @@ pub fn package_load_overlaid(
     let rp = stem_of(root_file);
     let rf = String::from_str(root_file);
     p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
+    load_prelude(&mut p, std_dir, target);
+    p.seed_core();
+    return p;
+}
+
+/// Prelude-only package (import roots set, no root module): the batch `lint` driver load_module's each
+/// listed file into it afterwards, so every file shares one closure instead of reloading its own.
+pub fn package_load_prelude(root_dir: str, alt_dir: str, std_dir: *const char, target: i32) Package {
+    let mut p = Package::new();
+    p.ok = true;
+    p.root_dir = String::from_str(root_dir);
+    p.alt_root = String::from_str(alt_dir);
+    if std_dir != null {
+        p.std_root = dir_of(str::from_cstr(std_dir));
+    }
     load_prelude(&mut p, std_dir, target);
     p.seed_core();
     return p;

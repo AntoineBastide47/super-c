@@ -22,6 +22,7 @@ pub struct LintFix {
     pub kind: u8,
     pub warn: u32, // index into `warns`; 0xFFFFFFFF = unattached
     pub text: u32, // index into `fix_texts` (kind 3); 0xFFFFFFFF = none
+    pub module: u32, // owning ModuleId, stamped when fixes drain into the driver's shared vector (0 inside Errors)
 }
 
 /// Diagnostic accumulator for one source buffer. Messages are raw until `finalize` rewrites them into
