@@ -42,7 +42,7 @@
         "superc.serverPath": {
           "type": "string",
           "default": "super-c",
-          "description": "Path to the super-c binary (the language server runs as `super-c lsp`)."
+          "description": "Path to the super-c binary (the language server runs as `super-c lsp`). When unset, the extension discovers one: the workspace's <out-dir>/release/super-c (sanitizer-free) first, then the workspace-root super-c, then PATH."
         },
         "superc.trace.server": {
           "type": "string",

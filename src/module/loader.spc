@@ -2329,11 +2329,21 @@ pub fn package_load_overlaid(
     return p;
 }
 
-/// Prelude-only package (import roots set, no root module): the batch `lint` driver load_module's each
-/// listed file into it afterwards, so every file shares one closure instead of reloading its own.
-pub fn package_load_prelude(root_dir: str, alt_dir: str, std_dir: *const char, target: i32) Package {
+/// Prelude-only package (import roots set, no root module): the batch `lint` driver and the LSP's
+/// workspace batch load_module each listed file into it afterwards, so every file shares one closure
+/// instead of reloading its own. Takes ownership of the overlay vectors (empty for CLI use).
+pub fn package_load_prelude(
+    root_dir: str,
+    alt_dir: str,
+    std_dir: *const char,
+    target: i32,
+    overlay_files: Vector<String>,
+    overlay_texts: Vector<String>,
+) Package {
     let mut p = Package::new();
     p.ok = true;
+    p.overlay_files = overlay_files;
+    p.overlay_texts = overlay_texts;
     p.root_dir = String::from_str(root_dir);
     p.alt_root = String::from_str(alt_dir);
     if std_dir != null {
@@ -2342,6 +2352,53 @@ pub fn package_load_prelude(root_dir: str, alt_dir: str, std_dir: *const char, t
     load_prelude(&mut p, std_dir, target);
     p.seed_core();
     return p;
+}
+
+/// A batch-listed file's canonical module path: relative to the alt root when under it (the spelling
+/// manifest imports must use -- the alt root has no index form), else to the package root, `/` -> `::`.
+/// A root-level index file (<root>/x/x.spc with no <root>/x.spc beside it) collapses to `x`, mirroring
+/// module_index_path, so imports of it dedup against the listed copy.
+pub fn batch_mod_path(file: str, root: str, alt: str) String {
+    let mut rel = file;
+    if rel.len() > 2 && rel.byte_at(0) == b'.' && rel.byte_at(1) == b'/' {
+        rel = rel.slice(2, rel.len());
+    }
+    if alt.len() != 0 && rel.len() > alt.len() && rel.starts_with(alt) && rel.byte_at(alt.len()) == b'/' {
+        rel = rel.slice(alt.len() + 1, rel.len());
+    } else if root.len() > 1 && rel.len() > root.len() && rel.starts_with(root) && rel.byte_at(root.len()) == b'/' {
+        rel = rel.slice(root.len() + 1, rel.len());
+    }
+    let mut end = rel.len();
+    if rel.ends_with(".spc") {
+        end = end - 4;
+    }
+    let mut ls: i64 = -1;
+    let mut pv: i64 = -1;
+    for i in 0..end {
+        if rel.byte_at(i) == b'/' {
+            pv = ls;
+            ls = i as i64;
+        }
+    }
+    if ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice(pv as usize + 1, ls as usize) {
+        let mut sib = String::from_str(file.slice(0, file.len() - rel.len() + ls as usize));
+        sib.push_str(".spc");
+        let sf = stdio::fopen(sib.as_str(), "rb");
+        if sf == null {
+            end = ls as usize;
+        } else {
+            unsafe stdio::fclose(sf);
+        }
+    }
+    let mut out = String::new();
+    for i in 0..end {
+        if rel.byte_at(i) == b'/' {
+            out.push_str("::");
+        } else {
+            out.push_byte(rel.byte_at(i));
+        }
+    }
+    return out;
 }
 
 /// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import

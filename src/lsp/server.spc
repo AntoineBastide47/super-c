@@ -33,14 +33,16 @@ extend Doc as Free {
 }
 
 /// One compiled unit: the manifest root (build.toml's entry), a per-file root for an open doc outside
-/// the manifest closure, or a workspace-sweep root for a closed .spc no package owns (both mirror the
-/// `super-c lint <file>` rooting).
+/// the manifest closure, or THE workspace-batch root (sweep=true, origin "") -- ONE shared package for
+/// every closed .spc no other package owns, the `super-c lint` one-package recipe. The batch replaced
+/// the per-file sweep roots, whose per-file prelude + closure copies held ~1 GB on this repo.
 pub struct Root {
     pub root_file: String,
     pub root_dir: String,
     pub alt_dir: String,
-    pub origin: String, // "" for the manifest root; the file path that spawned a per-file/sweep root
-    pub sweep: bool, // workspace-sweep root: kept while its file exists, rebuilt only while open
+    pub origin: String, // "" for the manifest/batch roots; the file path that spawned a per-file root
+    pub sweep: bool, // the workspace-batch root: rebuilt when its member set changes, else cached
+    pub members: Vector<String>, // batch only: the swept files (relative paths) it lints
     pub pkg: loader::Package,
     pub files: Vector<String>, // canonical module file paths, index-aligned with pkg.modules
     pub diags: Vector<analysis::DiagRec>, // last build's records (codeAction reads the fixes)
@@ -53,6 +55,7 @@ extend Root as Free {
         self.root_dir.free();
         self.alt_dir.free();
         self.origin.free();
+        self.members.free();
         self.pkg.free();
         self.files.free();
         self.diags.free();
@@ -104,6 +107,27 @@ fn canon(path: str) String {
     return pb;
 }
 
+// Byte-lexicographic path order with a length tiebreak: a deterministic batch member list.
+const fn path_cmp(a: &String, b: &String) i32 {
+    let la = a.len();
+    let lb = b.len();
+    let m = if la < lb {
+        la;
+    } else {
+        lb;
+    };
+    let mut i: usize = 0;
+    while i < m {
+        let ca = a.as_str()[i];
+        let cb = b.as_str()[i];
+        if ca != cb {
+            return ca as i32 - cb as i32;
+        }
+        i += 1;
+    }
+    return la as i32 - lb as i32;
+}
+
 fn is_dir(path: str) bool {
     let mut p = String::from_str(path);
     return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
@@ -130,10 +154,21 @@ extend Server {
         return -1;
     }
 
-    // First BUILT root containing `path` (manifest root first), -1 if none.
+    // The workspace-batch root: sweep=true with no origin (the manifest root is origin "" + sweep=false).
+    fn is_batch(self: &Self, r: usize) bool {
+        return self.roots.at(r).sweep && self.roots.at(r).origin.len() == 0;
+    }
+
+    // First BUILT root containing `path` (manifest root first; the workspace batch LAST, so an open
+    // doc's per-file root -- built from the live overlay -- wins over the batch's disk-built copy), -1 if none.
     fn owning_root(self: &Self, path: str) i32 {
         for r in 0..self.roots.len() {
-            if self.roots.at(r).built && self.root_module(r, path) >= 0 {
+            if !self.is_batch(r) && self.roots.at(r).built && self.root_module(r, path) >= 0 {
+                return r as i32;
+            }
+        }
+        for r in 0..self.roots.len() {
+            if self.is_batch(r) && self.roots.at(r).built && self.root_module(r, path) >= 0 {
                 return r as i32;
             }
         }
@@ -142,10 +177,12 @@ extend Server {
 
     // Every open doc must belong to some root; docs outside every built package get a per-file root
     // (the `super-c lint <file>` recipe: file dir as root, src/ as the alt root when it exists).
+    // Batch ownership does not count: its copy is disk-built, so an open doc needs its own root.
     fn ensure_roots(self: &mut Self) {
         for i in 0..self.docs.len() {
             let path = self.docs.at(i).path.as_str();
-            if self.owning_root(path) >= 0 {
+            let own = self.owning_root(path);
+            if own >= 0 && !self.is_batch(own as usize) {
                 continue;
             }
             let mut have = false;
@@ -168,6 +205,7 @@ extend Server {
                     alt_dir: String::from_str(alt),
                     origin: String::from_str(path),
                     sweep: false,
+                    members: Vector::<String>::new(),
                     pkg: loader::Package::new(),
                     files: Vector::<String>::new(),
                     diags: Vector::<analysis::DiagRec>::new(),
@@ -178,11 +216,11 @@ extend Server {
         self.ensure_sweep_roots();
     }
 
-    // The workspace sweep: every .spc under the build.toml folder that no built package owns gets its
-    // own per-file root, so the LSP lints and checks the whole project tree (the `super-c lint <dir>`
-    // recipe), not only the manifest closure plus open docs. Hidden entries and the manifest out-dir
-    // are skipped. Sweep roots build once, then rebuild only while their file is open (rebuild_all);
-    // closed files keep republishing their cached diagnostics.
+    // The workspace sweep: every .spc under the build.toml folder that no other package owns joins
+    // THE batch root -- one shared package (the `super-c lint` recipe) instead of a resident package
+    // per file. Hidden entries and the manifest out-dir are skipped. The batch rebuilds only when its
+    // member set changes (a file appears/vanishes, a doc opens into a per-file root or closes back);
+    // otherwise its cached diagnostics republish.
     fn ensure_sweep_roots(self: &mut Self) {
         if !self.has_manifest {
             return;
@@ -191,10 +229,51 @@ extend Server {
         if is_dir("src") {
             alt = "src";
         }
-        self.sweep_dir(".", alt);
+        let mut cand = Vector::<String>::new();
+        self.sweep_dir(".", &mut cand);
+        cand.sort_by(path_cmp);
+        let mut b: i64 = -1;
+        for r in 0..self.roots.len() {
+            if self.is_batch(r) {
+                b = r as i64;
+            }
+        }
+        if b < 0 {
+            if cand.len() == 0 {
+                return;
+            }
+            self.roots.push(
+                Root {
+                    root_file: String::new(),
+                    root_dir: String::from_str("."),
+                    alt_dir: String::from_str(alt),
+                    origin: String::new(),
+                    sweep: true,
+                    members: cand,
+                    pkg: loader::Package::new(),
+                    files: Vector::<String>::new(),
+                    diags: Vector::<analysis::DiagRec>::new(),
+                    built: false,
+                },
+            );
+            return;
+        }
+        let bi = b as usize;
+        let mut same = self.roots.at(bi).members.len() == cand.len();
+        if same {
+            for i in 0..cand.len() {
+                if self.roots.at(bi).members.at(i).as_str() != cand.at(i).as_str() {
+                    same = false;
+                }
+            }
+        }
+        if !same {
+            self.roots[bi].members = cand;
+            self.roots[bi].built = false;
+        }
     }
 
-    fn sweep_dir(self: &mut Self, dir: str, alt: str) {
+    fn sweep_dir(self: &mut Self, dir: str, cand: &mut Vector<String>) {
         let mut db = String::from_str(dir);
         let dh = unsafe shim::sc_opendir(db.cstr());
         if dh == null {
@@ -224,42 +303,21 @@ extend Server {
                 continue;
             }
             if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
-                self.sweep_dir(p.as_str(), alt);
+                self.sweep_dir(p.as_str(), cand);
             } else if p.as_str().ends_with(".spc") {
-                self.sweep_file(p.as_str(), alt);
+                let cp = canon(p.as_str());
+                let own = self.owning_root(cp.as_str());
+                let mut have = own >= 0 && !self.is_batch(own as usize);
+                for r in 0..self.roots.len() {
+                    if self.roots.at(r).origin.as_str() == cp.as_str() {
+                        have = true;
+                    }
+                }
+                if !have {
+                    cand.push(p);
+                }
             }
         }
-    }
-
-    fn sweep_file(self: &mut Self, rel: str, alt: str) {
-        let cp = canon(rel);
-        let mut have = self.owning_root(cp.as_str()) >= 0;
-        for r in 0..self.roots.len() {
-            if self.roots.at(r).origin.as_str() == cp.as_str() {
-                have = true;
-            }
-        }
-        if have {
-            return;
-        }
-        let rd = if alt.len() != 0 {
-            String::from_str("."); // mirror `super-c lint`: imports resolve against the project root
-        } else {
-            dir_of(rel);
-        };
-        self.roots.push(
-            Root {
-                root_file: String::from_str(rel),
-                root_dir: rd,
-                alt_dir: String::from_str(alt),
-                origin: cp,
-                sweep: true,
-                pkg: loader::Package::new(),
-                files: Vector::<String>::new(),
-                diags: Vector::<analysis::DiagRec>::new(),
-                built: false,
-            },
-        );
     }
 
     fn doc_open(self: &Self, path: str) bool {
@@ -412,6 +470,8 @@ extend Server {
         let rf = self.roots.at(r).root_file.clone();
         let rd = self.roots.at(r).root_dir.clone();
         let ad = self.roots.at(r).alt_dir.clone();
+        // drop the previous build BEFORE compiling: holding both packages doubled the peak
+        self.roots[r].pkg = loader::Package::new();
         // the manifest root lints every workspace file it owns (incl. an in-repo std/); other roots
         // lint only their own root file, so each file's lint warnings come from exactly one root
         let ld = if r == 0 && self.has_manifest {
@@ -419,18 +479,30 @@ extend Server {
         } else {
             String::new();
         };
-        let pkg = analysis::compile(
-            rf.as_str(),
-            rd.as_str(),
-            ad.as_str(),
-            self.std_dir,
-            self.target,
-            ovf,
-            ovt,
-            ld.as_str(),
-            &mut diags,
-        );
-        // swap the fresh package in (drop the previous build wholesale)
+        let pkg = if self.is_batch(r) {
+            analysis::compile_batch(
+                &self.roots.at(r).members,
+                rd.as_str(),
+                ad.as_str(),
+                self.std_dir,
+                self.target,
+                ovf,
+                ovt,
+                &mut diags,
+            );
+        } else {
+            analysis::compile(
+                rf.as_str(),
+                rd.as_str(),
+                ad.as_str(),
+                self.std_dir,
+                self.target,
+                ovf,
+                ovt,
+                ld.as_str(),
+                &mut diags,
+            );
+        };
         self.roots[r].pkg = pkg;
         self.roots[r].files = Vector::<String>::new();
         let nmods = self.roots.at(r).pkg.modules.len();
@@ -460,6 +532,21 @@ extend Server {
             }
             if dedup && self.root_module(0, self.roots.at(r).files.at(m).as_str()) >= 0 {
                 continue;
+            }
+            // a batch module whose file has a live per-file root (its doc is open) publishes from
+            // that root's overlay-fresh build, not the batch's disk-built copy
+            if self.is_batch(r) {
+                let mut fresh = false;
+                for q in 0..self.roots.len() {
+                    if q != r && self.roots.at(q).built && self.roots.at(q).origin.as_str() == self.roots.at(r).files.at(
+                        m,
+                    ).as_str() {
+                        fresh = true;
+                    }
+                }
+                if fresh {
+                    continue;
+                }
             }
             let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
             if d.module as i64 != last_mod {
@@ -565,6 +652,7 @@ fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
                     alt_dir: String::new(),
                     origin: String::new(),
                     sweep: false,
+                    members: Vector::<String>::new(),
                     pkg: loader::Package::new(),
                     files: Vector::<String>::new(),
                     diags: Vector::<analysis::DiagRec>::new(),

@@ -170,6 +170,11 @@ fn canon_path(path: str) String {
 // directory, so a repo carrying its own std/ lints it like `super-c lint std`. Gating on the root
 // file rather than "any open doc" keeps each file's lint warnings owned by exactly one root.
 fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: str) bool {
+    // batch build: the mask names the member files; everything else (their closures, the prelude)
+    // is someone else's to lint
+    if p.lint_set.len() != 0 {
+        return p.lint_set[i];
+    }
     if !p.modules[i].prelude {
         return true;
     }
@@ -247,34 +252,93 @@ pub fn compile(
         ov_files,
         ov_texts,
     );
-    for i in 0..p.modules.len() {
-        if !p.modules[i].has_ast {
-            harvest_parse_errors(&p, i, diags);
+    run_pipeline(&mut p, target, root_file, lint_dir, diags);
+    return p;
+}
+
+/// The LSP's workspace batch: like `super-c lint`'s one-package recipe -- the prelude loads first,
+/// every listed file joins the shared closure once, and `lint_set` marks the members so lints (and
+/// the always-panics pass) report exactly them. ONE resident package replaces the per-file sweep
+/// packages, which is what held a full prelude + closure copy per workspace file.
+pub fn compile_batch(
+    files: &Vector<String>,
+    root_dir: str,
+    alt_dir: str,
+    std_dir: *const char,
+    target: i32,
+    ov_files: Vector<String>,
+    ov_texts: Vector<String>,
+    diags: &mut Vector<DiagRec>,
+) loader::Package {
+    let mut p = loader::package_load_prelude(
+        root_dir,
+        alt_dir,
+        std_dir,
+        unsafe shim::sc_host_platform(),
+        ov_files,
+        ov_texts,
+    );
+    let mut mids = Vector::<i32>::new();
+    for k in 0..files.len() {
+        let mut fc = String::from_str(files.at(k).as_str());
+        let mut mid: i32 = -1;
+        for m in 0..p.modules.len() {
+            if p.modules[m].has_ast && unsafe shim::sc_same_file(fc.cstr(), p.modules[m].file.cstr()) == 1 {
+                mid = m as i32;
+                break;
+            }
+        }
+        if mid < 0 {
+            let mp = loader::batch_mod_path(files.at(k).as_str(), root_dir, alt_dir);
+            mid = p.load_module(mp.as_str(), files.at(k).as_str(), false, unsafe shim::sc_host_platform());
+        }
+        mids.push(mid);
+    }
+    let mut set = Vector::<bool>::new();
+    for m in 0..p.modules.len() {
+        set.push(false);
+    }
+    for k in 0..mids.len() {
+        if mids[k] >= 0 {
+            set.set(mids[k] as usize, true);
         }
     }
-    emit::platform_filter(&mut p, target);
-    let pkg = (&mut p) as *mut loader::Package;
+    p.lint_set = set;
+    run_pipeline(&mut p, target, "", "", diags);
+    return p;
+}
+
+// The shared codegen-free pipeline over a loaded package: harvest parse failures, platform-filter,
+// resolve + typecheck every module (lints gated per module), then the always-panics phase.
+fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: str, diags: &mut Vector<DiagRec>) {
+    for i in 0..p.modules.len() {
+        if !p.modules[i].has_ast {
+            harvest_parse_errors(p, i, diags);
+        }
+    }
+    emit::platform_filter(p, target);
+    let pkg = p as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, 0, 0);
     p.ceval = &mut ceval;
     let n = p.modules.len();
     let mut resolved = true;
     for i in 0..n {
-        let lw = lsp_lint_wanted(&mut p, i, root_file, lint_dir);
-        let ok = lsp_resolve_module(&mut p, i, lw, diags);
+        let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
+        let ok = lsp_resolve_module(p, i, lw, diags);
         resolved = ok && resolved;
     }
     if resolved {
         for i in 0..n {
-            let lw = lsp_lint_wanted(&mut p, i, root_file, lint_dir);
-            lsp_typecheck_module(&mut p, i, lw, diags);
+            let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
+            lsp_typecheck_module(p, i, lw, diags);
         }
         // driver-parity post-typecheck phase: the always-panics check (an error) interprets
         // cross-module `const fn` bodies, so it only runs once every module is typed
         ceval.all_typed = true;
         for i in 0..n {
-            if lsp_lint_wanted(&mut p, i, root_file, lint_dir) {
+            if lsp_lint_wanted(p, i, root_file, lint_dir) {
                 let mut errs = diag::Errors::new();
-                emit::check_always_panics_module(&mut p, i, &mut errs);
+                emit::check_always_panics_module(p, i, &mut errs);
                 if errs.errors.len() != 0 {
                     errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
                     drain_errors(&errs, i as u32, diags);
@@ -283,5 +347,4 @@ pub fn compile(
         }
     }
     p.ceval = null; // the stack ConstEval dies here; the Package outlives it
-    return p;
 }

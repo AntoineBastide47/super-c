@@ -21,7 +21,10 @@ npm install
 
 ## Settings
 
-- `superc.serverPath` — the `super-c` binary the server is spawned from (default: `super-c`).
+- `superc.serverPath` — the `super-c` binary the server is spawned from. When unset, the extension
+  discovers one: the workspace's `<out-dir>/release/super-c` first (a release build is sanitizer-free
+  and uses about a quarter of the ASan dev build's memory), then the workspace-root `super-c`, then
+  `super-c` on `PATH`. Set it explicitly to override the order (e.g. to a stale-proof absolute path).
 - `superc.trace.server` — LSP wire tracing (`off` / `messages` / `verbose`).
 
 ## Notes
