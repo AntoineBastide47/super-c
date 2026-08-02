@@ -578,6 +578,10 @@ extend tc::TypeChecker {
         for i in 0..self.nuninit {
             unsafe s.uninit[i as usize] = unsafe self.uninit[i as usize];
         }
+        s.nlate = self.nlate;
+        for i in 0..self.nlate {
+            unsafe s.late[i as usize] = unsafe self.late[i as usize];
+        }
         s.nfreed = self.nfreed;
         for i in 0..self.nfreed {
             unsafe s.freed[i as usize] = unsafe self.freed[i as usize];
@@ -605,6 +609,10 @@ extend tc::TypeChecker {
         for i in 0..s.nuninit {
             unsafe self.uninit[i as usize] = unsafe s.uninit[i as usize];
         }
+        self.nlate = s.nlate;
+        for i in 0..s.nlate {
+            unsafe self.late[i as usize] = unsafe s.late[i as usize];
+        }
         self.nfreed = s.nfreed;
         for i in 0..s.nfreed {
             unsafe self.freed[i as usize] = unsafe s.freed[i as usize];
@@ -619,6 +627,7 @@ extend tc::TypeChecker {
         s.nmoved = 0;
         s.nmoved_places = 0;
         s.nuninit = 0;
+        s.nlate = 0;
         s.nfreed = 0;
         s.nborrows = 0;
     }
@@ -672,6 +681,23 @@ extend tc::TypeChecker {
                     let k = unsafe acc.nuninit;
                     unsafe acc.uninit[k as usize] = unsafe self.uninit[i as usize];
                     unsafe acc.nuninit = k + 1;
+                } else {
+                    overflow = true;
+                }
+            }
+        }
+        for i in 0..self.nlate {
+            let mut seen = false;
+            for j in 0..unsafe acc.nlate {
+                if unsafe acc.late[j as usize] == unsafe self.late[i as usize] {
+                    seen = true;
+                }
+            }
+            if !seen {
+                if unsafe acc.nlate < 64 {
+                    let k = unsafe acc.nlate;
+                    unsafe acc.late[k as usize] = unsafe self.late[i as usize];
+                    unsafe acc.nlate = k + 1;
                 } else {
                     overflow = true;
                 }
@@ -2749,6 +2775,7 @@ extend tc::TypeChecker {
         self.nmoved = 0;
         self.nmoved_places = 0;
         self.nuninit = 0;
+        self.nlate = 0;
         self.nfreed = 0;
         self.nborrows = 0;
         self.scope_depth = 0;
@@ -2767,6 +2794,7 @@ extend tc::TypeChecker {
         self.nmoved = 0;
         self.nmoved_places = 0;
         self.nuninit = 0;
+        self.nlate = 0;
         self.nfreed = 0;
         self.nborrows = 0;
         self.scope_depth = 0;
@@ -3323,6 +3351,30 @@ extend tc::TypeChecker {
         }
         let lhs_local = ld.node != NODE_NONE && ld.module == self.cur_module();
         if lhs_local {
+            // Split initialization of an immutable binding: the assignment is its ONE initialization.
+            // Reject a second one (or one already made on some earlier path), and one inside a loop
+            // the binding does not belong to (it would re-run against the same binding; use `mut`).
+            let ln = a.at_const(ld.node);
+            if ln.kind == NodeKind::NODE_LET && !ln.as_data.let_stmt.is_mutable {
+                let sp = a.at_const(bd.left).span;
+                if self.tc_is_late(ld.node) {
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format("cannot assign twice to an immutable binding; declare it 'let mut'"),
+                    );
+                } else if self.nloops != 0 && !self.tc_binding_in_innermost_loop(ld.node) {
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "cannot initialize an immutable binding inside a loop it was declared outside of; declare it 'let mut'",
+                        ),
+                    );
+                } else {
+                    self.tc_add_late(ld.node);
+                }
+            }
             self.tc_init(ld.node);
             self.tc_unmark_move(ld.node);
         }

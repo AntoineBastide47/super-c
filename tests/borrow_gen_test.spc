@@ -766,3 +766,43 @@ fn composition() {
         }
     }
 }
+
+// Split declaration/initialization of immutable bindings: `let x: T;` followed by exactly one
+// assignment on every path. The borrow checker's late-init set enforces assign-once; loops and
+// maybe-assigned paths reject; Free-typed bindings keep requiring an initializer (RAII).
+@test
+fn split_init() {
+    check_case("split init once", "fn main() i32 { let x: i32; x = 5; return x - 5; }\n", true);
+    check_case("split init assign twice", "fn main() i32 { let x: i32; x = 5; x = 6; return x; }\n", false);
+    check_case(
+        "split init both arms",
+        "fn pick(c: bool) i32 { let x: i32; if c { x = 1; } else { x = 2; } return x; }\nfn main() i32 { return pick(true); }\n",
+        true,
+    );
+    check_case(
+        "split init maybe then assign",
+        "fn f(c: bool) i32 { let x: i32; if c { x = 1; } x = 2; return x; }\nfn main() i32 { return f(false); }\n",
+        false,
+    );
+    check_case(
+        "split init inside loop",
+        "fn main() i32 { let x: i32; let mut i = 0; while i < 3 { x = i; i = i + 1; } return x; }\n",
+        false,
+    );
+    check_case("split decl use before init", "fn main() i32 { let x: i32; return x; }\n", false);
+    check_case(
+        "split init switch arms",
+        "fn f(v: i32) i32 { let x: i32; switch v { 1 => { x = 10; }, _ => { x = 20; } }; return x; }\nfn main() i32 { return f(1); }\n",
+        true,
+    );
+    check_case(
+        "split init free-typed rejected",
+        "fn main() i32 { let v: Vector<i64>; v = Vector::<i64>::new(); let _ = &v; return 0; }\n",
+        false,
+    );
+    check_case(
+        "assign to initialized immutable still rejected",
+        "fn main() i32 { let x: i32 = 1; x = 2; return x; }\n",
+        false,
+    );
+}

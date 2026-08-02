@@ -107,6 +107,8 @@ pub struct FlowState {
     pub nmoved_places: u32,
     pub uninit: [NodeId; 64],
     pub nuninit: u32,
+    pub late: [NodeId; 64],
+    pub nlate: u32,
     pub freed: [NodeId; 64],
     pub nfreed: u32,
     pub borrows: [Borrow; 64],
@@ -173,6 +175,10 @@ pub struct TypeChecker<'a> {
     pub nmoved_places: u32,
     pub uninit: [NodeId; 256],
     pub nuninit: u32,
+    /// Split-initialization tracking: immutable `let x;` bindings assigned on SOME path so far --
+    /// a second assignment (or one on a path that may repeat) is "cannot assign twice".
+    pub late: [NodeId; 256],
+    pub nlate: u32,
     pub freed: [NodeId; 256],
     pub nfreed: u32,
     pub borrows: [Borrow; 256],
@@ -468,6 +474,7 @@ extend TypeChecker {
             nmoved: 0,
             nmoved_places: 0,
             nuninit: 0,
+            nlate: 0,
             nfreed: 0,
             nborrows: 0,
             scope_depth: 0,
@@ -4626,7 +4633,10 @@ extend TypeChecker {
                     self.tc_mark_mut_used(d);
                     return true;
                 }
-                return false;
+                // Split declaration/initialization: an immutable binding declared WITHOUT a value is
+                // assignable; the borrow checker enforces exactly-once on every path. Requiring no
+                // mutability is what keeps the C emission const-free only for these bindings.
+                return dn.as_data.let_stmt.value == NODE_NONE;
             }
             if dn.kind == NodeKind::NODE_PARAMETER {
                 if dn.as_data.parameter.is_mutable {
@@ -4758,6 +4768,26 @@ extend TypeChecker {
 
     // TC-5: moved[] membership bitset (bit index = decl NodeId). moved[] stays authoritative for
     // flow save/merge; the bits are updated at every mutation site so is_moved is O(1).
+
+    pub fn tc_is_late(self: &Self, decl: NodeId) bool {
+        for i in 0..self.nlate {
+            if unsafe self.late[i as usize] == decl {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn tc_add_late(self: &mut Self, decl: NodeId) {
+        if self.tc_is_late(decl) {
+            return;
+        }
+        if self.nlate < 256 {
+            let k = self.nlate;
+            unsafe self.late[k as usize] = decl;
+            self.nlate = k + 1;
+        }
+    }
 
     pub fn tc_is_uninit(self: &Self, decl: NodeId) bool {
         for i in 0..self.nuninit {
@@ -10460,6 +10490,7 @@ extend TypeChecker {
                 self.err_wm = self.errors.errors.len();
                 self.nmoved = 0;
                 self.nuninit = 0;
+                self.nlate = 0;
                 self.nfreed = 0;
                 self.nborrows = 0;
                 self.scope_depth = 0;
@@ -10536,6 +10567,7 @@ extend TypeChecker {
                 for mi in 0..self.nmoved {}
                 self.nmoved = 0;
                 self.nuninit = 0;
+                self.nlate = 0;
                 self.nfreed = 0;
                 self.nborrows = 0;
                 self.scope_depth = 0;

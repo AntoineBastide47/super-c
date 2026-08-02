@@ -5676,9 +5676,11 @@ extend Codegen {
                     return;
                 }
                 let autofree = self.cg_will_auto_free(id);
-                let is_const = !n.as_data.let_stmt.is_mutable && !self.cg_type_is_free(self.cur_ast().type_of(id)) && !self.cg_type_has_unsafe_cell(
+                // a split-initialized binding (`let x; ... x = v;`) is immutable in the language but
+                // cannot be C-const: the store happens after the declaration
+                let is_const = !n.as_data.let_stmt.is_mutable && n.as_data.let_stmt.value != NODE_NONE && !self.cg_type_is_free(
                     self.cur_ast().type_of(id),
-                );
+                ) && !self.cg_type_has_unsafe_cell(self.cur_ast().type_of(id));
                 let lbt = self.cur_ast().type_of(id);
                 let lval = n.as_data.let_stmt.value;
                 if lval != NODE_NONE && lbt != TYPE_NONE && self.type_at(lbt).kind == TypeKind::TYPE_ARRAY && self.cur_ast().at_const(
@@ -6053,9 +6055,9 @@ extend Codegen {
                 continue;
             }
             self.emit_indent();
-            let element_const = !n.as_data.let_stmt.is_mutable && !self.cg_type_is_free(self.cur_ast().type_of(nid)) && !self.cg_type_has_unsafe_cell(
+            let element_const = !n.as_data.let_stmt.is_mutable && n.as_data.let_stmt.value != NODE_NONE && !self.cg_type_is_free(
                 self.cur_ast().type_of(nid),
-            );
+            ) && !self.cg_type_has_unsafe_cell(self.cur_ast().type_of(nid));
             let mut ecq = "".ptr() as *const char;
             if element_const {
                 ecq = "const ".ptr() as *const char;
