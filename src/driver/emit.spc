@@ -5,6 +5,7 @@
 // run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
 import stdio;
 import stdlib;
+import driver_shim as shim;
 import lexer::token as tok;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
@@ -1353,10 +1354,229 @@ pub fn lint_package(
 }
 
 /// Compile a loaded package into the <gen_root> C tree: full per-module pipeline, instance propagation,
-/// then codegen of the live modules in dependency-first order, pruning stale outputs afterwards. A
-/// non-empty `out_bin` also compiles + links the program there (`build`); `topts.enabled` synthesizes,
-/// builds and runs the test runner instead. Returns the process exit code (0 = success).
-pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str, target: i32, lint: bool, cflags: str) i32 {
+/// Per-file completion callback for the streaming build: the engine starts compiling a finished TU
+/// while later ones are still being emitted. `kind` 0 = header, 1 = C source. Paths are full paths
+/// under the package's gen_root. Notifications for one build arrive from a single thread.
+pub struct EmitSink {
+    pub ctx: *mut void,
+    pub notify: fn(*mut void, str, i32) void,
+}
+
+fn sink_notify(sink: *mut EmitSink, path: str, kind: i32) {
+    if sink != null {
+        let f = unsafe sink.notify;
+        f(unsafe sink.ctx, path, kind);
+    }
+}
+
+/// Construct module `mi`'s multifile Codegen. The instance lives across both emit passes:
+/// codegen_emit reuses the header pass's collect_insts, exactly as the fused per-TU loop did.
+/// Boxed because Codegen may hold pointers into its own fixed arrays once emission starts; it must
+/// never move again.
+fn make_tu<'a>(p: &mut loader::Package, mi: ModuleId) Box<cg::Codegen<'a>> {
+    let m_ast = mod_ast_m(p, mi);
+    let src = p.modules[mi as usize].source.as_str().ptr() as *const char;
+    let slen = p.modules[mi as usize].source.len();
+    let pkg = p as *mut loader::Package;
+    let mut c = Box::new(cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg));
+    c.set_multifile(true);
+    return c;
+}
+
+/// Wire module `mi`'s test cases into `c`. Re-done before EVERY emit call on `c`: CgTestInfo stores
+/// a raw pointer into `tcases`, which each pass reuses for the TU it is currently emitting.
+fn set_tu_test_info(c: &mut Box<cg::Codegen>, mi: ModuleId, plan: &TestPlan, tcases: &mut TCases) {
+    let mut nt: u32 = 0;
+    let mut tk: usize = 0;
+    while tk < plan.cases.len() && nt < 512 {
+        let tc = plan.cases[tk];
+        if tc.mod == mi {
+            tcases[nt as usize] = cg::CgTestCase {
+                func: tc.func,
+                wants: tc.wants,
+                suite: tc.suite,
+                suite_is_enum: tc.suite_is_enum,
+                suite_init: tc.suite_init,
+                suite_free: tc.suite_free,
+            };
+            nt = nt + 1;
+        }
+        tk = tk + 1;
+    }
+    let gi = if plan.genv_mod == mi {
+        plan.genv_init;
+    } else {
+        NODE_NONE;
+    };
+    let gf = if plan.genv_mod == mi {
+        plan.genv_free;
+    } else {
+        NODE_NONE;
+    };
+    let ti = cg::CgTestInfo {
+        enabled: true,
+        cases: &tcases[0],
+        ncases: nt,
+        fx_init: plan.fx_init[mi as usize],
+        fx_free: plan.fx_free[mi as usize],
+        fx_type: plan.fx_type[mi as usize],
+        fx_is_enum: plan.fx_is_enum[mi as usize],
+        genv_init: gi,
+        genv_free: gf,
+        genv_type: plan.genv_type,
+        genv_is_enum: plan.genv_is_enum,
+    };
+    c.set_test_info(&ti);
+}
+
+/// Emit one prepared TU's header into `root`, borrowing the package's recycled output buffer.
+fn emit_tu_header(p: &mut loader::Package, c: &mut Box<cg::Codegen>, mi: ModuleId, root: str) {
+    c.adopt_buf(replace(&mut p.cg_scratch, String::new()));
+    let hpath = build_out_path(root, p.modules[mi as usize].path.as_str(), ".h");
+    let hout = open_out(hpath.as_str());
+    if hout != null {
+        c.codegen_emit_header(hout);
+        unsafe stdio::fclose(hout);
+    }
+    p.cg_scratch = c.take_buf();
+}
+
+/// Emit one prepared TU's C source into `root`; false on an emission error.
+fn emit_tu_source(p: &mut loader::Package, c: &mut Box<cg::Codegen>, mi: ModuleId, root: str) bool {
+    c.adopt_buf(replace(&mut p.cg_scratch, String::new()));
+    let mut ok = true;
+    let mut opath = build_out_path(root, p.modules[mi as usize].path.as_str(), ".c");
+    let out = open_out(opath.as_str());
+    if out == null {
+        unsafe stdio::perror(opath.cstr());
+        ok = false;
+    } else {
+        c.codegen_emit(out);
+        unsafe stdio::fclose(out);
+        if c.has_errors() {
+            c.log_errors();
+            ok = false;
+        }
+    }
+    p.cg_scratch = c.take_buf();
+    return ok;
+}
+
+/// Fork `w` workers, worker `wk` rendering the sources of stride `k % w == wk` of `lm` from the
+/// prepared Codegens inherited across the fork. Every header is already on disk (the serial
+/// header pass runs first -- header rendering deposits re-homed instances into other modules'
+/// pools, so its ORDER is part of the emitted bytes and it cannot be split across workers). A
+/// worker's own source rendering is independent: it only APPENDS to foreign type pools inside a
+/// reintern/restore_arena window, and its whole address space is COW-private. Each finished TU is
+/// reported as a 2-byte index packet on a shared pipe (atomic under PIPE_BUF); the parent turns
+/// packets into sink notifications in arrival order, then reaps the workers. `keep[base_c..]`
+/// holds the .c paths, indexed like `lm`. Workers leave through sc_exit_now, so the inherited
+/// leak registry and stdio buffers are never replayed. Returns false when no worker could be
+/// forked (Windows) -- the caller then runs the serial source loop instead.
+fn emit_sources_parallel(
+    p: &mut loader::Package,
+    cgs: &mut Vector<Box<cg::Codegen>>,
+    lm: &Vector<ModuleId>,
+    w: u32,
+    root: str,
+    testing: bool,
+    plan: &TestPlan,
+    sink: *mut EmitSink,
+    keep: &Vector<String>,
+    base_c: usize,
+    err: &mut bool,
+) bool {
+    let mut fds = Array::<i32, 2>::new();
+    if unsafe shim::sc_pipe(&mut fds[0]) != 0 {
+        return false;
+    }
+    let mut tcases = TCases {}; // per-process: each worker wires its own current TU into it
+    let mut pids = Vector::<i64>::new();
+    let mut inline_strides = Vector::<u32>::new();
+    for wk in 0..w {
+        let pid = unsafe shim::sc_fork();
+        if pid == 0 {
+            unsafe shim::sc_fd_close(fds[0]);
+            let mut cerr = false;
+            let mut k = wk as usize;
+            while k < lm.len() {
+                if testing {
+                    set_tu_test_info(&mut cgs[k], lm[k], plan, &mut tcases);
+                }
+                if !emit_tu_source(p, &mut cgs[k], lm[k], root) {
+                    cerr = true;
+                }
+                let idx = k as u16;
+                unsafe shim::sc_fd_write(fds[1], (&idx) as *const u16, 2);
+                k = k + w as usize;
+            }
+            unsafe shim::sc_fd_close(fds[1]);
+            unsafe shim::sc_exit_now(
+                if cerr {
+                    1;
+                } else {
+                    0 as i32;
+                },
+            );
+        } else if pid < 0 {
+            inline_strides.push(wk);
+        } else {
+            pids.push(pid);
+        }
+    }
+    unsafe shim::sc_fd_close(fds[1]);
+    if pids.len() == 0 {
+        unsafe shim::sc_fd_close(fds[0]);
+        return false;
+    }
+    // Strides whose fork failed run in the parent, notifying inline; the workers keep running meanwhile.
+    for s in 0..inline_strides.len() {
+        let mut k = inline_strides[s] as usize;
+        while k < lm.len() {
+            if testing {
+                set_tu_test_info(&mut cgs[k], lm[k], plan, &mut tcases);
+            }
+            if !emit_tu_source(p, &mut cgs[k], lm[k], root) {
+                *err = true;
+            }
+            sink_notify(sink, keep.at(base_c + k).as_str(), 1);
+            k = k + w as usize;
+        }
+    }
+    loop {
+        let mut idx: u16 = 0;
+        let r = unsafe shim::sc_fd_read(fds[0], (&mut idx) as *mut u16, 2);
+        if r != 2 {
+            break; // EOF: every worker closed its write end
+        }
+        sink_notify(sink, keep.at(base_c + idx as usize).as_str(), 1);
+    }
+    unsafe shim::sc_fd_close(fds[0]);
+    for i in 0..pids.len() {
+        let mut code: i32 = 0;
+        if unsafe shim::sc_waitpid(pids[i], &mut code) != 0 || code != 0 {
+            *err = true;
+        }
+    }
+    return true;
+}
+
+/// then codegen of the live modules (headers first, then sources across `jobs` forked workers),
+/// pruning stale outputs afterwards. A non-empty `out_bin` also compiles + links the program there
+/// (`build`); `topts.enabled` synthesizes, builds and runs the test runner instead. `sink` (may be
+/// null) hears about every finished output file, which is what lets the build engine compile a TU
+/// while later ones are still being emitted. `jobs` 0 means the online core count. Returns the
+/// process exit code (0 = success).
+pub fn run_package(
+    p: &mut loader::Package,
+    topts: *const TestOpts,
+    out_bin: str,
+    target: i32,
+    lint: bool,
+    cflags: str,
+    sink: *mut EmitSink,
+    jobs: u32,
+) i32 {
     platform_filter(p, target);
     let n = p.modules.len();
     for i in 0..n {
@@ -1418,9 +1638,24 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
     keep.push(build_out_path(root, "super_rt", ".c"));
+    sink_notify(sink, keep.at(0).as_str(), 0);
+    sink_notify(sink, keep.at(1).as_str(), 1); // self-contained: carries its own includes
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
+    let pre_ext = keep.len();
     ext_c_collect(p, &mut keep, &mut err, target);
+    for i in pre_ext..keep.len() {
+        let s = keep.at(i).as_str();
+        sink_notify(
+            sink,
+            s,
+            if s.ends_with(".c") {
+                1;
+            } else {
+                0 as i32;
+            },
+        );
+    }
     let live = compute_emit_live(p);
     let osz = if n != 0 {
         n;
@@ -1435,85 +1670,70 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
         return 1;
     }
     loader::package_emit_order(p, order);
+    let mut lm = Vector::<ModuleId>::new();
     for oi in 0..n {
         let mi = unsafe order[oi];
         if live != null && !unsafe live[mi as usize] {
             continue;
         }
-        let m_ast = mod_ast_m(p, mi);
-        let src = p.modules[mi as usize].source.as_str().ptr() as *const char;
-        let slen = p.modules[mi as usize].source.len();
-        let mpath = p.modules[mi as usize].path.as_str();
-        let pkg = p as *mut loader::Package;
-        let mut c = cg::Codegen::new(m_ast, str::from_raw(src as *const u8, slen), pkg);
-        c.set_multifile(true);
-        c.adopt_buf(replace(&mut p.cg_scratch, String::new()));
-        let mut tcases = TCases {}; // must outlive codegen_emit (CgTestInfo keeps a pointer into it)
+        lm.push(mi);
+    }
+    // The parent owns keep[] whichever mode runs, so every output path exists up front:
+    // keep[base_h + k] / keep[base_c + k] are TU k's header/source, indexed like lm.
+    let base_h = keep.len();
+    for k in 0..lm.len() {
+        keep.push(build_out_path(root, p.modules[lm[k] as usize].path.as_str(), ".h"));
+    }
+    let base_c = keep.len();
+    for k in 0..lm.len() {
+        keep.push(build_out_path(root, p.modules[lm[k] as usize].path.as_str(), ".c"));
+    }
+    let mut w: u32 = if jobs != 0 {
+        jobs;
+    } else {
+        (unsafe shim::sc_ncpu()) as u32;
+    };
+    if w as usize > lm.len() {
+        w = lm.len() as u32;
+    }
+    // Fork is pathological under ASan (each child COW-faults the whole shadow), so a sanitized
+    // binary keeps the serial path; SC_SERIAL_EMIT=1 forces it for A/B byte-diffs.
+    if unsafe shim::sc_asan() != 0 || stdlib::getenv("SC_SERIAL_EMIT") != null {
+        w = 1;
+    }
+    // One Codegen per TU, alive across both passes, so codegen_emit reuses the header pass's
+    // collect_insts (the fused loop's behavior).
+    let mut cgs = Vector::<Box<cg::Codegen>>::with_capacity(lm.len());
+    for k in 0..lm.len() {
+        let c = make_tu(p, lm[k]);
+        cgs.push(c);
+    }
+    let mut tcases = TCases {}; // reused per emit call; CgTestInfo points into it (see set_tu_test_info)
+    // Pass 1: every header, serially IN EMIT ORDER -- header rendering deposits re-homed instances
+    // into other modules' pools, so this order is part of the emitted bytes. It also puts all .h
+    // on disk before the first source: a streamed source compile can never miss an include.
+    for k in 0..lm.len() {
         if testing {
-            let mut nt: u32 = 0;
-            let mut tk: usize = 0;
-            while tk < plan.cases.len() && nt < 512 {
-                let tc = plan.cases[tk];
-                if tc.mod == mi {
-                    tcases[nt as usize] = cg::CgTestCase {
-                        func: tc.func,
-                        wants: tc.wants,
-                        suite: tc.suite,
-                        suite_is_enum: tc.suite_is_enum,
-                        suite_init: tc.suite_init,
-                        suite_free: tc.suite_free,
-                    };
-                    nt = nt + 1;
-                }
-                tk = tk + 1;
+            set_tu_test_info(&mut cgs[k], lm[k], &plan, &mut tcases);
+        }
+        emit_tu_header(p, &mut cgs[k], lm[k], root);
+        sink_notify(sink, keep.at(base_h + k).as_str(), 0);
+    }
+    // Pass 2: sources, forked workers when possible.
+    let mut done_par = false;
+    if w > 1 {
+        done_par = emit_sources_parallel(p, &mut cgs, &lm, w, root, testing, &plan, sink, &keep, base_c, &mut err);
+    }
+    if !done_par {
+        for k in 0..lm.len() {
+            if testing {
+                set_tu_test_info(&mut cgs[k], lm[k], &plan, &mut tcases);
             }
-            let gi = if plan.genv_mod == mi {
-                plan.genv_init;
-            } else {
-                NODE_NONE;
-            };
-            let gf = if plan.genv_mod == mi {
-                plan.genv_free;
-            } else {
-                NODE_NONE;
-            };
-            let ti = cg::CgTestInfo {
-                enabled: true,
-                cases: &tcases[0],
-                ncases: nt,
-                fx_init: plan.fx_init[mi as usize],
-                fx_free: plan.fx_free[mi as usize],
-                fx_type: plan.fx_type[mi as usize],
-                fx_is_enum: plan.fx_is_enum[mi as usize],
-                genv_init: gi,
-                genv_free: gf,
-                genv_type: plan.genv_type,
-                genv_is_enum: plan.genv_is_enum,
-            };
-            c.set_test_info(&ti);
-        }
-        let hpath = build_out_path(root, mpath, ".h");
-        let hout = open_out(hpath.as_str());
-        if hout != null {
-            c.codegen_emit_header(hout);
-            unsafe stdio::fclose(hout);
-        }
-        keep.push(hpath);
-        let mut opath = build_out_path(root, mpath, ".c");
-        let out = open_out(opath.as_str());
-        if out == null {
-            unsafe stdio::perror(opath.cstr());
-            err = true;
-        } else {
-            c.codegen_emit(out);
-            unsafe stdio::fclose(out);
-            if c.has_errors() {
-                c.log_errors();
+            if !emit_tu_source(p, &mut cgs[k], lm[k], root) {
                 err = true;
             }
+            sink_notify(sink, keep.at(base_c + k).as_str(), 1);
         }
-        keep.push(opath);
-        p.cg_scratch = c.take_buf();
     }
     unsafe stdlib::free(order);
     if live != null {
@@ -1549,6 +1769,7 @@ pub fn run_package(p: &mut loader::Package, topts: *const TestOpts, out_bin: str
         } else {
             switch write_test_main(p, &plan) {
                 Some(runner) => {
+                    sink_notify(sink, runner.as_str(), 1);
                     keep.push(runner);
                     rc = test_build_and_run(p, topts, &keep, "", cflags);
                 },

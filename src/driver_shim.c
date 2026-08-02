@@ -15,6 +15,7 @@
 #include "driver_shim.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -322,6 +323,147 @@ int sc_wait_any(const int64_t *pids, int n, int *code) {
       }
     /* an unrelated child (none are expected during the compile phase): keep waiting */
   }
+#endif
+}
+
+/* Non-blocking sc_wait_any: index of an already-exited child, or -1 when none has exited yet.
+   Unlike sc_wait_any it never reaps a pid outside `pids`, so it is safe while unrelated children
+   (the parallel emit workers) are alive. */
+int sc_try_wait(const int64_t *pids, int n, int *code) {
+#if defined(_WIN32)
+  HANDLE hs[MAXIMUM_WAIT_OBJECTS];
+  if (n > MAXIMUM_WAIT_OBJECTS)
+    n = MAXIMUM_WAIT_OBJECTS;
+  for (int i = 0; i < n; i++)
+    hs[i] = (HANDLE)(intptr_t)pids[i];
+  DWORD w = WaitForMultipleObjects((DWORD)n, hs, FALSE, 0);
+  if (w >= (DWORD)n)
+    return -1;
+  DWORD ec = 1;
+  GetExitCodeProcess(hs[w], &ec);
+  CloseHandle(hs[w]);
+  *code = (int)ec;
+  return (int)w;
+#else
+  for (int i = 0; i < n; i++) {
+    int st = 0;
+    pid_t p = waitpid((pid_t)pids[i], &st, WNOHANG);
+    if (p == (pid_t)pids[i]) {
+      *code = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+      return i;
+    }
+  }
+  return -1;
+#endif
+}
+
+/* fork() for the parallel emit workers; -1 where unsupported (Windows), which selects the serial path. */
+long long sc_fork(void) {
+#if defined(_WIN32)
+  return -1;
+#else
+  return (long long)fork();
+#endif
+}
+
+/* Anonymous pipe: fds[0] read end, fds[1] write end. -1 on failure or Windows. */
+int sc_pipe(int *fds) {
+#if defined(_WIN32)
+  (void)fds;
+  return -1;
+#else
+  return pipe(fds);
+#endif
+}
+
+/* Read exactly `n` bytes (short only at EOF); the emit workers' 2-byte completion packets must
+   never tear across reads. Returns bytes read, -1 on error. */
+int sc_fd_read(int fd, void *buf, int n) {
+#if defined(_WIN32)
+  (void)fd; (void)buf; (void)n;
+  return -1;
+#else
+  int got = 0;
+  while (got < n) {
+    ssize_t r = read(fd, (char *)buf + got, (size_t)(n - got));
+    if (r < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
+    }
+    if (r == 0)
+      break;
+    got += (int)r;
+  }
+  return got;
+#endif
+}
+
+int sc_fd_write(int fd, const void *buf, int n) {
+#if defined(_WIN32)
+  (void)fd; (void)buf; (void)n;
+  return -1;
+#else
+  int put = 0;
+  while (put < n) {
+    ssize_t r = write(fd, (const char *)buf + put, (size_t)(n - put));
+    if (r < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
+    }
+    put += (int)r;
+  }
+  return put;
+#endif
+}
+
+int sc_fd_close(int fd) {
+#if defined(_WIN32)
+  (void)fd;
+  return -1;
+#else
+  return close(fd);
+#endif
+}
+
+/* _exit(): no atexit handlers, no stream flushing. Emit workers end here so the inherited leak
+   registry and buffered stdio are not replayed once per child. */
+void sc_exit_now(int code) {
+  _exit(code);
+}
+
+/* 1 when this binary is ASan-instrumented. fork() under ASan copy-on-write-faults the entire
+   shadow region per child, which costs more than the parallel emit saves -- such a binary keeps
+   the serial path. Compile-time of the shim, which is built with the profile's own cflags. */
+int sc_asan(void) {
+#if defined(__SANITIZE_ADDRESS__)
+  return 1;
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+  return 1;
+#  else
+  return 0;
+#  endif
+#else
+  return 0;
+#endif
+}
+
+/* Block for ONE specific child; its exit code via *code, 0 on success, -1 on error/Windows.
+   Never reaps unrelated children. */
+int sc_waitpid(long long pid, int *code) {
+#if defined(_WIN32)
+  (void)pid; (void)code;
+  return -1;
+#else
+  int st = 0;
+  while (waitpid((pid_t)pid, &st, 0) < 0) {
+    if (errno != EINTR)
+      return -1;
+  }
+  *code = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+  return 0;
 #endif
 }
 

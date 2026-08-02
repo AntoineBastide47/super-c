@@ -53,7 +53,7 @@ fn run_file(
     if p.ok {
         let mut ceval = ce::ConstEval::new(&mut p, ce_steps, ce_mem);
         p.ceval = &mut ceval;
-        rc = run_package(&mut p, topts, out_bin, target, lint, cflags);
+        rc = run_package(&mut p, topts, out_bin, target, lint, cflags, null, 0);
     }
     return rc;
 }

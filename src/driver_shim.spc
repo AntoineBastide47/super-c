@@ -42,6 +42,26 @@ extern "C" "driver_shim.h" {
     /// Block until any of the `n` children exits: returns its index into `pids` and stores its exit
     /// code in `code`; -1 on wait error.
     pub fn sc_wait_any(pids: *const i64, n: i32, code: *mut i32) i32;
+    /// Non-blocking `sc_wait_any`: index of an already-exited child, or -1 when none has exited yet.
+    /// Never reaps a pid outside `pids`, so it is safe while the parallel emit workers are alive.
+    pub fn sc_try_wait(pids: *const i64, n: i32, code: *mut i32) i32;
+    /// fork() for the parallel emit workers; -1 where unsupported (Windows) selects the serial path.
+    pub fn sc_fork() i64;
+    /// Anonymous pipe: fds[0] read end, fds[1] write end. -1 on failure or Windows.
+    pub fn sc_pipe(fds: *mut i32) i32;
+    /// Read exactly `n` bytes (short only at EOF), so completion packets never tear; -1 on error.
+    pub fn sc_fd_read(fd: i32, buf: *mut void, n: i32) i32;
+    /// Write all `n` bytes; -1 on error.
+    pub fn sc_fd_write(fd: i32, buf: *const void, n: i32) i32;
+    pub fn sc_fd_close(fd: i32) i32;
+    /// `_exit()`: no atexit handlers, no stream flushing. Emit workers end here so the inherited
+    /// leak registry and buffered stdio are not replayed once per child.
+    pub fn sc_exit_now(code: i32);
+    /// 1 when this binary is ASan-instrumented: fork() copy-on-write-faults the whole shadow per
+    /// child there, costing more than the parallel emit saves, so such a binary stays serial.
+    pub fn sc_asan() i32;
+    /// Wait for ONE specific child; its exit code via `code`. 0 on success, -1 on error/Windows.
+    pub fn sc_waitpid(pid: i64, code: *mut i32) i32;
     /// rename() that also replaces an existing destination on Windows -- including one that is a RUNNING
     /// executable, which Windows will not delete but will let us rename aside (parked as `<to>.old`).
     pub fn sc_rename(from: *const char, to: *const char) i32;

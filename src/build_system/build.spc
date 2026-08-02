@@ -248,17 +248,10 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str) bool {
 // ---------------------------------------------------------------------------------------------------------
 // the build itself
 // ---------------------------------------------------------------------------------------------------------
-fn resolve_cc(m: &mf::Manifest) String {
+// The compiler named by manifest/$CC/default, WITHOUT the ccache decision (that probe costs a
+// shell round-trip, so the engine runs it in the background -- see CcStream::ensure_cc).
+fn resolve_cc_raw(m: &mf::Manifest) String {
     let mut cc = String::new();
-    // ccache makes fixpoint rebuilds (bootstrap stage 2) nearly free
-    let probe = if unsafe shim::sc_host_platform() == 0 {
-        "ccache -V >nul 2>&1"; // cmd.exe has no /dev/null
-    } else {
-        "ccache -V >/dev/null 2>&1";
-    };
-    if shell(probe) == 0 {
-        cc.push_str("ccache ");
-    }
     if m.cc.len() != 0 {
         cc.push_string(&m.cc);
         return cc;
@@ -533,6 +526,281 @@ pub const fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> 
     return m.default_profile.as_str();
 }
 
+// The streaming compile pipeline: run_package's EmitSink feeds every finished output file here, so
+// a TU is content-synced into gen/ and its compile job spawned while later TUs are still being
+// emitted. The emit pass writes all headers before the first source, so a source's compile can
+// never miss an include. Reaping in-flight jobs uses sc_try_wait only: the blocking sc_wait_any
+// (waitpid(-1)) would steal the emit workers' exit statuses while they are alive.
+struct CcStream {
+    pub src_len: usize, // gen_root prefix; rel = path[src_len+1..]
+    pub gen: String,
+    pub obj: String,
+    pub pdir: String,
+    pub cc_raw: String, // compiler without the ccache decision (see ensure_cc)
+    pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c"
+    pub probe_pid: i64, // background ccache+version probe; -1 = resolve synchronously on demand
+    pub ccver_path: String, // <pdir>/.ccver, the probe's output file
+    pub cc: String, // full compiler command (ccache-prefixed when available); empty until ensure_cc
+    pub cmd_prefix: String, // "<cc><cc_tail>"; empty until ensure_cc
+    pub ccver: String,
+    pub cc_ready: bool,
+    pub jobs: u32,
+    pub objs: Vector<String>,
+    pub pend: Vector<Pend>,
+    pub window: Vector<Job>,
+    pub total_c: usize,
+    pub stale_n: usize,
+    pub ret: i32,
+}
+
+extend CcStream {
+    // Finish compiler resolution: collect the background probe (ccache presence + `cc --version`
+    // first line, ~50ms of shell round-trips that overlap the transpile), or run both
+    // synchronously when no probe was spawned (Windows, or spawn failure). Idempotent; called
+    // before the first compile command is built and again before the link line.
+    pub fn ensure_cc(self: &mut Self) {
+        if self.cc_ready {
+            return;
+        }
+        self.cc_ready = true;
+        let mut done = false;
+        if self.probe_pid >= 0 {
+            let mut code: i32 = 0;
+            let _ = unsafe shim::sc_waitpid(self.probe_pid, &mut code);
+            let v = loader::read_file(self.ccver_path.as_str());
+            let mut vp = String::from_str(self.ccver_path.as_str());
+            unsafe shim::sc_unlink(vp.cstr());
+            if !v.is_none() {
+                let body = v.unwrap();
+                let s = body.as_str();
+                // line 1: "1"/"0" ccache presence; line 2: the compiler's version line
+                let mut e: usize = 0;
+                while e < s.len() && s[e] != b'\n' {
+                    e = e + 1;
+                }
+                if e < s.len() {
+                    if s.slice(0, e) == "1" {
+                        self.cc.push_str("ccache ");
+                    }
+                    self.cc.push_string(&self.cc_raw);
+                    let v0 = e + 1;
+                    let mut v1 = v0;
+                    while v1 < s.len() && s[v1] != b'\n' && s[v1] != b'\r' {
+                        v1 = v1 + 1;
+                    }
+                    self.ccver.push_str(s.slice(v0, v1));
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            let probe = if unsafe shim::sc_host_platform() == 0 {
+                "ccache -V >nul 2>&1"; // cmd.exe has no /dev/null
+            } else {
+                "ccache -V >/dev/null 2>&1";
+            };
+            if shell(probe) == 0 {
+                self.cc.push_str("ccache ");
+            }
+            self.cc.push_string(&self.cc_raw);
+            self.ccver = cc_version(&self.cc, self.pdir.as_str());
+        }
+        self.cmd_prefix = self.cc.clone();
+        self.cmd_prefix.push_string(&self.cc_tail);
+    }
+
+    // Sync one finished file raw -> gen (byte-compare keeps the mtime anchor); a source also gets
+    // its compile planned and the pool pumped.
+    pub fn on_file(self: &mut Self, path: str, kind: i32) {
+        let rel = path.slice(self.src_len + 1, path.len());
+        let content = loader::read_file(path);
+        if content.is_none() {
+            eprintln("build: cannot read '{}'", path);
+            self.ret = 1;
+            return;
+        }
+        let body = content.unwrap();
+        let dp = join2(self.gen.as_str(), rel);
+        if !file_eq(dp.as_str(), &body) {
+            let full = dp.as_str();
+            let mut k = full.len();
+            while k > 0 && full[k - 1] != b'/' {
+                k = k - 1;
+            }
+            if k > 0 {
+                let dir = String::from_str(full.slice(0, k - 1));
+                mkdirs(dir.as_str());
+            }
+            let f = stdio::fopen(dp.as_str(), "wb");
+            if f == null {
+                eprintln("build: cannot write '{}'", dp.as_str());
+                self.ret = 1;
+                return;
+            }
+            unsafe stdio::fwrite(body.as_str().ptr(), 1, body.len(), f);
+            unsafe stdio::fclose(f);
+        }
+        if kind != 1 {
+            return;
+        }
+        self.plan_c(rel);
+        self.pump();
+    }
+
+    // Staleness + command construction for one gen-relative .c; stale units join pend, every unit's
+    // object joins the link list.
+    pub fn plan_c(self: &mut Self, rel: str) {
+        self.ensure_cc();
+        self.total_c = self.total_c + 1;
+        let mut cpath = join2(self.gen.as_str(), rel);
+        let mut opath = join2(self.obj.as_str(), rel.slice(0, rel.len() - 2));
+        opath.push_str(".o");
+        let stem = opath.as_str().slice(0, opath.len() - 2);
+        let mut dpath = String::from_str(stem);
+        dpath.push_str(".d");
+        let mut cmdpath = String::from_str(stem);
+        cmdpath.push_str(".cmd");
+        let mut cmd = self.cmd_prefix.clone();
+        push_quoted(&mut cmd, cpath.as_str());
+        cmd.push_str(" -o");
+        push_quoted(&mut cmd, opath.as_str());
+        let mut fp = self.ccver.clone();
+        fp.push_str(" | ");
+        fp.push_string(&cmd);
+        let mut fp_ok = false;
+        let mut prev_ms: i64 = 0;
+        let old = loader::read_file(cmdpath.as_str());
+        if !old.is_none() {
+            let ob = old.unwrap();
+            let s = ob.as_str();
+            let mut e: usize = 0;
+            while e < s.len() && s[e] != b'\n' {
+                e = e + 1;
+            }
+            fp_ok = s.slice(0, e) == fp.as_str();
+            if e < s.len() {
+                let ms = s.slice(e + 1, s.len()).parse_i64();
+                if !ms.is_none() {
+                    prev_ms = ms.unwrap();
+                }
+            }
+        }
+        if !fp_ok || obj_stale(&mut cpath, &mut opath, dpath.as_str()) {
+            let full = opath.as_str();
+            let mut k = full.len();
+            while k > 0 && full[k - 1] != b'/' {
+                k = k - 1;
+            }
+            let dir = String::from_str(full.slice(0, k - 1));
+            mkdirs(dir.as_str());
+            let mut log = opath.clone();
+            log.push_str(".log");
+            cmd.push_str(" > \"");
+            cmd.push_str(log.as_str());
+            cmd.push_str("\" 2>&1");
+            self.pend.push(Pend { cmd: cmd, fp: fp, log: log, cmdpath: cmdpath, prev_ms: prev_ms });
+            self.stale_n = self.stale_n + 1;
+        }
+        self.objs.push(opath.clone());
+    }
+
+    // Fill free slots (longest-known-first) and reap whatever already exited; never blocks.
+    pub fn pump(self: &mut Self) {
+        loop {
+            while self.window.len() != 0 {
+                let mut pids = Vector::<i64>::new();
+                for i in 0..self.window.len() {
+                    pids.push(self.window.at(i).pid);
+                }
+                let mut code: i32 = 0;
+                let idx = unsafe shim::sc_try_wait(&pids[0], self.window.len() as i32, &mut code);
+                if idx < 0 {
+                    break;
+                }
+                let mut j = self.window.remove(idx as usize).unwrap();
+                if finish_job(&mut j, code) != 0 {
+                    self.ret = 1;
+                }
+            }
+            if self.pend.len() == 0 || self.window.len() as u32 >= self.jobs {
+                break;
+            }
+            self.pend.sort_by(pend_cmp);
+            let mut w = self.pend.remove(0).unwrap();
+            let pid = unsafe shim::sc_spawn(w.cmd.cstr());
+            if pid < 0 {
+                eprintln("build: cannot spawn compiler");
+                self.ret = 1;
+                unsafe shim::sc_unlink(w.log.cstr());
+            } else {
+                self.window.push(
+                    Job {
+                        pid: pid,
+                        fp: w.fp.clone(),
+                        log: w.log.clone(),
+                        cmdpath: w.cmdpath.clone(),
+                        start: unsafe shim::sc_ticks_ms(),
+                    },
+                );
+            }
+        }
+    }
+
+    // Run everything left to completion (blocking): only called once the emit workers are gone, so
+    // sc_wait_any's waitpid(-1) cannot reap anything but our compile jobs. `discard` abandons units
+    // not yet started -- the error path, which still must reap what is in flight.
+    pub fn drain(self: &mut Self, discard: bool) {
+        if discard {
+            self.pend.truncate(0);
+        }
+        while self.pend.len() != 0 || self.window.len() != 0 {
+            while self.pend.len() != 0 && self.window.len() as u32 < self.jobs {
+                self.pend.sort_by(pend_cmp);
+                let mut w = self.pend.remove(0).unwrap();
+                let pid = unsafe shim::sc_spawn(w.cmd.cstr());
+                if pid < 0 {
+                    eprintln("build: cannot spawn compiler");
+                    self.ret = 1;
+                    unsafe shim::sc_unlink(w.log.cstr());
+                } else {
+                    self.window.push(
+                        Job {
+                            pid: pid,
+                            fp: w.fp.clone(),
+                            log: w.log.clone(),
+                            cmdpath: w.cmdpath.clone(),
+                            start: unsafe shim::sc_ticks_ms(),
+                        },
+                    );
+                }
+            }
+            if self.window.len() == 0 {
+                break;
+            }
+            let mut pids = Vector::<i64>::new();
+            for i in 0..self.window.len() {
+                pids.push(self.window.at(i).pid);
+            }
+            let mut code: i32 = 0;
+            let idx = unsafe shim::sc_wait_any(&pids[0], self.window.len() as i32, &mut code);
+            if idx < 0 {
+                eprintln("build: wait failed");
+                self.ret = 1;
+                break;
+            }
+            let mut j = self.window.remove(idx as usize).unwrap();
+            if finish_job(&mut j, code) != 0 {
+                self.ret = 1;
+            }
+        }
+    }
+}
+
+fn stream_notify(ctx: *mut void, path: str, kind: i32) {
+    let s = ctx as *mut CcStream;
+    s.on_file(path, kind);
+}
+
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
 // the transpiled C lands in <out-dir>/<raw> first.
 // link_kind: 0 = executable, 1 = static library (ar), 2 = shared library (cc -shared).
@@ -562,163 +830,124 @@ fn engine_build(
     let prof = m.profiles.at(pi as usize);
     let t0 = unsafe shim::sc_ticks_ms();
 
-    // 1) transpile the closure to <out-dir>/<raw>
-    let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
-    if !p.ok {
-        return 1;
-    }
+    // Compile-side setup happens BEFORE the transpile: the EmitSink streams each finished TU into
+    // the worker pool, overlapping cc with the remainder of the emit pass.
     let srcgen = join2(m.out_dir.as_str(), raw);
-    p.gen_root = srcgen.clone();
-
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
-    p.ceval = &mut ceval;
-    let rc = run_package(&mut p, null, "", target, lint, "");
-    if rc != 0 {
-        return rc;
-    }
-    let t_transpile = unsafe shim::sc_ticks_ms();
-
-    // 2) content-sync into <out-dir>/<sub>/gen (unchanged files keep their mtime -- the
-    // staleness anchor); objects mirror it under <out-dir>/<sub>/obj.
     let pdir = join2(m.out_dir.as_str(), sub);
     let gen = join2(pdir.as_str(), "gen");
     let obj = join2(pdir.as_str(), "obj");
     mkdirs(gen.as_str());
     mkdirs(obj.as_str());
-    let mut ret = sync_tree(srcgen.as_str(), gen.as_str());
+    let jobs: u32 = if jobs_override != 0 {
+        jobs_override;
+    } else if m.jobs != 0 {
+        m.jobs;
+    } else {
+        (unsafe shim::sc_ncpu()) as u32;
+    };
+    let cc_raw = resolve_cc_raw(m);
+    let mut tail = String::new();
+    tail.push_byte(b' ');
+    tail.push_string(&m.cstd);
+    if m.lib_shared && target != 0 {
+        tail.push_str(" -fPIC"); // shared-library objects need it; harmless for the exe targets
+    }
+    push_all(&mut tail, &m.cflags);
+    push_profile(&mut tail, &prof.cflags, target);
+    tail.push_str(" -MMD -c");
+    // The ccache probe and `cc --version` cost ~50ms of shell round-trips; a background process
+    // resolves both while the transpile runs (ensure_cc collects it at first use). POSIX only:
+    // the compound command below is sh syntax, so Windows resolves synchronously on demand.
+    let ccver_path = join2(pdir.as_str(), ".ccver");
+    let mut probe_pid: i64 = -1;
+    if unsafe shim::sc_host_platform() != 0 {
+        let mut pc = String::from_str("{ ccache -V >/dev/null 2>&1 && echo 1 || echo 0; ");
+        pc.push_string(&cc_raw);
+        pc.push_str(" --version; } >");
+        push_quoted(&mut pc, ccver_path.as_str());
+        pc.push_str(" 2>/dev/null");
+        probe_pid = unsafe shim::sc_spawn(pc.cstr());
+    }
+    let mut stream = CcStream {
+        src_len: srcgen.len(),
+        gen: gen.clone(),
+        obj: obj.clone(),
+        pdir: pdir.clone(),
+        cc_raw: cc_raw,
+        cc_tail: tail,
+        probe_pid: probe_pid,
+        ccver_path: ccver_path,
+        cc: String::new(),
+        cmd_prefix: String::new(),
+        ccver: String::new(),
+        cc_ready: false,
+        jobs: jobs,
+        objs: Vector::<String>::new(),
+        pend: Vector::<Pend>::new(),
+        window: Vector::<Job>::new(),
+        total_c: 0,
+        stale_n: 0,
+        ret: 0,
+    };
+    let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
+
+    // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool
+    let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
+    if !p.ok {
+        return 1;
+    }
+    p.gen_root = srcgen.clone();
+    let pkg = (&mut p) as *mut loader::Package;
+    let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
+    p.ceval = &mut ceval;
+    let rc = run_package(&mut p, null, "", target, lint, "", &mut sink, jobs);
+    if rc != 0 {
+        stream.drain(true); // reap what is in flight; abandon what has not started
+        return rc;
+    }
+    let t_transpile = unsafe shim::sc_ticks_ms();
+
+    // 2) whole-tree content-sync as the safety net: every file was already synced when its
+    // notification arrived, so this is a byte-compare no-op that (a) unlinks gen/ orphans and
+    // (b) surfaces anything the stream never heard about -- planned below off the directory walk.
+    let mut ret = stream.ret;
+    if ret == 0 {
+        ret = sync_tree(srcgen.as_str(), gen.as_str());
+    }
     let t_sync = unsafe shim::sc_ticks_ms();
     let mut t_compile = t_sync;
     let mut t_link = t_sync;
     let mut total_c: usize = 0;
     let mut stale_n: usize = 0;
-    let mut jobs: u32 = 0;
     let mut linked = false;
 
     if ret == 0 {
-        // 3) compile stale objects: longest-first, wait-any worker pool
+        // 3) plan any .c the stream did not see (none expected), then run the pool dry
         let mut rels = Vector::<String>::new();
         walk_files(gen.as_str(), gen.len(), &mut rels);
-        let cc = resolve_cc(m);
-        let ccver = cc_version(&cc, pdir.as_str());
-        jobs = if jobs_override != 0 {
-            jobs_override;
-        } else if m.jobs != 0 {
-            m.jobs;
-        } else {
-            (unsafe shim::sc_ncpu()) as u32;
-        };
-        let mut objs = Vector::<String>::new();
-        let mut pend = Vector::<Pend>::new();
         for i in 0..rels.len() {
             let rel = rels.at(i).as_str();
             if !rel.ends_with(".c") {
                 continue;
             }
-            total_c = total_c + 1;
-            let mut cpath = join2(gen.as_str(), rel);
             let mut opath = join2(obj.as_str(), rel.slice(0, rel.len() - 2));
             opath.push_str(".o");
-            let stem = opath.as_str().slice(0, opath.len() - 2);
-            let mut dpath = String::from_str(stem);
-            dpath.push_str(".d");
-            let mut cmdpath = String::from_str(stem);
-            cmdpath.push_str(".cmd");
-            let mut cmd = cc.clone();
-            cmd.push_byte(b' ');
-            cmd.push_string(&m.cstd);
-            if m.lib_shared && target != 0 {
-                cmd.push_str(" -fPIC"); // shared-library objects need it; harmless for the exe targets
+            if !contains(&stream.objs, opath.as_str()) {
+                stream.plan_c(rel);
             }
-            push_all(&mut cmd, &m.cflags);
-            push_profile(&mut cmd, &prof.cflags, target);
-            cmd.push_str(" -MMD -c");
-            push_quoted(&mut cmd, cpath.as_str());
-            cmd.push_str(" -o");
-            push_quoted(&mut cmd, opath.as_str());
-            let mut fp = ccver.clone();
-            fp.push_str(" | ");
-            fp.push_string(&cmd);
-            // an object is stale when a dependency is newer OR the command that produced it
-            // (compiler version, flags, paths) is not the one we are about to run
-            let mut fp_ok = false;
-            let mut prev_ms: i64 = 0;
-            let old = loader::read_file(cmdpath.as_str());
-            if !old.is_none() {
-                let ob = old.unwrap();
-                let s = ob.as_str();
-                let mut e: usize = 0;
-                while e < s.len() && s[e] != b'\n' {
-                    e = e + 1;
-                }
-                fp_ok = s.slice(0, e) == fp.as_str();
-                if e < s.len() {
-                    let ms = s.slice(e + 1, s.len()).parse_i64();
-                    if !ms.is_none() {
-                        prev_ms = ms.unwrap();
-                    }
-                }
-            }
-            if !fp_ok || obj_stale(&mut cpath, &mut opath, dpath.as_str()) {
-                let full = opath.as_str();
-                let mut k = full.len();
-                while k > 0 && full[k - 1] != b'/' {
-                    k = k - 1;
-                }
-                let dir = String::from_str(full.slice(0, k - 1));
-                mkdirs(dir.as_str());
-                let mut log = opath.clone();
-                log.push_str(".log");
-                cmd.push_str(" > \"");
-                cmd.push_str(log.as_str());
-                cmd.push_str("\" 2>&1");
-                pend.push(Pend { cmd: cmd, fp: fp, log: log, cmdpath: cmdpath, prev_ms: prev_ms });
-            }
-            objs.push(opath.clone());
         }
-        pend.sort_by(pend_cmp);
-        stale_n = pend.len();
+        stream.drain(false);
+        stream.ensure_cc(); // a build with zero .c files never planned one; the link still needs cc
+        let cc = stream.cc.clone();
+        let ccver = stream.ccver.clone();
+        total_c = stream.total_c;
+        stale_n = stream.stale_n;
+        ret = stream.ret;
         let compiled = stale_n != 0;
-        let mut window = Vector::<Job>::new();
-        while pend.len() != 0 || window.len() != 0 {
-            while pend.len() != 0 && window.len() as u32 < jobs {
-                let mut w = pend.remove(0).unwrap();
-                let pid = unsafe shim::sc_spawn(w.cmd.cstr());
-                if pid < 0 {
-                    eprintln("build: cannot spawn compiler");
-                    ret = 1;
-                    unsafe shim::sc_unlink(w.log.cstr());
-                } else {
-                    window.push(
-                        Job {
-                            pid: pid,
-                            fp: w.fp.clone(),
-                            log: w.log.clone(),
-                            cmdpath: w.cmdpath.clone(),
-                            start: unsafe shim::sc_ticks_ms(),
-                        },
-                    );
-                }
-            }
-            if window.len() == 0 {
-                break;
-            }
-            let mut pids = Vector::<i64>::new();
-            for i in 0..window.len() {
-                pids.push(window.at(i).pid);
-            }
-            let mut code: i32 = 0;
-            let idx = unsafe shim::sc_wait_any(&pids[0], window.len() as i32, &mut code);
-            if idx < 0 {
-                eprintln("build: wait failed");
-                ret = 1;
-                break;
-            }
-            let mut j = window.remove(idx as usize).unwrap();
-            if finish_job(&mut j, code) != 0 {
-                ret = 1;
-            }
-        }
+        // The link list is sorted so its order never depends on notification arrival order --
+        // the link fingerprint embeds the full command.
+        let mut objs = replace(&mut stream.objs, Vector::<String>::new());
+        objs.sort_by(name_cmp);
         t_compile = unsafe shim::sc_ticks_ms();
         t_link = t_compile;
 
@@ -1363,7 +1592,20 @@ pub fn manifest_test(
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
-    return run_package(&mut p, topts, "", target, false, "");
+    return run_package(
+        &mut p,
+        topts,
+        "",
+        target,
+        false,
+        "",
+        null,
+        if jobs_override != 0 {
+            jobs_override;
+        } else {
+            m.jobs;
+        },
+    );
 }
 
 // Every .spc under <bench-dir>, as `import <bench-dir>::<path>;` lines. Returns how many were found.
