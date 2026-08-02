@@ -978,10 +978,6 @@ extend Codegen {
         };
     }
 
-    pub const fn take_ast(self: &mut Self) *mut Ast {
-        return self.ast;
-    }
-
     pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }

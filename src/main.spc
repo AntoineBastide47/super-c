@@ -40,6 +40,15 @@ fn run_file(
     cflags: str,
 ) i32 {
     let mut p = loader::package_load(path, std_dir, bootstrap_tags, target);
+    // A standalone script is a binary with no test suite to count as callers: unreachable pub
+    // functions are dead weight. Project trees get this from the whole-workspace lint instead,
+    // where @test roots keep test-only helpers alive.
+    let manf = stdio::fopen("build.toml", "rb");
+    if manf != null {
+        unsafe stdio::fclose(manf);
+    } else {
+        p.lint_pub = lint;
+    }
     let mut rc: i32 = 1;
     if p.ok {
         let mut ceval = ce::ConstEval::new(&mut p, ce_steps, ce_mem);
@@ -466,11 +475,13 @@ fn lint_batch(
     target: i32,
     fix: bool,
     sc: bool,
+    lint_pub: bool,
 ) i32 {
     let alt = lint_alt();
     let mut pass = 0;
     loop {
         let mut p = lint_load_batch(files, root, alt, std_dir, target);
+        p.lint_pub = lint_pub;
         if !p.ok {
             return 1;
         }
@@ -520,7 +531,7 @@ fn lint_batch(
         pass = pass + 1;
     }
     // a final plain pass prints what remains and sets the exit code
-    return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc);
+    return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
 }
 
 fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
@@ -533,7 +544,7 @@ fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target:
         };
         let mut files = Vector::<String>::new();
         let crc = lint_collect(path, &mut files);
-        let brc = lint_batch(&files, droot, std_dir, ce_steps, ce_mem, target, fix, sc);
+        let brc = lint_batch(&files, droot, std_dir, ce_steps, ce_mem, target, fix, sc, false);
         return if crc != 0 || brc != 0 {
             1;
         } else {
@@ -618,6 +629,8 @@ enum Mode {
     MODE_TEST, // `super-c test`: tests/ by convention
     MODE_BENCH, // `super-c bench`: bench/main.spc by convention
     MODE_LSP, // `super-c lsp`: language server over stdio
+    MODE_NEW, // `super-c new <name>`: scaffold a project directory (cargo new)
+    MODE_INIT, // `super-c init`: scaffold a project in the current directory (cargo init)
 }
 
 fn subcommand(arg: str) Mode {
@@ -651,6 +664,12 @@ fn subcommand(arg: str) Mode {
         },
         "lsp" => {
             Mode::MODE_LSP;
+        },
+        "new" => {
+            Mode::MODE_NEW;
+        },
+        "init" => {
+            Mode::MODE_INIT;
         },
         _ => {
             Mode::MODE_DEFAULT;
@@ -709,6 +728,8 @@ struct BuildOpts<'a> {
     pub cstd: str<'a>, // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
     pub cc: str<'a>, // --cc=BIN: override the C compiler (else manifest `cc`, else $CC, else cc)
     pub jobs: u32, // --jobs=N (0 = manifest / core count)
+    pub bin_sel: str<'a>, // --bin=NAME: build/run only that binary target
+    pub lib_sel: bool, // --lib: build only the [lib] target
 }
 
 fn build_flag(o: &mut BuildOpts, co: &mut CommonOpts, arg: str) bool {
@@ -720,6 +741,10 @@ fn build_flag(o: &mut BuildOpts, co: &mut CommonOpts, arg: str) bool {
         o.cstd = arg[7..];
     } else if arg.starts_with("--cc=") {
         o.cc = arg[5..];
+    } else if arg.starts_with("--bin=") {
+        o.bin_sel = arg[6..];
+    } else if arg == "--lib" {
+        o.lib_sel = true;
     } else if arg.starts_with("--jobs=") {
         let v = unsafe stdlib::atoi((&arg[7]) as *const char);
         if v < 1 {
@@ -731,6 +756,50 @@ fn build_flag(o: &mut BuildOpts, co: &mut CommonOpts, arg: str) bool {
         return false;
     }
     return true;
+}
+
+fn is_dir(path: str) bool {
+    let mut p = String::from_str(path);
+    return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
+}
+
+fn canon_cwd() String {
+    let mut dot = String::from_str(".");
+    let mut buf = PathBuf {};
+    if unsafe shim::sc_realpath(dot.cstr(), &mut buf[0]) != null {
+        return String::from_cstr(&buf[0]);
+    }
+    return dot;
+}
+
+// Cargo-style manifest discovery: when the cwd has no build.toml, walk toward the filesystem root and
+// chdir to the nearest directory that has one. A miss changes nothing -- the caller reports it.
+fn chdir_to_manifest() {
+    let probe = stdio::fopen("build.toml", "rb");
+    if probe != null {
+        unsafe stdio::fclose(probe);
+        return;
+    }
+    let cwd = canon_cwd();
+    let mut end = cwd.len();
+    while end > 1 {
+        while end > 1 && cwd.as_str()[end - 1] != b'/' {
+            end = end - 1;
+        }
+        if end <= 1 {
+            break;
+        }
+        end = end - 1; // drop the trailing '/'
+        let mut dir = String::from_str(cwd.as_str().slice(0, end));
+        let mut man = dir.clone();
+        man.push_str("/build.toml");
+        let f = stdio::fopen(man.as_str(), "rb");
+        if f != null {
+            unsafe stdio::fclose(f);
+            let _ = unsafe shim::sc_chdir(dir.cstr());
+            return;
+        }
+    }
 }
 
 fn main(argv: Vector<str>) i32 {
@@ -757,7 +826,7 @@ fn main(argv: Vector<str>) i32 {
         lint: true,
         bad: false,
     };
-    let mut bo = BuildOpts { profile: "", out_dir: "", cstd: "", cc: "", jobs: 0 };
+    let mut bo = BuildOpts { profile: "", out_dir: "", cstd: "", cc: "", jobs: 0, bin_sel: "", lib_sel: false };
 
     let mut i: usize = if mode == Mode::MODE_DEFAULT {
         1usize;
@@ -929,12 +998,35 @@ fn main(argv: Vector<str>) i32 {
                 i = i + 1;
             }
         },
+        MODE_NEW => {
+            while i < argc {
+                if !argv[i].starts_with("--") && file.len() == 0 {
+                    file = argv[i]; // the project name
+                } else {
+                    co.bad = true;
+                }
+                i = i + 1;
+            }
+            if file.len() == 0 {
+                co.bad = true; // `new` needs a project name
+            }
+        },
+        MODE_INIT => {
+            if i < argc {
+                co.bad = true; // `init` scaffolds the current directory, no arguments
+            }
+        },
     };
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null) {
         co.bad = true;
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
     let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_COMMAND || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
+    // cargo-style manifest discovery: a manifest command run from a subdirectory walks up to the
+    // nearest build.toml and works from there
+    if manifest_mode {
+        chdir_to_manifest();
+    }
     // Only a script needs a path of its own: every other mode either reads build.toml, needs no
     // input at all (lsp), or discovers the project itself (fmt/lint).
     if co.bad || file.len() == 0 && mode == Mode::MODE_DEFAULT {
@@ -956,6 +1048,8 @@ COMMANDS:
     fmt  [<path>...]       format source in place (or verify with --check)
     lint [<path>...]       report lint warnings (apply fixes with --fix)
     lsp                    run the language server over stdio
+    new <name>             scaffold a new project directory
+    init                   scaffold a project in the current directory
 
 OPTIONS:
     -o <path>              output binary path (build/release with a file)
@@ -964,6 +1058,8 @@ OPTIONS:
     --jobs=N               parallel C compile jobs (default: one per core)
     --cstd=F               C standard passed to the C compiler
     --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
+    --bin=NAME             build/run only that binary target
+    --lib                  build only the [lib] target
     --target=T             cross-compilation target: windows|macos|linux
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
@@ -1002,6 +1098,22 @@ OPTIONS:
             }
         }
     }
+    if mode == Mode::MODE_NEW {
+        if is_dir(file) {
+            eprintln("new: '{}' already exists", file);
+            return 1;
+        }
+        return bsys::scaffold_project(file, file);
+    }
+    if mode == Mode::MODE_INIT {
+        let cwd = canon_cwd();
+        let name = cwd.as_str();
+        let mut k = name.len();
+        while k > 0 && name[k - 1] != b'/' {
+            k = k - 1;
+        }
+        return bsys::scaffold_project(".", name.slice(k, name.len()));
+    }
     if mode == Mode::MODE_FMT {
         let mut rc = 0;
         for k in 0..paths.len() {
@@ -1033,7 +1145,14 @@ OPTIONS:
                     files.push(String::from_str(pa));
                 }
             }
-            if files.len() != 0 && lint_batch(&files, ".", std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
+            // whole-workspace lint of a lib-less manifest: unreachable pub functions are findings
+            let mut lpub = false;
+            let mo = bman::load("build.toml");
+            if !mo.is_none() {
+                let man = mo.unwrap();
+                lpub = man.lib_name.len() == 0;
+            }
+            if files.len() != 0 && lint_batch(&files, ".", std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc, lpub) != 0 {
                 rc = 1;
             }
         } else {
@@ -1120,6 +1239,20 @@ OPTIONS:
                     &man,
                     profile,
                     out_bin,
+                    bo.bin_sel,
+                    jobs,
+                    std_dir,
+                    ce_steps,
+                    ce_mem,
+                    target,
+                    bootstrap_tags,
+                    lint,
+                );
+            } else if out_bin.len() != 0 {
+                rc = bsys::manifest_build(
+                    &man,
+                    profile,
+                    out_bin,
                     jobs,
                     std_dir,
                     ce_steps,
@@ -1129,10 +1262,11 @@ OPTIONS:
                     lint,
                 );
             } else {
-                rc = bsys::manifest_build(
+                rc = bsys::manifest_build_all(
                     &man,
                     profile,
-                    out_bin,
+                    bo.bin_sel,
+                    bo.lib_sel,
                     jobs,
                     std_dir,
                     ce_steps,

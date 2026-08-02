@@ -441,6 +441,27 @@ const fn base_name(p: str) str {
 /// supplies it for us -- the engine links to `<bin>.tmp` and renames, so the C compiler never sees a name
 /// without an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
 /// `.exe` to a name that has none and then fails to find it. `pub` because the driver names binaries too.
+/// Platform artifact name for a library target: static -> lib<name>.a everywhere (mingw uses ar
+/// archives too); shared -> <name>.dll (windows) / lib<name>.dylib (macos) / lib<name>.so (linux).
+pub fn lib_file(name: str, shared: bool, target: i32) String {
+    let mut s = String::new();
+    if shared && target == 0 {
+        s.push_str(name);
+        s.push_str(".dll");
+        return s;
+    }
+    s.push_str("lib");
+    s.push_str(name);
+    if !shared {
+        s.push_str(".a");
+    } else if target == 1 {
+        s.push_str(".dylib");
+    } else {
+        s.push_str(".so");
+    }
+    return s;
+}
+
 pub fn exe_name(base: str, target: i32) String {
     let mut s = String::from_str(base);
     if target == 0 && !base.ends_with(".exe") {
@@ -514,6 +535,7 @@ pub const fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> 
 
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
 // the transpiled C lands in <out-dir>/<raw> first.
+// link_kind: 0 = executable, 1 = static library (ar), 2 = shared library (cc -shared).
 fn engine_build(
     m: &mf::Manifest,
     prof_name: str,
@@ -530,6 +552,7 @@ fn engine_build(
     target: i32,
     bootstrap_tags: bool,
     lint: bool,
+    link_kind: i32,
 ) i32 {
     let pi = m.profile_index(prof_name);
     if pi < 0 {
@@ -546,6 +569,7 @@ fn engine_build(
     }
     let srcgen = join2(m.out_dir.as_str(), raw);
     p.gen_root = srcgen.clone();
+
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
@@ -603,6 +627,9 @@ fn engine_build(
             let mut cmd = cc.clone();
             cmd.push_byte(b' ');
             cmd.push_string(&m.cstd);
+            if m.lib_shared && target != 0 {
+                cmd.push_str(" -fPIC"); // shared-library objects need it; harmless for the exe targets
+            }
             push_all(&mut cmd, &m.cflags);
             push_profile(&mut cmd, &prof.cflags, target);
             cmd.push_str(" -MMD -c");
@@ -702,32 +729,48 @@ fn engine_build(
             let bmt = unsafe shim::sc_mtime(binb.cstr());
             let mut tmp = String::from_str(bin);
             tmp.push_str(".tmp");
-            let mut cmd = cc.clone();
-            cmd.push_str(" -o");
-            push_quoted(&mut cmd, tmp.as_str());
-            for i in 0..objs.len() {
-                push_quoted(&mut cmd, objs.at(i).as_str());
-            }
-            push_all(&mut cmd, &m.ldflags);
-            push_profile(&mut cmd, &prof.ldflags, target);
-            // @c.link flags recorded by the emitter
-            let lfp = join2(gen.as_str(), "__ldflags");
-            let lf = loader::read_file(lfp.as_str());
-            if !lf.is_none() {
-                let body = lf.unwrap();
-                let s = body.as_str();
-                let mut a: usize = 0;
-                for b in 0..s.len() {
-                    if s[b] == b'\n' {
-                        if b > a {
-                            cmd.push_byte(b' ');
-                            cmd.push_str(s.slice(a, b));
-                        }
-                        a = b + 1;
+            let mut cmd = String::new();
+            if link_kind == 1 {
+                // a static library is an archive: no link flags, no libs
+                cmd.push_str("ar rcs");
+                push_quoted(&mut cmd, tmp.as_str());
+                for i in 0..objs.len() {
+                    push_quoted(&mut cmd, objs.at(i).as_str());
+                }
+            } else {
+                cmd = cc.clone();
+                if link_kind == 2 {
+                    cmd.push_str(" -shared");
+                    if target != 0 {
+                        cmd.push_str(" -fPIC");
                     }
                 }
+                cmd.push_str(" -o");
+                push_quoted(&mut cmd, tmp.as_str());
+                for i in 0..objs.len() {
+                    push_quoted(&mut cmd, objs.at(i).as_str());
+                }
+                push_all(&mut cmd, &m.ldflags);
+                push_profile(&mut cmd, &prof.ldflags, target);
+                // @c.link flags recorded by the emitter
+                let lfp = join2(gen.as_str(), "__ldflags");
+                let lf = loader::read_file(lfp.as_str());
+                if !lf.is_none() {
+                    let body = lf.unwrap();
+                    let s = body.as_str();
+                    let mut a: usize = 0;
+                    for b in 0..s.len() {
+                        if s[b] == b'\n' {
+                            if b > a {
+                                cmd.push_byte(b' ');
+                                cmd.push_str(s.slice(a, b));
+                            }
+                            a = b + 1;
+                        }
+                    }
+                }
+                push_all(&mut cmd, &m.ldlibs);
             }
-            push_all(&mut cmd, &m.ldlibs);
             let mut fp = ccver.clone();
             fp.push_str(" | ");
             fp.push_string(&cmd);
@@ -772,7 +815,7 @@ fn engine_build(
                         eprintln("build: cannot move '{}' into place", bin);
                         ret = 1;
                     } else {
-                        if prof.strip {
+                        if prof.strip && link_kind == 0 {
                             let mut st = String::from_str("strip");
                             push_quoted(&mut st, bin);
                             shell(st.as_str());
@@ -841,6 +884,7 @@ pub fn manifest_build(
             target,
             bootstrap_tags,
             lint,
+            0,
         );
     }
     let mut path = String::new();
@@ -861,6 +905,222 @@ pub fn manifest_build(
     }
     let dest = exe_name(m.bin.as_str(), target);
     return install_bin(path.as_str(), dest.as_str());
+}
+
+// Build one named target through the engine into its own <out-dir>/<profile><suffix> tree (per-target
+// gen/obj caches: different closures must not thrash one another's sync). `out` receives the artifact.
+fn target_build(
+    m: &mf::Manifest,
+    prof_name: str,
+    root: str,
+    suffix: str,
+    raw: str,
+    leaf: str,
+    link_kind: i32,
+    jobs_override: u32,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    bootstrap_tags: bool,
+    lint: bool,
+    out: &mut String,
+) i32 {
+    let mut sub = String::from_str(prof_name);
+    sub.push_str(suffix);
+    let dir = join2(m.out_dir.as_str(), sub.as_str());
+    let path = join2(dir.as_str(), leaf);
+    let rc = engine_build(
+        m,
+        prof_name,
+        root,
+        dirname_of(m.root.as_str()),
+        "",
+        sub.as_str(),
+        raw,
+        path.as_str(),
+        jobs_override,
+        std_dir,
+        ce_steps,
+        ce_mem,
+        target,
+        bootstrap_tags,
+        lint,
+        link_kind,
+    );
+    *out = path;
+    return rc;
+}
+
+/// `super-c build`/`release` over every manifest target (cargo-style): the [lib] section's static and/or
+/// shared artifacts, the primary `bin` (installed onto the manifest's `bin` path), and each [bin.NAME].
+/// `sel_bin`/`sel_lib` restrict to one target (`--bin=NAME` / `--lib`).
+pub fn manifest_build_all(
+    m: &mf::Manifest,
+    profile: str,
+    sel_bin: str,
+    sel_lib: bool,
+    jobs_override: u32,
+    std_dir: *const char,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    bootstrap_tags: bool,
+    lint: bool,
+) i32 {
+    let prof_name = resolve_profile(m, profile);
+    let selected = sel_bin.len() != 0 || sel_lib;
+    let mut matched = false;
+    if m.lib_name.len() != 0 && (!selected || sel_lib) {
+        matched = true;
+        if m.lib_static {
+            let leaf = lib_file(m.lib_name.as_str(), false, target);
+            let mut path = String::new();
+            let rc = target_build(
+                m,
+                prof_name,
+                m.lib_root.as_str(),
+                "-lib",
+                "raw-lib",
+                leaf.as_str(),
+                1,
+                jobs_override,
+                std_dir,
+                ce_steps,
+                ce_mem,
+                target,
+                bootstrap_tags,
+                lint,
+                &mut path,
+            );
+            if rc != 0 {
+                return rc;
+            }
+            println("built {}", path.as_str());
+        }
+        if m.lib_shared {
+            let leaf = lib_file(m.lib_name.as_str(), true, target);
+            let mut path = String::new();
+            let rc = target_build(
+                m,
+                prof_name,
+                m.lib_root.as_str(),
+                "-lib",
+                "raw-lib",
+                leaf.as_str(),
+                2,
+                jobs_override,
+                std_dir,
+                ce_steps,
+                ce_mem,
+                target,
+                bootstrap_tags,
+                false, // the static pass already linted this closure
+                &mut path,
+            );
+            if rc != 0 {
+                return rc;
+            }
+            println("built {}", path.as_str());
+        }
+    }
+    if m.bin.len() != 0 && (!selected || sel_bin == m.bin.as_str()) {
+        matched = true;
+        let rc = manifest_build(m, profile, "", jobs_override, std_dir, ce_steps, ce_mem, target, bootstrap_tags, lint);
+        if rc != 0 {
+            return rc;
+        }
+    }
+    for i in 0..m.bins.len() {
+        let bt = m.bins.at(i);
+        if selected && sel_bin != bt.name.as_str() {
+            continue;
+        }
+        matched = true;
+        let mut suffix = String::from_str("-bin-");
+        suffix.push_string(&bt.name);
+        let mut raw = String::from_str("raw-bin-");
+        raw.push_string(&bt.name);
+        let leaf = exe_name(bt.name.as_str(), target);
+        let mut path = String::new();
+        let rc = target_build(
+            m,
+            prof_name,
+            bt.root.as_str(),
+            suffix.as_str(),
+            raw.as_str(),
+            leaf.as_str(),
+            0,
+            jobs_override,
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            bootstrap_tags,
+            lint,
+            &mut path,
+        );
+        if rc != 0 {
+            return rc;
+        }
+        println("built {}", path.as_str());
+    }
+    if !matched {
+        if sel_lib {
+            eprintln("build: this manifest declares no [lib] target");
+        } else {
+            eprintln("build: no target named '{}' (check `bin` and [bin.NAME] sections)", sel_bin);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/// Scaffold a project in `dir` named `name` (cargo new/init): build.toml, src/main.spc, .gitignore,
+/// and a best-effort `git init` when no repository is present. Refuses to overwrite an existing manifest.
+pub fn scaffold_project(dir: str, name: str) i32 {
+    let man = join2(dir, "build.toml");
+    let probe = stdio::fopen(man.as_str(), "rb");
+    if probe != null {
+        unsafe stdio::fclose(probe);
+        eprintln("init: '{}' already exists", man.as_str());
+        return 1;
+    }
+    let srcdir = join2(dir, "src");
+    mkdirs(srcdir.as_str());
+    let mut toml = String::new();
+    toml.push_str("bin = \"");
+    toml.push_str(name);
+    toml.push_str("\"\nroot = \"src/main.spc\"\n");
+    if write_file(man.as_str(), toml.as_str()) != 0 {
+        eprintln("init: cannot write '{}'", man.as_str());
+        return 1;
+    }
+    let mainp = join2(srcdir.as_str(), "main.spc");
+    let mut mains = String::new();
+    mains.push_str("fn main() i32 {\n    println(\"Hello from ");
+    mains.push_str(name);
+    mains.push_str("!\");\n    return 0;\n}\n");
+    if write_file(mainp.as_str(), mains.as_str()) != 0 {
+        eprintln("init: cannot write '{}'", mainp.as_str());
+        return 1;
+    }
+    let gi = join2(dir, ".gitignore");
+    let gprobe = stdio::fopen(gi.as_str(), "rb");
+    if gprobe != null {
+        unsafe stdio::fclose(gprobe);
+    } else {
+        let _ = write_file(gi.as_str(), "/build\n");
+    }
+    let gitdir = join2(dir, ".git");
+    let mut gd = gitdir.clone();
+    if unsafe shim::sc_stat_isdir(gd.cstr()) != 1 {
+        let mut cmd = String::from_str("git init -q");
+        push_quoted(&mut cmd, dir);
+        let _ = shell(cmd.as_str()); // best-effort: no git, no repository, no error
+    }
+    println("created {} project at {}", name, dir);
+    return 0;
 }
 
 // Build the manifest's binary for `prof_name` into that profile's own directory; `out` receives its path.
@@ -896,6 +1156,7 @@ fn build_into_profile(
         target,
         bootstrap_tags,
         lint,
+        0,
     );
     *out = path;
     return rc;
@@ -908,6 +1169,7 @@ pub fn manifest_run_bin(
     m: &mf::Manifest,
     profile: str,
     bin_override: str,
+    sel_bin: str,
     jobs_override: u32,
     std_dir: *const char,
     ce_steps: u32,
@@ -918,6 +1180,49 @@ pub fn manifest_run_bin(
 ) i32 {
     let prof_name = resolve_profile(m, profile);
     let mut built = String::new();
+    if sel_bin.len() != 0 && sel_bin != m.bin.as_str() {
+        // `run --bin=NAME`: build and execute that [bin.NAME] target
+        let mut bi: i64 = -1;
+        for i in 0..m.bins.len() {
+            if m.bins.at(i).name.as_str() == sel_bin {
+                bi = i as i64;
+            }
+        }
+        if bi < 0 {
+            eprintln("run: no binary target named '{}'", sel_bin);
+            return 1;
+        }
+        let bt = m.bins.at(bi as usize);
+        let mut suffix = String::from_str("-bin-");
+        suffix.push_string(&bt.name);
+        let mut raw = String::from_str("raw-bin-");
+        raw.push_string(&bt.name);
+        let leaf = exe_name(bt.name.as_str(), target);
+        let mut path = String::new();
+        let trc = target_build(
+            m,
+            prof_name,
+            bt.root.as_str(),
+            suffix.as_str(),
+            raw.as_str(),
+            leaf.as_str(),
+            0,
+            jobs_override,
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            bootstrap_tags,
+            lint,
+            &mut path,
+        );
+        if trc != 0 {
+            return trc;
+        }
+        let mut cmd0 = String::new();
+        push_quoted(&mut cmd0, path.as_str());
+        return unsafe shim::sc_exec(cmd0.cstr());
+    }
     let rc = if bin_override.len() != 0 {
         built = exe_name(bin_override, target);
         engine_build(
@@ -936,6 +1241,7 @@ pub fn manifest_run_bin(
             target,
             bootstrap_tags,
             lint,
+            0,
         );
     } else {
         // Run the profile's own binary where it was linked; `run` builds to run, it does not install.
@@ -1314,6 +1620,7 @@ pub fn manifest_bench(
         target,
         bootstrap_tags,
         false,
+        0,
     );
     if rc != 0 || no_run {
         return rc;

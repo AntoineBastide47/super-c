@@ -1091,10 +1091,6 @@ extend tc::TypeChecker {
         }
     }
 
-    pub const fn tc_scope_enter(self: &mut Self) {
-        self.scope_depth = self.scope_depth + 1;
-    }
-
     pub fn tc_scope_exit(self: &mut Self) {
         let d = self.scope_depth;
         let mut w: u32 = 0;

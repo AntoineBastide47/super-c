@@ -107,6 +107,10 @@ pub struct Package {
     /// Batch-lint module mask (`super-c lint` over many files sharing ONE package): when non-empty,
     /// the lint passes report exactly the modules set here instead of the only_mod/prelude filter.
     pub lint_set: Vector<bool>,
+    /// Binary-project lint (`pub` earns nothing in a program nobody links against): when true, public
+    /// functions join the unused-item candidates instead of rooting the reachability graph. Set only
+    /// for whole-program lints of manifests without a [lib] target (and for script builds).
+    pub lint_pub: bool,
     /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
     /// (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
@@ -481,6 +485,7 @@ extend Package {
             cg_scratch: String::new(),
             dir_cache: DirCache::new(),
             lint_set: Vector::<bool>::new(),
+            lint_pub: false,
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
         };
@@ -2363,8 +2368,10 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
     if rel.len() > 2 && rel.byte_at(0) == b'.' && rel.byte_at(1) == b'/' {
         rel = rel.slice(2, rel.len());
     }
+    let mut from_alt = false;
     if alt.len() != 0 && rel.len() > alt.len() && rel.starts_with(alt) && rel.byte_at(alt.len()) == b'/' {
         rel = rel.slice(alt.len() + 1, rel.len());
+        from_alt = true;
     } else if root.len() > 1 && rel.len() > root.len() && rel.starts_with(root) && rel.byte_at(root.len()) == b'/' {
         rel = rel.slice(root.len() + 1, rel.len());
     }
@@ -2380,7 +2387,9 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
             ls = i as i64;
         }
     }
-    if ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice(pv as usize + 1, ls as usize) {
+    // The index collapse mirrors module_index_path, which only ever probes the PACKAGE root:
+    // an alt-rooted `a/a.spc` is imported as `a::a`, so collapsing it would fork a duplicate module.
+    if !from_alt && ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice(pv as usize + 1, ls as usize) {
         let mut sib = String::from_str(file.slice(0, file.len() - rel.len() + ls as usize));
         sib.push_str(".spc");
         let sf = stdio::fopen(sib.as_str(), "rb");

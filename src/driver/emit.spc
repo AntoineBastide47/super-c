@@ -512,13 +512,13 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
                         start: msp.start,
                         end: msp.end,
                         node: mid,
-                        root: !(reported && lint_item_candidate(a, mid, in_iface)),
+                        root: !(reported && lint_item_candidate(a, mid, in_iface, lint_pub_applies(p, m))),
                     },
                 );
             }
             continue;
         }
-        let mut root = !(reported && lint_item_candidate(a, iid, false));
+        let mut root = !(reported && lint_item_candidate(a, iid, false, lint_pub_applies(p, m)));
         // `main` in the root module is the program entry: never reported, always a root
         if !root && lint_root_mod(p, m) && it.kind == NodeKind::NODE_FUNCTION {
             let nsp = a.at_const(it.as_data.function.name).as_data.name.text;
@@ -531,18 +531,43 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
     ents.sort_by(lint_ent_cmp);
 }
 
-fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool) bool {
+// Whether the binary-project pub lint applies to module `m`: never to the std/ffi trees -- they are
+// libraries whose `pub` is API for downstream programs, even when they sit inside the workspace
+// (nested std modules do not carry the prelude flag, so the file location is the reliable signal).
+fn lint_pub_applies(p: &loader::Package, m: usize) bool {
+    if !p.lint_pub || p.modules[m].prelude {
+        return false;
+    }
+    let f = p.modules[m].file.as_str();
+    if f.starts_with("std/") || f.starts_with("ffi/") || f.starts_with("./std/") || f.starts_with("./ffi/") {
+        return false;
+    }
+    let sr = p.std_root.as_str();
+    if sr.len() != 0 && f.len() > sr.len() + 5 && f.starts_with(sr) {
+        let rest = f.slice(sr.len() + 1, f.len());
+        if rest.starts_with("std/") || rest.starts_with("ffi/") {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_too: bool) bool {
     let it = a.at_const(iid);
     if it.kind == NodeKind::NODE_FUNCTION {
         let f = it.as_data.function;
-        if f.is_public || f.is_extern || f.body == NODE_NONE || in_iface_extend {
+        if f.is_public && !pub_too || f.is_extern || f.body == NODE_NONE || in_iface_extend {
             return false;
         }
         return !(item_has_attr(a, iid, AttrKind::ATTR_EXPORT) || item_has_attr(a, iid, AttrKind::ATTR_USED) || item_has_attr(
             a,
             iid,
             AttrKind::ATTR_TEST,
-        ) || item_has_attr(a, iid, AttrKind::ATTR_TEST_INIT) || item_has_attr(a, iid, AttrKind::ATTR_TEST_FREE));
+        ) || item_has_attr(a, iid, AttrKind::ATTR_TEST_INIT) || item_has_attr(a, iid, AttrKind::ATTR_TEST_FREE) || item_has_attr(
+            a,
+            iid,
+            AttrKind::ATTR_BENCH,
+        ));
     }
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
         return !it.as_data.aggregate.is_public && !item_has_attr(a, iid, AttrKind::ATTR_EXPORT) && !item_has_attr(
@@ -601,6 +626,17 @@ fn lint_report_item(
     }
     let nsp = a.at_const(nid).as_data.name.text;
     if root_mod && it.kind == NodeKind::NODE_FUNCTION && diag::span_str(src, nsp.start, nsp.end) == "main" {
+        return;
+    }
+    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.is_public {
+        errs.warn(
+            nsp.start,
+            nsp.end - nsp.start,
+            format(
+                "unused public function '{}': nothing in this binary reaches it",
+                diag::span_str(src, nsp.start, nsp.end),
+            ),
+        );
         return;
     }
     errs.warn(nsp.start, nsp.end - nsp.start, format("unused {} '{}'", what, diag::span_str(src, nsp.start, nsp.end)));
@@ -726,11 +762,11 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
                 let ms = it.as_data.extend_def.items;
                 for j in 0..ms.len {
                     let mid = unsafe a.list(ms)[j as usize];
-                    if lint_item_candidate(a, mid, in_iface) && !used[starts[m] + mid as usize] {
+                    if lint_item_candidate(a, mid, in_iface, lint_pub_applies(p, m)) && !used[starts[m] + mid as usize] {
                         lint_report_item(p, &mut errs, a, m as ModuleId, mid, lint_root_mod(p, m));
                     }
                 }
-            } else if lint_item_candidate(a, iid, false) && !used[starts[m] + iid as usize] {
+            } else if lint_item_candidate(a, iid, false, lint_pub_applies(p, m)) && !used[starts[m] + iid as usize] {
                 lint_report_item(p, &mut errs, a, m as ModuleId, iid, lint_root_mod(p, m));
             }
         }

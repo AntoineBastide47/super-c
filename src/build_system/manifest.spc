@@ -21,6 +21,20 @@ extend Profile as Free {
     }
 }
 
+/// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the
+/// primary binary). `super-c build` builds every target; `--bin=NAME` selects one.
+pub struct BinTarget {
+    pub name: String,
+    pub root: String,
+}
+
+extend BinTarget as Free {
+    pub fn free(self: &mut Self) {
+        self.name.free();
+        self.root.free();
+    }
+}
+
 /// One [command.NAME] for `super-c command <name>`: shell lines executed in order, stopping at the
 /// first failure. Built-in subcommand names are reserved -- a command can never shadow one.
 pub struct Command<'a> {
@@ -62,6 +76,11 @@ pub struct Manifest<'a> {
     pub default_profile: String,
     pub profiles: Vector<Profile<'a>>,
     pub commands: Vector<Command<'a>>,
+    pub bins: Vector<BinTarget>, // extra [bin.NAME] targets (the top-level bin/root pair is first-class)
+    pub lib_name: String, // [lib] name; empty = no library target
+    pub lib_root: String, // [lib] root (default src/lib.spc)
+    pub lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
+    pub lib_shared: bool, // [lib] type contains "shared"
 }
 
 extend Manifest as Free {
@@ -80,6 +99,9 @@ extend Manifest as Free {
         self.default_profile.free();
         self.profiles.free();
         self.commands.free();
+        self.bins.free();
+        self.lib_name.free();
+        self.lib_root.free();
     }
 }
 
@@ -103,6 +125,11 @@ extend Manifest {
             default_profile: String::new(),
             profiles: Vector::<Profile>::new(),
             commands: Vector::<Command>::new(),
+            bins: Vector::<BinTarget>::new(),
+            lib_name: String::new(),
+            lib_root: String::new(),
+            lib_static: false,
+            lib_shared: false,
         };
     }
 
@@ -250,7 +277,7 @@ fn norm_conv_dir(dir: &mut String, key: str, errs: &mut diag::Errors) {
 
 // The `super-c` subcommand names: reserved, so a `[command.NAME]` can never shadow one.
 fn is_builtin_command(name: str) bool {
-    return name == "build" || name == "release" || name == "fmt" || name == "lint" || name == "run" || name == "command" || name == "clean" || name == "test" || name == "bench" || name == "lsp";
+    return name == "build" || name == "release" || name == "fmt" || name == "lint" || name == "run" || name == "command" || name == "clean" || name == "test" || name == "bench" || name == "lsp" || name == "new" || name == "init";
 }
 
 fn set_str(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut String) {
@@ -288,10 +315,18 @@ pub fn load(path: str) Option<Manifest> {
     let items = items_opt.unwrap();
     let mut errs = diag::Errors::new();
     let mut rejected = Vector::<String>::new(); // [command.<builtin>] sections already reported
+    let mut saw_lib = false;
     for x in 0..items.len() {
         let it = items.at(x);
         let sec = it.section.as_str();
         let key = it.key.as_str();
+        if key.len() == 0 {
+            // a bare section header: only its presence matters (and only [lib] cares)
+            if sec == "lib" {
+                saw_lib = true;
+            }
+            continue;
+        }
         if sec == "" {
             if key == "bin" {
                 set_str(it, &mut errs, &mut m.bin);
@@ -413,6 +448,45 @@ pub fn load(path: str) Option<Manifest> {
             } else {
                 errs.emit(it.at, key.len() as u32, format("unknown command key '{}'", key));
             }
+        } else if sec == "lib" {
+            saw_lib = true;
+            if key == "name" {
+                set_str(it, &mut errs, &mut m.lib_name);
+            } else if key == "root" {
+                set_str(it, &mut errs, &mut m.lib_root);
+            } else if key == "type" {
+                let mut kinds = Vector::<String>::new();
+                take_arr(it, &mut errs, &mut kinds);
+                for k in 0..kinds.len() {
+                    let kind = kinds.at(k).as_str();
+                    if kind == "static" {
+                        m.lib_static = true;
+                    } else if kind == "shared" {
+                        m.lib_shared = true;
+                    } else {
+                        errs.emit(it.at, 4, format("unknown library type '{}' (static | shared)", kind));
+                    }
+                }
+            } else {
+                errs.emit(it.at, key.len() as u32, format("unknown [lib] key '{}'", key));
+            }
+        } else if sec.starts_with("bin.") && sec.len() > 4 {
+            let name = sec.slice(4, sec.len());
+            let mut bi: i64 = -1;
+            for i in 0..m.bins.len() {
+                if m.bins.at(i).name.as_str() == name {
+                    bi = i as i64;
+                }
+            }
+            if bi < 0 {
+                m.bins.push(BinTarget { name: String::from_str(name), root: String::new() });
+                bi = m.bins.len() as i64 - 1;
+            }
+            if key == "root" {
+                set_str(it, &mut errs, &mut m.bins[bi as usize].root);
+            } else {
+                errs.emit(it.at, key.len() as u32, format("unknown [bin.{}] key '{}'", name, key));
+            }
         } else {
             errs.emit(it.at, key.len() as u32, format("unknown section '{}'", sec));
         }
@@ -438,11 +512,39 @@ pub fn load(path: str) Option<Manifest> {
         m.default_profile.push_str("dev");
     }
     add_builtin_profiles(&mut m);
-    if m.bin.len() == 0 {
-        errs.emit(0, 1, format("missing required key 'bin'"));
+    // [lib] defaults: root src/lib.spc, name after the primary binary, static unless told otherwise
+    if saw_lib {
+        if m.lib_root.len() == 0 {
+            m.lib_root.push_str("src/lib.spc");
+        }
+        if m.lib_name.len() == 0 {
+            if m.bin.len() != 0 {
+                m.lib_name.push_string(&m.bin);
+            } else {
+                errs.emit(0, 1, format("[lib] needs a 'name' when the manifest declares no 'bin'"));
+            }
+        }
+        if !m.lib_static && !m.lib_shared {
+            m.lib_static = true;
+        }
+    }
+    // a library-only project needs no primary binary; its lib root anchors the source tree
+    if m.root.len() == 0 && saw_lib {
+        m.root.push_string(&m.lib_root);
+    }
+    if m.bin.len() == 0 && !saw_lib {
+        errs.emit(0, 1, format("missing required key 'bin' (or a [lib] section)"));
     }
     if m.root.len() == 0 {
         errs.emit(0, 1, format("missing required key 'root'"));
+    }
+    for i in 0..m.bins.len() {
+        if m.bins.at(i).root.len() == 0 {
+            errs.emit(0, 1, format("[bin.{}] needs a 'root'", m.bins.at(i).name.as_str()));
+        }
+        if m.bins.at(i).name.as_str() == m.bin.as_str() {
+            errs.emit(0, 1, format("[bin.{}] collides with the manifest's primary 'bin'", m.bins.at(i).name.as_str()));
+        }
     }
     if m.profile_index(m.default_profile.as_str()) < 0 {
         errs.emit(0, 1, format("default-profile '{}' is not defined", m.default_profile.as_str()));

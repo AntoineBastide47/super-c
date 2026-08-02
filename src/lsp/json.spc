@@ -98,14 +98,6 @@ extend JSON {
         return self.kind == JT_BOOL;
     }
 
-    pub const fn is_number(self: &Self) bool {
-        return self.kind == JT_NUMBER;
-    }
-
-    pub const fn is_string(self: &Self) bool {
-        return self.kind == JT_STRING;
-    }
-
     pub const fn is_array(self: &Self) bool {
         return self.kind == JT_ARRAY;
     }
@@ -142,20 +134,6 @@ extend JSON {
 
     pub const fn get_str(self: &Self) str {
         return self.get_string().as_str();
-    }
-
-    pub const fn get_array(self: &Self) &Vector<JSON> {
-        if self.kind != JT_ARRAY {
-            panic("JSON::get_array called on a non-array type");
-        }
-        return &self.arr;
-    }
-
-    pub const fn get_object(self: &Self) &Vector<JSONPair> {
-        if self.kind != JT_OBJECT {
-            panic("JSON::get_object called on a non-object type");
-        }
-        return &self.obj;
     }
 
     /// Element at `index`; panics out of bounds or on a non-array (JSON::At(size_t)).
@@ -221,10 +199,6 @@ extend JSON {
         panic("JSON::size called on non-array or non-object type");
     }
 
-    pub const fn empty(self: &Self) bool {
-        return self.size() == 0;
-    }
-
     // Become an empty value of `kind` (the variant reassignment in C++). Assigning over a field frees what
     // it held, so the three stores below are the release as well as the reset.
     fn reset_to(self: &mut Self, kind: u8) {
@@ -279,14 +253,6 @@ extend JSON {
             self.obj.reserve(size);
         } else {
             panic("JSON::reserve called on non-array and non-object type");
-        }
-    }
-
-    pub fn clear(self: &mut Self) {
-        if self.kind == JT_ARRAY {
-            self.arr.clear();
-        } else if self.kind == JT_OBJECT {
-            self.obj.clear();
         }
     }
 

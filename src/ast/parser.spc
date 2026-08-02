@@ -678,12 +678,6 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    // Callers that have no lifetime slot to fill (they simply don't support lifetime params yet).
-    pub fn parse_generics(self: &mut Self) NodeList {
-        let mut discard = NodeList { start: 0, len: 0 };
-        return self.parse_generics_split(&mut discard);
-    }
-
     pub fn parse_where_clause(self: &mut Self) NodeList {
         if !self.match(TokenType::Where) {
             return NodeList { start: 0, len: 0 };
@@ -2183,10 +2177,6 @@ extend Parser {
         return NODE_NONE;
     }
 
-    pub fn parse_primary(self: &mut Self) NodeId {
-        return self.parse_primary_mode(ExpressionGrammar::EXPR_FULL);
-    }
-
     pub fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
         // fixed 16-segment cap: a deeper member chain silently loses its leftmost segments
         let mut segs: [NodeId; 16] = [
@@ -2372,10 +2362,6 @@ extend Parser {
         return self.parse_postfix_after_mode(self.parse_primary_mode(grammar), grammar);
     }
 
-    pub fn parse_postfix(self: &mut Self) NodeId {
-        return self.parse_postfix_mode(ExpressionGrammar::EXPR_FULL);
-    }
-
     fn parse_unary_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
         if self.depth >= PARSE_MAX_DEPTH {
             self.error_here("expression nested too deeply");
@@ -2440,10 +2426,6 @@ extend Parser {
 
     fn parse_cast_mode(self: &mut Self, grammar: ExpressionGrammar) NodeId {
         return self.parse_cast_after(self.parse_unary_mode(grammar));
-    }
-
-    pub fn parse_cast(self: &mut Self) NodeId {
-        return self.parse_cast_mode(ExpressionGrammar::EXPR_FULL);
     }
 
     // Shift and relational operators share a leading `>` token. Parsing both precedence levels
@@ -2547,10 +2529,6 @@ extend Parser {
 
     fn parse_binary_mode(self: &mut Self, grammar: ExpressionGrammar) BinaryParse {
         return self.parse_binary_level_mode(1, grammar);
-    }
-
-    pub fn parse_binary(self: &mut Self) NodeId {
-        return self.parse_binary_mode(ExpressionGrammar::EXPR_FULL).expression;
     }
 
     fn parse_expression_from_mode(self: &mut Self, first: NodeId, grammar: ExpressionGrammar) NodeId {
@@ -2701,10 +2679,6 @@ extend Parser {
                 },
             },
         );
-    }
-
-    pub fn parse_range_value(self: &mut Self, start_node: NodeId) NodeId {
-        return self.parse_range_value_mode(start_node, ExpressionGrammar::EXPR_FULL);
     }
 
     pub fn parse_let(self: &mut Self) NodeId {

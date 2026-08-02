@@ -21,36 +21,50 @@ Super-C source (.spc)
     -> native binary
 ```
 
-## Quick start
+## Installation
 
-Grab a `super-c` binary from the GitHub Releases (it ships with `std/` and `ffi/`), then:
+macOS/Linux — installs the latest release (the `super-c` binary plus the `std/` and `ffi/` trees it compiles from) into `~/.super-c` and adds `~/.super-c/bin` to your PATH:
 
 ```sh
-# build an app straight to a native binary
-./super-c run
+curl -fsSL https://raw.githubusercontent.com/AntoineBastide47/super-c/main/install.sh | sh
+```
 
-# or emit the readable C into path/to/build/ and compile it yourself
-./super-c path/to/app.spc
-cc path/to/build/**/*.c -o app
+Windows — download the `super-c-windows-*.zip` from the [GitHub Releases](https://github.com/AntoineBastide47/super-c/releases), unpack it anywhere, and add that folder to your PATH (it bundles `std/` and `ffi/` next to the binary).
+
+## Quick start
+
+```sh
+# scaffold a project and run it
+super-c new hello
+cd hello
+super-c run
+
+# or compile + run a single file directly
+super-c path/to/app.spc
+
+# emit the readable C and compile it yourself
+super-c build path/to/app.spc -o app
 ```
 
 ## Building and testing
 
 ```sh
-./super-c build                     # two-stage dev self-build (ASan/UBSan)
-./super-c release                   # optimized build (-O3 -flto)
-./super-c run                       # build the project, then execute its binary
-./super-c test                      # run the full test suite (tests/ by convention)
-./super-c bench                     # run the benchmarks (bench/ by convention)
-./super-c clean                     # drop build outputs
+super-c build                     # two-stage dev self-build (ASan/UBSan)
+super-c release                   # optimized build (-O3 -flto)
+super-c run                       # build the project, then execute its binary
+super-c test                      # run the full test suite (tests/ by convention)
+super-c bench                     # run the benchmarks (bench/ by convention)
+super-c clean                     # drop build outputs
 ```
 
 The build is driven by `build.toml` and works for any project, not just the compiler: declare
 `bin` and `root`, and `super-c build` gives you profiles (`debug`/`dev`/`release`/`bench`, plus your
 own), incremental parallel C compilation with dependency tracking, and the `tests/` + `bench/`
-conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `-o`. Custom `[command.NAME]`
-entries run via `super-c command NAME` and may shadow the built-in `build`/`run`/`test`/`bench`/`clean`
-(this repo's `build` is overridden to the two-stage self-hosting bootstrap). The rest of the toolchain:
+conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `--cc=`, `--bin=`, `--lib`, `-o`.
+Custom `[command.NAME]` entries run via `super-c command NAME`; built-in subcommand names are reserved
+and cannot be shadowed (this repo's bootstrap lives under `super-c command bootstrap`). Library targets
+come from a `[lib]` section (`type = ["static", "shared"]`), extra binaries from `[bin.NAME]` sections.
+The rest of the toolchain:
 
 * `super-c fmt` — the canonical formatter (Wadler-style, width 120, `@fmt.skip` escape hatch).
 * `super-c lint [--fix]` — default-on lints (unused imports/members/labels, unnecessary `mut` or
@@ -578,10 +592,10 @@ fn rejects_bad_input() { panic("boom"); }
 ```
 
 ```sh
-./super-c --test app.spc                      # collect @test fns, build, run (fork-isolated, parallel)
-./super-c --test --test-filter=drains app.spc # substring selection
-./super-c --test --test-jobs=4 app.spc        # bound the process pool (default: one per core)
-./super-c --test --test-no-fork app.spc       # in-process, for debuggers (should_panic is skipped)
+super-c --test app.spc                      # collect @test fns, build, run (fork-isolated, parallel)
+super-c --test --test-filter=drains app.spc # substring selection
+super-c --test --test-jobs=4 app.spc        # bound the process pool (default: one per core)
+super-c --test --test-no-fork app.spc       # in-process, for debuggers (should_panic is skipped)
 ```
 
 Each test runs in a forked child, so a panic, a failed assertion, or a crash fails just that test —
@@ -621,7 +635,7 @@ Every compiled binary carries a built-in leak sanitizer, inert until asked for (
 including Apple Silicon where LeakSanitizer does not exist):
 
 ```sh
-./super-c lint                 # statically detect leaks and logs an error per leak
+super-c lint                 # statically detect leaks and logs an error per leak
 SC_LEAK_CHECK=1 ./app          # report allocations that survive to exit, with call stacks
 SC_LEAK_CHECK=fatal ./app      # same report, exit code 23 on leaks -- a CI gate
 ```
@@ -650,8 +664,8 @@ as part of every compile; two flags bound how much work a single compile-time ev
 one; `const fn` calls and const initializers are held to a stricter standard, below):
 
 ```sh
-./super-c app.spc                                          # defaults: ~2M steps, ~96 MiB
-./super-c --const-eval-steps=100000 --const-eval-memory=16M app.spc
+super-c app.spc                                          # defaults: ~2M steps, ~96 MiB
+super-c --const-eval-steps=100000 --const-eval-memory=16M app.spc
 ```
 
 ```superc
@@ -730,7 +744,7 @@ The strictness rules:
   exit (like a non-`mut` `let`); moving it out is rejected (a `const` stays put), so it never
   double-frees. Owning containers remain fully usable *inside* compile-time evaluation.
 
-Running `./super-c lint --suggest-const` indicates all functions the compiler has proven to be const evaluatable.
+Running `super-c lint --suggest-const` indicates all functions the compiler has proven to be const evaluatable.
 Running it with `--fix` makes all those functions const and saves some compilation time as the compiler won't reprove them.
 
 ## Concurrency
@@ -781,7 +795,7 @@ The `std::parallel` modules build a real concurrency stack on OS threads:
 
 ## Generated output
 
-`./super-c app.spc` writes a `build/` tree next to the source that mirrors the module paths:
+`super-c app.spc` writes a `build/` tree next to the source that mirrors the module paths:
 
 ```text
 build/

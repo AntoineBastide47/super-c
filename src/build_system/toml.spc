@@ -303,6 +303,16 @@ extend Parser {
             }
             self.i = self.i + 1;
             self.section = name;
+            // a bare header is still a fact (an empty [lib] means "this project has a library"):
+            // record it as a keyless item so the schema can see section PRESENCE
+            self.items.push(
+                TomlItem {
+                    section: self.section.clone(),
+                    key: String::new(),
+                    at: at as u32,
+                    val: TomlVal::empty(TV_BOOL),
+                },
+            );
             return;
         }
         let at = self.i;

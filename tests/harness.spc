@@ -383,17 +383,7 @@ pub struct RunResult {
     pub out: *mut char,
 }
 
-extend RunResult {
-    pub const fn ok(self: &Self) bool {
-        return self.built && self.exit == 0;
-    }
-    pub fn out_has(self: &Self, needle: str) bool {
-        if self.out == null {
-            return false;
-        }
-        return cli::contains_str(self.out, needle);
-    }
-}
+extend RunResult {}
 extend RunResult as Free {
     pub fn free(self: &mut Self) {
         if self.out != null {
@@ -487,13 +477,6 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     return r;
 }
 
-// Build+run `src` and require it to exit 0 with stdout containing `want`.
-pub fn expect_run(label: str, src: str, want: str) {
-    let r = compile_and_run(src);
-    assert(r.ok(), label);
-    assert(r.out_has(want), label);
-}
-
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
 // `sc_run_program(name, src, code, "")` -- the program signals its result via `exit(code)`).
 pub fn expect_exit(label: str, src: str, code: i32) {
@@ -520,17 +503,9 @@ pub fn expect_ok(label: str, src: str) {
     let c = compile(src, STAGE_TYPECHECK);
     assert(c.ok(), label);
 }
-pub fn expect_err(label: str, src: str) {
-    let c = compile(src, STAGE_TYPECHECK);
-    assert(!c.ok(), label);
-}
 pub fn expect_resolve_ok(label: str, src: str) {
     let c = compile(src, STAGE_RESOLVE);
     assert(c.ok(), label);
-}
-pub fn expect_resolve_err(label: str, src: str) {
-    let c = compile(src, STAGE_RESOLVE);
-    assert(!c.ok(), label);
 }
 // Reject at the given stage AND require the first message to contain `needle`.
 pub fn expect_err_msg(label: str, src: str, needle: str) {

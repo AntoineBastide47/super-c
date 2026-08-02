@@ -4791,12 +4791,6 @@ extend ConstEval {
         return v;
     }
 
-    /// The `const fn` def-site validation surface: FX_NO fails the declaration, and fx_no_reason
-    /// carries the recorded disqualifying site.
-    pub fn ce_fn_eligible(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
-        return self.fx_get(m, fn_id);
-    }
-
     /// Like ce_fn_eligible, but re-scans instead of trusting the memo. The def-site check runs this
     /// AFTER the body has typechecked: type-based disqualifiers ('@no_const' mentions) are invisible
     /// before the body's types exist, and an earlier caller's fold prefilter may have memoized that
