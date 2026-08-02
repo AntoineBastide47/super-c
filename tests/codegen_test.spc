@@ -383,3 +383,13 @@ fn lifetimes_are_erased() {
     h::expect_c("mixed lifetime+type generic mangles only the type arg", MIX, "Pair__i32");
     h::expect_c_absent("the lifetime never appears in the mangled name", MIX, "Pair__a");
 }
+
+// Prelude `likely`/`unlikely`: direct calls lower to the SC_LIKELY/SC_UNLIKELY layout-hint macros;
+// the conditions keep their value semantics (identity), and the hints stay const-evaluable.
+@test
+fn branch_hints() {
+    let SRC: str = "fn pick(n: i32) i32 { if unlikely(n < 0) { return -1; } if likely(n < 100) { return 1; } return 2; }\nfn main() i32 { if pick(-5) != -1 || pick(7) != 1 || pick(500) != 2 { return 1; } const F: bool = likely(true); if !F { return 1; } return 0; }\n";
+    h::expect_c("unlikely lowers to SC_UNLIKELY", SRC, "SC_UNLIKELY((n < 0))");
+    h::expect_c("likely lowers to SC_LIKELY", SRC, "SC_LIKELY((n < 100))");
+    h::expect_exit("branch hints keep value semantics", SRC, 0);
+}

@@ -9,6 +9,19 @@
 // every value equal to itself (including NaN), so sorting and Map/Set keys work -- note `-0.0 != 0.0`
 // under this order, unlike `==`. Complex numbers stay out: they admit no total order.
 
+/// Branch-layout hint: this condition is expected to be TRUE. Semantically the identity function
+/// (and const-evaluable); codegen lowers direct calls to SC_LIKELY (__builtin_expect on GCC/Clang,
+/// the bare condition elsewhere), which steers hot-path block placement -- not the hardware predictor.
+pub const fn likely(c: bool) bool {
+    return c;
+}
+
+/// Branch-layout hint: this condition is expected to be FALSE (error paths, cold branches).
+/// See `likely` for the lowering.
+pub const fn unlikely(c: bool) bool {
+    return c;
+}
+
 extern "C" {
     fn sqrt(x: f64) f64;
     fn cbrt(x: f64) f64;

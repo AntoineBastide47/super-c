@@ -120,6 +120,15 @@ pub const fn super_rt_includes() *const char {
 #if __has_include(<wctype.h>)
 #include <wctype.h>
 #endif
+/* Branch-layout hints (std/core `likely`/`unlikely`): __builtin_expect steers block placement on
+   GCC/Clang; every other compiler sees the bare condition. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SC_LIKELY(x) __builtin_expect(!!(x), 1)
+#define SC_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define SC_LIKELY(x) (x)
+#define SC_UNLIKELY(x) (x)
+#endif
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -5057,6 +5066,9 @@ extend Codegen {
             return;
         }
         if self.emit_assert_builtin(id) {
+            return;
+        }
+        if self.emit_expect_builtin(id) {
             return;
         }
         // `x.free()` intrinsic on an unresolved generic receiver
@@ -16316,6 +16328,58 @@ extend Codegen {
         }
         return "<src>".ptr() as *const char;
     }
+    // `likely(c)` / `unlikely(c)` from the prelude: 1 / 2, else 0. Direct identifier calls only --
+    // anything indirect (a function value) falls back to the real identity function.
+    fn cg_expect_kind(self: &Self, id: NodeId) i32 {
+        if self.package == null {
+            return 0;
+        }
+        let n = self.cur_ast().at_const(id);
+        if n.as_data.call.args.len != 1 {
+            return 0;
+        }
+        let callee = n.as_data.call.callee;
+        if self.cur_ast().at_const(callee).kind != NodeKind::NODE_IDENTIFIER {
+            return 0;
+        }
+        let d = self.cur_ast().resolution_def(callee);
+        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() || !unsafe self.package.modules[d.module as usize].prelude {
+            return 0;
+        }
+        if self.mod_ast(d.module).at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return 0;
+        }
+        let fnamenode = self.mod_ast(d.module).at_const(d.node).as_data.function.name;
+        let fnm = self.mod_ast(d.module).at_const(fnamenode).as_data.name.text;
+        let s = self.mod_src(d.module);
+        if span_is(s, fnm, "likely".ptr() as *const char) {
+            return 1;
+        }
+        if span_is(s, fnm, "unlikely".ptr() as *const char) {
+            return 2;
+        }
+        return 0;
+    }
+
+    fn emit_expect_builtin(self: &mut Self, id: NodeId) bool {
+        let k = self.cg_expect_kind(id);
+        if k == 0 {
+            return false;
+        }
+        let args = self.cur_ast().at_const(id).as_data.call.args;
+        let a0 = unsafe self.cur_ast().list(args)[0 as usize];
+        self.emit_str(
+            if k == 1 {
+                "SC_LIKELY(";
+            } else {
+                "SC_UNLIKELY(";
+            },
+        );
+        self.emit_expr(a0);
+        self.emit_str(")");
+        return true;
+    }
+
     fn cg_assert_kind(self: &Self, id: NodeId) i32 {
         if self.package == null {
             return 0;
