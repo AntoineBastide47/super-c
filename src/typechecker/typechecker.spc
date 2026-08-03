@@ -3960,6 +3960,104 @@ extend TypeChecker {
         }
         return owns;
     }
+    /// Does a value of `ty` occupy no bytes? A struct with no fields, or whose every field is itself
+    /// zero-sized (`Global`, any allocator tag). The depth cap breaks reference cycles.
+    fn tc_type_is_zero_sized(self: &mut Self, ty: TypeId, depth: u32) bool {
+        if ty == TYPE_NONE || depth > 8 {
+            return false;
+        }
+        let y = *self.type_at(ty);
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return y.as_data.arr.len == 0 || self.tc_type_is_zero_sized(y.as_data.arr.elem, depth + 1);
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(ty, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            return false;
+        }
+        let dn = self.mod_ast(om).at_const(od);
+        if dn.kind != NodeKind::NODE_STRUCT {
+            return false; // an enum carries a tag; a union is as big as its widest member
+        }
+        let ms = dn.as_data.aggregate.members;
+        for i in 0..ms.len {
+            let fid = unsafe self.mod_ast(om).list(ms)[i as usize];
+            if self.mod_ast(om).at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let ft = self.subst_type(self.decl_type_in(om, fid), &gp[0], &ga[0], gn);
+            if !self.tc_type_is_zero_sized(ft, depth + 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// The stateful allocator a constant of `ty` would EMBED, or TYPE_NONE. A constant's storage is static
+    /// data no allocator provided, so an allocator value stored beside it describes memory that does not
+    /// exist -- and a state field holding a compile-time pointer bakes that block into the binary as
+    /// read-only data the allocator could never legally hand out. Walks stored fields only: a pointer is
+    /// not embedded state, and elements a program deliberately stores are data, not the container's
+    /// allocator.
+    fn tc_const_alloc_state(self: &mut Self, ty: TypeId, depth: u32) TypeId {
+        if ty == TYPE_NONE || depth > 8 {
+            return TYPE_NONE;
+        }
+        let y = *self.type_at(ty);
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.tc_const_alloc_state(y.as_data.arr.elem, depth + 1);
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(ty, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            return TYPE_NONE;
+        }
+        if self.mod_ast(om).at_const(od).kind != NodeKind::NODE_STRUCT {
+            return TYPE_NONE;
+        }
+        let ms = self.mod_ast(om).at_const(od).as_data.aggregate.members;
+        for i in 0..ms.len {
+            let fid = unsafe self.mod_ast(om).list(ms)[i as usize];
+            if self.mod_ast(om).at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let ft = self.subst_type(self.decl_type_in(om, fid), &gp[0], &ga[0], gn);
+            if ft == TYPE_NONE {
+                continue;
+            }
+            let fk = self.type_at(ft).kind;
+            if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
+                continue; // a pointer field is not embedded state
+            }
+            if self.tc_is_stateful_allocator(ft) {
+                return ft;
+            }
+            let inner = self.tc_const_alloc_state(ft, depth + 1);
+            if inner != TYPE_NONE {
+                return inner;
+            }
+        }
+        return TYPE_NONE;
+    }
+
+    /// Does `ty` implement Allocator AND occupy bytes? Those bytes are the state a constant cannot carry.
+    fn tc_is_stateful_allocator(self: &mut Self, ty: TypeId) bool {
+        if self.tc_type_is_zero_sized(ty, 0) || self.package == null {
+            return false;
+        }
+        let h = self.package.prelude_lookup("Allocator", true);
+        if h.node == NODE_NONE {
+            return false;
+        }
+        return self.type_satisfies(ty, DefId { module: h.mid, node: h.node }, 0);
+    }
+
     fn tc_param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
         let a = self.mod_ast(m);
         let bs = a.at_const(gp).as_data.generic_param.bounds;
@@ -4182,6 +4280,48 @@ extend TypeChecker {
             lit = "try_from";
         }
         return self.find_method_cstr(m, decl, lit);
+    }
+
+    /// The type a `.into()` / `.try_into()` call builds, when `mname` is one of those and it resolved to
+    /// the mirror `from` / `try_from`. That is the type whose generic arguments the call substitutes
+    /// through; TYPE_NONE for any ordinary method call. Mirrors resolve_conversion's unwrapping: the
+    /// fallible pair names `Result<Target, E>`, so the target is its first argument.
+    fn tc_conversion_target(self: &mut Self, mname: NodeId, md: DefId, want: TypeId) TypeId {
+        if md.node == NODE_NONE || want == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let nsp = self.name_span(mname);
+        let is_into = span_is(self.source, nsp, "into");
+        let is_try = span_is(self.source, nsp, "try_into");
+        if !is_into && !is_try {
+            return TYPE_NONE;
+        }
+        let mn = self.mod_ast(md.module).at_const(md.node);
+        if mn.kind != NodeKind::NODE_FUNCTION {
+            return TYPE_NONE;
+        }
+        let fnm = self.mod_ast(md.module).at_const(mn.as_data.function.name).as_data.name.text;
+        let msrc = self.mod_src(md.module);
+        let mut ok = span_is(msrc, fnm, "from");
+        if is_try {
+            ok = span_is(msrc, fnm, "try_from");
+        }
+        if !ok {
+            return TYPE_NONE;
+        }
+        if !is_try {
+            return self.strip(want);
+        }
+        let mut m: ModuleId = 0;
+        let mut decl = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        let ok2 = self.aggregate_of(self.strip(want), &mut m, &mut decl, &mut gp, &mut ga, &mut gn);
+        if !ok2 || gn < 1 {
+            return TYPE_NONE;
+        }
+        return self.strip(ga[0]);
     }
 
     fn tc_find_from_for(self: &mut Self, target: TypeId, src: TypeId) DefId {
@@ -4822,6 +4962,20 @@ extend TypeChecker {
         let dn = self.mod_ast(d.module).at_const(d.node);
         return dn.kind == NodeKind::NODE_CONST && dn.as_data.const_def.is_static_mut;
     }
+    /// Does this qualified path name a constant? A constant emits as a named object with an address,
+    /// so `mod::C` is a PLACE -- borrowing through it (`mod::TABLE.at(i)`) is rooted in that object,
+    /// not in a temporary. (Assignability is decided separately, and a constant is never assignable.)
+    const fn tc_path_const(self: &Self, id: NodeId) bool {
+        let n = self.cur_ast().at_const(id);
+        let mut d = self.cur_ast().resolution_def(id);
+        if d.node == NODE_NONE {
+            d = self.cur_ast().resolution_def(n.as_data.member.member);
+        }
+        if d.node == NODE_NONE {
+            return false;
+        }
+        return self.mod_ast(d.module).at_const(d.node).kind == NodeKind::NODE_CONST;
+    }
     fn is_assignable(self: &mut Self, node_in: NodeId) bool {
         let node = self.peel_wrappers(node_in);
         let a = self.cur_ast();
@@ -4957,7 +5111,7 @@ extend TypeChecker {
             return true;
         }
         if n.kind == NodeKind::NODE_MEMBER {
-            return !n.as_data.member.path || self.tc_path_static_mut(node);
+            return !n.as_data.member.path || self.tc_path_static_mut(node) || self.tc_path_const(node);
         }
         if n.kind == NodeKind::NODE_UNARY {
             return n.as_data.unary.op == TokenType::Star;
@@ -7192,11 +7346,19 @@ extend TypeChecker {
         let mut rsubp = Defs8 {};
         let mut rsuba = Tys8 {};
         let mut nrsub: i32 = 0;
+        let mut conv_target = TYPE_NONE;
         if cn_kind == NodeKind::NODE_MEMBER {
             let md = a.resolution_def(a.at_const(callee_id).as_data.member.member);
             let mut recvbase = self.strip(a.type_of(a.at_const(callee_id).as_data.member.object));
             if cdu != null {
                 recvbase = unsafe cdu.target;
+            }
+            // `x.into()` calls `Target::from(x)`, so the generics to bind are the TARGET's, taken from
+            // the expected type -- the object is the argument here, not the receiver. Without this a
+            // generic target (`let v: Vector<i32> = [..].into()`) kept its parameters unbound.
+            conv_target = self.tc_conversion_target(a.at_const(callee_id).as_data.member.member, md, want);
+            if conv_target != TYPE_NONE {
+                recvbase = conv_target;
             }
             let mut rmod: ModuleId = 0;
             let mut rdecl = NODE_NONE;
@@ -7522,6 +7684,18 @@ extend TypeChecker {
                         self.cur_ast().set_type(a.at_const(callee_id).as_data.member.object, inst);
                     }
                 }
+            }
+        }
+        // `x.into()` hands the OBJECT to `from`'s parameter; it is never in `args`, so its conversions
+        // (an array reaching a slice parameter, most of all) have to be checked here, or the value goes
+        // to codegen unconverted.
+        if conv_target != TYPE_NONE && skip == 1 && params.len == 1 {
+            let pid0 = unsafe fa.list(params)[0];
+            let raw0 = if_ty(named, self.decl_type_in(fmod, pid0), self.lower_type_in(fmod, pid0));
+            let pt0 = self.subst_type(self.subst_type(raw0, &gparams[0], &gargs[0], gn), &rsubp[0], &rsuba[0], nrsub);
+            let obj0 = a.at_const(callee_id).as_data.member.object;
+            if pt0 != TYPE_NONE && !self.compatible(pt0, obj0) {
+                self.err_mismatch(obj0, pt0);
             }
         }
         // arity + arg compatibility
@@ -10992,33 +11166,40 @@ extend TypeChecker {
             NODE_CONST => {
                 let declared = self.resolve_type(a.at_const(id).as_data.const_def.ty);
                 let cd = self.cur_ast().at_const(id).as_data.const_def;
-                // An owning (Free) type is unrepresentable as a global const: its data would be
-                // immutable compile-time storage, but the type's contract lets any by-value copy
-                // run free()/push on it. Value types carry no such contract. (Local consts are
-                // runtime values with real scope exits, so they stay allowed.)
                 let dtk = self.type_at(declared).kind;
-                let owning = !cd.is_extern && !cd.is_static_mut && dtk != TypeKind::TYPE_BUILTIN && self.tc_type_is_free(
-                    declared,
-                );
-                if owning {
-                    let sp = self.cur_ast().at_const(id).span;
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format("a constant cannot hold an owning (Free) type"),
-                    );
-                    self.errors.note(
-                        format(
-                            "the value would live in immutable static storage that copies must not free; use a value type ([T; N], Array<T, N>) or build it at runtime",
-                        ),
-                    );
+                // An owning (Free) type IS representable: its object graph -- heap blocks included --
+                // materializes into static storage with relocations, exactly as a malloc'd graph does.
+                // What makes it sound is that nothing can ever free or mutate it: the value is
+                // immutable, and borrowck refuses to move it out of the const (bc_const_move), so no
+                // copy exists to run free() on storage the allocator never handed out.
+                // The one thing that does NOT survive materialization is allocator STATE: the constant's
+                // storage is static data, so state describing it is fiction, and a state field holding a
+                // compile-time pointer would freeze that block into the binary as read-only data.
+                if !cd.is_extern && !cd.is_static_mut && dtk != TypeKind::TYPE_BUILTIN {
+                    let bad = self.tc_const_alloc_state(declared, 0);
+                    if bad != TYPE_NONE {
+                        let sp = self.name_span(cd.name);
+                        let mut tn = Buf96 {};
+                        self.render_type(bad, &mut tn[0], 96);
+                        self.errors.emit(
+                            sp.start,
+                            sp.end - sp.start,
+                            format("a constant cannot use the stateful allocator '{}'", diag::cstr(&tn[0])),
+                        );
+                        self.errors.note(
+                            format(
+                                "a constant's storage is static data that no allocator provided, so allocator state beside it describes memory that does not exist; use a zero-sized allocator",
+                            ),
+                        );
+                    }
                 }
                 if cd.value != NODE_NONE {
+                    self.expected = declared; // `[..].into()` and `[]` take their type from here
                     self.check_expr(cd.value);
                     if !self.compatible(declared, cd.value) {
                         self.err_mismatch(cd.value, declared);
                     }
-                    if !cd.is_extern && !cd.is_static_mut && !owning {
+                    if !cd.is_extern && !cd.is_static_mut {
                         self.tc_mandatory_const(id, cd.value);
                     }
                 }

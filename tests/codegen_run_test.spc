@@ -324,3 +324,56 @@ fn closures_in_generic_fns() {
         "cannot be passed to another generic function",
     );
 }
+
+// `From<[]T>` on the containers: an array literal coerces to the slice, so a list of elements builds a
+// container through `.into()` or the explicit `from`. The slice BORROWS, so elements are cloned in and
+// the source keeps its own -- a Free element type must not end up with two owners.
+@test
+fn container_from_list() {
+    h::expect_exit(
+        "a Vector comes from a list of elements",
+        "fn main() i32 {\n    let v: Vector<i32> = [1, 2, 3, 4, 5].into();\n    let mut t = 0;\n    for i in 0..v.len() { t = t + *v.at(i); }\n    return t - 15;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "the explicit 'from' names the same conversion",
+        "fn main() i32 {\n    let v = Vector::<i32>::from([1, 2, 3]);\n    return (v.len() as i32) - 3;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a Set collapses duplicates",
+        "fn main() i32 {\n    let s: Set<i32> = [1, 2, 2, 3].into();\n    return (s.len() as i32) - 3;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a Map comes from a list of pairs",
+        "fn main() i32 {\n    let m: Map<i32, i32> = [(1, 10), (2, 20)].into();\n    return (m.len() as i32) - 2 + *m.get(&2).unwrap() - 20;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a Free element type is cloned in, not shared",
+        "fn main() i32 {\n    let v: Vector<String> = [String::from_str(\"ab\"), String::from_str(\"cde\")].into();\n    return (v.at(0).len() + v.at(1).len()) as i32 - 5;\n}\n",
+        0,
+    );
+}
+
+// A temporary that OWNS memory is freed whichever way it is used. A method call on one already bound
+// and freed it; a field read did not, so the owner was dropped on the floor and its allocation leaked.
+@test
+fn free_temporary_field_read() {
+    h::expect_exit(
+        "a field read from an owning temporary frees it",
+        "struct R { pub v: i32, pub buf: Vector<i32> }\nextend R { pub fn get(self: &R) i32 { return self.v; } }\nfn mk() R {\n    let mut b = Vector::<i32>::new();\n    b.push(1);\n    return R { v: 7, buf: b };\n}\nfn main() i32 { return mk().v - 7; }\n",
+        0,
+    );
+    h::expect_exit(
+        "a method call on one still does",
+        "struct R { pub v: i32, pub buf: Vector<i32> }\nextend R { pub fn get(self: &R) i32 { return self.v; } }\nfn mk() R {\n    let mut b = Vector::<i32>::new();\n    b.push(1);\n    return R { v: 7, buf: b };\n}\nfn main() i32 { return mk().get() - 7; }\n",
+        0,
+    );
+    h::expect_c(
+        "the temporary is bound around the field read",
+        "struct R { pub v: i32, pub buf: Vector<i32> }\nextend R { pub fn get(self: &R) i32 { return self.v; } }\nfn mk() R {\n    let mut b = Vector::<i32>::new();\n    b.push(1);\n    return R { v: 7, buf: b };\n}\nfn main() i32 { return mk().v - 7; }\n",
+        "__auto_type",
+    );
+}

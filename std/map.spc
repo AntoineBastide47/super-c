@@ -212,6 +212,19 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
     }
 }
 
+// Build from a list of pairs: `let m: Map<i32, i32> = [(1, 10), (2, 20)].into();` A later pair with the
+// same key wins, as it would through `insert`. The slice borrows, so both halves are cloned in.
+extend<K: Hash + Eq + Clone, V: Clone, A: Allocator + Default> Map<K, V, A> as From<[](K, V)> {
+    pub fn from(value: [](K, V)) Map<K, V, A> {
+        let mut out = Map::<K, V, A>::new();
+        for i in 0..value.len() {
+            let pair = value.at(i);
+            out.insert(pair._0.clone(), pair._1.clone());
+        }
+        return out;
+    }
+}
+
 extend<K: Hash + Eq + Default, V: Default, A: Allocator + Default> Map<K, V, A> as Default {
     pub const fn default() Map<K, V, A> {
         return Map::<K, V, A>::new();

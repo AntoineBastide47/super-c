@@ -458,12 +458,19 @@ fn local_const_lifecycle() {
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert_eq(lk.exit, 0); // runs, and the owning const is freed (no leak under the fatal gate)
 
-    // a global owning const is rejected
+    // a GLOBAL owning const is the other lifecycle: no scope exit, so it is materialized into the
+    // binary -- buffer included -- and never freed
     p.mkfile(
         "g.spc",
-        "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return 0;\n}\n",
+        "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return (V.len() - 1) as i32;\n}\n",
     );
-    p.expect_fail("g.spc", "a constant cannot hold an owning (Free) type");
+    let g = p.compile("g.spc");
+    assert_eq(g.exit, 0);
+    assert(p.gen_has("g.c", "static const uint32_t V__ct0[8]"), "the buffer is static data");
+    assert(p.gen_has("g.c", ".ptr = (void *)V__ct0"), "the const points at it");
+    assert(!p.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
+    let gr = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(gr.exit, 0);
     // moving an owning const out is rejected
     p.mkfile(
         "m.spc",
@@ -4250,8 +4257,8 @@ fn main() i32 {
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
 
-    // an owning (Free) type is unrepresentable as a global const: its data would be static,
-    // but any by-value copy would free()/mutate it
+    // An owning (Free) type materializes too -- buffer and all. What keeps it sound is that no copy
+    // can exist to free it: the value is immutable and cannot be moved out of the constant.
     let p2 = cli::proj_new();
     p2.mkfile(
         "own.spc",
@@ -4261,10 +4268,44 @@ fn main() i32 {
     return v;
 }
 const V: Vector<u32> = evens(5);
-fn main() i32 { return 0; }
+fn main() i32 {
+    let mut t: u32 = 0;
+    for i in 0..V.len() { t = t + *V.at(i); }
+    if t != 20u32 { return 1; }
+    return 0;
+}
 "#,
     );
-    p2.expect_fail("own.spc", "a constant cannot hold an owning (Free) type");
+    let r2 = p2.compile("own.spc");
+    assert_eq(r2.exit, 0);
+    assert(p2.gen_has("own.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
+    assert(!p2.gen_has("own.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
+    let cc2 = p2.cc_build("");
+    assert_eq(cc2.exit, 0);
+    // bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer
+    let lk2 = p2.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert_eq(lk2.exit, 0);
+
+    // and nothing can obtain a copy to free, or mutate it in place
+    let p3 = cli::proj_new();
+    p3.mkfile(
+        "own2.spc",
+        "const V: Vector<u32> = [1u32, 2u32].into();\nfn main() i32 {\n    let c = V;\n    return (c.len()) as i32;\n}\n",
+    );
+    p3.expect_fail("own2.spc", "cannot move a value out of a 'const' binding");
+    let p4 = cli::proj_new();
+    p4.mkfile(
+        "own3.spc",
+        "const V: Vector<u32> = [1u32, 2u32].into();\nfn main() i32 {\n    V.push(3u32);\n    return 0;\n}\n",
+    );
+    p4.expect_fail("own3.spc", "cannot call a '&mut self' method on an immutable binding");
+    // An owning constant has no runtime construction to fall back on: it folds, or it is an error.
+    let p5 = cli::proj_new();
+    p5.mkfile(
+        "own4.spc",
+        "extern \"C\" { fn rand() i32; }\nfn mk() Vector<i32> {\n    let mut v = Vector::<i32>::new();\n    v.push(unsafe rand());\n    return v;\n}\nconst V: Vector<i32> = mk();\nfn main() i32 { return 0; }\n",
+    );
+    p5.expect_fail("own4.spc", "cannot be evaluated at compile time");
 }
 
 // Differential: a const fn produces the same value at compile time (const initializer) and at

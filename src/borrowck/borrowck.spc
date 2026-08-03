@@ -897,26 +897,42 @@ extend tc::TypeChecker {
             }
             return;
         }
-        if xk != NodeKind::NODE_IDENTIFIER {
+        // A constant is named bare (`V`) or qualified (`data::V`); both must reach the const rule below.
+        let path_const = xk == NodeKind::NODE_MEMBER && a.at_const(expr).as_data.member.path;
+        if xk != NodeKind::NODE_IDENTIFIER && !path_const {
             return;
         }
-        let d = a.resolution_def(expr);
-        if d.module != self.cur_module() || d.node == NODE_NONE {
+        let mut d = a.resolution_def(expr);
+        if d.node == NODE_NONE && path_const {
+            d = a.resolution_def(a.at_const(expr).as_data.member.member);
+        }
+        if d.node == NODE_NONE {
             return;
         }
-        let dk = a.at_const(d.node).kind;
-        // An owning `const` local is a runtime value freed at scope exit: moving it out would leave
-        // that free to double-free. A `const` stays put -- read it or borrow it, never move it.
+        // A `const` is checked WHEREVER it was declared: an owning one imported from another module is
+        // the same hazard, and skipping foreign decls let a copy of it reach a free().
+        let foreign = d.module != self.cur_module();
+        if foreign && (self.package == null || d.module as usize >= self.pkg_count()) {
+            return;
+        }
+        let dk = self.mod_ast(d.module).at_const(d.node).kind;
+        // An owning `const` stays put -- read it or borrow it, never move it. A local one is a runtime
+        // value freed at scope exit, so a copy would double-free; a top-level one lives in the binary,
+        // so a copy would free storage the allocator never handed out.
         if dk == NodeKind::NODE_CONST {
-            let cd = a.at_const(d.node).as_data.const_def;
+            let cd = self.mod_ast(d.module).at_const(d.node).as_data.const_def;
             if !cd.is_static_mut && !cd.is_extern && self.tc_type_is_free(a.type_of(expr)) {
                 let sp = a.at_const(expr).span;
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
-                    format("cannot move a value out of a 'const' binding (it is freed at scope exit)"),
+                self.errors.emit(sp.start, sp.end - sp.start, format("cannot move a value out of a 'const' binding"));
+                self.errors.note(
+                    format(
+                        "a constant of an owning type is read or borrowed, never moved: the copy would free storage the constant still owns",
+                    ),
                 );
             }
+            return;
+        }
+        if foreign || path_const {
             return;
         }
         if dk != NodeKind::NODE_LET && dk != NodeKind::NODE_PARAMETER || !self.tc_type_is_free(a.type_of(expr)) {

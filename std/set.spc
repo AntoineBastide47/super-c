@@ -60,3 +60,15 @@ extend<T: Hash + Eq + Default, A: Allocator + Default> Set<T, A> as Default {
         return Set::<T, A>::new();
     }
 }
+
+// Build from a list of elements: `let s: Set<i32> = [1, 2, 2, 3].into();` (duplicates collapse). The
+// slice borrows, so each element is cloned in -- see Vector's conversion for why.
+extend<T: Hash + Eq + Clone, A: Allocator + Default> Set<T, A> as From<[]T> {
+    pub fn from(value: []T) Set<T, A> {
+        let mut out = Set::<T, A>::new();
+        for i in 0..value.len() {
+            out.insert(value.at(i).clone());
+        }
+        return out;
+    }
+}

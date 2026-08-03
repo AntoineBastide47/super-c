@@ -2554,3 +2554,80 @@ fn split_init_reference_to_free() {
         "must be initialized when declared",
     );
 }
+
+// A constant of an OWNING type is materialized into the binary -- its heap blocks become static data
+// with relocations -- and is then read or borrowed only. Nothing can obtain a copy to free, because
+// moving out of a constant is rejected, and nothing can mutate it in place.
+@test
+fn owning_constants() {
+    h::expect_exit(
+        "a Vector constant is built at compile time and read at run time",
+        "const V: Vector<i32> = [1, 2, 3, 4, 5].into();\nfn main() i32 {\n    let mut t = 0;\n    for i in 0..V.len() { t = t + *V.at(i); }\n    return t - 15;\n}\n",
+        0,
+    );
+    h::expect_c(
+        "the buffer itself is static data the constant points at",
+        "const V: Vector<i32> = [1, 2, 3].into();\nfn main() i32 { return (V.len() as i32) - 3; }\n",
+        ".ptr = (void *)V__ct0",
+    );
+    h::expect_exit(
+        "an explicit 'from' and a builder function reach the same place",
+        "fn mk() Vector<i32> {\n    let mut v = Vector::<i32>::new();\n    v.push(4);\n    return v;\n}\nconst A: Vector<i32> = Vector::<i32>::from([1, 2]);\nconst B: Vector<i32> = mk();\nfn main() i32 { return (A.len() as i32) - 2 + (B.len() as i32) - 1; }\n",
+        0,
+    );
+    // A String is an untagged union (the small-string optimization) built through memcpy: both are
+    // modeled now, so a short one materializes with its bytes inline.
+    h::expect_exit(
+        "a String constant is built at compile time",
+        "const S: String = String::from_str(\"hi\");\nfn main() i32 { return (S.len() as i32) - 2; }\n",
+        0,
+    );
+    h::expect_c(
+        "its bytes live in the constant itself",
+        "const S: String = String::from_str(\"hi\");\nfn main() i32 { return (S.len() as i32) - 2; }\n",
+        ".small = { .data = { 104U, 105U",
+    );
+    h::expect_exit(
+        "a union constant keeps the member it was written through",
+        "union U { pub i: i32, pub f: f32 }\nstruct W { pub u: U, pub n: i32 }\nfn mk() W { return W { u: U { i: 5 }, n: 1 }; }\nconst X: W = mk();\nfn main() i32 { return unsafe X.u.i - 5 + X.n - 1; }\n",
+        0,
+    );
+    // A constant's storage is static data no allocator provided, so it cannot embed allocator STATE.
+    // A zero-sized allocator carries none and is fine; a stateful one would freeze bookkeeping that
+    // describes memory that does not exist -- and a pointer field would bake its block into the binary.
+    h::expect_exit(
+        "a zero-sized allocator is fine in a constant",
+        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Tag> {\n    let mut v = Vector::<i32, Tag>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Tag> = mk();\nfn main() i32 { return (V.len() as i32) - 1; }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a stateful allocator is rejected",
+        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Pool> {\n    let mut v = Vector::<i32, Pool>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Pool> = mk();\nfn main() i32 { return 0; }\n",
+        "cannot use the stateful allocator",
+    );
+    h::expect_exit(
+        "allocators stored as DATA are not the container's allocator",
+        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<Pool> {\n    let mut v = Vector::<Pool>::new();\n    v.push(Pool { used: 3 });\n    return v;\n}\nconst V: Vector<Pool> = mk();\nfn main() i32 { return (V.len() as i32) - 1; }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a copy that could free it is rejected",
+        "const V: Vector<i32> = [1, 2].into();\nfn main() i32 {\n    let c = V;\n    return c.len() as i32;\n}\n",
+        "cannot move a value out of a 'const' binding",
+    );
+    h::expect_err_msg(
+        "passing it by value is the same move",
+        "fn eat(v: Vector<i32>) i32 { return v.len() as i32; }\nconst V: Vector<i32> = [1, 2].into();\nfn main() i32 { return eat(V); }\n",
+        "cannot move a value out of a 'const' binding",
+    );
+    h::expect_err_msg(
+        "mutating it in place is rejected",
+        "const V: Vector<i32> = [1, 2].into();\nfn main() i32 {\n    V.push(3);\n    return 0;\n}\n",
+        "cannot call a '&mut self' method on an immutable binding",
+    );
+    h::expect_err_msg(
+        "and it cannot be freed",
+        "const V: Vector<i32> = [1, 2].into();\nfn main() i32 {\n    V.free();\n    return 0;\n}\n",
+        "cannot move a value out of a 'const' binding",
+    );
+}

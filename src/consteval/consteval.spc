@@ -175,6 +175,7 @@ pub struct CeObj {
     pub dead: u8,
     pub is_enum: u8,
     pub heap: u8,
+    pub uactive: i32, // union: the member the value was written through; -1 for a struct/enum
     pub dm: ModuleId,
     pub dn: NodeId,
     pub nargs: u8,
@@ -1581,6 +1582,7 @@ extend ConstEval {
             unsafe o.dead = 0;
             unsafe o.is_enum = 0;
             unsafe o.heap = 0;
+            unsafe o.uactive = -1;
             unsafe o.dm = 0;
             unsafe o.dn = NODE_NONE;
             unsafe o.nargs = 0;
@@ -1596,7 +1598,7 @@ extend ConstEval {
                     slots.push(cv_nil());
                 }
             }
-            self.objs.push(CeObj { slots: slots });
+            self.objs.push(CeObj { slots: slots, uactive: -1 });
         }
         self.objs_live = self.objs_live + 1;
         self.live_slots = self.live_slots + len as u64;
@@ -1682,6 +1684,7 @@ extend ConstEval {
         unsafe {
             dst.dead = src.dead;
             dst.is_enum = src.is_enum;
+            dst.uactive = src.uactive; // a copied union still holds the member it was written through
             dst.heap = src.heap;
             dst.dm = src.dm;
             dst.dn = src.dn;
@@ -3739,7 +3742,13 @@ extend ConstEval {
         let da = self.ast_ptr(rr.r.dm);
         let dkind = da.at_const(rr.r.dn).kind;
         let is_union = da.at_const(rr.r.dn).as_data.aggregate.is_union;
-        if dkind != NodeKind::NODE_STRUCT || is_union {
+        if dkind != NodeKind::NODE_STRUCT {
+            return cv_nil();
+        }
+        // A union literal names exactly ONE member, and that member is what the value holds: record
+        // which, so a later read through a DIFFERENT member is refused rather than answered with a
+        // slot nothing ever wrote.
+        if is_union && fields.len != 1 {
             return cv_nil();
         }
         if self.ce_user_free(rr.r.dm, rr.r.dn) {
@@ -3777,6 +3786,13 @@ extend ConstEval {
                 return cv_nil();
             }
             unsafe self.obj_ptr(o).slots.set(fi.idx as usize, cloned);
+            if is_union {
+                unsafe self.obj_ptr(o).uactive = fi.idx;
+            }
+        }
+        // a union holds ONE member: the others are not zero, they are simply not there
+        if is_union {
+            return CeVal { kind: CV_AGG, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
         }
         // remaining fields: decl-side default, else zero-initialized (a partial struct literal
         // zero-fills in C; the zero is built from the field's TYPE NODE so const-generic array
@@ -3819,6 +3835,13 @@ extend ConstEval {
             return cv_nil();
         }
         let y = *self.ast_ptr(r2.m).type_at(r2.t);
+        // A literal in a slice position keeps the SLICE as its node type (the typechecker rewrites it
+        // there so codegen builds the fat value), so the array shape has to be recovered from the
+        // slice's element type. Without this every `f([1, 2, 3])` with a `[]T` parameter was
+        // unevaluable, and any constant built from one silently failed to fold.
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            return self.ev_slice_lit(f, m, id, r2.m, r2.t, rt);
+        }
         if y.kind != TypeKind::TYPE_ARRAY {
             return cv_nil();
         }
@@ -3887,6 +3910,55 @@ extend ConstEval {
             cursor = cursor + 1;
         }
         return CeVal { kind: CV_AGG, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
+    }
+
+    // `[a, b, c]` written where a `[]T` is wanted: evaluate the elements into an array object, then
+    // wrap it in the two-slot Slice (pointer + length) that ce_coerce builds for a named array.
+    fn ev_slice_lit(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId, sm: ModuleId, st: TypeId, rt: TypeId) CeVal {
+        let a = self.ast_ptr(m);
+        let elements = a.at_const(id).as_data.array_literal.elements;
+        let sy = *self.ast_ptr(sm).type_at(st);
+        let it = *self.ast_ptr(sm).instance(sy.as_data.inst);
+        let da = self.ast_ptr(it.module);
+        let dn = self.name_text(it.module, da.at_const(it.decl).as_data.aggregate.name);
+        if !self.ce_span_is(it.module, dn, "Slice") && !self.ce_span_is(it.module, dn, "SliceMut") {
+            return cv_nil();
+        }
+        let count = elements.len;
+        let o = self.ce_obj_new(count);
+        if o == 0 {
+            return cv_nil();
+        }
+        for i in 0..count {
+            let el = unsafe a.list(elements)[i as usize];
+            if a.at_const(el).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                return cv_nil(); // a designated initializer has no slice meaning
+            }
+            let v = self.ev_rval(f, m, el);
+            if v.kind == CV_NIL_K {
+                return cv_nil();
+            }
+            let cloned = self.ce_clone(v, 0);
+            if cloned.kind == CV_NIL_K {
+                return cv_nil();
+            }
+            unsafe self.obj_ptr(o).slots.set(i as usize, cloned);
+        }
+        let so = self.ce_obj_new(2);
+        if so == 0 {
+            return cv_nil();
+        }
+        unsafe self.obj_ptr(so).dm = it.module;
+        unsafe self.obj_ptr(so).dn = it.decl;
+        unsafe self.obj_ptr(so).slots.set(
+            0,
+            CeVal { kind: CV_PTR, tm: 0, ty: TYPE_NONE, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } },
+        );
+        unsafe self.obj_ptr(so).slots.set(
+            1,
+            CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: count } },
+        );
+        return CeVal { kind: CV_AGG, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: so, off: 0 } } };
     }
 
     fn ev_tuple(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
@@ -5323,12 +5395,26 @@ extend ConstEval {
 
     // Does ce_intercept model this extern name? Heap/trap names are listed here (keep in sync with
     // ce_intercept below); libm names route through libm1/libm2 so those lists cannot drift.
+    // Does this value point at single bytes? Only a byte pointer can address storage the abstract heap
+    // does not carve into typed elements (an inline array, a struct field).
+    const fn ce_ptr_elem_is_byte(self: &Self, v: CeVal) bool {
+        if v.ty == TYPE_NONE {
+            return false;
+        }
+        let y = self.ast_ptr(v.tm).type_at(v.ty);
+        if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+            return false;
+        }
+        let e = self.ast_ptr(v.tm).type_at(y.as_data.elem);
+        return e.kind == TypeKind::TYPE_BUILTIN && (e.as_data.builtin == BuiltinType::BT_U8 || e.as_data.builtin == BuiltinType::BT_I8 || e.as_data.builtin == BuiltinType::BT_CHAR);
+    }
+
     fn ce_intercept_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
         if self.ce_span_is(fm, nm, "malloc") || self.ce_span_is(fm, nm, "realloc") || self.ce_span_is(fm, nm, "free") || self.ce_span_is(
             fm,
             nm,
             "memset",
-        ) || self.ce_span_is(fm, nm, "memcmp") || self.ce_span_is(fm, nm, "abort") || self.ce_span_is(
+        ) || self.ce_span_is(fm, nm, "memcpy") || self.ce_span_is(fm, nm, "memcmp") || self.ce_span_is(fm, nm, "abort") || self.ce_span_is(
             fm,
             nm,
             "__sc_panic_str",
@@ -5508,6 +5594,90 @@ extend ConstEval {
             for i in 0..count {
                 let cloned = self.ce_clone(fill, 0);
                 unsafe self.obj_ptr(unsafe args[0].as_data.p.obj).slots.set((off + i) as usize, cloned);
+            }
+            out.vals[0] = unsafe args[0];
+            out.n = 1;
+            out.ok = true;
+            return out;
+        }
+        // memcpy: a slot-wise copy between two compile-time objects. Both sides must address elements
+        // of the same size (the abstract heap has no bytes below its element type), which covers the
+        // byte buffers this is actually used for -- String's inline storage, a Vector's block.
+        if self.ce_span_is(fm, nm, "memcpy") {
+            if nargs != 3 || unsafe args[0].kind != CV_PTR || unsafe args[1].kind != CV_PTR || unsafe args[2].kind != CV_INT || unsafe args[2].as_data.i < 0 {
+                return out;
+            }
+            let n = (unsafe args[2].as_data.i) as u64;
+            if n == 0 {
+                out.vals[0] = unsafe args[0];
+                out.n = 1;
+                out.ok = true;
+                return out;
+            }
+            let did = unsafe args[0].as_data.p.obj;
+            let sid = unsafe args[1].as_data.p.obj;
+            if did == 0 || sid == 0 {
+                return out;
+            }
+            let dp = self.obj_ptr(did);
+            let sp2 = self.obj_ptr(sid);
+            if dp == null || sp2 == null {
+                return out;
+            }
+            if unsafe dp.dead != 0 || unsafe sp2.dead != 0 {
+                self.ce_trap(CE_TRAP_UB_USE_AFTER_FREE, "use after free");
+                return out;
+            }
+            // A fresh HEAP block with no element type yet adopts the source's, exactly as memset does.
+            // An inline array (String's small buffer) is not a heap block and must not be reshaped.
+            if unsafe dp.heap != 0 && unsafe dp.et == TYPE_NONE && unsafe args[0].as_data.p.off == 0 && unsafe sp2.esz != 0 {
+                let bytes = unsafe dp.bytes;
+                let esz0 = unsafe sp2.esz;
+                if bytes % esz0 == 0 && self.ce_obj_resize(did, (bytes / esz0) as u32) {
+                    let d2 = self.obj_ptr(did);
+                    unsafe d2.em = unsafe sp2.em;
+                    unsafe d2.et = unsafe sp2.et;
+                    unsafe d2.esz = esz0;
+                }
+            }
+            let db = self.obj_ptr(did);
+            let sb = self.obj_ptr(sid);
+            // Element size: a heap block records it; anything else is only copyable through a byte
+            // pointer, where the element IS the byte.
+            let mut esz = unsafe db.esz;
+            if unsafe db.heap == 0 {
+                esz = 0;
+                if self.ce_ptr_elem_is_byte(unsafe args[0]) {
+                    esz = 1;
+                }
+            }
+            let mut ssz = unsafe sb.esz;
+            if unsafe sb.heap == 0 {
+                ssz = 0;
+                if self.ce_ptr_elem_is_byte(unsafe args[1]) {
+                    ssz = 1;
+                }
+            }
+            if esz == 0 || esz != ssz || n % esz != 0 {
+                return out;
+            }
+            let count = n / esz;
+            let doff = (unsafe args[0].as_data.p.off) as u64;
+            let soff = (unsafe args[1].as_data.p.off) as u64;
+            if doff + count > (unsafe db.slots.len()) as u64 || soff + count > (unsafe sb.slots.len()) as u64 {
+                self.ce_trap(CE_TRAP_UB_OOB, "out-of-bounds access");
+                return out;
+            }
+            for i in 0..count {
+                let sv = unsafe self.obj_ptr(sid).slots[(soff + i) as usize];
+                if sv.kind == CV_NIL_K {
+                    return out;
+                }
+                let cloned = self.ce_clone(sv, 0);
+                if cloned.kind == CV_NIL_K {
+                    return out;
+                }
+                unsafe self.obj_ptr(did).slots.set((doff + i) as usize, cloned);
             }
             out.vals[0] = unsafe args[0];
             out.n = 1;
@@ -6097,9 +6267,29 @@ extend ConstEval {
             return out;
         }
 
+        // `x.into()` runs `Target::from(x)`: the owner whose generics bind is the TARGET, which is this
+        // call's own type -- the receiver is the argument. Deriving the owner from the receiver found no
+        // aggregate at all (an array, a slice) and the call was simply unevaluable.
+        let mut conv_ty = TYPE_NONE;
+        if ck == NodeKind::NODE_MEMBER && !a.at_const(callee).as_data.member.path && fkind == NodeKind::NODE_FUNCTION {
+            let mname = self.name_text(m, a.at_const(callee).as_data.member.member);
+            let fname = self.name_text(fd.module, self.ast_ptr(fd.module).at_const(fd.node).as_data.function.name);
+            if self.ce_span_is(m, mname, "into") && self.ce_span_is(fd.module, fname, "from") {
+                conv_ty = self.ce_type(m, id);
+            }
+        }
         let mut recv_id = ce_recv_zero();
         let mut have_recv_id = false;
-        if have_recv_type {
+        if conv_ty != TYPE_NONE {
+            let sr = self.ce_strip_refptr(f, m, conv_ty);
+            if sr.ok {
+                let rr = self.ce_recv_of(f, sr.m, sr.t);
+                have_recv_id = rr.ok;
+                if rr.ok {
+                    recv_id = rr.r;
+                }
+            }
+        } else if have_recv_type {
             let mut dt = rtt;
             if du != null {
                 dt = unsafe du.target;
@@ -6688,6 +6878,7 @@ pub struct StaticObj {
     pub etm: ModuleId, // HEAP/ARRAY element type; CELL value type
     pub ety: TypeId,
     pub n: u32, // HEAP/ARRAY element count
+    pub uactive: i32, // union: the only member present; -1 for a struct/enum
     pub parent: u32, // embedding parent (statics index); S_NO_PARENT = standalone
     pub pslot: u32,
     pub owner: u32, // nearest standalone ancestor (self when standalone)
@@ -6891,6 +7082,7 @@ extend ConstEval {
             let sl = (unsafe self.obj_ptr(oid).slots.len()) as u32;
             let standalone = embp[oid as usize] == 0;
             let mut g = StaticObj {
+                uactive: -1,
                 shape: SS_CELL,
                 parent: S_NO_PARENT,
                 owner: 0,
@@ -6930,6 +7122,7 @@ extend ConstEval {
                 }
             } else if unsafe op.dn != NODE_NONE {
                 g.shape = SS_STRUCT;
+                g.uactive = unsafe op.uactive; // a union serializes the one member it holds
                 g.dm = unsafe op.dm;
                 g.dn = unsafe op.dn;
                 g.nargs = unsafe op.nargs;
@@ -7004,9 +7197,14 @@ extend ConstEval {
             let sl = (unsafe self.obj_ptr(oid).slots.len()) as u32;
             let mut sslots = Vector::<SSlot>::new();
             let mut srels = Vector::<SRel>::new();
+            let uact = self.statics[gi].uactive;
             for k in 0..sl {
                 let sv = unsafe self.obj_ptr(oid).slots[k as usize];
                 let mut s = SSlot { kind: SK_ZERO, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0, child: 0 };
+                if uact >= 0 && k as i32 != uact {
+                    sslots.push(s); // an inactive union member holds nothing; never emitted
+                    continue;
+                }
                 if sv.kind == CV_INT || sv.kind == CV_BOOL {
                     s.kind = if_u8(sv.kind == CV_INT, SK_INT, SK_BOOL);
                     s.tm = sv.tm;

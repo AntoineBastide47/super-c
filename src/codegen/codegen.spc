@@ -9497,6 +9497,30 @@ extend Codegen {
         }
         let ot = *self.type_at(self.cur_ast().type_of(n.as_data.member.object));
         let ptr = ot.kind == TypeKind::TYPE_POINTER || ot.kind == TypeKind::TYPE_REFERENCE;
+        // Reading a field out of a TEMPORARY that owns memory: bind it, take the field, then free it.
+        // A method call on such a temporary already does this; without the same step here the owner was
+        // dropped on the floor and its allocation leaked. (Moving a Free FIELD out of a Free value is
+        // rejected earlier, so the field taken here never shares ownership with what is freed.)
+        let objn = n.as_data.member.object;
+        let obj_t = self.cur_ast().type_of(objn);
+        if !ptr && !self.is_lvalue(objn) && self.cg_type_is_free(obj_t) {
+            let mut tmp = Buf32 {};
+            let mut res = Buf32 {};
+            self.fresh(&mut tmp[0], 32);
+            self.fresh(&mut res[0], 32);
+            self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&tmp[0]));
+            self.emit_expr(objn);
+            self.buf.format_into("; __auto_type {} = {}.", diag::cstr(&res[0]), diag::cstr(&tmp[0]));
+            let tsp = self.name_span(n.as_data.member.member);
+            if self.source[tsp.start as usize] >= b'0' && self.source[tsp.start as usize] <= b'9' {
+                self.emit_str("_");
+            }
+            self.emit_ident(tsp);
+            self.emit_str("; ");
+            self.emit_free_target(obj_t);
+            self.buf.format_into("(&{}); {}; }})", diag::cstr(&tmp[0]), diag::cstr(&res[0]));
+            return;
+        }
         // a field reached through Deref: replay the hops, each of which yields a pointer
         let fdu = self.cur_ast().deref_use_at(n.as_data.member.member);
         if fdu != null {
@@ -14775,6 +14799,16 @@ extend Codegen {
         // SS_STRUCT
         if nslots == 0 {
             self.emit_str("{}");
+            return;
+        }
+        // A union holds ONE member: name it, and leave the rest of the storage to C.
+        let uact = unsafe g.uactive;
+        if uact >= 0 {
+            self.emit_str("{ ");
+            self.emit_static_field(unsafe g.dm, unsafe g.dn, uact as u32);
+            self.emit_str(" = ");
+            self.emit_static_slot(name, gi, uact as u32);
+            self.emit_str(" }");
             return;
         }
         self.emit_str("{ ");

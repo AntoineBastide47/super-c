@@ -296,6 +296,19 @@ extend<T, A: Allocator + Default> Vector<T, A> as Default {
     }
 }
 
+// Build from a list of elements: `let v: Vector<i32> = [1, 2, 3].into();` (an array coerces to the
+// slice). The slice BORROWS, so each element is cloned in -- the source keeps its own copies and stays
+// responsible for them. Hence `T: Clone`, which every scalar satisfies.
+extend<T: Clone, A: Allocator + Default> Vector<T, A> as From<[]T> {
+    pub fn from(value: []T) Vector<T, A> {
+        let mut out = Vector::<T, A>::with_capacity(value.len());
+        for i in 0..value.len() {
+            out.push(value.at(i).clone());
+        }
+        return out;
+    }
+}
+
 // Equality-based algorithms (available when the element type is `Eq`).
 extend<T: Eq, A: Allocator> Vector<T, A> {
     /// True if any element equals `x` (per `Eq`); O(n) linear scan.
