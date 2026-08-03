@@ -63,6 +63,9 @@ pub struct Manifest<'a> {
     /// Instruction set `@arch` gates against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown. Defaults to the
     /// host; the driver overwrites it for `--arch=`.
     pub arch: i32,
+    /// Cross-compilation toolchain: 0 none (host cc), 1 ios, 2 android, 3 wasm. Set by `--target=`; it
+    /// selects the compiler, sysroot and triple, never the platform gate.
+    pub sdk: i32,
     pub toml: Vector<toml::TomlItem>,
     pub bin: String,
     pub root: String,
@@ -113,6 +116,7 @@ extend Manifest {
     fn new<'a>() Manifest<'a> {
         return Manifest {
             arch: unsafe shim::sc_host_arch(),
+            sdk: 0,
             toml: Vector::<toml::TomlItem>::new(),
             bin: String::new(),
             root: String::new(),

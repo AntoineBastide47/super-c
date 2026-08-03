@@ -243,7 +243,9 @@ void (*__sc_pre_hook)(void) = 0;
 /* Installed by a scheduler before it starts any worker, so every safepoint's read happens-after it. */
 void __sc_set_preempt_hook(void (*__f)(void)) { __sc_pre_hook = __f; }
 #include <stdint.h>
-#if defined(__has_include)
+#if defined(__has_include) && !defined(__ANDROID__)
+/* bionic ships <execinfo.h> but only DECLARES backtrace()/backtrace_symbols() from API 33, so the
+   header alone does not mean they are callable: leaks are still tracked there, without call stacks. */
 #if __has_include(<execinfo.h>)
 #include <execinfo.h>
 #define SC_LK_BT 10

@@ -256,6 +256,14 @@ fn resolve_cc_raw(m: &mf::Manifest) String {
         cc.push_string(&m.cc);
         return cc;
     }
+    // A cross target picks its own toolchain: an explicit `cc` in the manifest still wins, but nothing
+    // else can name these compilers, and $CC on the host would be the wrong one.
+    if m.sdk != 0 {
+        sdk_cc(m.sdk, &mut cc);
+        if cc.len() != 0 {
+            return cc;
+        }
+    }
     let env = stdlib::getenv("CC");
     if env != null && unsafe *env != 0 as char {
         cc.push_str(str::from_cstr(env));
@@ -263,6 +271,114 @@ fn resolve_cc_raw(m: &mf::Manifest) String {
     }
     cc.push_str("cc");
     return cc;
+}
+
+/// The cross compiler for `sdk`, found through the SDK's own environment variable so no path is baked
+/// into the compiler. Empty when the toolchain is not installed -- the caller then falls back and the
+/// C compiler reports what is missing.
+fn sdk_cc(sdk: i32, out: &mut String) {
+    if sdk == 1 {
+        // iOS: clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain
+        out.push_str("xcrun --sdk iphoneos clang");
+        return;
+    }
+    if sdk == 2 {
+        // Android: the NDK's prebuilt clang. $ANDROID_NDK_HOME (or $ANDROID_NDK_ROOT) locates it.
+        let mut ndk = stdlib::getenv("ANDROID_NDK_HOME");
+        if ndk == null || unsafe *ndk == 0 as char {
+            ndk = stdlib::getenv("ANDROID_NDK_ROOT");
+        }
+        if ndk == null || unsafe *ndk == 0 as char {
+            return;
+        }
+        out.push_str(str::from_cstr(ndk));
+        out.push_str("/toolchains/llvm/prebuilt/");
+        out.push_str(ndk_host_tag());
+        out.push_str("/bin/clang");
+        return;
+    }
+    if sdk == 3 {
+        // WebAssembly: the wasi-sdk's clang when present (it brings wasi-libc), else a plain clang,
+        // which can only build freestanding code.
+        let w = stdlib::getenv("WASI_SDK_PATH");
+        if w != null && unsafe *w != 0 as char {
+            out.push_str(str::from_cstr(w));
+            out.push_str("/bin/clang");
+            return;
+        }
+        out.push_str("clang");
+    }
+}
+
+// The NDK lays its prebuilt toolchains out per build host.
+const fn ndk_host_tag() str<'static> {
+    if unsafe shim::sc_host_platform() == 0 {
+        return "windows-x86_64";
+    }
+    if unsafe shim::sc_host_platform() == 1 {
+        return "darwin-x86_64"; // the NDK ships one universal darwin toolchain under this name
+    }
+    return "linux-x86_64";
+}
+
+/// Flags every translation unit needs for a cross target: the triple, and for wasm the wasi sysroot's
+/// own defaults. Nothing here overrides the manifest -- these come first, manifest flags after.
+fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
+    if sdk == 1 {
+        // The triple carries the deployment floor: without a version clang assumes an iOS old enough to
+        // lack thread-local storage, which the runtime's preemption tick needs.
+        cmd.push_str(" -target ");
+        if arch == 0 {
+            cmd.push_str("x86_64-apple-ios13.0-simulator");
+        } else {
+            cmd.push_str("arm64-apple-ios13.0");
+        }
+        return;
+    }
+    if sdk == 2 {
+        // The NDK's clang takes the API level in the triple; 24 is the oldest still widely supported.
+        cmd.push_str(" -target ");
+        if arch == 0 {
+            cmd.push_str("x86_64-linux-android24");
+        } else {
+            cmd.push_str("aarch64-linux-android24");
+        }
+        return;
+    }
+    if sdk == 3 {
+        // A wasi sysroot supplies the libc the emitted C needs. $WASI_SDK_PATH names a full wasi-sdk
+        // (its sysroot sits under share/wasi-sysroot); $WASI_SYSROOT names a bare one. With neither,
+        // only freestanding code can build -- there is no libc to include.
+        let sdkp = stdlib::getenv("WASI_SDK_PATH");
+        if sdkp != null && unsafe *sdkp != 0 as char {
+            cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
+            cmd.push_str(" -target wasm32-wasi --sysroot \"");
+            cmd.push_str(str::from_cstr(sdkp));
+            cmd.push_str("/share/wasi-sysroot\"");
+            return;
+        }
+        let sr = stdlib::getenv("WASI_SYSROOT");
+        if sr != null && unsafe *sr != 0 as char {
+            cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
+            cmd.push_str(" -target wasm32-wasi --sysroot \"");
+            cmd.push_str(str::from_cstr(sr));
+            cmd.push_str("\"");
+            return;
+        }
+        cmd.push_str(" -target wasm32 -nostdlib");
+    }
+}
+
+/// Libraries a cross target needs at LINK time only. wasi keeps signals behind an opt-in emulation
+/// library; the runtime's panic path installs a handler, so the build asks for it.
+fn push_sdk_libs(cmd: &mut String, sdk: i32) {
+    if sdk == 3 {
+        let sdkp = stdlib::getenv("WASI_SDK_PATH");
+        let sr = stdlib::getenv("WASI_SYSROOT");
+        if sdkp != null && unsafe *sdkp != 0 as char || sr != null && unsafe *sr != 0 as char {
+            cmd.push_str(" -lwasi-emulated-signal");
+        }
+    }
 }
 
 // Double quotes: understood by both sh (macOS/Linux) and cmd.exe (Windows _popen/system).
@@ -282,10 +398,12 @@ fn push_all(cmd: &mut String, flags: &Vector<String>) {
 // Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
 // dev/debug profiles' `-fsanitize*` would fail the link on Windows -- there they are dropped instead
 // (SC_LEAK_CHECK, being self-hosted, still covers leaks, double-frees and use-after-free there).
-fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32) {
+fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32) {
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
-        if target == 0 && f.starts_with("-fsanitize") {
+        // mingw ships no libasan/libubsan, and neither do the iOS, Android or wasm toolchains as used
+        // here: the sanitizer flags would fail the link, so they are dropped (SC_LEAK_CHECK still works).
+        if (target == 0 || sdk != 0) && f.starts_with("-fsanitize") {
             continue;
         }
         cmd.push_byte(b' ');
@@ -297,7 +415,7 @@ fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32) {
 /// with no manifest to read them from -- `super-c release foo.spc`, which compiles and links in one command.
 /// Empty for an unknown name, so an unrecognised `--profile=` degrades to the plain build rather than
 /// failing. `target` drops what that target cannot honour, exactly as a manifest build does.
-pub fn profile_flags(name: str, target: i32) String {
+pub fn profile_flags(name: str, target: i32, sdk: i32) String {
     let mut out = String::new();
     if name.len() == 0 {
         return out;
@@ -306,8 +424,8 @@ pub fn profile_flags(name: str, target: i32) String {
     let pi = m.profile_index(name);
     if pi >= 0 {
         let prof = m.profiles.at(pi as usize);
-        push_profile(&mut out, &prof.cflags, target);
-        push_profile(&mut out, &prof.ldflags, target);
+        push_profile(&mut out, &prof.cflags, target, sdk);
+        push_profile(&mut out, &prof.ldflags, target, sdk);
     }
     return out;
 }
@@ -447,12 +565,18 @@ pub fn lib_file(name: str, shared: bool, target: i32) String {
     s.push_str(name);
     if !shared {
         s.push_str(".a");
-    } else if target == 1 {
+    } else if is_darwin(target) {
         s.push_str(".dylib");
     } else {
         s.push_str(".so");
     }
     return s;
+}
+
+// macOS and iOS are one platform family for artifact shape (Mach-O, .dylib), even though they are
+// separate `@platform` values.
+pub const fn is_darwin(target: i32) bool {
+    return target == 1 || target == 4;
 }
 
 pub fn exe_name(base: str, target: i32) String {
@@ -852,8 +976,9 @@ fn engine_build(
     if m.lib_shared && target != 0 {
         tail.push_str(" -fPIC"); // shared-library objects need it; harmless for the exe targets
     }
+    push_sdk_flags(&mut tail, m.sdk, m.arch); // the cross triple comes first; manifest flags can override
     push_all(&mut tail, &m.cflags);
-    push_profile(&mut tail, &prof.cflags, target);
+    push_profile(&mut tail, &prof.cflags, target, m.sdk);
     tail.push_str(" -MMD -c");
     // The ccache probe and `cc --version` cost ~50ms of shell round-trips; a background process
     // resolves both while the transpile runs (ensure_cc collects it at first use). POSIX only:
@@ -980,8 +1105,10 @@ fn engine_build(
                 for i in 0..objs.len() {
                     push_quoted(&mut cmd, objs.at(i).as_str());
                 }
+                push_sdk_flags(&mut cmd, m.sdk, m.arch);
+                push_sdk_libs(&mut cmd, m.sdk);
                 push_all(&mut cmd, &m.ldflags);
-                push_profile(&mut cmd, &prof.ldflags, target);
+                push_profile(&mut cmd, &prof.ldflags, target, m.sdk);
                 // @c.link flags recorded by the emitter
                 let lfp = join2(gen.as_str(), "__ldflags");
                 let lf = loader::read_file(lfp.as_str());

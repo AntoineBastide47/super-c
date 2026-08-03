@@ -973,7 +973,11 @@ extend ConstEval {
             if b == BuiltinType::BT_I32 || b == BuiltinType::BT_U32 || b == BuiltinType::BT_F32 {
                 return Layout { ok: true, size: 4, align: 4 };
             }
-            if b == BuiltinType::BT_I64 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_ISIZE || b == BuiltinType::BT_USIZE || b == BuiltinType::BT_F64 {
+            if b == BuiltinType::BT_ISIZE || b == BuiltinType::BT_USIZE {
+                let w = self.ptr_width();
+                return Layout { ok: true, size: w, align: w };
+            }
+            if b == BuiltinType::BT_I64 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_F64 {
                 return Layout { ok: true, size: 8, align: 8 };
             }
             if b == BuiltinType::BT_C32 {
@@ -985,7 +989,8 @@ extend ConstEval {
             return Layout { ok: false };
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION {
-            return Layout { ok: true, size: 8, align: 8 };
+            let w = self.ptr_width();
+            return Layout { ok: true, size: w, align: w };
         }
         if y.kind == TypeKind::TYPE_ARRAY {
             if y.as_data.arr.len == 0 {
@@ -1078,6 +1083,17 @@ extend ConstEval {
             return BuiltinType::BT_COUNT;
         }
         return type_builtin(self.ast_ptr(r.m), r.t);
+    }
+
+    /// Pointer width of the TARGET, not the host: wasm32 addresses memory with 4 bytes, so every
+    /// pointer, reference, function value and `usize`/`isize` is half the size it is elsewhere. The
+    /// layout model feeds both compile-time `sizeof` and the emitted `_Static_assert`s, so a host-shaped
+    /// answer here makes the generated C reject itself.
+    const fn ptr_width(self: &Self) u64 {
+        if self.pkg != null && unsafe self.pkg.arch == 2 {
+            return 4; // wasm32
+        }
+        return 8;
     }
 
     fn ce_layout_f(self: &mut Self, f: *mut CeFrame, m: ModuleId, t: TypeId) Layout {

@@ -685,6 +685,9 @@ struct CommonOpts {
     pub ce_mem: u64, // --const-eval-memory=BYTES[K|M|G]
     pub target: i32, // --target=windows|macos|linux: @platform gate (default: host)
     pub arch: i32, // --arch=x86_64|aarch64|wasm32: @arch gate (default: the host's instruction set)
+    /// Cross-compilation toolchain: 0 none (host cc), 1 ios, 2 android, 3 wasm. Independent of the
+    /// platform gate above: the gate says which items exist, this says which compiler builds them.
+    pub sdk: i32,
     pub bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes (build across a new tag)
     pub lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
     pub bad: bool, // malformed argument list: print usage and exit 1
@@ -711,6 +714,18 @@ fn common_flag(o: &mut CommonOpts, arg: str) bool {
             o.target = 1;
         } else if t == "linux" {
             o.target = 2;
+        } else if t == "wasm" {
+            o.target = 3;
+            o.sdk = 3;
+            o.arch = 2; // wasm32
+        } else if t == "ios" {
+            o.target = 4;
+            o.sdk = 1;
+            o.arch = 1; // aarch64
+        } else if t == "android" {
+            o.target = 5;
+            o.sdk = 2;
+            o.arch = 1; // aarch64
         } else {
             o.bad = true;
         }
@@ -837,6 +852,7 @@ fn main(argv: Vector<str>) i32 {
         ce_mem: 0,
         target: unsafe shim::sc_host_platform(),
         arch: unsafe shim::sc_host_arch(),
+        sdk: 0,
         bootstrap_tags: false,
         lint: true,
         bad: false,
@@ -1075,7 +1091,7 @@ OPTIONS:
     --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
     --bin=NAME             build/run only that binary target
     --lib                  build only the [lib] target
-    --target=T             cross-compilation target: windows|macos|linux
+    --target=T             target: windows|macos|linux|ios|android|wasm
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
@@ -1195,6 +1211,7 @@ OPTIONS:
         if !mo.is_none() {
             let mut man = mo.unwrap();
             man.arch = co.arch; // --arch= (else the host) is the axis `@arch` gates on
+            man.sdk = co.sdk; // --target=ios|android|wasm picks the cross toolchain
             // CLI --const-eval-* wins; else the manifest's value; else (0) the engine default.
             // Capture the CLI values under fresh names -- shadowing `ce_steps` with an initializer
             // that reads `ce_steps` would resolve to the new (uninitialized) binding.
@@ -1300,7 +1317,7 @@ OPTIONS:
     }
     // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins -- without
     // this a `super-c release foo.spc` linked with no -O at all while reporting success.
-    let pflags = bsys::profile_flags(profile, target);
+    let pflags = bsys::profile_flags(profile, target, co.sdk);
     let rc = run_file(
         file,
         std_dir,

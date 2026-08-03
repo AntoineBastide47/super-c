@@ -12,7 +12,7 @@
 //
 // Park while `*word == expected` until unparked or (timeout_ns >= 0) the deadline; < 0 waits forever.
 // Wakeups may be spurious; the unparker publishes the new state to `*word` before unparking.
-@platform(macos | linux)
+@platform(macos | linux | ios | android)
 @c.link("pthread")
 extern "C" "sc_rt.h" {
     pub fn sc_rt_park(word: *mut i32, expected: i32, timeout_ns: i64) void;

@@ -3589,6 +3589,12 @@ extend Parser {
                     2u32;
                 } else if self.text_is(p, "linux") {
                     4u32;
+                } else if self.text_is(p, "wasm") {
+                    8u32;
+                } else if self.text_is(p, "ios") {
+                    16u32;
+                } else if self.text_is(p, "android") {
+                    32u32;
                 } else {
                     0u32;
                 };
@@ -3608,15 +3614,21 @@ extend Parser {
                         p.start(),
                         p.len(),
                         format(
-                            "unknown platform '{}'; expected windows, macos, or linux",
+                            "unknown platform '{}'; expected windows, macos, linux, wasm, ios, or android",
                             diag::span_str(self.source, p.start(), p.end()),
                         ),
                     );
                 }
                 return;
             }
+            // `!x` is every OTHER platform: the complement over the whole set, which grows with it.
+            let all = if is_arch {
+                7u32;
+            } else {
+                63u32;
+            };
             mask = mask | if neg {
-                bit ^ 7u32;
+                bit ^ all;
             } else {
                 bit;
             };
@@ -3642,7 +3654,11 @@ extend Parser {
                     format("expected an architecture name: x86_64, aarch64, or wasm32"),
                 );
             } else {
-                self.errors.emit(t.start(), t.len(), format("expected a platform name: windows, macos, or linux"));
+                self.errors.emit(
+                    t.start(),
+                    t.len(),
+                    format("expected a platform name: windows, macos, linux, wasm, ios, or android"),
+                );
             }
             return;
         }

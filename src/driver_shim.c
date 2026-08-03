@@ -168,11 +168,14 @@ int sc_getpid(void) {
 #endif
 }
 
-/* Host/target platform index, resolved by the compiler that builds this shim: 0 windows, 1 macos, 2 linux.
+/* Host/target platform index, resolved by the compiler that builds this shim: 0 windows, 1 macos, 2 linux,
+   3 wasm, 4 ios, 5 android.
    The self-hosted driver reads it as the default `--target`, so @platform gating matches the native build. */
 int sc_host_platform(void) {
 #if defined(_WIN32)
   return 0;
+#elif defined(__ANDROID__)
+  return 5; /* checked before __linux__: bionic is its own platform */
 #elif defined(__APPLE__)
   return 1;
 #else

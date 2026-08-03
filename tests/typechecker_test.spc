@@ -2657,3 +2657,25 @@ fn arch_gate() {
         "requires an architecture list",
     );
 }
+
+// Six platforms on the gate axis. iOS and Android are their OWN values, not aliases of Darwin and
+// Linux: their libc surface genuinely differs (bionic version-gates declarations glibc has always had,
+// iOS forbids fork/exec), so code must be able to say which one it means. Negation covers the whole set.
+@test
+fn platform_gate_values() {
+    h::expect_exit(
+        "every platform is nameable",
+        "@platform(windows | macos | linux | wasm | ios | android)\nfn here() i32 { return 0; }\nfn main() i32 { return here(); }\n",
+        0,
+    );
+    h::expect_exit(
+        "negation covers the platforms it does not name",
+        "@platform(!windows)\nfn which() i32 { return 1; }\n@platform(windows)\nfn which() i32 { return 2; }\nfn main() i32 {\n    let w = which();\n    if w != 1 && w != 2 { return 1; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "an unknown platform names the whole set",
+        "@platform(solaris)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "unknown platform 'solaris'; expected windows, macos, linux, wasm, ios, or android",
+    );
+}
