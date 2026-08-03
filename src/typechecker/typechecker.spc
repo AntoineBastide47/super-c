@@ -4533,6 +4533,20 @@ extend TypeChecker {
                 return true;
             }
         }
+        // Deref coercion: `&W` reaches a `&Target` parameter through W's Deref, the same step
+        // `w.method()` already takes. Only tightens (`&mut W` also satisfies `&Target`); the reverse
+        // would hand out mutability the source never had.
+        if ex.kind == TypeKind::TYPE_REFERENCE && ac.kind == TypeKind::TYPE_REFERENCE && ex.as_data.elem != ac.as_data.elem && (ex.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 || ac.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8) {
+            let mut dm = DefId { module: 0, node: NODE_NONE };
+            let dt = self.tc_deref_step(ac.as_data.elem, &mut dm);
+            if dt == ex.as_data.elem && dt != TYPE_NONE {
+                if !probe {
+                    self.tc_record_deref(node, ac.as_data.elem, dm, dt);
+                    self.cur_ast().set_type(node, expected);
+                }
+                return true;
+            }
+        }
         if ex.kind == TypeKind::TYPE_DYN {
             let exsig = self.tc_dyn_fn_sig(&ex);
             let sp = self.cur_ast().at_const(node).span;
@@ -5976,6 +5990,13 @@ extend TypeChecker {
                 }
                 return ot.as_data.elem;
             }
+            // `*x` on a type that implements Deref is that impl's job, exactly as `x.method()` is
+            let mut dm = DefId { module: 0, node: NODE_NONE };
+            let dt = self.tc_deref_step(self.strip(opnd), &mut dm);
+            if dt != TYPE_NONE {
+                self.tc_record_deref(id, self.strip(opnd), dm, dt);
+                return dt;
+            }
             self.errors.emit(sp.start, sp.end - sp.start, format("cannot dereference a non-pointer"));
             return TYPE_NONE;
         }
@@ -7392,6 +7413,27 @@ extend TypeChecker {
                 gargs[i as usize] = bound[i as usize];
             }
             gn = nexplicit;
+            // A closure written inside a generic body is monomorphized with that body, so its C form
+            // differs per instantiation. Binding it to ANOTHER function's type parameter would make
+            // that function's instance depend on which instantiation produced the closure -- which the
+            // closure's type does not record, so both would collapse onto one wrong symbol.
+            if self.tc_fn_is_generic(self.cur_module(), self.current_fn) {
+                let mut bad = false;
+                for i in 0..gn {
+                    if self.tc_is_local_closure(gargs[i as usize]) {
+                        bad = true;
+                    }
+                }
+                if bad {
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "a closure declared inside a generic function cannot be passed to another generic function; call it directly, or take the callback as a plain 'fn' pointer type",
+                        ),
+                    );
+                }
+            }
             if gn == g {
                 self.cur_ast().set_type_args(id, &gargs[0], gn as u8);
                 // enforce bounds (best-effort; diagnostics)
@@ -7756,6 +7798,63 @@ pub const fn if_u8(c: bool, a: u8, b: u8) u8 {
 }
 
 extend TypeChecker {
+    /// Is `ty` a closure's own type (not a fn pointer, not a named function)?
+    const fn tc_is_local_closure(self: &Self, ty: TypeId) bool {
+        if ty == TYPE_NONE {
+            return false;
+        }
+        let y = *self.type_at(ty);
+        return y.kind == TypeKind::TYPE_FUNCTION && self.mod_ast(y.module).at_const(y.as_data.decl).kind == NodeKind::NODE_CLOSURE;
+    }
+
+    /// Does `decl` carry type parameters of its own, or inherit an extend's?
+    fn tc_fn_is_generic(self: &mut Self, m: ModuleId, decl: NodeId) bool {
+        if decl == NODE_NONE || self.mod_ast(m).at_const(decl).kind != NodeKind::NODE_FUNCTION {
+            return false;
+        }
+        if self.mod_ast(m).at_const(decl).as_data.function.generics.len != 0 {
+            return true;
+        }
+        let ext = self.enclosing_extend(m, decl);
+        return ext != NODE_NONE && self.mod_ast(m).at_const(ext).as_data.extend_def.generics.len != 0;
+    }
+
+    /// One `Deref` step: the type behind `ty`, with the `deref` that produces it written to `out`.
+    /// TYPE_NONE when `ty` has no Deref, or its `deref` does not return a reference/pointer.
+    fn tc_deref_step(self: &mut Self, ty: TypeId, out: *mut DefId) TypeId {
+        unsafe *out = DefId { module: 0, node: NODE_NONE };
+        let mut cm: ModuleId = 0;
+        let mut cd = NODE_NONE;
+        let mut cgp = Defs8 {};
+        let mut cga = Tys8 {};
+        let mut cgn: i32 = 0;
+        if !self.aggregate_of(ty, &mut cm, &mut cd, &mut cgp, &mut cga, &mut cgn) {
+            return TYPE_NONE;
+        }
+        let dm = self.find_method_cstr(cm, cd, "deref");
+        if dm.node == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let dret = self.tc_method_ret(ty, dm);
+        if dret == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let dry = *self.type_at(dret);
+        if dry.kind != TypeKind::TYPE_REFERENCE && dry.kind != TypeKind::TYPE_POINTER {
+            return TYPE_NONE;
+        }
+        unsafe *out = dm;
+        return dry.as_data.elem;
+    }
+
+    /// Record the single deref hop `node` needs, so codegen emits `T__deref(&x)` around it.
+    fn tc_record_deref(self: &mut Self, node: NodeId, recv: TypeId, dm: DefId, target: TypeId) {
+        let mut du = DerefUse { node: node, target: target, n: 1 };
+        du.recv[0] = recv;
+        du.method[0] = dm;
+        self.cur_ast().add_deref_use(&du);
+    }
+
     fn check_member(self: &mut Self, id: NodeId, prefer_method: bool) TypeId {
         let a = self.cur_ast();
         let want = self.expected;
@@ -7917,9 +8016,10 @@ extend TypeChecker {
                 return self.decl_type_in(conv.module, conv.node);
             }
         }
-        // auto-deref chain
+        // auto-deref chain -- for fields as well as methods: `b.v` through a Deref is the same step
+        // `b.peek()` takes, and stopping at methods left the field unreachable.
         let mut deref_capped = false;
-        if prefer_method {
+        {
             let mut du = DerefUse { node: mname, n: 0 };
             let mut cur = base;
             let mut seen = Tys8 {};
@@ -7978,13 +8078,19 @@ extend TypeChecker {
                 let mut tga = Tys8 {};
                 let mut tgn: i32 = 0;
                 let mut mhit = DefId { module: 0, node: NODE_NONE };
+                let mut tfhit = NODE_NONE;
                 let tty = *self.type_at(target);
                 if self.aggregate_of(target, &mut tm, &mut td, &mut tgp, &mut tga, &mut tgn) {
-                    mhit = self.find_method(tm, td, name);
-                    if mhit.node == NODE_NONE {
-                        mhit = self.find_default_method(tm, td, name);
+                    if prefer_method {
+                        mhit = self.find_method(tm, td, name);
+                        if mhit.node == NODE_NONE {
+                            mhit = self.find_default_method(tm, td, name);
+                        }
                     }
-                } else if tty.kind == TypeKind::TYPE_BUILTIN && self.package != null {
+                    if mhit.node == NODE_NONE {
+                        tfhit = self.find_member(tm, td, name);
+                    }
+                } else if tty.kind == TypeKind::TYPE_BUILTIN && self.package != null && prefer_method {
                     let bd = self.package.builtin_decl(tty.as_data.builtin);
                     if bd != NODE_NONE {
                         mhit = self.find_method(unsafe self.package.core_module, bd, name);
@@ -8039,6 +8145,15 @@ extend TypeChecker {
                     self.cur_ast().add_deref_use(&du);
                     self.cur_ast().set_resolution_def(mname, mhit);
                     return self.subst_type(self.decl_type_in(mhit.module, mhit.node), &tgp[0], &tga[0], tgn);
+                }
+                if tfhit != NODE_NONE {
+                    du.target = target;
+                    self.cur_ast().add_deref_use(&du);
+                    self.cur_ast().set_resolution_def(mname, DefId { module: tm, node: tfhit });
+                    if self.mod_ast(tm).at_const(tfhit).kind == NodeKind::NODE_FIELD {
+                        self.check_field_visibility(tm, tfhit, td, name);
+                    }
+                    return self.subst_type(self.decl_type_in(tm, tfhit), &tgp[0], &tga[0], tgn);
                 }
                 cur = target;
             }

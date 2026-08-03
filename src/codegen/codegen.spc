@@ -791,6 +791,8 @@ pub struct Codegen<'a> {
     // CG-17: NODE_CLOSURE ids in ascending (= emission) order, collected by collect_insts'
     // arena sweep so emit_closures does not re-sweep the whole arena in both proto and body passes.
     pub clos_list: Vector<NodeId>,
+    pub clos_gen: Vector<NodeId>, // closures inside a generic scope: emitted per instantiation
+    pub clos_sfx: Buf200, // instance suffix for the closures of the generic body being emitted
     // CG-18: precomputed cb_specialized_away verdicts (private fns fully replaced by callback
     // specializations); rebuilt by collect_callbacks, empty before it runs (= all-false, as today).
     pub cb_away: Map<u32, u8>,
@@ -851,6 +853,7 @@ pub struct Codegen<'a> {
     pub fnval_pass: bool,
     pub slice_raw: NodeId,
     pub dyn_raw: NodeId,
+    pub deref_raw: NodeId,
     pub env_clos: NodeId,
     pub minst_only: bool,
     pub defer_stack: [NodeId; 256],
@@ -903,6 +906,7 @@ extend Codegen as Free {
         self.attr_head.free();
         self.attr_next.free();
         self.clos_list.free();
+        self.clos_gen.free();
         self.cb_away.free();
         self.free_memo.free();
         self.mangle_memo.free();
@@ -964,6 +968,7 @@ extend Codegen {
             attr_head: Map::<u64, u32>::new(),
             attr_next: Map::<u64, u32>::new(),
             clos_list: Vector::<NodeId>::new(),
+            clos_gen: Vector::<NodeId>::new(),
             cb_away: Map::<u32, u8>::new(),
             free_memo: Map::<u64, u64>::new(),
             mangle_memo: Map::<u64, String>::new(),
@@ -1045,7 +1050,23 @@ extend Codegen {
         k = bappend(&mut self.trunc, out, cap, k, "closure_".ptr() as *const char);
         let mut idb = Buf32 {};
         unsafe stdio::snprintf(&mut idb[0], 16, "%u".ptr() as *const char, id);
-        bappend(&mut self.trunc, out, cap, k, &idb[0]);
+        k = bappend(&mut self.trunc, out, cap, k, &idb[0]);
+        // Inside a generic body the SAME closure node emits once per instantiation; the instance
+        // suffix is what keeps those apart. References sit in that same body, so they agree. Closures
+        // of a non-generic scope have ONE form and must keep their bare name, even when the body
+        // referencing them is an instance.
+        if self.clos_sfx[0] != 0 as char && self.cg_closure_is_generic(id) {
+            bappend(&mut self.trunc, out, cap, k, &self.clos_sfx[0]);
+        }
+    }
+    // Was this closure written inside a generic scope? (collect_insts classifies them.)
+    fn cg_closure_is_generic(self: &Self, id: NodeId) bool {
+        for i in 0..self.clos_gen.len() {
+            if self.clos_gen[i] == id {
+                return true;
+            }
+        }
+        return false;
     }
     fn closure_name(self: &mut Self, id: NodeId, out: *mut char, cap: usize) {
         self.closure_sym_in(self.cur_module(), id, out, cap);
@@ -1979,10 +2000,35 @@ extend Codegen {
         self.ninsts = 0;
         self.inst_idx = Map::<u64, u32>::new();
         self.clos_list.clear();
+        self.clos_gen.clear();
+        // Spans of every generic scope in this TU. A closure inside one has no single C form -- its
+        // parameter and capture types mention the scope's type parameters -- so it is emitted once per
+        // instantiation instead (emit_specializations), under that instance's substitution frame.
+        let mut gspans = Vector::<tok::Span>::new();
+        let mut gi: u32 = 1;
+        while gi as usize < unsafe self.cur_ast().nodes.len() {
+            let gn = *self.cur_ast().at_const(gi);
+            let generic = gn.kind == NodeKind::NODE_FUNCTION && gn.as_data.function.generics.len != 0 || gn.kind == NodeKind::NODE_EXTEND && gn.as_data.extend_def.generics.len != 0;
+            if generic {
+                gspans.push(gn.span);
+            }
+            gi = gi + 1;
+        }
         let mut i: u32 = 1;
         while i as usize < unsafe self.cur_ast().nodes.len() {
             if self.cur_ast().at_const(i).kind == NodeKind::NODE_CLOSURE {
-                self.clos_list.push(i);
+                let csp = self.cur_ast().at_const(i).span;
+                let mut owned = false;
+                for k in 0..gspans.len() {
+                    if gspans[k].start <= csp.start && csp.end <= gspans[k].end {
+                        owned = true;
+                    }
+                }
+                if owned {
+                    self.clos_gen.push(i);
+                } else {
+                    self.clos_list.push(i);
+                }
             }
             if self.cur_ast().at_const(i).kind == NodeKind::NODE_CALL {
                 let mut args = TyArgs8 {};
@@ -3203,6 +3249,30 @@ extend Codegen {
                 return false;
             }
             i = i + 1;
+        }
+        return true;
+    }
+    /// Do this struct's members contribute NO elements to the C aggregate? True when every one is a
+    /// zero-length array (`Array<T, 0>`), which C sees as "an aggregate with no elements": such a value
+    /// takes `{}`, because `{0}` is a constraint violation with nothing to initialize.
+    fn cg_no_c_elements(self: &mut Self, om: ModuleId, members: NodeList, rt: TypeId) bool {
+        if members.len == 0 {
+            return true;
+        }
+        for i in 0..members.len {
+            let mid = unsafe self.mod_ast(om).list(members)[i as usize];
+            let mn = *self.mod_ast(om).at_const(mid);
+            if mn.kind != NodeKind::NODE_FIELD {
+                return false;
+            }
+            let mt = self.cg_derived_member_ty(om, mn.as_data.field.ty, rt);
+            if mt == TYPE_NONE {
+                return false;
+            }
+            let my = *self.type_at(self.subst_resolve(mt));
+            if my.kind != TypeKind::TYPE_ARRAY || my.as_data.arr.len != 0 {
+                return false;
+            }
         }
         return true;
     }
@@ -4679,6 +4749,48 @@ extend Codegen {
         self.emit_ident_mod(md.module, self.mod_ast(md.module).at_const(md.node).as_data.function.name);
         self.emit_str("(");
     }
+    // A `&W` that reached a `&Target` position through W's Deref: wrap the value in the hop the
+    // typechecker recorded on THIS node. `*w` records its hop here too but wants the pointee, so it
+    // keeps its own emission in the unary branch.
+    fn emit_deref_coercion(self: &mut Self, id: NodeId) bool {
+        let n = self.cur_ast().at_const(id);
+        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Star {
+            return false;
+        }
+        let du = self.cur_ast().deref_use_at(id);
+        if du == null || unsafe du.n != 1 {
+            return false;
+        }
+        self.emit_deref_hop(unsafe du.recv[0], unsafe du.method[0]);
+        let saved = self.deref_raw;
+        self.deref_raw = id;
+        self.emit_expr(id);
+        self.deref_raw = saved;
+        self.emit_str(")");
+        return true;
+    }
+    // `*w` on a Deref type: the hop yields `&Target`, and the operator wants the value behind it.
+    fn emit_deref_star(self: &mut Self, id: NodeId, operand: NodeId) bool {
+        let du = self.cur_ast().deref_use_at(id);
+        if du == null || unsafe du.n != 1 {
+            return false;
+        }
+        if self.is_lvalue(operand) {
+            self.emit_str("*");
+            self.emit_deref_hop(unsafe du.recv[0], unsafe du.method[0]);
+            self.emit_prefixed(operand, "&".ptr() as *const char);
+            self.emit_str(")");
+            return true;
+        }
+        let mut tmp = Buf32 {};
+        self.fresh(&mut tmp[0], 32);
+        self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&tmp[0]));
+        self.emit_expr(operand);
+        self.emit_str("; *");
+        self.emit_deref_hop(unsafe du.recv[0], unsafe du.method[0]);
+        self.buf.format_into("&{}); }})", diag::cstr(&tmp[0]));
+        return true;
+    }
     fn emit_call_args(self: &mut Self, args: NodeList) {
         for i in 0..args.len {
             if i != 0 {
@@ -5456,7 +5568,11 @@ extend Codegen {
             let d = self.cur_ast().resolution_def(stn);
             if d.node != NODE_NONE {
                 let dn = self.mod_ast(d.module).at_const(d.node);
-                zero_fields = dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.members.len == 0;
+                zero_fields = dn.kind == NodeKind::NODE_STRUCT && (dn.as_data.aggregate.members.len == 0 || self.cg_no_c_elements(
+                    d.module,
+                    dn.as_data.aggregate.members,
+                    self.cur_ast().type_of(id),
+                ));
             }
             if zero_fields {
                 self.buf.format_into("({}){{}}", diag::cstr(&t[0]));
@@ -9381,6 +9497,30 @@ extend Codegen {
         }
         let ot = *self.type_at(self.cur_ast().type_of(n.as_data.member.object));
         let ptr = ot.kind == TypeKind::TYPE_POINTER || ot.kind == TypeKind::TYPE_REFERENCE;
+        // a field reached through Deref: replay the hops, each of which yields a pointer
+        let fdu = self.cur_ast().deref_use_at(n.as_data.member.member);
+        if fdu != null {
+            let mut i = unsafe fdu.n;
+            while i > 0 {
+                i = i - 1;
+                self.emit_deref_hop(unsafe fdu.recv[i as usize], unsafe fdu.method[i as usize]);
+            }
+            if ptr {
+                self.emit_place(n.as_data.member.object, want_mut);
+            } else {
+                self.emit_prefixed(n.as_data.member.object, "&".ptr() as *const char);
+            }
+            for _j in 0..unsafe fdu.n {
+                self.emit_str(")");
+            }
+            self.emit_str("->");
+            let fsp = self.name_span(n.as_data.member.member);
+            if self.source[fsp.start as usize] >= b'0' && self.source[fsp.start as usize] <= b'9' {
+                self.emit_str("_");
+            }
+            self.emit_ident(fsp);
+            return;
+        }
         self.emit_place(n.as_data.member.object, want_mut);
         if ptr {
             self.emit_str("->");
@@ -10309,6 +10449,9 @@ extend Codegen {
         if id != self.dyn_raw && self.emit_dyn_coercion(id) {
             return;
         }
+        if id != self.deref_raw && self.emit_deref_coercion(id) {
+            return;
+        }
         let n = *self.cur_ast().at_const(id);
         let nk = n.kind;
         if self.ceval() != null && (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_CAST || nk == NodeKind::NODE_CALL || nk == NodeKind::NODE_SIZEOF || nk == NodeKind::NODE_ALIGNOF) && self.cg_fold_worthwhile(
@@ -10352,7 +10495,7 @@ extend Codegen {
                 let operand = n.as_data.unary.operand;
                 if op == TokenType::Question {
                     self.emit_try(id);
-                } else if op == TokenType::Move || op == TokenType::Unsafe {
+                } else if op == TokenType::Star && self.emit_deref_star(id, operand) {} else if op == TokenType::Move || op == TokenType::Unsafe {
                     self.emit_expr(operand);
                 } else if op == TokenType::Ampersand && !self.is_lvalue(operand) && self.type_at(
                     self.cur_ast().type_of(operand),
@@ -13082,7 +13225,11 @@ extend Codegen {
                 if !with_body {
                     self.emit_ret_struct_named(fn2.node, &nm[0]);
                 }
+                // this instance's closures FIRST: the body names their env struct and function
+                self.cg_inst_suffix(&inst.args[0], inst.n);
+                self.emit_generic_closures(fn2.node, with_body);
                 self.emit_function(fn2.node, DefId { module: 0, node: NODE_NONE }, false, with_body, &nm[0], true);
+                self.clos_sfx[0] = 0 as char;
                 self.nsubst = 0;
                 continue;
             }
@@ -13538,6 +13685,30 @@ extend Codegen {
             return TYPE_NONE;
         }
         return self.cur_ast().reintern(unsafe &*fa, t0);
+    }
+    // The suffix that keeps one generic body's closures apart per instantiation: the mangled type
+    // arguments, the same pieces spec_name uses for the function itself.
+    fn cg_inst_suffix(self: &mut Self, args: *const TypeId, n: u8) {
+        self.clos_sfx[0] = 0 as char;
+        let mut k: usize = 0;
+        for i in 0..n {
+            k = bappend(&mut self.trunc, &mut self.clos_sfx[0], 200, k, "__".ptr() as *const char);
+            let mut mb = Buf128 {};
+            self.mangle_type(unsafe args[i as usize], &mut mb[0], 128);
+            k = bappend(&mut self.trunc, &mut self.clos_sfx[0], 200, k, &mb[0]);
+        }
+    }
+    // Emit the closures written inside `fnNode`, under the substitution frame the caller established.
+    fn emit_generic_closures(self: &mut Self, fnNode: NodeId, with_body: bool) {
+        let fsp = self.cur_ast().at_const(fnNode).span;
+        for i in 0..self.clos_gen.len() {
+            let cid = self.clos_gen[i];
+            let csp = self.cur_ast().at_const(cid).span;
+            if csp.start < fsp.start || csp.end > fsp.end || self.cur_ast().type_of(cid) == TYPE_NONE {
+                continue;
+            }
+            self.emit_closure_fn(cid, with_body);
+        }
     }
     fn emit_closures(self: &mut Self, with_body: bool) {
         // CG-17: iterate the ids collected by collect_insts' sweep (ascending = old scan order)

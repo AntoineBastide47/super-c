@@ -134,6 +134,19 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         return Option::<&V>::Some(&unsafe self.vals[i]);
     }
 
+    /// A MUTABLE borrow of the value for `key`, or `None`. Holds the Map borrowed for as long as the
+    /// result lives, so the entry cannot be rehashed out from under it.
+    pub const fn get_mut(self: &mut Map<K, V, A>, key: &K) Option<&mut V> {
+        if self.cap == 0 {
+            return Option::<&mut V>::None;
+        }
+        let i = self.slot(key);
+        if unsafe self.used[i] == 0 {
+            return Option::<&mut V>::None;
+        }
+        return Option::<&mut V>::Some(&mut unsafe self.vals[i]);
+    }
+
     pub const fn contains_key(self: &Map<K, V, A>, key: &K) bool {
         return self.get(key).is_some();
     }

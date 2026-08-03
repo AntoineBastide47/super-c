@@ -2522,6 +2522,11 @@ fn zero_length_arrays() {
         "fn take(a: [i32; 2], b: i32) i32 { return a[0] + b; }\nfn main() i32 {\n    let f: fn([i32; 2], i32) i32 = take;\n    let v: [i32; 2] = [3, 0];\n    return f(v, 4) - 7;\n}\n",
         0,
     );
+    h::expect_exit(
+        "a zero-length Array instantiates and reports its length",
+        "fn main() i32 {\n    let a = Array::<i32, 0>::new();\n    return a.len() as i32;\n}\n",
+        0,
+    );
     h::expect_err_msg(
         "an empty array literal with no context is still rejected",
         "fn main() i32 {\n    let e = [];\n    return 0;\n}\n",

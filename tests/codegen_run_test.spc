@@ -270,3 +270,57 @@ fn ref_mutability_mangles_apart() {
     h::expect_c("the mutable instance takes its own symbol", SRC, "Option__ptrm_i32");
     h::expect_c("the read-only instance keeps the plain one", SRC, "Option__ptr_i32");
 }
+
+// `Deref` reaches past method dispatch: the `*` operator, field access, and a `&W` argument arriving
+// at a `&Target` parameter all take the same hop `w.method()` already took.
+@test
+fn deref_beyond_methods() {
+    h::expect_exit(
+        "the '*' operator uses Deref",
+        "struct W { pub v: i32 }\nextend W as Deref<i32> { fn deref(self: &W) &i32 { return &self.v; } }\nfn main() i32 { let w = W { v: 6 }; return *w - 6; }\n",
+        0,
+    );
+    h::expect_exit(
+        "a '&W' argument reaches a '&Target' parameter",
+        "struct W { pub v: i32 }\nextend W as Deref<i32> { fn deref(self: &W) &i32 { return &self.v; } }\nfn take(x: &i32) i32 { return *x; }\nfn main() i32 { let w = W { v: 6 }; return take(&w) - 6; }\n",
+        0,
+    );
+    h::expect_exit(
+        "'*' and fields work through Box",
+        "struct P { pub v: i32 }\nfn main() i32 {\n    let b = Box::<i32>::new(5);\n    let p = Box::<P>::new(P { v: 4 });\n    return *b + p.v - 9;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a method through Deref still resolves",
+        "struct P { pub v: i32 }\nextend P { pub fn peek(self: &P) i32 { return self.v; } }\nfn main() i32 {\n    let b = Box::<P>::new(P { v: 5 });\n    return b.peek() - 5;\n}\n",
+        0,
+    );
+}
+
+// A closure inside a generic function is monomorphized WITH that function: one C function per
+// instantiation, so its parameter, return and capture types follow the type arguments.
+@test
+fn closures_in_generic_fns() {
+    h::expect_exit(
+        "a closure over the type parameter, at two instantiations",
+        "fn twice<T>(v: T) T {\n    let f = fn(x: T) T { return x; };\n    return f(v);\n}\nfn main() i32 { return twice(3) - 3 + (twice(4i64) as i32) - 4; }\n",
+        0,
+    );
+    h::expect_exit(
+        "a closure capturing a generic value",
+        "fn hold<T>(v: T) T {\n    let f = fn() T { return v; };\n    return f();\n}\nfn main() i32 { return hold(7) - 7; }\n",
+        0,
+    );
+    h::expect_exit(
+        "a closure that ignores the type parameter",
+        "fn gen<T>(v: T) i32 {\n    let f = fn() i32 { return 1; };\n    return f();\n}\nfn main() i32 { return gen(9) - 1 + gen(true) - 1; }\n",
+        0,
+    );
+    // The one shape still out of reach: the callee's instance would have to be keyed on WHICH
+    // instantiation produced the closure, which the closure's type does not record.
+    h::expect_err_msg(
+        "passing such a closure to another generic function is rejected",
+        "fn apply<T, F: fn(T) T>(f: F, v: T) T { return f(v); }\nfn twice<T>(v: T) T { return apply(fn(x: T) T { return x; }, v); }\nfn main() i32 { return twice(3) - 3; }\n",
+        "cannot be passed to another generic function",
+    );
+}

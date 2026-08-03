@@ -1430,14 +1430,6 @@ extend Resolver {
     }
 
     fn resolve_closure(self: &mut Self, id: NodeId) {
-        if self.in_generic {
-            let sp = self.ast.at_const(id).span;
-            self.errors.emit(
-                sp.start,
-                sp.end - sp.start,
-                format("closures inside generic functions are not yet supported"),
-            );
-        }
         if self.closures.len() >= 8 {
             let sp = self.ast.at_const(id).span;
             self.errors.emit(sp.start, sp.end - sp.start, format("closures nested too deeply (max 8)"));
