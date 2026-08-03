@@ -342,7 +342,10 @@ extend Parser {
 
 /// Parse `src` into items in file order; diagnostics (if any) are rendered against `file` and printed
 /// here. None on any error (one per offending line -- the parser resyncs at newlines).
-pub fn parse(src: str, file: str) Option<Vector<TomlItem>> {
+/// Parse into `errs` instead of reporting: the caller decides what to do with the diagnostics (the
+/// build logs them, the language server turns them into editor squiggles). Spans stay raw -- `finalize`
+/// is the step that rewrites messages into rendered blocks, and an editor wants them unrendered.
+pub fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
     let mut p = Parser {
         src: src,
         i: 0,
@@ -357,10 +360,22 @@ pub fn parse(src: str, file: str) Option<Vector<TomlItem>> {
         }
         p.parse_line();
     }
-    if p.errors.has_errors() {
-        p.errors.finalize(src, file);
-        p.errors.log();
+    let bad = p.errors.has_errors();
+    for i in 0..p.errors.errors.len() {
+        errs.emit(p.errors.starts[i], p.errors.lens[i], p.errors.errors.at(i).clone());
+    }
+    if bad {
         return Option::<Vector<TomlItem>>::None;
     }
     return Option::<Vector<TomlItem>>::Some(replace(&mut p.items, Vector::<TomlItem>::new()));
+}
+
+pub fn parse(src: str, file: str) Option<Vector<TomlItem>> {
+    let mut errs = diag::Errors::new();
+    let r = parse_into(src, &mut errs);
+    if errs.has_errors() {
+        errs.finalize(src, file);
+        errs.log();
+    }
+    return r;
 }

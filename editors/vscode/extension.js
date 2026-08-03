@@ -42,7 +42,12 @@ function activate(context) {
     options: cwd ? { cwd, env } : { env },
   };
   const clientOptions = {
-    documentSelector: [{ language: "super-c" }],
+    // build.toml is served by the same server: it validates the manifest with the build's own checker
+    // and completes its keys. Matched by name so no other TOML file is claimed.
+    documentSelector: [
+      { language: "super-c" },
+      { language: "superc-manifest" },
+    ],
   };
 
   client = new LanguageClient("superc", "Super-C Language Server", serverOptions, clientOptions);

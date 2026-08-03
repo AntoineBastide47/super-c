@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Super-C manifest",
+  "scopeName": "source.superc-manifest",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#section" },
+    { "include": "#key" },
+    { "include": "#value" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.superc-manifest"
+    },
+    "section": {
+      "match": "^\\s*(\\[)\\s*([A-Za-z0-9_.-]*)\\s*(\\])",
+      "captures": {
+        "1": { "name": "punctuation.definition.section.superc-manifest" },
+        "2": { "name": "entity.name.section.superc-manifest" },
+        "3": { "name": "punctuation.definition.section.superc-manifest" }
+      }
+    },
+    "key": {
+      "match": "^\\s*([A-Za-z0-9_-]+)\\s*(=)",
+      "captures": {
+        "1": { "name": "variable.other.key.superc-manifest" },
+        "2": { "name": "keyword.operator.assignment.superc-manifest" }
+      }
+    },
+    "value": {
+      "patterns": [
+        { "include": "#string" },
+        {
+          "match": "\\b(true|false)\\b",
+          "name": "constant.language.boolean.superc-manifest"
+        },
+        {
+          "match": "\\b[0-9][0-9_]*\\b",
+          "name": "constant.numeric.superc-manifest"
+        }
+      ]
+    },
+    "string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.superc-manifest",
+      "patterns": [
+        {
+          "match": "\\\\.",
+          "name": "constant.character.escape.superc-manifest"
+        }
+      ]
+    }
+  }
+}

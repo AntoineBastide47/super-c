@@ -621,3 +621,85 @@ fn main() i32 {
     assert_eq(b.exit, 0);
     assert_eq(p.run_bin(), 0);
 }
+
+// build.toml is served by the SAME server as .spc: the manifest's own validator supplies the
+// diagnostics (so the editor never disagrees with `super-c build`), plus key/section completion and
+// hover from the schema.
+@test
+fn lsp_build_toml() {
+    let BAD: str = "bin = \"app\"\nroot = \"src/main.spc\"\nbogus = 1\n\n[profile.release]\nnope = 2\n\n[command.build]\nrun = [\"x\"]\n";
+    let p = cli::proj_new();
+    p.mkfile("build.toml", BAD);
+    p.mkfile("src/main.spc", MAIN_OK);
+    let root = str::from_cstr(p.rootp());
+
+    let mut ses = String::new();
+    let mut b = String::from_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("\"}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/build.toml\",\"languageId\":\"toml\",\"version\":1,\"text\":");
+    json::dump_escaped(BAD, &mut b);
+    b.push_str("}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    // hover over `bin` on line 0
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/build.toml\"},\"position\":{\"line\":0,\"character\":1}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    // completion at the start of a key line: the top-level keys
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/build.toml\"},\"position\":{\"line\":2,\"character\":0}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    // completion inside a section header: the section names
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/build.toml\"},\"position\":{\"line\":4,\"character\":1}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"shutdown\",\"params\":null}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+    frame(&mut ses, &b);
+    p.mkfile("session.bin", ses.as_str());
+
+    let rc = lsp_run(root);
+    assert_eq(rc, 0);
+
+    let mut op = String::from_str(root);
+    op.push_str("/out.txt");
+    let out_opt = loader::read_file(op.as_str());
+    assert(out_opt.is_some());
+    let out = out_opt.unwrap();
+    let o = out.as_str();
+    // the manifest's own checker produced these
+    assert(o.contains("unknown key 'bogus'"));
+    assert(o.contains("unknown profile key 'nope'"));
+    assert(o.contains("cannot be overridden"));
+    assert(o.contains("\"source\":\"build.toml\""));
+    // hover and both completion flavours
+    assert(o.contains("name of the binary this project builds"));
+    assert(o.contains("\"label\":\"out-dir\""));
+    assert(o.contains("\"label\":\"profile.\""));
+}

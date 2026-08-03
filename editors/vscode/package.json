@@ -13,7 +13,9 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:super-c"
+    "onLanguage:super-c",
+    "workspaceContains:**/build.toml",
+    "onLanguage:superc-manifest"
   ],
   "contributes": {
     "languages": [
@@ -27,6 +29,16 @@
           ".spc"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "superc-manifest",
+        "aliases": [
+          "Super-C manifest"
+        ],
+        "filenames": [
+          "build.toml"
+        ],
+        "configuration": "./language-configuration-toml.json"
       }
     ],
     "grammars": [
@@ -34,6 +46,11 @@
         "language": "super-c",
         "scopeName": "source.super-c",
         "path": "./syntaxes/super-c.tmLanguage.json"
+      },
+      {
+        "language": "superc-manifest",
+        "scopeName": "source.superc-manifest",
+        "path": "./syntaxes/build-toml.tmLanguage.json"
       }
     ],
     "configuration": {

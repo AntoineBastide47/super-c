@@ -15,6 +15,7 @@ import lsp::text as text;
 import lsp::analysis as analysis;
 import lsp::features as feat;
 import driver::util as dutil;
+import lsp::buildtoml as btoml;
 
 /// An open editor document (the overlay source of truth while open).
 pub struct Doc {
@@ -181,6 +182,12 @@ extend Server {
     fn ensure_roots(self: &mut Self) {
         for i in 0..self.docs.len() {
             let path = self.docs.at(i).path.as_str();
+            // Only Super-C source compiles. An open build.toml is served by the manifest half of the
+            // server; giving it a package root made the parser read TOML as Super-C and report
+            // "expected top-level item" on its first line.
+            if !path.ends_with(".spc") {
+                continue;
+            }
             let own = self.owning_root(path);
             if own >= 0 && !self.is_batch(own as usize) {
                 continue;
@@ -443,6 +450,19 @@ extend PubSet as Free {
 }
 
 extend PubSet {
+    // Register a URI with its complete list (possibly empty), replacing anything gathered for it.
+    fn push_all(self: &mut Self, uri: String, arr: json::JSON) {
+        for i in 0..self.uris.len() {
+            if self.uris.at(i).as_str() == uri.as_str() {
+                self.arrs.set(i, arr);
+                let u = uri;
+                u.free();
+                return;
+            }
+        }
+        self.uris.push(uri);
+        self.arrs.push(arr);
+    }
     fn push(self: &mut Self, uri: String, d: json::JSON) {
         for i in 0..self.uris.len() {
             if self.uris.at(i).as_str() == uri.as_str() {
@@ -563,6 +583,31 @@ extend Server {
         }
     }
 
+    // Every OPEN build.toml gets the build's own verdict on it. An open manifest with no diagnostics
+    // still registers its URI, so a previously-reported problem is cleared once fixed.
+    fn publish_manifest_diags(self: &Self, ps: &mut PubSet) {
+        for d in 0..self.docs.len() {
+            let doc = self.docs.at(d);
+            if !is_manifest_path(doc.path.as_str()) {
+                continue;
+            }
+            let src = doc.txt.as_str();
+            let ls = text::line_starts(src);
+            let diags = btoml::diagnostics(src);
+            let mut any = json::JSON::array();
+            for i in 0..diags.len() {
+                let dg = diags.at(i);
+                let mut dj = json::JSON::object();
+                dj.emplace("range", range_json(src, &ls, dg.start, dg.len));
+                dj.emplace("severity", json::JSON::integer(1));
+                dj.emplace("source", json::JSON::str("build.toml"));
+                dj.emplace("message", json::JSON::str(dg.msg.as_str()));
+                any.push_back(dj);
+            }
+            ps.push_all(doc.uri.clone(), any);
+        }
+    }
+
     // Rebuild everything and republish: every URI with diagnostics gets its list, every URI published
     // last round but clean now gets an explicit empty list.
     fn rebuild_all(self: &mut Self, f: *mut stdio::FILE) {
@@ -584,6 +629,7 @@ extend Server {
                 self.build_root(r, &mut ps);
             }
         }
+        self.publish_manifest_diags(&mut ps);
         // publish
         for i in 0..ps.uris.len() {
             let mut params = json::JSON::object();
@@ -737,6 +783,12 @@ fn uri_doc_path(uri: str) String {
     return canon(raw.as_str());
 }
 
+// `build.toml` is served by the manifest half of the server (src/lsp/buildtoml.spc): it is not Super-C
+// source, so none of the package machinery applies to it.
+fn is_manifest_path(path: str) bool {
+    return path.ends_with("build.toml");
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // Positional requests: hover / definition / references / rename.
 // ---------------------------------------------------------------------------------------------------------
@@ -857,8 +909,52 @@ extend Server {
     }
 }
 
+// The open build.toml a positional request names, and the byte offset in it; -1 when the request is
+// not about a manifest. The document text is the editor's, so it is current between keystrokes.
+fn manifest_hit(sv: &Server, req: &json::JSON, off: &mut usize) i32 {
+    let po = req.value("params");
+    if po.is_none() {
+        return -1;
+    }
+    let params = po.unwrap();
+    let tdo = params.value("textDocument");
+    if tdo.is_none() {
+        return -1;
+    }
+    let uri = tdo.unwrap().value_str("uri");
+    let di = sv.find_doc(uri);
+    if di < 0 || !is_manifest_path(sv.docs.at(di as usize).path.as_str()) {
+        return -1;
+    }
+    let pos = params.value("position");
+    if pos.is_none() {
+        return -1;
+    }
+    let p = pos.unwrap();
+    let src = sv.docs.at(di as usize).txt.as_str();
+    let ls = text::line_starts(src);
+    *off = text::pos_to_offset(src, &ls, p.value_i64("line", 0) as u32, p.value_i64("character", 0) as u32) as usize;
+    return di;
+}
+
 fn on_hover(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
     let nullv = json::JSON::default();
+    let mut moff: usize = 0;
+    let mdi = manifest_hit(sv, req, &mut moff);
+    if mdi >= 0 {
+        let doc = btoml::hover(sv.docs.at(mdi as usize).txt.as_str(), moff);
+        if doc.len() == 0 {
+            respond(f, req.at_key("id"), &nullv);
+            return;
+        }
+        let mut contents = json::JSON::object();
+        contents.emplace("kind", json::JSON::str("markdown"));
+        contents.emplace("value", json::JSON::string(doc));
+        let mut res = json::JSON::object();
+        res.emplace("contents", contents);
+        respond(f, req.at_key("id"), &res);
+        return;
+    }
     let h = sv.locate(req);
     if !h.ok {
         respond(f, req.at_key("id"), &nullv);
@@ -1191,6 +1287,20 @@ fn complete_via_probe(sv: &Server, path: str, txt: str, off: u32, member: bool) 
 
 fn on_completion(sv: &Server, req: &json::JSON, f: *mut stdio::FILE) {
     let mut arr = json::JSON::array();
+    let mut moff: usize = 0;
+    let mdi = manifest_hit(sv, req, &mut moff);
+    if mdi >= 0 {
+        let items = btoml::completions(sv.docs.at(mdi as usize).txt.as_str(), moff);
+        for i in 0..items.len() {
+            let mut it = json::JSON::object();
+            it.emplace("label", json::JSON::str(items.at(i).label.as_str()));
+            it.emplace("kind", json::JSON::integer(14)); // Keyword
+            it.emplace("detail", json::JSON::str(items.at(i).doc.as_str()));
+            arr.push_back(it);
+        }
+        respond(f, req.at_key("id"), &arr);
+        return;
+    }
     let mut uri = "";
     let mut line: i64 = 0;
     let mut ch: i64 = 0;

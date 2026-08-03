@@ -304,16 +304,28 @@ pub fn load(path: str) Option<Manifest> {
         eprintln("build: cannot read '{}'", path);
         return Option::<Manifest>::None;
     }
-
     let src = src_opt.unwrap();
-    let items_opt = toml::parse(src.as_str(), path);
+    let (m, errs) = parse_check(src.as_str(), path);
+    errs.free();
+    return m;
+}
+
+/// Parse and VALIDATE a manifest, returning the diagnostics alongside it. A non-empty `file` renders and
+/// logs them (what the build wants); an empty one leaves them raw with their spans, for a caller that
+/// formats its own (the language server). The manifest is None when the file is unusable.
+pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors) {
+    let mut errs = diag::Errors::new();
+    let items_opt = toml::parse_into(src, &mut errs);
     if items_opt.is_none() {
-        return Option::<Manifest>::None;
+        if file.len() != 0 {
+            errs.finalize(src, file);
+            errs.log();
+        }
+        return Option::<Manifest>::None, errs;
     }
 
     let mut m = Manifest::new();
     let items = items_opt.unwrap();
-    let mut errs = diag::Errors::new();
     let mut rejected = Vector::<String>::new(); // [command.<builtin>] sections already reported
     let mut saw_lib = false;
     for x in 0..items.len() {
@@ -549,13 +561,12 @@ pub fn load(path: str) Option<Manifest> {
     if m.profile_index(m.default_profile.as_str()) < 0 {
         errs.emit(0, 1, format("default-profile '{}' is not defined", m.default_profile.as_str()));
     }
-    let bad = errs.has_errors();
-    if bad {
-        errs.finalize(src.as_str(), path);
-        errs.log();
+    if errs.has_errors() {
+        if file.len() != 0 {
+            errs.finalize(src, file);
+            errs.log();
+        }
+        return Option::<Manifest>::None, errs;
     }
-    if bad {
-        return Option::<Manifest>::None;
-    }
-    return Option::<Manifest>::Some(m);
+    return Option::<Manifest>::Some(m), errs;
 }
