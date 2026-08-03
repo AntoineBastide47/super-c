@@ -2454,3 +2454,98 @@ fn mut_ref_invariance() {
         "struct Cell<T> { pub v: T }\nfn swapcell<T>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let mut m = Cell::<i32> { v: 1 };\n    let mut n = Cell::<i32> { v: 2 };\n    swapcell(&mut m, &mut n);\n    return m.v - 2;\n}\n",
     );
 }
+
+// A generic function has no type of its own -- only a fn pointer to one of its instances does. Naming
+// one where a fn-pointer type is wanted binds its type parameters from that signature; with nothing to
+// bind them, the value is rejected instead of reaching codegen unsubstituted.
+@test
+fn generic_fn_as_value() {
+    h::expect_exit(
+        "a generic fn coerces to an annotated fn pointer",
+        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f: fn(i32) i32 = id;\n    let g: fn(i64) i64 = id;\n    return f(3) + (g(4) as i32) - 7;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a turbofish binds the arguments the signature would infer",
+        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f: fn(i32) i32 = id::<i32>;\n    return f(9) - 9;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a generic fn coerces in argument position",
+        "fn twice<T>(v: T) T { return v; }\nfn apply(f: fn(i32) i32, x: i32) i32 { return f(x); }\nfn main() i32 {\n    return apply(twice, 5) - 5;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "lifetimes survive the coercion",
+        "fn id<'a, T>(v: &'a T) &'a T { return v; }\nfn main() i32 {\n    let x = 7;\n    let f: fn(&i32) &i32 = id;\n    return *f(&x) - 7;\n}\n",
+        0,
+    );
+    h::expect_c(
+        "the coerced value names the monomorphized instance",
+        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f: fn(i32) i32 = id;\n    return f(0);\n}\n",
+        "id__i32",
+    );
+    h::expect_err_msg(
+        "a signature the type arguments cannot satisfy is rejected",
+        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f: fn(i32) i64 = id;\n    return f(0) as i32;\n}\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "an inferred binding cannot name a generic fn",
+        "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f = id::<i32>;\n    return f(0);\n}\n",
+        "cannot infer the type of a generic function used as a value",
+    );
+    // The two sides of a fn-type mismatch must be distinguishable; both used to print bare "fn".
+    h::expect_err_msg(
+        "a fn-type mismatch names both signatures",
+        "fn take(v: i64) i64 { return v; }\nfn main() i32 {\n    let f: fn(i32) i32 = take;\n    return f(0);\n}\n",
+        "expected 'fn(i32) i32', found 'fn(i64) i64'",
+    );
+}
+
+// A zero-length array is a legal type: it types the `[]` literal, and a fn pointer naming one must
+// match the definition it points at (an array parameter decays, so its const lands on the element).
+@test
+fn zero_length_arrays() {
+    h::expect_exit(
+        "an empty array literal takes its type from the context",
+        "fn main() i32 {\n    let e: [i32; 0] = [];\n    return sizeof(e) as i32;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a zero-length array passes through a fn pointer",
+        "fn pick(_: [i32; 0], a: i32) i32 { return a; }\nfn main() i32 {\n    let f: fn([i32; 0], i32) i32 = pick;\n    let e: [i32; 0] = [];\n    return f(e, 4) - 4;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "an array parameter reaches a fn pointer unchanged",
+        "fn take(a: [i32; 2], b: i32) i32 { return a[0] + b; }\nfn main() i32 {\n    let f: fn([i32; 2], i32) i32 = take;\n    let v: [i32; 2] = [3, 0];\n    return f(v, 4) - 7;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "an empty array literal with no context is still rejected",
+        "fn main() i32 {\n    let e = [];\n    return 0;\n}\n",
+        "cannot infer the element type of an empty array literal",
+    );
+    h::expect_err_msg(
+        "a negative array length is rejected",
+        "fn main() i32 {\n    let e: [i32; 0 - 1] = [];\n    return 0;\n}\n",
+        "array length",
+    );
+}
+
+// `tc_type_is_free` peels to the referent, so the split-init rule has to gate on the type kind first:
+// a `&String` binding BORROWS an owner, it does not become one.
+@test
+fn split_init_reference_to_free() {
+    h::expect_exit(
+        "a reference to a Free type may be declared then assigned",
+        "fn main() i32 {\n    let s = String::from_str(\"hi\");\n    let r: &String;\n    r = &s;\n    return (r.len() - 2) as i32;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "the owner itself still must be initialized when declared",
+        "fn main() i32 {\n    let s: String;\n    s = String::from_str(\"hi\");\n    return 0;\n}\n",
+        "must be initialized when declared",
+    );
+}

@@ -239,3 +239,34 @@ fn closure_captures_every_binding_kind() {
         45,
     );
 }
+
+// A `[T; N]` parameter is a VALUE, but C hands the callee a pointer to the caller's array. A `mut` one
+// must therefore be copied into a local on entry, or writes in the callee reach the caller.
+@test
+fn mut_array_param_is_a_copy() {
+    h::expect_exit(
+        "writing a mut array parameter leaves the caller's array alone",
+        "fn f(mut a: [i32; 2]) i32 { a[0] = 9; return a[0]; }\nfn main() i32 {\n    let v: [i32; 2] = [3, 0];\n    let r = f(v);\n    return r - 9 + v[0] - 3;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "the copy is per call, not shared",
+        "fn bump(mut a: [i32; 1]) i32 { a[0] = a[0] + 1; return a[0]; }\nfn main() i32 {\n    let v: [i32; 1] = [5];\n    return bump(v) + bump(v) - 12;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a non-mut array parameter still reads the caller's elements",
+        "fn sum(a: [i32; 3]) i32 { return a[0] + a[1] + a[2]; }\nfn main() i32 {\n    let v: [i32; 3] = [1, 2, 3];\n    return sum(v) - 6;\n}\n",
+        0,
+    );
+}
+
+// `&T` and `&mut T` are DIFFERENT C types (`const T*` vs `T*`), so instances named by them must get
+// different symbols -- one name for both redefines the struct and conflicts on every method.
+@test
+fn ref_mutability_mangles_apart() {
+    let SRC: str = "fn peek<T>(v: &T) Option<&T> { return Option::<&T>::Some(v); }\nfn peek_mut<T>(v: &mut T) Option<&mut T> { return Option::<&mut T>::Some(v); }\nfn main() i32 {\n    let mut x = 41;\n    let m = peek_mut(&mut x).unwrap();\n    *m = *m + 1;\n    return *peek(&x).unwrap() - 42;\n}\n";
+    h::expect_exit("Option<&T> and Option<&mut T> coexist in one program", SRC, 0);
+    h::expect_c("the mutable instance takes its own symbol", SRC, "Option__ptrm_i32");
+    h::expect_c("the read-only instance keeps the plain one", SRC, "Option__ptr_i32");
+}

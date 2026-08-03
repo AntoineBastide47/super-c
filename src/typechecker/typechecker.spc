@@ -1121,6 +1121,119 @@ extend TypeChecker {
         return self.dynfn_sig_ok(exid, acid);
     }
 
+    /// The generic function `node` names, or NODE_NONE when it names something else. A generic function
+    /// has no type of its own -- only its instantiations do -- so naming one as a VALUE needs the type
+    /// arguments pinned before it can be a fn pointer.
+    fn tc_generic_fn_named(self: &Self, node: NodeId) DefId {
+        let a = self.cur_ast();
+        let mut n = node;
+        if a.at_const(n).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            n = a.at_const(n).as_data.specialization.expression;
+        }
+        let k = a.at_const(n).kind;
+        if k != NodeKind::NODE_IDENTIFIER && (k != NodeKind::NODE_MEMBER || !a.at_const(n).as_data.member.path) {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let d = a.resolution_def(n);
+        if d.node == NODE_NONE || d.module != self.cur_module() && (self.package == null || d.module as usize >= self.pkg_count()) {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let dn = self.mod_ast(d.module).at_const(d.node);
+        if dn.kind != NodeKind::NODE_FUNCTION || dn.as_data.function.generics.len == 0 {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        return d;
+    }
+
+    /// Does `node` need the context type pushed into it before it can be checked? A generic function
+    /// named as a value and an empty array literal both carry no type of their own.
+    fn tc_wants_param_type(self: &Self, node: NodeId) bool {
+        let n = self.cur_ast().at_const(node);
+        if n.kind == NodeKind::NODE_ARRAY_LITERAL {
+            return !n.as_data.array_literal.repeat && n.as_data.array_literal.elements.len == 0;
+        }
+        return self.tc_generic_fn_named(node).node != NODE_NONE;
+    }
+
+    /// Coerce a generic function named as a value to the expected function-pointer type: bind its type
+    /// parameters by matching its declared signature against `expected`'s, then check the substituted
+    /// signature. On success the node ADOPTS `expected` (a concrete signature the rest of the pipeline
+    /// can render and emit) and records its type arguments, so codegen names the monomorphized instance
+    /// exactly as a call site does. A turbofish pre-binds the arguments it spells out.
+    fn tc_coerce_generic_fn(self: &mut Self, expected: TypeId, node: NodeId) bool {
+        let d = self.tc_generic_fn_named(node);
+        if d.node == NODE_NONE || self.type_at(expected).kind != TypeKind::TYPE_FUNCTION {
+            return false;
+        }
+        let fa = self.mod_ast(d.module);
+        let gens = fa.at_const(d.node).as_data.function.generics;
+        let g = gens.len as i32;
+        if g > 8 {
+            return false;
+        }
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        for i in 0..g {
+            gp[i as usize] = DefId { module: d.module, node: unsafe fa.list(gens)[i as usize] };
+            ga[i as usize] = TYPE_NONE;
+        }
+        // explicit turbofish arguments bind first, left to right
+        let sn = self.cur_ast().at_const(node);
+        if sn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            let tas = sn.as_data.specialization.types;
+            let mut i: u32 = 0;
+            while i < tas.len && i as i32 < g {
+                ga[i as usize] = self.resolve_type(unsafe self.cur_ast().list(tas)[i as usize]);
+                i = i + 1;
+            }
+        }
+        let mut ep = Tys8 {};
+        let mut er: TypeId = TYPE_NONE;
+        let en = self.fn_sig(expected, &mut ep[0], 4, &mut er);
+        let params = fa.at_const(d.node).as_data.function.params;
+        let rets = fa.at_const(d.node).as_data.function.returns;
+        if params.len as i32 != en || en > 4 || rets.len > 1 {
+            return false;
+        }
+        // infer the rest from the wanted signature, parameters then return
+        for i in 0..en {
+            let pid = unsafe fa.list(params)[i as usize];
+            self.unify_infer(self.decl_type_in(d.module, pid), ep[i as usize], &gp[0], &mut ga[0], g);
+        }
+        if rets.len == 1 {
+            let r0 = unsafe fa.list(rets)[0];
+            let rn = self.mod_ast(d.module).at_const(r0);
+            let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
+            self.unify_infer(self.lower_type_in(d.module, tn), er, &gp[0], &mut ga[0], g);
+        }
+        for i in 0..g {
+            if ga[i as usize] == TYPE_NONE {
+                return false;
+            }
+        }
+        // the substituted signature must be exactly what was asked for
+        for i in 0..en {
+            let pid = unsafe fa.list(params)[i as usize];
+            if self.subst_type(self.decl_type_in(d.module, pid), &gp[0], &ga[0], g) != ep[i as usize] {
+                return false;
+            }
+        }
+        let mut ar = Ast::builtin(BuiltinType::BT_VOID);
+        if rets.len == 1 {
+            let r0 = unsafe fa.list(rets)[0];
+            let rn = self.mod_ast(d.module).at_const(r0);
+            let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
+            ar = self.subst_type(self.lower_type_in(d.module, tn), &gp[0], &ga[0], g);
+        }
+        if !self.ret_eq(er, ar) {
+            return false;
+        }
+        self.check_generic_bounds(node, d.module, d.node, gens, &gp[0], &ga[0], g, &gp[0], &ga[0], 0);
+        self.cur_ast().set_type(node, expected);
+        self.cur_ast().set_type_args(node, &ga[0], g as u8);
+        return true;
+    }
+
     fn dynfn_sig_ok(self: &mut Self, exid: TypeId, acid: TypeId) bool {
         let mut ep = Tys8 {};
         let mut ap = Tys8 {};
@@ -1198,6 +1311,83 @@ const fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: Mod
     return cur_src;
 }
 
+// `fn(P, Q) R` from a function type's decl node. Reads the CACHED type of each parameter/return node
+// rather than lowering (no checker here); an uncached slot renders `..`, so a signature never checked
+// still names itself. Without this every function type printed as a bare "fn" and a mismatch between
+// two of them read "expected 'fn', found 'fn'".
+fn render_fn_sig_into(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, buf: *mut char, cap: usize) {
+    let ma = rt_ast(pkg, a, ty.module);
+    let d = ma.at_const(ty.as_data.decl);
+    let mut ps = NodeList { start: 0, len: 0 };
+    let mut rs = NodeList { start: 0, len: 0 };
+    if d.kind == NodeKind::NODE_FUNCTION {
+        ps = d.as_data.function.params;
+        rs = d.as_data.function.returns;
+    } else if d.kind == NodeKind::NODE_CLOSURE {
+        ps = d.as_data.closure.params;
+        rs = d.as_data.closure.returns;
+    } else if d.kind == NodeKind::NODE_FUNCTION_TYPE {
+        ps = d.as_data.function_type.params;
+        rs = d.as_data.function_type.returns;
+    } else {
+        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "fn".ptr() as *const char);
+        return;
+    }
+    let mut at: usize = 0;
+    at = at + (unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "fn(".ptr() as *const char)) as usize;
+    for i in 0..ps.len {
+        let mut pb = Buf96 {};
+        render_slot_into(pkg, a, cur_src, ma, unsafe ma.list(ps)[i as usize], &mut pb[0], 96);
+        let mut sep = ", ".ptr() as *const char;
+        if i == 0 {
+            sep = "".ptr() as *const char;
+        }
+        if at >= cap {
+            return;
+        }
+        at = at + (unsafe stdio::snprintf(buf + at, cap - at, "%s%s".ptr() as *const char, sep, &pb[0])) as usize;
+    }
+    if at >= cap {
+        return;
+    }
+    let mut rb = Buf96 {};
+    if rs.len == 1 {
+        render_slot_into(pkg, a, cur_src, ma, unsafe ma.list(rs)[0], &mut rb[0], 96);
+        unsafe stdio::snprintf(buf + at, cap - at, ") %s".ptr() as *const char, &rb[0]);
+    } else {
+        unsafe stdio::snprintf(buf + at, cap - at, "%s".ptr() as *const char, ")".ptr() as *const char);
+    }
+}
+
+// One parameter/return slot of a function type: the node is either a NODE_PARAMETER wrapping a type
+// node or the type node itself.
+fn render_slot_into(
+    pkg: *const loader::Package,
+    a: *const Ast,
+    cur_src: str,
+    ma: *const Ast,
+    slot: NodeId,
+    buf: *mut char,
+    cap: usize,
+) {
+    let mut tn = slot;
+    if ma.at_const(slot).kind == NodeKind::NODE_PARAMETER {
+        tn = ma.at_const(slot).as_data.parameter.ty;
+    }
+    let mut t = TYPE_NONE;
+    if tn != NODE_NONE {
+        t = ma.type_of(tn);
+    }
+    if t == TYPE_NONE {
+        t = ma.type_of(slot);
+    }
+    if t == TYPE_NONE {
+        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "..".ptr() as *const char);
+        return;
+    }
+    render_type_into(pkg, ma, rt_src(pkg, a, cur_src, unsafe ma.module), t, buf, cap);
+}
+
 /// Render `tid` as Super-C surface syntax into `buf` (NUL-terminated, truncating at `cap`). The
 /// standalone form of TypeChecker::render_type: `a` is the Ast owning the type pool (a checker's
 /// in-flight ast, or a module's held ast after the build), `cur_src` that module's source, `pkg` the
@@ -1242,7 +1432,7 @@ pub fn render_type_into(
     } else if ty.kind == TypeKind::TYPE_ARRAY {
         let mut inb = Buf96 {};
         render_type_into(pkg, a, cur_src, ty.as_data.arr.elem, &mut inb[0], 96);
-        unsafe stdio::snprintf(buf, cap, "[%s]".ptr() as *const char, &inb[0]);
+        unsafe stdio::snprintf(buf, cap, "[%s; %u]".ptr() as *const char, &inb[0], ty.as_data.arr.len);
     } else if ty.kind == TypeKind::TYPE_STRUCT || ty.kind == TypeKind::TYPE_ENUM || ty.kind == TypeKind::TYPE_GENERIC {
         let ma = rt_ast(pkg, a, ty.module);
         let d = ma.at_const(ty.as_data.decl);
@@ -1300,7 +1490,7 @@ pub fn render_type_into(
             unsafe stdio::snprintf(buf + at, cap - at, "%s".ptr() as *const char, ">".ptr() as *const char);
         }
     } else if ty.kind == TypeKind::TYPE_FUNCTION {
-        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "fn".ptr() as *const char);
+        render_fn_sig_into(pkg, a, cur_src, &ty, buf, cap);
     } else if ty.kind == TypeKind::TYPE_DYN {
         let ma = rt_ast(pkg, a, ty.module);
         let mut pfx = "Box<dyn ".ptr() as *const char;
@@ -1794,7 +1984,9 @@ extend TypeChecker {
             return 0;
         }
         let lv = ceptr.eval(m, lenNode);
-        if lv.kind == ce::CONST_INT && lv.as_data.i > 0 && lv.as_data.i <= 0xFFFFFFFFi64 {
+        // A length of 0 is legal (an empty carrier type); it interns as the same len-0 array a
+        // `[]` literal types with, which is exactly the type the literal must match.
+        if lv.kind == ce::CONST_INT && lv.as_data.i >= 0 && lv.as_data.i <= 0xFFFFFFFFi64 {
             return lv.as_data.i as u32;
         }
         // diagnose once per node; unsubstituted generic contexts stay silent (re-lowered at instantiation)
@@ -1814,7 +2006,11 @@ extend TypeChecker {
             );
         } else if lv.kind != ce::CONST_NONE {
             self.len_reported.push(key);
-            self.errors.emit(sp.start, sp.end - sp.start, format("array length must be a positive constant expression"));
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("array length must be a non-negative constant expression"),
+            );
         } else if !self.tc_mentions_generic(m, lenNode, 0) {
             self.len_reported.push(key);
             self.errors.emit(sp.start, sp.end - sp.start, format("array length must be a constant expression"));
@@ -4280,7 +4476,12 @@ extend TypeChecker {
             return true;
         }
         if ex.kind == TypeKind::TYPE_FUNCTION && ac.kind == TypeKind::TYPE_FUNCTION {
-            return self.fn_compatible(expected, actual);
+            if self.fn_compatible(expected, actual) {
+                return true;
+            }
+            // The actual may be a GENERIC function named as a value: its declared signature still
+            // mentions its type parameters, so it matches only once they are bound.
+            return !probe && self.tc_coerce_generic_fn(expected, node);
         }
         if ex.kind == TypeKind::TYPE_ARRAY && ac.kind == TypeKind::TYPE_ARRAY {
             if ex.as_data.arr.len != 0 && ac.as_data.arr.len != 0 && ex.as_data.arr.len != ac.as_data.arr.len {
@@ -6331,6 +6532,14 @@ extend TypeChecker {
         }
         let fa = self.mod_ast(ct.module);
         let fnn = fa.at_const(ct.as_data.decl);
+        if fnn.kind == NodeKind::NODE_FUNCTION_TYPE {
+            // a call THROUGH a fn-pointer value: the parameter types are the signature's own
+            let fps = fnn.as_data.function_type.params;
+            if argi >= fps.len {
+                return TYPE_NONE;
+            }
+            return self.lower_type_in(ct.module, unsafe fa.list(fps)[argi as usize]);
+        }
         if fnn.kind != NodeKind::NODE_FUNCTION {
             return TYPE_NONE;
         }
@@ -6801,7 +7010,10 @@ extend TypeChecker {
         let args = a.at_const(id).as_data.call.args;
         for i in 0..args.len {
             let aid = unsafe a.list(args)[i as usize];
-            if self.tc_is_iface_assoc_call(aid) || a.at_const(aid).kind == NodeKind::NODE_CLOSURE {
+            // `[]` and a generic fn named as a value both take their type from the parameter.
+            if self.tc_is_iface_assoc_call(aid) || a.at_const(aid).kind == NodeKind::NODE_CLOSURE || self.tc_wants_param_type(
+                aid,
+            ) {
                 self.expected = self.tc_param_expected(callee, callee_id, i);
             }
             self.check_expr(aid);
@@ -7316,7 +7528,7 @@ extend TypeChecker {
                         &rsubp[0],
                         &rsuba[0],
                         nrsub,
-                    ) {
+                    ) && !self.tc_coerce_generic_fn(pt, aid) {
                         self.err_mismatch(aid, pt);
                     }
                 } else if !self.compatible(pt, aid) {
@@ -9299,6 +9511,11 @@ extend TypeChecker {
             return self.check_array_repeat(elements, expected);
         }
         if elements.len == 0 {
+            // `[]` carries no element type of its own: take it from the context, which is the only
+            // place a zero-length array can come from.
+            if expected != TYPE_NONE && self.type_at(expected).kind == TypeKind::TYPE_ARRAY {
+                return expected;
+            }
             let sp = a.at_const(id).span;
             self.errors.emit(
                 sp.start,
@@ -10010,6 +10227,21 @@ extend TypeChecker {
                     binding = declared;
                 } else if valued {
                     binding = self.cur_ast().type_of(value);
+                    // A generic function has no type of its own -- only a fn POINTER to one of its
+                    // instances does, and nothing here says which signature that pointer has (the type
+                    // arguments fix the parameters, not the reverse). Reject it: codegen would
+                    // otherwise emit the unsubstituted signature, which is not valid C.
+                    if binding != TYPE_NONE && self.tc_generic_fn_named(value).node != NODE_NONE {
+                        let sp = a.at_const(value).span;
+                        self.errors.emit(
+                            sp.start,
+                            sp.end - sp.start,
+                            format(
+                                "cannot infer the type of a generic function used as a value; annotate the binding with its signature, e.g. 'let f: fn(i32) i32 = ..'",
+                            ),
+                        );
+                        binding = TYPE_NONE;
+                    }
                     // An array literal types with len 0 (unknown -- `compatible`'s extent sugar needs
                     // that), so an INFERRED binding would lose its length and every index on it would
                     // look unprovable to the raw-array unsafe gate: pin the literal's real extent here.
@@ -10041,7 +10273,10 @@ extend TypeChecker {
                 // A binding whose type has lifetime slots gets a region vector; the solver will
                 // constrain these against the initializer's regions.
                 if annotated && !valued {
-                    if self.tc_type_is_free(binding) {
+                    // tc_type_is_free peels to the referent, so gate on the kind first: a `&String`
+                    // binding borrows an owner, it does not become one.
+                    let bk = self.type_at(binding).kind;
+                    if bk != TypeKind::TYPE_POINTER && bk != TypeKind::TYPE_REFERENCE && self.tc_type_is_free(binding) {
                         let sp = self.name_span(nm);
                         self.errors.emit(
                             sp.start,

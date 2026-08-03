@@ -879,6 +879,8 @@ pub struct Codegen<'a> {
     pub nparam_flags: u32,
     pub unused_params: [NodeId; 32],
     pub nunused_params: u32,
+    pub marr_params: [NodeId; 32],
+    pub nmarr_params: u32,
     pub no_temp_free: bool,
     pub type_state: *mut u8,
     pub inst_emit_state: *mut u8,
@@ -1323,8 +1325,16 @@ extend Codegen {
         }
         if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
             let e = self.mangle_type_s(ty.as_data.elem);
-            let mut o = String::with_capacity(e.len() + 4);
-            o.push_str("ptr_");
+            let mut o = String::with_capacity(e.len() + 5);
+            // `&T` and `&mut T` are different C types (`const T*` vs `T*`), so they must be different
+            // instances: one name for both redefines the struct and conflicts on every method.
+            o.push_str(
+                if cg_ptr_is_const(&ty) {
+                    "ptr_";
+                } else {
+                    "ptrm_";
+                },
+            );
             o.push_string(&e);
             return o;
         }
@@ -1621,6 +1631,8 @@ extend Codegen {
                 pfx = "slice_".ptr() as *const char;
             } else if y.kind == TypeKind::TYPE_ARRAY {
                 pfx = "arr_".ptr() as *const char;
+            } else if !cg_ptr_is_const(&y) {
+                pfx = "ptrm_".ptr() as *const char; // see mangle_type_s: `&T` and `&mut T` differ in C
             }
             let mut at = bappend(&mut self.trunc, out, cap, 0, pfx);
             if at < cap {
@@ -1827,18 +1839,22 @@ extend Codegen {
         }
         return fn2;
     }
-    // A generic function used as a VALUE (a turbofished `f::<T>` fn pointer, not the callee of a call):
-    // `specId` is the NODE_GENERIC_SPECIALIZATION. Returns the generic fn DefId and its explicit type
-    // args, so the monomorphized instance is collected and named exactly like a call site. NODE_NONE for
-    // anything that is not a turbofished generic-fn value.
+    // A generic function used as a VALUE (an `f::<T>` fn pointer, or a bare `f` coerced to one -- not
+    // the callee of a call): `specId` is the NODE_GENERIC_SPECIALIZATION or the NODE_IDENTIFIER. Returns
+    // the generic fn DefId and the type args the checker bound, so the monomorphized instance is
+    // collected and named exactly like a call site. NODE_NONE for anything that is not a generic-fn
+    // value -- including a plain identifier, which carries no type args.
     fn generic_value_target(self: &Self, specId: NodeId, args: *mut TypeId, n: *mut i32) DefId {
         unsafe *n = 0;
         let a = self.cur_ast();
         let sp = a.at_const(specId);
-        if sp.kind != NodeKind::NODE_GENERIC_SPECIALIZATION {
+        let mut inner = specId;
+        if sp.kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            inner = sp.as_data.specialization.expression;
+        } else if sp.kind != NodeKind::NODE_IDENTIFIER {
             return DefId { module: 0, node: NODE_NONE };
         }
-        let fn2 = a.resolution_def(sp.as_data.specialization.expression);
+        let fn2 = a.resolution_def(inner);
         if fn2.node == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
         }
@@ -1976,7 +1992,8 @@ extend Codegen {
                     self.record_inst(fn2, &args[0], n, i);
                 }
             }
-            if self.cur_ast().at_const(i).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            let ik = self.cur_ast().at_const(i).kind;
+            if ik == NodeKind::NODE_GENERIC_SPECIALIZATION || ik == NodeKind::NODE_IDENTIFIER {
                 let mut sargs = TyArgs8 {};
                 let mut sn: i32 = 0;
                 let sfn = self.generic_value_target(i, &mut sargs[0], &mut sn);
@@ -2095,7 +2112,9 @@ extend Codegen {
                 let ck = self.cur_ast().at_const(cn).kind;
                 if ck == NodeKind::NODE_CALL {
                     self.call_list.push(cn);
-                } else if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                } else if ck == NodeKind::NODE_GENERIC_SPECIALIZATION || ck == NodeKind::NODE_IDENTIFIER && self.cur_ast().type_args(
+                    cn,
+                ) != null {
                     self.spec_list.push(cn);
                 }
                 cn = cn + 1;
@@ -2638,6 +2657,12 @@ extend Codegen {
                 if i != 0 {
                     k = bappend(&mut self.trunc, &mut params[0], 480, k, ", ".ptr() as *const char);
                 }
+                // see render_fn_ptr_id: an array parameter decays, so the definition's binding const
+                // lands on the element and the type must spell it too
+                let pt = self.cur_ast().type_of(pid);
+                if pt != TYPE_NONE && self.type_at(pt).kind == TypeKind::TYPE_ARRAY {
+                    k = bappend(&mut self.trunc, &mut params[0], 480, k, "const ".ptr() as *const char);
+                }
                 k = bappend(&mut self.trunc, &mut params[0], 480, k, &t[0]);
                 i = i + 1;
             }
@@ -2828,14 +2853,16 @@ extend Codegen {
                 anchor = pid;
             }
             let mut tt = Buf256 {};
-            self.render_type_id(
-                self.cur_ast().reintern(unsafe &*fa, fa.type_of(anchor)),
-                "".ptr() as *const char,
-                &mut tt[0],
-                256,
-            );
+            let pty = self.cur_ast().reintern(unsafe &*fa, fa.type_of(anchor));
+            self.render_type_id(pty, "".ptr() as *const char, &mut tt[0], 256);
             if i != 0 {
                 k = bappend(&mut self.trunc, &mut params[0], 480, k, ", ".ptr() as *const char);
+            }
+            // An array parameter DECAYS to a pointer, so the const a definition puts on the (immutable)
+            // binding lands on the ELEMENT: spell it here too, or no fn-pointer type ever matches a
+            // function taking an array.
+            if self.type_at(pty).kind == TypeKind::TYPE_ARRAY {
+                k = bappend(&mut self.trunc, &mut params[0], 480, k, "const ".ptr() as *const char);
             }
             k = bappend(&mut self.trunc, &mut params[0], 480, k, &tt[0]);
             i = i + 1;
@@ -3744,6 +3771,22 @@ pub type ScopeArr = Array<ModuleId, 3>;
 fn cg_move_flag(out: *mut char, cap: usize, decl: NodeId) {
     unsafe stdio::snprintf(out, cap, "__mv%u".ptr() as *const char, decl);
 }
+// Does this pointer/reference type emit as `const T*`? A reference is read-only unless it is `&mut`; a
+// raw pointer only when it says `*const`. The two answers are the two distinct C types, which is what
+// the manglers key on.
+const fn cg_ptr_is_const(y: &Ty) bool {
+    if y.kind == TypeKind::TYPE_REFERENCE {
+        return y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
+    }
+    return y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8;
+}
+// Does this parameter hold a fixed-size array (the one type C passes by reference behind the
+// language's back)? Resolved through the active substitution frame, so `[T; N]` in a monomorphized
+// body answers for the instance.
+fn cg_param_is_array(cg: &mut Codegen, pid: NodeId) bool {
+    let pty = cg.cur_ast().type_of(pid);
+    return pty != TYPE_NONE && cg.type_at(cg.subst_resolve(pty)).kind == TypeKind::TYPE_ARRAY;
+}
 const fn ref_derefs(d0: i32) *const char {
     let mut d = d0;
     if d < 1 {
@@ -4505,7 +4548,9 @@ extend Codegen {
             if d.node != NODE_NONE {
                 let dnk = self.mod_ast(d.module).at_const(d.node).kind;
                 let dbody = self.mod_ast(d.module).at_const(d.node).as_data.function.body;
-                if dnk == NodeKind::NODE_FUNCTION && dbody != NODE_NONE {
+                // a GENERIC callee is named by its instance, which this specialization cannot spell:
+                // leave it as a fn pointer (emit_ident_ref names the instance)
+                if dnk == NodeKind::NODE_FUNCTION && dbody != NODE_NONE && self.mod_ast(d.module).at_const(d.node).as_data.function.generics.len == 0 {
                     unsafe *out = d;
                     unsafe *is_closure = false;
                     return true;
@@ -7950,6 +7995,49 @@ extend Codegen {
             }
         }
     }
+    // Record the `mut` array parameters of the function about to be emitted; emit_mut_array_params turns
+    // each into a local copy at the top of the body.
+    fn cg_collect_mut_array_params(self: &mut Self, params: NodeList) {
+        self.nmarr_params = 0;
+        let pids = self.cur_ast().list(params);
+        for i in 0..params.len {
+            let pid = unsafe pids[i as usize];
+            if pid != self.cb_param && self.cur_ast().at_const(pid).as_data.parameter.is_mutable && cg_param_is_array(
+                self,
+                pid,
+            ) && self.nmarr_params < 32 {
+                unsafe self.marr_params[self.nmarr_params as usize] = pid;
+                self.nmarr_params = self.nmarr_params + 1;
+            }
+        }
+    }
+    // `mut a: [T; N]` is a by-value parameter, but C hands the callee a pointer to the CALLER's array.
+    // render_params renamed the incoming pointer to `__sc_pv<pid>`; declare the real local here and copy
+    // into it, so writes in the body stay local -- which is what the language, and every analysis in
+    // front of this one, already assume.
+    fn emit_mut_array_params(self: &mut Self) {
+        let mut i: u32 = 0;
+        while i < self.nmarr_params {
+            let pid = unsafe self.marr_params[i as usize];
+            let p = self.cur_ast().at_const(pid).as_data.parameter;
+            let mut nm = Buf128 {};
+            self.render_ident(self.name_span(p.name), &mut nm[0], 128);
+            if nm[0] == '_' as char && nm[1] == 0 as char {
+                unsafe stdio::snprintf(&mut nm[0], 128, "__sc_u%u".ptr() as *const char, pid);
+            }
+            let mut d = Buf300 {};
+            if p.ty == NODE_NONE {
+                self.render_type_id(self.subst_resolve(self.cur_ast().type_of(pid)), &nm[0], &mut d[0], 300);
+            } else {
+                self.render_binding_node(p.ty, &nm[0], false, &mut d[0], 300);
+            }
+            self.emit_indent();
+            self.emit_cstr(&d[0]);
+            self.buf.format_into("; memcpy({}, __sc_pv{}, sizeof({}));\n", diag::cstr(&nm[0]), pid, diag::cstr(&nm[0]));
+            i = i + 1;
+        }
+        self.nmarr_params = 0;
+    }
     // Emit the `(void)p;` line for each parameter `cg_collect_unused_params` (or emit_function) recorded, and
     // clear the list.
     fn emit_unused_params(self: &mut Self) {
@@ -9671,6 +9759,7 @@ extend Codegen {
             }
             self.place_flags_pending = false;
         }
+        self.emit_mut_array_params();
         self.emit_unused_params();
         let stmts = n.as_data.block.statements;
         i = 0;
@@ -10003,6 +10092,19 @@ extend Codegen {
     fn emit_ident_ref(self: &mut Self, id: NodeId) {
         let d = self.cur_ast().resolution_def(id);
         let nt = self.cur_ast().at_const(id).as_data.name.text;
+        // a bare generic fn coerced to a fn pointer: name the instance, as a turbofish would
+        let mut vargs = TyArgs8 {};
+        let mut vn: i32 = 0;
+        let vfn = self.generic_value_target(id, &mut vargs[0], &mut vn);
+        if vfn.node != NODE_NONE {
+            for kk in 0..vn {
+                vargs[kk as usize] = self.subst_resolve(vargs[kk as usize]);
+            }
+            let mut nm = Buf256 {};
+            self.spec_name(vfn, &vargs[0], vn, &mut nm[0], 256);
+            self.emit_cstr(&nm[0]);
+            return;
+        }
         if d.node != NODE_NONE && d.module == self.cur_module() {
             let mut is_mut = false;
             if self.cg_env_capture(d.node, &mut is_mut) >= 0 {
@@ -11189,7 +11291,18 @@ extend Codegen {
                 unsafe stdio::snprintf(&mut nm[0], 128, "__sc_u%u".ptr() as *const char, pid);
             }
             let pty = self.cur_ast().type_of(pid);
-            let pconst = !p.is_mutable && !self.cg_type_is_free(pty);
+            let mut pconst = !p.is_mutable && !self.cg_type_is_free(pty);
+            // An array parameter is a VALUE in this language but DECAYS to a pointer in C, so the
+            // callee would write the caller's storage. A `mut` one takes the incoming array as a
+            // read-only pointer under a shadow name and copies it into a local (see
+            // emit_mut_array_params); the parameter itself is then const either way, which is also
+            // what every fn-pointer type naming this signature spells.
+            if cg_param_is_array(self, pid) {
+                pconst = true;
+                if p.is_mutable {
+                    unsafe stdio::snprintf(&mut nm[0], 128, "__sc_pv%u".ptr() as *const char, pid);
+                }
+            }
             let mut d = Buf300 {};
             if p.ty == NODE_NONE {
                 self.render_type_id(self.subst_resolve(pty), &nm[0], &mut d[0], 300);
@@ -11773,6 +11886,7 @@ extend Codegen {
             let pids = self.cur_ast().list(f.params);
             self.nparam_flags = 0;
             self.nunused_params = 0;
+            self.cg_collect_mut_array_params(f.params);
             // One body walk answers "is this param used" for every parameter at once.
             let mut upids = Ids64 {};
             let mut uarr = Bools64 {};
@@ -13263,6 +13377,7 @@ extend Codegen {
             self.cg_scan_moves(body, false);
             self.cg_replay_cond_moves();
             self.cg_collect_unused_params(cl.params, body);
+            self.cg_collect_mut_array_params(cl.params);
             self.emit_block(body);
             self.emit_str("\n\n");
         }
