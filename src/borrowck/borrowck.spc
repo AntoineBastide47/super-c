@@ -2987,6 +2987,21 @@ extend tc::TypeChecker {
             NODE_MATCH => {
                 self.bc_match(id, false);
             },
+            NODE_ASM => {
+                // The assembly writes its outputs and reads its inputs; the checker cannot see inside the
+                // template, so it treats each operand as exactly that.
+                let ad = a.at_const(id).as_data.asm_stmt;
+                let mut oi: u32 = 0;
+                while oi + 1 < ad.outputs.len {
+                    self.bc_expr(unsafe a.list(ad.outputs)[(oi + 1) as usize], false, false);
+                    oi = oi + 2;
+                }
+                let mut ii: u32 = 0;
+                while ii + 1 < ad.inputs.len {
+                    self.bc_expr(unsafe a.list(ad.inputs)[(ii + 1) as usize], false, true);
+                    ii = ii + 2;
+                }
+            },
             NODE_DEFER => {
                 // check the body in isolation, then queue it to run at scope exit (LIFO), where a
                 // double free or a use-after-deferred-free is actually caught.

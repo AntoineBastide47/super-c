@@ -836,6 +836,21 @@ const fn is_block_node(b: &Builder, id: NodeId) bool {
     return id != NODE_NONE && nd(b, id).kind == NodeKind::NODE_BLOCK;
 }
 
+// Flat constraint/expression pairs printed as `"c" (expr)`, comma separated.
+fn b_asm_operands(b: &mut Builder, v: &mut Vector<d::DocId>, ops: NodeList) {
+    let mut i: u32 = 0;
+    while i + 1 < ops.len {
+        if i != 0 {
+            v.push(b.p.txt(", "));
+        }
+        v.push(b_expr(b, list_at(b, ops, i)));
+        v.push(b.p.txt("("));
+        v.push(b_expr(b, list_at(b, ops, i + 1)));
+        v.push(b.p.txt(")"));
+        i = i + 2;
+    }
+}
+
 fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
     if id == NODE_NONE {
         return b.p.nil();
@@ -1387,6 +1402,29 @@ fn b_stmt(b: &mut Builder, id: NodeId) d::DocId {
                 v.push(b_expr(b, f.value));
             }
             v.push(b.p.txt(";"));
+        },
+        NODE_ASM => {
+            let d = n.as_data.asm_stmt;
+            v.push(b.p.txt("asm("));
+            v.push(b_expr(b, d.template));
+            if d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0 {
+                v.push(b.p.txt(" : "));
+                b_asm_operands(b, &mut v, d.outputs);
+            }
+            if d.inputs.len != 0 || d.clobbers.len != 0 {
+                v.push(b.p.txt(" : "));
+                b_asm_operands(b, &mut v, d.inputs);
+            }
+            if d.clobbers.len != 0 {
+                v.push(b.p.txt(" : "));
+                for k in 0..d.clobbers.len {
+                    if k != 0 {
+                        v.push(b.p.txt(", "));
+                    }
+                    v.push(b_expr(b, list_at(b, d.clobbers, k)));
+                }
+            }
+            v.push(b.p.txt(");"));
         },
         NODE_DEFER => {
             v.push(b.p.txt("defer "));

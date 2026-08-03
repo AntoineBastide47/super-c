@@ -893,6 +893,7 @@ fn engine_build(
 
     // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool
     let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
+    p.arch = m.arch; // the instruction-set axis `@arch` gates on
     if !p.ok {
         return 1;
     }
@@ -1585,6 +1586,7 @@ pub fn manifest_test(
         bootstrap_tags,
         target,
     );
+    p.arch = m.arch;
     if !p.ok {
         return 1;
     }

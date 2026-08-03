@@ -41,6 +41,7 @@ pub enum AttrKind {
     ATTR_C_LINK,
     ATTR_COLD,
     ATTR_PLATFORM,
+    ATTR_ARCH,
     ATTR_FMT_SKIP,
     ATTR_BLOCKING,
     // Appended, never inserted: attribute kinds are mirrored by position elsewhere, so adding one in
@@ -112,6 +113,7 @@ pub enum NodeKind {
     NODE_BREAK,
     NODE_CONTINUE,
     NODE_DEFER,
+    NODE_ASM,
     NODE_IF,
     NODE_WHILE,
     NODE_FOR,
@@ -360,6 +362,15 @@ pub struct FunctionTypeData {
     pub returns: NodeList,
     pub is_move: bool,
 }
+/// `asm("tpl" : outs : ins : clobbers)`, GCC extended assembly passed through to the C compiler.
+/// `outputs`/`inputs` hold FLAT PAIRS -- constraint literal, then its expression -- so an operand needs
+/// no node kind of its own; `clobbers` holds bare string literals.
+pub struct AsmData {
+    pub template: NodeId,
+    pub outputs: NodeList,
+    pub inputs: NodeList,
+    pub clobbers: NodeList,
+}
 pub struct BlockData {
     pub statements: NodeList,
 }
@@ -494,6 +505,7 @@ pub struct PatternRangeData {
 }
 
 pub union NodeAs {
+    pub asm_stmt: AsmData,
     pub program: ProgramData,
     pub name: NameData,
     pub literal: LiteralData,

@@ -43,6 +43,9 @@ extend Module as Free {
 /// emit-order/instance-propagation fields are added when those stages are ported.)
 pub struct Package {
     pub modules: Vector<Module>,
+    /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
+    /// Defaults to the host the compiler runs on; the driver overwrites it for `--arch=`.
+    pub arch: i32,
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
     pub std_root: String, // second import search root (parent of std/); empty = none
@@ -461,6 +464,7 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool, recycled: 
 extend Package {
     pub fn new() Package {
         return Package {
+            arch: unsafe shim::sc_host_arch(),
             modules: Vector::<Module>::new(),
             root_dir: String::new(),
             gen_root: String::new(),
@@ -632,10 +636,11 @@ extend Package {
                 let mut gated_out = false;
                 for k in 0..a.attrs.len() {
                     let at = a.attrs.at(k);
-                    if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_PLATFORM as u8 {
-                        if (at.arg >> target as u32 & 1u32) == 0 {
-                            gated_out = true;
-                        }
+                    if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
+                        gated_out = true;
+                    }
+                    if at.owner == unsafe ids[i as usize] && at.kind == AttrKind::ATTR_ARCH as u8 && self.arch >= 0 && (at.arg >> self.arch as u32 & 1u32) == 0 {
+                        gated_out = true;
                     }
                 }
                 if gated_out {

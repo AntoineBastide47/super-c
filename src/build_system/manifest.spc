@@ -1,6 +1,7 @@
 // build.toml schema: maps parsed TOML items onto the Build manifest, applies defaults (built-in
 // debug/dev/release/bench profiles), and validates. Unknown sections/keys are hard errors so typos
 // never silently no-op.
+import driver_shim as shim;
 import build_system::toml as toml;
 import module::loader as loader;
 import utils::errors as diag;
@@ -59,6 +60,9 @@ extend Command as Free {
 /// Ownership: `toml` keeps the parsed items alive -- Profile/Command `name` views borrow into their
 /// section strings.
 pub struct Manifest<'a> {
+    /// Instruction set `@arch` gates against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown. Defaults to the
+    /// host; the driver overwrites it for `--arch=`.
+    pub arch: i32,
     pub toml: Vector<toml::TomlItem>,
     pub bin: String,
     pub root: String,
@@ -108,6 +112,7 @@ extend Manifest as Free {
 extend Manifest {
     fn new<'a>() Manifest<'a> {
         return Manifest {
+            arch: unsafe shim::sc_host_arch(),
             toml: Vector::<toml::TomlItem>::new(),
             bin: String::new(),
             root: String::new(),

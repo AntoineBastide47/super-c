@@ -377,3 +377,35 @@ fn free_temporary_field_read() {
         "__auto_type",
     );
 }
+
+// Inline assembly is a pass-through to the C compiler's extended asm: the checker owns the SHAPE (string
+// literals, assignable outputs, an `unsafe` context) and never reads the template. `@arch` picks the
+// variant for the instruction set being built for.
+@test
+fn inline_asm() {
+    h::expect_exit(
+        "assembly runs, and @arch picks the variant",
+        "@arch(aarch64)\nfn triple(x: i64) i64 {\n    let mut out: i64 = 0;\n    unsafe { asm(\"add %0, %1, %1, lsl #1\" : \"=r\"(out) : \"r\"(x)); }\n    return out;\n}\n@arch(x86_64)\nfn triple(x: i64) i64 {\n    let mut out: i64 = x;\n    unsafe {\n        asm(\"addq %1, %0\" : \"+r\"(out) : \"r\"(x));\n        asm(\"addq %1, %0\" : \"+r\"(out) : \"r\"(x));\n    }\n    return out;\n}\n@arch(wasm32)\nfn triple(x: i64) i64 { return x * 3; }\nfn main() i32 { unsafe { asm(\"\" : : : \"memory\"); } return (triple(7) - 21) as i32; }\n",
+        0,
+    );
+    h::expect_c(
+        "it lowers to volatile extended asm",
+        "fn main() i32 {\n    let mut o: i64 = 0;\n    unsafe { asm(\"mov %0, #7\" : \"=r\"(o) : : \"memory\"); }\n    return (o - 7) as i32;\n}\n",
+        "__asm__ volatile (\"mov %0, #7\" : \"=r\"(o) :  : \"memory\")",
+    );
+    h::expect_err_msg(
+        "it needs an unsafe context",
+        "fn main() i32 {\n    asm(\"nop\");\n    return 0;\n}\n",
+        "inline assembly requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "an output must be assignable",
+        "fn main() i32 {\n    let x = 1;\n    unsafe { asm(\"nop\" : \"=r\"(x + 1)); }\n    return 0;\n}\n",
+        "asm output must be an assignable place",
+    );
+    h::expect_err_msg(
+        "a constraint must be a literal",
+        "fn main() i32 {\n    let c = \"r\";\n    unsafe { asm(\"nop\" : : c(1)); }\n    return 0;\n}\n",
+        "asm constraint must be a string literal",
+    );
+}

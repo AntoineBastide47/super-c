@@ -180,6 +180,18 @@ int sc_host_platform(void) {
 #endif
 }
 
+int sc_host_arch(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+  return 0;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  return 1;
+#elif defined(__wasm32__) || defined(__wasm__)
+  return 2;
+#else
+  return -1;
+#endif
+}
+
 int sc_chdir(const char *path) {
 #if defined(_WIN32)
   return _chdir(path);

@@ -239,6 +239,9 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
             }
         },
         3 => {
+            if first == b'a' && memeq(lexeme, "asm") {
+                return TokenType::Asm;
+            }
             if first == b'd' && memeq(lexeme, "dyn") {
                 return TokenType::Dyn;
             }

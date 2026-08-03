@@ -1146,6 +1146,16 @@ extend Resolver {
                 let v = self.ast.at_const(id).as_data.single.value;
                 self.resolve_expr(v);
             },
+            NODE_ASM => {
+                // Template and clobbers are literals; only the operand expressions name bindings.
+                let d = self.ast.at_const(id).as_data.asm_stmt;
+                self.resolve_expr(d.template);
+                self.resolve_asm_operands(d.outputs);
+                self.resolve_asm_operands(d.inputs);
+                for i in 0..d.clobbers.len {
+                    self.resolve_expr(self.child(d.clobbers, i));
+                }
+            },
             NODE_LAUNCH => {
                 // Sugar marker wrapping a call: resolve the call's operand(s). The placeholder callee is
                 // seeded by the desugar pass, so it is deliberately not resolved here.
@@ -1427,6 +1437,18 @@ extend Resolver {
             }
         }
         self.resolve_type(v);
+    }
+
+    // Flat constraint/expression pairs: only the expressions resolve.
+    fn resolve_asm_operands(self: &mut Self, ops: NodeList) {
+        let mut i: u32 = 0;
+        while i < ops.len {
+            self.resolve_expr(self.child(ops, i));
+            if i + 1 < ops.len {
+                self.resolve_expr(self.child(ops, i + 1));
+            }
+            i = i + 2;
+        }
     }
 
     fn resolve_closure(self: &mut Self, id: NodeId) {

@@ -10320,6 +10320,62 @@ extend TypeChecker {
         }
     }
 
+    /// `asm(..)` hands a template straight to the C compiler, so the checker owns the SHAPE, not the
+    /// contents: the template and every constraint must be string literals, an output must be assignable
+    /// (the assembly writes it), and the whole statement needs `unsafe` -- nothing here can know what the
+    /// instructions do.
+    fn tc_check_asm(self: &mut Self, id: NodeId) {
+        let d = self.cur_ast().at_const(id).as_data.asm_stmt;
+        let sp = self.cur_ast().at_const(id).span;
+        if self.tc_needs_unsafe() {
+            self.err_unsafe(sp, "inline assembly");
+        }
+        self.tc_asm_literal(d.template, "an asm template");
+        let mut i: u32 = 0;
+        while i < d.outputs.len {
+            let c = unsafe self.cur_ast().list(d.outputs)[i as usize];
+            self.tc_asm_literal(c, "an asm constraint");
+            if i + 1 < d.outputs.len {
+                let e = unsafe self.cur_ast().list(d.outputs)[(i + 1) as usize];
+                self.check_expr(e);
+                if !self.is_assignable(e) {
+                    let esp = self.cur_ast().at_const(e).span;
+                    self.errors.emit(
+                        esp.start,
+                        esp.end - esp.start,
+                        format("an asm output must be an assignable place (the assembly writes it)"),
+                    );
+                }
+            }
+            i = i + 2;
+        }
+        i = 0;
+        while i < d.inputs.len {
+            let c = unsafe self.cur_ast().list(d.inputs)[i as usize];
+            self.tc_asm_literal(c, "an asm constraint");
+            if i + 1 < d.inputs.len {
+                self.check_expr(unsafe self.cur_ast().list(d.inputs)[(i + 1) as usize]);
+            }
+            i = i + 2;
+        }
+        for k in 0..d.clobbers.len {
+            self.tc_asm_literal(unsafe self.cur_ast().list(d.clobbers)[k as usize], "an asm clobber");
+        }
+    }
+
+    fn tc_asm_literal(self: &mut Self, e: NodeId, what: str) {
+        if e == NODE_NONE {
+            return;
+        }
+        self.check_expr(e);
+        let n = self.cur_ast().at_const(e);
+        let lit = n.kind == NodeKind::NODE_LITERAL && (n.as_data.literal.token_type == TokenType::StringLiteral || n.as_data.literal.token_type == TokenType::RawStringLiteral);
+        if !lit {
+            let sp = n.span;
+            self.errors.emit(sp.start, sp.end - sp.start, format("{} must be a string literal", what));
+        }
+    }
+
     fn check_static_assert(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let left = a.at_const(id).as_data.binary.left;
@@ -10592,6 +10648,9 @@ extend TypeChecker {
             },
             NODE_DEFER => {
                 self.tc_check_defer(id);
+            },
+            NODE_ASM => {
+                self.tc_check_asm(id);
             },
             NODE_IF => {
                 self.check_if_stmt(id);

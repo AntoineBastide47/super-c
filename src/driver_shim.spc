@@ -23,6 +23,9 @@ extern "C" "driver_shim.h" {
     pub fn sc_getpid() i32;
     /// Platform index baked in when the shim is compiled: 0 windows, 1 macos, 2 linux (the default --target).
     pub fn sc_host_platform() i32;
+    /// Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other
+    /// (the default --arch).
+    pub fn sc_host_arch() i32;
     pub fn sc_chdir(path: *const char) i32;
     pub fn sc_mkdir(path: *const char) i32;
     pub fn sc_rmdir(path: *const char) i32;

@@ -3052,6 +3052,9 @@ extend Parser {
                     },
                 );
             },
+            Asm => {
+                result = self.parse_asm();
+            },
             Launch => {
                 // Sugar keyword: `launch <closure>;`. Built as an expression-statement marker wrapping a call
                 // to a placeholder callee (its name is never read). The desugar pass seeds the callee's
@@ -3530,15 +3533,28 @@ extend Parser {
         return (unsafe stdlib::strtoul(&buf[0], null, 0)) as u32;
     }
 
+    // `@arch` is `@platform`'s sibling on the instruction-set axis; the list grammar is identical, so
+    // both go through one parser with the axis's names supplied by the caller.
     fn parse_platform_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr) {
+        self.parse_axis_attr(syntax, out, false);
+    }
+
+    fn parse_arch_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr) {
+        self.parse_axis_attr(syntax, out, true);
+    }
+
+    fn parse_axis_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr, is_arch: bool) {
         if !syntax.has_args {
-            self.errors.emit(
-                syntax.namespace.start(),
-                syntax.namespace.len(),
+            let msg = if is_arch {
+                String::from_str(
+                    "attribute '@arch' requires an architecture list, e.g. '@arch(x86_64)' or '@arch(x86_64 | aarch64)'",
+                );
+            } else {
                 String::from_str(
                     "attribute '@platform' requires a platform list, e.g. '@platform(windows)' or '@platform(linux | macos)'",
-                ),
-            );
+                );
+            };
+            self.errors.emit(syntax.namespace.start(), syntax.namespace.len(), msg);
             return;
         }
         let count = Parser::attr_arg_count(syntax);
@@ -3555,24 +3571,48 @@ extend Parser {
                 break;
             }
             let p = self.attr_arg(syntax, i);
-            let bit = if self.text_is(p, "windows") {
-                1u32;
-            } else if self.text_is(p, "macos") {
-                2u32;
-            } else if self.text_is(p, "linux") {
-                4u32;
+            let mut bit: u32 = 0;
+            if is_arch {
+                bit = if self.text_is(p, "x86_64") {
+                    1u32;
+                } else if self.text_is(p, "aarch64") {
+                    2u32;
+                } else if self.text_is(p, "wasm32") {
+                    4u32;
+                } else {
+                    0u32;
+                };
             } else {
-                0u32;
-            };
+                bit = if self.text_is(p, "windows") {
+                    1u32;
+                } else if self.text_is(p, "macos") {
+                    2u32;
+                } else if self.text_is(p, "linux") {
+                    4u32;
+                } else {
+                    0u32;
+                };
+            }
             if bit == 0 {
-                self.errors.emit(
-                    p.start(),
-                    p.len(),
-                    format(
-                        "unknown platform '{}'; expected windows, macos, or linux",
-                        diag::span_str(self.source, p.start(), p.end()),
-                    ),
-                );
+                if is_arch {
+                    self.errors.emit(
+                        p.start(),
+                        p.len(),
+                        format(
+                            "unknown architecture '{}'; expected x86_64, aarch64, or wasm32",
+                            diag::span_str(self.source, p.start(), p.end()),
+                        ),
+                    );
+                } else {
+                    self.errors.emit(
+                        p.start(),
+                        p.len(),
+                        format(
+                            "unknown platform '{}'; expected windows, macos, or linux",
+                            diag::span_str(self.source, p.start(), p.end()),
+                        ),
+                    );
+                }
                 return;
             }
             mask = mask | if neg {
@@ -3595,10 +3635,90 @@ extend Parser {
             } else {
                 syntax.name;
             };
-            self.errors.emit(t.start(), t.len(), format("expected a platform name: windows, macos, or linux"));
+            if is_arch {
+                self.errors.emit(
+                    t.start(),
+                    t.len(),
+                    format("expected an architecture name: x86_64, aarch64, or wasm32"),
+                );
+            } else {
+                self.errors.emit(t.start(), t.len(), format("expected a platform name: windows, macos, or linux"));
+            }
             return;
         }
         out.arg = mask;
+    }
+
+    // `asm("template" : outs : ins : clobbers);` -- GCC extended assembly, passed through verbatim.
+    // Every section is optional from the left, exactly as in C. Operands are `"constraint"(expr)` and are
+    // stored as flat constraint/expression pairs; clobbers are bare string literals.
+    fn parse_asm(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        self.advance(); // `asm`
+        self.expect(TokenType::LeftParen, "'('");
+        let template = self.parse_asm_string("an asm template");
+        let mut outs = NodeList { start: 0, len: 0 };
+        let mut ins = NodeList { start: 0, len: 0 };
+        let mut clob = NodeList { start: 0, len: 0 };
+        if self.match(TokenType::Colon) {
+            outs = self.parse_asm_operands();
+            if self.match(TokenType::Colon) {
+                ins = self.parse_asm_operands();
+                if self.match(TokenType::Colon) {
+                    clob = self.parse_asm_clobbers();
+                }
+            }
+        }
+        self.expect(TokenType::RightParen, "')'");
+        self.expect(TokenType::Semicolon, "';'");
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_ASM,
+                span: Span::new(start, self.previous_end()),
+                as_data: NodeAs { asm_stmt: AsmData { template: template, outputs: outs, inputs: ins, clobbers: clob } },
+            },
+        );
+    }
+
+    fn parse_asm_operands(self: &mut Self) NodeList {
+        let mark = self.ast.mark();
+        while !self.check(TokenType::Colon) && !self.check(TokenType::RightParen) && !self.at_end() {
+            // The constraint is a bare string literal, NOT an expression: `"=r"(out)` would otherwise
+            // parse as a call of the string.
+            let c = self.parse_asm_string("an asm constraint");
+            self.expect(TokenType::LeftParen, "'('");
+            let e = self.parse_expression();
+            self.expect(TokenType::RightParen, "')'");
+            self.ast.push(c);
+            self.ast.push(e);
+            if !self.match(TokenType::Comma) {
+                break;
+            }
+        }
+        return self.ast.commit(mark);
+    }
+
+    fn parse_asm_clobbers(self: &mut Self) NodeList {
+        let mark = self.ast.mark();
+        while !self.check(TokenType::RightParen) && !self.at_end() {
+            self.ast.push(self.parse_asm_string("an asm clobber"));
+            if !self.match(TokenType::Comma) {
+                break;
+            }
+        }
+        return self.ast.commit(mark);
+    }
+
+    // A string literal in operand position. Parsed directly so a following '(' stays the operand's,
+    // not a call's.
+    fn parse_asm_string(self: &mut Self, what: str) NodeId {
+        if self.check(TokenType::StringLiteral) || self.check(TokenType::RawStringLiteral) {
+            return self.literal();
+        }
+        let t = self.raw_peek();
+        self.errors.emit(t.start(), t.len(), format("{} must be a string literal", what));
+        self.advance();
+        return NODE_NONE;
     }
 
     pub fn parse_attribute(self: &mut Self, out: &mut Attr) bool {
@@ -3693,6 +3813,11 @@ extend Parser {
         if syntax.parts == 1 && self.text_is(ns, "platform") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
             self.parse_platform_attr(&syntax, out);
+            return true;
+        }
+        if syntax.parts == 1 && self.text_is(ns, "arch") {
+            *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_ARCH as u8, arg: 0, str_span: Span::empty() };
+            self.parse_arch_attr(&syntax, out);
             return true;
         }
         if self.text_is(ns, "fmt") {

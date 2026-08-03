@@ -2631,3 +2631,29 @@ fn owning_constants() {
         "cannot move a value out of a 'const' binding",
     );
 }
+
+// `@arch` is `@platform`'s sibling on the instruction-set axis: it gates items on the ISA being built
+// for, defaulting to the host and overridable with `--arch=`.
+@test
+fn arch_gate() {
+    h::expect_exit(
+        "only the matching architecture's item survives",
+        "@arch(x86_64)\nfn which() i32 { return 1; }\n@arch(aarch64)\nfn which() i32 { return 2; }\n@arch(wasm32)\nfn which() i32 { return 3; }\nfn main() i32 {\n    let w = which();\n    if w != 1 && w != 2 && w != 3 { return 1; }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a list gates on any of its architectures",
+        "@arch(x86_64 | aarch64 | wasm32)\nfn here() i32 { return 0; }\nfn main() i32 { return here(); }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "an unknown architecture is rejected",
+        "@arch(sparc)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "unknown architecture 'sparc'",
+    );
+    h::expect_err_msg(
+        "the list is required",
+        "@arch\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "requires an architecture list",
+    );
+}

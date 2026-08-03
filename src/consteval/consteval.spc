@@ -4458,6 +4458,9 @@ extend ConstEval {
                 }
                 return Flow::Continue;
             },
+            NODE_ASM => {
+                return Flow::Bail; // machine instructions have no compile-time meaning
+            },
             NODE_DEFER => {
                 if unsafe f.ndefers >= CE_MAX_DEFERS {
                     return Flow::Bail;
@@ -4947,6 +4950,8 @@ extend ConstEval {
                 continue;
             } else if deep && (k == NodeKind::NODE_IF || k == NodeKind::NODE_MATCH) {
                 s = self.fx_scan_expr(m, owner, sid, depth + 1, true);
+            } else if k == NodeKind::NODE_ASM {
+                return FX_NO; // inline assembly is never compile-time evaluable
             } else if deep && k == NodeKind::NODE_DEFER {
                 s = self.fx_scan_body(m, owner, a.at_const(sid).as_data.single.value, depth + 1);
             } else {

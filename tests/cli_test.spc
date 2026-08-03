@@ -4306,6 +4306,13 @@ fn main() i32 {
         "extern \"C\" { fn rand() i32; }\nfn mk() Vector<i32> {\n    let mut v = Vector::<i32>::new();\n    v.push(unsafe rand());\n    return v;\n}\nconst V: Vector<i32> = mk();\nfn main() i32 { return 0; }\n",
     );
     p5.expect_fail("own4.spc", "cannot be evaluated at compile time");
+    // Inline assembly has no compile-time meaning either: a constant cannot be built from it.
+    let p6 = cli::proj_new();
+    p6.mkfile(
+        "asm.spc",
+        "fn mk() i64 {\n    let mut o: i64 = 0;\n    unsafe { asm(\"mov %0, #1\" : \"=r\"(o)); }\n    return o;\n}\nconst V: i64 = mk();\nfn main() i32 { return V as i32; }\n",
+    );
+    p6.expect_fail("asm.spc", "cannot be evaluated at compile time");
 }
 
 // Differential: a const fn produces the same value at compile time (const initializer) and at

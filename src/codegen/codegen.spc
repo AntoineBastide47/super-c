@@ -4791,6 +4791,57 @@ extend Codegen {
         self.buf.format_into("&{}); }})", diag::cstr(&tmp[0]));
         return true;
     }
+    // `asm(..)` -> GCC extended assembly, verbatim. Always `volatile`: the statement exists for its
+    // effect, and the C compiler must not move or drop it just because its outputs look unused.
+    fn emit_asm(self: &mut Self, id: NodeId) {
+        let d = self.cur_ast().at_const(id).as_data.asm_stmt;
+        self.emit_str("__asm__ volatile (");
+        self.emit_asm_str(d.template);
+        let want_sections = d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0;
+        if want_sections {
+            self.emit_str(" : ");
+            self.emit_asm_operands(d.outputs);
+        }
+        if d.inputs.len != 0 || d.clobbers.len != 0 {
+            self.emit_str(" : ");
+            self.emit_asm_operands(d.inputs);
+        }
+        if d.clobbers.len != 0 {
+            self.emit_str(" : ");
+            for k in 0..d.clobbers.len {
+                if k != 0 {
+                    self.emit_str(", ");
+                }
+                self.emit_asm_str(unsafe self.cur_ast().list(d.clobbers)[k as usize]);
+            }
+        }
+        self.emit_str(");\n");
+    }
+
+    // A template / constraint / clobber goes out as a PLAIN C string literal: `asm` takes C strings, not
+    // the `str` value a Super-C string literal normally becomes.
+    fn emit_asm_str(self: &mut Self, id: NodeId) {
+        if id == NODE_NONE {
+            self.emit_str("\"\"");
+            return;
+        }
+        self.emit_reescaped(self.cur_ast().at_const(id).as_data.literal.raw, false);
+    }
+
+    fn emit_asm_operands(self: &mut Self, ops: NodeList) {
+        let mut i: u32 = 0;
+        while i + 1 < ops.len {
+            if i != 0 {
+                self.emit_str(", ");
+            }
+            self.emit_asm_str(unsafe self.cur_ast().list(ops)[i as usize]);
+            self.emit_str("(");
+            self.emit_expr(unsafe self.cur_ast().list(ops)[(i + 1) as usize]);
+            self.emit_str(")");
+            i = i + 2;
+        }
+    }
+
     fn emit_call_args(self: &mut Self, args: NodeList) {
         for i in 0..args.len {
             if i != 0 {
@@ -6038,6 +6089,9 @@ extend Codegen {
                 self.depth = self.depth - 1;
                 self.emit_indent();
                 self.emit_str("}\n");
+            },
+            NODE_ASM => {
+                self.emit_asm(id);
             },
             NODE_DEFER => {
                 if self.defer_top >= 256 {
