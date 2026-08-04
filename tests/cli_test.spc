@@ -4509,3 +4509,63 @@ fn bindgen_generates_records_enums_and_consts() {
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
 }
+
+// `bindgen` takes a list of paths like `fmt` and `lint` do, and a directory recurses. The output tree
+// MIRRORS the headers', which is also where each module's `#include` spelling comes from: name the include
+// root and `net/http/http.h` is what the generated module writes, exactly as C code would.
+@test
+fn bindgen_walks_paths_recursively() {
+    let p = cli::proj_new();
+    p.mkfile("inc/a.h", "#ifndef A_H\n#define A_H\nint a_go(int x);\n#endif\n");
+    p.mkfile("inc/net/http/http.h", "#ifndef H_H\n#define H_H\nint http_get(const char *url);\n#endif\n");
+    p.mkfile("inc/README.md", "not a header\n");
+    p.mkfile("other/z-lib.h", "#ifndef Z_H\n#define Z_H\nint z_run(void);\n#endif\n");
+    let root = str::from_cstr(p.rootp());
+
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/inc\" \"{}/other/z-lib.h\" -o \"{}/gen\"", root, root, root);
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+
+    let mut hp = String::new();
+    hp.format_into("{}/gen/net/http/http.spc", root);
+    let mut got = String::new();
+    switch loader::read_file(hp.as_str()) {
+        Some(t) => {
+            got.push_string(&t);
+        },
+        None => {},
+    };
+    assert(got.as_str().contains("extern \"C\" \"net/http/http.h\""));
+    assert(got.as_str().contains("pub fn http_get(url: *const char) i32;"));
+
+    let mut ap = String::new();
+    ap.format_into("{}/gen/a.spc", root);
+    let mut top = String::new();
+    switch loader::read_file(ap.as_str()) {
+        Some(t) => {
+            top.push_string(&t);
+        },
+        None => {},
+    };
+    assert(top.as_str().contains("extern \"C\" \"a.h\""));
+
+    // A file name that is not an identifier cannot be imported, so the module is renamed (the `#include`
+    // spelling is not).
+    let mut zp = String::new();
+    zp.format_into("{}/gen/z_lib.spc", root);
+    let mut z = String::new();
+    switch loader::read_file(zp.as_str()) {
+        Some(t) => {
+            z.push_string(&t);
+        },
+        None => {},
+    };
+    assert(z.as_str().contains("pub fn z_run() i32;"));
+
+    // A directory has many outputs, so it needs somewhere to put them.
+    let mut bad = String::new();
+    bad.format_into("bindgen \"{}/inc\"", root);
+    let r = p.run_raw(bad.as_str());
+    assert_eq(r.exit, 1);
+    assert(r.out_has("needs '-o <dir>'"));
+}

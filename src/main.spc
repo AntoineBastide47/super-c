@@ -1068,15 +1068,20 @@ fn main(argv: Vector<str>) i32 {
                     bg_incs.push(String::from_str(argv[i]));
                 } else if arg.starts_with("--cc=") {
                     bo.cc = arg[5..];
-                } else if !arg.starts_with("-") && file.len() == 0 {
-                    file = arg;
+                } else if !arg.starts_with("-") {
+                    // Like fmt/lint: the first path lands in `file`, the rest in `extra`.
+                    if file.len() == 0 {
+                        file = arg;
+                    } else {
+                        extra.push(i);
+                    }
                 } else {
                     co.bad = true;
                 }
                 i = i + 1;
             }
             if file.len() == 0 {
-                co.bad = true; // `bindgen` needs a header
+                co.bad = true; // `bindgen` needs a header or a directory
             }
         },
     };
@@ -1113,7 +1118,7 @@ COMMANDS:
     lsp                    run the language server over stdio
     new <name>             scaffold a new project directory
     init                   scaffold a project in the current directory
-    bindgen <header.h>     generate an extern "C" module from a C header
+    bindgen <path>...      generate extern "C" modules from C headers (a directory recurses)
 
 OPTIONS:
     -o <path>              output binary path (build/release with a file)
@@ -1175,7 +1180,13 @@ OPTIONS:
         return bsys::scaffold_project(file, file);
     }
     if mode == Mode::MODE_BINDGEN {
-        let rc = bindgen::run(file, out_bin, bg_link, bg_header, &bg_incs, &bg_from, bo.cc);
+        let mut bg_paths = Vector::<String>::new();
+        bg_paths.push(String::from_str(file));
+        for k in 0..extra.len() {
+            bg_paths.push(String::from_str(argv[*extra.at(k)]));
+        }
+        let rc = bindgen::run(&bg_paths, out_bin, bg_link, bg_header, &bg_incs, &bg_from, bo.cc);
+        bg_paths.free();
         bg_incs.free();
         bg_from.free();
         return rc;

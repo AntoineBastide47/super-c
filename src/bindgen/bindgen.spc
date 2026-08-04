@@ -19,6 +19,7 @@ import stdio;
 import stdlib;
 import driver_shim as shim;
 import module::loader as loader;
+import string as cstring;
 import driver::util as *;
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1852,24 +1853,16 @@ fn emit(c: &Collected, header: str, spelling: str, link: str, out: &mut String) 
 
 /// `super-c bindgen <header.h> [-o out.spc] [--link=NAME] [--header=SPELLING] [-I dir]... [--from=PART]...`
 /// Returns a process exit code.
-pub fn run(
+fn run_one(
     header: str,
     out_path: str,
     link: str,
     spelling_in: str,
     incs: &Vector<String>,
     froms: &Vector<String>,
-    cc_in: str,
+    cc_str: str,
 ) i32 {
-    let mut cc = String::from_str(cc_in);
-    if cc.len() == 0 {
-        let e = stdlib::getenv("CC");
-        if e != null && unsafe *e != 0 as char {
-            cc.push_str(str::from_cstr(e));
-        } else {
-            cc.push_str("cc");
-        }
-    }
+    let cc = String::from_str(cc_str);
     let mut hdr = String::from_str(header);
     let mut abs = PathBuf {};
     if unsafe shim::sc_realpath(hdr.cstr(), &mut abs[0]) != null {
@@ -1985,4 +1978,255 @@ fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
         );
     }
     return 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// path expansion
+// ---------------------------------------------------------------------------------------------------------
+
+/// One header to convert: where it is, how the generated module spells its `#include`, and where the
+/// result goes.
+struct Job {
+    pub path: String,
+    pub spelling: String,
+    pub out: String,
+}
+
+extend Job as Free {
+    fn free(self: &mut Job) {
+        self.path.free();
+        self.spelling.free();
+        self.out.free();
+    }
+}
+
+fn join_path(a: str, b: str) String {
+    let mut p = String::from_str(a);
+    if p.len() != 0 && !p.as_str().ends_with("/") {
+        p.push_byte(b'/');
+    }
+    p.push_str(b);
+    return p;
+}
+
+// The directory part of `p`, empty when there is none.
+fn dir_part(p: str) str {
+    let mut k = p.len();
+    while k > 0 && p.byte_at(k - 1) != b'/' {
+        k = k - 1;
+    }
+    if k == 0 {
+        return "";
+    }
+    return p.slice(0, k - 1);
+}
+
+fn stem_of(p: str) str {
+    let mut k = p.len();
+    while k > 0 && p.byte_at(k - 1) != b'/' {
+        k = k - 1;
+    }
+    let base = p.slice(k, p.len());
+    if base.ends_with(".h") {
+        return base.slice(0, base.len() - 2);
+    }
+    return base;
+}
+
+/// The generated file's stem. A module is imported by its file name, so anything that cannot appear in an
+/// identifier becomes `_` -- `typecheck-gcc.h` would otherwise produce a module nothing can import. Only
+/// the FILE name is rewritten; the `#include` spelling has to stay exactly what C wrote.
+fn module_stem(p: str, out: &mut String) {
+    let st = stem_of(p);
+    for i in 0..st.len() {
+        let ch = st.byte_at(i);
+        if is_id_body(ch) {
+            out.push_byte(ch);
+        } else {
+            out.push_byte(b'_');
+        }
+    }
+}
+
+/// Every `.h` under `dir`, recursively. `rel` is the path so far BELOW the directory the user named,
+/// which is what the generated module uses to `#include` it -- name the include root and the spellings
+/// come out the way C code writes them (`curl/curl.h`).
+fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) i32 {
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    if dh == null {
+        unsafe stdio::fprintf(
+            stdio::stderr(),
+            "super-c: cannot read directory '%.*s'\n".ptr() as *const char,
+            dir.len() as i32,
+            dir.ptr(),
+        );
+        return 1;
+    }
+    let mut names = Vector::<String>::new();
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = unsafe shim::sc_dirent_name(e);
+        if unsafe nm[0] == '.' as char {
+            continue;
+        }
+        names.push(String::from_cstr(nm));
+    }
+    let _ = unsafe shim::sc_closedir(dh);
+    names.sort_by(|a: &String, b: &String| name_cmp(a, b));
+    let mut rc: i32 = 0;
+    for i in 0..names.len() {
+        let mut child = join_path(dir, names[i].as_str());
+        let crel = join_path(rel, names[i].as_str());
+        if unsafe shim::sc_stat_isdir(child.cstr()) == 1 {
+            if walk_headers(child.as_str(), crel.as_str(), out_dir, jobs) != 0 {
+                rc = 1;
+            }
+        } else if names[i].as_str().ends_with(".h") {
+            let o = join_path(out_dir, dir_part(crel.as_str()));
+            let mut leaf = String::new();
+            module_stem(crel.as_str(), &mut leaf);
+            leaf.push_str(".spc");
+            let full = join_path(o.as_str(), leaf.as_str());
+            jobs.push(Job { path: child, spelling: crel, out: full });
+            o.free();
+            leaf.free();
+            continue;
+        }
+    }
+    names.free();
+    return rc;
+}
+
+// Byte-lexicographic with a length tiebreak: the same walk order on every filesystem.
+const fn name_cmp(a: &String, b: &String) i32 {
+    let la = a.len();
+    let lb = b.len();
+    let m = if la < lb {
+        la;
+    } else {
+        lb;
+    };
+    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
+    if c != 0 {
+        return c;
+    }
+    return la as i32 - lb as i32;
+}
+
+/// `super-c bindgen <header.h|dir>... [-o out]`. A directory is walked recursively for `.h` files, so a
+/// whole library's include tree converts in one call -- `-o` then names a DIRECTORY, and the tree under it
+/// mirrors the headers'. A single header with no `-o` still writes to stdout.
+pub fn run(
+    paths: &Vector<String>,
+    out_path: str,
+    link: str,
+    spelling_in: str,
+    incs: &Vector<String>,
+    froms: &Vector<String>,
+    cc_in: str,
+) i32 {
+    let mut cc = String::from_str(cc_in);
+    if cc.len() == 0 {
+        let e = stdlib::getenv("CC");
+        if e != null && unsafe *e != 0 as char {
+            cc.push_str(str::from_cstr(e));
+        } else {
+            cc.push_str("cc");
+        }
+    }
+    let out_is_file = out_path.ends_with(".spc");
+    let out_dir = if out_is_file {
+        "";
+    } else {
+        out_path;
+    };
+    let mut jobs = Vector::<Job>::new();
+    let mut rc: i32 = 0;
+    for i in 0..paths.len() {
+        let p = paths[i].as_str();
+        let mut pp = String::from_str(p);
+        let isdir = unsafe shim::sc_stat_isdir(pp.cstr()) == 1;
+        pp.free();
+        if isdir {
+            if out_dir.len() == 0 {
+                unsafe stdio::fputs(
+                    "super-c: bindgen over a directory needs '-o <dir>' to write into\n".ptr() as *const char,
+                    stdio::stderr(),
+                );
+                rc = 1;
+                break;
+            }
+            if walk_headers(p, "", out_dir, &mut jobs) != 0 {
+                rc = 1;
+            }
+            continue;
+        }
+        let mut sp = String::from_str(spelling_in);
+        if sp.len() == 0 {
+            sp.push_str(p);
+        }
+        let mut o = String::new();
+        if out_is_file {
+            o.push_str(out_path);
+        } else if out_dir.len() != 0 {
+            let mut leaf = String::new();
+            module_stem(p, &mut leaf);
+            leaf.push_str(".spc");
+            let full = join_path(out_dir, leaf.as_str());
+            o.push_string(&full);
+            full.free();
+            leaf.free();
+        }
+        jobs.push(Job { path: String::from_str(p), spelling: sp, out: o });
+    }
+    if jobs.len() > 1 && out_is_file {
+        unsafe stdio::fputs(
+            "super-c: '-o <file>.spc' takes one header; name a directory for several\n".ptr() as *const char,
+            stdio::stderr(),
+        );
+        rc = 1;
+    } else if jobs.len() > 1 && out_dir.len() == 0 {
+        unsafe stdio::fputs(
+            "super-c: several headers need '-o <dir>' to write into\n".ptr() as *const char,
+            stdio::stderr(),
+        );
+        rc = 1;
+    } else {
+        for i in 0..jobs.len() {
+            // Each header is its own module, so one that cannot be read or preprocessed fails alone.
+            let od = dir_part(jobs[i].out.as_str());
+            if od.len() != 0 {
+                let mut odp = String::from_str(od);
+                let _ = unsafe shim::sc_mkdir_p(odp.cstr());
+                odp.free();
+            }
+            if run_one(
+                jobs[i].path.as_str(),
+                jobs[i].out.as_str(),
+                link,
+                jobs[i].spelling.as_str(),
+                incs,
+                froms,
+                cc.as_str(),
+            ) != 0 {
+                rc = 1;
+            }
+        }
+        if jobs.len() > 1 {
+            unsafe stdio::fprintf(
+                stdio::stdout(),
+                "bindgen: %d header(s) -> %.*s\n".ptr() as *const char,
+                jobs.len() as i32,
+                out_dir.len() as i32,
+                out_dir.ptr(),
+            );
+        }
+    }
+    jobs.free();
+    cc.free();
+    return rc;
 }
